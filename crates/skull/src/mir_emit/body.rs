@@ -1,11 +1,5 @@
-//! The per-body pipeline: lower, inline, clean up, validate and print one body.
-
 use super::*;
 
-/// The statically-resolved callees referenced by a (post-inline) MIR function —
-/// the callees still CALLED after inlining (their bodies could flip eligibility
-/// on a future edit). Unioned with the driver's spliced set to form the chunk's
-/// codegen deps.
 fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
     for (_, inst) in mf.insts.iter() {
         match inst {
@@ -51,7 +45,6 @@ pub(super) fn emit_named_with_allocation_report(
     })
 }
 
-/// Coroutine calls construct objects, so their bodies only emit standalone.
 fn emit_coroutine_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -67,9 +60,6 @@ fn emit_coroutine_chunk(
     skull_transform::cleanup_with_nobox(ws, mf)?;
     times.cleanup = tc.elapsed();
     times.cleanup_work = mir_live_instructions(mf) != cleanup_before;
-    // Coroutines never inline, so a combinator chain here leaves a residual call
-    // -- fine when the lowerer specialized it (a standalone body serves it), a
-    // rejection when it did not.
     let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, mf)?;
     let mut specs = Vec::new();
@@ -103,10 +93,6 @@ fn emit_coroutine_chunk(
     times.emit_work = times.emit > Duration::ZERO;
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     times.regalloc_work = times.regalloc > Duration::ZERO;
-    // No declaration edge here: "this instance instantiates that declaration" is
-    // the GRAPH's fact, and `update_chunk_cache` reads it through
-    // `instances_of`. `deps` carries only what codegen alone knows -- which
-    // bodies this chunk's TEXT contains.
     let mut abi_deps = FxHashMap::default();
     collect_abi_dependencies(mf, &mut abi_deps);
     deps.extend(abi_deps.keys().copied());
@@ -130,17 +116,10 @@ fn emit_coroutine_chunk(
         calls: skull_mir::reach::call_targets(mf),
         specs,
         code_artifact: code_artifact.into(),
-        // A coroutine's emitted text is a constructor plus a `__step`, neither
-        // of which is the declaration's own body, so neither binds callees.
         binds: Vec::new(),
     })
 }
 
-/// Emit one ordinary or coroutine function body to a cacheable [`Chunk`]. Extern
-/// and `inline(lua)` functions are NOT handled here — they are cheap and
-/// regenerated in [`assemble`]. Captures per-stage emit time into the chunk so the
-/// parallel chunk fan-out's per-unit elapsed time still rolls up into
-/// `backend-stats`.
 pub(super) fn emit_body_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -173,16 +152,9 @@ pub(super) fn emit_body_chunk(
         chunk.attribution = Some(Box::new(attribution));
         return Ok(chunk);
     }
-    // The shared chain: inline (so a hot loop traces with no per-call frame),
-    // cleanup, closure conversion, FORL recovery, then inlining into the
-    // hoisted bodies. Hoisted bodies inline only after conversion has split
-    // them out: the inliner never scans a closure sub-CFG, where a cell is an
-    // upvalue and splicing piles onto LuaJIT's 60-upvalue cap. That second
-    // inline is correctness, not just speed: a call the lowerer gave the
-    // specialized scalar ABI has no serviceable shared body, and for a
-    // column-stored element the shared `next` reads a `_data` that does not
-    // exist. Each minted `<name>__lambda<k>` goes through the synthetic-name
-    // collision guard, so a user fn named `foo__lambda0` rejects.
+    // Hoisted bodies inline only after closure conversion has split them
+    // out: inside a closure a cell is an upvalue, and splicing there piles
+    // onto LuaJIT's 60-upvalue cap.
     let name = mangle_fn(ws, f);
     let mut stats = ChainStats::new(&mut times, &mut attribution.inline);
     stats.ordinary = true;
@@ -224,8 +196,6 @@ pub(super) fn emit_body_chunk(
     )
 }
 
-/// Lower `instance`'s body, or clone the inline cache's canonical copy of it,
-/// and start the body's attribution.
 fn lower_body(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -267,9 +237,6 @@ fn lower_body(
     Ok((mf, times, attribution))
 }
 
-/// The emission every non-coroutine body shares once its pass chain has run:
-/// validate it, print it and its hoisted fns, and collect the chunk's
-/// dependency facts.
 fn finish_body_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -298,8 +265,6 @@ fn finish_body_chunk(
         format!("cannot emit specialized `{name}`: ")
     };
     validate_emitted_body(ws, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, &prefix))?;
-    // A specialization's residual callees count as embedded, so every edit to
-    // one rebuilds it.
     let embedded_deps = ordinary.then(|| deps.clone());
     collect_callee_frefs(&mf, &mut deps);
     let mut code_artifact =
@@ -308,8 +273,6 @@ fn finish_body_chunk(
             &ws.comptime_inputs.volatile_vars,
         );
     code_artifact.set_body_names(&mf, name);
-    // Global-init ordering is stated over declarations, so a specialization's
-    // ordering facts are its declaration's.
     let (direct_globals, direct_calls) = if ordinary {
         direct_refs(ws, cg, &mf)
     } else {
@@ -347,14 +310,9 @@ fn finish_body_chunk(
     let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
     times.regalloc += regalloc;
     times.regalloc_work |= regalloc > Duration::ZERO;
-    // Read before the nested fns are emitted, which detaches their children.
     let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
     let mut abi_deps = FxHashMap::default();
     collect_abi_dependencies(&mf, &mut abi_deps);
-    // Nested `fn`s are hoisted to sibling top-level Lua fns in the same chunk
-    // (their `__local_*` names are already final -- emit_named, no mangling). Their
-    // `static` cells fold into THIS chunk's `statics` so the hot-reload preamble +
-    // overlay reset see them -- a nested-fn static is otherwise invisible to both.
     let mut statics = mf.statics.clone();
     emit_nested_fns(
         ws,
@@ -394,11 +352,6 @@ fn finish_body_chunk(
     })
 }
 
-/// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
-/// top-level Lua function appended to the enclosing chunk. Runs the standard
-/// cleanup pipeline per fn, folds their callee refs into the chunk's deps (so an
-/// edit to a callee still invalidates the enclosing chunk) and their `static`
-/// cells into the chunk's `statics` (so hot-reload can reset them).
 pub(crate) fn emit_nested_fns(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -430,15 +383,12 @@ pub(crate) fn emit_nested_fns(
         );
         times.bounds += tb.elapsed();
         collect_callee_frefs(nf, deps);
-        // A flat variant's text is another declaration's body.
         if let Some(source) = nf.flat_variant_source {
             deps.insert(source);
         }
         statics.extend(nf.statics.iter().cloned());
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
-        // A hoisted nested fn has no declaration of its own, so no call-graph
-        // component and no callee binding.
         let emission = emit_named_with_allocation_report(
             ws,
             cg,
@@ -484,8 +434,6 @@ pub(crate) fn emit_nested_fns(
     Ok(())
 }
 
-/// The shared chain for a decorator or global-initializer body: cleanup and
-/// closure conversion, with no inlining and no counted-loop recovery.
 pub(super) fn convert_unit_body(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -506,10 +454,6 @@ pub(super) fn convert_unit_body(
     skull_transform::body_chain::convert_body(ws, mf, name, &opts, &mut stats).map_err(|e| e.error)
 }
 
-/// Emit the hoisted bodies (`convert_closures` appends one `MirFunc` per live
-/// lambda, nested ones included; a named nested fn holds its own) as sibling
-/// top-level fns appended to `out`. Unlike [`emit_nested_fns`] this folds no
-/// deps/statics and runs no `recover_counted_loops`.
 pub(super) fn emit_pass_nested_fns(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -572,7 +516,6 @@ pub(super) fn emit_pass_nested_fns(
         let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(emit);
         times.regalloc += regalloc;
         times.regalloc_work |= regalloc > Duration::ZERO;
-        // A named nested fn keeps its own hoisted lambdas.
         let mut children = std::mem::take(&mut nf.nested_fns);
         emit_pass_nested_fns(
             ws,
@@ -589,17 +532,11 @@ pub(super) fn emit_pass_nested_fns(
     Ok(())
 }
 
-/// Whether a function body is cached as a [`Chunk`] (ordinary or coroutine) vs
-/// regenerated inline (extern / `inline(lua)`). An `Iterator`-bounded fn is
-/// NEITHER: it is emitted STANDALONE per instantiation, resolving its
-/// placeholder bound-calls from the tree that specialization demand carries, so
-/// there is no declaration-keyed chunk to cache.
+/// Whether a function body is cached as a [`Chunk`].
 pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
     !f.is_extern && f.inline_body.is_none() && !f.has_iterator_bounds() && !is_generic(f)
 }
 
-/// A concrete specialization has a cacheable body even when its declaration
-/// has no standalone definition.
 pub(crate) fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &Instance) -> bool {
     if body.args.is_empty() {
         return is_cached_body(f);
@@ -611,7 +548,6 @@ pub fn is_generic(f: &bone_semantic::hir::Function) -> bool {
     !f.generics.is_empty()
 }
 
-/// Emit one concrete body with its recorded witnesses.
 pub(super) fn emit_spec_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -640,10 +576,6 @@ pub(super) fn emit_spec_chunk(
         inline_cache,
     )
     .map_err(|e| e.or_at(f.name_span))?;
-    // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
-    // make it unemittable on its own, and the demand that reached here is what
-    // resolves them. The splice path does the same substitution at the moment it
-    // clones the body into a caller.
     let tresolve = Instant::now();
     skull_transform::bound::resolve_standalone_bound_calls(
         ws,
@@ -700,7 +632,6 @@ pub(super) fn emit_spec_chunk(
     )
 }
 
-/// Use LIFO demand order to preserve the ordering of specialized definitions.
 pub(super) fn order_specialized_callees<'c>(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -725,8 +656,6 @@ pub(super) fn order_specialized_callees<'c>(
             .get(body)
             .or_else(|| cached.get(body).and_then(|c| c.as_ref().ok()));
         let Some(chunk) = chunk else {
-            // Not a fallback: the walk either built this body or recorded why it
-            // could not, and a rejected one is reported through `rejected`.
             let name = body.symbol(ws, scx.interner());
             if !rejected_names.contains(name.as_str()) {
                 let f = &ws.module(body.func.module).functions[body.func.func];
@@ -746,7 +675,6 @@ pub(super) fn order_specialized_callees<'c>(
         }
         times.add(&chunk.times);
         pending.extend(chunk.specs.iter());
-        // A body built for this build moves into `built` instead of copying.
         if !cached.contains_key(body) && live.contains_key(body) {
             moved.push(body.clone());
         }
@@ -755,17 +683,7 @@ pub(super) fn order_specialized_callees<'c>(
     (errs.into_iter().map(|(_, e)| e).collect(), moved)
 }
 
-/// **THE transform sequence an instance body is emitted through.**
-///
-/// Extracted so `emit_spec_chunk` and the site-join census in skull's tests
-/// consume ONE sequence rather than two that agree today. The census's whole
-/// claim is about the body EMISSION sees, so a census that re-listed these
-/// passes would be free to drift into measuring a body no emitter renders --
-/// and the drift would look like a clean measurement.
-///
-/// Everything after this point is rendering: `validate_emitted_body`,
-/// `emit_named` and the nested-fn emission. Nothing here mints a name or
-/// touches a `CodegenCtx`, which is what lets a read-only consumer run it.
+/// The transform sequence an instance body is emitted through.
 pub fn prepare_instance_body_with_plans(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,

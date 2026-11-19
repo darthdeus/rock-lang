@@ -1,37 +1,6 @@
-//! Emission roots: library filtering, sim discovery and sim registration.
-
 use super::*;
 
-/// Whether `f` must be emitted no matter what the call graph says.
-///
-/// `@nomangle` is the load-bearing one. It is precisely the annotation for "this
-/// fn is called by its ORIGINAL name from outside the MIR call graph" (CLAUDE.md:
-/// from another `inline(lua)` body, from compiler codegen, or from itself), so
-/// rooting all of them covers every invisible edge class at once -- including the
-/// the string-keyed `on_loop_jump` dispatch site, whose targets appear only as
-/// string literals. CodeRef-backed `@on_reload` values are rooted by their
-/// decorator application. Measured cost on an application: 24 fns / 7.2 KB, 0.3% of the
-/// chunk. Sound beats clever at that price.
-///
-/// The rest name a fn from generated top-level text rather than from a body:
-/// `main` (the CLI appends `__rock_main_wrapper(main)`), a decorated fn (its
-/// mangled name goes in a `decorator_application_lines` call), `@sim`
-/// (`sim_registration_lines`), and `@test` (the harness calls it bare).
-/// Whether a module is a LIBRARY -- something the compilation target consumes --
-/// rather than part of the target itself.
-///
-/// The distinction is what makes whole-program DCE both safe and worthwhile. A
-/// library is prunable: nothing outside it depends on a definition no root
-/// reaches, and libraries are where the dead weight is (a game chunk is mostly
-/// stdlib + engine). The target's OWN sources are roots, because compiling a unit
-/// and getting its functions is a real contract here -- codegen tests compile a
-/// fragment with no entry point and expect its fns, and `rock compile foo.rock`
-/// on a file of helpers should not emit an empty program.
-///
-/// The stdlib is always a library. Beyond that the caller supplies the target's
-/// root directory: a module whose file lives outside it came from a declared
-/// dependency (a host library via stick.toml). `None` means a single-file compile, whose
-/// only library is the stdlib.
+/// Whether a module is a library: the stdlib, or a file outside `project_root`.
 pub(super) fn is_library_module(file: &str, project_root: Option<&str>) -> bool {
     if is_stdlib_module_file(file) {
         return true;
@@ -42,9 +11,6 @@ pub(super) fn is_library_module(file: &str, project_root: Option<&str>) -> bool 
     }
 }
 
-/// `program`: the project target defines `main`. A program's own functions are
-/// reached from its entry like a library's; only a target without an entry (a
-/// library compiled alone, whose functions are its exports) roots them all.
 pub(crate) fn is_emission_root(
     file: &str,
     project_root: Option<&str>,
@@ -71,7 +37,6 @@ fn is_global_emission_root(f: &bone_semantic::hir::Function, decorators: &Decora
     if f.json_field_for.is_some() || f.annotations.iter().any(|a| a.is_builtin("nomangle")) {
         return true;
     }
-    // `extern` decls bind a bare name an inline(lua) body may call directly.
     if f.is_extern {
         return true;
     }
@@ -92,28 +57,6 @@ pub fn collect_sim_fns(ws: &Workspace) -> Vec<(Ustr, &bone_semantic::hir::Functi
     sims
 }
 
-/// `register_sim("<wire>", <mangled_fn>)` for every `@sim`-annotated fn,
-/// workspace-wide.
-/// Emitted at module-init time (after fn + global defs) so a skull-compiled game
-/// registers its sims and the runtime's `ROCK_RUN_SIM=<wire>` dispatch resolves.
-///
-/// `register_sim` is itself a regular Rock fn (the host simulation registry), so it
-/// is mangled the same way as its definition (every fn mangles by name +
-/// signature, so definition and call agree). Every `@sim` implies the host engine
-/// is linked, so a missing
-/// `register_sim` is an internal error rather than a silent nil-call (mirrors
-/// rock's discipline).
-///
-/// Full-emit only: sims run from a fresh `main.lua` process via `ROCK_RUN_SIM`,
-/// never from the live dev game's overlay, so `assemble_overlay` needs none.
-/// The engine's `register_sim`, which [`sim_registration_lines`] calls by MANGLED
-/// name from generated top-level text. Shared with the reachability roots so the
-/// registration and the root cannot drift: emitting the call while DCE prunes the
-/// definition is a nil-call at load, which is exactly what happened.
-///
-/// Matched by DECLARED name: under modules v1 a function's name is its DefKey.
-/// More than one candidate is ambiguous and yields `None`;
-/// [`sim_registration_lines`] reports the candidates.
 fn register_sim_fn(ws: &Workspace) -> Option<FuncRef> {
     match register_sim_candidates(ws).as_slice() {
         [only] => Some(*only),
@@ -138,11 +81,6 @@ fn register_sim_candidates(ws: &Workspace) -> Vec<FuncRef> {
         .collect()
 }
 
-/// The game's `@sim_entry` providers. A provider is how a game hands a sim its
-/// entry argument while the engine's registry stays game-agnostic: a sim that
-/// takes one parameter is registered as `provider(sim)`, and the provider
-/// (a `co fn(body: fn(P) -> Coroutine<Wait>) -> Coroutine<Wait>`) resolves the
-/// argument when the runner starts the sim and awaits the body with it.
 fn sim_entry_providers(ws: &Workspace) -> Vec<FuncRef> {
     ws.source_modules()
         .flat_map(|m| {
@@ -157,8 +95,6 @@ fn sim_entry_providers(ws: &Workspace) -> Vec<FuncRef> {
         .collect()
 }
 
-/// Functions the generated sim registration text names: `register_sim` and the
-/// `@sim_entry` providers. Empty when the build has no sims.
 pub(super) fn sim_glue_roots(ws: &Workspace) -> Vec<FuncRef> {
     if collect_sim_fns(ws).is_empty() {
         return Vec::new();
@@ -169,12 +105,6 @@ pub(super) fn sim_glue_roots(ws: &Workspace) -> Vec<FuncRef> {
 }
 
 /// Every function this build roots from, by the emitter's own predicate.
-///
-/// It lives in the DRIVER, not in `skull_graph`: which declarations a build
-/// roots from is a production decision (project layout, decorators, `@sim`,
-/// `@test`), and the graph takes roots as an INPUT precisely so it cannot make
-/// that decision itself. The full build adds generated-glue obligations
-/// separately and retains the resulting root sources for body edits.
 pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef> {
     let decorators = DecoratorTable::collect(ws);
     let program = is_program_target(ws, project_root);
@@ -192,8 +122,6 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
     roots
 }
 
-/// Harness roots plus the global roots every build keeps. Package tests and
-/// selected sim receipts have no public interface to root wholesale.
 pub(super) fn explicit_and_global_roots(ws: &Workspace, explicit: &[FuncRef]) -> Vec<FuncRef> {
     let decorators = DecoratorTable::collect(ws);
     let mut roots = explicit.to_vec();
@@ -245,8 +173,6 @@ pub(super) fn named_sim_dependencies(
             }
         }
     }
-    // The engine dispatcher consumes the runner's resolved entry plan. Other
-    // registry reads must name their dependencies statically.
     let engine_dispatch = match owner {
         BodyOwner::Function(fid) => matches!(
             ws.module(mid).functions[fid].name.as_str(),
@@ -286,9 +212,6 @@ pub(super) fn named_sim_dependencies(
     Ok(roots)
 }
 
-/// Whether a project build's own sources define `main`. A single-file compile
-/// (no project root) keeps every function: codegen tests and `rock compile` on a
-/// file of helpers expect them.
 fn is_program_target(ws: &Workspace, project_root: Option<&str>) -> bool {
     project_root.is_some()
         && ws.source_modules().any(|m| {
@@ -299,9 +222,6 @@ fn is_program_target(ws: &Workspace, project_root: Option<&str>) -> bool {
         })
 }
 
-/// Compose the retained root set from facts cached by full construction and
-/// explicit body-local shader deltas. This never asks the workspace for its
-/// declarations or sim functions.
 pub(super) fn cached_roots(
     interface_roots: &[FuncRef],
     sim_roots: &[FuncRef],
@@ -378,8 +298,6 @@ pub(super) fn sim_registration_lines(
             0 => body,
             1 => {
                 let provider = sim_entry_provider_for(ws, f, &wire)?;
-                // The provider is called when the runner STARTS the sim, so the
-                // argument is resolved against the world live at that moment.
                 format!("function() return {}({}) end", provider, body)
             }
             n => {
@@ -397,10 +315,6 @@ pub(super) fn sim_registration_lines(
     Ok(out)
 }
 
-/// The mangled name of the `@sim_entry` provider that supplies `sim`'s single
-/// parameter. The provider must be unique and its `body` parameter must take
-/// exactly the sim's parameter type, so a sim cannot be started with an
-/// argument of the wrong type.
 fn sim_entry_provider_for(
     ws: &Workspace,
     sim: &bone_semantic::hir::Function,

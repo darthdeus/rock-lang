@@ -1,12 +1,8 @@
-//! Global initializers: dependency ordering, init lines and the mutable-global layout.
-
 use super::*;
 
-/// The globals a function reads DIRECTLY plus the (statically-resolved) functions
-/// it calls, walking only blocks reachable from `mf.entry`. A lambda's body is a
-/// sub-CFG unreachable from entry (its reads fire when the closure is later
-/// *called*, not at this function's load time), so it is intentionally not
-/// descended into — keeping init ordering from over-constraining on closures.
+/// The globals a function reads directly and the functions it calls, from
+/// blocks reachable from `mf.entry` only: a lambda body runs when the
+/// closure is called, not at load time.
 pub(super) fn direct_refs(ws: &Workspace, cg: &CodegenCtx, mf: &MirFunc) -> (Vec<Ustr>, Vec<Ustr>) {
     let mut globals = Vec::new();
     let mut calls = Vec::new();
@@ -41,8 +37,6 @@ pub(super) fn direct_refs(ws: &Workspace, cg: &CodegenCtx, mf: &MirFunc) -> (Vec
     (globals, calls)
 }
 
-/// Sort the pending init lines into load-time order (see
-/// [`skull_mir::reach::order_global_inits`]).
 pub(super) fn sort_global_init_lines(
     inits: Vec<PendingInit<String>>,
     leaf_owner: &FxHashMap<Ustr, Ustr>,
@@ -102,10 +96,6 @@ pub(super) fn state_initializer_lua(init_lines: &[String]) -> String {
     out
 }
 
-/// The assignment target of a global's init line: its own name, or -- for a
-/// `nobox` global, whose storage IS its leaves -- the comma-separated leaf list
-/// bound from the initializer's multiple return. Leaf names are compiler-minted
-/// top-level names, so they go through the collision sink.
 pub(super) fn global_init_target(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -114,8 +104,6 @@ pub(super) fn global_init_target(
 ) -> Result<String, CompilerError> {
     let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
         .map_err(|e| CompilerError::new_no_location(e.message))?;
-    // The LHS is an identifier, so it is the global's emitted symbol; a v1
-    // DefKey never reaches the artifact.
     let symbol = skull_mir::mangle::symbol_of_key(g.name);
     let Some(leaves) = plan.leaf_names(symbol) else {
         return Ok(symbol.to_string());
@@ -127,9 +115,6 @@ pub(super) fn global_init_target(
         .join(", "))
 }
 
-/// The load-time initialization of one mutable global. It runs only when this
-/// load created the global storage: a program loaded over live storage keeps
-/// every value the running program wrote.
 fn global_init_line(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -189,12 +174,9 @@ pub fn lua_global_state_slots(
         .collect())
 }
 
-/// The line that opens (or, on a later load, validates) the global storage and
-/// seats this chunk's storage cell. The table is sized to its rehash fixpoint:
-/// the array part at the highest slot's next power of two, plus one for index
-/// 0, which is what LuaJIT's `rehashtab` settles on once more than half of that
-/// range is populated, so a later rehash cannot move it -- and a hash part with
-/// twice the statics' string keys, so no static's first store overflows it.
+/// The table is sized to its rehash fixpoint: the array part at the highest
+/// slot's next power of two plus one for index 0, which is where LuaJIT's
+/// `rehashtab` settles, and a hash part with twice the statics' string keys.
 pub(super) fn globals_open_lua(layout: &str, cg: &CodegenCtx, static_count: usize) -> String {
     let narr = cg.state_slot_max().next_power_of_two() + 1;
     let nhash = (static_count * 4).next_power_of_two().max(16);
@@ -248,7 +230,6 @@ fn accessor_fields(
         .iter()
         .zip(&shape.paths)
         .map(|(cell, path)| {
-            // Table boxes store dotted paths as literal keys. Cdata uses nested fields.
             if shape.storage == skull_mir::lower::ValueStorage::CData {
                 format!("{cell} = v.{path}")
             } else {
@@ -276,7 +257,6 @@ fn accessor_fields(
     ))
 }
 
-/// The global directory every reflection reader and the `_G` bridge use.
 pub(super) fn globals_directory_lua(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -337,7 +317,6 @@ pub(super) fn globals_directory_lua(
     })
 }
 
-/// Lower + emit one global's initializer fn, recording its `pending_init` line.
 pub(super) fn emit_global_unit(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -388,12 +367,6 @@ pub(super) fn emit_global_unit(
             out.attribution.mir_lowered = mf.insts.len();
             out.attribution.lower_facts = mf.lower_attribution.clone();
             out.times.lower_work = out.attribution.mir_instructions > 0;
-            // A global-initializer body can carry lambdas (e.g. a `[TileDef]`
-            // literal with fn fields) -- route them through the shared pass, same
-            // as an ordinary fn. Their global reads are NOT init-ordering
-            // constraints (the fn value is stored, not called at init), so `refs`
-            // is computed on the post-pass `mf` where those reads live in the
-            // hoisted siblings, not the main body.
             if let Err(e) = convert_unit_body(ws, cg, &mut mf, &init_name, &mut out.times) {
                 out.hard_error = Some(e);
                 return out;
@@ -421,8 +394,6 @@ pub(super) fn emit_global_unit(
             let key = Ustr::from(&init_name);
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
-            // A decorator / global-initializer body runs once at chunk load,
-            // outside the definitions section the binding pass covers.
             let emission = emit_named_with_allocation_report(
                 ws,
                 cg,
@@ -462,8 +433,6 @@ pub(super) fn emit_global_unit(
                 out.hard_error = Some(e);
                 return out;
             }
-            // An initializer that only returns one expression is evaluated in
-            // its init line instead of through a function made for one call.
             let returned = lua
                 .strip_prefix(&format!("function {init_name}()\n do return "))
                 .and_then(|rest| rest.strip_suffix(" end\nend\n"))
@@ -473,8 +442,6 @@ pub(super) fn emit_global_unit(
                 Some(expr) => expr.clone(),
                 None => format!("{init_name}()"),
             };
-            // An unread constant is still lowered: its body fingerprint is what
-            // a `@wire(onchange=...)` dependency on it compares.
             let unread = g.is_const && cg.is_unread_constant(g.name);
             if returned.is_some() || unread {
                 lua.clear();
@@ -493,22 +460,6 @@ pub(super) fn emit_global_unit(
             if unread {
                 return out;
             }
-            // Hot-reload init line. A `const` is a compile-time constant: tweaking
-            // the source literal should show the new value next reload, so its init
-            // runs UNCONDITIONALLY (no preserve guard).
-            //
-            // A mutable `global` holds live runtime state we WANT to survive the
-            // re-dofile, so it keeps the preservation guard: on a reload
-            // (`_G.HOT_RELOAD`), skip the assignment when this global existed with
-            // the SAME type in the previous run. Cold start (HOT_RELOAD nil) always
-            // runs the init. The type string is bone's render of `g.ty`, also
-            // written into `__rock_known_globals` below (which lists const + mutable
-            // alike); both come from the same render so "type unchanged" compares
-            // equal.
-            // Same TYPE is not same LAYOUT, and this guard deliberately does not
-            // detect the difference: a layout drift restarts the process upstream
-            // (`shape_drift_tests::marking_a_type_nobox_requests_restart`), and a
-            // respawn is a cold start that never reaches this branch.
             let target = match global_init_target(ws, scx, cg, g) {
                 Ok(target) => target,
                 Err(e) => {

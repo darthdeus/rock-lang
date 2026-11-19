@@ -1,12 +1,9 @@
-//! Shader program discovery, realization and registration.
-
 use super::*;
 use crate::instance_graph::Edge;
 
-/// A Lua long-bracket string literal (`[==[ ... ]==]`) holding `s`, at the
-/// smallest `=` level whose closing bracket does not occur in `s` (never does
-/// for generated GLSL, but the guard keeps a `]]` in shader source from
-/// terminating early). The leading newline is elided by Lua's long-string rule.
+/// A Lua long-bracket string literal holding `s`, at the smallest `=` level
+/// whose closing bracket does not occur in `s`. Lua's long-string rule
+/// drops a leading newline.
 fn lua_long_bracket(s: &str) -> String {
     let mut level = 0usize;
     loop {
@@ -32,12 +29,6 @@ pub(super) fn shader_programs(
         .collect()
 }
 
-/// Every function's call-graph strongly connected component, read off the
-/// whole-program instance graph and projected onto declarations. A function
-/// taken as a value is
-/// reached by a call the direct-call edges cannot see. Projecting MERGES nodes, which can only merge
-/// components, so a callee this reports as separate from its caller really is:
-/// the binding pass never orders a capture after the closure that needs it.
 pub(super) fn call_sccs(
     graph: &crate::instance_graph::InstanceGraph,
 ) -> bone_semantic::prelude::FxHashMap<skull_mir::mir::FuncRef, u32> {
@@ -99,20 +90,9 @@ fn identity_storage_exempt(ws: &Workspace, instance: &Instance) -> bool {
     bone_semantic::identity_storage::identity_storage_exempt(ws, ws.module(instance.func.module))
 }
 
-/// An instance's identity-storage rejection belongs to the package whose call
-/// site instantiated it. The walk goes back
-/// from the instance through its callers; a caller in an exempt package whose
-/// own type arguments carry an identity only forwarded it, so its callers are
-/// asked in turn. Any other caller introduced the identity, and the rejection is
-/// fatal when that caller's package is not exempt.
 struct IdentityRejectionWalk<'g> {
-    /// The instances that only forward an identity to their callees.
     forwarders: FxHashSet<&'g Instance>,
-    /// The edges into every rejected instance and every forwarder, in owner
-    /// order. No walk asks for the callers of anything else.
     callers: FxHashMap<&'g Instance, Vec<(&'g Instance, &'g Edge)>>,
-    /// Instances a walk already went through without finding an introducing
-    /// caller. A later rejection reaching one has nothing left to find there.
     cleared: FxHashSet<&'g Instance>,
 }
 
@@ -123,9 +103,6 @@ impl<'g> IdentityRejectionWalk<'g> {
         rejections: &[&'g crate::instance_graph::Rejection],
     ) -> Self {
         use bone_core::prelude::*;
-        // The graph keeps no caller index in a full build, so the pool reads
-        // every owner twice: once for the forwarders, once for the edges
-        // into them.
         let owners: Vec<(
             &crate::instance_graph::Owner,
             &crate::instance_graph::Contribution,
@@ -154,8 +131,6 @@ impl<'g> IdentityRejectionWalk<'g> {
             })
             .map(|rejection| &rejection.at)
             .collect();
-        // Nearly every edge targets a plain instance, which is ruled out
-        // without hashing it when no plain instance was rejected.
         let plain = rejected.iter().any(|instance| instance.args.is_empty());
         let into: Vec<Vec<(&Instance, &Edge)>> = owners
             .par_iter()
@@ -210,8 +185,6 @@ impl<'g> IdentityRejectionWalk<'g> {
                 }
             }
         }
-        // An instance no edge reaches is rooted by an always-emitted body; the
-        // instance's own package answers for it.
         (!self.callers.contains_key(&rejection.at) && !identity_storage_exempt(ws, &rejection.at))
             .then(|| CompilerError::new_with_label(rejection.span, rejection.message.clone()))
     }
@@ -229,8 +202,6 @@ pub(super) fn shader_registration_lines(
             "shader graph/view registration denominator differs from shader collection".to_string(),
         ));
     }
-    // Each program's GLSL is emitted from its own view against the shared
-    // scalar context; the programs fan out and register in collection order.
     let programs: Vec<(
         &skull_mir::lower::ShaderPair,
         &crate::shader_artifact::ShaderProgramView,
@@ -246,18 +217,11 @@ pub(super) fn shader_registration_lines(
         use bone_core::prelude::*;
         programs
             .par_iter()
-            .map(|(_, program_view, plan)| {
-                // The view's profile pass already planned an accepted program;
-                // a program it did not plan is emitted from the view, which
-                // reports the same refusal at the same span.
-                match plan {
-                    Some(plan) => {
-                        skull_codegen_glsl::render_shader_plan(ws, scx.interner(), plan, profile)
-                    }
-                    None => {
-                        skull_codegen_glsl::emit_shader_with_view(ws, scx, program_view, profile)
-                    }
+            .map(|(_, program_view, plan)| match plan {
+                Some(plan) => {
+                    skull_codegen_glsl::render_shader_plan(ws, scx.interner(), plan, profile)
                 }
+                None => skull_codegen_glsl::emit_shader_with_view(ws, scx, program_view, profile),
             })
             .collect()
     };
@@ -272,20 +236,15 @@ pub(super) fn shader_registration_lines(
             language: ShaderLanguage::Glsl,
             source: emission.source.clone(),
         });
-        // Slot order is the engine's whole view of texture binding: it points
-        // each sampler at its unit once at link time, then binds by slot.
         let slot_names: Vec<&str> = emission
             .abi
             .texture_units
             .iter()
             .map(|n| n.as_str())
             .collect();
-        // The `@uniform` blocks' std140 layouts, in binding order: A1 has at
-        // most one, an A2 pipeline has one per stage. Carried as PARALLEL FLAT
-        // lists -- one entry per block, plus the members concatenated with a
-        // per-block count -- so a hand-written driver never nests. A program
-        // with no group sends empty lists, which are still arguments; a short
-        // call is what rock-cli/tests/shader_register_arity_gate.rs catches.
+        // The `@uniform` blocks' std140 layouts, as parallel flat lists (one
+        // entry per block, members concatenated with a per-block count) so a
+        // hand-written driver never nests.
         let w = skull_codegen_glsl::BlockWire::of(
             emission.abi.uniform_blocks.iter(),
             emission.abi.uniform_array_blocks.iter(),

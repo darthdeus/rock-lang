@@ -1,9 +1,5 @@
-//! Per-definition emit units and their merge into the program text.
-
 use super::*;
 
-/// Render a literal default-value expression as Lua (for inline(lua) and
-/// `extern(ffi)` default fills). `None` for a non-literal default.
 fn render_default_lit(body: &bone_semantic::hir::Body, e: Idx<Expr>) -> Option<String> {
     match body.expr_arena[e] {
         Expr::Null | Expr::Unit => Some("nil".to_string()),
@@ -16,12 +12,6 @@ fn render_default_lit(body: &bone_semantic::hir::Body, e: Idx<Expr>) -> Option<S
     }
 }
 
-/// Callee-side `if p == nil then p = <lit> end` fills for a generated Lua
-/// wrapper. A Rock direct call already passes a literal default at the site;
-/// this covers an indirect or Lua call that omitted it. `inline(lua)` and
-/// `extern(ffi)` share the same fill because both wrappers are the body the
-/// omitted argument actually arrives at. A nullable parameter with a non-null
-/// default gets no fill: its nil is an explicit `null` (EXPLICIT_NULL_DEFAULT).
 pub(super) fn default_fill_prologue(
     ws: &Workspace,
     mid: ModuleId,
@@ -46,49 +36,20 @@ pub(super) fn default_fill_prologue(
     prologue
 }
 
-/// What an `extern(ffi)` wrapper does with the callee's return, decided ONCE
-/// from the declared Rock type.
-///
-/// The `ffi.cdef` lives inside an opaque `inline(lua)` body, so the declaration
-/// is the only contract the compiler has -- which is exactly why an unresolvable
-/// declared type is a hard error here and not a default. Falling back to
-/// "return it as-is" would silently reproduce the boxed-handle bug this
-/// classification exists to prevent, and would do it precisely where the
-/// compiler has admitted it does not know what the type is.
 #[derive(Debug)]
 pub(super) enum ExternRet {
-    /// No return value.
     None,
-    /// Rock `int`. LuaJIT hands back a BOXED cdata for a 64-bit C integer
-    /// (`uint64_t`, `int64_t`), so the wrapper coerces to a number. A cdata
-    /// leaking through is not cosmetic: LuaJIT keys a table by cdata IDENTITY,
-    /// so a handle used as a `Map<int, V>` key only ever hits on the box that
-    /// was inserted (`b1_ffi_handle.rock`).
+    /// LuaJIT hands back a boxed cdata for a 64-bit C integer, and keys a
+    /// table by cdata identity, so the wrapper coerces to a number.
     Int,
-    /// Rock `uint` uses the same numeric bridge, but remains a distinct static
-    /// type so its caller-side normalization and ABI identity are preserved.
     Uint,
-    /// A `value` struct returned BY VALUE; the C ABI is then
-    /// `void f(T* out, ..)`, so the wrapper bridges an out-param.
+    /// Returned by value: the C ABI is `void f(T* out, ..)`.
     ValueStruct(String),
-    /// Rock `bool`. The C side declares the return `uint8_t`, not `bool`, so
-    /// the wrapper turns the byte into a Lua boolean -- the same coercion
-    /// principle as `Int`, applied to the other representation the declaration
-    /// promises but the C ABI does not hand back directly.
-    ///
-    /// The reason the `cdef` says `uint8_t` is LuaJIT, not the ABI: recording a
-    /// `bool`-returning C call needs a Lua frame INSIDE the trace above the call
-    /// (`crec_call` -> `crec_snap_caller`, `lj_crecord.c`), and a trace rooted
-    /// at this one-line wrapper has none, so it aborts `NYI: unsupported C
-    /// function type` every time the wrapper itself becomes a trace root. A
-    /// `uint8_t` return records unconditionally. Rust `extern "C" fn -> bool`
-    /// already returns one byte 0/1 in that register, so only the `cdef` and
-    /// this arm move -- and they MUST move together: `~= 0` over a `bool` cdef
-    /// compares a Lua boolean to 0 and is always true.
+    /// The `cdef` declares the return `uint8_t`: LuaJIT cannot record a
+    /// `bool`-returning C call from a trace rooted at the wrapper (`NYI:
+    /// unsupported C function type`). The `cdef` and this arm's `~= 0` must
+    /// change together.
     Bool,
-    /// Everything else crosses as the callee produced it: LuaJIT already hands
-    /// back a Lua value for `float`/`double` and a string, and a pointer return
-    /// is declared `Ptr<T>` and stays a cdata by design.
     AsIs,
 }
 
@@ -112,10 +73,6 @@ pub(super) fn extern_ret(
             ),
         )
     };
-    // Every non-conversion is a REASON, so none of them can read as "some other
-    // opaque type" the way a partial normalizer's fallback node would -- which
-    // matters most for the cycle check below, where a summarized instantiation
-    // could manufacture a false match.
     let describe = |r: MonoTyReason| -> CompilerError {
         match r {
             MonoTyReason::UnboundGeneric(n) => {
@@ -153,43 +110,22 @@ pub(super) fn extern_ret(
     })
 }
 
-/// One emitted definition (function / decorator / global-init): the Lua text to
-/// append plus the facts the surrounding assembly merges back in. Produced
-/// independently per definition (see [`par_map`]) so the heavy lower+cleanup+emit
-/// work fans out; results are folded back in source order so output is stable.
 #[derive(Default)]
 pub(super) struct UnitOut {
-    /// Lua to append to the chunk (empty for a no-op definition).
     pub(super) lua: String,
-    /// A rejection that fails the compile.
     pub(super) hard_error: Option<CompilerError>,
-    /// `(emit_key, direct_global_reads, direct_callees)` for global-init ordering.
     pub(super) refs: Option<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
-    /// `(global_name, init_key, load_line)` for a global initializer.
     pub(super) pending_init: Option<(Ustr, Ustr, String)>,
-    /// Callees this definition still calls -- reachability roots, since decorator
-    /// bodies and global initializers are always emitted.
     pub(super) calls: Vec<FuncRef>,
-    /// Specialized callees this definition needs emitted (see `Chunk::specs`).
     pub(super) specs: Vec<skull_mir::bound::SpecDemand>,
-    /// Compiler-owned logical callable identities in this emitted body.
     pub(super) code_artifact: skull_mir::code_identity::BodyCodeArtifact,
-    /// Module-global names read/written (fn-as-value edges; see `Chunk`).
     pub(super) global_names: Vec<Ustr>,
-    /// Comptime inputs this unit's body baked in (`build_var`/`embed_string`).
-    /// Always-emitted units have no Chunk to carry these, and ALL in-tree
-    /// production comptime reads are global initializers -- dropping them here
-    /// is how the cimgui embeds went missing from the watch set.
     pub(super) comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
     pub(super) allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
     pub(super) times: PhaseTimes,
     pub(super) attribution: UnitAttribution,
 }
 
-/// Record one emitted definition's Lua, emit time, and (for the non-coroutine
-/// paths) its call-graph facts. `collect_refs` carries the emit key when the
-/// definition seeds global-init ordering; `None` for coroutines, which never do.
-/// Reads the per-thread regalloc accumulator that the caller reset before emit.
 pub(super) fn emit_lowered(
     ws: &Workspace,
     cg: &CodegenCtx,

@@ -1,9 +1,5 @@
-//! Which instances are emitted: inline candidates, specialization and view-driven chunks.
-
 use super::*;
 
-/// The diagnostic for a demand clash, at the declaration whose specialization
-/// two sites disagree about.
 fn demand_clash(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -24,20 +20,6 @@ fn demand_clash(
     )
 }
 
-/// The spanned rejection for a specialization demand whose type arguments have
-/// outgrown [`crate::instance_graph::MAX_INSTANTIATION_DEPTH`], or `None` when
-/// it is within bounds.
-///
-/// This is the emission side of plan S 0h's `ChangingInstanceRecursion` call --
-/// changing-instance recursion is REJECT, and the rejection has to come from
-/// the INSTANCE, because E1 leaves no declaration body to reject from. The
-/// depth test is the graph's: one `MonoTy::depth`, one constant, so "does this
-/// instantiation terminate" has a single answer on both sides.
-///
-/// Depth is the right discriminant rather than a chain walk: a recursion whose
-/// arguments do not change is same-instance recursion, which is legal and which
-/// the walk's dedup already closes. Only a chain that grows its arguments
-/// diverges, and growth is exactly what depth measures.
 fn too_deep_to_instantiate(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -85,9 +67,6 @@ pub(super) fn build_inline_candidate_table(
     added: Option<&BTreeSet<Instance>>,
     removed: Option<&BTreeSet<Instance>>,
 ) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
-    // The old incremental route left this unset and filtered every key here.
-    // Count the exact iterator population so a mutation that restores that
-    // route is visible rather than looking like a timing-only regression.
     let warm_keys: Vec<Instance> = warm_keys_override.unwrap_or_else(|| {
         keys.iter()
             .filter(|key| match base {
@@ -128,30 +107,17 @@ pub(super) fn build_inline_candidate_table(
     ))
 }
 
-/// One demanded instance's outcome, keyed by its symbol so the queue's
-/// completion order never shows in what is installed.
 type SpecOutcome = (String, Instance, Result<Chunk, CompilerError>);
 
-/// The specialized chunks a demand closure built, and the instances it
-/// rejected, in installation order.
 pub(super) type SpecChunks = (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>);
 
-/// Build each demanded specialization once. Inlining can deliver a retained
-/// specialization entirely through its callers.
 pub(super) struct SpecQueue<'a> {
     ws: &'a Workspace,
     scx: &'a skull_mir::lower::ScalarCtx,
-    /// The instances the graph reached with two different witness trees. A
-    /// set rather than the graph, so a one-shot build can free the graph's
-    /// records before the fan-out that reads this.
     dissenters: FxHashSet<Instance>,
-    /// A retained cache's chunks, whose specialized entries are reused rather
-    /// than built again. A full build has none.
     cached: Option<&'a FxHashMap<Instance, Result<Chunk, CompilerError>>>,
     done: std::sync::Mutex<FxHashSet<Instance>>,
     outcomes: std::sync::Mutex<Vec<SpecOutcome>>,
-    /// Keep each built body's attribution record, with its thread CPU time;
-    /// only a build that folds attribution reads them.
     pub(super) attribution: bool,
 }
 
@@ -173,7 +139,6 @@ impl<'a> SpecQueue<'a> {
         }
     }
 
-    /// Admit every instance `demands` names; new build jobs go to `jobs`.
     pub(super) fn admit_all(
         &self,
         demands: &[skull_mir::bound::SpecDemand],
@@ -184,8 +149,6 @@ impl<'a> SpecQueue<'a> {
         }
     }
 
-    /// Decide `inst` if it is new: reject it, take its cached chunk (and
-    /// admit that chunk's own demand), or queue it as a build job.
     fn admit(&self, inst: Instance, jobs: &mut Vec<Instance>) {
         if !self
             .done
@@ -195,10 +158,6 @@ impl<'a> SpecQueue<'a> {
         {
             return;
         }
-        // Polymorphic recursion (plan S 0h: REJECT). The graph's own build
-        // silently CAPS a too-deep instance (`depth_capped`, no rejection --
-        // it is a target-neutral fact-recorder, not a diagnostic surface), so
-        // emission is where the spanned rejection has to live, same as before.
         if let Some((name, err)) = too_deep_to_instantiate(self.ws, self.scx, &inst) {
             self.record(name, inst, Err(err));
             return;
@@ -217,7 +176,6 @@ impl<'a> SpecQueue<'a> {
         jobs.push(inst);
     }
 
-    /// Build one admitted job's chunk and admit its own demand to `follow_ups`.
     pub(super) fn build(
         &self,
         cg: &CodegenCtx,
@@ -246,7 +204,6 @@ impl<'a> SpecQueue<'a> {
             .push((name, inst, result));
     }
 
-    /// Install every outcome in symbol order, whatever order the pool made.
     pub(super) fn finish(self) -> SpecChunks {
         let mut outcomes: Vec<Option<SpecOutcome>> = self
             .outcomes
@@ -255,8 +212,6 @@ impl<'a> SpecQueue<'a> {
             .into_iter()
             .map(Some)
             .collect();
-        // Sorted by position so the chunks themselves are moved once. A tie
-        // falls back to the instance itself.
         let mut order: Vec<usize> = (0..outcomes.len()).collect();
         let key = |at: usize| outcomes[at].as_ref().expect("unsorted outcome");
         order.sort_by(|&a, &b| {
@@ -280,7 +235,6 @@ impl<'a> SpecQueue<'a> {
     }
 }
 
-/// A worker's inline cache, over the build's shared candidate table.
 pub(super) fn worker_inline_cache(
     table: Option<&std::sync::Arc<skull_transform::InlineCandidateTable>>,
 ) -> skull_transform::InlineCache {
@@ -292,10 +246,6 @@ pub(super) fn worker_inline_cache(
     }
 }
 
-/// Drain `jobs` and everything they demand through `queue`. Each built
-/// chunk's own demand is queued as soon as that chunk is done, so a deep
-/// demand chain never waits on an unrelated body's build, and every worker
-/// keeps its inline cache for the whole closure.
 pub(super) fn drain_spec_jobs(
     queue: &SpecQueue<'_>,
     cg: &CodegenCtx,
@@ -313,9 +263,6 @@ pub(super) fn drain_spec_jobs(
     );
 }
 
-/// The incremental driver of the demand closure: seeded from `initial` and
-/// the retained chunk of every ordinary/coroutine declaration
-/// `should_emit_via_view` retains.
 pub(super) fn view_driven_specialized_chunks(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -353,16 +300,10 @@ pub(super) fn view_driven_specialized_chunks(
     queue.finish()
 }
 
-/// The shared body of `fref` -- the id under which a declaration's own
-/// definition is cached. Written out at every chunk lookup so the day a
-/// SPECIALIZED body answers one of them is a visible change rather than a
-/// silent widening.
 pub(super) fn shared(fref: FuncRef) -> Instance {
     Instance::base(fref)
 }
 
-/// A definition can serve calls through a sibling group, fulfill an exact
-/// bare-name publication, or do both.
 pub(super) fn should_emit_via_view(
     ws: &Workspace,
     view: &crate::artifact::ArtifactView,
@@ -377,8 +318,6 @@ pub(super) fn should_emit_via_view(
     call_serving || publication
 }
 
-/// An opaque body needs a definition for a publication, explicit root,
-/// function value, or residual call.
 pub(super) fn emits_foreign_definition(
     ws: &Workspace,
     view: &crate::artifact::ArtifactView,

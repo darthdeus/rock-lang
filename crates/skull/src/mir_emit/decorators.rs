@@ -1,8 +1,5 @@
-//! Decorator units and decorator application lines.
-
 use super::*;
 
-/// Lower + emit one decorator definition (`deco <name>` -> `__deco_<name>`).
 pub(super) fn emit_decorator_unit(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -44,7 +41,6 @@ pub(super) fn emit_decorator_unit(
             out.attribution.mir_lowered = mf.insts.len();
             out.attribution.lower_facts = mf.lower_attribution.clone();
             out.times.lower_work = out.attribution.mir_instructions > 0;
-            // Decorator bodies can carry lambdas too -- convert like an ordinary fn.
             if let Err(e) = convert_unit_body(ws, cg, &mut mf, &deco_name, &mut out.times) {
                 out.hard_error = Some(e);
                 return out;
@@ -64,8 +60,6 @@ pub(super) fn emit_decorator_unit(
             }
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
-            // A decorator / global-initializer body runs once at chunk load,
-            // outside the definitions section the binding pass covers.
             let emission = emit_named_with_allocation_report(
                 ws,
                 cg,
@@ -122,8 +116,6 @@ pub(super) fn emit_decorator_unit(
     out
 }
 
-/// Decorator APPLICATION lines (`__deco_<name>({ name, func }, ...)`) for every
-/// decorated fn workspace-wide -- registration calls only, no fn bodies.
 pub(super) fn decorator_application_lines(
     ws: &Workspace,
     decorators: &DecoratorTable,

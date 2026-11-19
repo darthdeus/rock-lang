@@ -1,5 +1,3 @@
-//! Emit attribution and setup-lane measurement, reported by `rock backend-stats`.
-
 use super::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -79,10 +77,7 @@ pub struct SpliceCost {
     pub instructions: usize,
 }
 
-/// One emitted body's own costs. Stage times are elapsed time on the worker
-/// that built the body, the same quantity the compile budget sums per pass;
-/// `thread_cpu` is that worker's CPU time for the whole body where the
-/// fan-out measured it.
+/// One emitted body's own costs.
 #[derive(Clone, Debug, Default)]
 pub struct BodyCost {
     pub source: BodySource,
@@ -241,11 +236,6 @@ pub struct BodyAttributionOwner {
     pub mir_instructions: usize,
 }
 
-/// Counter totals of the build's shared `RepArena` and `MonoInterner`, taken
-/// when the body-lowering fanout began (`setup`) and again at emission end
-/// (`final`). Surfaced by `backend-stats`; the freeze-premise gate for
-/// publishing lock-free read views is `intern_new`/`write_acqs` deltas near
-/// zero after setup.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ArenaTraffic {
     pub rep_setup: skull_mir::lower::RepArenaStats,
@@ -254,9 +244,6 @@ pub struct ArenaTraffic {
     pub mono_final: skull_mir::monoty::MonoInternerStats,
 }
 
-/// Coarse per-stage wall-clock for one emitted definition. Summed across every
-/// cached chunk + decorator/global unit in [`assemble`] to produce the
-/// `backend-stats` breakdown.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct PhaseTimes {
     pub(super) lower: Duration,
@@ -277,9 +264,6 @@ pub(crate) struct PhaseTimes {
     pub(super) validation_work: bool,
     pub(super) emit: Duration,
     pub(super) emit_work: bool,
-    /// Regalloc subset of `emit` (read from the per-thread `REGALLOC_TIME`
-    /// accumulator, reset just before this unit's emit so it is exact per-unit
-    /// even when units run concurrently on a rayon worker pool).
     pub(super) regalloc: Duration,
     pub(super) regalloc_work: bool,
 }
@@ -398,7 +382,6 @@ pub(super) struct UnitAttribution {
     pub(super) canonical_reused: bool,
     pub(super) always_lowered: bool,
     pub(super) always_callee_keys: Vec<Instance>,
-    /// Kept so the fold can describe the wire; read only when it folds.
     pub(super) abi_plan: Option<skull_mir::lower::BackendFnAbiPlanHandle>,
 }
 
@@ -422,9 +405,7 @@ pub(super) struct AttributionAccumulator {
     pub(super) regalloc_samples: Vec<u64>,
     pub(super) stringify_samples: Vec<u64>,
     pub(super) top_bodies: Vec<BodyAttributionOwner>,
-    /// Per-callee inline totals, named only once the report is built.
     pub(super) owner_totals: FxHashMap<FuncRef, (usize, usize, u64, usize)>,
-    /// Off unless the build asked for attribution: then nothing is folded.
     pub(super) enabled: bool,
     pub(super) census_enabled: bool,
     pub(super) candidate_published_keys: FxHashSet<Instance>,
@@ -469,14 +450,10 @@ pub(super) fn mir_live_instructions(mf: &MirFunc) -> usize {
     mf.blocks.iter().map(|(_, block)| block.insts.len()).sum()
 }
 
-/// Times each pass of the shared body chain and records its inline work, for
-/// `rock backend-stats`.
 pub(super) struct ChainStats<'a> {
     pub(super) times: &'a mut PhaseTimes,
     pub(super) work: &'a mut InlineWork,
-    /// Root splices count as ordinary (a declaration, not a specialization).
     pub(super) ordinary: bool,
-    /// The ordinary instance the root scan is credited to.
     pub(super) ordinary_key: Option<Instance>,
     started: Instant,
     before: (usize, usize, usize),
@@ -630,17 +607,13 @@ fn finish_distribution(phase: &mut AttributionPhase, samples: &mut [u64]) {
 }
 
 impl AttributionAccumulator {
-    /// Fold one body and keep its cost record; `lua` is its text, or `None`
-    /// when assembly drops the body.
     pub(super) fn add_body(&mut self, unit: &UnitAttribution, lua: Option<&str>) {
         if !self.enabled || !unit.examined {
-            // The lines are counted only for a body that is recorded.
             return;
         }
         self.add_body_sized(unit, lua.map(|lua| (lua.len(), lua.lines().count())));
     }
 
-    /// [`Self::add_body`] for a text known by its bytes and lines.
     pub(super) fn add_body_sized(&mut self, unit: &UnitAttribution, text: Option<(usize, usize)>) {
         if !self.enabled || !unit.examined {
             return;

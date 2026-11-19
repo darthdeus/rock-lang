@@ -1,9 +1,5 @@
-//! Rejection of bodies and units that fail post-emit validation.
-
 use super::*;
 
-/// Collect definition errors in assembly order so parallel completion cannot
-/// change diagnostic order.
 #[derive(Default)]
 pub(super) struct Rejections(Vec<CompilerError>);
 
@@ -16,8 +12,6 @@ impl Rejections {
         self.0.extend(es);
     }
 
-    /// The first rejection, carrying the rest as siblings (the shared sink every
-    /// renderer expands). `Ok` only when nothing was rejected.
     pub(super) fn into_result(self) -> Result<(), CompilerError> {
         let mut it = self.0.into_iter();
         match it.next() {
@@ -27,7 +21,6 @@ impl Rejections {
     }
 }
 
-/// A column-backed vector has no whole-element slot to address.
 fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Result<(), String> {
     use skull_mir::mir::{
         ContainerKind::{VecValueColumns, VecValueStrided},
@@ -59,17 +52,11 @@ fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Resu
     Ok(())
 }
 
-/// Retain all independent findings from validating a body.
 #[derive(Default)]
 pub(super) struct BodyRejection {
     findings: Vec<Finding>,
 }
 
-/// One rejection site. `guarantee` separates a LANGUAGE GUARANTEE (today:
-/// `nobox`) from a codegen parity gap. `site` is the offending instruction's own span when the check could
-/// name one; it outranks the enclosing fn's span at [`BodyRejection::into_error`]
-/// -- a whole-fn anchor cannot distinguish two violations in one body, which is
-/// how one `nobox` sink hid another inside `draw_fractures`.
 struct Finding {
     message: String,
     guarantee: bool,
@@ -87,9 +74,6 @@ impl BodyRejection {
         }
     }
 
-    /// A guarantee violation anywhere in the body makes the whole rejection a
-    /// guarantee: the stdlib path may drop a body with only gaps in it, and a
-    /// body holding both must not be dropped on the strength of the gap.
     fn guarantee(&self) -> bool {
         self.findings.iter().any(|f| f.guarantee)
     }
@@ -113,9 +97,6 @@ impl BodyRejection {
         self
     }
 
-    /// Spanned rejection at the offending instruction, falling back to `span`
-    /// (the enclosing definition), tagged so the stdlib leniency check can tell
-    /// a guarantee from a gap without matching on the message text.
     pub(super) fn into_error(
         self,
         span: bone_semantic::prelude::Span,
@@ -136,29 +117,18 @@ impl BodyRejection {
     }
 }
 
-/// Every post-transform invariant one about-to-be-emitted body must hold, and its
-/// hoisted children with it, plus the specialized callees it needs emitted. The
-/// single entry point on purpose: each check below was added because some
-/// emitted-body kind was missing it, so a new one joins here rather than at one
-/// call site.
 pub(super) fn validate_emitted_body(
     ws: &Workspace,
     mf: &MirFunc,
     specs: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<(), BodyRejection> {
     let mut acc = BodyRejection::default();
-    // A demand this body cannot state in self-contained terms is a rejection,
-    // not a demand that is quietly dropped: the callee would then be reached by
-    // nothing and its call site would spell a definition the program lacks.
     if let Err(e) = skull_mir::reach::spec_bound_calls(ws, mf, specs) {
         acc.absorb(BodyRejection::gap(e.message));
     }
     if let Err(r) = validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap) {
         acc.absorb(r);
     }
-    // Name the function being emitted: the span often points into an INLINED
-    // stdlib body (every `xs.push(..)` reports at the same `Vec<T>.push` line),
-    // so without the caller the diagnostic cannot tell two sites apart.
     acc.findings.extend(
         skull_transform::nobox_materialization_violations(ws, mf)
             .into_iter()
@@ -176,10 +146,6 @@ pub(super) fn validate_emitted_body(
     acc.into_result()
 }
 
-/// The spec-binding check for a decorator / global-init unit, whose body and
-/// hoisted lambdas are emitted without ever passing through the inliner. Lenient
-/// for stdlib modules on the same grounds as the fn path: their emit gaps are the
-/// known parity list, a user definition that cannot emit is a hard error.
 pub(super) fn check_unit_spec_bindings(
     ws: &Workspace,
     mid: ModuleId,
@@ -195,9 +161,6 @@ pub(super) fn check_unit_spec_bindings(
     }
 }
 
-/// EVERY [`UnitOut::hard_error`] in a parallel batch, in source order so the
-/// reported list does not depend on thread scheduling. Each unit is an
-/// independent definition, so a batch of them holds a site table, not one bug.
 pub(super) fn unit_errors(units: &[UnitOut]) -> Vec<CompilerError> {
     units.iter().filter_map(|u| u.hard_error.clone()).collect()
 }

@@ -1,12 +1,3 @@
-//! Order-preserving parallel map and join, plus a work queue, sequential under
-//! `--features sequential`.
-
-/// Map `f` over `items`, in PARALLEL by default (rayon work-stealing pool) or
-/// SEQUENTIALLY under `--features sequential` (clean single-thread sampling
-/// profiles — mirrors bone's `sequential` shim). Order-preserving in both modes,
-/// so the assembled Lua chunk is byte-identical regardless of the feature. Each
-/// `emit_*_unit` is independent (read-only `ws`/`scx`/`cg`, owns its own
-/// `MirFunc`), so the lower+cleanup+emit work fans out cleanly per definition.
 #[cfg(not(feature = "sequential"))]
 struct WorkerMode {
     inline_off: bool,
@@ -46,13 +37,7 @@ pub(super) fn par_map<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync
     par_map_with(items, || (), move |_, item| f(item))
 }
 
-/// Like [`par_map`], but threads a per-worker mutable state `S` (built by `init`)
-/// into `f` — for the function fan-out, an [`InlineCache`](skull_transform::InlineCache)
-/// reused across every fn a rayon worker handles, so each callee lowers + classifies
-/// at most once per worker. PARALLEL by default (one `S` per pool
-/// thread); SEQUENTIALLY under `--features sequential` ONE `S` is shared across all
-/// items, exactly reproducing the original whole-workspace cache. Order-preserving
-/// in both modes.
+/// [`par_map`] with a per-worker state `S` built by `init`.
 #[cfg(not(feature = "sequential"))]
 pub(super) fn par_map_with<T: Send, R: Send, S: Send>(
     items: Vec<T>,
@@ -61,11 +46,9 @@ pub(super) fn par_map_with<T: Send, R: Send, S: Send>(
 ) -> Vec<R> {
     use rayon::prelude::*;
     let mode = WorkerMode::capture();
-    // Rayon splits a range further only when a thief steals part of it, and
-    // these items vary widely in cost, so with `map_init`'s coarse leaves one
-    // thread was left finishing a long run alone. Short leaves keep every
-    // thread busy to the end; the state lives per pool thread instead of per
-    // leaf so it is still built once per worker.
+    // Rayon splits a range only when a thief steals part of it, so with
+    // `map_init`'s coarse leaves one thread finishes a long run alone. The
+    // state lives per pool thread so it is still built once per worker.
     let states: Vec<std::sync::Mutex<Option<S>>> = (0..=rayon::current_num_threads())
         .map(|_| std::sync::Mutex::new(None))
         .collect();
@@ -101,13 +84,7 @@ pub(super) fn par_map_with<T, R, S>(
     items.into_iter().map(|t| f(&mut state, t)).collect()
 }
 
-/// A work queue on the pool: `f` handles one item with a per-worker state
-/// (built by `init`, reused across the items a worker handles, as in
-/// [`par_map_with`]) and may push follow-up items, which are queued the moment
-/// the item is done rather than at the end of a wave. Returns once the queue
-/// has drained. Unordered: a caller that needs a deterministic result sorts
-/// what it collected. SEQUENTIALLY under `--features sequential`, a LIFO
-/// worklist over one state.
+/// A work queue on the pool; `f` may push follow-up items. Unordered.
 #[cfg(not(feature = "sequential"))]
 pub(super) fn par_drain<T: Send, S: Send>(
     items: Vec<T>,
@@ -201,9 +178,7 @@ pub(super) fn parallel_join<A, B>(left: impl FnOnce() -> A, right: impl FnOnce()
 
 pub(super) use bone_core::prelude::join_in_place;
 
-/// Drop `value` off the calling thread. One-shot builds release large caches
-/// in the middle of serial assembly; freeing them on an idle worker keeps that
-/// path short. Inline where there are no worker threads to hand it to.
+/// Drop `value` off the calling thread.
 #[cfg(all(not(feature = "sequential"), not(target_arch = "wasm32")))]
 pub(crate) fn drop_in_background<T: Send + 'static>(value: T) {
     rayon::spawn(move || drop(value));
@@ -248,9 +223,6 @@ mod tests {
         );
     }
 
-    /// A pool thread waiting inside one compile's join can steal an item of
-    /// another compile, so an item's mode must not depend on what its host
-    /// thread currently holds.
     #[test]
     fn an_item_runs_under_its_own_inline_mode_on_a_thread_holding_another() {
         let normal = WorkerMode::capture();
@@ -264,8 +236,7 @@ mod tests {
     }
 }
 
-/// `parts` joined, with the copying spread over the pool: a large program's
-/// definitions are tens of megabytes, which one thread copies in milliseconds.
+/// `parts` joined, with the copying spread over the pool.
 #[cfg(not(feature = "sequential"))]
 pub(super) fn par_concat(parts: &[&str]) -> String {
     use rayon::prelude::*;
