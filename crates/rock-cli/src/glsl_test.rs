@@ -480,20 +480,13 @@ pub(crate) fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
 pub(crate) fn validate_workspace(dir: &str) -> Result<bone_semantic::inference::Workspace> {
     let sources = crate::unified_compile::discover_project_sources(std::path::Path::new(dir))
         .map_err(|e| anyhow::anyhow!("{dir}: cannot load project: {e}"))?;
-    validate_sources(sources)
-}
-
-fn validate_sources(
-    sources: rock_core::SourceFiles,
-) -> Result<bone_semantic::inference::Workspace> {
-    crate::skull_backend::check_project(&sources)
-        .map(|(ws, _entry)| ws)
-        .map_err(|errs| {
-            anyhow::anyhow!(
-                "{}",
-                crate::skull_backend::render_project_errs(&sources, &errs)
-            )
-        })
+    let (ws, _entry) = crate::skull_backend::check_project(&sources).map_err(|errs| {
+        anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_errs(&sources, &errs)
+        )
+    })?;
+    Ok(ws)
 }
 
 /// Split a single-file `#ifdef VERTEX` / `#ifdef PIXEL` shader into the two
