@@ -146,6 +146,28 @@ mod tests {
         [active as i32, x, y, generation, installed as i32]
     }
 
+    fn query(
+        records: &[i32],
+        candidates: &[i32],
+        rect: (i32, i32, i32, i32),
+        include_uninstalled: bool,
+        output: &mut [i32],
+    ) -> bool {
+        stone_actor_query_rect(
+            records.as_ptr(),
+            records.len() as i64,
+            candidates.as_ptr(),
+            candidates.len() as i64,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            include_uninstalled,
+            output.as_mut_ptr(),
+            output.len() as i64,
+        )
+    }
+
     #[test]
     fn sparse_candidates_skip_holes_filter_exact_edges_and_sort_slots() {
         let records = [
@@ -160,18 +182,12 @@ mod tests {
         let candidates = [5, 4, 1, 3, 0, 2];
         let mut output = [-1; 8];
 
-        assert!(stone_actor_query_rect(
-            records.as_ptr(),
-            records.len() as i64,
-            candidates.as_ptr(),
-            candidates.len() as i64,
-            0,
-            0,
-            5,
-            5,
+        assert!(query(
+            &records,
+            &candidates,
+            (0, 0, 5, 5),
             false,
-            output.as_mut_ptr(),
-            output.len() as i64,
+            &mut output
         ));
         assert_eq!(&output[..6], &[4, 5, 0, 2, 3, 5]);
         assert_eq!(&output[6..], &[-1; 2]);
@@ -189,33 +205,21 @@ mod tests {
         let candidates = [3, 0, 2, 1];
         let mut output = [-1; 6];
 
-        assert!(stone_actor_query_rect(
-            records.as_ptr(),
-            records.len() as i64,
-            candidates.as_ptr(),
-            candidates.len() as i64,
-            0,
-            0,
-            3,
-            3,
+        assert!(query(
+            &records,
+            &candidates,
+            (0, 0, 3, 3),
             false,
-            output.as_mut_ptr(),
-            output.len() as i64,
+            &mut output
         ));
         assert_eq!(&output[..3], &[1, 2, 1]);
 
-        assert!(stone_actor_query_rect(
-            records.as_ptr(),
-            records.len() as i64,
-            candidates.as_ptr(),
-            candidates.len() as i64,
-            0,
-            0,
-            3,
-            3,
+        assert!(query(
+            &records,
+            &candidates,
+            (0, 0, 3, 3),
             true,
-            output.as_mut_ptr(),
-            output.len() as i64,
+            &mut output
         ));
         assert_eq!(&output[..4], &[2, 3, 0, 1]);
     }
@@ -226,18 +230,12 @@ mod tests {
         let candidates = [1, 0];
         let mut output = [-1; 4];
 
-        assert!(stone_actor_query_rect(
-            records.as_ptr(),
-            records.len() as i64,
-            candidates.as_ptr(),
-            candidates.len() as i64,
-            3,
-            0,
-            1,
-            3,
+        assert!(query(
+            &records,
+            &candidates,
+            (3, 0, 1, 3),
             false,
-            output.as_mut_ptr(),
-            output.len() as i64,
+            &mut output
         ));
         assert_eq!(&output[..2], &[0, 2]);
     }
