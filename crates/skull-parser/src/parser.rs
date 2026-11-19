@@ -98,6 +98,17 @@ impl Pos {
     }
 }
 
+const STATIC_PATTERN_ERROR: &str = "a `static` takes a plain name, not a pattern: give it one name and                      destructure from it";
+
+fn bare_item(span: Span, kind: ItemKind) -> Item {
+    Item {
+        annotations: Vec::new(),
+        vis: None,
+        span,
+        kind,
+    }
+}
+
 fn identity_map(base: usize, len: usize) -> Vec<usize> {
     (base..=base + len).collect()
 }
@@ -301,7 +312,7 @@ impl<'a> Parser<'a> {
         self.advance();
     }
 
-    fn can_start_statement(&self, kind: TokenKind) -> bool {
+    fn can_start_statement(kind: TokenKind) -> bool {
         matches!(
             kind,
             TokenKind::Let
@@ -347,7 +358,7 @@ impl<'a> Parser<'a> {
                     return true;
                 }
                 TokenKind::CloseCurly | TokenKind::EOF => return false,
-                k if self.can_start_statement(k) => return true,
+                k if Self::can_start_statement(k) => return true,
                 _ => self.advance(),
             }
         }
@@ -410,14 +421,10 @@ impl<'a> Parser<'a> {
     /// Newlines that followed the *previous* token (the tokenizer folds
     /// `Newline` into `Token::trailing_newlines`).
     fn prev_trailing_newlines(&self) -> usize {
-        if self.pos == 0 {
-            0
-        } else {
-            self.tokens
-                .get(self.pos - 1)
-                .map(|t| t.trailing_newlines)
-                .unwrap_or(0)
-        }
+        self.pos
+            .checked_sub(1)
+            .and_then(|i| self.tokens.get(i))
+            .map_or(0, |t| t.trailing_newlines)
     }
 
     fn at_end(&self) -> bool {
@@ -457,7 +464,6 @@ impl<'a> Parser<'a> {
     /// enclosing list (mirrors rock's `expect_generic_close`).
     fn expect_generic_close(&mut self) -> PResult<Span> {
         match self.kind() {
-            TokenKind::GreaterThan => self.expect(TokenKind::GreaterThan),
             TokenKind::RightShift => {
                 let span = self.span();
                 self.advance();
@@ -471,7 +477,7 @@ impl<'a> Parser<'a> {
                 );
                 Ok(span)
             }
-            other => Err(self.err(format!("expected GreaterThan, got {:?}", other))),
+            _ => self.expect(TokenKind::GreaterThan),
         }
     }
 
@@ -484,12 +490,9 @@ impl<'a> Parser<'a> {
     fn skip_comments_as_items(&mut self) {
         while let TokenKind::Comment(text) = self.kind() {
             let span = self.span();
-            self.ast.items.push(Item {
-                annotations: Vec::new(),
-                vis: None,
-                span,
-                kind: ItemKind::Comment(text),
-            });
+            self.ast
+                .items
+                .push(bare_item(span, ItemKind::Comment(text)));
             self.advance();
         }
         while self.eat(TokenKind::Semicolon) {}
@@ -531,6 +534,21 @@ impl<'a> Parser<'a> {
         while self.list_item_follows(close) {
             items.push(parse_item(self)?);
             if !self.list_continues() {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    fn parse_bare_comma_list<T>(
+        &mut self,
+        close: TokenKind,
+        mut parse_item: impl FnMut(&mut Self) -> PResult<T>,
+    ) -> PResult<Vec<T>> {
+        let mut items = Vec::new();
+        while self.kind() != close && !self.at_end() {
+            items.push(parse_item(self)?);
+            if !self.eat(TokenKind::Comma) {
                 break;
             }
         }
@@ -913,12 +931,10 @@ impl<'a> Parser<'a> {
         let args = self.parse_comma_list(TokenKind::CloseParen, |p| p.parse_macro_arg(sigil))?;
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
-        Ok(Item {
-            annotations: Vec::new(),
-            vis: None,
+        Ok(bare_item(
             span,
-            kind: ItemKind::MacroInvocation { name, args, sigil },
-        })
+            ItemKind::MacroInvocation { name, args, sigil },
+        ))
     }
 
     fn parse_sigil_call(&mut self, func: Idx<ExprData>) -> PResult<Idx<ExprData>> {
@@ -1023,26 +1039,16 @@ impl<'a> Parser<'a> {
             }
             TokenKind::OpenSquare => {
                 self.advance();
-                let mut elems = Vec::new();
-                while self.kind() != TokenKind::CloseSquare && !self.at_end() {
-                    elems.push(self.parse_macro_arg(true)?);
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                }
+                let elems = self
+                    .parse_bare_comma_list(TokenKind::CloseSquare, |p| p.parse_macro_arg(true))?;
                 self.expect(TokenKind::CloseSquare)?;
                 let span = self.span_from(start);
                 Ok(self.ast.expr(span, ExprKind::ArrayLiteral(elems)))
             }
             TokenKind::OpenParen => {
                 self.advance();
-                let mut elems = Vec::new();
-                while self.kind() != TokenKind::CloseParen && !self.at_end() {
-                    elems.push(self.parse_macro_arg(true)?);
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                }
+                let elems =
+                    self.parse_bare_comma_list(TokenKind::CloseParen, |p| p.parse_macro_arg(true))?;
                 self.expect(TokenKind::CloseParen)?;
                 let span = self.span_from(start);
                 let kind = if elems.len() == 1 {
@@ -1325,7 +1331,8 @@ impl<'a> Parser<'a> {
 
         let (body, macro_items) = if self.kind() == TokenKind::OpenCurly {
             if is_macro {
-                let (block, items) = self.parse_macro_body()?;
+                let mut items = Vec::new();
+                let block = self.parse_braced_block(Some(&mut items))?;
                 (FunctionBody::Rock(block), items)
             } else {
                 (FunctionBody::Rock(self.parse_block()?), Vec::new())
@@ -1378,11 +1385,9 @@ impl<'a> Parser<'a> {
             );
             self.ast.macro_param_refs.extend(refs);
         }
-        Ok(Item {
-            annotations: Vec::new(),
-            vis: None,
+        Ok(bare_item(
             span,
-            kind: ItemKind::Function(FunctionDef {
+            ItemKind::Function(FunctionDef {
                 span,
                 keyword_span: Some(start),
                 name,
@@ -1398,13 +1403,7 @@ impl<'a> Parser<'a> {
                 macro_items,
                 receiver_surface,
             }),
-        })
-    }
-
-    fn parse_macro_body(&mut self) -> PResult<(Idx<BlockData>, Vec<Item>)> {
-        let mut items = Vec::new();
-        let block = self.parse_braced_block(Some(&mut items))?;
-        Ok((block, items))
+        ))
     }
 
     fn token_starts_macro_body_item(&self) -> bool {
@@ -1467,17 +1466,8 @@ impl<'a> Parser<'a> {
         path_generics: &[Generic],
     ) -> Idx<TypeExprData> {
         if path_generics.is_empty() {
-            let kind = match ident.name.as_str() {
-                "any" => TypeExprKind::Any,
-                "string" => TypeExprKind::String,
-                "int" => TypeExprKind::Int,
-                "uint" => TypeExprKind::Uint,
-                "float" => TypeExprKind::Float,
-                "f64" => TypeExprKind::F64,
-                "f32" => TypeExprKind::F32,
-                "bool" => TypeExprKind::Bool,
-                _ => TypeExprKind::Ident(ident.clone()),
-            };
+            let kind = primitive_type(ident.name.as_str())
+                .unwrap_or_else(|| TypeExprKind::Ident(ident.clone()));
             return self.ast.ty(ident.span, kind, false);
         }
         let mut args = Vec::with_capacity(path_generics.len());
@@ -1571,11 +1561,9 @@ impl<'a> Parser<'a> {
         let generics = self.parse_generics()?;
         let fields = self.parse_field_block()?;
         let span = self.span_from(start);
-        Ok(Item {
-            annotations: Vec::new(),
-            vis: None,
+        Ok(bare_item(
             span,
-            kind: ItemKind::Struct(StructDef {
+            ItemKind::Struct(StructDef {
                 span,
                 keyword_span: Some(start),
                 name,
@@ -1584,7 +1572,7 @@ impl<'a> Parser<'a> {
                 is_value,
                 is_nobox,
             }),
-        })
+        ))
     }
 
     fn parse_field_block(&mut self) -> PResult<Vec<Field>> {
@@ -1681,18 +1669,16 @@ impl<'a> Parser<'a> {
         self.delimiter_depth -= 1;
         self.expect(TokenKind::CloseCurly)?;
         let span = self.span_from(start);
-        Ok(Item {
-            annotations: Vec::new(),
-            vis: None,
+        Ok(bare_item(
             span,
-            kind: ItemKind::Enum(EnumDef {
+            ItemKind::Enum(EnumDef {
                 span,
                 keyword_span: Some(start),
                 name,
                 generics,
                 variants,
             }),
-        })
+        ))
     }
 
     fn parse_newtype(&mut self) -> PResult<Item> {
@@ -1711,17 +1697,15 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
-        Ok(Item {
-            annotations: Vec::new(),
-            vis: None,
+        Ok(bare_item(
             span,
-            kind: ItemKind::Newtype(NewtypeDef {
+            ItemKind::Newtype(NewtypeDef {
                 span,
                 name,
                 generics,
                 wrapped,
             }),
-        })
+        ))
     }
 
     fn parse_decorator(&mut self) -> PResult<Item> {
@@ -1739,17 +1723,15 @@ impl<'a> Parser<'a> {
         };
         let body = self.parse_block()?;
         let span = self.span_from(start);
-        Ok(Item {
-            annotations: Vec::new(),
-            vis: None,
+        Ok(bare_item(
             span,
-            kind: ItemKind::Decorator(DecoratorDef {
+            ItemKind::Decorator(DecoratorDef {
                 span,
                 name,
                 params,
                 body,
             }),
-        })
+        ))
     }
 
     fn parse_global(&mut self, is_const: bool) -> PResult<Item> {
@@ -1767,11 +1749,9 @@ impl<'a> Parser<'a> {
             None
         };
         let span = self.span_from(start);
-        Ok(Item {
-            annotations: Vec::new(),
-            vis: None,
+        Ok(bare_item(
             span,
-            kind: ItemKind::Global(GlobalDef {
+            ItemKind::Global(GlobalDef {
                 span,
                 keyword_span: Some(start),
                 name,
@@ -1779,7 +1759,7 @@ impl<'a> Parser<'a> {
                 value,
                 is_const,
             }),
-        })
+        ))
     }
 
     fn parse_compiler_directive(&mut self) -> PResult<Item> {
@@ -1799,12 +1779,7 @@ impl<'a> Parser<'a> {
             _ => CompilerDirective::End,
         };
         let span = self.span_from(start);
-        Ok(Item {
-            annotations: Vec::new(),
-            vis: None,
-            span,
-            kind: ItemKind::CompilerDirective(directive),
-        })
+        Ok(bare_item(span, ItemKind::CompilerDirective(directive)))
     }
 
     fn directive_condition(&mut self) -> Ustr {
@@ -1902,13 +1877,8 @@ impl<'a> Parser<'a> {
             TokenKind::Fn => {
                 self.advance();
                 self.expect(TokenKind::OpenParen)?;
-                let mut params = Vec::new();
-                while self.kind() != TokenKind::CloseParen && !self.at_end() {
-                    params.push(self.parse_type()?);
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                }
+                let params =
+                    self.parse_bare_comma_list(TokenKind::CloseParen, |p| p.parse_type())?;
                 self.expect(TokenKind::CloseParen)?;
                 let ret = if self.eat(TokenKind::Arrow) {
                     self.parse_type()?
@@ -1920,31 +1890,24 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(name) => {
                 let ident_span = self.span();
                 self.advance();
-                match name.as_str() {
-                    "any" => TypeExprKind::Any,
-                    "string" => TypeExprKind::String,
-                    "int" => TypeExprKind::Int,
-                    "uint" => TypeExprKind::Uint,
-                    "float" => TypeExprKind::Float,
-                    "f64" => TypeExprKind::F64,
-                    "f32" => TypeExprKind::F32,
-                    "bool" => TypeExprKind::Bool,
-                    "ref" => TypeExprKind::Ref(self.parse_type()?),
-                    _ => {
-                        let ctor = Ident {
-                            span: ident_span,
-                            name,
-                        };
-                        if self.kind() == TokenKind::DoubleColon {
-                            let path = self.parse_path_tail(ctor)?;
-                            self.finish_type_path(path)?
-                        } else if self.kind() == TokenKind::LessThan {
-                            self.advance();
-                            let args = self.parse_type_arg_list()?;
-                            TypeExprKind::App { ctor, args }
-                        } else {
-                            TypeExprKind::Ident(ctor)
-                        }
+                if let Some(kind) = primitive_type(name.as_str()) {
+                    kind
+                } else if name.as_str() == "ref" {
+                    TypeExprKind::Ref(self.parse_type()?)
+                } else {
+                    let ctor = Ident {
+                        span: ident_span,
+                        name,
+                    };
+                    if self.kind() == TokenKind::DoubleColon {
+                        let path = self.parse_path_tail(ctor)?;
+                        self.finish_type_path(path)?
+                    } else if self.kind() == TokenKind::LessThan {
+                        self.advance();
+                        let args = self.parse_type_arg_list()?;
+                        TypeExprKind::App { ctor, args }
+                    } else {
+                        TypeExprKind::Ident(ctor)
                     }
                 }
             }
@@ -2131,15 +2094,11 @@ impl<'a> Parser<'a> {
         {
             self.advance(); // `static`
             if self.kind() == TokenKind::OpenParen {
-                return Err(self.err(
-                    "a `static` takes a plain name, not a pattern: give it one name and                      destructure from it".to_string(),
-                ));
+                return Err(self.err(STATIC_PATTERN_ERROR));
             }
             let name = self.expect_ident()?;
             if matches!(self.kind(), TokenKind::OpenCurly | TokenKind::OpenParen) {
-                return Err(self.err(
-                    "a `static` takes a plain name, not a pattern: give it one name and                      destructure from it".to_string(),
-                ));
+                return Err(self.err(STATIC_PATTERN_ERROR));
             }
             let ty = if self.eat(TokenKind::Colon) {
                 Some(self.parse_type()?)
@@ -2453,7 +2412,7 @@ impl<'a> Parser<'a> {
                 }
                 match op {
                     TokenKind::OpenParen => {
-                        left = self.parse_call(left)?;
+                        left = self.parse_call_with_generics(left, Vec::new())?;
                         continue;
                     }
                     TokenKind::OpenSquare => {
@@ -2466,22 +2425,15 @@ impl<'a> Parser<'a> {
                         left = self.ast.expr(span, ExprKind::Index(left, idx));
                         continue;
                     }
-                    TokenKind::QuestionMark => {
+                    TokenKind::QuestionMark | TokenKind::PlusPlus | TokenKind::MinusMinus => {
                         let span = self.node_span(left, self.span());
                         self.advance();
-                        left = self.ast.expr(span, ExprKind::QuestionMark(left));
-                        continue;
-                    }
-                    TokenKind::PlusPlus => {
-                        let span = self.node_span(left, self.span());
-                        self.advance();
-                        left = self.ast.expr(span, ExprKind::PostIncrement(left));
-                        continue;
-                    }
-                    TokenKind::MinusMinus => {
-                        let span = self.node_span(left, self.span());
-                        self.advance();
-                        left = self.ast.expr(span, ExprKind::PostDecrement(left));
+                        let kind = match op {
+                            TokenKind::QuestionMark => ExprKind::QuestionMark(left),
+                            TokenKind::PlusPlus => ExprKind::PostIncrement(left),
+                            _ => ExprKind::PostDecrement(left),
+                        };
+                        left = self.ast.expr(span, kind);
                         continue;
                     }
                     TokenKind::QuestionDot => {
@@ -2507,21 +2459,8 @@ impl<'a> Parser<'a> {
                             );
                             continue;
                         }
-                        let field = match self.kind() {
-                            TokenKind::Ident(name) => {
-                                let s = self.span();
-                                self.advance();
-                                Ident { span: s, name }
-                            }
-                            TokenKind::Int(num, text) if is_tuple_index(&text) => {
-                                let s = self.span();
-                                self.advance();
-                                Ident {
-                                    span: s,
-                                    name: Ustr::from(&(num as usize).to_string()),
-                                }
-                            }
-                            _ => break,
+                        let Some(field) = self.eat_field_name() else {
+                            break;
                         };
                         let span = self.node_span(left, field.span);
                         left = self.ast.expr(span, ExprKind::SafeNavigation(left, field));
@@ -2704,41 +2643,33 @@ impl<'a> Parser<'a> {
     fn parse_dot(&mut self, left: Idx<ExprData>) -> PResult<Idx<ExprData>> {
         self.advance(); // consume `.`
         self.skip_comments();
-        let field = match self.kind() {
-            TokenKind::Ident(name) => {
-                let span = self.span();
-                self.advance();
-                Ident { span, name }
+        let field = if let Some(field) = self.eat_field_name() {
+            field
+        } else if let Some(kw) = self.kind().as_keyword_identifier() {
+            let span = self.span();
+            self.advance();
+            Ident {
+                span,
+                name: Ustr::from(kw),
             }
-            TokenKind::Int(num, text) if is_tuple_index(&text) => {
-                let span = self.span();
-                self.advance();
-                Ident {
-                    span,
-                    name: Ustr::from(&(num as usize).to_string()),
-                }
-            }
-            _ => {
-                if let Some(kw) = self.kind().as_keyword_identifier() {
-                    let span = self.span();
-                    self.advance();
-                    Ident {
-                        span,
-                        name: Ustr::from(kw),
-                    }
-                } else {
-                    return Err(
-                        self.err("field access `.` must be followed by an identifier or integer")
-                    );
-                }
-            }
+        } else {
+            return Err(self.err("field access `.` must be followed by an identifier or integer"));
         };
         let span = self.node_span(left, field.span);
         Ok(self.ast.expr(span, ExprKind::FieldAccess(left, field)))
     }
 
-    fn parse_call(&mut self, func: Idx<ExprData>) -> PResult<Idx<ExprData>> {
-        self.parse_call_with_generics(func, Vec::new())
+    fn eat_field_name(&mut self) -> Option<Ident> {
+        let span = self.span();
+        let name = match self.kind() {
+            TokenKind::Ident(name) => name,
+            TokenKind::Int(num, text) if is_tuple_index(&text) => {
+                Ustr::from(&(num as usize).to_string())
+            }
+            _ => return None,
+        };
+        self.advance();
+        Some(Ident { span, name })
     }
 
     fn try_generic_call_args(&mut self) -> PResult<Option<Vec<Idx<TypeExprData>>>> {
@@ -3230,15 +3161,10 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let kind = if parts.is_empty() {
-            ExprKind::String(Ustr::from(""))
-        } else if parts.len() == 1 {
-            match &parts[0] {
-                InterpolatedPart::Literal(lit) => ExprKind::String(*lit),
-                _ => ExprKind::InterpolatedString(parts),
-            }
-        } else {
-            ExprKind::InterpolatedString(parts)
+        let kind = match parts.as_slice() {
+            [] => ExprKind::String(Ustr::from("")),
+            [InterpolatedPart::Literal(lit)] => ExprKind::String(*lit),
+            _ => ExprKind::InterpolatedString(parts),
         };
         Ok(self.ast.expr(span, kind))
     }
@@ -3346,22 +3272,11 @@ impl<'a> Parser<'a> {
             chars.next();
         }
         if chars.peek() == Some(&'{') {
-            let (off, line, col) =
-                self.dyn_expr_pos(format_str, &chars, fmt_offset, fmt_line, fmt_col);
-            chars.next(); // `{`
-            let src = take_balanced_brace_body(&mut chars, format_str)?;
-            let map = identity_map(off, src.len());
-            spec.width_expr = Some(self.parse_interp_subexpr(&src, file, &map, line, col)?);
+            spec.width_expr = Some(
+                self.parse_spec_expr(format_str, &mut chars, file, fmt_offset, fmt_line, fmt_col)?,
+            );
         } else {
-            let mut w = String::new();
-            while let Some(&c) = chars.peek() {
-                if c.is_ascii_digit() {
-                    w.push(c);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
+            let w = take_ascii_digits(&mut chars);
             if !w.is_empty() {
                 spec.width = Some(w.parse().map_err(|_| self.err("format width overflow"))?);
             }
@@ -3375,22 +3290,11 @@ impl<'a> Parser<'a> {
         if chars.peek() == Some(&'.') {
             chars.next(); // `.`
             if chars.peek() == Some(&'{') {
-                let (off, line, col) =
-                    self.dyn_expr_pos(format_str, &chars, fmt_offset, fmt_line, fmt_col);
-                chars.next(); // `{`
-                let src = take_balanced_brace_body(&mut chars, format_str)?;
-                let map = identity_map(off, src.len());
-                spec.precision_expr = Some(self.parse_interp_subexpr(&src, file, &map, line, col)?);
+                spec.precision_expr = Some(self.parse_spec_expr(
+                    format_str, &mut chars, file, fmt_offset, fmt_line, fmt_col,
+                )?);
             } else {
-                let mut p = String::new();
-                while let Some(&c) = chars.peek() {
-                    if c.is_ascii_digit() {
-                        p.push(c);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
+                let p = take_ascii_digits(&mut chars);
                 if !p.is_empty() {
                     spec.precision = Some(
                         p.parse()
@@ -3427,26 +3331,25 @@ impl<'a> Parser<'a> {
         Ok(spec)
     }
 
-    fn dyn_expr_pos(
-        &self,
+    fn parse_spec_expr(
+        &mut self,
         format_str: &str,
-        chars: &std::iter::Peekable<std::str::Chars>,
+        chars: &mut std::iter::Peekable<std::str::Chars>,
+        file: Ustr,
         fmt_offset: usize,
         fmt_line: usize,
         fmt_col: usize,
-    ) -> (usize, usize, usize) {
-        let total = format_str.chars().count();
-        let brace_idx = total - chars.clone().count();
+    ) -> PResult<Idx<ExprData>> {
+        let brace_idx = format_str.chars().count() - chars.clone().count();
         let brace_byte = format_str
             .char_indices()
             .nth(brace_idx)
             .map(|(b, _)| b)
             .unwrap_or(format_str.len());
-        (
-            fmt_offset + brace_byte + 1,
-            fmt_line,
-            fmt_col + brace_idx + 1,
-        )
+        chars.next(); // `{`
+        let src = take_balanced_brace_body(chars, format_str)?;
+        let map = identity_map(fmt_offset + brace_byte + 1, src.len());
+        self.parse_interp_subexpr(&src, file, &map, fmt_line, fmt_col + brace_idx + 1)
     }
 
     fn struct_literal_follows(&self) -> bool {
@@ -3621,13 +3524,8 @@ impl<'a> Parser<'a> {
         match self.kind() {
             TokenKind::OpenParen => {
                 self.advance();
-                let mut ps = Vec::new();
-                while self.kind() != TokenKind::CloseParen && !self.at_end() {
-                    ps.push(self.parse_pattern()?);
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                }
+                let ps =
+                    self.parse_bare_comma_list(TokenKind::CloseParen, |p| p.parse_pattern())?;
                 self.expect(TokenKind::CloseParen)?;
                 Ok(Pattern::Tuple(ps))
             }
@@ -3652,13 +3550,8 @@ impl<'a> Parser<'a> {
                 };
                 if self.kind() == TokenKind::OpenParen {
                     self.advance();
-                    let mut args = Vec::new();
-                    while self.kind() != TokenKind::CloseParen && !self.at_end() {
-                        args.push(self.parse_pattern()?);
-                        if !self.eat(TokenKind::Comma) {
-                            break;
-                        }
-                    }
+                    let args =
+                        self.parse_bare_comma_list(TokenKind::CloseParen, |p| p.parse_pattern())?;
                     self.expect(TokenKind::CloseParen)?;
                     Ok(Pattern::PathVariant {
                         path,
@@ -3805,8 +3698,7 @@ impl<'a> Parser<'a> {
         let mut else_branch = None;
         while self.kind() == TokenKind::Else {
             self.advance();
-            if self.kind() == TokenKind::If {
-                self.expect(TokenKind::If)?;
+            if self.eat(TokenKind::If) {
                 let cond = self.with_allow_literals(false, |p| p.parse_expr(0))?;
                 let body = self.parse_block()?;
                 branches.push((cond, body));
@@ -3901,6 +3793,28 @@ impl<'a> Parser<'a> {
     }
 }
 
+fn take_ascii_digits(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
+    let mut digits = String::new();
+    while let Some(c) = chars.next_if(char::is_ascii_digit) {
+        digits.push(c);
+    }
+    digits
+}
+
+fn primitive_type(name: &str) -> Option<TypeExprKind> {
+    Some(match name {
+        "any" => TypeExprKind::Any,
+        "string" => TypeExprKind::String,
+        "int" => TypeExprKind::Int,
+        "uint" => TypeExprKind::Uint,
+        "float" => TypeExprKind::Float,
+        "f64" => TypeExprKind::F64,
+        "f32" => TypeExprKind::F32,
+        "bool" => TypeExprKind::Bool,
+        _ => return None,
+    })
+}
+
 fn take_balanced_brace_body(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     full_spec: &str,
@@ -3908,18 +3822,17 @@ fn take_balanced_brace_body(
     let mut body = String::new();
     let mut depth: usize = 1;
     for c in chars.by_ref() {
-        if c == '{' {
-            depth += 1;
-            body.push(c);
-        } else if c == '}' {
-            depth -= 1;
-            if depth == 0 {
-                return Ok(body);
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(body);
+                }
             }
-            body.push(c);
-        } else {
-            body.push(c);
+            _ => {}
         }
+        body.push(c);
     }
     Err(CompilerError::new_with_label(
         Span::unknown(),
