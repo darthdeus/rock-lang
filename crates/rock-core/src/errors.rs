@@ -10,7 +10,6 @@ pub enum CompilerErrorLevel {
 }
 
 impl CompilerErrorLevel {
-    /// How ariadne labels a report of this level.
     fn report_kind(self) -> ariadne::ReportKind<'static> {
         match self {
             Self::Advice => ariadne::ReportKind::Advice,
@@ -19,7 +18,6 @@ impl CompilerErrorLevel {
         }
     }
 
-    /// First letter of the numeric code shown after the level word.
     fn initial(self) -> &'static str {
         match self {
             Self::Advice => "A",
@@ -28,8 +26,6 @@ impl CompilerErrorLevel {
         }
     }
 
-    /// The coloured `[E00] Error:` prefix of a one-line rendering. The code in
-    /// it is always `00`: the one-liner reports the level, not the code.
     fn one_line_prefix(self) -> colored::ColoredString {
         use colored::Colorize;
 
@@ -63,27 +59,20 @@ pub enum CompilerErrorKind {
     /// backend parity gap.
     NoboxGuaranteeViolated,
 
-    /// The program is valid Rock but goes past a fixed limit of the target it
-    /// compiles to. Not a backend gap: no later emitter work removes it.
     TargetLimit,
 }
 
 #[derive(Clone, Debug)]
 pub struct CompilerError {
     pub location: LineCol,
-    /// What went wrong, for callers that branch on the failure.
     pub kind: CompilerErrorKind,
     pub code: CompilerErrorCode,
-    /// Extra marked ranges, rendered in the order they were added.
     pub labels: Vec<CompilerLabel>,
     pub level: CompilerErrorLevel,
     pub message: String,
     /// Independent failures from the same pass, carried so that a caller able
     /// to return only one error still reports all of them. Body emission runs
     /// in parallel and rejects every body before returning any of them, so
-    /// without this a caller would see one rejection and read the program as
-    /// having one problem. A renderer emits them after the primary one, and
-    /// they never nest: a sibling carries no siblings of its own.
     pub siblings: Vec<CompilerError>,
 }
 
@@ -108,16 +97,10 @@ impl CompilerError {
     }
 
     /// A span-only error with no message, for trial paths -- overload scoring,
-    /// `coerce(..).is_ok()` -- that only test whether the call succeeded. They
-    /// throw the error away unrendered and would otherwise pay for the
-    /// recursive type rendering the real failure arms build.
     pub fn silent(span: Span) -> Self {
         Self::at(span.start(), String::new())
     }
 
-    /// Take over further independent errors from the same pass. Nested
-    /// siblings are lifted out of whatever carried them, so the flat shape
-    /// holds no matter how the inputs were assembled.
     pub fn with_siblings(mut self, others: impl IntoIterator<Item = CompilerError>) -> Self {
         for mut other in others {
             let nested = std::mem::take(&mut other.siblings);
@@ -131,13 +114,10 @@ impl CompilerError {
         Self::at(span.start(), message.clone()).with_label(span, message)
     }
 
-    /// Whether this error has no source position to point at.
     pub(crate) fn has_no_location(&self) -> bool {
         self.location.file == UNKNOWN_FILE_NAME
     }
 
-    /// Anchor an error that has no position yet at `span`, leaving a located
-    /// one untouched: the first caller that knows where the failure was wins.
     pub fn or_at(mut self, span: Span) -> Self {
         if self.has_no_location() {
             self.location = span.start();
@@ -164,8 +144,6 @@ impl CompilerError {
         self
     }
 
-    /// A `[E00] Error: message at file:line:col` line and nothing else. Line
-    /// and column are the raw (zero-based) ones stored on the location.
     pub fn one_line(&self) -> String {
         let location = match self.location.file.as_str() {
             UNKNOWN_FILE_NAME => String::new(),
@@ -188,8 +166,6 @@ impl CompilerError {
         render_all(std::slice::from_ref(self), sources)
     }
 
-    /// This error's ariadne report with no source cache attached, so a batch
-    /// render can share one cache across every report it emits.
     fn report(&self) -> ariadne::ReportBuilder<'static, (String, std::ops::Range<usize>)> {
         let file = self.location.file;
         let offset = self.location.offset;
@@ -202,7 +178,6 @@ impl CompilerError {
         );
 
         match self.labels.as_slice() {
-            // No marked range: point at the single byte the error sits on.
             [] => builder.add_label(ariadne::Label::new((file.to_string(), offset..offset + 1))),
             labels => {
                 for label in labels {
@@ -214,18 +189,6 @@ impl CompilerError {
     }
 }
 
-/// Render `errs` against one shared ariadne source cache, separated by blank
-/// lines.
-///
-/// Building a cache copies the text of every file in `sources` (~1.5 MB for a
-/// whole project), so one cache per error costs about 1.6 ms each there. The
-/// lint pass renders warnings after every successful build, so it must render
-/// all of them against one cache; any multi-diagnostic render belongs here.
-///
-/// An error in a stdlib file whose contents the caller never supplied has no
-/// source to frame and falls back to the one-line form, as does an error with
-/// no location at all. A caller that does supply the stdlib (the CLI does) gets
-/// the same source report as for a user file.
 #[must_use]
 pub fn render_all(errs: &[CompilerError], sources: &SourceFiles) -> String {
     if errs.is_empty() {
@@ -324,14 +287,11 @@ mod tests {
         CompilerError::new_with_label(at("main.rock", 1, 8, 17), "bad thing".to_string())
     }
 
-    /// The frame body, i.e. everything after the `[Exx] Level: message` line.
     fn body(rendered: &str) -> &str {
         let start = rendered.find('\n').expect("header line") + 1;
         &rendered[start..]
     }
 
-    /// A report as ariadne emits it: one line per entry, the last one empty so
-    /// the joined text ends in a newline.
     fn joined(lines: &[String]) -> String {
         lines.join("\n")
     }

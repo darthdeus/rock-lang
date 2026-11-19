@@ -3,10 +3,6 @@ use std::path::{Path, PathBuf};
 
 use rock_host::project::is_release_layout_in;
 
-/// Get the path to the LuaJIT binary.
-///
-/// In release layout: `<rock_dir>/bin/luajit`
-/// In dev layout: the host cache's `gamelibs-<platform>/bin/luajit`
 pub fn luajit_path() -> PathBuf {
     if let Some(path) = std::env::var_os("ROCK_LUAJIT").filter(|path| !path.is_empty()) {
         return PathBuf::from(path);
@@ -14,7 +10,6 @@ pub fn luajit_path() -> PathBuf {
 
     let root = PathBuf::from(rock_host::rock_dir());
 
-    // Release layout: bin/luajit next to bin/rock
     let release_path = if cfg!(target_os = "windows") {
         root.join("bin").join("luajit.exe")
     } else {
@@ -36,10 +31,6 @@ pub fn luajit_path() -> PathBuf {
     }
 }
 
-/// Get the library search path value for the current platform.
-///
-/// In release layout: `<rock_dir>/lib` (Windows adds `<rock_dir>\bin`)
-/// In dev layout: `tmp`, the workspace's `tmp`, and the cached native lib dir.
 pub(crate) fn lib_path_value() -> String {
     lib_path_value_in(Path::new(&rock_host::rock_dir()))
 }
@@ -50,7 +41,6 @@ fn lib_path_value_in(root: &Path) -> String {
     if is_release_layout_in(root) {
         let lib_str = root.join("lib").to_string_lossy().into_owned();
         if cfg!(target_os = "windows") {
-            // Windows also needs bin/ on PATH for DLLs next to executables
             let bin_str = root.join("bin").to_string_lossy().into_owned();
             return format!("{};{}", lib_str, bin_str);
         } else {
@@ -72,9 +62,6 @@ fn lib_path_value_in(root: &Path) -> String {
     }
 }
 
-/// `lib_path_value()` with platform graphics libraries and the caller's
-/// inherited search paths appended.
-/// Linux also gets the system Vulkan loader and driver directories when they
 /// exist; the bundled LuaJIT does not receive NixOS's nix-ld defaults itself.
 ///
 /// Rock's own dirs (SDK `lib/`, or `tmp` and cached gamelibs) come FIRST so the bundled
@@ -154,7 +141,6 @@ fn linux_vulkan_library_paths_from(nix_store: &Path, opengl_driver: &Path) -> Ve
     paths
 }
 
-/// Get the environment variable name for the library search path.
 pub fn lib_path_var() -> &'static str {
     if cfg!(target_os = "macos") {
         "DYLD_LIBRARY_PATH"
@@ -165,9 +151,6 @@ pub fn lib_path_var() -> &'static str {
     }
 }
 
-/// Get the LUA_PATH value for requiring Lua modules.
-///
-/// Every layout includes its Rock root and the matching LuaJIT toolkit.
 pub fn lua_path_value() -> String {
     let root = rock_host::rock_dir();
     let p = format!("{root}/?.lua;");
@@ -175,17 +158,12 @@ pub fn lua_path_value() -> String {
     rock_host::project::lua_path_for(&luajit_path(), p)
 }
 
-/// The game or program spawn: LuaJIT running `lua_file` with the engine's
-/// runtime environment and JIT tracing switch.
 pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> std::process::Command {
     let mut command = rock_host::project::luajit_command();
     command.arg(lua_file).args(app_args);
     configure_command(command, true, true)
 }
 
-/// Configure before stdio. Lua commands may change executable and prepend JIT
-/// switches. Arguments, cwd and unrelated environment overrides survive; the
-/// runtime owns LUA_PATH and the native library search path.
 pub fn configure_command(
     command: std::process::Command,
     lua: bool,
@@ -234,7 +212,6 @@ mod tests {
     #[test]
     fn release_lib_path_never_searches_a_worktree_tmp() {
         let temp = TempDir::new().unwrap();
-        // find_workspace_root returns a canonical path; macOS temp dirs sit under the /var symlink.
         let canonical = fs::canonicalize(temp.path()).unwrap();
         let root = canonical.as_path();
         for dir in ["lib", "bin", "tmp"] {
@@ -334,9 +311,6 @@ mod tests {
             "unexpected library path: {value}"
         );
     }
-    /// Process env vars touched by this test, restored on drop -- including
-    /// when an assert unwinds, so a failure cannot leak into a sibling test
-    /// sharing this process.
     struct EnvGuard {
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }

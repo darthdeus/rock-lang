@@ -11,9 +11,6 @@ use rock_core::source_code::PackageTag;
 
 use crate::stick::graph::PackageGraph;
 
-/// The package graph of the project whose `stick.toml` is in `manifest_dir`.
-/// `Ok(None)` when there is no manifest there: a standalone source owns no
-/// package and uses the empty alias table.
 pub fn package_graph(manifest_dir: &Path) -> Result<Option<PackageGraph>, CompilerError> {
     if !manifest_dir.join("stick.toml").is_file() {
         return Ok(None);
@@ -28,24 +25,16 @@ pub fn package_graph(manifest_dir: &Path) -> Result<Option<PackageGraph>, Compil
         })
 }
 
-/// The alias table of `graph`, empty for a source with no package.
 pub fn ns_aliases(graph: Option<&PackageGraph>) -> NsAliases {
     graph.map(PackageGraph::ns_aliases).unwrap_or_default()
 }
 
-/// The alias table for a program given each source's `(file, package)` facts,
-/// as the package graph stamped them. Sources without a real
-/// root package use the empty table; otherwise the table comes from the root
-/// package's (graph id 0) manifest, which selected the files.
 pub fn ns_aliases_for_sources<'a>(
     sources: impl IntoIterator<Item = (&'a str, Option<&'a PackageTag>)>,
 ) -> Result<NsAliases, CompilerError> {
     ns_aliases_for_selected_sources(sources, None)
 }
 
-/// [`ns_aliases_for_sources`] given the alias table of the graph that
-/// selected the files, when the caller kept it, instead of building that
-/// graph again from the root file's manifest.
 pub fn ns_aliases_for_selected_sources<'a>(
     sources: impl IntoIterator<Item = (&'a str, Option<&'a PackageTag>)>,
     selecting_graph: Option<&NsAliases>,
@@ -66,8 +55,6 @@ pub fn ns_aliases_for_selected_sources<'a>(
     }
 }
 
-/// The alias table for a program whose root package owns `root_file`, read
-/// from the nearest `stick.toml` at or above it.
 pub(crate) fn ns_aliases_for_root_file(root_file: &Path) -> Result<NsAliases, CompilerError> {
     let Some(manifest_dir) = manifest_dir_above(root_file) else {
         return Err(CompilerError::new_no_location(format!(

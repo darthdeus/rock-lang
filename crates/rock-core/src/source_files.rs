@@ -4,20 +4,10 @@ use atomic_refcell::AtomicRefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// The set of files one compilation sees, with the package layout they came
-/// from.
 #[derive(Clone, Debug)]
 pub struct SourceFiles {
-    /// Shared so a diagnostic can hand a single file to another component
-    /// without copying its text.
     pub files: Vec<Arc<AtomicRefCell<SourceFile>>>,
-    /// Canonical roots of the packages the graph loaded, keyed by `PackageTag`
-    /// id. Left empty by standalone and synthetic source sets, which own no
-    /// package.
     pub package_roots: Vec<(u32, PathBuf)>,
-    /// The alias table of the package graph that selected these files, kept
-    /// so the check does not build the graph again. `None` when no graph
-    /// selected them or the source set did not keep it.
     pub ns_aliases: Option<crate::package_aliases::NsAliases>,
 }
 
@@ -42,10 +32,6 @@ impl SourceFiles {
         self.package_roots = roots.into_iter().collect();
     }
 
-    /// Insert `updated`, overwriting in place the file that shares its id path
-    /// and appending it when the path is new. A re-add must keep its slot so
-    /// that the order of the set does not depend on how often a file was
-    /// loaded.
     pub fn add_or_update_file(&mut self, updated: SourceFile) {
         let path = updated.file.to_id_path();
         let known = self
@@ -58,15 +44,7 @@ impl SourceFiles {
         }
     }
 
-    /// The classifier that decides which files a production build keeps.
-    /// Test-only means the path convention: a file with a `tests` component
-    /// below the root of the package that owns it (sims live in
-    /// `<pkg>/tests/sims/`, unit tests in `<pkg>/tests/`). Production builds
-    /// keep the other files so that an error in a test-only file cannot break
-    /// the application, while the test, sim, lint and lsp paths keep working
-    /// on the full set.
     pub fn production_filter<'a>(&'a self, project_root: &'a Path) -> ProductionFilter<'a> {
-        // Every file shares one of a few roots; canonicalize each root once.
         let canonical = |root: &Path| root.canonicalize().map_err(|error| error.to_string());
         ProductionFilter {
             sources: self,
@@ -79,7 +57,6 @@ impl SourceFiles {
         }
     }
 
-    /// A copy holding the files whose `keep` is true, in order.
     pub fn retaining(&self, keep: &[bool]) -> SourceFiles {
         SourceFiles {
             files: self
@@ -94,9 +71,6 @@ impl SourceFiles {
         }
     }
 
-    /// The index of one package's recorded root. A tagged file whose package
-    /// has no recorded root breaks the invariant that the loader stamps both
-    /// together, and classification must not guess a root for it.
     fn package_root_index(&self, id: u32, path: &str) -> usize {
         match self
             .package_roots
@@ -141,7 +115,6 @@ impl SourceFiles {
         let relative = match canonical_path.strip_prefix(canonical_root) {
             Ok(relative) => relative,
             Err(_) if !tagged => {
-                // Untagged stdlib and loose files are not owned by this root.
                 return Ok(false);
             }
             Err(_) => {
@@ -154,12 +127,6 @@ impl SourceFiles {
         Ok(Self::is_test_only_relative_path(relative))
     }
 
-    /// `path` itself when it is already canonical below `canonical_root`:
-    /// the root's own spelling, then plain names with no symlink among them.
-    /// Discovery hands over canonical paths, so this answers for nearly every
-    /// source with one `lstat` per component below the root instead of a
-    /// `realpath` walk from `/`. `plain_dirs` holds the directories already
-    /// found to be no symlink.
     fn canonical_under(
         path: &Path,
         canonical_root: &Path,
@@ -188,8 +155,6 @@ impl SourceFiles {
         Some(probe)
     }
 
-    /// The filesystem's canonical spelling of `path`, or `None` for an
-    /// untagged source the filesystem does not know.
     fn canonicalize_source(
         path: &str,
         root: &Path,
@@ -197,10 +162,7 @@ impl SourceFiles {
     ) -> Result<Option<PathBuf>, CompilerError> {
         match Path::new(path).canonicalize() {
             Ok(canonical) => Ok(Some(canonical)),
-            Err(_) if !tagged => {
-                // Untagged stdlib and loose sources may use non-filesystem ids.
-                Ok(None)
-            }
+            Err(_) if !tagged => Ok(None),
             Err(error) => Err(CompilerError::new_no_location(format!(
                 "cannot classify source `{path}` against root `{}`: cannot canonicalize source: {error}",
                 root.display()
@@ -208,8 +170,6 @@ impl SourceFiles {
         }
     }
 
-    /// The check shared by production discovery and watch-event filtering,
-    /// once the caller has resolved which package owns the file.
     pub fn is_test_only_relative_path(relative: &Path) -> bool {
         relative
             .components()
@@ -217,18 +177,13 @@ impl SourceFiles {
     }
 }
 
-/// [`SourceFiles::production_filter`]: the roots are resolved, so callers
-/// may classify files from several threads.
 pub struct ProductionFilter<'a> {
     sources: &'a SourceFiles,
     project_root: (&'a Path, Result<PathBuf, String>),
-    /// Canonical spellings of `sources.package_roots`, in the same order.
     package_roots: Vec<Result<PathBuf, String>>,
 }
 
 impl ProductionFilter<'_> {
-    /// Whether a production build keeps `source`. `plain_dirs` holds the
-    /// directories this caller already found to be no symlink.
     pub fn keeps(
         &self,
         source: &SourceFile,
@@ -320,9 +275,6 @@ mod tests {
         )));
     }
 
-    /// A path spelled below the root is classified by where it really is: a
-    /// symlink below the root into a `tests` directory is test-only, and one
-    /// out of a `tests` directory into production is not.
     #[cfg(unix)]
     #[test]
     fn production_classification_follows_symlinks_below_the_root() {

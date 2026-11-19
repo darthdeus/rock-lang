@@ -6,13 +6,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// A stdlib source file: its short name, full contents, and the path editors
-/// and diagnostics name it by.
 pub struct StdlibFile {
     pub name: &'static str,
     pub contents: &'static str,
-    /// The file on disk for a stdlib read from a directory; `/stdlib/<name>`
-    /// on wasm, `<embedded-stdlib>/<name>` for an embedded native stdlib.
     pub display_path: &'static str,
 }
 
@@ -35,12 +31,9 @@ pub const STDLIB_NAMES: &[&str] = &[
     "js.rock",
 ];
 
-/// The `stdlib/` of the source checkout this crate was built from.
 #[cfg(not(target_arch = "wasm32"))]
 const BUILD_CHECKOUT_STDLIB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib");
 
-/// Where the stdlib sources come from: a directory on disk, or the copy
-/// compiled into the binary.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StdlibSource {
     Dir(PathBuf),
@@ -130,7 +123,6 @@ fn resolve_package(
     } else if let Some(root) = install_sources(exe, "packages").filter(|root| root.is_dir()) {
         lookup(&root)
     } else {
-        // Include an absent install location in diagnostics before source lookup.
         if let Some(root) = install_sources(exe, "packages") {
             lookup(&root);
         }
@@ -156,13 +148,6 @@ fn install_sources(exe: Option<&Path>, directory: &str) -> Option<PathBuf> {
         .map(|root| root.join(directory))
 }
 
-/// All stdlib files: the first rung of [`stdlib_origin`]'s order that resolves
-/// on this machine, else the copy embedded in the binary; cached for the
-/// process lifetime. Contents are leaked to `&'static str`: the stdlib is resident for
-/// the whole process, so a one-time leak of a bounded, always-live buffer is
-/// not an unbounded leak. Panics with the resolved path if an on-disk rung
-/// names files that can't be read (the stdlib is not optional; a clear failure
-/// beats a thousand downstream "callee not found"s).
 pub fn stdlib_files() -> &'static [StdlibFile] {
     FILES.get_or_init(|| match resolve_for_this_process() {
         StdlibSource::Dir(dir) => STDLIB_NAMES
@@ -188,11 +173,6 @@ pub fn stdlib_files() -> &'static [StdlibFile] {
     })
 }
 
-/// Stdlib source identity: the loaders key every stdlib file by
-/// [`stdlib_file_id`], and bone reads the compiler-owned `std` package and the
-/// std-only primitives back through [`is_stdlib_module_file`]. Defined in
-/// `rock-core` so the semantic crates share it without depending on the
-/// embedded stdlib sources.
 pub use rock_core::{is_stdlib_module_file, stdlib_file_id, stdlib_file_name};
 
 /// The stdlib compiled into the binary: what [`stdlib_files`] serves when no
@@ -372,8 +352,6 @@ mod tests {
 
     #[test]
     fn override_names_its_dir_even_when_missing() {
-        // An explicit override that points nowhere stays a loud read error,
-        // never a silent fallthrough to another rung.
         assert_eq!(
             resolve(Some("/controlled/stdlib"), Some("/opt/rock/bin/rock"), &[]),
             StdlibSource::Dir(PathBuf::from("/controlled/stdlib"))
@@ -382,8 +360,6 @@ mod tests {
 
     #[test]
     fn exe_outside_a_release_layout_uses_build_checkout() {
-        // A dev exe under target/ and a bin/ without a sibling stdlib/ both
-        // fall through to the checkout the crate was built from.
         assert_eq!(
             resolve(
                 None,
@@ -400,8 +376,6 @@ mod tests {
 
     #[test]
     fn no_stdlib_on_disk_falls_back_to_embedded() {
-        // No override, no release-layout sibling, no checkout: an installed
-        // binary outside any checkout serves the compiled-in stdlib.
         assert_eq!(
             resolve(None, Some("/usr/bin/rock"), &[]),
             StdlibSource::Embedded

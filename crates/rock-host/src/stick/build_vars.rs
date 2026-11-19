@@ -26,16 +26,12 @@ pub struct ResolvedBuildVars {
     pub channel: String,
     pub vars: HashMap<String, ResolvedVar>,
     pub volatile_vars: std::collections::HashSet<String>,
-    /// Compiler-derived declarations resolved after semantic checking.
-    /// They have no placeholder in `vars`.
     pub source_fingerprints: HashMap<String, SourceFingerprint>,
 }
 
-/// A var whose value comes from running a command.
 struct PendingCommand<'a> {
     name: &'a String,
     var: &'a super::BuildVar,
-    /// Whether `optional_channels` may replace a failure with the default.
     fall_back: bool,
     run: Box<dyn FnOnce() -> Result<String> + Send + 'a>,
 }
@@ -57,8 +53,6 @@ fn run_concurrently<T: Send>(jobs: Vec<Box<dyn FnOnce() -> T + Send + '_>>) -> V
     })
 }
 
-/// `build_command` is the `ROCK_BUILD_COMMAND` a `cmd` var sees; `None`
-/// leaves the one this process inherited.
 pub fn resolve_build_vars(
     cfg: &StickConfig,
     project_dir: &Path,
@@ -91,9 +85,6 @@ pub fn resolve_build_vars(
         .or(build.default_channel.as_deref())
         .unwrap_or("dev")
         .to_string();
-    // An EXPLICIT channel is validated even when the project declares no
-    // channels list: an empty list can vouch for nothing, and accepting the
-    // flag anyway stamps a typo into release identity with every gate green.
     if let Some(explicit) = channel_arg {
         if !build.channels.iter().any(|c| c == explicit) {
             anyhow::bail!(
@@ -178,7 +169,6 @@ pub fn resolve_build_vars(
             });
             continue;
         } else {
-            // validate_build above rejected sourceless vars.
             unreachable!("[build.vars] {name} has no source past validate_build")
         };
         vars.insert(
@@ -189,7 +179,6 @@ pub fn resolve_build_vars(
             },
         );
     }
-    // Commands are independent processes; their waits overlap.
     let (pending, jobs): (Vec<_>, Vec<_>) = commands
         .into_iter()
         .map(|command| ((command.name, command.var, command.fall_back), command.run))
@@ -235,8 +224,6 @@ pub fn resolve_build_vars(
     })
 }
 
-/// The platform names the runtime distinguishes; `--target-os` accepts
-/// exactly these.
 const TARGET_PLATFORMS: &[&str] = &["linux", "osx", "windows"];
 
 fn validate_target_os(target: &str) -> Result<&str> {
@@ -250,14 +237,9 @@ fn validate_target_os(target: &str) -> Result<&str> {
     }
 }
 
-/// `source_revision` runs a command, so the caller schedules it with the
-/// `cmd` vars instead.
 fn resolve_builtin(name: &str, channel: &str, target_os: Option<&str>) -> Result<String> {
     match name {
         "channel" => Ok(channel.to_string()),
-        // An explicit target is the artifact truth (a Linux host packaging a
-        // Windows release must bake "windows"); use the packaging host only
-        // when no target was declared.
         "platform" => Ok(if let Some(target) = target_os {
             target.to_string()
         } else {
@@ -298,11 +280,6 @@ fn resolve_source_revision(project_dir: &Path, channel: &str) -> Result<String> 
     )
 }
 
-/// A `secret = true` var's diagnostics are redacted on the failure path: the
-/// command text can carry the credential (`load_key.sh --token abc`) and a
-/// failing fetcher routinely echoes it. The variable NAME and the exit status
-/// always survive -- they say which declaration to look at and how it died,
-/// and neither can carry the value. A non-secret var reports everything.
 fn run_var_cmd(
     name: &str,
     cmd: &str,
@@ -448,8 +425,6 @@ mod tests {
 
     #[test]
     fn target_os_overrides_the_platform_builtin() {
-        // Cross-builds package on one OS for another; the artifact target,
-        // not the packaging host, is what the builtin must report.
         let cfg = fixture(concat!(
             "[package]\nname = \"x\"\n",
             "[build]\nchannels = [\"dev\", \"steam\", \"web\"]\n",
@@ -466,8 +441,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(win.vars["PLATFORM"].value, "windows");
-        // An explicit target also wins over channel inference: the target is
-        // the artifact truth, the channel only a proxy for it.
         let web = resolve_build_vars(
             &cfg,
             dir.path(),
@@ -501,9 +474,6 @@ mod tests {
 
     #[test]
     fn explicit_channel_with_no_declared_channels_rejects() {
-        // A [build] section without a channels list cannot validate an
-        // explicit --channel, so accepting one silently stamps a typo into
-        // release identity. Fail closed instead.
         let cfg = fixture(concat!(
             "[package]\nname = \"x\"\n",
             "[build]\n",
@@ -515,7 +485,6 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("stema"), "error names the channel: {msg}");
 
-        // The implicit default stays usable: no --channel resolves as before.
         let resolved =
             resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), None).unwrap();
         assert_eq!(resolved.vars["CHANNEL"].value, "dev");
@@ -539,8 +508,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cmd_vars_run_concurrently() {
-        // Each command waits for the other's marker, so resolving them one
-        // after another cannot finish before the wait gives up.
         let wait = |own: &str, other: &str| {
             format!(
                 "touch {own}; i=0; while [ ! -e {other} ]; do i=$((i+1)); [ $i -gt 100 ] && exit 1; sleep 0.05; done; echo {own}"
@@ -572,8 +539,6 @@ mod tests {
 
     #[test]
     fn override_wins_and_suppresses_the_source() {
-        // cmd = "false" would fail resolution; the override must win without
-        // running it, or precedence is a lie.
         let cfg = fixture(concat!(
             "[package]\nname = \"x\"\n",
             "[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n",
@@ -589,11 +554,6 @@ mod tests {
         );
     }
 
-    // A secret var's FAILURE path is the leak: the command text can carry the
-    // credential (`load_key.sh --token abc`) and a failing fetcher routinely
-    // echoes it. Both sides are asserted -- the redaction, and that a
-    // non-secret var still reports everything -- because a redaction that
-    // fired on every var would satisfy the first arm alone.
     #[test]
     fn a_failing_secret_cmd_redacts_its_command_and_stderr() {
         let cfg = fixture(concat!(

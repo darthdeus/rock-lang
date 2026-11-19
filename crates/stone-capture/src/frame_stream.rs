@@ -69,8 +69,6 @@ impl FrameStream {
         })
     }
 
-    /// A buffer of `width * height * 4` bytes to read the next frame into.
-    /// Waits while every buffer is queued for the writer.
     pub fn next_buffer(&mut self, width: u32, height: u32) -> Result<Vec<u8>, String> {
         if width == 0 || height == 0 {
             return Err(format!(
@@ -104,7 +102,6 @@ impl FrameStream {
         Ok(buffer)
     }
 
-    /// Queues a frame read into a buffer from `next_buffer`.
     pub fn submit(&mut self, rgba: Vec<u8>, origin: RowOrigin) -> Result<(), String> {
         let (width, height) = self
             .size
@@ -135,7 +132,6 @@ impl FrameStream {
         Ok(())
     }
 
-    /// Writes every queued frame, closes the stream and reports what it holds.
     pub fn finish(mut self) -> Result<FrameStreamSummary, String> {
         self.frames_tx = None;
         self.join_writer()?;
@@ -147,7 +143,6 @@ impl FrameStream {
         })
     }
 
-    // The writer stopped early, which it does only on a failed write.
     fn writer_failure(&mut self) -> String {
         self.frames_tx = None;
         match self.join_writer() {
@@ -209,7 +204,6 @@ fn write_frames(
         };
         file.write_all(bytes)
             .map_err(|e| format!("frame stream {path}: write failed: {e}"))?;
-        // The receiver is gone only when the stream is being dropped.
         let _ = free_tx.send(rgba);
     }
     file.flush()

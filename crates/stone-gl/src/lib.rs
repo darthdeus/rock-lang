@@ -18,8 +18,6 @@ pub struct GlContextRequest {
     pub minor: u8,
 }
 
-/// The single context version each host asks for. Nothing in the engine needs
-/// more than GL 3.3 core; Apple's driver tops out at 4.1.
 pub fn context_request(host: GlHost) -> GlContextRequest {
     match host {
         GlHost::AppleDesktop => GlContextRequest {
@@ -35,21 +33,8 @@ pub fn context_request(host: GlHost) -> GlContextRequest {
     }
 }
 
-// =============================================================================
-// Debug GL Wrapper
-// =============================================================================
-
-/// Total GL errors seen by DebugGl since process start. Buffer storage
-/// allocations are checked in every build; other calls only in debug builds.
-/// Exposed over FFI as `stone_gl_error_count` so sims/tests can assert
-/// a run stayed GL-clean instead of relying on someone reading the log.
 pub static GL_ERROR_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Shader compile + program link failures since process start. A failed compile
-/// sets no GL error, so `GL_ERROR_COUNT` stays 0 and the frame loop draws on
-/// without the program -- the log line was the only signal, which is how
-/// `just test-games` reported `ok` over a shader that never compiled. Exposed
-/// as `stone_shader_error_count`; bounded runs exit nonzero on it.
 pub static SHADER_ERROR_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn force_shader_failure() -> bool {
@@ -63,9 +48,6 @@ fn panic_on_gl_error() -> bool {
     *FLAG.get_or_init(|| std::env::var("STONE_GL_PANIC").as_deref() == Ok("1"))
 }
 
-/// Whether a context offers `KHR_debug` groups and object labels: core in
-/// GL 4.3, otherwise only through the extension. Apple's desktop GL stops at
-/// 4.1 without it.
 pub fn debug_groups_supported(major: u32, minor: u32, has_khr_debug: bool) -> bool {
     has_khr_debug || (major, minor) >= (4, 3)
 }
@@ -118,7 +100,6 @@ impl DebugGl {
         self.check_error("compressed_tex_image_2d");
     }
 
-    /// Returns no limit when anisotropic filtering is unavailable on this context.
     pub fn max_texture_anisotropy(&self) -> Option<f32> {
         let version = self.gl.version();
         let extensions = self.gl.supported_extensions();
@@ -161,10 +142,6 @@ impl DebugGl {
         }
     }
 
-    /// Whether `GL_TIME_ELAPSED` timer queries yield a number worth reporting.
-    /// The single answer to "can we time the GPU here" -- callers must not add
-    /// their own platform gate on top, or the capability and the log describing
-    /// it drift apart. Core in GL 3.3, the oldest context Stone requests.
     pub fn supports_timer_query(&self) -> bool {
         // Apple's desktop GL driver exposes timer queries but returns
         // unreliable values, and the GL stack is deprecated there: a wrong
@@ -172,8 +149,6 @@ impl DebugGl {
         !cfg!(target_os = "macos")
     }
 
-    /// Whether `glPushDebugGroup`/`glObjectLabel` are available, so capture
-    /// tools see named passes. See [`debug_groups_supported`].
     pub fn supports_debug_groups(&self) -> bool {
         let v = self.gl.version();
         debug_groups_supported(
@@ -183,10 +158,6 @@ impl DebugGl {
         )
     }
 
-    /// One-line description of the live context: version, renderer, vendor and
-    /// the capabilities that silently change rendering/measurement behaviour.
-    /// Logged once at init -- on a device you cannot attach a debugger to, this
-    /// is the only record of what the driver actually offered.
     pub fn describe(&self) -> String {
         use glow::HasContext as _;
         let v = self.gl.version();
@@ -216,8 +187,6 @@ impl DebugGl {
         }
     }
 
-    // Storage allocation is required in release builds too. Consume and report
-    // the error once, before a caller can publish or draw from invalid storage.
     #[inline]
     fn checked_error(&self, operation: &str) -> Result<(), String> {
         let err = unsafe { self.gl.get_error() };
@@ -231,7 +200,6 @@ impl DebugGl {
     }
 }
 
-// Implement GL methods with automatic error checking
 impl DebugGl {
     /// # Safety
     /// Requires the [OpenGL call contract](Self#safety).
@@ -248,8 +216,6 @@ impl DebugGl {
         self.check_error("clear");
     }
 
-    /// glClearBufferiv -- the only defined way to clear an integer color
-    /// buffer (glClear on one is undefined per spec).
     /// # Safety
     /// Requires the [OpenGL call contract](Self#safety).
     /// `values` must contain every component read for the selected buffer.
@@ -436,9 +402,6 @@ impl DebugGl {
         self.check_error("depth_mask");
     }
 
-    /// Read back the states a `glClear` is gated by, so a caller that has to
-    /// open them can put them back. Used by canvas creation, which clears the
-    /// new target and may run mid-render.
     /// # Safety
     /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn is_enabled(&self, cap: u32) -> bool {
@@ -1047,8 +1010,6 @@ impl DebugGl {
         self.checked_error("buffer_sub_data_u8_slice")
     }
 
-    /// Desktop GL only: `glGetBufferSubData` does not exist in GLES, which is
-    /// why nothing on the render path uses it.
     /// # Safety
     /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_buffer_sub_data(&self, target: u32, offset: i32, dst: &mut [u8]) {

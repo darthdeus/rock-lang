@@ -43,16 +43,8 @@ use std::time::Duration;
 /// and the full profile.
 pub const HANG_BACKSTOP: Duration = Duration::from_secs(300);
 
-/// Parse `//^^^ msg` annotations out of source text.
-///
-/// Returns `(byte_range, content)` pairs. `byte_range` points at characters
-/// on the line *above* the annotation; content is the trimmed text after the
-/// carets. Annotation lines themselves are not included in any range.
 pub fn extract_annotations(text: &str) -> Vec<((usize, usize), String)> {
     let mut res: Vec<((usize, usize), String)> = Vec::new();
-    // Map: line length → byte offset of the most recent line with that length.
-    // Used to resolve which earlier line an annotation points at, since the
-    // annotation line itself may be shorter or longer than the target.
     let mut line_start_map: BTreeMap<usize, usize> = BTreeMap::new();
     let mut line_start: usize = 0;
     let mut prev_line_annotations: Vec<(usize, usize)> = Vec::new();
@@ -167,20 +159,12 @@ fn extract_line_annotations(mut line: &str) -> Vec<LineAnnotation> {
     res
 }
 
-/// A named section parsed from a fixture file via `//- name` markers.
 #[derive(Debug)]
 pub struct Section<'a> {
     pub name: &'a str,
     pub content: &'a str,
 }
 
-/// Parse `//- name` section markers out of a fixture file.
-///
-/// A line starting with `//- ` (column 0, space required) begins a new
-/// section; everything up to the next marker (or EOF) is that section's
-/// content. Any text before the first marker is ignored — fixtures with
-/// no markers return an empty vec, and the caller should treat the whole
-/// file as a single unnamed case.
 pub fn parse_sections(src: &str) -> Vec<Section<'_>> {
     let mut out = Vec::new();
     let mut current: Option<(&str, usize)> = None;
@@ -221,7 +205,6 @@ let x = 5;
         let res = extract_annotations(text);
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].1, "int");
-        // Range points at the `x` in `let x`.
         let (s, e) = res[0].0;
         assert_eq!(&text[s..e], "x");
     }
@@ -279,8 +262,6 @@ fn f() -> int { 5 }
 
     #[test]
     fn continuation() {
-        // Source line must extend past the caret columns; `hello` (5 chars)
-        // covers cols 0–4 so `^^^` at cols 2–4 points at "llo".
         let text = "\
 hello
 //^^^ first
@@ -292,7 +273,6 @@ hello
     }
 }
 
-/// Remove terminal styling before asserting diagnostic text and layout.
 pub fn strip_ansi_sgr(text: &str) -> String {
     static ANSI_SGR: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
         regex_lite::Regex::new(r"\x1b\[[0-9;]*m").expect("valid ANSI SGR regex")

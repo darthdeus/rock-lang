@@ -13,8 +13,6 @@ pub fn current_executable_image() -> std::io::Result<std::path::PathBuf> {
     Ok(executable)
 }
 
-/// File a budgeting parent (the rock-cli test harness) names for this
-/// process to report its current phase in, so each phase gets its own cap.
 pub const SPAWN_PHASE_FILE_ENV: &str = "ROCK_SPAWN_PHASE_FILE";
 
 pub fn report_spawn_phase(phase: &str) {
@@ -26,9 +24,6 @@ pub fn report_spawn_phase(phase: &str) {
     }
 }
 
-/// Collect a child pipe drained by `thread`. A panicked reader or a failed
-/// read is a harness failure: returning empty or truncated output instead
-/// would let the caller judge the program on bytes it never fully saw.
 pub fn join_drained_pipe(
     thread: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
     pipe: &str,
@@ -40,7 +35,6 @@ pub fn join_drained_pipe(
     }
 }
 
-/// Child processes to kill on exit.
 static ACTIVE_CHILDREN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 fn active_children() -> MutexGuard<'static, Vec<u32>> {
@@ -67,7 +61,6 @@ pub fn cleanup_all_children() {
     }
 }
 
-/// Signal `pid` if it is still running; refreshes only that process.
 fn kill_pid(pid: u32) -> bool {
     let pid = Pid::from_u32(pid);
     let mut system = System::new();

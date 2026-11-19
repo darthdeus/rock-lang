@@ -27,9 +27,6 @@ pub(crate) fn make_report_builder(
         .with_message(text)
 }
 
-/// Whether diagnostic colour is on, probed from stderr once per process.
-/// `ROCK_FORCE_COLOR` turns it on, while `ROCK_NO_COLOR` and `NO_COLOR` (the
-/// no-color.org convention) turn it off without consulting the terminal.
 pub(crate) fn stderr_is_tty() -> bool {
     use std::io::IsTerminal;
     use std::sync::OnceLock;

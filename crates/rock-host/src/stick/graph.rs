@@ -1,12 +1,4 @@
 //! The one package graph for a build.
-//!
-//! Resolves a project's stick.toml dependency tree recursively and
-//! manifest-relative (each dependency's own manifest resolves its deps
-//! relative to its own directory), dedupes packages by canonicalized root
-//! path, validates alias normalization (`-` to `_`) and file ownership. Every consumer
-//! that used to resolve dependencies on its own (CLI source discovery, the
-//! compilation-unit loader, watch, global directory metadata) reads facts from
-//! here instead of re-walking manifests.
 
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
@@ -16,16 +8,9 @@ use rock_core::package_aliases::{NsAliases, PackageAliases};
 
 use super::{StickConfig, dependency_matches_channel};
 
-/// Dense package id, stable within one graph build. Ids are assigned in
-/// DFS discovery order (root = 0, then each dependency subtree in declared
-/// key order); [`PackageGraph::load_order`] is the order sources load in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PackageId(pub u32);
 
-/// One dependency edge in the graph: the declaring package's view of a
-/// provider. `alias` is the normalized source name (`-` to `_`, case
-/// preserved); `declared_key` is the key as written in the consumer's
-/// manifest, kept for legacy metadata parity (global directory package strings).
 #[derive(Debug, Clone)]
 pub struct PackageEdge {
     pub alias: String,
@@ -36,25 +21,18 @@ pub struct PackageEdge {
 #[derive(Debug, Clone)]
 pub struct PackageNode {
     pub id: PackageId,
-    /// Canonicalized package root (the directory containing stick.toml).
     pub root: PathBuf,
     pub manifest_name: String,
     /// Manifest name with `-` normalized to `_`, case preserved:
     /// `name = "Demo"` yields `Demo`, never an invented `demo`.
     pub self_name: String,
-    /// The package's mutable-global policy (`[language] globals`).
     pub global_policy: rock_core::source_code::GlobalPolicy,
-    /// The package's identity-storage migration state
-    /// (`[language] identity_storage`).
     pub identity_storage: rock_core::source_code::IdentityStorage,
-    /// Channel-filtered edges, sorted by declared key.
     pub dependencies: Vec<PackageEdge>,
-    /// Source directories selected before parsing, under this same owner.
     pub source_groups: Vec<SourceGroup>,
 }
 
 impl PackageNode {
-    /// The tag every source file of this package is stamped with.
     pub fn tag(&self) -> rock_core::source_code::PackageTag {
         rock_core::source_code::PackageTag {
             id: self.id.0,
@@ -64,7 +42,6 @@ impl PackageNode {
         }
     }
 
-    /// Stamp this package's facts onto one of its source files.
     pub fn stamp(&self, source: &mut rock_core::source_code::SourceFile) {
         source.package = Some(self.tag());
         source.global_policy = self.global_policy;
@@ -81,21 +58,14 @@ pub struct SourceGroup {
 #[derive(Debug, Clone)]
 pub struct PackageGraph {
     packages: Vec<PackageNode>,
-    /// Postorder dependency order (providers first), root last: the order
-    /// source discovery loads packages in.
     load_order: Vec<PackageId>,
 }
 
-/// Reserved path roots no dependency alias may claim.
 const RESERVED_ROOTS: [&str; 3] = ["std", "self", "super"];
 
 struct Builder {
-    /// Filled in postorder; indexed by PackageId with `None` at ids whose
-    /// subtree is still being visited.
     packages: Vec<Option<PackageNode>>,
     by_root: HashMap<PathBuf, PackageId>,
-    /// `(canonical root, manifest name)` of the packages currently being
-    /// visited, for cycle chain reporting.
     stack: Vec<(PathBuf, String)>,
     load_order: Vec<PackageId>,
 }
@@ -107,9 +77,6 @@ impl Builder {
             .expect("dependency finished before its dependent validated edges")
     }
 
-    /// Visit one package: dedupe by canonical root, recurse into its
-    /// channel-filtered dependencies (sorted by declared key), then assign
-    /// its id. Postorder ids make `load_order` a prefix of the id sequence.
     fn visit(
         &mut self,
         manifest_dir: &Path,
@@ -264,10 +231,6 @@ impl Builder {
         config: &StickConfig,
         dependencies: &[PackageEdge],
     ) -> Result<()> {
-        // Normalized aliases must be unique within one package's dependency
-        // table: `a-b` and `a_b` would otherwise be two indistinguishable
-        // root bindings. Two aliases reaching one package are
-        // fine; two packages behind one normalized alias are not.
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for edge in dependencies {
             if let Some(first_key) = seen.get(edge.alias.as_str()) {
@@ -295,7 +258,6 @@ impl Builder {
         Ok(())
     }
 
-    /// Postorder the visited packages.
     fn finish(self) -> Result<PackageGraph> {
         Ok(PackageGraph {
             packages: self
@@ -308,10 +270,6 @@ impl Builder {
     }
 }
 
-/// Normalize a dependency key into a source alias: `-` to `_`, case
-/// preserved. Rejects empty keys, non-identifier spellings, and reserved
-/// roots, so a manifest typo fails here instead of inventing an unusable
-/// namespace name.
 pub(crate) fn normalize_dep_key(key: &str) -> Result<String> {
     let alias = key.replace('-', "_");
     let mut chars = alias.chars();
@@ -336,8 +294,6 @@ pub(crate) fn normalize_dep_key(key: &str) -> Result<String> {
 }
 
 impl PackageGraph {
-    /// Build from the project directory that contains the root stick.toml,
-    /// reading the invocation's resolved channel for edge filtering.
     pub fn build(manifest_dir: &Path) -> Result<PackageGraph> {
         let manifest_path = manifest_dir.join("stick.toml");
         let config = StickConfig::from_path(&manifest_path)?;
@@ -345,8 +301,6 @@ impl PackageGraph {
         Self::build_with_channel(manifest_dir, &config, &channel)
     }
 
-    /// Build with the manifest already loaded and the channel selected, so
-    /// callers that resolved the manifest once do not resolve it twice.
     pub fn build_with_channel(
         manifest_dir: &Path,
         config: &StickConfig,
@@ -370,14 +324,10 @@ impl PackageGraph {
         &self.packages[id.0 as usize]
     }
 
-    /// All packages in id order.
     pub fn packages(&self) -> &[PackageNode] {
         &self.packages
     }
 
-    /// Every package's self name and declared dependency aliases, keyed by
-    /// package id: the table bone's namespace resolver reads. The batch
-    /// compile and the incremental session both build from this one method.
     pub fn ns_aliases(&self) -> NsAliases {
         NsAliases {
             packages: self
@@ -396,15 +346,10 @@ impl PackageGraph {
         }
     }
 
-    /// Postorder dependency order (providers first), root last: the order
-    /// source discovery loads packages in.
     pub fn load_order(&self) -> &[PackageId] {
         &self.load_order
     }
 
-    /// The package whose root contains `path`, deepest first on nesting.
-    /// Resolve filesystem aliases before comparing against canonical roots.
-    /// An unresolvable path has no owner.
     pub fn package_of_file(&self, path: &Path) -> Option<PackageId> {
         let path = match fs_err::canonicalize(path) {
             Ok(path) => path,
@@ -445,8 +390,6 @@ impl PackageGraph {
         package_of(path) == Some(owner)
     }
 
-    /// Selected source membership. Inactive groups vanish before parsing and
-    /// never contribute definitions, initializers or lifecycle hooks.
     pub fn includes_file(&self, owner: PackageId, path: &Path) -> bool {
         self.includes(owner, path, |path| self.package_of_file(path))
     }
@@ -467,8 +410,6 @@ impl PackageGraph {
             .any(|group| path.starts_with(&group.directory) && !group.active)
     }
 
-    /// The files under `directory` that `owner` contributes, by the path the
-    /// walk reached each one.
     pub fn selected_rock_files(&self, owner: PackageId, directory: &Path) -> Result<Vec<PathBuf>> {
         Ok(self
             .select(owner, directory)?
@@ -477,8 +418,6 @@ impl PackageGraph {
             .collect())
     }
 
-    /// [`Self::selected_rock_files`] by canonical path, for a loader that
-    /// would otherwise resolve every file once more.
     pub fn selected_canonical_rock_files(
         &self,
         owner: PackageId,
@@ -581,8 +520,6 @@ mod tests {
         (tmp, root)
     }
 
-    /// A source group's files keep the enclosing package as owner; the
-    /// channel decides only whether they are in the compile set.
     #[test]
     fn source_groups_keep_their_package_and_follow_the_channel() {
         let (_tmp, root) = group_package(
@@ -634,8 +571,6 @@ mod tests {
         assert_eq!(graph.packages().len(), 2);
     }
 
-    /// Channel scoping survives a transitive hop, or a dev-only package
-    /// reached through a library would ship in a release build.
     #[test]
     fn channel_scoped_dependencies_resolve_only_on_matching_channels() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -793,7 +728,6 @@ mod tests {
         let a_child = tmp.path().join("a-child");
         write_manifest(&b_child, "b-child", "");
         write_manifest(&a_child, "a-child", "");
-        // Declared b first; resolution orders by key, so a-child loads first.
         write_manifest(
             &root,
             "app",

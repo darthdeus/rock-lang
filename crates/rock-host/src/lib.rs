@@ -1,9 +1,4 @@
 //! rock-host — neutral CLI/runtime substrate shared by all backends.
-//!
-//! Houses the infra the command surface and every backend need: project
-//! discovery, source loading, configuration, LuaJIT execution and process
-//! management. Leaf crate (no compiler crate dependency) so bone and skull can
-//! depend on it.
 
 pub mod cargo;
 pub mod compilation_units;
@@ -16,7 +11,6 @@ pub mod project;
 pub mod source_files;
 pub mod stick;
 
-/// Resolve the Rock root directory from environment, exe path or CWD.
 pub(crate) fn resolve_rock_dir_with(
     env_override: Option<String>,
     exe_path: Option<&std::path::Path>,
@@ -27,7 +21,6 @@ pub(crate) fn resolve_rock_dir_with(
     }
 
     if let Some(exe) = exe_path {
-        // Release layout: <root>/bin/rock where <root> has lib/
         if let Some(bin_dir) = exe.parent() {
             if let Some(root) = bin_dir.parent() {
                 let has_lib = root.join("lib").is_dir();
@@ -37,7 +30,6 @@ pub(crate) fn resolve_rock_dir_with(
             }
         }
 
-        // Dev layout: <root>/target/{debug,release}/rock where <root> has Cargo.toml + crates/
         if let Some(profile_dir) = exe.parent() {
             if let Some(target_dir) = profile_dir.parent() {
                 if target_dir.file_name().and_then(|n| n.to_str()) == Some("target") {
@@ -62,9 +54,6 @@ pub(crate) fn resolve_rock_dir_with(
         .into_owned()
 }
 
-/// Resolve the Rock root directory at runtime. `ROCK_DIR` env wins; else derive
-/// from the running exe's location (release install or dev target/); else workspace
-/// root above cwd; else cwd.
 pub fn rock_dir() -> String {
     use std::sync::OnceLock;
     static CACHED: OnceLock<String> = OnceLock::new();
@@ -78,8 +67,6 @@ pub fn rock_dir() -> String {
         .clone()
 }
 
-/// Runs `f` and logs its wall time at debug level, so `ROCK_LOG=debug` shows
-/// where a launch spends its time before the program starts.
 pub fn timed<T>(what: impl std::fmt::Display, f: impl FnOnce() -> T) -> T {
     let started = rock_core::clock::Instant::now();
     let value = f();

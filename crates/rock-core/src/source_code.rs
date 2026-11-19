@@ -3,7 +3,6 @@ use std::sync::LazyLock;
 
 use crate::prelude::*;
 
-/// File name that stands in for a source position which does not exist.
 pub(crate) const UNKNOWN_FILE_NAME: &str = "<unknown>";
 
 /// `Span::unknown()` runs on every trial-unify path that ends up succeeding, so
@@ -15,15 +14,12 @@ static UNKNOWN_FILE: LazyLock<ustr::Ustr> = LazyLock::new(|| ustr::ustr(UNKNOWN_
 /// outside the identifier grammar, so a manifest name cannot claim it.
 pub const STANDALONE_PACKAGE_PREFIX: &str = "@/";
 
-/// Source-facing spelling without the standalone package's file identity.
 pub fn display_name(key: &str) -> &str {
     key.strip_prefix(STANDALONE_PACKAGE_PREFIX)
         .and_then(|rest| rest.split_once("::"))
         .map_or(key, |(_, name)| name)
 }
 
-/// Preserve the source identity of a standalone root in emitted artifacts.
-/// Nested modules and named packages retain their full definition keys.
 pub fn artifact_name(key: &str) -> &str {
     key.strip_prefix(STANDALONE_PACKAGE_PREFIX)
         .and_then(|rest| rest.split_once("::"))
@@ -41,9 +37,6 @@ pub(crate) fn display_diagnostic_names(mut message: String) -> String {
     message
 }
 
-/// Whether a package may declare mutable global storage. The default keeps
-/// today's language behavior; `none` is the package boundary used by a
-/// simulation library whose state must be reachable from its explicit root.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum GlobalPolicy {
     #[default]
@@ -52,8 +45,6 @@ pub enum GlobalPolicy {
 }
 
 impl GlobalPolicy {
-    /// Parse a declared policy. Unknown values are rejected by the manifest
-    /// loader instead of silently restoring the permissive default.
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "any" => Some(Self::Any),
@@ -65,25 +56,17 @@ impl GlobalPolicy {
     pub const NAMES: [&'static str; 2] = ["any", "none"];
 }
 
-/// A package's identity-storage migration state, declared by its manifest
-/// (`[language] identity_storage`). Unmigrated code is exempt: its sites are
-/// counted instead of reported. Absent means enforced.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum IdentityStorage {
     #[default]
     Enforced,
-    /// The whole package is unmigrated.
     Exempt,
-    /// Modules under these `::`-joined module path prefixes are unmigrated.
-    /// A prefix covers the module it names and every module below it.
     ExemptModules(Vec<String>),
 }
 
 impl IdentityStorage {
     pub const NAMES: [&'static str; 2] = ["enforced", "exempt"];
 
-    /// Parse a declared whole-package state. Unknown values are rejected by
-    /// the manifest loader.
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "enforced" => Some(Self::Enforced),
@@ -93,24 +76,15 @@ impl IdentityStorage {
     }
 }
 
-/// The package a file belongs to, minted by the host's PackageGraph.
-/// `id` is dense and stable within one graph build; `self_name` is the
-/// manifest name with `-` normalized to `_`, case preserved.
-/// `identity_storage` is the manifest's declaration, carried with the tag so
-/// every file of the package reaches the checker with it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PackageTag {
     pub id: u32,
     pub self_name: String,
     pub identity_storage: IdentityStorage,
-    /// The canonical package root (the directory holding stick.toml).
     pub root: String,
 }
 
 impl PackageTag {
-    /// `file` as `<self_name>/<path under the root>`, the spelling generated
-    /// code uses so it does not depend on where the package is checked out.
-    /// `None` for a file outside the root.
     pub fn logical_file(&self, file: &str) -> Option<String> {
         let rest = file.strip_prefix(self.root.as_str())?;
         let rest = rest.strip_prefix(['/', '\\'])?;
@@ -122,16 +96,10 @@ impl PackageTag {
 pub struct SourceFile {
     pub contents: String,
     pub file: FileContents,
-    /// Owning package, stamped by the loader that resolved the package graph.
-    /// `None` for files loaded outside a package (standalone scripts, editor
-    /// synthetic sources).
     pub package: Option<PackageTag>,
-    /// The owning package's mutable-global policy, stamped by the loader.
     pub global_policy: GlobalPolicy,
 }
 
-/// Build a `SourceFile` from an on-disk path + already-read contents. The
-/// canonical constructor; skull-parser + the rock-cli prelude re-export it.
 pub fn source_file_from_path_and_contents(
     path: String,
     filename: String,
@@ -146,33 +114,15 @@ pub fn source_file_from_path_and_contents(
     }
 }
 
-/// A region of source code.
-///
-/// Spans are what ties analysis results back to the text the user wrote: error
-/// reporting, completion, hover and go-to-definition all start from one.
-///
-/// Positions are stored as `u32` so a span is 32 bytes: the compiler keeps
-/// millions of them alive. The accessors hand out `usize` pairs; the
-/// tokenizer refuses a source file too large for that width.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Span {
-    /// Which source file the region belongs to (a path or another id path).
     pub file: Ustr,
-    /// First and last line, zero-based and inclusive at both ends, so a
-    /// single-line span has `line_range.0 == line_range.1`.
     line_range: (u32, u32),
     /// First and one-past-last column, zero-based and half-open `[start..end)`.
     /// `col_range.1` is therefore the column just past the last character of
-    /// the span, the same convention `offset_range` and LSP `Range.end` use:
-    /// a three-character token opening at column 5 has `col_range == (5, 8)`.
-    /// `Tokenizer::end_span` produces it that way and `lsp_range_from_span`
-    /// depends on it, so `col_range.1` is never inclusive.
     col_range: (u32, u32),
     /// First and one-past-last byte, zero-based and half-open `[start..end)`.
     /// The precise extent: these offsets index a `&str` directly, since
-    /// `Tokenizer::byte_offset` advances by `c.len_utf8()` per character.
-    /// They are byte counts, not character counts, and drift from character
-    /// positions as soon as a multibyte character appears earlier in the file.
     offset_range: (u32, u32),
 }
 
@@ -203,7 +153,6 @@ impl Default for Span {
     }
 }
 
-// The file name is pointer-sized, so the span is smaller still on 32-bit targets.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Span>() == 32);
 
@@ -282,12 +231,10 @@ impl Span {
         Self::from_linecol(LineCol::unknown())
     }
 
-    /// `"file:line"` with a one-based line, for `__SITE__` and the like.
     pub fn format_site(&self) -> String {
         format!("{}:{}", self.file.as_str(), self.line_range().0 + 1)
     }
 
-    /// The zero-width span of one position.
     pub fn from_linecol(linecol: LineCol) -> Self {
         Self::new(
             linecol.file,
@@ -297,7 +244,6 @@ impl Span {
         )
     }
 
-    /// The smallest span covering both, which must belong to one file.
     pub fn merge(&self, other: &Self) -> Self {
         assert_eq!(self.file, other.file);
         Self {
@@ -308,7 +254,6 @@ impl Span {
         }
     }
 
-    /// Whether `inner` lies within this span, in the same file.
     pub fn contains(&self, inner: Span) -> bool {
         self.file == inner.file
             && self.offset_range.0 <= inner.offset_range.0
@@ -357,11 +302,8 @@ impl FileContents {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineCol {
     pub file: Ustr,
-    /// Zero-based line number.
     pub line: usize,
-    /// Zero-based column, counted in characters from the start of the line.
     pub col: usize,
-    /// Byte offset from the start of the file.
     pub offset: usize,
 }
 

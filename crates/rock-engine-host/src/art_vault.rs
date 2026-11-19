@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 
 pub const ENV: &str = "GAME_ART_VAULT";
 pub const TOKEN: &str = "$GAME_ART_VAULT";
-/// The vault root named by the environment, validated before use.
 pub fn root() -> Result<PathBuf> {
     let env = std::env::var_os(ENV);
     root_from(env.as_deref())
@@ -32,8 +31,6 @@ pub(crate) fn root_from(env: Option<&OsStr>) -> Result<PathBuf> {
     Ok(root)
 }
 
-/// Expand a leading `$GAME_ART_VAULT` token. `Ok(None)` when `raw` does not
-/// start with the token; `root` is only called when it does.
 pub fn expand_token(raw: &str, root: impl FnOnce() -> Result<PathBuf>) -> Result<Option<PathBuf>> {
     let Some(rest) = raw.strip_prefix(TOKEN) else {
         return Ok(None);
@@ -47,8 +44,6 @@ pub fn expand_token(raw: &str, root: impl FnOnce() -> Result<PathBuf>) -> Result
     }
 }
 
-/// `path` written as `$GAME_ART_VAULT/...` when it lies under `root`. Callers
-/// compare canonical paths so a symlinked vault still matches.
 pub fn tokenize(path: &Path, root: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     Some(if relative.as_os_str().is_empty() {

@@ -4,7 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// A scratch directory whose `wav` writes a one-second 1 kHz tone into it.
 struct Fixture(tempfile::TempDir);
 impl Fixture {
     fn new() -> Self {

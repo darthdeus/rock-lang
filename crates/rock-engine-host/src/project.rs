@@ -3,8 +3,6 @@ use anyhow::Result;
 use rock_host::project::MAIN_LUA_FILENAME;
 use std::path::{Path, PathBuf};
 
-/// Use the same resolved Stone identity for game setup and engine resources.
-/// Marker files retain support for manifest-free projects.
 pub fn is_game_project(path: &Path) -> Result<bool> {
     if configured_stone_dir(path)?.is_some() {
         return Ok(true);
@@ -19,8 +17,6 @@ pub fn is_game_project(path: &Path) -> Result<bool> {
 /// so concurrent one-shot builds cannot replace a running session.
 pub const STONE_SESSION_DIR: &str = "tmp/stone";
 
-/// This session's private `main.lua`, one directory per (game, pid).
-/// `rock stone` prunes inactive sessions after seven days.
 pub fn stone_session_main_lua_path(game: &str, pid: u32) -> PathBuf {
     let name = Path::new(game)
         .file_name()
@@ -52,16 +48,8 @@ pub fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::
         .map(|package| package.root.clone()))
 }
 
-/// Parents a bare project name expands against (relative to the workspace
-/// root), beyond the literal path. `games/` holds the match3-class games;
-/// top-level projects (sample-game, demo) are picked up by the literal-path
-/// check, so they need no entry here.
 pub(crate) const PROJECT_PARENTS: &[&str] = &["games"];
 
-/// Resolve a project argument (`rock sim`/`--list`) to a directory. Checks
-/// relative to current directory first (allowing execution from game subdirectories);
-/// if not found in CWD, expands against `PROJECT_PARENTS` relative to `rock_dir()`.
-/// Zero or more-than-one matches reject with the candidates listed -- never guess.
 pub fn resolve_project_dir(arg: &str) -> Result<PathBuf> {
     if let Ok(dir) = resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg) {
         return Ok(dir);
@@ -75,9 +63,6 @@ pub fn resolve_project_dir(arg: &str) -> Result<PathBuf> {
     resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg)
 }
 
-/// Core of `resolve_project_dir`, parameterized on the search base and parent
-/// list so it can be exercised without touching the process cwd. An empty
-/// `base` yields clean cwd-relative paths (`Path::new("").join("x")` == `"x"`).
 pub(crate) fn resolve_project_dir_in(base: &Path, parents: &[&str], arg: &str) -> Result<PathBuf> {
     let literal = base.join(arg);
     if literal.is_dir() {
@@ -111,7 +96,6 @@ pub(crate) fn resolve_project_dir_in(base: &Path, parents: &[&str], arg: &str) -
     }
 }
 
-/// Source-owned tools and sim labels follow the game tree, not an installed SDK.
 pub fn source_workspace_root(project: &Path) -> Option<PathBuf> {
     rock_host::project::find_source_root(project)
 }
@@ -124,7 +108,6 @@ mod tests {
     #[test]
     fn game_recognition_uses_resolved_stone_identity() {
         let tmp = TempDir::new().unwrap();
-        // Discovery returns canonical paths; macOS temp dirs sit behind a /var symlink.
         let root = tmp.path().canonicalize().unwrap();
         for (directory, manifest) in [
             ("engine", "[package]\nname = \"stone\"\ntype = \"lib\"\n"),
@@ -156,9 +139,6 @@ mod tests {
         assert!(!is_game_project(&root.join("plain")).unwrap());
     }
 
-    /// A literal directory wins over expansion (so `.` stays the current
-    /// directory and a typed subpath passes through); only a bare name
-    /// expands against the parents.
     #[test]
     fn resolve_project_dir_prefers_the_literal_path() {
         let temp = TempDir::new().unwrap();

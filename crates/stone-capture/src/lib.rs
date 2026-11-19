@@ -9,16 +9,12 @@ mod frame_stream;
 
 pub use frame_stream::{FrameStream, FrameStreamSummary};
 
-/// Which way the supplied rows run. GL's default framebuffer reads bottom-to-top.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowOrigin {
     TopDown,
     BottomUp,
 }
 
-/// Write `rgba` (tightly packed, `width * height * 4` bytes) as a top-left
-/// origin PNG at `path`. `max_size <= 0` selects the historical 1920 long-edge
-/// default; `STONE_SCREENSHOT_MAX` overrides either.
 pub fn save_rgba_png(
     path: &str,
     width: u32,

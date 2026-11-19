@@ -7,9 +7,6 @@ use rock_core::SourceFiles;
 
 use crate::source_files::source_file_load;
 
-/// The files a project compile loads from `dir`: the root package's selected
-/// files. A `tests/` directory or one without its own `stick.toml`
-/// contributes none.
 fn project_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let is_tests_directory = dir.file_name().is_some_and(|name| name == "tests");
     if is_tests_directory || !dir.join("stick.toml").exists() {
@@ -27,8 +24,6 @@ fn project_files(dir: &Path) -> Result<Vec<PathBuf>> {
     graph.selected_rock_files(graph.root(), dir)
 }
 
-/// Load the sources a compile of `file_path` reads: its enclosing project, or
-/// the file alone outside any project.
 pub fn load_sources_for_file(file_path: impl AsRef<Path>) -> Result<SourceFiles> {
     let path = file_path.as_ref();
     let files = match crate::stick::StickConfig::find_from_dir(path.parent().unwrap_or(path))? {
@@ -38,15 +33,10 @@ pub fn load_sources_for_file(file_path: impl AsRef<Path>) -> Result<SourceFiles>
     load_project_sources(&files, files.first().and_then(|file| file.parent()))
 }
 
-/// Load an editor buffer's enclosing project, even before its first file is saved.
 pub fn load_sources_for_project(project_dir: &Path) -> Result<SourceFiles> {
     load_project_sources(&project_files(project_dir)?, Some(project_dir))
 }
 
-/// The package that owns the file at the canonical `path` in `graph`: its
-/// node stamps the file's facts, at load or when the file enters an
-/// incremental session after its load (the editor opening a new file).
-/// `None` when no package owns the path: a standalone, unowned source.
 pub fn source_package<'g>(
     graph: &'g crate::stick::graph::PackageGraph,
     path: &Path,
@@ -58,18 +48,13 @@ pub fn source_package<'g>(
 }
 
 fn load_project_sources(files: &[PathBuf], project_dir: Option<&Path>) -> Result<SourceFiles> {
-    // Load stick.toml dependencies for project compilation
     let mut all_files = Vec::new();
     let mut graph = None;
 
-    // Try to find stick.toml in the project directory
     if let Some(project_dir) = project_dir {
         if let Some((stick_path, stick_config)) =
             crate::stick::StickConfig::find_from_dir(project_dir)?
         {
-            // Resolve every package through the one graph, so the
-            // LSP's file set matches a real compile on the same
-            // channel: recursive, manifest-relative, channel-filtered.
             let channel = crate::stick::resolved_channel_for(&stick_config);
             let stick_dir = stick_path.parent().unwrap_or(&stick_path);
             let resolved = crate::stick::graph::PackageGraph::build_with_channel(
@@ -95,8 +80,6 @@ fn load_project_sources(files: &[PathBuf], project_dir: Option<&Path>) -> Result
 
     let mut sources = load_sources_from_paths(&all_files)?;
 
-    // Stamp package facts from the graph onto every file it owns, so
-    // downstream consumers never infer ownership from inclusion order.
     if let Some(graph) = graph.as_ref() {
         sources.set_package_roots(
             graph

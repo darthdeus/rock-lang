@@ -17,13 +17,9 @@ unsafe extern "C" {
     fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
 }
 
-/// The kernel THP-disable state this process had before the compiler default;
-/// negative until `enter_compiler_process` applied it.
 #[cfg(target_os = "linux")]
 static INHERITED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
-/// Apply the compiler's THP-off default unless the caller chose through
-/// `MIMALLOC_ALLOW_THP`, which mimalloc itself honors.
 pub fn enter_compiler_process() -> io::Result<()> {
     if std::env::var_os("MIMALLOC_ALLOW_THP").is_some()
         || std::env::var_os("mimalloc_allow_thp").is_some()
@@ -47,7 +43,6 @@ pub fn enter_compiler_process() -> io::Result<()> {
     Ok(())
 }
 
-/// Lua, C, JS and GLSL execution share this runtime spawn boundary.
 pub fn configure_runtime_command(command: &mut Command) {
     #[cfg(target_os = "linux")]
     {

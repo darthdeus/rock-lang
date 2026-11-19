@@ -1,10 +1,4 @@
 //! The one logging backend.
-//!
-//! Single `ROCK_LOG` parser, single level, single format
-//! (`[CATEGORY] msg`), single stream (stderr). Every Rust crate logs
-//! through the `log` facade (`log::info!(target: "CAT", …)`) plus the
-//! `log_once!` / `log_throttled!` filters; this is the only thing that
-//! actually writes. `eprintln!` here is the *one* sanctioned raw write.
 
 use once_cell::sync::Lazy;
 use rock_core::clock::Instant;
@@ -14,12 +8,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// 0=error 1=warn 2=info 3=debug 4=trace. Default info (2). Single
-// source of truth for the whole process; external level bridges delegate here.
 static LEVEL: AtomicU8 = AtomicU8::new(2);
 
-/// Parse `error|warn|info|debug|trace` or `0..4`. Unknown / unset =>
-/// `None` (caller keeps the default). `info` is the default elsewhere.
 pub(crate) fn parse_level(s: &str) -> Option<u8> {
     match s.trim().to_lowercase().as_str() {
         "error" | "0" => Some(0),
@@ -41,8 +31,6 @@ pub fn set_level(level: u8) {
     log::set_max_level(facade_max());
 }
 
-/// The facade's static gate: the installed filter's widest level, else the
-/// single level.
 fn facade_max() -> log::LevelFilter {
     match FILTER.get() {
         Some(filter) => filter.0.filter(),
@@ -74,34 +62,20 @@ fn log_to_level(l: log::Level) -> u8 {
     }
 }
 
-/// Third-party crate target prefixes whose info/debug chatter is
-/// noise for us (decode progress, etc.). Capped at warn so their
-/// real problems still surface. This replaces the per-crate
-/// filtering (`RUST_LOG=info,symphonia=warn`) that env_logger gave
-/// and the single-global-level unification dropped. `symphonia`
-/// (audio decode via rodio) floods `ignoring unknown chunk` /
-/// `selected vorbis mapper` at info — that's the motivating case.
 const NOISY_TARGET_PREFIXES: &[&str] = &["symphonia"];
 
 fn is_noisy(target: &str) -> bool {
     NOISY_TARGET_PREFIXES.iter().any(|p| target.starts_with(p))
 }
 
-/// Effective max level for a target: noisy third-party targets are
-/// capped at warn (1) even when the global level is higher.
 fn effective_max(target: &str) -> u8 {
     let l = level();
     if is_noisy(target) { l.min(1) } else { l }
 }
 
-/// Per-target filtering in `RUST_LOG` directive syntax, for a process that
-/// installs it with [`init_filtered`] in place of the single level.
 pub struct Filter(env_filter::Filter);
 
 impl Filter {
-    /// `default` for every target, refined by `directives` (`info`,
-    /// `my_crate=debug,warn`, ...), then by `overrides`. Unparsable
-    /// directives are an error rather than silently dropped.
     pub fn parse(
         default: log::LevelFilter,
         directives: Option<&str>,
@@ -124,7 +98,6 @@ impl Filter {
     }
 }
 
-/// Where the log lines go.
 pub enum Sink {
     Stderr,
     File(std::fs::File),
@@ -150,10 +123,6 @@ fn level_tag(l: log::Level) -> &'static str {
     }
 }
 
-/// SGR sequence for a level, or `""` when colour is off. Only error and
-/// warn get one: colouring every line is noise, and the point is that the
-/// two that need action stand out of a stream the application and its driver both
-/// write to.
 fn level_color(l: log::Level) -> &'static str {
     match l {
         log::Level::Error => "\x1b[1;31m", // bold red
@@ -164,10 +133,6 @@ fn level_color(l: log::Level) -> &'static str {
 
 const SGR_RESET: &str = "\x1b[0m";
 
-/// Colour is on only when stderr is a terminal, so piped/captured output
-/// (sim harnesses, `2>` redirects, CI) stays byte-clean. `ROCK_LOG_COLOR`
-/// = `always` | `never` | `auto` overrides; `NO_COLOR` (any value) forces
-/// off, per no-color.org.
 static COLOR: Lazy<bool> = Lazy::new(|| {
     match std::env::var("ROCK_LOG_COLOR").as_deref().map(str::trim) {
         Ok("always") | Ok("1") => return true,
@@ -180,10 +145,6 @@ static COLOR: Lazy<bool> = Lazy::new(|| {
     std::io::IsTerminal::is_terminal(&std::io::stderr())
 });
 
-/// Body (without the time/level prefix). `target` is the deliberate
-/// `[CATEGORY]` only when it's one of our short tags; a module-path
-/// target (contains "::") or empty is third-party / untargeted and
-/// prints bare. Pure for testability.
 fn fmt_body(target: &str, args: &std::fmt::Arguments) -> String {
     if target.is_empty() || target.contains("::") {
         format!("{}", args)
@@ -232,8 +193,6 @@ static EPOCH_MS: Lazy<u128> = Lazy::new(|| {
 /// buys is that ordinary application output cannot match it by ACCIDENT.
 pub const WALL_CLOCK_MARK: &str = "~";
 
-/// The full emitted line, minus colour. Pure so both the emitter and its
-/// tests -- and the harness that has to parse it back -- read one grammar.
 fn format_line(
     elapsed: f64,
     level: log::Level,
@@ -265,8 +224,6 @@ impl log::Log for Logger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        // The whole line is wrapped, not just the level tag -- the body is
-        // the part you read while scrolling for what went wrong.
         emit(record.level(), record.target(), record.args(), false);
     }
     fn flush(&self) {}
@@ -286,8 +243,6 @@ fn emit(level: log::Level, target: &str, args: &std::fmt::Arguments, wall_clock:
     if let Some(file) = FILE_SINK.get() {
         let mut file = file.lock().unwrap();
         if let Err(e) = writeln!(file, "{line}") {
-            // The log file is the only channel this process configured, so
-            // its failure goes to stderr with the line it lost.
             eprintln!("rock-log: cannot write the log file ({e}): {line}");
         }
         return;
@@ -352,10 +307,6 @@ pub fn init_filtered(filter: Filter, sink: Sink) {
     init();
 }
 
-// ---- error and warning records: what an on-screen development badge reads ----
-
-/// One distinct ERROR or WARN record: the target plus the message's first line,
-/// so a traceback or a varying tail does not split one fault into many rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogRecord {
     pub target: String,
@@ -364,8 +315,6 @@ pub struct LogRecord {
     pub last_seen_secs: f64,
 }
 
-/// Distinct records kept per level; past it the least recently seen is evicted
-/// and counted, so the table stays bounded without losing the fact of a record.
 pub(crate) const RECORD_CAP: usize = 64;
 
 #[derive(Default)]
@@ -407,17 +356,14 @@ impl RecordTable {
         });
     }
 
-    /// Every record emitted, evicted rows included.
     pub fn total(&self) -> u64 {
         self.total
     }
 
-    /// Distinct rows evicted to stay under `RECORD_CAP`.
     pub fn evicted(&self) -> u64 {
         self.evicted
     }
 
-    /// Rows, most recently seen first.
     pub fn rows(&self) -> Vec<LogRecord> {
         let mut rows = self.rows.clone();
         rows.sort_by(|a, b| b.last_seen_secs.total_cmp(&a.last_seen_secs));
@@ -436,8 +382,6 @@ fn record_table(level: log::Level) -> Option<&'static Mutex<RecordTable>> {
     }
 }
 
-/// Every record at `level` this process emitted, Rust and Rock alike. Only
-/// ERROR and WARN are kept; other levels read as zero.
 pub fn records_total(level: log::Level) -> u64 {
     record_table(level).map_or(0, |t| t.lock().unwrap().total())
 }
@@ -446,15 +390,10 @@ pub fn records_evicted(level: log::Level) -> u64 {
     record_table(level).map_or(0, |t| t.lock().unwrap().evicted())
 }
 
-/// Distinct records at `level`, most recently seen first.
 pub fn records(level: log::Level) -> Vec<LogRecord> {
     record_table(level).map_or_else(Vec::new, |t| t.lock().unwrap().rows())
 }
 
-// ---- collected error records: what a checked run fails on ----
-
-/// Error records a checked run (a sim, a bounded frame run) keeps until it
-/// verifies them. Past it records are dropped and counted, and the run fails.
 pub const COLLECTED_ERROR_CAP: usize = 256;
 
 struct CollectedError {
@@ -468,7 +407,6 @@ struct CollectedErrors {
     overflow: u64,
 }
 
-/// `None` until a checked run enables collection.
 static COLLECTED_ERRORS: Mutex<Option<CollectedErrors>> = Mutex::new(None);
 
 fn collect_error(target: &str, args: &std::fmt::Arguments) {
@@ -486,18 +424,14 @@ fn collect_error(target: &str, args: &std::fmt::Arguments) {
     }
 }
 
-/// Start (or restart, emptied) collecting error records as `[CAT] msg`, the
-/// emitted line without its stamp, Rust and Rock records alike.
 pub fn collect_errors() {
     *COLLECTED_ERRORS.lock().unwrap() = Some(CollectedErrors::default());
 }
 
-/// The collected records in emission order; empty when collection is off.
 pub fn collected_errors() -> Vec<String> {
     collected_errors_for(None)
 }
 
-/// Synchronous scopes observe their own thread; worker errors stay pending.
 pub fn scoped_errors() -> Vec<String> {
     collected_errors_for(Some(std::thread::current().id()))
 }
@@ -516,7 +450,6 @@ fn collected_errors_for(thread: Option<std::thread::ThreadId>) -> Vec<String> {
         })
 }
 
-/// Records dropped past [`COLLECTED_ERROR_CAP`].
 pub fn collected_error_overflow() -> u64 {
     COLLECTED_ERRORS
         .lock()
@@ -525,12 +458,10 @@ pub fn collected_error_overflow() -> u64 {
         .map_or(0, |c| c.overflow)
 }
 
-/// Remove the first collected record equal to `record`; false when none is.
 pub fn take_collected_error(record: &str) -> bool {
     take_collected_error_for(record, None)
 }
 
-/// Consume one matching synchronous record, never an equal worker record.
 pub fn take_scoped_error(record: &str) -> bool {
     take_collected_error_for(record, Some(std::thread::current().id()))
 }
@@ -552,38 +483,21 @@ fn take_collected_error_for(record: &str, thread: Option<std::thread::ThreadId>)
     }
 }
 
-// ---- log_once / log_throttled filter state (the one dedup/throttle) ----
-
 static DEDUP: Lazy<Mutex<HashSet<&'static str>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static THROTTLE: Lazy<Mutex<HashMap<&'static str, Instant>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Sites that dedup per SUBJECT rather than per site: an offending image
-/// handle, an unknown enum int. Separate from `DEDUP` only because the key has
-/// a second component; it is the same store in every other sense and
-/// `reset_dedup`, the image and the count all cover both.
 static DEDUP_SUBJECT: Lazy<Mutex<HashSet<(&'static str, u64)>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
 
-/// True the first time `key` (a `concat!(file!(),":",line!())`) is
-/// seen, false after. The emit itself goes through `log::` in the macro.
 pub fn once_should_emit(key: &'static str) -> bool {
     DEDUP.lock().unwrap().insert(key)
 }
 
-/// True the first time this `(key, subject)` pair is seen.
-///
-/// The variant for a diagnostic whose interesting part is WHICH thing was
-/// wrong. A site-only key reports the first offender and swallows every later
-/// one, so the log shows one row where eight are wrong while the failure count
-/// stays correct -- which is why the subject belongs IN the key rather than
-/// only in the message. A shared set lets one reset reach every caller.
 pub fn once_should_emit_for(key: &'static str, subject: u64) -> bool {
     DEDUP_SUBJECT.lock().unwrap().insert((key, subject))
 }
 
-/// True if `key` hasn't fired within `interval`. Records the time on
-/// emit. The caller emits through `log::` after this suppression check.
 pub fn throttle_should_emit(key: &'static str, interval: Duration) -> bool {
     let mut m = THROTTLE.lock().unwrap();
     let now = Instant::now();
@@ -596,20 +510,16 @@ pub fn throttle_should_emit(key: &'static str, interval: Duration) -> bool {
     }
 }
 
-/// Clear dedup + throttle state (tests; hot reload).
 pub fn reset_dedup() {
     DEDUP.lock().unwrap().clear();
     DEDUP_SUBJECT.lock().unwrap().clear();
     THROTTLE.lock().unwrap().clear();
 }
 
-/// Distinct `log_once!` call sites that have fired, site-keyed and
-/// subject-keyed together.
 pub fn dedup_count() -> usize {
     DEDUP.lock().unwrap().len() + DEDUP_SUBJECT.lock().unwrap().len()
 }
 
-/// Distinct `log_throttled!` call sites currently tracked.
 pub fn throttle_count() -> usize {
     THROTTLE.lock().unwrap().len()
 }
@@ -627,15 +537,6 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    // Regression: set_level must keep the `log` facade's static
-    // max-level in sync, else `log::info!` etc. short-circuit against
-    // the level set once at init() and runtime level changes never open
-    // the gate. Reproduced
-    // as ROCK_LOG=error + --verbose showing nothing.
-    // `log::max_level()` is the facade's static gate that `log::info!`
-    // short-circuits against; asserting it directly pins the bug
-    // without an installed logger (`log_enabled!` is always false
-    // under the test NopLogger so it can't distinguish levels).
     #[test]
     fn set_level_syncs_facade_max_level() {
         let _level = hold_level();
@@ -645,8 +546,6 @@ mod tests {
         set_level(2);
         assert_eq!(log::max_level(), log::LevelFilter::Info);
 
-        // The exact --verbose-over-ROCK_LOG=error case: drop to
-        // error, then raise via `level().max(3)`. Must open to debug.
         set_level(0);
         set_level(level().max(3));
         assert_eq!(log::max_level(), log::LevelFilter::Debug);
@@ -656,30 +555,19 @@ mod tests {
         assert_eq!(log::max_level(), log::LevelFilter::Trace);
     }
 
-    // Regression: noisy third-party targets (symphonia decode chatter,
-    // surfaced once a process-wide logger was installed) are capped at
-    // warn even when the global level is higher; our own UPPERCASE
-    // category targets are not.
     #[test]
     fn noisy_third_party_targets_capped_at_warn() {
         let _level = hold_level();
         set_level(3); // debug — generous global level
-        // symphonia info/debug suppressed; warn/error still emit.
         assert!(!is_noisy("AUDIO"));
         assert!(is_noisy("symphonia_core::probe"));
         assert_eq!(effective_max("symphonia_core::probe"), 1); // warn
         assert_eq!(effective_max("AUDIO"), 3); // our cat: full level
-        // log_to_level: info=2 > 1 ⇒ symphonia info gated; warn=1 ⇒ ok.
         assert!(log_to_level(log::Level::Info) > effective_max("symphonia_format_ogg"));
         assert!(log_to_level(log::Level::Warn) <= effective_max("symphonia_format_ogg"));
-        // our own info still passes at debug global level.
         assert!(log_to_level(log::Level::Info) <= effective_max("AUDIO"));
     }
 
-    /// A wall-clock record is DECLARED at its log site, and the declaration
-    /// travels in the stamp the emitter owns, separately from the message an
-    /// application writes. It occupies the separator column, so declared and
-    /// plain records put their bodies at the same offset.
     #[test]
     fn a_declared_wall_clock_record_is_marked_in_the_stamp() {
         let plain = format_line(
@@ -812,10 +700,8 @@ mod tests {
 
     #[test]
     fn fmt_body_brackets_only_our_categories() {
-        // module-path / empty target -> bare (third-party, untargeted)
         assert_eq!(fmt_body("symphonia_core::x", &format_args!("m")), "m");
         assert_eq!(fmt_body("", &format_args!("m")), "m");
-        // our short category -> [CAT] prefix
         assert_eq!(fmt_body("AUDIO", &format_args!("m")), "[AUDIO] m");
     }
 }

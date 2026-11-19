@@ -10,7 +10,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub(crate) const ENGINE_BUILD_RECEIPT_ENV: &str = "ROCK_ENGINE_BUILD_RECEIPT";
-/// Interactive launches select immutable tools; source builds are opt-in.
 pub fn prebuilt_game() -> bool {
     std::env::var("ROCK_PREBUILT_GAME").as_deref() == Ok("1")
 }
@@ -42,10 +41,6 @@ struct ReceiptLib {
     staged_sha1: String,
 }
 
-/// The Cargo target directory for `rock_root`. Cargo resolves a relative
-/// `CARGO_TARGET_DIR` against the directory it was invoked from, and
-/// `run_cargo` runs cargo with `current_dir(rock_host::rock_dir())`; resolve it the
-/// same way here. Without the override Cargo uses `<rock_root>/target`.
 fn cargo_target_dir(rock_root: &Path) -> PathBuf {
     match std::env::var_os("CARGO_TARGET_DIR").filter(|value| !value.is_empty()) {
         Some(value) => {
@@ -81,7 +76,6 @@ fn staged_cdylib_path(root: &Path, dst_stem: &str) -> PathBuf {
     root.join("tmp").join(cdylib_name(dst_stem))
 }
 
-// rustc escapes spaces and continuations, but leaves path separators literal.
 fn makefile_words(text: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -382,8 +376,6 @@ mod tests {
                 threads.push(scope.spawn(|| {
                     starts.wait();
                     stage_cdylib_from(&src, &dst, |_| {
-                        // Probe the OS lock while production is preparing the
-                        // publication, independent of thread scheduling.
                         let probe = std::fs::OpenOptions::new()
                             .read(true)
                             .write(true)
@@ -575,8 +567,6 @@ mod tests {
         validate_receipt_lib(&root_path, &loaded.libs[0]).expect("loaded identity remains valid");
     }
 
-    // A budgeting parent caps compile work by phase; a cold engine build
-    // billed to `spawn` was cut off under load.
     #[test]
     fn an_engine_build_reports_its_phase_before_cargo_runs() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -584,7 +574,6 @@ mod tests {
         // SAFETY: nextest runs each test in its own process. Restored below.
         let prev = std::env::var_os(rock_host::process_management::SPAWN_PHASE_FILE_ENV);
         unsafe { std::env::set_var(rock_host::process_management::SPAWN_PHASE_FILE_ENV, &phase) };
-        // An unknown flag makes cargo fail before it touches any lock.
         let built = cargo_build_and_stage_lib(
             "phase probe",
             &["--rock-phase-probe-unknown-flag"],
@@ -607,9 +596,6 @@ mod tests {
     }
 }
 
-/// Build a cargo crate and stage its cdylib into tmp/ under the given name.
-/// Release layout is a no-op (prebuilt libs already staged); dev layout shells
-/// out to cargo then copies + renames the cdylib via `stage_cdylib`.
 fn cargo_build_and_stage_lib(
     display_name: &str,
     cargo_args: &[&str],
@@ -632,11 +618,7 @@ fn cargo_build_and_stage_lib(
     })
 }
 
-/// Stage a freshly built cdylib under its stable loader name. Accepted build
-/// receipts retain ownership; otherwise Cargo's source artifact and the final
-/// transformed publication must both match the recorded staging identity.
 pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
-    // A receipt owns the destination even for callers that bypass the builder.
     if validate_receipted_lib(dst_stem)? {
         return Ok(());
     }
@@ -652,10 +634,6 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
         prepare_staged_cdylib(staging, dst_stem)
     })
     .map_err(|error| {
-        // `cargo build -p <pkg>` can exit 0 without producing the cdylib: a
-        // cleaned/foreign target dir, a crate-type without `cdylib`, or a
-        // build that touched only dependents. The copy error alone names
-        // neither the cause nor the recovery.
         if src.exists() {
             return error;
         }
@@ -689,9 +667,6 @@ fn stage_identity_path(dst: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-/// Cargo releases its target-dir lock before staging reads the artifact, so a
-/// concurrent build in the same target dir can replace it mid-copy. One retry
-/// stages whichever artifact settled.
 pub(crate) fn stage_cdylib_from(
     src: &Path,
     dst: &Path,
@@ -747,8 +722,6 @@ fn stage_cdylib_once(
             ),
         },
         Ok(_) => log::debug!("Restaging `{}`: source content changed", dst.display()),
-        // An absent, old or damaged record proves nothing. Reconstruct it only
-        // by staging the current source, never by trusting an existing library.
         Err(error) => log::debug!(
             "Restaging `{}`: no valid staging identity: {error:#}",
             dst.display()
@@ -811,7 +784,6 @@ fn set_macos_install_name(path: &Path, dst_stem: &str) -> Result<()> {
     Ok(())
 }
 
-/// Use the installed core, or build and stage it in a source checkout.
 pub fn build_libstone() -> Result<()> {
     if rock_host::project::is_release_layout() {
         return Ok(());
@@ -825,10 +797,6 @@ pub fn build_libstone() -> Result<()> {
     Ok(())
 }
 
-/// Build and stage the core engine plus the optional libraries declared by
-/// `game_paths`, then write the content-bound receipt inherited by a test
-/// session. Ordinary commands do not create receipts and retain their usual
-/// build-before-run behavior.
 pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Result<()> {
     if rock_host::project::is_release_layout() {
         anyhow::bail!("engine build receipts are only meaningful in a source workspace");
@@ -854,7 +822,6 @@ pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Resul
             .as_ref()
             .and_then(|receipt| receipt_lib(receipt, dst_stem))
         {
-            // Cargo dep-info may describe a later C build, not this owned library.
             validate_receipt_lib(&root, lib)?;
             return Ok(lib.clone());
         }
@@ -873,8 +840,6 @@ pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Resul
 fn engine_build_receipt_json(receipt: &EngineBuildReceipt) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec_pretty(&serde_json::json!({
         "version": receipt.version,
-        // Emitted by the compiler, so launchers can reject older binaries
-        // that would ignore ROCK_PREBUILT_GAME and invoke Cargo anyway.
         "prebuilt_game_protocol": 1,
         "workspace": receipt.workspace,
         "libs": receipt.libs.iter().map(|lib| serde_json::json!({
@@ -1020,7 +985,6 @@ fn validate_receipted_lib(dst_stem: &str) -> Result<bool> {
                 receipt_path.display()
             );
         }
-        // Uncaptured providers still build on demand.
         return Ok(false);
     };
     validate_receipt_lib(&root, lib)?;

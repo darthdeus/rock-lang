@@ -17,12 +17,8 @@ pub const CARGO_HARNESS_ENV_VARS: &[&str] = &[
     "CARGO_PRIMARY_PACKAGE",
     "CARGO_TARGET_TMPDIR",
 ];
-/// Prefix of the per-package harness variables (`CARGO_PKG_NAME`,
-/// `CARGO_PKG_VERSION_*`, ...), which share the fate above.
 pub const CARGO_HARNESS_ENV_PREFIX: &str = "CARGO_PKG_";
 
-/// Remove the harness variables from a nested cargo invocation so it
-/// fingerprints like a plain-shell build.
 pub fn strip_cargo_harness_env(cmd: &mut Command) {
     for var in CARGO_HARNESS_ENV_VARS {
         cmd.env_remove(var);
@@ -34,9 +30,6 @@ pub fn strip_cargo_harness_env(cmd: &mut Command) {
     }
 }
 
-/// Run `cargo <args>` with inherited stdio, bailing with `fail_msg`
-/// if cargo exits non-zero. Single place for the build-invoke +
-/// status-check shared by compiler and native-library builders.
 pub fn run_cargo(args: &[&str], fail_msg: &str) -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.args(args).current_dir(crate::rock_dir());

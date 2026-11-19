@@ -1,5 +1,3 @@
-//! `SourceFile` / `SourceFiles` constructors that read from disk.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,8 +24,6 @@ fn load_paths(
     paths: &[PathBuf],
     load: impl Fn(&PathBuf) -> Result<SourceFile> + Sync + Send,
 ) -> Result<SourceFiles> {
-    // Load in parallel, then collect in path order so the reported error
-    // is still the first failing path's.
     let loaded: Vec<Result<SourceFile>> = {
         use rayon::prelude::*;
         paths.par_iter().map(load).collect()
@@ -46,9 +42,6 @@ fn load_paths(
     })
 }
 
-/// `sources` without the files a production build drops (see
-/// [`SourceFiles::production_filter`]). Each file costs a few `lstat`s; they
-/// run in parallel, and the first failing file in order reports.
 pub fn production_only(
     sources: &SourceFiles,
     project_root: &Path,
@@ -68,8 +61,6 @@ pub fn production_only(
     Ok(sources.retaining(&keep))
 }
 
-/// Load one source with its package's parsing and ownership facts.
-/// Standalone files have no package.
 pub fn source_file_new_with_context(path: impl AsRef<Path>) -> Result<SourceFile> {
     let canonical = fs_err::canonicalize(path.as_ref())?;
     let mut source = source_file_from_canonical_path(&canonical)?;
@@ -98,7 +89,6 @@ pub(crate) fn source_file_load(path: impl AsRef<Path>) -> Result<SourceFile> {
     source_file_from_canonical_path(&path)
 }
 
-/// Load a source file from an already-canonical absolute path (skips canonicalize syscall).
 fn source_file_from_canonical_path(path: &Path) -> Result<SourceFile> {
     let contents = fs_err::read_to_string(path)
         .with_context(|| format!("Failed to read '{}'", path.display()))?;
@@ -114,7 +104,6 @@ fn source_file_from_canonical_path(path: &Path) -> Result<SourceFile> {
         filename: filename.to_string_lossy().to_string(),
     };
 
-    // Package loaders overwrite the standalone default with the graph fact.
     Ok(SourceFile {
         file,
         contents,

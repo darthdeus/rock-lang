@@ -1,10 +1,7 @@
 /// The one spelling of a standard-library source-file id. The stdlib loader
 /// builds every stdlib id with [`stdlib_file_id`], and every consumer (std
-/// ownership in semantic analysis, lowering, emission, the editor, the module
-/// tools) reads it back with [`is_stdlib_module_file`] or [`stdlib_file_name`].
 const STDLIB_FILE_ID_PREFIX: &str = "<stdlib>/";
 
-/// The source-file id of stdlib file `name` (for example `unified.rock`).
 pub fn stdlib_file_id(name: &str) -> String {
     format!("{STDLIB_FILE_ID_PREFIX}{name}")
 }
@@ -17,7 +14,6 @@ pub fn stdlib_file_name(file: &str) -> Option<&str> {
         .filter(|name| !name.is_empty())
 }
 
-/// Whether `file` is a stdlib source-file id built by [`stdlib_file_id`].
 pub fn is_stdlib_module_file(file: &str) -> bool {
     stdlib_file_name(file).is_some()
 }

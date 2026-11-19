@@ -9,7 +9,6 @@ fn is_pattern(key: &str) -> bool {
     key.contains(['*', '?', '[', '{'])
 }
 
-/// Discovery is confined to one named directory; it never walks an asset store.
 pub fn source_directory(key: &str) -> Result<&Path, String> {
     crate::validate_asset_key(key)?;
     let directory = Path::new(key)

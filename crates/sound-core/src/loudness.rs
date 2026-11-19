@@ -64,8 +64,6 @@ impl SourceMeasurement {
     }
 }
 
-/// Shared by development, release packaging and the report. File contents, not
-/// paths or mtimes, identify measurements; a renamed source reuses its result.
 pub struct MeasurementCache {
     root: PathBuf,
 }
@@ -126,8 +124,6 @@ impl MeasurementCache {
         }
         let result = measure()?;
         fs::create_dir_all(&self.root).map_err(|e| format!("{}: {e}", self.root.display()))?;
-        // Same-content concurrent writers publish identical results; unique temporary
-        // files keep readers from seeing a partial JSON record.
         let temp = tempfile::Builder::new()
             .prefix("measurement-")
             .tempfile_in(&self.root)
@@ -255,9 +251,6 @@ pub struct RenderLayer {
     pub offset: f64,
 }
 
-/// Offline, dry, centered sum for bank diagnostics and the report, never playback.
-/// Mono/stereo sources are linearly resampled to 48 kHz; mono
-/// contributes equal-power channels when mixed alongside stereo.
 pub fn measure_mix(layers: &[RenderLayer]) -> Result<SourceMeasurement, String> {
     let decoded = layers
         .iter()

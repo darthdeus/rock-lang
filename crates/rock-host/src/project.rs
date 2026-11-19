@@ -1,11 +1,6 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// Check if a directory looks like the Rock workspace root.
-///
-/// Recognizes two layouts:
-/// - Dev workspace: has Cargo.toml + crates/
-/// - Release layout: has bin/rock + lib/
 fn is_rock_root(path: &Path) -> bool {
     is_dev_workspace(path) || is_release_layout_in(path)
 }
@@ -14,26 +9,16 @@ pub(crate) fn is_dev_workspace(path: &Path) -> bool {
     path.join("Cargo.toml").exists() && path.join("crates").is_dir()
 }
 
-/// Find the Rock workspace root by looking for known layout markers.
-/// This identifies the top-level Rock development workspace (which contains target/,
-/// crates/, tmp/, etc.) or a release installation (which contains bin/, lib/).
-///
-/// Walks up from the given path. Returns None if no workspace root is found.
 pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
     context_root_from_env()
         .or_else(release_root_from_exe)
         .or_else(|| find_ancestor(path, is_rock_root))
 }
 
-/// Find the source workspace root for a project path without consulting the
-/// executable's installed toolchain layout.
 pub fn find_source_root(path: &Path) -> Option<PathBuf> {
     context_root_from_env().or_else(|| find_ancestor(path, is_dev_workspace))
 }
 
-/// The nearest directory at or above `path` (canonicalized when possible)
-/// that satisfies `is_root`. A file never holds a marker, so a file path
-/// starts the walk at its directory.
 fn find_ancestor(path: &Path, is_root: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let start = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     start
@@ -51,11 +36,6 @@ pub(crate) fn context_root_from_env() -> Option<PathBuf> {
     }
 }
 
-/// If the current executable is `<root>/bin/rock` inside a release layout,
-/// return that root. The binary knows where its own install directory is,
-/// which is more authoritative than walking up CWD — a user running a
-/// release zip from inside another Rock workspace should still use the
-/// release zip's lib/, not the outer dev workspace.
 fn release_root_from_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let bin_dir = exe.parent()?;
@@ -67,17 +47,10 @@ fn release_root_from_exe() -> Option<PathBuf> {
     }
 }
 
-/// The nearest directory at or above `path` holding a `stick.toml`.
 pub fn find_project_root(path: &Path) -> Option<PathBuf> {
     find_ancestor(path, |dir| dir.join("stick.toml").exists())
 }
 
-/// Returns true when the rock_dir looks like an extracted release zip
-/// (bin/rock + lib/) rather than a dev workspace (Cargo.toml + crates/).
-///
-/// In release layout the native libraries are already staged under lib/, so
-/// commands like `rock run` must not shell out to cargo or copy from
-/// target/debug/ — there is no target dir.
 pub fn is_release_layout() -> bool {
     is_release_layout_in(Path::new(&crate::rock_dir()))
 }
@@ -92,8 +65,6 @@ pub fn is_release_layout_in(root: &Path) -> bool {
         && !root.join("Cargo.toml").exists()
 }
 
-/// Find LuaJIT through an explicit override, beside this executable, or PATH.
-/// A bare name on failure lets process spawning report the OS lookup error.
 pub fn luajit_path() -> PathBuf {
     locate_luajit(
         std::env::var_os("ROCK_LUAJIT"),
@@ -131,8 +102,6 @@ fn locate_luajit(
     PathBuf::from(name)
 }
 
-/// Preserve Lua's defaults and inherited module path, adding the selected
-/// binary's matching JIT toolkit when installed beside it.
 pub fn lua_path_value() -> String {
     lua_path_for(
         &luajit_path(),
@@ -140,7 +109,6 @@ pub fn lua_path_value() -> String {
     )
 }
 
-/// Add the toolkit belonging to this binary to a host-selected module path.
 pub fn lua_path_for(luajit: &Path, mut value: String) -> String {
     if let Some(prefix) = luajit.parent().and_then(Path::parent) {
         let share = prefix.join("share/luajit-2.1");
@@ -154,12 +122,8 @@ pub fn lua_path_for(luajit: &Path, mut value: String) -> String {
     value
 }
 
-/// Filename of the assembled Lua output inside an output directory.
 pub const MAIN_LUA_FILENAME: &str = "main.lua";
 
-/// Filename of the precompiled LuaJIT bytecode image of `main.lua`, beside it
-/// in the same output directory. Optional everywhere: a consumer that cannot
-/// find it runs the source file instead.
 pub const MAIN_BYTECODE_FILENAME: &str = "main.ljbc";
 
 /// Build a `Command` that dumps `lua_file` to LuaJIT bytecode at
@@ -187,30 +151,17 @@ pub fn build_luajit_bytecode_command(
     cmd
 }
 
-/// Default output directory for compiled programs.
 pub(crate) const DEFAULT_OUTPUT_DIR: &str = "tmp";
 
-/// The canonical default location for the compiled program:
-/// `tmp/main.lua`. Used as both the compile target and the file
-/// executed by `rock run`.
 pub fn default_main_lua_path() -> PathBuf {
     PathBuf::from(DEFAULT_OUTPUT_DIR).join(MAIN_LUA_FILENAME)
 }
 
-/// Write `contents` to `path` atomically: write to a uniquely-named temp
-/// file in the same directory, then `rename(2)` into place (atomic on
-/// macOS + Linux). A concurrent reader -- a running game polling main.lua
-/// for hot reload, or a parallel `rock frame` -- always sees either the
-/// complete old or the complete new file, never a truncated mid-write
-/// (which the hot-reload poller would `dofile` as an empty program,
-/// clearing the system registries and blanking the screen).
 pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
     use std::io::Write;
     write_atomic_streamed(path, |file| file.write_all(contents.as_ref()))
 }
 
-/// Stream a generated artifact into a same-directory temporary file before
-/// atomically replacing the destination. Writer errors leave the destination intact.
 pub fn write_atomic_streamed(
     path: impl AsRef<Path>,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
@@ -222,20 +173,12 @@ pub fn write_atomic_streamed(
     };
     fs_err::create_dir_all(parent)?;
 
-    // Temp file in the SAME directory so `persist` is a same-filesystem
-    // (atomic) rename. NamedTempFile gives an OS-level unique name -- no
-    // collisions between concurrent compiler / test instances -- and is
-    // removed on any early return, so a failed write leaves no `.tmp`
-    // litter. Generated artifacts skip fsync.
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     write(tmp.as_file_mut())?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 
-/// LuaJIT with the plain runtime environment and no arguments: callers add a
-/// script or feed one on stdin. Hosts configure their runtime service before
-/// stdio.
 pub fn luajit_command() -> std::process::Command {
     let mut cmd = std::process::Command::new(luajit_path());
     crate::compiler_thp::configure_runtime_command(&mut cmd);
@@ -243,16 +186,11 @@ pub fn luajit_command() -> std::process::Command {
     cmd
 }
 
-/// A `.rock` file found below a directory.
 pub struct WalkedRockFile {
     pub path: String,
-    /// The entry is a symlink to a file. Every other path is canonical
-    /// already: the walk starts at a canonical directory and follows no link.
     pub symlink: bool,
 }
 
-/// Recursively find every `.rock` file under `source_dir` (absolute paths,
-/// `~`-suffixed editor backups skipped).
 pub fn find_rock_files_at_path(source_dir: impl AsRef<Path>) -> Result<Vec<String>> {
     Ok(walk_rock_files(source_dir)?
         .into_iter()
@@ -260,16 +198,10 @@ pub fn find_rock_files_at_path(source_dir: impl AsRef<Path>) -> Result<Vec<Strin
         .collect())
 }
 
-/// [`find_rock_files_at_path`], keeping what the walk learned about each
-/// file. Surfaces per-entry walk errors to stderr rather than silently
-/// dropping them — a permission error on stdlib/ would otherwise masquerade
-/// as "module not found" (silent-errors audit).
 pub fn walk_rock_files(source_dir: impl AsRef<Path>) -> Result<Vec<WalkedRockFile>> {
     use anyhow::Context;
     use walkdir::WalkDir;
 
-    // Canonicalize the base directory once — walkdir will produce absolute paths
-    // from this base, so individual files don't need per-file canonicalize.
     let canonical_base = fs_err::canonicalize(source_dir.as_ref()).with_context(|| {
         format!(
             "Failed to resolve source directory '{}'",
@@ -301,13 +233,10 @@ pub fn walk_rock_files(source_dir: impl AsRef<Path>) -> Result<Vec<WalkedRockFil
         if path.extension().is_none_or(|ext| ext != "rock") {
             continue;
         }
-        // The walk already knows each entry's type; only a symlink needs the
-        // stat that tells whether it leads to a file.
         let file_type = entry.file_type();
         let is_file = if file_type.is_symlink() {
             match fs_err::metadata(path) {
                 Ok(metadata) => metadata.is_file(),
-                // A dangling link has no source to include.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
                 Err(error) => return Err(error.into()),
             }
@@ -370,11 +299,9 @@ mod tests {
     #[test]
     fn find_project_root_walks_up_to_the_nearest_stick_toml() {
         let temp = TempDir::new().unwrap();
-        // macOS temp dirs sit behind a /var symlink.
         let root = temp.path().canonicalize().unwrap();
         let loose = root.join("loose.rock");
         fs::write(&loose, "fn main() {}").unwrap();
-        // .git is not a project marker; only stick.toml is.
         fs::create_dir(root.join(".git")).unwrap();
         assert_eq!(find_project_root(&loose), None);
 

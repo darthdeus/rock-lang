@@ -60,7 +60,6 @@ pub struct SoundStep {
 #[serde(deny_unknown_fields)]
 pub struct SoundLayer {
     pub sources: Vec<String>,
-    /// dB relative to the event and group; zero is unity.
     #[serde(default)]
     pub volume: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,10 +68,8 @@ pub struct SoundLayer {
     pub speed: f32,
     #[serde(default)]
     pub offset: f32,
-    /// Loop by incremental decode of held encoded bytes instead of resident PCM.
     #[serde(default, skip_serializing_if = "is_false")]
     pub stream: bool,
-    /// Retained PCM loops need integrated loudness too, even without streaming.
     #[serde(default, skip_serializing_if = "is_false")]
     pub looped: bool,
 }
@@ -313,7 +310,6 @@ pub struct PreparedSoundProject {
     looped_sources: BTreeSet<String>,
 }
 
-/// Validate catalog references without decoding audio or measuring loudness.
 pub fn prepare_project<R: AssetResolver + ?Sized>(
     project: &SoundProject,
     resolver: &R,
@@ -417,7 +413,6 @@ pub(crate) fn validate_project<R: AssetResolver + ?Sized>(
         }
     }
     let mut seen_ids = BTreeMap::new();
-    // One source loads as one native kind; the first layer naming it decides.
     let mut source_kinds: BTreeMap<&str, (bool, String)> = BTreeMap::new();
     for (event_index, event) in project.events.iter().enumerate() {
         let event_path = format!("events[{event_index}]");
@@ -654,7 +649,6 @@ mod tests {
         )
     }
 
-    /// A project JSON of the given `events`, under the fixture group.
     fn project_json(version: u32, events: &str) -> String {
         format!(
             r#"{{"version": {version}, "normalization_lufs": -18.0,
@@ -663,7 +657,6 @@ mod tests {
         )
     }
 
-    /// One event JSON with one step whose only layer is `layer`.
     fn event_json(id: &str, layer: &str) -> String {
         format!(r#"{{"id": "{id}", "group": "fixture", "steps": [{{"layers": [{layer}]}}]}}"#)
     }

@@ -31,7 +31,6 @@ impl Default for LanguageConfig {
     }
 }
 
-/// `[language] identity_storage`: a state name or an `exempt_modules` table.
 struct IdentityStorageDeclaration(rock_core::source_code::IdentityStorage);
 
 impl<'de> serde::Deserialize<'de> for IdentityStorageDeclaration {
@@ -153,31 +152,19 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
 #[derive(Debug, Clone)]
 pub struct StickConfig {
     pub package: Package,
-    /// Optional runtime requirements, interpreted by the installed host.
     pub engine: Option<EngineConfig>,
     pub native: Option<NativeConfig>,
-    /// Declared compile-time inputs (`build_var(..)`) and release channels.
-    /// Commands are run by the CLI once per session build, before compilation;
-    /// the compiler only ever sees resolved values.
     pub build: Option<BuildConfig>,
-    /// Release asset selection consumed by both `rock package` and `rock web`.
     pub release: Option<ReleaseConfig>,
-    /// External asset roots.
     pub assets: Option<AssetsConfig>,
-    /// Optional compiler-owned sound project declaration.
     pub sound: Option<SoundConfig>,
-    /// Project-owned ambient inputs included in sim timing identities.
     pub sim: Option<SimConfig>,
     pub lint: Option<LintConfig>,
-    /// Source-language selection for this package. `None` = modules v1.
     pub language: Option<LanguageConfig>,
     pub dependencies: HashMap<String, Dependency>,
-    /// Optional implementation directories that retain this package's owner.
     pub source_groups: HashMap<String, SourceGroupConfig>,
 }
 
-/// Project-owned conventions for the opt-in action-layer lints.
-/// Production roots match complete path components; test modules are excluded.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionLayerPolicy {
@@ -186,7 +173,6 @@ pub struct ActionLayerPolicy {
     pub action_prefix: String,
     pub raw_input_names: Vec<String>,
     pub raw_input_classes: Vec<String>,
-    /// Registration helpers whose reads do not count as action consumers.
     pub registration_functions: Vec<String>,
 }
 
@@ -254,8 +240,6 @@ pub struct SourceGroupConfig {
 }
 
 impl StickConfig {
-    /// This package's mutable-global policy. Missing `[language]` or missing
-    /// `globals` keeps today's permissive behavior.
     pub fn global_policy(&self) -> rock_core::source_code::GlobalPolicy {
         self.language
             .as_ref()
@@ -263,8 +247,6 @@ impl StickConfig {
             .unwrap_or(rock_core::source_code::GlobalPolicy::Any)
     }
 
-    /// This package's identity-storage migration state. Missing `[language]`
-    /// or missing `identity_storage` is enforced.
     pub fn identity_storage(&self) -> rock_core::source_code::IdentityStorage {
         self.language
             .as_ref()
@@ -290,29 +272,16 @@ pub struct BuildVar {
     pub cmd: Option<String>,
     pub builtin: Option<String>,
     pub value: Option<String>,
-    /// A compiler-derived fingerprint resolved after semantic checking,
-    /// without putting a placeholder into the resolved variable map.
     pub source_fingerprint: Option<SourceFingerprint>,
     pub channels: Option<Vec<String>>,
-    /// Channels on which a failing `cmd` degrades to `default` with a warning
-    /// instead of failing the build. Per-channel on purpose: a credential a
-    /// development build can do without is one a release build cannot, and an
-    /// all-channel switch would let a retail artifact ship the empty default.
-    /// `validate_build` requires a `default` to fall back to and membership in
-    /// `channels`, so the declaration can never be inert.
     pub optional_channels: Option<Vec<String>>,
     pub default: Option<String>,
     /// Hash the value into cache keys but never store it in plaintext in any
     /// on-disk artifact or manifest.
     pub secret: bool,
-    /// Explicitly declared metadata that may vary without changing executable
-    /// Artifact identity.
     pub volatile: bool,
 }
 
-/// Inputs whose contents contribute to a build variable's source fingerprint.
-/// Empty lists are accepted by deserialization so validation can report the
-/// missing root alongside the owning build variable.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SourceFingerprint {
@@ -359,20 +328,12 @@ pub struct EngineConfig {
     pub needs: Vec<String>,
 }
 
-/// The invocation's channel selection, recorded once by the CLI before
-/// dispatch. rock-host consumers of the channel (dependency resolution, source
-/// loading) cannot read rock-cli's comptime selection, so the CLI mirrors the
-/// same value here.
 static INVOCATION_CHANNEL: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn set_invocation_channel(channel: Option<String>) {
     *INVOCATION_CHANNEL.lock().expect("invocation channel lock") = channel;
 }
 
-/// Resolve the channel a manifest's channel-scoped selections evaluate
-/// against: explicit `--channel` > the project's `default_channel` > `"dev"`. Mirrors
-/// `resolve_build_vars` so a dependency filter and a build var can never
-/// disagree about which channel a build is on.
 pub fn resolved_channel_for(cfg: &StickConfig) -> String {
     if let Some(channel) = INVOCATION_CHANNEL
         .lock()
@@ -387,8 +348,6 @@ pub fn resolved_channel_for(cfg: &StickConfig) -> String {
         .unwrap_or_else(|| "dev".to_string())
 }
 
-/// True when `dep` compiles into a build on `channel`. A dependency with no
-/// declared channels is unscoped and matches everywhere.
 pub(crate) fn dependency_matches_channel(dep: &Dependency, channel: &str) -> bool {
     match dep {
         Dependency::Path(_) => true,
@@ -401,17 +360,7 @@ pub(crate) fn dependency_matches_channel(dep: &Dependency, channel: &str) -> boo
 #[derive(Debug, Clone)]
 pub struct Package {
     pub name: String,
-    // Optional with a sensible default so a minimal `[package]\nname =
-    // "x"\n` stick.toml parses cleanly. Required-by-serde used to
-    // crash rock-lsp (toml parse error -> `?` in find_from_dir ->
-    // load_project_files returns Err -> non-zero exit ~100ms after
-    // initialize). Real projects always set version; the default just
-    // protects minimal/test/in-progress configs.
-    /// Stored as `Option<String>` because serde's default calls `T::default()`;
-    /// the read accessor `version()` returns `"0.0.0"` when missing.
     pub version: Option<String>,
-    /// `Option` for the same reason as `version`. Read via `package_type()`,
-    /// which defaults to `Bin`.
     pub package_type: Option<PackageType>,
 }
 
@@ -431,15 +380,6 @@ pub enum PackageType {
     Lib,
 }
 
-// `[build] target` and `Target` stay removed: Lua was the only codegen
-// target Rock ever shipped, so that field was tautological. Game-vs-lib
-// detection reads `[package] type` -- never a
-// build target. `[build]` now carries channels and declared compile-time
-// vars instead (BuildConfig above).
-
-/// `Path(String)` because PathBuf isn't a built-in serde scalar; the
-/// consumer sites (`resolver.rs`, `compilation_units.rs`) convert via
-/// `PathBuf::from(s)` at use time.
 #[derive(Debug, Clone)]
 #[repr(u8)]
 pub enum Dependency {
@@ -450,14 +390,9 @@ pub enum Dependency {
 #[derive(Debug, Clone)]
 pub struct DetailedDependency {
     pub source: DependencySource,
-    /// Channels the dependency compiles into. Empty = every channel. This is
-    /// the declared gate for development-only packages (such as an agent bridge):
-    /// a shipping channel excludes the package from the compile set entirely,
-    /// so generated shipping code carries none of its symbols.
     pub channels: Vec<String>,
 }
 
-/// A dependency has exactly one source; package names refer to this toolchain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencySource {
     Path(String),
@@ -653,8 +588,6 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                             var.volatile = map.next_value()?;
                         }
                         other => {
-                            // Fail closed: a misspelled source key would leave the
-                            // var sourceless and every build_var() reading it stale.
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [build.vars] entry; known keys: \
                                  cmd, builtin, value, source_fingerprint, channels, optional_channels, default, secret, volatile"
@@ -694,8 +627,6 @@ impl<'de> serde::Deserialize<'de> for BuildConfig {
                             build.vars = map.next_value()?;
                         }
                         other => {
-                            // Fail closed: a misspelled key here would silently drop
-                            // every declared var and channel.
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [build]; known keys: \
                                  channels, default_channel, vars"
@@ -974,12 +905,6 @@ impl StickConfig {
         Self::new_from_str(&content)
     }
 
-    /// Load a manifest if it exists. Distinguishes "no manifest" (Ok(None))
-    /// from "manifest exists but is malformed" (Err), so callers stop
-    /// laundering parse errors as "no game config" — a typo in
-    /// `[engine] needs = [...]` would otherwise silently skip
-    /// runtime validation and surface as a confusing later failure
-    /// (silent-errors audit, 2026-05-02).
     pub fn from_path_optional(path: &Path) -> Result<Option<Self>> {
         if !path
             .try_exists()
@@ -994,10 +919,6 @@ impl StickConfig {
         toml::from_str(content).map_err(|e| anyhow::anyhow!("Failed to parse stick.toml: {}", e))
     }
 
-    /// Reject a malformed `[build]` section at load time: a var with zero or
-    /// two sources, an unknown builtin, or a channel name nothing declares
-    /// would otherwise surface as a confusing resolution failure (or silently
-    /// wrong value) at the first `build_var()` call.
     pub fn validate_build(&self) -> Result<()> {
         let Some(build) = self.build.as_ref() else {
             return Ok(());
@@ -1114,11 +1035,6 @@ impl StickConfig {
         Ok(())
     }
 
-    /// True iff the deepest `stick.toml` at or above `dir` is a `bin` package
-    /// (the default when `type` is absent). False for a `lib`, and false when
-    /// no `stick.toml` exists -- a standalone scratch file is not a closed
-    /// world. The gate for closed-world analyses (`unused_fn`), read by both
-    /// the LSP and the build lint pass.
     pub fn is_bin_at(dir: &Path) -> bool {
         matches!(
             Self::find_from_dir(dir),
@@ -1190,8 +1106,6 @@ mod tests {
         );
     }
 
-    /// Fail closed: a misspelled key would otherwise silently drop the
-    /// declaration it belonged to.
     #[test]
     fn manifest_rejections_name_the_offending_key() {
         for (body, wants) in [
@@ -1318,8 +1232,6 @@ mod tests {
         }
     }
 
-    /// A minimal manifest without a version used to crash rock-lsp shortly
-    /// after initialize.
     #[test]
     fn package_version_defaults_when_missing() {
         let cfg = manifest("").expect("minimal stick.toml must parse without explicit version");
@@ -1355,8 +1267,6 @@ mod tests {
         }
     }
 
-    /// Optional loading distinguishes an absent manifest from a malformed or
-    /// unreadable one.
     #[test]
     fn from_path_optional_distinguishes_absence_from_failure() {
         let dir = tempfile::tempdir().unwrap();
@@ -1431,7 +1341,6 @@ mod tests {
             .expect("well-formed build section validates");
     }
 
-    /// Omitted fields default to empty lists so validation can name the var.
     #[test]
     fn source_fingerprint_fields_default_to_empty_lists() {
         let cfg = manifest("[build.vars]\nTREE = { source_fingerprint = {} }\n").unwrap();

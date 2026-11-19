@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 
 pub const VERSION: &str = include_str!("../../../gamelibs.version");
 
-/// Name of the explicit work-root override. The per-host table lives with the
-/// private tooling, which exports this variable for child builds.
 pub(crate) const WORK_ROOT_ENV: &str = "ROCK_WORK_ROOT";
 
 /// Shared host storage policy: an explicit absolute `ROCK_WORK_ROOT`, else the
@@ -33,8 +31,6 @@ pub fn local_work_root(home: &Path) -> Result<PathBuf, String> {
     Ok(home.to_path_buf())
 }
 
-/// The version directory. An override is also a version directory, containing
-/// `gamelibs-<platform>` children; all overrides must be absolute.
 pub fn gamelibs_root() -> PathBuf {
     if let Some(dir) = env::var_os("ROCK_GAMELIBS_DIR").filter(|value| !value.is_empty()) {
         let dir = PathBuf::from(dir);
@@ -54,7 +50,6 @@ pub fn gamelibs_root() -> PathBuf {
         .join(VERSION.trim())
 }
 
-/// Resolve one installed platform. Readers never download or write the cache.
 pub(crate) fn platform_dir(platform: &str) -> PathBuf {
     assert!(
         matches!(platform, "linux-x86_64" | "macos-arm64" | "windows-x86_64"),
@@ -80,13 +75,10 @@ fn target_platform(os: &str, arch: &str) -> &'static str {
     }
 }
 
-/// The native prefix for the running host, independent of Cargo's target env.
 pub fn host_dir() -> PathBuf {
     platform_dir(target_platform(env::consts::OS, env::consts::ARCH))
 }
 
-/// The prefix for Cargo's compilation target. Track cache overrides and the
-/// manifest for relocated builds.
 pub fn prebuilt_dir() -> PathBuf {
     println!("cargo:rerun-if-env-changed=ROCK_GAMELIBS_DIR");
     println!("cargo:rerun-if-env-changed=ROCK_WORK_ROOT");
@@ -108,8 +100,6 @@ pub(crate) fn is_source_root(path: &Path) -> bool {
     path.join("Cargo.toml").is_file() && path.join("gamelibs.version").is_file()
 }
 
-/// Source workspace discovery for Fire's exported-symbol inventory. Native
-/// libraries are resolved separately and never identify a source checkout.
 pub fn source_root() -> PathBuf {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     manifest

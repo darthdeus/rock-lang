@@ -9,9 +9,6 @@ use rock_host::stick::StickConfig;
 
 pub const ASSET_OVERLAYS_ENV: &str = "ROCK_ASSET_OVERLAYS";
 
-/// Every file the bank's sheets draw from, as `assets/.eat/<dir>/<name>` keys
-/// mapped to the first line that names them. Identical sheets share a
-/// directory, so a key may belong to several lines.
 pub fn bank_files(lines: &[visual_bank::Line]) -> BTreeMap<String, &visual_bank::Line> {
     let mut files = BTreeMap::new();
     for line in lines {
@@ -25,7 +22,6 @@ pub fn bank_files(lines: &[visual_bank::Line]) -> BTreeMap<String, &visual_bank:
     files
 }
 
-/// Worktree-owned visual roots, including the conventional main bank when present.
 pub fn visual_bank_paths(project: &Path, config: Option<&StickConfig>) -> Result<Vec<String>> {
     let mut banks = config
         .map(EngineConfigExt::release_visual_banks)
@@ -57,8 +53,6 @@ pub struct StagedAssets {
     pub keys: Vec<String>,
 }
 
-/// Select the shipped-key set for native packaging.
-/// `config` is the already-parsed StickConfig; neither caller reparses TOML.
 #[cfg(test)]
 pub(crate) fn select_assets(
     project_dir: &Path,
@@ -327,9 +321,6 @@ mod worktree_bank_tests {
     }
 }
 
-/// Insert an overlay-first-resolved asset, overwriting any worktree-selected
-/// same-key entry. Bank inserts leave the selection unsorted; the caller sorts
-/// once after all of them instead of paying a sort per insertion.
 pub fn replace_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset) {
     if let Some(existing) = selection
         .assets
@@ -423,9 +414,6 @@ fn insert_asset(
     }
 }
 
-/// Sibling marker proving `output_dir` is a tree this module generated and
-/// may therefore clear. Kept beside the directory, not inside it, so the
-/// staged tree itself holds only shipped keys.
 pub(crate) fn staging_marker_path(output_dir: &Path) -> PathBuf {
     let name = output_dir
         .file_name()

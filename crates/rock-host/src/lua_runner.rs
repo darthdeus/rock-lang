@@ -9,18 +9,6 @@ use rock_core::CompilerError;
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
-/// What the luajit child did: its streams, and whether it EXITED CLEANLY.
-///
-/// `success` is the child's real exit status, kept as data. It used to be
-/// encoded in-band -- the returned String got `"STDERR: "` prepended -- so every
-/// caller had to sniff for that substring to learn whether the program died, and
-/// `rock run` (which just printed the string) could not tell at all and exited 0
-/// on a crash. An in-band marker also conflated two different things: a run that
-/// FAILED, and a run that merely wrote to stderr.
-///
-/// `Err` from the runner stays reserved for HARNESS failures -- luajit missing,
-/// a broken pipe, a timeout -- which is a different category from "the program
-/// ran and exited non-zero".
 #[derive(Debug, Clone)]
 pub struct LuaRun {
     pub stdout: String,
@@ -57,8 +45,6 @@ pub fn run_lua_code_with_timeout_and_env(
     run_lua_code_with_command(command, code, timeout)
 }
 
-/// Evaluate stdin using a host-configured command. Configure before calling;
-/// the runner owns stdin selection, stdio, child lifetime and error reporting.
 pub fn run_lua_code_with_command(
     mut cmd: std::process::Command,
     code: &str,
@@ -82,9 +68,6 @@ pub fn run_lua_code_with_command(
     let mut stdin = child.stdin.take().expect("stdin piped");
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr piped");
-    // The read result is PROPAGATED, not dropped. Discarding it turned a failed
-    // drain into empty output, which reads downstream as "the program printed
-    // nothing" -- a harness failure wearing a successful program's clothes.
     let stdout_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut stdout_pipe, &mut buf).map(|_| buf)
@@ -104,14 +87,9 @@ pub fn run_lua_code_with_command(
         result.err()
     };
 
-    // The status MUST come from whichever call reaped the child. `wait_timeout`
-    // reaps it itself, so a following `wait`/`wait_with_output` cannot report the
-    // real status -- it fabricates `exit(0)`. That is why this used to treat any
-    // stderr output as failure: the stderr check was compensating for an exit
-    // status that was always 0 here, which in turn is why `rock run` exited 0 on
-    // a program that died.
-    // On a wait error the child stays registered, so process cleanup can still
-    // kill it; the reader threads are left to end with it.
+    // `wait_timeout` reaps the child itself: take the status from it, since a later
+    // `wait` would fabricate exit(0). On a wait error the child stays registered so
+    // process cleanup can still kill it.
     let process_error = |action: &str, error: std::io::Error| {
         CompilerError::new_no_location(format!("Failed to {action} LuaJIT process {pid}: {error}"))
     };

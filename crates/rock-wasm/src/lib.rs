@@ -38,8 +38,6 @@ use serde_json::{Value, json};
 use skull::mir_emit::{RendererTarget, ShaderLanguage};
 use skull::pipeline::{CompileHost, EmitTarget, Stage};
 
-/// Handle one JSON request. Errors in the request itself come back as
-/// `{"ok":false,"error":...}`.
 pub fn handle(request: &str) -> Value {
     match serde_json::from_str::<Value>(request) {
         Ok(request) => {
@@ -175,9 +173,6 @@ fn lsp(request: &Value) -> Result<Value, String> {
     })
 }
 
-/// The playground's [`CompileHost`]: one source, no manifests (so no alias
-/// tables), build inputs only as supplied `embed_string` files, and lint
-/// findings for that source returned with the response.
 struct PlaygroundHost<'a> {
     file: Ustr,
     source: &'a str,
@@ -276,7 +271,6 @@ mod abi {
         *OUTPUT.lock().unwrap_or_else(|p| p.into_inner()) = bytes;
     }
 
-    /// A buffer of `len` bytes for the host to write a request into.
     #[unsafe(no_mangle)]
     pub extern "C" fn rock_alloc(len: usize) -> *mut u8 {
         let mut buffer = Vec::<u8>::with_capacity(len);

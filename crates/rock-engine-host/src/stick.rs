@@ -3,7 +3,6 @@ use anyhow::Result;
 use rock_host::stick::StickConfig;
 use std::path::{Path, PathBuf};
 
-/// Private engine and asset policy; the public parser only supplies data.
 pub trait EngineConfigExt {
     fn release_assets(&self) -> Result<Vec<String>>;
     fn release_visual_banks(&self) -> Result<Vec<String>>;
@@ -16,8 +15,6 @@ pub trait EngineConfigExt {
 }
 
 impl EngineConfigExt for StickConfig {
-    /// Resolve the release roots once from the already-parsed StickConfig.
-    /// Predefined levels are explicit inputs, independent of the general asset roots.
     fn release_assets(&self) -> Result<Vec<String>> {
         let mut assets = self
             .release
