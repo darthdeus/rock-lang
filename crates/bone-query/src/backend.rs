@@ -42,7 +42,9 @@ use crate::completion::match_policy::admit;
 use crate::completion::rank::*;
 use crate::completion::select::*;
 use crate::completion::sources::*;
-use crate::query::{FnRefScope, RefSite, RenameSubject, SymCat, clean_match};
+use crate::query::{
+    FnRefScope, RefSite, RenameSubject, SymCat, clean_match, span_contains, span_text,
+};
 use crate::rank_key::RankKey;
 
 #[derive(Default)]
@@ -1314,7 +1316,7 @@ impl BoneWorkspace {
         let text_at = |span: &Span| {
             proj.texts
                 .get(span.file.as_str())
-                .and_then(|t| t.get(span.offset_range().0..span.offset_range().1))
+                .and_then(|t| span_text(t, span))
         };
         let (key, alias) = match crate::query::path_segment_at(ws, mid, offset) {
             Some(PathSegmentRef {
@@ -1406,11 +1408,7 @@ impl BoneWorkspace {
             .rename_plan(proj, path, offset)?
             .into_iter()
             .map(|s| s.span)
-            .find(|s| {
-                s.file.as_str() == path
-                    && s.offset_range().0 <= offset
-                    && offset < s.offset_range().1
-            });
+            .find(|s| s.file.as_str() == path && span_contains(s, offset));
         Ok(here.map(|here| byte_range(src, here.offset_range())))
     }
 
@@ -1513,15 +1511,10 @@ impl BoneWorkspace {
                     )
                 })
             });
-        let spelled = |span: &Span| {
-            text_of(span.file.as_str())
-                .and_then(|t| t.get(span.offset_range().0..span.offset_range().1))
-        };
-        let here = sites.iter().find(|s| {
-            s.span.file.as_str() == path
-                && s.span.offset_range().0 <= offset
-                && offset < s.span.offset_range().1
-        });
+        let spelled = |span: &Span| text_of(span.file.as_str()).and_then(|t| span_text(t, span));
+        let here = sites
+            .iter()
+            .find(|s| s.span.file.as_str() == path && span_contains(&s.span, offset));
         let Some(old) = here.or(sites.first()).and_then(|s| spelled(&s.span)) else {
             return Ok(sites);
         };

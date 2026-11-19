@@ -457,15 +457,13 @@ pub fn hover_at(
         if source_ident(f.name).starts_with("__") {
             continue;
         }
-        let (s, e) = f.name_span.offset_range();
-        if s <= offset && offset < e {
+        if span_contains(&f.name_span, offset) {
             let sig = render_fn_signature_with_defaults(ws, mid, fid, sources);
             return Some((fenced(&sig), f.name_span));
         }
     }
     for s in module.structs.values() {
-        let (ss, se) = s.name_span.offset_range();
-        if ss <= offset && offset < se {
+        if span_contains(&s.name_span, offset) {
             return render_struct_def(ws, s.name).map(|d| (d, s.name_span));
         }
         for fld in &s.fields {
@@ -477,20 +475,17 @@ pub fn hover_at(
         }
     }
     for en in module.enums.values() {
-        let (s, e) = en.name_span.offset_range();
-        if s <= offset && offset < e {
+        if span_contains(&en.name_span, offset) {
             return render_enum_def(ws, en.name).map(|d| (d, en.name_span));
         }
         for v in &en.variants {
-            let (vs, ve) = v.name_span.offset_range();
-            if vs <= offset && offset < ve {
+            if span_contains(&v.name_span, offset) {
                 return render_variant(ws, Some(en.name), v.name).map(|d| (d, v.name_span));
             }
         }
     }
     for nt in module.newtypes.values() {
-        let (s, e) = nt.name_span.offset_range();
-        if s <= offset && offset < e {
+        if span_contains(&nt.name_span, offset) {
             return Some((
                 fenced(&format!(
                     "newtype {}({})",
@@ -502,25 +497,21 @@ pub fn hover_at(
         }
     }
     for g in module.globals.values() {
-        let (s, e) = g.name_span.offset_range();
-        if s <= offset && offset < e {
+        if span_contains(&g.name_span, offset) {
             return Some((
                 format!("Type: {}", render_hover_type(ws, None, g.ty)),
                 g.name_span,
             ));
         }
         // A value-less global has no inference body, so resolve its type here.
-        if let TyId::Static(tmid, idx) = g.ty {
-            if let Some(sp) = ws
+        if let TyId::Static(tmid, idx) = g.ty
+            && let Some(sp) = ws
                 .modules
                 .get(tmid.index())
                 .and_then(|m| m.ty_spans.get(idx).copied())
-            {
-                let (ts, te) = sp.offset_range();
-                if ts <= offset && offset < te {
-                    return Some((render_type_hover(ws, None, g.ty), sp));
-                }
-            }
+            && span_contains(&sp, offset)
+        {
+            return Some((render_type_hover(ws, None, g.ty), sp));
         }
     }
 
@@ -728,8 +719,7 @@ fn hover_record_pat(at: &ResolvedPosition<'_>, body: &Body) -> Option<(String, S
             continue;
         };
         if let (Some(nspan), Some(var)) = (name_span, name) {
-            let (s, e) = nspan.offset_range();
-            if s <= offset && offset < e {
+            if span_contains(nspan, offset) {
                 if let Some(edef) = enum_def_for_variant(ws, *enum_name, *var) {
                     return Some((
                         format!("Type: enum {}", display_name(edef.name.as_str())),
@@ -1382,8 +1372,7 @@ impl RefTarget {
                             let span = leading_name_span(span, source_ident(name).len());
                             if !matches!(self, Self::Newtype(_))
                                 || text_of(module.file.as_str()).is_none_or(|text| {
-                                    text.get(span.offset_range().0..span.offset_range().1)
-                                        == Some(source_ident(name))
+                                    span_text(text, &span) == Some(source_ident(name))
                                 })
                             {
                                 sites.push(RefSite::plain(span));
@@ -1803,9 +1792,14 @@ fn for_each_nominal_annotation(
     }
 }
 
-fn span_contains(span: &Span, offset: usize) -> bool {
+pub(crate) fn span_contains(span: &Span, offset: usize) -> bool {
     let (s, e) = span.offset_range();
     s <= offset && offset < e
+}
+
+pub(crate) fn span_text<'t>(text: &'t str, span: &Span) -> Option<&'t str> {
+    let (s, e) = span.offset_range();
+    text.get(s..e)
 }
 
 pub(crate) fn declared_generics(module: &hir::Module) -> impl Iterator<Item = &TyId> {
@@ -2613,8 +2607,7 @@ pub(crate) fn var_binding_ty_at(
         let target = match &body.expr_arena[e] {
             hir::Expr::Var(_) => e,
             hir::Expr::Assign { target, .. } | hir::Expr::CompoundAssign { target, .. } => {
-                let ts = body.expr_spans.get(*target)?.offset_range();
-                if !(ts.0 <= offset && offset < ts.1) {
+                if !span_contains(body.expr_spans.get(*target)?, offset) {
                     continue;
                 }
                 *target
@@ -2787,10 +2780,7 @@ pub(crate) fn enum_variant_pattern_at(
             }
             _ => return None,
         };
-        let on = |sp: Span| {
-            let (s, e) = sp.offset_range();
-            s <= offset && offset < e
-        };
+        let on = |sp: Span| span_contains(&sp, offset);
 
         if path.segments.len() == 1 {
             let variant = path.segments.first()?;
@@ -4236,11 +4226,11 @@ pub(crate) fn render_fn_signature_with_defaults(
     let default_at = |i: usize| {
         let body = module.bodies.get(&hir::BodyOwner::Function(fid))?;
         let expr = (*body.param_defaults.get(i)?)?;
-        let (start, end) = body.expr_spans.get(expr)?.offset_range();
-        sources?
-            .get(module.file.as_str())?
-            .get(start..end)
-            .map(str::trim)
+        span_text(
+            sources?.get(module.file.as_str())?,
+            body.expr_spans.get(expr)?,
+        )
+        .map(str::trim)
     };
     let mut params = rendered_params(ws, &f.param_decls);
     for (i, (param, rendered)) in f.param_decls.iter().zip(&mut params).enumerate() {
@@ -4485,14 +4475,14 @@ pub(crate) fn all_holes(
 }
 
 fn hole_kind_at(ast: &Ast, offset: usize) -> Option<(HoleKind, Span)> {
-    let covers = |range: (usize, usize)| range.0 <= offset && offset < range.1;
     for (_, t) in ast.types.iter() {
-        if matches!(t.kind, skull_parser::TypeExprKind::Hole(..)) && covers(t.span.offset_range()) {
+        if matches!(t.kind, skull_parser::TypeExprKind::Hole(..)) && span_contains(&t.span, offset)
+        {
             return Some((HoleKind::Type, t.span));
         }
     }
     for (_, e) in ast.exprs.iter() {
-        if matches!(e.kind, skull_parser::ExprKind::Hole(..)) && covers(e.span.offset_range()) {
+        if matches!(e.kind, skull_parser::ExprKind::Hole(..)) && span_contains(&e.span, offset) {
             return Some((HoleKind::Expr, e.span));
         }
     }

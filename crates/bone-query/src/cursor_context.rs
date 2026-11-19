@@ -180,10 +180,7 @@ impl CursorAst {
         let mut chain: Vec<_> = ast
             .exprs
             .iter()
-            .filter_map(|(i, expr)| {
-                let (start, end) = expr.span.offset_range();
-                (start <= offset && offset < end).then_some(i)
-            })
+            .filter_map(|(i, expr)| crate::query::span_contains(&expr.span, offset).then_some(i))
             .collect();
         chain.sort_by_key(|&i| {
             let (start, end) = ast.exprs[i].span.offset_range();
