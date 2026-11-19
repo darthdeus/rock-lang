@@ -2133,10 +2133,7 @@ pub(crate) fn check_expr(
                 // A writable selector cannot widen its value type to nullable: field_set could store null.
                 if writable {
                     let (fty_r, v_r) = (resolve(gamma, fty, span), resolve(gamma, v, span));
-                    let unbound_v =
-                        matches!(gamma.get(v_r), TypeExpr::Infer(..) | TypeExpr::Generic(..));
-                    if !unbound_v
-                        && matches!(gamma.get(v_r), TypeExpr::Nullable(_))
+                    if matches!(gamma.get(v_r), TypeExpr::Nullable(_))
                         && !matches!(gamma.get(fty_r), TypeExpr::Nullable(_))
                     {
                         comp_error!(

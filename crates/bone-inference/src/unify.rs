@@ -489,6 +489,8 @@ fn coerce_impl(
                 ));
             }
         }
+        gamma.out.any_erasures.push((span, from_r));
+        return Ok(());
     }
 
     let from_ty = gamma.get(from_r);
@@ -504,11 +506,6 @@ fn coerce_impl(
         && let Some(target) = frame_ref_target(gamma, from_r)
     {
         return unify(gamma, target, to_r, span);
-    }
-
-    if matches!(to_ty, TypeExpr::Builtin(BuiltinTy::Any)) {
-        gamma.out.any_erasures.push((span, from_r));
-        return Ok(());
     }
 
     if matches!(from_ty, TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint))
