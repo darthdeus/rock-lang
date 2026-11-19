@@ -1,3 +1,5 @@
+//! The graph resolves inference and substitutions before building these facts;
+//! lowering never receives the substitution that produced them.
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -23,9 +25,13 @@ pub enum ConcreteOwner {
 pub struct ConcreteTypeTables {
     pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
+    /// Deliberately untyped slots: a planned untyped operation, not an implicit
+    /// boxed value or a source-type fallback.
     pub untyped_exprs: FxHashSet<Idx<Expr>>,
     pub untyped_bindings: FxHashSet<Idx<BindingInfo>>,
     pub ty_types: FxHashMap<bone_core::prelude::TyId, MonoTyId>,
+    /// The field declaration lives outside the body's inference arena, so this
+    /// cannot be recovered from `ty_types`.
     pub struct_field_types: ArenaMap<Idx<Expr>, FxHashMap<Ustr, MonoTyId>>,
 }
 
@@ -58,6 +64,7 @@ impl ConcreteTypeTables {
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct ConcreteSignature {
     pub params: Vec<MonoTyId>,
+    /// A concrete tuple bound to a generic parameter stays one boxed boundary slot.
     pub param_tuple_spelled: Vec<bool>,
     pub result: Option<MonoTyId>,
 }
@@ -73,18 +80,25 @@ pub struct ConcreteCallee {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConcreteBodyPlan {
     pub owner: ConcreteOwner,
+    /// Empty for global and decorator plans.
     pub code_identity: Option<crate::code_identity::CodeIdentity>,
     pub types: ConcreteTypeTables,
+    /// Struct-default domains, keyed because each has a distinct HIR arena.
     pub foreign_domains: BTreeMap<SiteDomain, ConcreteTypeTables>,
     pub signature: ConcreteSignatureHandle,
     pub callees: BTreeMap<Site, ConcreteCallee>,
+    /// Visited but unresolved, distinct from absent, so lowering reports a planned
+    /// failure at the site.
     pub failed_sites: BTreeMap<Site, &'static str>,
     pub bound_tree: ResolvedBoundTree,
 }
 
+/// Ordered for deterministic iteration; replacing one body only swaps its handle.
 pub type ConcretePlans = BTreeMap<Instance, Arc<ConcreteBodyPlan>>;
 pub type ConcreteAlwaysPlans = FxHashMap<ConcreteOwner, ConcreteBodyPlan>;
 
+/// Keeps each selected body's handle, so the publisher can replace its own entry
+/// without mutating a consumer's selection.
 pub(crate) fn select_concrete_plans<'a>(
     plans: &ConcretePlans,
     instances: impl IntoIterator<Item = &'a Instance>,
@@ -99,6 +113,8 @@ pub(crate) fn select_concrete_plans<'a>(
         .collect()
 }
 
+/// Includes resolved Rock callees the target graph classifies as inline/native
+/// operators.
 pub fn select_concrete_plan_closure<'a>(
     plans: &ConcretePlans,
     roots: impl IntoIterator<Item = &'a Instance>,

@@ -1,3 +1,6 @@
+//! Cell-model CFG IR: variables are mutable cells, an `Idx<Inst>` is its single-use
+//! value, control flow lives only in terminators, and merges go through cells
+//! (no SSA, no block params).
 pub mod append_vec;
 pub mod bound;
 pub mod cfg;

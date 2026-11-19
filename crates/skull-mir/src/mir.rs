@@ -9,6 +9,8 @@ pub const VALUE_INTEGER_CHECK: &str = "__rock_value_integer_check";
 
 pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
 
+/// Part of the plan identity: backends must not infer it from field names
+/// or operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueCtorForm {
     Declared,
@@ -16,6 +18,8 @@ pub enum ValueCtorForm {
 }
 pub const VEC_COLUMN_REPR: &str = "columns";
 pub const VEC_STRIDED_REPR: &str = "strided";
+/// One bool per slot, leading the leaf columns. `@` cannot appear in a Rock
+/// identifier, so the key never collides with a leaf path.
 pub(crate) const VEC_COLUMN_PRESENCE_FIELD: &str = "@p";
 
 pub fn column_elem_rep_plans(
@@ -60,6 +64,8 @@ pub enum Lit {
     Bool(bool),
     Str(Ustr),
     Nil,
+    /// Passed for an omitted `T?` parameter with a non-null default: the callee
+    /// fills the default only on this marker, so an explicit `null` stays null.
     Omitted,
 }
 
@@ -67,25 +73,45 @@ pub enum Lit {
 /// on `Map` keys or arithmetic.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ContainerKind {
+    /// A slot may be absent while in bounds (`[T?]`), so access may enter a
+    /// backing table metamethod.
     Vec,
+    /// In-bounds access cannot reach a backing table metamethod.
     VecNonNull,
+    /// Index proven in `[0, len)`; a metamethod can still run for an absent slot.
+    /// Only on `Index` and `StoreIndex`.
     VecInBounds,
     VecNonNullInBounds,
+    /// `{ ptr, len }`; `.ptr` is a 0-based C array.
     NativeBuffer,
     NativeBufferInBounds,
+    /// Lua renders this exactly like `NativeBuffer`; JS lowers element access to
+    /// slot arithmetic over one flat `Float32Array(n * k)`.
     NativeBufferValue(Ustr),
+    /// One 1-indexed Lua array per leaf, `{ <leaf> = {..}, len = n }`; no
+    /// per-element table exists.
     VecValueColumns(ColumnElem),
+    /// Fixed-width rows in one dense array; inactive enum lanes store `false`,
+    /// never `nil`.
     VecValueStrided(ColumnElem),
     /// The index is already 1-based and bounds-checked.
     VecColumn,
+    /// The index is already in the backend's physical array base and was
+    /// bounds-checked by the owning element access.
     VecStrideSlot,
     /// Indexing a primitive pointer yields a number; indexing a struct pointer
     /// would allocate a reference cdata.
+    /// The index is absolute (`i * stride + leaf_off`) and already bounds-checked
+    /// per element: no `+1`, no check.
     NativeBufferLeaf,
+    /// Raw `base[index]`; records have no sequence length or iteration.
     Record,
+    /// Keyed directly by K, no `+1`.
     Map,
 }
 
+/// Nullability travels with the element because it decides the column set;
+/// reading it off a use site's type would add a phantom presence column.
 #[derive(Copy, Clone, Debug)]
 pub struct ColumnElem {
     pub name: Ustr,
@@ -173,6 +199,8 @@ impl ContainerKind {
     }
 }
 
+/// A plain resume fires only `on_resume`; `on_killed` fires from `kill()` and
+/// `on_hot_reload` from `fire_hot_reload()`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CoroHookKind {
     OnResume,
@@ -214,6 +242,8 @@ pub enum Inst {
     FloatDiv(Idx<Inst>, Idx<Inst>),
     FloatMod(Idx<Inst>, Idx<Inst>),
     StringConcat(Idx<Inst>, Idx<Inst>),
+    /// Scalar holes only; float and composite holes call `__rock_format_float` or
+    /// `inspect` instead.
     ToString(Idx<Inst>),
     Format {
         value: Idx<Inst>,
@@ -236,12 +266,18 @@ pub enum Inst {
     FloatLeq(Idx<Inst>, Idx<Inst>),
     FloatGt(Idx<Inst>, Idx<Inst>),
     FloatGeq(Idx<Inst>, Idx<Inst>),
+    /// Value-type contents equality goes through a helper, never a raw `==`.
     Eq(Idx<Inst>, Idx<Inst>),
     NotEq(Idx<Inst>, Idx<Inst>),
 
+    /// Floors, since Lua numbers are doubles. Every other `as` is identity and
+    /// emits no op.
     FloatToInt(Idx<Inst>),
+    /// Identity on LuaJIT; non-Lua backends materialize the conversion.
     IntToFloat(Idx<Inst>),
     UintToFloat(Idx<Inst>),
+    /// Rounds to the nearest `f32` so an `f32` field reads the same in every
+    /// storage.
     FloatToF32(Idx<Inst>),
     IntToUint(Idx<Inst>),
     UintToInt(Idx<Inst>),
@@ -265,6 +301,8 @@ pub enum Inst {
     UintShl(Idx<Inst>, Idx<Inst>),
     UintShr(Idx<Inst>, Idx<Inst>),
 
+    // Args are a Vec, not an IdxRange: lowered arg values are not contiguous in
+    // the arena.
     Call {
         func: FuncRef,
         args: Vec<Idx<Inst>>,
@@ -285,23 +323,30 @@ pub enum Inst {
         callee: Idx<Inst>,
         args: Vec<Idx<Inst>>,
     },
+    /// Placeholder `next` on an `Iterator`-bounded generic; the inliner substitutes
+    /// the concrete callee. Emitting a body that still contains one is an error.
     CallBoundMulti {
         dests: Vec<Idx<Cell>>,
         generic_idx: u32,
         args: Vec<Idx<Inst>>,
     },
 
+    /// The body shares the enclosing fn's arenas, so a captured variable is the
+    /// same `Cell`. Its sub-CFG is unreachable from the enclosing entry.
     Lambda {
         params: Vec<Idx<Cell>>,
         entry: Idx<Block>,
     },
 
     MakeTuple(Vec<Idx<Inst>>),
+    /// `{ data = {v0, ...}, len = N }`.
     MakeVec(Vec<Idx<Inst>>),
     MakeVecColumns {
         elem: Ustr,
         representation: crate::lower::RepId,
         nobox: bool,
+        /// One (leaf path, values) pair per leaf, each of length `len`, in the
+        /// element's declaration order.
         columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
         len: usize,
         capacity: Idx<Inst>,
@@ -338,27 +383,35 @@ pub enum Inst {
     },
     MakeValueStruct {
         name: Ustr,
+        /// Backends must realize this plan, never replan from `name` or the
+        /// operand spelling.
         representation: crate::lower::RepId,
         form: ValueCtorForm,
         /// In declared field order: the `<name>_ct` ctor is positional.
+        /// In the leaf form (only between cleanup and emit) the names are dotted
+        /// leaf paths that must equal the plan's leaf paths exactly.
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
     MakeNullableValue {
         present: Idx<Inst>,
         value: Idx<Inst>,
     },
+    /// An authorized box (`materialize`, or a `@gpu_only` call boundary). Emits like
+    /// `MakeValueStruct`; the `nobox` verifier ignores it.
     MaterializeValueStruct {
         name: Ustr,
         representation: crate::lower::RepId,
         form: ValueCtorForm,
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
+    /// A tagged table `{ __variant, __ty, <payload> }`.
     MakeEnum {
         tag: Ustr,
         ty: Ustr,
         positional: Vec<Idx<Inst>>,
         named: Vec<(Ustr, Idx<Inst>)>,
     },
+    /// Nil slots are harmless: Lua omits them, so the box matches the live variant.
     MakeEnumDyn {
         tag: Idx<Inst>,
         ty: Ustr,
@@ -366,6 +419,8 @@ pub enum Inst {
         named: Vec<(Ustr, Idx<Inst>)>,
     },
 
+    /// Produced only by closure conversion, never by lowering. `fn_ref = None`
+    /// boxes a mutable shared capture as `{ v = .. }`.
     MakeEnv {
         fn_ref: Option<Ustr>,
         fields: Vec<(Ustr, Idx<Inst>)>,
@@ -380,11 +435,14 @@ pub enum Inst {
     /// Made once per buffer, not per access: `ffi.cast` allocates a pointer
     /// cdata.
     FfiViewCast {
+        /// Aliases the same bytes as `.ptr`, so leaf and slot accesses stay coherent.
         cty: Ustr,
         ptr: Idx<Inst>,
     },
 
     Field {
+        /// The base is non-nil and its fields have no getters, so an unused read may
+        /// be removed.
         nonthrowing: bool,
         base: Idx<Inst>,
         field: Ustr,
@@ -400,11 +458,16 @@ pub enum Inst {
         index: Idx<Inst>,
         kind: ContainerKind,
     },
+    /// Yields the 1-based backing index; the column reads that follow share this
+    /// one check.
     VecCheckedIndex {
         vec: Idx<Inst>,
         index: Idx<Inst>,
     },
+    /// Each backend renders its own column base (`index + 1` on Lua, `index` on
+    /// JS). Pure and never raises.
     VecIndexSlot(Idx<Inst>),
+    /// Pure and never raises.
     NbIndexSlot(Idx<Inst>),
     Len {
         base: Idx<Inst>,
@@ -436,10 +499,13 @@ pub enum Inst {
         kind: ContainerKind,
     },
     CoroSetInner(Idx<Inst>),
+    /// Relocated to the constructor so a kill before the first resume still fires
+    /// the hook.
     CoroHook {
         kind: CoroHookKind,
         lambda: Idx<Inst>,
     },
+    /// The key cell is both cursor and new key; a nil key signals exhaustion.
     MapNext {
         key_cell: Idx<Cell>,
         val_cell: Idx<Cell>,
@@ -672,14 +738,28 @@ impl Inst {
 pub struct Cell {
     pub name: Option<Ustr>,
     pub capture_identity: Option<crate::code_identity::CaptureIdentity>,
+    /// A direct capture of a loop binding is per-iteration by value, so ownership
+    /// analysis excludes it from boxing.
     pub loop_binding: bool,
+    /// `None` for compiler temps, whose type typed backends infer from the first
+    /// store. The Lua backend ignores it.
     pub ty: Option<TyId>,
+    /// Licenses SROA to rematerialize an escaping load at the use site. Only a
+    /// wrongly-set flag can miscompile, so leave it unset when in doubt.
     pub nonnull_value_struct: bool,
+    /// Closure ownership treats the default-fill store as initialization, not
+    /// mutation.
     pub default_param: bool,
+    /// Drops the nil-write guard on field stores. Leave it unset when in doubt: a
+    /// wrongly-set flag lets a nil store insert an absent key.
     pub never_nil: bool,
+    /// A write through the `ref` alias is invisible to transforms, so SROA must not
+    /// split this cell and copy-prop must not forward its loads.
     pub borrowed: bool,
     pub native_ty: Option<crate::monoty::MonoTyId>,
     pub native_flat_slot: Option<NativeFlatSlot>,
+    /// Provenance for the cleanup census only: no pass may read it to decide
+    /// anything.
     pub producer: CellProducer,
 }
 
@@ -737,13 +817,16 @@ pub struct NativeFlatSlot {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Term {
     Return(Vec<Idx<Inst>>),
+    /// Lowers to a bare `return`.
     Unreachable,
+    /// No args: merges go through cells, not block params.
     Goto(Idx<Block>),
     Branch {
         cond: Idx<Inst>,
         then_bb: Idx<Block>,
         else_bb: Idx<Block>,
     },
+    /// Pre-rewrite only: the coroutine transform removes every `Yield`.
     Yield {
         values: Vec<Idx<Inst>>,
         resume: Idx<Block>,
@@ -787,6 +870,7 @@ impl Term {
     }
 }
 
+/// No params: every cross-block value goes through a cell.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub insts: Vec<Idx<Inst>>,
@@ -813,14 +897,20 @@ pub struct StaticCell {
     pub cell: Ustr,
     pub done_flag: Ustr,
     pub ty: Option<bone_core::prelude::TyId>,
+    /// Name and ordinal are the logical identity; synthesized cell names are
+    /// realization only.
     pub logical_name: Ustr,
     pub ordinal: u32,
     pub type_str: String,
+    /// Hashes names and literals, not arena indices, so it is stable across edits
+    /// elsewhere in the body.
     pub init_hash: u64,
     pub owner: Option<crate::code_identity::CodeIdentity>,
     pub site: Option<crate::code_identity::LambdaSiteId>,
 }
 
+/// Physical indices stay dense for side tables; these preserve source arena
+/// order at the output boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmitIds {
     pub insts: Vec<u32>,
@@ -833,6 +923,8 @@ pub struct EmitIds {
     pub next_blocks: u32,
 }
 
+/// bone hashes only source text, so incremental invalidation must compare these
+/// against the current inputs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ComptimeRead {
     pub input: ComptimeInputId,
@@ -846,6 +938,7 @@ pub enum ComptimeInputId {
     File(Ustr),
 }
 
+/// The one hash both the recorder and the staleness check use.
 pub fn comptime_value_hash(value: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -856,6 +949,7 @@ pub fn comptime_value_hash(value: &str) -> u64 {
 pub struct MirFunc {
     pub name: Ustr,
     pub code_identity: Option<crate::code_identity::CodeIdentity>,
+    /// Contains no backend symbol or build-local `RepId`.
     pub code_abi_fingerprint: Option<String>,
     pub lambda_abi_fingerprints: bone_core::prelude::FxHashMap<Idx<Inst>, String>,
     pub lambda_abi_representations:
@@ -867,9 +961,12 @@ pub struct MirFunc {
     pub code_compatibility: Option<crate::code_identity::CodeCompatibility>,
     pub rep_arena: Option<Arc<crate::lower::RepArena>>,
     pub params: Vec<Idx<Cell>>,
+    /// Backends with typed parameters cannot use the Lua/JS nil sentinel.
     pub param_default_guards: bone_core::prelude::FxHashMap<Idx<Inst>, usize>,
     pub param_default_materialized: std::collections::HashSet<usize>,
     pub param_default_values: bone_core::prelude::FxHashMap<usize, Vec<Idx<Inst>>>,
+    /// The inliner still charges a splice for a callee's, so the cell budget
+    /// bounds the same expansion.
     pub value_lets: usize,
     pub value_leaves: usize,
     pub lower_timing_enabled: bool,
@@ -889,31 +986,54 @@ pub struct MirFunc {
     pub entry: Idx<Block>,
     pub is_coroutine: bool,
     pub resume_arg: Option<Idx<Cell>>,
+    /// Each entry block is unreachable from `entry`. The flag is set where the
+    /// `defer` runs and cleared at scope exit, so terminal cleanup runs only pending defers.
     pub coro_defers: Vec<(Idx<Cell>, Idx<Block>)>,
+    /// Only a desugared iterator loop may have its bound snapshot-hoisted, never a
+    /// user-written `while`.
     pub for_iter_headers: Vec<Idx<Block>>,
     pub bound_trees: bone_core::prelude::FxHashMap<Idx<Inst>, bone_core::prelude::BoundTree>,
+    /// Already resolved: a raw `BoundTree`'s `TyId`s belong to the arena that
+    /// recorded it.
     pub resolved_bound_trees:
         bone_core::prelude::FxHashMap<Idx<Inst>, crate::bound::ResolvedBoundTree>,
+    /// A surviving un-spliced entry is a hard rejection: an opaque delivery cannot
+    /// receive splatted args.
     pub spec_bindings: bone_core::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
+    /// Identity, recorded regardless of delivery policy; `spec_bindings` is a
+    /// policy artifact and must not be read as identity.
     pub callee_instances: bone_core::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
+    /// Kept because rebuilding from a later, mutated owner would make an ABI
+    /// corruption look self-consistent.
     pub call_abi_plans:
         bone_core::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlanHandle>,
     pub call_rep_plans: bone_core::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
     pub flat_call_lanes: bone_core::prelude::FxHashMap<Idx<Inst>, usize>,
     pub closure_env_plans: bone_core::prelude::FxHashMap<Idx<Inst>, ClosureEnvPlan>,
+    /// Not derivable from `dests.len()`: a one-leaf element is two dests either way.
     pub bound_next_split: bone_core::prelude::FxHashSet<Idx<Inst>>,
+    /// Unused ones are dropped without keeping one to raise a nil error the source
+    /// could not have asked for.
     pub synthetic_projections: bone_core::prelude::FxHashSet<Idx<Inst>>,
     pub flat_box_widths: bone_core::prelude::FxHashMap<Idx<Inst>, usize>,
     pub nested_fns: Vec<MirFunc>,
+    /// Stamped for every lowered instruction because transforms rewrite
+    /// instructions in place.
     pub inst_spans: bone_core::prelude::ArenaMap<Idx<Inst>, bone_core::prelude::Span>,
+    /// Representation plans erase nominal generic arguments, so native backends
+    /// read them here.
     pub inst_logical_types: bone_core::prelude::FxHashMap<Idx<Inst>, crate::monoty::MonoTyId>,
+    /// A span cannot key this: a `for` head's `iter` and `next` share one span.
     pub call_sites: bone_core::prelude::FxHashMap<Idx<Inst>, crate::site::CallSite>,
     pub fn_value_symbols: bone_core::prelude::FxHashMap<Idx<Inst>, FuncRef>,
     pub hoisted_fn_globals: Vec<Ustr>,
     pub flat_variant_source: Option<FuncRef>,
+    /// Index 0 is this body's own owner when it has one.
     pub site_owners: Vec<crate::instance::Instance>,
 }
 
+/// A body that pushes runs under `DEFER_CALL`, which runs the still-registered
+/// cleanups when an error escapes and re-raises it.
 pub const DEFER_PUSH: &str = "__rock_defer_push";
 pub const DEFER_POP: &str = "__rock_defer_pop";
 pub const DEFER_CALL: &str = "__rock_defer_call";
@@ -921,6 +1041,7 @@ pub const CORO_KILL: &str = "__rock_coroutine_kill";
 pub const CORO_HOT_RELOAD: &str = "__rock_coroutine_fire_hot_reload";
 
 impl MirFunc {
+    /// Does not establish purity or authorize removing the original's effects.
     pub fn field_projection(&self, id: Idx<Inst>) -> Option<(Idx<Inst>, Ustr)> {
         match self.insts[id] {
             Inst::Field { base, field, .. } => Some((base, field)),
@@ -936,6 +1057,8 @@ impl MirFunc {
         }
     }
 
+    /// Read off the final MIR, so an inlined callee's registrations protect its
+    /// caller.
     pub fn registers_defer_cleanup(&self, blocks: &[Idx<Block>]) -> bool {
         blocks.iter().any(|&b| {
             self.blocks[b].insts.iter().any(|&i| match &self.insts[i] {

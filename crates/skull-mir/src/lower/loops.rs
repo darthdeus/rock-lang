@@ -44,6 +44,8 @@ impl<'a> Builder<'a> {
         self.cur = header;
         let const_true = matches!(self.body.expr_arena[cond], Expr::Bool(true));
         if const_true {
+            // `while true`: exit is reachable only via `break`, which
+            // `used_break_targets` records.
             self.f.set_term(self.cur, Term::Goto(body_bb));
         } else {
             self.lower_branch(cond, body_bb, exit, true)?;
@@ -59,6 +61,7 @@ impl<'a> Builder<'a> {
 
         let diverges = const_true && !self.used_break_targets.contains(&exit);
         self.cur = exit;
+        // The dead exit still gets a terminator so every block ends terminated.
         if diverges {
             self.f.set_term(self.cur, Term::Goto(header));
         }
@@ -89,6 +92,8 @@ impl<'a> Builder<'a> {
             .inf
             .and_then(|i| i.for_iter_protocol.get(&iter).cloned())
         {
+            // A plain `[T]` walks its storage directly: `VecIter` would only inline back
+            // into this counted loop. Shader lowering keeps the protocol.
             if !self.scx.values_first_class
                 && enumerated_collection.is_none()
                 && vars.leaves().iter().all(|&b| !self.binding_is_ref(b))
@@ -109,6 +114,8 @@ impl<'a> Builder<'a> {
                 if let Some(collection) = enumerated_collection.filter(|&c| self.iter_is_arena(c)) {
                     return self.lower_for_arena(&vars, collection, body, true);
                 }
+                // The arena head takes the same walk: the pair iterator's `next` skips free
+                // slots in an inner loop that no pass turns back into a counted one.
                 let walkable = match &vars {
                     BindingPattern::Leaf(_) => true,
                     BindingPattern::Tuple(subs) => subs.len() == 2,
@@ -130,10 +137,13 @@ impl<'a> Builder<'a> {
             return self.lower_for_vec(&vars, collection, body, true);
         }
         if self.iter_is_arena(iter) {
+            // Bone routes a direct `for .. in arena` to the stdlib ArenaPairIter.
             return Err(gap(
                 "for over Arena must route through the iterator protocol (for_iter_protocol missing)",
             ));
         }
+        // FlatVec is routed here so `coll_kind` stays closed over
+        // Vec/Map/NativeBuffer.
         if self.expr_is_flat_vec(iter) {
             return self.lower_for_array(vars, iter, body);
         }
@@ -149,6 +159,8 @@ impl<'a> Builder<'a> {
             }
             ContainerKind::Map => self.lower_for_map(None, &vars, iter, body),
             ContainerKind::Record => unreachable!("for over a heap record"),
+            // Leaf columns and leaf views are minted during element lowering, never user
+            // types, so neither can be a `for` head.
             ContainerKind::VecColumn => Err(gap("for over a synthetic Vec leaf column")),
             ContainerKind::VecStrideSlot => Err(gap("for over a synthetic Vec strided slot")),
             ContainerKind::VecInBounds
@@ -184,6 +196,8 @@ impl<'a> Builder<'a> {
             Some((m, f)) => {
                 let iter_ref = FuncRef { module: m, func: f };
                 let bundle = self.lower_expr_repr(iter_expr)?;
+                // Resolved before the arguments are shaped: the splat must match the body
+                // the call targets.
                 let witness = if info.iter.is_some() {
                     self.with_site_op(crate::site::SiteOp::ForIter, |b| {
                         b.concrete_callee_for_site(iter_expr)
@@ -193,12 +207,16 @@ impl<'a> Builder<'a> {
                     crate::instance::Instance::base(iter_ref)
                 };
                 let args = self.iter_witness_args(&witness, bundle)?;
+                // The head's `iter` witness and the head expression's own call share one
+                // span; the site operation keeps them distinguishable.
                 let call = self.with_site_op(crate::site::SiteOp::ForIter, |b| {
                     b.emit_cur(Inst::Call {
                         func: iter_ref,
                         args,
                     })
                 });
+                // The witness is an ordinary call to a generic `iter`, so under
+                // instance-owned emission it must name a concrete instance.
                 if let Some(delivery) = self.concrete_delivery_instance(&witness) {
                     self.f.spec_bindings.insert(call, delivery);
                 }
@@ -226,6 +244,8 @@ impl<'a> Builder<'a> {
             )]);
         }
 
+        // The `next` shape is read under the concrete callee the emitted call
+        // carries, not the caller's, so both lowering sides agree.
         let concrete_next = if matches!(info.next, BoundNext::Concrete { .. }) {
             self.with_site_op(crate::site::SiteOp::ForNext(Box::default()), |b| {
                 b.concrete_callee_for_site(iter_expr)
@@ -297,6 +317,8 @@ impl<'a> Builder<'a> {
                     .insert(call, self.callee_abi_plan_for_instance(owner)?);
             }
             BoundNext::CallerGeneric(gidx) => {
+                // Takes the same `ForNext` operation as the concrete arm; otherwise the
+                // witness is recorded on one arm and invisible on the other.
                 let call = self.with_site_op(crate::site::SiteOp::ForNext(Box::default()), |b| {
                     b.emit_cur(Inst::CallBoundMulti {
                         dests: dests.clone(),
@@ -312,6 +334,8 @@ impl<'a> Builder<'a> {
         let ok = self.emit_cur(Inst::Load(dests[0]));
         self.branch_to(ok, body_bb, exit);
 
+        // Multiple elements (`next -> (bool, A, B)`) destructure against a matching
+        // tuple pattern without allocating.
         self.cur = body_bb;
         let loads = self.load_cells(&dests[1..]);
         let elem_slot = match &ret_shape.slots[1..] {
@@ -338,6 +362,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Retain an owned generator's cleanup while its coroutine is suspended.
+    /// The same flag is cleared by early-exit cleanup and natural exhaustion.
     fn own_loop_coroutine(
         &mut self,
         iter_expr: Idx<Expr>,
@@ -448,6 +474,8 @@ impl<'a> Builder<'a> {
         HashSet::default()
     }
 
+    /// Lets a payload-free enum's tag test int-compare the ordinal instead of
+    /// reading `.__variant`.
     pub(crate) fn scrut_enum_name(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let name = ty.peel_nullable().0.nominal()?;
@@ -496,12 +524,18 @@ impl<'a> Builder<'a> {
         } else {
             (None, vars.clone())
         };
+        // Occupancy is the liveness check; generations only supply the handle's
+        // payload, and an unused row needs no snapshot of the data.
         let entity_used = self.arena_component_used(&pat, 0, body)?;
         let data_used = self.arena_component_used(&pat, 1, body)?;
         let enum_var = enum_var.filter(|&b| self.loop_pattern_used(&BindingPattern::Leaf(b)));
 
+        // At an all-scalar value `T` the arena's `data` is column-stored, so a bare
+        // `Index` would read a table that isn't there.
         let column_elem = self.arena_column_elem_of(iter)?;
 
+        // The columns are resolved once, outside the counted loop. A retired handle
+        // resolves to an empty store, which the `i < n` header exits immediately.
         let arena = self.lower_iterable_collection(iter)?;
         let scene_id = self.read_field(arena, crate::names::ustr("_scene_id"));
         let arena_id = self.read_field(arena, crate::names::ustr("_arena_id"));
@@ -541,6 +575,8 @@ impl<'a> Builder<'a> {
         let c = self.emit_cur(Inst::IntLt(i, n));
         self.branch_to(c, body_bb, exit);
 
+        // The walk is bounded by the occupancy column's own length, and a `[bool]`
+        // column has no holes, so no nil test is needed.
         self.cur = body_bb;
         let idx = self.emit_cur(Inst::Load(i_cell));
         self.f.set_term(self.cur, Term::Goto(occ_bb));
@@ -568,6 +604,8 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
+        // A column element is rebuilt from its leaves; for a `nobox` element that is
+        // an implicit materialization, which the verifier rejects by name.
         let data = if let Some(data) = data {
             Some(match column_elem {
                 Some(elem) => {
@@ -575,6 +613,7 @@ impl<'a> Builder<'a> {
                     self.pack(repr.into_value())?
                 }
                 None => {
+                    // The stored element stays the entry's; the binder gets its own copy.
                     let elem = match self.concrete_expr_ty(iter).map(|ty| ty.peel_nullable().0) {
                         Some(MonoTy::App { params, .. }) if self.iter_is_arena(iter) => {
                             params.first()
@@ -607,6 +646,8 @@ impl<'a> Builder<'a> {
                 }
             }
             BindingPattern::Leaf(_) if entity_used || data_used => {
+                // A whole-pair use demands both components, so no source read sees this
+                // placeholder.
                 let entity = entity.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Nil)));
                 let data = data.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Nil)));
                 let pair = ValueRepr::Tuple {
@@ -643,6 +684,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Lua stateless `next` iteration: the key cell is the cursor and a nil key
+    /// after `MapNext` ends the loop. The enumerate counter steps in the latch.
     pub(crate) fn lower_for_map(
         &mut self,
         counter: Option<Idx<BindingInfo>>,
@@ -650,6 +693,8 @@ impl<'a> Builder<'a> {
         iter: Idx<Expr>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
+        // A column-stored Map iterates its spine, yielding (key, slot), and reads the
+        // value leaf-wise out of `data`; no element table exists.
         let col = self.map_column_value_of(iter)?;
         let m = self.lower_expr(iter)?;
         let table = match col {
@@ -727,6 +772,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    // An unused loop binding needs no snapshot, which also drops a column read's
+    // bounds check. Writes count as uses: an assignment still needs the cell.
     fn loop_pattern_used(&self, pattern: &BindingPattern) -> bool {
         let leaves = pattern.leaves();
         self.body.expr_arena.iter().any(|(_, expr)| match expr {
@@ -739,6 +786,8 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// A single arena binder holds a pair. Only a projection of the other
+    /// component can avoid its snapshot; whole-pair uses and writes demand both.
     fn arena_component_used(
         &self,
         pattern: &BindingPattern,
@@ -781,6 +830,8 @@ impl<'a> Builder<'a> {
         Ok(false)
     }
 
+    /// `col_value` is the element of a column-stored Map. `None` keeps the boxed
+    /// walk, loading the value cell in place so the emitted order is unchanged.
     pub(crate) fn bind_map_entry(
         &mut self,
         vars: &BindingPattern,
@@ -862,6 +913,8 @@ impl<'a> Builder<'a> {
                 None => s.loop_binder_ty(vars, Some(1)),
             };
             let repr = s.loop_element_snapshot(ty, repr)?;
+            // A tuple element whose `nobox` parts ride its box as leaves destructures
+            // from the box's slots, not from its plain indices.
             if let Some(pat) = elem_pat {
                 if let (BindingPattern::Tuple(_), ValueRepr::Scalar(base)) = (pat, &repr)
                     && let Some(MonoTy::App { params, .. }) = s.concrete_expr_ty(coll)
@@ -938,6 +991,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// A FlatVec is bounded by its `len` field, not the buffer capacity, and
+    /// indexes its `buf` NativeBuffer.
     fn lower_counted_storage(
         &mut self,
         coll: Idx<Expr>,
@@ -955,6 +1010,7 @@ impl<'a> Builder<'a> {
         Ok((kind, arr_v, len_v))
     }
 
+    /// `continue` jumps to the latch, so the index still increments.
     pub(crate) fn lower_for_array(
         &mut self,
         vars: BindingPattern,
@@ -970,6 +1026,7 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Snapshot a boxed value before the loop body can mutate its source element.
     fn loop_element_snapshot(
         &mut self,
         ty: Option<std::borrow::Cow<'a, MonoTy>>,
@@ -1057,6 +1114,8 @@ impl<'a> Builder<'a> {
                 self.binds.insert(raw(*b), cell);
             }
             BindingPattern::Tuple(subs) => {
+                // Destructuring a fresh `MakeTuple` binds its operands directly, with no
+                // table allocation; this keeps `let (ok, x) = next(it)` zero-alloc.
                 if let Inst::MakeTuple(vs) = &self.f.insts[value]
                     && vs.len() == subs.len()
                 {
@@ -1072,6 +1131,8 @@ impl<'a> Builder<'a> {
                         base: value,
                         index: i,
                     });
+                    // The tuple box can be shared, so a value element the binding writes through
+                    // is its own copy.
                     let elem = match sub {
                         BindingPattern::Leaf(b) if !self.binding_stays_unwritten(*b) => {
                             match self.binding_ty(*b).and_then(|ty| self.concrete_ty_id(ty)) {
@@ -1089,6 +1150,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Charge every cell a destructuring pattern bound to the destructure, for
+    /// the cleanup Load/Store census ([`crate::mir::CellProducer`]).
     fn mark_destructured(&mut self, vars: &BindingPattern) {
         match vars {
             BindingPattern::Leaf(b) => {
@@ -1141,6 +1204,8 @@ impl<'a> Builder<'a> {
                     self.bind_pattern_slot(sub, self.scx.rep_arena().layout(s), values, idx)?;
                 }
             }
+            // One name bound to a splatting tuple holds its slot cells: packing it would
+            // pack the tuple's `nobox` parts, which no later pass can undo.
             (BindingPattern::Leaf(b), RepLayout::Tuple(inner))
                 if inner.splats(self.scx.rep_arena()) =>
             {
@@ -1158,6 +1223,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Bind `b` to a value's leaves: one cell per leaf, registered in
+    /// `group_binds`.
     pub(crate) fn bind_leaves(
         &mut self,
         b: Idx<BindingInfo>,
@@ -1238,6 +1305,8 @@ impl<'a> Builder<'a> {
         Some(out)
     }
 
+    /// The slot layout a name takes when it binds a whole splatting tuple: it
+    /// holds the slots in cells, never one box.
     pub(crate) fn whole_tuple_binding(
         &self,
         b: Idx<BindingInfo>,
@@ -1283,6 +1352,8 @@ impl<'a> Builder<'a> {
         self.tuple_binds.insert(raw(b), (cells, shape));
     }
 
+    /// The elements arrive as flat slots, so an element that is a `nobox` value
+    /// binds its leaves directly.
     pub(crate) fn bind_tuple_repr(
         &mut self,
         vars: &BindingPattern,

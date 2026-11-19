@@ -11,6 +11,8 @@ use super::{EnumFlatShape, EnumPlan, RepArena, RepError, RepId, ValueShape, Valu
 use crate::lua_nesting::{LuaDisplayPart, display_record};
 use crate::mir::{Inst, MirFunc};
 
+/// One physical answer for one logical field: inline/nobox fields and flat
+/// enum payloads share one inline layout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StructFieldPlan {
     Direct {
@@ -99,6 +101,8 @@ pub fn cdata_leaf_alias(ws: &Workspace, owner: Ustr, path: &str) -> Ustr {
     crate::names::ustr(&prefix)
 }
 
+/// Closing over declared child fields also owns the value representation of a
+/// child that enters through a host boundary rather than a Rock constructor.
 pub struct StructRegistryPlan {
     arena: Arc<RepArena>,
     names: BTreeSet<Ustr>,
@@ -237,6 +241,8 @@ fn resolved_field_type(ws: &Workspace, ty: TyId) -> Result<(TypeExpr, bool), Rep
     }
 }
 
+/// Every consumer that inspects or lowers a struct field uses this answer; a
+/// missing declaration or unresolved field type is never direct storage.
 pub fn struct_field_plan(
     ws: &Workspace,
     target: FnBackend,
@@ -331,6 +337,8 @@ pub struct GcTableField {
 }
 
 impl GcTableField {
+    /// Box keys in ctor order, each flagged when it is a nullable child's presence
+    /// tag rather than a data leaf.
     pub fn keys(&self) -> Vec<(Ustr, bool)> {
         let Some(sub) = &self.inline else {
             return vec![(self.name, false)];
@@ -351,6 +359,7 @@ impl GcTableField {
         out
     }
 
+    /// An inline child renders as its own box would.
     pub fn lua_display_parts(&self) -> Vec<LuaDisplayPart> {
         match &self.inline {
             None => vec![LuaDisplayPart::Expr(format!("tostring(v.{})", self.name))],
@@ -422,6 +431,7 @@ fn lua_display_inline(shape: &ValueShape, prefix: &str) -> Vec<LuaDisplayPart> {
 
 /// The concatenated [`GcTableField::keys`] are the `<Name>_vt` ctor's
 /// parameters and the box's keys.
+/// Every reader and writer of the box takes them from here.
 pub fn gc_table_fields(
     ws: &Workspace,
     target: FnBackend,

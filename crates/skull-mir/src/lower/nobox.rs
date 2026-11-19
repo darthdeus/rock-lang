@@ -42,9 +42,12 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
+        // GPU-only calls use native values in GLSL and never execute on Lua.
         if crate::intrinsics::is_gpu_only(callee) {
             return Ok(());
         }
+        // Only an opaque body reads a tuple box by its user layout; the stdlib's
+        // opaque primitives hold a splatting tuple's flat box without reading it.
         let foreign_body = (callee.inline_body.is_some() || callee.is_extern)
             && !bone_core::modules::is_stdlib_module_file(
                 self.ws.module(func.module).file.as_str(),
@@ -56,6 +59,7 @@ impl<'a> Builder<'a> {
                 }
                 continue;
             }
+            // A flat element `ref` passes its container and slot, never a box.
             if self.is_flat_ref_call_arg(arg) {
                 continue;
             }
@@ -88,6 +92,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Opaque bodies may assume row storage, including inside tuple parameters.
     pub(crate) fn reject_column_container_opaque_slots(
         &self,
         e: Idx<Expr>,
@@ -112,6 +117,7 @@ impl<'a> Builder<'a> {
         )
     }
 
+    /// Nullable and tuple slots can still carry the same underlying container.
     fn param_slot_hazard_mono(
         &self,
         mono: &crate::monoty::MonoTy,
@@ -220,6 +226,8 @@ impl<'a> Builder<'a> {
         if callee.param_decls.len() != signature.params.len() {
             return Err(self.gap_here("concrete callee signature has the wrong parameter count"));
         }
+        // The JS `deepcopy` runtime rebuilds every TypedArray over one copy of its
+        // buffer, so a leaf-addressed container comes back with views over its own storage.
         let leaf_views_rebuilt =
             callee.name == "deepcopy" && crate::intrinsics::is_intrinsic(callee);
         for (i, id) in signature.params.iter().enumerate() {
@@ -268,6 +276,7 @@ impl<'a> Builder<'a> {
             .is_some_and(|pd| pd.annotations.iter().any(|a| a.is_builtin("repr")))
     }
 
+    /// A named function value must match the ABI derived from its type.
     pub(crate) fn reject_fn_value_abi_mismatch(
         &self,
         e: Idx<Expr>,
@@ -330,6 +339,8 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
+        // A `@gpu_only` intrinsic's boxed return is no real boundary: on the GPU it is
+        // a native vector, and the Lua body only errors.
         if crate::intrinsics::is_gpu_only(callee) {
             return Ok(());
         }
@@ -406,6 +417,8 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Coerces at construction, before any scalar-ABI splat; only a `Scalar` leaf
+    /// can be an int.
     pub(crate) fn coerce_field_repr(
         &mut self,
         r: ValueRepr,
@@ -454,6 +467,7 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Sees through a transparent newtype: `newtype Score(int)` is the raw int at runtime.
     pub(crate) fn arith_ty_of(&self, te: TypeExpr) -> Option<ArithTy> {
         match te {
             TypeExpr::Builtin(BuiltinTy::Int) => Some(ArithTy::Int),
@@ -476,6 +490,7 @@ impl<'a> Builder<'a> {
         self.dispatch().nobox_value_name(e)
     }
 
+    /// First-class values need no box, so the target already meets the guarantee.
     pub(crate) fn is_nobox_struct(&self, name: Ustr) -> bool {
         self.dispatch().is_nobox_struct(name)
     }
@@ -558,6 +573,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         }
         match self.body.expr_arena[e] {
+            // The global's declared nullability preserves its leaf positions.
             Expr::Global(name) => {
                 let Some(&ty) = self.ws.globals_by_name.get(&name) else {
                     return Ok(None);
@@ -567,6 +583,8 @@ impl<'a> Builder<'a> {
                 let Some(shape) = plan.value_shape().cloned() else {
                     return Ok(None);
                 };
+                // Minted from the emitted symbol, matching `global_storage::physical_leaf_names`:
+                // these leaves are emitted Lua globals, and a DefKey is not an identifier.
                 let symbol = crate::mangle::symbol_of_key(name);
                 let leaves = (0..shape.leaf_count())
                     .map(|i| nobox_global_leaf_name(symbol, i))

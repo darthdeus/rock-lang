@@ -1,6 +1,11 @@
+//! Neither [`ShaderIR`] nor [`ShaderInterfacePlan`] may name a physical layout:
+//! no byte offsets, binding indices, texture units, `std140` or target type
+//! spellings. Those are a target's answer, stated in its own ABI plan.
 use std::fmt::Write as _;
 use ustr::Ustr;
 
+/// Lives on the neutral side because it is a target property, and the graph
+/// layer must not depend on a backend to spell its own target axes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum GlslProfile {
     #[default]
@@ -30,6 +35,8 @@ impl ShaderStage {
     }
 }
 
+/// The reachability node, body identity and emitted name all come off this one
+/// value, so two instantiations of one generic helper are two functions.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ShaderInstance {
     pub inst: Instance,
@@ -58,6 +65,8 @@ impl ShaderInstance {
         self.inst.subst(ws, interner)
     }
 
+    /// Target-neutral: a backend that needs a different spelling renames from here
+    /// rather than re-deriving it.
     pub fn symbol(&self, ws: &Workspace, interner: &crate::monoty::MonoInterner) -> String {
         self.inst.symbol(ws, interner)
     }
@@ -75,6 +84,8 @@ pub struct ShaderStageIr {
 }
 
 impl ShaderStageIr {
+    /// Deduped by set, since a generic helper's repeats are not neighbours; emission
+    /// order is kept so the reload list is stable run to run.
     pub fn declarations(&self) -> Vec<FuncRef> {
         let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
         let mut out = Vec::new();
@@ -92,13 +103,18 @@ impl ShaderStageIr {
     }
 }
 
+/// Published on an emission so a second backend renders these bodies rather
+/// than re-walking the entry.
 #[derive(Clone)]
 pub struct ShaderIR {
+    /// The arena that minted every `Instance` here; a target emitter must use this
+    /// same handle for specialization symbols and substitutions.
     pub interner: Arc<MonoInterner>,
     pub stages: Vec<ShaderStageIr>,
 }
 
 impl ShaderIR {
+    /// Deduped across stages: a helper both stages reach is one file to reload.
     pub fn declarations(&self) -> Vec<FuncRef> {
         let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
         let mut out = Vec::new();
@@ -111,12 +127,16 @@ impl ShaderIR {
     }
 }
 
+/// `Engine` is one group per program, and both stages must name the same type.
+/// A `Stage` group is one per stage: a vertex entry is reused across fragments.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum UniformRole {
     Engine,
     Stage(ShaderStage),
 }
 
+/// `key` is the DefKey that lookups and fingerprints read; `symbol` is what
+/// shader text and wires spell, and keeps a `@nomangle` declared name.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NominalType {
     pub key: Ustr,
@@ -132,6 +152,7 @@ impl NominalType {
     }
 }
 
+/// No offsets: a member's place is the target's answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalUniformGroup {
     pub role: UniformRole,
@@ -139,6 +160,7 @@ pub struct LogicalUniformGroup {
     pub members: Vec<(Ustr, WireKind)>,
 }
 
+/// Physical offsets, padding, bindings and block size are deliberately absent.
 pub fn semantic_uniform_group_fingerprint(struct_name: Ustr, members: &[(Ustr, WireKind)]) -> u64 {
     let mut hash = 0xa5a5_5a5a_c3c3_3c3cu64;
     for byte in bone_core::modules::artifact_name(struct_name.as_str()).as_bytes() {
@@ -162,6 +184,8 @@ impl LogicalUniformGroup {
     }
 }
 
+/// Separate from the scalar group for a lifetime reason (whole-block uploads),
+/// not a typing one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalArrayGroup {
     pub stage: ShaderStage,
@@ -170,15 +194,22 @@ pub struct LogicalArrayGroup {
 }
 
 impl LogicalArrayGroup {
+    /// The runtime joins the semantic interface's array packets to a target's
+    /// physical block by this name.
     pub fn symbol(&self) -> Ustr {
         symbol_of_key(self.owner)
     }
 
+    /// Per stage entry, so a program's two array blocks cannot collide; a clash
+    /// with a user `@uniform` group is rejected by the target, never renamed.
     pub fn block_name(&self) -> Ustr {
         Ustr::from(&format!("{}_Arrays", self.symbol()))
     }
 }
 
+/// Sampler order is logical; the compiler assigns units. `stages` lists the
+/// readers because a stage that samples unlisted would reference an undeclared
+/// identifier.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalTextureGroup {
     pub struct_name: Option<NominalType>,
@@ -199,6 +230,7 @@ pub enum VertexRate {
     PerInstance,
 }
 
+/// The location each attribute takes is the target's answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalVertexInput {
     pub struct_name: NominalType,
@@ -210,6 +242,7 @@ pub struct LogicalVertexInput {
 pub struct LogicalVarying {
     pub name: Ustr,
     pub kind: WireKind,
+    /// Not interpolated: every target must honour it; how it says so is its own.
     pub flat: bool,
 }
 
@@ -221,14 +254,20 @@ pub struct ShaderInterfacePlan {
     pub uniform_groups: Vec<LogicalUniformGroup>,
     pub array_groups: Vec<LogicalArrayGroup>,
     pub textures: Option<LogicalTextureGroup>,
+    /// Kept apart from `textures`: a grouped sampler's unit is compiler-assigned,
+    /// while a bare one keeps a unit the CPU picked. A program may not mix them.
     pub bare_samplers: Vec<LogicalSampler>,
     pub fragment_output: FragmentOutput,
+    /// Not a colour output, so absent from `fragment_output` and the semantic
+    /// wire; the colour-attachment count must not see it.
     pub frag_depth: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum FragmentOutput {
+    /// An integer target (R32I picking) returns `I32`.
     Single(WireKind),
+    /// MRT: one named output per field, in declaration order.
     Mrt(Vec<(Ustr, WireKind)>),
     #[default]
     None,
@@ -239,6 +278,7 @@ impl ShaderInterfacePlan {
         self.uniform_groups.iter().find(|g| g.role == role)
     }
 
+    /// Declaration order, which is the order a target assigns units in.
     pub fn sampler_names(&self) -> Vec<Ustr> {
         self.textures
             .as_ref()
@@ -246,6 +286,8 @@ impl ShaderInterfacePlan {
             .unwrap_or_default()
     }
 
+    /// Grouped samplers first (in group order), then bare ones. A stage declares
+    /// exactly this and types its bare-global reads from it.
     pub fn stage_samplers(&self, stage: ShaderStage) -> Vec<(Ustr, SamplerKind)> {
         let mut out: Vec<(Ustr, SamplerKind)> = self
             .textures
@@ -262,6 +304,8 @@ impl ShaderInterfacePlan {
         out
     }
 
+    /// Hashes names, roles, order and neutral kinds only; target bindings,
+    /// offsets, sizes and source text are not part of the semantic interface.
     pub fn semantic_fingerprint(&self, fullscreen: bool) -> u64 {
         let payload = self.semantic_payload(fullscreen);
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
@@ -273,6 +317,8 @@ impl ShaderInterfacePlan {
         folded & ((1 << 53) - 1)
     }
 
+    /// A separate wire from every target's physical ABI wire; the runtime never
+    /// parses GLSL or WGSL to recover it.
     pub fn semantic_wire(&self, fullscreen: bool) -> String {
         format!(
             "SHADER_INTERFACE_V1\nfingerprint {}\n{}end\n",
@@ -281,6 +327,8 @@ impl ShaderInterfacePlan {
         )
     }
 
+    /// Type names are written as emitted symbols: the runtime joins a uniform group
+    /// to its physical block by name. Fingerprints keep the logical key.
     fn semantic_payload(&self, fullscreen: bool) -> String {
         let mut out = String::new();
         writeln!(out, "fullscreen {}", if fullscreen { 1 } else { 0 }).unwrap();

@@ -1,3 +1,5 @@
+//! Lowering and the instance walk must produce the same key for a struct-default
+//! injection, or the join reports a hole that is really a disagreement.
 use bone_core::prelude::StructId;
 use bone_core::workspace::{BodyInference, Workspace};
 use ustr::Ustr;
@@ -6,11 +8,15 @@ use crate::monoty::{self, MonoCtor, MonoSubst, MonoTy, MonoTyReason};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Args {
+    /// One per declared generic, in declaration order; empty for a non-generic struct.
     At(Vec<MonoTy>),
+    /// Not determinable inside a shared generic body. Both consumers then use the
+    /// declaration-keyed injection, sound because a shared body is lowered once.
     Shared,
 }
 
 impl Args {
+    /// Empty for [`Args::Shared`].
     pub fn to_vec(&self) -> Vec<MonoTy> {
         match self {
             Self::At(a) => a.clone(),
@@ -19,6 +25,7 @@ impl Args {
     }
 }
 
+/// A defect, unlike the expected shared-body case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArgsError {
     Untyped,
@@ -32,6 +39,8 @@ pub fn declared_generics(ws: &Workspace, sid: StructId) -> usize {
         .len()
 }
 
+/// For a generic struct the type must be an application of this struct with one
+/// argument per declared generic; anything else is rejected.
 pub fn args_at(
     ws: &Workspace,
     inf: &BodyInference,
@@ -46,6 +55,7 @@ pub fn args_at(
     let ty = *inf.expr_types.get(e).ok_or(ArgsError::Untyped)?;
     let mono = match monoty::convert(ws, inf, ty, subst) {
         Ok(m) => m,
+        // Only these two reasons come from a shared generic body; any other is a defect.
         Err(MonoTyReason::UnboundGeneric(_) | MonoTyReason::UnresolvedInfer(_)) => {
             return Ok(Args::Shared);
         }
@@ -60,6 +70,8 @@ pub fn args_at(
     }
 }
 
+/// Positional. Empty when bone published no slots, so the initializer fails to
+/// resolve rather than binding by guess.
 pub fn slot_subst(defaults_inf: Option<&BodyInference>, args: &[MonoTy]) -> MonoSubst {
     let mut out = MonoSubst::default();
     let Some(inf) = defaults_inf else { return out };

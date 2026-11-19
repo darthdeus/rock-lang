@@ -7,6 +7,8 @@ use super::{EnumPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, shape::is_pa
 use crate::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
 use crate::monoty::MonoSubst;
 
+/// Type context for route decisions. The graph walk uses a target-neutral
+/// context with `values_first_class` false; GLSL cannot reach these routes.
 #[derive(Clone, Copy)]
 pub struct DispatchCtx<'a> {
     pub ws: &'a Workspace,
@@ -17,6 +19,8 @@ pub struct DispatchCtx<'a> {
     pub interner: Option<&'a crate::monoty::MonoInterner>,
     pub rep_arena: &'a RepArena,
     pub target: bone_core::hir::FnBackend,
+    /// Concrete lowering sets this to `None`: every type decision must come from
+    /// its concrete plan.
     pub logical_subst: Option<&'a MonoSubst>,
     pub values_first_class: bool,
 }
@@ -24,6 +28,7 @@ pub struct DispatchCtx<'a> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum StringifyRoute {
     ToString,
+    /// A string inside a structural rendering, quoted and escaped as a Rock literal.
     EscapedString,
     FormatFloat,
     Newtype(Ustr),
@@ -79,6 +84,8 @@ impl EqRoute {
     }
 }
 
+/// Resolution is target-neutral: backend selection happens when the concrete
+/// call plan is built, and JS may supply a body for an `inline(lua)` declaration.
 pub fn dispatched_callee_decls(ws: &Workspace, name: &str) -> Vec<crate::mir::FuncRef> {
     let mut resolved = Vec::new();
     for (key, decls) in &ws.functions_by_name {
@@ -116,12 +123,16 @@ pub struct FormatPlan {
     pub special: Option<&'static str>,
     pub grouping: Option<(char, i64)>,
     pub needs_pad: bool,
+    /// The printf conversion omits the width; the pad helper takes it instead.
     pub skip_width: bool,
+    /// A `float` value floors before an integer conversion.
     pub val_is_float: bool,
     pub ty: Option<char>,
 }
 
 impl FormatPlan {
+    /// Structural rendering always calls pad; no width makes padding a runtime
+    /// no-op, not an omitted call.
     pub fn obligations(&self) -> Vec<(Vec<u32>, &'static str)> {
         let mut out: Vec<(Vec<u32>, &'static str)> = Vec::new();
         match &self.structural {
@@ -164,6 +175,7 @@ impl HolePlan {
 }
 
 impl<'a> DispatchCtx<'a> {
+    /// The stored type node, without the specialization substitution.
     pub(crate) fn raw_ty_node(&self, ty: TyId) -> Option<TypeExpr> {
         Some(match ty {
             TyId::Static(mid, idx) => self.ws.module(mid).ty_arena[idx],
@@ -188,10 +200,13 @@ impl<'a> DispatchCtx<'a> {
         Some(self.interner?.get_ref(id))
     }
 
+    /// Never fabricates a partial HIR node for a concrete generic argument; use
+    /// `concrete_ty` or `concrete_expr_ty` for resolved facts.
     pub(crate) fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
         self.raw_ty_node(ty)
     }
 
+    /// Chase `Infer` and peel `Nullable`.
     pub(crate) fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
         match self.ty_node(ty)? {
             TypeExpr::Infer(var, _) => self.resolve_ty(self.inf?.substitutions.get(var)?),
@@ -200,6 +215,7 @@ impl<'a> DispatchCtx<'a> {
         }
     }
 
+    /// Chase `Infer` without peeling `Nullable`, keeping the `TyId`.
     pub(crate) fn resolve_tyid(&self, ty: TyId) -> Option<TyId> {
         match self.ty_node(ty)? {
             TypeExpr::Infer(var, _) => self.resolve_tyid(self.inf?.substitutions.get(var)?),
@@ -218,6 +234,8 @@ impl<'a> DispatchCtx<'a> {
         if self.concrete_plan.is_some() {
             return false;
         }
+        // A generic bound to `E?` is nullable, but `ty_node` substitutes the payload;
+        // read the raw node before that erases the `?`.
         if let Some(TypeExpr::Generic(var, _)) = self.raw_ty_node(ty) {
             if let Some(b) = self.logical_subst.and_then(|subst| subst.get(&var)) {
                 return b.peel_nullable().1;
@@ -298,10 +316,14 @@ impl<'a> DispatchCtx<'a> {
         self.is_nobox_struct(name).then_some(name)
     }
 
+    /// Lua/C equality reaches a value struct's `__eq` directly; JS uses the
+    /// structural equality helper.
     pub fn is_value_struct(&self, name: Ustr) -> bool {
         crate::lower::shape::is_value_struct(self.ws, name)
     }
 
+    /// Unlike [`Self::nobox_value_name`] this does not require `nobox`: every
+    /// `value` struct carries a native-`==`-reachable `__eq`.
     pub(crate) fn value_struct_name(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
@@ -326,6 +348,8 @@ impl<'a> DispatchCtx<'a> {
         self.is_value_struct(name).then_some(name)
     }
 
+    /// All-unit enum variants lower to interned singleton globals, reference-equal
+    /// across uses, so `==`/`!=` is native Lua `==`/`~=`.
     pub(crate) fn is_payloadless_enum(&self, e: Idx<Expr>) -> bool {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
@@ -398,6 +422,8 @@ impl<'a> DispatchCtx<'a> {
         )
     }
 
+    /// For a value already known present: the nullable guard wraps this route, so
+    /// the arm is picked from the non-null shape on both sides.
     pub(crate) fn stringify_route(&self, expr: Idx<Expr>) -> StringifyRoute {
         if self.is_null_lit(expr) {
             return StringifyRoute::ToString;
@@ -526,6 +552,8 @@ impl<'a> DispatchCtx<'a> {
             .collect()
     }
 
+    /// Only the stdlib's extern `tostring` and the `to_string(any)` fallback
+    /// qualify; a user function or a typed overload of either name is ordinary.
     pub fn tostring_route(&self, call: Idx<Expr>) -> Option<(Idx<Expr>, StringifyRoute)> {
         let Expr::Call {
             callee: bone_core::hir::Callee::Unresolved { name, .. },
@@ -619,6 +647,8 @@ impl<'a> DispatchCtx<'a> {
         HolePlan::Formatted(self.format_plan(hole, spec))
     }
 
+    /// Every branch that decides a stdlib call is here; the printf conversion
+    /// string is not, because it emits no call.
     pub(crate) fn format_plan(&self, hole: Idx<Expr>, spec: &InterpSpec) -> FormatPlan {
         let inferred = if self.concrete_plan.is_some() {
             match self.concrete_expr_ty(hole) {
@@ -644,6 +674,8 @@ impl<'a> DispatchCtx<'a> {
             }
         };
         let has_precision = spec.precision.is_some() || spec.precision_expr.is_some();
+        // A spec carrying a numeric-presentation flag falls through to the printf path
+        // and gaps there rather than being silently ignored on a structural render.
         let structural = (spec.format_type.is_none()
             && inferred.is_none()
             && spec.grouping.is_none()
@@ -685,6 +717,7 @@ impl<'a> DispatchCtx<'a> {
             None
         };
         let grouping = grouping_sep.map(|sep| {
+            // `_` with a radix conversion groups by nibble (4), else by 3.
             let group = match (sep, ty) {
                 ('_', Some('x' | 'X' | 'o' | 'b')) => 4i64,
                 _ => 3i64,
@@ -703,6 +736,7 @@ impl<'a> DispatchCtx<'a> {
         }
     }
 
+    /// Null tests and same-type `nobox` comparisons are primitive operations.
     pub fn eq_route(&self, lhs: Idx<Expr>, rhs: Idx<Expr>) -> EqRoute {
         if self.is_null_lit(lhs) || self.is_null_lit(rhs) {
             return EqRoute::Primitive;
@@ -712,6 +746,8 @@ impl<'a> DispatchCtx<'a> {
                 return EqRoute::Primitive;
             }
         }
+        // Lua/C value structs have native equality; JS reaches its per-type registry
+        // through the structural helper. Different names keep the type-mismatch check.
         if let (Some(ln), Some(rn)) = (self.value_struct_name(lhs), self.value_struct_name(rhs)) {
             if ln == rn {
                 return if matches!(

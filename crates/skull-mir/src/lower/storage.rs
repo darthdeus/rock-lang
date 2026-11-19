@@ -1,6 +1,8 @@
 use super::flat_ref::FlatRefVal;
 use super::*;
 
+/// Builds root every entry [`Builder::call_spine`] may call instead of
+/// predicting synthesized sites, so a call resolves wherever lowering emits it.
 pub const SYNTHESIZED_ENTRIES: &[&str] = &[
     "__arena_store_or_empty",
     "__descriptor_with",
@@ -127,6 +129,8 @@ impl<'a> Builder<'a> {
         let shape = self.column_shape(elem)?;
         let paths = column_leaf_paths(&shape);
 
+        // Built as a `Vec`-tagged struct: `write_table_key` brackets a dotted leaf
+        // path, so the table has the shape `MakeVecColumns` writes for a literal.
         let mut fields = Vec::with_capacity(paths.len() + 2);
         let len = self.read_field(vec, crate::names::ustr("len"));
         for path in paths {
@@ -220,6 +224,7 @@ impl<'a> Builder<'a> {
 
     /// Capped at 12: each distinct offset can cost a KNUM plus a KINT, three of
     /// LuaJIT's 500 constant slots, on x86.
+    /// Wider rows advance one index so their leaves add no offset constants.
     fn strided_store_leaves_at(
         &mut self,
         vec: Idx<Inst>,
@@ -257,6 +262,7 @@ impl<'a> Builder<'a> {
 
     /// A wide `nobox` struct row keeps every leaf as stored: a `false` leaf would
     /// be corrupted by the flat-enum tier's nil-to-false densifying.
+    /// Enum rows are numeric by eligibility and keep the sentinel.
     pub(crate) fn strided_stores_raw(&self, elem: ColumnElem) -> bool {
         self.ws.struct_by_name.contains_key(&elem.name)
     }
@@ -470,6 +476,7 @@ impl<'a> Builder<'a> {
         }
         let (b, _) = self.lower_index_base(ib)?;
         let i = self.lower_expr(index)?;
+        // The bounds check belongs to the index, not the outer field access.
         let checked = self.with_site_expr(cur, |s| s.nb_checked_index(b, i))?;
         segs.reverse();
         let path = segs
@@ -549,6 +556,7 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Lua pointers and JS TypedArrays use the same planned C offsets and strides.
     fn native_buffer_plan(&self, elem: Ustr) -> Result<ContainerPlan, CompilerError> {
         let ty = MonoTy::App {
             ctor: crate::monoty::MonoCtor::Nominal(crate::names::ustr("NativeBuffer")),
@@ -608,6 +616,8 @@ impl<'a> Builder<'a> {
         (view, at)
     }
 
+    /// Bounds-checks the element once and takes no slot reference, so the read
+    /// allocates nothing; the `Group` result lets SROA peel projected bindings.
     pub(crate) fn nb_leaf_element_repr(
         &mut self,
         buf: Idx<Inst>,
@@ -635,6 +645,8 @@ impl<'a> Builder<'a> {
         ))
     }
 
+    /// The element never materializes, which is what lets a `nobox` type live in
+    /// a NativeBuffer.
     pub(crate) fn nb_leaf_element_store(
         &mut self,
         buf: Idx<Inst>,
@@ -661,6 +673,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Read once per element access and reused across that element's leaves.
     pub(crate) fn leaf_view(
         &mut self,
         buf: Idx<Inst>,
@@ -688,6 +701,8 @@ impl<'a> Builder<'a> {
         at
     }
 
+    /// Bounds-checks without taking a slot reference; one call per element
+    /// access, never per leaf.
     pub(crate) fn nb_checked_index(
         &mut self,
         buf: Idx<Inst>,
@@ -704,6 +719,8 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueBundle, CompilerError> {
         let shape = self.column_shape(elem)?;
         let slot = self.checked_column_index(vec, index);
+        // Presence leads the reads for a nullable element, as `rebuild_from_leaves`
+        // consumes it, so `present` comes from the column, not a nil compare on a box.
         let leaves: Vec<Idx<Inst>> = column_leaf_paths(&shape)
             .into_iter()
             .map(|path| {
@@ -717,6 +734,8 @@ impl<'a> Builder<'a> {
         ))
     }
 
+    /// For a synthesized call. A missing or ambiguous name means the stdlib and
+    /// lowering drifted, so it rejects; backend siblings pick this target's decl.
     pub(crate) fn stdlib_funcref(&self, name: &str) -> Result<FuncRef, CompilerError> {
         let Some(decls) = self.ws.functions_by_name.get(&crate::names::ustr(name)) else {
             return Err(gap(format!("stdlib `{name}` not found")));
@@ -868,6 +887,7 @@ impl<'a> Builder<'a> {
                     FlatStorage::Strided => {
                         let stride = self.column_shape(elem)?.leaf_count();
                         let raw = self.strided_stores_raw(elem);
+                        // Stale scalar slots beyond len hold nothing to release.
                         if !raw || self.column_contains_references(elem) {
                             let vec = self.lower_expr(recv)?;
                             let index = self.lower_expr(index)?;
@@ -967,6 +987,7 @@ impl<'a> Builder<'a> {
                     };
                     self.call_spine(helper, vec![vec, key, width])?
                 } else if elem.is_nobox() {
+                    // Pass the argument leaves in the key function's ABI order.
                     let shape = self.column_shape(elem)?;
                     let paths = column_leaf_paths(&shape)
                         .into_iter()
@@ -1043,6 +1064,8 @@ impl<'a> Builder<'a> {
     }
 
     /// The `data` columns must exist before the first store.
+    /// Hence a zero-length `MakeVecColumns`, not an empty table. The field names
+    /// match Arena's bookkeeping SoA: the two are one structure.
     pub(crate) fn empty_column_map(
         &mut self,
         elem: ColumnElem,
@@ -1065,6 +1088,8 @@ impl<'a> Builder<'a> {
         }))
     }
 
+    /// Generic snapshots keep table storage; concrete instantiations resolve
+    /// through `SpecSubst` and use spine operations.
     pub(crate) fn map_column_primitive(
         &mut self,
         e: Idx<Expr>,
@@ -1134,6 +1159,8 @@ impl<'a> Builder<'a> {
         let paths = column_leaf_paths(&shape);
         let leaves =
             self.element_storage_leaves(bundle, &shape, paths.len(), elem, "column append")?;
+        // `len` is shared by every column, so it advances once; bumping per column
+        // would desync them.
         let len = self.read_field(vec, crate::names::ustr("len"));
         let next = self.int_plus_one(len);
         // A column indexes like its backend's `_data` (1-based on LuaJIT, 0-based
@@ -1144,6 +1171,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// The chain must name one leaf: `xs[i].at.x` -> (`xs[i]`, `"at.x"`). A chain
+    /// past a reference leaf is not one; the leaf is its place base.
     pub(crate) fn flat_leaf_path(
         &self,
         base: Idx<Expr>,
@@ -1227,6 +1256,7 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Paired with `value`'s leaves in order, with `value` lowered once.
     fn nested_field_leaves(
         &mut self,
         field: Ustr,
@@ -1309,6 +1339,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Its `SiteOp::Synthesized(name)` keeps it distinct from the enclosing
+    /// expression's own callee in the concrete call plan.
     pub(crate) fn call_spine(
         &mut self,
         name: &'static str,
@@ -1326,6 +1358,8 @@ impl<'a> Builder<'a> {
         )
     }
 
+    /// Several such calls can share one expression and one name (a nobox value
+    /// renders per leaf field); the `path` keeps their sites apart.
     pub(crate) fn dispatched_call(
         &mut self,
         name: &'static str,
@@ -1344,6 +1378,8 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// The value never materializes. A nullable value collapses to key removal
+    /// when absent, since a nil store already removes a Map key.
     pub(crate) fn map_column_store(
         &mut self,
         m: Idx<Inst>,
@@ -1353,6 +1389,8 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         let bundle = self.lower_expr_repr(value)?;
         let repr = bundle.value();
+        // The instance graph decides the absent arm from the value's type, so this
+        // does too.
         if self
             .concrete_expr_ty(value)
             .is_some_and(|ty| !ty.peel_nullable().1)
@@ -1406,6 +1444,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Errors on a miss, like the boxed `__map_get_checked`.
     pub(crate) fn map_column_index_repr(
         &mut self,
         m: Idx<Inst>,
@@ -1419,6 +1458,7 @@ impl<'a> Builder<'a> {
 
     /// Read columns only in the present arm: a missing slot is `-1`, and freed
     /// slots may hold stale leaves.
+    /// `nobox` results remain leaf groups across the join.
     pub(crate) fn map_column_get_repr(
         &mut self,
         m: Idx<Inst>,
@@ -1526,6 +1566,7 @@ impl<'a> Builder<'a> {
         Ok(leaves)
     }
 
+    /// One call per element access, not per column.
     pub(crate) fn checked_column_index(&mut self, vec: Idx<Inst>, index: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::VecCheckedIndex { vec, index })
     }

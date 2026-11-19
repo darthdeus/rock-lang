@@ -22,6 +22,8 @@ fn missing_wire_slot_rejects_instead_of_boxing() {
     assert!(matches!(variadic, RepLayout::Opaque));
 }
 
+// No Rock program reaches the states below: each hands the oracle a compiler
+// state bone never produces, so they are rejections rather than diagnostics.
 fn spec_ws(src: &str) -> (Workspace, ModuleId) {
     let mut modules =
         vec![skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse")];
@@ -154,6 +156,8 @@ fn updating_one_shared_reference_context_uses_copy_on_write() {
     ));
 }
 
+/// `update_body` is the one ABI-state mutation crossing emissions; a plan served
+/// after it is one the context already invalidated.
 #[test]
 fn a_cleared_abi_memo_cannot_serve_a_stale_plan() {
     let (ws, mid) = spec_ws("fn f(x: int) -> int { x }\nfn main() { let y = f(1) }");

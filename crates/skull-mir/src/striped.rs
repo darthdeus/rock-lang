@@ -1,3 +1,5 @@
+//! Counters split across threads: each thread counts in its own cache-line
+//! stripe, so counting adds no shared write, and a reader folds every stripe.
 const STRIPES: usize = 16;
 
 #[derive(Default)]

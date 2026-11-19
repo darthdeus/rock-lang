@@ -1,8 +1,12 @@
+//! An [`Instance`]'s `args` are ids in the instance graph's
+//! [`crate::monoty::MonoArena`] and have no meaning without it.
 use bone_core::workspace::Workspace;
 
 use crate::mir::FuncRef;
 use crate::monoty::{MonoInterner, MonoSubst, MonoTy, MonoTyId};
 
+/// Non-generic functions get an instance too, with empty `args`. Empty `args`
+/// means non-generic and nothing else; it is not a shared-body sentinel.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Instance {
     pub func: FuncRef,
@@ -17,16 +21,21 @@ impl Instance {
         }
     }
 
+    /// Reads the declaration's generics, not `self.args`: an argument list that
+    /// disagreed would be a defect, not a different answer.
     pub fn is_generic(&self, ws: &Workspace) -> bool {
         !ws.module(self.func.module).functions[self.func.func]
             .generics
             .is_empty()
     }
 
+    /// In declaration order. Ids in, owned types out is always safe; the other
+    /// direction ([`Self::intern`]) must go through the build's single interner.
     pub fn arg_types(&self, interner: &MonoInterner) -> Vec<MonoTy> {
         interner.get_all(&self.args)
     }
 
+    /// The only way an instance is minted outside the graph's own walk.
     pub fn intern(interner: &MonoInterner, func: FuncRef, args: Vec<MonoTy>) -> Self {
         Self {
             func,
@@ -34,6 +43,8 @@ impl Instance {
         }
     }
 
+    /// The declaration supplies the generics' order. Empty for a non-generic
+    /// instance.
     pub fn subst(&self, ws: &Workspace, interner: &MonoInterner) -> MonoSubst {
         if self.args.is_empty() {
             return MonoSubst::default();
@@ -41,6 +52,8 @@ impl Instance {
         crate::lower::spec_subst_from_key(ws, self.func, &self.arg_types(interner))
     }
 
+    /// A non-generic instance is the base mangling. A generic one always has
+    /// concrete arguments; falling back to the base name would miscompile.
     pub fn symbol(&self, ws: &Workspace, interner: &MonoInterner) -> String {
         let f = &ws.module(self.func.module).functions[self.func.func];
         if self.args.is_empty() {
@@ -51,6 +64,8 @@ impl Instance {
     }
 }
 
+/// `(module, function index)`: stable within a build and used only to make
+/// iteration deterministic.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DeclKey(pub FuncRef);
 
@@ -72,6 +87,8 @@ impl PartialOrd for DeclKey {
     }
 }
 
+/// Stable within a build and only used for deterministic iteration; the manifest
+/// is sorted by rendered symbol, which is stable across builds.
 fn ord_key(i: &Instance) -> (u32, u32, &[MonoTyId]) {
     (
         i.func.module.raw(),
@@ -80,6 +97,7 @@ fn ord_key(i: &Instance) -> (u32, u32, &[MonoTyId]) {
     )
 }
 
+/// Not an identity across builds or indexes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct InstanceId(u32);
 
@@ -89,6 +107,8 @@ impl InstanceId {
     }
 }
 
+/// Ids are dense in first-asked order and never reused or reassigned, so a table
+/// indexed by them only grows.
 pub struct InstanceIndex {
     generation: u64,
     ids: std::sync::RwLock<rustc_hash::FxHashMap<Instance, InstanceId>>,
@@ -100,6 +120,7 @@ struct InstanceIdCache {
 }
 
 thread_local! {
+    /// Ids this worker has seen, so a repeat question takes no shared lock.
     static INSTANCE_ID_CACHE: std::cell::RefCell<InstanceIdCache> =
         std::cell::RefCell::new(InstanceIdCache {
             generation: 0,

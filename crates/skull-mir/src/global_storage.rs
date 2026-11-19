@@ -1,3 +1,6 @@
+//! Mutable globals and statics live in one table that survives an incremental
+//! overlay. Globals take dense slots ordered by stable keys; statics are keyed
+//! by logical identity, so adding or removing one never moves another value.
 use std::collections::BTreeMap;
 
 use bone_core::hir::FnBackend;
@@ -13,6 +16,8 @@ pub fn global_identity(file: Ustr, name: Ustr) -> String {
     format!("global:{}", logical_def_key(file, name))
 }
 
+/// A DefKey is not an identifier, so leaves are minted from the emitted symbol,
+/// as lowering mints `nobox` leaves: MIR and storage leaf names are equal.
 pub(crate) fn physical_leaf_names(plan: &GlobalPlan, name: Ustr) -> Vec<Ustr> {
     let symbol = symbol_of_key(name);
     plan.leaf_names(symbol).unwrap_or_else(|| vec![symbol])
@@ -26,6 +31,7 @@ pub(crate) fn storage_key(identity: &str, leaf: &str) -> String {
     format!("{identity}::{leaf}")
 }
 
+/// Backends assign slots in key order, never declaration or arena order.
 pub fn global_storage_keys(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -36,6 +42,7 @@ pub fn global_storage_keys(
             let identity = global_identity(module.logical_file, global.name);
             let plan = GlobalPlan::for_declared_type(ws, scx, global.ty)
                 .map_err(|_| format!("global `{identity}` has no storage plan"))?;
+            // Keyed on the emitted symbol, which is what a lookup from codegen carries.
             let names = physical_leaf_names(&plan, global.name);
             let multi_leaf = names.len() != 1;
             for (index, name) in names.into_iter().enumerate() {
@@ -71,6 +78,7 @@ pub struct GlobalDirectoryEntry {
     pub slots: Vec<String>,
 }
 
+/// Sorted by identity.
 pub fn global_directory(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -113,6 +121,8 @@ pub fn global_directory(
     Ok(entries)
 }
 
+/// Covers identity, type, representation, leaves and cdata C layouts: storage
+/// created under a different layout cannot be loaded into.
 pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, String> {
     let mut rows = Vec::new();
     for module in ws.source_modules() {
@@ -175,6 +185,8 @@ pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, Strin
     Ok(format!("{hash:016x}"))
 }
 
+/// Static identity is its owning logical callable and source site, never its
+/// emitted cell name or initializer hash.
 pub fn static_cell_storage_keys(
     ws: &Workspace,
     interner: &crate::monoty::MonoInterner,
@@ -198,6 +210,7 @@ pub fn static_cell_storage_keys(
     ))
 }
 
+/// An overlay re-runs a static's initializer only when this key changed.
 pub fn static_cell_key(cell: &StaticCell) -> String {
     format!("{}@{:x}", cell.type_str, cell.init_hash)
 }
@@ -274,6 +287,7 @@ pub(crate) fn global_read_checks(
                 continue;
             };
             let physical = physical_leaf_names(&plan, global.name);
+            // Optional fields can leave every flattened value leaf null.
             let flag = plan
                 .leaf_names(symbol_of_key(global.name))
                 .map(|_| initialization_flag(global.name));
@@ -309,5 +323,6 @@ pub(crate) fn global_read_checks(
 }
 
 fn initialization_flag(name: Ustr) -> Ustr {
+    // Rock identifiers cannot contain `$`.
     crate::names::ustr(&format!("$global_initialized_{}", symbol_of_key(name)))
 }

@@ -54,10 +54,12 @@ pub struct LifecycleEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LifecyclePlan {
     pub entries: Vec<LifecycleEntry>,
+    /// Declared lifecycle decorators, whether or not anything applies them.
     pub declarations: usize,
 }
 
 impl LifecyclePlan {
+    /// In plan order within each phase.
     pub fn entries_by_phase(&self) -> std::collections::BTreeMap<Ustr, Vec<&LifecycleEntry>> {
         let mut out: std::collections::BTreeMap<Ustr, Vec<&LifecycleEntry>> = Default::default();
         for entry in &self.entries {
@@ -179,6 +181,7 @@ fn is_frame_phase(phase: Ustr) -> bool {
     )
 }
 
+/// `scene_create<T>` embeds the same canonical `MonoTy` encoding.
 pub fn scene_root_type_key(root_type: &MonoTy) -> Option<String> {
     match root_type {
         MonoTy::App {
@@ -420,6 +423,8 @@ fn wire_qualification(
     app: &bone_core::hir::Annotation,
     phase: Ustr,
 ) -> Result<LifecycleQualification, CompilerError> {
+    // `wire` is a compiler-owned role, not a reserved spelling: an unrelated
+    // decorator named `wire` does not qualify.
     if phase != "wire" {
         return Ok(LifecycleQualification::Plain);
     }

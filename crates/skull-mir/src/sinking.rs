@@ -2,6 +2,8 @@ use comfy_la_arena::Idx;
 
 use crate::mir::{Block, Inst, MirFunc};
 
+/// Allocation exhaustion is excluded. Field reads are non-throwing when lowering
+/// proves a non-nil Rock value base.
 pub fn may_throw(inst: &Inst) -> bool {
     matches!(
         inst,
@@ -29,6 +31,8 @@ pub fn may_throw(inst: &Inst) -> bool {
     )
 }
 
+/// `Load`, `Call`, `Index`, `Field` and `Len` are impure or cell-order-sensitive,
+/// so they materialize at their program position.
 pub fn always_inlinable(inst: &Inst) -> bool {
     matches!(
         inst,
@@ -102,17 +106,25 @@ pub fn always_inlinable(inst: &Inst) -> bool {
 }
 
 fn is_barrier(inst: &Inst) -> bool {
+    // A projection may enter a host callback that writes globals, so it stays before
+    // a later global snapshot.
     !inst.produces_value() || ordered_read(inst) || matches!(inst, Inst::Global(_))
 }
 
+// Non-throwing fields can be deleted when unused, but remain mutable reads: their
+// snapshot must not sink across a call or a storage write.
 fn ordered_read(inst: &Inst) -> bool {
     may_throw(inst) || matches!(inst, Inst::Field { .. })
 }
 
+/// A throwing expression may reach its use only when no effect or other possible
+/// error intervenes.
 pub fn preserve_effect_order(func: &MirFunc, blocks: &[Idx<Block>], inlinable: &mut [bool]) {
     preserve_effect_order_with(func, blocks, inlinable, |_, _| false);
 }
 
+/// `commutes(folded, between)` names an error a folded throwing expression may
+/// cross because the target cannot tell the two apart.
 pub fn preserve_effect_order_with(
     func: &MirFunc,
     blocks: &[Idx<Block>],
@@ -120,12 +132,15 @@ pub fn preserve_effect_order_with(
     commutes: impl Fn(&Inst, &Inst) -> bool,
 ) {
     let raw = |id: Idx<Inst>| id.into_raw().into_u32() as usize;
+    // Position in its block before which a value is finally evaluated.
     let mut limit = vec![0usize; func.insts.len()];
     for &block in blocks {
         let insts = &func.blocks[block].insts;
         func.blocks[block].term.uses_each(&mut |value| {
             limit[raw(value)] = insts.len();
         });
+        // Follow folded consumers to their final evaluation point: the immediate use
+        // alone misses a throw nested in a folded tuple or concat.
         for (pos, &id) in insts.iter().enumerate().rev() {
             let k = raw(id);
             let inst = &func.insts[id];
@@ -138,6 +153,8 @@ pub fn preserve_effect_order_with(
                     inlinable[k] = false;
                 }
             }
+            // Operands run before the instruction; a folded barrier evaluates where it
+            // stands, so its operands do too.
             let at = if inlinable[k] && !is_barrier(inst) {
                 limit[k]
             } else {

@@ -1,3 +1,5 @@
+//! Facts come from the target's representation plans, so a walker reads values
+//! in the layout that backend actually stores.
 use bone_core::hir::{BuiltinTy, EnumDef, StructDef, TyId, TypeCtor, TypeExpr, VariantPayload};
 use bone_core::workspace::Workspace;
 use rustc_hash::FxHashMap;
@@ -10,6 +12,8 @@ use crate::lower::{
 use crate::mangle::type_symbol;
 use crate::monoty::{MonoCtor, MonoTy};
 
+/// A shape with no typed leaf is absent from [`type_shape`]; inside a typed
+/// shape an unsupported part stays `Prim("any")`, which rebuilding walkers reject.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shape {
     Prim(&'static str),
@@ -17,6 +21,7 @@ pub enum Shape {
     Tuple(Vec<Shape>),
     Vec(Box<Shape>),
     Map(Box<Shape>, Box<Shape>),
+    /// The stdlib `JsonField<T>` presence wrapper.
     Field(Box<Shape>),
     Nom(Ustr),
 }
@@ -41,6 +46,7 @@ pub fn type_shape(ws: &Workspace, ty: TyId) -> Option<Shape> {
     found.then_some(shape)
 }
 
+/// Nominal leaves stop recursion; structural nesting has a finite depth bound.
 fn shape_of(ws: &Workspace, ty: TyId, depth: u32) -> (Shape, bool) {
     const MAX_DEPTH: u32 = 12;
     const ANY: (Shape, bool) = (Shape::Prim("any"), false);
@@ -52,6 +58,7 @@ fn shape_of(ws: &Workspace, ty: TyId, depth: u32) -> (Shape, bool) {
             Some(module) => module.ty_arena[idx],
             None => return ANY,
         },
+        // A local arena type never reaches a declaration's descriptor.
         TyId::Local(_) => return ANY,
     };
     let nested = |inner| shape_of(ws, ty.with_idx(inner), depth + 1);
@@ -121,12 +128,15 @@ fn shape_of(ws: &Workspace, ty: TyId, depth: u32) -> (Shape, bool) {
                     let (inner, found) = nested(inner);
                     return (Shape::Field(Box::new(inner)), found);
                 }
+                // A struct's own fields are reached through its own entry.
                 (Shape::Nom(type_symbol(ws, name)), true)
             }
         },
     }
 }
 
+/// The string matches `to_simple_string` for int/float/string/bool, a nominal
+/// name and `[..]`; anything else is "any".
 pub fn reflect_field_type(ws: &Workspace, ty: TyId) -> (String, bool) {
     let resolve = |t: TyId| -> Option<TypeExpr> {
         match t {
@@ -167,9 +177,12 @@ pub fn json_field_factories(ws: &Workspace) -> FxHashMap<(Ustr, Ustr, JsonFieldO
 #[derive(Clone, Debug)]
 pub struct FieldEntry {
     pub name: Ustr,
+    /// The reflection type string, or the inline child's type symbol.
     pub ty: String,
     pub nullable: bool,
+    /// The child's leaves live in the parent under `<name>.<leaf>` keys.
     pub embed: bool,
+    /// The parent's physical keys of a flattened enum field: tag, then slots.
     pub flat: Option<Vec<Ustr>>,
     pub shape: Option<Shape>,
     pub json_name: Option<Ustr>,
@@ -181,7 +194,9 @@ pub struct FieldEntry {
 #[derive(Clone, Debug)]
 pub struct PositionEntry {
     pub shape: Option<Shape>,
+    /// 0-based physical slot in a flat enum box.
     pub slot: Option<usize>,
+    /// Leaf paths of a value payload spread across consecutive slots.
     pub leaves: Option<Vec<Ustr>>,
 }
 
@@ -200,12 +215,14 @@ pub struct CEnumPayload {
 
 #[derive(Clone, Debug)]
 pub enum Entry {
+    /// A `value` element whose Vec stores interleaved rows; paths in slot order.
     StridedRows {
         name: Ustr,
         paths: Vec<Ustr>,
     },
     Struct {
         name: Ustr,
+        /// `struct`, `value_table` (GC-carrying value) or `c_struct` (GC-free value).
         kind: &'static str,
         fields: Vec<FieldEntry>,
         vec_columns: Option<Vec<Ustr>>,
@@ -234,6 +251,7 @@ pub enum Entry {
 }
 
 impl Entry {
+    /// Primitive type strings are included; a caller resolves only declared ones.
     pub fn referenced_types(&self) -> Vec<Ustr> {
         let mut out = Vec::new();
         match self {
@@ -276,6 +294,8 @@ fn plan_error(message: String) -> CompilerError {
     CompilerError::new_no_location(message)
 }
 
+/// The strided row layout, if any, then the struct. `is_gc` names GC-carrying
+/// `value` structs, which are tables rather than GC-free native values.
 pub fn struct_entries(
     ws: &Workspace,
     target: bone_core::hir::FnBackend,
@@ -348,6 +368,7 @@ pub fn struct_entries(
     Ok(out)
 }
 
+/// The flat layout, if any, then the enum when it has a walkable form.
 pub fn enum_entries(ws: &Workspace, e: &EnumDef) -> Vec<Entry> {
     let mut out = Vec::new();
     let name = type_symbol(ws, e.name);
@@ -412,6 +433,7 @@ pub fn enum_entries(ws: &Workspace, e: &EnumDef) -> Vec<Entry> {
     out
 }
 
+/// Complete alternatives, including units and primitive payloads.
 fn boxed_variants(ws: &Workspace, e: &EnumDef) -> Option<Vec<(Ustr, VariantEntry)>> {
     let flat = EnumPlan::for_name(ws, e.name).and_then(|plan| plan.flat().cloned());
     let mut any = false;

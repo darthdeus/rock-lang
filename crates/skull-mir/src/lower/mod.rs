@@ -1,5 +1,7 @@
 //! Lower resolved HIR into MIR blocks, cells and typed instructions.
 
+// Fx hashing: per-body scratch maps keyed by small ids, where SipHash was a
+// measurable share of lowering.
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -101,6 +103,8 @@ pub(crate) fn required_wire_slot<T>(
         .ok_or_else(|| missing(format!("{context} has no ABI slot {index}")))
 }
 
+/// An `Any` (portable Rock) body serves every target; otherwise the backend must
+/// match exactly.
 fn serves_target(b: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend) -> bool {
     use bone_core::hir::FnBackend;
     b == FnBackend::Any || b == target
@@ -118,6 +122,8 @@ mod shape;
 mod sort_key;
 pub use shape::*;
 
+/// The scalar-ABI policy is private to this module, so a definition and its
+/// calls cannot reach it from two places.
 mod abi;
 pub use abi::{
     AbiPlanMemoStats, AbiQuestion, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass,
@@ -177,6 +183,8 @@ fn prefixed(field: Ustr, leaves: Vec<(Ustr, Idx<Inst>)>) -> Vec<(Ustr, Idx<Inst>
         .collect()
 }
 
+/// Flat enum slots use dotted keys on the parent: `sig.#` holds the variant
+/// name, `sig.0` and `shape.r` the payloads.
 fn flat_tag_slot(field: Ustr) -> Ustr {
     crate::names::ustr(format!("{field}.#").as_str())
 }
@@ -209,6 +217,7 @@ struct FlatCells {
     named: Vec<(Ustr, Idx<Inst>)>,
 }
 
+/// A source argument is lowered in place so it keeps its evaluation order.
 enum FlatPayload {
     Expr(Idx<Expr>),
     Repr(ValueRepr),
@@ -239,19 +248,27 @@ enum Scrut {
 struct ValueReferences {
     taken_by_ref: HashSet<Ustr>,
     per_body: HashMap<(ModuleId, BodyOwner), HashSet<Ustr>>,
+    /// Only a 0<->1 flip changes scalar-ABI eligibility, so `update_body` reports
+    /// exactly those.
     ref_counts: HashMap<Ustr, u32>,
 }
 
-/// Workspace-wide scalar-ABI context.
+/// Workspace-wide scalar-ABI context. Address-taken functions use the
+/// type-derived fn-value ABI at definitions and direct calls, so all three call
+/// forms agree.
 pub struct ScalarCtx {
     global_read_checks: OnceLock<HashMap<Ustr, crate::global_storage::GlobalReadCheck>>,
     value_references: std::sync::Arc<ValueReferences>,
     values_first_class: bool,
     native_flat_enums: bool,
     row_value_containers: bool,
+    /// Drives backend-variant selection at every resolved call; `Any` disables it
+    /// (GLSL and tests).
     target: bone_core::hir::FnBackend,
     interner: std::sync::Arc<crate::monoty::MonoInterner>,
     rep_arena: std::sync::Arc<abi::RepArena>,
+    /// Valid only under this context's target, value mode and taken-by-ref state;
+    /// `update_body` clears it.
     abi_plans: abi::AbiPlanCache,
 }
 
@@ -413,6 +430,7 @@ impl ScalarCtx {
 
     /// Return names whose function-value uses change ABI eligibility after an edit.
     pub fn update_body(&mut self, ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> Vec<Ustr> {
+        // An edit can flip taken-by-ref membership, which the memoized plans read.
         self.abi_plans.clear();
         self.global_read_checks.take();
         if self.values_first_class {
@@ -455,6 +473,7 @@ impl ScalarCtx {
 #[derive(Clone)]
 struct NestedFn {
     hoisted: Ustr,
+    /// Lets a call site place named args into slots as for a top-level callee.
     param_names: Vec<Ustr>,
     representation: FunctionRepPlan,
     logical_type: MonoTy,
@@ -559,6 +578,7 @@ fn fmt_pieces(
     if spec.alternate {
         buf.push('#');
     }
+    // A dynamic width cannot bake `0` into the literal, so it space-pads.
     if spec.zero_pad && spec.width_expr.is_none() {
         buf.push('0');
     }
@@ -583,6 +603,7 @@ fn fmt_pieces(
     Some(pieces)
 }
 
+// The corpus coverage lens buckets lowering gaps on this tag.
 fn expr_tag(e: &Expr) -> &'static str {
     match e {
         Expr::As { .. } => "As",
@@ -659,6 +680,8 @@ fn arith_inst(
     })
 }
 
+/// Generic instances use their canonical concrete symbol so their cells stay
+/// distinct.
 fn static_owner_tag(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -680,6 +703,7 @@ fn static_owner_tag(
     crate::names::ustr(&format!("{}_{:06x}", name, h.finish() & 0xff_ffff))
 }
 
+/// Visits child contents to keep their arena indices out of the reload key.
 fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map::DefaultHasher) {
     hash_init_node(body, HirChild::Expr(e), h);
 }
@@ -1068,6 +1092,7 @@ fn lower_instance_with_plan_inner(
     let inf = ws
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
+    // The plan audits only fail on a compiler bug, so they run with the debug checks.
     let audit = crate::verify::checks_enabled();
     if let Some(inf) = inf.filter(|_| audit) {
         validate_concrete_type_tables(
@@ -1665,10 +1690,16 @@ struct Builder<'a> {
     f: MirFunc,
     cur: Idx<Block>,
     binds: HashMap<u32, Idx<Cell>>,
+    /// A break also leaves the scope owning a temporary loop generator.
     loop_targets: Vec<(Idx<Block>, Idx<Block>, usize, usize)>,
+    /// A `while true` whose exit is never targeted terminates the statement list.
     used_break_targets: HashSet<Idx<Block>>,
+    /// Spliced LIFO at block exit, before every `return` and at `break`/`continue`.
     defers: Vec<Vec<(Idx<Expr>, stmt::PendingDefer)>>,
+    /// Global initializers and decorators are `Inline`: they are not emitted under
+    /// the unwind trampoline.
     defer_mode: stmt::DeferMode,
+    /// `yield`/`await` inside a defer body is a compile error.
     in_defer_body: bool,
     owned_reload_tail: Option<Idx<Block>>,
     resume_arg: Option<Idx<Cell>>,
@@ -1686,29 +1717,42 @@ struct Builder<'a> {
     site_owner: Option<crate::instance::Instance>,
     cur_op: crate::site::SiteOp,
     group_binds: HashMap<u32, (Vec<GroupLeaf>, ValueShape)>,
+    /// A reassignment copies a box it did not build, so every store stays a ctor and
+    /// SROA can scalarize the binding.
     owned_value_binds: HashSet<u32>,
     ref_borrowed_binds: std::cell::OnceCell<(HashSet<u32>, HashSet<u32>)>,
     body_facts: std::cell::OnceCell<BodyFacts>,
     value_binds: HashMap<u32, Idx<Inst>>,
     preflight_reads: Vec<HashMap<u32, Idx<Inst>>>,
+    /// A recursive `V?` child cannot be unrolled into its own copy.
     value_copy_stack: Vec<Ustr>,
     borrowed_value_children: HashMap<Idx<Inst>, std::borrow::Cow<'a, MonoTy>>,
+    /// Boxes held only by immutable values; owned storage still copies them.
     shareable_value_boxes: HashSet<Idx<Inst>>,
+    /// A host may supply heap records with property callbacks, so even generated
+    /// projections must keep that effect.
     callback_records: HashSet<Idx<Inst>>,
+    /// Shallow local snapshots cannot be lent across a call or return.
     unshareable_value_cells: HashSet<Idx<Cell>>,
     boundary_materializes: HashSet<Idx<Expr>>,
+    /// Every other box of a splatting tuple is the flat wire.
     element_tuples: HashSet<Idx<Inst>>,
     tuple_bind_boxes: HashMap<u32, Idx<Inst>>,
     scalar_tuple_reentry: HashSet<Idx<Expr>>,
     shallow_pack: bool,
     lending_pack: bool,
+    /// Every assignment lowers its value through an expression entry that rounds
+    /// these, so no store path rounds on its own.
     f32_round_exprs: HashSet<Idx<Expr>>,
     integer_field_checks: HashMap<Idx<Expr>, bool>,
+    /// The shape is non-nullable: the branch that bound it consumed the presence.
     tuple_binds: HashMap<u32, (Vec<Idx<Cell>>, TupleLayout)>,
     static_cells: HashMap<u32, Ustr>,
     /// Owner tag baked into a static's cell name: stable across body edits and
     /// distinct per overload. `mir_emit` reads it back verbatim.
     static_owner: Ustr,
+    /// So shadowing duplicates get distinct cells and adding a static never renames
+    /// its siblings.
     static_counters: HashMap<Ustr, u32>,
     nested_fn_globals: HashMap<u32, NestedFn>,
     nested_fn_counters: HashMap<Ustr, u32>,
@@ -1833,6 +1877,8 @@ impl<'a> Builder<'a> {
         self.body_facts.get_or_init(|| BodyFacts::of(self.body))
     }
 
+    /// Nothing writes, captures or borrows it after its binding, so it can be held
+    /// as values with no cell.
     pub(crate) fn binding_stays_unwritten(&self, name: Idx<BindingInfo>) -> bool {
         // Shader lowering keeps the cell: the GLSL emitter names a local only
         // for a cell, and writes a value out at every use.
@@ -1852,6 +1898,7 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Never for an aggregate: a value struct's whole read copies from its cell.
     pub(crate) fn bind_let_value(&mut self, name: Idx<BindingInfo>, value: Idx<Inst>) -> bool {
         if !self.binding_stays_unwritten(name) {
             return false;
@@ -1867,6 +1914,8 @@ impl<'a> Builder<'a> {
                     .nominal()
                     .is_some_and(|n| self.ws.struct_by_name.contains_key(&n)),
             });
+        // An aggregate read records its own logical type, which the binding's type
+        // need not match.
         if holds_aggregate
             || matches!(
                 self.f.insts[value],
@@ -1930,6 +1979,7 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Call before the scope restores the cursor. Innermost wins.
     fn located(&self, error: CompilerError) -> CompilerError {
         match self.cur_span {
             Some(span) => error.or_at(span),
@@ -1961,6 +2011,7 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// A projection of a non-nil Rock value; still a mutable load at this point.
     fn read_value_field(&mut self, base: Idx<Inst>, field: Ustr) -> Idx<Inst> {
         self.emit_cur(Inst::Field {
             base,
@@ -2124,6 +2175,7 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // Record the source site before instruction indices enter later passes.
         let is_mint = self.cur_op == crate::site::SiteOp::FnValue;
         if is_call || is_mint {
             if let (Some(owner), Some(expr)) = (self.site_owner.clone(), self.cur_expr) {
@@ -2141,6 +2193,8 @@ impl<'a> Builder<'a> {
                 );
             }
         }
+        // Code after a raising call lowers into a block nothing reaches, which
+        // cleanup drops.
         if let Inst::Call { func, .. } = self.f.insts[id]
             && crate::intrinsics::never_returns(&self.ws.module(func.module).functions[func.func])
         {
@@ -2220,6 +2274,8 @@ impl<'a> Builder<'a> {
         self.cur = next;
     }
 
+    /// `DispatchCtx` is the one implementation, so the instance walk cannot get a
+    /// second answer.
     pub(crate) fn dispatch(&self) -> dispatch::DispatchCtx<'_> {
         dispatch::DispatchCtx {
             ws: self.ws,
@@ -2253,6 +2309,8 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// Scoped, not global: a `for` head carries several operations at one
+    /// expression.
     fn with_site_op<T>(&mut self, op: crate::site::SiteOp, f: impl FnOnce(&mut Self) -> T) -> T {
         let outer = std::mem::replace(&mut self.cur_op, op);
         let out = f(self);
@@ -2260,6 +2318,8 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// False after a diverging sub-expression; the caller must not append a
+    /// fall-through `Store` or `Goto` then.
     fn is_open(&self) -> bool {
         matches!(self.f.blocks[self.cur].term, Term::Unreachable)
     }
@@ -2347,6 +2407,8 @@ impl<'a> Builder<'a> {
                 match self.new_flat_enum_cells(pb, name, shape, owner)? {
                     Some(cells) => cells,
                     None => {
+                        // Refuses nullable nesting, so every slot is a data leaf of the type it
+                        // names.
                         let leaf_tys = self.value_shape_leaf_monos(shape);
                         (0..slot.slot_count(self.scx.rep_arena()))
                             .map(|li| {
@@ -2406,6 +2468,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// One admission rule for call-site constants and callee default guards; `null`
+    /// stays omitted.
     fn constant_param_default(
         &self,
         body: &Body,
@@ -2436,6 +2500,8 @@ impl<'a> Builder<'a> {
         Some(CallParamDefault::Scalar(literal))
     }
 
+    /// Reads both arenas in their lexical owners and never lowers a foreign
+    /// expression in the caller.
     fn constant_vector_default(
         &self,
         body: &Body,
@@ -2575,6 +2641,7 @@ impl<'a> Builder<'a> {
             .ws
             .inference(func.module)
             .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(func.func)));
+        // A foreign wrapper has no Rock prologue to test the omitted marker.
         let rock_body = decl.inline_body.is_none() && !decl.is_extern;
         body.param_defaults
             .iter()
@@ -2636,6 +2703,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Opaque callers may omit arguments, so the callee fills defaults too.
     fn fill_param_defaults(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         let defaults = self.body.param_defaults.clone();
@@ -2769,6 +2837,8 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Reachable fallthrough in a non-null, non-unit coroutine would publish a
+    /// missing result.
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
         let plan = self.concrete_plan;
         let Some(result_id) = plan.signature.result else {
@@ -2866,6 +2936,8 @@ impl<'a> Builder<'a> {
                     &self.ws.module(owner.func.module).functions[owner.func.func],
                 )
             });
+            // Shader planning needs value-form control flow to keep GPU-only effects
+            // in a discarded tail.
             if gpu_context {
                 self.lower_expr(e)?;
             } else {
@@ -2903,6 +2975,7 @@ impl<'a> Builder<'a> {
                     .collect());
             }
             let r = self.lower_expr_repr(e)?;
+            // A terminating block returns a placeholder, not an aggregate to project.
             if !self.is_open() {
                 return Ok(Vec::new());
             }
@@ -2964,6 +3037,8 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// Every other value of a splatting tuple type is the flat box; this is the one
+    /// place layout is decided.
     pub(crate) fn is_tuple_aggregate(&self, v: Idx<Inst>) -> bool {
         self.element_tuples.contains(&v)
     }
@@ -2998,6 +3073,8 @@ impl<'a> Builder<'a> {
         self.flat_box_slots(v, n)
     }
 
+    /// The `present, <slots...>` wire of a flat box that may be nil; absent is
+    /// `false` plus nils.
     fn nullable_box_slots(&mut self, boxed: Idx<Inst>, shape: &TupleLayout) -> Vec<Idx<Inst>> {
         let absent = self.absent_tuple_slots(shape);
         let cells = self.fresh_cells(absent.len());
@@ -3029,6 +3106,7 @@ impl<'a> Builder<'a> {
         r: ValueRepr,
         shape: &TupleLayout,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        // A phantom tuple has no aggregate to project; every wire slot is absent.
         if let ValueRepr::Scalar(v) = &r {
             if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
                 return Ok(self.absent_tuple_slots(shape));
@@ -3069,6 +3147,7 @@ impl<'a> Builder<'a> {
         for (&slot, part) in shape.slots.iter().zip(parts) {
             match self.scx.rep_arena().layout(slot) {
                 RepLayout::Opaque => out.push(self.pack(part)?),
+                // The iterator's missing element can leave a non-null slot empty.
                 RepLayout::Leaves(vs)
                     if !vs.nullable && !matches!(part, ValueRepr::Group { .. }) =>
                 {
@@ -3084,6 +3163,7 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
+    /// Never boxes a `nobox` element.
     pub(crate) fn tuple_from_slots(
         &mut self,
         shape: &TupleLayout,
@@ -3139,6 +3219,8 @@ impl<'a> Builder<'a> {
             && self.boxed_value_local(b, a).is_some()
             && self.binding_value_is_shareable(b)
         {
+            // The callee may retain an immutable box: a later mutable store copies it,
+            // and a `ref` borrow copies its parameter on entry.
             return Ok(vec![self.emit_cur(Inst::Load(self.binds[&raw(b)]))]);
         }
         self.with_value_lending(lend, |s| {
@@ -3196,6 +3278,7 @@ pub fn param_null_overrides_default(ws: &Workspace, body: &Body, index: usize, t
     }
     match ty {
         TyId::Static(mid, idx) => matches!(ws.module(mid).ty_arena[idx], TypeExpr::Nullable(_)),
+        // Declared parameter types are lowered into the module's static arena.
         TyId::Local(_) => false,
     }
 }
@@ -3220,6 +3303,7 @@ fn map_key_rejection_reason(
     k: TyId,
     depth: u32,
 ) -> Option<String> {
+    // A malformed self-wrapping newtype chain must not spin.
     if depth > 8 {
         return None;
     }
@@ -3236,6 +3320,7 @@ fn map_key_rejection_reason(
             | BuiltinTy::Never
             | BuiltinTy::Error,
         ) => None,
+        // A type parameter or an uninstantiated var is undecidable here.
         TypeExpr::Generic(..) | TypeExpr::Infer(..) => None,
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
@@ -3486,6 +3571,7 @@ pub fn is_shader_entry(f: &Function) -> bool {
     shader_stage_of(f).is_some()
 }
 
+/// skull-mir must not depend on skull-codegen-glsl, which has the same helper.
 fn shader_stage_of(f: &Function) -> Option<&'static str> {
     let ann = f.annotations.iter().find(|a| a.is_builtin("shader"))?;
     match ann.args.first().map(|a| &a.value) {
@@ -3689,6 +3775,8 @@ pub(crate) fn resolve_comptime_value(
                 value: var.value.clone(),
                 file_abs: None,
             }),
+            // Fully-default inputs mean resolution never ran, so do not blame
+            // the project's [build.vars].
             None if ws.comptime_inputs.embed_root.is_none()
                 && ws.comptime_inputs.vars.is_empty()
                 && ws.comptime_inputs.channel.is_empty() =>
@@ -3710,6 +3798,8 @@ pub(crate) fn resolve_comptime_value(
             )),
         },
         ExpandKind::EmbedString => {
+            // Resolve against the nearest stick.toml at or above the calling file, so a
+            // library embeds its own files; synthetic files fall back to embed_root.
             let call_file = body.expr_spans[call_expr].file;
             let files = &ws.comptime_inputs.embed_files;
             let package_root = files.package_root(call_file.as_str());
@@ -3756,6 +3846,7 @@ pub(crate) fn resolve_comptime_value(
 
 pub(crate) struct ResolvedComptime {
     pub value: String,
+    /// The path invalidation re-reads and the watcher watches.
     pub file_abs: Option<Ustr>,
 }
 
@@ -3998,6 +4089,8 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
         .values()
         .flat_map(|&mid| ws.module(mid).bodies.keys().map(move |owner| (mid, *owner)))
         .collect();
+    // The fold keeps serial order, so the first registration of a key and the
+    // first error are the same ones.
     let scanned: Vec<_> = {
         use bone_core::prelude::*;
         keys.par_iter()
@@ -4024,7 +4117,7 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
 }
 
 /// Reject CPU-side calls to `@gpu_only` intrinsics and GPU functions used as
-/// runtime fn values.
+/// runtime fn values. Shader-pipeline expansion arguments are names, not values.
 pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
@@ -4165,6 +4258,8 @@ pub(crate) enum GroupLeaf {
 }
 
 impl GroupLeaf {
+    /// Only a never-written binding holds its leaves as values, so a write always
+    /// finds cells.
     pub(crate) fn cell(self) -> Idx<Cell> {
         match self {
             Self::Cell(cell) => cell,
@@ -4175,8 +4270,10 @@ impl GroupLeaf {
 
 #[derive(Default)]
 pub(crate) struct BodyFacts {
+    /// A lambda or `defer` may read bindings from another function body.
     may_capture: bool,
     written: HashSet<u32>,
+    /// `None` for a whole use, otherwise the directly projected fields.
     projected: HashMap<u32, Option<Vec<Ustr>>>,
 }
 

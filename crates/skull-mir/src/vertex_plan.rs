@@ -1,3 +1,6 @@
+//! Offsets come from the RepPlan C layout, which the emitted chunk checks
+//! against LuaJIT `ffi.offsetof`; never compute them here.
+//!
 //! A vertex buffer is laid out by C rules, not std140: a `Vec3` occupies 12
 //! bytes with the next attribute immediately after.
 
@@ -7,6 +10,8 @@ use bone_core::workspace::Workspace;
 use skull_parser::CompilerError;
 use ustr::Ustr;
 
+/// Every admitted attribute kind is a 4-byte float or int; the cumulative
+/// offset check relies on it.
 const COMPONENT_BYTES: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,6 +19,7 @@ pub struct AttrSlot {
     pub name: Ustr,
     pub location: u32,
     pub kind: AttrKind,
+    /// Of the first component, within one element.
     pub byte_offset: usize,
 }
 
@@ -27,12 +33,15 @@ pub struct VertexPlan {
 }
 
 impl VertexPlan {
+    /// Rejects integer attributes: the mesh API binds everything through
+    /// `glVertexAttribPointer`, which would read an int's bits as a float.
     pub fn float_unit_sizes(&self) -> Result<Vec<u32>, String> {
         self.reject_integers()?;
         self.check_cumulative_offsets()?;
         Ok(self.slots.iter().map(|s| s.kind.components()).collect())
     }
 
+    /// In floats, the unit `gpu_mesh_set_instances` takes.
     pub fn float_unit_stride(&self) -> Result<usize, String> {
         self.reject_integers()?;
         self.check_cumulative_offsets()?;
@@ -117,6 +126,8 @@ pub fn vertex_plan(
             ))
         })?;
 
+        // Attributes match leaves positionally, so check the names: a drift would bind
+        // an attribute to a neighbour's bytes with every offset still valid.
         let want_cty = if a.kind.is_integer() { "int" } else { "float" };
         for (i, l) in group.iter().enumerate() {
             let path = l.path.as_str();

@@ -19,6 +19,7 @@ ustr = { workspace = true }
 [dev-dependencies]
 bone-semantic = { workspace = true }
 ustr = { workspace = true }
+# The real stdlib, so `__op_*` overloads resolve in lowering tests.
 rock-stdlib = { workspace = true }
 skull-graph = { workspace = true }
 

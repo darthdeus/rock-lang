@@ -11,12 +11,16 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueBundle, CompilerError> {
         let lv = self.lower_expr(a)?;
         let rv = self.lower_expr(b)?;
+        // An int operand of a Float* op is used-as-float; `/` is always float
+        // division. String concat and pure int ops leave operands untouched.
         let str_op = op == "__op_add" && (lt == ArithTy::Str || rt == ArithTy::Str);
         let to_float =
             !str_op && (op == "__op_div" || lt == ArithTy::Float || rt == ArithTy::Float);
         let lv = self.coerce_numeric_to_float(lv, lt, to_float);
         let rv = self.coerce_numeric_to_float(rv, rt, to_float);
         let inst = arith_inst(op, lt, rt, lv, rv)?;
+        // Desugared compound assignments can omit the call's inferred type; this
+        // producer has already selected a single scalar result.
         let representation = self.concrete_rep_id(&MonoTy::Any, RepUse::Value, false, false)?;
         let value = ValueRepr::Scalar(self.emit_cur(inst));
         Ok(ValueBundle::new(representation, value))
@@ -35,6 +39,8 @@ impl<'a> Builder<'a> {
         let rhs_repr = self.lower_expr_repr(rhs)?;
         let mut rhs_leaves =
             self.repr_to_storage_leaves(&rhs_repr, shape, "value equality right operand")?;
+        // A nested child's presence tag spells absence `false` on the scalar ABI and
+        // `nil` once read back from storage, so tags compare by truth.
         let top = usize::from(shape.nullable);
         for (i, tag) in super::shape::value_leaf_presence_flags(shape)
             .into_iter()
@@ -113,6 +119,8 @@ impl<'a> Builder<'a> {
                 Ok(self.emit_cur(inst))
             }
             BinOp::Eq | BinOp::NotEq => {
+                // `x == null` on a flat enum compares the tag slot (nil tag is null):
+                // materializing a box would compare a table to nil, always false.
                 let null_side = if self.is_null_lit(rhs) {
                     Some(lhs)
                 } else if self.is_null_lit(lhs) {
@@ -124,6 +132,8 @@ impl<'a> Builder<'a> {
                     if let Some(test) = self.flat_ref_presence(v, op)? {
                         return Ok(test);
                     }
+                    // A `V?` place is read here for its presence; the copy such a read otherwise
+                    // takes would allocate a cdata per nil test.
                     let boxed_local = matches!(self.body.expr_arena[v], Expr::Var(b)
                         if self.nullable_boxed_value_local(b, v).is_some());
                     if self.nobox_value_name(v).is_none()
@@ -141,6 +151,8 @@ impl<'a> Builder<'a> {
                             Inst::NotEq(value, nil)
                         }));
                     }
+                    // A group-bound nullable value carries its presence as a leaf even when its
+                    // read's rep layout is boxed, so `nullable_value_shape_of` alone misses it.
                     let group_bound_nullable = matches!(self.body.expr_arena[v], Expr::Var(b)
                         if self.group_binds.get(&raw(b)).is_some_and(|(_, shape)| shape.nullable));
                     if self.nobox_value_name(v).is_some()
@@ -164,6 +176,8 @@ impl<'a> Builder<'a> {
                         };
                         return Ok(self.lower_presence_test(op, present, condition));
                     }
+                    // A splatting `(..)?` carries its own presence slot. Packing would build a
+                    // `MakeTuple`, a table that is never nil, so `== null` would be false.
                     if self.nullable_tuple_wire_shape(v)?.is_some() {
                         let repr = self.lower_expr_repr(v)?.into_value();
                         let present = match repr {
@@ -187,6 +201,7 @@ impl<'a> Builder<'a> {
                                     .next()
                                     .expect("flat enum group has a tag leaf"),
                             )?,
+                            // A boxed flat enum is nil-or-table and compares directly.
                             other => self.pack(other)?,
                         };
                         let nil = self.emit_cur(Inst::Const(Lit::Nil));
@@ -216,6 +231,7 @@ impl<'a> Builder<'a> {
                         return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);
                     }
                 }
+                // Ordinary values can arrive as leaves under a scalar ABI.
                 let same_value = self.scx.target() == bone_core::hir::FnBackend::Lua
                     && !self.scx.values_first_class
                     && matches!(
@@ -229,6 +245,8 @@ impl<'a> Builder<'a> {
                     {
                         return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);
                     }
+                    // Identity lanes are integral. Other values retain their metatype's rounding,
+                    // presence and structural field rules.
                     let integral = self
                         .value_struct_name_of(lhs)
                         .and_then(|name| value_struct_field_tys(self.ws, name))
@@ -376,6 +394,8 @@ impl<'a> Builder<'a> {
                 };
                 Ok(self.emit_cur(inst))
             }
+            // The rhs may not evaluate, so short-circuit operators lower to branches with
+            // the result flowing through a cell.
             BinOp::And => self.lower_short_circuit(lhs, rhs, condition, true),
             BinOp::Or => self.lower_short_circuit(lhs, rhs, condition, false),
             BinOp::NullCoalesce => self.lower_nullcoalesce(lhs, rhs),
@@ -388,11 +408,14 @@ impl<'a> Builder<'a> {
         } else if condition {
             present
         } else {
+            // An absent place can carry nil; escaped bools must carry false.
             let absent = self.emit_cur(Inst::Not(present));
             self.emit_cur(Inst::Not(absent))
         }
     }
 
+    /// Both arms inherit the return destination, so no result cell or join is
+    /// required.
     pub(crate) fn lower_if_to_return(
         &mut self,
         cond: Idx<Expr>,
@@ -408,6 +431,7 @@ impl<'a> Builder<'a> {
         self.lower_return(Some(else_branch))
     }
 
+    /// An arm that diverges skips its store and join-goto.
     pub(crate) fn lower_if(
         &mut self,
         cond: Idx<Expr>,
@@ -428,6 +452,8 @@ impl<'a> Builder<'a> {
         let result_ty = matches!(shape, RepLayout::Opaque)
             .then(|| self.current_expr_unit_storage_ty_id())
             .flatten();
+        // An opaque slot is the whole value in one cell, so the expression's type
+        // decides nil; splatting slots hold leaves this type does not describe.
         let never_nil = !shape.splats()
             && self
                 .cur_expr
@@ -496,6 +522,8 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Record one arm's value; its block stays open until [`Self::finish_join`]
+    /// knows every arm and can pick the form they meet in.
     pub(crate) fn join_arm(
         &mut self,
         join: &mut ValueJoin,
@@ -510,12 +538,16 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// For an arm whose slots are already in hand, such as a `??` lhs read before
+    /// the branch.
     pub(crate) fn join_slots_arm(&mut self, join: &mut ValueJoin, slots: Vec<Idx<Inst>>) {
         if self.is_open() {
             join.arms.push((self.cur, JoinArm::Slots(slots)));
         }
     }
 
+    /// Arms that are all one flat tuple box meet as that box, so a whole-value use
+    /// shares it; anything else meets as slots.
     pub(crate) fn finish_join(
         &mut self,
         values: ValueJoin,
@@ -560,6 +592,8 @@ impl<'a> Builder<'a> {
         Ok(self.slot_repr(&shape, &slots, &mut 0))
     }
 
+    /// Arms recurse in statement position, so nested if/block/match also skip
+    /// their result cells.
     pub(crate) fn lower_if_stmt(
         &mut self,
         cond: Idx<Expr>,
@@ -602,6 +636,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Lower the receiver once and preserve the result's per-slot representation.
     pub(crate) fn safe_nav_repr(
         &mut self,
         receiver: Idx<Expr>,
@@ -629,6 +664,7 @@ impl<'a> Builder<'a> {
         )
     }
 
+    /// The value arm runs when `cond` equals `cond_is_presence`.
     pub(crate) fn nil_or_join(
         &mut self,
         result: Idx<Cell>,
@@ -657,6 +693,7 @@ impl<'a> Builder<'a> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
+    /// A diverged arm leaves the join untouched.
     pub(crate) fn store_and_join(&mut self, result: Idx<Cell>, value: Idx<Inst>, join: Idx<Block>) {
         if self.is_open() {
             self.store_cell(result, value);
@@ -664,6 +701,8 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The open-block guard is here, not at callers: a diverged arm has nothing to
+    /// store, and storing would read leaves off a nil before the divergence.
     fn store_slots_and_join(
         &mut self,
         results: &[Idx<Cell>],
@@ -717,6 +756,7 @@ impl<'a> Builder<'a> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
+    /// `a ?? b` == `if a == nil then b else a`, with `a` evaluated once.
     pub(crate) fn lower_nullcoalesce(
         &mut self,
         lhs: Idx<Expr>,
@@ -733,6 +773,7 @@ impl<'a> Builder<'a> {
         self.cur = rhs_bb;
         let rv = self.lower_expr(rhs)?;
         self.store_and_join(result, rv, join);
+        // Reuse `lv`: its defining block dominates this one.
         self.cur = lhs_bb;
         self.store_and_join(result, lv, join);
         self.cur = join;
@@ -745,6 +786,8 @@ enum LeafPair {
     Split(ValueRepr, ValueRepr, ValueShape),
 }
 
+/// Answers false when either side is packed or carries a presence leaf. A
+/// first-class target compares a boxed child whole.
 fn matching_scalar_leaves(
     ws: &Workspace,
     first_class: bool,
@@ -754,6 +797,8 @@ fn matching_scalar_leaves(
     out: &mut Vec<LeafPair>,
 ) -> bool {
     match (lhs, rhs) {
+        // A flat enum with a structurally compared payload is not equal leaf for
+        // leaf; the packed `__eq` decides it.
         (ValueRepr::Group { name, .. }, _)
             if EnumPlan::for_name(ws, *name).is_some_and(|plan| plan.flat().is_some())
                 && !flat_enum_equality_is_leafwise(ws, *name) =>
@@ -790,6 +835,7 @@ fn matching_scalar_leaves(
                     out.push(LeafPair::Leaf(*l, *r));
                     true
                 }
+                // A boxed child is not one leaf: raw `==` on two enum tables compares identity.
                 (FieldShape::Nested(sub), ..) if shape_equality_is_leafwise(ws, sub) => {
                     out.push(LeafPair::Split(l.clone(), r.clone(), sub.clone()));
                     true
@@ -800,6 +846,8 @@ fn matching_scalar_leaves(
     }
 }
 
+/// No child may be nullable: an absent child's presence leaf is `nil` read out
+/// of a box but `false` on a literal, so raw leaf `==` calls them different.
 fn shape_equality_is_leafwise(ws: &Workspace, shape: &ValueShape) -> bool {
     if shape.nullable {
         return false;

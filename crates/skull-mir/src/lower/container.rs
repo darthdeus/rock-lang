@@ -190,6 +190,7 @@ impl ContainerPlan {
             };
         // A column per leaf costs a lookup, bounds check and barrier per leaf, which
         // ended hot traces at LuaJIT's constant limit for wide structs.
+        // A generic field stays one opaque leaf, so type arguments do not move row offsets.
         let wide_nobox_struct = matches!(family, ContainerFamily::Vec)
             && !nullable
             && column_eligible

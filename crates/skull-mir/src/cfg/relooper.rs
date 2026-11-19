@@ -3,6 +3,8 @@ use crate::mir::{Block, Inst, MirFunc, Term};
 use comfy_la_arena::Idx;
 use skull_parser::CompilerError;
 
+/// The enclosing loop's jump targets: `Goto(cont)` -> `continue`, `Goto(brk)`
+/// -> `break`.
 #[derive(Clone, Copy, Default)]
 pub struct LoopCtx {
     pub cont: Option<Idx<Block>>,
@@ -13,6 +15,7 @@ pub struct LoopCtx {
 pub struct LoopTest {
     pub block: Idx<Block>,
     pub cond: Idx<Inst>,
+    /// The arm that stays in the loop.
     pub body: Idx<Block>,
     pub break_when_true: bool,
 }
@@ -44,6 +47,7 @@ pub trait StructuredEmit {
     fn general_at(&self, b: Idx<Block>) -> Option<LoopRegion>;
     fn is_active(&self, b: Idx<Block>) -> bool;
     fn set_active(&mut self, b: Idx<Block>, active: bool);
+    /// False if `b` was already emitted.
     fn mark_visited(&mut self, b: Idx<Block>) -> bool;
     fn out(&mut self) -> &mut String;
     fn indent(&mut self) -> &mut usize;
@@ -60,6 +64,8 @@ pub trait StructuredEmit {
         ctx: LoopCtx,
     ) -> Result<(), CompilerError>;
     fn unsupported_term(&self, term: &Term) -> CompilerError;
+    /// A branch consumed without an `if`: `Some(next)` continues at `next`, `None`
+    /// has no fall-through.
     fn branch_shortcut(
         &mut self,
         _b: Idx<Block>,
@@ -81,6 +87,7 @@ pub trait StructuredEmit {
         out.push('\n');
     }
 
+    /// Stops before `stop`, its continuation.
     fn emit_seq(
         &mut self,
         start: Idx<Block>,
@@ -92,6 +99,8 @@ pub trait StructuredEmit {
             if Some(cur) == stop {
                 return Ok(());
             }
+            // Loop headers dispatch before the visited guard: `emit_general` re-enters
+            // `emit_seq` on the header for its condition region.
             if !self.is_active(cur) {
                 if let Some(li) = self.counted_at(cur) {
                     self.emit_counted(li)?;
@@ -159,6 +168,7 @@ pub trait StructuredEmit {
         }
     }
 
+    /// Returns the merge, or `None` when both arms diverge.
     fn emit_branch(
         &mut self,
         blk: Idx<Block>,
@@ -169,6 +179,8 @@ pub trait StructuredEmit {
         ctx: LoopCtx,
     ) -> Result<Option<Idx<Block>>, CompilerError> {
         let cond_s = self.render_cond(cond)?;
+        // When an arm diverges, ipdom collapses to the virtual exit or a loop target;
+        // the arms then absorb the continuation and there is no fall-through.
         let merge = self
             .structure()
             .ipdom(blk)
@@ -202,6 +214,8 @@ pub trait StructuredEmit {
         Ok(merge)
     }
 
+    /// The slot and bound are initialized in the preheader, so the init clause is
+    /// empty. `continue` targets the latch; `break` the exit.
     fn emit_counted(&mut self, li: CountedLoop) -> Result<(), CompilerError> {
         let (slot, bound) = self.counted_slot_bound(&li)?;
         let cmp = if li.inclusive { "<=" } else { "<" };
@@ -221,6 +235,8 @@ pub trait StructuredEmit {
         Ok(())
     }
 
+    /// `while (true) { <condition region>; if (!c) break; <body> }`; the condition
+    /// region may be a multi-block diamond.
     fn emit_general(&mut self, region: &LoopRegion, outer: LoopCtx) -> Result<(), CompilerError> {
         let h = region.header;
         let exit = region.exit;
@@ -252,6 +268,8 @@ pub trait StructuredEmit {
         Ok(())
     }
 
+    /// Only a `continue;` indented exactly at the body level is the natural
+    /// back-edge fall-through.
     fn trim_trailing_continue(&mut self, start: usize) {
         let line = format!("{}continue;\n", "  ".repeat(*self.indent()));
         let out = self.out();

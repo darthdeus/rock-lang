@@ -9,6 +9,7 @@ impl<'a> Builder<'a> {
     ) -> Result<StructFieldPlan, CompilerError> {
         let plan = crate::lower::struct_field_plan(self.ws, self.scx.target, sname, field, spliced)
             .map_err(|e| self.gap_here(e.message))?;
+        // First-class targets store inline children as declared fields, not leaf keys.
         if self.scx.values_first_class {
             if let StructFieldPlan::Inline {
                 child,
@@ -25,6 +26,7 @@ impl<'a> Builder<'a> {
         Ok(plan)
     }
 
+    /// Embedded children use dotted keys on the parent.
     pub(crate) fn physical_field(
         &self,
         base: Idx<Expr>,
@@ -34,6 +36,8 @@ impl<'a> Builder<'a> {
         Ok((base, key))
     }
 
+    /// A flattened value's projected shape comes from the leaf layout that stores
+    /// it, even when an intermediate child permits boxing.
     pub(crate) fn physical_field_layout(
         &self,
         base: Idx<Expr>,
@@ -122,6 +126,7 @@ impl<'a> Builder<'a> {
         Ok(physical)
     }
 
+    // Groups, tuple projections and container views have no boxed native holder.
     fn native_projection_holder(&self, mut base: Idx<Expr>) -> bool {
         loop {
             match self.body.expr_arena[base] {
@@ -157,6 +162,7 @@ impl<'a> Builder<'a> {
         Ok((storage == ValueStorage::LeafTable).then_some(sname))
     }
 
+    /// A nested value may occupy leaves even under a Direct field plan.
     pub(crate) fn leaf_table_value_child(
         &self,
         sname: Ustr,
@@ -179,6 +185,8 @@ impl<'a> Builder<'a> {
         Ok((storage == ValueStorage::LeafTable).then_some(child))
     }
 
+    /// The child's leaves go to the parent's dotted keys under `key`, in the order
+    /// the parent's `<Name>_lct` ctor keys them.
     pub(crate) fn store_leaf_table_child(
         &mut self,
         parent: Idx<Inst>,
@@ -331,7 +339,11 @@ impl<'a> Builder<'a> {
             bases,
         } = self.body.expr_arena[value]
         {
+            // A functional-update base reads unwritten fields off another instance; the
+            // general path owns that base-copy rule.
             if name == cname && bases.into_iter().next().is_none() {
+                // A field group (`Ty { a + b: expr }`) shares one value expr: lower each
+                // distinct one once so it is evaluated once.
                 let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::default();
                 let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::default();
                 let mut written: Vec<(Ustr, Idx<Expr>)> = Vec::new();
@@ -342,6 +354,7 @@ impl<'a> Builder<'a> {
                 let mut out = Vec::new();
                 for f in self.struct_field_names_required(cname)? {
                     let inner = self.struct_field_plan(cname, f, true)?.inline_child();
+                    // A flat-enum field contributes its sub-slots, never one boxed leaf.
                     let flat = if inner.is_none() {
                         self.struct_field_plan(cname, f, false)?.flat_shape()
                     } else {
@@ -349,6 +362,8 @@ impl<'a> Builder<'a> {
                     };
                     match written.iter().find(|(n, _)| *n == f).map(|(_, v)| *v) {
                         Some(ve) => match (inner, flat) {
+                            // A nullable inner embed owns a presence slot, and `= null` must not be
+                            // read leaf-wise off nil.
                             (Some(ic), _) => {
                                 let n = self.struct_field_plan(cname, f, true)?.nullable();
                                 let leaves = self.embed_value_leaves(n, ic, ve)?;
@@ -422,12 +437,15 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
+    /// Presence is published last so errors or yields cannot expose a partial value.
     pub(crate) fn embed_nullable_leaf_values(
         &mut self,
         cname: Ustr,
         value: Idx<Expr>,
     ) -> Result<(Idx<Inst>, Vec<(Ustr, Idx<Inst>)>), CompilerError> {
         let paths = self.embed_leaf_paths(cname)?;
+        // `= null` clears presence and every leaf: a stale reference leaf would keep
+        // its pointee alive.
         if matches!(self.body.expr_arena[value], Expr::Null) {
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             return Ok((nil, paths.into_iter().map(|k| (k, nil)).collect()));
@@ -450,6 +468,7 @@ impl<'a> Builder<'a> {
                 .ok_or_else(|| gap("nullable embed shape produced no presence leaf"))?;
             return Ok((present, Self::pair_embed_leaves(paths, leaves.collect())?));
         }
+        // Dynamic `Child?`: leaves are read only on the present arm.
         let v = self.lower_expr(value)?;
         let cells = self.fresh_cells(paths.len());
         let absent_bb = self.f.new_block();
@@ -523,6 +542,8 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// `(presence, relative leaves)`. Relative so one lowering can be attached under
+    /// several field names when a field group shares one value expr.
     pub(crate) fn embed_value_leaves(
         &mut self,
         nullable: bool,
@@ -562,6 +583,7 @@ impl<'a> Builder<'a> {
             && matches!(self.body.expr_arena[value], Expr::Null)
             && !self.callback_records.contains(&parent)
         {
+            // False presence still needs normalization for boxed embed readers.
             let present = self.read_field(parent, field);
             let clear = self.f.new_block();
             let join = self.f.new_block();
@@ -582,6 +604,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Presence-gated, so an absent field reads as null and never materializes a
+    /// box from stale leaves.
     pub(crate) fn materialize_embed_nullable(
         &mut self,
         parent: Idx<Inst>,

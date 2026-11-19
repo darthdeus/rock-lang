@@ -1,3 +1,5 @@
+//! Value-producing instructions print as `v0..vN` in block/append order; effects
+//! bind no value and print unnumbered. Cells print as `cN`, blocks as `bbN`.
 use std::collections::HashMap;
 use std::fmt;
 

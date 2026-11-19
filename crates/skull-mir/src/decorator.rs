@@ -1,3 +1,5 @@
+//! Decorator argument selection lives here once; each backend only maps a
+//! chosen [`DecoArg`] to its own literal syntax and default token.
 use bone_core::hir::{AnnoValue, Annotation, BodyOwner, DecoratorDef, FnBackend, Function};
 use bone_core::prelude::ModuleId;
 use bone_core::workspace::Workspace;
@@ -12,10 +14,16 @@ use crate::mir::FuncRef;
 
 pub enum DecoArg<'a> {
     Value(&'a AnnoValue),
+    /// Omitted: the backend passes its default token (`nil`/`null`) and the callee
+    /// prologue substitutes the real default.
     Default,
+    /// Omitted with an explicit `null` overriding the default: the backend passes
+    /// `Lit::Omitted`, the only value the callee prologue fills.
     Omitted,
 }
 
+/// In declaration order: the named arg, else `Default` when the param has one,
+/// else an error for a required param.
 pub fn select_decorator_args<'a>(
     ws: &Workspace,
     module: ModuleId,
@@ -61,6 +69,8 @@ pub fn decorator_symbol(def_key: &str) -> String {
     )
 }
 
+/// Keyed by definition key, so a package decorator sharing a spelling with
+/// another one is still a different definition.
 pub struct DecoratorTable {
     by_key: FxHashMap<Ustr, DecoratorRef>,
     definitions: Vec<DecoratorRef>,
@@ -104,14 +114,19 @@ impl DecoratorTable {
             .copied()
     }
 
+    /// Compiler-owned decorators included: generated text names such a function,
+    /// so it is a root.
     pub fn is_decorated(&self, f: &Function) -> bool {
         f.annotations.iter().any(|ann| self.resolve(ann).is_some())
     }
 
+    /// In declaration order. Compiler-owned decorators have no body to emit.
     pub fn definitions(&self) -> &[DecoratorRef] {
         &self.definitions
     }
 
+    /// In module, function and annotation order: the registration calls a program
+    /// makes at load.
     pub fn applications<'w>(
         &self,
         ws: &'w Workspace,
@@ -159,6 +174,8 @@ impl DecoratorTable {
             .collect()
     }
 
+    /// Decorated functions and selected `@sim` targets have no MIR value site, but
+    /// they escape as Rock values and use the same CodeRefs.
     pub fn mark_generated_code_values(
         &self,
         ws: &Workspace,
@@ -188,6 +205,7 @@ impl DecoratorTable {
     }
 }
 
+/// A function serves `target` unless it is pinned to another backend.
 fn serves(f: &Function, target: FnBackend) -> bool {
     f.backend == FnBackend::Any || f.backend == target
 }

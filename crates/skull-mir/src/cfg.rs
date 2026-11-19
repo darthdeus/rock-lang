@@ -1,6 +1,7 @@
 use crate::mir::{Block, MirFunc, Term};
 use comfy_la_arena::Idx;
 
+/// Successor blocks of a terminator, in branch order.
 pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
     match term {
         Term::Return(_) | Term::Unreachable => {}
@@ -15,6 +16,8 @@ pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
     }
 }
 
+/// In arena-id order; unreachable blocks are dropped so no dangling `goto`
+/// reaches the printer.
 pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     let mut visited = vec![false; func.blocks.len()];
     let mut stack = Vec::with_capacity(func.blocks.len());
@@ -31,7 +34,7 @@ pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block
             }
         });
     }
-    // The entry MUST be emitted first — Lua executes top-down, so it falls into
+    // The entry MUST be emitted first: Lua executes top-down, so it falls into
     // the first label regardless of the `entry` field (matters when the entry is
     // not the lowest-id block, e.g. a coroutine's dispatch entry).
     let mut order = Vec::with_capacity(count);
@@ -45,6 +48,8 @@ pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block
     order
 }
 
+/// A loop preheader dominates its header, so RPO emits it first: a `for` cannot
+/// be a goto target, unlike a label.
 pub fn reverse_postorder(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     let mut post = Vec::with_capacity(func.blocks.len());
     let mut visited = vec![false; func.blocks.len()];
@@ -69,8 +74,10 @@ pub fn reverse_postorder(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     post
 }
 
+/// Dense by block id; a block with none has no entry.
 #[derive(Clone, Debug, Default)]
 pub struct PredMap {
+    /// `preds[off[b]..off[b + 1]]` are block `b`'s predecessors, in discovery order.
     off: Vec<u32>,
     preds: Vec<Idx<Block>>,
 }
@@ -83,6 +90,8 @@ impl PredMap {
     }
 }
 
+/// (all predecessors, goto-only predecessors). Loop edges are unconditional
+/// gotos, so the goto-only set isolates the two loop entries.
 pub fn predecessors(func: &MirFunc, rpo: &[Idx<Block>]) -> (PredMap, PredMap) {
     let n = func.blocks.len();
     let mut reach = vec![false; n];
@@ -139,6 +148,7 @@ pub fn predecessors(func: &MirFunc, rpo: &[Idx<Block>]) -> (PredMap, PredMap) {
     )
 }
 
+/// The entry maps to itself; an unreachable block has no entry.
 #[derive(Clone, Debug)]
 pub struct Dominators {
     idom: Vec<Option<Idx<Block>>>,
@@ -249,6 +259,7 @@ impl Dominators {
 
 #[derive(Clone, Debug)]
 pub struct DomIntervals {
+    /// `(preorder, end)` per block; an unreachable block has `u32::MAX`.
     span: Vec<(u32, u32)>,
 }
 
@@ -329,6 +340,7 @@ pub mod dense {
         post
     }
 
+    /// The entry maps to `None`.
     pub fn idoms(
         n: usize,
         entry: usize,
@@ -340,6 +352,7 @@ pub mod dense {
         idom
     }
 
+    /// The entry maps to itself and a node missing from `rpo` to `None`.
     pub(crate) fn chk_idoms<'p>(
         n: usize,
         rpo: &[usize],
@@ -400,6 +413,7 @@ pub mod dense {
         }
     }
 
+    /// Every node that reaches `latch` without passing through `header`.
     pub(crate) fn collect_loop_body(
         header: usize,
         latch: usize,

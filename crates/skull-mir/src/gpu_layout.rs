@@ -1,6 +1,8 @@
 //! Vertex buffers use the struct's C layout. Uniform blocks use std140: `Vec2`
 //! aligns to 8, `Vec3` and `Vec4` to 16, a block rounds to 16, and a block
 //! `bool` is 32 bits where Rock's C bool is one byte.
+//! Vertex offsets and stride come only from the checked C layout; never compute
+//! a second set here. Applying either family's rules to the other corrupts buffers.
 
 use bone_core::hir::{BuiltinTy, TypeCtor, TypeExpr};
 use bone_core::prelude::{Span, TyId};
@@ -12,6 +14,8 @@ fn err(span: Span, msg: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, msg.into())
 }
 
+/// Int attributes need `glVertexAttribIPointer`; uploading one down the float
+/// path is a silent wrong value, not an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttrKind {
     F32,
@@ -22,6 +26,7 @@ pub enum AttrKind {
 }
 
 impl AttrKind {
+    /// A count of components (an attribute pointer's `size`), not bytes.
     pub fn components(self) -> u32 {
         match self {
             AttrKind::F32 | AttrKind::I32 => 1,
@@ -40,9 +45,11 @@ impl AttrKind {
 pub struct Attr {
     pub name: Ustr,
     pub kind: AttrKind,
+    /// Recorded so the engine binds against the same numbering the shader declares.
     pub location: u32,
 }
 
+/// Not a layout: it carries no offsets and no stride.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VertexAttrs {
     pub struct_name: Ustr,
@@ -50,11 +57,13 @@ pub struct VertexAttrs {
 }
 
 impl VertexAttrs {
+    /// The `attr_sizes` argument of `gpu_mesh_new` / `gpu_mesh_set_instances`.
     pub fn attr_sizes(&self) -> Vec<u32> {
         self.attrs.iter().map(|a| a.kind.components()).collect()
     }
 }
 
+/// Reading an integer texture through a float sampler is undefined, not merely lossy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SamplerKind {
     Float,
@@ -65,6 +74,8 @@ pub enum SamplerKind {
 pub struct TexSlot {
     pub name: Ustr,
     pub kind: SamplerKind,
+    /// Compiler-assigned from field order: a hand-numbered unit can collide and
+    /// silently bind one texture over another.
     pub slot: u32,
 }
 
@@ -92,6 +103,7 @@ fn sampler_kind(ws: &Workspace, ty: TyId) -> Option<SamplerKind> {
     }
 }
 
+/// Field order is slot order, the same contract `@attr` uses for locations.
 pub fn texture_slots(ws: &Workspace, struct_name: Ustr) -> Result<TextureSlots, CompilerError> {
     let Some(&sid) = ws.struct_by_name.get(&struct_name) else {
         return Err(CompilerError::new_no_location(format!(
@@ -155,6 +167,8 @@ pub enum WireKind {
 }
 
 impl WireKind {
+    /// Written out, not derived from the discriminant: the host reads these codes,
+    /// and `wire_kind_codes.rs` pins them against the host's table.
     pub fn code(self) -> u32 {
         match self {
             WireKind::F32 => 0,
@@ -189,6 +203,8 @@ impl WireKind {
         }
     }
 
+    /// A claim about stdlib's `Vec2`/`Mat4` field order, bound to std140 slots
+    /// positionally; `uniform_block_checked` checks it against the value walker.
     pub(crate) fn leaf_suffixes(self) -> Vec<String> {
         match self {
             WireKind::F32 | WireKind::I32 | WireKind::U32 | WireKind::Bool32 => vec![String::new()],
@@ -204,6 +220,7 @@ impl WireKind {
         }
     }
 
+    /// A block `bool` is a 32-bit value, so it rides the int view.
     fn view(self) -> WireView {
         match self {
             WireKind::I32 | WireKind::Bool32 => WireView::Int,
@@ -233,19 +250,24 @@ pub struct BlockMember {
     pub name: Ustr,
     pub kind: WireKind,
     pub offset: u32,
+    /// Bytes between a matrix's columns (`GL_UNIFORM_MATRIX_STRIDE`); `None` for
+    /// non-matrix members.
     pub matrix_stride: Option<u32>,
 }
 
+/// The single authority for the block's byte layout: the GLSL declaration, the
+/// CPU packer and the link-time driver assertion all read it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UniformBlockPlan {
     pub struct_name: Ustr,
     pub members: Vec<BlockMember>,
+    /// The block's total size in bytes, rounded up to 16.
     pub size: u32,
 }
 
 impl BlockMember {
-    /// A flat 4-byte run: `Mat4`'s std140 column stride of 16 is four packed
-    /// floats.
+    /// A flat 4-byte run, in value-side leaf order: `Mat4`'s std140 column stride
+    /// of 16 is four packed floats, and stdlib stores it as four column-major `Vec4`s.
     pub fn leaf_stores(&self) -> Vec<LeafStore> {
         let view = self.kind.view();
         (0..self.kind.size() / 4)
@@ -257,6 +279,8 @@ impl BlockMember {
     }
 }
 
+/// Written out rather than `DefaultHasher`: the value is emitted into the chunk
+/// and must stay byte-stable across toolchains.
 fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
     let mut h = seed;
     for b in bytes {
@@ -269,6 +293,8 @@ fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
 impl UniformBlockPlan {
     /// Folded to 53 bits: it is emitted as a numeric literal, and LuaJIT and JS
     /// represent integers exactly only that far.
+    /// Kinds and names are hashed: `{float, Vec2}` and `{Vec2, float}` agree on
+    /// size and offsets, and the driver resolves members by name.
     pub fn fingerprint(&self) -> u64 {
         let mut h = fnv1a(
             0xcbf2_9ce4_8422_2325,
@@ -280,9 +306,11 @@ impl UniformBlockPlan {
             h = fnv1a(h, &m.offset.to_le_bytes());
         }
         let h = fnv1a(h, &self.size.to_le_bytes());
+        // XOR-fold the high bits down so they still contribute to the 53 that survive.
         (h ^ (h >> 53)) & ((1 << 53) - 1)
     }
 
+    /// In the order [`Self::leaf_stores`] writes them.
     pub fn leaf_paths(&self) -> Vec<String> {
         self.members
             .iter()
@@ -295,6 +323,7 @@ impl UniformBlockPlan {
             .collect()
     }
 
+    /// One store per primitive leaf; its length must match the value's flattened leaves.
     pub fn leaf_stores(&self) -> Vec<LeafStore> {
         self.members.iter().flat_map(|m| m.leaf_stores()).collect()
     }
@@ -304,6 +333,7 @@ fn round_up(v: u32, align: u32) -> u32 {
     v.div_ceil(align) * align
 }
 
+/// A `UniformArray<T>` element is classified here too, so there is one layout authority.
 pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some(WireKind::F32),
@@ -336,6 +366,7 @@ pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
     }
 }
 
+/// Field order is member order.
 pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPlan, CompilerError> {
     let span = ws
         .struct_by_name
@@ -412,6 +443,7 @@ pub fn uniform_group_members(
     Ok(members)
 }
 
+/// A pure function of `members`; it never reads the Workspace.
 pub fn std140_block(
     struct_name: Ustr,
     members: &[(Ustr, WireKind)],
@@ -476,6 +508,8 @@ pub struct ArrayMember {
     pub stride: u32,
 }
 
+/// Not part of [`UniformBlockPlan`], whose leaf paths must match a value struct.
+/// A separate buffer: scalars change per draw, arrays per activation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UniformArrayBlockPlan {
     pub block_name: Ustr,
@@ -486,6 +520,7 @@ pub struct UniformArrayBlockPlan {
 impl UniformArrayBlockPlan {
     /// Folded to 53 bits: it is emitted as a numeric literal, and LuaJIT and JS
     /// represent integers exactly only that far.
+    /// Seeded apart from the scalar fingerprint so the two blocks never hash alike.
     pub fn fingerprint(&self) -> u64 {
         let mut h = fnv1a(
             0xa5a5_5a5a_c3c3_3c3c,
@@ -521,6 +556,8 @@ fn oversized(block_name: Ustr, member: Ustr, span: Span, size: u64) -> CompilerE
 
 /// `Vec3` is refused: std140 aligns it to 16 but sizes it 12, so an array of
 /// them is neither tightly packed nor stride-12.
+/// Admits exactly the element kinds the host array lane can push; the GLSL
+/// emitter declares whatever this admits, so this is the one gate.
 pub fn uniform_array_block(
     block_name: Ustr,
     decls: &[ArrayMemberDecl],
@@ -537,6 +574,7 @@ pub fn uniform_array_block(
     for d in decls {
         let stride = match d.elem {
             WireKind::F32 | WireKind::I32 | WireKind::F32x2 | WireKind::F32x4 => {
+                // Computed, not a literal, so a new kind cannot inherit the stride silently.
                 round_up(d.elem.align(), 16)
             }
             WireKind::F32x3 | WireKind::Mat4 | WireKind::Bool32 | WireKind::U32 => {
@@ -568,6 +606,8 @@ pub fn uniform_array_block(
             ));
         }
 
+        // u64, with the budget checked before narrowing: `capacity` comes from source,
+        // and a u32 product could wrap to a small size that passes the budget.
         offset = round_up_u64(offset, stride as u64);
         let member_offset =
             u32::try_from(offset).map_err(|_| oversized(block_name, d.name, d.span, offset))?;
@@ -595,6 +635,7 @@ pub fn uniform_array_block(
         return Err(oversized(block_name, last.name, last.span, size));
     }
 
+    // Narrowing is where a wrap would hide, so it rejects rather than truncating.
     let size =
         u32::try_from(size).map_err(|_| oversized(block_name, last.name, last.span, size))?;
     Ok(UniformArrayBlockPlan {
@@ -604,7 +645,8 @@ pub fn uniform_array_block(
     })
 }
 
-/// OpenGL 3.3's guaranteed MAX_UNIFORM_BLOCK_SIZE minimum.
+/// OpenGL 3.3's guaranteed MAX_UNIFORM_BLOCK_SIZE minimum, so shaders stay
+/// portable rather than accepting a larger limit on the build host.
 pub(crate) const GL_MAX_UNIFORM_BLOCK_SIZE: u32 = 16384;
 
 fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
@@ -642,6 +684,7 @@ fn attr_kind(ws: &Workspace, ty: TyId) -> Option<AttrKind> {
     }
 }
 
+/// Field order is attribute order is location order.
 pub fn vertex_attrs(ws: &Workspace, struct_name: Ustr) -> Result<VertexAttrs, CompilerError> {
     let Some(&sid) = ws.struct_by_name.get(&struct_name) else {
         return Err(CompilerError::new_no_location(format!(

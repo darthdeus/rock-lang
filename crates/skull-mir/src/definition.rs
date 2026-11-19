@@ -15,6 +15,8 @@ pub(crate) fn is_artifact_definition(decorator: &bone_core::hir::DecoratorDef) -
         .any(|ann| ann.is_builtin("artifact_definition"))
 }
 
+/// The compiler defines a catalog accessor's body from the definition plan, so
+/// no backend mapping or Rock body supplies it.
 pub fn is_artifact_catalog_accessor(function: &bone_core::hir::Function) -> bool {
     function.is_extern
         && function
@@ -54,6 +56,7 @@ pub struct DefinitionPlan {
 }
 
 impl DefinitionPlan {
+    /// In declaration order within each catalog.
     pub fn entries_by_catalog(&self) -> std::collections::BTreeMap<Ustr, Vec<&DefinitionEntry>> {
         let mut out: std::collections::BTreeMap<Ustr, Vec<&DefinitionEntry>> = Default::default();
         for entry in &self.entries {
@@ -577,6 +580,7 @@ mod tests {
                 )),
                 &["definition type"],
             ),
+            // Equal display spellings must not hide a semantic type mismatch.
             (
                 typed_source(
                     r#"

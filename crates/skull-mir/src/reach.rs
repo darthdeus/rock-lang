@@ -6,8 +6,10 @@ use ustr::Ustr;
 
 pub struct GlobalReach {
     id_of: FxHashMap<Ustr, u32>,
+    /// Indexed by the bit each name owns in a closure set.
     globals: Vec<Ustr>,
     component_of: Vec<u32>,
+    /// One bitset per component: the globals its bodies read, transitively.
     closure: Vec<Vec<u64>>,
 }
 
@@ -30,6 +32,8 @@ impl GlobalReach {
     }
 }
 
+/// One closure per component: Tarjan returns callees first, so each component
+/// unions its callees' completed closures once.
 pub fn transitive_global_reads<G: AsRef<[Ustr]>, C: AsRef<[Ustr]>>(
     direct_globals: &FxHashMap<Ustr, G>,
     direct_calls: &FxHashMap<Ustr, C>,
@@ -60,6 +64,8 @@ pub fn transitive_global_reads<G: AsRef<[Ustr]>, C: AsRef<[Ustr]>>(
             edges.push((body, intern(*callee)));
         }
     }
+    // A global's name may never appear as a body; give every name a node so
+    // `component_of` is total over `id_of`.
     for global in &globals {
         intern(*global);
     }
@@ -82,6 +88,7 @@ pub fn transitive_global_reads<G: AsRef<[Ustr]>, C: AsRef<[Ustr]>>(
         let set = &mut closure[component_of[body as usize] as usize];
         set[bit as usize / 64] |= 1 << (bit % 64);
     }
+    // Components come out callee-first, so a callee's set is final here.
     for (index, members) in components.iter().enumerate() {
         for &member in members {
             for &callee in &callees[member as usize] {
@@ -109,6 +116,8 @@ pub fn transitive_global_reads<G: AsRef<[Ustr]>, C: AsRef<[Ustr]>>(
     }
 }
 
+/// In finish order: every component appears after each component it has an
+/// edge into.
 pub fn strongly_connected_components(callees: &[Vec<u32>]) -> Vec<Vec<u32>> {
     const UNVISITED: u32 = u32::MAX;
     let n = callees.len();
@@ -118,6 +127,7 @@ pub fn strongly_connected_components(callees: &[Vec<u32>]) -> Vec<Vec<u32>> {
     let mut stack: Vec<u32> = Vec::new();
     let mut components = Vec::new();
     let mut next_index = 0u32;
+    // (node, position of the next callee to visit)
     let mut work: Vec<(u32, usize)> = Vec::new();
     for root in 0..n {
         if index_of[root] != UNVISITED {
@@ -168,6 +178,8 @@ pub fn strongly_connected_components(callees: &[Vec<u32>]) -> Vec<Vec<u32>> {
     components
 }
 
+/// Overloads merge under one name, which at worst over-approximates a
+/// dependency.
 pub fn symbol_references(ws: &bone_core::workspace::Workspace) -> FxHashMap<Ustr, HashSet<Ustr>> {
     use bone_core::hir::BodyOwner;
     let mut deps: FxHashMap<Ustr, HashSet<Ustr>> = FxHashMap::default();
@@ -210,10 +222,16 @@ pub fn forward_reach(deps: &FxHashMap<Ustr, HashSet<Ustr>>, start: Ustr) -> Hash
 
 pub struct PendingInit<T> {
     pub name: Ustr,
+    /// Transitive through the call graph. Leaf names and names without an
+    /// initializer are allowed.
     pub deps: Vec<Ustr>,
     pub item: T,
 }
 
+/// Each init runs after every initialized global it reads; rounds keep source
+/// order. `leaf_owner` maps `nobox` leaf names to their global, or the dependent
+/// init would read undefined leaves. A round without progress means mutual
+/// recursion: the stuck names come back in source order.
 pub fn order_global_inits<T>(
     inits: Vec<PendingInit<T>>,
     leaf_owner: &FxHashMap<Ustr, Ustr>,
@@ -252,6 +270,9 @@ pub fn order_global_inits<T>(
     Ok(ordered)
 }
 
+/// Regions entered on their own: the body from `mf.entry`, every `Inst::Lambda`
+/// named by an emitted block, and every `coro_defers` entry. Not every arena
+/// block: a hoisted lambda body is an arena clone carrying its parent's blocks.
 pub fn emitted_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
     let mut seen = vec![false; mf.blocks.len()];
     let mut out: Vec<Idx<Block>> = Vec::new();
@@ -267,6 +288,7 @@ pub fn emitted_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
             }
             out.push(bid);
             for &iid in &mf.blocks[bid].insts {
+                // `CoroHook` names its body through an operand, not the block list.
                 let lambda = match &mf.insts[iid] {
                     Inst::CoroHook { lambda, .. } => *lambda,
                     _ => iid,
@@ -280,6 +302,8 @@ pub fn emitted_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
     out
 }
 
+/// Deduped in source order. A top-level fn used as a value lowers to
+/// `Inst::Global`, not `Inst::Call`, so [`call_targets`] alone misses it.
 pub fn global_ref_names(mf: &MirFunc) -> Vec<Ustr> {
     fn walk(mf: &MirFunc, out: &mut Vec<Ustr>, seen: &mut HashSet<Ustr>) {
         for (_, block) in mf.blocks.iter() {
@@ -304,6 +328,8 @@ pub fn global_ref_names(mf: &MirFunc) -> Vec<Ustr> {
     out
 }
 
+/// Walks block lists, including unreachable artifacts, unlike [`emitted_blocks`].
+/// Calls with `spec_bindings` target specialized bodies and keep nothing alive.
 pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
     fn walk(mf: &MirFunc, out: &mut Vec<FuncRef>) {
         for (_, block) in mf.blocks.iter() {
@@ -326,6 +352,8 @@ pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
     out
 }
 
+/// Emitted blocks only: a hoisted lambda's arena clone carries its parent's
+/// unreachable bindings. Resolve each bound tree in the body owning its arena.
 pub fn spec_bound_calls(
     ws: &bone_core::workspace::Workspace,
     mf: &MirFunc,
@@ -342,6 +370,8 @@ pub fn spec_bound_calls(
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                 _ => continue,
             };
+            // Check the delivery identity first, so a missing bound fact cannot mask an
+            // owner disagreement.
             let owner_agrees =
                 inst.func == fref && mf.callee_instances.get(&iid).is_some_and(|oi| oi == inst);
             if !owner_agrees {
@@ -352,6 +382,8 @@ pub fn spec_bound_calls(
                     mf.name,
                 )));
             }
+            // An already-resolved tree from a standalone substitution wins: this body's
+            // arena cannot state a tree from another instantiation.
             let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
             let tree = match mf.resolved_bound_trees.get(&iid) {
                 Some(t) => t.clone(),

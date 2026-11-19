@@ -6,11 +6,14 @@ impl<'a> Builder<'a> {
         self.dispatch().is_null_lit(e)
     }
 
+    /// Chases `Infer` but does not peel `Nullable`, unlike `expr_ty`.
     pub(crate) fn expr_is_nullable(&self, e: Idx<Expr>) -> bool {
         self.dispatch().expr_is_nullable(e)
     }
 }
 
+/// The types live in the build's interner, so the borrows outlive any borrow
+/// of the builder itself.
 impl<'a> Builder<'a> {
     pub(crate) fn concrete_mono(&self, id: crate::monoty::MonoTyId) -> &'a MonoTy {
         let scx: &'a ScalarCtx = self.scx;
@@ -243,6 +246,8 @@ impl<'a> Builder<'a> {
         self.dispatch().is_nullable_ty(ty)
     }
 
+    /// Every field gets the child plan from the declaring struct before a caller
+    /// places it into a parameter slot.
     pub(crate) fn spread_field_bundles(
         &mut self,
         op: Idx<Expr>,
@@ -506,10 +511,12 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Chases `Infer` and peels `Nullable`; `None` when inference is absent or unsolved.
     pub(crate) fn expr_ty(&self, e: Idx<Expr>) -> Option<TypeExpr> {
         self.dispatch().expr_ty(e)
     }
 
+    /// Field lookup sees through a reference to its referent.
     pub(crate) fn field_base_ty(&self, base: Idx<Expr>) -> Option<TypeExpr> {
         let dispatch = self.dispatch();
         let mut ty = *self.inf?.expr_types.get(base)?;
@@ -608,6 +615,7 @@ impl<'a> Builder<'a> {
         &self,
         e: Idx<Expr>,
     ) -> Result<Option<TupleLayout>, CompilerError> {
+        // Use the bound declaration's return ABI instead of the generic call type.
         if let Some(&gidx) = self.inf.and_then(|inf| inf.bound_calls.get(&e)) {
             return self.bound_next_tuple_shape(gidx).map(Some);
         }
@@ -626,6 +634,7 @@ impl<'a> Builder<'a> {
         {
             return Ok(Some(RepLayout::Tuple(shape)));
         }
+        // A join can keep a nullable tuple's presence slot.
         if let Some(shape) = self.nullable_tuple_wire_shape(e)? {
             return Ok(Some(RepLayout::Tuple(shape)));
         }
@@ -661,6 +670,7 @@ impl<'a> Builder<'a> {
         Ok(Some(RepLayout::Leaves(shape)))
     }
 
+    /// A boxed tuple can carry `nobox` fields as flattened slots.
     pub(crate) fn tuple_box_shape(
         &self,
         e: Idx<Expr>,
@@ -695,6 +705,7 @@ impl<'a> Builder<'a> {
         Ok(shape)
     }
 
+    /// The FFI element type comes from the allocation's concrete result type.
     pub(crate) fn leaf_view_fields(
         &mut self,
         ctype: Ustr,
@@ -757,6 +768,8 @@ impl<'a> Builder<'a> {
             .map_err(|error| CompilerError::new_with_label(span, error.message))
     }
 
+    /// Also `Some` for `(tuple)?`: a safe-nav call's result is nullable, but its
+    /// callee still splats the inner tuple.
     pub(crate) fn peeled_tuple_shape(
         &self,
         e: Idx<Expr>,
@@ -779,10 +792,12 @@ impl<'a> Builder<'a> {
         self.dispatch().ty_node(ty)
     }
 
+    /// Keeps the `TyId`, unlike `resolve_ty`, so its App params index the right arena.
     pub(crate) fn resolve_tyid(&self, ty: TyId) -> Option<TyId> {
         self.dispatch().resolve_tyid(ty)
     }
 
+    /// A flat-enum yield threads through an `await` delegation as leaves, not a box.
     pub(crate) fn coroutine_yield_flat_shape(&self, e: Idx<Expr>) -> Option<EnumFlatShape> {
         let concrete = self.concrete_expr_ty(e)?;
         let MonoTy::App {

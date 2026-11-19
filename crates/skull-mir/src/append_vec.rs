@@ -1,7 +1,10 @@
+//! A push-only vector whose elements never move, so any thread can read an
+//! element by index without a lock while another thread appends.
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
+/// Slots in the first segment; segment `k` holds `FIRST << k` slots.
 const FIRST: usize = 64;
 const SEGMENTS: usize = 40;
 
@@ -11,6 +14,8 @@ pub struct AppendVec<T> {
     push_lock: Mutex<()>,
 }
 
+// Elements are only written before `len` publishes them and are never mutated
+// afterwards, so sharing the vector shares `&T` across threads.
 unsafe impl<T: Send> Send for AppendVec<T> {}
 unsafe impl<T: Send + Sync> Sync for AppendVec<T> {}
 
@@ -87,6 +92,7 @@ impl<T> AppendVec<T> {
         (0..self.len()).map(|index| self.get(index).expect("index below len"))
     }
 
+    /// A published element never moves, so its address identifies its slot.
     pub fn index_of(&self, element: &T) -> Option<usize> {
         let addr = element as *const T as usize;
         let size = std::mem::size_of::<T>();
@@ -108,6 +114,8 @@ impl<T> AppendVec<T> {
     }
 }
 
+/// Lazily created values by dense id, lock-free: the first thread to ask for a
+/// slot installs it and every later reader shares it.
 pub struct SlotTable<T> {
     segments: [AtomicPtr<AtomicPtr<T>>; SEGMENTS],
 }
@@ -178,6 +186,7 @@ impl<T> SlotTable<T> {
 }
 
 impl<T> SlotTable<T> {
+    /// In index order.
     pub fn for_each(&self, mut visit: impl FnMut(usize, &T)) {
         for (segment, base) in self.segments.iter().enumerate() {
             let base = base.load(Ordering::Acquire);

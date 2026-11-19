@@ -7,10 +7,14 @@ use crate::monoty::{MonoCtor, MonoInterner, MonoTy, MonoTyReason};
 pub struct CoroutinePlan {
     base: String,
     pub result: Option<MonoTy>,
+    /// `Some` -> the step writes yield leaves into reused `s.__y*` frame slots and
+    /// the boxed `__resume` rebuilds a variant box from them.
     pub channel: Option<EnumFlatShape>,
 }
 
 impl CoroutinePlan {
+    /// `base` is target-owned: Lua uses the instance symbol, JS the
+    /// artifact-selected one.
     pub fn from_concrete_plan(
         ws: &Workspace,
         interner: &MonoInterner,
@@ -76,6 +80,8 @@ impl CoroutinePlan {
         format!("{}__defer{k}", self.base)
     }
 
+    /// `slot` is the hook's frame field (`__on_killed`, ...), which is also its
+    /// name suffix.
     pub fn hook(&self, slot: &str) -> String {
         format!("{}{slot}", self.base)
     }

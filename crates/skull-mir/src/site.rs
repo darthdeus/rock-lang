@@ -1,15 +1,25 @@
+//! An `Idx<Expr>` alone is not a site identity: one expression can carry several
+//! callee obligations (a `for` head's `iter` and `next`), so the operation is
+//! part of the key.
 use bone_core::hir::Expr;
 use bone_core::prelude::Idx;
 
+/// Paths and the rare dispatched payload are boxed so a [`Site`] stays small.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SiteOp {
     DirectCall,
     FnValue,
     ForIter,
+    /// The `for` protocol's `next` witness and its conformance path; an empty path
+    /// is the outermost witness.
     ForNext(Box<[usize]>),
     ImplicitIter,
+    /// Kept apart from [`Self::ForNext`]: a `for` over a bounded call has both, at
+    /// the same expression and with the same paths.
     BoundNext(Box<[usize]>),
     Synthesized(&'static str),
+    /// `path` keeps several same-named obligations of one hole distinct (one per
+    /// leaf field of a nobox value); an empty path is the hole itself.
     Dispatched(Box<DispatchedOp>),
 }
 
@@ -25,6 +35,7 @@ impl SiteOp {
     }
 }
 
+// Spelled as the unboxed variants were, so rendering does not depend on storage.
 impl std::fmt::Debug for SiteOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -44,9 +55,13 @@ impl std::fmt::Debug for SiteOp {
     }
 }
 
+/// A struct literal that omits a field lowers the default from another body's
+/// arena; the domain is part of the key so equal indices cannot collide.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum SiteDomain {
     Own,
+    /// The arguments are part of the key: `Box<int> {}` and `Box<string> {}` inject
+    /// the same initializers but resolve different callees.
     StructDefaults(Box<StructDefaultsDomain>),
 }
 
@@ -82,6 +97,8 @@ impl std::fmt::Debug for SiteDomain {
 }
 
 impl SiteDomain {
+    /// For reproducible reports, not identity. Arguments order by their canonical
+    /// encoding, so domains compare equal here exactly when they are equal.
     fn ord_key(&self) -> (u8, usize, u32, &[crate::monoty::MonoTy]) {
         match self {
             Self::Own => (0, 0, 0, &[]),
@@ -132,6 +149,8 @@ pub struct Site {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct OwnerRef(pub u32);
 
+/// The one find-or-append for lowering and the inliner: two routines could
+/// disagree about identity and join a call through the wrong concrete body.
 pub fn intern_owner(
     table: &mut Vec<crate::instance::Instance>,
     owner: crate::instance::Instance,
@@ -143,6 +162,7 @@ pub fn intern_owner(
     OwnerRef((table.len() - 1) as u32)
 }
 
+/// Includes a non-generic witness whose delivery map has no specialized entry.
 pub fn record_call_owner(
     func: &mut crate::mir::MirFunc,
     call: Idx<crate::mir::Inst>,
@@ -151,6 +171,8 @@ pub fn record_call_owner(
     func.callee_instances.insert(call, inst.clone());
 }
 
+/// Inlined calls remain the callee body's obligations and index its arena, so a
+/// map keyed only by `Site` would mix arenas after a splice.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CallSite {
     pub owner: OwnerRef,

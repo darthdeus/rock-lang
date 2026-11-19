@@ -9,6 +9,8 @@ use ustr::Ustr;
 use crate::concrete::ConcreteSignature;
 use crate::monoty::{MonoCtor, MonoTy};
 
+/// Stdlib descriptors (`Ptr`, `NativeBuffer`) are excluded: the backend supplies
+/// their one host slot, which a copy shares and never rebuilds.
 pub fn has_value_plan(sd: &bone_core::hir::StructDef) -> bool {
     sd.is_value && !bone_core::modules::is_descriptor_key(sd.name)
 }
@@ -21,6 +23,7 @@ pub(crate) fn is_value_struct(ws: &Workspace, name: Ustr) -> bool {
 
 /// Above this many leaves, column writes hit a measured cliff (about 9x on
 /// LuaJIT and V8 at K=16), so an unmarked wider value stays boxed.
+/// An explicit `nobox` bypasses this, because boxing is not a legal fallback.
 pub(crate) const MAX_COLUMN_LEAVES: usize = 4;
 
 pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
@@ -78,6 +81,8 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
         })
 }
 
+/// Nullable presence first: a top-level presence leaf has no field path, so
+/// this adds the key [`value_leaf_paths`] omits.
 pub(crate) fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
     let paths = value_leaf_paths(shape);
     if !shape.nullable {
@@ -136,6 +141,8 @@ fn for_each_leaf(
     }
     let prefix = path.len();
     for (fname, fs) in &shape.fields {
+        // Join each field to its ancestors so paths and Lua parameter names stay
+        // unique for repeated nested value types.
         if prefix != 0 {
             path.push_str(sep);
         }
@@ -158,6 +165,8 @@ pub const LEAF_VIEWS: &[(&str, &str, &str)] = &[
     ("bool", "__vb", "bool*"),
 ];
 
+/// One field per distinct leaf type, made once at construction and read per
+/// element access, never per leaf.
 pub fn leaf_view_field(cty: &str) -> Ustr {
     match LEAF_VIEWS.iter().find(|(t, ..)| *t == cty) {
         Some((_, field, _)) => crate::names::ustr(field),
@@ -178,6 +187,8 @@ pub fn leaf_views_lua_table() -> String {
 }
 
 /// Leaf location in units of its own view's element size.
+/// Both numbers are compile-time constants, so an access is
+/// `view[i * stride + offset]`: pure arithmetic, no allocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeafAddr {
     pub path: Ustr,
@@ -193,6 +204,8 @@ pub fn leaf_view_cty(field: &str) -> Option<&'static str> {
         .map(|(t, ..)| *t)
 }
 
+/// Non-value-struct `NativeBuffer` element types as `(C type, byte width)`.
+/// Separate from [`c_prim_size_align`]: `uint8_t` is an element, never a leaf.
 pub const NB_PRIM_ELEMS: &[(&str, usize)] = &[
     ("float", 4),
     ("int", 4),
@@ -221,6 +234,7 @@ fn nb_storage_call(ctype: &str, size: usize, views: &[&str]) -> String {
     )
 }
 
+/// A primitive element carries no leaf views: `buf.ptr` already addresses it.
 pub fn nb_prim_storage_lua() -> String {
     NB_PRIM_ELEMS
         .iter()
@@ -228,6 +242,7 @@ pub fn nb_prim_storage_lua() -> String {
         .collect()
 }
 
+/// Takes the already-validated leaves and size rather than re-walking the layout.
 pub fn nb_value_storage_lua(
     ws: &Workspace,
     elem: Ustr,
@@ -245,6 +260,8 @@ pub fn nb_value_storage_lua(
     nb_storage_call(elem.as_str(), size, &views)
 }
 
+/// `byte_off` is in bytes from the start of the struct; `path` is the
+/// [`value_leaf_paths`] key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeafSlot {
     pub path: Ustr,
@@ -256,6 +273,7 @@ pub struct LeafSlot {
 }
 
 /// Size and alignment of a primitive C type as LuaJIT lays it out.
+/// The only types [`value_field_c_type`] admits as leaves.
 pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
     match cty {
         "double" => Some((8, 8)),
@@ -373,6 +391,7 @@ pub(crate) enum FieldShape {
 }
 
 impl ValueShape {
+    /// Total primitive-leaf count: the scalar-ABI arity.
     pub(crate) fn leaf_count(&self) -> usize {
         self.fields
             .iter()
@@ -591,6 +610,8 @@ pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<Rc<PlannedValu
     )
 }
 
+/// Per-thread memo of declaration plans, scoped to a representation arena
+/// generation; outside an active [`ShapeMemoScope`] plans are computed directly.
 #[derive(Default)]
 struct ShapeMemo {
     arena_gen: u64,
@@ -627,6 +648,7 @@ impl ShapeMemo {
         if let Some(value) = hit {
             return value;
         }
+        // Computed outside the borrow: a nested plan request re-enters here.
         let value = compute();
         SHAPE_MEMO.with(|memo| {
             let mut memo = memo.borrow_mut();
@@ -660,6 +682,7 @@ pub(crate) fn gc_table_inline_fields(
     )
 }
 
+/// Nests, restoring the enclosing scope on drop.
 pub(crate) struct ShapeMemoScope {
     previous: u64,
 }
@@ -698,6 +721,7 @@ pub(crate) fn is_payload_free_enum(ws: &Workspace, name: Ustr) -> bool {
     })
 }
 
+/// The index is the variant's int tag.
 pub(crate) fn payload_free_enum_variants(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
     let eid = *ws.enums_by_name.get(&name)?;
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -711,6 +735,7 @@ pub(crate) fn payload_free_enum_variants(ws: &Workspace, name: Ustr) -> Option<V
     Some(out)
 }
 
+/// A Lua value with no mutable heap storage is already its own copy.
 pub(crate) fn lua_value_is_immutable(ws: &Workspace, ty: &MonoTy) -> bool {
     match ty {
         MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String => true,
@@ -769,6 +794,8 @@ pub(crate) fn payload_free_ordinal(ws: &Workspace, name: Ustr, variant: Ustr) ->
         .map(|p| p as i64)
 }
 
+/// Boxes sanctioned later at boundaries such as `@gpu_only` go through
+/// `authorize_nobox_box`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BoxKind {
     Implicit,
@@ -800,6 +827,8 @@ impl BoxKind {
     }
 }
 
+/// A value struct lives as an unboxed `Group` of per-field reprs; everything
+/// else is one already-lowered `Scalar`.
 #[derive(Clone)]
 pub(crate) enum ValueRepr {
     Scalar(Idx<Inst>),
@@ -808,12 +837,16 @@ pub(crate) enum ValueRepr {
         parts: Vec<ValueRepr>,
         present: Option<Idx<Inst>>,
     },
+    /// Produced only by a splatting tuple return. Packing it emits `MakeTuple` of
+    /// packed parts, which is how a `nobox` element still reaches the rejection.
     Tuple {
         parts: Vec<ValueRepr>,
+        /// For a `(..)?` return: the presence bool that led the wire.
         present: Option<Idx<Inst>>,
     },
 }
 
+/// Forces a caller to state which RepId a representation conforms to.
 #[derive(Clone)]
 pub(crate) struct ValueBundle {
     representation: RepId,
@@ -841,6 +874,8 @@ impl ValueBundle {
     }
 }
 
+/// A box is absent when nil; an unboxed value when its tag says so. Packing it
+/// to ask the nil question builds a non-nil ctor and deletes the absent arm.
 #[derive(Clone)]
 pub(crate) enum SafeNavRecv {
     Boxed(Idx<Inst>),
@@ -881,6 +916,8 @@ pub(crate) fn value_shape(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     planned_value(ws, name)?.shape.clone()
 }
 
+/// The one storage classification; callers must not rediscover `_ct`, `_vt`
+/// or `_lct` from field syntax.
 pub(crate) fn declared_value_storage(
     ws: &Workspace,
     _target: bone_core::hir::FnBackend,
@@ -917,6 +954,8 @@ pub fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
         .collect()
 }
 
+/// `@struct_expand` picks each field's variant structurally (the unique variant
+/// whose single payload type equals the field type), never by an engine name.
 pub(crate) fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
     let TypeExpr::App {
         ctor: TypeCtor::Array,
@@ -953,7 +992,9 @@ pub(crate) fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VertexExpandRet {
+    /// `-> int`: the element stride in floats.
     Stride,
+    /// `-> [int]`: per-attribute component counts, in location order.
     Sizes,
 }
 
@@ -1208,6 +1249,8 @@ pub(crate) fn variants_for_payload(ws: &Workspace, enum_name: Ustr, want: TyId) 
         .collect()
 }
 
+/// The single source of the field-to-variant rule, shared by the emit-time
+/// validator and the lowering expander.
 pub(crate) fn struct_expand_variants(
     ws: &Workspace,
     enum_name: Ustr,
@@ -1233,6 +1276,7 @@ pub(crate) fn struct_expand_variants(
     Ok(out)
 }
 
+/// A presence leaf, then the payload leaves.
 pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
     let scalar = is_nobox_nominal(ws, n) || ws.struct_by_name.contains_key(&n);
     if scalar {
@@ -1271,6 +1315,8 @@ pub struct NoboxGlobalAccessorShape {
     pub nullable: bool,
     pub storage: ValueStorage,
     pub ctor_suffix: &'static str,
+    /// `_lct` is positional over physical leaves and `_vt` over box keys, so a GC
+    /// table with a nested boxed child cannot be rebuilt from flattened storage.
     pub unbuildable: Option<String>,
 }
 
@@ -1298,7 +1344,8 @@ pub fn nobox_global_accessor_shape(
         ValueStorage::CData => "_ct",
     };
     // `_vt` is positional over its box keys: a declared field whole, a `nobox`
-    // field by its dotted leaves.
+    // field by its dotted leaves. It is the accessor's ctor exactly when those
+    // keys are the storage's leaf paths.
     let unbuildable = if storage == ValueStorage::GcTable {
         let keys: Vec<Ustr> = super::gc_table_fields(ws, scx.target, shape.name)?
             .iter()
@@ -1390,15 +1437,19 @@ pub(crate) fn value_shape_can_fill(actual: &ValueShape, expected: &ValueShape) -
         )
 }
 
+/// Opaque, rebuildable and unsupported stay distinct so an unrepresentable
+/// element cannot take the no-op path.
 pub enum BoundNextElem {
     Opaque,
     Rebuild(ElemRebuild),
+    /// The splice rejects this rather than guessing a leaf-to-field mapping.
     Unsupported,
 }
 
 /// How to rebuild one splatting element from the wire values.
 pub enum ElemRebuild {
     Passthrough,
+    /// Leaf fields are in ctor order.
     Value(Ustr, RepId, Vec<Ustr>),
     Tuple(Vec<ElemRebuild>),
 }
@@ -1486,6 +1537,8 @@ pub fn bound_next_shape_from_concrete(
             message: "bound witness return plan is not a tuple layout".into(),
         });
     };
+    // The element is slot 1 alone, or slots 1.. as a tuple: the same pairing
+    // `lower_for_user_iter` makes when it binds the pattern.
     let elem_slots = match slots.get(1..).ok_or_else(|| RepError {
         span: None,
         message: "bound witness return plan has no success flag and element slots".into(),
@@ -1525,11 +1578,13 @@ pub fn bound_next_shape_from_concrete(
 
 /// Cdata enum layout: payload slots are shared by position with identical C
 /// types across variants; shorter variants pad unused slots.
+/// Record and ref payloads are ineligible; payload-free enums stay plain ints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumCdataShape {
     pub name: Ustr,
     /// `_<i>` for a tuple field at position `i`, `_<field>` for a record field.
     pub slots: Vec<(Ustr, &'static str)>,
+    /// `(variant, payload arity)`; the tag is the variant's declaration index.
     pub variants: Vec<(Ustr, usize)>,
 }
 
@@ -1563,6 +1618,7 @@ impl EnumCdataShape {
 }
 
 /// `_<i>` for a tuple position, `_<field>` for a record field.
+/// Record field names are identifiers, so they never collide with tuple positions.
 pub(crate) fn slot_name(suffix: &str) -> Ustr {
     crate::names::concat(&["_", suffix])
 }
@@ -1613,6 +1669,7 @@ fn build_enum_cdata_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> 
         };
         variants.push((v.name, arity));
     }
+    // A payload-free enum is a plain int.
     if !any_payload {
         return None;
     }
@@ -1625,6 +1682,8 @@ fn build_enum_cdata_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> 
 
 /// The C type for a `value`-struct field, or `None` when it is not
 /// C-layout-mappable.
+/// The single mappability oracle: a struct is GC-carrying when any field maps
+/// to `None`. A payload-free enum stores as its int tag.
 pub fn value_field_c_type(ws: &Workspace, ty: TyId) -> Option<String> {
     value_field_c_type_guarded(ws, ty)
 }
@@ -1636,6 +1695,7 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId) -> Option<Str
         TypeExpr::Builtin(BuiltinTy::Float) => Some("double".into()),
         TypeExpr::Builtin(BuiltinTy::F32) => Some("float".into()),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool".into()),
+        // A nested value struct is C-mappable only if it is itself FFI-clean.
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
@@ -1698,16 +1758,21 @@ pub(crate) fn value_storage_is_gc_guarded(ws: &Workspace, name: Ustr) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumFlatShape {
     pub(crate) name: Ustr,
+    /// One entry per payload position; a position may span several slots, see
+    /// [`Self::tuple_width`] and [`Self::slot_offset`].
     pub(crate) slots: Vec<FlatSlot>,
     /// Named payload slots `f__<name>`.
     pub(crate) record_fields: Vec<Ustr>,
 }
 
+/// A payload slot is a dynamic Lua field. A scalarizable value widens its
+/// position to its leaves, so an enum payload never materializes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FlatSlot {
     Opaque,
     /// Each variant writes only its own leaves in the leading slots and nil-pads
     /// the rest.
+    /// Deduplicated by name and never empty; the tag discriminates which applies.
     Leaves(Vec<ValueShape>),
 }
 
@@ -1734,14 +1799,19 @@ impl EnumFlatShape {
     }
 
     /// Total positional slots `_0 .. _{tuple_width-1}`.
+    /// Distinct from the position count: a `nobox` position spans several slots.
     pub fn tuple_width(&self) -> usize {
         self.slots.iter().map(FlatSlot::width).sum()
     }
 
+    /// Positions past the end answer the total width, so a narrower variant has
+    /// nothing to write.
     pub fn slot_offset(&self, pos: usize) -> usize {
         self.slots.iter().take(pos).map(FlatSlot::width).sum()
     }
 
+    /// The oracle for both the ctor's placement and a match arm's read, so a write
+    /// and a read of one position cannot disagree.
     pub(crate) fn position_shape(&self, pos: usize, name: Option<Ustr>) -> Option<&ValueShape> {
         let FlatSlot::Leaves(vss) = self.slots.get(pos)? else {
             return None;
@@ -1758,6 +1828,7 @@ impl EnumFlatShape {
         1 + self.tuple_width() + self.record_fields.len()
     }
 
+    /// The leaf names are nominal: `pack` and `cdata_leaves` use box semantics.
     pub(crate) fn value_shape(&self) -> ValueShape {
         let mut fields = vec![(crate::names::ustr("__tag"), FieldShape::Prim)];
         for i in 0..self.tuple_width() {
@@ -1780,6 +1851,7 @@ fn build_flat_enum_shape(
     visiting: &mut Vec<Ustr>,
 ) -> Option<EnumFlatShape> {
     let eid = *ws.enums_by_name.get(&name)?;
+    // Payload-free enums are ints; cdata-eligible enums scalarize via cdata.
     if is_payload_free_enum(ws, name) || build_enum_cdata_shape(ws, name).is_some() {
         return None;
     }
@@ -1788,6 +1860,8 @@ fn build_flat_enum_shape(
     }
     visiting.push(name);
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
+    // Distinct value payload shapes share a position by width. Letting one fall
+    // back to the opaque slot would reintroduce an aggregate at the enum boundary.
     let mut want: Vec<Vec<ValueShape>> = Vec::new();
     let mut record_fields: Vec<Ustr> = Vec::new();
     for v in &ed.variants {
@@ -1841,6 +1915,8 @@ pub enum EnumLayout {
     Boxed,
 }
 
+/// The single static representation decision for an enum; no caller chooses
+/// between the cdata and flat views independently.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumPlan {
     name: Ustr,
@@ -1895,6 +1971,8 @@ impl EnumPlan {
     }
 }
 
+/// Keyed on the declared payload type, so the ctor and the match arm derive
+/// the same layout without seeing each other.
 fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
     let TypeExpr::App {
         ctor: TypeCtor::Nominal(n),
@@ -2039,6 +2117,8 @@ fn equality_payload_is_leafwise(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ust
     }
 }
 
+/// The transform writes a flat-enum yield's leaves into reused `__y*` frame
+/// slots (no allocation); the generic `resume()` rebuilds a box from them.
 pub(crate) fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<EnumFlatShape> {
     let (ty, nullable) = ty.peel_nullable();
     if nullable {

@@ -1,3 +1,5 @@
+//! Flat-stored element references carry their container and checked slot. A
+//! callee uses a specialized body for each argument storage signature.
 use super::call::{DirectCall, call_argument_parameter, call_uses_parameter_slots};
 use super::*;
 use crate::instance::Instance;
@@ -28,6 +30,8 @@ impl FlatStorage {
     }
 }
 
+/// The stored element and the dotted path of a nested value field in it. Every
+/// derived key is static, so a body lowered for one key addresses leaves directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FlatRefKey {
     pub(crate) elem: ColumnElem,
@@ -46,6 +50,7 @@ impl FlatRefKey {
     }
 }
 
+/// Per callee parameter, the flat storage its `ref` argument has.
 pub(crate) type FlatSig = Vec<Option<FlatRefKey>>;
 
 #[derive(Clone, Copy)]
@@ -58,10 +63,13 @@ pub(crate) struct FlatRefVal {
 pub(crate) struct FlatCallPlan {
     inst: Instance,
     sig: FlatSig,
+    /// `(argument, parameter index, key)` for each flat argument.
     args: Vec<(Idx<Expr>, usize, FlatRefKey)>,
     ret: Option<FlatRefKey>,
 }
 
+/// Each `ref` argument the call expects lowers to its vec; its slot is recorded
+/// here.
 pub(crate) struct FlatArgCapture {
     expected: Vec<(Idx<Expr>, usize, FlatRefKey)>,
     slots: Vec<(usize, Idx<Inst>)>,
@@ -72,18 +80,27 @@ pub(crate) enum FlatCallOut {
     Value(ValueRepr),
 }
 
+/// Shared by every builder lowering into one emitted root body, nested fns and
+/// variants included.
 #[derive(Default)]
 pub(crate) struct FlatVariants {
+    /// Set only by a root that hoists the variants into its `nested_fns`; variants
+    /// are named after its symbol.
     root: Option<Instance>,
     counter: u32,
     by_key: HashMap<(Instance, FlatSig), Ustr>,
     funcs: Vec<MirFunc>,
     returns: HashMap<(Instance, FlatSig), Option<FlatRefKey>>,
+    /// Innermost last.
     scanning: Vec<ReturnScan>,
 }
 
+/// A recursive call back into the scan reads `assumed`; the scan repeats until
+/// its answer equals what it assumed.
 struct ReturnScan {
     key: (Instance, FlatSig),
+    /// `None` until a pass has an answer: reading an unknown answer decides nothing
+    /// rather than counting as boxed.
     assumed: Option<Option<FlatRefKey>>,
     depends_on: Option<usize>,
     unknown_reads: u32,
@@ -112,6 +129,7 @@ fn is_phantom_call(body: &Body, e: Idx<Expr>) -> bool {
     )
 }
 
+/// Excludes lambda and nested fn bodies, which return for themselves.
 fn scan_returns(
     body: &Body,
     node: HirChild,
@@ -171,6 +189,8 @@ impl<'a> Builder<'a> {
         Ok(shape)
     }
 
+    /// `ref V` or `(ref V)?` for a value struct `V` is the only `ref` that can
+    /// address a flat element.
     fn is_value_ref_type(&self, ty: &MonoTy) -> bool {
         match ty.peel_nullable().0 {
             MonoTy::App {
@@ -298,6 +318,8 @@ impl<'a> Builder<'a> {
         }))
     }
 
+    /// Bone does not record a `ref` handed to a generic parameter (`unwrap(c)` with
+    /// `T = ref V`) because `T` is still open when it checks the call.
     fn flat_ref_arg_candidate(&self, e: Idx<Expr>, a: Idx<Expr>) -> Result<bool, CompilerError> {
         if self.is_ref_call_arg(e, a) {
             return Ok(true);
@@ -320,6 +342,8 @@ impl<'a> Builder<'a> {
             .is_some_and(|capture| capture.expected.iter().any(|(arg, _, _)| *arg == a))
     }
 
+    /// Every returned place must agree: one `ref` result cannot be `vec, slot` on one
+    /// path and a table on another.
     fn flat_return_of(
         &self,
         inst: &Instance,
@@ -433,6 +457,7 @@ impl<'a> Builder<'a> {
         let done = reg.scanning.pop().expect("pushed above");
         let answer = result?;
         match done.depends_on {
+            // An enclosing scan's answer was read; it rescans this one once that changes.
             Some(d) if d < depth => {
                 let reader = reg.scanning.last_mut().expect("an enclosing scan");
                 reader.depends_on = Some(reader.depends_on.map_or(d, |r| r.min(d)));
@@ -440,6 +465,7 @@ impl<'a> Builder<'a> {
                     reader.unknown_reads += 1;
                 }
             }
+            // A body whose every return recurses never returns and keeps the boxed result.
             _ => {
                 reg.returns.insert(key, answer.flatten());
             }
@@ -447,12 +473,16 @@ impl<'a> Builder<'a> {
         Ok(answer.flatten())
     }
 
+    /// Repeats with each new answer assumed for the scan's own recursive calls until
+    /// it stops changing. `None` while every return reads an unknown answer.
     fn settle_flat_returns(
         &self,
         decl: &Function,
         returns: &[Idx<Expr>],
         depth: usize,
     ) -> Result<Option<Option<FlatRefKey>>, CompilerError> {
+        // Agreement only refines an unknown answer; once known, a return confirms it or
+        // `agree_flat_returns` rejects the disagreement.
         loop {
             let answer = self.agree_flat_returns(decl, returns, depth)?;
             let mut reg = self.flat_variants.borrow_mut();
@@ -515,6 +545,8 @@ impl<'a> Builder<'a> {
         self.flat_return_scan(subject, self.concrete_plan, &sig)
     }
 
+    /// A safe-nav call or function value cannot take the `vec, slot` result of a
+    /// flat `ref` return.
     pub(crate) fn reject_flat_return_outside_direct_call(
         &self,
         e: Idx<Expr>,
@@ -633,6 +665,8 @@ impl<'a> Builder<'a> {
         if !self.f.hoisted_fn_globals.contains(&hoisted) {
             self.f.hoisted_fn_globals.push(hoisted);
         }
+        // The variant is only called directly and never escapes as a value, so the call
+        // names the global rather than a reload code slot.
         let callee = self.emit_cur(Inst::Global(hoisted));
         let mut argv: Vec<Idx<Inst>> = slots.into_iter().map(|(_, slot)| slot).collect();
         argv.extend(args);
@@ -675,6 +709,7 @@ impl<'a> Builder<'a> {
         )))
     }
 
+    /// Lowered on first use and shared by every call in this root.
     fn flat_variant(
         &mut self,
         plan: &FlatCallPlan,
@@ -837,6 +872,8 @@ impl<'a> Builder<'a> {
         child.fill_param_defaults()?;
         child.copy_ref_borrowed_params(&params)?;
         child.lower_root()?;
+        // Code belongs to the generated variant; persistent state belongs to the
+        // concrete callable whose body it implements.
         for cell in &mut child.f.statics {
             cell.owner = Some(crate::code_identity::CodeIdentity::Named(inst.clone()));
         }
@@ -940,6 +977,7 @@ impl<'a> Builder<'a> {
         })))
     }
 
+    /// In leaf order.
     fn flat_leaf_keys(&self, key: &FlatRefKey, shape: &ValueShape) -> Vec<Ustr> {
         leaf_names(shape, key.prefix.as_str(), ".")
             .iter()
@@ -1053,6 +1091,8 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Reads the addressed leaves, never a table. An index-rooted read keeps its own
+    /// path.
     pub(crate) fn flat_ref_read(
         &mut self,
         e: Idx<Expr>,

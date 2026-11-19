@@ -3,6 +3,7 @@ use crate::monoty::MonoTy;
 
 impl<'a> Builder<'a> {
     pub(crate) fn mark_record_base(&mut self, source: Idx<Expr>, value: Idx<Inst>) {
+        // Shader lowering uses native first-class structs, with no host objects.
         if self.scx.target == bone_core::hir::FnBackend::Any {
             return;
         }
@@ -159,6 +160,7 @@ impl<'a> Builder<'a> {
         Ok(arena.value_shape(rep).map(|shape| shape.name))
     }
 
+    /// Whether `e` is a Vec, Map or Arena whose elements have no per-element table.
     pub(crate) fn flat_stored_container(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
         match self.concrete_ty(e)? {
             Some(ty) => self.flat_stored_container_type(ty),
@@ -204,6 +206,8 @@ impl<'a> Builder<'a> {
         Ok(self.boxed_vec_kind(elem))
     }
 
+    /// On Lua an element that is never nil fills every live slot, so an in-bounds
+    /// access cannot reach a metamethod of a foreign backing table.
     pub(crate) fn boxed_vec_kind(&self, elem: Option<&MonoTy>) -> ContainerKind {
         if matches!(self.scx.target, bone_core::hir::FnBackend::Lua)
             && elem.is_some_and(|ty| crate::nilness::monoty_never_nil(self.ws, ty))
@@ -234,6 +238,7 @@ impl<'a> Builder<'a> {
             .map(|plan| plan.flat_elem(self.scx.rep_arena()))
     }
 
+    /// Nullable elements add a presence column.
     pub(crate) fn column_shape(&self, elem: ColumnElem) -> Result<ValueShape, CompilerError> {
         let shape = self
             .scx
@@ -262,6 +267,7 @@ impl<'a> Builder<'a> {
             .ok_or_else(|| self.gap_here("concrete plan has no type for this expression"))
     }
 
+    /// A column-stored Map's values live in the column Vec `m.data`.
     pub(crate) fn map_col_data(&mut self, m: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::Field {
             nonthrowing: false,
@@ -270,6 +276,7 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Value-struct elements carry their name so the JS emitter can lower flat slots.
     pub(crate) fn nb_kind(&self, e: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
         match self.nb_value_elem(e)? {
             Some(elem) => Ok(ContainerKind::NativeBufferValue(elem)),
@@ -277,6 +284,7 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// FlatVec indexing addresses the backing NativeBuffer.
     pub(crate) fn lower_index_base(
         &mut self,
         base: Idx<Expr>,
@@ -349,6 +357,7 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Coerce typed integer reads at expected-float boundaries.
     pub(crate) fn coerced(
         &mut self,
         value: Idx<Inst>,

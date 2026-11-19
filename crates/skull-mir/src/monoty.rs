@@ -1,9 +1,15 @@
+//! The logical type. Ids are type-equality within one arena only; cross-process
+//! identity is [`MonoTy::canonical`], never the numeric id or [`MonoTy::render`].
+//! The API takes no target: only ABI and layout may differ downstream.
+
 use bone_core::hir::{BuiltinTy, TypeCtor, TypeExpr, VarId};
 use bone_core::prelude::TyId;
 use bone_core::workspace::{BodyInference, Workspace};
 use rustc_hash::FxHashMap;
 use ustr::Ustr;
 
+/// Equality is type-equality within one arena; it carries no meaning across
+/// arenas, which is what `canonical` is for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct MonoTyId(u32);
 
@@ -13,6 +19,7 @@ impl MonoTyId {
     }
 }
 
+/// `Nominal` keeps the declared name, which makes two same-layout structs distinct.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum MonoCtor {
     Array,
@@ -43,14 +50,21 @@ pub enum MonoTy {
     },
 }
 
+/// A symbol and an identity may differ about a type's name, never its shape.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum NominalSpelling {
+    /// The DefKey, for a stable identity.
     Key,
+    /// Serialized artifact identity, preserving standalone root spellings.
     Artifact,
+    /// The DefKey's identifier form (`<Name>_<digest>`), for an emitted symbol.
+    /// Bare compiler-owned keys pass through unchanged.
     Symbol,
 }
 
 impl MonoTy {
+    /// Display only, and not injective: `(fn(int) -> int)?` and `fn(int) -> int?`
+    /// spell alike. Compare, deduplicate and hash with [`Self::canonical`].
     pub fn render(&self) -> String {
         let mut s = String::new();
         self.write(&mut s);
@@ -113,6 +127,8 @@ impl MonoTy {
         }
     }
 
+    /// Polymorphic recursion (`f<T> -> f<[T]>`) grows this without bound, so an
+    /// instantiation walk caps on it rather than on a path length.
     pub fn depth(&self) -> u32 {
         match self {
             MonoTy::Int
@@ -133,12 +149,15 @@ impl MonoTy {
         }
     }
 
+    /// Tagged, length-prefixed and terminated, so unambiguous by construction.
+    /// Emitted specialized symbols are built from the same encoding.
     pub fn canonical(&self) -> String {
         let mut s = String::new();
         self.write_canonical(&mut s);
         s
     }
 
+    /// Serialized type spelling, retaining standalone root compatibility.
     pub fn artifact_key(&self) -> String {
         let mut key = String::new();
         self.write_canonical_as(&mut key, NominalSpelling::Artifact);
@@ -163,10 +182,14 @@ impl MonoTy {
             MonoTy::Any => prim(out, "any"),
             MonoTy::Unit => prim(out, "unit"),
             MonoTy::Never => prim(out, "never"),
+            // `T = E?` differs from `T = E` (its slots carry a presence leaf); without
+            // the tag the two would collide on one symbol.
             MonoTy::Nullable(inner) => {
                 out.push_str("o_");
                 inner.write_canonical_as(out, spelling);
             }
+            // Length-prefixed and terminated, so `(A, B)` cannot encode like a one-slot
+            // tuple of something that encodes as `A_B`.
             MonoTy::Tuple(parts) => {
                 out.push_str("t_");
                 out.push_str(&parts.len().to_string());
@@ -183,6 +206,8 @@ impl MonoTy {
                     MonoCtor::Map => out.push('m'),
                     MonoCtor::Ref => out.push('r'),
                     MonoCtor::Nominal(name) => {
+                        // The length prefix measures the spelled text, so the encoding stays
+                        // self-delimiting under either spelling.
                         let spelled = match spelling {
                             NominalSpelling::Key => std::borrow::Cow::Borrowed(name.as_str()),
                             NominalSpelling::Artifact => std::borrow::Cow::Borrowed(
@@ -204,6 +229,7 @@ impl MonoTy {
                 }
                 out.push_str("_z");
             }
+            // The result is part of the identity, encoded and terminated like any child.
             MonoTy::Function { params, ret } => {
                 out.push_str("f_");
                 out.push_str(&params.len().to_string());
@@ -218,6 +244,8 @@ impl MonoTy {
         }
     }
 
+    /// `None` for a nullable binding on purpose: a presence-carrying binding is
+    /// not exactly this struct. Presence-aware callers use [`Self::peel_nullable`].
     pub fn nominal(&self) -> Option<Ustr> {
         match self {
             Self::App {
@@ -228,6 +256,8 @@ impl MonoTy {
         }
     }
 
+    /// `?` over a nullable type is that type: both spell absence as one null, so
+    /// no type has two layers.
     pub fn nullable(inner: MonoTy) -> MonoTy {
         match inner {
             MonoTy::Nullable(_) => inner,
@@ -245,12 +275,18 @@ impl MonoTy {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum MonoTyReason {
+    /// Inference recovery poison: an invalid program.
     RecoveryError,
+    /// `f32` is a field storage type, which no value has.
     StorageOnly,
     UnresolvedInfer(Ustr),
+    /// Expected in generic contexts that have not selected an instance.
     UnboundGeneric(Ustr),
     NoNode,
+    /// A cyclic substitution chain.
     DepthLimit,
+    /// A body-local or inference type reached from a declaration: compiler state
+    /// disagreeing with itself, never a source shape.
     NotADeclarationType,
 }
 
@@ -334,6 +370,8 @@ impl std::fmt::Display for NewtypeResolutionError {
     }
 }
 
+/// Interned instantiations are the cycle key. Generic arguments convert in
+/// their current environment before binding into the next declaration.
 pub fn resolve_newtype_chain(ws: &Workspace, ty: MonoTy) -> Result<MonoTy, NewtypeResolutionError> {
     use bone_core::hir::TypeExpr;
 
@@ -391,10 +429,13 @@ pub fn resolve_newtype_chain(ws: &Workspace, ty: MonoTy) -> Result<MonoTy, Newty
     Err(NewtypeResolutionError::StepLimit)
 }
 
+/// Guards a cyclic `Infer` chain; not a type-depth bound.
 pub const MAX_DEPTH: u32 = 64;
 
 pub type MonoSubst = FxHashMap<VarId, MonoTy>;
 
+/// A declaration has no inference arena: a `TyId::Local` or `Infer` reached
+/// from one is compiler state disagreeing with itself.
 #[derive(Clone, Copy)]
 pub enum TyEnv<'a> {
     Body(&'a BodyInference),
@@ -415,6 +456,7 @@ impl<'a> TyEnv<'a> {
                 .map(|m| m.ty_arena[idx])
                 .ok_or(MonoTyReason::NoNode),
             (TyId::Local(idx), TyEnv::Body(inf)) => {
+                // `Arena` indexes unchecked; bound it rather than panic.
                 if idx.into_raw().into_u32() as usize >= inf.ty_arena.len() {
                     return Err(MonoTyReason::NoNode);
                 }
@@ -424,6 +466,7 @@ impl<'a> TyEnv<'a> {
         }
     }
 
+    /// An open slot is not an error: a caller's substitution may still answer it.
     fn solved(self, var: VarId) -> Result<Option<TyId>, MonoTyReason> {
         match self {
             TyEnv::Body(inf) => Ok(inf.substitutions.get(var)),
@@ -432,6 +475,8 @@ impl<'a> TyEnv<'a> {
     }
 }
 
+/// The declaration is the authority on a generic's shape, never the body's
+/// own inference.
 pub fn generic_var_of(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<VarId> {
     match crate::lower::ty_node(ws, inf, ty)? {
         TypeExpr::Generic(var, _) => Some(var),
@@ -439,6 +484,8 @@ pub fn generic_var_of(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<V
     }
 }
 
+/// Does not chase `substitutions`: a solved slot is not a hole a caller may
+/// fill, and binding it would overwrite the solution.
 pub(crate) fn infer_var_of(inf: &BodyInference, ty: TyId) -> Option<VarId> {
     let idx = match ty {
         TyId::Local(idx) => idx,
@@ -450,6 +497,7 @@ pub(crate) fn infer_var_of(inf: &BodyInference, ty: TyId) -> Option<VarId> {
     }
 }
 
+/// Structural equality is the interning key, so ids are equal iff types are.
 #[derive(Default, Debug)]
 pub struct MonoArena {
     tys: Vec<MonoTy>,
@@ -487,6 +535,7 @@ impl MonoArena {
         id
     }
 
+    /// Not an identity; see [`MonoTy::render`].
     pub fn render(&self, id: MonoTyId) -> String {
         self.get(id).render()
     }
@@ -543,11 +592,18 @@ impl MonoArena {
     }
 }
 
+/// The one arena a whole build shares: a [`MonoTyId`] means nothing without
+/// the arena that minted it. Monotonic and never pruned, so ids stay stable.
 pub struct MonoInterner {
+    /// Readers index it without a lock.
     types: crate::append_vec::AppendVec<MonoTy>,
+    /// Only interning touches it.
     index: std::sync::RwLock<MonoIndex>,
+    /// Keys the worker-local intern cache, so two live interners never serve
+    /// each other's ids.
     arena_gen: u64,
     write_acqs: std::sync::atomic::AtomicU64,
+    /// Each worker counts on a cache line of its own.
     shared_intern_hits: crate::striped::Striped<std::sync::atomic::AtomicU64>,
 }
 
@@ -561,6 +617,7 @@ struct MonoIndex {
 #[derive(Default)]
 struct MonoInternCache {
     arena_gen: u64,
+    /// The arena is monotonic, so an id learned once stays right.
     ids: FxHashMap<MonoTy, MonoTyId>,
 }
 
@@ -609,6 +666,7 @@ impl MonoInterner {
         self.len() == 0
     }
 
+    /// Takes the write lock only when `ty` is new.
     pub fn intern(&self, ty: MonoTy) -> MonoTyId {
         MONO_INTERN_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -657,6 +715,7 @@ impl MonoInterner {
         })
     }
 
+    /// A type borrowed from this arena is found by address without interning.
     pub fn id_of(&self, ty: &MonoTy) -> MonoTyId {
         if let Some(index) = self.types.index_of(ty) {
             return MonoTyId(index as u32);
@@ -683,6 +742,7 @@ impl MonoInterner {
             .copied()
     }
 
+    /// The conversion itself holds no lock.
     pub fn convert(
         &self,
         ws: &Workspace,
@@ -702,6 +762,7 @@ impl MonoInterner {
         Ok(self.intern(convert_decl(ws, ty, subst)?))
     }
 
+    /// Borrowed from the arena without a lock.
     pub fn get_ref(&self, id: MonoTyId) -> &MonoTy {
         &self.types[id.index()]
     }
@@ -714,6 +775,7 @@ impl MonoInterner {
         ids.iter().map(|id| self.get(*id)).collect()
     }
 
+    /// Not an identity; see [`MonoTy::render`].
     pub fn render(&self, id: MonoTyId) -> String {
         self.get_ref(id).render()
     }
@@ -739,6 +801,8 @@ impl MonoInterner {
     }
 }
 
+/// A generic absent from `subst` is [`MonoTyReason::UnboundGeneric`] rather
+/// than a guess: only the caller knows whether that is expected.
 pub fn convert<S: std::hash::BuildHasher>(
     ws: &Workspace,
     inf: &BodyInference,
@@ -748,6 +812,7 @@ pub fn convert<S: std::hash::BuildHasher>(
     convert_at(ws, TyEnv::Body(inf), ty, subst, 0)
 }
 
+/// A declaration type has no body and so no inference arena.
 pub fn convert_decl<S: std::hash::BuildHasher>(
     ws: &Workspace,
     ty: TyId,
@@ -780,6 +845,8 @@ fn convert_at<S: std::hash::BuildHasher>(
             BuiltinTy::Error => return Err(MonoTyReason::RecoveryError),
             BuiltinTy::F32 => return Err(MonoTyReason::StorageOnly),
         },
+        // An unsolved var the caller binds (struct-default slots). One map serves
+        // both arms: a `VarId` is a declared generic or an inference var, never both.
         TypeExpr::Infer(var, name) => match env.solved(var)? {
             Some(next) => return convert_at(ws, env, next, subst, depth + 1),
             None => {
@@ -834,8 +901,12 @@ fn convert_at<S: std::hash::BuildHasher>(
     })
 }
 
+/// Caps structural type depth so admissibility depends on the instance, not
+/// the path by which graph traversal discovered it.
 pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
 
+/// Emission rejects a too-deep instance: its call site already spelled the
+/// specialized name, and skipping the body would ship a call to nothing.
 pub fn too_deep_to_instantiate<'a>(
     args: impl IntoIterator<Item = &'a MonoTy>,
 ) -> Option<&'a MonoTy> {
@@ -848,6 +919,8 @@ pub fn too_deep_to_instantiate<'a>(
 mod mono_read_cache_tests {
     use super::*;
 
+    /// Two live interners mint the same numeric ids for different types; the
+    /// worker-local cache must never serve one's type for the other's id.
     #[test]
     fn worker_local_reads_stay_interner_scoped() {
         let a = MonoInterner::new();
@@ -864,6 +937,7 @@ mod mono_read_cache_tests {
         }
     }
 
+    /// An intern after this thread warmed its local cache must still be readable.
     #[test]
     fn a_post_warm_intern_reads_through() {
         let a = MonoInterner::new();

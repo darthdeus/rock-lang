@@ -1,3 +1,5 @@
+//! `Vec<T>.sort<K>` with a struct or tuple `K` compares leaf by leaf. The stdlib
+//! routes it through `__sort_key_wide` (folded by an `if`) and `__sort_key_lt`.
 use super::call::DirectCall;
 use super::*;
 use crate::lower::shape::mono_value_shape;
@@ -20,6 +22,7 @@ impl<'a> Builder<'a> {
             && decl.param_decls.len() == 2
     }
 
+    /// Only the stdlib sort consumes this private callback ABI.
     pub(crate) fn sort_call_args(
         &mut self,
         e: Idx<Expr>,
@@ -31,6 +34,7 @@ impl<'a> Builder<'a> {
         if !self.is_stdlib_sort(func) {
             return Ok(None);
         }
+        // Vec.sort already received the private callback from its caller.
         if self.site_owner.as_ref().is_some_and(|owner| {
             let module = self.ws.module(owner.func.module);
             module.functions[owner.func.func].name.as_str() == "sort"
@@ -130,6 +134,8 @@ impl<'a> Builder<'a> {
         if original == plan {
             return Ok(callee);
         }
+        // The function value may be called elsewhere, so adapt its fixed ABI here
+        // rather than changing those calls.
         let capture = self.fresh_cells(1)[0];
         self.store_cell(capture, callee);
         let saved = self.cur;
@@ -211,6 +217,8 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A splatting `T` reaches the key as slots, which a backend sort handing it
+    /// one stored element cannot supply.
     fn sort_takes_leaf_path(&self, key_fn_ty: &MonoTy) -> Result<bool, CompilerError> {
         let MonoTy::Function { params, ret } = key_fn_ty else {
             return Err(self.gap_here("sort key function has no concrete function type"));
@@ -273,6 +281,7 @@ impl<'a> Builder<'a> {
         ))
     }
 
+    /// The first unequal leaf decides; equal keys are not less.
     pub(crate) fn expand_sort_key_lt(
         &mut self,
         e: Idx<Expr>,
@@ -284,6 +293,8 @@ impl<'a> Builder<'a> {
         let ty = self.sort_key_ty(*key_fn)?;
         let leaf_tys = match self.validate_sort_key(e, &ty) {
             Ok(leaves) => leaves,
+            // Generic stdlib bodies lower independently; the sort boundary rejects this
+            // key at the user's call.
             Err(_) if self.uses_sort_key_leaf_abi() => {
                 return Ok(ValueRepr::Scalar(
                     self.emit_cur(Inst::Const(Lit::Bool(false))),
@@ -413,6 +424,7 @@ fn leaf_lt(ty: &MonoTy, l: Idx<Inst>, r: Idx<Inst>) -> Inst {
     match ty {
         MonoTy::Int => Inst::IntLt(l, r),
         MonoTy::Uint => Inst::UintLt(l, r),
+        // Both backends emit `<` for strings too, matching a scalar string key's order.
         _ => Inst::FloatLt(l, r),
     }
 }

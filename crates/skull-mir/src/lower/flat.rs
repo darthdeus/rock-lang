@@ -136,8 +136,11 @@ impl<'a> Builder<'a> {
         let mut slots: Vec<Option<Idx<Inst>>> = vec![None; shape.tuple_width()];
         for (pos, arg) in positional.into_iter().enumerate() {
             let off = shape.slot_offset(pos);
+            // Use this variant's payload width and leave the remaining slots inactive.
             match self.flat_payload_leaf_shape(Some(shape.name), variant, pos) {
                 Some(vs) => {
+                    // The enum is immutable and outlives its operands, so its payload owns its
+                    // value children from the start.
                     let leaves = match arg {
                         FlatPayload::Expr(a) => {
                             let r = self.lower_expr_repr(a)?;
@@ -159,6 +162,8 @@ impl<'a> Builder<'a> {
                 None => {
                     let v = match arg {
                         FlatPayload::Expr(a) => self.lower_expr(a)?,
+                        // A compiler-built payload has no source line to mark `materialize`, so the
+                        // box it needs is the authorized one.
                         FlatPayload::Repr(r) => {
                             let v = self.pack(r)?;
                             self.authorize_nobox_box(v);
@@ -219,6 +224,7 @@ impl<'a> Builder<'a> {
             .is_some_and(|v| matches!(v.payload, VariantPayload::Unit))
     }
 
+    /// True for both `E` and `E?`: `expr_ty` peels `Nullable`.
     pub(crate) fn expr_is_flat_enum(&self, e: Idx<Expr>) -> bool {
         self.dispatch().expr_is_flat_enum(e)
     }
