@@ -3,7 +3,7 @@
 //! This is a conservative source projection, not a runtime layout hash. The
 //! host retains responsibility for hashing source contents and decoder code.
 
-use crate::hir::{TyId, TypeCtor, TypeExpr, VariantPayload};
+use crate::hir::{TypeCtor, TypeExpr, VariantPayload};
 use crate::workspace::Workspace;
 use std::collections::{BTreeMap, HashSet};
 use ustr::Ustr;
@@ -32,7 +32,7 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
     let mut owners = BTreeMap::new();
     while !names.is_empty() || !types.is_empty() {
         if let Some(name) = names.pop() {
-            if owners.contains_key(name.as_str()) {
+            if owners.contains_key(&name) {
                 continue;
             }
             let module = if let Some(id) = ws.struct_by_name.get(&name) {
@@ -64,7 +64,7 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
                 return Err(format!("source provenance cannot find declaration {name}"));
             };
             owners.insert(
-                name.to_string(),
+                name,
                 TypeSource {
                     name,
                     file: module.file,
@@ -76,24 +76,24 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
         if !seen_types.insert(ty) {
             continue;
         }
-        let TyId::Static(mid, idx) = ty else {
+        let Some(expr) = ws.type_expr(None, ty) else {
             return Err("source provenance encountered a body-local type".to_string());
         };
-        match ws.module(mid).ty_arena[idx] {
+        match expr {
             TypeExpr::Builtin(_) | TypeExpr::Generic(_, _) => {}
             TypeExpr::Infer(_, _) => {
                 return Err("source provenance encountered an unresolved type".to_string());
             }
-            TypeExpr::Nullable(inner) => types.push(TyId::Static(mid, inner)),
+            TypeExpr::Nullable(inner) => types.push(ty.with_idx(inner)),
             TypeExpr::Tuple { elements } => {
-                types.extend(elements.into_iter().map(|idx| TyId::Static(mid, idx)))
+                types.extend(elements.into_iter().map(|idx| ty.with_idx(idx)))
             }
             TypeExpr::Function { params, ret } => {
-                types.extend(params.into_iter().map(|idx| TyId::Static(mid, idx)));
-                types.push(TyId::Static(mid, ret));
+                types.extend(params.into_iter().map(|idx| ty.with_idx(idx)));
+                types.push(ty.with_idx(ret));
             }
             TypeExpr::App { ctor, params } => {
-                types.extend(params.into_iter().map(|idx| TyId::Static(mid, idx)));
+                types.extend(params.into_iter().map(|idx| ty.with_idx(idx)));
                 match ctor {
                     TypeCtor::Nominal(name) => names.push(name),
                     TypeCtor::Array => {

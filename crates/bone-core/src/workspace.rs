@@ -457,22 +457,29 @@ impl Workspace {
             .is_some_and(|sid| !self.module(sid.module).structs[sid.def].is_value)
     }
 
+    pub(crate) fn type_expr(&self, body: Option<&BodyInference>, ty: TyId) -> Option<TypeExpr> {
+        Some(match ty {
+            TyId::Static(mid, idx) => self.module(mid).ty_arena[idx],
+            TyId::Local(idx) => body?.ty_arena[idx],
+        })
+    }
+
     /// The type behind `ty`, following solved inference variables, with the id
     /// whose arena its child indices point into (`id.with_idx(child)`). `None`
     /// for a `Local` type without its body.
-    pub fn resolve_ty(&self, body: Option<&BodyInference>, ty: TyId) -> Option<(TyId, TypeExpr)> {
-        let mut cur = ty;
+    pub fn resolve_ty(
+        &self,
+        body: Option<&BodyInference>,
+        mut ty: TyId,
+    ) -> Option<(TyId, TypeExpr)> {
         loop {
-            let expr = match cur {
-                TyId::Static(mid, idx) => self.module(mid).ty_arena[idx],
-                TyId::Local(idx) => body?.ty_arena[idx],
-            };
-            match expr {
-                TypeExpr::Infer(var, _) => match body.and_then(|b| b.substitutions.get(var)) {
-                    Some(next) => cur = next,
-                    None => return Some((cur, expr)),
-                },
-                _ => return Some((cur, expr)),
+            let expr = self.type_expr(body, ty)?;
+            if let TypeExpr::Infer(var, _) = expr
+                && let Some(next) = body.and_then(|b| b.substitutions.get(var))
+            {
+                ty = next;
+            } else {
+                return Some((ty, expr));
             }
         }
     }
@@ -486,12 +493,8 @@ impl Workspace {
         ty: TyId,
         hit: &mut impl FnMut(TypeExpr) -> bool,
     ) -> bool {
-        let expr = match ty {
-            TyId::Static(mid, idx) => self.module(mid).ty_arena[idx],
-            TyId::Local(idx) => match body {
-                Some(b) => b.ty_arena[idx],
-                None => return false,
-            },
+        let Some(expr) = self.type_expr(body, ty) else {
+            return false;
         };
         if hit(expr) {
             return true;
@@ -507,8 +510,7 @@ impl Workspace {
                 .is_some_and(|next| self.type_any(body, next, hit)),
             TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
             TypeExpr::Nullable(inner) => self.type_any(body, ty.with_idx(inner), hit),
-            TypeExpr::App { params, .. } => any(params, hit),
-            TypeExpr::Tuple { elements } => any(elements, hit),
+            TypeExpr::App { params, .. } | TypeExpr::Tuple { elements: params } => any(params, hit),
             TypeExpr::Function { params, ret } => {
                 any(params, hit) || self.type_any(body, ty.with_idx(ret), hit)
             }
@@ -529,12 +531,17 @@ impl Workspace {
     }
 
     pub fn render(&self, body: Option<&BodyInference>, ty: TyId) -> String {
-        let te = match ty {
-            TyId::Static(mid, idx) => self.module(mid).ty_arena[idx],
-            TyId::Local(idx) => body.expect("Local type needs its BodyInference").ty_arena[idx],
+        let (ty, expr) = self
+            .resolve_ty(body, ty)
+            .expect("Local type needs its BodyInference");
+        let render_list = |types: IdxRange<TypeExpr>| {
+            types
+                .map(|idx| self.render(body, ty.with_idx(idx)))
+                .collect_vec()
+                .join(", ")
         };
 
-        match te {
+        match expr {
             TypeExpr::Builtin(b) => match b {
                 BuiltinTy::Int => "int".into(),
                 BuiltinTy::Uint => "uint".into(),
@@ -548,19 +555,12 @@ impl Workspace {
                 BuiltinTy::Error => "<error>".into(),
             },
 
-            TypeExpr::Generic(_, name) => name.to_string(),
-            TypeExpr::Infer(var_id, name) => match body.and_then(|b| b.substitutions.get(var_id)) {
-                Some(sub) => self.render(body, sub),
-                None => name.to_string(),
-            },
+            TypeExpr::Generic(_, name) | TypeExpr::Infer(_, name) => name.to_string(),
 
             TypeExpr::Nullable(inner) => format!("{}?", self.render(body, ty.with_idx(inner))),
 
             TypeExpr::App { ctor, params } => {
-                let params_str = params
-                    .map(|x| self.render(body, ty.with_idx(x)))
-                    .collect_vec()
-                    .join(", ");
+                let params_str = render_list(params);
 
                 match ctor {
                     hir::TypeCtor::Array => format!("[{}]", params_str),
@@ -582,28 +582,12 @@ impl Workspace {
                 }
             }
 
-            TypeExpr::Function { params, ret } => {
-                let params_str = params
-                    .map(|x| self.render(body, ty.with_idx(x)))
-                    .collect_vec()
-                    .join(", ");
-
-                format!(
-                    "fn({}) -> {}",
-                    params_str,
-                    self.render(body, ty.with_idx(ret))
-                )
-            }
-
-            TypeExpr::Tuple { elements } => {
-                format!(
-                    "({})",
-                    elements
-                        .map(|x| self.render(body, ty.with_idx(x)))
-                        .collect_vec()
-                        .join(", ")
-                )
-            }
+            TypeExpr::Function { params, ret } => format!(
+                "fn({}) -> {}",
+                render_list(params),
+                self.render(body, ty.with_idx(ret))
+            ),
+            TypeExpr::Tuple { elements } => format!("({})", render_list(elements)),
         }
     }
 }

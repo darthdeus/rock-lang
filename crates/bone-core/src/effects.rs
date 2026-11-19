@@ -19,7 +19,7 @@ use crate::hir::{
     BinOp, BodyOwner, BuiltinTy, Callee, Expr, Function, Statement, TyId, TypeCtor, TypeExpr,
 };
 use crate::prelude::*;
-use crate::workspace::{BoundNext, BoundTree, Workspace};
+use crate::workspace::{BodyInference, BoundNext, Workspace};
 
 /// What a call may write. Every field is an upper bound.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -208,13 +208,9 @@ fn opaque_effect(f: &Function, callback_libraries: &FxHashSet<Ustr>) -> Option<M
 }
 
 fn is_fn_typed(ws: &Workspace, ty: TyId) -> bool {
-    let TyId::Static(mid, idx) = ty else {
-        return true;
-    };
-    match ws.module(mid).ty_arena[idx] {
-        TypeExpr::Function { .. } => true,
-        TypeExpr::Builtin(BuiltinTy::Any) => true,
-        TypeExpr::Nullable(inner) => is_fn_typed(ws, TyId::Static(mid, inner)),
+    match ws.type_expr(None, ty) {
+        None | Some(TypeExpr::Function { .. } | TypeExpr::Builtin(BuiltinTy::Any)) => true,
+        Some(TypeExpr::Nullable(inner)) => is_fn_typed(ws, ty.with_idx(inner)),
         _ => false,
     }
 }
@@ -228,39 +224,17 @@ fn is_constructor(ws: &Workspace, name: Ustr) -> bool {
         || ws.newtypes_by_name.contains_key(&bare)
 }
 
-fn type_expr_at(ws: &Workspace, bi: &crate::workspace::BodyInference, ty: TyId) -> TypeExpr {
-    let mut ty = ty;
+fn expr_type(ws: &Workspace, bi: &BodyInference, expr: Idx<Expr>) -> Option<TypeExpr> {
+    let mut ty = *bi.expr_types.get(expr)?;
     loop {
-        let current = raw_type_expr_at(ws, bi, ty);
-        if let TypeExpr::Nullable(inner) = current {
-            ty = ty.with_idx(inner);
-        } else {
-            break current;
+        match ws.type_expr(Some(bi), ty)? {
+            TypeExpr::Nullable(inner) => ty = ty.with_idx(inner),
+            expr => return Some(expr),
         }
     }
 }
 
-fn raw_type_expr_at(ws: &Workspace, bi: &crate::workspace::BodyInference, ty: TyId) -> TypeExpr {
-    match ty {
-        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
-        TyId::Local(idx) => bi.ty_arena[idx],
-    }
-}
-
-fn expr_type(
-    ws: &Workspace,
-    bi: &crate::workspace::BodyInference,
-    expr: Idx<Expr>,
-) -> Option<TypeExpr> {
-    let &ty = bi.expr_types.get(expr)?;
-    Some(type_expr_at(ws, bi, ty))
-}
-
-fn index_may_call_table_metamethod(
-    ws: &Workspace,
-    bi: &crate::workspace::BodyInference,
-    base: Idx<Expr>,
-) -> bool {
+fn index_may_call_table_metamethod(ws: &Workspace, bi: &BodyInference, base: Idx<Expr>) -> bool {
     let Some(expr) = expr_type(ws, bi, base) else {
         return true;
     };
@@ -275,22 +249,15 @@ fn index_may_call_table_metamethod(
     )
 }
 
-fn field_may_call_callback(
-    ws: &Workspace,
-    bi: &crate::workspace::BodyInference,
-    base: Idx<Expr>,
-) -> bool {
+fn field_may_call_callback(ws: &Workspace, bi: &BodyInference, base: Idx<Expr>) -> bool {
     let Some(&source_ty) = bi.expr_types.get(base) else {
         return true;
     };
     let mut ty = source_ty;
     loop {
-        match raw_type_expr_at(ws, bi, ty) {
-            TypeExpr::Infer(var, _) => match bi.substitutions.get(var) {
-                Some(next) => ty = next,
-                None => return true,
-            },
-            TypeExpr::Nullable(inner) => ty = ty.with_idx(inner),
+        let (base, expr) = ws.resolve_ty(Some(bi), ty).expect("body supplied");
+        match expr {
+            TypeExpr::Nullable(inner) => ty = base.with_idx(inner),
             TypeExpr::App {
                 ctor: TypeCtor::Ref,
                 params,
@@ -298,7 +265,7 @@ fn field_may_call_callback(
                 let Some(inner) = params.into_iter().next() else {
                     return true;
                 };
-                ty = ty.with_idx(inner);
+                ty = base.with_idx(inner);
             }
             TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),
@@ -306,7 +273,9 @@ fn field_may_call_callback(
             } => {
                 return ws.is_identity_struct(name);
             }
-            TypeExpr::Generic(..) | TypeExpr::Builtin(BuiltinTy::Any) => return true,
+            TypeExpr::Infer(..) | TypeExpr::Generic(..) | TypeExpr::Builtin(BuiltinTy::Any) => {
+                return true;
+            }
             _ => return false,
         }
     }
@@ -315,7 +284,7 @@ fn field_may_call_callback(
 fn equality_operand_may_call_metamethod(
     ws: &Workspace,
     body: &crate::hir::Body,
-    bi: &crate::workspace::BodyInference,
+    bi: &BodyInference,
     expr: Idx<Expr>,
 ) -> bool {
     if matches!(body.expr_arena[expr], Expr::Null) {
@@ -341,7 +310,7 @@ fn equality_operand_may_call_metamethod(
 fn body_effect(
     ws: &Workspace,
     body: &crate::hir::Body,
-    bi: &crate::workspace::BodyInference,
+    bi: &BodyInference,
 ) -> (MemEffect, Vec<(ModuleId, Idx<Function>)>) {
     let mut effect = MemEffect::none();
     let mut callees = Vec::new();
@@ -422,22 +391,14 @@ fn collect_next(
     match next {
         BoundNext::Concrete { func, sub, .. } => {
             callees.push(*func);
-            collect_tree(sub, callees, effect);
+            for next in sub.next.values() {
+                collect_next(next, callees, effect);
+            }
         }
         // Resolved only at an inlining root: unknown here.
         BoundNext::CallerGeneric(_) => {
             effect.join(&MemEffect::all());
         }
-    }
-}
-
-fn collect_tree(
-    tree: &BoundTree,
-    callees: &mut Vec<(ModuleId, Idx<Function>)>,
-    effect: &mut MemEffect,
-) {
-    for next in tree.next.values() {
-        collect_next(next, callees, effect);
     }
 }
 

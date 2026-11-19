@@ -28,18 +28,10 @@ impl<'a> TyRef<'a> {
 
     fn with_idx(self, idx: Idx<TypeExpr>) -> Self {
         TyRef {
-            body: self.body,
             ty: self.ty.with_idx(idx),
+            ..self
         }
     }
-}
-
-/// The arena a `TyId` indexes. Generic parameter ids are allocated per
-/// arena, so they compare only within one.
-#[derive(PartialEq, Eq)]
-enum Arena {
-    Module(ModuleId),
-    Body(*const BodyInference),
 }
 
 impl Workspace {
@@ -124,19 +116,16 @@ impl Workspace {
 }
 
 fn same_arena(a: TyRef<'_>, b: TyRef<'_>) -> bool {
-    arena_of(a) == arena_of(b)
+    match (a.ty, b.ty) {
+        (TyId::Static(x, _), TyId::Static(y, _)) => x == y,
+        (TyId::Local(_), TyId::Local(_)) => same_body(a, b),
+        _ => false,
+    }
 }
 
 fn same_body(a: TyRef<'_>, b: TyRef<'_>) -> bool {
     match (a.body, b.body) {
         (Some(x), Some(y)) => std::ptr::eq(x, y),
         _ => false,
-    }
-}
-
-fn arena_of(t: TyRef<'_>) -> Option<Arena> {
-    match t.ty {
-        TyId::Static(mid, _) => Some(Arena::Module(mid)),
-        TyId::Local(_) => t.body.map(|b| Arena::Body(b as *const _)),
     }
 }
