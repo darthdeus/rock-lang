@@ -165,8 +165,6 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
                     range: (lit_start, end),
                     text: std::mem::take(&mut lit_text),
                 });
-            } else {
-                lit_text.clear();
             }
         }};
     }
@@ -210,10 +208,7 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
             continue;
         }
         if flavor.interpolates() && (b[i] == b'{' || b[i] == b'}') && b.get(i + 1) == Some(&b[i]) {
-            // `{{` / `}}` emit a literal brace and never open a hole. Kept
-            // doubled here; see `Piece::Literal`.
-            lit_text.push(b[i] as char);
-            lit_text.push(b[i] as char);
+            lit_text.push_str(&src[i..i + 2]);
             i += 2;
             continue;
         }
@@ -225,12 +220,10 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
             lit_start = i;
             continue;
         }
-        let c = src[i..]
-            .chars()
-            .next()
-            .expect("byte index on a char boundary");
-        lit_text.push(c);
-        i += c.len_utf8();
+        // `{{` / `}}` emit a literal brace and never open a hole. Kept
+        // doubled here; see `Piece::Literal`.
+        lit_text.push(b[i] as char);
+        i += 1;
     }
     flush_literal!(n);
     Scan {
@@ -300,21 +293,13 @@ fn resolve_escape(src: &str, at: usize) -> Esc {
         '\\' | '"' | '\'' => Esc::ok(c, w),
         'u' => resolve_unicode_escape(src, at + w),
         // Line continuation consumes the newline and the next line's indentation.
-        '\n' => {
-            let b = src.as_bytes();
-            let mut j = at + w;
-            while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
-                j += 1;
-            }
-            Esc::empty(j - at)
-        }
-        '\r' if src[at + w..].starts_with('\n') => {
-            let b = src.as_bytes();
-            let mut j = at + w + 1;
-            while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
-                j += 1;
-            }
-            Esc::empty(j - at)
+        '\n' | '\r' if c == '\n' || src[at + w..].starts_with('\n') => {
+            let end = at + w + usize::from(c == '\r');
+            let indent = src[end..]
+                .bytes()
+                .take_while(|b| matches!(b, b' ' | b'\t'))
+                .count();
+            Esc::empty(end + indent - at)
         }
         other => Esc::bad(
             other,
@@ -391,7 +376,7 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
     // Bracket depth within the hole: a `:` or `}` inside a nested bracket is neither the spec split nor the terminator.
     let mut depth: i32 = 0;
     let mut spec_start: Option<usize> = None;
-    let mut expr_end = n;
+    let mut closed = false;
     while i < n {
         // Regardless of depth: nothing inside a hole may outlive the literal.
         if flavor.closes_inside_hole() && b[i..].starts_with(close) {
@@ -404,17 +389,8 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
         }
         match b[i] {
             b'}' if depth == 0 => {
-                let expr = (expr_start, spec_start.map_or(i, |s| s - 1));
-                let spec = spec_start.map(|s| (s, i));
-                return (
-                    i + 1,
-                    Piece::Hole {
-                        range: (open, i + 1),
-                        expr,
-                        spec,
-                        closed: true,
-                    },
-                );
+                closed = true;
+                break;
             }
             b':' if depth == 0 && spec_start.is_none() && b.get(i + 1) == Some(&b':') => {
                 i += 2;
@@ -422,16 +398,10 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
             }
             b':' if depth == 0 && spec_start.is_none() => {
                 spec_start = Some(i + 1);
-                i += 1;
-                continue;
             }
             // A nested `".."` literal is opaque. Not inside `"""`, where a lone `"` is plain text.
             b'"' | b'\'' if !flavor.closes_inside_hole() => {
-                if let Some(inner) = Flavor::at(src, i) {
-                    i = scan_string(src, i).end.max(i + inner.open().len());
-                    continue;
-                }
-                i += 1;
+                i = scan_string(src, i).end;
                 continue;
             }
             b'(' | b'[' | b'{' => depth += 1,
@@ -440,17 +410,14 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
         }
         i += 1;
     }
-    let end = i.min(n);
-    expr_end = expr_end.min(end);
-    let expr = (expr_start, spec_start.map_or(expr_end, |s| s - 1));
-    let spec = spec_start.map(|s| (s, end));
+    let end = i + usize::from(closed);
     (
         end,
         Piece::Hole {
             range: (open, end),
-            expr,
-            spec,
-            closed: false,
+            expr: (expr_start, spec_start.map_or(i, |s| s - 1)),
+            spec: spec_start.map(|s| (s, i)),
+            closed,
         },
     )
 }

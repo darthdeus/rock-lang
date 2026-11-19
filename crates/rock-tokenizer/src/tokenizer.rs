@@ -1,3 +1,4 @@
+use crate::interp::{Flavor, Piece, scan_string};
 use crate::prelude::*;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -25,33 +26,31 @@ pub struct Tokenizer<'a> {
 }
 
 #[inline(always)]
-fn decode_at(bytes: &[u8], i: usize) -> Option<(char, usize)> {
-    let b = *bytes.get(i)?;
-    if b < 0x80 {
-        return Some((b as char, 1));
+fn decode_at(input: &str, i: usize) -> Option<char> {
+    let b = *input.as_bytes().get(i)?;
+    if b.is_ascii() {
+        return Some(b as char);
     }
-    let s = unsafe { std::str::from_utf8_unchecked(&bytes[i..]) };
-    let c = s.chars().next()?;
-    Some((c, c.len_utf8()))
+    input[i..].chars().next()
 }
 
-fn single_char_token(ch: char) -> Option<TokenKind> {
-    Some(match ch {
-        '(' => TokenKind::OpenParen,
-        ')' => TokenKind::CloseParen,
-        '[' => TokenKind::OpenSquare,
-        ']' => TokenKind::CloseSquare,
-        '{' => TokenKind::OpenCurly,
-        '}' => TokenKind::CloseCurly,
-        '%' => TokenKind::Mod,
-        ';' => TokenKind::Semicolon,
-        ',' => TokenKind::Comma,
-        '@' => TokenKind::At,
-        '$' => TokenKind::Dollar,
-        '^' => TokenKind::BitXor,
-        '~' => TokenKind::BitNot,
+fn is_char_start(b: u8) -> bool {
+    b & 0xC0 != 0x80
+}
+
+pub(crate) fn directive(src: &str) -> Option<(TokenKind, usize)> {
+    if !src.as_bytes().first().is_some_and(u8::is_ascii_lowercase) {
+        return None;
+    }
+    let len = src.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let kind = match &src[..len] {
+        "if" => TokenKind::DirectiveIf,
+        "elseif" => TokenKind::DirectiveElseIf,
+        "else" => TokenKind::DirectiveElse,
+        "end" => TokenKind::DirectiveEnd,
         _ => return None,
-    })
+    };
+    Some((kind, len))
 }
 
 /// Spans hold positions as `u32`, so a source whose last byte offset does
@@ -103,7 +102,7 @@ impl<'a> Tokenizer<'a> {
         line: usize,
         column: usize,
     ) -> Self {
-        let current = decode_at(input.as_bytes(), 0).map(|(c, _)| c);
+        let current = decode_at(input, 0);
 
         Self {
             source_file,
@@ -123,35 +122,30 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub fn advance(&mut self) {
-        if self.current == Some('\n') {
+        let Some(c) = self.current else { return };
+        if c == '\n' {
             self.line += 1;
             self.column = 0;
-        } else if self.current.is_some() {
+        } else {
             self.column += 1;
         }
-
-        let bytes = self.input.as_bytes();
-        if let Some(c) = self.current {
-            let len = c.len_utf8();
-            self.byte_offset += len;
-            self.byte_index += len;
-        }
-
-        self.current = decode_at(bytes, self.byte_index).map(|(c, _)| c);
+        self.set_byte_index(self.byte_index + c.len_utf8());
     }
 
-    pub(crate) fn peek_n(&self, n: usize) -> Option<char> {
-        let raw = self.input.as_bytes();
-        let base = self.byte_index;
-        let fast_ok = base + n < raw.len() && raw[base..base + n].iter().all(|b| b.is_ascii());
-        if fast_ok {
-            let ahead = raw[base + n];
-            if ahead.is_ascii() {
-                return Some(ahead as char);
-            }
-            return decode_at(raw, base + n).map(|(got, _)| got);
-        }
-        self.input.get(base..)?.chars().nth(n)
+    fn set_byte_index(&mut self, end: usize) {
+        self.byte_offset += end - self.byte_index;
+        self.byte_index = end;
+        self.current = decode_at(self.input, end);
+    }
+
+    // Columns count chars, offsets count bytes.
+    fn advance_on_line(&mut self, end: usize, chars: usize) {
+        self.column += chars;
+        self.set_byte_index(end);
+    }
+
+    fn peek_byte(&self, ahead: usize) -> Option<u8> {
+        self.input.as_bytes().get(self.byte_index + ahead).copied()
     }
 
     fn at(&self, want: char) -> bool {
@@ -168,126 +162,85 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        let bytes = self.input.as_bytes();
-        let mut i = self.byte_index;
-        let n = bytes.len();
-        let mut consumed = 0usize;
-        while i < n && bytes[i] == b' ' {
-            i += 1;
-            consumed += 1;
-        }
-        if consumed > 0 {
-            self.byte_index = i;
-            self.byte_offset += consumed;
-            self.column += consumed;
+        let start = self.byte_index;
+        let len = self.input.as_bytes()[start..]
+            .iter()
+            .take_while(|&&b| b == b' ')
+            .count();
+        if len != 0 {
+            self.advance_on_line(start + len, len);
             self.just_skipped_whitespace = true;
-            self.current = decode_at(bytes, i).map(|(c, _)| c);
         }
     }
 
     fn read_ident(&mut self) -> &'a str {
-        let input = self.input; // copy the &'a str out, decoupled from &mut self
-        let bytes = input.as_bytes();
-        let n = bytes.len();
+        let bytes = self.input.as_bytes();
         let start = self.byte_index;
-        let mut i = start;
-        let mut char_count = 0usize;
-
-        while i < n {
-            let b = bytes[i];
-            if b.is_ascii_alphanumeric() || b == b'_' {
-                i += 1;
-                char_count += 1;
-            } else if b < 0x80 {
-                break;
-            } else {
-                match decode_at(bytes, i) {
-                    Some((c, len)) if c.is_alphanumeric() => {
-                        i += len;
-                        char_count += 1;
-                    }
+        let mut end = start;
+        let mut chars = 0;
+        while let Some(&b) = bytes.get(end) {
+            end += if b.is_ascii_alphanumeric() || b == b'_' {
+                1
+            } else if !b.is_ascii() {
+                match decode_at(self.input, end) {
+                    Some(c) if c.is_alphanumeric() => c.len_utf8(),
                     _ => break,
                 }
-            }
+            } else {
+                break;
+            };
+            chars += 1;
         }
-
-        self.byte_index = i;
-        // Columns count chars, offsets count bytes.
-        self.byte_offset += i - start;
-        self.column += char_count;
-        self.current = decode_at(bytes, i).map(|(c, _)| c);
-        &input[start..i]
+        self.advance_on_line(end, chars);
+        &self.input[start..end]
     }
 
     fn read_line_rest(&mut self) -> &'a str {
-        let input = self.input;
-        let bytes = input.as_bytes();
-        let n = bytes.len();
         let start = self.byte_index;
-        let mut i = start;
-        let mut char_count = 0usize;
-        while i < n && bytes[i] != b'\n' {
-            if bytes[i] & 0xC0 != 0x80 {
-                char_count += 1;
+        let mut end = start;
+        let mut chars = 0;
+        for &b in &self.input.as_bytes()[start..] {
+            if b == b'\n' {
+                break;
             }
-            i += 1;
+            end += 1;
+            chars += usize::from(is_char_start(b));
         }
-        self.byte_index = i;
-        self.byte_offset += i - start;
-        self.column += char_count;
-        self.current = decode_at(bytes, i).map(|(c, _)| c);
-        &input[start..i]
+        self.advance_on_line(end, chars);
+        &self.input[start..end]
     }
 
     /// Leaves the cursor in place when an escape, line break or interpolation needs the full scanner.
     fn try_read_plain_string(&mut self) -> Option<&'a str> {
-        let input = self.input;
-        let bytes = input.as_bytes();
-        let n = bytes.len();
         let start = self.byte_index;
-        let mut j = start;
-        let mut char_count = 0usize;
-        loop {
-            if j >= n {
-                return None; // unterminated -- let the slow path raise the error
-            }
-            match bytes[j] {
+        let mut chars = 0;
+        for (i, &b) in self.input.as_bytes()[start..].iter().enumerate() {
+            match b {
                 b'"' => {
-                    self.byte_index = j + 1;
-                    self.byte_offset += (j + 1) - start;
-                    self.column += char_count + 1; // +1 for the closing quote
-                    self.current = decode_at(bytes, j + 1).map(|(c, _)| c);
-                    return Some(&input[start..j]);
+                    let end = start + i;
+                    self.advance_on_line(end + 1, chars + 1);
+                    return Some(&self.input[start..end]);
                 }
                 b'\\' | b'{' | b'\n' => return None,
-                b => {
-                    if b & 0xC0 != 0x80 {
-                        char_count += 1;
-                    }
-                    j += 1;
-                }
+                b => chars += usize::from(is_char_start(b)),
             }
         }
+        None
     }
 
     fn read_string_literal(&mut self, start: usize) -> Result<TokenKind, CompilerError> {
         let open_span = self.start_span();
-        let scan = crate::interp::scan_string(self.input, start);
-        let unclosed_hole = scan.flavor == crate::interp::Flavor::Quoted
-            && matches!(
-                scan.pieces.last(),
-                Some(crate::interp::Piece::Hole { closed: false, .. })
-            );
+        let scan = scan_string(self.input, start);
+        let unclosed_hole = scan.flavor == Flavor::Quoted
+            && matches!(scan.pieces.last(), Some(Piece::Hole { closed: false, .. }));
         if !scan.terminated {
             self.advance_to(scan.end);
             return Err(CompilerError::new_with_label(
                 self.end_span(open_span),
                 match scan.flavor {
-                    crate::interp::Flavor::Triple => "unterminated multiline string".to_string(),
-                    crate::interp::Flavor::RawTriple => {
-                        "unterminated multiline raw string".to_string()
-                    }
-                    crate::interp::Flavor::Raw => "unterminated raw string".to_string(),
+                    Flavor::Triple => "unterminated multiline string".to_string(),
+                    Flavor::RawTriple => "unterminated multiline raw string".to_string(),
+                    Flavor::Raw => "unterminated raw string".to_string(),
                     _ => "unterminated string literal: a bare `{` opens an interpolation \
                           that must be closed with `}`; use `{{` to emit a literal `{`"
                         .to_string(),
@@ -303,20 +256,17 @@ impl<'a> Tokenizer<'a> {
         }
         // After the structural refusals, so an unterminated literal is reported as such.
         if let Some(bad) = scan.bad_escapes.first() {
-            let (at, len, message) = (bad.at, bad.len, bad.message.clone());
-            self.advance_to(at);
+            self.advance_to(bad.at);
             let esc_start = self.start_span();
-            self.advance_to(at + len);
+            self.advance_to(bad.at + bad.len);
             let span = self.end_span(esc_start);
             self.advance_to(scan.end);
-            return Err(CompilerError::new_with_label(span, message));
+            return Err(CompilerError::new_with_label(span, bad.message.clone()));
         }
         let content = scan.content(self.input);
         self.advance_to(scan.end);
         Ok(match scan.flavor {
-            crate::interp::Flavor::Raw | crate::interp::Flavor::RawTriple => {
-                TokenKind::RawString(content.into())
-            }
+            Flavor::Raw | Flavor::RawTriple => TokenKind::RawString(content.into()),
             _ => TokenKind::String(content.into()),
         })
     }
@@ -324,14 +274,14 @@ impl<'a> Tokenizer<'a> {
     fn advance_to(&mut self, target: usize) {
         let bytes = self.input.as_bytes();
         let mut end = target.min(bytes.len());
-        while end < bytes.len() && bytes[end] & 0xC0 == 0x80 {
+        while end < bytes.len() && !is_char_start(bytes[end]) {
             end += 1;
         }
         if end <= self.byte_index {
             return;
         }
         let run = &bytes[self.byte_index..end];
-        let chars = |s: &[u8]| s.iter().filter(|&&b| b & 0xC0 != 0x80).count();
+        let chars = |s: &[u8]| s.iter().filter(|&&b| is_char_start(b)).count();
         match run.iter().rposition(|&b| b == b'\n') {
             Some(last) => {
                 self.line += run.iter().filter(|&&b| b == b'\n').count();
@@ -339,13 +289,11 @@ impl<'a> Tokenizer<'a> {
             }
             None => self.column += chars(run),
         }
-        self.byte_offset += run.len();
-        self.byte_index = end;
-        self.current = decode_at(bytes, end).map(|(c, _)| c);
+        self.set_byte_index(end);
     }
 
     fn read_keyword_or_ident(&mut self) -> Result<TokenKind, CompilerError> {
-        if self.current == Some('r') && self.peek_n(1) == Some('"') {
+        if self.current == Some('r') && self.peek_byte(1) == Some(b'"') {
             return self.read_string_literal(self.byte_index);
         }
 
@@ -366,24 +314,17 @@ impl<'a> Tokenizer<'a> {
         unescape_lua_keyword(name)
     }
 
-    pub(crate) fn lookahead_number(&self) -> bool {
-        if self.current.is_some_and(|c| c.is_ascii_digit()) {
-            return true;
+    fn lookahead_number(&self, head: char) -> bool {
+        let digit_at = |ahead| self.peek_byte(ahead).is_some_and(|b| b.is_ascii_digit());
+        match head {
+            '0'..='9' => true,
+            '-' => {
+                (digit_at(1) || (self.peek_byte(1) == Some(b'.') && digit_at(2)))
+                    && self.minus_can_start_number()
+            }
+            '.' => digit_at(1) && self.minus_can_start_number(),
+            _ => false,
         }
-        if self.at('-') {
-            let after = self.peek_n(1);
-            let numeric = match after {
-                Some(d) if d.is_ascii_digit() => true,
-                Some('.') => self.peek_n(2).is_some_and(|c| c.is_ascii_digit()),
-                _ => false,
-            };
-            return numeric && self.minus_can_start_number();
-        }
-        if self.at('.') {
-            return self.peek_n(1).is_some_and(|c| c.is_ascii_digit())
-                && self.minus_can_start_number();
-        }
-        false
     }
 
     fn minus_can_start_number(&self) -> bool {
@@ -407,199 +348,115 @@ impl<'a> Tokenizer<'a> {
             )
     }
 
-    pub(crate) fn read_number(&mut self) -> Result<TokenKind, CompilerError> {
-        enum Radix {
-            Decimal,
-            Binary,
-            Hex,
-        }
+    fn read_number(&mut self) -> Result<TokenKind, CompilerError> {
         let origin = self.start_span();
-        let mut digits = String::with_capacity(16);
-        let mut kept = String::with_capacity(16);
-        let mut dot_seen = false;
-        let mut floaty = false;
-        let mut radix = Radix::Decimal;
-
-        if self.at('-') {
-            digits.push('-');
-            kept.push('-');
-            self.advance();
-        }
-
+        let start = self.byte_index;
+        let negative = self.eat('-');
         if self.at('0') {
-            match self.peek_n(1) {
-                Some('b') | Some('B') => {
-                    kept.push_str("0b");
-                    self.advance();
-                    self.advance();
-                    radix = Radix::Binary;
+            match self.peek_byte(1) {
+                Some(b'b' | b'B') => {
+                    return self.read_radix_number(origin, negative, 2, "binary", "0b");
                 }
-                Some('x') | Some('X') => {
-                    kept.push_str("0x");
-                    self.advance();
-                    self.advance();
-                    radix = Radix::Hex;
+                Some(b'x' | b'X') => {
+                    return self.read_radix_number(origin, negative, 16, "hex", "0x");
                 }
-                Some(_) => {
-                    digits.push('0');
-                    kept.push('0');
-                    self.advance();
-                }
-                None => {
-                    digits.push('0');
-                    kept.push('0');
-                    self.advance();
-                }
+                _ => {}
             }
         }
 
-        match radix {
-            Radix::Binary => {
-                while let Some(cur) = self.current {
-                    match cur {
-                        '0' | '1' => {
-                            digits.push(cur);
-                            kept.push(cur);
-                            self.advance();
-                        }
-                        '_' => {
-                            kept.push(cur);
-                            self.advance();
-                        }
-                        _ => break,
-                    }
-                }
-
-                if digits.is_empty() {
-                    return Err(CompilerError::new_with_label(
-                        self.end_span(origin.clone()),
-                        "Invalid binary literal: no digits after 0b".to_string(),
-                    )
-                    .with_code(CompilerErrorCode::TokenizerError));
-                }
-
-                let value = i64::from_str_radix(&digits, 2).map_err(|e| {
-                    CompilerError::new_with_label(
-                        self.end_span(origin.clone()),
-                        format!("Invalid binary literal '{}': {}", digits, e),
-                    )
-                    .with_code(CompilerErrorCode::TokenizerError)
-                })?;
-                Ok(TokenKind::Int(value, kept.into()))
+        self.read_decimal_digits();
+        let fraction = self.at('.')
+            && self.last_token_kind != Some(TokenKind::Dot)
+            && self.peek_byte(1).is_some_and(|b| b.is_ascii_digit());
+        if fraction {
+            self.advance();
+            self.read_decimal_digits();
+        }
+        let exponent = matches!(self.current, Some('e' | 'E'));
+        if exponent {
+            self.advance();
+            if matches!(self.current, Some('+' | '-')) {
+                self.advance();
             }
-            Radix::Hex => {
-                while let Some(cur) = self.current {
-                    if cur.is_ascii_hexdigit() {
-                        digits.push(cur);
-                        kept.push(cur);
-                        self.advance();
-                    } else if cur == '_' {
-                        kept.push(cur);
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-
-                if digits.is_empty() {
-                    return Err(CompilerError::new_with_label(
-                        self.end_span(origin.clone()),
-                        "Invalid hex literal: no digits after 0x".to_string(),
-                    )
-                    .with_code(CompilerErrorCode::TokenizerError));
-                }
-
-                let value = i64::from_str_radix(&digits, 16).map_err(|e| {
-                    CompilerError::new_with_label(
-                        self.end_span(origin.clone()),
-                        format!("Invalid hex literal '{}': {}", digits, e),
-                    )
-                    .with_code(CompilerErrorCode::TokenizerError)
-                })?;
-                Ok(TokenKind::Int(value, kept.into()))
+            let exp_start = self.byte_index;
+            self.read_decimal_digits();
+            if self.byte_index == exp_start {
+                let literal = &self.input[start..exp_start];
+                return Err(self.number_error(
+                    origin,
+                    format!(
+                        "Invalid scientific notation: expected digits after exponent in '{literal}'"
+                    ),
+                ));
             }
-            Radix::Decimal => {
-                while let Some(cur) = self.current {
-                    match cur {
-                        '0'..='9' => {
-                            digits.push(cur);
-                            kept.push(cur);
-                            self.advance();
-                            continue;
-                        }
-                        '.' => {
-                            if dot_seen {
-                                break;
-                            }
-                            if matches!(&self.last_token_kind, Some(TokenKind::Dot)) {
-                                break;
-                            }
-                            if !self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) {
-                                break;
-                            }
-                            floaty = true;
-                            digits.push(cur);
-                            kept.push(cur);
-                            dot_seen = true;
-                            self.advance();
-                            continue;
-                        }
-                        'e' | 'E' => {
-                            floaty = true;
-                            digits.push(cur);
-                            kept.push(cur);
-                            self.advance();
-                            if let Some(sign) = self.current {
-                                if sign == '+' || sign == '-' {
-                                    digits.push(sign);
-                                    kept.push(sign);
-                                    self.advance();
-                                }
-                            }
-                            let mut exp_digits = false;
-                            while let Some(ec) = self.current {
-                                if !ec.is_ascii_digit() {
-                                    break;
-                                }
-                                digits.push(ec);
-                                kept.push(ec);
-                                exp_digits = true;
-                                self.advance();
-                            }
-                            if !exp_digits {
-                                return Err(CompilerError::new_with_label(
-                                self.end_span(origin.clone()),
-                                format!("Invalid scientific notation: expected digits after exponent in '{}'", kept),
-                            )
-                            .with_code(CompilerErrorCode::TokenizerError));
-                            }
-                            break;
-                        }
-                        _ => break,
-                    }
-                }
+        }
 
-                Ok(if floaty {
-                    let parsed_float = digits.parse().map_err(|_| {
-                        CompilerError::new_with_label(
-                            self.end_span(origin.clone()),
-                            format!("Invalid floating point literal: '{}'", digits),
-                        )
-                        .with_code(CompilerErrorCode::TokenizerError)
-                    })?;
-                    TokenKind::Float(parsed_float)
-                } else {
-                    let parsed_int = digits.parse::<i64>().map_err(|e| {
-                        CompilerError::new_with_label(
-                            self.end_span(origin.clone()),
-                            format!("Invalid integer literal '{}': {}", digits, e),
-                        )
-                        .with_code(CompilerErrorCode::TokenizerError)
-                    })?;
-                    TokenKind::Int(parsed_int, kept.into())
+        let literal = &self.input[start..self.byte_index];
+        if fraction || exponent {
+            literal.parse().map(TokenKind::Float).map_err(|_| {
+                self.number_error(
+                    origin,
+                    format!("Invalid floating point literal: '{literal}'"),
+                )
+            })
+        } else {
+            literal
+                .parse()
+                .map(|value| TokenKind::Int(value, literal.into()))
+                .map_err(|e| {
+                    self.number_error(origin, format!("Invalid integer literal '{literal}': {e}"))
                 })
-            }
         }
+    }
+
+    fn read_decimal_digits(&mut self) {
+        let start = self.byte_index;
+        let len = self.input[start..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        self.advance_on_line(start + len, len);
+    }
+
+    fn read_radix_number(
+        &mut self,
+        origin: LineCol,
+        negative: bool,
+        radix: u32,
+        name: &str,
+        prefix: &str,
+    ) -> Result<TokenKind, CompilerError> {
+        let start = self.byte_index + prefix.len();
+        let mut digits = String::with_capacity(16);
+        let sign = if negative { "-" } else { "" };
+        digits.push_str(sign);
+        let mut len = 0;
+        for b in self.input[start..].bytes() {
+            if (b as char).is_digit(radix) {
+                digits.push(b as char);
+            } else if b != b'_' {
+                break;
+            }
+            len += 1;
+        }
+        let end = start + len;
+        self.advance_on_line(end, prefix.len() + len);
+        if digits.is_empty() {
+            return Err(self.number_error(
+                origin,
+                format!("Invalid {name} literal: no digits after {prefix}"),
+            ));
+        }
+        let value = i64::from_str_radix(&digits, radix).map_err(|e| {
+            self.number_error(origin, format!("Invalid {name} literal '{digits}': {e}"))
+        })?;
+        let literal = format!("{sign}{prefix}{}", &self.input[start..end]);
+        Ok(TokenKind::Int(value, literal.into()))
+    }
+
+    fn number_error(&self, origin: LineCol, message: String) -> CompilerError {
+        CompilerError::new_with_label(self.end_span(origin), message)
+            .with_code(CompilerErrorCode::TokenizerError)
     }
 
     fn read_punctuation(&mut self, head: char) -> Option<TokenKind> {
@@ -616,7 +473,6 @@ impl<'a> Tokenizer<'a> {
             ('*', [b'=', ..]) => (MulAssign, 2),
             ('*', _) => (Mul, 1),
             ('/', [b'=', ..]) => (DivAssign, 2),
-            ('/', [b'/' | b'*', ..]) => return None,
             ('/', _) => (Div, 1),
             ('=', [b'=', ..]) => (Equals, 2),
             ('=', [b'>', ..]) => (FatArrow, 2),
@@ -643,12 +499,22 @@ impl<'a> Tokenizer<'a> {
             ('&', _) => (BitAnd, 1),
             ('|', [b'|', ..]) => (Or, 2),
             ('|', _) => (BitOr, 1),
+            ('(', _) => (OpenParen, 1),
+            (')', _) => (CloseParen, 1),
+            ('[', _) => (OpenSquare, 1),
+            (']', _) => (CloseSquare, 1),
+            ('{', _) => (OpenCurly, 1),
+            ('}', _) => (CloseCurly, 1),
+            ('%', _) => (Mod, 1),
+            (';', _) => (Semicolon, 1),
+            (',', _) => (Comma, 1),
+            ('@', _) => (At, 1),
+            ('$', _) => (Dollar, 1),
+            ('^', _) => (BitXor, 1),
+            ('~', _) => (BitNot, 1),
             _ => return None,
         };
-        self.byte_index += len;
-        self.byte_offset += len;
-        self.column += len;
-        self.current = decode_at(self.input.as_bytes(), self.byte_index).map(|(c, _)| c);
+        self.advance_on_line(self.byte_index + len, len);
         Some(kind)
     }
 
@@ -658,29 +524,12 @@ impl<'a> Tokenizer<'a> {
         let Some(head) = self.current else {
             return Ok(None);
         };
-        if head.is_ascii_alphabetic() || head == '_' {
-            let kind = self.read_keyword_or_ident()?;
-            return self.finish_token(origin, kind);
-        }
-        if head.is_ascii_digit() || ((head == '-' || head == '.') && self.lookahead_number()) {
-            let kind = self.read_number()?;
-            return self.finish_token(origin, kind);
-        }
-        if let Some(kind) = single_char_token(head) {
-            self.advance();
-            return self.finish_token(origin, kind);
-        }
-        if let Some(kind) = self.read_punctuation(head) {
-            return self.finish_token(origin, kind);
-        }
-        let kind: TokenKind = match self.current {
-            Some('\r') => {
+        let kind = match head {
+            'a'..='z' | 'A'..='Z' | '_' => self.read_keyword_or_ident()?,
+            '0'..='9' | '-' | '.' if self.lookahead_number(head) => self.read_number()?,
+            '\r' => {
                 self.advance();
-                if self.current == Some('\n') {
-                    self.advance();
-
-                    TokenKind::Newline
-                } else {
+                if !self.eat('\n') {
                     return Err(CompilerError::new_with_label(
                         Span::unknown(),
                         format!(
@@ -689,106 +538,62 @@ impl<'a> Tokenizer<'a> {
                         ),
                     ));
                 }
-            }
-            Some('\n') => {
-                self.advance();
-
                 TokenKind::Newline
             }
-
-            Some('/') => {
+            '\n' => {
                 self.advance();
-                let start = self.byte_index + 1;
-                if self.eat('/') {
-                    TokenKind::Comment(self.read_line_rest().into())
+                TokenKind::Newline
+            }
+            '/' if self.peek_byte(1) == Some(b'/') => {
+                self.advance_on_line(self.byte_index + 2, 2);
+                TokenKind::Comment(self.read_line_rest().into())
+            }
+            '/' if self.peek_byte(1) == Some(b'*') => {
+                let start = self.byte_index + 2;
+                let Some(len) = self.input[start..].find("*/") else {
+                    self.advance_to(self.input.len());
+                    return Err(CompilerError::new_with_label(
+                        self.end_span(origin),
+                        "unterminated block comment: `/*` has no closing `*/`".to_string(),
+                    ));
+                };
+                let end = start + len;
+                self.advance_to(end + 2);
+                TokenKind::Comment(self.input[start..end].into())
+            }
+            '"' => {
+                let start = self.byte_index;
+                if self.input[start..].starts_with("\"\"\"") {
+                    self.read_string_literal(start)?
                 } else {
-                    debug_assert!(self.at('*'));
-                    let input = self.input;
-                    let Some(len) = input[start..].find("*/") else {
-                        self.advance_to(input.len());
-                        return Err(CompilerError::new_with_label(
-                            self.end_span(origin),
-                            "unterminated block comment: `/*` has no closing `*/`".to_string(),
-                        ));
-                    };
-                    let end = start + len;
-                    self.advance_to(end + 2);
-                    TokenKind::Comment(input[start..end].into())
+                    self.advance();
+                    match self.try_read_plain_string() {
+                        Some(body) => TokenKind::String(body.into()),
+                        None => self.read_string_literal(start)?,
+                    }
                 }
             }
-
-            Some('"') => {
-                let lit_at = self.byte_index;
-                if self.peek_n(1) == Some('"') && self.peek_n(2) == Some('"') {
-                    self.read_string_literal(lit_at)?
+            '\'' => self.read_string_literal(self.byte_index)?,
+            '#' => {
+                self.advance();
+                if let Some((kind, len)) = directive(&self.input[self.byte_index..]) {
+                    self.advance_on_line(self.byte_index + len, len);
+                    kind
                 } else {
-                    self.advance();
-                    if let Some(body) = self.try_read_plain_string() {
-                        TokenKind::String(body.into())
-                    } else {
-                        self.read_string_literal(lit_at)?
-                    }
-                }
-            }
-
-            Some('\'') => self.read_string_literal(self.byte_index)?,
-
-            Some('#') => match self.peek_n(1) {
-                Some(nxt) if nxt.is_ascii_lowercase() => {
-                    self.advance();
-                    let src = self.input;
-                    let word_at = self.byte_index;
-                    {
-                        let raw = src.as_bytes();
-                        let mut j = self.byte_index;
-                        while j < raw.len() && raw[j].is_ascii_alphabetic() {
-                            j += 1;
-                        }
-                        let took = j - self.byte_index;
-                        self.byte_index = j;
-                        self.byte_offset += took;
-                        self.column += took;
-                        self.current = decode_at(raw, j).map(|(got, _)| got);
-                    }
-                    match &src[word_at..self.byte_index] {
-                        "if" => TokenKind::DirectiveIf,
-                        "elseif" => TokenKind::DirectiveElseIf,
-                        "else" => TokenKind::DirectiveElse,
-                        "end" => TokenKind::DirectiveEnd,
-                        _ => {
-                            let _ = self.read_line_rest();
-                            TokenKind::Comment(src[word_at..self.byte_index].into())
-                        }
-                    }
-                }
-                Some(_) => {
-                    self.advance();
                     TokenKind::Comment(self.read_line_rest().into())
                 }
+            }
+            _ => match self.read_punctuation(head) {
+                Some(kind) => kind,
                 None => {
-                    self.advance();
-                    TokenKind::Comment(String::new().into())
+                    return Err(CompilerError::new_with_label(
+                        Span::unknown(),
+                        format!("I done a bad thing: {:?}", self.current),
+                    ));
                 }
             },
-
-            _ => {
-                return Err(CompilerError::new_with_label(
-                    Span::unknown(),
-                    format!("I done a bad thing: {:?}", self.current),
-                ));
-            }
         };
-
-        self.finish_token(origin, kind)
-    }
-
-    fn finish_token(
-        &mut self,
-        origin: LineCol,
-        kind: TokenKind,
-    ) -> Result<Option<Token>, CompilerError> {
-        let meaningful = !matches!(kind, TokenKind::Newline | TokenKind::Comment(_));
-        if meaningful {
+        if !matches!(kind, TokenKind::Newline | TokenKind::Comment(_)) {
             self.last_token_kind = Some(kind);
         }
         self.just_skipped_whitespace = false;
@@ -809,7 +614,6 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub(crate) fn end_span(&self, start: LineCol) -> Span {
-        let end_col = self.column;
         let offset_range = (start.offset, self.byte_offset);
 
         assert!(
@@ -821,7 +625,7 @@ impl<'a> Tokenizer<'a> {
         Span::new(
             start.file,
             (start.line, self.line),
-            (start.col, end_col),
+            (start.col, self.column),
             offset_range,
         )
     }
@@ -833,9 +637,7 @@ impl<'a> Tokenizer<'a> {
     pub fn tokenize(&mut self) -> Result<Vec<Token>, CompilerError> {
         source_fits_spans(self.source_file, self.byte_offset, self.input.len())?;
         let mut out: Vec<Token> = Vec::with_capacity(self.input.len() / 5 + 8);
-        loop {
-            let nxt = self.next_token()?;
-            let Some(tok) = nxt else { break };
+        while let Some(tok) = self.next_token()? {
             if tok.kind == TokenKind::Newline {
                 if let Some(prev) = out.last_mut() {
                     prev.trailing_newlines += 1;
@@ -848,12 +650,11 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub fn tokenize_kinds(&mut self) -> Result<Vec<TokenKind>, CompilerError> {
-        let all = self.tokenize()?;
-        let mut kinds = Vec::with_capacity(all.len());
-        for tok in all {
-            kinds.push(tok.kind);
-        }
-        Ok(kinds)
+        Ok(self
+            .tokenize()?
+            .into_iter()
+            .map(|token| token.kind)
+            .collect())
     }
 }
 
@@ -876,7 +677,7 @@ mod test {
 
     #[test]
     fn spans_after_slow_path_literals_count_lines_chars_and_bytes() {
-        let src = "\"\"\"é\nxé\"\"\" y \"a{b}é\" z";
+        let src = "\"\"\"\u{e9}\nx\u{e9}\"\"\" y \"a{b}\u{e9}\" z";
         let tokens = Tokenizer::from_code("t.rock", src).tokenize().unwrap();
         let y = &tokens[1].span;
         assert_eq!(tokens[1].kind, TokenKind::Ident("y".into()));
@@ -886,7 +687,7 @@ mod test {
         assert_eq!(tokens[3].kind, TokenKind::Ident("z".into()));
         assert_eq!((z.line_range().0, z.col_range().0), (1, 16));
         assert_eq!(z.offset_range().0, 24);
-        let err = Tokenizer::from_code("t.rock", "\"é\\\nab\\q\"")
+        let err = Tokenizer::from_code("t.rock", "\"\u{e9}\\\nab\\q\"")
             .tokenize()
             .unwrap_err();
         let span = err.labels[0].span;

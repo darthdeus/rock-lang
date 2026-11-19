@@ -21,67 +21,67 @@ fn toks(src: &str) -> Vec<rock_tokenizer::Token> {
 
 #[test]
 fn pin_malformed_input_errors() {
-    for source in ["/*/", "/* unterminated", "/* a *"] {
-        assert!(kinds_err(source).contains("unterminated block comment"));
+    for (source, expected) in [
+        ("/*/", "unterminated block comment"),
+        ("/* unterminated", "unterminated block comment"),
+        ("/* a *", "unterminated block comment"),
+        ("0b", "no digits after 0b"),
+        ("0b2", "no digits after 0b"),
+        ("0x", "no digits after 0x"),
+        ("0xG", "no digits after 0x"),
+        ("1e", "expected digits after exponent"),
+        ("1E+", "expected digits after exponent"),
+        ("1.5e", "expected digits after exponent"),
+        ("9999999999999999999999", "Invalid integer literal"),
+        (
+            "0b1111111111111111111111111111111111111111111111111111111111111111",
+            "Invalid binary literal",
+        ),
+        (
+            "let mut x = 5",
+            "`let mut` is not supported, all bindings are mut, use just `let`",
+        ),
+    ] {
+        let actual = kinds_err(source);
+        assert!(actual.contains(expected), "{source:?}: {actual}");
     }
-    assert!(kinds_err("0b").contains("no digits after 0b"));
-    assert!(kinds_err("0b2").contains("no digits after 0b"));
-    assert!(kinds_err("0x").contains("no digits after 0x"));
-    assert!(kinds_err("0xG").contains("no digits after 0x"));
-    assert!(kinds_err("1e").contains("expected digits after exponent"));
-    assert!(kinds_err("1E+").contains("expected digits after exponent"));
-    assert!(kinds_err("1.5e").contains("expected digits after exponent"));
-    assert!(kinds_err("9999999999999999999999").contains("Invalid integer literal"));
-    assert!(
-        kinds_err("0b1111111111111111111111111111111111111111111111111111111111111111")
-            .contains("Invalid binary literal")
-    );
-    assert!(
-        kinds_err("let mut x = 5")
-            .contains("`let mut` is not supported, all bindings are mut, use just `let`")
-    );
 }
 
 #[test]
 fn pin_strings_and_interpolation_boundaries() {
-    assert_eq!(kinds("\"hello\""), vec![TokenKind::String("hello".into())]);
-    assert_eq!(kinds("'world'"), vec![TokenKind::String("world".into())]);
-    assert_eq!(kinds("\"\""), vec![TokenKind::String("".into())]);
-    assert_eq!(kinds("''"), vec![TokenKind::String("".into())]);
-    assert_eq!(kinds("r\"raw\""), vec![TokenKind::RawString("raw".into())]);
-    assert_eq!(kinds("r\"\""), vec![TokenKind::RawString("".into())]);
-    assert_eq!(
-        kinds("\"\"\"tri\"\"\""),
-        vec![TokenKind::String("tri".into())]
-    );
-    assert_eq!(
-        kinds("r\"\"\"rawtri\"\"\""),
-        vec![TokenKind::RawString("rawtri".into())]
-    );
-    assert_eq!(kinds("\"x={y}\""), vec![TokenKind::String("x={y}".into())]);
-    assert_eq!(kinds("\"a{b}c\""), vec![TokenKind::String("a{b}c".into())]);
-    assert_eq!(
-        kinds("\"a{{b}}c\""),
-        vec![TokenKind::String("a{{b}}c".into())]
-    );
-    assert_eq!(kinds("\"{{x}}\""), vec![TokenKind::String("{{x}}".into())]);
-    assert_eq!(
-        kinds("\"a{f(\"x\")}b\""),
-        vec![TokenKind::String("a{f(\"x\")}b".into())]
-    );
-    assert_eq!(
-        kinds("r\"a{b}c\""),
-        vec![TokenKind::RawString("a{b}c".into())]
-    );
-    assert_eq!(kinds("'a{b}c'"), vec![TokenKind::String("a{b}c".into())]);
-    assert_eq!(
-        kinds("\"\"\"a{b}c\"\"\""),
-        vec![TokenKind::String("a{b}c".into())]
-    );
-    assert_eq!(
-        kinds("\"caf\u{e9} {x}\""),
-        vec![TokenKind::String("caf\u{e9} {x}".into())]
-    );
+    for (source, expected) in [
+        ("\"hello\"", "hello"),
+        ("'world'", "world"),
+        ("\"\"", ""),
+        ("''", ""),
+        ("\"\"\"tri\"\"\"", "tri"),
+        ("\"x={y}\"", "x={y}"),
+        ("\"a{b}c\"", "a{b}c"),
+        ("\"a{{b}}c\"", "a{{b}}c"),
+        ("\"{{x}}\"", "{{x}}"),
+        ("\"a{f(\"x\")}b\"", "a{f(\"x\")}b"),
+        ("'a{b}c'", "a{b}c"),
+        ("\"\"\"a{b}c\"\"\"", "a{b}c"),
+        ("\"caf\u{e9} {x}\"", "caf\u{e9} {x}"),
+    ] {
+        assert_eq!(
+            kinds(source),
+            [TokenKind::String(expected.into())],
+            "{source:?}"
+        );
+    }
+    for (source, expected) in [
+        ("r\"raw\"", "raw"),
+        ("r\"\"", ""),
+        ("r\"\"\"rawtri\"\"\"", "rawtri"),
+        ("r\"a{b}c\"", "a{b}c"),
+    ] {
+        assert_eq!(
+            kinds(source),
+            [TokenKind::RawString(expected.into())],
+            "{source:?}"
+        );
+    }
     assert!(kinds_err("\"unterminated").contains("unterminated"));
     assert!(kinds_err("\"unclosed {hole\"").contains("unterminated"));
 }

@@ -1,3 +1,5 @@
+use crate::tokenizer::directive;
+
 /// What the source at a byte offset lexically is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LexRegion {
@@ -8,13 +10,14 @@ pub enum LexRegion {
 
 pub fn region_at(src: &str, offset: usize) -> LexRegion {
     // Regions nest (a literal in a hole in a string): the innermost, latest-starting one wins.
-    let mut found = (LexRegion::Code, 0usize, false);
+    let (mut found, mut latest) = (LexRegion::Code, 0);
     scan(src, offset, &mut |start, end, region| {
-        if start < offset && offset <= end && (!found.2 || start >= found.1) {
-            found = (region, start, true);
+        if start < offset && offset <= end && start >= latest {
+            found = region;
+            latest = start;
         }
     });
-    found.0
+    found
 }
 
 fn is_ident_byte(b: u8) -> bool {
@@ -29,26 +32,24 @@ fn scan(src: &str, limit: usize, emit: &mut dyn FnMut(usize, usize, LexRegion)) 
     let mut i = 0;
     while i < n && i <= limit {
         match b[i] {
-            b'/' if i + 1 < n && b[i + 1] == b'/' => {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
                 let end = line_end(b, i + 2);
                 emit(i, end, LexRegion::Comment);
                 i = end;
             }
-            b'/' if i + 1 < n && b[i + 1] == b'*' => {
-                let close = find(b, i + 2, b"*/");
-                emit(i, close.map_or(n, |c| c + 1), LexRegion::Comment);
-                i = close.map_or(n, |c| c + 2);
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                if let Some(len) = src[i + 2..].find("*/") {
+                    let close = i + 2 + len;
+                    emit(i, close + 1, LexRegion::Comment);
+                    i = close + 2;
+                } else {
+                    emit(i, n, LexRegion::Comment);
+                    i = n;
+                }
             }
             b'#' => {
-                let mut j = i + 1;
-                while j < n && b[j].is_ascii_alphabetic() {
-                    j += 1;
-                }
-                let word = &src[i + 1..j];
-                if b.get(i + 1).is_some_and(u8::is_ascii_lowercase)
-                    && matches!(word, "if" | "elseif" | "else" | "end")
-                {
-                    i = j;
+                if let Some((_, len)) = directive(&src[i + 1..]) {
+                    i += 1 + len;
                 } else {
                     let end = line_end(b, i + 1);
                     emit(i, end, LexRegion::Comment);
@@ -101,21 +102,10 @@ fn string_regions(src: &str, start: usize, emit: &mut dyn FnMut(usize, usize, Le
 }
 
 fn line_end(b: &[u8], from: usize) -> usize {
-    memchr(b, from, b'\n').unwrap_or(b.len())
-}
-
-fn memchr(b: &[u8], from: usize, needle: u8) -> Option<usize> {
-    b.get(from..)?
+    b[from..]
         .iter()
-        .position(|&c| c == needle)
-        .map(|p| p + from)
-}
-
-fn find(b: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
-    let hay = b.get(from..)?;
-    hay.windows(needle.len())
-        .position(|w| w == needle)
-        .map(|p| p + from)
+        .position(|&c| c == b'\n')
+        .map_or(b.len(), |len| from + len)
 }
 
 #[cfg(test)]
