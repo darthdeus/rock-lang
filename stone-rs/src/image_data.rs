@@ -424,7 +424,6 @@ pub extern "C" fn stone_new_image_from_data(data_handle: u64, filter_mode: i32) 
         };
 
         let size = (img_data.width, img_data.height);
-        // Create OpenGL texture
         let texture = with_gl(|gl| unsafe {
             let texture = match create_filtered_image_texture(gl, filter_mode, gl_filter) {
                 Ok(t) => t,

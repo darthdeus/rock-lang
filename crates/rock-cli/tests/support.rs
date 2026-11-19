@@ -52,7 +52,6 @@ pub fn assert_mentions(out: &Output, needle: &str) {
     assert!(text.contains(needle), "missing {needle:?} in: {text}");
 }
 
-/// One JSON value per line of the file at `path`.
 pub fn read_jsonl(path: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))

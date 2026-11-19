@@ -99,7 +99,6 @@ pub enum ShaderLanguage {
     Glsl,
 }
 
-/// Emit the whole workspace once.
 pub fn emit_workspace_mir(ws: &Workspace, user_mid: ModuleId) -> Result<MirEmit, CompilerError> {
     FullEmit::one_shot()
         .with_attribution()

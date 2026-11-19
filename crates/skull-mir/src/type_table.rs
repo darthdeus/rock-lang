@@ -194,7 +194,6 @@ pub struct FieldEntry {
 #[derive(Clone, Debug)]
 pub struct PositionEntry {
     pub shape: Option<Shape>,
-    /// 0-based physical slot in a flat enum box.
     pub slot: Option<usize>,
     /// Leaf paths of a value payload spread across consecutive slots.
     pub leaves: Option<Vec<Ustr>>,

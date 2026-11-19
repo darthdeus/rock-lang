@@ -320,7 +320,6 @@ fn js_run(_: &CommandContext) -> Result<()> {
 
 pub static OPTION_RULES: &[OptionRule] = &[OptionRule::TestFilter, OptionRule::SkipGpu];
 
-/// Commands recorded in the invocation log.
 pub(crate) fn logs_invocation(command: &CliCommand) -> bool {
     matches!(
         command.cli_name(),

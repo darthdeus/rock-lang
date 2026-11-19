@@ -1,7 +1,6 @@
 use crate::mir::{Block, MirFunc, Term};
 use comfy_la_arena::Idx;
 
-/// Successor blocks of a terminator, in branch order.
 pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
     match term {
         Term::Return(_) | Term::Unreachable => {}

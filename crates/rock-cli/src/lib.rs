@@ -86,7 +86,6 @@ pub enum Backend {
     Glsl,
 }
 
-/// The parsed invocation.
 pub struct Args {
     pub command: &'static CliCommand,
     pub files: Vec<String>,

@@ -545,7 +545,6 @@ pub(super) fn emit_pass_nested_fns(
     Ok(())
 }
 
-/// Whether a function body is cached as a [`Chunk`].
 pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
     !f.is_extern && f.inline_body.is_none() && !f.has_iterator_bounds() && !is_generic(f)
 }

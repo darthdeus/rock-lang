@@ -164,7 +164,6 @@ pub trait CompileHost {
     }
     /// Present the findings that do not refuse the program.
     fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>);
-    /// Emit the checked program.
     fn emit(
         &mut self,
         ws: &Workspace,

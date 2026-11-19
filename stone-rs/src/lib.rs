@@ -1137,7 +1137,6 @@ pub struct GraphicsStats {
     pub instanced_draws: c_int,
 }
 
-/// Per-frame statistics tracking
 #[derive(Default)]
 struct FrameStats {
     draw_calls: i32,
@@ -1263,7 +1262,6 @@ where
     with_window(|w| f(&w.gl))
 }
 
-/// Initialize Stone
 #[no_mangle]
 pub extern "C" fn stone_init() -> bool {
     logging::init();
@@ -3690,7 +3688,6 @@ pub extern "C" fn stone_reset_frame_stats() {
     });
 }
 
-// Re-export sprite functions that are used internally or externally
 pub use mesh::{stone_mesh_create, stone_mesh_draw, stone_mesh_free, stone_mesh_set_instances};
 pub use sprite::stone_draw_mesh;
 

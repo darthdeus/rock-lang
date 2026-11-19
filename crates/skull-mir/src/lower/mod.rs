@@ -422,7 +422,6 @@ impl ScalarCtx {
         self.abi_plans.store(question, inst, plan);
     }
 
-    /// ABI-plan memo counters.
     pub fn abi_plan_stats(&self) -> AbiPlanMemoStats {
         self.abi_plans.stats()
     }
@@ -431,7 +430,6 @@ impl ScalarCtx {
         self.rep_arena.stats()
     }
 
-    /// The backend this context lowers for.
     pub fn target(&self) -> bone_core::hir::FnBackend {
         self.target
     }
@@ -3943,7 +3941,6 @@ pub fn body_has_shader_pipeline_call(ws: &Workspace, mid: ModuleId, owner: BodyO
     })
 }
 
-/// Collect the shader roots contributed by one body.
 pub fn collect_shader_body(
     ws: &Workspace,
     mid: ModuleId,
