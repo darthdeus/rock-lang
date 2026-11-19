@@ -37,7 +37,6 @@ fn is_tmp_scratch_file(path: &Path, roots: &[PathBuf]) -> bool {
 pub struct FileWatcher {
     debounce_ms: u64,
     /// Whether to filter out metadata-only changes (like touch)
-    filter_metadata: bool,
     /// Optional relative path suffix that the host treats as a restart input.
     restart_suffix: Option<PathBuf>,
     /// Exact restart files outside the source roots; their parents are watched
@@ -217,7 +216,6 @@ impl FileWatcher {
     pub fn new() -> Self {
         Self {
             debounce_ms: 5,
-            filter_metadata: false,
             restart_suffix: None,
             restart_files: Vec::new(),
             watch_extensions: vec!["rock".to_string()],
@@ -232,11 +230,6 @@ impl FileWatcher {
             debounce_ms: 100,
             ..Self::new()
         }
-    }
-
-    pub fn with_metadata_filter(mut self, filter: bool) -> Self {
-        self.filter_metadata = filter;
-        self
     }
 
     /// Supply a host's relative restart path, including inputs below skipped scratch directories.
@@ -455,11 +448,7 @@ impl FileWatcher {
                                             if should_debounce {
                                                 false
                                             } else {
-                                                // Original metadata filtering logic
-
-                                                is_restart_trigger
-                                                    || (!config.filter_metadata
-                                                        && affects_watched_files)
+                                                is_restart_trigger || affects_watched_files
                                             }
                                         }
                                         ModifyKind::Name(_) => true,
@@ -894,10 +883,6 @@ mod macos {
                             None => !changed_after_start,
                         };
                     !declared_seed
-                        && (old
-                            .is_none_or(|old| old.hash != hash || old.stamp.inode != stamp.inode)
-                            || !self.config.filter_metadata
-                            || self.restart(path))
                 };
                 updates.push((
                     path.clone(),
@@ -1120,24 +1105,7 @@ mod macos {
             let root = dir.path().canonicalize().unwrap();
             let source = root.join("main.rock");
             std::fs::write(&source, "before").unwrap();
-            let mut observation = observation(
-                root.clone(),
-                FileWatcher {
-                    filter_metadata: true,
-                    ..FileWatcher::new()
-                },
-            );
-            let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
-            std::fs::File::options()
-                .write(true)
-                .open(&source)
-                .unwrap()
-                .set_modified(modified + Duration::from_nanos(1))
-                .unwrap();
-            assert!(
-                observation.scan(false).unwrap().paths.is_empty(),
-                "metadata filter must reject a nanosecond touch"
-            );
+            let mut observation = observation(root.clone(), FileWatcher::new());
             std::fs::write(&source, "after").unwrap();
             assert_eq!(
                 observation.scan(false).unwrap().paths,
@@ -1151,7 +1119,6 @@ mod macos {
                 HashSet::from([source.clone()]),
                 "same-byte inode replacement is still an atomic save"
             );
-            observation.config.filter_metadata = false;
             let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
             std::fs::File::options()
                 .write(true)
