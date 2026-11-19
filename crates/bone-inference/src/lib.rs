@@ -176,10 +176,14 @@ impl<'a> Gamma<'a> {
         }
     }
 
-    pub(crate) fn note_local_narrow(&mut self, b: Idx<BindingInfo>, old: TyId) {
+    pub(crate) fn narrow_local(&mut self, b: Idx<BindingInfo>, span: Span) -> Option<TyId> {
+        let old = self.out.binding_types.get(b).copied()?;
+        let narrowed = unify::peel_nullable(self, old, span);
+        self.out.binding_types.insert(b, narrowed);
         if self.closure_assigned.contains(&b) {
             self.revocable_locals.push((b, old));
         }
+        Some(old)
     }
 
     pub fn new(workspace: &'a Workspace, body: &'a Body, mid: ModuleId) -> Gamma<'a> {

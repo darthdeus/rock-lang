@@ -1915,11 +1915,8 @@ fn infer_block(
         for (root, fields) in stmt_guard_narrows(gamma, c, statement) {
             match root {
                 Root::Local(b) if fields.is_empty() => {
-                    if let Some(cur) = gamma.out.binding_types.get(b).copied() {
-                        let narrowed = peel_nullable(gamma, cur, expr_span);
-                        gamma.out.binding_types.insert(b, narrowed);
-                        gamma.note_local_narrow(b, cur);
-                        g_saved.push((b, cur, gamma.refinement_epoch));
+                    if let Some(old) = gamma.narrow_local(b, expr_span) {
+                        g_saved.push((b, old, gamma.refinement_epoch));
                     }
                 }
                 _ => {
@@ -1930,22 +1927,18 @@ fn infer_block(
     }
 
     let result = match tail {
-        Some(tail) => match expected {
-            Some(exp) => match check_expr(c, gamma, *tail, exp, c.body.expr_spans[*tail]) {
-                Ok(()) => exp,
-                Err(err) => {
-                    gamma.body_errors.push(err);
-                    gamma.workspace.builtins.error()
+        Some(tail) => {
+            let ty = match expected {
+                Some(exp) => {
+                    check_expr(c, gamma, *tail, exp, c.body.expr_spans[*tail]).map(|()| exp)
                 }
-            },
-            None => match infer_expr_used(c, gamma, *tail, used) {
-                Ok(t) => t,
-                Err(err) => {
-                    gamma.body_errors.push(err);
-                    gamma.workspace.builtins.error()
-                }
-            },
-        },
+                None => infer_expr_used(c, gamma, *tail, used),
+            };
+            ty.unwrap_or_else(|err| {
+                gamma.body_errors.push(err);
+                gamma.workspace.builtins.error()
+            })
+        }
         None => {
             if block_ends_in_exit(c, *statements) {
                 gamma.workspace.builtins.never()

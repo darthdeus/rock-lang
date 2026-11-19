@@ -8,7 +8,7 @@ use bone_core::hir;
 use bone_core::hir::{BinOp, BindingInfo, Callee, Expr, Statement};
 use bone_core::prelude::*;
 
-use crate::{BodyCtx, Gamma, Use, fn_has_anno, infer_expr_used, peel_nullable};
+use crate::{BodyCtx, Gamma, Use, fn_has_anno, infer_expr_used};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Root {
@@ -240,11 +240,8 @@ pub(crate) fn infer_branch(
     for (root, fields) in narrows {
         match root {
             Root::Local(b) if fields.is_empty() => {
-                if let Some(cur) = gamma.out.binding_types.get(*b).copied() {
-                    let narrowed = peel_nullable(gamma, cur, span);
-                    gamma.out.binding_types.insert(*b, narrowed);
-                    gamma.note_local_narrow(*b, cur);
-                    saved_bindings.push((*b, cur));
+                if let Some(old) = gamma.narrow_local(*b, span) {
+                    saved_bindings.push((*b, old));
                 }
             }
             _ => {
