@@ -98,7 +98,8 @@ impl Pos {
     }
 }
 
-const STATIC_PATTERN_ERROR: &str = "a `static` takes a plain name, not a pattern: give it one name and                      destructure from it";
+const STATIC_PATTERN_ERROR: &str =
+    "a `static` takes a plain name, not a pattern: give it one name and destructure from it";
 
 fn bare_item(span: Span, kind: ItemKind) -> Item {
     Item {
