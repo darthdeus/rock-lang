@@ -145,9 +145,10 @@ fn visit_shader_library(
             }
             if renders_inline_instance(ws, f, &callee, graph.interner()) {
                 builtins.insert(callee);
-            } else if is_lowered_native_operator(ws, f, &callee, graph.interner()) {
-                continue;
-            } else if f.is_extern || f.inline_body.is_some() {
+            } else if is_lowered_native_operator(ws, f, &callee, graph.interner())
+                || f.is_extern
+                || f.inline_body.is_some()
+            {
                 continue;
             } else {
                 visit_shader_library(ws, graph, callee, retained, builtins, active, done, order)?;
