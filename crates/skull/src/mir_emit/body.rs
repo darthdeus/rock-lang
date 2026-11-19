@@ -152,9 +152,6 @@ pub(super) fn emit_body_chunk(
         chunk.attribution = Some(Box::new(attribution));
         return Ok(chunk);
     }
-    // Hoisted bodies inline only after closure conversion has split them
-    // out: inside a closure a cell is an upvalue, and splicing there piles
-    // onto LuaJIT's 60-upvalue cap.
     let name = mangle_fn(ws, f);
     let mut stats = ChainStats::new(&mut times, &mut attribution.inline);
     stats.ordinary = true;
@@ -171,6 +168,9 @@ pub(super) fn emit_body_chunk(
             cg.mint_synthetic(name.to_string());
         },
         counted_loops: skull_transform::body_chain::CountedLoops::Root,
+        // Hoisted bodies inline only after closure conversion has split them
+        // out: inside a closure a cell is an upvalue, and splicing there piles
+        // onto LuaJIT's 60-upvalue cap.
         inline_hoisted: true,
     };
     let deps =
