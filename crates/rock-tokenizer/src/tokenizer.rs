@@ -920,19 +920,7 @@ mod escape_tests {
         assert_eq!(text(r#""M\u{00c1}G""#), "M\u{00c1}G");
         assert_eq!(text(r#""\u{1F600}""#), "\u{1F600}");
         assert_eq!(text(r#""\u{c1}""#), text(r#""\u{0000C1}""#));
-    }
-
-    #[test]
-    fn an_astral_escape_emits_four_utf8_bytes() {
-        let s = text(r#""\u{1F600}""#);
-        assert_eq!(s.len(), 4, "U+1F600 is four UTF-8 bytes");
-        assert_eq!(s.chars().count(), 1);
-    }
-
-    #[test]
-    fn carriage_return_is_an_escape_rather_than_the_letter_r() {
-        assert_eq!(text(r#""a\rb""#), "a\rb");
-        assert_eq!(text(r#""\r""#).as_bytes(), &[13]);
+        assert_eq!(text(r#""\u{1F600}""#).len(), 4);
     }
 
     #[test]
@@ -940,6 +928,7 @@ mod escape_tests {
         assert_eq!(text(r#""a\nb\tc""#), "a\nb\tc");
         assert_eq!(text(r#""q\"q""#), "q\"q");
         assert_eq!(text(r#""b\\b""#), "b\\b");
+        assert_eq!(text(r#""a\rb""#), "a\rb");
     }
 
     #[test]
