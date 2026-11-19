@@ -151,7 +151,7 @@ pub struct LowerCtx<'w, 'm> {
     /// Already-evaluated place parts, keyed by source address, to avoid running
     /// them twice for compound assignment.
     pub(crate) place_temps: Vec<(usize, Idx<BindingInfo>)>,
-    pub(crate) name_errors: std::cell::RefCell<Option<Vec<CompilerError>>>,
+    name_errors: std::cell::RefCell<Option<Vec<CompilerError>>>,
 }
 
 impl<'w, 'm> LowerCtx<'w, 'm> {
@@ -199,6 +199,16 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         let result = self.probed(lookup);
         cache.borrow_mut().insert(name, result.clone());
         result
+    }
+
+    fn collect_name_errors<R>(
+        &mut self,
+        lower: impl FnOnce(&mut Self) -> R,
+    ) -> (R, Vec<CompilerError>) {
+        let outer = self.name_errors.replace(Some(Vec::new()));
+        let result = lower(self);
+        let errors = self.name_errors.replace(outer).unwrap_or_default();
+        (result, errors)
     }
 
     fn recover_name(&self, e: CompilerError) -> Result<(), CompilerError> {
@@ -2361,12 +2371,6 @@ pub(crate) fn build_function(
     }
 
     let is_variadic = f.params.last().map_or(false, |p| p.is_variadic);
-    let num_required = f
-        .params
-        .iter()
-        .filter(|p| p.default.is_none() && !p.is_variadic)
-        .count();
-
     let func = hir::Function {
         span: f.span,
         name: f.name.name,
@@ -2378,7 +2382,7 @@ pub(crate) fn build_function(
         generic_bounds,
         param_decls,
 
-        num_required,
+        num_required: required_params(&f.params),
         return_ty,
         inline_body,
         is_extern,
@@ -2443,12 +2447,34 @@ fn install_relowered_body(
 
 /// Lower the body using resolved interface types. Body-only refreshes must
 /// avoid appending replacements to the module type arena.
+fn lower_param_defaults(
+    ctx: &mut LowerCtx,
+    scope: Idx<Scope>,
+    params: &[skull_parser::Param],
+) -> Result<Vec<Option<Idx<Expr>>>, CompilerError> {
+    let a = ctx.ast;
+    let mut defaults = Vec::with_capacity(params.len());
+    for param in params {
+        defaults.push(match &param.default {
+            Some(expr) => Some(lower_expr(ctx, scope, a.e(expr))?),
+            None => None,
+        });
+    }
+    Ok(defaults)
+}
+
+fn required_params(params: &[skull_parser::Param]) -> usize {
+    params
+        .iter()
+        .filter(|p| p.default.is_none() && !p.is_variadic)
+        .count()
+}
+
 fn lower_fn_body_into(
     ctx: &mut LowerCtx,
     f: &FunctionDef,
     param_tys: &[TyId],
 ) -> Result<(bool, Vec<CompilerError>), CompilerError> {
-    let a = ctx.ast;
     debug_assert_eq!(
         f.params.len(),
         param_tys.len(),
@@ -2456,9 +2482,7 @@ fn lower_fn_body_into(
     );
 
     // Returned rather than stored so a body re-lower replaces its errors.
-    let mut errors = Vec::new();
     let mut bindings = FxHashMap::default();
-    let mut param_defaults = Vec::with_capacity(f.params.len());
     let default_scope = ctx.body.alloc_root_scope();
 
     let first_param = ctx.body.binding_arena.len();
@@ -2472,25 +2496,15 @@ fn lower_fn_body_into(
     // allocates its own param bindings, which would otherwise land inside the
     // `first..=last` param range below. An unresolved name in a default fails
     // the body.
-    let outer = ctx.name_errors.replace(Some(Vec::new()));
-    let lowered = f.params.iter().try_for_each(|p| {
-        let param_default = match &p.default {
-            Some(expr) => Some(lower_expr(ctx, default_scope, a.e(expr))?),
-            None => None,
-        };
-        param_defaults.push(param_default);
-        Ok(())
-    });
-    let default_names = ctx.name_errors.replace(outer).unwrap_or_default();
-    lowered?;
-    errors.extend(default_names);
+    let (defaults, mut errors) =
+        ctx.collect_name_errors(|ctx| lower_param_defaults(ctx, default_scope, &f.params));
+    let param_defaults = defaults?;
 
     let root_scope = ctx.body.alloc_root_scope_with_bindings(bindings);
     let mut body_failed = false;
     if let skull_parser::FunctionBody::Rock(block) = &f.body {
-        let outer = ctx.name_errors.replace(Some(Vec::new()));
-        let lowered = lower_block(ctx, root_scope, block);
-        errors.extend(ctx.name_errors.replace(outer).unwrap_or_default());
+        let (lowered, names) = ctx.collect_name_errors(|ctx| lower_block(ctx, root_scope, block));
+        errors.extend(names);
         match lowered {
             Ok(root) => ctx.body.root = Some(root),
             Err(error) => {
@@ -2637,9 +2651,8 @@ pub fn lower_struct_def(
     let def_scope = ctx.body.alloc_root_scope();
     // Like a function body, the defaults report every name they cannot
     // resolve; they then keep no value, so inference never sees a placeholder.
-    let outer = ctx.name_errors.replace(Some(Vec::new()));
-    let lowered = lower_struct_fields(ctx, s, def_scope, &mut fields);
-    let names = ctx.name_errors.replace(outer).unwrap_or_default();
+    let (lowered, names) =
+        ctx.collect_name_errors(|ctx| lower_struct_fields(ctx, s, def_scope, &mut fields));
     lowered?;
 
     let idx = ctx.module.struct_by_name[&reg_key];
@@ -2983,14 +2996,12 @@ pub fn lower_global(
 
     // Like a function body, the initializer reports every name it cannot
     // resolve; it then keeps no value, so inference never sees a placeholder.
-    let mut names = Vec::new();
-    let value = match &g.value {
+    let (value, names) = match &g.value {
         Some(e) => {
             let scope = ctx.body.alloc_root_scope();
-            let outer = ctx.name_errors.replace(Some(Vec::new()));
-            let lowered = lower_expr(ctx, scope, a.e(e));
-            names = ctx.name_errors.replace(outer).unwrap_or_default();
-            match lowered {
+            let (lowered, mut names) =
+                ctx.collect_name_errors(|ctx| lower_expr(ctx, scope, a.e(e)));
+            let value = match lowered {
                 Ok(lowered) if names.is_empty() => Some(lowered),
                 Ok(_) => None,
                 Err(e) if names.is_empty() => return Err(e),
@@ -2998,10 +3009,10 @@ pub fn lower_global(
                     names.push(e);
                     None
                 }
-            }
+            };
+            (value, names)
         }
-
-        None => None,
+        None => (None, Vec::new()),
     };
 
     if !names.is_empty() {
@@ -3529,27 +3540,12 @@ pub fn lower_decorator_def(
     // Like a function body, the defaults and body report every name they
     // cannot resolve; the body is then dropped, so inference never sees a
     // placeholder.
-    let mut param_defaults = Vec::new();
-    let outer = ctx.name_errors.replace(Some(Vec::new()));
-    let lowered = d
-        .params
-        .iter()
-        .try_for_each(|p| {
-            param_defaults.push(match &p.default {
-                Some(expr) => Some(lower_expr(ctx, root_scope, a.e(expr))?),
-                None => None,
-            });
-            Ok(())
-        })
-        .and_then(|()| lower_block(ctx, root_scope, &d.body));
-    let names = ctx.name_errors.replace(outer).unwrap_or_default();
-    let body_e = lowered?;
-
-    let num_required = d
-        .params
-        .iter()
-        .filter(|p| p.default.is_none() && !p.is_variadic)
-        .count();
+    let (lowered, names) = ctx.collect_name_errors(|ctx| {
+        let defaults = lower_param_defaults(ctx, root_scope, &d.params)?;
+        let root = lower_block(ctx, root_scope, &d.body)?;
+        Ok((defaults, root))
+    });
+    let (param_defaults, body_e) = lowered?;
 
     ctx.body.root = Some(body_e);
     ctx.body.root_scope = Some(root_scope);
@@ -3562,7 +3558,7 @@ pub fn lower_decorator_def(
         def_key,
         span: d.span,
         param_decls,
-        num_required,
+        num_required: required_params(&d.params),
         annotations: lower_annotations_with_ctx(ctx, annotations)?,
     });
 
