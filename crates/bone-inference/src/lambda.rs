@@ -86,17 +86,7 @@ pub(crate) fn infer_lambda(
     let saved_returns = gamma.lambda_returns.replace(Vec::new());
     let saved_coro = gamma.coroutine_ret.take();
     let saved_ref_source = std::mem::replace(&mut gamma.allow_frame_ref_return_place, false);
-    // Calls can run later, so globals may have changed; captured locals keep
-    // their refinements.
-    let saved_globals: Vec<Narrow> = gamma
-        .refined_nonnull
-        .iter()
-        .filter(|(root, _)| root.is_global())
-        .cloned()
-        .collect();
-    for g in &saved_globals {
-        gamma.refined_nonnull.remove(g);
-    }
+    let saved_globals = gamma.take_global_refinements();
     let body_res = if expects_unit {
         infer_expr_used(c, gamma, body, Use::Discard)
     } else {

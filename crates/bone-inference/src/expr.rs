@@ -258,15 +258,7 @@ pub(crate) fn infer_statement(
             let saved_returns = gamma.lambda_returns.take();
             let saved_ref_source =
                 std::mem::replace(&mut gamma.allow_frame_ref_return_place, false);
-            let saved_globals: Vec<Narrow> = gamma
-                .refined_nonnull
-                .iter()
-                .filter(|(root, _)| root.is_global())
-                .cloned()
-                .collect();
-            for g in &saved_globals {
-                gamma.refined_nonnull.remove(g);
-            }
+            let saved_globals = gamma.take_global_refinements();
 
             let result = (|| -> Result<(), CompilerError> {
                 match ret_ty {
@@ -288,7 +280,6 @@ pub(crate) fn infer_statement(
                         }
                     }
                     None => {
-                        gamma.declared_ret_ty = None;
                         let body_ty = infer_expr(c, gamma, body)?;
                         let body_ty = resolve(gamma, body_ty, span);
                         let fn_ty = make_fn_ty(gamma, &param_tys, body_ty, span);
@@ -935,44 +926,20 @@ pub(crate) fn infer_expr_used(
                 gamma.workspace.builtins.bool()
             }
 
-            hir::BinOp::And => {
+            hir::BinOp::And | hir::BinOp::Or => {
                 let bool_ty = gamma.workspace.builtins.bool();
                 let lhs_ty = infer_expr(c, gamma, *lhs)?;
                 unify(gamma, lhs_ty, bool_ty, c.body.expr_spans[*lhs])?;
 
-                let (then_narrows, _) = detect_null_narrow(gamma, c, *lhs);
-
-                let rhs_ty = infer_branch(
-                    c,
-                    gamma,
-                    *rhs,
-                    &then_narrows,
-                    c.body.expr_spans[*rhs],
-                    Use::Value,
-                )?;
-
-                unify(gamma, rhs_ty, bool_ty, c.body.expr_spans[*rhs])?;
-
-                bool_ty
-            }
-
-            hir::BinOp::Or => {
-                let bool_ty = gamma.workspace.builtins.bool();
-                let lhs_ty = infer_expr(c, gamma, *lhs)?;
-                unify(gamma, lhs_ty, bool_ty, c.body.expr_spans[*lhs])?;
-
-                let (_, else_narrows) = detect_null_narrow(gamma, c, *lhs);
-
-                let rhs_ty = infer_branch(
-                    c,
-                    gamma,
-                    *rhs,
-                    &else_narrows,
-                    c.body.expr_spans[*rhs],
-                    Use::Value,
-                )?;
-
-                unify(gamma, rhs_ty, bool_ty, c.body.expr_spans[*rhs])?;
+                let (then_narrows, else_narrows) = detect_null_narrow(gamma, c, *lhs);
+                let narrows = if matches!(op, hir::BinOp::And) {
+                    &then_narrows
+                } else {
+                    &else_narrows
+                };
+                let rhs_span = c.body.expr_spans[*rhs];
+                let rhs_ty = infer_branch(c, gamma, *rhs, narrows, rhs_span, Use::Value)?;
+                unify(gamma, rhs_ty, bool_ty, rhs_span)?;
 
                 bool_ty
             }
@@ -1903,7 +1870,7 @@ fn infer_block(
     expr_span: Span,
     expected: Option<TyId>,
 ) -> TyId {
-    let mut g_saved = vec![];
+    let mut saved_bindings = vec![];
     // Block-local guards and assignments must not refine paths outside the block.
     let refined_snapshot = gamma.refined_nonnull.clone();
 
@@ -1917,7 +1884,7 @@ fn infer_block(
             match root {
                 Root::Local(b) if fields.is_empty() => {
                     if let Some(old) = gamma.narrow_local(b, expr_span) {
-                        g_saved.push((b, old, gamma.refinement_epoch));
+                        saved_bindings.push((b, old, gamma.refinement_epoch));
                     }
                 }
                 _ => {
@@ -1949,7 +1916,7 @@ fn infer_block(
         }
     };
 
-    for (b, old, epoch) in g_saved.into_iter().rev() {
+    for (b, old, epoch) in saved_bindings.into_iter().rev() {
         gamma.restore_local_narrow(b, old, epoch);
     }
 

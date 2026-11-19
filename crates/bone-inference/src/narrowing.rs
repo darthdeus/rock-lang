@@ -173,37 +173,27 @@ fn detect_null_narrow_inner(
         }
 
         Expr::BinOp {
-            op: hir::BinOp::Or,
+            op: op @ (BinOp::And | BinOp::Or),
             lhs,
             rhs,
         } => {
-            let (_, mut le) = detect_null_narrow_inner(gamma, c, lhs);
-            let (_, re) = detect_null_narrow_inner(gamma, c, rhs);
-
-            le.extend(re);
-
-            (vec![], le)
-        }
-
-        Expr::Call { args, .. } if is_stdlib_null_predicate(gamma, cond) && args.len() == 1 => {
-            match path_key(c, args.start()) {
-                Some(p) => (vec![], path_prefixes(p)),
-                None => (vec![], vec![]),
+            let (mut then_set, mut else_set) = detect_null_narrow_inner(gamma, c, lhs);
+            let (rhs_then, rhs_else) = detect_null_narrow_inner(gamma, c, rhs);
+            if matches!(op, BinOp::And) {
+                then_set.extend(rhs_then);
+                (then_set, vec![])
+            } else {
+                else_set.extend(rhs_else);
+                (vec![], else_set)
             }
         }
 
-        Expr::BinOp {
-            op: hir::BinOp::And,
-            lhs,
-            rhs,
-        } => {
-            let (mut lt, _) = detect_null_narrow_inner(gamma, c, lhs);
-            let (rt, _) = detect_null_narrow_inner(gamma, c, rhs);
-
-            lt.extend(rt);
-
-            (lt, vec![])
-        }
+        Expr::Call { args, .. } if is_stdlib_null_predicate(gamma, cond) && args.len() == 1 => (
+            vec![],
+            path_key(c, args.start())
+                .map(path_prefixes)
+                .unwrap_or_default(),
+        ),
 
         Expr::BinOp { op, lhs, rhs } if matches!(op, BinOp::NotEq | BinOp::Eq) => {
             let null_side = match (c.body.expr_arena[lhs], c.body.expr_arena[rhs]) {
@@ -237,18 +227,15 @@ pub(crate) fn infer_branch(
     let mut added_paths = vec![];
     let refinement_epoch = gamma.refinement_epoch;
 
-    for (root, fields) in narrows {
-        match root {
-            Root::Local(b) if fields.is_empty() => {
-                if let Some(old) = gamma.narrow_local(*b, span) {
-                    saved_bindings.push((*b, old));
-                }
+    for narrow in narrows {
+        if let (Root::Local(b), fields) = narrow
+            && fields.is_empty()
+        {
+            if let Some(old) = gamma.narrow_local(*b, span) {
+                saved_bindings.push((*b, old));
             }
-            _ => {
-                if gamma.refined_nonnull.insert((*root, fields.clone())) {
-                    added_paths.push((*root, fields.clone()));
-                }
-            }
+        } else if gamma.refined_nonnull.insert(narrow.clone()) {
+            added_paths.push(narrow);
         }
     }
 
@@ -260,7 +247,7 @@ pub(crate) fn infer_branch(
     }
 
     for p in added_paths {
-        gamma.refined_nonnull.remove(&p);
+        gamma.refined_nonnull.remove(p);
     }
 
     result
@@ -283,21 +270,9 @@ pub(crate) fn stmt_guard_narrows(gamma: &Gamma, c: BodyCtx, stmt: Idx<Statement>
     let (then_narrows, else_narrows) = detect_null_narrow(gamma, c, cond);
 
     match else_branch {
-        None => {
-            if expr_diverges(c, then_branch) {
-                else_narrows
-            } else {
-                vec![]
-            }
-        }
-
-        Some(eb) => {
-            if expr_diverges(c, eb) && !expr_diverges(c, then_branch) {
-                then_narrows
-            } else {
-                vec![]
-            }
-        }
+        None if expr_diverges(c, then_branch) => else_narrows,
+        Some(eb) if expr_diverges(c, eb) && !expr_diverges(c, then_branch) => then_narrows,
+        _ => vec![],
     }
 }
 

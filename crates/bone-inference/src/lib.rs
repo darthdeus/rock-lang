@@ -190,6 +190,14 @@ impl<'a> Gamma<'a> {
         Some(old)
     }
 
+    // Calls can run later, so globals may have changed; captured locals keep
+    // their refinements.
+    pub(crate) fn take_global_refinements(&mut self) -> Vec<Narrow> {
+        self.refined_nonnull
+            .extract_if(|(root, _)| root.is_global())
+            .collect()
+    }
+
     pub fn new(workspace: &'a Workspace, body: &'a Body, mid: ModuleId) -> Gamma<'a> {
         Self {
             workspace,
