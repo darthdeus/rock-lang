@@ -417,49 +417,37 @@ mod tests {
         use skull_parser::Ident;
 
         let span = Span::new(Ustr::from("<annotation>"), (0, 0), (0, 0), (0, 0));
-        let ident = |name| Ident {
+        let ident = |name: &str| Ident {
             name: Ustr::from(name),
             span,
         };
-        let mut annotation = Annotation {
-            name: ident("deprecated"),
-            span,
-            args: Vec::new(),
-            resolved_name: None,
-            resolved_ident_list: None,
+        let message = AnnoValue::String(Ustr::from("use fresh"));
+        let arg = |name: Option<&str>, value: &AnnoValue| AnnoArg {
+            name: name.map(ident),
+            value: value.clone(),
         };
-        let names = FxHashSet::default();
-        assert!(
-            validate_annotations(AnnoPos::FnItem, std::slice::from_ref(&annotation), &names)
-                .is_ok()
-        );
-        annotation.args.push(AnnoArg {
-            name: None,
-            value: AnnoValue::String(Ustr::from("use fresh")),
-        });
-        assert!(
-            validate_annotations(AnnoPos::FnItem, std::slice::from_ref(&annotation), &names)
-                .is_ok()
-        );
-        annotation.args[0].name = Some(ident("message"));
-        assert!(
-            validate_annotations(AnnoPos::FnItem, std::slice::from_ref(&annotation), &names)
-                .is_err()
-        );
-        annotation.args[0].name = None;
-        annotation.args[0].value = AnnoValue::Int(1);
-        assert!(
-            validate_annotations(AnnoPos::FnItem, std::slice::from_ref(&annotation), &names)
-                .is_err()
-        );
-        annotation.args[0].value = AnnoValue::String(Ustr::from("use fresh"));
-        annotation.args.push(annotation.args[0].clone());
-        assert!(
-            validate_annotations(AnnoPos::FnItem, std::slice::from_ref(&annotation), &names)
-                .is_err()
-        );
-        annotation.args.clear();
-        assert!(validate_annotations(AnnoPos::Param, &[annotation], &names).is_err());
+        let valid = |pos, args: Vec<AnnoArg>| {
+            let annotation = Annotation {
+                name: ident("deprecated"),
+                span,
+                args,
+                resolved_name: None,
+                resolved_ident_list: None,
+            };
+            validate_annotations(pos, &[annotation], &FxHashSet::default()).is_ok()
+        };
+        assert!(valid(AnnoPos::FnItem, vec![]));
+        assert!(valid(AnnoPos::FnItem, vec![arg(None, &message)]));
+        assert!(!valid(
+            AnnoPos::FnItem,
+            vec![arg(Some("message"), &message)]
+        ));
+        assert!(!valid(AnnoPos::FnItem, vec![arg(None, &AnnoValue::Int(1))]));
+        assert!(!valid(
+            AnnoPos::FnItem,
+            vec![arg(None, &message), arg(None, &message)]
+        ));
+        assert!(!valid(AnnoPos::Param, vec![]));
     }
 
     #[test]

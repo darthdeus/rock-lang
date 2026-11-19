@@ -79,14 +79,18 @@ mod tests {
         Span::new(Ustr::from(file), (line, line), col, off)
     }
 
+    fn edit(at: usize, byte_delta: isize, line_delta: isize) -> TextEditDelta {
+        TextEditDelta {
+            file: Ustr::from("a.rock"),
+            at,
+            byte_delta,
+            line_delta,
+        }
+    }
+
     #[test]
     fn same_line_count_edit_keeps_columns_of_later_spans() {
-        let edit = TextEditDelta {
-            file: Ustr::from("a.rock"),
-            at: 10,
-            byte_delta: 6,
-            line_delta: 0,
-        };
+        let edit = edit(10, 6, 0);
         let mut s = span("a.rock", 5, (8, 19), (60, 71));
         assert!(edit.shift_span(&mut s));
         assert_eq!(s.offset_range(), (66, 77));
@@ -96,12 +100,7 @@ mod tests {
 
     #[test]
     fn spans_before_the_edit_or_in_other_files_stay() {
-        let edit = TextEditDelta {
-            file: Ustr::from("a.rock"),
-            at: 10,
-            byte_delta: -4,
-            line_delta: -1,
-        };
+        let edit = edit(10, -4, -1);
         let mut before = span("a.rock", 0, (0, 3), (2, 5));
         let mut other = span("b.rock", 9, (0, 3), (90, 93));
         assert!(!edit.shift_span(&mut before));
@@ -112,12 +111,7 @@ mod tests {
 
     #[test]
     fn shifting_saturates_instead_of_wrapping() {
-        let edit = TextEditDelta {
-            file: Ustr::from("a.rock"),
-            at: 0,
-            byte_delta: -100,
-            line_delta: -100,
-        };
+        let edit = edit(0, -100, -100);
         let mut s = span("a.rock", 1, (0, 1), (5, 6));
         edit.shift_span(&mut s);
         assert_eq!(s.offset_range(), (0, 0));
