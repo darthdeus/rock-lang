@@ -1596,7 +1596,7 @@ impl InstanceGraph {
     ) -> UpdateStats {
         self.revision += 1;
         self.ensure_incremental_indexes();
-        let pending_roots = canonical_roots(ws, root_added.to_vec())
+        let pending_roots: Vec<Owner> = canonical_roots(ws, root_added.to_vec())
             .into_iter()
             .filter(|root| {
                 ws.module(root.module).functions[root.func]
@@ -1611,31 +1611,6 @@ impl InstanceGraph {
             })
             .collect();
         self.apply_root_delta(ws, root_added, root_removed);
-        self.update_bodies_after_roots(ws, changed, edits, pending_roots)
-    }
-
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    fn ensure_incremental_indexes(&mut self) {
-        if self.incremental_indexes {
-            return;
-        }
-        self.incremental_indexes = true;
-        self.index.subst.clear();
-        for (owner, c) in &self.contributions {
-            self.index.insert_update_rows(owner, c);
-        }
-    }
-
-    fn update_bodies_after_roots(
-        &mut self,
-        ws: &Workspace,
-        changed: &[(ModuleId, BodyOwner)],
-        edits: &[TextEditDelta],
-        pending_roots: Vec<Owner>,
-    ) -> UpdateStats {
         self.delta_added.clear();
         self.delta_removed.clear();
         self.shift_contribution_spans(edits);
@@ -1678,6 +1653,21 @@ impl InstanceGraph {
             removed,
             revisited,
             revisited_owners,
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn ensure_incremental_indexes(&mut self) {
+        if self.incremental_indexes {
+            return;
+        }
+        self.incremental_indexes = true;
+        self.index.subst.clear();
+        for (owner, c) in &self.contributions {
+            self.index.insert_update_rows(owner, c);
         }
     }
 
