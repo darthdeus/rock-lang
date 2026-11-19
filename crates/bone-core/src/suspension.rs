@@ -49,12 +49,12 @@ pub fn uses_after_suspension_in(
     let mut walk = Walk {
         body,
         policy,
-        reported: FxHashMap::default(),
+        reported: FxHashSet::default(),
         loops: Vec::new(),
         unwound: Flow::default(),
     };
     walk.expr(root, &mut flow);
-    let mut found: Vec<_> = walk.reported.into_keys().collect();
+    let mut found: Vec<_> = walk.reported.into_iter().collect();
     found.sort_by_key(|at| body.expr_spans[*at].offset_range());
     found
 }
@@ -62,41 +62,28 @@ pub fn uses_after_suspension_in(
 #[derive(Clone, Default)]
 struct Flow {
     live: FxHashSet<Idx<BindingInfo>>,
-    /// Each crossed binding with the last suspension it was held across on
-    /// each path merged here.
-    crossed: FxHashMap<Idx<BindingInfo>, FxHashSet<Idx<Expr>>>,
+    crossed: FxHashSet<Idx<BindingInfo>>,
 }
 
 impl Flow {
-    /// A suspension becomes the last one on this path for every binding it
-    /// holds, live or already crossed.
-    fn suspend(&mut self, at: Idx<Expr>, crosses: impl Fn(Idx<BindingInfo>) -> bool) {
-        for (&binding, suspensions) in &mut self.crossed {
-            if !crosses(binding) {
-                continue;
-            }
-            suspensions.clear();
-            suspensions.insert(at);
-        }
+    fn suspend(&mut self, crosses: impl Fn(Idx<BindingInfo>) -> bool) {
         let crossed = &mut self.crossed;
         self.live.retain(|&binding| {
             if !crosses(binding) {
                 return true;
             }
-            crossed.insert(binding, FxHashSet::from_iter([at]));
+            crossed.insert(binding);
             false
         });
     }
 
     fn merge(&mut self, other: Flow) {
         self.live.extend(other.live);
-        for (binding, suspensions) in other.crossed {
-            self.crossed.entry(binding).or_default().extend(suspensions);
-        }
+        self.crossed.extend(other.crossed);
     }
 
     fn size(&self) -> usize {
-        self.live.len() + self.crossed.values().map(|s| s.len()).sum::<usize>()
+        self.live.len() + self.crossed.len()
     }
 
     fn rebind(&mut self, binding: Idx<BindingInfo>, live: bool) {
@@ -111,7 +98,7 @@ impl Flow {
 struct Walk<'a, P> {
     body: &'a Body,
     policy: &'a P,
-    reported: FxHashMap<Idx<Expr>, FxHashSet<Idx<Expr>>>,
+    reported: FxHashSet<Idx<Expr>>,
     /// Flows leaving each enclosing loop by `break` and by `continue`.
     loops: Vec<LoopExits>,
     /// Flows that left a block early; its defers still run on them.
@@ -132,11 +119,8 @@ enum Exit {
 
 impl<P: SuspensionPolicy> Walk<'_, P> {
     fn report(&mut self, at: Idx<Expr>, binding: Idx<BindingInfo>, flow: &Flow) {
-        if let Some(suspensions) = flow.crossed.get(&binding) {
-            self.reported
-                .entry(at)
-                .or_default()
-                .extend(suspensions.iter().copied());
+        if flow.crossed.contains(&binding) {
+            self.reported.insert(at);
         }
     }
 
@@ -392,7 +376,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             }
         }
         if self.policy.is_barrier(self.body, expr) {
-            flow.suspend(expr, |binding| self.policy.crosses_binding(binding, expr));
+            flow.suspend(|binding| self.policy.crosses_binding(binding, expr));
         }
     }
 
