@@ -348,6 +348,7 @@ pub fn task_tick_step<R>(t: Task<R>, dt: float, frame: int) -> bool {
 
 pub fn take_result<R>(t: Task<R>) -> R {
     if completed(t.coroutine) {
+        // rock: allow(transmute_of_nullable)
         return cast(result(t.coroutine))
     }
     if status(t.coroutine) == "suspended" {
