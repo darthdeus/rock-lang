@@ -1,15 +1,9 @@
-// `vec_push`'s parameter contract, split by what each parameter names
-//
-// The RECEIVER names the vec layout: `[T]` says "this body reads `_data`", so a
-// column-stored receiver must never reach it -- `column_push` routes around it.
-// The PAYLOAD names no layout: `item` is stored opaquely and never indexed, so
-// it carries `@repr(opaque)`. Without that contract a pushed COLUMN vec read as
-// a layout violation (`[[Vec2]]`). It keeps the
-// type `T` because that is the inference edge giving `vec_new()` its element;
-// `any`/`any?` compiles here and breaks `tests/coroutines/basics.rock`.
-//
-// Both backends: the payload case is where Lua and JS diverged, because Lua
-// intercepts `push` and JS did not specialize it.
+// `push` and `set` contracts. The receiver names the vec layout, so a
+// column-stored receiver goes through `column_push` and never reaches the
+// boxed body; the payload names no layout (`@repr(opaque)`), so a pushed
+// column vec inside a boxed outer vec is stored as is. A value struct pushed or
+// set from a context the inliner never splices (a closure body, a nested fn)
+// stores the whole struct, not its first scalarized leaf.
 
 value PushCell { a: int, b: int }
 
@@ -75,4 +69,36 @@ value PushCell { a: int, b: int }
     mid.push(inner)
     outer.push(mid)
     assert_eq(outer[0][0][0].a, 5)
+}
+
+fn run(f: () -> ()) { f() }
+
+@test(output = "7 9")
+fn value_push_in_closure_stores_whole_struct() {
+    let xs: [Vec2] = []
+    run(() => { xs.push(v(7.0, 9.0)) })
+    print("{xs[0].x} {xs[0].y}")
+}
+
+@test(output = "3 4")
+fn value_push_in_nested_fn_stores_whole_struct() {
+    let xs: [Vec2] = []
+    fn fill(ys: [Vec2]) { ys.push(v(3.0, 4.0)) }
+    fill(xs)
+    print("{xs[0].x} {xs[0].y}")
+}
+
+@test(output = "7 9")
+fn value_push_direct_stores_whole_struct() {
+    let xs: [Vec2] = []
+    xs.push(v(7.0, 9.0))
+    print("{xs[0].x} {xs[0].y}")
+}
+
+// A value argument at a non-first parameter of an `@inline` generic.
+@test(output = "33 44")
+fn value_set_in_closure_stores_whole_struct() {
+    let xs: [Vec2] = [v(0.0, 0.0)]
+    run(() => { xs.set(0, v(33.0, 44.0)) })
+    print("{xs[0].x} {xs[0].y}")
 }

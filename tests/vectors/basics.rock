@@ -1,6 +1,7 @@
 // Vector basics: literals, indexing and index writes, the free-function and
 // method surface, vectors as parameters, fields, payloads and return values,
-// nested vectors, and for-in / enumerate iteration over scalars and tuples.
+// nested vectors, for-in / enumerate iteration over scalars and tuples, and
+// equality of drained vecs with fresh literals.
 // First and last elements are read everywhere so an off-by-one in a `_data`
 // accessor shows as a wrong value.
 
@@ -318,4 +319,18 @@ fn test_vec_clear_then_push() -> int {
     xs.clear()
     xs.push(7)
     xs[0] * 10 + xs.len - 3
+}
+
+@test(output = "true true true true false")
+fn drained_vec_equals_fresh_literal() {
+    let popped = [1, 2, 3]
+    let _ = popped.pop()
+    let cleared = [1, 2, 3]
+    cleared.clear()
+    let empty: [int] = []
+    let removed = [1, 2, 3, 4]
+    let _ = removed.remove_at(1)
+    let swapped = [1, 2, 3, 4]
+    let _ = swapped.swap_remove(1)
+    print("{popped == [1, 2]} {cleared == empty} {removed == [1, 3, 4]} {swapped == [1, 4, 3]} {popped == [1, 9]}")
 }

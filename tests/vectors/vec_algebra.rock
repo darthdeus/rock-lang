@@ -1,6 +1,7 @@
-// Vec2/Vec3/Vec4 algebra from the stdlib (stdlib/vec.rock): construction and
-// pure algebra resolve in a bare program with no engine. Vec3 matches Vec2
-// where sensible and Vec4 carries the shader-facing algebra.
+// Vec2/Vec3/Vec4 algebra from the stdlib (stdlib/vec.rock) in a bare program
+// with no engine, plus user vector types: a boxed struct with a struct-by-int
+// operator used chained, negated and inside nested range loops, and a value
+// struct whose branch-rotated corners match a branch-free closed form.
 
 @test
 fn vec2_stdlib_arithmetic() {
@@ -87,4 +88,112 @@ fn vec4_dot_length_normalize_lerp() {
 
     let l = a.lerp(b, 0.5)
     assert(l.x == 3.0 && l.w == 6.0)
+}
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+fn fixv(x: float, y: float) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+operator *(v: FixVec2, scale: int) -> FixVec2 {
+    let s = float(scale)
+    return FixVec2 { x: v.x * s, y: v.y * s }
+}
+
+@test(output = "56 56\n-84 -84\n6 6\n3 6")
+fn test_vec2_multiplication_operator() {
+    let scaled = fixv(2.0, 2.0) * 28
+    let negated = fixv(3.0, 3.0) * (-28)
+    let chained = fixv(1.0, 1.0) * 2 * 3
+    let neg = fixv(-1.0, -2.0) * (-3)
+    print("{int(scaled.x)} {int(scaled.y)}")
+    print("{int(negated.x)} {int(negated.y)}")
+    print("{int(chained.x)} {int(chained.y)}")
+    print("{int(neg.x)} {int(neg.y)}")
+}
+
+@test(output = "-84\n-28\n-84\n0\n-84\n28\n84\n-28\n84\n0\n84\n28")
+fn test_loop_with_vec_operations() {
+    let bg_size = 28
+    let span = 3
+
+    for x in (-span)..(span + 1) {
+        if x == -3 || x == 3 {
+            for y in (-1)..2 {
+                let result = fixv(float(x), float(y)) * bg_size
+                print(int(result.x))
+                print(int(result.y))
+            }
+        }
+    }
+}
+
+value V2 { x: float, y: float }
+@inline @pure operator +(a: V2, b: V2) -> V2 { return V2 { x: a.x + b.x, y: a.y + b.y } }
+@inline @pure operator -(a: V2, b: V2) -> V2 { return V2 { x: a.x - b.x, y: a.y - b.y } }
+
+// Rotates each axis only when needed, then flips by swapping corners.
+fn old_corners(hw: float, hh: float, cx: float, cy: float, rot: float, fx: bool, fy: bool) -> [V2] {
+    let c = V2 { x: cx, y: cy }
+    let right0 = V2 { x: hw, y: 0.0 }
+    let up0 = V2 { x: 0.0, y: -hh }
+    let right = if rot != 0.0 {
+        V2 { x: right0.x * cos(rot) - right0.y * sin(rot), y: right0.x * sin(rot) + right0.y * cos(rot) }
+    } else { right0 }
+    let up = if rot != 0.0 {
+        V2 { x: up0.x * cos(rot) - up0.y * sin(rot), y: up0.x * sin(rot) + up0.y * cos(rot) }
+    } else { up0 }
+    let tl0 = c - right + up
+    let tr0 = c + right + up
+    let br0 = c + right - up
+    let bl0 = c - right - up
+    let xt = if fx { tr0 } else { tl0 }
+    let xtr = if fx { tl0 } else { tr0 }
+    let xb = if fx { br0 } else { bl0 }
+    let xbr = if fx { bl0 } else { br0 }
+    let tl = if fy { xb } else { xt }
+    let bl = if fy { xt } else { xb }
+    let tr = if fy { xbr } else { xtr }
+    let br = if fy { xtr } else { xbr }
+    return [tl, tr, br, bl]
+}
+
+// Branch-free: rotation and flips as sign multipliers.
+fn new_corners(hw: float, hh: float, cx: float, cy: float, rot: float, fx: bool, fy: bool) -> [V2] {
+    let cr = cos(rot)
+    let sr = sin(rot)
+    let right = V2 { x: hw * cr, y: hw * sr }
+    let up = V2 { x: hh * sr, y: -hh * cr }
+    let sx = if fx { -1.0 } else { 1.0 }
+    let sy = if fy { -1.0 } else { 1.0 }
+    let rx = V2 { x: right.x * sx, y: right.y * sx }
+    let uy = V2 { x: up.x * sy, y: up.y * sy }
+    let tl = V2 { x: cx - rx.x + uy.x, y: cy - rx.y + uy.y }
+    let tr = V2 { x: cx + rx.x + uy.x, y: cy + rx.y + uy.y }
+    let br = V2 { x: cx + rx.x - uy.x, y: cy + rx.y - uy.y }
+    let bl = V2 { x: cx - rx.x - uy.x, y: cy - rx.y - uy.y }
+    return [tl, tr, br, bl]
+}
+
+@test
+fn corners_equivalent() {
+    let rots = [0.0, 0.7853981633974483, 1.5707963267948966, 3.141592653589793, -1.2]
+    for r in rots {
+        for fx in [false, true] {
+            for fy in [false, true] {
+                let a = old_corners(3.0, 2.0, 10.0, 5.0, r, fx, fy)
+                let b = new_corners(3.0, 2.0, 10.0, 5.0, r, fx, fy)
+                for i in 0..4 {
+                    let dx = abs(a[i].x - b[i].x)
+                    let dy = abs(a[i].y - b[i].y)
+                    assert(dx < 0.0001)
+                    assert(dy < 0.0001)
+                }
+            }
+        }
+    }
 }
