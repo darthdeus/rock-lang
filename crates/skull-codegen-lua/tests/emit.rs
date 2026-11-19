@@ -654,8 +654,7 @@ fn assert_counted_zero_alloc(lua: &str) {
 
 // --- A REAL `[T]` for-loop routes through the stdlib
 // VecIter protocol (no skull template) and still compiles to the same
-// zero-alloc native `for` the deleted template emitted. Parity measured at
-// ~1.0x, 0 bytes/elem (benchmarks/iterator-zero-alloc/vec_parity.rock).
+// zero-alloc native `for` the deleted template emitted.
 #[test]
 fn for_real_vec_loop_is_forl_zero_alloc_with_raw_reads() {
     let lua = emit_inlined(
@@ -674,8 +673,7 @@ fn for_real_vec_loop_is_forl_zero_alloc_with_raw_reads() {
 /// A register or cell local is assigned `nil` right after its last use, so a
 /// LuaJIT exit snapshot taken later in the parent trace carries it as a
 /// constant instead of a parent SLOAD that needs a register at the side-trace
-/// head (`benchmarks/luajit/trace-aborts/calleekill.lua`). A local still live
-/// across the branch is untouched.
+/// head. A local still live across the branch is untouched.
 #[test]
 fn dead_locals_are_nil_killed_after_their_last_use() {
     let lua = emit_clean(

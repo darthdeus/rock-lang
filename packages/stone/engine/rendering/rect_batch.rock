@@ -264,8 +264,7 @@ pub fn rect_batch_reset(b: RectBatch) {
 // One vertex, built from scalars. Leaf addressing lowers `buf[i] = vert(..)`
 // to `view[i*13 + k]` float stores the flat idiom wrote by hand, with
 // no Vertex_ct/Vec2_ct materialized -- so the layout comes from the struct
-// instead of from argument order, at no allocation (measured:
-// benchmarks/value-scalarize/sprite_vertex_store_ab.rock).
+// instead of from argument order, at no allocation.
 pub @pure fn vert(
     x: float, y: float, u: float, v_: float,
     r: float, g: float, b: float, a: float,

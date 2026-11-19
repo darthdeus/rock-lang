@@ -1,8 +1,6 @@
 // Unit tests for the unified `Metric` windowed-statistics type (stdlib).
 // Covers basic aggregation, single-sample and all-equal edges, ring
-// eviction (trailing window), and percentile ordering. Sister coverage:
-// the allocation gate in benchmarks/stats/metric_alloc.rock asserts
-// metric_add does not allocate.
+// eviction (trailing window), and percentile ordering.
 
 @test(output = "n=5 min=1 max=5 mean=3")
 fn test_metric_basic() {
