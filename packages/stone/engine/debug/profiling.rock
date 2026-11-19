@@ -1922,7 +1922,7 @@ fn profiler_apply_pending_enabled() {
     if enabled {
         profiler_clear_samples()
         ENGINE.profiler_enabled = true
-        if os_getenv("PERF_MODE") != "1" { live_allocation_capture_begin() }
+        if !PERF_FRAME_CAPTURE { live_allocation_capture_begin() }
     } else {
         live_allocation_capture_end()
         ENGINE.profiler_enabled = false

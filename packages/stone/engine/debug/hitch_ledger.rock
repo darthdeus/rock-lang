@@ -373,18 +373,10 @@ fn hitch_ledger_flush() {
         sb_push(sb, if cpu >= 0.0 { "\t{cpu}" } else { "\tnull" })
         sb_push(sb, "\n")
     }
-    let written = __hitch_write_file(HITCH.dump_path, sb_build(sb))
+    let written = stone_file_write(HITCH.dump_path, sb_build(sb))
     if !written {
         log_error("HITCH", "could not write the hitch ledger to {HITCH.dump_path}")
         return
     }
     log_info("HITCH", "ledger: {n} rows -> {HITCH.dump_path} ({hitch_cause_counts(HITCH.total_hitches, HITCH.total_causes)})")
 }
-
-@nomangle inline(lua) fn __hitch_write_file(path: string, text: string) -> bool = """
-    local f = io.open(path, "w")
-    if f == nil then return false end
-    f:write(text)
-    f:close()
-    return true
-"""

@@ -340,7 +340,7 @@ global WINDOW_GEOMETRY_DIRTY_AT: float = -1.0
 const WINDOW_GEOMETRY_DEBOUNCE_S: float = 0.5
 
 fn runner_bounded_run() -> bool {
-    return os_getenv("PERF_MODE") == "1" || sim_mode_active() || get_env_int("FRAME_COUNT", -1) > 0
+    return PERF_FRAME_CAPTURE || sim_mode_active() || get_env_int("FRAME_COUNT", -1) > 0
 }
 
 fn runner_checked_run() -> bool {
@@ -458,7 +458,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
 
     stone_init_done()
 
-    if os_getenv("PERF_MODE") == "1" {
+    if PERF_FRAME_CAPTURE {
         ENGINE.profiler_enabled = true
         if PERF_RECORDS.scenario == "" {
             perf_scenario_wait("default")
@@ -719,8 +719,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     let shader_errors = stone_shader_error_count()
     let unfilled_blocks = stone_unfilled_uniform_block_count()
     let unfilled_textures = stone_unfilled_texture_slot_count()
-    let perf_mode = os_getenv("PERF_MODE") == "1"
-    if perf_mode { dump_perf_summary() }
+    if PERF_FRAME_CAPTURE { dump_perf_summary() }
     log_debug("STONE", "Shutting down...")
     shutdown_stage = stone_get_time()
     if stone_shutdown_window() {
@@ -732,7 +731,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     shutdown_stage_finished("native window", shutdown_stage)
     shutdown_stage_finished("total", shutdown_started)
 
-    if perf_mode && PERF_RECORDS.termination != "window_complete" {
+    if PERF_FRAME_CAPTURE && PERF_RECORDS.termination != "window_complete" {
         log_error("PERF", "incomplete interval: {PERF_RECORDS.termination} ({PERF_RECORDS.count}/{PERF_RECORDS.requested_frames} measured frames)")
         os_exit(3)
     }
@@ -1231,7 +1230,7 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
     profile_gpu_begin("screen_draw")
     frame_core_render_late_draw()
 
-    if os_getenv("PERF_MODE") != "1" && PROFILER_UI_ENABLED {
+    if !PERF_FRAME_CAPTURE && PROFILER_UI_ENABLED {
         live_allocation_exclusion_begin()
         profile_begin("screen.profiler_overlay")
         draw_profiler_overlay()
