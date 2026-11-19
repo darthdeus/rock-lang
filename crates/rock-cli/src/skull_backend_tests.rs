@@ -1855,7 +1855,7 @@ mod value_test_exec {
 
 #[cfg(test)]
 mod backend_stats_workspace_tests {
-    use super::super::skull_workspace_timed;
+    use super::super::skull_emit_timed;
     use crate::unified_compile::discover_project_sources;
 
     #[test]
@@ -1873,7 +1873,10 @@ mod backend_stats_workspace_tests {
         .expect("main.rock");
 
         let sources = discover_project_sources(dir.path()).expect("discover timed project");
-        let (ok, times) = skull_workspace_timed(&sources, dir.path());
+        let (ws, entry) = crate::bone_backend::workspace_frontend_timed(&sources)
+            .0
+            .expect("timed project checks");
+        let (ok, times) = skull_emit_timed(ws, entry, dir.path());
 
         assert!(ok, "timed emission must succeed for a prepared project");
         assert!(

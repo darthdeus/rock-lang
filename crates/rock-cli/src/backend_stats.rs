@@ -1,4 +1,4 @@
-//! Time Bone type checking and Skull emission over one shared source set.
+//! Time the Rock front end and Skull emission over one shared source set.
 
 use crate::Result;
 use crate::bone_backend::{self, BonePhaseTimes};
@@ -7,17 +7,25 @@ use colored::Colorize;
 use rock_core::SourceFiles;
 use std::time::Duration;
 
-/// Bone's phase timings are summed across timed iterations in phase order.
+/// Front-end and emit timings, summed across timed iterations. Each iteration
+/// runs the front end once and emits the workspace it checked.
 #[derive(Default)]
-struct BoneStats {
-    times: BonePhaseTimes,
+struct Stats {
     files: usize,
-    ok: bool,
-    phases: Vec<(&'static str, Duration)>,
+    front: BonePhaseTimes,
+    /// Bone's own phase split of `front.semantic`, in run order.
+    front_phases: Vec<(&'static str, Duration)>,
+    checked: bool,
+    emit: SkullPhaseTimes,
+    /// Per-unit timers overlap under parallel emission. Setup timers measure wall time.
+    emit_phases: Vec<(&'static str, Duration)>,
+    abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
+    emitted: bool,
+    failure: Option<rock_core::CompilerError>,
 }
 
-/// Accumulate one run's ordered phase list into `acc`. bone emits the same
-/// phases in the same order every run, so we sum element-wise by position.
+/// Accumulate one run's ordered phase list into `acc`. Each run reports the
+/// same phases in the same order, so they are summed element-wise by position.
 fn merge_phases(acc: &mut Vec<(&'static str, Duration)>, new: &[(&'static str, Duration)]) {
     if acc.is_empty() {
         acc.extend_from_slice(new);
@@ -28,51 +36,32 @@ fn merge_phases(acc: &mut Vec<(&'static str, Duration)>, new: &[(&'static str, D
     }
 }
 
-#[derive(Default)]
-struct SkullStats {
-    times: SkullPhaseTimes,
-    files: usize,
-    ok: bool,
-    failure: Option<rock_core::CompilerError>,
-    setup_failed: bool,
-    emit_failed: bool,
-    /// Per-unit timers overlap under parallel emission. Setup timers measure wall time.
-    emit_phases: Vec<(&'static str, Duration)>,
-    abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
-    /// Traffic, attribution and their counters describe the last timed run.
-    arena_traffic: skull::mir_emit::ArenaTraffic,
-    attribution: skull::mir_emit::EmitAttribution,
-    setup_lanes: skull::mir_emit::SetupLaneAttribution,
-    graph_census: skull::instance_graph::RunStats,
-    concrete_stats: skull::concrete_body::ConcreteBuildStats,
-}
-
 pub(crate) fn do_backend_stats(input: &str, iters: usize, warmup: usize, json: bool) -> Result<()> {
     let iters = iters.max(1);
+    let project_path = std::path::Path::new(input);
 
-    let sources = crate::unified_compile::discover_sources(std::path::Path::new(input))?;
+    let sources = crate::unified_compile::discover_sources(project_path)?;
     if sources.files.is_empty() {
         anyhow::bail!("no Rock source files found at `{}`", input);
     }
 
-    let bone = run_bone(&sources, iters, warmup);
-    let skull = run_skull(&sources, std::path::Path::new(input), iters, warmup);
+    let stats = run(&sources, project_path, iters, warmup);
 
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json_report(input, iters, warmup, &bone, &skull))?
+            serde_json::to_string_pretty(&json_report(input, iters, warmup, &stats))?
         );
     } else {
-        print_report(input, iters, warmup, &bone, &skull);
+        print_report(input, iters, warmup, &stats);
     }
-    if skull.setup_failed || skull.emit_failed {
-        let stage = if skull.setup_failed {
+    if stats.emit.setup_failed || stats.emit.emit_failed {
+        let stage = if stats.emit.setup_failed {
             "workspace setup"
         } else {
             "emit"
         };
-        if let Some(error) = &skull.failure {
+        if let Some(error) = &stats.failure {
             anyhow::bail!("backend-stats skull {stage} failed: {error}");
         }
         anyhow::bail!("backend-stats skull {stage} failed without a diagnostic");
@@ -80,58 +69,56 @@ pub(crate) fn do_backend_stats(input: &str, iters: usize, warmup: usize, json: b
     Ok(())
 }
 
-fn run_bone(sources: &SourceFiles, iters: usize, warmup: usize) -> BoneStats {
-    let mut stats = BoneStats::default();
-    for i in 0..(warmup + iters) {
-        let (res, times) = bone_backend::bone_workspace_timed(sources);
-        // Body diagnostics can exist in a successful semantic-pass result.
-        stats.ok = res
-            .as_ref()
-            .is_ok_and(|ws| bone_backend::body_errors(ws).is_empty());
-        if i < warmup {
-            continue; // untimed warmup
-        }
-        stats.times.parse += times.parse;
-        stats.times.semantic += times.semantic;
-        stats.times.stdlib_assemble += times.stdlib_assemble;
-        stats.times.semantic_call += times.semantic_call;
-        if let Ok(ws) = &res {
-            merge_phases(&mut stats.phases, &ws.phase_timings);
-        }
-    }
-    stats.files = sources.files.len();
-    stats
-}
-
-fn run_skull(
+fn run(
     sources: &SourceFiles,
     project_path: &std::path::Path,
     iters: usize,
     warmup: usize,
-) -> SkullStats {
-    let mut stats = SkullStats::default();
+) -> Stats {
+    let mut stats = Stats {
+        files: sources.files.len(),
+        ..Default::default()
+    };
     for i in 0..(warmup + iters) {
-        let (ok, times) = skull_backend::skull_workspace_timed(sources, project_path);
-        stats.ok = ok;
-        if i < warmup {
-            continue; // untimed warmup
+        let timed = i >= warmup;
+        let (frontend, front) = bone_backend::workspace_frontend_timed(sources);
+        if timed {
+            stats.front.parse += front.parse;
+            stats.front.semantic += front.semantic;
+            stats.front.stdlib_assemble += front.stdlib_assemble;
+            stats.front.semantic_call += front.semantic_call;
         }
-        stats.times.parse += times.parse;
-        stats.times.semantic += times.semantic;
-        stats.times.workspace_setup += times.workspace_setup;
-        stats.times.emit += times.emit;
-        stats.failure = times.failure.clone();
-        stats.setup_failed = times.setup_failed;
-        stats.emit_failed = times.emit_failed;
-        merge_phases(&mut stats.emit_phases, &times.emit_phases);
-        stats.abi_plan_stats.merge(&times.abi_plan_stats);
-        stats.arena_traffic = times.arena_traffic;
-        stats.attribution = times.attribution;
-        stats.setup_lanes = times.setup_lanes;
-        stats.graph_census = times.graph_census;
-        stats.concrete_stats = times.concrete_stats;
+        let (ws, entry_file) = match frontend {
+            Ok(checked) => checked,
+            Err(mut errors) => {
+                stats.checked = false;
+                stats.failure = errors.drain(..).next();
+                continue;
+            }
+        };
+        if timed {
+            merge_phases(&mut stats.front_phases, &ws.phase_timings);
+        }
+        // Body diagnostics can exist in a successful semantic-pass result.
+        if let Some(error) = bone_backend::body_errors(&ws).into_iter().next() {
+            stats.checked = false;
+            stats.failure = Some(error);
+            continue;
+        }
+        stats.checked = true;
+        let (ok, emit) = skull_backend::skull_emit_timed(ws, entry_file, project_path);
+        stats.emitted = ok;
+        if !timed {
+            continue;
+        }
+        stats.failure = emit.failure.clone();
+        merge_phases(&mut stats.emit_phases, &emit.emit_phases);
+        stats.abi_plan_stats.merge(&emit.abi_plan_stats);
+        let (setup, emit_time) = (stats.emit.workspace_setup, stats.emit.emit);
+        stats.emit = emit;
+        stats.emit.workspace_setup += setup;
+        stats.emit.emit += emit_time;
     }
-    stats.files = sources.files.len();
     stats
 }
 
@@ -419,13 +406,7 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
 
 /// The machine-readable report: per-iteration means of the same boundary and
 /// phase timings the pretty report prints, without the one-run census lines.
-fn json_report(
-    input: &str,
-    iters: usize,
-    warmup: usize,
-    bone: &BoneStats,
-    skull: &SkullStats,
-) -> serde_json::Value {
+fn json_report(input: &str, iters: usize, warmup: usize, stats: &Stats) -> serde_json::Value {
     let per = iters as f64;
     let ms = |d: Duration| d.as_secs_f64() * 1000.0 / per;
     let phases = |phases: &[(&'static str, Duration)], prefix: &str| -> serde_json::Value {
@@ -438,85 +419,68 @@ fn json_report(
             .collect::<serde_json::Map<_, _>>()
             .into()
     };
-    let bone_phase_sum: Duration = bone.phases.iter().map(|(_, d)| *d).sum();
+    let front = &stats.front;
+    let front_phase_sum: Duration = stats.front_phases.iter().map(|(_, d)| *d).sum();
     serde_json::json!({
         "input": input,
         "iters": iters,
         "warmup": warmup,
-        "files": bone.files,
-        "bone": {
-            "ok": bone.ok,
-            "parse_ms": ms(bone.times.parse),
-            "semantic_ms": ms(bone.times.semantic),
-            "semantic_call_ms": ms(bone.times.semantic_call),
-            "stdlib_assemble_ms": ms(bone.times.stdlib_assemble),
-            "teardown_ms": ms(bone.times.semantic_call.saturating_sub(bone_phase_sum)),
-            "phases": phases(&bone.phases, ""),
+        "files": stats.files,
+        "front": {
+            "ok": stats.checked,
+            "parse_ms": ms(front.parse),
+            "semantic_ms": ms(front.semantic),
+            "semantic_call_ms": ms(front.semantic_call),
+            "stdlib_assemble_ms": ms(front.stdlib_assemble),
+            "teardown_ms": ms(front.semantic_call.saturating_sub(front_phase_sum)),
+            "phases": phases(&stats.front_phases, ""),
         },
-        "skull": {
-            "ok": skull.ok,
-            "parse_ms": ms(skull.times.parse),
-            "semantic_ms": ms(skull.times.semantic),
-            "workspace_setup_ms": ms(skull.times.workspace_setup),
-            "emit_ms": ms(skull.times.emit),
-            "setup_phases": phases(&skull.emit_phases, "setup: "),
-            "join_phases": phases(&skull.emit_phases, "join: "),
+        "emit": {
+            "ok": stats.emitted,
+            "workspace_setup_ms": ms(stats.emit.workspace_setup),
+            "emit_ms": ms(stats.emit.emit),
+            "setup_phases": phases(&stats.emit_phases, "setup: "),
+            "join_phases": phases(&stats.emit_phases, "join: "),
             // Per-unit elapsed sums; they overlap under parallel emit, so they
             // exceed `emit_ms` and are comparable only with each other.
-            "emit_phases": phases(&skull.emit_phases, ""),
-            "failure": skull.failure.as_ref().map(|e| e.to_string()),
+            "emit_phases": phases(&stats.emit_phases, ""),
+            "failure": stats.failure.as_ref().map(|e| e.to_string()),
         },
     })
 }
 
-fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skull: &SkullStats) {
+fn print_report(input: &str, iters: usize, warmup: usize, stats: &Stats) {
     let per = iters as f64;
     let ms = |d: Duration| d.as_secs_f64() * 1000.0 / per;
-    let verdict = |ok: bool, yes: &str, no: &str| {
-        if ok {
-            yes.to_string().green()
-        } else {
-            no.to_string().red()
-        }
-    };
+    let front = &stats.front;
+    let emit = &stats.emit;
 
     println!("\n{}", format!("=== backend-stats: {} ===", input).bold());
     println!(
         "input: {} user file(s); mean of {} timed iter(s) after {} warmup(s)",
-        bone.files, iters, warmup
+        stats.files, iters, warmup
     );
 
-    // Post-parse = the part that actually differs between the stages. Parsing is
-    // shared skull_parser infra, so it's excluded from the A/B.
-    let bone_postparse = bone.times.semantic;
-    let skull_postparse = skull.times.semantic + skull.times.workspace_setup + skull.times.emit;
-
-    // --- bone (parse + semantic_pass over the whole workspace) ---
     println!(
         "\n{}",
-        "BONE (parse + semantic[lower+check], whole workspace)".bold()
+        "FRONT END (parse + semantic[lower+check], whole workspace)".bold()
     );
+    println!("  parse          : {:>9.3} ms", ms(front.parse));
     println!(
         "  stdlib assemble: {:>9.3} ms  (in semantic; per-run harness cost)",
-        ms(bone.times.stdlib_assemble)
+        ms(front.stdlib_assemble)
     );
-    println!(
-        "  parse          : {:>9.3} ms  (excluded from A/B)",
-        ms(bone.times.parse)
-    );
-    println!("  semantic       : {:>9.3} ms", ms(bone.times.semantic));
-    println!("  post-parse     : {:>9.3} ms", ms(bone_postparse));
-    // bone's own per-phase split of the semantic column, in run order.
-    if !bone.phases.is_empty() {
+    println!("  semantic       : {:>9.3} ms", ms(front.semantic));
+    if !stats.front_phases.is_empty() {
         println!("  phases:");
         let mut phase_sum = Duration::ZERO;
-        for (name, dur) in &bone.phases {
+        for (name, dur) in &stats.front_phases {
             phase_sum += *dur;
             println!("    {:28} {:>9.3} ms", name, ms(*dur));
         }
         // Caller-measured call captures bone's input-AST teardown at fn return,
         // which no internal phase timer can see: call = phase_sum + teardown.
-        let teardown = bone.times.semantic_call.saturating_sub(phase_sum);
+        let teardown = front.semantic_call.saturating_sub(phase_sum);
         println!(
             "    {:28} {:>9.3} ms  (input-AST drop at return)",
             "teardown",
@@ -525,57 +489,46 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         println!(
             "    {:28} {:>9.3} ms  (call, incl teardown)",
             "= semantic_pass total",
-            ms(bone.times.semantic_call)
+            ms(front.semantic_call)
         );
     }
-    println!(
-        "  type-check     : {}  ({} file workspace)",
-        verdict(bone.ok, "OK", "FAILED (bone gap)"),
-        bone.files
-    );
+    let check = if stats.checked {
+        "OK".green()
+    } else {
+        "FAILED".red()
+    };
+    println!("  type-check     : {check}");
 
-    // --- skull (bone front-half + Lua codegen) ---
     println!(
         "\n{}",
-        "SKULL (parse + semantic[bone] + emit[codegen], whole workspace)".bold()
-    );
-    println!(
-        "  parse          : {:>9.3} ms  (excluded from A/B)",
-        ms(skull.times.parse)
-    );
-    println!(
-        "  semantic       : {:>9.3} ms  (bone front-half)",
-        ms(skull.times.semantic)
+        "EMIT (workspace setup + codegen of the checked workspace)".bold()
     );
     println!(
         "  workspace setup: {:>9.3} ms  (comptime/build-var preparation; separate from emit)",
-        ms(skull.times.workspace_setup)
+        ms(emit.workspace_setup)
     );
-    println!(
-        "  emit           : {:>9.3} ms  (skull codegen delta)",
-        ms(skull.times.emit)
-    );
-    if !skull.emit_phases.is_empty() {
-        let setup_sum: Duration = skull
+    println!("  emit           : {:>9.3} ms", ms(emit.emit));
+    if !stats.emit_phases.is_empty() {
+        let setup_sum: Duration = stats
             .emit_phases
             .iter()
             .filter(|(name, _)| name.starts_with("setup: "))
             .map(|(_, d)| *d)
             .sum();
-        let emit_phases: Vec<_> = skull
+        let emit_phases: Vec<_> = stats
             .emit_phases
             .iter()
             .filter(|(name, _)| !name.starts_with("setup: ") && !name.starts_with("join: "))
             .collect();
         if setup_sum > Duration::ZERO {
             println!("  emit setup (direct wall-clock):");
-            for (name, dur) in &skull.emit_phases {
+            for (name, dur) in &stats.emit_phases {
                 if name.starts_with("setup: ") {
                     println!("    {:28} {:>9.3} ms", name, ms(*dur));
                 }
             }
             // Joined-group children overlap, so the group total already includes their wall time.
-            for (name, dur) in &skull.emit_phases {
+            for (name, dur) in &stats.emit_phases {
                 if name.starts_with("join: ") {
                     println!("    {:28} {:>9.3} ms  (overlapping child)", name, ms(*dur));
                 }
@@ -583,7 +536,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             println!("    {:28} {:>9.3} ms", "= setup total", ms(setup_sum));
         }
         let phase_sum: Duration = emit_phases.iter().map(|(_, d)| *d).sum();
-        let emit_body = skull.times.emit.saturating_sub(setup_sum);
+        let emit_body = emit.emit.saturating_sub(setup_sum);
         // Per-unit timers overlap. Estimate their wall shares after subtracting the measured setup time.
         let parallel = phase_sum > emit_body;
         if parallel {
@@ -627,8 +580,8 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             );
         }
     }
-    print_attribution(&skull.attribution);
-    let lanes = &skull.setup_lanes;
+    print_attribution(&emit.attribution);
+    let lanes = &emit.setup_lanes;
     if lanes.cpu_population > 0 || lanes.plans_population > 0 {
         println!(
             "  setup lanes (one timed run): cpu {}, plans {}, shader (beside the fan-out) {}; first={:?}; overlap cpu/plans={}; shared MonoInterner writes/acquires={}, attempts={}, new={}",
@@ -642,14 +595,14 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             lanes.mono_intern_new_during_join,
         );
     }
-    let graph = &skull.graph_census;
+    let graph = &emit.graph_census;
     if graph.expanded > 0 {
         println!(
             "  graph walks (one timed run): {} owners, {} settle rounds",
             graph.expanded, graph.settle_rounds,
         );
     }
-    let concrete = &skull.concrete_stats;
+    let concrete = &emit.concrete_stats;
     if concrete.plan_attempts > 0 || concrete.always_plan_attempts > 0 {
         println!(
             "  concrete plan facts (one timed run): ordinary plans {}/{} success/fail over {}; always {}/{} over {}; source slots expr/binding {}/{}; callee scans {} over {} borrowed rows; plan maps callees/signatures {}/{}",
@@ -682,7 +635,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             concrete.signature_ns,
         );
     }
-    let memo = &skull.abi_plan_stats;
+    let memo = &stats.abi_plan_stats;
     if memo.requests() > 0 {
         let per_run = |v: u64| v / iters as u64;
         let asked = per_run(memo.requests());
@@ -703,7 +656,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             per_run(memo.duplicate_cold_stores),
         );
     }
-    let traffic = &skull.arena_traffic;
+    let traffic = &emit.arena_traffic;
     if traffic.rep_final.plans > 0 {
         let (rs, rf) = (&traffic.rep_setup, &traffic.rep_final);
         println!(
@@ -722,73 +675,33 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             mf.types,
         );
     }
-    println!("  post-parse     : {:>9.3} ms", ms(skull_postparse));
-    if skull.ok {
+    let failure = || {
+        stats
+            .failure
+            .as_ref()
+            .map_or("missing diagnostic".to_string(), ToString::to_string)
+    };
+    if stats.emitted {
         println!("  emit           : {}", "OK".green());
-    } else if skull.emit_failed {
-        println!(
-            "  emit           : {} ({})",
-            "FAILED".red(),
-            skull
-                .failure
-                .as_ref()
-                .map_or("missing diagnostic".to_string(), ToString::to_string)
-        );
-    } else if skull.setup_failed {
+    } else if emit.emit_failed {
+        println!("  emit           : {} ({})", "FAILED".red(), failure());
+    } else if emit.setup_failed {
         println!(
             "  emit           : {} (workspace setup: {})",
             "SKIPPED".red(),
-            skull
-                .failure
-                .as_ref()
-                .map_or("missing diagnostic".to_string(), ToString::to_string)
+            failure()
         );
-    } else if let Some(error) = &skull.failure {
-        println!("  emit           : {} ({})", "SKIPPED".red(), error);
     } else {
-        println!(
-            "  emit           : {}",
-            "skipped (bone rejected workspace)".red()
-        );
+        println!("  emit           : {} ({})", "SKIPPED".red(), failure());
     }
 
-    // --- A/B (post-parse only) ---
-    // bone is the type-check floor (semantic only); skull is that same front
-    // half PLUS Lua codegen, so `emit` is the codegen delta bone doesn't pay.
-    let bone_ms = ms(bone_postparse);
-    let skull_ms = ms(skull_postparse);
-    let skull_sem_ms = ms(skull.times.semantic);
-    let skull_emit_ms = ms(skull.times.emit);
-    println!("\n{}", "A/B (post-parse work; parsing excluded)".bold());
-    println!(
-        "  bone  : {:>9.3} ms  (semantic only — typecheck floor)",
-        bone_ms
-    );
-    println!(
-        "  skull : {:>9.3} ms  (semantic + workspace setup + codegen)",
-        skull_ms
-    );
-    println!(
-        "  skull emit (codegen delta over bone) : {:>9.3} ms",
-        skull_emit_ms
-    );
-    if skull_sem_ms > 0.0 {
+    let post_parse = front.semantic + emit.workspace_setup + emit.emit;
+    println!("\n{}", "TOTAL (parsing excluded)".bold());
+    println!("  post-parse     : {:>9.3} ms", ms(post_parse));
+    if !front.semantic.is_zero() {
         println!(
-            "  skull emit / semantic : {:.2}x  (codegen vs typecheck)",
-            skull_emit_ms / skull_sem_ms
+            "  emit / semantic: {:.2}x  (codegen vs typecheck)",
+            emit.emit.as_secs_f64() / front.semantic.as_secs_f64()
         );
     }
-
-    // Caveats — the comparison only reads true when bone accepts the workspace.
-    println!(
-        "\n{}",
-        "note: parsing (shared skull_parser infra) is excluded from the A/B. Both \
-         stages type-check the whole source set as one workspace. If bone rejects \
-         the workspace (type-check FAILED, a bone feature gap), its semantic time \
-         stops at the failure and skull's emit is SKIPPED (reads 0) — the ratios \
-         are only meaningful when bone's verdict is OK. Treat the ratios as \
-         directional. Finer bone per-pass stats need bone-side counters \
-         (the compiler pipeline contract)."
-            .dimmed()
-    );
 }

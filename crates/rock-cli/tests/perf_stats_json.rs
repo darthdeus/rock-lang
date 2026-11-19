@@ -1,4 +1,4 @@
-//! The `perf/` tracker reads `backend-stats` and `incremental-stats` as JSON.
+//! `backend-stats` and `incremental-stats` report their timings as JSON.
 use crate::support::invoke;
 use std::process::Output;
 
@@ -36,15 +36,15 @@ fn backend_stats_reports_phase_means_as_json() {
     let report = json_stdout(&out);
     assert_eq!(report["iters"], 2);
     assert_eq!(report["files"], 2);
-    assert_eq!(report["bone"]["ok"], true);
-    assert_eq!(report["skull"]["ok"], true);
-    assert!(report["bone"]["semantic_ms"].as_f64().unwrap() > 0.0);
-    assert!(report["skull"]["emit_ms"].as_f64().unwrap() > 0.0);
-    let phases = report["bone"]["phases"].as_object().unwrap();
+    assert_eq!(report["front"]["ok"], true);
+    assert_eq!(report["emit"]["ok"], true);
+    assert!(report["front"]["semantic_ms"].as_f64().unwrap() > 0.0);
+    assert!(report["emit"]["emit_ms"].as_f64().unwrap() > 0.0);
+    let phases = report["front"]["phases"].as_object().unwrap();
     assert!(phases.contains_key("infer functions"), "{phases:?}");
-    let setup = report["skull"]["setup_phases"].as_object().unwrap();
+    let setup = report["emit"]["setup_phases"].as_object().unwrap();
     assert!(setup.contains_key("graph"), "{setup:?}");
-    let emit = report["skull"]["emit_phases"].as_object().unwrap();
+    let emit = report["emit"]["emit_phases"].as_object().unwrap();
     assert!(emit.contains_key("lower hir->mir"), "{emit:?}");
 }
 

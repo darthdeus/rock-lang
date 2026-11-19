@@ -363,20 +363,15 @@ fn skull_emit_full(
     Ok((build.compiled.emission, tests))
 }
 
-/// Per-phase wall-clock for one skull run over a single source. `parse` and
-/// `semantic` mirror `BonePhaseTimes` (skull shares bone's front half: same
-/// `parse_rock` + `semantic_pass`), so they're directly comparable; `emit` is
-/// the codegen skull adds on top (`skull::emit_workspace`). Consumed by
-/// `backend-stats` for the bone-vs-skull comparison.
+/// Wall-clock and attribution for one timed emit of a checked workspace,
+/// consumed by `backend-stats`.
 #[derive(Default, Clone)]
 pub(crate) struct SkullPhaseTimes {
-    pub parse: Duration,
-    pub semantic: Duration,
     /// Comptime/build-variable preparation after semantic checking and before
     /// code generation. This is setup work, not semantic or emit self-time.
     pub workspace_setup: Duration,
     pub emit: Duration,
-    /// The last front-end/setup/emit failure, retained so measurement callers
+    /// The last setup/emit failure, retained so measurement callers
     /// cannot report a contradictory successful-looking zero population.
     pub failure: Option<CompilerError>,
     pub setup_failed: bool,
@@ -400,27 +395,12 @@ pub(crate) struct SkullPhaseTimes {
     pub concrete_stats: skull::concrete_body::ConcreteBuildStats,
 }
 
-pub(crate) fn skull_workspace_timed(
-    sources: &SourceFiles,
+pub(crate) fn skull_emit_timed(
+    mut ws: bone_semantic::inference::Workspace,
+    entry_file: ustr::Ustr,
     project_path: &std::path::Path,
 ) -> (bool, SkullPhaseTimes) {
     let mut times = SkullPhaseTimes::default();
-    let (frontend, frontend_times) = crate::bone_backend::workspace_frontend_timed(sources);
-    times.parse = frontend_times.parse;
-    times.semantic = frontend_times.semantic;
-    let (mut ws, entry_file) = match frontend {
-        Ok(v) => v,
-        Err(mut errors) => {
-            times.failure = errors.drain(..).next();
-            return (false, times);
-        }
-    };
-    let body_errors = crate::bone_backend::body_errors(&ws);
-    if let Some(error) = body_errors.into_iter().next() {
-        times.failure = Some(error);
-        return (false, times);
-    }
-
     // Production emission stamps declared [build.vars] once after the checked
     // workspace exists. Keep that preparation visible as its own timed lane;
     // the emit stopwatch remains codegen-only.

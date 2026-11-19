@@ -307,14 +307,12 @@ pub(crate) fn bone_workspace_timed(
     BonePhaseTimes,
 ) {
     let (res, mut times) = workspace_frontend_timed(sources);
-    // Bone's historical total starts only once semantic_pass runs. Skull's
-    // total includes setup failures before that call; keep that distinction in
-    // skull_workspace_timed while sharing the work itself.
+    // A type-check total starts only once semantic_pass runs.
     if !times.semantic_pass_called {
         times.semantic = Duration::ZERO;
     }
-    // The checked Workspace carries bone's own per-phase split (`phase_timings`)
-    // for backend-stats and the symbol/loc counts for the [COMPILE] stats line.
+    // The checked Workspace carries the symbol/loc counts for the [COMPILE]
+    // stats line.
     // `Ok(ws)` here means "lowered and checked", NOT "no type errors" -- body
     // errors live per-`BodyOwner` on the workspace, so every verdict-shaped
     // consumer must run `body_errors` on `ws`.
