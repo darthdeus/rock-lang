@@ -42,14 +42,9 @@ fn same_name_user_declarations_are_not_host_supplies() {
         );
     }
     let js = crate::common::emit_closure(&ws, "root").unwrap();
-    let out = crate::common::node().arg("-e")
-        .arg(format!("{js}\nfor (const input of ['user function', '']) {{ if (root(input) !== input) throw Error('user function changed'); }}"))
-        .output().expect("node");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    crate::common::run_node(&format!(
+        "{js}\nfor (const input of ['user function', '']) {{ if (root(input) !== input) throw Error('user function changed'); }}"
+    ));
 }
 
 #[test]
