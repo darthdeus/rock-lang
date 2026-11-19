@@ -607,6 +607,7 @@ pub(crate) fn fn_signature_hover(
         if !(s <= offset && offset < e) {
             continue;
         }
+        // Ends at the body brace, so body keywords are not swallowed.
         let body_open = src
             .get(s..e)
             .and_then(|seg| seg.find('{'))
@@ -1214,6 +1215,8 @@ pub fn references<'t>(
     let mut sites = ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)
         .and_then(|at| at.symbol(text_of))
         .map_or_else(Vec::new, |symbol| symbol.sites(ws, mid, text_of, fn_scope));
+    // Walks may meet one token twice (a declaration that is also a use);
+    // the first sighting wins.
     let mut seen = std::collections::HashSet::new();
     sites.retain(|s| seen.insert((s.span.file, s.span.offset_range())));
     sites
@@ -3233,6 +3236,7 @@ pub fn inline_local(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Inli
     let bi = ws.inference(mid)?.per_fn.get(&owner)?;
     let b = binding_at(body, offset)?;
 
+    // Params, `for` vars and destructuring lets have no single `Statement::Let`.
     let (let_idx, value) = body.statement_arena.iter().find_map(|(i, s)| match s {
         hir::Statement::Let { pattern, value, .. }
             if body.pattern_single_bind(*pattern) == Some(b) =>
@@ -3386,6 +3390,7 @@ fn uses_rerun_outside_let(body: &hir::Body, let_span: Span, uses: &[Span]) -> bo
     let mut regions: Vec<Span> = Vec::new();
     for (i, statement) in body.statement_arena.iter() {
         match statement {
+            // The iterable is evaluated once; only the body repeats.
             hir::Statement::For {
                 body: loop_body, ..
             } => {
@@ -3518,6 +3523,7 @@ pub fn generate_function(
         return None;
     };
 
+    // An existing function of this name makes the call a type error, not a missing function.
     if function_name_exists(ws, *name) {
         return None;
     }

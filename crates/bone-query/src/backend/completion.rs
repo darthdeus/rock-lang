@@ -117,6 +117,8 @@ fn lexical_gate(src: &str, offset: usize, space_triggered: bool) -> Option<Vec<C
         rock_tokenizer::LexRegion::StringText => return Some(Vec::new()),
         rock_tokenizer::LexRegion::Code => {}
     }
+    // A digit starts a numeric literal; don't match it against symbols
+    // (`0` -> `remap_to_01`).
     if ident_prefix(src, offset)
         .as_bytes()
         .first()
@@ -420,6 +422,8 @@ fn general_completions(
 
     let t_ct = bone_core::prelude::Instant::now();
     let mut ct_counts = CtCounts::default();
+    // Skipping call-through at the cap can hide a better local-seeded call;
+    // narrowing the prefix surfaces it.
     if cx.expr_position && !pattern_pos && sink.len() < MAX_COMPLETION_ITEMS {
         ct_counts = push_call_through(
             &g,
@@ -683,6 +687,8 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
     fn rank(&mut self, c: crate::query::CompletionEntry) -> Cand {
         let ws = self.g.ws;
         let (q, q_raw) = (self.q, self.q_raw);
+        // Structs share bucket 2 with functions: below them, the empty-prefix cap
+        // would truncate every type away.
         let kind = match c.kind() {
             _ if self.demote_tests && c.test_scoped => 4,
             SymCat::Local | SymCat::Param => 0,

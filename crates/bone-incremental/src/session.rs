@@ -619,6 +619,7 @@ impl Session {
         session.warm_names =
             bone_semantic::stdlib_base::warm_names(&session.warm, &session.warm_contributions);
 
+        // Keep each parsed module for lowering: `combined_unexpanded` would parse again.
         let mut user_modules: Vec<Ast> = Vec::new();
         for SessionFile {
             path,
@@ -770,6 +771,7 @@ impl Session {
     }
 
     pub fn update_file(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
+        // Callers read these counters as this update's work.
         self.ws
             .reinferred_body_count
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -914,6 +916,8 @@ impl Session {
             &self.aliases,
         )?;
         let mids = lower_and_infer(&mut ws, &lowered)?;
+        // The batch path's whole-program gate: a non-public export type closure must
+        // fail in a session too.
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
         ws.phase_timings.clear();
         self.set_cooked_contributions(user_contributions, warm_contributions);
@@ -1274,6 +1278,7 @@ impl Session {
         let registry = collect_registry(unexpanded.iter());
         reject_macro_name_collisions(&unexpanded)?;
         let (mut ws, user_mids) = self.build(unexpanded, &registry)?;
+        // Build variables are set once at session creation; nothing re-derives them.
         ws.comptime_inputs = self.ws.comptime_inputs.clone();
 
         // Commit -- past this point nothing fails, so `self.ws` never observes a
@@ -1578,6 +1583,7 @@ impl Session {
 
         let old_fn_span = self.ws.module(mid).functions[fid].span;
 
+        // Owned so the borrow ends before the fallback moves `ast`.
         let new_fn_span_opt = ast
             .items
             .iter()

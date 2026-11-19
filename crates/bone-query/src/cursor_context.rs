@@ -825,6 +825,7 @@ mod gaps {
 
     #[test]
     fn call_arg_survives_cursor_adjacent_to_a_number() {
+        // `1__rock_completion__` fails to tokenize; the replacement munge recovers.
         let (_, _, cx) = cx("fn feed(x: int) {}\nfn t() {\n  feed(1$0)\n}\n");
         assert_eq!(cx.call_arg(), Some(("feed".to_string(), 0, None)));
     }
@@ -846,6 +847,8 @@ mod gaps {
 
     #[test]
     fn call_arg_survives_a_following_lambda_arg() {
+        // The sentinel juxtaposed with the next arg fails to parse; the
+        // sentinel-plus-comma munge recovers.
         let (_, _, cx) = cx(
             "fn apply(n: int, f: (int) -> int) -> int { return f(n) }\nfn t() {\n  apply(3, $0(x: int) => x * x)\n}\n",
         );
@@ -860,6 +863,8 @@ mod gaps {
 
     #[test]
     fn call_arg_between_named_args() {
+        // Every sentinel munge breaks here, so the raw parse wins and the cursor
+        // sits between arg nodes.
         let (_, _, cx) =
             cx("fn draw(a: int, b: int, c: int) {}\nfn t() {\n  draw(1, b: 2,$0 c: 3)\n}\n");
         assert_eq!(cx.call_arg(), Some(("draw".to_string(), 2, None)));
@@ -883,12 +888,14 @@ mod gaps {
 
     #[test]
     fn qualified_base_in_a_fresh_match_arm() {
+        // Recovery drops an arm with no `=>`; only the arm-completing rung keeps it.
         let (_, _, cx) = cx("enum E { X, Y(int) }\nfn t(e: E) {\n  match e {\n    E::$0\n  }\n}\n");
         assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
 
     #[test]
     fn qualified_base_mid_variant_ident_in_record_literal() {
+        // Mid-ident, the sentinel glues into one identifier that parses cleanly.
         let (_, _, cx) = cx(
             "enum E { B { d: int, h: int } }\nfn t(h: int) {\n  let v = E::B$0andaging { d: 1, h }\n}\n",
         );

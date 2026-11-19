@@ -12,6 +12,7 @@ use lsp_types::{Command, CompletionItem, Position};
 use serde_json::json;
 
 pub const ACCEPT_COMMAND: &str = "rock.completionAccepted";
+/// An accept refers to one of the last few per-keystroke requests.
 const RING_CAP: usize = 8;
 
 struct Stashed {

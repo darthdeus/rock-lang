@@ -426,6 +426,7 @@ fn enumerate_arg_paths(
 ) {
     let Some(outs) = edges.get(&cur) else { return };
     for e in outs {
+        // Simple-path cycle guard: never re-enter a type already on this path.
         if on_path.contains(&e.target) {
             continue;
         }

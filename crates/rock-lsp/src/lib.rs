@@ -486,6 +486,8 @@ impl LspServer {
         Ok(())
     }
 
+    /// Tags are written here, not on first save: a restart replays every buffer
+    /// as an open.
     fn on_open(&mut self, note: &lsp_server::Notification, out: &mut Vec<Message>) -> Result<()> {
         let _span = tracing::debug_span!("lsp_did_open_notification").entered();
         let at = doc_uri(note)?;

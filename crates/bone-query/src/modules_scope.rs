@@ -112,6 +112,7 @@ fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
             .unwrap_or_default();
     names.extend(frag.named.keys().copied());
     for glob in &frag.globs {
+        // Unresolved/inaccessible glob imports are source errors, not query failures.
         if let Ok((package, path)) = resolve::resolve_path_to_module(ws, frag, glob) {
             names.extend(
                 resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default(),
@@ -329,6 +330,7 @@ pub(crate) fn module_members(
     let (package, path) = resolve::resolve_path_to_module(ws, frag, &prefix).ok()?;
     let viewers = [frag];
     let mut out = Vec::new();
+    // Broken re-exports are source diagnostics; still offer accessible child modules.
     for name in resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default() {
         if let Ok(members) = resolve::module_members(ws, &viewers, package, &path, name)
             && let [hit] = members.found[..]
