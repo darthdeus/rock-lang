@@ -1,27 +1,8 @@
-// Adversarial coverage for body-local hygiene rename.
-//
-// Pattern: macro takes `arg: expr`, body introduces a binding named `x`
-// via various constructs, body computes something combining the
-// param-substituted `arg` with body-local `x`. Caller passes its own
-// `x` as `arg`. If hygiene works the caller's `x` flows through and
-// body's `x` stays distinct.
+// Body-local hygiene: a macro taking `arg: expr` binds its own `x` through
+// each binding construct while the caller passes its own `x` as `arg`. The
+// body-local is renamed before param substitution, so the two stay distinct.
 
-// --- (1) let in body, plain --------------------------------------------------
-// Regression: the body-local is renamed before param substitution, so it
-// cannot capture an `expr` arg sharing its surface name.
-
-macro hyg_let(arg: expr) -> int {
-    let x = 7
-    arg + x
-}
-
-@test
-fn test_hyg_let() {
-    let x = 99
-    assert(hyg_let(x) == 106, "99 + 7 = 106")
-}
-
-// --- (2) let inside an if-then branch ---------------------------------------
+// --- let inside an if-then branch ---------------------------------------
 
 macro hyg_let_in_if(arg: expr, flag: expr) -> int {
     if flag {
@@ -40,7 +21,7 @@ fn test_hyg_let_in_if_branches() {
     assert(hyg_let_in_if(x, false) == 104, "else-branch: 99 + 5")
 }
 
-// --- (3) for-binding shadows the substituted name --------------------------
+// --- for-binding shadows the substituted name --------------------------
 
 macro hyg_for_iter(arg: expr) -> int {
     let acc = 0
@@ -57,7 +38,7 @@ fn test_hyg_for_iter_binding() {
     assert(hyg_for_iter(x) == 306, "3*100 + (1+2+3) = 306")
 }
 
-// --- (4) let inside for-body --------------------------------------------------
+// --- let inside for-body --------------------------------------------------
 
 macro hyg_let_in_for(arg: expr) -> int {
     let acc = 0
@@ -75,7 +56,7 @@ fn test_hyg_let_in_for_body() {
     assert(hyg_let_in_for(x) == 32, "(1+10)+(1+20) = 32")
 }
 
-// --- (5) tuple-destructuring let --------------------------------------------
+// --- tuple-destructuring let --------------------------------------------
 
 macro hyg_let_tuple(arg: expr) -> int {
     let (x, y) = (3, 4)
@@ -88,7 +69,7 @@ fn test_hyg_let_tuple_destructure() {
     assert(hyg_let_tuple(x) == 57, "50 + 3 + 4 = 57")
 }
 
-// --- (6) sibling lets in two block scopes — each gets its own fresh name ---
+// --- sibling lets in two block scopes -- each gets its own fresh name ---
 
 macro hyg_two_scopes(arg: expr) -> int {
     let a = {
@@ -108,7 +89,7 @@ fn test_hyg_two_block_scopes() {
     assert(hyg_two_scopes(x) == 218, "(100+7) + (100+11) = 218")
 }
 
-// --- (7) inner block shadows an outer body-local ----------------------------
+// --- inner block shadows an outer body-local ----------------------------
 
 macro hyg_inner_shadow(arg: expr) -> int {
     let x = 7
@@ -122,12 +103,12 @@ macro hyg_inner_shadow(arg: expr) -> int {
 @test
 fn test_hyg_inner_block_shadow() {
     let x = 1
-    // Outer x=7 → arg + x = 1 + 7 = 8. Inner x=50 → arg + x = 51.
+    // Outer x=7 -> arg + x = 1 + 7 = 8. Inner x=50 -> arg + x = 51.
     // Outer trailing: arg(=1) + outer-x(=7) + inner(=51) = 59.
     assert(hyg_inner_shadow(x) == 59, "1 + 7 + (1+50) = 59")
 }
 
-// --- (8) nested macro — inner body-local must not capture outer arg --------
+// --- nested macro -- inner body-local must not capture outer arg --------
 
 macro hyg_inner(arg: expr) -> int {
     let x = 100
@@ -144,7 +125,7 @@ fn test_hyg_nested_macros() {
     let x = 5000
     // Outer expands. Outer body: `let x = 1; hyg_inner(arg) + x`.
     // Outer rename: `let __o_x = 1; hyg_inner(arg) + __o_x`.
-    // Substitute arg→caller(5000): `let __o_x = 1; hyg_inner(5000) + __o_x`.
+    // Substitute arg->caller(5000): `let __o_x = 1; hyg_inner(5000) + __o_x`.
     // Inner expansion at recursive walk: body `let x = 100; arg + x`
     // becomes `let __i_x = 100; 5000 + __i_x` = 5100.
     // Final: 5100 + 1 = 5101.
@@ -155,7 +136,7 @@ fn hyg_nested_outer(v: int) -> int {
     hyg_outer(v)
 }
 
-// --- (9) match-arm pattern binding ------------------------------------------
+// --- match-arm pattern binding ------------------------------------------
 
 macro hyg_match(arg: expr, tag: expr) -> int {
     match tag {
@@ -177,7 +158,7 @@ fn test_hyg_match_arm_let() {
     assert(hyg_match(x, 9) == 111, "100 + 11")
 }
 
-// --- (10) lambda body with let shadowing -----------------------------------
+// --- lambda body with let shadowing -----------------------------------
 
 macro hyg_lambda(arg: expr) -> int {
     let f = (k: int) => {
@@ -194,11 +175,11 @@ fn test_hyg_lambda_body_let() {
     assert(hyg_lambda(x) == 109, "100 + 7 + 2 = 109")
 }
 
-// --- (11) lambda param shadows the macro param --------------------------
+// --- lambda param shadows the macro param --------------------------
 //
 // If a lambda inside the macro body declares a param whose name
 // matches the macro's own param, the lambda's binder must shadow the
-// substitution within its body — i.e. references to that name inside
+// substitution within its body -- i.e. references to that name inside
 // the lambda body resolve to the lambda param, NOT the caller's expr.
 
 macro hyg_lambda_param_shadow(arg: expr) -> int {
@@ -209,13 +190,13 @@ macro hyg_lambda_param_shadow(arg: expr) -> int {
 @test
 fn test_hyg_lambda_param_shadows_macro_arg() {
     let x = 100
-    // f(3) = 30 (lambda param `arg` = 3); + caller's x = 100 → 130.
+    // f(3) = 30 (lambda param `arg` = 3); + caller's x = 100 -> 130.
     // Bug shape: if substitution leaks past the shadow, lambda body
     // would compute 100 * 10 = 1000 instead.
     assert(hyg_lambda_param_shadow(x) == 130, "30 + 100 = 130")
 }
 
-// --- (12) lambda param must not capture a caller expr ------------------------
+// --- lambda param must not capture a caller expr ------------------------
 
 macro hyg_lambda_param_capture(arg: expr) -> int {
     let f = (x: int) => arg + x
@@ -228,7 +209,7 @@ fn test_hyg_lambda_param_does_not_capture_arg() {
     assert(hyg_lambda_param_capture(x) == 101, "100 + 1 = 101")
 }
 
-// --- (13) static must not capture a caller expr ------------------------------
+// --- static must not capture a caller expr ------------------------------
 
 macro hyg_static_capture(arg: expr) -> int {
     static x = 7
@@ -241,7 +222,7 @@ fn test_hyg_static_does_not_capture_arg() {
     assert(hyg_static_capture(x) == 107, "100 + 7 = 107")
 }
 
-// --- (14) while-let pattern binding must not capture a caller expr ----------
+// --- while-let pattern binding must not capture a caller expr ----------
 
 macro hyg_while_let(arg: expr) -> int {
     let acc = 0
@@ -259,7 +240,7 @@ fn test_hyg_while_let_binding() {
     assert(hyg_while_let(x) == 103, "100 + 3 = 103")
 }
 
-// --- (15) if-let chain: every clause's binder is fresh -----------------------
+// --- if-let chain: every clause's binder is fresh -----------------------
 
 macro hyg_if_let_chain(arg: expr) -> int {
     let a: int? = 3
@@ -279,7 +260,7 @@ fn test_hyg_if_let_chain_bindings() {
     assert(hyg_if_let_chain(y) == 1007, "1000 + 3 + 4 = 1007")
 }
 
-// --- (16) `?.let` binder must not capture a caller expr ----------------------
+// --- `?.let` binder must not capture a caller expr ----------------------
 
 fn hyg_some(v: int) -> int? {
     v

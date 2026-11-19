@@ -1,18 +1,11 @@
-// Macro basics: anaphoric bindings, path fragments and UFCS.
-
-// === Single-shape expansion (GREEN) ===
+// Macro basics: overloads, variadics, anaphoric `^name` and `_G.name`
+// access, path fragments and UFCS.
 
 macro double(x: expr) -> int {
     x + x
 }
 
-@test
-fn test_macro_simple_expansion() {
-    let result = double(5)
-    assert(result == 10, "double(5) should expand to 5 + 5 == 10")
-}
-
-// === Overload-dispatched arms (GREEN) ===
+// === Overload-dispatched arms ===
 
 macro greet() -> string {
     "hello"
@@ -32,7 +25,7 @@ fn test_macro_overload_arms() {
 // === Variadic + overload-recursion ===
 // Variadic macros expand recursively at compile time. Each `sum_of(...rest)`
 // call has its splat expanded and the
-// matching overload selected by post-splat arity (variadic for ≥1,
+// matching overload selected by post-splat arity (variadic for >=1,
 // base case for 0).
 
 macro sum_of() -> int {
@@ -69,12 +62,6 @@ fn test_anaphoric_picks_caller_local_over_def_global() {
 
 macro ana_double() -> int {
     ^x * 2
-}
-
-@test
-fn test_anaphoric_local() {
-    let x = 7
-    assert_eq(ana_double(), 14)
 }
 
 mod pkg {
@@ -124,4 +111,46 @@ fn ufcs_receiver_is_first_arg() {
     assert_eq(10.first_of(20, 30), 10)
     let b = Box { n: 6 }
     assert_eq(b.n.twice(), 12)
+}
+
+global GAF_GLOBAL: int = 200
+
+@test
+fn test_g_access_bypasses_local_shadow() {
+    let GAF_GLOBAL = 11
+    assert_eq(GAF_GLOBAL, 11)         // bare reads local
+    assert_eq(_G.GAF_GLOBAL, 200)     // _G. reads global
+}
+
+global GAF_COUNTER: int = 0
+
+@test
+fn test_g_access_write() {
+    _G.GAF_COUNTER = 5
+    assert_eq(_G.GAF_COUNTER, 5)
+    _G.GAF_COUNTER = 0
+}
+
+global GAF_SHADOWED: int = 50
+
+@test
+fn test_g_access_write_bypasses_shadow() {
+    let GAF_SHADOWED = 999
+    _G.GAF_SHADOWED = 51
+    assert_eq(GAF_SHADOWED, 999)
+    assert_eq(_G.GAF_SHADOWED, 51)
+    _G.GAF_SHADOWED = 50
+}
+
+// A bare global read in another fn's body emits as `_G.<name>`, so a
+// caller-scope Lua local of the same name cannot intercept it.
+global GH_GLOBAL: int = 100
+
+fn gh_read_global() -> int { return GH_GLOBAL }
+
+@test
+fn test_global_read_through_local_shadow() {
+    let GH_GLOBAL = 7
+    assert_eq(GH_GLOBAL, 7)
+    assert_eq(gh_read_global(), 100)
 }

@@ -4,7 +4,7 @@
 
 macro key(name: expr) { name }
 
-// --- (1) fn-typed param named like the macro --------------------------------
+// --- fn-typed param named like the macro --------------------------------
 
 fn apply_key(x: int, key: fn(int) -> int) -> int {
     return key(x)
@@ -16,7 +16,7 @@ fn test_param_shadows_macro() {
     assert(apply_key(5, v => v + 1) == 6, "param must shadow macro")
 }
 
-// --- (2) generic fn-typed param (the stdlib min_by shape) -------------------
+// --- generic fn-typed param (the stdlib min_by shape) -------------------
 
 fn apply_key_gen<T>(x: T, key: fn(T) -> float) -> float {
     return key(x)
@@ -28,15 +28,7 @@ fn test_generic_param_shadows_macro() {
     assert(apply_key_gen(2, v => 2.5) == 2.5, "generic param must shadow macro")
 }
 
-// --- (3) local holding a fn value -------------------------------------------
-
-@test
-fn test_local_shadows_macro() {
-    let key = (v: int) => v * 2
-    assert(key(4) == 8, "local must shadow macro")
-}
-
-// --- (4) lambda param -------------------------------------------------------
+// --- lambda param -------------------------------------------------------
 
 @test
 fn test_lambda_param_shadows_macro() {
@@ -44,7 +36,7 @@ fn test_lambda_param_shadows_macro() {
     assert(call(v => v + 1) == 11, "lambda param must shadow macro")
 }
 
-// --- (5) nested fn named like the macro -------------------------------------
+// --- nested fn named like the macro -------------------------------------
 
 @test
 fn test_nested_fn_shadows_macro() {
@@ -52,7 +44,7 @@ fn test_nested_fn_shadows_macro() {
     assert(key(1) == 4, "nested fn must shadow macro")
 }
 
-// --- (6) for-loop binding ---------------------------------------------------
+// --- for-loop binding ---------------------------------------------------
 
 @test
 fn test_for_binding_shadows_macro() {
@@ -64,7 +56,7 @@ fn test_for_binding_shadows_macro() {
     assert(acc == 23, "for binding must shadow macro")
 }
 
-// --- (7) shadow ends where the scope ends -----------------------------------
+// --- shadow ends where the scope ends -----------------------------------
 
 @test
 fn test_macro_expands_outside_shadow_scope() {
@@ -75,7 +67,7 @@ fn test_macro_expands_outside_shadow_scope() {
     assert(key(7) == 7, "outside the block the macro is back")
 }
 
-// --- (8) call BEFORE the let still expands (let binds from decl point) ------
+// --- call BEFORE the let still expands (let binds from decl point) ------
 
 @test
 fn test_call_before_let_still_expands() {
@@ -83,13 +75,6 @@ fn test_call_before_let_still_expands() {
     let key = (v: int) => v * 2
     assert(a == 7, "call before the let is the macro")
     assert(key(3) == 6, "call after the let is the local")
-}
-
-// --- (9) unshadowed call still expands --------------------------------------
-
-@test
-fn test_macro_still_expands() {
-    assert(key(41) + 1 == 42, "macro must still expand unshadowed")
 }
 
 fn key_from_optional(callback: (fn(int) -> int)?) -> int {

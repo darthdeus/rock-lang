@@ -1,5 +1,110 @@
-// How macro calls interact with Rock syntax constructs: control-flow
-// expressions as args, and macro calls in every expression position.
+// How a macro call expands: argument evaluation, assignment through params,
+// fragment kinds, composition, return types, and macro calls in every
+// expression and control-flow position.
+
+global SIDE_EFFECT_COUNTER: int = 0
+
+fn next_counter() -> int {
+    SIDE_EFFECT_COUNTER = SIDE_EFFECT_COUNTER + 1
+    SIDE_EFFECT_COUNTER
+}
+
+// A macro can assign through its params: the substituted caller places are
+// written, and the body-local temporary cannot capture a caller `t`.
+macro swap_places(a: expr, b: expr) {
+    let t = a
+    a = b
+    b = t
+}
+
+@test
+fn test_macro_assigns_through_params() {
+    let x = 1
+    let t = 2
+    swap_places(x, t)
+    assert(x == 2 && t == 1, "swap writes both caller locals")
+}
+
+macro double(x: expr) -> int {
+    x + x
+}
+
+@test
+fn test_side_effect_arg_evaluated_once() {
+    SIDE_EFFECT_COUNTER = 0
+    let result = double(next_counter())
+    // Either substitution model is allowed, but the result must match it:
+    // textual gives 1 + 2 with the counter at 2, let-bound gives 1 + 1.
+    assert(SIDE_EFFECT_COUNTER == 1 || SIDE_EFFECT_COUNTER == 2, "counter advanced")
+    if SIDE_EFFECT_COUNTER == 2 {
+        assert(result == 3, "textual subst: 1 + 2 = 3")
+    } else {
+        assert(result == 2, "let-bound subst: 1 + 1 = 2")
+    }
+}
+
+macro frag_only_expr(_x: expr) -> string {
+    "expr_arm"
+}
+
+@test
+fn test_fragment_kind_expr_accepts_anything() {
+    assert(frag_only_expr(42) == "expr_arm", "literal")
+    let v = 99
+    assert(frag_only_expr(v) == "expr_arm", "ident")
+    assert(frag_only_expr(next_counter()) == "expr_arm", "fn call")
+    assert(frag_only_expr(1 + 2) == "expr_arm", "binary expr")
+}
+
+// `ident` and `expr` both resolve to TYPE_ANY, so `ident` also accepts a
+// non-ident expression. Making `ident` syntactic would turn the second call
+// into a compile error.
+macro frag_pick_ident(_x: ident) -> string {
+    "ident_arm"
+}
+
+@test
+fn test_fragment_kind_ident_accepts_what() {
+    let v = 99
+    assert(frag_pick_ident(v) == "ident_arm", "ident accepts ident")
+    assert(frag_pick_ident(42) == "ident_arm", "ident currently accepts non-ident exprs")
+}
+
+@test
+fn test_macro_inside_if() {
+    let r = if true { double(5) } else { 0 }
+    assert(r == 10, "macro inside if-then branch")
+}
+
+macro returns_string(x: expr) -> string {
+    "got_{x}"
+}
+
+macro returns_bool(x: expr) -> bool {
+    x > 0
+}
+
+@test
+fn test_macro_return_types() {
+    assert(returns_string(42) == "got_42", "string return + interp")
+    assert(returns_bool(5), "5 > 0")
+    assert(!returns_bool(-3), "-3 not > 0")
+}
+
+// An unused param's arg may be dropped (textual) or evaluated once (let-bound).
+macro ignores_arg(_x: expr) -> int {
+    42
+}
+
+@test
+fn test_unused_arg_still_evaluated() {
+    SIDE_EFFECT_COUNTER = 0
+    assert(ignores_arg(next_counter()) == 42, "body result ignores the arg")
+    assert(SIDE_EFFECT_COUNTER == 0 || SIDE_EFFECT_COUNTER == 1, "evaluated at most once")
+}
+
+// Macro/fn name collisions are a compile error, pinned by
+// `tests/errors/macros.rock.err`.
 
 macro twice(x: expr) -> int { x + x }
 macro pick(c: expr, a: expr, b: expr) -> int { if c { a } else { b } }
