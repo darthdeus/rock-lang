@@ -46,9 +46,10 @@ impl<'a> Builder<'a> {
         let tuple_width = flat.tuple_width();
         let mut native_slot_fields = vec![None; tuple_width];
         let mut offset = 0;
-        for slot in &flat.slots {
-            if self.scx.native_flat_enums || matches!(slot, FlatSlot::Leaves(_)) {
-                for (relative, field) in native_slot_fields[offset..offset + slot.width()]
+        for shapes in &flat.positions {
+            let width = flat_position_width(shapes);
+            if self.scx.native_flat_enums || !shapes.is_empty() {
+                for (relative, field) in native_slot_fields[offset..offset + width]
                     .iter_mut()
                     .enumerate()
                 {
@@ -56,7 +57,7 @@ impl<'a> Builder<'a> {
                     *field = Some(crate::names::indexed("", "", index));
                 }
             }
-            offset += slot.width();
+            offset += width;
         }
         let cells = (0..flat.leaf_count())
             .map(|index| {

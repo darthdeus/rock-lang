@@ -758,12 +758,11 @@ fn wire_value_shape(
     ty: &crate::monoty::MonoTy,
     use_context: RepUse,
     guarantees: RepGuarantees,
-    tuple_element: bool,
 ) -> Option<ValueShape> {
     if let Some(shape) = crate::lower::mono_nobox_value_shape(ws, ty) {
         return Some(shape);
     }
-    if guarantees.nobox || tuple_element {
+    if guarantees.nobox || use_context == RepUse::TupleElement {
         return None;
     }
     let shape = crate::lower::mono_value_shape(ws, ty)?;
@@ -777,15 +776,10 @@ fn wire_value_shape(
 }
 
 fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
-    let (payload, _) = ty.peel_nullable();
-    let crate::monoty::MonoTy::App {
-        ctor: crate::monoty::MonoCtor::Nominal(name),
-        ..
-    } = payload
-    else {
-        return false;
-    };
-    crate::lower::is_nobox_nominal(ws, *name)
+    ty.peel_nullable()
+        .0
+        .nominal()
+        .is_some_and(|name| crate::lower::is_nobox_nominal(ws, name))
 }
 
 impl RepArena {
@@ -868,19 +862,9 @@ impl RepArena {
     }
 
     fn intern(&self, target: FnBackend, use_context: RepUse, layout: RepLayout) -> RepId {
-        self.intern_with_storage(target, use_context, layout, None)
-    }
-
-    fn intern_with_storage(
-        &self,
-        target: FnBackend,
-        use_context: RepUse,
-        layout: RepLayout,
-        storage: Option<ValueStorage>,
-    ) -> RepId {
         // Only `intern_value_shape_plan` mints `Leaves` plans, so boxability is vacuous
         // here.
-        self.intern_with_facts(target, use_context, layout, storage, false, false, true)
+        self.intern_with_facts(target, use_context, layout, None, false, false, true)
     }
 
     fn intern_with_facts(
@@ -1331,7 +1315,6 @@ impl RepArena {
             span: facts.span,
             message,
         };
-        let tuple_element_shape = matches!(use_context, RepUse::TupleElement);
         if let (MonoTy::Tuple(parts), nullable) = ty.peel_nullable() {
             let slots = parts
                 .iter()
@@ -1340,7 +1323,8 @@ impl RepArena {
             let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
             let return_slot = matches!(use_context, RepUse::Return);
             if (return_slot && !nullable)
-                || (splats && (return_slot || tuple_element_shape || facts.tuple_spelled))
+                || (splats
+                    && (return_slot || use_context == RepUse::TupleElement || facts.tuple_spelled))
             {
                 return Ok(self.intern(
                     target,
@@ -1363,7 +1347,7 @@ impl RepArena {
                 ctor: MonoCtor::Nominal(_),
                 ..
             } => {
-                let shape = wire_value_shape(ws, ty, use_context, guarantees, tuple_element_shape);
+                let shape = wire_value_shape(ws, ty, use_context, guarantees);
                 if let Some(shape) = shape {
                     return Ok(self.intern_value_shape_plan(ws, target, use_context, shape));
                 }
@@ -1373,18 +1357,15 @@ impl RepArena {
                         ty.render()
                     )));
                 }
-                Ok(self.intern(target, use_context, RepLayout::Opaque))
             }
-            MonoTy::App { .. } => {
-                if guarantees.nobox && !guarantees.allow_opaque {
-                    return Err(reject(format!(
-                        "{} cannot cross a nobox boundary",
-                        ty.render()
-                    )));
-                }
-                Ok(self.intern(target, use_context, RepLayout::Opaque))
+            MonoTy::App { .. } if guarantees.nobox && !guarantees.allow_opaque => {
+                return Err(reject(format!(
+                    "{} cannot cross a nobox boundary",
+                    ty.render()
+                )));
             }
-            MonoTy::Int
+            MonoTy::App { .. }
+            | MonoTy::Int
             | MonoTy::Uint
             | MonoTy::Float
             | MonoTy::Bool
@@ -1392,8 +1373,9 @@ impl RepArena {
             | MonoTy::Any
             | MonoTy::Unit
             | MonoTy::Never
-            | MonoTy::Function { .. } => Ok(self.intern(target, use_context, RepLayout::Opaque)),
+            | MonoTy::Function { .. } => {}
         }
+        Ok(self.intern(target, use_context, RepLayout::Opaque))
     }
 
     /// Boxes the widest eligible ordinary values until the signature fits; ties pick
@@ -1405,13 +1387,9 @@ impl RepArena {
         result: &mut Option<RepId>,
     ) {
         let lanes = |id: &RepId| self.get(*id).lanes(self);
-        let total = |params: &[RepId], result: &Option<RepId>| {
-            params.iter().map(lanes).sum::<usize>() + result.as_ref().map_or(0, lanes)
-        };
-        if total(params, result) <= SIGNATURE_SCALAR_LANE_BUDGET {
-            return;
-        }
-        loop {
+        while params.iter().map(lanes).sum::<usize>() + result.as_ref().map_or(0, lanes)
+            > SIGNATURE_SCALAR_LANE_BUDGET
+        {
             let widest = params
                 .iter()
                 .enumerate()
@@ -1429,9 +1407,6 @@ impl RepArena {
             match use_context {
                 RepUse::Return => *result = Some(boxed),
                 _ => params[index] = boxed,
-            }
-            if total(params, result) <= SIGNATURE_SCALAR_LANE_BUDGET {
-                return;
             }
         }
     }
