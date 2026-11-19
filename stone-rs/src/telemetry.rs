@@ -120,6 +120,8 @@ struct QueuedTelemetryEvent {
 
 enum AppendCommand {
     Record(QueuedTelemetryEvent),
+    // Only tests flush: it is their barrier for observing queued rows.
+    #[cfg_attr(not(test), allow(dead_code))]
     Flush(Sender<bool>),
     Finish,
 }
@@ -1576,6 +1578,7 @@ impl AppendWorker {
         let _ = self.handle.join();
     }
 
+    #[cfg(test)]
     fn flush(&self) -> io::Result<()> {
         let (done_tx, done_rx) = mpsc::channel();
         self.tx.send(AppendCommand::Flush(done_tx)).map_err(|_| {
@@ -1705,6 +1708,7 @@ impl TelemetryClient {
         self.upload_worker.finish(mode);
     }
 
+    #[cfg(test)]
     fn flush(&self) -> io::Result<()> {
         self.append_worker.flush()
     }
@@ -1838,17 +1842,6 @@ pub extern "C" fn stone_telemetry_close() {
     if let Some(client) = client {
         client.finish(StopMode::Drain);
     }
-}
-
-#[no_mangle]
-pub extern "C" fn stone_telemetry_flush() -> bool {
-    let Ok(active) = TELEMETRY.lock() else {
-        return false;
-    };
-    let Some(client) = active.as_ref() else {
-        return false;
-    };
-    client.flush().is_ok()
 }
 
 /// Whether `root` holds a withdrawal that only an explicit opt-in lifts. An
