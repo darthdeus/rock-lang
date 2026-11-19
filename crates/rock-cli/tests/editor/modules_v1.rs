@@ -53,39 +53,26 @@ pub use super::shapes::inner::depth;"#,
 }
 
 #[test]
-fn v1_alias_import_definition() {
+fn imports_reexports_and_child_modules_across_package_files() {
     let project = namespace_project();
-    let reply = project.cli("definition", Some((4, 16)), &[]);
-    assert_eq!(reply["definitions"][0]["range"]["start"]["line"], 2);
-    assert_eq!(reply["definitions"][0]["range"]["start"]["character"], 7);
-}
-
-#[test]
-fn v1_glob_import_definition() {
-    let project = namespace_project();
-    let reply = project.cli("definition", Some((5, 16)), &[]);
-    assert_eq!(reply["definitions"][0]["range"]["start"]["line"], 6);
-    assert_eq!(reply["definitions"][0]["range"]["start"]["character"], 7);
-}
-
-#[test]
-fn v1_reexport_definition() {
-    let project = namespace_project();
-    let reply = project.cli("definition", Some((7, 28)), &[]);
-    assert_eq!(reply["definitions"][0]["range"]["start"]["line"], 4);
-    assert_eq!(reply["definitions"][0]["range"]["start"]["character"], 7);
-}
-
-#[test]
-fn v1_callable_references() {
-    let project = namespace_project();
+    let definitions = [
+        ("alias import", (4, 16), (2, 7)),
+        ("glob import", (5, 16), (6, 7)),
+        ("re-export", (7, 28), (4, 7)),
+    ];
+    for (case, at, expected) in definitions {
+        assert_eq!(
+            project.definition("definition", at),
+            Some(expected),
+            "{case}"
+        );
+    }
     let reply = project.cli("references", Some((6, 33)), &[]);
-    reference_starts(&reply["references"], &[(4, 7), (6, 32), (7, 27)]);
-}
-
-#[test]
-fn v1_child_module_completion() {
-    let project = namespace_project();
+    reference_starts(
+        "callable",
+        &reply["references"],
+        &[(4, 7), (6, 32), (7, 27)],
+    );
     let reply = project.cli("completion", Some((8, 32)), &[]);
-    completion_labels(&reply, &["depth"]);
+    completion_labels("child module", &reply, &["depth"]);
 }

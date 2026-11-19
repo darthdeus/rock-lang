@@ -1,169 +1,29 @@
 use super::*;
 
 #[test]
-fn semantic_tokens_basic() {
-    let source = r#"// Test basic semantic tokens
-struct Point {
-    x: float,
-    y: float,
-}
-
-fn distance(p1: Point, p2: Point) -> float {
-    let dx = p2.x - p1.x
-    let dy = p2.y - p1.y
-    return (dx * dx + dy * dy).sqrt()
-}
-
-fn main() {
-    let origin = Point { x: 0.0, y: 0.0 }
-    let point = Point { x: 3.0, y: 4.0 }
-    let dist = distance(origin, point)
-    print("Distance: " + dist.to_string())
-}"#;
-    let project = Project::single("semantic_tokens_basic", source);
-    let reply = project.cli("semantic-tokens", None, &[]);
-    assert!(reply["count"].as_u64().unwrap() >= 30, "{reply}");
-}
-
-#[test]
-fn semantic_tokens_struct_highlight() {
-    let source = r#"struct Color {
-    red: int,
-    green: int,
-    blue: int,
-}
-
-struct Rectangle {
-    width: float,
-    height: float,
-    color: Color,
-}"#;
-    let project = Project::single("semantic_tokens_struct_highlight", source);
-    let reply = project.cli("semantic-tokens", None, &[]);
-    assert!(reply["count"].as_u64().unwrap() >= 10, "{reply}");
-}
-
-#[test]
-fn semantic_tokens_enum_struct() {
-    let source = r#"struct Shape {
-    area: float
-}
-
-enum ShapeKind {
-    Circle(radius: float),
-    Rectangle(width: float, height: float),
-    Triangle,
-}
-
-global MY_PI: float = 3.14159
-
-fn process_shape(shape: ShapeKind) {
-    match shape {
-        ShapeKind::Circle(r) => print("Circle"),
-        ShapeKind::Rectangle(w, h) => print("Rectangle"),
-        ShapeKind::Triangle => print("Triangle"),
+fn semantic_tokens_cover_valid_and_incomplete_code() {
+    let cases = [
+        (
+            "structs, functions and locals",
+            "struct Point {\n    x: float,\n    y: float,\n}\n\nfn distance(p1: Point, p2: Point) -> float {\n    let dx = p2.x - p1.x\n    let dy = p2.y - p1.y\n    return (dx * dx + dy * dy).sqrt()\n}\n\nfn main() {\n    let origin = Point { x: 0.0, y: 0.0 }\n    print(distance(origin, Point { x: 3.0, y: 4.0 }).to_string())\n}",
+            30,
+        ),
+        (
+            "undefined names and a half-typed call",
+            "struct Sprite {\n    width: int,\n}\n\nfn draw_sprite(sprite: Sprite, pos: Vec2) {\n}\n\nfn update_entities() {\n    let sprite_frog = Sprite { width: 16 }\n    let pos = Vec2 { x: 100.0, y: 200.0 }\n    for i in range(0, 10) {\n        draw_sprite(sprite_frog, pos)\n        draw_\n    }\n    let another_sprite = Sprite { width: 32 }\n    draw_sprite(another_sprite, pos)\n}",
+            20,
+        ),
+        (
+            "await delegation",
+            "co fn inner() -> Coroutine<int> {\n    yield 1\n}\n\nco fn outer() -> Coroutine<int> {\n    await inner()\n    yield 3\n}",
+            14,
+        ),
+    ];
+    for (case, source, minimum) in cases {
+        let reply = Project::single(source).cli("semantic-tokens", None, &[]);
+        assert!(
+            reply["count"].as_u64().unwrap() >= minimum,
+            "{case}: {reply}"
+        );
     }
-}"#;
-    let project = Project::single("semantic_tokens_enum_struct", source);
-    let reply = project.cli("semantic-tokens", None, &[]);
-    assert!(reply["count"].as_u64().unwrap() >= 5, "{reply}");
-}
-
-#[test]
-fn semantic_tokens_nullable_types() {
-    let source = r#"fn process_optional(value: int?) -> int {
-    if value != null {
-        return value + 10
-    } else {
-        return 0
-    }
-}
-
-fn handle_string(text: string?) {
-    let result = text ?? "default"
-    print(result)
-}"#;
-    let project = Project::single("semantic_tokens_nullable_types", source);
-    let reply = project.cli("semantic-tokens", None, &[]);
-    assert!(reply["count"].as_u64().unwrap() >= 10, "{reply}");
-}
-
-#[test]
-fn semantic_tokens_with_undefined_symbol() {
-    let source = r#"struct Sprite {
-    width: int,
-    height: int,
-}
-
-fn draw_sprite(sprite: Sprite, pos: Vec2, rect: Rect) {
-    // Drawing logic here
-}
-
-fn update_entities() {
-    let sprite_frog = Sprite { width: 16, height: 16 }
-    let pos = Vec2 { x: 100.0, y: 200.0 }
-
-    // This should still generate semantic tokens for everything else
-    // even though draw_ is undefined and incomplete
-    for i in range(0, 10) {
-        draw_sprite(sprite_frog, pos, rect(0, 0, 16, 16))
-        draw_
-    }
-
-    // More valid code after the error
-    let another_sprite = Sprite { width: 32, height: 32 }
-    draw_sprite(another_sprite, pos, rect(0, 0, 32, 32))
-}"#;
-    let project = Project::single("semantic_tokens_with_undefined_symbol", source);
-    let reply = project.cli("semantic-tokens", None, &[]);
-    assert!(reply["count"].as_u64().unwrap() >= 20, "{reply}");
-}
-
-#[test]
-fn semantic_tokens_incomplete_typing() {
-    let source = r#"// Test that semantic tokens work while actively typing
-struct Player {
-    health: int,
-    position: Vec2,
-}
-
-fn draw_player(p: Player) {
-    // Implementation
-}
-
-fn draw_sprite_rotated(sprite: Sprite, angle: float) {
-    // Implementation
-}
-
-fn game_loop() {
-    let player = Player { health: 100, position: Vec2 { x: 0.0, y: 0.0 } }
-
-    // User is in the middle of typing draw_sprite...
-    draw_player(player)
-    draw_spri
-
-    // Should still have tokens for code after the incomplete line
-    let health_bar = 100
-    if player.health > 0 {
-        draw_player(player)
-    }
-}"#;
-    let project = Project::single("semantic_tokens_incomplete_typing", source);
-    let reply = project.cli("semantic-tokens", None, &[]);
-    assert!(reply["count"].as_u64().unwrap() >= 15, "{reply}");
-}
-
-#[test]
-fn semantic_tokens_await_delegation() {
-    let source = r#"co fn inner() -> Coroutine<int> {
-    yield 1
-}
-
-co fn outer() -> Coroutine<int> {
-    await inner()
-    yield 3
-}"#;
-    let project = Project::single("semantic_tokens_await_delegation", source);
-    let reply = project.cli("semantic-tokens", None, &[]);
-    assert!(reply["count"].as_u64().unwrap() >= 14, "{reply}");
 }

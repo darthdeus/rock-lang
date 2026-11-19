@@ -11,9 +11,8 @@ struct Project {
 }
 
 impl Project {
-    fn single(name: &str, source: &str) -> Self {
-        let file = format!("{}.rock", name.replace([' ', '/'], "_"));
-        Self::new(&file, &[(&file, source)])
+    fn single(source: &str) -> Self {
+        Self::new("main.rock", &[("main.rock", source)])
     }
 
     fn package(primary: &str, files: &[(&str, &str)]) -> Self {
@@ -37,21 +36,29 @@ impl Project {
             Some((line, column)) => format!("{file}:{}:{}", line + 1, column + 1),
             None => file.to_string(),
         };
+        self.lsp(&[&[method, &target], args].concat())
+    }
+
+    fn lsp(&self, args: &[&str]) -> Value {
         let mut command = crate::support::rock(&crate::support::repo_root());
-        let output = command
-            .args(["lsp", method, &target])
-            .args(args)
-            .output()
-            .unwrap();
+        let output = command.arg("lsp").args(args).output().unwrap();
         let output = crate::support::success(output);
         serde_json::from_str(&output).unwrap_or_else(|error| panic!("{error}: {output}"))
     }
 
-    fn renamed(&self, reply: &Value, file: Option<&str>) -> String {
-        let file = file.map_or_else(
-            || self.file.clone(),
-            |name| self.dir.path().join(name).canonicalize().unwrap(),
-        );
+    fn hover(&self, at: (u32, u32)) -> String {
+        let reply = self.cli("hover", Some(at), &[]);
+        string(&reply["hover"]["contents"]).trim().to_owned()
+    }
+
+    fn definition(&self, method: &str, at: (u32, u32)) -> Option<(u64, u64)> {
+        let reply = self.cli(method, Some(at), &[]);
+        let start = &array(&reply["definitions"]).first()?["range"]["start"];
+        Some((start["line"].as_u64()?, start["character"].as_u64()?))
+    }
+
+    fn renamed(&self, reply: &Value, name: &str) -> String {
+        let file = self.dir.path().join(name).canonicalize().unwrap();
         let uri = Uri::from_file_path(file.to_str().unwrap()).unwrap();
         let changes = object(&reply["changes"]);
         let edits = changes
@@ -67,15 +74,17 @@ struct Document {
     project: Project,
     text: String,
     version: i64,
+    diagnostics: Value,
 }
 
 impl Document {
-    fn open(project: Project, source: &str) -> Self {
+    fn single(source: &str) -> Self {
         let mut document = Self {
             server: rock_lsp::LspServer::new(),
-            project,
+            project: Project::single(source),
             text: source.to_owned(),
             version: 1,
+            diagnostics: Value::Null,
         };
         document.notify("textDocument/didOpen", json!({
             "textDocument": {"uri": document.project.uri, "version": 1, "languageId": "rock", "text": source}
@@ -84,12 +93,21 @@ impl Document {
     }
 
     fn notify(&mut self, method: &str, params: Value) {
+        let mut messages = Vec::new();
         self.server
             .handle(
                 Notification::new(method.into(), params).into(),
-                &mut Vec::new(),
+                &mut messages,
             )
             .unwrap();
+        for message in messages {
+            if let Message::Notification(note) = message
+                && note.method == "textDocument/publishDiagnostics"
+                && note.params["uri"] == self.project.uri.as_str()
+            {
+                self.diagnostics = note.params["diagnostics"].clone();
+            }
+        }
     }
 
     fn request(&mut self, method: &str, fields: Value) -> Value {
@@ -107,6 +125,33 @@ impl Document {
             .expect("server response");
         assert!(reply.error.is_none(), "{method}: {:?}", reply.error);
         reply.result.expect("server result")
+    }
+
+    fn at(&mut self, method: &str, line: u32, character: u32) -> Value {
+        let position = json!({"line": line, "character": character});
+        let context = json!({"includeDeclaration": true});
+        self.request(method, json!({"position": position, "context": context}))
+    }
+
+    fn hover_text(&mut self, line: u32, character: u32) -> String {
+        let reply = self.at("textDocument/hover", line, character);
+        string(&reply["contents"]["value"]).to_owned()
+    }
+
+    fn tokens(&mut self) -> Value {
+        self.request("textDocument/semanticTokens/full", json!({}))["data"].take()
+    }
+
+    #[track_caller]
+    fn assert_tokens_match_fresh(&mut self) {
+        let tokens = self.tokens();
+        assert!(!array(&tokens).is_empty(), "no tokens for {:?}", self.text);
+        let fresh = Document::single(&self.text).tokens();
+        assert_eq!(
+            tokens, fresh,
+            "edited and fresh tokens differ for {:?}",
+            self.text
+        );
     }
 
     fn change(&mut self) {
@@ -239,64 +284,27 @@ fn string(value: &Value) -> &str {
         .unwrap_or_else(|| panic!("expected a string, got {value}"))
 }
 
-fn matches_fields(actual: &Value, expected: &Value) -> bool {
-    if let Some(text) = expected["text"].as_str() {
-        return actual.as_str().is_some_and(|value| {
-            let value = value.trim();
-            expected["strip_prefix"]
-                .as_str()
-                .and_then(|prefix| value.strip_prefix(prefix))
-                .unwrap_or(value)
-                .trim()
-                == text
-        });
-    }
-    match expected {
-        Value::Object(fields) => fields.iter().all(|(key, value)| {
-            actual
-                .get(key)
-                .is_some_and(|actual| matches_fields(actual, value))
-        }),
-        _ => actual == expected,
-    }
-}
-
 #[track_caller]
 fn contains_items(actual: &Value, expected: &[Value]) {
     for item in expected {
+        let matches = |value: &Value| object(item).iter().all(|(key, field)| &value[key] == field);
         assert!(
-            array(actual)
-                .iter()
-                .any(|value| matches_fields(value, item)),
+            array(actual).iter().any(matches),
             "missing {item} in {actual}"
         );
     }
 }
 
 #[track_caller]
-fn contains_text(actual: &str, expected: &[&str]) {
-    for fragment in expected {
-        assert!(
-            actual.contains(fragment),
-            "missing {fragment:?} in {actual:?}"
-        );
-    }
-}
-
-#[track_caller]
-fn assert_no_rename_changes(reply: &Value) {
-    let changes = &reply["changes"];
+fn contains_text(actual: &str, fragment: &str) {
     assert!(
-        changes.is_null()
-            || object(changes)
-                .values()
-                .all(|edits| { edits.is_null() || array(edits).is_empty() }),
-        "{reply}"
+        actual.contains(fragment),
+        "missing {fragment:?} in {actual:?}"
     );
 }
 
 #[track_caller]
-fn reference_starts(actual: &Value, expected: &[(u32, u32)]) {
+fn reference_starts(case: &str, actual: &Value, expected: &[(u32, u32)]) {
     let mut actual: Vec<_> = array(actual)
         .iter()
         .map(|value| {
@@ -308,44 +316,33 @@ fn reference_starts(actual: &Value, expected: &[(u32, u32)]) {
     actual.sort_unstable();
     let mut expected = expected.to_vec();
     expected.sort_unstable();
-    assert_eq!(actual, expected);
+    assert_eq!(actual, expected, "{case}");
 }
 
 #[track_caller]
-fn completion_labels(reply: &Value, expected: &[&str]) {
+fn completion_labels(case: &str, reply: &Value, expected: &[&str]) {
     let labels: Vec<_> = array(&reply["completions"])
         .iter()
-        .map(|v| string(&v["label"]))
+        .map(|item| string(&item["label"]))
         .collect();
     for fragment in expected {
         assert!(
             labels.iter().any(|label| label.contains(fragment)),
-            "missing {fragment:?} in {labels:?}"
+            "{case}: missing {fragment:?} in {labels:?}"
         );
     }
 }
 
-mod completion_named_args;
-mod completion_struct_and_methods;
+mod completion;
+mod diagnostics;
 mod document_symbols;
 mod edit_sequence;
-mod edit_sequence_hover;
-mod edit_sequence_references;
-mod edit_sequence_stress;
-mod edit_sequence_typing;
-mod front_end_shapes;
-mod goto_type_definition;
 mod inlay_hints;
-mod inline_local_variable;
-mod method_syntax;
 mod modules_v1;
-mod multi_file;
-mod partial_compilation;
-mod references;
+mod navigation;
 mod rename;
-mod rename_hazards;
-mod rename_overloaded;
 mod semantic_tokens;
+mod server_requests;
 mod signature_help;
 mod workspace_symbols;
 

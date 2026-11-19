@@ -1,51 +1,6 @@
 use super::*;
 
-#[test]
-fn tokens_survive_field_addition() {
-    let step_1 = r#"struct Player {
-    health: int,
-}
-
-fn main() {
-    let p = Player { health: 100 }
-    print(p.health.to_string())
-}"#;
-    let source = step_1;
-    let mut doc = Document::open(
-        Project::single("tokens_survive_field_addition", source),
-        source,
-    );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 25, "{reply}");
-    doc.replace(
-        &step_1
-            .replace(
-                "    health: int,\n",
-                r#"    health: int,
-    name: string,
-"#,
-            )
-            .replace(
-                "    let p = Player { health: 100 }\n",
-                "    let p = Player { health: 100, name: \"Hero\" }\n",
-            )
-            .replace(
-                "    print(p.health.to_string())\n",
-                r#"    print(p.health.to_string())
-    print(p.name)
-"#,
-            ),
-    );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 25, "{reply}");
-    doc.replace(step_1);
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 25, "{reply}");
-}
-
-#[test]
-fn tokens_recover_after_syntax_error() {
-    let step_1 = r#"struct Enemy {
+const ENEMY: &str = r#"struct Enemy {
     health: int,
     damage: int,
 }
@@ -58,151 +13,102 @@ fn main() {
     let e = Enemy { health: 50, damage: 10 }
     let d = attack(e)
 }"#;
-    let source = step_1;
-    let mut doc = Document::open(
-        Project::single("tokens_recover_after_syntax_error", source),
-        source,
+
+#[test]
+fn tokens_after_whole_text_changes_match_a_fresh_open() {
+    let with_field = ENEMY
+        .replace(
+            "    damage: int,\n",
+            "    damage: int,\n    name: string,\n",
+        )
+        .replace("damage: 10 }", "damage: 10, name: \"Orc\" }")
+        + "\n\nfn name_of(e: Enemy) -> string {\n    return e.name\n}";
+    let without_attack = ENEMY.replace(
+        "fn attack(e: Enemy) -> int {\n    return e.damage\n}\n\n",
+        "",
     );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 40, "{reply}");
-    doc.replace(&step_1.replace("    let d = attack(e)", "    let d = attack("));
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 5, "{reply}");
-    doc.replace(step_1);
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 40, "{reply}");
+    let mut doc = Document::single(ENEMY);
+    doc.assert_tokens_match_fresh();
+    for step in [
+        ENEMY.replace("    let d = attack(e)", "    let d = attack("),
+        ENEMY.to_owned(),
+        with_field,
+        without_attack,
+        ENEMY.to_owned(),
+    ] {
+        doc.replace(&step);
+        doc.assert_tokens_match_fresh();
+    }
 }
 
 #[test]
-fn tokens_survive_function_lifecycle() {
+fn tokens_after_typing_and_deleting_match_a_fresh_open() {
     let source = r#"fn greet(name: string) -> string {
     return "Hello " + name
 }
 
 fn main() {
-    print(greet("world"))
+    let msg = greet("world")
+    print(msg)
 }"#;
-    let mut doc = Document::open(
-        Project::single("tokens_survive_function_lifecycle", source),
-        source,
+    let mut doc = Document::single(source);
+    doc.type_at(
+        4,
+        0,
+        "fn farewell(name: string) -> string {\n    return \"Bye \" + name\n}\n",
     );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 25, "{reply}");
-    let step_2 = r#"fn greet(name: string) -> string {
-    return "Hello " + name
-}
-
-fn farewell(name: string) -> string {
-    return "Goodbye " + name
-}
-
-fn main() {
-    print(greet("world"))
-    print(farewell("world"))
-}"#;
-    doc.replace(step_2);
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 40, "{reply}");
-    doc.replace(
-        &step_2
-            .replace(
-                r#"fn greet(name: string) -> string {
-    return "Hello " + name
-}
-
-"#,
-                "",
-            )
-            .replace("    print(greet(\"world\"))\n", ""),
+    doc.assert_tokens_match_fresh();
+    doc.delete_at(7, 1, 36);
+    doc.assert_tokens_match_fresh();
+    doc.delete_at(6, 1, 32);
+    doc.assert_tokens_match_fresh();
+    doc.delete_at(5, 0, 1);
+    doc.assert_tokens_match_fresh();
+    doc.type_at(
+        7,
+        4,
+        "    match msg.len() {\n        0 => print(\"empty\"),\n        _ => print(msg),\n    }",
     );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 25, "{reply}");
+    doc.assert_tokens_match_fresh();
 }
 
 #[test]
-fn tokens_survive_rapid_edits() {
-    let source = r#"fn add(a: int, b: int) -> int { return a + b }
-fn main() { let x = add(1, 2) }"#;
-    let mut doc = Document::open(
-        Project::single("tokens_survive_rapid_edits", source),
-        source,
-    );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 25, "{reply}");
-    doc.replace(
-        r#"fn add(a: int, b: int) -> int { return a + b }
-fn sub(a: int, b: int) -> int { return a - b }
-fn main() { let x = add(1, 2) + sub(3, 1) }"#,
-    );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 25, "{reply}");
-    doc.replace(
-        r#"fn add(a: int, b: int) -> int { return a + b }
-fn sub(a: int, b: int) -> int { return a - b }
-fn mul(a: int, b: int) -> int { return a * b }
-fn main() { let x = mul(add(1, 2), sub(3, 1)) }"#,
-    );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 25, "{reply}");
-    doc.replace(
-        r#"fn mul(a: int, b: int) -> int { return a * b }
-fn main() { let x = mul(2, 3) }"#,
-    );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 25, "{reply}");
-    doc.replace(
-        r#"fn mul(a: int, b: int) -> int { return a * b }
-fn div(a: int, b: int) -> int { return a / b }
-fn main() { let x = div(mul(6, 2), 3) }"#,
-    );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 25, "{reply}");
+fn hover_after_typing_a_for_loop() {
+    let source = r#"struct AggressorEntry {
+    dmg: int
+}
+
+struct Mob {
+    aggressors: [AggressorEntry] = [],
+}
+
+fn f(m: Mob) {
+
+}"#;
+    let mut doc = Document::single(source);
+    contains_text(&doc.hover_text(8, 5), "Mob");
+    doc.type_at(9, 0, "for a in m.aggressors {\n    print(a.dmg)\n}");
+    contains_text(&doc.hover_text(9, 4), "AggressorEntry");
+    contains_text(&doc.hover_text(9, 14), "[AggressorEntry]");
 }
 
 #[test]
-fn tokens_after_type_change() {
-    let step_1 = r#"struct FixVec2 {
-    x: float,
-    y: float,
+fn references_shift_after_typing_and_deleting_a_line_in_another_fn() {
+    let source = r#"fn alpha() -> int {
+    return 1
 }
 
-fn distance(a: FixVec2, b: FixVec2) -> float {
-    let dx = b.x - a.x
-    let dy = b.y - a.y
-    return (dx * dx + dy * dy).sqrt()
+fn beta() -> int {
+    let count = 2
+    return count + count
 }"#;
-    let source = step_1;
-    let mut doc = Document::open(Project::single("tokens_after_type_change", source), source);
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 40, "{reply}");
-    doc.replace(
-        r#"struct FixVec2 {
-    x: float,
-    y: float,
-}
-
-struct FixVec3 {
-    x: float,
-    y: float,
-    z: float,
-}
-
-fn distance(a: FixVec2, b: FixVec2) -> float {
-    let dx = b.x - a.x
-    let dy = b.y - a.y
-    return (dx * dx + dy * dy).sqrt()
-}
-
-fn distance3d(a: FixVec3, b: FixVec3) -> float {
-    let dx = b.x - a.x
-    let dy = b.y - a.y
-    let dz = b.z - a.z
-    return (dx * dx + dy * dy + dz * dz).sqrt()
-}"#,
-    );
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 75, "{reply}");
-    doc.replace(step_1);
-    let reply = doc.request("textDocument/semanticTokens/full", json!({}));
-    assert!(array(&reply["data"]).len() >= 40, "{reply}");
+    let mut doc = Document::single(source);
+    let references = doc.at("textDocument/references", 5, 8);
+    reference_starts("count", &references, &[(5, 8), (6, 11), (6, 19)]);
+    doc.type_at(1, 12, "\n    let pad = 0");
+    let references = doc.at("textDocument/references", 6, 8);
+    reference_starts("count", &references, &[(6, 8), (7, 11), (7, 19)]);
+    doc.delete_at(2, 15, 16);
+    let references = doc.at("textDocument/references", 5, 8);
+    reference_starts("count", &references, &[(5, 8), (6, 11), (6, 19)]);
 }
