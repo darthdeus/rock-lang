@@ -283,10 +283,6 @@ impl SkullEmitCache {
         &self.lua_view
     }
 
-    pub fn shader_view(&self) -> &crate::shader_artifact::ShaderArtifactView {
-        &self.shader_view
-    }
-
     pub fn global_layout(&self) -> Option<&str> {
         self.global_layout.as_deref()
     }
@@ -786,7 +782,7 @@ impl SkullEmitCache {
         let scx = &cache.scx;
         let cg = &cache.cg;
 
-        let _t_aff = Instant::now();
+        let t_aff = Instant::now();
         let mut changed: FxHashSet<FuncRef> = reinferred
             .iter()
             .filter_map(|(mid, owner)| match owner {
@@ -921,7 +917,7 @@ impl SkullEmitCache {
                 }
             }
         }
-        cache.repair_stats.affected_selection_ns = _t_aff.elapsed().as_nanos() as u64;
+        cache.repair_stats.affected_selection_ns = t_aff.elapsed().as_nanos() as u64;
 
         let t_relow = Instant::now();
         for body in &affected {

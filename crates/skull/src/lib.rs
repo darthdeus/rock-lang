@@ -313,10 +313,6 @@ pub fn module_tests_with_ids(
     Ok(out)
 }
 
-pub(crate) fn global_init_fn_name(global: &str) -> String {
-    format!("__skull_ginit_{}", global)
-}
-
 pub(crate) fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String> {
     use bone_semantic::hir::AnnoValue as A;
     Some(match v {

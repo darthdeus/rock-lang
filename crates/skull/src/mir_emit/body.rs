@@ -601,19 +601,24 @@ pub(super) fn emit_spec_chunk(
         },
         ..skull_transform::body_chain::ChainOptions::PLAIN
     };
-    let (deps, prepared_times, prepared_inline) = prepare_instance_body_with_attribution(
-        ws,
+    let mut prepared_times = PhaseTimes::default();
+    let mut prepared_inline = InlineWork::default();
+    let inliner = skull_transform::body_chain::Inliner {
         scx,
-        fref,
-        name,
+        self_ref: fref,
+        cache: inline_cache,
+        plans: &concrete.plans,
+    };
+    let deps = skull_transform::body_chain::prepare_body(
+        ws,
+        inliner,
         &mut mf,
-        inline_cache,
-        &concrete.plans,
+        name,
         &opts,
+        &mut ChainStats::new(&mut prepared_times, &mut prepared_inline),
     )
-    .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    .map_err(|e| CompilerError::new_with_label(f.name_span, e.error.message))?;
     times.add(&prepared_times);
-    let mut prepared_inline = prepared_inline;
     prepared_inline.specialized_splices = prepared_inline.accepted_splices;
     prepared_inline.census.ordinary_keys.push(body.clone());
     attribution.inline.add(prepared_inline);
@@ -681,49 +686,4 @@ pub(super) fn order_specialized_callees<'c>(
     }
     errs.sort_by(|(a, _), (b, _)| a.cmp(b));
     (errs.into_iter().map(|(_, e)| e).collect(), moved)
-}
-
-/// The transform sequence an instance body is emitted through.
-pub fn prepare_instance_body_with_plans(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    fref: FuncRef,
-    name: &str,
-    mf: &mut skull_mir::mir::MirFunc,
-    cache: &mut skull_transform::InlineCache,
-    concrete_plans: &skull_mir::concrete::ConcretePlans,
-) -> Result<FxHashSet<FuncRef>, CompilerError> {
-    let opts = skull_transform::body_chain::ChainOptions::PLAIN;
-    prepare_instance_body_with_attribution(ws, scx, fref, name, mf, cache, concrete_plans, &opts)
-        .map(|(spliced, _, _)| spliced)
-}
-
-fn prepare_instance_body_with_attribution(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    fref: FuncRef,
-    name: &str,
-    mf: &mut skull_mir::mir::MirFunc,
-    cache: &mut skull_transform::InlineCache,
-    concrete_plans: &skull_mir::concrete::ConcretePlans,
-    opts: &skull_transform::body_chain::ChainOptions<'_>,
-) -> Result<(FxHashSet<FuncRef>, PhaseTimes, InlineWork), CompilerError> {
-    let mut times = PhaseTimes::default();
-    let mut work = InlineWork::default();
-    let inliner = skull_transform::body_chain::Inliner {
-        scx,
-        self_ref: fref,
-        cache,
-        plans: concrete_plans,
-    };
-    let spliced = skull_transform::body_chain::prepare_body(
-        ws,
-        inliner,
-        mf,
-        name,
-        opts,
-        &mut ChainStats::new(&mut times, &mut work),
-    )
-    .map_err(|e| e.error)?;
-    Ok((spliced, times, work))
 }

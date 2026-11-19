@@ -160,7 +160,3 @@ pub(super) fn check_unit_spec_bindings(
         Err(r) => Err(r.into_error(span, &format!("cannot emit `{name}`: "))),
     }
 }
-
-pub(super) fn unit_errors(units: &[UnitOut]) -> Vec<CompilerError> {
-    units.iter().filter_map(|u| u.hard_error.clone()).collect()
-}

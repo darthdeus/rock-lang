@@ -699,7 +699,8 @@ impl UnitFacts {
         out: &mut String,
         pending_inits: &mut Vec<(Ustr, Ustr, String)>,
     ) {
-        self.rejections.extend(unit_errors(&results));
+        self.rejections
+            .extend(results.iter().filter_map(|u| u.hard_error.clone()));
         for u in results {
             out.push_str(&u.lua);
             if let Some(facts) = u.refs {
