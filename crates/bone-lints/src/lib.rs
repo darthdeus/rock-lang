@@ -8,7 +8,6 @@ use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
 use rock_core::errors::CompilerErrorLevel;
 use std::collections::BTreeSet;
-use std::hash::Hash;
 
 mod call_lints;
 pub use call_lints::DEPRECATED;
@@ -22,7 +21,6 @@ fn unused_vars_in_body_with_metadata(
     let mut read = read_bindings(body);
     read.extend(metadata_used);
     candidate_bindings(body, variants)
-        .into_iter()
         .filter(|idx| !read.contains(idx))
         .map(|idx| &body.binding_arena[idx])
         .filter(|b| !b.name.as_str().starts_with('_'))
@@ -69,17 +67,16 @@ fn decorator_metadata_used_bindings(
 
 /// Let bindings and the enclosing function's parameters, excluding enum-variant
 /// pattern names, lambda parameters, and parameters of opaque bodies.
-fn candidate_bindings(body: &Body, variants: &FxHashSet<Ustr>) -> Vec<Idx<BindingInfo>> {
-    let mut out: Vec<Idx<BindingInfo>> = body
-        .binding_arena
+fn candidate_bindings<'a>(
+    body: &'a Body,
+    variants: &'a FxHashSet<Ustr>,
+) -> impl Iterator<Item = Idx<BindingInfo>> + 'a {
+    let params = body.root.map(|_| body.param_bindings);
+    body.binding_arena
         .iter()
         .filter(|(_, b)| b.kind == BindingKind::Let && !variants.contains(&b.name))
         .map(|(idx, _)| idx)
-        .collect();
-    if body.root.is_some() {
-        out.extend(body.param_bindings);
-    }
-    out
+        .chain(params.into_iter().flatten())
 }
 
 /// Enum names that lower to `Let` bindings in bare pattern arms.
@@ -316,7 +313,17 @@ struct FindingRow {
 
 impl FindingRow {
     fn refilter(&mut self, suppressions: &FxHashSet<(usize, &'static str)>) {
-        self.visible = filter_suppressed_findings_with_entries(self.raw.clone(), suppressions);
+        if suppressions.is_empty() {
+            self.visible.clone_from(&self.raw);
+            return;
+        }
+        self.visible.clear();
+        self.visible.extend(
+            self.raw
+                .iter()
+                .filter(|finding| !is_suppressed(finding, suppressions))
+                .cloned(),
+        );
     }
 
     fn retain(&mut self, keep: impl Fn(&Finding) -> bool) {
@@ -348,14 +355,6 @@ impl CachedFileFindings {
         }
     }
 
-    fn index_bodies(&mut self, module: &Module) {
-        for &owner in module.bodies.keys() {
-            self.flat.entry(owner).or_default();
-            self.inference.entry(owner).or_default();
-        }
-        self.refilter();
-    }
-
     fn refilter(&mut self) {
         for row in self.flat.values_mut().chain(self.inference.values_mut()) {
             row.refilter(&self.suppressions);
@@ -380,8 +379,9 @@ impl CachedFileFindings {
         } else {
             &mut self.flat
         };
-        let visible = filter_suppressed_findings_with_entries(raw.clone(), &self.suppressions);
-        rows.insert(owner, FindingRow { raw, visible });
+        let row = rows.entry(owner).or_default();
+        row.raw = raw;
+        row.refilter(&self.suppressions);
     }
 }
 
@@ -474,8 +474,26 @@ impl LintDependencyIndex {
             .or_default();
     }
 
+    fn remove_edges(&mut self, body: BodyKey) -> FxHashSet<FunctionKey> {
+        use std::collections::hash_map::Entry;
+        let old = self.body_edges.remove(&body).unwrap_or_default();
+        for &target in &old {
+            if let Entry::Occupied(mut callers) = self.reverse_callers.entry(target) {
+                callers.get_mut().remove(&body);
+                if callers.get().is_empty() {
+                    callers.remove();
+                }
+            }
+        }
+        old
+    }
+
     fn install_edges(&mut self, body: BodyKey, edges: FxHashSet<FunctionKey>) {
-        install_edges(&mut self.body_edges, &mut self.reverse_callers, body, edges);
+        self.remove_edges(body);
+        for &target in &edges {
+            self.reverse_callers.entry(target).or_default().insert(body);
+        }
+        self.body_edges.insert(body, edges);
     }
 
     /// Shift indexed declaration spans with body edits so later invalidation
@@ -643,11 +661,7 @@ impl LintDependencyIndex {
         }
 
         for function in old_functions {
-            remove_edges(
-                &mut self.body_edges,
-                &mut self.reverse_callers,
-                (function.0, BodyOwner::Function(function.1)),
-            );
+            self.remove_edges((function.0, BodyOwner::Function(function.1)));
             self.declarations.remove(&function);
             self.reachable.remove(&function);
         }
@@ -709,7 +723,7 @@ impl LintDependencyIndex {
             .filter(|(mid, owner)| mids.contains(mid) && !matches!(owner, BodyOwner::Function(_)))
             .collect();
         for key in stale {
-            let old = remove_edges(&mut self.body_edges, &mut self.reverse_callers, key);
+            let old = self.remove_edges(key);
             for target in old {
                 seeds.insert((target.0, BodyOwner::Function(target.1)));
             }
@@ -836,55 +850,6 @@ fn declaration_fingerprint(ws: &Workspace, module: &Module) -> String {
     rows.join("\n")
 }
 
-/// Action globals declared by production modules, with their file and name span.
-fn action_declarations_in<'a>(
-    modules: impl Iterator<Item = &'a Module> + 'a,
-    policy: Option<&'a ActionLayerPolicy>,
-) -> impl Iterator<Item = (Ustr, Ustr, Span)> + 'a {
-    modules
-        .filter(move |module| is_production_action_module(module.file, policy))
-        .flat_map(move |module| {
-            module
-                .globals
-                .values()
-                .filter(move |global| is_action_name(global.name, policy))
-                .map(move |global| (global.name, module.file, global.name_span))
-        })
-}
-
-fn action_edges_in_body(
-    module: &Module,
-    owner: BodyOwner,
-    body: &Body,
-    declared: &FxHashSet<Ustr>,
-    policy: Option<&ActionLayerPolicy>,
-) -> FxHashSet<Ustr> {
-    let production_read = match owner {
-        BodyOwner::Function(fid) => {
-            let function = &module.functions[fid];
-            !has_annotation(function, "wire")
-                && !policy.is_some_and(|policy| {
-                    policy
-                        .registration_functions
-                        .iter()
-                        .any(|name| name == declared_name(function.name.as_str()))
-                })
-        }
-        BodyOwner::Global(gid) => !is_action_name(module.globals[gid].name, policy),
-        _ => false,
-    };
-    if !production_read {
-        return FxHashSet::default();
-    }
-    body.expr_arena
-        .values()
-        .filter_map(|expr| match expr {
-            Expr::Global(name) if declared.contains(name) => Some(*name),
-            _ => None,
-        })
-        .collect()
-}
-
 /// Incremental lint derivation cache. Reporting policy stays in the CLI/LSP
 /// adapters.
 #[derive(Clone, Debug, Default)]
@@ -966,22 +931,11 @@ impl IncrementalLintCache {
         if let Some(row) = self.global.get_mut(&file) {
             row.visible.clear();
         }
-        self.last_by_file.remove(&file);
-        if let Some(rank) = self.report_rank.get(&file) {
-            self.active_output_ranks.remove(rank);
-        }
+        self.set_output(file, Vec::new());
     }
 
     pub fn findings_for_file(&self, file: Ustr) -> Vec<Finding> {
         self.last_by_file.get(&file).cloned().unwrap_or_default()
-    }
-
-    fn filter_cached_suppressions(&self, file: Ustr, findings: Vec<Finding>) -> Vec<Finding> {
-        let cached = self
-            .files
-            .get(&file)
-            .expect("lint derivation requires a populated suppression cache");
-        filter_suppressed_findings_with_entries(findings, &cached.suppressions)
     }
 
     fn remove_global_findings(&mut self, lint: &str, locations: &FxHashSet<(Ustr, usize)>) {
@@ -996,10 +950,12 @@ impl IncrementalLintCache {
     }
 
     fn push_global(&mut self, file: Ustr, raw: Finding) {
-        let kept = self.filter_cached_suppressions(file, vec![raw.clone()]);
+        let cached = &self.files[&file];
         let row = self.global.entry(file).or_default();
+        if !is_suppressed(&raw, &cached.suppressions) {
+            row.visible.push(raw.clone());
+        }
         row.raw.push(raw);
-        row.visible.extend(kept);
     }
 
     fn replace_unused_findings(
@@ -1265,13 +1221,6 @@ impl IncrementalLintCache {
                 .or_default()
                 .install_body(owner, raw, inference);
         }
-        for file in &change.changed_files {
-            if let Some(source) = sources.get(file).copied() {
-                if let Some(cached) = self.files.get_mut(file) {
-                    cached.suppression_fingerprint = suppression_fingerprint(source);
-                }
-            }
-        }
         for edit in &change.edits {
             self.dependency.shift_declarations(edit);
             let Some(cached) = self.files.get_mut(&edit.file) else {
@@ -1363,7 +1312,7 @@ impl IncrementalLintCache {
             for finding in local_findings(ws, module, &self.variants, source, sel) {
                 cached.add_raw_local(module, finding);
             }
-            cached.index_bodies(module);
+            cached.refilter();
         }
         self.files.insert(file, cached);
     }
@@ -1435,18 +1384,15 @@ impl IncrementalLintCache {
             }
             if !report.is_empty() {
                 findings.extend(report.iter().cloned());
-                self.last_by_file.insert(file, report);
-                self.active_output_ranks.insert(self.report_rank[&file]);
+                self.set_output(file, report);
             }
         }
         for module in ws.user_modules(warm) {
-            if !sources.contains_key(&module.file) {
-                continue;
+            if let Some(cached) = self.files.get_mut(&module.file)
+                && sources.contains_key(&module.file)
+            {
+                cached.refilter();
             }
-            self.files
-                .entry(module.file)
-                .or_default()
-                .index_bodies(module);
         }
         for (&file, row) in &mut self.global {
             if let Some(cached) = self.files.get(&file) {
@@ -1457,45 +1403,40 @@ impl IncrementalLintCache {
         findings
     }
 
+    fn set_output(&mut self, file: Ustr, findings: Vec<Finding>) {
+        let rank = self.report_rank.get(&file);
+        if findings.is_empty() {
+            self.last_by_file.remove(&file);
+            if let Some(rank) = rank {
+                self.active_output_ranks.remove(rank);
+            }
+        } else {
+            self.last_by_file.insert(file, findings);
+            if let Some(&rank) = rank {
+                self.active_output_ranks.insert(rank);
+            }
+        }
+    }
+
     fn refresh_output_files(&mut self, files: &FxHashSet<Ustr>, sources: &FxHashMap<Ustr, &str>) {
         for &file in files {
-            let rank = self.report_rank.get(&file).copied();
-            if !sources.contains_key(&file) {
-                self.last_by_file.remove(&file);
-                if let Some(rank) = rank {
-                    self.active_output_ranks.remove(&rank);
-                }
-                continue;
+            let mut findings = Vec::new();
+            if sources.contains_key(&file)
+                && let Some(cached) = self.files.get(&file)
+            {
+                // Non-cacheable selections rebuild, so these rows are the report.
+                findings.extend(
+                    cached
+                        .flat
+                        .values()
+                        .chain(cached.inference.values())
+                        .chain(std::iter::once(&cached.other))
+                        .chain(self.global.get(&file))
+                        .flat_map(|row| row.visible.iter().cloned()),
+                );
+                findings.sort_by(cmp_by_offset);
             }
-            let Some(cached) = self.files.get(&file) else {
-                self.last_by_file.remove(&file);
-                if let Some(rank) = rank {
-                    self.active_output_ranks.remove(&rank);
-                }
-                continue;
-            };
-            // Non-cacheable selections rebuild, so these rows are the report.
-            let mut findings: Vec<Finding> = cached
-                .flat
-                .values()
-                .chain(cached.inference.values())
-                .chain(std::iter::once(&cached.other))
-                .chain(self.global.get(&file))
-                .flat_map(|row| &row.visible)
-                .cloned()
-                .collect();
-            findings.sort_by(cmp_by_offset);
-            if findings.is_empty() {
-                self.last_by_file.remove(&file);
-                if let Some(rank) = rank {
-                    self.active_output_ranks.remove(&rank);
-                }
-            } else {
-                self.last_by_file.insert(file, findings);
-                if let Some(rank) = rank {
-                    self.active_output_ranks.insert(rank);
-                }
-            }
+            self.set_output(file, findings);
         }
     }
 
@@ -1509,44 +1450,6 @@ impl IncrementalLintCache {
             out.extend(self.last_by_file.get(file).cloned().unwrap_or_default());
         }
         out
-    }
-}
-
-fn remove_edges<T: Eq + Hash>(
-    rows: &mut FxHashMap<BodyKey, FxHashSet<T>>,
-    callers: &mut FxHashMap<T, FxHashSet<BodyKey>>,
-    body: BodyKey,
-) -> FxHashSet<T> {
-    let old = rows.remove(&body).unwrap_or_default();
-    for target in &old {
-        remove_from_set(callers, target, &body);
-    }
-    old
-}
-
-fn install_edges<T: Copy + Eq + Hash>(
-    rows: &mut FxHashMap<BodyKey, FxHashSet<T>>,
-    callers: &mut FxHashMap<T, FxHashSet<BodyKey>>,
-    body: BodyKey,
-    edges: FxHashSet<T>,
-) {
-    remove_edges(rows, callers, body);
-    for target in &edges {
-        callers.entry(*target).or_default().insert(body);
-    }
-    rows.insert(body, edges);
-}
-
-fn remove_from_set<K: Eq + Hash, V: Eq + Hash>(
-    map: &mut FxHashMap<K, FxHashSet<V>>,
-    key: &K,
-    value: &V,
-) {
-    if let Some(set) = map.get_mut(key) {
-        set.remove(value);
-        if set.is_empty() {
-            map.remove(key);
-        }
     }
 }
 
@@ -1677,14 +1580,12 @@ fn missing_policy_advice(module: &Module, sel: &LintOptions) -> Option<Finding> 
     ]
     .into_iter()
     .find(|lint| sel.enabled(lint))
-    .map(|lint| Finding {
-        lint,
-        error: CompilerError::new_with_label(
+    .map(|lint| {
+        Finding::advice(
+            lint,
             Span::new(module.file, (0, 0), (0, 0), (0, 0)),
             "no action-layer policy configured".to_owned(),
         )
-        .with_level(CompilerErrorLevel::Advice),
-        line: 0,
     })
 }
 
@@ -1744,25 +1645,12 @@ fn local_findings(
         .iter()
         .flat_map(|(owner, body)| flat_body_findings(module, *owner, body, variants, sel))
         .collect();
-    if sel.enabled(RAW_INPUT_MIGRATION)
+    let migration = sel.enabled(RAW_INPUT_MIGRATION);
+    let classification = sel.enabled(RAW_INPUT_CLASSIFICATION);
+    if (migration || classification)
         && let Some(policy) = sel.action_policy.as_deref()
     {
-        out.extend(raw_input_sites_in_module(module, policy).into_iter().map(|site| {
-            Finding::advice(
-                RAW_INPUT_MIGRATION,
-                site.span,
-                format!(
-                    "raw input query `{}` needs an action, editor/tool, text-input, or deliberate-remainder classification",
-                    site.name
-                ),
-            )
-        }));
-    }
-    if sel.enabled(RAW_INPUT_CLASSIFICATION)
-        && let Some(policy) = sel.action_policy.as_deref()
-    {
-        let found = unclassified_raw_input_sites_in_module(module, src, policy);
-        out.extend(found);
+        raw_input_findings(module, src, policy, migration, classification, &mut out);
     }
     out.extend(
         module
@@ -1835,7 +1723,6 @@ fn report_findings(src: &str, raw: Vec<Finding>, advice: Option<&Finding>) -> Ve
 }
 
 /// Apply `report` to each file's local and workspace findings in module order.
-/// Reuse `edges` when the caller has already derived them.
 fn lint_modules<'ws, T: Send>(
     ws: &'ws Workspace,
     warm: &'ws FxHashSet<ModuleId>,
@@ -1875,11 +1762,14 @@ fn lint_modules<'ws, T: Send>(
 }
 
 /// Drop findings with `// rock: allow(<lint>)` on their line or the line above.
-pub fn filter_suppressed_findings(findings: Vec<Finding>, source: &str) -> Vec<Finding> {
-    if findings.is_empty() {
-        return findings;
+pub fn filter_suppressed_findings(mut findings: Vec<Finding>, source: &str) -> Vec<Finding> {
+    if !findings.is_empty() {
+        let allow = suppression_entries(source);
+        if !allow.is_empty() {
+            findings.retain(|finding| !is_suppressed(finding, &allow));
+        }
     }
-    filter_suppressed_findings_with_entries(findings, &suppression_entries(source))
+    findings
 }
 
 /// Parse standalone or trailing allow comments, including optional whitespace
@@ -1903,20 +1793,9 @@ fn suppression_entries(source: &str) -> FxHashSet<(usize, &'static str)> {
     allow
 }
 
-fn filter_suppressed_findings_with_entries(
-    findings: Vec<Finding>,
-    allow: &FxHashSet<(usize, &'static str)>,
-) -> Vec<Finding> {
-    if allow.is_empty() {
-        return findings;
-    }
-    findings
-        .into_iter()
-        .filter(|f| {
-            !allow.contains(&(f.line, f.lint))
-                && !(f.line > 0 && allow.contains(&(f.line - 1, f.lint)))
-        })
-        .collect()
+fn is_suppressed(finding: &Finding, allow: &FxHashSet<(usize, &'static str)>) -> bool {
+    allow.contains(&(finding.line, finding.lint))
+        || (finding.line > 0 && allow.contains(&(finding.line - 1, finding.lint)))
 }
 
 fn find_comment_start(s: &str) -> Option<usize> {
@@ -2285,24 +2164,21 @@ fn head_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> (TyId, TypeExpr) {
     ws.resolve_ty(Some(bi), ty).expect("body supplied")
 }
 
-/// A direct call to an input observation primitive in a user module.
-#[derive(Clone, Debug)]
-pub(crate) struct RawInputSite {
-    pub name: Ustr,
-    pub span: Span,
-}
-
 pub const RAW_INPUT_MIGRATION: &str = "action_layer_raw_input";
 
 /// Require each raw-input site to carry an accepted non-action class marker.
 pub const RAW_INPUT_CLASSIFICATION: &str = "action_layer_raw_input_classification";
 
-/// Action calls and input-event APIs are not raw observation sites.
-pub(crate) fn raw_input_sites_in_module(
+fn raw_input_findings(
     module: &Module,
+    source: &str,
     policy: &ActionLayerPolicy,
-) -> Vec<RawInputSite> {
-    let mut out = Vec::new();
+    migration: bool,
+    classification: bool,
+    out: &mut Vec<Finding>,
+) {
+    let mut sites = Vec::new();
+    let mut sites_per_line = FxHashMap::default();
     for body in module.bodies.values() {
         for (idx, expr) in body.expr_arena.iter() {
             let Expr::Call {
@@ -2312,67 +2188,59 @@ pub(crate) fn raw_input_sites_in_module(
             else {
                 continue;
             };
-            if policy
+            if !policy
                 .raw_input_names
                 .iter()
                 .any(|item| item == declared_name(name.as_str()))
             {
-                out.push(RawInputSite {
-                    name: *name,
-                    span: body.expr_spans[idx],
-                });
+                continue;
+            }
+            let span = body.expr_spans[idx];
+            if migration {
+                out.push(Finding::advice(
+                    RAW_INPUT_MIGRATION,
+                    span,
+                    format!(
+                        "raw input query `{name}` needs an action, editor/tool, text-input, or deliberate-remainder classification"
+                    ),
+                ));
+            }
+            if classification {
+                sites.push((*name, span));
+                *sites_per_line.entry(span.line_range().0).or_insert(0usize) += 1;
             }
         }
     }
-    out
+
+    for (name, span) in sites {
+        let line = span.line_range().0;
+        let count = sites_per_line[&line];
+        let message = if count != 1 {
+            format!(
+                "raw input classification requires exactly one query per source line (found {count})"
+            )
+        } else if !has_raw_input_class(source, line, policy) {
+            format!(
+                "raw input query `{name}` needs an adjacent `// action-layer:` marker: {}",
+                policy.raw_input_classes.join(", ")
+            )
+        } else {
+            continue;
+        };
+        out.push(Finding::advice(RAW_INPUT_CLASSIFICATION, span, message));
+    }
 }
 
-fn raw_input_class_marker<'a>(
-    source: &'a str,
-    line: usize,
-    policy: &ActionLayerPolicy,
-) -> Option<&'a str> {
-    let marker_line = source.lines().nth(line.saturating_sub(1))?.trim();
-    let class = marker_line.strip_prefix("// action-layer:")?.trim();
-    if class.is_empty() || class.split_whitespace().count() != 1 {
-        return None;
-    }
-    policy
-        .raw_input_classes
-        .iter()
-        .any(|item| item == class)
-        .then_some(class)
-}
-
-fn unclassified_raw_input_sites_in_module(
-    module: &Module,
-    source: &str,
-    policy: &ActionLayerPolicy,
-) -> Vec<Finding> {
-    let sites = raw_input_sites_in_module(module, policy);
-    let mut sites_per_line: FxHashMap<usize, usize> = FxHashMap::default();
-    for site in &sites {
-        *sites_per_line.entry(site.span.line_range().0).or_default() += 1;
-    }
-    sites
-        .into_iter()
-        .filter_map(|site| {
-            let line = site.span.line_range().0;
-            let count = sites_per_line[&line];
-            let message = if count != 1 {
-                format!("raw input classification requires exactly one query per source line (found {count})")
-            } else if raw_input_class_marker(source, line, policy).is_none() {
-                format!(
-                    "raw input query `{}` needs an adjacent `// action-layer:` marker: {}",
-                    site.name,
-                    policy.raw_input_classes.join(", ")
-                )
-            } else {
-                return None;
-            };
-            Some(Finding::advice(RAW_INPUT_CLASSIFICATION, site.span, message))
+fn has_raw_input_class(source: &str, line: usize, policy: &ActionLayerPolicy) -> bool {
+    source
+        .lines()
+        .nth(line.saturating_sub(1))
+        .and_then(|previous| previous.trim().strip_prefix("// action-layer:"))
+        .map(str::trim)
+        .is_some_and(|class| {
+            class.split_whitespace().count() == 1
+                && policy.raw_input_classes.iter().any(|item| item == class)
         })
-        .collect()
 }
 
 pub const ACTION_CALLERS: &str = "action_layer_action_callers";
@@ -2389,13 +2257,8 @@ fn is_test_module(file: Ustr) -> bool {
     path.starts_with('<') || path_uses_component(file, "tests") || path_uses_component(file, "test")
 }
 
-fn is_production_action_module(file: Ustr, policy: Option<&ActionLayerPolicy>) -> bool {
-    policy.is_some_and(|policy| path_uses_component(file, &policy.production_root))
-        && !is_test_module(file)
-}
-
-fn is_action_name(name: Ustr, policy: Option<&ActionLayerPolicy>) -> bool {
-    policy.is_some_and(|policy| declared_name(name.as_str()).starts_with(&policy.action_prefix))
+fn is_action_name(name: Ustr, policy: &ActionLayerPolicy) -> bool {
+    declared_name(name.as_str()).starts_with(&policy.action_prefix)
 }
 
 fn has_annotation(f: &Function, name: &str) -> bool {
@@ -2406,75 +2269,89 @@ fn has_annotation(f: &Function, name: &str) -> bool {
 
 /// HIR-backed caller census for production actions. The missing-population
 /// finding is attached to the first function of the first production module.
-fn empty_action_population(
-    ws: &Workspace,
-    warm: &FxHashSet<ModuleId>,
-    policy: &ActionLayerPolicy,
-) -> Option<(Ustr, Finding)> {
-    let module = ws
-        .user_modules(warm)
-        .find(|module| is_production_action_module(module.file, Some(policy)))?;
-    let function = module.functions.values().next()?;
-    Some((
-        module.file,
-        Finding::advice(
-            ACTION_CALLERS,
-            function.span,
-            format!(
-                "no production {} {}* declarations found",
-                policy.production_label, policy.action_prefix
-            ),
-        ),
-    ))
-}
-
 fn action_caller_gaps(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
     policy: &ActionLayerPolicy,
 ) -> Vec<(Ustr, Finding)> {
-    let declarations: Vec<(Ustr, Ustr, Span)> =
-        action_declarations_in(ws.user_modules(warm), Some(policy)).collect();
-
+    let modules = || {
+        ws.user_modules(warm)
+            .filter(|module| !is_test_module(module.file))
+    };
+    let mut production = modules()
+        .filter(|module| path_uses_component(module.file, &policy.production_root))
+        .peekable();
+    let first_production = production.peek().copied();
+    let declarations: Vec<_> = production
+        .flat_map(|module| {
+            module
+                .globals
+                .values()
+                .filter(|global| is_action_name(global.name, policy))
+                .map(move |global| (module.file, global))
+        })
+        .collect();
     if declarations.is_empty() {
-        return empty_action_population(ws, warm, policy)
+        return first_production
             .into_iter()
+            .filter_map(|module| {
+                let function = module.functions.values().next()?;
+                Some((
+                    module.file,
+                    Finding::advice(
+                        ACTION_CALLERS,
+                        function.span,
+                        format!(
+                            "no production {} {}* declarations found",
+                            policy.production_label, policy.action_prefix
+                        ),
+                    ),
+                ))
+            })
             .collect();
     }
 
-    let declared: FxHashSet<Ustr> = declarations.iter().map(|(name, _, _)| *name).collect();
-    let mut callers: FxHashSet<Ustr> = FxHashSet::default();
-    for module in ws
-        .user_modules(warm)
-        .filter(|module| !is_test_module(module.file))
-    {
-        for (owner, body) in &module.bodies {
-            callers.extend(action_edges_in_body(
-                module,
-                *owner,
-                body,
-                &declared,
-                Some(policy),
-            ));
+    let mut unread: FxHashSet<Ustr> = declarations.iter().map(|(_, g)| g.name).collect();
+    for module in modules() {
+        for (&owner, body) in &module.bodies {
+            let counts_as_caller = match owner {
+                BodyOwner::Function(fid) => {
+                    let function = &module.functions[fid];
+                    !has_annotation(function, "wire")
+                        && !policy
+                            .registration_functions
+                            .iter()
+                            .any(|name| name == declared_name(function.name.as_str()))
+                }
+                BodyOwner::Global(gid) => !is_action_name(module.globals[gid].name, policy),
+                _ => false,
+            };
+            if counts_as_caller {
+                for expr in body.expr_arena.values() {
+                    if let Expr::Global(name) = expr {
+                        unread.remove(name);
+                    }
+                }
+            }
         }
     }
 
     declarations
         .into_iter()
-        .filter(|(name, _, _)| !callers.contains(name))
-        .map(|(action, file, span)| (file, missing_action_caller(policy, action, span)))
+        .filter(|(_, global)| unread.contains(&global.name))
+        .map(|(file, global)| {
+            let label = &policy.production_label;
+            let action = global.name;
+            (
+                file,
+                Finding::advice(
+                    ACTION_CALLERS,
+                    global.name_span,
+                    format!("production {label} action `{action}` has no production caller"),
+                ),
+            )
+        })
         .collect()
-}
-
-fn missing_action_caller(policy: &ActionLayerPolicy, action: Ustr, span: Span) -> Finding {
-    Finding::advice(
-        ACTION_CALLERS,
-        span,
-        format!(
-            "production {} action `{action}` has no production caller",
-            policy.production_label
-        ),
-    )
 }
 
 pub(crate) const TASK_NULL_ABANDON: &str = "task_null_abandon";

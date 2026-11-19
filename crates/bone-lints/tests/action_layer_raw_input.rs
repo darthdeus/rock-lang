@@ -1,5 +1,5 @@
 use crate::support;
-use bone_lints::{Finding, LintOptions, RAW_INPUT_MIGRATION};
+use bone_lints::{Finding, LintOptions, RAW_INPUT_CLASSIFICATION, RAW_INPUT_MIGRATION};
 
 const FILE: &str = "<action_layer_raw_input>";
 
@@ -71,4 +71,10 @@ fn gameplay() {
 fn main() { gameplay() }
 "#;
     assert!(census(src).is_empty());
+    let both =
+        LintOptions::only([RAW_INPUT_MIGRATION, RAW_INPUT_CLASSIFICATION].map(str::to_owned));
+    let found = findings(src, &both);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].lint, RAW_INPUT_CLASSIFICATION);
+    assert_eq!(found[0].line, 4);
 }
