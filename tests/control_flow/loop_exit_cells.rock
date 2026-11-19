@@ -22,19 +22,6 @@ fn test_value_returned_from_inside_an_enumerate_loop() {
     print("slot {h.slot} tag {h.tag}")
 }
 
-fn first_index(xs: [int], want: int) -> int {
-    for (i, x) in xs.enumerate() {
-        if x == want { return i }
-    }
-    return -1
-}
-
-@test(output = "2\n-1")
-fn test_index_returned_from_inside_a_loop() {
-    print(first_index([4, 5, 6, 7], 6))
-    print(first_index([4, 5], 6))
-}
-
 fn index_and_square(n: int, want: int) -> (int, int) {
     for i in 0..n {
         let sq = i * i

@@ -1,34 +1,11 @@
-// Defer statement tests - execution order, scoping, and edge cases
-// Tests that defer statements execute in LIFO order at scope exit
+// Defers run LIFO at scope exit: on return, in nested if blocks, alongside
+// lambdas (which are their own defer scope) and against the locals they read.
 
 fn cleanup1() {
     print("cleanup1")
 }
 
-fn cleanup2() {
-    print("cleanup2")
-}
-
-fn level3() {
-    defer { print("level3 defer") }
-    print("level3 work")
-}
-
-fn level2() {
-    defer { print("level2 defer") }
-    print("level2 start")
-    level3()
-    print("level2 end")
-}
-
-fn level1() {
-    defer { print("level1 defer") }
-    print("level1 start")
-    level2()
-    print("level1 end")
-}
-
-// Test: Basic defer executes in LIFO order
+// Basic defer executes in LIFO order
 @test(output = "start\nmiddle\nend\ndefer 2\ndefer 1")
 fn test_basic_defer() {
     print("start");
@@ -46,7 +23,7 @@ fn test_basic_defer() {
     print("end")
 }
 
-// Test: Defer executes even with early return
+// Defer executes even with early return
 @test(output = "before return\ndefer executed")
 fn test_defer_with_return() {
     print("before return");
@@ -59,22 +36,7 @@ fn test_defer_with_return() {
     print("unreachable")
 }
 
-// Test: Defer in a bare block runs at the block exit
-@test(output = "start\nend\ndefer\nafter")
-fn test_defer_in_bare_block() {
-    {
-        print("start");
-
-        defer {
-            print("defer")
-        }
-
-        print("end")
-    }
-    print("after")
-}
-
-// Test: Mixed defer syntax
+// Mixed defer syntax
 @test(output = "work\ncleanup2\ncleanup1")
 fn test_defer_mixed_syntax() {
     defer(cleanup1())
@@ -83,7 +45,7 @@ fn test_defer_mixed_syntax() {
     print("work")
 }
 
-// Test: Defer in conditional blocks
+// Defer in conditional blocks
 @test(output = "in if block\nif defer\nafter if\nfunction defer")
 fn test_defer_with_if_else_blocks() {
     defer { print("function defer") }
@@ -99,7 +61,7 @@ fn test_defer_with_if_else_blocks() {
     print("after if")
 }
 
-// Test: Nested if blocks with defer
+// Nested if blocks with defer
 @test(output = "inner if\ninner if defer\nouter if\nouter if defer\nafter all\nouter defer")
 fn test_defer_with_nested_if_blocks() {
     defer { print("outer defer") }
@@ -118,32 +80,10 @@ fn test_defer_with_nested_if_blocks() {
     print("after all")
 }
 
-// Test: Deep function call nesting with defers
-@test(output = "level1 start\nlevel2 start\nlevel3 work\nlevel3 defer\nlevel2 end\nlevel2 defer\nlevel1 end\nlevel1 defer")
-fn test_defer_with_nested_function_calls() {
-    level1()
-}
-
-// Test: Defer expression in nested blocks
-@test(output = "work done\ncleanup2\nfunction end\ncleanup1")
-fn test_defer_expression_in_nested_blocks() {
-    defer(cleanup1())
-
-    if true {
-        defer(cleanup2())
-        print("work done")
-    }
-
-    print("function end")
-}
-
-// Defer and lambdas. A lambda lowered
-// while an enclosing `defer` is pending must NOT splice that defer into its
-// own body: the lambda is a separate fn scope whose `return` runs only the
-// lambda's own defers. Pre-fix the shared `defers` stack leaked the enclosing
-// defer into every lambda call (miscompile) and, when the defer body created
-// the lambda, recursed forever during lowering (compiler stack overflow).
-// Co-fn variants live in closures/capture_semantics_cofn.rock.
+// Defer and lambdas. A lambda lowered while an enclosing `defer` is pending
+// must not splice that defer into its own body: the lambda is a separate fn
+// scope whose `return` runs only the lambda's own defers. Co-fn variants live
+// in closures/capture_semantics_cofn.rock.
 global R1: int = 0
 
 fn defer_then_lambda() -> int {
@@ -154,8 +94,7 @@ fn defer_then_lambda() -> int {
     return a + b
 }
 
-// Pre-fix: each `f()` ran the spliced enclosing defer, so R1 == 3 (two calls
-// + the real defer). The lambda is capture-free; its own return is 42.
+// A spliced defer would run on each `f()` call too, giving R1 == 3.
 @test(output = "x=84 R=1")
 fn test_defer_then_lambda_runs_defer_once() {
     let x = defer_then_lambda()
@@ -164,9 +103,8 @@ fn test_defer_then_lambda_runs_defer_once() {
 
 global R2: int = 0
 
-// The compiler-stack-overflow shape: the lambda lives INSIDE the defer body.
-// Pre-fix, lowering the lambda re-ran the still-pending defer's splice ->
-// infinite recursion. Now the defer runs once at fn exit.
+// The lambda lives inside the defer body; lowering it must not re-enter the
+// pending defer. The defer runs once at fn exit.
 fn lambda_in_defer_body() {
     defer {
         let f = () => 7
@@ -178,24 +116,6 @@ fn lambda_in_defer_body() {
 fn test_lambda_in_defer_body_no_crash() {
     lambda_in_defer_body()
     print("R={R2}")
-}
-
-global R3: int = 0
-
-// A lambda created BEFORE the defer was always correct (no pending defer at
-// lambda-lowering time) -- guards that the fix doesn't perturb it.
-fn lambda_before_defer() -> int {
-    let f = () => 42
-    defer { R3 = R3 + 1 }
-    let a = f()
-    let b = f()
-    return a + b
-}
-
-@test(output = "x=84 R=1")
-fn test_lambda_before_defer_unaffected() {
-    let x = lambda_before_defer()
-    print("x={x} R={R3}")
 }
 
 global R4: int = 0

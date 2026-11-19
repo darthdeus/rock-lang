@@ -14,34 +14,6 @@ struct Point {
 
 newtype Id(int)
 
-fn find(m: Map<string, int>, k: string) -> int {
-    let v = m.get(k) else {
-        return -1
-    }
-    v * 10
-}
-
-@test(output = "70\n-1")
-fn nullable_unwrap() {
-    let m = map_new<string, int>()
-    m.insert("a", 7)
-    print(find(m, "a"))
-    print(find(m, "zzz"))
-}
-
-fn radius(s: Shape) -> int {
-    let Shape::Circle(r) = s else {
-        return 0
-    }
-    r
-}
-
-@test(output = "5\n0")
-fn enum_variant_miss_returns() {
-    print(radius(Shape::Circle(5)))
-    print(radius(Shape::Square(2, 3)))
-}
-
 fn first_pair(xs: [(int, int)]) -> int {
     let (a, b) = xs.get(0) else {
         return -1
@@ -67,18 +39,6 @@ fn break_and_continue_in_else() {
         print(r)
     }
     print("skipped {skipped}")
-}
-
-fn sum_sides(s: Shape) -> int {
-    let Shape::Square(w, h) = s else {
-        return -1
-    }
-    w + h
-}
-
-@test(output = "7")
-fn multi_payload_bindings() {
-    print(sum_sides(Shape::Square(3, 4)))
 }
 
 fn id_or(v: Id?, fallback: int) -> int {

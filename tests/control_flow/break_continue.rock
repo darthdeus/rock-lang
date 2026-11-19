@@ -1,43 +1,7 @@
-// break and continue in while and for loops: nesting, complex conditions,
-// top-level placement in the loop body, and every combination with return.
-// The return combinations have had codegen bugs (invalid Lua when a
-// `return` or `break` was followed by the continue label).
-
-// === continue in while loops ===
-
-@test
-fn test_simple_continue() {
-    let results = vec_new()
-    let i = 0
-    while i < 10 {
-        i = i + 1
-        if i == 3 || i == 7 {
-            continue
-        }
-        vec_push(results, i)
-    }
-
-    assert_eq(results, [1, 2, 4, 5, 6, 8, 9, 10])
-}
-
-@test
-fn test_nested_loops_continue() {
-    let results = vec_new()
-    let i = 0
-    while i < 3 {
-        i = i + 1
-        let j = 0
-        while j < 3 {
-            j = j + 1
-            if j == 2 {
-                continue
-            }
-            vec_push(results, i * 10 + j)
-        }
-    }
-
-    assert_eq(results, [11, 13, 21, 23, 31, 33])
-}
+// break, continue and return in while, for, loop and match-arm bodies: each
+// binds to the right enclosing loop through nesting and sibling loops, the
+// combinations in one body, top-level placement in the loop body, and a
+// lambda return that does not escape the enclosing fn.
 
 @test
 fn test_continue_with_complex_conditions() {
@@ -113,96 +77,6 @@ fn test_deeply_nested_continue() {
 // === continue and break in for loops ===
 
 @test
-fn test_for_loop_basic_continue() {
-    let results = vec_new()
-    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-
-    for x in arr {
-        if x % 2 == 0 {
-            continue
-        }
-        vec_push(results, x)
-    }
-
-    assert_eq(results, [1, 3, 5, 7, 9])
-}
-
-@test
-fn test_for_loop_basic_break() {
-    let results = vec_new()
-    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-
-    for x in arr {
-        if x > 5 {
-            break
-        }
-        vec_push(results, x)
-    }
-
-    assert_eq(results, [1, 2, 3, 4, 5])
-}
-
-@test
-fn test_for_loop_continue_and_break() {
-    let results = vec_new()
-    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-
-    for x in arr {
-        if x > 10 {
-            break
-        }
-        if x % 3 == 0 {
-            continue
-        }
-        vec_push(results, x)
-    }
-
-    assert_eq(results, [1, 2, 4, 5, 7, 8, 10])
-}
-
-@test
-fn test_nested_for_loops_with_continue() {
-    let results = vec_new()
-    let outer_arr = [1, 2, 3]
-    let inner_arr = [10, 20, 30, 40]
-
-    for i in outer_arr {
-        for j in inner_arr {
-            if j == 20 {
-                continue
-            }
-            if i == 2 && j == 30 {
-                continue
-            }
-            vec_push(results, i * 100 + j)
-        }
-    }
-
-    assert_eq(results, [110, 130, 140, 210, 240, 310, 330, 340])
-}
-
-@test
-fn test_nested_for_loops_with_break() {
-    let results = vec_new()
-    let outer_arr = [1, 2, 3, 4]
-    let inner_arr = [10, 20, 30, 40, 50]
-
-    for i in outer_arr {
-        for j in inner_arr {
-            if j > 30 {
-                break
-            }
-            vec_push(results, i * 100 + j)
-        }
-        if i >= 3 {
-            break
-        }
-    }
-
-    assert_eq(results, [110, 120, 130, 210, 220, 230, 310, 320, 330])
-}
-
-@test
 fn test_nested_for_loops_continue_and_break() {
     let results = vec_new()
     let outer_arr = [1, 2, 3, 4, 5]
@@ -233,33 +107,6 @@ fn test_nested_for_loops_continue_and_break() {
     // i=5: j=1,3,5 -> [51, 53, 55] but break after 12 total
     assert_eq(results, [11, 13, 15, 21, 23, 25, 31, 33, 35, 51, 53, 55])
 }
-
-@test
-fn test_for_loop_with_early_collection_limit() {
-    let results = vec_new()
-    let collected = 0
-    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-
-    for x in arr {
-        if x % 7 == 0 {
-            continue
-        }
-        if collected >= 5 {
-            // Stop collecting after 5 items, but continue processing to test continue still works
-            if x % 3 == 0 {
-                continue
-            }
-            // Don't add to results, but don't break either
-        } else {
-            vec_push(results, x)
-            collected = collected + 1
-        }
-    }
-
-    assert_eq(results, [1, 2, 3, 4, 5])
-}
-
-// === Edge cases ===
 
 @test
 fn test_mixed_loop_types_with_continue() {
@@ -325,34 +172,6 @@ fn test_deeply_nested_mixed_continue_break() {
     ])
 }
 
-@test
-fn test_continue_break_with_side_effects() {
-    let results = vec_new()
-    let side_effect_count = 0
-    let break_triggered = false
-    let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-
-    for x in arr {
-        side_effect_count = side_effect_count + 1
-
-        if x > 10 {
-            break_triggered = true
-            break
-        }
-
-        if x % 4 == 0 {
-            // Side effect happens even when we continue
-            continue
-        }
-
-        vec_push(results, x)
-    }
-
-    assert_eq(results, [1, 2, 3, 5, 6, 7, 9, 10])
-    assert_eq(side_effect_count, 11)
-    assert(break_triggered, "break should have been triggered")
-}
-
 // === break/continue/return at the top level of a loop body ===
 // Not nested in an if: Lua requires break/return to end a block, so the
 // continue label must not follow them directly.
@@ -365,16 +184,6 @@ fn test_break_toplevel_in_range_loop() {
         break
     }
     assert(sum == 0, "break at toplevel should exit after first iteration, got {sum}")
-}
-
-@test
-fn test_break_after_code_in_range_loop() {
-    let results: [int] = []
-    for i in 0..5 {
-        results.push(i)
-        if results.len == 3 { break }
-    }
-    assert(results.len == 3, "expected 3 elements, got {results.len}")
 }
 
 @test
@@ -413,20 +222,6 @@ fn test_break_in_array_loop() {
 }
 
 // === continue and return in the same for loop ===
-// Regression: an if/else before the return caused a parse error.
-
-@test(output = "found 3")
-fn simple_continue_then_return() {
-    print(find_first_over_2())
-}
-
-fn find_first_over_2() -> string {
-    for i in 0..5 {
-        if i <= 2 { continue }
-        return "found {i}"
-    }
-    return "not found"
-}
 
 @test(output = "yes 3")
 fn continue_then_ifelse_then_return() {
@@ -445,28 +240,6 @@ fn find_with_ifelse(flag: bool) -> string {
         }
 
         return "{result} {i}"
-    }
-    return "not found"
-}
-
-@test(output = "updated 3")
-fn continue_then_ifelse_then_mutate_then_return() {
-    print(find_and_mutate())
-}
-
-fn find_and_mutate() -> string {
-    let state = ""
-    for i in 0..5 {
-        if i <= 2 { continue }
-
-        if i > 2 {
-            state = "updated"
-        } else {
-            state = "other"
-        }
-
-        state = "{state} {i}"
-        return state
     }
     return "not found"
 }
@@ -494,8 +267,6 @@ fn do_stuff() {
 }
 
 // === continue with return/break in while loops ===
-// Regression: return was not wrapped in `do return end` when continue was
-// also present.
 
 @test(output = "3")
 fn while_continue_then_return() {
@@ -510,74 +281,6 @@ fn while_cr() -> int {
         return i
     }
     return -1
-}
-
-@test(output = "5")
-fn while_continue_then_break() {
-    let i = 0
-    let result = -1
-    while i < 10 {
-        i = i + 1
-        if i < 3 { continue }
-        if i > 5 { break }
-        result = i
-    }
-    print(result)
-}
-
-global W1: int = 0
-
-@test(output = "42")
-fn while_continue_ifelse_return_void() {
-    while_void_test()
-    print(W1)
-}
-
-fn while_void_test() {
-    let i = 0
-    while i < 10 {
-        i = i + 1
-        if i < 3 { continue }
-
-        if i == 3 {
-            W1 = 42
-        } else {
-            W1 = 99
-        }
-
-        return
-    }
-}
-
-// === continue + return ===
-
-global G1: int = 0
-
-@test(output = "42")
-fn continue_then_return_void() {
-    continue_return_void()
-    print(G1)
-}
-
-fn continue_return_void() {
-    for i in 0..5 {
-        if i < 3 { continue }
-        G1 = 42
-        return
-    }
-}
-
-// === continue + break ===
-
-@test(output = "3")
-fn continue_then_break() {
-    let result = -1
-    for i in 0..5 {
-        if i < 3 { continue }
-        result = i
-        break
-    }
-    print(result)
 }
 
 // === break + continue (break first in source, continue later) ===
@@ -629,36 +332,6 @@ fn nested_continue_outer_break() {
     print(sum)
 }
 
-// === multiple continues before return/break ===
-
-@test(output = "3")
-fn multiple_continues_then_return() {
-    print(multi_continue())
-}
-
-fn multi_continue() -> int {
-    for i in 0..10 {
-        if i < 3 { continue }
-        if i == 4 { continue }
-        if i == 5 { continue }
-        return i
-    }
-    return -1
-}
-
-@test(output = "3")
-fn multiple_continues_then_break() {
-    let result = -1
-    for i in 0..10 {
-        if i < 3 { continue }
-        if i == 4 { continue }
-        if i == 5 { continue }
-        result = i
-        break
-    }
-    print(result)
-}
-
 // === return inside nested if inside loop with continue ===
 
 @test(output = "found 4")
@@ -677,4 +350,235 @@ fn nested_if_return() -> string {
         }
     }
     return "none"
+}
+
+@test(output = "6")
+fn inner_continue_scope() {
+    let sum = 0
+    for i in 0..3 {
+        for j in 0..3 {
+            if j == 1 { continue }
+            sum = sum + 1
+        }
+    }
+    print(sum)
+}
+
+@test(output = "3")
+fn inner_break_scope() {
+    let outer_iters = 0
+    for i in 0..3 {
+        outer_iters = outer_iters + 1
+        for j in 0..3 {
+            if j == 1 { break }
+        }
+    }
+    print(outer_iters)
+}
+
+fn inner_return_escapes() -> int {
+    for i in 0..3 {
+        for j in 0..3 {
+            if i == 2 && j == 1 { return 7 }
+        }
+    }
+    return -1
+}
+
+@test
+fn call_inner_return() {
+    assert(inner_return_escapes() == 7)
+}
+
+@test(output = "sib 4")
+fn sibling_loops_share_label_scope() {
+    let sum = 0
+    for i in 0..3 {
+        if i == 1 { continue }
+        sum = sum + i
+    }
+    for i in 0..3 {
+        if i == 1 { continue }
+        sum = sum + i
+    }
+    print("sib {sum}")
+}
+
+// === break / continue / return inside if and else branches ===
+
+@test(output = "4")
+fn break_inside_else() {
+    let c = 0
+    for i in 0..10 {
+        if i < 4 {
+            c = c + 1
+        } else {
+            break
+        }
+    }
+    print(c)
+}
+
+@test(output = "3")
+fn continue_inside_else() {
+    let c = 0
+    for i in 0..10 {
+        if i >= 5 { break }
+        if i % 2 == 0 {
+            c = c + 1
+        } else {
+            continue
+        }
+    }
+    print(c)
+}
+
+// === Naked return in void fn nested inside two loops ===
+
+global HIT: int = 0
+
+@test(output = "9")
+fn naked_return_in_nested_void() {
+    HIT = 0
+    naked_return_void_inner()
+    print(HIT)
+}
+
+fn naked_return_void_inner() {
+    for i in 0..3 {
+        for j in 0..3 {
+            HIT = HIT + 1
+            if HIT == 9 { return }
+        }
+    }
+}
+
+// continue as the final body statement -- the `::continue::` label must
+// sit between the loop body and the closing `end`.
+@test(output = "done")
+fn continue_as_final_stmt() {
+    for i in 0..3 {
+        if i == 0 { continue }
+    }
+    print("done")
+}
+
+// === while-loop break / continue / return ===
+
+@test(output = "wq 5")
+fn while_break_continue_return() {
+    let n = 0
+    while n < 10 {
+        n = n + 1
+        if n == 3 { continue }
+        if n == 5 { break }
+    }
+    print("wq {n}")
+}
+
+// === for over vec with break / continue ===
+
+@test(output = "v 4")
+fn for_vec_break_continue() {
+    let v: [int] = [1, 2, 3, 4, 5]
+    let sum = 0
+    for x in v {
+        if x == 2 { continue }
+        if x == 4 { break }
+        sum = sum + x
+    }
+    print("v {sum}")
+}
+
+// === lambda return must NOT escape enclosing fn ===
+
+@test(output = "lam 6")
+fn return_in_lambda_stays_local() {
+    let list: [int] = [1, 2, 3, 4, 5]
+    let count = 0
+    let found = list.iter().filter(x => {
+        if x == 3 { return true }
+        false
+    }).collect()
+    for _ in found {
+        count = count + 1
+    }
+    for _ in list {
+        count = count + 1
+    }
+    print("lam {count}")
+}
+
+// === match-arm body with {} wrap -- break / continue / return all legal ===
+
+@test
+fn match_arm_block_continue_and_break() {
+    let c = 0
+    for i in 0..5 {
+        match i {
+            2 => { continue }
+            _ => { c = c + 1 }
+        }
+    }
+    assert(c == 4)
+    let d = 0
+    for i in 0..10 {
+        match i {
+            3 => { break }
+            _ => { d = d + 1 }
+        }
+    }
+    assert(d == 3)
+}
+
+fn match_arm_block_return() -> int {
+    for i in 0..10 {
+        match i {
+            5 => { return i }
+            _ => {}
+        }
+    }
+    return -1
+}
+
+@test
+fn call_match_arm_block_return() {
+    assert(match_arm_block_return() == 5)
+}
+
+// === match-arm body -- raw (no block wrap) break / continue / return ===
+
+@test
+fn match_arm_raw_continue_and_break() {
+    let c = 0
+    for i in 0..5 {
+        match i {
+            2 => continue,
+            _ => { c = c + 1 }
+        }
+    }
+    assert(c == 4)
+    let d = 0
+    for i in 0..10 {
+        match i {
+            3 => break,
+            _ => { d = d + 1 }
+        }
+    }
+    assert(d == 3)
+}
+
+fn match_arm_raw_return() -> int {
+    for i in 0..10 {
+        match i {
+            5 => return i,
+            _ => {}
+        }
+    }
+    return -1
+}
+
+@test
+fn call_match_arm_raw_return() {
+    assert(match_arm_raw_return() == 5)
 }

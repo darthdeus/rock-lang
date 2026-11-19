@@ -1,13 +1,9 @@
-// Control flow on the JS backend: shared tails and trampoline fallback.
+// Control-flow graph shapes the JS backend has to structure: one test per
+// shared-branch-tail class, and shared or-pattern arms large enough to take
+// the trampoline fallback. Each test runs on both backends.
 
-// Shared-branch-tail structuring corpus for the `--backend js` ratchet (T8c).
-// One @test per CFG-shape class the single `unstructured control flow (shared
-// branch tail)` reject used to conflate. Each test runs on both backends.
-//
-// Class A -- a loop INSIDE a lambda body (structure::analyze now roots at lambda
-// entries). The closure captures the outer accumulator by reference and owns its
-// own loop counter, which loop_capture_plan must NOT mis-flag as a per-iteration
-// capture.
+// A loop inside a lambda body. The closure captures the outer accumulator by
+// reference and owns its loop counter, which is not a per-iteration capture.
 @test(returns = 15)
 fn shared_tail_lambda_body_loop() -> int {
     let sum = 0
@@ -22,19 +18,17 @@ fn shared_tail_lambda_body_loop() -> int {
     sum
 }
 
-// Class B -- an inlined iterator combinator TERMINAL chain. Post-inline the
-// `next()` skip-loop nests inside the for-loop, and a body block `continue`s the
-// OUTER loop: a multi-level jump the labeled-loop path structures.
+// An inlined combinator chain: the `next()` skip loop nests inside the for
+// loop and a body block continues the outer loop, a multi-level jump.
 @test(returns = 10)
 fn shared_tail_combinator_chain() -> int {
     let v = [1, 2, 3]
     v.map(_ * 2).filter(_ > 2).reduce(0, (a, b) => a + b)
 }
 
-// Class C.1 -- multiple `continue` paths converging on a shared latch tail (the
-// T8a-regressed shape). A nested if/else where BOTH arms fall through to the same
-// accumulate block, which is NOT the branch's ipdom (the continue arms diverge to
-// the latch) -- so it is a doubly-reached forward tail, not a loop.
+// Several `continue` paths around a shared tail: both arms of a nested if/else
+// fall through to the same accumulate block, which is not the branch's
+// immediate post-dominator, so it is a doubly-reached forward tail.
 @test(returns = 14)
 fn shared_tail_multiple_continues() -> int {
     let v = [1, 2, 3, 4, 5, 6]
@@ -48,17 +42,6 @@ fn shared_tail_multiple_continues() -> int {
         sum = sum + x
     }
     sum
-}
-
-// Class C.2 -- an or-pattern success arm reached from N alternatives (a forward
-// shared tail with 2+ Goto predecessors).
-@test(returns = 42)
-fn shared_tail_or_pattern() -> int {
-    let x = 2
-    return match x {
-        1 | 2 | 3 => 42,
-        _ => 0,
-    }
 }
 
 // A shared or-pattern arm containing a nested loop.
@@ -78,13 +61,9 @@ fn nested_loop_tail(sel: int) -> int {
     return out + sel
 }
 
-@test(output = "12")
+@test(output = "12\n107")
 fn test_nested_loop_tail() {
     print(nested_loop_tail(2))
-}
-
-@test(output = "107")
-fn test_nested_loop_tail_default() {
     print(nested_loop_tail(7))
 }
 
@@ -115,13 +94,9 @@ fn over_cap_tail(sel: int) -> int {
     return out
 }
 
-@test(output = "61")
+@test(output = "61\n0")
 fn test_over_cap_tail() {
     print(over_cap_tail(2))
-}
-
-@test(output = "0")
-fn test_over_cap_tail_default() {
     print(over_cap_tail(9))
 }
 
@@ -142,14 +117,10 @@ fn unstructurable_pair(sel: int) -> (int, int) {
     return (s, s + 1)
 }
 
-@test(output = "6 7")
+@test(output = "6 7\n0 1")
 fn test_tuple_return_through_fallback() {
     let (a, b) = unstructurable_pair(2)
     print("{a} {b}")
-}
-
-@test(output = "0 1")
-fn test_tuple_return_default() {
-    let (a, b) = unstructurable_pair(9)
-    print("{a} {b}")
+    let (c, d) = unstructurable_pair(9)
+    print("{c} {d}")
 }

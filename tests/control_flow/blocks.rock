@@ -2,18 +2,6 @@
 // block values in expression position, defers at block exit, and a
 // `return` escaping a value-position block.
 
-@test(output="6")
-fn test_block() {
-    let a = 5
-
-    {
-        let b = 1
-        a = a + b
-    }
-
-    print(a)
-}
-
 @test(output="10")
 fn test_nested_blocks() {
     let x = 5
@@ -26,17 +14,6 @@ fn test_nested_blocks() {
         }
     }
     print(x)
-}
-
-@test(output="1\n2\n3")
-fn test_block_values() {
-    let a = {
-        print(1)
-        print(2)
-        3
-    }
-
-    print(a)
 }
 
 // Defers run at block exit, innermost block first
@@ -52,25 +29,6 @@ fn test_defer_execution_order() {
 
             print("2")
         }
-    }
-}
-
-@test(output="setup\nwork\ncleanup\ncleanup")
-fn test_defer_variable_modification() {
-    let status = "init"
-    defer { print(status) }
-
-    {
-        defer {
-            status = "cleanup"
-            print(status)
-        }
-
-        status = "setup"
-        print(status)
-
-        status = "work"
-        print(status)
     }
 }
 

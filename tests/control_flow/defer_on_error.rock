@@ -1,7 +1,8 @@
-// DEFER ON ERROR: an ordinary fn's pending
-// defers run when an error propagates out of their scope, LIFO, and the
-// original error is re-raised. Block exit, `return`, `break` and `continue`
-// run the defers of every scope they leave.
+// An ordinary fn's pending defers run when an error propagates out of their
+// scope -- every frame it leaves, innermost first and LIFO within a scope --
+// and the original error is re-raised unchanged. Block exit, `return`,
+// `break` and `continue` run the defers of every scope they leave. The
+// handler helpers have a Lua and a JS body.
 
 global LOG: string = ""
 
@@ -466,3 +467,43 @@ fn cleanup_error_under_a_value_error_is_logged() {
     let logged = capture_log(() => value_error_with_raising_cleanup())
     print("{has(logged, "DEFER:")} {has(logged, "cleanup boom")}")
 }
+
+fn fail_one_frame() {
+    defer { LOG = LOG + "d1;" }
+    error("one frame")
+}
+
+fn level3() {
+    defer { LOG = LOG + "l3;" }
+    error("deep")
+}
+
+fn level2() {
+    defer { LOG = LOG + "l2;" }
+    level3()
+    LOG = LOG + "unreached2;"
+}
+
+fn level1() {
+    defer { LOG = LOG + "l1;" }
+    level2()
+    LOG = LOG + "unreached1;"
+}
+
+@test(output = "l3;l2;l1; true")
+fn defers_run_innermost_frame_first() {
+    LOG = ""
+    let m = raised(() => level1())
+    print("{LOG} {has(m, "deep")}")
+}
+
+@test(output = "first:d1; second:d1; true")
+fn a_caught_error_does_not_leave_stale_defers() {
+    LOG = ""
+    raised(() => fail_one_frame())
+    let a = LOG
+    LOG = ""
+    let m = raised(() => fail_one_frame())
+    print("first:{a} second:{LOG} {has(m, "one frame")}")
+}
+

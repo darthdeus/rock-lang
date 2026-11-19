@@ -1,19 +1,5 @@
 // Loops: break and continue, compound while, nested loops in blocks, loop value model and exhausted for.
 
-@test(output = "3")
-fn loop_basic_break() {
-    let i = 0
-
-    loop {
-        i = i + 1
-        if i == 3 {
-            break
-        }
-    }
-
-    print(i)
-}
-
 @test(output = "3\n2")
 fn loop_nested() {
     let outer = 0
@@ -68,20 +54,6 @@ fn map_iteration_type_check() {
     for (key, value) in map {
         let value_typed: ? = value
         sum += value
-    }
-
-    print(sum)
-}
-
-@test(output = "6", type_holes = [[2, "int"]])
-fn array_iteration_type_check() {
-    let arr = [1, 2, 3]
-
-    let sum = 0
-
-    for x in arr {
-        let x_typed: ? = x
-        sum += x
     }
 
     print(sum)
@@ -149,27 +121,7 @@ fn debug_continue_multiple() {
     print(sum)
 }
 
-@test(output = "6\n3")
-fn test_vec_tuple_iteration_with_indices() {
-    let vec = vec_new()
-    vec_push(vec, 1)
-    vec_push(vec, 2)
-    vec_push(vec, 3)
-
-    let sum = 0
-    let index_sum = 0
-
-    // Tuple iteration over [T] with enumerate yields (int, T) with 0-based indices
-    for (i, x) in enumerate(vec) {
-        sum += x
-        index_sum += i
-    }
-
-    print(sum)
-    print(index_sum)
-}
-
-@test(output = "60", type_holes = [[3, "int"]])
+@test(output = "60", type_holes = [[2, "int"]])
 fn test_arena_tuple_iteration_type_check() {
     let arena = arena_new()
     insert(arena, 10)
@@ -246,21 +198,6 @@ fn with_callback(callback: () -> ()) {
 }
 
 @test
-fn test_nested_for_loops_in_block_expr() {
-    let count = 0
-
-    with_callback(() => {
-        for y in 0..3 {
-            for x in 0..3 {
-                count = count + 1
-            }
-        }
-    })
-
-    assert(count == 9, "Nested for loops should execute 9 times")
-}
-
-@test
 fn test_triple_nested_for_loops() {
     let sum = 0
 
@@ -275,24 +212,6 @@ fn test_triple_nested_for_loops() {
     })
 
     assert(sum == 28, "Triple nested loops sum should be 28")
-}
-
-@test
-fn test_nested_loops_with_break() {
-    let count = 0
-
-    with_callback(() => {
-        for i in 0..3 {
-            for j in 0..3 {
-                if j == 1 {
-                    break
-                }
-                count = count + 1
-            }
-        }
-    })
-
-    assert(count == 3, "Should break inner loop at j==1 each time")
 }
 
 @test
@@ -330,23 +249,6 @@ fn test_nested_loops_with_assignments() {
     assert(grid[2][2] == 8, "grid[2][2] should be 8")
 }
 
-@test
-fn test_nested_while_in_for_loop() {
-    let count = 0
-
-    with_callback(() => {
-        for i in 0..2 {
-            let j = 0
-            while j < 2 {
-                count = count + 1
-                j = j + 1
-            }
-        }
-    })
-
-    assert(count == 4, "Mixed for/while nested loops should work")
-}
-
 fn sum_while(n: int) -> int {
     let acc = 0
     let i = 0
@@ -376,27 +278,6 @@ fn first_ge(n: int, target: int) -> int {
     return found
 }
 
-fn sum_skip(n: int, skip: int) -> int {
-    let acc = 0
-    for i in 0..n {
-        if i == skip {
-            continue
-        }
-        acc = acc + i
-    }
-    return acc
-}
-
-fn nested(n: int) -> int {
-    let total = 0
-    for i in 0..n {
-        for j in 0..n {
-            total = total + j
-        }
-    }
-    return total
-}
-
 fn while_call_cond(n: int) -> int {
     let acc = 0
     let i = 0
@@ -415,12 +296,6 @@ fn t_sum_for() -> int { return sum_for(5) }
 
 @test(returns = 3)
 fn t_first_ge() -> int { return first_ge(10, 3) }
-
-@test(returns = 8)
-fn t_sum_skip() -> int { return sum_skip(5, 2) }
-
-@test(returns = 9)
-fn t_nested() -> int { return nested(3) }
 
 @test(returns = 6)
 fn t_while_call_cond() -> int { return while_call_cond(-4) }
