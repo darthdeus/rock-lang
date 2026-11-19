@@ -1,0 +1,246 @@
+// Lambda parameter inference and placeholder lambdas: parameters inferred from
+// the use site, deferred until a later call pins them, and `_` chains that
+// desugar to `x => <expr>` with every `_` naming the same parameter.
+
+struct Person {
+    name: string,
+    age: int,
+}
+
+struct Point {
+    x: float,
+    y: float,
+}
+
+@test
+fn test_lambda_type_inference() {
+    let numbers = [1, 2, 3, 4, 5]
+    let doubled = numbers.iter().map(x => x * 2).collect()
+    assert_eq(doubled[0], 2)
+    assert_eq(doubled[4], 10)
+
+    let names = ["alice", "bob", "charlie"]
+    let lengths = names.map(s => s.len()).collect()
+    assert_eq(lengths[0], 5)
+    assert_eq(lengths[2], 7)
+
+    let pairs = [(1, "a"), (2, "b"), (3, "c")]
+    let firsts = pairs.iter().map(p => p.0).collect()
+    let seconds = pairs.iter().map(p => p.1).collect()
+    assert_eq(firsts[0], 1)
+    assert_eq(seconds[2], "c")
+}
+
+@test
+fn test_underscore_placeholders() {
+    let add_one = _ + 1
+    assert_eq(add_one(5), 6)
+    assert_eq(add_one(10), 11)
+
+    let get_x = _.x
+    let p1 = Point { x: 3.0, y: 4.0 }
+    let p2 = Point { x: 5.0, y: 12.0 }
+    assert_eq(get_x(p1), 3.0)
+    assert_eq(get_x(p2), 5.0)
+
+    // Method-call placeholder: `_.m()` desugars to `x => x.m()`. A
+    // single-overload method resolves with no annotation (`upper` is
+    // string-only, so the placeholder infers string).
+    let shout = _.upper()
+    assert_eq(shout("hi"), "HI")
+
+    // An overloaded method (`len`: string/Vec/Map/Arena) can't pick from
+    // the bare placeholder, so it needs a type to disambiguate. `_.len()`
+    // and the equivalent `len(_)` both work here.
+    let get_length: fn(string) -> int = _.len()
+    assert_eq(get_length("hello"), 5)
+    assert_eq(get_length("world"), 5)
+}
+
+@test
+fn test_underscore_complex_expressions() {
+    let complex_calc: (int) -> int = (_ + 5) * 2
+    assert_eq(complex_calc(10), 30)
+
+    let people = [
+        Person { name: "Alice", age: 30 },
+        Person { name: "Bob", age: 25 },
+    ]
+
+    let get_age: (Person) -> int = _.age
+    let ages = people.iter().map(get_age).collect()
+    assert_eq(ages[0], 30)
+    assert_eq(ages[1], 25)
+
+    let is_positive: (int) -> bool = _ > 0
+    let is_adult: (Person) -> bool = _.age >= 18
+
+    assert_true(is_positive(5))
+    assert_false(is_positive(-3))
+    assert_true(is_adult(Person { name: "Test", age: 21 }))
+}
+
+@test
+fn test_underscore_limitations() {
+    // `typeof` alone (an `any` param) pins nothing; the call infers `_: int`.
+    let f = _ * 2
+    assert_eq(f(5), 10)
+    assert_true(__rock_is_fn_record(f))
+
+    // A capturing lambda is an env record -- a table on luajit, an object on
+    // JS -- so `typeof` says "table" on both.
+    let n = 3
+    let capturing = (x: int) => x + n
+    assert_eq(typeof(capturing), "table")
+
+    let multiplier: (int) -> int = _ * 3
+    let numbers = [1, 2, 3]
+    let tripled = numbers.iter().map(multiplier).collect()
+    assert_eq(tripled[0], 3)
+    assert_eq(tripled[2], 9)
+}
+
+struct FixVec2 { x: float, y: float }
+struct Mob { name: string, health: int, pos: FixVec2 }
+
+fn double(x: int) -> int { return x * 2 }
+
+fn orc_arena(x: float) -> Arena<Mob> {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Orc", health: 100, pos: FixVec2 { x: x, y: 2.0 } })
+    return mobs
+}
+
+@test(output = "true\ntrue\ntrue\nfalse\ntrue")
+fn field_predicates() {
+    let mobs = orc_arena(5.0)
+    print(mobs.values().any(_.health > 50))
+    print(mobs.values().any(_.name == "Orc"))
+    print(mobs.values().any(_.pos.x > 3.0))
+    print(mobs.values().any(_.pos.x > 6.0))
+    print(mobs.values().any((_.health) > 50))
+}
+
+@test(output = "200\n110\n-100")
+fn field_arithmetic() {
+    let mobs = orc_arena(1.0)
+    for hp in mobs.values().map(_.health * 2).collect() { print(hp) }
+    for hp in mobs.values().map(_.health + 10).collect() { print(hp) }
+    for hp in mobs.values().map(-_.health).collect() { print(hp) }
+}
+
+@test(output = "true\ntrue\n20\n10")
+fn unary_not_and_calls() {
+    let flags = [true, false, true]
+    print(flags.iter().any(!_))
+    let nums = [1, 2, 3, 4, 5]
+    print(nums.iter().any(_.double() > 8))
+    print([5].iter().map(_.double().double()).collect()[0])
+    print([5].iter().map(double(_)).collect()[0])
+}
+
+// Tuple fields via `.0` / `.1`, like explicit lambdas.
+@test(output = "1\n2\n3\na\nb\nc\n1\n2\n3")
+fn placeholder_tuple_fields() {
+    let pairs: [(int, string)] = [(1, "a"), (2, "b"), (3, "c")]
+    for n in pairs.iter().map(_.0).collect() { print(n) }
+    for s in pairs.iter().map(_.1).collect() { print(s) }
+    for n in pairs.iter().map(p => p.0).collect() { print(n) }
+}
+
+// Safe navigation, `as` casts and `~` inside a placeholder chain.
+
+struct Bag { v: int }
+struct Owner { pet: Bag? }
+
+@test(output = "1\n0\n3\n1\n2\n3\n-2\n-3\n-4")
+fn placeholder_safe_nav_cast_bitnot() {
+    // `_.pet` is nullable, so `?.v` puts SafeNavigation inside the chain.
+    let owners: [Owner] = [
+        Owner { pet: Bag { v: 1 } },
+        Owner { pet: null },
+        Owner { pet: Bag { v: 3 } },
+    ]
+    for y in owners.iter().map(_.pet?.v ?? 0).collect() { print(y) }
+    let floats: [float] = [1.5, 2.5, 3.5]
+    for y in floats.iter().map(_ as int).collect() { print(y) }
+    let ints: [int] = [1, 2, 3]
+    for y in ints.iter().map(~_).collect() { print(y) }
+}
+
+// Each map mixes FieldAccess / TupleIndex / unary / paren differently in one
+// chain rooted at `_`, so recognising only one wrapper kind fails.
+
+struct Pair { a: int, b: int }
+struct Holder { t: (int, int) }
+
+@test(output = "10\n20\n5\n6\n-10\n-20\n11\n21")
+fn placeholder_mixed_chains() {
+    let tuples: [(Pair, int)] = [(Pair { a: 10, b: 0 }, 99), (Pair { a: 20, b: 0 }, 99)]
+    for y in tuples.iter().map(_.0.a).collect() { print(y) }
+    let holders: [Holder] = [Holder { t: (5, 0) }, Holder { t: (6, 0) }]
+    for y in holders.iter().map(_.t.0).collect() { print(y) }
+    let pairs: [Pair] = [Pair { a: 10, b: 0 }, Pair { a: 20, b: 0 }]
+    for y in pairs.iter().map(-_.a).collect() { print(y) }
+    for y in pairs.iter().map((_.a) + 1).collect() { print(y) }
+}
+
+// Multiple `_` in one expression all bind to the SAME fresh parameter
+// (not Scala-style fresh-per-occurrence). `_.a + _.b` is `x => x.a + x.b`.
+@test(output = "12\n34\n13\n35")
+fn placeholder_multi_same_param() {
+    let xs: [Pair] = [Pair { a: 10, b: 2 }, Pair { a: 30, b: 4 }]
+    for y in xs.iter().map(_.a + _.b).collect() { print(y) }
+    for y in xs.iter().map(_.a + _.b + (_.b - _.b + 1)).collect() { print(y) }
+}
+
+// The local `*(DeferW, int)` ties with `*(int, int)` at fit cost 0, so `x * 2`
+// on an unpinned lambda parameter must defer until a call pins it.
+struct DeferW { a: float }
+
+operator *(l: DeferW, r: int) -> DeferW {
+    return DeferW { a: l.a }
+}
+
+operator +(l: DeferW, r: int) -> DeferW {
+    return DeferW { a: l.a }
+}
+
+struct DeferP { x: int }
+struct DeferQ { x: float }
+
+@test
+fn test_defer_mul_pinned_by_struct_call() {
+    let f = x => x * 2
+    let w = f(DeferW { a: 3.5 })
+    assert_eq(w.a, 3.5)
+}
+
+@test
+fn test_defer_other_shapes() {
+    let d = _ * 2
+    assert_eq(d(21), 42)
+    let chained = x => x * 2 + 1
+    assert_eq(chained(5), 11)
+    let get_x = _.x
+    assert_eq(get_x(DeferP { x: 3 }), 3)
+    let m = (a, b) => a * b
+    assert_eq(m(6, 7), 42)
+}
+
+@test
+fn test_defer_lambda_arg_before_pinning_arg() {
+    let r = defer_apply(x => x * 2, 5)
+    assert_eq(r, 10)
+}
+
+fn defer_apply<T, U>(f: fn(T) -> U, v: T) -> U {
+    return f(v)
+}
+
+@test
+fn test_defer_use_inside_later_lambda() {
+    let twice = x => x * 2
+    let composed = y => twice(y + 1)
+    assert_eq(composed(4), 10)
+}

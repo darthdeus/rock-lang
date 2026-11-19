@@ -4,9 +4,7 @@ struct S { field: int }
 struct Point { x: int, y: int }
 struct Inner { value: int }
 struct Outer { inner: Inner }
-struct TestStruct { value: float }
 struct Data { value: int, name: string }
-struct State { flag: bool, value: int }
 
 fn apply2(f: (int, int) -> int, a: int, b: int) -> int {
     return f(a, b)
@@ -145,56 +143,6 @@ fn test_lambda_curry_alias_and_block_arg() {
         return sum * 2
     }, 3, 4)
     print(result)
-}
-
-global test_global: float = 0
-
-@test(output = "99\n42\n15\n30")
-fn test_lambda_assignment_to_captures_and_globals() {
-    let obj = TestStruct { value: 10.0 }
-    let modifier = (v: float) => {
-        obj.value = v
-    }
-    modifier(99.0)
-    print(obj.value)
-
-    test_global = 0
-    let setter = (v: float) => {
-        test_global = v
-    }
-    setter(42.0)
-    print(test_global)
-
-    let data = Data { value: 10, name: "" }
-    let modify_and_return = (new_val: int) => {
-        data.value = new_val
-        return data.value * 2
-    }
-    let result = modify_and_return(15)
-    print(data.value)
-    print(result)
-}
-
-@test(output = "true\n42\nfalse\n42")
-fn test_lambda_assignment_in_conditional() {
-    let state = State { flag: false, value: 0 }
-
-    let conditional_set = (should_set: bool, val: int) => {
-        if should_set {
-            state.flag = true
-            state.value = val
-        } else {
-            state.flag = false
-        }
-    }
-
-    conditional_set(true, 42)
-    print(state.flag)
-    print(state.value)
-
-    conditional_set(false, 99)
-    print(state.flag)
-    print(state.value)
 }
 
 global accumulator: int = 0

@@ -56,8 +56,6 @@ fn test_lambda_placeholder_with_map_and_filter() {
     print_all([1, 2, 3, 4, 5].iter().filter(is_large).collect())
 }
 
-// Iterator chains inside lambda bodies silently drop the enclosing fn from
-// emission (skull bug), so the inner map lives in a top-level helper.
 fn double_row(row: [int]) -> [int] {
     return row.iter().map(x => x * 2).collect()
 }
@@ -130,22 +128,6 @@ fn test_lambda_with_captured_variables() {
 
     let filtered = nums.iter().filter(x => x > threshold).collect()
     print_all(filtered.iter().map(x => x * multiplier).collect())
-}
-
-@test(output = "Filter >= 5:\n5\n6\n7\n8\n9\n10\nFilter >= 7:\n7\n8\n9\n10")
-fn test_lambda_returning_lambda() {
-    let make_min_filter = (min_val: int) => {
-        return (x: int) => x >= min_val
-    }
-
-    let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    let filter5 = make_min_filter(5)
-    let filter7 = make_min_filter(7)
-
-    print("Filter >= 5:")
-    print_all(nums.iter().filter(filter5).collect())
-    print("Filter >= 7:")
-    print_all(nums.iter().filter(filter7).collect())
 }
 
 @test(output = "4\n6\n8\n3\n5\n7\n6\n7\n8")

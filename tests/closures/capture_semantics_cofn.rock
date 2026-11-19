@@ -1,5 +1,5 @@
 // Capture behavior inside coroutine bodies. Non-coroutine sibling:
-// closures/capture_semantics.rock.
+// closures/captures.rock.
 
 enum CEv { Tick(int) }
 

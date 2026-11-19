@@ -1,41 +1,11 @@
 // Lambda basics: capabilities, escaping, per-call locals, dead nested lambdas and parameter shadowing.
 
-fn apply(f: fn(int) -> int, x: int) -> int {
-    return f(x)
-}
-
-fn make_adder(n: int) -> fn(int) -> int {
-    return (x: int) => x + n
-}
-
 fn sum_mapped(xs: [int], f: fn(int) -> int) -> int {
     let total = 0
     for v in xs {
         total = total + f(v)
     }
     return total
-}
-
-@test(output = "11")
-fn test_simple_lambda() {
-    let add1 = (x: int) => x + 1
-    print(add1(10))
-}
-
-@test(output = "105\n15")
-fn test_capture_enclosing_local() {
-    let k = 100
-    let cap = (y: int) => y + k
-    print(cap(5))
-
-    let base = 10
-    let add = (x: int) => x + base
-    print(add(5))
-}
-
-@test(output = "12")
-fn test_lambda_as_arg() {
-    print(apply((n: int) => n * 3, 4))
 }
 
 @test(output = "7\n9")
@@ -46,12 +16,6 @@ fn test_multi_stmt_lambda_body() {
     }
     print(f(3))
     print(f(4))
-}
-
-@test(output = "8")
-fn test_returned_closure() {
-    let add5 = make_adder(5)
-    print(add5(3))
 }
 
 @test(output = "12")
@@ -98,22 +62,6 @@ fn test_calls_and_captures() {
     print(twice(x => x + base, 6))
 }
 
-@test(output = "7")
-fn test_capture_mutation() {
-    let sum = 0
-    let add = (x: int) => { sum = sum + x }
-    add(3)
-    add(4)
-    print(sum)
-}
-
-@test(output = "1\n-1")
-fn test_lambda_branch() {
-    let sign = (x: int) => if x >= 0 { 1 } else { 0 - 1 }
-    print(sign(42))
-    print(sign(-3))
-}
-
 value Pt2 { x: float, y: float }
 
 @test(output = "7")
@@ -142,13 +90,6 @@ fn test_lambda_calls_lambda_hof() {
     let apply_twice = (g: fn(int) -> int, x: int) => g(g(x))
     let outer = () => apply_twice(inc, 9)
     print(outer())
-}
-
-@test(output = "20")
-fn test_lambda_calls_captured_lambda() {
-    let dbl = (x: int) => x * 2
-    let run = () => dbl(10)
-    print(run())
 }
 
 // Both lambdas close over one shared box; `bump`'s mutation is visible through

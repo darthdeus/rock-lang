@@ -1,0 +1,284 @@
+// Closure captures: loop bindings are captured per iteration unless a lambda
+// writes them, a reassigned local or parameter is one shared box, and a
+// captured weak handle resolves its row on every call.
+
+@test(output = "10\n20\n30")
+fn test_vec_iter_capture_per_iteration() {
+    let xs = [10, 20, 30]
+    let fns: [fn() -> int] = []
+    for x in xs {
+        fns.push(() => x)
+    }
+    for f in fns { print(f()) }
+}
+
+// The sum is iteration-order-independent; sharing one cell would give three
+// times the last value.
+@test(output = "600")
+fn test_map_iter_capture_per_iteration() {
+    let m = map_new()
+    m[1] = 100
+    m[2] = 200
+    m[3] = 300
+    let fns: [fn() -> int] = []
+    for (k, v) in m {
+        fns.push(() => v)
+    }
+    let total = 0
+    for f in fns { total = total + f() }
+    print(total)
+}
+
+// Two lambdas and the enclosing function all observe one cell.
+@test(output = "1\n11\n100")
+fn test_shared_mutable_capture() {
+    let n = 1
+    let get = () => n
+    let bump = () => { n = n + 10 }
+    print(get())
+    bump()
+    print(get())
+    n = 100
+    print(get())
+}
+
+@test(output = "len=3")
+fn test_iterator_chain_inside_lambda_body() {
+    let f = (xs: [int]) => xs.iter().collect()
+    let r = f([1, 2, 3])
+    print("len={r.len}")
+}
+
+// A reassigned parameter is one mutable binding, not a per-iteration one, so
+// every capture shares its box; per-iteration capture is reserved for loop
+// bindings.
+@test(output = "20\n20\n20")
+fn test_param_reassigned_in_loop_shares_one_box() {
+    print_make_fns(0)
+}
+
+fn print_make_fns(x: int) {
+    let fns: [fn() -> int] = []
+    for i in 0..3 {
+        x = i * 10
+        fns.push(() => x)
+    }
+    for f in fns { print(f()) }
+}
+
+// Capturing a range counter turns the numeric for into a goto loop with a
+// shared counter local; each env record must still snapshot its iteration.
+@test(output = "0\n1\n2")
+fn test_range_counter_capture_per_iteration() {
+    let fns: [fn() -> int] = []
+    for i in 0..3 {
+        fns.push(() => i)
+    }
+    for f in fns { print(f()) }
+}
+
+// The enumerate index is a cursor incremented in the latch, a different
+// desugaring from a range counter, but likewise a per-iteration loop binding.
+@test(output = "0\n1\n2")
+fn test_enumerate_index_capture_per_iteration() {
+    let xs = [10, 20, 30]
+    let fns: [fn() -> int] = []
+    for (i, x) in enumerate(xs) {
+        fns.push(() => i)
+    }
+    for f in fns { print(f()) }
+}
+
+// A single-assignment let inside a loop body is snapshotted per iteration.
+@test(output = "0\n1\n2")
+fn test_loop_capture_distinct() {
+    let fns: [fn() -> int] = []
+    for i in 0..3 {
+        let a = i
+        fns.push(() => a)
+    }
+    for f in fns {
+        print(f())
+    }
+}
+
+// A while counter is a reassigned let, not a loop binding: every closure sees
+// its final value even though the increment looks like a latch.
+@test(output = "3\n3\n3")
+fn test_while_counter_capture_under_if() {
+    let fns: [fn() -> int] = []
+    let x = 0
+    while x < 3 {
+        if x >= 0 {
+            fns.push(() => x)
+        }
+        x = x + 1
+    }
+    for f in fns { print(f()) }
+}
+
+// An if-join increment followed by a test has a latch/header shape outside any
+// loop; the capture must still see the later `x = 100`.
+@test(output = "100")
+fn test_nonloop_ifjoin_capture() {
+    for g in make_fns(true) { print(g()) }
+}
+
+fn make_fns(cond: bool) -> [fn() -> int] {
+    let fns: [fn() -> int] = []
+    let x = 0
+    if cond { x = x + 1 }
+    if x < 10 { fns.push(() => x) }
+    x = 100
+    return fns
+}
+
+// A lambda write to a while counter reaches the loop: 0 -> 10 -> 11, exit.
+@test(output = "11")
+fn test_while_counter_lambda_write_visible() {
+    print(run_bump(true))
+}
+
+fn run_bump(cond: bool) -> int {
+    let x = 0
+    while x < 3 {
+        if cond {
+            let bump = () => { x = x + 10 }
+            bump()
+        }
+        x = x + 1
+    }
+    return x
+}
+
+// A lambda-written `for` counter or index is boxed and shared, so the write
+// steers the live counter like a plain in-loop write: 0 -> 10, then exit.
+@test(output = "10")
+fn test_range_counter_lambda_write_steers_loop() {
+    let mut_sum = 0
+    for i in 0..3 {
+        let f = () => { i = i + 10 }
+        f()
+        mut_sum = mut_sum + i
+    }
+    print(mut_sum)
+}
+
+// The user key binding is a fresh cell, distinct from the map cursor, so the
+// write does not corrupt iteration.
+@test(output = "111")
+fn test_map_key_lambda_write_boxes() {
+    let m = map_new()
+    m[1] = 100
+    let sum = 0
+    for (k, v) in m {
+        let f = () => { k = k + 10 }
+        f()
+        sum = sum + k + v
+    }
+    print(sum)
+}
+
+// The enumerate index is the loop counter, so steering it exits the loop.
+@test(output = "110")
+fn test_enumerate_index_lambda_write_steers_loop() {
+    let xs = [10, 20, 30]
+    let sum = 0
+    for (idx, x) in enumerate(xs) {
+        let f = () => { idx = idx + 100 }
+        f()
+        sum = sum + idx + x
+    }
+    print(sum)
+}
+
+// The same snapshot for a let in a while body.
+@test(output = "0 1 2")
+fn test_lambda_capture_loop_var() {
+    let funcs: [fn() -> int] = []
+    let i = 0
+    while i < 3 {
+        let captured = i
+        funcs.push(() => captured)
+        i = i + 1
+    }
+    let out = ""
+    let first = true
+    for f in funcs {
+        if !first { out = out + " " }
+        first = false
+        out = out + "{f()}"
+    }
+    print(out)
+}
+
+nobox value WorldMeleeProfile { move_speed: int }
+struct WorldTickShells<M> { profile: fn(M) -> WorldMeleeProfile? }
+nobox value WorldActorTurnProfile { move_speed: int = 0, moves: bool = true }
+struct WorldActorTurnHost<M> { profile: fn(M) -> WorldActorTurnProfile }
+struct WorldTickRunner<M> {
+    actor_host: WorldActorTurnHost<M>? = null,
+}
+
+fn tick_runner<M>(shells: Entity<WorldTickShells<M>>) -> WorldTickRunner<M> {
+    let runner = WorldTickRunner {}
+    runner.actor_host = WorldActorTurnHost {
+        profile: (shell: M) => {
+            let shells = shells.get() ?? return WorldActorTurnProfile { moves: false }
+            let profile = shells.profile(shell) ?? return WorldActorTurnProfile { moves: false }
+            return WorldActorTurnProfile { move_speed: profile.move_speed }
+        },
+    }
+    return runner
+}
+
+fn tick_fast(shell: int) -> WorldMeleeProfile? { return WorldMeleeProfile { move_speed: shell + 10 } }
+fn tick_slow(shell: int) -> WorldMeleeProfile? { return WorldMeleeProfile { move_speed: shell + 20 } }
+fn tick_absent(_shell: int) -> WorldMeleeProfile? { return null }
+
+@test
+fn c_world_tick_shell_capture_reads_current_callback_after_return() {
+    let rows: Arena<WorldTickShells<int>> = arena_new()
+    let shells = rows.insert(WorldTickShells { profile: tick_fast })
+    let runner = tick_runner(shells)
+    let callback = runner.actor_host.unwrap().profile
+    assert(callback(2).move_speed == 12, "callback survives runner construction")
+    shells.get().unwrap().profile = tick_slow
+    assert(callback(2).move_speed == 22, "callback reads the current shell profile")
+    shells.get().unwrap().profile = tick_absent
+    assert(!callback(2).moves, "an absent shell profile disables movement")
+}
+
+@test
+fn c_world_tick_shell_capture_does_not_revive_after_slot_reuse() {
+    let rows: Arena<WorldTickShells<int>> = arena_new()
+    let shells = rows.insert(WorldTickShells { profile: tick_fast })
+    let runner = tick_runner(shells)
+    let callback = runner.actor_host.unwrap().profile
+    assert(callback(2).moves, "live shell row permits movement")
+    let _ = rows.remove(shells)
+    assert(!callback(2).moves, "retired shell row disables movement")
+    let replacement = rows.insert(WorldTickShells { profile: tick_slow })
+    assert(!callback(2).moves, "slot reuse cannot revive the retained weak handle")
+    let other = tick_runner(replacement)
+    assert(other.actor_host.unwrap().profile(2).move_speed == 22,
+        "replacement runner resolves its own generation")
+}
+
+struct TickBody { move_speed: int }
+
+fn tick_body_profile(body: TickBody) -> WorldMeleeProfile? {
+    return WorldMeleeProfile { move_speed: body.move_speed }
+}
+
+@test
+fn c_world_tick_shell_capture_borrows_the_invocation_body() {
+    let rows: Arena<WorldTickShells<TickBody>> = arena_new()
+    let shells = rows.insert(WorldTickShells { profile: tick_body_profile })
+    let runner = tick_runner(shells)
+    let callback = runner.actor_host.unwrap().profile
+    let body = TickBody { move_speed: 3 }
+    assert(callback(body).move_speed == 3, "profile borrows the invocation's identity body")
+    body.move_speed = 9
+    assert(callback(body).move_speed == 9, "later calls observe the body's current state")
+}

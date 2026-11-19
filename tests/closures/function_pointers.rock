@@ -1,6 +1,6 @@
-// Functions as values: references to named functions, fn-typed locals and
-// parameters called through `f(args)`, higher-order functions, composition,
-// and lambdas taking or returning fn types.
+// Functions as values: references to named and extern functions, fn-typed
+// locals, parameters and globals, higher-order functions, lambdas taking or
+// returning fn types, and equality of values holding fns.
 
 struct Point {
     x: int,
@@ -35,14 +35,6 @@ fn square(x: int) -> int {
     return x * x
 }
 
-fn add_two(x: int) -> int {
-    return x + 2
-}
-
-fn multiply_three(x: int) -> int {
-    return x * 3
-}
-
 fn sum_array(arr: [int]) -> int {
     let total = 0
     for val in arr {
@@ -53,18 +45,6 @@ fn sum_array(arr: [int]) -> int {
 
 fn distance_from_origin(p: Point) -> int {
     return p.x * p.x + p.y * p.y
-}
-
-fn apply_twice(f: fn(int) -> int, x: int) -> int {
-    return f(f(x))
-}
-
-fn transform(f: fn(int) -> int, value: int) -> int {
-    return f(value)
-}
-
-fn compose(f: fn(int) -> int, g: fn(int) -> int, x: int) -> int {
-    return f(g(x))
 }
 
 fn test_func() -> int {
@@ -119,14 +99,6 @@ fn reassign_function_pointer() {
 
     func = subtract_one
     print(func(5))
-}
-
-@test(output = "7\n10\n25\n14")
-fn functions_as_parameters() {
-    print(apply_twice(add_one, 5))
-    print(transform(double, 5))
-    print(transform(square, 5))
-    print(compose(add_two, multiply_three, 4))
 }
 
 @test(output = "10\n100\n50\n42")
@@ -208,4 +180,194 @@ fn test_nested_lambda_with_function_types() {
 
     let inner = outer(square)
     print(inner(3))
+}
+
+struct FnBox {
+    f: fn(float) -> int,
+}
+
+@test
+fn fn_ref_cross_module_let_binding() {
+    let f: fn(float) -> int = float_to_int
+    assert(f(2.7) == 2)
+}
+
+@test
+fn fn_ref_cross_module_struct_field() {
+    let b = FnBox { f: float_to_int }
+    assert(b.f(3.4) == 3)
+}
+
+extern(lua) fn rawequal(a: int, b: int) -> bool
+
+extern(ffi, "string") fn rep(s: string, n: int) -> string
+
+value P { x: float, y: float }
+
+fn take_p(p: P) -> float { return p.x + p.y }
+
+inline(lua) fn twice(a: float) -> float = """
+    return a * 2.0
+"""
+
+inline(js) fn twice(a: float) -> float = """
+    return a * 2.0;
+"""
+
+struct Holder { f: (string, int) -> string }
+
+global EQ: (int, int) -> bool = rawequal
+
+global REP: (string, int) -> string = rep
+
+global REPS: [(string, int) -> string] = [rep]
+
+global HELD: Holder = Holder { f: rep }
+
+global TAKE_P: (P) -> float = take_p
+
+global TWICE: (float) -> float = twice
+
+fn apply(f: (string, int) -> string, s: string, n: int) -> string { return f(s, n) }
+
+@test(backends = "lua") fn bare_extern_direct() { assert(rawequal(7, 7)) }
+@test(backends = "lua") fn bare_extern_in_local() { let g = rawequal; assert(g(7, 7)) }
+@test(backends = "lua") fn bare_extern_via_global() { let g = EQ; assert(g(7, 7)) }
+
+@test(backends = "lua") fn ffi_extern_direct() { assert_eq(rep("ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_in_local() { let g = rep; assert_eq(g("ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_as_arg() { assert_eq(apply(rep, "ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_via_global() { let g = REP; assert_eq(g("ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_via_global_vec() { let g = REPS[0]; assert_eq(g("ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_via_struct_field() { let g = HELD.f; assert_eq(g("ab", 2), "abab") }
+
+@test fn value_param_fn_via_global() { let g = TAKE_P; assert_eq(g(P { x: 1.0, y: 2.0 }), 3.0) }
+@test fn inline_lua_fn_via_global() { let g = TWICE; assert_eq(g(3.0), 6.0) }
+
+@test fn a_lambda_inferred_without_an_expectation_splats_its_tuple() {
+    let f = (x: int) => (x, x + 1)
+    let (a, b) = f(5)
+    assert_eq(a, 5)
+    assert_eq(b, 6)
+}
+
+@test fn a_lambda_checked_against_a_declared_fn_type_splats_its_tuple() {
+    let g: (int) -> (int, int) = x => (x, x + 1)
+    let (a, b) = g(5)
+    assert_eq(a, 5)
+    assert_eq(b, 6)
+}
+
+fn take(f: (int) -> (int, int)) -> int {
+    let (a, b) = f(7)
+    return a * 100 + b
+}
+
+@test fn the_same_lambda_at_a_fn_value_param_agrees_with_its_callee() {
+    assert_eq(take(x => (x, x + 1)), 708)
+}
+
+// `==` between fn values is a compile error (tests/errors/functions.rock.err),
+// but comparing an optional fn against null is refinement.
+@test(output = "yes\n6\nnone")
+fn test_optional_fn_null_checks_refine() {
+    let f: (fn(int) -> int)? = add_one
+    if f != null {
+        print("yes")
+        print("{f(5)}")
+    }
+    let g: (fn(int) -> int)? = null
+    if g == null {
+        print("none")
+    }
+}
+
+// `==` on a struct with a fn-typed field stays legal: a closure env record is
+// the one leaf that compares by identity, never by walking its captures.
+
+struct CbHolder { cb: fn(int) -> int, tag: int }
+
+fn make(n: int) -> CbHolder { return CbHolder { cb: (x) => x + n, tag: 1 } }
+
+@test(output = "true")
+fn test_same_instance_equal() {
+    let h = make(5)
+    let a = CbHolder { cb: h.cb, tag: 7 }
+    let b = CbHolder { cb: h.cb, tag: 7 }
+    print(a == b)
+}
+
+@test(output = "false")
+fn test_separate_creations_not_equal() {
+    print(make(5) == make(5))
+}
+
+struct Counter { bump: fn() -> int, tag: int }
+fn make_counter() -> Counter {
+    let n = 0
+    return Counter { bump: () => { n = n + 1; return n }, tag: 1 }
+}
+@test(output = "false")
+fn test_boxed_capture_not_equal() {
+    print(make_counter() == make_counter())
+}
+
+// The identity leaf rule applies through struct -> vec -> struct -> fn field.
+struct Inner { cb: fn(int) -> int }
+struct Outer { rows: [Inner], tag: int }
+fn make_outer(n: int) -> Outer {
+    return Outer { rows: [Inner { cb: (x) => x + n }], tag: 1 }
+}
+@test(output = "false")
+fn test_nested_record_not_equal() {
+    print(make_outer(5) == make_outer(5))
+}
+@test(output = "true")
+fn test_nested_same_instance_equal() {
+    let o = make_outer(5)
+    let a = Outer { rows: o.rows, tag: 9 }
+    let b = Outer { rows: o.rows, tag: 9 }
+    print(a == b)
+}
+
+// A capture-free lambda is one hoisted fn value per creation site, so two
+// creations from the same site compare equal.
+struct CfHolder { cb: fn() -> int, tag: int }
+fn make_capfree() -> CfHolder { return CfHolder { cb: () => 42, tag: 1 } }
+@test(output = "true")
+fn test_capfree_same_site_equal() {
+    print(make_capfree() == make_capfree())
+}
+
+// A generic `==` wrapper compiles for non-fn types; only a fn instantiation is
+// rejected (tests/errors/functions.rock.err).
+
+fn same<T>(a: T, b: T) -> bool { return a == b }
+
+struct EqP { x: int }
+value EqV { n: int }
+
+@test(output = "true false true true")
+fn test_same_non_fn_types_through_generic() {
+    let p = EqP { x: 1 }
+    let a = EqV { n: 3 }
+    let b = EqV { n: 3 }
+    print("{same(1, 1)} {same(\"a\", \"b\")} {same(p, p)} {same(a, b)}")
+}
+
+fn same_via<T>(a: T, b: T) -> bool { return same(a, b) }
+
+@test(output = "true false")
+fn test_same_forwarded_through_generic() {
+    print("{same_via(2, 2)} {same_via(\"a\", \"b\")}")
+}
+
+// A generic null check is refinement, not identity: it accepts a fn type.
+fn is_set<T>(x: T?) -> bool { return x != null }
+
+@test(output = "true false")
+fn test_generic_null_check_on_fn() {
+    let f: (fn(int) -> int)? = add_one
+    let g: (fn(int) -> int)? = null
+    print("{is_set(f)} {is_set(g)}")
 }
