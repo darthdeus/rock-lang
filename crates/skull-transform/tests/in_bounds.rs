@@ -112,10 +112,6 @@ impl Probe {
     fn run(&mut self) {
         elide_bounds_checks_for_target(None, &mut self.f, FnBackend::Js);
     }
-
-    fn run_lua(&mut self) {
-        elide_bounds_checks_for_target(None, &mut self.f, FnBackend::Lua);
-    }
 }
 
 /// `for i in 0..xs.len() { <body(B)>; xs[i] = 1; <after(B)> }` with the
@@ -442,12 +438,8 @@ fn affine_probe(case: &str) -> ContainerKind {
 }
 
 #[test]
-fn bounded_whole_affine_native_buffer_index() {
-    assert_eq!(affine_probe("valid"), ContainerKind::NativeBufferInBounds);
-}
-
-#[test]
 fn affine_proof_requires_whole_bounded_operands_and_live_length() {
+    assert_eq!(affine_probe("valid"), ContainerKind::NativeBufferInBounds);
     for case in [
         "fractional_count",
         "fractional_row",
@@ -464,91 +456,69 @@ fn affine_proof_requires_whole_bounded_operands_and_live_length() {
 }
 
 #[test]
-fn a_literal_array_push_preserves_unrelated_bounds() {
-    let mut p = Probe::new();
-    let arr = p.emit(p.f.entry, Inst::MakeVec(vec![]));
-    let (_, store) = counted_loop(&mut p, |p, b| {
-        let value = p.int(b, 7);
-        p.emit(
-            b,
-            Inst::ArrayPush {
-                arr,
-                value,
-                kind: ContainerKind::Vec,
+fn only_a_private_lua_literal_push_preserves_unrelated_bounds() {
+    let literal = |p: &mut Probe| p.emit(p.f.entry, Inst::MakeVec(vec![]));
+    let cases: [(&str, fn(&mut Probe) -> Idx<Inst>, FnBackend, ContainerKind); 4] = [
+        (
+            "private literal",
+            literal,
+            FnBackend::Lua,
+            ContainerKind::VecNonNullInBounds,
+        ),
+        (
+            "exposed backing",
+            |p| {
+                let arr = p.emit(p.f.entry, Inst::MakeVec(vec![]));
+                p.emit(
+                    p.f.entry,
+                    Inst::Field {
+                        nonthrowing: false,
+                        base: arr,
+                        field: u("_data"),
+                    },
+                );
+                arr
             },
-        );
-    });
-    p.run_lua();
-    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
-}
-
-#[test]
-fn exposing_a_literal_backing_revokes_private_push() {
-    let mut p = Probe::new();
-    let arr = p.emit(p.f.entry, Inst::MakeVec(vec![]));
-    p.emit(
-        p.f.entry,
-        Inst::Field {
-            nonthrowing: false,
-            base: arr,
-            field: u("_data"),
-        },
-    );
-    let (_, store) = counted_loop(&mut p, |p, b| {
-        let value = p.int(b, 7);
-        p.emit(
-            b,
-            Inst::ArrayPush {
-                arr,
-                value,
-                kind: ContainerKind::Vec,
+            FnBackend::Lua,
+            ContainerKind::VecNonNull,
+        ),
+        (
+            // The push goes through the direct alias, which must be revoked too.
+            "borrowed cell",
+            |p| {
+                let cell = p.f.new_cell(None);
+                p.f.cells[cell].borrowed = true;
+                let arr = p.emit(p.f.entry, Inst::MakeVec(vec![]));
+                p.store(p.f.entry, cell, arr);
+                arr
             },
-        );
-    });
-    p.run_lua();
-    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
-}
-
-#[test]
-fn a_borrowed_cell_does_not_keep_private_vector_provenance() {
-    let mut p = Probe::new();
-    let cell = p.f.new_cell(None);
-    p.f.cells[cell].borrowed = true;
-    let arr = p.emit(p.f.entry, Inst::MakeVec(vec![]));
-    p.store(p.f.entry, cell, arr);
-    let (_, store) = counted_loop(&mut p, |p, b| {
-        let value = p.int(b, 7);
-        // The original direct alias must be revoked too, not just the cell.
-        p.emit(
-            b,
-            Inst::ArrayPush {
-                arr,
-                value,
-                kind: ContainerKind::Vec,
-            },
-        );
-    });
-    p.run_lua();
-    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
-}
-
-#[test]
-fn a_fresh_js_array_does_not_prove_absence_of_inherited_setters() {
-    let mut p = Probe::new();
-    let arr = p.emit(p.f.entry, Inst::MakeVec(vec![]));
-    let (_, store) = counted_loop(&mut p, |p, b| {
-        let value = p.int(b, 7);
-        p.emit(
-            b,
-            Inst::ArrayPush {
-                arr,
-                value,
-                kind: ContainerKind::Vec,
-            },
-        );
-    });
-    skull_transform::elide_bounds_checks_for_target(None, &mut p.f, bone_core::hir::FnBackend::Js);
-    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
+            FnBackend::Lua,
+            ContainerKind::VecNonNull,
+        ),
+        (
+            "fresh JS array with possibly inherited setters",
+            literal,
+            FnBackend::Js,
+            ContainerKind::VecNonNull,
+        ),
+    ];
+    for (name, make_arr, backend, expected) in cases {
+        let mut p = Probe::new();
+        let arr = make_arr(&mut p);
+        let (_, store) = counted_loop(&mut p, |p, b| {
+            let value = p.int(b, 7);
+            p.emit(
+                b,
+                Inst::ArrayPush {
+                    arr,
+                    value,
+                    kind: ContainerKind::Vec,
+                },
+            );
+        });
+        elide_bounds_checks_for_target(None, &mut p.f, backend);
+        assert_eq!(p.kind(store), expected, "{name}");
+    }
 }
 
 #[test]
@@ -586,15 +556,12 @@ fn only_private_lua_record_reads_preserve_bounds() {
         let zero = p.int(body, 0);
         let check = p.check(body, p.xs, zero);
         p.f.set_term(body, Term::Return(vec![]));
-        skull_transform::elide_bounds_checks_for_target(
-            None,
-            &mut p.f,
-            if mode == "js" {
-                bone_core::hir::FnBackend::Js
-            } else {
-                bone_core::hir::FnBackend::Lua
-            },
-        );
+        let backend = if mode == "js" {
+            FnBackend::Js
+        } else {
+            FnBackend::Lua
+        };
+        elide_bounds_checks_for_target(None, &mut p.f, backend);
         assert_eq!(p.is_slot(check), matches!(mode, "lua" | "alias"), "{mode}");
     }
 }

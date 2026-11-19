@@ -1,5 +1,5 @@
 use comfy_la_arena::Idx;
-use skull_mir::mir::{Inst, MirFunc};
+use skull_mir::mir::{Cell, Inst, MirFunc};
 use skull_transform::scope::ScopeTree;
 use ustr::Ustr;
 
@@ -49,6 +49,19 @@ fn boxes(mf: &MirFunc) -> Vec<&Vec<(Ustr, Idx<Inst>)>> {
             _ => None,
         })
         .collect()
+}
+
+/// The first lambda's captured cell and the entry position of its initializer.
+fn captured_initializer(mf: &MirFunc) -> (ScopeTree, Idx<Cell>, usize) {
+    let tree = ScopeTree::build(mf);
+    let own = tree.analyze(mf);
+    let cell = *own.captures[1].iter().next().unwrap();
+    let init = mf.blocks[mf.entry]
+        .insts
+        .iter()
+        .position(|&id| matches!(mf.insts[id], Inst::Store { cell: c, .. } if c == cell))
+        .unwrap();
+    (tree, cell, init)
 }
 
 fn execute(lua: &str, driver: &str) {
@@ -125,14 +138,7 @@ const MUTABLE_LOCAL: &str = "fn f(input: int, replacement: int) -> fn() -> int {
 #[test]
 fn pre_initialization_read_retains_the_entry_box() {
     let (mf, lua) = converted(MUTABLE_LOCAL, |mf| {
-        let tree = ScopeTree::build(mf);
-        let own = tree.analyze(mf);
-        let cell = *own.captures[1].iter().next().unwrap();
-        let init = mf.blocks[mf.entry]
-            .insts
-            .iter()
-            .position(|&id| matches!(mf.insts[id], Inst::Store { cell: c, .. } if c == cell))
-            .unwrap();
+        let (_, cell, init) = captured_initializer(mf);
         let read = mf.alloc_inst(Inst::Load(cell));
         mf.blocks[mf.entry].insts.insert(init, read);
     });
@@ -154,14 +160,7 @@ fn branch_dependent_initialization_retains_the_entry_box() {
         return () => n\n\
     }",
         |mf| {
-            let tree = ScopeTree::build(mf);
-            let own = tree.analyze(mf);
-            let cell = *own.captures[1].iter().next().unwrap();
-            let init = mf.blocks[mf.entry]
-                .insts
-                .iter()
-                .position(|&id| matches!(mf.insts[id], Inst::Store { cell: c, .. } if c == cell))
-                .unwrap();
+            let (_, _, init) = captured_initializer(mf);
             mf.blocks[mf.entry].insts.remove(init);
         },
     );
@@ -235,27 +234,12 @@ fn initializer_after_a_join_can_seed_the_box() {
 fn forward_capture_retains_the_entry_box() {
     // Construct a forward capture directly: the MIR transform must preserve
     // its shared cell even when source definite-assignment disallows the shape.
-    let (mf, lua) = converted(
-        "fn f(input: int, replacement: int) -> fn() -> int {\n\
-             let n = input\n\
-             let read = () => n\n\
-             n = replacement\n\
-             return read\n\
-         }",
-        |mf| {
-            let tree = ScopeTree::build(mf);
-            let own = tree.analyze(mf);
-            let cell = *own.captures[1].iter().next().unwrap();
-            let lambda = tree.scopes[1].lambda.unwrap();
-            let init = mf.blocks[mf.entry]
-                .insts
-                .iter()
-                .position(|&id| matches!(mf.insts[id], Inst::Store { cell: c, .. } if c == cell))
-                .unwrap();
-            mf.blocks[mf.entry].insts.retain(|&id| id != lambda);
-            mf.blocks[mf.entry].insts.insert(init, lambda);
-        },
-    );
+    let (mf, lua) = converted(MUTABLE_LOCAL, |mf| {
+        let (tree, _, init) = captured_initializer(mf);
+        let lambda = tree.scopes[1].lambda.unwrap();
+        mf.blocks[mf.entry].insts.retain(|&id| id != lambda);
+        mf.blocks[mf.entry].insts.insert(init, lambda);
+    });
     let boxes = boxes(&mf);
     assert_eq!(boxes.len(), 1);
     assert!(
