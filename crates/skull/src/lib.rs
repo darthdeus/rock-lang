@@ -1,10 +1,4 @@
-//! skull: the default code-generation backend over `bone`'s typed HIR.
-//!
-//! skull consumes `bone` as a library (`parse_rock` -> `semantic_pass` ->
-//! `Workspace`), lowers the typed HIR to the `skull-mir` cell-model CFG, runs
-//! the `skull-transform` passes over it, and assembles a LuaJIT program from
-//! the `skull-codegen-lua` output ([`mir_emit`]). The JS and GLSL backends
-//! read the same MIR.
+//! The default code-generation backend over `bone`'s typed HIR.
 
 pub mod allocation_report;
 pub(crate) mod coroutine_emit;
@@ -14,10 +8,6 @@ pub mod shader_artifact;
 /// Whether emitted Lua carries LuaJIT line directives (`ROCK_SKULL_LINE_DIRECTIVES`).
 pub use skull_codegen_lua::line_directives_mode;
 
-// The shared graph layer, re-exported under its original paths. It moved BELOW
-// the backends (`skull-graph`) so the JS and GLSL emitters can realize the same
-// graph the luajit driver does; consumers name it the same way either side of
-// that move.
 pub use skull_graph::{
     artifact, concrete_body, expr_subtree, instance_graph, shader, target_projection,
 };
@@ -34,7 +24,6 @@ use skull_parser::CompilerError;
 pub type ShapeHashes = rustc_hash::FxHashMap<ustr::Ustr, u64>;
 
 /// Hash type layouts to detect reloads that cannot preserve live values.
-/// Boxed children have independent entries. Inline children affect the parent.
 pub fn type_shape_hashes(ws: &Workspace) -> Result<ShapeHashes, CompilerError> {
     use bone_semantic::hir::VariantPayload;
     use std::hash::{Hash, Hasher};
@@ -78,8 +67,6 @@ pub fn type_shape_hashes(ws: &Workspace) -> Result<ShapeHashes, CompilerError> {
     Ok(out)
 }
 
-/// Inline children contribute their own layout hashes. The recursion guard keeps
-/// an invalid embed cycle finite even if it passes semantic checking.
 fn struct_shape_hash(
     ws: &Workspace,
     s: &bone_semantic::hir::StructDef,
@@ -121,9 +108,7 @@ fn struct_shape_hash(
     Ok(h.finish())
 }
 
-/// The type names whose shape hash differs between two compiles: changed,
-/// added, or removed entries all count -- live data under a REMOVED type is
-/// just as stale as under a changed one.
+/// The type names whose shape hash changed, was added, or was removed.
 pub fn shape_diff(old: &ShapeHashes, new: &ShapeHashes) -> Vec<String> {
     let mut changed: Vec<String> = new
         .iter()
@@ -146,25 +131,15 @@ pub fn user_module_id(ws: &Workspace) -> Result<ModuleId, CompilerError> {
         .next()
         .ok_or_else(|| CompilerError::new_no_location("skull: no user module after semantic_pass"))
 }
-/// A `@test` function discovered in a module: its LOGICAL name (the DefKey --
-/// what a report labels and what the value backends look the fn up by), the
-/// SYMBOL the artifact defines it under, and the expected stdout of
-/// `@test(output = "...")`.
-///
-/// The two differ for a v1 package. `@test` is mangling-exempt, so the emitted
-/// global is the key's declared segment, while the key itself (`pkg::mod::name`)
-/// is not an identifier in any backend's grammar. A harness that must CALL the
-/// test uses `symbol`; text a human reads uses `name`.
+/// A `@test` function: its logical `name` for reports and the `symbol` the artifact defines it under.
 #[derive(Clone, Debug)]
 pub struct SkullTest {
     pub name: String,
     pub symbol: String,
     pub output: Option<String>,
-    /// `@test(returns = <literal>)`: the fn's return value is captured by the
-    /// backend harness and compared HOST-side against this pinned literal.
+    /// `@test(returns = <literal>)`, compared host-side.
     pub returns: Option<ValueExpect>,
-    /// `@test(backends = "...")`: the only backends that compile and run the
-    /// test. `None` = every backend.
+    /// `@test(backends = "...")`; `None` means every backend.
     pub backends: Option<Vec<bone_core::annotations::TestBackend>>,
 }
 
@@ -176,9 +151,7 @@ impl SkullTest {
     }
 }
 
-/// The pinned literal of a `@test(returns = ...)` value test. Comparison policy
-/// (int/bool exact, float relative tolerance) lives host-side in
-/// `rock-cli/src/test_protocol.rs`.
+/// The pinned literal of a `@test(returns = ...)` value test.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ValueExpect {
     Int(i64),
@@ -186,9 +159,7 @@ pub enum ValueExpect {
     Bool(bool),
 }
 
-/// Unescape a `@test(output = "...")` string the way rock's test runner does:
-/// the source had `\\n`, so the parsed annotation value carries a literal
-/// backslash-n that must become a real newline before comparison.
+/// Unescape a `@test(output = "...")` string: a literal `\n` becomes a newline.
 fn unescape_expected(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -214,10 +185,7 @@ fn unescape_expected(s: &str) -> String {
     out
 }
 
-/// The `@test` functions in `mid`, with their expected outputs (if any).
-/// `Err` = a malformed `@test` annotation (bad `returns` literal, or
-/// `returns` + `expect_failure` together) -- a spanned rejection, never a
-/// silently-ignored annotation.
+/// The `@test` functions in `mid`; `Err` for a malformed `@test` annotation.
 pub fn module_tests(ws: &Workspace, mid: ModuleId) -> Result<Vec<SkullTest>, CompilerError> {
     Ok(module_tests_with_ids(ws, mid)?
         .into_iter()
@@ -244,8 +212,6 @@ pub fn module_tests_with_ids(
         let Some(test_ann) = f.annotations.iter().find(|a| a.is_builtin("test")) else {
             continue;
         };
-        // Honor `@ignore` (same convention as rock-cli/src/test.rs): a test
-        // marked ignored is not run.
         if f.annotations.iter().any(|a| a.is_builtin("ignore")) {
             continue;
         }
@@ -270,11 +236,6 @@ pub fn module_tests_with_ids(
             }),
             None => None,
         };
-        // A `@test(expect_failure = true)` asserts a COMPILE error, not runtime
-        // output — the execution oracle can't verify rejection (and an accepted
-        // one is a type-checker gap, not a codegen issue). Skip it here; the
-        // compile-fail / backend-diff harnesses cover rejection. Combining it
-        // with `returns` (a runtime-value assertion) is contradictory.
         if test_ann.args.iter().any(|arg| {
             arg.name
                 .as_ref()
@@ -300,9 +261,6 @@ pub fn module_tests_with_ids(
         }) {
             Some(arg) => match &arg.value {
                 bone_semantic::hir::AnnoValue::String(s) => Some(unescape_expected(s.as_str())),
-                // A lone `{` makes the literal an interpolation expression
-                // (AnnoValue::Other) -- dropping it to None silently un-pins
-                // the expectation, so reject instead.
                 _ => {
                     return Err(CompilerError::new_with_label(
                         test_ann.span,
@@ -345,8 +303,6 @@ pub fn module_tests_with_ids(
             fid,
             SkullTest {
                 name: display_name(f.name.as_str()).to_string(),
-                // The one emitted-name oracle, so the harness cannot drift from
-                // the definition the artifact actually writes.
                 symbol: skull_mir::mangle::mangle_fn(ws, f),
                 output,
                 returns,
@@ -357,14 +313,10 @@ pub fn module_tests_with_ids(
     Ok(out)
 }
 
-// --- emit-name helpers (pure; shared by the new-path `mir_emit` + scaffolding) ---
-
-/// Lua name for a global's init fn (`<global> = __skull_ginit_<global>()`).
 pub(crate) fn global_init_fn_name(global: &str) -> String {
     format!("__skull_ginit_{}", global)
 }
 
-/// A `@deco`-annotation argument (or `deco` param default) as a Lua literal.
 pub(crate) fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String> {
     use bone_semantic::hir::AnnoValue as A;
     Some(match v {
@@ -378,14 +330,7 @@ pub(crate) fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<
     })
 }
 
-/// The Lua argument list for one `@deco` application: each `deco` param gets its
-/// named annotation arg if present, else its default (`nil`, or the omitted
-/// marker where an explicit `null` overrides the default -- filled callee-side
-/// in `__deco_<name>`'s prologue). Required params without an arg, and
-/// non-literal args/defaults, error. The selection (named/default/required) is
-/// the backend-agnostic `skull_mir::decorator::select_decorator_args`, shared
-/// with the JS backend's `decorator_call_args_js`; only the literal rendering
-/// (`annotation_value_lua`) and the default tokens are Lua-specific.
+/// The Lua argument list for one `@deco` application.
 pub(crate) fn decorator_call_args(
     ws: &Workspace,
     module: ModuleId,
@@ -410,10 +355,6 @@ pub(crate) fn decorator_call_args(
     Ok(args)
 }
 
-/// Runtime globals the stdlib expects pre-seeded (rock's codegen emits an init
-/// that does this; skull emits this small prelude instead). Empty tables are
-/// enough — the stdlib's accessors (`__rock_create_struct`, `vec_new`)
-/// nil-guard per-key, so they self-heal off a present-but-empty registry.
 fn runtime_prelude() -> &'static str {
     // LuaJIT can fail to place a second nearby mcode block on arm64. The first block
     // holds the full budget. Higher exit and trace limits reduce repeated recording
@@ -428,7 +369,6 @@ fn runtime_prelude() -> &'static str {
                 "{NB_PRIM_STORAGE}",
                 &skull_mir::lower::nb_prim_storage_lua(),
             );
-        // An unsubstituted placeholder is valid Lua and leaves the view registry empty.
         assert!(
             !out.contains("{LEAF_VIEWS}"),
             "prelude template still contains an unsubstituted {{LEAF_VIEWS}} placeholder"
@@ -852,16 +792,11 @@ if not _G.__rock_rng_next then
 end
 "#;
 
-/// Map a value-struct field type to a C type for `ffi.cdef`, or `None` when the
-/// field is not C-layout-mappable. Delegates to the single mappability oracle
-/// `skull_mir::lower::value_field_c_type` (shared with the GC-tier
-/// shared `ValueStorage` classification, so the cdef view and the pack-site
-/// `_ct`/`_vt` choice can never diverge).
+/// A value-struct field's C type for `ffi.cdef`, or `None` when not C-mappable.
 fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
     skull_mir::lower::value_field_c_type(ws, ty)
 }
 
-/// Whether a struct named `name` is declared `value` (C-layout cdata).
 fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
@@ -873,9 +808,7 @@ fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
         .unwrap_or(false)
 }
 
-/// Canonical (deduped, name-sorted) list of `value` structs in the workspace,
-/// via the same `struct_by_name` view name resolution uses. Sorted so the
-/// emitted Lua is deterministic across runs (module maps hash-iterate).
+/// Deduped, name-sorted `value` structs.
 fn canonical_value_structs(ws: &Workspace) -> Vec<&bone_semantic::hir::StructDef> {
     let mut v: Vec<_> = ws
         .struct_by_name
@@ -889,7 +822,6 @@ fn canonical_value_structs(ws: &Workspace) -> Vec<&bone_semantic::hir::StructDef
     v
 }
 
-/// Allocate a native value from scalar leaves without nested FFI descriptors.
 fn leaf_ctor_def(ws: &Workspace, name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
     let sym = skull_mir::mangle::type_symbol(ws, name);
     let params: Vec<String> = (0..paths.len()).map(|i| format!("l{i}")).collect();
@@ -974,8 +906,6 @@ fn value_struct_defs(
         return Ok((String::new(), emitted, gc));
     }
 
-    // Partition by tier. GC-carrying value structs materialize as Lua tables
-    // (`_vt`), never as cdef, so only FFI-clean structs enter the ordering.
     let mut ffi_structs = Vec::new();
     for &s in vstructs {
         let storage = rep_arena
@@ -1000,8 +930,6 @@ fn value_struct_defs(
             let mut body = String::new();
             let mut blocked = false;
             for f in &s.fields {
-                // An FFI-clean struct has every field C-mappable by construction
-                // (that is what the `CData` storage plan means).
                 let ct = c_field_type(ws, f.storage_ty).expect(
                     "FFI-clean value-struct field must be C-mappable (CData storage invariant)",
                 );
@@ -1010,8 +938,6 @@ fn value_struct_defs(
                     blocked = true;
                     continue;
                 }
-                // The dependency key above is the LOGICAL name (what the
-                // workspace sets hold); the cdef text is the C one.
                 let field_type = skull_mir::mangle::type_symbol(ws, dep);
                 if ffi_names.contains(&dep)
                     || skull_mir::lower::EnumPlan::for_name(ws, dep)
@@ -1035,11 +961,8 @@ fn value_struct_defs(
                 let sym = skull_mir::mangle::type_symbol(ws, s.name);
                 typedefs.push_str(&format!("typedef struct {{\n{}}} {};\n", body, sym));
                 ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = sym));
-                // Leaf-taking ctor: LuaJIT has no brace elision, so a nested
-                // field cannot be passed as loose scalars to `_ct`. Allocate and
-                // write leaves instead, hoisting each nested reference once.
-                // Used by the normalization that keeps a `nobox` field from
-                // materializing when its parent boxes.
+                // LuaJIT has no brace elision, so a nested field cannot be passed as
+                // loose scalars to `_ct`; allocate and write leaves instead.
                 let paths = rep_arena
                     .nominal_value_leaf_paths_required(
                         ws,
@@ -1071,9 +994,6 @@ fn value_struct_defs(
     if typedefs.is_empty() {
         return Ok((String::new(), emitted, gc));
     }
-    // Direct ffi.cdef: a skull chunk loads once per process, so a failure here
-    // is a genuine emit bug and must abort with LuaJIT's own message — the old
-    // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
     let (checks, storage) = value_leaf_layout_checks(ws, &emitted, rep_arena)?;
     Ok((
         format!("ffi.cdef[[\n{}]]\n{}{}{}", typedefs, ctors, checks, storage),
@@ -1082,11 +1002,8 @@ fn value_struct_defs(
     ))
 }
 
-/// The load-time check behind [`value_leaf_layout_checks`]. `leaves` is
-/// `path offset` pairs and `nested` maps each nested field path to its C type,
-/// so the helper composes `ffi.offsetof` along a leaf's path. A nested leaf is
-/// also checked through its flattened alias (`cdata_leaf_alias`), whose name
-/// is `prefix` plus the hex of the path.
+/// The load-time layout check: `leaves` is `path offset` pairs and `nested`
+/// maps each nested field path to its C type.
 const LAYOUT_CHECK_LUA: &str = r#"do
 local hex = {}
 for i = 0, 255 do hex[string.char(i)] = string.format("%02x", i) end
@@ -1123,8 +1040,7 @@ end
 if jit and jit.off then jit.off(__rock_layout_check) end
 "#;
 
-/// Check the compiler offsets against LuaJIT and register buffer layouts from
-/// the same plan. Wrong offsets can corrupt storage during typed leaf access.
+/// Check the compiler offsets against LuaJIT and register buffer layouts.
 fn value_leaf_layout_checks(
     ws: &Workspace,
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
@@ -1197,14 +1113,10 @@ fn value_struct_gc_defs(
             continue;
         }
         let n = s.name;
-        // `n` stays the readable path for DISPLAY text; every name the chunk
-        // defines or tags with is the type's symbol.
         let sym = skull_mir::mangle::type_symbol(ws, n);
         let shown = display_name(n.as_str());
         let mt = skull_codegen_lua::value_struct_metatable_name(sym.as_str());
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
-        // A leaf-table struct has no declared-field keys to compare or print, so
-        // both metamethods and its ctor run off the leaf paths instead.
         let storage = rep_arena
             .nominal_value_storage_required(ws, bone_semantic::hir::FnBackend::Lua, n)
             .map_err(|e| CompilerError::new_no_location(e.message))?;
@@ -1251,10 +1163,8 @@ fn value_struct_gc_defs(
             out.push_str(&display_return(&parts, "  "));
             out.push_str("end\n");
             let params: Vec<String> = (0..paths.len()).map(|i| format!("l{i}")).collect();
-            // An absent tag canonicalizes to `nil` -- the form a `= null` write
-            // and an absent literal both store. The scalar ABI spells absence
-            // `false` on the wire, and two logically-equal absent values then
-            // compared unequal (`__eq` is a per-key compare, and `false ~= nil`).
+            // An absent tag canonicalizes to `nil`: the scalar ABI spells absence
+            // `false`, and `__eq` is a per-key compare where `false ~= nil`.
             let presence = rep_arena
                 .nominal_value_leaf_presence_flags_required(
                     ws,
@@ -1288,12 +1198,8 @@ fn value_struct_gc_defs(
             ));
             continue;
         }
-        // The box's keys: a declared field's name, or an inline child's dotted
-        // leaf paths (`skull_mir::lower::gc_table_fields`, shared with every
-        // MIR reader and writer of the box).
         let fields = skull_mir::lower::gc_table_fields(ws, bone_semantic::hir::FnBackend::Lua, n)
             .map_err(|e| CompilerError::new_no_location(e.message))?;
-        // value __eq
         out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
         out.push_str("  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n");
         let cmps: Vec<String> = fields
@@ -1317,7 +1223,6 @@ fn value_struct_gc_defs(
             out.push_str(&format!("  return {}\n", cmps.join(" and ")));
         }
         out.push_str("end\n");
-        // __tostring: field-wise, mirroring the cdata tier's `Name { f: v, .. }`.
         out.push_str(&format!("{mt}.__tostring = function(v)\n"));
         if fields.is_empty() {
             out.push_str(&format!("  return \"{shown} {{ }}\"\n"));
@@ -1332,9 +1237,6 @@ fn value_struct_gc_defs(
             out.push_str(&display_return(&parts, "  "));
         }
         out.push_str("end\n");
-        // `<Name>_vt(...)` positional ctor over the box keys. A declared field's
-        // parameter keeps its name; an inline leaf's is positional, since a
-        // dotted path has no injective identifier spelling.
         let mut params = Vec::new();
         let mut body = String::new();
         for f in &fields {
@@ -1344,7 +1246,6 @@ fn value_struct_gc_defs(
                 } else {
                     key.as_str().to_string()
                 };
-                // An absent tag canonicalizes to `nil`, as the leaf-table ctor's.
                 let value = if presence {
                     format!("{param} or nil")
                 } else {
@@ -1381,13 +1282,7 @@ fn lua_key_read(table: &str, key: &str) -> String {
     }
 }
 
-/// Emit the `ffi.cdef` typedef + `<Enum>_ct` ctor for every cdata-eligible enum
-/// (`skull_mir::lower::enum_value_shape`): a `value`-struct-style cdata
-/// `{ int __tag; <T> _0; }` carrying the variant tag + its single scalar payload.
-/// Scalar payloads only (cut 1), so there is no inter-enum dependency; emitted
-/// BEFORE value structs so a future enum-typed value-struct field resolves. Name-
-/// sorted for deterministic output. Reflection is sacrificed: there is no
-/// `{__variant}` table.
+/// The `ffi.cdef` typedef and `<Enum>_ct` ctor for every cdata-eligible enum.
 fn enum_cdata_defs(ws: &Workspace) -> String {
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
     names.sort_by(|a, b| display_name(a.as_str()).cmp(display_name(b.as_str())));
@@ -1416,12 +1311,8 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
     format!("ffi.cdef[[\n{}]]\n{}", typedefs, ctors)
 }
 
-/// Attach an `ffi.metatype` to each cdata-eligible ENUM ctype giving it value
-/// `__eq` (compare `__tag` + `_0`, so two distinct `<Enum>_ct` cdata with equal
-/// fields are `==`) and a `__tostring` that
-/// renders `<Enum>::<Variant>` from a baked names table -- static reflection, no
-/// runtime engine. Without `__eq`, LuaJIT compares struct cdata by identity, so an
-/// ESCAPING enum (stored in `[Enum]`, a Map, ...) mis-compares. Name-sorted.
+/// Attach an `ffi.metatype` to each cdata-eligible enum ctype: without
+/// `__eq`, LuaJIT compares struct cdata by identity.
 fn enum_cdata_metatypes(ws: &Workspace) -> String {
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
     names.sort_by(|a, b| display_name(a.as_str()).cmp(display_name(b.as_str())));
@@ -1437,7 +1328,6 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
             out.push_str("_G.__ROCK_C_METATYPE = _G.__ROCK_C_METATYPE or {}\n");
             any = true;
         }
-        // value `__eq`: all C fields equal (`__tag` + every payload slot).
         let mut eq = String::from("a.__tag == b.__tag");
         for (nm, _) in &shape.slots {
             eq.push_str(&format!(" and a.{nm} == b.{nm}"));
@@ -1449,11 +1339,6 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
              \x20   if type(b) ~= \"cdata\" or type(a) ~= \"cdata\" then return false end\n\
              \x20   return {eq}\n  end,\n"
         ));
-        // __tostring: per-variant baked render -- compile-time reflection matching
-        // rock's inspect (unit `E::V`; tuple `E::V { [1] = .., [2] = .. }`; record
-        // `E::V { f = .., .. }` with record fields SORTED alphabetically). Static, no
-        // runtime reflection engine -- the directive's "solve reflection at compile
-        // time" for the tostring case.
         let mut ts = String::from("  __tostring = function(v)\n    local t = v.__tag\n");
         if let Some(eid) = ws.enums_by_name.get(&name) {
             use bone_semantic::hir::VariantPayload;
@@ -1517,13 +1402,9 @@ fn push_cdata_metatype_trampoline(out: &mut String, sym: &str) {
         ));
 }
 
-/// Attach an `ffi.metatype` to each value-struct ctype giving it value
-/// `__eq` (field-wise) and `__tostring`, so `c == c2` on two distinct cdata
-/// compares by value instead of by pointer identity (the LuaJIT default).
-/// A thin metatype trampoline delegates to a mutable
-/// `_G.__ROCK_C_METATYPE[name]` impl table (metatypes seal once, so the
-/// trampoline indirection is what lets a reload update the impl). Gated by
-/// `emitted` — exactly the structs `value_struct_defs` declared a ctype for.
+/// Attach an `ffi.metatype` to each value-struct ctype. Metatypes seal once,
+/// so a trampoline delegates to the mutable `_G.__ROCK_C_METATYPE[name]`
+/// impl table, which a reload can update.
 fn value_struct_metatypes(
     ws: &Workspace,
     vstructs: &[&bone_semantic::hir::StructDef],
@@ -1581,19 +1462,15 @@ fn value_struct_metatypes(
     out
 }
 
-/// Unit-only enums use numeric tags and a names table. Mixed enums keep unit
-/// singletons across reloads so preserved values retain identity.
 pub(crate) type ValueCtors = Vec<(ustr::Ustr, String)>;
 
 const VALUE_CTOR_SUFFIXES: [&str; 2] = ["_lct", "_vt"];
-/// Each suffix followed by the call's opening parenthesis.
 const VALUE_CTOR_CALLS: [&str; 2] = ["_lct(", "_vt("];
 
 pub(crate) fn is_value_ctor_global(name: &str) -> bool {
     VALUE_CTOR_SUFFIXES.iter().any(|s| name.ends_with(s))
 }
 
-/// Adds every value ctor that `lua` calls to `out`.
 pub(crate) fn push_value_ctor_calls(lua: &str, out: &mut Vec<ustr::Ustr>) {
     for call in VALUE_CTOR_CALLS {
         for at in memchr::memmem::find_iter(lua.as_bytes(), call.as_bytes()) {
@@ -1624,10 +1501,7 @@ pub(crate) fn is_enum_names_global(name: &str) -> bool {
     name.starts_with("__rock_enum_") && name.ends_with("_names")
 }
 
-/// The ordinal -> display-name tables (`__rock_enum_<E>_names[tag]`) of the
-/// payload-free enums whose table is in `read`. Interp stringify is their only
-/// reader, so a table nothing reads is not emitted. They hold no identity, so
-/// an overlay may define one again.
+/// The ordinal -> display-name tables of the payload-free enums in `read`.
 pub(crate) fn enum_names_defs(ws: &Workspace, read: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
     use bone_semantic::hir::VariantPayload;
     let mut out = String::new();
@@ -1644,8 +1518,6 @@ pub(crate) fn enum_names_defs(ws: &Workspace, read: &rustc_hash::FxHashSet<ustr:
             {
                 continue;
             }
-            // The table is a Lua GLOBAL, so its name carries the enum's
-            // symbol; the values it holds are display text.
             let name = skull_mir::mangle::enum_names_global(ws, e.name);
             if !read.contains(&name) {
                 continue;
@@ -1673,10 +1545,6 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
     let mut out = String::new();
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
-            // A cdata-eligible enum is a value cdata `{__tag, _0}` with no
-            // singleton or names table; its ctype defs come from
-            // `enum_cdata_defs`, while `type_table_defs` records its physical
-            // slots and logical variants for typed runtime consumers.
             if skull_mir::lower::EnumPlan::for_name(ws, e.name)
                 .is_some_and(|plan| plan.cdata().is_some())
             {
@@ -1687,17 +1555,12 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                     .iter()
                     .all(|v| matches!(v.payload, VariantPayload::Unit));
             if all_unit {
-                // Payload-free: int repr. Its names table comes from
-                // `enum_names_defs`, and only when emitted code reads it.
             } else {
-                // Mixed: unit variants are interned singleton tables.
                 let mut units = Vec::new();
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {
                         let sym = skull_mir::mangle::type_symbol(ws, e.name);
                         let g = skull_mir::mangle::enum_singleton_global(ws, e.name, v.name);
-                        // `__ty` is looked up in `__ROCK_TYPE_TABLE`, so it is
-                        // the same spelling that registry is keyed on.
                         out.push_str(&format!(
                             "{g} = {g} or {{ __variant = \"{var}\", __ty = \"{ty}\" }}\n",
                             var = v.name,
@@ -1719,8 +1582,7 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
     out
 }
 
-/// Register inspection and copy functions for C-backed values. Invalidate the
-/// ctype lookup cache on reload so it sees the new registry.
+/// Register inspection and copy functions for C-backed values.
 fn c_struct_inspect_defs(
     ws: &Workspace,
     vstructs: &[&bone_semantic::hir::StructDef],
@@ -2053,11 +1915,7 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String) {
     }
 }
 
-/// Register every struct + newtype into `_G.__ROCK_TYPE_TABLE`, so the stdlib
-/// reflection fns (`get_type_info`, `type_info_of`, `type_name`) can recover a
-/// value's metadata from its `__ty` tag. The prelude already seeds the table
-/// empty, so this only adds entries. No metatables: type tagging is the direct
-/// `__ty`.
+/// Register every struct and newtype into `_G.__ROCK_TYPE_TABLE`.
 fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
@@ -2100,9 +1958,7 @@ fn type_table_defs(
 
 #[cfg(test)]
 mod tests {
-    /// Stdlib-free emission: these tests pin codegen shapes on programs that
-    /// need no stdlib, and the harness below supplies the few shims they call.
-    /// Programs that need the stdlib compile through [`crate::pipeline`].
+    /// Stdlib-free emission; programs that need the stdlib use [`crate::pipeline`].
     fn emit(src: &str) -> String {
         let module = skull_parser::parse_module(src, ustr::Ustr::from("<skull>"))
             .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
@@ -2117,9 +1973,7 @@ mod tests {
             .lua
     }
 
-    /// The hot trace working set needs one 64 MB block on either architecture;
-    /// smaller arenas cause global trace flushes. Keep the environment override
-    /// so the budget can still be swept without rebuilding.
+    /// The hot trace working set needs one 64 MB block on either architecture.
     #[test]
     fn runtime_prelude_keeps_the_application_trace_working_set() {
         let prelude = super::runtime_prelude();
@@ -2180,10 +2034,7 @@ mod tests {
         assert!(!prelude.contains("ffi.new(\"uint64_t\", 0)"));
     }
 
-    /// The schema-drift restart trigger's oracle:
-    /// the hash moves iff the runtime LAYOUT moves. Body edits are invisible;
-    /// each shape-edit class moves exactly its own type's entry; a removed type
-    /// counts as drifted (live data under it is stale).
+    /// The shape hash moves iff the runtime layout moves.
     #[test]
     fn type_shape_hashes_track_layout_not_bodies() {
         let hashes = |src: &str| {
@@ -2244,10 +2095,7 @@ mod tests {
         );
     }
 
-    /// `embed` moves the PARENT's layout: the child's leaves become the parent's
-    /// physical keys, so the parent's hash must react both to the flag itself and
-    /// to the child's shape. The non-transitivity that is correct for a boxed
-    /// field (a pointer either way) is wrong here, and only here.
+    /// `embed` moves the parent's layout: the child's leaves are its keys.
     #[test]
     fn embed_drifts_the_parent_shape() {
         let hashes = |src: &str| {
@@ -2262,9 +2110,6 @@ mod tests {
                 .collect::<super::ShapeHashes>()
         };
 
-        // (a) The flag alone relayouts the parent, while every rendered field
-        // type stays identical -- so nothing else in the workspace drifts and
-        // the parent's own entry is the only possible signal.
         let boxed = "struct Pt { x: int }\nstruct Holder { p: Pt, tag: int }\n";
         let embedded = "struct Pt { x: int }\nstruct Holder { embed p: Pt, tag: int }\n";
         assert_eq!(
@@ -2273,8 +2118,6 @@ mod tests {
             "flipping a field to `embed` relayouts the parent"
         );
 
-        // (b) The child's fields ARE the parent's keys, so widening the child
-        // widens the parent.
         let embedded_wide =
             "struct Pt { x: int, y: int }\nstruct Holder { embed p: Pt, tag: int }\n";
         assert_eq!(
@@ -2283,10 +2126,6 @@ mod tests {
             "a field added to an EMBEDDED child also relayouts the parent"
         );
 
-        // (c) CONTROL, the property that must not regress: a BOXED child is a
-        // pointer either way, so widening it leaves the parent's layout alone.
-        // If this ever reports `Holder` too, the hash went transitive in general
-        // and every nested edit now over-triggers a restart.
         let boxed_wide = "struct Pt { x: int, y: int }\nstruct Holder { p: Pt, tag: int }\n";
         assert_eq!(
             super::shape_diff(&hashes(boxed), &hashes(boxed_wide)),
@@ -2294,8 +2133,6 @@ mod tests {
             "a field added to a BOXED child must NOT drift the parent"
         );
 
-        // (d) Transitive through a chain: the deepest leaf is a key on the
-        // outermost parent, so every level drifts.
         let chain = "struct Inner { c: int }\n\
                      struct Mid { embed b: Inner, m: int }\n\
                      struct Outer { embed a: Mid, o: int }\n";
@@ -2308,8 +2145,6 @@ mod tests {
             "an embed chain propagates the child's shape to every enclosing parent"
         );
 
-        // A boxed link BREAKS the chain: `Mid` holds `Inner` by pointer, so
-        // widening `Inner` stops there even though `Outer` embeds `Mid`.
         let broken = "struct Inner { c: int }\n\
                       struct Mid { b: Inner, m: int }\n\
                       struct Outer { embed a: Mid, o: int }\n";
@@ -2327,7 +2162,6 @@ mod tests {
     fn int_literal_function() {
         let lua = emit("fn five() -> int { 5 }");
         assert!(lua.contains("function five_0()"), "got:\n{lua}");
-        // The literal is a single-use pure value -> tree-folded into the return.
         assert!(lua.contains("do return (5)"), "got:\n{lua}");
     }
 
@@ -2346,11 +2180,8 @@ mod tests {
         );
     }
 
-    /// Execution oracle: emit Lua, append a `driver`, run under luajit, return
-    /// trimmed stdout. Drivers call the emitted (mangled) names. Panics when
-    /// luajit isn't on PATH: a host without it must report red for tests that
-    /// never ran, never green. CRLF is normalized to `\n` because luajit's
-    /// stdout is text-mode on Windows.
+    /// Emit Lua, append `driver`, run under luajit and return trimmed stdout.
+    /// CRLF is normalized because luajit's stdout is text-mode on Windows.
     fn run(src: &str, driver: &str) -> String {
         let lua = format!("{}\n{}", emit(src), driver);
         let out = std::process::Command::new("luajit")
@@ -2371,15 +2202,7 @@ mod tests {
             .to_string()
     }
 
-    /// A flat-enum channel writes its yield leaves into reused `s.__y*`
-    /// slots. The constructor's literal seeds those keys with `false` and
-    /// clears them to nil, so every slot has a hash node from birth: a store
-    /// to a present key never grows the table, the frame's shape never moves
-    /// under a trace, and a frame that stays inside one trace can be sunk.
-    /// Short-lived coroutine creation measured 222 -> 108 ns escaping and
-    /// 196 -> 2 ns sinkable for it (docs/luajit-performance.md). The nil
-    /// clears keep the seeds invisible: pairs and snapshots see the same
-    /// frame as before.
+    /// Flat-enum yield slots are seeded in the constructor literal so the frame shape never moves under a trace.
     #[test]
     fn channel_constructor_seeds_and_clears_yield_slots() {
         let lua = emit(
@@ -2402,13 +2225,6 @@ mod tests {
 
     #[test]
     fn coroutine_is_stackless_no_lua_coroutines() {
-        // A `co fn` lowers to the C# state-machine model via the CFG->CFG
-        // transform (`coro_transform`), never LuaJIT's native coroutines and
-        // never a per-instance frame closure: one state table `s`, a TOP-LEVEL
-        // `<name>__step` (shared, name-referenced via pcall), state-saving
-        // returns, a terminal transition, and zero `coroutine.*`. The transform
-        // emits an ORDINARY CFG (plain `goto bbN` / dispatch on `s.__state`), so
-        // the emit-time `::__co_resume_K::` re-entry labels must be ABSENT.
         let lua = emit(
             "co fn counter() -> Coroutine<int> {\n\
                  yield 1\n\
@@ -2419,7 +2235,6 @@ mod tests {
             !lua.contains("coroutine."),
             "co fn must not emit LuaJIT coroutines, got:\n{lua}"
         );
-        // Top-level shared step fn -- NOT a per-instance `local function` closure.
         assert!(
             lua.contains("function counter_0__step("),
             "expected top-level step fn, got:\n{lua}"
@@ -2429,8 +2244,6 @@ mod tests {
             "step must be top-level, not a per-instance closure, got:\n{lua}"
         );
         // A constant-key literal, which LuaJIT builds with one TDUP from a
-        // template table; see the pre-sizing entry in the rejected list of
-        // docs/luajit-performance.md before changing this to assignments.
         assert!(
             lua.contains(r#"{ __ty = "Coroutine", __state = 0, __layout = "#),
             "expected the tagged+stamped frame table, got:\n{lua}"
@@ -2439,9 +2252,6 @@ mod tests {
             lua.contains("return counter_0__step(s, arg)"),
             "expected a direct step call, got:\n{lua}"
         );
-        // State machine: writes to the state field + a completed terminal -3
-        // (killed is -1, interrupted is -2), over an ordinary CFG -- NOT the
-        // emit-time goto-into-block re-entry labels.
         assert!(
             lua.contains(".__state ="),
             "expected state-saving write, got:\n{lua}"
@@ -2459,17 +2269,8 @@ mod tests {
         );
     }
 
-    /// Body slice of a single emitted function -- from its `function NAME()`
-    /// header to the next top-level `function ` (or end). Lets a codegen
-    /// assertion scope to one fn and ignore the always-emitted value-struct
-    /// `copy = function(v) return V2_ct(...) end` metatype helpers.
+    /// Body slice of a single emitted function.
     fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {
-        // Every non-exempt fn emits under its mangled name (`mk`), so
-        // match the `function <name>` PREFIX and scope from the header's `(` to
-        // the next top-level definition. Under the bound callee shape the
-        // definition reads `__rock_mk_<name> = function(<callees>) return
-        // function(..)`, so the body starts after the INNER header and the next
-        // definition can be a factory rather than a `function ` line.
         let factory_prefix = skull_codegen_lua::CALLEE_FACTORY_PREFIX;
         let inner = " return function(";
         let (start, header_end) = match lua.find(&format!("function {name}")) {
@@ -2496,14 +2297,6 @@ mod tests {
     }
 
     /// Scalar-ABI boundaries that must not build cdata or dispatch generically.
-    /// Each row lists functions whose bodies must not contain a token:
-    /// - a defaulted flat-value param splats its fields at the call site and
-    ///   default-fills per-field scalars (it once packed `V2_ct(...)` for the
-    ///   single defaulted slot);
-    /// - a NON-flat value (`Rect` of `V2`s) builds, returns and threads
-    ///   flattened leaves (it once returned `Rect_ct(V2_ct(...), V2_ct(...))`);
-    /// - `==`/`!=` on a payloadless enum is native Lua equality, not the
-    ///   trace-hostile `__op_eq`/`__op_ne` dispatch.
     #[test]
     fn scalar_abi_boundaries_build_no_cdata() {
         let cases: &[(&str, &str, &[(&str, &str)])] = &[
@@ -2544,13 +2337,7 @@ mod tests {
         }
     }
 
-    /// `@inline` splices: a scalarized value-struct ctor in a hot loop (so the
-    /// loop traces with no per-iteration call frame), a multi-block callee
-    /// spliced through the general CFG path, and a transitive chain re-scanned
-    /// after each splice. A surviving call names the callee symbol at the call
-    /// site or in the caller's bound-callee factory, so each spliced callee's
-    /// symbol must occur once: at its own definition. The driver proves the
-    /// spliced code computes the same result.
+    /// `@inline` splices leave each spliced callee's symbol only at its definition.
     #[test]
     fn inline_splices_callees_and_keeps_results() {
         let cases: &[(&str, &str, &[&str], &str, &str)] = &[
@@ -2608,8 +2395,7 @@ mod tests {
         }
     }
 
-    /// A self-recursive callee is never an inline candidate (cloning it would
-    /// not terminate), so its body (the literal 7) must not appear in the caller.
+    /// A self-recursive callee is never an inline candidate.
     #[test]
     fn recursive_callee_not_inlined() {
         let src = "@inline\n\
@@ -2624,13 +2410,7 @@ mod tests {
         assert_eq!(run(src, "print(caller_0())"), "7");
     }
 
-    /// The relooper recovers the canonical counted-loop CFG (preheader store,
-    /// `i < hi` header, pure-increment latch) as a numeric `for c<slot> = ...`
-    /// so LuaJIT specializes the induction variable (FORL) instead of unrolling
-    /// a goto loop. A loop that reassigns its own counter must stay a goto loop:
-    /// a synthesized `for` would ignore `i = n`, run 6 times and return 5
-    /// instead of 0. Each program is a single fn, so the module-wide `for c`
-    /// count is that fn's.
+    /// The relooper recovers counted loops as numeric `for`, but not a loop that reassigns its counter.
     #[test]
     fn counted_loops_become_numeric_for_only_when_sound() {
         let cases: &[(&str, &str, usize, &str, &str)] = &[
