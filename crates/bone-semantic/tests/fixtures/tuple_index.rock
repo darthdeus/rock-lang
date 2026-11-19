@@ -1,9 +1,3 @@
-//! Tuple indexing: `t.0`, `t.1`. The base must be a `Tuple`; the result is the
-//! index-th element type. An out-of-bounds index or a non-tuple base is an
-//! error.
-//!
-//! Marker on the `let` binding holding the projection.
-
 //- tuple_index_first
 fn f() -> int {
     let t = (1, true)
@@ -20,7 +14,6 @@ fn f() -> int {
     5
 }
 
-// project through a nested tuple: t.0 is (int, int), t.0.1 is int
 //- tuple_index_nested
 fn f() -> int {
     let t = ((1, 2), true)

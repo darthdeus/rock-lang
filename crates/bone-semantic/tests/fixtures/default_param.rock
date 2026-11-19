@@ -1,7 +1,3 @@
-//! A parameter with a default value may be omitted at the call site.
-//! `fn g(a: int, b: int = 5)` accepts both g(1) and g(1, 2), but the
-//! required params (those without a default) still form an arity floor.
-
 //- default_param_omitted
 fn g(a: int, b: int = 5) -> int { a }
 fn h() -> int {

@@ -1,8 +1,3 @@
-//! Tuple-literal expressions: `(a, b)` infers to `(A, B)`. Heterogeneous — each
-//! element keeps its own type (no element-unify, unlike arrays).
-//!
-//! Marker on the `let` binding (its inferred type).
-
 //- tuple_literal_pair
 fn f() -> int {
     let t = (1, true)
@@ -17,7 +12,6 @@ fn f() -> int {
     5
 }
 
-// element is itself a tuple -> recursion through inference
 //- tuple_literal_nested
 fn f() -> int {
     let t = ((1, 2), true)

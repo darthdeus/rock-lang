@@ -3,8 +3,6 @@ use ustr::ustr;
 
 use crate::LowerCtx;
 
-/// A module's lookups repeat the same probes many times; the module's probe
-/// set must be sized by its distinct probes, not by the recorded count.
 #[test]
 fn repeated_probes_do_not_inflate_the_module_probe_set() {
     let ws = Workspace::new();

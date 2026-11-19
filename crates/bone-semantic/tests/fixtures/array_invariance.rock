@@ -1,20 +1,3 @@
-//! Arrays are invariant in bone (the array-value coercion arm of `coerce` was
-//! removed; coerce now falls through to `unify`, which recurses the array App).
-//! Element covariance is cut: an already-typed [int] is NOT coercible to [float]
-//! (numeric widening). What still works: element-wise coercion in a CHECK-mode
-//! array literal, and type-variable inference flowing through an array element
-//! (bone's unify recurses structurally, so the nested generic still solves).
-//! Matches rock, which made arrays invariant in the same arc.
-//!
-//! The @fail section carries a caret annotation of the type it WOULD have if
-//! covariance were still accepted: that keeps it honest -- if the array arm were
-//! restored it would type-check and the harness would flag @fail (RED), rather
-//! than passing on a "no annotations" harness error. Keep caret characters out of
-//! this prose; the annotation extractor scans every comment line for them.
-
-// KEEP: element-wise coercion in a CHECK-mode array literal is a different
-// mechanism (each element coerces to the expected element type) and must keep
-// working even though arrays are invariant.
 //- heterogeneous_literal_coerces
 fn h() -> float {
     let xs: [float] = [1, 2.5, 3]
@@ -22,10 +5,6 @@ fn h() -> float {
     xs[0]
 }
 
-// KEEP: a type variable nested inside an array element still solves. mk returns
-// Holder<Duo<K, V>> with K, V undetermined by its args; the only way to solve them
-// is to push the expected binding type back through the invariant Holder and the
-// array-typed `items` field into Duo. Regressing array inference would break this.
 //- nested_generic_infers_through_array
 value Duo<K, V> { k: K, v: V }
 struct Holder<T> { items: [T] }

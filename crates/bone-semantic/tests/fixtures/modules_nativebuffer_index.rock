@@ -1,9 +1,3 @@
-//! `NativeBuffer<T>[i]` indexes by int and yields the element type T
-//! (verified vs rock: a non-int index is "found _, expected int").
-//! bone's index inference handled Array/Map but not the NativeBuffer
-//! Nominal ctor. Element type is unrestricted here (int/float/struct);
-//! value-ness is a separate monomorphization concern, not a type-of-index one.
-
 //- nb_float_index
 //-- nb_float_index.rock
 fn f(buf: NativeBuffer<float>) -> int {

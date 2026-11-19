@@ -1,7 +1,4 @@
-//! Module lookup keeps package definitions separate from the stdlib.
-
 //-- <file> @pkg=<self_name>,<id> [@v1]`;
-//! a file without `@v1` is package.
 
 //- a_package_unary_operator_declarations
 //-- package.rock

@@ -1,7 +1,3 @@
-//! Safe navigation: `x?.field`. The receiver is peeled of one nullable layer,
-//! the field is looked up on the inner (struct) type, and the result is wrapped
-//! back into a nullable.
-
 //- safe_nav_field
 struct Point { x: int, y: int }
 fn f(p: Point?) -> int {
@@ -10,7 +6,6 @@ fn f(p: Point?) -> int {
     5
 }
 
-// the field's own type is preserved, then made nullable
 //- safe_nav_bool_field
 struct Flags { on: bool }
 fn f(p: Flags?) -> int {
@@ -19,7 +14,6 @@ fn f(p: Flags?) -> int {
     5
 }
 
-// chaining: each `?.` step stays a single nullable layer (no `T??`)
 //- safe_nav_chain
 value Inner { n: int }
 struct Outer { inner: Inner }

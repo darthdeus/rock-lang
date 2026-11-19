@@ -1,5 +1,3 @@
-//! The function body's type must unify with the declared return type.
-
 //- body_return_ok
 fn f() -> int { 5 }
               //^ int

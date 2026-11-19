@@ -57,7 +57,6 @@ fn parse_args() -> std::result::Result<Args, String> {
                         .ok_or_else(|| format!("invalid --test-threads value `{n}`"))?,
                 );
             }
-            // Accepted for compatibility with tools that pass libtest options.
             "--format" | "--color" | "--logfile" | "--shuffle-seed" | "-Z" => {
                 value(&flag)?;
             }
@@ -99,8 +98,6 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// Runs `check(file_name, contents)` for every `.rock` file under `root`
-/// (relative to the crate), naming each test `<prefix>::<relative path>`.
 pub fn run(
     prefix: &str,
     root: &str,

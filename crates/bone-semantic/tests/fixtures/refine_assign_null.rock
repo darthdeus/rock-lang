@@ -1,9 +1,3 @@
-//! Assigning null to a path-refined nullable field: inside `if t.mid != null`,
-//! `t.mid` is narrowed to non-null `Mid`, so `t.mid = null` fails ("null? and
-//! Mid"). Assignment targets the field's DECLARED (nullable) type and must
-//! invalidate the path's refinement (CLAUDE.md: "refinement invalidates on
-//! assignment"). Verified vs rock (nullable/path_refinement.rock).
-
 //- assign_null_to_refined_field
 value Mid { v: int }
 struct Top { mid: Mid? }

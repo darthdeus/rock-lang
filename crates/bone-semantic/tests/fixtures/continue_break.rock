@@ -1,7 +1,3 @@
-//! Continue/Break statements inside a loop body type-check as unit.
-//! Lowering already produces Statement::{Break,Continue} (lower.rs); inference
-//! must treat them as no-ops rather than hitting the catch-all comp_error.
-
 //- continue_break
 struct FIter<T> { last: T }
 fn iter<T>(v: [T]) -> FIter<T> { return FIter { last: v[0] } }

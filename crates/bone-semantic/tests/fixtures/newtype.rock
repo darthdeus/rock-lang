@@ -1,8 +1,3 @@
-//! `newtype UserId(int)` is a distinct nominal wrapper over a base type.
-//! Construction is explicit (`UserId(42)` : UserId); the base type does NOT
-//! coerce to the newtype (verified vs rock: `let x: UserId = 5` is rejected).
-//! Registered like a struct (passes 1-2), constructed via the Call path.
-
 //- newtype_construct
 newtype UserId(int)
 fn f() -> int {
@@ -19,7 +14,6 @@ fn f(t: Tag) -> int {
     5
 }
 
-// Generic newtype: construction infers the type parameter.
 //- generic_newtype_construct
 newtype Box<T>(T)
 fn f() -> int {
@@ -28,8 +22,6 @@ fn f() -> int {
     5
 }
 
-// Multi-param generic newtype (single-field: wraps one value mentioning both
-// type params).
 //- generic_newtype_multi
 newtype Pair<T, U>((T, U))
 fn f() -> int {

@@ -1,7 +1,3 @@
-//! Struct field defaults: `struct Foo { x: int = 5 }` lets a literal omit the
-//! defaulted field (`Foo { }` fills x=5). Verified vs rock. Mirrors default
-//! params: track which fields have defaults; skip them in the missing-field check.
-
 //- field_default_omitted
 struct Slime { kind: int, health: int = 100 }
 fn f() -> int {

@@ -1,9 +1,3 @@
-//! Intrinsic type formers (`bone_core::modules::STD_INTRINSIC_TYPES`) have no
-//! source declaration: their canonical keys are the bare spellings, reached
-//! through the std tier. Only the FieldRef family is a member of the std
-//! export view. A package type with the same tail spelling stays an ordinary
-//! nominal that resolves only through the package's own paths.
-
 //- every_intrinsic_resolves_bare_in_a_v1_package
 //-- main.rock @pkg=app,1 @v1
 struct Hero { hp: int }

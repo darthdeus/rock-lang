@@ -1,7 +1,4 @@
-//! Module lookup keeps package definitions separate from the stdlib.
-
 //-- <file> @pkg=<self_name>,<id> [@v1]`;
-//! a file without `@v1` is package.
 
 //- a_package_overload_of_a_std_function_is_not_in_the_std_tier @fail=No overload for `lerp` with argument types (string, string, float)
 //-- game.rock @pkg=game,3

@@ -1,8 +1,3 @@
-//! `[T]` is syntactic sugar for `struct Vec<T> { _data: any, len: int }` -- they
-//! are the same type. bone represents `[T]` as `App{Array}`, so field access on
-//! a `[T]` must route through the Vec struct: `.len` -> int, `._data` -> any,
-//! with the Vec generic T bound to the element type. The stdlib provides Vec.
-
 //- vec_len_field
 //-- vec_len_field.rock
 fn f(v: [int]) -> int {

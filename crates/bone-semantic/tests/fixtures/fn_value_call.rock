@@ -1,8 +1,3 @@
-//! Calling a fn-typed parameter (callback). `f(x)` where `f: fn(A) -> B` resolves
-//! the callee to a LOCAL binding (not a top-level fn), checks each arg against A
-//! (with coercion), and yields B. Needed for the higher-order stdlib fns
-//! (map/filter/find/any/all/sort) whose Rock bodies invoke their fn params.
-
 //- call_fn_param
 fn apply<T, U>(x: T, f: fn(T) -> U) -> U {
     let r = f(x)

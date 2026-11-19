@@ -1,5 +1,3 @@
-// The default v1 prelude is the exported surface of the trusted std package.
-
 //- prelude_inventory
 // prelude: Arena
 // prelude: ArenaGenerationSnapshot

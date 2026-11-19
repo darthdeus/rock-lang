@@ -1,8 +1,3 @@
-//! `defer { }` and lifecycle-hook (`on_killed { }` etc.) statements. Both sit
-//! in bone's statement catch-all. For type-checking they just need their body
-//! block type-checked; lower them to a `Statement::Expr` of the block. Verified
-//! vs rock (control_flow/defer.rock, coroutines/tied.rock).
-
 //- defer_block
 fn f() -> int {
     defer { let y = 1 }

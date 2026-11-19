@@ -1,11 +1,3 @@
-//! Unary minus: `-e`. The operand must be numeric (`int` or `float`); the
-//! result has the operand's type. Mirrors `Not` (see not_op.rock) but with a
-//! numeric constraint instead of bool. Needs `Expr::Neg` HIR + lowering
-//! (`ExprKind::UnaryMinus`) + inference (operand must be int/float, yield it).
-//!
-//! Note: `-5` (a literal) is folded to a negative `Int` by the parser and
-//! already lowers; the gap is `-e` for any non-literal operand.
-
 //- neg_int_var
 fn f(n: int) -> int {
     let x = -n
@@ -20,7 +12,6 @@ fn f(n: float) -> float {
     x
 }
 
-// double negation preserves the type
 //- neg_double
 fn f(n: int) -> int {
     let x = -(-n)
@@ -28,7 +19,6 @@ fn f(n: int) -> int {
     x
 }
 
-// negating a parenthesized expression
 //- neg_paren_expr
 fn f(a: int, b: int) -> int {
     let x = -(a)
@@ -36,7 +26,6 @@ fn f(a: int, b: int) -> int {
     x
 }
 
-// the folded negative literal still works (guard against regression)
 //- neg_literal
 fn f() -> int {
     let x = -5

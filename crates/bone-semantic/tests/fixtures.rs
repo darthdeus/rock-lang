@@ -4,7 +4,6 @@ mod test_support;
 type Result = std::result::Result<(), String>;
 
 fn check_rock(file_name: &str, contents: &str) -> Result {
-    // Modules-v1 multi-file fixtures: sections hold embedded `//--` files.
     if file_name == "modules_std.rock" {
         return check_std_fixture(contents);
     }
@@ -24,7 +23,6 @@ fn check_rock(file_name: &str, contents: &str) -> Result {
     };
     let sections = test_utils::parse_sections(contents);
     if sections.is_empty() {
-        // Bare fixture (no `//- name` markers): the whole file is one case.
         if let Err(e) = check(contents) {
             panic!("{e}");
         }
@@ -40,10 +38,8 @@ fn check_rock(file_name: &str, contents: &str) -> Result {
     Ok(())
 }
 
-/// Why a section's outcome breaks its contract. `@fail` expects any
-/// rejection; `@fail=<text>` also pins the reason, so a case cannot pass by
-/// failing for an unrelated reason, and a trailing ` @not=<text>` pins text
-/// the rejection must not contain.
+/// `@fail` expects a rejection, `@fail=<text>` one containing `<text>`, and a
+/// trailing ` @not=<text>` one that does not contain `<text>`.
 fn section_failure(header: &str, outcome: Result) -> Option<String> {
     let Some((name, rest)) = header.split_once(" @fail") else {
         return outcome
@@ -59,9 +55,6 @@ fn section_failure(header: &str, outcome: Result) -> Option<String> {
         Ok(()) => return Some(format!("section `{name}` was marked @fail but passed")),
         Err(e) => e,
     };
-    // `check_types` reports a section with no `//^` marker as an error, which
-    // would otherwise read as the expected failure of a rule no longer
-    // enforced.
     if e == "no //^ annotations in source" {
         return Some(format!(
             "section `{name}` is marked @fail but produced no type error"
@@ -81,7 +74,6 @@ fn section_failure(header: &str, outcome: Result) -> Option<String> {
     None
 }
 
-/// The stdlib under its loader ids (`<stdlib>/name`), in load order.
 fn stdlib_sources() -> &'static [(&'static str, &'static str)] {
     static SOURCES: std::sync::OnceLock<Vec<(&'static str, &'static str)>> =
         std::sync::OnceLock::new();

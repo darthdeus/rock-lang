@@ -1,9 +1,3 @@
-//! Hover on an IN-BODY type annotation. Pre-C this resolves through
-//! NodeRef::StaticTy (annotation allocated in the module ty_arena); after
-//! step C it must resolve identically through NodeRef::LocalTy +
-//! Body.lowered_tys. Green on both sides of the flip — the no-regression
-//! net for the annotation storage move.
-
 //- hover_let_annotation
 struct P { a: int }
 fn f() -> int {

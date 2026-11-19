@@ -1,14 +1,5 @@
-//! A `match` over an enum must handle every variant, or carry an unguarded
-//! catch-all (`_`) / binding arm. bone rejects a non-exhaustive match at
-//! compile time -- a real full-compiler check, not just an LSP hint. A GUARDED
-//! arm covers nothing (its guard may fail), so it doesn't make the match
-//! exhaustive.
-//!
 //! Each `@fail` section is otherwise well-formed (valid `//^` annotation) so the
-//! ONLY defect is exhaustiveness -- it must fail for that reason, not a stray
-//! second error.
 
-// Every variant handled -> accepted.
 //- exhaustive_all_variants
 enum E { A, B, C }
 fn f(e: E) -> int {
@@ -22,7 +13,6 @@ fn f(e: E) -> int {
     r
 }
 
-// Unguarded `_` catch-all -> accepted.
 //- exhaustive_wildcard
 enum E { A, B, C }
 fn f(e: E) -> int {
@@ -35,7 +25,6 @@ fn f(e: E) -> int {
     r
 }
 
-// Unguarded binding catch-all -> accepted.
 //- exhaustive_binding
 enum E { A, B, C }
 fn f(e: E) -> int {

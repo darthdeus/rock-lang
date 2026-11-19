@@ -1,7 +1,3 @@
-//! Lambda-param bidirectional inference: when a lambda is passed where a
-//! `fn(A) -> B` is expected, push A into its unannotated params (Check mode).
-//! Covers both explicit `x => x.value` and the desugared placeholder `_.value`.
-
 //- lambda_param_inferred
 struct Box { value: int }
 fn apply(f: fn(Box) -> int, b: Box) -> int { f(b) }

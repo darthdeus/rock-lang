@@ -1,9 +1,5 @@
 //! Or-patterns `A | B | C` at the top of a match arm. Each alternative is
-//! checked against the scrutinee type; the arm body type is the match result.
-//! v1: alternatives may NOT bind variables (rock rejects with an explicit
-//! error). Verified vs rock (tests/patterns/or_patterns.rock).
 
-// Unit-variant alternation. The multi-line `match` must type-check; `r` is bool.
 //- or_unit_variants
 enum Faction { Hostile, Friendly, Pet, Neutral }
 fn is_friendly(f: Faction) -> bool {
@@ -18,7 +14,6 @@ fn check(f: Faction) -> bool {
     r
 }
 
-// Literal alternation, with a multi-alt arm and a wildcard fallback.
 //- or_literals
 fn classify(n: int) -> string {
     let r = match n { 1 | 2 | 3 => "small", 4 | 5 => "mid", _ => "big" }
@@ -26,7 +21,6 @@ fn classify(n: int) -> string {
     r
 }
 
-// Range alternation.
 //- or_ranges
 fn band(n: int) -> string {
     let r = match n { 1..=5 | 10..=20 => "in", _ => "out" }
@@ -34,7 +28,6 @@ fn band(n: int) -> string {
     r
 }
 
-// Payload variants with wildcard payloads (no bindings).
 //- or_payload_wildcard
 enum Color { Red(int), Blue(int), Green(int), Other }
 fn name(c: Color) -> string {
@@ -43,7 +36,6 @@ fn name(c: Color) -> string {
     r
 }
 
-// Nested match, or-patterns at both levels.
 //- or_nested
 enum Faction { Hostile, Friendly, Pet, Neutral }
 fn rel(a: Faction, b: Faction) -> string {

@@ -1,11 +1,3 @@
-//! Identity storage in bodies. An identity
-//! local, parameter or return is a borrow; a body may not put one into
-//! ordinary storage: a Vec or Map local, a `[x]` literal, a value or enum
-//! constructor that stores it. A `co fn` parameter lives in the coroutine
-//! frame, so an identity there is storage; an identity borrow may not be used
-//! after a suspension; an escaping or unknown-escape closure may not capture
-//! one. Stdlib-free: each section declares its own handles.
-
 //- body_identity_vec_local @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 fn empty<T>() -> [T] { return empty() }
@@ -75,8 +67,6 @@ fn marker() -> int {
   //^ int
 }
 
-// Borrows: identity locals, nullable locals, tuples of borrows, parameters
-// and returns. Handles over identities are values.
 //- body_identity_borrows
 struct Mob { hp: int }
 value Entity<T> { idx: int }
@@ -118,8 +108,6 @@ fn marker() -> int {
   //^ int
 }
 
-// A coroutine takes a persistent handle and resolves it per resume segment;
-// a borrow finished with before the yield is fine.
 //- co_fn_entity_param
 struct Mob { hp: int }
 value Entity<T> { idx: int }
@@ -149,7 +137,6 @@ fn marker() -> int {
   //^ int
 }
 
-// A borrow whose last use precedes the suspension is not retained by it.
 //- identity_borrow_finished_before_yield
 struct Mob { hp: int }
 fn make() -> Mob { return Mob { hp: 1 } }
@@ -163,7 +150,6 @@ fn marker() -> int {
   //^ int
 }
 
-// An explicit `ref` to an identity is the borrow an identity parameter takes.
 //- explicit_ref_fills_identity_param
 struct Mob { hp: int }
 fn damage(mob: Mob) { mob.hp = 1 }
@@ -172,8 +158,6 @@ fn f(mob: ref Mob) {
          //^ ref Mob
 }
 
-// A closure passed to a parameter the callee only calls cannot outlive the
-// borrow it captures.
 //- nonescaping_closure_captures_identity
 struct Mob { hp: int }
 fn apply(g: () -> int) -> int { return g() }
@@ -218,8 +202,6 @@ fn marker() -> int {
   //^ int
 }
 
-// A closure held in a local is not proven nonescaping: rejected
-// conservatively.
 //- local_closure_captures_identity @fail=closure that may escape cannot capture identity struct `Mob` (`mob`)
 struct Mob { hp: int }
 fn f(mob: Mob) -> int {
@@ -231,7 +213,6 @@ fn marker() -> int {
   //^ int
 }
 
-// Capturing a handle is always fine.
 //- closure_captures_handle
 struct Mob { hp: int }
 value Entity<T> { idx: int }

@@ -1,6 +1,3 @@
-//! Final `break` and `continue` statements make their block branches never,
-//! leaving the reachable if-expression arm to determine its value type.
-
 //- final_break_then_value
 fn f(stop: bool) -> int {
     while stop {

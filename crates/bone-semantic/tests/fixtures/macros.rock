@@ -1,16 +1,3 @@
-//! Expr-position macro expansion. A `macro f(p: expr) { body }` is expanded
-//! away BEFORE type-checking: each call `f(arg)` is replaced by the macro body
-//! with `p` substituted by `arg`. Macro DEFINITIONS are then dropped -- they
-//! are not typed entities (their `expr`/`ident` params are meta-types, not real
-//! types; lowering a macro def as a regular fn is exactly what choked stdlib
-//! loading on "Unknown type name ident/expr"). Overload selection is by arity;
-//! trailing params with defaults widen the matchable arity range.
-//!
-//! Bodies here stay self-contained (comparisons / blocks / lets only) so they
-//! typecheck without stdlib. Real stdlib macros (assert_eq, log_*) reference
-//! `error`/`tostring`/`+` and are covered by every compile that loads the stdlib.
-
-// Single-arg macro, body is one expression. `pos(n)` -> `n > 0`.
 //- macro_single_arg
 macro pos(x: expr) {
     x > 0
@@ -21,7 +8,6 @@ fn f(n: int) -> bool {
     r
 }
 
-// Two args substituted positionally.
 //- macro_two_args
 macro lt(a: expr, b: expr) {
     a < b
@@ -32,7 +18,6 @@ fn f(n: int, m: int) -> bool {
     r
 }
 
-// A param referenced more than once is substituted at each occurrence.
 //- macro_repeated_param
 macro eq_self(x: expr) {
     x == x
@@ -43,7 +28,6 @@ fn f(n: int) -> bool {
     r
 }
 
-// Block-bodied macro in statement position expands to its statements.
 //- macro_block_stmt
 macro stash(v: expr) {
     let kept = v
@@ -54,7 +38,6 @@ fn f() -> int {
   //^ int
 }
 
-// A default-valued trailing param: callable with or without it.
 //- macro_default_param
 macro ge(x: expr, lo: expr = 0) {
     x > lo
@@ -67,7 +50,6 @@ fn f(n: int) -> bool {
     a
 }
 
-// Arity overloads: dispatch by argument count.
 //- macro_arity_overload
 macro pick(a: expr) {
     a > 0
@@ -83,7 +65,6 @@ fn f(n: int, m: int) -> bool {
     one
 }
 
-// An UNCALLED macro definition is dropped, not type-checked.
 //- macro_def_dropped
 macro unused(x: expr) {
     x > 0
@@ -93,7 +74,6 @@ fn f() -> int {
   //^ int
 }
 
-// Macros expanding macros: `outer(n)` -> `inner(n)` -> `n == n`.
 //- macro_nested
 macro inner(x: expr) {
     x == x

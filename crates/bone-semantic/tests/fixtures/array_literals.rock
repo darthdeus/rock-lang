@@ -1,8 +1,3 @@
-//! Array-literal expressions: `[1, 2, 3]` infers to `[int]` (App Array). The
-//! element types unify together and the result wraps them in the Array ctor.
-//!
-//! Marker sits on the `let` binding name (its inferred type).
-
 //- array_literal_int
 fn f() -> int {
     let xs = [1, 2, 3]
@@ -17,7 +12,6 @@ fn f() -> int {
     5
 }
 
-// element types are themselves arrays -> recursion through inference
 //- array_literal_nested
 fn f() -> int {
     let xs = [[1, 2], [3]]

@@ -1,13 +1,3 @@
-//! Modules-v1 overload families that span more than one definition:
-//! a declared or imported operator joins the built-in operator family,
-//! explicit imports of different callables compose at their tier, glob-tier
-//! callables of different modules compose at theirs, a nearer tier's
-//! callables join the lower tiers' (see `modules_callable_families.rock`), and
-//! compound assignment reads the family its binary operator reads. Unary
-//! `-x` / `!x` (`__unm` / `__not`) read a family lowering decides the same way.
-//!
-//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
-
 //- a_modules_own_operator_keeps_builtin_arithmetic
 //-- geo.rock @pkg=geo,1 @v1
 pub struct Pt {

@@ -1,9 +1,4 @@
-//! Comparison / logical operators carry operand constraints beyond "-> bool":
-//!   <, <=, >, >=  require numeric operands (int/float); int and float widen.
 //!   &&, ||        require bool operands.
-//!   ==, !=        equality-compatible operands; int/float widen, null-compare ok.
-
-// --- ordering requires numeric operands ---
 
 //- lt_int_ok
 fn f() -> bool {
@@ -26,15 +21,12 @@ fn f() -> bool {
     b
 }
 
-// int and float operands widen (matches rock)
 //- lt_int_float_ok
 fn f() -> bool {
     let b = 1 < 2.5
       //^ bool
     b
 }
-
-// --- logical requires bool operands ---
 
 //- and_bool_ok
 fn f() -> bool {
@@ -50,8 +42,6 @@ fn f() -> bool {
     b
 }
 
-// --- equality stays permissive over matching types, strict across types ---
-
 //- eq_int_ok
 fn f() -> bool {
     let b = 1 == 2
@@ -59,7 +49,6 @@ fn f() -> bool {
     b
 }
 
-// equality widens int/float too
 //- eq_int_float_ok
 fn f() -> bool {
     let b = 1 == 2.5

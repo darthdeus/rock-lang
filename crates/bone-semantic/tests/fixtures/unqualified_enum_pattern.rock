@@ -1,12 +1,3 @@
-//! Unqualified enum patterns in match: `match c { A => .. }` (no `Choice::`).
-//! lowering keeps enum_name=None; check_pattern resolves the bare variant against
-//! the scrutinee's enum (its nominal name).
-//!
-//! A bare `Name` arm is ambiguous with a binding, and the discriminant is
-//! capitalization -- the same rule the parser uses for `Color::Red` vs
-//! `value :: int`. So an uppercase arm name over an enum scrutinee must be a
-//! real variant; a lowercase one is always a binding.
-
 //- unqualified_variant
 enum Choice { A, B }
 fn f(c: Choice) -> int {
@@ -19,8 +10,6 @@ fn f(c: Choice) -> int {
     y
 }
 
-// A lowercase arm name is a binding, not a variant -- it stays legal even
-// though no variant is named that, and it binds the scrutinee.
 //- lowercase_arm_binds
 enum Choice { A, B }
 fn f(c: Choice) -> int {
@@ -35,7 +24,6 @@ fn f(c: Choice) -> int {
     r
 }
 
-// `_` never reaches the variant rule.
 //- wildcard_arm_ok
 enum Choice { A, B }
 fn f(c: Choice) -> int {
@@ -48,8 +36,6 @@ fn f(c: Choice) -> int {
     y
 }
 
-// Only the arm ROOT is a possible tag test. Inside a payload an uppercase
-// name is a plain binding, exactly as skull lowers it.
 //- nested_uppercase_binds
 enum Wrap { One(int), Two }
 fn f(w: Wrap) -> int {
@@ -61,7 +47,6 @@ fn f(w: Wrap) -> int {
     r
 }
 
-// A lowercase arm binding may shadow an outer local of the same name.
 //- arm_binding_shadows_outer
 enum Choice { A, B }
 fn f(c: Choice) -> int {
@@ -77,8 +62,6 @@ fn f(c: Choice) -> int {
     r
 }
 
-// The rule is keyed on the scrutinee being an enum. Over a non-enum an
-// uppercase arm name is just a binding.
 //- uppercase_arm_over_non_enum_binds
 fn f(n: int) -> int {
     let r = match n {
@@ -89,7 +72,6 @@ fn f(n: int) -> int {
     r
 }
 
-// A tuple scrutinee has no enum nominal, so the root rule doesn't fire.
 //- uppercase_arm_over_tuple_binds
 fn f(t: (int, int)) -> int {
     let r = match t {

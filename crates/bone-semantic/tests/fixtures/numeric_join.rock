@@ -1,7 +1,3 @@
-//! int/float widening at JOINS (if-branches, array elements, match arms): the
-//! least-upper-bound of int and float is float. Symmetric (neither side is
-//! "expected"), unlike the directional value->expected coerce.
-
 //- if_branch_widens
 fn f(c: bool) -> float {
     let r = if c { 1.0 } else { 2 }

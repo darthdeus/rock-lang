@@ -1,9 +1,3 @@
-//! Lambda expressions synthesize a function type `(P...) -> R`. This slice is
-//! pure synthesis: params must be annotated, the body's type becomes the return
-//! type. Exercises the HIR `Expr::Lambda` node,
-//! the `TypeExpr::Function` construction, and its `render`.
-//! Marker on the `let` binding holding the lambda.
-
 //- lambda_identity
 fn f() -> int {
     let g = (x: int) => x
@@ -11,7 +5,6 @@ fn f() -> int {
     5
 }
 
-// the body's type drives the return type
 //- lambda_to_bool
 fn f() -> int {
     let g = (x: int) => x < 5
@@ -33,8 +26,6 @@ fn f() -> int {
     5
 }
 
-// the body may reference outer bindings; the type flows through (capture is a
-// runtime concern, irrelevant to the function type)
 //- lambda_captures_outer
 fn f() -> int {
     let n = 10
@@ -43,7 +34,6 @@ fn f() -> int {
     5
 }
 
-// param annotation types resolve nominal types too
 //- lambda_struct_param
 struct Point { x: int, y: int }
 fn f() -> int {
@@ -52,13 +42,9 @@ fn f() -> int {
     5
 }
 
-// a return value whose type is itself a lambda nests the function type
 //- lambda_returns_lambda
 fn f() -> int {
     let g = (x: int) => (y: int) => x
       //^ fn(int) -> fn(int) -> int
     5
 }
-
-// unannotated params with no expected-type slot are inferred (body /
-// application constraints), not rejected -- see lambda_nonarg.rock

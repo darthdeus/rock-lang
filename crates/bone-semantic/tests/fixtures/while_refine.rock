@@ -1,8 +1,3 @@
-//! While-loop condition narrowing: the body runs only when the condition holds,
-//! so `while x.f != null { ... x.f ... }` should narrow `x.f` non-null in the
-//! body (same as an if-then). bone narrows `if` but not `while`. Mirror the if:
-//! `infer_branch(body, detect_null_narrow(cond).then)`. Verified vs rock.
-
 //- while_refine_field
 value Val { n: int }
 struct Box { val: Val? }

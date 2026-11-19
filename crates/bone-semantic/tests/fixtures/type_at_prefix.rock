@@ -1,5 +1,3 @@
-// Prefix operator probes must report the unary result at the operator while
-// retaining the operand type at the operand and binary operator positions.
 //- prefix_operator_result_type
 struct PrefixOperand { value: int }
 

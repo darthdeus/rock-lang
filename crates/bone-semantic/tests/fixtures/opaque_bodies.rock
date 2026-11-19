@@ -1,8 +1,3 @@
-//! Opaque function bodies: `inline(lua)` / extern functions have no Rock body to
-//! infer. bone registers the signature (params + return type) and skips body
-//! inference, so callers resolve and typecheck against the declared signature.
-
-// an inline(lua) function is callable; its declared return type flows out.
 //- inline_lua_callable
 inline(lua) fn myadd(x: int, y: int) -> int = "return x + y"
 fn f() -> int {
@@ -11,7 +6,6 @@ fn f() -> int {
     r
 }
 
-// a unit-returning inline(lua) fn (no `-> T`) is callable as a statement.
 //- inline_lua_unit
 inline(lua) fn log_it(msg: string) = "print(msg)"
 fn f() -> int {

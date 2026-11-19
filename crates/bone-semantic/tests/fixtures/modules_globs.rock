@@ -1,12 +1,3 @@
-//! Glob imports open only the members accessible from the importing
-//! fragment. An inaccessible member never enters
-//! tier selection: it neither shadows a lower tier nor makes a glob
-//! ambiguous. A glob also opens its target's export bindings, explicit and
-//! glob, followed to a fixed point; a binding admits only the audience its
-//! own visibility and the original definition's both admit.
-//!
-//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
-
 //- a_private_glob_member_does_not_shadow_std
 //-- lib_b.rock @pkg=chess,1 @v1
 mod b;

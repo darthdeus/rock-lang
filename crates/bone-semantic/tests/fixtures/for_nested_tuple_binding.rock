@@ -1,14 +1,4 @@
-//! NESTED tuple bindings in `for` and `let`. bone already destructures a
-//! flat 2-tuple binding (`for (k,v) in map`, `for (a,b) in [(A,B)]`), but
-//! a nested binding `(i, (a, b))` hits the flat-only collector and errors
-//! "unsupported variable binding pattern in for loop: Tuple(...)". The
-//! non-duplicating fix (per the investigation) is a HIR `BindingPattern`
 //! tree { Leaf(binding) | Tuple(Vec<BindingPattern>) } stored on `For` and
-//! `LetTuple`, built by one recursive `lower_pattern_bindings` and consumed
-//! by one recursive destructure helper -- replacing the two flat zip sites
-//! (inference.rs For :606-638 and LetTuple :668-696). Keeps the single-var
-//! fast path (`for (i, t) in ...` binds the inner tuple as one var).
-//! Verified vs rock.
 
 //- for_nested_tuple
 struct FIter<T> { last: T }

@@ -1,7 +1,3 @@
-//! `Vec { ... }` struct literal and the `[T]`/`Vec<T>` type are the same type.
-//! bone maps the `Vec` type name to the Array ctor (lower.rs); the struct-literal
-//! path must do the same so a `Vec { ... }` literal unifies with a `[T]` slot.
-
 //- vec_literal_is_array
 //-- vec_literal_is_array.rock
 fn make<T>() -> [T] {

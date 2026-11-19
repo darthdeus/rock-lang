@@ -1,8 +1,3 @@
-//! Type ascription via `(expression : Type)` -- distinct from `as`
-//! (which already lowers). `ExprKind::TypeAscription(expr, ty)` sits in the
-//! lower catch-all. Like `as`, the whole expression has the ascribed type; it
-//! can lower to the existing `Expr::As`. Verified vs rock (types/checked_ascription.rock).
-
 //- ascription_int
 fn f() -> int {
     let a = (42 : int)

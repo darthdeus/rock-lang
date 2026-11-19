@@ -1,9 +1,3 @@
-//! Coroutine typecheck (Step 1): `co fn ... -> Coroutine<Y>` + `yield e`.
-//! `yield e` checks `e` against the yield type Y (first param of the declared
-//! Coroutine return type). `Coroutine<Y>` synthesizes to `Coroutine<Y, (),
-//! ()>` so it matches the stdlib `resume<Y,R,N>` signature (resume/.resume()
-//! itself is exercised by the full suite, which has stdlib).
-
 //- co_fn_yield_ok
 co fn echo() -> Coroutine<string> {
     yield "hello"
@@ -15,8 +9,6 @@ fn carrier() -> int {
     x
 }
 
-// `await inner()` delegates: inner must be a Coroutine whose yield type Y'
-// flows into the outer Y. The delegate expression's value is the inner's R.
 //- yield_star
 co fn inner() -> Coroutine<int> {
     yield 1

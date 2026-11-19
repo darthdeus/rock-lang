@@ -1,8 +1,3 @@
-// Structural tests: assertions on workspace/HIR/inference internals that a
-// `.rock` fixture marker can't express (arena layouts, per-body bookkeeping,
-// cross-module wiring, diagnostic spans). Type-level behavior belongs in
-// tests/fixtures/*.rock instead.
-
 use crate::test_support::{diagnostic_messages, diagnostics};
 use bone_core::modules::{NsAliases, PackageAliases};
 use bone_semantic::prelude::*;
@@ -17,8 +12,6 @@ fn parse_rock(src: &str) -> Result<skull_parser::Ast, CompilerError> {
     parse_rock_with_file(src, "<parse_rock>")
 }
 
-/// Parse + type-check one source as a standalone, identity-enforced module
-/// (no stdlib).
 fn check(src: &str) -> Result<Workspace, CompilerError> {
     let mut module = [parse_rock(src)?];
     bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(
@@ -43,14 +36,12 @@ fn tag(id: u32, self_name: &str, identity_storage: IdentityStorage) -> PackageTa
     }
 }
 
-/// Parse `src` as `file` owned by package `id`/`name`.
 fn parse_in(src: &str, file: &str, package: (u32, &str)) -> skull_parser::Ast {
     let mut module = parse_module(src, Ustr::from(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
     module.package = Some(tag(package.0, package.1, Default::default()));
     module
 }
 
-/// Each package reachable under its own self name, plus the listed aliases.
 fn aliases(packages: &[(u32, &str, &[(&str, u32)])]) -> NsAliases {
     NsAliases {
         packages: packages
@@ -64,7 +55,6 @@ fn aliases(packages: &[(u32, &str, &[(&str, u32)])]) -> NsAliases {
     }
 }
 
-/// The index of the item named `$name` in a HIR arena.
 macro_rules! named {
     ($arena:expr, $name:expr) => {
         $arena
@@ -91,12 +81,10 @@ fn fn_owner(ws: &Workspace, name: &str) -> BodyOwner {
     BodyOwner::Function(named!(ws.module(user_mid(ws)).functions, name))
 }
 
-/// The body of the function named `name` in the single user module.
 fn fn_body<'a>(ws: &'a Workspace, name: &str) -> &'a Body {
     &ws.module(user_mid(ws)).bodies[&fn_owner(ws, name)]
 }
 
-/// All errors recorded against the named function's body.
 fn fn_errors<'a>(ws: &'a Workspace, name: &str) -> &'a [CompilerError] {
     ws.inference(user_mid(ws))
         .expect("user module inferred")
@@ -105,7 +93,6 @@ fn fn_errors<'a>(ws: &'a Workspace, name: &str) -> &'a [CompilerError] {
         .map_or(&[], Vec::as_slice)
 }
 
-/// The source slice a byte-offset span covers.
 fn text<'a>(src: &'a str, span: &Span) -> &'a str {
     let (s, e) = span.offset_range();
     &src[s..e]
@@ -132,9 +119,7 @@ fn an_unresolved_v1_variant_pattern_is_labeled_at_its_path() {
     assert_eq!(text(src, &label.span), "Nope::A");
 }
 
-// The mismatch carries a second label at the expected type's origin (the
-// `: Foo` annotation). Builtins (`int`) lower to a shared interned TyId with
-// no per-site span, so only span-carrying types get one.
+// Builtin types are interned without a span, so only a user type gets an origin label.
 #[test]
 fn type_mismatch_labels_the_expected_type_origin() {
     let src = "struct Foo { x: int }\nfn main() { let a: Foo = \"hello\" }";
@@ -150,9 +135,6 @@ fn type_mismatch_labels_the_expected_type_origin() {
     );
 }
 
-// Each diagnostic's primary label covers just the offending expression: the
-// `/` subexpression for the float-division hint, the tail rather than the
-// whole fn for a return mismatch, the hole for an interpolation error.
 #[test]
 fn diagnostics_label_the_offending_expression() {
     for (src, fn_name, message, labeled) in [
@@ -211,8 +193,6 @@ fn any_interpolation_errors_label_the_hole() {
     }
 }
 
-// A statement-tailed body reports the missing value instead of leaking the
-// internal `()` type, and never masks a genuine error in the body.
 #[test]
 fn missing_return_value_says_so_instead_of_unifying_unit() {
     let src = "fn f() -> string {\n    let y = 1\n    let z = 2\n}";
@@ -234,9 +214,6 @@ fn missing_return_value_says_so_instead_of_unifying_unit() {
     );
 }
 
-// The bug is type-invisible: `let c`'s inner block defines `let b`, and
-// lowering must not let that inner statement leak into the OUTER block's
-// statement range via the `first..=last` contiguity trap.
 #[test]
 fn nested_block_does_not_leak_into_outer_statements() {
     use bone_semantic::hir::Expr;
@@ -256,9 +233,6 @@ fn nested_block_does_not_leak_into_outer_statements() {
     );
 }
 
-// The same contiguity trap for parameters: the lambda default's own `x`
-// binding is allocated between `f` and `k`, and must stay out of the fn's
-// parameter range.
 #[test]
 fn lambda_param_default_does_not_leak_into_fn_params() {
     for (src, names) in [
@@ -283,9 +257,6 @@ fn lambda_param_default_does_not_leak_into_fn_params() {
     }
 }
 
-// The same contiguity trap for interpolation parts: the hole's `if` holds its
-// own interpolated string, whose parts are allocated while the outer parts are
-// being collected. A leaked inner `{x}` part printed the inner string twice.
 #[test]
 fn nested_interpolation_does_not_leak_into_outer_parts() {
     use bone_semantic::hir::{Expr, InterpPart};
@@ -315,9 +286,6 @@ fn nested_interpolation_does_not_leak_into_outer_parts() {
     );
 }
 
-// A type error in one body must not abort checking of the others: every
-// owner kind collects its errors per BodyOwner instead of failing fast, so a
-// watch/LSP session keeps healthy bodies' inference warm.
 #[test]
 fn body_type_errors_do_not_abort_other_bodies() {
     let ws = check(
@@ -381,21 +349,17 @@ fn arena_value_borrows_reject_detected_invalidation() {
         "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); let alias: ref BorrowCell = r; invalidate(h); alias.n = 1 }",
         "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); r = CELLS.borrow(h).unwrap(); invalidate(h); r.n = 1 }",
         "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); opaque(); r.n = 1 }",
-        // a lambda body and a local function body
         "fn probe(h: Entity<BorrowCell>) { let f = () => { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); invalidate(h); r.n = 1 }; f() }",
         "fn probe(h: Entity<BorrowCell>) { fn nested(k: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(k).unwrap(); invalidate(k); r.n = 1 } nested(h) }",
-        // an invoked closure and an invoked local function
         "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); let f = () => invalidate(h); f(); r.n = 1 }",
         "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); fn nested(k: Entity<BorrowCell>) { invalidate(k) } nested(h); r.n = 1 }",
     ]
     .map(String::from)
     .into();
-    // hidden returns, including an early one
     bodies.extend([
         "fn hidden() -> ref BorrowCell { return CELLS.borrow(HELD).unwrap() }\nfn probe() { let r: ref BorrowCell = hidden(); CELLS.remove(HELD); r.n = 1 }",
         "fn hidden(flag: bool) -> ref BorrowCell { if flag { return CELLS.borrow(HELD).unwrap() }; CELLS.borrow(HELD).unwrap() }\nfn probe() { let r: ref BorrowCell = hidden(true); CELLS.remove(HELD); r.n = 1 }",
     ].map(|b| format!("{HELD}{b}")));
-    // return origins through generics and both recursive entry points
     bodies.extend(["one(1)", "two(1)", "forward(one(1))"].map(|origin| {
         format!("{HELD}{RECURSIVE}fn probe() {{ let r: ref BorrowCell = {origin}; CELLS.remove(HELD); r.n = 1 }}")
     }));
@@ -521,8 +485,6 @@ fn structural_interface_conformance_rejects_private_set_field_for_writable_inter
         coerce("WritableMana").unwrap_err(),
         "field `mana` on struct `Actor` is not writable from this module"
     );
-    // A genuinely absent source field gets the interface-specific diagnostic;
-    // a present but inaccessible one keeps the access diagnostic.
     assert_eq!(
         coerce("MissingField").unwrap_err(),
         "type game::Actor does not have required field `missing` of interface `consumer::MissingField`"
@@ -559,7 +521,6 @@ fn identity_storage_edge_admits_only_direct_rows() {
     assert!(admitted.is_empty(), "{admitted:?}");
 
     for user in [
-        // not a recursive waiver
         "struct Mob { hp: int }\nglobal MOBS: ArenaStore<[Mob]> = ArenaStore { generations: [], data: [] }",
         "struct Mob { hp: int }\nglobal MOBS: PlainStore<Mob> = PlainStore { data: [] }",
     ] {
@@ -609,9 +570,6 @@ fn identity_storage_capability_is_the_arena_files_alone() {
     );
 }
 
-// A package's own declaration decides whether its sites are reported: the
-// package name exempts nothing, and stdlib and unpackaged programs keep the
-// compiler's built-in exemption.
 #[test]
 fn identity_storage_exemption_follows_the_package_declaration() {
     let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";
@@ -641,10 +599,6 @@ fn identity_storage_exemption_follows_the_package_declaration() {
     assert!(enforced(&declared), "{declared:?}");
 }
 
-// A declared module exemption covers a qualified module path prefix of its own
-// package, read from each file's `mod` header: the module it names and every
-// module below it, never a sibling that shares its spelling or a file with no
-// path.
 #[test]
 fn identity_storage_module_exemption_follows_the_module_path() {
     use bone_semantic::identity_storage::identity_storage_exempt;
@@ -710,12 +664,9 @@ fn identity_storage_module_exemption_follows_the_module_path() {
     assert!(exemption_of("nav.rock"));
     assert!(exemption_of("nav/graph.rock"));
     assert!(exemption_of("world.rock"));
-    // a prefix matches whole segments; a declaration covers its own package
-    // only; the package root is not under `nav`
     assert!(!exemption_of("navigation.rock"));
     assert!(!exemption_of("other/world.rock"));
     assert!(!exemption_of("lib.rock"));
-    // A file without a header belongs to the root, which matches no prefix.
     assert!(ws.fragment_scopes.contains_key(&ustr("unheaded.rock")));
     assert!(!exemption_of("unheaded.rock"));
     let errors = diagnostic_messages(&ws);
@@ -806,7 +757,6 @@ fn annotations_resolve_like_other_names() {
         );
     }
 
-    // A custom decorator spelled like a builtin is not the builtin.
     let custom = annotation_resolution_errors(&[(
         "main.rock",
         "deco init frame_ref_source {}
@@ -841,8 +791,6 @@ fn annotations_resolve_like_other_names() {
     }
 }
 
-// Enum variant uses carry the spans of their qualifier and variant name
-// tokens, so LSP rename rewrites exactly the name at every use.
 #[test]
 fn enum_variant_uses_carry_name_token_spans() {
     use bone_semantic::hir::{Expr, Pattern};

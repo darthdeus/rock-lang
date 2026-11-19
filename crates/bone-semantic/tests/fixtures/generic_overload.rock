@@ -1,8 +1,3 @@
-//! Generic-aware overload resolution: candidates differing by shape AND arity.
-//! Candidates are inline(lua) (bodies skipped); the caller's Rock body exercises
-//! selection. Containers declared inline (no stdlib). Custom struct names avoid
-//! bone's builtin Array/Map ctors.
-
 //- picks_dict_by_shape
 struct Lst<T> { len: int }
 struct Dict<K, V> { len: int }

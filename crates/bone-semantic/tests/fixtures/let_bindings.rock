@@ -93,7 +93,6 @@ fn f(p: int) -> int {
   //^ int
 }
 
-// declared let type must agree with the value's inferred type
 //- let_annotation_match
 fn f() -> int {
     let x: int = 5

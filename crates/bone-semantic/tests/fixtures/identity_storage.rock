@@ -1,11 +1,3 @@
-//! Identity storage. A `struct` has
-//! identity and lives only as an Arena row or a Scene/process root; every
-//! ordinary declaration position holds values or handles. Fields of structs
-//! and values, enum payloads, nullable wrappers, newtypes, non-root globals,
-//! and the type arguments a constructor stores (transitively) reject an
-//! identity struct. `value`s, phantom-`T` handles, roots, parameters and
-//! function types are admitted.
-
 //- identity_struct_field @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 struct Room { boss: Mob }
@@ -78,8 +70,6 @@ fn f() -> int {
   //^ int
 }
 
-// A direct `T?` at the top of a global is an optional one-row process root:
-// the nullable is occupancy, not nested storage.
 //- identity_nullable_root_global
 struct Mob { hp: int }
 global BOSS: Mob? = null
@@ -88,8 +78,6 @@ fn f() -> int {
   //^ int
 }
 
-// The root privilege is the global's top position alone: a nullable root's
-// type arguments and a nullable inside another constructor still store.
 //- identity_nullable_root_global_argument @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 struct Bag<T> { items: [T] }
@@ -115,8 +103,6 @@ fn f() -> int {
   //^ int
 }
 
-// A user generic whose field stores its parameter makes that argument a
-// storage position.
 //- identity_user_generic_argument @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 value Holder<T> { item: T }
@@ -126,7 +112,6 @@ fn f() -> int {
   //^ int
 }
 
-// Storage is transitive through a generic that forwards its parameter.
 //- identity_transitive_generic_argument @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 value Holder<T> { items: [T] }
@@ -137,8 +122,6 @@ fn f() -> int {
   //^ int
 }
 
-// A generic that stores its parameter under a nullable or a Vec still stores
-// it.
 //- identity_generic_argument_nullable_storage @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 value Maybe<T> { item: T? }
@@ -158,7 +141,6 @@ fn f() -> int {
   //^ int
 }
 
-// Values have no identity: any position may hold them.
 //- values_store_anywhere
 value Pos { x: int }
 enum Shape { Dot(Pos), Line { a: Pos, b: Pos } }
@@ -170,8 +152,6 @@ fn f() -> int {
   //^ int
 }
 
-// A phantom parameter is never stored, so a handle over an identity is a
-// value: `Arena<T>`/`Entity<T>`/`Scene<T>` are admitted by structure.
 //- phantom_handles_admit_identity
 struct Mob { hp: int }
 value Handle<T> { slot: int, generation: int }
@@ -184,7 +164,6 @@ fn f() -> int {
   //^ int
 }
 
-// A global of exactly an identity type is its process root.
 //- identity_root_global
 struct World { tick: int }
 global WORLD: World = World { tick: 0 }
@@ -193,7 +172,6 @@ fn f() -> int {
   //^ int
 }
 
-// A root's own type arguments are still storage positions.
 //- identity_root_global_argument @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 struct Bag<T> { items: [T] }
@@ -203,7 +181,6 @@ fn f() -> int {
   //^ int
 }
 
-// Parameters, returns and function types are borrows, not storage.
 //- identity_params_and_function_types
 struct Mob { hp: int }
 value Callbacks { on_hit: (Mob) -> int, pick: () -> Mob }

@@ -1,8 +1,3 @@
-//! Top-level (item-emitting) macros: a macro whose body declares items
-//! (`fn`/`struct`/...) is invoked at module level, splicing its `macro_items`
-//! into the module. (No-param case here; ident/type-sigil substitution into
-//! declarations is a separate, larger step.)
-
 //- top_level_macro_emits_fn
 macro emit_const() {
     fn made_by_macro() -> int { 42 }

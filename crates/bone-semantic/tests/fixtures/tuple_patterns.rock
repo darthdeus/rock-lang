@@ -1,9 +1,3 @@
-//! Tuple patterns `(a, b)` in match arms. The scrutinee must be a tuple type;
-//! each element pattern is checked against the corresponding element type.
-//! Unlike or-patterns, tuple patterns DO bind variables. Verified vs rock
-//! (tests/patterns/literal_range_tuple.rock).
-
-// Literal + binding + wildcard element patterns; result is the arm-body type.
 //- tuple_two_elem
 fn tup(p: (int, int)) -> int {
     match p { (0, 0) => 100, (1, y) => y, (x, _) => x }
@@ -14,7 +8,6 @@ fn f(p: (int, int)) -> int {
     r
 }
 
-// Element types propagate: the second element binds as `string`.
 //- tuple_mixed_types
 fn g(p: (int, string)) -> string {
     match p { (0, s) => s, (_, t) => t }
@@ -25,7 +18,6 @@ fn f(p: (int, string)) -> string {
     r
 }
 
-// Three elements, all bound.
 //- tuple_three_elem
 fn h(p: (int, int, int)) -> int {
     match p { (a, _, _) => a }

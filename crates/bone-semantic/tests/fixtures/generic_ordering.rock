@@ -1,9 +1,3 @@
-//! Ordering operators (`< <= > >=`) on a generic type parameter `T` are allowed:
-//! the operands must unify and the result is bool, but orderability is deferred
-//! (bone does not monomorphize, and rock accepts `max<T>` with no constraint).
-//! Concrete non-numeric operands (string, bool) stay rejected -- rock defines no
-//! `operator <` for them.
-
 //- generic_ordering_max
 fn max<T>(a: T, b: T) -> T {
     if a > b { a } else { b }
@@ -24,7 +18,6 @@ fn f() -> bool {
     r
 }
 
-// numeric ordering still works
 //- int_ordering
 fn f(a: int, b: int) -> bool {
     let r = a < b

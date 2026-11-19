@@ -39,11 +39,3 @@ fn f() -> int {
     return 5
   //^^^^^^ int
 }
-
-// //- nested_block
-// fn f() -> int {
-//     return 1
-//     { return 2 }
-//     return 3
-//               //^ int
-// }

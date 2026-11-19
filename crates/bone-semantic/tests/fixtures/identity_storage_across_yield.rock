@@ -1,8 +1,3 @@
-//! Across-yield flow through loops. A
-//! loop variable is bound fresh on every iteration, and `continue`, `break`
-//! and `return` leave the path they end, so neither carries a borrow past a
-//! yield. A borrow bound before the loop still reaches the next iteration.
-
 //- while_let_variable_is_rebound_each_iteration
 struct Mob { hp: int }
 value Entity<T> { idx: int }

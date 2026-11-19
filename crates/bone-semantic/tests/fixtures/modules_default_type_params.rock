@@ -1,6 +1,3 @@
-//! A defaulted type parameter pads a short application the same way whichever
-//! module lowers first: the declaring one or the using one.
-
 //- decl_module_first
 //-- decl.rock @pkg=shared,1
 struct Pair<T, U = int> { a: T, b: U }

@@ -1,9 +1,3 @@
-//! Newtype let-destructuring: `let UserId(x) = u` unwraps a newtype binding.
-//! bone rejects `VariableBindingKind::Newtype` in let lowering. The value must
-//! be the named newtype; each inner binding takes the corresponding wrapped
-//! type (with generic subst from the value's type args). Verified vs rock
-//! (newtypes/basics.rock).
-
 //- newtype_let_destructure
 newtype UserId(int)
 fn f(u: UserId) -> int {
@@ -12,7 +6,6 @@ fn f(u: UserId) -> int {
   //^ int
 }
 
-// the wrapped type is recovered, not the newtype.
 //- newtype_let_wrapped_type
 newtype Tag(string)
 fn f(t: Tag) -> int {

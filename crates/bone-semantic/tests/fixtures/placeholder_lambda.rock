@@ -1,15 +1,3 @@
-//! Placeholder-lambda [D1]: a direct-underscore expression becomes a one-param
-//! lambda, all `_` binding to the SAME param. `_.x` => `p => p.x`, `_ > 0` =>
-//! `p => p > 0`, `_ > _` => `p => p > p`. Wrapping is OUTERMOST-only: the whole
-//! direct-underscore expr is one lambda; inner `_`s reuse its param. The param
-//! type is inferred from the expected fn type at the call site. Ops are
-//! user-defined / comparisons so the fixture type-checks without stdlib.
-//!
-//! `_` inside an explicit lambda body or a block expression is REJECTED (a
-//! lambda/block is its own value context — there is no enclosing expression to
-//! lift, so a `_` there is meaningless). See the `@fail` sections below.
-
-// `_.x` => `p => p.x` : (P) -> int.
 //- placeholder_field
 struct P { x: int }
 fn apply(f: (P) -> int) -> int { return f(P { x: 5 }) }
@@ -19,7 +7,6 @@ fn g() -> int {
     r
 }
 
-// `_ > 0` => `p => p > 0` : (int) -> bool.
 //- placeholder_comparison
 fn pred(f: (int) -> bool) -> bool { return f(3) }
 fn g() -> bool {
@@ -28,7 +15,6 @@ fn g() -> bool {
     r
 }
 
-// multiple `_` in one expr all bind the SAME param: `_ > _` => `p => p > p`.
 //- placeholder_multi_same_param
 fn pred(f: (int) -> bool) -> bool { return f(3) }
 fn g() -> bool {
@@ -37,7 +23,6 @@ fn g() -> bool {
     r
 }
 
-// `_` as a call arg wraps the whole call: `forward(_)` => `p => forward(p)`.
 //- placeholder_bare_arg
 fn twoarg(f: (int) -> int) -> int { return f(10) }
 fn forward(n: int) -> int { return n }
@@ -47,8 +32,6 @@ fn g() -> int {
     r
 }
 
-// operator-overloaded placeholder: `_ + V{..}` => `p => p + V{..}` : (V) -> V,
-// resolving the user `__op_add(V, V)`.
 //- placeholder_struct_op
 struct V { n: int }
 fn __op_add(a: V, b: V) -> V { return a }

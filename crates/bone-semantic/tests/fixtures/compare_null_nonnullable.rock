@@ -1,12 +1,3 @@
-//! Comparing a value KNOWN to be non-null against `null` (`x == null` /
-//! `x != null`) is a TYPE ERROR -- `null` can't inhabit it, so the check is dead
-//! code. "Known non-null" is flow-sensitive: a declared non-nullable type, OR a
-//! nullable refined to non-null by a guard or an (in-scope) assignment. Consistent
-//! with bone's rejection of `??` / `?.` on a non-nullable. Stricter than rock,
-//! which only narrows via guards (so rock accepts the assignment case). Nullable
-//! types are the valid case; `any` and unresolved generics are exempt.
-
-// a nullable IS comparable to null -- the normal null check, still allowed.
 //- compare_nullable_to_null_ok
 fn f(x: int?) -> bool {
     let r = x != null
@@ -14,7 +5,6 @@ fn f(x: int?) -> bool {
     r
 }
 
-// `any` is exempt -- it could be null at runtime.
 //- compare_any_to_null_ok
 fn f(x: any) -> bool {
     let r = x != null
@@ -22,7 +12,6 @@ fn f(x: any) -> bool {
     r
 }
 
-// a nullable assigned null is still nullable -- the check is valid.
 //- compare_after_null_assignment_ok
 struct S { v: int }
 fn f(x: S?) -> bool {

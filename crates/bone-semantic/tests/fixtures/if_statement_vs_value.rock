@@ -1,22 +1,3 @@
-//! Position-based `if` typing (rule A, adopted 2026-06-10):
-//!   - STATEMENT position (value discarded): branches are checked
-//!     independently, tail values are discarded, no join, else optional.
-//!     Discarded positions: Statement::Expr / Defer, for/while bodies,
-//!     branch blocks of a discarded if/match, and the body tail of a fn
-//!     with no declared return (or a coroutine).
-//!   - VALUE position (let init, return, fn tail with declared return,
-//!     args, ...): a final `else` is REQUIRED and all branch tails
-//!     (incl. else) must unify; the if's type is the joined type.
-//! Same rule for `if let` (sections below) and `match`
-//! (match_statement_vs_value.rock).
-//! INTENDED divergences from rock until rock adopts rule A:
-//!   - rock joins branch tails even in statement position (it rejects
-//!     stmt_open_chain_mismatched_tails and stmt_closed_mismatched_tails)
-//!   - rock's check_if never requires an else, so a no-else if in value
-//!     position type-checks and produces nil at runtime -- bone rejects.
-
-// an open conditional chain: open chain, every branch tail
-// the same non-unit type, value discarded
 //- stmt_open_chain_uniform_tails
 fn gives_bool() -> bool { true }
 fn f() -> int {
@@ -47,7 +28,6 @@ fn f() -> int {
     y
 }
 
-// the pop/push shape: closed chain, mismatched tails, value discarded
 //- stmt_closed_mismatched_tails
 fn gives_bool() -> bool { true }
 fn f() -> int {
@@ -62,8 +42,6 @@ fn f() -> int {
     y
 }
 
-// the anvil shape (main.rock render): branch block of a discarded if ends
-// with an inner open if whose tail is non-unit
 //- stmt_nested_open_if_bool_tail
 fn gives_bool() -> bool { true }
 fn f() -> int {
@@ -113,7 +91,6 @@ fn f() -> int {
     y
 }
 
-// fn with no declared return: the body tail is a discarded position
 //- stmt_fn_tail_no_ret_mismatched_if
 fn gives_bool() -> bool { true }
 fn f() {
@@ -145,7 +122,6 @@ fn f(x: int) -> int {
     }
 }
 
-// statement if-let: non-unit then tail, no else, discarded
 //- stmt_iflet_nonunit_tail
 fn gives_bool() -> bool { true }
 fn f() -> int {
@@ -166,9 +142,6 @@ fn f() -> int {
     u
 }
 
-// a lambda checked against `fn()` (unit return) has a discarded body tail,
-// like a fn with no declared return -- the with_shader callback shape
-// (a draw-list flush body)
 //- lambda_arg_unit_ret_tail_if
 fn gives_bool() -> bool { true }
 fn run(cb: fn()) -> int {

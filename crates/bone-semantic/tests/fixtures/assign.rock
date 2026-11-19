@@ -1,6 +1,3 @@
-//! Assignment: `x = v`, `p.field = v`. Result is unit; the value must unify
-//! with the target's type.
-
 //- assign_var
 fn f() -> int {
     let x = 5

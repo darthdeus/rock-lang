@@ -1,8 +1,3 @@
-//! Test-only helpers shared across bone's test modules.
-//!
-//! - `check_types(src)` runs the bone pipeline and asserts every `//^ ty`
-//!   marker in the source resolves to the expected type via `query::type_at`.
-
 // Both test harnesses include this module and each uses part of it.
 #![allow(dead_code)]
 
@@ -22,22 +17,15 @@ pub fn render_err(sources: &[(&str, &str)], e: &CompilerError) -> String {
     e.render(&sf)
 }
 
-/// Parse `//^ ty` markers out of `src`, run the bone pipeline once,
-/// and assert that each marked position has the expected type.
-/// Rock treats `//` as a comment so the original source parses cleanly
-/// with annotation lines inert.
+/// Checks that every `//^ ty` marker in `src` names the type at its position.
 pub fn check_types(src: &str) -> Result<(), String> {
     let srcs: &[(&str, &str)] = &[("<parse_rock>", src)];
     let stage = |stage: &str, e: CompilerError| format!("{stage} failed\n{}", render_err(srcs, &e));
 
-    // Filename must match the `srcs` key above (and the fabricated span in the
-    // no-marker path below) so ariadne can fetch the source for error rendering
-    // -- a mismatch triggers a stderr "Unable to fetch source" warning per label.
+    // The file name must match the `srcs` key so error rendering finds the source.
     let module = parse_module(src, ustr("<parse_rock>")).map_err(|e| stage("parse_rock", e))?;
 
-    // `parse_module` recovers past a malformed item and returns Ok, parking the
-    // error on `recovery_errors` -- the compile gate rejects on it, so a fixture
-    // must too. Without this a parse-rejected shape reads as ACCEPTED here.
+    // `parse_module` recovers past a malformed item; the compile gate still rejects it.
     if let Some(e) = module.recovery_errors.first() {
         return Err(stage("parse_rock", e.clone()));
     }
@@ -52,7 +40,6 @@ pub fn check_types(src: &str) -> Result<(), String> {
         return Err(stage("type-check", e.clone()));
     }
 
-    // the single user module: everything in the workspace except the builtin one
     let mid = ws
         .source_modules()
         .next()
@@ -97,7 +84,6 @@ pub fn check_types(src: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Every body, lowering, and interface diagnostic in phase order.
 pub(crate) fn diagnostics(ws: &Workspace) -> Vec<&CompilerError> {
     ws.inferences_iter()
         .flat_map(|(_, inference)| inference.errors.values().flatten())
@@ -121,17 +107,13 @@ pub(crate) fn diagnostic_messages(ws: &Workspace) -> Vec<String> {
         .collect()
 }
 
-/// The first body, lowering or interface error in source order: a fixture
-/// fails (and `@fail` passes) on it. `semantic_pass` Ok means "lowered and
-/// checked", not "no errors": these are collected per module and body.
 fn first_error(ws: &Workspace) -> Option<&CompilerError> {
     diagnostics(ws)
         .into_iter()
         .min_by_key(|e| e.location.offset)
 }
 
-/// Build a CompilerError that labels every interval in the position index
-/// overlapping `[start, end)`. Used by the `//^ ?` debug marker.
+/// The `//^ ?` debug marker: labels every indexed node overlapping `[start, end)`.
 fn dump_at(
     ws: &Workspace,
     mid: ModuleId,
@@ -232,7 +214,6 @@ fn dump_at(
     err
 }
 
-/// One embedded source file in a multi-package fixture.
 pub struct PackageFixture<'a> {
     pub file: &'a str,
     /// `None` creates a standalone package; `Some((self_name, package_id))` stamps a
@@ -241,12 +222,6 @@ pub struct PackageFixture<'a> {
     pub src: &'a str,
 }
 
-/// Like [`check_types`] but over several files in possibly several packages:
-/// each file joins the namespace tree, and every `//^ ty` marker in every file
-/// must resolve. Cross-package alias
-/// tables default to "every package is reachable under its own self name".
-/// Trusted stdlib sources are prepended without treating their
-/// internal `//^` comments as fixture assertions.
 pub fn check_types_packages_with_stdlib(
     files: &[PackageFixture<'_>],
     stdlib_sources: &[(&str, &str)],
@@ -307,7 +282,6 @@ fn check_types_packages_inner(
         modules.push(module);
     }
 
-    // Default alias table: each package reachable under its own self name.
     let mut aliases = bone_core::modules::NsAliases::default();
     let ids: Vec<(u32, &str)> = all_files
         .iter()
@@ -341,7 +315,6 @@ fn check_types_packages_inner(
         return Err(render_err(&srcs, e));
     }
 
-    // Check `//^` markers in every file.
     for f in checked_files.iter() {
         let annotations = test_utils::extract_annotations(f.src);
         if annotations.is_empty() {
@@ -377,8 +350,6 @@ fn check_types_packages_inner(
 
 pub use test_utils::{EmbeddedFile, parse_embedded_files};
 
-/// Check embedded modules with the compiler-owned stdlib export view
-/// available as the v1 default prelude.
 pub fn check_types_embedded_with_stdlib(
     files: &[EmbeddedFile<'_>],
     stdlib_sources: &[(&str, &str)],

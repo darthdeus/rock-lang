@@ -1,7 +1,3 @@
-//! Overload-family visibility is per member, not last-writer-wins at the
-//! family key. The public member remains callable outside the package while
-//! the private member is available to the defining package.
-
 //- public_then_private_external_public_and_same_module
 //-- lib.rock @pkg=lib,1 @v1
 pub fn f(n: int) -> int { n }

@@ -1,5 +1,3 @@
-//! Packages use the same module rules, including sources with no directive.
-
 //- private_package_items_are_not_exported @fail=not accessible from this module
 //-- xlib.rock @pkg=x_lib,1
 fn f(n: int) -> int { n }

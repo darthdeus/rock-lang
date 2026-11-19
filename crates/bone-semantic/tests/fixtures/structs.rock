@@ -1,9 +1,3 @@
-//! Structs, slice A: definitions + named-type resolution. A `struct` item
-//! registers a named type; its name resolves in type position (params, fields,
-//! returns). Field bodies can forward-reference structs declared later, so
-//! registration is two-pass (collect names, then lower field types).
-
-// a struct name resolves as a parameter type, and renders as the name.
 //- struct_param_type
 struct Point { x: int, y: int }
 fn f(p: Point) -> int {
@@ -11,7 +5,6 @@ fn f(p: Point) -> int {
     5
 }
 
-// a struct field whose type is another struct resolves.
 //- struct_field_of_struct
 value Inner { a: int }
 struct Outer { inner: Inner }
@@ -20,7 +13,6 @@ fn f(o: Outer) -> int {
     5
 }
 
-// forward reference: Outer's field names Inner, declared later -> two-pass.
 //- struct_forward_ref
 struct Outer { inner: Inner }
 value Inner { a: int }
@@ -29,9 +21,6 @@ fn f(o: Outer) -> int {
     5
 }
 
-// --- slice B: struct literals ---
-
-// a literal has the struct's type.
 //- struct_literal_let
 struct Point { x: int, y: int }
 fn f() -> int {
@@ -40,7 +29,6 @@ fn f() -> int {
     5
 }
 
-// a literal satisfies a declared return of the struct type.
 //- struct_literal_return
 struct Point { x: int, y: int }
 fn f() -> Point {
@@ -49,7 +37,6 @@ fn f() -> Point {
     p
 }
 
-// field order in the literal need not match declaration order.
 //- struct_literal_reordered
 struct Point { x: int, y: int }
 fn f() -> int {
@@ -58,9 +45,6 @@ fn f() -> int {
     5
 }
 
-// --- slice C: field access ---
-
-// reading a field yields its declared type.
 //- struct_field_access
 struct Point { x: int, y: int }
 fn f() -> int {
@@ -70,7 +54,6 @@ fn f() -> int {
     5
 }
 
-// a struct-typed field reads back as that struct.
 //- struct_field_is_struct
 value Inner { a: int }
 struct Outer { inner: Inner }
@@ -80,7 +63,6 @@ fn f(o: Outer) -> int {
     5
 }
 
-// field access chains through nested structs.
 //- struct_field_chain
 value Inner { a: int }
 struct Outer { inner: Inner }

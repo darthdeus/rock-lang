@@ -1,7 +1,3 @@
-//! Position queries inside NON-FUNCTION bodies: `body_at` must map an offset
-//! to its owner for every BodyOwner kind, not just `Function` (bone-inc B7's
-//! item interval index). Before B7 these markers resolve to no type at all.
-
 //- hover_inside_global_init
 //-- hover_inside_global_init.rock
 global GREETING: string = "hello"

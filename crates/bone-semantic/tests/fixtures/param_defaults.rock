@@ -1,14 +1,3 @@
-//! Function param defaults are inferred at DEFINITION, in the fn's own gamma:
-//! (a) a default that doesn't fit the declared param type is rejected (rock
-//! rejects `x: int = "oops"`); (b) a default calling an overloaded fn records
-//! its overload resolution in the fn's BodyInference (skull's callee-side
-//! default fill lowers the default expr with that inference — without the
-//! entry the call can't be mangled and the fn gaps).
-//!
-//! The @fail section carries a caret annotation of the type it WOULD have if
-//! the bad default were accepted, so a wrong-acceptance surfaces as "@fail
-//! but passed" (RED) instead of a "no annotations" harness error.
-
 //- param_default_overloaded_call
 struct V2 { x: float, y: float }
 fn mk() -> V2 {
@@ -36,9 +25,6 @@ fn use_scale() -> float {
     return s
 }
 
-// ...and a param named after a global fn does NOT shadow it in its own
-// default — `color` here is the global fn, unambiguously (the host-library pattern
-// `color: Color = color(0, 0, 0, 0)`).
 //- param_default_shadowing_name_resolves_to_fn
 struct Color2 { r: int }
 fn color2(r: int) -> Color2 {
@@ -50,9 +36,6 @@ fn paint(color2: Color2 = color2(7)) -> int {
     return r
 }
 
-// An explicit `null` overrides a nullable parameter's non-null default
-// (EXPLICIT_NULL_DEFAULT, option A): `seed: int? = 42` is accepted and both
-// `seeded()` and `seeded(null)` typecheck.
 //- param_default_nullable_non_null_accepted
 fn seeded(seed: int? = 42) -> int? {
     return seed

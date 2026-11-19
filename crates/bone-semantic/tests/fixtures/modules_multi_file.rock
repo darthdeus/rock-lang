@@ -1,7 +1,3 @@
-//! Modules-v1 namespace resolution: multi-file logical modules,
-//! visibility, scope tiers, UFCS, operators, paths.
-//!
-//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
 //! `//^ ty` markers are checked in every embedded file.
 
 //- module_ownership_two_files_share_one_module
@@ -64,8 +60,6 @@ pub fn width() -> int {
     10
 }
 
-// Tier 2 (this logical module's own definition) wins over the tier 4 glob:
-// the glob `width` returns string, so the marker below is the oracle.
 pub fn outer_width() -> int {
     let n = width()
             //^ int
@@ -389,8 +383,6 @@ struct Foo {
     v: int,
 }
 
-// The own `min` hides the std family for the bare name; the
-// qualified path reaches the std family and selects by argument type.
 fn min(a: Foo, b: Foo) -> Foo {
     a
 }
@@ -442,8 +434,6 @@ struct Api {
     stop: fn() -> int,
 }
 
-// The field call keeps its precedence: no tier binds `stop`, and the
-// call is the field's function, exactly as in legacy.
 fn run(a: Api) -> int {
     let n = a.stop()
     let m = n
@@ -484,8 +474,6 @@ fn stop(a: Api) -> string {
     "free"
 }
 
-// Legacy calls the field here; so must v1. The free fn returns
-// string, so the marker catches a rebinding.
 fn run(a: Api) -> int {
     let n = a.stop()
     let m = n
@@ -497,8 +485,6 @@ fn run(a: Api) -> int {
 //-- app.rock @pkg=app,1 @v1
 use store::Store;
 
-// Importing the type does not import its functions, so the call is rejected;
-// the diagnostic points at the fitting `len` beside `Store`.
 fn run(s: Store) -> int {
     s.len()
 }

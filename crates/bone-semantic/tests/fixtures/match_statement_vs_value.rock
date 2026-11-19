@@ -1,9 +1,3 @@
-//! Position-based `match` typing -- same rule A as
-//! if_statement_vs_value.rock: arm tails join only when the match is used
-//! as a value; in statement position arms are checked independently and
-//! their values discarded. (rock still joins statement-position arms;
-//! intended divergence until rock adopts rule A.)
-
 //- stmt_match_mismatched_arms
 fn gives_bool() -> bool { true }
 fn f() -> int {

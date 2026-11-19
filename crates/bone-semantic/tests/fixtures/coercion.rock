@@ -1,8 +1,3 @@
-//! int -> float widening (directional: int <: float, never the reverse). Applies
-//! at value->expected sites -- let annotation, call arg -> param, return value,
-//! assignment. Comparisons stay strict (comparison.rock). Operator-overload
-//! selection that also needs widening lives in numeric_operators.rock.
-
 //- let_int_to_float
 fn f() -> float {
     let x: float = 1

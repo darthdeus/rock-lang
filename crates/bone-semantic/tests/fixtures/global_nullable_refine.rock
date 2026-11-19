@@ -1,26 +1,4 @@
-//! Global nullable refinement (purity-aware) -- a DELIBERATE divergence from
-//! rock. rock never refines a global, because a global can be
-//! reassigned by any intervening call. bone makes the intended rule: after
-//! `if G != null`, the global G is refined to non-null until an INTERVENING
-//! EFFECT could change it. The effect set (soundness condition):
-//!   - a direct write to G (`G = ...`)
-//!   - a call to a NON-`@pure` function/method (a `@pure` callee provably can't
-//!     write globals, so it preserves the refinement)
-//!   - a `yield` (control returns to the resumer, who may mutate G)
-//! An access of G inside a call's own argument list stays refined -- the access
-//! is sequenced before that call's effect (`log(G.name)` is fine).
-//!
 //! Marker `//^` sits on the expression whose type is under test. The "refine"
-//! sections assert the global narrows to its inner type; the "dropped" /
-//! "restored" sections assert it stays `T?` after an intervening effect, pinning
-//! the invalidation soundness condition. Impl: `bone-inference/src/narrowing.rs`
-//! (detection + branch application + the purity-aware condition effect check)
-//! and the `Expr::Global` / `Expr::Assign` / call + yield hooks in
-//! `bone-inference/src/lib.rs`. Locals and globals share one path-keyed
-//! refinement set (`Root::Local` / `Root::Global`), so global field paths
-//! (`if G.inner != null { G.inner.x }`) refine through the same mechanism.
-
-// --- the feature: refine a global inside `!= null` -------------------------
 
 //- global_refine_basic
 value Player { name: string }
@@ -34,8 +12,6 @@ fn f() -> Player? {
     }
 }
 
-// the user-facing win: a field access on the refined global type-checks (and is
-// the field's type, not an error).
 //- global_refine_field_access
 value Player { name: string }
 global P: Player? = null
@@ -49,8 +25,6 @@ fn f() -> string {
     }
 }
 
-// global FIELD path: `if G.inner != null` refines `G.inner` (and the `G`
-// prefix), so `G.inner.v` type-checks -- same path-keyed mechanism as locals.
 //- global_refine_field_path
 value Inner { v: int }
 struct Outer { inner: Inner? }
@@ -64,8 +38,6 @@ fn f() -> int {
     0
 }
 
-// `== null` guard with an early return refines G for the rest of the function
-// (the else path is unreachable, so the narrow escapes the if).
 //- global_refine_guard_early_return
 value Player { name: string }
 global P: Player? = null
@@ -78,8 +50,6 @@ fn f() -> string {
     nm
 }
 
-// a `@pure` call cannot write globals, so the refinement survives it. (This
-// pins the PURITY-AWARE choice: a "any call invalidates" rule would fail here.)
 //- global_refine_survives_pure_call
 value Player { name: string }
 global P: Player? = null
@@ -93,9 +63,6 @@ fn f() -> int {
     0
 }
 
-// a `@pure` call IN THE CONDITION can't reassign P, so the refinement holds in
-// the body. The effect check is purity-aware: a non-pure call here would drop it
-// (see global_refine_dropped_after_impure_in_cond).
 //- global_refine_survives_pure_in_cond
 value Player { name: string }
 global P: Player? = null
@@ -108,8 +75,6 @@ fn f() -> int {
     0
 }
 
-// the access precedes the impure call's effect, so it is refined; the later
-// impure() does not retroactively un-refine the earlier access.
 //- global_refine_use_before_impure_call
 value Player { name: string }
 global P: Player? = null
@@ -123,9 +88,6 @@ fn f() -> int {
     0
 }
 
-// --- invalidation guards: the refinement must NOT survive an effect ---------
-
-// a non-`@pure` call may have nulled P, so P is `Player?` again after it.
 //- global_refine_dropped_after_impure_call
 value Player { name: string }
 global P: Player? = null
@@ -139,8 +101,6 @@ fn f() -> int {
     0
 }
 
-// a global FIELD-path refinement is also dropped by an intervening impure call,
-// so `G.inner` is `Inner?` again after it.
 //- global_refine_field_path_dropped_after_impure_call
 value Inner { v: int }
 struct Outer { inner: Inner? }
@@ -156,7 +116,6 @@ fn f() -> int {
     0
 }
 
-// a direct write to P invalidates the refinement.
 //- global_refine_dropped_after_write
 value Player { name: string }
 global P: Player? = null
@@ -169,10 +128,6 @@ fn f() -> int {
     0
 }
 
-// a lambda body runs at CALL time, after arbitrary intervening effects, and a
-// global is read fresh on each call -- so an enclosing global refinement does
-// NOT hold inside a lambda body (`P` is `Player?` there, not `Player`). Locals
-// are captured, so they keep their refinement; only globals are cleared.
 //- global_not_refined_inside_lambda_body
 value Player { name: string }
 global P: Player? = null
@@ -188,7 +143,6 @@ fn f() -> int {
     return 0
 }
 
-// a `yield` hands control to the resumer, who may mutate P, so it invalidates.
 //- global_refine_dropped_after_yield
 value Player { name: string }
 global P: Player? = null
@@ -200,10 +154,6 @@ co fn f() -> Coroutine<int> {
     }
 }
 
-// an impure call IN THE CONDITION, after the null-check, can null P before the
-// body runs (`g != null && impure()`), so P is NOT refined in the body. (Locals
-// are immune -- a call can't mutate a caller local -- so this guard is
-// global-specific.)
 //- global_refine_dropped_after_impure_in_cond
 value Player { name: string }
 global P: Player? = null
@@ -216,7 +166,6 @@ fn f() -> int {
     0
 }
 
-// the overlay is block-scoped: after the branch closes, P is `Player?` again.
 //- global_refine_restored_after_branch
 value Player { name: string }
 global P: Player? = null

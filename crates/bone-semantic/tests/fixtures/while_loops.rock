@@ -1,6 +1,3 @@
-//! While loops: `while cond { body }`. The condition must be `bool`; the body is
-//! checked; the `while` is a statement (unit).
-
 //- while_basic
 fn f() -> int {
     let i = 0

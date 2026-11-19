@@ -1,17 +1,3 @@
-//! Tuple type lowering, substitution, and unification.
-//!
-//! Marker conventions:
-//!   - param tuples: marker sits on the binding name `p` (its declared type),
-//!     not inside the annotation. `type_at` returns the smallest interval, so a
-//!     caret on an inner `int` would resolve to that `int`, not the tuple.
-//!   - return tuples: marker on the comma — inside the tuple node, outside any
-//!     element node.
-//!   - call results: marker on the callee name (matches generics.rock `id(5)`).
-//!
-//! Render format: `(int, int)` — parens, `, ` separator.
-
-// --- lower + render tuple type annotations ---
-
 //- tuple_param
 fn f(p: (int, int)) -> int { 5 }
    //^ (int, int)
@@ -24,7 +10,6 @@ fn f(p: (int, bool)) -> int { 5 }
 fn f(p: (int, bool, string)) -> int { 5 }
    //^ (int, bool, string)
 
-// nested tuple exercises recursive lowering + render
 //- tuple_param_nested
 fn f(p: ((int, int), bool)) -> int { 5 }
    //^ ((int, int), bool)
@@ -32,8 +17,6 @@ fn f(p: ((int, int), bool)) -> int { 5 }
 //- tuple_return
 fn f() -> (int, int) { (1, 2) }
             //^ (int, int)
-
-// --- substitute through a generic call returning a tuple ---
 
 //- tuple_generic_return
 fn pair<T>(x: T) -> (T, T) { (x, x) }
@@ -45,16 +28,12 @@ fn pair<T>(x: T) -> (T, T) { (x, x) }
 fn f() -> (bool, bool) { pair(true) }
                        //^ (bool, bool)
 
-// --- unify compound vs compound ---
-
-// monomorphic param tuple unified against a generic call result
 //- tuple_unify_monomorphic
 fn pair<T>(x: T) -> (T, T) { (x, x) }
 fn takes(p: (int, int)) -> int { 5 }
 fn f() -> int { takes(pair(5)) }
               //^ int
 
-// generic param tuple (U, U) unified against (int, int), binds U := int
 //- tuple_unify_generic
 fn pair<T>(x: T) -> (T, T) { (x, x) }
 fn fst<U>(p: (U, U)) -> U { p.0 }

@@ -1,15 +1,3 @@
-//! A fragment's explicit import that lands on a module is a path anchor for
-//! that fragment (`use p::m as m;`, `use p::m::{self, x};`), and a
-//! module's named export binding that lands on a module is a module member.
-//! A path through either is checked as it is written: the
-//! import's own path from the fragment, then each later segment and the
-//! final member from the fragment, never the canonical parent path a second
-//! time. An imported module name that clashes with a child module, a
-//! dependency alias or the package's own name is a diagnostic, never a
-//! silent pick; `self`, `super` and `std` are reserved.
-//!
-//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
-
 //- an_alias_of_a_child_module_anchors_a_path
 //-- lib.rock @pkg=chess,1 @v1
 use inner as renamed;

@@ -1,9 +1,3 @@
-//! Multi-field init `Foo { a + b: expr }` -- shorthand for `a: expr, b: expr`
-//! with `expr` evaluated once and shared across the named fields. bone already
-//! handles the struct-literal arm; these slices also cover the enum
-//! record-variant arm. Verified vs rock (tests/structs/init_shorthand.rock).
-
-// Two fields share one value.
 //- struct_two_fields
 struct FixVec2 { x: int, y: int }
 fn f() -> FixVec2 {
@@ -12,7 +6,6 @@ fn f() -> FixVec2 {
     v
 }
 
-// Three fields in one group.
 //- struct_three_fields
 struct Triple { a: int, b: int, c: int }
 fn f() -> Triple {
@@ -21,7 +14,6 @@ fn f() -> Triple {
     t
 }
 
-// Multi-field group alongside an explicit field.
 //- struct_mixed_with_explicit
 struct Named { a: int, b: int, name: string }
 fn f() -> Named {
@@ -30,10 +22,6 @@ fn f() -> Named {
     n
 }
 
-// Multi-field with a shared `null` value across (homogeneous) nullable fields.
-// The shared node is inferred once (assign_expr_type memoization); both fields
-// receive `int?`. (Heterogeneous fields are intentionally
-// rejected.)
 //- struct_nullable_fields_shared_null
 struct OptPair { a: int?, b: int? }
 fn f() -> OptPair {
@@ -42,7 +30,6 @@ fn f() -> OptPair {
     p
 }
 
-// Enum record variant with a multi-field group + explicit field.
 //- enum_record_variant
 enum Shape { Circle { cx: int, cy: int, radius: int }, Box { x: int, y: int, w: int, h: int } }
 fn f() -> Shape {
@@ -51,7 +38,6 @@ fn f() -> Shape {
     s
 }
 
-// Enum record variant with two multi-field groups.
 //- enum_record_two_groups
 enum Region { Box { x: int, y: int, w: int, h: int } }
 fn f() -> Region {

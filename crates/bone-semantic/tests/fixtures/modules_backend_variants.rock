@@ -1,9 +1,3 @@
-//! Backend-variant collapse at a call (`collapse_backend_variants` in
-//! bone-inference): candidates that share a name and a declared parameter
-//! signature, with every backend distinct, are one logical function and
-//! collapse to the lowest-ranked backend before scoring. Each section mixes
-//! backends so the collapse runs rather than its single-backend fast path.
-
 //- a_cross_backend_sibling_call_collapses
 //-- main.rock @pkg=game,1
 fn now(n: int) -> int {

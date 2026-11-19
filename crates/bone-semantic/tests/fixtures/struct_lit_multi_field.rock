@@ -1,8 +1,3 @@
-//! Multi-field struct-lit init: `FixVec2 { x + y: 0 }` sets both `x` and `y` to the
-//! same value (AST `fields: Vec<(Vec<Ident>, Expr)>`; one entry, many names).
-//! bone's StructLiteral lowering rejects names.len() != 1. Fix: emit a
-//! StructLitField per name, sharing the lowered value. Verified vs rock.
-
 //- multi_field_init
 struct FixVec2 { x: int, y: int }
 fn f() -> int {

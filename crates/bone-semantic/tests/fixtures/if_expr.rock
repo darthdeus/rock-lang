@@ -1,7 +1,3 @@
-//! If-expressions: `if cond { a } else { b }`. The condition must be `bool`, and
-//! the two branches unify to the result type. Marker on the `let` binding (the
-//! if's result type).
-
 //- if_basic
 fn f() -> int {
     let x = if true { 1 } else { 2 }

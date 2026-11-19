@@ -1,8 +1,3 @@
-//! `match` (enum E3): wildcard `_`, ident binding, and enum variant patterns
-//! (unit + tuple payload binding). All arm bodies unify to the result type;
-//! payload sub-patterns bind to the (substituted) variant fields.
-
-// unit variants + wildcard.
 //- match_unit
 enum Color { Red, Green, Blue }
 fn f(c: Color) -> int {
@@ -15,7 +10,6 @@ fn f(c: Color) -> int {
     r
 }
 
-// tuple-payload variant binds its field in the arm body.
 //- match_payload_binding
 enum Shape { Circle(int), Dot }
 fn f(s: Shape) -> int {
@@ -27,7 +21,6 @@ fn f(s: Shape) -> int {
     r
 }
 
-// generic enum: the payload binding picks up the instantiated type arg.
 //- match_generic
 enum Opt<T> { Some(T), None }
 fn f(o: Opt<int>) -> int {
