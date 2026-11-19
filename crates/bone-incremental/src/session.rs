@@ -110,23 +110,20 @@ impl ScopeDelta {
                         if on.glob_exports != nn.glob_exports {
                             delta.all_members.insert((package, key));
                         }
-                        for (a, b) in [
+                        let changed = [
                             (&on.owned_types, &nn.owned_types),
                             (&on.owned_globals, &nn.owned_globals),
                             (&on.owned_callables, &nn.owned_callables),
                             (&on.owned_decorators, &nn.owned_decorators),
                             (&on.children, &nn.children),
-                        ] {
-                            for name in changed_keys(a, b) {
-                                delta.members.insert((package, key, name));
-                            }
-                        }
-                        for name in changed_keys(&on.callable_members, &nn.callable_members) {
-                            delta.members.insert((package, key, name));
-                        }
-                        for name in changed_keys(&on.exports, &nn.exports) {
-                            delta.members.insert((package, key, name));
-                        }
+                        ]
+                        .into_iter()
+                        .flat_map(|(old, new)| changed_keys(old, new))
+                        .chain(changed_keys(&on.callable_members, &nn.callable_members))
+                        .chain(changed_keys(&on.exports, &nn.exports));
+                        delta
+                            .members
+                            .extend(changed.map(|name| (package, key, name)));
                     }
                     (None, None) => {}
                     _ => {
@@ -169,7 +166,10 @@ impl ScopeDelta {
     }
 }
 
-fn changed_keys<V: PartialEq>(old: &FxHashMap<Ustr, V>, new: &FxHashMap<Ustr, V>) -> Vec<Ustr> {
+fn changed_keys<V: PartialEq>(
+    old: &FxHashMap<Ustr, V>,
+    new: &FxHashMap<Ustr, V>,
+) -> impl Iterator<Item = Ustr> {
     changed_keys_by(old, new, PartialEq::eq)
 }
 
@@ -177,12 +177,11 @@ fn changed_keys_by<V>(
     old: &FxHashMap<Ustr, V>,
     new: &FxHashMap<Ustr, V>,
     same: impl Fn(&V, &V) -> bool,
-) -> Vec<Ustr> {
+) -> impl Iterator<Item = Ustr> {
     old.iter()
-        .filter(|(k, value)| !new.get(*k).is_some_and(|next| same(value, next)))
+        .filter(move |(k, value)| !new.get(*k).is_some_and(|next| same(value, next)))
         .map(|(k, _)| *k)
-        .chain(new.keys().filter(|k| !old.contains_key(*k)).copied())
-        .collect()
+        .chain(new.keys().filter(move |k| !old.contains_key(*k)).copied())
 }
 
 /// How many times its live size a module's type arena may grow by keeping
@@ -309,9 +308,16 @@ struct ItemPrint {
     body_range: Option<(usize, usize)>,
 }
 
+impl ItemPrint {
+    fn same_interface(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.name == other.name && self.iface_hash == other.iface_hash
+    }
+}
+
 enum FileDiff {
     BodiesOnly(Vec<usize>),
-    Interface,
+    Interface { only_functions: bool },
+    Scope,
 }
 
 fn reject_macro_name_collisions(modules: &ModuleSet) -> Result<(), CompilerError> {
@@ -506,14 +512,18 @@ fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
 
 fn classify(old: &[ItemPrint], new: &[ItemPrint]) -> FileDiff {
     if old.len() != new.len() {
-        return FileDiff::Interface;
+        return FileDiff::Interface {
+            only_functions: false,
+        };
     }
 
     let mut changed = Vec::new();
 
     for (i, (o, n)) in old.iter().zip(new).enumerate() {
-        if o.kind != n.kind || o.name != n.name || o.iface_hash != n.iface_hash {
-            return FileDiff::Interface;
+        if !o.same_interface(n) {
+            return FileDiff::Interface {
+                only_functions: only_functions_changed(old, new),
+            };
         }
 
         if o.body_hash != n.body_hash {
@@ -739,13 +749,8 @@ impl Session {
     }
 
     fn parse_stored(&self, path: Ustr) -> Result<Ast, CompilerError> {
-        let (package, global_policy) = self.facts_of(path.as_str());
-        parse_with_facts(
-            &self.files[path.as_str()].text,
-            path,
-            package,
-            global_policy,
-        )
+        let file = &self.files[path.as_str()];
+        parse_with_facts(&file.text, path, file.package.clone(), file.global_policy)
     }
 
     pub fn workspace(&self) -> &Workspace {
@@ -780,89 +785,77 @@ impl Session {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let hash = fingerprint(text);
 
-        if let Some(existing) = self.files.get(path) {
-            if existing.text_hash == hash {
-                return Ok(UpdateResult::default());
-            }
+        if self
+            .files
+            .get(path)
+            .is_some_and(|file| file.text_hash == hash)
+        {
+            return Ok(UpdateResult::default());
         }
 
         if let Some(result) = self.try_incremental_body_edit(path, text, hash)? {
             return Ok(result);
         }
 
-        let (package, global_policy) = self.facts_of(path);
-        let module = parse_with_facts(text, ustr(path), package.clone(), global_policy)?;
+        let module = self.parse_buffer(path, text)?;
         let mid = self.ws.intern_module(module.file);
         if self.warm_mids.contains(&mid) {
             // Opening a warm (stdlib) file: it IS the warm module, not a second copy.
             return Ok(UpdateResult::default());
         }
 
+        let old = self.files.get(path);
         let new_prints = item_prints(&module, text);
         let new_macros = macro_defs(&module);
-        let tracked = self.files.contains_key(path);
-        let only_functions =
-            tracked && only_functions_changed(&self.files[path].item_prints, &new_prints);
-
-        let changed: FxHashSet<Ustr> = match self.files.get(path) {
-            Some(old) => {
-                let old = name_shapes(&old.item_prints);
-                let new = name_shapes(&new_prints);
-                old.keys()
-                    .chain(new.keys())
-                    .filter(|name| old.get(*name) != new.get(*name))
-                    .copied()
-                    .collect()
-            }
-            None => FxHashSet::default(),
-        };
-        let touches_macros = tracked
-            && (touches_macro(&self.files[path].macros, &new_macros, &changed)
-                || self.defines_a_function_named_like_a_macro(&module));
-        let new_contribution = if tracked && !touches_macros {
+        let changed: FxHashSet<Ustr> = old
+            .map(|old| {
+                changed_keys(&name_shapes(&old.item_prints), &name_shapes(&new_prints)).collect()
+            })
+            .unwrap_or_default();
+        let touches_macros = old.is_some_and(|old| {
+            touches_macro(&old.macros, &new_macros, &changed)
+                || self.defines_a_function_named_like_a_macro(&module)
+        });
+        let contribution = if old.is_some() && !touches_macros {
             let mut cooked = module.clone();
             cook_one(&mut cooked, &self.registry)?;
             contribute(&cooked)
         } else {
             contribute(&module)
         };
-
-        let new_scope = scope_hash(&new_contribution);
-
-        let scope_changed = self
-            .files
-            .get(path)
-            .is_some_and(|old| old.scope_hash != new_scope);
-
-        let diff = (tracked && !module.items.is_empty() && !scope_changed)
-            .then(|| classify(&self.files[path].item_prints, &new_prints));
-
+        let scope_hash = scope_hash(&contribution);
+        let diff = old.filter(|_| !module.items.is_empty()).map(|old| {
+            if old.scope_hash != scope_hash {
+                FileDiff::Scope
+            } else {
+                classify(&old.item_prints, &new_prints)
+            }
+        });
+        let span_only = matches!(&diff, Some(FileDiff::BodiesOnly(items)) if items.is_empty());
         let next = UserFile {
             text_hash: hash,
             item_prints: new_prints,
             text: text.to_string(),
             macros: new_macros,
-            package,
-            global_policy,
+            package: module.package.clone(),
+            global_policy: module.global_policy,
             syntax_errors: module.recovery_errors.clone(),
-            scope_hash: new_scope,
-            contribution: new_contribution,
+            scope_hash,
+            contribution,
         };
-        let span_only = matches!(&diff, Some(FileDiff::BodiesOnly(items)) if items.is_empty());
-        let scope_path = tracked && scope_changed && !module.items.is_empty() && !touches_macros;
         self.apply_file(path, Some(next), span_only, |s| match diff {
             Some(FileDiff::BodiesOnly(changed)) => match changed.as_slice() {
                 [idx] => s.rebuild_body_incremental(path, module, *idx, false),
                 _ => s.rebuild_module(path, module, &changed),
             },
-            Some(FileDiff::Interface) if !touches_macros => s.rebuild_interface(
+            Some(FileDiff::Interface { only_functions }) if !touches_macros => s.rebuild_interface(
                 module,
                 &changed,
                 ScopeDelta::default(),
                 UpdateTier::Interface,
                 only_functions,
             ),
-            _ if scope_path => s.rebuild_scope(module, &changed),
+            Some(FileDiff::Scope) if !touches_macros => s.rebuild_scope(module, &changed),
             _ => s.rebuild_users(),
         })
     }
@@ -1064,7 +1057,7 @@ impl Session {
             &self.ws.fragment_scopes[&file],
             &module,
         );
-        let changed_types = changed_keys(&old_types, &new_types);
+        let changed_types: Vec<_> = changed_keys(&old_types, &new_types).collect();
 
         let mut to_relower: FxHashSet<ModuleId> = FxHashSet::default();
         for key in &changed_types {
@@ -1162,24 +1155,19 @@ impl Session {
         let prevs: Vec<(ModuleId, InferenceResult)> = ids
             .iter()
             .map(|id| {
-                let cached = self
-                    .ws
-                    .inferences
-                    .get_mut(id.index())
-                    .and_then(|o| o.take())
-                    .unwrap_or_default();
-                let errored: FxHashSet<BodyOwner> = cached.errors.keys().copied().collect();
-                let mut prev = InferenceResult::default();
-                for (owner, bi) in cached.per_fn {
-                    if !errored.contains(&owner) && bi.deps.is_disjoint(&reinfer_names) {
-                        // Globals, decorators and struct defaults re-check
-                        // regardless of `prev`, so only a function is reused.
-                        if matches!(owner, BodyOwner::Function(_)) {
-                            reused.insert((*id, owner));
-                        }
-                        prev.per_fn.insert(owner, bi);
+                let mut prev = self.take_inference(*id);
+                prev.per_fn.retain(|&owner, bi| {
+                    // Globals, decorators and struct defaults re-check
+                    // regardless of `prev`, so only a function is reused.
+                    let reusable = matches!(owner, BodyOwner::Function(_))
+                        && !prev.errors.contains_key(&owner)
+                        && bi.deps.is_disjoint(&reinfer_names);
+                    if reusable {
+                        reused.insert((*id, owner));
                     }
-                }
+                    reusable
+                });
+                prev.errors.clear();
                 (*id, prev)
             })
             .collect();
@@ -1337,7 +1325,7 @@ impl Session {
             return;
         }
 
-        let new = self.module_deps(mid); // owned -> releases the `ws` borrow
+        let new = self.module_deps(mid);
         let old = self.module_dep_names.remove(&mid).unwrap_or_default();
 
         for name in old.difference(&new) {
@@ -1388,11 +1376,7 @@ impl Session {
                 .collect()
         };
 
-        let old_inf = self
-            .ws
-            .inferences
-            .get_mut(mid.index())
-            .and_then(|s| s.take());
+        let old_inf = self.take_inference(mid);
 
         // Same text, same interface: starting from the same arena prefix puts
         // every entry back at the index cached callers hold.
@@ -1433,15 +1417,7 @@ impl Session {
             }
         }
 
-        let timer = Instant::now();
-        let result = check_module_incremental(
-            &self.ws,
-            mid,
-            self.ws.module(mid),
-            old_inf.unwrap_or_default(),
-        )?;
-        self.ws.set_inference(mid, result);
-        self.ws.log_time("infer functions", timer);
+        self.reinfer_body_edit(mid, old_inf)?;
 
         #[cfg(debug_assertions)]
         debug_assert_eq!(
@@ -1502,19 +1478,17 @@ impl Session {
         }
         cook_one(&mut mini, &self.registry)?;
 
+        let Ok([np]) = <[ItemPrint; 1]>::try_from(item_prints(&mini, new_text)) else {
+            return Ok(None);
+        };
         // A changed name or interface must go through the full path's classification.
-        let mut mini_prints = item_prints(&mini, new_text);
-        if mini_prints.len() != 1 {
-            return Ok(None);
-        }
-        let np = mini_prints.pop().unwrap();
-        if np.kind != ItemKindTag::Fn || np.name != print.name || np.iface_hash != print.iface_hash
-        {
-            return Ok(None);
-        }
         // The item parse stops at the end of the function; text left after it
         // in the edited range is a new item the full path must see.
-        if np.item_span.offset_range().1 != new_end {
+        if np.kind != ItemKindTag::Fn
+            || np.name != print.name
+            || np.iface_hash != print.iface_hash
+            || np.item_span.offset_range().1 != new_end
+        {
             return Ok(None);
         }
 
@@ -1626,11 +1600,7 @@ impl Session {
         let byte_delta = new_fn_span.offset_range().1 as isize - at as isize;
         let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
 
-        let old_inf = self
-            .ws
-            .inferences
-            .get_mut(mid.index())
-            .and_then(|s| s.take());
+        let old_inf = self.take_inference(mid);
         self.ws.phase_timings.clear();
 
         let mut module = std::mem::take(self.ws.module_mut(mid));
@@ -1657,15 +1627,7 @@ impl Session {
         self.ws.index_param_signature(mid, fid);
         self.ws.log_time("lower functions", lower_timer);
 
-        let infer_timer = Instant::now();
-        let result = check_module_incremental(
-            &self.ws,
-            mid,
-            self.ws.module(mid),
-            old_inf.unwrap_or_default(),
-        )?;
-        self.ws.set_inference(mid, result);
-        self.ws.log_time("infer functions", infer_timer);
+        self.reinfer_body_edit(mid, old_inf)?;
 
         let deps_timer = Instant::now();
         self.update_dependents_for(mid);
@@ -1681,6 +1643,26 @@ impl Session {
             relowered: body,
             ..UpdateResult::default()
         })
+    }
+
+    fn take_inference(&mut self, mid: ModuleId) -> InferenceResult {
+        self.ws
+            .inferences
+            .get_mut(mid.index())
+            .and_then(Option::take)
+            .unwrap_or_default()
+    }
+
+    fn reinfer_body_edit(
+        &mut self,
+        mid: ModuleId,
+        previous: InferenceResult,
+    ) -> Result<(), CompilerError> {
+        let timer = Instant::now();
+        let inf = check_module_incremental(&self.ws, mid, self.ws.module(mid), previous)?;
+        self.ws.set_inference(mid, inf);
+        self.ws.log_time("infer functions", timer);
+        Ok(())
     }
 
     /// `None` once dead entries piled up enough that the edit should re-lower from empty.
@@ -1703,27 +1685,23 @@ impl Session {
         span_only: bool,
         rebuild: impl FnOnce(&mut Self) -> Result<UpdateResult, CompilerError>,
     ) -> Result<UpdateResult, CompilerError> {
-        let removing = next.is_none();
-        let previous = match next {
-            Some(file) => self.files.insert(path.to_string(), file),
-            None => self.files.remove(path),
-        };
-        let position = if removing {
+        let (previous, position) = if let Some(file) = next {
+            let previous = self.files.insert(path.to_string(), file);
             if previous.is_none() {
-                return Ok(UpdateResult::default());
+                self.paths.push(path.to_string());
             }
-            let pos = self
+            (previous, None)
+        } else {
+            let Some(previous) = self.files.remove(path) else {
+                return Ok(UpdateResult::default());
+            };
+            let position = self
                 .paths
                 .iter()
                 .position(|p| p == path)
                 .expect("tracked file must be in path order");
-            self.paths.remove(pos);
-            Some(pos)
-        } else {
-            if previous.is_none() {
-                self.paths.push(path.to_string());
-            }
-            None
+            self.paths.remove(position);
+            (Some(previous), Some(position))
         };
         match rebuild(self) {
             Ok(mut result) => {
@@ -1740,7 +1718,7 @@ impl Session {
                         span_only,
                     };
                 }
-                if !removing && result.tier != UpdateTier::NoChange {
+                if position.is_none() && result.tier != UpdateTier::NoChange {
                     bone_semantic::relocation::check_relocation(&mut self.ws);
                     bone_semantic::fn_identity::check_generic_fn_eq(&mut self.ws);
                 }
@@ -1756,7 +1734,11 @@ impl Session {
                     self.files.remove(path);
                     self.paths.retain(|p| p != path);
                 }
-                let action = if removing { "removal" } else { "update" };
+                let action = if position.is_some() {
+                    "removal"
+                } else {
+                    "update"
+                };
                 if let Err(revert_error) = self.rebuild_users() {
                     return Err(CompilerError::new_no_location(format!(
                         "bone session: rebuild of previous good state failed after a failed {action} of `{path}` - session is inconsistent: {} (original {action} error: {})",
@@ -1865,10 +1847,8 @@ fn text_edit_delta(path: &str, old: &str, new: &str) -> TextEditDelta {
 fn only_functions_changed(old: &[ItemPrint], new: &[ItemPrint]) -> bool {
     old.len() == new.len()
         && old.iter().zip(new).all(|(o, n)| {
-            o.kind == n.kind
-                && o.name == n.name
-                && (o.kind == ItemKindTag::Fn
-                    || (o.iface_hash == n.iface_hash && o.body_hash == n.body_hash))
+            (o.kind == ItemKindTag::Fn && n.kind == ItemKindTag::Fn && o.name == n.name)
+                || (o.same_interface(n) && o.body_hash == n.body_hash)
         })
 }
 
