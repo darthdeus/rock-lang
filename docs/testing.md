@@ -116,8 +116,7 @@ only when named. `ROCK_SIM_TIMEOUT_SECS` sets the wall-clock runaway guard.
 `every_frame`. `@sim_render` selects on-demand drawing. Picture readers request
 a draw when needed; raw FFI readers and draw-written globals require
 `drawn_frame` or `every_frame`. A reader in update sees the world at that point
-in the update. Run records are written to `.sim-runs/` or `ROCK_SIM_LOG_DIR`;
-`rock sim-report` reads them.
+in the update. Run records are written to `.sim-runs/` or `ROCK_SIM_LOG_DIR`.
 
 Hot-reload sims opt in with `@sim_env("STONE_HOT_RELOAD", "1")` and use
 `reload_edit(file, find, replace)` to apply a unique source-text match through

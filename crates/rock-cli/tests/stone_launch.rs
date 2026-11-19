@@ -1001,7 +1001,7 @@ fn bounded_runs_do_not_outlive_a_killed_rock() {
 }
 
 #[test]
-fn sim_commands_run_and_report_an_external_stone_project() {
+fn sim_commands_run_and_record_an_external_stone_project() {
     let fixture = tempfile::tempdir().unwrap();
     // Parallel builds can replace the CLI, but receipts need a stable compiler image.
     let rock = fixture
@@ -1175,13 +1175,12 @@ co fn portable_sim() -> Coroutine<Wait> {
                 .get("UNRELATED_VALUE")
                 .is_none()
         );
-        let (report, text) = invoke(&["sim-report", "--format", "json"], fail);
-        assert!(report.status.success(), "{text}");
-        let report: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+        let end: serde_json::Value = serde_json::from_str(events.lines().last().unwrap()).unwrap();
+        assert_eq!(end["event"], "run_end", "{events}");
         assert_eq!(
-            report["run"]["status"],
+            end["status"],
             if fail { "FAIL" } else { "PASS" },
-            "{report}"
+            "{events}"
         );
     }
 }

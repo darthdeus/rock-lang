@@ -118,7 +118,6 @@ pub struct Args {
     pub gc_window_start: usize,
     pub gc_window_mode: String,
     pub perf_format: String,
-    pub sim_log_dir: Option<String>,
     pub test_threads: Option<usize>,
     /// `--channel`: release channel for `[build.vars]` resolution.
     /// None = the project's default_channel.
@@ -330,7 +329,6 @@ impl Args {
                 .get_one::<String>("perf-format")
                 .cloned()
                 .unwrap_or_else(|| "pretty".to_string()),
-            sim_log_dir: Default::default(),
             test_threads: m.get_one::<usize>("test-threads").copied(),
             channel: m.get_one::<String>("channel").cloned(),
             target_os: m.get_one::<String>("target-os").cloned(),
@@ -404,7 +402,6 @@ mod sim_arguments;
 mod sim_command;
 mod sim_environment;
 mod sim_observability;
-mod sim_report;
 
 mod sdk_check;
 

@@ -66,22 +66,6 @@ pub static COMMANDS: &[&CliCommand] = &[
         route: Route::Backend(Operation::Sim),
     },
     &CliCommand {
-        name: "sim-report",
-        route: Route::Direct(|cx| {
-            if cx.args.files.len() > 1 {
-                anyhow::bail!(
-                    "usage: rock sim-report [<run-id>] [--sim-log-dir <root>] \
-                 [--format pretty|json]"
-                );
-            }
-            crate::sim_report::run(
-                cx.args.sim_log_dir.as_deref(),
-                cx.args.files.first().map(String::as_str),
-                &cx.args.perf_format,
-            )
-        }),
-    },
-    &CliCommand {
         name: "frame",
         route: Route::Backend(Operation::Frame),
     },

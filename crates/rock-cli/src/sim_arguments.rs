@@ -12,10 +12,6 @@ pub(crate) fn arguments(command: clap::Command) -> clap::Command {
                 .value_name("DIR")
                 .help("For `rock sim`: instrument compiler-known allocation sites in isolated sims and write frame-aware joined reports to DIR."),
         ] },
-        registry::ArgumentGroup { before: "test-threads", arguments: vec![
-            Arg::new("sim-log-dir").long("sim-log-dir")
-                .help("For `rock sim-report`: the persistent sim history root to read (default: $ROCK_SIM_LOG_DIR, else .sim-runs). Read-only."),
-        ] },
         registry::ArgumentGroup { before: "no-lints", arguments: vec![
             Arg::new("update-snapshots").long("update-snapshots").action(ArgAction::SetTrue)
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."),
@@ -31,14 +27,13 @@ pub(crate) fn arguments(command: clap::Command) -> clap::Command {
                 .help("For `rock sim`: list every `@sim` wire name in the project, one per line, then exit."),
         ] },
     ])
-        .mut_arg("perf-format", |arg| arg.help("Output format for `rock perf` or `rock sim-report`: \"pretty\" (default) or \"json\"."))
+        .mut_arg("perf-format", |arg| arg.help("Output format for `rock perf`: \"pretty\" (default) or \"json\"."))
 }
 
 pub(crate) fn decode(m: &clap::ArgMatches, args: &mut Args) {
     crate::frame_commands::decode(m, args);
     args.allocation_census = m.get_one::<String>("allocation-census").cloned();
     args.allocation_sites = m.get_one::<String>("allocation-sites").cloned();
-    args.sim_log_dir = m.get_one::<String>("sim-log-dir").cloned();
     args.update_snapshots = m.get_flag("update-snapshots");
     args.jobs = m.get_one::<usize>("jobs").copied();
     args.full_asset_jobs = m.get_one::<usize>("full-asset-jobs").copied();

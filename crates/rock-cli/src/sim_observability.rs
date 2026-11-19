@@ -21,9 +21,8 @@ mod timing;
 
 const SCHEMA_VERSION: u64 = 1;
 
-/// Frame counters and phase times shared by the child marker, retained event,
-/// and report reader. The report accepts only values representable by its
-/// signed totals; the live protocol retains the runner's wider unsigned range.
+/// Frame counters and phase times shared by the child marker and the
+/// retained event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct FrameTiming {
     pub(crate) frames: u64,
@@ -61,19 +60,6 @@ impl FrameTiming {
         Ok(())
     }
 
-    pub(crate) fn fits_report_totals(&self) -> bool {
-        [
-            self.frames,
-            self.draw_frames,
-            self.submitted_frames,
-            self.logic_us,
-            self.render_cpu_us,
-            self.present_us,
-        ]
-        .iter()
-        .all(|value| *value <= i64::MAX as u64)
-    }
-
     pub(crate) fn from_child_value(
         value: &Value,
         frame_count: Option<usize>,
@@ -104,12 +90,8 @@ impl FrameTiming {
     }
 }
 
-/// The history root: the explicit flag, then `ROCK_SIM_LOG_DIR`, then
-/// `.sim-runs`, shared by the recorder and report reader.
-pub(crate) fn history_root(explicit: Option<&str>) -> PathBuf {
-    if let Some(dir) = explicit {
-        return PathBuf::from(dir);
-    }
+/// The history root: `ROCK_SIM_LOG_DIR`, else `.sim-runs`.
+fn history_root() -> PathBuf {
     std::env::var_os("ROCK_SIM_LOG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".sim-runs"))
@@ -148,7 +130,7 @@ impl SimRunRecorder {
         quiet: bool,
         requested_jobs: Option<usize>,
     ) -> Self {
-        let root = history_root(None);
+        let root = history_root();
         Self::begin_at_with_root(&root, project, selection, quiet, requested_jobs)
     }
 
