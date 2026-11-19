@@ -1,4 +1,7 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+))]
 
 use std::fs;
 use std::path::Path;
@@ -41,16 +44,13 @@ fn isolated_cargo_home(scratch: &Path) -> std::path::PathBuf {
     cargo_home
 }
 
-fn cargo_check(project: &Path, target: &Path, cargo_home: &Path) -> Output {
+fn cargo_check(project: &Path, target: &Path, cargo_home: &Path, cache: &Path) -> Output {
     Command::new(env!("CARGO"))
         .args(["check", "--offline", "-vv"])
         .current_dir(project)
         .env("CARGO_TARGET_DIR", target)
         .env("CARGO_HOME", cargo_home)
-        .env(
-            "ROCK_GAMELIBS_DIR",
-            project.ancestors().nth(3).unwrap().join("cache"),
-        )
+        .env("ROCK_GAMELIBS_DIR", cache)
         .output()
         .expect("run isolated Cargo check")
 }
@@ -62,8 +62,15 @@ fn native_build_script_finds_relocated_gamelibs_root() {
     let scratch = Scratch(root.join(format!("target/native-build-roots-{}", std::process::id())));
     let relocated_root = scratch.0.join("checkout");
     let project = relocated_root.join("nested/build/native-probe");
+    let cache = relocated_root.join("cache");
+    let bundle = cache.join(if cfg!(target_os = "macos") {
+        "gamelibs-macos-arm64"
+    } else {
+        "gamelibs-linux-x86_64"
+    });
+    let lib = bundle.join("lib");
     fs::create_dir_all(project.join("src")).unwrap();
-    fs::create_dir_all(relocated_root.join("cache/gamelibs-linux-x86_64/lib")).unwrap();
+    fs::create_dir_all(&lib).unwrap();
     fs::write(
         project.join("Cargo.toml"),
         format!(
@@ -82,7 +89,7 @@ fn native_build_script_finds_relocated_gamelibs_root() {
 
     let target = scratch.0.join("target");
     let cargo_home = isolated_cargo_home(&scratch.0);
-    let output = cargo_check(&project, &target, &cargo_home);
+    let output = cargo_check(&project, &target, &cargo_home, &cache);
     let log = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -90,11 +97,10 @@ fn native_build_script_finds_relocated_gamelibs_root() {
     );
     assert!(output.status.success(), "isolated build failed:\n{log}");
 
-    let expected_lib = relocated_root.join("cache/gamelibs-linux-x86_64/lib");
     assert!(
-        log.contains(&expected_lib.display().to_string()),
+        log.contains(&format!("cargo:rustc-link-search=native={}", lib.display())),
         "runner did not use the relocated gamelibs library directory {}:\n{log}",
-        expected_lib.display()
+        lib.display()
     );
     assert!(
         log.contains(&format!(
@@ -104,8 +110,8 @@ fn native_build_script_finds_relocated_gamelibs_root() {
         "runner did not invalidate cached paths when its manifest moves:\n{log}"
     );
     // Removing an immutable installation must invalidate cached build-script output.
-    fs::remove_dir_all(relocated_root.join("cache/gamelibs-linux-x86_64")).unwrap();
-    let missing = cargo_check(&project, &target, &cargo_home);
+    fs::remove_dir_all(&bundle).unwrap();
+    let missing = cargo_check(&project, &target, &cargo_home, &cache);
     let missing_log = format!(
         "{}{}",
         String::from_utf8_lossy(&missing.stdout),
@@ -120,12 +126,7 @@ fn native_build_script_finds_relocated_gamelibs_root() {
         "missing-cache remedy absent: {missing_log}"
     );
     assert!(
-        missing_log.contains(
-            &relocated_root
-                .join("cache/gamelibs-linux-x86_64")
-                .display()
-                .to_string()
-        ),
+        missing_log.contains(&bundle.display().to_string()),
         "missing-cache path absent: {missing_log}"
     );
 }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub const VERSION: &str = include_str!("../../../gamelibs.version");
 
-pub(crate) const WORK_ROOT_ENV: &str = "ROCK_WORK_ROOT";
+const WORK_ROOT_ENV: &str = "ROCK_WORK_ROOT";
 
 /// Shared host storage policy: an explicit absolute `ROCK_WORK_ROOT`, else the
 /// home directory. Host identity never enters the public crates. A root that
@@ -50,12 +50,15 @@ pub fn gamelibs_root() -> PathBuf {
         .join(VERSION.trim())
 }
 
-pub(crate) fn platform_dir(platform: &str) -> PathBuf {
-    assert!(
-        matches!(platform, "linux-x86_64" | "macos-arm64" | "windows-x86_64"),
-        "no gamelibs for {platform}"
-    );
-    let path = gamelibs_root().join(format!("gamelibs-{platform}"));
+fn installed_dir(os: &str, arch: &str) -> PathBuf {
+    let bundle = match (os, arch) {
+        ("macos", "aarch64") => "gamelibs-macos-arm64",
+        ("windows", "x86_64") => "gamelibs-windows-x86_64",
+        // BSD builds use the Linux native library set.
+        ("linux", "x86_64") | ("freebsd" | "openbsd" | "netbsd", _) => "gamelibs-linux-x86_64",
+        (os, arch) => panic!("no prebuilt gamelibs for {os}/{arch}"),
+    };
+    let path = gamelibs_root().join(bundle);
     assert!(
         path.is_dir(),
         "gamelibs cache missing at {}; install the matching native bundle or set ROCK_GAMELIBS_DIR",
@@ -64,24 +67,13 @@ pub(crate) fn platform_dir(platform: &str) -> PathBuf {
     path
 }
 
-fn target_platform(os: &str, arch: &str) -> &'static str {
-    match (os, arch) {
-        ("macos", "aarch64") => "macos-arm64",
-        ("windows", "x86_64") => "windows-x86_64",
-        ("linux", "x86_64") => "linux-x86_64",
-        // BSD builds use the Linux native library set.
-        ("freebsd" | "openbsd" | "netbsd", _) => "linux-x86_64",
-        (os, arch) => panic!("no prebuilt gamelibs for {os}/{arch}"),
-    }
-}
-
 pub fn host_dir() -> PathBuf {
-    platform_dir(target_platform(env::consts::OS, env::consts::ARCH))
+    installed_dir(env::consts::OS, env::consts::ARCH)
 }
 
 pub fn prebuilt_dir() -> PathBuf {
     println!("cargo:rerun-if-env-changed=ROCK_GAMELIBS_DIR");
-    println!("cargo:rerun-if-env-changed=ROCK_WORK_ROOT");
+    println!("cargo:rerun-if-env-changed={WORK_ROOT_ENV}");
     println!("cargo:rerun-if-env-changed=HOME");
     println!("cargo:rerun-if-env-changed=USERPROFILE");
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
@@ -91,20 +83,16 @@ pub fn prebuilt_dir() -> PathBuf {
     );
     let os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS");
     let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH");
-    let dir = platform_dir(target_platform(&os, &arch));
+    let dir = installed_dir(&os, &arch);
     println!("cargo:rerun-if-changed={}", dir.display());
     dir
-}
-
-pub(crate) fn is_source_root(path: &Path) -> bool {
-    path.join("Cargo.toml").is_file() && path.join("gamelibs.version").is_file()
 }
 
 pub fn source_root() -> PathBuf {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     manifest
         .ancestors()
-        .find(|dir| is_source_root(dir))
+        .find(|dir| dir.join("Cargo.toml").is_file() && dir.join("gamelibs.version").is_file())
         .unwrap_or_else(|| panic!("no Rock source workspace above {}", manifest.display()))
         .to_path_buf()
 }
