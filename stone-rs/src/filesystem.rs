@@ -543,6 +543,22 @@ mod xfer_tests {
         crate::test_support::fresh_root("stone_fsxfer_test_")
     }
 
+    fn list_names(dir: &CStr) -> Vec<String> {
+        let mut files = ptr::null_mut();
+        let mut count = 0;
+        assert!(stone_list_directory(dir.as_ptr(), &mut files, &mut count));
+        let names = (0..count)
+            .map(|index| unsafe {
+                CStr::from_ptr(*files.add(index as usize))
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        stone_free_string_array(files, count);
+        names
+    }
+
     fn cs(p: &Path) -> CString {
         CString::new(p.to_str().unwrap()).unwrap()
     }
@@ -776,18 +792,7 @@ mod xfer_tests {
         let dir = CString::new(dir).unwrap();
 
         assert_eq!(stone_is_directory_status(dir.as_ptr()), 1);
-        let mut files = ptr::null_mut();
-        let mut count = 0;
-        assert!(stone_list_directory(dir.as_ptr(), &mut files, &mut count));
-        let names: Vec<_> = (0..count)
-            .map(|index| unsafe {
-                CStr::from_ptr(*files.add(index as usize))
-                    .to_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        stone_free_string_array(files, count);
+        let names = list_names(&dir);
 
         assert_eq!(names, vec!["sound.ogg"]);
     }
@@ -815,19 +820,7 @@ mod xfer_tests {
         let root = fresh_root();
         fs::write(root.join("visible.txt"), b"visible").unwrap();
         let dir = cs(&root);
-        let mut files = ptr::null_mut();
-        let mut count = 0;
-
-        assert!(stone_list_directory(dir.as_ptr(), &mut files, &mut count));
-        let names: Vec<_> = (0..count)
-            .map(|index| unsafe {
-                CStr::from_ptr(*files.add(index as usize))
-                    .to_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        stone_free_string_array(files, count);
+        let names = list_names(&dir);
         assert_eq!(names, vec!["visible.txt"]);
     }
 
@@ -844,19 +837,7 @@ mod xfer_tests {
         )
         .unwrap();
         let dir = cs(&root);
-        let mut files = ptr::null_mut();
-        let mut count = 0;
-
-        assert!(stone_list_directory(dir.as_ptr(), &mut files, &mut count));
-        let names: Vec<_> = (0..count)
-            .map(|index| unsafe {
-                CStr::from_ptr(*files.add(index as usize))
-                    .to_str()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        stone_free_string_array(files, count);
+        let names = list_names(&dir);
         assert_eq!(names, vec!["visible.txt"]);
     }
 }
