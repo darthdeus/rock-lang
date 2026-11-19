@@ -35,29 +35,21 @@ use std::io::Read;
 
 /// Execute the standalone runner protocol.
 pub fn run() {
-    let mut profile: Option<&str> = None;
-    let argv: Vec<String> = std::env::args().collect();
-    let mut i = 1;
-    while i < argv.len() {
-        match argv[i].as_str() {
-            "--profile" => {
-                i += 1;
-                profile = argv.get(i).map(|s| s.as_str());
-            }
+    let mut args = std::env::args().skip(1);
+    let mut profile = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--profile" => profile = args.next(),
             other => {
                 eprintln!("stone-glsl-runner: unexpected argument `{other}`");
                 std::process::exit(3);
             }
         }
-        i += 1;
     }
-    let profile = match profile {
-        Some(p @ "330core") => p,
-        _ => {
-            eprintln!("stone-glsl-runner: --profile must be 330core");
-            std::process::exit(3);
-        }
-    };
+    if profile.as_deref() != Some("330core") {
+        eprintln!("stone-glsl-runner: --profile must be 330core");
+        std::process::exit(3);
+    }
 
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
@@ -72,7 +64,7 @@ pub fn run() {
         }
     };
 
-    let gl_ctx = match GlCtx::create(profile) {
+    let gl_ctx = match GlCtx::create() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("stone-glsl-runner: no GL context: {e}");
@@ -106,25 +98,28 @@ struct Job {
 }
 
 fn parse_jobs(input: &str) -> Result<Vec<Job>, String> {
-    let v: serde_json::Value =
-        serde_json::from_str(input).map_err(|e| format!("bad job JSON: {e}"))?;
-    let arr = v.as_array().ok_or("job payload must be a JSON array")?;
-    let mut jobs = Vec::with_capacity(arr.len());
-    for item in arr {
-        let get = |k: &str| -> Result<String, String> {
-            item.get(k)
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| format!("job missing string field `{k}`"))
-        };
-        jobs.push(Job {
-            name: get("name")?,
-            vertex: get("vertex")?,
-            fragment: get("fragment")?,
-            ret: get("ret")?,
-        });
-    }
-    Ok(jobs)
+    use serde_json::Value;
+
+    let Value::Array(items) =
+        serde_json::from_str(input).map_err(|e| format!("bad job JSON: {e}"))?
+    else {
+        return Err("job payload must be a JSON array".into());
+    };
+    items
+        .into_iter()
+        .map(|mut item| {
+            let mut get = |key: &str| match item.get_mut(key).map(std::mem::take) {
+                Some(Value::String(value)) => Ok(value),
+                _ => Err(format!("job missing string field `{key}`")),
+            };
+            Ok(Job {
+                name: get("name")?,
+                vertex: get("vertex")?,
+                fragment: get("fragment")?,
+                ret: get("ret")?,
+            })
+        })
+        .collect()
 }
 
 /// A `\t`/`\n` escaper so a driver's multi-line compile log stays on one
@@ -138,44 +133,29 @@ fn escape(s: &str) -> String {
 // Field order is drop order: gl before context before window before subsystems.
 struct GlCtx {
     gl: glow::Context,
-    int_fbo: FboTarget,
-    float_fbo: FboTarget,
-    vao: glow::VertexArray,
+    int_fbo: glow::Framebuffer,
+    float_fbo: glow::Framebuffer,
     _gl_context: sdl2::video::GLContext,
     _window: sdl2::video::Window,
-    _video: sdl2::VideoSubsystem,
-    _sdl: sdl2::Sdl,
-}
-
-struct FboTarget {
-    fbo: glow::Framebuffer,
-    _tex: glow::Texture,
 }
 
 impl GlCtx {
-    fn create(profile: &str) -> Result<GlCtx, String> {
+    fn create() -> Result<Self, String> {
         #[cfg(target_os = "macos")]
         sdl2::hint::set("SDL_MAC_BACKGROUND_APP", "1");
 
         let sdl = sdl2::init().map_err(|e| format!("sdl init: {e}"))?;
         let video = sdl.video().map_err(|e| format!("sdl video: {e}"))?;
         let gl_attr = video.gl_attr();
-        match profile {
-            "330core" => {
-                gl_attr.set_context_profile(sdl2::video::GLProfile::Core);
-                gl_attr.set_context_version(3, 3);
-            }
-            _ => return Err(format!("unknown profile `{profile}`")),
-        }
+        gl_attr.set_context_profile(sdl2::video::GLProfile::Core);
+        gl_attr.set_context_version(3, 3);
         let mut wb = video.window("stone-glsl-runner", 1, 1);
         wb.opengl().hidden();
         let window = wb.build().map_err(|e| format!("window: {e}"))?;
+        // SDL makes the context current on creation.
         let gl_context = window
             .gl_create_context()
             .map_err(|e| format!("gl context: {e}"))?;
-        window
-            .gl_make_current(&gl_context)
-            .map_err(|e| format!("make current: {e}"))?;
         let gl = unsafe {
             glow::Context::from_loader_function(|s| video.gl_get_proc_address(s) as *const _)
         };
@@ -183,17 +163,15 @@ impl GlCtx {
         unsafe {
             let vao = gl.create_vertex_array().map_err(|e| format!("vao: {e}"))?;
             gl.bind_vertex_array(Some(vao));
+            gl.viewport(0, 0, 1, 1);
             let int_fbo = make_target(&gl, glow::R32I, glow::RED_INTEGER, glow::INT)?;
             let float_fbo = make_target(&gl, glow::R32F, glow::RED, glow::FLOAT)?;
-            Ok(GlCtx {
+            Ok(Self {
                 gl,
                 int_fbo,
                 float_fbo,
-                vao,
                 _gl_context: gl_context,
                 _window: window,
-                _video: video,
-                _sdl: sdl,
             })
         }
     }
@@ -206,18 +184,16 @@ impl GlCtx {
                 gl.delete_program(program);
                 return Ok("compiled".to_string());
             }
-            let target = match job.ret.as_str() {
-                "float" => &self.float_fbo,
-                "int" | "bool" => &self.int_fbo,
+            let (fbo, format, ty) = match job.ret.as_str() {
+                "float" => (self.float_fbo, glow::RED, glow::FLOAT),
+                "int" | "bool" => (self.int_fbo, glow::RED_INTEGER, glow::INT),
                 other => {
                     gl.delete_program(program);
                     return Err(format!("unknown ret kind `{other}`"));
                 }
             };
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
-            gl.viewport(0, 0, 1, 1);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             gl.use_program(Some(program));
-            gl.bind_vertex_array(Some(self.vao));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.finish();
 
@@ -227,14 +203,8 @@ impl GlCtx {
                 0,
                 1,
                 1,
-                match job.ret.as_str() {
-                    "float" => glow::RED,
-                    _ => glow::RED_INTEGER,
-                },
-                match job.ret.as_str() {
-                    "float" => glow::FLOAT,
-                    _ => glow::INT,
-                },
+                format,
+                ty,
                 glow::PixelPackData::Slice(Some(&mut buf)),
             );
             let err = gl.get_error();
@@ -247,13 +217,7 @@ impl GlCtx {
                     let f = f32::from_ne_bytes(buf);
                     format!("{}", f as f64)
                 }
-                "bool" => {
-                    if i32::from_ne_bytes(buf) != 0 {
-                        "true".to_string()
-                    } else {
-                        "false".to_string()
-                    }
-                }
+                "bool" => (i32::from_ne_bytes(buf) != 0).to_string(),
                 _ => format!("{}", i32::from_ne_bytes(buf)),
             })
         }
@@ -265,7 +229,7 @@ unsafe fn make_target(
     internal: u32,
     format: u32,
     ty: u32,
-) -> Result<FboTarget, String> {
+) -> Result<glow::Framebuffer, String> {
     let tex = gl.create_texture().map_err(|e| format!("texture: {e}"))?;
     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
     gl.tex_parameter_i32(
@@ -302,7 +266,7 @@ unsafe fn make_target(
     if status != glow::FRAMEBUFFER_COMPLETE {
         return Err(format!("framebuffer incomplete: 0x{status:X}"));
     }
-    Ok(FboTarget { fbo, _tex: tex })
+    Ok(fbo)
 }
 
 unsafe fn compile_program(
