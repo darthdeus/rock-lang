@@ -32,17 +32,6 @@ pub(crate) fn top_level_blocks_from(f: &MirFunc, entry: Idx<Block>) -> Vec<Idx<B
     order
 }
 
-pub(crate) fn term_value(term: &Term) -> Option<Idx<Inst>> {
-    match term {
-        // Coroutine returns are single/zero by the time spill runs (a co fn never
-        // scalarizes its completion value); the first covers it.
-        Term::Return(vs) => vs.first().copied(),
-        Term::Branch { cond, .. } => Some(*cond),
-        Term::Yield { values, .. } => values.first().copied(),
-        _ => None,
-    }
-}
-
 pub(crate) fn splice_replacements(
     func: &mut MirFunc,
     replacements: &rustc_hash::FxHashMap<Idx<Inst>, Vec<Idx<Inst>>>,

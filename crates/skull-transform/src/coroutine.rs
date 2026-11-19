@@ -3,7 +3,7 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::detached::detached_region_blocks;
-use crate::visit::{raw, term_value, top_level_blocks};
+use crate::visit::{raw, top_level_blocks};
 use comfy_la_arena::Idx;
 use skull_mir::cfg::successors;
 use skull_mir::code_identity::LambdaSiteId;
@@ -123,6 +123,7 @@ fn stamp_state(
         then_bb: killed_bb,
         else_bb: stamp_bb,
     };
+    step.blocks[killed_bb].term = Term::Return(Vec::new());
     let next = emit(step, stamp_bb, Inst::Const(Lit::Int(next)));
     state_store(step, stamp_bb, state, ustr::Ustr::from(STATE), next);
     step.blocks[stamp_bb].term = Term::Return(values);
@@ -141,116 +142,87 @@ fn spill_cross_block_values(
     block_ids: &[Idx<Block>],
     resume_blocks: &[Idx<Block>],
 ) -> Vec<Idx<Inst>> {
-    let mut def_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
-    for &bid in block_ids {
-        for &id in &step.blocks[bid].insts {
+    if resume_blocks.is_empty() {
+        return Vec::new();
+    }
+    let mut block_use = HashMap::default();
+    let mut block_def = HashMap::default();
+    for &block in block_ids {
+        let mut uses = HashSet::default();
+        let mut defs = HashSet::default();
+        for &id in &step.blocks[block].insts {
+            step.insts[id].uses_each(&mut |value| {
+                if !defs.contains(&value) {
+                    uses.insert(value);
+                }
+            });
             if step.insts[id].produces_value() {
-                def_block.insert(id, bid);
+                defs.insert(id);
             }
         }
-    }
-    let mut cross_block_values: HashSet<Idx<Inst>> = HashSet::default();
-    for &bid in block_ids {
-        let mut used: Vec<Idx<Inst>> = Vec::new();
-        for &id in &step.blocks[bid].insts {
-            step.insts[id].uses_each(&mut |v| used.push(v));
-        }
-        used.extend(term_value(&step.blocks[bid].term));
-        for v in used {
-            if def_block.get(&v).copied() != Some(bid) {
-                cross_block_values.insert(v);
+        step.blocks[block].term.uses_each(&mut |value| {
+            if !defs.contains(&value) {
+                uses.insert(value);
             }
-        }
+        });
+        block_use.insert(block, uses);
+        block_def.insert(block, defs);
     }
-    let live_values = values_live_at_resume_blocks(step, block_ids, resume_blocks);
-    let persistent_values = cross_block_values
-        .intersection(&live_values)
-        .copied()
-        .collect::<HashSet<_>>();
-    let rematerialized = persistent_values
-        .iter()
-        .copied()
-        .filter(|value| matches!(step.insts[*value], Inst::Const(_)))
-        .collect::<HashSet<_>>();
-    let frame_values = persistent_values
-        .difference(&rematerialized)
-        .copied()
-        .collect::<HashSet<_>>();
+
+    let persistent_values = live_at_resumes(step, block_ids, resume_blocks, &block_use, &block_def);
     if persistent_values.is_empty() {
         return Vec::new();
     }
 
+    let mut spill_values = Vec::new();
     for &bid in block_ids {
-        let mut used_here: Vec<Idx<Inst>> = Vec::new();
-        {
-            let mut seen = HashSet::default();
-            for &id in &step.blocks[bid].insts {
-                step.insts[id].uses_each(&mut |v| {
-                    if persistent_values.contains(&v)
-                        && def_block.get(&v).copied() != Some(bid)
-                        && seen.insert(v)
-                    {
-                        used_here.push(v);
-                    }
-                });
-            }
-            if let Some(v) = term_value(&step.blocks[bid].term) {
-                if persistent_values.contains(&v)
-                    && def_block.get(&v).copied() != Some(bid)
-                    && seen.insert(v)
-                {
-                    used_here.push(v);
-                }
-            }
-        }
+        // MIR defines each value once, before any use in its block.
+        let mut used_here: Vec<_> = block_use[&bid]
+            .intersection(&persistent_values)
+            .copied()
+            .collect();
         used_here.sort_by_key(|v| raw(*v));
 
-        let old: Vec<Idx<Inst>> = std::mem::take(&mut step.blocks[bid].insts);
-        let mut reload: HashMap<Idx<Inst>, Idx<Inst>> = HashMap::default();
-        let mut new_list: Vec<Idx<Inst>> = Vec::new();
+        let old = std::mem::take(&mut step.blocks[bid].insts);
+        let mut reload = HashMap::default();
         for v in used_here {
-            let rv = if rematerialized.contains(&v) {
-                step.alloc_inst(step.insts[v].clone())
+            let inst = if matches!(step.insts[v], Inst::Const(_)) {
+                step.insts[v].clone()
             } else {
-                let sv = step.alloc_inst(Inst::Load(s_cell));
-                new_list.push(sv);
-                step.alloc_inst(Inst::Field {
+                let sv = emit(step, bid, Inst::Load(s_cell));
+                Inst::Field {
                     nonthrowing: false,
                     base: sv,
                     field: vfield(v),
-                })
+                }
             };
-            new_list.push(rv);
-            reload.insert(v, rv);
+            reload.insert(v, emit(step, bid, inst));
         }
         let m = |x: Idx<Inst>| reload.get(&x).copied().unwrap_or(x);
         for id in old {
             step.insts[id].remap_uses(&m);
-            new_list.push(id);
-            if frame_values.contains(&id) && def_block.get(&id) == Some(&bid) {
-                let sv = step.alloc_inst(Inst::Load(s_cell));
-                let st = step.alloc_inst(Inst::StoreField {
-                    base: sv,
-                    field: vfield(id),
-                    value: id,
-                });
-                new_list.push(sv);
-                new_list.push(st);
+            step.blocks[bid].insts.push(id);
+            if persistent_values.contains(&id) && !matches!(step.insts[id], Inst::Const(_)) {
+                state_store(step, bid, s_cell, vfield(id), id);
+                spill_values.push(id);
             }
         }
-        step.blocks[bid].insts = new_list;
-        let mut term = step.blocks[bid].term.clone();
-        term.remap_uses(&m);
-        step.blocks[bid].term = term;
+        step.blocks[bid].term.remap_uses(&m);
     }
-    let mut values: Vec<Idx<Inst>> = frame_values.into_iter().collect();
-    values.sort_by_key(|value| raw(*value));
-    values
+    spill_values.sort_by_key(|value| raw(*value));
+    spill_values
 }
 
-fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
-    let mut block_use: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = HashMap::default();
-    let mut block_def: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = HashMap::default();
+fn cells_live_at_yield_resumes(
+    func: &MirFunc,
+    blocks: &[Idx<Block>],
+    resume_blocks: &[Idx<Block>],
+) -> HashSet<Idx<Cell>> {
+    if resume_blocks.is_empty() {
+        return HashSet::default();
+    }
+    let mut block_use = HashMap::default();
+    let mut block_def = HashMap::default();
     for &block in blocks {
         let mut uses = HashSet::default();
         let mut defs = HashSet::default();
@@ -269,23 +241,16 @@ fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet
         block_def.insert(block, defs);
     }
 
-    let live_in = live_in(func, blocks, &block_use, &block_def);
-
-    let mut live = HashSet::default();
-    for &block in blocks {
-        if let Term::Yield { resume, .. } = func.blocks[block].term {
-            live.extend(live_in[&resume].iter().copied());
-        }
-    }
-    live
+    live_at_resumes(func, blocks, resume_blocks, &block_use, &block_def)
 }
 
-fn live_in<K: Copy + Eq + std::hash::Hash>(
+fn live_at_resumes<K: Copy + Eq + std::hash::Hash>(
     func: &MirFunc,
     blocks: &[Idx<Block>],
+    resume_blocks: &[Idx<Block>],
     block_use: &HashMap<Idx<Block>, HashSet<K>>,
     block_def: &HashMap<Idx<Block>, HashSet<K>>,
-) -> HashMap<Idx<Block>, HashSet<K>> {
+) -> HashSet<K> {
     let mut live_in: HashMap<Idx<Block>, HashSet<K>> = blocks
         .iter()
         .copied()
@@ -312,7 +277,10 @@ fn live_in<K: Copy + Eq + std::hash::Hash>(
             break;
         }
     }
-    live_in
+    resume_blocks
+        .iter()
+        .flat_map(|resume| live_in[resume].iter().copied())
+        .collect()
 }
 
 /// A defer's scope-exit splice shares closure bodies with the detached copy.
@@ -349,44 +317,6 @@ fn lambda_site(func: &MirFunc, lambda: Idx<Inst>) -> Option<LambdaSiteId> {
         .and_then(LambdaSiteId::from_span)
 }
 
-fn values_live_at_resume_blocks(
-    func: &MirFunc,
-    blocks: &[Idx<Block>],
-    resume_blocks: &[Idx<Block>],
-) -> HashSet<Idx<Inst>> {
-    let mut block_use: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = HashMap::default();
-    let mut block_def: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = HashMap::default();
-    for &block in blocks {
-        let mut uses = HashSet::default();
-        let mut defs = HashSet::default();
-        for &id in &func.blocks[block].insts {
-            func.insts[id].uses_each(&mut |value| {
-                if !defs.contains(&value) {
-                    uses.insert(value);
-                }
-            });
-            if func.insts[id].produces_value() {
-                defs.insert(id);
-            }
-        }
-        func.blocks[block].term.uses_each(&mut |value| {
-            if !defs.contains(&value) {
-                uses.insert(value);
-            }
-        });
-        block_use.insert(block, uses);
-        block_def.insert(block, defs);
-    }
-
-    let live_in = live_in(func, blocks, &block_use, &block_def);
-
-    let mut live = HashSet::default();
-    for &resume in resume_blocks {
-        live.extend(live_in[&resume].iter().copied());
-    }
-    live
-}
-
 pub fn transform_coroutine(
     func: &MirFunc,
     channel: Option<&skull_mir::lower::EnumFlatShape>,
@@ -404,6 +334,13 @@ pub fn transform_coroutine(
 
     // A closure has its own returns and lexical scope.
     let orig_blocks: Vec<Idx<Block>> = top_level_blocks(&step);
+    let suspension_resumes: Vec<_> = orig_blocks
+        .iter()
+        .filter_map(|&block| match step.blocks[block].term {
+            Term::Yield { resume, .. } => Some(resume),
+            _ => None,
+        })
+        .collect();
 
     // Hooks run outside the step, so their bodies need separate control flow.
     let mut hooks: Vec<(CoroHookKind, Idx<Block>)> = Vec::new();
@@ -463,9 +400,8 @@ pub fn transform_coroutine(
                     !lambda_site(&step, lambda).is_some_and(|site| detached_sites.contains(&site))
                 })
             })
-            .flat_map(|(_, cells)| cells.iter().copied())
-            .collect::<HashSet<_>>();
-        let mut fields = cells_live_at_yield_resumes(&step, &orig_blocks);
+            .flat_map(|(_, cells)| cells.iter().copied());
+        let mut fields = cells_live_at_yield_resumes(&step, &orig_blocks, &suspension_resumes);
         fields.extend(params.iter().copied());
         fields.extend(captured_by_escaping_lambda);
         fields.extend(detached_cells);
@@ -500,22 +436,11 @@ pub fn transform_coroutine(
         }
     }
 
-    let suspension_resumes: Vec<Idx<Block>> = orig_blocks
-        .iter()
-        .filter_map(|&block| match step.blocks[block].term {
-            Term::Yield { resume, .. } => Some(resume),
-            _ => None,
-        })
-        .collect();
-    let mut resume_of_state: Vec<Idx<Block>> = Vec::new();
     let mut state_tags: Vec<String> = Vec::new();
-    let mut yield_blocks: HashSet<Idx<Block>> = HashSet::default();
     for &bid in &orig_blocks {
-        if let Term::Yield { values, resume } = &step.blocks[bid].term {
+        if let Term::Yield { values, .. } = &step.blocks[bid].term {
             let values = values.clone();
-            let resume = *resume;
-            let k = resume_of_state.len() as i64 + 1;
-            resume_of_state.push(resume);
+            let k = state_tags.len() as i64 + 1;
             let tag = values
                 .first()
                 .and_then(|&v| match &step.insts[v] {
@@ -524,7 +449,6 @@ pub fn transform_coroutine(
                 })
                 .unwrap_or_else(|| "dyn".to_string());
             state_tags.push(tag);
-            yield_blocks.insert(bid);
             // Reuse frame slots for flat enum yields to avoid per-yield allocation.
             if frame_slot_channel {
                 for (i, &v) in values.iter().enumerate() {
@@ -536,16 +460,12 @@ pub fn transform_coroutine(
             } else {
                 values
             };
-            let killed_bb = stamp_state(&mut step, bid, s_cell, k, returned);
-            step.blocks[killed_bb].term = Term::Return(Vec::new());
+            stamp_state(&mut step, bid, s_cell, k, returned);
         }
     }
-    let num_states = resume_of_state.len();
+    let num_states = suspension_resumes.len();
 
     for &bid in &orig_blocks {
-        if yield_blocks.contains(&bid) {
-            continue;
-        }
         let Term::Return(values) = &step.blocks[bid].term else {
             continue;
         };
@@ -559,7 +479,6 @@ pub fn transform_coroutine(
             let nil = emit(&mut step, killed_bb, Inst::Const(Lit::Nil));
             state_store(&mut step, killed_bb, s_cell, field, nil);
         }
-        step.blocks[killed_bb].term = Term::Return(Vec::new());
     }
 
     let spill_values =
@@ -662,7 +581,7 @@ pub fn transform_coroutine(
             };
             step.blocks[bid].term = Term::Branch {
                 cond: eq,
-                then_bb: resume_of_state[k],
+                then_bb: suspension_resumes[k],
                 else_bb,
             };
         }
