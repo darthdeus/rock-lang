@@ -175,7 +175,24 @@ mod incremental_output_equality_tests {
                 })
             };
             let incremental = output(emit_incremental(&ws, &mut cache, &[(mid, owner)]));
-            let fresh = output(build.run(&ws, mid).map(|(emit, _)| emit));
+            let fresh = build.run(&ws, mid);
+            if let (Ok(_), Ok((_, fresh))) = (&incremental, &fresh) {
+                let instances = |graph: &crate::instance_graph::InstanceGraph| {
+                    graph
+                        .instances
+                        .iter()
+                        .map(|i| graph.identity(&ws, i))
+                        .collect::<BTreeSet<_>>()
+                };
+                let (incremental, fresh) = (instances(&cache.graph), instances(&fresh.graph));
+                assert!(
+                    incremental == fresh,
+                    "{file}, edit {step}: only incremental {:?}, only fresh {:?}",
+                    incremental.difference(&fresh).collect::<Vec<_>>(),
+                    fresh.difference(&incremental).collect::<Vec<_>>()
+                );
+            }
+            let fresh = output(fresh.map(|(emit, _)| emit));
             match (incremental, fresh) {
                 (Err(a), Err(b)) if !diagnostic.is_empty() => {
                     assert!(a.0.contains(diagnostic), "{}", a.0);

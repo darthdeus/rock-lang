@@ -1862,11 +1862,10 @@ impl InstanceGraph {
         ws: &Workspace,
         affected: &[Owner],
         changed_decls: &[DeclKey],
-    ) -> Prune {
+    ) {
         let lost: Vec<Instance> = std::mem::take(&mut self.lost).into_iter().collect();
-        let prune = self.stranded(&lost);
-        for instance in &prune.pruned {
-            self.uninstall(&Owner::Instance(instance.clone()));
+        for instance in self.stranded(&lost) {
+            self.uninstall(&Owner::Instance(instance));
         }
 
         let entered: Vec<Instance> = self.delta_added.iter().cloned().collect();
@@ -1959,12 +1958,6 @@ impl InstanceGraph {
             };
         for finding in findings {
             self.install_recursion_finding(finding);
-        }
-        Prune {
-            pruned: prune.pruned,
-            region: prune.region,
-            seeds: prune.seeds,
-            boundary_predecessor_edges_examined: prune.boundary_predecessor_edges_examined,
         }
     }
 
@@ -2088,7 +2081,7 @@ impl InstanceGraph {
             _ => None,
         });
         let changed_decls: Vec<DeclKey> = changed_decls.map(DeclKey).collect();
-        let prune = self.derive_incremental(ws, &affected, &changed_decls);
+        self.derive_incremental(ws, &affected, &changed_decls);
         let added = self.delta_added.clone();
         let removed = self.delta_removed.clone();
         let mut revisited: BTreeSet<Instance> = affected
@@ -2107,10 +2100,6 @@ impl InstanceGraph {
         UpdateStats {
             affected: affected.len(),
             expanded: run.expanded,
-            pruned: prune.pruned.len(),
-            suspect_region: prune.region,
-            prune_seeds: prune.seeds,
-            boundary_predecessor_edges_examined: prune.boundary_predecessor_edges_examined,
             newly_reached: added.len(),
             added,
             removed,
@@ -2373,354 +2362,52 @@ impl InstanceGraph {
         ordinary.into_iter().chain(graph)
     }
 
-    /// **What an edit stranded**, searched over the affected region only.
-    ///
-    /// Reachability, not reference counting: an edit can strand a whole group
-    /// of instances that keep each other alive, and a cycle has no member whose
-    /// count would ever drop to zero. But it does not need the whole graph
-    /// either -- only an instance whose IN-EDGES changed can have become
-    /// unreachable, so the search starts at those and stops at tentative
-    /// external boundaries.
-    ///
-    /// The search keeps external boundaries tentative. If another lost seed
-    /// later reaches a boundary's predecessor, that predecessor enters the
-    /// region and the boundary is reopened; no rootward query is needed.
-    fn stranded(&self, lost: &[Instance]) -> Prune {
+    /// The instances an edit stranded. An instance that lost its last way in
+    /// is forward-reachable from a lost seed, and every instance outside that
+    /// region keeps its old path in, so only the region is searched: what an
+    /// anchor inside it, or an edge from outside it, still reaches survives.
+    fn stranded(&self, lost: &[Instance]) -> BTreeSet<Instance> {
         let succ = |i: &Instance| -> &[Edge] {
             self.contributions
                 .get(&Owner::Instance(i.clone()))
                 .map_or(&[][..], |c| c.edges.as_slice())
         };
-        let seeds: BTreeSet<Instance> = lost.iter().cloned().collect();
-        let mut region: BTreeSet<Instance> = lost
+        let mut region: FxHashSet<&Instance> = FxHashSet::default();
+        let mut queue: Vec<&Instance> = lost
             .iter()
-            .filter(|i| {
-                self.contributions
-                    .contains_key(&Owner::Instance((*i).clone()))
-            })
-            .cloned()
+            .filter(|i| self.instances.contains(*i))
             .collect();
-        let mut queue: Vec<Instance> = region.iter().cloned().collect();
-        let mut pending: FxHashSet<Instance> = region.iter().cloned().collect();
-        let mut expanded: FxHashSet<Instance> = FxHashSet::default();
-        let mut boundary_preds: BTreeMap<Instance, BTreeSet<Instance>> = BTreeMap::new();
-        let mut boundary_waiters: BTreeMap<Instance, BTreeSet<Instance>> = BTreeMap::new();
-        let mut anchors: BTreeSet<Instance> = BTreeSet::new();
-        let mut released: Vec<Instance> = Vec::new();
-        let mut boundary_predecessor_edges_examined = 0;
-        let mut support_component_cache: BTreeMap<Instance, (bool, usize)> = BTreeMap::new();
-        let mut support_components: Vec<BTreeSet<Instance>> = Vec::new();
-        let predecessor_blockers = |target: &Instance,
-                                    region: &BTreeSet<Instance>,
-                                    examined: &mut usize|
-         -> BTreeSet<Instance> {
-            let Some(preds) = self.index.preds.get(target) else {
-                return BTreeSet::new();
-            };
-            *examined += preds.len();
-            preds
-                .iter()
-                .filter(|pred| *pred != target && !region.contains(*pred))
-                .cloned()
-                .collect()
+        while let Some(i) = queue.pop() {
+            if region.insert(i) {
+                queue.extend(succ(i).iter().map(|e| &e.to));
+            }
+        }
+        let anchored = |i: &&Instance| {
+            self.root_instances.contains(*i)
+                || self.index.always_emitted.contains_key(*i)
+                || self
+                    .index
+                    .preds
+                    .get(*i)
+                    .is_some_and(|preds| preds.iter().any(|p| !region.contains(p)))
         };
-        let local_support_component_reaches_anchor =
-            |target: &Instance,
-             region: &BTreeSet<Instance>,
-             cache: &mut BTreeMap<Instance, (bool, usize)>,
-             components: &mut Vec<BTreeSet<Instance>>| {
-                if region.contains(target) {
-                    return (false, usize::MAX);
-                }
-                if let Some((supported, component)) = cache.get(target) {
-                    return (*supported, *component);
-                }
-                let mut pending = vec![target.clone()];
-                let mut discovered = BTreeSet::new();
-                let mut support_edges = Vec::new();
-                let mut direct_anchors = BTreeSet::new();
-                while let Some(i) = pending.pop() {
-                    if region.contains(&i) {
-                        continue;
-                    }
-                    if !discovered.insert(i.clone()) {
-                        continue;
-                    }
-                    if self.root_instances.contains(&i)
-                        || self.index.always_emitted.contains_key(&i)
-                    {
-                        direct_anchors.insert(i.clone());
-                    }
-                    let Some(preds) = self.index.preds.get(&i) else {
-                        continue;
-                    };
-                    for pred in preds {
-                        if pred == &i || region.contains(pred) {
-                            continue;
-                        }
-                        if self.root_instances.contains(pred)
-                            || self.index.always_emitted.contains_key(pred)
-                        {
-                            direct_anchors.insert(i.clone());
-                        } else {
-                            support_edges.push((i.clone(), pred.clone()));
-                            pending.push(pred.clone());
-                        }
-                    }
-                }
-
-                let mut dependents: BTreeMap<Instance, BTreeSet<Instance>> = BTreeMap::new();
-                for (source, predecessor) in &support_edges {
-                    dependents
-                        .entry(predecessor.clone())
-                        .or_default()
-                        .insert(source.clone());
-                }
-                let mut supported_nodes = direct_anchors;
-                let mut support_queue: Vec<Instance> = supported_nodes.iter().cloned().collect();
-                while let Some(supported) = support_queue.pop() {
-                    let Some(dependents) = dependents.get(&supported) else {
-                        continue;
-                    };
-                    for dependent in dependents {
-                        if supported_nodes.insert(dependent.clone()) {
-                            support_queue.push(dependent.clone());
-                        }
-                    }
-                }
-
-                let unsupported_nodes: BTreeSet<Instance> =
-                    discovered.difference(&supported_nodes).cloned().collect();
-                let mut unsupported_neighbors: BTreeMap<Instance, BTreeSet<Instance>> =
-                    BTreeMap::new();
-                for node in &unsupported_nodes {
-                    unsupported_neighbors.entry(node.clone()).or_default();
-                }
-                for (source, predecessor) in &support_edges {
-                    if unsupported_nodes.contains(source) && unsupported_nodes.contains(predecessor)
-                    {
-                        unsupported_neighbors
-                            .entry(source.clone())
-                            .or_default()
-                            .insert(predecessor.clone());
-                        unsupported_neighbors
-                            .entry(predecessor.clone())
-                            .or_default()
-                            .insert(source.clone());
-                    }
-                }
-                let mut remaining = unsupported_nodes;
-                while let Some(start) = remaining.pop_first() {
-                    let component_id = components.len();
-                    let mut component = BTreeSet::new();
-                    let mut component_queue = vec![start];
-                    while let Some(i) = component_queue.pop() {
-                        if !component.insert(i.clone()) {
-                            continue;
-                        }
-                        remaining.remove(&i);
-                        if let Some(neighbors) = unsupported_neighbors.get(&i) {
-                            component_queue.extend(
-                                neighbors.iter().filter(|n| remaining.contains(*n)).cloned(),
-                            );
-                        }
-                    }
-                    for i in &component {
-                        cache.insert(i.clone(), (false, component_id));
-                    }
-                    components.push(component);
-                }
-                for i in &supported_nodes {
-                    cache.insert(i.clone(), (true, usize::MAX));
-                }
-                if supported_nodes.contains(target) {
-                    (true, usize::MAX)
-                } else {
-                    let component_id = components
-                        .iter()
-                        .position(|component| component.contains(target))
-                        .expect("unsupported support target has no component");
-                    (false, component_id)
-                }
-            };
-        loop {
-            while let Some(promoted) = released.pop() {
-                let waiters = boundary_waiters.remove(&promoted).unwrap_or_default();
-                for target in waiters {
-                    let became_region = boundary_preds.get_mut(&target).is_some_and(|preds| {
-                        preds.remove(&promoted);
-                        preds.is_empty()
-                    });
-                    if !became_region {
-                        continue;
-                    }
-                    boundary_preds.remove(&target);
-                    anchors.remove(&target);
-                    if region.insert(target.clone()) {
-                        support_component_cache.clear();
-                        support_components.clear();
-                        released.push(target.clone());
-                    }
-                    if pending.insert(target.clone()) {
-                        queue.push(target);
-                    }
-                }
-            }
-            let Some(i) = queue.pop() else { break };
-            pending.remove(&i);
-            if !region.contains(&i) || !expanded.insert(i.clone()) {
-                continue;
-            }
-            let is_root = self.root_instances.contains(&i);
-            let is_always = self.index.always_emitted.contains_key(&i);
-            if is_root || is_always {
-                anchors.insert(i);
-                continue;
-            }
-            let blockers =
-                predecessor_blockers(&i, &region, &mut boundary_predecessor_edges_examined);
-            if !blockers.is_empty() {
-                anchors.insert(i.clone());
-                boundary_preds.insert(i.clone(), blockers.clone());
-                for pred in &blockers {
-                    boundary_waiters
-                        .entry(pred.clone())
-                        .or_default()
-                        .insert(i.clone());
-                }
-            } else {
-                anchors.remove(&i);
-                boundary_preds.remove(&i);
-            }
-            // A lost seed with a locally supported boundary is tentative;
-            // otherwise it must probe forward so an unanchored cycle is found.
-            let mut unsupported_component_ids = BTreeSet::new();
-            let has_direct_anchor = blockers.iter().any(|pred| {
-                self.root_instances.contains(pred) || self.index.always_emitted.contains_key(pred)
-            });
-            let has_live_boundary = has_direct_anchor
-                || (seeds.contains(&i)
-                    && blockers.iter().any(|pred| {
-                        let (supported, component_id) = local_support_component_reaches_anchor(
-                            pred,
-                            &region,
-                            &mut support_component_cache,
-                            &mut support_components,
-                        );
-                        if !supported {
-                            unsupported_component_ids.insert(component_id);
-                        }
-                        supported
-                    }));
-            if !blockers.is_empty() && (!seeds.contains(&i) || has_live_boundary) {
-                continue;
-            }
-            if seeds.contains(&i) && !blockers.is_empty() {
-                anchors.remove(&i);
-                boundary_preds.remove(&i);
-                for blocker in &blockers {
-                    let remove_waiter = boundary_waiters.get_mut(blocker).is_some_and(|waiters| {
-                        waiters.remove(&i);
-                        waiters.is_empty()
-                    });
-                    if remove_waiter {
-                        boundary_waiters.remove(blocker);
-                    }
-                }
-                let mut support_targets = BTreeSet::new();
-                for component_id in unsupported_component_ids {
-                    if let Some(component) = support_components.get(component_id) {
-                        support_targets.extend(component.iter().cloned());
-                    }
-                }
-                let mut entered_region = false;
-                for support_target in support_targets {
-                    if let Some(target_blockers) = boundary_preds.remove(&support_target) {
-                        for blocker in target_blockers {
-                            let remove_waiter =
-                                boundary_waiters.get_mut(&blocker).is_some_and(|waiters| {
-                                    waiters.remove(&support_target);
-                                    waiters.is_empty()
-                                });
-                            if remove_waiter {
-                                boundary_waiters.remove(&blocker);
-                            }
-                        }
-                    }
-                    anchors.remove(&support_target);
-                    entered_region |= region.insert(support_target.clone());
-                    let was_expanded = expanded.remove(&support_target);
-                    released.push(support_target.clone());
-                    if pending.insert(support_target.clone()) || was_expanded {
-                        queue.push(support_target);
-                    }
-                }
-                if entered_region {
-                    support_component_cache.clear();
-                    support_components.clear();
-                }
-            }
-            for target in succ(&i).iter().map(|e| e.to.clone()) {
-                if region.contains(&target) || boundary_preds.contains_key(&target) {
-                    continue;
-                }
-                if self.root_instances.contains(&target)
-                    || self.index.always_emitted.contains_key(&target)
-                {
-                    anchors.insert(target);
-                    continue;
-                }
-                let blockers = predecessor_blockers(
-                    &target,
-                    &region,
-                    &mut boundary_predecessor_edges_examined,
-                );
-                if blockers.is_empty() {
-                    if region.insert(target.clone()) {
-                        support_component_cache.clear();
-                        support_components.clear();
-                        released.push(target.clone());
-                    }
-                    if pending.insert(target.clone()) {
-                        queue.push(target);
-                    }
-                } else {
-                    anchors.insert(target.clone());
-                    boundary_preds.insert(target.clone(), blockers.clone());
-                    for pred in blockers {
-                        boundary_waiters
-                            .entry(pred)
-                            .or_default()
-                            .insert(target.clone());
-                    }
-                }
-            }
-        }
-        if region.is_empty() {
-            return Prune {
-                seeds,
-                boundary_predecessor_edges_examined,
-                ..Prune::default()
-            };
-        }
-        let mut alive: Vec<Instance> = anchors.iter().cloned().collect();
-        let mut survives: BTreeSet<Instance> = BTreeSet::new();
+        let mut alive: Vec<&Instance> = region.iter().copied().filter(anchored).collect();
+        let mut survives: FxHashSet<&Instance> = FxHashSet::default();
         while let Some(i) = alive.pop() {
-            if !survives.insert(i.clone()) {
-                continue;
-            }
-            for e in succ(&i) {
-                if region.contains(&e.to) && !survives.contains(&e.to) {
-                    alive.push(e.to.clone());
-                }
+            if survives.insert(i) {
+                alive.extend(
+                    succ(i)
+                        .iter()
+                        .map(|e| &e.to)
+                        .filter(|to| region.contains(to)),
+                );
             }
         }
-        Prune {
-            pruned: region.difference(&survives).cloned().collect(),
-            region: region.len(),
-            seeds,
-            boundary_predecessor_edges_examined,
-        }
+        region
+            .into_iter()
+            .filter(|i| !survives.contains(i))
+            .cloned()
+            .collect()
     }
 }
 
@@ -2731,23 +2418,6 @@ pub struct RunStats {
     pub settle_rounds: usize,
 }
 
-/// What [`InstanceGraph::derive`] pruned, and over how much.
-///
-/// The region is carried out beside the answer because it is the only thing
-/// that distinguishes an affected-region search from a whole-graph one: both
-/// return the same pruned set, and canonical equality is green either way.
-#[derive(Default)]
-struct Prune {
-    pruned: BTreeSet<Instance>,
-    /// How many instances the suspect walk VISITED to produce `pruned` -- the
-    /// forward closure of what lost an in-edge.
-    region: usize,
-    /// The initial instances whose incoming edges changed.
-    seeds: BTreeSet<Instance>,
-    /// Predecessor edges examined while classifying local boundary blockers.
-    boundary_predecessor_edges_examined: usize,
-}
-
 /// Work and changes recorded during a body edit.
 #[derive(Default, Debug, Clone)]
 pub struct UpdateStats {
@@ -2756,15 +2426,6 @@ pub struct UpdateStats {
     /// Owners walked in total: the affected ones plus everything newly
     /// reached, plus any re-walk the conformance fixpoint demanded.
     pub expanded: usize,
-    /// Instances no root reaches any more.
-    pub pruned: usize,
-    /// **Instances the strand search VISITED**, i.e. the size of the suspect
-    /// region -- the forward closure of everything that lost an in-edge.
-    pub suspect_region: usize,
-    /// The initial instances whose incoming edges changed.
-    pub prune_seeds: BTreeSet<Instance>,
-    /// Predecessor edges examined while classifying local boundary blockers.
-    pub boundary_predecessor_edges_examined: usize,
     /// Instances the graph did not have before.
     pub newly_reached: usize,
     /// **The instances this update ADDED**, as the set rather than the count.
