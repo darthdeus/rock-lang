@@ -16,6 +16,7 @@ fn f() -> int {
 }
 
 //=== TEST CASE: nullable_field_on_struct_Generic ===
+//! expect: cannot access field `x` on non-struct type Foo?
 // Field access on nullable type must use ?. for safety
 struct Foo { x: int }
 
@@ -27,6 +28,7 @@ fn test() {
 fn main() { test() }
 
 //=== TEST CASE: nullable_field_nested_Generic ===
+//! expect: cannot access field `value` on non-struct type Inner?
 struct Inner { value: int }
 struct Outer { inner: Inner? }
 
@@ -38,6 +40,7 @@ fn test() {
 fn main() { test() }
 
 //=== TEST CASE: nullable_field_chain_Generic ===
+//! expect: cannot access field `value` on non-struct type Chain?
 struct Chain { value: int = 0, next: Chain? = null }
 
 fn test() {
@@ -48,6 +51,7 @@ fn test() {
 fn main() { test() }
 
 //=== TEST CASE: divergence_refinement_of_global_unsound_Generic ===
+//! expect: cannot access field `x` on non-struct type GFoo?
 // D4: divergence-based narrowing
 // A global refinement must NOT survive an intervening effect: a non-@pure
 // call may reassign the global, so a use AFTER such a call is unrefined and
@@ -102,6 +106,7 @@ fn f(x: S?) -> bool {
 }
 
 //=== TEST CASE: nullable_tuple_index_write_Generic ===
+//! expect: cannot assign to this expression: it is not a variable, field, or element
 // Assignment through tuple index on nullable type
 // `t.0 = v` where `t: (int, int)?` would crash at runtime if `t` is
 // null (live emits invalid Lua; typed-ANF rejects). Refine via
@@ -118,6 +123,7 @@ fn test() {
 fn main() { test() }
 
 //=== TEST CASE: nullable_tuple_index_read_Generic ===
+//! expect: cannot index a non-tuple type (int, int)?
 // Reading a tuple element off a nullable base must use ?. for safety
 // `t.0` where `t: (int, int)?` would index `nil` at runtime if `t` is
 // null. Plain `.N` on a nullable base is rejected exactly like plain
@@ -135,6 +141,7 @@ fn test() -> int {
 fn main() { let _ = test() }
 
 //=== TEST CASE: let_nullable_value_call_into_non_null_Generic ===
+//! expect: type mismatch: expected `V2`, found `V2?`
 // nullable value-struct can't implicitly unwrap to non-null
 //
 // These tests pin the SEMANTIC checks that make the Bucket-C ANF
@@ -155,6 +162,7 @@ fn test() {
 fn main() { test() }
 
 //=== TEST CASE: nullable_value_call_as_arg_Generic ===
+//! expect: type mismatch: expected `V2`, found `V2?`
 value V2 { x: int, y: int }
 
 fn make() -> V2? { return V2 { x: 1, y: 2 } }
@@ -167,6 +175,7 @@ fn test() {
 fn main() { test() }
 
 //=== TEST CASE: nullable_value_field_unsafe_access_Generic ===
+//! expect: cannot access field `x` on non-struct type V2?
 value V2 { x: int, y: int }
 
 fn make() -> V2? { return V2 { x: 1, y: 2 } }
@@ -351,6 +360,7 @@ fn f(p: Point?) -> int {
 }
 
 //=== TEST CASE: struct_field_null_NullAssignmentToNonNullable ===
+//! expect: type mismatch: expected `int`, found `null?`
 struct Foo { x: int }
 
 fn main() {
@@ -358,12 +368,14 @@ fn main() {
 }
 
 //=== TEST CASE: null_coalesce_non_nullable_lhs_Generic ===
+//! expect: left operand of `??` is not nullable -- the `?? default` is redundant
 fn main() {
     let x: int = 5
     let y = x ?? 0
 }
 
 //=== TEST CASE: safe_nav_field_non_nullable_Generic ===
+//! expect: receiver of `?.` is not nullable -- use `.` instead
 struct Bar { val: int }
 
 fn main() {
@@ -372,24 +384,28 @@ fn main() {
 }
 
 //=== TEST CASE: safe_nav_method_non_nullable_Generic ===
+//! expect: receiver of `?.` is not nullable -- use `.` instead
 fn main() {
     let x: int = 5
     let s = x?.to_string()
 }
 
 //=== TEST CASE: nullable_to_non_nullable_without_unwrap_Generic ===
+//! expect: type mismatch: expected `int`, found `int?`
 fn main() {
     let x: int? = 5
     let y: int = x
 }
 
 //=== TEST CASE: different_nullable_types_MismatchedType ===
+//! expect: type mismatch: expected `string`, found `int`
 fn main() {
     let x: int? = 5
     let y: string? = x
 }
 
 //=== TEST CASE: wrong_nullable_param_type_MismatchedType ===
+//! expect: type mismatch: expected `int`, found `string`
 fn process(maybe_int: int?) {}
 
 fn main() {
@@ -397,6 +413,7 @@ fn main() {
 }
 
 //=== TEST CASE: wrong_nullable_return_type_MismatchedType ===
+//! expect: type mismatch: expected `string`, found `int`
 fn get_opt() -> string? {
     return 5
 }
@@ -406,6 +423,7 @@ fn main() {
 }
 
 //=== TEST CASE: nullable_in_arithmetic_without_unwrap_Generic ===
+//! expect: operator `+` expects operands (int, int), got (int?, int)
 fn main() {
     let x: int? = null
     let y = x + 5

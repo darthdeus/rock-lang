@@ -296,6 +296,7 @@ fn main() {
 }
 
 //=== TEST CASE: no_iter_fn_for_struct_Generic ===
+//! expect: type `Thing` is not iterable: not a builtin collection, and neither `iter(Thing)` nor `next(Thing) ->
 struct Thing { n: int }
 fn main() {
     for x in (Thing { n: 1 }) {
@@ -304,6 +305,7 @@ fn main() {
 }
 
 //=== TEST CASE: iter_but_no_next_Generic ===
+//! expect: `iter` yields `BagIter`, but there is no `next(BagIter) ->
 struct Bag { n: int }
 struct BagIter { bag: Bag, i: int }
 fn iter(b: Bag) -> BagIter {

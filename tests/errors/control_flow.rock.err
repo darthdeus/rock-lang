@@ -290,6 +290,7 @@ fn f() -> int {
 fn f() -> int { "hi" }
 
 //=== TEST CASE: return_value_from_unannotated_fn_Generic ===
+//! expect: type mismatch: expected `()`, found `Trail`
 struct Trail { x: int }
 
 fn make() -> Trail {

@@ -1,4 +1,5 @@
 //=== TEST CASE: struct_to_struct_mismatch_MismatchedType ===
+//! expect: type mismatch: expected `Point`, found `Color`
 struct Point { x: int, y: int }
 struct Color { r: int, g: int, b: int }
 
@@ -12,6 +13,7 @@ fn main() {
 }
 
 //=== TEST CASE: array_type_mismatch_MismatchedType ===
+//! expect: type mismatch: expected `int`, found `string`
 // Error: int array parameter cannot have string array default
 fn bad_func(arr: [int] = ["hello", "world"]) {
     print("This should not compile")
@@ -22,6 +24,7 @@ fn main() {
 }
 
 //=== TEST CASE: null_to_non_nullable_NullAssignmentToNonNullable ===
+//! expect: type mismatch: expected `Point`, found `null?`
 struct Point { x: int, y: int }
 
 // Error: Cannot assign null to non-nullable type
@@ -34,6 +37,7 @@ fn main() {
 }
 
 //=== TEST CASE: function_type_default_mismatch_Generic ===
+//! expect: type mismatch: expected `int`, found `string`
 fn dummy_int() -> int {
     return 42
 }
@@ -52,6 +56,7 @@ fn main() {
 }
 
 //=== TEST CASE: enum_variant_default_mismatch_MismatchedType ===
+//! expect: type mismatch: expected `int`, found `string`
 enum Result<T, E> {
     Ok(T),
     Err(E)
@@ -67,6 +72,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_struct_default_mismatch_MismatchedType ===
+//! expect: type mismatch: expected `int`, found `string`
 struct Box<T> {
     value: T
 }
@@ -81,21 +87,25 @@ fn main() {
 }
 
 //=== TEST CASE: string_to_int_mismatch_MismatchedType ===
+//! expect: type mismatch: expected `int`, found `string`
 fn main() {
     let x: int = "hello"  // This should fail - type mismatch
 }
 
 //=== TEST CASE: int_to_string_mismatch_MismatchedType ===
+//! expect: type mismatch: expected `string`, found `int`
 fn main() {
     let s: string = 42
 }
 
 //=== TEST CASE: array_element_mismatch_MismatchedType ===
+//! expect: type mismatch: expected `int`, found `string`
 fn main() {
     let numbers: [int] = [1, 2, "three"]
 }
 
 //=== TEST CASE: default_param_type_mismatch_MismatchedType ===
+//! expect: type mismatch: expected `int`, found `string`
 // Error: int parameter cannot have string default
 fn bad_func(x: int = "hello") {
     print(x)
@@ -118,6 +128,7 @@ struct Foo { x: int }
 fn main() { let a: [int] = Foo { x: 1 } }
 
 //=== TEST CASE: heterogeneous_struct_spread_Generic ===
+//! expect: type mismatch: expected `int`, found `string`
 struct Mixed {
     name: string,
     age: int,
@@ -130,6 +141,7 @@ fn main() {
 }
 
 //=== TEST CASE: heterogeneous_tuple_spread_into_int_array_MismatchedType ===
+//! expect: type mismatch: expected `int`, found `float`
 fn main() {
     let floats = (1.0, 2.0, 3.0)
     let data: [int] = [...floats, 4]
@@ -403,6 +415,7 @@ fn f(v: [int]) -> int {
 }
 
 //=== TEST CASE: vec2_component_out_of_arity_Rejected ===
+//! expect: `Vec2` has no `z` component (swizzle `xz`)
 fn main() {
     let p = v(1.0, 2.0)
     let q = p.xz   // ERROR: Vec2 has no z component
@@ -410,6 +423,7 @@ fn main() {
 }
 
 //=== TEST CASE: vec3_w_component_Rejected ===
+//! expect: `Vec3` has no `w` component (swizzle `xw`)
 fn main() {
     let p = v(1.0, 2.0, 3.0)
     let q = p.xw   // ERROR: Vec3 has no w component
@@ -417,6 +431,7 @@ fn main() {
 }
 
 //=== TEST CASE: mixed_alphabet_Rejected ===
+//! expect: swizzle `xg` mixes the `xyzw` and `rgba` alphabets
 fn main() {
     let c = v(1.0, 2.0, 3.0, 4.0)
     let q = c.xg   // ERROR: mixed swizzle alphabets
@@ -424,18 +439,21 @@ fn main() {
 }
 
 //=== TEST CASE: swizzle_assignment_Rejected ===
+//! expect: cannot assign to swizzle `yx`: swizzles are read-only
 fn main() {
     let p = v(1.0, 2.0)
     p.yx = v(3.0, 4.0)   // ERROR: swizzles are read-only
 }
 
 //=== TEST CASE: swizzle_compound_assignment_Rejected ===
+//! expect: cannot assign to swizzle `xy`: swizzles are read-only
 fn main() {
     let p = v(1.0, 2.0)
     p.xy += v(1.0, 1.0)   // ERROR: swizzles are read-only
 }
 
 //=== TEST CASE: swizzle_name_on_non_vec_struct_Rejected ===
+//! expect: struct `Foo` has no field `yx`
 struct Foo { x: float }
 
 fn main() {
@@ -445,6 +463,7 @@ fn main() {
 }
 
 //=== TEST CASE: too_long_swizzle_Rejected ===
+//! expect: swizzle `xyxyx` has more than 4 components
 fn main() {
     let p = v(1.0, 2.0)
     let q = p.xyxyx   // ERROR: swizzles are at most 4 components
@@ -452,6 +471,7 @@ fn main() {
 }
 
 //=== TEST CASE: vec_of_tuples_dot0_rejected_Generic ===
+//! expect: cannot index a non-tuple type [(int, string)]
 // `[(A,B)].0` used to auto-project to `[A]` (map .0 over the vec). That
 // magic was removed -- a tuple index applies to a tuple/newtype, not a
 // vec of them. The explicit form is `pairs.map(_.0)`.

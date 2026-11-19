@@ -1,4 +1,5 @@
 //=== TEST CASE: plain_fn_without_a_body ===
+//! expect: this function has no body: expected a block `{ .
 // a function body must be a block or an inline string, never absent
 //
 // `finish_fn_def` answered a missing body with `extern_body.unwrap_or(ExternC)`.
@@ -26,6 +27,7 @@ fn g() -> int {
 }
 
 //=== TEST CASE: lambda_values_eq_Generic ===
+//! expect: Cannot compare fn values: fn identity is not meaningful
 // `==`/`!=` on fn-typed values is rejected: capture-free lambdas
 // share one hoisted fn value and capturing lambdas become per-creation
 // records, so fn identity is representation-dependent and never
@@ -40,6 +42,7 @@ fn main() {
 }
 
 //=== TEST CASE: lambda_values_noteq_Generic ===
+//! expect: Cannot compare fn values: fn identity is not meaningful
 fn mk() -> fn() -> int { return () => 42 }
 
 fn main() {
@@ -49,6 +52,7 @@ fn main() {
 }
 
 //=== TEST CASE: named_fn_values_eq_Generic ===
+//! expect: Cannot compare fn values: fn identity is not meaningful
 fn foo() -> int { return 1 }
 
 fn main() {
@@ -58,6 +62,7 @@ fn main() {
 }
 
 //=== TEST CASE: nullable_fn_values_eq_Generic ===
+//! expect: Cannot compare fn values: fn identity is not meaningful
 fn main() {
     let a: (fn() -> int)? = null
     let b: (fn() -> int)? = null
@@ -65,6 +70,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_capture_free_fn_arg_Generic ===
+//! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 // comparing fn values THROUGH a generic wrapper is rejected at the
 // call site. `fn same<T>(a: T, b: T) -> bool { a == b }` type-checks
 // (the operands are `T`, not a fn type), but a call that binds `T` to a
@@ -82,6 +88,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_capturing_fn_arg_Generic ===
+//! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { return a == b }
 fn mk2(x: int) -> fn() -> int { return () => x }
 
@@ -90,6 +97,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_neq_fn_arg_Generic ===
+//! expect: Cannot compare fn values: `diff` compares a generic parameter with `==`/`!=`, but it is
 fn diff<T>(a: T, b: T) -> bool { return a != b }
 fn mk() -> fn() -> int { return () => 1 }
 
@@ -98,6 +106,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_nullable_fn_arg_Generic ===
+//! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { return a == b }
 fn mk() -> (fn() -> int)? { return () => 1 }
 
@@ -107,6 +116,7 @@ fn main() {
 
 // Aliasing ONE operand does not escape: `x` infers as `T`.
 //=== TEST CASE: generic_eq_single_unannotated_alias_Generic ===
+//! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { let x = a; return x == b }
 fn mk() -> fn() -> int { return () => 1 }
 
@@ -117,6 +127,7 @@ fn main() {
 // ANNOTATED aliases are T-typed too. (The unannotated both-alias form:
 // `generic_eq_fn_arg_both_unannotated_alias` below.)
 //=== TEST CASE: generic_eq_annotated_both_alias_Generic ===
+//! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { let x: T = a; let y: T = b; return x == y }
 fn mk() -> fn() -> int { return () => 1 }
 
@@ -125,6 +136,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_fn_arg_both_unannotated_alias_Generic ===
+//! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 // aliasing BOTH operands of a generic `==` through unannotated lets
 // does not hide the comparison. `let x = a` infers `x: T`, and the
 // generic fn-eq summary (bone-semantic fn_identity) reads each
@@ -139,6 +151,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_fn_arg_call_operands_Generic ===
+//! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn mk_t<T>(x: T) -> T { return x }
 fn same<T>(a: T, b: T) -> bool { return mk_t(a) == mk_t(b) }
 fn mk() -> fn() -> int { return () => 1 }
@@ -148,6 +161,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_fn_arg_transitive_Generic ===
+//! expect: Cannot compare fn values: `outer` compares a generic parameter with `==`/`!=`, but it is
 // forwarding a generic into a callee that `==`-compares it is itself
 // a comparison. `outer<T>` instantiates `same`'s compared generic with
 // its own `T`, so the generic fn-eq summary (bone-semantic
@@ -162,6 +176,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_fn_arg_transitive_two_levels_Generic ===
+//! expect: Cannot compare fn values: `outer` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { return a == b }
 fn mid<U>(a: U, b: U) -> bool { return same(a, b) }
 fn outer<V>(a: V, b: V) -> bool { return mid(a, b) }
@@ -172,6 +187,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_fn_arg_mutual_recursion_Generic ===
+//! expect: Cannot compare fn values: `pong` compares a generic parameter with `==`/`!=`, but it is
 fn ping<T>(a: T, b: T, n: int) -> bool {
     if n == 0 { return a == b }
     return pong(a, b, n - 1)
@@ -184,6 +200,7 @@ fn main() {
 }
 
 //=== TEST CASE: expression_bodied_fn ===
+//! expect: an `= <body>` function body must be a string literal
 // an `= <body>` function body must be a string literal
 //
 // `= <expr>` parsed the expression, THREW IT AWAY, and kept an empty inline
@@ -427,6 +444,7 @@ fn caller(p: V2) -> int {
 }
 
 //=== TEST CASE: spread_unmatched_field_Generic ===
+//! expect: spread field `c` names no parameter of the callee
 // Rule 2: every field of the spread struct must name a callee param.
 struct ABC { a: int, b: int, c: int }
 
@@ -438,6 +456,7 @@ fn main() {
 }
 
 //=== TEST CASE: spread_named_before_spread_collision_Generic ===
+//! expect: parameter `a` is given before the spread that also supplies it
 // Rule 4: an explicit named arg BEFORE a spread that also supplies it errors.
 struct AB { a: int, b: int }
 
@@ -449,6 +468,7 @@ fn main() {
 }
 
 //=== TEST CASE: spread_spread_collision_Generic ===
+//! expect: two spreads both supply parameter `a`
 // Rule 5: two spreads supplying the same param collide.
 struct AB2 { a: int, b: int }
 struct AC { a: int, c: int }
@@ -462,6 +482,7 @@ fn main() {
 }
 
 //=== TEST CASE: spread_non_struct_operand_Generic ===
+//! expect: cannot spread `int` into call arguments: expected a nominal struct
 // The spread operand must be a nominal struct with statically known fields.
 fn takes_a(a: int) -> int { a }
 
@@ -668,6 +689,7 @@ fn outer(digits: int) -> string {
 fn main() { let _ = outer(2) }
 
 //=== TEST CASE: field_ref_picked_slot_not_fieldref_Generic ===
+//! expect: field reference `.health` is only valid against an expected `FieldRef<T, V>` / `ReadFieldRef<T, V>`
 struct Mob { health: int }
 
 fn probe(a: int, b: int) -> int { return a + b }
@@ -689,6 +711,7 @@ fn f() -> int {
 }
 
 //=== TEST CASE: polymorphic_recursion ===
+//! expect: polymorphic recursion: `rec_T_int<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<int>>>>>>>>>>>>>`
 fn rec<T>(x: T, n: int) -> int {
     if n <= 0 { return 0 }
     return rec([x], n - 1)
@@ -699,6 +722,7 @@ fn main() {
 }
 
 //=== TEST CASE: extern_ffi_generic_return ===
+//! expect: extern `opaque_ret` returns the unbound generic parameter `T`, which has no C representation
 extern(ffi, "m") fn opaque_ret<T>() -> T
 
 fn main() {

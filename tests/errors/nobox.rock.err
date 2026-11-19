@@ -1,4 +1,5 @@
 //=== TEST CASE: bound_callback_nullable_nobox_return ===
+//! expect: a function returning a `nobox` value cannot be used as one returning a nullable value
 // A stored function returning a nobox value has a fixed leaf return ABI.
 // A nullable return adds a presence slot, so the value needs a lambda adapter.
 fn accepts_nullable_position(callback: () -> Vec2?) -> Vec2 {
@@ -12,6 +13,7 @@ fn main() {
 }
 
 //=== TEST CASE: opaque_body_via_global_init_Generic ===
+//! expect: `lscore` cannot be taken as a fn value because its fixed ABI does not match the type-derived
 // a fn whose fixed ABI cannot adopt the type-derived `nobox` fn-value
 // ABI is rejected in a GLOBAL INITIALIZER, exactly as it already is at
 // a direct call site. A call through a fn value cannot see its callee,
@@ -39,6 +41,7 @@ fn main() {
 }
 
 //=== TEST CASE: opaque_body_in_global_vec_Generic ===
+//! expect: `lscore` cannot be taken as a fn value because its fixed ABI does not match the type-derived
 nobox value P { x: float, y: float }
 
 inline(lua) fn lscore(p: P) -> float = """
@@ -53,6 +56,7 @@ fn main() {
 }
 
 //=== TEST CASE: nomangle_fn_via_global_init_Generic ===
+//! expect: `scorer` cannot be taken as a fn value because its fixed ABI does not match the type-derived
 nobox value P { x: float, y: float }
 
 // Not an opaque body -- an ordinary Rock fn whose `@nomangle` bare name pins its
@@ -67,6 +71,7 @@ fn main() {
 }
 
 //=== TEST CASE: extern_fn_via_global_init_Generic ===
+//! expect: `take_p` cannot be taken as a fn value because its fixed ABI does not match the type-derived
 nobox value P { x: float, y: float }
 
 extern(lua) fn take_p(p: P) -> float
@@ -79,6 +84,7 @@ fn main() {
 }
 
 //=== TEST CASE: nobox_bare_return_from_inline_lua ===
+//! expect: nobox value `NV2` cannot cross the boxed return of `hand_boxed`
 // a BARE (non-tuple) `nobox` return from an opaque body. The callee
 // writes its own `return`, so a hand-written box is handed back where
 // the call site expects leaves -- and Lua's `.field` does not
@@ -102,6 +108,7 @@ fn main() {
 }
 
 //=== TEST CASE: nobox_bare_return_from_nomangle_inline_lua ===
+//! expect: nobox value `NV2` cannot cross the boxed return of `hand_boxed_fixed_name`
 nobox value NV2 { x: float, y: float }
 
 @nomangle inline(lua) fn hand_boxed_fixed_name() -> NV2 = """
@@ -113,6 +120,7 @@ fn main() {
 }
 
 //=== TEST CASE: nobox_materialization_in_a_shader_body ===
+//! expect: nobox value `NV2` survived lowering as an implicit materialization, while emitting
 // a `@shader` fn's body is ordinary CPU-executable Lua -- the authoring
 // contract promises shader fns "compile
 // to Lua as normal fns, so shader helper math is CPU-callable and
@@ -149,6 +157,7 @@ fn main() {
 }
 
 //=== TEST CASE: whole_tuple_escape_of_a_nobox_Generic ===
+//! expect: nobox value `SNV` survived lowering as an implicit materialization, while emitting `main`
 // NOT an unbuilt mechanism -- the guarantee firing, pinned so the boundary
 // cannot move unnoticed. A nullable tuple carrying a nobox element is bound and
 // used slot-wise (seventeen shapes in `tests/nobox/nullable_tuple.rock`), but
@@ -166,6 +175,7 @@ fn main() {
 }
 
 //=== TEST CASE: inline_tuple_interpolation_of_a_nobox_Generic ===
+//! expect: nobox value `INV` survived lowering as an implicit materialization, while emitting `main`
 // The same boundary reached WITHOUT a binding. It rejects through a different
 // site (`stringify_non_null`, not the packed repr) and is pinned separately
 // because it once compiled while the bound form above rejected: the box had
@@ -179,6 +189,7 @@ fn main() {
 }
 
 //=== TEST CASE: direct_inspect_of_a_tuple_carrying_a_nobox_Generic ===
+//! expect: cannot inspect a tuple carrying a nobox value
 // The call-boundary spelling of the case above: `inspect` reached by name rather
 // than through interpolation. Pinned as its own case because the two are checked
 // at different sites and only one of them used to exist.
@@ -189,6 +200,7 @@ fn main() {
 }
 
 //=== TEST CASE: implicit_tuple_at_an_inline_body_Generic ===
+//! expect: a tuple carrying a nobox value cannot cross boxed call boundary `count`
 // The guarantee firing at a body the compiler cannot see into: it would be
 // handed the flat box and read a wider tuple. `materialize(t)` hands it one
 // boxed value per element (`tests/nobox/tuple.rock`).
@@ -367,6 +379,7 @@ fn main() {
 }
 
 //=== TEST CASE: native_buffer_alloc_generic_gc_value ===
+//! expect: `native_buffer_alloc<Named>` requires a valid native-buffer element ctype
 struct FlatVec<T> { buf: NativeBuffer<T>, len: int }
 
 value Named { s: string }   // string field -> GC-carrying value struct, no C layout
@@ -381,6 +394,7 @@ fn main() {
 }
 
 //=== TEST CASE: native_buffer_alloc_heap_struct ===
+//! expect: `native_buffer_alloc<Heap>` requires a valid native-buffer element ctype
 struct Heap { xs: [int] }
 
 fn bad(n: int) -> NativeBuffer<Heap> {
@@ -401,6 +415,7 @@ fn f(buf: NativeBuffer<float>) -> int {
 }
 
 //=== TEST CASE: gc_value_extern_param_Generic ===
+//! expect: `Bag` is a GC-carrying `value` struct (immutable Lua table) and cannot cross an `extern` C boundary
 value Bag { xs: [int], n: int }
 
 extern(lua) fn c_takes_bag(b: Bag) -> int
@@ -410,6 +425,7 @@ fn main() {
 }
 
 //=== TEST CASE: gc_value_extern_return_Generic ===
+//! expect: `Pair` is a GC-carrying `value` struct (immutable Lua table) and cannot cross an `extern` C boundary
 value Pair<T> { a: T, b: T }
 
 extern(lua) fn c_makes_pair() -> Pair<int>
@@ -420,6 +436,7 @@ fn main() {
 }
 
 //=== TEST CASE: gc_value_nativebuffer_alloc ===
+//! expect: `native_buffer_alloc<Bag>` requires a valid native-buffer element ctype
 value Bag { xs: [int], n: int }
 
 fn nb_bag(n: int) -> NativeBuffer<Bag> {

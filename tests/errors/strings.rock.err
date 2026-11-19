@@ -90,6 +90,7 @@ fn render_nullable_any(value: any?) -> string { return "{value:.2f}" }
 fn main() { print(render_nullable_any(null)) }
 
 //=== TEST CASE: unterminated_call_in_hole_Generic ===
+//! expect: unterminated string literal: a bare `{` opens an interpolation that must be closed with `}`
 fn add2(a: int, b: int) -> int { return a + b }
 
 fn main() {
@@ -97,12 +98,14 @@ fn main() {
 }
 
 //=== TEST CASE: string_char_above_ascii_Generic ===
+//! expect: string_char is portable only for ASCII 0-127; for code points use from_codepoint
 fn main() {
     let s = string_char(233)
     print("{s}")
 }
 
 //=== TEST CASE: string_char_negative_Generic ===
+//! expect: string_char is portable only for ASCII 0-127; for code points use from_codepoint
 fn main() {
     let s = string_char(-1)
     print("{s}")

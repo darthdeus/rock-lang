@@ -76,6 +76,7 @@ fn main() {
 }
 
 //=== TEST CASE: macro_shadows_same_named_fn_Compiler ===
+//! expect: macro `foo` collides with a function named `foo`
 macro foo(x: expr) -> int { x }
 fn foo(x: int) -> int { return x }
 
@@ -84,6 +85,7 @@ fn main() {
 }
 
 //=== TEST CASE: unknown_label_Rejected ===
+//! expect: macro `three` has no parameter named `zzz`
 macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
 
 fn main() {
@@ -91,6 +93,7 @@ fn main() {
 }
 
 //=== TEST CASE: label_repeated_Rejected ===
+//! expect: macro `three` got two values for parameter `b`
 macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
 
 fn main() {
@@ -98,6 +101,7 @@ fn main() {
 }
 
 //=== TEST CASE: label_duplicates_a_positional_Rejected ===
+//! expect: macro `three` got two values for parameter `a`
 macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
 
 fn main() {

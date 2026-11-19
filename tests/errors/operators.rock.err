@@ -129,6 +129,7 @@ fn main() {}
 // six overloadable symbols by asserting each returns its marker.
 
 //=== TEST CASE: newtype_eq_with_int_IncompatibleNewtypeOperation ===
+//! expect: type mismatch: expected `int`, found `UserId`
 newtype UserId(int)
 
 fn main() {
@@ -139,6 +140,7 @@ fn main() {
 }
 
 //=== TEST CASE: newtype_ne_with_int_IncompatibleNewtypeOperation ===
+//! expect: type mismatch: expected `int`, found `UserId`
 newtype UserId(int)
 
 fn main() {
@@ -149,6 +151,7 @@ fn main() {
 }
 
 //=== TEST CASE: int_eq_with_newtype_IncompatibleNewtypeOperation ===
+//! expect: type mismatch: expected `UserId`, found `int`
 newtype UserId(int)
 
 fn main() {
@@ -159,6 +162,7 @@ fn main() {
 }
 
 //=== TEST CASE: different_newtypes_comparison_IncompatibleNewtypeOperation ===
+//! expect: type mismatch: expected `Score`, found `UserId`
 newtype UserId(int)
 newtype Score(int)
 

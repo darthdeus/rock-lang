@@ -80,6 +80,7 @@ fn f() -> int {
 }
 
 //=== TEST CASE: unpinned_lambda_param_mul_Generic ===
+//! expect: cannot infer type of lambda parameter `x`: annotate it or use the lambda
 // an unconstrained lambda param that no use in the body ever pins
 // has no type -- defer-to-use does not invent one. The local
 // `*(UnpinnedW, int)` overload ties with stdlib `*(int, int)`, so `x * 2` cannot
@@ -96,6 +97,7 @@ fn main() {
 }
 
 //=== TEST CASE: unpinned_placeholder_field_Generic ===
+//! expect: cannot infer type of lambda parameter `_`: annotate it or use the lambda
 struct UnpinnedP { x: int }
 struct UnpinnedQ { x: float }
 
@@ -176,6 +178,7 @@ fn main() {
 }
 
 //=== TEST CASE: lambda_parameter_wrong_method_Generic ===
+//! expect: No overload for `get` with argument types (Point, string)
 struct Point {
     x: int,
     y: int,

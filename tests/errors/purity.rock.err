@@ -364,6 +364,7 @@ fn main() {
 }
 
 //=== TEST CASE: write_field_ref_to_read_field_ref_Generic ===
+//! expect: type mismatch: expected `ReadFieldRef<Mob, int?>`, found `WriteFieldRef<Mob, int?>`
 // The extraction hole `WriteFieldRef` exists to close: a write-only selector
 // must not reach a readable one, or an embedded field's whole value reads out.
 struct Mob { health: int, attack_co: int? }
@@ -376,6 +377,7 @@ fn main() {
 }
 
 //=== TEST CASE: write_field_ref_to_field_ref_Generic ===
+//! expect: type mismatch: expected `FieldRef<Mob, int?>`, found `WriteFieldRef<Mob, int?>`
 struct Mob { health: int, attack_co: int? }
 
 fn take_full(f: FieldRef<Mob, int?>) {}
@@ -386,6 +388,7 @@ fn main() {
 }
 
 //=== TEST CASE: read_field_ref_to_write_field_ref_Generic ===
+//! expect: type mismatch: expected `WriteFieldRef<Mob, int?>`, found `ReadFieldRef<Mob, int?>`
 struct Mob { health: int, attack_co: int? }
 
 fn take_write(f: WriteFieldRef<Mob, int?>) {}
@@ -396,6 +399,7 @@ fn main() {
 }
 
 //=== TEST CASE: write_field_ref_widen_to_nullable_Generic ===
+//! expect: type mismatch: expected `int?`, found `int`
 // INVARIANCE. `unify`'s `(_, Nullable)` arm widens on the right, so without the
 // explicit check a non-null `int` field satisfies a `<_, int?>` selector and
 // `field_set(m, f, null)` writes nil into a field typed `int`.
@@ -408,6 +412,7 @@ fn main() {
 }
 
 //=== TEST CASE: field_ref_widen_to_nullable_Generic ===
+//! expect: type mismatch: expected `int?`, found `int`
 struct Mob { health: int }
 
 fn take_full(f: FieldRef<Mob, int?>) {}
@@ -417,6 +422,7 @@ fn main() {
 }
 
 //=== TEST CASE: write_field_ref_value_struct_Immutable ===
+//! expect: cannot form a writable field reference `.x` into `value` struct `Pt`
 // The write capability refuses a `value` struct T, same rule as `FieldRef`.
 value Pt { x: int, y: int }
 
@@ -427,6 +433,7 @@ fn main() {
 }
 
 //=== TEST CASE: write_field_ref_arity_Generic ===
+//! expect: WriteFieldRef type must have exactly 2 type arguments (<Struct, FieldType>)
 struct Mob { health: int, attack_co: int? }
 
 fn take_write(f: WriteFieldRef<Mob>) {}   // ERROR: needs <Struct, FieldType>

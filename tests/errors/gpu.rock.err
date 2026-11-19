@@ -1,4 +1,5 @@
 //=== TEST CASE: gpu_only_without_intrinsic_Generic ===
+//! expect: `@gpu_only` marks an `@intrinsic` fn that only GPU backends map
 @gpu_only fn bogus() -> int {
     return 1
 }
@@ -6,6 +7,7 @@
 fn main() {}
 
 //=== TEST CASE: native_required_without_intrinsic_Generic ===
+//! expect: `@native_required` marks an `@intrinsic` fn a backend must map natively
 @native_required inline(lua) fn spin(x: int) -> int = """
     return x
 """
@@ -15,6 +17,7 @@ fn main() {
 }
 
 //=== TEST CASE: native_required_no_luajit_mapping_Generic ===
+//! expect: `@native_required` intrinsic `spun` has no luajit mapping
 @native_required @intrinsic fn spun(x: int) -> int {
     return x
 }
@@ -24,6 +27,7 @@ fn main() {
 }
 
 //=== TEST CASE: texture_direct_cpu_call_Generic ===
+//! expect: `texture` is GPU-only and cannot be called from CPU
 fn use_texture() -> Vec4 {
     let s = Sampler2D { __handle: 0 }
     return texture(s, v(0.0, 0.0))
@@ -34,6 +38,7 @@ fn main() {
 }
 
 //=== TEST CASE: texture_size_direct_cpu_call_Generic ===
+//! expect: `texture_size` is GPU-only and cannot be called from CPU
 fn use_texture_size() -> Vec2 {
     let s = Sampler2D { __handle: 0 }
     return texture_size(s)
@@ -44,6 +49,7 @@ fn main() {
 }
 
 //=== TEST CASE: fwidth_direct_cpu_call_Generic ===
+//! expect: `fwidth` is GPU-only and cannot be called from CPU
 // The A2a fragment builtins are @gpu_only too -- a CPU call is a hard error.
 fn use_fwidth() -> float {
     return fwidth(1.0)
@@ -54,6 +60,7 @@ fn main() {
 }
 
 //=== TEST CASE: frag_coord_direct_cpu_call_Generic ===
+//! expect: `frag_coord` is GPU-only and cannot be called from CPU
 fn use_frag_coord() -> Vec4 {
     return frag_coord()
 }
@@ -63,6 +70,7 @@ fn main() {
 }
 
 //=== TEST CASE: at_direct_cpu_call_Generic ===
+//! expect: `at` is GPU-only and cannot be called from CPU
 fn use_at() -> float {
     let arr = cast<UniformArray<float>>(0)
     return at(arr, 0)
@@ -73,6 +81,7 @@ fn main() {
 }
 
 //=== TEST CASE: vertex_id_direct_cpu_call_Generic ===
+//! expect: `vertex_id` is GPU-only and cannot be called from CPU
 fn use_vertex_id() -> int {
     return vertex_id()
 }
@@ -82,6 +91,7 @@ fn main() {
 }
 
 //=== TEST CASE: discard_direct_cpu_call_Generic ===
+//! expect: `discard` is GPU-only and cannot be called from CPU
 fn use_discard() {
     discard()
 }
@@ -91,6 +101,7 @@ fn main() {
 }
 
 //=== TEST CASE: arg_not_a_fn_reference_Generic ===
+//! expect: `rock_shader` argument must be a direct reference to a top-level `@shader(vertex)` fn
 value AV { p: Vec2 }
 value UV { m: Mat4 }
 value Vary { position: Vec4 }
@@ -108,6 +119,7 @@ fn main() {
 }
 
 //=== TEST CASE: arg_is_a_local_not_direct_reference_Generic ===
+//! expect: `rock_shader` argument must be a direct reference to a top-level `@shader(vertex)` fn
 value AV { p: Vec2 }
 value UV { m: Mat4 }
 value Vary { position: Vec4 }
@@ -126,6 +138,7 @@ fn main() {
 }
 
 //=== TEST CASE: arg_is_not_a_shader_fn_Generic ===
+//! expect: `rock_shader` argument `plain` is not a `@shader` fn
 value AV { p: Vec2 }
 value UV { m: Mat4 }
 value Vary { position: Vec4 }
@@ -140,6 +153,7 @@ fn main() {
 }
 
 //=== TEST CASE: swapped_vertex_and_fragment_Generic ===
+//! expect: `rock_shader` expects a `@shader(vertex)` fn here, but `frg` is `@shader(fragment)`
 value AV { p: Vec2 }
 value UV { m: Mat4 }
 value Vary { position: Vec4 }
@@ -157,6 +171,7 @@ fn main() {
 }
 
 //=== TEST CASE: single_arg_vertex_fn_where_fragment_expected_Generic ===
+//! expect: `rock_shader` expects a `@shader(fragment)` fn here, but `vtx` is `@shader(vertex)`
 value AV { p: Vec2 }
 value UV { m: Mat4 }
 value Vary { position: Vec4 }
@@ -171,6 +186,7 @@ fn main() {
 }
 
 //=== TEST CASE: single_arg_not_a_shader_fn_Generic ===
+//! expect: `rock_shader` argument `plain` is not a `@shader` fn
 fn plain() -> int { return 0 }
 
 fn main() {
@@ -178,6 +194,7 @@ fn main() {
 }
 
 //=== TEST CASE: three_args_rejected_Generic ===
+//! expect: No overload for `rock_shader` with argument types
 value AV { p: Vec2 }
 value UV { m: Mat4 }
 value Vary { position: Vec4 }
@@ -195,6 +212,7 @@ fn main() {
 }
 
 //=== TEST CASE: arg_not_value_struct_Generic ===
+//! expect: `@struct_expand` fn `epairs` argument must be a value struct
 enum E { F(float), I(int) }
 
 @struct_expand inline(lua) fn epairs<T>(u: T) -> [(string, E)] = """
@@ -206,6 +224,7 @@ fn main() {
 }
 
 //=== TEST CASE: field_type_no_matching_variant_Generic ===
+//! expect: `@struct_expand`: field `flag: bool` has no variant of `E` carrying that payload type
 enum E { F(float), I(int) }
 value S { flag: bool }
 
@@ -218,6 +237,7 @@ fn main() {
 }
 
 //=== TEST CASE: ambiguous_variant_payload_Generic ===
+//! expect: `@struct_expand`: field `x: float` matches more than one variant of `Dup`
 enum Dup { A(float), B(float) }
 value S { x: float }
 
@@ -230,6 +250,7 @@ fn main() {
 }
 
 //=== TEST CASE: return_type_not_pairs_Generic ===
+//! expect: `@struct_expand` fn `bad` must return `[(string, <enum>)]`, got `int`
 value S { x: float }
 
 @struct_expand inline(lua) fn bad<T>(u: T) -> int = """
@@ -241,6 +262,7 @@ fn main() {
 }
 
 //=== TEST CASE: nominal_field_vs_same_named_generic_payload_Generic ===
+//! expect: `@struct_expand`: field `t: T` has no variant of `E` carrying that payload type
 // `A(T)` carries E's generic parameter, not the struct `T`; the two only
 // render alike.
 value T { x: float }
@@ -256,6 +278,7 @@ fn main() {
 }
 
 //=== TEST CASE: intrinsic_declared_with_wrong_arity ===
+//! expect: `@uniform_expand` fn `packu` takes either three arguments
 value U { a: float }
 
 // The rejection is about the DECLARATION, not the call: a call that disagrees
@@ -276,6 +299,7 @@ fn main() {
 }
 
 //=== TEST CASE: third_arg_not_a_value_struct ===
+//! expect: `@uniform_expand` fn `packu`'s uniform-group argument must be a concrete `value` struct
 @uniform_expand inline(lua) fn packu<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
     error("compiler-expanded")
 """
@@ -287,6 +311,7 @@ fn main() {
 }
 
 //=== TEST CASE: group_with_no_std140_form ===
+//! expect: `@uniform_expand`: uniform block: `Outer` field `i` has type `Inner`, which has no std140 form here
 value Inner { a: float }
 value Outer { i: Inner, b: float }
 
@@ -301,6 +326,7 @@ fn main() {
 }
 
 //=== TEST CASE: arg_not_a_buffer_Generic ===
+//! expect: `@vertex_expand` fn `vstride` argument must be a `FlatVec<E>` or `NativeBuffer<E>` whose element is
 @vertex_expand inline(lua) fn vstride<T>(u: T) -> int = """
     error("compiler-expanded")
 """
@@ -310,6 +336,7 @@ fn main() {
 }
 
 //=== TEST CASE: element_not_a_value_struct_Generic ===
+//! expect: `@vertex_expand` fn `vstride` argument must be a `FlatVec<E>` or `NativeBuffer<E>` whose element is
 @vertex_expand inline(lua) fn vstride<T>(buf: NativeBuffer<T>) -> int = """
     error("compiler-expanded")
 """
@@ -320,6 +347,7 @@ fn main() {
 }
 
 //=== TEST CASE: return_type_not_layout_Generic ===
+//! expect: `@vertex_expand` fn `vbad` must return `int`
 value Inst { pos: Vec2, rot: float }
 
 @vertex_expand inline(lua) fn vbad<T>(buf: FlatVec<T>) -> float = """
@@ -332,6 +360,7 @@ fn main() {
 }
 
 //=== TEST CASE: integer_attribute_rejects_float_unit_Generic ===
+//! expect: `@vertex_expand`: vertex plan: `WithId` field `pos` is a float attribute but its leaf `pos.x` is a
 value WithId { pos: Vec2, id: int }
 
 @vertex_expand inline(lua) fn vsizes<T>(buf: FlatVec<T>) -> [int] = """
@@ -420,6 +449,7 @@ fn main() {
 }
 
 //=== TEST CASE: scene_handle_of_wrong_root_type_Generic ===
+//! expect: type mismatch: expected `MenuState`, found `RoomState`
 struct RoomState { n: int }
 struct MenuState { label: string }
 
@@ -433,6 +463,7 @@ fn main() {
 }
 
 //=== TEST CASE: scene_root_used_as_other_root_Generic ===
+//! expect: type mismatch: expected `MenuState`, found `RoomState`
 struct RoomState { n: int }
 struct MenuState { label: string }
 
@@ -446,6 +477,7 @@ fn main() {
 }
 
 //=== TEST CASE: scene_owned_arena_of_wrong_element_Generic ===
+//! expect: type mismatch: expected `Prop`, found `Actor`
 struct Actor { hp: int }
 struct Prop { solid: bool }
 struct RoomState { actors: Arena<Actor> }
@@ -460,6 +492,7 @@ fn main() {
 }
 
 //=== TEST CASE: scene_create_root_type_mismatch_Generic ===
+//! expect: type mismatch: expected `RoomState`, found `MenuState`
 struct RoomState { n: int }
 struct MenuState { label: string }
 

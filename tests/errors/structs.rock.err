@@ -61,6 +61,7 @@ fn f() -> int {
 }
 
 //=== TEST CASE: update_wrong_nominal_base_MismatchedType ===
+//! expect: type mismatch: expected `B`, found `A`
 // Rule 6: the base must have the SAME nominal type as the literal.
 struct A { x: int, y: int }
 struct B { x: int, y: int }
@@ -72,6 +73,7 @@ fn main() {
 }
 
 //=== TEST CASE: update_two_bases_Generic ===
+//! expect: a functional-update literal takes at most one `..base`
 // Rule 5: two same-type bases both supply every field (collision).
 struct P { x: int, y: int }
 
@@ -214,6 +216,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_primitive_Generic ===
+//! expect: cannot `embed` field `n`: a primitive has no statically known leaves to inline
 struct Holder { embed n: int }
 
 fn main() {
@@ -222,6 +225,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_collection_Generic ===
+//! expect: cannot `embed` field `xs`: a collection has no statically known leaves to inline
 struct Holder { embed xs: [int] }
 
 fn main() {
@@ -230,6 +234,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_any_Generic ===
+//! expect: cannot `embed` field `a`: `any` has no statically known leaves to inline
 struct Holder { embed a: any }
 
 fn main() {
@@ -238,6 +243,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_enum_Generic ===
+//! expect: cannot `embed` field `c`: a non-struct nominal type has no statically known leaves to inline
 enum Color { Red, Green }
 struct Holder { embed c: Color }
 
@@ -247,6 +253,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_generic_param_Generic ===
+//! expect: cannot `embed` field `t`: a generic parameter has no statically known leaves to inline
 // A generic param has no statically known leaves at the declaration.
 struct Holder<T> { embed t: T }
 
@@ -256,6 +263,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_self_cycle_Generic ===
+//! expect: cannot `embed` field `next`: the embed graph is cyclic, so the layout has no finite size
 struct Node { embed next: Node, v: int }
 
 fn main() {
@@ -263,6 +271,7 @@ fn main() {
 }
 
 //=== TEST CASE: embed_mutual_cycle_Generic ===
+//! expect: cannot `embed` field `b`: the embed graph is cyclic, so the layout has no finite size
 struct A { embed b: B, v: int }
 struct B { embed a: A, w: int }
 
@@ -459,6 +468,7 @@ fn main() {
 }
 
 //=== TEST CASE: direct_scalar_abi_call_Generic ===
+//! expect: `ambiguous` would emit the Lua parameter `r__tl__x` twice
 value V2 { x: float, y: float }
 value Bad { tl__x: float, tl: V2 }
 
@@ -469,6 +479,7 @@ value Bad { tl__x: float, tl: V2 }
 fn main() { let _ = ambiguous(Bad { tl__x: 1.0, tl: V2 { x: 2.0, y: 3.0 } }) }
 
 //=== TEST CASE: through_a_fn_value_Generic ===
+//! expect: `probe` would emit the Lua parameter `r__tl__x` twice
 nobox value P { x: float, y: float }
 nobox value Bad { tl: P, tl__x: float }
 
@@ -484,6 +495,7 @@ fn main() {
 }
 
 //=== TEST CASE: sibling_param_collides_with_a_leaf_Generic ===
+//! expect: `collide` would emit the Lua parameter `r__x` twice
 // The value declaration is CLEAN here -- `V2 { x, y }` has no ambiguity of its
 // own. The collision is between the leaf `r.x` (emitted `r__x`) and the sibling
 // param literally named `r__x`, so only a signature-level check sees it. Emits
@@ -497,6 +509,7 @@ value V2 { x: float, y: float }
 fn main() { print("{collide(V2 { x: 2.0, y: 3.0 }, 100.0)}") }
 
 //=== TEST CASE: sibling_param_collides_with_a_nested_leaf_Generic ===
+//! expect: `collide2` would emit the Lua parameter `r__tl__x` twice
 // The same class one level deeper: the sibling param spells out a NESTED leaf.
 value V2 { x: float, y: float }
 value Rect { tl: V2, br: V2 }
@@ -508,6 +521,7 @@ value Rect { tl: V2, br: V2 }
 fn main() { print("{collide2(Rect { tl: V2 { x: 1.0, y: 2.0 }, br: V2 { x: 3.0, y: 4.0 } }, 9.0)}") }
 
 //=== TEST CASE: deep_nesting_collision_Generic ===
+//! expect: `deep` would emit the Lua parameter `r__a__b__c` twice
 // Two levels down: `a.b.c` and a flat `a__b__c` join alike.
 value Inner { c: float }
 value Mid { b: Inner }

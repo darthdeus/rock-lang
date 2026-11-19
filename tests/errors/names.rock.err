@@ -237,11 +237,13 @@ enum Envelope { Empty, Text(string) }
 fn main() {}
 
 //=== TEST CASE: undefined_function_SymbolNotFound ===
+//! expect: `undefined_function` did not resolve to any definition
 fn main() {
     undefined_function()
 }
 
 //=== TEST CASE: undefined_variable_Generic ===
+//! expect: `undefined_var` did not resolve to any definition
 fn main() {
     let x = undefined_var
 }
@@ -253,26 +255,31 @@ fn main() {
 // The operators-as-functions arc rewrote that arm to propagate via `?`;
 // this pins the symmetry so it cannot silently regress.
 //=== TEST CASE: undefined_in_operator_arg_Generic ===
+//! expect: `undefined_thing` did not resolve to any definition
 fn main() {
     let r = undefined_thing + 1
 }
 
 //=== TEST CASE: global_r1_Generic ===
+//! expect: `r1` collides with a reserved codegen identifier
 global r1: int = 100
 fn use_it(a: int) -> int { return a + r1 }
 fn main() { print("{use_it(7)}") }
 
 //=== TEST CASE: global_c0_Generic ===
+//! expect: `c0` collides with a reserved codegen identifier
 global c0: int = 5
 fn use_it(a: int) -> int { return a + c0 }
 fn main() { print("{use_it(1)}") }
 
 //=== TEST CASE: global_rock_env_Generic ===
+//! expect: `__rock_env` collides with a reserved codegen identifier
 global __rock_env: int = 9
 fn use_it(a: int) -> int { return a + __rock_env }
 fn main() { print("{use_it(1)}") }
 
 //=== TEST CASE: nomangle_fn_r2_Generic ===
+//! expect: `r2` collides with a reserved codegen identifier
 @nomangle fn r2() -> int { return 3 }
 fn main() { print("{r2()}") }
 
@@ -322,12 +329,14 @@ fn spec<T>(x: T) -> T { let g = () => x return g() }
 fn main() { print("{spec(5)}") print("{spec_T_spec_p_int__lambda0()}") }
 
 //=== TEST CASE: distinct_signatures_collide_Generic ===
+//! expect: mangled name `foo_int_int` is produced by two distinct function signatures
 // `foo(int, int) -> int` and `foo_int(int) -> int` both mangle to `foo_int_int`.
 fn foo(x: int, y: int) -> int { return x }
 fn foo_int(x: int) -> int { return 0 }
 fn main() { let a = foo(1, 2) let b = foo_int(1) }
 
 //=== TEST CASE: mangled_equals_exempt_bare_name_Generic ===
+//! expect: mangled name `bar_int` is produced by two distinct function signatures
 // `bar(int) -> int` mangles to `bar_int`, which is the bare name a
 // `@nomangle` fn `bar_int` keeps -- one emitted symbol for two functions.
 fn bar(x: int) -> int { return x }

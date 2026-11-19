@@ -227,6 +227,7 @@ deco init bad {
 }
 
 //=== TEST CASE: deco_init_type_mismatch_MismatchedType ===
+//! expect: type mismatch: expected `int`, found `string`
 deco init bad_types {
     let x: int = "hello"
 }
@@ -237,6 +238,7 @@ fn foo() {}
 fn main() {}
 
 //=== TEST CASE: deco_invalid_target_field_Generic ===
+//! expect: struct `__DecoTarget` has no field `nonexistent_field`
 deco init invalid_field {
     let x = target.nonexistent_field
 }
@@ -247,6 +249,7 @@ fn baz() {}
 fn main() {}
 
 //=== TEST CASE: deco_param_type_mismatch_MismatchedType ===
+//! expect: type mismatch: expected `string`, found `int`
 deco init param_error(priority: int) {
     let x: string = priority
 }
@@ -257,6 +260,7 @@ fn qux() {}
 fn main() {}
 
 //=== TEST CASE: js_only_extern_called_from_lua_Generic ===
+//! expect: call to `js_only` has no luajit binding: its only declaration targets the `js` backend
 extern(js) fn js_only() -> int
 
 fn main() {
@@ -273,6 +277,7 @@ fn main() {
 }
 
 //=== TEST CASE: unknown_inline_backend_Generic ===
+//! expect: unknown inline backend Ident(u!("wasm")); expected `lua` or `js`
 inline(wasm) fn nope(x: int) -> int = """return x"""
 
 fn main() {
