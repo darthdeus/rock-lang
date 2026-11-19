@@ -23,7 +23,6 @@ pub(super) struct JsonTypes {
     arena: Arc<RepArena>,
     interner: Arc<MonoInterner>,
     used: bool,
-    /// Entries by declaration key, in a stable order.
     entries: BTreeMap<Ustr, Vec<Entry>>,
 }
 
@@ -347,8 +346,6 @@ fn field_js(f: &FieldEntry) -> String {
     if let Some(name) = f.json_name {
         out.push_str(&format!(", json_name: {}", js_string_lit(name.as_str())));
     }
-    // Factories are emitted functions: `fn() -> any` and `fn(any) -> bool`,
-    // one lane each, so the walker calls them directly.
     if let Some(factory) = &f.json_default {
         out.push_str(&format!(", json_default: {factory}"));
     }

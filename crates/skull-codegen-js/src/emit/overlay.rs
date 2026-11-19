@@ -27,7 +27,6 @@ pub fn emit_overlay_with_span_edits(
         return Ok(JsReload::FullRequired);
     }
 
-    // Refresh per-body ABI facts on the interner retained by this session.
     for &(mid, owner) in reinferred {
         cache.scx.update_body(ws, mid, owner);
     }
@@ -167,7 +166,6 @@ pub fn emit_overlay_with_span_edits(
         })
         .map(|(fref, _)| *fref)
         .collect();
-    // The static resets below are emitted in this order.
     changed_now.sort_by_key(|fref| definition_order(*fref));
     let changed_consts: HashSet<ustr::Ustr> = current
         .const_chunks

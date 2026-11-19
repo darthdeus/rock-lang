@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// An opaque inline body selected by the artifact view.
 pub(super) struct JsInlineBody {
     pub(super) instance: Instance,
     pub(super) decl: FuncRef,
@@ -16,35 +15,23 @@ pub(super) struct WorklistState<'a> {
     pub(super) queue: Vec<FuncRef>,
     pub(super) seen: HashSet<FuncRef>,
     pub(super) lowered: Vec<(FuncRef, MirFunc)>,
-    /// Standalone specialized copies, one per distinct `(callee, instantiation)`
-    /// a body's `spec_bindings` still asks for after inlining. This is DELIVERY
-    /// work, not instance discovery: every entry must already be in the graph
-    /// view's retained population.
     pub(super) spec_lowered: Vec<(Instance, MirFunc)>,
     pub(super) standalone_specs: Vec<Instance>,
     pub(super) standalone_seen: HashSet<Instance>,
     pub(super) view_instances: BTreeSet<Instance>,
     pub(super) bound_tree_disagreements: HashSet<Instance>,
-    /// `inline(js)` callees, emitted verbatim (their raw JS body, not MIR-lowered).
     pub(super) inline_js: Vec<JsInlineBody>,
     pub(super) state_index: HashMap<ustr::Ustr, GlobalSite>,
     pub(super) nobox_leaf_globals: HashMap<ustr::Ustr, ustr::Ustr>,
-    /// Empty in program mode (applications ARE emitted, so a registry read is
-    /// legitimate); the per-test reject set otherwise.
     pub(super) deco_globals: HashSet<ustr::Ustr>,
     pub(super) enum_defs: HashMap<ustr::Ustr, String>,
     pub(super) gctx: GlobalCtx,
     pub(super) ginit_queue: Vec<(ustr::Ustr, GlobalSite)>,
     pub(super) ginit_seen: HashSet<ustr::Ustr>,
     pub(super) ginits: Vec<GlobalInit>,
-    /// One entry per DEFINITION that could not be emitted, keyed by its emitted
-    /// JS name (unique per definition, so the key sorts the report into an order
-    /// that does not depend on the walk's post-order). See [`Rejections`].
     pub(super) rejections: Vec<(String, CompilerError)>,
     pub(super) artifact_decls: HashMap<Instance, FuncRef>,
     pub(super) fn_value_targets: HashSet<Instance>,
-    /// The bare `@nomangle` declarations each `inline(js)` body names. They are
-    /// emitted only once the body that names them is.
     opaque_targets: BTreeMap<skull_graph::instance_graph::DeclKey, rustc_hash::FxHashSet<FuncRef>>,
     pub(super) json_types: super::json_types::JsonTypes,
 }
@@ -163,8 +150,6 @@ impl<'a> WorklistState<'a> {
         Ok(st)
     }
 
-    /// Queue `requested` for emission as an entry: a body with no MIR call
-    /// site naming it, so the view's base instance is what it delivers.
     fn queue_root(&mut self, ws: &Workspace, requested: FuncRef) -> Result<(), CompilerError> {
         let key = self.names.base_instance(ws, requested).ok_or_else(|| {
             err(format!(
@@ -172,8 +157,7 @@ impl<'a> WorklistState<'a> {
                 ws.module(requested.module).functions[requested.func].name
             ))
         })?;
-        // A root named only from opaque JS (an inline body or the JSON type
-        // table) has no published symbol; that JS calls it by its JS name.
+        // A root named only from opaque JS has no published symbol; that JS calls it by its JS name.
         if self.names.get(&key).is_none() {
             self.names
                 .insert(key.clone(), callee_js_name(ws, requested));
@@ -218,17 +202,11 @@ impl<'a> WorklistState<'a> {
         Ok(())
     }
 
-    /// Record a definition that cannot be emitted and keep going. The definition
-    /// contributes no JS, and the caller fails the whole emission on the
-    /// accumulated set -- so the program is never returned with a hole in it.
     pub(super) fn reject(&mut self, name: &str, e: CompilerError) {
         self.rejections.push((name.to_string(), e));
     }
 
-    /// An opaque `inline(js)` body has no MIR global-read facts. Recover its
-    /// explicit `__G.name` reads and feed the corresponding initializer through
-    /// the same ginit worklist as lowered bodies. Dynamic `__G[...]` remains
-    /// outside the compiler-known surface and has no silent fallback.
+    /// An opaque `inline(js)` body has no MIR global-read facts: recover its explicit `__G.name` reads; dynamic `__G[...]` has no fallback.
     pub(super) fn queue_opaque_js_global_initializers(&mut self, ws: &Workspace) {
         let names: Vec<ustr::Ustr> = self
             .inline_js
@@ -246,8 +224,6 @@ impl<'a> WorklistState<'a> {
         }
     }
 
-    /// Drain the worklists into their canonical order and register the code
-    /// slots of every body, `extra` included. Returns the rejections so far.
     pub(super) fn finish(
         &mut self,
         ws: &Workspace,
@@ -270,9 +246,6 @@ impl<'a> WorklistState<'a> {
         Ok(std::mem::take(&mut self.rejections))
     }
 
-    /// Every emitted top-level body (fn defs + ginit init fns) for the cross-
-    /// cutting passes (arity guard, hoisted-name set, vt_eq). Excludes nested
-    /// (lambda) fns.
     pub(super) fn top_bodies(&self) -> Vec<&MirFunc> {
         self.lowered
             .iter()
@@ -285,8 +258,6 @@ impl<'a> WorklistState<'a> {
     pub(super) fn canonicalize_emission_order(&mut self) {
         self.lowered
             .sort_by_key(|(fr, _)| (fr.module.index(), u32::from(fr.func.into_raw())));
-        // Specialized copies share a `FuncRef`, so the emitted NAME is what
-        // orders them (one per instantiation, all distinct).
         self.spec_lowered.sort_by(|a, b| {
             (
                 a.0.func.module.index(),
@@ -299,8 +270,7 @@ impl<'a> WorklistState<'a> {
                     &b.1.name,
                 ))
         });
-        // Not by `instance.args`: interned type ids follow worker timing, so
-        // the emitted name is the stable key within one declaration.
+        // Not by `instance.args`: interned type ids follow worker timing.
         let names = &self.names;
         self.inline_js.sort_by_cached_key(|body| {
             (
@@ -361,9 +331,6 @@ pub(super) fn queue_lifecycle_dependency_initializers(
     Ok(())
 }
 
-/// Emit an `inline(js)` fn verbatim: `function <js_name>(p1, p2) { <raw js> }`.
-/// The body is the author's raw JS, spliced unchanged (mirrors the luajit path's
-/// verbatim `inline(lua)` emission in `skull::mir_emit`).
 pub(super) fn emit_inline_js_fn(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -373,9 +340,6 @@ pub(super) fn emit_inline_js_fn(
     js_name: &str,
 ) -> Result<String, CompilerError> {
     let f = &ws.module(fr.module).functions[fr.func];
-    // A @scalar_abi fn's value-struct params explode into their
-    // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
-    // sites and the raw body's leaf names agree.
     let selected = Instance {
         func: fr,
         args: instance.args.clone(),
@@ -395,17 +359,11 @@ pub(super) fn emit_inline_js_fn(
         Some((bone_core::hir::FnBackend::Js, s)) => s.to_string(),
         _ => String::new(),
     };
-    // The publisher contract is checked against the selected body's ABI. The
-    // canonical graph instance supplies identity; this sibling supplies the
-    // opaque body and its parameter/result convention.
     let src = lower_publisher(&src, abi.result_lanes(), f.name.as_str())?;
     Ok(format!("function {js_name}({params}) {{\n{src}\n}}\n"))
 }
 
-/// Register a body's `static` locals as `__G` state: each lowers to a private
-/// `__static_*` cell + done-flag global (`lower_static`). No initializer line
-/// is needed -- an undefined done-flag is falsy, so the first-reach guard runs
-/// the init exactly as Lua's nil does.
+/// Register a body's `static` locals as `__G` state; no initializer is needed since an undefined done-flag is falsy.
 pub(super) fn register_statics(
     ws: &Workspace,
     interner: &skull_mir::monoty::MonoInterner,
@@ -421,9 +379,6 @@ pub(super) fn register_statics(
     Ok(())
 }
 
-/// The `(callee, instantiation)` pairs `mf` and its hoisted bodies still ask for
-/// after inlining. Per-BODY in `skull_mir`, so the nested walk is here: a hoisted
-/// lambda is its own emitted callable and its residual bindings are its own.
 pub(super) fn collect_spec_bound_calls(
     ws: &Workspace,
     mf: &MirFunc,

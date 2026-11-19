@@ -20,7 +20,6 @@ impl Emitter<'_> {
         matches!(&self.mf.insts[v], Inst::Global(n) if is_runtime_global(n))
     }
 
-    /// The rejection for a body whose control flow is too deep for V8.
     pub(super) fn nesting_error(&self, b: Idx<Block>) -> CompilerError {
         let term = &self.mf.blocks[b].term;
         let mut cond = None;
@@ -51,9 +50,6 @@ impl Emitter<'_> {
         error
     }
 
-    /// Whether inst `iid` produces a statement in [`Self::emit_block_effects`]:
-    /// a store, a materialized (bound) value, or a statement-position call.
-    /// Inlinable and dead-pure insts emit nothing.
     pub(super) fn inst_emits(&self, iid: Idx<Inst>) -> bool {
         let inst = &self.mf.insts[iid];
         if matches!(inst, Inst::Store { .. } | Inst::StoreIndex { .. }) {
@@ -86,8 +82,6 @@ impl Emitter<'_> {
         matches!(self.mf.insts[iid], Inst::Const(Lit::Nil))
     }
 
-    /// The bound is a `Load` of a hoisted preheader cell (or a const), rendered
-    /// inline so it never depends on a header-block temp the loop skips.
     pub(super) fn counted_slot_bound(
         &mut self,
         li: &CountedLoop,
@@ -98,10 +92,7 @@ impl Emitter<'_> {
         ))
     }
 
-    /// JS access paths of an intrinsic call's result lanes. `None` means the
-    /// callee is a real function, which packs its result into the return bank;
-    /// a mapped intrinsic with an unprojectable multi-lane result is an error,
-    /// because no intrinsic writes that bank.
+    /// JS access paths of an intrinsic call's result lanes; `None` for a real function, which packs its result into the return bank.
     pub(super) fn intrinsic_lane_paths(
         &self,
         iid: Idx<Inst>,
@@ -137,10 +128,7 @@ impl Emitter<'_> {
         Ok(Some(out))
     }
 
-    /// Depth-first lane paths of one representation, in the scalar-ABI lane order
-    /// (`RepArena::ret_slot` flattens the same way). `false` when a lane cannot be
-    /// addressed on a JS value: a nullable tuple threads a presence lane, and a
-    /// dotted leaf path has no single-key spelling the box agrees on.
+    /// Depth-first lane paths in scalar-ABI order; `false` when a lane cannot be addressed on a JS value (nullable tuple presence lane, dotted leaf path).
     fn collect_lane_paths(
         &self,
         plan: &skull_mir::lower::BackendFnAbiPlan,
@@ -182,20 +170,9 @@ impl Emitter<'_> {
         }
     }
 
-    /// A multi-value capture: `d0 = <call>; d1 = __rock_ret1; ...` -- leaf 0 from
-    /// the call's own return value, leaves 1..N from the scratch bank
-    /// ([`Self::emit_return`] is the publishing half). A single dest is a plain
-    /// `d0 = <call>;`; the ABI returns one leaf as a bare scalar.
-    ///
-    /// The bank is caller-saved-by-immediacy: this emits the call and EVERY slot
-    /// read as one indivisible run of statements, so nothing can execute between
-    /// publish and capture. That is the whole safety argument, and it holds only
-    /// while this stays a single unit -- never split the reads out, and never let
-    /// a multi-value call render as an inlined subexpression (it cannot today:
-    /// `CallMulti`/`CallValueMulti` have dests and always emit as statements).
+    /// A multi-value capture: `d0 = <call>; d1 = __rock_ret1; ...`. The call and every bank read must stay one indivisible run of statements, or something could overwrite the bank between publish and capture.
     pub(super) fn multi_assign(&self, dests: &[Idx<Cell>], call: &str) -> String {
         match dests {
-            // A zero-leaf result (`Storage`) is still called for its effects.
             [] => format!("{call};"),
             [d] => format!("{} = {call};", cell_name(self.mf, *d)),
             _ => {

@@ -2,10 +2,7 @@
 
 use super::*;
 
-/// The backend-local delivery scheduler. Logical instances, selected
-/// declarations and symbols come from `ArtifactView`; this type only lowers
-/// retained declarations, follows post-inline residual calls, and emits the
-/// global/opaque bodies those definitions still require.
+/// The backend-local delivery scheduler: lowers retained declarations, follows post-inline residual calls and emits the global/opaque bodies they need.
 pub(super) struct JsDelivery<'a, 'b> {
     pub(super) ws: &'a Workspace,
     pub(super) scx: &'a skull_mir::lower::ScalarCtx,
@@ -58,7 +55,6 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 self.st.concrete,
             )?;
             if specialization.is_some() {
-                // Resolve bounded placeholders before any transform consumes the body.
                 if f.has_iterator_bounds() && plan.bound_tree.is_empty() {
                     return Err(CompilerError::new_with_label(
                         f.name_span,
@@ -106,9 +102,6 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         Ok(())
     }
 
-    /// Lower one standalone specialized copy already retained by the graph and
-    /// required by a post-inline residual call. The view supplies identity,
-    /// declaration and symbol; this method only performs delivery lowering.
     fn lower_standalone(&mut self, inst: Instance) -> Result<(), CompilerError> {
         if !self.st.view_instances.contains(&inst) {
             self.st.reject(
@@ -170,7 +163,6 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         mf: &mut MirFunc,
         name: &str,
     ) -> Result<(), CompilerError> {
-        // Coroutine defer copies live outside the entry CFG until coroutine lowering.
         if mf.is_coroutine {
             skull_transform::cleanup_with_nobox(self.ws, mf)
         } else {
@@ -186,8 +178,6 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         }
     }
 
-    /// Lower one module global's initializer (never inlined, mirroring the luajit
-    /// global path). A global with no initializer contributes no node body.
     fn visit_ginit(&mut self, gname: ustr::Ustr) -> Result<(), CompilerError> {
         let site = self.st.state_index[&gname];
         let init_name = global_init_js_name(gname);
@@ -262,8 +252,6 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         Ok(())
     }
 
-    /// Queue residual dependencies and collect unmapped callees. Return decorator
-    /// global scheduling errors immediately so the driver retries in program mode.
     pub(super) fn schedule_body(
         &mut self,
         mf: &MirFunc,
@@ -302,9 +290,6 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
     }
 }
 
-/// Expand the reachable program from whatever the root seeding left on the
-/// worklists. Emission order is canonicalized afterwards, so the driver's
-/// post-order does not reach the output.
 pub(super) fn drain_worklists(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -333,8 +318,6 @@ pub(super) fn drain_worklists(
     Ok(())
 }
 
-/// Emit one lowered TOP body: a coroutine through the trampoline pipeline, else
-/// the ordinary fn path plus its hoisted (`convert_closures`) sibling bodies.
 pub(super) fn emit_lowered_fn(
     ws: &Workspace,
     interner: &skull_mir::monoty::MonoInterner,
@@ -366,7 +349,6 @@ pub(super) fn emit_lowered_fn(
     Ok((out, code_artifact))
 }
 
-/// The standalone specialized copies, each under its `spec_fn_name`.
 pub(super) fn emit_spec_chunks(
     ws: &Workspace,
     interner: &skull_mir::monoty::MonoInterner,
@@ -437,9 +419,7 @@ pub(super) fn ordered_spec_chunks<'a>(
     ordered
 }
 
-/// Reject calls whose scalarized argument lanes would be dropped by a callee
-/// retaining a whole-value parameter. Omitted defaulted parameters are legal.
-/// Report one mismatch per body so all offending bodies remain visible.
+/// Reject calls whose scalarized argument lanes a callee retaining a whole-value parameter would drop; one mismatch per body.
 pub(super) fn check_scalar_abi(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -452,11 +432,7 @@ pub(super) fn check_scalar_abi(
         .iter()
         .map(|(fr, mf)| (*fr, mf.params.len()))
         .collect();
-    // A SPECIALIZED callee takes the scalar ABI its instantiation implies, which
-    // is exactly where a value-struct arg legitimately becomes several leaves --
-    // so a spec-bound call must be measured against its own copy, not the shared
-    // body it shares a `FuncRef` with. Checking the shared arity reads every
-    // correct specialized call as a dropped-leaf bug.
+    // A specialized callee takes its instantiation's scalar ABI, so a spec-bound call is measured against its own copy, not the shared body.
     let spec_arities: HashMap<Instance, usize> = st
         .spec_lowered
         .iter()
@@ -473,19 +449,9 @@ pub(super) fn check_scalar_abi(
                     }
                     _ => continue,
                 };
-                // ONE admission rule, over the EMITTED BODY the call targets.
-                // The two arms decide only WHICH body that is; the arity window
-                // is then the same question of both, asked through the same ABI
-                // plan. Stating the rule twice is how the specialized arm came
-                // to demand `argc == arity`: it lost the omitted-defaulted-
-                // argument window the shared arm allowed, so the one shape that
-                // exists only at a specialization -- a defaulted param behind a
-                // scalarized value-struct one -- rejected while luajit compiled
-                // and ran it.
+                // One admission rule over the emitted body the call targets, so the shared and specialized arms agree on the omitted-default window.
                 let (body, arity, what) = match mf.spec_bindings.get(&iid) {
                     Some(inst) => match spec_arities.get(inst) {
-                        // An unemitted specialization is `callee_name`'s
-                        // rejection to make -- it knows which name went missing.
                         None => continue,
                         Some(&arity) => (inst.clone(), arity, "specialized "),
                     },
@@ -498,11 +464,6 @@ pub(super) fn check_scalar_abi(
                     func: *decl,
                     args: body.args.clone(),
                 });
-                // The ABI is the shared oracle's answer about that emitted
-                // body; the arms only decide which entry point matches the
-                // selection: `owner_abi_plan` for a body serving its own
-                // canonical instance, the sibling entry point when the
-                // artifact selected a different declaration.
                 let abi = match selected.as_ref().filter(|inst| inst.func != body.func) {
                     Some(selected) => {
                         match concrete.get(&body).or_else(|| concrete.get(selected)) {
@@ -532,8 +493,7 @@ pub(super) fn check_scalar_abi(
                     }
                 };
                 let cf = &ws.module(callee.module).functions[callee.func];
-                // A variadic surplus is passed past the declared params, as the
-                // luajit emitter passes it; only the lower bound is an ABI fact.
+                // A variadic surplus is passed past the declared params; only the lower bound is an ABI fact.
                 if argc < required || (argc > arity && !cf.is_variadic) {
                     findings.push(err(format!(
                         "JS subset: value-struct scalar ABI mismatch calling {what}`{}` \

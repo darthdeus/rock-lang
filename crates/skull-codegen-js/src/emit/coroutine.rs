@@ -8,13 +8,7 @@ pub(super) fn js_code_artifact(ws: &Workspace, mf: &MirFunc) -> CodeArtifact {
     CodeArtifact::from_mir_tree_with_volatile_vars(mf, &ws.comptime_inputs.volatile_vars)
 }
 
-/// Emit a `co fn` for JS: the shared preparation
-/// ([`skull_transform::prepare_coroutine`]), `materialize_frame` on the step,
-/// then the trampoline step, hoisted-lambda siblings, hook/defer aux
-/// trampolines over the shared arena, and the JS ctor (the exact Lua ctor
-/// contract: the object IS the frame; `__resume`/`__advance` drive the step;
-/// `JS_CORO_RUNTIME` supplies `__rock_coroutine_kill`/
-/// `__rock_coroutine_run_defers`/`error`).
+/// Emit a `co fn` following the Lua ctor contract: the object is the frame.
 pub(super) fn emit_coroutine_js(
     ws: &Workspace,
     interner: &skull_mir::monoty::MonoInterner,
@@ -42,8 +36,6 @@ pub(super) fn emit_coroutine_js(
         code_artifact,
         keys,
     } = skull_transform::prepare_coroutine(ws, interner, source_func, plan, mf, &|_| {})?;
-    // This coroutine's hoisted lambda names are referenced only from its own
-    // bodies, so extend the program set locally.
     let mut hoisted = hoisted.clone();
     let regions: Vec<&MirFunc> = std::iter::once(&lowered.step)
         .chain(defers.iter())
@@ -75,9 +67,6 @@ pub(super) fn emit_coroutine_js(
         &[lowered.s_cell, resume_arg],
         false,
     )?;
-    // Named nested fns finish like an ordinary body's; hoisted lambda siblings
-    // are frame-free ordinary fns (their frame accesses are already
-    // `e.c<S>.c<slot>` MIR) -- the normal structured path.
     let mut nested = std::mem::take(&mut lowered.step.nested_fns);
     for nf in &mut nested[..named_nested] {
         skull_transform::cleanup_with_nobox(ws, nf)?;
@@ -114,10 +103,7 @@ pub(super) fn emit_coroutine_js(
     Ok((out, code_artifact))
 }
 
-/// The JS Coroutine constructor + per-co-fn `__resume` (and `__advance` on the
-/// frame-slot channel), mirroring the Lua ctor contract field for field. The
-/// cleanup protection matches Lua; `undefined -> null` on the step's value so a
-/// bare terminal return reads as nil.
+/// The JS Coroutine constructor, mirroring the Lua ctor contract field for field.
 fn emit_js_constructor(
     plan: &skull_mir::lower::CoroutinePlan,
     step_name: &str,
@@ -174,9 +160,7 @@ fn emit_js_constructor(
             tag = skull_mir::lower::yield_slot(0),
             ty = js_string_lit(skull_mir::mangle::symbol_of_key(ch.name()).as_str()),
         );
-        // 0-based positional keys: JS `TupleIndex` reads `base[i]` (no +1 like Lua's
-        // array keys), so a boxed-enum consumer of a yielded channel value projects
-        // the payload correctly. Matches `MakeEnum`'s native 0-based keys.
+        // 0-based keys: JS `TupleIndex` reads `base[i]`, matching `MakeEnum`.
         for i in 0..ch.tuple_width() {
             let _ = write!(
                 box_fields,

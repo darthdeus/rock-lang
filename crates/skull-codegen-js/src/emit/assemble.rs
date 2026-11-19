@@ -75,7 +75,6 @@ pub(super) fn assemble_program_core(
             st.reject(&deco_name, e);
             continue;
         }
-        // Decorators can be the only callers of a specialization.
         let findings = JsDelivery {
             ws,
             scx,
@@ -114,7 +113,6 @@ pub(super) fn assemble_program_core(
     );
     out.push_str(&ret_slots);
     stable.push_str(&ret_slots);
-    // 1. deco def fns.
     for (name, mf) in &deco_bodies {
         match emit_body_with_nested(ws, mf, name, &st.names, &hoisted, &st.gctx) {
             Ok(definition) => {
@@ -124,7 +122,6 @@ pub(super) fn assemble_program_core(
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
-    // 2. fn defs (main, decorated fns, transitive callees).
     let mut chunks = HashMap::new();
     emit_lowered_defs(
         ws,
@@ -139,9 +136,6 @@ pub(super) fn assemble_program_core(
             chunks.insert(fr, JsChunk { js, statics });
         },
     )?;
-    // 2a. standalone specialized copies. They are keyed by Instance so an
-    // overlay can add, remove, or rebuild one without confusing it with the
-    // shared generic declaration.
     let spec_chunks = emit_spec_chunks(ws, scx.interner(), &st, &hoisted, &mut rejections);
     for chunk in ordered_spec_chunks(&spec_chunks, &st.spec_lowered) {
         out.push_str(&chunk.js);
@@ -149,7 +143,6 @@ pub(super) fn assemble_program_core(
             code_artifact.merge(chunk.code_artifact.clone());
         }
     }
-    // 2b. inline(js) fns, emitted verbatim.
     for body in &st.inline_js {
         let name = st
             .names
@@ -163,7 +156,6 @@ pub(super) fn assemble_program_core(
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
-    // 3. ginit def fns.
     let mut const_chunks = HashMap::new();
     for g in &st.ginits {
         let definition = match emit_ginit_with_nested(ws, g, &st.names, &hoisted, &st.gctx) {
@@ -186,11 +178,9 @@ pub(super) fn assemble_program_core(
             stable.push_str(&definition);
         }
     }
-    // 4. load-time init lines (dependency-ordered).
     let mut const_order = Vec::new();
     let mut const_init_lines = HashMap::new();
     let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
-    // Report rejected bodies before staging could raise an incomplete-census error.
     combine_rejections(rejections)?;
     let lifecycle_plan = if let Some((decorators, lifecycle_skeleton)) = effects {
         out.push_str("function __rock_state_initialize() {\n");
@@ -201,8 +191,7 @@ pub(super) fn assemble_program_core(
                 stable.push_str(&init.js);
             }
         }
-        // A global initialized from a lambda stores that lambda's CodeRef, so the
-        // initializers run at the CALL below, after the code slots are staged.
+        // A global initialized from a lambda stores its CodeRef, so initializers run after the code slots are staged.
         out.push_str("}\n");
         stable.push_str("}\n");
         for init in init_lines {
@@ -230,8 +219,6 @@ pub(super) fn assemble_program_core(
         {
             out.push_str("__rock_code_slot_begin();\n");
         }
-        // Global initializers run once the slots they may reference are staged, and
-        // before the definition plan materializes (a materializer may read them).
         out.push_str("__rock_state_initialize();\n");
         let definition_stage = definition_plan_stage_js(ws, scx, st.concrete, &definition_plan)?;
         out.push_str(&definition_stage);
@@ -241,8 +228,7 @@ pub(super) fn assemble_program_core(
             scx.interner(),
             &lifecycle_plan,
         )?);
-        // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
-        //    initialized registry).
+        // Decorator applications run after inits: a deco body pushes into a ginit-initialized registry.
         let applications =
             decorator_application_lines_js(ws, &decorators, scx.interner(), &st.names)?;
         out.push_str(&applications);
@@ -290,9 +276,6 @@ pub(super) fn assemble_program_core(
     })
 }
 
-/// The scalar-ABI findings over every emitted body (filed into `rejections`),
-/// their hoisted lambda names, and the per-type runtime tables a program
-/// carries ahead of its definitions.
 pub(super) fn check_bodies(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -316,8 +299,6 @@ pub(super) fn check_bodies(
     Ok((hoisted, tables))
 }
 
-/// Every lowered base body as a definition; `each` receives the ones that
-/// emit, and a failure is filed under the body's name.
 pub(super) fn emit_lowered_defs(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -352,8 +333,6 @@ pub(super) fn emit_lowered_defs(
     Ok(())
 }
 
-/// Opens (or reattaches to) the global storage and publishes the directory.
-/// Every program runs this before any initializer.
 pub(super) fn globals_open_js(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -367,7 +346,6 @@ pub(super) fn globals_open_js(
     ))
 }
 
-/// The global directory reflection and the `__G` bridge read.
 fn globals_directory_js(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -401,13 +379,10 @@ fn globals_directory_js(
     Ok(out)
 }
 
-/// Select the JS-served registration declaration for shader driver lines.
 pub(super) fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>, CompilerError> {
     if skull_mir::lower::collect_shader_pairs(ws)?.is_empty() {
         return Ok(None);
     }
-    // The registry uses DefKeys in scoped packages. @nomangle changes the
-    // emitted symbol, not that key, so match the declared segment.
     let cands: Vec<_> = ws
         .functions_by_name
         .iter()
@@ -443,23 +418,15 @@ pub(super) fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>,
     ))
 }
 
-/// A whole-program JS emission plus the entry fn's JS name (`None` when the entry
-/// module has no nullary `main`; the driver then appends nothing and the program
-/// is module-load effects only, matching luajit).
 pub struct JsProgram {
     pub program: String,
     pub main_js_name: Option<String>,
-    /// Compiler-owned logical callable identities for the emitted JS artifact.
     pub code_artifact: CodeArtifact,
-    /// Compiler-owned lifecycle metadata shared with the Lua artifact.
     pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
-    /// The mutable-global layout fingerprint the program opens its storage with.
     pub global_layout: String,
 }
 
 impl JsProgram {
-    /// True when a callable escapes as a code ref, so the prelude needs the
-    /// full code-slot call helper (see [`crate::assemble_prelude`]).
     pub fn has_code_refs(&self) -> bool {
         self.code_artifact.has_escaping()
     }
@@ -504,7 +471,6 @@ pub struct JsEmitCache {
     pub(super) root_plan: JsRootPlan,
     pub(super) opaque_root_contributions:
         BTreeMap<skull_graph::instance_graph::DeclKey, rustc_hash::FxHashSet<FuncRef>>,
-    /// The session's lowering context, graph, and artifact view, kept across edits.
     pub(super) scx: skull_mir::lower::ScalarCtx,
     pub(super) session: JsSession,
 }

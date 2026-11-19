@@ -3,10 +3,7 @@
 use super::*;
 
 impl Emitter<'_> {
-    /// Render an inst's own JS expression (its operands routed through
-    /// [`Self::render_val`], so a non-inlinable operand reads its temp). JS is
-    /// untyped, so the int/float split collapses to one operator and
-    /// `IntToFloat` is identity.
+    /// Render an inst's own JS expression; JS is untyped, so int/float collapse to one operator.
     pub(super) fn render_inst_expr(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
         let bin =
             |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
@@ -44,9 +41,7 @@ impl Emitter<'_> {
                 self.render_val(*a)?,
                 self.render_val(*b)?
             ),
-            // Both operands are already in uint range, so only a zero divisor
-            // can leave it, and LuaJIT yields inf/nan there rather than wrapping.
-            // Rock int `/` floors toward -inf (Lua); JS `/` is real division.
+            // A zero divisor is the only way out of uint range, and LuaJIT yields inf/nan there; Rock int `/` floors, JS `/` does not.
             Inst::UintDiv(a, b) | Inst::IntDiv(a, b) => format!(
                 "Math.floor({} / {})",
                 self.render_val(*a)?,
@@ -62,25 +57,15 @@ impl Emitter<'_> {
             Inst::IntGeq(a, b) | Inst::UintGeq(a, b) | Inst::FloatGeq(a, b) => {
                 bin(a, ">=", b, self)?
             }
-            // Loose `== null` / `!= null` when either side is `nil`: it matches
-            // JS `undefined` too, so an OMITTED defaulted arg (JS passes nothing
-            // -> `undefined`, not `null`) still trips the callee's `x == nil`
-            // default-fill guard, exactly as Lua's absent-arg `nil` does.
+            // Loose `== null` also matches `undefined`, so an omitted defaulted arg still trips the callee's default-fill guard.
             Inst::Eq(a, b) if self.is_nil(*a) || self.is_nil(*b) => bin(a, "==", b, self)?,
             Inst::NotEq(a, b) if self.is_nil(*a) || self.is_nil(*b) => bin(a, "!=", b, self)?,
             Inst::Eq(a, b) => bin(a, "===", b, self)?,
             Inst::NotEq(a, b) => bin(a, "!==", b, self)?,
-            // Space after `-`: `Neg` of a negative literal would otherwise emit
-            // `(--1.5)`, which JS lexes as the `--` decrement operator.
+            // Space after `-`: a negative literal would otherwise emit `(--1.5)`, JS's decrement operator.
             Inst::Neg(x) => format!("(- {})", self.render_val(*x)?),
             Inst::Not(x) => format!("(!{})", self.render_val(*x)?),
-            // Bitwise: luajit lowers these to `bit.*`, whose results are SIGNED
-            // 32-bit; JS `& | ^ ~ <<` are signed 32-bit too, and both sides
-            // coerce to int32 and mask the shift count to 5 bits, so those map
-            // straight across. `bit.rshift` is the LOGICAL shift, which is JS
-            // `>>>` -- but `>>>` yields an UNSIGNED 32-bit value, so `| 0`
-            // brings it back to the signed range luajit reports
-            // (`bit.rshift(-1, 0)` is -1, not 4294967295).
+            // `bit.rshift` is logical (`>>>`), which yields unsigned; `| 0` restores luajit's signed result (`bit.rshift(-1, 0)` is -1).
             Inst::BitAnd(a, b) => bin(a, "&", b, self)?,
             Inst::BitOr(a, b) => bin(a, "|", b, self)?,
             Inst::BitXor(a, b) => bin(a, "^", b, self)?,
@@ -111,7 +96,6 @@ impl Emitter<'_> {
             ),
             Inst::UintShl(a, b) => self.checked_uint_shift(*a, *b, "<<")?,
             Inst::UintShr(a, b) => self.checked_uint_shift(*a, *b, ">>>")?,
-            // Identity on JS (all doubles), like codegen-lua on luajit.
             Inst::IntToFloat(x) => self.render_val(*x)?,
             Inst::UintToFloat(x) => self.render_val(*x)?,
             Inst::FloatToF32(x) => format!("Math.fround({})", self.render_val(*x)?),
@@ -124,7 +108,6 @@ impl Emitter<'_> {
             Inst::UintToInt(x) => self.render_val(*x)?,
             Inst::UintBitcastInt(x) => format!("({} | 0)", self.render_val(*x)?),
             Inst::IntBitcastUint(x) => format!("({} >>> 0)", self.render_val(*x)?),
-            // A proven element index: the 0-based column slot, no check.
             Inst::VecIndexSlot(index) | Inst::NbIndexSlot(index) => self.render_val(*index)?,
             Inst::VecStrideNilToFalse(x) => {
                 let value = self.render_val(*x)?;
@@ -134,12 +117,8 @@ impl Emitter<'_> {
                 let value = self.render_val(*x)?;
                 format!("((value) => value === false ? null : value)({value})")
             }
-            // Rock float->int truncates toward -inf == floor.
             Inst::FloatToInt(x) => format!("Math.floor({})", self.render_val(*x)?),
-            // Lua `..` coerces each operand via `tostring` (number formatting is
-            // `%.14g`); JS `+` does not, so every leaf routes through
-            // `lua_tostring` for parity. Emitted as one flat `+` run over the
-            // whole concat tree (mirrors the Lua backend's flat `..`).
+            // Lua `..` stringifies operands (`%.14g` numbers); JS `+` does not, so every leaf goes through `lua_tostring`.
             Inst::StringConcat(a, b) => {
                 let mut parts = Vec::new();
                 self.collect_concat(&mut parts, *a);
@@ -150,12 +129,8 @@ impl Emitter<'_> {
                     .collect();
                 format!("({})", rendered?.join(" + "))
             }
-            // The scalar `{x}` interpolation stringify (int/bool/string) -- same
-            // `%.14g`-parity path as a concat leaf.
             Inst::ToString(x) => format!("lua_tostring({})", self.render_val(*x)?),
-            // Rock `%` is LuaJIT's `a - floor(a / b) * b`, computed the same way
-            // so rounding and the sign of a zero agree; JS `%` truncates. Each
-            // operand appears twice, so an inlined expression binds once.
+            // Rock `%` is `a - floor(a / b) * b` (JS `%` truncates); operands appear twice, so an inlined expression binds once.
             Inst::IntMod(a, b) | Inst::FloatMod(a, b) => {
                 let (ra, rb) = (self.render_val(*a)?, self.render_val(*b)?);
                 if self.is_plain_operand(*a) && self.is_plain_operand(*b) {
@@ -165,11 +140,7 @@ impl Emitter<'_> {
                 }
             }
             Inst::Call { func, args } => self.render_call(iid, *func, args)?,
-            // A capture-free hoisted closure resolves its reusable logical slot.
-            // Any OTHER global read (module `let`, enum name table, named fn as a
-            // value) is not emitted, so it stays out of subset. `error` is the
-            // one runtime global: the coroutine transform's layout raise and
-            // `await`'s re-raise read it as a value (`JS_CORO_RUNTIME` defines it).
+            // Only capture-free hoisted closures and the `error` runtime global are emittable global reads.
             Inst::Global(name) if self.mf.code_value_identities.contains_key(&iid) => {
                 let identity = &self.mf.code_value_identities[&iid];
                 let key = self
@@ -186,15 +157,12 @@ impl Emitter<'_> {
             {
                 name.to_string()
             }
-            // A boundary function referenced as a value: its co-emitted JS name.
             Inst::Global(name) if self.globals.fns.contains_key(name) => {
                 self.globals.fns[name].clone()
             }
             Inst::Global(name) if self.globals.const_globals.contains(name) => {
                 js_member("__G", name.as_str())
             }
-            // Module-level `let`/`global` state: scoped so no body local can
-            // collide with or shadow it.
             Inst::Global(name) => match self.globals.state.get(&symbol_of_key(*name)) {
                 Some(slot) => {
                     self.globals.uses_storage.set(true);
@@ -207,8 +175,6 @@ impl Emitter<'_> {
                     )));
                 }
             },
-            // A CodeRef env record `{ __slot, c<A>.. }` (capturing lambda) or a
-            // box `{ v }` (a shared mutable capture) -- built by `convert_closures`.
             Inst::MakeEnv { fn_ref, fields } => {
                 let mut parts: Vec<String> = Vec::new();
                 if let Some(_name) = fn_ref {
@@ -233,7 +199,6 @@ impl Emitter<'_> {
                 }
                 format!("({{{}}})", parts.join(", "))
             }
-            // The runtime is plain JS: no CodeRef dispatch.
             Inst::CallValue { callee, args } if self.is_runtime_value(*callee) => {
                 let rendered = args
                     .iter()
@@ -241,10 +206,7 @@ impl Emitter<'_> {
                     .collect::<Result<Vec<_>, _>>()?;
                 format!("{}({})", self.render_val(*callee)?, rendered.join(", "))
             }
-            // An indirect call: foreign raw functions call directly; Rock values
-            // resolve their slot through `__rock_call`.
             Inst::CallValue { callee, args } => self.indirect_call(*callee, args)?,
-            // NativeBuffer variants share the equality runtime's buffer tag.
             Inst::MakeStruct { ty, fields } => {
                 let name = ty
                     .map(|t| skull_mir::mangle::type_symbol(self.ws, t).to_string())
@@ -263,15 +225,7 @@ impl Emitter<'_> {
                 }
                 format!("({{{}}})", parts.join(", "))
             }
-            // A `value` struct is byte-value cdata on luajit; on JS it is a plain
-            // `{__ty, ...}` object, same shape as a reference struct. An all-scalar
-            // (GC-free) one compares via the generic structural deep-eq
-            // (`JS_STRUCTURAL_EQ`), matching luajit's byte-value eq. A GC-carrying
-            // one compares its pointer fields BY REFERENCE on luajit, which the
-            // generic contents-eq cannot reproduce; the per-type `__rock_vt_eq`
-            // registry (`build_vt_eq_defs`) supplies that split and `__op_eq`
-            // consults it before the generic walk -- mirroring luajit's `_vt.__eq`
-            // metatable-authority rule. Construction is identical for both tiers.
+            // A value struct is a plain `{__ty, ...}` object on JS. A GC-carrying one compares pointer fields by reference like luajit's `_vt.__eq`, via the per-type `__rock_vt_eq` registry consulted before the generic walk.
             Inst::MakeValueStruct {
                 name,
                 representation,
@@ -317,12 +271,7 @@ impl Emitter<'_> {
                 }
                 format!("({{{}}})", parts.join(", "))
             }
-            // A non-cdata enum boxes as `{__variant, __ty, 0:.., 1:.., <name>:..}`
-            // via the nil-dropping ctor (`JS_ENUM_RUNTIME`). Positional payloads take
-            // native 0-based keys (luajit's 1-based table keys are Lua table-ctor
-            // semantics; `TupleIndex` reads `base[index]` uniformly here). A unit
-            // variant of a mixed enum is its interned singleton (an `Inst::Global`),
-            // so a bare `MakeEnum` here always carries payload.
+            // A non-cdata enum boxes with 0-based positional keys through the nil-dropping ctor; a unit variant of a mixed enum is an interned singleton, so a bare `MakeEnum` carries payload.
             Inst::MakeEnum {
                 tag,
                 ty,
@@ -335,8 +284,6 @@ impl Emitter<'_> {
                 positional,
                 named,
             } => self.render_make_enum(&self.render_val(*tag)?, ty, positional, named)?,
-            // A tuple is a plain JS array; `.N` reads index N. (Most tuples are
-            // scalarized by SROA before emission; these cover the residue.)
             Inst::MakeTuple(elems) => {
                 let rendered: Result<Vec<String>, CompilerError> =
                     elems.iter().map(|e| self.render_val(*e)).collect();
@@ -345,9 +292,6 @@ impl Emitter<'_> {
             Inst::TupleIndex { base, index } => {
                 format!("{}[{index}]", self.render_val(*base)?)
             }
-            // A Vec literal: `{_data, len, __ty}` with `_data` a 0-based dense
-            // array (the JS-native repr; the base-agnostic `__vec_data_*`
-            // accessors read `_data[i]`).
             Inst::MakeVec(elems) => {
                 let rendered: Result<Vec<String>, CompilerError> =
                     elems.iter().map(|e| self.render_val(*e)).collect();
@@ -359,11 +303,8 @@ impl Emitter<'_> {
                 let (b, i) = (self.render_val(*base)?, self.render_val(*index)?);
                 match kind {
                     ContainerKind::NativeBuffer => format!("__nb_checked_get({b}, {i})"),
-                    // Proven within `[0, len)`: the typed array, raw.
                     ContainerKind::NativeBufferInBounds => format!("{b}.ptr[{i}]"),
-                    // Lowering decomposes every whole-element read into per-leaf
-                    // reads (`nb_leaf_element_repr`), so reaching emit means the
-                    // element has no C leaf layout to address.
+                    // Lowering decomposes whole-element reads (`nb_leaf_element_repr`), so one reaching emit has no C leaf layout.
                     ContainerKind::NativeBufferValue(elem) => {
                         return Err(err(format!(
                             "JS subset: whole-element read of `NativeBuffer<{elem}>` reached \
@@ -373,14 +314,10 @@ impl Emitter<'_> {
                     ContainerKind::Vec | ContainerKind::VecNonNull => {
                         format!("__vec_checked_get({b}, {i})")
                     }
-                    // Proven within `[0, len)`: the 0-based backing, raw.
                     ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
                         format!("{b}._data[{i}]")
                     }
-                    // A whole-element read has no single slot to name: column
-                    // storage has no element object. Lowering decomposes every
-                    // such read into per-column reads (`column_element_repr`),
-                    // so reaching emit means that decomposition was bypassed.
+                    // Column storage has no element object; lowering decomposes whole-element reads (`column_element_repr`).
                     ContainerKind::VecValueColumns(elem) => {
                         return Err(err(format!(
                             "JS subset: whole-element read of column-stored `[{elem}]` reached \
@@ -392,13 +329,8 @@ impl Emitter<'_> {
                             "JS subset: whole-element read of strided `[{elem}]` reached emit"
                         )));
                     }
-                    // One leaf column: the index is already checked
-                    // (`VecCheckedIndex`) and already 0-based, so this is raw.
                     ContainerKind::VecColumn | ContainerKind::VecStrideSlot => format!("{b}[{i}]"),
-                    // One typed leaf view. The index is absolute and already
-                    // bounds-checked once per ELEMENT, so this indexes raw. A
-                    // `bool` view is a Uint8Array holding 0/1, which the language
-                    // wants back as a boolean.
+                    // The index is bounds-checked once per element; a `bool` view is a Uint8Array of 0/1 that reads back as a boolean.
                     ContainerKind::NativeBufferLeaf => {
                         if self.leaf_view_is_bool(*base) {
                             format!("({b}[{i}] !== 0)")
@@ -406,8 +338,6 @@ impl Emitter<'_> {
                             format!("{b}[{i}]")
                         }
                     }
-                    // Keyed MIR reads also address reflected struct leaves.
-                    // Evaluate the owner and selector once in either case.
                     ContainerKind::Map => format!(
                         "(function(t, k) {{ return t instanceof Map ? t.get(k) : t[k]; }})({b}, {i})"
                     ),
@@ -435,19 +365,13 @@ impl Emitter<'_> {
                 ContainerKind::VecColumn | ContainerKind::VecStrideSlot => {
                     format!("{}.length", self.render_val(*base)?)
                 }
-                // A view has no length of its own: it spans the whole buffer, and
-                // only the owning NativeBuffer knows the element count. Reaching
-                // here means a `len` was taken on the wrong base.
+                // A view has no length of its own; only the owning NativeBuffer knows the element count.
                 ContainerKind::NativeBufferLeaf => {
                     return Err(err("JS subset: `len` of a NativeBuffer leaf view"));
                 }
                 ContainerKind::Map => format!("{}.size", self.render_val(*base)?),
                 ContainerKind::Record => unreachable!("len of a heap record"),
             },
-            // The `native_buffer_alloc<T>` primitive lowers to this MIR node
-            // (skull-mir intercepts the call and resolves the element ctype).
-            // `Ptr<T>` IS a TypedArray on JS, matching the luajit `ffi.new` cdata;
-            // value-struct elements use the shared flat C layout below.
             Inst::FfiNewArray {
                 ctype,
                 count,
@@ -457,12 +381,7 @@ impl Emitter<'_> {
                 "int" => format!("new Int32Array({})", self.render_val(*count)?),
                 "uint32_t" => format!("new Uint32Array({})", self.render_val(*count)?),
                 "bool" => format!("new Uint8Array({})", self.render_val(*count)?),
-                // A value struct has no per-struct ctype on JS: back it onto one
-                // flat `Float32Array(n * size/4)` laid out in the SAME C bytes
-                // luajit uses, which the per-leaf views (`FfiViewCast`) then alias
-                // through `.buffer`. For an all-float element `size/4` IS the float
-                // leaf count, so an all-float buffer's storage and its `.ptr`
-                // handed to a host API are unchanged.
+                // A value struct backs onto one flat `Float32Array(n * size/4)` in luajit's C layout, which the per-leaf views alias through `.buffer`.
                 other => {
                     let representation = representation.ok_or_else(|| {
                         err(format!(
@@ -491,17 +410,14 @@ impl Emitter<'_> {
                             "JS subset: native_buffer_alloc element ctype `{other}` is not a CData representation"
                         )));
                     }
-                    // A 4-byte-backed array needs a 4-byte multiple. C gives that
-                    // whenever any leaf is 4-wide; an all-`bool` element would not,
-                    // and rejects rather than silently reinterpreting its bytes.
+                    // A 4-byte-backed array needs a 4-byte multiple; an all-`bool` element would not and rejects.
                     if size % 4 != 0 {
                         return Err(err(format!(
                             "JS subset: native_buffer_alloc element ctype `{other}` is {size} \
                              bytes, not a multiple of 4 -- no aligned TypedArray backing"
                         )));
                     }
-                    // The backing view uses float32 slots regardless of the
-                    // element's C width. Preserve that width for byte equality.
+                    // The backing view uses float32 slots regardless of C width; keep that width for byte equality.
                     format!(
                         "Object.assign(new Float32Array(({}) * {}), {{__rock_elem_size: {size}}})",
                         self.render_val(*count)?,
@@ -509,10 +425,7 @@ impl Emitter<'_> {
                     )
                 }
             },
-            // One typed view over the buffer's storage. luajit casts the pointer;
-            // JS makes a TypedArray over the same `ArrayBuffer`, so the views and
-            // `.ptr` alias the same bytes -- which is what lets leaf-addressed and
-            // whole-`.ptr` (host upload) access to one buffer stay coherent.
+            // The views and `.ptr` alias one `ArrayBuffer`, keeping leaf-addressed and whole-`.ptr` (host upload) access coherent.
             Inst::FfiViewCast { cty, ptr } => {
                 let p = self.render_val(*ptr)?;
                 let array = match cty.as_str() {
@@ -520,8 +433,6 @@ impl Emitter<'_> {
                     "float" => "Float32Array",
                     "int" => "Int32Array",
                     "uint32_t" => "Uint32Array",
-                    // C `bool` is one byte. Reads coerce back to a JS boolean at
-                    // the leaf `Index` (`!== 0`); writes coerce implicitly.
                     "bool" => "Uint8Array",
                     other => {
                         return Err(err(format!(
@@ -531,21 +442,13 @@ impl Emitter<'_> {
                 };
                 format!("new {array}({p}.buffer, {p}.byteOffset)")
             }
-            // A general field read is JS property access. NativeBuffer `.ptr`/
-            // `.len`, a leaf VIEW field and Vec `._data`/`.len` are all the same
-            // shape; a read THROUGH a buffer element is decomposed by lowering.
             Inst::Field { base, field, .. } => js_member(&self.render_val(*base)?, field),
-            // Presence is a bool on the scalar ABI, so JS truthiness agrees with
-            // luajit's `present and value or nil`.
+            // Presence is a bool on the scalar ABI, so JS truthiness agrees with luajit's `present and value or nil`.
             Inst::MakeNullableValue { present, value } => format!(
                 "({} ? {} : null)",
                 self.render_val(*present)?,
                 self.render_val(*value)?
             ),
-            // `{x:spec}` interpolation: `string.format(fmt, value)` for a single
-            // value (Lua path). `__rock_sprintf` is the single-value C printf port
-            // (d/i/u/x/X/o/f/F/e/E/g/G/s/c, flags, width, precision; half-even
-            // rounding). Format's fmt is a static string, FormatDyn's is computed.
             Inst::Format { value, fmt } => {
                 format!(
                     "__rock_sprintf({}, {})",
@@ -560,11 +463,7 @@ impl Emitter<'_> {
                     self.render_val(*value)?
                 )
             }
-            // Column storage: one plain array per leaf, sharing the single
-            // `len`. Plain arrays rather than TypedArrays on purpose -- V8's
-            // packed-double arrays beat `Float64Array` for the strided reads
-            // this layout exists to make fast.
-            // A nested leaf path is dotted (`min.x`), so keys are quoted.
+            // Plain arrays, not TypedArrays: V8's packed-double arrays beat `Float64Array` for strided reads. Nested leaf paths are dotted (`min.x`), so keys are quoted.
             Inst::MakeVecColumns {
                 elem,
                 columns,
@@ -631,8 +530,6 @@ impl Emitter<'_> {
                 js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str()),
                 self.render_val(*capacity)?,
             ),
-            // The element index is checked ONCE here; each per-leaf access then
-            // indexes its column raw.
             Inst::VecCheckedIndex { vec, index } => format!(
                 "__vec_checked_index({}, {})",
                 self.render_val(*vec)?,
@@ -646,9 +543,7 @@ impl Emitter<'_> {
         })
     }
 
-    /// Flatten a `StringConcat` tree into its leaf operands, descending only into
-    /// child `StringConcat`s folded into this expression. A materialized child
-    /// stays a leaf: its operands may be `let`s of another switch case.
+    /// Flatten a `StringConcat` tree; a materialized child stays a leaf because its operands may be `let`s of another switch case.
     fn collect_concat(&self, parts: &mut Vec<Idx<Inst>>, id: Idx<Inst>) {
         if self.inlinable[raw(id) as usize] {
             if let Inst::StringConcat(a, b) = &self.mf.insts[id] {
@@ -660,13 +555,7 @@ impl Emitter<'_> {
         parts.push(id);
     }
 
-    /// A value constructor that arrives as its leaf paths (`pos.x`, `pos.y`, a
-    /// presence tag at an inline child's own name). A CData value's box is a
-    /// plain nested JS object -- its dotted paths are only the luajit byte
-    /// layout -- so a child's leaves are rebuilt as its own box under the field
-    /// name. A TABLE value's box keys the leaf paths themselves, so the same
-    /// leaves stay flat: that is where the lowering reads `pos.x` from, and a
-    /// nested child under `pos` leaves every read through it undefined.
+    /// A value constructor arriving as leaf paths. A CData box is a nested object, so a child's leaves are rebuilt under its field name; a TABLE box keys the leaf paths themselves, so they stay flat.
     pub(super) fn render_leaf_form_value_struct(
         &self,
         name: ustr::Ustr,
@@ -683,9 +572,7 @@ impl Emitter<'_> {
             .and_then(|plan| plan.value_storage())
             == Some(skull_mir::lower::ValueStorage::CData);
         if !cdata {
-            // An absent tag canonicalizes to `null` -- the form a `= null` write
-            // and an absent literal both store. The scalar ABI spells absence
-            // `false`, and equality compares tags per key.
+            // An absent tag canonicalizes to `null`; the scalar ABI spells absence `false`.
             let presence = arena
                 .nominal_value_leaf_presence_flags_required(
                     self.ws,
@@ -715,8 +602,6 @@ impl Emitter<'_> {
             }
             return Ok(format!("({{{}}})", parts.join(", ")));
         }
-        // Nested groups in first-seen order, so the emitted object matches the
-        // declared field order the non-leaf path produces.
         let (top, groups) = split_leaf_paths(fields.iter().copied());
         let mut parts = vec![format!(
             "__ty: {}",
@@ -741,10 +626,7 @@ impl Emitter<'_> {
         Ok(format!("({{{}}})", parts.join(", ")))
     }
 
-    /// Box an enum: `__rock_make_enum(<tag>, "<ty>", [0, p0, 1, p1, "name", v, ..])`.
-    /// `tag_expr` is a rendered JS expression (a string literal for `MakeEnum`, the
-    /// dynamic tag operand for `MakeEnumDyn`). The ctor drops nil `kv` slots so a
-    /// union-wide rebox owns exactly the active variant's keys.
+    /// Box an enum: `__rock_make_enum(<tag>, "<ty>", [0, p0, 1, p1, "name", v, ..])`; the ctor drops nil `kv` slots.
     fn render_make_enum(
         &self,
         tag_expr: &str,
@@ -768,9 +650,6 @@ impl Emitter<'_> {
         ))
     }
 
-    /// Whether `base` is the `bool` leaf view (`buf.__vb`) -- a `Uint8Array`
-    /// holding 0/1 where the language wants a boolean. The view field name is the
-    /// discriminant because `LEAF_VIEWS` is the single source that mints it.
     fn leaf_view_is_bool(&self, base: Idx<Inst>) -> bool {
         match &self.mf.insts[base] {
             Inst::Field { field, .. } => {
@@ -781,7 +660,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// Render a known GC-free value struct without an inspect-only object.
     fn render_value_struct_inspect(
         &self,
         name: ustr::Ustr,
@@ -880,15 +758,8 @@ impl Emitter<'_> {
         Ok(format!("({expr})"))
     }
 
-    /// The JS name this call site targets. A `spec_bindings` entry means the
-    /// lowerer specialized this instantiation, and the shared body cannot serve
-    /// it -- so an unemitted specialization resolves to `None` and rejects,
-    /// rather than silently reaching the boxed shared body. Mirrors the luajit
-    /// emitter's `callee_name`.
+    /// The JS name this call site targets; an unemitted specialization resolves to `None` and rejects instead of reaching the boxed shared body.
     pub(super) fn callee_name(&self, iid: Idx<Inst>, func: FuncRef) -> Option<&String> {
-        // The call-site join is the identity oracle. The instruction's FuncRef
-        // is only the backend declaration selected for the call; the graph owns
-        // the target-neutral instance and the artifact view owns its symbol.
         let body = self
             .callees
             .instance_for_call(self.ws, self.mf, iid, func)?;
@@ -915,8 +786,6 @@ impl Emitter<'_> {
     ) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
         let supply = js_supply(self.ws, cf);
-        // The inline path avoids an inspect-only object while matching the
-        // runtime's sorted equals format and nested indentation.
         if supply.is_some() && matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
             if let Some(&arg0) = args.first() {
                 if let Inst::MakeValueStruct { name, .. }
@@ -963,13 +832,7 @@ impl Emitter<'_> {
     }
 }
 
-/// The minimum argument count a co-emitted callee accepts: its MIR param count
-/// minus the params carrying a default (each omitted trailing default arrives as
-/// JS `undefined` and is filled callee-side). Defaults live on the fn's HIR body;
-/// for the scalar defaults this gate targets (`step: int = 1`) each maps 1:1 to a
-/// MIR param slot. A GC value-struct default would break the 1:1 assumption, but
-/// value-struct construction rejects at emit independently, so no such call is
-/// admitted here.
+/// The minimum argument count a co-emitted callee accepts: MIR param count minus defaulted params, which arrive as `undefined` and fill callee-side.
 pub fn required_arg_count(
     ws: &Workspace,
     abi: &skull_mir::lower::BackendFnAbiPlan,
@@ -983,11 +846,7 @@ pub fn required_arg_count(
         .get(&BodyOwner::Function(fr.func))
         .map(|b| b.param_defaults.iter().map(|d| d.is_some()).collect())
         .unwrap_or_default();
-    // Scalar ABI: a defaulted value-struct param explodes to N leaf slots and
-    // all N are omittable together -- subtract per-param LEAF widths, not 1.
-    // The widths come from the EMITTED BODY's own plan: a specialization's
-    // instantiation is exactly where a param's leaf width differs from the
-    // declaration's, so asking the declaration would answer for another ABI.
+    // A defaulted value-struct param explodes to N leaf slots, all omittable together; widths come from the emitted body's own plan, since a specialization's leaf width can differ from the declaration's.
     if let Some(widths) = abi.param_leaf_widths() {
         let omittable: usize = widths
             .iter()
@@ -1001,24 +860,14 @@ pub fn required_arg_count(
     arity.saturating_sub(n_defaults)
 }
 
-/// What the JS backend renders for a call it supplies ITSELF.
-///
-/// Two shapes, because the surface has two: a fixed-arity expression template,
-/// and a variadic host global no template can express.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JsSupply {
-    /// A `$1..$n` expression template.
     Template(&'static str),
-    /// A bare JS global, called with every rendered argument.
     Global(&'static str),
 }
 
-/// The one JS realization oracle, shared by rendering, callee discovery and
-/// the artifact view. Declaration-keyed mappings win before any declared body,
-/// including the portable `map_new` body. Unmarked same-name user functions
-/// remain ordinary callees.
+/// The one JS realization oracle for rendering, callee discovery and the artifact view; declaration-keyed mappings win before any declared body.
 pub fn js_supply(ws: &Workspace, cf: &bone_core::hir::Function) -> Option<JsSupply> {
-    // `definition_plan_stage_js` defines the accessor under its own symbol.
     if skull_mir::definition::is_artifact_catalog_accessor(cf) {
         let symbol = ustr::Ustr::from(skull_mir::mangle::mangle_fn(ws, cf).as_str());
         return Some(JsSupply::Global(symbol.as_str()));
@@ -1030,14 +879,7 @@ pub fn js_supply(ws: &Workspace, cf: &bone_core::hir::Function) -> Option<JsSupp
     }
 }
 
-/// Render one supplied call from its arguments.
-///
-/// A template is padded to the callee's DECLARED arity with `undefined`: a
-/// defaulted trailing param (e.g. `string.find`'s `from = 0`) is not
-/// materialized into the call args, so a `$N` for it would otherwise stay
-/// literal. JS reads an omitted arg as `undefined`, and for the templated fns
-/// that carry a default that coincides with the Rock default. A global is
-/// variadic and takes the arguments as they came.
+/// Render one supplied call. A template is padded to the declared arity with `undefined`, since defaulted trailing params are not in the call args.
 fn render_supply(supply: JsSupply, args: &[String], declared_arity: usize) -> String {
     match supply {
         JsSupply::Template(tmpl) => {

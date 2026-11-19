@@ -210,12 +210,7 @@ pub(super) fn lifecycle_plan_stage_js(
                 )
                 .unwrap();
             }
-            // A compiler-synthesized thunk of one uniform signature
-            // (`scene_id -> ()`) per entry -- see the Lua sibling in
-            // `rock-lang/crates/skull/src/mir_emit.rs::lifecycle_plan_stage_lua` for
-            // the full rationale. A scene thunk resolves the live root for
-            // `scene_id` and calls through; it never asks the value its
-            // runtime type.
+            // A scene thunk of one uniform signature: it resolves the live root for `scene_id` and calls through.
             let key_lit = js_string_lit(&key);
             let sim_guard = (!entry.sim_wires.is_empty()).then(|| {
                 entry

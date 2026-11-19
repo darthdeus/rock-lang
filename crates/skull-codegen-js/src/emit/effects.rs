@@ -2,11 +2,7 @@
 
 use super::*;
 
-/// A value inst that still runs as a statement when its result is unused:
-/// a call (`nb_set(b, i, v)`, `(f)(x)`), an index that checks bounds or may
-/// enter a host getter (a Map, heap record, or proxy-backed Vec), the shared
-/// element check of a column or strided read, and a range-checked uint shift
-/// or conversion.
+/// A value inst that still runs as a statement when unused: calls, bounds-checking or host-getter indexes, column/strided element checks and range-checked uint ops.
 pub(super) fn evaluated_when_unused(inst: &Inst) -> bool {
     match inst {
         Inst::Index { kind, .. } => {
@@ -55,13 +51,8 @@ impl Emitter<'_> {
                     );
                     let line = match kind {
                         ContainerKind::NativeBuffer => format!("__nb_checked_set({b}, {i}, {v});"),
-                        // Proven within `[0, len)`: the typed array, raw.
                         ContainerKind::NativeBufferInBounds => format!("{b}.ptr[{i}] = {v};"),
-                        // Column storage has no JS emitter arm yet -- reject so
-                        // the case lands in the SKIP histogram (the emitter
-                        // worklist) instead of emitting a wrong single-slot write.
-                        // One `value` operand cannot carry K leaves; lowering
-                        // splits an element write into per-column stores.
+                        // Column storage has no JS arm: reject, since one `value` operand cannot carry K leaves (lowering splits element writes into per-column stores).
                         ContainerKind::VecValueColumns(elem) => {
                             return Err(err(format!(
                                 "JS subset: whole-element store into column-stored `[{elem}]` \
@@ -76,13 +67,8 @@ impl Emitter<'_> {
                         ContainerKind::VecColumn | ContainerKind::VecStrideSlot => {
                             format!("{b}[{i}] = {v};")
                         }
-                        // Raw: the element index was bounds-checked once ahead of
-                        // every leaf write. A JS boolean into a Uint8Array stores
-                        // 1/0 already, so the write side needs no coercion.
+                        // The element index was bounds-checked once ahead of every leaf write; a JS boolean stores 1/0 in a Uint8Array already.
                         ContainerKind::NativeBufferLeaf => format!("{b}[{i}] = {v};"),
-                        // Lowering decomposes every whole-element write into
-                        // per-leaf stores (`nb_leaf_element_store`), so reaching
-                        // emit means the element has no C leaf layout to address.
                         ContainerKind::NativeBufferValue(elem) => {
                             return Err(err(format!(
                                 "JS subset: whole-element store into `NativeBuffer<{elem}>` \
@@ -92,7 +78,6 @@ impl Emitter<'_> {
                         ContainerKind::Vec | ContainerKind::VecNonNull => {
                             format!("__vec_checked_set({b}, {i}, {v});")
                         }
-                        // Proven within `[0, len)`: the 0-based backing, raw.
                         ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
                             format!("{b}._data[{i}] = {v};")
                         }
@@ -107,13 +92,7 @@ impl Emitter<'_> {
                     };
                     self.push(&line);
                 }
-                // `k, v = next(t, k)` -- one step of Map iteration. JS has no
-                // `next`, so a cursor-cached shim (`__map_next`, JS_MAP_ITER_RUNTIME)
-                // returns the next key in the native Map's INSERTION order (null at
-                // exhaustion; Map order is backend-defined by doctrine). The value
-                // side reads `t.get(k)` -- no per-step pair allocation. The `table`
-                // operand renders to a Load/Global/Field (idempotent) or a
-                // materialized `v<N>` temp, so re-rendering it is safe.
+                // One Map iteration step through the cursor-cached `__map_next` shim (insertion order, null at exhaustion); `table` renders idempotently, so re-rendering it is safe.
                 Inst::MapNext {
                     key_cell,
                     val_cell,
@@ -125,9 +104,6 @@ impl Emitter<'_> {
                     self.push(&format!("{k} = __map_next({t}, {k});"));
                     self.push(&format!("{v} = ({k} === null ? null : {t}.get({k}));"));
                 }
-                // `base.field = value` (struct field / cursor mutation). A write
-                // THROUGH a NativeBuffer element never reaches here: lowering
-                // decomposes it into leaf stores against the element's typed views.
                 Inst::StoreField { base, field, value } => {
                     let line = format!(
                         "{} = {};",
@@ -140,13 +116,9 @@ impl Emitter<'_> {
                     let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
                 }
-                // Capture the result bank into the predeclared destination cells.
                 Inst::CallMulti { dests, func, args } => {
                     let call = self.render_call(iid, *func, args)?;
-                    // An intrinsic is ONE JS expression: when its result type has
-                    // more than one lane (a tuple-typed `A` from `tuple_first`),
-                    // the lanes are read off that value rather than the callee's
-                    // return bank, which no intrinsic ever writes.
+                    // An intrinsic is one JS expression: lanes of a multi-lane result are read off that value, since no intrinsic writes the return bank.
                     let line = match self.intrinsic_lane_paths(iid, *func, dests.len())? {
                         Some(paths) => {
                             let temp = format!("__rock_mv{}", raw(iid));
@@ -172,10 +144,7 @@ impl Emitter<'_> {
                     let line = self.multi_assign(dests, &call);
                     self.push(&line);
                 }
-                // Module-level `let`/`global` state write: `__G.<name> = value;`
-                // (scoped so no body local can collide). The name must be in the
-                // program's state set (`emit_with_closure` registers it before
-                // emit); an unregistered write is a backend bug, not a skip.
+                // An unregistered state-global write is a backend bug, not a skip.
                 Inst::StoreGlobal { name, value } => {
                     let Some(slot) = self.globals.state.get(&symbol_of_key(*name)) else {
                         return Err(err(format!(
@@ -186,19 +155,13 @@ impl Emitter<'_> {
                     let v = self.render_val(*value)?;
                     self.push(&format!("__rock_globals[{}] = {v};", js_string_lit(slot)));
                 }
-                // A used, non-inlinable value inst: materialize it at its
-                // program position as `let v<raw> = <expr>` so cell reads capture
-                // their value here and effectful calls keep their order. Its use
-                // sites read the temp via `render_val`.
                 other
                     if other.produces_value()
                         && !self.inlinable[raw(iid) as usize]
                         && self.use_count[raw(iid) as usize] > 0 =>
                 {
                     let expr = self.render_inst_expr(iid)?;
-                    // A cross-case temp is hoist-declared at the fn top (see
-                    // `hoisted_temps`); assign, don't re-`let`, so it stays live
-                    // across the flat switch cases. Block-local temps `let` here.
+                    // A cross-case temp is hoist-declared: assign, don't re-`let`.
                     if self.hoisted_temps.contains(&raw(iid)) {
                         self.push(&format!("v{} = {};", self.mf.emit_inst_id(iid), expr));
                     } else {
@@ -214,10 +177,6 @@ impl Emitter<'_> {
                     let v = self.render_val(*value)?;
                     self.push(&format!("{a}._data[{a}.len] = {v}; {a}.len = {a}.len + 1;"));
                 }
-                // An inlinable value inst renders at its use; an unused pure inst
-                // (dead `Load`/`Index`/`Field`/`Len`) is dropped. Remaining
-                // EFFECT insts (StoreField, StoreGlobal, column ArrayPush, MapNext,
-                // CallMulti, coroutine ops, ...) are outside the subset.
                 other if other.produces_value() => {}
                 other => return Err(err(format!("JS subset: unsupported effect {other:?}"))),
             }
@@ -232,8 +191,7 @@ impl Emitter<'_> {
                 let s = self.render_val(*v)?;
                 self.push(&format!("return {s};"));
             }
-            // Publish secondary lanes first. Each operand is a temp or a folded
-            // expression that cannot call and overwrite the bank.
+            // Publish secondary lanes first: each operand is a temp or folded expression that cannot overwrite the bank.
             _ => self.emit_multi_return(vs)?,
         }
         Ok(())
@@ -251,8 +209,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// A trampoline case's terminator: `__bb` reassignment + `continue` for
-    /// in-region edges, `return` for exits.
     pub(super) fn emit_trampoline_term(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         match self.mf.blocks[b].term.clone() {
             Term::Goto(t) => self.push(&format!("__bb = {}; continue;", self.mf.emit_block_id(t))),
@@ -284,8 +240,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// The JS expression for a value operand: the bound `v<raw>` temp if the
-    /// inst was materialized at its position, else its expression folded inline.
     pub(super) fn checked_uint_shift(
         &self,
         value: Idx<Inst>,
@@ -300,8 +254,6 @@ impl Emitter<'_> {
         ))
     }
 
-    /// An operand that renders as a temp or a literal, so repeating its text
-    /// neither re-evaluates nor grows the expression.
     pub(super) fn is_plain_operand(&self, iid: Idx<Inst>) -> bool {
         !self.inlinable[raw(iid) as usize] || matches!(self.mf.insts[iid], Inst::Const(_))
     }

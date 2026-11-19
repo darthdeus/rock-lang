@@ -147,8 +147,6 @@ impl PlacementEmit for JsPlacement<'_, '_> {
     }
 
     fn condition_effect(&self, _cond: Idx<Inst>) -> bool {
-        // Effectful or possibly-throwing values materialize in the block before
-        // its terminator; any condition left to render here is safe to elide.
         false
     }
 

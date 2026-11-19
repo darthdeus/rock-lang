@@ -2,26 +2,19 @@
 
 use super::*;
 
-/// The compiler-owned temp holding publisher argument `i` while the remaining
-/// arguments evaluate. In the shared `__rock_` global space and outside the
-/// reserved body namespace, like [`ret_slot`]; a body naming one rejects.
+/// The compiler-owned temp holding publisher argument `i` while later arguments evaluate.
 const PUBLISH_TEMP: &str = "__rock_lane";
 
 fn publish_temp(i: usize) -> String {
     format!("{PUBLISH_TEMP}{i}")
 }
 
-/// Secondary return register `i` (1-based; leaf 0 rides the ordinary JS return
-/// value). Module scope, not body-local, so it is outside the reserved
-/// `r<N>`/`v<N>`/`c<N>` body namespace and cannot shadow a user global -- the
-/// `__rock_` prefix is the shared compiler/stdlib global space.
+/// Secondary return register `i`; module scope so it cannot shadow a user global.
 pub(super) fn ret_slot(i: usize) -> String {
     format!("__rock_ret{i}")
 }
 
-/// `var __rock_ret1, ..;` for a program whose widest multi-value wire is `n`
-/// leaves. Self-declaring per the runtime-globals doctrine: a caller assembling
-/// a partial program without the prelude must not hit a ReferenceError.
+/// `var __rock_ret1, ..;` sized for the widest multi-value wire; declared so a partial program without the prelude does not throw a ReferenceError.
 pub(super) fn ret_slot_decls(n: usize) -> String {
     if n < 2 {
         return String::new();
@@ -30,16 +23,7 @@ pub(super) fn ret_slot_decls(n: usize) -> String {
     format!("var {};\n", names.join(", "))
 }
 
-/// The widest result wire in `bodies`, as recorded by the owning ABI plans and,
-/// for flat `ref` calls, by the lowering (`MirFunc::flat_call_lanes`).
-/// Call destinations are operational storage; their length is not a second
-/// ABI oracle.
-///
-/// MIR is not the only writer: an `inline(js)` body publishes its own lanes, so
-/// the bank is sized over [`max_published_lanes`] too. Both paths that assemble
-/// a program take that max -- sizing from MIR alone under-declares silently,
-/// because the emitted program is sloppy-mode and an undeclared write just
-/// becomes an implicit global.
+/// The widest result wire in `bodies`, also covering `inline(js)` publishers: sloppy-mode JS turns a write past the bank into an implicit global.
 pub(super) fn max_multi_wire(bodies: &[&MirFunc]) -> Result<usize, CompilerError> {
     pub(super) fn of(mf: &MirFunc) -> Result<usize, CompilerError> {
         let mut n = mf
@@ -117,14 +101,7 @@ pub(super) fn max_published_lanes(
         .map(|lanes| lanes.into_iter().max().unwrap_or(0))
 }
 
-/// `body` with every comment and string/template literal replaced by spaces of
-/// the same length: byte offsets are preserved, so a lexical check can look at
-/// CODE only and still slice the original text.
-///
-/// Plain substring matching is not an oracle here -- a `__rock_ret1` inside a
-/// comment is not bank access, and a `,` inside a string is not an argument
-/// separator. An unrecognized shape must REJECT rather than be guessed at,
-/// which is what the caller does with what this returns.
+/// `body` with comments and string/template literals blanked to spaces, preserving byte offsets so lexical checks see code only.
 fn code_only(body: &str) -> String {
     let b = body.as_bytes();
     let mut out = vec![b' '; b.len()];
@@ -156,8 +133,6 @@ fn code_only(body: &str) -> String {
             }
         }
     }
-    // Newlines survive blanking so line structure (and `//` termination) is
-    // unchanged for anything reading this back.
     for (i, c) in body.bytes().enumerate() {
         if c == b'\n' {
             out[i] = b'\n';
@@ -235,8 +210,6 @@ pub(super) fn lower_publisher(
             returns.len()
         )));
     };
-    // `return` immediately followed by the publisher, and nothing but the call
-    // between them. A single-exit body by construction.
     if return_at > publish_at
         || !code[return_at + "return".len()..publish_at]
             .trim()
@@ -255,8 +228,6 @@ pub(super) fn lower_publisher(
                 "`inline(js)` body of `{name}`: `__rock_publish` is not a call"
             ))
         })?;
-    // Argument boundaries come from the BLANKED text (a comma inside a string is
-    // not a separator); the argument TEXT comes from the original body.
     let mut depth = 0usize;
     let mut splits: Vec<usize> = vec![open + 1];
     let mut close = None;
@@ -305,13 +276,7 @@ pub(super) fn lower_publisher(
             args.len()
         )));
     }
-    // ORDER IS PART OF THE CONTRACT. `__rock_publish(f(), g())` is an ordinary
-    // JS call expression, so its arguments evaluate left to right; assigning
-    // lane 1 from `g()` first would run `g` before `f` and publish a lane
-    // before `f` had a chance to throw. Every argument is therefore evaluated,
-    // IN ORDER, into compiler-owned temps, and only then does anything reach
-    // the bank -- which is also what makes a throwing publisher leave no lane
-    // behind for the caller (which never captures) to see later.
+    // Evaluate every argument in order into temps before touching the bank: lane order must match JS argument order, and a throwing publisher must leave no lane behind.
     let prefix = &body[..return_at];
     let mut lowered = String::from(prefix);
     let temps: Vec<String> = (0..args.len()).map(publish_temp).collect();

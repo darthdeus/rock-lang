@@ -2,9 +2,7 @@
 
 use super::*;
 
-/// A JS literal for a `@deco` annotation arg value (the JS analog of skull's
-/// `annotation_value_lua`): the same value classes, rendered in JS syntax. A
-/// non-literal (`AnnoValue::Other`) yields `None` (the caller rejects).
+/// A JS literal for a `@deco` annotation arg; `None` for a non-literal.
 pub(crate) fn annotation_value_js(v: &bone_core::hir::AnnoValue) -> Option<String> {
     use bone_core::hir::AnnoValue as A;
     Some(match v {
@@ -78,14 +76,12 @@ pub(super) fn decorator_application_lines_js(
     Ok(out)
 }
 
-/// The definition site of a module-level global (for lowering its initializer).
 #[derive(Clone, Copy)]
 pub(super) struct GlobalSite {
     pub(super) module: bone_core::prelude::ModuleId,
     pub(super) gid: Idx<bone_core::hir::GlobalDef>,
 }
 
-/// A lowered global initializer: `__G.<name> = <init_name>()` runs the `mf` body.
 pub(super) struct GlobalInit {
     pub(super) name: ustr::Ustr,
     pub(super) init_name: String,
@@ -128,7 +124,6 @@ pub(super) fn decorator_populated_globals(ws: &Workspace) -> HashSet<ustr::Ustr>
     set
 }
 
-/// Map every module-level `let`/`global` name to its definition site.
 pub(super) fn build_state_index(ws: &Workspace) -> HashMap<ustr::Ustr, GlobalSite> {
     let mut m = HashMap::new();
     for module in &ws.modules {
@@ -163,7 +158,6 @@ pub(super) fn build_const_global_names(
     names
 }
 
-/// Map synthetic storage leaves to the global that initializes them.
 pub(super) fn build_nobox_leaf_globals(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -451,10 +445,7 @@ pub(super) fn schedule_global_reads(
     Ok(())
 }
 
-/// Static callee emit-names of `mf` (`Call`/`CallMulti`), resolved through
-/// `names` (+ nested fns). Indirect (fn-value) and bound calls are not statically
-/// resolvable and contribute no ordering edge -- parity with the luajit backend's
-/// direct-call facts (`skull::mir_emit::direct_calls`).
+/// Static callee emit-names of `mf`; indirect and bound calls add no ordering edge.
 fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
     let mut out = Vec::new();
     visit_placed(mf, &mut |body, iid| {
@@ -467,8 +458,6 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
     out
 }
 
-/// The consts in `const_order` an overlay re-initializes: each changed const
-/// and every const that transitively references one.
 pub(super) fn affected_const_names(
     ws: &Workspace,
     changed: &HashSet<ustr::Ustr>,
@@ -490,19 +479,13 @@ pub(super) fn affected_const_names(
         .collect()
 }
 
-/// Order the global-init assignment lines so each global inits AFTER every global
-/// it TRANSITIVELY reads through its call graph: `__G.<name> = <init_name>();`.
-/// A shallow "reads in the init body" edge misses `ACT_UI_CONFIRM = action_new(..)`
-/// where the `ACTIONS` read is inside `action_new`, not the init body -- so build
-/// the transitive global-read closure over every emitted fn (ginits + lowered).
-/// A genuine cycle rejects.
+/// Order global-init assignments so each global inits after every global it transitively reads through its call graph; a cycle rejects.
 pub(super) fn order_global_inits(
     ginits: &[GlobalInit],
     lowered: &[(FuncRef, MirFunc)],
     names: &CalleeNames,
     state_slots: &HashMap<ustr::Ustr, String>,
 ) -> Result<Vec<GlobalInitLine>, CompilerError> {
-    // Per-fn direct facts, keyed by emit name (ginit = init_name, lowered = js name).
     let mut direct_globals: rustc_hash::FxHashMap<Ustr, Vec<Ustr>> = Default::default();
     let mut direct_calls: rustc_hash::FxHashMap<Ustr, Vec<Ustr>> = Default::default();
     let mut record = |key: Ustr, mf: &MirFunc| {
@@ -512,8 +495,7 @@ pub(super) fn order_global_inits(
     for g in ginits {
         record(Ustr::from(g.init_name.as_str()), &g.mf);
     }
-    // Key by the EMIT name (`names[fr]`, mangled) -- that is what `direct_callees`
-    // resolves a call to, NOT the unmangled `mf.name`.
+    // Key by the mangled emit name, which is what `direct_callees` resolves to.
     for (fr, mf) in lowered {
         if let Some(emit_name) = names.get(&Instance::base(*fr)) {
             record(Ustr::from(emit_name.as_str()), mf);
@@ -590,9 +572,6 @@ fn global_init_line(
     Ok(GlobalInitLine { name: g.name, js })
 }
 
-/// Every `Inst::Global` read + `Inst::StoreGlobal` write name in `mf` (main body
-/// and hoisted nested fns) -- the module-global surface the emitter must resolve
-/// (state, fn-value, or reject). Names are deduped in source order.
 fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();

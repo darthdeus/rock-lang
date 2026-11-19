@@ -2,8 +2,6 @@
 
 use super::*;
 
-/// The `NativeBuffer*` nominal names (T-typed + phantom-size variants); the
-/// same set skull-mir's lowering recognizes as `ContainerKind::NativeBuffer`.
 pub(super) fn is_native_buffer(name: &str) -> bool {
     matches!(
         name,
@@ -26,19 +24,11 @@ pub(super) fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
     }
 }
 
-/// An expression candidate for folding into its single use site. The shared
-/// sinking check separately constrains potentially throwing evaluations.
-/// EXCLUDES `Load`/`Call`/`Index`/`Field`/`Len` (impure or cell-order-sensitive)
-/// -- those materialize at their program position. JS also folds the
-/// environment record of a closure.
+/// An expression candidate for folding into its single use; excludes impure or cell-order-sensitive values (`Load`/`Call`/`Index`/`Field`/`Len`).
 pub(super) fn always_inlinable(inst: &Inst) -> bool {
     matches!(inst, Inst::MakeEnv { .. }) || skull_mir::sinking::always_inlinable(inst)
 }
 
-/// Use counts (dense by raw inst id, over the `blocks` region) + the inlinable
-/// mask: an `always_inlinable` value used EXACTLY ONCE with def and use in the
-/// SAME block folds into that use; everything else materializes at its program
-/// position. The shared sinking check also preserves effect/error order.
 pub(super) fn compute_inlinable(mf: &MirFunc, blocks: &[Idx<Block>]) -> (Vec<u32>, Vec<bool>) {
     const NONE: u32 = u32::MAX;
     let ni = mf.insts.len();
@@ -96,7 +86,6 @@ fn inline_loads_before_branch(
     for &b in blocks {
         if let Term::Branch { else_bb, .. } = mf.blocks[b].term {
             let mut arm = else_bb;
-            // Bounded by the block count: a cycle of empty blocks must not hang.
             for _ in 0..mf.blocks.len() {
                 else_arms[raw(arm) as usize] = true;
                 match mf.blocks[arm].term {
@@ -158,12 +147,7 @@ fn cap_inline_depth(mf: &MirFunc, blocks: &[Idx<Block>], inl: &mut [bool]) {
     }
 }
 
-/// Materialized value temps (raw inst ids) whose use crosses their defining
-/// block. The structured emitter nests blocks so such a temp stays in lexical
-/// scope; the trampoline puts each block in a SIBLING switch case, so a
-/// cross-case `let v<N>` would be undefined at the use -- these get hoist-
-/// declared at the fn top and assigned in-place ([`Emitter::hoisted_temps`]). A
-/// same-block temp is not returned (keeps its per-case `let`).
+/// Value temps whose use crosses their defining block: the trampoline puts blocks in sibling switch cases, so these are hoist-declared ([`Emitter::hoisted_temps`]).
 pub(super) fn cross_block_temps(
     mf: &MirFunc,
     region: &[Idx<Block>],
@@ -198,7 +182,6 @@ pub(super) fn cross_block_temps(
     cross
 }
 
-/// Blocks reachable over terminators from `root` (a fn entry OR a lambda entry).
 pub(super) fn reachable_from(mf: &MirFunc, root: Idx<Block>) -> Vec<Idx<Block>> {
     let mut reachable = Vec::new();
     let mut seen = HashSet::new();

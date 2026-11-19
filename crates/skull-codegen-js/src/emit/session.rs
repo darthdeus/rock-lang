@@ -22,7 +22,6 @@ pub(super) struct JsSession {
     pub(super) concrete: skull_graph::concrete_body::ConcreteBodies,
 }
 
-/// The instances one session update added to and removed from the graph.
 pub(super) struct JsGraphUpdate {
     pub(super) added: BTreeSet<Instance>,
     pub(super) removed: BTreeSet<Instance>,
@@ -170,7 +169,6 @@ pub(super) fn update_js_session(
         .filter(|root| !roots.contains(root))
         .copied()
         .collect();
-    // The view retracts against the graph it was realized from.
     session.view.prepare_update(&session.graph);
     let update =
         session
@@ -205,15 +203,11 @@ pub(super) fn update_js_session(
     }
 }
 
-/// Emit the entry module and its reachable bodies, including module-load effects.
 pub fn emit_program(
     ws: &Workspace,
     user_mid: bone_core::prelude::ModuleId,
 ) -> Result<JsProgram, CompilerError> {
     let scx = js_scx(ws);
-    // The program entry: a nullary `main` in the entry module. Passed as the
-    // one extra root; the module-load effects (deco applications, ginits) run
-    // regardless of whether a `main` exists.
     let mut extra: Vec<(FuncRef, String)> = Vec::new();
     let main_js_name = nullary_main(ws, user_mid).map(|fr| {
         let nm = callee_js_name(ws, fr);
@@ -274,7 +268,6 @@ pub fn emit_program_cached(
     Ok((program, cache))
 }
 
-/// Emit test roots with module-load effects and report their callable slots.
 pub fn emit_program_with_roots_artifact(
     ws: &Workspace,
     roots: &[(FuncRef, String)],

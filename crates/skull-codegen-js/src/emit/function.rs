@@ -2,8 +2,6 @@
 
 use super::*;
 
-/// Emit `mf` as `function <js_name>(...) { ... }`. `js_name` is the caller's
-/// chosen JS identity (the differential harness names each fallback fn).
 pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, CompilerError> {
     let names = CalleeNames::default();
     emit_fn_with_callees(
@@ -16,10 +14,7 @@ pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, Co
     )
 }
 
-/// [`emit_fn`] with a set of known co-emitted plain-Rock callees: a call whose
-/// `FuncRef` is in `callees` renders as `<js name>(args)` (the caller promises
-/// to emit that fn under that name in the same program). Anything neither a
-/// mapped intrinsic nor a known callee still rejects.
+/// [`emit_fn`] with known co-emitted callees: a call to one renders as `<js name>(args)`; anything else unmapped rejects.
 pub(crate) fn emit_fn_with_callees(
     ws: &Workspace,
     mf: &MirFunc,
@@ -45,13 +40,7 @@ pub(crate) fn emit_fn_with_callees(
     ))
 }
 
-/// Emit a region of `mf` as a block trampoline `for(;;) switch(__bb)` -- the
-/// coroutine-step shape (dispatch-into-loops is irreducible by construction, so
-/// the structured relooper cannot apply). `entry` is the region root (the step
-/// entry, or a detached hook/defer region's block); `params` the emitted fn's
-/// param cells (the step's `[s, resume_arg]`, an aux body's `[s]`). Case bodies
-/// are braced so `let v<N>` temps stay case-local; values are same-block by the
-/// value model + the transform's cross-block spill, so no cross-case temps exist.
+/// A block trampoline `for(;;) switch(__bb)` for a region, the coroutine-step shape (dispatch-into-loops is irreducible, so the relooper cannot apply). Case bodies are braced so `let v<N>` temps stay case-local.
 pub fn emit_fn_trampoline(
     ws: &Workspace,
     mf: &MirFunc,
@@ -94,15 +83,12 @@ pub fn emit_fn_trampoline(
     ))
 }
 
-/// An [`Emitter`] over the blocks reachable from `entry`, with that region.
 struct FnFrame<'a> {
     emitter: Emitter<'a>,
     region: Vec<Idx<Block>>,
 }
 
 impl<'a> FnFrame<'a> {
-    /// The frame, and whether the region registers `defer` cleanups that need
-    /// [`defer_unwind_wrap`].
     fn new(
         ws: &'a Workspace,
         mf: &'a MirFunc,
@@ -132,10 +118,6 @@ impl<'a> FnFrame<'a> {
         (Self { emitter, region }, unwind)
     }
 
-    /// `function <js_name>(<params>) {` plus one hoisted `let` for the stored
-    /// cells and the materialized values that cross block scopes: follower
-    /// labels and trampoline cases add scopes outside the block that defines
-    /// some of them. `coerce_uint` normalizes `uint` params on entry.
     fn header(&self, js_name: &str, params: &[Idx<Cell>], coerce_uint: bool) -> String {
         let (ws, mf) = (self.emitter.ws, self.emitter.mf);
         let names: Vec<String> = params.iter().map(|&c| cell_name(mf, c)).collect();
@@ -180,11 +162,7 @@ impl<'a> FnFrame<'a> {
     }
 }
 
-/// A body that registers an ordinary-fn `defer` (`skull_mir::mir::DEFER_PUSH`)
-/// catches whatever escapes it: `__rock_defer_unwind` runs the cleanups still
-/// registered above the depth the body was entered at, LIFO, and rethrows. The
-/// Lua backend gets the same protection by re-entering the body under
-/// `__rock_defer_call`.
+/// A body registering an ordinary-fn `defer` catches what escapes it: `__rock_defer_unwind` runs the cleanups above the entry depth LIFO and rethrows.
 fn defer_unwind_wrap(unwind: bool, body: &str) -> String {
     if !unwind {
         return body.to_string();
@@ -195,8 +173,6 @@ fn defer_unwind_wrap(unwind: bool, body: &str) -> String {
     )
 }
 
-/// The runtime entry points the shared lowering calls as globals; the JS
-/// runtime defines them (`JS_DEFER_RUNTIME`, the coroutine runtime).
 pub(super) fn is_runtime_global(name: &str) -> bool {
     name == skull_mir::mir::VALUE_INTEGER_CHECK
         || name == skull_mir::mir::DEFER_PUSH
@@ -205,20 +181,13 @@ pub(super) fn is_runtime_global(name: &str) -> bool {
         || name == skull_mir::mir::CORO_HOT_RELOAD
 }
 
-/// Deterministic JS name for a co-emitted callee -- the SHARED mangle keyed on
-/// `(name, declared signature)`, identical to the Lua and GLSL backends. Exempt
-/// (`extern`/`@nomangle`/`@test`/`main`/`test_*`) fns keep their bare name: the
-/// discipline is "called by original name from inline bodies / compiler
-/// codegen", and on JS an inline(js) body or a driver-injected line is verbatim
-/// text that can only use the bare name (same rule as the lua backend).
+/// The shared mangle keyed on `(name, declared signature)`. Exempt fns keep their bare name because inline(js) bodies and driver lines are verbatim text.
 pub(crate) fn callee_js_name(ws: &Workspace, fr: FuncRef) -> String {
     let f = &ws.module(fr.module).functions[fr.func];
     skull_mir::mangle::mangle_fn(ws, f)
 }
 
-/// One non-fn body (decorator definition, global initializer) plus its hoisted
-/// lambda bodies, as one string -- so a rejection anywhere in it drops the whole
-/// definition rather than half of it.
+/// One non-fn body plus its hoisted lambdas, so a rejection drops the whole definition.
 pub(super) fn emit_body_with_nested(
     ws: &Workspace,
     mf: &MirFunc,

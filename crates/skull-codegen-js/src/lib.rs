@@ -18,18 +18,13 @@ const fn global(name: &'static str, arity: usize) -> (&'static str, usize, Emiss
 }
 
 /// Maps stdlib intrinsic declarations and host globals to JS emissions.
-/// Shared by `JsIntrinsics::lookup` and `JsIntrinsics::entries`.
 pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
-    // base math
     template("sin", 1, "Math.sin($1)"),
     template("cos", 1, "Math.cos($1)"),
     template("tan", 1, "Math.tan($1)"),
     template("sqrt", 1, "Math.sqrt($1)"),
     template("exp", 1, "Math.exp($1)"),
-    // `log` is the NATURAL log on both hosts (Lua `math.log`, JS `Math.log`).
-    // `log2` gets `Math.log2` rather than a mirror of luajit's
-    // `math.log(x) / 0.6931471805599453`: it is the same function computed
-    // better, exact on powers of two where the division is a bit short.
+    // `log2` uses Math.log2: exact on powers of two, unlike luajit's `math.log(x) / ln 2`.
     template("log", 1, "Math.log($1)"),
     template("log2", 1, "Math.log2($1)"),
     template("abs", 1, "Math.abs($1)"),
@@ -37,7 +32,6 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("ceil", 1, "Math.ceil($1)"),
     template("pow", 2, "Math.pow($1, $2)"),
     template("atan2", 2, "Math.atan2($1, $2)"),
-    // conformance differential set
     template("min", 2, "Math.min($1, $2)"),
     template("max", 2, "Math.max($1, $2)"),
     template("clamp", 3, "Math.min(Math.max($1, $2), $3)"),
@@ -50,30 +44,18 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("round", 1, "Math.floor($1 + 0.5)"),
     template("sign", 1, "Math.sign($1)"),
     template("fract", 1, "($1 - Math.floor($1))"),
-    // `join` over a `[string]`: the backing array IS the input both hosts want,
-    // so this is one `Array.prototype.join` here and one `table.concat` on
-    // luajit. `_data` is 0-based and may be longer than `len`, hence the slice.
+    // `_data` is 0-based and may be longer than `len`, hence the slice.
     template("join", 2, "$1._data.slice(0, $1.len).join($2)"),
-    // String primitives declared in stdlib/unified.rock. Indices are native
-    // units (Lua bytes, JS UTF-16); substring bounds are end-exclusive.
-    // `find` returns a 0-based index, or -1 when the needle is absent.
+    // Indices are native units (Lua bytes, JS UTF-16); `find` returns -1 when absent.
     template("find", 3, "$1.indexOf($2, $3)"),
     template("substring", 3, "$1.slice($2, $3)"),
     template("unit_at", 2, "($1.charCodeAt($2) || 0)"),
     template("upper", 1, "$1.toUpperCase()"),
     template("lower", 1, "$1.toLowerCase()"),
     template("string_char", 1, "String.fromCharCode($1)"),
-    // Reference identity (stdlib `same_ref`). `===` on two objects is JS
-    // identity, the same question luajit's `rawequal` answers; on primitives
-    // both reduce to value equality, which is also what identity means there.
     template("same_ref", 2, "($1 === $2)"),
-    // IEEE non-finite predicates. isinf excludes NaN
-    // (a NaN is neither finite nor infinite). any/greater_than/to_vec3 co-emit
-    // their portable Rock bodies -- no JS row.
     template("isnan", 1, "Number.isNaN($1)"),
     template("isinf", 1, "(!Number.isFinite($1) && !Number.isNaN($1))"),
-    // Phantom-width buffers use TypedArray allocation templates. Generic
-    // native_buffer_alloc is lowered to FfiNewArray.
     template("__nb_alloc_u8", 1, "new Uint8Array($1)"),
     template("__nb_alloc_i8", 1, "new Int8Array($1)"),
     template("__nb_alloc_u16", 1, "new Uint16Array($1)"),
@@ -86,24 +68,17 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     ),
     template("nb_get", 2, "$1.ptr[$2]"),
     template("nb_set", 3, "($1.ptr[$2] = $3)"),
-    // StringBuilder: a Lua table used as an array accumulator IS a JS array.
-    // `sb_new` -> `[]`, `sb_push` -> `.push` (Lua `sb[#sb+1] = s`; the returned
-    // length is discarded), `sb_build` -> `.join("")` (Lua `table.concat`).
     template("sb_new", 0, "[]"),
     template("sb_push", 2, "$1.push($2)"),
     template("sb_build", 1, "$1.join(\"\")"),
-    // A declared-signature key keeps Map get independently checked from
-    // NativeBuffer get. It also wins before the latter's name/arity key.
+    // Signature key: keeps Map get distinct from NativeBuffer get, and wins before the latter's name/arity key.
     template("get_map_K_V_K", 2, "$1.get($2)"),
-    // The safe accessor: an IIFE so the receiver/index evaluate exactly once
-    // (the template reads each twice), mirroring the inline(lua) body's
-    // param-binding. Null on miss = Rock `T?` null.
+    // IIFE: the template reads the receiver and index twice.
     template(
         "get",
         2,
         "(function(b, i) { return (i >= 0 && i < b.len) ? b.ptr[i] : null; })($1, $2)",
     ),
-    // Host runtime bindings; declarations opt in with @intrinsic.
     template("tostring", 1, "lua_tostring($1)"),
     template("__rock_format_float", 1, "__rock_format_float($1)"),
     template("int_to_float", 1, "$1"),
@@ -112,11 +87,9 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("is_null", 1, "($1 == null)"),
     template("cast", 1, "$1"),
     template("transmute", 1, "$1"),
-    // Raw table helpers dispatch on Map versus array/object storage.
     template("table_get", 2, "__table_get($1, $2)"),
     template("table_set", 3, "__table_set($1, $2, $3)"),
     template("table_unset", 2, "__table_unset($1, $2)"),
-    // Vec backing indices are 0-based on JS, including shifted Lua indices.
     template("__vec_data_get", 2, "$1._data[$2]"),
     template("__vec_data_set", 3, "$1._data[$2] = $3"),
     template("__vec_data_unset", 2, "$1._data[$2] = undefined"),
@@ -150,11 +123,9 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("__op_ne", 2, "(!__op_eq($1, $2))"),
     template("len", 1, "$1.length"),
     template("float", 1, "$1"),
-    // The runtime encoder checks the code point like luajit, then emits UTF-16.
     template("from_codepoint", 1, "__from_codepoint($1)"),
     template("parse_float", 1, "__parse_float($1)"),
     template("parse_float_at", 3, "__parse_float($1.slice($2, $3))"),
-    // RNG streams share LuaJIT's seedable, serializable transition.
     template("random", 0, "__rock_random()"),
     template("random_int", 2, "__rock_random_int($1, $2)"),
     template("random_seed", 1, "__rock_rng_seed($1)"),
@@ -183,12 +154,10 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     ),
     template("env_var", 1, "__rock_env_var($1)"),
     template("deepcopy", 1, "deepcopy($1)"),
-    // Like LuaJIT, JS uses GC storage; a destination token does not change the copy.
     template("clone_into", 2, "deepcopy($1)"),
     template("map_storage", 1, "null"),
     template("storage", 1, "null"),
     template("__rock_deepcopy_value", 2, "__rock_deepcopy_value($1, $2)"),
-    // Omitted optional arguments default inside the runtime.
     template("inspect", 3, "inspect($1, $2, $3)"),
     template("inspect_formatted", 2, "inspect_formatted($1, $2)"),
     template("__rock_fmt_pad", 4, "__rock_fmt_pad($1, $2, $3, $4)"),
@@ -205,7 +174,6 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("__range", 2, "__range($1, $2)"),
     template("__range_uint", 2, "__range($1, $2)"),
     template("try_call", 1, "__try_call($1)"),
-    // Coroutine fields normalize unset JS values to Rock null.
     template(
         "resume",
         1,
