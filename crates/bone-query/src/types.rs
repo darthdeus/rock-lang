@@ -1,6 +1,5 @@
-//! Shape questions about a `TyId`, all answered through
-//! [`Workspace::resolve_ty`] so a solved inference variable reads as its
-//! solution everywhere.
+//! Type shape questions, answered through `Workspace::resolve_ty` so a
+//! solved inference variable reads as its solution.
 
 use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
 use bone_semantic::prelude::{Arena, BodyInference, Idx, TyId, Workspace};
@@ -12,7 +11,6 @@ pub(crate) fn ty_of(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Typ
         .map_or(TypeExpr::Builtin(BuiltinTy::Error), |(_, te)| te)
 }
 
-/// `ty` resolved under any number of `?`.
 pub(crate) fn peel_nullable(
     ws: &Workspace,
     bi: Option<&BodyInference>,
@@ -36,7 +34,6 @@ pub(crate) fn is_unit(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> b
     )
 }
 
-/// The constructor and argument ids of the type application under any `?`.
 fn app(
     ws: &Workspace,
     bi: Option<&BodyInference>,
@@ -50,7 +47,6 @@ fn app(
     }
 }
 
-/// The nominal (struct, enum or newtype) name and type arguments of `ty`.
 pub(crate) fn nominal_args(
     ws: &Workspace,
     bi: Option<&BodyInference>,
@@ -66,8 +62,7 @@ pub(crate) fn nominal_name(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId)
     nominal_args(ws, bi, ty).map(|(name, _)| name)
 }
 
-/// [`nominal_name`], with `[T]` read as the stdlib `Vec` struct it is
-/// type-checked as -- the name its fields and UFCS functions hang off.
+/// `[T]` reads as the stdlib `Vec` struct it is type-checked as.
 pub(crate) fn member_owner_name(
     ws: &Workspace,
     bi: Option<&BodyInference>,
@@ -87,8 +82,7 @@ pub(crate) fn array_elem(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -
     }
 }
 
-/// The nominal name of a one-argument nominal's argument (`Entity<Glyph>` ->
-/// `Glyph`).
+/// `Entity<Glyph>` -> `Glyph`.
 pub(crate) fn sole_arg_name(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
     let (_, mut args) = nominal_args(ws, bi, ty)?;
     match (args.next(), args.next()) {
@@ -97,7 +91,6 @@ pub(crate) fn sole_arg_name(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId
     }
 }
 
-/// A lowered annotation's nominal constructor, before inference substitution.
 pub(crate) fn annotation_nominal(arena: &Arena<TypeExpr>, mut idx: Idx<TypeExpr>) -> Option<Ustr> {
     loop {
         match arena[idx] {

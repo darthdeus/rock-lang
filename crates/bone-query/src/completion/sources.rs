@@ -24,7 +24,6 @@ use super::classify::{SlotAnchor, balance_delimiters, completion_munges};
 use super::rank::*;
 use super::select::*;
 
-/// Union parameter names across accessible overloads in first-seen order.
 pub(crate) fn callee_param_names_in_scope(
     ws: &Workspace,
     callee: &str,
@@ -63,7 +62,6 @@ pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v: TyId) -> Vec<Ustr>
     out
 }
 
-/// Bind the FieldRef owner from a receiver of type T or Ctor<T>.
 fn receiver_owner_binding(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
@@ -90,7 +88,6 @@ fn receiver_owner_binding(
     }
 }
 
-/// Resolve the owner from a nominal, receiver or preceding argument.
 fn fieldref_slot_owner(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
@@ -163,7 +160,6 @@ fn sibling_owner_bind(
     None
 }
 
-/// Suggest fields compatible with at least one overload's FieldRef slot.
 pub(crate) fn field_ref_candidates(
     ws: &Workspace,
     path: &str,
@@ -177,8 +173,6 @@ pub(crate) fn field_ref_candidates(
 ) -> Option<Vec<Cand>> {
     let name = Ustr::from(callee);
     let frag = crate::modules_scope::fragment(ws, Ustr::from(path))?;
-    // UFCS receiver struct + sole-type-arg element (`Entity<Glyph>` ->
-    // `("Entity", Some("Glyph"))`); `(None, None)` for a non-UFCS prefix call.
     let (recv_struct, recv_elem) = recv_end
         .and_then(|e| {
             let mid = user_module_for_path(ws, path)?;
@@ -188,7 +182,6 @@ pub(crate) fn field_ref_candidates(
         .unwrap_or((None, None));
     let recv_offset = usize::from(recv_end.is_some());
 
-    // First overload whose `arg_idx` slot resolves to a FieldRef with >=1 field.
     let (fields, v) =
         crate::modules_scope::admitted_overloads(ws, frag, name).find_map(|(_, _, f)| {
             let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
@@ -233,7 +226,6 @@ pub(crate) enum ArgPayload {
     Record,
 }
 
-/// Filter the virtual call without constructing its text.
 pub(crate) fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
     let mut qi = k.min(q.len());
     if qi < q.len() && q[qi] == b'(' {
@@ -316,7 +308,6 @@ impl CtArg {
     }
 }
 
-/// Cache functions and global-derived arguments by type for call-through.
 pub(crate) struct CallThroughIndex {
     pub(crate) fns: Vec<CtFn>,
     pub(crate) global_type_args: HashMap<String, Vec<CtArg>>,
@@ -344,7 +335,6 @@ pub(crate) fn build_call_through(
             });
         }
     }
-    // Global roots (position-independent), each with its rendered type.
     let mut groots: Vec<(ustr::Ustr, String, String)> = Vec::new();
     for m in ws.modules.iter() {
         for (gname, gidx) in m.global_by_name.iter() {
@@ -355,7 +345,6 @@ pub(crate) fn build_call_through(
             ));
         }
     }
-    // Visit reach paths once per global and bucket by the type at the end.
     let needed: std::collections::HashSet<&str> =
         fns.iter().map(|c| c.first_param_ty.as_str()).collect();
     let mut global_type_args: HashMap<String, Vec<CtArg>> = HashMap::new();
@@ -396,9 +385,8 @@ pub(crate) fn build_call_through(
     }
 }
 
-/// The fragment view of the workspace call-through index. Namespace spellings
-/// and member visibility are scope facts, so build this once per fragment after
-/// an interface/scope edit and reuse it for body-only completion requests.
+/// Namespace spellings and member visibility are scope facts: build once per
+/// fragment after an interface or scope edit.
 pub(crate) struct ScopedCallThroughIndex {
     pub(crate) fns_by_first_char: HashMap<u8, Vec<ScopedCtFn>>,
     pub(crate) global_type_args: HashMap<String, Vec<CtArg>>,
@@ -536,9 +524,7 @@ pub(crate) fn call_through_param_completions(
     let mut counts = CtCounts::default();
     let q = prefix.as_bytes();
     if q.len() < 2 {
-        // 1 char only completes the fn-name's first letter -- no room for an
-        // arg yet. At 2+ chars the fn name can absorb the lead and the arg can
-        // start to match, so call-through is meaningful.
+        // One char only completes the fn name's first letter.
         return counts;
     }
     let scoped_fns = scoped_index
@@ -548,8 +534,6 @@ pub(crate) fn call_through_param_completions(
         .unwrap_or_default();
     let global_type_args = &scoped_index.global_type_args;
     let callable_spellings = &scoped_index.callable_spellings;
-    // In-scope LOCAL roots only -- the position-dependent part. Globals + their
-    // reach expansion are precomputed in `index` (the slow part, now cached).
     let owner = ws.module(mid).body_at(offset);
     let body_inference = owner.and_then(|owner| inf.per_fn.get(&owner));
     let locals: Vec<(String, String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
@@ -565,13 +549,10 @@ pub(crate) fn call_through_param_completions(
         })
         .collect();
 
-    // Group by expected type and residual query after matching the function name.
     let mut passing: Vec<(usize, usize)> = Vec::new(); // (fn index, k)
-    // Fns whose name FULLY covers the query (`k == q.len()`): normally suppressed
-    // as fn-name browsing, but eligible for confident unique-arg autofill below.
+    // Fns whose name fully covers the query: eligible for unique-arg autofill below.
     let mut committed: Vec<usize> = Vec::new();
 
-    // Add local seeds once per request. The match memo borrows these entries.
     let mut local_args: HashMap<String, Vec<CtArg>> = HashMap::new();
     for (ln, _lt, node_ty) in &locals {
         local_args
@@ -596,8 +577,7 @@ pub(crate) fn call_through_param_completions(
 
     for (si, scoped) in scoped_fns.iter().enumerate() {
         let cf = &index.fns[scoped.index];
-        // Never autofill a call to the fn being defined -- a recursive self-call
-        // is not what completing its own body means (a struct fill inside its own function body).
+        // Never autofill a recursive call to the fn being defined.
         if enclosing_fn == Some(cf.key.as_str()) {
             continue;
         }
@@ -616,22 +596,18 @@ pub(crate) fn call_through_param_completions(
             counts.fns += 1;
             passing.push((si, k));
         } else if local_arg_matches() {
-            // Relaxed noise guard: the fn name absorbs < half the query, but the
-            // residual matches a LOCAL arg of its param type -- a promoted
-            // local-seeded call-through (`gmob` -> `give(mob)`), not fn-name noise.
+            // Relaxed noise guard: the residual matches a local arg of its param type
+            // (`gmob` -> `give(mob)`).
             counts.fns += 1;
             passing.push((si, k));
         }
     }
 
-    // Share argument matches and scores across functions with the same residual query.
     let empty: Vec<CtArg> = Vec::new();
-    // Per group: (arg, suffix_scores, path_penalty, local). suffix + penalty
-    // both depend only on the arg (not the fn), so computed once and shared.
+    // Per group: (arg, suffix_scores, path_penalty, local).
     let mut match_memo: HashMap<(&str, usize), Vec<(&CtArg, Vec<i32>, i32, bool)>> = HashMap::new();
     let mut prefix_scores: Vec<i32> = Vec::new(); // reused across fns
 
-    // Render call text only for candidates that survive the caps.
     let mut cands: Vec<(i32, usize, &CtArg, u8)> = Vec::new();
     for (si, k) in passing {
         let cf = &index.fns[scoped_fns[si].index];
@@ -661,13 +637,9 @@ pub(crate) fn call_through_param_completions(
         fuzzy_prefix_scores(scoped_fns[si].name.as_bytes(), q, &mut prefix_scores);
         let mut scored: Vec<(i32, &CtArg, bool)> = Vec::with_capacity(group.len());
         for (a, suffix, penalty, local) in group.iter() {
-            // Bias toward simpler args: a direct value / clean field path beats a
-            // deep method chain (which the boundary-rich score over-rewards). The
-            // penalty is arg-only, precomputed once per group.
             let score = combine_scores(&prefix_scores, suffix) - penalty;
             scored.push((score, a, *local));
         }
-        // Leave direct values and sibling fields browsable.
         let (mut methods, simple): (Vec<_>, Vec<_>) =
             scored.into_iter().partition(|(_, a, _)| a.method);
         if methods.len() > PER_FN_METHOD_CAP {
@@ -681,7 +653,6 @@ pub(crate) fn call_through_param_completions(
             cands.push((score, si, a, if local { 1 } else { 4 }));
         }
     }
-    // A fully typed name can prefill one unambiguous local argument.
     for si in committed {
         let cf = &index.fns[scoped_fns[si].index];
         let t = cf.first_param_ty.as_str();
@@ -694,7 +665,6 @@ pub(crate) fn call_through_param_completions(
             cands.push((score, si, a, 0));
         }
     }
-    // Global top `CALL_THROUGH_CAP` by score (then ci-arg tiebreak); materialize only those.
     if cands.len() > CALL_THROUGH_CAP {
         cands.select_nth_unstable_by(CALL_THROUGH_CAP, |x, y| {
             y.0.cmp(&x.0)
@@ -707,7 +677,6 @@ pub(crate) fn call_through_param_completions(
         let scoped = &scoped_fns[si];
         let cf = &index.fns[scoped.index];
         let fname = scoped.name;
-        // Promote a local seed only if the completed call also satisfies the slot.
         let type_rank = match expected.as_deref_mut() {
             Some(exp) if type_rank < 4 => {
                 if exp.accepts_fn_returning(ws, cf.key.as_str()) {
@@ -722,7 +691,6 @@ pub(crate) fn call_through_param_completions(
         if !sink.admit(&call) {
             continue;
         }
-        // Unpromoted synthesized calls rank below direct candidates.
         let (ex, bd) = match_band_exact(&call, q, q);
         let key = if score_leads {
             RankKey {
@@ -733,8 +701,7 @@ pub(crate) fn call_through_param_completions(
                 ..Default::default()
             }
         } else {
-            // Typed slot: kind 2 (a call synth is fn-shaped), so a real
-            // local of the slot type still beats a same-rank synth.
+            // A call synth is fn-shaped (kind 2), so a real local of the slot type beats it.
             RankKey {
                 exact: ex,
                 type_rank,
@@ -760,14 +727,11 @@ pub(crate) fn call_through_param_completions(
             },
         ));
     }
-    // Keep the emitted tail in rank order (the final stable sort preserves
-    // insertion order on full ties); the global select above already bounded
-    // the count.
+    // The final stable sort preserves insertion order on full ties.
     sink.cands[ct_start..].sort_by(cand_cmp);
     counts
 }
 
-/// Pool overload references under one name to compute the frequency prior.
 pub(crate) fn build_freq_index(ws: &Workspace) -> HashMap<Ustr, u32> {
     use bone_semantic::hir::{self, TypeCtor, TypeExpr};
     let mut counts: HashMap<Ustr, u32> = HashMap::new();
@@ -825,9 +789,7 @@ fn arg_admitted(ws: &Workspace, frag: &bone_core::modules::FragmentScope, arg: &
     }) && crate::reachability::fields_admitted(ws, frag, &arg.field_members)
 }
 
-/// Whether a nominal type (struct OR enum) named `name` is defined anywhere in
-/// the workspace. The host's `Wait` yield type is an enum, so the coroutine
-/// ergonomics probe both.
+/// The host's `Wait` yield type is an enum, so this probes structs and enums.
 pub(crate) fn nominal_exists(
     ws: &Workspace,
     frag: &bone_core::modules::FragmentScope,
@@ -841,15 +803,12 @@ pub(crate) fn nominal_exists(
         .any(|m| m.struct_by_name.contains_key(&key) || m.enums_by_name.contains_key(&key))
 }
 
-/// Infer an Entity payload from the first name segment that names a struct.
 pub(crate) fn fn_prefix_struct(
     ws: &Workspace,
     frag: &bone_core::modules::FragmentScope,
     fn_name: &str,
 ) -> Option<Ustr> {
-    // Try each `_`-segment leading-first: `<type>_<verb>` (`mob_attack_co`) and
-    // `<verb>_<type>` (`spawn_mob`) both name `Mob`. Leading match wins when
-    // more than one segment is a struct (the UFCS convention).
+    // `mob_attack_co` and `spawn_mob` both name `Mob`; the leading segment wins.
     fn_name
         .split('_')
         .filter(|s| !s.is_empty())
@@ -961,7 +920,6 @@ pub(crate) fn variant_candidates(
     }
     let pfx = prefix.as_bytes();
     let matches_prefix = |name: &str| admit(name.as_bytes(), pfx);
-    // Recover a mistyped qualifier suffix by offering every variant.
     let none_match = !variants.iter().any(|(name, _)| matches_prefix(name));
     Some(
         variants
@@ -1016,7 +974,6 @@ pub(crate) fn pattern_scrutinee_enum(
     None
 }
 
-/// Reuse parentheses even when separated from a member by inline whitespace.
 pub(crate) fn open_paren_follows(src: &str, offset: usize) -> bool {
     src.as_bytes()[offset..]
         .iter()
@@ -1039,17 +996,13 @@ fn member_ty_match(
     }
 }
 
-/// Find a compatible field-reference argument after the receiver.
 fn field_ref_slot(
     ws: &Workspace,
     recv_struct: Ustr,
     recv_elem: Option<Ustr>,
     f: &bone_semantic::hir::Function,
 ) -> Option<(usize, Vec<Ustr>)> {
-    // A UFCS receiver always binds the owner; a sibling arg never contributes
-    // here (that path serves the non-UFCS prefix call). The FieldRef's owner must
-    // be the receiver's own struct -- a literal `FieldRef<Other, V>` on a `recv`
-    // method isn't a `recv.method(.field)` slot, so gate nominal owners on that.
+    // A literal `FieldRef<Other, V>` on a `recv` method is not a `recv.method(.field)` slot.
     let (recv_var, recv_owner) = receiver_owner_binding(ws, f, Some(recv_struct), recv_elem);
     let recv_owner = recv_owner?;
     for pi in 1..f.param_decls.len() {
@@ -1068,10 +1021,7 @@ fn field_ref_slot(
     None
 }
 
-/// Snippet `insert_text` for a field-ref method: the FieldRef arg pre-filled with
-/// the field (a `${1|.a,.b|}` choice when >1 field), every other arg a numbered
-/// placeholder named after its param. `mob.kill_co` -> `kill_co(.attack_co)`;
-/// `mob.set_co` -> `set_co(.attack_co, ${1:next})`.
+/// The FieldRef arg pre-filled: `mob.set_co` -> `set_co(.attack_co, ${1:next})`.
 fn field_ref_insert(
     name: &str,
     f: &bone_semantic::hir::Function,
@@ -1100,8 +1050,7 @@ fn field_ref_insert(
     format!("{name}({})", parts.join(", "))
 }
 
-/// Find compatible methods even when a generic first parameter would
-/// keep them out of the nominal method list.
+/// A generic first parameter keeps these out of the nominal method list.
 fn field_ref_methods<'a>(
     ws: &'a Workspace,
     recv_struct: Ustr,
@@ -1122,9 +1071,6 @@ fn field_ref_methods<'a>(
             let Some(p0) = f.param_decls.first() else {
                 continue;
             };
-            // A bare-generic receiver (`o: T`), or a wrapper `Ctor<T>` whose ctor
-            // is the receiver struct (`e: Entity<T>` on an `Entity<Glyph>`
-            // receiver) -- the two shapes `field_ref_slot` resolves an owner for.
             let p0_ok = match ty_of(ws, None, p0.ty) {
                 TypeExpr::Generic(..) => true,
                 TypeExpr::App {

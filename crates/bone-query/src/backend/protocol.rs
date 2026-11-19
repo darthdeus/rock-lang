@@ -9,10 +9,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use ustr::Ustr;
 
-/// 0-based LSP `(line, character)` -> 0-based **byte** offset into `src`.
-/// `character` counts UTF-16 code units, the protocol's default encoding. A
-/// column inside a surrogate pair snaps to the character's start; past the
-/// line's end it clamps there (before the line break), per the spec.
+/// 0-based LSP `(line, character)` -> byte offset; `character` counts UTF-16
+/// code units. A column inside a surrogate pair snaps to its start; past the
+/// line end it clamps before the line break, per the spec.
 pub fn offset_at_line_col(src: &str, line: u32, character: u32) -> usize {
     let mut offset = 0usize;
     for (i, line_str) in src.split_inclusive('\n').enumerate() {
@@ -101,8 +100,6 @@ impl LineIndex {
     /// UTF-16 code units within the line, matching [`offset_to_position`].
     pub fn position(&self, src: &str, offset: usize) -> Position {
         let offset = offset.min(src.len());
-        // Last line start <= offset (partition_point gives the count of starts
-        // that are <=, so -1 is that line's index; line_starts[0]=0 so >=1).
         let line = self.line_starts.partition_point(|&s| s <= offset) - 1;
         let line_start = self.line_starts[line];
         let mut pos = offset_to_position(&src[line_start..], offset - line_start);
@@ -123,7 +120,6 @@ pub(super) fn byte_offsets(src: &str, range: Range) -> (usize, usize) {
     (byte_offset(src, range.start), byte_offset(src, range.end))
 }
 
-/// A compiler span's `(line, col)` range as an LSP range.
 pub(super) fn span_range(s: &Span, text_of: TextOf<'_, '_>) -> Range {
     let text = text_of(s.file.as_str());
     Range::new(
@@ -132,7 +128,6 @@ pub(super) fn span_range(s: &Span, text_of: TextOf<'_, '_>) -> Range {
     )
 }
 
-/// The one-column range at a label-less error's location.
 pub(super) fn location_range(
     loc: &rock_core::source_code::LineCol,
     text_of: TextOf<'_, '_>,

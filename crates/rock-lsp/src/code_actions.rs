@@ -16,9 +16,7 @@ pub fn compute_code_actions_workspace(
 
     let mut actions: Vec<CodeAction> = Vec::new();
 
-    // Fill in missing enum match arms. When the non-exhaustive-match
-    // diagnostic is under the cursor, attach it so the editor offers this as
-    // the quick-fix for that error (lightbulb on the squiggle).
+    // Attach the non-exhaustive-match diagnostic so the editor offers this as its quick-fix.
     if let Some(fill) = workspace.bone.fill_match_arms(path, params.range.start) {
         let mut action = bone_edit_action(
             format!(
@@ -37,7 +35,6 @@ pub fn compute_code_actions_workspace(
         actions.push(action);
     }
 
-    // Fill in missing required struct-literal fields.
     if let Some(fill) = workspace.bone.fill_struct_fields(path, params.range.start) {
         actions.push(bone_edit_action(
             "Fill struct fields".to_string(),
@@ -47,7 +44,6 @@ pub fn compute_code_actions_workspace(
         ));
     }
 
-    // Inline a local: replace its uses with its initializer and delete the `let`.
     if let Some(inline) = workspace.bone.inline_local(path, params.range.start) {
         actions.push(bone_multi_edit_action(
             format!("Inline local `{}`", inline.var),
@@ -57,7 +53,6 @@ pub fn compute_code_actions_workspace(
         ));
     }
 
-    // Generate a stub for a call to an undeclared function.
     if let Some(stub) = workspace.bone.generate_function(path, params.range.start) {
         actions.push(bone_edit_action(
             format!("Generate function `{}`", stub.fn_name),
@@ -67,18 +62,12 @@ pub fn compute_code_actions_workspace(
         ));
     }
 
-    // Suppress a lint: insert `// rock: allow(<lint>)` above the offending line.
     actions.extend(try_suppress_lint_actions(workspace, params, uri, path));
 
     Ok((!actions.is_empty()).then_some(actions))
 }
 
-/// One "Suppress with `// rock: allow(<lint>)`" action per lint diagnostic under
-/// the cursor. Lint squiggles are identified by the `Diagnostic.code` field
-/// (a known lint name), not by message-sniffing; the matched diagnostic is
-/// attached so the editor offers this as THE fix for that squiggle. The insert
-/// goes on a new line directly above the offender, copying its leading
-/// whitespace so the comment lines up.
+/// Lint squiggles are identified by `Diagnostic.code`, not by message-sniffing.
 fn try_suppress_lint_actions(
     workspace: &LspWorkspace,
     params: &CodeActionParams,
@@ -112,8 +101,6 @@ fn try_suppress_lint_actions(
         .collect()
 }
 
-/// The lint name a bone diagnostic carries in its `code` field, iff it is one of
-/// the known lints. `None` for a non-lint diagnostic (type error, hole, ...).
 fn lint_name(d: &Diagnostic) -> Option<&'static str> {
     let lsp_types::NumberOrString::String(code) = d.code.as_ref()? else {
         return None;
@@ -124,16 +111,12 @@ fn lint_name(d: &Diagnostic) -> Option<&'static str> {
         .find(|k| *k == code.as_str())
 }
 
-/// The leading whitespace (spaces/tabs) of `line`.
 fn leading_whitespace(line: &str) -> String {
     line.chars()
         .take_while(|c| *c == ' ' || *c == '\t')
         .collect()
 }
 
-/// The bone diagnostics from the request context whose message contains `needle`
-/// and whose range overlaps the requested range -- the ones this quick-fix
-/// resolves. Returned so they can be attached to the `CodeAction.diagnostics`.
 fn matching_diagnostics(params: &CodeActionParams, needle: &str) -> Vec<Diagnostic> {
     params
         .context
@@ -148,13 +131,11 @@ fn matching_diagnostics(params: &CodeActionParams, needle: &str) -> Vec<Diagnost
         .collect()
 }
 
-/// LSP ranges (line/char, end-exclusive) overlap.
+/// LSP ranges are end-exclusive.
 fn ranges_overlap(a: Range, b: Range) -> bool {
     a.start <= b.end && b.start <= a.end
 }
 
-/// Build a single-edit `QUICKFIX` `CodeAction` for the bone backend: one
-/// `TextEdit` (range + new_text) on `uri`, wrapped in a `WorkspaceEdit`.
 fn bone_edit_action(
     title: String,
     uri: &lsp_types::Uri,
@@ -169,8 +150,6 @@ fn bone_edit_action(
     )
 }
 
-/// Build a multi-edit `CodeAction` of `kind` for the bone backend: several
-/// `TextEdit`s on one `uri`, wrapped in a `WorkspaceEdit`.
 fn bone_multi_edit_action(
     title: String,
     uri: &lsp_types::Uri,

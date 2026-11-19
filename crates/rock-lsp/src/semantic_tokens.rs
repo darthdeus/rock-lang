@@ -42,7 +42,6 @@ fn remap_bone_token_types(tokens: &mut lsp_types::SemanticTokens) {
     }
 }
 
-/// Get the semantic tokens legend for Rock
 pub fn get_semantic_tokens_legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: vec![
@@ -86,11 +85,7 @@ pub fn get_semantic_tokens_legend() -> SemanticTokensLegend {
     }
 }
 
-/// Minimal `SemanticTokensEdit` list turning `old` into `new`: the common
-/// prefix/suffix is unchanged, so one splice replaces the differing middle.
-/// `start`/`delete_count` are in FLAT integer units (5 per token), per the LSP
-/// spec (edits operate on the previous response's `data` array). Empty when the
-/// arrays are identical.
+/// `start`/`delete_count` are flat integer units (5 per token), per the LSP spec.
 pub fn semantic_tokens_delta_edits(
     old: &[SemanticToken],
     new: &[SemanticToken],
@@ -117,8 +112,6 @@ pub fn semantic_tokens_delta_edits(
     }]
 }
 
-/// Range semantic tokens: bone's viewport classifier, remapped to the
-/// advertised legend.
 pub(crate) fn range_semantic_tokens(
     workspace: &mut LspWorkspace,
     params: &SemanticTokensRangeParams,
@@ -131,8 +124,6 @@ pub(crate) fn range_semantic_tokens(
     Ok(Some(tokens))
 }
 
-/// Full-document semantic tokens: bone's tokenizer-based classifier (same one
-/// the CLI uses), remapped to the advertised legend.
 /// `uri` decodes to the key `bone.update` registers on didChange.
 pub fn compute_semantic_tokens_workspace(
     workspace: &mut LspWorkspace,
@@ -144,9 +135,7 @@ pub fn compute_semantic_tokens_workspace(
     Ok(tokens)
 }
 
-/// Full-document tokens, served from the cache while the document version is
-/// unchanged. A failed or empty recompute falls back to the cached tokens, so
-/// highlighting does not disappear while an edit is being recompiled.
+/// A failed or empty recompute falls back to the cached tokens.
 pub(crate) fn full_semantic_tokens(
     workspace: &mut LspWorkspace,
     params: &SemanticTokensParams,
@@ -174,8 +163,6 @@ pub(crate) fn full_semantic_tokens(
     }
 }
 
-/// Answers with edits against the array the client holds when its previous
-/// result id matches the cache, otherwise with the full array.
 pub(crate) fn delta_semantic_tokens(
     workspace: &mut LspWorkspace,
     params: &SemanticTokensDeltaParams,

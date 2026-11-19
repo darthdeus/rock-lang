@@ -1,7 +1,6 @@
-//! Type-directed completion over field and UFCS return edges. The index is
-//! reused across body edits. Type reachability alone cannot bound the number
-//! of access paths: chained diamonds have exponentially many simple paths.
-//! Query search therefore keeps ranked partition minima rather than all paths.
+//! Type-directed completion over field and UFCS return edges. Chained
+//! diamonds have exponentially many simple paths, so queries keep ranked
+//! partition minima rather than all paths.
 
 use bone_core::modules::{FragmentScope, NsVisibility};
 use bone_semantic::prelude::*;
@@ -11,10 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EdgeKind {
     Field,
-    /// A UFCS method. `takes_args` is true iff a parameter remains after the
-    /// receiver fills the first one -- such a method can only be the LAST hop of
-    /// a path (you cannot park a snippet hole mid-path), so it is never
-    /// traversed through.
+    /// `takes_args`: a parameter remains after the receiver. Such a method can
+    /// only be the last hop of a path, never traversed through.
     Method {
         takes_args: bool,
     },
@@ -25,8 +22,6 @@ struct Edge {
     kind: EdgeKind,
     /// Rendered type this edge leads to (a node key).
     target: Ustr,
-    /// The callable family member behind a method edge. Fields have no member
-    /// identity and therefore carry `None`.
     method: Option<MethodRef>,
     field: Option<FieldRef>,
 }
@@ -39,20 +34,15 @@ pub(crate) struct FieldRef {
     vis: NsVisibility,
 }
 
-/// One completed path from a root variable to a value of the expected type.
-/// `suffix` is the dotted access RELATIVE to the root variable, with `()` baked
-/// onto every INTERMEDIATE method hop but NOT the final one -- the caller
-/// renders the final hop (`field` / `method()` / `method($0)`) from the flags.
+/// `suffix` is relative to the root, with `()` on every intermediate method
+/// hop but not the final one; the caller renders the final hop from the flags.
 pub struct ReachPath {
     pub suffix: String,
     pub final_ty: String,
     pub is_method: bool,
     /// Only meaningful when `is_method`: the final method needs a snippet hole.
     pub takes_args: bool,
-    /// ANY hop on the path (intermediate or final) is a method call -- the
-    /// "method-chain" classification call-through's per-fn cap keys off
-    /// (`is_method` only describes the final hop; `x.foo().bar` traverses a
-    /// call but ends on a field).
+    /// Any hop is a method call; `is_method` describes only the final hop.
     pub via_call: bool,
     pub dist: u16,
     pub(crate) method_members: Vec<MethodRef>,
@@ -61,46 +51,35 @@ pub struct ReachPath {
 
 pub struct ReachResult {
     pub paths: Vec<ReachPath>,
-    /// True if the result cap clipped some paths (the caller logs this -- no
-    /// silent truncation).
+    /// The result cap clipped some paths.
     pub truncated: bool,
 }
 
-/// Edges out of each type. The pruning sets and shallow path stores derived
-/// from them are computed on first use: the index is rebuilt on every
-/// signature edit, while queries touch only a few expected and root types.
+/// Derived data is computed on first use: the index is rebuilt on every
+/// signature edit, while queries touch only a few types.
 pub struct ReachabilityIndex {
     #[cfg(test)]
     search_visits: std::sync::atomic::AtomicUsize,
     edges: HashMap<Ustr, Vec<Edge>>,
-    /// Predecessors of each type (one per edge), for the backward pruning
-    /// search.
     preds: FxHashMap<Ustr, Vec<Ustr>>,
-    /// Per expected-type set (sorted, deduplicated): every type with a path of
-    /// at least one edge to one of them. Prunes searches; it does not store
-    /// access paths.
+    /// Per sorted expected-type set: every type with a path to one of them.
+    /// Prunes searches only.
     reachers: Mutex<FxHashMap<Vec<Ustr>, Arc<FxHashSet<Ustr>>>>,
-    /// Shallow call-through argument paths, cached independently of the
-    /// expected-type search because their depth is bounded. One slot per
-    /// edge source, filled on first lookup.
+    /// Shallow call-through argument paths, filled on first lookup.
     arg_paths: FxHashMap<Ustr, OnceLock<Vec<ReachPath>>>,
 }
 
-/// Max depth for the precomputed `arg_paths` store. Call-through args are
-/// `root.field.field` / `root.method()` shaped (`player.movable.grid`), so depth
-/// 2 covers them; deeper paths would explode the store (the reason `paths_to`
-/// stays on-demand for the rare, deep member-completion case).
+/// Call-through args are `root.field.field` shaped; deeper paths would
+/// explode the store.
 const ARG_PATH_DEPTH: u16 = 2;
 
 impl ReachabilityIndex {
-    /// Build from a checked workspace: O(structs*fields + functions) to lay
-    /// edges and their predecessor lists. Derived data is filled per query.
+    /// Lays edges and predecessor lists; derived data is filled per query.
     pub fn build(ws: &Workspace) -> ReachabilityIndex {
         let mut edges: HashMap<Ustr, Vec<Edge>> = HashMap::new();
 
-        // Field edges: `S -.field-> render(field.ty)` for every struct field.
-        // Keyed by the struct's bare name, which is exactly how a value of that
-        // struct type renders (so it matches a root variable's rendered type).
+        // Keyed by the struct's bare name, which is how a value of that struct
+        // type renders.
         for m in ws.modules.iter() {
             for (&src, &sid) in &m.struct_by_name {
                 let s = &m.structs[sid];
@@ -119,8 +98,6 @@ impl ReachabilityIndex {
             }
         }
 
-        // Index each UFCS function with a struct receiver and non-unit result
-        // once, for reuse across roots and queries.
         for m in ws.modules.iter() {
             for (fid, f) in m.functions.iter() {
                 if bone_core::modules::display_name(f.name.as_str()).starts_with("__") {
@@ -129,9 +106,8 @@ impl ReachabilityIndex {
                 let Some(p0) = f.param_decls.first() else {
                     continue;
                 };
-                // Keep the original graph limited to direct nominal receiver
-                // types. Arrays and other builtin constructors use separate
-                // completion paths and would flood the generic reach graph.
+                // Arrays and other builtin constructors use separate completion paths
+                // and would flood the reach graph.
                 if crate::types::nominal_name(ws, None, p0.ty).is_none() {
                     continue;
                 }
@@ -171,10 +147,7 @@ impl ReachabilityIndex {
         }
     }
 
-    /// Precomputed depth-`<= ARG_PATH_DEPTH` reach paths from a value of `ty` to
-    /// any type -- a lookup (no DFS). The call-through arg expansion filters
-    /// these by the wanted param type. Empty for a scalar / leaf type. Peels a
-    /// nullable `?` so a `Foo?` root matches the `Foo`-keyed store.
+    /// Peels a nullable `?` so a `Foo?` root matches the `Foo`-keyed store.
     pub(crate) fn arg_paths_from(&self, ty: &str) -> &[ReachPath] {
         let key = Ustr::from(ty.strip_suffix('?').unwrap_or(ty));
         self.arg_paths.get(&key).map_or(&[], |slot| {
@@ -198,9 +171,8 @@ impl ReachabilityIndex {
         })
     }
 
-    /// The same shallow paths, restricted to callable members admitted by a
-    /// modules-v1 fragment. The cached graph is workspace-wide; visibility is
-    /// a property of the request site, so it is applied at read time.
+    /// Visibility is a property of the request site, so it is applied at read
+    /// time to the workspace-wide cache.
     pub(crate) fn arg_paths_in_scope(
         &self,
         ws: &Workspace,
@@ -213,8 +185,6 @@ impl ReachabilityIndex {
             .collect()
     }
 
-    /// Types with a path of at least one edge to any of `want`, by a backward
-    /// search from `want`, memoized per expected-type set.
     fn reachers_of(&self, want: &[Ustr]) -> Arc<FxHashSet<Ustr>> {
         let mut key = want.to_vec();
         key.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -281,9 +251,8 @@ impl ReachabilityIndex {
                 break;
             }
             result.paths.push(self.materialize_path(&path));
-            // Partition alternatives by their first different edge (or stop).
-            // Each partition contributes only its minimum, so we never enumerate
-            // every path before applying the requested rank/cap.
+            // Each partition by first different edge contributes only its minimum,
+            // so we never enumerate every path before applying the rank and cap.
             for split in prefix.len()..=path.len() {
                 let alternative_prefix = path[..split].to_vec();
                 let mut alternative_blocked = if split == prefix.len() {
@@ -442,12 +411,8 @@ impl ReachabilityIndex {
     }
 }
 
-/// Build-time enumeration of every depth-`<= ARG_PATH_DEPTH` access path from
-/// `cur` to any type (simple-path cycle-guarded). Uses the query suffix shaping
-/// (`suffix` is the bare access path; `is_method`/`takes_args` let the caller
-/// render the final `()`), but is UNGUIDED (no `want` target -- it records every
-/// reachable type, since the query's wanted type isn't known at build time) and
-/// depth-capped (deeper paths would explode the store).
+/// Unguided (records every reachable type) and depth-capped: deeper paths
+/// would explode the store.
 fn enumerate_arg_paths(
     edges: &HashMap<Ustr, Vec<Edge>>,
     cur: Ustr,
@@ -461,7 +426,6 @@ fn enumerate_arg_paths(
 ) {
     let Some(outs) = edges.get(&cur) else { return };
     for e in outs {
-        // Simple-path cycle guard: never re-enter a type already on this path.
         if on_path.contains(&e.target) {
             continue;
         }
@@ -492,8 +456,7 @@ fn enumerate_arg_paths(
             method_members: next_methods.clone(),
             field_members: next_fields.clone(),
         });
-        // Descend through traversable edges (fields + no-arg methods) until the
-        // depth cap. An args-taking method ends the path (can't chain through it).
+        // An args-taking method ends the path.
         let traversable = matches!(
             e.kind,
             EdgeKind::Field | EdgeKind::Method { takes_args: false }
@@ -555,10 +518,8 @@ pub(crate) fn fields_admitted(ws: &Workspace, frag: &FragmentScope, fields: &[Fi
     })
 }
 
-/// Canonical graph-node key for a type: its bare nominal name when it is a
-/// nominal type (struct/enum, peeling any nullable `?`), else the rendered form
-/// (scalars like `int`). Canonicalizing is what lets traversal follow a `next:
-/// Node?` or `movable: Movable` field edge to the struct keyed by its bare name.
+/// Bare nominal name (peeling `?`), else the rendered form, so a `next:
+/// Node?` field edge reaches the `Node` key.
 pub(crate) fn type_key(ws: &Workspace, ty: TyId) -> Ustr {
     type_key_in_body(ws, None, ty)
 }

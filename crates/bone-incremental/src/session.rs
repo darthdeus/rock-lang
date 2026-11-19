@@ -15,15 +15,11 @@ use bone_semantic::{
 
 use crate::span_shift;
 
-/// Re-exported because it is part of [`Session::new`]'s signature: a caller
-/// that builds a session needs the alias table type without depending on
-/// `bone-core` directly.
 pub use bone_core::modules::NsAliases;
 
 /// Unique identifier of a Body across all modules.
 pub type BodyId = (ModuleId, BodyOwner);
 
-/// The source-coordinate change carried with one incremental body update.
 pub use bone_core::text_edit::TextEditDelta;
 
 /// The semantic part of a body-only update, kept separate from coordinate
@@ -46,8 +42,6 @@ pub enum UpdateTier {
     FullUser,
 }
 
-/// Result of a session update. Stores the type of update, and all the bodies
-/// that were reinferred.
 #[derive(Clone, Debug, Default)]
 pub struct UpdateResult {
     pub tier: UpdateTier,
@@ -56,7 +50,6 @@ pub struct UpdateResult {
     pub body_update: BodyUpdate,
 }
 
-/// Namespace changes keyed by the facts recorded as scope probes.
 #[derive(Clone, Debug, Default)]
 struct ScopeDelta {
     members: FxHashSet<(u32, Ustr, Ustr)>,
@@ -87,8 +80,6 @@ impl ScopeDelta {
         }
     }
 
-    /// Diff two assembled trees (`old` and `new` hold `ns.packages`, `defs`
-    /// and `fragment_scopes`).
     fn between(old: &Workspace, new: &Workspace) -> Self {
         let mut delta = ScopeDelta::default();
 
@@ -178,7 +169,6 @@ impl ScopeDelta {
     }
 }
 
-/// The keys whose entries differ between two maps, a missing entry included.
 fn changed_keys<V: PartialEq>(old: &FxHashMap<Ustr, V>, new: &FxHashMap<Ustr, V>) -> Vec<Ustr> {
     changed_keys_by(old, new, PartialEq::eq)
 }
@@ -202,11 +192,9 @@ const MAX_KEPT_ARENA_GROWTH: usize = 16;
 /// Reuse the warm-only workspace when no user macro can affect warm expansion.
 #[derive(Clone, Debug)]
 enum WarmBase {
-    /// Not built yet: every build so far had a collision.
     Unbuilt,
     Clean(Box<Workspace>),
-    /// The warm modules alone were refused or report a diagnostic, so they
-    /// may name a user definition; never reused.
+    /// The warm modules alone were refused or report a diagnostic; never reused.
     Unusable,
 }
 
@@ -218,14 +206,8 @@ pub struct Session {
     pub warm_mids: FxHashSet<ModuleId>,
     pub paths: Vec<String>,
     pub files: FxHashMap<String, UserFile>,
-    /// Reverse dep index: name -> modules whose bodies reference it. Used by
-    /// `rebuild_interface` to find which modules to re-infer on an interface edit.
     pub dependents: FxHashMap<Ustr, FxHashSet<ModuleId>>,
-    /// Forward dep index: module -> the names its bodies reference. The inverse
-    /// of `dependents`, kept so a body edit can update just the edited module's
-    /// entry in O(its deps) instead of rescanning the whole workspace.
     module_dep_names: FxHashMap<ModuleId, FxHashSet<Ustr>>,
-    /// Reverse dependencies from type names to interfaces that mention them.
     dependents_iface: FxHashMap<Ustr, FxHashSet<ModuleId>>,
     /// Independent of inference: even a module with body errors has interface
     /// deps. Invalidated when its lowered interface is replaced or purged.
@@ -233,20 +215,13 @@ pub struct Session {
     pub registry: MacroRegistry,
     /// Warm macro signatures, captured before expansion removes their definitions.
     warm_macros: Vec<(Ustr, MacroDef)>,
-    /// The package graph's alias tables, kept because every O(workspace)
-    /// rebuild runs `build_namespaces` again and needs them.
     pub aliases: bone_core::modules::NsAliases,
-    /// The warm modules lowered and inferred alone, before any user file or
-    /// namespace tree entered the workspace, which a build starts from
-    /// instead of re-lowering the stdlib -- when that equals lowering them
+    /// The warm modules lowered alone, reused only when that equals lowering them
     /// with the user files (see [`WarmBase`]).
     warm_base: WarmBase,
-    /// The names through which a user file can reach a warm module.
     warm_names: bone_semantic::stdlib_base::WarmNames,
-    /// The warm modules' namespace contributions (the `std` root), computed
-    /// once: warm ASTs are immutable. User files keep theirs on `UserFile`.
+    /// Computed once: warm ASTs are immutable.
     warm_contributions: Vec<FragmentContribution>,
-    /// Keep host package facts even when a new file fails to enter the session.
     declared_facts: FxHashMap<String, (Option<PackageTag>, GlobalPolicy)>,
 }
 
@@ -256,12 +231,10 @@ pub struct SessionFile {
     pub path: String,
     pub text: String,
     pub package: Option<PackageTag>,
-    /// The owning package's mutable-global policy, which every re-parse keeps.
     pub global_policy: GlobalPolicy,
 }
 
 impl SessionFile {
-    /// Retain the source loader's package facts across reparses.
     pub fn from_source(source: &rock_core::SourceFile) -> Self {
         Self {
             path: source.file.to_id_path(),
@@ -287,24 +260,16 @@ pub struct UserFile {
     text_hash: u64,
     item_prints: Vec<ItemPrint>,
     pub text: String,
-    /// Keep macro signatures for editor queries after expansion.
     pub macros: Vec<MacroDef>,
-    /// The package that owns this file, from the package graph.
     package: Option<PackageTag>,
-    /// Retained across full and single-item reparses.
     global_policy: GlobalPolicy,
     /// Recovery keeps the partial tree queryable while diagnostics retain its syntax errors.
     syntax_errors: Vec<CompilerError>,
-    /// Hash of what this file contributes to the namespace tree: the `mod` header, every `use`,
-    /// and each definition's name, kind and visibility (see [`scope_hash`]).
     scope_hash: u64,
-    /// What this file contributes to the namespace tree, kept so a scope
-    /// edit re-assembles the tree without re-parsing any other file.
     pub contribution: FragmentContribution,
 }
 
-/// One parameter of a macro definition, rendered at parse time (the AST is
-/// transient, so the type is stored as surface text rather than an arena index).
+/// The type is stored as surface text because the AST is transient.
 #[derive(Clone, Debug)]
 pub struct MacroParam {
     pub name: Ustr,
@@ -312,13 +277,11 @@ pub struct MacroParam {
     pub ty: String,
 }
 
-/// A macro definition (`macro foo(...) { ... }`) recovered at parse time before
-/// expansion drops it from the cooked module. Holds what navigation/ctags need:
-/// name, definition name-span, parameter signature, and return type.
+/// A macro definition recovered at parse time, before expansion drops it.
 #[derive(Clone, Debug)]
 pub struct MacroDef {
     pub name: Ustr,
-    /// The macro NAME's span -- shifted incrementally on fast body edits.
+    /// Shifted incrementally on fast body edits.
     pub span: Span,
     pub params: Vec<MacroParam>,
     pub ret: Option<String>,
@@ -340,13 +303,9 @@ struct ItemPrint {
     iface_hash: u64,
     body_hash: Option<u64>,
     offset: usize,
-    /// Full item span (covers leading annotations) -- the incremental body-edit fast path
-    /// slices `text[item_span]` to re-parse just this item, and reads its line/col as the
-    /// `parse_one_item` base.
+    /// Covers leading annotations; the body-edit fast path re-parses `text[item_span]`.
     item_span: Span,
-    /// Byte range of the function's body BLOCK (Rock-bodied fns only) -- an edit
-    /// strictly inside it is a pure body edit. `None` for non-fn / lua / extern /
-    /// macro items, which the fast path never takes.
+    /// Body block of a Rock-bodied fn: an edit strictly inside it is a pure body edit.
     body_range: Option<(usize, usize)>,
 }
 
@@ -355,7 +314,6 @@ enum FileDiff {
     Interface,
 }
 
-/// Reject declaration collisions before expansion removes macro definitions.
 fn reject_macro_name_collisions(modules: &ModuleSet) -> Result<(), CompilerError> {
     check_macro_name_uniqueness(modules.iter())
         .into_iter()
@@ -363,7 +321,6 @@ fn reject_macro_name_collisions(modules: &ModuleSet) -> Result<(), CompilerError
         .map_or(Ok(()), Err)
 }
 
-/// See [`UserFile::scope_hash`].
 fn scope_hash(contribution: &FragmentContribution) -> u64 {
     use std::hash::{Hash, Hasher};
 
@@ -381,9 +338,8 @@ fn scope_hash(contribution: &FragmentContribution) -> u64 {
     h.finish()
 }
 
-/// What namespace assembly reads from a cooked contribution. Signatures,
-/// fields and bodies are left out -- an edit to them keeps every DefKey and
-/// stays on the interface path.
+/// Signatures, fields and bodies are left out: an edit to them keeps every
+/// DefKey and stays on the interface path.
 fn scope_items(
     items: &[bone_semantic::semantic_passes::ScopeItem],
     depth: usize,
@@ -588,9 +544,6 @@ fn name_shapes(prints: &[ItemPrint]) -> FxHashMap<Ustr, u64> {
         .collect()
 }
 
-/// Parse `text` and tag the module with its owning package. Every session parse
-/// goes through here (or [`Session::parse_stored`], which reads the facts back
-/// off the file).
 fn parse_with_facts(
     text: &str,
     file: Ustr,
@@ -625,9 +578,6 @@ impl Session {
             .chain(self.warm_macros.iter().map(|(f, d)| (*f, d)))
     }
 
-    /// `aliases` are the host package graph's dependency-alias tables, the same
-    /// input `semantic_pass_with_aliases` takes. A standalone-only session
-    /// passes the default (empty) table.
     pub fn new(
         warm: impl Into<Arc<[Ast]>>,
         files: Vec<SessionFile>,
@@ -669,9 +619,6 @@ impl Session {
         session.warm_names =
             bone_semantic::stdlib_base::warm_names(&session.warm, &session.warm_contributions);
 
-        // Parse each file once for its prints/macros AND keep the module to feed
-        // lowering directly -- avoids a second parse via `combined_unexpanded`,
-        // which re-parses (the AST is transient and not persisted).
         let mut user_modules: Vec<Ast> = Vec::new();
         for SessionFile {
             path,
@@ -691,18 +638,15 @@ impl Session {
             let module =
                 parse_with_facts(&text, ustr(path.as_str()), package.clone(), global_policy)?;
 
-            // Looked up, not interned: user modules take their ids when they
-            // lower, after the warm modules, so a warm-alone build
-            // (`warm_base`) interns the warm modules alone.
+            // Looked up, not interned: user modules take their ids after the warm
+            // modules, so a warm-alone build interns the warm modules alone.
             if session
                 .ws
                 .module_ids
                 .get(&module.file)
                 .is_some_and(|mid| session.warm_mids.contains(mid))
             {
-                // A stdlib file present in the initial set IS the warm module --
-                // skip the user copy (adding it would self-collide on every
-                // stdlib type); the warm build already covers it.
+                // A stdlib file in the initial set is the warm module; a user copy would self-collide.
                 continue;
             }
 
@@ -742,9 +686,7 @@ impl Session {
         Ok(session)
     }
 
-    /// Re-parse every user file from its stored text and prepend the (immutable, pre-parsed)
-    /// warm modules -- the un-expanded module set the full-rebuild path (`rebuild_users`) feeds
-    /// to `expand_and_desugar`.
+    /// Every user file re-parsed from stored text, after the warm modules, unexpanded.
     pub fn combined_unexpanded(&self) -> Result<ModuleSet, CompilerError> {
         let users = self
             .paths
@@ -754,8 +696,6 @@ impl Session {
         Ok(ModuleSet::new(self.warm.clone(), users))
     }
 
-    /// The package facts recorded for `path`: a held file's own, else what the host declared
-    /// for it.
     fn facts_of(&self, path: &str) -> (Option<PackageTag>, GlobalPolicy) {
         match self.files.get(path) {
             Some(f) => (f.package.clone(), f.global_policy),
@@ -767,9 +707,7 @@ impl Session {
         }
     }
 
-    /// Parse `text` as a buffer of `path`, with the package facts a
-    /// stored copy of it carries. A recovery reparse of an editor buffer goes
-    /// through here: parsed with the same package facts as the stored file.
+    /// Parse `text` as a buffer of `path`, with the package facts its stored copy carries.
     pub fn parse_buffer(&self, path: &str, text: &str) -> Result<Ast, CompilerError> {
         let (package, global_policy) = self.facts_of(path);
         parse_with_facts(text, ustr(path), package, global_policy)
@@ -799,7 +737,6 @@ impl Session {
         Ok(())
     }
 
-    /// Re-parse `path` from its stored text with its own facts.
     fn parse_stored(&self, path: Ustr) -> Result<Ast, CompilerError> {
         let (package, global_policy) = self.facts_of(path.as_str());
         parse_with_facts(
@@ -833,9 +770,6 @@ impl Session {
     }
 
     pub fn update_file(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
-        // Reset the work counters so callers can read EXACTLY how many bodies
-        // this update re-inferred (check_module_incremental bumps it) and
-        // re-lowered (the lowering passes bump it).
         self.ws
             .reinferred_body_count
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -893,8 +827,6 @@ impl Session {
 
         let new_scope = scope_hash(&new_contribution);
 
-        // An edit that changes what the namespace tree or the fragment scopes
-        // are built from (`UserFile::scope_hash`) takes the scope path.
         let scope_changed = self
             .files
             .get(path)
@@ -933,9 +865,8 @@ impl Session {
         })
     }
 
-    /// Whether `module` defines a top-level function under a name some macro
-    /// of the session also has: the whole-program `check_macro_name_uniqueness`
-    /// refuses that, and only the full rebuild runs it.
+    /// `check_macro_name_uniqueness` refuses a function named like a macro, and only
+    /// the full rebuild runs it.
     fn defines_a_function_named_like_a_macro(&self, module: &Ast) -> bool {
         let macro_names: FxHashSet<Ustr> = self.all_macro_defs().map(|(_, d)| d.name).collect();
         if macro_names.is_empty() {
@@ -946,8 +877,7 @@ impl Session {
         })
     }
 
-    /// Build from unexpanded inputs. Namespace assembly must precede expansion
-    /// and lowering so files can resolve module paths and uses.
+    /// Namespace assembly must precede expansion and lowering.
     fn build(
         &mut self,
         unexpanded: ModuleSet,
@@ -984,16 +914,12 @@ impl Session {
             &self.aliases,
         )?;
         let mids = lower_and_infer(&mut ws, &lowered)?;
-        // The same whole-program gate the batch path runs, so an export whose type closure is
-        // not public fails in a session too rather than only under `rock compile`.
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
         ws.phase_timings.clear();
         self.set_cooked_contributions(user_contributions, warm_contributions);
         Ok((ws, mids[first_user..].to_vec()))
     }
 
-    /// The warm-alone workspace, built on first need; `None` when the warm
-    /// modules alone are refused or report a diagnostic (see [`WarmBase`]).
     fn warm_alone(
         &mut self,
         cooked: &[Ast],
@@ -1021,9 +947,8 @@ impl Session {
         }
     }
 
-    /// Every file's namespace contribution in module order: the warm modules,
-    /// then the user files in tracking order -- the order `build_namespaces`
-    /// reads a fresh build's modules in, so a rejection names the same file.
+    /// In the order `build_namespaces` reads a fresh build's modules, so a rejection
+    /// names the same file.
     fn contributions(&self) -> Vec<&FragmentContribution> {
         self.warm_contributions
             .iter()
@@ -1051,7 +976,6 @@ impl Session {
             bone_semantic::stdlib_base::warm_names(&self.warm, &self.warm_contributions);
     }
 
-    /// Reassemble the namespace and use changed scope probes to find affected files.
     fn rebuild_scope(
         &mut self,
         module: Ast,
@@ -1073,7 +997,6 @@ impl Session {
         self.rebuild_interface(module, changed, delta, UpdateTier::Scope, false)
     }
 
-    /// User modules other than `except` whose lowering read a fact in `delta`.
     fn modules_reading(&self, delta: &ScopeDelta, except: ModuleId) -> FxHashSet<ModuleId> {
         if delta.is_empty() {
             return FxHashSet::default();
@@ -1088,7 +1011,6 @@ impl Session {
             .collect()
     }
 
-    /// Re-lower modules whose scopes changed and re-infer callers of changed definitions.
     fn rebuild_interface(
         &mut self,
         module: Ast,
@@ -1153,17 +1075,14 @@ impl Session {
             }
         }
         to_relower.extend(self.modules_reading(&delta, mid));
-        // Plus every module currently carrying an interface error, so a type that (re)appears
-        // with this edit re-lowers its previously-dangling users and clears them.
+        // Modules with interface errors re-lower so a reappearing type clears them.
         for m in self.ws.user_modules(&self.warm_mids) {
             if m.id != mid && !m.interface_errors.is_empty() {
                 to_relower.insert(m.id);
             }
         }
 
-        // Re-parse each closure module from its stored text (the edited module
-        // uses the provided AST); cook + lower them together with the edited
-        // module so intra-closure and closure->kept references resolve.
+        // Lower the closure with the edited module so references between them resolve.
         let mut edited = module;
         cook_one(&mut edited, &self.registry)?;
         let mut asts: Vec<Ast> = Vec::with_capacity(to_relower.len() + 1);
@@ -1216,10 +1135,7 @@ impl Session {
             reinfer_names.extend(module.global_by_name.keys().copied());
         }
 
-        // Re-infer: body-dependents of `reinfer_names` (their TEXT is unchanged, so body-
-        // granular reuse applies), every module with a stale inference error, AND every re-
-        // lowered module (its arena shifted, so its cached inference -- already cleared by
-        // `retain_modules` -- can't be reused).
+        // Re-lowered modules cannot reuse inference: their arena shifted.
         let mut to_reinfer: FxHashSet<ModuleId> = reinfer_names
             .iter()
             .flat_map(|n| self.dependents.get(n).into_iter().flatten().copied())
@@ -1231,17 +1147,13 @@ impl Session {
         }
         to_reinfer.extend(f_mids.iter().copied());
 
-        // `ws.modules` is append-only (`retain_modules` only nulls inference
-        // slots / prunes name maps, never shrinks the vec), and `ModuleId` is its
-        // dense index -- so existence is an O(1) bounds check, not an O(modules)
-        // scan per dependent.
+        // `ws.modules` is append-only and `ModuleId` is its dense index.
         let ids: Vec<ModuleId> = to_reinfer
             .iter()
             .copied()
             .filter(|m| m.index() < self.ws.modules.len())
             .collect();
 
-        // Reuse successful function checks whose dependencies did not change.
         let mut reused: FxHashSet<BodyId> = FxHashSet::default();
         let prevs: Vec<(ModuleId, InferenceResult)> = ids
             .iter()
@@ -1267,9 +1179,7 @@ impl Session {
                 (*id, prev)
             })
             .collect();
-        // check_module_incremental reads ws immutably (declared signatures from
-        // the HIR, not inference results), so dependents re-check in parallel --
-        // mirroring the full pipeline's `infer_modules`.
+        // check_module_incremental reads ws immutably, so dependents re-check in parallel.
         let results: Vec<_> = prevs
             .into_par_iter()
             .map(|(id, prev)| {
@@ -1284,15 +1194,11 @@ impl Session {
             self.ws.set_inference(id, inf);
         }
 
-        // The same whole-program gate `rebuild_users` runs: a signature edit
-        // alone can export a type whose closure is not public. It reads only
-        // definitions and their signatures, and is a no-op with no v1 package.
+        // A signature edit alone can export a type whose closure is not public.
         bone_semantic::semantic_passes::pass_validate_api_closure(&self.ws)?;
 
         self.rebuild_dependents();
 
-        // `ids` already contains `f_mids`, so it covers `reinferred`, minus the bodies reused
-        // above.
         let mut reinferred = self.collect_reinferred(&ids);
         reinferred.retain(|body| !reused.contains(body));
         let relowered = self.collect_reinferred(&f_mids);
@@ -1311,9 +1217,7 @@ impl Session {
 
     pub fn diagnostics(&self) -> Vec<CompilerError> {
         let mut errs = body_errors(&self.ws);
-        // Recovered syntax errors from each file's total parse. The compile path
-        // rejects on these; the interactive path keeps the partial tree AND shows
-        // them here, so a broken file gets both best-effort features and a squiggle.
+        // The interactive path keeps the partial tree and reports its recovered syntax errors.
         errs.extend(
             self.files
                 .values()
@@ -1341,9 +1245,8 @@ impl Session {
         self.ws.enums_by_name.retain(|_, id| keep(id.module));
         self.ws.newtypes_by_name.retain(|_, id| keep(id.module));
 
-        // The arity/defaults facts owned by evicted modules go with them; a
-        // re-lowered module re-inserts its own. Facts owned by kept modules
-        // stay, so a kept first definer still wins over a re-lowered duplicate.
+        // Facts owned by kept modules stay, so a kept first definer still wins over a
+        // re-lowered duplicate.
         self.ws.type_generics.retain(|_, entry| keep(entry.owner));
 
         self.ws.functions_by_name.retain(|_, fns| {
@@ -1355,7 +1258,6 @@ impl Session {
         // Rebuild both global indexes so a removed const stops restricting assignments.
         self.ws.const_globals.clear();
 
-        // Skip evicted
         for module in self.ws.modules.iter().filter(|m| keep(m.id)) {
             for (_, g) in module.globals.iter() {
                 self.ws.globals_by_name.insert(g.name, g.ty);
@@ -1367,13 +1269,11 @@ impl Session {
     }
 
     pub fn rebuild_users(&mut self) -> Result<UpdateResult, CompilerError> {
-        // Build off to the side. A failed lowering may intern ids without inserting modules.
+        // A failed lowering may intern ids without inserting modules.
         let unexpanded = self.combined_unexpanded()?;
         let registry = collect_registry(unexpanded.iter());
         reject_macro_name_collisions(&unexpanded)?;
         let (mut ws, user_mids) = self.build(unexpanded, &registry)?;
-        // Host-resolved build variables, set once on the workspace when the
-        // session was made; nothing in this rebuild derives them again.
         ws.comptime_inputs = self.ws.comptime_inputs.clone();
 
         // Commit -- past this point nothing fails, so `self.ws` never observes a
@@ -1397,9 +1297,6 @@ impl Session {
         })
     }
 
-    /// Full O(workspace) rebuild of both dep indices. For the full-rebuild paths
-    /// (`Session::new`, `rebuild_users`, `rebuild_module`, `rebuild_interface`);
-    /// a single-body edit uses `update_dependents_for` instead.
     fn rebuild_dependents(&mut self) {
         self.dependents.clear();
         self.module_dep_names.clear();
@@ -1430,7 +1327,6 @@ impl Session {
         }
     }
 
-    /// A body edit changes only the edited module's outgoing dependencies.
     fn update_dependents_for(&mut self, mid: ModuleId) {
         if !Workspace::is_user_module(mid, &self.warm_mids) {
             return;
@@ -1560,7 +1456,6 @@ impl Session {
         })
     }
 
-    /// Reparse just one item when the edit stays within its function body.
     fn try_incremental_body_edit(
         &mut self,
         path: &str,
@@ -1596,17 +1491,13 @@ impl Session {
         };
         mini.package = old.package.clone();
         mini.global_policy = old.global_policy;
-        // The parse is total now; a recovered (partial) item must NOT be installed
-        // in place. Bail to the full reparse, which keeps the best-effort tree and
-        // records the recovery error as a diagnostic.
+        // A recovered (partial) item must not be installed in place.
         if !mini.recovery_errors.is_empty() {
             return Ok(None);
         }
         cook_one(&mut mini, &self.registry)?;
 
-        // The re-parsed item must be exactly one function with the SAME name and
-        // interface; otherwise the "body edit" actually moved the interface and
-        // the full path must classify/route it.
+        // A changed name or interface must go through the full path's classification.
         let mut mini_prints = item_prints(&mini, new_text);
         if mini_prints.len() != 1 {
             return Ok(None);
@@ -1622,7 +1513,6 @@ impl Session {
             return Ok(None);
         }
 
-        // Resolve the HIR body + spans (non-mutating). Bail if anything is off.
         let Some(&mid) = self.ws.module_ids.get(&ustr(path)) else {
             return Ok(None);
         };
@@ -1674,8 +1564,7 @@ impl Session {
         let file = ast.file;
         let mid = self.ws.module_ids[&file];
 
-        // New start of the edited item: equal to its old start, so bdy_at of old still
-        // resolves to the right owner
+        // Equal to the old start, so bdy_at of old still resolves to the right owner.
         let new_start = self.files[path].item_prints[changed_idx].offset;
 
         let owner = match self.ws.module(mid).body_at(new_start) {
@@ -1683,16 +1572,12 @@ impl Session {
             None => return self.rebuild_module(path, ast, &[changed_idx]),
         };
 
-        // Only functions take the fast path (for now)
-        // TODO: also handle globals
         let BodyOwner::Function(fid) = owner else {
             return self.rebuild_module(path, ast, &[changed_idx]);
         };
 
         let old_fn_span = self.ws.module(mid).functions[fid].span;
 
-        // Extract the new fn span as an owned value so the borrow into `ast`
-        // ends before the fallback may move `ast` into `rebuild_module`.
         let new_fn_span_opt = ast
             .items
             .iter()
@@ -1706,8 +1591,6 @@ impl Session {
             None => return self.rebuild_module(path, ast, &[changed_idx]),
         };
 
-        // The threaded full-module AST is not persisted, so it is cooked in
-        // place.
         let mut edited = ast;
         let t_cook = Instant::now();
         if !cooked {
@@ -1794,9 +1677,7 @@ impl Session {
         })
     }
 
-    /// The module's whole type arena as a seed for its next lowering, or `None`
-    /// once earlier lowerings have piled up enough dead entries that the edit
-    /// should re-lower from empty (and re-infer every caller) to reclaim them.
+    /// `None` once dead entries piled up enough that the edit should re-lower from empty.
     fn kept_type_arena(&self, mid: ModuleId) -> Option<TypeArenaSeed> {
         let module = self.ws.module(mid);
         let total = module.ty_arena.len();
@@ -1895,9 +1776,7 @@ impl Session {
     }
 }
 
-/// The macro definitions in a freshly-parsed module (Functions with `is_macro`),
-/// with their parameter/return types rendered to surface text while the AST (and
-/// its type arena) is still alive -- expansion will drop them from the module.
+/// Types are rendered while the AST is alive; expansion drops macros from the module.
 fn macro_defs(module: &Ast) -> Vec<MacroDef> {
     module
         .items
@@ -1928,7 +1807,6 @@ fn macro_defs(module: &Ast) -> Vec<MacroDef> {
         .collect()
 }
 
-/// Does any macro defined by the old or new version appear in the changed-name set?
 fn touches_macro(
     old_macros: &[MacroDef],
     new_macros: &[MacroDef],
@@ -2000,10 +1878,7 @@ fn item_names(module: &Module) -> Vec<Ustr> {
     names
 }
 
-/// The index of the single item whose function BODY block strictly contains the
-/// edit region `[es, oe)`, or `None` if the edit touches a signature, spans
-/// items, or lands between them (body ranges are disjoint, so at most one matches
-/// -- the extra guard is defensive).
+/// The single item whose fn body block strictly contains `[es, oe)`.
 fn locate_body_edit(prints: &[ItemPrint], es: usize, oe: usize) -> Option<usize> {
     let mut found = None;
     for (i, p) in prints.iter().enumerate() {
@@ -2019,10 +1894,6 @@ fn locate_body_edit(prints: &[ItemPrint], es: usize, oe: usize) -> Option<usize>
     found
 }
 
-/// New per-item prints after a body edit: items before `idx` are unchanged, `idx`
-/// is replaced with the re-parsed `np` (already absolute), and every item after
-/// `idx` (all past `shift.at`) moves by `shift` -- so the next edit still
-/// locates correctly without a whole-file reparse.
 fn build_shifted_prints(
     mut prints: Vec<ItemPrint>,
     idx: usize,
@@ -2156,7 +2027,6 @@ fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
     out
 }
 
-/// Resolve a `TyId` to a canonical, `ty_arena`-index-independent shape string.
 #[cfg(debug_assertions)]
 fn render_ty(ws: &Workspace, ty: &bone_semantic::hir::TyId) -> String {
     use bone_semantic::hir::TyId;

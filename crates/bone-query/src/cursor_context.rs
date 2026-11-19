@@ -9,20 +9,16 @@ use ustr::Ustr;
 
 pub(crate) struct CursorAst {
     ast: skull_parser::Ast,
-    /// The candidate text the winning parse ran on -- span offsets in the
-    /// AST index into THIS buffer, not the live one.
+    /// Span offsets in the AST index into this buffer, not the live one.
     text: String,
     chain: Vec<Idx<ExprData>>,
-    /// Where to look up the cursor node. Equal to the live cursor offset for
-    /// the insertion munges (the sentinel starts there); the RUN START for
-    /// the token-replacement munge (the sentinel replaces the whole run).
+    /// The live cursor for the insertion munges; the run start for the
+    /// token-replacement munge, whose sentinel replaces the whole run.
     probe: usize,
 }
 
-/// Replace the identifier/number run around the cursor with the sentinel.
-/// Recovers the digit-glue class: insertion produces `1__rock_completion__`,
-/// which fails tokenize and drops the statement; replacement yields a clean
-/// ident. Returns the munged source + the probe offset (the run's start).
+/// Insertion yields `1__rock_completion__`, which fails tokenize and drops
+/// the statement; replacement yields a clean ident.
 fn token_replacement_munge(src: &str, offset: usize) -> Option<(String, usize)> {
     let b = src.as_bytes();
     let tok = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
@@ -35,7 +31,7 @@ fn token_replacement_munge(src: &str, offset: usize) -> Option<(String, usize)> 
         e += 1;
     }
     if s == e {
-        return None; // nothing to replace; the insertion munges cover it
+        return None;
     }
     let mut out = String::with_capacity(src.len() + 24);
     out.push_str(&src[..s]);
@@ -44,7 +40,6 @@ fn token_replacement_munge(src: &str, offset: usize) -> Option<(String, usize)> 
     Some((crate::completion::classify::balance_delimiters(out), s))
 }
 
-/// Offset of the `}` matching the `{` at `open` (None when unbalanced).
 fn matching_brace(b: &[u8], open: usize) -> Option<usize> {
     let mut depth = 0i32;
     for (i, &c) in b.iter().enumerate().skip(open) {
@@ -64,24 +59,19 @@ fn matching_brace(b: &[u8], open: usize) -> Option<usize> {
 
 /// Locate the UFCS receiver even if its trailing arguments fail to parse.
 pub(crate) enum ReceiverAnchor {
-    /// Receiver ends here; `type_at` on its last byte resolves it (variable /
-    /// field path -- survives the broken trailing arg).
+    /// `type_at` on its last byte resolves it, surviving a broken trailing arg.
     End(usize),
     /// The receiver is itself a call (`a.b().m(|`): its type is this
     /// callee's unique return type, resolved structurally (no inference).
     ChainCall(String),
 }
 
-/// Named-arg completion context: the direct callee, the count of leading
-/// positional args already supplied, and the explicit `name:` args already
-/// supplied (both excluding the slot being typed).
 pub(crate) struct NamedArgSlot {
     pub callee: String,
     pub positional: usize,
     pub named: Vec<String>,
-    /// Probe offsets inside each `..spread` operand supplied before the cursor.
-    /// The caller resolves each operand's struct type and treats its fields as
-    /// already-supplied params.
+    /// Probe offsets inside each `..spread` operand before the cursor; their
+    /// struct fields count as already supplied.
     pub spread_probes: Vec<usize>,
 }
 
@@ -119,7 +109,6 @@ fn is_paren_call(syntax: &CallSyntax) -> bool {
 }
 
 impl CursorAst {
-    /// Try increasingly permissive parses around the completion probe.
     pub(crate) fn at(src: &str, offset: usize) -> Option<CursorAst> {
         let file = Ustr::from("<cursor>");
         let mut candidates: Vec<(String, usize)> =
@@ -185,9 +174,8 @@ impl CursorAst {
         &self.ast.exprs[i]
     }
 
-    /// Exprs whose span contains the cursor, innermost first. Span nesting is
-    /// ancestry in a well-formed parse (sibling spans are disjoint, so at most
-    /// one sibling contains the cursor) -- no parent map needed.
+    /// Span nesting is ancestry in a well-formed parse, so no parent map is
+    /// needed.
     fn expr_chain(ast: &skull_parser::Ast, offset: usize) -> Vec<Idx<ExprData>> {
         let mut chain: Vec<_> = ast
             .exprs
@@ -213,8 +201,6 @@ impl CursorAst {
         })
     }
 
-    /// `Enum::<cursor>` -- the qualified base when the cursor sits in the
-    /// member slot. Qualified paths and enum patterns produce it.
     pub(crate) fn qualified_base(&self) -> Option<String> {
         if let Some(node) = self.chain.first().copied() {
             match &self.expr(node).kind {
@@ -235,8 +221,6 @@ impl CursorAst {
         self.pattern_qualified_base()
     }
 
-    /// Visit every pattern in the module (match arms, if/while-let bindings),
-    /// including nested sub-patterns.
     fn walk_patterns(&self, f: &mut dyn FnMut(&Pattern)) {
         fn walk(p: &Pattern, f: &mut dyn FnMut(&Pattern)) {
             f(p);
@@ -308,8 +292,7 @@ impl CursorAst {
         found
     }
 
-    /// `Enum::Variant { <cursor> }` as a record PATTERN (match arm,
-    /// if/while-let): `(enum, variant)` when the cursor is inside the braces.
+    /// `Enum::Variant { <cursor> }` in a pattern: `(enum, variant)`.
     fn pattern_record(&self) -> Option<(String, String)> {
         let mut found = None;
         self.walk_patterns(&mut |p| {
@@ -333,8 +316,7 @@ impl CursorAst {
         found
     }
 
-    /// Cursor inside a struct DECLARATION field's DEFAULT expr
-    /// (`struct S { dur: float = 0.|0 }`): `(struct, field, is_lambda_body)`.
+    /// `struct S { dur: float = 0.|0 }`: `(struct, field, is_lambda_body)`.
     fn decl_field_default(&self) -> Option<(String, String, bool)> {
         for item in &self.ast.items {
             let skull_parser::ast::ItemKind::Struct(sd) = &item.kind else {
@@ -356,7 +338,6 @@ impl CursorAst {
         None
     }
 
-    /// Whether `v` is a lambda whose BODY block contains the cursor.
     fn lambda_body_contains(&self, v: &ExprData) -> bool {
         matches!(&v.kind, ExprKind::Lambda { body, .. }
         if {
@@ -452,7 +433,6 @@ impl CursorAst {
         None
     }
 
-    /// Use the nearest enclosing comparison or coalesce expression.
     pub(crate) fn comparison_lhs(&self) -> Option<usize> {
         for (_, e) in self.ast.exprs.iter() {
             let ExprKind::BinOp {
@@ -475,10 +455,8 @@ impl CursorAst {
         None
     }
 
-    /// Cursor in the INIT of an explicitly-typed `let name: T = <cursor>`:
-    /// the last byte offset of the binding ident, so `type_at` resolves the
-    /// declared type (the annotation types the binding even while the init
-    /// is broken).
+    /// `let name: T = <cursor>`: the binding ident's last byte, since the
+    /// annotation types the binding even while the init is broken.
     pub(crate) fn typed_let_binding(&self) -> Option<usize> {
         for (_, s) in self.ast.stmts.iter() {
             let StatementKind::Let(l) = &s.kind else {
@@ -501,10 +479,8 @@ impl CursorAst {
         None
     }
 
-    /// Cursor in the VALUE of a `return` (statement or expression form): the
-    /// slot expects the enclosing fn's declared return type -- the caller
-    /// resolves it from the HIR owner at the cursor. False when a lambda
-    /// body encloses the cursor (its return retargets to the lambda).
+    /// False when a lambda body encloses the cursor (its return retargets to
+    /// the lambda).
     pub(crate) fn in_return_value(&self) -> bool {
         let in_span = |(vs, ve): (usize, usize)| vs <= self.probe && self.probe <= ve;
         let hit = self.ast.stmts.iter().any(|(_, s)| {
@@ -537,9 +513,6 @@ impl CursorAst {
         body.is_some_and(|b| self.block_tail_has_cursor(b))
     }
 
-    /// The cursor sits in `block`'s tail value expression (its last statement,
-    /// when that is a bare expression), descending through tail-propagating
-    /// constructs. Non-expr / `return` / earlier statements are not the tail.
     fn block_tail_has_cursor(&self, block: skull_parser::Idx<BlockData>) -> bool {
         let Some(&last) = self.ast.blocks[block].statements.last() else {
             return false;
@@ -556,8 +529,6 @@ impl CursorAst {
             return false;
         }
         match &self.expr(e).kind {
-            // Arm bodies / branch tails inherit the match/if slot; the scrutinee
-            // and conditions do not (their spans hold no arm/branch block).
             ExprKind::Match { arms, .. } => arms.iter().any(|a| self.block_tail_has_cursor(a.body)),
             ExprKind::If {
                 branches,
@@ -567,14 +538,12 @@ impl CursorAst {
                     || else_branch.is_some_and(|b| self.block_tail_has_cursor(b))
             }
             ExprKind::Block(b) => self.block_tail_has_cursor(*b),
-            // A leaf tail expr containing the cursor IS the return slot. A cursor
-            // nested in an arg / field of it is handled with higher precedence in
-            // `expected` (arg_call / field_value short-circuit before the anchor).
+            // A cursor nested in an arg or field of the tail is handled earlier in
+            // `expected`.
             _ => true,
         }
     }
 
-    /// Use the AST argument list to count slots across nested expressions.
     pub(crate) fn call_arg(&self) -> Option<(String, u32, Option<usize>)> {
         let (call, _cursor_arg, pos) = self.enclosing_arg_call()?;
         let ExprKind::FunctionCall { func, .. } = &self.expr(call).kind else {
@@ -596,7 +565,6 @@ impl CursorAst {
     fn enclosing_arg_call(&self) -> Option<(Idx<ExprData>, Option<Idx<ExprData>>, usize)> {
         let chain = &self.chain;
         for (ci, &node) in chain.iter().enumerate() {
-            // Stop at a lambda parameter or return annotation.
             if matches!(&self.expr(node).kind, ExprKind::Lambda { .. })
                 && !self.lambda_body_contains(self.expr(node))
             {
@@ -628,7 +596,7 @@ impl CursorAst {
             } else {
                 let inner = chain[ci - 1];
                 if *func == inner {
-                    continue; // cursor in the callee, not an arg
+                    continue;
                 }
                 let Some(pos) = args.iter().position(|a| a.value == inner) else {
                     continue;
@@ -639,7 +607,6 @@ impl CursorAst {
         None
     }
 
-    /// Collect supplied labels and positional arguments from the enclosing call.
     pub(crate) fn named_arg_slot(&self) -> Option<NamedArgSlot> {
         let (call, cursor_arg, _pos) = self.enclosing_arg_call()?;
         let ExprKind::FunctionCall { func, args, .. } = &self.expr(call).kind else {
@@ -655,16 +622,14 @@ impl CursorAst {
         let mut spread_probes: Vec<usize> = Vec::new();
         for a in args.iter() {
             if cursor_arg == Some(a.value) {
-                continue; // the slot being typed, not a supplied arg
+                continue;
             }
-            // Between-args (no cursor node): only args ENDING before the probe
-            // are supplied for this slot; a trailing arg after it isn't. With a
-            // cursor node every OTHER arg is already present, so count them all.
+            // Without a cursor node only args ending before the probe are supplied;
+            // with one, every other arg is present.
             if cursor_arg.is_none() && self.expr(a.value).span.offset_range().1 > self.probe {
                 continue;
             }
             if a.is_spread {
-                // Probe just inside the operand's end to resolve its struct type.
                 let (s, e) = self.expr(a.value).span.offset_range();
                 spread_probes.push(e.saturating_sub(1).max(s));
                 continue;
@@ -682,10 +647,7 @@ impl CursorAst {
         })
     }
 
-    /// TYPE-vs-expression slot: true when the innermost node containing the
-    /// probe is a TYPE (`let x: F|`, `fn f(p: F|)`, `-> F|`, `Vec<F|>`,
-    /// `struct S { f: F| }`). Positive evidence only -- no containing type
-    /// node means expression.
+    /// Positive evidence only: no containing type node means expression.
     pub(crate) fn is_type_position(&self) -> bool {
         let ty = self
             .ast
@@ -710,17 +672,13 @@ impl CursorAst {
         match self.chain.first() {
             None => true,
             Some(&e) => {
-                // Types nest inside exprs (ascription, casts): the smaller
-                // span is the slot the cursor is actually in.
+                // Types nest inside exprs (ascription, casts): the smaller span wins.
                 let (es, ee) = self.expr(e).span.offset_range();
                 (te - ts) <= (ee - es)
             }
         }
     }
 
-    /// `fn name(param: <cursor>)` -- the enclosing fn DECL's `(param name,
-    /// fn name)` when the probe sits in a param's TYPE slot. Drives the
-    /// Entity-type hint.
     pub(crate) fn param_type(&self) -> Option<(String, String)> {
         for item in &self.ast.items {
             let skull_parser::ast::ItemKind::Function(fd) = &item.kind else {
@@ -736,9 +694,6 @@ impl CursorAst {
         None
     }
 
-    /// True when the probe sits in the FIRST generic argument of a
-    /// `Coroutine<..>` type (`Coroutine<|`, `Coroutine<Co|`). Drives the
-    /// Wait-first boost.
     pub(crate) fn coroutine_first_generic_arg(&self) -> bool {
         use skull_parser::ast::TypeExprKind;
         self.ast.types.iter().any(|(_, t)| {
@@ -755,9 +710,8 @@ impl CursorAst {
         })
     }
 
-    /// The member chain the cursor is typing is the WHOLE condition of an
-    /// `if`/`while` (`if thing.foo.bar|`) -- the bool-field soft-boost
-    /// context. `if a && thing.foo|` is not (the condition is the `&&`).
+    /// The member chain is the whole `if`/`while` condition; `if a &&
+    /// thing.foo|` is not.
     pub(crate) fn bool_condition_chain(&self) -> bool {
         let Some(&top) = self.chain.first() else {
             return false;
@@ -780,7 +734,6 @@ impl CursorAst {
                 .any(|(_, st)| matches!(&st.kind, StatementKind::While(w) if w.condition == top))
     }
 
-    /// Extract a receiver path made of identifiers or tuple projections.
     pub(crate) fn member_path(&self) -> Option<Vec<String>> {
         let chain = &self.chain;
         let &node = chain.first()?;
@@ -790,7 +743,7 @@ impl CursorAst {
             return None;
         };
         if self.probe < member.span.offset_range().0 {
-            return None; // cursor in the receiver, not the member slot
+            return None;
         }
         let mut segs: Vec<String> = Vec::new();
         let mut cur = *recv;
@@ -811,7 +764,6 @@ impl CursorAst {
         Some(segs)
     }
 
-    /// Find the receiver boundary for member completion, including call receivers.
     pub(crate) fn member_receiver_end(&self) -> Option<usize> {
         let chain = &self.chain;
         let &node = chain.first()?;
@@ -821,16 +773,13 @@ impl CursorAst {
             return None;
         };
         if self.probe < member.span.offset_range().0 {
-            return None; // cursor in the receiver, not the member slot
+            return None;
         }
         Some(self.expr(*recv).span.offset_range().1)
     }
 
-    /// The UFCS receiver of the call whose arg slot the cursor sits in, as a
-    /// structural anchor. None when the cursor isn't in a method call's args
-    /// (matches `call_arg`'s Some-with-receiver cases exactly).
+    /// Matches `call_arg`'s Some-with-receiver cases exactly.
     pub(crate) fn call_receiver(&self) -> Option<ReceiverAnchor> {
-        // The receiver anchor only exists when call_arg found a UFCS call.
         self.call_arg()?.2?;
         let chain = &self.chain;
         for &node in chain.iter() {
@@ -847,8 +796,6 @@ impl CursorAst {
             };
             let r = self.expr(*recv);
             return Some(match &r.kind {
-                // `a.b().m(|`: the receiver is a call -- its type is the last
-                // method's unique return type.
                 ExprKind::FunctionCall {
                     func: rf, syntax, ..
                 } if is_paren_call(syntax) => match &self.expr(*rf).kind {
@@ -878,8 +825,6 @@ mod gaps {
 
     #[test]
     fn call_arg_survives_cursor_adjacent_to_a_number() {
-        // Digit-glue: the insertion munges produce `1__rock_completion__`,
-        // which fails tokenize -- the token-REPLACEMENT munge recovers.
         let (_, _, cx) = cx("fn feed(x: int) {}\nfn t() {\n  feed(1$0)\n}\n");
         assert_eq!(cx.call_arg(), Some(("feed".to_string(), 0, None)));
     }
@@ -901,9 +846,6 @@ mod gaps {
 
     #[test]
     fn call_arg_survives_a_following_lambda_arg() {
-        // Sentinel juxtaposed with the NEXT arg's expr fails to parse
-        // (`__rock_completion__ (x: int) => ..`); the sentinel-plus-comma
-        // munge recovers -- new arg being typed before an existing one.
         let (_, _, cx) = cx(
             "fn apply(n: int, f: (int) -> int) -> int { return f(n) }\nfn t() {\n  apply(3, $0(x: int) => x * x)\n}\n",
         );
@@ -912,17 +854,12 @@ mod gaps {
 
     #[test]
     fn qualified_base_in_a_path_record_literal() {
-        // `Effect::|Bandage { .. }` is a path expression, not a pattern.
         let (_, _, cx) = cx("enum E { B { d: int } }\nfn t() {\n  let v = E::$0B { d: 1 }\n}\n");
         assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
 
     #[test]
     fn call_arg_between_named_args() {
-        // Fresh arg being typed after a comma in a named-arg call: every
-        // sentinel munge breaks (juxtaposition / positional-after-named), so
-        // the RAW parse wins the ladder -- and the cursor sits BETWEEN arg
-        // nodes, inside only the call node itself.
         let (_, _, cx) =
             cx("fn draw(a: int, b: int, c: int) {}\nfn t() {\n  draw(1, b: 2,$0 c: 3)\n}\n");
         assert_eq!(cx.call_arg(), Some(("draw".to_string(), 2, None)));
@@ -938,7 +875,6 @@ mod gaps {
 
     #[test]
     fn call_arg_fires_in_a_lambda_body() {
-        // Control: the lambda BODY is a value expr -- arg context applies.
         let (_, _, cx) = cx(
             "fn apply(n: int, f: (int) -> int) -> int { return f(n) }\nfn t() {\n  apply(3, (x: int) => x$0)\n}\n",
         );
@@ -947,19 +883,12 @@ mod gaps {
 
     #[test]
     fn qualified_base_in_a_fresh_match_arm() {
-        // `E::<cursor>` in a fresh arm with no `=>` typed yet: every plain
-        // munge leaves an incomplete arm that recovery DROPS (empty chain).
-        // The arm-completing rung (`<sentinel> => {}`) parses it as the
-        // pattern it is.
         let (_, _, cx) = cx("enum E { X, Y(int) }\nfn t(e: E) {\n  match e {\n    E::$0\n  }\n}\n");
         assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
 
     #[test]
     fn qualified_base_mid_variant_ident_in_record_literal() {
-        // Cursor MID-ident glues the sentinel into one identifier
-        // (`B__rock_completion__andaging`), which parses CLEAN as a path
-        // record expression.
         let (_, _, cx) = cx(
             "enum E { B { d: int, h: int } }\nfn t(h: int) {\n  let v = E::B$0andaging { d: 1, h }\n}\n",
         );
@@ -1012,8 +941,6 @@ mod gaps {
 
     #[test]
     fn qualified_base_in_expression_position() {
-        // Control: the expression-position case the sweep also flagged --
-        // isolates whether that class is a classifier bug or file-specific.
         let (_, _, cx) = cx("enum E { X }\nfn t() {\n  let v = E::$0X\n}\n");
         assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
@@ -1030,9 +957,6 @@ mod frontier_census {
             .collect()
     }
 
-    /// How often CursorAst::at returns None -- the ONLY case the byte
-    /// fallbacks still run. Sweeps a stride over EVERY byte offset (not just
-    /// "interesting" ones).
     #[test]
     fn none_rate_over_all_offsets() {
         let mut total = 0usize;
@@ -1069,10 +993,8 @@ mod frontier_census {
 mod tokenize_frontier {
     use super::*;
 
-    /// The mid-edit states whose RAW buffer fatally fails tokenize
-    /// (unterminated strings / interpolations, bad numeric literals): the
-    /// classifier must still classify via the balanced munges (or we must
-    /// know it can't, byte fallbacks or not).
+    /// Raw buffers that fail tokenize must still classify via the balanced
+    /// munges.
     #[test]
     fn broken_tail_states_still_classify() {
         let cases = [

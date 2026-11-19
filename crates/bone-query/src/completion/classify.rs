@@ -1,17 +1,11 @@
-//! Cursor classification for completion: the
-//! syntactic byte/AST classifiers and `classify()` -- every classifier
-//! consulted exactly once into a `CompletionCx`. Semantic resolution
-//! (`ExpectedArg`, Session variants) stays in `backend.rs`.
+//! Cursor classification for completion.
 
 use bone_semantic::prelude::{InferenceResult, ModuleId, Workspace};
 
 use crate::backend::{ExpectedArg, expected_for_anchor, fn_unique_return_ty_in_scope};
 use crate::cursor_context::{CursorAst, Record};
 
-/// True when a leading `.` sits just before the partial identifier under the
-/// cursor (a key-path `.field`, not member access -- `receiver_path` already
-/// returned for a receiver-preceded dot). Decides insert text: `co` when the
-/// dot is present, `.co` to add it.
+/// A leading `.` before the identifier under the cursor (a key-path `.field`).
 pub(crate) fn leading_dot(src: &str, offset: usize) -> bool {
     let b = src.as_bytes();
     let mut i = offset.min(b.len());
@@ -21,9 +15,6 @@ pub(crate) fn leading_dot(src: &str, offset: usize) -> bool {
     i > 0 && b[i - 1] == b'.'
 }
 
-/// True when `offset` sits just after the `)` of a `co fn NAME(..)` signature
-/// with no return type yet (`co fn spawn()|`). Pure byte heuristic; drives the
-/// `-> Coroutine<Wait>` return-type snippet.
 pub(crate) fn co_fn_return_slot(src: &[u8], offset: usize) -> bool {
     let mut i = offset.min(src.len());
     while i > 0 && src[i - 1].is_ascii_whitespace() {
@@ -32,7 +23,6 @@ pub(crate) fn co_fn_return_slot(src: &[u8], offset: usize) -> bool {
     if i == 0 || src[i - 1] != b')' {
         return false;
     }
-    // balance back to the matching `(`
     let mut depth = 0i32;
     let mut k = i - 1;
     loop {
@@ -51,7 +41,6 @@ pub(crate) fn co_fn_return_slot(src: &[u8], offset: usize) -> bool {
         }
         k -= 1;
     }
-    // before the `(`: ws, fn-name ident, ws, `fn`, ws, `co`
     let mut p = k;
     let skip_ws = |p: &mut usize| {
         while *p > 0 && src[*p - 1].is_ascii_whitespace() {
@@ -82,14 +71,11 @@ pub(crate) fn co_fn_return_slot(src: &[u8], offset: usize) -> bool {
     &src[p..co_end] == b"co" && (p == 0 || !is_ident_byte(src[p - 1]))
 }
 
-/// Param names that conventionally hold an `Entity<T>` (the `e`/`entity` idiom).
 pub(crate) fn is_entity_param_name(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "e" | "ent" | "entity")
 }
 
-/// The identifier characters immediately preceding `offset` (a byte offset).
-/// Rock identifiers are ASCII (`[A-Za-z0-9_]`), so walking bytes never splits a
-/// multibyte codepoint -- a non-ASCII byte is not alphanumeric and stops the walk.
+/// Rock identifiers are ASCII, so walking bytes never splits a codepoint.
 pub(crate) fn ident_prefix(src: &str, offset: usize) -> &str {
     let end = offset.min(src.len());
     let bytes = src.as_bytes();
@@ -109,9 +95,6 @@ pub(crate) fn is_ident_byte(c: u8) -> bool {
     c == b'_' || c.is_ascii_alphanumeric()
 }
 
-/// True when the cursor is in decorator position (`@<ident-prefix>|`): the ident
-/// under the cursor is immediately preceded by an `@`. The `@` isn't an ident
-/// byte, so `ident_prefix` already excludes it -- this only checks the trigger.
 pub(crate) fn decorator_context(src: &str, offset: usize) -> bool {
     let b = src.as_bytes();
     let mut i = offset.min(b.len());
@@ -125,7 +108,7 @@ pub(crate) fn completion_munges(src: &str, offset: usize) -> [String; 2] {
     let off = offset.min(src.len());
     let (head, tail) = src.split_at(off);
 
-    // Insert a probe so incomplete positions still produce an AST node.
+    // A probe makes incomplete positions still produce an AST node.
     let mk = |inject: &str| {
         let mut s = String::with_capacity(src.len() + 32);
         s.push_str(head);
@@ -138,18 +121,14 @@ pub(crate) fn completion_munges(src: &str, offset: usize) -> [String; 2] {
     [mk(""), mk(" {}")]
 }
 
-/// Balance a partial buffer without changing comments or literal contents.
 pub(crate) fn balance_delimiters(mut s: String) -> String {
-    // One stack models the whole nesting: code delimiters, strings, and the
-    // interpolation braces that re-enter CODE inside a string (`"a {expr}"`)
-    // -- an unterminated `"foo {` must close as `}"`, not `"`, or the
-    // tokenizer still fatals on the unmatched interpolation.
+    // An unterminated `"foo {` must close as `}"`, not `"`, or the tokenizer
+    // still fatals on the unmatched interpolation.
     #[derive(PartialEq)]
     enum Ctx {
         Paren,
         Bracket,
         Brace,
-        /// `{` inside a string: code until the matching `}`.
         Interp,
         LineStr,
         TripleStr,
@@ -179,7 +158,7 @@ pub(crate) fn balance_delimiters(mut s: String) -> String {
                     b'"' if !triple => {
                         stack.pop();
                     }
-                    // `{{` emits a literal `{`; a bare `{` opens interpolation
+                    // `{{` emits a literal `{`
                     b'{' if bytes.get(i + 1) == Some(&b'{') => i += 1,
                     b'{' => stack.push(Ctx::Interp),
                     _ => {}
@@ -201,8 +180,6 @@ pub(crate) fn balance_delimiters(mut s: String) -> String {
                     b'[' => stack.push(Ctx::Bracket),
                     b'{' => stack.push(Ctx::Brace),
                     b')' | b']' | b'}' => {
-                        // a `}` closes a code Brace or pops Interp back into
-                        // its string; `)`/`]` close their code delimiter
                         stack.pop();
                     }
                     _ => {}
@@ -227,18 +204,15 @@ pub(crate) fn balance_delimiters(mut s: String) -> String {
     s
 }
 
-/// Distinguish a match arm's pattern head from a qualified expression.
 pub(crate) fn in_pattern_position(src: &str, offset: usize) -> bool {
     let b = src.as_bytes();
     let mut i = offset.min(b.len());
-    // the variant identifier under / after the cursor
     while i < b.len() && is_ident_byte(b[i]) {
         i += 1;
     }
     while i < b.len() && b[i].is_ascii_whitespace() {
         i += 1;
     }
-    // an already-typed payload pattern, e.g. `Loaded(x)` / `Bandage { .. }`
     if i < b.len() && (b[i] == b'(' || b[i] == b'{') {
         let (open, close) = if b[i] == b'(' {
             (b'(', b')')
@@ -265,18 +239,12 @@ pub(crate) fn in_pattern_position(src: &str, offset: usize) -> bool {
     if i + 1 < b.len() && b[i] == b'=' && b[i + 1] == b'>' {
         return true;
     }
-    // Fresh arm: no `=>` yet -- the arm-head classification below.
     match_arm_scrutinee(src, offset).is_some()
 }
 
-/// When the cursor sits in a match-arm pattern HEAD (fresh arm or an
-/// already-`=>`ed one being retyped), the byte anchor of the SCRUTINEE's last
-/// byte -- `type_at` there is the scrutinee's type, which names the enum
-/// whose variants the pattern slot expects. `None` in every other position.
+/// The scrutinee's last byte when the cursor is in a match-arm pattern head.
 pub(crate) fn match_arm_scrutinee(src: &str, offset: usize) -> Option<usize> {
     let b = src.as_bytes();
-    // Start of the `Enum::Variant` path the cursor is in (ident bytes + `:`
-    // run backward).
     let mut start = offset.min(b.len());
     while start > 0 && (is_ident_byte(b[start - 1]) || b[start - 1] == b':') {
         start -= 1;
@@ -292,7 +260,6 @@ pub(crate) fn match_arm_scrutinee(src: &str, offset: usize) -> Option<usize> {
     match_scrutinee_end(b, start)
 }
 
-/// Find whether the enclosing brace opens a match body.
 pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
     let mut depth = 0i32;
     let mut i = from;
@@ -325,7 +292,6 @@ pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
     if end == 0 {
         return None;
     }
-    // Scan the scrutinee backward from the `{` to the governing keyword.
     let mut j = brace;
     let mut depth = 0i32;
     while j > 0 {
@@ -354,10 +320,6 @@ pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
     None
 }
 
-/// True when the cursor's ident sits in the ITERABLE slot of a `for` loop
-/// (`for x in |`, `for (k, v) in |`): preceded by the `in` keyword, a
-/// binding pattern (plain ident or `(..)` tuple), and the `for` keyword.
-/// Pure byte heuristic, same family as `co_fn_return_slot`.
 pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
     let b = src.as_bytes();
     let mut p = offset.min(b.len());
@@ -379,7 +341,6 @@ pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
     }
     skip_ws(&mut p);
     if p > 0 && b[p - 1] == b')' {
-        // `(a, b)` tuple binding: balance back to its `(`
         let mut depth = 0i32;
         loop {
             if p == 0 {
@@ -430,58 +391,30 @@ pub(crate) enum Context<'a> {
     Decorator,
 }
 
-/// Facts shared by contextual lookups and general completion.
 pub(crate) struct CompletionCx {
-    /// The recovered-AST classifier over the munge ladder; None only on the
-    /// tokenize frontier (byte-scanner fallbacks own that).
+    /// None only on the tokenize frontier, where byte-scanner fallbacks apply.
     pub(crate) ast: Option<crate::cursor_context::CursorAst>,
-    /// `recv.pa|` -- pure ident receiver chain, as name segments. The FALLBACK
-    /// receiver resolver (structural name-walk): used when `type_at` at
-    /// `member_recv_end` can't type the receiver (unknown callee / dropped
-    /// statement), where a by-name binding lookup still resolves it.
+    /// Fallback receiver resolver, used when `type_at` at `member_recv_end` cannot
+    /// type the receiver.
     pub(crate) member: Option<Vec<String>>,
-    /// `recv.<cursor>` -- the member receiver's end offset, any receiver shape.
-    /// The PRIMARY resolver: the receiver's type via inference (`type_at`).
     pub(crate) member_recv_end: Option<usize>,
-    /// Enclosing call with the cursor in an ARG slot: (callee, idx,
-    /// receiver end). Field-ref gate + expected-type input.
     pub(crate) arg_call: Option<(String, u32, Option<usize>)>,
     record: Option<Record>,
     qualified: Option<String>,
-    /// `@deco|` decorator namespace (byte trigger; live even when the
-    /// module dropped out).
     pub(crate) decorator: bool,
-    /// `Name { field: <cursor> }` field-VALUE slot -- only when NOT in a
-    /// call arg (the arg slot is the more specific expected-type source).
+    /// Only when not in a call arg, which is the more specific expected-type source.
     pub(crate) field_value: Option<(String, String, bool)>,
-    /// Slot-anchored expected type (assign/compare RHS, typed-`let`,
-    /// `return`) -- consumed by BOTH the general and the member path.
     pub(crate) anchor: Option<SlotAnchor>,
-    /// The whole `if`/`while` condition chain (bool-member soft boost).
     pub(crate) bool_chain: bool,
-    /// Value slot vs type-annotation slot (governs the enum universe).
     pub(crate) expr_position: bool,
-    /// After `yield`/`await` -- coroutine fns promote. Expr position only.
     pub(crate) after_yield: bool,
-    /// Param TYPE slot `fn f(name: Ty|)`: (param name, enclosing fn name)
-    /// -- the Entity<T> idiom input. Type position only.
     pub(crate) param_type: Option<(String, String)>,
-    /// Direct-call named-arg slot (`f(na|)` offers `name:` items).
     pub(crate) named_arg: Option<crate::cursor_context::NamedArgSlot>,
-    /// First generic arg of `Coroutine<|>` (Wait synth).
     pub(crate) coroutine_generic: bool,
-    /// Match-arm pattern HEAD: the byte anchor of the enclosing `match`'s
-    /// scrutinee (its last byte). The slot expects the scrutinee's enum --
-    /// variants rank first and patterns bind (no payload template).
     pub(crate) pattern_scrutinee: Option<usize>,
-    /// `for x in |` iterable slot -- iterable-typed candidates rank first.
     pub(crate) for_in: bool,
 }
 
-/// Classify the cursor for completion: parse the munge ladder once, consult
-/// every classifier once, and encode the cross-classifier guards (field
-/// value wins over call arg; yield/Entity hints are universe-gated) in one
-/// place instead of scattered call sites.
 pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     let ast = crate::cursor_context::CursorAst::at(src, offset);
     let cx = ast.as_ref();
@@ -553,7 +486,6 @@ impl CompletionCx {
         .flatten()
     }
 
-    /// Resolve the expected type using the most specific slot first.
     pub(crate) fn expected<'a>(
         &self,
         ws: &'a Workspace,
@@ -562,9 +494,6 @@ impl CompletionCx {
         offset: usize,
     ) -> Option<ExpectedArg<'a>> {
         if let Some((callee, idx, _recv)) = self.arg_call.as_ref() {
-            // Receiver type for UFCS overload filtering: structural from the
-            // classifier (a chain receiver's type is its callee's unique
-            // return type, no paren rescanning).
             let recv_ty = self.ast.as_ref().and_then(|cx| {
                 cx.call_receiver().and_then(|a| match a {
                     crate::cursor_context::ReceiverAnchor::ChainCall(name) => {
@@ -580,10 +509,8 @@ impl CompletionCx {
             return ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx as usize, recv_ty);
         }
         if let Some((sname, fname, is_lambda)) = self.field_value.as_ref() {
-            // `Name { field: <cursor> }`: the field's declared type. Inside a
-            // lambda body assigned to a function-typed field
-            // (`is_open: () => x|`), the body returns the field's RETURN type.
-            // The parser keeps the source spelling, while workspace type
+            // Inside a lambda assigned to a function-typed field the body returns the
+            // field's return type. The parser keeps source spelling; workspace type
             // indexes use canonical keys for standalone files.
             let sname =
                 crate::modules_scope::resolve_type_key_in_file(ws, ws.module(mid).file, sname)?;
@@ -595,10 +522,8 @@ impl CompletionCx {
             }?;
             return ExpectedArg::for_slot(ws, mid, inf, offset, slot);
         }
-        // A bare-identifier assign target (`dest = |`) is typed `()` in place
-        // position, so the byte anchor yields no type; resolve the slot from the
-        // binding by name. Guarded by the same precedence `slot_anchor` uses --
-        // a nested `==` RHS is the more specific slot and wins.
+        // A bare assign target (`dest = |`) is typed `()` in place position, so the
+        // byte anchor yields no type; a nested `==` RHS still wins.
         if let Some(cx) = self.ast.as_ref() {
             if cx.comparison_lhs().is_none() {
                 if let Some(name) = cx.assign_target_ident() {
@@ -614,16 +539,14 @@ impl CompletionCx {
     }
 }
 
-/// Use anchors before the cursor so they also work in speculative reparses.
+/// Anchors sit before the cursor so they also work in speculative reparses.
 #[derive(Clone, Copy)]
 pub(crate) enum SlotAnchor {
     TypeAt(usize),
     EnclosingFnReturn,
 }
 
-/// Classify the slot-anchored expected-type context at the cursor.
-/// Comparison first (a `==` nested in an assignment RHS is the more specific
-/// slot), then assignment RHS, typed-`let` init, and `return` last.
+/// A `==` nested in an assignment RHS is the more specific slot.
 pub(crate) fn slot_anchor(cx: &crate::cursor_context::CursorAst) -> Option<SlotAnchor> {
     cx.comparison_lhs()
         .or_else(|| cx.assign_lhs())

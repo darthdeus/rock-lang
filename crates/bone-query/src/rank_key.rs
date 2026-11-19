@@ -1,50 +1,11 @@
-//! The ONE completion rank key. Every
-//! completion path expresses its ranking as a `RankKey`: `Ord` drives the
-//! in-process top-N select and `encode()` produces the LSP `sort_text`
-//! string, from the same field order -- so the two orderings cannot
-//! disagree, and a ranking rule added here exists in every path at once.
+//! The completion rank key: `Ord` drives the in-process top-N select and
+//! `encode()` the LSP `sort_text`, from the same field order, so the two
+//! orderings cannot disagree.
 
-/// Field order IS the ranking ladder (completion ranking contract):
-/// exact whole-name match, expected-type relevance, coarse match band,
-/// locality/kind, reach distance, non-fn-before-fn, smart case, fine fuzzy
-/// score, shorter-first. The ci name tiebreak lives outside: `encode`
-/// appends the lowercased name; tuple-compare callers chain `ci_cmp`.
-///
-/// LOCALITY OUTRANKS CASE: `kind` sits above `case`, so a lowercase query
-/// still surfaces a SCREAMING global over a same-band lowercase fn (`lot` ->
-/// `LOOT_OPEN` above `loot_item`). Case is a late within-band-and-kind
-/// boost, not a gate -- smart-case still decides ties among equals.
-///
-/// Field semantics (all "lower ranks first"):
-/// - `exact`: 0 iff the candidate name equals the query case-exact.
-/// - `type_rank`: expected-type relevance when a slot type is known
-///   (0 right-type value/variant .. 4 wrong-type synth); with NO expected
-///   type it is the coarse bucket only (0 direct, 4 call-through synth).
-/// - `band`: coarse match tier -- 0 case-exact prefix, 1 ci prefix,
-///   2 clean word-boundary subsequence, 3 scattered; 0 on an empty query.
-/// - `kind`: locality ladder -- 0 local/param, 1 global, 2 fn/type,
-///   3 variant, 4 test-scoped symbol outside test files; 0 (neutral)
-///   where a path ranks one kind only.
-/// - `dist`: reach hop distance; 0 for direct candidates.
-/// - `method`: 1 for a callable (needs args / has side effects), 0 else.
-/// - `case`: smart-case mismatch count (0-9); 0 (neutral) in typed slots.
-///   A late boost -- below `kind`, so locality wins first.
-/// - `fine`: `9999 - clamped fuzzy score` -- the within-band tiebreak.
-/// - `prox`: definition proximity to the request file -- 0 same file,
-///   1 same project root, 2 other workspace code (engine/deps), 3 stdlib/
-///   builtins. Late PRIOR: decides only where match quality ties (the
-///   whole empty-prefix browse, score ties at typed prefixes).
-/// - `freq`: workspace reference count, log-bucketed (0 hot / 1 warm /
-///   2 rare-or-unknown; FREQ_HOT/FREQ_WARM in the tuning block). Priors
-///   land AFTER prox: "my file first, then the popular stuff", and
-///   stdlib-internal call-count inflation stays contained in prox tier 3.
-/// - `rec`: scope recency for LOCALS -- in-scope bindings ranked by
-///   declaration position, closest above the cursor first (params carry
-///   the earliest spans, so an inner `let` beats an enclosing param on
-///   ties). 0 (neutral) for every other kind.
-/// - `len`: candidate length when there IS a match (score > 0), else 0 --
-///   shorter-first among equals, but an empty prefix must NOT reorder by
-///   length (short stdlib names would bury longer user symbols).
+/// Field order is the ranking ladder; every field ranks lower-first, and
+/// `encode` appends the lowercased name as the final tiebreak. `kind` sits
+/// above `case`, so locality outranks smart case (`lot` -> `LOOT_OPEN` above
+/// `loot_item`).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub(crate) struct RankKey {
     pub exact: u8,
@@ -67,7 +28,7 @@ impl RankKey {
         (9999 - score.clamp(0, 9999)) as u16
     }
 
-    /// Shorter-first tiebreak, gated on a real match (score > 0).
+    /// Gated on a real match: an empty prefix must not reorder by length.
     pub(crate) fn len_key(score: i32, name_len: usize) -> u16 {
         if score > 0 {
             name_len.min(999) as u16
@@ -76,11 +37,8 @@ impl RankKey {
         }
     }
 
-    /// The key with every field clamped to its `encode` digit width. Tuple
-    /// `Ord` on a clamped key agrees with the encoded-string order at ANY
-    /// field value (an unclamped `dist: 150` orders below `dist: 100` in
-    /// `Ord` but both encode `99`); `Cand` stores clamped keys so the
-    /// in-process select and the client's sort_text sort cannot disagree.
+    /// Tuple `Ord` on a clamped key agrees with the encoded-string order at any
+    /// field value; `Cand` stores clamped keys.
     pub fn clamped(self) -> RankKey {
         RankKey {
             exact: self.exact.min(9),
@@ -98,9 +56,7 @@ impl RankKey {
         }
     }
 
-    /// The LSP `sort_text`: the fields in `Ord` order, fixed-width, with the
-    /// lowercased candidate appended as the final ci-alphabetical tiebreak.
-    /// Lexicographic order of these strings == `(RankKey, ci name)` order.
+    /// The LSP `sort_text`; lexicographic order equals `(RankKey, ci name)` order.
     pub fn encode(&self, name: &str) -> String {
         format!(
             "{}{}{}{}{:02}{}{}{:04}{}{}{}{:03}{}",
@@ -121,16 +77,13 @@ impl RankKey {
     }
 }
 
-/// Decode an encoded sort_text into labeled fields -- the `--explain`
-/// surface (`rock lsp completion <pos> --explain`): a live mis-rank reads as
-/// named rungs instead of hand-decoded digit columns. None when the string
-/// is not a RankKey encoding (foreign/legacy sort_texts).
+/// Decode a sort_text into labeled fields for `--explain`; None for
+/// non-RankKey strings.
 pub fn explain_sort_text(st: &str) -> Option<String> {
     let b = st.as_bytes();
     if b.len() < 18 || !b[..18].iter().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    // Foreign sort text is a normal non-match; only RankKey encodings are explained.
     let fine: u32 = st[8..12].parse().ok()?;
     Some(format!(
         "exact={} type_rank={} band={} kind={} dist={} method={} case={} score={} prox={} freq={} rec={} len={}",
@@ -153,8 +106,7 @@ pub fn explain_sort_text(st: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// The load-bearing property: string order == struct order, across every
-    /// field at its boundary values, including width-clamped ones.
+    /// String order == struct order at every field's boundary values.
     #[test]
     fn encode_order_agrees_with_ord() {
         let base = RankKey::default();
@@ -178,7 +130,6 @@ mod tests {
             }
             keys.push(k);
         }
-        // Cross-field dominance pairs and a couple of composites.
         keys.push(RankKey { fine: 9999, ..base });
         keys.push(RankKey {
             band: 1,
@@ -237,7 +188,6 @@ mod tests {
             a.clamped().cmp(&b.clamped()),
             a.encode("x").cmp(&b.encode("x"))
         );
-        // In-range values pass through untouched.
         let k = RankKey {
             exact: 1,
             type_rank: 4,

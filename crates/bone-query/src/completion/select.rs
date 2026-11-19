@@ -8,7 +8,6 @@ use crate::rank_key::RankKey;
 use super::rank::ci_cmp;
 use super::sources::ArgPayload;
 
-/// Reuse an existing call suffix by inserting only the callee.
 pub(crate) fn strip_call_template(items: &mut [CompletionItem]) {
     for it in items.iter_mut() {
         let Some(t) = it.insert_text.as_deref() else {
@@ -21,9 +20,6 @@ pub(crate) fn strip_call_template(items: &mut [CompletionItem]) {
     }
 }
 
-/// The member-access/call run immediately after the cursor: identifier chars,
-/// `.`, parens, and `?`/`!`, stopping at the first char that can't continue a
-/// postfix expression (whitespace, `,`, operators, EOL). `PANE|.rect(),` -> `.rect()`.
 pub(crate) fn member_tail(src: &str, offset: usize) -> &str {
     let rest = src.get(offset..).unwrap_or("");
     let end = rest
@@ -32,8 +28,7 @@ pub(crate) fn member_tail(src: &str, offset: usize) -> &str {
     &rest[..end]
 }
 
-/// Reuse a literal member or call suffix already in the buffer. Snippets
-/// are excluded because their placeholders are not literal text.
+/// Snippets are excluded because their placeholders are not literal text.
 pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
     if !tail.starts_with(['.', '(']) {
         return;
@@ -59,17 +54,14 @@ pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
 /// Cap general results because incomplete lists are re-requested per keystroke.
 pub(crate) const MAX_COMPLETION_ITEMS: usize = 200;
 
-/// Cap paths per root independently of path depth.
 pub(crate) const REACH_CAP: usize = 64;
 
 pub(crate) const FREQ_HOT: u32 = 16;
 pub(crate) const FREQ_WARM: u32 = 3;
 
-/// Limit method chains per function while leaving sibling fields browsable.
 pub(crate) const CALL_THROUGH_CAP: usize = 10;
 pub(crate) const PER_FN_METHOD_CAP: usize = 2;
 
-/// Display labels may include text that does not participate in ranking.
 pub(crate) enum CandName {
     Sym(ustr::Ustr),
     Owned(String),
@@ -152,7 +144,6 @@ impl Cand {
     }
 }
 
-/// Reach paths and synthesized calls share the deduplication set.
 pub(crate) struct Sink {
     pub(crate) cands: Vec<Cand>,
     pub(crate) seen: std::collections::HashSet<String>,
@@ -193,7 +184,6 @@ pub(crate) fn cand_cmp(a: &Cand, b: &Cand) -> std::cmp::Ordering {
         .then_with(|| ci_cmp(a.name.as_str().as_bytes(), b.name.as_str().as_bytes()))
 }
 
-/// Preserve existing call parentheses and leave payloads out of patterns.
 pub(crate) fn materialize_cand(
     cand: Cand,
     ws: &Workspace,
@@ -320,9 +310,7 @@ pub(crate) fn materialize_cand(
             payload,
             multiparam,
         } => {
-            // Insert: a tuple/record variant arg carries a payload hole; the
-            // trailing param (when multiparam) takes `$0`, so the payload
-            // uses `$1` to keep the tab order arg-then-next-param.
+            // The payload uses `$1` so tab order is arg, then the trailing param's `$0`.
             let (insert_text, is_snippet) = match (payload, multiparam) {
                 (ArgPayload::None, false) => (format!("{fname}({a})"), false),
                 (ArgPayload::None, true) => (format!("{fname}({a}, $0)"), true),
@@ -468,13 +456,11 @@ pub(crate) fn variant_insert(
     }
 }
 
-/// The contextual lifecycle-hook keywords with a statement block form
-/// (`on_killed { .. }`), parsed specially (`skull-parser` `LifecycleHook`).
+/// Parsed specially as `LifecycleHook` by `skull-parser`.
 pub(crate) fn is_lifecycle_hook(name: &str) -> bool {
     matches!(name, "on_killed" | "on_resume" | "on_hot_reload")
 }
 
-/// Show parameter lists and binding types inline with a bare label.
 pub(crate) fn fn_or_type_label_details(
     kind: SymCat,
     detail: Option<&str>,

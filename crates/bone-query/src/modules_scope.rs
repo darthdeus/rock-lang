@@ -1,8 +1,6 @@
-//! What a modules-v1 fragment can name, for completion. Every
-//! answer comes from the resolver (`bone_lower::resolve`): the tiers decide
-//! what a bare name binds, the path walks decide what a qualified prefix
-//! names, and a member is offered only if the resolver would let this
-//! fragment name it. Nothing here matches names against definitions itself.
+//! What a modules-v1 fragment can name, for completion. Every answer comes
+//! from the resolver (`bone_lower::resolve`); nothing here matches names
+//! against definitions itself.
 
 use bone_core::modules::{AccessSite, DefKind, DefMeta, FragmentScope, UsePathRef};
 use bone_semantic::lower::resolve::{self, CalleeFamily, ResolvedKind};
@@ -14,9 +12,8 @@ pub fn fragment(ws: &Workspace, file: Ustr) -> Option<&FragmentScope> {
     ws.fragment_scopes.get(&file)
 }
 
-/// Whether one callable family member is visible from a v1 query fragment.
-/// Query readers use the same per-member table as lowering; the family key's
-/// `DefMeta::vis` is only a compatibility anchor for non-callable definitions.
+/// Query readers use the same per-member table as lowering; the family
+/// key's `DefMeta::vis` only anchors non-callable definitions.
 pub(crate) fn callable_member_admitted(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -32,8 +29,6 @@ pub(crate) fn callable_member_admitted(
     )
 }
 
-/// Every overload of the callable spelling `name`, in module order, that
-/// `frag` admits.
 pub(crate) fn admitted_overloads<'w>(
     ws: &'w Workspace,
     frag: &'w FragmentScope,
@@ -79,9 +74,8 @@ pub(crate) fn admitted_overloads<'w>(
     out.into_iter()
 }
 
-/// Resolve a type spelling from a query source to the key stored in workspace
-/// registries. Query syntax carries source spellings while those registries
-/// use canonical definition keys.
+/// Query syntax carries source spellings; workspace registries use
+/// canonical definition keys.
 pub(crate) fn resolve_type_key(ws: &Workspace, frag: &FragmentScope, name: &str) -> Option<Ustr> {
     let path = name.strip_prefix("::").unwrap_or(name);
     let resolved = if path.contains("::") || name.starts_with("::") {
@@ -110,9 +104,6 @@ pub(crate) fn resolve_type_key_in_file(ws: &Workspace, file: Ustr, name: &str) -
     resolve_type_key(ws, fragment(ws, file)?, name)
 }
 
-/// Every name some tier of `frag` offers, bound cleanly or not:
-/// the module's own members, the fragment's named imports (by their local
-/// names), its glob imports' members, and the std prelude. Sorted.
 fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
     let viewers = [frag];
     // Broken export paths are source diagnostics; omit that tier while offering other names.
@@ -121,9 +112,7 @@ fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
             .unwrap_or_default();
     names.extend(frag.named.keys().copied());
     for glob in &frag.globs {
-        // Unresolved/inaccessible glob imports are source errors, not query failures.
         if let Ok((package, path)) = resolve::resolve_path_to_module(ws, frag, glob) {
-            // A broken re-export contributes no names; other import tiers remain usable.
             names.extend(
                 resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default(),
             );
@@ -139,11 +128,8 @@ fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
     names
 }
 
-/// Names that a v1 fragment can write for each canonical definition of one
-/// kind. Completion indexes are workspace-wide and therefore store DefKeys;
-/// this map is the request-site view that turns those keys back into names the
-/// fragment's resolver actually accepts. Callable families are resolved in
-/// callee position so composed imports contribute every member key.
+/// Completion indexes store workspace-wide DefKeys; this maps them back to
+/// names the fragment's resolver accepts.
 pub(crate) fn spellings_by_key(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -152,7 +138,6 @@ pub(crate) fn spellings_by_key(
     let mut out: std::collections::HashMap<Ustr, Vec<Ustr>> = std::collections::HashMap::new();
     for name in tier_names(ws, frag) {
         if kind == DefKind::Callable {
-            // A tier name need not resolve as a callable (or may have a diagnosed broken import).
             let Ok(family) = resolve::resolve_v1_callee(ws, frag, name) else {
                 continue;
             };
@@ -169,7 +154,6 @@ pub(crate) fn spellings_by_key(
             }
             continue;
         }
-        // Ambiguous or broken bindings cannot supply a usable spelling.
         let Ok(resolved) = resolve::resolve_bare(ws, frag, name) else {
             continue;
         };
@@ -195,8 +179,7 @@ pub(crate) fn spellings_by_key(
     out
 }
 
-/// A global root together with the spelling and type that a fragment can use.
-/// The canonical key remains available for the cached reachability index.
+/// `key` stays canonical for the cached reachability index.
 #[derive(Clone, Debug)]
 pub(crate) struct GlobalBinding {
     pub name: Ustr,
@@ -204,9 +187,8 @@ pub(crate) struct GlobalBinding {
     pub node_ty: String,
 }
 
-/// Enumerate globals that the fragment can actually bind. This is used for
-/// reach roots as well as for the cached call-through argument source; walking
-/// Module::global_by_name directly would leak private globals and DefKeys.
+/// Walking `Module::global_by_name` directly would leak private globals
+/// and DefKeys.
 pub(crate) fn visible_globals(ws: &Workspace, frag: &FragmentScope) -> Vec<GlobalBinding> {
     let names = spellings_by_key(ws, frag, DefKind::Global);
     let mut out = Vec::new();
@@ -301,10 +283,8 @@ pub(crate) fn display_method_suffix_with_names(
     Some(rendered)
 }
 
-/// Every bare name the fragment's tiers bind that `admit` accepts, with the
-/// definition the resolver binds it to. A name whose binding is broken (an
-/// ambiguous glob, imports that do not compose) is left out; a composed
-/// callable family is offered once, by its first member. Sorted by name.
+/// Broken bindings are left out; a composed callable family is offered
+/// once, by its first member.
 pub(crate) fn bound_names(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -317,7 +297,6 @@ pub(crate) fn bound_names(
         .collect()
 }
 
-/// The definition the bare `name` binds in `frag`, if a tier binds it to one.
 fn bound_key(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Option<Ustr> {
     match resolve::resolve_bare(ws, frag, name) {
         Ok(r) if r.kind != ResolvedKind::Module => Some(r.key),
@@ -326,20 +305,17 @@ fn bound_key(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Option<Ustr> {
         Err(_) => match resolve::resolve_v1_callee(ws, frag, name) {
             Ok(CalleeFamily::Merged { members }) => members.first().map(|m| m.key),
             Ok(CalleeFamily::Single(r)) => Some(r.key),
-            // Neither resolver binds this name; omit the unusable source binding.
             Err(_) => None,
         },
     }
 }
 
-/// One member a qualified prefix offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Member {
     Def(Ustr),
     Module,
 }
 
-/// Complete accessible definitions and child modules of a module path.
 pub(crate) fn module_members(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -353,9 +329,7 @@ pub(crate) fn module_members(
     let (package, path) = resolve::resolve_path_to_module(ws, frag, &prefix).ok()?;
     let viewers = [frag];
     let mut out = Vec::new();
-    // Broken re-exports are source diagnostics; still offer accessible child modules.
     for name in resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default() {
-        // Ambiguous/inaccessible/broken bindings are not usable completion candidates.
         if let Ok(members) = resolve::module_members(ws, &viewers, package, &path, name)
             && let [hit] = members.found[..]
         {
@@ -367,7 +341,6 @@ pub(crate) fn module_members(
         .package(package)
         .and_then(|p| p.node(p.key_of(&path)))
         .map(|node| node.children.keys().copied().collect::<Vec<_>>())
-        // No namespace node means no child modules to offer.
         .unwrap_or_default();
     for child in children {
         let mut child_path = segments.to_vec();
@@ -392,13 +365,8 @@ pub struct ImportCandidate {
     pub path: String,
 }
 
-/// Definitions `frag` could name through a new `use` (completion may
-/// suggest out-of-scope public symbols with an import edit), for names
-/// `admit` accepts. Only a name no
-/// tier binds qualifies -- an explicit import of a bound name would rebind
-/// every use of it -- and only a definition of this package or of a declared
-/// dependency, through a path the resolver resolves from `frag` to that very
-/// definition, which is also the access check. Sorted by name, then path.
+/// Definitions `frag` could name through a new `use`. Only names no tier
+/// binds qualify: importing a bound name would rebind every use of it.
 pub fn import_candidates(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -459,12 +427,8 @@ pub fn import_candidates(
     out
 }
 
-/// The text and offset of a new `use <path>;` in a v1 fragment, placed to
-/// keep import ordering stable and avoid repeated churn: at the start of
-/// the line of the first top-level `use` item whose text sorts after it,
-/// else on the line after the last `use` item, else after the `mod` header,
-/// else at the top. Deterministic for a given file, so a second run inserts
-/// nothing new in a new place.
+/// A new `use <path>;` placed by sorted order among top-level `use` items,
+/// so a second run inserts nothing new in a new place.
 pub fn use_insertion(
     contribution: &FragmentContribution,
     src: &str,
@@ -507,9 +471,6 @@ pub fn use_insertion(
     (at, format!("{lead}{line}\n"))
 }
 
-/// The path a `use` in `frag` names `meta`'s definition by: relative from
-/// the package root, `::`-anchored from any other module of the package, or
-/// through the fragment package's own alias for a dependency.
 fn import_path(ws: &Workspace, frag: &FragmentScope, meta: &DefMeta) -> Option<(bool, Vec<Ustr>)> {
     let mut segments = Vec::new();
     let from_root = if meta.package == frag.package {

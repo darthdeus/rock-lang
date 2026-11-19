@@ -1,6 +1,4 @@
-//! Patch absolute spans/indices after an in-place body edit. Per-body re-lowering keeps the
-//! unchanged bodies' HIR but the text under them moved, so every stored byte offset / line
-//! number / interval index is stale.
+//! Patch absolute spans and indices after an in-place body edit.
 
 use bone_core::text_edit::TextEditDelta;
 use bone_semantic::{
@@ -8,7 +6,6 @@ use bone_semantic::{
     prelude::*,
 };
 
-/// Adapts [`TextEditDelta`], the shared shift policy, to the walk below.
 struct Shift(TextEditDelta);
 
 impl Shift {
@@ -20,7 +17,6 @@ impl Shift {
         self.0.shift_span(s);
     }
 
-    /// Shift every span value in an arena map (expr / binding / statement / ty).
     fn map<T>(&self, m: &mut ArenaMap<Idx<T>, Span>) {
         for s in m.values_mut() {
             self.span(s);
@@ -28,9 +24,6 @@ impl Shift {
     }
 }
 
-/// After a body edit re-lowered `edited` in place, every OTHER body keeps its reused HIR but
-/// its absolute offsets are stale -- the text under it moved by `byte_delta` bytes /
-/// `line_delta` lines starting at byte `at`.
 pub fn shift_module_after_edit(
     module: &mut Module,
     edited: BodyOwner,
@@ -45,8 +38,6 @@ pub fn shift_module_after_edit(
         line_delta,
     });
 
-    // Kept bodies: reused HIR with stale absolute spans + node index. The edited
-    // body is re-lowered fresh, so skip it.
     for (owner, body) in module.bodies.iter_mut() {
         if *owner == edited {
             continue;
@@ -61,9 +52,7 @@ pub fn shift_module_after_edit(
         }
         body.node_index_cell = Default::default();
 
-        // Spans stored INLINE in HIR nodes, not in the side tables above:
-        // callee names, enum-variant heads, struct-literal / record-pattern
-        // field names, binding decls. references/rename read these directly.
+        // Spans stored inline in HIR nodes, not in the side tables above.
         for (_, b) in body.binding_arena.iter_mut() {
             sh.span(&mut b.span);
         }
@@ -125,15 +114,12 @@ pub fn shift_module_after_edit(
         }
     }
 
-    // `use` items and interface-position path segments.
     for seg in module.path_segments.iter_mut() {
         sh.span(&mut seg.span);
     }
 
-    // Interface type spans (params / returns / fields) of every later signature.
     sh.map(&mut module.ty_spans);
 
-    // Item header / name / annotation / field / variant spans.
     for (_, f) in module.functions.iter_mut() {
         sh.span(&mut f.span);
         sh.span(&mut f.name_span);

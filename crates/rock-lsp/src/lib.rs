@@ -1,7 +1,6 @@
 #![allow(clippy::mutable_key_type)]
 
-/// Open a tracing info-span scoped to the rest of the enclosing block, for
-/// whatever tracing subscriber the process installs. rock-lsp is its only user.
+/// Open a tracing info-span scoped to the rest of the enclosing block.
 #[macro_export]
 macro_rules! scope {
     ($name:expr) => {
@@ -61,7 +60,6 @@ mod debug_path_tests {
     }
 }
 
-/// Log handler time when `ROCK_LSP_TIMING` is set.
 fn lsp_timing_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("ROCK_LSP_TIMING").is_some())
@@ -89,7 +87,6 @@ impl Drop for ReqTiming {
     }
 }
 
-/// Bound each method's sample count for `rock/stats`.
 static REQUEST_STATS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<f32>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -106,8 +103,7 @@ fn record_request_time(method: &str, ms: f32) {
     }
 }
 
-/// Snapshot for the `rock/stats` request: per-method request counts + totals,
-/// rendered generically by the panel's STATS block.
+/// Snapshot for `rock/stats`, rendered generically by the panel's STATS block.
 fn request_stats_json(loaded_modules: usize) -> serde_json::Value {
     let mut method_counts = serde_json::Map::new();
     let mut total = 0usize;
@@ -156,7 +152,6 @@ fn modules_json(summary: Vec<(String, Vec<bone_query::ModuleRecency>)>) -> serde
     serde_json::json!({ "total_modules": total, "contexts": contexts })
 }
 
-/// The server capabilities advertised during initialization.
 pub fn server_capabilities() -> serde_json::Value {
     serde_json::json!({
         "positionEncoding": "utf-16",
@@ -172,7 +167,6 @@ pub fn server_capabilities() -> serde_json::Value {
         "completionProvider": {
             "completionItem": { "labelDetailsSupport": false },
             "resolveProvider": false,
-            // Trigger on a qualifier or space so clients can request contextual completions.
             "triggerCharacters": [".", ":", " "],
             "workDoneProgress": false,
         },
@@ -188,17 +182,13 @@ pub fn server_capabilities() -> serde_json::Value {
             "resolveProvider": false,
         },
         "renameProvider": { "prepareProvider": true },
-        // Always listed (nvim will not send a command the server left
-        // undeclared); completions only bear the command while
-        // ROCK_LSP_RECORD records, so this is inert the rest of the time.
+        // nvim will not send a command the server left undeclared; completions only
+        // bear it while ROCK_LSP_RECORD records.
         "executeCommandProvider": { "commands": [completion_record::ACCEPT_COMMAND] },
         "semanticTokensProvider": {
-            // Delta: on a re-request the client sends the previous result_id
-            // and gets just the changed token span instead of the whole array.
             "full": { "delta": true },
             "legend": semantic_tokens::get_semantic_tokens_legend(),
-            // nvim requests range for the initial paint / scroll; the handler
-            // classifies only viewport bodies.
+            // nvim requests range for the initial paint and scroll.
             "range": true,
         },
         "inlayHintProvider": { "resolveProvider": false },
@@ -268,9 +258,8 @@ fn main_loop(link: Connection, mut server: LspServer) -> Result<()> {
     Ok(())
 }
 
-/// Server state plus a transport-free message handler: every inbound
-/// message appends whatever answers and notifications it causes, letting the
-/// stdio loop and an embedded host (a Wasm Worker) run the same dispatch.
+/// Transport-free message handler shared by the stdio loop and embedded hosts
+/// (a Wasm Worker).
 pub struct LspServer {
     workspace: LspWorkspace,
     shutdown_mode: bool,
@@ -280,7 +269,6 @@ pub struct LspServer {
 }
 
 impl LspServer {
-    /// Start without optional client capabilities.
     pub fn new() -> Self {
         Self {
             workspace: LspWorkspace::new(),
@@ -311,7 +299,6 @@ impl LspServer {
         )
     }
 
-    /// Whether the client has sent `exit`.
     pub fn exited(&self) -> bool {
         self.exited
     }
@@ -349,9 +336,7 @@ impl LspServer {
             start: bone_core::prelude::Instant::now(),
         };
 
-        // Fixed panic hook for the wedge-recovery test. Harmless otherwise:
-        // it only fires with ROCK_LSP_ALLOW_TEST_PANIC set, so a genuine
-        // client can never trip it.
+        // Only fires with ROCK_LSP_ALLOW_TEST_PANIC set, so a genuine client can never trip it.
         if req.method == "$/rockDebugPanic"
             && std::env::var_os("ROCK_LSP_ALLOW_TEST_PANIC").is_some()
         {
@@ -444,9 +429,7 @@ impl LspServer {
                 let snapshot = modules_json(ws.bone.projects_summary());
                 send_response(out, req.id, Ok(snapshot));
             }
-            // `rock.completionAccepted`: the corpus recorder's accept signal,
-            // run by the client after inserting a tagged completion item
-            // (ROCK_LSP_RECORD).
+            // `rock.completionAccepted`: the corpus recorder's accept signal (ROCK_LSP_RECORD).
             "workspace/executeCommand" => {
                 let parsed = serde_json::from_value::<lsp_types::ExecuteCommandParams>(req.params)
                     .map_err(|e| format!("malformed executeCommand params: {e}"))
@@ -493,9 +476,8 @@ impl LspServer {
         Ok(())
     }
 
-    /// A save only refreshes `.rock.tags`: with FULL sync the buffer text we
-    /// already hold (from didChange) is newer than the file, so reloading
-    /// from disk here could clobber it with a stale read.
+    /// With full sync the held buffer is newer than the file, so a save must not
+    /// reload from disk.
     fn on_save(&self, note: &lsp_server::Notification) -> Result<()> {
         let _span = tracing::debug_span!("lsp_did_save_notification").entered();
         let at = doc_uri(note)?;
@@ -504,10 +486,6 @@ impl LspServer {
         Ok(())
     }
 
-    /// Track a newly opened document, compile it, and write tags: the first
-    /// open batch-loads the whole compilation unit, which is also what a
-    /// restart replays buffer by buffer, so each root gets fresh tags here
-    /// rather than waiting for the first save.
     fn on_open(&mut self, note: &lsp_server::Notification, out: &mut Vec<Message>) -> Result<()> {
         let _span = tracing::debug_span!("lsp_did_open_notification").entered();
         let at = doc_uri(note)?;
@@ -522,8 +500,6 @@ impl LspServer {
         Ok(())
     }
 
-    /// Apply an edit, request an inlay hint refresh if supported, recompile,
-    /// and publish whatever diagnostics moved.
     fn on_change(&mut self, note: &lsp_server::Notification, out: &mut Vec<Message>) -> Result<()> {
         let at = doc_uri(note)?;
         let Some(path) = notification_path(out, &at, "didChange")? else {
@@ -561,8 +537,7 @@ impl LspServer {
         match std::fs::read_to_string(&path) {
             Ok(text) => bone_reload_and_publish(out, &path, text, &mut self.workspace)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // Remove the declarations through the normal edit path so
-                // dependents get fresh diagnostics before dropping the entry.
+                // Remove through the normal edit path so dependents get fresh diagnostics.
                 bone_reload_and_publish(out, &path, String::new(), &mut self.workspace)?;
                 self.workspace.bone.remove(&path);
             }
@@ -573,7 +548,6 @@ impl LspServer {
     }
 }
 
-/// Refresh tags on didOpen after the project is loaded.
 fn regenerate_ctags(workspace: &LspWorkspace, file_path: &str, when: &str) {
     // A Wasm host has no filesystem to write `.rock.tags` into.
     if cfg!(target_family = "wasm") {
@@ -585,7 +559,6 @@ fn regenerate_ctags(workspace: &LspWorkspace, file_path: &str, when: &str) {
     }
 }
 
-/// Refresh all open project tag files on didSave for cross-project navigation.
 fn regenerate_all_ctags(workspace: &LspWorkspace, when: &str) {
     // A Wasm host has no filesystem to write `.rock.tags` into.
     if cfg!(target_family = "wasm") {
@@ -602,7 +575,6 @@ fn regenerate_all_ctags(workspace: &LspWorkspace, when: &str) {
     }
 }
 
-/// Compile the editor buffer and publish changed diagnostics across its project.
 fn bone_reload_and_publish(
     out: &mut Vec<Message>,
     file_path: &str,
@@ -625,9 +597,7 @@ fn bone_reload_and_publish(
         if path == "<autogenerated>" || path == "<unknown>" || path.is_empty() {
             continue;
         }
-        // `bone.update` returns every tracked file each keystroke; only publish
-        // files whose diagnostics actually changed (skip the ~130 unchanged
-        // empty clears for dependency files the editor never opened).
+        // `bone.update` returns every tracked file each keystroke; publish only changes.
         if !workspace.diagnostics_changed(&path, &diagnostics) {
             continue;
         }
@@ -652,9 +622,7 @@ fn bone_reload_and_publish(
     Ok(())
 }
 
-/// Answer an `R` request with a caller-selected parameter type and the request's
-/// declared result type. Position-only handlers retain compatibility with
-/// clients that omit context added by newer protocol versions.
+/// Position-only handlers stay compatible with clients that omit newer context.
 fn answer<R: lsp_types::request::Request, P: serde::de::DeserializeOwned>(
     req: Request,
     out: &mut Vec<Message>,
@@ -684,12 +652,10 @@ fn notify(out: &mut Vec<Message>, method: &str, params: serde_json::Value) {
     }));
 }
 
-/// An error response message for a request that cannot be answered.
 fn failed_request(id: RequestId, code: lsp_server::ErrorCode, text: String) -> Message {
     Response::new_err(id, code as i32, text).into()
 }
 
-/// The document a notification talks about, read from its `textDocument.uri`.
 fn doc_uri(note: &lsp_server::Notification) -> Result<Uri> {
     note.params["textDocument"]["uri"]
         .as_str()
@@ -703,7 +669,6 @@ fn doc_version(note: &lsp_server::Notification) -> Option<i32> {
         .map(|v| v as i32)
 }
 
-/// The full text a notification carries at `text`, a JSON pointer.
 fn doc_text(note: &lsp_server::Notification, text: &str) -> Result<String> {
     note.params
         .pointer(text)
@@ -712,9 +677,8 @@ fn doc_text(note: &lsp_server::Notification, text: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("{} has no {text}", note.method))
 }
 
-/// The file a document notification is about. A URI that names no local file
-/// (an unsaved `untitled:` buffer, a remote scheme) is not an error that should
-/// stop the server: the notification is skipped and the client is told why.
+/// A URI naming no local file (`untitled:`, a remote scheme) is skipped with a
+/// message to the client, not treated as an error.
 fn notification_path(out: &mut Vec<Message>, uri: &Uri, method: &str) -> Result<Option<String>> {
     match uri.to_file_path() {
         Ok(path) => Ok(Some(path)),
@@ -731,9 +695,6 @@ fn notification_path(out: &mut Vec<Message>, uri: &Uri, method: &str) -> Result<
     }
 }
 
-/// Answer a request: serialize the handler's value into a response, or the
-/// handler's failure into a `RequestFailed` error. A value that cannot
-/// serialize becomes `InternalError`.
 fn send_response<T: serde::Serialize>(out: &mut Vec<Message>, id: RequestId, t: Result<T>) {
     let answer = match t.map(|done| serde_json::to_value(&done)) {
         Ok(Ok(payload)) => Message::Response(Response {

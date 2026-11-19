@@ -110,9 +110,8 @@ pub fn do_completion_workspace(
     let _span = tracing::debug_span!("do_completion_workspace").entered();
     let file_path = doc_path(&params.text_document_position.text_document)?;
     let pos = params.text_document_position.position;
-    // Was this auto-fired by the space trigger character? If so, a
-    // whitespace-only line prefix is `<CR>` auto-indent, and bone suppresses the
-    // popup (so `<CR><CR>` inserts two newlines instead of accepting item 1).
+    // On a space trigger, a whitespace-only prefix is `<CR>` auto-indent, so bone
+    // suppresses the popup (`<CR><CR>` inserts two newlines).
     let space_triggered = params.context.as_ref().is_some_and(|c| {
         c.trigger_kind == lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER
             && c.trigger_character.as_deref() == Some(" ")
@@ -120,8 +119,6 @@ pub fn do_completion_workspace(
     let mut items = workspace
         .bone
         .completion_with_trigger(&file_path, pos, space_triggered);
-    // Corpus recorder (ROCK_LSP_RECORD): snapshot the request + tag items
-    // with the accept command. No-op when recording is off.
     crate::completion_record::stash_and_tag(&workspace.bone, &file_path, pos, &mut items);
     // Re-request on each keystroke because ranking depends on the typed prefix.
     Ok(Some(CompletionList {

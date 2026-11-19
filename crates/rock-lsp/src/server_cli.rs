@@ -1,16 +1,10 @@
-//! The `rock lsp <subcommand>` entry point. Drives the persistent LSP server
-//! (`serve`) and every one-shot CLI handler (hover, completion, diagnostics,
-//! ...). Invoked from `rock-cli`'s `main` after it strips the leading `lsp`
-//! token; there is no standalone `rock-lsp` binary (removed so a single `rock`
-//! artifact can never go stale against the stdlib it embeds).
+//! The `rock lsp <subcommand>` entry point, invoked from `rock-cli` after it strips `lsp`.
 
 use crate::cli;
 use anyhow::Result;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 fn build_cli() -> Command {
-    // Most subcommands take a single positional + --trace. A few take
-    // (file, query) or (position, new_name). Builders for both shapes.
     let trace_flag = || {
         Arg::new("trace")
             .long("trace")
@@ -141,7 +135,6 @@ fn arg_str<'a>(m: &'a ArgMatches, name: &str) -> &'a str {
     m.get_one::<String>(name).map(|s| s.as_str()).unwrap_or("")
 }
 
-/// Parse a `file:line:column` position the same way the Lua CLI handlers do.
 fn bone_position(m: &ArgMatches) -> Result<(String, u32, u32)> {
     cli::parse_position(arg_str(m, "position"))
 }
@@ -154,12 +147,9 @@ fn open_debug_log(log_path: &str) -> Result<fs_err::File> {
         .map_err(|e| anyhow::anyhow!("ROCK_LSP_DEBUG: cannot open {log_path}: {e}"))
 }
 
-/// Stderr filter at a warn floor, refined by `RUST_LOG` directives
-/// (`info`, `rock_lsp=debug,warn`, ...). An unparsable `RUST_LOG` is an error.
+/// Warn floor refined by `RUST_LOG`; an unparsable `RUST_LOG` is an error.
 fn stderr_log_filter(rust_log: Option<&str>, timing: bool) -> Result<rock_log::Filter> {
-    // ROCK_LSP_TIMING=1: surface the per-request handle timer (info on
-    // the `lsp_timing` target) without lifting the default warn floor
-    // for everything else, so `:LspLog` shows timing and nothing else.
+    // ROCK_LSP_TIMING=1 shows the request timer without lifting the warn floor.
     let timing_override = [("lsp_timing", log::LevelFilter::Info)];
     let overrides: &[_] = if timing { &timing_override } else { &[] };
     rock_log::Filter::parse(log::LevelFilter::Warn, rust_log, overrides).map_err(|e| {
@@ -170,17 +160,11 @@ fn stderr_log_filter(rust_log: Option<&str>, timing: bool) -> Result<rock_log::F
     })
 }
 
-/// Install the LSP logger and run the requested `rock lsp` subcommand.
-///
-/// `args` is the full argv for the LSP CLI with `argv[0]` a display name
-/// (`rock-cli` passes `"rock lsp"`); clap reads the subcommand from `args[1]`.
-/// Owns its own logger install — callers must NOT have installed a global
-/// logger first (`rock-cli` intercepts `lsp` before `rock_log::init()`).
-/// It is the shared rock-log backend with a per-target filter.
+/// Run a `rock lsp` subcommand; `args[0]` is a display name. Callers must not have
+/// installed a global logger first.
 pub fn run_cli(args: Vec<String>) -> Result<()> {
-    // ROCK_LSP_DEBUG=1 -> lsp_debug.log in /tmp (Windows: system temp directory).
-    // ROCK_LSP_DEBUG=/some/path -> that path at trace level
-    // Unset -> stderr at warn (or RUST_LOG level)
+    // ROCK_LSP_DEBUG=1 -> lsp_debug.log in the temp dir; a path -> that path at trace
+    // level; unset -> stderr at warn (or RUST_LOG).
     match std::env::var("ROCK_LSP_DEBUG") {
         Ok(val) => {
             let log_path = if val == "1" || val.is_empty() {
@@ -265,7 +249,6 @@ mod tests {
         );
     }
 
-    /// Which of `(target, level)` the filter built from these settings enables.
     fn enabled(rust_log: Option<&str>, timing: bool, probes: &[(&str, Level)]) -> Vec<bool> {
         let filter = stderr_log_filter(rust_log, timing).unwrap();
         probes

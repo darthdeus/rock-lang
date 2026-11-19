@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Global counter for semantic token result IDs
 static SEMANTIC_TOKEN_RESULT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// Generate a unique result ID for semantic tokens
 fn generate_result_id() -> String {
     let id = SEMANTIC_TOKEN_RESULT_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
     format!("semantic_tokens_{}", id)
@@ -15,21 +13,15 @@ pub(crate) struct SemanticTokenCache {
     pub document_version: Option<i32>,
 }
 
-/// Workspace managing the bone session plus per-document LSP caches.
 pub struct LspWorkspace {
-    /// bone-backed state: the per-root sessions that serve every query.
     pub bone: bone_query::BoneWorkspace,
 
-    /// Semantic token cache with document version tracking
     semantic_token_cache: HashMap<String, SemanticTokenCache>,
 
     document_versions: HashMap<String, i32>,
 
-    /// Last diagnostics published per file path, so the bone publish path can
-    /// skip re-sending unchanged files. `bone.update` returns diagnostics for
-    /// EVERY tracked file (the whole compilation unit, incl. deps) on every
-    /// keystroke; without this we'd re-publish ~130 notifications/edit, almost
-    /// all empty clears for files the editor never opened.
+    /// `bone.update` returns diagnostics for every tracked file on every keystroke;
+    /// this keeps unchanged files from being re-published.
     published_diagnostics: HashMap<String, Vec<lsp_types::Diagnostic>>,
 }
 
@@ -43,11 +35,7 @@ impl LspWorkspace {
         }
     }
 
-    /// True if `diagnostics` differ from what was last published for `path`
-    /// (an untracked path is treated as previously-empty). Records the new
-    /// state when it differs, so the caller publishes only changed files.
-    /// Empty diagnostics for a never-published (or already-empty) file are a
-    /// no-op -- we never emit a redundant "clear".
+    /// Records the new state when it differs; an untracked path counts as previously empty.
     pub(crate) fn diagnostics_changed(
         &mut self,
         path: &str,
@@ -69,7 +57,6 @@ impl LspWorkspace {
         true
     }
 
-    /// Update the document version.
     pub(crate) fn update_document_version(&mut self, uri: &str, version: Option<i32>) {
         if let Some(v) = version {
             self.document_versions.insert(uri.to_string(), v);
@@ -109,12 +96,10 @@ impl LspWorkspace {
         tokens
     }
 
-    /// Get current document version
     pub(crate) fn get_document_version(&self, uri: &str) -> Option<i32> {
         self.document_versions.get(uri).copied()
     }
 
-    /// Drop all per-document caches for a URI the editor has closed.
     /// Called after the `textDocument/didClose` handler reconciles disk contents.
     pub(crate) fn close_document(&mut self, uri: &str) {
         self.document_versions.remove(uri);
@@ -139,26 +124,16 @@ mod published_diagnostics_tests {
         }
     }
 
-    /// `diagnostics_changed` gates the bone publish path so only files whose
-    /// diagnostics actually changed are re-sent. Pins every transition: a
-    /// never-published clean file is a no-op (no redundant clear), an error
-    /// publishes once, a clear after an error publishes once, and steady state
-    /// is silent.
     #[test]
     fn diagnostics_changed_dedups_unchanged_and_clears_once() {
         let mut ws = LspWorkspace::new();
-        // Clean + never published -> nothing to publish.
         assert!(!ws.diagnostics_changed("a", &[]));
         assert!(!ws.diagnostics_changed("a", &[]));
-        // First error -> publish; same error again -> skip.
         assert!(ws.diagnostics_changed("a", &[diag("E")]));
         assert!(!ws.diagnostics_changed("a", &[diag("E")]));
-        // Different error -> publish.
         assert!(ws.diagnostics_changed("a", &[diag("E2")]));
-        // Becomes clean -> publish the clear ONCE, then silent.
         assert!(ws.diagnostics_changed("a", &[]));
         assert!(!ws.diagnostics_changed("a", &[]));
-        // A different file is independent.
         assert!(ws.diagnostics_changed("b", &[diag("E")]));
         assert!(!ws.diagnostics_changed("a", &[]));
     }

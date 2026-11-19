@@ -1,8 +1,4 @@
-//! Why a rename must not run. A rename either rewrites every site that names
-//! the symbol or none: a site Rock cannot see or rewrite (an opaque inline
-//! body, a macro expansion, an external caller of a `@nomangle` name) turns a
-//! partial edit into a silently broken program, so the rename is refused with
-//! a reason the editor shows instead.
+//! Why a rename must not run: a partial rename silently breaks the program.
 
 use rock_tokenizer::{TokenKind, Tokenizer};
 
@@ -24,8 +20,6 @@ impl std::fmt::Display for RenameRefusal {
 
 impl std::error::Error for RenameRefusal {}
 
-/// `Err` unless `new_name` lexes as exactly one identifier, so a rename never
-/// writes a keyword or several tokens into every site.
 pub(super) fn check_new_name(new_name: &str) -> Result<(), RenameRefusal> {
     let kinds = Tokenizer::from_code("<rename>", new_name).tokenize_kinds();
     match kinds.as_deref() {
@@ -36,10 +30,6 @@ pub(super) fn check_new_name(new_name: &str) -> Result<(), RenameRefusal> {
     }
 }
 
-/// `Err` when a site lies in a read-only source. Renaming a function keeps to
-/// the overloads the user owns before it gets here, so a site left in the
-/// stdlib means the symbol itself belongs to it: a stdlib function, type or
-/// field, or a name rename reached from inside a stdlib file.
 pub(super) fn check_read_only<'t>(
     sites: &[RefSite],
     old: &str,
@@ -61,11 +51,6 @@ pub(super) fn check_read_only<'t>(
     )))
 }
 
-/// `Err` when a user's reference to function `name` cannot be pinned to the
-/// user's overloads or the stdlib's that share the name. A resolved call says
-/// which overload it reaches, so it is either rewritten or left alone; a bare
-/// value (`let f = get`) or a call that did not resolve says nothing, and
-/// guessing either way can leave a wrong edit, so the rename is refused.
 pub(super) fn check_unpinned<'t>(
     ws: &Workspace,
     subject: RenameSubject,
@@ -150,21 +135,9 @@ pub(super) fn check_unpinned<'t>(
     Ok(())
 }
 
-/// `Err` when code Rock cannot rewrite spells the old name. Rename edits only
-/// Rock source, and the Lua or JS emitted for a program keeps some names as
-/// written, so:
-///
-/// - a `@nomangle` or `extern` function, or a `@nomangle` struct, is named
-///   by code outside the program (the host, other inline code); it is
-///   refused outright;
-/// - an `inline(lua)` / `inline(js)` body sees its own parameters by name,
-///   and globals, struct fields and struct or enum names (runtime type tags)
-///   from anywhere, so a body that spells the old name as a word refuses the
-///   rename. Other functions are emitted under mangled names, which inline
-///   code cannot call, so their renames go ahead.
-///
-/// The word match is textual: it cannot tell a Lua local that happens to
-/// share the name from a real reference, and it refuses either way.
+/// `Err` when code Rock cannot rewrite names the symbol: a `@nomangle` or
+/// `extern` function or `@nomangle` struct, or an `inline(lua)` / `inline(js)`
+/// body that spells the old name as a word.
 pub(super) fn check_opaque<'t>(
     ws: &Workspace,
     subject: RenameSubject,
@@ -246,7 +219,6 @@ pub(super) fn check_opaque<'t>(
     Ok(())
 }
 
-/// Whether `word` occurs in `text` with no identifier character on either side.
 fn contains_word(text: &str, word: &str) -> bool {
     let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
     let b = text.as_bytes();
@@ -256,8 +228,6 @@ fn contains_word(text: &str, word: &str) -> bool {
     })
 }
 
-/// `file:line` of byte `offset` in `text`, naming the file by its last
-/// component so the message stays short.
 pub(super) fn site_label(file: &str, text: &str, offset: usize) -> String {
     let line = text
         .get(..offset)
@@ -269,10 +239,8 @@ pub(super) fn site_label(file: &str, text: &str, offset: usize) -> String {
     format!("{name}:{}", line + 1)
 }
 
-/// `Err` when a site does not spell `old` in the source. Macro expansion
-/// retags the code it splices onto the invocation, so a use written inside a
-/// macro body (`^count`, `_G.SCORE`) surfaces as a site over the call text;
-/// rewriting it would corrupt the call and still leave the body stale.
+/// `Err` when a site does not spell `old`: macro expansion retags spliced code
+/// onto the invocation, so a site may cover the call text.
 pub(super) fn check_spellings<'t>(
     sites: &[RefSite],
     old: &str,

@@ -68,8 +68,6 @@ fn from_file_path_on(path: &str, windows: bool) -> Result<Uri, FileUriError> {
         .map_err(|e| FileUriError(format!("{e}: {path}")))
 }
 
-/// Whether a Windows path starts `X:` followed by the end or a separator in
-/// `seps`.
 fn starts_with_drive(path: &str, seps: &[u8]) -> bool {
     let b = path.as_bytes();
     b.len() >= 2
@@ -78,9 +76,8 @@ fn starts_with_drive(path: &str, seps: &[u8]) -> bool {
         && (b.len() == 2 || seps.contains(&b[2]))
 }
 
-/// A decoded `file:` URI path as a native absolute path. On Windows the URI
-/// path is `/C:/dir/f` (the client may have percent-encoded the colon; it is
-/// decoded by now) and becomes `C:\dir\f`; elsewhere it is used as is.
+/// On Windows the URI path `/C:/dir/f` (colon possibly percent-encoded by
+/// the client) becomes `C:\dir\f`.
 fn uri_path_to_native(path: &str, windows: bool) -> Option<String> {
     if !windows {
         return path.starts_with('/').then(|| path.to_string());
@@ -95,9 +92,7 @@ fn uri_path_to_native(path: &str, windows: bool) -> Option<String> {
     Some(native)
 }
 
-/// The unencoded URI path for a native absolute path: `C:\dir\f`, `C:/dir/f`
-/// or `\\?\C:\dir\f` becomes `/C:/dir/f` on Windows; elsewhere the path must
-/// start with `/` and is used as is. The error says why the path has no URI.
+/// On Windows `C:\dir\f`, `C:/dir/f` or `\\?\C:\dir\f` becomes `/C:/dir/f`.
 fn native_to_uri_path(path: &str, windows: bool) -> Result<String, &'static str> {
     if !windows {
         return if path.starts_with('/') {

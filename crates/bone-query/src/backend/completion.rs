@@ -9,7 +9,6 @@ struct Request<'a> {
     offset: usize,
     prefix_raw: &'a str,
     prefix: String,
-    /// Reuse existing call parentheses when inserting a completion.
     next_is_open_paren: bool,
     munges: std::cell::OnceCell<[String; 2]>,
 }
@@ -31,7 +30,6 @@ impl Request<'_> {
     }
 }
 
-/// Project indexes shared across completion requests until the interface changes.
 struct Caches<'a> {
     reach: &'a crate::reachability::ReachabilityIndex,
     freq: &'a HashMap<Ustr, u32>,
@@ -84,7 +82,6 @@ impl BoneWorkspace {
                 next_is_open_paren: src.get(offset..).is_some_and(|s| s.starts_with('(')),
             };
             let cx = classify(src, offset);
-            // Dropped by interface edits; the first completion after one rebuilds.
             let ws = session.workspace();
             let reach =
                 &*reach.get_or_insert_with(|| crate::reachability::ReachabilityIndex::build(ws));
@@ -108,25 +105,18 @@ impl BoneWorkspace {
     }
 }
 
-/// The answers decided before classification: `Some` is the whole response.
 fn lexical_gate(src: &str, offset: usize, space_triggered: bool) -> Option<Vec<CompletionItem>> {
-    // Space-triggered on an all-whitespace line prefix == `<CR>` auto-indent,
-    // not a real space-after-token context: suppress the popup.
+    // A space trigger on a blank line prefix is the editor's `<CR>` auto-indent.
     if space_triggered && line_prefix_is_blank(src, offset) {
         return Some(Vec::new());
     }
-    // Only directives within comments and code inside interpolation holes complete.
     match rock_tokenizer::region_at(src, offset) {
         rock_tokenizer::LexRegion::Comment => {
-            // Ordinary comments have no magic directive candidates.
             return Some(magic_comment_completions(src, offset).unwrap_or_default());
         }
         rock_tokenizer::LexRegion::StringText => return Some(Vec::new()),
         rock_tokenizer::LexRegion::Code => {}
     }
-    // A token starting with a digit is a numeric literal, never an identifier
-    // being typed (Rock idents are `[A-Za-z_][A-Za-z0-9_]*`) -- don't
-    // subsequence-match it against symbols (`0` -> `remap_to_01`).
     if ident_prefix(src, offset)
         .as_bytes()
         .first()
@@ -137,8 +127,6 @@ fn lexical_gate(src: &str, offset: usize, space_triggered: bool) -> Option<Vec<C
     None
 }
 
-// A contextual lookup may decline: an incomplete receiver or qualifier can
-// prevent the live file from lowering, and a block can parse as a record.
 fn contextual_completions(
     session: &mut Session,
     reach: &crate::reachability::ReachabilityIndex,
@@ -250,7 +238,6 @@ fn member_candidates_at(
         .as_ref()
         .map(|(callee, idx, _)| (callee.as_str(), *idx as usize));
     let mut resolved = path.is_some();
-    // Try both repairs with inference before falling back to the named receiver.
     for named in [false, true] {
         if named && path.is_none() {
             break;
@@ -287,7 +274,6 @@ fn member_candidates_at(
     resolved.then(Vec::new)
 }
 
-/// A name that is not a module may still qualify an enum variant.
 fn module_path_candidates(
     ws: &Workspace,
     path: &str,
@@ -335,9 +321,7 @@ struct GeneralCx<'w> {
     ws: &'w Workspace,
     mid: ModuleId,
     inf: &'w InferenceResult,
-    /// The request file's fragment scope (modules v1).
     frag: &'w bone_core::modules::FragmentScope,
-    /// Offer recursion as an ordinary completion, without type-directed promotion.
     enclosing_fn: Option<Ustr>,
     pattern_pos: bool,
 }
@@ -349,15 +333,12 @@ fn general_completions(
     rq: &Request,
     cx: &CompletionCx,
 ) -> Vec<CompletionItem> {
-    // Use the scrutinee type to rank variants and suppress synthesized calls
-    // and reach paths in a pattern.
     let pattern_pos = cx.pattern_scrutinee.is_some();
     let pattern_enum: Option<String> = cx
         .pattern_scrutinee
         .and_then(|a| pattern_scrutinee_enum(session, rq.path, rq.src, rq.offset, a));
     let session: &Session = session;
     let live = session.workspace();
-    // An incomplete buffer can be absent from the live session.
     let fallback_ws: Option<Workspace> = if user_module_for_path(live, rq.path).is_none() {
         recovery_workspace(session, fallbacks, rq, pattern_pos)
     } else {
@@ -396,7 +377,6 @@ fn general_completions(
         rq,
         cx.expr_position || pattern_pos,
     );
-    // Macros are an expression, never a type.
     if cx.expr_position {
         push_macro_candidates(session, rq, &mut cands);
     }
@@ -419,7 +399,6 @@ fn general_completions(
         );
         cands.into_iter().map(|c| ranker.rank(c)).collect()
     };
-    // Partition by the same comparator that orders the final response.
     if general.len() > MAX_COMPLETION_ITEMS {
         general.select_nth_unstable_by(MAX_COMPLETION_ITEMS, cand_cmp);
         general.truncate(MAX_COMPLETION_ITEMS);
@@ -441,8 +420,6 @@ fn general_completions(
 
     let t_ct = bone_core::prelude::Instant::now();
     let mut ct_counts = CtCounts::default();
-    // When the cap is already met, skip call-through even though a local-seeded
-    // call may outrank some entries. Narrowing the prefix can surface it.
     if cx.expr_position && !pattern_pos && sink.len() < MAX_COMPLETION_ITEMS {
         ct_counts = push_call_through(
             &g,
@@ -470,7 +447,6 @@ fn general_completions(
     finish(&g, sink, rq, &import_edits)
 }
 
-/// Recovery workspace for a buffer whose live parse dropped the user module.
 fn recovery_workspace(
     session: &Session,
     fallbacks: &FallbackReports,
@@ -478,10 +454,6 @@ fn recovery_workspace(
     pattern_pos: bool,
 ) -> Option<Workspace> {
     let (src, offset) = (rq.src, rq.offset.min(rq.src.len()));
-    // A half-typed arm HEAD (`match s { co`) is what broke the parse:
-    // complete it (` => {}` at the cursor) so the recovery reparse keeps the
-    // match -- and its scrutinee, which the pattern rung resolves -- instead
-    // of dropping the statement.
     let fixed = if pattern_pos {
         let mut s = String::with_capacity(src.len() + 8);
         s.push_str(&src[..offset]);
@@ -500,7 +472,6 @@ fn recovery_workspace(
     )
 }
 
-/// The in-scope and visible-global candidates matching the prefix.
 fn scope_candidates(
     g: &GeneralCx,
     visible_bindings: &mut HashMap<Ustr, Vec<crate::query::VisibleBinding>>,
@@ -545,10 +516,6 @@ fn scope_candidates(
     )
 }
 
-/// Macros are expanded away before bone lowering, so the workspace has no
-/// record of them -- without this every macro in the tree is invisible to
-/// completion. The Session's parse-time capture is the only source (the same
-/// one ctags and semantic tokens read).
 fn push_macro_candidates(
     session: &Session,
     rq: &Request,
@@ -565,8 +532,6 @@ fn push_macro_candidates(
         if !admit(name.as_str().as_bytes(), pfx) {
             continue;
         }
-        // Overloaded macros (`log_once` has a 2- and a 3-param form) share
-        // one name -- offer the first, like an overloaded fn.
         if !already.insert(name) {
             continue;
         }
@@ -590,9 +555,6 @@ fn push_macro_candidates(
     }
 }
 
-/// Out-of-scope accessible definitions of a v1 fragment, each with the `use`
-/// that brings it in, keyed by label. Only while a name is being typed: the
-/// empty-prefix list is what the file already binds.
 fn push_import_candidates(
     g: &GeneralCx,
     session: &Session,
@@ -657,22 +619,14 @@ struct GeneralRanker<'a, 'w> {
     q: &'a [u8],
     q_raw: &'a [u8],
     pattern_enum: Option<&'a str>,
-    /// `for x in |`: an iterable is the expected operand.
     for_in: bool,
-    /// Inference's `for`-head judgment over the cursor body (Local candidate
-    /// TyIds index its BodyInference); `Some` only in a ForIn slot.
     for_in_oracle: Option<ForInOracle<'w>>,
-    /// After `yield`/`await`, coroutine-returning fns rank first (the
-    /// `await frame(1)` delegation pattern).
     after_yield: bool,
-    /// Test-scoped symbols demote outside test files (kind bucket 4).
     demote_tests: bool,
     expected: Option<&'a mut ExpectedArg<'w>>,
     has_expected: bool,
     freq: &'a HashMap<Ustr, u32>,
-    /// The request's project root, for the proximity rung.
     root: String,
-    /// Proximity tier per defining file, memoized per request.
     prox_memo: HashMap<Ustr, u8>,
 }
 
@@ -710,8 +664,6 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
         }
     }
 
-    /// Proximity tier of a defining file vs the request (late prior: 0 same
-    /// file, 1 same project root, 2 other workspace code, 3 stdlib/builtins).
     fn prox(&mut self, def_file: Ustr) -> u8 {
         let (path, root) = (self.path, &self.root);
         *self.prox_memo.entry(def_file).or_insert_with(|| {
@@ -731,23 +683,9 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
     fn rank(&mut self, c: crate::query::CompletionEntry) -> Cand {
         let ws = self.g.ws;
         let (q, q_raw) = (self.q, self.q_raw);
-        // Locality/kind ladder, always computed: variables first
-        // (locals/params, then globals), then functions / structs / bare
-        // enums / newtypes, then enum-member VARIANTS last. In a typed slot it
-        // is the post-band tiebreak (a right-type local beats a right-type
-        // global); with no expected type it is the primary kind bucket.
-        // Structs sit in bucket 2 (NOT below functions): on an EMPTY prefix
-        // the cap keeps the best `max_items`, and burying types under every
-        // stdlib fn would truncate them away entirely; within bucket 2 the
-        // `method` tiebreak already orders non-fns ahead of functions.
         let kind = match c.kind() {
-            // Test-scoped symbols (tests/-dir or test_-named) sink to the
-            // bottom kind bucket OUTSIDE test files; the band rung still
-            // leads, so an explicitly typed `test_` prefix surfaces them.
             _ if self.demote_tests && c.test_scoped => 4,
             SymCat::Local | SymCat::Param => 0,
-            // After `yield`/`await`, a coroutine fn is the expected operand
-            // -- promote it above plain fns/types.
             SymCat::Function
                 if self.after_yield
                     && fn_is_coroutine_in_scope(ws, c.name.as_str(), self.g.frag) =>
@@ -761,11 +699,6 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
         let type_rank = self.type_rank(&c);
         let method = u8::from(c.kind() == SymCat::Function);
         let name = c.name.as_str();
-        // Smart-case leading rank, untyped slots only: measure against the
-        // variant NAME (the user types it; `Enum::` uppercasing would skew
-        // it). In a typed slot (and the pattern / for-in slots) the
-        // expected-TYPE bucket must stay dominant over case, so leave case
-        // neutral (0) there.
         let case_rank = if !self.has_expected && self.pattern_enum.is_none() && !self.for_in {
             let case_target = if c.kind() == SymCat::Variant {
                 name.rsplit("::").next().unwrap_or(name)
@@ -777,9 +710,6 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             0
         };
         let (score, lead) = if c.kind() == SymCat::Variant {
-            // The user types the variant NAME (`nog` -> `NotGround`); score
-            // against it, but keep the qualified score too so a `tarnog`
-            // (Enum + variant) query still ranks.
             let vname = name.rsplit("::").next().unwrap_or(name);
             let s = fuzzy_score(vname.as_bytes(), q).max(fuzzy_score(name.as_bytes(), q));
             let l = leading_run_len(vname.as_bytes(), q).max(leading_run_len(name.as_bytes(), q));
@@ -790,14 +720,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
                 leading_run_len(name.as_bytes(), q),
             )
         };
-        // A leading contiguous run (you typed the start of the name) beats a
-        // scattered all-boundary match on a longer name -- the fine score
-        // alone over-rewards boundary-rich names. Only reorders within a
-        // band; well below fuzzy_score's whole-prefix +1000.
         let score = score + (lead as i32) * 100;
-        // Coarse match band + exact-name flag: classified against the variant
-        // tail too (the user types `Combat`, not `MobAiState::Combat`),
-        // mirroring the score's vname handling.
         let (exact, band) = match_band_exact(name, q, q_raw);
         let freq_name = c.key();
         let key = RankKey {
@@ -811,7 +734,6 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             fine: RankKey::fine(score),
             prox: self.prox(c.def_file),
             freq: match c.kind() {
-                // Locals ride the recency rung instead.
                 SymCat::Local | SymCat::Param => 0,
                 _ => freq_bucket(self.freq.get(&freq_name).copied().unwrap_or(0)),
             },
@@ -821,8 +743,6 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
         Cand::new(key, CandName::Sym(c.name), CandShape::Entry(c))
     }
 
-    /// The typed ladder: 0 = a value (or variant) of the expected type, 1 = a
-    /// fn returning it, 2 = else; all 0 when no type is inferable.
     fn type_rank(&mut self, c: &crate::query::CompletionEntry) -> u8 {
         use crate::query::CompletionSymbol;
         let ws = self.g.ws;
@@ -868,7 +788,6 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
     }
 }
 
-/// Frequency prior: workspace ref counts, log-bucketed.
 fn freq_bucket(n: u32) -> u8 {
     if n >= FREQ_HOT {
         0
@@ -879,7 +798,6 @@ fn freq_bucket(n: u32) -> u8 {
     }
 }
 
-/// Offer an Entity template in typed parameter declarations.
 fn push_entity_synth(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Sink) {
     let Some((pn, fn_name)) = cx.param_type.as_ref() else {
         return;
@@ -905,7 +823,6 @@ fn push_entity_synth(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut 
     }
 }
 
-/// Offer unused parameter names. A spread may already supply some of them.
 fn push_named_args(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Sink) {
     let Some(nargs) = cx.named_arg.as_ref() else {
         return;
@@ -946,13 +863,10 @@ fn push_named_args(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Si
     }
 }
 
-/// Prefer the host yield type when the project declares it.
 fn push_coroutine_synths(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Sink) {
     let has_wait = nominal_exists(g.ws, g.frag, "Wait");
     let q = rq.prefix.as_bytes();
     if cx.coroutine_generic {
-        // (a) first generic arg of `Coroutine<..>` -> `Wait` ranks #0,
-        // superseding the plain struct symbol.
         if has_wait && admit(b"Wait", q) {
             sink.retain_not_named("Wait");
             let key = RankKey {
@@ -966,8 +880,6 @@ fn push_coroutine_synths(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &
             ));
         }
     } else if !cx.expr_position && !q.is_empty() && admit(b"Coroutine", q) {
-        // (b) completing the `Coroutine` type name -> snippet forms replace
-        // the bare type: `Coroutine<Wait>` first, `Coroutine<$0>` second.
         sink.retain_not_named("Coroutine");
         if has_wait {
             let key = RankKey {
@@ -991,8 +903,6 @@ fn push_coroutine_synths(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &
             CandShape::Coroutine { with_wait: false },
         ));
     }
-    // (c) `co fn NAME()|` with no return type -> offer the `-> Coroutine<..>`
-    // return type to the right of `)`.
     if q.is_empty() && co_fn_return_slot(rq.src.as_bytes(), rq.offset) {
         let label = if has_wait {
             "-> Coroutine<Wait>"
@@ -1011,7 +921,6 @@ fn push_coroutine_synths(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &
     }
 }
 
-/// Offer paths from visible roots to an expected type using cached DefKeys.
 fn push_reach_paths(
     g: &GeneralCx,
     reach: &crate::reachability::ReachabilityIndex,
@@ -1047,16 +956,11 @@ fn push_reach_paths(
     for (vname, vty, root_kind) in roots {
         let res = reach.paths_to(&vty, expected_types, REACH_CAP, Some((ws, frag)));
         for p in res.paths {
-            // A path that CALLS the enclosing fn (`k.partition_style()`
-            // inside `partition_style`) is a recursive self-reference -- skip
-            // it, same reason the fn is not promoted as a candidate.
             if g.enclosing_fn
                 .is_some_and(|f| reach_suffix_calls(&p.suffix, &f))
             {
                 continue;
             }
-            // Dedup / fuzzy-match / sort on the bare access form; the final
-            // hop's parens/snippet are rendered from the flags.
             let Some(suffix) = crate::modules_scope::display_method_suffix_with_names(
                 &p.suffix,
                 &p.method_members,
@@ -1067,16 +971,12 @@ fn push_reach_paths(
             let final_ty =
                 crate::modules_scope::display_type_with_names(ws, &p.final_ty, &type_spellings);
             let key = format!("{vname}.{suffix}");
-            // Require a CLEAN match (word-boundary / run), not a
-            // coincidental scatter, so `nog` doesn't drag in
-            // `necro_cast.ima(g)e_dims()...` reach paths.
             if !pfx.is_empty() && !clean_match(key.as_bytes(), pfx) {
                 continue;
             }
             if !sink.admit(&key) {
                 continue;
             }
-            // Rank stored fields with values and method results with calls.
             let (type_rank, kind) = if p.is_method { (1, 2) } else { (0, root_kind) };
             let rk = arg_rank_key(type_rank, kind, &key, pfx, p.dist, u8::from(p.is_method), 0);
             sink.push(Cand::new(

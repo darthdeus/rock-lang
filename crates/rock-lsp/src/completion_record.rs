@@ -1,18 +1,7 @@
-//! Completion corpus recorder -- the replay corpus's server half.
-//!
-//! Gated on `ROCK_LSP_RECORD`: `1` -> `rock-completion-corpus.jsonl` in `/tmp`
-//! (Windows: the system temp directory),
-//! any other non-empty value -> that path (the `ROCK_LSP_DEBUG` convention).
-//! Off = zero cost: no snapshots taken, no item commands attached.
-//!
-//! Flow: `stash_and_tag` snapshots each completion response (the buffer
-//! exactly as the ranker saw it, the full ranked item list, phase timings)
-//! into a small ring and rides a `rock.completionAccepted` command
-//! `[record_id, index, label]` on every item. Per LSP, the client executes
-//! `CompletionItem.command` after inserting the item; that arrives as
-//! `workspace/executeCommand`, `handle_execute_command` joins the id back
-//! to the stashed snapshot, and one self-contained JSONL row is appended.
-//! Dismissed popups never write (their snapshots age out of the ring).
+//! Completion corpus recorder, gated on `ROCK_LSP_RECORD` (`1` -> `rock-completion-corpus.jsonl`
+//! in the temp dir, any other value -> that path). Each item carries a `rock.completionAccepted`
+//! command `[record_id, index, label]`; per LSP the client executes it after inserting the item,
+//! and the accept appends one JSONL row joined to the stashed request.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
@@ -23,8 +12,6 @@ use lsp_types::{Command, CompletionItem, Position};
 use serde_json::json;
 
 pub const ACCEPT_COMMAND: &str = "rock.completionAccepted";
-/// An accept refers to one of the last few requests (per-keystroke
-/// re-query while the popup is open); older snapshots are dead weight.
 const RING_CAP: usize = 8;
 
 struct Stashed {
@@ -42,8 +29,7 @@ pub(crate) struct Recorder {
     out_path: PathBuf,
     ring: VecDeque<Stashed>,
     next_id: u64,
-    /// git HEAD per directory (what the rest of the workspace looked like);
-    /// `None` caches "not a repo" so git isn't respawned per accept.
+    /// `None` caches "not a repo" so git is not respawned per accept.
     git_heads: HashMap<String, Option<String>>,
 }
 
@@ -88,9 +74,7 @@ impl Recorder {
         record_id
     }
 
-    /// Join an accepted item back to its stashed request and append the
-    /// corpus row. Unknown ids (popup outlived the ring, or a stale client)
-    /// are warned, never silently dropped.
+    /// Unknown ids are warned, never silently dropped.
     pub fn accept(&mut self, record_id: u64, index: Option<u64>, label: Option<&str>) {
         let Some(at) = self.ring.iter().position(|s| s.record_id == record_id) else {
             log::warn!(
@@ -170,9 +154,7 @@ fn append_line(path: &Path, row: &serde_json::Value) -> std::io::Result<()> {
     writeln!(f, "{row}")
 }
 
-/// `Mutex<Option<..>>` (not `OnceLock`) so tests / a CLI can flip recording
-/// on after the first `recording is off` read. One uncontended lock per
-/// completion request when off -- noise next to the request itself.
+/// Not `OnceLock`, so tests or a CLI can turn recording on after the first read.
 static RECORDER: LazyLock<Mutex<Option<Recorder>>> = LazyLock::new(|| {
     Mutex::new(match std::env::var("ROCK_LSP_RECORD") {
         Ok(v) if v == "1" => Some(Recorder::new(crate::default_debug_file(
@@ -192,8 +174,6 @@ pub fn init_recorder_at(path: PathBuf) {
     }
 }
 
-/// Snapshot the completion request into the ring and tag every item with
-/// the accept command. No-op (and no buffer copy) when recording is off.
 pub(crate) fn stash_and_tag(
     bone: &bone_query::BoneWorkspace,
     file_path: &str,
@@ -243,8 +223,7 @@ pub(crate) fn stash_and_tag(
     }
 }
 
-/// The `workspace/executeCommand` endpoint; `rock.completionAccepted` is the
-/// only command the server advertises.
+/// `rock.completionAccepted` is the only command the server advertises.
 pub fn handle_execute_command(
     params: &lsp_types::ExecuteCommandParams,
 ) -> Result<serde_json::Value, String> {
@@ -259,8 +238,6 @@ pub fn handle_execute_command(
     match RECORDER.lock() {
         Ok(mut g) => match g.as_mut() {
             Some(rec) => rec.accept(record_id, index, label),
-            // A client can only hold tagged items if recording was on when
-            // they were served; reaching here means it was turned off since.
             None => log::warn!("completion-record: accept received while recording is off"),
         },
         Err(e) => log::warn!("completion-record: recorder lock poisoned: {e}"),

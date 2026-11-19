@@ -14,7 +14,6 @@ fn marked_string(marked: MarkedString) -> String {
     }
 }
 
-/// `rock lsp hover <file:line:col>`.
 pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -40,8 +39,7 @@ pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
             )
         }
         None => {
-            // Nothing resolves at the cursor. If the file doesn't type-check,
-            // surface that as the hover body rather than a bare empty result.
+            // If the file does not type-check, surface that as the hover body.
             let diags = bone.diagnostics_for(&file_path);
             if diags.is_empty() {
                 (String::new(), None)
@@ -66,25 +64,17 @@ pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
     Ok(())
 }
 
-/// A `BoneWorkspace` method that returns the diagnostics for one loaded file --
-/// either all of them (`diagnostics_for`) or lints only (`lint_diagnostics`).
 type DiagFn = fn(&BoneWorkspace, &str) -> Vec<lsp_types::Diagnostic>;
 
-/// `rock lsp diagnostics <path>`. `path` may be a single file or
-/// a directory (whole-project diagnostics -- see [`diagnostics_report`]).
 pub fn diagnostics(path: &str) -> Result<()> {
     print_report(diagnostics_report(path)?)
 }
 
-/// `rock lsp lint <path>`. Lint findings only (`unused_var`,
-/// `unused_fn`) -- no typecheck errors or holes. File or directory, like
-/// `diagnostics`.
 pub fn lint(path: &str) -> Result<()> {
     print_report(lint_report(path)?)
 }
 
-/// Print a diagnostics report, then fail when the directory walk could not read
-/// some files: their diagnostics are missing, so the report is not a clean bill.
+/// Fail when some files were unreadable: their diagnostics are missing.
 fn print_report(report: serde_json::Value) -> Result<()> {
     print_json(&report)?;
     let unreadable: Vec<&str> = report["unreadable"]
@@ -103,22 +93,16 @@ fn print_report(report: serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// All diagnostics JSON for a file or directory. Shared by the CLI handler and
-/// tests. See [`report_with`] for the file/dir walk.
 pub fn diagnostics_report(path: &str) -> Result<serde_json::Value> {
     report_with(path, BoneWorkspace::diagnostics_for)
 }
 
-/// Lint-only diagnostics JSON for a file or directory.
 pub fn lint_report(path: &str) -> Result<serde_json::Value> {
     report_with(path, BoneWorkspace::lint_diagnostics)
 }
 
-/// Diagnostics JSON for a file or a directory, using `diag_fn` to select which
-/// diagnostics to report. A directory walks every `.rock` under it, loads each
-/// one's project once (whole-compilation-unit, so cross-file symbols and the
-/// whole-project `unused_fn` lint resolve), and reports the files that have any,
-/// plus an `unreadable` list naming each file it could not read.
+/// Each project loads once as a whole compilation unit so cross-file symbols
+/// and the `unused_fn` lint resolve.
 fn report_with(path: &str, diag_fn: DiagFn) -> Result<serde_json::Value> {
     if fs_err::metadata(path)?.is_dir() {
         return dir_report(path, diag_fn);
@@ -138,9 +122,7 @@ fn dir_report(dir: &str, diag_fn: DiagFn) -> Result<serde_json::Value> {
     let mut bone = BoneWorkspace::new();
     let mut unreadable = Vec::new();
     for f in &files {
-        // Idempotent per project root: once a file's compilation unit is loaded,
-        // its siblings already have buffer text, so skip the reload. A file with
-        // no resolvable unit (standalone, no stick.toml) loads on its own.
+        // Once a file's compilation unit is loaded, its siblings already have buffer text.
         if bone.file_text(f).is_some() {
             continue;
         }
@@ -155,7 +137,6 @@ fn dir_report(dir: &str, diag_fn: DiagFn) -> Result<serde_json::Value> {
         }
     }
 
-    // Hole diagnostics reparse each file, so the per-file queries run on the pool.
     use bone_core::prelude::*;
     let per_file: Vec<Vec<lsp_types::Diagnostic>> =
         files.par_iter().map(|f| diag_fn(&bone, f)).collect();
@@ -186,7 +167,6 @@ fn diags_to_json(diags: Vec<lsp_types::Diagnostic>) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// `rock lsp definition <file:line:col>`.
 pub fn definition(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -194,7 +174,6 @@ pub fn definition(file_path: &str, line: u32, column: u32) -> Result<()> {
     emit_definitions(&file_path, line, column, loc)
 }
 
-/// `rock lsp type-definition <file:line:col>`.
 pub fn type_definition(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -202,8 +181,6 @@ pub fn type_definition(file_path: &str, line: u32, column: u32) -> Result<()> {
     emit_definitions(&file_path, line, column, loc)
 }
 
-/// Print the `{definitions: [...]}` JSON shared by the `definition` and
-/// `type-definition` handlers (both resolve a single optional target).
 fn emit_definitions(
     file_path: &str,
     line: u32,
@@ -233,7 +210,6 @@ fn emit_definitions(
     Ok(())
 }
 
-/// `rock lsp completion <file:line:col>`.
 pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Result<()> {
     let (file_path, mut bone) = open_file(file_path)?;
 
@@ -241,9 +217,6 @@ pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Res
     let items = bone.completion(&file_path, pos);
 
     if explain {
-        // Ranking breakdown for humans: server order with each item's RankKey
-        // rungs decoded (rank_key.rs) -- a mis-rank reads as named fields, not
-        // digit columns. Items without a decodable key print the raw string.
         for (i, it) in items.iter().enumerate() {
             let st = it.sort_text.as_deref().unwrap_or("");
             let ex =
@@ -263,9 +236,7 @@ pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Res
     Ok(())
 }
 
-/// `rock lsp references <file:line:col>`.
 pub fn references(file_path: &str, line: u32, column: u32) -> Result<()> {
-    // Load the whole project so cross-file references are found.
     let (file_path, bone) = open_project(file_path);
 
     let pos = Position::new(line - 1, column - 1);
@@ -281,9 +252,7 @@ pub fn references(file_path: &str, line: u32, column: u32) -> Result<()> {
     Ok(())
 }
 
-/// `rock lsp rename <file:line:col> <new_name>`.
 pub fn rename(file_path: &str, line: u32, column: u32, new_name: &str) -> Result<()> {
-    // Load the whole project so rename rewrites cross-file references too.
     let (file_path, bone) = open_project(file_path);
 
     let pos = Position::new(line - 1, column - 1);
@@ -316,7 +285,6 @@ pub fn rename(file_path: &str, line: u32, column: u32, new_name: &str) -> Result
     Ok(())
 }
 
-/// `rock lsp signature-help <file:line:col>`.
 pub fn signature_help(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -335,7 +303,6 @@ pub fn signature_help(file_path: &str, line: u32, column: u32) -> Result<()> {
     Ok(())
 }
 
-/// `rock lsp document-symbols <file>`.
 pub fn document_symbols(file_path: &str) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -349,9 +316,7 @@ pub fn document_symbols(file_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// `rock lsp workspace-symbols <file> <query>`.
 pub fn workspace_symbols(file_path: &str, query: &str) -> Result<()> {
-    // Load the whole project so symbols from every user file are searched.
     let (file_path, bone) = open_project(file_path);
 
     let symbols = bone.workspace_symbols(query);
@@ -365,7 +330,6 @@ pub fn workspace_symbols(file_path: &str, query: &str) -> Result<()> {
     Ok(())
 }
 
-/// `rock lsp semantic-tokens <file>`.
 pub fn semantic_tokens(file_path: &str) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -380,7 +344,6 @@ pub fn semantic_tokens(file_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// `rock lsp inlay-hints <file>`. Hints over the whole file.
 pub fn inlay_hints(file_path: &str) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
@@ -398,7 +361,6 @@ pub fn inlay_hints(file_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Canonicalize `file_path` and open just that file on a fresh workspace.
 fn open_file(file_path: &str) -> Result<(String, BoneWorkspace)> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
@@ -407,8 +369,6 @@ fn open_file(file_path: &str) -> Result<(String, BoneWorkspace)> {
     Ok((file_path, bone))
 }
 
-/// Canonicalize `file_path` and load its whole project, so cross-file
-/// queries see every file.
 fn open_project(file_path: &str) -> (String, BoneWorkspace) {
     let file_path = canonical(file_path);
     let mut bone = BoneWorkspace::new();
@@ -422,8 +382,6 @@ fn print_json(value: &serde_json::Value) -> Result<()> {
 }
 
 fn canonical(file_path: &str) -> String {
-    // Strip Windows' `\\?\` verbatim prefix so this matches the module keys
-    // bone-query builds; the bare `fs_err::canonicalize` form won't string-match
-    // them and breaks goto/hover/etc. resolution on Windows.
+    // Strip Windows' `\\?\` verbatim prefix so this matches bone-query's module keys.
     bone_query::canonicalize_lenient(file_path)
 }
