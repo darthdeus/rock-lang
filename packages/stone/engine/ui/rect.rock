@@ -975,26 +975,11 @@ pub fn UiRect.rich_text(
     shadow: bool = true
 ) -> UiRect {
     if spans.len() > 0 && spans[0].text.len() > 0 {
-        if family == null {
-            let font = DEFAULT_FONT
-            if font == null {
-                error("rich text: no family given and no DEFAULT_FONT is loaded")
-            }
+        if let font = rich_ui_single_font(family) {
             if spans.len() == 1 {
-                return r.rich_text_single_font(
-                    spans[0], font.unwrap(), font_size, align, shadow)
+                return r.rich_text_single_font(spans[0], font, font_size, align, shadow)
             }
-            return r.rich_text_single_font_spans(
-                spans, font.unwrap(), font_size, align, shadow)
-        }
-        let fam = family
-        if fam.fallbacks.len() == 0 && spans.len() == 1 {
-            return r.rich_text_single_font(
-                spans[0], fam.regular, font_size, align, shadow)
-        }
-        if fam.fallbacks.len() == 0 {
-            return r.rich_text_single_font_spans(
-                spans, fam.regular, font_size, align, shadow)
+            return r.rich_text_single_font_spans(spans, font, font_size, align, shadow)
         }
     }
     let fam = text_family_or_default(family)
@@ -1022,22 +1007,17 @@ pub fn UiRect.rich_text(
     return r
 }
 
+// Families without fallbacks take the per-font path, which skips run resolution.
+fn rich_ui_single_font(family: TextFamily?) -> Font? {
+    if let fam = family { return if fam.fallbacks.len() == 0 { fam.regular } else { null } }
+    return text_family_or_default().regular
+}
+
 pub fn measure_rich_ui(spans: [TextSpan], font_size: float, family: TextFamily? = null) -> Vec2 {
-    let measured = if family == null {
-        let font = DEFAULT_FONT
-        if font == null {
-            error("rich text: no family given and no DEFAULT_FONT is loaded")
-        }
-        measure_rich_text_single_font(font.unwrap(), spans, font_size,
-            FONT_RENDER_SCALE)
+    let measured = if let font = rich_ui_single_font(family) {
+        measure_rich_text_single_font(font, spans, font_size, FONT_RENDER_SCALE)
     } else {
-        let fam = family
-        if fam.fallbacks.len() == 0 {
-            measure_rich_text_single_font(fam.regular, spans, font_size,
-                FONT_RENDER_SCALE)
-        } else {
-            measure_rich_text_of(fam, spans, font_size, FONT_RENDER_SCALE)
-        }
+        measure_rich_text_of(family.unwrap(), spans, font_size, FONT_RENDER_SCALE)
     }
     return measured / ui_effective_scale()
 }
@@ -1045,24 +1025,14 @@ pub fn measure_rich_ui(spans: [TextSpan], font_size: float, family: TextFamily? 
 pub fn measure_rich_ui_text(text: string, color: Color, font_size: float,
                         bold: bool = false, italic: bool = false,
                         family: TextFamily? = null) -> Vec2 {
-    let measured = if family == null {
-        let font = DEFAULT_FONT
-        if font == null {
-            error("rich text: no family given and no DEFAULT_FONT is loaded")
-        }
-        measure_rich_text_single_font_text(font.unwrap(), text, color, bold,
-            italic, font_size, FONT_RENDER_SCALE)
+    let measured = if let font = rich_ui_single_font(family) {
+        measure_rich_text_single_font_text(font, text, color, bold, italic, font_size,
+            FONT_RENDER_SCALE)
     } else {
-        let fam = family
-        if fam.fallbacks.len() == 0 {
-            measure_rich_text_single_font_text(fam.regular, text, color, bold,
-                italic, font_size, FONT_RENDER_SCALE)
-        } else {
-            measure_rich_text_of(fam, [TextSpan {
-                text: text,
-                style: TextStyle { color, bold, italic },
-            }], font_size, FONT_RENDER_SCALE)
-        }
+        measure_rich_text_of(family.unwrap(), [TextSpan {
+            text: text,
+            style: TextStyle { color, bold, italic },
+        }], font_size, FONT_RENDER_SCALE)
     }
     return measured / ui_effective_scale()
 }
