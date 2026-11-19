@@ -11,24 +11,20 @@ pub struct SheetSpec {
 }
 
 pub fn sheet_spec(line: &Line) -> Result<Option<SheetSpec>> {
-    let png_size = match line {
+    let (png_size, geometry) = match line {
         Line::Character(_) => return Ok(None),
-        Line::Animation(a) => a.size,
-        Line::Surface(s) => s.size,
-        Line::Prop(p) => [
-            p.frame_size[0],
-            p.frame_size[1]
+        Line::Animation(a) => (a.size, Some((a.cell, a.frames as usize, DIRECTION_COUNT))),
+        Line::Surface(s) => (s.size, Some((s.cell, 1, s.camera.bases.len()))),
+        Line::Prop(p) => {
+            let [width, height] = p.frame_size;
+            let atlas_height = height
                 .checked_mul(p.rows)
-                .context("prop atlas height overflows")?,
-        ],
-        Line::Icon(i) => i.frame_size,
-        Line::Texture(t) => t.size,
-        Line::Architecture(a) => a.size,
-    };
-    let geometry = match line {
-        Line::Animation(a) => Some((a.cell, a.frames as usize, DIRECTION_COUNT)),
-        Line::Surface(s) => Some((s.cell, 1, s.camera.bases.len())),
-        _ => None,
+                .context("prop atlas height overflows")?;
+            ([width, atlas_height], None)
+        }
+        Line::Icon(i) => (i.frame_size, None),
+        Line::Texture(t) => (t.size, None),
+        Line::Architecture(a) => (a.size, None),
     };
     Ok(Some(SheetSpec {
         files: sheet_files(line),
@@ -40,13 +36,12 @@ pub fn sheet_spec(line: &Line) -> Result<Option<SheetSpec>> {
 /// Reads every file of a sheet directory, decodes every PNG and checks it
 /// against `spec`; returns the directory's hash or every problem found.
 pub fn check_sheet(dir: &Path, spec: &SheetSpec) -> std::result::Result<String, Vec<String>> {
-    let mut present = match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|error| vec![format!("listing {}: {error}", dir.display())])?,
-        Err(error) => return Err(vec![format!("{} is missing: {error}", dir.display())]),
-    };
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| vec![format!("{} is missing: {error}", dir.display())])?;
+    let mut present = entries
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| vec![format!("listing {}: {error}", dir.display())])?;
     present.sort();
     if present != spec.files {
         return Err(vec![format!(
@@ -56,7 +51,7 @@ pub fn check_sheet(dir: &Path, spec: &SheetSpec) -> std::result::Result<String, 
         )]);
     }
     let mut problems = Vec::new();
-    let mut listing = String::new();
+    let mut digest = Sha256::new();
     for name in &present {
         let path = dir.join(name);
         let bytes = match std::fs::read(&path) {
@@ -66,7 +61,7 @@ pub fn check_sheet(dir: &Path, spec: &SheetSpec) -> std::result::Result<String, 
                 continue;
             }
         };
-        listing.push_str(&format!("{:x}  {name}\n", Sha256::digest(&bytes)));
+        digest.update(format!("{:x}  {name}\n", Sha256::digest(&bytes)));
         if name.ends_with(".png") {
             match image::load_from_memory_with_format(&bytes, image::ImageFormat::Png) {
                 Ok(image) if [image.width(), image.height()] == spec.png_size => {}
@@ -94,14 +89,11 @@ pub fn check_sheet(dir: &Path, spec: &SheetSpec) -> std::result::Result<String, 
                 ));
             }
         } else if name == SHEET_GEOMETRY {
-            let geometry = spec
-                .geometry
-                .as_ref()
-                .expect("relight sheets hold sheet.json");
+            let (cell, frames, directions) = spec.geometry.expect("relight sheets hold sheet.json");
             match serde_json::from_slice::<SheetGeometry>(&bytes) {
                 Ok(parsed) => {
                     if let Err(error) =
-                        parsed.validate_layout(spec.png_size, geometry.0, geometry.1, geometry.2)
+                        parsed.validate_layout(spec.png_size, cell, frames, directions)
                     {
                         problems.push(format!("{}: {error:#}", dir.display()));
                     }
@@ -111,7 +103,7 @@ pub fn check_sheet(dir: &Path, spec: &SheetSpec) -> std::result::Result<String, 
         }
     }
     if problems.is_empty() {
-        Ok(format!("{:x}", Sha256::digest(listing.as_bytes())))
+        Ok(format!("{:x}", digest.finalize()))
     } else {
         Err(problems)
     }

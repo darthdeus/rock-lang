@@ -390,73 +390,62 @@ pub fn mask_file(mask: &str) -> String {
 
 /// The file names a sheet line's directory holds, sorted.
 pub fn sheet_files(line: &Line) -> Vec<String> {
+    let relight_files = || {
+        RELIGHT_CHANNELS
+            .into_iter()
+            .map(|channel| format!("{channel}.png"))
+            .chain([SHEET_GEOMETRY.to_owned()])
+    };
+    let skin_files = |skin: bool| {
+        skin.then_some(["skin-albedo.png", "skin-diffuse.png", "skin-specular.png"])
+            .into_iter()
+            .flatten()
+    };
     let mut files: Vec<String> = match line {
         Line::Character(_) => Vec::new(),
-        Line::Animation(_) => RELIGHT_CHANNELS
-            .iter()
-            .map(|channel| format!("{channel}.png"))
-            .chain([SHEET_GEOMETRY.to_string()])
-            .collect(),
-        Line::Surface(surface) => RELIGHT_CHANNELS
-            .iter()
-            .map(|channel| format!("{channel}.png"))
-            .chain([SHEET_GEOMETRY.to_string()])
-            .chain(surface.studio.as_ref().into_iter().flat_map(|studio| {
+        Line::Animation(a) => {
+            let skin = a.normal_bc5 && a.skin_mask;
+            let companions = [
+                a.albedo_bc1.then_some("albedo.dds"),
+                a.material_bc5.then_some("material.bc5.dds"),
+                a.normal_bc5.then_some("normal.bc5.dds"),
+                skin.then_some("material-skin.png"),
+                (skin && a.material_bc5).then_some("material-skin.bc5.dds"),
+            ];
+            relight_files()
+                .chain(companions.into_iter().flatten().map(str::to_owned))
+                .collect()
+        }
+        Line::Surface(surface) => relight_files()
+            .chain(surface.studio.iter().flat_map(|studio| {
                 ["painted.png", "radiance.png"]
                     .into_iter()
-                    .chain(
-                        studio
-                            .skin
-                            .then_some(["skin-albedo.png", "skin-diffuse.png", "skin-specular.png"])
-                            .into_iter()
-                            .flatten(),
-                    )
-                    .map(str::to_string)
+                    .chain(skin_files(studio.skin))
+                    .map(str::to_owned)
             }))
             .collect(),
         Line::Prop(prop) => ["albedo.png", "normal.png", "material.png"]
             .into_iter()
-            .map(str::to_string)
+            .chain(prop.albedo_bc1.then_some("albedo.dds"))
+            .map(str::to_owned)
             .chain(prop.masks.iter().map(|mask| mask_file(mask)))
             .collect(),
-        Line::Icon(icon) => std::iter::once("color.png")
-            .chain(
-                icon.skin
-                    .then_some(["skin-albedo.png", "skin-diffuse.png", "skin-specular.png"])
-                    .into_iter()
-                    .flatten(),
-            )
-            .map(str::to_string)
+        Line::Icon(icon) => ["color.png"]
+            .into_iter()
+            .chain(skin_files(icon.skin))
+            .map(str::to_owned)
             .collect(),
-        Line::Texture(texture) => std::iter::once("color.png")
+        Line::Texture(texture) => ["color.png"]
+            .into_iter()
             .chain(texture.normal.then_some("normal.png"))
             .chain(texture.material.then_some("material.png"))
-            .map(str::to_string)
+            .map(str::to_owned)
             .collect(),
-        Line::Architecture(set) => std::iter::once("color.png".to_string())
+        Line::Architecture(set) => std::iter::once("color.png".to_owned())
             .chain(set.masks.iter().map(|mask| mask_file(mask)))
             .collect(),
     };
-    if matches!(line, Line::Animation(a) if a.albedo_bc1)
-        || matches!(line, Line::Prop(p) if p.albedo_bc1)
-    {
-        files.push("albedo.dds".into());
-    }
-    if let Line::Animation(animation) = line {
-        if animation.material_bc5 {
-            files.push("material.bc5.dds".into());
-        }
-        if animation.normal_bc5 {
-            files.push("normal.bc5.dds".into());
-            if animation.skin_mask {
-                files.push("material-skin.png".into());
-                if animation.material_bc5 {
-                    files.push("material-skin.bc5.dds".into());
-                }
-            }
-        }
-    }
-    files.sort();
+    files.sort_unstable();
     files
 }
 
@@ -691,7 +680,7 @@ pub fn check_line(line: &Line) -> Result<()> {
                 let mut orientations = piece.orientation_map.clone();
                 orientations.sort_unstable();
                 anyhow::ensure!(
-                    orientations == (0..count as u32).collect::<Vec<_>>(),
+                    orientations.into_iter().eq(0..count as u32),
                     "orientation_map must select every authored orientation exactly once"
                 );
             }
@@ -700,7 +689,7 @@ pub fn check_line(line: &Line) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn parse_line(raw: &str) -> Result<Line> {
+fn parse_line(raw: &str) -> Result<Line> {
     let line: Line = serde_json::from_str(raw)?;
     check_line(&line)?;
     Ok(line)
@@ -714,11 +703,8 @@ pub fn parse_bank(text: &str) -> (Vec<Line>, Vec<String>) {
         problems.push("the bank does not end with a newline".to_string());
     }
     let mut lines = Vec::new();
-    for (number, raw) in text
-        .lines()
-        .enumerate()
-        .map(|(index, raw)| (index + 1, raw))
-    {
+    for (index, raw) in text.lines().enumerate() {
+        let number = index + 1;
         match parse_line(raw) {
             Ok(line) => lines.push(line),
             Err(error) => problems.push(format!("line {number}: {error:#}")),
@@ -762,13 +748,12 @@ pub fn resolve(lines: &[Line]) -> (BankIndex<'_>, Vec<String>) {
         }
     }
     for (&id, character) in &index.characters {
-        let labels: Vec<&str> = index
+        let mut animations = index
             .animations
             .range((id, "")..)
             .take_while(|((c, _), _)| *c == id)
-            .map(|((_, l), _)| *l)
-            .collect();
-        if labels.is_empty() {
+            .peekable();
+        if animations.peek().is_none() {
             problems.push(format!("character {id:?} has no animations"));
         }
         let Some(body_id) = character.layer_of.as_deref() else {
@@ -783,21 +768,20 @@ pub fn resolve(lines: &[Line]) -> (BankIndex<'_>, Vec<String>) {
                 "layer {id:?} names {body_id:?}, which is itself a layer"
             ));
         }
-        for label in labels {
+        for (&(_, label), layer) in animations {
             match index.animations.get(&(body_id, label)) {
                 None => problems.push(format!(
                     "layer {id:?} animation {label:?} has no body animation on {body_id:?}"
                 )),
-                Some(body_animation) => {
-                    let layer = index.animations[&(id, label)];
+                Some(body_animation)
                     if layer.frames != body_animation.frames
-                        || layer.frame_time != body_animation.frame_time
-                    {
-                        problems.push(format!(
-                            "layer {id:?} animation {label:?}: layer timeline differs from its body"
-                        ));
-                    }
+                        || layer.frame_time != body_animation.frame_time =>
+                {
+                    problems.push(format!(
+                        "layer {id:?} animation {label:?}: layer timeline differs from its body"
+                    ));
                 }
+                Some(_) => {}
             }
         }
     }
