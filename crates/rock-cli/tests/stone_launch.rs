@@ -1,15 +1,16 @@
 use std::path::Path;
 
+fn repo_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 fn package_test_command(project: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_rock"));
     command
         .arg("test")
         .arg(project)
         .current_dir(project)
-        .env(
-            "ROCK_DIR",
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        )
+        .env("ROCK_DIR", repo_root())
         .env("ROCK_TEST_SHARDS", "1")
         .env("STONE_HEADLESS", "1")
         .env_remove("ROCK_PREBUILT_GAME")
@@ -523,10 +524,7 @@ fn main() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
         command
             .current_dir(fixture.path())
-            .env(
-                "ROCK_DIR",
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-            )
+            .env("ROCK_DIR", repo_root())
             .env("ROCK_SKIP_ENGINE_BUILD", "1")
             .env("WATCH_HEARTBEAT", &heartbeat)
             .env("STONE_HEADLESS", "1")
@@ -620,10 +618,7 @@ fn a_stone_launch_builds_the_engine_library_it_stages() {
         .env("PATH", path)
         .env("CARGO_LOG", &log)
         .env("CARGO_TARGET_DIR", fixture.path().join("empty-target"))
-        .env(
-            "ROCK_DIR",
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        )
+        .env("ROCK_DIR", repo_root())
         .env("STONE_HEADLESS", "1")
         .env_remove("ROCK_PREBUILT_GAME")
         .env_remove("ROCK_ENGINE_BUILD_RECEIPT")
@@ -764,10 +759,7 @@ fn main() {
         cmd.args([command, game.to_str().unwrap(), "--frames", "3", "--output"])
             .arg(&output)
             .current_dir(fixture.path())
-            .env(
-                "ROCK_DIR",
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-            )
+            .env("ROCK_DIR", repo_root())
             .env("STONE_SCREENSHOT_PATH", &screenshot)
             .env(
                 "ROCK_FRAME_TIMEOUT_SECS",
@@ -1081,10 +1073,7 @@ co fn portable_sim() -> Coroutine<Wait> {
         let mut command = std::process::Command::new(&rock);
         command
             .current_dir(fixture.path())
-            .env(
-                "ROCK_DIR",
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-            )
+            .env("ROCK_DIR", repo_root())
             .env_remove("STONE_HOT_RELOAD");
         command
     };
