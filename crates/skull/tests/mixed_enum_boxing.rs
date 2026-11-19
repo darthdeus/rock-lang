@@ -1,4 +1,8 @@
-use crate::common::{emit_module, name_matches, run_luajit};
+use bone_semantic::hir::BodyOwner;
+
+use crate::common::{
+    emit_module, function_body, module_id, name_matches, run_luajit, ws_with_stdlib,
+};
 
 const SRC: &str = r#"
 nobox value Wide { a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int, k: int, l: int, m: int, n: int, o: int }
@@ -41,7 +45,7 @@ fn dynamic_mixed_units_share_identity_across_boxing_boundaries() {
     let out = run_luajit(&format!(
         r#"{lua}
 local unit = constant_unit()
-for _, make in ipairs({{boxed, through_vec, through_field, through_nullable}}) do
+for _, make in ipairs({{boxed, through_vec, through_field, through_nullable, copied}}) do
     assert(rawequal(make(0), unit))
     local a, b = make(1), make(1)
     assert(not rawequal(a, b))
@@ -84,28 +88,9 @@ print("ok")
 }
 
 #[test]
-fn deepcopy_canonicalizes_mixed_units_and_keeps_payloads_owned() {
-    let lua = emit_module(SRC);
-    assert_eq!(
-        run_luajit(&format!(
-            r#"{lua}
-assert(rawequal(copied(0), constant_unit()))
-local a, b = copied(1), copied(1)
-a[1] = "changed"
-assert(b[1] == "payload")
-print("ok")
-"#
-        )),
-        "ok"
-    );
-}
-
-#[test]
 fn mixed_units_keep_identity_through_body_overlay_and_full_reload() {
-    use crate::common::ws_with_stdlib;
-    use bone_semantic::hir::BodyOwner;
     let ws = ws_with_stdlib(SRC);
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let mid = module_id(&ws, "<test>");
     let (full, mut cache) = skull::mir_emit::emit_full(&ws, mid).expect("full");
     let edited = SRC.replace("kind == 0", "kind < 1");
     let ws2 = ws_with_stdlib(&edited);
@@ -179,12 +164,11 @@ end
 local ty = constant_unit().__ty
 local control = measure(function() return {{__variant = "Text", __ty = ty, "payload"}} end)
 local dynamic = measure(function() return through_field(1) end)
-print("payload bytes", control, dynamic)
-assert(dynamic <= control + 1, "dynamic payload reserves union slots")
+assert(dynamic <= control + 1, "dynamic payload reserves union slots: " .. control .. " vs " .. dynamic)
 print("ok")
 "#
     ));
-    assert!(out.ends_with("ok"));
+    assert_eq!(out, "ok");
 }
 
 #[test]
@@ -255,14 +239,12 @@ struct BoxHolder { packet: Packet? }
 }
 "#;
     let lua = emit_module(src);
-    let body = lua
-        .split("function box_input(")
-        .nth(1)
-        .expect("box_input body")
-        .split("\nend")
-        .next()
-        .expect("box_input end");
-    assert_eq!(body.matches("__variant =").count(), 1);
+    assert_eq!(
+        function_body(&lua, "box_input")
+            .matches("__variant =")
+            .count(),
+        1
+    );
     let out = run_luajit(&format!(
         r#"{lua}
 for kind, tag in ipairs({{"A", "B", "C", "D", "E", "F"}}) do

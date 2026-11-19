@@ -56,5 +56,5 @@ end
 print('ok')
 "#
     ));
-    assert_eq!(output.trim(), "ok");
+    assert_eq!(output, "ok");
 }

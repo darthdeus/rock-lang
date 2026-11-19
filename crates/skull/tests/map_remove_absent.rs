@@ -40,8 +40,6 @@ assert({remove}(m, "k1"))
 print(stores)
 "#
     ))
-    .trim()
-    .to_string()
 }
 
 #[test]

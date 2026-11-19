@@ -17,13 +17,6 @@ fn main() {}
 fn overload_add_orphans_running_global_sentinel() {
     let before = emit_without_stdlib(V1);
     let after = emit_without_stdlib(V2_OVERLOAD);
-    for lua in [&before, &after] {
-        assert!(
-            lua.contains("\nfoo_int = function(")
-                || lua.contains("\nfunction foo_int(")
-                || lua.contains("__rock_mk_foo_int")
-        );
-    }
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
          _G.HOT_RELOAD = true\n{after}\n\
@@ -31,15 +24,8 @@ fn overload_add_orphans_running_global_sentinel() {
          print('canonical=' .. foo_int(5))\n\
          print('bare_foo_present=' .. tostring(_G.foo ~= nil))\n"
     );
-    let out = run_luajit(&script);
-    let fresh = out.lines().find(|l| l.starts_with("fresh=")).unwrap();
-    let canon = out.lines().find(|l| l.starts_with("canonical=")).unwrap();
-    let bare = out
-        .lines()
-        .find(|l| l.starts_with("bare_foo_present="))
-        .unwrap();
-
-    assert_eq!(fresh, "fresh=52");
-    assert_eq!(canon, "canonical=52");
-    assert_eq!(bare, "bare_foo_present=false");
+    assert_eq!(
+        run_luajit(&script),
+        "fresh=52\ncanonical=52\nbare_foo_present=false"
+    );
 }
