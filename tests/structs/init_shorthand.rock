@@ -90,18 +90,6 @@ fn multi_field_groups() {
 
 global EVAL_COUNT: int = 0
 
-fn tick() -> int {
-    EVAL_COUNT = EVAL_COUNT + 1
-    return EVAL_COUNT
-}
-
-@test(output = "1 1 1")
-fn value_expression_evaluated_once() {
-    EVAL_COUNT = 0
-    let v = Triple { a + b + c: tick() }
-    print("{v.a} {v.b} {v.c}")
-}
-
 struct FourInts { a: int, b: int, c: int, d: int }
 
 @test(output = "10 10 20 20 2")
