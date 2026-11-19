@@ -65,6 +65,24 @@ fn inlines_at_every_use() {
             (1, 8),
             "fn f() -> int {\n    return (1 - 2).abs()\n}\n",
         ),
+        (
+            "a_literal_initializer_is_copied_verbatim",
+            "fn f() {\n    let message = \"Hello, World!\"\n    print(message)\n}\n",
+            (1, 8),
+            "fn f() {\n    print(\"Hello, World!\")\n}\n",
+        ),
+        (
+            "a_use_as_an_if_condition",
+            "fn f() {\n    let c = true\n    if c {\n        print(1)\n    }\n}\n",
+            (1, 8),
+            "fn f() {\n    if true {\n        print(1)\n    }\n}\n",
+        ),
+        (
+            "a_use_in_a_nested_block",
+            "fn f() {\n    let outer = 10\n    {\n        let inner = outer + 5\n        print(inner)\n    }\n}\n",
+            (1, 8),
+            "fn f() {\n    {\n        let inner = 10 + 5\n        print(inner)\n    }\n}\n",
+        ),
     ];
     for (name, src, (line, ch), expected) in cases {
         assert_eq!(inlined(src, Position::new(*line, *ch)), *expected, "{name}");

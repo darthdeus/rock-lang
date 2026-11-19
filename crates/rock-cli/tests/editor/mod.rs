@@ -325,8 +325,6 @@ fn completion_labels(reply: &Value, expected: &[&str]) {
     }
 }
 
-mod completion_basic;
-mod completion_field_ref;
 mod completion_named_args;
 mod completion_struct_and_methods;
 mod document_symbols;
@@ -336,14 +334,7 @@ mod edit_sequence_references;
 mod edit_sequence_stress;
 mod edit_sequence_typing;
 mod front_end_shapes;
-mod goto_definition;
 mod goto_type_definition;
-mod hover_basic;
-mod hover_declarations;
-mod hover_field_ref;
-mod hover_match_pattern;
-mod hover_struct_literal;
-mod hover_type_annotation;
 mod inlay_hints;
 mod inline_local_variable;
 mod method_syntax;

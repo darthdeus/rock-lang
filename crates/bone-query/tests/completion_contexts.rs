@@ -705,6 +705,477 @@ fn field_refs_offer_exactly_the_fields_of_their_value_type() {
              fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\nfn r(mob: Mob) {\n  mob.kil<|>\n}\n",
             &["!kill_co"],
         ),
+        (
+            "WriteFieldRef V = int?",
+            "struct Mob { health: int, attack_co: int?, name: string }\n\
+             fn clear_slot(f: WriteFieldRef<Mob, int?>) {}\nfn main() {\n  clear_slot(.<|>)\n}\n",
+            &[".attack_co: int?", "!.health*"],
+        ),
+        (
+            "WriteFieldRef T bound by a sibling arg",
+            "struct Mob { hp: int, co: int? }\nstruct Entity<T> { i: int }\n\
+             fn stop<T>(e: Entity<T>, f: WriteFieldRef<T, int?>) {}\n\
+             fn r() {\n  let e: Entity<Mob> = Entity { i: 0 }\n  stop(e, .<|>)\n}\n",
+            &[".co: int?", "!.hp*"],
+        ),
+    ]);
+}
+
+#[test]
+fn member_and_scope_completion_in_complete_and_broken_code() {
+    check_labels(&[
+        (
+            "after comma no space",
+            r"struct Data {
+    first: int,
+    second: int,
+    third: int,
+}
+fn process(d: Data) {
+    do_something(d.first,d.<|>",
+            &["first: int", "second: int", "third: int"],
+        ),
+        (
+            "after operator no space",
+            r"struct Vector {
+    x: float,
+    y: float,
+    z: float,
+}
+fn calculate(v1: Vector, v2: Vector) {
+    let sum = v1.x+v2.<|>
+}",
+            &["x: float", "y: float", "z: float"],
+        ),
+        (
+            "enum qualified",
+            r"enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+fn main() {
+    let d = Direction::<|>
+}",
+            &["Up", "Down", "Left", "Right"],
+        ),
+        (
+            "enum qualified with prefix",
+            r"enum AiState {
+    Wander,
+    Chase,
+    Flee,
+}
+fn main() {
+    let s = AiState::Wan<|>
+}",
+            &["Wander"],
+        ),
+        (
+            "enum record variant field with prefix",
+            r"enum Effect {
+    Bandage { duration: float, heal_amount: int },
+    Other(int),
+}
+fn main() {
+    let e = Effect::Bandage { dura<|> }
+}",
+            &["duration: float"],
+        ),
+        (
+            "enum record variant fields",
+            r"enum Effect {
+    Bandage { duration: float, heal_amount: int },
+    Other(int),
+}
+fn main() {
+    let e = Effect::Bandage { <|> }
+}",
+            &["duration: float", "heal_amount: int"],
+        ),
+        (
+            "for loop var fields",
+            r"struct Item {
+    name: string
+    count: int
+}
+fn main() {
+    let items: [Item] = vec_new()
+    for item in items {
+        let x = item.<|>
+    }
+}",
+            &["name: string", "count: int"],
+        ),
+        (
+            "function names",
+            r"fn sqrt(x: float) -> float {
+    return x * x
+}
+fn abs(x: float) -> float {
+    if x < 0.0 {
+        return -x
+    }
+    return x
+}
+fn main() {
+    let x = sq<|>
+}",
+            &["sqrt"],
+        ),
+        (
+            "function parameters",
+            r#"fn process(input_data: string, max_length: int, verbose: bool) {
+    if ve<|> == true {
+        print("debug")
+    }
+}"#,
+            &["verbose"],
+        ),
+        (
+            "generic struct fields",
+            r#"struct Pair<A, B> {
+    first: A,
+    second: B,
+}
+fn main() {
+    let p = Pair { first: 1, second: "hi" }
+    let x = p.<|>
+}"#,
+            &["first: int", "second: string"],
+        ),
+        (
+            "global var fields",
+            r"struct GameState {
+    score: int
+    level: int
+}
+global state: GameState = GameState { score: 0, level: 1 }
+fn main() {
+    let s = state.<|>
+}",
+            &["score: int", "level: int"],
+        ),
+        (
+            "in incomplete array literal",
+            r"struct Item {
+    id: int,
+    name: string,
+    price: float,
+}
+fn process_items(item: Item) {
+    let items = [item.<|>",
+            &["id: int", "name: string", "price: float"],
+        ),
+        (
+            "in incomplete for loop",
+            r"struct Range {
+    start: int,
+    stop: int,
+    items: [int],
+}
+fn iterate(range: Range) {
+    for i in range.<|>",
+            &["start: int", "stop: int"],
+        ),
+        (
+            "in incomplete function call",
+            r"struct Vector3 {
+    x: float,
+    y: float,
+    z: float,
+}
+fn process(v: Vector3) {
+    print(v.<|>
+}",
+            &["x: float", "y: float", "z: float"],
+        ),
+        (
+            "in incomplete match arm",
+            r"enum Status {
+    Active,
+    Inactive,
+    Pending,
+}
+struct User {
+    name: string,
+    status: Status,
+    age: int,
+}
+fn check_user(user: User) {
+    match user.status {
+        Status::Active => user.<|>",
+            &["name: string", "status: Status", "age: int"],
+        ),
+        (
+            "in incomplete return",
+            r#"struct Result {
+    value: int,
+    success: bool,
+    error: string,
+}
+fn compute() -> Result {
+    let res = Result { value: 42, success: true, error: "" }
+    return res.<|>"#,
+            &["value: int", "success: bool", "error: string"],
+        ),
+        (
+            "in incomplete struct literal",
+            r"struct Position {
+    x: float,
+    y: float,
+}
+struct CompletionEntity {
+    pos: Position,
+    health: int,
+    name: string,
+}
+fn create(entity: CompletionEntity) {
+    let new_entity = CompletionEntity {
+        pos: entity.<|>",
+            &["health: int", "name: string"],
+        ),
+        (
+            "in incomplete while condition",
+            r"struct Counter {
+    value: int,
+    max: int,
+    step: int,
+}
+fn count(counter: Counter) {
+    while counter.<|>",
+            &["value: int", "max: int", "step: int"],
+        ),
+        (
+            "in match arm body",
+            r"struct Point { x: int, y: int }
+enum Opt {
+    None,
+    Some(Point),
+}
+fn main() {
+    let o = Opt::Some(Point { x: 1, y: 2 })
+    match o {
+        Opt::Some(p) => p.<|>,
+        Opt::None => {},
+    }
+}",
+            &["x: int", "y: int"],
+        ),
+        (
+            "in match arm braced body",
+            r"struct Point { x: int, y: int }
+enum Opt {
+    None,
+    Some(Point),
+}
+fn main() {
+    let o = Opt::Some(Point { x: 1, y: 2 })
+    match o {
+        Opt::Some(p) => { p.<|> },
+        Opt::None => {},
+    }
+}",
+            &["x: int", "y: int"],
+        ),
+        (
+            "in match arm without trailing comma",
+            r"struct Point { x: int, y: int }
+enum Opt {
+    None,
+    Some(Point),
+}
+fn main() {
+    let o = Opt::Some(Point { x: 1, y: 2 })
+    match o {
+        Opt::Some(p) => p.<|>
+        Opt::None => {},
+    }
+}",
+            &["x: int", "y: int"],
+        ),
+        (
+            "in nested incomplete if",
+            r"struct Game {
+    player_x: float,
+    player_y: float,
+    enemy_x: float,
+    enemy_y: float,
+}
+fn update(game: Game) {
+    if game.player_x > 100 {
+        if game.<|>",
+            &[
+                "player_x: float",
+                "player_y: float",
+                "enemy_x: float",
+                "enemy_y: float",
+            ],
+        ),
+        (
+            "in unclosed string",
+            r#"struct Config {
+    host: string,
+    port: int,
+    debug: bool,
+}
+fn setup(cfg: Config) {
+    let message = "Host: " + cfg.<|>"#,
+            &["host: string", "port: int", "debug: bool"],
+        ),
+        (
+            "lambda param fields",
+            r"struct Enemy {
+    health: int
+    name: string
+}
+fn main() {
+    let enemies: [Enemy] = vec_new()
+    let alive = enemies.filter((e: Enemy) => e.<|>)
+}",
+            &["health: int", "name: string"],
+        ),
+        (
+            "local variables",
+            r"fn calculate() {
+    let first_number = 42
+    let second_number = 84
+    let result = first_number + second_number
+    let sum = fi<|>
+}",
+            &["first_number"],
+        ),
+        (
+            "local vars with syntax error",
+            r"fn calculate() {
+    let first_value = 10
+    let second_value = 20
+    let invalid_syntax = 
+    let result = fi<|>
+}",
+            &["first_value"],
+        ),
+        (
+            "method calls",
+            r"struct Rectangle {
+    width: float,
+    height: float,
+}
+fn main() {
+    let rect = Rectangle { width: 10.0, height: 20.0 }
+    rect.<|>
+}",
+            &["width: float", "height: float"],
+        ),
+        (
+            "method in broken expression",
+            r"struct Database {
+    connection_count: int,
+    is_connected: bool,
+}
+fn check_status(db: Database) {
+    let status = db.<|> && some_undefined_var
+}",
+            &["connection_count: int", "is_connected: bool"],
+        ),
+        (
+            "nested field access incomplete",
+            r"struct Point {
+    x: float,
+    y: float,
+}
+struct Line {
+    start: Point,
+    end: Point,
+}
+fn get_distance(line: Line) {
+    let dx = line.start.<|>",
+            &["x: float", "y: float"],
+        ),
+        (
+            "nested struct fields",
+            r#"struct FixVec2 {
+    x: float
+    y: float
+}
+struct Player {
+    pos: FixVec2
+    name: string
+}
+fn main() {
+    let p = Player { pos: FixVec2 { x: 0.0, y: 0.0 }, name: "Hero" }
+    let x = p.pos.<|>
+}"#,
+            &["x: float", "y: float"],
+        ),
+        (
+            "nullable safe nav",
+            r"struct Inner {
+    value: int
+    name: string
+}
+struct Outer {
+    inner: Inner?
+}
+fn main() {
+    let o: Outer? = null
+    let x = o?.inner?.<|>
+}",
+            &["value: int", "name: string"],
+        ),
+        (
+            "struct fields",
+            r"struct Point {
+    x: int,
+    y: int,
+}
+fn main() {
+    let p = Point { x: 10, y: 20 }
+    p.<|>
+}",
+            &["x: int", "y: int"],
+        ),
+        (
+            "struct fields in invalid if",
+            r"struct Player {
+    position_x: float,
+    position_y: float,
+    health: float,
+}
+fn foo(player: Player) {
+    if player.pos<|>
+}",
+            &["position_x: float", "position_y: float"],
+        ),
+        (
+            "variant in let else pattern",
+            r"enum Shape {
+    Circle(int),
+    Square(int, int),
+}
+fn f(s: Shape) -> int {
+    let Shape::<|> = s else {
+        return 0
+    }
+    1
+}",
+            &["Circle", "Square"],
+        ),
+        (
+            "with missing bracket",
+            r#"struct Config {
+    debug_mode: bool,
+    max_connections: int,
+}
+fn setup() {
+    let cfg = Config { debug_mode: true, max_connections: 100 }
+    if cfg.debug<|>
+        print("Debug enabled")
+    }
+}"#,
+            &["debug_mode: bool"],
+        ),
     ]);
 }
 

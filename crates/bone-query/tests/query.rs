@@ -1,5 +1,6 @@
 //! Definition and reference ranges through the LSP workspace facade.
 
+use crate::completion::cursor;
 use crate::fixture::{PATH, offset_of, workspace};
 use bone_query::FileUriExt;
 
@@ -93,6 +94,339 @@ fn definition_cases() {
         if case == "function call" {
             assert_eq!(e - s, "helper".len(), "{case}: the bare name, not the item");
         }
+    }
+}
+
+#[test]
+fn definition_starts() {
+    // (case, source with a `<|>` cursor and a `<@>` at the definition start)
+    let cases: &[(&str, &str)] = &[
+        (
+            "closure captured var",
+            r"fn main() {
+    let <@>base = 10
+    let f = (x: int) => x + <|>base
+}",
+        ),
+        (
+            "enum qualified variant",
+            r"enum Direction {
+    Up,
+    <@>Down,
+}
+fn main() {
+    let d = Direction::<|>Down
+}",
+        ),
+        (
+            "enum record variant",
+            r"enum Shape {
+    <@>Circle { radius: float },
+    Rect { w: float, h: float },
+}
+fn main() {
+    let s = Shape::<|>Circle { radius: 5.0 }
+}",
+        ),
+        (
+            "enum simple variant",
+            r"enum Color {
+    <@>Red,
+    Green,
+    Blue,
+}
+fn main() {
+    let c = Color::<|>Red
+}",
+        ),
+        (
+            "for loop iterable",
+            r"fn main() {
+    let <@>items = [1, 2, 3]
+    for x in <|>items {
+        print(x)
+    }
+}",
+        ),
+        (
+            "function call",
+            r"fn <@>double(x: int) -> int {
+    return x * 2
+}
+fn main() {
+    let x = 5
+    let y = <|>double(x)
+}",
+        ),
+        (
+            "generic struct literal",
+            r"struct <@>Box<T> {
+    item: T
+}
+fn main() {
+    let b = <|>Box { item: 42 }
+}",
+        ),
+        (
+            "global variable assignment",
+            r"global <@>counter: int = 0
+fn main() {
+    <|>counter = 42
+}",
+        ),
+        (
+            "mixed shorthand x",
+            r"struct Point {
+    x: int
+    y: int
+}
+fn main() {
+    let <@>x = 100
+    let p = Point { <|>x, y: 200 }
+}",
+        ),
+        (
+            "nested field access",
+            r"struct Inner {
+    <@>value: int
+}
+struct Outer {
+    inner: Inner
+}
+fn main() {
+    let o = Outer { inner: Inner { value: 42 } }
+    let v = o.inner.<|>value
+}",
+        ),
+        (
+            "record variant pattern field name",
+            r"enum Opt {
+    Some { <@>value: int },
+    None,
+}
+fn main() {
+    let o = Opt::Some { value: 42 }
+    match o {
+        Opt::Some { <|>value: v } => { print(v) },
+        Opt::None => {},
+    }
+}",
+        ),
+        (
+            "shorthand x value",
+            r"struct Point {
+    x: int
+    y: int
+}
+fn main() {
+    let <@>x = 100
+    let y = 200
+    let p = Point { <|>x, y }
+}",
+        ),
+        (
+            "shorthand y value",
+            r"struct Point {
+    x: int
+    y: int
+}
+fn main() {
+    let x = 100
+    let <@>y = 200
+    let p = Point { x, <|>y }
+}",
+        ),
+        (
+            "struct field in literal",
+            r"struct Point {
+    <@>x: float,
+    y: float,
+}
+fn main() {
+    let p = Point { <|>x: 1.0, y: 2.0 }
+}",
+        ),
+        (
+            "struct literal name",
+            r#"struct <@>Player {
+    name: string
+    health: int
+}
+fn main() {
+    let player = <|>Player { name: "Hero", health: 100 }
+}"#,
+        ),
+        (
+            "struct literal name assignment",
+            r#"struct <@>Enemy {
+    kind: string
+}
+fn main() {
+    let e: Enemy = <|>Enemy { kind: "goblin" }
+}"#,
+        ),
+        (
+            "struct pattern field name",
+            r"struct Point { <@>x: int, y: int }
+fn main() {
+    let p = Point { x: 1, y: 2 }
+    match p {
+        Point { <|>x: a, y: b } => { print(a + b) },
+    }
+}",
+        ),
+        (
+            "function",
+            r"fn <@>calculate(x: int, y: int) -> int {
+    return x + y
+}
+fn main() {
+    let result = <|>calculate(5, 3)
+}",
+        ),
+        (
+            "local variable",
+            r"fn calculate() {
+    let <@>base_value = 10
+    let multiplier = 3
+    let result = <|>base_value * multiplier
+    print(result)
+}",
+        ),
+        (
+            "macro invocation name",
+            r"macro <@>twice(x: expr) {
+    let _ = x + x
+}
+fn main() {
+    tw<|>ice(41)
+}",
+        ),
+        (
+            "parameter",
+            r"fn process(<@>data: string, count: int) -> string {
+    let result = <|>data + count.to_string()
+    return result
+}",
+        ),
+        (
+            "struct field",
+            r"struct Point {
+    <@>x: float,
+    y: float,
+}
+fn main() {
+    let p = Point { x: 1.0, y: 2.0 }
+    let coordinate = p.<|>x
+}",
+        ),
+        (
+            "struct type",
+            r"struct <@>Vector {
+    x: float,
+    y: float,
+}
+fn create_vector() -> <|>Vector {
+    return Vector { x: 0.0, y: 0.0 }
+}",
+        ),
+        (
+            "variable",
+            r"fn main() {
+    let <@>number = 42
+    let doubled = <|>number * 2
+    print(doubled)
+}",
+        ),
+    ];
+    for (case, marked) in cases {
+        let (src, at) = cursor(&marked.replacen("<@>", "", 1));
+        let (_, want) = cursor(&marked.replacen("<|>", "", 1).replacen("<@>", "<|>", 1));
+        let def = workspace(&src)
+            .definition(PATH, at)
+            .unwrap_or_else(|| panic!("{case}: no definition"));
+        assert_eq!(def.uri.to_file_path().unwrap(), PATH, "{case}");
+        assert_eq!(def.range.start, want, "{case}");
+    }
+}
+
+/// Builtin types resolve to their stdlib declaration; primitives and keywords
+/// resolve to nothing.
+#[test]
+fn builtin_definitions() {
+    // (case, source with a `<|>` cursor, whether a definition exists)
+    let cases: &[(&str, &str, bool)] = &[
+        (
+            "builtin coroutine jumps to stdlib resume",
+            r"fn use_coroutine(c: <|>Coroutine<int>) -> int? {
+    return resume(c)
+}",
+            true,
+        ),
+        (
+            "builtin coroutine jumps to stdlib resume landmark",
+            r"co fn producer() -> <|>Coroutine<int> {
+    yield 42
+}",
+            true,
+        ),
+        (
+            "builtin map jumps to stdlib map new",
+            r"fn make() -> <|>Map<string, int> {
+    return map_new()
+}",
+            true,
+        ),
+        (
+            "builtin native buffer jumps to stdlib",
+            r"fn make() -> <|>NativeBuffer<int> {
+    return native_buffer_int(10)
+}",
+            true,
+        ),
+        (
+            "builtin native buffer u8 jumps to stdlib",
+            r"fn make() -> <|>NativeBufferU8 {
+    return native_buffer_u8(10)
+}",
+            true,
+        ),
+        (
+            "builtin primitive int returns nothing",
+            r"fn make() -> <|>int {
+    return 42
+}",
+            false,
+        ),
+        (
+            "builtin vec jumps to stdlib vec struct",
+            r"fn make() -> <|>Vec<int> {
+    return vec_new()
+}",
+            true,
+        ),
+        (
+            "keyword yield returns empty",
+            r"co fn producer() -> Coroutine<int> {
+    <|>yield 42
+}",
+            false,
+        ),
+        (
+            "primitive type returns empty",
+            r"fn make() -> Vec<<|>int> {
+    return vec_new()
+}",
+            false,
+        ),
+    ];
+    for (case, marked, exists) in cases {
+        let (src, at) = cursor(marked);
+        assert_eq!(
+            workspace(&src).definition(PATH, at).is_some(),
+            *exists,
+            "{case}"
+        );
     }
 }
 
