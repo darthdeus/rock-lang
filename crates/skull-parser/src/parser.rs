@@ -504,12 +504,16 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn at_list_close(&self, close: TokenKind) -> bool {
+        let k = self.kind();
+        k == close
+            || (close == TokenKind::GreaterThan && k == TokenKind::RightShift)
+            || self.at_end()
+    }
+
     fn list_item_follows(&mut self, close: TokenKind) -> bool {
         self.skip_comments();
-        let k = self.kind();
-        !(k == close
-            || (close == TokenKind::GreaterThan && k == TokenKind::RightShift)
-            || self.at_end())
+        !self.at_list_close(close)
     }
 
     fn list_continues(&mut self) -> bool {
@@ -535,13 +539,14 @@ impl<'a> Parser<'a> {
         Ok(items)
     }
 
+    /// Leave comments for the element parser or the closing-token diagnostic.
     fn parse_bare_comma_list<T>(
         &mut self,
         close: TokenKind,
         mut parse_item: impl FnMut(&mut Self) -> PResult<T>,
     ) -> PResult<Vec<T>> {
         let mut items = Vec::new();
-        while self.kind() != close && !self.at_end() {
+        while !self.at_list_close(close) {
             items.push(parse_item(self)?);
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -1004,21 +1009,15 @@ impl<'a> Parser<'a> {
                 let func = self
                     .ast
                     .expr(start, ExprKind::Ident(Ident { span: start, name }));
-                let mut targs = Vec::new();
-                while !matches!(self.kind(), TokenKind::GreaterThan | TokenKind::RightShift)
-                    && !self.at_end()
-                {
-                    let v = self.parse_macro_arg(true)?;
-                    targs.push(FunctionCallArg {
+                let args = self.parse_bare_comma_list(TokenKind::GreaterThan, |p| {
+                    let value = p.parse_macro_arg(true)?;
+                    Ok(FunctionCallArg {
                         name: None,
-                        value: v,
+                        value,
                         is_splat: false,
                         is_spread: false,
-                    });
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                }
+                    })
+                })?;
                 self.expect_generic_close()?;
                 let span = self.span_from(start);
                 Ok(self.ast.expr(
@@ -1026,26 +1025,24 @@ impl<'a> Parser<'a> {
                     ExprKind::FunctionCall {
                         func,
                         generic_args: Vec::new(),
-                        args: targs,
+                        args,
                         syntax: CallSyntax::TypeArgs,
                     },
                 ))
             }
-            TokenKind::OpenSquare => {
+            open @ (TokenKind::OpenSquare | TokenKind::OpenParen) => {
                 self.advance();
-                let elems = self
-                    .parse_bare_comma_list(TokenKind::CloseSquare, |p| p.parse_macro_arg(true))?;
-                self.expect(TokenKind::CloseSquare)?;
+                let close = if open == TokenKind::OpenSquare {
+                    TokenKind::CloseSquare
+                } else {
+                    TokenKind::CloseParen
+                };
+                let elems = self.parse_bare_comma_list(close, |p| p.parse_macro_arg(true))?;
+                self.expect(close)?;
                 let span = self.span_from(start);
-                Ok(self.ast.expr(span, ExprKind::ArrayLiteral(elems)))
-            }
-            TokenKind::OpenParen => {
-                self.advance();
-                let elems =
-                    self.parse_bare_comma_list(TokenKind::CloseParen, |p| p.parse_macro_arg(true))?;
-                self.expect(TokenKind::CloseParen)?;
-                let span = self.span_from(start);
-                let kind = if elems.len() == 1 {
+                let kind = if open == TokenKind::OpenSquare {
+                    ExprKind::ArrayLiteral(elems)
+                } else if elems.len() == 1 {
                     ExprKind::Paren(elems[0])
                 } else {
                     ExprKind::Tuple(elems)
@@ -2365,7 +2362,7 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            if let Some(generic_args) = self.try_generic_call_args()? {
+            if let Some(generic_args) = self.try_generic_call_args() {
                 left = self.parse_call_with_generics(left, generic_args)?;
                 continue;
             }
@@ -2639,35 +2636,20 @@ impl<'a> Parser<'a> {
         Some(Ident { span, name })
     }
 
-    fn try_generic_call_args(&mut self) -> PResult<Option<Vec<Idx<TypeExprData>>>> {
-        if self.kind() != TokenKind::LessThan {
-            return Ok(None);
-        }
+    fn try_generic_call_args(&mut self) -> Option<Vec<Idx<TypeExprData>>> {
         let saved = self.pos;
-        self.advance();
-        let mut args = Vec::new();
-        let parsed: PResult<Option<Vec<Idx<TypeExprData>>>> = (|| {
-            while !matches!(self.kind(), TokenKind::GreaterThan | TokenKind::RightShift)
-                && !self.at_end()
-            {
-                args.push(self.parse_type()?);
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-            }
-            self.expect_generic_close()?;
-            if self.kind() != TokenKind::OpenParen {
-                return Ok(None);
-            }
-            Ok(Some(args))
-        })();
-        match parsed {
-            Ok(Some(args)) => Ok(Some(args)),
-            Ok(None) | Err(_) => {
-                self.pos = saved;
-                Ok(None)
-            }
+        if !self.eat(TokenKind::LessThan) {
+            return None;
         }
+        let args = self.parse_bare_comma_list(TokenKind::GreaterThan, Self::parse_type);
+        if let Ok(args) = args
+            && self.expect_generic_close().is_ok()
+            && self.kind() == TokenKind::OpenParen
+        {
+            return Some(args);
+        }
+        self.pos = saved;
+        None
     }
 
     fn parse_call_with_generics(
@@ -3489,13 +3471,7 @@ impl<'a> Parser<'a> {
             return Ok(Pattern::Literal(lit));
         }
         match self.kind() {
-            TokenKind::OpenParen => {
-                self.advance();
-                let ps =
-                    self.parse_bare_comma_list(TokenKind::CloseParen, |p| p.parse_pattern())?;
-                self.expect(TokenKind::CloseParen)?;
-                Ok(Pattern::Tuple(ps))
-            }
+            TokenKind::OpenParen => Ok(Pattern::Tuple(self.parse_pattern_tuple()?)),
             TokenKind::Ident(name) if name.as_str() == "_" => {
                 self.advance();
                 Ok(Pattern::Wildcard)
@@ -3516,13 +3492,9 @@ impl<'a> Parser<'a> {
                     }
                 };
                 if self.kind() == TokenKind::OpenParen {
-                    self.advance();
-                    let args =
-                        self.parse_bare_comma_list(TokenKind::CloseParen, |p| p.parse_pattern())?;
-                    self.expect(TokenKind::CloseParen)?;
                     Ok(Pattern::PathVariant {
                         path,
-                        args: Some(args),
+                        args: Some(self.parse_pattern_tuple()?),
                     })
                 } else if self.kind() == TokenKind::OpenCurly {
                     let (fields, rest) = self.parse_pattern_record_fields()?;
@@ -3535,6 +3507,13 @@ impl<'a> Parser<'a> {
             }
             other => Err(self.err(format!("unsupported pattern: {:?}", other))),
         }
+    }
+
+    fn parse_pattern_tuple(&mut self) -> PResult<Vec<Pattern>> {
+        self.advance(); // `(`
+        let patterns = self.parse_bare_comma_list(TokenKind::CloseParen, Self::parse_pattern)?;
+        self.expect(TokenKind::CloseParen)?;
+        Ok(patterns)
     }
 
     fn parse_pattern_record_fields(&mut self) -> PResult<(Vec<(Ident, Pattern)>, bool)> {
