@@ -70,9 +70,8 @@ pub struct CompilerError {
     pub labels: Vec<CompilerLabel>,
     pub level: CompilerErrorLevel,
     pub message: String,
-    /// Independent failures from the same pass, carried so that a caller able
-    /// to return only one error still reports all of them. Body emission runs
-    /// in parallel and rejects every body before returning any of them, so
+    /// Independent failures from the same pass, for callers that can return only one error.
+    /// Rendered after the primary one; they never nest.
     pub siblings: Vec<CompilerError>,
 }
 
@@ -96,7 +95,8 @@ impl CompilerError {
         Self::new_with_label(Span::unknown(), message.into())
     }
 
-    /// A span-only error with no message, for trial paths -- overload scoring,
+    /// A span-only error for trial paths (overload scoring, `coerce(..).is_ok()`) that discard
+    /// the error unrendered, so the expensive type rendering is skipped.
     pub fn silent(span: Span) -> Self {
         Self::at(span.start(), String::new())
     }
@@ -189,6 +189,8 @@ impl CompilerError {
     }
 }
 
+// Building an ariadne cache copies every file in `sources` (~1.5 MB per project, ~1.6 ms), so
+// render all diagnostics of a batch against one cache.
 #[must_use]
 pub fn render_all(errs: &[CompilerError], sources: &SourceFiles) -> String {
     if errs.is_empty() {

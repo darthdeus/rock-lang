@@ -62,6 +62,7 @@ fn log_to_level(l: log::Level) -> u8 {
     }
 }
 
+// Third-party chatter (symphonia decode progress) is capped at warn so real problems still show.
 const NOISY_TARGET_PREFIXES: &[&str] = &["symphonia"];
 
 fn is_noisy(target: &str) -> bool {

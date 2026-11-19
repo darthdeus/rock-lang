@@ -118,11 +118,11 @@ pub fn source_file_from_path_and_contents(
 pub struct Span {
     pub file: Ustr,
     line_range: (u32, u32),
-    /// First and one-past-last column, zero-based and half-open `[start..end)`.
-    /// `col_range.1` is therefore the column just past the last character of
+    /// Zero-based, half-open `[start..end)`, counted in characters: `col_range.1` is never
+    /// inclusive (`lsp_range_from_span` depends on it).
     col_range: (u32, u32),
-    /// First and one-past-last byte, zero-based and half-open `[start..end)`.
-    /// The precise extent: these offsets index a `&str` directly, since
+    /// Zero-based, half-open byte range; indexes a `&str` directly. Bytes, not characters, so it
+    /// drifts from character positions after any multibyte character.
     offset_range: (u32, u32),
 }
 

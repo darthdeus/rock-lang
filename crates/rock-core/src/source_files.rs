@@ -32,6 +32,7 @@ impl SourceFiles {
         self.package_roots = roots.into_iter().collect();
     }
 
+    // A re-add keeps its slot so the set order does not depend on how often a file was loaded.
     pub fn add_or_update_file(&mut self, updated: SourceFile) {
         let path = updated.file.to_id_path();
         let known = self

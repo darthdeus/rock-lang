@@ -1,5 +1,4 @@
-/// The one spelling of a standard-library source-file id. The stdlib loader
-/// builds every stdlib id with [`stdlib_file_id`], and every consumer (std
+/// The one spelling of a standard-library source-file id.
 const STDLIB_FILE_ID_PREFIX: &str = "<stdlib>/";
 
 pub fn stdlib_file_id(name: &str) -> String {

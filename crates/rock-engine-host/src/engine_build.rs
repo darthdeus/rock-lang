@@ -667,6 +667,8 @@ fn stage_identity_path(dst: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+// Cargo drops its target-dir lock before staging reads the artifact, so a concurrent build can
+// replace it mid-copy; one retry stages whichever artifact settled.
 pub(crate) fn stage_cdylib_from(
     src: &Path,
     dst: &Path,

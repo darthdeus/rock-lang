@@ -288,6 +288,8 @@ fn run_var_cmd(
     channel: &str,
     build_command: Option<&str>,
 ) -> Result<String> {
+    // The command text can carry the credential and a failing fetcher often echoes it; the
+    // variable name and exit status stay, since neither can hold the value.
     let shown = if secret {
         "<redacted: secret = true>".to_string()
     } else {

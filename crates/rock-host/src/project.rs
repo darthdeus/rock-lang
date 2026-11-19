@@ -173,6 +173,7 @@ pub fn write_atomic_streamed(
     };
     fs_err::create_dir_all(parent)?;
 
+    // Same directory so the rename is atomic: a hot-reload poller must never read a truncated file.
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     write(tmp.as_file_mut())?;
     tmp.persist(path).map_err(|e| e.error)?;

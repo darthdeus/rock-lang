@@ -41,6 +41,7 @@ fn lib_path_value_in(root: &Path) -> String {
     if is_release_layout_in(root) {
         let lib_str = root.join("lib").to_string_lossy().into_owned();
         if cfg!(target_os = "windows") {
+            // DLLs sit next to the executables in bin/.
             let bin_str = root.join("bin").to_string_lossy().into_owned();
             return format!("{};{}", lib_str, bin_str);
         } else {

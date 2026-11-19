@@ -35,6 +35,7 @@ pub fn context_request(host: GlHost) -> GlContextRequest {
 
 pub static GL_ERROR_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// A failed compile or link sets no GL error, so GL_ERROR_COUNT alone would stay 0.
 pub static SHADER_ERROR_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn force_shader_failure() -> bool {
@@ -219,6 +220,7 @@ impl DebugGl {
     /// # Safety
     /// Requires the [OpenGL call contract](Self#safety).
     /// `values` must contain every component read for the selected buffer.
+    // The only defined way to clear an integer colour buffer (glClear on one is undefined).
     pub unsafe fn clear_buffer_i32_slice(&self, target: u32, draw_buffer: u32, values: &[i32]) {
         self.capture(
             "clear_buffer_i32_slice",
@@ -1012,6 +1014,7 @@ impl DebugGl {
 
     /// # Safety
     /// Requires the [OpenGL call contract](Self#safety).
+    // Desktop GL only: glGetBufferSubData does not exist in GLES.
     pub unsafe fn get_buffer_sub_data(&self, target: u32, offset: i32, dst: &mut [u8]) {
         self.gl.get_buffer_sub_data(target, offset, dst);
         self.check_error("get_buffer_sub_data");

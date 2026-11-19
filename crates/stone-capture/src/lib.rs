@@ -12,6 +12,7 @@ pub use frame_stream::{FrameStream, FrameStreamSummary};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowOrigin {
     TopDown,
+    // GL's default framebuffer reads bottom-to-top.
     BottomUp,
 }
 
