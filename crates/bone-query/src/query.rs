@@ -964,7 +964,7 @@ pub enum Shorthand {
 }
 
 impl RefSite {
-    fn plain(span: Span) -> Self {
+    pub(crate) fn plain(span: Span) -> Self {
         RefSite {
             span,
             shorthand: None,
@@ -1307,9 +1307,7 @@ pub fn references<'t>(
 ) -> Vec<RefSite> {
     let mut sites = ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)
         .and_then(|at| at.symbol(text_of))
-        .map_or_else(Vec::new, |symbol| {
-            symbol.sites(ws, mid, offset, text_of, fn_scope)
-        });
+        .map_or_else(Vec::new, |symbol| symbol.sites(ws, mid, text_of, fn_scope));
     // Walks may meet one token twice (a declaration that is also a use);
     // the first sighting wins.
     let mut seen = std::collections::HashSet::new();
@@ -1364,7 +1362,6 @@ impl RefTarget {
         self,
         ws: &Workspace,
         mid: ModuleId,
-        offset: usize,
         text_of: TextOf<'_, 't>,
         scope: FnRefScope,
     ) -> Vec<RefSite> {
@@ -1372,8 +1369,20 @@ impl RefTarget {
         let mut plain = |span| sites.push(RefSite::plain(span));
         match self {
             Self::Binding(owner, binding) => {
-                let mut sites = local_references(&ws.module(mid).bodies[&owner], binding);
-                sites.extend(param_named_arg_sites(ws, mid, offset, text_of));
+                let body = &ws.module(mid).bodies[&owner];
+                let mut sites = local_references(body, binding);
+                if let hir::BodyOwner::Function(fid) = owner
+                    && body.binding_arena[binding].kind == hir::BindingKind::Param
+                    && body.param_bindings.into_iter().any(|p| p == binding)
+                {
+                    append_param_named_arg_sites(
+                        ws,
+                        (mid, fid),
+                        body.binding_arena[binding].name,
+                        text_of,
+                        &mut sites,
+                    );
+                }
                 return sites;
             }
             Self::Function(mid, fid) => {
@@ -1985,120 +1994,84 @@ fn local_references(body: &Body, b: Idx<hir::BindingInfo>) -> Vec<RefSite> {
     out
 }
 
-/// Resolve named arguments through the selected overload. HIR keeps label names
-/// but no spans, so locate the token immediately before the value.
-fn param_named_arg_sites<'t>(
-    ws: &Workspace,
-    mid: ModuleId,
-    offset: usize,
-    text_of: TextOf<'_, 't>,
-) -> Vec<RefSite> {
-    let Some(module) = ws.modules.get(mid.index()) else {
-        return Vec::new();
+fn named_arguments(body: &Body, call: Idx<hir::Expr>) -> impl Iterator<Item = (Ustr, &Span)> {
+    let args = match body.expr_arena[call] {
+        hir::Expr::Call { args, .. } | hir::Expr::SafeNavCall { args, .. } => Some(args),
+        _ => None,
     };
-    let Some(owner) = module.body_at(offset) else {
-        return Vec::new();
-    };
-    let hir::BodyOwner::Function(target_fid) = owner else {
-        return Vec::new();
-    };
-    let Some(body) = module.bodies.get(&owner) else {
-        return Vec::new();
-    };
-    let Some(b) = binding_at(body, offset) else {
-        return Vec::new();
-    };
-    if body.binding_arena[b].kind != hir::BindingKind::Param
-        || !body.param_bindings.into_iter().any(|p| p == b)
-    {
-        return Vec::new();
-    }
-    let pname = body.binding_arena[b].name;
+    args.into_iter()
+        .flatten()
+        .filter_map(|arg| Some((*body.arg_names.get(&arg)?, body.expr_spans.get(arg)?)))
+}
 
-    let mut out = Vec::new();
-    for (cm, inf) in ws.inferences_iter() {
-        let Some(cmod) = ws.modules.get(cm.index()) else {
+/// HIR keeps label names but no spans. The label is immediately before its value.
+fn named_argument_span(text_of: TextOf<'_, '_>, label: Ustr, value: &Span) -> Option<Span> {
+    named_label_before(
+        text_of(value.file.as_str())?,
+        value.offset_range().0,
+        label.as_str(),
+        value,
+    )
+}
+
+fn append_param_named_arg_sites(
+    ws: &Workspace,
+    target: (ModuleId, Idx<Function>),
+    name: Ustr,
+    text_of: TextOf<'_, '_>,
+    out: &mut Vec<RefSite>,
+) {
+    for (mid, inf) in ws.inferences_iter() {
+        let Some(module) = ws.modules.get(mid.index()) else {
             continue;
         };
-        for (cowner, bi) in inf.per_fn.iter() {
-            let Some(cbody) = cmod.bodies.get(cowner) else {
+        for (owner, bi) in inf.per_fn.iter() {
+            let Some(body) = module.bodies.get(owner) else {
                 continue;
             };
-            for (call_idx, (rmid, rfid)) in bi.resolved_overload_calls.iter() {
-                if !(*rmid == mid && *rfid == target_fid) {
-                    continue;
-                }
-                let args = match &cbody.expr_arena[*call_idx] {
-                    hir::Expr::Call { args, .. } => *args,
-                    hir::Expr::SafeNavCall { args, .. } => *args,
-                    _ => continue,
-                };
-                for a in args.into_iter() {
-                    if cbody.arg_names.get(&a) != Some(&pname) {
-                        continue;
-                    }
-                    let Some(asp) = cbody.expr_spans.get(a) else {
-                        continue;
-                    };
-                    let Some(text) = text_of(asp.file.as_str()) else {
-                        continue;
-                    };
-                    if let Some(span) =
-                        named_label_before(text, asp.offset_range().0, pname.as_str(), asp)
-                    {
-                        out.push(RefSite::plain(span));
-                    }
+            for (&call, &resolved) in &bi.resolved_overload_calls {
+                if resolved == target {
+                    out.extend(
+                        named_arguments(body, call)
+                            .filter(|&(label, _)| label == name)
+                            .filter_map(|(label, value)| named_argument_span(text_of, label, value))
+                            .map(RefSite::plain),
+                    );
                 }
             }
         }
     }
-    out
 }
 
 /// Find the parameter for a named argument through the selected overload.
-pub(crate) fn named_arg_param_at<'t>(
+pub(crate) fn named_arg_param_at(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
-    text_of: TextOf<'_, 't>,
+    text_of: TextOf<'_, '_>,
 ) -> Option<Span> {
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
     let bi = inf.per_fn.get(&owner)?;
-    for (call_idx, (rmid, rfid)) in bi.resolved_overload_calls.iter() {
-        let args = match &body.expr_arena[*call_idx] {
-            hir::Expr::Call { args, .. } | hir::Expr::SafeNavCall { args, .. } => *args,
-            _ => continue,
+    for (&call, &(mid, fid)) in &bi.resolved_overload_calls {
+        let Some((label, _)) = named_arguments(body, call).find(|&(label, value)| {
+            named_argument_span(text_of, label, value)
+                .is_some_and(|span| span_contains(&span, offset))
+        }) else {
+            continue;
         };
-        for a in args.into_iter() {
-            let Some(label) = body.arg_names.get(&a) else {
-                continue;
-            };
-            let Some(asp) = body.expr_spans.get(a) else {
-                continue;
-            };
-            let Some(text) = text_of(asp.file.as_str()) else {
-                continue;
-            };
-            let Some(lsp) = named_label_before(text, asp.offset_range().0, label.as_str(), asp)
-            else {
-                continue;
-            };
-            if !span_contains(&lsp, offset) {
-                continue;
-            }
-            let tmod = ws.modules.get(rmid.index())?;
-            let tbody = tmod.bodies.get(&hir::BodyOwner::Function(*rfid))?;
-            let p = tbody
-                .param_bindings
-                .into_iter()
-                .find(|p| tbody.binding_arena[*p].name == *label)?;
-            let s = tbody.binding_spans.get(p)?;
-            let start = s.offset_range().0;
-            return Some(s.with_offset_range((start, start + label.as_str().len())));
-        }
+        let target = ws.modules.get(mid.index())?;
+        let body = target.bodies.get(&hir::BodyOwner::Function(fid))?;
+        let param = body
+            .param_bindings
+            .into_iter()
+            .find(|p| body.binding_arena[*p].name == label)?;
+        return Some(leading_name_span(
+            body.binding_spans.get(param)?,
+            label.len(),
+        ));
     }
     None
 }

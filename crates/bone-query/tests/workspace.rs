@@ -630,6 +630,10 @@ fn references_from_a_named_arg_label_find_the_resolved_overloads_param() {
         (range.start, range.end),
         (Position::new(7, 6), Position::new(7, 11))
     );
+    assert_eq!(
+        rename_lines(&bone, Position::new(7, 7), "amount", 5),
+        [0, 1, 7]
+    );
 }
 
 /// The sorted lines a rename edits, checking every edit writes `new_name` over

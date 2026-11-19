@@ -42,7 +42,7 @@ use crate::completion::match_policy::admit;
 use crate::completion::rank::*;
 use crate::completion::select::*;
 use crate::completion::sources::*;
-use crate::query::{SymCat, clean_match};
+use crate::query::{FnRefScope, RefSite, RenameSubject, SymCat, clean_match};
 use crate::rank_key::RankKey;
 
 /// A fallback is reported once per request, file and stage until project text
@@ -1250,16 +1250,10 @@ impl BoneWorkspace {
         let offset = byte_offset(src, pos);
         let mut idx_cache = HashMap::new();
         // Find-usages scopes to the specific overload under the cursor.
-        self.all_reference_spans(
-            proj,
-            path,
-            offset,
-            crate::query::FnRefScope::ThisOverload,
-            "references",
-        )
-        .into_iter()
-        .filter_map(|s| location(proj, &s.span, Some(&mut idx_cache)))
-        .collect()
+        self.all_reference_spans(proj, path, offset, FnRefScope::ThisOverload, "references")
+            .into_iter()
+            .filter_map(|s| location(proj, &s.span, Some(&mut idx_cache)))
+            .collect()
     }
 
     /// References in the current document.
@@ -1461,20 +1455,12 @@ impl BoneWorkspace {
         proj: &BoneProject,
         path: &str,
         offset: usize,
-        fn_scope: crate::query::FnRefScope,
+        fn_scope: FnRefScope,
         request: &'static str,
-    ) -> Vec<crate::query::RefSite> {
-        if let Some(ast) = proj.reparse_user_file(path, request) {
-            let macro_refs = macro_refs::macro_param_references(&ast, offset);
-            if !macro_refs.is_empty() {
-                return macro_refs
-                    .into_iter()
-                    .map(|span| crate::query::RefSite {
-                        span,
-                        shorthand: None,
-                    })
-                    .collect();
-            }
+    ) -> Vec<RefSite> {
+        let ast = proj.reparse_user_file(path, request);
+        if let Some(sites) = macro_parameter_sites(ast.as_ref(), offset) {
+            return sites;
         }
         let ws = proj.session.workspace();
         let Some(mid) = user_module_for_path(ws, path) else {
@@ -1501,42 +1487,6 @@ impl BoneWorkspace {
         crate::query::references(ws, mid, inf, offset, &text_of, fn_scope)
     }
 
-    /// The sites a rename at `offset` rewrites: [`Self::v1_rename_sites`]
-    /// for a modules-v1 definition or import alias, else every reference of
-    /// the symbol, all overloads of a function included.
-    fn rename_sites(
-        &self,
-        proj: &BoneProject,
-        path: &str,
-        offset: usize,
-    ) -> Vec<crate::query::RefSite> {
-        let ws = proj.session.workspace();
-        let text_of = |file: &str| proj.texts.get(file).map(String::as_str);
-        let on_named_arg = user_module_for_path(ws, path)
-            .and_then(|mid| {
-                crate::query::named_arg_param_at(ws, mid, ws.inference(mid)?, offset, &text_of)
-            })
-            .is_some();
-        if on_named_arg {
-            return self.all_reference_spans(
-                proj,
-                path,
-                offset,
-                crate::query::FnRefScope::AllOverloads,
-                "rename",
-            );
-        }
-        self.v1_rename_sites(proj, path, offset).unwrap_or_else(|| {
-            self.all_reference_spans(
-                proj,
-                path,
-                offset,
-                crate::query::FnRefScope::AllOverloads,
-                "rename",
-            )
-        })
-    }
-
     /// Rename sites that tell a definition from an import alias.
     /// Renaming a modules-v1 definition rewrites every site that spells its
     /// name -- its declaration, bare uses, the naming segment of each path,
@@ -1548,11 +1498,11 @@ impl BoneWorkspace {
         &self,
         proj: &BoneProject,
         path: &str,
+        mid: ModuleId,
         offset: usize,
-    ) -> Option<Vec<crate::query::RefSite>> {
+    ) -> Option<Vec<RefSite>> {
         use bone_semantic::hir::{PathSegmentRef, SegmentTarget};
         let ws = proj.session.workspace();
-        let mid = user_module_for_path(ws, path)?;
         let text_at = |span: &Span| {
             proj.texts
                 .get(span.file.as_str())
@@ -1594,7 +1544,7 @@ impl BoneWorkspace {
                 proj,
                 decl.file.as_str(),
                 decl.offset_range().0,
-                crate::query::FnRefScope::AllOverloads,
+                FnRefScope::AllOverloads,
                 "rename",
             )
             .into_iter()
@@ -1629,17 +1579,9 @@ impl BoneWorkspace {
                     }))
         });
         sites.extend(segments);
-        sites.sort_by_key(|span| (span.file.as_str().to_string(), span.offset_range()));
+        sites.sort_by_key(|span| (span.file.as_str(), span.offset_range()));
         sites.dedup_by_key(|span| (span.file, span.offset_range()));
-        Some(
-            sites
-                .into_iter()
-                .map(|span| crate::query::RefSite {
-                    span,
-                    shorthand: None,
-                })
-                .collect(),
-        )
+        Some(sites.into_iter().map(RefSite::plain).collect())
     }
 
     // rename + prepare-rename
@@ -1730,18 +1672,52 @@ impl BoneWorkspace {
         proj: &BoneProject,
         path: &str,
         offset: usize,
-    ) -> Result<Vec<crate::query::RefSite>, RenameRefusal> {
-        if let Some(ast) = proj.reparse_user_file(path, "rename") {
-            if macro_refs::on_macro_name(&ast, &proj.session.registry, offset) {
-                return Err(RenameRefusal(
-                    "cannot rename a macro: expansion erases its uses before analysis, \
-                     so rename cannot find them all"
-                        .to_string(),
-                ));
-            }
+    ) -> Result<Vec<RefSite>, RenameRefusal> {
+        let ast = proj.reparse_user_file(path, "rename");
+        if ast
+            .as_ref()
+            .is_some_and(|ast| macro_refs::on_macro_name(ast, &proj.session.registry, offset))
+        {
+            return Err(RenameRefusal(
+                "cannot rename a macro: expansion erases its uses before analysis, \
+                 so rename cannot find them all"
+                    .to_string(),
+            ));
         }
-        let sites = self.rename_sites(proj, path, offset);
-        let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
+        let ws = proj.session.workspace();
+        let text_of = |file: &str| proj.texts.get(file).map(String::as_str);
+        let mid = user_module_for_path(ws, path);
+        let inferred = mid.and_then(|mid| Some((mid, ws.inference(mid)?)));
+        let named_param = inferred.and_then(|(mid, inf)| {
+            crate::query::named_arg_param_at(ws, mid, inf, offset, &text_of)
+        });
+
+        // A named argument refers to the resolved overload's parameter.
+        let sites = mid
+            .filter(|_| named_param.is_none())
+            .and_then(|mid| self.v1_rename_sites(proj, path, mid, offset))
+            .or_else(|| macro_parameter_sites(ast.as_ref(), offset))
+            .unwrap_or_else(|| {
+                if let Some(param) = named_param {
+                    return self.all_reference_spans(
+                        proj,
+                        param.file.as_str(),
+                        param.offset_range().0,
+                        FnRefScope::AllOverloads,
+                        "rename",
+                    );
+                }
+                inferred.map_or_else(Vec::new, |(mid, inf)| {
+                    crate::query::references(
+                        ws,
+                        mid,
+                        inf,
+                        offset,
+                        &text_of,
+                        FnRefScope::AllOverloads,
+                    )
+                })
+            });
         let spelled = |span: &Span| {
             text_of(span.file.as_str())
                 .and_then(|t| t.get(span.offset_range().0..span.offset_range().1))
@@ -1755,16 +1731,12 @@ impl BoneWorkspace {
             return Ok(sites);
         };
         rename_guard::check_spellings(&sites, old, &text_of)?;
-        let ws = proj.session.workspace();
-        let subject = user_module_for_path(ws, path)
-            .and_then(|mid| Some((mid, ws.inference(mid)?)))
-            .map_or(crate::query::RenameSubject::Other, |(mid, inf)| {
-                // On a caller's named-arg label the subject is the parameter.
-                match crate::query::named_arg_param_at(ws, mid, inf, offset, &text_of) {
-                    Some(_) => crate::query::RenameSubject::Binding,
-                    None => crate::query::rename_subject(ws, mid, inf, offset, &text_of),
-                }
-            });
+        let subject = match named_param {
+            Some(_) => RenameSubject::Binding,
+            None => inferred.map_or(RenameSubject::Other, |(mid, inf)| {
+                crate::query::rename_subject(ws, mid, inf, offset, &text_of)
+            }),
+        };
         rename_guard::check_unpinned(ws, subject, old, &text_of)?;
         rename_guard::check_read_only(&sites, old, &text_of)?;
         rename_guard::check_opaque(ws, subject, &sites, old, &text_of)?;
@@ -3876,6 +3848,11 @@ fn hole_diagnostics_for(proj: &BoneProject, path: &str) -> Option<Vec<Diagnostic
         })
         .collect();
     Some(diags)
+}
+
+fn macro_parameter_sites(ast: Option<&skull_parser::Ast>, offset: usize) -> Option<Vec<RefSite>> {
+    let spans = macro_refs::macro_param_references(ast?, offset);
+    (!spans.is_empty()).then(|| spans.into_iter().map(RefSite::plain).collect())
 }
 
 /// Find the user module whose source file is `path` (excludes warm stdlib and
