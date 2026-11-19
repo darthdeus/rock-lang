@@ -312,3 +312,32 @@ fn an_unmarked_value_field_reads_correctly_through_the_same_primitive() {
     let h = VHolder { p: VPt { x: 9, y: 0 }, tag: 1 }
     print("{read_value_field(h, .p)}")
 }
+
+value RefCell { n: int }
+
+fn ref_owner_lambda_return(c: ref RefCell) -> ref RefCell {
+    let make = (x: int) => {
+        if x > 3 { return P { x: x, y: 2 } }
+        return P { x: 1, y: x }
+    }
+    let p = make(c.n)
+    c.n = p.x + p.y
+    return c
+}
+
+fn ref_owner_nested_fn_return(c: ref RefCell) -> ref RefCell {
+    fn make(x: int) -> P {
+        if x > 3 { return P { x: x, y: 2 } }
+        return P { x: 1, y: x }
+    }
+    let p = make(c.n)
+    c.n = p.x * p.y
+    return c
+}
+
+@test(output = "7 10")
+fn a_return_inside_a_lambda_or_nested_fn_uses_its_own_result_type() {
+    let a = RefCell { n: 5 }
+    let b = RefCell { n: 5 }
+    print("{ref_owner_lambda_return(a).n} {ref_owner_nested_fn_return(b).n}")
+}

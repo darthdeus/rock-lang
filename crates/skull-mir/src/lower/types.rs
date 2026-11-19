@@ -40,6 +40,16 @@ impl<'a> Builder<'a> {
         let id = plan.domain_types(&self.cur_domain)?.ty_type(ty)?;
         Some(self.concrete_mono(id))
     }
+
+    pub(crate) fn fn_result_ty(
+        &self,
+        fn_ty: Option<&'a MonoTy>,
+    ) -> Result<&'a MonoTy, CompilerError> {
+        match fn_ty.map(|ty| ty.peel_nullable().0) {
+            Some(MonoTy::Function { ret, .. }) => Ok(ret),
+            _ => Err(self.gap_here("a function body has no concrete function type")),
+        }
+    }
 }
 
 impl<'a> Builder<'a> {

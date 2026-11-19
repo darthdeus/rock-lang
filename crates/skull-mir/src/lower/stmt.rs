@@ -297,6 +297,8 @@ impl<'a> Builder<'a> {
         child.defer_mode = DeferMode::for_body(false, self.call_scx.target);
         child.param_reps = abi.representation.params().to_vec();
         child.ret_rep = abi.representation.result();
+        child.ret_ty =
+            Some(self.fn_result_ty(self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty)))?);
         child.site_owner = self.site_owner.clone();
         child.static_cells = self.static_cells.clone();
         child.nested_fn_globals = self.nested_fn_globals.clone();

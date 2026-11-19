@@ -1831,8 +1831,10 @@ struct Builder<'a> {
     param_reps: Vec<RepId>,
     /// The ordinary body's ABI owns this immutable parameter slice.
     param_plan: Option<BackendFnAbiPlanHandle>,
-    /// The body's physical result representation identity, if it has one.
     ret_rep: Option<RepId>,
+    /// The logical result type of the function, nested fn or lambda whose body is
+    /// being lowered; a `return` belongs to the innermost of them.
+    ret_ty: Option<&'a MonoTy>,
     /// The fn's name span, for spanned emit-time rejections that have no better
     /// anchor (the non-unit-coroutine fall-off check). `None` for non-fn bodies.
     fn_name_span: Option<Span>,
@@ -1991,6 +1993,10 @@ impl<'a> Builder<'a> {
             param_reps: Vec::new(),
             param_plan: None,
             ret_rep: None,
+            ret_ty: concrete_plan
+                .signature
+                .result
+                .map(|result| scx.interner().get_ref(result)),
             fn_name_span: None,
             cur_span: None,
             cur_expr: None,
@@ -3162,9 +3168,9 @@ impl<'a> Builder<'a> {
             }
             return Ok(vec![]);
         }
-        if self.concrete_plan.signature.result.is_some_and(|result| {
+        if self.ret_ty.is_some_and(|result| {
             matches!(
-                self.concrete_mono(result).peel_nullable().0,
+                result.peel_nullable().0,
                 MonoTy::App {
                     ctor: MonoCtor::Ref,
                     ..
@@ -3231,20 +3237,12 @@ impl<'a> Builder<'a> {
             }
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
-        let expected = self
-            .concrete_plan
-            .signature
-            .result
-            .map(|result| self.concrete_mono(result));
-        let v = self.lower_expr_with_expected(e, expected)?;
+        let v = self.lower_expr_with_expected(e, self.ret_ty)?;
         if !self.is_open() {
             return Ok(Vec::new());
         }
-        let v = match self.concrete_plan.signature.result {
-            Some(result) => {
-                let result = self.concrete_mono(result);
-                self.coerced_mono(v, e, result)
-            }
+        let v = match self.ret_ty {
+            Some(result) => self.coerced_mono(v, e, result),
             None => v,
         };
         Ok(vec![v])

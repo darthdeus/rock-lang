@@ -293,6 +293,8 @@ impl<'a> Builder<'a> {
             // Use the lambda's return representation while lowering its body.
             let saved_ret_rep = self.ret_rep.take();
             let saved_flat_ret = self.flat_ret.take();
+            let lambda_ret_ty = self.fn_result_ty(self.concrete_expr_ty(e))?;
+            let saved_ret_ty = self.ret_ty.replace(lambda_ret_ty);
             // A return from the lambda runs only the lambda's defers.
             let saved_defers = std::mem::take(&mut self.defers);
             let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
@@ -343,6 +345,7 @@ impl<'a> Builder<'a> {
             self.defer_mode = saved_mode;
             self.ret_rep = saved_ret_rep;
             self.flat_ret = saved_flat_ret;
+            self.ret_ty = saved_ret_ty;
             self.cur = saved;
             let id = self.emit_cur(Inst::Lambda {
                 params: param_cells,
