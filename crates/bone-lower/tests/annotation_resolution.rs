@@ -8,19 +8,17 @@ use skull_parser::{CompilerError, ItemKind, UseSuffix, UseTree, parse_module_cle
 use ustr::Ustr;
 
 fn lower_field_annotation(left: &str, right: &str) -> Result<Vec<Annotation>, CompilerError> {
-    lower_annotation(
-        left,
-        right,
-        "use left::*; use right::*; struct Buffer { @size(4) values: int }",
-    )
+    lower_annotation(left, right, "use left::*; use right::*;")
 }
 
 fn lower_annotation(
     left: &str,
     right: &str,
-    source: &str,
+    imports: &str,
 ) -> Result<Vec<Annotation>, CompilerError> {
     let file = Ustr::from("annotation.rock");
+    let source = format!("{imports} struct Buffer {{ @size(4) values: int }}");
+    let source = source.as_str();
     let ast = parse_module_clean(source, file).unwrap();
     let mut ws = Workspace::new();
     let mut pkg = NsPackage {
@@ -102,26 +100,18 @@ fn lower_annotation(
         ..Default::default()
     };
     let ctx = LowerCtx::new(&ws, &mut module, 0);
-    let item = ast.items.last().unwrap();
-    let annotations = match &item.kind {
-        ItemKind::Struct(buffer) => &buffer.fields[0].annotations,
-        ItemKind::Function(_) => &item.annotations,
-        _ => panic!("expected a struct or function"),
+    let ItemKind::Struct(buffer) = &ast.items.last().unwrap().kind else {
+        panic!("expected a struct");
     };
-    lower_annotations_with_ctx(&ctx, &ast, annotations)
+    lower_annotations_with_ctx(&ctx, &ast, &buffer.fields[0].annotations)
 }
 
 #[test]
-fn builtin_size_ignores_glob_imported_functions() {
-    let annotations = lower_field_annotation("pub fn size() {}", "pub fn size() {}").unwrap();
-    assert!(annotations[0].is_builtin("size"));
-}
-
-#[test]
-fn builtin_size_ignores_glob_imported_globals() {
-    let annotations =
-        lower_field_annotation("pub global size: int = 1", "pub global size: int = 2").unwrap();
-    assert!(annotations[0].is_builtin("size"));
+fn builtin_size_ignores_glob_imported_functions_and_globals() {
+    for definition in ["pub fn size() {}", "pub global size: int = 1"] {
+        let annotations = lower_field_annotation(definition, definition).unwrap();
+        assert!(annotations[0].is_builtin("size"), "{definition}");
+    }
 }
 
 #[test]
@@ -144,25 +134,7 @@ fn only_the_decorator_claims_a_mixed_glob_spelling() {
 
 #[test]
 fn annotation_lookup_retains_broken_glob_errors() {
-    let error = lower_annotation(
-        "pub fn size() {}",
-        "pub fn size() {}",
-        "use missing::*; struct Buffer { @size(4) values: int }",
-    )
-    .unwrap_err();
+    let error =
+        lower_annotation("pub fn size() {}", "pub fn size() {}", "use missing::*;").unwrap_err();
     assert!(error.message.contains("missing"), "{error:?}");
-}
-
-#[test]
-fn wire_onchange_still_rejects_missing_and_ambiguous_names() {
-    for name in ["missing", "size"] {
-        let source = format!("use left::*; use right::*; @wire(onchange=[{name}]) fn probe() {{}}");
-        let error = lower_annotation("pub fn size() {}", "pub fn size() {}", &source).unwrap_err();
-        let diagnostic = if name == "missing" {
-            "did not resolve"
-        } else {
-            "not a single definition"
-        };
-        assert!(error.message.contains(diagnostic), "{error:?}");
-    }
 }

@@ -1,20 +1,10 @@
-//- not_bool_literal
+//- not
 fn f() -> bool {
-    let b = !true
+    let a = !true
       //^ bool
-    b
-}
-
-//- not_of_comparison
-fn f() -> bool {
     let b = !(1 < 2)
       //^ bool
-    b
-}
-
-//- not_double
-fn f() -> bool {
-    let b = !!true
+    let c = !!true
       //^ bool
-    b
+    c
 }

@@ -1,19 +1,9 @@
-//- paren_int
-fn f() -> int {
+//- paren
+fn f() -> bool {
     let x = (5)
       //^ int
-    5
-}
-
-//- paren_nested
-fn f() -> int {
-    let x = ((5))
+    let y = ((5))
       //^ int
-    5
-}
-
-//- paren_bool
-fn f() -> bool {
     let b = (1 < 2)
       //^ bool
     b

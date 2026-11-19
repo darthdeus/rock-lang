@@ -1,57 +1,20 @@
-//!   &&, ||        require bool operands.
-
-//- lt_int_ok
+//- comparison_and_logic_are_bool
 fn f() -> bool {
-    let b = 1 < 2
+    let a = 1 < 2
       //^ bool
-    b
-}
-
-//- gt_float_ok
-fn f() -> bool {
     let b = 2.5 > 1.5
       //^ bool
-    b
-}
-
-//- leq_int_ok
-fn f() -> bool {
-    let b = 1 <= 1
+    let c = 1 <= 1
       //^ bool
-    b
-}
-
-//- lt_int_float_ok
-fn f() -> bool {
-    let b = 1 < 2.5
+    let d = 1 < 2.5
       //^ bool
-    b
-}
-
-//- and_bool_ok
-fn f() -> bool {
-    let b = true && false
+    let e = true && false
       //^ bool
-    b
-}
-
-//- or_bool_ok
-fn f() -> bool {
-    let b = true || false
+    let g = true || false
       //^ bool
-    b
-}
-
-//- eq_int_ok
-fn f() -> bool {
-    let b = 1 == 2
+    let h = 1 == 2
       //^ bool
-    b
-}
-
-//- eq_int_float_ok
-fn f() -> bool {
-    let b = 1 == 2.5
+    let i = 1 == 2.5
       //^ bool
-    b
+    i
 }

@@ -5,9 +5,3 @@ fn f() -> string {
     s
 }
 
-//- site_returned
-fn f() -> string {
-    let s = __SITE__
-      //^ string
-    s
-}

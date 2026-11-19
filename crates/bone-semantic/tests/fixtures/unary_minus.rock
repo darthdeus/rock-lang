@@ -1,34 +1,14 @@
-//- neg_int_var
-fn f(n: int) -> int {
-    let x = -n
+//- unary_minus
+fn f(n: int, m: float) -> int {
+    let a = -n
       //^ int
-    x
-}
-
-//- neg_float_var
-fn f(n: float) -> float {
-    let x = -n
+    let b = -m
       //^ float
-    x
-}
-
-//- neg_double
-fn f(n: int) -> int {
-    let x = -(-n)
+    let c = -(-n)
       //^ int
-    x
-}
-
-//- neg_paren_expr
-fn f(a: int, b: int) -> int {
-    let x = -(a)
+    let d = -(n)
       //^ int
-    x
-}
-
-//- neg_literal
-fn f() -> int {
-    let x = -5
-    x
+    let e = -5
+    e
   //^ int
 }

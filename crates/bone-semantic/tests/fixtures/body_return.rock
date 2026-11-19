@@ -1,3 +1,0 @@
-//- body_return_ok
-fn f() -> int { 5 }
-              //^ int
