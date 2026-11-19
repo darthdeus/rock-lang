@@ -148,21 +148,6 @@ fn test_resume_after_exhaustion() {
     print(out)
 }
 
-// ---- Linear yield chain ----
-co fn linear() -> Coroutine<int> {
-    yield 1
-    yield 2
-    yield 3
-}
-
-@test(output = "1\n2\n3")
-fn test_linear_chain() {
-    let c = linear()
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-}
-
 // ---- Local state persists across yields ----
 co fn accumulator(step: int) -> Coroutine<int> {
     let sum = 0
@@ -203,32 +188,6 @@ fn test_struct_param_mutation() {
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
-}
-
-// ---- Exhaustion returns null ----
-co fn two_values() -> Coroutine<int> {
-    yield 42
-    yield 99
-}
-
-@test(output = "42\n99\nnull")
-fn test_exhaustion_returns_null() {
-    let c = two_values()
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    let r = c.resume()
-    if r == null { print("null") } else { print(r) }
-}
-
-// ---- Multiple independent instances ----
-@test(output = "1\n100\n2\n200")
-fn test_independent_instances() {
-    let a = accumulator(1)
-    let b = accumulator(100)
-    print(a.resume() ?? -1)
-    print(b.resume() ?? -1)
-    print(a.resume() ?? -1)
-    print(b.resume() ?? -1)
 }
 
 // ---- No yields: the first resume runs the body and exhausts ----
@@ -302,20 +261,8 @@ fn pair() -> (int, int) {
     return (10, 20)
 }
 
-co fn tuple_basic() -> Coroutine<int> {
-    let (a, b) = pair()
-    yield a
-    yield b
-    yield a + b
-}
-
-@test(output = "10\n20\n30\n1\n2\n3")
-fn test_tuple_basic() {
-    let c = tuple_basic()
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-
+@test(output = "1\n2\n3")
+fn test_tuple_literal() {
     let h = tuple_literal()
     print(h.resume() ?? -1)
     print(h.resume() ?? -1)

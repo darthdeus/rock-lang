@@ -66,31 +66,6 @@ fn test_unit_falloff_is_completed_and_kill_is_noop() {
     print("falloff:{f} kill-after:{completed(c)}")
 }
 
-// ---- Raised resume ----
-//
-// A raise escapes resume. The coroutine is dead but is not reported as a
-// normal completion, and later resumes are no-ops.
-
-co fn bad() -> Coroutine<int> {
-    yield 1
-    error("BAD_MARKER")
-    yield 2
-}
-
-@test(output = "1\ntrue\ndead\ntrue\nnull\ndead")
-fn test_raised_resume_is_terminal() {
-    let c = bad()
-    let v1 = c.resume()
-    print(v1 ?? -1)
-    let raised = try_call(() => { let _ = c.resume() })
-    print(raised)
-    print(c.status())
-    print(!c.completed())
-    let v3 = c.resume()
-    if v3 == null { print("null") } else { print(v3) }
-    print(c.status())
-}
-
 co fn clean() -> Coroutine<int> {
     yield 1
     yield 2

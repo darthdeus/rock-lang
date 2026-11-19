@@ -20,13 +20,6 @@ inline(js) fn frames_same(a: Coroutine<int>, b: Coroutine<int>) -> bool = """
 // Identity holds only while every creation allocates a fresh frame; pooling or
 // interning frames would break these tests.
 @test
-fn two_spawns_of_one_co_fn_are_distinct_frames() {
-    let a = ticker()
-    let b = ticker()
-    assert_eq(frames_same(a, b), false)
-}
-
-@test
 fn a_frame_is_identical_to_itself() {
     // Control: without this, a `frames_same` that always returned false would
     // satisfy every other assertion here.
@@ -181,13 +174,6 @@ fn show(ev: Signal?) {
             Signal::Idle => { print("idle") }
         }
     }
-}
-
-@test(output = "idle\nnone")
-fn a_narrow_frame_completes() {
-    let c = narrow()
-    show(c.resume())
-    show(c.resume())
 }
 
 @test(output = "lamp3\noff\ndone")

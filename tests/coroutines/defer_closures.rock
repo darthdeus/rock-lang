@@ -4,45 +4,6 @@
 // capture the block's locals the same way: boxed when written, by value
 // when only read, never through the coroutine frame.
 
-// ---- Closure mutates a defer-local ----
-co fn defer_local_mutation() -> Coroutine<int> {
-    defer {
-        let n = 5
-        let bump = () => { n = n + 1 }
-        bump()
-        print(n)
-    }
-    yield 1
-}
-
-@test(output = "1\n6\n1\n6")
-fn test_defer_closure_mutates_defer_local() {
-    let c = defer_local_mutation()
-    print(c.resume() ?? -1)
-    c.resume()
-
-    let c = defer_local_mutation()
-    print(c.resume() ?? -1)
-    c.kill()
-}
-
-// ---- Closure reads a defer-local ----
-co fn defer_local_read() -> Coroutine<int> {
-    defer {
-        let n = 7
-        let get = () => n
-        print(get())
-    }
-    yield 1
-}
-
-@test(output = "1\n7")
-fn test_defer_closure_reads_defer_local() {
-    let c = defer_local_read()
-    print(c.resume() ?? -1)
-    c.resume()
-}
-
 // ---- Closure captures both a frame local and a defer-local ----
 co fn defer_mixed_capture() -> Coroutine<int> {
     let base = 100

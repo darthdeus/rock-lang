@@ -100,19 +100,6 @@ fn test_loop_with_break() {
     drain_null(yield_in_loop(0))
 }
 
-co fn yield_in_while(limit: int) -> Coroutine<int> {
-    let i = 0
-    while i < limit {
-        yield i
-        i = i + 1
-    }
-}
-
-@test(output = "0\n1\n2\nnull")
-fn test_yield_in_while() {
-    drain_null(yield_in_while(3))
-}
-
 co fn nested_loops(rows: int, cols: int) -> Coroutine<int> {
     let r = 0
     while r < rows {

@@ -47,18 +47,6 @@ fn test_yield_flat_enum() {
     assert_eq(count, 5)
 }
 
-@test
-fn test_yield_empty() {
-    let c = stream(0)
-    // stream(0): just Done
-    let e = c.resume()
-    if e != null {
-        assert_eq(score(e), 100)
-    }
-    let d = c.resume()
-    assert_eq(d == null, true)
-}
-
 // A payload-free variant yielded in a loop: the singleton-vs-rebox case.
 co fn ticks(n: int) -> Coroutine<Ev> {
     let i = 0

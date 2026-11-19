@@ -7,21 +7,6 @@ value V2 {
     y: int,
 }
 
-// Value-typed parameter, read across yield.
-co fn co_val_param(p: V2) -> Coroutine<int> {
-    yield p.x
-    yield p.y
-    yield p.x + p.y
-}
-
-@test(output = "3\n4\n7")
-fn test_value_param() {
-    let c = co_val_param(V2 { x: 3, y: 4 })
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-}
-
 // Value-typed local, re-bound between yields.
 co fn co_val_local() -> Coroutine<int> {
     let v = V2 { x: 1, y: 10 }

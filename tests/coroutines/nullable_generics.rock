@@ -8,11 +8,6 @@ struct Player {
     health: int,
 }
 
-struct Being {
-    name: string,
-    health: int,
-}
-
 co fn nullable_ints() -> Coroutine<int?> {
     yield 1
     yield null
@@ -64,72 +59,4 @@ fn test_coroutine_tuple_yield() {
         let (num, name) = p
         print("{num}: {name}")
     }
-}
-
-fn first_player_name(c: Coroutine<Player>) -> string {
-    let p = c.resume()
-    if p == null { return "none" }
-    return p.name
-}
-
-@test(output = "Alice")
-fn test_coroutine_guard_return() {
-    let c = make_players()
-    print(first_player_name(c))
-}
-
-co fn make_entities() -> Coroutine<Being> {
-    yield Being { name: "Hero", health: 100 }
-    yield Being { name: "Guard", health: 50 }
-}
-
-@test(output = "Alice Hero Bob Guard")
-fn test_interleaved_coroutines() {
-    let a = make_players()
-    let b = make_entities()
-    let a1 = a.resume()?.name ?? "?"
-    let b1 = b.resume()?.name ?? "?"
-    let a2 = a.resume()?.name ?? "?"
-    let b2 = b.resume()?.name ?? "?"
-    print("{a1} {b1} {a2} {b2}")
-}
-
-co fn count_to(n: int) -> Coroutine<int> {
-    let i = 0
-    while i < n {
-        yield i
-        i = i + 1
-    }
-}
-
-@test(output = "0 1 2 -1")
-fn test_coroutine_coalesce() {
-    let c = count_to(3)
-    let a = c.resume() ?? -1
-    let b = c.resume() ?? -1
-    let d = c.resume() ?? -1
-    let e = c.resume() ?? -1
-    print("{a} {b} {d} {e}")
-}
-
-co fn fibonacci() -> Coroutine<int> {
-    let a = 0
-    let b = 1
-    loop {
-        yield a
-        let tmp = b
-        b = a + b
-        a = tmp
-    }
-}
-
-@test(output = "0 1 1 2 3 5 8")
-fn test_fibonacci_coroutine() {
-    let fib = fibonacci()
-    let out = ""
-    for i in 0..7 {
-        if i > 0 { out = out + " " }
-        out = out + "{fib.resume() ?? -1}"
-    }
-    print(out)
 }

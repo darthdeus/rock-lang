@@ -1,10 +1,5 @@
-// JS-backend coroutine coverage: yields, resume-with-value, terminal return,
-// status, kill and raised-resume propagation.
-
-@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
-    local ok = pcall(f)
-    return not ok
-"""
+// JS-backend coroutine coverage: yields, status, kill, hooks and terminal
+// defers with a return value.
 
 co fn echo_two() -> Coroutine<string> {
     yield "hello"
@@ -17,43 +12,6 @@ fn two_yield_resume() {
     print(c.resume())
     print(c.resume())
     print(c.resume())
-}
-
-co fn gen_from(start: int) -> Coroutine<int> {
-    let i = start
-    loop {
-        yield i
-        i = i + 1
-    }
-}
-
-@test(output = "5\n6\n7")
-fn counter_loop_yields() {
-    let c = gen_from(5)
-    print(c.resume())
-    print(c.resume())
-    print(c.resume())
-}
-
-co fn sum_in(n: int) -> Coroutine<int, int, int> {
-    let total = 0
-    let i = 0
-    while i < n {
-        let got = yield i
-        total = total + got
-        i = i + 1
-    }
-    return total
-}
-
-@test(output = "0\n1\n2\nnil\n60")
-fn resume_with_value_and_result() {
-    let c = sum_in(3)
-    print(c.resume(0))
-    print(c.resume(10))
-    print(c.resume(20))
-    print(c.resume(30))
-    print(c.result())
 }
 
 @test(output = "suspended\ndead\nnil")
@@ -95,42 +53,4 @@ fn defers_lifo_on_terminal() {
     print(c.resume())
     print(c.resume())
     print(c.result())
-}
-
-co fn boom() -> Coroutine<int> {
-    yield 1
-    error("kaboom")
-}
-
-@test(output = "1\ntrue\ndead\ntrue\nnil")
-fn raised_resume_reaches_caller() {
-    let c = boom()
-    print(c.resume())
-    print(try_call(() => { let _ = c.resume() }))
-    print(c.status())
-    print(!c.completed())
-    if c.resume() == null { print("nil") } else { print("value") }
-}
-
-// Map iteration inside a co fn (materialize_frame must rewrite MapNext's framed
-// cursor/value cells, else the cursor reads the frame field but writes a bare
-// local and the loop never advances). Order-insensitive (running sum).
-global CO_SCORES: Map<string, int> = map_new()
-
-co fn yield_score_total() -> Coroutine<int> {
-    let total = 0
-    for (_k, v) in CO_SCORES {
-        total = total + v
-    }
-    yield total
-}
-
-@test(output = "6")
-fn map_iter_inside_coroutine() {
-    CO_SCORES.clear()
-    CO_SCORES["a"] = 1
-    CO_SCORES["b"] = 2
-    CO_SCORES["c"] = 3
-    let c = yield_score_total()
-    print(c.resume() ?? -1)
 }

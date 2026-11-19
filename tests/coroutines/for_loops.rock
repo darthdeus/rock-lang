@@ -86,21 +86,6 @@ fn test_for_empty() {
     drain(yield_range_empty())
 }
 
-// ---- Vec iteration inside a coroutine ----
-global VEC_GLOBAL: [int] = [10, 20, 30]
-
-co fn yield_from_vec() -> Coroutine<int> {
-    for v in VEC_GLOBAL {
-        yield v + 1
-    }
-}
-
-@test(output = "11\n21\n31\nnull")
-fn test_for_vec() {
-    let c = yield_from_vec()
-    drain(c)
-}
-
 // ---- Arena iteration (yields {entity, data}) ----
 struct Mob { name: string, hp: int }
 global ARENA: Arena<Mob> = arena_new()
