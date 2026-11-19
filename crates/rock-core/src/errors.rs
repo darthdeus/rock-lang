@@ -1,6 +1,6 @@
 use crate::prelude::*;
 use crate::source_files::SourceFiles;
-use crate::utils::{ReportBuilderExt, make_report_builder};
+use crate::utils::{ReportBuilder, ReportBuilderExt, make_report_builder};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CompilerErrorLevel {
@@ -77,16 +77,13 @@ pub struct CompilerError {
 
 impl CompilerError {
     fn at(location: LineCol, message: String) -> Self {
-        let message = crate::source_code::display_diagnostic_names(message);
-        let code = CompilerErrorCode::Unknown;
-        let level = CompilerErrorLevel::Error;
         CompilerError {
             location,
             kind: CompilerErrorKind::Generic,
-            code,
+            code: CompilerErrorCode::Unknown,
             labels: Vec::new(),
-            level,
-            message,
+            level: CompilerErrorLevel::Error,
+            message: display_diagnostic_names(message),
             siblings: Vec::new(),
         }
     }
@@ -111,10 +108,15 @@ impl CompilerError {
     }
 
     pub fn new_with_label(span: Span, message: String) -> Self {
-        Self::at(span.start(), message.clone()).with_label(span, message)
+        let mut error = Self::at(span.start(), message);
+        error.labels.push(CompilerLabel {
+            span,
+            message: error.message.clone(),
+        });
+        error
     }
 
-    pub(crate) fn has_no_location(&self) -> bool {
+    fn has_no_location(&self) -> bool {
         self.location.file == UNKNOWN_FILE_NAME
     }
 
@@ -139,7 +141,7 @@ impl CompilerError {
     }
 
     pub fn with_label(mut self, span: Span, message: String) -> Self {
-        let message = crate::source_code::display_diagnostic_names(message);
+        let message = display_diagnostic_names(message);
         self.labels.push(CompilerLabel { span, message });
         self
     }
@@ -166,15 +168,15 @@ impl CompilerError {
         render_all(std::slice::from_ref(self), sources)
     }
 
-    fn report(&self) -> ariadne::ReportBuilder<'static, (String, std::ops::Range<usize>)> {
+    fn report(&self) -> ReportBuilder<'static> {
         let file = self.location.file;
         let offset = self.location.offset;
         let mut builder = make_report_builder(
             self.level.report_kind(),
             file.to_string(),
             offset,
-            format!("{}{:02}", self.level.initial(), self.code as u8),
-            self.message.clone(),
+            format_args!("{}{:02}", self.level.initial(), self.code as u8),
+            &self.message,
         );
 
         match self.labels.as_slice() {
@@ -193,46 +195,38 @@ impl CompilerError {
 // render all diagnostics of a batch against one cache.
 #[must_use]
 pub fn render_all(errs: &[CompilerError], sources: &SourceFiles) -> String {
-    if errs.is_empty() {
-        return String::new();
-    }
-
-    let has_source = |error: &CompilerError| {
-        sources
-            .files
-            .iter()
-            .any(|source| source.borrow().file.to_id_path() == error.location.file.as_str())
-    };
-    let frameless = |error: &CompilerError| {
+    let (unframed, framed): (Vec<_>, Vec<_>) = errs.iter().partition(|error| {
         let file = error.location.file.as_str();
-        file == UNKNOWN_FILE_NAME || (crate::is_stdlib_module_file(file) && !has_source(error))
-    };
+        error.has_no_location()
+            || (crate::is_stdlib_module_file(file)
+                && !sources
+                    .files
+                    .iter()
+                    .any(|source| source.borrow().file.id_path() == file))
+    });
 
-    let (unframed, framed): (Vec<&CompilerError>, Vec<&CompilerError>) =
-        errs.iter().partition(|error| frameless(error));
-
-    let mut rendered: Vec<String> = unframed.iter().map(|error| error.one_line()).collect();
+    let mut rendered = unframed
+        .into_iter()
+        .map(CompilerError::one_line)
+        .join("\n")
+        .into_bytes();
     if !framed.is_empty() {
-        let contents = sources
-            .files
-            .iter()
-            .map(|source| {
-                let source = source.borrow();
-                (source.file.to_id_path(), source.contents.clone())
-            })
-            .collect::<Vec<_>>();
-        let mut cache = ariadne::sources(contents);
+        let mut cache = ariadne::sources(sources.files.iter().map(|source| {
+            let source = source.borrow();
+            (source.file.to_id_path(), source.contents.clone())
+        }));
         for error in framed {
-            let mut written = Vec::new();
+            if !rendered.is_empty() {
+                rendered.push(b'\n');
+            }
             error
                 .report()
                 .finish()
-                .write(&mut cache, &mut written)
+                .write(&mut cache, &mut rendered)
                 .unwrap();
-            rendered.push(String::from_utf8(written).unwrap());
         }
     }
-    rendered.join("\n")
+    String::from_utf8(rendered).unwrap()
 }
 
 impl From<CompilerError> for Vec<CompilerError> {
@@ -290,12 +284,7 @@ mod tests {
     }
 
     fn body(rendered: &str) -> &str {
-        let start = rendered.find('\n').expect("header line") + 1;
-        &rendered[start..]
-    }
-
-    fn joined(lines: &[String]) -> String {
-        lines.join("\n")
+        rendered.split_once('\n').expect("header line").1
     }
 
     #[test]
@@ -312,7 +301,7 @@ mod tests {
         let rendered = strip_ansi_sgr(&labelled().render(&files()));
         assert_eq!(
             rendered,
-            joined(&[
+            [
                 "[E00] Error: bad thing".to_string(),
                 format!("   {OPEN}[main.rock:2:6]"),
                 format!("   {BAR}"),
@@ -321,7 +310,8 @@ mod tests {
                 format!("   {BAR}      {TICK} bad thing"),
                 CLOSE.to_string(),
                 String::new(),
-            ])
+            ]
+            .join("\n")
         );
     }
 
@@ -331,14 +321,15 @@ mod tests {
         let rendered = strip_ansi_sgr(&error.render(&files()));
         assert_eq!(
             rendered,
-            joined(&[
+            [
                 "[E00] Error: no label".to_string(),
                 format!("   {OPEN}[main.rock:2:6]"),
                 format!("   {BAR}"),
                 format!(" 2 {BAR}     let x = 1;"),
                 CLOSE.to_string(),
                 String::new(),
-            ])
+            ]
+            .join("\n")
         );
     }
 
@@ -346,12 +337,9 @@ mod tests {
     fn render_keeps_every_label_in_the_order_it_was_added() {
         let error = labelled().with_label(at("main.rock", 1, 8, 17), "second".to_string());
         let rendered = strip_ansi_sgr(&error.render(&files()));
-        let second = rendered.find("second").expect("second label");
-        let first = rendered.find("bad thing").expect("first label");
-        assert!(first < second, "{rendered}");
         assert_eq!(
             rendered,
-            joined(&[
+            [
                 "[E00] Error: bad thing".to_string(),
                 format!("   {OPEN}[main.rock:2:6]"),
                 format!("   {BAR}"),
@@ -362,91 +350,38 @@ mod tests {
                 format!("   {BAR}      {TICK} second"),
                 CLOSE.to_string(),
                 String::new(),
-            ])
+            ]
+            .join("\n")
         );
     }
 
     #[test]
-    fn render_prefixes_the_level_and_a_two_digit_code() {
-        let error = labelled();
-        let rendered = strip_ansi_sgr(&error.render(&files()));
-        assert_eq!(rendered.lines().next(), Some("[E00] Error: bad thing"));
-        let rendered = strip_ansi_sgr(
-            &error
-                .clone()
-                .with_code(CompilerErrorCode::SyntaxError)
-                .render(&files()),
-        );
-        assert_eq!(rendered.lines().next(), Some("[E02] Error: bad thing"));
-        let rendered = strip_ansi_sgr(
-            &error
-                .clone()
-                .with_level(CompilerErrorLevel::Warning)
-                .render(&files()),
-        );
-        assert_eq!(rendered.lines().next(), Some("[W00] Warning: bad thing"));
-        let rendered = strip_ansi_sgr(
-            &error
-                .with_level(CompilerErrorLevel::Advice)
-                .render(&files()),
-        );
-        assert_eq!(rendered.lines().next(), Some("[A00] Advice: bad thing"));
-    }
+    fn level_and_code_change_the_header_but_leave_the_frame_body() {
+        use CompilerErrorCode::*;
+        use CompilerErrorLevel::*;
 
-    #[test]
-    fn render_compact_uses_the_level_only_and_always_the_00_code() {
         let error = labelled();
-        assert_eq!(
-            strip_ansi_sgr(&error.one_line()),
-            "[E00] Error: bad thing at main.rock:1:8"
-        );
-        assert_eq!(
-            strip_ansi_sgr(
-                &error
-                    .clone()
-                    .with_level(CompilerErrorLevel::Warning)
-                    .one_line()
-            ),
-            "[W00] Warning: bad thing at main.rock:1:8"
-        );
-        assert_eq!(
-            strip_ansi_sgr(
-                &error
-                    .clone()
-                    .with_level(CompilerErrorLevel::Advice)
-                    .one_line()
-            ),
-            "[A00] Advice: bad thing at main.rock:1:8"
-        );
-        assert_eq!(
-            strip_ansi_sgr(
-                &error
-                    .clone()
-                    .with_code(CompilerErrorCode::TokenizerError)
-                    .one_line()
-            ),
-            "[E00] Error: bad thing at main.rock:1:8"
-        );
-        assert_eq!(
-            strip_ansi_sgr(&CompilerError::new_no_location("nowhere".to_string()).one_line()),
-            "[E00] Error: nowhere"
-        );
-    }
-
-    #[test]
-    fn render_changes_only_the_header_with_the_level() {
-        let error = labelled();
-        let base = strip_ansi_sgr(&error.render(&files()));
-        for level in [CompilerErrorLevel::Warning, CompilerErrorLevel::Advice] {
-            let rendered = strip_ansi_sgr(&error.clone().with_level(level).render(&files()));
+        let files = files();
+        let base = strip_ansi_sgr(&error.render(&files));
+        for (level, code, header, compact) in [
+            (Error, Unknown, "[E00] Error:", "[E00] Error:"),
+            (Error, TokenizerError, "[E01] Error:", "[E00] Error:"),
+            (Error, SyntaxError, "[E02] Error:", "[E00] Error:"),
+            (Warning, Unknown, "[W00] Warning:", "[W00] Warning:"),
+            (Advice, Unknown, "[A00] Advice:", "[A00] Advice:"),
+        ] {
+            let error = error.clone().with_level(level).with_code(code);
+            let rendered = strip_ansi_sgr(&error.render(&files));
+            assert_eq!(
+                rendered.lines().next().unwrap(),
+                format!("{header} bad thing")
+            );
             assert_eq!(body(&rendered), body(&base));
+            assert_eq!(
+                strip_ansi_sgr(&error.one_line()),
+                format!("{compact} bad thing at main.rock:1:8")
+            );
         }
-        let rendered = strip_ansi_sgr(
-            &error
-                .with_level(CompilerErrorLevel::Warning)
-                .render(&files()),
-        );
-        assert_eq!(rendered.lines().next(), Some("[W00] Warning: bad thing"));
     }
 
     #[test]
@@ -494,8 +429,8 @@ mod tests {
     // to frame; ariadne would print "Unable to fetch source" and an empty box.
     #[test]
     fn render_all_reports_a_location_less_error_on_one_line() {
-        let nowhere = CompilerError::new_no_location("shader root `nope` not found".to_string());
-        let rendered = strip_ansi_sgr(&render_all(&[labelled(), nowhere.clone()], &files()));
+        let nowhere = CompilerError::new_no_location("shader root `nope` not found");
+        let rendered = strip_ansi_sgr(&render_all(&[labelled(), nowhere], &files()));
         assert_eq!(
             rendered,
             format!(
@@ -513,7 +448,7 @@ mod tests {
         let rendered = strip_ansi_sgr(&render_all(&[stdlib], &files()));
         assert_eq!(
             rendered,
-            joined(&[
+            [
                 "[E00] Error: stdlib".to_string(),
                 format!("   {OPEN}[<stdlib>/core.rock:1:4]"),
                 format!("   {BAR}"),
@@ -522,7 +457,8 @@ mod tests {
                 format!("   {BAR}    {TICK} stdlib"),
                 CLOSE.to_string(),
                 String::new(),
-            ])
+            ]
+            .join("\n")
         );
     }
 
@@ -540,7 +476,7 @@ mod tests {
         let error = CompilerError::new_with_label(span, "accented".to_string());
         assert_eq!(
             strip_ansi_sgr(&error.render(&files)),
-            joined(&[
+            [
                 "[E00] Error: accented".to_string(),
                 format!("   {OPEN}[mb.rock:2:14]"),
                 format!("   {BAR}"),
@@ -549,7 +485,8 @@ mod tests {
                 format!("   {BAR}               \u{2570}\u{2500}\u{2500} accented"),
                 CLOSE.to_string(),
                 String::new(),
-            ])
+            ]
+            .join("\n")
         );
     }
 

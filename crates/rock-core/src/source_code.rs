@@ -270,16 +270,11 @@ impl Span {
     }
 
     pub fn start(&self) -> LineCol {
-        let (line, col, offset) = (
-            self.line_range().0,
-            self.col_range().0,
-            self.offset_range().0,
-        );
         LineCol {
             file: self.file,
-            line,
-            col,
-            offset,
+            line: self.line_range().0,
+            col: self.col_range().0,
+            offset: self.offset_range().0,
         }
     }
 }
@@ -292,9 +287,12 @@ pub enum FileContents {
 
 impl FileContents {
     pub fn to_id_path(&self) -> String {
+        self.id_path().to_owned()
+    }
+
+    pub(crate) fn id_path(&self) -> &str {
         match self {
-            FileContents::Filesystem { path, .. } => path.clone(),
-            FileContents::Code { id_path, .. } => id_path.clone(),
+            Self::Filesystem { path, .. } | Self::Code { id_path: path, .. } => path,
         }
     }
 }
@@ -342,6 +340,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
     #[should_panic(expected = "does not fit a span")]
     fn a_span_past_u32_positions_is_refused_at_construction() {
         let past = u32::MAX as usize + 1;

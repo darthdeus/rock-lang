@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-type ReportBuilder<'a> = ariadne::ReportBuilder<'a, (String, std::ops::Range<usize>)>;
+pub(crate) type ReportBuilder<'a> = ariadne::ReportBuilder<'a, (String, std::ops::Range<usize>)>;
 
 /// Build a report whose labels address the source by byte offset.
 ///
@@ -11,13 +11,13 @@ type ReportBuilder<'a> = ariadne::ReportBuilder<'a, (String, std::ops::Range<usi
 /// as well, because styling the source frame is a large share of ariadne's
 /// per-diagnostic cost and a piped stderr renders none of it. `ROCK_FORCE_COLOR`
 /// and `ROCK_NO_COLOR` / `NO_COLOR` override the terminal probe.
-pub(crate) fn make_report_builder(
-    kind: ariadne::ReportKind<'_>,
+pub(crate) fn make_report_builder<'a>(
+    kind: ariadne::ReportKind<'a>,
     file: String,
     offset: usize,
-    code: String,
-    text: String,
-) -> ReportBuilder<'_> {
+    code: impl std::fmt::Display,
+    text: &str,
+) -> ReportBuilder<'a> {
     let config = ariadne::Config::default()
         .with_index_type(ariadne::IndexType::Byte)
         .with_color(stderr_is_tty());
@@ -27,7 +27,7 @@ pub(crate) fn make_report_builder(
         .with_message(text)
 }
 
-pub(crate) fn stderr_is_tty() -> bool {
+fn stderr_is_tty() -> bool {
     use std::io::IsTerminal;
     use std::sync::OnceLock;
     static PROBED: OnceLock<bool> = OnceLock::new();
@@ -48,8 +48,10 @@ pub trait ReportBuilderExt {
 
 impl ReportBuilderExt for ReportBuilder<'_> {
     fn add_span_label(&mut self, span: &Span, label: String) {
-        let range = span.offset_range().0..span.offset_range().1;
-        self.add_label(ariadne::Label::new((span.file.to_string(), range)).with_message(label));
+        let (start, end) = span.offset_range();
+        self.add_label(
+            ariadne::Label::new((span.file.to_string(), start..end)).with_message(label),
+        );
     }
 }
 
@@ -64,8 +66,8 @@ mod tests {
             ariadne::ReportKind::Error,
             "u.rock".to_string(),
             1,
-            "E03".to_string(),
-            "no labels".to_string(),
+            "E03",
+            "no labels",
         );
 
         let mut written = Vec::new();
