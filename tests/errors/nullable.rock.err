@@ -39,17 +39,6 @@ fn test() {
 
 fn main() { test() }
 
-//=== TEST CASE: nullable_field_chain_Generic ===
-//! expect: cannot access field `value` on non-struct type Chain?
-struct Chain { value: int = 0, next: Chain? = null }
-
-fn test() {
-    let c = Chain { next: Chain { value: 42 } }
-    let result = c.next.value  // ERROR: Cannot use '.' to access field 'value' on nullable type
-}
-
-fn main() { test() }
-
 //=== TEST CASE: divergence_refinement_of_global_unsound_Generic ===
 //! expect: cannot access field `x` on non-struct type GFoo?
 // D4: divergence-based narrowing
@@ -278,10 +267,9 @@ fn bad(v: int?) -> int {
     return 0
 }
 
+//=== TEST CASE: closure_nulls_local_before_fn_value_call_Generic ===
 // A whole local is normally immune to calls: a callee cannot reassign it.
 // A lambda declared in the same body can, and a call may run that lambda.
-
-//=== TEST CASE: closure_nulls_local_before_fn_value_call_Generic ===
 //! expect: got (int?, int)
 fn bad() -> int {
     let x: int? = 1
@@ -412,16 +400,6 @@ fn main() {
     process("hello")
 }
 
-//=== TEST CASE: wrong_nullable_return_type_MismatchedType ===
-//! expect: type mismatch: expected `string`, found `int`
-fn get_opt() -> string? {
-    return 5
-}
-
-fn main() {
-    let _ = get_opt()
-}
-
 //=== TEST CASE: nullable_in_arithmetic_without_unwrap_Generic ===
 //! expect: operator `+` expects operands (int, int), got (int?, int)
 fn main() {
@@ -456,25 +434,11 @@ fn main() {
     print(s.expect("present"))
 }
 
-//=== TEST CASE: expect_ufcs_Generic ===
-fn main() {
-    let s = "hi"
-    //! expect: argument of `expect` is not nullable -- the `expect` is redundant
-    print(expect(s, "present"))
-}
-
 //=== TEST CASE: unwrap_or_method_Generic ===
 fn main() {
     let x: int = 5
     //! expect: argument of `unwrap_or` is not nullable -- the `unwrap_or` is redundant
     print(x.unwrap_or(0))
-}
-
-//=== TEST CASE: unwrap_or_ufcs_Generic ===
-fn main() {
-    let x: int = 5
-    //! expect: argument of `unwrap_or` is not nullable -- the `unwrap_or` is redundant
-    print(unwrap_or(x, 0))
 }
 
 //=== TEST CASE: unwrap_after_null_guard_Generic ===

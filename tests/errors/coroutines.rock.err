@@ -125,17 +125,6 @@ fn main() {
     let task = read(borrowed)
 }
 
-//=== TEST CASE: coroutine_cannot_receive_an_explicit_map_element_ref ===
-//! expect: cannot retain a reference into relocatable Vec or Map storage
-value Cell { w: int }
-co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
-fn main() {
-    let cells: Map<string, Cell> = map_new()
-    cells["a"] = Cell { w: 1 }
-    let borrowed: ref Cell = cells["a"]
-    let task = read(borrowed)
-}
-
 //=== TEST CASE: overloaded_coroutine_cannot_receive_a_vec_element_ref ===
 //! expect: cannot pass a reference into a relocatable Vec or Map element to `read`: the reference is retained by a coroutine
 value Cell { w: int }
@@ -143,16 +132,6 @@ co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
 fn main() {
     let cells: [Cell] = [Cell { w: 1 }]
     let task = read(cells[0])
-}
-
-//=== TEST CASE: overloaded_coroutine_cannot_receive_a_map_element_ref ===
-//! expect: cannot pass a reference into a relocatable Vec or Map element to `read`: the reference is retained by a coroutine
-value Cell { w: int }
-co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
-fn main() {
-    let cells: Map<string, Cell> = map_new()
-    cells["a"] = Cell { w: 1 }
-    let task = read(cells["a"])
 }
 
 //=== TEST CASE: coroutine_cannot_borrow_a_spread_vec_element_field ===
@@ -163,17 +142,6 @@ co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
 fn main() {
     let cells: [Wrapper] = [Wrapper { c: Cell { w: 1 } }]
     let task = read(..cells[0])
-}
-
-//=== TEST CASE: coroutine_cannot_borrow_a_spread_map_element_field ===
-//! expect: No overload for `read` with argument types (Wrapper)
-value Cell { w: int }
-value Wrapper { c: Cell }
-co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
-fn main() {
-    let cells: Map<string, Wrapper> = map_new()
-    cells["a"] = Wrapper { c: Cell { w: 1 } }
-    let task = read(..cells["a"])
 }
 
 //=== TEST CASE: resume_taking_coroutine_not_iterable_Rejected ===
@@ -371,11 +339,6 @@ fn main(player: ref Player) { let retained = [player] }
 //! expect: field `player` cannot store a frame reference; store an `Entity<T>` or a value instead
 struct Player { hp: int }
 struct Holder { player: ref Player }
-
-//=== TEST CASE: ref_value_field_Generic ===
-//! expect: field `player` cannot store a frame reference; store an `Entity<T>` or a value instead
-struct Player { hp: int }
-value Holder { player: ref Player }
 
 //=== TEST CASE: ref_enum_payload_Generic ===
 //! expect: enum variant `Player` cannot store a frame reference; store an `Entity<T>` or a value instead

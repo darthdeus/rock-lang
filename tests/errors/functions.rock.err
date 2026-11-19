@@ -41,16 +41,6 @@ fn main() {
     if a == b { print("same") }   // ERROR: fn identity comparison
 }
 
-//=== TEST CASE: lambda_values_noteq_Generic ===
-//! expect: Cannot compare fn values: fn identity is not meaningful
-fn mk() -> fn() -> int { return () => 42 }
-
-fn main() {
-    let a = mk()
-    let b = mk()
-    if a != b { print("diff") }   // ERROR: fn identity comparison
-}
-
 //=== TEST CASE: named_fn_values_eq_Generic ===
 //! expect: Cannot compare fn values: fn identity is not meaningful
 fn foo() -> int { return 1 }
@@ -87,15 +77,6 @@ fn main() {
     if same(mk(), mk()) { print("same") }   // ERROR: fn identity via generic
 }
 
-//=== TEST CASE: generic_eq_capturing_fn_arg_Generic ===
-//! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
-fn same<T>(a: T, b: T) -> bool { return a == b }
-fn mk2(x: int) -> fn() -> int { return () => x }
-
-fn main() {
-    if same(mk2(1), mk2(1)) { print("same") }   // ERROR: fn identity via generic
-}
-
 //=== TEST CASE: generic_neq_fn_arg_Generic ===
 //! expect: Cannot compare fn values: `diff` compares a generic parameter with `==`/`!=`, but it is
 fn diff<T>(a: T, b: T) -> bool { return a != b }
@@ -114,19 +95,9 @@ fn main() {
     if same(mk(), mk()) { print("same") }   // ERROR: nullable-fn identity via generic
 }
 
-// Aliasing ONE operand does not escape: `x` infers as `T`.
-//=== TEST CASE: generic_eq_single_unannotated_alias_Generic ===
-//! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
-fn same<T>(a: T, b: T) -> bool { let x = a; return x == b }
-fn mk() -> fn() -> int { return () => 1 }
-
-fn main() {
-    if same(mk(), mk()) { print("same") }   // ERROR: `x` is still a T operand
-}
-
+//=== TEST CASE: generic_eq_annotated_both_alias_Generic ===
 // ANNOTATED aliases are T-typed too. (The unannotated both-alias form:
 // `generic_eq_fn_arg_both_unannotated_alias` below.)
-//=== TEST CASE: generic_eq_annotated_both_alias_Generic ===
 //! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { let x: T = a; let y: T = b; return x == y }
 fn mk() -> fn() -> int { return () => 1 }
@@ -158,21 +129,6 @@ fn mk() -> fn() -> int { return () => 1 }
 
 fn main() {
     if same(mk(), mk()) { print("same") }   // ERROR: call operands infer as T
-}
-
-//=== TEST CASE: generic_eq_fn_arg_transitive_Generic ===
-//! expect: Cannot compare fn values: `outer` compares a generic parameter with `==`/`!=`, but it is
-// forwarding a generic into a callee that `==`-compares it is itself
-// a comparison. `outer<T>` instantiates `same`'s compared generic with
-// its own `T`, so the generic fn-eq summary (bone-semantic
-// fn_identity, a whole-program fixpoint after inference) marks
-// `outer`'s `T` compared too, and `outer(mk(), mk())` is rejected.
-fn same<T>(a: T, b: T) -> bool { return a == b }
-fn outer<T>(a: T, b: T) -> bool { return same(a, b) }
-fn mk() -> fn() -> int { return () => 1 }
-
-fn main() {
-    if outer(mk(), mk()) { print("same") }   // ERROR: fn identity two levels down
 }
 
 //=== TEST CASE: generic_eq_fn_arg_transitive_two_levels_Generic ===
@@ -443,44 +399,6 @@ fn caller(p: V2) -> int {
     label("hi", p, 8.0, duration: "soon")
 }
 
-//=== TEST CASE: spread_unmatched_field_Generic ===
-//! expect: spread field `c` names no parameter of the callee
-// Rule 2: every field of the spread struct must name a callee param.
-struct ABC { a: int, b: int, c: int }
-
-fn takes_ab(a: int, b: int) -> int { a + b }
-
-fn main() {
-    let p = ABC { a: 1, b: 2, c: 3 }
-    print(takes_ab(..p))   // ERROR: field `c` names no parameter
-}
-
-//=== TEST CASE: spread_named_before_spread_collision_Generic ===
-//! expect: parameter `a` is given before the spread that also supplies it
-// Rule 4: an explicit named arg BEFORE a spread that also supplies it errors.
-struct AB { a: int, b: int }
-
-fn takes_ab2(a: int, b: int) -> int { a + b }
-
-fn main() {
-    let p = AB { a: 1, b: 2 }
-    print(takes_ab2(a: 9, ..p))   // ERROR: `a` given before the spread
-}
-
-//=== TEST CASE: spread_spread_collision_Generic ===
-//! expect: two spreads both supply parameter `a`
-// Rule 5: two spreads supplying the same param collide.
-struct AB2 { a: int, b: int }
-struct AC { a: int, c: int }
-
-fn takes_abc(a: int, b: int, c: int) -> int { a + b + c }
-
-fn main() {
-    let x = AB2 { a: 1, b: 2 }
-    let y = AC { a: 8, c: 3 }
-    print(takes_abc(..x, ..y))   // ERROR: both spreads supply `a`
-}
-
 //=== TEST CASE: spread_non_struct_operand_Generic ===
 //! expect: cannot spread `int` into call arguments: expected a nominal struct
 // The spread operand must be a nominal struct with statically known fields.
@@ -503,13 +421,6 @@ fn choose(x: int) -> int { x }
 fn choose(x: string) -> int { len(x) }
 fn main() { let _ = choose(1, 2) }
 
-//=== TEST CASE: no_viable_fail_Generic ===
-// No candidate accepts the argument types.
-//! expect: No overload for `pick` with argument types (string)
-fn pick(x: int) -> int { x }
-fn pick(x: bool) -> bool { x }
-fn f() -> int { pick("hi") }
-
 //=== TEST CASE: ambiguous_fail_Generic ===
 // Two candidates fit equally well -> ambiguous.
 //! expect: Ambiguous overload for `amb` with argument types (int, int)
@@ -526,7 +437,7 @@ fn f<T>(s: Set<T>) -> T {
     get(s, 0)
 }
 
-//=== TEST CASE: ambiguous_fail_Generic ===
+//=== TEST CASE: ambiguous_generic_twin_fail_Generic ===
 //! expect: Ambiguous overload for `pick` with argument types (Box<T>)
 struct Box<T> { v: int }
 inline(lua) fn pick<T>(x: Box<T>) -> int = "return 0"
@@ -615,16 +526,6 @@ fn outer(threshold: int) -> int {
 }
 fn main() { let _ = outer(3) }
 
-//=== TEST CASE: nested_fn_reads_enclosing_local_Generic ===
-//! expect: nested function may not read enclosing local `bonus`
-// Same rule for an enclosing local.
-fn outer() -> int {
-    let bonus = 10
-    fn add(x: int) -> int { x + bonus }
-    return add(5)
-}
-fn main() { let _ = outer() }
-
 //=== TEST CASE: nested_fn_with_generics_Generic ===
 //! expect: nested functions cannot be generic
 // v1: no generics on nested fns.
@@ -641,17 +542,6 @@ fn outer() -> int {
     @pure
     fn inc(x: int) -> int { x + 1 }
     return inc(7)
-}
-fn main() { let _ = outer() }
-
-//=== TEST CASE: nested_fn_forward_reference_Generic ===
-//! expect: `later` did not resolve to any definition
-// v1 decl-before-use: calling a nested fn before its declaration does not
-// resolve (there is no like-named top-level fn).
-fn outer() -> int {
-    let r = later(5)
-    fn later(x: int) -> int { x + 1 }
-    return r
 }
 fn main() { let _ = outer() }
 

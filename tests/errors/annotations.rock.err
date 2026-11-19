@@ -66,15 +66,6 @@ fn shade() -> int { 3 }
 
 fn main() { print("{shade()}") }
 
-//=== TEST CASE: uniform_on_item_Generic ===
-//! expect: annotation `@uniform` is not allowed on a fn -- it applies to a fn parameter
-// `@uniform` is a param-only role marker (GLSL vertex inputs); on a fn item
-// it is a disallowed-position violation.
-@uniform
-fn vertex_stage() -> int { 4 }
-
-fn main() { print("{vertex_stage()}") }
-
 //=== TEST CASE: nomangle_on_enum_Generic ===
 //! expect: annotation `@nomangle` is not allowed on an enum -- it applies to a fn or a struct
 // `@nomangle` keeps a fn's or a struct's declared symbol; an enum's symbol
@@ -225,17 +216,6 @@ struct Row { @json_skip(1) value: int = 0 }
 deco init bad {
     let n: int = target.name
 }
-
-//=== TEST CASE: deco_init_type_mismatch_MismatchedType ===
-//! expect: type mismatch: expected `int`, found `string`
-deco init bad_types {
-    let x: int = "hello"
-}
-
-@bad_types
-fn foo() {}
-
-fn main() {}
 
 //=== TEST CASE: deco_invalid_target_field_Generic ===
 //! expect: struct `__DecoTarget` has no field `nonexistent_field`

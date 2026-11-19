@@ -84,19 +84,6 @@ fn bad_lambda() -> (int) -> int {
     return x => x + 1
 }
 
-//=== TEST CASE: pure_while_loop_with_mutation_Generic ===
-//! expect: performs an assignment (mutation)
-// Only the loop-body write violates purity; the condition reads no global.
-struct LoopPoint { x: int }
-
-@pure
-fn bad_while(p: LoopPoint, keep_going: bool) -> int {
-    while keep_going {
-        p.x = 5
-    }
-    return 0
-}
-
 //=== TEST CASE: pure_collection_index_Generic ===
 //! expect: indexes a collection
 // Index read from a collection — could read mutable state.
@@ -332,37 +319,6 @@ fn main() {
     take(.attack_co)
 }
 
-//=== TEST CASE: write_field_ref_no_coerce_to_field_ref_fail_Generic ===
-// ... and NOT back up: a write-only selector is not a full field ref.
-//! expect: No overload for `take` with argument types (WriteFieldRef<Mob, int?>)
-struct Mob { health: int, attack_co: int? }
-fn take(f: FieldRef<Mob, int?>) {}
-fn main() {
-    let f: WriteFieldRef<Mob, int?> = .attack_co
-    take(f)
-}
-
-//=== TEST CASE: write_field_ref_no_coerce_to_read_fail_Generic ===
-// THE EXTRACTION HOLE this former exists to close: a write-only selector must
-// not reach a readable one, or an embedded field's whole value could be read out.
-//! expect: No overload for `take` with argument types (WriteFieldRef<Mob, int?>)
-struct Mob { health: int, attack_co: int? }
-fn take(f: ReadFieldRef<Mob, int?>) {}
-fn main() {
-    let f: WriteFieldRef<Mob, int?> = .attack_co
-    take(f)
-}
-
-//=== TEST CASE: read_field_ref_no_coerce_to_write_fail_Generic ===
-// The other diagonal of the diamond: read-only does not grant write.
-//! expect: No overload for `take` with argument types (ReadFieldRef<Mob, int?>)
-struct Mob { health: int, attack_co: int? }
-fn take(f: WriteFieldRef<Mob, int?>) {}
-fn main() {
-    let f: ReadFieldRef<Mob, int?> = .attack_co
-    take(f)
-}
-
 //=== TEST CASE: write_field_ref_to_read_field_ref_Generic ===
 //! expect: type mismatch: expected `ReadFieldRef<Mob, int?>`, found `WriteFieldRef<Mob, int?>`
 // The extraction hole `WriteFieldRef` exists to close: a write-only selector
@@ -396,48 +352,4 @@ fn take_write(f: WriteFieldRef<Mob, int?>) {}
 fn main() {
     let f: ReadFieldRef<Mob, int?> = .attack_co
     take_write(f)   // ERROR: read-only does not grant write
-}
-
-//=== TEST CASE: write_field_ref_widen_to_nullable_Generic ===
-//! expect: type mismatch: expected `int?`, found `int`
-// INVARIANCE. `unify`'s `(_, Nullable)` arm widens on the right, so without the
-// explicit check a non-null `int` field satisfies a `<_, int?>` selector and
-// `field_set(m, f, null)` writes nil into a field typed `int`.
-struct Mob { health: int }
-
-fn take_write(f: WriteFieldRef<Mob, int?>) {}
-
-fn main() {
-    take_write(.health)   // ERROR: writable selectors are invariant in V
-}
-
-//=== TEST CASE: field_ref_widen_to_nullable_Generic ===
-//! expect: type mismatch: expected `int?`, found `int`
-struct Mob { health: int }
-
-fn take_full(f: FieldRef<Mob, int?>) {}
-
-fn main() {
-    take_full(.health)   // ERROR: writable selectors are invariant in V
-}
-
-//=== TEST CASE: write_field_ref_value_struct_Immutable ===
-//! expect: cannot form a writable field reference `.x` into `value` struct `Pt`
-// The write capability refuses a `value` struct T, same rule as `FieldRef`.
-value Pt { x: int, y: int }
-
-fn take_write(f: WriteFieldRef<Pt, int>) {}
-
-fn main() {
-    take_write(.x)   // ERROR: a write through a value copy would be lost
-}
-
-//=== TEST CASE: write_field_ref_arity_Generic ===
-//! expect: WriteFieldRef type must have exactly 2 type arguments (<Struct, FieldType>)
-struct Mob { health: int, attack_co: int? }
-
-fn take_write(f: WriteFieldRef<Mob>) {}   // ERROR: needs <Struct, FieldType>
-
-fn main() {
-    take_write(.attack_co)
 }

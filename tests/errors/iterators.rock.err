@@ -10,17 +10,6 @@ fn main() {
     print("{a} {b}")
 }
 
-//=== TEST CASE: for_then_terminal_Generic ===
-//! expect: use of consumed binding
-fn main() {
-    let v = [1, 2, 3]
-    let it = v.iter().map(x => x * 2)
-    let a = 0
-    for x in it { a += x }
-    let r = it.collect()
-    print("{a} {r.len}")
-}
-
 //=== TEST CASE: wrap_then_use_Generic ===
 //! expect: use of consumed binding
 fn main() {

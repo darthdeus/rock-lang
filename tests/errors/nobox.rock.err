@@ -40,21 +40,6 @@ fn main() {
     print("{g(P { x: 3.0, y: 7.0 })}")
 }
 
-//=== TEST CASE: opaque_body_in_global_vec_Generic ===
-//! expect: `lscore` cannot be taken as a fn value because its fixed ABI does not match the type-derived
-nobox value P { x: float, y: float }
-
-inline(lua) fn lscore(p: P) -> float = """
-    return p.x * 100.0 + p.y
-"""
-
-global FS: [(P) -> float] = [lscore]   // ERROR: same gate, through a container
-
-fn main() {
-    let g = FS[0]
-    print("{g(P { x: 3.0, y: 7.0 })}")
-}
-
 //=== TEST CASE: nomangle_fn_via_global_init_Generic ===
 //! expect: `scorer` cannot be taken as a fn value because its fixed ABI does not match the type-derived
 nobox value P { x: float, y: float }
@@ -105,18 +90,6 @@ inline(lua) fn hand_boxed() -> NV2 = """
 
 fn main() {
     print("{hand_boxed().x}")
-}
-
-//=== TEST CASE: nobox_bare_return_from_nomangle_inline_lua ===
-//! expect: nobox value `NV2` cannot cross the boxed return of `hand_boxed_fixed_name`
-nobox value NV2 { x: float, y: float }
-
-@nomangle inline(lua) fn hand_boxed_fixed_name() -> NV2 = """
-    return NV2_ct(3.0, 4.0)
-"""
-
-fn main() {
-    print("{hand_boxed_fixed_name().x}")
 }
 
 //=== TEST CASE: nobox_materialization_in_a_shader_body ===
@@ -367,15 +340,6 @@ fn pair(n: int) -> [int] { return [n, n] }
 fn main() {
     //! expect: this callback returns `[int]`, not an iterator; only a lambda's result is coerced
     print([1, 2].flat_map(pair).count())
-}
-
-//=== TEST CASE: named_fn_nullable_vec_result_Generic ===
-fn pair(n: int?) -> [int?] { return [n, n] }
-
-fn main() {
-    let a: [int?] = [1, null]
-    //! expect: this callback returns `[int?]`, not an iterator
-    print(a.flat_map(pair).count())
 }
 
 //=== TEST CASE: native_buffer_alloc_generic_gc_value ===

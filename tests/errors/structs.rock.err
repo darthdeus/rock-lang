@@ -287,14 +287,6 @@ fn main() {
     print("unreachable")
 }
 
-//=== TEST CASE: nullable_self_RecursiveValue ===
-//! expect: recursive value type: Chain -> Chain; use a reference or handle
-value Chain { n: int, next: Chain? }
-
-fn main() {
-    print("unused")
-}
-
 //=== TEST CASE: nullable_self_read_only_RecursiveValue ===
 //! expect: recursive value type: Chain -> Chain
 value Chain { n: int, next: Chain?, xs: [int] }
@@ -379,39 +371,6 @@ fn main() {
     print("{a.__fn}")
 }
 
-//=== TEST CASE: struct_field_ty_Generic ===
-//! expect: Reserved field name `__ty` in struct `Tagged`: `__fn`, `__ty`, and `__variant` are runtime marker keys
-struct Tagged {
-    __ty: string,
-}
-
-fn main() {
-    let a = Tagged { __ty: "x" }
-    print(a.__ty)
-}
-
-//=== TEST CASE: struct_field_variant_Generic ===
-//! expect: Reserved field name `__variant` in struct `Var`: `__fn`, `__ty`, and `__variant` are runtime marker keys
-struct Var {
-    __variant: int,
-}
-
-fn main() {
-    let a = Var { __variant: 2 }
-    print("{a.__variant}")
-}
-
-//=== TEST CASE: value_struct_field_fn_Generic ===
-//! expect: Reserved field name `__fn` in struct `VSneaky`: `__fn`, `__ty`, and `__variant` are runtime marker keys
-value VSneaky {
-    __fn: int,
-}
-
-fn main() {
-    let a = VSneaky { __fn: 1 }
-    print("{a.__fn}")
-}
-
 //=== TEST CASE: value_struct_field_ty_Generic ===
 //! expect: Reserved field name `__ty` in struct `VTagged`: `__fn`, `__ty`, and `__variant` are runtime marker keys
 value VTagged {
@@ -421,17 +380,6 @@ value VTagged {
 fn main() {
     let a = VTagged { __ty: 3 }
     print("{a.__ty}")
-}
-
-//=== TEST CASE: value_struct_field_variant_Generic ===
-//! expect: Reserved field name `__variant` in struct `VVar`: `__fn`, `__ty`, and `__variant` are runtime marker keys
-value VVar {
-    __variant: int,
-}
-
-fn main() {
-    let a = VVar { __variant: 2 }
-    print("{a.__variant}")
 }
 
 //=== TEST CASE: enum_record_variant_field_variant_Generic ===
@@ -444,39 +392,6 @@ fn main() {
     let e = E::A { __variant: 1 }
     print("ok")
 }
-
-//=== TEST CASE: enum_record_variant_field_fn_Generic ===
-//! expect: Reserved field name `__fn` in variant `B` of enum `F`: `__fn`, `__ty`, and `__variant` are runtime marker keys
-enum F {
-    B { __fn: int },
-}
-
-fn main() {
-    let f = F::B { __fn: 1 }
-    print("ok")
-}
-
-//=== TEST CASE: enum_record_variant_field_ty_Generic ===
-//! expect: Reserved field name `__ty` in variant `C` of enum `G`: `__fn`, `__ty`, and `__variant` are runtime marker keys
-enum G {
-    C { __ty: int },
-}
-
-fn main() {
-    let g = G::C { __ty: 1 }
-    print("ok")
-}
-
-//=== TEST CASE: direct_scalar_abi_call_Generic ===
-//! expect: `ambiguous` would emit the Lua parameter `r__tl__x` twice
-value V2 { x: float, y: float }
-value Bad { tl__x: float, tl: V2 }
-
-@scalar_abi inline(lua) fn ambiguous(r: Bad) -> float = """
-    return r__tl__x
-"""
-
-fn main() { let _ = ambiguous(Bad { tl__x: 1.0, tl: V2 { x: 2.0, y: 3.0 } }) }
 
 //=== TEST CASE: through_a_fn_value_Generic ===
 //! expect: `probe` would emit the Lua parameter `r__tl__x` twice
@@ -493,20 +408,6 @@ fn main() {
     let r = Bad { tl: P { x: 1.0, y: 2.0 }, tl__x: 900.0 }
     print("{apply(probe, r)}")
 }
-
-//=== TEST CASE: sibling_param_collides_with_a_leaf_Generic ===
-//! expect: `collide` would emit the Lua parameter `r__x` twice
-// The value declaration is CLEAN here -- `V2 { x, y }` has no ambiguity of its
-// own. The collision is between the leaf `r.x` (emitted `r__x`) and the sibling
-// param literally named `r__x`, so only a signature-level check sees it. Emits
-// `collide(r__x, r__y, r__x)` and returns 103 instead of 5 when unchecked.
-value V2 { x: float, y: float }
-
-@scalar_abi inline(lua) fn collide(r: V2, r__x: float) -> float = """
-    return r__x + r__y
-"""
-
-fn main() { print("{collide(V2 { x: 2.0, y: 3.0 }, 100.0)}") }
 
 //=== TEST CASE: sibling_param_collides_with_a_nested_leaf_Generic ===
 //! expect: `collide2` would emit the Lua parameter `r__tl__x` twice

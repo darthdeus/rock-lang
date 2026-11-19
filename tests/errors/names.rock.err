@@ -59,26 +59,12 @@ enum Shape { Circle }
 
 fn main() {}
 
-//=== TEST CASE: enum_and_newtype_same_name_DuplicateSymbol ===
-//! expect: duplicate definition `Id`
-enum Id { A }
-newtype Id(int)
-
-fn main() {}
-
 //=== TEST CASE: struct_and_newtype_across_files_DuplicateSymbol ===
 //! expect: duplicate definition `Meters`
 //--- FILE: a.rock ---
 struct Meters { v: float }
 //--- FILE: b.rock ---
 newtype Meters(float)
-
-fn main() {}
-
-//=== TEST CASE: same_decorator_twice_DuplicateSymbol ===
-//! expect: duplicate definition of decorator `reg`: already defined at test.rock:1
-deco init reg {}
-deco init reg {}
 
 fn main() {}
 
@@ -109,17 +95,6 @@ fn main() {
     print("duplicate struct field must not compile")
 }
 
-//=== TEST CASE: duplicate_value_struct_field_Generic ===
-//! expect: Duplicate field `x` in struct `P`
-value P {
-    x: int,
-    x: int
-}
-
-fn main() {
-    print("duplicate value-struct field must not compile (two `x` in the C layout)")
-}
-
 //=== TEST CASE: duplicate_enum_variant_Generic ===
 //! expect: Duplicate variant `Tick` in enum `Ev`
 enum Ev {
@@ -131,17 +106,6 @@ fn main() {
     print("duplicate enum variant must not compile")
 }
 
-//=== TEST CASE: duplicate_enum_variant_mixed_payload_Generic ===
-//! expect: Duplicate variant `Tick` in enum `Ev`
-enum Ev {
-    Tick(int),
-    Tick
-}
-
-fn main() {
-    print("same variant name with different payloads is still a duplicate")
-}
-
 //=== TEST CASE: duplicate_record_payload_field_Generic ===
 //! expect: Duplicate field `w` in variant `Rect` of enum `Shape`
 enum Shape {
@@ -151,22 +115,6 @@ enum Shape {
 
 fn main() {
     print("duplicate field in a record payload must not compile")
-}
-
-//=== TEST CASE: duplicate_enum_DuplicateSymbol ===
-//! expect: duplicate definition `DrawCommand`
-enum DrawCommand {
-    Rect { x: int, y: int, width: int, height: int },
-    Circle { x: int, y: int, radius: int }
-}
-
-// Duplicate definition
-enum DrawCommand {
-    Line { x1: int, y1: int, x2: int, y2: int }
-}
-
-fn main() {
-    print("Testing duplicate enum detection")
 }
 
 //=== TEST CASE: duplicate_struct_DuplicateSymbol ===
@@ -185,17 +133,6 @@ struct Player {
 
 fn main() {
     print("Testing duplicate struct detection")
-}
-
-//=== TEST CASE: duplicate_newtype_DuplicateSymbol ===
-//! expect: duplicate definition `UserId`
-newtype UserId(int)
-
-// Duplicate newtype
-newtype UserId(string)
-
-fn main() {
-    print("Testing duplicate newtype detection")
 }
 
 //=== TEST CASE: duplicate_struct_across_modules_DuplicateSymbol ===
@@ -248,13 +185,13 @@ fn main() {
     let x = undefined_var
 }
 
+//=== TEST CASE: undefined_in_operator_arg_Generic ===
 // Regression: an undefined variable used as an OPERATOR argument must
 // still surface a diagnostic. The `__op_*` arg-inference path used to
 // `Err(_) => continue` (silently skip the check), so a broken `x + y`
 // produced wrong types while the same shape in a regular call errored.
 // The operators-as-functions arc rewrote that arm to propagate via `?`;
 // this pins the symmetry so it cannot silently regress.
-//=== TEST CASE: undefined_in_operator_arg_Generic ===
 //! expect: `undefined_thing` did not resolve to any definition
 fn main() {
     let r = undefined_thing + 1

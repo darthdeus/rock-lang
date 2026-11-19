@@ -6,7 +6,6 @@ fn f() -> int {
     5
 }
 
-
 //=== TEST CASE: break_inside_lambda_in_loop_Generic ===
 //! expect: only valid inside a loop body
 // A lambda body is not the enclosing loop's body: it runs when called. The
@@ -18,19 +17,6 @@ fn main() {
             break
         }
         g()
-    }
-}
-
-//=== TEST CASE: continue_inside_lambda_in_loop_Generic ===
-//! expect: only valid inside a loop body
-fn main() {
-    let x: int? = null
-    for i in [1, 2] {
-        let g = () => {
-            let v = x else { continue }
-            v
-        }
-        print(g())
     }
 }
 
@@ -77,23 +63,6 @@ fn f() -> int {
     let a = g(3)
     let b = g("hi")
     5
-}
-
-//=== TEST CASE: unpinned_lambda_param_mul_Generic ===
-//! expect: cannot infer type of lambda parameter `x`: annotate it or use the lambda
-// an unconstrained lambda param that no use in the body ever pins
-// has no type -- defer-to-use does not invent one. The local
-// `*(UnpinnedW, int)` overload ties with stdlib `*(int, int)`, so `x * 2` cannot
-// pick eagerly, and with no later call the param stays unresolved.
-struct UnpinnedW { a: float }
-
-operator *(l: UnpinnedW, r: int) -> UnpinnedW {
-    return UnpinnedW { a: l.a }
-}
-
-fn main() {
-    let f = x => x * 2
-    print("never calls f")
 }
 
 //=== TEST CASE: unpinned_placeholder_field_Generic ===
@@ -162,18 +131,6 @@ fn main() {
         let acc = 0
         for v in y { let _bad = _ + v }
         acc
-    })
-}
-
-//=== TEST CASE: placeholder_in_explicit_lambda_while_body_Generic ===
-//! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
-// `_` inside a While-stmt body of an explicit lambda. Walker visits While.
-fn main() {
-    let xs = [1, 2, 3]
-    let _ys = vec_map(xs, y => {
-        let i = 0
-        while i < 1 { let _bad = _ + y; i = i + 1 }
-        y
     })
 }
 

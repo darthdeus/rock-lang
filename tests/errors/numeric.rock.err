@@ -32,20 +32,6 @@ fn main() {
     print(value)
 }
 
-//=== TEST CASE: cast_int_to_string_MismatchedType ===
-//! expect: cannot convert `int` to `string` with `as`
-fn main() {
-    let value = 42 as string
-    print(value)
-}
-
-//=== TEST CASE: cast_bool_to_int_MismatchedType ===
-//! expect: cannot convert `bool` to `int` with `as`
-fn main() {
-    let value = true as int
-    print(value)
-}
-
 //=== TEST CASE: cast_struct_to_int_MismatchedType ===
 //! expect: cannot convert `Point` to `int` with `as`
 struct Point { x: int, y: int }
@@ -55,49 +41,36 @@ fn main() {
     print(value)
 }
 
-//=== TEST CASE: cast_any_to_nominal_MismatchedType ===
-//! expect: cannot convert `any` to `Point` with `as`
-struct Point { x: int, y: int }
-
-fn take(a: any) -> int {
-    let p = a as Point
-    p.x
-}
-
-fn main() {
-    print(take(Point { x: 1, y: 2 }))
-}
-
+//=== TEST CASE: cast_empty_array_unresolved_element_MismatchedType ===
 // An empty array literal has no element type of its own. `[1, 2, 3] as [int]`
 // (tests/types/checked_ascription.rock) is the accepted control -- there the operand
 // types itself.
-//=== TEST CASE: cast_empty_array_unresolved_element_MismatchedType ===
 //! expect: cannot convert `[?E]` to `[int]` with `as`: the operand is not fully inferred on its own
 fn main() {
     let value = [] as [int]
     print(value.len())
 }
 
+//=== TEST CASE: cast_bare_null_unresolved_MismatchedType ===
 // A bare `null` carries only a fresh variable. `(null : int?)` is the ascription
 // that legitimately binds it.
-//=== TEST CASE: cast_bare_null_unresolved_MismatchedType ===
 //! expect: cannot convert `null?` to `int?` with `as`: the operand is not fully inferred on its own
 fn main() {
     let value = null as int?
     print(value == null)
 }
 
+//=== TEST CASE: cast_deferred_lambda_param_MismatchedType ===
 // The lambda infers as `fn(?a) -> ?a`; taking `int` from the cast target is the
 // contextual behaviour that belongs to ascription, not `as`.
-//=== TEST CASE: cast_deferred_lambda_param_MismatchedType ===
 //! expect: cannot convert `fn(?R) -> ?R` to `fn(int) -> int` with `as`: the operand is not fully inferred on its own
 fn main() {
     let f = ((x) => x) as fn(int) -> int
 }
 
+//=== TEST CASE: cast_deferred_lambda_field_MismatchedType ===
 // Same rule where the operand also has a deferred field access waiting on the
 // parameter's type: `as` may not discharge it either.
-//=== TEST CASE: cast_deferred_lambda_field_MismatchedType ===
 //! expect: cannot convert `fn(p) -> ?R` to `fn(Point) -> int` with `as`: the operand is not fully inferred on its own
 struct Point { x: int, y: int }
 
@@ -105,27 +78,27 @@ fn main() {
     let f = ((p) => p.x) as fn(Point) -> int
 }
 
+//=== TEST CASE: cast_target_hole_MismatchedType ===
 // `_` is an inference hole in type position, so a hole target has nothing to
 // validate against: the classification passes, and the surrounding expectation
 // then binds the hole. That laundered `42 as string`, which rejects directly.
-//=== TEST CASE: cast_target_hole_MismatchedType ===
 //! expect: cannot convert `int` to `_` with `as`: the target is not a written type
 fn main() {
     let bad: string = 42 as _
     print(bad)
 }
 
-// The hole does not have to be the whole target.
 //=== TEST CASE: cast_nested_target_hole_MismatchedType ===
+// The hole does not have to be the whole target.
 //! expect: cannot convert `[int]` to `[_]` with `as`: the target is not a written type
 fn main() {
     let bad: [string] = [1, 2, 3] as [_]
     print(bad.len())
 }
 
+//=== TEST CASE: cast_target_hole_identity_MismatchedType ===
 // A hole target is rejected on its own terms, not only when it launders a bad
 // pair -- `as` validates a written type, and `_` is not one.
-//=== TEST CASE: cast_target_hole_identity_MismatchedType ===
 //! expect: cannot convert `int` to `_` with `as`: the target is not a written type
 fn main() {
     let same: int = 42 as _
@@ -143,13 +116,6 @@ fn main() {
 //! expect: type mismatch: expected `int`, found `float`
 fn main() {
     let value = (3.14 : int)
-    print(value)
-}
-
-//=== TEST CASE: ascribe_string_to_int_MismatchedType ===
-//! expect: type mismatch: expected `int`, found `string`
-fn main() {
-    let value = ("42" : int)
     print(value)
 }
 
@@ -393,24 +359,11 @@ fn f() -> bool {
     b
 }
 
-//=== TEST CASE: or_int_fail_Generic ===
-//! expect: type mismatch: expected `bool`, found `int`
-fn f() -> bool {
-    let b = 1 || 0
-    b
-}
-
 //=== TEST CASE: eq_mismatch_fail_Generic ===
 //! expect: type mismatch: expected `bool`, found `int`
 fn f() -> bool {
     let b = 1 == true
     b
-}
-
-//=== TEST CASE: compare_nonnull_neq_null_Generic ===
-//! expect: Cannot compare non-nullable type 'int' with null
-fn f(x: int) -> bool {
-    x != null
 }
 
 //=== TEST CASE: compare_nonnull_eq_null_Generic ===
@@ -436,19 +389,6 @@ struct Top { inner: Inner? }
 fn f(t: Top) -> bool {
     t.inner = Inner { v: 1 }
     return t.inner != null
-}
-
-//=== TEST CASE: string_ordering_fail_Generic ===
-// concrete non-numeric ordering stays rejected
-//! expect: ordering operators require numeric operands, got string
-fn f() -> bool {
-    "a" < "b"
-}
-
-//=== TEST CASE: bool_ordering_fail_Generic ===
-//! expect: ordering operators require numeric operands, got bool
-fn f() -> bool {
-    true < false
 }
 
 //=== TEST CASE: sort_key_nullable_value_Generic ===

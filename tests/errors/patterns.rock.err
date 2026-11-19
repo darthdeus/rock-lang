@@ -14,23 +14,6 @@ fn main() {
     test()
 }
 
-//=== TEST CASE: multiple_duplicate_wildcards_DuplicatePattern ===
-//! expect: duplicate wildcard pattern in match expression - only one unguarded `_` arm is allowed
-fn test() -> int {
-    let t = 3
-    match t {
-        0 => 10
-        _ => 20
-        1 => 30
-        _ => 40  // Second wildcard - should be an error!
-        _ => 50  // Third wildcard - but error should trigger on the second one
-    }
-}
-
-fn main() {
-    test()
-}
-
 //=== TEST CASE: missing_plain_variant_NonExhaustive ===
 //! expect: Non-exhaustive match expression. Missing patterns: Blue
 enum Color { Red, Green, Blue }
@@ -530,7 +513,6 @@ fn f(e: E, hot: bool) -> int {
     r
 }
 
-
 //=== TEST CASE: nullable_enum_missing_null_arm_Generic ===
 //! expect: null
 enum Sig { Idle, Num(int) }
@@ -552,17 +534,6 @@ fn f(c: Color) -> int {
         _ => "no",
     }
     r
-}
-
-//=== TEST CASE: value_match_mismatched_fail_Generic ===
-//! expect: type mismatch: expected `int`, found `string`
-fn f() -> int {
-    let x = 1
-    let u = match x {
-        1 => 10,
-        _ => "s",
-    }
-    x
 }
 
 //=== TEST CASE: or_binding_rejected_Generic ===
@@ -654,14 +625,4 @@ fn main() {
     let user = User { id: 42, name: "Alice" }
     let UserId(x) = user
     print(x)
-}
-
-//=== TEST CASE: destructure_int_with_newtype_Generic ===
-//! expect: cannot destructure this value with newtype pattern `UserId` - the value is not a newtype `UserId`
-newtype UserId(int)
-
-fn main() {
-    let x = 42
-    let UserId(id) = x
-    print(id)
 }

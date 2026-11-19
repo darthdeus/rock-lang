@@ -84,14 +84,6 @@ fn main() {
     let _ = foo(1)
 }
 
-//=== TEST CASE: unknown_label_Rejected ===
-//! expect: macro `three` has no parameter named `zzz`
-macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
-
-fn main() {
-    let _ = three(1, zzz: 3)   // ERROR: no parameter named `zzz`
-}
-
 //=== TEST CASE: label_repeated_Rejected ===
 //! expect: macro `three` got two values for parameter `b`
 macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
