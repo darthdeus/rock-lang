@@ -544,7 +544,8 @@ mod tests {
 
     #[test]
     fn closest_mode_prefers_exact_then_nearest_area_then_refresh() {
-        let cases: [(&[(i32, i32, i32)], Option<(i32, i32, i32)>, &str); 4] = [
+        type Mode = (i32, i32, i32);
+        let cases: [(&[Mode], Option<Mode>, &str); 4] = [
             (
                 &[(1920, 1080, 60), (2560, 1440, 60), (1280, 720, 60)],
                 Some((1920, 1080, 60)),
