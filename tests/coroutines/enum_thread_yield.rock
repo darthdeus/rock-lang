@@ -5,7 +5,7 @@ enum Ev {
     Tick(int),
     Pair(int, int),
     Done,
-    Act(() -> ()),
+    Act(() -> ()),      // closure payload -> Ev is non-cdata (boxed/flat)
 }
 
 co fn stream(n: int) -> Coroutine<Ev> {

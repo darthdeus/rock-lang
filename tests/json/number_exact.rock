@@ -83,12 +83,12 @@ fn test_json_float_beyond_the_fast_path_bounds_still_matches_host() {
 @test
 fn test_json_float_range_boundaries_match_host() {
     let cases = [
-        "1e400", "-1e400",
-        "1e-400",
-        "1e-320", "1e-310",
-        "2.2250738585072011e-308",
-        "1.0000000000000002",
-        "-1.7976931348623157e308",
+        "1e400", "-1e400",                  // overflow -> +/-inf
+        "1e-400",                           // underflow -> 0
+        "1e-320", "1e-310",                 // denormal
+        "2.2250738585072011e-308",          // the smallest normal
+        "1.0000000000000002",               // 1 + 1ulp
+        "-1.7976931348623157e308",          // most negative finite
     ]
     for lit in cases { assert_matches_host(lit) }
     assert_eq(cases.len(), 8)

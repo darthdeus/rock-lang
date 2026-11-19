@@ -389,6 +389,7 @@ fn test_truthiness_edge_case() {
     // If using (cond and then_value or else_value), this fails when then_value is false
     let x = if true { flag } else { true }
 
+    // Should be false, but and/or optimization would give true
     assert(x == false, "Should preserve false value, got: " + x.to_string())
 
     // Another edge case - consistent boolean type
