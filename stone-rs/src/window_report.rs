@@ -370,10 +370,7 @@ mod tests {
 
     #[test]
     fn fit_exceeds_reports_overflow() {
-        let r = report(
-            (2560, 1600),
-            title_bar(28),
-        );
+        let r = report((2560, 1600), title_bar(28));
         let f = r.fit().unwrap();
         assert_eq!(f.max_content_w, 1440);
         assert_eq!(f.max_content_h, 842);
@@ -387,10 +384,7 @@ mod tests {
 
     #[test]
     fn fit_within_reports_headroom() {
-        let r = report(
-            (800, 700),
-            title_bar(28),
-        );
+        let r = report((800, 700), title_bar(28));
         let f = r.fit().unwrap();
         assert!(!f.exceeds);
         assert_eq!(f.over_w, 800 - 1440);
@@ -402,10 +396,7 @@ mod tests {
 
     #[test]
     fn fit_none_when_landed_display_missing() {
-        let mut r = report(
-            (800, 700),
-            title_bar(0),
-        );
+        let mut r = report((800, 700), title_bar(0));
         r.landed_display = 5;
         assert!(r.fit().is_none());
         assert!(r.render_human().contains("cannot derive"));
@@ -459,11 +450,7 @@ mod tests {
             pos: (0, 30),
             display: None,
         };
-        let p = resolve_window_placement(
-            req,
-            &[d],
-            title_bar(28),
-        );
+        let p = resolve_window_placement(req, &[d], title_bar(28));
         assert_eq!(p.size, (1440, 842)); // 870 usable - 28 title
         assert_eq!(p.display, 0);
     }
@@ -595,10 +582,7 @@ mod tests {
 
     #[test]
     fn units_are_labelled() {
-        let r = report(
-            (800, 700),
-            title_bar(28),
-        );
+        let r = report((800, 700), title_bar(28));
         let h = r.render_human();
         assert!(h.contains("pt=points, px=pixels"));
         assert!(h.contains("drawable=1600x1400px"));

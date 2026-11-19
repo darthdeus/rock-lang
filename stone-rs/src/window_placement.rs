@@ -843,13 +843,6 @@ display = 1
     }
 
     #[test]
-    fn config_malformed_is_error() {
-        assert!(parse_config_toml("this is not = = toml", "x").is_err());
-        assert!(parse_config_toml("[default]\nsize = [1]\n", "x").is_err());
-        assert!(parse_config_toml("[default]\ndisplay = \"two\"\n", "x").is_err());
-    }
-
-    #[test]
     fn config_imgui_scale_game_section_beats_default() {
         let toml = "[default]\nimgui_scale = 2.0\n\n[game.demo]\nimgui_scale = 1.5\n";
         assert_eq!(
@@ -875,10 +868,17 @@ display = 1
     }
 
     #[test]
-    fn config_imgui_scale_must_be_a_positive_number() {
-        assert!(parse_config_toml("[default]\nimgui_scale = 0\n", "x").is_err());
-        assert!(parse_config_toml("[default]\nimgui_scale = -1.0\n", "x").is_err());
-        assert!(parse_config_toml("[default]\nimgui_scale = \"2\"\n", "x").is_err());
+    fn config_rejects_malformed_toml_and_invalid_values() {
+        for toml in [
+            "this is not = = toml",
+            "[default]\nsize = [1]\n",
+            "[default]\ndisplay = \"two\"\n",
+            "[default]\nimgui_scale = 0\n",
+            "[default]\nimgui_scale = -1.0\n",
+            "[default]\nimgui_scale = \"2\"\n",
+        ] {
+            assert!(parse_config_toml(toml, "x").is_err(), "accepted {toml:?}");
+        }
     }
 
     #[test]
@@ -913,16 +913,17 @@ display = 1
         assert_eq!(topology_signature(&[]), topology_signature(&[]));
     }
 
-    #[test]
-    fn windowed_restore_preserves_display_and_bounds() {
-        let displays = vec![disp(0, (0, 0, 1920, 1080)), disp(1, (1920, 0, 1920, 1080))];
-        let borders = crate::window_report::Borders {
-            top: 30,
+    fn top_border(top: i32) -> crate::window_report::Borders {
+        crate::window_report::Borders {
+            top,
             left: 0,
             bottom: 0,
             right: 0,
-        };
-        let state = HiddenWindowState {
+        }
+    }
+
+    fn windowed_on_second_display() -> HiddenWindowState {
+        HiddenWindowState {
             mode: WindowMode::Windowed,
             pos: (2000, 100),
             size: (800, 600),
@@ -932,7 +933,14 @@ display = 1
                 size: (800, 600),
                 display: Some(1),
             },
-        };
+        }
+    }
+
+    #[test]
+    fn windowed_restore_preserves_display_and_bounds() {
+        let displays = vec![disp(0, (0, 0, 1920, 1080)), disp(1, (1920, 0, 1920, 1080))];
+        let borders = top_border(30);
+        let state = windowed_on_second_display();
         let (mode, placement, bounds) = resolve_hidden_window_restore(state, &displays, borders);
         assert_eq!(mode, WindowMode::Windowed);
         assert_eq!(placement.display, 1);
@@ -945,23 +953,8 @@ display = 1
     #[test]
     fn restore_when_monitor_disappears_falls_back_to_available_display() {
         let displays = vec![disp(0, (0, 0, 1920, 1080))];
-        let borders = crate::window_report::Borders {
-            top: 30,
-            left: 0,
-            bottom: 0,
-            right: 0,
-        };
-        let state = HiddenWindowState {
-            mode: WindowMode::Windowed,
-            pos: (2000, 100),
-            size: (800, 600),
-            display: Some(1),
-            windowed_bounds: WindowedBounds {
-                pos: (2000, 100),
-                size: (800, 600),
-                display: Some(1),
-            },
-        };
+        let borders = top_border(30);
+        let state = windowed_on_second_display();
         let (mode, placement, bounds) = resolve_hidden_window_restore(state, &displays, borders);
         assert_eq!(mode, WindowMode::Windowed);
         assert_eq!(
@@ -976,12 +969,7 @@ display = 1
     #[test]
     fn fullscreen_restore_falls_back_when_monitor_disappears() {
         let displays = vec![disp(0, (0, 0, 1920, 1080))];
-        let borders = crate::window_report::Borders {
-            top: 0,
-            left: 0,
-            bottom: 0,
-            right: 0,
-        };
+        let borders = top_border(0);
         let state = HiddenWindowState {
             mode: WindowMode::Fullscreen(1),
             pos: (1920, 0),
