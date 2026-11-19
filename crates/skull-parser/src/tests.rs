@@ -234,7 +234,7 @@ fn interpolation_nested_hole_spans_are_file_offsets() {
 }
 
 #[test]
-fn a_comment_may_close_a_delimited_list() {
+fn a_comment_may_close_a_list_or_precede_its_comma() {
     for src in [
         "fn f() {\n    g(\n        a,\n        // c\n    )\n}\n",
         "fn f() {\n    g(\n        x: a,\n        // c\n    )\n}\n",
@@ -244,14 +244,6 @@ fn a_comment_may_close_a_delimited_list() {
         "fn f<\n    T,\n    // c\n>() {}\n",
         "enum E {\n    A(\n        int,\n        // c\n    ),\n}\n",
         "fn f() {\n    let l = (\n        // c\n        a: int,\n        // c\n    ) => a\n}\n",
-    ] {
-        parse(src);
-    }
-}
-
-#[test]
-fn a_comment_may_sit_before_any_list_comma() {
-    for src in [
         "fn f() {\n    g(a /* c */, b)\n}\n",
         "fn f() {\n    g(x: a /* c */, y: b)\n}\n",
         "fn f() {\n    let v = [a /* c */, b]\n}\n",
