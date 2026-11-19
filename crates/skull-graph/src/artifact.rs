@@ -38,12 +38,9 @@ impl<'a> ArtifactMappings<'a> {
 
     /// Native mapping only; a Rock body is the portable rung, a separate question.
     pub fn maps(&self, ws: &Workspace, f: &Function) -> bool {
-        if f.inline_body
+        f.inline_body
             .is_some_and(|(be, _)| instance_graph::serves(be, self.inline_backend))
-        {
-            return true;
-        }
-        self.supplies(ws, f)
+            || self.supplies(ws, f)
     }
 }
 
@@ -247,6 +244,21 @@ impl ArtifactIndex {
                 .insert(owner.clone());
         }
     }
+
+    fn add_publication_candidate(&mut self, instance: Instance, symbol: String) -> bool {
+        if self
+            .publication_candidates
+            .insert(instance.clone(), symbol.clone())
+            .is_some()
+        {
+            return false;
+        }
+        self.publication_users
+            .entry(symbol)
+            .or_default()
+            .insert(instance);
+        true
+    }
 }
 
 /// A `@shader` stage entry is registered as GLSL text, so it is never a root.
@@ -271,6 +283,15 @@ fn publication_candidate(
             skull_mir::mangle::mangle_fn(ws, f),
         )
     })
+}
+
+fn unique_publication<'a>(
+    g: &InstanceGraph,
+    candidates: &'a BTreeSet<Instance>,
+) -> Option<&'a Instance> {
+    let mut represented = candidates.iter().filter(|i| g.instances.contains(*i));
+    let instance = represented.next()?;
+    represented.next().is_none().then_some(instance)
 }
 
 impl ArtifactView {
@@ -335,23 +356,19 @@ impl ArtifactView {
         let root_removed = &canonical(root_removed);
         // A caller that did not update the graph may skip `prepare_update`.
         self.prepare_update(g);
-        self.index.graph_revision = g.revision();
-        let mut root_subjects = BTreeSet::new();
+        let mut subjects = revisited.clone();
+        subjects.extend(added.iter().cloned());
+        subjects.extend(removed.iter().cloned());
         for decl in root_added.iter().chain(root_removed) {
-            root_subjects.extend(
+            subjects.extend(
                 self.index
                     .instances_by_decl
                     .get(&decl.0)
                     .into_iter()
                     .flat_map(|instances| instances.iter().cloned()),
             );
-            let instances: Vec<_> = g.instances_of(decl.0).cloned().collect();
-            root_subjects.extend(instances);
+            subjects.extend(g.instances_of(decl.0).cloned());
         }
-        let mut subjects = revisited.clone();
-        subjects.extend(added.iter().cloned());
-        subjects.extend(removed.iter().cloned());
-        subjects.extend(root_subjects.iter().cloned());
         if subjects.is_empty() && root_added.is_empty() && root_removed.is_empty() {
             return;
         }
@@ -365,15 +382,6 @@ impl ArtifactView {
             .iter()
             .filter_map(|i| self.index.realizable.get(i).map(|r| (i.clone(), *r)))
             .collect();
-        let old_outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>> = subjects
-            .iter()
-            .filter_map(|i| {
-                self.index
-                    .outgoing
-                    .get(i)
-                    .map(|edges| (i.clone(), edges.clone()))
-            })
-            .collect();
         let old_predecessors: FxHashMap<Instance, FxHashSet<Instance>> = subjects
             .iter()
             .filter_map(|i| {
@@ -383,6 +391,7 @@ impl ArtifactView {
                     .map(|preds| (i.clone(), preds.clone()))
             })
             .collect();
+        let mut old_outgoing = FxHashMap::default();
         for i in &subjects {
             // The removed rows stay in `old_outgoing` for the dirty-region walk.
             if let Some(edges) = self.index.outgoing.remove(i) {
@@ -394,6 +403,7 @@ impl ArtifactView {
                         }
                     }
                 }
+                old_outgoing.insert(i.clone(), edges);
             }
         }
 
@@ -466,22 +476,18 @@ impl ArtifactView {
         let mut dirty = subjects.clone();
         let mut queue: VecDeque<Instance> = subjects.iter().cloned().collect();
         while let Some(i) = queue.pop_front() {
-            let mut neighbours = Vec::new();
-            if let Some(edges) = old_outgoing.get(&i) {
-                neighbours.extend(edges.values().cloned());
-            }
-            if let Some(edges) = self.index.outgoing.get(&i) {
-                neighbours.extend(edges.values().cloned());
-            }
-            if let Some(preds) = self.index.incoming.get(&i) {
-                neighbours.extend(preds.iter().cloned());
-            }
-            if let Some(preds) = old_predecessors.get(&i) {
-                neighbours.extend(preds.iter().cloned());
-            }
+            let successors = [old_outgoing.get(&i), self.index.outgoing.get(&i)]
+                .into_iter()
+                .flatten()
+                .flat_map(FxHashMap::values);
+            let predecessors = [self.index.incoming.get(&i), old_predecessors.get(&i)]
+                .into_iter()
+                .flatten()
+                .flatten();
+            let neighbours = successors.chain(predecessors);
             for neighbour in neighbours {
                 if dirty.insert(neighbour.clone()) {
-                    queue.push_back(neighbour);
+                    queue.push_back(neighbour.clone());
                 }
             }
         }
@@ -708,18 +714,10 @@ impl ArtifactView {
             };
             if self
                 .index
-                .publication_candidates
-                .insert(instance.clone(), symbol.clone())
-                .is_some()
+                .add_publication_candidate(instance, symbol.clone())
             {
-                continue;
+                changed.insert(symbol);
             }
-            self.index
-                .publication_users
-                .entry(symbol.clone())
-                .or_default()
-                .insert(instance);
-            changed.insert(symbol);
         }
         changed
     }
@@ -730,23 +728,14 @@ impl ArtifactView {
         changed_symbols: &BTreeSet<String>,
     ) {
         for symbol in changed_symbols {
-            let users = self
-                .index
-                .publication_users
-                .get(symbol)
-                .cloned()
-                .unwrap_or_default();
-            for instance in &users {
+            let Some(users) = self.index.publication_users.get(symbol) else {
+                continue;
+            };
+            for instance in users {
                 self.publications.remove(instance);
             }
-            let represented: Vec<Instance> = users
-                .iter()
-                .filter(|instance| g.instances.contains(*instance))
-                .cloned()
-                .collect();
-            if represented.len() == 1 {
-                self.publications
-                    .insert(represented.into_iter().next().unwrap(), symbol.clone());
+            if let Some(instance) = unique_publication(g, users) {
+                self.publications.insert(instance.clone(), symbol.clone());
             }
         }
     }
@@ -878,13 +867,13 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let mut index = ArtifactIndex {
         realizable,
         graph_revision: g.revision(),
-        root_decls: root_decls.clone(),
+        root_decls,
         ..Default::default()
     };
     let mut roots: BTreeSet<Instance> = BTreeSet::new();
     let mut declared_roots: BTreeSet<Instance> = BTreeSet::new();
     for i in &g.instances {
-        let declared = declared_root(ws, &root_decls, i);
+        let declared = declared_root(ws, &index.root_decls, i);
         let is_root = declared || g.is_always_emitted_target(i);
         if is_root && index.realizable[i].is_ok() {
             roots.insert(i.clone());
@@ -924,8 +913,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         reached: Vec::new(),
         queue: VecDeque::new(),
     };
-    let root_refs: Vec<&Instance> = g.instances.iter().filter(|i| roots.contains(*i)).collect();
-    for r in root_refs {
+    for r in g.instances.iter().filter(|i| roots.contains(*i)) {
         walk.admit(r, &index.realizable);
     }
     // A value take in a global initializer or decorator has no caller instance,
@@ -1044,42 +1032,21 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .cloned()
         .collect();
 
-    let publication_candidates: BTreeMap<Instance, String> = req
+    for (instance, symbol) in req
         .roots
         .iter()
         .filter_map(|&root| publication_candidate(ws, &target, root))
+    {
+        index.add_publication_candidate(instance, symbol);
+    }
+    let publications = index
+        .publication_users
+        .iter()
+        .filter_map(|(symbol, candidates)| {
+            let instance = unique_publication(g, candidates)?;
+            Some((instance.clone(), symbol.clone()))
+        })
         .collect();
-    for (instance, symbol) in &publication_candidates {
-        index
-            .publication_users
-            .entry(symbol.clone())
-            .or_default()
-            .insert(instance.clone());
-        index
-            .publication_candidates
-            .insert(instance.clone(), symbol.clone());
-    }
-    let mut by_pub_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
-    for (inst, symbol) in &publication_candidates {
-        if !g.instances.contains(inst) {
-            continue;
-        }
-        by_pub_symbol
-            .entry(symbol.clone())
-            .or_default()
-            .push(inst.clone());
-    }
-    let mut publications: BTreeMap<Instance, String> = BTreeMap::new();
-    for (symbol, mut instances) in by_pub_symbol {
-        instances.sort();
-        instances.dedup();
-        if instances.len() == 1 {
-            publications.insert(
-                instances.into_iter().next().expect("non-empty group"),
-                symbol,
-            );
-        }
-    }
 
     let opaque_boundary_roots = g
         .inline_body_nomangle_roots
