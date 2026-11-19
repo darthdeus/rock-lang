@@ -7,14 +7,8 @@
 // formatting or arithmetic). These two do NOT, which is why they are pinned here
 // and the loud ones are not.
 //
-// PINNED BEHAVIOR (BUG) in both tests below. When either stops holding, the fix
-// landed: flip the assertion to the correct value named in each comment, update
-// the comment, and ship both in the same commit.
-//
-// Measured live, not presumed: the matrix's trust-boundary section used to say
-// "container and field writes are presumed to be the same class, untested". That
-// presumption was false in both directions -- containers are mostly loud, field
-// writes are silent, and a Map store an opaque body performs actually WORKS.
+// PINNED BEHAVIOR (BUG) in the sentinel below. When it stops holding, the fix
+// landed: flip the assertion to the correct value named in its comment.
 
 nobox value TrustV2 { x: float, y: float }
 
@@ -45,18 +39,9 @@ fn nobox_field_write_from_an_opaque_body_vanishes_while_its_sibling_lands_sentin
 
 global TRUST_MAP: Map<string, TrustV2> = map_new()
 
-// NOT a sentinel -- this is the positive test that replaced one. Before Map value
-// storage landed, an opaque body could perform `M["a"] = TrustV2_ct(9.0, 9.0)`
-// and a Rock read would unbox the smuggled cdata correctly, because the emitted
-// read was representation-agnostic. That made an opaque body a WORKING back door
-// for a store the compiler refused.
-//
-// The column spine closed it from both ends: the Rock store below is now
-// supported outright (no `materialize`), and the smuggled raw-table write is no
-// longer readable -- it fails loudly with `Map key not found` rather than
-// silently returning nothing, because the spine lookup never finds a key the
-// back door never registered. A back door that now announces itself is the
-// outcome we want, so there is nothing left to pin.
+// NOT a sentinel: a Rock store of a nobox Map value needs no `materialize`, and
+// a raw-table write from an opaque body fails loudly (`Map key not found`)
+// because the column spine never registered its key.
 @test(returns = 9)
 fn a_nobox_map_store_needs_no_materialize() -> int {
     TRUST_MAP["a"] = TrustV2 { x: 9.0, y: 9.0 }

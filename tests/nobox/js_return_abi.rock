@@ -151,9 +151,6 @@ fn computed(a: int) -> (int, int) { return (a * 3 + 1, a * 5 - 1) }
     assert_eq(q, 19)
 }
 
-// --- shapes the first pass did NOT cover; added because "we tested it" must
-// --- mean these too, not just the ones that were easy to think of.
-
 // A `defer` body runs at scope exit. If it ran BETWEEN the publish and the
 // caller's capture, it would clobber the bank; it must run before the return.
 fn with_defer(a: int) -> NV {
@@ -211,15 +208,8 @@ fn with_defer(a: int) -> NV {
 // while the miss arm produces null. Nothing in the ABI's safety argument covers
 // a call the emitter may skip: if a capture were ever hoisted out of the hit arm,
 // the miss would read whatever the previous call left in the bank -- a plausible
-// wrong number, not a crash. The spec-key propagation on this path is also new
-// (`bb819f640`, rewired to `spec_key_has_target_storage` at `587779159`).
-//
-// Both wires now reach the bank. `recv?.method()` returning a `nobox` VALUE used
-// to reject in shared lowering -- safe-nav joined its arms through one result
-// cell, which a value's leaves plus presence tag do not fit -- and its `.err`
-// pin here went red when that landed, so the pin is gone and the value wire is
-// exercised directly below. The tuple wire stays: it is a different arity and a
-// different rebuild, and the attack is per-shape.
+// wrong number, not a crash. Both the tuple wire and the `nobox` value wire are
+// attacked: they differ in arity and rebuild.
 
 struct Holder { n: int }
 
@@ -270,8 +260,7 @@ fn Holder.wire3(h) -> (int, int, int) { return (h.n, h.n * 2, h.n * 3) }
     assert_eq(v?.1 ?? -1, 8)
 }
 
-// A `nobox` VALUE through the same safe-nav wire -- the widest multi-value that
-// reaches the bank, and the shape the tuple above used to stand in for. 31/62 are
+// A `nobox` VALUE through the same safe-nav wire. 31/62 are
 // values no other wire in this file produces, so a hit that read a stale slot
 // reports a number that is visibly not its own.
 @test fn safenav_ufcs_nobox_value_hit_captures_its_own_leaves() {
@@ -292,9 +281,8 @@ fn Holder.wire3(h) -> (int, int, int) { return (h.n, h.n * 2, h.n * 3) }
     assert_eq(v?.y ?? -1, -1)
 }
 
-// The control kept from the retired `.err` pin: the same nullable `nobox` payload
-// through a DECLARED return type. It always worked, and it is what bounded the
-// defect to safe-nav's own join rather than the nullable payload.
+// Control: the same nullable `nobox` payload through a DECLARED return type,
+// with no safe-nav join.
 fn maybe_wire(a: int) -> NV? {
     if a > 0 { return NV { x: a, y: a * 2 } }
     return null
@@ -397,10 +385,8 @@ co fn op_in_coroutine(seed: IV) -> Coroutine<int> {
 //
 // A `@scalar_abi inline(js)` boundary returning a multi-lane result publishes
 // through the compiler-owned `__rock_publish(..)`, whose arity comes from the
-// concrete result ABI. Before that contract, `stone_measure_text_vec2_for`'s
-// web sibling handed back a JS ARRAY here while its caller captured
-// `c0 = f(); c1 = __rock_ret1;` -- so leaf 0 was the array and leaf 1 was
-// whatever the last multi-value call left behind.
+// concrete result ABI, so the caller's `c0 = f(); c1 = __rock_ret1;` capture
+// reads this call's leaves.
 
 // The luajit sibling returns its leaves natively; the JS one publishes them.
 // Both are the same boundary, which is the whole point -- the two transports
