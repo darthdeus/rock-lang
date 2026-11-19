@@ -1,8 +1,4 @@
-//! Lua emission for a transformed `co fn`: the stackless `__step` (via the dumb
-//! printer, with a frame context) + the stdlib Coroutine constructor. The
-//! MIR->MIR transform itself lives in `skull_transform::transform_coroutine`;
-//! this module is the Lua-printing consumer (unfuck #57: the transform crate is
-//! printer-free).
+//! Lua emission for a transformed `co fn`: the `__step` and its constructor.
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::CompilerError;
@@ -62,9 +58,6 @@ pub(crate) fn emit_coroutine_with_artifact(
         allocation_bodies: Vec::new(),
     };
     out.emit(&step_name, plan.base(), &lowered.step, Some(&frame));
-    // Named nested fns take the ordinary nested-fn path; hoisted lambda bodies
-    // are frame-free siblings (their frame accesses are already
-    // `e.c<S>.c<slot>` MIR), so they need no `FrameCtx`.
     let mut nested_deps = FxHashSet::default();
     let mut nested_statics = lowered.step.statics.clone();
     let mut nested_times = crate::mir_emit::PhaseTimes::default();
@@ -86,8 +79,6 @@ pub(crate) fn emit_coroutine_with_artifact(
         out.emit(&nf.name, &nf.name, nf, None);
     }
     lowered.step.nested_fns = hoisted;
-    // Terminal-cleanup defers and lifecycle hooks are ordinary functions, with
-    // their converted lambda siblings emitted beside them.
     for aux in defers.iter().chain(hooks.iter().map(|(_, aux)| aux)) {
         out.emit(&aux.name, &aux.name, aux, None);
         for nf in &aux.nested_fns {
@@ -160,8 +151,6 @@ fn emit_coroutine_body(
 ) -> CoroutineBodyEmission {
     if !crate::allocation_report::enabled() {
         return CoroutineBodyEmission {
-            // A coroutine `__step` is not a declaration of its own, so it
-            // has no call-graph component and binds no callees.
             lua: emit_named_framed(ws, ctx, interner, emitted_name, func, frame, None),
             body: None,
         };
@@ -191,9 +180,7 @@ fn emit_coroutine_body(
     CoroutineBodyEmission { lua, body }
 }
 
-/// Construct the frame with step-bound resume/advance CodeRefs. Frame cells
-/// use dense `c<N>` slots; the frame local keeps its raw cell id so detached
-/// hooks and the step address the same fields.
+/// Construct the frame with step-bound resume/advance CodeRefs.
 fn emit_constructor(
     plan: &CoroutinePlan,
     step_name: &str,
@@ -228,8 +215,6 @@ fn emit_constructor(
     for pf in &param_fields {
         init.push(format!("{pf} = {pf}"));
     }
-    // Terminal-cleanup CodeRefs retain the old frame's logical body across a
-    // compatible overlay; runners iterate them in reverse for LIFO.
     if !defer_keys.is_empty() {
         let list: Vec<String> = defer_keys
             .iter()
@@ -243,7 +228,6 @@ fn emit_constructor(
         init.push(format!("__defers = {{ {} }}", list.join(", ")));
     }
 
-    // Lifecycle hook fields are logical CodeRefs, not copied backend bodies.
     for ((kind, _), key) in lowered.hooks.iter().zip(hook_keys) {
         let field = kind.slot();
         init.push(format!(
@@ -258,12 +242,6 @@ fn emit_constructor(
         format!("{step_name}(s, arg)")
     };
 
-    // Frame-slot channel: the step writes yield leaves to reused `s.__y*` slots
-    // and returns nothing. The OBJECT IS THE FRAME (one table per creation):
-    // `__advance(s, arg)` steps (returns done-bool) and a concrete consumer reads
-    // the `__y*` leaves threaded off the object itself (0 alloc). The
-    // generic/boxed `__resume` rebuilds one `{__variant}` box from the slots --
-    // same external `Y?` for erased consumers (correct, allocates, rare).
     if let Some(ch) = channel {
         let mut box_fields = format!(
             "{{__variant = s.{tag}, __ty = {ty}",
@@ -282,19 +260,9 @@ fn emit_constructor(
             );
         }
         box_fields.push('}');
-        // Seed every yield slot in the literal and clear it to nil, so each
-        // slot has a hash node from birth. The step then only ever writes
-        // PRESENT keys: yield writes do not grow or rehash it under a trace, a
-        // frame that stays inside one trace can be sunk (measured 196 -> 2 ns
-        // per short-lived coroutine; 222 -> 108 ns when the handle escapes),
-        // and a nil store into a full frame cannot hit the repeated-rehash
-        // path (docs/luajit-performance.md). The clears keep the seeds
-        // invisible: a nil-valued node does not appear to pairs or snapshots,
-        // and no slot is readable before the first yield writes it. The
-        // template is copied by one TDUP either way. Resumed frames use
-        // the same memory; a wide frame never resumed can be larger because
-        // growth happens at creation. The step's nil-write guards stay: a frame
-        // rebuilt by a host copy (snapshot restore) has no seeded nodes.
+        // Seed every yield slot in the literal and clear it to nil, so each slot
+        // has a hash node from birth and yield writes never grow or rehash the
+        // frame under a trace. A frame rebuilt by a host copy has no seeded nodes.
         let slot_count = ch.leaf_count();
         let mut clears = String::new();
         for i in 0..slot_count {

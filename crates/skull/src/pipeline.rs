@@ -1,8 +1,4 @@
-//! The compile pipeline: parsed modules to an emitted program, through every
-//! gate a build applies, in order. A host (the command line, a browser)
-//! supplies what needs a filesystem or a process -- alias tables, build
-//! inputs, the lint report set, where diagnostics go -- through
-//! [`CompileHost`]; it never decides whether a program compiles.
+//! The compile pipeline: parsed modules to an emitted program.
 
 use bone_core::modules::NsAliases;
 use bone_semantic::inference::{ComptimeInputs, Workspace};
@@ -14,10 +10,8 @@ use ustr::Ustr;
 
 use crate::mir_emit::{MirEmit, RendererTarget};
 
-/// Parse the process stdlib on another thread, so a host that discovers and
-/// reads its sources serially finds it ready when [`with_stdlib`] asks. A
-/// caller that arrives first waits for the parse in progress; nothing is
-/// parsed twice.
+/// Parse the process stdlib on another thread, so [`with_stdlib`] finds it
+/// ready.
 pub fn warm_stdlib() {
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(|| {
@@ -25,16 +19,12 @@ pub fn warm_stdlib() {
     });
 }
 
-/// The shared process stdlib with `user` modules after it: the module set
-/// every non-incremental compile checks. A stdlib that does not parse is the
-/// error ([`skull_parser::stdlib::cached`], the loader the editor shares).
+/// The shared process stdlib with `user` modules after it.
 pub fn with_stdlib(user: impl IntoIterator<Item = Ast>) -> Result<ModuleSet, CompilerError> {
     ModuleSet::with_stdlib(user)
 }
 
-/// Every recovered syntax error across `modules`, in module order. Parsing is
-/// total, so a compile refuses a program with any syntax error here; the
-/// editor keeps the partial tree and shows the same errors as diagnostics.
+/// Every recovered syntax error across `modules`, in module order.
 pub fn syntax_errors<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> Vec<CompilerError> {
     modules
         .into_iter()
@@ -43,9 +33,6 @@ pub fn syntax_errors<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> Vec<Comp
 }
 
 /// Lower and type-check `modules`.
-/// Recovered trees and recorded body errors remain available to tooling.
-/// [`check_modules`] applies the syntax and macro admission gates, and
-/// [`compile_modules`] also refuses recorded body errors before emission.
 pub fn semantic_pass(
     modules: &mut ModuleSet,
     aliases: &NsAliases,
@@ -61,11 +48,8 @@ fn apply_closure_gate(mut ws: Workspace) -> Result<Workspace, CompilerError> {
     Ok(ws)
 }
 
-/// The front half over an assembled module set: syntax and macro gates, the
-/// semantic pass, then the syntax gate again over the expanded trees. `Err`
-/// carries every diagnostic of the first failing gate; `Ok` carries the body
-/// errors beside the workspace, since `semantic_pass` succeeding means
-/// "lowered and checked", not "no type errors".
+/// Syntax and macro gates, the semantic pass, then the syntax gate again over
+/// the expanded trees. `Ok` carries the body errors beside the workspace.
 pub fn check_modules(
     modules: &mut ModuleSet,
     aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
@@ -96,9 +80,6 @@ pub fn check_modules(
         Err(bone_semantic::semantic_passes::PassFailure::Pass(error)) => Err(error),
         Ok(ws) => apply_closure_gate(ws),
     };
-    // Expansion recovers: a macro that must not expand records the reason on
-    // `recovery_errors` and leaves the call in place. That reason explains
-    // any type error the unexpanded call caused, so it reports first.
     let expanded_syntax = syntax_errors(modules.iter());
     if !expanded_syntax.is_empty() {
         return Err(expanded_syntax);
@@ -112,7 +93,6 @@ pub fn check_modules(
     Ok((ws, errs))
 }
 
-/// Check declaration collisions before expansion removes macro definitions.
 fn macro_gates(modules: &[&Ast]) -> Vec<CompilerError> {
     skull_parser::check_macro_name_uniqueness(modules.iter().copied())
 }
@@ -126,8 +106,7 @@ pub fn warm_module_ids(ws: &Workspace, sources: &FxHashMap<Ustr, &str>) -> FxHas
         .collect()
 }
 
-/// Split lint findings into the `Error`s that refuse the program and the
-/// softer tiers that only report.
+/// Split lint findings into refusing `Error`s and the tiers that only report.
 pub fn split_findings(
     found: Vec<bone_lints::Finding>,
 ) -> (Vec<CompilerError>, Vec<bone_lints::Finding>) {
@@ -137,7 +116,6 @@ pub fn split_findings(
     (errors.into_iter().map(|f| f.error).collect(), soft)
 }
 
-/// What a compile needs from its host.
 /// A boundary the host may measure.
 pub enum Phase<'a> {
     /// The entry source and the stdlib are parsed ([`compile_source`] only).
@@ -157,8 +135,6 @@ pub trait CompileHost {
     /// once the program has type-checked.
     fn comptime_inputs(&mut self) -> Result<ComptimeInputs, CompilerError>;
 
-    /// Resolve compiler-derived inputs against the checked workspace. Hosts
-    /// without deferred declarations retain the ordinary input contract.
     fn checked_comptime_inputs(
         &mut self,
         _ws: &Workspace,
@@ -166,14 +142,10 @@ pub trait CompileHost {
         self.comptime_inputs()
     }
 
-    /// The lint findings for this build's own files. The host chooses the
-    /// report set and the closed-world flag; [`warm_module_ids`] and
-    /// `bone_lints::lint_workspace` compute them.
+    /// The lint findings for this build's own files.
     fn lint_findings(&mut self, ws: &Workspace) -> Vec<bone_lints::Finding>;
     /// [`Self::checked_comptime_inputs`] and [`Self::lint_findings`] for one
-    /// checked workspace. Neither reads what the other produces, so a host
-    /// may run them side by side; the findings of a build whose inputs fail
-    /// are never read.
+    /// checked workspace.
     fn checked_inputs_and_lints(
         &mut self,
         ws: &Workspace,
@@ -188,9 +160,7 @@ pub trait CompileHost {
     }
     /// Present the findings that do not refuse the program.
     fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>);
-    /// Emit the checked program. The host selects the roots: a test build
-    /// roots at its tests, every other build at the program entry. The
-    /// pipeline keeps one check-lint-emit order and never branches on kind.
+    /// Emit the checked program.
     fn emit(
         &mut self,
         ws: &Workspace,
@@ -207,7 +177,6 @@ pub fn emit_program(
     entry: ModuleId,
     target: EmitTarget,
 ) -> Result<MirEmit, CompilerError> {
-    // The one-shot program is written once; nothing replays or reloads it.
     let mut emit = crate::mir_emit::FullEmit::one_shot()
         .without_fingerprint()
         .project_root(target.project_root)
@@ -219,18 +188,14 @@ pub fn emit_program(
         emit = emit.with_attribution();
     }
     emit.run(ws, entry).map(|(emit, cache)| {
-        // The emitted program is complete; the cache is dead weight
-        // whose release need not delay it.
         crate::mir_emit::par::drop_in_background(cache);
         emit
     })
 }
 
-/// Where emission prunes and which renderer it targets.
 #[derive(Clone, Copy)]
 pub struct EmitTarget<'a> {
-    /// A project build's directory: modules outside it are libraries and
-    /// prune to what the project reaches. `None` for a single source.
+    /// A project build's directory; `None` for a single source.
     pub project_root: Option<&'a str>,
     pub renderer: RendererTarget,
     /// Emit reflection accessors for unboxed mutable globals.
@@ -248,7 +213,6 @@ impl EmitTarget<'_> {
     };
 }
 
-/// The stage a compile stopped at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     Parse,
@@ -291,8 +255,7 @@ pub fn compile_source(
     compile_modules(modules, entry, target, host)
 }
 
-/// Compile an assembled module set (stdlib included) whose program starts in
-/// the module parsed from `entry`.
+/// Compile an assembled module set (stdlib included) starting at `entry`.
 pub fn compile_modules(
     mut modules: ModuleSet,
     entry: Ustr,
@@ -305,15 +268,10 @@ pub fn compile_modules(
         return Err(CompileFailure::at(Stage::Check, body_errors));
     }
     host.phase(Phase::Checked(&ws));
-    // The workspace owns everything lints and emission read; the parse trees
-    // would otherwise stay live through the emission peak. Freeing them is
-    // not this thread's work.
     crate::mir_emit::par::drop_in_background(modules);
     let (inputs, findings) = host.checked_inputs_and_lints(&ws);
     ws.comptime_inputs = inputs.map_err(|e| CompileFailure::at(Stage::Comptime, vec![e]))?;
     let entry = ws.module_ids[&entry];
-    // Lints are a compiler pass: an `Error` finding refuses the program
-    // through the same path a type error takes.
     let (lint_errors, soft) = split_findings(findings);
     host.report_soft_findings(soft);
     if !lint_errors.is_empty() {

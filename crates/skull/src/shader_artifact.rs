@@ -1,6 +1,3 @@
-//! Realize shader roots and their helpers from the shared instance graph.
-//! The GLSL backend checks the retained bodies against the requested profile.
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
@@ -15,26 +12,20 @@ use crate::target_projection::{ShaderTargetSpec, TargetSpec};
 
 pub use crate::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
 
-/// Everything one shader artifact view is taken through.
 pub struct ShaderArtifactRequest<'a> {
     pub spec: TargetSpec,
-    /// The shader PROGRAMS, an input exactly like the CPU artifact's emission
-    /// roots. Production reads them from `skull_mir::lower`'s `rock_shader`
-    /// collector; the view never re-derives them.
+    /// The shader programs, read from the `rock_shader` collector.
     pub programs: &'a [ShaderProgram],
 }
 
-/// An entry rejected by GLSL planning.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ShaderRejection {
     /// The entry whose signature, body or helper the GLSL pass refused.
     pub instance: Instance,
-    /// The emitter's own diagnostic, verbatim.
     pub message: String,
     pub span: Span,
 }
 
-/// One target's SHADER artifact.
 #[derive(Clone)]
 pub struct ShaderArtifactView {
     pub profile: GlslProfile,
@@ -42,19 +33,12 @@ pub struct ShaderArtifactView {
     pub roots: BTreeSet<Instance>,
     /// Helpers reached from those entries. Disjoint from `roots`.
     pub helpers: BTreeSet<Instance>,
-    /// Instances rendered INLINE at call sites (a GLSL intrinsic template or a
-    /// Vec operator's native infix). Reached, never traversed and never
-    /// emitted as a definition -- `skull_codegen_glsl`'s own leaf rule.
+    /// Instances rendered inline at call sites, never emitted as definitions.
     pub builtins: BTreeSet<Instance>,
     pub rejections: Vec<ShaderRejection>,
-    /// Per-program roots and retained populations, aligned with the request's
-    /// `programs` slice. Missing graph roots remain represented by an empty
-    /// stage list so a denominator cannot silently shrink.
+    /// Per-program roots and retained populations, aligned with `programs`.
     pub program_views: Vec<ShaderProgramView>,
-    /// The GLSL plan the profile pass built for each program it accepted,
-    /// aligned with `program_views`; emission renders these rather than
-    /// planning the program again. `None` where the program was not checked
-    /// or was rejected.
+    /// The GLSL plan for each accepted program, aligned with `program_views`.
     pub program_plans: Vec<Option<Arc<skull_codegen_glsl::ShaderPlan>>>,
 }
 
@@ -72,8 +56,6 @@ impl ShaderArtifactView {
 
 /// Realize the shader half of `req.spec` over the shared `g`, or `None` when
 /// this target packages no GLSL beside its CPU artifact.
-///
-/// `g` is `&`, so this cannot discover any more than the CPU view can.
 pub fn realize_shader(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -84,9 +66,7 @@ pub fn realize_shader(
     realize_shader_with_context_and_plans(ws, g, req, &scx, None)
 }
 
-/// Realize a shader view with the lowering context that shares the graph's
-/// interner. Production emission uses this entry point so concrete graph ids
-/// and lowered shader bodies are read from one arena.
+/// Realize a shader view with the lowering context that shares the graph's interner.
 pub fn realize_shader_with_context(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -96,12 +76,6 @@ pub fn realize_shader_with_context(
     realize_shader_with_context_and_plans(ws, g, req, scx, None)
 }
 
-/// `plans`: the build's own concrete-plan table when the caller has one (the
-/// emit drivers, which built it from the same graph moments earlier) -- the
-/// plans are a pure function of `(ws, graph)`, so sharing is identity-safe.
-/// `None` derives a fresh table here and is for STANDALONE tools only
-/// (shader-validate, `rock web`'s offline view, manifests); an emit path
-/// passing `None` is re-doing setup work it already paid for.
 pub(crate) fn realize_shader_with_context_and_plans(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -124,8 +98,6 @@ pub(crate) fn realize_shader_with_context_and_plans(
         .cloned()
         .collect();
 
-    // Retention: the same graph-site walk shape the CPU view runs, from a
-    // different shader root set. Inline callees are packaging leaves.
     let mut helpers: BTreeSet<Instance> = BTreeSet::new();
     let mut builtins: BTreeSet<Instance> = BTreeSet::new();
     let mut seen: BTreeSet<Instance> = roots.clone();
@@ -164,9 +136,6 @@ pub(crate) fn realize_shader_with_context_and_plans(
         let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
         roots.iter().find(|i| DeclKey(i.func) == key)
     };
-    // Each program's view and profile check read the shared graph, plans and
-    // scalar context; the programs are independent, so they fan out, and the
-    // results are folded in program order.
     let program_views: Vec<ShaderProgramView> = {
         use bone_core::prelude::*;
         req.programs
@@ -191,7 +160,6 @@ pub(crate) fn realize_shader_with_context_and_plans(
             })
             .collect()
     };
-    // Validate each retained entry with its stage and requested profile.
     let programs: Vec<(&ShaderProgram, &ShaderProgramView)> =
         req.programs.iter().zip(&program_views).collect();
     let checks: Vec<_> = {
@@ -236,8 +204,6 @@ fn check_program(
     program: &ShaderProgram,
     program_view: &ShaderProgramView,
 ) -> Option<Result<skull_codegen_glsl::ShaderPlan, ShaderRejection>> {
-    // The PROGRAM's own root instances -- the fragment entry, and the
-    // vertex stage when the pair has one.
     let entry_of = |r: FuncRef| -> Option<&Instance> {
         let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
         roots.iter().find(|i| DeclKey(i.func) == key)
@@ -247,8 +213,6 @@ fn check_program(
     if let Some(v) = program.vert {
         match entry_of(v) {
             Some(i) => program_roots.push(i.clone()),
-            // A registered vertex stage the graph holds no instance for is
-            // not something this pass may check around.
             None => {
                 return None;
             }
@@ -261,8 +225,6 @@ fn check_program(
     {
         return None;
     }
-    // The profile pass IS the planning of the program; the plan it
-    // produces is kept so emission renders it instead of planning again.
     Some(
         skull_codegen_glsl::plan_shader_with_view(ws, scx, program_view).map_err(|error| {
             let f = &ws.module(root.func.module).functions[root.func.func];
@@ -356,10 +318,7 @@ fn postorder(
     }
 }
 
-/// The instances reachable from `roots` over the RETAINED shader call relation
-/// -- one program's own packaged set, taken from the same recorded edges the
-/// whole-artifact walk built. Roots are included: an entry's own substitution
-/// governs the declaration-based pass exactly as a helper's does.
+/// The instances reachable from `roots` over the retained shader call relation.
 fn reachable_from(
     roots: &[Instance],
     edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,

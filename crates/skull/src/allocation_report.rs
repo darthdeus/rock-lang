@@ -128,9 +128,7 @@ impl From<skull_codegen_lua::EmittedAllocationKind> for AllocationKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllocationSite {
-    /// Artifact-local identity shared by the static report and its instrumented
-    /// build. It is deterministic for one emitted artifact; it is
-    /// not promised stable after edits move or reshape this body.
+    /// Artifact-local identity; not stable after edits move or reshape this body.
     pub id: u64,
     pub kind: AllocationKind,
     pub span: Option<Span>,

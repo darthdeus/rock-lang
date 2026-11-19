@@ -1,9 +1,4 @@
 //! The compiler-owned semantic identity of one emitted runtime Artifact.
-//!
-//! This is deliberately built from compiler facts before a backend writes its
-//! payload. Generated Lua is not an identity authority: backend text is a
-//! realization, while the plans below are the inputs that make that text
-//! executable and reload-compatible.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -32,9 +27,7 @@ impl fmt::Display for FingerprintError {
 
 impl std::error::Error for FingerprintError {}
 
-/// Build the exact identity consumed by both replay recording and replay
-/// admission. The input is a canonical semantic inventory; no generated
-/// backend text is parsed or hashed.
+/// The exact identity consumed by replay recording and replay admission.
 pub fn compute(
     ws: &Workspace,
     interner: &MonoInterner,
@@ -250,8 +243,6 @@ fn write_code_row(
     Ok(())
 }
 
-// Both indexes share persistent search paths so transaction snapshots retain
-// their rows without copying the canonical inventory.
 #[derive(Clone, Default)]
 pub(crate) struct CodeRows {
     root: Option<Arc<RowNode<(String, CodeIdentity), Vec<u8>>>>,
