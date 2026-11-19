@@ -35,70 +35,18 @@ pub(super) fn emit_decorator_unit(
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(mut mf) => {
-            out.attribution.examined = true;
-            out.attribution.hir_nodes = hir_nodes_for_owner(ws, mid, BodyOwner::Decorator(did));
-            out.attribution.mir_instructions = mf.insts.len();
-            out.attribution.mir_lowered = mf.insts.len();
-            out.attribution.lower_facts = mf.lower_attribution.clone();
-            out.times.lower_work = out.attribution.mir_instructions > 0;
-            if let Err(e) = convert_unit_body(ws, cg, &mut mf, &deco_name, &mut out.times) {
-                out.hard_error = Some(e);
-                return out;
-            }
             let plan = concrete_plan.expect("a lowered decorator has a concrete plan");
-            out.attribution.always_lowered = true;
-            out.attribution
-                .always_callee_keys
-                .extend(plan.callees.values().map(|callee| callee.instance.clone()));
-            let tv = Instant::now();
-            let check = check_unit_spec_bindings(ws, mid, &deco_name, &mf, d.span, &mut out.specs);
-            out.times.validation += tv.elapsed();
-            out.times.validation_work = true;
-            if let Err(e) = check {
-                out.hard_error = Some(e);
+            let unit = UnitBody {
+                mid,
+                owner: BodyOwner::Decorator(did),
+                symbol: &deco_name,
+                check_name: &deco_name,
+                source_name: d.name.as_str(),
+                span: d.span,
+            };
+            let Some(lua) = unit.emit(ws, scx, cg, plan, &mut mf, &mut out) else {
                 return out;
-            }
-            skull_codegen_lua::regalloc_time_reset();
-            let te = Instant::now();
-            let emission = emit_named_with_allocation_report(
-                ws,
-                cg,
-                scx.interner(),
-                &deco_name,
-                &mut mf,
-                &[],
-                None,
-            );
-            let mut lua = emission.lua;
-            if let Some(body) = crate::allocation_report::collect_emitted_body(
-                ws,
-                scx.interner(),
-                &deco_name,
-                d.name.as_str(),
-                &mf,
-                emission.allocation_sites,
-            ) {
-                out.allocation_bodies.push(body);
-            }
-            let root_emit = te.elapsed();
-            out.times.emit += root_emit;
-            out.times.emit_work |= root_emit > Duration::ZERO;
-            let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
-            out.times.regalloc += regalloc;
-            out.times.regalloc_work |= regalloc > Duration::ZERO;
-            if let Err(e) = emit_pass_nested_fns(
-                ws,
-                cg,
-                scx,
-                &mut mf.nested_fns,
-                &mf.statics,
-                Some(&mut out.allocation_bodies),
-                &mut lua,
-                &mut out.times,
-            ) {
-                out.hard_error = Some(e);
-                return out;
-            }
+            };
             emit_lowered(
                 ws,
                 cg,

@@ -161,3 +161,86 @@ pub(super) fn emit_lowered(
     out.times.regalloc += regalloc;
     out.times.regalloc_work |= regalloc > Duration::ZERO;
 }
+
+/// A decorator or global-initializer body, which runs once at chunk load.
+pub(super) struct UnitBody<'a> {
+    pub(super) mid: ModuleId,
+    pub(super) owner: BodyOwner,
+    pub(super) symbol: &'a str,
+    pub(super) check_name: &'a str,
+    pub(super) source_name: &'a str,
+    pub(super) span: bone_semantic::prelude::Span,
+}
+
+impl UnitBody<'_> {
+    /// Convert, check and print a lowered unit body with its hoisted
+    /// functions. `None` once `out.hard_error` is set.
+    pub(super) fn emit(
+        &self,
+        ws: &Workspace,
+        scx: &skull_mir::lower::ScalarCtx,
+        cg: &CodegenCtx,
+        plan: &skull_mir::concrete::ConcreteBodyPlan,
+        mf: &mut MirFunc,
+        out: &mut UnitOut,
+    ) -> Option<String> {
+        out.attribution.examined = true;
+        out.attribution.hir_nodes = hir_nodes_for_owner(ws, self.mid, self.owner);
+        out.attribution.mir_instructions = mf.insts.len();
+        out.attribution.mir_lowered = mf.insts.len();
+        out.attribution.lower_facts = mf.lower_attribution.clone();
+        out.times.lower_work = out.attribution.mir_instructions > 0;
+        if let Err(e) = convert_unit_body(ws, cg, mf, self.symbol, &mut out.times) {
+            out.hard_error = Some(e);
+            return None;
+        }
+        out.attribution.always_lowered = true;
+        out.attribution
+            .always_callee_keys
+            .extend(plan.callees.values().map(|callee| callee.instance.clone()));
+        let tv = Instant::now();
+        let check =
+            check_unit_spec_bindings(ws, self.mid, self.check_name, mf, self.span, &mut out.specs);
+        out.times.validation += tv.elapsed();
+        out.times.validation_work = true;
+        if let Err(e) = check {
+            out.hard_error = Some(e);
+            return None;
+        }
+        skull_codegen_lua::regalloc_time_reset();
+        let te = Instant::now();
+        let emission =
+            emit_named_with_allocation_report(ws, cg, scx.interner(), self.symbol, mf, &[], None);
+        let mut lua = emission.lua;
+        if let Some(body) = crate::allocation_report::collect_emitted_body(
+            ws,
+            scx.interner(),
+            self.symbol,
+            self.source_name,
+            mf,
+            emission.allocation_sites,
+        ) {
+            out.allocation_bodies.push(body);
+        }
+        let root_emit = te.elapsed();
+        out.times.emit += root_emit;
+        out.times.emit_work |= root_emit > Duration::ZERO;
+        let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
+        out.times.regalloc += regalloc;
+        out.times.regalloc_work |= regalloc > Duration::ZERO;
+        if let Err(e) = emit_pass_nested_fns(
+            ws,
+            cg,
+            scx,
+            &mut mf.nested_fns,
+            &mf.statics,
+            Some(&mut out.allocation_bodies),
+            &mut lua,
+            &mut out.times,
+        ) {
+            out.hard_error = Some(e);
+            return None;
+        }
+        Some(lua)
+    }
+}

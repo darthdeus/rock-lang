@@ -361,78 +361,19 @@ pub(super) fn emit_global_unit(
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(Some(mut mf)) => {
-            out.attribution.examined = true;
-            out.attribution.hir_nodes = hir_nodes_for_owner(ws, mid, BodyOwner::Global(gid));
-            out.attribution.mir_instructions = mf.insts.len();
-            out.attribution.mir_lowered = mf.insts.len();
-            out.attribution.lower_facts = mf.lower_attribution.clone();
-            out.times.lower_work = out.attribution.mir_instructions > 0;
-            if let Err(e) = convert_unit_body(ws, cg, &mut mf, &init_name, &mut out.times) {
-                out.hard_error = Some(e);
-                return out;
-            }
             let plan = concrete_plan.expect("a lowered global has a concrete plan");
-            out.attribution.always_lowered = true;
-            out.attribution
-                .always_callee_keys
-                .extend(plan.callees.values().map(|callee| callee.instance.clone()));
-            let tv = Instant::now();
-            let check = check_unit_spec_bindings(
-                ws,
+            let unit = UnitBody {
                 mid,
-                g.name.as_str(),
-                &mf,
-                g.name_span,
-                &mut out.specs,
-            );
-            out.times.validation += tv.elapsed();
-            out.times.validation_work = true;
-            if let Err(e) = check {
-                out.hard_error = Some(e);
+                owner: BodyOwner::Global(gid),
+                symbol: &init_name,
+                check_name: g.name.as_str(),
+                source_name: g.name.as_str(),
+                span: g.name_span,
+            };
+            let Some(mut lua) = unit.emit(ws, scx, cg, plan, &mut mf, &mut out) else {
                 return out;
-            }
+            };
             let key = Ustr::from(&init_name);
-            skull_codegen_lua::regalloc_time_reset();
-            let te = Instant::now();
-            let emission = emit_named_with_allocation_report(
-                ws,
-                cg,
-                scx.interner(),
-                &init_name,
-                &mut mf,
-                &[],
-                None,
-            );
-            let mut lua = emission.lua;
-            if let Some(body) = crate::allocation_report::collect_emitted_body(
-                ws,
-                scx.interner(),
-                &init_name,
-                g.name.as_str(),
-                &mf,
-                emission.allocation_sites,
-            ) {
-                out.allocation_bodies.push(body);
-            }
-            let root_emit = te.elapsed();
-            out.times.emit += root_emit;
-            out.times.emit_work |= root_emit > Duration::ZERO;
-            let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
-            out.times.regalloc += regalloc;
-            out.times.regalloc_work |= regalloc > Duration::ZERO;
-            if let Err(e) = emit_pass_nested_fns(
-                ws,
-                cg,
-                scx,
-                &mut mf.nested_fns,
-                &mf.statics,
-                Some(&mut out.allocation_bodies),
-                &mut lua,
-                &mut out.times,
-            ) {
-                out.hard_error = Some(e);
-                return out;
-            }
             let returned = lua
                 .strip_prefix(&format!("function {init_name}()\n do return "))
                 .and_then(|rest| rest.strip_suffix(" end\nend\n"))
