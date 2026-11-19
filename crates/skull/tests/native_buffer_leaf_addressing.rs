@@ -20,20 +20,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn nested_value_store_materializes_no_ctor() {
-    let lua = emit_module(NESTED_STORE);
-    let body = function_body(&lua, "fill");
-    assert!(!body.contains("V2_ct("));
-}
-
-#[test]
-fn nested_value_store_takes_no_slot_reference() {
-    let lua = emit_module(NESTED_STORE);
-    let body = function_body(&lua, "fill");
-    assert!(!body.contains("__nb_checked_get("));
-}
-
 const NESTED_READ: &str = r#"
 value V2 { x: float, y: float }
 value Vert { pos: V2, uv: V2, id: int, w: float }
@@ -56,9 +42,11 @@ fn main() {
 "#;
 
 #[test]
-fn a_whole_element_store_bounds_checks_exactly_once_first() {
+fn a_whole_element_store_bounds_checks_once_without_ctor_or_slot_reference() {
     let lua = emit_module(NESTED_STORE);
     let body = function_body(&lua, "fill");
+    assert!(!body.contains("V2_ct("));
+    assert!(!body.contains("__nb_checked_get("));
 
     let checks = body.matches("checked").count();
     assert_eq!(checks, 1);

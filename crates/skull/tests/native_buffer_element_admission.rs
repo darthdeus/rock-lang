@@ -1,4 +1,4 @@
-use crate::common::{module_id, try_emit_module, ws_with_stdlib};
+use crate::common::try_emit_module;
 
 const NATIVEBUFFER_STRING: &str = r#"
 fn bad(n: int) -> NativeBuffer<string> { return native_buffer_alloc(n) }
@@ -32,37 +32,23 @@ fn main() {
 }
 "#;
 
-fn reject(src: &str) -> skull_parser::CompilerError {
-    try_emit_module(src).expect_err("invalid native-buffer element must reject")
-}
-
-fn assert_planner_rejection(error: &skull_parser::CompilerError, element: &str) {
-    let msg = &error.message;
-    assert!(msg.contains("requires a valid native-buffer element ctype") && msg.contains(element));
-    assert!(!error.labels.is_empty());
-}
-
 #[test]
-fn native_buffer_string_rejects_at_the_planner_boundary() {
-    let msg = reject(NATIVEBUFFER_STRING);
-    assert_planner_rejection(&msg, "string");
-}
-
-#[test]
-fn flat_vec_string_rejects_through_its_allocation_route() {
-    let msg = reject(FLATVEC_STRING);
-    assert_planner_rejection(&msg, "string");
-}
-
-#[test]
-fn gc_carrying_value_rejects_with_its_concrete_name() {
-    let msg = reject(GC_VALUE);
-    assert_planner_rejection(&msg, "GcValue");
+fn non_c_elements_reject_at_the_planner_boundary() {
+    for (src, element) in [
+        (NATIVEBUFFER_STRING, "string"),
+        (FLATVEC_STRING, "string"),
+        (GC_VALUE, "GcValue"),
+    ] {
+        let error = try_emit_module(src).expect_err(element);
+        let msg = &error.message;
+        assert!(
+            msg.contains("requires a valid native-buffer element ctype") && msg.contains(element)
+        );
+        assert!(!error.labels.is_empty());
+    }
 }
 
 #[test]
 fn native_buffer_primitives_and_ffi_value_are_valid_controls() {
-    let ws = ws_with_stdlib(VALID_CONTROLS);
-    let mid = module_id(&ws, "<test>");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("valid c-mappable elements must emit");
+    try_emit_module(VALID_CONTROLS).expect("valid c-mappable elements must emit");
 }

@@ -1,6 +1,4 @@
-use crate::common::{
-    activation_scope, compile_and_run, emit_mir, emit_module, run_luajit, run_main, try_emit_module,
-};
+use crate::common::{activation_scope, compile_and_run, emit_mir, emit_module, run_luajit};
 
 #[test]
 fn a_read_only_snapshot_does_not_rebox_its_nullable_child() {
@@ -29,9 +27,11 @@ fn make_wide(seed: int) -> Wide {{ Wide {{ f0: seed }} }}
     assert_eq!(run_luajit(&format!("{lua}\nprint(read_only(7))")), "14");
 }
 
-fn remove_handle(method: &str) {
-    let source = format!(
-        r#"
+#[test]
+fn generic_handle_removal_keeps_its_concrete_type() {
+    for method in ["remove_at", "swap_remove"] {
+        let source = format!(
+            r#"
 struct Item {{ number: int }}
 fn remove<T>(items: [T]) -> T? {{ return items.{method}(0) }}
 fn main() {{
@@ -43,19 +43,9 @@ fn main() {{
     print(removed.get().unwrap().number, items[0].get().unwrap().number, items.len)
 }}
 "#
-    );
-    let lua = try_emit_module(&source).expect("generic handle removal must lower");
-    assert_eq!(run_main(&lua), "7\t9\t1");
-}
-
-#[test]
-fn generic_handle_remove_at_keeps_its_concrete_type() {
-    remove_handle("remove_at");
-}
-
-#[test]
-fn generic_handle_swap_remove_keeps_its_concrete_type() {
-    remove_handle("swap_remove");
+        );
+        assert_eq!(compile_and_run(&source), "7\t9\t1", "{method}");
+    }
 }
 
 #[test]
@@ -107,7 +97,6 @@ print(bytes)
 "#
     ));
     let bytes: f64 = out.parse().expect("bytes per slot update");
-    eprintln!("coroutine slot bytes/update: {bytes}");
     assert!(bytes < 1.0);
 }
 
@@ -136,7 +125,7 @@ value HandleRow { handle: Entity<int>?, sequence: int }
 fn main() { let _ = retain(relay(make(42.0))) }
 "#;
 
-fn allocation_probe(probe: &str) -> String {
+fn allocation_probe_lua() -> String {
     let _activation = activation_scope(true);
     let emit = emit_mir(SOURCE);
     let mut lua = emit.lua;
@@ -172,97 +161,75 @@ local receipt = make(42)
 tables, cdata = 0, 0
 "#,
     );
-    lua.push_str(probe);
-    run_luajit(&lua)
+    lua
 }
 
 #[test]
-fn returning_a_record_keeps_its_boxed_child() {
-    assert_eq!(
-        allocation_probe(
+fn records_and_handles_crossing_calls_keep_their_boxed_children() {
+    let lua = allocation_probe_lua();
+    for (case, probe, expected) in [
+        (
+            "returning a record keeps its boxed child",
             r#"
 local result = relay(receipt)
 print(tables, cdata, rawequal(receipt.landing, result.landing))
-"#
+"#,
+            "0\t0\ttrue",
         ),
-        "0\t0\ttrue"
-    );
-}
-
-#[test]
-fn returning_an_immutable_conditional_local_keeps_its_boxed_child() {
-    assert_eq!(
-        allocation_probe(
+        (
+            "returning an immutable conditional local keeps its boxed child",
             r#"
 local second = make(7)
 tables, cdata = 0, 0
 local first_result = select_receipt(receipt, second, true)
 local second_result = select_receipt(receipt, second, false)
 print(tables, cdata, rawequal(receipt.landing, first_result.landing), rawequal(second.landing, second_result.landing))
-"#
+"#,
+            "0\t0\ttrue\ttrue",
         ),
-        "0\t0\ttrue\ttrue"
-    );
-}
-
-#[test]
-fn returning_an_immutable_match_local_keeps_its_boxed_child() {
-    assert_eq!(
-        allocation_probe(
+        (
+            "returning an immutable match local keeps its boxed child",
             r#"
 local second = make(7)
 tables, cdata = 0, 0
 local first_result = match_receipt(receipt, second, true)
 local second_result = match_receipt(receipt, second, false)
 print(tables, cdata, rawequal(receipt.landing, first_result.landing), rawequal(second.landing, second_result.landing))
-"#
+"#,
+            "0\t0\ttrue\ttrue",
         ),
-        "0\t0\ttrue\ttrue"
-    );
-}
-
-#[test]
-fn passing_a_record_into_an_enum_keeps_its_boxed_child() {
-    assert_eq!(
-        allocation_probe(
+        (
+            "passing a record into an enum keeps its boxed child",
             r#"
 local result = retain(receipt)
 print(tables, cdata, rawequal(receipt.landing, result[1]))
-"#
+"#,
+            "1\t0\ttrue",
         ),
-        "1\t0\ttrue"
-    );
-}
-
-#[test]
-fn passing_a_handle_field_through_keeps_the_handle() {
-    assert_eq!(
-        allocation_probe(
+        (
+            "passing a handle field through keeps the handle",
             r#"
 local handle = { __ty = "Entity", _scene_id = 1, _arena_id = 2, _slot = 3, _generation = 4 }
 tables, cdata = 0, 0
 local row = { __ty = "HandleRow", handle = handle, sequence = 7 }
 local result = relay_handle(row)
 print(tables, cdata, rawequal(handle, result.handle), result.sequence)
-"#
+"#,
+            "0\t0\ttrue\t7",
         ),
-        "0\t0\ttrue\t7"
-    );
-}
-
-#[test]
-fn passing_a_handle_through_keeps_the_callers_box() {
-    assert_eq!(
-        allocation_probe(
+        (
+            "passing a handle through keeps the callers box",
             r#"
 local handle = { __ty = "Entity", _scene_id = 1, _arena_id = 2, _slot = 3, _generation = 4 }
 tables, cdata = 0, 0
 local result = relay_token(handle)
 print(tables, cdata, rawequal(handle, result))
-"#
+"#,
+            "0\t0\ttrue",
         ),
-        "0\t0\ttrue"
-    );
+    ] {
+        assert_eq!(run_luajit(&format!("{lua}{probe}")), expected, "{case}");
+    }
 }
 
 fn assert_allocation_free_compare(source: &str, predicate: &str) {
