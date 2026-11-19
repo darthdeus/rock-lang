@@ -67,7 +67,6 @@ fn forwarded_defer_capture(
     }
 }
 
-/// Use the same dense slot names in constructors and frame accesses.
 pub(crate) fn frame_field(slot: u32) -> Ustr {
     skull_mir::names::indexed("c", "", slot as usize)
 }
@@ -85,7 +84,6 @@ impl FrameInfo<'_> {
     }
 }
 
-/// Name hoisted bodies within the enclosing emitted name.
 pub fn convert_closures(mf: &mut MirFunc, name_base: &str) {
     convert_closures_framed(mf, name_base, None, None);
 }
@@ -613,7 +611,6 @@ fn read_capture(
     f
 }
 
-/// Read the capture slot itself, so a boxed capture passes its shared table.
 fn slot_in_scope(
     mf: &mut MirFunc,
     own: &Ownership,

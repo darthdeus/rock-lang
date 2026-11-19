@@ -22,7 +22,6 @@ pub enum BodyPass {
     HoistedInline,
 }
 
-/// Sees each pass of the chain, for timing and work attribution.
 pub trait PassObserver {
     fn begin(&mut self, _pass: BodyPass, _mf: &MirFunc) {}
     fn end(&mut self, _pass: BodyPass, _mf: &MirFunc) {}
@@ -100,8 +99,6 @@ impl Inliner<'_> {
     }
 }
 
-/// Run the MIR verifier on `mf` when [`skull_mir::verify::checks_enabled`],
-/// panicking on a violation. `what` names the pass that just ran.
 #[inline(always)]
 pub fn debug_verify(mf: &MirFunc, stage: Stage, what: &dyn std::fmt::Display) {
     if skull_mir::verify::checks_enabled() {
@@ -113,13 +110,11 @@ fn verify_after(mf: &MirFunc, stage: Stage, pass: BodyPass) {
     debug_verify(mf, stage, &format_args!("{pass:?}"));
 }
 
-/// A chain failure and the pass it came from.
 pub struct ChainError {
     pub pass: BodyPass,
     pub error: CompilerError,
 }
 
-/// Inline the root body and optionally its hoisted bodies. Return embedded sources.
 pub fn prepare_body(
     ws: &Workspace,
     mut inliner: Inliner<'_>,
@@ -138,7 +133,6 @@ pub fn prepare_body(
     Ok(spliced)
 }
 
-/// Prepare a body without inlining.
 pub fn convert_body(
     ws: &Workspace,
     mf: &mut MirFunc,
@@ -219,7 +213,6 @@ fn cleanup(
     Ok(())
 }
 
-/// Visit hoisted bodies after closure conversion separates their upvalues.
 fn inline_hoisted(
     ws: &Workspace,
     inliner: &mut Inliner<'_>,

@@ -41,7 +41,6 @@ impl LoadStoreRow {
     }
 }
 
-/// One row per [`CellProducer`], indexed by `producer as usize`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoadStoreCensus {
     pub rows: [LoadStoreRow; CellProducer::ALL.len()],
@@ -63,7 +62,6 @@ fn cell_access(inst: &Inst) -> Option<(Idx<Cell>, bool)> {
     }
 }
 
-/// Live `Load`/`Store` instructions with their cell and kind.
 fn live_accesses(func: &MirFunc) -> Vec<(Idx<Inst>, Idx<Cell>, bool)> {
     let mut out = Vec::new();
     for (_, block) in func.blocks.iter() {
@@ -76,8 +74,6 @@ fn live_accesses(func: &MirFunc) -> Vec<(Idx<Inst>, Idx<Cell>, bool)> {
     out
 }
 
-/// Run `cleanup` on `func`, charging the accesses it unlinks to `census`.
-/// Instructions at or past `spliced_floor` were created by inlining.
 pub fn observe_cleanup(
     func: &mut MirFunc,
     spliced_floor: usize,
@@ -125,7 +121,6 @@ pub fn observe_cleanup(
     Ok(())
 }
 
-/// [`cleanup_with_nobox`], observed by `census` when one is given.
 pub fn cleanup_with_nobox_census(
     ws: &Workspace,
     func: &mut MirFunc,

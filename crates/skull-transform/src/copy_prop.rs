@@ -20,9 +20,6 @@ pub(crate) struct CopyProp {
     pub(crate) exposes_more: bool,
 }
 
-/// Build the analysis without applying it. Returns `None` when the walk proves
-/// nothing (the common case for small bodies), so callers skip the remap
-/// entirely. [`cleanup`] folds the remap into DCE's count scan.
 pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<CopyProp> {
     // A call can invoke a closure that writes a cell.
     let mut main = vec![false; func.blocks.len()];
@@ -103,7 +100,6 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
         }
         let mut checked_native_buffers = HashSet::default();
         let mut checked_vecs: HashSet<Operand> = HashSet::default();
-        // Live `VecCheckedIndex` results by (vec, index) operand.
         let mut vec_checks: Vec<((Operand, Operand), Idx<Inst>)> = Vec::new();
         for &id in &b.insts {
             // Clearing the cell-keyed facts too covers multi-result calls,
@@ -113,7 +109,6 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                 checked_vecs.clear();
             }
             if !matches!(func.insts[id], Inst::Store { .. }) {
-                // Multi-result calls and `MapNext` assign their cells directly.
                 func.insts[id].cell_writes_each(&mut |c| cur[raw(c)] = None);
             }
             if let Inst::Store { cell, .. } = &func.insts[id] {
@@ -333,7 +328,6 @@ fn operand_key(
     }
 }
 
-/// Whether an instruction can invalidate a vector bounds check.
 fn keeps_vec_lengths(inst: &Inst) -> bool {
     match inst {
         // A cell write rebinds a local; facts keyed on that cell are dropped
@@ -388,7 +382,6 @@ fn leaf_form_path(
     }
 }
 
-/// Follow a copy-prop substitution chain to its final value (guards self-loops).
 pub(crate) fn substitute_uses(func: &mut MirFunc, subst: &[Option<Idx<Inst>>]) {
     let remap = |value| resolve_subst(subst, value);
     for (_, inst) in func.insts.iter_mut() {

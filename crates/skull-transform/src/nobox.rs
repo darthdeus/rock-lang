@@ -8,7 +8,6 @@ use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 use ustr::Ustr;
 
-/// List all implicit nobox materializations that survive in emitted blocks.
 pub fn nobox_materialization_violations(
     ws: &Workspace,
     func: &MirFunc,
@@ -52,7 +51,6 @@ pub fn nobox_materialization_violations(
     out
 }
 
-/// Check nested constructors for a nobox value.
 fn ctor_tree_has_implicit_nobox(ws: &Workspace, func: &MirFunc, mvs: Idx<Inst>) -> bool {
     let (name, fields) = match &func.insts[mvs] {
         Inst::MakeValueStruct { name, fields, .. } => (name, fields),
@@ -73,7 +71,6 @@ fn ctor_tree_has_implicit_nobox(ws: &Workspace, func: &MirFunc, mvs: Idx<Inst>) 
     })
 }
 
-/// Read missing constructor operands from an existing value.
 fn leaf_operand(
     func: &mut MirFunc,
     root: Idx<Inst>,
@@ -107,7 +104,6 @@ fn leaf_operand(
 /// The inner constructors can then disappear. GC tables keep declared keys;
 /// leaf-table constructors already take their leaves.
 fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> Result<bool, CompilerError> {
-    // Most bodies have no nobox constructor, so skip the operand census.
     let any_nobox = func.blocks.iter().any(|(_, b)| {
         b.insts.iter().any(|&i| match &func.insts[i] {
             Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => ws
@@ -310,7 +306,6 @@ fn fold_nobox_projections(ws: &Workspace, func: &mut MirFunc) {
 /// Prepare a body for emission and implicit nobox validation.
 pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) -> Result<(), CompilerError> {
     cleanup_in(Some(ws), func)?;
-    // Flattening exposes projections that let the next cleanup split an aggregate.
     while flatten_nobox_nested_ctors(ws, func)? {
         cleanup_in(Some(ws), func)?;
     }

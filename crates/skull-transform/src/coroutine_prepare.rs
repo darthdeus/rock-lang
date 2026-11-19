@@ -15,7 +15,6 @@ use ustr::Ustr;
 
 use crate::CoroLowered;
 
-/// The code-slot keys a coroutine constructor references.
 pub struct CoroutineKeys {
     pub advance: Option<String>,
     pub resume: String,

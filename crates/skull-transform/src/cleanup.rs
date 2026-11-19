@@ -6,16 +6,13 @@ use bone_core::workspace::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
 
-/// Remove unreferenced pure values and unread stores, including closure blocks.
 pub(crate) fn dce(func: &mut MirFunc) {
     dce_core(func, None);
 }
 
-/// Apply copy substitutions during the reference count scan when available.
 fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
     let ni = func.insts.len();
     let nc = func.cells.len();
-    // Reference counts for a worklist that cascades through dead operands.
     let mut use_count = vec![0u32; ni];
     let mut load_count = vec![0u32; nc];
     let mut store_n = vec![0u32; nc];
@@ -90,8 +87,6 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
         if let Inst::Store { cell, .. } = &func.insts[i] {
             removed_store_cells.push(raw(*cell));
         }
-        // Each value operand of the removed inst loses a use; a value that hits
-        // zero (and is pure) is itself now dead.
         func.insts[i].uses_each(&mut |op| {
             let k = raw(op);
             exposes |= matches!(func.insts[op], Inst::MakeStruct { .. });
@@ -104,8 +99,6 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
                 work.push(op);
             }
         });
-        // Removing a `Load` drops its cell's load count; a cell with no remaining
-        // loads makes its stores dead (their value operands then cascade on pop).
         if let Inst::Load(c) = &func.insts[i] {
             let ck = raw(*c);
             load_count[ck] = load_count[ck].saturating_sub(1);
@@ -191,7 +184,6 @@ fn end_run(used: bool, unused: &mut Vec<Idx<Inst>>, dead: &mut [bool], work: &mu
     unused.clear();
 }
 
-/// Remove every instruction whose `dead` flag is set from its block.
 fn drop_flagged(func: &mut MirFunc, dead: &[bool]) {
     let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
     for bid in block_ids {
@@ -214,8 +206,6 @@ fn index_read_is_checked(kind: &ContainerKind) -> bool {
     )
 }
 
-/// Whether a value-producing inst is pure enough that an unused result is dead.
-/// `Call`/`CallValue` run for effect; a checked `Index` must still execute.
 fn is_dead_value(inst: &Inst) -> bool {
     match inst {
         Inst::Index { kind, .. } => !index_read_is_checked(kind),
@@ -223,7 +213,6 @@ fn is_dead_value(inst: &Inst) -> bool {
     }
 }
 
-/// Cleanup for a lowered body before it becomes an inline template.
 pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {
     cleanup_in(None, func)
 }
@@ -384,7 +373,6 @@ fn fold_known_compares(func: &mut MirFunc) -> bool {
     true
 }
 
-/// Fold known branches and clear the detached blocks and their emit provenance.
 pub(crate) fn fold_const_branches(func: &mut MirFunc) -> bool {
     let bids: Vec<Idx<Block>> = func.blocks.iter().map(|(b, _)| b).collect();
     let mut changed = false;
@@ -437,7 +425,6 @@ fn has_unreached_code(func: &MirFunc) -> bool {
         })
 }
 
-/// Keep lambda bodies and coroutine defer entries as independent roots.
 fn clear_unreachable_blocks(func: &mut MirFunc) -> bool {
     let mut roots = vec![func.entry];
     roots.extend(func.coro_defers.iter().map(|(_, e)| *e));

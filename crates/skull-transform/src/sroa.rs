@@ -32,7 +32,6 @@ enum FieldSrc {
     ConstNil,
 }
 
-/// Use the enum hint to identify a unit variant stored as a shared global.
 fn ctor_fields(
     inst: &Inst,
     enum_hint: Option<ustr::Ustr>,
@@ -120,7 +119,6 @@ fn ctor_fields(
     }
 }
 
-/// Split eligible aggregate cells and preserve their projections and escaping values.
 pub(crate) fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError> {
     let mut fam = Families::collect(func);
     fam.resolve_aliases();
@@ -149,12 +147,10 @@ pub(crate) fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, Co
     Ok(true)
 }
 
-/// A nullable value family's presence leaf.
 fn present_field() -> ustr::Ustr {
     skull_mir::names::ustr("__present")
 }
 
-/// Cells some closure captures (empty when the body has no lambda).
 fn captured_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
     if func
         .insts
@@ -669,7 +665,6 @@ impl FieldCells {
     }
 }
 
-/// Use the enum tag or nullable value presence field for nil tests.
 fn rewrite_nil_tests(
     func: &mut MirFunc,
     fam: &Families,
@@ -966,7 +961,6 @@ fn expand_stores(
     }
 }
 
-/// Rebuild a known non-null value at its escaping load.
 fn rematerialize_escapes(
     func: &mut MirFunc,
     fam: &Families,

@@ -10,7 +10,6 @@ use skull_mir::cfg::reachable_blocks_from;
 pub(crate) type ScopeId = usize;
 pub const ROOT: ScopeId = 0;
 
-/// A function root or a lambda region and its creator.
 #[derive(Debug)]
 pub struct Scope {
     pub entry: Idx<Block>,
@@ -21,7 +20,6 @@ pub struct Scope {
     pub params: Vec<Idx<Cell>>,
 }
 
-/// The scope tree of a `MirFunc`: root at [`ROOT`], one child per live lambda.
 pub struct ScopeTree {
     pub scopes: Vec<Scope>,
     block_scope: HashMap<Idx<Block>, ScopeId>,
@@ -67,8 +65,6 @@ impl ScopeTree {
             lambda: None,
             params: func.params.clone(),
         }];
-        // block -> owning scope; regions are pairwise disjoint. Seeded with the
-        // root region, then grown one live lambda at a time (below).
         let mut block_scope: HashMap<Idx<Block>, ScopeId> = HashMap::default();
         for &b in &scopes[ROOT].region {
             block_scope.insert(b, ROOT);
@@ -293,7 +289,6 @@ pub(crate) fn non_dominating_by_value_captures(
     frame_slots: Option<&HashMap<Idx<Cell>, u32>>,
 ) -> HashSet<Idx<Cell>> {
     let mut extra: HashSet<Idx<Cell>> = HashSet::default();
-    // block -> the `Inst::Lambda` creating a scope (its creation block).
     let mut create_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
     for (bid, b) in func.blocks.iter() {
         for &iid in &b.insts {

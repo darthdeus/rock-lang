@@ -248,7 +248,6 @@ fn spill_cross_block_values(
     values
 }
 
-/// Find cells live into a suspension resume block.
 fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
     let mut block_use: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = HashMap::default();
     let mut block_def: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = HashMap::default();
@@ -281,8 +280,6 @@ fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet
     live
 }
 
-/// Backward liveness over `blocks`: what is live into each block, given each
-/// block's upward-exposed uses and its definitions.
 fn live_in<K: Copy + Eq + std::hash::Hash>(
     func: &MirFunc,
     blocks: &[Idx<Block>],
@@ -503,7 +500,6 @@ pub fn transform_coroutine(
         }
     }
 
-    // Static yield tags distinguish states in the frame layout stamp.
     let suspension_resumes: Vec<Idx<Block>> = orig_blocks
         .iter()
         .filter_map(|&block| match step.blocks[block].term {
@@ -723,7 +719,6 @@ pub fn transform_coroutine(
                 args: vec![msg],
             },
         );
-        // Unreachable (error() raised); a terminator is still required.
         step.blocks[raise].term = Term::Goto(dispatch);
         step.blocks[chk].term = Term::Branch {
             cond: ne,

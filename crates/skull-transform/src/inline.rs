@@ -402,7 +402,6 @@ impl InlineCandidateTable {
         }
     }
 
-    /// Share unchanged candidates with the previous incremental snapshot.
     pub fn from_warms_incremental(
         base: Arc<Self>,
         warms: Vec<InlineCandidateWarm>,
@@ -771,7 +770,6 @@ impl InlineCache {
         })
     }
 
-    /// Drop every concrete specialization when the declaration's cached body is stale.
     pub fn invalidate(&mut self, fref: FuncRef) {
         self.cands.retain(|inst, _| inst.func != fref);
     }
@@ -924,7 +922,6 @@ fn live_closure_at(header: &MirFunc, func: &MirFunc) -> LiveClosure {
     live
 }
 
-/// Compact the candidate once before it is used at multiple call sites.
 fn compact_live_template(
     mut source: MirFunc,
     live: &LiveClosure,
@@ -934,7 +931,6 @@ fn compact_live_template(
     compact_region(&source, &source, &facts, nested, live, &[])
 }
 
-/// Use the split body header with the original arena and its side tables.
 fn compact_region(
     header: &MirFunc,
     arena: &MirFunc,
@@ -1186,7 +1182,6 @@ fn compact_region(
     (template, block_map)
 }
 
-/// Copy only the hoisted body's region and preserve emission IDs.
 pub(crate) fn compact_split_body(header: &MirFunc, arena: &MirFunc, facts: &ArenaFacts) -> MirFunc {
     let live = live_closure_at(header, arena);
     let (mut compact, _) = compact_region(
@@ -1414,7 +1409,6 @@ fn classify(
     }))
 }
 
-/// Leave forwarded loads allocated, preserving arena and emission IDs.
 fn forward_param_reads(
     func: &mut MirFunc,
     cand: &CalleeBody,
@@ -1726,7 +1720,6 @@ fn mark_forwarded_params(caller: &mut MirFunc, callee: &MirFunc, scratch: &Inlin
     }
 }
 
-/// Allocate every clone before remapping its operands.
 fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratch, kind: Kind) {
     caller.ensure_emit_ids();
     let (inst_base, cell_base, block_base) = caller.emit_nexts().unwrap();
@@ -2155,7 +2148,6 @@ fn rename_nested_tree(nested: &mut [MirFunc], names: &HashMap<Ustr, Ustr>) {
     }
 }
 
-/// Rename private hoisted definitions that collide in the caller.
 fn import_nested_fns(
     func: &mut MirFunc,
     callee: &MirFunc,
@@ -2195,7 +2187,6 @@ fn import_nested_fns(
     names
 }
 
-/// Carry instruction metadata through the splice remap.
 fn import_spec_bindings(
     func: &mut MirFunc,
     callee: &MirFunc,
@@ -2397,7 +2388,6 @@ fn bind_params(
     }
 }
 
-/// Inline within the caller block, preserving its terminator.
 fn splice_straight(
     func: &mut MirFunc,
     site: &Site,
@@ -2471,7 +2461,6 @@ fn splice_straight(
     }
 }
 
-/// Branch into the clone and send its returns to the continuation.
 fn splice_general(
     func: &mut MirFunc,
     site: &Site,
@@ -2556,7 +2545,6 @@ fn splice_general(
     scratch.added_blocks.push(cont);
 }
 
-/// Return the concrete splice dependencies needed for incremental emission.
 pub(crate) fn inline_functions_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -2575,8 +2563,6 @@ pub(crate) fn inline_functions_with_plans(
     if inline_disabled() {
         return Ok((spliced, records, scan_stats));
     }
-    // The caller's top-level blocks (excludes closure sub-CFGs), maintained
-    // incrementally so neither find_site nor the loop recomputes reachability.
     let top_start = cache.census_enabled.then(Instant::now);
     let top_blocks = top_level_blocks(func);
     if let Some(start) = top_start {
@@ -2584,7 +2570,6 @@ pub(crate) fn inline_functions_with_plans(
         cache.census.top_level_blocks_population = top_blocks.len();
     }
     let mut top: HashSet<Idx<Block>> = top_blocks.into_iter().collect();
-    // Caller cells a closure body writes; see [`pin_cells`].
     let mut pinned: HashSet<Idx<Cell>> = HashSet::default();
     pin_cells(func, &top, 0, &mut pinned);
     let mut uses: Option<UseIndex> = None;
@@ -2693,8 +2678,6 @@ pub(crate) fn inline_functions_with_plans(
         resume = Some(pos);
         budget -= 1;
     }
-    // Most bodies own no statics at all, and this runs for every emitted fn --
-    // so the set is only built when there is something that could duplicate.
     if func.statics.len() > 1 {
         let mut seen: HashSet<ustr::Ustr> = HashSet::default();
         func.statics.retain(|sc| seen.insert(sc.cell));
@@ -2723,14 +2706,11 @@ fn fn_has_bounds(f: &bone_core::hir::Function) -> bool {
     f.generic_bounds.iter().any(Option::is_some)
 }
 
-/// Report any unresolved bound calls before rendering.
 pub fn validate_no_residual_bound_calls(
     ws: &Workspace,
     f: &bone_core::hir::Function,
     mf: &MirFunc,
 ) -> Result<(), CompilerError> {
-    // Walk block inst-lists, not the raw arena: a splice drops the consumed call
-    // inst from its block but the arena still holds it.
     for (_, block) in mf.blocks.iter() {
         for &iid in &block.insts {
             match &mf.insts[iid] {
@@ -2787,7 +2767,7 @@ mod tests {
         assert!(!env_disables_inline(None));
     }
 
-    /// Issue #5: `bound::repack_bound_next_element` allocates the element's
+    /// `bound::repack_bound_next_element` allocates the element's
     /// leaf loads, its rebuilt aggregate and the store into the element cell
     /// AFTER the splice cloned the callee. The splice's `UseIndex` must cover
     /// those users like every other instruction it adds.

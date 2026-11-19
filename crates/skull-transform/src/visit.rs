@@ -32,7 +32,6 @@ pub(crate) fn top_level_blocks_from(f: &MirFunc, entry: Idx<Block>) -> Vec<Idx<B
     order
 }
 
-/// Value operand of a terminator (the only ones are `cond`/`discr`/return value).
 pub(crate) fn term_value(term: &Term) -> Option<Idx<Inst>> {
     match term {
         // Coroutine returns are single/zero by the time spill runs (a co fn never

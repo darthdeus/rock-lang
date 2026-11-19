@@ -7,7 +7,6 @@ use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 use ustr::Ustr;
 
-/// Include nested lambda entries in the detached region.
 pub(crate) fn detached_region_blocks(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<Block>> {
     let mut seen = HashSet::default();
     let mut stack = vec![entry];
@@ -25,7 +24,6 @@ pub(crate) fn detached_region_blocks(func: &MirFunc, entry: Idx<Block>) -> HashS
     seen
 }
 
-/// Copy a detached body into an ordinary function that takes the frame.
 pub(crate) fn lower_detached_region(
     source: &MirFunc,
     entry: Idx<Block>,
@@ -105,7 +103,6 @@ fn detached_region_site(
         .and_then(skull_mir::code_identity::LambdaSiteId::from_span)
 }
 
-/// Remove the original closure producers after their regions have been split.
 pub(crate) fn erase_detached_lambdas(
     func: &mut MirFunc,
     entries: impl IntoIterator<Item = Idx<Block>>,

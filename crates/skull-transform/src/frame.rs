@@ -6,7 +6,6 @@ use crate::visit::{raw, top_level_blocks_from};
 use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 
-/// Rewrite JS step frame cells as field accesses and check for residual reads and writes.
 pub fn materialize_frame(
     mf: &mut MirFunc,
     entry: Idx<Block>,
@@ -16,7 +15,6 @@ pub fn materialize_frame(
     materialize_frame_inner(mf, entry, s_cell, slots, true);
 }
 
-/// Rewrite the shared frame cells of an ordinary detached body.
 pub fn materialize_frame_cells(
     mf: &mut MirFunc,
     entry: Idx<Block>,

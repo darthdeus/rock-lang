@@ -10,7 +10,6 @@ use skull_mir::lower::{BoundNextElem, ElemRebuild, bound_next_shape_from_concret
 use skull_mir::mir::*;
 use skull_mir::monoty::MonoInterner;
 
-/// Resolve a standalone instantiation from its specialization demand.
 pub fn resolve_standalone_bound_calls(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -128,7 +127,6 @@ fn bound_next_shape_for_instance(
         .map_err(|error| CompilerError::new_no_location(error.message))
 }
 
-/// Check the destinations against the witness ABI when lowering already split them.
 fn check_bound_next_split(
     func: &MirFunc,
     call: Idx<Inst>,
@@ -155,7 +153,6 @@ fn check_bound_next_split(
     )))
 }
 
-/// Rebuild the element from the concrete witness's flat return lanes.
 fn repack_bound_next_element(
     func: &mut MirFunc,
     call: Idx<Inst>,
@@ -226,7 +223,6 @@ fn repack_bound_next_element(
     )))
 }
 
-/// Consume flat cells in order while rebuilding nested element values.
 fn emit_elem_rebuild(
     func: &mut MirFunc,
     plan: &ElemRebuild,

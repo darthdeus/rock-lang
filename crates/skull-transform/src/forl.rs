@@ -13,7 +13,6 @@ use comfy_la_arena::Idx;
 use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 
-/// Run after scalarization exposes the iterator cursor as a cell.
 pub fn recover_counted_loops(ws: &Workspace, func: &mut MirFunc) {
     if func.for_iter_headers.is_empty() {
         return;
@@ -65,8 +64,6 @@ struct GuardInfo {
     done_arm: Idx<Block>,
 }
 
-/// Follow a chain of empty single-goto blocks starting at `b` (inclusive),
-/// collecting the empties into `hops`.
 fn chase(func: &MirFunc, mut b: Idx<Block>, hops: &mut Vec<Idx<Block>>) -> Idx<Block> {
     let mut n = 0;
     while func.blocks[b].insts.is_empty() && n < 64 {
@@ -86,8 +83,6 @@ fn retarget(term: &mut Term, from: Idx<Block>, to: Idx<Block>) {
     term.remap_targets(&|target| if target == from { to } else { target });
 }
 
-/// Whether any inst in `blocks` writes cell `c` (store, multi-call dest,
-/// map-next out-cell, or lambda param rebinding).
 fn cell_written_in(func: &MirFunc, c: Idx<Cell>, blocks: &HashSet<Idx<Block>>) -> bool {
     for &b in blocks {
         for &i in &func.blocks[b].insts {
@@ -181,7 +176,6 @@ fn try_match(
         _ => return None,
     };
 
-    // Chase both arms; the yield side is the one that stores the slot.
     let mut then_chain = Vec::new();
     let ca = chase(func, then_bb, &mut then_chain);
     let mut else_chain = Vec::new();
@@ -219,7 +213,6 @@ fn try_match(
         return None;
     }
 
-    // Swapping operands or taking the false arm reverses the comparison.
     if less != (slot_is_lhs == yield_is_then) {
         return None;
     }

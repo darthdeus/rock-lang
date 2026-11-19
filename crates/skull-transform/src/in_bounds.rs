@@ -157,7 +157,6 @@ fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) ->
                     ins[raw(b)] = merged;
                 }
             }
-            // A final query needs its input, but its output feeds no proof.
             if needed[raw(b)] == INPUT {
                 continue;
             }
@@ -239,7 +238,6 @@ fn needs_bounds_proof(ws: Option<&Workspace>, inst: &Inst) -> bool {
     }
 }
 
-/// Whether `fref` is the standard library's function `name`.
 fn is_stdlib_fn(ws: Option<&Workspace>, fref: FuncRef, name: &str) -> bool {
     ws.is_some_and(|ws| {
         let module = ws.module(fref.module);
@@ -425,8 +423,6 @@ impl<'a> Ctx<'a> {
     }
 }
 
-/// The facts flowing along the edge `from -> to`: the block's out-state
-/// sharpened by its branch condition.
 fn edge_facts<'a>(
     func: &Body<'_>,
     out: &'a Facts,
@@ -611,8 +607,6 @@ fn through_memory(key: KeyData) -> bool {
     )
 }
 
-/// The key of `id` as a value: a literal by its value, anything else by
-/// its instruction.
 fn value_key(func: &Body<'_>, id: Idx<Inst>) -> Key {
     match func.insts[id] {
         Inst::Const(Lit::Int(n)) => func.key(KeyData::Const(n)),
@@ -620,7 +614,6 @@ fn value_key(func: &Body<'_>, id: Idx<Inst>) -> Key {
     }
 }
 
-/// The place `id` reads, when it reads one.
 fn place_of(func: &Body<'_>, id: Idx<Inst>) -> Option<Key> {
     let via = |x: Idx<Inst>| place_of(func, x).unwrap_or_else(|| value_key(func, x));
     let data = match &func.insts[id] {
@@ -1032,7 +1025,6 @@ impl Facts {
         })
     }
 
-    /// The vectors whose live length bounds the integer `id` from above.
     fn le_len_of(&self, func: &Body<'_>, id: Idx<Inst>) -> Vec<Key> {
         // `n - c` for a constant `c >= 0` is no larger than `n`.
         if let Inst::IntSub(a, b) = func.insts[id]
@@ -1112,7 +1104,6 @@ impl Facts {
     }
 }
 
-/// Sharpen `facts` with `cond == truth`.
 fn cond_facts(facts: &mut Facts, func: &Body<'_>, cond: Idx<Inst>, truth: bool, affine: bool) {
     if truth && affine {
         match func.insts[cond] {
@@ -1154,7 +1145,6 @@ fn equal_capacity_facts(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx
     }
 }
 
-/// `a < b` holds.
 fn lt_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
     let bounds = facts.le_len_of(func, b);
     for k in facts.keys_of(func, a) {
@@ -1174,7 +1164,6 @@ fn lt_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
     }
 }
 
-/// `a <= b` holds.
 fn leq_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
     if facts.nonneg(func, a) {
         for k in facts.keys_of(func, b) {
@@ -1183,7 +1172,6 @@ fn leq_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
     }
 }
 
-/// Use known callee effects for a direct call.
 fn after_direct_call(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, fref: FuncRef) {
     let Some(ws) = ctx.ws else {
         facts.after_unknown_call(func);
@@ -1244,7 +1232,6 @@ fn constant_scale(func: &MirFunc, id: Idx<Inst>) -> Option<(Idx<Inst>, i64)> {
 
 const LEN: &str = "len";
 
-/// Seed bounds declared by the callee.
 fn seed_declared_result_facts(
     facts: &mut Facts,
     func: &Body<'_>,
@@ -1284,7 +1271,6 @@ fn seed_declared_result_facts(
     }
 }
 
-/// Advance `facts` across `id`.
 fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_reexecute: bool) {
     let inst = &func.insts[id];
     if inst.produces_value() {
