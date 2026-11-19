@@ -1,30 +1,12 @@
-//! std140 layout for a stage's ARRAY block -- the `UniformArray<T>` half of the
-//! uniform lane.
-//!
-//! A separate plan type from [`UniformBlockPlan`] on purpose. That one's contract
-//! includes a value-struct producer: `uniform_block_checked` requires its
-//! `leaf_paths()` to EQUAL `value_leaf_paths` over the same struct, matched by
-//! position. Array members emit leaves no value struct can produce, so folding
-//! them in would break that agreement or weaken it. Same std140 authority, two
-//! producers.
-//!
-//! The rule being pinned: **an array's element stride is its element's base
-//! alignment rounded up to 16**, so for every kind a uniform array may hold
-//! (float, int, Vec2, Vec4) the stride is 16 and the member occupies
-//! `capacity * 16`. That is also where the waste comes from -- a `float[16]`
-//! costs 256 bytes to carry 64.
-//!
-//! Every expected number here is a LITERAL read off the std140 rules, never
-//! computed from the function under test.
+//! std140 layout for a stage's `UniformArray<T>` block: an array's element
+//! stride is its element's base alignment rounded up to 16. Every expected
+//! number is a literal read off the std140 rules.
 
 use crate::common::{key, ws_of};
 use skull_mir::gpu_layout::{ArrayMemberDecl, WireKind, uniform_array_block, uniform_block};
 use ustr::Ustr;
 
 fn decl(name: &str, elem: WireKind, capacity: u32) -> ArrayMemberDecl {
-    // A synthetic span: these cases exercise the LAYOUT, and the real `@size(N)`
-    // site is supplied by the GLSL classifier. That the rejections land on the
-    // offending param is pinned there, against real source.
     ArrayMemberDecl {
         name: Ustr::from(name),
         elem,
@@ -33,7 +15,6 @@ fn decl(name: &str, elem: WireKind, capacity: u32) -> ArrayMemberDecl {
     }
 }
 
-/// `(name, offset, stride, capacity)` per member.
 fn layout(p: &skull_mir::gpu_layout::UniformArrayBlockPlan) -> Vec<(&str, u32, u32, u32)> {
     p.members
         .iter()
@@ -41,7 +22,6 @@ fn layout(p: &skull_mir::gpu_layout::UniformArrayBlockPlan) -> Vec<(&str, u32, u
         .collect()
 }
 
-/// `outline_detect`'s three `@size(256)` `Vec4` arrays -- the tight consumer.
 #[test]
 fn outline_detects_three_vec4_arrays() {
     let p = uniform_array_block(
@@ -64,11 +44,8 @@ fn outline_detects_three_vec4_arrays() {
     assert_eq!(p.size, 12288);
 }
 
-/// `sprite_batch_frag`'s seven light arrays, and the scalar-array waste that
-/// backlog 18 decided to accept: four of the seven are scalar arrays costing
-/// 256 bytes each to carry 64.
 #[test]
-fn sprite_batchs_light_arrays_pay_stride_16_for_scalars() {
+fn scalar_and_vector_arrays_all_pay_stride_16() {
     let p = uniform_array_block(
         Ustr::from("sprite_batch_frag_arrays"),
         &[
@@ -82,29 +59,13 @@ fn sprite_batchs_light_arrays_pay_stride_16_for_scalars() {
         ],
     )
     .expect("1792 bytes");
-    // Every member 256 bytes regardless of element kind -- that IS the rule.
     assert_eq!(
         p.members.iter().map(|m| m.offset).collect::<Vec<_>>(),
         vec![0, 256, 512, 768, 1024, 1280, 1536]
     );
     assert!(p.members.iter().all(|m| m.stride == 16));
     assert_eq!(p.size, 1792);
-
-    // The four scalar arrays spend 1024 bytes carrying 256 bytes of data.
-    let scalar_bytes: u32 = p
-        .members
-        .iter()
-        .filter(|m| matches!(m.elem, WireKind::F32 | WireKind::I32))
-        .map(|m| m.capacity * m.stride)
-        .sum();
-    assert_eq!(scalar_bytes, 1024);
 }
-
-// -- The portable OpenGL budget, on the array block's OWN size.
-//
-// The budget is per BLOCK and the arrays get their own, so a stage's scalar
-// group is never added in. For outline's shape the block is `48 * N`: one more
-// ENTRY adds a Vec4 to each of three arrays.
 
 #[test]
 fn three_vec4_arrays_straddle_the_portable_limit() {
@@ -125,8 +86,6 @@ fn three_vec4_arrays_straddle_the_portable_limit() {
     }
 }
 
-/// A FOURTH `Vec4[256]` array fits, at exactly the guarantee. The limit is a
-/// size the block may reach.
 #[test]
 fn a_fourth_vec4_256_array_fits_exactly() {
     let p = uniform_array_block(
@@ -141,9 +100,6 @@ fn a_fourth_vec4_256_array_fits_exactly() {
     .expect("4 * 256 * 16 = 16384, exactly the guarantee");
     assert_eq!(p.size, 16384);
 }
-
-// -- Rejections. The element kinds are the same set the GLSL emitter admits, so
-// the two cannot drift into disagreeing about what an array may hold.
 
 #[test]
 fn array_rejections_keep_the_specific_reason() {
@@ -188,9 +144,7 @@ fn array_rejections_keep_the_specific_reason() {
     }
 }
 
-/// The fingerprint separates layouts a size comparison cannot. Two blocks with
-/// the same total and the same offsets differ only in element KIND or in NAME,
-/// and the driver resolves members by name.
+/// The driver resolves members by name, so name and kind are both identity.
 #[test]
 fn the_fingerprint_separates_same_size_layouts() {
     let a = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::F32, 16)]).unwrap();
@@ -209,25 +163,11 @@ fn the_fingerprint_separates_same_size_layouts() {
         "member name must be hashed"
     );
 
-    // And it must fit the 53-bit wire, for the same reason the scalar block's
-    // does: it is emitted as a plain numeric literal.
     assert!(a.fingerprint() < (1u64 << 53));
 }
 
-/// An array block's fingerprint must not collide with a SCALAR block's. They are
-/// separate bindings uploaded independently, so a bind that compared one against
-/// the other would accept a mismatched buffer.
-///
-/// The two are made as alike as the types allow -- same block name, same single
-/// member name, same element kind, same offset 0, same 16-byte size -- so the
-/// premise assertions below are what make the inequality mean something.
-///
-/// This pins the OUTCOME, not a mechanism, and the separation is
-/// over-determined: the array hash uses a different seed AND folds in capacity
-/// and stride, which the scalar hash has nothing to fold. Measured -- giving both
-/// the same seed leaves this test green, so it is not a test of the seed. Two
-/// independent reasons is deliberate for a value a bind compares before trusting
-/// a buffer, but do not read a pass here as evidence the seed is doing work.
+/// Array and scalar blocks are separate bindings; a bind must not accept one
+/// for the other even when every keyed fact agrees.
 #[test]
 fn an_array_block_fingerprint_differs_from_a_scalar_blocks() {
     let ws = ws_of("value Shared { m0: Vec4 }");
@@ -235,7 +175,6 @@ fn an_array_block_fingerprint_differs_from_a_scalar_blocks() {
     let arrays =
         uniform_array_block(key(&ws, "Shared"), &[decl("m0", WireKind::F32x4, 1)]).unwrap();
 
-    // The premise: everything a fingerprint could key on agrees.
     assert_eq!(scalar.size, arrays.size, "both 16 bytes");
     assert_eq!(scalar.struct_name, arrays.block_name, "both named Shared");
     assert_eq!(
@@ -256,40 +195,24 @@ fn an_array_block_fingerprint_differs_from_a_scalar_blocks() {
     assert!(arrays.fingerprint() < (1u64 << 53));
 }
 
-// -- Capacity arithmetic cannot be trusted to u32.
-//
-// `capacity * stride` is attacker-shaped input: `@size(N)` is whatever the source
-// says. At stride 16 the product reaches u32::MAX at capacity 2^28, so a u32
-// multiply either panics (debug overflow checks) or WRAPS -- and a wrap lands on
-// a small size that passes the budget check, which is the one thing this
-// function exists to enforce. Both are rejections that must arrive as
-// diagnostics.
-
-/// The wrap point and maximum input both exceed the budget after checked math.
+/// At stride 16 a u32 product wraps at capacity 2^28, onto a size that would
+/// pass the budget.
 #[test]
-fn overflowing_member_capacities_are_rejected() {
-    for (case, capacity) in [("u32 wrap point", 1 << 28), ("largest capacity", u32::MAX)] {
-        let message = uniform_array_block(
-            Ustr::from("arrays"),
-            &[decl("a", WireKind::F32x4, capacity)],
-        )
-        .expect_err(case)
-        .message;
+fn overflowing_capacities_are_rejected() {
+    let big = (1u32 << 27) + 1;
+    for (case, capacities) in [
+        ("u32 wrap point", vec![1 << 28]),
+        ("largest capacity", vec![u32::MAX]),
+        ("sum of two members", vec![big, big]),
+    ] {
+        let members: Vec<_> = capacities
+            .into_iter()
+            .enumerate()
+            .map(|(i, capacity)| decl(&format!("m{i}"), WireKind::F32x4, capacity))
+            .collect();
+        let message = uniform_array_block(Ustr::from("arrays"), &members)
+            .expect_err(case)
+            .message;
         assert!(message.contains("16384"), "{case}: {message}");
     }
-}
-
-/// The sum across members can overflow even when each member alone does not.
-#[test]
-fn a_capacity_sum_that_would_overflow_is_rejected() {
-    let big = (1u32 << 27) + 1;
-    let e = uniform_array_block(
-        Ustr::from("arrays"),
-        &[
-            decl("a", WireKind::F32x4, big),
-            decl("b", WireKind::F32x4, big),
-        ],
-    )
-    .expect_err("the two together exceed u32 at stride 16");
-    assert!(e.message.contains("16384"), "{}", e.message);
 }
