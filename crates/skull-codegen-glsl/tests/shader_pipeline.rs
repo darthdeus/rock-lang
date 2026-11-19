@@ -286,31 +286,6 @@ fn frag_depth_field_writes_gl_frag_depth_without_an_out_location() {
 }
 
 #[test]
-fn reject_frag_depth_that_is_not_float() {
-    let src = FRAG_DEPTH_SRC
-        .replace("FragDepth: float", "FragDepth: Vec4")
-        .replace(
-            "FragDepth: vary.Depth * 0.5",
-            "FragDepth: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }",
-        );
-    reject_pipeline(&src, "vt", "fr", "`FragDepth` must be float");
-}
-
-#[test]
-fn reject_frag_depth_without_a_colour_output() {
-    let src = r#"
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4 }
-        value DepthOnly { FragDepth: float }
-        @shader(vertex)
-        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
-        @shader(fragment)
-        fn fr(vary: Vary) -> DepthOnly { return DepthOnly { FragDepth: 0.5 } }
-    "#;
-    reject_pipeline(src, "vt", "fr", "colour");
-}
-
-#[test]
 fn instanced_locations_continue_across_structs() {
     let src = r#"
         value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
@@ -401,24 +376,6 @@ cases! { reject_pipeline:
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
     "#, "vt", "fr", "element");
-}
-
-#[test]
-fn reject_vertex_id_in_fragment_stage() {
-    let src = r#"
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4 }
-        @shader(vertex)
-        fn vt(@attr a: QV) -> Vary {
-            return Vary { position: Vec4 { x: a.aPos.x, y: 0.0, z: 0.0, w: 1.0 } }
-        }
-        @shader(fragment)
-        fn fr(vary: Vary) -> Vec4 {
-            let vid = vertex_id()
-            return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
-        }
-    "#;
-    reject_pipeline(src, "vt", "fr", "vertex-stage builtin");
 }
 
 #[test]
@@ -573,23 +530,6 @@ fn isampler_texture_id() {
     assert_has(&glsl, "vec2(textureSize(ids, 0))");
 }
 
-#[test]
-fn reject_isampler_return() {
-    let src = r#"
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4 }
-        @shader(vertex)
-        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
-        @pure fn pick(s: ISampler2D) -> ISampler2D { return s }
-        @shader(fragment)
-        fn fr(vary: Vary, ids: ISampler2D) -> Vec4 {
-            let s = pick(ids)
-            return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
-        }
-    "#;
-    reject_pipeline(src, "vt", "fr", "sampler");
-}
-
 const OPAQUE_PRELUDE: &str = r#"
     struct Tex { a: Sampler2D, b: Sampler2D }
     value Quad { aPos: Vec2, aUv: Vec2 }
@@ -599,54 +539,6 @@ const OPAQUE_PRELUDE: &str = r#"
         return Vary { position: v(q.aPos, 0.0, 1.0), uv: q.aUv }
     }
 "#;
-
-#[test]
-fn reject_sampler_local_copy() {
-    let src = format!(
-        "{OPAQUE_PRELUDE}{}",
-        r#"
-        @shader(fragment)
-        fn fs(vary: Vary, tex: Sampler2D) -> Vec4 {
-            let s = tex
-            return texture(s, vary.uv)
-        }
-    "#
-    );
-    reject_pipeline(&src, "vs", "fs", "local `s` holds a `sampler2D`");
-}
-
-#[test]
-fn reject_sampler_param_select() {
-    let src = format!(
-        "{OPAQUE_PRELUDE}{}",
-        r#"
-        @shader(fragment)
-        fn fs(vary: Vary, tex: Sampler2D, tex2: Sampler2D) -> Vec4 {
-            return texture(if vary.uv.x > 0.5 { tex } else { tex2 }, vary.uv)
-        }
-    "#
-    );
-    reject_pipeline(&src, "vs", "fs", "samplers are opaque");
-}
-
-#[test]
-fn reject_texture_field_select() {
-    let src = format!(
-        "{OPAQUE_PRELUDE}{}",
-        r#"
-        @shader(fragment)
-        fn fs(vary: Vary, @textures t: Tex) -> Vec4 {
-            return texture(if vary.uv.x > 0.5 { t.a } else { t.b }, vary.uv)
-        }
-    "#
-    );
-    reject_pipeline(
-        &src,
-        "vs",
-        "fs",
-        "`a` is not a value field of the shader interface",
-    );
-}
 
 #[test]
 fn every_attr_kind_emits_its_glsl_type() {
@@ -816,41 +708,6 @@ fn engine_block_coexists_across_stages() {
     assert_lacks(glsl, "uniform mat4 uProjection;");
 }
 
-#[test]
-fn engine_groups_must_agree_across_stages() {
-    let src = ENGINE_SRC.replace(
-        "fn e_frag(vary: UiVary, @engine e: EngineU",
-        "fn e_frag(vary: UiVary, @engine e: UiFragU",
-    );
-    let e = emit_pipeline(&src, "e_vert", "e_frag").expect_err("must reject");
-    assert!(e.contains("different @engine groups"), "got: {e}");
-}
-
-#[test]
-fn textures_and_engine_conflict() {
-    let src = r#"
-        value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
-        value EngineU  { uProjection: Mat4, uView: Mat4 }
-        struct Tex     { atlas: Sampler2D }
-        value Vary     { position: Vec4, TexCoord: Vec2 }
-
-        @shader(vertex)
-        fn t_vert(@attr a: QuadVert, @textures @engine t: Tex) -> Vary {
-            return Vary {
-                position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 },
-                TexCoord: a.aTexCoord,
-            }
-        }
-
-        @shader(fragment)
-        fn t_frag(vary: Vary) -> Vec4 {
-            return Vec4 { x: vary.TexCoord.x, y: 0.0, z: 0.0, w: 1.0 }
-        }
-    "#;
-    let e = emit_pipeline(src, "t_vert", "t_frag").expect_err("must reject");
-    assert!(e.contains("@textures"), "got: {e}");
-}
-
 fn engine_member_named(name: &str) -> String {
     format!(
         r#"
@@ -972,4 +829,95 @@ fn fragment_stage_over_sixteen_samplers_rejects_naming_the_shader() {
         e.contains("many_entry") && e.contains("17 samplers") && e.contains("16"),
         "got: {e}"
     );
+}
+
+cases! { reject_pipeline:
+    reject_frag_depth_that_is_not_float(&FRAG_DEPTH_SRC
+        .replace("FragDepth: float", "FragDepth: Vec4")
+        .replace(
+            "FragDepth: vary.Depth * 0.5",
+            "FragDepth: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }",
+        ), "vt", "fr", "`FragDepth` must be float");
+
+    reject_frag_depth_without_a_colour_output(r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        value DepthOnly { FragDepth: float }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
+        @shader(fragment)
+        fn fr(vary: Vary) -> DepthOnly { return DepthOnly { FragDepth: 0.5 } }
+    "#, "vt", "fr", "colour");
+
+    reject_vertex_id_in_fragment_stage(r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            return Vary { position: Vec4 { x: a.aPos.x, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 {
+            let vid = vertex_id()
+            return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#, "vt", "fr", "vertex-stage builtin");
+
+    reject_isampler_return(r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
+        @pure fn pick(s: ISampler2D) -> ISampler2D { return s }
+        @shader(fragment)
+        fn fr(vary: Vary, ids: ISampler2D) -> Vec4 {
+            let s = pick(ids)
+            return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#, "vt", "fr", "sampler");
+
+    reject_sampler_local_copy(&format!("{OPAQUE_PRELUDE}{}", r#"
+        @shader(fragment)
+        fn fs(vary: Vary, tex: Sampler2D) -> Vec4 {
+            let s = tex
+            return texture(s, vary.uv)
+        }
+    "#), "vs", "fs", "local `s` holds a `sampler2D`");
+
+    reject_sampler_param_select(&format!("{OPAQUE_PRELUDE}{}", r#"
+        @shader(fragment)
+        fn fs(vary: Vary, tex: Sampler2D, tex2: Sampler2D) -> Vec4 {
+            return texture(if vary.uv.x > 0.5 { tex } else { tex2 }, vary.uv)
+        }
+    "#), "vs", "fs", "samplers are opaque");
+
+    reject_texture_field_select(&format!("{OPAQUE_PRELUDE}{}", r#"
+        @shader(fragment)
+        fn fs(vary: Vary, @textures t: Tex) -> Vec4 {
+            return texture(if vary.uv.x > 0.5 { t.a } else { t.b }, vary.uv)
+        }
+    "#), "vs", "fs", "`a` is not a value field of the shader interface");
+
+    engine_groups_must_agree_across_stages(&ENGINE_SRC.replace(
+        "fn e_frag(vary: UiVary, @engine e: EngineU",
+        "fn e_frag(vary: UiVary, @engine e: UiFragU",
+    ), "e_vert", "e_frag", "different @engine groups");
+
+    textures_and_engine_conflict(r#"
+        value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
+        value EngineU  { uProjection: Mat4, uView: Mat4 }
+        struct Tex     { atlas: Sampler2D }
+        value Vary     { position: Vec4, TexCoord: Vec2 }
+        @shader(vertex)
+        fn t_vert(@attr a: QuadVert, @textures @engine t: Tex) -> Vary {
+            return Vary {
+                position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 },
+                TexCoord: a.aTexCoord,
+            }
+        }
+        @shader(fragment)
+        fn t_frag(vary: Vary) -> Vec4 {
+            return Vec4 { x: vary.TexCoord.x, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#, "t_vert", "t_frag", "@textures");
 }
