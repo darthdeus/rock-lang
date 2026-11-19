@@ -392,7 +392,6 @@ mod resolve_tests {
         );
         std::fs::create_dir(&modded).unwrap();
         assert_eq!(resolve_prefix_with_root(Some(&root), &key, 3), None);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -415,7 +414,6 @@ mod resolve_tests {
             resolve_with_root(Some(&root), &key),
             Some(b"MODDED".to_vec())
         );
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -426,7 +424,6 @@ mod resolve_tests {
         std::fs::create_dir_all(modded.parent().unwrap()).unwrap();
         std::fs::write(&modded, b"MOD_SAVE").unwrap();
         assert_eq!(resolve_with_root(Some(&root), &key), None);
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -444,7 +441,6 @@ mod resolve_tests {
             read_override(&root, "/etc/passwd", None),
             OverrideRead::Missing
         ));
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -466,7 +462,6 @@ mod resolve_tests {
         let _asset = register_guarded_asset(key.clone(), b"embedded bytes".to_vec());
 
         let resolution = resolve_with_root(Some(&root), &key);
-        std::fs::remove_dir_all(root).unwrap();
 
         assert!(
             is_loop,

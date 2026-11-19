@@ -2090,7 +2090,6 @@ mod tests {
 
         assert_eq!(steam_seen, ["steam-event"]);
         assert_eq!(direct_seen, ["direct-event"]);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2107,7 +2106,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(drain.cursor_for_len(200).unwrap(), 100);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2136,7 +2134,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(seen, ["second"]);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2153,7 +2150,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(drain.cursor_for_len(200).unwrap(), 100);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2181,7 +2177,6 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["n"], "complete");
         assert_eq!(rows[1]["n"], "after-recovery");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2193,7 +2188,6 @@ mod tests {
         assert!(!root.join("reports/.install").exists());
         let rows = records(&root);
         assert!(rows[0].get("install").is_none());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2226,7 +2220,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["n"], "new");
         assert!(rows[0].get("install").is_none());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2252,7 +2245,6 @@ mod tests {
         drop(held);
         let client = recorder.join().unwrap();
         client.finish(StopMode::Discard);
-        std::fs::remove_dir_all(root).unwrap();
 
         let (accepted, elapsed) = returned_without_io
             .expect("gameplay-side telemetry recording waited for the persistence lock");
@@ -2279,7 +2271,6 @@ mod tests {
             assert_eq!(row["n"], format!("event-{seq}"));
             assert_eq!(row["seq"], seq);
         }
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2292,7 +2283,6 @@ mod tests {
 
         assert_eq!(records(&root)[0]["n"], "before-flush");
         client.finish(StopMode::Discard);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2314,7 +2304,6 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         client.finish(StopMode::Discard);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2339,7 +2328,6 @@ mod tests {
         assert!(client.flush().is_err());
         client.finish(StopMode::Discard);
         let warnings = capped_spool_warnings() - before;
-        std::fs::remove_dir_all(root).unwrap();
 
         assert!(
             (1..=2).contains(&warnings),
@@ -2376,7 +2364,6 @@ mod tests {
             fs::metadata(&spool.events_path).unwrap().len(),
             MAX_SPOOL_BYTES
         );
-        std::fs::remove_dir_all(root).unwrap();
         eprintln!(
             "CAPPED_BATCH_WORK batches=256 rows=16384 elapsed_us={}",
             elapsed.as_micros()
@@ -2420,7 +2407,6 @@ mod tests {
         assert!(length > MAX_SPOOL_BYTES - 1024 && length <= MAX_SPOOL_BYTES);
         assert!(client.flush().is_ok());
         client.finish(StopMode::Discard);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2476,7 +2462,6 @@ mod tests {
             fs::metadata(&spool.events_path).unwrap().len(),
             MAX_SPOOL_BYTES
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2512,7 +2497,6 @@ mod tests {
         let rows = records(&root);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["n"], "after-drain");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2534,7 +2518,6 @@ mod tests {
             "contended root lock",
         );
         drop(owner);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2628,7 +2611,6 @@ mod tests {
         );
         assert!(root.join("reports/.telemetry-revoked").exists());
         assert!(!root.join("reports/stats").exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2655,7 +2637,6 @@ mod tests {
         let rows = records(&root);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["n"], "after-reconsent");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2689,7 +2670,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(sent, ["after-reconsent"]);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2706,7 +2686,6 @@ mod tests {
             .expect("queued rows without their consent generation were accepted");
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2725,7 +2704,6 @@ mod tests {
             .expect("durable withdrawal state was forgotten with the tombstone");
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2739,7 +2717,6 @@ mod tests {
         client.finish(StopMode::Discard);
 
         assert!(!root.join("reports/stats").exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2775,7 +2752,6 @@ mod tests {
             String::from_utf8_lossy(&child.stderr)
         );
         assert!(!stats_remain, "offline owner did not observe withdrawal");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2792,7 +2768,6 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(!root.join("reports/stats").exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn queue_len(path: &Path) -> u64 {
@@ -2812,7 +2787,6 @@ mod tests {
         assert!(events.exists(), "the open materializes the queue");
         assert_eq!(queue_len(&events), 0, "and writes no row of its own");
         client.finish(StopMode::Discard);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2850,7 +2824,6 @@ mod tests {
                 "accepted game {game:?}"
             );
         }
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2888,7 +2861,6 @@ mod tests {
             rows[1].as_object().unwrap().get("data").is_none(),
             "a row without data still carried the key"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2911,7 +2883,6 @@ mod tests {
             let recorded = spool.record_stat_data(name, timestamp, payload).is_ok();
             assert_eq!(validated, recorded, "{name:?} {timestamp} {data:?}");
         }
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2993,7 +2964,6 @@ mod tests {
                 .unwrap_or_else(|error| panic!("refused data {payload:?}: {error}"));
         }
         assert_eq!(records(&root).len(), accepted.len());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3006,7 +2976,6 @@ mod tests {
                 .unwrap()
                 .trim_end()
                 .len();
-            std::fs::remove_dir_all(root).unwrap();
             len
         }
 
@@ -3049,7 +3018,6 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         assert_eq!(records(&root).len(), 1);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3077,7 +3045,6 @@ mod tests {
             rows[1]["seq"], 2,
             "a refused row consumed a sequence number"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3111,7 +3078,6 @@ mod tests {
         assert_eq!(ingest.stop().len(), 2);
         assert!(!root.join("reports/stats/steam/events.jsonl").exists());
         assert!(!root.join("reports/stats/steam/cursor.log").exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3174,7 +3140,6 @@ mod tests {
         ingest.stop();
 
         assert_eq!(batch_names(&body), ["first", "second"]);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3201,7 +3166,6 @@ mod tests {
         ingest.stop();
 
         assert_eq!(batch_names(&body), ["from-last-run"]);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3237,7 +3201,6 @@ mod tests {
 
         assert!(body.len() <= MAX_BODY_BYTES);
         assert!(body.len() > MAX_BODY_BYTES / 2);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3266,7 +3229,6 @@ mod tests {
         );
 
         assert_eq!(batch_names(body), ["before-close"]);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3308,7 +3270,6 @@ mod tests {
                 Err(error) => panic!("test server failed: {error}"),
             }
         }
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3357,7 +3318,6 @@ mod tests {
         assert_eq!(rejected["status"], 400);
         assert_eq!(batch_names(rejected["body"].as_str().unwrap()), first);
         assert!(!root.join("reports/stats/steam/events.jsonl").exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3391,7 +3351,6 @@ mod tests {
 
         assert_eq!(ingest.stop().len(), 1);
         assert!(!root.join("reports/stats").exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3424,7 +3383,6 @@ mod tests {
 
         assert_eq!(ingest.stop().len(), 1);
         assert!(root.join("reports/stats/steam/events.jsonl").exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3472,7 +3430,6 @@ mod tests {
             })
             .unwrap();
         assert_eq!(replayed, ["must-replay"]);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3508,7 +3465,6 @@ mod tests {
             batch_names(rejected["body"].as_str().unwrap()),
             ["rejected"]
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3545,7 +3501,6 @@ mod tests {
             1,
             "revocation polling bypassed retry backoff"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3570,7 +3525,6 @@ mod tests {
         worker.finish(StopMode::Discard);
 
         assert_eq!(ingest.stop().len(), 1);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3606,7 +3560,6 @@ mod tests {
             elapsed < Duration::from_millis(180),
             "shutdown took {elapsed:?}"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3679,7 +3632,6 @@ mod tests {
             !queued.exists(),
             "the client did not observe and reclaim the accepted event"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3711,8 +3663,6 @@ mod tests {
         assert!(rows[1].get("install").is_none());
         assert_eq!(rows[0]["session"], rows[1]["session"]);
         assert_eq!(rows[0]["consent"], rows[1]["consent"]);
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3734,8 +3684,6 @@ mod tests {
         assert_ne!(rows[0]["session"], rows[1]["session"]);
         assert_eq!(rows[0]["seq"], 1);
         assert_eq!(rows[1]["seq"], 1);
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3784,8 +3732,6 @@ mod tests {
         );
         let uploaded_at = fs::read_to_string(upload_marker).unwrap();
         assert!(uploaded_at.trim().parse::<u64>().unwrap() > 0);
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3820,8 +3766,6 @@ mod tests {
             .unwrap();
         let delivered: Vec<String> = retried.into_iter().flatten().collect();
         assert_eq!(delivered, expected, "a refused first batch lost rows");
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3865,8 +3809,6 @@ mod tests {
             !retried.iter().flatten().any(|name| sends[0].contains(name)),
             "the accepted first batch was replayed"
         );
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3887,7 +3829,6 @@ mod tests {
         assert!(!root.join("reports/stats/steam/cursor.log").exists());
 
         client.finish(StopMode::Discard);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

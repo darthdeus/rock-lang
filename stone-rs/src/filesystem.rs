@@ -565,7 +565,6 @@ mod xfer_tests {
         let missing_oracle = missing_error.kind() == std::io::ErrorKind::NotFound;
         let missing_exists = stone_file_exists_status(cs(&missing_path).as_ptr());
         let missing_is_directory = stone_is_directory_status(cs(&missing_path).as_ptr());
-        fs::remove_dir_all(root).unwrap();
 
         assert!(
             expected,
@@ -625,7 +624,6 @@ mod xfer_tests {
             0,
             "a path under a non-directory is not a directory"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -678,7 +676,6 @@ mod xfer_tests {
         assert!(stone_copy_file(cs(&src).as_ptr(), cs(&dst).as_ptr()));
         assert_eq!(fs::read(&dst).unwrap(), b"hello");
         assert!(src.exists(), "copy must not remove the source");
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -687,7 +684,6 @@ mod xfer_tests {
         let src = root.join("nope.txt");
         let dst = root.join("out.txt");
         assert!(!stone_copy_file(cs(&src).as_ptr(), cs(&dst).as_ptr()));
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -700,7 +696,6 @@ mod xfer_tests {
         assert!(stone_rename(cs(&src).as_ptr(), cs(&dst).as_ptr()));
         assert!(!src.exists());
         assert_eq!(fs::read(&dst).unwrap(), b"pcm");
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -718,7 +713,6 @@ mod xfer_tests {
         assert!(!src.exists());
         assert_eq!(fs::read(dst.join("kick.wav")).unwrap(), b"k");
         assert_eq!(fs::read(dst.join("Sub").join("snare.wav")).unwrap(), b"s");
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -738,7 +732,6 @@ mod xfer_tests {
         assert_eq!(fs::read(dst.join("k.wav")).unwrap(), b"k");
         assert_eq!(fs::read(dst.join("Sub").join("s.wav")).unwrap(), b"s");
         assert!(pack.exists(), "copy must not remove the source");
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(unix)]
@@ -753,7 +746,6 @@ mod xfer_tests {
 
         let _ = copy_tree(&src, &dst);
         assert_eq!(fs::read(dst.join("a.wav")).unwrap(), b"a");
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -773,7 +765,6 @@ mod xfer_tests {
             b"2"
         );
         assert!(src.exists(), "copy_tree must not remove the source");
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -817,8 +808,6 @@ mod xfer_tests {
             &mut files,
             &mut count
         ));
-
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -840,8 +829,6 @@ mod xfer_tests {
             .collect();
         stone_free_string_array(files, count);
         assert_eq!(names, vec!["visible.txt"]);
-
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(target_os = "linux")]
@@ -871,7 +858,5 @@ mod xfer_tests {
             .collect();
         stone_free_string_array(files, count);
         assert_eq!(names, vec!["visible.txt"]);
-
-        fs::remove_dir_all(&root).unwrap();
     }
 }

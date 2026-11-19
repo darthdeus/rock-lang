@@ -1890,11 +1890,8 @@ pub extern "C" fn stone_file_jobs_test_publication_entered() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU32;
     use std::thread;
     use std::time::Duration;
-
-    static TEST_SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
     fn limits(jobs: usize, bytes: usize) -> Limits {
         Limits {
@@ -1911,16 +1908,8 @@ mod tests {
         }
     }
 
-    fn test_root() -> PathBuf {
-        let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "stone_file_jobs_{}_{}",
-            std::process::id(),
-            sequence
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root
+    fn test_root() -> crate::test_support::TestRoot {
+        crate::test_support::fresh_root("stone_file_jobs_")
     }
 
     fn queued_write(queue: &Mutex<Jobs>, path: PathBuf, bytes: &[u8]) -> i32 {
@@ -1977,7 +1966,6 @@ mod tests {
         assert_eq!(poll_queue(&queue, failed, true), -1);
         assert_eq!(std::fs::read(&path).unwrap(), b"firstsecond");
         assert_eq!(poll_queue(&queue, failed, false), -1);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1999,7 +1987,6 @@ mod tests {
         gate.release();
         assert_eq!(waiter.join().unwrap(), 1);
         assert_eq!(poll_queue(&queue, second, true), 1);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2015,7 +2002,6 @@ mod tests {
         };
         assert!(queue.lock().unwrap().enqueue_single(request).is_none());
         assert_eq!(queue.lock().unwrap().accounting.load(Ordering::Acquire), 0);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2040,7 +2026,6 @@ mod tests {
         assert_eq!(poll_queue(&queue, first, true), 1);
         let second = queued_write(&queue, root.join("second"), b"x");
         assert_eq!(poll_queue(&queue, second, true), 1);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2134,7 +2119,6 @@ mod tests {
         assert_eq!(poll_queue(&queue, job, true), 1);
         assert_eq!(std::fs::read(snapshot).unwrap(), b"snap");
         assert_eq!(std::fs::read(manifest).unwrap(), b"{\"a\":1}");
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2171,7 +2155,6 @@ mod tests {
             decoded.as_raw(),
             &[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,]
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     fn compaction_limits() -> Limits {
@@ -2311,7 +2294,6 @@ mod tests {
         for (index, file) in files.iter().enumerate() {
             assert_reachable_png(file, index, 1);
         }
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2356,7 +2338,6 @@ mod tests {
         );
         assert!(path.exists());
         assert_eq!(std::fs::read(&manifest).unwrap(), b"manifest");
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2373,7 +2354,6 @@ mod tests {
         assert_eq!(poll_queue(&queue, job, true), 1);
         let cuts = log.take().len();
         assert_eq!(cuts, directories.len() + 1);
-        let _ = std::fs::remove_dir_all(measure_root);
 
         for cut in 1..=cuts {
             let root = test_root();
@@ -2404,7 +2384,6 @@ mod tests {
                 }
                 other => panic!("cut {cut} reported {other}"),
             }
-            let _ = std::fs::remove_dir_all(root);
         }
     }
 
@@ -2446,7 +2425,6 @@ mod tests {
         );
         assert!(queue.lock().unwrap().abort_transaction(transaction_id));
         assert_eq!(queue.lock().unwrap().accounting.load(Ordering::Acquire), 0);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2470,7 +2448,6 @@ mod tests {
         let root_nested = root.join("new").join("nested");
         assert!(nested.changed.contains(&root_nested));
         assert!(nested.flush().is_ok());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2509,7 +2486,6 @@ mod tests {
         assert!(snapshots.join("keep.png").exists());
         assert!(!snapshots.join("orphan.png").exists());
         assert!(snapshots.join("nested/child.png").exists());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2555,7 +2531,6 @@ mod tests {
         assert_eq!(std::fs::read(&manifest).unwrap(), b"old");
         assert!(snapshots.join("keep.png").exists());
         assert!(snapshots.join("orphan.png").exists());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2633,7 +2608,6 @@ mod tests {
         assert_eq!(std::fs::read(&manifest).unwrap(), b"recovered");
         assert!(previous.exists());
         assert!(next.exists());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2672,7 +2646,6 @@ mod tests {
             "keep.png".to_owned(),
         ));
         assert!(queue.lock().unwrap().abort_transaction(transaction_id));
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2713,7 +2686,6 @@ mod tests {
         ));
         assert!(queue.lock().unwrap().abort_transaction(transaction_id));
         assert_eq!(queue.lock().unwrap().accounting.load(Ordering::Acquire), 0);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2767,7 +2739,6 @@ mod tests {
             .unwrap();
         assert_eq!(poll_queue(&queue, failure_job, true), -1);
         assert!(!failure_cleanup.exists());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2811,7 +2782,6 @@ mod tests {
             std::fs::read(root.join("snapshot.png")).unwrap(),
             b"snapshot"
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2866,7 +2836,6 @@ mod tests {
         assert_eq!(std::fs::read(manifest).unwrap(), b"old");
         assert!(snapshots.join("keep.png").exists());
         assert!(snapshots.join("orphan.png").exists());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2929,7 +2898,6 @@ mod tests {
         assert_eq!(std::fs::read(&manifest).unwrap(), b"new");
         assert!(snapshots.join("keep.png").exists());
         assert!(!snapshots.join("orphan.png").exists());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2956,7 +2924,6 @@ mod tests {
         gate.release();
         assert_eq!(poll_queue(&queue, job, true), 1);
         assert_eq!(std::fs::read(path).unwrap(), b"before");
-        let _ = std::fs::remove_dir_all(root);
     }
 }
 
