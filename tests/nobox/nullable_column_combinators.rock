@@ -154,4 +154,4 @@ fn the_remaining_combinators_over_a_nullable_column() -> int {
 // non-nullable `[BV2]` and the MARKED `[MV2?]` are column-stored). It used to
 // die packing `BV2_ct(nil, nil)` on the absent row, which was an SROA license
 // bug at a generic bound to `V?` rather than anything about columns -- fixed,
-// with its controls, in `tests/nullable/generic_binding_sroa.rock`.
+// with its controls, in `tests/nullable/representations.rock`.

@@ -1,8 +1,8 @@
-// Nullable refinement of local bindings: `if x != null` smart-casts `x` in
-// the branch. The second half holds adversarial cases around closures,
-// reassignment and control-flow edges.
+// Refinement of nullable locals: `if x != null`, guards, `!is_null(x)` and
+// compound conditions narrow a binding; the narrow survives only effects that
+// cannot undo it (pure calls, writes from outside a closure). Rejected shapes
+// are in tests/errors/nullable.rock.err.
 
-// Helper structures and functions
 struct Item {
     file: string,
     last_modified: int,
@@ -10,20 +10,6 @@ struct Item {
 
 fn file_modtime(_p: string) -> int? {
     return 5
-}
-
-@test(output = "4")
-fn if_else_nullable_then() {
-    let x: int? = 3
-    if x != null {
-        let y = x + 1
-        print(y)
-    } else {
-        let y = x
-        print("null")
-    }
-    
-    x = null
 }
 
 @test(output = "4")
@@ -36,21 +22,20 @@ fn if_else_nullable_else() {
         let y = x + 1
         print(y)
     }
-    
+
     x = null
 }
 
-// Nested Refinement Tests
 @test(output = "updated 5", type_holes = [[0, "int"]])
 fn nullable_refine_nested_else() {
     let item = Item{ file: "foo", last_modified: 0 }
     let last_modified = file_modtime(item.file)
-    
+
     if last_modified == null {
         print("not found")
     } else {
         let refined_last_modified: ? = last_modified
-        
+
         if last_modified > item.last_modified {
             item.last_modified = last_modified
             print("updated {last_modified}")
@@ -61,7 +46,7 @@ fn nullable_refine_nested_else() {
 @test(output = "11", type_holes = [[1, "int"], [2, "int"], [3, "int?"]])
 fn double_refinement_chain() {
     let x: int? = 10
-    
+
     if x != null {
         let x_refined_once: ? = x
         if x > 5 {
@@ -69,19 +54,17 @@ fn double_refinement_chain() {
             print(x + 1)
         }
     }
-    
+
     let x_reverted: ? = x
     x = null
 }
 
-// Complex Refinement Scenarios
 @test(output = "5\n10", type_holes = [[4, "int"], [5, "int"]])
 fn refinement_with_multiple_variables() {
     let a: int? = 5
     let b: int? = 10
-    
+
     if a != null && b != null {
-        // Both a and b are refined to int here
         let a_refined: ? = a
         let b_refined: ? = b
         print(a)
@@ -89,28 +72,15 @@ fn refinement_with_multiple_variables() {
     }
 }
 
-// Refinement with Different Operators
-@test(output = "not null")
-fn refinement_with_is_null() {
-    let x: int? = 5
-    
-    if !is_null(x) {
-        print("not null")
-    } else {
-        print("is null")
-    }
-}
-
 @test(output = "value is 7")
 fn refinement_with_negated_equality() {
     let x: int? = 7
-    
+
     if !(x == null) {
         print("value is {x}")
     }
 }
 
-// Refinement in Loops
 @test(output = "1\n2\n3")
 fn refinement_in_while_loop() {
     let counter: int? = 1
@@ -125,27 +95,11 @@ fn refinement_in_while_loop() {
     }
 }
 
-// Refinement with Function Calls
-fn process_value(x: int) -> int {
-    return x * 2
-}
-
-@test(output = "20")
-fn refinement_with_function_call() {
-    let value: int? = 10
-    
-    if value != null {
-        let result = process_value(value)
-        print(result)
-    }
-}
-
-// Advanced Refinement Patterns
 @test(output = "either null")
 fn refinement_or_conditions() {
     let a: int? = 5
     let b: int? = null
-    
+
     if a == null || b == null {
         print("either null")
     } else {
@@ -162,8 +116,6 @@ fn refinement_with_mutation() {
         print("modified: {x}")
     }
 }
-
-// Shadowing inside refinement blocks
 
 struct ShadowFoo { value: int }
 
@@ -196,8 +148,6 @@ fn refined_access_then_shadow() {
     }
 }
 
-// --- Refinement + closures ---
-
 @test(output = "42")
 fn test_refinement_captured_in_closure() {
     let x: int? = 42
@@ -209,24 +159,6 @@ fn test_refinement_captured_in_closure() {
     }
 }
 
-@test(output = "42 42 42")
-fn test_refinement_in_loop_closure() {
-    let x: int? = 42
-    if x != null {
-        let v = [1, 2, 3]
-        let out = ""
-        let first = true
-        for item in v {
-            if !first { out = out + " " }
-            first = false
-            out = out + "{x}"
-        }
-        print(out)
-    }
-}
-
-// --- Refinement with early return in if ---
-
 fn guard_return(x: int?, y: int?) -> string {
     if x == null {
         return "x null"
@@ -234,7 +166,6 @@ fn guard_return(x: int?, y: int?) -> string {
     if y == null {
         return "y null"
     }
-    // Both x and y should be refined here
     return "{x} {y}"
 }
 
@@ -244,8 +175,6 @@ fn test_double_guard_return() {
     print(guard_return(null, 20))
     print(guard_return(10, null))
 }
-
-// --- Nested if refinement ---
 
 struct Node {
     value: int,
@@ -274,8 +203,6 @@ fn test_nested_nullable_refinement() {
     print(out)
 }
 
-// --- Compound condition refinement ---
-
 @test(output = "skipped")
 fn test_compound_and_one_null() {
     let x: int? = 1
@@ -286,8 +213,6 @@ fn test_compound_and_one_null() {
         print("skipped")
     }
 }
-
-// --- Refinement with short-circuit safety ---
 
 @test(output = "safe: 42\nskipped")
 fn test_short_circuit_refinement() {
@@ -312,8 +237,6 @@ struct CountedItem {
     count: int,
 }
 
-// --- Refinement + safe navigation combination ---
-
 @test(output = "10")
 fn test_refinement_with_safenav_fallback() {
     let c: Container? = Container { item: CountedItem { name: "x", count: 10 } }
@@ -323,19 +246,127 @@ fn test_refinement_with_safenav_fallback() {
     }
 }
 
-// --- Refinement doesn't leak out of scope ---
+struct G { f: int? }
+global g: G = G { f: 1 }
 
-fn scoped_refinement(x: int?) -> string {
-    if x != null {
-        let doubled = x * 2
-        return "doubled: {doubled}"
+@pure fn twice(n: int) -> int { return n * 2 }
+fn count() -> int { return 3 }
+// A write through a call, so the test body starts with no narrow in force.
+fn reset(v: int?) { g.f = v }
+
+@test(output = "2")
+fn a_pure_call_in_the_condition_keeps_a_path_narrow() {
+    reset(1)
+    if g.f != null && twice(1) == 2 { print(g.f + 1) }
+}
+
+@test(output = "2")
+fn a_pure_call_between_check_and_use_keeps_a_path_narrow() {
+    reset(1)
+    if g.f != null {
+        let _k = twice(2)
+        print(g.f + 1)
     }
-    // x should NOT be refined here
-    return "was null"
 }
 
-@test(output = "doubled: 84\nwas null")
-fn test_refinement_scoped() {
-    print(scoped_refinement(42))
-    print(scoped_refinement(null))
+@test(output = "re-checked")
+fn an_impure_call_forces_a_re_check() {
+    reset(1)
+    if g.f != null {
+        let _k = count()
+        if g.f != null { print("re-checked") }
+    }
 }
+
+@test(output = "4")
+fn a_closure_assigned_local_keeps_its_narrow_across_a_pure_call() {
+    let x: int? = 1
+    let kill = () => { x = null }
+    if x != null {
+        let k = twice(x)
+        print(k + x + 1)
+    }
+    kill()
+}
+
+@test(output = "gone")
+fn a_closure_assigned_local_is_re_checked_after_the_call() {
+    let x: int? = 1
+    let kill = () => { x = null }
+    if x != null {
+        kill()
+        if x == null { print("gone") } else { print("still {x}") }
+    }
+}
+
+@test(output = "3")
+fn a_lambda_local_assigned_in_the_same_lambda_still_narrows() {
+    let f = () => {
+        let y: int? = 1
+        y = 2
+        if y != null {
+            let _k = count()
+            return y + 1
+        }
+        return 0
+    }
+    print(f())
+}
+
+@test(output = "5")
+fn a_local_assigned_only_outside_lambdas_is_immune_to_calls() {
+    let x: int? = 4
+    if x != null {
+        let _k = count()
+        print(x + 1)
+    }
+    x = null
+}
+
+struct Payload { n: int }
+struct Holder { value: Payload? }
+
+struct Other {}
+fn is_null(_value: Other?) -> bool { false }
+
+fn guarded_payload(p: Payload?) -> int {
+    if is_null(p) { return -1 }
+    return p.n
+}
+
+@test(output = "7\nempty")
+fn stdlib_bare_call_narrows_both_paths() {
+    let p: Payload? = Payload { n: 7 }
+    if !is_null(p) { print(p.n) }
+    p = null
+    if is_null(p) { print("empty") } else { print(p.n) }
+}
+
+@test(output = "8\n-1")
+fn stdlib_guard_narrows_after_return() {
+    print(guarded_payload(Payload { n: 8 }))
+    print(guarded_payload(null))
+}
+
+@test(output = "9")
+fn stdlib_ufcs_call_narrows() {
+    let p: Payload? = Payload { n: 9 }
+    if !p.is_null() { print(p.n) }
+}
+
+@test(output = "10\n11")
+fn stdlib_predicate_narrows_paths_and_short_circuits() {
+    let h = Holder { value: Payload { n: 10 } }
+    if !is_null(h.value) { print(h.value.n) }
+    let p: Payload? = Payload { n: 11 }
+    if !is_null(p) && p.n == 11 { print(p.n) }
+}
+
+@test(output = "false\nfalse")
+fn selected_user_overload_keeps_its_own_behavior() {
+    let x: Other? = null
+    print(is_null(x))
+    let is_null = (_value: Other?) => false
+    print(is_null(x))
+}
+

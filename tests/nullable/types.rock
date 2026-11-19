@@ -1,0 +1,305 @@
+// Nullable types: syntax, struct fields, params, returns, inference and
+// unwrap; nullable function values; T -> T? promotion through generics, HOFs
+// and map; and int -> float widening of a nullable that must stay absent.
+// Compile-time rejections are in tests/errors/nullable.rock.err.
+
+struct Opt {
+    val: int?
+}
+
+struct OptAny {
+    val: any?
+}
+
+struct S {}
+
+fn process(maybe_int: int?) {
+    print("processed")
+}
+
+fn get_opt() -> int? {
+    return 5
+}
+
+fn get_opt_null() -> int? {
+    return null
+}
+
+@test(output = "5\nhello\ntrue\ntrue\n0\ntrue")
+fn test_optional_type_syntax() {
+    let x: int? = null
+    x = 5
+    print(x)
+    let s: string? = null
+    s = "hello"
+    print(s)
+    let b: bool? = true
+    print(b)
+    let arr: [int]? = null
+    print(arr == null)
+    let elems: [int?] = []
+    print(elems.len())
+    let st: S? = null
+    print(st == null)
+}
+
+@test(output = "5\ntrue\ntrue\n5")
+fn test_optional_in_struct_field() {
+    let o = Opt { val: 5 }
+    print(o.val)
+    o.val = null
+    print(o.val == null)
+    let p = Opt { val: null }
+    print(p.val == null)
+    p.val = 5
+    print(p.val)
+}
+
+@test(output = "5")
+fn test_any_struct_field() {
+    let o = OptAny { val: 5 }
+    print(o.val)
+}
+
+@test(output = "processed\nprocessed")
+fn test_optional_in_function_param() {
+    process(5)
+    process(null)
+}
+
+@test(output = "5\nnull returned")
+fn test_optional_in_function_return() {
+    let result = get_opt()
+    print(result)
+
+    let null_result = get_opt_null()
+    if null_result == null {
+        print("null returned")
+    }
+}
+
+@test(output = "5\ntrue")
+fn test_nullable_inference() {
+    let opt_val: int? = 5
+    let inferred = opt_val
+    print(inferred)
+    let n = null
+    let inferred_any = n
+    print(inferred_any == null)
+}
+
+@test(output = "5\n5")
+fn test_unwrap() {
+    let x: int? = 5
+    print(x.unwrap())
+    let y = x.unwrap()
+    print(y)
+}
+
+@test(output = "5\n5")
+fn test_unwrap_inside_if_expression() {
+    let x: int? = 5
+    let plain = if true {
+        x.unwrap()
+    } else {
+        6
+    }
+    print(plain)
+    let shadowed = if true {
+        let z = x.unwrap()
+        z
+    } else {
+        6
+    }
+    print(shadowed)
+}
+
+@test(output = "42")
+fn test_conditional_nullable_assignment() {
+    let x: int? = null
+    if true {
+        x = 42
+    }
+    if x != null {
+        print(x)
+    }
+}
+
+fn test_fn() {
+    print("test")
+}
+
+fn takes_function(f: fn() -> ()) {
+    f()
+}
+
+struct StructWithNullableFunction {
+    func: (fn() -> ())?,
+}
+
+@test(output = "test")
+fn test_nullable_function_variable() {
+    let f: (fn() -> ())? = test_fn
+    f.unwrap()()
+}
+
+@test(output = "test")
+fn test_nullable_function_struct_field() {
+    let s = StructWithNullableFunction {
+        func: test_fn
+    }
+    s.func.unwrap()()
+}
+
+@test(output = "test")
+fn test_nullable_function_unwrap_and_pass() {
+    let f: (fn() -> ())? = test_fn
+    let unwrapped = f.unwrap()
+    takes_function(unwrapped)
+}
+
+@test(output = "null\ntest")
+fn test_nullable_function_null_case() {
+    let f: (fn() -> ())? = null
+    if f == null {
+        print("null")
+    }
+
+    f = test_fn
+    if f != null {
+        f()
+    }
+}
+
+fn promote_int(x: int) -> int? { return x }
+fn promote_string(x: string) -> string? { return x }
+
+fn call_with_lambda<T, U>(value: T, f: (T) -> U) -> U {
+    return f(value)
+}
+
+fn process_mixed(regular: int, nullable: int?) -> string {
+    let r_str = "{regular}"
+    let n_str = if is_null(nullable) { "null" } else { "{nullable}" }
+    return "{r_str}-{n_str}"
+}
+
+@test(output = "42\n42\nhello")
+fn nullable_promotion_basic_functionality() {
+    let x: int = 42
+    let y: int? = promote_int(x)
+    let z: string? = promote_string("hello")
+
+    print(x)
+    print(y.unwrap())
+    print(z.unwrap())
+}
+
+@test(output = "10\n5")
+fn nullable_promotion_does_not_contaminate_variables() {
+    // Promoting `length` into int? must not change the sibling `n`
+    // (still a plain int usable in arithmetic) nor `length` itself.
+    let length: int = 5
+    let n: int = 5
+    let maybe: int? = promote_int(length)
+    print(n + maybe.unwrap())
+    print(length)
+}
+
+@test(output = "3\ntrue")
+fn nullable_promotion_into_vec_construction() {
+    // A promoted value flows into a [int?] element and stays nullable.
+    let data: [int?] = [promote_int(1), promote_int(2), null]
+    print(data.len())
+    print(data[2] == null)
+}
+
+@test(output = "84")
+fn nullable_promotion_through_lambda_parameter() {
+    // A promoted int? passed as the generic T into a HOF.
+    let result: int = call_with_lambda(promote_int(42), m => m.unwrap() * 2)
+    print(result)
+}
+
+@test(output = "1\nnull\n3")
+fn nullable_promotion_complex_generic_scenario() {
+    // Mixed promoted/null through map + the null branch of process_mixed.
+    let numbers: [int?] = [promote_int(1), null, promote_int(3)]
+    let strings = numbers.iter().map(m => if is_null(m) { "null" } else { "{m}" }).collect()
+
+    for s in strings {
+        print(s)
+    }
+}
+
+@test(output = "42-42\n42-null")
+fn nullable_promotion_mixed_types() {
+    let x: int = 42
+    let y: int? = promote_int(x)
+    let z: int? = null
+
+    print(process_mixed(x, y))
+    print(process_mixed(x, z))
+}
+
+// Bare `any` excludes the null literal, but a nullable value may flow into it.
+@test(output = "true\n5")
+fn nullable_values_and_any() {
+    let none: any? = null
+    let some: int? = 5
+    let erased: any = some
+    print(none == null)
+    print(cast<int>(erased))
+}
+
+@test(output = "absent")
+fn test_nullable_int_in_a_float_binding_stays_absent() {
+    let a: int? = null
+    let v: float? = a
+    if v == null { print("absent") } else { print("present") }
+}
+
+@test(output = "7")
+fn test_nullable_int_in_a_float_binding_keeps_its_value() {
+    let a: int? = 7
+    let v: float? = a
+    if v == null { print("absent") } else { print("{v.floor()}") }
+}
+
+@inline fn widen(x: int?) -> float? {
+    return x
+}
+
+@test(output = "absent")
+fn test_inlined_widening_callee_stays_absent() {
+    let a: int? = null
+    let v = widen(a)
+    if v == null { print("absent") } else { print("present") }
+}
+
+fn describe(v: float?) -> string {
+    if v == null {
+        return "absent"
+    }
+    return "present"
+}
+
+@test(output = "absent")
+fn test_nullable_int_argument_in_a_float_parameter() {
+    let a: int? = null
+    print(describe(a))
+}
+
+@test(output = "absent")
+fn test_nullable_uint_in_a_float_binding_stays_absent() {
+    let a: uint? = null
+    let v: float? = a
+    if v == null { print("absent") } else { print("present") }
+}
+
+@test(output = "0")
+fn test_coalescing_a_widened_absent_value() {
+    let a: int? = null
+    let v: float? = a
+    print("{(v ?? 0.0).floor()}")
+}

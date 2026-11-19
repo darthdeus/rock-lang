@@ -1,12 +1,13 @@
-// Path refinement: `if a.b != null && a.b.c != null` narrows field paths,
-// safe-navigation chains, guards and early returns.
+// Path refinement: `if a.b != null && a.b.c != null`, `a?.b?.c != null`,
+// guards and early returns narrow field paths; assignment invalidates the
+// narrow, it stays scoped to its branch, and runtime null at every level of a
+// chain takes the miss path.
 
 struct C { value: int }
 struct B { c: C?, name: string }
 struct A { b: B? }
 struct Outer { inner: A? }
 
-// && short-circuit variable refinement
 @test(output = "hello\ndefault\nno inner")
 fn and_variable_refinement() {
     let o: A? = A { b: B { c: C { value: 42 }, name: "hello" } }
@@ -27,16 +28,6 @@ fn and_variable_refinement() {
     }
 }
 
-// Safe navigation chain refinement
-// a?.b?.c != null refines a, a.b, a.b.c in the body
-@test
-fn safe_nav_two_level() {
-    let a: A? = A { b: B { c: C { value: 42 }, name: "x" } }
-    if a?.b != null {
-        assert_eq(a.b.name, "x")
-    }
-}
-
 @test
 fn safe_nav_four_level() {
     let o: Outer? = Outer { inner: A { b: B { c: C { value: 99 }, name: "deep" } } }
@@ -45,8 +36,6 @@ fn safe_nav_four_level() {
     }
 }
 
-// Mixed && with path refinements
-// Each clause uses refinements from prior clauses
 @test
 fn and_chain_incremental() {
     let a: A? = A { b: B { c: C { value: 7 }, name: "inc" } }
@@ -55,7 +44,6 @@ fn and_chain_incremental() {
     }
 }
 
-// Safe nav LHS establishes path, plain access RHS uses it
 @test
 fn and_safe_nav_lhs_plain_rhs() {
     let a: A? = A { b: B { c: C { value: 9 }, name: "ok" } }
@@ -64,7 +52,6 @@ fn and_safe_nav_lhs_plain_rhs() {
     }
 }
 
-// && with non-null-check condition using path-refined access
 @test
 fn and_condition_on_refined_path() {
     let a: A? = A { b: B { c: C { value: 5 }, name: "test" } }
@@ -73,8 +60,6 @@ fn and_condition_on_refined_path() {
     }
 }
 
-// Mixed . and ?. in chains
-// a.b?.c where a is non-nullable, b is nullable field
 @test
 fn dot_then_safenav() {
     let a: A = A { b: B { c: C { value: 7 }, name: "hi" } }
@@ -83,18 +68,15 @@ fn dot_then_safenav() {
     }
 }
 
-// Post-divergence then deeper check
 @test
 fn post_divergence_then_deeper() {
     let a: A? = A { b: B { c: C { value: 3 }, name: "g" } }
     if a == null { return }
-    // a is now A (non-null via divergence refinement)
     if a.b?.c != null {
         assert_eq(a.b.c.value, 3)
     }
 }
 
-// Null cases (runtime correctness)
 @test(output = "missing root\nmissing intermediate\nmissing leaf")
 fn safe_nav_chain_null_at_each_level() {
     let root: A? = null
@@ -105,16 +87,6 @@ fn safe_nav_chain_null_at_each_level() {
     if leaf?.b?.c != null { print("found") } else { print("missing leaf") }
 }
 
-// Post-divergence path refinement (guard patterns)
-// if a?.b == null { return } refines a.b after the guard
-@test
-fn guard_safe_nav_eq_null() {
-    let a: A? = A { b: B { c: C { value: 42 }, name: "ok" } }
-    if a?.b == null { return }
-    assert_eq(a.b.name, "ok")
-}
-
-// Deeper guard: if a?.b?.c == null { return }
 @test
 fn guard_deep_chain() {
     let a: A? = A { b: B { c: C { value: 7 }, name: "deep" } }
@@ -122,7 +94,6 @@ fn guard_deep_chain() {
     assert_eq(a.b.c.value, 7)
 }
 
-// Guard fires on null root (verify runtime correctness)
 @test(output = "guarded")
 fn guard_fires_null_root() {
     let a: A? = null
@@ -133,19 +104,16 @@ fn guard_fires_null_root() {
     assert(false)
 }
 
-// Else-diverges: if a?.b != null { } else { return }; a.b.name
 @test
 fn else_diverges_path_refined() {
     let a: A? = A { b: B { c: C { value: 3 }, name: "else" } }
     if a?.b != null {
-        // ok
     } else {
         return
     }
     assert_eq(a.b.name, "else")
 }
 
-// While loop path refinement
 @test(output = "3\n2\n1")
 fn while_safe_nav_path_refined() {
     let a: A? = A { b: B { c: C { value: 3 }, name: "w" } }
@@ -165,25 +133,20 @@ fn while_safe_nav_null_skip() {
     print("done")
 }
 
-// Scoping: refinement doesn't leak
 @test(output = "inside\n7")
 fn refinement_scoped_to_block() {
     let a: A? = A { b: B { c: C { value: 7 }, name: "s" } }
     if a?.b?.c != null {
         print("inside")
     }
-    // Outside: a is still A?, must use ?.
     print(a?.b?.c?.value ?? 0)
 }
 
-// Assignment to refined paths. Regression: assigning null to a path-refined
-// nullable field was rejected.
 struct Inner { value: int }
 struct Mid { inner: Inner?, name: string }
 struct Top { mid: Mid? }
 struct Deep { top: Top? }
 
-// Deep chain: assign null to deeply refined path
 @test(output = "42\ncleared")
 fn assign_null_deep_path() {
     let t = Top { mid: Mid { inner: Inner { value: 42 }, name: "deep" } }
@@ -196,7 +159,6 @@ fn assign_null_deep_path() {
     }
 }
 
-// Assign null to intermediate level of a deep chain
 @test(output = "deep\ncleared")
 fn assign_null_intermediate_path() {
     let d = Deep { top: Top { mid: Mid { inner: Inner { value: 1 }, name: "deep" } } }
@@ -207,8 +169,6 @@ fn assign_null_intermediate_path() {
     }
 }
 
-// Guard pattern + assignment
-// Guard, use the refined value, then clear it
 @test(output = "x\ncleared")
 fn guard_use_then_clear() {
     let t = Top { mid: Mid { inner: Inner { value: 1 }, name: "x" } }
@@ -218,19 +178,16 @@ fn guard_use_then_clear() {
     print("cleared")
 }
 
-// Assign non-null: should preserve refinement ability
 @test(output = "before\nafter")
 fn assign_nonnull_to_refined_field() {
     let t = Top { mid: Mid { inner: Inner { value: 1 }, name: "before" } }
     if t.mid != null {
         print(t.mid.name)
         t.mid = Mid { inner: null, name: "after" }
-        // After assigning a non-null value, the field is still accessible
         print(t.mid.name)
     }
 }
 
-// While loop: mutate through refined path
 @test(output = "3\n2\n1\ndone")
 fn while_loop_mutate_refined_path() {
     let t = Top { mid: Mid { inner: Inner { value: 3 }, name: "loop" } }
@@ -242,7 +199,6 @@ fn while_loop_mutate_refined_path() {
     print("done")
 }
 
-// While loop that clears the condition field (should exit loop)
 @test(output = "clearing\ndone")
 fn while_loop_clear_refined_path() {
     let t = Top { mid: Mid { inner: Inner { value: 1 }, name: "x" } }
@@ -253,7 +209,6 @@ fn while_loop_clear_refined_path() {
     print("done")
 }
 
-// Multiple refined paths: invalidate one, use another
 struct TwoFields {
     a: Inner?,
     b: Inner?,
@@ -273,7 +228,6 @@ fn invalidate_one_path_keep_other() {
     }
 }
 
-// Assign in else branch
 @test(output = "was null\nset")
 fn assign_in_else_branch() {
     let t = Top { mid: null }
@@ -286,7 +240,6 @@ fn assign_in_else_branch() {
     }
 }
 
-// Nested if with progressive refinement and assignment
 @test(output = "a\n42\ncleared inner")
 fn nested_refinement_then_partial_clear() {
     let t = Top { mid: Mid { inner: Inner { value: 42 }, name: "a" } }
@@ -302,7 +255,6 @@ fn nested_refinement_then_partial_clear() {
     }
 }
 
-// Compound assignment through refined path
 @test(output = "11")
 fn compound_assign_through_refined_path() {
     let t = Top { mid: Mid { inner: Inner { value: 10 }, name: "x" } }
@@ -310,4 +262,238 @@ fn compound_assign_through_refined_path() {
         t.mid.inner.value = t.mid.inner.value + 1
         print(t.mid.inner.value)
     }
+}
+
+struct Val { n: int }
+struct Box { val: Val?, label: string }
+struct Wrapper { box: Box? }
+
+@test(output = "was set\nnow null")
+fn invalidation_after_null_assign() {
+    let b = Box { val: Val { n: 1 }, label: "x" }
+    if b.val != null {
+        print("was set")
+        b.val = null
+        if b.val == null {
+            print("now null")
+        }
+    }
+}
+
+@test(output = "re-checked")
+fn invalidation_after_nullable_assign() {
+    let b = Box { val: Val { n: 1 }, label: "x" }
+    let maybe: Val? = null
+    if b.val != null {
+        b.val = maybe
+        if b.val != null {
+            print("still set")
+        } else {
+            print("re-checked")
+        }
+    }
+}
+
+@test(output = "loop done\nsafe access")
+fn refinement_scoped_to_while() {
+    let b = Box { val: Val { n: 1 }, label: "x" }
+    while b.val != null && b.val.n > 0 {
+        b.val.n = b.val.n - 1
+    }
+    print("loop done")
+    let n = b.val?.n ?? -1
+    print("safe access")
+}
+
+struct Multi {
+    a: Val?,
+    b: Val?,
+    c: Val?,
+}
+
+@test(output = "1\n3")
+fn independent_field_refinements() {
+    let m = Multi { a: Val { n: 1 }, b: null, c: Val { n: 3 } }
+    if m.a != null {
+        print(m.a.n)
+    }
+    if m.b != null {
+        print("unreachable")
+    }
+    if m.c != null {
+        print(m.c.n)
+    }
+}
+
+@test(output = "original\nupdated")
+fn guard_safenav_assign() {
+    let w: Wrapper? = Wrapper { box: Box { val: Val { n: 1 }, label: "original" } }
+    if w == null { return }
+    if w.box == null { return }
+    let box = w.box
+    print(box.label)
+    box.label = "updated"
+    print(box.label)
+}
+
+@test(output = "no val")
+fn and_chain_short_circuits() {
+    let w = Wrapper { box: Box { val: null, label: "x" } }
+    if w.box != null && w.box.val != null {
+        print("unreachable")
+    } else {
+        print("no val")
+    }
+}
+
+struct Root { w: Wrapper? }
+
+@test(output = "3")
+fn negated_null_check_refines() {
+    let w = Wrapper { box: Box { val: Val { n: 42 }, label: "neg" } }
+    if !(w.box == null) {
+        print(w.box.label.len())
+    }
+}
+
+@test(output = "captured: 42")
+fn path_refinement_captured_in_closure() {
+    let w = Wrapper { box: Box { val: Val { n: 42 }, label: "x" } }
+    if w.box != null && w.box.val != null {
+        let f = () => {
+            print("captured: {w.box.val.n}")
+        }
+        f()
+    }
+}
+
+@test(output = "10\n20")
+fn assign_different_values_in_branches() {
+    let b = Box { val: null, label: "x" }
+    if b.val == null {
+        b.val = Val { n: 10 }
+    }
+    if b.val != null {
+        print(b.val.n)
+    }
+    // Re-assign via a local (backend-agnostic): bone narrows b.val to non-null
+    // after the assignment so a re-check is dead, while rock needs a guard. Use
+    // the local.
+    let v = Val { n: 20 }
+    b.val = v
+    print(v.n)
+}
+
+struct Player { weapon: Weapon? }
+struct Weapon { damage: int, enchant: Enchant? }
+struct Enchant { power: int, name: string }
+
+@test(output = "1\n2")
+fn assign_then_rerefine() {
+    let b = Box { val: Val { n: 1 }, label: "x" }
+    if b.val != null {
+        print(b.val.n)
+        b.val = null
+        let v = Val { n: 2 }
+        b.val = v
+        print(v.n)
+    }
+}
+
+@test(output = "5\nfire")
+fn guard_pattern_mixed_nav() {
+    let p = Player {
+        weapon: Weapon { damage: 5, enchant: Enchant { power: 10, name: "fire" } }
+    }
+    if p.weapon == null { return }
+    let weapon = p.weapon
+    print(weapon.damage)
+    let name = weapon.enchant?.name ?? "none"
+    print(name)
+}
+
+@test(output = "fire 10")
+fn successive_guards() {
+    let p = Player {
+        weapon: Weapon { damage: 5, enchant: Enchant { power: 10, name: "fire" } }
+    }
+    if p.weapon == null { return }
+    if p.weapon.enchant == null { return }
+    print("{p.weapon.enchant.name} {p.weapon.enchant.power}")
+}
+
+@test(output = "no enchant")
+fn successive_guards_second_null() {
+    let p = Player { weapon: Weapon { damage: 5, enchant: null } }
+    if p.weapon == null { return }
+    if p.weapon.enchant == null {
+        print("no enchant")
+        return
+    }
+    print("unreachable")
+}
+
+@test(output = "found: 42")
+fn while_with_break_path_refined() {
+    let items = [
+        Box { val: null, label: "a" },
+        Box { val: Val { n: 42 }, label: "b" },
+        Box { val: null, label: "c" },
+    ]
+    let found = false
+    let result = 0
+    for item in items {
+        if item.val != null {
+            result = item.val.n
+            found = true
+            break
+        }
+    }
+    if found {
+        print("found: {result}")
+    }
+}
+
+@test(output = "missing leaf\nmissing mid\nmissing root")
+fn safenav_condition_chain_null_at_each_level() {
+    let leaf = Root { w: Wrapper { box: Box { val: null, label: "x" } } }
+    if leaf.w?.box?.val != null { print("found") } else { print("missing leaf") }
+    let mid = Root { w: Wrapper { box: null } }
+    if mid.w?.box?.val != null { print("found") } else { print("missing mid") }
+    let root = Root { w: null }
+    if root.w?.box?.val != null { print("found") } else { print("missing root") }
+}
+
+// A local narrowed twice by one condition is restored after the branch
+// `w != null && w.box != null` narrows `w` both directly and as the prefix of
+// `w.box`. Leaving the branch must put back `w`'s declared nullable type, so
+// the later `w != null` stays a live check rather than a rejected dead one.
+fn double_narrow_branch(w: Wrapper?) -> string {
+    if w != null && w.box != null {
+        print("inner")
+    }
+    if w != null { return "set" }
+    return "null"
+}
+
+@test(output = "null")
+fn double_narrow_restored_after_branch() {
+    print(double_narrow_branch(null))
+}
+
+// Two guards narrowing the same local inside a block (`w` directly, then as the
+// prefix of `w.box`): after the block the local is nullable again.
+fn double_guard_block(w: Wrapper?, flag: bool) -> string {
+    if flag {
+        if w == null { return "early" }
+        if w.box == null { return "early" }
+        print(w.box.label)
+    }
+    if w == null { return "null" }
+    return "set"
+}
+
+@test(output = "null")
+fn double_guard_restored_after_block() {
+    print(double_guard_block(null, false))
 }

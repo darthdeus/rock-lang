@@ -104,17 +104,3 @@ fn vec_of_nullable_int_sum() {
     print(sum)
 }
 
-// Refinement inside loops over Vec<T?>
-@test(output = "a\nc")
-fn vec_of_nullable_refinement_in_loop() {
-    let mobs: [Mob?] = []
-    vec_push(mobs, Mob { name: "a", health: 10 })
-    vec_push(mobs, null)
-    vec_push(mobs, Mob { name: "c", health: 30 })
-    for mob in mobs {
-        if mob != null {
-            // mob is refined to Mob here (not Mob?)
-            print(mob.name)
-        }
-    }
-}

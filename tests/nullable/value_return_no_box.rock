@@ -23,11 +23,6 @@ fn nullable_return_present() -> int {
     return -1
 }
 
-@test(returns = true)
-fn nullable_return_absent() -> bool {
-    return return_pair(false, 20) == null && forward_pair(false, 20) == null
-}
-
 @test(returns = 41)
 fn nullable_return_forwarded_and_generic() -> int {
     if let pair = optional_identity(forward_pair(true, 20)) { return pair.x + pair.y }
@@ -91,9 +86,6 @@ fn match_return_pair(present: bool) -> ReturnPair? {
 fn if_return_pair(present: bool) -> ReturnPair? {
     if present { ReturnPair { x: 20, y: 21 } } else { null }
 }
-
-@test(returns = 20)
-fn nullable_return_unwrap() -> int { return return_pair(true, 20).unwrap().x }
 
 @test(returns = 20)
 fn nullable_return_match_body() -> int { return match_return_pair(true).unwrap().x }

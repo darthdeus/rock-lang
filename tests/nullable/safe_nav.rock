@@ -1,4 +1,7 @@
-// Safe navigation over tuples, value receivers and mixed enum fields.
+// Safe navigation `?.`: fields, methods, `?.let`, tuple and newtype
+// projections, value and struct receivers, enum fields through generic
+// holders, and `?.` in argument, array, arithmetic and interpolation
+// positions. Assignment through `?.` is in safe_nav_assign.rock.
 
 struct Inner { value: int }
 
@@ -10,23 +13,6 @@ fn boss_mobs() -> Arena<Mob> {
     let mobs: Arena<Mob> = arena_new()
     mobs.insert(Mob { name: "Boss", health: 500 })
     return mobs
-}
-
-@test(output = "hello\ntrue")
-fn safenav_field_access() {
-    let f: Outer? = Outer { inner: null, name: "hello" }
-    print(f?.name)
-
-    let f2: Outer? = null
-    print(f2?.name == null)
-}
-
-@test(output = "default\nhello")
-fn safenav_coalesce() {
-    let o: Outer? = null
-    print(o?.name ?? "default")
-    let o2: Outer? = Outer { inner: null, name: "hello" }
-    print(o2?.name ?? "default")
 }
 
 @test(output = "10\ntrue")
@@ -60,19 +46,6 @@ fn safenav_arena_tuple_projections_and_chains() {
     assert_eq(hp2, 0)
     assert(mobs.pairs().find(_.1.health > 0) != null)
     assert(!(mobs.pairs().find(_.1.health > 1000) != null))
-}
-
-@test(output = "removed Boss\n0")
-fn safenav_find_and_remove() {
-    let mobs = boss_mobs()
-
-    let boss_entity = mobs.pairs().find(_.1.name == "Boss")?.0
-    if boss_entity != null {
-        let mob = boss_entity.get().unwrap()
-        print("removed {mob.name}")
-        boss_entity.remove()
-    }
-    print(mobs.len())
 }
 
 fn damage(mob: Mob, amount: int) -> int {
@@ -136,33 +109,6 @@ fn safenav_linked_list() {
     print(c2.next?.value ?? 0)
 }
 
-@test(output = "42\nnone")
-fn nullable_struct_field() {
-    let o1 = Outer { inner: Inner { value: 42 }, name: "has" }
-    print(o1.inner?.value ?? -1)
-
-    let o2 = Outer { inner: null, name: "empty" }
-    let val = o2.inner?.value
-    if val == null {
-        print("none")
-    }
-}
-
-@test(output = "found: 42\nnot found")
-fn safenav_if_let() {
-    let o: Outer? = Outer { inner: Inner { value: 42 }, name: "x" }
-    let val = o?.inner?.value
-    if val != null {
-        print("found: {val}")
-    }
-
-    let o2: Outer? = null
-    let val2 = o2?.inner?.value
-    if val2 == null {
-        print("not found")
-    }
-}
-
 @test(output = "Boss hp: 500\nNo boss")
 fn safenav_arena_find_pattern() {
     let mobs = boss_mobs()
@@ -188,10 +134,6 @@ fn deep(o: SmallOuter?) -> int {
     return o?.inner?.v ?? -1
 }
 
-fn shallow(i: SmallInner?) -> int {
-    return i?.v ?? 0
-}
-
 @test(output = "42\n-1\n-1")
 fn test_chained_safenav() {
     let a = SmallOuter { inner: SmallInner { v: 42 } }
@@ -200,14 +142,6 @@ fn test_chained_safenav() {
     print("{deep(b)}")
     let c: SmallOuter? = null
     print("{deep(c)}")
-}
-
-@test(output = "9\n0")
-fn test_single_safenav() {
-    let i = SmallInner { v: 9 }
-    print("{shallow(i)}")
-    let n: SmallInner? = null
-    print("{shallow(n)}")
 }
 
 newtype UserId(int)
@@ -268,22 +202,19 @@ fn safe_nav_field_hits_and_misses() {
     assert_eq(by_field(seeded(), 9), -1.0)
 }
 
-// The miss used to crash: the method ran on the miss path with nil leaves.
 @test
 fn safe_nav_method_hits_and_misses() {
     assert_eq(by_method(seeded(), 1), 3.0)
     assert_eq(by_method(seeded(), 9), -1.0)
 }
 
-// The miss used to return 5, the hit value.
 @test
 fn safe_nav_let_hits_and_misses() {
     assert_eq(by_let(seeded(), 1), 5.0)
     assert_eq(by_let(seeded(), 9), -1.0)
 }
 
-// The control: a reference struct receiver is a real box, so `== nil` was always
-// the right test for it. It must stay that way.
+// Control: a reference struct receiver is a real box.
 @test
 fn a_struct_receiver_hits_and_misses() {
     let m: Map<int, SV2> = map_new()
@@ -411,4 +342,228 @@ fn test_controls() {
     assert(u?.field == UnitOnly::B)
     let w = u?.field ?? UnitOnly::A
     assert(w == UnitOnly::B)
+}
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+struct Player {
+    name: string,
+    pos: FixVec2,
+    health: int,
+}
+
+struct World {
+    player: Player?,
+    boss: Player?,
+}
+
+fn make_world() -> World {
+    return World {
+        player: Player { name: "Hero", pos: FixVec2 { x: 1.0, y: 2.0 }, health: 100 },
+        boss: Player { name: "Dragon", pos: FixVec2 { x: 5.0, y: 6.0 }, health: 500 },
+    }
+}
+
+fn make_empty_world() -> World {
+    return World { player: null, boss: null }
+}
+
+// Each test runs the same expression against a full world `w` and an empty
+// world `e`.
+
+fn show_int(x: int) {
+    print(x)
+}
+
+fn count_present(names: [string?]) -> int {
+    let count = 0
+    for n in names {
+        if n != null {
+            count = count + 1
+        }
+    }
+    return count
+}
+
+@test(output = "100\n0")
+fn test_safenav_as_arg() {
+    let w = make_world()
+    show_int(w.player?.health ?? 0)
+    let e = make_empty_world()
+    show_int(e.player?.health ?? 0)
+}
+
+@test(output = "2\n0")
+fn test_safenav_in_array() {
+    let w = make_world()
+    let names: [string?] = [w.player?.name, w.boss?.name]
+    print(count_present(names))
+    let e = make_empty_world()
+    let empty_names: [string?] = [e.player?.name, e.boss?.name]
+    print(count_present(empty_names))
+}
+
+@test(output = "3\n0")
+fn test_safenav_in_addition() {
+    let w = make_world()
+    print((w.player?.pos?.x ?? 0.0) + (w.player?.pos?.y ?? 0.0))
+    let e = make_empty_world()
+    print((e.player?.pos?.x ?? 0.0) + (e.player?.pos?.y ?? 0.0))
+}
+
+fn maybe_player() -> Player? {
+    return Player { name: "Test", pos: FixVec2 { x: 0.0, y: 0.0 }, health: 50 }
+}
+
+fn no_player() -> Player? {
+    return null
+}
+
+@test(output = "Test\nnone")
+fn test_safenav_on_fn_result() {
+    print(maybe_player()?.name ?? "none")
+    print(no_player()?.name ?? "none")
+}
+
+@test(output = "Hero\nnone")
+fn test_let_safenav_via_var() {
+    let p = make_world().player
+    print(p?.let { p.name } ?? "none")
+    let q = make_empty_world().player
+    print(q?.let { "something" } ?? "none")
+}
+
+fn health_status(p: Player) -> string {
+    if p.health > 50 {
+        return "healthy"
+    }
+    return "wounded"
+}
+
+@test(output = "healthy")
+fn test_safenav_ufcs() {
+    let w = make_world()
+    if w.player != null {
+        print(health_status(w.player))
+    }
+}
+
+struct A {
+    b: B?,
+}
+struct B {
+    c: C?,
+}
+struct C {
+    d: D?,
+}
+struct D {
+    value: int,
+}
+
+@test(output = "42\n0\n0\n0")
+fn test_4_level_safenav() {
+    let full = A { b: B { c: C { d: D { value: 42 } } } }
+    print(full.b?.c?.d?.value ?? 0)
+    let null_b = A { b: null }
+    print(null_b.b?.c?.d?.value ?? 0)
+    let null_c = A { b: B { c: null } }
+    print(null_c.b?.c?.d?.value ?? 0)
+    let null_d = A { b: B { c: C { d: null } } }
+    print(null_d.b?.c?.d?.value ?? 0)
+}
+
+@test(output = "Hero has 100 hp\nunknown has 0 hp")
+fn test_safenav_interpolation_via_var() {
+    let w = make_world()
+    let name = w.player?.name ?? "unknown"
+    let hp = w.player?.health ?? 0
+    print("{name} has {hp} hp")
+    let e = make_empty_world()
+    let empty_name = e.player?.name ?? "unknown"
+    let empty_hp = e.player?.health ?? 0
+    print("{empty_name} has {empty_hp} hp")
+}
+
+struct Point { x: int, y: int }
+struct Counter { value: int }
+struct Tween { value: float, completed: bool }
+
+fn get_value(c: Counter) -> int {
+    return c.value
+}
+
+fn fixzero() -> Point {
+    return Point { x: 0, y: 0 }
+}
+
+fn update(t: Tween, dt: float) -> Tween {
+    return Tween { value: t.value + dt, completed: false }
+}
+
+fn complete(t: Tween) -> Tween {
+    return Tween { value: 1.0, completed: true }
+}
+
+@test(output = "42\n-1")
+fn test_nullable_safe_navigation_method() {
+    let c_val = Counter { value: 42 }
+    let c: Counter? = c_val
+    let null_c: Counter? = null
+
+    let c_value: int? = if c != null { get_value(c) } else { null }
+    let null_c_value: int? = if null_c != null { get_value(null_c) } else { null }
+    print(c_value ?? -1)
+    print(null_c_value ?? -1)
+}
+
+@test(output = "0\n0\n-1\n-1")
+fn test_nullable_let_assignment_pattern() {
+    let p = Point { x: 10, y: 20 }
+    let p_nullable: Point? = p
+    let null_p: Point? = null
+
+    let result1 = p_nullable?.let {
+        let z = fixzero()
+        z
+    } ?? Point { x: -1, y: -1 }
+
+    let result2 = null_p?.let {
+        let z = fixzero()
+        z
+    } ?? Point { x: -1, y: -1 }
+
+    print(result1.x)
+    print(result1.y)
+    print(result2.x)
+    print(result2.y)
+}
+
+@test(output = "1\ntrue\n0\nfalse")
+fn test_nullable_method_chaining() {
+    let tween = Tween { value: 0.5, completed: false }
+    let tween_opt: Tween? = tween
+    let null_tween: Tween? = null
+
+    let result1: Tween? = if tween_opt != null {
+        let updated = update(tween_opt, 1.0)
+        if updated.value >= 1.0 { complete(updated) } else { updated }
+    } else { null }
+
+    let result2: Tween? = if null_tween != null {
+        let updated = update(null_tween, 1.0)
+        if updated.value >= 1.0 { complete(updated) } else { updated }
+    } else { null }
+
+    if result1 != null {
+        print(result1.value)
+        print(result1.completed)
+    }
+
+    let default_tween = result2 ?? Tween { value: 0.0, completed: false }
+    print(default_tween.value)
+    print(default_tween.completed)
 }

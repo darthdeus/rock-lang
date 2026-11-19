@@ -116,21 +116,6 @@ fn assign_3_levels_deep() {
     print(a?.b?.c?.d?.e?.value ?? -1)
 }
 
-@test(output = "-1")
-fn assign_3_levels_null_at_middle() {
-    let a: A? = A { b: null }
-    a?.b?.c?.d = D { e: null }  // no-op: b is null
-    print(a?.b?.c?.d?.e?.value ?? -1)
-}
-
-// 4-level chains
-@test(output = "77")
-fn assign_4_levels_deep() {
-    let a: A? = A { b: B { c: C { d: D { e: E { value: 1 } } } } }
-    a?.b?.c?.d?.e = E { value: 77 }
-    print(a?.b?.c?.d?.e?.value ?? -1)
-}
-
 @test(output = "5")
 fn compound_assign_4_levels_deep() {
     let a: A? = A { b: B { c: C { d: D { e: E { value: 10 } } } } }

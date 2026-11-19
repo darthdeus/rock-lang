@@ -1,6 +1,8 @@
-// Nullable representations: ascribed values, embeds, array stores, enum field defaults and receivers.
+// Nullable value representations: ascribed values, embeds, array stores,
+// enum field defaults, optional receivers, nullable value structs at `??`,
+// argument and return boundaries, boxed tuple slots, and generics bound to
+// `V?` that must not let SROA rematerialize an absent row.
 
-// https://github.com/darthdeus/rock-lang/issues/401
 value AscribedPair { x: int, y: int }
 
 fn ascribed_field(x: int) -> int {
@@ -156,4 +158,132 @@ fn optional_receiver_representations_preserve_absence_and_selected_values() {
         print("{scalar_pair(present)?.x ?? -1} {tuple_pair(present)?.0 ?? -1} {reference_row(present)?.n ?? -1}")
         print("{h.row?.n ?? -1} {h.pair?.y ?? -1} {h.flat?.x ?? -1}")
     }
+}
+
+value V2 { x: int, y: int }
+
+fn make_v2(x: int, y: int) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+fn sum2(v: V2) -> int {
+    return v.x + v.y
+}
+
+fn maybe_v2(on: bool) -> V2? {
+    if on { return make_v2(3, 7) }
+    return null
+}
+
+@test(output = "10\n300")
+fn test_coalesce_lhs() {
+    let v = maybe_v2(true) ?? make_v2(100, 200)
+    print(sum2(v))
+    let w = maybe_v2(false) ?? make_v2(100, 200)
+    print(sum2(w))
+}
+
+@test(output = "3")
+fn test_scalar_arg() {
+    let v: V2? = make_v2(1, 2)
+    if v != null {
+        print(sum2(v))
+    }
+}
+
+@test(output = "10")
+fn test_nullable_value_return() {
+    let v = maybe_v2(true)
+    if v != null {
+        print(sum2(v))
+    } else {
+        print(-1)
+    }
+}
+
+// A BOXED tuple slot can be observed for nil-ness, so an absent nullable value
+// element has to land there as `nil` rather than as the ctor `pack` builds
+// regardless of presence. The reference-struct twin is the control.
+value TupV2 { x: float, y: float }
+struct TupS2 { x: float, y: float }
+
+fn tup_value_absent(m: Map<int, TupV2>, k: int) -> bool {
+    let t = (m.get(k), 1)
+    return t.0 == null
+}
+
+fn tup_struct_absent(m: Map<int, TupS2>, k: int) -> bool {
+    let t = (m.get(k), 1)
+    return t.0 == null
+}
+
+@test
+fn an_absent_value_in_a_boxed_tuple_reads_as_absent() {
+    let mv: Map<int, TupV2> = map_new()
+    mv[1] = TupV2 { x: 1.0, y: 2.0 }
+    assert(!tup_value_absent(mv, 1))
+    assert(tup_value_absent(mv, 9))
+
+    let ms: Map<int, TupS2> = map_new()
+    ms[1] = TupS2 { x: 1.0, y: 2.0 }
+    assert(!tup_struct_absent(ms, 1))
+    assert(tup_struct_absent(ms, 9))
+}
+
+@test(output = "7 1 3 5")
+fn a_present_value_in_a_boxed_tuple_round_trips() {
+    let m: Map<int, TupV2> = map_new()
+    m[1] = TupV2 { x: 7.0, y: 2.0 }
+    let t = (m.get(1), 1)
+    let plain = (TupV2 { x: 3.0, y: 4.0 }, 5)
+    print("{t.0.unwrap().x} {t.1} {plain.0.x} {plain.1}")
+}
+
+value BV2 { x: float, y: float }
+
+fn first<T>(a: [T], i: int) -> T { let v = a[i]  return v }
+
+@test(output = "true 1")
+fn a_generic_bound_to_a_nullable_value_keeps_its_absent_row() {
+    let a: [BV2?] = [BV2 { x: 1.0, y: 1.0 }, null, BV2 { x: 2.0, y: 2.0 }]
+    print("{first(a, 1) == null} {first(a, 0)?.x ?? -1.0}")
+}
+
+@test(output = "3")
+fn iterating_an_absent_row_works() {
+    let a: [BV2?] = [BV2 { x: 1.0, y: 1.0 }, null, BV2 { x: 2.0, y: 2.0 }]
+    let t = 0.0
+    for v in a { if v != null { t = t + v.x } }
+    print("{t as int}")
+}
+
+@test(output = "true true true 3")
+fn indexed_reads_are_correct() {
+    let a: [BV2?] = [BV2 { x: 1.0, y: 1.0 }, null, BV2 { x: 2.0, y: 2.0 }]
+    print("{a[1] == null} {a.get(1) == null} {a[2] != null} {a.count()}")
+}
+
+fn pick(a: [BV2?], i: int) -> (bool, BV2?) { let v = a[i]  return (true, v) }
+
+@test(output = "true true")
+fn the_non_generic_twin_is_correct() {
+    let a: [BV2?] = [BV2 { x: 1.0, y: 1.0 }, null]
+    let (ok, v) = pick(a, 1)
+    print("{ok} {v == null}")
+}
+
+value Inner { x: float }
+value Outer { inner: Inner?, a: float }
+enum Part { One(Outer) }
+global FLAG: bool = true
+
+fn sink(p: Part) -> string {
+    match p { Part::One(o) => return "{o.inner?.x ?? -1.0} {o.a}" }
+}
+
+@test(output = "-1 8")
+fn an_sroa_field_cell_that_can_be_absent_is_not_licensed_to_rematerialize() {
+    let o = Outer { inner: Inner { x: 3.0 }, a: 4.0 }
+    if FLAG { o = Outer { inner: null, a: 5.0 } }
+    print("{sink(Part::One(Outer { ..o, a: 8.0 }))}")
 }
