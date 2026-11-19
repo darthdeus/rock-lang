@@ -162,6 +162,35 @@ fn manifest_stamp(root: &Path) -> Option<(std::time::SystemTime, u64)> {
 }
 
 impl BoneProject {
+    fn new(
+        root: &Path,
+        session: Session,
+        graph: Option<rock_host::stick::graph::PackageGraph>,
+        lint_options: bone_lints::LintOptions,
+        user_texts: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        Self {
+            fallbacks: Default::default(),
+            lint_options,
+            lint_manifest_stamp: manifest_stamp(root),
+            lint_policy_error: None,
+            session,
+            texts: stdlib_texts().into_iter().chain(user_texts).collect(),
+            rejected_updates: HashMap::new(),
+            freq: None,
+            hole_cache: HashMap::new(),
+            lint_cache: Default::default(),
+            reach: None,
+            call_through: None,
+            scoped_call_through: HashMap::new(),
+            visible_bindings: HashMap::new(),
+            is_bin: rock_host::stick::StickConfig::is_bin_at(root),
+            root: root.to_path_buf(),
+            module_touched: HashMap::new(),
+            graph,
+        }
+    }
+
     fn refresh_lint_policy(&mut self) -> Result<(), String> {
         let stamp = manifest_stamp(&self.root);
         if stamp != self.lint_manifest_stamp {
@@ -306,10 +335,6 @@ fn module_declaration(session: &Session, package: u32, node: Ustr) -> Option<Spa
 pub struct ModuleRecency {
     pub id: String,
     pub ago_ms: Option<u64>,
-}
-
-fn stick_is_bin(root: &Path) -> bool {
-    rock_host::stick::StickConfig::is_bin_at(root)
 }
 
 /// All bone-backed LSP state: one [`Session`] per stick-project root, created lazily.
@@ -493,29 +518,15 @@ impl BoneWorkspace {
             // The first file may not parse; update_file below adds it.
             let session = Session::new(warm, Vec::new(), &aliases)
                 .map_err(|error| format!("the stdlib does not check: {}", error.message))?;
-            let project = BoneProject {
-                fallbacks: Default::default(),
-                lint_options: self
-                    .lint_options
+            let project = BoneProject::new(
+                root,
+                session,
+                graph,
+                self.lint_options
                     .clone()
                     .with_action_policy(policy.as_ref()),
-                lint_manifest_stamp: manifest_stamp(root),
-                lint_policy_error: None,
-                session,
-                texts: stdlib_texts().into_iter().collect(),
-                rejected_updates: HashMap::new(),
-                freq: None,
-                hole_cache: HashMap::new(),
-                lint_cache: Default::default(),
-                reach: None,
-                call_through: None,
-                scoped_call_through: HashMap::new(),
-                visible_bindings: HashMap::new(),
-                is_bin: stick_is_bin(root),
-                root: root.to_path_buf(),
-                module_touched: HashMap::new(),
-                graph,
-            };
+                [],
+            );
             self.projects.insert(root.to_path_buf(), project);
         }
         Ok(self
@@ -600,7 +611,6 @@ impl BoneWorkspace {
         };
         self.source_load_errors.remove(&root);
         self.loaded_roots.insert(root.clone());
-        let is_bin = stick_is_bin(&root);
         let file_texts: Vec<(String, String)> = files
             .iter()
             .map(|f| (f.path.clone(), f.text.clone()))
@@ -608,33 +618,17 @@ impl BoneWorkspace {
         let aliases = rock_host::program_inputs::ns_aliases(graph.as_ref());
         match Session::new(warm, files, &aliases) {
             Ok(session) => {
-                let texts: HashMap<String, String> =
-                    stdlib_texts().into_iter().chain(file_texts).collect();
-                let now = bone_core::prelude::Instant::now();
-                let module_touched = texts.keys().map(|k| (k.clone(), now)).collect();
-                let mut project = BoneProject {
-                    fallbacks: Default::default(),
-                    lint_options: self
-                        .lint_options
+                let mut project = BoneProject::new(
+                    &root,
+                    session,
+                    graph,
+                    self.lint_options
                         .clone()
                         .with_action_policy(policy.as_ref()),
-                    lint_manifest_stamp: manifest_stamp(&root),
-                    lint_policy_error: None,
-                    session,
-                    texts,
-                    rejected_updates: HashMap::new(),
-                    freq: None,
-                    hole_cache: HashMap::new(),
-                    lint_cache: Default::default(),
-                    reach: None,
-                    call_through: None,
-                    scoped_call_through: HashMap::new(),
-                    visible_bindings: HashMap::new(),
-                    is_bin,
-                    root: root.clone(),
-                    module_touched,
-                    graph,
-                };
+                    file_texts,
+                );
+                let now = bone_core::prelude::Instant::now();
+                project.module_touched = project.texts.keys().map(|k| (k.clone(), now)).collect();
                 prime_lint_cache(&mut project);
                 self.projects.insert(root, project);
             }
@@ -1803,20 +1797,11 @@ impl BoneWorkspace {
         };
         let path = path.as_str();
         let (start, end) = byte_offsets(src, range);
-        // A broken buffer can drop the module from the live session (#21).
-        let live = proj.session.workspace();
-        let fallback_ws: Option<Workspace> = if user_module_for_path(live, path).is_none() {
-            reparse_with_project(
-                &proj.session,
-                &proj.fallbacks,
-                path,
-                &balance_delimiters(src.to_string()),
-                "inlay",
-            )
-        } else {
-            None
-        };
-        let ws: &Workspace = fallback_ws.as_ref().unwrap_or(live);
+        let fallback_ws =
+            recover_missing_module(&proj.session, &proj.fallbacks, path, "inlay", || {
+                src.to_owned()
+            });
+        let ws = fallback_ws.as_ref().unwrap_or(proj.session.workspace());
         let Some(mid) = user_module_for_path(ws, path) else {
             return Vec::new();
         };
@@ -3032,13 +3017,18 @@ fn line_prefix_is_blank(src: &str, offset: usize) -> bool {
         .is_some_and(|p| p.chars().all(|c| c == ' ' || c == '\t'))
 }
 
-fn reparse_with_project(
+fn recover_missing_module(
     session: &Session,
     fallbacks: &FallbackReports,
     path: &str,
-    munged: &str,
     request: &'static str,
+    repair: impl FnOnce() -> String,
 ) -> Option<Workspace> {
+    // A broken buffer can drop the module from the live session (#21).
+    if user_module_for_path(session.workspace(), path).is_some() {
+        return None;
+    }
+    let munged = balance_delimiters(repair());
     let combined = fallbacks.result(
         session.combined_unexpanded(),
         request,
@@ -3053,7 +3043,7 @@ fn reparse_with_project(
     };
     users.retain(|a| a.file.as_str() != path);
     let parsed = fallbacks.result(
-        session.parse_buffer(path, munged),
+        session.parse_buffer(path, &munged),
         request,
         path,
         "parse recovery source",

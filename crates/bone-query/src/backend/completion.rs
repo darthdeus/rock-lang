@@ -339,14 +339,16 @@ fn general_completions(
     let pattern_enum: Option<String> = cx
         .pattern_scrutinee
         .and_then(|a| pattern_scrutinee_enum(session, rq.path, rq.src, rq.offset, a));
-    let session: &Session = session;
-    let live = session.workspace();
-    let fallback_ws: Option<Workspace> = if user_module_for_path(live, rq.path).is_none() {
-        recovery_workspace(session, fallbacks, rq, pattern_pos)
-    } else {
-        None
-    };
-    let ws: &Workspace = fallback_ws.as_ref().unwrap_or(live);
+    let fallback_ws = recover_missing_module(session, fallbacks, rq.path, "completion", || {
+        if pattern_pos {
+            // Keep the incomplete match arm and its scrutinee in the recovered AST.
+            let (head, tail) = rq.src.split_at(rq.offset.min(rq.src.len()));
+            format!("{head} => {{}}{tail}")
+        } else {
+            rq.src.to_owned()
+        }
+    });
+    let ws = fallback_ws.as_ref().unwrap_or(session.workspace());
     let Some(mid) = user_module_for_path(ws, rq.path) else {
         return Vec::new();
     };
@@ -449,31 +451,6 @@ fn general_completions(
         })
     });
     finish(&g, sink, rq, &import_edits)
-}
-
-fn recovery_workspace(
-    session: &Session,
-    fallbacks: &FallbackReports,
-    rq: &Request,
-    pattern_pos: bool,
-) -> Option<Workspace> {
-    let (src, offset) = (rq.src, rq.offset.min(rq.src.len()));
-    let fixed = if pattern_pos {
-        let mut s = String::with_capacity(src.len() + 8);
-        s.push_str(&src[..offset]);
-        s.push_str(" => {}");
-        s.push_str(&src[offset..]);
-        s
-    } else {
-        src.to_string()
-    };
-    reparse_with_project(
-        session,
-        fallbacks,
-        rq.path,
-        &balance_delimiters(fixed),
-        "completion",
-    )
 }
 
 fn scope_candidates(
