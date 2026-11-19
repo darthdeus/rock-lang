@@ -552,13 +552,6 @@ fn take_collected_error_for(record: &str, thread: Option<std::thread::ThreadId>)
     }
 }
 
-/// Drop every collected record after the first `len`.
-pub fn truncate_collected_errors(len: usize) {
-    if let Some(collected) = COLLECTED_ERRORS.lock().unwrap().as_mut() {
-        collected.records.truncate(len);
-    }
-}
-
 // ---- log_once / log_throttled filter state (the one dedup/throttle) ----
 
 static DEDUP: Lazy<Mutex<HashSet<&'static str>>> = Lazy::new(|| Mutex::new(HashSet::new()));
@@ -812,8 +805,6 @@ mod tests {
         }
         assert_eq!(collected_errors().len(), COLLECTED_ERROR_CAP);
         assert_eq!(collected_error_overflow(), 1);
-        truncate_collected_errors(1);
-        assert_eq!(collected_errors(), ["[COLLECT] first"]);
         collect_errors();
         assert!(collected_errors().is_empty());
         assert_eq!(collected_error_overflow(), 0);
