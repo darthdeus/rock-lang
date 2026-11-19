@@ -1,6 +1,25 @@
 pub use stone_native::test_support::{world_fixture_call, world_fixture_raised,
     world_fixture_with_cleanup, world_fixture_traceback};
 
+// Profiler globals and native counters belong to the process, not a test shard.
+inline(lua) fn profiler_test_process(entry: string, which: int) = """
+    local function quote(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
+    local library_key = ffi.os == "OSX" and "DYLD_LIBRARY_PATH" or "LD_LIBRARY_PATH"
+    local library_env = library_key .. "=" .. quote(assert(os.getenv(library_key)))
+    local path = assert(os.getenv("ROCK_TEST_TMP")) .. "/" .. entry .. "-" .. which .. ".log"
+    local script = "assert(loadfile(" .. string.format("%q", arg[0]) .. "))(); "
+        .. "jit.off(); jit.flush(); " .. entry .. "(" .. which .. "); io.write('PROFILER_PROCESS_PASS')"
+    local executable_index = -1
+    while arg[executable_index - 1] do executable_index = executable_index - 1 end
+    local status = os.execute("env " .. library_env .. " ROCK_TEST_SHARD_TESTS='' "
+        .. quote(arg[executable_index]) .. " -e " .. quote(script) .. " > " .. quote(path) .. " 2>&1")
+    local file = assert(io.open(path, "rb"))
+    local log = file:read("*a")
+    file:close()
+    assert(os.remove(path))
+    assert(status == 0 and log:find("PROFILER_PROCESS_PASS", 1, true), log)
+"""
+
 // Run it in a fresh process (profiler_test_process): the runner's clocks,
 // renderer and profiler are process state no fixture restores.
 fn native_runner_test_boot(title: string) -> (StoneWindow, GameConfig) {
