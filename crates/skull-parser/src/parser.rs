@@ -101,15 +101,6 @@ impl Pos {
 const STATIC_PATTERN_ERROR: &str =
     "a `static` takes a plain name, not a pattern: give it one name and destructure from it";
 
-fn bare_item(span: Span, kind: ItemKind) -> Item {
-    Item {
-        annotations: Vec::new(),
-        vis: None,
-        span,
-        kind,
-    }
-}
-
 fn identity_map(base: usize, len: usize) -> Vec<usize> {
     (base..=base + len).collect()
 }
@@ -491,9 +482,12 @@ impl<'a> Parser<'a> {
     fn skip_comments_as_items(&mut self) {
         while let TokenKind::Comment(text) = self.kind() {
             let span = self.span();
-            self.ast
-                .items
-                .push(bare_item(span, ItemKind::Comment(text)));
+            self.ast.items.push(Item {
+                annotations: Vec::new(),
+                vis: None,
+                span,
+                kind: ItemKind::Comment(text),
+            });
             self.advance();
         }
         while self.eat(TokenKind::Semicolon) {}
@@ -831,29 +825,32 @@ impl<'a> Parser<'a> {
         }
         let mut annotations = self.parse_item_annotations()?;
         self.last_was_operator = false;
-        let mut item = self.parse_item_inner()?;
-        item.vis = mods.vis;
+        let kind = self.parse_item_inner()?;
         // rock injects `@inline` on block-bodied operator overloads (no source
         // form) unless one is already present.
         if self.last_was_operator
-            && matches!(&item.kind, ItemKind::Function(f) if f.body.rock_block().is_some())
+            && let ItemKind::Function(f) = &kind
+            && f.body.rock_block().is_some()
             && !annotations.iter().any(|a| a.name.name.as_str() == "inline")
         {
             annotations.push(Annotation {
-                span: item.span,
+                span: f.span,
                 name: Ident {
-                    span: item.span,
+                    span: f.span,
                     name: Ustr::from("inline"),
                 },
                 args: Vec::new(),
             });
         }
-        item.annotations = annotations;
-        item.span = self.merge_spans(item_start, item.span);
-        Ok(item)
+        Ok(Item {
+            annotations,
+            vis: mods.vis,
+            span: self.span_from(item_start),
+            kind,
+        })
     }
 
-    fn parse_item_inner(&mut self) -> PResult<Item> {
+    fn parse_item_inner(&mut self) -> PResult<ItemKind> {
         match self.kind() {
             TokenKind::Fn => self.parse_fn(false, None, FnBackend::Lua),
             // `co fn name(...)` — coroutine; body may use `yield`. `co` is a
@@ -870,6 +867,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let name = self.expect_ident()?;
                 self.finish_fn_def(name, start, true, false, None, FnBackend::Lua)
+                    .map(ItemKind::Function)
             }
             TokenKind::Extern => {
                 self.advance();
@@ -914,7 +912,7 @@ impl<'a> Parser<'a> {
             TokenKind::DirectiveIf
             | TokenKind::DirectiveElseIf
             | TokenKind::DirectiveElse
-            | TokenKind::DirectiveEnd => self.parse_compiler_directive(),
+            | TokenKind::DirectiveEnd => Ok(self.parse_compiler_directive()),
             TokenKind::Ident(_)
                 if matches!(self.peek_kind(), TokenKind::OpenParen | TokenKind::Bang) =>
             {
@@ -924,18 +922,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_top_level_invocation(&mut self) -> PResult<Item> {
-        let start = self.span();
+    fn parse_top_level_invocation(&mut self) -> PResult<ItemKind> {
         let name = self.expect_ident()?;
         let sigil = self.eat(TokenKind::Bang);
         self.expect(TokenKind::OpenParen)?;
         let args = self.parse_comma_list(TokenKind::CloseParen, |p| p.parse_macro_arg(sigil))?;
         self.expect(TokenKind::CloseParen)?;
-        let span = self.span_from(start);
-        Ok(bare_item(
-            span,
-            ItemKind::MacroInvocation { name, args, sigil },
-        ))
+        Ok(ItemKind::MacroInvocation { name, args, sigil })
     }
 
     fn parse_sigil_call(&mut self, func: Idx<ExprData>) -> PResult<Idx<ExprData>> {
@@ -1160,7 +1153,7 @@ impl<'a> Parser<'a> {
         is_coroutine: bool,
         extern_body: Option<FunctionBody>,
         inline_backend: FnBackend,
-    ) -> PResult<Item> {
+    ) -> PResult<ItemKind> {
         let start = self.span();
         self.expect(TokenKind::Fn)?;
         let name = self.expect_ident()?;
@@ -1172,6 +1165,7 @@ impl<'a> Parser<'a> {
             extern_body,
             inline_backend,
         )
+        .map(ItemKind::Function)
     }
 
     fn parse_operator(
@@ -1179,7 +1173,7 @@ impl<'a> Parser<'a> {
         is_coroutine: bool,
         extern_body: Option<FunctionBody>,
         inline_backend: FnBackend,
-    ) -> PResult<Item> {
+    ) -> PResult<ItemKind> {
         self.last_was_operator = true;
         let start = self.span();
         self.expect(TokenKind::Operator)?;
@@ -1226,7 +1220,7 @@ impl<'a> Parser<'a> {
             span: sym_span,
             name: Ustr::from(op_name),
         };
-        let mut item = self.finish_fn_def(
+        let mut function = self.finish_fn_def(
             name,
             start,
             false,
@@ -1234,25 +1228,23 @@ impl<'a> Parser<'a> {
             extern_body,
             inline_backend,
         )?;
-        if let ItemKind::Function(function) = &mut item.kind {
-            if function.params.len() == 1 {
-                match symbol {
-                    TokenKind::Minus => function.name.name = Ustr::from("__unm"),
-                    TokenKind::Bang => function.name.name = Ustr::from("__not"),
-                    TokenKind::BitNot => {}
-                    _ => {
-                        return Err(CompilerError::new_with_label(
-                            sym_span,
-                            format!(
-                                "operator `{}` takes two parameters; only `-` and `!` have a prefix (unary) form",
-                                symbol.operator_spelling()
-                            ),
-                        ));
-                    }
+        if function.params.len() == 1 {
+            match symbol {
+                TokenKind::Minus => function.name.name = Ustr::from("__unm"),
+                TokenKind::Bang => function.name.name = Ustr::from("__not"),
+                TokenKind::BitNot => {}
+                _ => {
+                    return Err(CompilerError::new_with_label(
+                        sym_span,
+                        format!(
+                            "operator `{}` takes two parameters; only `-` and `!` have a prefix (unary) form",
+                            symbol.operator_spelling()
+                        ),
+                    ));
                 }
             }
         }
-        Ok(item)
+        Ok(ItemKind::Function(function))
     }
 
     fn finish_fn_def(
@@ -1263,7 +1255,7 @@ impl<'a> Parser<'a> {
         mut is_coroutine: bool,
         extern_body: Option<FunctionBody>,
         backend: FnBackend,
-    ) -> PResult<Item> {
+    ) -> PResult<FunctionDef> {
         let mut generics = self.parse_generics()?;
         let qualified = self.kind() == TokenKind::DoubleColon
             && matches!(self.peek_kind(), TokenKind::Ident(_));
@@ -1386,25 +1378,22 @@ impl<'a> Parser<'a> {
             );
             self.ast.macro_param_refs.extend(refs);
         }
-        Ok(bare_item(
+        Ok(FunctionDef {
             span,
-            ItemKind::Function(FunctionDef {
-                span,
-                keyword_span: Some(start),
-                name,
-                generics,
-                params,
-                params_span,
-                return_ty,
-                body,
-                is_macro,
-                is_coroutine,
-                is_synthetic: false,
-                json_field_for: None,
-                macro_items,
-                receiver_surface,
-            }),
-        ))
+            keyword_span: Some(start),
+            name,
+            generics,
+            params,
+            params_span,
+            return_ty,
+            body,
+            is_macro,
+            is_coroutine,
+            is_synthetic: false,
+            json_field_for: None,
+            macro_items,
+            receiver_surface,
+        })
     }
 
     fn token_starts_macro_body_item(&self) -> bool {
@@ -1545,7 +1534,7 @@ impl<'a> Parser<'a> {
         Ok((params, self.span_from(open)))
     }
 
-    fn parse_struct(&mut self, is_value: bool, is_nobox: bool) -> PResult<Item> {
+    fn parse_struct(&mut self, is_value: bool, is_nobox: bool) -> PResult<ItemKind> {
         let start = self.span();
         if is_nobox {
             self.advance();
@@ -1562,18 +1551,15 @@ impl<'a> Parser<'a> {
         let generics = self.parse_generics()?;
         let fields = self.parse_field_block()?;
         let span = self.span_from(start);
-        Ok(bare_item(
+        Ok(ItemKind::Struct(StructDef {
             span,
-            ItemKind::Struct(StructDef {
-                span,
-                keyword_span: Some(start),
-                name,
-                generics,
-                fields,
-                is_value,
-                is_nobox,
-            }),
-        ))
+            keyword_span: Some(start),
+            name,
+            generics,
+            fields,
+            is_value,
+            is_nobox,
+        }))
     }
 
     fn parse_field_block(&mut self) -> PResult<Vec<Field>> {
@@ -1625,7 +1611,7 @@ impl<'a> Parser<'a> {
         Ok(fields)
     }
 
-    fn parse_enum(&mut self) -> PResult<Item> {
+    fn parse_enum(&mut self) -> PResult<ItemKind> {
         let start = self.span();
         self.expect(TokenKind::Enum)?;
         let name = self.expect_ident()?;
@@ -1670,19 +1656,16 @@ impl<'a> Parser<'a> {
         self.delimiter_depth -= 1;
         self.expect(TokenKind::CloseCurly)?;
         let span = self.span_from(start);
-        Ok(bare_item(
+        Ok(ItemKind::Enum(EnumDef {
             span,
-            ItemKind::Enum(EnumDef {
-                span,
-                keyword_span: Some(start),
-                name,
-                generics,
-                variants,
-            }),
-        ))
+            keyword_span: Some(start),
+            name,
+            generics,
+            variants,
+        }))
     }
 
-    fn parse_newtype(&mut self) -> PResult<Item> {
+    fn parse_newtype(&mut self) -> PResult<ItemKind> {
         let start = self.span();
         self.expect(TokenKind::Newtype)?;
         let name = self.expect_ident()?;
@@ -1698,18 +1681,15 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
-        Ok(bare_item(
+        Ok(ItemKind::Newtype(NewtypeDef {
             span,
-            ItemKind::Newtype(NewtypeDef {
-                span,
-                name,
-                generics,
-                wrapped,
-            }),
-        ))
+            name,
+            generics,
+            wrapped,
+        }))
     }
 
-    fn parse_decorator(&mut self) -> PResult<Item> {
+    fn parse_decorator(&mut self) -> PResult<ItemKind> {
         let start = self.span();
         self.expect(TokenKind::Deco)?;
         self.skip_comments();
@@ -1724,18 +1704,15 @@ impl<'a> Parser<'a> {
         };
         let body = self.parse_block()?;
         let span = self.span_from(start);
-        Ok(bare_item(
+        Ok(ItemKind::Decorator(DecoratorDef {
             span,
-            ItemKind::Decorator(DecoratorDef {
-                span,
-                name,
-                params,
-                body,
-            }),
-        ))
+            name,
+            params,
+            body,
+        }))
     }
 
-    fn parse_global(&mut self, is_const: bool) -> PResult<Item> {
+    fn parse_global(&mut self, is_const: bool) -> PResult<ItemKind> {
         let start = self.span();
         self.advance(); // `global` / `const`
         let name = self.expect_ident()?;
@@ -1750,37 +1727,26 @@ impl<'a> Parser<'a> {
             None
         };
         let span = self.span_from(start);
-        Ok(bare_item(
+        Ok(ItemKind::Global(GlobalDef {
             span,
-            ItemKind::Global(GlobalDef {
-                span,
-                keyword_span: Some(start),
-                name,
-                ty,
-                value,
-                is_const,
-            }),
-        ))
+            keyword_span: Some(start),
+            name,
+            ty,
+            value,
+            is_const,
+        }))
     }
 
-    fn parse_compiler_directive(&mut self) -> PResult<Item> {
-        let start = self.span();
+    fn parse_compiler_directive(&mut self) -> ItemKind {
         let tok = self.kind();
         self.advance();
         let directive = match tok {
-            TokenKind::DirectiveIf => {
-                let c = self.directive_condition();
-                CompilerDirective::If(c)
-            }
-            TokenKind::DirectiveElseIf => {
-                let c = self.directive_condition();
-                CompilerDirective::ElseIf(c)
-            }
+            TokenKind::DirectiveIf => CompilerDirective::If(self.directive_condition()),
+            TokenKind::DirectiveElseIf => CompilerDirective::ElseIf(self.directive_condition()),
             TokenKind::DirectiveElse => CompilerDirective::Else,
             _ => CompilerDirective::End,
         };
-        let span = self.span_from(start);
-        Ok(bare_item(span, ItemKind::CompilerDirective(directive)))
+        ItemKind::CompilerDirective(directive)
     }
 
     fn directive_condition(&mut self) -> Ustr {
