@@ -716,6 +716,8 @@ pub struct BodyInference {
     pub body_generation: u64,
 
     pub expr_types: ArenaMap<Idx<Expr>, TyId>,
+    /// The matched type of a record pattern whose written head does not identify an enum.
+    pub record_pattern_types: FxHashMap<Idx<Pattern>, TyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, TyId>,
     /// The actual arguments that filled `ref T` parameters at a resolved call.
     /// MIR uses this to preserve the argument place instead of copying it.
@@ -782,6 +784,7 @@ impl BodyInference {
     /// result keeps until the program is emitted.
     pub fn shrink_to_fit(&mut self) {
         self.expr_types.shrink_to_fit();
+        self.record_pattern_types.shrink_to_fit();
         self.binding_types.shrink_to_fit();
         self.ref_call_args.shrink_to_fit();
         self.resolved_overload_calls.shrink_to_fit();

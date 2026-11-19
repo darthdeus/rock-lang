@@ -184,6 +184,9 @@ pub(crate) fn check_pattern(
             ..
         } => {
             let expected = resolve(gamma, expected, span);
+            if enum_name.is_none() {
+                gamma.out.record_pattern_types.insert(pat, expected);
+            }
 
             if let TypeExpr::App {
                 ctor: TypeCtor::Nominal(scrut),

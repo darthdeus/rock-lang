@@ -29,6 +29,7 @@ struct ResolvedPosition<'a> {
     body: Option<&'a Body>,
     bi: Option<&'a BodyInference>,
     node: Option<NodeRef>,
+    policy: NodePolicy,
 }
 
 impl<'a> ResolvedPosition<'a> {
@@ -69,11 +70,63 @@ impl<'a> ResolvedPosition<'a> {
             body,
             bi,
             node,
+            policy,
         })
     }
 
     fn binding(&self) -> Option<Idx<hir::BindingInfo>> {
         binding_of_node(self.body?, self.node?)
+    }
+
+    fn literal_field(&self, expr: Idx<hir::Expr>) -> Option<RecordFieldToken> {
+        let body = self.body?;
+        let (record, fields) = RecordType::literal(&body.expr_arena[expr])?;
+        let include_colon =
+            matches!(self.policy, NodePolicy::Hover) && matches!(record, RecordType::Struct(_));
+        let field = fields
+            .map(|id| &body.struct_lit_field_arena[id])
+            .find(|field| {
+                let (start, mut end) = field.name_span.offset_range();
+                // Struct-field hover covers the colon up to the value expression.
+                if include_colon {
+                    if let Some(value) = body.expr_spans.get(field.value) {
+                        end = value.offset_range().0;
+                    }
+                }
+                start <= self.offset && self.offset < end
+            })?;
+        Some(RecordFieldToken {
+            record,
+            name: field.name,
+            span: field.name_span,
+        })
+    }
+
+    fn record_pattern_field(&self) -> Option<RecordFieldToken> {
+        self.body?
+            .pattern_arena
+            .iter()
+            .find_map(|(id, _)| self.pattern_field(id))
+    }
+
+    fn pattern_field(&self, id: Idx<hir::Pattern>) -> Option<RecordFieldToken> {
+        let body = self.body?;
+        let hir::Pattern::Record { fields, .. } = body.pattern_arena[id] else {
+            return None;
+        };
+        let field = fields
+            .map(|id| &body.record_pat_field_arena[id])
+            .find(|field| span_contains(&field.name_span, self.offset))?;
+        // A shorthand token is the binding under the cursor.
+        if pattern_field_is_shorthand(body, field) {
+            return None;
+        }
+        let (record, _) = RecordType::pattern(self.ws, body, self.bi, id)?;
+        Some(RecordFieldToken {
+            record,
+            name: field.name,
+            span: field.name_span,
+        })
     }
 }
 
@@ -85,10 +138,12 @@ pub fn definition_at(
 ) -> Option<Span> {
     let at = ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Definition)?;
     let body = at.body?;
-    if let Some(span) = pattern_field_def(ws, body, offset) {
+    if let Some(span) = at
+        .record_pattern_field()
+        .and_then(|field| field.definition(ws))
+    {
         return Some(span);
     }
-    let def_bi = at.bi;
     let owner = at.owner?;
     match at.node? {
         // Cursor on a decl itself
@@ -119,24 +174,15 @@ pub fn definition_at(
                 .per_fn
                 .get(&owner)
                 .and_then(|bi| field_ref_struct(ws, bi, *bi.expr_types.get(e)?))
-                .and_then(|sname| struct_field_span(ws, sname, *name))
+                .and_then(|sname| RecordType::Struct(sname).field(ws, *name))
+                .map(|field| field.span)
                 .or_else(|| def_of_name(ws, *name)),
 
-            hir::Expr::StructLiteral { name, fields, .. } => {
-                let enum_name = record_literal_enum(ws, def_bi, e, *name);
-                for fidx in *fields {
-                    let f = &body.struct_lit_field_arena[fidx];
-                    if span_contains(&f.name_span, offset) {
-                        return match enum_name {
-                            Some(en) => variant_field_span(ws, Some(en), *name, f.name),
-                            None => struct_field_span(ws, *name, f.name),
-                        };
-                    }
+            hir::Expr::StructLiteral { name, .. } => {
+                if let Some(field) = at.literal_field(e) {
+                    return field.definition(ws);
                 }
-                match enum_name {
-                    Some(en) => variant_def_span(ws, Some(en), *name),
-                    None => struct_def_by_name(ws, *name).map(|s| s.name_span),
-                }
+                struct_def_by_name(ws, *name).map(|def| def.name_span)
             }
 
             // The variant name -> the variant decl; the enum qualifier -> the
@@ -145,19 +191,13 @@ pub fn definition_at(
                 enum_name,
                 variant,
                 variant_span,
-                args,
                 ..
             } => {
                 if let Some(seg) = path_segment_at(ws, mid, offset) {
                     return segment_target_def(ws, seg.target);
                 }
-                if let hir::VariantArgs::Record(fields) = args {
-                    for fidx in *fields {
-                        let f = &body.struct_lit_field_arena[fidx];
-                        if span_contains(&f.name_span, offset) {
-                            return variant_field_span(ws, Some(*enum_name), *variant, f.name);
-                        }
-                    }
+                if let Some(field) = at.literal_field(e) {
+                    return field.definition(ws);
                 }
                 let (vs, ve) = body.name_spans[*variant_span].offset_range();
                 if vs <= offset && offset < ve {
@@ -172,7 +212,7 @@ pub fn definition_at(
                 let bi = inf.per_fn.get(&owner)?;
                 let base_ty = *bi.expr_types.get(*base)?;
                 let sname = types::nominal_name(ws, Some(bi), base_ty)?;
-                struct_field_span(ws, sname, *field)
+                Some(RecordType::Struct(sname).field(ws, *field)?.span)
             }
 
             _ => None,
@@ -289,68 +329,6 @@ fn type_def_target(ws: &Workspace, te: &hir::TypeExpr) -> Option<Span> {
     }
 }
 
-/// Declaration span of a struct field (the field name).
-fn struct_field_span(ws: &Workspace, sname: Ustr, field: Ustr) -> Option<Span> {
-    struct_def_by_name(ws, sname)?
-        .fields
-        .iter()
-        .find(|f| f.name == field)
-        .map(|f| f.span)
-}
-
-/// Declaration span of a record-variant payload field.
-fn variant_field_span(
-    ws: &Workspace,
-    enum_name: Option<Ustr>,
-    variant: Ustr,
-    field: Ustr,
-) -> Option<Span> {
-    let edef = enum_def_for_variant(ws, enum_name, variant)?;
-    let v = edef.variants.iter().find(|v| v.name == variant)?;
-    match &v.payload {
-        hir::VariantPayload::Record(fields) => {
-            fields.iter().find(|f| f.name == field).map(|f| f.span)
-        }
-        _ => None,
-    }
-}
-
-fn pattern_field_def(ws: &Workspace, body: &Body, offset: usize) -> Option<Span> {
-    let (enum_name, name, field) = record_pat_field_at(body, offset)?;
-    if enum_name.is_none() {
-        if let Some(sp) = name.and_then(|n| struct_field_span(ws, n, field.name)) {
-            return Some(sp);
-        }
-    }
-    variant_field_span(ws, enum_name, name?, field.name)
-}
-
-/// The record-pattern field name under `offset` with its pattern's enum
-/// qualifier and head name. Shorthand `{ field }` is excluded: the name token
-/// *is* the binding, so the node dispatch resolves it -- only an explicit
-/// `field: bind` (name distinct from its binding) is a field-name reference.
-fn record_pat_field_at(
-    body: &Body,
-    offset: usize,
-) -> Option<(Option<Ustr>, Option<Ustr>, &hir::RecordPatField)> {
-    body.pattern_arena.values().find_map(|pat| {
-        let hir::Pattern::Record {
-            enum_name,
-            name,
-            fields,
-            ..
-        } = pat
-        else {
-            return None;
-        };
-        let f = fields
-            .into_iter()
-            .map(|fidx| &body.record_pat_field_arena[fidx])
-            .find(|f| span_contains(&f.name_span, offset))?;
-        (!pattern_field_is_shorthand(body, f)).then_some((*enum_name, *name, f))
-    })
-}
-
 /// Stdlib landmark for a builtin type name with no nominal declaration.
 fn builtin_type_landmark(name: Ustr, ws: &Workspace) -> Option<Span> {
     is_intrinsic_key(name, "Coroutine")
@@ -391,7 +369,7 @@ pub fn hover_at(
     let module = at.module;
     let frag = crate::modules_scope::fragment(ws, module.file)?;
     if let (Some(body), Some(bi)) = (at.body, at.bi) {
-        if let Some(hit) = hover_record_pat(ws, body, offset) {
+        if let Some(hit) = hover_record_pat(&at, body) {
             return Some(hit);
         }
         if let Some(node) = at.node {
@@ -399,36 +377,12 @@ pub fn hover_at(
                 NodeRef::Expr(e) => {
                     let span = *body.expr_spans.get(e)?;
                     match &body.expr_arena[e] {
-                        hir::Expr::StructLiteral { name, fields, .. } => {
-                            let enum_name = record_literal_enum(ws, Some(bi), e, *name);
-                            // A field name under the cursor -> `field: T
-                            // (field of Struct)`; otherwise the head -> the
-                            // full struct definition.
-                            for fld_idx in *fields {
-                                let fld = &body.struct_lit_field_arena[fld_idx];
-                                let fs = fld.name_span.offset_range().0;
-                                // Cover the name through (but not including) the
-                                // value, so the `:` in `x: 3` hovers as the
-                                // field too. The value has its own expr node;
-                                // the whitespace guard drops the blanks.
-                                let fe = body
-                                    .expr_spans
-                                    .get(fld.value)
-                                    .map_or(fld.name_span.offset_range().1, |s| s.offset_range().0);
-                                if fs <= offset && offset < fe {
-                                    if let Some(s) =
-                                        render_record_field(ws, enum_name, Some(*name), fld.name)
-                                    {
-                                        return Some((s, fld.name_span));
-                                    }
-                                }
+                        hir::Expr::StructLiteral { name, .. } => {
+                            if let Some(hit) = at.literal_field(e).and_then(|field| field.hover(ws))
+                            {
+                                return Some(hit);
                             }
-                            if let Some(en) = enum_name {
-                                let head = leading_name_span(&span, name.len());
-                                if span_contains(&head, offset) {
-                                    return render_variant(ws, Some(en), *name).map(|s| (s, head));
-                                }
-                            } else if let Some(def) = render_struct_def(ws, *name) {
+                            if let Some(def) = render_struct_def(ws, *name) {
                                 return Some((def, span));
                             }
                         }
@@ -451,7 +405,7 @@ pub fn hover_at(
                             enum_name_span,
                             variant,
                             variant_span,
-                            args,
+                            ..
                         } => {
                             if let Some(seg) = path_segment_at(ws, mid, offset) {
                                 let text = match seg.target {
@@ -463,19 +417,8 @@ pub fn hover_at(
                                 }?;
                                 return Some((text, seg.span));
                             }
-                            if let hir::VariantArgs::Record(fields) = args {
-                                for fidx in *fields {
-                                    let f = &body.struct_lit_field_arena[fidx];
-                                    if span_contains(&f.name_span, offset) {
-                                        return render_record_field(
-                                            ws,
-                                            Some(*enum_name),
-                                            Some(*variant),
-                                            f.name,
-                                        )
-                                        .map(|s| (s, f.name_span));
-                                    }
-                                }
+                            if let Some(field) = at.literal_field(e) {
+                                return field.hover(ws);
                             }
                             let (vs, ve) = body.name_spans[*variant_span].offset_range();
                             if vs <= offset && offset < ve {
@@ -495,7 +438,7 @@ pub fn hover_at(
                         // not the raw FieldRef wrapper type.
                         hir::Expr::SiblingRef(name) => {
                             if let Some(sname) = field_ref_struct(ws, bi, *bi.expr_types.get(e)?) {
-                                if let Some(s) = render_field_of(ws, sname, *name) {
+                                if let Some(s) = RecordType::Struct(sname).render_field(ws, *name) {
                                     return Some((s, span));
                                 }
                             }
@@ -563,7 +506,7 @@ pub fn hover_at(
         // A field declaration name (`struct S { field: T }` -> hover `field`).
         for fld in &s.fields {
             if in_leading_name(offset, &fld.span, source_ident(fld.name).len()) {
-                if let Some(t) = render_field_of(ws, s.name, fld.name) {
+                if let Some(t) = RecordType::Struct(s.name).render_field(ws, fld.name) {
                     return Some((t, fld.span));
                 }
             }
@@ -766,21 +709,6 @@ fn render_variant(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Opt
 /// Bare record heads retain the struct-literal HIR shape, including in an
 /// incomplete body without an inferred type. Prefer the inferred enum identity;
 /// otherwise use the declaration catalog, without treating a real struct as a variant.
-fn record_literal_enum(
-    ws: &Workspace,
-    bi: Option<&BodyInference>,
-    expr: Idx<hir::Expr>,
-    name: Ustr,
-) -> Option<Ustr> {
-    if struct_def_by_name(ws, name).is_some() {
-        return None;
-    }
-    let inferred = bi.and_then(|bi| types::nominal_name(ws, Some(bi), *bi.expr_types.get(expr)?));
-    let edef = enum_def_for_variant(ws, inferred, name)?;
-    let variant = edef.variants.iter().find(|v| v.name == name)?;
-    matches!(variant.payload, hir::VariantPayload::Record(_)).then_some(edef.name)
-}
-
 /// Declaration span (the variant name) of `Enum::Variant`. None if unknown.
 fn variant_def_span(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Option<Span> {
     let edef = enum_def_for_variant(ws, enum_name, variant)?;
@@ -845,9 +773,10 @@ fn render_hover_type(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> St
 /// `Enum::Variant { field: bind }`): a field name -> `field: T (field of
 /// Owner)`; the variant name -> `Type: enum E`. `None` when `offset` isn't on
 /// any record-pattern name.
-fn hover_record_pat(ws: &Workspace, body: &Body, offset: usize) -> Option<(String, Span)> {
-    if let Some((enum_name, name, f)) = record_pat_field_at(body, offset) {
-        return render_record_field(ws, enum_name, name, f.name).map(|t| (t, f.name_span));
+fn hover_record_pat(at: &ResolvedPosition<'_>, body: &Body) -> Option<(String, Span)> {
+    let (ws, offset) = (at.ws, at.offset);
+    if let Some(field) = at.record_pattern_field() {
+        return field.hover(ws);
     }
     for pat in body.pattern_arena.values() {
         let hir::Pattern::Record {
@@ -877,46 +806,6 @@ fn hover_record_pat(ws: &Workspace, body: &Body, offset: usize) -> Option<(Strin
         }
     }
     None
-}
-
-/// `field: T (field of Point)` or `value: int (field of Opt::Some)` for a
-/// record construction or pattern. `None` if unresolved.
-fn render_record_field(
-    ws: &Workspace,
-    enum_name: Option<Ustr>,
-    name: Option<Ustr>,
-    field: Ustr,
-) -> Option<String> {
-    let name = name?;
-    // Unqualified name that is a known struct -> struct field.
-    if enum_name.is_none() {
-        if let Some(s) = render_field_of(ws, name, field) {
-            return Some(s);
-        }
-    }
-    // Enum record variant.
-    let ty = variant_record_field_ty(ws, enum_name, Some(name), field)?;
-    let edef = enum_def_for_variant(ws, enum_name, name)?;
-    Some(format!(
-        "{}: {} (field of {}::{})",
-        field,
-        ws.render(None, ty),
-        display_name(edef.name.as_str()),
-        name
-    ))
-}
-
-/// `field: T (field of Struct)` -- rock's hover for a struct field name. `None`
-/// if the struct or field isn't found (renders the head's full def instead).
-fn render_field_of(ws: &Workspace, struct_name: Ustr, field: Ustr) -> Option<String> {
-    let sdef = struct_def_by_name(ws, struct_name)?;
-    let f = sdef.fields.iter().find(|f| f.name == field)?;
-    Some(format!(
-        "{}: {} (field of {})",
-        field,
-        ws.render(None, f.ty),
-        display_name(struct_name.as_str())
-    ))
 }
 
 /// The full `struct Name { field: T, .. }` definition block (rock's struct-name
@@ -1274,7 +1163,7 @@ impl ResolvedPosition<'_> {
                         enum_name_span,
                         variant,
                         variant_span,
-                        args,
+                        ..
                     } => {
                         if span_contains(&body.name_spans[*variant_span], offset) {
                             offer(1, RefTarget::EnumVariant(*enum_name, *variant));
@@ -1282,22 +1171,11 @@ impl ResolvedPosition<'_> {
                         if span_contains(&body.name_spans[*enum_name_span], offset) {
                             offer(11, RefTarget::Enum(*enum_name));
                         }
-                        if let hir::VariantArgs::Record(fields) = args {
-                            for idx in *fields {
-                                let field = &body.struct_lit_field_arena[idx];
-                                if span_contains(&field.name_span, offset) {
-                                    offer(
-                                        51,
-                                        RefTarget::Field(
-                                            RecordType::Variant(*enum_name, *variant),
-                                            field.name,
-                                        ),
-                                    );
-                                }
-                            }
+                        if let Some(field) = self.literal_field(expr) {
+                            offer(51, field.target());
                         }
                     }
-                    hir::Expr::StructLiteral { name, fields, .. } if selected => {
+                    hir::Expr::StructLiteral { name, .. } if selected => {
                         if body.expr_spans.get(expr).is_some_and(|span| {
                             in_leading_name(offset, span, source_ident(*name).len())
                         }) {
@@ -1310,11 +1188,8 @@ impl ResolvedPosition<'_> {
                             };
                             offer(31, target);
                         }
-                        for idx in *fields {
-                            let field = &body.struct_lit_field_arena[idx];
-                            if span_contains(&field.name_span, offset) {
-                                offer(41, RefTarget::Field(RecordType::Struct(*name), field.name));
-                            }
+                        if let Some(field) = self.literal_field(expr) {
+                            offer(41, field.target());
                         }
                     }
                     hir::Expr::FieldAccess { base, field } if selected => {
@@ -1358,7 +1233,7 @@ impl ResolvedPosition<'_> {
                     }
                 }
             }
-            for pattern in body.pattern_arena.values() {
+            for (id, pattern) in body.pattern_arena.iter() {
                 match pattern {
                     hir::Pattern::EnumVariant {
                         enum_name,
@@ -1383,7 +1258,6 @@ impl ResolvedPosition<'_> {
                         enum_name_span,
                         name,
                         name_span,
-                        fields,
                         ..
                     } => {
                         if enum_name_span.is_some_and(|span| span_contains(&span, offset)) {
@@ -1393,21 +1267,16 @@ impl ResolvedPosition<'_> {
                             if name_span.is_some_and(|span| span_contains(&span, offset)) {
                                 offer(2, RefTarget::EnumVariant(*en, *variant));
                             }
-                            for idx in *fields {
-                                let field = &body.record_pat_field_arena[idx];
-                                if span_contains(&field.name_span, offset) {
-                                    offer(
-                                        52,
-                                        RefTarget::Field(
-                                            RecordType::Variant(*en, *variant),
-                                            field.name,
-                                        ),
-                                    );
-                                }
-                            }
                         }
                     }
                     _ => {}
+                }
+                if let Some(field) = self.pattern_field(id) {
+                    let rank = match field.record {
+                        RecordType::Struct(_) => 42,
+                        RecordType::Variant(..) => 52,
+                    };
+                    offer(rank, field.target());
                 }
             }
         }
@@ -1693,23 +1562,9 @@ impl RefTarget {
                             }
                         }
                         (Self::Field(record, field), _) => {
-                            let fields = match node {
-                                hir::Expr::StructLiteral { name, fields, .. }
-                                    if record == RecordType::Struct(*name) =>
-                                {
-                                    Some(*fields)
-                                }
-                                hir::Expr::EnumVariant {
-                                    enum_name,
-                                    variant,
-                                    args: hir::VariantArgs::Record(fields),
-                                    ..
-                                } if record == RecordType::Variant(*enum_name, *variant) => {
-                                    Some(*fields)
-                                }
-                                _ => None,
-                            };
-                            if let Some(fields) = fields {
+                            if let Some((_, fields)) =
+                                RecordType::literal(node).filter(|(owner, _)| *owner == record)
+                            {
                                 for idx in fields {
                                     let f = &body.struct_lit_field_arena[idx];
                                     if f.name == field {
@@ -1740,7 +1595,7 @@ impl RefTarget {
                         _ => {}
                     }
                 }
-                for pattern in body.pattern_arena.values() {
+                for (id, pattern) in body.pattern_arena.iter() {
                     match (self, pattern) {
                         (
                             Self::Enum(name),
@@ -1781,20 +1636,13 @@ impl RefTarget {
                                 ..
                             },
                         ) if en == *name && variant == *v => sites.push(RefSite::plain(*span)),
-                        (
-                            Self::Field(record, field),
-                            hir::Pattern::Record {
-                                enum_name,
-                                name: Some(name),
-                                fields,
-                                ..
-                            },
-                        ) if record
-                            == enum_name.map_or(RecordType::Struct(*name), |en| {
-                                RecordType::Variant(en, *name)
-                            }) =>
-                        {
-                            for idx in *fields {
+                        (Self::Field(record, field), _) => {
+                            let Some((_, fields)) = RecordType::pattern(ws, body, bi, id)
+                                .filter(|(owner, _)| *owner == record)
+                            else {
+                                continue;
+                            };
+                            for idx in fields {
                                 let f = &body.record_pat_field_arena[idx];
                                 if f.name == field {
                                     sites.push(RefSite {
@@ -1865,7 +1713,94 @@ enum RecordType {
     Variant(Ustr, Ustr),
 }
 
+#[derive(Clone, Copy)]
+struct RecordFieldToken {
+    record: RecordType,
+    name: Ustr,
+    span: Span,
+}
+
+impl RecordFieldToken {
+    fn definition(self, ws: &Workspace) -> Option<Span> {
+        Some(self.record.field(ws, self.name)?.span)
+    }
+
+    fn hover(self, ws: &Workspace) -> Option<(String, Span)> {
+        Some((self.record.render_field(ws, self.name)?, self.span))
+    }
+
+    fn target(self) -> RefTarget {
+        RefTarget::Field(self.record, self.name)
+    }
+}
+
 impl RecordType {
+    fn literal(expr: &hir::Expr) -> Option<(Self, IdxRange<hir::StructLitField>)> {
+        match expr {
+            hir::Expr::StructLiteral { name, fields, .. } => Some((Self::Struct(*name), *fields)),
+            hir::Expr::EnumVariant {
+                enum_name,
+                variant,
+                args: hir::VariantArgs::Record(fields),
+                ..
+            } => Some((Self::Variant(*enum_name, *variant), *fields)),
+            _ => None,
+        }
+    }
+
+    fn pattern(
+        ws: &Workspace,
+        body: &Body,
+        bi: Option<&BodyInference>,
+        id: Idx<hir::Pattern>,
+    ) -> Option<(Self, IdxRange<hir::RecordPatField>)> {
+        let hir::Pattern::Record {
+            enum_name,
+            name,
+            fields,
+            ..
+        } = body.pattern_arena[id]
+        else {
+            return None;
+        };
+        if let Some(en) = enum_name {
+            return Some((Self::Variant(en, name?), fields));
+        }
+        let bi = bi?;
+        let (ty, node) = ws.resolve_ty(Some(bi), *bi.record_pattern_types.get(&id)?)?;
+        let ty = match node {
+            hir::TypeExpr::App {
+                ctor: hir::TypeCtor::Ref,
+                params,
+            } => ty.with_idx(params.into_iter().next()?),
+            _ => ty,
+        };
+        let owner = types::member_owner_name(ws, Some(bi), ty)?;
+        let record = if ws.enums_by_name.contains_key(&owner) {
+            Self::Variant(owner, ustr(source_ident(name?)))
+        } else {
+            Self::Struct(owner)
+        };
+        Some((record, fields))
+    }
+
+    fn field(self, ws: &Workspace, name: Ustr) -> Option<&hir::StructFieldDef> {
+        ws.modules
+            .iter()
+            .find_map(|module| self.fields(module))?
+            .iter()
+            .find(|field| field.name == name)
+    }
+
+    fn render_field(self, ws: &Workspace, name: Ustr) -> Option<String> {
+        let ty = ws.render(None, self.field(ws, name)?.ty);
+        let owner = match self {
+            Self::Struct(name) => display_name(name.as_str()).to_owned(),
+            Self::Variant(en, variant) => format!("{}::{variant}", display_name(en.as_str())),
+        };
+        Some(format!("{name}: {ty} (field of {owner})"))
+    }
+
     fn fields(self, module: &hir::Module) -> Option<&[hir::StructFieldDef]> {
         match self {
             Self::Struct(name) => Some(&module.structs[*module.struct_by_name.get(&name)?].fields),
@@ -3148,24 +3083,6 @@ fn enum_def_for_variant(
             .values()
             .find(|e| e.variants.iter().any(|v| v.name == variant))
     })
-}
-
-/// Type of a named field in a record-variant payload.
-fn variant_record_field_ty(
-    ws: &Workspace,
-    enum_name: Option<Ustr>,
-    variant: Option<Ustr>,
-    field: Ustr,
-) -> Option<TyId> {
-    let variant = variant?;
-    let edef = enum_def_for_variant(ws, enum_name, variant)?;
-    let v = edef.variants.iter().find(|v| v.name == variant)?;
-    match &v.payload {
-        hir::VariantPayload::Record(fields) => {
-            fields.iter().find(|f| f.name == field).map(|f| f.ty)
-        }
-        _ => None,
-    }
 }
 
 /// Look up a struct definition by name across all modules.
