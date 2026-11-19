@@ -1,12 +1,7 @@
-//! Evaluation-order constraints shared by expression-folding backends.
-
 use comfy_la_arena::Idx;
 
 use crate::mir::{Block, Inst, MirFunc};
 
-/// Whether evaluating this instruction can raise a language/runtime error.
-/// Allocation exhaustion is excluded. Field reads carry the non-throwing
-/// fact when lowering proves a non-nil Rock value base.
 pub fn may_throw(inst: &Inst) -> bool {
     matches!(
         inst,
@@ -34,10 +29,6 @@ pub fn may_throw(inst: &Inst) -> bool {
     )
 }
 
-/// An expression a backend may fold into its single use site: pure apart from
-/// the throws [`preserve_effect_order`] constrains. `Load`, `Call`, `Index`,
-/// `Field` and `Len` are excluded (impure or cell-order-sensitive), so those
-/// materialize at their program position.
 pub fn always_inlinable(inst: &Inst) -> bool {
     matches!(
         inst,
@@ -111,27 +102,17 @@ pub fn always_inlinable(inst: &Inst) -> bool {
 }
 
 fn is_barrier(inst: &Inst) -> bool {
-    // A projection may enter a host callback that writes globals. Keep it
-    // before a later global snapshot, just as an explicit call must stay.
     !inst.produces_value() || ordered_read(inst) || matches!(inst, Inst::Global(_))
 }
 
-// Non-throwing fields can be deleted when unused, but remain mutable reads.
-// Their snapshot must not sink across a call or a storage write.
 fn ordered_read(inst: &Inst) -> bool {
     may_throw(inst) || matches!(inst, Inst::Field { .. })
 }
 
-/// Restrict an existing same-block folding mask to preserve observable order.
-/// Non-throwing expressions keep their eligibility. A throwing expression may
-/// reach its use only when no effect or other possible error intervenes.
 pub fn preserve_effect_order(func: &MirFunc, blocks: &[Idx<Block>], inlinable: &mut [bool]) {
     preserve_effect_order_with(func, blocks, inlinable, |_, _| false);
 }
 
-/// [`preserve_effect_order`], where `commutes(folded, between)` names a
-/// possible error that a folded throwing expression may cross because the
-/// target cannot tell the two apart (the same failure with the same message).
 pub fn preserve_effect_order_with(
     func: &MirFunc,
     blocks: &[Idx<Block>],
@@ -139,15 +120,12 @@ pub fn preserve_effect_order_with(
     commutes: impl Fn(&Inst, &Inst) -> bool,
 ) {
     let raw = |id: Idx<Inst>| id.into_raw().into_u32() as usize;
-    // Position in its block before which a value is finally evaluated.
     let mut limit = vec![0usize; func.insts.len()];
     for &block in blocks {
         let insts = &func.blocks[block].insts;
         func.blocks[block].term.uses_each(&mut |value| {
             limit[raw(value)] = insts.len();
         });
-        // Follow folded consumers to their final evaluation point. Checking
-        // only the immediate use misses a throw nested in a folded tuple/concat.
         for (pos, &id) in insts.iter().enumerate().rev() {
             let k = raw(id);
             let inst = &func.insts[id];
@@ -160,9 +138,6 @@ pub fn preserve_effect_order_with(
                     inlinable[k] = false;
                 }
             }
-            // Operands run before the instruction itself. A folded barrier
-            // was just checked to evaluate where it stands, so its operands
-            // evaluate there too, as an unfolded instruction's do.
             let at = if inlinable[k] && !is_barrier(inst) {
                 limit[k]
             } else {

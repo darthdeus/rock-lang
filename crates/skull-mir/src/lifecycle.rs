@@ -54,12 +54,10 @@ pub struct LifecycleEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LifecyclePlan {
     pub entries: Vec<LifecycleEntry>,
-    /// Lifecycle decorators declared, whether or not anything applies them.
     pub declarations: usize,
 }
 
 impl LifecyclePlan {
-    /// The entries of each phase, in plan order.
     pub fn entries_by_phase(&self) -> std::collections::BTreeMap<Ustr, Vec<&LifecycleEntry>> {
         let mut out: std::collections::BTreeMap<Ustr, Vec<&LifecycleEntry>> = Default::default();
         for entry in &self.entries {
@@ -181,8 +179,6 @@ fn is_frame_phase(phase: Ustr) -> bool {
     )
 }
 
-/// The one emitted identity for a validated typed Scene lifecycle root. The
-/// same canonical `MonoTy` encoding is embedded by `scene_create<T>`.
 pub fn scene_root_type_key(root_type: &MonoTy) -> Option<String> {
     match root_type {
         MonoTy::App {
@@ -424,10 +420,6 @@ fn wire_qualification(
     app: &bone_core::hir::Annotation,
     phase: Ustr,
 ) -> Result<LifecycleQualification, CompilerError> {
-    // `wire` is a compiler-owned lifecycle role, not a globally reserved
-    // annotation spelling. Its qualification follows the admitted role's
-    // metadata, so a v1 alias keeps the behavior while an unrelated decorator
-    // named `wire` does not.
     if phase != "wire" {
         return Ok(LifecycleQualification::Plain);
     }

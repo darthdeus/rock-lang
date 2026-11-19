@@ -1,12 +1,7 @@
-//! Printing order and edge classification over a reducible CFG's placement.
-
 use super::structure::{Placement, Succ};
 use crate::mir::{Block, Inst, MirFunc, Term};
 use comfy_la_arena::Idx;
 
-/// Where each block's edges really lead: an edge into a chain of empty
-/// forwarding blocks reaches the chain's end, so the chain never becomes a
-/// merge of its own (an `else if` ladder joins once, not once per rung).
 pub fn thread_forwarders(
     func: &MirFunc,
     rpo: &[Idx<Block>],
@@ -20,7 +15,6 @@ pub fn thread_forwarders(
         }
     };
     let mut forward: Vec<u32> = (0..n as u32).collect();
-    // 0 = unresolved, 1 = on the current chain, 2 = resolved.
     let mut state = vec![0u8; n];
     let mut chain = Vec::new();
     for &b in rpo {
@@ -32,7 +26,6 @@ pub fn thread_forwarders(
         let end = loop {
             match state[index(cur)] {
                 2 => break forward[index(cur)],
-                // A cycle of forwarders: stop at the block that closes it.
                 1 => break index(cur) as u32,
                 _ => {}
             }
@@ -51,7 +44,6 @@ pub fn thread_forwarders(
     forward
 }
 
-/// Successor table after threading edges through empty forwarding blocks.
 pub fn threaded_successors(func: &MirFunc, forward: &[u32]) -> Succ {
     let n = func.blocks.len();
     let mut succ = Succ {
@@ -88,9 +80,6 @@ pub enum BlockFlow {
     Done,
 }
 
-/// Target syntax and statement emission. A follower's scope surrounds the
-/// construct preceding it: Lua can leave it implicit and use a forward goto,
-/// while JavaScript opens a labeled block and breaks out to its follower.
 pub trait PlacementEmit {
     type Error;
     type Ladder;
@@ -137,7 +126,6 @@ pub trait PlacementEmit {
         native: Option<NativeLoop>,
         innermost: bool,
     ) -> Result<(), Self::Error>;
-    /// False leaves an outer-loop exit to its follower scope.
     fn break_loop(&mut self, header: Idx<Block>, innermost: bool) -> Result<bool, Self::Error>;
 }
 

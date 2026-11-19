@@ -1,13 +1,6 @@
-//! CFG analyses over `MirFunc`: successors, reachability, reverse-postorder,
-//! predecessors, and dominators. IR-adjacent, so they live next to the arena
-//! types every consumer already depends on -- the Lua printer, the relooper
-//! backends, and skull-transform all read them from here.
-
 use crate::mir::{Block, MirFunc, Term};
 use comfy_la_arena::Idx;
 
-/// Successor blocks of a terminator, in branch order. The callback avoids a
-/// temporary vector when callers only need to visit each successor.
 pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
     match term {
         Term::Return(_) | Term::Unreachable => {}
@@ -22,13 +15,8 @@ pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
     }
 }
 
-/// Blocks reachable from `entry`, in arena-id order. Pure `goto`+labels means
-/// label order is irrelevant to correctness, so emit in source-faithful id order
-/// rather than RPO; unreachable blocks are dropped so no dangling `goto` reaches
-/// the printer. Counted loops use RPO so their preheaders precede their headers.
 pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     let mut visited = vec![false; func.blocks.len()];
-    // Each block is pushed at most once, so the stack never grows.
     let mut stack = Vec::with_capacity(func.blocks.len());
     stack.push(entry);
     visited[dense::bx(entry)] = true;
@@ -57,14 +45,9 @@ pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block
     order
 }
 
-/// Reverse-postorder of the blocks reachable from `entry`. A loop preheader
-/// dominates its header, so RPO emits it first — the `for` then falls through
-/// into the header position (a `for` can't be a goto target, unlike a label).
-/// Unreachable lowering-artifact blocks are dropped.
 pub fn reverse_postorder(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     let mut post = Vec::with_capacity(func.blocks.len());
     let mut visited = vec![false; func.blocks.len()];
-    // A block is pushed once unvisited and once finished.
     let mut stack = Vec::with_capacity(2 * func.blocks.len());
     stack.push((entry, false));
     visited[dense::bx(entry)] = true;
@@ -86,20 +69,13 @@ pub fn reverse_postorder(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     post
 }
 
-/// (all predecessors, goto-only predecessors) of each reachable block. Loop
-/// edges are unconditional gotos (preheader->header, latch->header), so the
-/// goto-pred set isolates the two loop entries.
-/// Predecessor lists, dense by block id; a block with none has no entry.
 #[derive(Clone, Debug, Default)]
 pub struct PredMap {
-    /// `preds[off[b]..off[b + 1]]` are the predecessors of block `b`, in
-    /// discovery order: one allocation per map instead of one per block.
     off: Vec<u32>,
     preds: Vec<Idx<Block>>,
 }
 
 impl PredMap {
-    /// The predecessors of `b`, `None` when it has none.
     pub fn get(&self, b: &Idx<Block>) -> Option<&[Idx<Block>]> {
         let at = dense::bx(*b);
         let (start, end) = (*self.off.get(at)? as usize, *self.off.get(at + 1)? as usize);
@@ -113,7 +89,6 @@ pub fn predecessors(func: &MirFunc, rpo: &[Idx<Block>]) -> (PredMap, PredMap) {
     for &b in rpo {
         reach[dense::bx(b)] = true;
     }
-    // Every edge `b -> s` in rpo order, for both maps: counted, then placed.
     let each_edge = |f: &mut dyn FnMut(Idx<Block>, Idx<Block>, bool)| {
         for &b in rpo {
             match &func.blocks[b].term {
@@ -164,23 +139,16 @@ pub fn predecessors(func: &MirFunc, rpo: &[Idx<Block>]) -> (PredMap, PredMap) {
     )
 }
 
-/// The immediate-dominator tree over the blocks reachable from `entry`,
-/// stored densely by block id (every body computes one, so a hash map per
-/// block was a measurable share of the cleanup pass). The entry maps to
-/// itself; an unreachable block has no entry.
 #[derive(Clone, Debug)]
 pub struct Dominators {
     idom: Vec<Option<Idx<Block>>>,
 }
 
 impl Dominators {
-    /// The immediate dominator of `b` (the entry's is itself), `None` when
-    /// `b` is unreachable from the entry.
     pub fn idom(&self, b: Idx<Block>) -> Option<Idx<Block>> {
         self.idom.get(dense::bx(b)).copied().flatten()
     }
 
-    /// Does block `a` dominate block `b` (walk `b`'s idom chain to the entry)?
     pub fn dominates(&self, a: Idx<Block>, b: Idx<Block>) -> bool {
         let mut x = b;
         loop {
@@ -196,16 +164,12 @@ impl Dominators {
     }
 }
 
-/// Immediate dominators of the blocks reachable from `entry` (classic
-/// Cooper-Harvey-Kennedy iterative fixpoint over reverse-postorder). The entry
-/// maps to itself.
 pub fn dominators(func: &MirFunc, entry: Idx<Block>) -> Dominators {
     let n = func.blocks.len();
     let rpo: Vec<usize> = reverse_postorder(func, entry)
         .into_iter()
         .map(dense::bx)
         .collect();
-    // Predecessors in CSR form, counting only edges from reachable blocks.
     let mut pred_n = vec![0usize; n + 1];
     for &b in &rpo {
         successors(&func.blocks[dense::bi(b)].term, |s| {
@@ -231,8 +195,6 @@ pub fn dominators(func: &MirFunc, entry: Idx<Block>) -> Dominators {
 }
 
 impl Dominators {
-    /// Preorder intervals over the dominator tree, for callers asking many
-    /// dominance queries: each then costs O(1) instead of a chain walk.
     pub fn intervals(&self) -> DomIntervals {
         let n = self.idom.len();
         let mut child_n = vec![0u32; n + 1];
@@ -285,15 +247,12 @@ impl Dominators {
     }
 }
 
-/// [`Dominators`] as preorder intervals; see [`Dominators::intervals`].
 #[derive(Clone, Debug)]
 pub struct DomIntervals {
-    /// `(preorder, end)` per block; an unreachable block has `u32::MAX`.
     span: Vec<(u32, u32)>,
 }
 
 impl DomIntervals {
-    /// Same answer as [`Dominators::dominates`].
     pub fn dominates(&self, a: Idx<Block>, b: Idx<Block>) -> bool {
         if a == b {
             return true;
@@ -307,7 +266,6 @@ impl DomIntervals {
     }
 }
 
-/// Does block `a` dominate block `b`? See [`Dominators::dominates`].
 pub fn dominates(idom: &Dominators, a: Idx<Block>, b: Idx<Block>) -> bool {
     idom.dominates(a, b)
 }
@@ -316,8 +274,6 @@ pub mod placement;
 pub mod relooper;
 pub mod structure;
 
-/// CFG primitives over dense `usize` node indices, used by control-flow
-/// structuring and dataflow analysis.
 pub mod dense {
     use super::successors;
     use crate::mir::{Block, MirFunc};
@@ -351,7 +307,6 @@ pub mod dense {
         p
     }
 
-    /// Reverse post-order of the nodes reachable from `entry` over `adj`.
     pub fn rpo(n: usize, entry: usize, adj: &[Vec<usize>]) -> Vec<usize> {
         let mut visited = vec![false; n];
         let mut post = Vec::new();
@@ -374,8 +329,6 @@ pub mod dense {
         post
     }
 
-    /// Cooper-Harvey-Kennedy iterative dominators. Returns the immediate dominator of
-    /// each node reachable in `rpo_order` (`entry` maps to `None`).
     pub fn idoms(
         n: usize,
         entry: usize,
@@ -387,8 +340,6 @@ pub mod dense {
         idom
     }
 
-    /// Cooper-Harvey-Kennedy iterative dominators over `rpo` (entry first).
-    /// The entry maps to itself and a node missing from `rpo` to `None`.
     pub(crate) fn chk_idoms<'p>(
         n: usize,
         rpo: &[usize],
@@ -436,7 +387,6 @@ pub mod dense {
         idom
     }
 
-    /// Does node `a` dominate node `b` (walk `b`'s idom chain to the root)?
     pub fn dominates(idom: &[Option<usize>], a: usize, b: usize) -> bool {
         let mut cur = b;
         loop {
@@ -450,8 +400,6 @@ pub mod dense {
         }
     }
 
-    /// The natural-loop body for the back edge `latch -> header`: every node that
-    /// reaches `latch` without passing through `header`.
     pub(crate) fn collect_loop_body(
         header: usize,
         latch: usize,

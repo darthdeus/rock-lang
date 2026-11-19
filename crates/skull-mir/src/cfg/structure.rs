@@ -1,29 +1,14 @@
-//! CFG analysis for GLSL's structured emitter: immediate post-dominators,
-//! tested natural loops, and range-`for` recognition. The structured walk is
-//! [`relooper`](super::relooper).
-//!
-//! For the Lua and JS printers, which keep forward jumps and so can structure
-//! every reducible CFG: [`place`], the shared dominator-tree placement of blocks.
-
 use super::dense::{bi, bx, collect_loop_body, dominates, idoms, pred_list, rpo, succ_list};
 use crate::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-/// Which range-`for` bounds a backend can render in its loop header.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CountedBound {
-    /// Any bound value.
     Any,
-    /// Only a `Load` (of a hoisted preheader cell) or a const: the counted path
-    /// skips the header block, so a bound computed there would reference a temp
-    /// that is never emitted.
     InlineOnly,
 }
 
-/// One tested natural loop: its header (back-edge target), the set of blocks
-/// in the loop body, and its single exit (the block outside the loop that a body
-/// block branches to). Tier-0 `while`/`for` loops are single-exit by construction.
 #[derive(Clone)]
 pub struct LoopRegion {
     pub header: Idx<Block>,
@@ -32,8 +17,6 @@ pub struct LoopRegion {
 }
 
 pub struct Structure {
-    /// Immediate post-dominator per block; `None` = the virtual exit (a diverging
-    /// branch has no real join).
     ipdom: Vec<Option<Idx<Block>>>,
     pub loops: HashMap<Idx<Block>, LoopRegion>,
 }
@@ -58,25 +41,15 @@ pub fn analyze(f: &MirFunc) -> Structure {
     Structure { ipdom, loops }
 }
 
-/// Immediate post-dominators: dominators on the reversed CFG rooted at a virtual
-/// exit (node `n`) that every `Return` block flows into. `Unreachable` blocks do
-/// NOT connect to the exit: they mark control the compiler proved never runs (an
-/// exhaustive-`match` default, code after a diverging call), so counting them as
-/// an exit path would defeat post-dominance of the REAL join -- an exhaustive
-/// match's `if/else` chain would then double-walk its join block and reject as
-/// unstructured control flow.
 fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Block>>> {
     let exit = n;
     let nn = n + 1;
-    // Reverse graph: edge b->s becomes s->b; every `Return` block gets an edge
-    // from the virtual exit.
     let mut rev_adj = vec![Vec::new(); nn];
     let mut rev_preds = vec![Vec::new(); nn];
     for b in 0..n {
         for &s in &succ[b] {
             rev_adj[s].push(b);
         }
-        // Reverse predecessors of b are its forward successors.
         rev_preds[b].extend_from_slice(&succ[b]);
         if matches!(f.blocks[bi(b)].term, Term::Return(_)) {
             rev_adj[exit].push(b);
@@ -104,7 +77,6 @@ fn natural_loops(
     preds: &[Vec<usize>],
     idom: &[Option<usize>],
 ) -> HashMap<Idx<Block>, LoopRegion> {
-    // Back edges grouped by header, keeping each latch (back-edge source).
     let mut latches: HashMap<usize, Vec<usize>> = HashMap::default();
     for latch in 0..n {
         if idom[latch].is_none() && latch != bx(f.entry) {
@@ -123,10 +95,6 @@ fn natural_loops(
         for &l in &hlatches {
             collect_loop_body(h, l, preds, &mut body);
         }
-        // The loop's exit is the out-of-loop successor of the condition test: the
-        // shallowest body block that dominates every latch and leaves the loop.
-        // (Early `return`/`break` blocks branch out too, but don't dominate the
-        // latch or aren't the shallowest, so they are not mistaken for the exit.)
         let mut candidates: Vec<usize> = body
             .iter()
             .copied()
@@ -160,7 +128,6 @@ fn natural_loops(
     out
 }
 
-/// A recognized range-`for` loop (the shape `lower_for_range` emits).
 #[derive(Clone, Copy)]
 pub struct CountedLoop {
     pub slot: Idx<Cell>,
@@ -171,11 +138,6 @@ pub struct CountedLoop {
     pub exit: Idx<Block>,
 }
 
-/// Split `st.loops` into range-`for` loops (emitted as a counted `for`) and the
-/// rest (the general `while` path). The counted path is valid only when the
-/// header's own `Branch` IS the loop test (its else is the real exit): a
-/// `while i < N && ..` header also looks like `i < N` with an `i + 1` latch, but
-/// its exit lies inside the loop, so that one takes the general path.
 pub fn split_loops(
     f: &MirFunc,
     st: &Structure,
@@ -199,12 +161,6 @@ pub fn split_loops(
     (counted, general)
 }
 
-/// `Some(CountedLoop)` iff `h` is a `for i in lo..hi` header: a `Branch` on
-/// `IntLt/IntLeq(load slot, bound)`, entered by a pure-increment latch
-/// (`load slot; 1; add; store slot; goto h`). The `slot` cell must be
-/// `loop_binding` -- desugar provenance that only `lower_for_range` sets, so a
-/// `while i < n { ..; i = i + 1 }` (manual counter) is NOT mistaken for a
-/// range-for and takes the general path instead.
 pub fn counted_loop(f: &MirFunc, h: Idx<Block>, bound_rule: CountedBound) -> Option<CountedLoop> {
     let Term::Branch {
         cond,
@@ -250,7 +206,6 @@ fn load_cell(f: &MirFunc, iid: Idx<Inst>) -> Option<Idx<Cell>> {
     }
 }
 
-/// `p`: `load slot; 1; slot + 1; store slot; goto h` -- a pure `slot += 1` latch.
 fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
     for &iid in &f.blocks[p].insts {
         if let Inst::Store { cell, value } = f.insts[iid] {
@@ -268,9 +223,6 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
     false
 }
 
-/// Dense successor lists in compressed form: block `b`'s successors are
-/// `targets[offsets[b]..offsets[b + 1]]`, so a body costs two allocations
-/// rather than one per block.
 #[derive(Default)]
 pub struct Succ {
     pub offsets: Vec<u32>,
@@ -283,37 +235,18 @@ impl Succ {
     }
 }
 
-/// Where each block of a reducible CFG is printed, for a printer that nests
-/// blocks along the dominator tree and keeps forward jumps (Ramsey, "Beyond
-/// Relooper"). A block reached by two or more forward edges, or one that
-/// leaves a loop, is a *follower*: it is printed after the construct of its
-/// placement parent, its immediate dominator lifted out of every loop that
-/// does not contain it. Every other block is printed inline at its one
-/// forward edge.
-///
-/// Everything but `order` is indexed by reverse-postorder position, over
-/// the blocks reachable from the entry only.
 pub struct Placement {
-    /// Block -> its reverse-postorder position, [`NO_BLOCK`] if unreachable.
     order: Vec<u32>,
-    /// Position -> block.
     blocks: Vec<u32>,
     pos: Vec<Pos>,
-    /// `(header, latch)` positions of every back edge, sorted.
     latches: Vec<(u32, u32)>,
-    /// Followers grouped by placement parent, each group in reverse
-    /// postorder; [`Pos::follow`] is where a parent's group starts.
     follow: Vec<Idx<Block>>,
 }
 
 #[derive(Clone, Copy)]
 struct Pos {
-    /// The innermost loop header containing this position (itself, for a
-    /// header).
     loop_of: u32,
-    /// For a header: the header of the loop enclosing its loop.
     loop_parent: u32,
-    /// For a header: how many blocks its natural loop holds.
     loop_size: u32,
     follow: u32,
     flags: u8,
@@ -335,12 +268,10 @@ impl Placement {
         p != NO_BLOCK && self.pos[p as usize].flags & f != 0
     }
 
-    /// A loop header: the target of a back edge.
     pub fn is_header(&self, b: Idx<Block>) -> bool {
         self.flag(b, HEADER)
     }
 
-    /// The back-edge sources of header `h`.
     pub fn latches(&self, h: Idx<Block>) -> impl Iterator<Item = Idx<Block>> + '_ {
         let p = self.at(h);
         let start = self.latches.partition_point(|&(x, _)| x < p);
@@ -350,14 +281,11 @@ impl Placement {
             .map(|&(_, l)| bi(self.blocks[l as usize] as usize))
     }
 
-    /// Whether `b` lies in the natural loop headed by `h` (or a nested one).
     pub fn in_loop(&self, h: Idx<Block>, b: Idx<Block>) -> bool {
         let (h, b) = (self.at(h), self.at(b));
         b != NO_BLOCK && in_loop(&self.pos, h, b)
     }
 
-    /// How many blocks the natural loop headed by `h` holds, nested loops
-    /// included.
     pub fn loop_size(&self, h: Idx<Block>) -> usize {
         let p = self.at(h);
         if p == NO_BLOCK {
@@ -371,7 +299,6 @@ impl Placement {
         self.flag(b, FOLLOWER)
     }
 
-    /// The followers placed after `b`'s construct, in reverse postorder.
     pub fn followers(&self, b: Idx<Block>) -> &[Idx<Block>] {
         let p = self.at(b);
         if p == NO_BLOCK {
@@ -397,8 +324,6 @@ fn in_loop(pos: &[Pos], h: u32, b: u32) -> bool {
     false
 }
 
-/// Working storage for [`place`], kept per thread: one call per printed body
-/// would otherwise allocate all of it again.
 #[derive(Default)]
 struct Scratch {
     stack: Vec<(u32, u32)>,
@@ -421,12 +346,6 @@ fn reset<T: Copy>(v: &mut Vec<T>, len: usize, x: T) {
     v.resize(len, x);
 }
 
-/// [`Placement`] over `succ` (successors that may differ from the function's
-/// own edges) from `entry`. `unplaced` blocks are never printed as statements
-/// (a counted loop's latch, which its `for` line subsumes), so they are never
-/// followers. `in_place` exits (blocks that raise) print where they are
-/// branched to, even inside a loop they leave. `None` when the CFG is
-/// irreducible.
 pub fn place(
     entry: Idx<Block>,
     succ: &Succ,
@@ -444,7 +363,6 @@ fn place_in(
     in_place: &[Idx<Block>],
 ) -> Option<Placement> {
     let n = succ.offsets.len() - 1;
-    // Reverse postorder by an iterative depth-first search.
     let mut order = vec![NO_BLOCK; n];
     let mut blocks: Vec<u32> = Vec::with_capacity(n);
     s.stack.clear();
@@ -505,8 +423,6 @@ fn place_in(
             });
         }
     }
-    // Predecessors by position. Every successor of a reachable block is
-    // reachable, so the edges of `blocks` are all of them.
     reset(&mut s.pred_start, k + 1, 0);
     for &b in &blocks {
         for &t in succ.of(b as usize) {
@@ -528,8 +444,6 @@ fn place_in(
     }
     let (pred_start, preds) = (&s.pred_start, &s.preds);
     let preds_of = |p: usize| &preds[pred_start[p] as usize..pred_start[p + 1] as usize];
-    // Immediate dominators (Cooper, Harvey, Kennedy); in position space a
-    // dominator always has the smaller position.
     let idom = &mut s.idom;
     reset(idom, k, NO_BLOCK);
     idom[0] = 0;
@@ -564,8 +478,6 @@ fn place_in(
                 changed = true;
             }
         }
-        // Without a retreating edge every predecessor was final when its
-        // successor was visited, so the first pass settled them all.
         changed &= retreating;
     }
     reset(&mut s.forward_in, k, 0);
@@ -590,8 +502,6 @@ fn place_in(
     }
     latches.sort_unstable();
     latches.dedup();
-    // Innermost loops first: a header claims every unclaimed block of its
-    // natural loop, and a nested header already claimed is its child.
     reset(&mut s.mark, k, NO_BLOCK);
     let (mark, body) = (&mut s.mark, &mut s.body);
     let mut end = latches.len();
@@ -607,7 +517,6 @@ fn place_in(
                 body.push(l);
             }
         }
-        // `body[0]` is the header, whose predecessors are outside the loop.
         let mut next = 1;
         while next < body.len() {
             let x = body[next];
@@ -640,8 +549,6 @@ fn place_in(
         let mut parent = idom[p];
         let mut lifted = false;
         let mut l = pos[parent as usize].loop_of;
-        // A raise reached from one place never falls through, so it prints
-        // there inside the loop instead of after it behind a goto.
         if pos[p].flags & IN_PLACE != 0 && s.forward_in[p] == 1 {
             l = NO_BLOCK;
         }
@@ -655,8 +562,6 @@ fn place_in(
             pairs.push((parent, p as u32));
         }
     }
-    // Pairs come in position order of the follower, so a stable sort by
-    // parent leaves each group in reverse postorder.
     pairs.sort_by_key(|&(parent, _)| parent);
     let mut next = 0;
     for (p, at) in pos.iter_mut().enumerate() {
@@ -688,8 +593,6 @@ mod tests {
     use comfy_la_arena::RawIdx;
     use ustr::Ustr;
 
-    /// Build a MirFunc with `n` blocks (0 = entry) and the given terminators.
-    /// Branch conds are a single shared dummy bool const.
     fn mk(n: usize, terms: Vec<Term>) -> MirFunc {
         let mut f = MirFunc::new(Ustr::from("t"));
         for _ in 1..n {
@@ -792,10 +695,6 @@ mod tests {
 
     #[test]
     fn headerless_loop_is_rejected_but_placement_recognizes_it() {
-        // `loop { if c { continue } ; if d { break } }`:
-        // 0 -> 1(header); 1 -> {1(continue), 2}; 2 -> {3(exit), 1}; 3 returns.
-        // Two latches (1 and 2), and no block dominating both leaves the loop
-        // except 1, whose successors stay inside, so there is no single test.
         let f = mk(
             4,
             vec![
@@ -824,7 +723,6 @@ mod tests {
 
     #[test]
     fn place_rejects_an_irreducible_cfg() {
-        // 0 -> {1, 2}; 1 -> 2; 2 -> 1: the cycle has two entries.
         let f = mk(
             4,
             vec![
@@ -839,7 +737,6 @@ mod tests {
 
     #[test]
     fn place_keeps_a_raising_loop_exit_where_it_branches_from() {
-        // A raising exit stays at its branch site instead of becoming a follower.
         let f = mk(
             4,
             vec![

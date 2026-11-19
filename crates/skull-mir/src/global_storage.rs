@@ -1,10 +1,3 @@
-//! Storage identity for mutable globals and `static` locals.
-//!
-//! Every backend keeps a program's mutable globals and statics in one table
-//! that survives an incremental overlay. Globals occupy dense slots ordered by
-//! their stable keys; statics are keyed by their logical identity, so a body
-//! edit that adds or removes a static never moves another value.
-
 use std::collections::BTreeMap;
 
 use bone_core::hir::FnBackend;
@@ -20,10 +13,6 @@ pub fn global_identity(file: Ustr, name: Ustr) -> String {
     format!("global:{}", logical_def_key(file, name))
 }
 
-/// The physical leaf names a global occupies, in the backend's own identifier
-/// namespace: a v1 DefKey is not an identifier, so the leaves are minted from
-/// the global's emitted SYMBOL. Lowering mints its `nobox` leaves the same way,
-/// so a MIR global name and a storage leaf name are the same string.
 pub(crate) fn physical_leaf_names(plan: &GlobalPlan, name: Ustr) -> Vec<Ustr> {
     let symbol = symbol_of_key(name);
     plan.leaf_names(symbol).unwrap_or_else(|| vec![symbol])
@@ -37,9 +26,6 @@ pub(crate) fn storage_key(identity: &str, leaf: &str) -> String {
     format!("{identity}::{leaf}")
 }
 
-/// The stable key of every mutable-global leaf, by physical name. Backends
-/// assign slots in key order, so the order never depends on declaration order
-/// or arena indices.
 pub fn global_storage_keys(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -50,8 +36,6 @@ pub fn global_storage_keys(
             let identity = global_identity(module.logical_file, global.name);
             let plan = GlobalPlan::for_declared_type(ws, scx, global.ty)
                 .map_err(|_| format!("global `{identity}` has no storage plan"))?;
-            // Keyed on the emitted symbol, which is what a lookup from codegen
-            // carries.
             let names = physical_leaf_names(&plan, global.name);
             let multi_leaf = names.len() != 1;
             for (index, name) in names.into_iter().enumerate() {
@@ -78,8 +62,6 @@ pub fn global_storage_keys(
     Ok(keys)
 }
 
-/// One mutable global in the published global directory: its identity, its
-/// display name, its physical leaves and the storage slot of each leaf.
 pub struct GlobalDirectoryEntry {
     pub logical_name: Ustr,
     pub plan: GlobalPlan,
@@ -89,8 +71,6 @@ pub struct GlobalDirectoryEntry {
     pub slots: Vec<String>,
 }
 
-/// Every mutable global a program publishes, sorted by identity. `slot_of`
-/// names the backend's storage slot for a physical leaf.
 pub fn global_directory(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -133,11 +113,6 @@ pub fn global_directory(
     Ok(entries)
 }
 
-/// A fingerprint of the mutable-global layout: every global's identity, type,
-/// representation and leaves, and the C layout of every cdata value type a
-/// global can hold. A program whose layout differs from the one that created
-/// the live storage cannot be loaded into it, because a slot would name a
-/// different global or hold a value of a different shape.
 pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, String> {
     let mut rows = Vec::new();
     for module in ws.source_modules() {
@@ -200,9 +175,6 @@ pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, Strin
     Ok(format!("{hash:016x}"))
 }
 
-/// The value and done-flag keys of one lowered static. Static identity is based
-/// on its owning logical callable and source site, never on its emitted cell
-/// name or initializer hash.
 pub fn static_cell_storage_keys(
     ws: &Workspace,
     interner: &crate::monoty::MonoInterner,
@@ -226,13 +198,10 @@ pub fn static_cell_storage_keys(
     ))
 }
 
-/// The reload key of a lowered static: its type and initializer. An overlay
-/// re-runs a static's initializer only when this key changed.
 pub fn static_cell_key(cell: &StaticCell) -> String {
     format!("{}@{:x}", cell.type_str, cell.init_hash)
 }
 
-/// A `static` cell as the last build left it: its reload key and storage keys.
 #[derive(Clone)]
 pub struct StaticBaseline {
     pub key: String,
@@ -255,8 +224,6 @@ impl StaticBaseline {
     }
 }
 
-/// The storage key of every value cell and done-flag among `cells`, by cell
-/// name.
 pub fn static_storage_slots<'a>(
     ws: &Workspace,
     interner: &crate::monoty::MonoInterner,
@@ -307,7 +274,6 @@ pub(crate) fn global_read_checks(
                 continue;
             };
             let physical = physical_leaf_names(&plan, global.name);
-            // Optional fields can leave every flattened value leaf null.
             let flag = plan
                 .leaf_names(symbol_of_key(global.name))
                 .map(|_| initialization_flag(global.name));
@@ -343,6 +309,5 @@ pub(crate) fn global_read_checks(
 }
 
 fn initialization_flag(name: Ustr) -> Ustr {
-    // This name only addresses storage; Rock identifiers cannot contain `$`.
     crate::names::ustr(&format!("$global_initialized_{}", symbol_of_key(name)))
 }

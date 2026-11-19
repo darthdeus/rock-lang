@@ -1,14 +1,3 @@
-//! Backend-agnostic `@deco` application-argument SELECTION, shared by both
-//! codegen backends (skull-codegen-lua's `decorator_call_args`,
-//! skull-codegen-js's `decorator_call_args_js`). The selection rules (named arg
-//! wins, else the param's default, else a hard error for a required param with
-//! no arg) live HERE once; each backend only maps a chosen [`DecoArg`] to its
-//! own literal syntax + default token.
-//!
-//! [`DecoratorTable`] holds the other backend-neutral decorator decisions:
-//! which annotation names which definition, which definitions a program emits,
-//! and which applications it registers at load.
-
 use bone_core::hir::{AnnoValue, Annotation, BodyOwner, DecoratorDef, FnBackend, Function};
 use bone_core::prelude::ModuleId;
 use bone_core::workspace::Workspace;
@@ -21,22 +10,12 @@ use crate::code_identity::{CodeArtifact, CodeIdentity};
 use crate::instance::Instance;
 use crate::mir::FuncRef;
 
-/// The value chosen for one `deco` param on one `@deco` application.
 pub enum DecoArg<'a> {
-    /// A named annotation arg supplied this param's value.
     Value(&'a AnnoValue),
-    /// The param was omitted; the backend fills its default token
-    /// (`nil`/`null`), and the callee prologue substitutes the real default.
     Default,
-    /// The param was omitted and its explicit `null` overrides its default
-    /// (EXPLICIT_NULL_DEFAULT): the backend passes its `Lit::Omitted` marker,
-    /// the only value the callee prologue fills.
     Omitted,
 }
 
-/// One [`DecoArg`] per `deco` param, in declaration order: the named annotation
-/// arg if present, else `Default` if the param has one, else a hard error for a
-/// required param with no arg.
 pub fn select_decorator_args<'a>(
     ws: &Workspace,
     module: ModuleId,
@@ -73,10 +52,8 @@ pub fn select_decorator_args<'a>(
     Ok(out)
 }
 
-/// A `deco` definition: its module and index there.
 pub(crate) type DecoratorRef = (ModuleId, Idx<DecoratorDef>);
 
-/// The emitted symbol of a `deco` definition, from its definition key.
 pub fn decorator_symbol(def_key: &str) -> String {
     format!(
         "__deco_{}",
@@ -84,15 +61,11 @@ pub fn decorator_symbol(def_key: &str) -> String {
     )
 }
 
-/// Every `deco` in the workspace by definition key. An annotation names a
-/// decorator through its resolved key, so a package decorator that shares a
-/// spelling with another one is still a different definition.
 pub struct DecoratorTable {
     by_key: FxHashMap<Ustr, DecoratorRef>,
     definitions: Vec<DecoratorRef>,
 }
 
-/// One `@deco` annotation on a function, resolved to its definition.
 pub struct DecoratorApplication<'w> {
     pub func: FuncRef,
     pub function: &'w Function,
@@ -100,7 +73,6 @@ pub struct DecoratorApplication<'w> {
     pub annotation: &'w Annotation,
 }
 
-/// Which `@sim` targets count as generated CodeRef values.
 #[derive(Clone, Copy)]
 pub enum SimValues<'a> {
     None,
@@ -126,28 +98,20 @@ impl DecoratorTable {
         }
     }
 
-    /// The decorator an annotation applies, if it names one.
     pub fn resolve(&self, ann: &Annotation) -> Option<DecoratorRef> {
         self.by_key
             .get(&ann.resolved_name.unwrap_or(ann.name.name))
             .copied()
     }
 
-    /// Whether any annotation on `f` applies a decorator, compiler-owned ones
-    /// included. Generated text names such a function, so it is a root.
     pub fn is_decorated(&self, f: &Function) -> bool {
         f.annotations.iter().any(|ann| self.resolve(ann).is_some())
     }
 
-    /// Every decorator the program defines as a function, in declaration order.
-    /// Compiler-owned decorators have no body to emit.
     pub fn definitions(&self) -> &[DecoratorRef] {
         &self.definitions
     }
 
-    /// Every application of a program-defined decorator to a function `target`
-    /// serves, in module, function and annotation order. These are the
-    /// registration calls a program makes at load.
     pub fn applications<'w>(
         &self,
         ws: &'w Workspace,
@@ -182,8 +146,6 @@ impl DecoratorTable {
         out
     }
 
-    /// The [`definitions`](Self::definitions) some function `target` serves
-    /// applies, in declaration order.
     pub fn applied_definitions(&self, ws: &Workspace, target: FnBackend) -> Vec<DecoratorRef> {
         let applied: FxHashSet<DecoratorRef> = self
             .applications(ws, target)
@@ -197,9 +159,6 @@ impl DecoratorTable {
             .collect()
     }
 
-    /// Mark the functions generated registration glue passes as values:
-    /// decorated functions and the selected `@sim` targets. They have no MIR
-    /// value site, but they are escaping Rock values and use the same CodeRefs.
     pub fn mark_generated_code_values(
         &self,
         ws: &Workspace,
@@ -229,7 +188,6 @@ impl DecoratorTable {
     }
 }
 
-/// A function serves `target` unless it is pinned to another backend.
 fn serves(f: &Function, target: FnBackend) -> bool {
     f.backend == FnBackend::Any || f.backend == target
 }

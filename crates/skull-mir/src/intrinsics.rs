@@ -1,21 +1,3 @@
-//! The `@intrinsic` mechanism: the stdlib DECLARES intrinsics, backends
-//! IMPLEMENT them. The portable artifact is the contract, not the mapping.
-//!
-//! **Body-slot rule.** A fn has one body, and that slot is the luajit story: an
-//! `inline(lua)` body IS the luajit mapping; a Rock body IS the portable
-//! fallback (and the differential-test reference). There is no Rust-side lua
-//! table -- luajit's "table" is the set of in-source `inline(lua)` bodies.
-//! Other backends (GLSL, JS) own a Rust [`IntrinsicTable`].
-//!
-//! **Resolution order at emit:** backend mapping > portable fallback > spanned
-//! `CompilerError`. `@native_required` opts out of the fallback rung: a missing
-//! backend mapping is fatal even when a fallback body exists, so a perf-critical
-//! primitive can never silently degrade to a slow portable loop.
-//!
-//! `@struct_expand` is an intrinsic whose
-//! emission is a compile-time [`ExpandKind`] on every backend, recognized at MIR
-//! lowering rather than any per-backend table.
-
 use bone_core::hir::Function;
 use bone_core::prelude::ModuleId;
 use bone_core::workspace::Workspace;
@@ -23,78 +5,34 @@ use skull_parser::CompilerError;
 use std::collections::HashSet;
 use ustr::Ustr;
 
-/// How a backend renders a call to an `@intrinsic` fn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Emission {
-    /// Inline expression template; `$1..$n` are argument placeholders
-    /// (`sin($1)`, `Math.atan2($1, $2)`). The shipped GLSL table syntax.
+    /// `$1..$n` are argument placeholders (`sin($1)`, `Math.atan2($1, $2)`).
     Template(&'static str),
-    /// A callable backend global. Variadic calls pass every supplied argument;
-    /// function values refer to the same global.
     Global(&'static str),
-    /// Emit the fn body once as a backend fn definition and call it.
     Body,
-    /// Compile-time expansion at MIR lowering (backend-agnostic).
     Expand(ExpandKind),
 }
 
-/// A compile-time expansion kind -- the emission of an expansion intrinsic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExpandKind {
-    /// `@scene_type_key fn __rock_scene_type_key<T>() -> string` -> the
-    /// canonical semantic identity of the concrete `T` at this call site.
     SceneTypeKey,
-    /// `materialize<T>(value: T) -> T` makes a value aggregate's runtime box
-    /// explicit at this source position.
     Materialize,
-    /// `@struct_expand fn f<T>(u: T) -> [(string, E)]` -> the literal pairs list.
     StructPairs,
-    /// `@shader_expand fn rock_shader<V, F>(vert: V, frag: F) -> string` -> the
-    /// pipeline key const `"<vert>+<frag>"`; the driver emits one top-level
-    /// `__rock_shader_register(key, glsl)` per distinct pair.
     ShaderPipeline,
-    /// `@vertex_expand fn f<T>(v: FlatVec<T>) -> int | [int]` -> the element's
-    /// vertex layout as a literal: the stride for an `int` return, the
-    /// per-attribute component counts for `[int]`. Both from one
-    /// `vertex_plan`, so the two cannot drift.
     VertexLayout,
-    /// `@uniform_expand fn f<T>(fv: Ptr<float>, iv: Ptr<int>, u: T)` -> one
-    /// DIRECT typed store per primitive leaf of `u`, at the std140 offsets
-    /// `gpu_layout::uniform_block` computes. Never a per-leaf helper call. The
-    /// views are params rather than looked up here, so the compiler names no
-    /// runtime field; the public generic setter is what pairs them with one
-    /// scratch.
     UniformBlock,
-    /// `@build_var_expand fn build_var(name: string) -> string` -> the value
-    /// the host resolved from `[build.vars]` for this invocation, as a string
-    /// const. Undeclared names reject.
     BuildVar,
-    /// `@embed_expand fn embed_string(path: string) -> string` -> the file's
-    /// contents as a string const, path resolved against
-    /// `Workspace.comptime_inputs.embed_root`.
     EmbedString,
-    /// `@uniform_values fn f<T>(u: T) -> SemanticUniformBlock` -> one
-    /// compiler-owned canonical scalar leaf per logical uniform leaf.
     UniformValues,
-    /// `@sort_key_wide fn f<T, K>(key_fn: fn(T) -> K) -> bool` -> whether `K`
-    /// has more than one leaf, as a bool const. An `if` on it lowers only the
-    /// selected arm, so the other arm's callees are never emitted.
     SortKeyWide,
-    /// `@sort_key_lt fn f<T, K>(key_fn: fn(T) -> K, a: T, b: T) -> bool` ->
-    /// `key_fn(a) < key_fn(b)` compared leaf by leaf, first leaf first.
     SortKeyLt,
 }
 
-/// True iff `f` is an intrinsic in the mechanism's sense: declared `@intrinsic`,
-/// or an expansion intrinsic (`@struct_expand`) whose annotation IS the
-/// declaration surface.
 pub fn is_intrinsic(f: &Function) -> bool {
     has_anno(f, "intrinsic") || expand_kind(f).is_some()
 }
 
-/// The compile-time expansion kind for `f`, or `None` if `f` is not an expansion
-/// intrinsic. THE ONE recognizer -- `lower_call_repr` routes through it instead
-/// of a bespoke annotation check, so there is no second ad-hoc registry.
 pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
     if has_anno(f, "scene_type_key") {
         return Some(ExpandKind::SceneTypeKey);
@@ -132,27 +70,18 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
     None
 }
 
-/// True iff `f` is `@native_required`: every backend must map it natively; the
-/// portable fallback rung is skipped even when a Rock body exists.
 pub fn is_native_required(f: &Function) -> bool {
     has_anno(f, "native_required")
 }
 
-/// True iff `f` is `@gpu_only`: it maps only on GPU backends, so a direct call
-/// from CPU (Lua) code is rejected at emit ([`crate::lower::gpu_only_call_rejection`]).
-/// The one in-tree consumer is `texture()` (stdlib/shader.rock).
 pub(crate) fn is_gpu_only(f: &Function) -> bool {
     has_anno(f, "gpu_only")
 }
 
-/// True iff `f` is GPU-side code that may reach a `@gpu_only` intrinsic: a
-/// `@shader(...)` entry or another `@gpu_only` fn. Shader bodies pass through the
-/// Lua backend too, so the marker exempts them.
 pub(crate) fn is_gpu_context(f: &Function) -> bool {
     is_gpu_only(f) || has_anno(f, "shader")
 }
 
-/// The luajit mapping is the `inline(lua)` body; a Rock body is the fallback.
 fn has_luajit_mapping(f: &Function) -> bool {
     f.inline_body.is_some()
 }
@@ -161,56 +90,23 @@ fn has_anno(f: &Function, name: &str) -> bool {
     f.annotations.iter().any(|a| a.is_builtin(name))
 }
 
-/// A backend's intrinsic mapping table (GLSL, JS, a future C runtime-lib table).
-/// luajit has none -- its mapping is the set of in-source `inline(lua)` bodies.
-/// Keyed by callee identity; the concrete key scheme is the impl's business, but
-/// [`entries`](IntrinsicTable::entries) MUST enumerate the same (key, arity)
-/// space (source-name or declared-signature aliases from [`declared_intrinsics`])
-/// so the fail-closed check ([`unbacked_entries`]) can catch declaration drift.
 pub trait IntrinsicTable {
-    /// Backend identity, for diagnostics.
     fn backend(&self) -> &'static str;
-    /// The emission for callee `f`, or `None` if this backend does not map it.
     fn lookup(&self, f: &Function) -> Option<Emission>;
-    /// Every entry's (name, arity) -- the fail-closed key surface.
     fn entries(&self) -> Vec<IntrinsicEntry>;
 }
 
-/// **How a backend supplies a callee ITSELF** -- the whole of it, in the
-/// backend's own precedence, as one question with one answer.
-///
-/// Not a second table beside [`IntrinsicTable`]. A backend's intrinsic table is
-/// an INPUT to its realization, layered under the call-site renderings that win
-/// ahead of it: the JS backend renders `map_new` as `new Map()` even though the
-/// declaration is a pure Rock body, and skips a host-bound callee before it
-/// reaches the `inline(js)` co-emit and plain-Rock branches. Asking the table
-/// alone gets a different answer than the emitter gives.
-///
-/// The implementor's own call rendering and callee discovery MUST branch on
-/// exactly this, so "how the artifact says this is supplied" and "what the
-/// emitter does" cannot drift. `skull_codegen_js::JsBackendRealization` is the
-/// worked example: `render_call`, `discover_callees` and the mono artifact view
-/// all read `js_supply`.
 pub trait BackendRealization {
-    /// Backend identity, for diagnostics.
     fn backend(&self) -> &'static str;
-    /// True iff this backend renders or serves `f` without emitting any
-    /// declared body for it.
     fn supplies(&self, ws: &Workspace, f: &Function) -> bool;
 }
 
-/// One backend-table key (source name or declared signature) and arity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IntrinsicEntry {
     pub name: &'static str,
     pub arity: usize,
 }
 
-/// The source-name and declared-signature keys of every intrinsic fn. A
-/// signature key lets a backend map overloads independently without weakening
-/// the existing fail-closed check. Both aliases come from the declaration.
-/// The (key, arity) set across the workspace --
-/// the set a backend table's keys must be a subset of.
 pub fn declared_intrinsics(ws: &Workspace) -> HashSet<(Ustr, usize)> {
     let mut out = HashSet::new();
     for module in ws.modules.iter() {
@@ -231,12 +127,6 @@ pub fn declared_intrinsics(ws: &Workspace) -> HashSet<(Ustr, usize)> {
     out
 }
 
-/// Fail-closed key check: every entry of `table` MUST correspond to an
-/// `@intrinsic` declaration in `declared` (its (key, arity) set from
-/// [`declared_intrinsics`]). A key matching no declaration means the stdlib
-/// declaration drifted out from under the mapping -- returned here so a test fails
-/// loudly rather than the mapping silently missing at a call site. Pure data in,
-/// pure data out (no `Workspace`) so the algorithm is unit-testable on its own.
 pub fn unbacked_entries(
     table: &dyn IntrinsicTable,
     declared: &HashSet<(Ustr, usize)>,
@@ -248,21 +138,6 @@ pub fn unbacked_entries(
         .collect()
 }
 
-/// Emit-time `@intrinsic` validation over the user module `mid` (the luajit
-/// coverage rung; GLSL/JS coverage lives in their own emit paths). Rejects, with
-/// a span:
-///
-/// - a `@native_required` fn that is not also `@intrinsic` -- the marker only
-///   means "backends must map this intrinsic natively", meaningless alone;
-/// - a `@gpu_only` fn that is not also `@intrinsic` -- likewise meaningless
-///   alone: the marker only names an intrinsic that CPU backends do not map;
-/// - a `@native_required @intrinsic` fn with no luajit mapping (its only body is
-///   a Rock body): native-required skips the fallback rung, so there is nothing
-///   for luajit to fall back to.
-///
-/// On luajit every other `@intrinsic` fn is trivially covered (its body is
-/// either the mapping or the fallback); the coverage rung has real teeth for
-/// GLSL now and JS later, in those backends' emit paths.
 pub fn intrinsic_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     for (_, f) in module.functions.iter() {
@@ -304,8 +179,6 @@ pub fn intrinsic_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
     None
 }
 
-/// Whether a call to `f` never returns: the stdlib intrinsics that raise. A
-/// block ends at such a call, so lowering emits nothing after it.
 pub fn never_returns(f: &bone_core::hir::Function) -> bool {
     matches!(f.name.as_str(), "error" | "__unwrap_failed")
         && f.annotations.iter().any(|a| a.is_builtin("intrinsic"))

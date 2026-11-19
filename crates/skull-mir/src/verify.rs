@@ -1,13 +1,3 @@
-//! A structural MIR verifier: the invariants every pass and backend assumes,
-//! checked between passes so a broken body is caught at the pass that broke
-//! it instead of as a panic (or wrong code) deep in a backend.
-//!
-//! The walk covers what a backend renders: the blocks reachable from `entry`,
-//! from each `coro_defers` entry and from the entry of every `Inst::Lambda`
-//! (or `CoroHook` lambda) those blocks name. The arena itself is not walked: a
-//! splice drops a consumed inst from its block but leaves it in the arena, and
-//! a hoisted body is a clone of its parent's whole arena.
-
 use crate::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use comfy_la_arena::{Arena, Idx};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -17,11 +7,6 @@ const CHECKS_BUILD_DEFAULT: u8 = 0;
 const CHECKS_ON: u8 = 1;
 const CHECKS_OFF: u8 = 2;
 
-/// Whether the consistency checks that only ever catch compiler bugs run in
-/// this process: this verifier between passes, and lowering's audit of the
-/// concrete plans it was handed. The build default is on with debug
-/// assertions, so every test exercises them; the `rock` binary turns them off
-/// for an ordinary compile unless `ROCK_MIR_CHECKS` asks for them.
 static CHECKS: AtomicU8 = AtomicU8::new(CHECKS_BUILD_DEFAULT);
 
 pub fn checks_enabled() -> bool {
@@ -32,8 +17,6 @@ pub fn checks_enabled() -> bool {
     }
 }
 
-/// Force the checks on or off for the rest of the process; `None` restores
-/// the build default.
 pub fn set_checks(enabled: Option<bool>) {
     let state = match enabled {
         Some(true) => CHECKS_ON,
@@ -45,9 +28,6 @@ pub fn set_checks(enabled: Option<bool>) {
 
 static SCOPE_CHECKS: AtomicBool = AtomicBool::new(false);
 
-/// Whether the Lua printer checks that every name it prints is in scope:
-/// always with the checks above, and on its own where [`set_scope_checks`]
-/// asks, since it costs far less than this verifier.
 pub fn scope_checks_enabled() -> bool {
     checks_enabled() || SCOPE_CHECKS.load(Ordering::Relaxed)
 }
@@ -56,8 +36,6 @@ pub fn set_scope_checks(enabled: bool) {
     SCOPE_CHECKS.store(enabled, Ordering::Relaxed);
 }
 
-/// The setting a `ROCK_MIR_CHECKS` value asks for: unset leaves the choice
-/// to the caller, `0`, `off` or `false` disable, anything else enables.
 pub fn checks_requested(setting: Option<&str>) -> Option<bool> {
     let value = setting?.trim();
     Some(!matches!(
@@ -66,13 +44,9 @@ pub fn checks_requested(setting: Option<&str>) -> Option<bool> {
     ))
 }
 
-/// What the passes run so far promise. Each flag forbids the instructions the
-/// pass that sets it removes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stage {
-    /// Closure conversion ran: no `Inst::Lambda` remains in any body.
     pub closures_converted: bool,
-    /// The residual-bound-call gate passed: no `Inst::CallBoundMulti` remains.
     pub bound_calls_resolved: bool,
 }
 
@@ -93,7 +67,6 @@ impl Stage {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Violation {
-    /// The body (root or nested) the violation is in.
     pub func: Ustr,
     pub block: Option<Idx<Block>>,
     pub inst: Option<Idx<Inst>>,
@@ -113,16 +86,12 @@ impl std::fmt::Display for Violation {
     }
 }
 
-/// Check `mf` and every body in its `nested_fns` tree against the structural
-/// invariants and the postconditions `stage` promises.
 pub fn verify(mf: &MirFunc, stage: Stage) -> Vec<Violation> {
     let mut out = Vec::new();
     verify_into(mf, stage, &mut out);
     out
 }
 
-/// [`verify`], panicking with every violation and `what` (the pass that just
-/// ran) when there is any. For debug-build pass hooks.
 pub fn assert_verified(mf: &MirFunc, stage: Stage, what: &dyn std::fmt::Display) {
     let violations = verify(mf, stage);
     if violations.is_empty() {
@@ -164,14 +133,9 @@ struct Verifier<'a> {
     mf: &'a MirFunc,
     stage: Stage,
     out: &'a mut Vec<Violation>,
-    /// The live blocks, in visit order.
     live: Vec<Idx<Block>>,
-    /// Per block: the index of the region (root, defer or lambda body) it
-    /// was reached from, or `UNPLACED`.
     region: Vec<u32>,
-    /// Per inst: the raw id of the block that lists it, or `UNPLACED`.
     placed: Vec<u32>,
-    /// Per inst: whether the use check has passed its definition yet.
     defined: Vec<bool>,
 }
 
@@ -230,7 +194,6 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    /// Visit every live region, recording which block lists each inst.
     fn place(&mut self, mut regions: Vec<Idx<Block>>) {
         let mf = self.mf;
         let mut stack = Vec::new();
@@ -316,9 +279,6 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    /// An operand must name a value-producing inst listed in a live block of
-    /// the same region (a lambda body's values are its own), and earlier when
-    /// that block is the user's.
     fn check_operand(&mut self, bid: Idx<Block>, user: Option<Idx<Inst>>, operand: Idx<Inst>) {
         let mf = self.mf;
         let o = raw(operand);
@@ -383,8 +343,6 @@ impl<'a> Verifier<'a> {
             }
             Term::Branch { cond, .. } => {
                 if let Some(lit) = self.const_lit(*cond) {
-                    // A folded absent presence test branches on nil, which
-                    // both dynamic targets read as false.
                     if !matches!(lit, Lit::Bool(_) | Lit::Nil) {
                         self.report(
                             Some(bid),
@@ -505,7 +463,6 @@ impl<'a> Verifier<'a> {
         if form == crate::mir::ValueCtorForm::Declared
             && plan.value_storage() == Some(crate::lower::ValueStorage::GcTable)
         {
-            // GC-table boxing flattens inline children into keys absent from ValueShape.
             return;
         }
 
@@ -524,8 +481,6 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    /// A typed arithmetic or comparison op over a literal of another kind.
-    /// Only literal operands are checked: anything else needs a type lookup.
     fn check_literal_kinds(&mut self, bid: Idx<Block>, iid: Idx<Inst>, inst: &Inst) {
         #[derive(Clone, Copy, Debug)]
         enum Kind {
@@ -567,8 +522,6 @@ impl<'a> Verifier<'a> {
             let Some(lit) = self.const_lit(operand) else {
                 continue;
             };
-            // Nil is allowed: copy propagation forwards an absent optional
-            // into the arm that only runs when it is present.
             let fits = match kind {
                 Kind::Int => matches!(lit, Lit::Int(_) | Lit::Nil),
                 Kind::Uint => matches!(lit, Lit::Uint(_) | Lit::Nil),
