@@ -85,14 +85,6 @@ impl CoroutinePlan {
     pub fn hook(&self, slot: &str) -> String {
         format!("{}{slot}", self.base)
     }
-
-    pub fn declared_suffixes(&self) -> Vec<&'static str> {
-        let mut out = vec!["__step", "__resume"];
-        if self.channel.is_some() {
-            out.push("__advance");
-        }
-        out
-    }
 }
 
 #[cfg(test)]
