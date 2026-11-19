@@ -456,19 +456,29 @@ mod cap_tests {
     }
 
     #[test]
-    fn box_downsample_rounds_a_fractional_mean_to_nearest() {
-        let rgba = vec![0, 0, 0, 0, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5];
-        let out = box_downsample(&rgba, 4, 1, 2, 1).expect("4x1 reduces to 2x1");
-        assert_eq!(out, vec![2, 2, 2, 2, 5, 5, 5, 5]);
-    }
-
-    #[test]
-    fn box_downsample_covers_every_texel_at_a_non_integer_ratio() {
-        let rgba = vec![
-            10, 10, 10, 10, 20, 20, 20, 20, 30, 30, 30, 30, 60, 60, 60, 60, 90, 90, 90, 90,
+    fn box_downsample_rounds_and_covers_every_texel() {
+        let cases: [(&str, &[u8], u32, u32, &[u8]); 2] = [
+            (
+                "a fractional mean rounds to nearest",
+                &[0, 0, 0, 0, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5],
+                4,
+                2,
+                &[2, 2, 2, 2, 5, 5, 5, 5],
+            ),
+            (
+                "a non-integer ratio covers every texel",
+                &[
+                    10, 10, 10, 10, 20, 20, 20, 20, 30, 30, 30, 30, 60, 60, 60, 60, 90, 90, 90, 90,
+                ],
+                5,
+                2,
+                &[15, 15, 15, 15, 60, 60, 60, 60],
+            ),
         ];
-        let out = box_downsample(&rgba, 5, 1, 2, 1).expect("5x1 reduces to 2x1");
-        assert_eq!(out, vec![15, 15, 15, 15, 60, 60, 60, 60]);
+        for (name, rgba, width, out_width, expected) in cases {
+            let out = box_downsample(rgba, width, 1, out_width, 1).expect(name);
+            assert_eq!(out, expected, "{name}");
+        }
     }
 
     #[test]
@@ -488,46 +498,27 @@ mod cap_tests {
     }
 
     #[test]
-    fn no_cap_leaves_the_dimensions_alone() {
-        assert_eq!(
-            capped_dims_for(0, 4096, 1024),
-            (4096, 1024),
-            "0 is unset, not a cap of zero"
-        );
-        assert_eq!(
-            capped_dims_for(256, 256, 64),
-            (256, 64),
-            "already at the cap"
-        );
-        assert_eq!(
-            capped_dims_for(256, 32, 16),
-            (32, 16),
-            "well inside the cap"
-        );
-        assert_eq!(
-            capped_dims_for(256, 0, 0),
-            (0, 0),
-            "a sizeless image is not scaled"
-        );
-    }
-
-    #[test]
-    fn cap_scales_the_longer_side_to_the_cap_whichever_axis_it_is() {
-        assert_eq!(capped_dims_for(256, 4096, 1024), (256, 64));
-        assert_eq!(capped_dims_for(256, 1024, 4096), (64, 256));
-        assert_eq!(capped_dims_for(256, 2048, 2048), (256, 256));
-    }
-
-    #[test]
-    fn cap_rounds_the_shorter_side_to_nearest() {
-        assert_eq!(capped_dims_for(256, 1000, 300), (256, 77));
-        assert_eq!(capped_dims_for(256, 1000, 257), (256, 66));
-    }
-
-    #[test]
-    fn cap_never_produces_a_zero_side() {
-        assert_eq!(capped_dims_for(256, 4096, 3), (256, 1));
-        assert_eq!(capped_dims_for(1, 4096, 1024), (1, 1));
+    fn capped_dims_scale_the_longer_side_and_round_the_shorter() {
+        let cases = [
+            (
+                "0 is unset, not a cap of zero",
+                (0, 4096, 1024),
+                (4096, 1024),
+            ),
+            ("already at the cap", (256, 256, 64), (256, 64)),
+            ("well inside the cap", (256, 32, 16), (32, 16)),
+            ("a sizeless image is not scaled", (256, 0, 0), (0, 0)),
+            ("wide", (256, 4096, 1024), (256, 64)),
+            ("tall", (256, 1024, 4096), (64, 256)),
+            ("square", (256, 2048, 2048), (256, 256)),
+            ("shorter side rounds down", (256, 1000, 300), (256, 77)),
+            ("shorter side rounds up", (256, 1000, 257), (256, 66)),
+            ("never a zero side", (256, 4096, 3), (256, 1)),
+            ("a cap of one", (1, 4096, 1024), (1, 1)),
+        ];
+        for (name, (cap, width, height), expected) in cases {
+            assert_eq!(capped_dims_for(cap, width, height), expected, "{name}");
+        }
     }
 
     /// The decode-failure fixture's corruption: a PNG with one flipped IDAT
