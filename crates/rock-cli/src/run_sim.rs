@@ -1350,12 +1350,7 @@ fn entry_excluded(summary: &SimSummary) -> bool {
 }
 
 fn entry_passed(summary: &SimSummary) -> bool {
-    !entry_excluded(summary)
-        && !summary.timed_out
-        && summary.process_failure_code.is_none()
-        && summary.saw_stop
-        && !summary.has_failures()
-        && summary.checks_accounted()
+    !entry_excluded(summary) && sim_outcome(summary, "").is_ok()
 }
 
 fn verdict_word(summary: &SimSummary) -> &'static str {

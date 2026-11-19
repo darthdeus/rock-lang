@@ -1057,6 +1057,11 @@ fn entry_verdict_requires_stop_and_checks_without_failures_or_exclusion() {
         assert_eq!(entry_passed(&summary), verdict == "PASS", "{name}");
         assert_eq!(entry_excluded(&summary), verdict == "EXCLUDED", "{name}");
         assert_eq!(verdict_word(&summary), verdict, "{name}");
+        assert_eq!(
+            sim_outcome(&summary, "s").is_ok(),
+            verdict != "FAIL",
+            "{name}"
+        );
     }
 }
 
