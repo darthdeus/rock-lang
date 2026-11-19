@@ -310,3 +310,12 @@ fn vec_of_tuples_edge_cases() {
     }
     print("Empty vec iteration count: {count}")
 }
+
+// Clearing drains every slot; a push afterwards reuses the array from index 0.
+@test(returns = 68)
+fn test_vec_clear_then_push() -> int {
+    let xs = [1, 2, 3]
+    xs.clear()
+    xs.push(7)
+    xs[0] * 10 + xs.len - 3
+}

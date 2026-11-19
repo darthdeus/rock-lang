@@ -1,0 +1,256 @@
+// Column-stored maps: `Map<K, V>` stores an all-scalar V (at most four
+// leaves) in columns whether or not V is marked `nobox`, and looks a key up as
+// a slot into that storage. A miss is decided by the spine, never by the
+// leaves: the absent arm has nil leaves and a freed slot keeps stale ones, so
+// packing the leaves before the null check would fault. A generic userland map
+// composes scalar slot indices with column-stored values the same way.
+
+value GetCell { a: int, b: int }
+value GetCellF { x: float, y: float }
+
+@test fn map_column_get_miss_on_a_fresh_map_and_beside_a_live_key() {
+    let m: Map<string, GetCell> = map_new()
+    assert(m.get("nope") == null)
+    m["a"] = GetCell { a: 1, b: 2 }
+    assert(m.get("nope") == null)
+    let f = m.get("nope")
+    assert(f == null)
+}
+
+// The freed slot keeps its stale leaves; presence must still come from the spine.
+@test fn map_column_get_miss_after_remove() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 7, b: 8 }
+    m.remove("a")
+    let f = m.get("a")
+    assert(f == null)
+    assert(m.get("a") == null)
+}
+
+@test fn map_column_get_miss_after_clear() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 7, b: 8 }
+    m.clear()
+    let f = m.get("a")
+    assert(f == null)
+    assert_eq(m.len(), 0)
+}
+
+// The present control: the same shapes must still read real leaves.
+@test fn map_column_get_present_control() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    assert(m.get("a") != null)
+    let f = m.get("a")
+    assert(f != null)
+    assert_eq(f.unwrap().a, 1)
+    assert_eq(f.unwrap().b, 2)
+}
+
+// Refine-then-use: the absent arm must not be entered, and reaching the check
+// must not have read a leaf.
+@test fn map_column_get_miss_refined_use() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    let f = m.get("nope")
+    let seen = 0
+    if f != null {
+        seen = f.a
+    }
+    assert_eq(seen, 0)
+    let g = m.get("a")
+    if g != null {
+        seen = g.a
+    }
+    assert_eq(seen, 1)
+}
+
+// A miss reaching the other nil-observable consumers.
+@test fn map_column_get_miss_through_coalesce() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    let d = m.get("nope") ?? GetCell { a: 9, b: 9 }
+    assert_eq(d.a, 9)
+    let p = m.get("a") ?? GetCell { a: 9, b: 9 }
+    assert_eq(p.a, 1)
+}
+
+@test fn map_column_get_miss_through_safe_nav() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    assert(m.get("nope")?.a == null)
+    assert(m.get("a")?.a == 1)
+}
+
+// Float leaves take the same path -- the fault is the pack, not the leaf type.
+@test fn map_column_get_miss_float_leaves() {
+    let m: Map<string, GetCellF> = map_new()
+    m["a"] = GetCellF { x: 1.0, y: 2.0 }
+    let f = m.get("nope")
+    assert(f == null)
+    let g = m.get("a")
+    assert(g != null)
+    assert_eq(g.unwrap().x, 1.0)
+}
+
+// contains / index / remove must be unaffected by any fix here.
+@test fn map_column_get_miss_does_not_disturb_the_neighbours() {
+    let m: Map<string, GetCell> = map_new()
+    m["a"] = GetCell { a: 1, b: 2 }
+    m["b"] = GetCell { a: 3, b: 4 }
+    assert(!m.contains("nope"))
+    assert(m.get("nope") == null)
+    assert(m.contains("a"))
+    assert_eq(m["b"].a, 3)
+    let old = m.remove("a")
+    assert(old != null)
+    assert_eq(old.unwrap().a, 1)
+    assert(m.get("a") == null)
+    m["c"] = GetCell { a: 5, b: 6 }
+    assert_eq(m["c"].a, 5)
+    assert_eq(m["b"].a, 3)
+    assert_eq(m.len(), 2)
+}
+
+nobox value Mote { x: float, y: float, life: int }
+
+fn lookup(m: Map<string, Mote>, k: string) -> float {
+    let v = m.get(k)
+    if v != null { return v.x }
+    return -1.0
+}
+
+@test(output = "1.5 -1 2.5")
+fn a_hit_a_miss_and_an_insert() {
+    let m: Map<string, Mote> = map_new()
+    m.insert("a", Mote { x: 1.5, y: 0.0, life: 1 })
+    let a = lookup(m, "a")
+    let b = lookup(m, "b")
+    m.insert("b", Mote { x: 2.5, y: 0.0, life: 2 })
+    print("{a} {b} {lookup(m, "b")}")
+}
+
+@test(output = "-1 3.5")
+fn a_removed_key_misses_and_a_reused_slot_reads_the_new_value() {
+    let m: Map<string, Mote> = map_new()
+    m.insert("a", Mote { x: 1.5, y: 0.0, life: 1 })
+    m.remove("a")
+    let gone = lookup(m, "a")
+    m.insert("c", Mote { x: 3.5, y: 0.0, life: 3 })
+    print("{gone} {lookup(m, "c")}")
+}
+
+@test(output = "6")
+fn lookups_in_a_loop() {
+    let m: Map<int, Mote> = map_new()
+    for i in 0..4 { m.insert(i, Mote { x: i as float, y: 0.0, life: i }) }
+    let t = 0.0
+    for i in 0..4 {
+        let v = m.get(i)
+        if v != null { t += v.x }
+    }
+    print("{t}")
+}
+
+struct ProofMap<K, V> {
+    spine: Map<K, int>,
+    data: [V],
+    free_indices: [int],
+    occupied_count: int,
+}
+
+fn proof_new<K, V>() -> ProofMap<K, V> {
+    return ProofMap { spine: map_new(), data: [], free_indices: [], occupied_count: 0 }
+}
+
+fn ProofMap<K, V>.pset(m, key: K, value: V) {
+    let existing = m.spine.get(key)
+    if existing != null {
+        m.data.set(existing, value)
+        return
+    }
+    let slot = 0
+    if m.free_indices.len > 0 {
+        slot = m.free_indices.pop().unwrap()
+        m.data.set(slot, value)
+    } else {
+        slot = m.data.len
+        m.data.push(value)
+    }
+    m.spine[key] = slot
+    m.occupied_count = m.occupied_count + 1
+}
+
+fn ProofMap<K, V>.pget(m, key: K) -> V? {
+    let slot = m.spine.get(key)
+    if slot == null { return null }
+    return m.data[slot]
+}
+
+fn ProofMap<K, V>.premove(m, key: K) -> V? {
+    let slot = m.spine.get(key)
+    if slot == null { return null }
+    let i = slot
+    let old = m.data[i]
+    m.free_indices.push(i)
+    m.spine.remove(key)
+    m.occupied_count = m.occupied_count - 1
+    return old
+}
+
+fn ProofMap<K, V>.plen(m) -> int { return m.occupied_count }
+
+@test fn proof_store_and_read() {
+    let m: ProofMap<string, Vec2> = proof_new()
+    m.pset("a", Vec2 { x: 1.0, y: 2.0 })
+    m.pset("b", Vec2 { x: 3.0, y: 4.0 })
+    assert_eq(m.pget("a").unwrap().x, 1.0)
+    assert_eq(m.pget("a").unwrap().y, 2.0)
+    assert_eq(m.pget("b").unwrap().x, 3.0)
+    assert_eq(m.plen(), 2)
+}
+
+@test fn proof_update_reuses_the_slot() {
+    let m: ProofMap<string, Vec2> = proof_new()
+    m.pset("a", Vec2 { x: 1.0, y: 2.0 })
+    m.pset("a", Vec2 { x: 9.0, y: 8.0 })
+    assert_eq(m.pget("a").unwrap().x, 9.0)
+    assert_eq(m.plen(), 1)
+    assert_eq(m.data.len, 1)
+}
+
+@test fn proof_miss_is_null() {
+    let m: ProofMap<string, Vec2> = proof_new()
+    m.pset("a", Vec2 { x: 1.0, y: 2.0 })
+    assert(m.pget("nope") == null)
+}
+
+@test fn proof_slot_reuse_after_remove() {
+    let m: ProofMap<string, Vec2> = proof_new()
+    m.pset("a", Vec2 { x: 1.0, y: 1.0 })
+    m.pset("b", Vec2 { x: 2.0, y: 2.0 })
+    let old = m.premove("a")
+    assert(old != null)
+    assert_eq(old.unwrap().x, 1.0)
+    m.pset("c", Vec2 { x: 3.0, y: 3.0 })
+    assert_eq(m.pget("b").unwrap().x, 2.0)
+    assert_eq(m.pget("c").unwrap().x, 3.0)
+    assert(m.pget("a") == null)
+    assert_eq(m.plen(), 2)
+    // the freed slot was reused, so the column did not grow
+    assert_eq(m.data.len, 2)
+}
+
+@test fn proof_iteration_over_the_spine() {
+    let m: ProofMap<string, Vec2> = proof_new()
+    m.pset("a", Vec2 { x: 1.0, y: 2.0 })
+    m.pset("b", Vec2 { x: 3.0, y: 4.0 })
+    let sx = 0.0
+    let n = 0
+    for (k, slot) in m.spine {
+        sx = sx + m.data[slot].x
+        n = n + 1
+    }
+    assert_eq(n, 2)
+    assert_eq(sx, 4.0)
+}
