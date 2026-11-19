@@ -1111,11 +1111,7 @@ impl BoneWorkspace {
 
         let (start, end) = span.offset_range();
         let close = src.get(..end)?.rfind('}')?;
-        let line_start = src.get(..start)?.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let match_indent: String = src[line_start..start]
-            .chars()
-            .take_while(|c| *c == ' ' || *c == '\t')
-            .collect();
+        let match_indent = line_indent_at(src, start);
         let arm_indent = format!("{match_indent}    ");
         let replace_start = src.get(..close)?.trim_end().len();
 
@@ -1149,8 +1145,6 @@ impl BoneWorkspace {
         let last = src.get(..content_end)?.chars().next_back();
         let needs_comma = !matches!(last, Some('{') | Some(','));
 
-        let fields: Vec<String> = missing.clone();
-
         let new_text = if multiline {
             let field_indent = if matches!(last, Some('{')) {
                 format!("{}    ", line_indent_at(src, open))
@@ -1162,7 +1156,7 @@ impl BoneWorkspace {
             if needs_comma {
                 t.push(',');
             }
-            for f in &fields {
+            for f in &missing {
                 t.push('\n');
                 t.push_str(&field_indent);
                 t.push_str(f);
@@ -1173,7 +1167,7 @@ impl BoneWorkspace {
             t
         } else {
             let lead = if needs_comma { ", " } else { " " };
-            format!("{lead}{} ", fields.join(", "))
+            format!("{lead}{} ", missing.join(", "))
         };
 
         Some(StructFieldsFill {
@@ -1209,7 +1203,7 @@ impl BoneWorkspace {
             });
         }
         let (ls, le) = sites.let_span.offset_range();
-        let line_start = src.get(..ls)?.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_start = line_start(src, ls);
         let line_end = src
             .get(le..)?
             .find('\n')
@@ -2489,14 +2483,14 @@ fn semantic_name_map(ws: &Workspace) -> HashMap<Ustr, u32> {
     names
 }
 
-fn line_indent_at(src: &str, pos: usize) -> String {
-    let pos = pos.min(src.len());
-    let line_start = src
-        .get(..pos)
+fn line_start(src: &str, pos: usize) -> usize {
+    src.get(..pos.min(src.len()))
         .and_then(|s| s.rfind('\n'))
-        .map_or(0, |i| i + 1);
-    src.get(line_start..)
-        .unwrap_or("")
+        .map_or(0, |i| i + 1)
+}
+
+fn line_indent_at(src: &str, pos: usize) -> String {
+    src[line_start(src, pos)..]
         .chars()
         .take_while(|c| *c == ' ' || *c == '\t')
         .collect()
@@ -2980,11 +2974,7 @@ pub fn ident_prefix_at(src: &str, pos: Position) -> &str {
 
 /// A space trigger on a blank line prefix is `<CR>` auto-indent, not a typed space.
 fn line_prefix_is_blank(src: &str, offset: usize) -> bool {
-    let line_start = src
-        .get(..offset)
-        .and_then(|s| s.rfind('\n'))
-        .map_or(0, |i| i + 1);
-    src.get(line_start..offset)
+    src.get(line_start(src, offset)..offset)
         .is_some_and(|p| p.chars().all(|c| c == ' ' || c == '\t'))
 }
 
@@ -3176,8 +3166,7 @@ fn finding_diagnostic(
 }
 
 fn magic_comment_completions(src: &str, offset: usize) -> Option<Vec<CompletionItem>> {
-    let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
-    let before = &src[line_start..offset];
+    let before = &src[line_start(src, offset)..offset];
     // The LAST `//` before the cursor, so a trailing `x() // rock: allow(` works.
     let after_slashes = before.rsplit_once("//")?.1;
     let body = after_slashes.trim_start().strip_prefix("rock")?;
