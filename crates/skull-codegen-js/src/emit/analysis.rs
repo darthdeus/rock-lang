@@ -87,6 +87,7 @@ fn inline_loads_before_branch(
     for &b in blocks {
         if let Term::Branch { else_bb, .. } = mf.blocks[b].term {
             let mut arm = else_bb;
+            // Bounded by the block count: a cycle of empty blocks must not hang.
             for _ in 0..mf.blocks.len() {
                 else_arms[raw(arm) as usize] = true;
                 match mf.blocks[arm].term {

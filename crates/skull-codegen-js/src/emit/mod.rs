@@ -336,6 +336,8 @@ struct Emitter<'a> {
     /// Whether a multi-value `Term::Return` in the trampoline printer packs an array (ordinary-body
     /// fallback) or rejects (coroutine step, which returns through the step protocol).
     pack_multi_return: bool,
+    /// Value temps (raw inst ids) whose use crosses their defining block: hoist-declared at the fn
+    /// top and assigned at their MIR position, so follower scopes and trampoline cases see one value.
     hoisted_temps: HashSet<u32>,
     /// NativeBuffer slot refs used only as `Field`/`StoreField` bases render flat-slot access from
     /// their operands and emit no statement; any other use materializes a whole-element copy.

@@ -55,6 +55,7 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("string_char", 1, "String.fromCharCode($1)"),
     template("same_ref", 2, "($1 === $2)"),
     template("isnan", 1, "Number.isNaN($1)"),
+    // isinf excludes NaN (a NaN is neither finite nor infinite).
     template("isinf", 1, "(!Number.isFinite($1) && !Number.isNaN($1))"),
     template("__nb_alloc_u8", 1, "new Uint8Array($1)"),
     template("__nb_alloc_i8", 1, "new Int8Array($1)"),

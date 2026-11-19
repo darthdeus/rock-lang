@@ -166,6 +166,8 @@ impl Emitter<'_> {
                         && !self.inlinable[raw(iid) as usize]
                         && self.use_count[raw(iid) as usize] > 0 =>
                 {
+                    // Bind a used, non-inlinable value at its program position so cell reads capture their
+                    // value here and effectful calls keep their order.
                     let expr = self.render_inst_expr(iid)?;
                     // A cross-case temp is hoist-declared: assign, don't re-`let`.
                     if self.hoisted_temps.contains(&raw(iid)) {

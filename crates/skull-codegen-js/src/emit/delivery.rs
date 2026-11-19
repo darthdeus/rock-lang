@@ -55,6 +55,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 plan,
                 self.st.concrete,
             )?;
+            // Resolve bounded placeholders before any transform consumes the body.
             if specialization.is_some() {
                 if f.has_iterator_bounds() && plan.bound_tree.is_empty() {
                     return Err(CompilerError::new_with_label(
@@ -291,6 +292,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
     }
 }
 
+/// Emission order is canonicalized afterwards, so the walk order does not reach the output.
 pub(super) fn drain_worklists(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,

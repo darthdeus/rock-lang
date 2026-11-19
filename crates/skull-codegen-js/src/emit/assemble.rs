@@ -181,6 +181,7 @@ pub(super) fn assemble_program_core(
     let mut const_order = Vec::new();
     let mut const_init_lines = HashMap::new();
     let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
+    // Report rejected bodies before staging could raise an incomplete-census error.
     combine_rejections(rejections)?;
     let lifecycle_plan = if let Some((decorators, lifecycle_skeleton)) = effects {
         out.push_str("function __rock_state_initialize() {\n");
@@ -221,6 +222,8 @@ pub(super) fn assemble_program_core(
             out.push_str("__rock_code_slot_begin();\n");
         }
         out.push_str("__rock_state_initialize();\n");
+        // Global initializers run once the slots they may reference are staged, and before the
+        // definition plan materializes (a materializer may read them).
         let definition_stage = definition_plan_stage_js(ws, scx, st.concrete, &definition_plan)?;
         out.push_str(&definition_stage);
         stable.push_str(&definition_stage);
@@ -388,6 +391,8 @@ pub(super) fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>,
     let cands: Vec<_> = ws
         .functions_by_name
         .iter()
+        // Scoped packages key the registry by DefKey; @nomangle changes the emitted symbol, not
+        // that key, so match the declared segment.
         .filter(|(key, _)| skull_mir::mangle::declared_name(key) == "__rock_shader_register")
         .flat_map(|(_, functions)| functions.iter().copied())
         .collect();
