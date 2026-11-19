@@ -1670,7 +1670,6 @@ impl InstanceGraph {
         affected.sort();
         affected.dedup();
         self.run_stats = self.run(ws, affected.clone(), true);
-        let revisited_owners = self.last_run_owners.clone();
         let changed_decls = changed.iter().filter_map(|(module, owner)| match owner {
             BodyOwner::Function(func) => Some(skull_mir::lower::canonical_variant(
                 ws,
@@ -1702,7 +1701,7 @@ impl InstanceGraph {
             added,
             removed,
             revisited,
-            revisited_owners,
+            revisited_owners: std::mem::take(&mut self.last_run_owners),
         }
     }
 
