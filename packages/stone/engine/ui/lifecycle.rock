@@ -1,5 +1,3 @@
-// Visibility state for UI that can disappear before its feedback does.
-
 const UI_PRESENCE_DEFAULT_DURATION: float = 0.18
 
 pub enum UiPresenceEdge { None, Initial, Open, Close }
@@ -20,10 +18,6 @@ fn ui_presence_emit(ev: UiEvent, r: UiRect, skin: (() -> Entity<UiSkin>)?,
         world_anchor: world_anchor)
 }
 
-// `rect` is optional for subjects whose geometry is only valid in draw; their
-// last captured visible rect remains the Close payload. A supplied world anchor
-// is retained with it so close feedback can keep following the scene. No
-// world-freeze gate belongs here: this is UI time, like update_ui_ghosts.
 pub fn ui_presence_step(
     p: ref UiPresence,
     visible: bool,
@@ -80,8 +74,6 @@ pub fn ui_presence_progress(p: UiPresence) -> float {
     return clamp(p.opening_age / p.opening_duration, 0.0, 1.0)
 }
 
-// Progress 0 is fully dissolved. Completed skins return to the ordinary path
-// so steady-state panels do not pay for a custom pipeline.
 pub fn ui_presence_skin_draw(r: UiRect, skin: UiSkin, progress: float, pipeline: Pipeline, tint: Color = WHITE) {
     let p = clamp(progress, 0.0, 1.0)
     if p >= 1.0 {

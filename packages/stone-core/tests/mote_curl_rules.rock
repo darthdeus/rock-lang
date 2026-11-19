@@ -3,7 +3,6 @@ fn mote_hash_range_determinism_and_distribution() {
     let bins = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     let sum = 0.0
     let squares = 0.0
-    // Signed lattice cells cover the actual value-noise hash inputs.
     for x in -8..8 {
         for y in -8..8 {
             for z in -8..8 {
@@ -17,7 +16,6 @@ fn mote_hash_range_determinism_and_distribution() {
             }
         }
     }
-    // Broad uniform-distribution bounds, independent of any frozen field.
     for count in bins {
         assert(count >= 128 && count <= 384, "grid fills every hash bin")
     }
@@ -36,8 +34,6 @@ fn mote_curl_is_deterministic_and_divergence_free() {
         let a = mote_curl(p)
         let b = mote_curl(p)
         assert(a.x == b.x && a.y == b.y && a.z == b.z, "curl is deterministic")
-        // Match the curl's central-difference step so mixed partials cancel,
-        // including across lattice boundaries; only rounding remains.
         let dx = mote_curl(p + v(0.1, 0.0, 0.0)) - mote_curl(p - v(0.1, 0.0, 0.0))
         let dy = mote_curl(p + v(0.0, 0.1, 0.0)) - mote_curl(p - v(0.0, 0.1, 0.0))
         let dz = mote_curl(p + v(0.0, 0.0, 0.1)) - mote_curl(p - v(0.0, 0.0, 0.1))

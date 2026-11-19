@@ -1,11 +1,3 @@
-// Short-tap witness for ui_focus_begin_frame (stone/engine/ui/focus.rock):
-// a key down/up pair delivered in one poll must drive nav, confirm and
-// left/right edges exactly once, with no repeat. Gameplay key queries see
-// the tap through the pressed-event latches; focus must consume the same
-// latches instead of deriving edges from its held-state snapshot alone.
-// The two control tests pin the behavior the repair must preserve: a held
-// key fires one edge, and a sim's mid-frame injection still lands.
-
 struct TapNavActions {
     up: ActionDef,
     dn: ActionDef,
@@ -15,8 +7,6 @@ struct TapNavActions {
     bk: ActionDef,
 }
 
-// Input and UI state back to boot, so no test sees another's holds, focus or
-// keyboard capture.
 fn tapnav_reset() {
     input_reset_state()
     UI_MOUSE = ui_mouse_state_new()
@@ -26,7 +16,6 @@ fn tapnav_reset() {
     REBIND_INPUT_CONSUMED = false
 }
 
-// Throwaway nav actions use the production binding names and defaults.
 fn tapnav_wire() -> TapNavActions {
     let acts = TapNavActions {
         up: action_new("ftap_up", [key_bind("up")], ui: true),
@@ -63,9 +52,6 @@ fn tapnav_register() {
     ui_focus_item(ui_id("ftap", "c"), r, "ftap")
 }
 
-// Production frame order (stone/engine/runner.rock): poll events first,
-// then the authority projection, mouse/focus resolution, end-of-frame
-// snapshot.
 fn tapnav_frame() {
     input_select_game_authority()
     ui_mouse_begin_frame()
@@ -73,8 +59,6 @@ fn tapnav_frame() {
     input_end_frame()
 }
 
-// One poll delivering a full tap: the pressed latch survives the release,
-// the hold does not.
 fn tapnav_poll_tap(key: string, scan: string) {
     input_physical_key_pressed(key, scan, 0, false)
     input_physical_key_released(key, scan)
@@ -101,7 +85,6 @@ fn ui_focus_short_tap_moves_once_without_repeat() {
     tapnav_frame()
     assert(!UI_FOCUS.nav_mode, "ftap: no input leaves pointer mode")
 
-    // A tap completed in one poll enters nav mode on the first item.
     tapnav_poll_tap("down", "down")
     tapnav_register()
     tapnav_frame()
@@ -109,7 +92,6 @@ fn ui_focus_short_tap_moves_once_without_repeat() {
     assert(ui_focused(ia), "ftap: the entering tap focuses the first item")
     assert(UI_INPUT_CAPTURE, "ftap: nav-mode focus captures the keyboard")
 
-    // The next tap moves exactly one item down the declaration order.
     tapnav_poll_tap("down", "down")
     tapnav_register()
     tapnav_frame()
@@ -117,7 +99,6 @@ fn ui_focus_short_tap_moves_once_without_repeat() {
     assert(!ui_focused(ia) && !ui_focused(ic),
         "ftap: the tap moves one item, not zero or two")
 
-    // A quiet frame fires nothing: one activation, no repeat.
     tapnav_register()
     tapnav_frame()
     assert(ui_focused(ib), "ftap: a quiet frame after a tap repeats nothing")
@@ -200,13 +181,11 @@ fn ui_focus_held_key_fires_one_edge() {
     tapnav_register()
     tapnav_frame()
 
-    // A held key: the down poll fires the entering edge once.
     input_physical_key_pressed("down", "down", 0, false)
     tapnav_register()
     tapnav_frame()
     assert(ui_focused(ia), "ftap: a held key enters nav mode on the first item")
 
-    // Still held, no new events: no second edge, no repeat on frozen time.
     tapnav_register()
     tapnav_frame()
     assert(ui_focused(ia), "ftap: a held key does not re-fire without a new press")
@@ -233,7 +212,6 @@ fn ui_focus_sim_midframe_injection_still_lands() {
     tapnav_register()
     tapnav_frame()
 
-    // A sim injects mid-frame, after resolution: the next resolution fires.
     on_key_pressed_with_identity("down", "down", 0, false)
     tapnav_register()
     tapnav_frame()

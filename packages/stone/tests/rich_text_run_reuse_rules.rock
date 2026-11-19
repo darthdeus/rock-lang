@@ -1,6 +1,3 @@
-// The deferred world overlay and the world measures resolve their text again
-// every frame and reuse the runs of commands that have finished. A reused run
-// must carry nothing over, and must not be one a queued command still holds.
 @test
 fn reused_rich_text_runs_keep_queued_commands_intact() {
     setup_stone()

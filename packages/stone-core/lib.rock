@@ -1,13 +1,8 @@
-// IVec2 -> Vec2 widening. The scalar constructors (v(), v(x), v(x, y)) and
-// zero() live in stdlib/vec.rock; this overload stays because IVec2 is
-// engine-defined.
 @inline
 @pure fn v(v: IVec2) -> Vec2 {
     return Vec2 { x: v.x, y: v.y }
 }
 
-// Component-wise color multiply (including alpha) -- tint/dim: a base color
-// times a modulation color. e.g. face_tint * WHITE.alpha(0.5) dims + fades.
 pub @pure operator *(a: Color, b: Color) -> Color {
     return Color { r: a.r * b.r, g: a.g * b.g, b: a.b * b.b, a: a.a * b.a }
 }

@@ -17,7 +17,6 @@
 // * `output: Canvas?` -- null draws into whatever is currently bound.
 // * `clear: Color?` -- null does not clear.
 
-// Nullable render-row transfers use scalar slots; static caches materialize once.
 pub nobox value Pipeline {
     shader_name: string,
     parametric_quads: bool = false,
@@ -41,15 +40,6 @@ pub fn parametric_quad_pipeline(shader_name: string) -> Pipeline {
     return Pipeline { shader_name: shader_name, parametric_quads: true }
 }
 
-// One declarative post-process step. Immutable data; `run_pass(p)`
-// drives it. `slot_inputs` binds sampler textures by compiler slot. `output` is
-// the render target; `null` means
-// "draw into whatever canvas is already bound". `clear` is applied to
-// the output before the draw; `null` means "don't clear."
-//
-// Every field but `pipeline` defaults, so a minimal Pass is one line:
-//   run_pass(Pass { pipeline: pipeline("crt") })
-// and `..` spread carves a variant off a base Pass.
 pub struct Pass {
     pipeline: Pipeline,
     // Index N is the shader's `@textures` slot N, so the COMPILER owns the
@@ -76,9 +66,6 @@ pub struct Pass {
     // payload its shader does not want, or omits one it does, is refused by the
     // writer rather than partially uploaded.
     array_payload: [PassArrayMember] = [],
-    // Borrowed until execution. Only vertices/count are consumed; the pass
-    // owns textures, uniforms and draw state. Positions/UVs are authored for
-    // the pipeline's vertex shader rather than inferred from the target.
     geometry: SpriteMesh? = null,
     output: Canvas? = null,
     clear: Color? = null,
@@ -94,28 +81,11 @@ pub struct Pass {
     // output's ACTIVE rectangle -- a rect larger than the active area would
     // widen the margin scissor the bind just set, not narrow it.
     scissor: IRect? = null,
-    // When set, `run_pass` switches to this blend mode before the draw
-    // and restores the caller's PRIOR mode afterward (true save/restore
-    // via CURRENT_BLEND). Null leaves the currently-bound blend alone.
     blend: BlendMode? = null,
-    // A tag of zero or more times this pass on the GPU in normal play, with
-    // no `STONE_GPU_SCOPES`: `stone_gpu_timed_pass_poll_ms` later returns its
-    // milliseconds and `stone_gpu_timed_pass_tag` this tag. For work a game
-    // paces by its measured cost. One timestamp pair and a flush per timed
-    // pass, so time the few passes that need it, not every pass.
     timed: int = -1,
-    // The colour attachments of `output` this pass writes, as the bitmask
-    // `stone_set_draw_buffer_mask` takes: bit N is attachment N, the shader's
-    // fragment output at location N. Zero writes attachment 0 alone. The
-    // further attachments are canvases the caller attached to `output` with
-    // `stone_canvas_attach_color_target`; the scissor and the clear cover all
-    // of them. Requires an output.
     draw_buffers: int = 0,
 }
 
-// Queues and the pipeline inspector retain Pass records. Return the old record
-// on a match; copy on change so an earlier submission keeps its input snapshot.
-// Assign the result back to the retained pass. Other payloads remain shared.
 pub fn Pass.with_canvas_input(p, slot: int, canvas: Canvas, sampling: TextureFilter) -> Pass {
     let current = p.slot_inputs[slot]
     if current.1 == sampling && sampled_texture_matches_canvas(current.0, canvas) { return p }
@@ -149,29 +119,18 @@ pub fn Pass.with_output(p, output: Canvas?) -> Pass {
     return Pass { ..p, output }
 }
 
-// The Pass binder, and the only place a canvas reaches a compiler-assigned
-// slot. Sets no sampler uniform by name: `bind_texture_slots` pointed
-// each one at its slot once at link time, which is why a group needs no per-draw
-// by-name set. Returns whether the texture bind took, so the caller can do its
-// own slot bookkeeping -- that part is per-call-site policy (a pass input marks
-// FILLED, an activation input marks ACTIVATION), the binding itself is not.
 pub fn bind_sampled_to_slot(source: SampledTexture, slot: int, sampling: TextureFilter) -> bool {
     let ok = bind_sampled_texture_to_unit(source, slot)
     stone_bind_sampler(slot, texture_filter_to_int(sampling), sampled_texture_sampler_key(source))
     return ok
 }
 
-// The depth attachment of `canvas` on `slot`. Returns false when the canvas
-// has none, so asking for depth it does not have refuses rather than leaving
-// the unit holding whatever was there.
 pub fn bind_canvas_depth_to_slot(canvas: Canvas, slot: int, sampling: TextureFilter) -> bool {
     let ok = stone_bind_canvas_depth_to_unit(canvas.handle.0, slot)
     stone_bind_sampler(slot, texture_filter_to_int(sampling), 0)
     return ok
 }
 
-// Release a unit back to texture-object filtering, once the draw that consumed
-// it is done. Deleting any single release is caught by the sampler_release sim.
 pub fn sampler_release_unit(unit: int) {
     stone_bind_sampler(unit, -1, 0)
 }
@@ -201,10 +160,6 @@ fn run_pass_scoped(p: Pass, previous_shader: string?, retain_shader: bool) -> bo
     let has_output = p.output != null
     if has_output {
         set_canvas(p.output.unwrap())
-        // AFTER the bind, which is what resets the scissor: `stone_set_canvas`
-        // re-states the target's own rect (the inactive margin, or none) on
-        // every bind, so a rect set before this line would be thrown away, and
-        // restoring the previous target below also restores its active rectangle.
         if p.scissor != null {
             let r = p.scissor
             stone_set_scissor(true, r.x, r.y, r.w, r.h)
@@ -226,8 +181,6 @@ fn run_pass_scoped(p: Pass, previous_shader: string?, retain_shader: bool) -> bo
     }
 
     if has_output {
-        // Draw-buffer state belongs to the output's framebuffer, so it is
-        // put back while that is still bound.
         if p.draw_buffers != 0 { stone_set_draw_buffer_mask(1) }
         set_canvas_handle(previous_canvas)
     }
@@ -241,9 +194,6 @@ fn pass_is_admitted(p: Pass) -> bool {
     return get_shader_handle(p.pipeline.shader_name) != 0
 }
 
-// The inside of every Pass. Runs with output canvas and blend state already
-// established by the caller; the shader bracket is inlined here (set_shader /
-// body / end_shader) for the same closure-free reason as `run_pass` above.
 fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
     if p.clear != null {
         let c = p.clear
@@ -267,9 +217,6 @@ fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
         // derives Vertex's layout but leaves the one draw audit to this owner.
         let _ = __stone_draw_mesh_vertex(mesh.vbo, mesh.count, 0, 0, audit_inputs: false)
     } else {
-        // Fullscreen TexCoord addresses input 0's active rectangle in 0..1.
-        // A second input at a different active fraction needs an explicit
-        // relative uniform; supplied geometry already states its own UVs.
         if p.slot_inputs.len() > 0 {
             let uv = sampled_texture_active_uv(p.slot_inputs[0].0)
             set_fullscreen_uv_scale(uv.x, uv.y)
@@ -279,8 +226,6 @@ fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
             draw_fullscreen_quad()
         }
     }
-    // AFTER the draw and before anything else can bind: the marks describe this
-    // draw only.
     audit_texture_slots_for_draw(p.pipeline.shader_name)
     release_pass_input_units(p)
     if !retain_shader {
@@ -288,9 +233,6 @@ fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
     }
 }
 
-// Why a pass's texture bindings are unusable, or "" when they are fine. Pure:
-// `run_pass_body` asks BEFORE clearing, so a rejected pass leaves its output
-// alone instead of wiping it and then declining to redraw.
 pub fn pass_input_rejection(p: Pass) -> string {
     if let mesh = p.geometry {
         if mesh.count <= 0 || mesh.count % 3 != 0 { return "geometry needs complete nonempty triangles" }
@@ -300,12 +242,6 @@ pub fn pass_input_rejection(p: Pass) -> string {
     let declared = shader_texture_slot_count(sh)
     let aliases_output = false
 
-    // LIVENESS first, for the inputs and the output. A `Canvas` is a plain
-    // struct, so it outlives the canvas it names: a value captured before a
-    // destroy or a scene-target rebuild still looks like a canvas and its bind
-    // is the only thing that fails. Binding is too late -- the clear has already
-    // run by then, and a draw whose unit never got its texture samples whatever
-    // the previous pass left there.
     for si in p.slot_inputs {
         if !sampled_texture_is_live(si.0) {
             return "slot input names source {sampled_texture_key(si.0)}, which the registry no longer knows"
@@ -323,9 +259,6 @@ pub fn pass_input_rejection(p: Pass) -> string {
         return "source canvas aliases output canvas {p.output.unwrap().handle.0}; read/write feedback is not admitted"
     }
 
-    // EXACT, not "at least": a short or empty list would leave the tail reading
-    // whatever the previous draw bound there, and a long one names a slot the
-    // program does not have.
     if p.slot_inputs.len() != declared {
         return "{p.slot_inputs.len()} slot_inputs for {declared} declared @textures slot(s) -- the count must match exactly"
     }
@@ -341,15 +274,12 @@ fn bind_pass_inputs(p: Pass) {
     }
 }
 
-// Slot units are 0..n-1 by construction.
 fn release_pass_input_units(p: Pass) {
     for (slot, _si) in enumerate(p.slot_inputs) {
         sampler_release_unit(slot)
     }
 }
 
-// Run a sequence of passes in order. Intermediate canvases stay valid
-// between passes — a pass can read from a canvas a prior pass wrote to.
 pub fn run_passes(passes: [Pass]) {
     let previous_shader: string? = null
     for p in passes {
@@ -373,7 +303,6 @@ pub fn run_passes(passes: [Pass]) {
 // grading, CRT) use queue_final_pass below instead.
 pub global SCENE_PASSES: [Pass] = []
 
-// Game-owned textures needed by this frame's world sprites (lighting, caches).
 pub global WORLD_PREPARE_PASSES: [Pass] = []
 
 pub fn queue_world_prepare_pass(p: Pass) {
@@ -383,10 +312,6 @@ pub fn queue_world_prepare_pass(p: Pass) {
 }
 
 pub fn run_world_prepare_passes() {
-    // Draw-time asset loads allocate handles before decoding/uploading pixels.
-    // Prepare may have drained the passes before draw admitted more images;
-    // The gameplay budget only publishes completed decodes. Draw owners retain
-    // their last complete presentation until the requested images are ready.
     let _ = residency_service_uploads()
     for p in WORLD_PREPARE_PASSES { run_pass(p) }
     WORLD_PREPARE_PASSES.clear()
@@ -449,13 +374,10 @@ fn drop_queued_passes_on_target_rebuild() {
         "scene target rebuild dropped {scene} queued scene pass(es) and {final_count} final pass(es) -- they named the destroyed set")
 }
 
-// Scene passes run on the last frame, for sims that pin a graphics setting to
-// the passes it must add or remove (fog is one pass per visible space).
 pub global SCENE_PASSES_RUN_LAST: int = 0
 
 global SCENE_RETURN_PASS: Pass? = null
 
-// Rebuild after code edits even when the preserved canvas handles still match.
 @nomangle
 @on_reload
 fn reset_scene_return_pass() {

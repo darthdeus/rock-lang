@@ -1,9 +1,3 @@
-// `rock perf --gc-window N` can ask for a window longer than any fixed frame
-// history. The window's frame history is reserved from N before it opens,
-// so every requested frame is kept and nothing allocates per frame. A window
-// that cannot keep its frames invalidates the whole section attribution, which
-// is why the frame count is a contract rather than a diagnostic.
-
 fn profiler_gc_window_history_fixture(body: fn()) {
     let running = lua_gc_is_running()
     let enabled = ENGINE.profiler_enabled
@@ -29,8 +23,6 @@ fn profiler_gc_window_history_fixture(body: fn()) {
     body()
 }
 
-// One real frame: an open section, work that requests Lua allocation, and the
-// frame end that samples the window.
 fn profiler_gc_window_history_frame(frame: int) {
     profile_frame_begin()
     profile_begin("history.frame")
@@ -40,8 +32,6 @@ fn profiler_gc_window_history_frame(frame: int) {
     profile_frame_end()
 }
 
-// A completed window of `frames` needs one frame to open it and one sampled
-// frame per requested frame. Returns the frames actually driven.
 fn profiler_gc_window_history_run(frames: int) -> int {
     GC_WIN_N = frames
     GC_WIN_START = 1
@@ -57,7 +47,6 @@ fn profiler_gc_window_history_run(frames: int) -> int {
     return driven
 }
 
-// Longer than the 4096-frame history the window used to keep.
 const GC_WINDOW_HISTORY_LONG_FRAMES: int = 4200
 
 fn profiler_gc_window_history_long() {
@@ -78,8 +67,6 @@ fn profiler_gc_window_history_long() {
         assert(GC_WIN_WORST_FRAME_INDEX_RESULT >= 0
             && GC_WIN_WORST_FRAME_INDEX_RESULT < GC_WINDOW_HISTORY_LONG_FRAMES,
             "the worst frame is an index inside the window, got {GC_WIN_WORST_FRAME_INDEX_RESULT}")
-        // Every frame of this fixture allocates inside history.frame, so the
-        // worst frame's row must explain part of its total and never more.
         assert(GC_WIN_FRAME_SECTION_SLOT_COUNT > 0,
             "a long window still interns the sections it measured")
         let worst_row_kb = 0.0
@@ -92,8 +79,6 @@ fn profiler_gc_window_history_long() {
     })
 }
 
-// A second, shorter window in the same process must record only its own
-// frames instead of inheriting the first window's history.
 fn profiler_gc_window_history_shorter() {
     profiler_gc_window_history_fixture(() => {
         let long_driven = profiler_gc_window_history_run(GC_WINDOW_HISTORY_LONG_FRAMES)

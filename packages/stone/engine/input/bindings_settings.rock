@@ -305,10 +305,6 @@ fn bindings_load_conflict_message(a: string, b: string, chord: InputBinding) -> 
     return "binding conflict at load: \"{a}\" and \"{b}\" share \"{label}\""
 }
 
-// Reports chords two registered actions hold in the same input context after
-// a load completes. Same-context matches the capture path's displacement rule;
-// undeclared (pair, chord) matches report once. Read-only: no displacement, persistence,
-// or capture behavior changes.
 fn bindings_report_load_conflicts() {
     let names = action_names()
     for i in 0..names.len() {
@@ -337,7 +333,6 @@ fn bindings_report_load_conflicts() {
     }
 }
 
-// Returns a rejection reason before any live bindings are changed.
 fn bindings_restore_json(raw: string) -> string? {
     let parsed = json_decode(raw)
     if parsed == null {

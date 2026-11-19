@@ -20,9 +20,6 @@ pub enum OverlayVerb {
     Custom,
 }
 
-// One queued command. Each push writes every field its own verb's flush arm
-// reads; the rest keep whatever the previous occupant left, because entries
-// are reused across frames rather than reallocated.
 pub struct OverlayCmd {
     verb: OverlayVerb,
     a: Vec2,          // world anchor, or a line's start
@@ -92,18 +89,7 @@ fn overlay_cmd(verb: OverlayVerb) -> OverlayCmd {
     return c
 }
 
-// Commands live for exactly one frame. Dropping them here rather than at the
-// flush is what keeps a skipped render pass (sim mode, a seek) from carrying
-// last frame's queue forward.
-//
-// Truncating the length is not dropping: entries are pooled, so the backing
-// array still reaches every reference the retired prefix held -- a custom
-// closure and its whole captured graph, a source image -- until that slot is
-// reused, which may be never. The reference fields are released explicitly;
-// the scalar ones are overwritten by whatever verb takes the slot next.
 pub fn world_overlay_begin_frame() {
-    // Rich-text validation can fail after filling the next unpublished slot.
-    // Retire that slot too, including when the frame never reaches its flush.
     let clear_len = min(OVERLAY_CMD_LEN + 1, OVERLAY_CMDS.len())
     for i in 0..clear_len {
         let c = OVERLAY_CMDS[i]
@@ -262,9 +248,6 @@ fn overlay_custom(draw_fn: fn() -> (), z: int) {
     c.z = z
 }
 
-// Where a world anchor lands on the output, snapped like the text arm draws
-// it. One formula, so a caller that needs to know where its label went (a sim,
-// a hit test) cannot disagree with the pixels.
 pub @pure
 fn world_overlay_anchor_of(view: FrameView, p: Vec2) -> Vec2 {
     let s = world_to_screen_in(view, p)
@@ -281,10 +264,6 @@ pub fn rich_text_aligned_start(anchor: Vec2, width: float, ascent: float,
             ascent, cap_height, 0.0) })
 }
 
-// Project the queue onto the output. Runs after the scene is presented and
-// before the UI pool drains, so `RENDER_VIEW` is this frame's frozen view and
-// every command lands through the same px_* / queue_ui_text core the Target
-// verbs use.
 pub fn flush_world_overlay() {
     if OVERLAY_CMD_LEN == 0 { return }
     let view = RENDER_VIEW ?? return
@@ -306,8 +285,6 @@ pub fn flush_world_overlay() {
                 px_outline(p - size / 2.0, size, c.color, c.thickness * s, c.z)
             }
             OverlayVerb::Sprite => {
-                // draw_sprite's own anchor->center formula, so the two verbs
-                // read a pivot the same way whatever the anchor convention.
                 let ws = c.b
                 let center = v(
                     c.a.x + (0.5 - c.pivot.x) * ws.x,
@@ -326,8 +303,6 @@ pub fn flush_world_overlay() {
                 } else { world_text_em(drawn) * s }
                 for j in 0..c.rich_runs.len {
                     let run = c.rich_runs[j]
-                    // Lay out at the base size; the drawn size is the same
-                    // quantized em the run would have had at `drawn`.
                     if c.cap_height {
                         run.size = c.size * s
                         run.draw_scale = c.scale

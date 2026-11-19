@@ -28,7 +28,6 @@ pub fn terrain_field_weight(field: [float], x: float, y: float, world_grid: Vec2
     return terrain_field_sample(field, x, y, world_grid, 1)
 }
 
-// Native sampling consumes the same snapshot as the blade batch and semantic fuel.
 pub fn meadow_cover_profile(p: Vec2) -> Vec3 {
     stone_native_load()
     static output: NativeBufferU8 = native_buffer_u8(24)

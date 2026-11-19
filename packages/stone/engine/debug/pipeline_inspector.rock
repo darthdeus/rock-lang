@@ -28,26 +28,18 @@ value BatchInfo {
 }
 
 global PIPELINE_SNAPSHOT: [BatchInfo] = []
-// Passes in execution order this frame. Both execution contracts record at
-// their validated entry points, so the inspector follows the live path rather
-// than retaining a legacy-only view.
 pub enum PipelinePassInfo {
     Legacy(Pass),
     Semantic(GpuPass),
 }
 pub global PIPELINE_PASS_LOG: [PipelinePassInfo] = []
 
-// Called at the top of render_batches (the first pipeline step each
-// frame): reset the per-frame captures. Guarded so it's a no-op branch
-// when the window is closed.
 pub fn pipeline_inspector_frame_begin() {
     if !ENGINE.show_pipeline_inspector { return }
     PIPELINE_SNAPSHOT = []
     PIPELINE_PASS_LOG = []
 }
 
-// Called per batch inside render_batches' color loop (guarded at the call
-// site so the hot path is a single branch when the window is closed).
 fn pipeline_inspector_record_batch(b: RenderBatch) {
     let shader = if b.pipeline != null { b.pipeline.shader_name } else { "default" }
     let nm = if b.normal != null { sampled_texture_key(b.normal) } else { "" }
@@ -63,7 +55,6 @@ fn pipeline_inspector_record_batch(b: RenderBatch) {
     })
 }
 
-// Called at the top of run_pass (guarded at the call site).
 fn pipeline_inspector_record_pass(p: Pass) {
     PIPELINE_PASS_LOG.push(PipelinePassInfo::Legacy(p))
 }
@@ -92,8 +83,6 @@ fn draw_pipeline_inspector() {
             let extra = ""
             if bi.normal_key != "" { extra = "{extra} nm:{bi.normal_key}" }
             let line = "L{bi.z_layer} {blend_key(bi.blend)} {depth_key(bi.depth)} sh:{bi.shader} tex:{bi.texture_key} {tag}{extra}"
-            // Highlight the batch where the program switches -- that is the
-            // GPU state change the sh{} key segment groups.
             if switched {
                 imgui_text_colored("> {line}", color(1.0, 0.85, 0.3, 1.0))
             } else {
@@ -104,9 +93,6 @@ fn draw_pipeline_inspector() {
     }
     imgui_separator()
 
-    // Every Pass that ran this frame, in order: the engine post chain
-    // (bloom threshold / blur / tonemap / outline) interleaved with any
-    // game-injected scene + final passes.
     if imgui_tree_node("Passes this frame ({PIPELINE_PASS_LOG.len()})###pipe_passes") {
         let i = 0
         for info in PIPELINE_PASS_LOG {

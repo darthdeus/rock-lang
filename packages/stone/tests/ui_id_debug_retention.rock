@@ -84,8 +84,6 @@ fn ui_id_debug_maps_hold_one_frame_of_mints() {
     defer { ui_id_retention_restore(saved) }
     UI_ID_DEBUG.enabled = true
 
-    // Thirty frames of twenty entity-keyed mints, every label fresh:
-    // production clears the debug maps each frame before systems re-mint.
     let frames = 30
     let per_frame = 20
     for frame in 0..frames {

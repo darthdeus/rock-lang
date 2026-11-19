@@ -1,8 +1,5 @@
 use stone::*
 
-// Production tonemap sampler order and the non-finite debug overlay over
-// real Inf/NaN texels. Loose-uniform validation retired with the by-name API.
-
 fn pass_rules_fixture(body: fn()) {
     setup_stone()
     assert(stone_gpu_host_ensure())
@@ -23,9 +20,6 @@ fn pass_rules_flat_canvas(size: int, level: float) -> Canvas {
     return c
 }
 
-// A transposed sampler binding still compiles, links and draws; only the
-// pixels separate it. With bloom intensity 0 the output is the scene alone,
-// so a bright scene and black bloom are maximally far apart.
 @test
 fn tonemap_slot_payload_and_input_order() {
     pass_rules_fixture(() => {
@@ -154,8 +148,6 @@ fn pass_one_frag(_tc: Vec2) -> Vec4 {
     return v(1.0, 0.0, 0.0, 1.0)
 }
 
-// One pass writes every attachment its mask names, and a later pass without
-// a mask writes the output's own texture alone.
 @test
 fn pass_draw_buffers_write_attached_targets() {
     pass_rules_fixture(() => {

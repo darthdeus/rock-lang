@@ -1,9 +1,3 @@
-// Asset accounting reports: one JSON document of every
-// live asset with its memory, written periodically or on events, viewed by
-// tools/asset-report/index.html. The dump builds on residency_dump /
-// residency_census; byte counts the engine could not expose got the small FFI
-// each of these tests pins.
-
 fn asset_report_test_host() {
     setup_stone()
     assert(stone_gpu_host_ensure())
@@ -162,7 +156,6 @@ fn asset_report_frame_stats_entry(which: int) {
         let before = stone_get_graphics_stats()
         let (running, _) = run_one_frame(frame, stone_get_time(), window, config)
         assert(running)
-        // Normal-frame control: work after the shared core always survives.
         let late = gpu_mesh_new(vertices.ptr, 4, 2, [2], "fan")
         gpu_mesh_free(late)
         stone_end_frame()
@@ -221,13 +214,10 @@ fn asset_report_font_cpu_counts_the_ttf_bytes() {
 fn asset_report_music_bytes_count_the_encoded_track() {
     asset_report_test_host()
     assert(stone_audio_init())
-    // Absolute: load_audio resolves relatives against the game dir, which is
-    // stone here; this fixture has a repository-owned absolute path.
     let track = "{STONE_SOURCE_DIR}/tests/fixtures/tone.ogg"
     let sound = load_audio(track, "music")
     let backend = sound.data().unwrap().backend_id
     assert(backend != 0, "the track loads under its handle")
-    // The track is held compressed: the stored bytes are the file's bytes.
     let file = io_read_text_file(track)
     assert(file != null, "the fixture track reads back")
     assert_eq(stone_music_byte_len(backend), file.unwrap().len())
@@ -264,8 +254,6 @@ fn asset_report_rows_cover_every_loaded_kind() {
     let cue = "{STONE_SOURCE_DIR}/tests/fixtures/tone.ogg"
     let sound = load_audio(cue, "static")
     let backend_sound = sound.data().unwrap().backend_id
-    // The stub registers an empty buffer; reload decodes for real even under
-    // the stub, so this row's PCM bytes are honestly nonzero.
     assert(stone_reload_sound(backend_sound, cue))
     let pixels = new_owned_image_data(3, 1)
     let owned = new_owned_image_from_data(pixels)
@@ -396,7 +384,6 @@ fn live_texture_bytes_include_mip_chain_and_canvas_storage() {
         assert(stone_image_storage_size(image) == (7, 5), "accounting uses full-size storage")
         let canvas = new_canvas(13, 7, "rgba8")
         defer { destroy_canvas(canvas) }
-        // RG8 levels are 7x5, 3x2 and 1x1; the canvas has RGBA8 texels.
         assert_eq(stone_get_image_byte_len(image), 84)
         assert_eq(stone_get_live_image_bytes() - images, 70)
         assert_eq(stone_get_live_mip_bytes() - mips, 14)

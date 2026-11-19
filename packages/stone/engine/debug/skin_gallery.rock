@@ -1,13 +1,3 @@
-// Live skin gallery: browse every PNG under the game's assets/ui/,
-// preview it as a UiSkin (9-sliced at several sizes, or whole for
-// fixed-aspect assets) with corner + content guides, and tweak the
-// slice metadata from the keyboard until it looks right. Toggle with
-// Ctrl+U (when debug keys are enabled).
-//
-// Tweaks live in SKIN_GALLERY (a preserved global), so they survive an
-// engine hot reload. Press C to dump every entry's numbers to the log
-// for pasting into the game's skin instances / sg_default_skin below.
-
 const SKIN_GALLERY_REPEAT_DELAY: float = 0.3
 const SKIN_GALLERY_REPEAT_INTERVAL: float = 0.05
 const SG_FIELD_COUNT: int = 7
@@ -41,24 +31,12 @@ pub global SKIN_GALLERY: SkinGalleryState = SkinGalleryState {
     env_checked: false,
 }
 
-// The game seeds the gallery from its own skin globals (unfuck #35), so
-// the gallery previews EXACTLY what the game renders -- no drift between
-// a live Ctrl+U tweak, the gallery defaults, and the game's skin file.
-// Keyed by "<Asset>.png". Seeded skins are shared by reference, so a
-// gallery tweak lands in the game's global too. Games without a skin
-// file fall back to sg_default_skin's generic guess.
 pub global SKIN_GALLERY_SEED: Map<string, Entity<UiSkin>> = map_new()
 
 pub fn skin_gallery_seed(name: string, s: Entity<UiSkin>) {
     SKIN_GALLERY_SEED[name] = s
 }
 
-// Generic guess for a game with no skin file: corner ~ 1/8 of the
-// smaller dim (clamped), pad ~ 0.6 of that -- enough to preview without
-// gross smear. Tune live (C-dump) or add it to a skin file. The old
-// per-asset number tables lived here and drifted against mag's skins
-// (unfuck #35); they are gone, a seeded game's own instances are the
-// single source.
 fn sg_default_skin(img: Image) -> Entity<UiSkin> {
     let d = img.image_dims()
     let c = to_int(clamp(float(min(d.x, d.y)) / 8.0, 8.0, 64.0))
@@ -71,20 +49,10 @@ fn sg_default_skin(img: Image) -> Entity<UiSkin> {
     return ui_skin_create(s)
 }
 
-// Which source the entry list comes from. A game that seeds its skins
-// drives the gallery entirely from them; only a game with no skin file
-// reaches the directory walk. Pure in the seed count so a test can pick
-// the arm directly -- no game in the tree has an assets/ui and no seeds,
-// so the fallback is driven by emptying the seed map instead.
 pub @pure fn sg_seeded_mode(seed_count: int) -> bool {
     return seed_count > 0
 }
 
-// Seeded: the game's own skins, which already hold the image the game
-// loaded and the filter it declared. The gallery loads NOTHING here --
-// walking assets/ui would re-load whatever else lives there under the
-// gallery's own default filter, and a second load cannot redeclare one
-// (mag's splash logos are Linear, so Ctrl+U killed the frame).
 pub fn sg_load_entries(s: SkinGalleryState) {
     let entries: [SkinGalleryEntry] = vec_new()
 
@@ -101,9 +69,6 @@ pub fn sg_load_entries(s: SkinGalleryState) {
         }
         sort(names, n => n)
         for path in names {
-            // Prefer the handle the GAME loaded: the gallery does not own
-            // what it finds in that directory, and a load redeclaring the
-            // filter is a hard error (a Linear splash logo beside the kit).
             let parts = path.split("/")
             let name = parts[parts.len() - 1]
             let img = image_asset_cached(path) ?? load_image_asset(path)
@@ -136,8 +101,6 @@ fn sg_adjust(s: SkinGalleryState, dir: int) {
     else { sk.scale = max(sk.scale + float(dir) * 0.025 * float(step), 0.025) }
 }
 
-// Held-key repeat for left/right value tweaks (edge-press only would
-// make dialing a pad in by 40px unbearable).
 fn sg_adjust_dir(s: SkinGalleryState) -> int {
     if tool_key_pressed(ToolKey::Right) {
         s.repeat_dir = 1
@@ -188,9 +151,6 @@ fn sg_wire_invalidate() {
 fn update_skin_gallery() {
     let s = SKIN_GALLERY
 
-    // Open-during-reload: the wire invalidation above can't rebuild in
-    // place (it would race the game's re-seed), so catch up here. Keep
-    // the cursor -- the selected entry is usually the one being edited.
     if s.enabled && !s.initialized {
         let idx = s.idx
         sg_load_entries(s)
@@ -198,8 +158,6 @@ fn update_skin_gallery() {
         s.initialized = true
     }
 
-    // Headless/screenshot entry: open on startup without a keypress.
-    // "1" just opens; an asset filename opens with that entry selected.
     if !s.env_checked {
         s.env_checked = true
         let env = os_getenv("SKIN_GALLERY")
@@ -253,8 +211,6 @@ fn sg_field_label(sk: UiSkin, f: int) -> string {
     return "scale {sk.scale}"
 }
 
-// One preview: the skin, then guides one z up so they sit above the
-// sprites (same-z sprites draw at order 1, over shape fills).
 fn sg_draw_one(sk: UiSkin, r: UiRect, label: string) {
     r.skin(sk)
     let gz = r.z + 1
@@ -313,10 +269,6 @@ fn sg_draw_list(s: SkinGalleryState, panel: UiRect) {
     if clicked >= 0 { s.idx = clicked }
 }
 
-// Widgets preview: the skin as a live widget set. Button
-// states are force-tinted via skin_button_draw so a headless screenshot
-// shows all four without a cursor; progress bars expose the content-pad
-// fill channel (the acceptance check for the bar-measurement pass).
 fn sg_draw_widgets(sk: UiSkin, area: UiRect) {
     let x = area.x
     let y = area.y

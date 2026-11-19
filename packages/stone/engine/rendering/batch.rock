@@ -7,14 +7,12 @@
 // per key; pooling and parking keep the grown storage afterwards.
 const RENDER_BATCH_DEFAULT_CAP: int = 64
 
-// Stone maps world-surface intent to physical attachments. Automatic follows depth writes.
 pub enum WorldSurfaceOutputs {
     Automatic,
     Receiver,
     ColorAndMaterial,
     ColorMaterialAndNormal,
     ColorAndNormal,
-    // Grass writes coverage/normal first, then identity/material/owner without colour.
     ReceiverMetadata,
 }
 
@@ -41,11 +39,6 @@ pub struct RenderBatch {
     ui_group_base_z: int = 0,
     depth: DepthMode,
 
-    // Fullbright: the color pass binds this as `uUnlit`, and the sprite
-    // shader skips ambient/lights when set. Batch-affecting (part of the
-    // key) so lit and unlit content on the same texture/z/blend never
-    // merge. Additive is unlit by convention; explicit `unlit:` on Alpha
-    // and world text set it too. Replaces the old per-vertex effects bit.
     unlit: bool = false,
 
     // How the color texture is sampled, already resolved: an explicit
@@ -54,13 +47,7 @@ pub struct RenderBatch {
     // one image are two draws.
     sampling: TextureFilter = TextureFilter::Nearest,
 
-    // The normal sheet's resolved sampling. With no override the two textures
-    // each keep their own declared default, so this is not simply `sampling`.
     normal_sampling: TextureFilter = TextureFilter::Nearest,
-    // Filter for the second texture (uSurfaceTex). Nearest by default: a wall
-    // surface map carries per-texel ids and heights. A mark batch samples its
-    // material canvas at the same filter as its colour canvas, or the two
-    // disagree at every edge.
     surface_sampling: TextureFilter = TextureFilter::Nearest,
 
     // This batch's `verts` buffer is owned by the CALLER (a SpriteMesh's
@@ -70,23 +57,11 @@ pub struct RenderBatch {
     // __stone_draw_mesh_vertex path in all three passes -- no FNEW closure
     // to abort the producer/flush trace.
     external_verts: bool = false,
-    // The RENDER_FRAME a mesh row was last submitted in. A mesh row stays in
-    // its pool while its mesh draws every frame, so ~1500 retained meshes do
-    // not retire and rebuild a row each frame; the discard removes a row
-    // whose mesh drew neither this frame nor the previous one. A frame stamp,
-    // not a flag: the world pool is discarded twice per frame.
     mesh_frame: int = -1,
 
-    // Optional normal-map sheet bound as uNormalTex during the color
-    // pass. Batch-affecting (part of the batch key): same color texture
-    // with different normal sheets must not merge. null = the shader's
-    // no-normal path (pixel-identical to pre-normal-map rendering).
     normal: SampledTexture? = null,
 
-    // Optional geometry-derived surface classification sheet. Architecture
-    // meshes use it to mark cap pixels in the visible-id MRT.
     surface: SampledTexture? = null,
-    // Optional custom material input on caller-owned meshes (uAuxiliaryTex).
     auxiliary: SampledTexture? = null,
     material: SampledTexture? = null,
 
@@ -101,10 +76,6 @@ pub struct RenderBatch {
 
     text_batch: bool = false,
 
-    // Eviction bookkeeping. `last_used_frame` is stamped on every ensure
-    // and every Material cached-batch draw; the sweep in clear_batches /
-    // clear_ui_batches removes pool-owned vertex batches idle too long.
-    // Retired rows invalidate cached handles before storage is reused.
     last_used_frame: int = 0,
     pooled: bool = true,
     // The shader's `@uniform` block, packed by `batch_block` and uploaded at
@@ -261,9 +232,6 @@ fn restore_after_custom_draw(target: int, depth: DepthMode, blend: BlendMode) {
     __nb_refresh_views(b.verts)
 """
 
-// Grow past the current capacity by one slot, which the geometric core
-// turns into exactly one doubling. Called from append_vertex when
-// count >= capacity.
 @nomangle inline(lua) fn __grow_vertex_buf(b: RenderBatch) = """
     __ensure_vertex_capacity(b, b.capacity + 1)
 """
@@ -280,10 +248,6 @@ pub global UI_RENDER_ACTIVE_LAST: int = 0
 global UI_RENDER_MESH_LAST: int = 0
 pub global UI_RENDER_SORT_KEYS: [string] = []
 
-// The post-imgui pass. Drawn through the same UI primitives and the same
-// flush as UI_RENDER_BATCHES, just after stone_imgui_render() rather than
-// before it -- so its contents sit above every imgui panel without going
-// through imgui at all.
 pub global OVERLAY_RENDER_BATCHES: RenderBatchPool = render_batch_pool_new()
 pub global OVERLAY_RENDER_VERTS_LAST: int = 0
 global OVERLAY_RENDER_ACTIVE_LAST: int = 0
@@ -291,29 +255,14 @@ global OVERLAY_RENDER_MESH_LAST: int = 0
 
 global UI_BATCH_FAST: Map<int, [string]> = map_new()
 global WORLD_BATCH_FAST: Map<int, [string]> = map_new()
-// Ordered UI containers share this pool without sorting through each other.
 pub global UI_DRAW_GROUP: int = 0
 pub global UI_DRAW_GROUP_BASE_Z: int = 0
 
-// Outline silhouette pool.
-// Outlined geometry is mirrored here, keyed by TEXTURE handle: sprites keep
-// their image while shapes use WHITE_PIXEL. The mask renders depthless through
-// one shader with no blend/z/depth variety, so the sampled texture is the sole
-// batch-affecting field. Its cost tracks #outlined, not scene size. Pooled +
-// truncated each frame like RENDER_BATCHES.
 pub global OUTLINE_MASK_BATCHES: RenderBatchPool = render_batch_pool_new()
-// Snapshot of last frame's total mask-pool vertices, stamped at frame end
-// before the truncate (POOL_BIRTHS_LAST pattern) so a sim can read it across
-// the frame boundary.
 pub global OUTLINE_MASK_VERTS_LAST: int = 0
 
-// Monotonic frame counter, bumped once per frame by run_one_frame
-// (runner.rock). Occurrence keys and the eviction sweep read it.
 pub global RENDER_FRAME: int = 0
 
-// Per-frame occurrence counter for a base batch key. Allocated once at
-// first sight; a frame-stamp mismatch resets `n` in place, so there is
-// no per-frame map churn.
 struct Occ {
     frame: int,
     n: int,
@@ -324,8 +273,6 @@ struct ParametricCursor {
     slot: int,
 }
 
-// base key -> occurrence state. Persistent; keeps uniform VALUES out of
-// pool identity.
 global BATCH_OCC: Map<string, Occ> = map_new()
 
 global PARAMETRIC_BATCH_CURSOR: Map<string, ParametricCursor> = map_new()
@@ -370,9 +317,6 @@ fn parametric_batch_slot(base: string) -> int {
     return cursor.slot
 }
 
-// Pool births (misses) this frame -- the guardrail metric. Reset each
-// frame in run_one_frame; a sustained non-trivial value means a key
-// component is varying per frame (the bug class this plan closes).
 pub global POOL_BIRTHS: int = 0
 global POOL_BIRTHS_LAST: int = 0
 pub global BATCH_KEY_BUILDS: int = 0
@@ -381,11 +325,6 @@ pub global WORLD_BATCH_KEY_BUILDS: int = 0
 global POOL_BIRTH_STREAK: int = 0
 const POOL_BIRTH_WARN_THRESHOLD: int = 2
 
-// Called once per frame (run_one_frame) after the births are captured.
-// Warns only on a sustained streak so first-sight bursts (a new screen's
-// worth of batches) don't cry wolf; log_throttled then caps it to one
-// line per 5s. Converts the next member of the value-in-key bug class
-// from a memprof-session discovery into a log line.
 fn pool_birth_guardrail() {
     if POOL_BIRTHS_LAST > POOL_BIRTH_WARN_THRESHOLD {
         POOL_BIRTH_STREAK = POOL_BIRTH_STREAK + 1
@@ -397,19 +336,12 @@ fn pool_birth_guardrail() {
     }
 }
 
-// Ambient pool override for world-space draws; an inactive scope falls through to
-// RENDER_BATCHES. Set via `with_draw_pool` — avoids threading a pool
-// parameter through every draw_* signature.
 pub global CURRENT_RENDER_POOL: RenderBatchScope = RenderBatchScope {}
 
 pub fn current_render_pool() -> RenderBatchPool {
     return if CURRENT_RENDER_POOL.active() { CURRENT_RENDER_POOL.pool() } else { RENDER_BATCHES }
 }
 
-// The UI-side counterpart, same mechanism: the Target-pixel emission core
-// (px_*, ui_draw_sprite_topleft, queue_ui_text) writes into whichever UI pool
-// is ambient, so `pixel_screen` reaches the composite through the SAME
-// primitives `screen` reaches the window through. Set via `with_ui_pool`.
 pub global CURRENT_UI_POOL: RenderBatchScope = RenderBatchScope {}
 global CURRENT_UI_DRAW_LIST_POOL: RenderBatchScope = RenderBatchScope {}
 
@@ -475,8 +407,6 @@ fn batch_fast_add(cache: Map<int, [string]>, texture: SampledTexture, key: strin
     }
 }
 
-// Redirect world-space draw verbs into `pool` for the extent of `f`.
-// Save/restore nests properly.
 pub fn with_draw_pool(pool: RenderBatchPool, f: fn() -> ()) {
     let prev = CURRENT_RENDER_POOL
     CURRENT_RENDER_POOL = render_batch_scope(pool)
@@ -504,43 +434,11 @@ fn with_ui_pool_for_draw_list(pool: RenderBatchPool, f: fn() -> ()) {
 pub global WHITE_PIXEL: Image? = null
 pub global CUSTOM_DRAW_COUNTER: int = 0
 
-// Shared dummy NativeBuffer for custom_draw batches. Those batches hold
-// a closure (queue_custom_draw) and never push vertices through
-// append_vertex, so their `verts` field is never dereferenced — but
-// every RenderBatch needs one. Reuse one small buffer instead of
-// allocating 56KB per custom_draw batch.
 global __DUMMY_VERTEX_BUF: NativeBuffer<Vertex> = native_buffer_vertex(1)
 
-// Frame reset for the render-batch pool. Vertex-bearing batches are
-// POOLED across frames: the RenderBatch and its (possibly grown)
-// NativeBuffer<Vertex> stay in RENDER_BATCHES; we only truncate
-// (count = 0). Vertices are overwritten in place and only `count` of
-// them are submitted, so stale bytes are never read — no zeroing
-// needed. This makes the vertex storage allocation happen once per
-// batch key *ever seen*, not once per key *per frame*.
-//
-// custom_draw batches are NOT pooled: they hold a per-frame closure +
-// the shared dummy buffer and are keyed by the per-frame
-// CUSTOM_DRAW_COUNTER. Removed every frame, exactly as before.
-//
-// Callers must NOT use `RENDER_BATCHES.len() > 0` to mean "content was
-// queued" — pooled empty batches keep the map non-empty. Use
-// `has_pending_batches()` instead.
-// Eviction cadence: sweep the pooled vertex batches every
-// BATCH_EVICT_INTERVAL frames and drop any idle longer than
-// BATCH_EVICT_IDLE frames. Bounds the pool against abandoned
-// occurrence-slot tails (a draw order that shifts leaves a high-occ slot
-// unproduced) without churning every frame. The evicted batch's vertex
-// storage is parked (below), not dropped.
 pub const BATCH_EVICT_INTERVAL: int = 60
 pub const BATCH_EVICT_IDLE: int = 300
 
-// Vertex storage of swept batches, parked under the batch key. A key drawn
-// again takes its grown buffer back instead of allocating
-// RENDER_BATCH_DEFAULT_CAP and regrowing through every doubling; 300 idle
-// frames is only 1 s at desktop rates, so particle and VFX textures that
-// come and go with casts cycled this constantly. Oldest storage leaves once
-// the total passes the budget (131072 vertices, about 5.5 MiB).
 pub const BATCH_PARKED_VERTEX_BUDGET: int = 131072
 global BATCH_PARKED_VERTS: Map<string, NativeBuffer<Vertex>> = map_new()
 global BATCH_PARKED_ORDER: [string] = []
@@ -559,9 +457,6 @@ fn batch_parked_forget(key: string) {
     }
 }
 
-// Detaches the storage first, so a stale reference that ignores `pooled`
-// and reserves again errors in reserve_vertices instead of writing into
-// the storage's next owner.
 fn batch_park_vertices(key: string, batch: RenderBatch) {
     let buf = batch.verts
     batch.verts = __DUMMY_VERTEX_BUF
@@ -586,12 +481,6 @@ fn batch_take_vertices(key: string) -> NativeBuffer<Vertex> {
     return native_buffer_vertex(RENDER_BATCH_DEFAULT_CAP)
 }
 
-// Remove pool-owned vertex batches idle > BATCH_EVICT_IDLE frames. A
-// batch drawn this frame has last_used_frame == RENDER_FRAME, so it is
-// never eligible. custom_draw / external-vbo batches are removed by the
-// discard (a mesh row once its mesh stops drawing), so they are skipped here. `pooled` is
-// cleared before removal so a Material caching an evicted handle re-ensures
-// instead of drawing into a buffer the flush no longer visits.
 pub fn sweep_idle_batches(pool: RenderBatchPool) {
     static stale: [string] = []
     stale.clear()
@@ -612,13 +501,6 @@ pub fn sweep_idle_batches(pool: RenderBatchPool) {
     }
 }
 
-// Eviction for the texture-keyed mask pools -- OUTLINE_MASK_BATCHES and the
-// ad-hoc ADHOC_MASK_BATCHES. These are excluded from sweep_idle_batches, so
-// without this each dead texture key pins its ~56 KB vertex buffer forever.
-// Same cadence/idle window as the general sweep. Mask batches are plain vertex
-// batches (no custom_draw / external_verts / occurrence slots), so the check is
-// just the idle age;
-// last_used_frame is stamped in ensure_mask_batch_in on create and reuse.
 fn sweep_idle_mask_batches(pool: RenderBatchPool) {
     static stale: [string] = []
     stale.clear()
@@ -634,7 +516,6 @@ fn sweep_idle_mask_batches(pool: RenderBatchPool) {
     }
 }
 
-// What a flush learns about the pool it is truncating.
 pub value BatchPoolFlush {
     verts: int,
     active: int,
@@ -682,10 +563,6 @@ pub fn discard_pool_batches(pool: RenderBatchPool) -> int {
     return discard_pool_batches_counted(pool).mesh
 }
 
-// The silhouette pools (OUTLINE_MASK_BATCHES, ADHOC_MASK_BATCHES).
-// Plain vertex batches -- no custom_draw, no external vbo, no occurrence
-// slots -- so the discard is the truncate. The frame-end caller publishes
-// the returned count; frame-start and ad-hoc callers only discard it.
 fn discard_mask_batches(pool: RenderBatchPool) -> int {
     let verts = 0
     for (_key, batch_row) in pool.entries {
@@ -696,9 +573,6 @@ fn discard_mask_batches(pool: RenderBatchPool) -> int {
     return verts
 }
 
-// True when a pool holds work to render: queued vertices or a custom_draw
-// closure. Pooled empty batches keep the map non-empty, so `.len() > 0` is
-// not this question.
 fn pool_has_pending(pool: RenderBatchPool) -> bool {
     for (_key, batch_row) in pool.entries {
         let batch = batch_row.borrow().unwrap()
@@ -714,31 +588,17 @@ pub fn clear_batches() {
     RENDER_BATCH_VERTS_LAST = world.verts
     RENDER_BATCH_ACTIVE_LAST = world.active
     RENDER_BATCH_MESH_LAST = world.mesh
-    // Outline geometry and styles survive until post-frame retirement: the
-    // detect pass still needs them after this world-batch drain.
     if RENDER_FRAME % BATCH_EVICT_INTERVAL == 0 {
         sweep_idle_batches(RENDER_BATCHES)
         WORLD_BATCH_FAST.clear()
-        // Mask pools use the texture-keyed sweep rather than the general pool.
         sweep_idle_mask_batches(OUTLINE_MASK_BATCHES)
         sweep_idle_mask_batches(ADHOC_MASK_BATCHES)
     }
-    // Mesh batches are truncated -- acquired-mesh buffers are free to
-    // serve this frame's acquires.
     recycle_acquired_meshes()
     CUSTOM_DRAW_COUNTER = 0
 }
 
-// True if any batch has work to render this frame: vertices queued or
-// a custom_draw closure. Replaces the old `RENDER_BATCHES.len() > 0`
-// proxy, which is wrong once batches are pooled (empty pooled batches
-// keep the map non-empty).
 pub fn has_pending_batches() -> bool {
-    // Acquired meshes count as pending even though they are not batches yet:
-    // they materialize inside render_batches (flush_acquired_meshes), so
-    // skipping the flush on an empty pool would drop a frame whose only content
-    // is meshes -- silently, since nothing else reports it. Games that also
-    // emit sprite batches never see it.
     for m in MESH_PENDING {
         if m.count > 0 { return true }
     }
@@ -747,27 +607,6 @@ pub fn has_pending_batches() -> bool {
 
 // TODO: unify batch_key with custom draw
 
-// Scalar core: every draw verb resolves its batch through here with flat
-// fields, no command object. batch_key(texture, render) is a thin
-// RenderProps forwarder for the few callers that still carry one (UI /
-// sprite ensure paths).
-//
-// Key shape: "{target}|{z,pad3}|{order,pad2}|sh{shader}|{texture}|{depth}|{blend}|{snap}".
-// Batches flush in sorted-key order, so within one z the `order` segment
-// is the EXPLICIT paint order; without it, same-z batches sort by texture
-// id — an asset-load-order accident (bitgun HUD nine-patch chrome flipped
-// under its bar fills exactly that way). The shader segment sorts before
-// texture so same-pipeline batches group and the flush switches programs
-// at group boundaries, not per texture ("sh0" = the default shader).
-// The sort prefix EVERY batch key starts with: z layer, then the intra-layer
-// order. Sprite batches, custom draws and sprite meshes land in one pool and
-// are drawn in sorted-key order, so their keys have to agree on this segment
-// or a whole key shape sorts as a block instead of interleaving by layer.
-// One fn rather than three hand-matched format strings -- the third one was
-// carrying a stale constant prefix that sorted every mesh past every sprite.
-// Draw one batch's vertices under its own sampler. The bind/release pair lives
-// in draw_mesh_sampled (rect_batch.rock), shared with the caller-owned rect
-// batches and the immediate draws.
 pub fn draw_batch_mesh(batch: RenderBatch) {
     let result = match batch.texture {
         SampledTexture::Image(image) => {
@@ -792,10 +631,6 @@ pub fn draw_batch_mesh(batch: RenderBatch) {
 // complement arithmetic exact for every supported negative render value.
 const BATCH_KEY_SIGNED_MAX: int = 2147483647
 
-// Map negative fields into a fixed-width bucket before lexical sorting. The
-// complement reverses magnitude, so -2 sorts before -1; `!` sorts before the
-// digit-prefixed nonnegative fields. Nonnegative values retain their existing
-// key bytes and widths.
 fn batch_key_signed_int(n: int, width: int) -> string {
     if n < 0 {
         let complement = BATCH_KEY_SIGNED_MAX + n + 1
@@ -804,11 +639,8 @@ fn batch_key_signed_int(n: int, width: int) -> string {
     return pad_int(n, width)
 }
 
-// Wide enough for any nonnegative int32: UI z runs to five digits (hover
-// cards, veils, badges), and a narrower pad sorts "20000" before "200|".
 const BATCH_KEY_Z_WIDTH: int = 10
 
-// A key's z segment on its own, for code that matches keys by layer.
 pub fn batch_key_z(z_layer: int) -> string {
     return batch_key_signed_int(z_layer, BATCH_KEY_Z_WIDTH)
 }
@@ -817,8 +649,6 @@ pub fn batch_key_prefix(z_layer: int, order: int) -> string {
     return "{batch_key_z(z_layer)}|{batch_key_signed_int(order, BATCH_KEY_Z_WIDTH)}"
 }
 
-// A UI container's batches sort as one block at the container's base z,
-// against ungrouped batches at theirs.
 pub fn batch_key_group_prefix(z_layer: int, order: int, ui_group: int, ui_group_base_z: int) -> string {
     if ui_group <= 0 { return batch_key_prefix(z_layer, order) }
     return "{batch_key_z(ui_group_base_z)}|g{pad_int(ui_group, 8)}|{batch_key_prefix(z_layer, order)}"
@@ -881,8 +711,6 @@ pub fn batch_key_of(
     return "{base}|u#{next_occurrence(base)}"
 }
 
-// An explicit pipeline declares the callback's outputs to the world MRT
-// pass. The callback must bind that shader; an untyped callback stays color-only.
 pub fn queue_custom_draw(
     draw_fn: fn() -> (),
     z_layer: int = DEFAULT_RENDER_LAYER,
@@ -894,11 +722,6 @@ pub fn queue_custom_draw(
     queue_custom_draw_into(current_render_pool(), draw_fn, z_layer, blend, depth, order, pipeline)
 }
 
-// Same as queue_custom_draw but writes into an explicit pool. Used by
-// user-owned DrawLists so their `.custom(fn)` doesn't collide with the
-// engine's shared RENDER_BATCHES map. The CUSTOM_DRAW_COUNTER is still
-// global — that's fine, it only needs to disambiguate keys within a
-// single pool and the counter produces unique strings frame-wide.
 pub fn queue_custom_draw_into(
     pool: RenderBatchPool,
     draw_fn: fn() -> (),
@@ -912,7 +735,6 @@ pub fn queue_custom_draw_into(
     batch.custom_draw = transmute(draw_fn)
 }
 
-// Rows share the custom-draw sequence so paired geometry stays adjacent.
 fn queue_ordered_geometry_row(pool: RenderBatchPool, z_layer: int, blend: BlendMode,
     depth: DepthMode, order: int, pipeline: Pipeline?, sort_key: string? = null) -> RenderBatch {
     CUSTOM_DRAW_COUNTER = CUSTOM_DRAW_COUNTER + 1
@@ -975,7 +797,6 @@ pub fn queue_world_surface_geometry(mesh: GpuMesh, pipeline: Pipeline, bindings:
     batch.surface_outputs = outputs
 }
 
-// pad_int(n, 4) for the per-frame draw counters, built once per value.
 global DRAW_COUNTER_KEYS: [string] = []
 
 fn draw_counter_key(n: int) -> string {
@@ -1085,7 +906,6 @@ fn batch_birth(pool: RenderBatchPool, cache: Map<int, [string]>, key: string,
         last_used_frame: RENDER_FRAME,
     })
     if let pipeline = render.pipeline {
-        // UI borrows its pipeline; world batches retain their uniform block.
         batch.get().unwrap().pipeline = if criteria.ui { pipeline } else { pipeline_owned_in(pipeline, batch.storage()) }
     }
     pool.insert(key, batch)
@@ -1094,7 +914,6 @@ fn batch_birth(pool: RenderBatchPool, cache: Map<int, [string]>, key: string,
     return stored
 }
 
-// Direct optional-texture arguments retain their unboxed calling convention.
 fn batch_resolve(pool: RenderBatchPool, cache: Map<int, [string]>, fast: bool,
                  texture: SampledTexture, criteria: BatchMatch, shared_pipeline: bool,
                  parametric_slot: int? = null, custom_draw: (fn() -> ())? = null,
@@ -1107,7 +926,6 @@ fn batch_resolve(pool: RenderBatchPool, cache: Map<int, [string]>, fast: bool,
     return batch_birth(pool, cache, key, fast, texture, criteria, normal, surface, custom_draw)
 }
 
-// An explicit sampling override applies to both colour and normal textures.
 fn ensure_batch_common(
     texture: SampledTexture,
     z_layer: int,
@@ -1126,9 +944,6 @@ fn ensure_batch_common(
     parametric_slot: int? = null,
 ) -> RenderBatch {
     let pool = current_render_pool()
-    // Resolved BEFORE the key so the key segment is the effective filter, not
-    // an "inherit" sentinel that would sort as its own class against the
-    // custom-draw and sprite-mesh key shapes.
     let eff = resolve_sampling(texture, sampling)
     let eff_normal = if sampling != null || normal == null {
         eff
@@ -1193,12 +1008,6 @@ pub fn get_sorted_batch_keys() -> [string] {
     RENDER_BATCHES.sorted_keys_into(RENDER_BATCH_SORT_KEYS)
 }
 
-// Resolve (or pool-create) a mask batch for a texture in `pool`. Mirrors
-// ensure_batch_of's pooling but keyed by texture handle alone -- the mask
-// pass needs no z/blend/depth/pipeline distinction. blend/depth/z fields are
-// set to inert defaults; the mask pass reads only verts/count/texture. The
-// per-frame outline path passes OUTLINE_MASK_BATCHES; the ad-hoc
-// silhouette-to-canvas primitive passes its own pool (outline.rock).
 fn ensure_mask_batch_in(pool: RenderBatchPool, texture: SampledTexture) -> RenderBatch {
     let key = sampled_texture_key(texture)
     if pool.contains(key) {
@@ -1223,15 +1032,6 @@ fn ensure_mask_batch_in(pool: RenderBatchPool, texture: SampledTexture) -> Rende
     pool.get(key).unwrap()
 }
 
-// Shared geometry + push core: compute a sprite quad's corners / UVs / depth
-// key and push one 6-vert quad into `batch`. The single geometry-math site --
-// the per-frame sprite funnel (add_sprite_vertices_of, main + mask pushes) and
-// the ad-hoc silhouette-to-canvas primitive (push_silhouette_mask_quad,
-// outline.rock) both call this. `pixel_snap` is passed explicitly (not read off
-// `batch`) so the per-frame outlined path can push into a non-snapped mask
-// batch with the SAME snap as its main quad -- byte-identical corners.
-//
-// Scalar fields, not a command object, so hot callers push with no alloc.
 fn emit_textured_quad(
     batch: RenderBatch,
     texture: SampledTexture,
@@ -1282,9 +1082,6 @@ fn emit_sprite_quad(
     pixel_snap: bool,
     colorize: float = 0.0
 ) {
-    // Defaults are intentional fallbacks: callers may legitimately omit
-    // source (== whole image) and dest_size (== source size in world units).
-    // Audit R20 confirmed not-a-bug.
     let source = source ?? full_image_rect(texture)
     let world_size = dest_size ?? sprite_default_world_size(source)
 
@@ -1302,16 +1099,12 @@ fn emit_sprite_quad(
     let right = v(hw * cos_rot, hw * sin_rot)
     let up = v(hh * sin_rot, -hh * cos_rot)
 
-    // Apply pixel snapping to position if enabled
     let pos = if pixel_snap {
-        // Round position to nearest pixel (1/16 world units)
         v(round(pos.x * 16.0) / 16.0, round(pos.y * 16.0) / 16.0)
     } else {
         pos
     }
 
-    // Compute geometric center from anchor pos + pivot.
-    // pivot (0.5, 0.5) = center-anchored (default), (0.5, 1.0) = feet-anchored, etc.
     let c = v(
         pos.x + (0.5 - pivot.x) * world_size.x,
         pos.y + (0.5 - pivot.y) * world_size.y
@@ -1339,20 +1132,11 @@ fn emit_sprite_quad(
     let br = c + rx - uy
     let bl = c - rx - uy
 
-    // Depth key: RAW world anchor y (pos.y + z_off). The shader remaps
-    // against the camera bounds per frame (uYBounds), so vertex data is
-    // camera-independent -- no per-sprite camera_y_bounds here anymore.
     let py = pos.y + z_off
     emit_textured_quad(batch, texture, tl, tr, br, bl, source, tint, py,
         entity_id, colorize)
 }
 
-// Per-frame sprite funnel: push the main quad, and when the sprite is outlined
-// mirror the SAME quad into the per-frame outline mask pool (R1). `outlined` is
-// the explicit signal (draw_sprite's `outline != null`) -- depends on no
-// VertexEffects field, so it survived the outline_size (R3), outline-bit (R4),
-// and effects-channel (R5) removals. The mask push reuses the main quad's
-// pixel_snap so the silhouette corners match the rendered sprite.
 fn add_sprite_vertices_of(
     batch: RenderBatch,
     texture: SampledTexture,
@@ -1377,10 +1161,6 @@ fn add_sprite_vertices_of(
     }
 }
 
-// Mask-only entry for the ad-hoc silhouette-to-canvas primitive (outline.rock):
-// push one sprite's silhouette quad straight into `pool`, no main quad. Shares
-// emit_sprite_quad's geometry with the per-frame funnel. Non-snapped (the mask
-// canvas is its own render target, no pixel grid to align to).
 pub fn push_silhouette_mask_quad(
     pool: RenderBatchPool,
     texture: SampledTexture,
@@ -1400,18 +1180,10 @@ pub fn push_silhouette_mask_quad(
     emit_sprite_quad(mb, texture, pos, source, dest_size, pivot, rotation, flip_x, flip_y, tint, z_off, entity_id, false)
 }
 
-// Reserve n additional vertex slots in the batch. The growth core
-// resolves the whole request to its final geometric capacity in one
-// allocation. Call once before a run of appends (e.g. 6 for a sprite
-// quad) to amortize the check.
 pub @nomangle inline(lua) fn reserve_vertices(batch: RenderBatch, n: int) = """
     __ensure_vertex_capacity(batch, batch.count + n)
 """
 
-// Write one vertex directly into the batch. Grows 2x through the shared
-// helper when at capacity; reserving ahead via reserve_vertices still
-// amortizes the check across a run. entity_id is stored as a float, exact
-// in f32 to 2^24.
 fn append_vertex(
     batch: RenderBatch,
     pos: Vec2,
@@ -1435,10 +1207,6 @@ pub fn full_image_rect(image: SampledTexture) -> IRect {
     irect(0, 0, dims.x, dims.y)
 }
 
-// Scalar core: takes rect fields directly so callers (push_draw_rect et
-// al) skip the RectDrawCommand + DrawCommand::Rectangle heap allocation
-// entirely. Geometry below is unchanged -- only the parameter intake moved
-// off the struct. Mirrors add_sprite_vertices_of.
 pub fn add_rect_vertices_of(
     batch: RenderBatch,
     pos: Vec2,
@@ -1456,30 +1224,22 @@ pub fn add_rect_vertices_of(
     let br = pos + v(hw, hh)
     let bl = pos + v(-hw, hh)
 
-    // Depth key: raw world anchor y, the same convention sprites, circles
-    // and lines use. Callers at DepthMode::Off (nearly all of them) never
-    // read it -- but a depth-tested rect must not sort as if it sat at
-    // world y = 0, which is what a constant here would mean.
     let py = pos.y
 
     let ei = entity_id
 
     if mode == FillMode::Fill {
         reserve_vertices(batch, 6)
-        // Triangle 1: tl, tr, br
         append_vertex(batch, tl, 0, 0, color, py, ei)
         append_vertex(batch, tr, 1, 0, color, py, ei)
         append_vertex(batch, br, 1, 1, color, py, ei)
 
-        // Triangle 2: bl, tl, br
         append_vertex(batch, bl, 0, 1, color, py, ei)
         append_vertex(batch, tl, 0, 0, color, py, ei)
         append_vertex(batch, br, 1, 1, color, py, ei)
     } else {
-        // Outline mode - create a proper rectangle outline with no overlaps
         let thickness = outline_thickness
 
-        // Create inner rectangle vertices
         let inner_hw = max(0, hw - thickness)
         let inner_hh = max(0, hh - thickness)
 
@@ -1490,7 +1250,6 @@ pub fn add_rect_vertices_of(
 
         reserve_vertices(batch, 24)
 
-        // Top edge (outer TL -> outer TR -> inner TR -> inner TL)
         append_vertex(batch, tl, 0, 0, color, py, ei)
         append_vertex(batch, tr, 1, 0, color, py, ei)
         append_vertex(batch, inner_tr, 0.9, 0.1, color, py, ei)
@@ -1499,7 +1258,6 @@ pub fn add_rect_vertices_of(
         append_vertex(batch, inner_tr, 0.9, 0.1, color, py, ei)
         append_vertex(batch, inner_tl, 0.1, 0.1, color, py, ei)
 
-        // Right edge (outer TR -> outer BR -> inner BR -> inner TR)
         append_vertex(batch, tr, 1, 0, color, py, ei)
         append_vertex(batch, br, 1, 1, color, py, ei)
         append_vertex(batch, inner_br, 0.9, 0.9, color, py, ei)
@@ -1508,7 +1266,6 @@ pub fn add_rect_vertices_of(
         append_vertex(batch, inner_br, 0.9, 0.9, color, py, ei)
         append_vertex(batch, inner_tr, 0.9, 0.1, color, py, ei)
 
-        // Bottom edge (outer BR -> outer BL -> inner BL -> inner BR)
         append_vertex(batch, br, 1, 1, color, py, ei)
         append_vertex(batch, bl, 0, 1, color, py, ei)
         append_vertex(batch, inner_bl, 0.1, 0.9, color, py, ei)
@@ -1517,7 +1274,6 @@ pub fn add_rect_vertices_of(
         append_vertex(batch, inner_bl, 0.1, 0.9, color, py, ei)
         append_vertex(batch, inner_br, 0.9, 0.9, color, py, ei)
 
-        // Left edge (outer BL -> outer TL -> inner TL -> inner BL)
         append_vertex(batch, bl, 0, 1, color, py, ei)
         append_vertex(batch, tl, 0, 0, color, py, ei)
         append_vertex(batch, inner_tl, 0.1, 0.1, color, py, ei)
@@ -1588,9 +1344,6 @@ pub fn add_ellipse_vertices_of(
     segments: int = 32,
     compact_native: bool = false
 ) {
-    // Depth key: same convention as sprites (raw world anchor y + z_off,
-    // batch.rock add_sprite_vertices) so depth-tested ellipses sort
-    // against sprites. Callers with DepthMode::Off never read it.
     let py = pos.y + z_off
 
     let ei = entity_id
@@ -1629,16 +1382,6 @@ pub fn add_ellipse_vertices_of(
         }
         if compact { append_fan_range(batch, first, segments) }
     } else {
-        // Outline: ONE ring. Each segment is the quad between the inner and
-        // outer radius at its two angles, so adjacent segments share those two
-        // points exactly. A quad per CHORD instead (add_line_segment, which is
-        // what this was) is perpendicular to its own chord, so neighbours meet
-        // at an angle and cut a V out of the outer edge at every joint --
-        // measured 10px deep on a 108px ring 21.6px thick, i.e. half the ring
-        // gone, 32 times around (circle_outline_ring).
-        //
-        // Thickness stays centred on the radii, the same convention the chord
-        // quads had, so only the notches change.
         let half = thickness * 0.5
         let inner = v(max(radii.x - half, 0.0), max(radii.y - half, 0.0))
         let outer = radii + v(half)
@@ -1667,8 +1410,6 @@ pub fn add_ellipse_vertices_of(
     }
 }
 
-// Filled triangle. UVs are nominal (shape batches use the white pixel);
-// used by the UI carve API's diagonal split.
 pub fn add_triangle_vertices_of(batch: RenderBatch, p1: Vec2, p2: Vec2, p3: Vec2, color: Color) {
     reserve_vertices(batch, 3)
     append_vertex(batch, p1, 0, 0, color, 0.0, 0)
@@ -1685,20 +1426,11 @@ fn add_line_vertices_of(
     entity_id: int,
     z_off: float = 0
 ) {
-    // Depth key: same convention as circles/sprites (add_circle_vertices_of)
-    // so a depth-tested line sorts against sprites instead of always
-    // reading as world y=0 -- callers with DepthMode::Off never read it.
-    // `z_off` is a caller-supplied bias (e.g. a ground decal nudged just
-    // in front of the floor tile it sits on, which shares its exact y).
     let py = (start.y + end.y) * 0.5 + z_off
 
     add_line_segment(batch, start, end, width, color, py, entity_id)
 }
 
-// Flat [x1,y1,x2,y2,..] in, fan-triangulated (convex only) or as a closed
-// outline. Indexes the flat array directly: an intermediate [Vec2] cost a vec
-// plus a Vec2 per point per call, which measured +57% allocation on the
-// immediate polygon path against the Rust builder it replaced.
 fn add_polygon_vertices_of(
     batch: RenderBatch,
     vertices: [float],
@@ -1712,9 +1444,6 @@ fn add_polygon_vertices_of(
 
     let ei = entity_id
 
-    // Depth key: same convention as circles/sprites/lines -- the polygon's
-    // own world position, not a fixed y=0, so DepthMode::TestNoWrite callers
-    // sort correctly.
     let y_sum = 0.0
     for i in 0..(num_points) {
         y_sum += vertices[i * 2 + 1]
@@ -1722,9 +1451,6 @@ fn add_polygon_vertices_of(
     let py = py_override ?? y_sum / num_points as float
 
     if mode == FillMode::Fill {
-        // Fan from vertex 0. UVs map each triangle's own bounds to 0..1; shape
-        // batches draw the white pixel, so they matter only to a custom
-        // pipeline reading TexCoord.
         let cx = vertices[0]
         let cy = vertices[1]
         reserve_vertices(batch, (num_points - 2) * 3)
@@ -1754,9 +1480,6 @@ fn add_polygon_vertices_of(
             append_vertex(batch, v(x3, y3), u3, v3, color, py, ei)
         }
     } else {
-        // Per-edge quads, so the corners notch the same way a circle outline
-        // used to (circle_outline_ring); a polygon corner wants a miter join,
-        // which is a different problem than the circle's shared-radial ring.
         let thickness = 1.0
         reserve_vertices(batch, num_points * 6)
         for i in 0..(num_points) {
@@ -1787,7 +1510,6 @@ fn add_line_segment(
     let perp = v(-dir.y, dir.x) * thickness * 0.5  // Perpendicular vector
     let ei = entity_id
 
-    // Create quad vertices
     let p1 = start - perp
     let p2 = start + perp
     let p3 = end + perp
@@ -1795,12 +1517,10 @@ fn add_line_segment(
 
     reserve_vertices(batch, 6)
 
-    // Triangle 1
     append_vertex(batch, p1, 0, 0, color, py, ei)
     append_vertex(batch, p2, 0, 1, color, py, ei)
     append_vertex(batch, p3, 1, 1, color, py, ei)
 
-    // Triangle 2
     append_vertex(batch, p1, 0, 0, color, py, ei)
     append_vertex(batch, p3, 1, 1, color, py, ei)
     append_vertex(batch, p4, 1, 0, color, py, ei)
@@ -1812,9 +1532,6 @@ pub fn get_shader_handle(shader_name: string) -> int {
     if shader_item != null {
         transmute(shader_item.shader.0)
     } else {
-        // Was d("ERROR: ...") spamming every frame for every draw call. log_once
-        // ensures one diagnostic per missing shader name across the whole run;
-        // callers still get 0 and skip the draw, so behavior is unchanged.
         log_once("RENDER", "shader handle missing for '{shader_name}' (not registered in WATCHER.shaders); draw calls suppressed")
         0
     }
@@ -1840,28 +1557,18 @@ pub fn render_batches(after_scene: bool = false) {
     let previous_canvas = CURRENT_CANVAS_HANDLE
     RENDER_BATCH_FLUSHES = RENDER_BATCH_FLUSHES + 1
     if !after_scene { POST_SCENE_BATCHES_PENDING = false }
-    // Reset the inspector's per-frame captures at the first pipeline step
-    // (no-op unless the window is open). Both world phases contribute
-    // to the same inspector frame.
     if !after_scene { pipeline_inspector_frame_begin() }
 
-    // Materialize this frame's acquired meshes into pool batches BEFORE
-    // the key sort -- their counts snapshot here (mesh_pool.rock).
     if !after_scene {
         flush_acquired_meshes()
         run_world_prepare_passes()
     }
 
-    // The color pass below is the frame's only id writer, and the outline
-    // detect pass reads the result afterwards (post_processing). Reset before
-    // the view bail-out: a frame that renders nothing wrote no ids either, and
-    // ran no silhouette mask pass to leave a stale mask flag behind.
     if !after_scene {
         outline_ids_written = false
         outline_mask_written = false
     }
 
-    // This frame's resolved world transform, from the one render view.
     let view = RENDER_VIEW ?? return
     let cam_scale = view.world_to_scene_scale
     let cam_offset = camera_offset_in(view)
@@ -1871,18 +1578,6 @@ pub fn render_batches(after_scene: bool = false) {
     if !after_scene { with_canvas(
         screen_canvas,
         () => {
-            // R6 (MRT): [ATTACHMENT0=color, ATTACHMENT1=id]. glClear covers only
-            // the color attachment -- on the R32I id attachment glClear is
-            // undefined per spec, so the per-frame id reset is an explicit
-            // glClearBufferiv on draw buffer 1. Draw buffers reset to [0] at
-            // color-pass exit so later renders into screen_canvas (mag scene/
-            // composite passes) can't clobber the id. Skipped entirely when the
-            // MRT attach failed: the FBO has no attachment 1, so enabling draw
-            // buffer 1 would make it incomplete and drop every draw.
-            // The surface-owner target clears here, with the id, instead of in a
-            // clear-only pass of its own: it is an attachment of this FBO, so
-            // naming it in the clear list costs one more glClearBufferiv rather
-            // than a whole second full-screen pass over the same texels.
             let owner_attached = mrt_id_attached && world_surface_owner_canvas != null
             if mrt_id_attached {
                 stone_set_draw_buffer_mask(
@@ -1890,9 +1585,6 @@ pub fn render_batches(after_scene: bool = false) {
             }
             clear_screen(0, 0, 0, 0)
             if mrt_id_attached { stone_clear_canvas_int(1, 0) }
-            // glClear is undefined on an integer buffer, so the owner takes its
-            // own glClearBufferiv exactly as the id does. Draw buffer 4, because
-            // the mask leaves 2 and 3 as GL_NONE and the index is positional.
             if owner_attached { stone_clear_canvas_int(4, 0) }
             stone_clear_depth(1.0)
         }
@@ -1901,13 +1593,6 @@ pub fn render_batches(after_scene: bool = false) {
     with_shader(
         sprite_batch_shader,
         () => {
-            // Bind the render target BEFORE building the camera projection.
-            // The engine block's ortho is sized to the currently-bound target; with
-            // FBO 0 still bound it builds a window-sized projection while the world
-            // actually renders into screen_canvas (the internal render resolution
-            // when a pixel-art target is active), squishing a full window's worth
-            // of world into the smaller buffer -> ~Nx zoom-out. Latent until the
-            // buffer stopped being window-sized.
             set_canvas(screen_canvas)
             if let capture = UNIFORM_BLOCK_DUMP_STAGE_HOOK {
                 if let canvas = screen_canvas { capture(if after_scene { "late_begin" } else { "main_begin" }, canvas) }
@@ -1930,16 +1615,9 @@ pub fn render_batches(after_scene: bool = false) {
             let yb = camera_y_bounds()
             setup_world_pass_shader(sprite_batch_shader, cam_offset, cam_scale, yb)
 
-            // Color-pass program for the current batch group. Batch keys
-            // carry a shader segment sorted before texture, so same-pipeline
-            // batches are contiguous within a (target, layer, order) group
-            // and switches happen at group boundaries only.
             let active_shader = sprite_batch_shader
             let current_depth = DepthMode::Off
 
-            // Blend analogue of the depth tracker: the key's blend segment
-            // groups batches, this applies the group's mode. Restored to the
-            // caller's mode after the loop (CURRENT_BLEND shadow).
             let entry_blend = CURRENT_BLEND
             let current_blend = entry_blend
 
@@ -1960,8 +1638,6 @@ pub fn render_batches(after_scene: bool = false) {
                     continue
                 }
 
-                // Record before the custom/empty continues so the inspector
-                // sees every batch (guarded: pure branch when window closed).
                 if ENGINE.show_pipeline_inspector {
                     pipeline_inspector_record_batch(batch)
                 }
@@ -1974,16 +1650,10 @@ pub fn render_batches(after_scene: bool = false) {
                 if batch.blend != current_blend {
                     set_blend_mode(batch.blend)
                     current_blend = batch.blend
-                    // The global gl.enable(BLEND) this issues cannot corrupt the
-                    // id attachment: blending is ignored on integer (R32I) color
-                    // buffers per spec (picker_blend_id_overwrite pins this).
                 }
 
-                // Only declared integer MRT outputs may write IDs. Explicit surface
-                // writers can label depth-off background receivers before occluders.
                 if mrt_id_attached {
                     let outputs = batch.surface_outputs
-                    // Overlays preserve the picking ID and surface owner beneath them.
                     let overlay = outputs == WorldSurfaceOutputs::ColorAndMaterial
                         || outputs == WorldSurfaceOutputs::ColorMaterialAndNormal
                     let write_material = !after_scene && batch.custom_draw == null && overlay
@@ -2033,7 +1703,6 @@ pub fn render_batches(after_scene: bool = false) {
                         _ => draw_buffers,
                     }
                     if !write_id_set || draw_buffers != current_draw_buffers {
-                        // Attachment masks preserve underlying receiver channels during overlays.
                         stone_set_draw_buffer_mask(draw_buffers)
                         current_draw_buffers = draw_buffers
                         write_id_set = true
@@ -2080,8 +1749,6 @@ pub fn render_batches(after_scene: bool = false) {
                     active_shader = want
                 }
 
-                // Per-batch uniforms on the now-active program, right before
-                // the draw.
                 apply_batch_uniforms(active_shader, batch)
 
                 bind_batch_samplers(active_shader, batch)
@@ -2101,9 +1768,6 @@ pub fn render_batches(after_scene: bool = false) {
 
                 if UNIFORM_BLOCK_DUMP_ON { stone_mesh_capture_arm(after_scene) }
 
-                // Direct push/pop — see the outline-target site below for
-                // why the trailing-closure form is a per-iteration UCLO
-                // abort. gl_push/pop are empty inline(lua) no-ops.
                 gl_push_debug_group(key)
                 draw_batch_mesh(batch)
                 if UNIFORM_BLOCK_DUMP_ON {
@@ -2126,8 +1790,6 @@ pub fn render_batches(after_scene: bool = false) {
             }
 
             if active_shader != sprite_batch_shader {
-                // Re-bind the default program so the bracket unwinds from
-                // the state it set up.
                 set_shader(sprite_batch_shader)
             }
 
@@ -2135,41 +1797,15 @@ pub fn render_batches(after_scene: bool = false) {
             // can't leak to other passes; mask back on so a future MRT clear works.
             // All no-ops when the MRT attach failed (nothing was toggled).
             if mrt_id_attached {
-                // Drop screen_canvas back to single-output [ATTACHMENT0] (per-FBO
-                // state, screen_canvas still bound here) so scene/composite passes
-                // that render into it write only color, never the id attachment.
                 stone_set_draw_buffer_mask(DRAW_BUFFERS_COLOR_ONLY)
             }
 
-            // Reset camera transform to identity
             reset_camera()
         }
     )
 
-    // Entity id is written by the color pass itself now (R6, MRT): draw buffer
-    // 1 = visible_id_canvas's texture, gated to depth-writing or explicitly
-    // opted-in batches whose pipeline declares the integer surface output.
-    // Each pixel holds the visible entity's id by construction -- it resolves
-    // against the color pass's own depth buffer, no second traversal.
-
-    // Outline target mask pass. Draws ONLY the ad-hoc OUTLINE_MASK_BATCHES
-    // pool -- this frame's outlined sprites (populated in
-    // add_sprite_vertices_of) -- instead of re-submitting the whole scene with
-    // a per-fragment aOutlineSize discard. Cost tracks #outlined, ~0 idle
-    // (only the canvas switch + clear run). The ad-hoc silhouette-to-canvas
-    // primitive (outline.rock) reuses the same core with its own pool/target.
     if !after_scene {
-        // Before the draw, and before clear_batches truncates the pool: the
-        // detect pass scissors to this frame's silhouettes, and the pool is
-        // the only place that has seen every push into it.
         stamp_outline_mask_bounds(OUTLINE_MASK_BATCHES)
-        // Nothing outlined: the pass would bind the canvas twice and clear a
-        // scene-sized R32I that nothing reads, because the detect pass is
-        // gated on the mask having content (ab12ec0dde). The target is cleared
-        // once where it is created (create_render_canvases), so skipping the
-        // pass leaves it empty rather than undefined. The forced diagnostic
-        // scan is the exception -- it scans an empty mask on purpose, so it
-        // needs the clear.
         if pool_has_pending(OUTLINE_MASK_BATCHES) || outline_force_scan() {
             profile_begin("outline_target_mask")
             outline_mask_written = render_silhouette_mask(
@@ -2188,15 +1824,6 @@ pub fn render_batches(after_scene: bool = false) {
     }
 }
 
-// Render a texture-keyed mask pool as a depthless entity-id silhouette into
-// `target`, through outline_target_shader with the given world camera. The
-// per-frame outline path (OUTLINE_MASK_BATCHES -> outline_target_canvas) and
-// the ad-hoc silhouette-to-canvas primitive both call this. Clears `target`
-// first so a now-un-outlined entity leaves no stale silhouette. Depth is off:
-// an outlined sprite's full shape writes even where it is occluded.
-// Returns how many of the pool's batches actually drew, so the per-frame
-// caller can tell an empty mask from a populated one without walking the pool
-// a second time (`outline_mask_written`).
 pub fn render_silhouette_mask(
     pool: RenderBatchPool,
     target: Canvas,
@@ -2207,8 +1834,6 @@ pub fn render_silhouette_mask(
     with_canvas(
         target,
         () => {
-            // R32I mask: glClear is undefined on integer buffers, clear via
-            // glClearBufferiv.
             stone_clear_canvas_int(0, 0)
 
             with_shader(
@@ -2248,8 +1873,6 @@ pub fn render_silhouette_mask(
 // Separate batch queue for screen-space UI (used during @late_draw).
 // Same vertex format as world batches, rendered with identity camera.
 
-// Total queued vertices in a UI pool. The observable that separates "flushed
-// the pool it rendered" from "flushed a pool" -- read by the isolation gate.
 pub fn ui_pool_vert_count(pool: RenderBatchPool) -> int {
     let n = 0
     for (_key, batch_row) in pool.entries {
@@ -2270,10 +1893,6 @@ pub fn batch_pool_active_count(pool: RenderBatchPool) -> int {
     return n
 }
 
-// `pool` is the pool that was just rendered. It has to be, not
-// UI_RENDER_BATCHES: the overlay pass renders OVERLAY_RENDER_BATCHES, and a
-// fixed global here would truncate and evict the MAIN pool a second time
-// mid-frame while the pool it actually drew grew forever unswept.
 pub fn clear_ui_batches(pool: RenderBatchPool = UI_RENDER_BATCHES) {
     let flush = discard_pool_batches_counted(pool)
     if render_batch_pool_same(pool, UI_RENDER_BATCHES) {
@@ -2310,12 +1929,6 @@ pub fn ensure_ui_batch(
     }, shared_pipeline, parametric_slot)
 }
 
-// Batched screen-space textured-sprite push. Bypasses add_sprite_vertices_of
-// (which Y-flips UVs for Y-up world); UI is Y-down so we use straight
-// Y-down UV orientation: TL(x,y) -> (u0,v0), BR(x+w,y+h) -> (u1,v1).
-// Queues into UI_RENDER_BATCHES so all sprites sharing a texture +
-// z-layer flush as one draw call -- one draw for the set, rather than the
-// per-sprite immediate submit a UI path would otherwise reach for.
 pub fn ui_draw_sprite_topleft(
     image: SampledTexture,
     pos: Vec2,
@@ -2329,7 +1942,6 @@ pub fn ui_draw_sprite_topleft(
     rotation: float = 0.0,
     sampling: TextureFilter? = null,
 ) -> RenderBatch {
-    // Get a correctly-keyed batch (same pipeline, same texture, same z).
     let batch = ensure_ui_batch(image, RenderProps {
         z_layer: z_layer,
         order: order,
@@ -2374,12 +1986,6 @@ fn ui_draw_sprite_quad(
     return batch
 }
 
-// Push one textured quad into an EXISTING batch.
-//
-// Split out of `ui_draw_sprite_topleft` so a multi-quad widget fills ONE batch:
-// a pipeline batch takes an occurrence SLOT per key lookup, so a nine-patch
-// drawn through a custom pipeline was nine batches and nine draws, and a uniform
-// block packed onto it had nine owners to fill instead of one.
 pub fn ui_push_sprite_topleft(
     batch: RenderBatch,
     image: SampledTexture,
@@ -2502,14 +2108,12 @@ fn __ui_sprite_push(
     let buf = batch.verts
     let x2 = x + w
     let y2 = y + h
-    // Tri 1: TL, TR, BR (Y-down screen space, no UV flip)
     __vertex_check_span(buf, ci, 6)
     let cursor = __vertex_float_view(buf, ci * vertex_stride(buf))
     let step = __vertex_stride_unit(buf)
     cursor = __write_vertex(cursor, step, x,  y,  u0, v0, r, g, b, a, colorize: parametric_index)
     cursor = __write_vertex(cursor, step, x2, y,  u1, v0, r, g, b, a, colorize: parametric_index)
     cursor = __write_vertex(cursor, step, x2, y2, u1, v1, r, g, b, a, colorize: parametric_index)
-    // Tri 2: TL, BR, BL
     cursor = __write_vertex(cursor, step, x,  y,  u0, v0, r, g, b, a, colorize: parametric_index)
     cursor = __write_vertex(cursor, step, x2, y2, u1, v1, r, g, b, a, colorize: parametric_index)
     cursor = __write_vertex(cursor, step, x,  y2, u0, v1, r, g, b, a, colorize: parametric_index)
@@ -2527,15 +2131,10 @@ pub fn setup_ui_pass_shader(
     projection_extent: Vec2? = null,
     convention: TargetConvention = TargetConvention::Direct
 ) {
-    // Screen space: identity view, pixel ortho on the bound target.
     reset_camera()
     set_engine_uniforms(shader, v(0.0, 1.0), convention, extent: projection_extent)
 
-    // UI colour inputs remain display-space, independent of the world colour policy.
     let u = ui_frag_uniforms()
-    // One lookup, not two: `if present { set }` repeats the fingerprint search
-    // that `set_uniform_block` does anyway, which is the form the macro's own
-    // note warns against.
     set_uniform_block_if_present(shader, u)
 
 }
@@ -2567,10 +2166,6 @@ fn render_ui_batches_gl(
             current_blend = batch.blend
         }
 
-        // screen.custom() closures run here: identity camera bound,
-        // after post-processing, z-ordered against the other UI keys.
-        // Their contract predates pipelines -- restore the default
-        // program first so a preceding pipeline batch can't leak in.
         if batch.custom_draw != null {
             if UI_SUBMISSION_PROBE_ON { UI_SUBMISSION_PROBE_BATCH_HOOK.unwrap()(key, batch, sprite_batch_shader, projection_extent) }
             if active_shader != sprite_batch_shader {
@@ -2606,7 +2201,6 @@ fn render_ui_batches_gl(
             continue
         }
 
-        // Per-batch uniforms on the now-active program, right before the draw.
         profile_begin("screen.ui_flush.render_batches.uniforms")
         apply_batch_uniforms(active_shader, batch)
         profile_end("screen.ui_flush.render_batches.uniforms")
@@ -2631,15 +2225,11 @@ fn render_ui_batches_gl(
     }
 }
 
-// `pool` is the UI pool to flush. It defaults to the main one; the runner
-// passes OVERLAY_RENDER_BATCHES for the pass that draws AFTER imgui.
 pub fn render_ui_batches(
     pool: RenderBatchPool = UI_RENDER_BATCHES,
     projection_extent: Vec2? = null,
     convention: TargetConvention = TargetConvention::Direct
 ) {
-    // Pooled empty batches keep the map non-empty (same trap as
-    // has_pending_batches for the world pool) -- check for actual work.
     let has_work = false
     for (_key, batch_row) in pool.entries {
         let batch = batch_row.borrow().unwrap()

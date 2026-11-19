@@ -1,7 +1,3 @@
-// Sprite-mesh and custom-draw batch rows across frame discards. A mesh drawn
-// every frame keeps its row and key; a mesh that stops drawing leaves the pool
-// at the next discard; flush order stays the per-frame submission order.
-
 fn mesh_batch_retention_test_mesh(z: int) -> SpriteMesh {
     let mesh = SpriteMesh {
         vbo: native_buffer_vertex(6),
@@ -25,8 +21,6 @@ fn mesh_batch_retention_key(z: int, counter: int) -> string {
     return "{batch_key_prefix(z, 0)}|sh0|mesh_{pad_int(counter, 4)}|{batch_key_state(DepthMode::Off, BlendMode::Alpha, false, TextureFilter::Nearest)}"
 }
 
-// The engine discards the world pool twice per frame: clear_batches after the
-// previous frame's flush, then the frame-start discard.
 fn mesh_batch_retention_frame(pool: RenderBatchPool, meshes: [SpriteMesh]) {
     discard_pool_batches(pool)
     RENDER_FRAME += 1
@@ -116,8 +110,6 @@ fn mesh_batch_retention_single_key(pool: RenderBatchPool, mesh: SpriteMesh) -> s
     return keys[0]
 }
 
-// Each key input on its own, so a cache check that skips one input keeps the
-// old key.
 @test
 fn each_key_input_change_rebuilds_the_mesh_key() {
     let pool = render_batch_pool_new()

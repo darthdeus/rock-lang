@@ -1,8 +1,3 @@
-// Who owns DEFAULT_FONT.
-//
-// GameConfig and runtime-selected game fonts go through declare_game_font;
-// unload_font clears a retired current handle.
-//
 pub value FontSpec {
     path: string,          // already asset_path-resolved
     size: int,
@@ -15,8 +10,6 @@ pub value FontSpec {
 
 pub global FONT_SPEC_CACHE: Map<string, Font> = map_new()
 
-// The key carries the whole policy, not just the path: the same file loaded
-// under different raster, sampling or face policies is a different atlas.
 fn font_spec_key(spec: FontSpec) -> string {
     let smp = if spec.sampling == TextureFilter::Nearest { "n" } else { "l" }
     let ras = if spec.raster == FontRasterPolicy::Fixed { "f" } else { "d" }
@@ -28,10 +21,6 @@ fn font_spec_key(spec: FontSpec) -> string {
 pub fn font_for_spec(spec: FontSpec) -> Font? {
     let key = font_spec_key(spec)
     if let existing = FONT_SPEC_CACHE.get(key) {
-        // Every unload removes the registry entity, so a cached font with no
-        // entity is stale: evict it and reload instead of handing out a dead
-        // handle. A coverage release keeps the entity (and the native face),
-        // so it still hits here.
         if existing.data() != null { return existing }
         FONT_SPEC_CACHE.remove(key)
     }

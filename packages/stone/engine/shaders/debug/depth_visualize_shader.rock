@@ -1,9 +1,3 @@
-// Grayscale depth preview (`draw_depth_buffer_preview`, debug.rock). Gamma-curves the
-// sampled depth so near-flat depth ranges stay visually separable.
-//
-// Compiled in-game via `rock_shader(depth_visualize_frag)` (single-arg
-// fullscreen form).
-
 // The world pass's own depth attachment, bound by
 // `shader_bind_canvas_depth(depth_visualize_shader, "depth_tex", screen_canvas)`.
 // A `@textures` slot rather than a loose sampler, so an unbound preview fails
@@ -15,8 +9,6 @@ struct DepthTex {
 
 @shader(fragment)
 fn depth_visualize_frag(@textures t: DepthTex, tc: Vec2) -> Vec4 {
-    // A DEPTH_COMPONENT texture reads its stored value in .x; the other
-    // components are (0, 0, 1) and mean nothing.
     let depth = texture(t.depth_tex, tc).x
 
     let visualized = pow(depth, 2.2)

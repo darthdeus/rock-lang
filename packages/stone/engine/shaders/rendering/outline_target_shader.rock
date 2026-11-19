@@ -27,9 +27,6 @@ fn outline_target_vert(@attr a: Vertex, @engine e: EngineU) -> OutlineTargetVary
 
 @shader(fragment)
 fn outline_target_frag(vary: OutlineTargetVary, @textures t: MainTex) -> int {
-    // Every draw in the pool is outlined; only guard the id (the detect
-    // shader needs it per-pixel) and the texture's own alpha. The target is
-    // an R32I mask canvas -- the id is the whole output.
     if vary.EntityId <= 0.0 {
         discard()
     }

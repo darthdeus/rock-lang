@@ -1,5 +1,3 @@
-// A frame over the stall threshold names its sections from the per-frame
-// section history, by the frame number the perf record carries.
 fn perf_stall_sections_frame(update_s: float, child_s: float, render_s: float) {
     profile_frame_begin()
     profile_begin("stall.update")
@@ -45,7 +43,6 @@ fn perf_stall_sections_entry(_which: int) {
     perf_scenario_wait("synthetic")
     perf_scenario_window("fighting", 1, 3)
     perf_scenario_ready("synthetic")
-    // Frame 10 is the single warmup frame; its stall must not be exported.
     perf_outer_frame_boundary(10, 0.0)
     perf_stall_sections_frame(0.040, 0.030, 0.001)
     assert(!PROFILER.warmup_active, "the declared warmup frame completed")
@@ -78,7 +75,6 @@ fn perf_stall_sections_entry(_which: int) {
     assert_eq(json_as_int(json_field(sections[0], "depth").unwrap()).unwrap(), 0)
     assert_eq(json_as_int(json_field(sections[1], "depth").unwrap()).unwrap(), 1)
 
-    // A record whose frame has no history sample cannot name sections.
     SECTION_HISTORY_FIRST_FRAME = 13
     let misaligned = perf_stall_sections_report()
     assert_eq(json_as_bool(json_field(misaligned, "complete").unwrap()).unwrap(), false)

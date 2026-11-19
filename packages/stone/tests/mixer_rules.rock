@@ -1,9 +1,3 @@
-// The mixer desk owns strip derivation and meter math: applied gain is
-// derived from gain/mute/solo rather than stored, and the meter maps
-// amplitude to bar position on a dB scale. bus_routing keeps only the wiring
-// (bus gains land, ducks fire, peaks read); the derivation itself is pinned
-// here, beside the Stone engine that owns it.
-
 @test
 fn mixer_meter_maps_unity_half_and_clip() {
     assert(abs(mixer_meter_norm(1.0) - 1.0) < 0.0001,

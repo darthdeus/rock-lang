@@ -8,7 +8,6 @@ pub struct WorldTextColumn {
 
 pub struct WorldTextRow {
     columns: [WorldTextColumn],
-    // Lets a caller fold a later value into this row instead of adding one.
     merge_key: string = "",
     amount: float = 0.0,
 }
@@ -103,12 +102,7 @@ const WORLD_TEXT_SIDE_ROW_GAP_PX: float = 1.0
 const WORLD_TEXT_SIDE_COLUMN_GAP_PX: float = 2.0
 pub const WORLD_TEXT_SIDE_FLIGHT_SECS: float = 0.18
 const WORLD_TEXT_COMPOSITION_RESPONSE: float = 12.0
-// Output-raster world text stays crisp, but belongs behind every screen-space
-// UI surface in the shared z-sorted pool.
 pub const WORLD_TEXT_Z_LAYER: int = -1
-// Narration is a scene caption, not transient combat feedback. Its plate and
-// type sit above entity bars while ordinary world text keeps the shared
-// behind-UI ordering.
 pub const WORLD_TEXT_NARRATION_PLATE_Z: int = 1
 pub const WORLD_TEXT_NARRATION_TEXT_Z: int = 2
 
@@ -377,8 +371,6 @@ fn world_text_row_offsets(layouts: [WorldTextRowLayout]) -> [float] {
     return offsets
 }
 
-// Replaces a live display's rows and the plain spans that describe them,
-// keeping its age, position and animation.
 pub fn world_text_set_rows(c: WorldTextDisplay, rows: [WorldTextRow], spans: [TextSpan]) {
     c.rows = rows
     c.row_layouts = world_text_row_layouts(rows, c.font_size)
@@ -664,7 +656,6 @@ fn update_world_text() {
     }
 }
 
-// Animation and pulse scale over the display's base font size.
 pub fn world_text_present_scale(c: WorldTextDisplay, sample: WorldTextSample) -> float {
     let pulse_scale = 1.0
     if c.style != WorldTextStyle::CastWord

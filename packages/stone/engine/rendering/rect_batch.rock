@@ -1,20 +1,4 @@
-// Batched rect drawing via NativeBuffer + stone_draw_mesh.
-//
-// RectBatch is a caller-owned primitive: push screen-space rects with one
-// texture and blend mode, then flush when ready. For general UI use the
-// z-sorted UI_RENDER_BATCHES pool instead (screen.rect / UiRect carve).
-//
-// Semantics note: DEFERRED. Calls do not reach the GPU until a flush.
-// For immediate-mode draws (canvas switches, shader changes, pixel
-// readback) use draw_rect_immediate / draw_circle_immediate /
-// draw_line_immediate (draw.rock) -- they build verts engine-side and
-// submit via stone_draw_mesh before returning.
-
 pub const RECT_BATCH_VERTS_PER_RECT: int = 6
-
-// The one-draw camera clear lives in engine_uniforms.rock
-// (begin/end_cleared_camera), which owns the stash slot this flush used to
-// keep here as `RECT_BATCH_SAVED_VIEW`.
 
 // THE sprite vertex layout. One owner: this field order IS the GPU attribute
 // layout, for the CPU writers here, for the GL binding (derived per draw via
@@ -36,9 +20,6 @@ pub @nomangle value Vertex {
     pivot_y: f32,
     entity_id: f32,
     colorize: f32,
-    // A per-primitive anchor a game's shader may compare against, such as the
-    // footprint corner of the wall section the vertex belongs to. Writers that
-    // need it stamp it after emission; everything else leaves it zero.
     section: Vec2f = Vec2f { x: 0.0, y: 0.0 },
 }
 
@@ -174,9 +155,6 @@ pub struct RectBatch {
     sampling: TextureFilter? = null,
 }
 
-// Allocate a new batch sized for `capacity` rects. Safe to call at module
-// load — does not require Stone to be initialized. Texture defaults to 0
-// (white pixel), resolved lazily on first flush.
 pub fn rect_batch_new(capacity: int, sampling: TextureFilter? = null,
     target: Canvas? = null, convention: TargetConvention = TargetConvention::PresentSource,
     blend: BlendMode = BlendMode::Alpha) -> RectBatch {
@@ -193,8 +171,6 @@ pub fn rect_batch_new(capacity: int, sampling: TextureFilter? = null,
     }
 }
 
-// Variant that binds a specific texture. Don't pass Image(0) (reserved
-// sentinel for "use white pixel"); use rect_batch_new() for the default.
 pub fn rect_batch_new_textured(capacity: int, texture: SampledTexture,
     sampling: TextureFilter? = null, target: Canvas? = null,
     convention: TargetConvention = TargetConvention::PresentSource,
@@ -212,8 +188,6 @@ pub fn rect_batch_new_textured(capacity: int, texture: SampledTexture,
     }
 }
 
-// `capacity` counts rects; the buffer holds RECT_BATCH_VERTS_PER_RECT each.
-// Preserve emitted vertices before the caller appends the next rectangle.
 @nomangle fn __grow_sprite_mesh_buf(m: SpriteMesh) {
     let new_cap = max(m.capacity * 2, 1)
     let target = native_buffer_vertex(new_cap * RECT_BATCH_VERTS_PER_RECT)
@@ -221,9 +195,6 @@ pub fn rect_batch_new_textured(capacity: int, texture: SampledTexture,
     m.capacity = new_cap
 }
 
-// Both the ordinary append and a compiler-approved early call use this exact
-// growth step once. The tail writers never repeat it after callbacks run.
-// For each append below: append(m, args) == tail(prepare(m), args).
 fn __sprite_mesh_prepare_append(m: SpriteMesh) -> SpriteMesh {
     if m.count >= m.capacity * RECT_BATCH_VERTS_PER_RECT {
         __grow_sprite_mesh_buf(m)
@@ -231,8 +202,6 @@ fn __sprite_mesh_prepare_append(m: SpriteMesh) -> SpriteMesh {
     return m
 }
 
-// Reserve additional quads before computing float-heavy append arguments.
-// Pick the final geometric capacity first so a bulk request copies only once.
 pub fn reserve_quads(m: SpriteMesh, n: int) {
     let requested = m.count + n * RECT_BATCH_VERTS_PER_RECT
     if requested <= m.capacity * RECT_BATCH_VERTS_PER_RECT { return }
@@ -290,8 +259,6 @@ pub @pure fn vert(
 // Reuse the compiler's cached float view instead of casting another cdata.
 @inline inline(lua) fn __vertex_float_view(buf: NativeBuffer<Vertex>, at: int) -> Ptr<float> = 'return buf.__vf + at'
 
-// Keep these stores in Vertex field order; vertex_writer_bytes compares them
-// against typed stores, including every default-zero tail lane.
 @nowrite @inline inline(lua) fn __write_vertex(
     p: Ptr<float>, step: float,
     x: float, y: float, u: float, v_: float,
@@ -314,8 +281,6 @@ pub @pure fn vert(
     return p + step * 13
 """
 
-// Push one colored rect. Two triangles, 6 vertices.
-// Grows the buffer 2x if the batch is at capacity.
 pub fn rect_batch_push(b: RectBatch,
     x: float, y: float, w: float, h: float,
     r: float, g: float, bl: float, a: float,
@@ -329,9 +294,6 @@ pub fn rect_batch_push(b: RectBatch,
     b.count = b.count + RECT_BATCH_VERTS_PER_RECT
 }
 
-// The one RectBatch quad writer: corners TL, TR, BR, BL as two triangles
-// (TL, TR, BR) and (TL, BR, BL). Untextured pushes sample the white pixel at
-// uv 0.5.
 fn __rect_batch_push_textured_quad4(
     buf: NativeBuffer<Vertex>, vi: int,
     tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2,
@@ -349,11 +311,6 @@ fn __rect_batch_push_textured_quad4(
     cursor = __write_vertex(cursor, step, bl.x, bl.y, u1, v2, r, g, b, a)
 }
 
-// Push one textured rect with atlas UVs. Same geometry as rect_batch_push
-// but samples the bound texture instead of the white pixel. V is NOT flipped
-// here — pass v1/v2 in whatever orientation matches your texture; for the
-// standard sprite shader with Y-up world space you typically want
-// V(top) < V(bottom) swapped.
 pub fn rect_batch_push_textured(b: RectBatch,
     x: float, y: float, w: float, h: float,
     u1: float, v1: float, u2: float, v2: float,
@@ -398,9 +355,6 @@ fn __rect_batch_push_triangle_verts(
     cursor = __write_vertex(cursor, step, x3, y3, 0.5, 0.5, r, g, bl, a)
 }
 
-// Push one colored triangle. Three vertices in any winding order
-// (back-face culling is off for 2D). Grows the buffer 2x if the batch
-// doesn't have room for 3 more verts.
 pub fn rect_batch_push_triangle(b: RectBatch,
     x1: float, y1: float, x2: float, y2: float, x3: float, y3: float,
     r: float, g: float, bl: float, a: float,
@@ -448,17 +402,13 @@ pub fn rect_batch_flush(b: RectBatch) {
     let count = b.count
     let sampling = resolve_sampling(tex, b.sampling)
     if b.target != null {
-        // Brackets closure-free (as `run_pass`): a closure per bracket allocates
-        // on every flush and the hot loops that flush record through the chain.
         let prior_blend = CURRENT_BLEND
         let prior_canvas = CURRENT_CANVAS_HANDLE
         set_blend_mode(b.blend)
         set_canvas(b.target.unwrap())
         set_shader(sprite_basic_shader)
         if get_shader_handle(sprite_basic_shader) != 0 {
-            // Pin: rect_batch_target_restores_the_camera.
             begin_cleared_camera()
-            // FBO rows use the direct authored-y projection.
             set_engine_uniforms(sprite_basic_shader, v(0.0, 1.0),
                 TargetConvention::Direct)
             draw_mesh_sampled(b.vbo, count, sampled_texture_kind(tex),
@@ -473,8 +423,6 @@ pub fn rect_batch_flush(b: RectBatch) {
         let texture_kind = sampled_texture_kind(tex)
         let texture_key = sampled_texture_backend_key(tex)
         let sampler_key = sampled_texture_sampler_key(tex)
-        // Bracketed closure-free like the target path: a closure here
-        // allocates on every flush (#948).
         let shader_state = begin_immediate_shader()
         if shader_state != 0 {
             let _ = draw_mesh_sampled(b.vbo, count,
@@ -485,43 +433,11 @@ pub fn rect_batch_flush(b: RectBatch) {
     b.count = 0
 }
 
-// (The former Layer 2 — an engine-managed shared UI batch with its own
-// pre-text flush — is gone. Screen-space UI rects/text/sprites all queue
-// into UI_RENDER_BATCHES and z-sort together: `screen.rect(..., z:)` or
-// the UiRect carve API, which carries a per-rect z. Caller-owned
-// RectBatches below remain for custom textures / mid-frame state changes.)
-
-// ────────────────────────────────────────────────────────────────────────
-// SpriteMesh — world-space textured batch that hooks into RENDER_BATCHES
-// ────────────────────────────────────────────────────────────────────────
-//
-// Use for hot loops that would otherwise emit thousands of `draw_sprite`
-// calls with the same texture (e.g. a tile grid). Lifecycles are
-// ENGINE-OWNED (mesh_pool.rock): `acquire_mesh` for per-frame content,
-// `retain_mesh` for fill-on-change content. sprite_mesh_new/add are the
-// building blocks those wrap; there is no manual reset/submit API.
-// At flush time, `render_batches` picks the mesh up like any other
-// layered draw, so ordering / depth / blend mode are respected.
-//
-// Limitations (v1):
-//   * `sprite_mesh_add` accepts a per-sprite tint for retained masks.
-//   * `sprite_mesh_add` defaults its y-sort key to `pos.y`; callers with a
-//     deliberate per-sprite key can pass `py` or use `sprite_mesh_add_quad`.
-//   * No outline / entity_id. Fine for tile grids; not for mobs/player.
-//   * After submit, don't `add` to the same batch in the same frame:
-//     the queued closure reads the captured count but the buffer is shared.
-//     Create two batches if you need two passes.
-//   * Overflowing capacity reallocs the buffer 2x (__grow_sprite_mesh_buf),
-//     same as a RenderBatch. Sizing up-front still avoids the copy.
-
 pub struct SpriteMesh {
     shared_capacity: int = -1,
     vbo: NativeBuffer<Vertex>,  // contiguous cdata, one slot per vertex
-    // The pool row this mesh submits through, kept while the mesh draws
-    // every frame, and the key it is entered under (`batch_entry_key`).
     batch: RenderBatchHandle = RenderBatchHandle {},
     batch_entry_key: string = "",
-    // The last built batch key and its inputs; a steady mesh reuses it.
     batch_key: string = "",
     batch_key_counter: int = -1,
     batch_key_z: int = 0,
@@ -535,12 +451,8 @@ pub struct SpriteMesh {
     texture: SampledTexture,
     normal: SampledTexture? = null,
     surface: SampledTexture? = null,
-    // Optional custom material input on caller-owned meshes (uAuxiliaryTex).
     auxiliary: SampledTexture? = null,
     material: SampledTexture? = null,
-    // Cached atlas dims + precomputed recip/inset so sprite_mesh_add can
-    // do UV math without touching FFI or ENGINE globals per call. Shaved
-    // 14,400 image_dims() FFI crossings per frame for life's tile grid.
     tex_w: float,
     tex_h: float,
     inset_x: float,
@@ -549,11 +461,7 @@ pub struct SpriteMesh {
     depth: DepthMode,
     blend: BlendMode,
     order: int = 0,           // intra-layer sub-sort (see RenderProps.order)
-    // Same meaning as draw_sprite's `sampling:`: null uses the source's
-    // declared filter. Resolved at submit, not here, so a mesh built before
-    // its image is registered still resolves against the live declaration.
     sampling: TextureFilter? = null,
-    // Same meaning as draw_sprite's `unlit:` -- see RenderBatch.unlit.
     unlit: bool = false,
     // Color-pass shader override, forwarded onto the submitted batch. Same contract as RenderBatch.pipeline: the shader
     // consumes the batched Vertex layout and owns the y-sort remap.
@@ -612,14 +520,12 @@ fn __sprite_mesh_push_verts(
     py: float,
     r: float, g: float, b: float, a: float,
 ) {
-    // Tri 1: TL, TR, BR (V-flip: world-top samples atlas-top)
     __vertex_check_span(buf, vi, 6)
     let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
     let step = __vertex_stride_unit(buf)
     cursor = __write_vertex(cursor, step, x1, y2, u1, v1, r, g, b, a, py)
     cursor = __write_vertex(cursor, step, x2, y2, u2, v1, r, g, b, a, py)
     cursor = __write_vertex(cursor, step, x2, y1, u2, v2, r, g, b, a, py)
-    // Tri 2: BL, TL, BR
     cursor = __write_vertex(cursor, step, x1, y1, u1, v2, r, g, b, a, py)
     cursor = __write_vertex(cursor, step, x1, y2, u1, v1, r, g, b, a, py)
     cursor = __write_vertex(cursor, step, x2, y1, u2, v2, r, g, b, a, py)
@@ -655,24 +561,17 @@ fn __sprite_mesh_push_quad4(
     let cv = if let uv = corner_v { uv.z } else { v2 }
     let dv = if let uv = corner_v { uv.w } else { v2 }
 
-    // Tri 1: a(TL), b(TR), c(BR).
     __vertex_check_span(buf, vi, 6)
     let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
     let step = __vertex_stride_unit(buf)
     cursor = __write_vertex(cursor, step, ax, ay, au, av, cr, cg, cb, aa, py, colorize: ac)
     cursor = __write_vertex(cursor, step, bx, by, bu, bv, cr, cg, cb, ba, py, colorize: bc)
     cursor = __write_vertex(cursor, step, cx, cy, cu, cv, cr, cg, cb, cca, py, colorize: cc)
-    // Tri 2: d(BL), a(TL), c(BR)
     cursor = __write_vertex(cursor, step, dx, dy, du, dv, cr, cg, cb, da, py, colorize: dc)
     cursor = __write_vertex(cursor, step, ax, ay, au, av, cr, cg, cb, aa, py, colorize: ac)
     cursor = __write_vertex(cursor, step, cx, cy, cu, cv, cr, cg, cb, cca, py, colorize: cc)
 }
 
-// Ribbon cross-section writer: stitches the PREVIOUS vertex pair (a) to
-// the new pair (b) as two triangles. Unlike the quad writers, uv and
-// color vary per cross-section -- a trail's V slides with time and its
-// tint lerps along the strip, so neither can be a per-batch constant.
-// Ground-world Y also varies per cross-section for airborne ribbons.
 fn __sprite_mesh_push_segment(
     buf: NativeBuffer<Vertex>, vi: int,
     alx: float, aly: float, alu: float, alv: float,
@@ -683,25 +582,17 @@ fn __sprite_mesh_push_segment(
     br_: float, bg: float, bb: float, ba: float,
     a_py: float, b_py: float,
 ) {
-    // Tri 1: a_left, a_right, b_right
     __vertex_check_span(buf, vi, 6)
     let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
     let step = __vertex_stride_unit(buf)
     cursor = __write_vertex(cursor, step, alx, aly, alu, alv, ar,  ag, ab, aa, a_py)
     cursor = __write_vertex(cursor, step, arx, ary, aru, arv, ar,  ag, ab, aa, a_py)
     cursor = __write_vertex(cursor, step, brx, bry, bru, brv, br_, bg, bb, ba, b_py)
-    // Tri 2: b_left, a_left, b_right
     cursor = __write_vertex(cursor, step, blx, bly, blu, blv, br_, bg, bb, ba, b_py)
     cursor = __write_vertex(cursor, step, alx, aly, alu, alv, ar,  ag, ab, aa, a_py)
     cursor = __write_vertex(cursor, step, brx, bry, bru, brv, br_, bg, bb, ba, b_py)
 }
 
-// Add one ribbon segment: the quad spanning cross-section `a` (the
-// previous pair) and `b` (the new pair). Each of the four vertices carries
-// its own UV, so the caller owns texture orientation (the Trail's along/
-// cross-section axis choice). Raw UVs -- no atlas rect, no texel inset: a
-// trail texture is a standalone image, and insetting would break the seam
-// where the scroll axis wraps.
 pub @preflight("__sprite_mesh_prepare_append", "__sprite_mesh_add_segment_tail") fn sprite_mesh_add_segment(
     m: SpriteMesh,
     a_left: Vec2, a_left_uv: Vec2, a_right: Vec2, a_right_uv: Vec2, a_color: Color,
@@ -733,15 +624,6 @@ fn __sprite_mesh_add_segment_tail(
     m.count = m.count + RECT_BATCH_VERTS_PER_RECT
 }
 
-// Push one textured, world-space quad. Mirrors draw_sprite's pivot math
-// and V-flip so output lines up with the existing sprite shader.
-//
-// The y-sort key is the RAW world anchor y, same as the sprite path
-// (add_sprite_vertices_of); the shader remaps against the camera
-// bounds per frame. Batches with depth Off ignore it; TestWrite
-// batches get correct per-tile occlusion for free. sprite_mesh_add_quad
-// keeps an explicit `py` param -- an arbitrary quad has no single
-// anchor (flat-panel walls share one tile-anchor y across 3 quads).
 pub @preflight("__sprite_mesh_prepare_append", "__sprite_mesh_add_tail") fn sprite_mesh_add(
     m: SpriteMesh,
     pos: Vec2,
@@ -758,7 +640,6 @@ fn __sprite_mesh_add_tail(
     m: SpriteMesh, pos: Vec2, src: IRect, dest_size: Vec2,
     pivot: Vec2, py: float?, tint: Color,
 ) {
-    // Geometric center from anchor pos + pivot (matches add_sprite_vertices).
     let hw = dest_size.x / 2.0
     let hh = dest_size.y / 2.0
     let cx = pos.x + (0.5 - pivot.x) * dest_size.x
@@ -769,10 +650,6 @@ fn __sprite_mesh_add_tail(
     let y1 = cy - hh
     let y2 = cy + hh
 
-    // UVs: texel inset matches ENGINE.texel_bleed_prevention. V is
-    // flipped (v(top) = v2, v(bot) = v1) for Y-up world. Atlas dims and
-    // inset are cached on the batch (sprite_mesh_new) to avoid an FFI
-    // image_dims() call per tile.
     let u1 = (float(src.x) + m.inset_x) / m.tex_w
     let v1 = (float(src.y) + m.inset_y) / m.tex_h
     let u2 = (float(src.x + src.w) - m.inset_x) / m.tex_w
@@ -780,7 +657,6 @@ fn __sprite_mesh_add_tail(
 
     let depth = if py != null { py } else { pos.y }
 
-    // vi is now in Vertex units (not floats) — one slot per vertex.
     let vi = m.count
 
     __sprite_mesh_push_verts(m.vbo, vi, x1, x2, y1, y2, u1, u2, v1, v2, depth,
@@ -789,16 +665,6 @@ fn __sprite_mesh_add_tail(
     m.count = m.count + RECT_BATCH_VERTS_PER_RECT
 }
 
-// Add an ARBITRARY 4-corner textured quad to the mesh -- a sheared
-// parallelogram for grid-aligned walls, or any quad. Corners in TL, TR, BR,
-// BL order (screen space); the projection lives entirely in these positions,
-// not the texture. `src` selects the texture region (flat, un-sheared).
-// `py` is the per-quad depth sort key: the RAW world anchor y (the
-// shader remaps -- pass e.g. the owning tile's pos.y, NOT a remapped
-// [0,1] value).
-// Optional corner lanes use the same TL, TR, BR, BL order. Alpha multiplies
-// tint.a; colorize replaces the scalar; U/V replace normalized atlas UVs
-// independently, without texel inset (custom shaders may use them as data).
 pub @preflight("__sprite_mesh_prepare_append", "__sprite_mesh_add_quad_tail") fn sprite_mesh_add_quad(
     m: SpriteMesh,
     tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2,
@@ -863,7 +729,6 @@ fn submit_mesh_into(
 ) {
     if m.count == 0 { return }
     CUSTOM_DRAW_COUNTER = CUSTOM_DRAW_COUNTER + 1
-    // Resolved before the key, same rule as ensure_batch_of.
     let eff = resolve_sampling(m.texture, m.sampling)
     let key = mesh_batch_key(m, eff)
     let handle = mesh_batch_row(pool, m, key)
@@ -872,10 +737,6 @@ fn submit_mesh_into(
     batch.mesh_frame = RENDER_FRAME
 }
 
-// Padded counter: unpadded sorts mesh_10 before mesh_2 (see
-// queue_custom_draw_into). Shader segment sits where batch_key_of puts it
-// (before the texture slot), so program switches land at group boundaries
-// instead of once per mesh interleaved among default-shader batches.
 fn mesh_batch_key(m: SpriteMesh, eff: TextureFilter) -> string {
     let sh = if m.pipeline != null { m.pipeline.shader_name } else { "0" }
     if m.batch_key_counter == CUSTOM_DRAW_COUNTER && m.batch_key_z == m.z_layer
@@ -896,8 +757,6 @@ fn mesh_batch_key(m: SpriteMesh, eff: TextureFilter) -> string {
     return key
 }
 
-// The mesh's row in `pool`, entered under `key`. A mesh that keeps its frame
-// position finds its row already there; one whose key moved re-enters it.
 fn mesh_batch_row(pool: RenderBatchPool, m: SpriteMesh, key: string) -> Entity<RenderBatch> {
     if let cached = m.batch.entity() {
         if pool.rows.contains(cached) {
@@ -919,8 +778,6 @@ fn mesh_batch_row(pool: RenderBatchPool, m: SpriteMesh, key: string) -> Entity<R
     return pool.insert(key, handle)
 }
 
-// Another submission may already hold the old key this frame; only an entry
-// still naming this row leaves the map.
 fn mesh_batch_reenter(
     pool: RenderBatchPool, m: SpriteMesh, handle: Entity<RenderBatch>, key: string,
 ) -> Entity<RenderBatch> {
@@ -931,7 +788,6 @@ fn mesh_batch_reenter(
     return pool.insert(key, handle)
 }
 
-// The fields every mesh row holds that mesh_render_batch_sync never changes.
 fn mesh_batch_row_init(batch: RenderBatch) {
     batch.custom_draw = null
     batch.pixel_snap = false

@@ -1,7 +1,3 @@
-// sRGB <-> linear transfer: the one implementation. Stone's texture and
-// ENGINE-dependent wrappers call these.
-// The scalar arms below are pinned by value tests in tests/; the vector
-// forms must call the scalar per channel.
 pub @pure fn srgb_channel_to_linear(value: float) -> float {
     return if value <= 0.04045 { value / 12.92 } else { pow((value + 0.055) / 1.055, 2.4) }
 }

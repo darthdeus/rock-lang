@@ -26,7 +26,6 @@ pub inline(lua) fn io_write_file(path: string, content: string) -> bool = """
     return true
 """
 
-// Recursively clear directory contents through Stone's cross-platform fs APIs.
 pub fn io_clear_directory_recursive(path: string) {
     if !stone_create_directory(path) {
         _log_once_impl(0, "FILE", "cannot create directory before clearing it: {path}",

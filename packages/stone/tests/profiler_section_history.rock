@@ -1,5 +1,3 @@
-// An early burst must survive the live 120-event tail, and conditional
-// sections must use the same frame denominator as continuously active ones.
 fn profiler_section_history_setup() {
     PERF_FRAME_CAPTURE = true
     PERF_SECTION_HISTORY = true
@@ -101,8 +99,6 @@ fn profiler_section_history_full_window() {
     }
     assert_eq(rows.len(), 4, "observation names are registered alongside timed sections")
 
-    // Observations sum their own millisecond values per frame; they are not
-    // main-thread CPU timing rows.
     let observations = json_as_array(json_field(history, "observations_per_frame") ?? json_null()).unwrap()
     assert_eq(observations.len(), 2, "full-window observations include early and late names")
     let observed_found = false
@@ -133,7 +129,6 @@ fn profiler_section_history_warmup_and_clear() {
     assert_eq(PROFILER.frame_count, 1)
     assert_eq(SECTION_FRAME_TIME[id].get().unwrap().count, 1)
 
-    // Warmup frames must not append to the measured section history.
     perf_scenario_wait("section_history")
     perf_scenario_window("steady", 2, 2)
     perf_scenario_ready("history.lifecycle")
@@ -144,7 +139,6 @@ fn profiler_section_history_warmup_and_clear() {
     assert(abs(during_warmup.mean - 0.010) < 0.000001,
         "warmup sample does not replace or extend measured history")
 
-    // The final warmup frame clears history without becoming a measured sample.
     perf_outer_frame_boundary(2, stone_get_time())
     profiler_section_history_frame("history.lifecycle", 0.020)
     assert(!PROFILER.warmup_active, "the declared warmup interval completed")

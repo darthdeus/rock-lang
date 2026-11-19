@@ -1,9 +1,4 @@
 
-// Rock's reader of the native resource ledger (`stone-rs/src/native_ledger.rs`):
-// which handles of each class are live, and the id accounting that checks a
-// class's live set against the allocator. Sim fixtures read it.
-
-// A class the engine does not know is a refusal, not an empty set.
 pub fn sim_native_live(class: string) -> string {
     let live = stone_native_live_handles(class)
     if live == null {
@@ -18,10 +13,6 @@ pub fn sim_native_split(csv: string) -> [string] {
     return csv.split(",")
 }
 
-// One field of one class's id-accounting row, or -1 when the report has no such
-// class or field. Three states for the reason the ledger's own entry points
-// have three: 0 is a legitimate value for every field here, so a two-state
-// answer would read a drifted class name as a clean count.
 pub fn sim_native_id_field(class: string, field: string) -> int {
     let report = stone_native_id_accounting()
     if report == null { return -1 }
@@ -35,10 +26,6 @@ pub fn sim_native_id_field(class: string, field: string) -> int {
     return -1
 }
 
-// One field of the accounting SUMMARY (`classes`, `issued`, `live`, `retired`,
-// `unaccounted`, `unissued`), or -1 when absent. `classes` is the denominator a
-// caller must assert: a summary of zero classes reports zero of everything else
-// and reads exactly like a clean world.
 pub fn sim_native_id_total(field: string) -> int {
     let report = stone_native_id_accounting()
     if report == null { return -1 }

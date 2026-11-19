@@ -1,8 +1,3 @@
-// Engine math types shared across all games: IVec2/Rect/IRect/Color and the
-// sprite-animation structs, plus their constructors and operators. Vec2/Vec3/
-// Vec4 and their pure algebra (incl. v()/zero()) live in
-// stdlib/vec.rock; what stays here touches engine-only types or globals.
-
 pub nobox value IVec2 {
     x: int,
     y: int,
@@ -60,8 +55,6 @@ pub @inline
     return iv(rect.w, rect.h)
 }
 
-// Rect is now defined in stone-core/types.rock
-
 @inline
 @pure fn r(x: float, y: float, w: float, h: float) -> Rect {
     return rect(x, y, w, h)
@@ -88,9 +81,6 @@ pub @inline @pure fn Rect.size(rect) -> Vec2 { return rect_size(rect) }
 }
 pub @pure fn Rect.center(rect) -> Vec2 { return rect_center(rect) }
 
-// V0: one-arg `iv(x)` uses x twice in its body; leaving it non-inline so
-// call sites with arithmetic args like `iv(off / 32)` still compile. V1
-// will handle arg-binding automatically.
 pub @pure fn iv(x: int) -> IVec2 {
     return iv(x, x)
 }
@@ -134,7 +124,6 @@ pub @pure operator *(a: IVec2, b: int) -> IVec2 {
     return IVec2 { x: a.x ./ b, y: a.y ./ b }
 }
 
-// Per-element sign/abs. UFCS: `d.sign()`, `d.abs()`.
 pub @pure fn IVec2.sign(a) -> IVec2 { return iv(std::sign(a.x), std::sign(a.y)) }
 @pure fn IVec2.abs(a) -> IVec2 { return iv(std::abs(a.x), std::abs(a.y)) }
 
@@ -176,13 +165,10 @@ pub @pure fn Color.lerp(a, b: Color, t: float) -> Color {
     )
 }
 
-// Scale RGB by k (alpha untouched). k > 1 pushes channels overbright
-// (max-channel > bloom_threshold), which is how a color feeds bloom.
 pub @pure fn Color.scale(c, k: float) -> Color {
     return color(c.r * k, c.g * k, c.b * k, c.a)
 }
 
-// Scale RGB toward black (alpha untouched).
 pub @pure fn Color.darken(color, amount: float) -> Color {
     return Color {
         r: color.r * amount,
@@ -192,8 +178,6 @@ pub @pure fn Color.darken(color, amount: float) -> Color {
     }
 }
 
-// Interpolate toward white. amount=0 returns the original color,
-// amount=1 returns pure white. Symmetric counterpart to Color.darken.
 pub @pure fn Color.lighten(color, amount: float) -> Color {
     return Color {
         r: color.r + (1.0 - color.r) * amount,
@@ -203,7 +187,6 @@ pub @pure fn Color.lighten(color, amount: float) -> Color {
     }
 }
 
-// Replace alpha, RGB untouched.
 pub @pure fn Color.alpha(color, alpha: float) -> Color {
     return Color {
         r: color.r,

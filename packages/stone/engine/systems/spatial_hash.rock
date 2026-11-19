@@ -1,18 +1,3 @@
-// A uniform-grid spatial hash over shapes, rebuilt from scratch each frame.
-//
-// Entries are bucketed by a counting sort into one flat `sorted` array with
-// per-cell ranges, rather than a vector per cell: one contiguous scan per cell
-// on query, and no per-cell allocation on rebuild. Every buffer keeps its
-// capacity across rebuilds; only the logical counts reset.
-//
-// Geometry is stored in retained scalar columns and payloads are kept in a
-// separate retained vector. The grid decides WHICH entries get tested, never
-// which ones count as a hit.
-//
-// Cell coordinates are biased into a non-negative range and packed into one
-// integer. Both fit well inside a double's exact-integer range, so the key is
-// reversible rather than a hash -- two distinct cells can never collide into
-// one bucket.
 const SH_FAR: float = 1.0e30
 const SH_CELL_BIAS: int = 16777216
 const SH_CELL_STRIDE: int = 33554432
@@ -38,8 +23,6 @@ pub struct SpatialHash<T> {
     sorted: [int],
     sorted_count: int,
 
-    // Per-entry query stamp: an entry occupying several cells is emitted once
-    // per query, without allocating a set.
     stamp: [int],
     query_id: int,
 
@@ -79,8 +62,6 @@ fn sh_cell_coord(world: float, cell_size: float) -> int {
     return int(floor(world / cell_size))
 }
 
-// Write at `i`, growing by one only when `i` is exactly the end. Keeps the
-// backing capacity across rebuilds instead of reallocating.
 fn sh_put_int(v: [int], i: int, x: int) {
     if i < vec_len(v) { v.set(i, x) } else { vec_push(v, x) }
 }
@@ -97,16 +78,10 @@ fn sh_put_payload<T>(v: [T], i: int, x: T) {
     if i < vec_len(v) { v.set(i, x) } else { vec_push(v, x) }
 }
 
-// Counting-sort placement writes at scattered offsets, not in order, so the
-// output array must be sized before the placing pass rather than grown at the
-// write.
 fn sh_ensure_int(v: [int], n: int) {
     for _ in vec_len(v)..n { vec_push(v, 0) }
 }
 
-// The entry's true AABB half-extents. Every exact test a query can apply is
-// bounded by this box, so an entry can never be a hit in a cell it was not
-// bucketed into.
 fn sh_reach_half_x<T>(sh: SpatialHash<T>, entry: int) -> float {
     if sh.is_circle[entry] { return sh.w[entry] }
     return sh.w[entry] * 0.5
@@ -132,8 +107,6 @@ fn sh_shape_min_y<T>(sh: SpatialHash<T>, entry: int) -> float {
 fn sh_shape_max_y<T>(sh: SpatialHash<T>, entry: int) -> float {
     return sh.pos_y[entry] + sh_reach_half_y(sh, entry)
 }
-
-// --- fill ---
 
 pub fn spatial_hash_begin<T>(sh: SpatialHash<T>) {
     sh.payload.clear()
@@ -168,9 +141,6 @@ pub fn spatial_hash_add_rect<T>(sh: SpatialHash<T>, pos: Vec2, w: float, h: floa
     spatial_hash_add_entry(sh, false, pos, w, h, layer, data, blocks_light)
 }
 
-// --- build ---
-
-// Assigns `key` a dense cell slot, creating one if this is its first entry.
 fn sh_intern_cell<T>(sh: SpatialHash<T>, key: int) -> int {
     let existing = sh.cell_of.get(key)
     if existing != null { return existing }
@@ -182,8 +152,6 @@ fn sh_intern_cell<T>(sh: SpatialHash<T>, key: int) -> int {
     return slot
 }
 
-// Counting sort: count per cell, prefix-sum into starts, then place. Two
-// passes over the entries, one contiguous output array.
 pub fn spatial_hash_build<T>(sh: SpatialHash<T>) {
     let cs = sh.cell_size
 
@@ -233,9 +201,6 @@ pub fn spatial_hash_build<T>(sh: SpatialHash<T>) {
         let cy0 = sh_cell_coord(sh_shape_min_y(sh, i), cs)
         let cy1 = sh_cell_coord(sh_shape_max_y(sh, i), cs)
 
-        // Same single-cell path as the counting pass above, and it has to stay
-        // in step with it: the two passes must agree on every shape's cells or
-        // the counting sort writes outside the range it reserved.
         if cx0 == cx1 && cy0 == cy1 {
             if let found = sh.cell_of.get(sh_cell_key(cx0, cy0)) {
                 let at = sh.starts[found] + sh.fill[found]
@@ -268,8 +233,6 @@ pub fn spatial_hash_payload_len<T>(sh: SpatialHash<T>) -> int {
     return vec_len(sh.payload)
 }
 
-// Total entry-to-cell placements. Exceeds `len` exactly when shapes span
-// several cells, which is what the query stamp deduplicates.
 pub fn spatial_hash_placements<T>(sh: SpatialHash<T>) -> int {
     return sh.sorted_count
 }
@@ -278,11 +241,6 @@ pub fn spatial_hash_cell_count<T>(sh: SpatialHash<T>) -> int {
     return sh.cell_count
 }
 
-// --- query ---
-
-// Candidate iteration is open-coded per query rather than shared, because each
-// query needs a different exact test and Rock has no zero-cost callback here.
-// The three share `sh_begin_query` and the stamp discipline.
 fn sh_begin_query<T>(sh: SpatialHash<T>) -> int {
     assert(sh.built, "spatial hash queried before spatial_hash_build")
     sh.query_id += 1
@@ -326,8 +284,6 @@ fn sh_layer_matches<T>(sh: SpatialHash<T>, entry: int, layer: int?) -> bool {
     return sh.layer[entry] == layer
 }
 
-// Every entry overlapping the circle, each returned at most once. Results are
-// live entry indices and remain valid until the next begin.
 pub fn spatial_hash_query_circle_all<T>(sh: SpatialHash<T>, pos: Vec2, radius: float,
                                     layer: int?, result: [int]) {
     result.clear()
@@ -362,7 +318,6 @@ pub fn spatial_hash_query_circle_all<T>(sh: SpatialHash<T>, pos: Vec2, radius: f
     return result
 }
 
-// The closest overlapping entry by centre distance, or null.
 pub fn spatial_hash_query_circle<T>(sh: SpatialHash<T>, pos: Vec2, radius: float, layer: int?) -> int? {
     let best: int? = null
     let best_dist = 0.0
@@ -398,7 +353,6 @@ pub fn spatial_hash_query_circle<T>(sh: SpatialHash<T>, pos: Vec2, radius: float
     return best
 }
 
-// Every entry overlapping the rect, each returned at most once.
 pub fn spatial_hash_query_rect<T>(sh: SpatialHash<T>, pos: Vec2, size: Vec2,
                               layer: int?, result: [int]) {
     result.clear()
@@ -435,16 +389,6 @@ pub fn spatial_hash_query_rect<T>(sh: SpatialHash<T>, pos: Vec2, size: Vec2,
     return result
 }
 
-// --- raycast ---
-
-// Amanatides-Woo grid traversal: visit the cells the segment crosses in order,
-// nearest first, and stop as soon as the best hit so far is closer than the
-// next cell's entry point. An entry is bucketed into every cell its extent
-// overlaps, so the cell containing a hit point always holds the entry that
-// produced it -- which is what makes the in-order early exit sound.
-//
-// Distances are carried as the segment parameter t in [0, 1] so they compare
-// directly against the traversal boundaries.
 fn spatial_hash_raycast_impl<T>(
     sh: SpatialHash<T>,
     start: Vec2,
@@ -494,8 +438,6 @@ fn spatial_hash_raycast_impl<T>(
         t_delta_y = -cs / dy
     }
 
-    // Exactly the number of cells a DDA can visit, so the walk is bounded by
-    // construction rather than by a float comparison.
     let max_steps = abs(cx_end - cx) + abs(cy_end - cy) + 2
 
     for _step in 0..max_steps {

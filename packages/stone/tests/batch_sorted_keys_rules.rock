@@ -1,6 +1,3 @@
-// The flush walks batches in sorted-key order. The sorted list is reused while
-// the pool holds the same key set and rebuilt when it changes.
-
 fn batch_sorted_keys_test_insert(pool: RenderBatchPool, key: string) {
     let row = pool.rows.insert(RenderBatch {
         texture: SampledTexture::Image(Image(0)),

@@ -1,11 +1,3 @@
-// Slice 2 RED tests: the shared sRGB <-> linear transfer.
-//
-// Oracles are hardcoded decimals verified against an independent Python
-// float64 computation (see the slice report): the card's 0.04045/0.5 decode
-// values plus off-junction arm pins and encode values. The vector-wrapper
-// test checks each channel against the scalar it must call; the scalars
-// themselves are pinned by the decimals above, never restated.
-
 const TRANSFER_TOL: float = 1e-9
 const TRANSFER_TIGHT_TOL: float = 1e-12
 
@@ -18,8 +10,6 @@ fn transfer_decode_mid_gray_matches_card_value() {
 
 @test
 fn transfer_decode_toe_boundary_takes_the_linear_arm() {
-    // At exactly 0.04045 the <= arm divides by 12.92; the pow arm sits
-    // 2.33e-9 higher, so this tolerance pins the arm, not just the value.
     let got = srgb_channel_to_linear(0.04045)
     assert(abs(got - 0.00313080495356) < TRANSFER_TOL,
         "sRGB 0.04045 decodes to linear 0.00313080495356")
@@ -61,8 +51,6 @@ fn transfer_endpoints_are_exact() {
 
 @test
 fn transfer_round_trip_recovers_off_junction_inputs() {
-    // Each value round-trips to within a few ulps in float64 (verified in
-    // Python); the junction itself switches arms and is pinned above.
     for x in [0.0, 0.25, 0.5, 1.0] {
         let back = linear_channel_to_srgb(srgb_channel_to_linear(x))
         assert(abs(back - x) < TRANSFER_TIGHT_TOL,
@@ -72,8 +60,6 @@ fn transfer_round_trip_recovers_off_junction_inputs() {
 
 @test
 fn transfer_vector_wrappers_apply_the_scalar_per_channel() {
-    // Distinct channels catch a swap; exact equality holds because the
-    // wrappers must call the same scalar on the same doubles.
     let decoded = srgb_to_linear(v(0.5, 0.04045, 0.0))
     assert(decoded.x == srgb_channel_to_linear(0.5)
         && decoded.y == srgb_channel_to_linear(0.04045)

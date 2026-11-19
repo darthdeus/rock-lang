@@ -1,10 +1,3 @@
-// Logging platform sink (stone-side). The portable logging API + dedup/throttle
-// logic live in the stdlib (stdlib/unified.rock); this file supplies the one
-// stone-specific piece the plan evicts: the FFI seam into the single rock-log
-// sink/level. The stdlib calls through `_G.__rock_log_sink` / `_level_source` /
-// `_level_sink`; here we install them. When stone is absent (rock test / rock
-// run) nothing installs and the stdlib keeps its portable print() fallback.
-
 inline(lua) fn __rock_install_log_sink() -> bool = """
     _G.__rock_log_sink = function(level, category, msg, wall_clock)
         if _G.stone ~= nil then
@@ -25,26 +18,12 @@ inline(lua) fn __rock_install_log_sink() -> bool = """
     return true
 """
 
-// Install at module load -- runs at main.lua top level, before main()/
-// stone_init(), so every post-init log routes to stone. Pre-install logs
-// happen only before stone is loaded at all, where the stdlib print fallback
-// is exactly what the old `_G.stone`-nil branch did.
 const __rock_log_sink_installed: bool = __rock_install_log_sink()
 
-// A deduped/throttled site that kept firing is invisible in the stream by
-// construction -- the totals only exist in the counters. Dump them as the
-// process winds down, so a run that hid 38k dropped draws says so without
-// anyone having had to watch for it.
 @shutdown fn __log_suppression_summary_at_exit() {
     log_suppression_summary()
 }
 
-// A bounded run (a sim, or a frame- or time-capped run) fails on error records
-// once it completes, as `rock test` fails a test. Production code logs and
-// continues; the check keeps those errors from passing a run. The one logger
-// (rock-log) collects every error record of the process, Rust and Rock alike,
-// as "[CAT] msg"; `_G.__rock_logged_errors` is the stdlib's view of that list,
-// and `assert_error_logs` removes the records it verifies.
 inline(lua) fn collect_logged_errors() = """
     _G.__rock_collect_logged_errors()
 """
@@ -54,13 +33,11 @@ inline(lua) fn logged_error_records_lua() -> any = """
     return log and log.records() or {}
 """
 
-// Collected error records, or none when this run does not check them.
 pub fn logged_error_records() -> [string] {
     let records = logged_error_records_lua()
     return __rock_vec_from_lua_array(records, table_len(records))
 }
 
-// Error records the logger dropped past its cap; a run with any fails.
 inline(lua) fn logged_error_overflow() -> int = """
     local log = _G.__rock_logged_errors
     if not log then return 0 end
@@ -68,7 +45,6 @@ inline(lua) fn logged_error_overflow() -> int = """
     return overflow
 """
 
-// Remove the first collected record equal to `record`; false when none is.
 pub inline(lua) fn take_logged_error(record: string) -> bool = """
     local log = _G.__rock_logged_errors
     return log ~= nil and log.take(record)

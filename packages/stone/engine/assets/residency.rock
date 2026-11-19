@@ -1,11 +1,6 @@
-// Image prefetch and cached-byte pressure.
-// Holding an image is acquire_image_asset's reference count; every cached
-// image nobody references sits in one LRU trimmed to RESIDENCY_BUDGET.
-
 pub enum ResidencyClass { Required, Prefetch }
 pub enum ResidencyState { Absent, Loading, Resident }
 pub value ResidencyRequest {
-    // Validated logical dimensions supplied by an asset manifest.
     logical_size: IVec2? = null,
     path: string,
     sampling: TextureFilter = TextureFilter::Nearest,
@@ -26,17 +21,10 @@ fn residency_cache_new() -> ResidencyCache {
 }
 global RESIDENCY_CACHE: ResidencyCache = residency_cache_new()
 global RESIDENCY_PATH_IDENTITIES: Map<string, string> = map_new()
-// Cached, unreferenced bytes the LRU may hold. 2 GiB until the game sets its
-// own figure.
 global RESIDENCY_BUDGET: int = max(0, get_env_int("STONE_RESIDENCY_BUDGET_MB", 2048)) * 1024 * 1024
 
-// A game with a total memory target gives the cache what its resources in use
-// leave. A smaller budget takes effect at the next trim.
 pub fn residency_set_budget(bytes: int) { RESIDENCY_BUDGET = max(0, bytes) }
-// Bytes of cached images nobody references.
 pub fn residency_cached_bytes() -> int { return RESIDENCY_CACHE.bytes }
-// Decoded bytes the native queue may hold past publication (RESIDENCY_BUDGET);
-// Prefetch submissions wait while the queue is fuller than this.
 global RESIDENCY_PREFETCH_INFLIGHT_BUDGET: int = 128 * 1024 * 1024
 
 pub fn residency_set_prefetch_budget(bytes: int) {
@@ -45,8 +33,6 @@ pub fn residency_set_prefetch_budget(bytes: int) {
 
 pub fn residency_prefetch_budget_bytes() -> int { return RESIDENCY_PREFETCH_INFLIGHT_BUDGET }
 
-// Prefetches waiting for inflight room, first in first out; the queued map
-// keeps one entry per path key.
 global RESIDENCY_PREFETCH_QUEUE: [ResidencyRequest] = vec_new()
 global RESIDENCY_PREFETCH_QUEUED: Map<string, bool> = map_new()
 struct ResidencyEvictor { name: string, usage: fn() -> int, budget: fn() -> int,
@@ -77,9 +63,6 @@ fn residency_touch(identity: string) {
     RESIDENCY_CACHE.touches.insert(identity, RESIDENCY_CACHE.touch)
 }
 
-// Appends an unreferenced cached image as the LRU's most recently used entry.
-// A deferred load's storage size is registered at submission, so a loading
-// image enters with its final bytes.
 @nomangle fn residency_demote(identity: string) {
     if (IMAGE_ASSET_REFS.get(identity) ?? 0) > 0 { return }
     let image = IMAGE_CACHE.get(identity) ?? return
@@ -106,10 +89,6 @@ fn residency_prefetch_load(req: ResidencyRequest, resolved: string) -> Image {
     return image
 }
 
-// Starts `req`'s load unless it is cached, and marks an unreferenced image
-// most recently used. A load past the inflight budget waits in the queue and
-// returns Image(0); a queued request still loads after its requester has
-// moved on, and lands in the LRU like any other.
 pub fn residency_prefetch(req: ResidencyRequest) -> Image {
     let resolved = asset_path(req.path)
     if residency_identity_cached(resolved, req.sampling, req.format)
@@ -128,10 +107,6 @@ fn residency_prefetch_waiting(req: ResidencyRequest) -> bool {
     return !residency_identity_cached(asset_path(req.path), req.sampling, req.format)
 }
 
-// Submits waiting prefetches in arrival order while the native queue has
-// inflight room, skipping any another load cached meanwhile. Called once per
-// frame from the game's prefetch update; the run-prepare manifest phase also
-// drains through it.
 pub fn residency_prefetch_advance() {
     if RESIDENCY_PREFETCH_QUEUE.len() == 0 { return }
     let waiting = RESIDENCY_PREFETCH_QUEUE
@@ -152,7 +127,6 @@ pub fn residency_prefetch_advance() {
     }
 }
 
-// Nothing waiting for inflight room and nothing still publishing.
 pub fn residency_prefetch_idle() -> bool {
     let kept: [ResidencyRequest] = vec_new()
     for req in RESIDENCY_PREFETCH_QUEUE {
@@ -163,9 +137,6 @@ pub fn residency_prefetch_idle() -> bool {
     return RESIDENCY_PREFETCH_QUEUE.len() == 0 && image_loads_pending_bytes() == 0
 }
 
-// Requires a bound image the way a Required acquire does: promote a pending
-// Deferred load and attribute the wait. A consumer calls this for images a
-// predictive Prefetch bound; load_image_cached calls it for Required hits.
 pub fn residency_require_loaded(image: Image, path: string) {
     if image_load_ready(image) { return }
     let _ = image_load_require(image)
@@ -195,7 +166,6 @@ pub fn residency_trim() {
     }
 }
 
-// Explicit retirement uses the same ownership test and accounting as budget pressure.
 pub fn residency_evict_unused(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> bool {
     let key = image_cached_identity(path, format)
     let entry = RESIDENCY_CACHE.entries.get(key) ?? return false
@@ -214,8 +184,6 @@ fn residency_evict_cached(key: string, entry: ResidencyCached) -> bool {
     return true
 }
 
-// Required loads keep batching until prepare. Only frames waiting for an admit
-// pay for timing; a quiet flush has no residency allocation or clock reads.
 pub fn residency_flush_required() {
     if RESIDENCY_FRAME_WAIT_PATHS.len() == 0 { stone_flush_image_uploads(); return }
     let t0 = stone_get_time()
@@ -226,10 +194,6 @@ pub fn residency_flush_required() {
     residency_observe_decode_failures()
 }
 
-// Name newly failed decodes on Required-observed paths through the shared
-// logger, once per identity. Counting is native (the stats read the
-// cumulative counter, so Prefetch failures count too); this pass attaches
-// paths to the failures the frame waited on.
 fn residency_observe_decode_failures() {
     for path in RESIDENCY_FRAME_WAIT_PATHS {
         let image = image_asset_cached(path) ?? continue
@@ -244,8 +208,6 @@ fn residency_observe_decode_failures() {
 }
 
 
-// The update-time pump can be blocking (budget 0), so it shares attribution
-// with the prepare flush for Required paths admitted during update.
 fn residency_service_uploads() -> int {
     let _ = stone_service_sound_admissions()
     if RESIDENCY_FRAME_WAIT_PATHS.len() == 0 { return stone_service_image_uploads() }
@@ -258,10 +220,6 @@ fn residency_service_uploads() -> int {
     return published
 }
 
-// A miss is a cache lookup that had to submit a load. Inside a cold-arrival
-// scope or window (a jump the residency set could not anticipate) misses
-// count as cold instead. Frame stats reset per frame; profile stats accumulate over the
-// profiler window.
 pub value ResidencyStats {
     misses: int,
     miss_bytes: int,
@@ -295,19 +253,13 @@ global RESIDENCY_PROFILE_MISS_BYTES: int = 0
 global RESIDENCY_PROFILE_COLD_MISSES: int = 0
 global RESIDENCY_PROFILE_COLD_MISS_BYTES: int = 0
 global RESIDENCY_COLD_DEPTH: int = 0
-// Native decode-failure count at the frame and profile boundaries; the stats
-// report the deltas, so every class of failure counts without a Rock-side
-// observation point per publish site.
 global RESIDENCY_FRAME_DECODE_FAILED_BASE: int = 0
 global RESIDENCY_PROFILE_DECODE_FAILED_BASE: int = 0
-// Identities whose decode failure the shared logger already named.
 global RESIDENCY_DECODE_FAILED_LOGGED: Map<string, bool> = map_new()
 
 fn residency_record_miss(image: Image, path: string) {
     RESIDENCY_FRAME_WAIT_PATHS.push(path)
     let bytes = residency_live_bytes(image)
-    // A boot misses on every path it loads (hundreds), and the stats count
-    // them, so per-path names stay at debug.
     _log_once_impl(3, "RESIDENCY", "miss {path} {bytes}", "residency:{path}")
     if RESIDENCY_COLD_DEPTH > 0 || RESIDENCY_COLD_ARRIVAL_OPEN {
         RESIDENCY_FRAME_COLD_MISSES = RESIDENCY_FRAME_COLD_MISSES + 1
@@ -346,7 +298,6 @@ pub fn residency_reset_profile_stats() {
     RESIDENCY_PROFILE_COLD_MISS_BYTES = 0
 }
 
-// The profiler's warmup boundary: keep only the current frame's counts.
 pub fn residency_reset_profile_stats_to_frame() {
     RESIDENCY_PROFILE_DECODE_FAILED_BASE = RESIDENCY_FRAME_DECODE_FAILED_BASE
     RESIDENCY_PROFILE_MISS_WAIT_US = RESIDENCY_FRAME_MISS_WAIT_US
@@ -378,10 +329,6 @@ pub fn residency_profile_stats() -> ResidencyStats {
     }
 }
 
-// A jump the residency set could not anticipate (blink, procgen entry,
-// recovery expiry, seek, editor jump). Its misses count as cold until the
-// first world render that began after the jump has finished: the arrival's
-// images are first required by that frame's prepare and draw.
 global RESIDENCY_COLD_ARRIVAL_OPEN: bool = false
 global RESIDENCY_COLD_ARRIVAL_RENDERING: bool = false
 
@@ -390,7 +337,6 @@ pub fn residency_cold_arrival() {
     RESIDENCY_COLD_ARRIVAL_RENDERING = false
 }
 
-// frame_core_render_frame brackets every world render with these two.
 pub fn residency_cold_arrival_render_begin() {
     RESIDENCY_COLD_ARRIVAL_RENDERING = RESIDENCY_COLD_ARRIVAL_OPEN
 }
@@ -416,9 +362,6 @@ pub fn residency_state(path: string, format: ImageAssetFormat = ImageAssetFormat
     return if image_load_ready(image) { ResidencyState::Resident } else { ResidencyState::Loading }
 }
 
-// Storage bytes for a cached asset; otherwise validated manifest dimensions
-// or a header probe. Logical dimensions are an upper bound under an image cap.
-// Without declared dimensions, a missing or unreadable header costs 0.
 pub fn residency_image_bytes(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8,
     logical_size: IVec2? = null) -> int {
     if let image = image_asset_cached(path, format) { return residency_live_bytes(image) }
@@ -438,12 +381,9 @@ pub fn residency_image_bytes(path: string, format: ImageAssetFormat = ImageAsset
     return size.x * size.y * bpp
 }
 
-// The cache's contents, one row per identity, sorted by identity. A
-// diagnostic: it walks the whole cache and queries every handle.
 pub fn residency_dump() -> [ResidencyRow] {
     let rows: [ResidencyRow] = vec_new()
     for (identity, image) in IMAGE_CACHE {
-        // A path that is not an Eat object is its own identity.
         let paths: [string] = vec_new()
         if let shared = IMAGE_IDENTITY_PATHS.get(identity) {
             for path in shared { paths.push(image_path_from_format_key(path)) }
@@ -471,10 +411,6 @@ pub fn residency_dump() -> [ResidencyRow] {
     return rows
 }
 
-// Handle count and storage bytes the image cache holds, split by who keeps
-// each entry alive. `shared_paths` counts logical paths beyond the first per
-// identity, and `shared_bytes` the uploads they would each cost if keyed by
-// path.
 pub value ResidencyCensus {
     handles: int,
     bytes: int,
@@ -489,10 +425,6 @@ pub value ResidencyCensus {
     live_total_bytes: int,
 }
 
-// The census the profiler reports, taken once when its measured window opens
-// (the perf summary is written after the window and its textures are gone).
-// Live image levels and managed canvas attachments, cached assets or not;
-// image base, mip, canvas and combined totals are retained separately.
 global RESIDENCY_PROFILE_CENSUS: ResidencyCensus = ResidencyCensus { handles: 0, bytes: 0,
     referenced_bytes: 0, cached_bytes: 0, shared_paths: 0, shared_bytes: 0,
     loading_bytes: 0, live_image_bytes: 0, live_mip_bytes: 0, live_canvas_bytes: 0, live_total_bytes: 0 }
@@ -519,8 +451,6 @@ pub fn residency_census() -> ResidencyCensus {
     let loading_bytes = 0
     let shared_paths = 0
     let shared_bytes = 0
-    // A census needs scalar totals, not the sorted paths in the diagnostic
-    // dump. Read the same cache records without materializing it.
     for (identity, image) in IMAGE_CACHE {
         if !residency_image_live(image) { continue }
         let image_bytes = residency_live_bytes(image)
@@ -587,8 +517,6 @@ pub value CanvasStorageReport {
     format: int,
 }
 
-// Dispatched by arg count: this overload (1 arg) coexists with the extern
-// above (3 args), the stone_probe_image_size shape.
 pub fn stone_canvas_report(handle: int) -> CanvasStorageReport? {
     let format = stone_canvas_report(handle, FFI_INT_OUT_1.ptr, FFI_INT_OUT_2.ptr)
     if format < 0 { return null }
@@ -707,8 +635,6 @@ fn asset_report_font_rows(rows: [AssetReportRow]) {
         row.cpu_bytes = cpu
         row.detail = "metrics-only"
         rows.push(row)
-        // Instance zero aliases the compatibility atlas; count that texture only here.
-        // image_at registers aliases lazily, before the census reads native totals.
         let instances = stone_font_atlas_instance_count(backend)
         for i in 0..instances {
             let image = stone_get_font_atlas_instance_image_at(backend, i)
@@ -729,21 +655,16 @@ fn asset_report_font_rows(rows: [AssetReportRow]) {
 fn asset_report_sound_rows(rows: [AssetReportRow]) {
     for (_entity, data) in SOUND_REGISTRY {
         let backend = data.backend_id
-        // A failed load holds no PCM; a registry entry whose native handle
-        // is gone holds none either. Neither is a live asset.
         if backend == 0 { continue }
         if data.path == "" {
             let held = stone_music_byte_len(backend)
             if held < 0 { continue }
-            // `music`, not `sound`: native sound and music ids mint from
-            // separate per-class spaces, so one number names two assets.
             let row = asset_report_new_row("sound", "music:{backend}")
             row.format = "encoded"
             row.cpu_bytes = held
             row.detail = "music"
             rows.push(row)
         } else if stone_sound_stream_bytes(backend) >= 0 {
-            // A stream source holds its encoded file, never PCM.
             let row = asset_report_new_row("sound", "sound:{backend}")
             row.paths.push(data.path)
             row.format = "encoded-stream"
@@ -776,9 +697,6 @@ fn asset_report_mesh_rows(rows: [AssetReportRow]) {
     }
 }
 
-// Every live asset at this moment, sorted by kind and identity so two dumps
-// diff row by row. A diagnostic: it walks every registry and queries every
-// handle, like residency_dump.
 pub fn asset_report_rows() -> [AssetReportRow] {
     let rows: [AssetReportRow] = vec_new()
     asset_report_source_rows(rows)
@@ -873,9 +791,6 @@ fn asset_report_snapshot(frame: int, event: string) -> (string, [JsonValue]) {
     doc["assets"] = json_array(assets)
     return (json_encode_pretty(json_object(doc), ["assets"]), totals)
 }
-
-// Reporting is opt-in. Environment configuration is read once; disarmed
-// frames only check flags and allocate nothing.
 
 global ASSET_REPORT_DIR: string = ""
 global ASSET_REPORT_INTERVAL: int = 600

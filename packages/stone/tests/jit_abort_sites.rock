@@ -4,11 +4,8 @@
 // rows are exactly its aborts (warmup sites do not leak in), an abort joins
 // its trace's start, and the top-N list never loses the total.
 
-// Fresh closures: the site identity is (func object, pc), so each call is a
-// new abort site even though the source line is shared.
 @nomangle inline(lua) fn jit_abort_sites_probe() -> any = "return function(x) local y = x + 1; return y end"
 
-// A second definition, so the two sites below resolve different lines.
 @nomangle inline(lua) fn jit_abort_sites_probe_other() -> any = "return function(x) local y = x * 2; return y end"
 
 inline(lua) fn jit_abort_sites_external() -> any = "return tostring"
@@ -55,10 +52,6 @@ fn jit_abort_sites_frame() {
     profile_frame_end()
 }
 
-// Drives a real allocation window: the first frame opens it, `in_window` runs
-// with the window collecting, and the remaining frames close it. The recorder
-// starts its era at the first event after `in_window` begins, exactly as it
-// does live.
 fn jit_abort_sites_window(frames: int, in_window: fn()) {
     GC_WIN_N = frames
     GC_WIN_START = 1
@@ -96,7 +89,6 @@ fn jit_abort_sites_are_the_window_and_join_their_start() {
         let counts = __stone_jit_trace_counts_table()
         let site = jit_abort_sites_probe()
         let orphan = jit_abort_sites_probe_other()
-        // Warmup aborts: the window must drop them, not report them as its own.
         __stone_jit_count_event(counts, "start", 11, site, 0, JIT_ABORT_SITES_REASON, 0)
         __stone_jit_count_event(counts, "abort", 11, site, 0, JIT_ABORT_SITES_REASON, 0)
         jit_abort_sites_window(2, () => {
@@ -160,8 +152,6 @@ fn jit_abort_sites_are_the_window_and_join_their_start() {
 fn jit_abort_sites_top_fifty_keeps_the_total() {
     jit_abort_sites_fixture(() => {
         let counts = __stone_jit_trace_counts_table()
-        // 60 distinct sites: each call makes a fresh closure, and the site id
-        // is (func object, pc).
         jit_abort_sites_window(2, () => {
             for i in 0..60 {
                 let site = jit_abort_sites_probe()

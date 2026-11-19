@@ -1,9 +1,3 @@
-// IMAGE_DECODE_FAILURE_PRESENTATION: an image
-// whose deferred decode fails draws the placeholder texture, is counted and
-// logged through the shared logger, and never reads Resident.
-
-// The placeholder texel contract, shared with the development missing-image
-// checker (assets.rock): bright magenta cells on near-black, 2x2 cells.
 const RESIDENCY_DECODE_PLACEHOLDER_BRIGHT: int = 0xFF00CCFF
 const RESIDENCY_DECODE_PLACEHOLDER_DARK: int = 0x190019FF
 
@@ -41,17 +35,12 @@ fn residency_decode_failure_png(path: string, w: int, h: int) {
     end
 """
 
-// A valid all-green PNG plus its header-valid body-corrupt twin: the probe
-// reads the twin's dimensions (so the load mints a handle and decodes on the
-// pool) while the pool decode fails.
 fn residency_decode_failure_object(digest_char: string) -> [string] {
     let root = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-residency-decode"
     let dir = root + "/.eat/" + digest_char.repeat(64)
     let _ = create_directory(root)
     let _ = create_directory(root + "/.eat")
     let _ = create_directory(dir)
-    // The twin stays loose: one digest dir names one image, so a second file
-    // under it would alias the corrupt identity instead of controlling it.
     let good = root + "/good-" + digest_char + ".png"
     let bad = dir + "/bad.png"
     residency_decode_failure_png(good, 4, 2)
@@ -178,9 +167,6 @@ fn residency_decode_failure_fixture_restores_after_failure() {
         "{origin}: the failed identity leaves the cache")
 }
 
-// Cold loads are the cache working: every boot misses on hundreds of paths.
-// The stats count each miss; the shared logger keeps per-path names below
-// info so a normal start does not print one line per image.
 @nomangle inline(lua) fn residency_miss_log_probe_begin() = """
     local previous = _G.__rock_log_sink
     _G.__residency_miss_log_probe = { previous = previous, messages = {} }
@@ -192,7 +178,6 @@ fn residency_decode_failure_fixture_restores_after_failure() {
     end
 """
 
-// Restores the sink and returns the captured records, joined.
 @nomangle inline(lua) fn residency_miss_log_probe_end() -> string = """
     local probe = _G.__residency_miss_log_probe
     _G.__rock_log_sink = probe.previous

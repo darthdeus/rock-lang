@@ -1,6 +1,4 @@
-// global SPRITE_DATA: Map<string, [(float, float, float, float, float)]> = map_new()
 global IMAGE_MAP: Map<string, Image> = map_new()
-// Pivot presets: normalized (0,0) = top-left, (1,1) = bottom-right
 pub const PIVOT_CENTER: Vec2 = v(0.5, 0.5)
 pub const PIVOT_FEET: Vec2 = v(0.5, 1.0)
 pub const PIVOT_TOP_LEFT: Vec2 = v(0.0, 0.0)
@@ -22,16 +20,11 @@ pub fn gpu_programs_drain() {
     load_pending_shader_sources()
 }
 
-// A sprite's world size when the caller gives no dest_size: source pixels at
-// 16 px per world unit. Every path that resolves a default dest_size resolves
-// it here.
 @pure
 fn sprite_default_world_size(source: IRect) -> Vec2 {
     return v(source.w, source.h) / 16.0
 }
 
-// `sampling` null inherits `image`'s declared filter (and `normal`'s for the
-// normal sheet); an explicit value overrides both.
 pub fn draw_sprite(
     image: SampledTexture,
     pos: Vec2,
@@ -56,14 +49,9 @@ pub fn draw_sprite(
     sampling: TextureFilter? = null,
     colorize: float = 0.0,
     depth_slope_x: float = 0.0,
-    // A pipeline every such draw shares, so they batch together on the keyed
-    // fast path (sprite_batch).
     shared_pipeline: bool = false,
     block: OwnedUniformBlock? = null,
 ) {
-    // Direct path: resolve the batch and append vertices with flat
-    // fields, no per-call command object (a command struct + enum box
-    // was ~6 KB/sprite of transient garbage).
     assert(block == null || (pipeline != null && !shared_pipeline),
         "per-draw uniform blocks require an independent shader submission")
     let batch = sprite_batch(image, layer, depth, blend, pixel_snap, normal,
@@ -109,10 +97,6 @@ fn sprite_batch(
     shared_pipeline: bool = false,
     order: int = 0,
 ) -> RenderBatch {
-    // draw_sprite has no `target` param, Additive is emissive by convention --
-    // never dim a light emitter with scene lighting. Unlit is a batch property
-    // (uUnlit uniform), so lit and unlit content on the same texture/z/blend
-    // land in separate batches.
     return ensure_batch_of(
         image, layer, blend, pixel_snap, depth,
         normal: normal, surface: surface, pipeline: pipeline,
@@ -121,9 +105,6 @@ fn sprite_batch(
     )
 }
 
-// Each quad supplies a batch-local row through Vertex.colorize. Equal texture,
-// pipeline and ordering state share a draw; full uniform arrays spill into the
-// same bounded slot scheme as parametric UI quads.
 pub fn parametric_sprite_batch(
     image: SampledTexture,
     layer: int = DEFAULT_RENDER_LAYER,
@@ -227,7 +208,6 @@ pub fn draw_sprite_quad(
         entity_id)
 }
 
-// Existing vertex depth interpolates across the quad in every renderer pass.
 fn sprite_vertices_depth_slope(vertices: NativeBuffer<Vertex>, first: int,
                                origin_x: float, slope: float) {
     for i in first..first+6 {
@@ -235,10 +215,6 @@ fn sprite_vertices_depth_slope(vertices: NativeBuffer<Vertex>, first: int,
     }
 }
 
-// Shared vertex tail of the sprite path: entity-id precedence, outline
-// registry, vertex append. Both front doors resolve their batch first and
-// funnel here — draw_sprite via ensure_batch_of per call, Material.draw via
-// its cached pool entry (material.rock).
 pub fn draw_sprite_into(
     batch: RenderBatch,
     image: SampledTexture,
@@ -267,13 +243,7 @@ pub fn draw_sprite_into(
     let has_outline = outline != null
     if has_outline {
         let o = outline.unwrap()
-        // Explicit entity_id parameter takes precedence over outline's entity_id
         if eid == 0 { eid = o.entity_id }
-        // Register per-entity outline color data so apply_outline_overlay can
-        // upload it to the shader. Falls back to the global OUTLINE_COLOR /
-        // OUTLINE_COLOR_OCCLUDED when the style table is full -- see outline.rock.
-        // The id test is kept even though register_outline_entry ignores
-        // ids <= 0: it also keeps a NaN id out of OUTLINE_ENTRIES.
         if eid > 0 { register_outline_entry(eid, o) }
     }
 

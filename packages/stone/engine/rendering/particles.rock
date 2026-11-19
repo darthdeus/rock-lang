@@ -7,7 +7,6 @@ pub struct Particle {
     source: IRect,
     tint: Color,
 
-    // UI-space draws only (emit_ui_particle): pos is design px.
     z: int = 0,
     scale: float = 1.0,
     blend: BlendMode = BlendMode::Alpha,
@@ -17,8 +16,6 @@ pub struct Particle {
 
 pub global PARTICLES: Arena<Particle> = arena_new()
 
-// UI-space particles: same sim, design-px positions, drawn into the
-// z-sorted UI pool. Ticks through pause/editor freeze (menu juice).
 pub global UI_PARTICLES: Arena<Particle> = arena_new()
 
 @reset
@@ -59,7 +56,6 @@ fn update_particles() {
     }
 }
 
-// No world_frozen gate: pause/editor freeze the world sim, not UI juice.
 @update(stage = 80)
 fn update_ui_particles() {
     let s = ui_effective_scale()

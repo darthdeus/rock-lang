@@ -81,9 +81,6 @@ pub fn circle_rect_collision(
 }
 
 
-// Sutherland-Hodgman clip of `points` to the rectangle `lo..hi`, one half-plane
-// per pass. Crossing points land exactly on the bound. The rectangle is convex,
-// so a concave polygon still clips to the right area.
 pub fn polygon_clip_rect(points: [Vec2], lo: Vec2, hi: Vec2) -> [Vec2] {
     let out: [Vec2] = []
     let scratch: [Vec2] = []
@@ -91,7 +88,6 @@ pub fn polygon_clip_rect(points: [Vec2], lo: Vec2, hi: Vec2) -> [Vec2] {
     return out
 }
 
-// The caller owns separate output and scratch arrays for repeated clips.
 pub fn polygon_clip_rect_into(points: [Vec2], lo: Vec2, hi: Vec2,
     out: [Vec2], scratch: [Vec2]) {
     out.clear()

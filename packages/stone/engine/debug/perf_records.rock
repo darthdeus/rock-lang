@@ -1,10 +1,3 @@
-// Perf-only storage: fixed capacity allocated before the first frame. Numeric
-// columns are interleaved; slowest-system strings borrow registered names.
-
-// Opt-in start metadata survives warmup and frame boundaries; all counts and
-// mcode queries are limited to measured outer frames. No locations, event log
-// or per-event JSON; reason labels are resolved after the window closes.
-// rock: allow(long_inline_lua)
 @nomangle inline(lua) fn perf_jit_health_active(active: bool) = """
     local state = _G.__stone_perf_jit_health
     if state == nil then
@@ -80,7 +73,6 @@
     _G.__stone_perf_jit_event = state.observe
 """
 
-// rock: allow(long_inline_lua)
 @nomangle inline(lua) fn perf_jit_health_json() -> string = """
     local s = _G.__stone_perf_jit_health
     if s == nil or not s.enabled then return '{"available":false}' end
@@ -124,14 +116,8 @@ const PERF_RECORD_TIMING_OFFSET: int = 17 + GC_STEP_FIELDS + JIT_NATIVE_COLUMNS
 const PERF_RECORD_COLUMNS: int = PERF_RECORD_TIMING_OFFSET + 3
 const PERF_RECORD_CAPACITY: int = 65536
 
-// Frames over this are stalls in every band; `stalls.counts.over_33` and the
-// stall section export share it.
 const PERF_STALL_MS: float = 33.0
 
-// Frames of the capture that waited on a residency miss, as JSON rows with
-// the files waited on: `frame_records.residency_us` says a frame waited, this
-// says for what. Bounded; a frame that misses hundreds of files (boot) names
-// the first sixteen and counts the rest.
 global PERF_RESIDENCY_WAITS: [string] = vec_new()
 const PERF_RESIDENCY_WAIT_ROWS: int = 256
 const PERF_RESIDENCY_WAIT_PATHS: int = 16
@@ -159,7 +145,6 @@ pub fn perf_stall_band(median_ms: float) -> string {
     return "below"
 }
 
-// Called only after measurement (and by the owning synthetic-series test).
 pub fn perf_stall_summary(samples: NativeBuffer<float>, count: int,
                           stride: int = 1, offset: int = 0) -> PerfStallSummary {
     let result = PerfStallSummary { over_17: 0, over_33: 0, over_34: 0, over_50: 0,
@@ -268,8 +253,6 @@ pub fn perf_scenario_window(phase: string, warmup_frames: int, frames: int) {
     }
 }
 
-// A scenario may fix its own measured count; the CLI supplies this default
-// for every other workload. PERF_MEASURE_FRAMES overrides either declaration.
 pub fn perf_scenario_default_window(phase: string) {
     perf_scenario_window(phase, 600, get_env_int("PERF_DEFAULT_MEASURE_FRAMES", 1200))
 }
@@ -283,8 +266,6 @@ pub fn perf_scenario_transition(start: float) {
     PERF_RECORDS.transitions += 1
 }
 
-// One boundary supplies both the hitch ledger and perf records. Closing the
-// preceding frame here includes presentation, pacing and runner bookkeeping.
 fn perf_outer_frame_boundary(frame: int, now: float) {
     perf_outer_frame_close(now)
     if PERF_RECORDS.absolute_start_frame >= 0 && PERF_RECORDS.warmup_frames >= 0 {
@@ -326,8 +307,6 @@ fn perf_measurement_complete() -> bool {
         && PERF_RECORDS.count == PERF_RECORDS.requested_frames
 }
 
-// The runner calls this after closing the preceding frame, before starting
-// another. Caps apply even during readiness, warmup and allocation windows.
 fn perf_run_termination(frame: int, max_frames: int, elapsed: float, seconds: float) -> string {
     if PERF_FRAME_CAPTURE && perf_measurement_complete() {
         return if profiler_gc_window_pending() { "gc_window_incomplete" } else { "window_complete" }
@@ -370,10 +349,6 @@ fn perf_record_frame(frame: int, t_ms: float, ms: float, heap: float, delta: flo
     }
     nb_set(PERF_RECORDS.data, at + 15 + GC_STEP_FIELDS, images.load_us as float)
     nb_set(PERF_RECORDS.data, at + 16 + GC_STEP_FIELDS, images.wait_us as float)
-    // One native read per recorded frame into preallocated staging, then a
-    // fixed copy into the row. Buffered serialization at export keeps this
-    // free of per-frame allocation. PERF_JIT_NATIVE_READ=0 keeps the overhead
-    // switch honest by zero-filling instead of reading.
     if JIT_NATIVE_READ_ENABLED {
         jit_native_health_frame_delta(PERF_RECORDS.jit_native_stage.ptr, JIT_NATIVE_COLUMNS)
     } else {

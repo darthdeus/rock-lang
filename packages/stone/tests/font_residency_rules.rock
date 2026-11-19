@@ -1,7 +1,3 @@
-// S10: boot font coverage release. Dropping a font's coverage atlas and its
-// IMAGES aliases retires exactly their bytes while the face (TTF bytes,
-// metrics) stays live.
-
 fn font_residency_test_host() {
     setup_stone()
     assert(stone_gpu_host_ensure())
@@ -95,7 +91,6 @@ fn font_reload_after_release_refreshes_without_pages() {
         font_release_coverage(loaded)
         assert_eq((stone_get_live_image_bytes() + stone_get_live_mip_bytes()), baseline,
             "the release drops the fixture bytes")
-        // Only a committed reload re-pulls the Rock-side batch state.
         FONT_PIXEL_SIZES[idx] = 0
         reload_font(loaded, FONT_RESIDENCY_PATH)
         assert_eq(FONT_PIXEL_SIZES[idx], 24,
@@ -143,9 +138,6 @@ fn font_release_fixture_failure_restores_state() {
     font_residency_test_cleanup(again)
 }
 
-// A native slot freed behind the registry's back must not unload silently:
-// unload_font finishes the Rock-side cleanup, then raises naming itself and
-// the refused backend id. A stale handle stays a no-op via font.data().
 @test
 fn unload_font_surfaces_a_refused_native_unload() {
     font_residency_test_host()

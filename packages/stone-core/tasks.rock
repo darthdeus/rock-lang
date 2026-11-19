@@ -1,9 +1,3 @@
-// The coroutine scheduler core: tasks, waits, clocks, pollers and the
-// combinators. It holds no host state. Every clock and poller is passed in by
-// its owner (a world, a scene, or the engine host), and an owner advances its
-// clock itself. The host clock, the engine POLLER, its pump and the
-// host-default overloads live in stone/engine/systems/coroutines.rock.
-
 pub struct TaskScope {
     live_count: int = 0,
     disposed: bool = false,
@@ -129,13 +123,6 @@ fn poller_remove(poller: CoroutinePoller, slot: int, entry: CoState) {
     poller.entry_count -= 1
 }
 
-// Eager: run the coroutine to its first suspension NOW (the code before the
-// first yield is the constructor). A fresh task's observable state is seeded
-// the same frame it is spawned -- no frame where the task exists but hasn't
-// run its init. A positive `delay` is the explicit lazy form: the first wait
-// is `Wait::Secs(delay)`, left untouched (no prime).
-// The task's state lives in `poller`'s store and is bound to its clock, but the
-// poller does not drive it: the caller polls or ticks the handle it keeps.
 pub fn start<R>(coroutine: Coroutine<Wait, R>, poller: CoroutinePoller,
     delay: float = 0) -> Task<R> {
     let active = if delay > 0.0 { Wait::Secs(delay) } else { Wait::Frame }
@@ -149,18 +136,11 @@ pub fn start<R>(coroutine: Coroutine<Wait, R>, poller: CoroutinePoller,
     return t
 }
 
-// STONE_CO_DEBUG=1: report a same-frame second RAW poll (the two-schedulers-
-// driving-one-task migration bug shape). Observation only -- poll stays
-// magic-free and still advances.
 fn co_double_poll_warn_enabled() -> bool {
     static enabled = (env_var("STONE_CO_DEBUG") ?? "0") == "1"
     return enabled
 }
 
-// Advance one frame; returns false the frame the coroutine completes. Stamps
-// `last_tick_frame` so a same-frame re-poll (poller after an eager prime, a
-// combinator `tick`) can be skipped by the caller -- `poll` never reads the
-// stamp itself, so it stays usable without stone (manual driving, bare tests).
 pub fn poll<R>(pc: Task<R>, dt: float) -> bool {
     let state = pc.state.get() ?? return false
     return task_poll_step(pc, dt, state.clock.frame_index())
@@ -201,10 +181,6 @@ pub fn task_poll_step<R>(pc: Task<R>, dt: float, frame: int) -> bool {
     if resume_now {
         let frame = resume(pc.coroutine)
         if frame == null {
-            // Natural completion: state is already terminal (completed, -3),
-            // so kill() is a no-op. Called for contract consistency — every
-            // removal path goes through kill() so any future "eject alive"
-            // paths fire on_killed.
             kill(pc.coroutine)
             task_abandon(pc)
             return false
@@ -215,8 +191,6 @@ pub fn task_poll_step<R>(pc: Task<R>, dt: float, frame: int) -> bool {
     return true
 }
 
-// `start`/`poll`/`tick` stay raw so combinators see the original raise. The
-// poller uses this fixed-unit adapter at its owned boundary.
 @nomangle fn task_owned_step(task: Task, dt: float, frame: int, prime: bool) -> bool {
     if prime { return task_poll_step(task, dt, frame) }
     return task_tick_step(task, dt, frame)
@@ -264,14 +238,7 @@ fn task_prime_owned(task: Task) {
     }
 }
 
-// The poller borrows each coroutine through `live_task()` rather than owning
-// it: null => cancelled / gone => drop, no orphan. `clear` (if set) nulls the
-// owner's slot on natural completion. `run` holds a constant Task;
-// `run_into` reads through the slot.
 pub struct CoState {
-    // Exactly one of `fetch` (a slot or entity read) and `task` (a constant
-    // handle) is set. `run` keeps its Task here directly: a closure capturing
-    // the value would rebuild its tables on every call.
     fetch: (() -> Task?)? = null,
     task: Task? = null,
     clear: (() -> ())? = null,
@@ -285,7 +252,6 @@ pub fn CoState.live_task(co_state) -> Task? {
     return co_state.task
 }
 
-// What a `co fn` yields to pause; `poll` interprets it against frame time.
 pub enum Wait {
     Frame,                           // resume next frame
     Secs(float),                     // wait N seconds
@@ -301,15 +267,6 @@ pub fn wait_sec(seconds: float) -> Wait {
     return Wait::Secs(seconds)
 }
 
-/// Yield this from a `co fn` to pause until `pred` returns true (or
-/// until `max_frames` frames have elapsed; pass 0 for unlimited).
-/// The poller evaluates the predicate each frame; the coroutine itself
-/// is not resumed while waiting. On budget exhaustion the wait clears
-/// and the coroutine resumes — body code can check whatever signal it
-/// expected, distinguish "satisfied" from "timed out" if it cares.
-///
-/// Useful in sim scripts and anywhere a `co fn` would otherwise do
-/// `while !pred { yield wait_frame() }`.
 pub fn wait_until(max_frames: int, pred: () -> bool) -> Wait {
     return Wait::Until(pred, max_frames)
 }
@@ -371,13 +328,6 @@ fn coroutine_poller_step(poller: CoroutinePoller, selected: Task?) {
     }
 }
 
-/// Poll `t` unless it was already advanced this frame (an eager prime, a prior
-/// `poll`, or another `tick` stamped its clock frame). Returns whether the task is
-/// still live. A terminal task returns false WITHOUT re-polling: re-driving a
-/// dead frame re-fires its stale Wait's side effects (a Tween's update callback,
-/// an Until pred). Combinators drive their children through `tick` so a child
-/// re-reached within one frame advances at most once. Frame-aware on purpose,
-/// unlike the magic-free `poll`.
 pub fn tick<R>(t: Task<R>, dt: float) -> bool {
     let state = t.state.get() ?? return false
     return task_tick_step(t, dt, state.clock.frame_index())
@@ -396,40 +346,8 @@ pub fn task_tick_step<R>(t: Task<R>, dt: float, frame: int) -> bool {
     return task_poll_step(t, dt, frame)
 }
 
-// -- Combinators --
-// Shared contract, every combinator:
-//   - children are driven by `tick` (once per frame, stamp-guarded; a terminal
-//     child is never re-polled),
-//   - EVERY child is killed through the combinator's `defer`, so both a normal
-//     exit and a kill of the combinator (or of a parent awaiting it) cascade
-//     to the whole child tree (structured concurrency; kill on an
-//     already-completed child is a no-op),
-//   - a child error propagates through raw `tick`; the combinator's defer kills
-//     its siblings as the error travels up the await chain. Race tie-break:
-//     children are scanned in slot order and a completion returns immediately,
-//     so a later sibling is
-//     not ticked that frame -- it dies suspended rather than losing a would-be
-//     error. Joins tick all children before checking when none raises.
-//
-// The coroutine-argument forms start their children in an explicit poller's
-// store on its clock; the engine adds host-poller overloads.
-
-/// The checked bridge from `result(): R?` to `R`, for a task the caller drove
-/// to its end. `completed()` (natural finish) is the only state where the
-/// stored `__return` is trustworthy -- there `cast` is sound: explicit
-/// `return <expr>` is bone-coerced to R, a reachable fall-off in a concrete
-/// non-unit co fn is REJECTED at emit (skull-mir `lower_root`), nil IS the
-/// unit for R = (), and null is a legal value for nullable R. (A GENERIC-R co
-/// fn that falls off is still admitted -- unknown at the shared lowering -- so
-/// such a body instantiated non-unit can yield nil-as-R; don't write those.)
-/// A child error propagates directly from `tick`; killed / still-suspended
-/// tasks raise instead of fabricating a nil typed as R.
 pub fn take_result<R>(t: Task<R>) -> R {
     if completed(t.coroutine) {
-        // Neither fix the lint suggests exists here: `R` is generic so there is
-        // no `?? default`, and null is a legal value for a nullable `R` so a
-        // null check would raise on a correct result.
-        // rock: allow(transmute_of_nullable)
         return cast(result(t.coroutine))
     }
     if status(t.coroutine) == "suspended" {
@@ -494,11 +412,6 @@ pub co fn race_all(tasks: [Task]) -> Coroutine<Wait, int> {
     }
 }
 
-/// Await an already-running task and read its typed result, driving it to
-/// completion first. The promise pattern: `let t = start(load_x()); ...; let x
-/// = await wait_for(t)`. A unit task (R = ()) yields the unit value. Owns the
-/// task: killing the waiter kills the task (defer); a task killed out from
-/// under the waiter raises (via `take_result`).
 pub co fn wait_for<R>(t: Task<R>) -> Coroutine<Wait, R> {
     defer { stop(t) }
     while tick(t) {
@@ -567,15 +480,6 @@ pub co fn join_all<R>(tasks: [Task<R>]) -> Coroutine<Wait, [R]> {
     return out
 }
 
-/// Race a task against a clock: its result if it completes within `secs` of
-/// WAITING, else `null` (the loser dies through the defer). The budget bounds
-/// the wait, not the task's total runtime: it charges only time yielded inside
-/// this combinator (the awaiting frame's tick is free, and a stamp-skipped
-/// tick -- task started the same frame -- costs nothing), and the tick on the
-/// expiring frame still runs, so a task completing exactly on the deadline
-/// wins the tie. UFCS reads naturally: `await t.timeout(2.0)`. For R = () the
-/// result is uninformative (unit reads as null either way) -- distinguish via
-/// `completed(t.coroutine)`.
 pub fn timeout<R>(coroutine: Coroutine<Wait, R>, secs: float,
     poller: CoroutinePoller) -> Coroutine<Wait, R?> {
     return timeout(start(coroutine, poller), secs)
@@ -596,11 +500,6 @@ pub co fn timeout<R>(t: Task<R>, secs: float) -> Coroutine<Wait, R?> {
     return take_result(t)
 }
 
-/// Frame-budget sibling of `timeout` (the `Wait::Until(pred, max_frames)`
-/// shape, for tasks): the task's result if it completes within `frames` waited
-/// frames, else `null`. Same wait-bounding, tie-break, ownership, and unit
-/// rules as `timeout` -- so the task may advance on the awaiting frame plus
-/// once per waited frame.
 pub fn timeout_frames<R>(coroutine: Coroutine<Wait, R>, frames: int,
     poller: CoroutinePoller) -> Coroutine<Wait, R?> {
     return timeout_frames(start(coroutine, poller), frames)
@@ -619,8 +518,6 @@ pub co fn timeout_frames<R>(t: Task<R>, frames: int) -> Coroutine<Wait, R?> {
     return take_result(t)
 }
 
-// Re-read the owner's slot each frame. Null abandons; natural completion clears it.
-// Replacements must share poller.clock so the frame guard remains meaningful.
 pub fn poll_co_owned(poller: CoroutinePoller, fetch: () -> Task?, clear: (() -> ())? = null) {
     poller_insert(poller, CoState { fetch: fetch, clear: clear, last: fetch() })
 }
@@ -629,10 +526,6 @@ fn poll_task_owned(poller: CoroutinePoller, t: Task) {
     poller_insert(poller, CoState { task: t, last: t })
 }
 
-/// Fire-and-forget owned by a POLLER the caller holds. The task advances only
-/// while that poller is pumped, bound to the poller's clock for waits and
-/// frame guards. Returns the handle -- watch it (`completed`) or `stop(t)` it
-/// if you care, ignore it if you don't.
 pub fn run(poller: CoroutinePoller, coroutine: Coroutine<Wait>, delay: float = 0) -> Task {
     let active = if delay > 0.0 { Wait::Secs(delay) } else { Wait::Frame }
     let t = task_new_in(poller.scope, coroutine, poller.clock, active)
@@ -643,15 +536,6 @@ pub fn run(poller: CoroutinePoller, coroutine: Coroutine<Wait>, delay: float = 0
     return t
 }
 
-/// Slot-owned spawn on a value's `Task?` FIELD, addressed by a compile-checked
-/// key path (`FieldRef<T, Task?>`): assign the field, register the poller, then
-/// prime -- IN THAT ORDER, so the body's pre-yield constructor code already sees
-/// `o.field != null` ("running" holds from the body's first instruction -- what
-/// a cast coroutine needs to publish state before its first yield). The poller
-/// reads through the field each frame (`stop` / null it to cancel) and nulls it
-/// on natural completion, so `field != null` stays an honest "is it running".
-/// Can't be `o.field = run(co)` -- start() would prime BEFORE the assignment
-/// lands.
 pub fn run_into<T>(poller: CoroutinePoller, o: T, f: FieldRef<T, Task?>,
     coroutine: Coroutine<Wait>) -> Task {
     let t = task_new_in(poller.scope, coroutine, poller.clock, Wait::Frame)
@@ -661,9 +545,6 @@ pub fn run_into<T>(poller: CoroutinePoller, o: T, f: FieldRef<T, Task?>,
     return t
 }
 
-/// Entity variant: address the `Task?` field through a generation-safe
-/// `Entity<T>`. A dead entity's `get()` is null, so the assign no-ops and every
-/// later fetch drops the entry with no orphan.
 pub fn run_into<T>(poller: CoroutinePoller, e: Entity<T>, f: FieldRef<T, Task?>,
     coroutine: Coroutine<Wait>) -> Task {
     let t = task_new_in(poller.scope, coroutine, poller.clock, Wait::Frame)
@@ -683,11 +564,6 @@ pub fn run_into<T>(poller: CoroutinePoller, e: Entity<T>, f: FieldRef<T, Task?>,
     return t
 }
 
-/// Entity-tied: the poller drives the coroutine while `e` is alive, and DROPS
-/// it (abandonment -- no terminal defers, same as nulling a slot) when the
-/// entity dies. For transient-but-entity-tied coroutines (a projectile homing
-/// a target) with no slot to own. `Entity.get()` is generation-safe, so no
-/// arena argument is needed.
 pub fn run_while<T>(poller: CoroutinePoller, coroutine: Coroutine<Wait>, e: Entity<T>,
     delay: float = 0) -> Task {
     let active = if delay > 0.0 { Wait::Secs(delay) } else { Wait::Frame }
@@ -700,36 +576,21 @@ pub fn run_while<T>(poller: CoroutinePoller, coroutine: Coroutine<Wait>, e: Enti
     return t
 }
 
-/// Stop a task by handle: kill its coroutine so terminal defers + the
-/// on_killed hook fire (cascading through `await`'s `__inner` chain).
-/// No-op once terminal. Overload sibling of the slot form below.
 pub fn stop<R>(t: Task<R>) {
     kill(t.coroutine)
     task_abandon(t)
 }
 
-/// Cancel a coroutine held in a `Task?` field, firing its terminal
-/// defers + on_killed hook -- unlike a bare `o.field = null`, which
-/// abandons it mid-stack so the `defer` never runs (verified: kill/
-/// natural-completion run defers, abandon does not). Idempotent: safe on
-/// an already-finished or null slot (`kill` no-ops once terminal). Prefer
-/// this over `field = null` for any live-cancellable coroutine slot.
 pub fn stop<T>(o: T, f: FieldRef<T, Task?>) {
     if let pc = field_get(o, f) { stop(pc) }
     field_set(o, f, null)
 }
 
-/// Replace a coroutine slot, killing the outgoing coroutine first so its
-/// cleanup runs. A bare `o.field = start(...)` over a LIVE slot abandons
-/// the old one -- same defer-skipping hazard as a bare null.
 pub fn replace<T>(o: T, f: FieldRef<T, Task?>, next: Task?) {
     if let pc = field_get(o, f) { stop(pc) }
     field_set(o, f, next)
 }
 
-/// Entity variant: cancel through the generation-safe handle, no manual
-/// `.get()` unwrap at the site. Dead entity: no-op (the poller has already
-/// dropped the task as abandonment).
 pub fn stop<T>(e: Entity<T>, f: FieldRef<T, Task?>) {
     if let m = e.get() { stop(m, f) }
 }

@@ -28,12 +28,8 @@ pub struct TextArtMaterial {
     pipeline: Pipeline,
     block: OwnedUniformBlock?,
     key: string,
-    // Slot 0 is the TextArt source, transformed when source_data is requested.
-    // These borrowed inputs
-    // occupy compiler-owned slots 1..N in declaration order.
     additional_inputs: [(SampledTexture, TextureFilter)] = [],
     radiance: TextArtRadianceMaterial? = null,
-    // Static data replaces slot 0 for the custom face and radiance passes.
     source_data: TextArtSourceMaterial? = null,
 }
 
@@ -88,8 +84,6 @@ pub fn text_art_glyph_paint(dl: DrawList, input: TextArtGlyphInput) {
     )
 }
 
-// Diagnostic only; paint identity compares the input structurally, so this
-// description is formatted at the error site and never on the retained path.
 fn text_art_glyph_description(input: TextArtGlyphInput) -> string {
     let follow = if input.follow == TextArtFollow::StaticRun { "static" } else { "posed" }
     return "{follow}:{text_layout_cache_key(input.layout)}"
@@ -102,7 +96,6 @@ pub fn text_art_glyph_paint_equal(a: TextArtGlyphInput, b: TextArtGlyphInput) ->
 fn text_art_glyph_paint_equal_at(
     a: TextArtGlyphInput, b: TextArtGlyphInput, origin: Vec2
 ) -> bool {
-    // TextLayout holds mutable raster/batch caches that do not change paint.
     return a.consumer_key == b.consumer_key
         && origin == b.origin && a.tint == b.tint && a.z_layer == b.z_layer
         && a.follow == b.follow
@@ -200,7 +193,6 @@ pub value TextArtRasterDemand {
 }
 
 pub value TextArtAtlasInstance {
-    // Native handles include a generation above the low 32 bits.
     instance_id: float,
     bucket: int,
     pixel_size: int,
@@ -560,7 +552,6 @@ pub fn text_art_glyph_effect_bounds(
 fn text_art_glyph_shifted_input(
     input: TextArtGlyphInput, origin: Vec2, cached: TextArtGlyphInput?
 ) -> TextArtGlyphInput {
-    // The retained snapshot already owns the shifted record on cache hits.
     if cached != null && text_art_glyph_paint_equal_at(input, cached, origin) {
         return cached
     }

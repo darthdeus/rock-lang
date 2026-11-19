@@ -126,7 +126,6 @@ fn bookkeeping_registration_upgrade(native: bool) {
         fullscreen_vertex: true, semantic_fingerprint: 61,
     })
     publish_gl_shader_semantic(shader, bookkeeping_test_interface(60))
-    // A reload preserves registration hashes while the newly introduced registry starts empty.
     GL_SHADER_ARTIFACTS.remove(shader)
     if native {
         assert(__rock_native_shader_publish(shader, src, ShaderId(1), [], [], [], [], [], [], [], [], [], [], [], true, wire))

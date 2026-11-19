@@ -5,8 +5,6 @@ struct TextArtResolveTex {
     coverage_tex: Sampler2D,
 }
 
-// The common scale preserves channel ratios; peak/(1+peak) is monotonic and
-// bounded below one, so a chromatic source cannot turn into white.
 fn text_art_display_color(color: Vec3) -> Vec3 {
     let peak = max(max(color.r, color.g), color.b)
     if peak <= 0.0 { return v(0.0, 0.0, 0.0) }

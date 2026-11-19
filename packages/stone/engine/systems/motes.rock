@@ -26,9 +26,6 @@ fn reset_motes() {
     mote_clear()
 }
 
-// Uniform downward acceleration -- no falloff, no anchor. Pushed per frame
-// like every other effector, so a game gravitates ONE group without making
-// gravity a property of the world.
 pub fn mote_gravity(accel: float, group: int = -1) {
     MOTE_EFFECTORS.push(MoteEffector {
         kind: MoteEffectorKind::Gravity,
@@ -46,9 +43,6 @@ fn mote_integrate_arena(arena: Arena<Mote>) {
     mote_integrate_arena_in(arena, MOTE_EFFECTORS, MOTE_MOOD, dt)
 }
 
-// Decorative motes. Authoritative arenas have already advanced by the time this
-// runs, so this is also where the shared effector list is retired for the
-// frame.
 pub @late_update
 fn update_motes() {
     if world_frozen() {

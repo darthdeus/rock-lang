@@ -1,14 +1,8 @@
-// Image identity: an Eat object's content
-// digest plus its filter names one upload, whatever logical path reached it.
-
 fn residency_test_host() {
     setup_stone()
     assert(stone_gpu_host_ensure())
 }
 
-// Writes the same pixels once per name and returns their absolute paths. As
-// aliases, each name is an overlay root holding the same object file; as
-// channels, the names are files in one object directory.
 fn residency_test_object(digest_char: string, names: [string], aliases: bool = true) -> [string] {
     let base = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-residency-identity"
     let _ = create_directory(base)
@@ -67,7 +61,6 @@ fn residency_one_digest_one_filter_shares_one_handle() {
     assert_eq((held.shared_paths, held.shared_bytes, held.loading_bytes), (2, 64, 0),
         "three paths share one 32-byte upload, saving two uploads")
 
-    // The handle lives while either logical path still holds it.
     assert(release_image_asset(paths[0]))
     assert_eq(stone_native_handle_state("image", soil.0), 1)
     assert(release_image_asset(paths[1]))
@@ -95,7 +88,6 @@ fn residency_one_digest_two_filters_keeps_two_handles() {
     let trail = acquire_image_asset(paths[1], TextureFilter::MipStable, watch: false)
     assert(soil.0 != 0 && trail.0 != 0)
     assert(soil != trail, "the filter is part of the identity")
-    // A path still declares one filter.
     assert((world_fixture_raised(() => {
         let _ = acquire_image_asset(paths[0], TextureFilter::Linear, watch: false)
     }) != null))
@@ -214,8 +206,6 @@ fn residency_census_is_captured_when_the_measured_window_opens() {
     residency_identity_fixture("2", ["soil"], paths => {
     let soil = acquire_image_asset(paths[0], watch: false)
     assert(soil.0 != 0)
-    // No warmup is configured in a test process; opening the measured window
-    // must still census the populated cache instead of reporting it empty.
     profiler_clear_samples()
     let census = residency_profile_census()
     assert(census.handles >= 1, "the opened window census its resident handles")
@@ -232,7 +222,6 @@ fn residency_a_mip_stable_image_counts_its_full_mip_chain() {
     let before = residency_profile_stats()
     let soil = acquire_image_asset(paths[0], TextureFilter::MipStable, watch: false)
     assert(soil.0 != 0)
-    // A 4x2 MipStable upload holds 4x2 + 2x1 + 1x1 RGBA8 texels.
     let chain_bytes = (8 + 2 + 1) * 4
     let loaded = residency_profile_stats()
     assert_eq(loaded.miss_bytes, before.miss_bytes + chain_bytes)
@@ -247,11 +236,8 @@ fn residency_a_mip_stable_image_counts_its_full_mip_chain() {
     })
 }
 
-// A cold arrival's window: every miss from the jump through the first world
-// render that began after it is cold, and nothing after that render is.
 @test
 fn residency_cold_arrival_window_closes_after_its_first_render() {
-    // One Eat object per image: a shared digest would be one identity.
     residency_test_host()
     let paths: [string] = vec_new()
     for digest in ["1", "2", "3", "4", "5", "6", "7"] {
@@ -275,7 +261,6 @@ fn residency_cold_arrival_window_closes_after_its_first_render() {
     residency_cold_arrival_render_end()
     assert(!classify(paths[3]), "a miss after the arrival renders is a plain miss")
 
-    // A jump made while a render is already running is presented by the next one.
     residency_cold_arrival_render_begin()
     residency_cold_arrival()
     residency_cold_arrival_render_end()
@@ -288,8 +273,6 @@ fn residency_cold_arrival_window_closes_after_its_first_render() {
     }, () => { residency_owner_test_cleanup(paths) })
 }
 
-// The runner owns the cold-arrival render bracket: a jump stays open through
-// a frame that draws nothing and closes after the first frame that draws.
 @nomangle
 fn residency_cold_arrival_runner_entry(_which: int) {
     let (window, config) = native_runner_test_boot("cold-arrival-test")

@@ -1,7 +1,3 @@
-// RenderBatch vertex-buffer growth goes through one shared 2x helper:
-// append_vertex grows at capacity, reserve_vertices grows until capacity
-// fits. Both double identically and both refuse evicted (parked) storage.
-
 fn render_batch_growth_tiny(capacity: int) -> RenderBatch {
     return RenderBatch {
         texture: SampledTexture::Image(Image(0)),

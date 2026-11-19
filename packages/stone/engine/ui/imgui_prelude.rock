@@ -101,7 +101,6 @@ inline(lua) fn __imgui_note_platform_init_failed() = """
     _G.__imgui_install_stub()
 """
 
-// A previous platform-init failure may have replaced the live bindings.
 inline(lua) fn __imgui_bindings_live() -> bool = """
     return _G.imgui ~= nil and _G.imgui.__stone_stub ~= true
 """

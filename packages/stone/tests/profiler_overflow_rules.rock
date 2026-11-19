@@ -1,6 +1,3 @@
-// Overflowed begins are dropped from the event bank. Their ends must unwind
-// only the dropped scopes, never a still-open recorded scope.
-
 fn profiler_overflow_fixture(body: fn()) {
     let enabled = ENGINE.profiler_enabled
     defer {
@@ -21,8 +18,6 @@ fn profiler_overflow_open(event: int, open: int, depth: int, why: string) {
     assert_eq(PROFILER.current_depth, depth, "{why}: nesting depth")
 }
 
-// Opens a recorded parent, fills the remaining bank with balanced children,
-// then drops `names` as nested begins and unwinds them innermost first.
 fn profiler_overflow_unwind(names: [string]) {
     profile_frame_begin()
     profile_begin("overflow.parent")

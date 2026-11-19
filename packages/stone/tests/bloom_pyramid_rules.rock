@@ -1,11 +1,5 @@
 use stone::*
 
-// The bloom pyramid (bloom_pyramid_passes) run directly on canvases: a lit
-// rectangle in an HDR source, read back from level 0. Distances are in level-0
-// pixels, which are half source pixels.
-
-// draw_rect_immediate draws with WHITE_PIXEL, and its static batch keeps the
-// image it first saw, so the white image lives for the whole process.
 global BLOOM_PYRAMID_WHITE: Image? = null
 
 fn bloom_pyramid_white() -> Image {
@@ -41,9 +35,6 @@ fn bloom_pyramid_fixture(w: int, h: int, blob: float, brightness: float,
     body(src, levels)
 }
 
-// Light reaches tens of level-0 pixels and falls off with distance; the levels
-// are sampled bilinearly, so the halo changes at nearly every pixel instead of
-// once per coarse texel; the threshold keeps the dark corner clean.
 @test
 fn bloom_pyramid_spreads_light_far_and_smoothly() {
     bloom_pyramid_fixture(1280, 720, 16.0, 20.0, (src, levels) => {
@@ -76,8 +67,6 @@ fn bloom_pyramid_spreads_light_far_and_smoothly() {
     })
 }
 
-// A 0.8 blob is under a 1.0 threshold. Knee 0 cuts it hard; knee 0.5 puts it
-// inside [threshold - knee, threshold + knee], where it ramps in attenuated.
 @test
 fn bloom_knee_ramps_sub_threshold_light_in() {
     bloom_pyramid_fixture(1280, 720, 64.0, 0.8, (src, levels) => {

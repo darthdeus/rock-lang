@@ -1,5 +1,3 @@
-// Renderer-independent mote state and physics shared by world ticks and Stone.
-
 const MOTE_TRAIL_N: int = 16
 
 pub nobox value MoteWorldPoint {
@@ -43,23 +41,13 @@ pub struct Mote {
     seed: float = 0.0,
     tint: Color = WHITE,
     size: float = 0.07,
-    // The last MOTE_TRAIL_N positions as a ring: `trail_head` is the next slot
-    // to overwrite once the ring is full.
     trail: [MoteWorldPoint] = [],
     trail_head: int = 0,
-    // Ballistic lane. A mote with no floor ignores all three and drifts as
-    // before; one with a floor collides with that plane, keeping
-    // `restitution` of its vertical speed and `floor_friction` of its
-    // horizontal speed per contact.
     floor_z: float? = null,
     restitution: float = 0.0,
     floor_friction: float = 1.0,
-    // Per-mote scales on the GLOBAL mood, so one lane can opt out of the
-    // shared feel without a second mood. A falling body wants neither the
-    // drift damping nor the curl noise the wisps are built on.
     drag: float = 1.0,
     curl: float = 1.0,
-    // Zero uses the shared mood; persistent followers can set their own cap.
     max_speed: float = 0.0,
 }
 
@@ -83,8 +71,6 @@ pub value MoteEffector {
     flow: float,
 }
 
-// Global motion feel, mutated per-frame by the game's intent layer
-// (tighten + speed up while channeling, sag when drained, ...).
 pub struct MoteMood {
     max_speed: float,
     damping: float,
@@ -110,7 +96,6 @@ pub fn default_mote_mood() -> MoteMood {
 
 @pure fn mote_hash3(x: float, y: float, z: float) -> float {
     let phase = (x * 127.1 + y * 311.7 + z * 74.7) * 0.15915494309189535
-    // Reduce to [-0.5, 0.5) before the polynomial.
     let u = phase - floor(phase + 0.5)
     let y = 16.0 * u * (0.5 - abs(u))
     let h = y * (0.775 + 0.225 * abs(y)) * 43758.5453
@@ -146,8 +131,6 @@ pub fn default_mote_mood() -> MoteMood {
     return y0 + (y1 - y0) * uz
 }
 
-// Curl of three offset noise potentials via finite differences --
-// divergence-free, so motes drift along organic paths without bunching.
 fn mote_curl(p: Vec3) -> Vec3 {
     let eps = 0.1
 
@@ -225,7 +208,6 @@ fn mote_effector_force(ef: MoteEffector, m: Mote) -> Vec3 {
         return tangent * (ef.strength * mote_falloff(rp_len, ef.falloff))
     }
 
-    // Path
     if ef.path != null && ef.path.len() > 0 {
         let pts = ef.path
         let nearest = 0
@@ -248,11 +230,6 @@ fn mote_effector_force(ef: MoteEffector, m: Mote) -> Vec3 {
     return v(0.0, 0.0, 0.0)
 }
 
-// The integrator. One loop serves every mote arena: a second copy would be a
-// second set of physics to keep in step, and the authoritative wisps must move
-// exactly as the decorative motes do or the digest pins the wrong dynamics.
-// The caller decides WHEN its arena advances, which is the whole point --
-// authoritative arenas advance in the simulation tick, decorative ones here.
 pub fn mote_integrate_arena_in(arena: Arena<Mote>, effectors: [MoteEffector],
                            mood: MoteMood, tick_dt: float) {
     for (e, m) in arena {
@@ -288,8 +265,6 @@ pub fn mote_integrate_arena_in(arena: Arena<Mote>, effectors: [MoteEffector],
         }
         m.pos = m.pos + m.vel * tick_dt
 
-        // Floor contact resolves AFTER integration, so a step that would end
-        // below the plane lands on it instead of tunnelling for a frame.
         if m.floor_z != null {
             let fz = m.floor_z
             if m.pos.z < fz {

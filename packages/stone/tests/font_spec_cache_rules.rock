@@ -1,6 +1,3 @@
-// S10: FONT_SPEC_CACHE validity. A cached spec whose font was unloaded
-// reloads instead of returning the stale handle.
-
 fn font_spec_cache_test_host() {
     setup_stone()
     assert(stone_gpu_host_ensure())
@@ -94,7 +91,6 @@ fn font_spec_cache_fixture_failure_restores_state() {
     font_spec_cache_test_cleanup(again, before)
 }
 
-// A hard load failure leaves the current font in place.
 @test
 fn declaring_a_bad_font_keeps_the_current_font() {
     font_spec_cache_test_host()

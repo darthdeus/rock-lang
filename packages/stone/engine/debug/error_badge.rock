@@ -1,13 +1,6 @@
-// Development only: every ERROR and WARN record this process logged, Rust or
-// Rock, shows on screen instead of only in stderr. Shipping builds embed their
-// assets, so ASSET_DEV_MODE keeps it out of them; a bounded run has no one
-// watching and would carry it into captures, so it opts in with
-// STONE_DEV_ERROR_BADGE=1. Warnings stay off the badge unless
-// STONE_DEV_ERROR_BADGE_WARNINGS=1 opts in.
 const DEV_ERROR_BADGE_Z: int = 30000
 const DEV_ERROR_BADGE_SIZE: Vec2 = v(150.0, 26.0)
 const DEV_ERROR_BADGE_ROWS: int = 8
-// Rows kept for warnings when errors alone would fill the list.
 const DEV_ERROR_BADGE_WARNING_ROWS: int = 2
 const DEV_ERROR_BADGE_PADDING: float = 12.0
 const DEV_ERROR_BADGE_ROW_HEIGHT: float = 20.0
@@ -28,7 +21,6 @@ pub fn dev_error_badge_label(errors: int, warnings: int) -> string {
     return "{dev_error_badge_count(errors, "error")}, {dev_error_badge_count(warnings, "warning")}"
 }
 
-// At least DEV_ERROR_BADGE_SIZE wide, and wide enough for its label.
 pub fn dev_error_badge_width(label: string) -> float {
     return max(DEV_ERROR_BADGE_SIZE.x,
         measure_ui(label, DEV_ERROR_BADGE_FONT_SIZE).x + 2.0 * DEV_ERROR_BADGE_PADDING)
@@ -44,7 +36,6 @@ pub fn dev_error_badge_row_text(count: string, target: string, message: string) 
 }
 
 global DEV_ERROR_BADGE_EXPANDED: bool = false
-// A host recording mode hides the badge from the picture; records still log.
 pub global DEV_ERROR_BADGE_SUPPRESSED: bool = false
 
 fn dev_error_badge_enabled() -> bool {
@@ -104,8 +95,6 @@ fn draw_dev_error_badge() {
     let list = screen.take_top_center(v(width, rows.len() as float * DEV_ERROR_BADGE_ROW_HEIGHT))
         .at_z(DEV_ERROR_BADGE_Z)
     list.fill(DEV_ERROR_BADGE_BG)
-    // Rows are cut to fit: an overflowing UiRect.text logs an ERROR, which the
-    // badge would then count every frame.
     let room = width - 8.0
     for i in 0..rows.len() {
         let row = list.skip_top(i as float * DEV_ERROR_BADGE_ROW_HEIGHT).take_top(DEV_ERROR_BADGE_ROW_HEIGHT)

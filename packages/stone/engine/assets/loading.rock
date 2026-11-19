@@ -1,13 +1,3 @@
-// Asset loading configuration. ASSET_DEV_MODE means "assets are on disk":
-// loaders register mutable paths with the Rust filesystem watcher and edits
-// hot-reload. Immutable Eat generations are not watched. On for every dev
-// invocation (rock run / stone / frame / perf / sim), where nothing is baked
-// in; off when a runner registered an embedded archive
-// (`__ROCK_ASSETS_EMBEDDED`, set by fire). An embedded runner serving
-// assets from disk is a dev build like any other -- which is why this asks the
-// runner what it did rather than inferring it from __GAME_DIR_OVERRIDE, whose
-// job is asset-key construction. The _G field is set in the preamble before
-// this global initializes.
 inline(lua) fn __resolve_asset_dev_mode() -> bool = """
     return _G.__ROCK_ASSETS_EMBEDDED ~= true
 """
@@ -95,11 +85,6 @@ pub fn project_asset_path(relative_path: string) -> string {
     return "{GAME_SOURCE_DIR}/{relative_path}"
 }
 
-// Cache overlay lookup results to avoid repeating filesystem probes.
-// Keyed by the roots table it was built against, by identity: a full reload
-// re-resolves `ASSET_OVERLAY_DIRS` into a fresh table, and an answer from the
-// previous roots must not outlive them. No path is spelled `roots`, which all
-// start with `assets/`.
 @nomangle inline(lua) fn __asset_path_memo(relative_path: string, roots: [string]) -> string = """
     local m = _G.__stone_asset_path_memo
     if not m or m.roots ~= roots then return "" end
@@ -138,8 +123,6 @@ pub fn asset_path(relative_path: string) -> string {
         }
     }
 
-    // Only an overlay HIT is remembered. A miss stays unmemoized so a file
-    // added to an overlay while the game runs is still found.
     return project_asset_path(relative_path)
 }
 
@@ -190,8 +173,6 @@ pub fn asset_list_dir(relative_path: string) -> [string] {
     return result
 }
 
-// Maps Image handle -> resolved on-disk path. Populated by every
-// asset-loader entry point; consumed by the asset hot-reload watcher.
 pub global IMAGE_PATHS: Map<int, string> = map_new()
 
 pub fn register_image_path(handle: int, resolved_path: string) {
@@ -236,22 +217,10 @@ fn image_load_diag_record(path: string, succeeded: bool) {
     IMAGE_FRAME_LOAD_SUCCEEDED.push(succeeded)
 }
 
-// Resolved path -> its identity, for Eat object paths only (every other path
-// is its own identity). Lets a path-only caller (release, lookup) find the
-// entry its load created.
 global IMAGE_RESOLVED_IDENTITY: Map<string, string> = map_new()
 
-// Eat identity -> every resolved path that shares its current handle, for the
-// residency dump (IMAGE_PATHS keeps one logical path per handle). The list is
-// kept while cached; a fresh load forgets whatever paths
-// a previous handle recorded, so each path records itself again on its next
-// load.
 global IMAGE_IDENTITY_PATHS: Map<string, [string]> = map_new()
 
-// Outstanding `acquire_image_asset` counts per resolved path. The identity
-// refcount is the sum over its paths; a path whose count reaches zero drops
-// its identity association, so a later acquire under another filter starts
-// from that filter's key instead of the stale one.
 global IMAGE_PATH_REFS: Map<string, int> = map_new()
 
 fn is_hex_digest(text: string) -> bool {
@@ -336,7 +305,6 @@ pub fn image_identity(resolved: string, sampling: TextureFilter,
     return image_format_path(resolved, format)
 }
 
-// The cache key a loaded path is held under.
 fn image_asset_key(resolved: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> string {
     let path_key = image_format_path(resolved, format)
     return IMAGE_RESOLVED_IDENTITY.get(path_key) ?? path_key
@@ -357,8 +325,6 @@ fn image_identity_record(resolved: string, identity: string) {
 fn image_identity_fresh(resolved: string, identity: string) {
     if identity == resolved { return }
     if let previous = IMAGE_IDENTITY_PATHS.get(identity) {
-        // A path the list still names may since have moved to another live
-        // identity; only forget the ones that still resolve here.
         for path in previous {
             if image_asset_key(path) == identity { IMAGE_RESOLVED_IDENTITY.remove(path) }
         }
@@ -367,9 +333,6 @@ fn image_identity_fresh(resolved: string, identity: string) {
     image_identity_record(resolved, identity)
 }
 
-// A path whose last reference is released forgets its identity, so a later
-// acquire under another filter reaches that filter's key. Only touches the
-// association it names: a path that already moved on keeps its new one.
 fn image_identity_unrecord(resolved: string, identity: string) {
     if identity == resolved { return }
     if image_asset_key(resolved) != identity { return }
@@ -382,8 +345,6 @@ global IMAGE_ASSET_REFS: Map<string, int> = map_new()
     destroy_image(Image(handle))
 }
 
-// Residency trim drops an unreferenced cached image and every path that
-// resolved to it.
 fn image_asset_evict(identity: string, handle: int) {
     __stone_asset_destroy_owned(handle)
     IMAGE_CACHE.remove(identity)
@@ -405,8 +366,6 @@ value GeneratedResource {
     handle: int,
 }
 
-// Images and image data the game made itself. Runner shutdown destroys what
-// is left while the window still exists.
 global GENERATED_RESOURCES: Map<string, GeneratedResource> = map_new()
 
 fn generated_key(kind: string, handle: int) -> string {
@@ -477,10 +436,6 @@ fn development_missing_image(sampling: TextureFilter) -> Image {
     return image
 }
 
-// Load `resolved` (already through asset_path, or an absolute path) once,
-// returning a shared handle on repeat calls. `canonical` is the caller-facing
-// path recorded for the editor/watcher (asset-relative for load_image_asset).
-// The result is unreferenced: a caller that keeps the handle acquires it.
 pub fn load_image_cached(
     resolved: string,
     canonical: string,
@@ -499,10 +454,6 @@ pub fn load_image_cached(
     let cached = IMAGE_CACHE.get(key)
     let new_alias = false
     if cached == null {
-        // A path seen before keeps its identity, so asking it for another
-        // filter still meets the filter-once error below; a new path or
-        // filter computes its own, which may already be cached under another
-        // logical path of the same Eat object.
         key = image_identity(resolved, sampling, format)
         if key != path_key {
             cached = IMAGE_CACHE.get(key)
@@ -514,23 +465,10 @@ pub fn load_image_cached(
         if image_storage_format(img) != image_file_storage_format(resolved, format) {
             error("load_image_asset: {canonical} is cached as {image_storage_format(img)}, requested {format}")
         }
-        // One upload per path, so a caller that needs the file's own texels
-        // cannot be handed an upload that already lost them. Checked on the
-        // OUTCOME rather than on the declaration: a first load that never
-        // declared anything is still fine as long as no cap reduced it, and
-        // that is the only case where the second caller would be wrong.
-        //
-        // A headers-only stub stores one white texel without resampling the
-        // file's pixels. Ask the loaded image: process policy alone cannot
-        // distinguish a stub from a real image that needed a decode fallback.
         if exact_texels && !image_is_stub(img)
             && image_storage_dims(img) != image_dims(img) {
             error("load_image_asset: {canonical} needs its own texels, but it is already loaded with {image_storage_dims(img)} of {image_dims(img)} stored under STONE_IMAGE_MAX_SIDE; the first load has to declare exact_texels too")
         }
-        // One upload per path, so the path carries ONE declared default. A
-        // second load asking for a different one cannot be honoured without
-        // silently giving whichever call ran first; a caller that wants the
-        // other filter passes it per draw.
         if image_sampling(img) != sampling {
             error("load_image_asset: {canonical} is already loaded as {image_sampling(img)}; a second load cannot redeclare it as {sampling} (pass `sampling:` at the draw instead)")
         }
@@ -548,8 +486,6 @@ pub fn load_image_cached(
         deferred: class == ResidencyClass::Prefetch, format: format, logical_size: logical_size)
     image_load_diag_record(canonical, handle != 0)
     if handle == 0 {
-        // The path goes on the second line: the badge keys on the first, so
-        // every failed image is one counted row.
         if !ASSET_DEV_MODE {
             log_once("ASSETS", "image asset failed to load\n{canonical} (asset_path: {resolved})", "load_image_asset:{canonical}")
             return Image(0)
@@ -559,15 +495,7 @@ pub fn load_image_cached(
         handle = development_missing_image(sampling).0
         if handle == 0 { return Image(0) }
     }
-    // Register the canonical (pre-resolution) path: that's the asset's identity.
-    // Save-back goes through asset_path again, so it round-trips across hot
-    // reloads, and the editor surfaces "assets/Sprites/foo.png" rather than the
-    // leaky "bitgun/assets/Sprites/foo.png".
     register_image_path(handle, canonical)
-    // Under `rock stone`, hand the resolved on-disk path to the filesystem
-    // watcher so an external edit to a mutable image hot-reloads it in place
-    // (handle is preserved -- see stone_reload_image). The reload poll lives in
-    // update_watcher (stone/engine/debug/watcher.rock).
     if watch && ASSET_DEV_MODE {
         stone_watch_asset(resolved)
     }
@@ -579,24 +507,12 @@ pub fn load_image_cached(
     return img
 }
 
-// `exact_texels` declares that this asset's texels are read individually rather
-// than sampled as colour -- a lookup table, an index structure, a packed mesh --
-// which withholds `STONE_IMAGE_MAX_SIDE` from it. Averaging such a texel does
-// not blur a value, it invents a different one.
-//
-// The caller keeps the handle for the process: each call takes a reference
-// that is never released, so trim cannot destroy a texture it still draws.
 pub fn load_image_asset(path: string, sampling: TextureFilter = TextureFilter::Nearest,
     exact_texels: bool = false, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> Image {
     return acquire_image_resolved(asset_path(path), path, sampling, exact_texels: exact_texels,
         format: format)
 }
 
-// The handle an asset path is ALREADY loaded under, or null. For a VIEWER
-// that wants whatever filter the owner declared rather than declaring one
-// of its own: a browser enumerating a directory does not own what it finds
-// there, and a second load asking for a different filter is a hard error
-// (the skin gallery hit exactly that on a game's Linear splash logos).
 pub fn image_asset_cached(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> Image? {
     return IMAGE_CACHE.get(image_cached_identity(path, format))
 }
@@ -618,8 +534,6 @@ pub fn acquire_image_asset(
         exact_texels: exact_texels, class: class, format: format)
 }
 
-// acquire_image_asset for a path already through asset_path; `canonical` is
-// the caller-facing path, as for load_image_cached.
 fn acquire_image_resolved(
     resolved: string,
     canonical: string,
@@ -645,8 +559,6 @@ pub fn image_asset_acquire_count(path: string, format: ImageAssetFormat = ImageA
 }
 
 pub fn release_image_asset(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> bool {
-    // A path spends only what it acquired: aliases share the identity count,
-    // but a release through one alias must not consume another's reference.
     let resolved = asset_path(path)
     let path_key = image_format_path(resolved, format)
     let held = IMAGE_PATH_REFS.get(path_key) ?? 0
@@ -667,14 +579,10 @@ pub fn release_image_asset(path: string, format: ImageAssetFormat = ImageAssetFo
 
     IMAGE_ASSET_REFS.remove(key)
     if IMAGE_CACHE.get(key) == null { error("managed image has no cached handle: {key}") }
-    // The last reference demotes the image into the residency LRU.
     residency_demote(key)
     return true
 }
 
-// Static sound loader. Delegates to load_audio (engine/bindings.rock) -- the single
-// SoundData construction + watcher-registration site -- so the two sound-load
-// paths can't drift.
 pub fn load_sound_asset(path: string, recipe: SoundRecipe? = null, stream: bool = false) -> Sound {
     return load_audio(path, if stream { "stream" } else { "static" }, recipe)
 }

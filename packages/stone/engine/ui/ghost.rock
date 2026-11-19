@@ -1,17 +1,3 @@
-// UI ghosts -- retained afterimages of skinned widgets. A feel fx (or
-// any UI code) pushes {skin, rect}; an anchored push also retains its world
-// point and design-space offset. The ghost redraws the skin fading and
-// slightly growing for `duration`, independent of the widget that
-// spawned it -- the widget (or its whole panel) can vanish the same
-// frame and the feedback still plays out. Same decoupling as
-// UI_PARTICLES: stepped every frame, no world_frozen gate, draws into
-// the z-sorted UI pool at the rect's z (caller picks via .at_z).
-// A UI ghost simulation pins this visibility and hit-testing behavior.
-
-// The dissolve uniform set, declared here because it is a CONVENTION the engine
-// writes and a game's shader reads (mag's `ui_dissolve_frag`) -- the same
-// relation `UiSdfBarU` has to `ui_sdf_bar_frag`. A packer needs a concrete type,
-// so the type must be engine-owned for the engine to fill the block.
 pub value UiDissolveU {
     uDissolve: float,
 }
@@ -23,9 +9,6 @@ pub struct UiGhost {
     world_offset: Vec2 = v(0.0, 0.0),
     duration: float,
     grow: float,
-    // Optional dissolve-style pipeline: the ghost draws through it and
-    // feeds `uDissolve` (age fraction, 0 whole -> 1 gone) per frame.
-    // null = plain alpha fade on the default shader.
     pipeline: Pipeline? = null,
     age: float = 0.0,
 }
@@ -37,7 +20,6 @@ fn reset_ui_ghosts() {
     UI_GHOSTS.clear()
 }
 
-// grow: design px the rect expands (per side) over the full fade.
 pub fn ui_ghost_push(skin: Entity<UiSkin>, r: UiRect, duration: float = 0.15, grow: float = 6.0, pipeline: Pipeline? = null) {
     UI_GHOSTS.insert(UiGhost { skin: skin, rect: r, duration: duration, grow: grow, pipeline: pipeline })
 }

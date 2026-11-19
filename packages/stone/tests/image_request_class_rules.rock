@@ -1,7 +1,3 @@
-// Native request classes (asset residency plan 2.4): a Required load is
-// published by the next flush; a Deferred one only by a pump, or by a flush
-// once it is required.
-
 fn image_class_test_host() {
     setup_stone()
     assert(stone_gpu_host_ensure())
@@ -11,7 +7,6 @@ fn image_class_test_fixture(large: bool = false) -> string {
     let path = env_var("ROCK_TEST_TMP").unwrap() + "/rock-image-class-fixture.png"
     let data = new_image_data(if large { 192 } else { 4 }, if large { 192 } else { 2 })
     if large {
-        // Varied pixels keep the encoded payload larger than a header prefix.
         let state = 1
         for y in 0..192 {
             for x in 0..192 {

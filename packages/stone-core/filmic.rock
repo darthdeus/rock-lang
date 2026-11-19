@@ -1,4 +1,3 @@
-// Generated from eat presentation::blender_filmic_rock; parity is tested.
 pub @pure fn blender_filmic_channel(value: float) -> float {
     let x = max(value, 0.0)
     if x <= 0.003000000 { return lerp(0.000000000, 0.003346536, (x - 0.000000000) / 0.003000000) }

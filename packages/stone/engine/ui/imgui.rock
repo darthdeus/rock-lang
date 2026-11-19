@@ -59,9 +59,6 @@ pub fn imgui_image_button(
     return imgui_image_button_recorded(id, image, size, uv1, uv2, bg_color, tint_color)
 }
 
-// The ONE place an image button is recorded, so the two overloads above cannot
-// drift apart on it. Recorded on the CALL, not on the return: the cell drew
-// whether or not it was clicked, and "was this grid populated" is the question.
 fn imgui_image_button_recorded(
     id: string,
     image: Image,
@@ -82,8 +79,6 @@ pub fn imgui_default_scale() -> float {
     // `STONE_IMGUI_SCALE`, which outranks it for one launch. Neither set keeps
     // the window-height rule below.
     if let raw = os_getenv("STONE_IMGUI_SCALE") {
-        // Empty is how a sim entry declares "no override" for the runner-owned
-        // vars, so it means unset here too, and silently.
         if raw != "" {
             if let override = raw.parse_float() {
                 if override > 0.0 { return override }
@@ -100,28 +95,17 @@ pub fn imgui_default_scale() -> float {
     return scale
 }
 
-// Debug-UI (imgui) scale knob. 1.0 = native window pixels (tiny on hi-dpi).
-// The runner seeds the shared default before game init; games may override it.
 pub global IMGUI_SCALE: float = 1.0
 global _imgui_scale_applied: float = 0.0
-// Set by the runner from stone_imgui_init's result; guards every style
-// access so a failed imgui init can't crash the scale path.
 pub global IMGUI_READY: bool = false
 
 // Applied once per process (survives hot reload) so the default dock layout
 // never stomps a layout the user arranged and imgui.ini restored.
 global DOCK_LAYOUT_APPLIED: bool = false
-// This frame's viewport dockspace; -1 before the first NewFrame.
 global IMGUI_DOCKSPACE_ID: int = -1
 
-// True between the runner's NewFrame and Render. Read only by the frame
-// error path, which has to close a frame the unwind left open.
 global IMGUI_FRAME_OPEN: bool = false
 
-// Scale the whole imgui surface (fonts + style geometry) crisply -- imgui
-// 1.92 dynamic fonts rasterize at the scaled size, no atlas rebuild.
-// Rescales from a baseline style captured on first call, so repeated calls
-// (slider drags) don't accumulate ScaleAllSizes' floor() truncation.
 pub inline(lua) fn imgui_apply_scale(s: float) = """
     local style = imgui.GetStyle()
     if _G.__imgui_base_style == nil then
@@ -134,7 +118,6 @@ pub inline(lua) fn imgui_apply_scale(s: float) = """
     style.FontScaleMain = s
 """
 
-// Live style probe (tests/diagnostics).
 pub inline(lua) fn imgui_get_font_scale() -> float = """
     return imgui.GetStyle().FontScaleMain
 """
@@ -147,8 +130,6 @@ pub fn imgui_update_scale() {
     }
 }
 
-// The unconditional form: its callers run the body whatever Begin returned, so
-// the call IS the body entry.
 pub fn imgui_begin(title: string) {
     let _ = __imgui_begin_window_raw(title, 0)
     imgui_note_body(title)
@@ -164,8 +145,6 @@ pub @inline inline(lua) fn imgui_button(label: string) -> bool = "imgui.Button(l
 
 pub @inline inline(lua) fn imgui_same_line() = "imgui.SameLine()"
 
-// SameLine only when a button labelled `label` still fits on the current row,
-// so a row of buttons wraps instead of running past a narrow window's edge.
 pub inline(lua) fn imgui_same_line_if_fits(label: string) = """
     local style = imgui.C.igGetStyle()
     local cache = __imgui_shared_image_packet()
@@ -204,12 +183,6 @@ pub inline(lua) fn imgui_slider_int(label: string, value: int, min: int, max: in
     return changed, v[0]
 """
 
-// Vertical slider -- a mixer fader. `size` is the whole track, so the caller
-// sets its height; unlike the horizontal form there is no sensible default.
-//
-// `format` is not optional here the way it is on the horizontal slider: the
-// value is printed INSIDE a track the caller has made narrow, so the default
-// "%.3f" clips to "1.(" at any sane fader width.
 @scalar_abi inline(lua) fn imgui_v_slider_float(label: string, size: Vec2, value: float, min: float, max: float, format: string) -> (bool, float) = """
     local v = ffi.new("float[1]", {value})
     local cache = __imgui_shared_image_packet()
@@ -218,9 +191,6 @@ pub inline(lua) fn imgui_slider_int(label: string, value: int, min: int, max: in
     return changed, v[0]
 """
 
-// Combo dropdown. Pass items as a regular Rock array; the helper joins
-// them with NUL bytes (which Rock strings can't carry as literals).
-// Returns (changed, new_index).
 pub fn imgui_combo(label: string, current_idx: int, items: [string]) -> (bool, int) {
     // ImGui wants the items NUL-separated with a trailing NUL. A Rock string
     // literal cannot carry a NUL byte, so the separator comes from Lua; the
@@ -242,11 +212,8 @@ inline(lua) fn __imgui_combo_str(label: string, current_idx: int, items_nul: str
 @inline inline(lua) fn imgui_end_combo() = "imgui.EndCombo()"
 @inline inline(lua) fn imgui_set_item_default_focus() = "imgui.SetItemDefaultFocus()"
 
-// Clickable row. `selected` controls the highlight state (caller-tracked).
-// Returns true on the frame it's clicked.
 pub @inline inline(lua) fn imgui_selectable(label: string, selected: bool) -> bool = "imgui.Selectable_Bool(label, selected)"
 
-// Boolean checkbox. Returns (changed, new_value).
 pub inline(lua) fn imgui_checkbox(label: string, value: bool) -> (bool, bool) = """
     local v = ffi.new("bool[1]", {value})
     local changed = imgui.Checkbox(label, v)
@@ -273,18 +240,10 @@ inline(lua) fn imgui_is_item_hovered_allow_active() -> bool = """
     return imgui.IsItemHovered(128)
 """
 
-// Reports whether the most recently submitted item is being interacted with
-// (held down). Pair with `imgui_invisible_button` for the canonical
-// click-drag-paint pattern: the button defines the input region; IsItemActive
-// returns true for the duration of the drag, even if the cursor moves
-// outside the region while held.
 pub inline(lua) fn imgui_is_item_active() -> bool = """
     return imgui.IsItemActive()
 """
 
-// Allocates a non-rendered widget at the cursor that captures input
-// (clicks, drags, hover) for its bounding rect. The label must be unique
-// within the window — prefix with `##` to keep it from showing in tooltips.
 pub @scalar_abi inline(lua) fn imgui_invisible_button(label: string, size: Vec2) -> bool = """
     local cache = __imgui_shared_image_packet()
     cache.s.x, cache.s.y = size__x, size__y
@@ -348,8 +307,6 @@ pub @scalar_abi inline(lua) fn imgui_foreground_add_rect_filled(
     dl:AddRectFilled(cache.u1, cache.u2, col_abgr)
 """
 
-// Color overload — packs RGBA floats into ImU32 (0xAABBGGRR) once,
-// avoiding manual bit-twiddling at call sites.
 pub fn imgui_foreground_add_rect_filled(p_min: Vec2, p_max: Vec2, color: Color) {
     imgui_foreground_add_rect_filled(p_min, p_max, color_to_abgr(color))
 }
@@ -382,7 +339,6 @@ pub @scalar_abi inline(lua) fn imgui_foreground_add_circle_filled(
     dl:AddCircleFilled(cache.pos, radius, col_abgr, num_segments)
 """
 
-// Line on the foreground draw list. Width in pixels.
 pub @scalar_abi inline(lua) fn imgui_foreground_add_line(
     p1: Vec2, p2: Vec2, col_abgr: int, thickness: float = 1.0,
 ) = """
@@ -394,10 +350,6 @@ pub @scalar_abi inline(lua) fn imgui_foreground_add_line(
     dl:AddLine(cache.u1, cache.u2, col_abgr, thickness)
 """
 
-// Window draw-list variants of line/circle: clipped + scrolled with the
-// current window (the foreground list ignores both). Absolute screen
-// coords, ImU32 0xAABBGGRR color -- same conventions as
-// imgui_window_add_rect_filled above.
 pub @scalar_abi inline(lua) fn imgui_window_add_line(
     p1: Vec2, p2: Vec2, col_abgr: int, thickness: float = 1.0,
 ) = """
@@ -409,8 +361,6 @@ pub @scalar_abi inline(lua) fn imgui_window_add_line(
     dl:AddLine(cache.u1, cache.u2, col_abgr, thickness)
 """
 
-// Fills a convex quad in the current window's draw list at absolute screen
-// coords. Color packed as 0xAABBGGRR.
 pub @scalar_abi inline(lua) fn imgui_window_add_quad_filled(
     p1: Vec2, p2: Vec2, p3: Vec2, p4: Vec2, col_abgr: int,
 ) = """
@@ -475,8 +425,6 @@ pub @scalar_abi inline(lua) fn imgui_draw_checkerboard(
     return total
 """
 
-// Constrain the next window's resize range. A negative max preserves the
-// current axis; use a huge positive value when there is no authored maximum.
 pub @scalar_abi inline(lua) fn imgui_set_next_window_size_constraints(min_size: Vec2, max_size: Vec2) = """
     local cache = __imgui_shared_image_packet()
     cache.u1.x, cache.u1.y = min_size__x, min_size__y
@@ -484,8 +432,6 @@ pub @scalar_abi inline(lua) fn imgui_set_next_window_size_constraints(min_size: 
     imgui.SetNextWindowSizeConstraints(cache.u1, cache.u2)
 """
 
-// Begin a scrollable child region. Call imgui_end_child() to close.
-// Border off; size = (0, 0) means "fill remaining space".
 @scalar_abi inline(lua) fn __imgui_begin_child_scroll_raw(id: string, size: Vec2) -> bool = """
     local cache = __imgui_shared_image_packet()
     cache.s.x, cache.s.y = size__x, size__y
@@ -591,8 +537,6 @@ pub @scalar_abi inline(lua) fn imgui_set_next_window_pos(pos: Vec2) = """
     imgui.SetNextWindowPos(cache.pos, 0, cache.u1)
 """
 
-// Places the next window's `pivot` point (0..1 of its own size) at `pos`
-// every frame, so a window anchored by a corner stays there while resized.
 pub @scalar_abi inline(lua) fn imgui_set_next_window_pos_pivot(pos: Vec2, pivot: Vec2) = """
     local cache = __imgui_shared_image_packet()
     cache.pos.x, cache.pos.y = pos__x, pos__y
@@ -725,8 +669,6 @@ pub @scalar_abi inline(lua) fn imgui_window_add_image_quad(
     imgui.Image(cache.tex, cache.s, cache.u1, cache.u2, cache.tint, cache.bg)
 """
 
-// Canvas textures are Y-flipped relative to imgui's UV convention, hence the
-// (0,1)-(1,0) default.
 pub fn imgui_canvas_image(
     canvas: Canvas,
     size: Vec2,
@@ -739,11 +681,6 @@ pub fn imgui_canvas_image(
     imgui_canvas_image_raw(texture, size, uv1, uv2, color, border_color)
 }
 
-// `imgui.ImageButton(str_id, tex, size, uv0, uv1, BG, TINT)` -- background
-// before tint. The parameters are named for what they ARE and the call below
-// passes them in imgui's order, so a caller can trust the signature. Only
-// pixels can catch a swap here, which is
-// `imgui_image_button_colors` (demos/imgui).
 pub @scalar_abi inline(lua) fn imgui_image_button_raw(
     id: string,
     texture: int,
@@ -772,25 +709,12 @@ inline(lua) fn __imgui_begin_window_raw(title: string, flags: int) -> bool = """
     return imgui.Begin(title, nil, flags)
 """
 
-// Records the body entry (`imgui_note_body`) so a test can ask whether THIS
-// window's body ran, rather than whether imgui drew anything at all.
 pub fn imgui_begin_window(title: string, flags: int) -> bool {
     let open = __imgui_begin_window_raw(title, flags)
     if open { imgui_note_body(title) }
     return open
 }
 
-// Begin a window that must not disturb the game when it appears.
-//
-// A window takes focus the frame it first appears, which is right for something
-// the user opened to type into and wrong for a debug overlay bound to a
-// function key: hitting F6 should show you something, not change what the
-// keyboard is pointed at. NoFocusOnAppearing (4096) stops that, and NoNav
-// (196608) keeps the window out of keyboard navigation for good, so a later
-// click on it does not start routing keys either.
-//
-// Returns false when the window is collapsed -- skip the contents then, and
-// call imgui_end() regardless (Begin/End must pair whatever it returns).
 fn imgui_begin_debug_window(title: string) -> bool {
     return imgui_begin_window(title, 4096 + 196608)
 }
@@ -845,8 +769,6 @@ pub inline(lua) fn imgui_input_text(
     return changed, ffi.string(buf)
 """
 
-// Fixed-size multiline box; w/h in imgui units (0 = fill available width /
-// default height).
 pub inline(lua) fn imgui_input_text_multiline(
     label: string,
     buffer: string,
@@ -862,14 +784,12 @@ pub inline(lua) fn imgui_input_text_multiline(
 """
 
 
-// End the current widget interaction when its owning tool handles Escape.
 pub @inline inline(lua) fn imgui_clear_active_item() = "imgui.ClearActiveID()"
 
 pub @inline inline(lua) fn imgui_set_keyboard_focus_here(offset: int) = "imgui.SetKeyboardFocusHere(offset)"
 
 pub @inline inline(lua) fn imgui_set_scroll_here_y(center_y_ratio: float) = "imgui.SetScrollHereY(center_y_ratio)"
 
-// Tooltip for the most-recently-submitted item; guard with imgui_is_item_hovered.
 pub @inline inline(lua) fn imgui_set_tooltip(text: string) = "imgui.SetTooltip(text)"
 
 // True when ImGui is capturing the mouse this frame (cursor over a window /
@@ -879,10 +799,6 @@ pub inline(lua) fn imgui_wants_mouse() -> bool = """
     return imgui.C.igGetIO_Nil().WantCaptureMouse
 """
 
-// True only while an imgui text field is being edited (io.WantTextInput)
-// -- NOT WantCaptureKeyboard, which is also true whenever a window merely
-// holds nav focus and would eat hotkeys after any window click. Gate
-// game hotkeys on this so typing in a filter box stays typing.
 pub inline(lua) fn imgui_wants_text_input() -> bool = """
     return imgui.C.igGetIO_Nil().WantTextInput
 """
@@ -894,17 +810,10 @@ inline(lua) fn imgui_enable_docking() = """
     io.ConfigFlags = bit.bor(io.ConfigFlags, 128)
 """
 
-// Full-viewport host node, submitted each frame after NewFrame and before any
-// window Begin, so every imgui_begin window is dockable. PassthruCentralNode
-// (=8) leaves the empty center transparent and click-through, so gameplay
-// under the editor windows still gets the mouse (WantCaptureMouse stays false
-// over the central node). Returns the dockspace id for the builder.
 inline(lua) fn imgui_dockspace_over_viewport() -> int = """
     return imgui.DockSpaceOverViewport(0, imgui.GetMainViewport(), 8, nil)
 """
 
-// The dockspace's central node -- the game view the docked columns leave --
-// as (min, max) screen corners; null before the dockspace exists.
 @scalar_abi inline(lua) fn __imgui_dock_central_pos(id: int) -> Vec2 = """
     local node = imgui.C.igDockBuilderGetCentralNode(id)
     if node == nil then return 0, 0 end
@@ -938,11 +847,6 @@ const IMGUI_DIR_RIGHT: int = 1
 const IMGUI_DIR_UP: int = 2
 const IMGUI_DIR_DOWN: int = 3
 
-// Right column panes, top to bottom: RightTop, RightMiddle, RightBottom,
-// RightFooter. A window that exists only while something is selected needs a
-// pane of its own: it joins its dock node the frame it first appears and takes
-// that node's tab, and it loses that tab for good the moment the author picks
-// one of its node-mates.
 pub enum DockRegion { Left, LeftBottom, RightTop, RightMiddle, RightBottom, RightFooter }
 
 pub value DockPlacement {
@@ -974,8 +878,6 @@ pub struct DockLayout {
     placements: [DockPlacement],
 }
 
-// Registered by the game before its first frame; null means "no coded default",
-// and every window floats until the user docks it.
 pub global IMGUI_DOCK_LAYOUT: DockLayout? = null
 
 // What a null IMGUI_DOCK_LAYOUT applies: one empty dockspace. It carries its own
@@ -999,9 +901,6 @@ fn imgui_dock_layout_stamp(layout: DockLayout) -> string {
 }
 
 fn imgui_dock_layout_stale(layout: DockLayout) -> bool {
-    // An absent stamp is the normal first-boot state, not a read failure.
-    // Probing first keeps stone_file_read's own diagnostic meaningful instead of
-    // logging an error on every fresh checkout.
     if !file_exists(DOCK_LAYOUT_VERSION_FILE) { return true }
     let cur = file_read(DOCK_LAYOUT_VERSION_FILE) ?? return true
     return cur != imgui_dock_layout_stamp(layout)
@@ -1025,7 +924,6 @@ inline(lua) fn imgui_dock_reset(id: int) = """
     imgui.DockBuilderSetNodeSize(id, imgui.GetMainViewport().Size)
 """
 
-// Returns (node in `dir`, remainder).
 inline(lua) fn imgui_dock_split(id: int, dir: int, ratio: float) -> (int, int) = """
     local carved, rest = imgui.DockBuilderSplitNode(id, dir, ratio)
     return carved, rest
@@ -1102,8 +1000,6 @@ fn imgui_build_dock_layout(id: int, layout: DockLayout) {
         imgui_dock_layout_uses(layout, DockRegion::RightFooter) {
         let (carved, _) = imgui_dock_split(rest, IMGUI_DIR_RIGHT, layout.right_ratio)
         right_top = carved
-        // Carve from the bottom up so each ratio is taken against the column
-        // still remaining above it.
         if imgui_dock_layout_uses(layout, DockRegion::RightBottom) ||
             imgui_dock_layout_uses(layout, DockRegion::RightFooter) {
             let (bottom, above) = imgui_dock_split(right_top, IMGUI_DIR_DOWN, layout.right_lower_split)
@@ -1162,7 +1058,6 @@ pub @inline inline(lua) fn imgui_pop_style_color(count: int) = """
     imgui.PopStyleColor(count)
 """
 
-// Greys the next widgets and blocks input. Pair with imgui_end_disabled.
 pub inline(lua) fn imgui_begin_disabled(disabled: bool) = """
     imgui.BeginDisabled(disabled)
 """
@@ -1178,10 +1073,6 @@ pub inline(lua) fn imgui_inject_left_mouse_up() = """
     imgui.C.ImGuiIO_AddMouseButtonEvent(io, 0, false)
 """
 
-// Symmetric companion to `imgui_inject_left_mouse_up`. Used by
-// layer-2 click-path sims to drive `InvisibleButton + IsItemActive`
-// without an OS mouse. Pair with `imgui_set_mouse_pos` to set the
-// cursor location before pressing.
 pub inline(lua) fn imgui_inject_left_mouse_down() = """
     local io = imgui.C.igGetIO_Nil()
     imgui.C.ImGuiIO_AddMouseButtonEvent(io, 0, true)
@@ -1213,8 +1104,6 @@ pub inline(lua) fn imgui_inject_text(text: string) = """
 
 @inline inline(lua) fn imgui_is_item_visible() -> bool = "return imgui.IsItemVisible()"
 
-// Both corners of the last item inside the window's clip rect, where
-// IsItemVisible accepts any overlap.
 inline(lua) fn imgui_is_item_fully_visible() -> bool = """
     local cache = __imgui_shared_image_packet()
     local min = imgui.GetItemRectMin()
@@ -1233,9 +1122,6 @@ pub inline(lua) fn imgui_is_item_activated() -> bool = """
     return imgui.IsItemActivated()
 """
 
-// Symmetric falling-edge detector: true on the single frame the
-// most-recently-submitted item *became* inactive (e.g. user just
-// released a press). Use to commit shape-tool strokes on release.
 pub inline(lua) fn imgui_is_item_deactivated() -> bool = """
     return imgui.IsItemDeactivated()
 """
@@ -1251,21 +1137,14 @@ inline(lua) fn imgui_is_window_hovered() -> bool = """
     return imgui.IsWindowHovered(128)
 """
 
-// Is any imgui item being interacted with (a held button, a slider mid-drag)?
-// GLOBAL, not per-window -- an item activated in any window returns true here,
-// including one activated by keyboard rather than by the mouse. Pair it with
-// imgui_is_window_focused and a mouse-button check if what you actually mean is
-// "this window is being dragged".
 pub inline(lua) fn imgui_is_any_item_active() -> bool = """
     return imgui.IsAnyItemActive()
 """
 
-// Does the current window have focus? Must be called between begin/end.
 inline(lua) fn imgui_is_window_focused() -> bool = """
     return imgui.IsWindowFocused(0)
 """
 
-// Focuses a window by name; for a docked window that selects its tab.
 pub @inline inline(lua) fn imgui_set_window_focus(name: string) = "imgui.SetWindowFocus_Str(name)"
 
 pub @scalar_abi inline(lua) fn imgui_get_window_dock_placement() -> (int, int) = """
@@ -1273,8 +1152,6 @@ pub @scalar_abi inline(lua) fn imgui_get_window_dock_placement() -> (int, int) =
     return tonumber(w.DockId), tonumber(w.DockOrder)
 """
 
-// Reinsert a temporarily floating window at its previous tab position.
-// The new tab may not exist until the dock node has submitted another frame.
 pub inline(lua) fn imgui_restore_window_tab_order(order: int) -> bool = """
     local w = imgui.GetCurrentWindow()
     if w.DockNode == nil or w.DockNode.TabBar == nil then return false end
@@ -1287,7 +1164,6 @@ pub inline(lua) fn imgui_restore_window_tab_order(order: int) -> bool = """
     return true
 """
 
-// Zero detaches the next window; retain its previous ID to restore its tab group.
 pub @inline inline(lua) fn imgui_set_next_window_dock_id(id: int) = "imgui.SetNextWindowDockID(id, 1)"
 
 pub @inline inline(lua) fn imgui_is_window_docked() -> bool = """
@@ -1320,14 +1196,10 @@ inline(lua) fn imgui_end_frame_after_error() = """
     io.ConfigErrorRecoveryEnableAssert = prev
 """
 
-// Close a valid hidden frame without producing or submitting draw data.
 inline(lua) fn imgui_discard_frame() = """
     imgui.EndFrame()
 """
 
-// Like the above but only fires when the value actually CHANGED before the
-// release -- the "commit on release" edge. A slider you grab and let go
-// without moving does not fire.
 pub inline(lua) fn imgui_is_item_deactivated_after_edit() -> bool = """
     return imgui.IsItemDeactivatedAfterEdit()
 """
@@ -1341,15 +1213,11 @@ pub @scalar_abi inline(lua) fn imgui_button_sized(label: string, size: Vec2) -> 
     return imgui.Button(label, cache.s)
 """
 
-// Cumulative drag delta of the given mouse button since drag started.
-// button=0 = left. Returns (dx, dy) in pixels.
 pub @scalar_abi inline(lua) fn imgui_get_mouse_drag_delta(button: int) -> Vec2 = """
     local p = imgui.GetMouseDragDelta(button, 0)
     return p.x, p.y
 """
 
-// Convenience: did the user drag the most-recently-submitted item by
-// at least `threshold` pixels with the left mouse button held?
 pub fn imgui_item_drag_started(threshold: float) -> bool {
     if !imgui_is_item_active() { return false }
     let d = imgui_get_mouse_drag_delta(0)
@@ -1357,9 +1225,6 @@ pub fn imgui_item_drag_started(threshold: float) -> bool {
     let dy = d.y
     return dx * dx + dy * dy > threshold * threshold
 }
-
-// These probes distinguish live bindings from the platform-init failure stub.
-// Consumer: demos/imgui/tests/sims/imgui_api_surface.rock.
 
 // The real cimgui's version string, or "" under the stub (whose `__index`
 // hands back a no-op returning nil).
@@ -1405,12 +1270,6 @@ pub fn imgui_total_vtx_count() -> int {
 // read; the sims here ask "did this body ever run", which is the question.
 global IMGUI_BODIES_RAN: Map<string, int> = map_new()
 
-// OFF unless a sim asked for it. Every window, child and image button in every
-// frame would otherwise pay a hash lookup and write for a table nothing reads --
-// a prop grid alone is one per cell per frame -- and ids built from data
-// (`prop_btn_{i}`, a row key, an entity id) would grow the map without bound in
-// a long editor session. Latched once from the environment rather than read per
-// call, so the hot path is a boolean test.
 global IMGUI_RECORD_BODIES: bool = false
 
 @init
@@ -1432,10 +1291,6 @@ pub fn imgui_body_ran(id: string) -> bool {
     return imgui_body_count(id) > 0
 }
 
-// How many DISTINCT ids beginning with `prefix` executed. A grid emits one id
-// per cell, so this is how a test says "the grid drew cells" without pinning
-// how many -- a count that moves with the asset list would be a test of the
-// asset list.
 pub fn imgui_bodies_with_prefix(prefix: string) -> int {
     let n = 0
     for (id, _) in IMGUI_BODIES_RAN {
@@ -1451,7 +1306,6 @@ pub value ImguiTestItem {
     clip_max: Vec2,
     frame: int,
     visible: bool,
-    // Entirely inside the clip rect; `visible` is any overlap.
     whole: bool,
 }
 
@@ -1485,7 +1339,6 @@ pub fn imgui_test_note_item(id: string) {
 
 pub fn imgui_test_item_submitted(id: string) -> bool {
     let item = IMGUI_TEST_ITEMS.get(id) ?? return false
-    // Sims resume before draw, so the latest submitted item is one frame_seq old.
     let age = frame_seq - item.frame
     return age >= 0 && age <= 1
         && item.max.x > item.min.x && item.max.y > item.min.y
@@ -1514,11 +1367,8 @@ pub fn imgui_test_item_revealed(id: string, whole: bool, relative: Vec2?) -> boo
     return true
 }
 
-// Paused draw-driven sims use the same reveal request as coroutine helpers.
 pub fn imgui_test_request_reveal(id: string) { IMGUI_TEST_REVEAL_TARGET = id }
 
-// Pixel reads need `whole`; clicks need their requested point inside the clip,
-// even when an oversized item cannot fit entirely in its scroll child.
 pub co fn imgui_test_reveal(id: string, whole: bool = false, relative: Vec2? = null) -> Coroutine<Wait> {
     if !imgui_test_item_submitted(id) {
         error("imgui semantic target '{id}' is absent, stale, or empty")
@@ -1540,7 +1390,6 @@ fn imgui_test_item_point(id: string, relative: Vec2) -> Vec2? {
         return null
     }
     let item = IMGUI_TEST_ITEMS[id]
-    // Treat both normalized endpoints as points inside the item, not its edge.
     let size = item.max - item.min
     let inset = v(min(size.x * 0.5, 0.5), min(size.y * 0.5, 0.5))
     let interior = size - inset * 2.0

@@ -1,7 +1,5 @@
-// Versioned observation at consumption. Disabled hooks allocate no payloads.
 pub global UI_SUBMISSION_PROBE_ON: bool = false
 pub global UI_SUBMISSION_PROBE_WINDOWLESS: bool = false
-// Only an explicit begin roots the payload builders in the emitted program.
 global UI_SUBMISSION_PROBE_BATCH_HOOK: (fn(string, RenderBatch, string, Vec2?))? = null
 global UI_SUBMISSION_PROBE_TEXT_HOOK: (fn(TextLayoutEmissionProbe, string))? = null
 global UI_SUBMISSION_PROBE_PASS_HOOK: (fn(GpuPass))? = null
@@ -303,8 +301,6 @@ pub fn ui_submission_probe_refusal(kind: string, reason: string) {
     if !stone_ui_probe_refuse(kind, json_encode(json_object(m))) { error("UI probe rejected refusal observation") }
 }
 
-// Keep legacy identity-container construction inside its owning package.
-// The fixture still crosses the ordinary validator and executor entry point.
 pub fn ui_submission_probe_empty_pass(viewport: GpuRect) -> bool {
     return submit_pass(GpuPass { target: GpuTarget::Window, load: GpuLoad::Load,
         viewport: viewport, draws: [] })

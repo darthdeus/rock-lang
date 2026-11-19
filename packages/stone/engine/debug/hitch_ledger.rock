@@ -39,16 +39,13 @@ pub struct HitchLedger {
     loud_ms: float,
     warmup_frames: int,
     window_secs: float,
-    // Wall time the current window started; negative until the first frame.
     window_start: float,
     dump_path: string,
-    // The ring. `count` records written; slot = count % HITCH_RING_FRAMES.
     frame: NativeBuffer<int>,
     frame_ms: NativeBuffer<float>,
     logic_ms: NativeBuffer<float>,
     render_ms: NativeBuffer<float>,
     present_ms: NativeBuffer<float>,
-    // Main-thread CPU time of the frame; negative when the clock is unknown.
     cpu_ms: NativeBuffer<float>,
     last_cpu_s: float,
     heap_kb: NativeBuffer<float>,
@@ -72,11 +69,9 @@ pub struct HitchLedger {
     last_aborts: int,
     last_compiles: int,
     last_flushes: int,
-    // Tier two scratch for the frame in flight.
     cur_slow_ms: float,
     cur_slow_name: string,
     cur_slow_phase: string,
-    // Window and lifetime tallies by cause.
     win_hitches: int,
     win_gc: int,
     win_alloc: int,
@@ -100,7 +95,6 @@ pub struct HitchLedger {
     last_cause: string,
     last_slow_name: string,
     last_logic_system: string,
-    // Log budget: at most HITCH_LOG_LINES_PER_SECOND lines per wall second.
     log_second: int,
     log_used: int,
 }
@@ -165,7 +159,6 @@ fn hitch_ledger_new() -> HitchLedger {
 
 pub global HITCH: HitchLedger = hitch_ledger_new()
 
-// Tier two: called around every lifecycle system by the systems runner.
 fn hitch_system_begin() -> float {
     if !HITCH.enabled && !PERF_FRAME_CAPTURE { return 0.0 }
     return stone_get_time()
@@ -181,11 +174,6 @@ fn hitch_system_end(name: string, phase: string, t0: float) {
     }
 }
 
-// Which record explains the frame. Present and upload waits are outside
-// Lua; time the main thread spent off the CPU beyond the present wait is a
-// wait nothing here measures; a heap drop means a sweep finished inside this
-// frame; a heap burst is allocation; a start or abort burst is the recorder;
-// otherwise the slower CPU phase, named by its slowest system.
 fn hitch_classify(frame_ms: float, logic_ms: float, render_ms: float,
                   present_ms: float, heap_delta_kb: float, starts: int,
                   aborts: int, upload_us: int, cpu_ms: float = -1.0) -> string {
@@ -217,8 +205,6 @@ fn hitch_tally(cause: string) {
     else { HITCH.win_render += 1; HITCH.total_render += 1 }
 }
 
-// Several draws can require one image before its load completes, so a frame's
-// wait list repeats paths; keep each once, in first-wait order.
 fn hitch_distinct_paths(paths: [string]) -> [string] {
     let seen: Map<string, bool> = map_new()
     let out: [string] = vec_new()
@@ -230,7 +216,6 @@ fn hitch_distinct_paths(paths: [string]) -> [string] {
     return out
 }
 
-// The log line names the first few files; the ledger TSV keeps every path.
 fn hitch_residency_log_summary(paths: [string]) -> string {
     let names: [string] = vec_new()
     for path in paths {
@@ -247,8 +232,6 @@ fn hitch_logs_frame(cause: string, frame_ms: float) -> bool {
     return cause != "present" || frame_ms >= HITCH.loud_ms
 }
 
-// Logs the window tally once per HITCH_WINDOW_SECS when the window had any
-// hitch, so a quiet window logs nothing. `now` is wall seconds.
 fn hitch_window_tick(now: float) {
     if HITCH.window_start < 0.0 { HITCH.window_start = now; return }
     if now - HITCH.window_start < HITCH.window_secs { return }
@@ -268,8 +251,6 @@ fn hitch_log_allowed(now: float) -> bool {
     return true
 }
 
-// Called once per completed frame by the runner, after the phase timers
-// for this frame are final.
 fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) {
     if !HITCH.enabled && !PERF_FRAME_CAPTURE { return }
     gc_step_frame_close()
@@ -362,8 +343,6 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     log_info("HITCH", "frame={frame} ms={ms} cause={cause} logic={l} render={r} present={p} cpu={c} heap={h}MB dheap={dh}MB starts={starts} aborts={aborts} load_us={load_us} upload_us={upload_us} decode_wait_us={decode_wait_us} residency_us={RESIDENCY_FRAME_MISS_WAIT_US} residency_paths={hitch_residency_log_summary(residency_paths)} slowest={slow_phase}:{slow_name} {s}ms")
 }
 
-// The window tally by cause, reset on read. Empty when nothing crossed the
-// threshold.
 fn hitch_window_summary() -> string {
     if !HITCH.enabled || HITCH.win_hitches == 0 { return "" }
     let s = "hitches={HITCH.win_hitches} gc={HITCH.win_gc} alloc={HITCH.win_alloc} jit={HITCH.win_jit} present={HITCH.win_present} upload={HITCH.win_upload} residency={HITCH.win_residency} blocked={HITCH.win_blocked} logic={HITCH.win_logic} render={HITCH.win_render}"
@@ -380,7 +359,6 @@ fn hitch_window_summary() -> string {
     return s
 }
 
-// Sim and tooling accessors.
 pub fn hitch_count_for(cause: string) -> int {
     if cause == "gc" { return HITCH.total_gc }
     if cause == "alloc" { return HITCH.total_alloc }
@@ -394,9 +372,6 @@ pub fn hitch_count_for(cause: string) -> int {
     return 0
 }
 
-// Dump the ring as a TSV at exit when `HITCH_LEDGER_PATH` is set. Returns
-// the rows written, or -1 when the path could not be opened; the caller
-// logs either way, so a run that asked for a file never silently lacks one.
 fn hitch_ledger_flush() {
     if !HITCH.enabled || HITCH.dump_path == "" { return }
     let n = min(HITCH.count, HITCH_RING_FRAMES)

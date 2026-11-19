@@ -64,11 +64,6 @@ fn bloom_sample(src: Sampler2D, uv: Vec2, lo: Vec2, hi: Vec2) -> Vec4 {
     return top + (bottom - top) * fraction.y
 }
 
-// Soft-knee bloom extract (Karis / COD): a hard `brightness > threshold`
-// step makes bloom pop on and off as a pixel crosses the threshold, because
-// 1.001 passes at full intensity while 0.999 contributes nothing. Instead
-// ramp the contribution quadratically across [threshold - knee,
-// threshold + knee]. knee <= 0 restores the hard cut.
 fn bloom_knee_extract(pixel: Vec4, threshold: float, knee: float) -> Vec4 {
     let brightness = max(max(pixel.r, pixel.g), pixel.b)
 
@@ -81,15 +76,9 @@ fn bloom_knee_extract(pixel: Vec4, threshold: float, knee: float) -> Vec4 {
         contribution = if brightness > threshold { brightness } else { 0.0 }
     }
 
-    // Scale by how much of the pixel clears the knee, preserving hue.
-    // max() on the divisor guards the black-pixel 0/0.
     return pixel * (contribution / max(brightness, 0.0001))
 }
 
-// 13 taps in a partitioned box: four overlapping 2x2 quads (the inner
-// ring, half the total weight) plus a 3x3 grid at 2-texel spacing. The
-// arrangement exists to kill the temporal pulsing plain bilinear box
-// downsampling produces as a small bright feature crosses texel centres.
 fn bloom_down_13(src: Sampler2D, tc: Vec2, texel: Vec2, lo: Vec2, hi: Vec2) -> Vec4 {
     let a = bloom_sample(src, tc + v(-2.0, -2.0) * texel, lo, hi)
     let b = bloom_sample(src, tc + v(0.0, -2.0) * texel, lo, hi)
@@ -111,9 +100,6 @@ fn bloom_down_13(src: Sampler2D, tc: Vec2, texel: Vec2, lo: Vec2, hi: Vec2) -> V
         + (j + k + l + m) * 0.125
 }
 
-// `gain` is the pyramid's normalisation, and only the FIRST pass carries a
-// value other than 1: every later level is a weight-1 average of the one
-// before, so scaling level 0 scales the whole stack. See pyramid_gain.
 @shader(fragment)
 fn bloom_prefilter_frag(@textures t: SrcTex, @uniform u: BloomPrefilterU, tc: Vec2) -> Vec4 {
     return bloom_knee_extract(
@@ -126,13 +112,6 @@ fn bloom_down_frag(@textures t: SrcTex, @uniform u: BloomDownU, tc: Vec2) -> Vec
     return bloom_down_13(t.src_tex, tc, u.src_texel, u.src_uv_lo, u.src_uv_hi) * u.gain
 }
 
-// 3x3 tent, weights 1/2/4 over 16. Output is ADDED into the level above by
-// BlendMode::Accumulate, so the alpha this returns is irrelevant -- which is
-// exactly why Accumulate and not Additive.
-//
-// `scatter` scales each rung's contribution, so level k lands at scatter^k:
-// 1.0 weights every octave equally (widest), lower values attenuate the
-// coarse levels and pull the halo tight. It is the wide-vs-tight knob.
 @shader(fragment)
 fn bloom_up_frag(@textures tex: SrcTex, @uniform u: BloomUpU, tc: Vec2) -> Vec4 {
     let t = u.src_texel

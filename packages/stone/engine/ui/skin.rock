@@ -1,26 +1,12 @@
-// Skinned UI drawing. UiSkin describes one kit asset: image region,
-// 9-slice corner, content padding, all in SOURCE px. The engine owns
-// the mechanism (this file); host-projected rows hold the mutable skins.
-// Games keep hot-reloadable handles to their instances. corner == (0,0)
-// marks a fixed-aspect asset
-// (ornamented art that must not stretch) -- drawn whole; place it with
-// take_center(native_size(s)) or a uniform multiple of it.
-
 pub struct UiSkin {
     image: SampledTexture,
     source: IRect,
     corner: IVec2 = iv(0, 0),
-    // Content insets from each edge (where text/children sit). Fixed
-    // border distances like the corners -- they don't stretch.
     pad_l: float = 0.0,
     pad_t: float = 0.0,
     pad_r: float = 0.0,
     pad_b: float = 0.0,
-    // Source px -> design units. The kit is painted hi-res; 0.25 draws
-    // a 1024px-wide panel as 256 design units.
     scale: float = 1.0,
-    // Feel-profile tag (ui/feel.rock), resolved when a widget wearing
-    // this skin fires an interaction edge. "" = the default feel.
     feel: string = "",
 }
 
@@ -49,7 +35,6 @@ fn UiRect.skin_batch(r, s: UiSkin, tint: Color = WHITE, pipeline: Pipeline? = nu
     return batch
 }
 
-// Design-space size the asset was painted for.
 @pure fn UiSkin.native_size(s) -> Vec2 {
     return v(s.source.w * s.scale, s.source.h * s.scale)
 }

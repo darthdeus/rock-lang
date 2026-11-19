@@ -1,4 +1,3 @@
-// Decoder policy is latched on first use.
 inline(lua) fn cw7_image_stub_process(stubbed: bool) = """
     local function quote(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
     local mode = stubbed and "1" or "0"
@@ -33,8 +32,6 @@ inline(lua) fn cw7_image_stub_process(stubbed: bool) = """
     if not result.ok then error(result.value, 0) end
 """
 
-// Legal JPEG metadata segments put the size header beyond the bounded
-// native header probe while keeping the complete file decodable.
 inline(lua) fn cw7_late_header_jpeg(path: string) = """
     local hex = ([=[
         ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912

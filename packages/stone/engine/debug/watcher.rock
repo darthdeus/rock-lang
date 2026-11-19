@@ -4,8 +4,6 @@ pub struct FileWatcher {
     current_shader_name: string?,
 }
 
-// Registry entry for a compiled rock_shader program, keyed by its rock_shader
-// key. A reload re-registers under the same key (`publish_shader_registration`).
 pub value WatcherShader {
     shader: ShaderId,
 }
@@ -15,12 +13,6 @@ pub global WATCHER: FileWatcher = FileWatcher {
     shaders: map_new(),
     current_shader_name: null
 }
-
-// -- rock_shader in-game shader compilation --
-// The compiler emits one __rock_shader_register(key, glsl) per distinct
-// rock_shader pair at chunk top level, so a reload re-runs it with the new
-// source. WATCHER.shaders is the name->ShaderId registry pipeline() resolves
-// through.
 
 // What makes a re-registration a NO-OP, per key. The GLSL source alone is NOT
 // enough: a compiler layout change can move a member's offset without touching
@@ -49,17 +41,12 @@ value PendingShader {
 global PENDING_SHADER_SRCS: Map<string, PendingShader> = map_new()
 
 
-// Decoded compiler metadata used by semantic submission admission. This is a
-// runtime copy of the compiler wire, not a second shader planner: names, order,
-// kinds and capacities arrive from `ShaderInterfacePlan::semantic_wire`, while
-// backend maps below say which physical generation made that metadata usable.
 pub value SemanticShaderMember {
     name: string,
     kind: int,
     capacity: int,
 }
 
-// Fingerprints carry 53 exact bits, wider than a value struct's int field.
 pub value SemanticShaderBlock {
     role: string,
     name: string,
@@ -387,8 +374,6 @@ value UniformBlockDecl {
     fingerprint: float,
     members: [string],
     offsets: [int],
-    // Per member, parallel to `members`. `kinds` is the compiler's wire-kind
-    // code; `capacities` and `strides` are 0 for a scalar member.
     kinds: [int],
     capacities: [int],
     strides: [int],
@@ -447,9 +432,6 @@ value ShaderTextureSlots {
 // bound by name and a caller-chosen unit.
 global SHADER_TEXTURE_SLOTS: Map<string, ShaderTextureSlots> = map_new()
 
-// The compiler resolves whether an artifact owns its vertex stage. Fullscreen
-// geometry can only realize the compiler-owned stage; explicit stages may
-// observe vertex identity and need a future geometry variant.
 pub global SHADER_COMPILER_FULLSCREEN_VERTEX: Map<string, bool> = map_new()
 
 inline(lua) fn __shader_src_hash(s: string) -> int = """
@@ -510,7 +492,6 @@ pub @nomangle fn __rock_shader_register(key: string, src: string, texture_slots:
         let p = prev
         // unchanged source AND layout -> no-op
         if p.src_hash == h.src_hash && p.block_fingerprint == h.block_fingerprint && p.fullscreen_vertex == h.fullscreen_vertex && p.semantic_fingerprint == h.semantic_fingerprint {
-            // Reload can preserve the registration before this registry existed.
             if WATCHER.shaders.contains(key) && !GL_SHADER_ARTIFACTS.contains(key) {
                 publish_gl_shader_semantic(key, semantic)
             }
@@ -579,7 +560,6 @@ fn load_pending_shader_sources() {
 fn rock_shader_compile_now(key: string, src: string, h: ShaderRegistrationKey, texture_slots: [string], blocks: [UniformBlockDecl], fullscreen_vertex: bool, semantic: SemanticShaderInterface) {
     let (shader, err) = new_shader_safe(src)
     if shader == null {
-        // Loud + keep the previous program; hash unset -> retried on next reload.
         log_error("SHADER", "rock_shader: GL compile failed for {key}: {err}")
         return
     }
@@ -594,9 +574,6 @@ fn rock_shader_compile_now(key: string, src: string, h: ShaderRegistrationKey, t
     // nothing left to notice.
     let live = build_uniform_blocks(key, sid, blocks)
     if live == null {
-        // Destroy the candidate and keep whatever was live before. The hash
-        // stays unset, so an edit retries rather than being skipped as
-        // unchanged -- the same contract the compile failure above has.
         stone_destroy_shader(transmute(sid.0))
         log_error("SHADER", "rock_shader: `{key}` not registered -- its uniform blocks were rejected (see above); the previous program stays live")
         return
@@ -610,15 +587,8 @@ fn publish_shader_registration(key: string, sid: ShaderId, h: ShaderRegistration
                                semantic: SemanticShaderInterface, live: [ShaderUniformBlock]) {
     let existing = WATCHER.shaders.get(key)
     if existing != null {
-        // Remap under the same key: pipelines resolve the ShaderId through
-        // WATCHER.shaders at draw time, so replacing the entry is what they see.
         let superseded = existing.shader
         WATCHER.shaders.insert(key, WatcherShader { shader: sid })
-        // The key is the only thing that named the old program, so remapping it
-        // is what makes the program unreachable. Destroy AFTER the remap, so no
-        // window exists where the key names a destroyed program. The ledger
-        // cannot catch a miss here: a boot-owned orphan stays live, so it is
-        // neither an `extras` nor a `missing` and the boundary diff is clean.
         if superseded.0 != sid.0 {
             stone_destroy_shader(transmute(superseded.0))
         }
@@ -686,18 +656,9 @@ fn bind_sampled_texture_slot(shader_name: string, slot: int, source: SampledText
     stone_bind_sampler(slot, texture_filter_to_int(sampling), sampled_texture_sampler_key(source))
 }
 
-// PER-DRAW texture-filled state: slot N of the program about to draw was bound
-// during THIS draw's setup. Same failure class as the unfilled uniform block --
-// a slot nobody binds reads whatever the last draw left on that unit, which is
-// a plausible image rather than an obvious one.
-//
-// Per Pass draw, not per frame. Frame-sticky state lets an earlier pass that
-// bound slot 1 hide a later pass that forgot it, since the unit still holds a
-// live texture. The audit removes the program's marks after every Pass draw.
 global TEXTURE_SLOT_FILLED: Map<string, int> = map_new()
 global UNFILLED_TEXTURE_SLOT_COUNT: int = 0
 
-// Shared textures remain filled for one program activation; set_shader clears this tier.
 global TEXTURE_SLOT_ACTIVATION: Map<string, int> = map_new()
 
 struct ShaderSharedTexture {
@@ -707,9 +668,6 @@ struct ShaderSharedTexture {
 }
 global SHADER_SHARED_TEXTURES: Map<string, [ShaderSharedTexture]> = map_new()
 
-// A program-wide input, rebound on every activation through the same sampler
-// owner as lights. Binding once at registration would leave it vulnerable to
-// another program using the same unit between two draws.
 pub fn shader_set_shared_texture(shader: string, sampler: string, source: SampledTexture,
                                   sampling: TextureFilter = TextureFilter::Nearest) {
     assert(shader_texture_slot(shader, sampler) >= 0, "shared texture requires a declared sampler")
@@ -757,8 +715,6 @@ pub fn mark_texture_slot_activation(shader_name: string, slot: int) {
     TEXTURE_SLOT_ACTIVATION[shader_name] = cur | (1 << slot)
 }
 
-// Both tiers, so the injection suppresses the whole account rather than the
-// per-draw half of it.
 fn texture_slot_marks_suppressed() -> bool {
     static force_unfilled = os_getenv("STONE_TEXTURE_SLOT_FORCE_UNFILLED") == "1"
     return force_unfilled
@@ -768,8 +724,6 @@ fn clear_texture_slot_activation(shader_name: string) {
     TEXTURE_SLOT_ACTIVATION.remove(shader_name)
 }
 
-// Check the program that just drew, then FORGET the per-draw half. Returns the
-// number of slots it declared but did not have bound for this draw.
 pub fn audit_texture_slots_for_draw(shader_name: string) -> int {
     let declared = shader_texture_slot_count(shader_name)
     if declared == 0 {
@@ -781,10 +735,6 @@ pub fn audit_texture_slots_for_draw(shader_name: string) -> int {
     for slot in 0..declared {
         if (filled & (1 << slot)) == 0 {
             missing = missing + 1
-            // Explicit site key, not the 2-arg log_once: the auto-injected
-            // __SITE__ is this one line, so a shared key reports the first
-            // (shader, slot) and swallows every other one for the run -- which
-            // makes the log useless exactly when several programs are wrong.
             log_once("SHADER",
                 "`{shader_name}` drew with slot {slot} of its @textures group never bound -- it reads whatever the previous draw left on that unit",
                 "unfilled-texture-slot:{shader_name}:{slot}")
@@ -799,8 +749,6 @@ pub fn stone_unfilled_texture_slot_count() -> int {
     return UNFILLED_TEXTURE_SLOT_COUNT
 }
 
-// Shared inputs stay filled until the program is rebound. Missing optional
-// samplers are ignored; sampler-to-unit assignments were set at link time.
 fn shader_bind_sampled_for_activation(shader_name: string, sampler: string, source: SampledTexture,
     sampling: TextureFilter = TextureFilter::Nearest) {
     let slot = shader_texture_slot_if_present(shader_name, sampler)
@@ -817,18 +765,12 @@ fn bind_sampled_texture_slot_for_activation(source: SampledTexture, slot: int,
     return ok
 }
 
-// Release the sampler a `shader_bind_sampled_for_activation` took, resolving the
-// same slot rather than assuming a number -- the slots are compiler-assigned and
-// differ per program (grass and the sprite batch get 2 and 1 for one spelling).
 fn release_activation_sampler(shader_name: string, sampler: string) {
     let slot = shader_texture_slot_if_present(shader_name, sampler)
     if slot < 0 { return }
     sampler_release_unit(slot)
 }
 
-// Bind `canvas`'s DEPTH attachment, per draw. The required form: a caller
-// asking for depth knows the program declares a depth sampler, and a canvas
-// with no depth attachment is a caller error rather than a shape difference.
 fn shader_bind_canvas_depth(shader_name: string, sampler: string, canvas: Canvas) {
     let slot = shader_texture_slot(shader_name, sampler)
     if slot < 0 { return }
@@ -838,9 +780,6 @@ fn shader_bind_canvas_depth(shader_name: string, sampler: string, canvas: Canvas
             "canvas-without-depth:{shader_name}:{sampler}")
         return
     }
-    // Nearest, explicitly: depth is read per-texel, and the alternative is
-    // inheriting whatever sampler the previous draw left on this slot. Released
-    // by `release_depth_sampler` at the caller's teardown.
     if bind_canvas_depth_to_slot(canvas, slot, TextureFilter::Nearest) {
         mark_texture_slot_filled(shader_name, slot)
     }
@@ -880,8 +819,6 @@ fn shader_texture_slot_impl(shader_name: string, sampler: string, required: bool
     return -1
 }
 
-// How many slots `shader_name`'s group declares; 0 when it has none. The
-// denominator for the exact-cardinality check on a slot-addressed Pass.
 pub fn shader_texture_slot_count(shader_name: string) -> int {
     let slots = SHADER_TEXTURE_SLOTS.get(shader_name)
     if slots == null { return 0 }
@@ -914,14 +851,6 @@ pub fn reload_exact_file(changed: string) {
     }
 }
 
-// Drain the filesystem watcher and hot-reload every changed asset. The watcher
-// (stone-rs) collects events on its own thread; this just polls the result.
-// Images reload in place via stone_reload_image (handle preserved). Asset paths
-// are registered by the loaders (load_image_asset) when ASSET_DEV_MODE is on.
-// Hot-reload events this run has been handed, whatever kind of asset they named.
-//
-// `reload_changed_asset` only bumps a counter for images, which cannot see an
-// event for a font or any other asset type.
 pub global ASSET_CHANGE_EVENTS: int = 0
 
 fn poll_and_reload_assets() {
@@ -937,15 +866,8 @@ fn poll_and_reload_assets() {
     }
 }
 
-// Monotonic count of successful image hot-reloads. A reload can change an
-// image's pixel SIZE in place (same handle), so games that cache per-image
-// data (sprite dims, src rects) compare against this once per frame and
-// refresh their caches on a bump -- no per-draw image_dims() FFI needed.
 global IMAGE_RELOAD_GEN: int = 0
 
-// `changed` is the resolved on-disk path the loader registered. Reload every
-// image whose asset resolves to it (a path may back more than one handle).
-// One source of truth: IMAGE_PATHS (handle -> asset-relative path).
 pub fn reload_changed_asset(changed: string) {
     for (handle, rel) in IMAGE_PATHS {
         if asset_path(rel) == changed {
@@ -958,7 +880,6 @@ pub fn reload_changed_asset(changed: string) {
         }
     }
 
-    // Sounds: re-decode in place behind the same handle.
     for (_, sd) in SOUND_REGISTRY {
         if sd.path != "" && asset_path(sd.path) == changed {
             if stone_reload_sound(sd.backend_id, changed) {
@@ -969,8 +890,6 @@ pub fn reload_changed_asset(changed: string) {
         }
     }
 
-    // Fonts: re-rasterize in place. fd.path is the resolved path, matched
-    // directly. One .ttf backs one font per pixel size; reload_font handles each.
     for (e, fd) in FONT_REGISTRY {
         if fd.path != "" && fd.path == changed {
             reload_font(Font { handle: e }, changed)
@@ -995,22 +914,13 @@ pub fn set_shader(shader_id: string) {
         shader_release_shared_textures()
         set_shader_raw(item.shader)
         WATCHER.current_shader_name = clone_into(shader_id, map_storage(shaders))
-        // A new activation: nothing this program's previous bind left on a unit
-        // is guaranteed still there, so its activation marks stop answering.
         clear_texture_slot_activation(shader_id)
         shader_bind_shared_textures(shader_id)
     } else {
-        // Never fires today (every set_shader caller names a registered shader),
-        // which is exactly why a future miss must be loud rather than a silent
-        // no-op that leaves whatever program was bound (the class that masked the
-        // custom_draw desync -- world_shader_after_custom_draw).
         log_once("SHADER", "set_shader: no shader registered for '{shader_id}'; keeping previously bound program")
     }
 }
 
-// The closing half of a `set_shader` bracket. The name is cleared with the
-// bind: the implicit unit-0 texture-slot account (`audit_implicit_texture_slot`)
-// reads it, so a stale one would attribute the next draw to this program.
 pub fn end_shader() {
     shader_release_shared_textures()
     unset_shader()
@@ -1030,10 +940,6 @@ pub fn with_canvas(color_canvas: Canvas, f: fn() -> ()) {
     set_canvas_handle(prior)
 }
 
-// Bracket `f` with a blend-mode change, restoring the caller's PRIOR
-// mode afterward (true save/restore, nests properly). The prior mode
-// comes from the CURRENT_BLEND shadow global -- no stone-side
-// state-read API needed, same trick as with_draw_pool.
 pub fn with_blend_mode(mode: BlendMode, f: fn() -> ()) {
     let prev = CURRENT_BLEND
     set_blend_mode(mode)

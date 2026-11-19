@@ -1,18 +1,3 @@
-// UI feel -- interaction feedback (audio + VFX) per skinned element.
-// The engine owns the emit sites: widgets (widgets.rock), the focus
-// core (focus.rock), and game panel layers call ui_event at their
-// interaction edges, passing geometry and the skin's `feel` tag. The
-// game owns the content: one default UiFeel plus named profiles,
-// registered at init (the ui_nav_use pattern). Resolution happens at
-// the EVENT, not at draw or registration -- so init order between
-// skins and feels doesn't matter and re-registering a tag takes effect
-// on the next event (hot-reload friendly). A profile's unset halves
-// inherit the default's independently (play ?? default, fx ?? default).
-// An unknown tag warns once and uses the default. Emit counters sit
-// ABOVE the STONE_QUIET gate: sims run quiet but still observe
-// emissions; ui_feel_plays counts playback callbacks that accepted the
-// event; simulations cover slider-drag sounds and bus routing.
-
 pub enum UiEvent {
     Hover, Click, FocusMove, SliderTick, SliderDragStart, SliderDragEnd,
     TabSwitch, TextEdit, TextSubmit, Open, Close,
@@ -20,11 +5,6 @@ pub enum UiEvent {
 
 pub value UiFeel {
     play: (fn(UiEvent) -> bool)? = null,
-    // skin is the emitting widget's or panel's skin -- null only at
-    // focus-move, which moves BETWEEN widgets and belongs to none, and
-    // for a panel that registers no frame. Lets an fx redraw the subject
-    // (ghosts) without a parallel hook. world_anchor is present when a
-    // screen-sized subject must remain attached to a point in the scene.
     fx: ((UiEvent, Vec2, UiRect, Entity<UiSkin>?, Vec2?) -> ())? = null,
 }
 
@@ -55,8 +35,6 @@ pub fn ui_feel_register(tag: string, f: UiFeel) {
     UI_FEEL.named.insert(tag, f)
 }
 
-// One interaction edge. `at`/`r` default to zero geometry for the
-// positionless emitters (focus-move, panel open/close).
 pub fn ui_event(ev: UiEvent, at: Vec2 = v(0.0, 0.0), r: UiRect = UiRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, feel: string = "", skin: Entity<UiSkin>? = null, world_anchor: Vec2? = null) {
     let s = UI_FEEL
 
@@ -106,8 +84,6 @@ pub fn ui_event(ev: UiEvent, at: Vec2 = v(0.0, 0.0), r: UiRect = UiRect { x: 0.0
     }
 }
 
-// Lifetime emit count per event -- what the contract sim asserts
-// (playback itself is silenced under STONE_QUIET).
 pub fn ui_event_count(ev: UiEvent) -> int {
     let s = UI_FEEL
     return match ev {
@@ -125,8 +101,6 @@ pub fn ui_event_count(ev: UiEvent) -> int {
     }
 }
 
-// Lifetime count of events whose resolved bank was non-empty -- the
-// would-play oracle for sound resolution under quiet sims.
 pub fn ui_feel_plays() -> int {
     return UI_FEEL.plays_n
 }

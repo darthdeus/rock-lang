@@ -7,22 +7,13 @@ value ScreenshotRequest {
 }
 
 global SCREENSHOT_PENDING: Vec<ScreenshotRequest> = vec_new()
-// What the host did with capture requests: a tally of files written and the
-// dimensions of the last one.
 pub global SCREENSHOT_CAPTURE_FAILURES: int = 0
 pub global SCREENSHOT_COMPLETED_COUNT: int = 0
 pub global SCREENSHOT_LAST_COMPLETED_PATH: string = ""
-// The ACTUAL saved PNG dimensions of the last completed capture,
-// which can differ from the requested drawable size when max_size resizes
-// it -- callers that need honest dimensions read these, not the pre-resize
-// size a request was armed with.
 pub global SCREENSHOT_LAST_COMPLETED_WIDTH: int = 0
 pub global SCREENSHOT_LAST_COMPLETED_HEIGHT: int = 0
 
-// Internal state
 global screenshot_taken_via_env: bool = false
-// Counts runner frames, including render-skipped seek frames, so it shares
-// FRAME_COUNT's denominator.
 global screenshot_frame_counter: int = 0
 
 @init
@@ -41,9 +32,6 @@ fn screenshot_capture_failed(path: string, reason: string) {
     log_error("STONE", "Failed to save screenshot to {path}: {reason}")
 }
 
-// max_size <= 0 uses ENGINE.screenshot_max_size (the historical global
-// default); a caller that needs a specific bounded output size passes its
-// own positive value without disturbing that default for anyone else.
 pub fn take_screenshot(path: string = "screenshot.png", max_size: int = -1,
         on_complete: (fn(string, bool))? = null) {
     sim_submit_guard("take_screenshot")
@@ -88,19 +76,12 @@ fn update_screenshot_system() {
         take_screenshot()
     }
 
-    // Check if we should take a screenshot via environment variable.
-    // If FRAME_COUNT is set and > 1, wait until the last frame so things
-    // that need warm-up (e.g. video decode) have a chance to produce
-    // real output before the capture.
     if !screenshot_taken_via_env {
         let take_screenshot_env = os_getenv("TAKE_SCREENSHOT")
         if take_screenshot_env != null && take_screenshot_env == "1" {
             let target_frame = get_env_int("FRAME_COUNT", 1)
             if target_frame < 1 { target_frame = 1 }
             if screenshot_frame_counter >= target_frame {
-                // STONE_SCREENSHOT_PATH isolates concurrent bounded runs:
-                // the process chdirs to the workspace root, so the relative
-                // default would race across parallel gate processes.
                 take_screenshot(os_getenv("STONE_SCREENSHOT_PATH") ?? "screenshot.png")
                 screenshot_taken_via_env = true
             }

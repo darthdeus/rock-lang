@@ -10,8 +10,6 @@
 // So: `is_key_pressed` drives the GAME; `tool_key_pressed` drives the TOOLS.
 // A game's own editor keys are game input.
 
-// The typed vocabulary is the one production binding surface. Dynamic names
-// remain an escape hatch only for the test injector below.
 pub enum ToolKey {
     F3, F5, F6, F7, F8, F10, F11, F12,
     LeftBracket, RightBracket, Backslash,
@@ -84,9 +82,6 @@ fn tool_key_name(key: ToolKey) -> string {
     return id
 """
 
-// The resolved id, or negative. An UNMAPPED name is reported once per NAME --
-// the dedup key carries the key, because a site-keyed `log_once` would report
-// the first dead shortcut and swallow every other one.
 fn tool_key_id_dynamic(key: string) -> int {
     let id = __tool_imgui_key_id(key)
     if id == -1 {
@@ -121,8 +116,6 @@ fn tool_key_id(key: ToolKey) -> int {
     return imgui.C.igIsKeyDown_Nil(id) and true or false
 """
 
-// Test hook: queue a key DOWN event, consumed at the next NewFrame, so the
-// shortcuts can be driven headless. Driven by STONE_TIMELINE_KEY(_AT).
 @nomangle inline(lua) fn __tool_imgui_inject_key_id(id: int) = """
     if not (_G.imgui and imgui.C) then return end
     imgui.C.ImGuiIO_AddKeyEvent(imgui.C.igGetIO_Nil(), id, true)
@@ -169,9 +162,6 @@ fn tool_key_id(key: ToolKey) -> int {
     snap.ctrl = ctrl_down
 """
 
-// No clear step: the sampler walks the same fixed key set every frame and
-// overwrites both entries, so the tables never grow and never allocate after
-// the first frame.
 @nomangle inline(lua) fn __tool_snapshot_put(id: int, pressed: bool, down: bool) = """
     local snap = _G.__stone_tool_keys
     snap.pressed[id] = pressed
@@ -193,9 +183,6 @@ fn tool_key_id(key: ToolKey) -> int {
     return (snap and snap.ctrl) or false
 """
 
-// Every ToolKey. `tool_key_name`'s exhaustive match is what fails a member
-// added without a name; this list is what the sampler walks, and a member
-// missing from it reads as never pressed.
 const TOOL_KEY_ALL: [ToolKey] = [
     ToolKey::F3, ToolKey::F5, ToolKey::F6, ToolKey::F7, ToolKey::F8,
     ToolKey::F10, ToolKey::F11, ToolKey::F12,
@@ -207,9 +194,6 @@ const TOOL_KEY_ALL: [ToolKey] = [
     ToolKey::Return, ToolKey::Backspace, ToolKey::Delete, ToolKey::F, ToolKey::P, ToolKey::Z,
 ]
 
-// The one per-frame sample. Before imgui is up every id is negative and the
-// tables stay empty, which reads as "nothing pressed" -- the same answer the
-// live queries gave.
 fn tool_input_sample_frame() {
     __tool_snapshot_begin(__tool_imgui_ctrl_down())
     for key in TOOL_KEY_ALL {
@@ -220,8 +204,6 @@ fn tool_input_sample_frame() {
     }
 }
 
-// Edge-triggered, no repeat: the press, not the hold. A text-owning tool
-// may explicitly receive its own finish/cancel key during text input.
 pub fn tool_key_pressed(key: ToolKey, during_text_input: bool = false) -> bool {
     if UI_TEXT_INPUT_CAPTURE && !during_text_input { return false }
     let id = tool_key_id(key)

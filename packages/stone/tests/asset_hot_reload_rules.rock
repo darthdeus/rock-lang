@@ -1,10 +1,5 @@
 use stone::*
 
-// Hot reload through the watcher's dispatch (reload_changed_asset) replaces
-// the resource behind a stable backend handle, so every Image or Font held in
-// game state keeps drawing. Watcher detection itself is the Rust test in
-// stone-rs/src/asset_watcher.rs.
-
 fn hot_reload_tmp(name: string) -> string {
     return (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-hot-reload-" + name
 }
@@ -35,9 +30,6 @@ fn hot_reload_repo_file(relative: string) -> string {
     return stone_file_read(relative) ?? ""
 }
 
-// Reloading the same file keeps the metrics; a different font behind the same
-// path keeps the handle and changes the metrics, which proves a re-raster; a
-// corrupt file fails and keeps the old atlas.
 @test
 fn font_hot_reload_rerasterizes_into_the_same_backend() {
     setup_stone()

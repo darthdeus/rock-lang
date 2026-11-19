@@ -1,22 +1,3 @@
-// Engine-owned display settings.
-//
-// The engine owns the monitor / window-mode / resolution / vsync knobs so a
-// game does not re-implement them. Persisted as a sparse diff from defaults
-// (only changed fields written, overlaid back onto a fresh
-// default_display_settings() on load) -- a new field next month falls to its
-// default in older files, unknown keys are ignored. This generalizes the
-// existing game-settings shape; games compose it as needed.
-//
-// DISPLAY_SETTINGS is the single source of truth; apply_display_settings QUEUES
-// a push into the live runtime, drained at the next frame boundary
-// (display_settings_apply_pending, run_one_frame). A mid-frame window mode /
-// resize would tear the frame. The APPLIED_* mirrors are the "applied" cache,
-// written only by display_settings_push, so a re-queue with no change is inert.
-//
-// This module is INERT until a game opts in: nothing loads or applies at boot
-// unless STONE_DISPLAY_SETTINGS=<path> is set (a game adopts by calling
-// load_display_settings() itself). Existing games are unaffected.
-
 pub enum DisplayMode {
     Windowed,    // 0: stone_set_fullscreen(0)
     Borderless,  // 1: stone_set_fullscreen(1)
@@ -58,7 +39,6 @@ pub fn display_mode_from_int(i: int) -> DisplayMode {
     return DisplayMode::Windowed
 }
 
-// Emit only fields that differ from default (sparse). default -> `{}`.
 fn display_settings_to_diff_json(s: DisplaySettings) -> JsonValue {
     let d = default_display_settings()
     let m: Map<string, JsonValue> = map_new()
@@ -74,7 +54,6 @@ fn display_settings_to_diff_json(s: DisplaySettings) -> JsonValue {
     return json_object(m)
 }
 
-// Overlay a (possibly partial / older / newer) diff onto a fresh default.
 fn display_settings_from_diff_json(root: JsonValue) -> DisplaySettings {
     let s = default_display_settings()
     s.display = jv_int(json_field(root, "display"), s.display)
@@ -93,7 +72,6 @@ fn save_display_settings() -> bool {
 
 fn load_display_settings() {
     let raw = file_read(DISPLAY_SETTINGS_PATH)
-    // Missing file is the expected first-run path -> keep defaults, apply them.
     if raw == null {
         apply_display_settings(DISPLAY_SETTINGS)
         return
@@ -115,14 +93,11 @@ global DS_APPLIED_VSYNC: int = -1
 global DS_APPLIED_RES: IVec2 = iv(-1, -1)
 global DS_APPLIED_FRAME_CAP: int = -1
 
-// Queue DISPLAY_SETTINGS -> runtime for the next frame boundary.
 pub fn apply_display_settings(s: DisplaySettings) {
     DISPLAY_SETTINGS = s
     DISPLAY_SETTINGS_APPLY_PENDING = true
 }
 
-// Frame-boundary drain, called from run_one_frame. Inert unless a push is
-// queued, so games that never touch display settings pay nothing.
 fn display_settings_apply_pending() {
     if !DISPLAY_SETTINGS_APPLY_PENDING { return }
     DISPLAY_SETTINGS_APPLY_PENDING = false
@@ -130,19 +105,7 @@ fn display_settings_apply_pending() {
 }
 
 fn display_settings_push(s: DisplaySettings) {
-    // Each FFI is called only on change: a re-queue with no delta is a no-op,
-    // so a slider drag or a boot re-apply can't hitch the present.
     let mode_i = display_mode_to_int(s.mode)
-    // Move to the selected monitor -- fullscreen only: which display it fills.
-    // Windowed placement is owned entirely by saved geometry
-    // (window-geometry.json, tracking wherever the user last dragged the
-    // window) -- a live cross-output move of a windowed/floating window
-    // desyncs a tiling WM's workspace-to-output binding from the window's
-    // actual pixel position (the window ends up logically owned by one
-    // output's workspace while painted over another's, and gets withdrawn).
-    // DS_APPLIED_DISPLAY is only updated when the move actually runs, so a
-    // later windowed -> fullscreen switch on the same display still applies
-    // it (move, then go fullscreen, same as before).
     if s.display != DS_APPLIED_DISPLAY && mode_i != 0 {
         DS_APPLIED_DISPLAY = s.display
         stone_set_window_display(s.display)
@@ -175,9 +138,6 @@ fn display_settings_push(s: DisplaySettings) {
     log_info("DISPLAY", "applied: display={s.display} mode={mode_i} resolution={s.resolution.x}x{s.resolution.y} vsync={s.vsync} frame_cap={s.frame_cap}")
 }
 
-// Boot hook (run_one_frame's owner calls this once). Inert unless
-// STONE_DISPLAY_SETTINGS=<path> opts in; then load + apply that file. A game
-// that adopts this in code calls load_display_settings() itself instead.
 fn display_settings_boot() {
     if os_getenv("STONE_DISPLAY_SELFTEST") == "1" {
         display_settings_selftest()
@@ -189,9 +149,6 @@ fn display_settings_boot() {
     load_display_settings()
 }
 
-// In-process round-trip check for the sparse diff (there is no engine unit-test
-// harness that reaches this package). Non-default settings through
-// to_diff_json -> encode -> decode -> from_diff_json must reproduce the input.
 fn display_settings_selftest() {
     let s = DisplaySettings {
         display: 2,

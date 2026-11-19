@@ -1,7 +1,3 @@
-// The tween value a coroutine can wait on (`Wait::Tween`) and its easing. The
-// named-tween registry that `start_tween`/`update_tweens` drive stays in
-// stone/engine/systems/tween.rock, since it is host state.
-
 pub value Tween {
     id: string,
     elapsed: float,
@@ -77,37 +73,30 @@ pub @pure fn remap_01_range(value: float, from: float, to: float) -> float {
 
 pub const EASE_LINEAR: int = 0
 
-// Quadratic
 pub const EASE_IN_QUAD: int = 1
 pub const EASE_OUT_QUAD: int = 2
 pub const EASE_IN_OUT_QUAD: int = 3
 
-// Cubic
 pub const EASE_IN_CUBIC: int = 4
 pub const EASE_OUT_CUBIC: int = 5
 pub const EASE_IN_OUT_CUBIC: int = 6
 
-// Quartic
 pub const EASE_IN_QUART: int = 7
 pub const EASE_OUT_QUART: int = 8
 pub const EASE_IN_OUT_QUART: int = 9
 
-// Quintic
 pub const EASE_IN_QUINT: int = 10
 pub const EASE_OUT_QUINT: int = 11
 pub const EASE_IN_OUT_QUINT: int = 12
 
-// Sine
 pub const EASE_IN_SINE: int = 13
 pub const EASE_OUT_SINE: int = 14
 pub const EASE_IN_OUT_SINE: int = 15
 
-// Exponential
 pub const EASE_IN_EXPO: int = 16
 pub const EASE_OUT_EXPO: int = 17
 pub const EASE_IN_OUT_EXPO: int = 18
 
-// Circular
 pub const EASE_IN_CIRC: int = 19
 pub const EASE_OUT_CIRC: int = 20
 pub const EASE_IN_OUT_CIRC: int = 21

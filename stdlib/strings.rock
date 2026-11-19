@@ -1,11 +1,3 @@
-// Portable string algorithms (Layer 2): pure Rock over the tier-0 string
-// primitives in unified.rock (find/substring/len/unit_at/from_codepoint/
-// string_char/StringBuilder). No Lua patterns, no per-unit hot loops -- the
-// workhorse is plain-text `find` + `substring`, both native on every backend.
-// String offsets and lengths count bytes.
-
-// Split `s` on every plain-text occurrence of `delimiter`. Empty delimiter is
-// a programmer error (nothing to split on).
 fn string.split(s, delimiter: string) -> [string] {
     let dl = delimiter.len()
     if dl == 0 { error("split: empty delimiter") }
@@ -24,8 +16,6 @@ fn string.split(s, delimiter: string) -> [string] {
     return result
 }
 
-// Replace every plain-text occurrence of `old` with `new`. Empty needle is a
-// programmer error.
 fn string.replace(s, old: string, new: string) -> string {
     let ol = old.len()
     if ol == 0 { error("replace: empty needle") }
@@ -60,7 +50,6 @@ fn string.ends_with(s, suffix: string) -> bool {
     return s.substring(sl - fl, sl) == suffix
 }
 
-// ASCII whitespace only (space \t \n \r \f \v) -- what Lua's %s matched.
 @pure fn is_ascii_ws(u: int) -> bool {
     return u == 32 || u == 9 || u == 10 || u == 13 || u == 12 || u == 11
 }
@@ -100,9 +89,6 @@ fn string.trim(s) -> string {
     return table.concat(parts._data, separator, 1, parts.len)
 """
 
-// Code-point iterator over the native units (UTF-8 decode on luajit, UTF-16
-// on JS). Yields code points as ints; the portable way to walk real
-// characters. Costs nothing when unused.
 @consume struct CharsIter {
     s: string,
     i: int,
@@ -125,9 +111,6 @@ fn CharsIter.next(it) -> (bool, int) {
     return (true, cp)
 }
 
-// The non-ASCII code point whose first native unit `b0` sits at `i`. This is
-// the UTF-8 decode over luajit bytes; the JS sibling in js.rock decodes UTF-16,
-// because a JS string literal is UTF-16 text, not a byte string.
 fn __char_decode(s: string, i: int, b0: int) -> int {
     if b0 < 0xE0 {
         let b1 = s.unit_at(i + 1)
@@ -143,7 +126,6 @@ fn __char_decode(s: string, i: int, b0: int) -> int {
     return (b0 - 0xF0) * 0x40000 + (b1 - 0x80) * 0x1000 + (b2 - 0x80) * 0x40 + (b3 - 0x80)
 }
 
-// Native units in the non-ASCII code point `cp` that starts with unit `b0`.
 fn __char_units(b0: int, cp: int) -> int {
     if b0 < 0xE0 { return 2 }
     if b0 < 0xF0 { return 3 }
@@ -155,12 +137,6 @@ fn __char_units(b0: int, cp: int) -> int {
 // they keep @nomangle. Emitted as inline(lua) on the luajit backend.
 // ---------------------------------------------------------------------------
 
-// Pad a formatted value to `width` characters. `align` is one of "<", ">",
-// "^", "=" (bare ">" and "=" are treated identically here -- sign-aware
-// zero-pad is handled earlier in codegen for numeric types, so by the time we
-// reach this helper `=` is effectively `>`). `fill` is any single character.
-// When `#s >= width`, returns `s` unchanged (never truncates -- matches
-// Python's format-spec behavior).
 @nomangle
 @intrinsic inline(lua) fn __rock_fmt_pad(s: string, width: int, align: string, fill: string) -> string = """
     s = tostring(s)
@@ -177,10 +153,6 @@ fn __char_units(b0: int, cp: int) -> int {
     end
 """
 
-// Insert `sep` every `group` digits from the right of the integer portion of
-// the numeric string `s`. Python convention: `,` / `_` with decimal uses
-// group=3; `_` with hex/oct/bin uses group=4 (nibble grouping). Preserves
-// optional leading sign and any fractional part.
 @nomangle
 @intrinsic inline(lua) fn __rock_fmt_grouping(s: string, sep: string, group: int) -> string = """
     local sign, num, frac = s:match("^([%+%-]?)(%w+)(%.?.*)$")
@@ -193,8 +165,6 @@ fn __char_units(b0: int, cp: int) -> int {
     return sign .. reversed:reverse() .. frac
 """
 
-// `{x:b}` binary conversion (string.format has no %b): floor, sign,
-// repeated %2.
 @nomangle
 @intrinsic inline(lua) fn __rock_fmt_binary(n: int) -> string = """
     local __n = math.floor(n)
@@ -206,8 +176,6 @@ fn __char_units(b0: int, cp: int) -> int {
     return (__neg and "-" or "") .. __s
 """
 
-// `{x:.P%}` percent conversion: x*100 with P decimals + literal `%` (P < 0
-// means the default 6).
 @nomangle
 @intrinsic inline(lua) fn __rock_fmt_percent(v: float, p: int) -> string = """
     local __p = p

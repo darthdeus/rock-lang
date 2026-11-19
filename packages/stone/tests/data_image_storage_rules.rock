@@ -1,7 +1,3 @@
-// A data image copies native buffer storage by its bytes. Storage of 16 KB or
-// more is a pointer (see `__rock_nb_alloc`), which carries neither its length
-// nor an array type, so the image has to take both from the allocation record.
-
 value ImageVert {
     x: float,
     id: int,
@@ -64,8 +60,6 @@ inline(lua) fn image_round_trip(value: ImageStorageHolder) -> ImageStorageHolder
     return __stone_data_image(image, {}, materialize)
 """
 
-// Reads the element struct directly: an image does not carry the buffer's leaf
-// views, so element access through the copy is not what this checks.
 inline(lua) fn image_vert_id(buffer: NativeBuffer<ImageVert>, index: int) -> int = "return buffer.ptr[index].id"
 
 @test

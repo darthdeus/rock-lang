@@ -8,11 +8,6 @@
 // `stone/engine/font_resolve.rock`; text-art effects live in
 // `stone/engine/ui/text_art.rock`.
 
-// --- Unified text batching (per-font) ---
-// One slot per loaded font, indexed by `font_id - 1` (matches the
-// stone-rs 1-based font_id). init_text_batch_for() grows the vecs
-// when a new font loads; queue_ui_text() reads from the slot keyed
-// by the call's Font argument (or DEFAULT_FONT if omitted).
 pub global FONT_ATLASES: [Image] = []
 global FONT_PIXEL_SIZES: [int] = []
 global FONT_CAP_HEIGHTS: [float] = []     // legacy per-font 'X' coverage height in atlas px
@@ -21,13 +16,8 @@ pub global FONT_UNIT_CAP_HEIGHTS: [float] = []
 pub global FONT_UNIT_ASCENTS: [float] = []
 pub global FONT_UNIT_DESCENTS: [float] = []
 pub global FONT_UNIT_LINE_GAPS: [float] = []
-// Per font, then per FACE (Face::ALL order), then by text slot 0..127. An
-// undeclared face's slice is empty: nothing substitutes regular for it.
 pub global GLYPH_CACHES: [[[GlyphData]]] = []
 pub global GLYPH_UNIT_CACHES: [[[GlyphUnitData]]] = []
-// Per font: declared codepoint -> text slot, for codepoints outside the
-// identity block. Published by stone-rs from the charset that baked the atlas
-// rather than re-derived here, so one side owns what a slot means.
 pub global FONT_CP_SLOTS: [Map<int, int>] = []
 pub const UI_TEXT_Z_LAYER: int = 1            // default z_layer for batched text
 global TEXT_LAYOUT_INSTANCE_GLYPH_SCRATCH: NativeBuffer<float> = native_buffer_float(9)
@@ -79,9 +69,6 @@ fn text_line_metrics(font_idx: int, scale_y: float) -> TextLineMetrics {
     }
 }
 
-// Per-font default-z text-batch cache; invalidate every entry (the pooled
-// batch stays valid, but get_text_batch re-resolves through ensure_ui_batch's
-// map hit -- no allocation either way).
 pub fn invalidate_text_batch_caches() {
     let i = 0
     while i < TEXT_BATCH_CACHES.len {
@@ -90,8 +77,6 @@ pub fn invalidate_text_batch_caches() {
         i = i + 1
     }
 }
-
-// --- Unified text batching functions ---
 
 // Initialize per-font batch state. Called by load_font() in lib.rock
 // after the FFI succeeds, so each loaded font automatically gets its
@@ -107,9 +92,6 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
     let d = font.data() ?? return
     let idx = d.backend_id - 1
 
-    // Grow each per-font vec to length backend_id, filling holes with
-    // sentinel/empty values for fonts that haven't been loaded.
-    // Multiple loads in order always append.
     while FONT_ATLASES.len <= idx {
         FONT_ATLASES.push(Image(0))
         FONT_PIXEL_SIZES.push(0)
@@ -126,14 +108,9 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
         TEXT_BATCH_POOLS.push(null)
     }
 
-    // The atlas is an Image like any other, so it registers -- but its filter
-    // stays the font's own declaration (Font.sampling), not an image default.
     if atlas {
         FONT_ATLASES[idx] = register_image(stone_get_font_atlas_image_for(d.backend_id), d.sampling)
     }
-    // Otherwise the slot keeps the Image(0) the growth loop above put there. A
-    // metrics font that reached a draw would be refused by stone-rs by
-    // name, so nothing here has to invent a texture for it.
     d.pixel_size = stone_get_font_pixel_size_for(d.backend_id)
     FONT_PIXEL_SIZES[idx] = d.pixel_size
 
@@ -152,18 +129,8 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
         FONT_UNIT_LINE_GAPS[idx] = 0.0
     }
 
-    // Bulk-fetch every declared face's glyph infos (one FFI call each, done
-    // once). An undeclared face gets an EMPTY slice rather than a run of invalid
-    // entries, so asking for it is a distinguishable condition rather than a
-    // string that measures zero.
-    // The slot count and the codepoint mapping both come from stone-rs, which
-    // owns the charset that baked the atlas: re-deriving either here would be a
-    // second place that has to agree about what slot 128 means.
     let slot_count = stone_get_font_slot_count(d.backend_id)
     let cp_slots = map_new()
-    // From 127, not 128: the identity block's own non-ASCII entry is published
-    // like any other, so the only codepoint rule spelled out on this side is
-    // the printable-ASCII range in text_glyph_slot.
     let slot = 127
     while slot < slot_count {
         let cp = stone_get_font_slot_codepoint(d.backend_id, slot)
@@ -237,8 +204,6 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
     text_prepare_cache_clear()
     let glyphs = faces[FACE_REGULAR]
 
-    // Keep the coverage alias for diagnostics and old raster consumers. Layout
-    // and FontData use the native face metric loaded above.
     let cap = glyphs[88].height
     if !glyphs[88].valid || cap <= 0.0 {
         cap = d.pixel_size as float
@@ -247,10 +212,6 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
     d.cap_height = FONT_UNIT_CAP_HEIGHTS[idx]
 }
 
-// Drop the per-font batch state for a backend_id. Called by
-// unload_font() in lib.rock after the FFI unload, so the GLYPH_CACHES
-// / FONT_ATLASES slot doesn't hold a stale Image handle. Doesn't
-// shrink the vecs (slot reuse never happens; ids are monotonic).
 fn drop_text_batch_for(backend_id: int) {
     let idx = backend_id - 1
     if idx < 0 || idx >= FONT_ATLASES.len { return }
@@ -278,15 +239,6 @@ fn drop_all_text_batches() {
     }
 }
 
-// Per-font default-z text-batch cache. Indexed by font_id - 1, invalidated
-// each frame by clear_ui_batches().
-//
-// The cached batch belongs to ONE pool. A frame that mixes `pixel_screen.text`
-// and `screen.text` at default z alternates the ambient UI pool, and a
-// font-only cache would route whichever call came second into the batch the
-// first one minted -- composite glyphs onto the window, or window glyphs into
-// the composite. The last-(pool, batch) pair keeps the single-surface hot path
-// exactly as cheap and makes a surface switch a miss rather than a wrong hit.
 pub global TEXT_BATCH_CACHES: [Entity<RenderBatch>?] = []
 global TEXT_BATCH_POOLS: [RenderBatchPool?] = []
 
@@ -381,7 +333,6 @@ fn text_layout_raster_rect_at(
         raw.height * metric_to_layout_y)
 }
 
-// Resolving entry point for callers outside a glyph loop.
 pub fn text_layout_raster_rect(
     layout: TextLayout,
     glyph_origin: Vec2,
@@ -393,8 +344,6 @@ pub fn text_layout_raster_rect(
         layout, glyph_origin, raw, source_pixel_size)
 }
 
-// One corner of a glyph quad from its ink rect. The four corners of a glyph
-// share the rect, so a loop builds the rect once and asks for each corner.
 fn text_layout_pose_corner(
     ink: Rect,
     glyph_pivot: Vec2,
@@ -515,8 +464,6 @@ fn text_layout_emit_instance(
     let emitted_bounds = rect(0.0, 0.0, 0.0, 0.0)
     text_layout_instance_glyph_cache_prepare(layout, instance_id)
     let cached_glyphs = layout.instance_glyph_data.unwrap()
-    // Plain text has no per-glyph deformation. Retain local ink corners with
-    // the atlas instance; only placement, whole-run scale and tint change.
     if poses == null && probe_text == "" && !UI_SUBMISSION_PROBE_ON {
         for i in 0..layout.glyphs.len {
             let base = i * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE
@@ -766,8 +713,6 @@ fn text_layout_emit_world_instance(
     poses: [GlyphPose]?
 ) -> bool {
     let before = batch.count
-    // `source_pixel_size` below is a function of `instance_id` alone, so the
-    // metric em it validates is loop invariant too.
     let unit_size = 0.0
     let unit_size_ready = false
     for i in 0..layout.glyphs.len {
@@ -850,14 +795,6 @@ fn text_layout_emit_world(
     return emitted
 }
 
-// Push screen-space text into UI_RENDER_BATCHES.
-//
-// `z_layer` defaults to the engine's UI_TEXT_Z_LAYER (1) and uses the
-// cached text-batch fast path. Pass an explicit z to land text in a
-// different z-bucket (e.g. an overlay above other UI). Non-default z
-// goes through a fresh `ensure_ui_batch` per call site so the cache
-// stays valid for the common path. Caller-driven z lets callers stack
-// arbitrary screen-space content above text without an imgui escape hatch.
 pub fn queue_ui_text(
     text: string,
     pos: Vec2,
@@ -870,8 +807,6 @@ pub fn queue_ui_text(
     queue_ui_text_with_font(f, text, pos, size, color, offset, z_layer)
 }
 
-// Per-font variant. Use directly when rendering with a font other
-// than DEFAULT_FONT (e.g. a custom font loaded via load_font()).
 pub fn queue_ui_text_with_font(
     font: Font,
     text: string,
@@ -885,9 +820,6 @@ pub fn queue_ui_text_with_font(
         FONT_RENDER_SCALE, TextAlign::TopLeft, text_output_raster_density())
 }
 
-// Screen coordinates supplied directly in output pixels do not belong to the
-// design-space text path. Keep the atlas demand physical-density aware, but
-// leave the emitted glyph geometry in the caller's pixel space.
 fn queue_ui_text_output_px(
     font: Font,
     text: string,
@@ -915,15 +847,11 @@ fn world_text_scene_density() -> float {
     return max(0.0001, view.world_to_scene_scale)
 }
 
-// The size divisor for a font: cap height when CAP_HEIGHT_FONTS is on (so the
-// same number is the same visible height across fonts), else the em. 0 = the
-// font has no usable metrics yet.
 pub fn font_size_divisor(idx: int) -> float {
     if idx < 0 || idx >= FONT_UNIT_SIZES.len { return 0.0 }
     return if CAP_HEIGHT_FONTS { FONT_UNIT_CAP_HEIGHTS[idx] } else { FONT_UNIT_SIZES[idx] }
 }
 
-// Family-aware callers delegate to the same native unit metric authority.
 pub fn font_size_divisor(font: Font) -> float {
     let d = font.data() ?? return 0.0
     return font_size_divisor(d.backend_id - 1)
@@ -939,12 +867,6 @@ fn text_layout_raster_cap_for_scale(font: Font, scale_y: float) -> float {
     return abs(scale_y)
 }
 
-// Target-space extent of `text`, measured with the SAME divisor and design->
-// target factor the emitter below uses -- so a caller that positions by
-// measurement cannot disagree with the glyphs. `render_scale` is the calling
-// context's factor: FONT_RENDER_SCALE for output-authored text, the context
-// scale for a scene-target UiRect, 1.0 for raw Target coordinates. Density
-// defaults to 1 for source footprints; output measurement passes its density.
 pub fn measure_text_of(font: Font, text: string, size: float, render_scale: float,
     raster_density: float = 1.0) -> Vec2 {
     let d = font.data() ?? return v()
@@ -964,13 +886,6 @@ pub fn measure_text_of(font: Font, text: string, size: float, render_scale: floa
 // live here once. Plain and rich callers retain the same layout facts while
 // choosing their own color, face and surface conventions.
 
-// The codepoint whose encoding STARTS at unit `i`. Two distinct refusals, so
-// a rejection surface can tell them apart: -1 means `i` is not a lead unit (a
-// UTF-8 continuation byte, a UTF-16 trail surrogate) and is skipped by every
-// walker, while -2 means the unit STARTS a sequence that is malformed or
-// truncated, which is a real defect in the text. Walking units one at a time
-// and skipping -1 is what lets the byte-range loops below stand unchanged over
-// multi-unit text: a non-lead unit is simply not the start of anything.
 pub inline(lua) fn text_codepoint_at(text: string, i: int) -> int = """
     local b = string.byte(text, i + 1)
     if b == nil then return -1 end
@@ -1019,8 +934,6 @@ pub nobox value TextFlowMetrics {
 
 fn text_flow_paragraph_text(text: string) -> string {
     if text.find("\n") < 0 { return text }
-    // Removing a newline first could join two malformed UTF-8 halves into a
-    // valid glyph. Admit the original bytes before normalizing controls.
     for i in 0..text.len() {
         if text_codepoint_at(text, i) == -2 {
             error("ui_rich_flow: byte at offset {i} begins a malformed glyph")
@@ -1039,8 +952,6 @@ pub fn text_flow_metrics(font: Font, text: string, style: TextStyle,
         let prepared = text_prepare_missing_glyphs(font, null, idx, admitted, site)
         face = text_validate_single_font_span(font, idx, prepared, style, true, site)
     } else if TEXT_MISSING_GLYPH_POLICY == TextMissingGlyphPolicy::Substitute {
-        // Plain rendering tolerates malformed bytes; preparation logs missing
-        // codepoints, while the advance walk keeps the authored byte ranges.
         let _ = text_prepare_missing_glyphs(font, null, idx, text, site)
     }
     if !plain && (text.find("\r") >= 0 || text.find("\t") >= 0) {
@@ -1052,8 +963,6 @@ pub fn text_flow_metrics(font: Font, text: string, style: TextStyle,
         ascent: metrics.ascent, below: metrics.line_height - metrics.ascent, plain }
 }
 
-// Keep the renderer's glyph-addition order, including spaces. Adding a measured
-// word to a measured prefix can round to the other side of a wrap boundary.
 pub fn text_flow_advance(metrics: TextFlowMetrics, text: string,
                          start: int, end: int, pen: float) -> float {
     let result = pen
@@ -1158,7 +1067,6 @@ struct TextLayoutCacheEntry {
     // text_layout_variant_key of the fields above; the index slot this entry
     // occupies under its text.
     variant: int,
-    // Next resident slot sharing this text/variant key, or -1 at chain end.
     next_variant_slot: int,
     last_used: int,
     layout: TextLayout,
@@ -1166,10 +1074,6 @@ struct TextLayoutCacheEntry {
 
 global TEXT_LAYOUT_CACHE: [TextLayoutCacheEntry] = []
 global TEXT_LAYOUT_CACHE_CLOCK: int = 0
-// text -> variant key -> TEXT_LAYOUT_CACHE slot. Two map reads replace a probe
-// over every cached variant of the text: that loop kept all seven request
-// parameters plus the probe state live across its exits and was a standing
-// "register coalescing too complex" abort in every text-heavy frame.
 global TEXT_LAYOUT_CACHE_INDEX: Map<string, Map<int, int>> = map_new()
 pub global TEXT_LAYOUT_CACHE_HITS: int = 0
 pub global TEXT_LAYOUT_CACHE_INDEX_HITS: int = 0
@@ -1265,8 +1169,6 @@ pub value GlyphPose {
 pub global TEXT_LAYOUT_BUILD_CALLS: int = 0
 pub global TEXT_LAYOUT_EMIT_CALLS: int = 0
 global TEXT_ART_COVERAGE_EMIT_CALLS: int = 0
-// The emission probe grows with the distinct texts recorded since the last
-// reset; the index keeps admission O(1) on long sim runs without one.
 pub global TEXT_LAYOUT_EMISSION_PROBES: [TextLayoutEmissionProbe] = []
 global TEXT_LAYOUT_EMISSION_PROBE_INDEX: Map<string, int> = map_new()
 
@@ -1299,8 +1201,6 @@ fn text_layout_emission_probe_case_text(i: int) -> string {
 fn text_layout_emission_probe_keeps_texts_past_the_old_bound() {
     text_layout_emission_probe_reset()
     defer { text_layout_emission_probe_reset() }
-    // More distinct texts than the 16 slots the keyboard pause sim outgrew
-    // (1e585292c8 RED 7/13): every recorded text stays retrievable.
     let count = 24
     for i in 0..count {
         let value = text_layout_emission_probe_empty()
@@ -1317,7 +1217,6 @@ fn text_layout_emission_probe_keeps_texts_past_the_old_bound() {
         assert_eq(found.unwrap().emitted_count, i + 1,
             "probe {text} keeps its recorded emission")
     }
-    // Re-recording a text overwrites its slot instead of growing a duplicate.
     let again = text_layout_emission_probe_empty()
     again.retained_text = text_layout_emission_probe_case_text(5)
     again.emitted_count = 50
@@ -1382,21 +1281,10 @@ fn text_layout_empty(font: Font?, text: string, face: int, align: TextAlign) -> 
     }
 }
 
-// Vertical centering rule for UI-target text: the middle row (Left/Center/Right)
-// centers the CAP BOX -- first line's cap top to last baseline -- so
-// descenders never move a centered label. Top/Bottom rows pin the logical
-// box edge exactly as text_align_fracs. World text keeps logical-box
-// centering on every row.
-
-// Distance from a TopLeft origin down to the cap-box center. `trailing`
-// carries the multiline tail ((lines - 1) * line height); one line passes 0.
 pub fn text_cap_center_from_top(ascent: float, cap_height: float, trailing: float) -> float {
     return ascent - cap_height * 0.5 + trailing * 0.5
 }
 
-// Origin y for UI-target text hung from an anchor: the middle row centers
-// the cap box, every other row pins the logical box. `frac_y` is the
-// text_align_fracs y; callers pass 0.0 trailing for one line.
 pub fn text_anchored_y(anchor_y: float, frac_y: float, text_h: float, ascent: float, cap_height: float, trailing: float) -> float {
     if frac_y == 0.5 && cap_height > 0.0 && text_h > 0.0 {
         return anchor_y - text_cap_center_from_top(ascent, cap_height, trailing)
@@ -1416,8 +1304,6 @@ pub fn text_font_cap_height(font: Font, size: float, render_scale: float) -> flo
     return FONT_UNIT_CAP_HEIGHTS[idx] * size * render_scale / divisor
 }
 
-// Cap height over resolved runs in each run's own target scale, taking the
-// maximum like measure_resolved_runs takes the maximum ascent.
 pub fn resolved_runs_cap_height(runs: [ResolvedTextRun]) -> float {
     let cap = 0.0
     for run in runs {
@@ -1734,9 +1620,6 @@ fn text_layout_quantize(value: float, scale: float, modulus: int) -> int {
     return ((q % modulus) + modulus) % modulus
 }
 
-// A hash of one cache variant, packed into 50 bits so it stays an exact
-// integer in a Lua number. It is a hash, not an identity: the float fields are
-// quantized, so lookups confirm the exact fields among entries sharing a key.
 fn text_layout_variant_key(world_raster: bool, font_id: int, face: int,
                            align: TextAlign, cap_height: bool,
                            a: float, b: float, c: float) -> int {
@@ -1769,9 +1652,6 @@ fn text_layout_cache_index_add(text: string, variant: int, index: int) {
     }
 }
 
-// A quantized variant may represent several distinct exact keys. Each resident
-// entry belongs to one slot in the same-variant chain; unlink it before that
-// slot is reused, preserving the remaining entries as lookup candidates.
 fn text_layout_cache_index_remove(text: string, variant: int, index: int) {
     let variants = TEXT_LAYOUT_CACHE_INDEX.get(text) ?? return
     let head = variants.get(variant) ?? return
@@ -2158,13 +2038,6 @@ fn text_world_layout_scaled(
     return text_layout_cached_world(font, text, scale_x, scale_y)
 }
 
-// The plain entry point. `render_scale` is EXPLICIT: FONT_RENDER_SCALE
-// is the output context's window/DPI factor and has no meaning on a surface
-// authored in its own units (scene texels), where letting it through would
-// rasterize glyphs at the wrong size for the grid.
-//
-// Multiline: one implicit run per line, all sharing the block's max ascent and
-// max glyph height, exactly as before. No TextSpan is built for it.
 pub fn queue_ui_text_scaled(
     font: Font,
     text: string,
@@ -2202,23 +2075,11 @@ fn emit_ui_text_layout(
     let _ = text_layout_emit(layout, origin, color, z_layer)
 }
 
-// --- Rich text: several runs, one line ---
-//
-// The walker's input. Face resolution and byte admission both happen before
-// one of these exists, so nothing downstream re-decides them. Every run reads
-// one face of one font at one size; the mixed-size arc varies `size` here
-// without touching the walk or the public span collection.
 pub struct ResolvedTextRun {
     text: string,
     font: Font,
-    // Which baked face this run reads. Resolution happened before the run
-    // existed; the walk never re-decides it.
     face: int,
-    // Target-context size: the authored size through the selected font's
-    // target or world scaling policy.
     size: float,
-    // Font-unit divisor. Target runs use the selected font's UI divisor;
-    // world runs use the selected font's native em.
     scale_divisor: float,
     color: Color,
     raster_physical_target_scale: float = 1.0,
@@ -2269,16 +2130,12 @@ pub fn text_family_font_idx(font: Font, site: string, require_atlas: bool = true
         || GLYPH_CACHES[idx][FACE_REGULAR].len == 0 {
         error("{site}: font {d.backend_id} has no glyph cache")
     }
-    // The int overload: `idx` is what the Font overload would resolve to, and
-    // it is already in hand.
     if font_size_divisor(idx) <= 0.0 {
         error("{site}: font {d.backend_id} has no usable metrics")
     }
     return idx
 }
 
-// Validate the whole flat family before looking at spans. This also makes an
-// empty span list name every handle and atlas in the family.
 fn text_family_indices_into(family: TextFamily, site: string, require_atlas: bool,
     fonts: [Font], indices: [int]) {
     fonts.clear()
@@ -2345,13 +2202,6 @@ pub global TEXT_MISSING_GLYPH_POLICY: TextMissingGlyphPolicy = TextMissingGlyphP
 // would cost more than re-preparing the live strings after a clear.
 const TEXT_PREPARE_CACHE_CAPACITY: int = 512
 
-// A family folds its index list, length first, so a two-font set can never
-// share a key with a one-font set. Backend ids are monotonic from zero and
-// never reused, and families are two or three fonts, so the fold stays exact
-// well past any set Stone builds; a set that would not fold exactly declines
-// the memo instead of sharing a key with a different one. A single_idx caller
-// lands on the one-element family's key on purpose: the two describe the same
-// font set and must share their answers.
 const TEXT_PREPARE_KEY_RADIX: int = 4096
 const TEXT_PREPARE_KEY_MAX_FONTS: int = 4
 
@@ -2359,10 +2209,6 @@ global TEXT_PREPARE_CACHE: Map<int, Map<string, string>> = map_new()
 global TEXT_PREPARE_CACHE_ENTRIES: int = 0
 global TEXT_PREPARE_CACHE_POLICY: TextMissingGlyphPolicy = TextMissingGlyphPolicy::Substitute
 
-// Called from every seam that rebuilds or drops glyph coverage:
-// init_text_batch_for(), drop_text_batch_for() and the font projection reset.
-// Those are the only writers of GLYPH_CACHES and FONT_CP_SLOTS, which are the
-// only coverage a prepared string depends on.
 fn text_prepare_cache_clear() {
     TEXT_PREPARE_CACHE = map_new()
     TEXT_PREPARE_CACHE_ENTRIES = 0
@@ -2431,15 +2277,6 @@ fn text_missing_glyph_owner(indices: [int]?, single_idx: int,
     } else { -1 }
 }
 
-// The memo front of text_prepare_missing_glyphs_uncached. A string already
-// accepted for this font set is returned as prepared without re-validating it.
-//
-// Rejection is not memoized: under Reject an unrenderable codepoint errors
-// out of the uncached body and never reaches the store, so a bad string keeps
-// erroring on every sight. `site` is deliberately absent from the key -- it
-// only reaches the log_once() for a substitution, which is already
-// deduplicated by (font, codepoint) rather than by site, so a second site
-// seeing the same substituted string logged nothing before the memo either.
 pub fn text_prepare_missing_glyphs(primary: Font, indices: [int]?, single_idx: int,
                                text: string, site: string) -> string {
     let set_key = text_prepare_font_set_key(indices, single_idx)
@@ -2494,9 +2331,6 @@ fn text_prepare_missing_glyphs_uncached(primary: Font, indices: [int]?,
     return prepared + text.substring(copy_from, text.len())
 }
 
-// The requested face must be declared by the font that owns the regular
-// glyph. Synthesis is a declaration, not a fallback: serving regular for an
-// undeclared bold would render a line that measures right and reads wrong.
 fn text_face(font: Font, idx: int, style: TextStyle, cp: int, at: int, site: string) -> int {
     let d = font.data().unwrap()
     let face = style_face_index(style)
@@ -2558,10 +2392,6 @@ fn text_make_run(
     }
 }
 
-// Runs whose owner has finished with them. Rich text that is resolved again
-// every frame (the deferred world overlay, the world measures) otherwise builds
-// a run per span per call. Only an owner that holds the last reference
-// releases: a run handed out by resolve_text_spans belongs to its caller.
 global TEXT_RUN_SPARE: [ResolvedTextRun] = []
 const TEXT_RUN_SPARE_MAX: int = 512
 
@@ -2582,12 +2412,6 @@ fn text_run_size(font: Font, size: float, render_scale: float, world_raster: boo
     }
 }
 
-// Memo for text_validate_single_font_span, cleared on the same seams as the
-// prepare memo (text_prepare_cache_clear). The answer is a pure function of the
-// text, the font, the face the style selects and the line-control rule. Once
-// preparation stopped looping, this validation was the next per-codepoint walk
-// the recorder reached on every drawn string, and the census moved to it
-// wholesale.
 global TEXT_VALIDATE_CACHE: Map<int, Map<string, int>> = map_new()
 pub global TEXT_VALIDATE_CACHE_ENTRIES: int = 0
 
@@ -2613,7 +2437,6 @@ pub fn text_validate_single_font_span(
     if let by_text = TEXT_VALIDATE_CACHE.get(key) {
         if let hit = by_text.get(text) { return hit }
     }
-    // Rejection errors out above and never reaches the store.
     let face = text_validate_single_font_span_uncached(font, idx, text, style,
         reject_line_controls, site)
     if TEXT_VALIDATE_CACHE_ENTRIES >= TEXT_PREPARE_CACHE_CAPACITY {
@@ -2667,10 +2490,6 @@ fn text_validate_single_font_span_uncached(
     return face
 }
 
-// Resolve one string segment into contiguous owner runs. The scan keeps byte
-// offsets until an owner changes, so a family-aware plain string allocates one
-// substring per run rather than one substring per codepoint.
-// Append into the consumer-owned sequence; span boundaries need no temporary list.
 pub fn text_resolve_segment(
     runs: [ResolvedTextRun],
     fonts: [Font],
@@ -2755,13 +2574,6 @@ pub fn text_resolve_segment(
     return
 }
 
-// Validate and resolve the WHOLE sequence before anything is measured or
-// emitted, so an invalid later span cannot leave earlier spans half-drawn.
-//
-// The FAMILY is validated for the call, before the loop: an empty sequence
-// names a family exactly as a full one does. Each selected face is then
-// validated before its run is appended, so an undeclared face in the last
-// span cannot leave the first spans drawn.
 fn resolve_text_spans_at(
     runs: [ResolvedTextRun],
     family: TextFamily,
@@ -2925,9 +2737,6 @@ fn resolved_run_layout(run: ResolvedTextRun) -> TextLayout {
     return built
 }
 
-// Total advance, max ascent and max glyph height over the COMPLETE sequence.
-// Alignment anchors on this, never on a single run: an empty run contributes
-// nothing and an all-empty list measures zero.
 pub fn measure_resolved_runs(runs: [ResolvedTextRun]) -> (float, float, float) {
     let total = 0.0
     let max_ascent = 0.0
@@ -2945,23 +2754,12 @@ pub fn measure_resolved_runs(runs: [ResolvedTextRun]) -> (float, float, float) {
     return (total, max_ascent, max_ascent + max_below_baseline)
 }
 
-// Where a resolved-run walk puts each run. Output and Target are Y-down:
-// `start` is the line's top-left and every run hangs from the line's max
-// ascent. World is Y-up: `start` is the baseline every run sits on. Output
-// goes to the UI pool, Target to the render-pool canvas bake, World to the
-// world sprite batch at the caller's depth.
 pub enum TextPlacement {
     Output,
     Target,
     World,
 }
 
-// Emit the sequence with ONE continuous pen from `start`. A run boundary
-// changes the colour and the face and nothing else -- one atlas, one baseline,
-// one pen. `tint` replaces every authored colour, so the shadow pass is the
-// same resolved sequence in black. A run with no drawable glyph (whitespace)
-// still advances the pen, as measure_resolved_runs counts it. `max_ascent`
-// is unused by World; `depth` only by World; `consumer_key` only by Output.
 pub fn emit_resolved_runs(
     runs: [ResolvedTextRun],
     placement: TextPlacement,
@@ -3036,10 +2834,6 @@ fn emit_target_layout_in_render_pool(
         (instance.instance_id as int), null)
 }
 
-// Target-space extent of a span sequence, measured with the SAME walk the
-// emitter uses, so a caller that positions by measurement cannot disagree with
-// the glyphs. `render_scale` is the calling context's factor, as for
-// measure_text_of.
 pub fn measure_rich_text_of(
     family: TextFamily,
     spans: [TextSpan],
@@ -3119,9 +2913,6 @@ fn measure_world_rich_text_at(spans: [TextSpan], size: float, site: string) -> (
     return (w, ascent, h)
 }
 
-// Plain family measurement is named separately from the legacy Font-only
-// measure_text_of so overload resolution cannot hide which admission policy a
-// caller selected.
 pub fn measure_plain_text_of(
     family: TextFamily,
     text: string,
@@ -3151,12 +2942,6 @@ pub fn measure_plain_text_of(
     }
 }
 
-// World-space text as a normal vertex batch: glyph quads on the font
-// atlas into the current render pool, same pen math as the immediate
-// FFI path (stone-rs `draw_text_line_internal`, negative-sy branch):
-// baseline-anchored, Y-up, quads descend from baseline + bearing_y.
-// `sy` is negative. entity_id stays zero so the aux passes
-// drop text the standard way (outline_target discards, no id claimed).
 pub fn queue_world_text(
     font: Font,
     text: string,
@@ -3190,14 +2975,6 @@ fn queue_world_text_layout(
     let _ = text_layout_emit_world(layout, v(x, y), z_layer, depth, color)
 }
 
-// Moved from the math module when stone-core was split out: it needs a Font
-// and the default font, which are the renderer's, not a value type's.
-
-// Default-font UI text measurement in OUTPUT units -- the same divisor and
-// window factor `queue_ui_text` emits with (measure_text_of, text.rock), so
-// a caller that positions by measurement lands on the glyphs. The world path
-// measures through `measure_world_text` (draw.rock), which divides
-// FONT_RENDER_SCALE back out to reach world units.
 pub fn measure_text(text: string, font_size: float, family: TextFamily? = null,
     font: Font? = null) -> Vec2 {
     if font != null && family != null { error("measure_text: pass either font or family, not both") }

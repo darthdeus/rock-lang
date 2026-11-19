@@ -24,9 +24,6 @@
 // payload outline.rock's build_outline_detect_pass supplies -- the order of the
 // pushes there is the order of the `@size(N)` params here.
 
-// Field order IS the slot: target_mask 0, visible_id 1. Both INTEGER samplers
-// -- the id canvases are r32i, and reading one through a float sampler is
-// undefined rather than lossy.
 struct OutlineDetectTex {
     target_mask: ISampler2D,
     visible_id: ISampler2D,
@@ -52,27 +49,13 @@ fn outline_detect_vert(@attr a: OutlineDetectVert) -> OutlineDetectVary {
 
 value OutlineDetectU {
     linear_world: bool = false,
-    // Scan ceiling in texels -- the kernel never samples farther. Also the slot-0
-    // fallback band width for ids without a per-entity entry.
     outline_radius: float,
-    // > 0.5: output raw classification state instead of styled pixels (dev viz,
-    // ENGINE.debug_outline_classify).
     debug_classify: float,
-    // > 0.5: classify every silhouette edge visible (the ad-hoc path has no
-    // visible-id input). The per-frame path leaves this 0.
     force_visible: float,
-    // camera_offset() in target pixels. The detect pass is fullscreen, so its
-    // TexCoord is screen space; subtracting this anchors the flame noise to
-    // the world, or a walking camera drags the pattern across the sprite.
     noise_origin: Vec2,
-    // Nonzero: a visible id that never hides the target (ground cover).
     see_through_id: int = 0,
 }
 
-// Slots 1..255 form a bounded hash table. Picking ids remain unchanged in
-// both id canvases, preserving occlusion and cursor readback identity.
-// params packs (band width, flame amount, resolved phase, picking id).
-// Array sizes stay in sync with OUTLINE_MAX_ENTRIES in outline.rock.
 @shader(fragment)
 fn outline_detect_frag(
     vary: OutlineDetectVary,
@@ -84,8 +67,6 @@ fn outline_detect_frag(
 ) -> Vec4 {
     let debug = u.debug_classify > 0.5
 
-    // Inside any target silhouette -> never paint. In debug mode tint the
-    // interior so the target shape is visible.
     let center_id = texture_id(tex.target_mask, vary.TexCoord)
     if center_id > 0 {
         if debug {
@@ -97,9 +78,6 @@ fn outline_detect_frag(
     let radius = u.outline_radius as int
     let texel_size = v(1.0, 1.0) / texture_size(tex.target_mask)
 
-    // Find the closest silhouette neighbor and classify this edge by what's
-    // visible at that neighbor's own position -- per-edge, so different parts of
-    // one target can be visible vs occluded independently.
     let found = false
     let min_dist_sq = (radius + 1) * (radius + 1) * 4
     let nearest_visible = false
@@ -123,9 +101,6 @@ fn outline_detect_frag(
                 continue
             }
 
-            // Per-entity width: only accept a silhouette neighbor if this
-            // fragment falls inside that entity's band, else a thin outline
-            // leaks to the global scan ceiling. Unregistered ids fall to slot 0.
             let candidate = (ntarget - 1) % 255 + 1
             let slot = 0
             for _probe in 0..255 {
@@ -143,9 +118,6 @@ fn outline_detect_frag(
             min_dist_sq = d2
             nearest_slot = slot
 
-            // Target visible at its own silhouette here? Compare the mask id with
-            // whatever is actually visible at that neighbor pixel; equal => in
-            // front. force_visible short-circuits it for the ad-hoc path.
             let nvis = texture_id(tex.visible_id, nuv)
             nearest_visible = (u.force_visible > 0.5) || (nvis == ntarget)
                 || (u.see_through_id != 0 && nvis == u.see_through_id)
@@ -157,14 +129,12 @@ fn outline_detect_frag(
     }
 
     if debug {
-        // Classification bits as color: green = visible, red = occluded.
         if nearest_visible {
             return v(0.0, 1.0, 0.0, 1.0)
         }
         return v(1.0, 0.0, 0.0, 1.0)
     }
 
-    // Per-entity color for the nearest neighbor's id; unregistered -> slot 0.
     let slot = nearest_slot
 
     let authored_base = at(outline_colors_occluded, slot)
@@ -178,21 +148,15 @@ fn outline_detect_frag(
         return base
     }
 
-    // Normalized distance across the band: 0 at the silhouette edge, 1 at the rim.
     let w = max(at(outline_params, slot).x, 1.0)
     let edge_t = clamp(sqrt(int_to_float(min_dist_sq)) / w, 0.0, 1.0)
     let hot = 1.0 - edge_t
 
-    // Two worley octaves drifting upward: billowy blobs scrolled into rising
-    // tongues. worley2/random2 are the byte-identical shared tier-0 helpers.
     let res = texture_size(tex.target_mask)
-    // Y is added, not subtracted: TexCoord runs top-down while world Y runs
-    // up, so the camera origin cancels with opposite sign on each axis.
     let p = (vary.TexCoord * res - v(u.noise_origin.x, -u.noise_origin.y)) * 0.045
     let t = at(outline_params, slot).z
     let noise = flame_worley2(p, t)
 
-    // High noise lets fire reach the outer rim; low noise hugs the silhouette.
     let body = clamp((hot - (1.0 - noise) * 0.55) * (1.2 + flame * 0.8), 0.0, 1.0)
     let temp = clamp(hot * (0.35 + 0.85 * noise), 0.0, 1.0)
 

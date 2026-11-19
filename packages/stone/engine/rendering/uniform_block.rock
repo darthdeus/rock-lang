@@ -26,14 +26,7 @@ pub struct ShaderUniformBlock {
     binding: int,
     size: int,
     fingerprint: int,
-    // The block's member names. Not used to bind anything -- the whole point is
-    // that binding is by slot -- but `GL_ACTIVE_UNIFORMS` enumerates block
-    // members too, so the by-name Pass validation needs to know which active
-    // uniforms are unreachable by name.
     members: [string],
-    // Per member, parallel to `members`, straight from the compiler. A member
-    // with capacity 0 is a scalar: nothing may be array-written into it, and
-    // `array_block_push` rejects rather than treating it as a one-element array.
     offsets: [int],
     kinds: [int],
     capacities: [int],
@@ -41,11 +34,6 @@ pub struct ShaderUniformBlock {
     scratch: NativeBufferU8,
     fv: Ptr<float>,
     iv: Ptr<int>,
-    // How many times this block has been uploaded, ever. The array lane's only
-    // oracle for "once per ACTIVATION, not once per batch": re-copying identical
-    // contents every batch is invisible to a pixel test, because the pixels are
-    // the same either way. Cleared by nothing -- a sim reads the delta across a
-    // window it drives itself.
     uploads: int,
     // Which screen-space engine block this scratch holds, or 0 for "packed by
     // something else". `set_engine_uniforms` stamps it and is the only reader;
@@ -59,15 +47,6 @@ pub struct ShaderUniformBlock {
 // a block arriving here is either the engine's or a mistake.
 const UNIFORM_BLOCK_BINDING_ENGINE: int = 0
 
-// The rest of the compiler's reserved bindings, mirrored. Each slot means one
-// thing whether or not a given program declares it -- that is what makes "the
-// engine block is at 0" and "this program's fragment arrays are at 4"
-// answerable without knowing what else the program declares.
-//
-// The per-stage SCALAR groups are here for the same reason, even though nothing
-// binds them by number: a caller asking how often a binding was uploaded needs
-// to name it, and a literal 2 at that call site is the sort of number this whole
-// lane exists to stop people writing.
 const UNIFORM_BLOCK_BINDING_VERTEX: int = 1
 pub const UNIFORM_BLOCK_BINDING_FRAGMENT: int = 2
 pub const UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS: int = 3
@@ -262,8 +241,6 @@ fn native_uniform_blocks(decls: [UniformBlockDecl]) -> [ShaderUniformBlock] {
 
 pub inline(lua) fn __ub_float_view(p: PtrU8) -> Ptr<float> = 'return ffi.cast("float*", p)'
 
-// Read one packed float back out. Inspection only (the pool-identity sims);
-// nothing on the flush path reads a block it wrote.
 pub inline(lua) fn __ub_read_float(p: Ptr<float>, i: int) -> float = "return p[i]"
 inline(lua) fn __ub_int_view(p: PtrU8) -> Ptr<int> = 'return ffi.cast("int32_t*", p)'
 
@@ -277,9 +254,6 @@ inline(lua) fn __ub_join_names(names: [string]) -> string = """
 
 inline(lua) fn __ub_str_len(s: string) -> int = "return #s"
 
-// Pointer element access for the array lane's strided scatter. `Ptr<T>` is not
-// indexable in Rock, and the scalar lane never needed these -- its packer is a
-// compiler expansion that writes through the views in generated code.
 pub inline(lua) fn __ub_write_float(p: Ptr<float>, i: int, v: float) = "p[i] = v"
 inline(lua) fn __ub_read_int(p: Ptr<int>, i: int) -> int = "return p[i]"
 inline(lua) fn __ub_write_int(p: Ptr<int>, i: int, v: int) = "p[i] = v"
@@ -391,12 +365,6 @@ fn publish_uniform_blocks(key: string, live: [ShaderUniformBlock]) {
     }
 }
 
-// Upload the scratch the public setter just packed. Keep this separate from
-// the packer so the caller can resolve and validate the runtime block first.
-//
-// `log_once` and not `log_error`: this runs per frame, and a broken upload
-// would otherwise emit a line per frame forever. Macro callers pass their own
-// source site explicitly.
 fn __upload_uniform_block(key: string, b: ShaderUniformBlock, site: string) {
     let h = get_shader_handle(key)
     if h == 0 {
@@ -410,31 +378,12 @@ fn __upload_uniform_block(key: string, b: ShaderUniformBlock, site: string) {
     b.uploads += 1
 }
 
-// --- The array lane -------------------------------------------------------
-//
-// An array block is filled by an ORDERED payload: the caller pushes one
-// pointer+count per member, in the compiler's member order, and never spells a
-// name, an offset or a binding number. That is the rule the texture lane
-// settled on (`slot_inputs` over `inputs`) and it is here for the same reason --
-// a caller-chosen number is what lets two bindings collide silently.
-//
-// Order is enforced rather than trusted: the caller holds a cursor, each push
-// targets the member the cursor is on, and `array_block_upload` refuses a
-// payload that did not reach every member. A block uploaded with a member
-// missing would read whatever the last frame left there, which is precisely the
-// unfilled-block failure this lane already learned to make loud.
-
-// The compiler's wire-kind codes, mirrored. Kept as one table with one reader
-// so the correspondence is stated once; a `push` whose declared kind disagrees
-// with the caller's verb REJECTS, which is what turns this mapping from a claim
-// into something every draw exercises.
 pub const WIRE_KIND_F32: int = 0
 pub const WIRE_KIND_F32X2: int = 1
 pub const WIRE_KIND_F32X4: int = 3
 pub const WIRE_KIND_I32: int = 4
 const WIRE_KIND_U32: int = 7
 
-// Components per element for a wire kind, or 0 if it is not one an array holds.
 fn wire_kind_components(kind: int) -> int {
     if kind == WIRE_KIND_F32 { return 1 }
     if kind == WIRE_KIND_F32X2 { return 2 }
@@ -486,8 +435,6 @@ pub fn __array_push(shader_name: string, b: ShaderUniformBlock, cursor: int,
         return -1
     }
     let comps = wire_kind_components(want_kind)
-    // Both the offset and the stride are BYTES from the compiler; the views are
-    // 4-byte typed, so the index arithmetic divides once, here.
     let base = b.offsets[i] ./ 4
     let step = b.strides[i] ./ 4
     let e = 0
@@ -508,13 +455,6 @@ pub fn __array_push(shader_name: string, b: ShaderUniformBlock, cursor: int,
     return i + 1
 }
 
-// One member of a deferred ordered payload -- a `Pass`'s arrays, where the
-// pushes cannot be written as a straight-line sequence because the pass is a
-// DESCRIPTION built in one place and run in another.
-//
-// The kind travels with the pointer so the same rejection applies as to a
-// direct push: a payload whose kind disagrees with the shader's declaration is
-// refused, not reinterpreted.
 pub struct PassArrayMember {
     kind: int,
     src_f: Ptr<float>? = null,
@@ -526,12 +466,6 @@ pub fn pass_array_vec4(src: Ptr<float>, count: int) -> PassArrayMember {
     return PassArrayMember { kind: WIRE_KIND_F32X4, src_f: src, count: count }
 }
 
-// Push a deferred payload into `shader_name`'s fragment array block and upload
-// it. Called from `run_pass_body` once the program is current.
-//
-// An empty payload against a shader that HAS an array block is left alone here
-// rather than half-filled: the draw-time unfilled-block gate is what reports it,
-// and it reports every such program uniformly instead of only the pass ones.
 fn apply_pass_arrays(shader_name: string, payload: [PassArrayMember], site: string) {
     if payload.len() == 0 { return }
     let block = array_block_find(shader_name, UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS)
@@ -569,13 +503,6 @@ macro array_block_push_int(shader: expr, block: expr, cursor: expr, src: expr, c
     cursor >= 0
 }
 
-// Upload the whole array block, once the payload is complete.
-//
-// A short payload REFUSES rather than uploading what it has: the members the
-// caller did not reach would keep the previous activation's contents, and the
-// shader would read them as though they were this activation's -- stale light
-// positions on the right entities, which no oracle short of a pixel diff against
-// a known scene would notice.
 pub fn array_block_upload(
     shader_name: string, b: ShaderUniformBlock, cursor: int, site: string
 ) -> bool {
@@ -596,19 +523,6 @@ pub fn array_block_upload(
     return true
 }
 
-// How many times a program's block at `binding` has been uploaded, or -1 when
-// the program has no block there.
-//
-// The structural oracle for upload FREQUENCY. A pixel test cannot see the
-// difference between uploading once per activation and once per batch -- the
-// contents are identical either way -- so a sim drives a known number of draws
-// and reads this.
-//
-// Generic over the binding rather than array-only, because the array number
-// means nothing on its own: "the array block moved by 1" is equally consistent
-// with the frame having drawn one batch. The claim is that the arrays move LESS
-// than the per-draw work, so the per-draw work has to be MEASURED -- and the
-// scalar block at binding 2 is the population that measures it.
 pub fn shader_block_uploads(shader_name: string, binding: int) -> int {
     let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
     if entry == null { return -1 }
@@ -652,9 +566,6 @@ pub fn new_owned_block(shader_name: string, fingerprint: int, site: string) -> O
     }
 }
 
-// Upload an owner's packed block. Called once the owner's program is current
-// and its buffer bound -- `run_pass_body` after `set_shader`, the batch flush
-// from `apply_batch_uniforms`.
 fn upload_owned_block(shader_name: string, b: OwnedUniformBlock) {
     let h = get_shader_handle(shader_name)
     if h == 0 { return }
@@ -672,8 +583,6 @@ fn upload_owned_block(shader_name: string, b: OwnedUniformBlock) {
     }
 }
 
-// The `Pass.block` form of `set_uniform_block`: pack now, upload at draw.
-// Keep this a macro so `u` is evaluated only after block allocation succeeds.
 macro pass_block(shader_name: expr, u: expr) {
     let pb = new_owned_block(shader_name, uniform_block_id(u), __SITE__)
     if pb != null {
@@ -683,8 +592,6 @@ macro pass_block(shader_name: expr, u: expr) {
     pb
 }
 
-// Frame command blocks share the same packed representation as persistent
-// owners, but their storage returns to this arena after the queued passes run.
 pub global FRAME_UNIFORM_BLOCKS: [OwnedUniformBlock] = []
 pub global FRAME_UNIFORM_BLOCK_FRAME: int = -1
 pub global FRAME_UNIFORM_BLOCK_CURSOR: int = 0
@@ -750,9 +657,6 @@ pub fn owned_block_for(held: OwnedUniformBlock?, shader_name: string, fingerprin
     return new_owned_block(shader_name, fingerprint, site)
 }
 
-// The `RenderBatch` form: pack now, upload when the flush reaches this batch.
-// `block_frame` carries the flat store's staleness rule -- an occurrence slot
-// reused by a different draw must not upload last frame's pack.
 macro batch_block(b: expr, shader_name: expr, u: expr) {
     let bb = owned_block_for(b.block, shader_name, uniform_block_id(u), __SITE__)
     if bb != null {
@@ -763,9 +667,6 @@ macro batch_block(b: expr, shader_name: expr, u: expr) {
     }
 }
 
-// The `SpriteMesh` form. An acquired mesh is a description too: it is filled
-// during update and forwards its block onto the batch `submit_mesh_into` builds
-// for it, so two acquires of the same shader keep their own values.
 macro mesh_block(m: expr, shader_name: expr, u: expr) {
     let mb = owned_block_for(m.block, shader_name, uniform_block_id(u), __SITE__)
     if mb != null {
@@ -802,8 +703,6 @@ fn __upload_resolved_block<T>(
     __upload_uniform_block(shader_name, entry, site)
 }
 
-// Pack `u` into `shader_name`'s block and upload it. A missing block is a
-// caller error here -- the set-then-draw shape -- so it logs.
 pub fn set_uniform_block<T>(shader_name: string, u: T) {
     if let entry = shader_block_by_fingerprint(shader_name, uniform_block_id(u)) {
         __upload_resolved_block(shader_name, entry, u, __SITE__)
@@ -812,16 +711,6 @@ pub fn set_uniform_block<T>(shader_name: string, u: T) {
     }
 }
 
-// The same upload for a caller whose shader may legitimately NOT declare this
-// block -- a custom pipeline declaring its own group, which is a normal state
-// rather than the missed set-then-draw `set_uniform_block` warns about.
-//
-// `u` is named twice but EVALUATED once, inside the branch: `uniform_block_id`
-// reads only its expression's TYPE and never lowers it (pinned by
-// `crates/skull/tests/uniform_block_pack.rs`). That is what keeps the value off
-// the hot path when the block is absent, and why this is not
-// `if block_present { set_uniform_block(..) }` -- that form looks the
-// fingerprint up twice and builds the value regardless.
 macro set_uniform_block_if_present(shader_name: expr, u: expr) {
     if let entry = shader_block_by_fingerprint(shader_name, uniform_block_id(u)) {
         __upload_resolved_block(shader_name, entry, u, __SITE__)

@@ -1,4 +1,3 @@
-// Isolates asset and residency state and native handles per test.
 @nomangle inline(lua) fn residency_owner_test_state_names() -> any = """
     local map_names = { "IMAGE_CACHE", "IMAGE_PATHS", "IMAGE_SAMPLING",
         "IMAGE_RESOLVED_IDENTITY", "IMAGE_IDENTITY_PATHS", "IMAGE_PATH_REFS",

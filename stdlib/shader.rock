@@ -11,16 +11,10 @@ value Sampler2D {
     error("texture() is GPU-only (shader fns are not CPU-callable)")
 """
 
-// The sampler's mip-0 dimensions as a float Vec2 (`vec2(textureSize(s, 0))`).
-// Not stage-restricted -- textureSize is legal in every GLSL stage.
 @intrinsic @gpu_only inline(lua) fn texture_size(s: Sampler2D) -> Vec2 = """
     error("texture_size() is GPU-only (shader fns are not CPU-callable)")
 """
 
-// Integer sampler (the R32I entity-id tier).
-// Phantom like Sampler2D. texture_id() reads the id channel as int
-// (`texture(s, uv).r`); GLSL ES gives isampler2D no default precision, so the
-// emitter declares it `highp` at the use site.
 value ISampler2D {
     __handle: int,
 }
@@ -33,8 +27,6 @@ value ISampler2D {
     error("texture_size() is GPU-only (shader fns are not CPU-callable)")
 """
 
-// GPU builtins. Fragment-stage only; the
-// emitter whitelists them per stage. CPU bodies error -- never a silent stub.
 @intrinsic @gpu_only inline(lua) fn frag_coord() -> Vec4 = """
     error("frag_coord() is GPU-only (fragment-stage builtin)")
 """
@@ -55,7 +47,6 @@ value ISampler2D {
     error("discard() is GPU-only (fragment-stage builtin)")
 """
 
-// Vertex-stage only (A2c): the per-vertex index within the draw call.
 @intrinsic @gpu_only inline(lua) fn vertex_id() -> int = """
     error("vertex_id() is GPU-only (vertex-stage builtin)")
 """
@@ -81,23 +72,12 @@ struct UniformArray<T> { }
     return x == math.huge or x == -math.huge
 """
 
-// Bool-vector tier. A plain value struct -- luajit/JS get it
-// free as a value; the GLSL emitter maps it to `bvec3`, LOCAL/TEMP ONLY (bool
-// interpolants are rejected in attr/varying/uniform position). Built via
-// `bvec3(...)`, reduced via `any`, produced by `greater_than`, and cast to Vec3
-// via `to_vec3` (the GLSL `vec3(bvec)` per-channel bool->float select).
 value Bvec3 { x: bool, y: bool, z: bool }
 
-// Ctor: portable `Bvec3 { ... }` body for luajit/JS; a GLSL template renders the
-// native `bvec3(a, b, c)` inline (a helper fn would collide with the GLSL builtin
-// type name -- "recursive call to bvec3").
 @intrinsic fn bvec3(x: bool, y: bool, z: bool) -> Bvec3 {
     return Bvec3 { x: x, y: y, z: z }
 }
 
-// The three below carry a portable Rock body (luajit/JS need nothing) AND a
-// GLSL template (crates/skull-codegen-glsl) so the shader path renders the
-// native builtin inline. `any` here is arity-1 (the iterator `any` is arity-2).
 @intrinsic fn any(b: Bvec3) -> bool {
     return b.x || b.y || b.z
 }

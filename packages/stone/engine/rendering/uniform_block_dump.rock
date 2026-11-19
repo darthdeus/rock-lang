@@ -25,8 +25,6 @@ global UNIFORM_BLOCK_DUMP_DRAW_HOOK: (fn(string, RenderBatch, string, bool))? = 
 global UNIFORM_BLOCK_DUMP_STAGE_HOOK: (fn(string, Canvas))? = null
 global UNIFORM_BLOCK_DUMP_MESH_JSON: string = "null"
 global UNIFORM_BLOCK_DUMP_FINISH_HOOK: (fn())? = null
-// The frame the dump was armed in; capture starts with the NEXT whole frame,
-// so a key press after this frame's flush still yields complete frames.
 global UNIFORM_BLOCK_DUMP_ARM_FRAME: int = -1
 global UNIFORM_BLOCK_DUMP_FRAME_COUNT: int = 0
 global UNIFORM_BLOCK_DUMP_DRAWS: [JsonValue] = []
@@ -39,13 +37,9 @@ global UNIFORM_BLOCK_DUMP_SCREENSHOT_STATUS: string = ""
 global UNIFORM_BLOCK_DUMP_SCREENSHOT_FAILED: bool = false
 
 const UNIFORM_BLOCK_DUMP_DIR: string = "debug_uniform_blocks"
-// Frames Ctrl+F7 captures; enough to hold both images of an alternation
-// several times over.
 pub const UNIFORM_BLOCK_DUMP_DEFAULT_FRAMES: int = 8
 pub const UNIFORM_BLOCK_DUMP_MAX_FRAMES: int = 64
 
-// Arm a capture of the next `frames` rendered frames. False when one is
-// already armed or `frames` is outside 1..UNIFORM_BLOCK_DUMP_MAX_FRAMES.
 pub fn uniform_block_dump_arm(frames: int, screenshot_dir: string = "") -> bool {
     if UNIFORM_BLOCK_DUMP_ON || frames < 1 || frames > UNIFORM_BLOCK_DUMP_MAX_FRAMES { return false }
     UNIFORM_BLOCK_DUMP_DRAW_HOOK = uniform_block_dump_draw
@@ -83,7 +77,6 @@ pub fn uniform_block_dump_arm(frames: int, screenshot_dir: string = "") -> bool 
     return true
 }
 
-// The finished dump's JSON, once; null while armed or when none was taken.
 pub fn uniform_block_dump_take() -> string? {
     let out = UNIFORM_BLOCK_DUMP_RESULT
     UNIFORM_BLOCK_DUMP_RESULT = null
@@ -103,12 +96,10 @@ pub fn uniform_block_dump_cancel() {
 }
 
 fn uniform_block_dump_begin_frame() {
-    // Numerical targets on two frames expose alternation without copying eight full G-buffers.
     let dir = if UNIFORM_BLOCK_DUMP_FRAMES.len() < 2 { UNIFORM_BLOCK_DUMP_SCREENSHOT_DIR } else { "" }
     stone_graphics_capture_begin(dir, RENDER_FRAME)
 }
 
-// Dev key: Ctrl+F7. Each bundle keeps the JSON and its eight presented frames.
 fn uniform_block_dump_key() {
     if !(debug_keys_enabled() && tool_ctrl_held() && tool_key_pressed(ToolKey::F7)) { return }
     if UNIFORM_BLOCK_DUMP_ON { return }
@@ -128,7 +119,6 @@ fn uniform_block_dump_key() {
     }
 }
 
-// Queue before the presented-frame screenshot drain, after all frame drawing.
 fn uniform_block_dump_prepare_present() {
     if UNIFORM_BLOCK_DUMP_SCREENSHOT_DIR == "" || RENDER_FRAME == UNIFORM_BLOCK_DUMP_ARM_FRAME { return }
     UNIFORM_BLOCK_DUMP_SCREENSHOT_PATH = "{UNIFORM_BLOCK_DUMP_SCREENSHOT_DIR}/frame_{RENDER_FRAME}.png"
@@ -143,9 +133,6 @@ fn uniform_block_dump_screenshot_done(path: string, ok: bool) {
     UNIFORM_BLOCK_DUMP_SCREENSHOT_STATUS = if ok { "ok" } else { "error" }
 }
 
-// Called with the scene canvas current, so the existing PNG readback restores
-// the same framebuffer. Capture boundaries distinguish bad shading from a later
-// composite without changing shader or world state.
 fn uniform_block_dump_stage(stage: string, canvas: Canvas) {
     if RENDER_FRAME == UNIFORM_BLOCK_DUMP_ARM_FRAME { return }
     if stage == "main_end" { stone_graphics_capture_scene_depth(canvas.handle.0) }
@@ -165,8 +152,6 @@ fn uniform_block_dump_stage(stage: string, canvas: Canvas) {
     UNIFORM_BLOCK_DUMP_STAGES.push(json_object(record))
 }
 
-// Called by the world flush right before a batch's draw, after its program is
-// current and its block uploaded.
 fn uniform_block_dump_draw(key: string, batch: RenderBatch, shader: string, after_scene: bool) {
     let late = if let pipe = batch.pipeline { pipe.after_scene } else { false }
     if batch.block == null && !late { return }
@@ -180,17 +165,12 @@ fn uniform_block_dump_draw(key: string, batch: RenderBatch, shader: string, afte
     m["handle"] = json_int(handle)
     m["has_block"] = json_bool(batch.block != null)
     m["block_frame"] = json_int(batch.block_frame)
-    // apply_batch_uniforms uploads only a block packed this frame; a stale one
-    // leaves the block's range holding the previous upload.
     m["uploaded"] = json_bool(batch.block != null && batch.block_frame == RENDER_FRAME)
     m["gl"] = json_decode(stone_uniform_block_binding_state_json(handle)) ?? json_null()
     m["mesh"] = json_decode(UNIFORM_BLOCK_DUMP_MESH_JSON) ?? json_null()
     UNIFORM_BLOCK_DUMP_DRAWS.push(json_object(m))
 }
 
-// Called at each frame's end: records the frame, and after the last one writes
-// the result. A frame that drew no world batch (a menu) still counts, with no
-// draws, so a waiting caller always gets an answer.
 fn uniform_block_dump_finish() {
     if RENDER_FRAME == UNIFORM_BLOCK_DUMP_ARM_FRAME { return }
     let registered: [JsonValue] = []
@@ -267,8 +247,6 @@ fn uniform_block_dump_finish() {
     root["status"] = json_str(if UNIFORM_BLOCK_DUMP_SCREENSHOT_FAILED { "error" } else { "ok" })
     root["frames"] = json_array(UNIFORM_BLOCK_DUMP_FRAMES)
     let text = json_encode(json_object(root))
-    // Not under the sim harness, like the watcher's shader dumps: a sim reads
-    // the result through `uniform_block_dump_take`.
     if !sim_mode_active() {
         let _ = create_directory(UNIFORM_BLOCK_DUMP_DIR)
         let base = if UNIFORM_BLOCK_DUMP_SCREENSHOT_DIR != "" {

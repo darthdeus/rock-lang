@@ -1,9 +1,3 @@
-// The depth preview samples screen_canvas's live active rectangle, not the
-// whole backing texture. Each witness renders real world geometry, checks the
-// written depth through the independent native readback, draws the production
-// preview into a separate canvas, and compares previews against each other --
-// never against a reimplementation of the visualize shader's curve.
-
 // Numeric trace for evidence runs. Off unless DEPTH_WITNESS_LOG names a file,
 // so the committed tests stay hermetic under a plain `rock test stone`.
 inline(lua) fn depth_preview_record(line: string) = """
@@ -20,9 +14,6 @@ fn depth_preview_view(size: int) -> FrameView {
         Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
 }
 
-// One world frame covering the whole live rectangle at `anchor_y`, whose
-// y-sort key the world pass remaps to `expected_depth`. Returns the
-// independently read back native depth.
 fn depth_preview_render_world(view: FrameView, anchor_y: float, expected_depth: float, label: string) -> float {
     RENDER_VIEW = view
     draw_rect(v(0.0, anchor_y), v(80.0, 80.0), WHITE, depth: DepthMode::TestWrite)
@@ -35,8 +26,6 @@ fn depth_preview_render_world(view: FrameView, anchor_y: float, expected_depth: 
     return actual
 }
 
-// Production preview of the current screen_canvas into a fresh canvas.
-// Returns the red channel at three spread points.
 fn depth_preview_sample(label: string) -> [float] {
     let preview = new_canvas(64, 64, "rgba32f")
     defer { destroy_canvas(preview) }
@@ -55,9 +44,6 @@ fn depth_preview_sample(label: string) -> [float] {
     return out
 }
 
-// The preview leaves no binding, program, or viewport behind: the target
-// handle is released, no shader stays bound, and the next bind re-establishes
-// its own full viewport (there is no separate viewport reset by design).
 fn depth_preview_assert_preview_teardown(label: string) {
     assert_eq(CURRENT_CANVAS_HANDLE, 0, "{label}: preview releases its target binding")
     assert(WATCHER.current_shader_name == null, "{label}: preview clears the bound-shader bookkeeping")
@@ -106,9 +92,6 @@ fn depth_preview_active_extent_matches_full_control() {
         let full = RENDER_VIEW.unwrap()
         depth_preview_render_world(full, 0.0, 0.5, "control frame")
         let control = depth_preview_sample("control frame")
-        // Establish non-0.5 backing everywhere before shrinking: whatever the
-        // inactive texels hold afterwards (this depth or the clear value), an
-        // unscaled preview samples something other than the live 0.5 frame.
         depth_preview_render_world(full, 6.5, 0.75, "backing frame")
         let control75 = depth_preview_sample("backing frame")
         assert(abs(control75[0] - control[0]) > 0.1 && abs(control75[1] - control[1]) > 0.1,
@@ -157,8 +140,6 @@ fn depth_preview_native_resize_keeps_preview() {
     })
 }
 
-// A horizontal gray gradient image: every row is identical, so only the U
-// mapping matters and any V convention cancels out.
 fn depth_preview_gradient_source() -> (ImageData, Image) {
     let data = new_owned_image_data(64, 64)
     for y in 0..64 {
@@ -171,8 +152,6 @@ fn depth_preview_gradient_source() -> (ImageData, Image) {
     return (data, image)
 }
 
-// Raw fullscreen copy through the imperative quad path -- the draw that
-// observes a leaked UV scale, since unlike a pass it installs none itself.
 fn depth_preview_blit_full(source: SampledTexture, output: Canvas) {
     set_canvas(output)
     set_blend_mode(BlendMode::Replace)
@@ -210,8 +189,6 @@ fn depth_preview_following_fullscreen_draw_keeps_default_uv() {
         let source = sampled_image(image)
         depth_preview_blit_full(source, output)
         let before = depth_preview_read_row(output)
-        // A reduced-extent preview through a sub-rect: a non-trivial UV scale
-        // plus a viewport the teardown must release.
         depth_preview_render_world(RENDER_VIEW.unwrap(), 0.0, 0.5, "uv frame")
         set_canvas_active(screen_canvas, 32, 32)
         set_canvas_active(visible_id_canvas, 32, 32)

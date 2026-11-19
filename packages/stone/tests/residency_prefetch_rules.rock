@@ -1,9 +1,3 @@
-// Prefetch submission is paced by decoded-bytes-in-flight. It
-// submits at once while the
-// native queue has room and wait otherwise; residency_prefetch_advance drains
-// the waiters in arrival order, and residency_prefetch_idle reports a drained
-// queue with nothing still publishing.
-
 fn residency_prefetch_test_image(digest: string, name: string, w: int, h: int) -> string {
     let root = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-residency-prefetch"
     let eat = root + "/.eat"
@@ -61,8 +55,6 @@ fn residency_prefetch_submits_while_under_budget() {
         residency_prefetch_advance()
         assert_eq(residency_state(small), ResidencyState::Loading, "advance drains the waiter")
         assert(!residency_prefetch_idle(), "loading prefetches are not idle")
-        // The blocking pump publishes Deferred results; the prepare flush
-        // only waits for Required ones.
         let _ = stone_service_image_uploads()
         assert_eq(residency_state(big), ResidencyState::Resident, "the pump publishes")
         assert_eq(residency_state(small), ResidencyState::Resident, "the drained waiter publishes")
@@ -85,7 +77,6 @@ fn residency_prefetch_advance_is_first_in_first_out() {
         let _ = residency_prefetch(ResidencyRequest { path: small })
         assert_eq(residency_state(small), ResidencyState::Absent, "small waits")
         assert_eq(residency_state(big), ResidencyState::Absent, "big waits")
-        // Room for one submission: the first waiter takes it.
         residency_set_prefetch_budget(1)
         let loads = stone_get_image_profile_stats().load_calls
         residency_prefetch_advance()

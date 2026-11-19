@@ -34,8 +34,6 @@ pub fn json_encode_job_advance(job: JsonEncodeJob, budget: int) -> int {
     return spent
 }
 
-// Appends unjoined tokens to caller-owned scratch. The save writer drains it
-// before advancing again; the public chunk/result API retains its old shape.
 pub fn json_encode_job_advance_into(job: JsonEncodeJob, budget: int,
                                     parts: [string]) -> int {
     let spent = 0
@@ -48,8 +46,6 @@ pub fn json_encode_job_advance_into(job: JsonEncodeJob, budget: int,
         let scanned = frame.scanned
         let multiline = frame.multiline
         let object_keys = frame.object_keys
-        // Keep cursor lanes local until descent, completion or budget exhaustion.
-        // Avoid copying every cursor lane after each string byte slice or scan.
         while spent < budget && job.stack.len() == level + 1 {
             match value {
                 Str(s) => {
@@ -101,7 +97,6 @@ pub fn json_encode_job_advance_into(job: JsonEncodeJob, budget: int,
                 Object(values) => {
                     if object_keys == null {
                         while job.key_buffers.len() <= level { job.key_buffers.push([]) }
-                        // keys_into already sorts string keys in canonical byte order.
                         object_keys = values.keys_into(job.key_buffers[level])
                     }
                     let keys = object_keys.unwrap()
@@ -179,8 +174,6 @@ fn json_encode_job_string_part(s: string, parts: [string]) {
     } else if start < s.len() { parts.push(s.substring(start, s.len())) }
 }
 
-// A leaf that fits this slice need not be boxed into a traversal frame. Charge
-// the same opening/string/closing units as the general cursor path.
 fn json_encode_job_leaf(value: JsonValue, parts: [string], budget: int) -> int {
     if budget <= 0 { return 0 }
     match value {

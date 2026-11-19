@@ -32,7 +32,6 @@ fn gpu_mesh_instanced_draw_renders_each_instance_and_counts_once() {
     let white = gpu_mesh_draw_white()
     let size = 64
     let target = new_canvas(float(size), float(size), "rgba8")
-    // Unit quad fan, pos-only: stride 2, one size-2 attribute at location 0.
     let verts = native_buffer_float(8)
     verts[0] = -1.0; verts[1] = -1.0
     verts[2] = 1.0;  verts[3] = -1.0
@@ -47,7 +46,6 @@ fn gpu_mesh_instanced_draw_renders_each_instance_and_counts_once() {
         release_owned_image(white)
         set_canvas_handle(saved_canvas)
     }
-    // Three instances at NDC x offsets (location 1, divisor 1).
     let inst = native_buffer_float(6)
     inst[0] = -0.5; inst[1] = 0.0
     inst[2] = 0.0;  inst[3] = 0.0
@@ -56,7 +54,6 @@ fn gpu_mesh_instanced_draw_renders_each_instance_and_counts_once() {
 
     let sid = rock_shader(mesh_probe_vert, mesh_probe_frag)
     let gl_errors = stone_gl_error_count()
-    // FRAME_STATS resets at frame start, so read the counter right after each draw.
     stone_reset_frame_stats()
     with_canvas(target, () => {
         clear_screen(0.0, 0.0, 0.0, 1.0)
@@ -96,7 +93,6 @@ fn gpu_mesh_instanced_draw_renders_each_instance_and_counts_once() {
     assert_eq(stone_get_graphics_stats().instanced_draws, 0)
     assert(stone_read_canvas_pixel_channel(target.handle.0, mid, mid, 0) < 0.5)
 
-    // Growth preserves attribute bindings; refilling the prefix then draws all four quads.
     let grown = native_buffer_float(8)
     grown[0] = -0.75; grown[1] = 0.0
     grown[2] = -0.25; grown[3] = 0.0
@@ -177,7 +173,6 @@ fn world_surface_mesh_order_interleaves_with_custom_rows_without_custom_uniforms
     let sprite = ensure_world_sprite_batch(image, 0, BlendMode::Alpha, false, DepthMode::TestWrite)
     let later = ensure_world_sprite_batch(image, 0, BlendMode::Alpha, false, DepthMode::TestWrite, unlit: true)
     let sprite_key = batch_key_of(image, 0, BlendMode::Alpha, false, DepthMode::TestWrite)
-    // Two occurrences share the old sprite ordering without replacing its row.
     for mesh in [first, last] {
         queue_world_surface_geometry(mesh, pipe, [], null, null, WorldSurfaceOutputs::Automatic,
             0, BlendMode::Alpha, DepthMode::TestWrite, sort_key: sprite_key)

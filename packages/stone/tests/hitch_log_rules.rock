@@ -1,8 +1,3 @@
-// Which slow frames get their own [HITCH] line, and when the window line
-// fires. Every frame over the threshold is still counted; only the logging
-// is tiered, so a present-bound miss under HITCH_LOUD_MS reaches the log
-// through the window tally alone.
-
 @test
 fn hitch_present_misses_log_only_when_loud() {
     let saved = HITCH
@@ -30,8 +25,6 @@ fn hitch_window_tally_resets_once_per_window() {
     HITCH = saved
 }
 
-// A long frame whose thread used little CPU was waiting on something no
-// phase or system timer covers; one that used its time is the slower phase.
 @test
 fn hitch_frame_off_the_cpu_is_blocked() {
     assert_eq(hitch_classify(60.0, 2.0, 55.0, 0.0, 0.0, 0, 0, 0, 6.0), "blocked")

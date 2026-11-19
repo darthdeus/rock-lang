@@ -15,7 +15,6 @@ use stone::*
     return largest
 """
 
-// Native pointer narrowing spends different constant slots on each target.
 @nomangle inline(lua) fn vertex_writer_trace_limit() -> int = 'return jit.arch == "arm64" and 128 or 144'
 
 @nomangle fn vertex_writer_trace_loop(mesh: SpriteMesh, count: int) {

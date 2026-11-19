@@ -35,9 +35,6 @@ pub fn draw_errors_world() {
             let message = error_item.message
             draw_text(message, pos + error_item.offset, 8.0, RED)
 
-            // print("Error at position: {inspect(pos)} - {message}")
-            // } else {
-            //     print("Error without position: {key} - {error_item.message}")
         }
     }
 

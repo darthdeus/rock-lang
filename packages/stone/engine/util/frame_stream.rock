@@ -16,8 +16,6 @@ pub struct FrameStreamResult {
     error: string,
 }
 
-// Frames that paid a recording readback, failed ones included: like a
-// screenshot, they say nothing about how fast the game runs for a player.
 pub global FRAME_STREAM_READBACKS: int = 0
 global FRAME_STREAM_LIVE: bool = false
 global FRAME_STREAM_PENDING: bool = false
@@ -29,7 +27,6 @@ pub fn frame_stream_begin(path: string) -> bool {
     return true
 }
 
-// Records the frame being drawn when it is presented.
 pub fn frame_stream_record() {
     sim_submit_guard("frame_stream_record")
     FRAME_STREAM_PENDING = true
@@ -56,7 +53,6 @@ fn frame_stream_capture_for_present() {
     FRAME_STREAM_PENDING = false
     FRAME_STREAM_READBACKS = FRAME_STREAM_READBACKS + 1
     let (draw_w, draw_h) = stone_get_drawable_size()
-    // A failure is logged natively and kept for frame_stream_finish.
     let _ = stone_frame_stream_record(draw_w, draw_h)
 }
 

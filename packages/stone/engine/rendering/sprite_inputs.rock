@@ -1,4 +1,3 @@
-// Optional per-batch inputs bind a stand-in when the shader declares the slot.
 pub fn bind_sprite_normal_texture(shader_id: string, normal: SampledTexture?,
     sampling: TextureFilter = TextureFilter::Nearest) {
     let source = normal ?? sampled_image(WHITE_PIXEL.unwrap())
@@ -11,9 +10,6 @@ pub fn bind_sprite_surface_texture(shader_id: string, surface: SampledTexture?,
     shader_bind_texture_if_present(shader_id, "uSurfaceTex", source, sampling)
 }
 
-// The source's declared sampling: a colour map declares Linear or MipStable,
-// a per-texel geometry map (a wall set's geometry normal) Nearest, since
-// filtering it into a transparent neighbour invents a normal.
 fn bind_sprite_auxiliary_texture(shader_id: string, auxiliary: SampledTexture?) {
     let source = auxiliary ?? sampled_image(WHITE_PIXEL.unwrap())
     shader_bind_texture_if_present(shader_id, "uAuxiliaryTex", source,
@@ -30,9 +26,6 @@ fn bind_sprite_material_texture(shader_id: string, material: SampledTexture?) {
     shader_bind_texture_if_present(shader_id,"uMaterialTex",source,sampling)
 }
 
-// A pooled batch's per-draw samplers, bound on the active program right before
-// its draw. Every pool flush (world, UI, DrawList) brackets its draw with this
-// pair.
 fn bind_batch_samplers(shader_id: string, batch: RenderBatch) {
     if let bindings = batch.geometry_bindings {
         for binding in bindings {
@@ -48,8 +41,6 @@ fn bind_batch_samplers(shader_id: string, batch: RenderBatch) {
     bind_sprite_material_texture(shader_id, batch.material)
 }
 
-// Unconditional because the binds are: a batch with no normal map still binds
-// the white 1x1, so its unit still holds a sampler.
 fn release_batch_samplers(shader_id: string, batch: RenderBatch) {
     if let bindings = batch.geometry_bindings {
         for binding in bindings { sampler_release_unit(binding.slot) }

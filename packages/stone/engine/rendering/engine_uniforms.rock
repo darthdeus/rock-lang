@@ -17,20 +17,14 @@
 pub value EngineU {
     uProjection: Mat4,
     uView: Mat4,
-    // Isometric depth-remap band, in world y. South=0, north=1.
     uYBounds: Vec2,
-    // Camera y extent, the wider band effects anchor against.
     uScreenBounds: Vec2,
     uEngineTime: float,
     uTextureVFlip: uint,
 }
 
-// The camera, as Rock owns it: ONE implementation feeding both deliveries --
-// this block, and the by-name writes hand-authored GLSL still needs.
-// Draw space belongs to each producer; the camera stores only its matrix.
 pub global CAMERA_VIEW: Mat4 = mat4_identity()
 
-// world_to_screen is (v + offset) * scale, so the translation is +offset*scale.
 pub fn camera_view_matrix(offset: Vec2, scale: float) -> Mat4 {
     return Mat4 {
         c0: v(scale, 0.0, 0.0, 0.0),
@@ -40,17 +34,10 @@ pub fn camera_view_matrix(offset: Vec2, scale: float) -> Mat4 {
     }
 }
 
-// The clock every shader animates on. NOT `stone_get_time()`: that is wall
-// time since process start, so it ignores `SIM_FIXED_DT` and does not replay. `time` accumulates the dt the frame
-// actually committed, which is what makes a rendered frame a function of its
-// frame index. One oracle -- `uEngineTime` and every `uTime` read it.
 pub fn shader_clock() -> float {
     return time
 }
 
-// Column stores, not `CAMERA_VIEW = camera_view_matrix(...)`: a Mat4 store
-// constructs the value, and the camera is set several times a frame. The
-// columns are those of camera_view_matrix.
 pub fn set_camera(offset: Vec2, scale: float) {
     CAMERA_VIEW.c0 = v(scale, 0.0, 0.0, 0.0)
     CAMERA_VIEW.c1 = v(0.0, scale, 0.0, 0.0)
@@ -58,8 +45,6 @@ pub fn set_camera(offset: Vec2, scale: float) {
     CAMERA_VIEW.c3 = v(offset.x * scale, offset.y * scale, 0.0, 1.0)
 }
 
-// Column stores for the same reason: every one-draw camera clear (each target
-// rect-batch flush and immediate draw) resets the matrix.
 pub fn reset_camera() {
     CAMERA_VIEW.c0 = v(1.0, 0.0, 0.0, 0.0)
     CAMERA_VIEW.c1 = v(0.0, 1.0, 0.0, 0.0)
@@ -67,7 +52,6 @@ pub fn reset_camera() {
     CAMERA_VIEW.c3 = v(0.0, 0.0, 0.0, 1.0)
 }
 
-// Compare leaves without constructing a Mat4 on the per-draw cache path.
 fn camera_view_is_identity() -> bool {
     return CAMERA_VIEW.c0.x == 1.0 && CAMERA_VIEW.c0.y == 0.0
         && CAMERA_VIEW.c0.z == 0.0 && CAMERA_VIEW.c0.w == 0.0
@@ -156,18 +140,6 @@ pub fn end_cleared_camera() {
     }
 }
 
-// The bound target's Y convention. `Direct` is the ordinary one: the target's
-// rows run with authored y. `PresentSource` is for a canvas the present pass
-// samples WITH A FLIP (the composite) -- authored top-left content needs the
-// pre-compensating ortho or it comes back mirrored, measured as an exact
-// 720 - y.
-//
-// The caller chooses, and it is deliberately NOT inferred from whether a canvas
-// is bound: world geometry renders into canvases too and needs `Direct`, so
-// canvas-vs-window carries too little information. Centralizing it in the
-// PROJECTION is what makes it cover every primitive at once -- a shape, a
-// sprite and a label all mirrored identically before this existed, and a
-// per-writer coordinate flip would have had to fix each separately.
 pub enum TargetConvention {
     Direct,
     PresentSource,
@@ -182,10 +154,6 @@ fn target_ortho_for_extent(extent: Vec2, convention: TargetConvention = TargetCo
     }
 }
 
-// THE construction site. A block uploads WHOLE, so every member converges here
-// -- the shape `sprite_frag_uniforms` took for the fragment block. Splitting it
-// is what let `uYBounds` and the screen bounds drift onto separate by-name
-// setters in the first place.
 pub fn engine_uniforms(yb: Vec2, convention: TargetConvention = TargetConvention::Direct) -> EngineU {
     return engine_uniforms_for_extent(
         v(stone_current_target_width(), stone_current_target_height()), yb, convention)
@@ -212,30 +180,8 @@ pub fn engine_uniforms_for_extent_with_view(
     }
 }
 
-// How many times the engine block has been PACKED, ever. Deliveries are
-// counted by the entry's own `uploads`; this counts the 38-leaf pack behind
-// them, which is the cost the screen-space reuse below collapses. Cleared by
-// nothing -- a sim reads the delta across a window it drives itself.
 pub global ENGINE_BLOCK_PACKS: int = 0
 
-// The screen-space engine block, identified by the inputs it is built from.
-//
-// Every program in a screen-space pass gets the SAME block. `reset_camera` has
-// run, so the view is identity, and the target extent, the convention, the
-// depth band, the camera's screen bounds and the shader clock are shared by
-// all of them -- only the destination scratch differs. So the pack runs once
-// per distinct state and each entry remembers the stamp of the state its
-// scratch holds (`engine_block_upload` drives both boot programs through one).
-//
-// Keyed on the INPUTS rather than on the packed bytes: comparing the bytes
-// means reading them back through the same constant pointer offsets the pack
-// writes, which is the cost this exists to remove.
-//
-// The camera is deliberately NOT in the key. Reuse is confined to an
-// identity matrix, checked from the data itself because scoped restores can
-// assign CAMERA_VIEW directly. Nonidentity views always pack their own bytes.
-//
-// Stamps start at 1, so a fresh entry's 0 never matches.
 global ENGINE_BLOCK_STAMP: int = 0
 global ENGINE_BLOCK_KEY_VALID: bool = false
 global ENGINE_BLOCK_KEY_W: float = 0.0
@@ -247,14 +193,8 @@ global ENGINE_BLOCK_KEY_SB_X: float = 0.0
 global ENGINE_BLOCK_KEY_SB_Y: float = 0.0
 global ENGINE_BLOCK_KEY_TIME: float = 0.0
 
-// The stamp identifying the screen-space block these inputs build. Unchanged
-// inputs return the previous stamp; anything else adopts the new inputs and
-// mints the next one, which invalidates every entry at once.
 fn engine_block_screen_stamp(w: float, h: float, present_source: bool,
                              yb: Vec2) -> int {
-    // Read here rather than taken as parameters: they are the same two calls
-    // the builder makes, and passing them in put three more floats live across
-    // the call on every delivery.
     let sb = camera_y_bounds()
     let t = shader_clock()
     if ENGINE_BLOCK_KEY_VALID
@@ -281,7 +221,6 @@ fn engine_block_screen_stamp(w: float, h: float, present_source: bool,
     return ENGINE_BLOCK_STAMP
 }
 
-// Deliver the engine block to `shader`, when its program declares one.
 pub fn set_engine_uniforms(shader: string, yb: Vec2,
     convention: TargetConvention = TargetConvention::Direct,
     extent: Vec2? = null) {
@@ -297,23 +236,16 @@ pub fn set_engine_uniforms(shader: string, yb: Vec2,
     // `NYI: register coalescing too complex` in a combat frame.
     if let block = shader_block_by_fingerprint(shader, uniform_block_id(engine_uniforms(yb, convention))) {
         let entry = block
-        // Resolved once: the key and the block are built from the same extent,
-        // and the default one is the bound target's, which a canvas bind moves.
         let target = if extent != null {
             extent
         } else {
             v(stone_current_target_width(), stone_current_target_height())
         }
-        // 0 is "not reusable": a nonidentity view is not in the key, and
-        // it is also what every other packer leaves on the entry.
         let stamp = if !camera_view_is_identity() { 0 } else {
             engine_block_screen_stamp(target.x, target.y,
                 convention == TargetConvention::PresentSource, yb)
         }
         if stamp != 0 && entry.engine_stamp == stamp {
-            // The scratch already holds these bytes. The upload still runs:
-            // the buffer is this program's own and the delivery is what the
-            // caller asked for.
             __upload_uniform_block(shader, entry, __SITE__)
             return
         }

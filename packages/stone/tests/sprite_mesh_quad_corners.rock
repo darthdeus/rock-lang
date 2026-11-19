@@ -13,8 +13,6 @@ fn quad_corner_near(actual: float, expected: float) {
     assert(abs(actual-expected) < 0.00001, "vertex attribute {actual} matches corner input {expected}")
 }
 
-// Match by geometry, independently of the builder's private vertex order.
-// The polygon shoelace area and diagonal incidence check its triangulation.
 fn quad_corner_oracle(mesh: SpriteMesh, first: int, expected: [Vertex]) {
     let seen: [int] = [0,0,0,0]
     let area = 0.0

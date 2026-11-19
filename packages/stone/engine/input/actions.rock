@@ -1,6 +1,3 @@
-// The action layer gives stable handles over mutable bindings and runtime
-// state.
-
 const DEFAULT_AXIS_DEADZONE: float = 0.2
 const DEFAULT_AXIS_THRESHOLD: float = 0.5
 const PAD_DEVICE_CLAIM_THRESHOLD: float = 0.5
@@ -62,15 +59,11 @@ pub value ActionRuntime {
     last_fire: float,
 }
 
-// Registry: name -> def, plus insertion order for the rebind screen.
 pub global ACTIONS: Map<string, ActionEntry> = map_new()
 pub global ACTION_NAMES: [string] = []
 pub global ACTION_RUNTIME: Map<string, ActionRuntime> = map_new()
 global ACTION_CLAIMED_SCANCODES: [string] = []
 
-// Keyboard capture: while true, non-ui actions read false (imgui's
-// WantCaptureKeyboard). Set each frame by the focus core -- nav-mode
-// focus live -- NOT by "any panel open".
 pub global UI_INPUT_CAPTURE: bool = false
 // Text fields capture UI actions too: Enter/Escape and printable bindings
 // belong to the editor until it submits or cancels. Code-native fields set
@@ -138,8 +131,6 @@ pub fn action_bindings_equal(a: [InputBinding], b: [InputBinding]) -> bool {
     return true
 }
 
-// Authored sharing applies only to a chord present in both default lists.
-// A remap to another chord still deserves the normal conflict diagnostic.
 pub fn action_entries_share_default(a: ActionEntry, b: ActionEntry, chord: InputBinding) -> bool {
     let declared = false
     for name in a.shared_defaults_with {
@@ -234,8 +225,6 @@ pub fn action_binding_at(name: string, slot: int) -> InputBinding? {
     return entry.bindings[slot]
 }
 
-// Replaces a registered action's bindings and recomputes whether they
-// override its defaults.
 fn action_store_bindings(name: string, bindings: [InputBinding]) {
     let entry = ACTIONS.get(name) ?? return
     ACTIONS[name].bindings = bindings
@@ -404,9 +393,6 @@ fn input_binding_pressed(binding: InputBinding) -> bool {
     }
 }
 
-// Whether `binding` was down last frame. A press and release in one frame
-// counts as not down, so that press still counts. Chord modifiers are matched
-// against the current state.
 fn input_binding_was_down(binding: InputBinding) -> bool {
     match binding {
         InputBinding::Key { scan, ctrl, shift, alt, gui } =>
@@ -511,9 +497,6 @@ pub fn pressed(a: ActionDef) -> bool {
     return false
 }
 
-// Capture does not gate releases: a hold begun before a panel opened still
-// has to terminate when its input is released. A release while another
-// binding still holds the action is not a release.
 pub fn released(a: ActionDef) -> bool {
     if REBIND_CAPTURE { return false }
     let entry = ACTIONS.get(a.name()) ?? return false
@@ -539,9 +522,6 @@ pub fn released(a: ActionDef) -> bool {
     return true
 }
 
-// One binding's analog contribution, never negative. An unavailable binding
-// contributes 0.0, which is what skipping it did: `best` starts at 0.0 and
-// only ever rises, so 0.0 never wins.
 fn action_binding_contribution(b: InputBinding) -> float {
     if !action_input_binding_available(b) { return 0.0 }
     return match b {
@@ -555,7 +535,6 @@ fn action_binding_contribution(b: InputBinding) -> float {
     }
 }
 
-// Unrolled for the same reason as `down` and `pressed`.
 pub fn value(a: ActionDef) -> float {
     if !action_allowed(a) { return 0.0 }
     let entry = ACTIONS.get(a.name()) ?? return 0.0
@@ -652,8 +631,6 @@ fn pad_button_label(button: string) -> string {
     }
 }
 
-// A trigger has one pressed direction, so its sign says nothing; a stick axis
-// carries a different action each way, so it names the direction instead.
 fn pad_axis_label(axis: string, dir: int) -> string {
     let trigger = match axis {
         "lefttrigger" => "LT",
@@ -676,8 +653,6 @@ fn pad_axis_label(axis: string, dir: int) -> string {
     return "Pad {axis} {if dir < 0 { "-" } else { "+" }}"
 }
 
-// One and two bindings cover every shipped action, and both take the
-// straight-line path: no loop to compile, and no scratch array either.
 pub fn action_binding_labels(name: string) -> string {
     let bindings = action_bindings(name)
     let n = bindings.len()

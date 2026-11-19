@@ -22,7 +22,6 @@ value TextVary {
     TexCoords: Vec2,
 }
 
-// text.rs binds the font atlas to unit 0, so `text` must be the only field.
 struct TextTex {
     text: Sampler2D,
 }
@@ -41,6 +40,5 @@ fn text_vert(@attr a: TextVert, @engine e: EngineU) -> TextVary {
 
 @shader(fragment)
 fn text_frag(vary: TextVary, @uniform u: TextFragU, @textures t: TextTex) -> Vec4 {
-    // Single-channel (GL_RED) atlas sampled into alpha, tinted by textColor.
     return u.textColor * v(1.0, 1.0, 1.0, texture(t.text, vary.TexCoords).r)
 }

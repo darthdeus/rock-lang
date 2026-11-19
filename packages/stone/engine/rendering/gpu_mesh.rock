@@ -1,9 +1,3 @@
-// Retained GPU mesh objects, instancing optional -- Rock wrapper over the
-// stone_mesh_* C API. Base verts
-// are STATIC_DRAW uploads; optional per-instance data can be updated in place;
-// draw runs under the currently bound shader (with_shader), so use it for
-// custom-shader geometry, not the sprite path.
-
 pub struct GpuMesh {
     handle: MeshId,
     vert_count: int,
@@ -47,10 +41,6 @@ pub @vertex_expand inline(lua) fn vertex_attr_sizes<T>(buf: FlatVec<T>) -> [int]
     error("vertex_attr_sizes is compiler-expanded")
 """
 
-// The NativeBuffer overloads: the expansion reads the ELEMENT type and accepts
-// either container, but a signature only admits the one it names, and the two
-// vertex stores in this engine are split across both (FlatVec for instance
-// data, NativeBuffer<Vertex> for the sprite batch).
 pub @vertex_expand inline(lua) fn vertex_stride<T>(buf: NativeBuffer<T>) -> int = """
     error("vertex_stride is compiler-expanded")
 """
@@ -83,8 +73,6 @@ pub fn gpu_mesh_new(
     }
 }
 
-// Instance attribs continue after the base attribs, divisor 1. count 0 is
-// valid (draws nothing); initialize once, then use gpu_mesh_update_instances.
 pub fn gpu_mesh_set_instances(
     m: GpuMesh,
     data: Ptr<float>,
@@ -107,14 +95,6 @@ pub fn gpu_mesh_update_instances(m: GpuMesh, data: Ptr<float>, count: int) -> bo
     return true
 }
 
-// count < 0 = all instances; ignored for non-instanced meshes.
-//
-// THE account of the retained-mesh lane's texture slots, the twin of
-// `__stone_draw_mesh_vertex` for the sprite-format lane. `stone_mesh_draw`
-// binds `tex` to unit 0 itself and reports whether its own registry lookup
-// produced a texture -- a nonzero handle is not evidence of either, and a
-// second lookup here would be a different opinion about the same fact. A
-// negative result means nothing was drawn and owes no audit.
 pub fn gpu_mesh_draw(m: GpuMesh, tex: Image, count: int = -1) {
     let result = stone_mesh_draw(m.handle.0, tex.0, count)
     if result < 0 { return }

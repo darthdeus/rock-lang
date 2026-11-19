@@ -1,5 +1,3 @@
-// Unlit world/UI sprites with shared depth and picking outputs.
-
 pub value SpriteVary {
     position: Vec4,
     TexCoord: Vec2,
@@ -10,7 +8,6 @@ pub value SpriteVary {
     @flat Section: Vec2 = v(0.0, 0.0),
 }
 
-// The window depth [0,1] of a sprite whose ground point is at world y `pivot_y`.
 pub fn sprite_batch_depth01(pivot_y: float, y_bounds: Vec2) -> float {
     return clamp((pivot_y - y_bounds.x) / max(y_bounds.y - y_bounds.x, 0.0001), 0.0, 1.0)
 }
@@ -42,14 +39,11 @@ pub value SpriteFragU {
 
 pub value SpriteBatchOut {
     FragColor: Vec4,
-    // R32I id attachment: integer output, written by overwrite (blending is
-    // ignored on integer color buffers per spec).
     FragId: int,
 }
 
 pub const SPRITE_ALPHA_CUTOFF: float = 0.1
 
-// The draw binds its colour texture to slot zero.
 pub struct SpriteBatchTex {
     uTexture: Sampler2D,
     uSurfaceTex: Sampler2D,

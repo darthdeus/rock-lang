@@ -10,8 +10,6 @@ co fn poller_idle_forever() -> Coroutine<Wait> {
     }
 }
 
-// Bytes allocated per registered coroutine per `coroutine_poller_update` once
-// every coroutine is idle on `Wait::Frame`.
 fn poller_idle_bytes_per_coroutine(poller: CoroutinePoller, count: int) -> float {
     let updates = 200
     for _ in 0..4 {

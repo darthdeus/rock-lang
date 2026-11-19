@@ -1,9 +1,5 @@
 use stone::*
 
-// Material batch resolution, Material.pipeline through the world and DrawList
-// flushes, and the acquire_mesh / retain_mesh lifecycles, rendered through the
-// production world flush (render_batches) in an owned scene scope.
-
 fn world_flush_fixture(body: fn() -> ()) {
     setup_stone()
     assert(stone_gpu_host_ensure())
@@ -13,8 +9,6 @@ fn world_flush_fixture(body: fn() -> ()) {
     assert(failure == null, failure ?? "")
 }
 
-// One world frame: flush, read the red channel at each world position, then
-// start the next frame the way the frame loop does.
 fn world_flush_frame(points: [Vec2]) -> [float] {
     render_batches()
     let out: [float] = []
@@ -53,9 +47,6 @@ fn world_flush_fixture_pipeline() -> Pipeline {
     return pipeline(rock_shader(sprite_batch_vert, world_flush_white_frag))
 }
 
-// Identical batch-affecting properties resolve to the same pooled batch as
-// draw_sprite, the cache holds across draws, and a with_draw_pool override
-// bypasses the cache instead of poisoning it.
 @test
 fn material_draws_share_the_draw_sprite_batch_and_respect_pool_overrides() {
     world_flush_fixture(() => {
@@ -88,8 +79,6 @@ fn material_draws_share_the_draw_sprite_batch_and_respect_pool_overrides() {
     })
 }
 
-// A black texture is white through the fixture pipeline and black through the
-// default shader, giving each flush an independent control.
 @test
 fn material_pipeline_is_honored_by_world_and_draw_list_flushes() {
     world_flush_fixture(() => {
@@ -144,8 +133,6 @@ fn material_pipeline_is_honored_by_world_and_draw_list_flushes() {
     })
 }
 
-// acquire: registered at acquire, read at flush, recycled through MESH_FREE
-// and reused the next frame.
 @test
 fn acquired_mesh_renders_at_flush_and_recycles_its_buffer() {
     world_flush_fixture(() => {
@@ -177,8 +164,6 @@ fn acquired_mesh_renders_at_flush_and_recycles_its_buffer() {
     })
 }
 
-// A draw that outgrows its request gets the grown buffer back on the next
-// frame, whatever order the draws acquire in, so it does not regrow one.
 @test
 fn acquired_mesh_returns_to_the_draw_that_grew_it() {
     world_flush_fixture(() => {
@@ -200,8 +185,6 @@ fn acquired_mesh_returns_to_the_draw_that_grew_it() {
     })
 }
 
-// retain: dirty on creation, refill clears dirty, draw_mesh renders without a
-// refill, invalidate re-marks dirty.
 @test
 fn retained_mesh_renders_across_frames_without_refill() {
     world_flush_fixture(() => {
@@ -220,9 +203,6 @@ fn retained_mesh_renders_across_frames_without_refill() {
         assert(r1 > 0.5 && r2 > 0.5, "the retained quad renders across frames without refill (r1={r1:.3} r2={r2:.3})")
         assert_eq(rm.mesh.count, 6, "retained contents survive draws")
 
-        // The depth key is the raw world anchor y; the shader remaps it against
-        // the camera bounds per frame, which keeps retained vertices
-        // camera-independent.
         assert(abs(rm.mesh.vbo[0].pivot_y - pos.y) < 0.001,
             "vertex pivot_y is the raw world anchor y ({rm.mesh.vbo[0].pivot_y} vs {pos.y})")
 

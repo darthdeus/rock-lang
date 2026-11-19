@@ -204,7 +204,6 @@ fn residency_owner_miss_wait_classifies_at_half_frame() {
         residency_flush_required()
         let waited = residency_profile_stats().miss_wait_us
         assert(waited > 0, "the Required miss accounts its prepare wait")
-        // Keep the exact boundary representable independently of native wait jitter.
         RESIDENCY_FRAME_MISS_WAIT_US = 10000
         assert_eq(hitch_classify(20.0, 0.0, 1.0, 0.0,
             0.0, 0, 0, waited), "residency", "a half-frame miss wait precedes upload attribution")
@@ -213,10 +212,8 @@ fn residency_owner_miss_wait_classifies_at_half_frame() {
         HITCH.enabled = true
         HITCH.threshold_ms = 0.0
         HITCH.warmup_frames = 0
-        // Recording is the seam under test; skip its wall-second log budget.
         HITCH.log_second = floor(stone_get_time()) as int
         HITCH.log_used = HITCH_LOG_LINES_PER_SECOND
-        // A second draw required the same image before its load completed.
         RESIDENCY_FRAME_WAIT_PATHS.push(paths[0])
         hitch_frame_record(1, 20.0, 0.0, false)
         assert_eq(HITCH.cause[0], "residency", "the slow-frame ring records the miss cause")

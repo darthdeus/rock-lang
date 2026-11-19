@@ -14,8 +14,6 @@ fn center_align_centers_cap_box_on_anchor() {
     let font = cap_center_test_font()
     defer { unload_font(font) }
     let anchor = v(200.0, 200.0)
-    // With and without descenders: the CAP BOX (first cap top to last
-    // baseline) centers on the anchor, so the label never moves with p/g.
     for text in ["H", "Hg", "Ag"] {
         let layout = text_layout_build(font, text, 24.0, 1.0,
             align: TextAlign::Center)

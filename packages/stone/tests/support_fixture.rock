@@ -1,10 +1,6 @@
 pub use stone_native::test_support::{world_fixture_call, world_fixture_raised,
     world_fixture_with_cleanup, world_fixture_traceback};
 
-// The native runner booted in this process as stone_run_game boots it, for a
-// test that drives run_one_frame. Run it in a fresh process
-// (profiler_test_process): the runner's clocks, renderer and profiler are
-// process state no fixture restores.
 fn native_runner_test_boot(title: string) -> (StoneWindow, GameConfig) {
     setup_stone()
     let config = GameConfig { title: title, width: 16, height: 16,

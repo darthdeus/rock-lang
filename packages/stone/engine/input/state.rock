@@ -123,8 +123,6 @@ pub fn input_note_last_device(event: InputDeviceEvent) {
 
 pub fn input_last_device() -> InputDevice { return LAST_INPUT_DEVICE }
 
-// Back to the boot input state, for tests that drive the production input
-// handlers and must not see another test's holds or latches.
 fn input_reset_state() {
     SIM_INPUT_SYNTHETIC_ONLY = false
     LAST_INPUT_DEVICE = InputDevice::KeyboardMouse
@@ -184,22 +182,16 @@ fn input_reset_state() {
 }
 
 pub fn input_end_frame() {
-    // Clear and rebuild last frame's state by copying current state
-    // This is much faster than deepcopy since we only copy small maps with primitive values
-
-    // Clear previous state
     mouse_down_last.clear()
     keys_down_last.clear()
     scancodes_down_last.clear()
     pad_down_last.clear()
     pad_axes_last.clear()
 
-    // Copy current button states (typically 0-3 buttons)
     for (button, is_down) in mouse_down {
         mouse_down_last.insert(button, is_down)
     }
 
-    // Copy current key states (typically <10 keys)
     for (key, is_down) in keys_down {
         keys_down_last.insert(key, is_down)
     }
@@ -306,17 +298,10 @@ fn input_copy_live_mouse(dst: Map<int, bool>) {
     }
 }
 
-// The host has no keyboard/mouse for this run: `rock frame`, `rock sim` and the
-// headless editor/agent boots all set STONE_HEADLESS and create the window
-// unmapped. Matches the host predicate (`STONE_HEADLESS` present, any value).
 fn input_headless_run() -> bool {
     return os_getenv("STONE_HEADLESS") != null
 }
 
-// Latch the game-input authority for the whole run, once, before any game code
-// reads an input predicate. A sim always drives its own lane; so does a run with
-// no window to type into. Only a windowed, non-sim run takes the host lane by
-// default, and the env opt-out overrides both.
 pub fn input_resolve_authority() {
     let host_opt_in = os_getenv("SIM_INPUT_SYNTHETIC_ONLY") == "0"
     SIM_INPUT_SYNTHETIC_ONLY = !host_opt_in && (sim_mode_active() || input_headless_run())
@@ -440,9 +425,6 @@ fn pad_axis_value_last(axis: string) -> float {
     return pad_axes_last.get(axis).unwrap_or(0.0)
 }
 
-// Either control key. The debug function-key row is fully assigned, so actions
-// that share a key are separated by this modifier: each site gates on it, one
-// way or the other.
 pub fn ctrl_held() -> bool {
     return is_key_down(KEY_CTRL_LEFT) || is_key_down(KEY_CTRL_RIGHT)
 }
@@ -456,9 +438,6 @@ pub @intrinsic fn is_key_pressed(key: string) -> bool {
     return a && !b
 }
 
-// The pressed-latch is OR'd in so a sub-frame tap (down and up inside one
-// frame's drain) reports press AND release on that frame, rather than
-// stranding whatever the hold was accumulating.
 pub fn is_key_released(key: string) -> bool {
     if keys_down.get(key).unwrap_or(false) { return false }
     return keys_down_last.get(key).unwrap_or(false)
@@ -561,7 +540,6 @@ fn on_mouse_released(_x: float, _y: float, button: int) {
 
 fn input_physical_mouse_released(_x: float, _y: float, button: int) {
     let suppressed = physical_mouse_suppressed.get(button).unwrap_or(false)
-    // A press hidden from game input cannot close a game-visible hold.
     if physical_mouse_down.get(button).unwrap_or(false) && !suppressed {
         physical_mouse_released_this_frame.insert(button, true)
     }

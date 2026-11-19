@@ -31,8 +31,6 @@ fn present_test_fixture(body: fn(Canvas, Canvas) -> ()) {
             RenderConfig { scene: SceneRaster::Native })
         ENGINE.profiler_enabled = true
         PROFILER_SECTIONS_OFF = 0
-        // Use real section registration without changing the caller's metrics
-        // or depending on an active GC window's late-section diagnostics.
         GC_WIN_SECTION_REGISTRY_FROZEN = false
         SECTION_IDS = map_new()
         SECTION_NAMES = vec_new()

@@ -1,8 +1,5 @@
 use stone::*
 
-// A duration only defers a shape: the retained draw must honor the same
-// options as the immediate one.
-
 const SHAPE_DURATION_LINE_LAYER: int = 3
 const SHAPE_DURATION_CIRCLE_LAYER: int = 5
 const SHAPE_DURATION_SHADER: string = "shape_duration_line_shader"
@@ -43,7 +40,6 @@ fn shape_duration_assert_drawn(pool: RenderBatchPool, mask: RenderBatchPool, out
     let entry = OUTLINE_ENTRIES.get(outline_id)
     assert(entry != null && entry.color == RED && entry.width == 2.0,
         "{what} line registers its outline")
-    // The silhouette is the line's own geometry entered under the outline id.
     assert_eq(shape_duration_mask_count(mask), line.count, "{what} line silhouette matches its geometry")
 
     let circle = shape_duration_batch(pool, SHAPE_DURATION_CIRCLE_LAYER)

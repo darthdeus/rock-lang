@@ -159,7 +159,6 @@ pub extern(ffi, "stone") fn stone_terrain_noise(x: float, y: float) -> float
 pub extern(ffi, "stone") fn stone_terrain_random(x: float, y: float, stream: float, seed: float) -> float
 pub extern(ffi, "stone") fn stone_terrain_field(a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float, i: float, x: float, y: float, wx: float, wy: float, noisy: int) -> float
 
-// A process-local wire namespace; copied state retains its existing value.
 pub inline(lua) fn native_identity_new() -> int = """
     local id = (_G.__stone_identity or 0) + 1
     assert(id < 9007199254740992, "identity namespace exhausted")
@@ -167,7 +166,6 @@ pub inline(lua) fn native_identity_new() -> int = """
     return id
 """
 
-// Checked headless hosts and the engine use the same native record collector.
 inline(lua) fn __stone_register_error_collector() -> bool = """
     _G.__rock_collect_logged_errors = function()
         if _G.__rock_native_errors_collected then return end

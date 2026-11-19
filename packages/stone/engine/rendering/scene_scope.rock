@@ -1,5 +1,3 @@
-// Explicit scene rendering owns its targets and commands; the live runner
-// keeps its pools and pending work even if the caller raises during a draw.
 struct SceneRenderSaved0 {
     render_view: FrameView?,
     outline_target_canvas: Canvas,
@@ -80,9 +78,6 @@ pub fn with_scene_render_scope(view: FrameView, body: fn() -> ()) {
     let saved_world_pool = world.batches
     let saved_gizmo_pool = gizmo.batches
     let saved_shader = WATCHER.current_shader_name
-    // A nested render must keep its caller's snapshots alive until restoration.
-    // Reuse storage by nesting depth rather than allocating every shader block
-    // again for each first-use chunk rendered by the prefetcher.
     static block_snapshots: [[SceneRenderBlockSaved]] = []
     static block_depth = 0
     if block_snapshots.len() == block_depth { block_snapshots.push([]) }
@@ -150,7 +145,6 @@ pub fn with_scene_render_scope(view: FrameView, body: fn() -> ()) {
             scene_render_restore0(saved0)
             world.batches = saved_world_pool
             gizmo.batches = saved_gizmo_pool
-            // Rebind while marks are private: set_shader clears its activation map.
             if let shader = saved_shader { set_shader(shader) } else { end_shader() }
             scene_render_restore2(saved2)
             ENGINE.debug_graphics_stats = debug_stats
@@ -193,7 +187,6 @@ fn scene_render_blocks_save(saved: [SceneRenderBlockSaved] = []) -> [SceneRender
                     uploads: entry.uploads, engine_stamp: entry.engine_stamp })
             }
             let block = saved[count]
-            // Registration can replace or resize blocks between scope entries.
             block.shader = shader
             block.entry = entry
             if block.bytes.len != entry.size {

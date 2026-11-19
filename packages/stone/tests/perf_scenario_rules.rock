@@ -162,7 +162,6 @@ fn perf_scenario_recorder_allocation_entry(which: int) {
     let start = max(warmup, 1)
     perf_scenario_window("steady", warmup, 4)
     perf_scenario_ready("recorder")
-    // A collection cannot hide setup allocation from the heap-delta check.
     __gc_collect_stop()
     let first_kb = 0.0
     let ordinary_kb = 0.0
@@ -229,7 +228,6 @@ fn perf_scenario_trace_reasons_cover_the_allocation_window() {
             __stone_jit_count_event(counts, "abort", 4, site, 0, 7, 2)
             __stone_jit_count_event(counts, "abort", 4, site, 0, 7, 3)
         })
-        // Export must retain the frozen histogram even after another abort.
         __stone_jit_count_event(counts, "abort", 5, site, 0, 2, 0)
         let doc = json_decode(profiler_perf_json()).unwrap()
         let memory = json_field(doc, "memory").unwrap()
@@ -285,8 +283,6 @@ fn perf_scenario_trace_reasons_without_a_window_cover_the_process() {
     })
 }
 
-// Inject an event between rotating the histogram and detaching its era, just
-// as a recorder event can arrive between the snapshot's Lua statements.
 @nomangle inline(lua) fn perf_scenario_freeze_with_abort(counts: any, site: any) -> (bool, int, int) = """
     local st = _G.__stone_jit_abort_sites
     local injected = false

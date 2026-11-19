@@ -1,5 +1,3 @@
-// Transport is keyed by live owner identity, outside replay.
-
 pub inline(lua) fn native_flow_handle<W>(owner: W, key: int) -> int = """
     local owners = _G.__stone_flow_owners
     local context = owners and owners[owner]

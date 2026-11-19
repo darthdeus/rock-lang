@@ -2,8 +2,6 @@ const SOUND_BANK_SCHEMA_VERSION: int = 2
 
 pub newtype SoundEventHandle(int)
 
-// A layer names its variant pool by handle: the pool's last-played memory is
-// shared by the layer's immediate plays and its queued (offset) plays.
 pub global SOUND_BANK_POOLS: Arena<MultiSound> = arena_new()
 
 pub value SoundBankLayer {
@@ -246,8 +244,6 @@ pub fn sound_bank_release(bank: SoundBank) {
     sound_bank_release_events(bank.events)
 }
 
-// The variant pool a loaded layer plays from. Null only after its bank was
-// released.
 pub fn sound_bank_layer_pool(layer: SoundBankLayer) -> MultiSound? {
     return layer.bank.get()
 }
@@ -294,8 +290,6 @@ fn sound_bank_play_pending(index: int) {
         if other_index != index { remaining.push(other) }
     }
     SOUND_BANK_PENDING = remaining
-    // Its bank was released while the layer waited: the sounds are gone, and a
-    // play would have been silent anyway.
     let pool = pending.bank.get() ?? {
         sound_bank_reset_pending_order_if_idle()
         log_error("SOUND", "pending sound layer lost its bank before firing")
@@ -331,9 +325,6 @@ macro sound_bank_play_step(bank: expr, handle: expr, step_index: expr) {
         -1, 0.0, 0.0, false, 0.0, __SITE__)
 }
 
-// `pitch_jitter` detunes each layer on its own roll; `level_jitter` (dB either
-// way) is rolled once per play and scales every layer of it, so the event
-// gets louder or softer as a whole rather than coming apart.
 macro sound_bank_play_step_with(bank: expr, handle: expr, step_index: expr,
                                 volume: expr = 1.0, speed: expr = 1.0,
                                 decay: expr = 0.0, bus: expr = -1,
@@ -374,7 +365,6 @@ pub fn _sound_bank_play_step(bank: SoundBank, handle: SoundEventHandle, step_ind
     } else { volume_in }
     for layer in event.steps[step_index].layers {
         if layer.offset <= 0.0 {
-            // Only a released bank has no pool, and its sounds are gone.
             let pool = layer.bank.get() ?? continue
             _play_random_sound_impl(pool, layer.volume * volume,
                 layer.speed * speed, decay, routed_bus, pitch_jitter, false, spatial, pan, site)

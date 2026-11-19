@@ -1,46 +1,18 @@
-// Focus and keyboard navigation. Focusables register via ui_focus_item while drawing --
-// a SEPARATE list from the mouse items (that one holds everything
-// hit-testable with z; this one holds only focusables, in declaration
-// order, per scope). Same frame model as the mouse core: resolve at
-// frame start against LAST frame's list; the runner calls
-// ui_focus_begin_frame right after ui_mouse_begin_frame (hot must be
-// fresh for hover-steal).
-//
-// Modality: nav mode is entered by an UiUp/UiDown press (the entering
-// press focuses the remembered item -- it does not also move) and
-// exited by pointer movement. Focus is LIVE only in nav mode; per-scope
-// remembered focus persists across mode switches. Keyboard capture
-// (UI_INPUT_CAPTURE, actions.rock) = nav-mode focus live -- pointer
-// mode never captures, so an open panel can't kill gameplay keys.
-//
-// Nav edges OR the action's pressed latch with this core's OWN prev-down
-// snapshot. The latch catches a tap completed in one poll (down and up
-// before resolution: the hold is gone but the press arrived); the own
-// snapshot catches a sim's mid-frame injection, whose latch the input
-// layer's snapshot rotation eats before this frame-start resolution
-// sees it (same trick as the mouse core's was_down).
-
 pub nobox value UiFocusItem {
     id: int,
     scope: string,
-    // Design-space rect at registration: FocusMove fx geometry now, the
-    // spatial-nav upgrade later.
     rect: UiRect,
 }
 
 pub struct UiFocusState {
-    // Grow-only pools swapped each frame (the mouse-core pattern).
     last: [UiFocusItem],
     last_count: int,
     cur: [UiFocusItem],
     cur_count: int,
 
-    // Active scope, game-set each frame (mag: topmost open panel).
     scope: string,
 
     nav_mode: bool,
-    // Remembered focus per scope: id + declaration index (the index is
-    // the id-miss fallback -- widget vanished, clamp to position).
     focused_ids: Map<string, int>,
     focused_idx: Map<string, int>,
     live_id: int,       // focused id this frame; 0 unless nav mode
@@ -60,8 +32,6 @@ pub struct UiFocusState {
     last_fire: float,
     prev_mouse: Vec2,
 
-    // UiLeft/UiRight direction resolved this frame (-1/0/+1); timers
-    // separate from up/down so holding both axes can't cross-reset.
     left_was: bool,
     right_was: bool,
     lr_held_since: float,
@@ -118,14 +88,10 @@ pub fn ui_nav_use(up: ActionDef, down: ActionDef, left: ActionDef, right: Action
     f.back = back
 }
 
-// Active focus scope for NEXT frame's resolution. Game-set each frame.
 pub fn ui_focus_set_scope(scope: string) {
     UI_FOCUS.scope = scope
 }
 
-// Register a focusable for NEXT frame's resolution. Declaration order
-// is the nav order. `r` is taken for the future spatial upgrade; 1D
-// vertical nav doesn't read it yet.
 pub fn ui_focus_item(id: int, r: UiRect, scope: string) {
     let f = UI_FOCUS
     f.cur_count = f.cur_count + 1
@@ -140,8 +106,6 @@ pub fn ui_focused(id: int) -> bool {
     return UI_FOCUS.nav_mode && UI_FOCUS.live_id == id && id != 0
 }
 
-// UiLeft/UiRight direction this frame: -1/0/+1, edge then hold-repeat.
-// Consumers (focus_slider, focus_tab_row) gate on ui_focused themselves.
 fn ui_focus_lr() -> int {
     return UI_FOCUS.lr_dir
 }
@@ -150,7 +114,6 @@ pub fn ui_focus_confirmed(id: int) -> bool {
     return UI_FOCUS.confirmed_id == id && id != 0
 }
 
-// The active scope's item at position i (declaration order), or 0.
 fn __focus_nth(f: UiFocusState, i: int) -> int {
     let k = 0
     for j in 0..f.last_count {
@@ -162,7 +125,6 @@ fn __focus_nth(f: UiFocusState, i: int) -> int {
     return 0
 }
 
-// The active scope's rect for `id` (last-frame registration), or zero.
 fn __focus_rect_of(f: UiFocusState, id: int) -> UiRect {
     for j in 0..f.last_count {
         let it = f.last[j]
@@ -190,9 +152,6 @@ fn __focus_scope_len(f: UiFocusState) -> int {
     return k
 }
 
-// Resolve the scope's remembered focus against the current list:
-// remembered id if it still exists, else clamp its index (id-miss),
-// else the first item. Syncs both maps.
 fn __focus_resolve(f: UiFocusState, n: int) {
     let want = f.focused_ids.get(f.scope) ?? 0
     if want != 0 {
@@ -207,7 +166,6 @@ fn __focus_resolve(f: UiFocusState, n: int) {
     f.focused_idx[f.scope] = idx
 }
 
-// Runner-called, right after ui_mouse_begin_frame.
 pub fn ui_focus_begin_frame() {
     let f = UI_FOCUS
     let tmp = f.last
@@ -264,8 +222,6 @@ pub fn ui_focus_begin_frame() {
     f.prev_mouse = mp
     if moved {
         f.nav_mode = false
-        // Hover-steal: a hovered focusable in the active scope retargets
-        // the remembered focus, so the next nav entry starts there.
         let hot = UI_MOUSE.hot
         if hot != 0 {
             let at = __focus_index_of(f, hot)
@@ -279,8 +235,6 @@ pub fn ui_focus_begin_frame() {
     let n = __focus_scope_len(f)
 
     if !f.nav_mode {
-        // The entering press focuses (remembered or first); it does not
-        // also move.
         if (up_edge || dn_edge) && n > 0 {
             f.nav_mode = true
             __focus_resolve(f, n)

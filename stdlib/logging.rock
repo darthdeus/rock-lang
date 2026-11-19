@@ -1,9 +1,3 @@
-// Logging: level control, the host sink/level-source platform SEAMS
-// (__rock_log_emit / __rock_log_sink), the log_* API, and log_once /
-// log_throttled dedup+throttle state. Loaded after unified.rock; the sink
-// is installed by the host logging module at runtime (portable print()
-// fallback until then). Split out of unified.rock for readability.
-
 // ============================================================================
 // Logging System
 // ============================================================================
@@ -13,11 +7,6 @@
 
 global __rock_log_level: int = -1
 
-// Level source is a platform SEAM: the host installs `_G.__rock_log_level_source`
-// (routing to the one rock-log level) via the host logging module. When no
-// sink is installed (rock test / rock run, or early global-init before the
-// install), keep an info default; the nil/<0 guard preserves the contract for
-// that ordering edge (the global-initialization tests).
 @intrinsic @nomangle inline(lua) fn __rock_log_init() = """
     local src = _G.__rock_log_level_source
     if src ~= nil then
@@ -73,56 +62,14 @@ fn log_info(category: string, msg: string) { __rock_log(2, category, msg) }
 fn log_debug(category: string, msg: string) { __rock_log(3, category, msg) }
 fn log_trace(category: string, msg: string) { __rock_log(4, category, msg) }
 
-// A record whose content IS a wall-clock measurement. Info level, because a
-// timing report is informational by nature. Declare only a record that says
-// nothing else: two runs of the same work cannot agree on it, so a differential
-// harness drops it whole, and any gameplay fact sharing the line goes with it.
 fn log_wall_clock(category: string, msg: string) { __rock_log_wall_clock(2, category, msg) }
 
-// Sets the ONE level source (the rock-log level, via the host-installed
-// `_G.__rock_log_level_sink` seam) so it affects all gating -- Rust + Rock --
-// not just this Lua global. With no sink installed it only updates the local
-// default.
 @intrinsic inline(lua) fn log_set_level(level: int) = """
     local sink = _G.__rock_log_level_sink
     if sink ~= nil then sink(level) end
     __rock_log_level = level
 """
 fn log_get_level() -> int { __rock_log_init(); return __rock_log_level }
-
-// ----------------------------------------------------------------------
-// log_once / log_throttled — per-call-site dedup, at a declared level
-// ----------------------------------------------------------------------
-// log_once fires once per call site; subsequent calls from the same site
-// are silently dropped. log_throttled fires at most once per interval per
-// call site. The plain names are ERROR and ignore the level gate (tests/
-// library/log_once.rock: log_set_level(0) must still fire); log_warn_once and
-// log_warn_throttled are WARN and obey it. Pick by what the record means, not
-// by the dedup it needs.
-// Both use `__SITE__` (via macro shim) to derive a stable per-site key —
-// `__SITE__` resolves to "file:line" of the *user's* call, even through
-// wrappers and other macros.
-//
-// Two overloads each: the 2-arg form auto-injects __SITE__; the explicit
-// 3-arg form takes a user-supplied site key (used by tests to share a
-// dedup key across physical lines).
-//
-// Both COUNT every occurrence, not just the ones they emit, and
-// log_suppression_summary() reports the totals at shutdown. Emitting once
-// and going quiet is right for a one-shot notice and actively harmful for
-// a condition that then persists: a sprite mesh dropping every add for ten
-// minutes looked identical to one that dropped a single add, which is how
-// a fracture silently losing its heat ribbon went unexplained for a whole
-// session (57e8c55a2). The counter is what distinguishes them, and the
-// summary surfaces it without anyone having to be watching the stream.
-//
-// State (Lua globals, lazily initialized):
-//   __rock_log_dedup    — site -> occurrence count (log_once)
-//   __rock_log_throttle — site -> last-fire-timestamp (seconds)
-//   __rock_log_counts   — site -> occurrence count (log_throttled)
-//   __rock_log_sites    — site -> "CATEGORY|last message", for the summary
-//   __rock_log_site_levels — site -> level, for the summary
-//   __rock_log_wall     — site -> true for a declared wall-clock site
 
 // @nomangle is ABI: raw Lua calls this by its bare name. The Stone engine's
 // inline(lua) bodies do (stone_file_read and stone_list_directory in
@@ -144,12 +91,6 @@ fn log_get_level() -> int { __rock_log_init(); return __rock_log_level }
     __rock_log_emit(level, category, msg, false)
 """
 
-// Report every deduped/throttled site that fired more than once, with its
-// total. This is the safety net that makes the suppression above safe: a
-// site that fired 38k times is a live bug, and without the total it looks
-// exactly like one that fired once. Emitted at each site's own level, so an
-// error site's total is never hidden and a warning site's obeys the gate.
-// Idempotent.
 @intrinsic @nomangle inline(lua) fn log_suppression_summary() = """
     __rock_log_init()
     if __rock_log_summary_done then return end
@@ -236,10 +177,6 @@ macro log_warn_throttled_with_now(now_sec: expr, category: expr, msg: expr, inte
     _log_throttled_with_now_impl(now_sec, 1, category, msg, interval_sec, site, false)
 }
 
-// Now-source seam for log_throttled. The host runner sets this each frame to
-// the engine `time` global (real wall-clock seconds since game start) via
-// log_set_now(); non-host Rock programs leave it nil and fall back
-// to os.clock() so something still works without the engine running.
 @intrinsic @nomangle inline(lua) fn log_set_now(now_sec: float) = """
     __rock_log_now_override = now_sec
 """
@@ -253,8 +190,6 @@ macro log_warn_throttled_with_now(now_sec: expr, category: expr, msg: expr, inte
     return os.clock()
 """
 
-// Wall-clock variant; thin wrapper around the mockable seam. Mangled: only the
-// macros below call it, and the JS backend binds it by its declared name.
 @intrinsic inline(lua) fn _log_throttled_impl(level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
     _log_throttled_with_now_impl(__rock_log_now(), level, category, msg, interval_sec, site, wall_clock)
 """
@@ -275,37 +210,16 @@ macro log_warn_throttled(category: expr, msg: expr, interval_sec: expr, site: ex
     _log_throttled_impl(1, category, msg, interval_sec, site, false)
 }
 
-// A single DECLARED wall-clock value inside a record that also carries facts
-// worth comparing. `log_wall_clock` drops the whole record, which is right when
-// the record says nothing else; a line like
-// `stroke 'A': commit {wall_clock_ms(t)} ({n} nodes)` still has to compare its
-// label and its node count, so the declaration goes on the value instead.
-//
-// Renders the measurement, except under `ROCK_MASK_WALL_CLOCK=1` -- set for
-// every sim child by `run_sim.rs` -- where it renders a fixed token. The
-// substitution happens at the SOURCE, so the differential harness never has to
-// recognize a duration in text and `cooldown 100ms` next to it stays compared.
 fn wall_clock_ms(ms: float) -> string {
     static masked: bool = (env_var("ROCK_MASK_WALL_CLOCK") ?? "0") == "1"
     if masked { return "<ms>" }
     return "{ms}ms"
 }
 
-// Throttled counterpart of `log_wall_clock`: the record is declared, and so is
-// the suppression summary line the site earns, which carries the same message.
-// WARN: a site throttles a measurement because it reports slowness, which is
-// worth attention and not a failure.
 macro log_wall_clock_throttled(category: expr, msg: expr, interval_sec: expr) {
     _log_throttled_impl(1, category, msg, interval_sec, __SITE__, true)
 }
 
-// Clear EVERY record a suppression leaves: the dedup counts, the throttle
-// stamps, the counts and last messages `log_suppression_summary` reads, the
-// declared-wall-clock sites, and the once-per-process latch that stops the
-// summary running twice. A partial reset is worse than none -- the summary
-// would report totals for sites the caller believes it cleared, and the latch
-// would silence it entirely. Called from tests; can be wired into hot reload
-// later if it becomes useful.
 @intrinsic @nomangle inline(lua) fn log_reset_dedup() = """
     __rock_log_dedup = {}
     __rock_log_throttle = {}
@@ -316,7 +230,6 @@ macro log_wall_clock_throttled(category: expr, msg: expr, interval_sec: expr) {
     __rock_log_summary_done = false
 """
 
-// Number of unique sites currently remembered by log_once. Used in tests.
 @intrinsic @nomangle inline(lua) fn log_dedup_count() -> int = """
     if __rock_log_dedup == nil then return 0 end
     local n = 0

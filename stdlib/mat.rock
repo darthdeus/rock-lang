@@ -18,12 +18,10 @@ value Mat4 {
     }
 }
 
-// Apply a matrix to a column vector: A * v = c0*v.x + c1*v.y + c2*v.z + c3*v.w.
 @pure operator *(a: Mat4, v: Vec4) -> Vec4 {
     return a.c0 * v.x + a.c1 * v.y + a.c2 * v.z + a.c3 * v.w
 }
 
-// Column-major compose: (A*B).col[j] = A * B.col[j].
 @pure operator *(a: Mat4, b: Mat4) -> Mat4 {
     return Mat4 {
         c0: a * b.c0,
@@ -104,7 +102,6 @@ value Mat4 {
     return v(r.x, r.y, r.z)
 }
 
-// Direction transform (w = 0: ignores translation).
 @pure fn Mat4.transform_vector(m, d: Vec3) -> Vec3 {
     let r = m * v(d.x, d.y, d.z, 0.0)
     return v(r.x, r.y, r.z)

@@ -1,8 +1,3 @@
-// Texture and ENGINE-dependent wrappers over the shared transfer in
-// stone-core/color_transfer.rock. This file keeps only what needs samplers
-// or ENGINE.
-
-// Decode each color tap before interpolation; alpha and data samplers are not transferred.
 pub fn texture_srgb(source: Sampler2D, uv: Vec2, filtered: bool) -> Vec4 {
     if !filtered { return srgb_color(texture(source, uv)) }
     let size = texture_size(source)

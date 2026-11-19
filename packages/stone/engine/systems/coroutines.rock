@@ -1,13 +1,3 @@
-// The host side of the coroutine scheduler. The scheduler itself (Task, Wait,
-// TaskClock, CoroutinePoller, poll/tick and the combinators) is in
-// stone-core/tasks.rock and takes every clock and poller explicitly. This file
-// owns the engine's clock and poller and the host-default overloads that bind
-// them, so engine and game code keep writing `start(co)` and `run(co)`.
-
-// The engine's clock mirrors Stone's time globals. The runner syncs it when it
-// commits frame time; `host_task_clock()` syncs it again so a task started
-// before the first frame reads the current globals.
-
 pub global HOST_TASK_CLOCK: TaskClock = task_clock_new()
 
 pub fn host_task_clock_begin_tick() {
@@ -46,8 +36,6 @@ fn pump_coroutine_poller() {
         }
     }
 }
-
-// -- Host-default overloads: the core forms with the engine clock/poller. --
 
 pub fn start<R>(coroutine: Coroutine<Wait, R>, delay: float = 0) -> Task<R> {
     let _ = host_task_clock()
@@ -99,9 +87,6 @@ pub fn poll_co_owned(fetch: () -> Task?, clear: (() -> ())? = null) {
     poll_co_owned(POLLER, fetch, clear)
 }
 
-/// Fire-and-forget: start the coroutine and let the engine poller drive it to
-/// completion. Returns the handle -- watch it (`completed`) or `stop(t)` it if
-/// you care, ignore it if you don't.
 pub fn run(coroutine: Coroutine<Wait>, delay: float = 0) -> Task {
     let _ = host_task_clock()
     return run(POLLER, coroutine, delay)

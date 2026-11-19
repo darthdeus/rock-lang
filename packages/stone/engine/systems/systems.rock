@@ -32,23 +32,11 @@
 //   @draw             -> default stage 100
 //   @draw(stage=10)   -> explicit stage 10
 
-// ============================================================================
-// System Registries
-// ============================================================================
-
 pub value LifecycleDependency {
     key: string,
     fingerprint: string,
 }
 
-// `func` is a compiler-synthesized thunk of one uniform signature for every
-// entry, process- and scene-owned alike (`crates/skull/src/mir_emit.rs`,
-// `crates/skull-codegen-js/src/emit.rs`): a process thunk ignores its
-// argument and invokes the zero-argument process system; a scene thunk
-// resolves `scene_id`'s live root and invokes the statically checked
-// `fn(T) -> ()`. Callable storage is never `any`, and dispatch never asks a
-// value its runtime type -- membership in a type's live population (below)
-// is the only test a scene thunk performs.
 pub value LifecycleSystem {
     func: fn(int) -> (),
     name: string,
@@ -65,13 +53,9 @@ inline(lua) fn lifecycle_wire_schedule_all() = "__rock_lifecycle_schedule_all_wi
 inline(lua) fn lifecycle_wire_take(key: string) -> bool = "return __rock_lifecycle_take_wire(key)"
 
 pub inline(lua) fn lifecycle_systems(phase: string) -> [LifecycleSystem] = "return (_G.__ROCK_LIFECYCLE_PLAN or {})[phase] or {len=0,_data={}}"
-// Same trusted pure boundary as `lifecycle_systems` above: a read-only
-// probe of the compiler-published, load-time-fixed lifecycle plan table.
 inline(lua) fn lifecycle_phase_has_scene(phase: string) -> bool = "local p = (_G.__ROCK_LIFECYCLE_PLAN or {})[phase]; return p ~= nil and (p.scene_owned or 0) > 0"
 
 @inline
-// Every frame-phase runner goes through these two so the hitch ledger sees
-// each system's own wall time (two clock reads).
 fn run_process_system_timed(system: LifecycleSystem, phase: string) {
     let t0 = hitch_system_begin()
     system.func(0)
@@ -97,10 +81,6 @@ fn run_frame_lifecycle_system(system: LifecycleSystem) {
         system.func(population[i])
     }
 }
-
-// ============================================================================
-// Decorators (using deco keyword syntax)
-// ============================================================================
 
 /// @early_init - Register a function to load assets early
 /// Runs before @init, use for loading images, sounds, fonts
@@ -197,11 +177,6 @@ deco init window_resized {}
 pub @lifecycle(phase="shutdown", owner="process", stage_param="stage")
 deco init shutdown(stage: int = 100) {}
 
-// ============================================================================
-// System Runners
-// ============================================================================
-
-// Runs one boot phase.
 fn run_boot_phase(phase: string) {
     let systems = lifecycle_systems(phase)
     let count = systems.len()
@@ -212,8 +187,6 @@ fn run_boot_phase(phase: string) {
         system.func(0)
         perf_phase_end(system_phase)
     }
-    // Required phase-local images must be ready for the next phase's draws
-    // and pixel readback. Explicit Prefetch work stays with the paced pump.
     let uploads_phase = perf_phase_begin("texture_uploads")
     stone_flush_image_uploads()
     perf_phase_end(uploads_phase)
@@ -254,9 +227,6 @@ fn run_wire_systems() {
 }
 
 
-/// Call all registered update systems in stage order
-/// Systems are automatically profiled if ENGINE.systems_profiling_enabled is true
-/// Note: Systems use the global `dt` variable for delta time
 pub fn run_update_systems() {
     let systems = lifecycle_systems("update")
     let count = systems.len()
@@ -299,7 +269,6 @@ fn run_late_update_systems() {
         return
     }
 
-    // Run systems in stage order with optional profiling
     if ENGINE.systems_profiling_enabled {
         for system in systems {
             profile_begin(system.name)
@@ -423,10 +392,6 @@ pub fn run_reset_systems() {
     }
 }
 
-// ============================================================================
-// Debug/Introspection
-// ============================================================================
-
 /// Print all registered systems (only when ROCK_LOG=debug or higher)
 fn print_registered_systems() {
     if log_get_level() < 3 { return }
@@ -461,7 +426,6 @@ fn clear_all_systems() {
     __rock_clear_hot_reload_callbacks()
 }
 
-// Shutdown has left the frame loop; name slow stages even in ordinary runs.
 pub fn shutdown_stage_finished(name: string, started: float) {
     let ms = round((stone_get_time() - started) * 10000.0) / 10.0
     if ms >= 100.0 || name == "total" || os_getenv("STONE_SHUTDOWN_TIMING") == "1" {

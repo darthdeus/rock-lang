@@ -1,9 +1,3 @@
-// Pure-Rock JSON library.
-//
-// JsonValue is the typed surface; json_encode / json_decode are the entry
-// points. No inline(lua) — portable across Rock backends. Canonical example of
-// a Layer-2 pure-Rock stdlib module.
-
 enum JsonValue {
     Null,
     Bool(bool),
@@ -14,9 +8,6 @@ enum JsonValue {
     Object(Map<string, JsonValue>),
 }
 
-// ---------------------------------------------------------------------------
-// Constructors
-
 fn json_null() -> JsonValue { return JsonValue::Null }
 fn json_bool(b: bool) -> JsonValue { return JsonValue::Bool(b) }
 fn json_int(i: int) -> JsonValue { return JsonValue::Int(i) }
@@ -24,9 +15,6 @@ fn json_float(f: float) -> JsonValue { return JsonValue::Float(f) }
 fn json_str(s: string) -> JsonValue { return JsonValue::Str(s) }
 fn json_array(items: [JsonValue]) -> JsonValue { return JsonValue::Array(items) }
 fn json_object(m: Map<string, JsonValue>) -> JsonValue { return JsonValue::Object(m) }
-
-// ---------------------------------------------------------------------------
-// Accessors. Return null on type mismatch so callers can chain `??` defaults.
 
 fn json_is_null(v: JsonValue) -> bool {
     match v {
@@ -79,8 +67,6 @@ fn json_as_object(v: JsonValue) -> Map<string, JsonValue>? {
     }
 }
 
-// Look up a field in an object. Returns null if v is not an object or key
-// is absent.
 fn json_field(v: JsonValue, key: string) -> JsonValue? {
     let m = json_as_object(v)
     if m == null { return null }
@@ -88,9 +74,6 @@ fn json_field(v: JsonValue, key: string) -> JsonValue? {
     if !mm.contains(key) { return null }
     return mm[key]
 }
-
-// ---------------------------------------------------------------------------
-// Encoder
 
 fn json_encode(v: JsonValue) -> string {
     let parts: [string] = []
@@ -122,7 +105,6 @@ fn encode_array(items: [JsonValue], parts: [string]) {
 }
 
 fn encode_object(m: Map<string, JsonValue>, parts: [string]) {
-    // Sort keys for deterministic output.
     let keys = keys(m)
     sort(keys, k => k)
     parts.push("{{")
@@ -137,12 +119,6 @@ fn encode_object(m: Map<string, JsonValue>, parts: [string]) {
     parts.push("}}")
 }
 
-// Pretty-print: containers expand one child per line, but a container whose
-// children are all scalars stays compact on a single line (so a tile/spawner
-// object renders as `{"type":"wall","x":0,"y":0}`, not four lines). Keeps
-// diffs line-oriented and deterministic (object keys stay sorted).
-// An array under an object key named in `compact_items_of` keeps each item on
-// one compact line even when the item nests containers.
 fn json_encode_pretty(v: JsonValue, compact_items_of: [string] = []) -> string {
     let parts: [string] = []
     encode_pretty_into(v, parts, 0, compact_items_of)
@@ -306,9 +282,6 @@ fn hex4(n: int) -> string {
     return "{d0}{d1}{d2}{d3}"
 }
 
-// Format a float without a trailing `.0` for whole numbers, while keeping
-// fractional parts intact. NaN / inf are emitted as null (JSON has no
-// representation for them).
 fn format_float(f: float) -> string {
     if f != f { return "null" }
     if f == 1.0 / 0.0 || f == -1.0 / 0.0 { return "null" }
@@ -317,16 +290,12 @@ fn format_float(f: float) -> string {
     let i = f as int
     if (i as float) == f {
         let text = "{i}"
-        // Large integers can lose digits through the backend's tostring.
         if (f > -1e14 && f < 1e14) || text.parse_float().unwrap() == f {
             return text
         }
     }
     return format_float_roundtrip(f)
 }
-
-// ---------------------------------------------------------------------------
-// Decoder
 
 struct JsonParser {
     src: string,
@@ -358,9 +327,6 @@ fn json_decode(s: string) -> JsonValue? {
     return v
 }
 
-// Typed readers expose this loop at their call sites to avoid whitespace
-// function-entry blacklisting. The graph parser retains its call boundary:
-// global inlining regresses mixed-document workloads (see the benchmark plan).
 @inline fn parse_skip_ws_inline_at(src: string, at: int) -> int {
     let pos = at
     let len = src.len()
@@ -395,10 +361,6 @@ fn parse_value(p: JsonParser) -> JsonValue {
     if b == 102 { return parse_keyword(p, "false", JsonValue::Bool(false)) }
     if b == 34 { return parse_string_value(p) }
     if b == 91 || b == 123 {
-        // One place owns the depth counter, so the container parsers keep
-        // their many return points. The over-limit path leaves it
-        // un-decremented, which is harmless: p.ok is false and the parse is
-        // already unwinding.
         p.depth = p.depth + 1
         if p.depth > json_max_depth() {
             p.ok = false
@@ -408,7 +370,6 @@ fn parse_value(p: JsonParser) -> JsonValue {
         p.depth = p.depth - 1
         return v
     }
-    // number: starts with - or 0..9
     if b == 45 || (b >= 48 && b <= 57) {
         return parse_number(p)
     }
@@ -437,7 +398,6 @@ fn parse_string_value(p: JsonParser) -> JsonValue {
     return JsonValue::Str(s)
 }
 
-// Returns the decoded string and the offset reached, including on rejection.
 fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (string?, int) {
     let pos = at
     let len = src.len()
@@ -446,10 +406,6 @@ fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (strin
     }
     pos = pos + 1
 
-    // `parts` stays null until the literal turns out to carry an escape. Every
-    // object key and most short values have none, and those return a single
-    // substring having allocated neither the array nor the join -- worth 2.1x
-    // on a structure-heavy document (level.json 2.94 -> 1.38ms).
     let body_start = pos
     let segment_start = pos
     let parts: [string]? = null
@@ -509,8 +465,6 @@ fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (strin
                     pos = pos + 6
                     cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
                 } else if cp >= 0xDC00 && cp <= 0xDFFF {
-                    // JSON permits lone surrogates; we reject them as a decode
-                    // failure (malformed input is data, not a programmer error).
                     return (null, pos)
                 }
                 if materialize { parts.unwrap().push(from_codepoint(cp)) }
@@ -519,8 +473,6 @@ fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (strin
             }
             segment_start = pos
         } else if b < 32 {
-            // JSON requires every byte below 0x20 to be escaped. 0x7F (DEL) is
-            // above the range and stays legal raw.
             return (null, pos)
         } else {
             pos = pos + 1
@@ -560,17 +512,11 @@ fn parse_hex4_at(s: string, at: int) -> int? {
 @inline fn parse_number_scan_at(src: string, at: int) -> (int, bool, bool) {
     let pos = at
     let len = src.len()
-    // The grammar is `[-] int [frac] [exp]`, and it is enforced here rather
-    // than left to parse_float: Lua's tonumber accepts `2.e3`, `.5` and `01`,
-    // so a permissive scan makes the verdict the host runtime's rather than
-    // JSON's.
     let is_float = false
     if pos < len && src.unit_at(pos) == 45 {
         pos = pos + 1
     }
 
-    // int: a lone 0, or a nonzero digit followed by any digits. Never empty,
-    // never a leading zero.
     if pos >= len {
         return (pos, is_float, false)
     }
@@ -590,7 +536,6 @@ fn parse_hex4_at(s: string, at: int) -> int? {
         return (pos, is_float, false)
     }
 
-    // frac: the point must be followed by at least one digit.
     if pos < len && src.unit_at(pos) == 46 {
         is_float = true
         pos = pos + 1
@@ -608,7 +553,6 @@ fn parse_hex4_at(s: string, at: int) -> int? {
         }
     }
 
-    // Exponents require a digit after the optional sign, before conversion.
     if pos < len {
         let b = src.unit_at(pos)
         if b == 101 || b == 69 {
@@ -729,12 +673,6 @@ fn parse_object_value(p: JsonParser) -> JsonValue {
     return JsonValue::Null
 }
 
-// ---- Field accessors with defaults -----------------------------------------
-// Take the nullable result of json_field(...) (or any JsonValue?) and a
-// fallback; return the extracted value or the default. Saves the verbose
-// `json_as_int(json_field(root, key) ?? json_null()) ?? default` dance at
-// every call site.
-
 fn jv_str(v: JsonValue?, default_val: string) -> string {
     let vv = v ?? return default_val
     return json_as_str(vv) ?? default_val
@@ -786,9 +724,6 @@ fn jv_int_pair(v: JsonValue?, def_w: int, def_h: int) -> (int, int) {
     return (out_w, out_h)
 }
 
-// A validated source position, or an adapter for an already materialized value.
-// Object field indexes hold source offsets, never descendant values. Readers
-// keep the source text, not a parser, so they store no identity struct.
 nobox value JsonReader {
     src: string? = null,
     at: int = -1,
@@ -854,8 +789,6 @@ fn json_reader_validate(src: string, at: int, validation: JsonReaderValidation) 
     let depth = 0
     let starts: [int] = []
     let path = validation.path
-    // 0: value or empty array, 1: separator, 2: key or empty object,
-    // 3: key after comma, 4: value after comma.
     let state = 0
     let kind = 0
     while true {
@@ -980,8 +913,6 @@ fn json_reader_decode(src: string, rejected: fn(string, int, string)? = null, in
     return JsonReader { src, at, offsets: validation.offsets }
 }
 
-// Source positions are created only after validation. This scan needs no
-// scalar conversion, field map or container tree, including skipped fields.
 fn json_reader_skip(src: string, at: int, offsets: Map<int, JsonReaderOffsets>? = null) -> int {
     let first = src.unit_at(at)
     if first == 91 || first == 123 {
@@ -1032,7 +963,6 @@ fn json_reader_index(reader: JsonReader) -> JsonReader {
     return indexed
 }
 
-// Returns the indexed object and its closing-brace offset.
 fn json_reader_index_at(reader: JsonReader) -> (JsonReader, int) {
     let src = reader.src.unwrap()
     if src.unit_at(reader.at) != 123 { return (reader, reader.at) }
@@ -1227,8 +1157,6 @@ fn JsonReaderArray.get_at(array, index: int) -> JsonReader {
     index: int = 0,
 }
 
-// Source members stream in document order, including duplicates. Consumers
-// overwrite earlier fields to retain JSON's last-member-wins behavior.
 fn json_reader_each_field(reader: JsonReader) -> JsonReaderFieldIter? {
     if let value = reader.value {
         let object = json_as_object(value) ?? return null
@@ -1311,7 +1239,6 @@ fn json_reader_is_null(reader: JsonReader) -> bool {
     return reader.at < 0 || reader.src.unwrap().unit_at(reader.at) == 110
 }
 
-// Use only at a consumer boundary that still requires a materialized subtree.
 fn json_reader_materialize(reader: JsonReader) -> JsonValue {
     if let value = reader.value { return value }
     if reader.at < 0 { return json_null() }
@@ -1320,8 +1247,6 @@ fn json_reader_materialize(reader: JsonReader) -> JsonValue {
     return parse_value(p)
 }
 
-// Fixed coordinate tuples do not need array adapters or descendant readers.
-// Shape and numeric validity stay separate for consumer diagnostics.
 fn json_reader_float_components(reader: JsonReader, size: int) -> (bool, float?, float?, float?) {
     let (shape, x, y, z, _) = json_reader_float_components_end(reader, size)
     return (shape, x, y, z)
@@ -1386,7 +1311,6 @@ fn json_reader_is_object(reader: JsonReader) -> bool {
     return reader.at >= 0 && reader.src.unwrap().unit_at(reader.at) == 123
 }
 
-// Presence belongs to an object field; T controls whether a supplied null is valid.
 struct JsonField<T> {
     present: bool = false,
     value: T? = null,

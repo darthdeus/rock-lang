@@ -1,10 +1,3 @@
-// The focus widgets and the focus core driven through the production frame
-// order: widgets register during update, input arrives mid-frame, and the next
-// ui_mouse_begin_frame/ui_focus_begin_frame resolves it (tapnav_frame in
-// ui_focus_short_tap.rock). Repeat timing advances `time` one 60 Hz frame per
-// resolution against frame-scale ACTION_REPEAT_DELAY/RATE, set between frame
-// boundaries so accumulated time cannot flake a comparison.
-
 struct FocusWidgetsSaved {
     pointer: Vec2?,
     clock: float,
@@ -32,7 +25,6 @@ fn focus_widgets_with(body: fn(Entity<UiSkin>) -> ()) {
         feel: UI_FEEL,
         white: WHITE_PIXEL,
     }
-    // Fills and skins draw with the shared white pixel.
     let white = outline_canvas_white()
     WHITE_PIXEL = white
     let skin = ui_skin_create(UiSkin { image: sampled_image(white), source: irect(0, 0, 1, 1),
@@ -253,8 +245,6 @@ fn focus_tab_row_selects_by_click_and_wraps_while_focused() {
             focus_widgets_frame()
         }
 
-        // The current choice is drawn as selected, not as hovered, with no
-        // pointer near the row. Labels draw one layer above their button.
         let saved_font = DEFAULT_FONT
         let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24, raster: FontRasterPolicy::Fixed).unwrap()
         DEFAULT_FONT = font
@@ -369,8 +359,6 @@ fn ui_focus_nav_moves_wraps_repeats_and_hands_focus_back_to_the_pointer() {
         assert(ui_focused(ic), "nav entry resumes at the hovered item")
         focus_widgets_nav_release("down")
 
-        // The focused item vanishes: focus clamps to its index in the
-        // surviving list ([a, b], index 2 -> b).
         let ra = ui_rect(100.0, 100.0, 200.0, 30.0)
         let rb = ui_rect(100.0, 140.0, 200.0, 30.0)
         ui_focus_set_scope("fsim")

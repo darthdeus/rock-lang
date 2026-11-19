@@ -17,32 +17,18 @@ pub global current_tick: int = 0
 //
 // All decorators support stage-based ordering: @update(stage=10)
 
-// Tracks the live vsync state (config.vsync, overridden to off in perf/sim
-// mode). The post-swap stone_gl_finish (which pulls the vblank busy-wait into
-// present_ms so effective_cpu measures real work) only runs when vsync is on:
-// with vsync off there's no stall to relocate, and a glFinish would just
-// serialize CPU/GPU and skew the uncapped perf measurement.
 global VSYNC_ACTIVE: bool = true
 // A game timing its own frames sets this to finish the frame's GL work before
 // the swap, so the profiler's effective span (frame start to pre-swap)
 // includes the GPU without the present's wait on the display or compositor.
 // macOS GL has no timer queries; this is how its GPU time is seen at all.
 pub global FRAME_FINISH_BEFORE_SWAP: bool = false
-// Presents that ran that finish: a reader timing frames sees which frames
-// actually rendered and finished, not only that the flag was set.
 pub global FRAMES_FINISHED_BEFORE_SWAP: int = 0
 
-// The vsync the game asked for, before the hidden-window hold below.
 global VSYNC_REQUESTED: int = 0
-// True while a vsync request is held off because the window is hidden.
 global VSYNC_HELD_FOR_HIDDEN_WINDOW: bool = false
-// Paces a hidden window whose game asked for vsync and set no frame cap, so
-// holding vsync off does not turn a headless game into a busy loop.
 const HIDDEN_WINDOW_FRAME_CAP: int = 60
 
-// A hidden window presents to no display, so vsync buys nothing there; the
-// cap paces it by time rather than by a display it is not on. Call
-// engine_window_visibility_changed after showing or hiding the window.
 fn engine_set_vsync(enabled: int) {
     VSYNC_REQUESTED = enabled
     let held = enabled != 0 && stone_is_window_hidden()
@@ -63,7 +49,6 @@ pub fn engine_vsync_active() -> bool {
     return VSYNC_ACTIVE
 }
 
-// Re-applies the game's vsync request after the window was shown or hidden.
 pub fn engine_window_visibility_changed() {
     engine_set_vsync(VSYNC_REQUESTED)
 }
@@ -73,15 +58,9 @@ fn engine_latch_vsync_off() {
     engine_set_vsync(0)
 }
 
-// Frame-rate cap: frames per second the loop is paced to, 0 for none. A
-// bounded run (perf, sim, frame-capped) latches it off like vsync, so a
-// game's settings apply cannot slow a measurement down.
 global FRAME_CAP_REQUESTED: int = 0
 global FRAME_CAP_LATCHED_OFF: bool = false
-// The time the current paced frame should end; -1 when pacing is off.
 global FRAME_PACE_DEADLINE: float = -1.0
-// The last stretch of the wait is spun, not slept: a thread sleep overshoots
-// by up to a scheduler tick, which at 60 FPS is several percent of a frame.
 const FRAME_PACE_SPIN_SECONDS: float = 0.002
 
 pub fn engine_set_frame_cap(fps: int) {
@@ -89,18 +68,12 @@ pub fn engine_set_frame_cap(fps: int) {
     FRAME_PACE_DEADLINE = -1.0
 }
 
-// The cap the loop applies: none in a bounded run.
 pub fn engine_frame_cap() -> int {
     if FRAME_CAP_LATCHED_OFF { return 0 }
     if FRAME_CAP_REQUESTED == 0 && VSYNC_HELD_FOR_HIDDEN_WINDOW { return HIDDEN_WINDOW_FRAME_CAP }
     return FRAME_CAP_REQUESTED
 }
 
-// Ends a frame no earlier than one cap interval after the last one ended.
-// Deadlines advance by the interval rather than from "now", so the average
-// rate holds; a frame that ran late restarts the schedule instead of
-// letting later frames run fast to catch up. `delay_ms` is the
-// STONE_FRAME_DELAY_MS test hook: a fixed sleep after every frame.
 fn frame_pace_wait(delay_ms: int) {
     if delay_ms > 0 { stone_delay(delay_ms) }
     let cap = engine_frame_cap()
@@ -175,25 +148,6 @@ fn texture_filter_to_int(f: TextureFilter) -> int {
     }
 }
 
-// Window size requested for this MACHINE, in one place because it is
-// the same question for every game here and the answer belongs to the MACHINE,
-// not to the game. mag carried its own copy of this; a second copy in a second
-// game is how the two drift apart.
-//
-// Stone itself knows no machine. The usual place for a machine's window size
-// is `size` in the machine config (`~/.config/stone/window.toml`), which the
-// native window resolver applies below remembered geometry. `STONE_WINDOW_DEFAULT`
-// (`WxH`) changes the size the game REQUESTS instead; a launch without it gets
-// `fallback`.
-//
-// Because this is the requested size, remembered window geometry and an
-// explicit `STONE_WINDOW` still outrank it. A game that wants a fixed size for
-// a screenshot or a recording overrides the result.
-//
-// Beware what this feeds: window WIDTH selects the CrispArt rung in a game that
-// uses one, so a per-machine size is a per-machine render mode. A test that
-// wants a particular rung has to derive it from the environment and assert what
-// resolved, never assume a literal width.
 pub fn host_window_size(fallback: IVec2) -> IVec2 {
     let spec = os_getenv("STONE_WINDOW_DEFAULT") ?? ""
     if spec != "" {
@@ -240,55 +194,19 @@ pub struct GameConfig {
     font_path: string = "@engine/assets/fonts/DroidSans.ttf",
     font_size: int = 48,
     font_extra: string = "",
-    // OutputDensity rebuilds a smooth font atlas for physical drawable
-    // density without changing logical text geometry. Fixed preserves the
-    // requested raster exactly (pixel fonts and scene-grid fonts).
     font_raster: FontRasterPolicy = FontRasterPolicy::OutputDensity,
-    // Synthesized faces the default font DECLARES. Off by default: a pixel
-    // font's oblique leaves its grid (a m3x6 probe goes 0.000 -> 0.480
-    // antialiased), so a family opts in rather than paying for it silently.
     font_faces: TextFaces = TextFaces {},
     vsync: int = 1,
-    // Initial window mode: 0 windowed, 1 borderless, 2 exclusive. 1/2 births the
-    // window fullscreen on `display` (no windowed flash at boot); a game that
-    // persists a mode sets this from its settings before stone_run_game.
     fullscreen: int = 0,
     clear_color: Color = BLACK,
     esc_quits: bool = false,
-    // Scene raster policy and UI design scale -- the whole resolution and
-    // presentation surface.
     render: RenderConfig = RenderConfig {},
-    // Treat UI text `size` as a cap-height pixel target (font-swap
-    // stable) instead of an em-nominal size. Off keeps legacy em
-    // scaling.
     cap_height_fonts: bool = false,
     // Extra source-raster resolution for smooth coverage; layout geometry is unchanged.
     font_coverage_oversampling: float = 1.15,
-    // The font's authored pixel em (m3x6: 16). World text quantizes its
-    // rendered scale to whole canvas px per FONT pixel against this;
-    // 0 = unknown, quantize per atlas texel instead.
     font_native_em: int = 0,
-    // Snap world-text anchors to whole canvas pixels. On kills the wobble
-    // of text re-rasterizing every sub-pixel step, but text then drifts
-    // against sprites, which draw unsnapped -- turn it off for a game that
-    // anchors labels to moving sprites and wants them locked together.
     world_text_snap: bool = true,
-    // Render world text at whole multiples of the font's authored em
-    // (`font_native_em`, else the atlas texel). On, a glyph pixel is always
-    // a whole number of canvas pixels -- crisp, but a COARSE size ladder:
-    // the reachable sizes are native/ppwu, 2*native/ppwu, ... and every
-    // request below the first rung silently lands ON it, so a caller asking
-    // for a small label gets a big one and no error.
-    //
-    // OFF by default: a size that renders at the size you asked for is the
-    // less surprising contract, and the quantized path's payoff (uniform
-    // glyph columns) is already only partial for any game whose present
-    // upscale is fractional. Turn it on per game if world text wobbles.
     world_text_quantize_em: bool = false,
-    // How the default font's atlas is sampled. Nearest keeps a pixel font's
-    // texels hard; Linear smooths a TTF drawn at sizes other than its atlas
-    // rasterization size. A game loading its own fonts passes this to
-    // `load_font` instead.
     font_sampling: TextureFilter = TextureFilter::Linear,
 }
 
@@ -306,9 +224,6 @@ fn native_engine_configure(config: GameConfig) {
 }
 
 fn native_engine_imgui_boot(window: StoneWindow) {
-    // Lua bindings (_G.imgui) are populated by stone's global initializer
-    // before any consuming project global runs. Here we only initialize the C
-    // backend.
     log_debug("IMGUI", "Initializing...")
     if !__imgui_bindings_live() {
         log_error("IMGUI", "cimgui bindings did not load; imgui stays off")
@@ -318,8 +233,6 @@ fn native_engine_imgui_boot(window: StoneWindow) {
         log_debug("IMGUI", "C backend initialized")
     } else {
         log_error("IMGUI", "Failed to initialize")
-        // Leave no live-C path behind: direct imgui.C call sites hit the
-        // inert stub instead of a context-less real table.
         __imgui_note_platform_init_failed()
     }
 }
@@ -331,8 +244,6 @@ fn native_engine_window_boot() {
 
 fn native_engine_font_boot(config: GameConfig) {
     log_debug("FONT", "Loading...")
-    // Declares; the resolver loads and assigns. An override set before
-    // stone_run_game is already in place, so the window is born in it.
     let spec = font_spec_from_config(config)
     if declare_game_font(spec) != null {
         log_debug("FONT", "Loaded successfully")
@@ -370,11 +281,7 @@ fn frame_error_recover() {
         IMGUI_FRAME_OPEN = false
         imgui_end_frame_after_error()
     }
-    // No-op unless this frame opened the timer, so this is safe on an error
-    // thrown before the timer began.
     frame_gpu_timer_close()
-    // The raise skipped frame_core_resolve_view's pump. A fault conditioned on
-    // the queue would otherwise reproduce on every later frame.
     let _ = residency_service_uploads()
 }
 
@@ -412,24 +319,18 @@ fn frame_error_recover() {
     return true, a, b
 """
 
-// Test-only frame injections; negative frame indices disable them.
 global FRAME_FORCE_ERROR_AT: int = -1
 global TEST_IMAGE_LOAD_AT_FRAME: int = -1
 global FRAME_FORCE_ERROR_WHILE_UPLOADS_PENDING: bool = false
 pub global FRAME_ERROR_COUNT: int = 0
 
-// Debounced geometry save: a move/resize sets the dirty timestamp;
-// the save fires once the window has been still for WINDOW_GEOMETRY_DEBOUNCE_S
-// seconds. -1 = clean (nothing pending).
 global WINDOW_GEOMETRY_DIRTY_AT: float = -1.0
 const WINDOW_GEOMETRY_DEBOUNCE_S: float = 0.5
 
-// A run no human watches: perf, a sim, or a frame-capped `rock frame`.
 fn runner_bounded_run() -> bool {
     return os_getenv("PERF_MODE") == "1" || sim_mode_active() || get_env_int("FRAME_COUNT", -1) > 0
 }
 
-// A bounded run that reports failure through its exit status or sim verdict.
 fn runner_checked_run() -> bool {
     return get_env_int("FRAME_COUNT", -1) > 0 ||
         get_env_float("PERF_SECONDS", -1.0) > 0.0 ||
@@ -442,7 +343,6 @@ fn fail_bounded_stone_run() {
     }
 }
 
-// -1/unset keeps `fallback`; 0/1 forces.
 fn env_flag_override(name: string, fallback: bool) -> bool {
     let v = get_env_int(name, -1)
     if v < 0 { return fallback }
@@ -456,7 +356,6 @@ fn env_flag_override(name: string, fallback: bool) -> bool {
     if os.getenv("STONE_NO_JIT") == "1" and jit ~= nil then jit.off(); jit.flush() end
 """
 
-// Returns the previous pause, so a caller can restore it.
 @nomangle inline(lua) fn stone_gc_set_pause(pause: int) -> int = """
     return collectgarbage("setpause", pause)
 """
@@ -504,14 +403,8 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     // Seed the window-size cache before any @init code calls screen_size().
     native_engine_window_boot()
 
-    // Window placement is resolved inside stone_create_window_ex from the
-    // precedence chain (env > saved geometry > machine config > game default),
-    // then fit-clamped on-screen.
-
     engine_set_vsync(config.vsync)
 
-    // Engine display settings. Inert unless a game opts in (or
-    // STONE_DISPLAY_SETTINGS=<path> is set); drains at the frame boundary.
     display_settings_boot()
 
     native_engine_imgui_boot(window)
@@ -521,8 +414,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     log_debug("RENDER", "Initializing...")
     native_engine_render_boot()
 
-    // After the sim queue is known (it latches the run's other modes) and before
-    // the first frame can poll host input.
     input_resolve_authority()
 
     timeline_init()
@@ -554,25 +445,15 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
 
     stone_init_done()
 
-    // Perf mode: enable profiler. Vsync is handled by the shared branch below.
     if os_getenv("PERF_MODE") == "1" {
         ENGINE.profiler_enabled = true
-        // Games without a workload selector still declare a complete interval.
         if PERF_RECORDS.scenario == "" {
             perf_scenario_wait("default")
             perf_scenario_default_window("steady")
             perf_scenario_ready("default")
         }
         perf_scenario_require_window()
-        // Blank any stale summary NOW, so a harness polling for PERF_OUT can
-        // treat "file is non-empty" as "this run finished". Without it a
-        // leftover file from a previous run is copied back instantly and read
-        // as a result -- the config under test never measured at all.
         perf_out_reset()
-        // Feed a fixed dt (same mechanism as sim mode) so gameplay evolves
-        // identically every run: a frame-bounded perf run (FRAME_COUNT) then
-        // ends on a byte-identical scene, making graphics.draw_calls a
-        // deterministic gate instead of a wall-clock-dependent snapshot.
         PERF_FIXED_DT_ENABLED = true
         if let ov = os_getenv("PERF_DT") {
             if let parsed = ov.parse_float() { PERF_FIXED_DT = parsed }
@@ -584,9 +465,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         toggle_jit_trace_logging()
     }
 
-    // STONE_JIT_FRAME_JOIN=<path>: same counters, but written per frame beside
-    // that frame's wall time, so a hitch can be attributed to the recorder or
-    // cleared of it. Installs the attach without the periodic log.
     if let join_path = os_getenv("STONE_JIT_FRAME_JOIN") {
         if join_path != "" {
             if !JIT_TRACE_INSTALLED {
@@ -616,17 +494,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         }
     }
 
-    // Every bounded, non-interactive run turns vsync off: perf, sim, and any
-    // frame-capped run (`rock frame`, which is also STONE_HEADLESS). One site
-    // for all three, because the reason is one reason -- nothing is on screen
-    // for a human to see tear, so waiting on the display buys nothing.
-    //
-    // Without it each frame still waits a refresh for the swap, which negates
-    // the fixed-dt speedup and pins `rendered` to the refresh rate
-    // mid-benchmark.
-    //
-    // Latched via stone_force_vsync_off so a game's settings apply cannot
-    // re-enable the vblock mid-run.
     if runner_bounded_run() {
         engine_latch_vsync_off()
         FRAME_CAP_LATCHED_OFF = true
@@ -637,8 +504,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     // after init; never re-emitted.
     print_environment_banner(config)
 
-    // Last thing before the loop: everything above is process boot and must
-    // stay OUTSIDE the entry's envelope.
     runner_begin_sim()
     allocation_activation_begin_if_enabled()
 
@@ -666,24 +531,15 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     let fps_window_start_frame = 0
     let fps_window = metric_new("fps_window", 1024)
 
-    // Single-frame outlier log. Anything above SLOW_FRAME_MS (default 50ms
-    // ≈ 20 FPS floor) gets a throttled line so we catch hitches that the
-    // 5-second average smooths over. Set SLOW_FRAME_MS=0 to silence.
     let slow_frame_threshold_ms = get_env_float("SLOW_FRAME_MS", 50.0)
 
-    // Test hook for a bounded run that is slow but still making frame
-    // progress. Unset/zero in normal runs.
     let frame_delay_ms = get_env_int("STONE_FRAME_DELAY_MS", 0)
 
-    // Sim mode owns its runaway bound in game ticks (`runner_sim_advance`), so
-    // the process-wide count of loop iterations is off.
     let max_frames = if sim_mode_active() { -1 } else { get_env_int("FRAME_COUNT", -1) }
     if max_frames > 0 {
         log_info("GAME", "Will exit after {max_frames} frames")
     }
 
-    // PERF_SECONDS is a wall-clock cap (float). Runs alongside FRAME_COUNT;
-    // whichever fires first wins — see `rock perf --seconds` in stone.rs.
     let perf_seconds = get_env_float("PERF_SECONDS", -1.0)
     TEXT_MISSING_GLYPH_POLICY = text_missing_glyph_policy_for_run(
         sim_mode_active(), max_frames, perf_seconds)
@@ -692,17 +548,12 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         log_info("GAME", "Will exit after {perf_seconds}s")
     }
 
-    // Window-resize test hooks: resize at two frame boundaries to exercise
-    // stone_set_window_size -> SIZE_CHANGED -> resize/realloc in a bounded
-    // windowed run, where a real drag can't be scripted. Unset normally.
     let resize_at = get_env_int("STONE_RESIZE_AT_FRAME", -1)
     let resize_at_2 = get_env_int("STONE_RESIZE_AT_FRAME_2", -1)
 
     while running {
         frame = frame + 1
         let entry_frame = frame - SIM_ENTRY_FRAME_START
-        // Zero warmup admits the first frame after readiness, not a discarded
-        // boundary frame. Reset before its outer wall-clock sample starts.
         if PERF_FRAME_CAPTURE && PERF_RECORDS.ready && PROFILER.warmup_active
                 && PERF_RECORDS.warmup_frames == 0
                 && (PERF_RECORDS.absolute_start_frame < 0 || frame >= PERF_RECORDS.absolute_start_frame) {
@@ -739,7 +590,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
 
         if os_getenv("ROCK_FRAME_WATCHDOG") == "1" {
             log_info("WATCHDOG", "ROCK_FRAME_PROGRESS renderer=gl completed={frame} requested={max_frames}")
-            // Perf needs one startup marker, not a log on every measured frame.
             if frame == 1 && os_getenv("ROCK_PERF_STARTUP_WATCHDOG") == "1" {
                 os_setenv("ROCK_FRAME_WATCHDOG", "0")
             }
@@ -767,9 +617,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         if ok && current_tick > tick_before_frame && SIM_HANDLE != null {
             sim_entry_frame_timing(frame_diagnostic_timing())
         }
-        // Exact complement of the branch above: every frame of an entry counts
-        // once, including a frame that raised or did not advance the tick, so the
-        // entry's timing agrees with its frame_count.
         if SIM_HANDLE != null && !(ok && current_tick > tick_before_frame) {
             sim_entry_frame_timing(sim_entry_diagnostic_timing(ok))
         }
@@ -829,10 +676,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     jit_frame_join_flush()
     hitch_ledger_flush()
 
-    // Overall average FPS across the whole run. The windowed FPS line
-    // (above) only fires once per FPS_INTERVAL, so short runs (small
-    // FRAME_COUNT) exit before it ever logs — this summary always gives
-    // the number regardless of how few frames ran.
     let total_elapsed = stone_get_time() - loop_start
     if frame > 0 && total_elapsed > 0.0 {
         let overall_fps = (frame as float) / total_elapsed
@@ -854,8 +697,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
 
     stone_save_window_geometry(config.title)
 
-    // Read the shader registry's run evidence before teardown releases the
-    // registry; the bounded-run checks below report it.
     let shader_errors = stone_shader_error_count()
     let unfilled_blocks = stone_unfilled_uniform_block_count()
     let unfilled_textures = stone_unfilled_texture_slot_count()
@@ -904,9 +745,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         }
     }
 
-    // Same class again: a block member has no location, so a by-name setter
-    // aimed at one writes nothing, the shader reads zeroes, and every gate stays
-    // green while the pixels are wrong.
     if unfilled_blocks > 0 {
         log_error("SHADER", "{unfilled_blocks} uniform block(s) drawn with but never filled -- see the [SHADER] errors above")
         if bounded {
@@ -928,7 +766,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         }
     }
 
-    // xpcall keeps dev sessions alive; bounded runs must still fail.
     if frame_error_count > 0 {
         log_error("GAME", "{frame_error_count} frame(s) raised during run -- see the [GAME] tracebacks above")
         if bounded {
@@ -936,7 +773,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         }
     }
 
-    // The entry reports its own errors; shutdown can still log after its end.
     let logged_errors = logged_error_records()
     let overflow = logged_error_overflow()
     if runner_checked_run() && (logged_errors.len() > 0 || overflow > 0) {
@@ -948,47 +784,21 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     }
 }
 
-// ============================================================================
-// Per-frame core
-//
-// The game-essential per-frame work is factored into the `frame_core_*`
-// work-fns below; `run_one_frame` interleaves the dev tooling (hot-reload,
-// pause, imgui, profiler overlay, screenshot, debug UI) between them. The
-// forced seams (imgui brackets the render pass; profiler overlays push into
-// the UI pool mid screen-draw; the debug UI trails the frame) are why the
-// render half is several small fns rather than one.
-// ============================================================================
-
 fn frame_core_begin() {
-    // Monotonic render-frame counter -- the batch pool's occurrence keys
-    // and eviction stamps read it (rendering/batch.rock). Not PROFILER.
-    // frame_count, which resets after the warmup window.
     RENDER_FRAME = RENDER_FRAME + 1
     if UNIFORM_BLOCK_DUMP_ON { uniform_block_dump_begin_frame() }
     POOL_BIRTHS_LAST = POOL_BIRTHS
     POOL_BIRTHS = 0
     pool_birth_guardrail()
     image_load_diag_frame_begin()
-    // The relight evictor reads frame_seq's completed draw before the clock
-    // advances, preserving the frame's drawn set under an unmeetable budget.
     residency_trim()
 }
 
-// Poll input, refresh the window-size cache, and drain window-geometry changes.
-// Returns running_init (false once a quit event or stone_quit() landed).
 fn frame_core_poll(config: GameConfig) -> bool {
     let running_init = stone_poll_all_events()
 
-    // Cache window size once per frame (after events, so resizes land).
-    // screen_size() / ui_effective_scale() read this global instead of
-    // crossing FFI per call.
     refresh_window_size()
 
-    // Drain window-geometry changes. A resize reallocs the world
-    // canvases when no fixed internal render resolution is set; the camera
-    // viewport tracks screen_size() every frame regardless. A move or resize
-    // marks geometry dirty for the debounced save (the clean-quit write is the
-    // backstop). Display change: dpi scale + camera are already per-frame live.
     let window_resized = stone_take_window_resized()
     if window_resized {
         handle_window_resized()
@@ -1005,19 +815,11 @@ fn frame_core_poll(config: GameConfig) -> bool {
         WINDOW_GEOMETRY_DIRTY_AT = -1.0
     }
 
-    // Engine display settings: drain any queued apply at the frame boundary.
-    // Inert unless a game queued one.
     display_settings_apply_pending()
 
     return running_init
 }
 
-// A frame's dt: a frozen frame advances no game time; sim/perf feed a fixed dt
-// so game time is wall-clock-independent; else the real delta.
-//
-// TIME_SCALE is applied here, at the ONE point where a game-visible dt is
-// resolved, so every mode scales the same way. A fixed dt times a fixed scale
-// is still fixed, so sim/perf determinism is unaffected.
 fn frame_core_select_dt(ticking: bool, current_time: float, last_time: float) -> float {
     if !ticking {
         return 0.0
@@ -1063,11 +865,6 @@ fn render_commands_begin_frame() {
     discard_pool_batches(UI_RENDER_BATCHES)
     discard_pool_batches(OVERLAY_RENDER_BATCHES)
     discard_pool_batches(pixel_screen.batches)
-    // An outlined sprite writes a silhouette quad alongside its main quad, so
-    // this carries the same per-frame commands the world pool does.
-    //
-    // The ad-hoc pool belongs to its same-frame begin/push/end bracket.
-    // Its API rejects and discards a bracket crossing this boundary.
     retire_outline_commands(snapshot: false)
     invalidate_text_batch_caches()
 
@@ -1079,9 +876,6 @@ fn render_commands_begin_frame() {
     SCENE_PASSES.clear()
     FINAL_PASSES.clear()
 
-    // Idle eviction on the same cadence as the world and output pools: the
-    // composite pool grows a key per material/font/z ever drawn, and without
-    // this an abandoned key pins its vertex buffer and uniform refs forever.
     if RENDER_FRAME % BATCH_EVICT_INTERVAL == 0 {
         sweep_idle_batches(pixel_screen.batches)
     }
@@ -1089,8 +883,6 @@ fn render_commands_begin_frame() {
 
 @shadow_root
 fn frame_core_pre_update() {
-    // Wire log_throttled's now-source to engine wall-clock so log_throttled()
-    // measures real elapsed seconds (not CPU time from os.clock()).
     log_set_now(time)
     action_claims_begin_frame()
 
@@ -1100,14 +892,9 @@ fn frame_core_pre_update() {
     // settings screen) that registers and clicks mouse rects.
     ui_mouse_begin_frame()
 
-    // Focus/nav resolution -- after the mouse (hover-steal reads hot),
-    // before every registrar/query (stone/engine/ui/focus.rock).
     ui_focus_begin_frame()
     ui_text_input_begin_frame()
 
-    // Every engine-owned transient render command lives for one frame.
-    // Dropped here, not at the flush that drains it, so a skipped render pass
-    // cannot carry a queue forward.
     render_commands_begin_frame()
 }
 
@@ -1119,25 +906,11 @@ fn frame_core_update(ticking: bool) {
         run_update_systems()
         run_late_update_systems()
     }
-    // Frame-timing marker: end of CPU logic work.
     profile_mark_logic_end()
 }
 
-// Render pass, factored so the native wrapper can bracket it with imgui and
-// slot the profiler/debug UI between the pieces. The whole pass is
-// skipped when running=false or SIM_SKIP_RENDER.
-
-// Freeze this frame's render view: update systems have selected and
-// positioned the camera, and nothing after this point may move it. The scene
-// target set is rebuilt here when the profile's capacity moved -- never while
-// a world canvas is bound.
 fn frame_core_resolve_view() {
     presented_scene_sample_begin_frame()
-    // Both runners call this between update and render, which is exactly where
-    // images loaded during update must reach the GPU. It sits ahead of the
-    // early return below because a frame with no render view still has to drain
-    // the queue -- a non-rendering sim would otherwise accumulate decoded
-    // pixels without bound.
     let uploads_phase = perf_phase_begin("texture_uploads")
     let _ = residency_service_uploads()
     perf_phase_end(uploads_phase)
@@ -1160,8 +933,6 @@ fn frame_core_prepare() {
     profile_gpu_end("prepare_systems")
 }
 
-// A rendered sim's demand draw inside update prepares first; the frame's
-// ordinary prepare then does not run a second time.
 global PREPARED_RENDER_FRAME: int = -1
 
 fn frame_core_prepare_once() {
@@ -1192,13 +963,6 @@ fn frame_gpu_timer_close() {
 }
 
 fn frame_core_render_clear(config: GameConfig) {
-    // Profiled separately from frame_draw: the screen clear is a
-    // full-drawable operation (3 MP at phone retina) and is also where a
-    // deferred renderer's implicit sync on the previous frame surfaces.
-    // On a GPU-bound frame that sync dominates, and this section's time is
-    // then a WAIT, not a cost -- it moved 0.06..12.44 ms across
-    // STONE_PRESENT_SYNC modes doing identical work. Attribute with
-    // `finish` before believing a number here.
     profile_gpu_begin("frame_clear")
     // The bind is the frame's FIRST GL call, so it is where a stall the
     // driver owes from the previous frame would land. Measured at 0.001 ms
@@ -1207,9 +971,6 @@ fn frame_core_render_clear(config: GameConfig) {
     profile_begin("frame_bind")
     set_canvas_handle(0)
     profile_end("frame_bind")
-    // Ceiling experiment 1: with the clear skipped, a block that stays
-    // put indicts the clear; a block that moves to the next default-FB
-    // touch indicts drawable acquisition.
     static skip_clear = os_getenv("STONE_SKIP_CLEAR") == "1"
     if !skip_clear {
         stone_clear_canvas(
@@ -1221,10 +982,6 @@ fn frame_core_render_clear(config: GameConfig) {
     }
     profile_gpu_end("frame_clear")
 
-    // Deferred pick submit: the id canvas holds last frame's ids and has
-    // no pending writes yet this frame, so the ReadPixels here rides the
-    // same wait frame_clear already absorbs (a mid-frame submit drains
-    // the TBDR pipeline instead -- 24.7 ms on an iPhone 16).
     profile_gpu_begin("pick_submit")
     flush_deferred_pick_submit()
     profile_gpu_end("pick_submit")
@@ -1243,22 +1000,16 @@ fn frame_core_render_world() {
     profile_gpu_end("draw_systems")
 
     if SIM_SKIP_SUBMIT {
-        // The draw phase has run and every counter it feeds is set; publish
-        // the per-frame counts exactly as the submitting path does, and
-        // drop the queued content instead of rendering it.
         clear_batches()
         draw_list_clear(pixel_screen)
         profile_end("world_draw")
         return
     }
 
-    // An empty world still clears the prior scene before post-processing.
     profile_gpu_begin("render_batches")
     render_batches()
     profile_gpu_end("render_batches")
 
-    // Game-injected scene passes see the world composite in
-    // screen_canvas; the engine post chain below sees their output.
     profile_gpu_begin("scene_passes")
     run_scene_passes()
     render_scene_overlays()
@@ -1273,8 +1024,6 @@ fn frame_core_render_world() {
         apply_outline_overlay()
         gpu_scope_end()
     }
-    // Virtual-texel UI: the composite is finished, the present has not run, so
-    // this lands on the scene grid without being an input to the chain.
     if !fx_disabled("ui") {
         gpu_scope_begin("pixel_screen")
         flush_pixel_screen()
@@ -1318,8 +1067,6 @@ fn frame_core_render_ui_flush() {
     if pool_has_pending(pixel_screen.batches) {
         log_once("RENDER", "composite content was queued after flush_pixel_screen (an @late_draw system?) -- pixel_screen and composite UiRects draw in @draw; this frame's is dropped")
     }
-    // Last writer into the UI pool: world anchors project here, against the
-    // frozen view, after the scene has been presented.
     if !SIM_SKIP_SUBMIT { text_render_order_present() }
     profile_gpu_begin("screen.ui_flush.world_overlay")
     flush_world_overlay()
@@ -1381,10 +1128,6 @@ fn frame_core_present(window: StoneWindow) {
 @shadow_root
 fn frame_core_end(promote_view: bool) {
     retire_outline_commands(snapshot: true)
-    // What was rendered (or simulated during headless runs) is what the player
-    // now sees, so it becomes the view the next frame's input and unqualified
-    // projection convert against. Frames without a gameplay surface do not
-    // publish their candidate view.
     if promote_view {
         let before = PRESENTED_VIEW
         promote_presented_view()
@@ -1393,26 +1136,12 @@ fn frame_core_end(promote_view: bool) {
 
     if UNIFORM_BLOCK_DUMP_ON { UNIFORM_BLOCK_DUMP_FINISH_HOOK.unwrap()() }
 
-    // End-of-frame input snapshot. Runs after both render and SIM_SKIP_RENDER
-    // paths so every is_key_pressed call site in this frame -- update,
-    // late_update, draw, late_draw, inline runner code -- sees consistent
-    // edge state, and next frame's reference is correct. It MUST run after
-    // every is_key_pressed consumer this frame: otherwise post-snapshot
-    // callers see (down_last == down_now) and the edge is always false.
     input_end_frame()
 
-    // The Scene safe point. A close request only
-    // hides a Scene from lookup; its rows are physically retired here, once
-    // every update, late_update, draw and late_draw consumer of this frame has
-    // returned -- so a system that closes the Scene it is standing in does not
-    // invalidate the rows underneath itself. Native C arena rows retired during
-    // the frame are reusable only after that Scene teardown has logically
-    // destroyed its rows.
     __scene_drain_closed()
     __arena_drain_retired()
 }
 
-// A rendered sim's draw at a picture reader (`sim_draw_on_demand` in sim.rock).
 global SIM_DEMAND_CONFIG: GameConfig? = null
 
 fn sim_demand_draw() {
@@ -1441,15 +1170,10 @@ fn input_imgui_new_frame() {
 
 fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
     residency_cold_arrival_render_begin()
-    // Prepare opened the frame's GPU timer; a second draw in one frame opens
-    // its own. Under SIM_DRAW=commands every GPU submission in this
-    // block is skipped and the draw-phase systems still run.
     frame_gpu_timer_open()
 
     if !SIM_SKIP_SUBMIT { frame_core_render_clear(config) }
 
-    // Style changes must land outside NewFrame..Render; apply the
-    // scale knob here so a change is crisp on this same frame.
     profile_begin("imgui_new_frame")
     imgui_update_scale()
     input_imgui_new_frame()
@@ -1470,9 +1194,6 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
     profile_gpu_begin("screen_draw")
     frame_core_render_late_draw()
 
-    // Profiler overlay/graph push into the UI pool at high z; they must
-    // land before render_ui_batches() flushes it. Skipped in perf mode to
-    // avoid interfering with measurements.
     if os_getenv("PERF_MODE") != "1" && PROFILER_UI_ENABLED {
         live_allocation_exclusion_begin()
         profile_begin("screen.profiler_overlay")
@@ -1493,9 +1214,6 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
 
     profile_end("frame_draw")
 
-    // Everything from here to the swap: debug/editor UI plus imgui's own
-    // render. All imgui no-ops where imgui is compiled out (iOS), so this
-    // reading is what the non-imgui overhead actually costs.
     profile_gpu_begin("debug_ui")
 
     draw_debug_ui()
@@ -1506,8 +1224,6 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
     }
     draw_pipeline_inspector()
 
-    // SFX browser (Ctrl+F6): the last N sounds played, with their
-    // parameters and a replay button. See stone/engine/debug/sfx_browser.rock.
     if tool_key_pressed(ToolKey::F6) && tool_ctrl_held() {
         ENGINE.show_sfx_browser = !ENGINE.show_sfx_browser
     }
@@ -1558,14 +1274,9 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
     }
     profile_gpu_end("debug_ui")
 
-    // End the GPU timer query, then bracket the (vsync-blocking) swap so
-    // present_ms is measured directly.
     frame_gpu_timer_close()
     if !SIM_SKIP_SUBMIT { frame_core_present(window) }
 
-    // First real present done: map a deferred windowed window now, at its
-    // resolved position, with the loop live -- so a WM can't relocate it
-    // during init. No-op after the first show / for fullscreen + headless.
     stone_show_window_if_deferred()
     residency_cold_arrival_render_end()
 }
@@ -1581,10 +1292,6 @@ fn run_one_frame(
     config: GameConfig
 ) -> (bool, float) {
     if FRAME_FORCE_ERROR_AT >= 0 && _frame >= FRAME_FORCE_ERROR_AT {
-        // No frame number in the message: the log line already carries it as
-        // "Error in frame N", and a varying message would make every repeat a
-        // distinct error -- which is exactly what the dedupe below is for, so
-        // the injection would stop standing in for a real repeating fault.
         error("forced frame error (STONE_FRAME_FORCE_ERROR)")
     }
     profile_frame_begin()
@@ -1595,24 +1302,14 @@ fn run_one_frame(
         let path = os_getenv("STONE_TEST_IMAGE_LOAD_PATH")
         if path != null { let _ = load_image_asset(path) }
     }
-    // A fault whose condition is the upload queue itself, the shape MAG's run
-    // admission asserts took: it repeats for as long as the queue stays full.
     if FRAME_FORCE_ERROR_WHILE_UPLOADS_PENDING && stone_image_uploads_pending() > 0 {
         error("forced frame error while image uploads are pending")
     }
 
     check_hot_reload()
 
-    // Replay resize must reach the native window before the ordinary frame
-    // poll refreshes cached drawable size and runs the resource resize path.
     let running_init = frame_core_poll(config)
 
-    // Runner pause: a frozen frame still polls + renders (so the
-    // window stays alive) but advances no game time, runs no update systems,
-    // and does not advance the game tick.
-    // A reload request freezes game time until the production watcher reports
-    // publication consumption. The host remains polled, but async wall time
-    // cannot spend the sim's frame/tick budget.
     let ticking = timeline_should_tick() && !sim_reload_pending()
 
     // Select the one effective game-input authority after SDL input is
@@ -1636,7 +1333,6 @@ fn run_one_frame(
     frame_core_pre_update()
     frame_core_update(ticking)
 
-    // The camera is settled; freeze the render view before anything draws.
     frame_core_resolve_view()
 
     if running && !SIM_SKIP_RENDER { frame_core_prepare_once() }
@@ -1649,7 +1345,6 @@ fn run_one_frame(
         SIM_ORDINARY_DRAW_FRAME = RENDER_FRAME
         frame_core_render_frame(window, config)
     }
-    // A frame that prepared without drawing.
     frame_gpu_timer_close()
 
     frame_core_end(rendered_world || (running && skip_draw))
@@ -1701,14 +1396,9 @@ fn print_environment_banner(config: GameConfig) {
     let actual = screen_size()
     let actual_w = actual.x as int
     let actual_h = actual.y as int
-    // vsync_active is the RESOLVED state, not the request: the bounded-run
-    // branch forces it off, and a run that hangs in the swap is indisputable
-    // about which of the two mattered.
     log_info("ENV", "os={os_name} window={actual_w}x{actual_h} (req {config.width}x{config.height}) vsync_req={config.vsync} vsync_active={VSYNC_ACTIVE}")
     log_info("ENV", "jit={jit_v} status={jit_s}")
     log_info("ENV", "asset_dev_mode={ASSET_DEV_MODE} (on = assets on disk)")
-    // Echo the perf-relevant env vars users typically forget they set.
-    // Cheap noise floor: 4 lines once per process.
     let perf_mode = os_getenv("PERF_MODE") ?? "0"
     let frame_count = os_getenv("FRAME_COUNT") ?? "-"
     let perf_seconds = os_getenv("PERF_SECONDS") ?? "-"
@@ -1747,14 +1437,11 @@ pub @nowrite @nomangle inline(lua) fn jit_trace_count_of(kind: string) -> int = 
     return n
 """
 
-// Test-facing: overwrite the process-wide counts. A caller that fakes them
-// restores what it read, since later sim entries share the process.
 pub @nomangle inline(lua) fn jit_trace_counts_set_for_test(starts: int, compiles: int, aborts: int, flushes: int) = """
     local counts = __stone_jit_trace_counts_table()
     counts.starts, counts.compiles, counts.aborts, counts.flushes = starts, compiles, aborts, flushes
 """
 
-// Created once and reused by every attach, so a re-attach keeps counting.
 @nomangle inline(lua) fn __stone_jit_trace_counts_table() -> any = """
     local counts = _G.__stone_jit_trace_counts
     if counts == nil then
@@ -1770,8 +1457,6 @@ pub @nomangle inline(lua) fn jit_trace_counts_set_for_test(starts: int, compiles
     return counts
 """
 
-// Trace start-to-stop/abort includes recording execution as well as compiler
-// work. It is a correlated subset of CPU spans, not additional frame time.
 @nomangle inline(lua) fn __stone_jit_trace_timing(counts: any, what: string) = """
     if not counts.timing then return end
     if what == "start" then counts.recording_start = stone.stone_get_time()
@@ -1845,10 +1530,6 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
              reason_extra = {}, reasons = reasons, next = 0, era_aborts = 0, pending = false }
 """
 
-// Close the measured window: detach the era (one store, so the callback can
-// only write the fresh state from then on) and keep its rows for the export.
-// Returns the walk's site sum and the era's own abort count; they are two
-// spellings of the same number, so a difference is an accounting bug.
 @nomangle inline(lua) fn __stone_jit_abort_sites_freeze() -> (int, int) = """
     local st = _G.__stone_jit_abort_sites
     _G.__stone_jit_abort_site_report = nil
@@ -1870,10 +1551,6 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
     return sum, era
 """
 
-// A run without a measured window exports the process-scope table, so take
-// its rows before the export samples the process counters: the two then
-// describe one instant and the total can only be larger than the listed
-// sites. A window close already took its rows.
 @nomangle inline(lua) fn __stone_jit_abort_sites_export() = """
     if _G.__stone_jit_abort_site_report ~= nil then return end
     local st = _G.__stone_jit_abort_sites
@@ -1884,8 +1561,6 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
     _G.__stone_jit_abort_site_report = { rows = __stone_jit_abort_site_rows_of(st), reasons = st.reasons }
 """
 
-// Capture the generated root while its initializer is on the stack. Walking
-// its prototypes is deferred until profiling, before the measured window.
 @nomangle inline(lua) fn __stone_jit_program_identity_init(source: string) -> bool = """
     local own = debug.getinfo(1, "S")
     local stripped = own.linedefined == 0
@@ -1918,8 +1593,6 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
 const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init(
     embed_string("engine/debug/prototype_identity.lua"))
 
-// Building the prototype registry walks the entire program. Perf prepares it
-// before measurement; opening an era only reuses the retained registry.
 @nomangle inline(lua) fn __stone_jit_program_identity_prepare() = """
     _G.__stone_jit_program_identity()
     if _G.__stone_jit_abort_sites == nil then
@@ -1927,8 +1600,6 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
     end
 """
 
-// Open the measured window: the callback clears the era at its next event, so
-// the window's abort count and its sites share one boundary.
 @nomangle inline(lua) fn __stone_jit_abort_sites_open() = """
     _G.__stone_jit_program_identity()
     _G.__stone_jit_abort_site_report = nil
@@ -2026,12 +1697,6 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
     if guard and guard.enabled then guard.event(what, tr, func, pc, otr, oex) end
 """
 
-// On by default; STONE_JIT_CHURN_GUARD=0 turns it off. Private offsets are
-// restricted to the v0.6.12 GC64 health build, so a VM pin bump disables it
-// (logged) until the build identity below is updated. Native
-// penalty_pc runs BEFORE the abort event. Raise only its matching slot; the
-// next native abort patches this bytecode without marking the function NOJIT.
-// rock: allow(long_inline_lua)
 @nomangle inline(lua) fn install_jit_churn_guard() -> string = """
     if os.getenv("STONE_JIT_CHURN_GUARD") == "0" then return "" end
     local old = _G.__stone_jit_churn_guard
@@ -2313,7 +1978,6 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
     return reason_name
 """
 
-// rock: allow(long_inline_lua)
 @nomangle inline(lua) fn install_jit_trace_attach() -> bool = """
     if jit == nil or jit.attach == nil then return false end
     local counts = __stone_jit_trace_counts_table()
@@ -2343,10 +2007,6 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
     return true
 """
 
-// Drain the top-N abort buckets accumulated since last call and reset
-// the table. Returns a pre-formatted summary string (or empty if no
-// aborts occurred). Caller is responsible for log emission so this stays
-// allocation-cheap on the no-abort path.
 pub @nomangle inline(lua) fn drain_jit_abort_top(n: int) -> string = """
     local buckets = _G.__rock_jit_abort_buckets
     if buckets == nil then return "" end
@@ -2394,8 +2054,6 @@ inline(lua) fn jit_is_enabled() -> bool = """
     return jit.status() == true
 """
 
-// The toggle reads the live runtime flag: STONE_NO_JIT changes the runtime
-// without touching Rock globals, so a shadow global starts in the wrong state.
 fn toggle_jit_enabled() {
     let state = jit_set_enabled(!jit_is_enabled())
     log_info("JIT", "runtime {state} (F3) — flushed traces; A/B for trace-thrash")
@@ -2423,7 +2081,6 @@ fn toggle_jit_trace_logging() {
 // within one run, not across two.
 const JIT_ABORT_TOP_N: int = 3
 global JIT_FRAME_JOIN_PATH: string = ""
-// Baselines of the process-wide counts for the per-frame join.
 global JIT_FRAME_JOIN_LAST_STARTS: int = 0
 global JIT_FRAME_JOIN_LAST_ABORTS: int = 0
 global JIT_FRAME_JOIN_LAST_FLUSHES: int = 0
@@ -2438,9 +2095,6 @@ global JIT_FRAME_JOIN_LAST_FLUSHES: int = 0
         frame, frame_ms, logic_ms, render_ms, present_ms, starts, aborts, flushes)
 """
 
-// Returns the row count written, 0 when nothing was captured, -1 when the
-// path could not be opened. The caller logs; a silent failure here would
-// leave an investigation reading a file that was never written.
 @nomangle inline(lua) fn jit_frame_join_write(path: string) -> int = """
     local rows = _G.__rock_jit_frame_join
     if rows == nil or #rows == 0 then return 0 end
@@ -2476,10 +2130,6 @@ fn jit_frame_join_flush() {
         return
     }
     log_info("JIT", "frame join: {written} rows -> {JIT_FRAME_JOIN_PATH}")
-    // The windowed ranking above only fires on an FPS interval, so a bounded
-    // run (a sim, `rock frame`, a short perf pass) can finish having recorded
-    // thousands of aborts and never report where any of them came from. Drain
-    // whatever the last window left.
     let top = drain_jit_abort_top(JIT_ABORT_TOP_N)
     if top != "" {
         log_info("JIT", "final top aborts: {top}")

@@ -1,9 +1,3 @@
-// Every static sound is admitted (decoded on a worker) when it loads, so a
-// bank is resident shortly after boot. A one-shot that plays before its
-// decode published decodes synchronously rather than being dropped; those
-// late decodes are counted here. Stream sources (ambience, music) hold their
-// encoded bytes once admitted and never hold PCM.
-
 pub value SoundRecipe {
     frames: int,
     rate: int,
