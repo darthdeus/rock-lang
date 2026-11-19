@@ -3297,7 +3297,6 @@ fn acquire_worker_slot(
         *waits.entry(reason).or_default() += blocked.elapsed();
     }
 }
-
 /// Inputs for one sim child: its part plus the run's reporting and session
 /// options. Named fields, not positionals, so a swapped boolean cannot
 /// silently change what a run records.
@@ -3312,42 +3311,14 @@ struct ChildConfig<'a> {
     recorder: Option<&'a SimRunRecorder>,
 }
 
-/// Spawn ONE fresh luajit process for one sim part and parse its side
-/// channel into the part's summary.
-fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
-    let ChildConfig {
-        part,
-        quiet,
-        buffered,
-        update_snapshots,
-        output,
-        census_warmup_frames,
-        stone,
-        recorder,
-    } = config;
-
-    // Overlay handling belongs ONLY to the reload lane. The overlay is one file
-    // shared by every child of this invocation, so wiping it here would be a
-    // cross-child mutation the moment ordinary sims run concurrently. Ordinary
-    // children never write it, and the reload lane is exclusive and reverts its
-    // own edits, so nothing stale can survive into an ordinary child.
-    //
-    // With STONE_HOT_RELOAD=1 the in-game watcher fires on the overlay's FIRST
-    // appearance (baseline modtime 0), so a leftover would be dofile'd at
-    // startup -- that is what this wipe prevents, for the lane that can create
-    // one.
-    if stone.is_some() {
-        crate::skull_backend::wipe_overlay(
-            &Path::new(output)
-                .join(rock_host::project::MAIN_LUA_FILENAME)
-                .with_file_name("incremental.lua"),
-        )?;
-    }
-
-    // Expand `$OUT` in env values to the entry's tempdir absolute path.
-    // Lets sims write `@sim_env("GAME_HISTORY_DIR", "$OUT/history")`
-    // and have it resolve before luajit spawns. Runtime `set_env()`
-    // runs after `@init` so it can't influence env-var-driven config.
+fn child_command(
+    part: &WorkerPart,
+    output: &str,
+    quiet: bool,
+    census_warmup_frames: Option<usize>,
+) -> (std::process::Command, PathBuf) {
+    // `$OUT` in env values resolves before luajit spawns, so env-var-driven
+    // config can point into the entry's tempdir.
     let out_str = part.out_dir.to_string_lossy().to_string();
     let preset_env: Vec<(String, String)> = part
         .env
@@ -3359,27 +3330,18 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     let mut cmd = crate::headless_scope::headless_command(
         rock_engine_host::runtime::build_luajit_command(&lua_file, &[]),
     );
+    // Explicit `@sim_env` values win over the defaults because `preset_env`
+    // is layered after them. Image stubs are one white texel and audio is
+    // silent for every entry; sims that read texels or voices opt out.
     cmd.env("ROCK_RUN_SIM", &part.name)
         .env("FRAME_COUNT", part.frame_budget.to_string())
         .env("OUT", &part.out_dir)
-        // Apply per-entry defaults, including private user data. Explicit
-        // `@sim_env` values override these defaults below.
         .envs(
             RUNNER_BASELINE_ENV
                 .iter()
                 .map(|(k, v)| (*k, v.replace("$OUT", &out_str))),
         )
-        // Headers-only assets for EVERY entry, rendering included: a stubbed
-        // image is one white texel, and a sim asserts layout and gameplay
-        // rather than texel colour. The sims that do read texels declare
-        // `@sim_env("STONE_ASSET_STUB", "0")`, which wins because `preset_env`
-        // is layered after this.
         .env("STONE_ASSET_STUB", asset_stub_value())
-        // Audio is stubbed for EVERY entry, not just non-rendering ones: a
-        // rendered snapshot wants pixels and no sound, so `entry_renders` says
-        // nothing about it. The handful of sims that assert on voices, bus
-        // pulls or sound reload set `@sim_env("STONE_AUDIO_STUB", "0")`, which
-        // wins because `preset_env` is layered after this.
         .env("STONE_AUDIO_STUB", unstub_override("STONE_AUDIO_STUB"))
         .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env("FPS_LOG", "0")
@@ -3398,75 +3360,84 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         }
     }
 
-    // Concise (quiet) runs: quiet the child's own logger to warn+ so the
-    // `[sim]` verdict lines aren't buried under [STONE]/[game]/[ENV] INFO
-    // noise. The `__SIM__` side channel is emitted directly, not through the
-    // logger, so results are unaffected; warn/error still pass through on a
-    // real failure. Respect an explicit ROCK_LOG from the env or a sim's
-    // `@sim_env` so a debugging run can still turn logs back up.
     let rock_log_preset = preset_env.iter().any(|(k, _)| k == "ROCK_LOG");
     if quiet && !rock_log_preset && std::env::var_os("ROCK_LOG").is_none() {
         cmd.env("ROCK_LOG", "warn");
     }
+    (cmd, lua_file)
+}
 
-    let label = part.name.clone();
-    let mut worker_phase = worker_admission::WorkerPhase::waiting();
-    let (mut worker_slot, admission_ms, checks_ms, waits) = acquire_worker_slot(&label)?;
-    worker_phase.admitted();
-    let worker_attempt = recorder
-        .map(|recorder| {
-            recorder.worker_spawn(part.occurrence_id, &part.name, &workload_env(&part.env))
-        })
-        .unwrap_or(0);
-    if let Some(recorder) = recorder {
-        recorder.worker_admission(worker_attempt, &label, admission_ms, checks_ms, &waits);
+struct ChildIo {
+    stderr_thread: std::thread::JoinHandle<(EntryStream, Option<String>)>,
+    stdout_thread: std::thread::JoinHandle<Option<String>>,
+    stdout_buf: Arc<Mutex<Vec<u8>>>,
+    // The wall-clock deadline is measured from the spawn until the entry
+    // opens, then from its `entry_start`, so boot does not spend its budget.
+    deadline_anchor: Arc<Mutex<rock_core::clock::Instant>>,
+}
+
+struct ReloadChannels {
+    requests: mpsc::Receiver<ReloadEditReq>,
+    completions: mpsc::Receiver<ReloadCompletion>,
+}
+
+#[derive(Default)]
+struct ReloadState {
+    pristine: HashMap<String, String>,
+    errors: Vec<SiteMessage>,
+    ledger: BTreeMap<u64, ReloadRequestState>,
+}
+
+impl ReloadState {
+    fn drain_completions(&mut self, channels: &ReloadChannels) -> bool {
+        drain_reload_completions(&channels.completions, &mut self.ledger, &mut self.errors)
     }
-    // Bound: on Linux the child dies with a SIGKILLed runner instead of
-    // orphaning (parent-death signal); everywhere else TERM/INT/HUP are
-    // forwarded. Released once reaped below, and in `Drop` for early exits.
-    let child = match crate::headless_scope::spawn_bound_child(&mut cmd, lua_file.parent().unwrap())
-    {
-        Ok(child) => child,
-        Err(error) => {
-            if let Some(recorder) = recorder {
-                recorder.worker_end(worker_attempt, "spawn_failed", None, None, false);
-            }
-            return Err(error.into());
+
+    fn reject(&mut self, request_id: u64, message: String, site: String) {
+        self.ledger.insert(request_id, ReloadRequestState::Rejected);
+        self.errors.push(SiteMessage { message, site });
+    }
+}
+
+struct Waited {
+    status: ExitStatus,
+    timed_out: bool,
+    runner_killed: bool,
+    memory_error: Option<SiteMessage>,
+}
+
+impl Waited {
+    fn exited(status: ExitStatus) -> Self {
+        Self {
+            status,
+            timed_out: false,
+            runner_killed: false,
+            memory_error: None,
         }
-    };
-    // Until the PID is published the admission lease reserves the full estimate.
-    // Keep the child bound if publishing fails, so it is reaped before the lease drops.
-    worker_admission::publish_pid(&sim_worker_slot_directory(), &mut worker_slot, child.id())?;
-    // Declared after the leases, so the bound child is reaped before capacity
-    // and the admission phase are released, including on early return.
-    let mut child = child;
-    let process_id = child.id();
-    if let Some(recorder) = recorder {
-        recorder.worker_started(worker_attempt, process_id);
     }
+}
+
+fn spawn_readers(
+    child: &mut crate::headless_scope::BoundChild,
+    part: &WorkerPart,
+    quiet: bool,
+    buffered: bool,
+    recorder: Option<&SimRunRecorder>,
+    worker_attempt: u64,
+) -> (ChildIo, ReloadChannels) {
     let stderr_handle = child.stderr.take().expect("piped");
     let stdout_handle = child.stdout.take().expect("piped");
-
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    // What the wall-clock deadline is measured from: the spawn until the entry
-    // opens, then its `entry_start`, so boot does not spend the entry's budget.
     let deadline_anchor = Arc::new(Mutex::new(rock_core::clock::Instant::now()));
-    // Mid-sim reload_edit ops flow stderr-thread -> wait-loop, which owns the
-    // (single-threaded) IncrementalProject and services them between try_wait polls.
-    let (reload_tx, reload_rx) = mpsc::channel::<ReloadEditReq>();
-    // The production watcher sends one terminal event after it has consumed
-    // the published overlay. The parent only accounts for it; it never
-    // fabricates publication or completion for a test.
-    let (reload_completion_tx, reload_completion_rx) = mpsc::channel::<ReloadCompletion>();
+    let (reload_tx, requests) = mpsc::channel::<ReloadEditReq>();
+    let (completion_tx, completions) = mpsc::channel::<ReloadCompletion>();
 
     let stderr_thread = {
         let anchor = Arc::clone(&deadline_anchor);
         let recorder = recorder.cloned();
         let (occurrence_id, name) = (part.occurrence_id, part.name.clone());
-        // Buffered runs must not write anything from this thread: several
-        // children are live, so a direct write here interleaves into the middle
-        // of another sim's locked record. The lines are retained and handed
-        // back for the caller to emit inside that lock.
+        // Buffered runs must not write from this thread: several children are
+        // live, so lines are retained for the caller to emit inside its lock.
         let quiet = quiet || buffered;
         std::thread::spawn(move || {
             let mut stream = EntryStream::new(name.clone(), buffered);
@@ -3499,7 +3470,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                     }
                 }
                 if let Some(event) = event {
-                    event.forward_reload(&reload_tx, &reload_completion_tx);
+                    event.forward_reload(&reload_tx, &completion_tx);
                     if !quiet && let Some(line) = event.progress() {
                         eprintln!("{line}");
                     }
@@ -3511,14 +3482,10 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
 
     let stdout_thread = {
         let buf = Arc::clone(&stdout_buf);
-        let label = label.clone();
+        let label = part.name.clone();
         std::thread::spawn(move || -> Option<String> {
             let mut h = stdout_handle;
             let mut local = Vec::new();
-            // Surface read failures: a silent `let _ = ...` would hand
-            // an empty buffer back to the post-run "game stdout for ..."
-            // dump on failure, hiding any partial output we did get
-            // (silent-errors audit, 2026-05-02).
             let error = h
                 .read_to_end(&mut local)
                 .err()
@@ -3528,181 +3495,190 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         })
     };
 
-    let memory_cap_mb = sim_memory_cap_mb();
-    let mut memory_error: Option<SiteMessage> = None;
-    let mut runner_killed = false;
-    let mut pristine: HashMap<String, String> = HashMap::new();
-    let mut reload_errors: Vec<SiteMessage> = Vec::new();
-    let mut reload_ledger = BTreeMap::new();
-    let mut stone = stone;
-    let (status, timed_out) = 'child: loop {
-        if drain_reload_completions(
-            &reload_completion_rx,
-            &mut reload_ledger,
-            &mut reload_errors,
-        ) {
-            runner_killed = true;
-            break (terminate_reload_child(&mut child)?, false);
-        }
-        match child.try_wait()? {
-            Some(s) => break (s, false),
-            None => {
-                let since_anchor = deadline_anchor.lock().unwrap().elapsed();
-                if since_anchor > part.timeout {
-                    runner_killed = true;
-                    let _ = child.kill();
-                    let s = child.wait()?;
-                    break (s, true);
-                }
-                if let (Some(cap), Some(used)) = (memory_cap_mb, process_memory_mb(child.id())) {
-                    if used > cap {
-                        let breakdown = process_memory_breakdown(child.id());
-                        runner_killed = true;
-                        let _ = child.kill();
-                        let s = child.wait()?;
-                        memory_error = Some(SiteMessage {
-                            message: format!(
-                                "sim child exceeded its memory cap of {cap} MB ({used} MB resident \
-                                 plus swap: {breakdown}) and was killed; override with ROCK_SIM_MEMORY_MB"
-                            ),
-                            site: String::new(),
-                        });
-                        break (s, false);
-                    }
-                }
-                // Service mid-sim reload_edit requests while waiting; the 50ms
-                // recv timeout doubles as the child poll interval. Disconnected
-                // = the stderr stream closed before the child was reaped --
-                // keep the poll cadence with a plain sleep.
-                match reload_rx.recv_timeout(Duration::from_millis(50)) {
-                    Ok(req) => {
-                        let request_id = match book_reload_request(&mut reload_ledger, &req) {
-                            Ok(id) => id,
-                            Err(e) => {
-                                reload_errors.push(SiteMessage {
-                                    message: format!("reload request: {e}"),
-                                    site: req.site,
-                                });
-                                break 'child (terminate_reload_child(&mut child)?, false);
-                            }
-                        };
-                        // An ordinary (non-reload) sim has no session to edit.
-                        // Servicing it here would mutate build state shared with
-                        // every other child, so refuse loudly rather than
-                        // silently dropping the request or reaching for the
-                        // session from a parallel lane.
-                        let serviced = match stone.as_deref_mut() {
-                            Some(st) => {
-                                let mut apply =
-                                    || service_reload_edit(st, output, &mut pristine, &req);
-                                if let Some(recorder) = recorder {
-                                    recorder.phase(&format!("reload_apply:{}", part.name), apply)
-                                } else {
-                                    apply()
-                                }
-                            }
-                            None => Err(anyhow!(
-                                "reload_edit is only available to sims that opt into the \
-                                 reload lane with `@sim_env(\"STONE_HOT_RELOAD\", \"1\")`"
-                            )),
-                        };
-                        match serviced {
-                            Ok(crate::skull_backend::SkullReload::Incremental { .. }) => {
-                                // Only this thread owns the ledger, and this request was just booked.
-                                reload_ledger.insert(request_id, ReloadRequestState::Published);
-                            }
-                            Ok(other) => {
-                                let e = anyhow!(
-                                    "reload_edit returned non-incremental result {other:?}"
-                                );
-                                reload_ledger.insert(request_id, ReloadRequestState::Rejected);
-                                reload_errors.push(SiteMessage {
-                                    message: format!("reload_edit: {e}"),
-                                    site: req.site,
-                                });
-                                break 'child (terminate_reload_child(&mut child)?, false);
-                            }
-                            Err(e) => {
-                                reload_ledger.insert(request_id, ReloadRequestState::Rejected);
-                                let site = req.site;
-                                // Stream now for a single run; buffered callers emit
-                                // the retained error under their record lock.
-                                if !buffered {
-                                    eprintln!(
-                                        "{}{} reload_edit: {e}",
-                                        format!("[{}] ", site).bright_black(),
-                                        "error:".red().bold(),
-                                    );
-                                }
-                                reload_errors.push(SiteMessage {
-                                    message: format!("reload_edit: {e}"),
-                                    site,
-                                });
-                                break 'child (terminate_reload_child(&mut child)?, false);
-                            }
-                        }
-                        drain_reload_completions(
-                            &reload_completion_rx,
-                            &mut reload_ledger,
-                            &mut reload_errors,
-                        );
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                }
-            }
+    (
+        ChildIo {
+            stderr_thread,
+            stdout_thread,
+            stdout_buf,
+            deadline_anchor,
+        },
+        ReloadChannels {
+            requests,
+            completions,
+        },
+    )
+}
+
+/// Applies one mid-sim `reload_edit`. Returns true when the child must be
+/// terminated because the request failed.
+fn handle_reload_request(
+    req: ReloadEditReq,
+    config: &ChildConfig<'_>,
+    stone: &mut Option<&mut crate::skull_backend::IncrementalProject>,
+    reload: &mut ReloadState,
+) -> bool {
+    let request_id = match book_reload_request(&mut reload.ledger, &req) {
+        Ok(id) => id,
+        Err(e) => {
+            reload.errors.push(SiteMessage {
+                message: format!("reload request: {e}"),
+                site: req.site,
+            });
+            return true;
         }
     };
-    if let Some(recorder) = recorder {
-        #[cfg(unix)]
-        let signal = status.signal();
-        #[cfg(not(unix))]
-        let signal = None;
-        recorder.worker_end(
-            worker_attempt,
-            if timed_out {
-                "timeout"
-            } else if status.success() {
-                "success"
-            } else {
-                "failure"
-            },
-            status.code(),
-            signal,
-            timed_out,
-        );
+    // Only the reload lane owns a session; servicing an ordinary sim would
+    // mutate build state shared with every other child.
+    let serviced = match stone.as_deref_mut() {
+        Some(st) => {
+            let mut apply = || service_reload_edit(st, config.output, &mut reload.pristine, &req);
+            match config.recorder {
+                Some(recorder) => {
+                    recorder.phase(&format!("reload_apply:{}", config.part.name), apply)
+                }
+                None => apply(),
+            }
+        }
+        None => Err(anyhow!(
+            "reload_edit is only available to sims that opt into the \
+             reload lane with `@sim_env(\"STONE_HOT_RELOAD\", \"1\")`"
+        )),
+    };
+    match serviced {
+        Ok(crate::skull_backend::SkullReload::Incremental { .. }) => {
+            reload
+                .ledger
+                .insert(request_id, ReloadRequestState::Published);
+            false
+        }
+        Ok(other) => {
+            reload.reject(
+                request_id,
+                format!("reload_edit: reload_edit returned non-incremental result {other:?}"),
+                req.site,
+            );
+            true
+        }
+        Err(e) => {
+            if !config.buffered {
+                eprintln!(
+                    "{}{} reload_edit: {e}",
+                    format!("[{}] ", req.site).bright_black(),
+                    "error:".red().bold(),
+                );
+            }
+            reload.reject(request_id, format!("reload_edit: {e}"), req.site);
+            true
+        }
     }
-    // A request still queued here arrived after the child exited -- the sim
-    // emitted reload_edit and stopped without waiting for the effect. That's
-    // a sim-author bug; dropping it silently would hide the mis-ordering.
-    while let Ok(req) = reload_rx.try_recv() {
-        match book_reload_request(&mut reload_ledger, &req) {
-            Ok(request_id) => {
-                reload_ledger.insert(request_id, ReloadRequestState::Rejected);
-                reload_errors.push(SiteMessage {
-                    message: format!(
-                        "reload_edit for `{}` arrived after the child exited (emit it before a wait_for on its effect)",
-                        req.file
-                    ),
-                    site: req.site,
+}
+
+fn wait_for_child(
+    child: &mut crate::headless_scope::BoundChild,
+    config: &ChildConfig<'_>,
+    stone: &mut Option<&mut crate::skull_backend::IncrementalProject>,
+    io: &ChildIo,
+    channels: &ReloadChannels,
+    reload: &mut ReloadState,
+) -> Result<Waited> {
+    let memory_cap_mb = sim_memory_cap_mb();
+    loop {
+        if reload.drain_completions(channels) {
+            return Ok(Waited {
+                runner_killed: true,
+                ..Waited::exited(terminate_reload_child(child)?)
+            });
+        }
+        if let Some(status) = child.try_wait()? {
+            return Ok(Waited::exited(status));
+        }
+        if io.deadline_anchor.lock().unwrap().elapsed() > config.part.timeout {
+            let _ = child.kill();
+            return Ok(Waited {
+                runner_killed: true,
+                timed_out: true,
+                ..Waited::exited(child.wait()?)
+            });
+        }
+        if let (Some(cap), Some(used)) = (memory_cap_mb, process_memory_mb(child.id())) {
+            if used > cap {
+                let breakdown = process_memory_breakdown(child.id());
+                let _ = child.kill();
+                return Ok(Waited {
+                    runner_killed: true,
+                    memory_error: Some(SiteMessage {
+                        message: format!(
+                            "sim child exceeded its memory cap of {cap} MB ({used} MB resident \
+                             plus swap: {breakdown}) and was killed; override with ROCK_SIM_MEMORY_MB"
+                        ),
+                        site: String::new(),
+                    }),
+                    ..Waited::exited(child.wait()?)
                 });
             }
-            Err(e) => reload_errors.push(SiteMessage {
+        }
+        // The recv timeout doubles as the child poll interval.
+        match channels.requests.recv_timeout(Duration::from_millis(50)) {
+            Ok(req) => {
+                if handle_reload_request(req, config, stone, reload) {
+                    return Ok(Waited::exited(terminate_reload_child(child)?));
+                }
+                reload.drain_completions(channels);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+fn reject_late_reload_requests(channels: &ReloadChannels, reload: &mut ReloadState) {
+    while let Ok(req) = channels.requests.try_recv() {
+        match book_reload_request(&mut reload.ledger, &req) {
+            Ok(request_id) => {
+                let message = format!(
+                    "reload_edit for `{}` arrived after the child exited (emit it before a wait_for on its effect)",
+                    req.file
+                );
+                reload.reject(request_id, message, req.site);
+            }
+            Err(e) => reload.errors.push(SiteMessage {
                 message: format!("reload request after child exit: {e}"),
                 site: req.site,
             }),
         }
     }
+}
 
-    // Surface reader-thread panics: a silent JoinError here meant a panic
-    // in the BufReader/Read loop would discard all sim output (the
-    // __SIM__ side channel + raw game stderr) with no diagnostic, leaving
-    // the user with a "0/0 expects passed" PASS line and no clue why
-    // (silent-errors audit, 2026-05-02).
-    let mut reader_diagnostics = Vec::new();
-    let (stream, diagnostic) = match stderr_thread.join() {
+fn record_worker_end(
+    recorder: &SimRunRecorder,
+    worker_attempt: u64,
+    status: &ExitStatus,
+    timed_out: bool,
+) {
+    #[cfg(unix)]
+    let signal = status.signal();
+    #[cfg(not(unix))]
+    let signal = None;
+    let outcome = if timed_out {
+        "timeout"
+    } else if status.success() {
+        "success"
+    } else {
+        "failure"
+    };
+    recorder.worker_end(worker_attempt, outcome, status.code(), signal, timed_out);
+}
+
+fn join_readers(
+    io: ChildIo,
+    part: &WorkerPart,
+    buffered: bool,
+) -> (EntryStream, Vec<String>, String) {
+    let label = &part.name;
+    let mut diagnostics = Vec::new();
+    let (stream, diagnostic) = match io.stderr_thread.join() {
         Ok(result) => result,
         Err(panic) => (
             EntryStream::new(part.name.clone(), buffered),
@@ -3710,23 +3686,132 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         ),
     };
     if let Some(message) = diagnostic {
-        reader_diagnostics.push(format!("rock sim `{label}`: {message}"));
+        diagnostics.push(format!("rock sim `{label}`: {message}"));
     }
-    match stdout_thread.join() {
-        Ok(Some(message)) => reader_diagnostics.push(message),
+    match io.stdout_thread.join() {
+        Ok(Some(message)) => diagnostics.push(message),
         Ok(None) => {}
-        Err(panic) => reader_diagnostics.push(format!(
+        Err(panic) => diagnostics.push(format!(
             "rock sim `{label}`: stdout reader thread panicked; game stdout may be incomplete: {panic:?}"
         )),
     }
-    drain_reload_completions(
-        &reload_completion_rx,
-        &mut reload_ledger,
-        &mut reload_errors,
-    );
-    let reload_summary = reload_ledger_summary(&reload_ledger);
+    let stdout = String::from_utf8_lossy(&io.stdout_buf.lock().unwrap()).to_string();
+    (stream, diagnostics, stdout)
+}
+
+fn push_error(summary: &mut SimSummary, message: String) {
+    summary.errors.push(SiteMessage {
+        message,
+        site: String::new(),
+    });
+}
+
+fn record_exit_errors(
+    summary: &mut SimSummary,
+    part: &WorkerPart,
+    waited: &Waited,
+    started: bool,
+    terminated: bool,
+    raw_tail: VecDeque<String>,
+) {
+    let Waited {
+        status,
+        timed_out,
+        runner_killed,
+        memory_error,
+    } = waited;
+    if !started {
+        let worker_end = describe_worker_end(
+            status,
+            *timed_out,
+            part.timeout,
+            *runner_killed,
+            memory_error.as_ref(),
+            raw_tail,
+        );
+        push_error(
+            summary,
+            format!(
+                "sim `{}` never started: its process ended before the entry opened ({worker_end})",
+                part.name,
+            ),
+        );
+    }
+    if started && !terminated && status.success() && !timed_out {
+        push_error(
+            summary,
+            format!(
+                "sim `{}` never emitted its entry_end although its process exited cleanly",
+                part.name
+            ),
+        );
+    }
+}
+
+fn run_child(mut config: ChildConfig<'_>) -> Result<SimSummary> {
+    let mut stone = config.stone.take();
+    let part = config.part;
+    let (quiet, buffered, recorder) = (config.quiet, config.buffered, config.recorder);
+    let output = config.output;
+
+    // The overlay is one file shared by every child of this invocation, so
+    // only the exclusive reload lane may touch it. With STONE_HOT_RELOAD=1 a
+    // leftover would be dofile'd at startup.
+    if stone.is_some() {
+        crate::skull_backend::wipe_overlay(
+            &Path::new(output)
+                .join(rock_host::project::MAIN_LUA_FILENAME)
+                .with_file_name("incremental.lua"),
+        )?;
+    }
+
+    let (mut cmd, lua_file) = child_command(part, output, quiet, config.census_warmup_frames);
+
+    let mut worker_phase = worker_admission::WorkerPhase::waiting();
+    let (mut worker_slot, admission_ms, checks_ms, waits) = acquire_worker_slot(&part.name)?;
+    worker_phase.admitted();
+    let worker_attempt = recorder
+        .map(|recorder| {
+            recorder.worker_spawn(part.occurrence_id, &part.name, &workload_env(&part.env))
+        })
+        .unwrap_or(0);
+    if let Some(recorder) = recorder {
+        recorder.worker_admission(worker_attempt, &part.name, admission_ms, checks_ms, &waits);
+    }
+    let child = match crate::headless_scope::spawn_bound_child(&mut cmd, lua_file.parent().unwrap())
+    {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(recorder) = recorder {
+                recorder.worker_end(worker_attempt, "spawn_failed", None, None, false);
+            }
+            return Err(error.into());
+        }
+    };
+    // Until the PID is published the admission lease reserves the full estimate.
+    // Keep the child bound if publishing fails, so it is reaped before the lease drops.
+    worker_admission::publish_pid(&sim_worker_slot_directory(), &mut worker_slot, child.id())?;
+    // Declared after the leases, so the bound child is reaped before capacity
+    // and the admission phase are released, including on early return.
+    let mut child = child;
+    let process_id = child.id();
+    if let Some(recorder) = recorder {
+        recorder.worker_started(worker_attempt, process_id);
+    }
+
+    let (io, channels) = spawn_readers(&mut child, part, quiet, buffered, recorder, worker_attempt);
+    let mut reload = ReloadState::default();
+    let waited = wait_for_child(&mut child, &config, &mut stone, &io, &channels, &mut reload)?;
+    if let Some(recorder) = recorder {
+        record_worker_end(recorder, worker_attempt, &waited.status, waited.timed_out);
+    }
+    reject_late_reload_requests(&channels, &mut reload);
+
+    let (stream, reader_diagnostics, stdout_str) = join_readers(io, part, buffered);
+    reload.drain_completions(&channels);
+    let reload_summary = reload_ledger_summary(&reload.ledger);
     if reload_summary.pending > 0 {
-        reload_errors.push(SiteMessage {
+        reload.errors.push(SiteMessage {
             message: format!(
                 "reload completion ledger has {} pending request(s): requests={} applied={} pending={} rejected={} failed={}",
                 reload_summary.pending,
@@ -3745,10 +3830,6 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         }
     }
 
-    let stdout_buf_locked = stdout_buf.lock().unwrap();
-    let stdout_str = String::from_utf8_lossy(&stdout_buf_locked).to_string();
-    drop(stdout_buf_locked);
-
     let EntryStream {
         started,
         terminated,
@@ -3765,42 +3846,17 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     if recorder.is_some() {
         summary.worker_attempt = Some(worker_attempt);
     }
-    if !started {
-        let worker_end = describe_worker_end(
-            &status,
-            timed_out,
-            part.timeout,
-            runner_killed,
-            memory_error.as_ref(),
-            raw_tail,
-        );
-        summary.errors.push(SiteMessage {
-            message: format!(
-                "sim `{}` never started: its process ended before the entry opened ({worker_end})",
-                part.name,
-            ),
-            site: String::new(),
-        });
-    }
-    // A started entry with no `entry_end` is only explicable as one its child
-    // died inside. Anywhere else the envelope was lost, and a record built
-    // from a half-seen stream must not read as a clean result.
-    if started && !terminated && status.success() && !timed_out {
-        summary.errors.push(SiteMessage {
-            message: format!(
-                "sim `{}` never emitted its entry_end although its process exited cleanly",
-                part.name
-            ),
-            site: String::new(),
-        });
-    }
-    summary.errors.extend(std::mem::take(&mut reload_errors));
-    summary.errors.extend(memory_error.take());
+    record_exit_errors(&mut summary, part, &waited, started, terminated, raw_tail);
+    let Waited {
+        status,
+        timed_out,
+        runner_killed,
+        memory_error,
+    } = waited;
+    summary.errors.append(&mut reload.errors);
+    summary.errors.extend(memory_error);
     if let Some(note) = crate::headless_scope::outside_kill_note(&status, runner_killed) {
-        summary.errors.push(SiteMessage {
-            message: note,
-            site: String::new(),
-        });
+        push_error(&mut summary, note);
     }
     if reload_summary.requests > 0 {
         summary.reload_ledger = Some(reload_summary);
@@ -3811,8 +3867,9 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     }
     if !status.success() {
         summary.process_failure_code = Some(status.code().unwrap_or(-1));
-        summary.errors.push(SiteMessage {
-            message: if timed_out {
+        push_error(
+            &mut summary,
+            if timed_out {
                 format!(
                     "sim `{}` exceeded its {}s wall-clock entry budget; \
                      its process ended with {status}; runner_killed={runner_killed}",
@@ -3822,30 +3879,22 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
             } else {
                 format!("sim process ended with {status}; runner_killed={runner_killed}")
             },
-            site: String::new(),
-        });
+        );
     }
 
     match snapshot_source_for(part) {
-        Ok(source) => {
-            process_image_snapshots(&mut summary, &snap_dir_for(&source), update_snapshots)
-        }
-        Err(reason) if !summary.image_snapshots.is_empty() => {
-            summary.errors.push(SiteMessage {
-                message: reason,
-                site: String::new(),
-            });
-        }
+        Ok(source) => process_image_snapshots(
+            &mut summary,
+            &snap_dir_for(&source),
+            config.update_snapshots,
+        ),
+        Err(reason) if !summary.image_snapshots.is_empty() => push_error(&mut summary, reason),
         Err(_) => {}
     }
 
+    let failed =
+        summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some();
     if buffered {
-        // Same CONTENT a streaming run writes live, just held until the
-        // caller prints the record: the child's own stderr, plus its stdout
-        // when the sim failed. Without this a concurrent run silently loses
-        // every game-side diagnostic that a serial run prints.
-        let failed =
-            summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some();
         let diag = &mut summary.diagnostics;
         for message in &reader_diagnostics {
             diag.push_str("[SIM] warning: ");
@@ -3858,39 +3907,27 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         }
     }
 
-    // Restore the session + remove the overlay even when the sim failed --
-    // a revert failure is itself a loud error (it would poison every later
-    // sim in the suite).
-    if let Err(e) = stone
-        .map(|st| {
-            if pristine.is_empty() {
-                return revert_reload_edits(st, output, &mut pristine);
+    // A failed revert would poison every later sim in the suite.
+    if let Some(st) = stone {
+        let result = if reload.pristine.is_empty() {
+            revert_reload_edits(st, output, &mut reload.pristine)
+        } else {
+            let mut restore = || revert_reload_edits(st, output, &mut reload.pristine);
+            match recorder {
+                Some(recorder) => recorder.phase(&format!("reload_restore:{}", part.name), restore),
+                None => restore(),
             }
-            let mut restore = || revert_reload_edits(st, output, &mut pristine);
-            if let Some(recorder) = recorder {
-                recorder.phase(&format!("reload_restore:{}", part.name), restore)
-            } else {
-                restore()
-            }
-        })
-        .unwrap_or(Ok(()))
-    {
-        summary.errors.push(SiteMessage {
-            message: format!("reload_edit revert failed: {e}"),
-            site: String::new(),
-        });
+        };
+        if let Err(e) = result {
+            push_error(&mut summary, format!("reload_edit revert failed: {e}"));
+        }
     }
 
-    if !quiet && !buffered {
-        if (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some())
-            && !stdout_str.trim().is_empty()
-        {
-            log::error!(target: "SIM", "--- game stdout for `{}` ---", part.name);
-            // Result output, NOT logging: verbatim dump of the child
-            // game's captured stdout on failure — structured child
-            // output, not a run_sim log record.
-            eprint!("{stdout_str}");
-        }
+    let failed =
+        summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some();
+    if !quiet && !buffered && failed && !stdout_str.trim().is_empty() {
+        log::error!(target: "SIM", "--- game stdout for `{}` ---", part.name);
+        eprint!("{stdout_str}");
     }
 
     Ok(summary)
