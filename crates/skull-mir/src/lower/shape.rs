@@ -1,7 +1,3 @@
-//! Workspace-level analysis of value and enum representations. It supplies the
-//! shared shapes, storage classifications, and C layouts used by lowering and
-//! backend scaffolding; it does not build MIR.
-
 use super::*;
 
 use bone_core::hir::{BuiltinTy, FnBackend, TyId, TypeCtor, TypeExpr, VariantPayload};
@@ -13,26 +9,18 @@ use ustr::Ustr;
 use crate::concrete::ConcreteSignature;
 use crate::monoty::{MonoCtor, MonoTy};
 
-/// Whether `sd` is a `value` lowered through the value plans. A stdlib
-/// descriptor (`Ptr`, `NativeBuffer`) is a `value` whose representation the
-/// backend supplies: on Lua, the one host slot holding the cdata or the buffer
-/// table with its leaf views, which a copy shares and never rebuilds.
 pub fn has_value_plan(sd: &bone_core::hir::StructDef) -> bool {
     sd.is_value && !bone_core::modules::is_descriptor_key(sd.name)
 }
 
-/// Whether `name` is a declared struct with a value plan.
 pub(crate) fn is_value_struct(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
         .is_some_and(|sid| has_value_plan(&ws.modules[sid.module.index()].structs[sid.def]))
 }
 
-/// Max leaf count that stores an unmarked value in columns. Above it, columns
-/// fall off a measured write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86;
-/// 17.1x / 11.7x on arm64), so an unmarked wider type stays boxed. An explicit
-/// `nobox` guarantee bypasses this heuristic because boxing is not a legal
-/// fallback.
+/// Above this many leaves, column writes hit a measured cliff (about 9x on
+/// LuaJIT and V8 at K=16), so an unmarked wider value stays boxed.
 pub(crate) const MAX_COLUMN_LEAVES: usize = 4;
 
 pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
@@ -90,8 +78,6 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
         })
 }
 
-/// Column keys for `shape`, with nullable presence first. A top-level presence
-/// leaf has no field path, so this adds the key omitted by [`value_leaf_paths`].
 pub(crate) fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
     let paths = value_leaf_paths(shape);
     if !shape.nullable {
@@ -103,10 +89,8 @@ pub(crate) fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
     out
 }
 
-/// Every leaf path of value shape `shape`, declaration order, dotted for nested
-/// value fields (`min.x`). These ARE the column keys. Dotted for the same
-/// reason `embed` storage is: `.` cannot appear in a Rock identifier, so the
-/// encoding is injective and can never collide with a sibling leaf.
+/// Dotted column keys: `.` cannot appear in a Rock identifier, so keys never
+/// collide with a sibling leaf.
 pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
     leaf_names(shape, "", ".")
         .into_iter()
@@ -114,11 +98,8 @@ pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
         .collect()
 }
 
-/// Which entries of [`value_leaf_paths`] are a nullable child's PRESENCE tag
-/// rather than a data leaf, positionally. Storage canonicalizes an absent tag to
-/// `nil` (the form a `= null` write and an absent literal both produce), so the
-/// ctor has to know which of its params is a tag; a data leaf must never be
-/// touched, or a `false` bool field would erase itself.
+/// Storage canonicalizes an absent presence tag to `nil`; a data leaf must
+/// never be touched, or a `false` bool field would erase itself.
 pub fn value_leaf_presence_flags(shape: &ValueShape) -> Vec<bool> {
     let mut out = Vec::new();
     for_each_leaf(shape, &mut String::new(), "", &mut |_, presence| {
@@ -127,8 +108,6 @@ pub fn value_leaf_presence_flags(shape: &ValueShape) -> Vec<bool> {
     out
 }
 
-/// Leaf paths in declaration order, joined from ancestor field names with
-/// `sep`. The separator selects dotted storage paths or Lua parameter names.
 pub(crate) fn leaf_names(shape: &ValueShape, prefix: &str, sep: &str) -> Vec<String> {
     let mut out = Vec::new();
     for_each_leaf(shape, &mut prefix.to_owned(), sep, &mut |path, _| {
@@ -137,8 +116,6 @@ pub(crate) fn leaf_names(shape: &ValueShape, prefix: &str, sep: &str) -> Vec<Str
     out
 }
 
-/// [`leaf_names`] under `prefix` with `.`, each flagged when it is a nested
-/// nullable child's presence tag rather than a data leaf.
 pub(crate) fn leaf_keys(shape: &ValueShape, prefix: &str) -> Vec<(Ustr, bool)> {
     let mut out = Vec::new();
     for_each_leaf(shape, &mut prefix.to_owned(), ".", &mut |path, presence| {
@@ -147,24 +124,18 @@ pub(crate) fn leaf_keys(shape: &ValueShape, prefix: &str) -> Vec<(Ustr, bool)> {
     out
 }
 
-/// Visit every leaf with its path and whether it is a presence tag. The prefix
-/// lives in a buffer every level extends and restores.
 fn for_each_leaf(
     shape: &ValueShape,
     path: &mut String,
     sep: &str,
     visit: &mut impl FnMut(&str, bool),
 ) {
-    // Nested nullable presence uses the field's own path, before its children;
-    // this matches the leaf order and remains distinct from child paths (for
-    // example, `a` and `a.x`). A top-level shape has no field path to key.
+    // Nested nullable presence is keyed at the field's own path, before its children.
     if shape.nullable && !path.is_empty() {
         visit(path, true);
     }
     let prefix = path.len();
     for (fname, fs) in &shape.fields {
-        // Join each field to its ancestors so paths and Lua parameter names
-        // stay unique for repeated nested value types.
         if prefix != 0 {
             path.push_str(sep);
         }
@@ -177,14 +148,8 @@ fn for_each_leaf(
     }
 }
 
-/// Every leaf VIEW the compiler mints: `(leaf C type, buffer field, cast type)`.
-///
-/// THE single source of truth. [`leaf_view_field`] selects from it,
-/// [`is_leaf_view_field`] tests it, and the runtime `__ROCK_LEAF_VIEWS` table is
-/// GENERATED from it (`skull::prelude`) so the Rock-side consumers -- view
-/// refresh, serialization, inspect -- cannot drift from the emitter. Adding a
-/// leaf type here reaches all of them; a hand-written list in any of them is the
-/// bug this replaces.
+/// Every leaf view `(leaf C type, buffer field, cast type)`. The runtime
+/// `__ROCK_LEAF_VIEWS` table is generated from this list.
 pub const LEAF_VIEWS: &[(&str, &str, &str)] = &[
     ("double", "__vd", "double*"),
     ("float", "__vf", "float*"),
@@ -193,9 +158,6 @@ pub const LEAF_VIEWS: &[(&str, &str, &str)] = &[
     ("bool", "__vb", "bool*"),
 ];
 
-/// The buffer-table field holding the typed leaf VIEW for primitive C type
-/// `cty`. One field per distinct leaf type, made once at construction
-/// ([`Inst::FfiViewCast`]) and read per element access, never per leaf.
 pub fn leaf_view_field(cty: &str) -> Ustr {
     match LEAF_VIEWS.iter().find(|(t, ..)| *t == cty) {
         Some((_, field, _)) => crate::names::ustr(field),
@@ -203,13 +165,10 @@ pub fn leaf_view_field(cty: &str) -> Ustr {
     }
 }
 
-/// Whether `field` is one of the leaf-view keys [`leaf_view_field`] mints.
 pub fn is_leaf_view_field(field: &str) -> bool {
     LEAF_VIEWS.iter().any(|(_, f, _)| *f == field)
 }
 
-/// The `__ROCK_LEAF_VIEWS` prelude table: leaf-view field -> `ffi.cast` type.
-/// Rock-side consumers key off it instead of spelling `__vf`/`__vi`/`__vb`.
 pub fn leaf_views_lua_table() -> String {
     let entries: Vec<String> = LEAF_VIEWS
         .iter()
@@ -218,10 +177,7 @@ pub fn leaf_views_lua_table() -> String {
     format!("{{ {} }}", entries.join(", "))
 }
 
-/// Where one leaf lives, in units of ITS OWN view's element size: the buffer
-/// field holding that view, the per-element stride, and the leaf's offset within
-/// an element. Both numbers are compile-time constants, so a leaf access is
-/// `view[i * stride + offset]` -- pure arithmetic, no allocation.
+/// Leaf location in units of its own view's element size.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeafAddr {
     pub path: Ustr,
@@ -230,7 +186,6 @@ pub struct LeafAddr {
     pub offset: i64,
 }
 
-/// C type represented by a leaf-view buffer field.
 pub fn leaf_view_cty(field: &str) -> Option<&'static str> {
     LEAF_VIEWS
         .iter()
@@ -238,13 +193,6 @@ pub fn leaf_view_cty(field: &str) -> Option<&'static str> {
         .map(|(t, ..)| *t)
 }
 
-/// Every element type a `NativeBuffer`'s storage can be allocated with that is
-/// NOT a value struct: the primitives `native_buffer_alloc<T>` accepts and the
-/// sized phantoms (`NativeBufferU8` ...) the stdlib's `__nb_alloc_*` ctors
-/// build. Entries are `(C type, byte width)`.
-///
-/// Separate from [`c_prim_size_align`], which answers for a value struct's
-/// LEAVES -- `uint8_t` is never a leaf but is an element in its own right.
 pub const NB_PRIM_ELEMS: &[(&str, usize)] = &[
     ("float", 4),
     ("int", 4),
@@ -256,8 +204,6 @@ pub const NB_PRIM_ELEMS: &[(&str, usize)] = &[
     ("int16_t", 2),
 ];
 
-/// One runtime registration describing a buffer element's C type, width, and
-/// leaf views. These facts come from the same layout plans used by the emitter.
 fn nb_storage_call(ctype: &str, size: usize, views: &[&str]) -> String {
     let views: Vec<String> = views
         .iter()
@@ -275,8 +221,6 @@ fn nb_storage_call(ctype: &str, size: usize, views: &[&str]) -> String {
     )
 }
 
-/// The registrations for [`NB_PRIM_ELEMS`]. A primitive element carries no leaf
-/// views -- its storage IS one C type, so `buf.ptr` already addresses it.
 pub fn nb_prim_storage_lua() -> String {
     NB_PRIM_ELEMS
         .iter()
@@ -284,10 +228,6 @@ pub fn nb_prim_storage_lua() -> String {
         .collect()
 }
 
-/// The registration for FFI-clean value struct `elem` used as a buffer element,
-/// derived from the layout its caller ALREADY validated. Takes the checked
-/// leaves and size rather than re-walking: the emitter needs one layout per
-/// struct and the registry is a second view of it, not a second computation.
 pub fn nb_value_storage_lua(
     ws: &Workspace,
     elem: Ustr,
@@ -305,24 +245,17 @@ pub fn nb_value_storage_lua(
     nb_storage_call(elem.as_str(), size, &views)
 }
 
-/// One primitive leaf of an FFI-clean value struct's C layout: its dotted path
-/// (the same key [`value_leaf_paths`] produces), its C type, and its BYTE offset
-/// from the start of the struct.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeafSlot {
     pub path: Ustr,
     pub cty: &'static str,
     pub byte_off: usize,
-    /// The emitted C type symbol of each nested struct along `path`, outermost
-    /// first; empty for a top-level leaf. The start-up layout check composes
-    /// `ffi.offsetof` along this chain and asserts it equals `byte_off`: the
-    /// Rust layout model and LuaJIT's must agree, and a divergence corrupts
-    /// memory silently rather than failing, so it is checked rather than trusted.
+    /// Emitted C type symbols of nested structs along `path`, outermost first;
+    /// the start-up `ffi.offsetof` check composes them to verify `byte_off`.
     pub owners: Vec<Ustr>,
 }
 
-/// Size and alignment of a primitive C type as LuaJIT lays it out. The only
-/// types [`value_field_c_type`] admits as leaves.
+/// Size and alignment of a primitive C type as LuaJIT lays it out.
 pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
     match cty {
         "double" => Some((8, 8)),
@@ -332,10 +265,8 @@ pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
     }
 }
 
-/// C layout of an FFI-clean value struct: primitive leaves with byte offsets,
-/// plus total size and alignment. The runtime `ffi.offsetof` check validates
-/// the offsets. Keep this walker private; its positional leaf order must match
-/// [`value_leaf_paths`], or values can be written to the wrong addresses.
+/// Positional leaf order must match [`value_leaf_paths`], or values are
+/// written to the wrong addresses.
 pub(crate) fn value_leaf_layout(
     ws: &Workspace,
     name: Ustr,
@@ -421,8 +352,6 @@ pub(crate) fn round_up(n: usize, align: usize) -> usize {
     n.div_ceil(align) * align
 }
 
-/// The static, recursive shape of a scalarizable `value` struct: declared fields,
-/// each a primitive leaf or a nested (also-scalarizable) value struct.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ValueShape {
     pub(crate) name: Ustr,
@@ -430,9 +359,6 @@ pub struct ValueShape {
     pub(crate) nullable: bool,
 }
 
-/// Physical materialization selected for a value-shaped nominal. The target is
-/// carried by the owning `RepPlan`; this enum is the operational vocabulary its
-/// consumers use after planning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ValueStorage {
     CData,
@@ -447,7 +373,6 @@ pub(crate) enum FieldShape {
 }
 
 impl ValueShape {
-    /// Total primitive-leaf count — the scalar-ABI arity (params/returns/args).
     pub(crate) fn leaf_count(&self) -> usize {
         self.fields
             .iter()
@@ -475,8 +400,6 @@ pub(crate) enum PlannedField {
     Opaque,
 }
 
-/// One recursive nominal plan. The storage tier and both scalar/GC projections
-/// are computed in this walk; later consumers only project this tree.
 #[derive(Clone, Debug)]
 pub(crate) struct PlannedValue {
     pub(crate) name: Ustr,
@@ -668,8 +591,6 @@ pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<Rc<PlannedValu
     )
 }
 
-/// Per-thread memo of declaration plans, scoped to a representation arena
-/// generation. Outside an active [`ShapeMemoScope`], plans are computed directly.
 #[derive(Default)]
 struct ShapeMemo {
     arena_gen: u64,
@@ -680,7 +601,6 @@ struct ShapeMemo {
 
 thread_local! {
     static SHAPE_MEMO: std::cell::RefCell<ShapeMemo> = std::cell::RefCell::new(ShapeMemo::default());
-    /// The arena generation the active scope serves, `0` outside any scope.
     static SHAPE_MEMO_ACTIVE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -707,7 +627,6 @@ impl ShapeMemo {
         if let Some(value) = hit {
             return value;
         }
-        // Computed outside the borrow: a nested plan request re-enters here.
         let value = compute();
         SHAPE_MEMO.with(|memo| {
             let mut memo = memo.borrow_mut();
@@ -719,9 +638,6 @@ impl ShapeMemo {
     }
 }
 
-/// The fields of GC-table value `name` when some field is stored inline,
-/// memoized with the declaration plans: every boxed read and write of the
-/// value asks, and the answer is a walk over its field plans.
 pub(crate) fn gc_table_inline_fields(
     ws: &Workspace,
     target: FnBackend,
@@ -744,8 +660,6 @@ pub(crate) fn gc_table_inline_fields(
     )
 }
 
-/// Serves the declaration-plan memo for the representation arena generation
-/// `arena_gen` until dropped; nests, restoring the enclosing scope.
 pub(crate) struct ShapeMemoScope {
     previous: u64,
 }
@@ -775,9 +689,6 @@ pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bo
     planned_value(ws, name).is_some_and(|plan| contains(&plan))
 }
 
-/// `Some(ordered variant names)` iff `name` is a PAYLOAD-FREE enum (every variant
-/// `Unit`) — the tier-1 scalarizable case. The index is the variant's int tag.
-/// Whether `name` is a declared enum whose every variant is a unit variant.
 pub(crate) fn is_payload_free_enum(ws: &Workspace, name: Ustr) -> bool {
     ws.enums_by_name.get(&name).is_some_and(|eid| {
         ws.modules[eid.module.index()].enums[eid.def]
@@ -800,9 +711,6 @@ pub(crate) fn payload_free_enum_variants(ws: &Workspace, name: Ustr) -> Option<V
     Some(out)
 }
 
-/// Whether a Lua value of `ty` holds no mutable heap storage: every leaf is a
-/// scalar, a string or a payload-free enum, through nullables and non-generic
-/// nobox value structs. Such a value is already its own copy.
 pub(crate) fn lua_value_is_immutable(ws: &Workspace, ty: &MonoTy) -> bool {
     match ty {
         MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String => true,
@@ -853,9 +761,7 @@ fn lua_decl_is_immutable(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> 
     }
 }
 
-/// `Some(ordinal)` iff `name` is a payload-free enum and `variant` is one of its
-/// variants — the variant's declaration-order index, which IS its runtime `int`
-/// value. `None` for a mixed/payload enum (those keep the table representation).
+/// A payload-free enum variant's declaration-order index is its runtime `int`.
 pub(crate) fn payload_free_ordinal(ws: &Workspace, name: Ustr, variant: Ustr) -> Option<i64> {
     payload_free_enum_variants(ws, name)?
         .iter()
@@ -863,9 +769,6 @@ pub(crate) fn payload_free_ordinal(ws: &Workspace, name: Ustr, variant: Ustr) ->
         .map(|p| p as i64)
 }
 
-/// Whether packing is implicit or explicitly requested by `materialize(v)`.
-/// The kind tags every nested constructor; `authorize_nobox_box` handles boxes
-/// sanctioned later at boundaries such as `@gpu_only`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BoxKind {
     Implicit,
@@ -897,9 +800,6 @@ impl BoxKind {
     }
 }
 
-/// The runtime carrier threaded through lowering: a value struct lives as an
-/// unboxed `Group` of per-field reprs (recursive); everything else is a `Scalar`
-/// (one already-lowered value — a primitive, or a boxed cdata).
 #[derive(Clone)]
 pub(crate) enum ValueRepr {
     Scalar(Idx<Inst>),
@@ -908,23 +808,12 @@ pub(crate) enum ValueRepr {
         parts: Vec<ValueRepr>,
         present: Option<Idx<Inst>>,
     },
-    /// A tuple whose elements are still reprs -- produced only by a tuple return
-    /// that splats (`TupleLayout::splats`), so an element that arrived as
-    /// leaves can reach a destructure without being packed. Packing one emits
-    /// the ordinary `MakeTuple` of packed parts, which is how a whole-tuple use
-    /// of a `nobox` element still reaches the guarantee's rejection.
     Tuple {
         parts: Vec<ValueRepr>,
-        /// The declared return was `(..)?`: the presence bool that led the wire.
-        /// Same convention as `Group::present`, one level up.
         present: Option<Idx<Inst>>,
     },
 }
 
-/// A runtime value together with the physical plan that authorized its shape.
-/// `ValueRepr` remains the operational carrier; this bundle prevents a caller
-/// from handing a representation to a consumer without stating which RepId it
-/// conforms to.
 #[derive(Clone)]
 pub(crate) struct ValueBundle {
     representation: RepId,
@@ -952,13 +841,6 @@ impl ValueBundle {
     }
 }
 
-/// A safe-nav receiver after lowering: either an ordinary boxed value, or an
-/// UNBOXED nullable value that carries its own presence tag.
-///
-/// The distinction exists because the two have different honest absence tests.
-/// A box is absent when it is nil; an unboxed value is absent when its presence
-/// tag says so, and packing it to ask the nil question instead builds a ctor
-/// that is statically non-nil -- which deletes the absent arm outright.
 #[derive(Clone)]
 pub(crate) enum SafeNavRecv {
     Boxed(Idx<Inst>),
@@ -971,8 +853,6 @@ pub(crate) enum SpreadDest {
     Flat(ColumnElem, FlatStorage),
 }
 
-/// The result repr of a swizzle: one selected component is the bare scalar;
-/// several become a fresh VecN Group in swizzle order.
 pub(crate) fn swizzle_group(parts: Vec<ValueRepr>) -> ValueRepr {
     if parts.len() == 1 {
         parts.into_iter().next().expect("len checked")
@@ -990,8 +870,6 @@ pub(crate) fn swizzle_group(parts: Vec<ValueRepr>) -> ValueRepr {
     }
 }
 
-/// The `TypeExpr` of a `Static` TyId (declared types — struct fields, signature
-/// params/returns are all static). `None` for a `Local`/inference TyId.
 pub(crate) fn static_ty(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     match ty {
         TyId::Static(m, idx) => Some(ws.module(m).ty_arena[idx]),
@@ -999,18 +877,10 @@ pub(crate) fn static_ty(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     }
 }
 
-/// `Some(shape)` iff `name` is a `value` struct all of whose fields are primitive
-/// (int/float/bool) or nested scalarizable value structs — the rock eligibility
-/// rule, matching `c_field_type` (string/array/nullable/generic fields disqualify,
-/// so a real cdata always exists as the escape representation). Cyclic field
-/// types disqualify.
 pub(crate) fn value_shape(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     planned_value(ws, name)?.shape.clone()
 }
 
-/// The target/context-specific physical storage of a nominal value. This is
-/// the one classification used by RepPlan projections and backend scaffolding;
-/// callers must not rediscover `_ct`, `_vt` or `_lct` from field syntax.
 pub(crate) fn declared_value_storage(
     ws: &Workspace,
     _target: bone_core::hir::FnBackend,
@@ -1019,7 +889,6 @@ pub(crate) fn declared_value_storage(
     planned_value(ws, name).map(|plan| plan.storage)
 }
 
-/// Declaration field order of `name` iff it is a GC-free value STRUCT proper.
 pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
     ws.struct_by_name.get(&name)?;
     planned_value(ws, name)?
@@ -1028,16 +897,12 @@ pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Ve
         .map(|_| struct_field_names(ws, name))
 }
 
-/// Scalar-ABI shape for a GC-carrying value struct. Each declared field is one
-/// slot, including generic `T`; nested value structs and cdata enums thread
-/// their leaves. Materialization uses the tier-selected `<Name>_vt` constructor.
 pub(crate) fn value_shape_gc(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     planned_value(ws, name)?.gc_shape.clone()
 }
 
-/// Declared field names of struct `name`, in declaration order (the positional
-/// `<name>_ct` ctor order). A cdata-eligible enum is `[__tag, _0]` (it rides the
-/// value-struct `<Enum>_ct` path). Empty if `name` is neither.
+/// Declared field names in positional `<name>_ct` ctor order; a cdata-eligible
+/// enum is `[__tag, _0]`.
 pub fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
     let Some(sid) = ws.struct_by_name.get(&name) else {
         if let Some(es) = EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned()) {
@@ -1052,16 +917,6 @@ pub fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
         .collect()
 }
 
-// --- `@struct_expand` intrinsic --------
-//
-// A call to a fn declared `@struct_expand fn f<T>(u: T) -> [(string, E)]` is
-// replaced at lowering by the literal pairs list: one `(field_name, E::V(u.field))`
-// per struct field, declaration order, the variant chosen STRUCTURALLY (the unique
-// variant of `E` whose single payload type equals the field type). skull never
-// hardcodes the engine's `UniformValue`.
-
-/// The enum name `E` in a return type shaped exactly `[(string, E)]` (E nominal
-/// and a real enum). `None` for any other shape.
 pub(crate) fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
     let TypeExpr::App {
         ctor: TypeCtor::Array,
@@ -1096,13 +951,9 @@ pub(crate) fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
     Some(name)
 }
 
-/// Which half of the vertex layout a `@vertex_expand` fn asks for, chosen by
-/// its return type the way `@struct_expand` chooses by its pairs shape.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VertexExpandRet {
-    /// `-> int`: the element stride in floats.
     Stride,
-    /// `-> [int]`: per-attribute component counts, in location order.
     Sizes,
 }
 
@@ -1121,8 +972,6 @@ pub(crate) fn vertex_expand_return(ws: &Workspace, ret: TyId) -> Option<VertexEx
     }
 }
 
-/// The return-shape rejection message shared by source admission and the
-/// lowering expander.
 pub(crate) fn vertex_expand_ret_msg(ws: &Workspace, fname: Ustr, ret: Option<TyId>) -> String {
     format!(
         "`@vertex_expand` fn `{fname}` must return `int` (the stride in floats) or `[int]` \
@@ -1139,9 +988,7 @@ pub(crate) fn vertex_expand_arg_msg(fname: Ustr) -> String {
     )
 }
 
-/// Build a std140 plan only when its leaf paths match the value shape's order.
-/// A mismatch can write equal-count leaves to the wrong offsets, so it is an
-/// invariant error rather than a reason to skip this plan.
+/// Mismatched leaf paths would write equal-count leaves to the wrong offsets.
 pub fn uniform_block_checked(
     ws: &Workspace,
     name: Ustr,
@@ -1165,9 +1012,6 @@ pub fn uniform_block_checked(
     Ok(plan)
 }
 
-/// The logical uniform group and value walkers agree without consulting a
-/// physical block layout. This is the compiler-owned input to every target's
-/// uniform projection.
 pub(crate) fn uniform_semantic_checked(
     ws: &Workspace,
     name: Ustr,
@@ -1199,9 +1043,6 @@ pub(crate) fn uniform_semantic_checked(
     Ok(members)
 }
 
-/// The compiler-owned return shape of `@uniform_values`. Keeping this shape
-/// structural lets tests and backend modules use the same typed packet without
-/// teaching the runtime a second uniform schema.
 pub(crate) struct UniformValuesShape {
     pub block_name: Ustr,
     pub fingerprint_field: Ustr,
@@ -1326,8 +1167,6 @@ pub(crate) fn uniform_values_return_shape(
     })
 }
 
-/// The arity rejection message shared by source admission and the lowering
-/// expander.
 pub(crate) fn uniform_expand_arity_msg(fname: Ustr) -> String {
     format!(
         "`@uniform_expand` fn `{fname}` takes either three arguments -- the float view, the \
@@ -1343,8 +1182,6 @@ pub(crate) fn uniform_expand_arg_msg(fname: Ustr) -> String {
     )
 }
 
-/// Value struct `name`'s fields as `(name, ty)` in declaration order. `None` when
-/// `name` is not a `value` struct.
 pub(crate) fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, TyId)>> {
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
@@ -1354,8 +1191,6 @@ pub(crate) fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(
     Some(sd.fields.iter().map(|f| (f.name, f.ty)).collect())
 }
 
-/// Variant names of `enum_name` whose payload is a single type equivalent to
-/// the static type `want`. Zero -> no match; more than one -> ambiguous.
 pub(crate) fn variants_for_payload(ws: &Workspace, enum_name: Ustr, want: TyId) -> Vec<Ustr> {
     let Some(&eid) = ws.enums_by_name.get(&enum_name) else {
         return Vec::new();
@@ -1373,11 +1208,6 @@ pub(crate) fn variants_for_payload(ws: &Workspace, enum_name: Ustr, want: TyId) 
         .collect()
 }
 
-/// Map each `(field, ty)` to the unique variant of `enum_name` carrying that
-/// payload type (declaration order preserved), or the first offending field's
-/// rejection message. The single source of the field->variant rule -- both the
-/// emit-time validator ([`struct_expand_rejection`]) and the lowering expander
-/// ([`Builder::expand_struct_pairs`]) resolve through it, so they never diverge.
 pub(crate) fn struct_expand_variants(
     ws: &Workspace,
     enum_name: Ustr,
@@ -1403,11 +1233,6 @@ pub(crate) fn struct_expand_variants(
     Ok(out)
 }
 
-/// [`value_shape_of_nominal`] for a NULLABLE nominal: a presence leaf, then the
-/// payload leaves.
-///
-/// Both cdata-tier and GC-tier value structs carry leaves until a boxed sink.
-/// Returns, bindings, joins, `??` and `== null` follow this shared shape.
 pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
     let scalar = is_nobox_nominal(ws, n) || ws.struct_by_name.contains_key(&n);
     if scalar {
@@ -1421,7 +1246,6 @@ pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<V
     EnumPlan::for_name(ws, n).and_then(|plan| plan.flat().map(|s| s.value_shape()))
 }
 
-/// The value shape of a `name` nominal (value struct or flat enum), or `None`.
 pub(crate) fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     planned_value(ws, name)
         .and_then(|plan| plan.shape.clone().or(plan.gc_shape.clone()))
@@ -1430,34 +1254,23 @@ pub(crate) fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<Value
         })
 }
 
-/// The Lua global holding leaf `leaf` of the `nobox` global `base`. A global is
-/// category-2 storage -- its layout is derived from the stored type -- so a
-/// `nobox` global is K scalar globals, never one boxed cdata.
+/// A `nobox` global is one scalar Lua global per leaf, never one boxed cdata.
 pub(crate) fn nobox_global_leaf_name(base: Ustr, leaf: usize) -> Ustr {
     crate::names::ustr(&format!("__nbg_{base}_{leaf}"))
 }
 
-/// Whether `name` is a `nobox` value struct.
 pub(crate) fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
 }
 
-/// Reflection-accessor facts for a `nobox` global, derived from the shared
-/// storage and presence plans rather than path spelling.
 pub struct NoboxGlobalAccessorShape {
     pub ty_name: Ustr,
     pub paths: Vec<Ustr>,
     pub nullable: bool,
     pub storage: ValueStorage,
-    /// From the shared physical storage classification -- the same answer the
-    /// `_lct` ctor and the leaf-form pack site consume.
     pub ctor_suffix: &'static str,
-    /// Why no accessor can be built, if so. `_lct` is positional over physical
-    /// leaves, while `_vt` is positional over its box keys (`gc_table_fields`),
-    /// which split only `nobox` fields into leaves; a GC table with a nested
-    /// boxed child therefore cannot be rebuilt from the flattened storage.
     pub unbuildable: Option<String>,
 }
 
@@ -1485,8 +1298,7 @@ pub fn nobox_global_accessor_shape(
         ValueStorage::CData => "_ct",
     };
     // `_vt` is positional over its box keys: a declared field whole, a `nobox`
-    // field by its dotted leaves. It is the accessor's ctor exactly when those
-    // keys are the storage's leaf paths.
+    // field by its dotted leaves.
     let unbuildable = if storage == ValueStorage::GcTable {
         let keys: Vec<Ustr> = super::gc_table_fields(ws, scx.target, shape.name)?
             .iter()
@@ -1513,13 +1325,6 @@ pub fn nobox_global_accessor_shape(
     }))
 }
 
-/// Callee generic `VarId` -> its concrete type tree, for specialized lowering.
-/// Total against the declaration's generics, exactly as [`Vec<MonoTy>`] is.
-///
-/// THE SAME TYPE as [`crate::monoty::MonoSubst`], which is what an instance of
-/// the mono graph carries. One substitution vocabulary, so an instance's own
-/// bindings drive lowering and the ABI plan directly rather than through a
-/// conversion that could lose or reorder them.
 pub type SpecSubst = crate::monoty::MonoSubst;
 
 pub(crate) fn mono_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape> {
@@ -1556,7 +1361,6 @@ pub(crate) fn mono_nobox_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<Valu
     })?
 }
 
-/// Bind a concrete instance's argument types to the callee's generics in declaration order.
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &Vec<MonoTy>) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
     let mut subst = SpecSubst::default();
@@ -1586,38 +1390,20 @@ pub(crate) fn value_shape_can_fill(actual: &ValueShape, expected: &ValueShape) -
         )
 }
 
-/// Concrete `(bool, E)` return shape for a bounded `next` splice. The slot
-/// count sizes the call destinations; the element plan rebuilds `E` when its
-/// shape is available. Keep opaque, rebuildable, and unsupported cases distinct
-/// so an unrepresentable element cannot take the no-op path.
 pub enum BoundNextElem {
-    /// Today's ABI -- one opaque slot. Nothing to do.
     Opaque,
-    /// The element splats; the plan says how to put it back together.
     Rebuild(ElemRebuild),
-    /// The element splats, but its shape cannot be represented by the flat
-    /// repack (for example, a nullable value has a presence leaf with no field).
-    /// The splice rejects this instead of guessing a leaf-to-field mapping.
     Unsupported,
 }
 
-/// How to rebuild one splatting element from the wire values, public because the
-/// splice that consumes it lives in `skull-transform`. It mirrors [`RepLayout`],
-/// which stays private: this is the part the other crate needs, not the shape
-/// machinery behind it.
+/// How to rebuild one splatting element from the wire values.
 pub enum ElemRebuild {
-    /// One wire value, used as-is (an unmarked element inside a splatting tuple).
     Passthrough,
-    /// A `nobox` value: its struct name, owned representation, and leaf fields
-    /// in ctor order.
     Value(Ustr, RepId, Vec<Ustr>),
-    /// A tuple element (`zip`'s pair, `enumerate`'s `(int, T)`): rebuild each part,
-    /// then pack them.
     Tuple(Vec<ElemRebuild>),
 }
 
 impl ElemRebuild {
-    /// Wire values this plan consumes.
     pub fn leaf_count(&self) -> usize {
         match self {
             ElemRebuild::Passthrough => 1,
@@ -1656,9 +1442,6 @@ pub struct BoundNextShape {
     pub elem: BoundNextElem,
 }
 
-/// The same bound-`next` shape from the selected concrete body signature.
-/// Production standalone resolution already owns this signature; rebuilding
-/// it from the witness declaration would reintroduce the source-shaped oracle.
 pub fn bound_next_shape_from_concrete(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1703,9 +1486,6 @@ pub fn bound_next_shape_from_concrete(
             message: "bound witness return plan is not a tuple layout".into(),
         });
     };
-    // The element is slot 1 alone, or slots 1.. as a tuple -- the same pairing
-    // `lower_for_user_iter` makes when it binds the pattern, so the two paths
-    // cannot disagree about what the element IS.
     let elem_slots = match slots.get(1..).ok_or_else(|| RepError {
         span: None,
         message: "bound witness return plan has no success flag and element slots".into(),
@@ -1743,23 +1523,17 @@ pub fn bound_next_shape_from_concrete(
     })
 }
 
-/// Cdata layout for enums with only unit or scalar tuple variants. Payload slots
-/// are shared by position and require identical C types across variants; shorter
-/// variants pad unused slots. Record/ref payloads are ineligible, and payload-
-/// free enums remain plain integers.
+/// Cdata enum layout: payload slots are shared by position with identical C
+/// types across variants; shorter variants pad unused slots.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumCdataShape {
     pub name: Ustr,
-    /// Ordered C slots `(slot_name, c_type)` -- `_<i>` for a tuple field at
-    /// position `i`, `_<field>` for a record field. Shared across variants; a slot
-    /// name's type must be identical everywhere it occurs.
+    /// `_<i>` for a tuple field at position `i`, `_<field>` for a record field.
     pub slots: Vec<(Ustr, &'static str)>,
-    /// (variant name, payload arity); the tag is the variant's declaration index.
     pub variants: Vec<(Ustr, usize)>,
 }
 
 impl EnumCdataShape {
-    /// The variant's runtime int tag (its declaration-order index).
     pub(crate) fn tag_of(&self, v: Ustr) -> Option<i64> {
         self.variants
             .iter()
@@ -1767,7 +1541,7 @@ impl EnumCdataShape {
             .map(|p| p as i64)
     }
 
-    /// All field names in `<Enum>_ct` ctor order: `[__tag, <slot names>]`.
+    /// Field names in `<Enum>_ct` ctor order: `[__tag, <slot names>]`.
     pub fn field_names(&self) -> Vec<Ustr> {
         let mut v = Vec::with_capacity(1 + self.slots.len());
         v.push(crate::names::ustr("__tag"));
@@ -1775,8 +1549,6 @@ impl EnumCdataShape {
         v
     }
 
-    /// The `ValueShape` the scalar ABI / SROA / pack see: `[__tag, <slots>]`, all
-    /// primitive leaves (the cdata's C fields).
     pub(crate) fn value_shape(&self) -> ValueShape {
         ValueShape {
             name: self.name,
@@ -1790,9 +1562,7 @@ impl EnumCdataShape {
     }
 }
 
-/// The slot name for a payload field: `_<i>` for a tuple position, `_<field>` for
-/// a record field. (Record field names are identifiers, so they never collide
-/// with the numeric tuple form.)
+/// `_<i>` for a tuple position, `_<field>` for a record field.
 pub(crate) fn slot_name(suffix: &str) -> Ustr {
     crate::names::concat(&["_", suffix])
 }
@@ -1807,17 +1577,15 @@ pub(crate) fn scalar_c_type(ws: &Workspace, ty: TyId) -> Option<&'static str> {
     }
 }
 
-/// `Some(shape)` iff `name` is a cdata-eligible enum (see [`EnumCdataShape`]).
 fn build_enum_cdata_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> {
     let eid = *ws.enums_by_name.get(&name)?;
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
     let mut slots: Vec<(Ustr, &'static str)> = Vec::new();
     let mut variants: Vec<(Ustr, usize)> = Vec::with_capacity(ed.variants.len());
     let mut any_payload = false;
-    // Register a slot (name -> type); reject a type conflict on an existing name.
     let mut add_slot = |nm: Ustr, c: &'static str| -> Option<()> {
         match slots.iter().find(|(n, _)| *n == nm) {
-            Some((_, existing)) if *existing != c => None, // slot type conflict
+            Some((_, existing)) if *existing != c => None,
             Some(_) => Some(()),
             None => {
                 slots.push((nm, c));
@@ -1846,7 +1614,7 @@ fn build_enum_cdata_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> 
         variants.push((v.name, arity));
     }
     if !any_payload {
-        return None; // payload-free -> int (increment 1)
+        return None;
     }
     Some(EnumCdataShape {
         name,
@@ -1855,13 +1623,8 @@ fn build_enum_cdata_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> 
     })
 }
 
-/// The C type for a `value`-struct field, or `None` when the field is NOT
-/// C-layout-mappable (`[T]`, `Arena<T>`, `Map`, `string`, a generic `T`, or a
-/// GC-carrying nested value struct). This is the single mappability oracle:
-/// skull's cdef emission uses the string, and the shared storage plan classifies
-/// a struct GC-carrying when any field maps to `None`. Mirrors rock's
-/// `rock_type_to_c_type`. A nested payload-free enum stores as its int tag; a
-/// cdata-eligible payload enum nests its own `{__tag, _0}` ctype.
+/// The C type for a `value`-struct field, or `None` when it is not
+/// C-layout-mappable.
 pub fn value_field_c_type(ws: &Workspace, ty: TyId) -> Option<String> {
     value_field_c_type_guarded(ws, ty)
 }
@@ -1873,9 +1636,6 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId) -> Option<Str
         TypeExpr::Builtin(BuiltinTy::Float) => Some("double".into()),
         TypeExpr::Builtin(BuiltinTy::F32) => Some("float".into()),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool".into()),
-        // A nested value struct is C-mappable iff it is itself FFI-clean; a
-        // GC-carrying nested value struct makes this field (and its parent)
-        // GC-carrying too.
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
@@ -1900,14 +1660,10 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId) -> Option<Str
     }
 }
 
-/// The equality operation for a GC-table value field, shared by Lua and JS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcFieldEq {
-    /// A true GC reference, including generic fields and interned strings.
     Reference,
-    /// Scalars, cdata enums and nested value structs with native equality.
     Native,
-    /// Boxed enums use the same structural helper as direct enum equality.
     Structural,
 }
 
@@ -1937,43 +1693,25 @@ pub(crate) fn value_storage_is_gc_guarded(ws: &Workspace, name: Ustr) -> bool {
     planned_value(ws, name).is_some_and(|plan| plan.storage != ValueStorage::CData)
 }
 
-/// Flattened Lua table layout for a boxed enum with payload variants that is not
-/// cdata-eligible. Unit and tuple payloads are supported; slots use dynamic Lua
-/// values and the variant name remains the discriminant.
+/// Flattened Lua table layout for a boxed non-cdata enum; the variant name
+/// remains the discriminant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumFlatShape {
     pub(crate) name: Ustr,
-    /// One entry per payload POSITION, widest variant first-wins. A position is
-    /// several SLOTS when it carries a scalarizable value, so this is not the slot
-    /// count -- ask [`EnumFlatShape::tuple_width`] for that and
-    /// [`EnumFlatShape::slot_offset`] for where a position starts.
     pub(crate) slots: Vec<FlatSlot>,
-    /// Named payload slots `f__<name>` (union of record-variant field names,
-    /// first-seen order). A tuple position and a record field never collide --
-    /// the former is a number, the latter an identifier.
+    /// Named payload slots `f__<name>`.
     pub(crate) record_fields: Vec<Ustr>,
 }
 
-/// The wire shape of ONE positional payload of a flat enum.
-///
-/// A payload slot is a dynamically-typed Lua field, so ANY single value fits in
-/// one -- except a scalarizable value, which can be several leaves. Widening the
-/// position to its leaves keeps it on the scalar ABI: the value's
-/// leaves ARE the slots, so an enum payload never materializes one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FlatSlot {
-    /// One dynamic slot -- today's shape, and what every non-scalarizable payload keeps.
     Opaque,
-    /// The scalarizable value payloads SHARING this position, in variant-declaration
-    /// order and deduplicated by name. The position is as wide as the widest;
-    /// each variant writes and reads only its own leaves in the leading slots and
-    /// nil-pads the rest, discriminated by the tag the ctor makes static and the
-    /// match already tests. Never empty.
+    /// Each variant writes only its own leaves in the leading slots and nil-pads
+    /// the rest.
     Leaves(Vec<ValueShape>),
 }
 
 impl FlatSlot {
-    /// Slots this position occupies: the widest payload sharing it.
     pub(crate) fn width(&self) -> usize {
         match self {
             FlatSlot::Opaque => 1,
@@ -1991,29 +1729,19 @@ impl EnumFlatShape {
         self.name
     }
 
-    /// Named physical columns shared by this enum's record variants.
     pub fn record_fields(&self) -> &[Ustr] {
         &self.record_fields
     }
 
-    /// Total positional SLOTS -- `_0 .. _{tuple_width-1}`. Distinct from the
-    /// position count (`slots.len()`): a `nobox` position spans several.
+    /// Total positional slots `_0 .. _{tuple_width-1}`.
     pub fn tuple_width(&self) -> usize {
         self.slots.iter().map(FlatSlot::width).sum()
     }
 
-    /// The first slot index of payload position `pos`. Positions past the end
-    /// answer with the total width, so a variant narrower than the union simply
-    /// has nothing to write.
     pub fn slot_offset(&self, pos: usize) -> usize {
         self.slots.iter().take(pos).map(FlatSlot::width).sum()
     }
 
-    /// The leaf shape position `pos` holds for a payload of nominal `name`, else
-    /// `None`. THE oracle for both the ctor's placement and a match arm's read,
-    /// so a write and a read of one position cannot disagree: a position may be
-    /// widened for a SIBLING variant while this variant's payload there is
-    /// ordinary, or a `nobox` value of a different shape.
     pub(crate) fn position_shape(&self, pos: usize, name: Option<Ustr>) -> Option<&ValueShape> {
         let FlatSlot::Leaves(vss) = self.slots.get(pos)? else {
             return None;
@@ -2026,15 +1754,10 @@ impl EnumFlatShape {
         self.position_shape(pos, Some(name)).map(value_leaf_paths)
     }
 
-    /// The number of scalar leaves this enum threads as across a call: the
-    /// discriminant + every positional slot + every record slot.
     pub fn leaf_count(&self) -> usize {
         1 + self.tuple_width() + self.record_fields.len()
     }
 
-    /// The `ValueShape` the scalar ABI / SROA see: `[__tag, _0.., <rec>..]`, all
-    /// primitive leaves. `pack`/`cdata_leaves` re-detect the enum by name and use
-    /// box semantics (the leaf NAMES here are nominal -- never read structurally).
     pub(crate) fn value_shape(&self) -> ValueShape {
         let mut fields = vec![(crate::names::ustr("__tag"), FieldShape::Prim)];
         for i in 0..self.tuple_width() {
@@ -2051,14 +1774,12 @@ impl EnumFlatShape {
     }
 }
 
-/// `Some(shape)` iff `name` is a mixed/boxed enum eligible for field flattening.
 fn build_flat_enum_shape(
     ws: &Workspace,
     name: Ustr,
     visiting: &mut Vec<Ustr>,
 ) -> Option<EnumFlatShape> {
     let eid = *ws.enums_by_name.get(&name)?;
-    // Payload-free enums are ints; cdata-eligible enums scalarize via cdata.
     if is_payload_free_enum(ws, name) || build_enum_cdata_shape(ws, name).is_some() {
         return None;
     }
@@ -2067,11 +1788,6 @@ fn build_flat_enum_shape(
     }
     visiting.push(name);
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
-    // Per position: every DISTINCT scalarizable value payload shape any variant
-    // carries there. Empty = no such payload, so one opaque slot. Several shapes
-    // share the position by width, each variant addressing its own leaves under
-    // the tag -- the alternative, letting the losing variant fall back to the
-    // opaque slot, would reintroduce an aggregate at the enum boundary.
     let mut want: Vec<Vec<ValueShape>> = Vec::new();
     let mut record_fields: Vec<Ustr> = Vec::new();
     for v in &ed.variants {
@@ -2117,9 +1833,6 @@ fn build_flat_enum_shape(
     })
 }
 
-/// The single static representation decision for an enum. The operational
-/// cdata and flat shapes remain available as views, but neither caller chooses
-/// between them independently.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnumLayout {
     PayloadFree,
@@ -2182,11 +1895,6 @@ impl EnumPlan {
     }
 }
 
-/// The leaf shape of a scalarizable payload, else `None`.
-///
-/// Keyed on the DECLARED payload type, like every other splat decision on this
-/// arc: both the ctor that writes the slots and the match arm that reads them
-/// derive the layout from the enum declaration, so neither has to see the other.
 fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
     let TypeExpr::App {
         ctor: TypeCtor::Nominal(n),
@@ -2196,9 +1904,8 @@ fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Opt
         return None;
     };
     if is_value_struct(ws, n) {
-        // The value's own shape plans its enum fields from scratch, without
-        // `visiting`, so a payload that leads back to an enum being built
-        // (`enum L { Cons(Cell) }`, `value Cell { tail: L }`) stays opaque.
+        // Planned without `visiting`, so a payload cycling back to an enum under
+        // construction stays opaque.
         if reaches_enum_in(ws, ty, visiting, &mut HashSet::default()) {
             return None;
         }
@@ -2207,8 +1914,6 @@ fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Opt
     build_flat_enum_shape(ws, n, visiting).map(|shape| shape.value_shape())
 }
 
-/// Whether `ty` mentions any enum in `goals`, through value fields, enum
-/// payloads and type arguments.
 fn reaches_enum_in(ws: &Workspace, ty: TyId, goals: &[Ustr], seen: &mut HashSet<Ustr>) -> bool {
     let TyId::Static(mid, _) = ty else {
         return false;
@@ -2334,11 +2039,6 @@ fn equality_payload_is_leafwise(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ust
     }
 }
 
-/// The frame-slot yield channel of a concrete `Coroutine<Y, ...>` whose `Y` is a
-/// flat (boxed) enum: the transform writes `Y`'s leaves into reused `s.__y*`
-/// frame slots (0 alloc) and the concrete consumer reads them threaded, while
-/// the generic/boxed `resume()` rebuilds a `{__variant}` box from those slots.
-/// `None` -> `resume()` returns the single value, no frame-slot channel.
 pub(crate) fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<EnumFlatShape> {
     let (ty, nullable) = ty.peel_nullable();
     if nullable {
@@ -2364,8 +2064,7 @@ pub(crate) fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Optio
     EnumPlan::for_name(ws, *yield_name).and_then(|plan| plan.flat().cloned())
 }
 
-/// The reused frame slot name for the `i`th yield leaf: `__y{i}` (tag at 0, then
-/// positional, then record leaves -- `value_shape` leaf order).
+/// Frame slot `__y{i}`: tag at 0, then positional, then record leaves.
 pub fn yield_slot(i: usize) -> Ustr {
     crate::names::ustr(format!("__y{i}").as_str())
 }

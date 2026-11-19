@@ -1,5 +1,3 @@
-//! The shared physical answer for one logical struct field.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -13,9 +11,6 @@ use super::{EnumFlatShape, EnumPlan, RepArena, RepError, RepId, ValueShape, Valu
 use crate::lua_nesting::{LuaDisplayPart, display_record};
 use crate::mir::{Inst, MirFunc};
 
-/// One physical answer for one logical field. Inline/nobox fields and flat
-/// enum payloads share one inline layout; consumers only project the part
-/// they need from the selected plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StructFieldPlan {
     Direct {
@@ -104,10 +99,6 @@ pub fn cdata_leaf_alias(ws: &Workspace, owner: Ustr, path: &str) -> Ustr {
     crate::names::ustr(&prefix)
 }
 
-/// The build-owned struct registry input shared by late representation
-/// consumers. Its roots are the structs this MIR can realize; closing over
-/// declared child fields also owns any value representation needed to observe
-/// a child that enters through a host boundary rather than a Rock constructor.
 pub struct StructRegistryPlan {
     arena: Arc<RepArena>,
     names: BTreeSet<Ustr>,
@@ -246,9 +237,6 @@ fn resolved_field_type(ws: &Workspace, ty: TyId) -> Result<(TypeExpr, bool), Rep
     }
 }
 
-/// Plan the physical placement of one declared field. All consumers that
-/// inspect or lower a struct field use this answer; a missing declaration or
-/// unresolved field type is never interpreted as direct storage.
 pub fn struct_field_plan(
     ws: &Workspace,
     target: FnBackend,
@@ -305,8 +293,8 @@ pub fn struct_field_plan(
     } else {
         None
     };
-    // Only a cdata parent nests a child whole; every table parent keys an
-    // inline child's leaves by dotted path.
+    // Only a cdata parent nests a child whole; a table parent keys an inline
+    // child's leaves by dotted path.
     if (fdef.is_embed || child.is_some_and(|s| s.is_nobox))
         && (spliced || !parent_is_value || parent_storage != Some(ValueStorage::CData))
     {
@@ -333,10 +321,8 @@ pub fn struct_field_plan(
     })
 }
 
-/// One declared field of a GC-table (`<Name>_vt`) value box: a single key, or
-/// an inline (`nobox`/embed) child whose leaves the box keys by dotted path
-/// under the field's name, presence tag at the name itself -- the layout a
-/// plain struct and a leaf-table value already give such a child.
+/// One declared field of a `<Name>_vt` box: a single key, or an inline child
+/// keyed by dotted path with its presence tag at the field's own name.
 #[derive(Clone, Debug)]
 pub struct GcTableField {
     pub name: Ustr,
@@ -345,8 +331,6 @@ pub struct GcTableField {
 }
 
 impl GcTableField {
-    /// This field's box keys in ctor order, each flagged when it is a nullable
-    /// child's presence tag rather than a data leaf.
     pub fn keys(&self) -> Vec<(Ustr, bool)> {
         let Some(sub) = &self.inline else {
             return vec![(self.name, false)];
@@ -358,7 +342,6 @@ impl GcTableField {
         self.inline.is_some()
     }
 
-    /// Per key of [`Self::keys`]: the declared field's equality operation.
     pub fn keys_eq(&self, ws: &Workspace) -> Vec<GcFieldEq> {
         let Some(sub) = &self.inline else {
             return vec![super::shape::gc_field_eq(ws, self.ty)];
@@ -368,8 +351,6 @@ impl GcTableField {
         out
     }
 
-    /// This field's value off box `v`, rendered for the box's `__tostring`:
-    /// an inline child renders as its own box would.
     pub fn lua_display_parts(&self) -> Vec<LuaDisplayPart> {
         match &self.inline {
             None => vec![LuaDisplayPart::Expr(format!("tostring(v.{})", self.name))],
@@ -383,8 +364,7 @@ fn leaf_eq(ws: &Workspace, shape: &ValueShape, nested: bool, out: &mut Vec<GcFie
         out.push(GcFieldEq::Native);
     }
     if ws.enums_by_name.contains_key(&shape.name) {
-        // Flat enum payload slots may contain reference structs or boxed enums;
-        // native equality on those slots would lose the enum's contents walk.
+        // Native equality on flat enum payload slots would skip the enum's contents walk.
         let payload_eq = if super::shape::flat_enum_equality_is_leafwise(ws, shape.name) {
             GcFieldEq::Native
         } else {
@@ -440,10 +420,8 @@ fn lua_display_inline(shape: &ValueShape, prefix: &str) -> Vec<LuaDisplayPart> {
     }
 }
 
-/// The declared fields of GC-table value `name` with their physical layout, in
-/// declaration order. The concatenated [`GcTableField::keys`] are the
-/// `<Name>_vt` ctor's parameters and the box's keys; every reader and writer of
-/// the box takes them from here.
+/// The concatenated [`GcTableField::keys`] are the `<Name>_vt` ctor's
+/// parameters and the box's keys.
 pub fn gc_table_fields(
     ws: &Workspace,
     target: FnBackend,

@@ -1,6 +1,3 @@
-//! Struct and enum CONSTRUCTION: struct literals and their defaults, the
-//! value-struct predicates the walk consults, enum-variant packing, swizzles,
-//! and the compile-time `@struct_expand` / `@shader_expand` expansions.
 use super::*;
 use crate::monoty::MonoTy;
 
@@ -12,9 +9,6 @@ impl<'a> Builder<'a> {
         range.into_iter().map(|e| self.lower_expr(e)).collect()
     }
 
-    /// A struct literal -> `MakeStruct`, fields in DECLARED order. Omitted fields
-    /// are evaluated from the declaring `StructDefaults` body, so every declared
-    /// field reaches MIR explicitly.
     pub(crate) fn lower_struct_literal(
         &mut self,
         e: Idx<Expr>,
@@ -34,18 +28,10 @@ impl<'a> Builder<'a> {
         fields: comfy_la_arena::IdxRange<bone_core::hir::StructLitField>,
         bases: comfy_la_arena::IdxRange<bone_core::hir::Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        // Functional-update base (`Struct { ..base, .. }`): evaluate once, before
-        // fields (source order), and read unwritten fields off it. Inference
-        // guarantees at most one base and that it has this struct's type.
         let base_inst: Option<Idx<Inst>> = match bases.into_iter().next() {
             Some(b) => Some(self.lower_expr(b)?),
             None => None,
         };
-        // A field GROUP (`Struct { a + b + c: expr }`) expands to several fields
-        // sharing ONE `value` Expr index; evaluate each distinct value-expr once
-        // (correct eval count, and grouped fields share the same instance), in
-        // source order. A flattened enum field evaluates to (tag, payload slots)
-        // instead of one boxed value.
         let mut literal = Vec::new();
         let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::default();
         let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::default();
@@ -66,9 +52,6 @@ impl<'a> Builder<'a> {
                 };
                 literal.push((lf.name, self.flat_literal_slots(lf.name, cells)));
             } else if let Some((cname, nullable)) = field_plan.embed() {
-                // An embedded field's leaves ARE this parent's keys, so its
-                // value is spliced rather than lowered to a child box. Keyed by
-                // the value expr so a field GROUP still evaluates once.
                 let leaves = match embed_by_value.get(&key) {
                     Some(l) => l.clone(),
                     None => {
@@ -81,8 +64,6 @@ impl<'a> Builder<'a> {
             } else {
                 let expected = self.concrete_struct_field_ty(e, lf.name);
                 let v = match by_value.get(&key) {
-                    // A later field of a group: one evaluation, but each value
-                    // field owns its own box.
                     Some(&v) => match expected {
                         Some(ty) => self.copied_value_box(ty, v)?,
                         None => v,
@@ -100,8 +81,6 @@ impl<'a> Builder<'a> {
         let out = self
             .collect_literal_fields(name, literal, |s, fname| {
                 if let Some((cname, nullable)) = s.struct_field_plan(name, fname, false)?.embed() {
-                    // Unwritten embed field: copy the base's leaves through
-                    // (including its presence slot), else the struct default.
                     match base_inst {
                         Some(bi) => {
                             let mut slots = Vec::new();
@@ -124,8 +103,6 @@ impl<'a> Builder<'a> {
                         }
                     }
                 } else if let Some(shape) = s.struct_field_plan(name, fname, false)?.flat_shape() {
-                    // A base stores the field in physical dotted slots, while the
-                    // default is still a boxed enum.
                     let cells = match base_inst {
                         Some(bi) => s.load_flat_cells(bi, fname, &shape),
                         None => s.with_struct_default(name, fname, |s, def| {
@@ -135,7 +112,6 @@ impl<'a> Builder<'a> {
                     Ok(s.flat_literal_slots(fname, cells))
                 } else {
                     let v = match base_inst {
-                        // The base keeps its own value fields.
                         Some(bi) => {
                             let v = s.read_field(bi, fname);
                             match s.concrete_struct_field_ty(e, fname) {
@@ -151,16 +127,9 @@ impl<'a> Builder<'a> {
             .into_iter()
             .flatten()
             .collect();
-        // A hand-built `NativeBuffer { ptr: .., len: .. }` must carry the same
-        // leaf views the `native_buffer_alloc` intrinsic attaches -- element
-        // access decides on the TYPE, so a buffer of a leaf-addressed element
-        // would otherwise index a nil view. (Loud, not silent: leaf addressing
-        // never changes storage, so the only failure available is a missing
-        // view, and that errors on first access.)
+        // A hand-built `NativeBuffer` must carry the leaf views `native_buffer_alloc`
+        // attaches: element access of a leaf-addressed type would index a nil view.
         let out = self.with_leaf_views(e, name, out)?;
-        // Non-value structs only — a `value` literal is built via the repr layer
-        // (`value_literal_repr` -> `pack`, the single value-cdata source), so it
-        // never reaches here.
         Ok(self.emit_cur(Inst::MakeStruct {
             ty: Some(name),
             fields: out,
@@ -187,9 +156,6 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    /// Append the leaf-view fields to a hand-written `NativeBuffer` literal's
-    /// fields, keyed off its declared element type. A no-op for any other
-    /// struct, for a primitive element, and for one already carrying views.
     pub(crate) fn with_leaf_views(
         &mut self,
         e: Idx<Expr>,
@@ -199,9 +165,6 @@ impl<'a> Builder<'a> {
         if !bone_core::modules::is_intrinsic_key(name, "NativeBuffer") {
             return Ok(fields);
         }
-        // The element comes from the literal's own inferred type, the same
-        // oracle element ACCESS consults -- so construction and access can never
-        // disagree about whether a buffer is leaf-addressed.
         let Some(elem) = self.nb_value_elem(e)? else {
             return Ok(fields);
         };
@@ -227,40 +190,26 @@ impl<'a> Builder<'a> {
             .ok_or_else(|| self.gap_here(format!("nominal `{name}` has no declared field plan")))
     }
 
-    /// Whether `e`'s type is a `value` struct -- the shape whose rvalue lowering
-    /// packs a fresh cdata rather than handing back shared storage.
     pub(crate) fn expr_is_value_struct(&self, e: Idx<Expr>) -> bool {
         self.value_struct_name_of(e).is_some()
     }
 
-    /// Whether nominal `name` is a `value` struct (C-layout cdata).
     pub(crate) fn is_value_struct(&self, name: Ustr) -> bool {
         super::shape::is_value_struct(self.ws, name)
     }
 
-    /// Whether a later write can reach storage read by `e`, so a whole-value
-    /// read needs a copy. Value locals and value-call results are fresh; chains
-    /// stop at shared containers/globals. This read-side question is separate
-    /// from bone's write-target legality check.
     pub(crate) fn is_mutable_place(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
         match &self.body.expr_arena[e] {
             Expr::Global(_) | Expr::Index { .. } => Ok(true),
             Expr::FieldAccess { base, .. }
             | Expr::SafeNav { base, .. }
             | Expr::TupleIndex { tuple: base, .. } => self.is_mutable_place(*base),
-            // A reference-struct binding aliases shared storage; a value binding
-            // is a copy of its own.
             Expr::Var(b) => Ok(!self.binding_is_nonnull_value_struct(*b)),
             Expr::Call { .. } | Expr::SafeNavCall { .. } => Ok(!self.expr_is_value_struct(e)),
             _ => Ok(false),
         }
     }
 
-    /// The value-struct type of `e`, EITHER tier. `None` for a non-value type or
-    /// unsolved inference, and for a `V?` -- an ABSENT value has no leaves, so an
-    /// unconditional split would index nil. A nullable read that still needs the
-    /// copy takes the presence-aware path instead
-    /// ([`Self::nullable_place_value_of`]).
     pub(crate) fn value_struct_of(&self, e: Idx<Expr>) -> Option<Ustr> {
         let ty = self.concrete_expr_ty(e)?;
         let (payload, nullable) = ty.peel_nullable();
@@ -271,8 +220,6 @@ impl<'a> Builder<'a> {
         self.is_value_struct(name).then_some(name)
     }
 
-    /// The value-struct type of `e` IGNORING nullability (`expr_ty` peels
-    /// `Nullable`, so a `V?` resolves to `V` here).
     pub(crate) fn value_struct_name_of(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let name = ty.peel_nullable().0.nominal()?;
@@ -281,8 +228,6 @@ impl<'a> Builder<'a> {
         None
     }
 
-    /// Nullable value type read from a mutable place. `nobox` globals are
-    /// already leaf snapshots, and presence-only reads need no value copy.
     pub(crate) fn nullable_place_value_of(
         &self,
         e: Idx<Expr>,
@@ -308,11 +253,6 @@ impl<'a> Builder<'a> {
         Ok(self.value_struct_name_of(e))
     }
 
-    /// The nominal type name of a non-nullable AGGREGATE expression -- a value
-    /// struct or a cdata-payload enum. [`Self::value_struct_of`] gates on
-    /// `is_value_struct`, which excludes enums; `value_shape` accepts both (it
-    /// falls back to `enum_value_shape`), so resolving the name is enough and
-    /// the shape lookup stays the thing that fails closed on a non-aggregate.
     pub(crate) fn value_aggregate_of(&self, e: Idx<Expr>) -> Option<Ustr> {
         if self.expr_is_nullable(e) {
             return None;
@@ -323,8 +263,6 @@ impl<'a> Builder<'a> {
         None
     }
 
-    /// The value-struct type of a plain binding whose cell holds one box. It may
-    /// be shared with a caller, callee, or closure, so whole-value reads copy it.
     pub(crate) fn boxed_value_local(&self, b: Idx<BindingInfo>, e: Idx<Expr>) -> Option<Ustr> {
         if self.scx.values_first_class
             || !self.binds.contains_key(&raw(b))
@@ -337,8 +275,6 @@ impl<'a> Builder<'a> {
             .filter(|name| !self.is_nobox_struct(*name))
     }
 
-    /// The `V?` twin of [`Self::boxed_value_local`]: a plain binding whose cell
-    /// holds a box or `nil`. A read for presence only is not a whole use.
     pub(crate) fn nullable_boxed_value_local(
         &self,
         b: Idx<BindingInfo>,
@@ -357,11 +293,6 @@ impl<'a> Builder<'a> {
             .filter(|name| !self.is_nobox_struct(*name))
     }
 
-    /// Whether some `ref` borrow in this body (a `ref` argument or a `ref`
-    /// local initializer or reassignment, lambdas included) is rooted at binding
-    /// `b`, or a field write reaches `b` through value projections only
-    /// (`b.p.x = v`). Either write lands in `b`'s box, so that box is never lent
-    /// to an argument slot. A parameter's lent box is copied before borrowing.
     pub(crate) fn binding_ref_borrowed(&self, b: Idx<BindingInfo>) -> bool {
         let (borrowed, written) = self.binding_borrow_facts();
         borrowed.contains(&raw(b)) || written.contains(&raw(b))
@@ -400,8 +331,6 @@ impl<'a> Builder<'a> {
                         }
                         _ => None,
                     });
-                // A value-projection chain only: a reference struct or a
-                // container in it is shared storage, not `b`'s box.
                 let field_write_root = |target: Idx<Expr>| {
                     let (Expr::FieldAccess { mut base, .. } | Expr::SafeNav { mut base, .. }) =
                         self.body.expr_arena[target]
@@ -452,8 +381,6 @@ impl<'a> Builder<'a> {
                 .is_some_and(|cell| !self.unshareable_value_cells.contains(cell))
     }
 
-    /// Only existing immutable bindings may cross a local selection without
-    /// snapshots. Calls and storage projections retain their ownership checks.
     pub(crate) fn conditional_value_is_shareable(&self, e: Idx<Expr>) -> bool {
         match self.body.expr_arena[e] {
             Expr::Var(b) => self.binding_value_is_shareable(b),
@@ -476,9 +403,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Whether a binding is a non-nullable value struct, which permits SROA to
-    /// rematerialize its cell load. Check concrete nullability before structural
-    /// source lookup so `T = V?` cannot be treated as bare `V`.
     pub(crate) fn binding_is_nonnull_value_struct(&self, b: Idx<BindingInfo>) -> bool {
         let Some(ty) = self.binding_ty(b) else {
             return false;
@@ -505,16 +429,10 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// The fn-typed field call `e` goes through, if inference resolved it to
-    /// one (`BodyInference::fn_field_calls`): only method syntax does, so a
-    /// call written by name reaches the function even when its first
-    /// argument has a fn-typed field of that name.
     pub(crate) fn fn_field_of_call(&self, e: Idx<Expr>) -> Option<Ustr> {
         self.inf?.fn_field_calls.get(&e).copied()
     }
 
-    /// Whether `name` is a module-level global of fn type — recovers `g(args)`
-    /// where `g` is a fn-valued global (not a declared function).
     pub(crate) fn is_fn_global(&self, name: Ustr) -> bool {
         self.ws
             .globals_by_name
@@ -524,10 +442,6 @@ impl<'a> Builder<'a> {
             .unwrap_or(false)
     }
 
-    /// Inject a struct field's default by lowering its initializer from the
-    /// struct's `StructDefaults` body (a different body, possibly a different
-    /// module) into the current CFG. Self-contained defaults (literals) work; a
-    /// default that reads a sibling field gaps (no `SiblingRef` lowering).
     pub(crate) fn lower_struct_default(
         &mut self,
         struct_name: Ustr,
@@ -546,8 +460,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The declaring struct's generic arguments at this injection. The current
-    /// expression must be that struct's literal; `args_at` verifies this.
     fn struct_default_args(
         &mut self,
         struct_name: Ustr,
@@ -584,10 +496,6 @@ impl<'a> Builder<'a> {
         Ok(params.to_vec())
     }
 
-    /// Run `f` on a field's default INITIALIZER EXPRESSION with the defaults
-    /// body's arena and inference installed. Consumers that need more than a
-    /// boxed value (an embed field's presence-plus-leaves) must see the expr,
-    /// not its lowering: reading leaves off a lowered `null` indexes nil.
     pub(crate) fn with_struct_default<T>(
         &mut self,
         struct_name: Ustr,
@@ -619,8 +527,6 @@ impl<'a> Builder<'a> {
             .and_then(|ir| ir.per_fn.get(&owner));
         let args = self.struct_default_args(struct_name, sid)?;
         let domain = crate::site::SiteDomain::struct_defaults(sid.module, sid.def, args);
-        // Like the owner's own plan audit, this only catches a plan the graph
-        // built incompletely, and it walks the whole defaults body per literal.
         if let Some(defaults_inf) = defaults_inf.filter(|_| crate::verify::checks_enabled()) {
             let plan = self.concrete_plan;
             let tables = plan.domain_types(&domain).ok_or_else(|| {
@@ -637,12 +543,10 @@ impl<'a> Builder<'a> {
                 std::iter::empty(),
             )?;
         }
-        // Lower the default expr in the defaults body's context, into the current
-        // block, then restore.
         let saved_body = self.body;
         let saved_inf = self.inf;
-        // HIR binding and expression indices are body-local. Defaults share the
-        // caller's MIR arenas, but must neither resolve nor replace its locals.
+        // HIR binding and expression indices are body-local: defaults share the
+        // caller's MIR arenas but must neither resolve nor replace its locals.
         let saved_locals = (
             std::mem::take(&mut self.binds),
             std::mem::take(&mut self.group_binds),
@@ -663,9 +567,8 @@ impl<'a> Builder<'a> {
         );
         self.body = defaults_body;
         self.inf = defaults_inf;
-        // Keep the enclosing owner, but stamp expressions in the defaults body
-        // domain. Include generic arguments in that domain so `Box<int>` and
-        // `Box<string>` retain distinct call obligations.
+        // Generic arguments are part of the domain so `Box<int>` and `Box<string>`
+        // keep distinct call obligations.
         let result = self.in_domain(domain, |s| f(s, def_expr));
         self.body = saved_body;
         self.inf = saved_inf;
@@ -690,13 +593,8 @@ impl<'a> Builder<'a> {
         result
     }
 
-    /// An enum variant -> `MakeEnum`. Unit variants have empty payload; tuple
-    /// variants fill `positional`; record variants fill `named`.
-    /// A cdata-eligible enum (`enum_value_shape`) as a `value`-struct-style Group
-    /// `[tag, _0, .., _{n-1}]`: the variant's int tag + its payload values in the
-    /// shared positional slots, padding any unused slot with the slot type's zero.
-    /// `pack` turns it into `<Enum>_ct(tag, _0, ..)`; the value-struct ABI/SROA/
-    /// field machinery do the rest.
+    /// A cdata-eligible enum packs as `[tag, _0, .., _{n-1}]`, padding unused
+    /// slots with the slot type's zero.
     pub(crate) fn enum_cdata_repr(
         &mut self,
         shape: &EnumCdataShape,
@@ -707,7 +605,6 @@ impl<'a> Builder<'a> {
             .tag_of(variant)
             .ok_or_else(|| gap("enum variant not in shape"))?;
         let tag_inst = self.emit_cur(Inst::Const(Lit::Int(tag)));
-        // Map this variant's payload values onto their slot names.
         let mut by_slot: HashMap<Ustr, Idx<Inst>> = HashMap::default();
         match args {
             VariantArgs::Unit => {}
@@ -729,7 +626,6 @@ impl<'a> Builder<'a> {
         for (nm, c) in &shape.slots {
             let v = match by_slot.get(nm) {
                 Some(v) => *v,
-                // This variant has no such field -> pad with the slot's zero.
                 None => self.emit_cur(Inst::Const(cdata_slot_zero(c)?)),
             };
             parts.push(ValueRepr::Scalar(v));
@@ -741,9 +637,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The compile-time expansion kind for `func`, routed through the intrinsic
-    /// registry ([`crate::intrinsics::expand_kind`]) -- the ONE recognizer, so
-    /// there is no second bespoke annotation check.
     pub(crate) fn fn_expand_kind(&self, func: FuncRef) -> Option<ExpandKind> {
         crate::intrinsics::expand_kind(&self.ws.module(func.module).functions[func.func])
     }
@@ -756,9 +649,6 @@ impl<'a> Builder<'a> {
         let [arg] = arg_idxs else {
             return Err(gap("materialize expects one argument"));
         };
-        // A splatting tuple is stored with its `nobox` parts as leaves, so it
-        // needs no box inside Rock code and passes through as it is. Only an
-        // opaque boundary is handed the user layout: one boxed element per slot.
         if !self.boundary_materializes.contains(&e) && self.tuple_box_shape(*arg)?.is_some() {
             return Ok(self.lower_expr_repr(*arg)?.into_value());
         }
@@ -766,9 +656,6 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(self.materialize_repr(repr)?))
     }
 
-    /// Expand the generic Scene bucket key from the concrete call instance.
-    /// The value is a compiler identity, not a tag read from the constructed
-    /// root, so construction and lifecycle-plan emission share `MonoTy`.
     pub(crate) fn expand_scene_type_key(
         &mut self,
         call: Idx<Expr>,
@@ -798,15 +685,10 @@ impl<'a> Builder<'a> {
         )))))
     }
 
-    /// Explicitly pack `materialize(v)` through the ordinary tier-specific
-    /// packer. Presence-carrying values branch to nil when absent; this box is
-    /// authorized, unlike an implicit box in a bound-next repack.
     pub(crate) fn materialize_repr(&mut self, repr: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         self.pack_maybe_absent_boxed(repr, BoxKind::Explicit)
     }
 
-    /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
-    /// literal pairs list. See the free helpers above.
     pub(crate) fn expand_struct_pairs(
         &mut self,
         call: Idx<Expr>,
@@ -844,8 +726,6 @@ impl<'a> Builder<'a> {
             )
         })?;
 
-        // The argument must be a value struct: its Group's parts are the field
-        // values in declaration order, each lowered exactly once.
         let repr = self.lower_expr_repr(arg)?.into_value();
         let ValueRepr::Group {
             name: struct_name,
@@ -866,8 +746,6 @@ impl<'a> Builder<'a> {
                 ),
             ));
         };
-        // Validation (`struct_expand_rejection`) already gated this program, so a
-        // resolution failure here is unreachable -- surface it rather than skip.
         let variants = struct_expand_variants(self.ws, enum_name, &fields)
             .map_err(|msg| reject(arg_span, format!("`@struct_expand`: {msg}")))?;
 
@@ -882,12 +760,6 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeVec(tuples))))
     }
 
-    /// Expand a `rock_shader(vert, frag)` call to its pipeline key const
-    /// `"<vert>+<frag>"`. The driver
-    /// (`skull::mir_emit`) emits the matching top-level `__rock_shader_register`;
-    /// this side produces only the key -- no GLSL, so skull-mir stays free of the
-    /// GLSL backend. Rejections flow through the shared `resolve_shader_pair`; the
-    /// fatal gate is `shader_expand_rejection`.
     pub(crate) fn expand_shader_pipeline(
         &mut self,
         call: Idx<Expr>,
@@ -898,10 +770,6 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(key))
     }
 
-    /// `build_var("NAME")` / `embed_string("path")` -> the resolved value as a
-    /// string const. Resolution goes through the
-    /// shared `resolve_comptime_value`; the fatal gate is
-    /// `comptime_input_rejection`.
     pub(crate) fn expand_comptime_input(
         &mut self,
         call: Idx<Expr>,
@@ -909,14 +777,11 @@ impl<'a> Builder<'a> {
         kind: ExpandKind,
     ) -> Result<ValueRepr, CompilerError> {
         let resolved = super::resolve_comptime_value(self.ws, self.body, call, arg_idxs, kind)?;
-        // The literal arg was just validated by the resolver.
         let Expr::String(key) = self.body.expr_arena[arg_idxs[0]] else {
             unreachable!()
         };
         let input = match (kind, resolved.file_abs) {
             (ExpandKind::BuildVar, _) => crate::mir::ComptimeInputId::Var(key),
-            // File reads are keyed by the ABSOLUTE path the resolver landed
-            // on, so invalidation and the watcher need no root re-derivation.
             (_, Some(abs)) => crate::mir::ComptimeInputId::File(abs),
             (_, None) => unreachable!("embed resolution always lands on a file"),
         };
@@ -931,9 +796,6 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(inst))
     }
 
-    /// `@uniform_expand` -> one direct typed store per primitive leaf of `u`,
-    /// at its std140 element index. No helper call per leaf, and no pack: the
-    /// Group's leaves go straight from registers into the views.
     pub(crate) fn expand_uniform_block(
         &mut self,
         call: Idx<Expr>,
@@ -944,15 +806,8 @@ impl<'a> Builder<'a> {
         let fname = self.ws.module(func.module).functions[func.func].name;
         let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
 
-        // TWO shapes, one annotation, because both answer the same question --
-        // what is `T`'s std140 plan. The 1-arg form yields that plan's
-        // FINGERPRINT as a constant, which is how a call site says WHICH of a
-        // program's blocks it means: with one block per stage the shader name
-        // no longer identifies one, and the value's type is what does.
         let (fv_e, iv_e, u_e) = match arg_idxs {
             [u_e] => {
-                // The one-argument form returns a fingerprint and must declare
-                // `-> int`, like `@vertex_expand`'s return-type dispatch.
                 let returns_int = self.ws.module(func.module).functions[func.func]
                     .return_ty
                     .map(|rt| {
@@ -982,9 +837,6 @@ impl<'a> Builder<'a> {
         let fv = self.lower_expr(fv_e)?;
         let iv = self.lower_expr(iv_e)?;
 
-        // From the TYPE, not from the repr's variant: a group read out of a
-        // local arrives as a `Scalar` (a loaded cell), which `repr_to_leaves`
-        // handles perfectly well but which carries no struct name.
         let Some(struct_name) = self.value_struct_name_of(u_e) else {
             return Err(reject(u_span, uniform_expand_arg_msg(fname)));
         };
@@ -992,12 +844,8 @@ impl<'a> Builder<'a> {
             .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
         let stores = plan.leaf_stores();
 
-        // A block held in a GLOBAL is read one leaf at a time, each leaf
-        // loaded right before its own store, so at most the box and one leaf
-        // are live at any store. The whole-value read below loads every leaf
-        // into a register before the first store; inside a trace that keeps
-        // all of them (41 for the engine block) live in every exit snapshot
-        // taken during the pack, against a 16-register side-trace budget.
+        // Read a global block one leaf at a time: a whole-value read keeps every leaf
+        // live in each trace exit snapshot, against a 16-register side-trace budget.
         if let Some(source) = self.global_uniform_source(u_e, struct_name)? {
             let leaf_count = source.leaf_count();
             if leaf_count != stores.len() {
@@ -1018,9 +866,6 @@ impl<'a> Builder<'a> {
         }
 
         let leaves = self.uniform_block_leaves(u_e, struct_name)?;
-        // `uniform_block_checked` already proved the two walkers agree on the
-        // leaf PATH sequence, so this can only differ if the repr handed back a
-        // different leaf count than the shape describes.
         if leaves.len() != stores.len() {
             return Err(reject(
                 u_span,
@@ -1039,9 +884,6 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
     }
 
-    /// Extract uniform-block leaves from the value's type shape, regardless of
-    /// its wire representation. A boxed slot has no leaf shape in its `RepPlan`,
-    /// so it is field-read through the same projection used by other boxes.
     fn uniform_block_leaves(
         &mut self,
         u_e: Idx<Expr>,
@@ -1060,8 +902,6 @@ impl<'a> Builder<'a> {
         self.repr_to_leaves_shape(repr.value(), &shape)
     }
 
-    /// One std140 slot of a uniform block: a direct typed store of `leaf`
-    /// through the view its wire type selects.
     fn emit_uniform_leaf_store(
         &mut self,
         fv: Idx<Inst>,
@@ -1069,8 +909,8 @@ impl<'a> Builder<'a> {
         leaf: Idx<Inst>,
         store: &crate::gpu_layout::LeafStore,
     ) {
-        // `LeafStore.offset` is a BYTE offset; a leaf view indexes in units
-        // of its own primitive, and every std140 slot here is 4-byte.
+        // `LeafStore.offset` is a BYTE offset; a leaf view indexes in units of its
+        // own primitive, and every std140 slot here is 4-byte.
         let idx = self.emit_cur(Inst::Const(Lit::Int((store.offset / 4) as i64)));
         let base = match store.view {
             crate::gpu_layout::WireView::Float => fv,
@@ -1084,11 +924,6 @@ impl<'a> Builder<'a> {
         self.write_index(base, idx, leaf, ContainerKind::NativeBufferLeaf);
     }
 
-    /// `u` as a global place the packer can read leaf by leaf, or `None` when
-    /// `u` is anything else (a local group, a literal, a call result), which
-    /// takes the whole-value path. A global whose shape has a nullable or enum
-    /// child is left to that path too: those leaves need presence branches or
-    /// a tag spread, and no uniform block carries either.
     fn global_uniform_source(
         &mut self,
         u_e: Idx<Expr>,
@@ -1104,13 +939,11 @@ impl<'a> Builder<'a> {
         if !self.shape_is_plain_keys(&shape) {
             return Ok(None);
         }
-        // The key paths `cdata_leaves` reads a box with, one leaf at a time.
         let paths = self.boxed_leaf_paths(&shape, true)?;
         let boxed = self.emit_cur(Inst::Global(name));
         Ok(Some(GlobalUniformSource::Boxed { boxed, paths }))
     }
 
-    /// Load leaf `i` of a global uniform source, at the point of the call.
     fn global_uniform_leaf(&mut self, source: &GlobalUniformSource, i: usize) -> Idx<Inst> {
         match source {
             GlobalUniformSource::LeafGlobals(leaves) => self.emit_cur(Inst::Global(leaves[i])),
@@ -1124,9 +957,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `@uniform_values` -> a typed packet of logical scalar leaves. The
-    /// physical target never sees this representation's offsets because there
-    /// are none; each backend projects the packet through its own live ABI.
     pub(crate) fn expand_uniform_values(
         &mut self,
         call: Idx<Expr>,
@@ -1211,9 +1041,6 @@ impl<'a> Builder<'a> {
         })))
     }
 
-    /// `@vertex_expand` -> the element's vertex layout as a literal. The
-    /// argument is used for its TYPE only and is deliberately not lowered: the
-    /// call collapses to a constant, as `@shader_expand` does.
     pub(crate) fn expand_vertex_layout(
         &mut self,
         call: Idx<Expr>,
@@ -1247,9 +1074,6 @@ impl<'a> Builder<'a> {
         let rep_arena = self.scx.rep_arena();
         let plan = crate::vertex_plan::vertex_plan(self.ws, rep_arena, elem)
             .map_err(|e| reject(arg_span, format!("`@vertex_expand`: {}", e.message)))?;
-        // `float_unit_*` carry the integer-attribute and cumulative-offset
-        // rejections, so the float-unit view is never emitted for a layout it
-        // cannot describe.
         let bad = |m: String| reject(arg_span, format!("`@vertex_expand`: {m}"));
         let v = match kind {
             VertexExpandRet::Stride => {
@@ -1268,10 +1092,6 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(v))
     }
 
-    /// Construct `enum_name::variant(payload)` for a compiler-built variant with
-    /// a single positional payload, through the same representation a source
-    /// ctor takes: cdata `<Enum>_ct` when the enum is cdata-eligible, the flat
-    /// cells (a scalarizable payload spread into its slots) when it is flat.
     pub(crate) fn make_single_payload_variant(
         &mut self,
         enum_name: Ustr,
@@ -1290,11 +1110,6 @@ impl<'a> Builder<'a> {
             let r = self.flat_cells_to_repr(&shape, cells);
             return self.pack(r);
         }
-        // A payload the enum cannot hold unboxed has nowhere to live but a box --
-        // the same boundary `uniform(x: Vec2)` marks with an explicit
-        // `materialize`. The compiler mints this box itself and there is no
-        // source line to mark, so it mints the AUTHORIZED one rather than
-        // rejecting a program the hand-written overload accepts.
         let payload = self.pack(payload)?;
         self.authorize_nobox_box(payload);
         if let Some(shape) =
@@ -1340,16 +1155,12 @@ impl<'a> Builder<'a> {
             return self.pack(r);
         }
         if let VariantArgs::Unit = args {
-            // A payload-free enum is an `int` value GLOBALLY (the variant's
-            // declaration-order ordinal). Fast int `match`/`==`/Map keys, and
-            // C-layout-eligible as a value-struct field.
+            // A payload-free enum is an `int` value globally: its declaration ordinal.
             if let Some(ord) = payload_free_ordinal(self.ws, enum_name, variant) {
                 return Ok(self.emit_cur(Inst::Const(Lit::Int(ord))));
             }
-            // A unit variant of a MIXED enum (e.g. `Option::None`) keeps the
-            // INTERNED singleton table (emitted by `enum_runtime_defs`): the
-            // enum still has payload variants, so its values stay tables, and the
-            // singleton is reference-equal across uses + usable as a Map key.
+            // A unit variant of a mixed enum is the interned singleton table, reference-
+            // equal across uses.
             let g = crate::mangle::enum_singleton_global(self.ws, enum_name, variant);
             return Ok(self.emit_cur(Inst::Global(g)));
         }
@@ -1374,15 +1185,6 @@ impl<'a> Builder<'a> {
         }))
     }
 
-    // --- enum field flattening ---
-
-    /// `Some(shape)` iff `base.field` is a flattenable enum field: `base` is a
-    /// non-`value` struct and the field's declared type is a [`flat_enum_shape`]
-    /// enum. Drives the construct/store/match/materialize rewrites.
-    /// A swizzle read: the base's
-    /// inferred type is a float vec and `field` is a valid synthetic swizzle for
-    /// it. Bone already accepted the read, so this only distinguishes swizzles
-    /// from real fields (len-1 `x/y/z/w`) and non-vec bases.
     pub(crate) fn swizzle_of(&self, base: Idx<Expr>, field: Ustr) -> Option<Vec<usize>> {
         if field.len() == 1 && "xyzw".contains(field.as_str()) {
             return None;
@@ -1394,8 +1196,6 @@ impl<'a> Builder<'a> {
         None
     }
 
-    /// Component `Field` reads off an already-lowered (packed) vec value, grouped
-    /// per `swizzle_group`. The read order is the swizzle's component order.
     pub(crate) fn swizzle_from_packed(&mut self, bv: Idx<Inst>, idxs: &[usize]) -> ValueRepr {
         let comps = ["x", "y", "z", "w"];
         let parts: Vec<ValueRepr> = idxs
@@ -1406,11 +1206,8 @@ impl<'a> Builder<'a> {
     }
 }
 
-/// Where a global uniform block's leaves are read from, leaf by leaf.
 enum GlobalUniformSource {
-    /// A `nobox` global: one scalar global per leaf.
     LeafGlobals(Vec<Ustr>),
-    /// A boxed global: the box plus each leaf's field path into it.
     Boxed {
         boxed: Idx<Inst>,
         paths: Vec<Vec<Ustr>>,
