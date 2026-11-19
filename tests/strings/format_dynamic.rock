@@ -1,20 +1,6 @@
 // Dynamic width / precision in format specifiers: `{v:{w}.{p}f}`.
 // Width and precision positions accept either a decimal literal or a
 // `{expr}` sub-expression. Expressions must evaluate to `int`.
-//
-// Test plan: every distinct code path is asserted:
-//   - Basic shapes: dyn width only, dyn precision only, both dynamic
-//   - Mixed static/dynamic (both orderings)
-//   - Alignment / fill paths (fast vs slow padding)
-//   - All numeric format types × dynamic width
-//   - Float / exp / general / percent with dynamic precision
-//   - String precision truncation
-//   - Expression shapes (ident, arithmetic, function call, struct field,
-//     if-expression, global ident) — each triggers different passes
-//   - Edge cases: width=0, precision=0, width smaller than content
-//   - Integration with sign, grouping, zero-pad, literal `{{`
-//   - Multiple interpolations in same string
-//   - Real-world: label padding with runtime-computed column
 
 // Basic shapes, and mixed static / dynamic in both orderings
 @test
@@ -41,7 +27,7 @@ fn test_dyn_width_and_precision_shapes() {
     assert_eq("[{pi:10.{four}f}]", "[    3.1416]")
 }
 
-// Alignment and fill with dynamic width — covers both the
+// Alignment and fill with dynamic width -- covers both the
 // string.format("%-Ns", ...) fast path (disabled when dynamic) and the
 // __rock_fmt_pad slow path.
 @test
@@ -54,7 +40,7 @@ fn test_dyn_width_alignment_and_fill() {
     assert_eq("[{digits:*^{w}}]", "[**42**]")
 }
 
-// Every numeric format type × dynamic width — each hits a separate
+// Every numeric format type x dynamic width -- each hits a separate
 // branch in apply_format_specifier -- and dynamic precision on each
 // non-integer numeric type.
 @test
@@ -79,7 +65,7 @@ fn test_dyn_spec_numeric_types() {
     assert_eq("[{half:.{one}%}]", "[50.0%]")
 }
 
-// Expression shapes — each triggers different pipeline passes
+// Expression shapes -- each triggers different pipeline passes
 // (scalarize, inline, bidirectional).
 fn get_two() -> int {
     return 2
@@ -102,7 +88,7 @@ fn test_dyn_spec_expression_shapes() {
 
 @test
 fn test_dyn_width_struct_field_scalarized() {
-    // Exercises scalarize_pass visiting width/precision exprs — `cfg` is
+    // Exercises scalarize_pass visiting width/precision exprs -- `cfg` is
     // split into `cfg__w` / `cfg__p` in Lua, and the sub-expression must
     // pick up the rewritten field access.
     let cfg = Cfg { w: 7, p: 2 }
@@ -119,7 +105,7 @@ fn test_dyn_spec_edges() {
     assert_eq("[{s:{0}}]", "[hi]")
     let x = 9.7
     assert_eq("[{x:.{0}f}]", "[10]")
-    // Width is a minimum — content longer than width passes through.
+    // Width is a minimum -- content longer than width passes through.
     let long = "hello world"
     let w = 3
     assert_eq("[{long:{w}}]", "[hello world]")
@@ -140,7 +126,7 @@ fn test_dyn_width_with_sign_and_grouping() {
 fn test_zero_pad_with_dyn_width_falls_back_to_space_pad() {
     // Dynamic width disables the zero-pad fast path (can't bake a
     // runtime expression into string.format's literal format). We pad
-    // with spaces instead — a documented tradeoff.
+    // with spaces instead -- a documented tradeoff.
     let n = 42
     let w = 6
     assert_eq("[{n:0{w}d}]", "[    42]")
@@ -154,7 +140,7 @@ fn test_literal_brace_alongside_dynamic() {
 }
 
 // Multiple interpolations in same string (ensures brace-depth tracking
-// in the interp splitter works — an inner `}` must not terminate the
+// in the interp splitter works -- an inner `}` must not terminate the
 // outer interpolation).
 @test
 fn test_multiple_dynamic_interp() {
