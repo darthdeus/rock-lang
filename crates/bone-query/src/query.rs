@@ -467,7 +467,7 @@ pub fn hover_at(
             return render_struct_def(ws, s.name).map(|d| (d, s.name_span));
         }
         for fld in &s.fields {
-            if in_leading_name(offset, &fld.span, source_ident(fld.name).len()) {
+            if in_leading_name(offset, &fld.span, fld.name) {
                 if let Some(t) = RecordType::Struct(s.name).render_field(ws, fld.name) {
                     return Some((t, fld.span));
                 }
@@ -964,7 +964,7 @@ impl ResolvedPosition<'_> {
             }
         };
         for en in module.enums.values() {
-            if in_leading_name(offset, &en.name_span, source_ident(en.name).len()) {
+            if in_leading_name(offset, &en.name_span, en.name) {
                 offer(10, RefTarget::Enum(en.name));
             }
             for variant in &en.variants {
@@ -992,7 +992,7 @@ impl ResolvedPosition<'_> {
             }
         }
         for record in module.structs.values() {
-            if in_leading_name(offset, &record.name_span, source_ident(record.name).len()) {
+            if in_leading_name(offset, &record.name_span, record.name) {
                 offer(30, RefTarget::Struct(record.name));
             }
             for field in &record.fields {
@@ -1063,9 +1063,11 @@ impl ResolvedPosition<'_> {
                         }
                     }
                     hir::Expr::StructLiteral { name, .. } if selected => {
-                        if body.expr_spans.get(expr).is_some_and(|span| {
-                            in_leading_name(offset, span, source_ident(*name).len())
-                        }) {
+                        if body
+                            .expr_spans
+                            .get(expr)
+                            .is_some_and(|span| in_leading_name(offset, span, *name))
+                        {
                             offer(31, RefTarget::nominal(ws, *name));
                         }
                         if let Some(field) = self.literal_field(expr) {
@@ -1289,19 +1291,21 @@ impl RefTarget {
                     return sites;
                 };
                 if let Some(span) = generic_decl_span(ws, mid, idx) {
-                    plain(leading_name_span(&span, source_ident(name).len()));
+                    plain(leading_name_span(&span, name));
                 }
             }
             _ => {}
         }
         for module in &ws.modules {
             let decl = match self {
-                Self::Struct(name) => module.struct_by_name.get(&name).map(|idx| {
-                    leading_name_span(&module.structs[*idx].name_span, source_ident(name).len())
-                }),
-                Self::Enum(name) => module.enums_by_name.get(&name).map(|idx| {
-                    leading_name_span(&module.enums[*idx].name_span, source_ident(name).len())
-                }),
+                Self::Struct(name) => module
+                    .struct_by_name
+                    .get(&name)
+                    .map(|idx| leading_name_span(&module.structs[*idx].name_span, name)),
+                Self::Enum(name) => module
+                    .enums_by_name
+                    .get(&name)
+                    .map(|idx| leading_name_span(&module.enums[*idx].name_span, name)),
                 Self::Newtype(name) => module
                     .newtypes_by_name
                     .get(&name)
@@ -1351,7 +1355,7 @@ impl RefTarget {
                 match self {
                     Self::Struct(name) | Self::Enum(name) | Self::Newtype(name) => {
                         for_each_nominal_annotation(ws, module.file, body, name, &mut |span| {
-                            let span = leading_name_span(span, source_ident(name).len());
+                            let span = leading_name_span(span, name);
                             if !matches!(self, Self::Newtype(_))
                                 || text_of(module.file.as_str()).is_none_or(|text| {
                                     span_text(text, &span) == Some(source_ident(name))
@@ -1382,7 +1386,7 @@ impl RefTarget {
                                             (0, 0),
                                             (iv.start, iv.stop),
                                         ),
-                                        source_ident(name).len(),
+                                        name,
                                     )));
                                 }
                             }
@@ -1411,10 +1415,7 @@ impl RefTarget {
                             if name == *head =>
                         {
                             if let Some(span) = span {
-                                sites.push(RefSite::plain(leading_name_span(
-                                    span,
-                                    source_ident(name).len(),
-                                )));
+                                sites.push(RefSite::plain(leading_name_span(span, name)));
                             }
                         }
                         (
@@ -1426,7 +1427,7 @@ impl RefTarget {
                             },
                         ) if name == *enum_name => sites.push(RefSite::plain(leading_name_span(
                             &body.name_spans[*enum_name_span],
-                            source_ident(name).len(),
+                            name,
                         ))),
                         (
                             Self::EnumVariant(en, variant),
@@ -1495,10 +1496,9 @@ impl RefTarget {
                                 enum_name_span: Some(span),
                                 ..
                             },
-                        ) if name == *en => sites.push(RefSite::plain(leading_name_span(
-                            span,
-                            source_ident(name).len(),
-                        ))),
+                        ) if name == *en => {
+                            sites.push(RefSite::plain(leading_name_span(span, name)))
+                        }
                         (
                             Self::EnumVariant(en, variant),
                             hir::Pattern::EnumVariant {
@@ -1558,14 +1558,13 @@ pub(crate) fn is_test_path(path: &str) -> bool {
     path.split(['/', '\\']).any(|seg| seg == "tests")
 }
 
-fn in_leading_name(offset: usize, span: &Span, len: usize) -> bool {
-    let start = span.offset_range().0;
-    offset >= start && offset < start + len
+fn in_leading_name(offset: usize, span: &Span, name: Ustr) -> bool {
+    span_contains(&leading_name_span(span, name), offset)
 }
 
-fn leading_name_span(span: &Span, len: usize) -> Span {
+fn leading_name_span(span: &Span, name: Ustr) -> Span {
     let start = span.offset_range().0;
-    span.with_offset_range((start, start + len))
+    span.with_offset_range((start, start + source_ident(name).len()))
 }
 
 fn ctor_name_if_on(te: &hir::TypeExpr, span: Option<&Span>, offset: usize) -> Option<Ustr> {
@@ -1574,7 +1573,7 @@ fn ctor_name_if_on(te: &hir::TypeExpr, span: Option<&Span>, offset: usize) -> Op
         ..
     } = te
     {
-        if in_leading_name(offset, span?, source_ident(*name).len()) {
+        if in_leading_name(offset, span?, *name) {
             return Some(*name);
         }
     }
@@ -1954,10 +1953,7 @@ pub(crate) fn named_arg_param_at(
             .param_bindings
             .into_iter()
             .find(|p| body.binding_arena[*p].name == label)?;
-        return Some(leading_name_span(
-            body.binding_spans.get(param)?,
-            label.len(),
-        ));
+        return Some(leading_name_span(body.binding_spans.get(param)?, label));
     }
     None
 }
