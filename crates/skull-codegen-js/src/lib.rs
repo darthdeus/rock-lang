@@ -243,7 +243,6 @@ function __nb_checked_set(buf, i, v) {
 }
 ";
 
-/// Checked Vec access into the 0-based JS backing array.
 pub const JS_VEC_CHECK_SHIMS: &str = "\
 function __vec_checked_get(vec, i) {
   if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
@@ -1653,7 +1652,6 @@ function __rock_sprintf(fmt, v) {
 }
 "##;
 
-/// Node's `__rock_host`, the default for tests and node-run programs.
 pub const JS_NODE_HOST: &str = r#"
 var __rock_host = {
   write: function(s) { process.stdout.write(s); },
@@ -1743,7 +1741,6 @@ pub fn assemble_prelude(
     p
 }
 
-/// The JS intrinsic table, with the workspace needed to match signature keys.
 pub struct JsIntrinsics<'a>(pub &'a bone_core::workspace::Workspace);
 
 impl IntrinsicTable for JsIntrinsics<'_> {
@@ -1794,7 +1791,6 @@ impl skull_mir::intrinsics::BackendRealization for JsBackendRealization {
     }
 }
 
-/// Fill `$1..$n` in an expression template with `args`.
 pub(crate) fn fill_template(template: &str, args: &[&str]) -> String {
     let mut s = template.to_string();
     for (i, a) in args.iter().enumerate() {

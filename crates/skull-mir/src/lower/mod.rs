@@ -429,7 +429,6 @@ impl ScalarCtx {
         self.abi_plans.stats()
     }
 
-    /// Traffic counters of this context's representation arena.
     pub fn rep_arena_stats(&self) -> abi::RepArenaStats {
         self.rep_arena.stats()
     }
@@ -521,7 +520,6 @@ impl NestedFn {
     }
 }
 
-/// Reject source parameters that collide after scalar expansion.
 pub fn scalar_abi_param_collisions(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1276,7 +1274,6 @@ pub fn lower_definition_factory(
     Ok(b.f)
 }
 
-/// Lower an always-emitted global from its graph-owned concrete plan.
 pub fn lower_global_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1383,7 +1380,6 @@ fn lower_global_inner(
     Ok(Some(finish_lower_attribution(b.f)))
 }
 
-/// Lower an always-emitted decorator from its graph-owned concrete plan.
 pub fn lower_decorator_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,

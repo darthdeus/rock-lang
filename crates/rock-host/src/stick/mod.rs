@@ -410,10 +410,8 @@ pub enum DependencySource {
     Package(String),
 }
 
-// ---------------------------------------------------------------------------
 // serde::Deserialize impls — hand-rolled to avoid pulling serde_derive
 // (and thus syn) into the front end's compile-time critical path.
-// ---------------------------------------------------------------------------
 
 impl<'de> serde::Deserialize<'de> for PackageType {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {

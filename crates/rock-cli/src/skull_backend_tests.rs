@@ -173,7 +173,6 @@ fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
 
 #[cfg(test)]
 mod overlay_runtime_tests {
-    //! Compare replaying the two-file overlay with a fresh compile.
 
     use super::super::{IncrementalProject, SkullReload};
     use super::files;

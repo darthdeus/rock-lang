@@ -133,8 +133,6 @@ cases! { reject:
     "#, &["absent"], "not found");
 }
 
-// --- A1 entry-contract rejects ------------------------
-
 fn reject_entry(src: &str, root: &str, needle: &str) {
     let err = emit_entry(src, root).expect_err("must reject");
     assert!(
