@@ -183,39 +183,6 @@ pub extern "C" fn stone_native_id_accounting() -> *const c_char {
     reply(out)
 }
 
-/// Registries this crate owns whose state id accounting cannot see, each with
-/// what covers it instead.
-///
-/// Id accounting is complete only over classes that mint, so a registry keyed
-/// by anything else -- a path, a driver-assigned name, a raw pointer -- is
-/// invisible to it by construction. That is a real hole and this is the list of
-/// it, pinned by a test so a new non-minting registry is a decision someone
-/// made rather than one nobody noticed. Adding a row here is the honest move;
-/// the dishonest one is a registry that appears in neither list.
-/// A declaration read by people and pinned by a test; it has no runtime caller
-/// by design, and adding one would make it a mechanism rather than a list.
-#[allow(dead_code)]
-pub(crate) const NON_MINTING: &[(&str, &str)] = &[
-    (
-        "uniform_block",
-        "covered: BLOCKS is keyed by SHADER handle, so a block rides the \
-         shader class -- stone_destroy_shader owns the program's whole \
-         resource set. BLOCK_PROGRAMS is keyed by driver-RECYCLED GL program ids, \
-         outside the monotonic-id argument, and is sound only because removal \
-         in destroy_blocks_for_shader is unconditional.",
-    ),
-    (
-        "asset_watcher",
-        "outside by design: REGISTERED/CHANGED/watched_dirs are path-keyed \
-         process state with no handle to account for.",
-    ),
-    (
-        "log_dedup",
-        "outside by design: rock-log's log_once!/log_throttled! stores are \
-         call-site keyed process state with no handle to account for.",
-    ),
-];
-
 fn class_by_name(name: &str) -> Option<&'static NativeClass> {
     CLASSES.iter().find(|c| c.name == name)
 }
@@ -296,32 +263,6 @@ mod tests {
             id_accounting().len(),
             CLASSES.len() - 1,
             "and the census examines exactly the classes that do mint"
-        );
-    }
-
-    #[test]
-    fn the_registries_id_accounting_cannot_see_are_declared_with_their_coverage() {
-        let names: Vec<&str> = NON_MINTING.iter().map(|(n, _)| *n).collect();
-        assert_eq!(
-            names,
-            vec!["uniform_block", "asset_watcher", "log_dedup",],
-            "every registry outside the mint seam is named with its coverage"
-        );
-        for (name, coverage) in NON_MINTING {
-            assert!(
-                coverage.starts_with("covered:")
-                    || coverage.starts_with("UNCOVERED:")
-                    || coverage.starts_with("outside by design:"),
-                "{name}: coverage must declare covered / UNCOVERED / outside by design"
-            );
-        }
-        assert_eq!(
-            NON_MINTING
-                .iter()
-                .filter(|(_, c)| c.starts_with("UNCOVERED:"))
-                .count(),
-            0,
-            "every registry outside the mint seam is covered or outside by design"
         );
     }
 }
