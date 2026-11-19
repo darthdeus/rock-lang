@@ -249,10 +249,7 @@ fn qualified_prefix_before(src: &str, at: usize) -> Option<(bool, Vec<Ustr>)> {
     let mut segments = Vec::new();
     while end >= 2 && &b[end - 2..end] == b"::" {
         let colon = end - 2;
-        let mut start = colon;
-        while start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_') {
-            start -= 1;
-        }
+        let start = crate::completion::classify::ident_start(b, colon);
         if start == colon {
             segments.reverse();
             return (!segments.is_empty()).then_some((true, segments));
@@ -262,20 +259,6 @@ fn qualified_prefix_before(src: &str, at: usize) -> Option<(bool, Vec<Ustr>)> {
     }
     segments.reverse();
     (!segments.is_empty()).then_some((false, segments))
-}
-
-fn ident_around(src: &str, offset: usize) -> &str {
-    let b = src.as_bytes();
-    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut start = offset.min(b.len());
-    while start > 0 && is_ident(b[start - 1]) {
-        start -= 1;
-    }
-    let mut end = offset.min(b.len());
-    while end < b.len() && is_ident(b[end]) {
-        end += 1;
-    }
-    &src[start..end]
 }
 
 fn module_declaration(session: &Session, package: u32, node: Ustr) -> Option<Span> {
@@ -1336,7 +1319,8 @@ impl BoneWorkspace {
                         crate::query::v1_def_declared_at(ws, &def)
                     })?;
                 let src = proj.texts.get(path)?;
-                let word = ident_around(src, offset);
+                let (start, end) = crate::completion::classify::ident_range_around(src, offset);
+                let word = &src[start..end];
                 let is_alias = word != ws.defs.get(&key)?.name.as_str()
                     && crate::modules_scope::fragment(ws, Ustr::from(path))
                         .is_some_and(|frag| frag.named.contains_key(&Ustr::from(word)));

@@ -7,19 +7,39 @@ use crate::cursor_context::{CursorAst, Record};
 
 /// A leading `.` before the identifier under the cursor (a key-path `.field`).
 pub(crate) fn leading_dot(src: &str, offset: usize) -> bool {
+    byte_before_ident(src, offset) == Some(b'.')
+}
+
+fn byte_before_ident(src: &str, offset: usize) -> Option<u8> {
     let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1;
+    let start = ident_start(b, offset.min(b.len()));
+    start.checked_sub(1).map(|i| b[i])
+}
+
+fn skip_back(b: &[u8], mut end: usize, skip: impl Fn(u8) -> bool) -> usize {
+    while end > 0 && skip(b[end - 1]) {
+        end -= 1;
     }
-    i > 0 && b[i - 1] == b'.'
+    end
+}
+
+pub(crate) fn ident_start(b: &[u8], end: usize) -> usize {
+    skip_back(b, end, is_ident_byte)
+}
+
+fn ws_start(b: &[u8], end: usize) -> usize {
+    skip_back(b, end, |c| c.is_ascii_whitespace())
+}
+
+/// The identifier ending at `end` after skipping whitespace before it.
+fn word_before(b: &[u8], end: usize) -> (usize, &[u8]) {
+    let word_end = ws_start(b, end);
+    let start = ident_start(b, word_end);
+    (start, &b[start..word_end])
 }
 
 pub(crate) fn co_fn_return_slot(src: &[u8], offset: usize) -> bool {
-    let mut i = offset.min(src.len());
-    while i > 0 && src[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
+    let i = ws_start(src, offset.min(src.len()));
     if i == 0 || src[i - 1] != b')' {
         return false;
     }
@@ -41,34 +61,12 @@ pub(crate) fn co_fn_return_slot(src: &[u8], offset: usize) -> bool {
         }
         k -= 1;
     }
-    let mut p = k;
-    let skip_ws = |p: &mut usize| {
-        while *p > 0 && src[*p - 1].is_ascii_whitespace() {
-            *p -= 1;
-        }
-    };
-    skip_ws(&mut p);
-    let name_end = p;
-    while p > 0 && is_ident_byte(src[p - 1]) {
-        p -= 1;
-    }
-    if p == name_end {
-        return false; // no fn name
-    }
-    skip_ws(&mut p);
-    let fn_end = p;
-    while p > 0 && is_ident_byte(src[p - 1]) {
-        p -= 1;
-    }
-    if &src[p..fn_end] != b"fn" {
+    let (name_start, name) = word_before(src, k);
+    if name.is_empty() {
         return false;
     }
-    skip_ws(&mut p);
-    let co_end = p;
-    while p > 0 && is_ident_byte(src[p - 1]) {
-        p -= 1;
-    }
-    &src[p..co_end] == b"co" && (p == 0 || !is_ident_byte(src[p - 1]))
+    let (fn_start, fn_kw) = word_before(src, name_start);
+    fn_kw == b"fn" && word_before(src, fn_start).1 == b"co"
 }
 
 pub(crate) fn is_entity_param_name(name: &str) -> bool {
@@ -78,17 +76,15 @@ pub(crate) fn is_entity_param_name(name: &str) -> bool {
 /// Rock identifiers are ASCII, so walking bytes never splits a codepoint.
 pub(crate) fn ident_prefix(src: &str, offset: usize) -> &str {
     let end = offset.min(src.len());
-    let bytes = src.as_bytes();
-    let mut start = end;
-    while start > 0 {
-        let c = bytes[start - 1];
-        if c == b'_' || c.is_ascii_alphanumeric() {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-    &src[start..end]
+    &src[ident_start(src.as_bytes(), end)..end]
+}
+
+/// The identifier byte range that `offset` touches, empty between non-identifiers.
+pub(crate) fn ident_range_around(src: &str, offset: usize) -> (usize, usize) {
+    let b = src.as_bytes();
+    let at = offset.min(b.len());
+    let end = at + b[at..].iter().take_while(|&&c| is_ident_byte(c)).count();
+    (ident_start(b, at), end)
 }
 
 pub(crate) fn is_ident_byte(c: u8) -> bool {
@@ -96,12 +92,7 @@ pub(crate) fn is_ident_byte(c: u8) -> bool {
 }
 
 pub(crate) fn decorator_context(src: &str, offset: usize) -> bool {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1;
-    }
-    i > 0 && b[i - 1] == b'@'
+    byte_before_ident(src, offset) == Some(b'@')
 }
 
 pub(crate) fn completion_munges(src: &str, offset: usize) -> [String; 2] {
@@ -245,15 +236,9 @@ pub(crate) fn in_pattern_position(src: &str, offset: usize) -> bool {
 /// The scrutinee's last byte when the cursor is in a match-arm pattern head.
 pub(crate) fn match_arm_scrutinee(src: &str, offset: usize) -> Option<usize> {
     let b = src.as_bytes();
-    let mut start = offset.min(b.len());
-    while start > 0 && (is_ident_byte(b[start - 1]) || b[start - 1] == b':') {
-        start -= 1;
-    }
+    let start = skip_back(b, offset.min(b.len()), |c| is_ident_byte(c) || c == b':');
     // Only arm separators or the match opening brace precede a pattern head.
-    let mut p = start;
-    while p > 0 && b[p - 1].is_ascii_whitespace() {
-        p -= 1;
-    }
+    let p = ws_start(b, start);
     if p == 0 || !matches!(b[p - 1], b'{' | b',' | b'}') {
         return None;
     }
@@ -285,10 +270,7 @@ pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
             _ => {}
         }
     };
-    let mut end = brace;
-    while end > 0 && b[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
+    let end = ws_start(b, brace);
     if end == 0 {
         return None;
     }
@@ -307,9 +289,7 @@ pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
             b'{' | b'}' | b';' if depth == 0 => return None,
             c if depth == 0 && is_ident_byte(c) => {
                 let word_end = j + 1;
-                while j > 0 && is_ident_byte(b[j - 1]) {
-                    j -= 1;
-                }
+                j = ident_start(b, j);
                 if &b[j..word_end] == b"match" {
                     return Some(end - 1);
                 }
@@ -322,24 +302,11 @@ pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
 
 pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
     let b = src.as_bytes();
-    let mut p = offset.min(b.len());
-    while p > 0 && is_ident_byte(b[p - 1]) {
-        p -= 1;
-    }
-    let skip_ws = |p: &mut usize| {
-        while *p > 0 && b[*p - 1].is_ascii_whitespace() {
-            *p -= 1;
-        }
-    };
-    skip_ws(&mut p);
-    let in_end = p;
-    while p > 0 && is_ident_byte(b[p - 1]) {
-        p -= 1;
-    }
-    if &b[p..in_end] != b"in" {
+    let (in_start, in_kw) = word_before(b, ident_start(b, offset.min(b.len())));
+    if in_kw != b"in" {
         return false;
     }
-    skip_ws(&mut p);
+    let mut p = ws_start(b, in_start);
     if p > 0 && b[p - 1] == b')' {
         let mut depth = 0i32;
         loop {
@@ -360,19 +327,12 @@ pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
         }
     } else {
         let e = p;
-        while p > 0 && is_ident_byte(b[p - 1]) {
-            p -= 1;
-        }
+        p = ident_start(b, p);
         if p == e {
             return false;
         }
     }
-    skip_ws(&mut p);
-    let for_end = p;
-    while p > 0 && is_ident_byte(b[p - 1]) {
-        p -= 1;
-    }
-    &b[p..for_end] == b"for"
+    word_before(b, p).1 == b"for"
 }
 
 pub(crate) enum Context<'a> {

@@ -20,16 +20,7 @@ pub(crate) struct CursorAst {
 /// Insertion yields `1__rock_completion__`, which fails tokenize and drops
 /// the statement; replacement yields a clean ident.
 fn token_replacement_munge(src: &str, offset: usize) -> Option<(String, usize)> {
-    let b = src.as_bytes();
-    let tok = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut s = offset.min(b.len());
-    while s > 0 && tok(b[s - 1]) {
-        s -= 1;
-    }
-    let mut e = offset.min(b.len());
-    while e < b.len() && tok(b[e]) {
-        e += 1;
-    }
+    let (s, e) = crate::completion::classify::ident_range_around(src, offset);
     if s == e {
         return None;
     }

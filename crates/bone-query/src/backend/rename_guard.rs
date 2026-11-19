@@ -220,7 +220,7 @@ pub(super) fn check_opaque<'t>(
 }
 
 fn contains_word(text: &str, word: &str) -> bool {
-    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let is_ident = crate::completion::classify::is_ident_byte;
     let b = text.as_bytes();
     text.match_indices(word).any(|(i, _)| {
         let j = i + word.len();
