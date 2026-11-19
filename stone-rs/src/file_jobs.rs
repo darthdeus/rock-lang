@@ -1912,17 +1912,64 @@ mod tests {
         crate::test_support::fresh_root("stone_file_jobs_")
     }
 
+    fn begin(queue: &Mutex<Jobs>) -> i32 {
+        queue.lock().unwrap().begin_transaction().unwrap()
+    }
+
+    fn commit(queue: &Mutex<Jobs>, transaction: i32) -> i32 {
+        queue
+            .lock()
+            .unwrap()
+            .commit_transaction(transaction)
+            .unwrap()
+    }
+
+    fn fragment(
+        queue: &Mutex<Jobs>,
+        transaction: i32,
+        path: PathBuf,
+        bytes: Vec<u8>,
+        append: bool,
+        manifest: bool,
+    ) -> bool {
+        queue.lock().unwrap().add_transaction_fragment_owned(
+            transaction,
+            path,
+            bytes,
+            append,
+            manifest,
+        )
+    }
+
+    fn keep(queue: &Mutex<Jobs>, transaction: i32, directory: PathBuf, name: &str) -> bool {
+        queue
+            .lock()
+            .unwrap()
+            .add_transaction_keep_owned(transaction, directory, name.to_owned())
+    }
+
+    fn cleanup_dir(queue: &Mutex<Jobs>, transaction: i32, directory: PathBuf) -> bool {
+        queue
+            .lock()
+            .unwrap()
+            .add_transaction_cleanup_directory_owned(transaction, directory)
+    }
+
+    fn single(path: PathBuf, bytes: &[u8], append: bool) -> SingleRequest {
+        SingleRequest {
+            path,
+            bytes: bytes.to_vec(),
+            append,
+            source: None,
+            second: None,
+        }
+    }
+
     fn queued_write(queue: &Mutex<Jobs>, path: PathBuf, bytes: &[u8]) -> i32 {
         queue
             .lock()
             .unwrap()
-            .enqueue_single(SingleRequest {
-                path,
-                bytes: bytes.to_vec(),
-                append: false,
-                source: None,
-                second: None,
-            })
+            .enqueue_single(single(path, bytes, false))
             .unwrap()
     }
 
@@ -1950,13 +1997,7 @@ mod tests {
         let second = queue
             .lock()
             .unwrap()
-            .enqueue_single(SingleRequest {
-                path: path.clone(),
-                bytes: b"second".to_vec(),
-                append: true,
-                source: None,
-                second: None,
-            })
+            .enqueue_single(single(path.clone(), b"second", true))
             .unwrap();
         assert_eq!(poll_queue(&queue, first, true), 1);
         assert_eq!(poll_queue(&queue, second, true), 1);
@@ -2014,13 +2055,7 @@ mod tests {
         assert!(queue
             .lock()
             .unwrap()
-            .enqueue_single(SingleRequest {
-                path: root.join("second"),
-                bytes: b"x".to_vec(),
-                append: false,
-                source: None,
-                second: None,
-            })
+            .enqueue_single(single(root.join("second"), b"x", false))
             .is_none());
         gate.release();
         assert_eq!(poll_queue(&queue, first, true), 1);
@@ -2062,13 +2097,7 @@ mod tests {
                 queue
                     .lock()
                     .unwrap()
-                    .enqueue_single(SingleRequest {
-                        path: root.path().join("second"),
-                        bytes: b"5678".to_vec(),
-                        append: false,
-                        source: None,
-                        second: None,
-                    })
+                    .enqueue_single(single(root.path().join("second"), b"5678", false))
                     .is_some(),
                 "completed payload still consumes the byte budget"
             );
@@ -2089,33 +2118,32 @@ mod tests {
         let queue = Mutex::new(Jobs::new(limits(4, 64)));
         let snapshot = root.join("snapshot.png");
         let manifest = root.join("manifest.json");
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        let transaction_id = begin(&queue);
+        assert!(fragment(
+            &queue,
             transaction_id,
             snapshot.clone(),
             b"snap".to_vec(),
             false,
             false
         ));
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        assert!(fragment(
+            &queue,
             transaction_id,
             manifest.clone(),
             b"{\"a\":".to_vec(),
             false,
             true
         ));
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        assert!(fragment(
+            &queue,
             transaction_id,
             manifest.clone(),
             b"1}".to_vec(),
             true,
             true
         ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(transaction_id)
-            .unwrap();
+        let job = commit(&queue, transaction_id);
         assert_eq!(poll_queue(&queue, job, true), 1);
         assert_eq!(std::fs::read(snapshot).unwrap(), b"snap");
         assert_eq!(std::fs::read(manifest).unwrap(), b"{\"a\":1}");
@@ -2129,7 +2157,7 @@ mod tests {
         let pixels = vec![
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ];
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
+        let transaction_id = begin(&queue);
         assert!(queue
             .lock()
             .unwrap()
@@ -2141,11 +2169,7 @@ mod tests {
             2,
             2
         ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(transaction_id)
-            .unwrap();
+        let job = commit(&queue, transaction_id);
         assert_eq!(poll_queue(&queue, job, true), 1);
         let decoded = image::load_from_memory(&std::fs::read(png).unwrap())
             .unwrap()
@@ -2207,7 +2231,7 @@ mod tests {
         generation: u8,
         publications: usize,
     ) -> (i32, PathBuf, Vec<PathBuf>) {
-        let transaction = queue.lock().unwrap().begin_transaction().unwrap();
+        let transaction = begin(&queue);
         let mut files = Vec::new();
         for index in 0..publications {
             let path = directories[index % directories.len()]
@@ -2228,18 +2252,15 @@ mod tests {
         }
         let manifest = save.join("manifest.json");
         let listing = manifest_listing(save, &files);
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        assert!(fragment(
+            &queue,
             transaction,
             manifest.clone(),
             listing.into_bytes(),
             false,
             true
         ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(transaction)
-            .unwrap();
+        let job = commit(&queue, transaction);
         (job, manifest, files)
     }
 
@@ -2309,26 +2330,24 @@ mod tests {
         let snapshots = save.join("snapshots");
         let path = snapshots.join("level-0").join("face-1").join("chunk.png");
         let manifest = save.join("manifest.json");
-        let transaction = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        let transaction = begin(&queue);
+        assert!(fragment(
+            &queue,
             transaction,
             path.clone(),
             b"png".to_vec(),
             false,
             false
         ));
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        assert!(fragment(
+            &queue,
             transaction,
             manifest.clone(),
             b"manifest".to_vec(),
             false,
             true
         ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(transaction)
-            .unwrap();
+        let job = commit(&queue, transaction);
         assert_eq!(poll_queue(&queue, job, true), 1);
         let face = snapshots.join("level-0").join("face-1");
         let level = snapshots.join("level-0");
@@ -2391,10 +2410,11 @@ mod tests {
     fn transaction_fragment_admission_bounds_retained_fragment_overhead() {
         let root = test_root();
         let queue = Mutex::new(Jobs::new(limits(4, 128 * 1024)));
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
+        let transaction_id = begin(&queue);
         let chunk = vec![0u8; 4 * 1024];
         for index in 0..16 {
-            assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+            assert!(fragment(
+                &queue,
                 transaction_id,
                 root.join("snapshot"),
                 chunk.clone(),
@@ -2402,7 +2422,8 @@ mod tests {
                 false,
             ));
         }
-        assert!(!queue.lock().unwrap().add_transaction_fragment_owned(
+        assert!(!fragment(
+            &queue,
             transaction_id,
             root.join("snapshot"),
             Vec::new(),
@@ -2450,38 +2471,43 @@ mod tests {
         assert!(nested.flush().is_ok());
     }
 
-    #[test]
-    fn successful_manifest_publish_prunes_orphans_but_keeps_referenced_files() {
-        let root = test_root();
-        let queue = Mutex::new(Jobs::new(limits(4, 64 * 1024)));
+    fn gc_fixture(root: &Path) -> (PathBuf, PathBuf) {
         let snapshots = root.join("snapshots");
         std::fs::create_dir_all(snapshots.join("nested")).unwrap();
         std::fs::write(snapshots.join("keep.png"), b"keep").unwrap();
         std::fs::write(snapshots.join("orphan.png"), b"orphan").unwrap();
         std::fs::write(snapshots.join("nested/child.png"), b"child").unwrap();
         let manifest = root.join("manifest.json");
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
-            transaction_id,
-            manifest,
+        std::fs::write(&manifest, b"old").unwrap();
+        (snapshots, manifest)
+    }
+
+    fn stage_gc_manifest(queue: &Mutex<Jobs>, transaction: i32, snapshots: &Path, manifest: &Path) {
+        assert!(fragment(
+            queue,
+            transaction,
+            manifest.to_path_buf(),
             b"new".to_vec(),
             false,
             true
         ));
-        assert!(queue
-            .lock()
-            .unwrap()
-            .add_transaction_cleanup_directory_owned(transaction_id, snapshots.clone()));
-        assert!(queue.lock().unwrap().add_transaction_keep_owned(
-            transaction_id,
-            snapshots.clone(),
-            "keep.png".to_owned()
+        assert!(cleanup_dir(queue, transaction, snapshots.to_path_buf()));
+        assert!(keep(
+            queue,
+            transaction,
+            snapshots.to_path_buf(),
+            "keep.png"
         ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(transaction_id)
-            .unwrap();
+    }
+
+    #[test]
+    fn successful_manifest_publish_prunes_orphans_but_keeps_referenced_files() {
+        let root = test_root();
+        let queue = Mutex::new(Jobs::new(limits(4, 64 * 1024)));
+        let (snapshots, manifest) = gc_fixture(&root);
+        let transaction_id = begin(&queue);
+        stage_gc_manifest(&queue, transaction_id, &snapshots, &manifest);
+        let job = commit(&queue, transaction_id);
         assert_eq!(poll_queue(&queue, job, true), 1);
         assert!(snapshots.join("keep.png").exists());
         assert!(!snapshots.join("orphan.png").exists());
@@ -2492,41 +2518,18 @@ mod tests {
     fn failed_manifest_publish_preserves_all_gc_files_and_old_manifest() {
         let root = test_root();
         let queue = Mutex::new(Jobs::new(limits(4, 64 * 1024)));
-        let snapshots = root.join("snapshots");
-        std::fs::create_dir_all(&snapshots).unwrap();
-        std::fs::write(snapshots.join("keep.png"), b"keep").unwrap();
-        std::fs::write(snapshots.join("orphan.png"), b"orphan").unwrap();
-        let manifest = root.join("manifest.json");
-        std::fs::write(&manifest, b"old").unwrap();
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        let (snapshots, manifest) = gc_fixture(&root);
+        let transaction_id = begin(&queue);
+        assert!(fragment(
+            &queue,
             transaction_id,
             snapshots.clone(),
             b"bad write".to_vec(),
             false,
             false
         ));
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
-            transaction_id,
-            manifest.clone(),
-            b"new".to_vec(),
-            false,
-            true
-        ));
-        assert!(queue
-            .lock()
-            .unwrap()
-            .add_transaction_cleanup_directory_owned(transaction_id, snapshots.clone()));
-        assert!(queue.lock().unwrap().add_transaction_keep_owned(
-            transaction_id,
-            snapshots.clone(),
-            "keep.png".to_owned()
-        ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(transaction_id)
-            .unwrap();
+        stage_gc_manifest(&queue, transaction_id, &snapshots, &manifest);
+        let job = commit(&queue, transaction_id);
         assert_eq!(poll_queue(&queue, job, true), -1);
         assert_eq!(std::fs::read(&manifest).unwrap(), b"old");
         assert!(snapshots.join("keep.png").exists());
@@ -2551,7 +2554,7 @@ mod tests {
         let manifest = root.join("manifest.json");
         std::fs::write(&manifest, b"old").unwrap();
 
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
+        let transaction_id = begin(&queue);
         assert!(queue
             .lock()
             .unwrap()
@@ -2572,18 +2575,15 @@ mod tests {
             previous.clone(),
             true
         ));
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        assert!(fragment(
+            &queue,
             transaction_id,
             manifest.clone(),
             b"new".to_vec(),
             false,
             true
         ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(transaction_id)
-            .unwrap();
+        let job = commit(&queue, transaction_id);
         assert_eq!(poll_queue(&queue, job, true), -3);
         assert_eq!(std::fs::read(&manifest).unwrap(), b"new");
         let previous_pixels = image::load_from_memory(&std::fs::read(&previous).unwrap())
@@ -2595,15 +2595,16 @@ mod tests {
             .to_rgba8();
         assert_eq!(next_pixels.as_raw(), &[255, 0, 0, 255]);
 
-        let recovery = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        let recovery = begin(&queue);
+        assert!(fragment(
+            &queue,
             recovery,
             manifest.clone(),
             b"recovered".to_vec(),
             false,
             true
         ));
-        let recovery_job = queue.lock().unwrap().commit_transaction(recovery).unwrap();
+        let recovery_job = commit(&queue, recovery);
         assert_eq!(poll_queue(&queue, recovery_job, true), 1);
         assert_eq!(std::fs::read(&manifest).unwrap(), b"recovered");
         assert!(previous.exists());
@@ -2615,36 +2616,23 @@ mod tests {
         let root = test_root();
         let queue = Mutex::new(Jobs::new(limits(4, 64 * 1024)));
         let snapshots = root.join("snapshots");
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(!queue.lock().unwrap().add_transaction_keep_owned(
+        let transaction_id = begin(&queue);
+        assert!(!keep(&queue, transaction_id, snapshots.clone(), "keep.png",));
+        assert!(cleanup_dir(&queue, transaction_id, snapshots.clone()));
+        assert!(!keep(
+            &queue,
             transaction_id,
             snapshots.clone(),
-            "keep.png".to_owned(),
+            "nested/keep.png",
         ));
-        assert!(queue
-            .lock()
-            .unwrap()
-            .add_transaction_cleanup_directory_owned(transaction_id, snapshots.clone()));
-        assert!(!queue.lock().unwrap().add_transaction_keep_owned(
+        assert!(!keep(
+            &queue,
             transaction_id,
             snapshots.clone(),
-            "nested/keep.png".to_owned(),
+            "nested\\keep.png",
         ));
-        assert!(!queue.lock().unwrap().add_transaction_keep_owned(
-            transaction_id,
-            snapshots.clone(),
-            "nested\\keep.png".to_owned(),
-        ));
-        assert!(!queue.lock().unwrap().add_transaction_keep_owned(
-            transaction_id,
-            snapshots.clone(),
-            "..".to_owned(),
-        ));
-        assert!(queue.lock().unwrap().add_transaction_keep_owned(
-            transaction_id,
-            snapshots,
-            "keep.png".to_owned(),
-        ));
+        assert!(!keep(&queue, transaction_id, snapshots.clone(), "..",));
+        assert!(keep(&queue, transaction_id, snapshots, "keep.png",));
         assert!(queue.lock().unwrap().abort_transaction(transaction_id));
     }
 
@@ -2665,25 +2653,11 @@ mod tests {
             max_transaction_fragment_bytes: 64 * 1024,
             max_transaction_fragments: 16,
         }));
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue
-            .lock()
-            .unwrap()
-            .add_transaction_cleanup_directory_owned(transaction_id, snapshots.clone(),));
-        assert!(!queue
-            .lock()
-            .unwrap()
-            .add_transaction_cleanup_directory_owned(transaction_id, root.join("other"),));
-        assert!(queue.lock().unwrap().add_transaction_keep_owned(
-            transaction_id,
-            snapshots.clone(),
-            "x".to_owned(),
-        ));
-        assert!(!queue.lock().unwrap().add_transaction_keep_owned(
-            transaction_id,
-            snapshots,
-            "y".to_owned(),
-        ));
+        let transaction_id = begin(&queue);
+        assert!(cleanup_dir(&queue, transaction_id, snapshots.clone(),));
+        assert!(!cleanup_dir(&queue, transaction_id, root.join("other"),));
+        assert!(keep(&queue, transaction_id, snapshots.clone(), "x",));
+        assert!(!keep(&queue, transaction_id, snapshots, "y",));
         assert!(queue.lock().unwrap().abort_transaction(transaction_id));
         assert_eq!(queue.lock().unwrap().accounting.load(Ordering::Acquire), 0);
     }
@@ -2694,8 +2668,9 @@ mod tests {
         let queue = Mutex::new(Jobs::new(limits(4, 64)));
         let success_cleanup = root.join("success.tmp");
         std::fs::write(&success_cleanup, b"stale").unwrap();
-        let success_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        let success_id = begin(&queue);
+        assert!(fragment(
+            &queue,
             success_id,
             root.join("success"),
             b"ok".to_vec(),
@@ -2707,11 +2682,7 @@ mod tests {
             success_cleanup.clone(),
             true
         ));
-        let success_job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(success_id)
-            .unwrap();
+        let success_job = commit(&queue, success_id);
         assert_eq!(poll_queue(&queue, success_job, true), 1);
         assert!(!success_cleanup.exists());
 
@@ -2719,8 +2690,9 @@ mod tests {
         std::fs::write(&failure_cleanup, b"stale").unwrap();
         let blocked = root.join("blocked");
         std::fs::create_dir(&blocked).unwrap();
-        let failure_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        let failure_id = begin(&queue);
+        assert!(fragment(
+            &queue,
             failure_id,
             blocked,
             b"bad write".to_vec(),
@@ -2732,11 +2704,7 @@ mod tests {
             failure_cleanup.clone(),
             false
         ));
-        let failure_job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(failure_id)
-            .unwrap();
+        let failure_job = commit(&queue, failure_id);
         assert_eq!(poll_queue(&queue, failure_job, true), -1);
         assert!(!failure_cleanup.exists());
     }
@@ -2749,33 +2717,32 @@ mod tests {
         std::fs::write(&manifest, b"old").unwrap();
         let blocked = root.join("blocked");
         std::fs::create_dir(&blocked).unwrap();
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        let transaction_id = begin(&queue);
+        assert!(fragment(
+            &queue,
             transaction_id,
             root.join("snapshot.png"),
             b"snapshot".to_vec(),
             false,
             false
         ));
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        assert!(fragment(
+            &queue,
             transaction_id,
             blocked,
             b"bad write".to_vec(),
             false,
             false
         ));
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
+        assert!(fragment(
+            &queue,
             transaction_id,
             manifest.clone(),
             b"new".to_vec(),
             false,
             true
         ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(transaction_id)
-            .unwrap();
+        let job = commit(&queue, transaction_id);
         assert_eq!(poll_queue(&queue, job, true), -1);
         assert_eq!(std::fs::read(manifest).unwrap(), b"old");
         assert_eq!(
@@ -2789,34 +2756,10 @@ mod tests {
         let root = test_root();
         let gate = Arc::new(TestGate::new());
         let queue = Mutex::new(Jobs::new_with_gate(limits(4, 64 * 1024), Arc::clone(&gate)));
-        let manifest = root.join("manifest.json");
-        let snapshots = root.join("snapshots");
-        std::fs::create_dir_all(&snapshots).unwrap();
-        std::fs::write(snapshots.join("keep.png"), b"keep").unwrap();
-        std::fs::write(snapshots.join("orphan.png"), b"orphan").unwrap();
-        std::fs::write(&manifest, b"old").unwrap();
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
-            transaction_id,
-            manifest.clone(),
-            b"new".to_vec(),
-            false,
-            true
-        ));
-        assert!(queue
-            .lock()
-            .unwrap()
-            .add_transaction_cleanup_directory_owned(transaction_id, snapshots.clone()));
-        assert!(queue.lock().unwrap().add_transaction_keep_owned(
-            transaction_id,
-            snapshots.clone(),
-            "keep.png".to_owned()
-        ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(transaction_id)
-            .unwrap();
+        let (snapshots, manifest) = gc_fixture(&root);
+        let transaction_id = begin(&queue);
+        stage_gc_manifest(&queue, transaction_id, &snapshots, &manifest);
+        let job = commit(&queue, transaction_id);
         gate.wait_until_entered();
         assert_eq!(
             queue
@@ -2853,34 +2796,10 @@ mod tests {
             limits(4, 64 * 1024),
             Arc::clone(&gate),
         ));
-        let snapshots = root.join("snapshots");
-        std::fs::create_dir_all(&snapshots).unwrap();
-        std::fs::write(snapshots.join("keep.png"), b"keep").unwrap();
-        std::fs::write(snapshots.join("orphan.png"), b"orphan").unwrap();
-        let manifest = root.join("manifest.json");
-        std::fs::write(&manifest, b"old").unwrap();
-        let transaction_id = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
-            transaction_id,
-            manifest.clone(),
-            b"new".to_vec(),
-            false,
-            true
-        ));
-        assert!(queue
-            .lock()
-            .unwrap()
-            .add_transaction_cleanup_directory_owned(transaction_id, snapshots.clone()));
-        assert!(queue.lock().unwrap().add_transaction_keep_owned(
-            transaction_id,
-            snapshots.clone(),
-            "keep.png".to_owned()
-        ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(transaction_id)
-            .unwrap();
+        let (snapshots, manifest) = gc_fixture(&root);
+        let transaction_id = begin(&queue);
+        stage_gc_manifest(&queue, transaction_id, &snapshots, &manifest);
+        let job = commit(&queue, transaction_id);
         gate.wait_until_entered();
         let cancellation = queue
             .lock()
