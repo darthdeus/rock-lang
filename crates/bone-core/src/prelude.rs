@@ -85,6 +85,12 @@ pub struct EnumId {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ModuleId(pub NonMaxU32);
 
+impl Default for ModuleId {
+    fn default() -> Self {
+        Self::builtin()
+    }
+}
+
 impl ModuleId {
     #[inline]
     pub fn new(v: u32) -> ModuleId {

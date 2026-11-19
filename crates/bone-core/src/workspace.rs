@@ -330,79 +330,67 @@ impl Workspace {
     }
 
     pub fn insert_module(&mut self, module: Module) -> ModuleId {
-        let id = module.module_id();
-
-        let idx = id.index();
-
-        if idx < self.modules.len() {
-            self.modules[idx] = module;
-        } else {
-            debug_assert_eq!(
-                idx,
-                self.modules.len(),
-                "insert_module: non-sequential module id leaves a gap"
-            );
-            self.modules.push(module);
-        }
-
-        let signatures = self
-            .module(id)
-            .functions
-            .iter()
-            .map(|(fid, _)| (fid, self.render_param_signature(id, fid)))
-            .collect();
-        if idx < self.param_signatures.len() {
-            self.param_signatures[idx] = signatures;
-        } else {
-            self.param_signatures.push(signatures);
-        }
-
+        let id = self.place_module(module);
+        let signatures = self.render_param_signatures(id);
+        self.store_param_signatures(id, signatures);
         id
     }
 
     /// [`Self::insert_module`] for every module of a pass at once.
     pub fn insert_modules(&mut self, modules: impl IntoIterator<Item = Module>) -> Vec<ModuleId> {
         let mut modules = modules.into_iter();
-        let mut ids: Vec<ModuleId> = Vec::with_capacity(modules.size_hint().0);
+        let mut ids = Vec::with_capacity(modules.size_hint().0);
         while let Some(module) = modules.next() {
-            let id = module.module_id();
-            let idx = id.index();
-            if idx < self.modules.len() {
-                self.modules[idx] = module;
-            } else {
-                debug_assert_eq!(
-                    idx,
-                    self.modules.len(),
-                    "insert_modules: non-sequential module id leaves a gap"
-                );
-                // Modules are large; growing one push at a time copies every placed module
-                // at each doubling.
-                if self.modules.len() == self.modules.capacity() {
-                    self.modules.reserve(1 + modules.size_hint().0);
-                }
-                self.modules.push(module);
+            // Modules are large; growing one push at a time copies every placed module
+            // at each doubling.
+            if module.module_id().index() >= self.modules.len()
+                && self.modules.len() == self.modules.capacity()
+            {
+                self.modules.reserve(1 + modules.size_hint().0);
             }
-            ids.push(id);
+            ids.push(self.place_module(module));
         }
-        let signatures: Vec<ArenaMap<Idx<Function>, Ustr>> = ids
+        let signatures: Vec<_> = ids
             .par_iter()
-            .map(|&id| {
-                self.module(id)
-                    .functions
-                    .iter()
-                    .map(|(fid, _)| (fid, self.render_param_signature(id, fid)))
-                    .collect()
-            })
+            .map(|&id| self.render_param_signatures(id))
             .collect();
-        for (id, signatures) in ids.iter().zip(signatures) {
-            let idx = id.index();
-            if idx < self.param_signatures.len() {
-                self.param_signatures[idx] = signatures;
-            } else {
-                self.param_signatures.push(signatures);
-            }
+        for (&id, signatures) in ids.iter().zip(signatures) {
+            self.store_param_signatures(id, signatures);
         }
         ids
+    }
+
+    fn place_module(&mut self, module: Module) -> ModuleId {
+        let id = module.module_id();
+        let idx = id.index();
+        if idx < self.modules.len() {
+            self.modules[idx] = module;
+        } else {
+            debug_assert_eq!(
+                idx,
+                self.modules.len(),
+                "non-sequential module id leaves a gap"
+            );
+            self.modules.push(module);
+        }
+        id
+    }
+
+    fn render_param_signatures(&self, id: ModuleId) -> ArenaMap<Idx<Function>, Ustr> {
+        self.module(id)
+            .functions
+            .iter()
+            .map(|(fid, _)| (fid, self.render_param_signature(id, fid)))
+            .collect()
+    }
+
+    fn store_param_signatures(&mut self, id: ModuleId, signatures: ArenaMap<Idx<Function>, Ustr>) {
+        let idx = id.index();
+        if idx < self.param_signatures.len() {
+            self.param_signatures[idx] = signatures;
+        } else {
+            self.param_signatures.push(signatures);
+        }
     }
 
     /// Re-index one function whose signature was replaced in place.

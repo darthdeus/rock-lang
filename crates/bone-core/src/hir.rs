@@ -322,10 +322,7 @@ impl Body {
     }
 
     pub fn alloc_root_scope(&mut self) -> Idx<Scope> {
-        self.scope_arena.alloc(hir::Scope {
-            parent: None,
-            bindings: Default::default(),
-        })
+        self.alloc_root_scope_with_bindings(Default::default())
     }
 
     pub fn alloc_root_scope_with_bindings(
@@ -361,7 +358,7 @@ pub enum NodeRef {
     LocalTy(Idx<TypeExpr>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Module {
     pub id: ModuleId,
     pub lower_var_high_water: u32,
@@ -416,56 +413,6 @@ pub struct Module {
 
     /// Resolved path segments from imports and interface positions.
     pub path_segments: Vec<PathSegmentRef>,
-}
-
-impl Default for Module {
-    fn default() -> Self {
-        Self {
-            id: ModuleId::builtin(),
-            lower_var_high_water: 0,
-            ty_arena_live_start: 0,
-            lower_var_floor: 0,
-
-            file: Ustr::from(""),
-            package: None,
-            logical_file: Ustr::from(""),
-            identity_storage: Default::default(),
-
-            functions: Default::default(),
-            functions_by_name: Default::default(),
-
-            structs: Default::default(),
-            struct_by_name: Default::default(),
-
-            enums: Default::default(),
-            enums_by_name: Default::default(),
-
-            newtypes: Default::default(),
-            newtypes_by_name: Default::default(),
-
-            globals: Default::default(),
-            global_by_name: Default::default(),
-
-            bodies: Default::default(),
-
-            ty_arena: Default::default(),
-            ty_spans: Default::default(),
-
-            decorators: Default::default(),
-
-            item_index_cell: Default::default(),
-            item_intervals: Default::default(),
-
-            lowering_errors: Default::default(),
-            interface_errors: Default::default(),
-            scope_probes: Default::default(),
-
-            call_families: Default::default(),
-            iterator_families: None,
-
-            path_segments: Default::default(),
-        }
-    }
 }
 
 impl Module {
