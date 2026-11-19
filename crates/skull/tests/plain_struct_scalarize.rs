@@ -29,10 +29,12 @@ fn main() {
 "#;
 
 #[test]
-fn plain_struct_field_reads_dont_materialize_table() {
-    let lua = emit_module(PLAIN_FIELD_LOOP);
-    let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("__ty = \"Props\""));
+fn plain_struct_field_reads_and_writes_dont_materialize_table() {
+    for (src, ty) in [(PLAIN_FIELD_LOOP, "Props"), (PLAIN_MUTATE_LOOP, "Acc")] {
+        let lua = emit_module(src);
+        let hot = function_body(&lua, "hot");
+        assert!(!hot.contains(&format!("__ty = \"{ty}\"")), "{hot}");
+    }
 }
 
 const PLAIN_MUTATE_LOOP: &str = r#"
@@ -53,13 +55,6 @@ fn main() {
     let _ = hot(4)
 }
 "#;
-
-#[test]
-fn plain_struct_field_writes_scalarize() {
-    let lua = emit_module(PLAIN_MUTATE_LOOP);
-    let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("__ty = \"Acc\""));
-}
 
 const PLAIN_WHOLE_USE: &str = r#"
 struct Box { w: int, h: int }

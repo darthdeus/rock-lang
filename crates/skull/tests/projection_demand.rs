@@ -1,8 +1,10 @@
-use crate::common::{compile_and_run, emit_module, run_luajit, run_main};
+use crate::common::{
+    compile_and_run, emit_module, function_body, inline_off_guard, run_luajit, run_main,
+};
 
 #[test]
 fn immediate_nullable_enum_projection_reads_only_selected_field() {
-    let _inline = crate::common::inline_off_guard();
+    let _inline = inline_off_guard();
     let lua = emit_module(
         r#"
 enum Count { Zero, Seven }
@@ -27,14 +29,14 @@ fn main() {
 }
 "#,
     );
-    let probe = crate::common::function_body(&lua, "nullable_probe");
+    let probe = function_body(&lua, "nullable_probe");
     assert!(!probe.contains(".spare"));
     assert_eq!(run_main(&lua), "true\ntrue\nfalse\n3\ntrue");
 }
 
 #[test]
 fn reference_owned_value_projection_reads_only_the_selected_field() {
-    let _inline = crate::common::inline_off_guard();
+    let _inline = inline_off_guard();
     let fields = (0..50)
         .map(|i| format!("unused_sibling{i}: int = {i}"))
         .collect::<Vec<_>>()
@@ -48,13 +50,7 @@ struct Owner {{ config: Config }}
 fn main() {{ print(probe(Owner {{ config: Config {{ chosen: 7, choice: Choice::Empty, items: [] }} }})) }}
 "#
     ));
-    let probe = lua
-        .split("\nfunction probe(")
-        .nth(1)
-        .unwrap()
-        .split("\nend")
-        .next()
-        .unwrap();
+    let probe = function_body(&lua, "probe");
     assert!(!probe.contains(".unused_sibling"));
     assert_eq!(
         run_luajit(&format!(
@@ -95,22 +91,16 @@ fn main() {{
 }}
 "#
     ));
-    let probe = lua
-        .split("\nfunction direct_probe(")
-        .nth(1)
-        .unwrap()
-        .split("\nend")
-        .next()
-        .unwrap();
+    let probe = function_body(&lua, "direct_probe");
     assert!(!probe.contains(".unused_sibling") && !probe.contains(".label"));
-    let whole = crate::common::function_body(&lua, "whole_probe");
+    let whole = function_body(&lua, "whole_probe");
     assert!(!whole.contains(".unused_sibling"));
     assert_eq!(run_main(&lua), "7\n1\n2\n2\n5\n5\n99");
 }
 
 #[test]
 fn enum_projection_does_not_expand_sibling_fields() {
-    let _inline = crate::common::inline_off_guard();
+    let _inline = inline_off_guard();
     let lua = emit_module(
         r#"
 enum Choice { Empty, Number(int), Text(string) }
@@ -126,13 +116,7 @@ fn main() {
 }
 "#,
     );
-    let body = lua
-        .split("\nfunction selected(")
-        .nth(1)
-        .unwrap()
-        .split("\nend")
-        .next()
-        .unwrap();
+    let body = function_body(&lua, "selected");
     assert!(!body.contains(".unused_sibling"));
     assert_eq!(
         run_luajit(&format!(
@@ -144,7 +128,7 @@ fn main() {
 
 #[test]
 fn enum_projections_preserve_nullable_children_and_argument_snapshots() {
-    let _inline = crate::common::inline_off_guard();
+    let _inline = inline_off_guard();
     assert_eq!(
         compile_and_run(
             r#"
@@ -193,7 +177,7 @@ fn selected(rows: [Row], index: int) -> int { rows[index].b }
 fn main() { print(selected([Row { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }], 0)) }
 "#,
     );
-    let body = crate::common::function_body(&lua, "selected");
+    let body = function_body(&lua, "selected");
     assert_eq!(body.matches("_data").count(), 1);
     assert_eq!(body.matches("__vec_checked_index(").count(), 1);
 }

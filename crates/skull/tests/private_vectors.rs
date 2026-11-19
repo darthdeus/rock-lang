@@ -26,17 +26,7 @@ assert(xs._data[21] == 20)
 print('ok')
 "#
     ));
-    assert_eq!(output.trim(), "ok");
-}
-
-#[test]
-fn local_aliases_keep_private_vector_provenance() {
-    let source = COLLECT.replace(
-        "if i % 7 == 0 { out.push(i) }",
-        "let alias = out\n        if i % 7 == 0 { alias.push(i) }",
-    );
-    let lua = emit_module(&source);
-    assert!(!function_body(&lua, "collect_private").contains("__vec_checked_set"));
+    assert_eq!(output, "ok");
 }
 
 #[test]
@@ -86,7 +76,7 @@ assert(__private_vec_hits == 1)
 print('ok')
 "#
         ));
-        assert_eq!(output.trim(), "ok");
+        assert_eq!(output, "ok");
     }
 }
 
@@ -117,7 +107,7 @@ assert(not ok and tostring(err):find('out of bounds'))
 print('ok')
 "#
         ));
-        assert_eq!(output.trim(), "ok");
+        assert_eq!(output, "ok");
     }
 }
 
@@ -195,18 +185,22 @@ print('ok')
 }
 
 #[test]
-fn an_opaque_call_without_a_vector_reference_does_not_publish_it() {
-    let source = format!(
-        "{}\n{}",
-        r#"inline(lua) fn ping() = "_G.__private_ping = 1""#,
-        COLLECT.replace("let out: [int] = []", "let out: [int] = []\n    ping()")
-    );
-    let lua = emit_module(&source);
-    assert!(!function_body(&lua, "collect_private").contains("__vec_checked_set"));
-}
-
-#[test]
-fn the_explicit_vec_push_intrinsic_uses_the_same_private_proof() {
-    let lua = emit_module(&COLLECT.replace("out.push(i)", "vec_push(out, i)"));
-    assert!(!function_body(&lua, "collect_private").contains("__vec_checked_set"));
+fn aliases_unrelated_opaque_calls_and_the_intrinsic_keep_the_private_proof() {
+    for source in [
+        COLLECT.replace(
+            "if i % 7 == 0 { out.push(i) }",
+            "let alias = out\n        if i % 7 == 0 { alias.push(i) }",
+        ),
+        format!(
+            "inline(lua) fn ping() = \"_G.__private_ping = 1\"\n{}",
+            COLLECT.replace("let out: [int] = []", "let out: [int] = []\n    ping()")
+        ),
+        COLLECT.replace("out.push(i)", "vec_push(out, i)"),
+    ] {
+        let lua = emit_module(&source);
+        assert!(
+            !function_body(&lua, "collect_private").contains("__vec_checked_set"),
+            "{source}"
+        );
+    }
 }

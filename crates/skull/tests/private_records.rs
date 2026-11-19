@@ -23,8 +23,7 @@ assert(report.offset == 7)
 assert(xs._data[1] == 7 and xs._data[2] == 8 and xs._data[3] == 9)
 print('ok')
 "#
-        ))
-        .trim(),
+        )),
         "ok"
     );
 }
@@ -69,8 +68,7 @@ local ok, err = pcall(published, xs)
 assert(not ok and tostring(err):find('out of bounds'))
 print('ok')
 "#
-            ))
-            .trim(),
+            )),
             "ok"
         );
     }
@@ -107,8 +105,7 @@ local ok, err = pcall(old_report, xs)
 assert(not ok and tostring(err):find('out of bounds'))
 print('ok')
 "#
-        ))
-        .trim(),
+        )),
         "ok"
     );
 }

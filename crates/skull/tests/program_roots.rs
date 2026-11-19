@@ -1,4 +1,4 @@
-use crate::common::{self, definition_symbols, fn_ref, ws_with_dependency_module};
+use crate::common::{body_id, definition_symbols, fn_ref, run_main, ws_with_dependency_module};
 use skull_mir::instance::Instance;
 
 const LIB: &str = "fn engine_body() -> int { return 1 }";
@@ -38,7 +38,7 @@ fn a_program_does_not_define_own_functions_nothing_calls() {
     );
     assert!(!defines(&emit.lua, "own_unused"));
 
-    assert_eq!(common::run_main(&emit.lua), "9");
+    assert_eq!(run_main(&emit.lua), "9");
 }
 
 #[test]
@@ -57,19 +57,12 @@ fn an_edit_that_starts_calling_an_own_function_defines_it() {
         LIB,
         "fn own_later() -> int { return 5 }\nfn main() { print(own_later()) }",
     );
-    let main = fn_ref(&edited, "main");
-    let incremental = skull::mir_emit::emit_incremental(
-        &edited,
-        &mut cache,
-        &[(
-            main.module,
-            bone_semantic::hir::BodyOwner::Function(main.func),
-        )],
-    )
-    .expect("incremental");
+    let incremental =
+        skull::mir_emit::emit_incremental(&edited, &mut cache, &[body_id(&edited, "main")])
+            .expect("incremental");
     assert!(defines(&incremental.lua, "own_later"));
 
-    assert_eq!(common::run_main(&incremental.lua), "5");
+    assert_eq!(run_main(&incremental.lua), "5");
 }
 
 #[test]
