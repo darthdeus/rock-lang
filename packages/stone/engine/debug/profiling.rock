@@ -383,7 +383,6 @@ pub inline(lua) fn thread_cpu_seconds() -> float = """
 @early_init
 fn lua_alloc_split_declare() { lua_alloc_split_init() }
 
-@allow(long_inline_lua, "declare native allocator origin counters without enabling capture")
 inline(lua) fn lua_alloc_split_init() = """
     require("ffi").cdef[[
         int stone_lua_alloc_split_available(void);
@@ -426,7 +425,6 @@ fn gc_step_capture_init() {
     gc_step_frame_close()
 }
 
-@allow(long_inline_lua, "opt-in versioned diagnostic collector ABI; fail if the requested probe is missing")
 inline(lua) fn gc_step_probe_init() = """
     local ffi = require("ffi")
     ffi.cdef[[int luaJIT_gc_probe(double *out, int op);]]

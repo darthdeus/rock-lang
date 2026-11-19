@@ -397,7 +397,6 @@ pub @scalar_abi inline(lua) fn imgui_window_add_circle_filled(
 // cells extend past origin+size by up to cell-1 pixels). Useful for the
 // pixel editor where the checkerboard sits behind an image that masks
 // any overshoot.
-// rock: allow(long_inline_lua, "perf-critical bulk loop replaces per-cell FFI")
 pub @scalar_abi inline(lua) fn imgui_draw_checkerboard(
     origin: Vec2, size: Vec2, cell: float,
     light_abgr: int, dark_abgr: int,

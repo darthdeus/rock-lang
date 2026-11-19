@@ -174,7 +174,7 @@ const SDLK_F1: int = 0x4000003A
 const SDLK_F12: int = 0x40000045
 
 // The unit-test host calls this stable name without booting the frame runner.
-pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(lua) fn setup_stone() = """
+pub @nomangle inline(lua) fn setup_stone() = """
     -- Only define FFI types once to support hot reload
     if not _G._stone_ffi_defined then
         _G._stone_ffi_defined = true
@@ -765,8 +765,7 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
     stone_native_load()
 """
 
-pub @allow(long_inline_lua, "load the allocator-counter module from the native host or Stone library")
-inline(lua) fn stone_lua_counter_install() = """
+pub inline(lua) fn stone_lua_counter_install() = """
     local installed = _G.__rock_lua_counter_installation
     if installed and installed.provider == stone then return end
     local loader = package.preload.stone_lua_alloc_counter
@@ -782,8 +781,7 @@ inline(lua) fn stone_lua_counter_install() = """
 
 // JIT health needs the live lua_State, which only a module loader receives.
 // It has its own loader so that sampling health never installs the counter.
-pub @allow(long_inline_lua, "load the JIT-health module from the native host or Stone library")
-inline(lua) fn stone_lua_jit_health_install() = """
+pub inline(lua) fn stone_lua_jit_health_install() = """
     if _G.__rock_jit_health_provider == stone then return end
     local loader = package.preload.stone_lua_jit_health
     if not loader then
