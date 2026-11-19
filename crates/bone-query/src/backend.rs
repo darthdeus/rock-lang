@@ -1824,28 +1824,20 @@ impl BoneWorkspace {
     }
 
     pub fn semantic_tokens(&self, path: &str) -> SemanticTokens {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
         self.semantic_tokens_impl(path, None)
     }
 
     /// Classify only bodies intersecting the requested viewport.
     pub fn semantic_tokens_range(&self, path: &str, range: Range) -> SemanticTokens {
-        let path_c = self.canon(path);
-        let path = path_c.as_str();
-        let Some(src) = self.project(path).and_then(|p| p.texts.get(path)) else {
-            return SemanticTokens::default();
-        };
-        self.semantic_tokens_impl(path, Some(byte_offsets(src, range)))
+        self.semantic_tokens_impl(path, Some(range))
     }
 
-    fn semantic_tokens_impl(&self, path: &str, range: Option<(usize, usize)>) -> SemanticTokens {
-        let Some(proj) = self.project(path) else {
+    fn semantic_tokens_impl(&self, path: &str, range: Option<Range>) -> SemanticTokens {
+        let Some((path, proj, src)) = self.open_file(path) else {
             return SemanticTokens::default();
         };
-        let Some(src) = proj.texts.get(path) else {
-            return SemanticTokens::default();
-        };
+        let path = path.as_str();
+        let range = range.map(|range| byte_offsets(src, range));
         let Some(toks) = proj.fallbacks.result(
             rock_tokenizer::Tokenizer::new(src, Ustr::from(path)).tokenize(),
             "semantic tokens",
