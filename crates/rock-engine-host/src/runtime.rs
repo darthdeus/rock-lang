@@ -175,143 +175,12 @@ pub fn lua_path_value() -> String {
     rock_host::project::lua_path_for(&luajit_path(), p)
 }
 
-/// Env switch enabling a RenderDoc GPU capture: the value is the capture
-/// file path template stone hands to `SetCaptureFilePathTemplate`
-/// (RenderDoc appends `_frame<N>.rdc`).
-pub(crate) const RENDERDOC_ENV: &str = "STONE_RENDERDOC";
-/// Optional explicit `librenderdoc.so` path for the preload gate.
-pub const RENDERDOC_LIB_ENV: &str = "STONE_RENDERDOC_LIB";
-
-/// `Some(template)` when a RenderDoc capture was requested, else `None`.
-/// Empty counts as unset, matching the `ROCK_LUAJIT` precedent.
-pub(crate) fn renderdoc_capture_requested() -> Option<String> {
-    std::env::var(RENDERDOC_ENV).ok().filter(|v| !v.is_empty())
-}
-
-/// Resolve the `librenderdoc.so` path to preload: `STONE_RENDERDOC_LIB`
-/// (verbatim, even when missing -- the child then fails loudly naming the
-/// user's path), else the `../lib/librenderdoc.so` sibling of `renderdoccmd`
-/// on PATH (the nix case), else the bare name for loader search. Never fails.
-pub fn resolve_renderdoc_lib() -> std::ffi::OsString {
-    resolve_renderdoc_lib_with(
-        std::env::var_os(RENDERDOC_LIB_ENV).filter(|v| !v.is_empty()),
-        std::env::var_os("PATH"),
-    )
-}
-
-pub fn resolve_renderdoc_lib_with(
-    lib_override: Option<std::ffi::OsString>,
-    path_var: Option<std::ffi::OsString>,
-) -> std::ffi::OsString {
-    if let Some(lib) = lib_override {
-        return lib;
-    }
-    if let Some(exe) = find_on_path_in(path_var.as_deref(), "renderdoccmd")
-        && let Some(sibling) = renderdoc_lib_sibling_of(&exe)
-    {
-        return sibling.into_os_string();
-    }
-    std::ffi::OsString::from("librenderdoc.so")
-}
-
-fn find_on_path_in(path_var: Option<&std::ffi::OsStr>, name: &str) -> Option<PathBuf> {
-    let path = path_var?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// `<prefix>/lib/librenderdoc.so` for a `<prefix>/bin/renderdoccmd`.
-/// Canonicalizes first: on NixOS the PATH entry is a `/run` symlink whose
-/// textual `../lib` does not exist.
-fn renderdoc_lib_sibling_of(exe: &Path) -> Option<PathBuf> {
-    let canon = fs_err::canonicalize(exe).ok()?;
-    let lib = canon
-        .parent()?
-        .parent()?
-        .join("lib")
-        .join("librenderdoc.so");
-    lib.is_file().then_some(lib)
-}
-
-/// Append `lib` to an ambient `LD_PRELOAD` value (append, never clobber).
-/// A present-but-empty ambient value is the scrub signature (some parent
-/// already loaded the lib); it contributes no entry.
-// Linux production use (`apply_renderdoc_gate`) plus its unit test in `lua_runner`.
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn join_preload(
-    existing: Option<&std::ffi::OsStr>,
-    lib: &std::ffi::OsStr,
-) -> std::ffi::OsString {
-    let mut joined = std::ffi::OsString::new();
-    if let Some(existing) = existing.filter(|v| !v.is_empty()) {
-        joined.push(existing);
-        joined.push(":");
-    }
-    joined.push(lib);
-    joined
-}
-
-/// Append the resolved lib to the child command's `LD_PRELOAD` (append,
-/// never clobber). Applied only to commands configured with `capture` --
-/// the final game spawn.
-///
-/// `librenderdoc.so` empties `LD_PRELOAD` in every process it loads into,
-/// so an ambient preload never survives the rock -> luajit chain (rock
-/// would load the lib first and scrub the var). Setting it explicitly on
-/// the final spawn's `Command` is the only shape that reaches the game.
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-pub(crate) fn apply_renderdoc_gate(cmd: &mut std::process::Command) {
-    if renderdoc_capture_requested().is_none() {
-        return;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let lib = resolve_renderdoc_lib();
-        if let Some(override_path) = std::env::var_os(RENDERDOC_LIB_ENV).filter(|v| !v.is_empty())
-            && !Path::new(&override_path).is_file()
-        {
-            eprintln!(
-                "rock: {}={} does not exist; the game will fail its RenderDoc load loudly",
-                RENDERDOC_LIB_ENV,
-                override_path.to_string_lossy()
-            );
-        }
-        let joined = join_preload(std::env::var_os("LD_PRELOAD").as_deref(), &lib);
-        cmd.env("LD_PRELOAD", joined);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        static WARN: std::sync::Once = std::sync::Once::new();
-        WARN.call_once(|| {
-            eprintln!(
-                "rock: {RENDERDOC_ENV} is set, but RenderDoc has no macOS support; \
-                 the game runs unhooked (use apitrace for GL captures)"
-            );
-        });
-    }
-    #[cfg(target_os = "windows")]
-    {
-        static WARN: std::sync::Once = std::sync::Once::new();
-        WARN.call_once(|| {
-            eprintln!(
-                "rock: {RENDERDOC_ENV} is set, but the Windows preload gate is not implemented; \
-                 the game runs unhooked"
-            );
-        });
-    }
-}
-
 /// The game or program spawn: LuaJIT running `lua_file` with the engine's
-/// runtime environment, JIT tracing switch and capture gate.
+/// runtime environment and JIT tracing switch.
 pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> std::process::Command {
     let mut command = rock_host::project::luajit_command();
     command.arg(lua_file).args(app_args);
-    configure_command(command, true, true, true)
+    configure_command(command, true, true)
 }
 
 /// Configure before stdio. Lua commands may change executable and prepend JIT
@@ -321,7 +190,6 @@ pub fn configure_command(
     command: std::process::Command,
     lua: bool,
     trace: bool,
-    capture: bool,
 ) -> std::process::Command {
     let mut configured = if lua {
         let mut configured = std::process::Command::new(luajit_path());
@@ -352,9 +220,6 @@ pub fn configure_command(
         rock_host::compiler_thp::configure_runtime_command(&mut configured);
     }
     configured.env(lib_path_var(), lib_path_with_inherited());
-    if capture {
-        apply_renderdoc_gate(&mut configured);
-    }
     configured
 }
 
@@ -365,18 +230,6 @@ mod tests {
     use tempfile::TempDir;
     fn lib_path_entries(value: &str) -> Vec<&str> {
         value.split(if cfg!(windows) { ';' } else { ':' }).collect()
-    }
-    #[cfg(unix)]
-    fn run_probe(
-        path: &Path,
-        code: &str,
-        timeout: Option<std::time::Duration>,
-        env: &[(&str, &str)],
-    ) -> anyhow::Result<rock_host::lua_runner::LuaRun> {
-        let mut command = std::process::Command::new(path);
-        command.envs(env.iter().copied());
-        rock_host::lua_runner::run_lua_code_with_command(command, code, timeout)
-            .map_err(|e| anyhow::anyhow!(e.message))
     }
     #[test]
     fn release_lib_path_never_searches_a_worktree_tmp() {
@@ -482,8 +335,8 @@ mod tests {
         );
     }
     /// Process env vars touched by this test, restored on drop -- including
-    /// when an assert unwinds, so a failure cannot leak LD_PRELOAD/PATH/
-    /// STONE_RENDERDOC_* into a sibling test sharing this process.
+    /// when an assert unwinds, so a failure cannot leak into a sibling test
+    /// sharing this process.
     struct EnvGuard {
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
@@ -515,155 +368,6 @@ mod tests {
                         None => std::env::remove_var(key),
                     }
                 }
-            }
-        }
-    }
-
-    /// Explicitly-set env on a Command (`get_envs` is the only reader;
-    /// ambient inheritance is invisible, which is exactly the pin).
-    fn cmd_env(cmd: &std::process::Command, key: &str) -> Option<std::ffi::OsString> {
-        cmd.get_envs()
-            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
-            .and_then(|(_, v)| v.map(|v| v.to_os_string()))
-    }
-
-    /// The STONE_RENDERDOC preload gate reaches only the final game spawn:
-    /// `build_luajit_command` gains the lib while the bytecode compile and
-    /// the stdin harness spawns stay clean, and everything stays clean when
-    /// the switch is unset. Append semantics and lib resolution are pinned
-    /// through the pure helpers: this test mutates only STONE_RENDERDOC_*
-    /// process-wide (no sibling reads them), never LD_PRELOAD/PATH, so it
-    /// stays green under threaded `cargo test` as well as nextest.
-    #[test]
-    fn renderdoc_gate_reaches_only_the_final_spawn() {
-        use std::ffi::OsStr;
-        use std::path::Path;
-
-        const SENTINEL: &str = "/ambient/sentinel.so";
-        const TEMPLATE: &str = "/tmp/rd-gate-test/captures/demo-crypt";
-        let lua = Path::new("tmp/main.lua");
-
-        // Append semantics, pure: ambient preserved first, scrub-empty
-        // contributes no entry (entries are `:`-separated per ld.so).
-        let joined = super::join_preload(Some(OsStr::new(SENTINEL)), OsStr::new("librenderdoc.so"));
-        let binding = joined.to_string_lossy();
-        let entries: Vec<_> = binding.split(':').collect();
-        assert_eq!(entries, vec![SENTINEL, "librenderdoc.so"]);
-        assert_eq!(
-            super::join_preload(None, OsStr::new("librenderdoc.so")).to_string_lossy(),
-            "librenderdoc.so"
-        );
-        assert_eq!(
-            super::join_preload(Some(OsStr::new("")), OsStr::new("librenderdoc.so"))
-                .to_string_lossy(),
-            "librenderdoc.so"
-        );
-
-        // Resolution, pure: override verbatim, renderdoccmd sibling, bare
-        // fallback. Canonicalized: production canonicalizes the PATH hit.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().canonicalize().expect("canonical tempdir");
-        let bin = root.join("bin");
-        let lib = root.join("lib");
-        std::fs::create_dir_all(&bin).expect("bin");
-        std::fs::create_dir_all(&lib).expect("lib");
-        std::fs::write(bin.join("renderdoccmd"), "#!/bin/sh\n").expect("fake renderdoccmd");
-        let sibling = lib.join("librenderdoc.so");
-        std::fs::write(&sibling, "fake").expect("fake lib");
-        let resolve = super::resolve_renderdoc_lib_with;
-        assert_eq!(
-            resolve(
-                Some(sibling.as_os_str().to_os_string()),
-                Some(std::ffi::OsString::from("/no/such/bin"))
-            ),
-            sibling.as_os_str()
-        );
-        assert_eq!(
-            resolve(None, Some(bin.as_os_str().to_os_string())),
-            sibling.as_os_str()
-        );
-        assert_eq!(
-            resolve(None, Some(std::ffi::OsString::from("/no/such/bin"))).to_string_lossy(),
-            "librenderdoc.so"
-        );
-        assert_eq!(resolve(None, None).to_string_lossy(), "librenderdoc.so");
-
-        // Gate ON with an explicit lib override (a real file: keeps the
-        // missing-override warning out of the test output).
-        {
-            let override_lib = sibling.to_string_lossy().into_owned();
-            let _guard = EnvGuard::set(&[
-                ("STONE_RENDERDOC", Some(TEMPLATE)),
-                ("STONE_RENDERDOC_LIB", Some(&override_lib)),
-            ]);
-            if cfg!(target_os = "linux") {
-                let game = super::build_luajit_command(lua, &[]);
-                let preload = cmd_env(&game, "LD_PRELOAD")
-                    .expect("gate sets LD_PRELOAD on the final game spawn")
-                    .to_string_lossy()
-                    .into_owned();
-                assert!(
-                    preload.contains(&override_lib),
-                    "gate must append the override lib: {preload}"
-                );
-
-                let bytecode = super::configure_command(
-                    rock_host::project::build_luajit_bytecode_command(
-                        lua,
-                        Path::new("tmp/main.ljbc"),
-                    ),
-                    true,
-                    false,
-                    false,
-                );
-                assert!(
-                    cmd_env(&bytecode, "LD_PRELOAD").is_none(),
-                    "bytecode compile is not the final spawn"
-                );
-            }
-            #[cfg(unix)]
-            {
-                // Harness spawn observed through real children: an explicit
-                // child preload passes through exactly, and without one no
-                // gate lib appears. The sentinel travels via the child's own
-                // env, never via process-global LD_PRELOAD.
-                let probe = root.join("print_preload");
-                test_utils::write_executable(
-                    &probe,
-                    "#!/bin/sh\ncat >/dev/null\necho \"LD_PRELOAD=$LD_PRELOAD\"\n",
-                );
-                let run = run_probe(
-                    &probe,
-                    "",
-                    Some(test_utils::HANG_BACKSTOP),
-                    &[("LD_PRELOAD", SENTINEL)],
-                )
-                .expect("probe child runs");
-                assert!(run.success, "probe child failed: {}", run.combined());
-                assert_eq!(
-                    run.stdout.trim(),
-                    format!("LD_PRELOAD={SENTINEL}"),
-                    "harness spawn must pass the child preload through exactly"
-                );
-                let bare = run_probe(&probe, "", Some(test_utils::HANG_BACKSTOP), &[])
-                    .expect("bare probe child runs");
-                assert!(
-                    !bare.stdout.contains("librenderdoc"),
-                    "harness spawn must not gain the gate lib: {}",
-                    bare.stdout
-                );
-            }
-        }
-
-        // Gate OFF: STONE_RENDERDOC unset leaves the final spawn clean too.
-        {
-            let _guard = EnvGuard::set(&[("STONE_RENDERDOC", None), ("STONE_RENDERDOC_LIB", None)]);
-            if cfg!(target_os = "linux") {
-                let game = super::build_luajit_command(lua, &[]);
-                assert!(
-                    cmd_env(&game, "LD_PRELOAD").is_none(),
-                    "gate off must not touch LD_PRELOAD"
-                );
             }
         }
     }

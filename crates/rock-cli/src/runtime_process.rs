@@ -16,12 +16,7 @@ pub fn configure(command: Command, purpose: RuntimeProcess) -> Command {
     use RuntimeProcess::*;
     let lua = matches!(purpose, LuaRun { .. } | LuaStdin | LuaTest | LuaBytecode);
     let trace = matches!(purpose, LuaRun { .. } | LuaTest);
-    let mut command = rock_engine_host::runtime::configure_command(
-        command,
-        lua,
-        trace,
-        matches!(purpose, LuaRun { .. }),
-    );
+    let mut command = rock_engine_host::runtime::configure_command(command, lua, trace);
     if matches!(purpose, LuaTest | LuaRun { headless: true }) {
         command.env("STONE_HEADLESS", "1");
     }
@@ -83,16 +78,12 @@ mod process_tests {
 mod runtime_service_tests {
     use super::{RuntimeProcess, configure};
     #[test]
-    fn lua_process_purposes_preserve_launch_and_capture_boundaries() {
+    fn lua_process_purposes_preserve_launch_boundaries() {
         const CHILD: &str = "ROCK_LUA_PURPOSE_WITNESS";
         if std::env::var_os(CHILD).is_none() {
-            let root = tempfile::tempdir().unwrap();
-            let library = root.path().join("librenderdoc.so");
-            std::fs::write(&library, "").unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "runtime_process::runtime_service_tests::lua_process_purposes_preserve_launch_and_capture_boundaries"])
-                .env(CHILD, "1").env("STONE_RENDERDOC", "capture")
-                .env("STONE_RENDERDOC_LIB", &library).env("STONE_JV", "1")
+                .args(["--exact", "runtime_process::runtime_service_tests::lua_process_purposes_preserve_launch_boundaries"])
+                .env(CHILD, "1").env("STONE_JV", "1")
                 .env("STONE_HEADLESS", "0").env("ROCK_HEADLESS_SCOPE", "0")
                 .output().unwrap();
             assert!(
@@ -103,11 +94,11 @@ mod runtime_service_tests {
             );
             return;
         }
-        for (purpose, trace, capture, headless) in [
-            (RuntimeProcess::LuaRun { headless: false }, true, true, None),
-            (RuntimeProcess::LuaTest, true, false, Some("1")),
-            (RuntimeProcess::LuaStdin, false, false, None),
-            (RuntimeProcess::LuaBytecode, false, false, None),
+        for (purpose, trace, headless) in [
+            (RuntimeProcess::LuaRun { headless: false }, true, None),
+            (RuntimeProcess::LuaTest, true, Some("1")),
+            (RuntimeProcess::LuaStdin, false, None),
+            (RuntimeProcess::LuaBytecode, false, None),
         ] {
             let mut input = std::process::Command::new("plain-luajit");
             input
@@ -143,10 +134,6 @@ mod runtime_service_tests {
                     .any(|(key, value)| key == "ROCK_REMOVED_ENV" && value.is_none())
             );
             assert_eq!(env("STONE_HEADLESS"), headless.map(std::ffi::OsStr::new));
-            #[cfg(target_os = "linux")]
-            assert_eq!(env("LD_PRELOAD").is_some(), capture);
-            #[cfg(not(target_os = "linux"))]
-            let _ = capture;
         }
     }
 }

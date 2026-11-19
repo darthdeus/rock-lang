@@ -1289,7 +1289,6 @@ fn headless_launch_uses_the_shared_scope_and_preserves_command_inputs() {
             .env("STONE_HEADLESS", "1")
             .env("ROCK_HEADLESS_SCOPE", "1")
             .env_remove("STONE_JV")
-            .env_remove("STONE_RENDERDOC")
             .output()
             .unwrap();
         assert!(out.status.success(), "{}", text(&out));

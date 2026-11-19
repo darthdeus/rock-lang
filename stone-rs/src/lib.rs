@@ -350,7 +350,6 @@ mod mesh;
 mod mesh_capture;
 mod native_ledger;
 mod pixel_readback;
-mod renderdoc;
 mod shader;
 mod sprite;
 mod stream_buffer;
@@ -1315,7 +1314,6 @@ where
 #[no_mangle]
 pub extern "C" fn stone_init() -> bool {
     logging::init();
-    crate::renderdoc::init();
     QUIT_REQUESTED.store(false, Ordering::SeqCst);
     INITIALIZED.store(true, Ordering::SeqCst);
     true
@@ -1359,7 +1357,6 @@ pub extern "C" fn stone_teardown() -> bool {
     crate::flow_jobs::shutdown();
     crate::relight_jobs::shutdown();
     crate::nav::shutdown();
-    crate::renderdoc::on_teardown();
     input::test_virtual_pad_cleanup();
     // ImGui's OpenGL3 backend shutdown needs the live GL context. Idempotent:
     // early-returns if ImGui was never initialized.
@@ -2284,9 +2281,7 @@ pub extern "C" fn stone_stop_text_input() {
 /// Swap buffers
 #[no_mangle]
 pub extern "C" fn stone_swap_window(_window: *mut StoneWindow) {
-    let completed = GL_SWAP_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-    // RenderDoc frame auto-trigger; one branch when STONE_RENDERDOC is unset.
-    crate::renderdoc::on_swap(completed);
+    GL_SWAP_COUNT.fetch_add(1, Ordering::SeqCst);
     with_window(|window| {
         if !window.runtime_hidden && window.pending_show.is_none() {
             canvas::present_headless_screen(&window.window);
