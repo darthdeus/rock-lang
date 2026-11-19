@@ -3124,7 +3124,10 @@ impl<'a> Builder<'a> {
     /// The return-value list for `opt`: under the scalar value ABI a value return
     /// flattens to its leaf scalars (`return v0, v1, ...`); otherwise it's the
     /// single (boxed) value, or empty for a bare return.
-    fn return_leaves(&mut self, opt: Option<Idx<Expr>>) -> Result<Vec<Idx<Inst>>, CompilerError> {
+    pub(crate) fn return_leaves(
+        &mut self,
+        opt: Option<Idx<Expr>>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         self.with_value_lending(true, |s| s.return_leaves_lent(opt))
     }
 

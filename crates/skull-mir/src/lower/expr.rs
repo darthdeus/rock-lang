@@ -304,39 +304,7 @@ impl<'a> Builder<'a> {
                 super::stmt::DeferMode::for_body(false, self.call_scx.target),
             );
             self.ret_rep = lam_plan.result();
-            let leaves = if self.ret_rep.is_none() {
-                self.lower_stmt_expr(body)?;
-                Vec::new()
-            } else if self.result_shape().is_some() {
-                let r = self.lower_expr_repr(body)?;
-                if self.is_open() {
-                    self.repr_to_leaves_bundle(&r)?
-                } else {
-                    Vec::new()
-                }
-            } else {
-                match self.result_tuple() {
-                    // A splatting tuple return needs the body as a repr, so a
-                    // `nobox` element reaches the wire as leaves.
-                    Some(shape) if shape.splats(self.scx.rep_arena()) => {
-                        let r = self.lower_expr_repr(body)?;
-                        if self.is_open() {
-                            self.tuple_repr_to_slots(r.into_value(), shape)?
-                        } else {
-                            Vec::new()
-                        }
-                    }
-                    Some(shape) => {
-                        let v = self.lower_expr(body)?;
-                        if self.is_open() {
-                            self.tuple_return_operands(v, shape.slots.len())
-                        } else {
-                            Vec::new()
-                        }
-                    }
-                    None => vec![self.lower_expr(body)?],
-                }
-            };
+            let leaves = self.return_leaves(Some(body))?;
             if self.is_open() {
                 self.f.set_term(self.cur, Term::Return(leaves));
             }
