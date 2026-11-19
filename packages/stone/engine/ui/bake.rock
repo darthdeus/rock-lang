@@ -37,10 +37,6 @@ pub fn ui_bake_canvas<T>(bake: UiBake<T>) -> Canvas? {
     return canvas
 }
 
-pub fn ui_bake_count<T>(bake: UiBake<T>) -> int {
-    return bake.bake_count
-}
-
 pub fn ui_bake_destroy<T>(bake: UiBake<T>) {
     draw_list_destroy(bake.draw_list)
     bake.pool_retired = true

@@ -373,15 +373,6 @@ pub fn text_art_raster_demand_for(
     }
 }
 
-pub fn text_art_raster_demand_probe(
-    font: Font,
-    text: string,
-    authored_cap_height: float,
-    target_scale: float
-) -> TextArtRasterDemand {
-    return text_art_raster_demand_for(font, text, authored_cap_height, target_scale)
-}
-
 pub fn text_art_atlas_instance_for(
     font: Font,
     demand: TextArtRasterDemand,
@@ -998,18 +989,6 @@ pub fn text_art_stats<T>(art: TextArt<T>) -> TextArtStats {
         shadow_pyramid_bake_count: art.shadow_pyramid_bake_count,
         shadow_pyramid_cache_hit: art.shadow_pyramid_cache_hit,
     }
-}
-
-pub fn text_art_emission_canvas<T>(art: TextArt<T>) -> Canvas? {
-    if art.workspace == null { return null }
-    let canvas = art.workspace.emission
-    return if canvas_is_live(canvas) { canvas } else { null }
-}
-
-pub fn text_art_shadow_canvas<T>(art: TextArt<T>) -> Canvas? {
-    if art.workspace == null || art.workspace.shadow.len() == 0 { return null }
-    let canvas = art.workspace.shadow[0]
-    return if canvas_is_live(canvas) { canvas } else { null }
 }
 
 pub fn text_art_destroy<T>(art: TextArt<T>) {

@@ -1007,32 +1007,6 @@ pub value TextGlyph {
     pivot: Vec2,
 }
 
-// Advance, max ascent and max glyph height of `text[from..to)` at `scale`.
-pub fn measure_text_range(
-    glyphs: [GlyphData],
-    cp_slots: Map<int, int>,
-    text: string,
-    from: int,
-    to: int,
-    scale: float
-) -> (float, float, float) {
-    let advance = 0.0
-    let max_ascent = 0.0
-    let max_glyph_h = 0.0
-    for i in from..to {
-        let slot = text_glyph_slot(cp_slots, text, i)
-        if slot < 0 { continue }
-        let g = glyphs[slot]
-        if !g.valid { continue }
-        advance = advance + g.advance * scale
-        let a = g.bearing_y * scale
-        if a > max_ascent { max_ascent = a }
-        let gh = g.height * scale
-        if gh > max_glyph_h { max_glyph_h = gh }
-    }
-    return (advance, max_ascent, max_glyph_h)
-}
-
 pub nobox value TextFlowMetrics {
     font: Font,
     index: int,
@@ -2109,33 +2083,6 @@ pub fn text_layout_identity_poses(layout: TextLayout) -> [GlyphPose] {
     return poses
 }
 
-pub fn glyph_pose_translate(pose: GlyphPose, translation: Vec2) -> GlyphPose {
-    return GlyphPose {
-        glyph_index: pose.glyph_index,
-        source_index: pose.source_index,
-        glyph: pose.glyph,
-        translation: pose.translation + translation,
-        scale: pose.scale,
-        rotation: pose.rotation,
-    }
-}
-
-pub fn glyph_pose_transform(
-    pose: GlyphPose,
-    translation: Vec2,
-    scale: Vec2,
-    rotation: float
-) -> GlyphPose {
-    return GlyphPose {
-        glyph_index: pose.glyph_index,
-        source_index: pose.source_index,
-        glyph: pose.glyph,
-        translation: pose.translation + translation,
-        scale: pose.scale * scale,
-        rotation: pose.rotation + rotation,
-    }
-}
-
 fn text_layout_pose_at(layout: TextLayout, index: int, poses: [GlyphPose]?) -> GlyphPose? {
     if poses == null { return null }
     let all = poses
@@ -2294,14 +2241,6 @@ pub value ResolvedPlainText {
     ascent: float,
     height: float,
     line_height: float,
-}
-
-pub fn run_glyphs(run: ResolvedTextRun) -> [GlyphData] {
-    return GLYPH_CACHES[run.font.data().unwrap().backend_id - 1][run.face]
-}
-
-pub fn run_cp_slots(run: ResolvedTextRun) -> Map<int, int> {
-    return FONT_CP_SLOTS[run.font.data().unwrap().backend_id - 1]
 }
 
 // An explicit family resolves every handle and atlas up front; legacy

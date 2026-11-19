@@ -233,12 +233,6 @@ fn new_owned_semantic_block(
     return out
 }
 
-pub fn shader_uniform_block_count(shader_name: string) -> int {
-    let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
-    if entry == null { return 0 }
-    return entry.blocks.len()
-}
-
 // Native C shader registration has already bound and driver-validated these
 // blocks before the generated publication hook runs. The Rock-side registry
 // still needs scratch storage for its packers, but must not bind a second GL

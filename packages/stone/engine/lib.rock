@@ -314,7 +314,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
 
         // Input query functions
         uint8_t stone_is_key_down(const char* key);
-        uint8_t stone_is_mouse_button_down(int button);
         void stone_get_mouse_position(int* x, int* y);
         void stone_get_global_mouse_position(int* x, int* y);
 
@@ -388,7 +387,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         bool stone_telemetry_configure(const char* root, const char* game, const char* build, const char* platform, const char* channel, const char* endpoint, const char* token, bool explicit_reconsent);
         bool stone_telemetry_record(const char* name, int64_t timestamp, const char* data);
         bool stone_telemetry_validate(const char* name, int64_t timestamp, const char* data);
-        bool stone_telemetry_flush(void);
         void stone_telemetry_close(void);
         bool stone_telemetry_clear(const char* root);
         bool stone_telemetry_withdrawn(const char* root);
@@ -499,7 +497,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         bool stone_image_data_read_rgba(StoneImageDataHandle handle, uint8_t* rgba, int pixel_count);
         StoneImageDataHandle stone_image_data_load_png(const char* path);
         StoneImageDataHandle stone_image_data_load_png_bytes(const uint8_t* bytes, int len);
-        StoneImageDataHandle stone_clipboard_image_data(void);
         uint8_t stone_set_clipboard_text(const char* text);
         const char* stone_system_report(void);
         uint8_t stone_image_data_save_png(StoneImageDataHandle handle, const char* path);
@@ -534,11 +531,8 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_stop_sound(StoneSoundHandle handle);
         uint8_t stone_bus_set_gain(uint32_t bus, float gain);
         uint64_t stone_bus_samples_pulled(uint32_t bus);
-        uint64_t stone_bus_duck_count(uint32_t bus);
-        float stone_bus_gain(uint32_t bus);
         float stone_bus_peak(uint32_t bus);
         uint8_t stone_bus_set_lowpass(uint32_t bus, float cutoff_hz, float q);
-        float stone_bus_lowpass_cutoff(uint32_t bus);
         uint8_t stone_bus_set_distortion(uint32_t bus, float drive, float mix);
         uint8_t stone_bus_set_reverb(uint32_t bus, bool enabled, float room_size, float damping, float wet, float dry, float width);
         uint8_t stone_bus_duck(uint32_t bus, float depth, float attack_secs, float release_secs);
@@ -820,8 +814,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_proc_kill(int handle);
         int stone_proc_reset(void);
         int stone_proc_occupied_count(void);
-        int stone_native_class_count(void);
-        const char* stone_native_class_name(int index);
         const char* stone_native_live_handles(const char* class);
         uint8_t stone_native_destroy(const char* class, uint64_t handle);
         int stone_native_handle_state(const char* class, uint64_t handle);
@@ -939,7 +931,6 @@ pub extern(ffi, "stone") fn stone_delay(ms: int)
 
 // Input query functions
 extern(ffi, "stone") fn stone_is_key_down(key: string) -> bool
-pub extern(ffi, "stone") fn stone_is_mouse_button_down(button: int) -> bool
 
 // Raw C boundary (out-param overloads, 2 args).
 extern(ffi, "stone") fn stone_get_mouse_position(x: Ptr<int>, y: Ptr<int>)
@@ -1058,21 +1049,13 @@ pub fn stone_proc_poll_line(handle: int) -> string {
 // An unknown class name answers NULL rather than an empty set, so a caller
 // asking about a class the engine does not have gets a refusal instead of a
 // reading that looks like "nothing is live".
-extern(ffi, "stone") fn stone_native_class_count() -> int
 pub extern(ffi, "stone") fn stone_native_destroy(class: string, handle: int) -> bool
 pub extern(ffi, "stone") fn stone_native_handle_state(class: string, handle: int) -> int
-@inline inline(lua) fn stone_native_class_name_ptr(index: int) -> any = "stone.stone_native_class_name(index)"
 @inline inline(lua) fn stone_native_live_handles_ptr(class: string) -> any = "stone.stone_native_live_handles(class)"
 @inline inline(lua) fn stone_native_id_accounting_ptr() -> any = "stone.stone_native_id_accounting()"
 @nomangle inline(lua) fn __stone_ptr_is_null(p: any) -> bool = """
     return p == nil or p == ffi.NULL
 """
-
-fn stone_native_class_name(index: int) -> string? {
-    let p = stone_native_class_name_ptr(index)
-    if __stone_ptr_is_null(p) { return null }
-    return ffi_string(p, null)
-}
 
 pub fn stone_native_live_handles(class: string) -> string? {
     let p = stone_native_live_handles_ptr(class)
@@ -1617,7 +1600,6 @@ extern(ffi, "stone") fn stone_image_data_read_rgba(handle: int, rgba: PtrU8, pix
 // PNG codec (image crate, Rust-side). 0 = error on load; false = error on save.
 pub extern(ffi, "stone") fn stone_image_data_load_png(path: string) -> int
 extern(ffi, "stone") fn stone_image_data_load_png_bytes(bytes: PtrU8, len: int) -> int
-extern(ffi, "stone") fn stone_clipboard_image_data() -> int
 extern(ffi, "stone") fn stone_image_data_save_png(handle: int, path: string) -> bool
 
 // Puts text on the system clipboard; false (logged natively) on failure.
@@ -1626,12 +1608,6 @@ pub extern(ffi, "stone") fn stone_set_clipboard_text(text: string) -> bool
 // The engine's host facts, one `key: value` per line: OS and version, CPU,
 // GL renderer/vendor/version, video driver, displays and the window's.
 pub inline(lua) fn stone_system_report_text() -> string = "return ffi.string(stone.stone_system_report())"
-
-pub fn clipboard_image_data() -> ImageData? {
-    let handle = stone_clipboard_image_data()
-    if handle == 0 { return null }
-    return ImageData(handle)
-}
 
 // In-place glTexSubImage2D upload from an ImageData buffer into an
 // existing texture. Sizes must match. Used for live brush feedback.
@@ -1690,11 +1666,8 @@ pub extern(ffi, "stone") fn stone_music_byte_len(handle: int) -> int
 pub extern(ffi, "stone") fn stone_stop_sound(handle: int)
 pub extern(ffi, "stone") fn stone_bus_set_gain(bus: int, gain: float) -> bool
 extern(ffi, "stone") fn stone_bus_samples_pulled(bus: int) -> int
-extern(ffi, "stone") fn stone_bus_duck_count(bus: int) -> int
-extern(ffi, "stone") fn stone_bus_gain(bus: int) -> float
 extern(ffi, "stone") fn stone_bus_peak(bus: int) -> float
 pub extern(ffi, "stone") fn stone_bus_set_lowpass(bus: int, cutoff_hz: float, q: float) -> bool
-extern(ffi, "stone") fn stone_bus_lowpass_cutoff(bus: int) -> float
 pub extern(ffi, "stone") fn stone_bus_set_distortion(bus: int, drive: float, mix: float) -> bool
 pub extern(ffi, "stone") fn stone_bus_set_reverb(bus: int, enabled: bool, room_size: float, damping: float, wet: float, dry: float, width: float) -> bool
 pub extern(ffi, "stone") fn stone_bus_duck(bus: int, depth: float, attack_secs: float, release_secs: float) -> bool

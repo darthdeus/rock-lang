@@ -577,22 +577,6 @@ fn live_allocation_capture_reset() {
 global PROFILER_ENABLED_PENDING: int = -1
 global PROFILER_ALLOC_COUNTER_OWNER: int = 0
 
-pub fn profiler_live_allocation_capture_active() -> bool {
-    return LIVE_ALLOC_CAPTURE.active
-}
-
-pub fn profiler_live_allocation_observed_frames() -> int {
-    return LIVE_ALLOC_CAPTURE.observed_frames
-}
-
-pub fn profiler_live_gross_request_kb_per_frame() -> float {
-    return LIVE_ALLOC_GROSS_KB.mean
-}
-
-pub fn profiler_live_allocator_calls_per_frame() -> float {
-    return LIVE_ALLOC_CALLS.mean
-}
-
 pub fn live_allocation_capture_begin() {
     assert(!GC_STEP_ENABLED, "live allocation capture conflicts with PERF_GC_STEPS")
     live_allocation_capture_reset()
@@ -2118,82 +2102,11 @@ pub fn profile_observation(name: string, value_ms: float) {
     nb_set(SECTION_LAST_OBSERVATION_MS, id, value_ms)
 }
 
-pub fn profile_observation_mean_ms(name: string) -> float {
-    if !ENGINE.profiler_enabled { return 0.0 }
-    let id = section_lookup(name)
-    if id < 0 { return 0.0 }
-    return section_observation_metric(id).mean
-}
-
-pub fn profile_observation_p95_ms(name: string) -> float {
-    if !ENGINE.profiler_enabled { return 0.0 }
-    let id = section_lookup(name)
-    if id < 0 { return 0.0 }
-    return metric_p95(section_observation_metric(id))
-}
-
-pub fn profile_observation_max_ms(name: string) -> float {
-    if !ENGINE.profiler_enabled { return 0.0 }
-    let id = section_lookup(name)
-    if id < 0 { return 0.0 }
-    return section_observation_metric(id).max
-}
-
-pub fn profile_observation_count(name: string) -> int {
-    if !ENGINE.profiler_enabled { return 0 }
-    let id = section_lookup(name)
-    if id < 0 { return 0 }
-    return section_observation_metric(id).count
-}
-
-pub fn profile_observation_last_ms(name: string) -> float {
-    if !ENGINE.profiler_enabled { return 0.0 }
-    let id = section_lookup(name)
-    if id < 0 { return 0.0 }
-    return nb_get(SECTION_LAST_OBSERVATION_MS, id)
-}
-
-// Mark an interaction at the boundary where the product first observes it.
-// The frame end is the strongest generic boundary available before the
-// presentation device; it is intentionally not called input-to-photon.
-pub fn profile_mark_latency_event() {
-    if !ENGINE.profiler_enabled { return }
-    let now = stone_get_time()
-    if PROFILER.pending_latency_event_t0 < 0.0 || now < PROFILER.pending_latency_event_t0 {
-        PROFILER.pending_latency_event_t0 = now
-    }
-}
-
-pub fn profile_last_event_to_end_frame_ms() -> float {
-    return PROFILER.last_event_to_end_frame_ms
-}
-
-pub fn profile_last_ms(name: string) -> float {
-    if !ENGINE.profiler_enabled { return 0.0 }
-    let id = section_lookup(name)
-    if id < 0 { return 0.0 }
-    return nb_get(SECTION_LAST_SECONDS, id) * 1000.0
-}
-
 pub fn profile_section_mean_ms(name: string) -> float {
     if !ENGINE.profiler_enabled { return 0.0 }
     let id = section_lookup(name)
     if id < 0 { return 0.0 }
     return section_time_metric(id).mean * 1000.0
-}
-
-pub fn profile_section_p95_ms(name: string) -> float {
-    if !ENGINE.profiler_enabled { return 0.0 }
-    let id = section_lookup(name)
-    if id < 0 { return 0.0 }
-    return metric_p95(section_time_metric(id)) * 1000.0
-}
-
-pub fn profile_section_max_ms(name: string) -> float {
-    if !ENGINE.profiler_enabled { return 0.0 }
-    let id = section_lookup(name)
-    if id < 0 { return 0.0 }
-    return section_time_metric(id).max * 1000.0
 }
 
 pub fn profile_section_count(name: string) -> int {
@@ -2690,16 +2603,6 @@ pub fn frame_timing_snapshot() -> FrameTimingSnapshot {
         latest_rendered_fps: if latest > 0.0 { 1000.0 / latest } else { 0.0 },
         gpu_supported: PROFILER.gpu_supported,
     }
-}
-
-// Mean rendered frame time in seconds (the rendered Metric is in ms). Callers
-// that want FPS invert it.
-pub fn get_average_frame_time() -> float {
-    return frame_timing_snapshot().rendered.mean / 1000.0
-}
-
-pub fn get_average_fps() -> float {
-    return frame_timing_snapshot().rendered_fps
 }
 
 // The frame-rate readout. Queued into whichever UI pool is ambient, which the

@@ -241,8 +241,6 @@ pub global outline_mask_written: bool = false
 pub global outline_target_canvas: Canvas = NO_CANVAS
 pub global UI_RASTER_CANVAS: Canvas? = null
 pub global OUTPUT_HDR_CANVAS: Canvas? = null
-// Submitted clears of OUTPUT_HDR_CANVAS, for sims.
-pub global OUTPUT_HDR_CLEARS: int = 0
 // Whether OUTPUT_HDR_CANVAS holds this frame's content. Only the main menu's
 // TextArt writes the layer, so the first write of a frame creates (when
 // absent) and clears it and only a written frame presents it; once nothing
@@ -339,47 +337,10 @@ fn output_hdr_begin_frame() {
     OUTPUT_HDR_WRITTEN = false
 }
 
-// This frame's layer for a writer or reader, created when absent and cleared
-// on the frame's first use. Null before any render view sized it.
-pub fn output_hdr_frame_canvas() -> Canvas? {
-    if OUTPUT_HDR_WRITTEN { return OUTPUT_HDR_CANVAS }
-    let size = OUTPUT_HDR_TARGET_SIZE
-    if size.x < 1 || size.y < 1 { return null }
-    if OUTPUT_HDR_CANVAS == null {
-        OUTPUT_HDR_CANVAS = new_canvas(size.x, size.y, "rgba16f")
-    }
-    let target = OUTPUT_HDR_CANVAS.unwrap()
-    OUTPUT_HDR_WRITTEN = true
-    if SIM_SKIP_SUBMIT { return target }
-    with_canvas(target, () => clear_screen(0.0, 0.0, 0.0, 0.0))
-    OUTPUT_HDR_CLEARS += 1
-    return target
-}
-
 // This frame's layer if something wrote it; a stale layer is never presented.
 fn output_hdr_written_canvas() -> Canvas? {
     if !OUTPUT_HDR_WRITTEN { return null }
     return OUTPUT_HDR_CANVAS
-}
-
-pub fn output_hdr_composite_to(source: Canvas, target: Canvas) {
-    if int(source.width) != int(target.width) || int(source.height) != int(target.height) {
-        error("output HDR source extent must equal FrameView.ui_raster_size")
-    }
-    if !run_pass(Pass {
-        pipeline: BLIT_PIPELINE,
-        slot_inputs: [(sampled_canvas(source), TextureFilter::Nearest)],
-        output: target,
-        clear: null,
-        blend: BlendMode::Premultiplied,
-    }) {
-        error("output HDR canvas composite was refused")
-    }
-}
-
-pub fn output_hdr_composite_canvas(source: Canvas) {
-    let target = output_hdr_frame_canvas() ?? return
-    output_hdr_composite_to(source, target)
 }
 
 fn output_hdr_present(target: GpuTarget) {
@@ -911,25 +872,6 @@ fn _draw_circle_outline_dur(
     thickness: float
 ) {
     run_with_duration(duration, () => draw_circle(p, radius, color, entity_id, layer, FillMode::Outline, depth, thickness: thickness))
-}
-
-pub fn draw_ellipse_outline(
-    p: Vec2,
-    radii: Vec2,
-    color: Color,
-    entity_id: int = 0,
-    layer: int = DEFAULT_SHAPE_LAYER,
-    depth: DepthMode = DepthMode::Off,
-    thickness: float = 1.0 / 16.0,
-    blend: BlendMode = BlendMode::Alpha,
-    order: int = 0,
-    z_off: float = 0,
-    outline: Outline? = null,
-    segments: int = 32
-) {
-    emit_ellipse(p, radii, color, entity_id, layer, FillMode::Outline, depth,
-        thickness, blend: blend, order: order, z_off: z_off,
-        outline: outline, segments: segments)
 }
 
 pub fn draw_circle(

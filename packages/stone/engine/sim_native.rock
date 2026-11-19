@@ -1,21 +1,7 @@
 
 // Rock's reader of the native resource ledger (`stone-rs/src/native_ledger.rs`):
-// which classes exist, which handles of each are live, and the id accounting
-// that checks a class's live set against the allocator. Sim fixtures read it.
-
-// The class list comes from the engine, never from a second list here.
-pub fn sim_native_classes() -> [string] {
-    let out: [string] = []
-    for i in 0..stone_native_class_count() {
-        let name = stone_native_class_name(i)
-        if name == null {
-            log_error("SIM", "native ledger class {i} has no name")
-            continue
-        }
-        out.push(name)
-    }
-    return out
-}
+// which handles of each class are live, and the id accounting that checks a
+// class's live set against the allocator. Sim fixtures read it.
 
 // A class the engine does not know is a refusal, not an empty set.
 pub fn sim_native_live(class: string) -> string {
@@ -30,13 +16,6 @@ pub fn sim_native_live(class: string) -> string {
 pub fn sim_native_split(csv: string) -> [string] {
     if csv == "" { return [] }
     return csv.split(",")
-}
-
-pub fn sim_native_contains(handles: [string], handle: string) -> bool {
-    for h in handles {
-        if h == handle { return true }
-    }
-    return false
 }
 
 // One field of one class's id-accounting row, or -1 when the report has no such

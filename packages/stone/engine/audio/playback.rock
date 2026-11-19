@@ -58,14 +58,6 @@ fn stone_quiet_init() {
 // Headless and sim runs can silence playback through the shared quiet gate.
 fn audio_gate_muted() -> bool { return STONE_QUIET }
 
-pub fn play_music_direct(handle: int) {
-    stone_play_music(handle)
-}
-
-pub fn play_sound_direct(handle: int, bus: int, volume: float, speed: float, decay: float, looped: bool) -> int {
-    return stone_play_sound(handle, bus, volume, speed, decay, looped, false, 0.0)
-}
-
 pub fn load_multisound(paths: [string]) -> MultiSound {
     return load_multisound_asset(paths)
 }

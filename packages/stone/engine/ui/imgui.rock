@@ -994,10 +994,6 @@ fn imgui_no_dock_layout() -> DockLayout {
     }
 }
 
-pub fn imgui_set_dock_layout(layout: DockLayout) {
-    IMGUI_DOCK_LAYOUT = layout
-}
-
 fn imgui_dock_layout_stamp(layout: DockLayout) -> string {
     return "{layout.id}:{layout.version}"
 }
@@ -1459,14 +1455,7 @@ pub value ImguiTestItem {
     whole: bool,
 }
 
-value ImguiTestCombo {
-    frame: int,
-    current: int,
-    items: [string],
-}
-
 pub global IMGUI_TEST_ITEMS: Map<string, ImguiTestItem> = map_new()
-global IMGUI_TEST_COMBOS: Map<string, ImguiTestCombo> = map_new()
 global IMGUI_TEST_REVEAL_TARGET: string = ""
 
 pub fn imgui_test_recording() -> bool { return IMGUI_RECORD_BODIES }
@@ -1543,40 +1532,6 @@ pub co fn imgui_test_reveal(id: string, whole: bool = false, relative: Vec2? = n
     }
 }
 
-fn imgui_test_note_combo(id: string, current: int, items: [string]) {
-    imgui_test_note_item(id)
-    if !IMGUI_RECORD_BODIES { return }
-    let labels: [string] = []
-    for item in items { labels.push(item) }
-    IMGUI_TEST_COMBOS[id] = ImguiTestCombo {
-        frame: frame_seq,
-        current,
-        items: labels,
-    }
-}
-
-pub fn imgui_testable_combo(id: string, label: string, current: int,
-                        items: [string]) -> (bool, int) {
-    let open = imgui_begin_combo(label, items[current])
-    imgui_test_note_combo(id, current, items)
-    let changed = false
-    let selected_index = current
-    if open {
-        for i in 0..items.len() {
-            let selected = i == current
-            let selected_now = imgui_selectable("{items[i]}##{id}_{i}", selected)
-            imgui_test_note_item("{id}/option/{i}")
-            if selected_now {
-                changed = true
-                selected_index = i
-            }
-            if selected { imgui_set_item_default_focus() }
-        }
-        imgui_end_combo()
-    }
-    return (changed, selected_index)
-}
-
 fn imgui_test_item_point(id: string, relative: Vec2) -> Vec2? {
     if !imgui_test_item_current(id) { return null }
     if relative.x < 0.0 || relative.x > 1.0
@@ -1630,44 +1585,4 @@ pub co fn imgui_test_drag(id: string, from_fraction: Vec2, to_fraction: Vec2) ->
     await frame(1)
     imgui_inject_left_mouse_up()
     await frame(2)
-}
-
-pub co fn imgui_test_replace_text_at(id: string, text: string, relative_x: float, relative_y: float) -> Coroutine<Wait> {
-    await imgui_test_click_at(id, relative_x, relative_y)
-    tool_inject_key("lctrl")
-    await frame(1)
-    tool_inject_key("a")
-    await frame(1)
-    tool_release_key("a")
-    tool_release_key("lctrl")
-    await frame(1)
-    imgui_inject_text(text)
-    await frame(2)
-}
-
-pub co fn imgui_test_replace_text(id: string, text: string) -> Coroutine<Wait> {
-    await imgui_test_replace_text_at(id, text, 0.5, 0.5)
-}
-
-pub co fn imgui_test_choose(id: string, label: string) -> Coroutine<Wait> {
-    if !imgui_test_item_submitted(id) {
-        error("imgui semantic combo '{id}' is absent, stale, clipped, or empty")
-        return
-    }
-    let combo = IMGUI_TEST_COMBOS.get(id)
-    if combo == null || frame_seq - combo.frame > 1 {
-        error("imgui semantic target '{id}' has no current combo metadata")
-        return
-    }
-    let state = combo
-    let target = -1
-    for i in 0..state.items.len() {
-        if state.items[i] == label { target = i; break }
-    }
-    if target < 0 {
-        error("imgui semantic combo '{id}' has no visible option '{label}'")
-        return
-    }
-    await imgui_test_click(id)
-    await imgui_test_click("{id}/option/{target}")
 }

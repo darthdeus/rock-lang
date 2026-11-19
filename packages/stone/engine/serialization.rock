@@ -67,5 +67,3 @@ pub fn get_timestamp() -> int {
     if sim_mode_active() { return SIM_FIXED_EPOCH }
     return wall_clock_unix_seconds()
 }
-
-pub fn any_is_null(x: any) -> bool { return is_null(x) }

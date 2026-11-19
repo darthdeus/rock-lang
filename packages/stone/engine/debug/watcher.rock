@@ -880,13 +880,6 @@ fn shader_texture_slot_impl(shader_name: string, sampler: string, required: bool
     return -1
 }
 
-// The group's sampler names in slot order, empty when there is no group.
-pub fn shader_texture_slot_names(shader_name: string) -> [string] {
-    let slots = SHADER_TEXTURE_SLOTS.get(shader_name)
-    if slots == null { return [] }
-    return slots.names
-}
-
 // How many slots `shader_name`'s group declares; 0 when it has none. The
 // denominator for the exact-cardinality check on a slot-addressed Pass.
 pub fn shader_texture_slot_count(shader_name: string) -> int {

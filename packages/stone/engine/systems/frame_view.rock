@@ -293,15 +293,6 @@ fn output_to_scene_texel(view: FrameView, p: Vec2) -> Vec2? {
     return v(src.x + u * src.w, src.y + t * src.h)
 }
 
-// Design-space UI extent of this frame's output. Height is the reference
-// height (times 1/user_scale); width flexes with the aspect, so an
-// ultrawide display exposes more design width instead of stretching.
-pub @pure
-fn design_size_in(view: FrameView) -> Vec2 {
-    if view.ui_scale <= 0.0 { return v(0.0, 0.0) }
-    return view.logical_size / view.ui_scale
-}
-
 // ─────────────── live frame state ───────────────
 
 // The game camera, and the editor's own. The engine selects between them on

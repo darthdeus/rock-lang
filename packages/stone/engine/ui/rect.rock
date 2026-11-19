@@ -142,18 +142,6 @@ pub @pure fn UiRect.on_output(r) -> UiRect {
     return UiRect { ..r, ctx: UI_CTX_OUTPUT, ref_h: 0.0 }
 }
 
-// The whole virtual target, as a composite-context rect.
-pub fn ui_scene_full(reference_height: float = 0.0) -> UiRect {
-    let base = UiRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0, ctx: UI_CTX_COMPOSITE, ref_h: reference_height }
-    let view = PRESENTED_VIEW ?? return base
-    let s = ui_ctx_scale_in(view, UI_CTX_COMPOSITE, reference_height)
-    if s <= 0.0 { return base }
-    return UiRect { ..base,
-        w: (view.scene_size.x as float) / s,
-        h: (view.scene_size.y as float) / s,
-    }
-}
-
 // Same rect in a different z-bucket. The overlay verb: carve the
 // overlay rect from its anchor, then .at_z(2) before drawing.
 pub @pure fn UiRect.at_z(r, z: int) -> UiRect {
@@ -330,11 +318,6 @@ pub fn ui_circle_outline(
 ) {
     let s = ui_effective_scale()
     screen.circle_outline(center * s, radius * s, color, thickness * s, z)
-}
-
-pub fn ui_text(text: string, pos: Vec2, font_size: float, color: Color = WHITE, z: int = 0) {
-    let s = ui_effective_scale()
-    screen.text(text, pos * s, font_size, color, z)
 }
 
 pub @pure fn UiRect.center(r) -> Vec2 {

@@ -9,8 +9,6 @@ pub const ACTION_BINDING_SLOT_COUNT: int = 3
 pub const INPUT_BINDING_ACTIVITY_DOWN: int = 1
 pub const INPUT_BINDING_ACTIVITY_PRESSED: int = 2
 
-pub enum PadStick { Left, Right }
-
 pub enum InputBinding {
     Key { scan: string, ctrl: bool, shift: bool, alt: bool, gui: bool },
     Mouse(int),
@@ -86,13 +84,6 @@ pub fn ui_wants_input() -> bool { return UI_INPUT_CAPTURE || UI_TEXT_INPUT_CAPTU
 
 pub fn action_claims_begin_frame() {
     ACTION_CLAIMED_SCANCODES.clear()
-}
-
-pub fn action_claim_scancode(scan: string) {
-    for claimed in ACTION_CLAIMED_SCANCODES {
-        if claimed == scan { return }
-    }
-    ACTION_CLAIMED_SCANCODES.push(scan)
 }
 
 pub fn action_scancode_claimed(scan: string) -> bool {
@@ -456,11 +447,6 @@ pub fn input_binding_activity(binding: InputBinding) -> int {
     return activity
 }
 
-pub fn action_binding_down(name: string, slot: int) -> bool {
-    let binding = action_binding_at(name, slot) ?? return false
-    return input_binding_down(binding)
-}
-
 pub fn action_binding_pressed(name: string, slot: int) -> bool {
     let binding = action_binding_at(name, slot) ?? return false
     return input_binding_pressed(binding)
@@ -616,16 +602,6 @@ pub fn action_vec2(left: ActionDef, right: ActionDef, up: ActionDef, down: Actio
     let length = out.length()
     if length > 1.0 { return out / length }
     return out
-}
-
-pub fn stick_value(which: PadStick, deadzone: float = DEFAULT_AXIS_DEADZONE) -> Vec2 {
-    let x_axis = if which == PadStick::Left { "leftx" } else { "rightx" }
-    let y_axis = if which == PadStick::Left { "lefty" } else { "righty" }
-    let out = v(pad_axis_value(x_axis), pad_axis_value(y_axis))
-    let length = out.length()
-    if length <= deadzone { return v(0.0, 0.0) }
-    let scaled = clamp((length - deadzone) / (1.0 - deadzone), 0.0, 1.0)
-    return out / length * scaled
 }
 
 pub fn binding_label(binding: InputBinding) -> string {

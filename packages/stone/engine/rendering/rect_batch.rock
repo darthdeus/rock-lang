@@ -212,13 +212,6 @@ pub fn rect_batch_new_textured(capacity: int, texture: SampledTexture,
     }
 }
 
-pub fn rect_batch_set_target(
-    b: RectBatch, target: Canvas, convention: TargetConvention = TargetConvention::PresentSource,
-) {
-    b.target = target
-    b.convention = convention
-}
-
 // `capacity` counts rects; the buffer holds RECT_BATCH_VERTS_PER_RECT each.
 // Preserve emitted vertices before the caller appends the next rectangle.
 @nomangle fn __grow_sprite_mesh_buf(m: SpriteMesh) {
@@ -438,18 +431,6 @@ pub fn rect_batch_push_line(b: RectBatch, start: Vec2, end: Vec2, width: float,
     __rect_batch_push_textured_quad4(b.vbo, b.count, tl, tr, br, blv,
         0.5, 0.5, 0.5, 0.5, r, g, bl, a)
     b.count = b.count + 6
-}
-
-// Four inset thin rects forming an outline. Cheaper than stroking a path
-// because the 2D shape shader has no line-width uniform.
-pub fn rect_batch_push_outline(b: RectBatch,
-    x: float, y: float, w: float, h: float, thickness: float,
-    r: float, g: float, bl: float, a: float,
-) {
-    rect_batch_push(b, x, y, w, thickness, r, g, bl, a)                      // top
-    rect_batch_push(b, x, y + h - thickness, w, thickness, r, g, bl, a)      // bottom
-    rect_batch_push(b, x, y, thickness, h, r, g, bl, a)                      // left
-    rect_batch_push(b, x + w - thickness, y, thickness, h, r, g, bl, a)      // right
 }
 
 pub fn rect_batch_flush(b: RectBatch) {

@@ -122,15 +122,6 @@ pub fn run_into<T>(e: Entity<T>, f: FieldRef<T, Task?>, coroutine: Coroutine<Wai
     return run_into(POLLER, e, f, coroutine)
 }
 
-// The room drives its poller. Close runs task cleanup before resources retire;
-// discard invalidates tasks without resuming their cleanup.
-pub fn scene_poller(b: SceneBuilder, clock: TaskClock = host_task_clock()) -> CoroutinePoller {
-    let poller = CoroutinePoller { clock }
-    b.on_close(() => coroutine_poller_clear(poller))
-    b.on_retire(() => { let _ = coroutine_poller_retire(poller) })
-    return poller
-}
-
 /// Post-hot-reload driver: fires the `on_hot_reload` hook on every live
 /// coroutine the engine poller tracks. Registered via `@on_reload` so the
 /// decorator-init re-runs on every `dofile`, keeping the callback list

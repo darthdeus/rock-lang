@@ -110,13 +110,6 @@ pub fn telemetry_close() {
 
 @inline inline(lua) fn telemetry_close_native() = "stone.stone_telemetry_close()"
 
-pub fn telemetry_flush_for_observation() -> bool {
-    if TELEMETRY_CAPTURE_EVENTS != null { return true }
-    return telemetry_flush_native()
-}
-
-@inline inline(lua) fn telemetry_flush_native() -> bool = "return stone.stone_telemetry_flush()"
-
 // Last among the shutdown systems: closing the queue is what bounds the final
 // upload, so anything a game wants recorded about the session has to have been
 // appended by an earlier stage.

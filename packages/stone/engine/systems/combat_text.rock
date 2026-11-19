@@ -386,10 +386,6 @@ pub fn world_text_set_rows(c: WorldTextDisplay, rows: [WorldTextRow], spans: [Te
     c.spans = spans
 }
 
-pub fn world_text_row_count(c: WorldTextDisplay) -> int {
-    return if c.rows.len() > 0 { c.rows.len() } else { 1 }
-}
-
 fn world_text_phrase_at(anchor_key: string) -> WorldTextDisplay? {
     if anchor_key == "" { return null }
     for (_, c) in WORLD_TEXT {

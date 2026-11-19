@@ -573,23 +573,6 @@ fn presented_scene_sample_capture() {
     }
 }
 
-// Null until a scene has been presented this frame; a consumer that reflects
-// the presented scene has nothing to draw before then (a headless `submit`
-// run never presents at all). A sample that exists but is destroyed or
-// aliases the output canvas is still an error.
-pub fn presented_scene_sample() -> PresentedSceneSample? {
-    sim_draw_on_demand()
-    let sample = PRESENTED_SCENE_SAMPLE ?? return null
-    if !canvas_is_live(sample.canvas) {
-        error("reflective TextArt requested a destroyed presented scene sample")
-    }
-    if OUTPUT_HDR_CANVAS != null
-        && OUTPUT_HDR_CANVAS.handle == sample.canvas.handle {
-        error("reflective TextArt presented scene sample aliases OUTPUT_HDR_CANVAS")
-    }
-    return sample
-}
-
 // The single upscale: the view's active scene rectangle onto its output
 // rectangle. Everything above it ran at scene resolution, so this is the only
 // stage in the frame that resamples.

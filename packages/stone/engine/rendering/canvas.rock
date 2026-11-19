@@ -37,23 +37,6 @@ pub fn get_canvas(canvas_id: string) -> Canvas? {
     return null
 }
 
-pub fn get_or_create_canvas(id: string, width: float, height: float, format: string = "rgba8") -> Canvas {
-    let managed = CANVAS_MANAGER.canvases.get(id)
-
-    if managed == null {
-        managed_canvas(id, width, height, format)
-        return get_canvas(id).unwrap()
-    }
-
-    let m = managed
-    if m.width != width || m.height != height {
-        resize_canvas(id, width, height)
-        return get_canvas(id).unwrap()
-    }
-
-    return m.canvas
-}
-
 fn resize_canvas(canvas_id: string, new_width: float, new_height: float) {
     let managed = CANVAS_MANAGER.canvases.get(canvas_id)
     if managed != null {

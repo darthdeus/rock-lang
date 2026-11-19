@@ -124,15 +124,6 @@ pub struct RenderBatch {
 
 const PARAMETRIC_QUAD_CAP: int = 256
 
-// The float packed at `offset` bytes into this batch's block, or `sentinel` if
-// it holds none. Inspection helper for tests -- not on the flush path. Byte
-// offset rather than member name because the packed bytes are the artifact; the
-// plan that produced them is the shader's, and the driver already checks it.
-pub fn batch_block_float(b: RenderBatch, offset: int, sentinel: float) -> float {
-    if b.block == null || b.block_frame != RENDER_FRAME { return sentinel }
-    return __ub_read_float(b.block.fv, offset ./ 4)
-}
-
 // The per-batch uniform apply, shared by all three flush passes (world +
 // UI in this file, DrawList in draw_list.rock): the packed `@uniform` block and
 // the parametric quad arrays.

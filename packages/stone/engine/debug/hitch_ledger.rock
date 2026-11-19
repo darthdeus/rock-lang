@@ -381,8 +381,6 @@ fn hitch_window_summary() -> string {
 }
 
 // Sim and tooling accessors.
-pub fn hitch_total() -> int { return HITCH.total_hitches }
-pub fn hitch_last_logic_system() -> string { return HITCH.last_logic_system }
 pub fn hitch_count_for(cause: string) -> int {
     if cause == "gc" { return HITCH.total_gc }
     if cause == "alloc" { return HITCH.total_alloc }

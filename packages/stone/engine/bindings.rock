@@ -613,12 +613,6 @@ pub fn bus_samples_pulled(bus: int) -> int {
     return stone_bus_samples_pulled(bus)
 }
 
-// This bus's target gain -- what was last asked for. The applied value slews
-// toward it sample-side and is not reachable from here.
-pub fn bus_gain(bus: int) -> float {
-    return stone_bus_gain(bus)
-}
-
 // This bus's meter, post-fader -- what the bus is contributing to the mix, not
 // what is playing into it, so a ducked or turned-down bus reads low. An
 // envelope maintained sample-side: rises instantly to a new peak, falls at
@@ -630,13 +624,6 @@ pub fn bus_peak(bus: int) -> float {
     return stone_bus_peak(bus)
 }
 
-// How many ducks have been fired on this bus. The envelope's SHAPE runs on
-// the audio thread and is not reachable from here; this answers the half a
-// game gets wrong -- whether an event ducked, and which bus it ducked.
-pub fn bus_duck_count(bus: int) -> int {
-    return stone_bus_duck_count(bus)
-}
-
 // Lowpass insert. Cutoff is the automation target: set it per frame from a
 // `co fn` and the engine slews it in log2(Hz). BUS_LOWPASS_OPEN is the
 // transparent position, so a sweep to it is "filter off".
@@ -644,10 +631,6 @@ pub const BUS_LOWPASS_OPEN: float = 19845.0
 
 pub fn bus_set_lowpass(bus: int, cutoff_hz: float, q: float) -> bool {
     return stone_bus_set_lowpass(bus, cutoff_hz, q)
-}
-
-pub fn bus_lowpass_cutoff(bus: int) -> float {
-    return stone_bus_lowpass_cutoff(bus)
 }
 
 // Soft-clip drive. `drive` >= 1 is pre-gain, `mix` 0..1 blends against dry,
@@ -936,15 +919,6 @@ pub fn canvas_upload_rgba8(canvas: Canvas, pixels: NativeBufferU8) -> bool {
 fn read_canvas_nearest_id(canvas: Canvas, x: int, y: int, side: int) -> int {
     sim_draw_on_demand()
     return stone_read_canvas_nearest_id(canvas.handle.0, x, y, side)
-}
-
-// Largest magnitude an entity id survives exactly. Ids ride to the GPU as an
-// f32 vertex attribute (batch.rock), exact only to 2^24; the integer readback
-// below fixes TRANSPORT precision, not that submission limit.
-pub const EXACT_ENTITY_ID_MAX: int = 16777216
-
-pub fn entity_id_within_exact_range(id: int) -> bool {
-    return id >= -EXACT_ENTITY_ID_MAX && id <= EXACT_ENTITY_ID_MAX
 }
 
 /// An exact integer readback of a rectangle of an R32I canvas, addressed in
