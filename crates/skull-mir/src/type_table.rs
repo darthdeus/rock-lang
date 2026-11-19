@@ -1,9 +1,3 @@
-//! Declared type facts for runtime walkers: reflection and typed JSON records.
-//!
-//! The facts come from the target's representation plans, so a walker reads
-//! values in the layout that backend actually stores. Each backend renders the
-//! same entries in its own literal syntax.
-
 use bone_core::hir::{BuiltinTy, EnumDef, StructDef, TyId, TypeCtor, TypeExpr, VariantPayload};
 use bone_core::workspace::Workspace;
 use rustc_hash::FxHashMap;
@@ -16,19 +10,13 @@ use crate::lower::{
 use crate::mangle::type_symbol;
 use crate::monoty::{MonoCtor, MonoTy};
 
-/// The declared shape of a field or payload. A shape with no typed leaf at all
-/// is reported as absent by [`type_shape`]; inside a typed shape, an
-/// unsupported part stays `Prim("any")` and walkers that rebuild typed values
-/// must reject it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shape {
-    /// `int`, `uint`, `float`, `bool`, `string` or `any`.
     Prim(&'static str),
     Opt(Box<Shape>),
     Tuple(Vec<Shape>),
     Vec(Box<Shape>),
     Map(Box<Shape>, Box<Shape>),
-    /// The stdlib `JsonField<T>` presence wrapper.
     Field(Box<Shape>),
     Nom(Ustr),
 }
@@ -53,7 +41,6 @@ pub fn type_shape(ws: &Workspace, ty: TyId) -> Option<Shape> {
     found.then_some(shape)
 }
 
-/// Nominal leaves stop recursion; structural nesting has a finite depth bound.
 fn shape_of(ws: &Workspace, ty: TyId, depth: u32) -> (Shape, bool) {
     const MAX_DEPTH: u32 = 12;
     const ANY: (Shape, bool) = (Shape::Prim("any"), false);
@@ -65,7 +52,6 @@ fn shape_of(ws: &Workspace, ty: TyId, depth: u32) -> (Shape, bool) {
             Some(module) => module.ty_arena[idx],
             None => return ANY,
         },
-        // A local (body) arena type never reaches a declaration's descriptor.
         TyId::Local(_) => return ANY,
     };
     let nested = |inner| shape_of(ws, ty.with_idx(inner), depth + 1);
@@ -100,7 +86,6 @@ fn shape_of(ws: &Workspace, ty: TyId, depth: u32) -> (Shape, bool) {
         }
         TypeExpr::App { ctor, params } => match ctor {
             TypeCtor::Array => {
-                // An array with no argument carries no element type to render.
                 let Some(elem) = params.into_iter().next() else {
                     return ANY;
                 };
@@ -136,18 +121,12 @@ fn shape_of(ws: &Workspace, ty: TyId, depth: u32) -> (Shape, bool) {
                     let (inner, found) = nested(inner);
                     return (Shape::Field(Box::new(inner)), found);
                 }
-                // The name is the whole answer for a nominal leaf: a struct's
-                // own fields are reached through its own entry rather than
-                // repeated inside this one.
                 (Shape::Nom(type_symbol(ws, name)), true)
             }
         },
     }
 }
 
-/// (reflection type-string, nullable) for a field's `TyId`. The string matches
-/// rock's `to_simple_string` for the cases the reflection stdlib needs
-/// (int/float/string/bool, a nominal name, `[..]`); anything else is "any".
 pub fn reflect_field_type(ws: &Workspace, ty: TyId) -> (String, bool) {
     let resolve = |t: TyId| -> Option<TypeExpr> {
         match t {
@@ -174,8 +153,6 @@ pub fn reflect_field_type(ws: &Workspace, ty: TyId) -> (String, bool) {
     }
 }
 
-/// The mangled name of each synthesized `@json_default` / `@json_omit_if`
-/// factory, keyed by the struct field it serves.
 pub fn json_field_factories(ws: &Workspace) -> FxHashMap<(Ustr, Ustr, JsonFieldOperation), String> {
     ws.modules
         .iter()
@@ -190,12 +167,9 @@ pub fn json_field_factories(ws: &Workspace) -> FxHashMap<(Ustr, Ustr, JsonFieldO
 #[derive(Clone, Debug)]
 pub struct FieldEntry {
     pub name: Ustr,
-    /// The reflection type string, or the inline child's type symbol.
     pub ty: String,
     pub nullable: bool,
-    /// The child's leaves live in the parent under `<name>.<leaf>` keys.
     pub embed: bool,
-    /// The parent's physical keys of a flattened enum field: tag, then slots.
     pub flat: Option<Vec<Ustr>>,
     pub shape: Option<Shape>,
     pub json_name: Option<Ustr>,
@@ -207,9 +181,7 @@ pub struct FieldEntry {
 #[derive(Clone, Debug)]
 pub struct PositionEntry {
     pub shape: Option<Shape>,
-    /// 0-based physical slot of the position in a flat enum box.
     pub slot: Option<usize>,
-    /// Leaf paths of a value payload spread across consecutive slots.
     pub leaves: Option<Vec<Ustr>>,
 }
 
@@ -228,15 +200,12 @@ pub struct CEnumPayload {
 
 #[derive(Clone, Debug)]
 pub enum Entry {
-    /// A `value` element type whose Vec stores interleaved rows; the paths
-    /// are in slot order.
     StridedRows {
         name: Ustr,
         paths: Vec<Ustr>,
     },
     Struct {
         name: Ustr,
-        /// `struct`, `value_table` (GC-carrying value) or `c_struct` (GC-free value).
         kind: &'static str,
         fields: Vec<FieldEntry>,
         vec_columns: Option<Vec<Ustr>>,
@@ -265,8 +234,6 @@ pub enum Entry {
 }
 
 impl Entry {
-    /// The type names this entry's walker may descend into. Primitive type
-    /// strings are included; a caller resolves only the declared ones.
     pub fn referenced_types(&self) -> Vec<Ustr> {
         let mut out = Vec::new();
         match self {
@@ -309,9 +276,6 @@ fn plan_error(message: String) -> CompilerError {
     CompilerError::new_no_location(message)
 }
 
-/// The entries for one struct: its strided row layout, if any, then the struct.
-/// `is_gc` names the GC-carrying `value` structs, which are tables rather than
-/// GC-free native values.
 pub fn struct_entries(
     ws: &Workspace,
     target: bone_core::hir::FnBackend,
@@ -384,8 +348,6 @@ pub fn struct_entries(
     Ok(out)
 }
 
-/// The entries for one enum: its flat layout, if any, then the enum itself
-/// when it has a walkable form.
 pub fn enum_entries(ws: &Workspace, e: &EnumDef) -> Vec<Entry> {
     let mut out = Vec::new();
     let name = type_symbol(ws, e.name);
@@ -450,7 +412,6 @@ pub fn enum_entries(ws: &Workspace, e: &EnumDef) -> Vec<Entry> {
     out
 }
 
-/// Complete boxed-enum alternatives, including units and primitive payloads.
 fn boxed_variants(ws: &Workspace, e: &EnumDef) -> Option<Vec<(Ustr, VariantEntry)>> {
     let flat = EnumPlan::for_name(ws, e.name).and_then(|plan| plan.flat().cloned());
     let mut any = false;

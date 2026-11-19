@@ -1,11 +1,3 @@
-//! skull-mir: the cell-model CFG IR and the HIR->CFG lowering for skull.
-//!
-//! Variables are mutable
-//! cells, expression results are single-use values, `Idx<Inst>` IS the value,
-//! control flow lives only in block terminators, and there are NO block params
-//! (merges go through cells). Transforms live in `skull-transform`; codegen in
-//! `skull-codegen-*`.
-
 pub mod append_vec;
 pub mod bound;
 pub mod cfg;

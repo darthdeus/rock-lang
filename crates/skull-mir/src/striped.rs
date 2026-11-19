@@ -1,7 +1,3 @@
-//! Counters split across threads, so that counting adds no shared write to a
-//! hot path: each thread counts in the stripe it was dealt, on a cache line of
-//! its own, and a reader folds every stripe.
-
 const STRIPES: usize = 16;
 
 #[derive(Default)]
@@ -17,7 +13,6 @@ impl<T: Default> Default for Striped<T> {
 }
 
 impl<T> Striped<T> {
-    /// The calling thread's stripe.
     pub(crate) fn local(&self) -> &T {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         thread_local! {

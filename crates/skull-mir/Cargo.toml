@@ -8,11 +8,6 @@ repository.workspace = true
 publish = false
 description = "Cell-based control-flow IR, lowering and backend layout contracts"
 
-# skull-mir: the cell-model CFG IR + HIR->CFG lowering for skull. Variables
-# are mutable cells, expression results are single-use values, an
-# instruction's `Idx<Inst>` IS its value, and control flow lives only in block
-# terminators. NO SSA, NO block params. Transforms live in `skull-transform`,
-# codegen in `skull-codegen-*`.
 
 [dependencies]
 bone-core = { workspace = true }
@@ -24,8 +19,6 @@ ustr = { workspace = true }
 [dev-dependencies]
 bone-semantic = { workspace = true }
 ustr = { workspace = true }
-# Source of the real stdlib (`__op_*` overloads etc.) so arithmetic snippets
-# resolve in lowering tests, exactly as the real corpus loads it.
 rock-stdlib = { workspace = true }
 skull-graph = { workspace = true }
 

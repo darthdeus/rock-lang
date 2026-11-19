@@ -1,20 +1,8 @@
-//! **The one identity of a function at one instantiation.**
-//!
-//! The instance graph owns the [`crate::monoty::MonoArena`] and builds these
-//! values. An [`Instance`]'s `args` are ids in that arena and have no meaning
-//! without it.
-
 use bone_core::workspace::Workspace;
 
 use crate::mir::FuncRef;
 use crate::monoty::{MonoInterner, MonoSubst, MonoTy, MonoTyId};
 
-/// A function at one concrete instantiation. Non-generic functions get an
-/// instance too (empty `args`), so no consumer can reintroduce `if generic`.
-///
-/// Empty `args` is a NON-GENERIC instance and nothing else. It is not a
-/// "shared body" sentinel; that conflation is what the narrowing
-/// removed, and reintroducing it here would put it back one layer down.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Instance {
     pub func: FuncRef,
@@ -22,8 +10,6 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// The instance of a non-generic declaration. An empty argument list is
-    /// not a shared-body sentinel.
     pub fn base(func: FuncRef) -> Self {
         Self {
             func,
@@ -31,33 +17,16 @@ impl Instance {
         }
     }
 
-    /// Whether the DECLARATION this instantiates is generic.
-    ///
-    /// Deliberately reads `f.generics`, not `self.args`. The two agree for every
-    /// instance the graph builds, and the point of asking the declaration is
-    /// that an argument list that disagreed would be a defect rather than a
-    /// different answer.
     pub fn is_generic(&self, ws: &Workspace) -> bool {
         !ws.module(self.func.module).functions[self.func.func]
             .generics
             .is_empty()
     }
 
-    /// The instance's type arguments as the types they are, in declaration
-    /// order.
-    ///
-    /// The arena direction that is always safe: ids in, owned types out. The
-    /// other direction ([`Self::intern`]) is the one that must go through the
-    /// build's single interner.
     pub fn arg_types(&self, interner: &MonoInterner) -> Vec<MonoTy> {
         interner.get_all(&self.args)
     }
 
-    /// Build an instance from a declaration and the concrete types it is
-    /// instantiated at, interning each argument into the build's arena.
-    ///
-    /// THE only way an instance is minted outside the graph's own walk, and it
-    /// takes the interner precisely so it cannot be done without one.
     pub fn intern(interner: &MonoInterner, func: FuncRef, args: Vec<MonoTy>) -> Self {
         Self {
             func,
@@ -65,12 +34,6 @@ impl Instance {
         }
     }
 
-    /// The substitution this instance's body lowers under: each declared
-    /// generic's `VarId` bound to its concrete type.
-    ///
-    /// The declaration supplies the ORDER, which is the only thing a
-    /// substitution lacks. Empty for a non-generic instance, which is the
-    /// substitution its body has always lowered under.
     pub fn subst(&self, ws: &Workspace, interner: &MonoInterner) -> MonoSubst {
         if self.args.is_empty() {
             return MonoSubst::default();
@@ -78,15 +41,6 @@ impl Instance {
         crate::lower::spec_subst_from_key(ws, self.func, &self.arg_types(interner))
     }
 
-    /// **The emitted symbol for this instance**, and the only encoder any
-    /// consumer may ask.
-    ///
-    /// Two cases, both explicit. A non-generic instance IS the declaration's
-    /// base mangling -- not a fallback for a failed lookup. A generic one always
-    /// has concrete arguments, so [`crate::mangle::spec_fn_name`] cannot
-    /// decline, and an `unwrap_or_else` back to the base name would hand a
-    /// specialization the declaration's symbol, which is the miscompile
-    /// instance-owned emission exists to remove.
     pub fn symbol(&self, ws: &Workspace, interner: &MonoInterner) -> String {
         let f = &ws.module(self.func.module).functions[self.func.func];
         if self.args.is_empty() {
@@ -97,12 +51,6 @@ impl Instance {
     }
 }
 
-/// A `FuncRef` as an ORDERED map key.
-///
-/// `FuncRef` is not `Ord`, and ordering by it would be ordering by arena
-/// position anyway. This is `(module, function index)` -- stable within a build
-/// and used only to make iteration deterministic, the same contract
-/// [`ord_key`] states for an [`Instance`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DeclKey(pub FuncRef);
 
@@ -124,10 +72,6 @@ impl PartialOrd for DeclKey {
     }
 }
 
-/// `FuncRef` is not `Ord`, and ordering by it would be ordering by arena
-/// position anyway. The key is `(module, function index, args)` -- stable within
-/// a build, and only ever used to make iteration order deterministic; the
-/// MANIFEST is sorted by rendered symbol, which is stable across builds.
 fn ord_key(i: &Instance) -> (u32, u32, &[MonoTyId]) {
     (
         i.func.module.raw(),
@@ -136,11 +80,6 @@ fn ord_key(i: &Instance) -> (u32, u32, &[MonoTyId]) {
     )
 }
 
-/// A dense number for an [`Instance`], minted by one [`InstanceIndex`].
-///
-/// Not an identity across builds or indexes: it exists so per-instance
-/// answers can live in a table indexed by number instead of a map keyed by
-/// the instance.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct InstanceId(u32);
 
@@ -150,9 +89,6 @@ impl InstanceId {
     }
 }
 
-/// Numbers instances densely in the order they are first asked about. Ids are
-/// never reused or reassigned, so a table indexed by them only grows; a
-/// retained session extends it as its graph reaches new instances.
 pub struct InstanceIndex {
     generation: u64,
     ids: std::sync::RwLock<rustc_hash::FxHashMap<Instance, InstanceId>>,
@@ -164,7 +100,6 @@ struct InstanceIdCache {
 }
 
 thread_local! {
-    /// Ids this worker has seen, so a repeat question takes no shared lock.
     static INSTANCE_ID_CACHE: std::cell::RefCell<InstanceIdCache> =
         std::cell::RefCell::new(InstanceIdCache {
             generation: 0,
@@ -199,7 +134,6 @@ impl InstanceIndex {
         self.len() == 0
     }
 
-    /// The id of `inst`, minting the next one on first sight.
     pub fn id(&self, inst: &Instance) -> InstanceId {
         INSTANCE_ID_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();

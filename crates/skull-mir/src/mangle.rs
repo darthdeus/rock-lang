@@ -1,40 +1,13 @@
-//! Name mangling -- the one place a function becomes its emitted symbol, shared
-//! by the Lua, GLSL, and JS backends.
-//!
-//! The scheme is ALWAYS-MANGLE, keyed on the function's own `(name, declared
-//! parameter types)` ONLY -- decl-set-independent, position-independent, and
-//! containing NO `__` anywhere (legal in the Lua, JS, and GLSL ES identifier
-//! grammars alike). Every function mangles except the verbatim exemptions:
-//! `extern`, `@nomangle`, `@test`, `main`, `test_*` (deliberate surface names --
-//! `extern(lua)` IS the Lua builtin; `@nomangle` is an explicit shadow the author
-//! owns; `main`/`test_*`/`@test` are runner entry points). A function with no
-//! parameters gets the arity marker `_0` (`foo()` -> `foo_0`), so a mangled name
-//! never equals its source name.
-//!
-//! The separator is a single `_`; `rock-cli/tests/mangle_corpus_scan.rs`
-//! checks it for collisions across a program's modules.
-//! [`collision_errors`] enforces the property permanently: any residual
-//! collision (two distinct signatures mangling alike, or a mangled name equal to
-//! an exempt bare name) is rejected, never silently renamed.
+//! Name mangling shared by the Lua, GLSL and JS backends. Mangled names never
+//! contain `__`, which GLSL ES reserves.
 
 use bone_core::hir::{self, Function, TyId, TypeExpr};
 use bone_core::prelude::Span;
 use bone_core::workspace::Workspace;
 use skull_parser::CompilerError;
 
-/// The mangle separator. A single `_`; see the module docs for why.
 const SEP: &str = "_";
 
-/// The emitted name for the copy of `f` specialized at `key` -- the instantiation
-/// the call site already lowered its arguments for.
-///
-/// Derived from [`mangle_fn`] plus the reified type trees in declaration order, so the
-/// definition and every call site agree without a side table, exactly as the base
-/// mangle does. `None` for an empty key, which has no instantiation to spell.
-///
-/// An exempt (`@nomangle`, `extern`, ...) callee still gets a suffixed name here.
-/// Its bare name belongs to the ONE body the author owns; a specialized copy is a
-/// different function and must not claim it.
 pub(crate) fn spec_fn_name(
     ws: &Workspace,
     f: &Function,
@@ -53,23 +26,10 @@ pub(crate) fn spec_fn_name(
     Some(out)
 }
 
-/// A specialized body's symbol IS the type's canonical identity
-/// ([`MonoTy::canonical`](crate::monoty::MonoTy::canonical)) -- one encoder, so
-/// a symbol and an instance identity cannot disagree about which type they name.
-///
-/// It is written in the SYMBOL spelling: this text lands in an identifier, and
-/// a v1 nominal's canonical name is its DefKey, which is not one. The identity
-/// keeps the key; only the emitted spelling of a nominal changes, exactly as
-/// [`encode_into`] already does for the signature suffix.
 fn encode_mono_type(ty: &crate::monoty::MonoTy, out: &mut String) {
     ty.write_canonical_as(out, crate::monoty::NominalSpelling::Symbol);
 }
 
-/// True if `f` keeps its bare surface name (never mangled).
-///
-/// A v1 definition's `name` is its DefKey, so the runner-entry-point tests
-/// (`main`, `test_*`) read the DECLARED name out of the key rather than the key
-/// itself -- `v1pkg::main` is still `main` to the runtime.
 pub fn is_exempt(f: &Function) -> bool {
     let name = declared_name(f.name.as_str());
     f.is_extern
@@ -79,9 +39,6 @@ pub fn is_exempt(f: &Function) -> bool {
         || name.starts_with("test_")
 }
 
-/// The declared (last) segment of a DefKey. A bare key IS the declared name.
-/// Classifiers use this spelling; emitted identifiers use [`ident_of_key`]
-/// instead.
 pub fn declared_name(key: &str) -> &str {
     match last_path_separator(key) {
         Some(cut) => &key[cut + 2..],
@@ -89,9 +46,6 @@ pub fn declared_name(key: &str) -> &str {
     }
 }
 
-/// Byte offset of the last `::` in `key`. A plain backward byte scan: the
-/// general substring searcher this replaces set itself up anew for every
-/// call, and classifiers ask this of every callee a body names.
 fn last_path_separator(key: &str) -> Option<usize> {
     let bytes = key.as_bytes();
     (1..bytes.len())
@@ -100,15 +54,6 @@ fn last_path_separator(key: &str) -> Option<usize> {
         .map(|i| i - 1)
 }
 
-/// The identifier form of a DefKey. A bare key passes through unchanged.
-/// A qualified key `<package>::<module path>::<name>` becomes `<name>_<digest>`: `::` is not in
-/// any identifier grammar, and the prefix is never flattened textually, so
-/// module `a::b` and a module literally named `a_b` cannot converge.
-///
-/// The separator is a single `_` because this module's scheme forbids `__`
-/// ANYWHERE -- it is reserved in the GLSL ES identifier grammar, which the
-/// shared mangler must also satisfy.
-/// [`collision_errors`] rejects a residual collision either way.
 pub fn ident_of_key(key: &str) -> std::borrow::Cow<'_, str> {
     let artifact = bone_core::modules::artifact_name(key);
     if artifact != key {
@@ -129,10 +74,6 @@ thread_local! {
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
 }
 
-/// [`ident_of_key`] for an interned name, memoized per thread. The ident is a
-/// pure function of the name, and every call site of a function mangles its
-/// callee's name again, so the digest and formatting run once per name per
-/// worker instead of once per reference.
 pub(crate) fn ident_of_name(name: ustr::Ustr) -> ustr::Ustr {
     IDENT_CACHE.with(|cache| {
         if let Some(ident) = cache.borrow().get(&name) {
@@ -147,20 +88,12 @@ pub(crate) fn ident_of_name(name: ustr::Ustr) -> ustr::Ustr {
     })
 }
 
-/// [`ident_of_key`] for a name that is used as an emitted symbol: the Lua global
-/// a definition occupies, the `_G` key the state bridge installs under it, and
-/// the identifiers minted from it. The compiler's own maps stay keyed on the
-/// LOGICAL name (the DefKey), so this belongs where a name is WRITTEN into the
-/// artifact, never where one is looked up.
 pub fn symbol_of_key(name: ustr::Ustr) -> ustr::Ustr {
     ident_of_name(name)
 }
 
-/// The emitted symbol of the nominal type keyed `key`: its C typedef, `__ty`
-/// tag, `<T>_ct` constructor and every registry key minted from it. A
-/// `@nomangle` struct keeps its declared name, because inline Lua spells it
-/// (cdefs, `ffi.new`, tag compares); every other type is [`symbol_of_key`].
-/// [`collision_errors`] rejects two types that would share a symbol.
+/// A `@nomangle` struct keeps its declared name because inline Lua spells it
+/// (cdefs, `ffi.new`, tag compares).
 pub fn type_symbol(ws: &Workspace, key: ustr::Ustr) -> ustr::Ustr {
     let exempt = ws
         .struct_by_name
@@ -173,21 +106,14 @@ pub fn type_symbol(ws: &Workspace, key: ustr::Ustr) -> ustr::Ustr {
     }
 }
 
-/// The interned singleton global of a mixed enum's unit variant, so the value
-/// is reference-equal across uses and usable as a map key.
 pub fn enum_singleton_global(ws: &Workspace, key: ustr::Ustr, variant: ustr::Ustr) -> ustr::Ustr {
     ustr::Ustr::from(format!("__rock_enum_{}_{variant}", type_symbol(ws, key)).as_str())
 }
 
-/// The display-name table global of a payload-free enum, indexed by ordinal.
 pub fn enum_names_global(ws: &Workspace, key: ustr::Ustr) -> ustr::Ustr {
     ustr::Ustr::from(format!("__rock_enum_{}_names", type_symbol(ws, key)).as_str())
 }
 
-/// The digest of a DefKey's `<package>::<module path>` prefix. Hashes the
-/// prefix BYTES with std's `DefaultHasher` (the `StaticCell.init_hash`
-/// precedent): stable across processes AND across compiler builds, unlike a
-/// `Ustr` hash, whose seed is per-build.
 pub fn prefix_digest(prefix: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -199,21 +125,11 @@ fn has_annotation(f: &Function, name: &str) -> bool {
     f.annotations.iter().any(|a| a.is_builtin(name))
 }
 
-/// The emitted name for function `f`, identical for its definition and every
-/// call site (so they cannot drift), identical with or without a backend sibling
-/// or another overload elsewhere (so a hot reload never orphans a running
-/// global).
 pub fn mangle_fn(ws: &Workspace, f: &Function) -> String {
     if is_exempt(f) {
-        // The exemption IS the surface name: `main`, a `test_*` runner entry,
-        // an `extern` foreign symbol, an author-owned `@nomangle`. A v1 key
-        // carries its module prefix, which none of those consumers know.
         return declared_name(f.name.as_str()).to_string();
     }
-    // Append directly into one buffer to avoid per-fragment allocations on the
-    // call-site codegen path.
     let mut out = String::with_capacity(f.name.len() + 16);
-    // Synthetic operators already carry package identity in their parameter types.
     let name = if f.is_synthetic && declared_name(f.name.as_str()).starts_with("__op_") {
         declared_name(f.name.as_str())
     } else {
@@ -225,7 +141,7 @@ pub fn mangle_fn(ws: &Workspace, f: &Function) -> String {
         encode_into(ws, pd.ty, &mut out);
     }
     // The arity marker keeps a parameterless symbol off its source name, which
-    // Lua's `_G[name]` would otherwise reach (ZERO_ARG_MANGLING).
+    // Lua's `_G[name]` would otherwise reach.
     if f.param_decls.is_empty() {
         out.push_str(SEP);
         out.push('0');
@@ -233,9 +149,6 @@ pub fn mangle_fn(ws: &Workspace, f: &Function) -> String {
     out
 }
 
-/// Append a type's mangling fragment to `out`. Generic nominal `{name}_{args}`,
-/// fn types `fn_{ps}_ret_{r}` (empty `ps` collapses so no `__`), tuples
-/// `tupleN_{ps}`.
 fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
     let te = match ty {
         TyId::Static(m, idx) => ws.module(m).ty_arena[idx],
@@ -255,8 +168,6 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
             hir::BuiltinTy::Bool => "bool",
             hir::BuiltinTy::String => "string",
             hir::BuiltinTy::Never => "never",
-            // Inference-recovery poison; never reaches a real (mangled)
-            // signature, but the match must stay exhaustive.
             hir::BuiltinTy::Error => "error",
         }),
         TypeExpr::Generic(_, name) | TypeExpr::Infer(_, name) => out.push_str(name.as_str()),
@@ -293,8 +204,6 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
                     append_args(out);
                 }
                 hir::TypeCtor::Nominal(name) => {
-                    // A v1 nominal's name is its DefKey; the signature suffix is
-                    // an identifier too, so it takes the same form.
                     out.push_str(ident_of_name(name).as_str());
                     if !params.is_empty() {
                         out.push_str(SEP);
@@ -305,8 +214,6 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
         }
         TypeExpr::Function { params, ret } => {
             out.push_str("fn");
-            // A nullary fn type (`fn() -> X`) drops the empty param segment so the
-            // result never contains `__`.
             for p in params {
                 out.push_str(SEP);
                 encode_into(ws, ty.with_idx(p), out);
@@ -328,12 +235,6 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
     }
 }
 
-/// Ground-truth structural signature key: kind-tagged so no two distinct type
-/// structures share a key (the fixed-token clash `arr` vs a nominal named `arr`
-/// is disambiguated by the `arr(` vs `nom:arr(` prefixes). Delimiters `\x1f`/
-/// `\x1e` never appear in a Rock identifier. Used only to decide whether two
-/// functions with one mangled name are the SAME overload (a backend variant /
-/// re-declaration, legitimate) or DISTINCT signatures colliding (rejected).
 fn sig_key(ws: &Workspace, f: &Function) -> String {
     let mut s = String::new();
     s.push_str(f.name.as_str());
@@ -437,17 +338,6 @@ fn function_collision_error(
     )
 }
 
-/// The permanent collision check (reject, don't fall back). Returns a spanned
-/// error per illegal collision:
-///   - two DISTINCT signatures producing the same mangled name, or
-///   - a mangled name equal to a distinct exempt signature's bare emitted name
-///     (so a mangled fn can never shadow, or be shadowed by, an `extern`/`@nomangle`/
-///     `main`/`test_*` surface name).
-///
-/// Same discipline as `mint_synthetic` /
-/// `is_reserved_lexical`: the compiler refuses the program rather than emit a
-/// name that would silently resolve to the wrong body. Keyed by mangled name for
-/// deterministic ordering across the rayon-scheduled emit.
 pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
     let names: Vec<(&Function, String)> = ws
         .modules
@@ -457,25 +347,17 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
     collision_errors_of(ws, names.iter().map(|(f, name)| (*f, name.as_str())))
 }
 
-/// [`collision_errors`] over names the caller already mangled, one per
-/// function in workspace order.
 pub fn collision_errors_of<'a>(
     ws: &Workspace,
     names: impl IntoIterator<Item = (&'a Function, &'a str)>,
 ) -> Vec<(String, CompilerError)> {
     use rustc_hash::FxHashMap as HashMap;
-    // mangled name -> (a representative Function, name_span) for a non-exempt fn.
-    // `sig_key` (the structural distinctness check) is computed LAZILY -- only
-    // when two fns hash to the same mangled name, which the corpus proves rare.
     let mut seen: HashMap<&str, (&Function, Span)> = HashMap::default();
     let mut exempt_names: HashMap<&str, Vec<&Function>> = HashMap::default();
     let mut out: Vec<(String, CompilerError)> = Vec::new();
 
     for (f, name) in names {
         if is_exempt(f) {
-            // The EMITTED name, which for a v1 key is its declared segment
-            // -- comparing the raw DefKey here would never match a mangled
-            // name and the exempt-collision check would go silent.
             exempt_names.entry(name).or_default().push(f);
             continue;
         }
@@ -493,10 +375,6 @@ pub fn collision_errors_of<'a>(
         }
     }
 
-    // Two distinct `<package>::<module path>` prefixes whose digests coincide
-    // would hand their definitions the same emitted identifier. Plan 2.1: reject
-    // it, never silently rename. One pass over `ws.defs` covers callables, types
-    // and globals; sorted so the reported pair does not depend on map order.
     let mut by_prefix: HashMap<&str, Vec<Span>> = HashMap::default();
     for (key, meta) in &ws.defs {
         if let Some(cut) = key.as_str().rfind("::") {
@@ -512,7 +390,6 @@ pub fn collision_errors_of<'a>(
     for (prefix, spans) in &prefixes {
         let digest = prefix_digest(prefix);
         match by_digest.get(digest.as_str()) {
-            // Prefixes are distinct here, so a seen digest is a collision.
             Some(prev) => {
                 for &span in spans {
                     let msg = format!(
@@ -527,10 +404,6 @@ pub fn collision_errors_of<'a>(
         }
     }
 
-    // Two nominal types with one emitted symbol would share a typedef, a
-    // constructor and a runtime tag. Only a `@nomangle` struct can reach
-    // another type's symbol: its declared name against a bare type or
-    // another package's `@nomangle` struct of that name.
     let mut type_keys: Vec<(ustr::Ustr, Span)> = Vec::new();
     for m in ws.modules.iter() {
         type_keys.extend(m.structs.iter().map(|(_, d)| (d.name, d.name_span)));
@@ -559,12 +432,9 @@ pub fn collision_errors_of<'a>(
         }
     }
 
-    // A non-exempt mangled name equal to an exempt bare name.
     for (name, (f, _)) in &seen {
         if let Some(exempt) = exempt_names.get(name) {
             for prev in exempt {
-                // Backend variants of one signature remain one logical function,
-                // even when the extern variant keeps a bare name.
                 if sig_key(ws, prev) != sig_key(ws, f) {
                     out.push((
                         name.to_string(),
@@ -649,10 +519,6 @@ mod tests {
         }
     }
 
-    /// Every constructor and composition the encoder can see, spelled out. The
-    /// encoding IS the emitted symbol for a specialized body, so any change to
-    /// it renames functions across every artifact; these strings are the record
-    /// of what the symbols are, independent of which type tree produces them.
     #[test]
     fn mono_type_encoding_is_these_exact_strings() {
         let enc = |ty: &MonoTy| {
@@ -702,8 +568,6 @@ mod tests {
             "a_n6_Entity_1_a_n3_Mob_0_z_z"
         );
 
-        // Totality: no instantiation carries these today, and each still has one
-        // symbol of its own rather than colliding with a neighbour.
         assert_eq!(enc(&MonoTy::Any), "p_any");
         assert_eq!(enc(&MonoTy::Unit), "p_unit");
         assert_eq!(enc(&MonoTy::Never), "p_never");
@@ -714,7 +578,6 @@ mod tests {
             }),
             "f_1_p_int_p_float_z"
         );
-        // Argument order and arrow direction are identity, not decoration.
         assert_ne!(
             enc(&MonoTy::Function {
                 params: vec![MonoTy::Int],

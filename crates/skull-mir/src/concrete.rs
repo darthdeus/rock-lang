@@ -1,9 +1,3 @@
-//! Concrete, instance-owned facts handed to MIR lowering.
-//!
-//! The graph resolves inference and substitutions before it constructs these
-//! values. Lowering may inspect the facts, but it does not receive the
-//! substitution that produced them.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -18,35 +12,20 @@ use crate::instance::Instance;
 use crate::monoty::MonoTyId;
 use crate::site::{Site, SiteDomain};
 
-/// The owner of one concrete body contribution.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum ConcreteOwner {
-    /// An ordinary Rock function at one concrete instance.
     Function(Instance),
-    /// An always-emitted global initializer.
     Global { module: ModuleId, index: u32 },
-    /// An always-emitted decorator body.
     Decorator { module: ModuleId, index: u32 },
 }
 
-/// Concrete types for one expression/binding arena.
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct ConcreteTypeTables {
     pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
-    /// Slots that inference deliberately left without a concrete answer.
-    /// Their absence is a planned untyped operation, not an implicit boxed
-    /// value or a source-type fallback.
     pub untyped_exprs: FxHashSet<Idx<Expr>>,
     pub untyped_bindings: FxHashSet<Idx<BindingInfo>>,
-    /// Inference TyIds are the bridge for declaration-shaped helpers that are
-    /// being migrated. The expression and binding maps remain the primary
-    /// ownership; this index prevents a second substitution lookup while a
-    /// query starts from one of those concrete slots.
     pub ty_types: FxHashMap<bone_core::prelude::TyId, MonoTyId>,
-    /// Declared field types for each concrete value-struct literal. The field
-    /// declaration lives outside the body's inference arena, so its concrete
-    /// type cannot be recovered from `ty_types` alone.
     pub struct_field_types: ArenaMap<Idx<Expr>, FxHashMap<Ustr, MonoTyId>>,
 }
 
@@ -76,56 +55,36 @@ impl ConcreteTypeTables {
     }
 }
 
-/// Concrete parameter/result signature for one lowered subject.
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct ConcreteSignature {
     pub params: Vec<MonoTyId>,
-    /// Whether each declared parameter was written as a tuple (including a
-    /// nullable tuple). A concrete tuple bound to a generic parameter remains
-    /// one boxed boundary slot; its reified children do not change that source
-    /// ABI choice.
     pub param_tuple_spelled: Vec<bool>,
     pub result: Option<MonoTyId>,
 }
 
 pub type ConcreteSignatureHandle = Arc<ConcreteSignature>;
 
-/// A resolved call site's identity and independently recorded signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConcreteCallee {
     pub instance: Instance,
     pub signature: ConcreteSignatureHandle,
 }
 
-/// All concrete facts MIR lowering needs for one body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConcreteBodyPlan {
     pub owner: ConcreteOwner,
-    /// The logical identity the concrete lowering belongs to. Function plans
-    /// carry their mono instance; global/decorator plans leave this empty.
     pub code_identity: Option<crate::code_identity::CodeIdentity>,
-    /// The owner's own expression and binding arena.
     pub types: ConcreteTypeTables,
-    /// Struct-default domains entered while lowering this owner. The key is
-    /// part of the plan because each domain has a distinct HIR arena.
     pub foreign_domains: BTreeMap<SiteDomain, ConcreteTypeTables>,
     pub signature: ConcreteSignatureHandle,
-    /// Resolved sites, including boundaries supplied by the target.
     pub callees: BTreeMap<Site, ConcreteCallee>,
-    /// Sites the graph visited but could not resolve. Keeping these distinct
-    /// from absent entries lets lowering report a planned failure at the site.
     pub failed_sites: BTreeMap<Site, &'static str>,
     pub bound_tree: ResolvedBoundTree,
 }
 
-/// Stable per-instance plan handles. The table is still ordered for
-/// deterministic iteration, while replacing one body only swaps its handle.
 pub type ConcretePlans = BTreeMap<Instance, Arc<ConcreteBodyPlan>>;
 pub type ConcreteAlwaysPlans = FxHashMap<ConcreteOwner, ConcreteBodyPlan>;
 
-/// Copy a view's outer table while preserving the stable handle for every
-/// selected body. The owner-local publisher can then replace its authoritative
-/// map entry without mutating a consumer's selection.
 pub(crate) fn select_concrete_plans<'a>(
     plans: &ConcretePlans,
     instances: impl IntoIterator<Item = &'a Instance>,
@@ -140,8 +99,6 @@ pub(crate) fn select_concrete_plans<'a>(
         .collect()
 }
 
-/// Select the concrete plans a lowering view can consume, including resolved
-/// Rock callees that the target graph classifies as inline/native operators.
 pub fn select_concrete_plan_closure<'a>(
     plans: &ConcretePlans,
     roots: impl IntoIterator<Item = &'a Instance>,

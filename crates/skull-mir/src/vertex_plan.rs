@@ -1,27 +1,4 @@
-//! Where each vertex/instance attribute sits in the CPU buffer, and how far
-//! apart elements are.
-//!
-//! This is the join between the two halves that neither owns alone:
-//! [`crate::gpu_layout`] gives the GROUPING (a top-level field is one attribute
-//! at one location, `pos` = `F32x2`), and the owned RepPlan C layout gives
-//! the OFFSETS (the C layout, flattened to primitive leaves `pos.x`, `pos.y`).
-//!
-//! # Why the offsets come from there and not from arithmetic here
-//!
-//! Every attribute kind admitted today (`float`/`int`/`Vec2`/`Vec3`/`Vec4`) is
-//! 4-byte aligned, so `4 * cumulative components` happens to equal the real C
-//! layout for every struct currently expressible -- computing offsets here
-//! would look correct and test green. It has a known expiry: the first `Mat4`,
-//! packed-u8 colour or `bool`-adjacent attribute breaks it silently, and a
-//! wrong vertex offset corrupts geometry rather than failing.
-//!
-//! the RepPlan C-layout projection is the offset model the emitted chunk
-//! cross-checks against LuaJIT (`ffi.offsetof` / `ffi.sizeof` assertions per
-//! FFI-clean value struct, aborting at load on drift). Taking offsets from
-//! anywhere else is a second, unvalidated model -- the bypass the raw walker is
-//! private to prevent.
-//!
-//! A vertex buffer is laid out by C rules, NOT std140: a `Vec3` occupies 12
+//! A vertex buffer is laid out by C rules, not std140: a `Vec3` occupies 12
 //! bytes with the next attribute immediately after.
 
 use crate::gpu_layout::{AttrKind, vertex_attrs};
@@ -30,22 +7,16 @@ use bone_core::workspace::Workspace;
 use skull_parser::CompilerError;
 use ustr::Ustr;
 
-/// Bytes per component. Every attribute kind the artifact admits is a 4-byte
-/// float or int, which is also what makes the cumulative-offset model sound --
-/// grep this constant when adding a kind that is not 4 bytes wide.
 const COMPONENT_BYTES: usize = 4;
 
-/// One attribute's place in the buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttrSlot {
     pub name: Ustr,
     pub location: u32,
     pub kind: AttrKind,
-    /// Byte offset of this attribute's first component within one element.
     pub byte_offset: usize,
 }
 
-/// The buffer plan for one vertex or instance struct, in location order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VertexPlan {
     pub struct_name: Ustr,
@@ -56,23 +27,12 @@ pub struct VertexPlan {
 }
 
 impl VertexPlan {
-    /// Per-attribute component counts, in location order.
-    ///
-    /// REJECTS an integer attribute. The `gpu_mesh_*` API takes `Ptr<float>`
-    /// and binds every attribute through `glVertexAttribPointer`, so an int
-    /// riding that path is read as the float reinterpretation of its bits --
-    /// a silent wrong-value class. `AttrKind::I32` needs
-    /// `glVertexAttribIPointer`, which that API cannot express today.
     pub fn float_unit_sizes(&self) -> Result<Vec<u32>, String> {
         self.reject_integers()?;
         self.check_cumulative_offsets()?;
         Ok(self.slots.iter().map(|s| s.kind.components()).collect())
     }
 
-    /// Element stride counted in floats -- the unit `gpu_mesh_set_instances`
-    /// takes. Rejects the same integer case, and a stride that is not a whole
-    /// number of floats (which would mean the element is not float-packed at
-    /// all, so the whole `float*` view is wrong).
     pub fn float_unit_stride(&self) -> Result<usize, String> {
         self.reject_integers()?;
         self.check_cumulative_offsets()?;
@@ -85,17 +45,8 @@ impl VertexPlan {
         Ok(self.byte_stride / COMPONENT_BYTES)
     }
 
-    /// The float-unit view carries component counts and a stride but NOT
-    /// offsets, and the renderer rebuilds them cumulatively.
-    /// So the view describes this struct only while every attribute sits at
-    /// exactly `4 * cumulative components` -- otherwise the engine would bind
-    /// each attribute at a position the checked C layout says is wrong, and the
-    /// only runtime guard (`sum(sizes) == stride`) would still pass.
-    ///
-    /// Holds for every struct expressible today, which is why this is a
-    /// compile-time assertion rather than a conversion: the alternative is
-    /// extending the FFI to take explicit offsets, and until something needs
-    /// that, rejecting beats silently emitting a layout the view cannot state.
+    /// The float-unit view carries no offsets; the renderer rebuilds them
+    /// cumulatively, so every attribute must sit at `4 * cumulative components`.
     fn check_cumulative_offsets(&self) -> Result<(), String> {
         let mut want = 0usize;
         for s in &self.slots {
@@ -109,11 +60,8 @@ impl VertexPlan {
             }
             want += s.kind.components() as usize * COMPONENT_BYTES;
         }
-        // And the attributes must SPAN the stride. `validate_layout` checks
-        // `sum(sizes) == stride`, so trailing padding is as undescribable as a
-        // gap between attributes -- without this the view emits a stride the
-        // engine then rejects at mesh creation, turning a compile-time
-        // representability fact into a runtime failure.
+        // The engine checks `sum(sizes) == stride`, so trailing padding cannot be
+        // described either.
         if want != self.byte_stride {
             return Err(format!(
                 "`{}` has a {}-byte stride but its attributes span {want} bytes -- the \
@@ -142,7 +90,6 @@ impl VertexPlan {
     }
 }
 
-/// The buffer plan for `struct_name`, or a spanned rejection.
 pub fn vertex_plan(
     ws: &Workspace,
     rep_arena: &RepArena,
@@ -170,10 +117,6 @@ pub fn vertex_plan(
             ))
         })?;
 
-        // The two walks are independent, and this one matches attributes to
-        // leaves POSITIONALLY. Check the names line up rather than trusting
-        // that they do: a drift here binds an attribute to a neighbour's bytes
-        // while every offset stays individually valid.
         let want_cty = if a.kind.is_integer() { "int" } else { "float" };
         for (i, l) in group.iter().enumerate() {
             let path = l.path.as_str();

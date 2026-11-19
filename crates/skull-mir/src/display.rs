@@ -1,9 +1,3 @@
-//! Textual dump of a [`MirFunc`] — the test oracle and how we eyeball lowering.
-//!
-//! Value-producing instructions are numbered `v0..vN` in block/append order;
-//! effects ([`Inst::Store`]) bind no value, so they print without a number.
-//! Cells print as `cN` (their arena index), blocks as `bbN`.
-
 use std::collections::HashMap;
 use std::fmt;
 
@@ -29,7 +23,6 @@ fn fmt_lit(l: &Lit) -> String {
 
 impl fmt::Display for MirFunc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Number value-producing instructions sequentially across all blocks.
         let mut num: HashMap<Idx<Inst>, u32> = HashMap::new();
         let mut next = 0u32;
         for (_, block) in self.blocks.iter() {

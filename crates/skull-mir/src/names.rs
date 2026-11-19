@@ -1,10 +1,3 @@
-//! Interning for names the backend spells again and again.
-//!
-//! `Ustr::from` takes one of 64 global locks chosen by the string's hash, so
-//! every worker spelling the same short name (`""`, `"0"`, `"self__0"`, a
-//! leaf path) queues on the same lock. Each thread remembers the names it
-//! has interned and only takes the lock for a name it has not seen.
-
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use ustr::Ustr;
@@ -13,7 +6,6 @@ thread_local! {
     static INTERNED: RefCell<FxHashMap<Box<str>, Ustr>> = RefCell::default();
 }
 
-/// The same value as `Ustr::from(name)`.
 pub fn ustr(name: &str) -> Ustr {
     INTERNED.with(|interned| {
         if let Some(found) = interned.borrow().get(name) {
@@ -25,8 +17,6 @@ pub fn ustr(name: &str) -> Ustr {
     })
 }
 
-/// `ustr` of `parts` joined, spelled into a stack buffer: these names are
-/// minted per cell and per field, where a `format!` is one allocation each.
 pub fn concat(parts: &[&str]) -> Ustr {
     let mut buf = [0u8; 96];
     let len: usize = parts.iter().map(|part| part.len()).sum();
@@ -38,11 +28,9 @@ pub fn concat(parts: &[&str]) -> Ustr {
         buf[at..at + part.len()].copy_from_slice(part.as_bytes());
         at += part.len();
     }
-    // Whole `str`s end to end are valid UTF-8.
     ustr(std::str::from_utf8(&buf[..len]).expect("joined names"))
 }
 
-/// `ustr` of `"{base}{sep}{index}"`.
 pub fn indexed(base: &str, sep: &str, index: usize) -> Ustr {
     let mut digits = [0u8; 20];
     let mut at = digits.len();

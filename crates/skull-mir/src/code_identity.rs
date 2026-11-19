@@ -1,11 +1,3 @@
-//! Logical identity and compatibility facts for callable Rock artifacts.
-//!
-//! `Instance` is the identity of a named concrete declaration.  A lambda has
-//! no declaration to borrow, so its identity is the enclosing concrete
-//! instance plus a source site.  Backend names, arena indices and `RepId`s are
-//! deliberately absent from these values: they are realization details, not
-//! artifact identity.
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use bone_core::prelude::Span;
@@ -19,12 +11,6 @@ use crate::mir::{
 };
 use crate::monoty::MonoInterner;
 
-/// The file-independent name of a definition, for the identities the runtime
-/// keys state on. A modules-v1 definition's name IS its DefKey
-/// (`<package>::<module path>::<name>`, the only names carrying `::`), which
-/// already names the logical module, so the owning FRAGMENT is not part of its
-/// identity: moving a definition between two fragments of one module keeps its
-/// state and its code slot. A standalone definition keeps `<file>::<name>`.
 pub(crate) fn logical_def_key(file: Ustr, name: Ustr) -> String {
     if let Some(key) = name
         .as_str()
@@ -43,10 +29,6 @@ pub(crate) fn logical_def_key(file: Ustr, name: Ustr) -> String {
     }
 }
 
-/// The source location used to identify a lambda within one concrete owner.
-/// The start offset is stable when the lambda body changes; the enclosing
-/// topology fingerprint rejects edits that insert, remove or reorder sibling
-/// lambda sites.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct LambdaSiteId {
     pub file: Ustr,
@@ -62,9 +44,6 @@ impl LambdaSiteId {
     }
 }
 
-/// The concrete owner of a callable artifact. Ordinary function bodies use the
-/// mono `Instance`; always-emitted global/decorator roots have no declaration,
-/// so their source artifact is named directly.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum CodeOwner {
     Instance(Instance),
@@ -81,30 +60,23 @@ pub enum CodeOwnerKind {
     Decorator,
 }
 
-/// Compiler-owned identity of an emitted Rock callable body.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum CodeIdentity {
-    /// A top-level declaration at one concrete mono instantiation.
     Named(Instance),
-    /// An always-emitted artifact root. It is not itself an escaping value, but
-    /// it owns lambda identities stored in a global or decorator artifact.
     Artifact(CodeOwner),
-    /// A lambda literal in a concrete declaration body.
     Lambda {
         enclosing: CodeOwner,
         site: LambdaSiteId,
     },
-    /// A source-named nested function. It is still owned by the enclosing
-    /// concrete declaration because nested functions do not enter the mono
-    /// declaration graph as independent top-level declarations.
     Nested {
         enclosing: CodeOwner,
         site: LambdaSiteId,
         name: Ustr,
     },
-    /// Compiler-generated callable machinery stored in a Rock runtime record,
-    /// such as a coroutine's resume/advance/defer/hook entry.
-    Generated { enclosing: CodeOwner, role: Ustr },
+    Generated {
+        enclosing: CodeOwner,
+        role: Ustr,
+    },
 }
 
 impl CodeIdentity {
@@ -124,9 +96,6 @@ impl CodeIdentity {
         }
     }
 
-    /// A stable runtime key. It names the compiler-owned source/mono identity
-    /// using the shared declaration mangling to distinguish overloads, and
-    /// deliberately excludes arena indices and pointers.
     pub fn logical_key(
         &self,
         ws: &bone_core::workspace::Workspace,
@@ -159,8 +128,6 @@ impl CodeIdentity {
                 )
             }
         };
-        // The owner key already names its file, so a site in that file is
-        // spelled by offset alone; that keeps build paths out of the key.
         let site_key = |owner: &CodeOwner, site: &LambdaSiteId| {
             let owner_file = match owner {
                 CodeOwner::Instance(instance) => ws.module(instance.func.module).file,
@@ -196,12 +163,6 @@ impl CodeIdentity {
     }
 }
 
-/// The ordered lambda population of one enclosing concrete instance.
-///
-/// A source-site identity alone is not enough: inserting a lambda before an
-/// existing one can otherwise make a positional implementation reuse the
-/// neighbour's slot. The fingerprint is compared at the owner boundary and
-/// makes that edit incompatible even when a backend happens to reuse names.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
 pub struct LambdaTopologyFingerprint(pub u64);
 
@@ -217,10 +178,6 @@ impl LambdaTopologyFingerprint {
         Self(h.finish())
     }
 
-    /// Combine one owner's distinct region topologies into the single value
-    /// the compatibility gate compares. Sorted, so region emission order
-    /// cannot move it; tagged to separate the hash input from site-derived
-    /// fingerprints. A single topology passes through unchanged.
     pub fn unified(topologies: impl IntoIterator<Item = LambdaTopologyFingerprint>) -> Self {
         let mut sorted: Vec<u64> = topologies.into_iter().map(|topology| topology.0).collect();
         sorted.sort_unstable();
@@ -238,14 +195,10 @@ impl LambdaTopologyFingerprint {
     }
 }
 
-/// How one captured value is transported in an environment record.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum CaptureMode {
-    /// The record stores the value at closure creation.
     ByValue,
-    /// The record stores a mutable box shared by all copies of the closure.
     Shared,
-    /// The record reaches the coroutine frame through the state object.
     Frame,
 }
 
@@ -284,8 +237,6 @@ impl CaptureIdentity {
     }
 }
 
-/// One logical environment field. Incomplete schemas fail compatibility
-/// closed rather than pretending two unknown fields are interchangeable.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct CaptureField {
     pub identity: CaptureIdentity,
@@ -307,17 +258,13 @@ impl CaptureSchema {
     }
 }
 
-/// The frame slots visible to a frame-bound callable. Slot ordinals are the
-/// logical layout contract; a changed set or order is incompatible.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct FrameSchema {
     pub slots: Vec<u32>,
 }
 
-/// Compatibility facts carried beside one logical code identity.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct CodeCompatibility {
-    /// Canonical ABI shape, never a build-local `RepId` or backend symbol.
     pub call_abi: String,
     pub capture: CaptureSchema,
     pub frame: Option<FrameSchema>,
@@ -330,40 +277,28 @@ impl CodeCompatibility {
     }
 }
 
-/// One callable body in an artifact's identity table.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CodeEntry {
     pub identity: CodeIdentity,
     pub compatibility: CodeCompatibility,
-    /// A body-content witness used only to reject duplicate identities naming
-    /// different bodies. It is not used as identity.
     pub body_fingerprint: u64,
-    /// The current backend body realization. This is payload, not identity;
-    /// overlays replace it only after logical compatibility succeeds.
     pub body_name: Option<Ustr>,
     pub escaping: bool,
     pub capture_free: bool,
 }
 
-/// Escaping values the table could not key: a function value without a code
-/// identity, or one identity reached with two different bodies.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct CodeIdentityCensus {
     pub missing_identity: usize,
     pub duplicate_identity: usize,
 }
 
-/// Artifact-owned logical callable table. Backends may attach physical bodies
-/// to these entries, but they do not mint or compare the keys.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct CodeArtifact {
     pub entries: BTreeMap<CodeIdentity, CodeEntry>,
     pub census: CodeIdentityCensus,
 }
 
-/// One emitted body's code identities, held from its emission until assembly
-/// merges them, in identity order. A `BTreeMap` allocates a whole node for a
-/// body's one or two entries, about 2.5 KB each.
 #[derive(Clone, Debug, Default)]
 pub struct BodyCodeArtifact {
     entries: Box<[CodeEntry]>,
@@ -385,15 +320,12 @@ impl BodyCodeArtifact {
     }
 }
 
-/// One escaping CodeRef a program stages into its slot table.
 pub struct StagedCodeSlot<'a> {
     pub key: String,
     pub body: Ustr,
     pub call_abi: &'a str,
 }
 
-/// The escaping entries of `source` in logical-key order, each with the body
-/// that realizes it. An escaping entry without an emitted body is an error.
 pub fn staged_code_slots<'a>(
     ws: &bone_core::workspace::Workspace,
     interner: &MonoInterner,
@@ -401,7 +333,6 @@ pub fn staged_code_slots<'a>(
 ) -> Result<Vec<StagedCodeSlot<'a>>, String> {
     use bone_core::prelude::*;
     let escaping: Vec<&CodeEntry> = source.into_iter().filter(|entry| entry.escaping).collect();
-    // A key is several formatted parts, and a large program stages thousands.
     let mut entries: Vec<(String, &CodeEntry)> = escaping
         .par_iter()
         .map(|entry| (entry.identity.logical_key(ws, interner), *entry))
@@ -420,13 +351,9 @@ pub fn staged_code_slots<'a>(
         .collect()
 }
 
-/// How a full program brackets its CodeRef slot table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CodeSlotPublication {
-    /// The program publishes its slots once staging is done.
     pub publish: bool,
-    /// Staging must be opened by an explicit begin, because no escaping entry
-    /// is staged to open it.
     pub explicit_begin: bool,
 }
 
@@ -435,8 +362,6 @@ impl CodeArtifact {
         self.entries.values().any(|entry| entry.escaping)
     }
 
-    /// Slots are published when anything can hold a CodeRef: an escaping value,
-    /// a definition catalog, or a lifecycle declaration.
     pub fn publication(
         &self,
         has_definition_plan: bool,
@@ -450,7 +375,6 @@ impl CodeArtifact {
         }
     }
 
-    /// Every escaping value has one identity and one resolved body.
     pub fn is_total(&self) -> bool {
         self.census.missing_identity == 0
             && self.census.duplicate_identity == 0
@@ -460,7 +384,6 @@ impl CodeArtifact {
                 .any(|entry| entry.escaping && entry.body_fingerprint == 0)
     }
 
-    /// The census must be total before any slot is staged.
     pub fn check_stageable(&self) -> Result<(), String> {
         if self.is_total() {
             Ok(())
@@ -497,12 +420,6 @@ impl CodeArtifact {
         }
     }
 
-    /// Merge `bodies` as [`Self::merge_body`] would, one after another.
-    ///
-    /// Nearly every identity arrives once, so those entries are sorted and
-    /// built into the table in one piece instead of one search each; an
-    /// identity that repeats, or that the table already holds, takes the
-    /// ordinary path in its merge order.
     pub fn merge_bodies<'a>(&mut self, bodies: impl IntoIterator<Item = &'a BodyCodeArtifact>) {
         use bone_core::prelude::*;
         let mut incoming: Vec<&CodeEntry> = Vec::new();
@@ -510,7 +427,6 @@ impl CodeArtifact {
             self.add_census(&body.census);
             incoming.extend(body.entries());
         }
-        // Stable, so the entries of one identity stay in merge order.
         incoming.sort_by(|a, b| a.identity.cmp(&b.identity));
         let mut once: Vec<&CodeEntry> = Vec::with_capacity(incoming.len());
         let mut repeated: Vec<&CodeEntry> = Vec::new();
@@ -530,8 +446,6 @@ impl CodeArtifact {
         }
     }
 
-    /// Attach backend payload names after emission has chosen its physical
-    /// symbols. The logical keys remain unchanged.
     pub fn set_body_names(&mut self, root: &MirFunc, root_name: &str) {
         fn visit(artifact: &mut CodeArtifact, mf: &MirFunc, body_name: &str) {
             if let Some(identity) = &mf.code_identity {
@@ -547,18 +461,10 @@ impl CodeArtifact {
         visit(self, root, root_name);
     }
 
-    /// Build the identity table for one transformed MIR tree. The root body is
-    /// a definition and is not automatically a slot; nested lambda bodies are
-    /// escaping values. Named value mints are marked separately, so a direct
-    /// call-only declaration does not acquire a slot merely because it exists
-    /// in the artifact.
     pub fn from_mir_tree(root: &MirFunc) -> Self {
         Self::from_mir_tree_with_volatile_vars(root, &FxHashSet::default())
     }
 
-    /// Build the identity table while treating explicitly volatile comptime
-    /// values as metadata in body witnesses. The surrounding code shape is
-    /// still hashed, so a body edit cannot hide behind a changing build clock.
     pub fn from_mir_tree_with_volatile_vars(
         root: &MirFunc,
         volatile_vars: &FxHashSet<Ustr>,
@@ -569,19 +475,6 @@ impl CodeArtifact {
         out
     }
 
-    /// Present one lambda topology per owner.
-    ///
-    /// A coroutine's step, defer and hook regions (and any future sibling
-    /// bodies sharing an owner) each compute their topology from their own
-    /// lambda population, so one owner legitimately owns several distinct
-    /// non-default topologies. The compatibility gate compares topologies at
-    /// the owner boundary, so the artifact rewrites every non-default
-    /// topology of a multi-topology owner to the hash of the sorted distinct
-    /// set. The union tracks changes to that distinct set, not which region
-    /// owns each fingerprint or how many regions share it: swapping region
-    /// fingerprints or changing their multiplicity leaves the union unchanged.
-    /// An unrelated body-only edit leaves every union untouched. Owners with
-    /// a single topology keep their site-derived fingerprint.
     pub fn unify_owner_topologies(&mut self) {
         let mut per_owner: BTreeMap<CodeOwner, BTreeSet<LambdaTopologyFingerprint>> =
             BTreeMap::new();
@@ -637,12 +530,6 @@ impl CodeArtifact {
         }
     }
 
-    /// Mark a compiler-generated or MIR-observed function value as escaping.
-    ///
-    /// Generated registration glue (decorators and `@sim`) is outside MIR, but
-    /// it still creates the same logical function value. Keeping this operation
-    /// on the artifact prevents those glue paths from becoming a second identity
-    /// mechanism.
     pub fn mark_value(&mut self, identity: CodeIdentity) {
         if let Some(entry) = self.entries.get_mut(&identity) {
             if entry.escaping {
@@ -666,9 +553,6 @@ impl CodeArtifact {
         });
     }
 
-    /// Add a compiler-generated callable whose body is emitted outside MIR.
-    /// The runtime still sees the same logical identity table as an ordinary
-    /// escaping value.
     pub fn add_generated_value(
         &mut self,
         identity: CodeIdentity,
@@ -689,8 +573,6 @@ impl CodeArtifact {
 
     pub fn insert(&mut self, entry: CodeEntry) {
         use std::collections::btree_map::Entry;
-        // One search of the table: assembly inserts every emitted body's
-        // entries, tens of thousands on a large program.
         let old = match self.entries.entry(entry.identity.clone()) {
             Entry::Vacant(slot) => {
                 slot.insert(entry);
@@ -721,9 +603,6 @@ impl CodeArtifact {
             .collect()
     }
 
-    /// Compare the entries belonging to one owner. A topology mismatch is an
-    /// owner-level incompatibility, even if all surviving individual keys look
-    /// compatible.
     pub fn compatible_overlay(&self, next: &Self) -> bool {
         for (identity, old) in &self.entries {
             if !old.escaping {
@@ -746,9 +625,6 @@ impl CodeArtifact {
         {
             return false;
         }
-        // A live coroutine resumes into the replacement body, so every named
-        // frame-bound callable must keep its frame layout, and none may appear
-        // or disappear.
         if self.named_frames() != next.named_frames() {
             return false;
         }
@@ -768,9 +644,6 @@ impl CodeArtifact {
         true
     }
 
-    /// Replace backend body payloads from an already-built compatible artifact.
-    /// The identity keys remain those of `self`; this is the overlay operation's
-    /// explicit separation between logical slot identity and current body name.
     pub fn with_replacements<'a>(
         &self,
         replacements: impl IntoIterator<Item = &'a CodeEntry>,
@@ -785,8 +658,6 @@ impl CodeArtifact {
                 }
                 next.entries.insert(identity.clone(), entry);
             } else if entry.escaping {
-                // A newly stored function value can refer to a body that
-                // already exists. Keep its payload, but publish its slot.
                 next.entries
                     .get_mut(identity)
                     .expect("existing body")
@@ -799,12 +670,6 @@ impl CodeArtifact {
 }
 
 fn body_fingerprint(mf: &MirFunc, volatile_vars: &FxHashSet<Ustr>) -> u64 {
-    // This is a duplicate-body witness only. It intentionally excludes the
-    // identity/compatibility fields and is canonicalized across MIR clones;
-    // it is never used to find a slot.
-    // Generic inlining can leave unrelated cloned lowering artifacts in the
-    // same arenas. Hash only the reachable body so those artifacts cannot make
-    // two copies of one lambda look like different bodies.
     let volatile_comptime_spans = mf
         .comptime_reads
         .iter()
@@ -839,8 +704,6 @@ struct BodyHasher {
     rep_ids: FxHashMap<u32, usize>,
 }
 
-/// First-seen numbering of arena ids, dense over the arena when its size is
-/// known up front (every body hash renumbers every reachable id once).
 #[derive(Default)]
 struct CanonicalIds {
     dense: Vec<u32>,

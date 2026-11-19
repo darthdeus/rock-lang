@@ -1,17 +1,7 @@
-//! A push-only vector whose elements never move, so any thread can read an
-//! element by index without a lock while another thread appends.
-//!
-//! Build-scoped tables that lowering workers read on every expression (the
-//! type arena, the representation arena) are monotonic: entries are appended
-//! and never changed or removed. Storing them in doubling segments that are
-//! never reallocated lets a reader hand out `&T` tied to the table itself,
-//! instead of copying entries into per-thread caches or taking a read lock.
-
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
-/// Slots in the first segment; segment `k` holds `FIRST << k` slots.
 const FIRST: usize = 64;
 const SEGMENTS: usize = 40;
 
@@ -21,8 +11,6 @@ pub struct AppendVec<T> {
     push_lock: Mutex<()>,
 }
 
-// Elements are only written before `len` publishes them and are never mutated
-// afterwards, so sharing the vector shares `&T` across threads.
 unsafe impl<T: Send> Send for AppendVec<T> {}
 unsafe impl<T: Send + Sync> Sync for AppendVec<T> {}
 
@@ -63,7 +51,6 @@ impl<T> AppendVec<T> {
         self.len() == 0
     }
 
-    /// Append `value` and return its index.
     pub fn push(&self, value: T) -> usize {
         let _guard = self.push_lock.lock().unwrap_or_else(|e| e.into_inner());
         let index = self.len.load(Ordering::Relaxed);
@@ -100,8 +87,6 @@ impl<T> AppendVec<T> {
         (0..self.len()).map(|index| self.get(index).expect("index below len"))
     }
 
-    /// The index of `element` when it is a reference into this vector. A
-    /// published element never moves, so its address identifies its slot.
     pub fn index_of(&self, element: &T) -> Option<usize> {
         let addr = element as *const T as usize;
         let size = std::mem::size_of::<T>();
@@ -123,9 +108,6 @@ impl<T> AppendVec<T> {
     }
 }
 
-/// A table of lazily created values indexed by a dense id, readable and
-/// fillable from any thread without a lock. Slots start empty; the first
-/// thread to ask for one installs it and every later reader shares it.
 pub struct SlotTable<T> {
     segments: [AtomicPtr<AtomicPtr<T>>; SEGMENTS],
 }
@@ -171,7 +153,6 @@ impl<T> SlotTable<T> {
         unsafe { &*base.add(offset) }
     }
 
-    /// The value at `index`, created by `init` when the slot is empty.
     pub fn get_or_init(&self, index: usize, init: impl FnOnce() -> T) -> &T {
         let slot = self.slot(index);
         let mut value = slot.load(Ordering::Acquire);
@@ -197,7 +178,6 @@ impl<T> SlotTable<T> {
 }
 
 impl<T> SlotTable<T> {
-    /// Every installed value with its index, in index order.
     pub fn for_each(&self, mut visit: impl FnMut(usize, &T)) {
         for (segment, base) in self.segments.iter().enumerate() {
             let base = base.load(Ordering::Acquire);
