@@ -1,5 +1,4 @@
-// This file also defines Result but with different fields
-// Without #script, this would conflict with script_with_result.rock
+// A program may define its own struct named `Result`.
 
 struct Result<T, E> {
     ok: T?

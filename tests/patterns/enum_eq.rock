@@ -66,7 +66,7 @@ fn test_payloaded_eq() {
     assert_eq(ping == ping2, true)
 }
 
-// Moved from enum_tuple_variants.rock: loop + match over heterogeneous vec
+// Loop + match over a heterogeneous vec
 enum Shape {
     Point,
     Line(float, float, float, float),

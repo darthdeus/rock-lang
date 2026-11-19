@@ -243,8 +243,7 @@ The reverse trap leaves nothing to see. During draw systems the window is
 bound, and `present_composite()` later blits the scene composite over it. A
 queued batch is submitted into the composite; an immediate draw
 (`draw_sampled_texture`, a raw sprite draw) issued from `@draw` goes straight
-to the window and is overwritten, so the region reads as background. The
-testbed sim `card_reaches_the_window` pins the correct path.
+to the window and is overwritten, so the region reads as background.
 
 A custom-shader sprite mesh consumes the batched `Vertex` layout and owns the
 y-sort depth remap: the vertex stage writes `position.z` from `pivot_y`

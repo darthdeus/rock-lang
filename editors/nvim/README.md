@@ -85,7 +85,7 @@ ROCK_LSP_BIN=~/projects/rock-lang/target/debug/rock tests/run.sh
 ```
 
 `tests/docker-run.sh` is the clean-room variant: it builds
-`tests/Dockerfile` (nvim pinned to the version in `M.min_nvim`), builds or
+`Dockerfile` (nvim pinned to the version in `M.min_nvim`), builds or
 reuses a cached `rock` via `tests/build-rock-lsp.sh`, and runs the same
 runner inside the container.
 

@@ -26,7 +26,7 @@ fn as_binds_tighter_than_arithmetic() {
 // the typechecker rejected, so that shape simply could not be written. Only
 // `a * b % c` came out right, by the accident of `*` already binding tighter.
 //
-// Same table and same class of defect as `nullable/coalesce_precedence.rock`.
+// Same table and same class of defect as `nullable/coalesce.rock`.
 //
 // The guards at the bottom pin the other side, so lowering the level cannot
 // silently drag `%` back under the operators it must stay above.
