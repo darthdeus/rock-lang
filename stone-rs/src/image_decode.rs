@@ -1,6 +1,6 @@
 //! Background image decode.
 //!
-//! Boot loads 211 images in mag and 89% of that wall time is CPU-side PNG
+//! Booting a large game loads hundreds of images and 89% of that wall time is CPU-side PNG
 //! decode, not GL upload. File reads and decode can run on workers; uploads
 //! must stay on the GL thread. `stone_load_image` probes dimensions immediately
 //! so the caller gets a valid handle; prefetched payloads are read on the pool,
@@ -72,7 +72,7 @@ pub fn stub_images() -> bool {
 /// every sheet frame, pixel rect and UV derived from them is unchanged and only
 /// sampling resolution drops. 0 or unset is no cap.
 ///
-/// The sim runner publishes 256 to every child. A rendering mag worker holds
+/// The sim runner publishes 256 to every child. A rendering game worker holds
 /// 3.2 GB of RGBA8 texture pixels, which is what stops a second suite from
 /// fitting in 36 GB of unified memory; a sim asserts layout
 /// and silhouettes, not texel detail. Production boots (`rock run`, `rock
@@ -114,7 +114,7 @@ pub fn capped_dims(width: u32, height: u32) -> (u32, u32) {
 /// individually rather than sampled as colour -- a lookup table, an index
 /// structure, anything where texel N means something on its own. Averaging
 /// those is not a loss of detail, it is a different value, so the cap is
-/// withheld entirely rather than softened. mag's relight caster bakes are the
+/// withheld entirely rather than softened. relight caster bakes are the
 /// standing case: they pack a bounding-volume hierarchy whose per-node escape
 /// index, once averaged, sends the traversal back to a node it already visited
 /// and hangs the GPU.
@@ -300,7 +300,7 @@ pub(crate) fn submit(
                 }
             }
             // The cap reduces here, on the pool thread, so the GL thread never
-            // pays a pass over the full-size pixels -- mag's bank is 3.2 GB.
+            // pays a pass over the full-size pixels -- a large bank is several GB.
             Some((rgba, width, height)) => {
                 let stored = storage_dims(exact_texels, width, height);
                 let pixels = if format.blocks().is_some() {

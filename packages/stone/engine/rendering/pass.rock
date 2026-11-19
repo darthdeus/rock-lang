@@ -344,7 +344,7 @@ fn scene_pass_reads_output(p: Pass) -> bool {
 //   * If a chain ends with the scene in screen_canvas_2, the engine
 //     blits it back. Canvas->canvas hops preserve content (identity
 //     fullscreen quad), so the blit is a plain copy -- no orientation
-//     to correct. Pinned by the MAG scene_pass_pingpong sim's
+//     to correct. Pinned by a downstream scene pass ping-pong sim's
 //     north/south probe.
 // Both queues name canvases from the scene target set, and both are filled
 // during `@update` while the set is rebuilt between update and render

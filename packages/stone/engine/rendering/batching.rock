@@ -237,7 +237,7 @@ pub fn draw_sprite_into(
     // to ensure_batch_of). This funnel only writes geometry + entity id.
     // One test of `outline` on the common path, not three. Each was a trace
     // exit inside the draw stack, and the `entity_id != 0` exit is bimodal --
-    // MAG draws both id-carrying and id-less sprites through here -- so it
+    // A game draws both id-carrying and id-less sprites through here -- so it
     // spawned side traces that never compiled.
     let eid = entity_id
     let has_outline = outline != null

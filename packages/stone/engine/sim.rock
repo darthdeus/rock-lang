@@ -13,7 +13,7 @@
 
 // Sim entry: a zero-arg co fn returning Coroutine<Wait>. Registered
 // once at @init; the runner picks one by name from ROCK_RUN_SIM. A sim
-// declared with one parameter (MAG's `world: Scene<WorldState>`) arrives here
+// declared with one parameter (for example `world: Scene<WorldState>`) arrives here
 // already wrapped by the game's `@sim_entry` provider, which resolves the
 // argument when the entry starts, so this registry never names a game type.
 global SIMS: Map<string, () -> Coroutine<Wait>> = map_new()
@@ -529,7 +529,7 @@ macro mouse_hold_click(frames: expr) -> Coroutine<Wait> {
 // block (`rock-dev-cli` image_diff). Per-channel deltas of 1 or less count
 // as zero. A local change is averaged only within its block, not the full frame.
 // Image snapshots gate scene-wide regressions; use focused sim expects for
-// local behavior (canonical: bitgun material_batch).
+// local behavior.
 // HEADLESS GL still has a real framebuffer, so readback works the
 // same as in screenshot mode.
 //

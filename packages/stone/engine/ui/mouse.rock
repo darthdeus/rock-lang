@@ -104,7 +104,7 @@ fn ui_mouse_note_press(button: int) {
 // reported by NAME ("scope/label", recorded at mint), not call site --
 // a __SITE__ shim can't see through widgets (skin_button registers
 // internally), and macro named args bind positionally (TODO.md), so
-// shimming every widget is a trap. MAG wiring: ui_id_collision; detector rules:
+// shimming every widget is a trap. Detector rules:
 // stone/tests/ui_id_debug_retention.rock.
 pub struct UiIdDebug {
     enabled: bool,

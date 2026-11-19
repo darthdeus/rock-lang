@@ -852,7 +852,7 @@ fn frame_core_commit_time(delta_time: float, ticking: bool) {
 // of them -- one accumulated set per skipped frame, since each custom draw
 // takes its own batch key. Successful consumption and frame lifetime are
 // separate facts: a drain may still truncate storage so the same frame can
-// refill it (bitgun renders and clears inside its own @draw), but a drain that
+// refill it, but a drain that
 // never runs cannot be the only discard boundary.
 //
 // Pooled vertex buffers survive (`discard_pool_batches`); closures, the

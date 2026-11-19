@@ -844,9 +844,9 @@ display = 1
 
     #[test]
     fn config_imgui_scale_game_section_beats_default() {
-        let toml = "[default]\nimgui_scale = 2.0\n\n[game.mag]\nimgui_scale = 1.5\n";
+        let toml = "[default]\nimgui_scale = 2.0\n\n[game.demo]\nimgui_scale = 1.5\n";
         assert_eq!(
-            parse_config_toml(toml, "mag").unwrap().imgui_scale,
+            parse_config_toml(toml, "demo").unwrap().imgui_scale,
             Some(1.5)
         );
         assert_eq!(
@@ -877,8 +877,8 @@ display = 1
     #[test]
     fn slug_strips_spaces_and_punct() {
         assert_eq!(game_slug("Match 3"), "match3");
-        assert_eq!(game_slug("mag"), "mag");
-        assert_eq!(game_slug("Bit-Gun!"), "bitgun");
+        assert_eq!(game_slug("demo"), "demo");
+        assert_eq!(game_slug("Two-Words!"), "twowords");
     }
 
     fn disp(index: i32, bounds: (i32, i32, i32, i32)) -> DisplayReport {

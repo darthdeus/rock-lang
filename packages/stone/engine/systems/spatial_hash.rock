@@ -162,7 +162,7 @@ pub fn spatial_hash_build<T>(sh: SpatialHash<T>) {
         let cy1 = sh_cell_coord(sh_shape_max_y(sh, i), cs)
 
         // A shape smaller than a cell usually lands inside one, and then both
-        // nested loops trip exactly once. Measured on mag's combat bench: 4,080
+        // nested loops trip exactly once. Measured on a combat benchmark: 4,080
         // of 4,080 entries into these loops had a trip count of 1, which is a
         // loop header LuaJIT starts a root trace at and then aborts, because
         // the loop leaves on the very iteration being recorded. Handling the

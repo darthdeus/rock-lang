@@ -6,7 +6,7 @@ pub global IMGUI_MOUSE_CAPTURE_OVERRIDE: bool? = null
 //
 // Real SDL input must not reach a run that has no host input to read. A focused
 // window takes a modifier the developer happens to be holding (measured while a
-// mag input sim pressed "f": with a real Ctrl down, `ctrl_held()` answered true,
+// An input sim pressed "f": with a real Ctrl down, `ctrl_held()` answered true,
 // so a Ctrl debug shortcut fired on some runs only), and an unmapped
 // headless window takes it too -- SDL's X11 keyboard init calls XQueryKeymap on
 // the display's SERVER-GLOBAL keymap and synthesizes a press for a modifier held

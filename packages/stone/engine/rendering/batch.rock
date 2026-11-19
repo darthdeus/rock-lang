@@ -1758,7 +1758,7 @@ pub fn render_batches(after_scene: bool = false) {
                 // normal/fullbright bits reach the GPU in one upload, which is also
                 // what stops a prior batch's value leaking into the next one -- the
                 // reason the by-name sets had to be explicit every batch.
-                // A custom pipeline declares its own group (mag's bolt has
+                // A custom pipeline declares its own group (a bolt effect has
                 // BoltFragU), so it has no block of THIS layout and wants no upload.
                 // Asking first is the difference between that normal state and the
                 // set-then-draw caller the miss log is actually for.

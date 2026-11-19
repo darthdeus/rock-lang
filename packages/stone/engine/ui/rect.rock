@@ -1,4 +1,3 @@
-// TODO: this is bitgun specific?
 pub const BAR_WIDTH: int = 300
 pub global BAR_HEIGHT: int = 50
 const BAR_INSET: int = 5

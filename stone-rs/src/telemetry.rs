@@ -1883,7 +1883,7 @@ mod tests {
 
     fn identity() -> TelemetryIdentity {
         TelemetryIdentity {
-            game: "mag".into(),
+            game: "demo".into(),
             build: "abc123".into(),
             platform: "linux".into(),
             channel: "steam".into(),
@@ -2208,7 +2208,7 @@ mod tests {
             "build": "old",
             "platform": "linux",
             "channel": "steam",
-            "game": "mag",
+            "game": "demo",
             "n": "legacy",
         });
         fs::write(&events_path, format!("{}\n", legacy)).unwrap();
@@ -2831,7 +2831,7 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidInput
         );
-        for game in ["", ".", "..", "MAG", "mag/other", "-mag"] {
+        for game in ["", ".", "..", "DEMO", "demo/other", "-demo"] {
             let mut bad_identity = identity();
             bad_identity.game = game.into();
             assert_eq!(
@@ -3642,7 +3642,7 @@ mod tests {
         let request = &posted[0];
         assert!(request.starts_with("POST /v1/events HTTP/1.1\r\n"));
         let headers = request.to_ascii_lowercase();
-        assert!(headers.contains("x-rock-game: mag\r\n"));
+        assert!(headers.contains("x-rock-game: demo\r\n"));
         assert!(headers.contains("x-rock-channel: dev\r\n"));
         let body = http_body(request);
         let expected = hmac_sha256_hex("development-secret", body);
@@ -3659,7 +3659,7 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row["v"], 2);
         assert_eq!(row["kind"], "stat");
-        assert_eq!(row["game"], "mag");
+        assert_eq!(row["game"], "demo");
         assert_eq!(row["channel"], "dev");
         assert_eq!(row["n"], "death");
         assert_eq!(row["t"], 1_754_600_000_i64);
@@ -3694,7 +3694,7 @@ mod tests {
         assert_eq!(rows[0]["seq"], 1);
         assert_eq!(rows[0]["build"], "abc123");
         assert_eq!(rows[0]["platform"], "linux");
-        assert_eq!(rows[0]["game"], "mag");
+        assert_eq!(rows[0]["game"], "demo");
         assert_eq!(rows[0]["channel"], "steam");
         assert_eq!(rows[0]["n"], "found:\"Orpiment\"");
         assert_eq!(rows[1]["seq"], 2);
@@ -3908,7 +3908,7 @@ mod tests {
             .contains("x-rock-channel: steam\r\n"));
         assert!(request
             .to_ascii_lowercase()
-            .contains("x-rock-game: mag\r\n"));
+            .contains("x-rock-game: demo\r\n"));
         assert!(request
             .to_ascii_lowercase()
             .contains(&format!("x-rock-signature: sha256={expected}\r\n")));

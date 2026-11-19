@@ -1,6 +1,6 @@
 // Shaders
 // @engine/ prefix = shared engine shaders from stone/engine/shaders/
-// No prefix = game-specific shaders from bitgun/shaders/
+// No prefix = shaders from the game's own shaders/ directory
 
 pub const sprite_batch_shader: string = rock_shader(sprite_batch_vert, sprite_batch_frag)  // sprite_batch_shader.rock (A2b)
 pub const sprite_basic_shader: string = rock_shader(sprite_basic_vert, sprite_basic_frag)  // sprite_basic_shader.rock (C2); the immediate/present sprite program

@@ -2658,7 +2658,7 @@ pub extern "C" fn stone_gpu_scopes_json() -> *const c_char {
 
 thread_local! {
     // When set (perf/sim benchmarking), stone_set_vsync(1) is ignored so a
-    // game's per-frame settings-apply (e.g. mag's settings_push pokes the raw
+    // game's per-frame settings-apply (e.g. a settings push that pokes the raw
     // FFI, bypassing the engine's engine_set_vsync wrapper) can't re-enable
     // the vblock and pin `rendered` to the refresh rate -- which silently
     // corrupts every render-bench frame-time measurement.

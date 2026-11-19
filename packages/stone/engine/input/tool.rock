@@ -101,7 +101,7 @@ fn tool_key_id(key: ToolKey) -> int {
 // `stone/prebuilt/cimgui/wrap.lua` opens with `jit.off(true)`, which
 // blacklists it, so a LuaJIT trace that reaches one is thrown away: the
 // per-key query below was the top-40 census entry worth 116 aborts in a `rock
-// sim mag trace_pressure_combat_bench` run, and the mouse side another 161.
+// combat benchmark sim` run, and the mouse side another 161.
 // Same C function, same answer, no `jit.off`; `imgui.C.igGetIO_Nil()` in the
 // injector below is the same idiom.
 // The wrapper's only other work is filling a defaulted argument, which every

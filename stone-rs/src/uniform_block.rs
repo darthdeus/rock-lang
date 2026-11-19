@@ -505,7 +505,7 @@ pub extern "C" fn stone_shader_upload_uniform_block(
         let bytes = unsafe { std::slice::from_raw_parts(data, size as usize) };
         // A fresh stream range, never storage a queued draw reads: an in-place
         // `glBufferSubData` into such storage makes Apple's GL-on-Metal flush,
-        // resubmit and wait (~139 uploads per MAG frame put half the main
+        // resubmit and wait (~139 uploads per frame in a large game put half the main
         // thread in that stall), and re-specifying one buffer per block with
         // `glBufferData` let NVIDIA 595.104 serve a draw the storage its own
         // upload replaced (#883).

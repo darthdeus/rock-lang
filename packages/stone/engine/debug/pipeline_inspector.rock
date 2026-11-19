@@ -8,7 +8,7 @@
 //
 // Capture is driven from the choke points, not a fixed runner line, so it
 // works no matter who flushes: render_batches() (the single batch flush,
-// called by the engine OR by a game's own @draw like bitgun) resets the
+// called by the engine OR by a game's own @draw ) resets the
 // snapshot at its top and records each batch; run_pass() (the single pass
 // entry point) appends every Pass as it executes. Batches and passes are
 // cleared right after they flush each frame, so a read at imgui time would

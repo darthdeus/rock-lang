@@ -62,8 +62,7 @@ pub fn engine_block_fingerprint() -> int {
 // The slot-0 policy, as a predicate rather than an inline condition: every other
 // way a registration can fail (a driver bind that rejects, a layout that does
 // not match the plan) also drops the entry, so "the program has no blocks" is
-// NOT a discriminant for this rule. Testing the policy directly is -- see
-// `bitgun/tests/sims/engine_block_binding.rock`.
+// NOT a discriminant for this rule.
 pub fn engine_binding_is_foreign(binding: int, fingerprint: int) -> bool {
     return binding == UNIFORM_BLOCK_BINDING_ENGINE && fingerprint != engine_block_fingerprint()
 }

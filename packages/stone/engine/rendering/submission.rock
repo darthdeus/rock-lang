@@ -304,7 +304,7 @@ fn gpu_execute_gl_pass(p: GpuPass, traced: [GpuTracedDraw]?, to_window: bool) ->
         for t in traced { gpu_execute_draw_resolved(t.draw, t.geometry) }
     } else if p.draws.len() == 1 {
         // Not a length guard: both arms execute every draw, and the loop below
-        // is unchanged for every longer pass. Measured on mag's combat bench,
+        // is unchanged for every longer pass. Measured on a combat benchmark,
         // all 3,996 passes reaching this branch carried exactly one draw, so
         // the loop always tripped once -- and a loop that always trips once is
         // one LuaJIT starts a root trace at and then aborts, because the loop
