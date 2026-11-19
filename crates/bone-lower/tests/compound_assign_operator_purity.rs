@@ -28,10 +28,9 @@ fn overloaded_operators_in_a_place_are_lowered_once() {
         },
     );
     let function_idx = {
-        let mut ctx = LowerCtx::new(&workspace, &mut module, 0);
+        let mut ctx = LowerCtx::new(&workspace, &mut module, &ast, 0);
         lower_function_def(
             &mut ctx,
-            &ast,
             function,
             &[],
             function.span.offset_range().0,

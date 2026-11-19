@@ -248,7 +248,7 @@ pub fn lower_modules_seeded(
     // Validate non-function annotations after more specific forward-declaration errors.
     // Resolve their names so user decorators cannot enter builtin branches.
     for lower_item in items.iter_mut() {
-        let mut ctx = LowerCtx::new(ws, lower_item.module, 0);
+        let mut ctx = LowerCtx::new(ws, lower_item.module, lower_item.rock_module, 0);
         let fragment_scope = lower_item.fragment_scope.clone();
         let start = fragment_scope.module_path.clone();
         for_each_def_item(
@@ -272,12 +272,7 @@ pub fn lower_modules_seeded(
                 };
                 let mut item_scope = fragment_scope.clone();
                 item_scope.module_path = path.to_vec();
-                let lowered = lower_annotations_in_scope(
-                    &ctx,
-                    lower_item.rock_module,
-                    &ast_item.annotations,
-                    &item_scope,
-                )?;
+                let lowered = lower_annotations_in_scope(&ctx, &ast_item.annotations, &item_scope)?;
                 validate_annotations(pos, &lowered, &ws.decorator_names)?;
                 if let ItemKind::Struct(def) = &ast_item.kind {
                     let name = map_key(&fragment_scope, path, def.name.name);
@@ -377,12 +372,12 @@ pub fn lower_modules_seeded(
             .par_iter_mut()
             .map(|item| {
                 let first_var = item.module.lower_var_high_water;
-                let mut ctx = LowerCtx::new(ws, item.module, first_var);
+                let mut ctx = LowerCtx::new(ws, item.module, item.rock_module, first_var);
 
-                pass_lower_fields(item.rock_module, &mut ctx)?;
-                bone_lower::record_use_paths(item.rock_module, &mut ctx);
+                pass_lower_fields(&mut ctx)?;
+                bone_lower::record_use_paths(&mut ctx);
 
-                Ok::<_, CompilerError>((item.rock_module, ctx))
+                Ok::<_, CompilerError>(ctx)
             })
             .collect::<Result<Vec<_>, _>>()?
     };
@@ -397,10 +392,10 @@ pub fn lower_modules_seeded(
         let timed = module_timings_requested();
         let (modules, times): (Vec<_>, Vec<_>) = par_map_largest_first(
             ctxts,
-            |(rock_module, _)| rock_module.exprs.len(),
-            |(rock_module, mut c)| {
+            |c| c.ast.exprs.len(),
+            |mut c| {
                 let started = timed.then(Instant::now);
-                pass_lower_functions(rock_module, &mut c)?;
+                pass_lower_functions(&mut c)?;
                 c.flush_scope_probes();
 
                 c.module.lower_var_high_water = c._next_var_id;
@@ -2069,15 +2064,16 @@ pub(crate) fn pass_register_forward_decls(
     Ok(())
 }
 
-pub(crate) fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
+pub(crate) fn pass_lower_fields(ctx: &mut LowerCtx) -> Result<(), CompilerError> {
+    let a = ctx.ast;
     let scope = ctx.fragment_scope().clone();
     let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(&scope, path, *name);
     let start = scope.module_path.clone();
     for_each_def_item(a.items.as_slice(), &start, &mut |item, path| {
         match &item.kind {
-            ItemKind::Struct(s) => lower_struct_def(ctx, a, s, reg_key(&s.name.name, path))?,
-            ItemKind::Enum(e) => lower_enum_def(ctx, a, e, reg_key(&e.name.name, path))?,
-            ItemKind::Newtype(n) => lower_newtype_def(ctx, a, n, reg_key(&n.name.name, path))?,
+            ItemKind::Struct(s) => lower_struct_def(ctx, s, reg_key(&s.name.name, path))?,
+            ItemKind::Enum(e) => lower_enum_def(ctx, e, reg_key(&e.name.name, path))?,
+            ItemKind::Newtype(n) => lower_newtype_def(ctx, n, reg_key(&n.name.name, path))?,
             _ => {}
         }
         Ok(())
@@ -2086,7 +2082,8 @@ pub(crate) fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Compi
     Ok(())
 }
 
-pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
+pub(crate) fn pass_lower_functions(ctx: &mut LowerCtx) -> Result<(), CompilerError> {
+    let a = ctx.ast;
     let scope = ctx.fragment_scope().clone();
     let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(&scope, path, *name);
     let start = scope.module_path.clone();
@@ -2128,14 +2125,8 @@ pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Co
                 ctx.workspace
                     .relowered_body_count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let fn_id = lower_function_def(
-                    ctx,
-                    a,
-                    f,
-                    &item.annotations,
-                    item.span.offset_range().0,
-                    key,
-                )?;
+                let fn_id =
+                    lower_function_def(ctx, f, &item.annotations, item.span.offset_range().0, key)?;
                 let mid = ctx.module.module_id();
 
                 ctx.module
@@ -2146,7 +2137,7 @@ pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Co
             }
 
             ItemKind::Decorator(d) => {
-                lower_decorator_def(ctx, a, d, &item.annotations, reg_key(&d.name.name, path))?;
+                lower_decorator_def(ctx, d, &item.annotations, reg_key(&d.name.name, path))?;
             }
 
             ItemKind::Comment(_)
@@ -2158,7 +2149,7 @@ pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Co
             ItemKind::Use(_) | ItemKind::Module(_) => {}
 
             ItemKind::Global(g) => {
-                lower_global(ctx, a, g, reg_key(&g.name.name, path))?;
+                lower_global(ctx, g, reg_key(&g.name.name, path))?;
             }
 
             ItemKind::CompilerDirective(_) => {

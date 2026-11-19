@@ -28,7 +28,8 @@ pub(crate) enum TyPos {
     Body,
 }
 
-pub fn record_use_paths(a: &Ast, ctx: &mut LowerCtx) {
+pub fn record_use_paths(ctx: &mut LowerCtx) {
+    let a = ctx.ast;
     if ctx.workspace.skip_session_facts {
         return;
     }
@@ -73,34 +74,28 @@ fn member_segment_target(target: &resolve::MemberTarget) -> hir::SegmentTarget {
     }
 }
 
-pub(crate) fn alloc_ty(ctx: &mut LowerCtx, body: &mut Body, pos: TyPos, node: TypeExpr) -> TyId {
+pub(crate) fn alloc_ty(ctx: &mut LowerCtx, pos: TyPos, node: TypeExpr) -> TyId {
     match pos {
-        TyPos::Iface => TyId::Static(ctx.module.module_id(), alloc_ty_raw(ctx, body, pos, node)),
-        TyPos::Body => TyId::Local(alloc_ty_raw(ctx, body, pos, node)),
+        TyPos::Iface => TyId::Static(ctx.module.module_id(), alloc_ty_raw(ctx, pos, node)),
+        TyPos::Body => TyId::Local(alloc_ty_raw(ctx, pos, node)),
     }
 }
 
-pub(crate) fn alloc_ty_raw(
-    ctx: &mut LowerCtx,
-    body: &mut Body,
-    pos: TyPos,
-    node: TypeExpr,
-) -> Idx<TypeExpr> {
+pub(crate) fn alloc_ty_raw(ctx: &mut LowerCtx, pos: TyPos, node: TypeExpr) -> Idx<TypeExpr> {
     match pos {
         TyPos::Iface => ctx.module.ty_arena.alloc(node),
-        TyPos::Body => body.lowered_tys.alloc(node),
+        TyPos::Body => ctx.body.lowered_tys.alloc(node),
     }
 }
 
 pub(crate) fn alloc_tys_contiguous(
     ctx: &mut LowerCtx,
-    body: &mut Body,
     pos: TyPos,
     nodes: impl IntoIterator<Item = TypeExpr>,
 ) -> IdxRange<TypeExpr> {
     match pos {
         TyPos::Iface => alloc_contiguous(&mut ctx.module.ty_arena, nodes),
-        TyPos::Body => alloc_contiguous(&mut body.lowered_tys, nodes),
+        TyPos::Body => alloc_contiguous(&mut ctx.body.lowered_tys, nodes),
     }
 }
 
@@ -142,6 +137,9 @@ fn variant_path_spans(path: &skull_parser::Path) -> (Span, Span) {
 pub struct LowerCtx<'w, 'm> {
     pub workspace: &'w Workspace,
     pub module: &'m mut hir::Module,
+    pub ast: &'w Ast,
+    /// The body under construction; each item starts a fresh one.
+    pub(crate) body: Body,
     pub(crate) generics_in_scope: FxHashMap<Ustr, TyId>,
 
     pub _next_var_id: u32,
@@ -159,10 +157,17 @@ pub struct LowerCtx<'w, 'm> {
 }
 
 impl<'w, 'm> LowerCtx<'w, 'm> {
-    pub fn new(workspace: &'w Workspace, module: &'m mut hir::Module, first_var: u32) -> Self {
+    pub fn new(
+        workspace: &'w Workspace,
+        module: &'m mut hir::Module,
+        ast: &'w Ast,
+        first_var: u32,
+    ) -> Self {
         LowerCtx {
             workspace,
             module,
+            ast,
+            body: Body::default(),
             generics_in_scope: Default::default(),
             _next_var_id: first_var,
             placeholder_param: None,
@@ -211,10 +216,14 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
 
     /// Record that `val` covers source bytes `start..stop`, for editor
     /// queries ([`Body::node_index`]); nothing in a one-shot pass.
-    fn node_interval(&self, body: &mut Body, start: usize, stop: usize, val: hir::NodeRef) {
+    fn node_interval(&mut self, start: usize, stop: usize, val: hir::NodeRef) {
         if !self.workspace.skip_session_facts {
-            body.make_lapper(start, stop, val);
+            self.body.make_lapper(start, stop, val);
         }
+    }
+
+    fn take_body(&mut self) -> Body {
+        std::mem::take(&mut self.body)
     }
 
     pub fn flush_scope_probes(&mut self) {
@@ -278,19 +287,13 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
             })
     }
 
-    fn record_path(
-        &mut self,
-        body: &mut Body,
-        pos: TyPos,
-        path: &skull_parser::Path,
-        last: hir::SegmentTarget,
-    ) {
+    fn record_path(&mut self, pos: TyPos, path: &skull_parser::Path, last: hir::SegmentTarget) {
         if self.workspace.skip_session_facts {
             return;
         }
         let refs = self.path_segment_refs(path.from_root, &path.segments, last);
         match pos {
-            TyPos::Body => body.path_segments.extend(refs),
+            TyPos::Body => self.body.path_segments.extend(refs),
             TyPos::Iface => self.module.path_segments.extend(refs),
         }
     }
@@ -559,17 +562,11 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         VarId(self._next_var_id)
     }
 
-    pub(crate) fn alloc_binding(
-        &mut self,
-        body: &mut Body,
-        b: BindingInfo,
-        span: Span,
-    ) -> Idx<BindingInfo> {
-        let idx = body.binding_arena.alloc(b);
+    pub(crate) fn alloc_binding(&mut self, b: BindingInfo, span: Span) -> Idx<BindingInfo> {
+        let idx = self.body.binding_arena.alloc(b);
 
-        body.binding_spans.insert(idx, span);
+        self.body.binding_spans.insert(idx, span);
         self.node_interval(
-            body,
             span.offset_range().0,
             span.offset_range().1,
             hir::NodeRef::Binding(idx),
@@ -580,13 +577,11 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
 
     fn alloc_parameter(
         &mut self,
-        body: &mut Body,
         name: &skull_parser::Ident,
         declared_ty: Option<TyId>,
         span: Span,
     ) -> Idx<BindingInfo> {
         self.alloc_binding(
-            body,
             BindingInfo {
                 name: name.name,
                 kind: BindingKind::Param,
@@ -597,15 +592,14 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         )
     }
 
-    pub(crate) fn alloc_expr(&mut self, body: &mut Body, expr: Expr, span: Span) -> Idx<Expr> {
+    pub(crate) fn alloc_expr(&mut self, expr: Expr, span: Span) -> Idx<Expr> {
         let is_block = matches!(expr, Expr::Block { .. });
-        let idx = body.expr_arena.alloc(expr);
+        let idx = self.body.expr_arena.alloc(expr);
 
-        body.expr_spans.insert(idx, span);
+        self.body.expr_spans.insert(idx, span);
 
         if !is_block {
             self.node_interval(
-                body,
                 span.offset_range().0,
                 span.offset_range().1,
                 hir::NodeRef::Expr(idx),
@@ -615,27 +609,20 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         idx
     }
 
-    pub(crate) fn alloc_block_expr(
-        &mut self,
-        body: &mut Body,
-        expr: Expr,
-        b: &BlockData,
-    ) -> Idx<Expr> {
+    pub(crate) fn alloc_block_expr(&mut self, expr: Expr, b: &BlockData) -> Idx<Expr> {
         debug_assert!(matches!(expr, Expr::Block { .. }));
-        let idx = body.expr_arena.alloc(expr);
+        let idx = self.body.expr_arena.alloc(expr);
 
-        body.expr_spans.insert(idx, b.span);
+        self.body.expr_spans.insert(idx, b.span);
 
         if let Some((open, close)) = b.braces {
             self.node_interval(
-                body,
                 open.offset_range().0,
                 open.offset_range().1,
                 hir::NodeRef::Expr(idx),
             );
 
             self.node_interval(
-                body,
                 close.offset_range().0,
                 close.offset_range().1,
                 hir::NodeRef::Expr(idx),
@@ -647,27 +634,26 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
 
     pub(crate) fn lower_type_exprs_to_range(
         &mut self,
-        a: &Ast,
-        body: &mut Body,
         pos: TyPos,
         xs: &[Idx<TypeExprData>],
     ) -> Result<IdxRange<TypeExpr>, CompilerError> {
+        let a = self.ast;
         let nodes: Vec<TypeExpr> = xs
             .iter()
             .map(|x| {
-                let id = lower_type_expr_in(self, a, body, pos, &a.types[*x])?;
-                Ok(self.type_node(body, id))
+                let id = lower_type_expr_in(self, pos, &a.types[*x])?;
+                Ok(self.type_node(id))
             })
             .collect::<Result<_, _>>()?;
 
-        Ok(alloc_tys_contiguous(self, body, pos, nodes))
+        Ok(alloc_tys_contiguous(self, pos, nodes))
     }
 
-    pub(crate) fn type_node(&self, body: &Body, ty: TyId) -> TypeExpr {
+    pub(crate) fn type_node(&self, ty: TyId) -> TypeExpr {
         match ty {
             TyId::Static(m, i) if m == self.module.module_id() => self.module.ty_arena[i],
             TyId::Static(m, i) => self.workspace.module(m).ty_arena[i],
-            TyId::Local(i) => body.lowered_tys[i],
+            TyId::Local(i) => self.body.lowered_tys[i],
         }
     }
 
@@ -696,20 +682,16 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
 
 pub(crate) fn lower_type_expr(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     te: &skull_parser::TypeExprData,
 ) -> Result<TyId, CompilerError> {
-    lower_type_expr_in(ctx, a, body, TyPos::Iface, te)
+    lower_type_expr_in(ctx, TyPos::Iface, te)
 }
 
 pub(crate) fn lower_type_expr_local(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     te: &skull_parser::TypeExprData,
 ) -> Result<TyId, CompilerError> {
-    lower_type_expr_in(ctx, a, body, TyPos::Body, te)
+    lower_type_expr_in(ctx, TyPos::Body, te)
 }
 
 /// Record spans only for new arena entries. Generics and `_` can share type IDs.
@@ -735,12 +717,11 @@ fn span_recordable(
 
 fn lower_type_application(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     pos: TyPos,
     te: &skull_parser::TypeExprData,
     key: Ustr,
 ) -> Result<TyId, CompilerError> {
+    let a = ctx.ast;
     use skull_parser::TypeExprKind;
 
     let args = match &te.kind {
@@ -780,7 +761,7 @@ fn lower_type_application(
     let mut lowered = args
         .unwrap_or(&[])
         .iter()
-        .map(|x| lower_type_expr_helper(ctx, a, body, pos, a.te(x)))
+        .map(|x| lower_type_expr_helper(ctx, pos, a.te(x)))
         .try_vec()?;
 
     // Exact intrinsic keys keep their own rules, even when a user type
@@ -832,20 +813,19 @@ fn lower_type_application(
         }
     }
 
-    let params = alloc_tys_contiguous(ctx, body, pos, lowered);
+    let params = alloc_tys_contiguous(ctx, pos, lowered);
     let ctor = if args.is_some() {
         TypeCtor::for_name(key)
     } else {
         TypeCtor::Nominal(key)
     };
-    Ok(alloc_ty(ctx, body, pos, TypeExpr::App { ctor, params }))
+    Ok(alloc_ty(ctx, pos, TypeExpr::App { ctor, params }))
 }
 
 /// A type name that did not resolve, like an unknown type name: a signature
 /// records it and types as `Error`, a body collects it with its other names.
 fn unresolved_type_name(
     ctx: &mut LowerCtx,
-    body: &mut Body,
     pos: TyPos,
     e: CompilerError,
 ) -> Result<TyId, CompilerError> {
@@ -856,12 +836,12 @@ fn unresolved_type_name(
         }
         TyPos::Body => {
             ctx.recover_name(e)?;
-            alloc_ty(ctx, body, pos, TypeExpr::Builtin(hir::BuiltinTy::Error))
+            alloc_ty(ctx, pos, TypeExpr::Builtin(hir::BuiltinTy::Error))
         }
     })
 }
 
-fn type_hole(ctx: &mut LowerCtx, body: &mut Body, pos: TyPos, span: Span, hint: Ustr) -> TyId {
+fn type_hole(ctx: &mut LowerCtx, pos: TyPos, span: Span, hint: Ustr) -> TyId {
     match pos {
         TyPos::Iface => {
             ctx.module
@@ -875,18 +855,17 @@ fn type_hole(ctx: &mut LowerCtx, body: &mut Body, pos: TyPos, span: Span, hint: 
         }
         TyPos::Body => {
             let var = ctx.next_var_id();
-            alloc_ty(ctx, body, pos, TypeExpr::Infer(var, hint))
+            alloc_ty(ctx, pos, TypeExpr::Infer(var, hint))
         }
     }
 }
 
 pub(crate) fn lower_type_expr_in(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     pos: TyPos,
     te: &skull_parser::TypeExprData,
 ) -> Result<TyId, CompilerError> {
+    let a = ctx.ast;
     use skull_parser::TypeExprKind;
 
     let mut resolved_key = None;
@@ -916,29 +895,29 @@ pub(crate) fn lower_type_expr_in(
                     Ok(r) => r,
                     Err(msg) => return Err(CompilerError::new_with_label(te.span, msg)),
                 };
-            ctx.record_path(body, pos, path, hir::SegmentTarget::Def(resolved.key));
-            lower_type_application(ctx, a, body, pos, te, resolved.key)?
+            ctx.record_path(pos, path, hir::SegmentTarget::Def(resolved.key));
+            lower_type_application(ctx, pos, te, resolved.key)?
         }
 
         TypeExprKind::Ident(name) => {
             if name.name.as_str() == "_" {
-                type_hole(ctx, body, pos, te.span, name.name)
+                type_hole(ctx, pos, te.span, name.name)
             } else if let Some(g) = ctx.generics_in_scope.get(&name.name) {
                 *g
             } else {
                 match ctx.resolve_bare_key(name.name, name.span) {
                     Ok(bare_key) => {
                         resolved_key = Some(bare_key);
-                        lower_type_application(ctx, a, body, pos, te, bare_key)?
+                        lower_type_application(ctx, pos, te, bare_key)?
                     }
-                    Err(e) => unresolved_type_name(ctx, body, pos, e)?,
+                    Err(e) => unresolved_type_name(ctx, pos, e)?,
                 }
             }
         }
 
         TypeExprKind::Tuple(xs) => {
-            let elements = ctx.lower_type_exprs_to_range(a, body, pos, xs)?;
-            alloc_ty(ctx, body, pos, hir::TypeExpr::Tuple { elements })
+            let elements = ctx.lower_type_exprs_to_range(pos, xs)?;
+            alloc_ty(ctx, pos, hir::TypeExpr::Tuple { elements })
         }
 
         TypeExprKind::Array(inner) | TypeExprKind::Ref(inner) => {
@@ -946,9 +925,9 @@ pub(crate) fn lower_type_expr_in(
                 TypeExprKind::Array(_) => TypeCtor::Array,
                 _ => TypeCtor::Ref,
             };
-            let inner = lower_type_expr_helper(ctx, a, body, pos, a.te(inner))?;
-            let params = alloc_tys_contiguous(ctx, body, pos, [inner]);
-            alloc_ty(ctx, body, pos, TypeExpr::App { ctor, params })
+            let inner = lower_type_expr_helper(ctx, pos, a.te(inner))?;
+            let params = alloc_tys_contiguous(ctx, pos, [inner]);
+            alloc_ty(ctx, pos, TypeExpr::App { ctor, params })
         }
 
         TypeExprKind::App { ctor, args } => 'app: {
@@ -957,30 +936,29 @@ pub(crate) fn lower_type_expr_in(
                 // The arguments still lower, so a name among them is
                 // reported in the same pass.
                 Err(e) => {
-                    let error = unresolved_type_name(ctx, body, pos, e)?;
+                    let error = unresolved_type_name(ctx, pos, e)?;
                     for x in args.iter() {
-                        lower_type_expr_helper(ctx, a, body, pos, a.te(x))?;
+                        lower_type_expr_helper(ctx, pos, a.te(x))?;
                     }
                     break 'app error;
                 }
             };
-            lower_type_application(ctx, a, body, pos, te, resolved_ctor)?
+            lower_type_application(ctx, pos, te, resolved_ctor)?
         }
 
         TypeExprKind::Function { params, ret } => {
             let lowered = params
                 .iter()
-                .map(|p| lower_type_expr_helper(ctx, a, body, pos, a.te(p)))
+                .map(|p| lower_type_expr_helper(ctx, pos, a.te(p)))
                 .try_vec()?;
 
-            let params_range = alloc_tys_contiguous(ctx, body, pos, lowered);
+            let params_range = alloc_tys_contiguous(ctx, pos, lowered);
 
-            let ret_te = lower_type_expr_helper(ctx, a, body, pos, a.te(ret))?;
-            let ret_idx = alloc_ty_raw(ctx, body, pos, ret_te);
+            let ret_te = lower_type_expr_helper(ctx, pos, a.te(ret))?;
+            let ret_idx = alloc_ty_raw(ctx, pos, ret_te);
 
             alloc_ty(
                 ctx,
-                body,
                 pos,
                 TypeExpr::Function {
                     params: params_range,
@@ -990,15 +968,15 @@ pub(crate) fn lower_type_expr_in(
         }
 
         TypeExprKind::Hole(_, name) => {
-            type_hole(ctx, body, pos, te.span, name.unwrap_or_else(|| ustr("_")))
+            type_hole(ctx, pos, te.span, name.unwrap_or_else(|| ustr("_")))
         }
     };
 
     let idx = if te.is_nullable {
-        let inner_te = ctx.type_node(body, idx);
-        let inner = alloc_ty_raw(ctx, body, pos, inner_te);
+        let inner_te = ctx.type_node(idx);
+        let inner = alloc_ty_raw(ctx, pos, inner_te);
 
-        alloc_ty(ctx, body, pos, TypeExpr::Nullable(inner))
+        alloc_ty(ctx, pos, TypeExpr::Nullable(inner))
     } else {
         idx
     };
@@ -1019,7 +997,6 @@ pub(crate) fn lower_type_expr_in(
             }
 
             ctx.node_interval(
-                body,
                 te.span.offset_range().0,
                 te.span.offset_range().1,
                 hir::NodeRef::StaticTy { mid, idx: tidx },
@@ -1027,9 +1004,8 @@ pub(crate) fn lower_type_expr_in(
         }
 
         TyId::Local(tidx) => {
-            body.lowered_ty_spans.insert(tidx, te.span);
+            ctx.body.lowered_ty_spans.insert(tidx, te.span);
             ctx.node_interval(
-                body,
                 te.span.offset_range().0,
                 te.span.offset_range().1,
                 hir::NodeRef::LocalTy(tidx),
@@ -1042,11 +1018,10 @@ pub(crate) fn lower_type_expr_in(
 
 pub(crate) fn lookup_in_scope(
     ctx: &LowerCtx,
-    body: &mut Body,
     start_scope: Idx<Scope>,
     name: &skull_parser::Ident,
 ) -> Result<Expr, CompilerError> {
-    if let Some(binding) = lookup_local(body, start_scope, name.name) {
+    if let Some(binding) = lookup_local(&ctx.body, start_scope, name.name) {
         return Ok(Expr::Var(binding));
     }
     // Tier 1 misses: a user fragment resolves through the namespace tiers to a
@@ -1072,57 +1047,50 @@ fn lookup_local(body: &Body, start_scope: Idx<Scope>, name: Ustr) -> Option<Idx<
 
 pub(crate) fn lower_block(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     parent: Idx<Scope>,
     block: &Idx<BlockData>,
 ) -> Result<Idx<Expr>, CompilerError> {
+    let a = ctx.ast;
     let block = a.b(block);
-    let value = lower_block_value(ctx, a, body, parent, block, None)?;
-    Ok(ctx.alloc_block_expr(body, value, block))
+    let value = lower_block_value(ctx, parent, block, None)?;
+    Ok(ctx.alloc_block_expr(value, block))
 }
 
 fn lower_block_value(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     parent: Idx<Scope>,
     block: &BlockData,
     prelude: Option<(Statement, Span)>,
 ) -> Result<Expr, CompilerError> {
-    let scope = body.alloc_child_scope(parent);
+    let scope = ctx.body.alloc_child_scope(parent);
 
-    let (statements, tail) = lower_statements(ctx, a, body, scope, &block.statements, prelude)?;
+    let (statements, tail) = lower_statements(ctx, scope, &block.statements, prelude)?;
 
     Ok(Expr::Block { statements, tail })
 }
 
 pub(crate) fn lower_statement_value(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     s: &StatementData,
 ) -> Result<Statement, CompilerError> {
+    let a = ctx.ast;
     let hir_s = match &s.kind {
         StatementKind::Use(u) => comp_error!(
             u.span,
             "`use` declarations require module resolution (not yet implemented)"
         ),
-        StatementKind::Expression(expr) => {
-            Statement::Expr(lower_expr(ctx, a, body, scope, a.e(expr))?)
-        }
+        StatementKind::Expression(expr) => Statement::Expr(lower_expr(ctx, scope, a.e(expr))?),
 
         StatementKind::Return {
             keyword_span,
             value: ret,
         } => {
             if let Some(expr) = &ret {
-                let e_id = lower_expr(ctx, a, body, scope, a.e(expr))?;
+                let e_id = lower_expr(ctx, scope, a.e(expr))?;
 
                 if let Some(kw_span) = keyword_span {
                     ctx.node_interval(
-                        body,
                         kw_span.offset_range().0,
                         kw_span.offset_range().1,
                         // TODO: statement id?
@@ -1143,13 +1111,13 @@ pub(crate) fn lower_statement_value(
 
         StatementKind::Let(l) => {
             let value_idx = if let Some(e) = &l.value {
-                lower_expr(ctx, a, body, scope, a.e(e))?
+                lower_expr(ctx, scope, a.e(e))?
             } else {
                 comp_error!(l.span, "let without value is not supported");
             };
 
             let declared_ty = if let Some(te) = &l.ty {
-                Some(lower_type_expr_local(ctx, a, body, a.te(te))?)
+                Some(lower_type_expr_local(ctx, a.te(te))?)
             } else {
                 None
             };
@@ -1159,22 +1127,21 @@ pub(crate) fn lower_statement_value(
             let else_block = l
                 .else_block
                 .as_ref()
-                .map(|b| lower_block(ctx, a, body, scope, b))
+                .map(|b| lower_block(ctx, scope, b))
                 .transpose()?;
 
-            let pat = lower_pattern_value(ctx, a, body, scope, &l.pattern)?;
-            let pattern = body.pattern_arena.alloc(pat);
-            normalize_binding_wildcards(ctx, body, pattern, l.span);
+            let pat = lower_pattern_value(ctx, scope, &l.pattern)?;
+            let pattern = ctx.body.pattern_arena.alloc(pat);
+            normalize_binding_wildcards(ctx, pattern, l.span);
 
             let mut value_idx = value_idx;
             if let Some(ty) = declared_ty {
-                match body.pattern_single_bind(pattern) {
-                    Some(b) => body.binding_arena[b].declared_ty = Some(ty),
+                match ctx.body.pattern_single_bind(pattern) {
+                    Some(b) => ctx.body.binding_arena[b].declared_ty = Some(ty),
                     // `let (a, b): (int, int) = e` — the annotation describes
                     // the whole value, so check it as an ascription.
                     None => {
                         value_idx = ctx.alloc_expr(
-                            body,
                             Expr::As {
                                 value: value_idx,
                                 target: ty,
@@ -1195,10 +1162,10 @@ pub(crate) fn lower_statement_value(
 
         StatementKind::Static(st) => {
             reject_mutable_global_if_forbidden(a, st.name.span, st.name.name, "static")?;
-            let value_idx = lower_expr(ctx, a, body, scope, a.e(&st.value))?;
+            let value_idx = lower_expr(ctx, scope, a.e(&st.value))?;
 
             let declared_ty = if let Some(te) = &st.ty {
-                Some(lower_type_expr_local(ctx, a, body, a.te(te))?)
+                Some(lower_type_expr_local(ctx, a.te(te))?)
             } else {
                 None
             };
@@ -1210,8 +1177,8 @@ pub(crate) fn lower_statement_value(
                 span: st.name.span,
             };
 
-            let binding = ctx.alloc_binding(body, binding, st.name.span);
-            body.scope_arena[scope]
+            let binding = ctx.alloc_binding(binding, st.name.span);
+            ctx.body.scope_arena[scope]
                 .bindings
                 .insert(st.name.name, binding);
 
@@ -1222,11 +1189,10 @@ pub(crate) fn lower_statement_value(
         }
 
         StatementKind::NestedFn(f) => {
-            // Name binds in the ENCLOSING scope, BEFORE the body is lowered, so a
+            // Name binds in the ENCLOSING scope, BEFORE the ctx.body is lowered, so a
             // self-recursive call resolves; a not-yet-declared sibling stays a
             // Global (decl-before-use -> mutual recursion rejected in inference).
             let name_binding = ctx.alloc_binding(
-                body,
                 BindingInfo {
                     name: f.name.name,
                     kind: BindingKind::Fn,
@@ -1235,30 +1201,32 @@ pub(crate) fn lower_statement_value(
                 },
                 f.name.span,
             );
-            body.scope_arena[scope]
+            ctx.body.scope_arena[scope]
                 .bindings
                 .insert(f.name.name, name_binding);
 
             // Params live in a child scope whose parent is the enclosing scope,
             // so an enclosing param/local reference still resolves (then gets
             // rejected as a capture in inference), while the params shadow.
-            let fn_scope = body.alloc_child_scope(scope);
-            let first_param = body.binding_arena.len();
+            let fn_scope = ctx.body.alloc_child_scope(scope);
+            let first_param = ctx.body.binding_arena.len();
             for p in &f.params {
-                let ty = lower_type_expr_local(ctx, a, body, a.te(&p.ty))?;
-                let b = ctx.alloc_parameter(body, &p.name, Some(ty), p.span);
-                body.scope_arena[fn_scope].bindings.insert(p.name.name, b);
+                let ty = lower_type_expr_local(ctx, a.te(&p.ty))?;
+                let b = ctx.alloc_parameter(&p.name, Some(ty), p.span);
+                ctx.body.scope_arena[fn_scope]
+                    .bindings
+                    .insert(p.name.name, b);
             }
-            let params = body.binding_arena.allocated_since(first_param);
+            let params = ctx.body.binding_arena.allocated_since(first_param);
 
             let ret_ty = match &f.return_ty {
-                Some(te) => Some(lower_type_expr_local(ctx, a, body, a.te(te))?),
+                Some(te) => Some(lower_type_expr_local(ctx, a.te(te))?),
                 None => None,
             };
 
             let saved = ctx.placeholder_forbidden;
             ctx.placeholder_forbidden = true;
-            let body_idx = lower_block(ctx, a, body, fn_scope, &f.body)?;
+            let body_idx = lower_block(ctx, fn_scope, &f.body)?;
             ctx.placeholder_forbidden = saved;
 
             Statement::Fn {
@@ -1270,19 +1238,19 @@ pub(crate) fn lower_statement_value(
         }
 
         StatementKind::For(f) => {
-            let iter = lower_expr(ctx, a, body, scope, a.e(&f.iter))?;
+            let iter = lower_expr(ctx, scope, a.e(&f.iter))?;
 
-            let loop_scope = body.alloc_child_scope(scope);
+            let loop_scope = ctx.body.alloc_child_scope(scope);
 
-            let pat = lower_pattern_value(ctx, a, body, loop_scope, &f.pattern)?;
-            let pattern = body.pattern_arena.alloc(pat);
-            let names_only = normalize_binding_wildcards(ctx, body, pattern, f.span);
+            let pat = lower_pattern_value(ctx, loop_scope, &f.pattern)?;
+            let pattern = ctx.body.pattern_arena.alloc(pat);
+            let names_only = normalize_binding_wildcards(ctx, pattern, f.span);
 
             // `for x: T in xs` — the element annotation rides the binding.
             if let Some(te) = &f.ty {
-                let ty = lower_type_expr_local(ctx, a, body, a.te(te))?;
-                match body.pattern_single_bind(pattern) {
-                    Some(b) => body.binding_arena[b].declared_ty = Some(ty),
+                let ty = lower_type_expr_local(ctx, a.te(te))?;
+                match ctx.body.pattern_single_bind(pattern) {
+                    Some(b) => ctx.body.binding_arena[b].declared_ty = Some(ty),
                     None => comp_error!(
                         f.span,
                         "a `for` element type annotation requires a plain name binding"
@@ -1294,9 +1262,8 @@ pub(crate) fn lower_statement_value(
                 (pattern, None)
             } else {
                 // Loop codegen wants a plain element binding; anything richer
-                // destructures through a `let` at the body's head.
+                // destructures through a `let` at the ctx.body's head.
                 let elem = ctx.alloc_binding(
-                    body,
                     BindingInfo {
                         name: ustr::ustr("__for_elem"),
                         kind: hir::BindingKind::Let,
@@ -1305,8 +1272,8 @@ pub(crate) fn lower_statement_value(
                     },
                     f.span,
                 );
-                let elem_pat = body.pattern_arena.alloc(hir::Pattern::Bind(elem));
-                let elem_var = ctx.alloc_expr(body, Expr::Var(elem), f.span);
+                let elem_pat = ctx.body.pattern_arena.alloc(hir::Pattern::Bind(elem));
+                let elem_var = ctx.alloc_expr(Expr::Var(elem), f.span);
                 let destructure = Statement::Let {
                     pattern,
                     value: elem_var,
@@ -1315,38 +1282,37 @@ pub(crate) fn lower_statement_value(
                 (elem_pat, Some((destructure, f.span)))
             };
             let block = a.b(&f.body);
-            let value = lower_block_value(ctx, a, body, loop_scope, block, prelude)?;
+            let value = lower_block_value(ctx, loop_scope, block, prelude)?;
             Statement::For {
                 pattern,
                 iter,
-                body: ctx.alloc_block_expr(body, value, block),
+                body: ctx.alloc_block_expr(value, block),
             }
         }
 
         StatementKind::While(w) => {
-            let body_i = lower_block(ctx, a, body, scope, &w.body)?;
+            let body_i = lower_block(ctx, scope, &w.body)?;
 
             Statement::While {
-                cond: lower_expr(ctx, a, body, scope, a.e(&w.condition))?,
+                cond: lower_expr(ctx, scope, a.e(&w.condition))?,
                 body: body_i,
             }
         }
 
         // `while let P = v { .. }` IS `while true { let P = v else { break } .. }`:
         // one loop head, one pattern test, one binding rule -- the same
-        // let-else the body could have written itself.
+        // let-else the ctx.body could have written itself.
         StatementKind::WhileLet(w) => {
-            let body_scope = body.alloc_child_scope(scope);
+            let body_scope = ctx.body.alloc_child_scope(scope);
 
-            let value = lower_expr(ctx, a, body, body_scope, a.e(&w.value))?;
-            let pat = lower_pattern_value(ctx, a, body, body_scope, &w.pattern)?;
-            let pattern = body.pattern_arena.alloc(pat);
-            normalize_binding_wildcards(ctx, body, pattern, w.span);
+            let value = lower_expr(ctx, body_scope, a.e(&w.value))?;
+            let pat = lower_pattern_value(ctx, body_scope, &w.pattern)?;
+            let pattern = ctx.body.pattern_arena.alloc(pat);
+            normalize_binding_wildcards(ctx, pattern, w.span);
 
-            let brk = body.statement_arena.alloc(Statement::Break);
-            body.statement_spans.insert(brk, w.span);
+            let brk = ctx.body.statement_arena.alloc(Statement::Break);
+            ctx.body.statement_spans.insert(brk, w.span);
             let else_block = ctx.alloc_expr(
-                body,
                 Expr::Block {
                     statements: IdxRange::new_inclusive(brk..=brk),
                     tail: None,
@@ -1360,22 +1326,21 @@ pub(crate) fn lower_statement_value(
             };
 
             let block = a.b(&w.body);
-            let body_expr =
-                lower_block_value(ctx, a, body, body_scope, block, Some((test, w.span)))?;
-            let body_i = ctx.alloc_block_expr(body, body_expr, block);
-            let cond = ctx.alloc_expr(body, Expr::Bool(true), w.span);
+            let body_expr = lower_block_value(ctx, body_scope, block, Some((test, w.span)))?;
+            let body_i = ctx.alloc_block_expr(body_expr, block);
+            let cond = ctx.alloc_expr(Expr::Bool(true), w.span);
 
             Statement::While { cond, body: body_i }
         }
 
         StatementKind::Defer(dk) => {
-            let body = match dk {
-                DeferKind::Block(b) => lower_block(ctx, a, body, scope, b)?,
+            let deferred = match dk {
+                DeferKind::Block(b) => lower_block(ctx, scope, b)?,
 
-                DeferKind::Expression(e) => lower_expr(ctx, a, body, scope, a.e(e))?,
+                DeferKind::Expression(e) => lower_expr(ctx, scope, a.e(e))?,
             };
 
-            Statement::Defer(body)
+            Statement::Defer(deferred)
         }
 
         StatementKind::LifecycleHook {
@@ -1387,11 +1352,10 @@ pub(crate) fn lower_statement_value(
             let block = a.b(hook_body);
 
             if name == "on_killed" || name == "on_resume" || name == "on_hot_reload" {
-                let hook_scope = body.alloc_child_scope(scope);
-                let body_idx = lower_block(ctx, a, body, hook_scope, hook_body)?;
+                let hook_scope = ctx.body.alloc_child_scope(scope);
+                let body_idx = lower_block(ctx, hook_scope, hook_body)?;
 
                 let lambda = ctx.alloc_expr(
-                    body,
                     Expr::Lambda {
                         params: IdxRange::new_empty(),
                         body: body_idx,
@@ -1400,9 +1364,8 @@ pub(crate) fn lower_statement_value(
                 );
 
                 let args = IdxRange::new_inclusive(lambda..=lambda);
-                let name_span = body.name_spans.alloc(keyword_span.unwrap_or(s.span));
+                let name_span = ctx.body.name_spans.alloc(keyword_span.unwrap_or(s.span));
                 let call = ctx.alloc_expr(
-                    body,
                     Expr::Call {
                         callee: Callee::Unresolved {
                             name: ustr(name),
@@ -1417,8 +1380,8 @@ pub(crate) fn lower_statement_value(
 
                 Statement::Expr(call)
             } else {
-                let e = lower_block_value(ctx, a, body, scope, block, None)?;
-                Statement::Expr(ctx.alloc_expr(body, e, block.span))
+                let e = lower_block_value(ctx, scope, block, None)?;
+                Statement::Expr(ctx.alloc_expr(e, block.span))
             }
         }
     };
@@ -1428,11 +1391,10 @@ pub(crate) fn lower_statement_value(
 
 pub(crate) fn lower_expr_value(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     e: &ExprData,
 ) -> Result<Expr, CompilerError> {
+    let a = ctx.ast;
     use hir::Expr;
     use skull_parser::ExprKind;
 
@@ -1451,7 +1413,7 @@ pub(crate) fn lower_expr_value(
         }
 
         if ctx.placeholder_param.is_none() {
-            return lower_placeholder_lambda(ctx, a, body, scope, e);
+            return lower_placeholder_lambda(ctx, scope, e);
         }
     }
 
@@ -1480,19 +1442,19 @@ pub(crate) fn lower_expr_value(
 
                 Expr::Var(ctx.placeholder_param.unwrap())
             } else {
-                lookup_in_scope(ctx, body, scope, name)?
+                lookup_in_scope(ctx, scope, name)?
             }
         }
 
         ExprKind::InterpolatedString(parts) => {
-            Expr::InterpolatedString(lower_interp_parts(ctx, a, body, scope, parts)?)
+            Expr::InterpolatedString(lower_interp_parts(ctx, scope, parts)?)
         }
 
         ExprKind::Block(block) => {
             let saved = ctx.placeholder_forbidden;
 
             ctx.placeholder_forbidden = true;
-            let r = lower_block_value(ctx, a, body, scope, a.b(block), None);
+            let r = lower_block_value(ctx, scope, a.b(block), None);
             ctx.placeholder_forbidden = saved;
 
             return r;
@@ -1504,22 +1466,21 @@ pub(crate) fn lower_expr_value(
             args,
             syntax: _,
         } => {
-            let generic_args = ctx.lower_type_exprs_to_range(a, body, TyPos::Body, generic_args)?;
+            let generic_args = ctx.lower_type_exprs_to_range(TyPos::Body, generic_args)?;
             match &a.e(func).kind {
                 ExprKind::Ident(name) => {
-                    let args_range =
-                        lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
+                    let args_range = lower_exprs(ctx, scope, args.iter().map(|x| &x.value))?;
 
                     for (arg_idx, ca) in args_range.into_iter().zip(args.iter()) {
                         if let Some(nm) = &ca.name {
-                            body.arg_names.insert(arg_idx, nm.name);
+                            ctx.body.arg_names.insert(arg_idx, nm.name);
                         }
                         if ca.is_spread {
-                            body.spread_args.insert(arg_idx);
+                            ctx.body.spread_args.insert(arg_idx);
                         }
                     }
 
-                    lower_named_call(ctx, body, scope, name, args_range, generic_args)?
+                    lower_named_call(ctx, scope, name, args_range, generic_args)?
                 }
 
                 ExprKind::FieldAccess(receiver, method) => {
@@ -1531,19 +1492,21 @@ pub(crate) fn lower_expr_value(
                     }
                     let all = std::iter::once(receiver).chain(args.iter().map(|a| &a.value));
 
-                    let args_range = lower_exprs(ctx, a, body, scope, all)?;
+                    let args_range = lower_exprs(ctx, scope, all)?;
 
                     for (arg_idx, ca) in args_range.into_iter().skip(1).zip(args.iter()) {
                         if let Some(nm) = &ca.name {
-                            body.arg_names.insert(arg_idx, nm.name);
+                            ctx.body.arg_names.insert(arg_idx, nm.name);
                         }
                         if ca.is_spread {
-                            body.spread_args.insert(arg_idx);
+                            ctx.body.spread_args.insert(arg_idx);
                         }
                     }
 
-                    body.method_call_recvs.insert(args_range.start());
-                    body.method_names.insert(args_range.start(), method.name);
+                    ctx.body.method_call_recvs.insert(args_range.start());
+                    ctx.body
+                        .method_names
+                        .insert(args_range.start(), method.name);
 
                     // UFCS and the bare call share one visible family: in a v1
                     // fragment the method name goes through the same tier
@@ -1553,7 +1516,7 @@ pub(crate) fn lower_expr_value(
                     Expr::Call {
                         callee: Callee::Unresolved {
                             name: callee_key,
-                            name_span: body.name_spans.alloc(method.span),
+                            name_span: ctx.body.name_spans.alloc(method.span),
                         },
                         args: args_range,
                         generic_args: IdxRange::new_empty(),
@@ -1567,18 +1530,18 @@ pub(crate) fn lower_expr_value(
                 // family's DefKey exactly as the bare-name form does.
                 ExprKind::Path(path) if ctx.v1_path_callable(path).is_some() => {
                     let key = ctx.v1_path_callable(path).expect("guard resolved it");
-                    ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Def(key));
-                    let args_range =
-                        lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
+                    ctx.record_path(TyPos::Body, path, hir::SegmentTarget::Def(key));
+                    let args_range = lower_exprs(ctx, scope, args.iter().map(|x| &x.value))?;
                     for (arg_idx, ca) in args_range.into_iter().zip(args.iter()) {
                         if let Some(nm) = &ca.name {
-                            body.arg_names.insert(arg_idx, nm.name);
+                            ctx.body.arg_names.insert(arg_idx, nm.name);
                         }
                     }
                     Expr::Call {
                         callee: hir::Callee::Unresolved {
                             name: key,
-                            name_span: body
+                            name_span: ctx
+                                .body
                                 .name_spans
                                 .alloc(path.segments.last().map_or(e.span, |segment| segment.span)),
                         },
@@ -1594,7 +1557,6 @@ pub(crate) fn lower_expr_value(
                     let (enum_key, variant) = ctx.v1_path_variant(path).expect("guard resolved it");
                     let (enum_span, variant_span) = variant_path_spans(path);
                     ctx.record_path(
-                        body,
                         TyPos::Body,
                         path,
                         hir::SegmentTarget::Variant { enum_key, variant },
@@ -1605,29 +1567,27 @@ pub(crate) fn lower_expr_value(
                             "explicit type arguments are not supported on enum constructors"
                         );
                     }
-                    let args_range =
-                        lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
+                    let args_range = lower_exprs(ctx, scope, args.iter().map(|x| &x.value))?;
                     Expr::EnumVariant {
                         enum_name: enum_key,
-                        enum_name_span: body.name_spans.alloc(enum_span),
+                        enum_name_span: ctx.body.name_spans.alloc(enum_span),
                         variant,
-                        variant_span: body.name_spans.alloc(variant_span),
+                        variant_span: ctx.body.name_spans.alloc(variant_span),
                         args: VariantArgs::Tuple(args_range),
                     }
                 }
 
                 ExprKind::SafeNavigation(receiver, method) => {
-                    let receiver = lower_expr(ctx, a, body, scope, a.e(receiver))?;
-                    let args_range =
-                        lower_exprs(ctx, a, body, scope, args.iter().map(|a| &a.value))?;
+                    let receiver = lower_expr(ctx, scope, a.e(receiver))?;
+                    let args_range = lower_exprs(ctx, scope, args.iter().map(|a| &a.value))?;
 
                     for (arg_idx, ca) in args_range.into_iter().zip(args.iter()) {
                         if let Some(nm) = &ca.name {
-                            body.arg_names.insert(arg_idx, nm.name);
+                            ctx.body.arg_names.insert(arg_idx, nm.name);
                         }
                     }
 
-                    body.method_names.insert(receiver, method.name);
+                    ctx.body.method_names.insert(receiver, method.name);
                     let (callee_key, family) =
                         ctx.resolve_method_family(method.name, method.span)?;
                     Expr::SafeNavCall {
@@ -1645,9 +1605,8 @@ pub(crate) fn lower_expr_value(
                             "explicit type arguments require a named function callee"
                         );
                     }
-                    let callee = lower_expr(ctx, a, body, scope, a.e(func))?;
-                    let args_range =
-                        lower_exprs(ctx, a, body, scope, args.iter().map(|a| &a.value))?;
+                    let callee = lower_expr(ctx, scope, a.e(func))?;
+                    let args_range = lower_exprs(ctx, scope, args.iter().map(|a| &a.value))?;
 
                     Expr::Call {
                         callee: hir::Callee::Value(callee),
@@ -1663,7 +1622,7 @@ pub(crate) fn lower_expr_value(
         }
 
         ExprKind::ArrayLiteral(elems) => {
-            let elems = lower_exprs(ctx, a, body, scope, elems.iter())?;
+            let elems = lower_exprs(ctx, scope, elems.iter())?;
             Expr::Array(elems)
         }
 
@@ -1673,15 +1632,14 @@ pub(crate) fn lower_expr_value(
         } => {
             let mut acc = else_branch
                 .as_ref()
-                .map(|b| lower_block(ctx, a, body, scope, b))
+                .map(|b| lower_block(ctx, scope, b))
                 .transpose()?;
 
             for (cond, block) in branches[1..].iter().rev() {
-                let cond = lower_expr(ctx, a, body, scope, a.e(cond))?;
-                let then = lower_block(ctx, a, body, scope, block)?;
+                let cond = lower_expr(ctx, scope, a.e(cond))?;
+                let then = lower_block(ctx, scope, block)?;
 
                 let idx = ctx.alloc_expr(
-                    body,
                     Expr::If {
                         cond,
                         then_branch: then,
@@ -1694,8 +1652,8 @@ pub(crate) fn lower_expr_value(
             }
 
             let (cond, block) = &branches[0];
-            let cond = lower_expr(ctx, a, body, scope, a.e(cond))?;
-            let then = lower_block(ctx, a, body, scope, block)?;
+            let cond = lower_expr(ctx, scope, a.e(cond))?;
+            let then = lower_block(ctx, scope, block)?;
 
             Expr::If {
                 cond,
@@ -1704,13 +1662,13 @@ pub(crate) fn lower_expr_value(
             }
         }
 
-        ExprKind::Tuple(items) => Expr::Tuple(lower_exprs(ctx, a, body, scope, items.iter())?),
+        ExprKind::Tuple(items) => Expr::Tuple(lower_exprs(ctx, scope, items.iter())?),
 
         ExprKind::BinOp {
             left, op, right, ..
         } if *op == skull_parser::TokenKind::DoubleDot => Expr::Range {
-            low: lower_expr(ctx, a, body, scope, a.e(left))?,
-            high: lower_expr(ctx, a, body, scope, a.e(right))?,
+            low: lower_expr(ctx, scope, a.e(left))?,
+            high: lower_expr(ctx, scope, a.e(right))?,
         },
 
         ExprKind::BinOp {
@@ -1736,18 +1694,18 @@ pub(crate) fn lower_expr_value(
                 let temps = compound_place_temps(a, left);
                 if !temps.is_empty() {
                     return lower_compound_assign_with_temps(
-                        ctx, a, body, scope, e, op_fn, left, right, &temps,
+                        ctx, scope, e, op_fn, left, right, &temps,
                     );
                 }
             }
 
-            let target = lower_expr(ctx, a, body, scope, a.e(left))?;
+            let target = lower_expr(ctx, scope, a.e(left))?;
             // The same callee resolution as the binary operator call, so
             // `a += b` sees what `a + b` sees.
             let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
 
             if lvalue_has_safe_nav(a, left) {
-                let value = lower_expr(ctx, a, body, scope, a.e(right))?;
+                let value = lower_expr(ctx, scope, a.e(right))?;
                 Expr::CompoundAssign {
                     target,
                     op_fn: ustr(op_fn),
@@ -1755,11 +1713,10 @@ pub(crate) fn lower_expr_value(
                     family,
                 }
             } else {
-                let args = lower_exprs(ctx, a, body, scope, [left, right].into_iter())?;
+                let args = lower_exprs(ctx, scope, [left, right].into_iter())?;
 
-                let name_span = body.name_spans.alloc(e.span);
+                let name_span = ctx.body.name_spans.alloc(e.span);
                 let call = ctx.alloc_expr(
-                    body,
                     Expr::Call {
                         callee: Callee::Unresolved {
                             name: callee_key,
@@ -1786,10 +1743,9 @@ pub(crate) fn lower_expr_value(
             right,
         } => {
             if let Some(op_fn) = op.overloadable_binop_fn() {
-                let args = lower_exprs(ctx, a, body, scope, [left, right].into_iter())?;
+                let args = lower_exprs(ctx, scope, [left, right].into_iter())?;
                 return lower_named_call(
                     ctx,
-                    body,
                     scope,
                     &skull_parser::Ident {
                         name: ustr(op_fn),
@@ -1822,8 +1778,8 @@ pub(crate) fn lower_expr_value(
 
             Expr::BinOp {
                 op: bin_op,
-                lhs: lower_expr(ctx, a, body, scope, a.e(left))?,
-                rhs: lower_expr(ctx, a, body, scope, a.e(right))?,
+                lhs: lower_expr(ctx, scope, a.e(left))?,
+                rhs: lower_expr(ctx, scope, a.e(right))?,
             }
         }
 
@@ -1838,7 +1794,7 @@ pub(crate) fn lower_expr_value(
                 }
             }
             _ => {
-                let base = lower_expr(ctx, a, body, scope, a.e(expr))?;
+                let base = lower_expr(ctx, scope, a.e(expr))?;
 
                 if let Some(index) = field.tuple_index() {
                     Expr::TupleIndex { tuple: base, index }
@@ -1859,7 +1815,7 @@ pub(crate) fn lower_expr_value(
             let target =
                 ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path));
             if let Ok(t) = &target {
-                ctx.record_path(body, TyPos::Body, path, member_segment_target(t));
+                ctx.record_path(TyPos::Body, path, member_segment_target(t));
             }
             match target {
                 Ok(resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key)) => {
@@ -1869,9 +1825,9 @@ pub(crate) fn lower_expr_value(
                     let (enum_span, variant_span) = variant_path_spans(path);
                     Expr::EnumVariant {
                         enum_name: enum_key,
-                        enum_name_span: body.name_spans.alloc(enum_span),
+                        enum_name_span: ctx.body.name_spans.alloc(enum_span),
                         variant,
-                        variant_span: body.name_spans.alloc(variant_span),
+                        variant_span: ctx.body.name_spans.alloc(variant_span),
                         args: hir::VariantArgs::Unit,
                     }
                 }
@@ -1893,7 +1849,7 @@ pub(crate) fn lower_expr_value(
             // Unqualified literals allow functional updates; qualified ones
             // retain their existing no-update rule.
             let base_range = if unqualified {
-                lower_exprs(ctx, a, body, scope, bases.iter())?
+                lower_exprs(ctx, scope, bases.iter())?
             } else {
                 IdxRange::new_empty()
             };
@@ -1906,12 +1862,12 @@ pub(crate) fn lower_expr_value(
                         ctx.recover_name(CompilerError::new_with_label(e.span, msg))?;
                         // The field values may name more unresolved names.
                         for (_, value) in fields.iter() {
-                            lower_expr(ctx, a, body, scope, a.e(value))?;
+                            lower_expr(ctx, scope, a.e(value))?;
                         }
                         return Ok(Expr::Error);
                     }
                 };
-            ctx.record_path(body, TyPos::Body, path, member_segment_target(&target));
+            ctx.record_path(TyPos::Body, path, member_segment_target(&target));
             if !unqualified && !bases.is_empty() {
                 return Err(CompilerError::new_with_label(
                     e.span,
@@ -1921,7 +1877,7 @@ pub(crate) fn lower_expr_value(
             }
             let mut entries = Vec::new();
             for (names, value) in fields.iter() {
-                let v = lower_expr(ctx, a, body, scope, a.e(value))?;
+                let v = lower_expr(ctx, scope, a.e(value))?;
                 for fname in names {
                     entries.push(StructLitField {
                         name: fname.name,
@@ -1930,7 +1886,7 @@ pub(crate) fn lower_expr_value(
                     });
                 }
             }
-            let fields_range = alloc_contiguous(&mut body.struct_lit_field_arena, entries);
+            let fields_range = alloc_contiguous(&mut ctx.body.struct_lit_field_arena, entries);
             match target {
                 resolve::MemberTarget::Type(key) => Expr::StructLiteral {
                     name: key,
@@ -1941,9 +1897,9 @@ pub(crate) fn lower_expr_value(
                     let (enum_span, variant_span) = variant_path_spans(path);
                     Expr::EnumVariant {
                         enum_name: enum_key,
-                        enum_name_span: body.name_spans.alloc(enum_span),
+                        enum_name_span: ctx.body.name_spans.alloc(enum_span),
                         variant,
-                        variant_span: body.name_spans.alloc(variant_span),
+                        variant_span: ctx.body.name_spans.alloc(variant_span),
                         args: hir::VariantArgs::Record(fields_range),
                     }
                 }
@@ -1959,25 +1915,25 @@ pub(crate) fn lower_expr_value(
         ExprKind::SiblingFieldRef(ident) => Expr::SiblingRef(ident.name),
 
         ExprKind::Assign { target, value } => {
-            let target = lower_expr(ctx, a, body, scope, a.e(target))?;
-            let value = lower_expr(ctx, a, body, scope, a.e(value))?;
+            let target = lower_expr(ctx, scope, a.e(target))?;
+            let value = lower_expr(ctx, scope, a.e(value))?;
             Expr::Assign { target, value }
         }
 
         ExprKind::Match { scrutinee, arms } => {
-            let scrutinee = lower_expr(ctx, a, body, scope, a.e(scrutinee))?;
+            let scrutinee = lower_expr(ctx, scope, a.e(scrutinee))?;
             let mut arm_vals = Vec::with_capacity(arms.len());
 
             for arm in arms.iter() {
-                let arm_scope = body.alloc_child_scope(scope);
+                let arm_scope = ctx.body.alloc_child_scope(scope);
 
-                let pat = lower_pattern_value(ctx, a, body, arm_scope, &arm.pattern)?;
-                let pattern = body.pattern_arena.alloc(pat);
+                let pat = lower_pattern_value(ctx, arm_scope, &arm.pattern)?;
+                let pattern = ctx.body.pattern_arena.alloc(pat);
 
-                let body_i = lower_block(ctx, a, body, arm_scope, &arm.body)?;
+                let body_i = lower_block(ctx, arm_scope, &arm.body)?;
 
                 let guard = match &arm.guard {
-                    Some(g) => Some(lower_expr(ctx, a, body, arm_scope, a.e(g))?),
+                    Some(g) => Some(lower_expr(ctx, arm_scope, a.e(g))?),
                     None => None,
                 };
 
@@ -1988,36 +1944,36 @@ pub(crate) fn lower_expr_value(
                 });
             }
 
-            let arms = alloc_contiguous(&mut body.match_arm_arena, arm_vals);
+            let arms = alloc_contiguous(&mut ctx.body.match_arm_arena, arm_vals);
             Expr::Match { scrutinee, arms }
         }
 
-        ExprKind::Paren(inner) => lower_expr_value(ctx, a, body, scope, a.e(inner))?,
+        ExprKind::Paren(inner) => lower_expr_value(ctx, scope, a.e(inner))?,
         ExprKind::Not(inner) => {
             let family = ctx.resolve_unary_family(ustr("__not"), e.span)?;
-            Expr::Not(lower_expr(ctx, a, body, scope, a.e(inner))?, family)
+            Expr::Not(lower_expr(ctx, scope, a.e(inner))?, family)
         }
-        ExprKind::BitNot(inner) => Expr::BitNot(lower_expr(ctx, a, body, scope, a.e(inner))?),
+        ExprKind::BitNot(inner) => Expr::BitNot(lower_expr(ctx, scope, a.e(inner))?),
 
         ExprKind::As(inner, ty) => Expr::As {
-            value: lower_expr(ctx, a, body, scope, a.e(inner))?,
-            target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
+            value: lower_expr(ctx, scope, a.e(inner))?,
+            target: lower_type_expr_local(ctx, a.te(ty))?,
             kind: AsKind::Cast,
         },
 
         ExprKind::Bitcast(inner, ty) => Expr::As {
-            value: lower_expr(ctx, a, body, scope, a.e(inner))?,
-            target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
+            value: lower_expr(ctx, scope, a.e(inner))?,
+            target: lower_type_expr_local(ctx, a.te(ty))?,
             kind: AsKind::Bitcast,
         },
 
         ExprKind::Index(base, index) => Expr::Index {
-            base: lower_expr(ctx, a, body, scope, a.e(base))?,
-            index: lower_expr(ctx, a, body, scope, a.e(index))?,
+            base: lower_expr(ctx, scope, a.e(base))?,
+            index: lower_expr(ctx, scope, a.e(index))?,
         },
 
         ExprKind::SafeNavigation(base, field) => Expr::SafeNav {
-            base: lower_expr(ctx, a, body, scope, a.e(base))?,
+            base: lower_expr(ctx, scope, a.e(base))?,
             field: field.name,
         },
 
@@ -2026,23 +1982,23 @@ pub(crate) fn lower_expr_value(
             body: body_e,
             ..
         } => {
-            let lambda_scope = body.alloc_child_scope(scope);
+            let lambda_scope = ctx.body.alloc_child_scope(scope);
 
-            let first_param = body.binding_arena.len();
+            let first_param = ctx.body.binding_arena.len();
             for p in params {
                 let declared_ty =
-                    p.ty.map(|te| lower_type_expr_local(ctx, a, body, a.te(&te)))
+                    p.ty.map(|te| lower_type_expr_local(ctx, a.te(&te)))
                         .transpose()?;
-                let b = ctx.alloc_parameter(body, &p.name, declared_ty, p.span);
-                body.scope_arena[lambda_scope]
+                let b = ctx.alloc_parameter(&p.name, declared_ty, p.span);
+                ctx.body.scope_arena[lambda_scope]
                     .bindings
                     .insert(p.name.name, b);
             }
-            let params_range = body.binding_arena.allocated_since(first_param);
+            let params_range = ctx.body.binding_arena.allocated_since(first_param);
 
             let saved = ctx.placeholder_forbidden;
             ctx.placeholder_forbidden = true;
-            let body_idx = lower_block(ctx, a, body, lambda_scope, body_e)?;
+            let body_idx = lower_block(ctx, lambda_scope, body_e)?;
             ctx.placeholder_forbidden = saved;
 
             Expr::Lambda {
@@ -2053,44 +2009,41 @@ pub(crate) fn lower_expr_value(
 
         ExprKind::UnaryMinus(inner) => {
             let family = ctx.resolve_unary_family(ustr("__unm"), e.span)?;
-            Expr::UnaryMinus(lower_expr(ctx, a, body, scope, a.e(inner))?, family)
+            Expr::UnaryMinus(lower_expr(ctx, scope, a.e(inner))?, family)
         }
 
         ExprKind::Yield(opt) => {
             let inner = match opt {
-                Some(e) => Some(lower_expr(ctx, a, body, scope, a.e(e))?),
+                Some(e) => Some(lower_expr(ctx, scope, a.e(e))?),
                 None => None,
             };
 
             Expr::Yield(inner)
         }
 
-        ExprKind::YieldDelegate(inner) => {
-            Expr::YieldDelegate(lower_expr(ctx, a, body, scope, a.e(inner))?)
-        }
+        ExprKind::YieldDelegate(inner) => Expr::YieldDelegate(lower_expr(ctx, scope, a.e(inner))?),
 
         ExprKind::IfLetChain {
             clauses,
             then_block,
             else_block,
         } => {
-            let idx = lower_if_let_clauses(ctx, a, body, scope, clauses, then_block, else_block)?;
-            body.expr_arena[idx]
+            let idx = lower_if_let_clauses(ctx, scope, clauses, then_block, else_block)?;
+            ctx.body.expr_arena[idx]
         }
 
-        ExprKind::Spread(inner) => Expr::Spread(lower_expr(ctx, a, body, scope, a.e(inner))?),
+        ExprKind::Spread(inner) => Expr::Spread(lower_expr(ctx, scope, a.e(inner))?),
 
         ExprKind::SafeNavigationLet {
             receiver,
             binding,
             body: block,
         } => {
-            let receiver = lower_expr(ctx, a, body, scope, a.e(receiver))?;
+            let receiver = lower_expr(ctx, scope, a.e(receiver))?;
 
-            let body_scope = body.alloc_child_scope(scope);
+            let body_scope = ctx.body.alloc_child_scope(scope);
 
             let b = ctx.alloc_binding(
-                body,
                 BindingInfo {
                     name: binding.name,
                     kind: BindingKind::Let,
@@ -2100,51 +2053,49 @@ pub(crate) fn lower_expr_value(
                 binding.span,
             );
 
-            body.scope_arena[body_scope]
+            ctx.body.scope_arena[body_scope]
                 .bindings
                 .insert(binding.name, b);
-
-            let body = lower_block(ctx, a, body, body_scope, block)?;
 
             Expr::SafeNavLet {
                 receiver,
                 binding: b,
-                body,
+                body: lower_block(ctx, body_scope, block)?,
             }
         }
 
         ExprKind::ParenAscription(inner, ty) => Expr::As {
-            value: lower_expr(ctx, a, body, scope, a.e(inner))?,
-            target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
+            value: lower_expr(ctx, scope, a.e(inner))?,
+            target: lower_type_expr_local(ctx, a.te(ty))?,
             kind: AsKind::Ascribe,
         },
 
         ExprKind::PreIncrement(inner) => Expr::IncDec {
-            target: lower_expr(ctx, a, body, scope, a.e(inner))?,
+            target: lower_expr(ctx, scope, a.e(inner))?,
             decrement: false,
             postfix: false,
         },
 
         ExprKind::PostIncrement(inner) => Expr::IncDec {
-            target: lower_expr(ctx, a, body, scope, a.e(inner))?,
+            target: lower_expr(ctx, scope, a.e(inner))?,
             decrement: false,
             postfix: true,
         },
 
         ExprKind::PreDecrement(inner) => Expr::IncDec {
-            target: lower_expr(ctx, a, body, scope, a.e(inner))?,
+            target: lower_expr(ctx, scope, a.e(inner))?,
             decrement: true,
             postfix: false,
         },
 
         ExprKind::PostDecrement(inner) => Expr::IncDec {
-            target: lower_expr(ctx, a, body, scope, a.e(inner))?,
+            target: lower_expr(ctx, scope, a.e(inner))?,
             decrement: true,
             postfix: true,
         },
 
         ExprKind::ReturnExpr(inner) => Expr::Return(match inner {
-            Some(e) => Some(lower_expr(ctx, a, body, scope, a.e(e))?),
+            Some(e) => Some(lower_expr(ctx, scope, a.e(e))?),
             None => None,
         }),
 
@@ -2159,7 +2110,7 @@ pub(crate) fn lower_expr_value(
             }
         },
 
-        ExprKind::AnaphoricIdent(name) => lookup_in_scope(ctx, body, scope, name)?,
+        ExprKind::AnaphoricIdent(name) => lookup_in_scope(ctx, scope, name)?,
 
         ExprKind::Hole(_, name) => Expr::Hole(*name),
 
@@ -2173,26 +2124,24 @@ pub(crate) fn lower_expr_value(
 
 pub(crate) fn lower_expr(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     e: &skull_parser::ExprData,
 ) -> Result<Idx<hir::Expr>, CompilerError> {
     ctx.capture_iterator_families();
     if let ExprKind::Block(b) = &e.kind {
         if let Some(binding) = ctx.place_temp(e) {
-            return Ok(ctx.alloc_expr(body, Expr::Var(binding), e.span));
+            return Ok(ctx.alloc_expr(Expr::Var(binding), e.span));
         }
         let saved = ctx.placeholder_forbidden;
         ctx.placeholder_forbidden = true;
-        let r = lower_block(ctx, a, body, scope, b);
+        let r = lower_block(ctx, scope, b);
         ctx.placeholder_forbidden = saved;
 
         return r;
     }
 
-    let hir_e = lower_expr_value(ctx, a, body, scope, e)?;
-    Ok(ctx.alloc_expr(body, hir_e, e.span))
+    let hir_e = lower_expr_value(ctx, scope, e)?;
+    Ok(ctx.alloc_expr(hir_e, e.span))
 }
 
 fn function_footprint_lo(annotations: &[Annotation], f: &FunctionDef) -> usize {
@@ -2209,10 +2158,9 @@ fn function_footprint_lo(annotations: &[Annotation], f: &FunctionDef) -> usize {
 /// compiler knows is the builtin `Iterator<elem>`; anything else rejects.
 fn lower_generic_bounds(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     generics: &[skull_parser::Generic],
 ) -> Result<Vec<Option<TyId>>, CompilerError> {
+    let a = ctx.ast;
     let mut out = Vec::with_capacity(generics.len());
     for g in generics {
         let Some(b) = g.bound else {
@@ -2227,7 +2175,7 @@ fn lower_generic_bounds(
                     "Iterator",
                 ) && args.len() == 1 =>
             {
-                out.push(Some(lower_type_expr(ctx, a, body, a.te(&args[0]))?));
+                out.push(Some(lower_type_expr(ctx, a.te(&args[0]))?));
             }
             skull_parser::TypeExprKind::App { ctor, .. }
                 if bone_core::modules::is_intrinsic_key(
@@ -2305,23 +2253,24 @@ fn reject_generic_defaults(
 /// Validate defaults even when their lowered forms are unused here.
 fn type_def_generics(
     ctx: &mut LowerCtx,
-    a: &Ast,
     what: &str,
     generics: &[skull_parser::Generic],
-) -> Result<(Vec<TyId>, Body), CompilerError> {
+) -> Result<Vec<TyId>, CompilerError> {
+    let a = ctx.ast;
     reject_generic_bounds(what, generics)?;
     validate_generic_defaults(what, generics, a)?;
     let ids = ctx.declare_generics(generics);
-    let mut body = Body::default();
+    ctx.body = Body::default();
     for g in generics {
         if let Some(d) = &g.default {
-            lower_type_expr(ctx, a, &mut body, a.te(d))?;
+            lower_type_expr(ctx, a.te(d))?;
         }
     }
-    Ok((ids, body))
+    Ok(ids)
 }
 
-fn insert_item_body(ctx: &mut LowerCtx, owner: BodyOwner, body: Body, span: Span) {
+fn insert_item_body(ctx: &mut LowerCtx, owner: BodyOwner, span: Span) {
+    let body = ctx.take_body();
     ctx.module.insert_body(owner, body);
     let (start, stop) = span.offset_range();
     ctx.module.make_lapper(start, stop, owner);
@@ -2382,19 +2331,19 @@ fn validate_generic_defaults(
 
 pub(crate) fn build_function(
     ctx: &mut LowerCtx,
-    a: &Ast,
     f: &FunctionDef,
     annotations: &[Annotation],
 ) -> Result<(Function, Option<Body>, Vec<CompilerError>), CompilerError> {
+    let a = ctx.ast;
     ctx.generics_in_scope.clear();
     reject_generic_defaults("fn generics", &f.generics)?;
     reject_inline_lua_if_forbidden(a, f)?;
     let generic_var_ids = ctx.declare_generics(&f.generics);
-    let mut body = Body::default();
-    let generic_bounds = lower_generic_bounds(ctx, a, &mut body, &f.generics)?;
+    ctx.body = Body::default();
+    let generic_bounds = lower_generic_bounds(ctx, &f.generics)?;
 
     let return_ty = if let Some(ret_ty) = &f.return_ty {
-        let typ_expr = lower_type_expr(ctx, a, &mut body, a.te(ret_ty))?;
+        let typ_expr = lower_type_expr(ctx, a.te(ret_ty))?;
         Some(typ_expr)
     } else {
         None
@@ -2404,13 +2353,13 @@ pub(crate) fn build_function(
     let mut param_tys = Vec::with_capacity(f.params.len());
 
     for p in f.params.iter() {
-        let ty_ref = lower_type_expr(ctx, a, &mut body, a.te(&p.ty))?;
+        let ty_ref = lower_type_expr(ctx, a.te(&p.ty))?;
         param_tys.push(ty_ref);
         param_decls.push(ParamDecl {
             name: p.name.name,
             ty: ty_ref,
             has_default: p.default.is_some(),
-            annotations: lower_annotations_with_ctx(ctx, a, &p.annotations)?,
+            annotations: lower_annotations_with_ctx(ctx, &p.annotations)?,
         });
     }
 
@@ -2418,10 +2367,10 @@ pub(crate) fn build_function(
     // rather than failing fast: the workspace must stay buildable while an
     // annotation is mid-typed (decorator completion runs on it), and
     // `body_errors()` already turns any lowering error into a hard verdict.
-    let annotations = lower_annotations_with_ctx(ctx, a, annotations)?;
+    let annotations = lower_annotations_with_ctx(ctx, annotations)?;
     let anno_errors = fn_annotation_errors(ctx, &annotations, &param_decls);
 
-    let (body_failed, mut errors) = lower_fn_body_into(ctx, a, f, &mut body, &param_tys)?;
+    let (body_failed, mut errors) = lower_fn_body_into(ctx, f, &param_tys)?;
     use skull_parser::FunctionBody;
     let (inline_body, is_extern, ffi_lib, backend) = match f.body {
         FunctionBody::Rock(_) => (None, false, None, hir::FnBackend::Any),
@@ -2476,7 +2425,8 @@ pub(crate) fn build_function(
             .transpose()?,
     };
 
-    Ok((func, if body_failed { None } else { Some(body) }, errors))
+    let body = ctx.take_body();
+    Ok((func, (!body_failed).then_some(body), errors))
 }
 
 fn fn_annotation_errors(
@@ -2524,39 +2474,38 @@ fn install_relowered_body(
 /// avoid appending replacements to the module type arena.
 fn lower_fn_body_into(
     ctx: &mut LowerCtx,
-    a: &Ast,
     f: &FunctionDef,
-    body: &mut Body,
     param_tys: &[TyId],
 ) -> Result<(bool, Vec<CompilerError>), CompilerError> {
+    let a = ctx.ast;
     debug_assert_eq!(
         f.params.len(),
         param_tys.len(),
         "lower_fn_body_into needs one resolved param ty per AST param"
     );
 
-    // Collected (not pushed to the module) so the caller can key them by body --
-    // a body re-lower must REPLACE its errors, not append. See `Module::lowering_errors`.
+    // Collected (not pushed to the module) so the caller can key them by ctx.body --
+    // a ctx.body re-lower must REPLACE its errors, not append. See `Module::lowering_errors`.
     let mut errors = Vec::new();
     let mut bindings = FxHashMap::default();
     let mut param_defaults = Vec::with_capacity(f.params.len());
-    let default_scope = body.alloc_root_scope();
+    let default_scope = ctx.body.alloc_root_scope();
 
-    let first_param = body.binding_arena.len();
+    let first_param = ctx.body.binding_arena.len();
     for (p, &ty) in f.params.iter().zip(param_tys) {
-        let binding = ctx.alloc_parameter(body, &p.name, Some(ty), p.span);
+        let binding = ctx.alloc_parameter(&p.name, Some(ty), p.span);
         bindings.insert(p.name.name, binding);
     }
-    let range = body.binding_arena.allocated_since(first_param);
+    let range = ctx.body.binding_arena.allocated_since(first_param);
 
     // Defaults are lowered after every param binding exists: a lambda default
     // allocates its own param bindings, which would otherwise land inside the
-    // `first..=last` param range below. Like the body, they report every
-    // name they cannot resolve, and such a name fails the body.
+    // `first..=last` param range below. Like the ctx.body, they report every
+    // name they cannot resolve, and such a name fails the ctx.body.
     let outer = ctx.name_errors.replace(Some(Vec::new()));
     let lowered = f.params.iter().try_for_each(|p| {
         let param_default = match &p.default {
-            Some(expr) => Some(lower_expr(ctx, a, body, default_scope, a.e(expr))?),
+            Some(expr) => Some(lower_expr(ctx, default_scope, a.e(expr))?),
             None => None,
         };
         param_defaults.push(param_default);
@@ -2566,36 +2515,35 @@ fn lower_fn_body_into(
     lowered?;
     errors.extend(default_names);
 
-    let root_scope = body.alloc_root_scope_with_bindings(bindings);
+    let root_scope = ctx.body.alloc_root_scope_with_bindings(bindings);
     let mut body_failed = false;
     if let skull_parser::FunctionBody::Rock(block) = &f.body {
         let outer = ctx.name_errors.replace(Some(Vec::new()));
-        let lowered = lower_block(ctx, a, body, root_scope, block);
+        let lowered = lower_block(ctx, root_scope, block);
         errors.extend(ctx.name_errors.replace(outer).unwrap_or_default());
         match lowered {
-            Ok(root) => body.root = Some(root),
+            Ok(root) => ctx.body.root = Some(root),
             Err(error) => {
                 errors.push(error);
                 body_failed = true;
             }
         }
     }
-    body.root_scope = Some(root_scope);
-    body.param_bindings = range;
-    body.param_defaults = param_defaults;
+    ctx.body.root_scope = Some(root_scope);
+    ctx.body.param_bindings = range;
+    ctx.body.param_defaults = param_defaults;
 
     Ok((body_failed, errors))
 }
 
 pub fn lower_function_def(
     ctx: &mut LowerCtx,
-    a: &Ast,
     f: &FunctionDef,
     annotations: &[Annotation],
     item_lo: usize,
     reg_key: Ustr,
 ) -> Result<Idx<Function>, CompilerError> {
-    let (mut func, body, errors) = build_function(ctx, a, f, annotations)?;
+    let (mut func, body, errors) = build_function(ctx, f, annotations)?;
     func.name = reg_key;
     let idx = ctx.module.functions.alloc(func);
     let owner = BodyOwner::Function(idx);
@@ -2638,9 +2586,9 @@ pub fn relower_function_in_place(
         // this as an Interface edit). Fall back to a full rebuild of the fn --
         // correctness over the no-leak optimization.
         let high_water = module.lower_var_high_water;
-        let mut ctx = LowerCtx::new(ws, module, high_water);
+        let mut ctx = LowerCtx::new(ws, module, a, high_water);
 
-        let (func, body, errors) = build_function(&mut ctx, a, f, annotations)?;
+        let (func, body, errors) = build_function(&mut ctx, f, annotations)?;
         ctx.flush_scope_probes();
 
         ctx.module.lower_var_high_water = ctx._next_var_id;
@@ -2666,26 +2614,24 @@ pub fn relower_function_in_place(
     let high_water = module.lower_var_high_water;
     let mut ctx = LowerCtx {
         generics_in_scope,
-        ..LowerCtx::new(ws, module, high_water)
+        ..LowerCtx::new(ws, module, a, high_water)
     };
-
-    let mut body = Body::default();
 
     // Rebuild the signature's navigation spans with body-local type IDs.
     if let Some(ret_ty) = &f.return_ty {
-        lower_type_expr_local(&mut ctx, a, &mut body, a.te(ret_ty))?;
+        lower_type_expr_local(&mut ctx, a.te(ret_ty))?;
     }
     for p in f.params.iter() {
-        lower_type_expr_local(&mut ctx, a, &mut body, a.te(&p.ty))?;
+        lower_type_expr_local(&mut ctx, a.te(&p.ty))?;
     }
 
-    let (body_failed, mut errors) = lower_fn_body_into(&mut ctx, a, f, &mut body, &param_tys)?;
+    let (body_failed, mut errors) = lower_fn_body_into(&mut ctx, f, &param_tys)?;
     ctx.module.lower_var_high_water = ctx._next_var_id;
 
     // Re-validate annotations on the body-only path too: the REPLACE below
     // would otherwise clear a still-present annotation violation recorded by
     // the last full lower.
-    let lowered_annos = lower_annotations_with_ctx(&ctx, a, annotations)?;
+    let lowered_annos = lower_annotations_with_ctx(&ctx, annotations)?;
     errors.extend(fn_annotation_errors(
         &ctx,
         &lowered_annos,
@@ -2701,7 +2647,7 @@ pub fn relower_function_in_place(
     existing.span = f.span;
     existing.name_span = f.name.span;
 
-    let body = (!body_failed).then_some(body);
+    let body = (!body_failed).then(|| ctx.take_body());
     Ok(install_relowered_body(ctx.module, owner, body, errors))
 }
 
@@ -2714,18 +2660,17 @@ fn is_reserved_runtime_field(name: &str) -> bool {
 
 pub fn lower_struct_def(
     ctx: &mut LowerCtx,
-    a: &Ast,
     s: &skull_parser::StructDef,
     reg_key: Ustr,
 ) -> Result<(), CompilerError> {
-    let (generic_var_ids, mut body) = type_def_generics(ctx, a, "a struct", &s.generics)?;
+    let generic_var_ids = type_def_generics(ctx, "a struct", &s.generics)?;
 
     let mut fields = Vec::new();
-    let def_scope = body.alloc_root_scope();
+    let def_scope = ctx.body.alloc_root_scope();
     // Like a function body, the defaults report every name they cannot
     // resolve; they then keep no value, so inference never sees a placeholder.
     let outer = ctx.name_errors.replace(Some(Vec::new()));
-    let lowered = lower_struct_fields(ctx, a, s, &mut body, def_scope, &mut fields);
+    let lowered = lower_struct_fields(ctx, s, def_scope, &mut fields);
     let names = ctx.name_errors.replace(outer).unwrap_or_default();
     lowered?;
 
@@ -2734,12 +2679,12 @@ pub fn lower_struct_def(
     ctx.module.structs[idx].generics = generic_var_ids;
 
     if !names.is_empty() {
-        body.field_defaults.clear();
+        ctx.body.field_defaults.clear();
         ctx.module
             .lowering_errors
             .insert(BodyOwner::StructDefaults(idx), names);
     }
-    insert_item_body(ctx, BodyOwner::StructDefaults(idx), body, s.span);
+    insert_item_body(ctx, BodyOwner::StructDefaults(idx), s.span);
 
     Ok(())
 }
@@ -2747,12 +2692,11 @@ pub fn lower_struct_def(
 /// The fields of `s`, with their defaults lowered into `body`.
 fn lower_struct_fields(
     ctx: &mut LowerCtx,
-    a: &Ast,
     s: &skull_parser::StructDef,
-    body: &mut Body,
     def_scope: Idx<Scope>,
     fields: &mut Vec<hir::StructFieldDef>,
 ) -> Result<(), CompilerError> {
+    let a = ctx.ast;
     let mut json_names = FxHashSet::default();
     for field in s.fields.iter() {
         let (ty, storage_ty) = match a.te(&field.ty).kind {
@@ -2760,14 +2704,14 @@ fn lower_struct_fields(
                 (ctx.workspace.builtins.float(), ctx.workspace.builtins.f32())
             }
             _ => {
-                let ty = lower_type_expr(ctx, a, body, a.te(&field.ty))?;
+                let ty = lower_type_expr(ctx, a.te(&field.ty))?;
                 (ty, ty)
             }
         };
         let default = field
             .default
             .as_ref()
-            .map(|e| lower_expr(ctx, a, body, def_scope, a.e(e)))
+            .map(|e| lower_expr(ctx, def_scope, a.e(e)))
             .transpose()?;
 
         if fields
@@ -2809,7 +2753,7 @@ fn lower_struct_fields(
                 field.name.name
             );
         }
-        let field_annotations = lower_annotations_with_ctx(ctx, a, &field.annotations)?;
+        let field_annotations = lower_annotations_with_ctx(ctx, &field.annotations)?;
         validate_annotations(
             AnnoPos::StructField,
             &field_annotations,
@@ -2854,7 +2798,7 @@ fn lower_struct_fields(
         });
 
         if let Some(default) = default {
-            body.field_defaults.insert(field.name.name, default);
+            ctx.body.field_defaults.insert(field.name.name, default);
         }
     }
     Ok(())
@@ -2862,11 +2806,11 @@ fn lower_struct_fields(
 
 pub fn lower_enum_def(
     ctx: &mut LowerCtx,
-    a: &Ast,
     e: &skull_parser::EnumDef,
     reg_key: Ustr,
 ) -> Result<(), CompilerError> {
-    let (generic_var_ids, mut body) = type_def_generics(ctx, a, "an enum", &e.generics)?;
+    let a = ctx.ast;
+    let generic_var_ids = type_def_generics(ctx, "an enum", &e.generics)?;
 
     let mut variants = Vec::new();
 
@@ -2875,16 +2819,14 @@ pub fn lower_enum_def(
 
         let payload = match &v.kind {
             EnumVariantKind::Unit => VariantPayload::Unit,
-            EnumVariantKind::Tuple(fs) => VariantPayload::Tuple(
-                fs.iter()
-                    .map(|f| lower_type_expr(ctx, a, &mut body, a.te(f)))
-                    .try_vec()?,
-            ),
+            EnumVariantKind::Tuple(fs) => {
+                VariantPayload::Tuple(fs.iter().map(|f| lower_type_expr(ctx, a.te(f))).try_vec()?)
+            }
             EnumVariantKind::Record(fs) => {
                 let rec: Vec<hir::StructFieldDef> = fs
                     .iter()
                     .map(|f| {
-                        let annos = lower_annotations_with_ctx(ctx, a, &f.annotations)?;
+                        let annos = lower_annotations_with_ctx(ctx, &f.annotations)?;
                         validate_annotations(AnnoPos::EnumVariantField, &annos, &ctx.workspace.decorator_names)?;
                         if f.is_embed {
                             comp_error!(
@@ -2893,7 +2835,7 @@ pub fn lower_enum_def(
                                 f.name.name
                             );
                         }
-                        let ty = lower_type_expr(ctx, a, &mut body, a.te(&f.ty))?;
+                        let ty = lower_type_expr(ctx, a.te(&f.ty))?;
                         Ok(hir::StructFieldDef {
                             name: f.name.name,
                             ty,
@@ -2954,69 +2896,65 @@ pub fn lower_enum_def(
     ctx.module.enums[idx].variants = variants;
     ctx.module.enums[idx].generics = generic_var_ids;
 
-    insert_item_body(ctx, BodyOwner::Enum(idx), body, e.span);
+    insert_item_body(ctx, BodyOwner::Enum(idx), e.span);
 
     Ok(())
 }
 
 pub fn lower_newtype_def(
     ctx: &mut LowerCtx,
-    a: &Ast,
     n: &skull_parser::NewtypeDef,
     reg_key: Ustr,
 ) -> Result<(), CompilerError> {
-    let (generic_var_ids, mut body) = type_def_generics(ctx, a, "a newtype", &n.generics)?;
+    let a = ctx.ast;
+    let generic_var_ids = type_def_generics(ctx, "a newtype", &n.generics)?;
 
     let idx = ctx.module.newtypes_by_name[&reg_key];
 
-    ctx.module.newtypes[idx].wrapped = lower_type_expr(ctx, a, &mut body, a.te(&n.wrapped))?;
+    ctx.module.newtypes[idx].wrapped = lower_type_expr(ctx, a.te(&n.wrapped))?;
     ctx.module.newtypes[idx].generics = generic_var_ids;
 
-    insert_item_body(ctx, BodyOwner::Newtype(idx), body, n.span);
+    insert_item_body(ctx, BodyOwner::Newtype(idx), n.span);
 
     Ok(())
 }
 
 fn lower_type_expr_helper(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     pos: TyPos,
     orig_te: &skull_parser::TypeExprData,
 ) -> Result<hir::TypeExpr, CompilerError> {
-    let id = lower_type_expr_in(ctx, a, body, pos, orig_te)?;
-    Ok(ctx.type_node(body, id))
+    let id = lower_type_expr_in(ctx, pos, orig_te)?;
+    Ok(ctx.type_node(id))
 }
 
 fn lower_exprs<'a>(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     exprs: impl Iterator<Item = &'a Idx<ExprData>>,
 ) -> Result<IdxRange<Expr>, CompilerError> {
+    let a = ctx.ast;
     let mut lowered_args = Vec::new();
 
     for e in exprs {
         let e = a.e(e);
-        lowered_args.push((lower_expr_value(ctx, a, body, scope, e)?, e));
+        lowered_args.push((lower_expr_value(ctx, scope, e)?, e));
     }
 
-    let start = body.expr_arena.len();
+    let start = ctx.body.expr_arena.len();
     for (value, expr) in lowered_args {
-        ctx.alloc_expr(body, value, expr.span);
+        ctx.alloc_expr(value, expr.span);
     }
-    Ok(body.expr_arena.allocated_since(start))
+    Ok(ctx.body.expr_arena.allocated_since(start))
 }
 
 fn lower_statements(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     statements: &[Idx<StatementData>],
     prelude: Option<(Statement, Span)>,
 ) -> Result<(IdxRange<Statement>, Option<Idx<Expr>>), CompilerError> {
+    let a = ctx.ast;
     let mut lowered = Vec::new();
     if let Some((s, span)) = prelude {
         lowered.push((s, span));
@@ -3040,35 +2978,35 @@ fn lower_statements(
         if Some(i) == tail_pos {
             if let skull_parser::StatementKind::Expression(e) = &s.kind {
                 let e = a.e(e);
-                tail = Some((lower_expr_value(ctx, a, body, scope, e)?, e));
+                tail = Some((lower_expr_value(ctx, scope, e)?, e));
             }
         } else {
-            lowered.push((lower_statement_value(ctx, a, body, scope, s)?, s.span));
+            lowered.push((lower_statement_value(ctx, scope, s)?, s.span));
         }
     }
 
-    let tail = tail.map(|(expr, data)| ctx.alloc_expr(body, expr, data.span));
-    let start = body.statement_arena.len();
+    let tail = tail.map(|(expr, data)| ctx.alloc_expr(expr, data.span));
+    let start = ctx.body.statement_arena.len();
     for (statement, span) in lowered {
-        body.alloc_statement(statement, span);
+        ctx.body.alloc_statement(statement, span);
     }
-    Ok((body.statement_arena.allocated_since(start), tail))
+    Ok((ctx.body.statement_arena.allocated_since(start), tail))
 }
 
 pub fn lower_global(
     ctx: &mut LowerCtx,
-    a: &Ast,
     g: &skull_parser::GlobalDef,
     reg_key: Ustr,
 ) -> Result<(), CompilerError> {
+    let a = ctx.ast;
     if !g.is_const {
         reject_mutable_global_if_forbidden(a, g.name.span, g.name.name, "global")?;
     }
     let name = reg_key;
-    let mut body = Body::default();
+    ctx.body = Body::default();
 
     let ty = match &g.ty {
-        Some(te) => lower_type_expr(ctx, a, &mut body, a.te(te))?,
+        Some(te) => lower_type_expr(ctx, a.te(te))?,
         None => comp_error!(
             g.span,
             "Global variable {} must have an explicit type annotation",
@@ -3081,9 +3019,9 @@ pub fn lower_global(
     let mut names = Vec::new();
     let value = match &g.value {
         Some(e) => {
-            let scope = body.alloc_root_scope();
+            let scope = ctx.body.alloc_root_scope();
             let outer = ctx.name_errors.replace(Some(Vec::new()));
-            let lowered = lower_expr(ctx, a, &mut body, scope, a.e(e));
+            let lowered = lower_expr(ctx, scope, a.e(e));
             names = ctx.name_errors.replace(outer).unwrap_or_default();
             match lowered {
                 Ok(lowered) if names.is_empty() => Some(lowered),
@@ -3100,9 +3038,9 @@ pub fn lower_global(
     };
 
     if !names.is_empty() {
-        body = Body::default();
+        ctx.body = Body::default();
     }
-    body.root = value;
+    ctx.body.root = value;
 
     let idx = ctx.module.globals.alloc(GlobalDef {
         name,
@@ -3121,7 +3059,7 @@ pub fn lower_global(
             .lowering_errors
             .insert(BodyOwner::Global(idx), names);
     }
-    insert_item_body(ctx, BodyOwner::Global(idx), body, g.span);
+    insert_item_body(ctx, BodyOwner::Global(idx), g.span);
 
     Ok(())
 }
@@ -3182,8 +3120,6 @@ fn reject_inline_lua_if_forbidden(a: &Ast, f: &FunctionDef) -> Result<(), Compil
 /// `None` tells the caller to lower a wildcard.
 fn resolve_pattern_path<'p>(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     path: &skull_parser::Path,
     subpats: impl IntoIterator<Item = &'p skull_parser::Pattern>,
@@ -3193,7 +3129,6 @@ fn resolve_pattern_path<'p>(
     match ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)) {
         Ok((enum_key, variant)) => {
             ctx.record_path(
-                body,
                 TyPos::Body,
                 path,
                 hir::SegmentTarget::Variant { enum_key, variant },
@@ -3203,7 +3138,7 @@ fn resolve_pattern_path<'p>(
         Err(msg) => {
             ctx.recover_name(CompilerError::new_with_label(path.span(), msg))?;
             for p in subpats {
-                lower_pattern_value(ctx, a, body, scope, p)?;
+                lower_pattern_value(ctx, scope, p)?;
             }
             Ok(None)
         }
@@ -3212,13 +3147,8 @@ fn resolve_pattern_path<'p>(
 
 /// Normalize `_` holes for let/for binding and report names-only loop shapes.
 /// Or-patterns stay untouched because their holes cannot bind.
-fn normalize_binding_wildcards(
-    ctx: &mut LowerCtx,
-    body: &mut Body,
-    p: Idx<Pattern>,
-    span: Span,
-) -> bool {
-    let pattern = body.pattern_arena[p];
+fn normalize_binding_wildcards(ctx: &mut LowerCtx, p: Idx<Pattern>, span: Span) -> bool {
+    let pattern = ctx.body.pattern_arena[p];
     let mut names_only = matches!(
         pattern,
         Pattern::Wildcard | Pattern::Bind(_) | Pattern::Tuple { .. }
@@ -3226,7 +3156,6 @@ fn normalize_binding_wildcards(
     match pattern {
         Pattern::Wildcard => {
             let b = ctx.alloc_binding(
-                body,
                 BindingInfo {
                     name: ustr::ustr("_"),
                     kind: hir::BindingKind::Let,
@@ -3235,20 +3164,20 @@ fn normalize_binding_wildcards(
                 },
                 span,
             );
-            body.pattern_arena[p] = Pattern::Bind(b);
+            ctx.body.pattern_arena[p] = Pattern::Bind(b);
         }
         Pattern::Newtype { sub, .. } => {
-            normalize_binding_wildcards(ctx, body, sub, span);
+            normalize_binding_wildcards(ctx, sub, span);
         }
         Pattern::Record { fields, .. } => {
             for f in fields {
-                let sub = body.record_pat_field_arena[f].pat;
-                normalize_binding_wildcards(ctx, body, sub, span);
+                let sub = ctx.body.record_pat_field_arena[f].pat;
+                normalize_binding_wildcards(ctx, sub, span);
             }
         }
         Pattern::EnumVariant { sub, .. } | Pattern::Tuple { elements: sub } => {
             for e in sub {
-                names_only &= normalize_binding_wildcards(ctx, body, e, span);
+                names_only &= normalize_binding_wildcards(ctx, e, span);
             }
         }
         Pattern::Bind(_) | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Or { .. } => {}
@@ -3258,16 +3187,14 @@ fn normalize_binding_wildcards(
 
 fn lower_pattern_value(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     pat: &skull_parser::Pattern,
 ) -> Result<Pattern, CompilerError> {
+    let a = ctx.ast;
     Ok(match pat {
         skull_parser::Pattern::Wildcard => Pattern::Wildcard,
         skull_parser::Pattern::Ident(id) => {
             let b = ctx.alloc_binding(
-                body,
                 BindingInfo {
                     name: id.name,
                     kind: hir::BindingKind::Let,
@@ -3277,7 +3204,7 @@ fn lower_pattern_value(
                 id.span,
             );
 
-            body.scope_arena[scope].bindings.insert(id.name, b);
+            ctx.body.scope_arena[scope].bindings.insert(id.name, b);
 
             Pattern::Bind(b)
         }
@@ -3297,8 +3224,8 @@ fn lower_pattern_value(
                         segment.name
                     );
                 }
-                let sub = lower_pattern_value(ctx, a, body, scope, &subs[0])?;
-                let sub = body.pattern_arena.alloc(sub);
+                let sub = lower_pattern_value(ctx, scope, &subs[0])?;
+                let sub = ctx.body.pattern_arena.alloc(sub);
                 return Ok(Pattern::Newtype {
                     name: key,
                     name_span: segment.span,
@@ -3307,29 +3234,29 @@ fn lower_pattern_value(
             }
             // A single unrooted segment preserves shorthand enum inference;
             // longer paths resolve the enum and variant through the package.
-            let (enum_name, enum_name_span, variant, variant_span) =
-                if path.segments.len() == 1 && !path.from_root {
-                    let segment = &path.segments[0];
-                    (None, None, segment.name, segment.span)
-                } else {
-                    let subpats = args.iter().flatten();
-                    let Some((enum_key, variant)) =
-                        resolve_pattern_path(ctx, a, body, scope, path, subpats)?
-                    else {
-                        return Ok(Pattern::Wildcard);
-                    };
-                    let (enum_span, variant_span) = variant_path_spans(path);
-                    (Some(enum_key), Some(enum_span), variant, variant_span)
+            let (enum_name, enum_name_span, variant, variant_span) = if path.segments.len() == 1
+                && !path.from_root
+            {
+                let segment = &path.segments[0];
+                (None, None, segment.name, segment.span)
+            } else {
+                let subpats = args.iter().flatten();
+                let Some((enum_key, variant)) = resolve_pattern_path(ctx, scope, path, subpats)?
+                else {
+                    return Ok(Pattern::Wildcard);
                 };
+                let (enum_span, variant_span) = variant_path_spans(path);
+                (Some(enum_key), Some(enum_span), variant, variant_span)
+            };
 
             let sub = match args {
                 None => IdxRange::new_empty(),
                 Some(pats) => {
                     let vals = pats
                         .iter()
-                        .map(|p| lower_pattern_value(ctx, a, body, scope, p))
+                        .map(|p| lower_pattern_value(ctx, scope, p))
                         .try_vec()?;
-                    alloc_contiguous(&mut body.pattern_arena, vals)
+                    alloc_contiguous(&mut ctx.body.pattern_arena, vals)
                 }
             };
             Pattern::EnumVariant {
@@ -3343,41 +3270,41 @@ fn lower_pattern_value(
         skull_parser::Pattern::PathRecord { path, fields, rest } => {
             // An unqualified record name still resolves as a bare type name,
             // falling back to the written variant name when it names no struct.
-            let (enum_name, enum_name_span, name, name_span) =
-                if path.segments.len() == 1 && !path.from_root {
-                    let segment = &path.segments[0];
-                    let name = ctx
-                        .resolve_bare_key(segment.name, segment.span)
-                        .ok()
-                        .filter(|key| ctx.workspace.struct_by_name.contains_key(key))
-                        .unwrap_or(segment.name);
-                    (None, None, Some(name), Some(segment.span))
-                } else {
-                    let subpats = fields.iter().map(|(_, p)| p);
-                    let Some((enum_key, variant)) =
-                        resolve_pattern_path(ctx, a, body, scope, path, subpats)?
-                    else {
-                        return Ok(Pattern::Wildcard);
-                    };
-                    let (enum_span, variant_span) = variant_path_spans(path);
-                    (
-                        Some(enum_key),
-                        Some(enum_span),
-                        Some(variant),
-                        Some(variant_span),
-                    )
+            let (enum_name, enum_name_span, name, name_span) = if path.segments.len() == 1
+                && !path.from_root
+            {
+                let segment = &path.segments[0];
+                let name = ctx
+                    .resolve_bare_key(segment.name, segment.span)
+                    .ok()
+                    .filter(|key| ctx.workspace.struct_by_name.contains_key(key))
+                    .unwrap_or(segment.name);
+                (None, None, Some(name), Some(segment.span))
+            } else {
+                let subpats = fields.iter().map(|(_, p)| p);
+                let Some((enum_key, variant)) = resolve_pattern_path(ctx, scope, path, subpats)?
+                else {
+                    return Ok(Pattern::Wildcard);
                 };
+                let (enum_span, variant_span) = variant_path_spans(path);
+                (
+                    Some(enum_key),
+                    Some(enum_span),
+                    Some(variant),
+                    Some(variant_span),
+                )
+            };
             let mut entries = Vec::with_capacity(fields.len());
             for (fname, subpat) in fields.iter() {
-                let pat = lower_pattern_value(ctx, a, body, scope, subpat)?;
-                let pat = body.pattern_arena.alloc(pat);
+                let pat = lower_pattern_value(ctx, scope, subpat)?;
+                let pat = ctx.body.pattern_arena.alloc(pat);
                 entries.push(RecordPatField {
                     name: fname.name,
                     name_span: fname.span,
                     pat,
                 });
             }
-            let fields = alloc_contiguous(&mut body.record_pat_field_arena, entries);
+            let fields = alloc_contiguous(&mut ctx.body.record_pat_field_arena, entries);
             Pattern::Record {
                 enum_name,
                 enum_name_span,
@@ -3394,11 +3321,11 @@ fn lower_pattern_value(
         } => {
             let start = start
                 .as_ref()
-                .map(|e| lower_expr(ctx, a, body, scope, a.e(e)))
+                .map(|e| lower_expr(ctx, scope, a.e(e)))
                 .transpose()?;
             let end = end
                 .as_ref()
-                .map(|e| lower_expr(ctx, a, body, scope, a.e(e)))
+                .map(|e| lower_expr(ctx, scope, a.e(e)))
                 .transpose()?;
 
             Pattern::Range {
@@ -3409,16 +3336,16 @@ fn lower_pattern_value(
         }
 
         skull_parser::Pattern::Literal(expr) => {
-            let e = lower_expr(ctx, a, body, scope, a.e(expr))?;
+            let e = lower_expr(ctx, scope, a.e(expr))?;
             Pattern::Literal(e)
         }
         skull_parser::Pattern::Tuple(elems) => {
             let vals = elems
                 .iter()
-                .map(|p| lower_pattern_value(ctx, a, body, scope, p))
+                .map(|p| lower_pattern_value(ctx, scope, p))
                 .try_vec()?;
 
-            let elements = alloc_contiguous(&mut body.pattern_arena, vals);
+            let elements = alloc_contiguous(&mut ctx.body.pattern_arena, vals);
 
             Pattern::Tuple { elements }
         }
@@ -3426,10 +3353,10 @@ fn lower_pattern_value(
         skull_parser::Pattern::Or(alts) => {
             let vals = alts
                 .iter()
-                .map(|p| lower_pattern_value(ctx, a, body, scope, p))
+                .map(|p| lower_pattern_value(ctx, scope, p))
                 .try_vec()?;
 
-            let alternatives = alloc_contiguous(&mut body.pattern_arena, vals);
+            let alternatives = alloc_contiguous(&mut ctx.body.pattern_arena, vals);
 
             Pattern::Or { alternatives }
         }
@@ -3438,8 +3365,6 @@ fn lower_pattern_value(
 
 fn lower_if_let_clauses(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     clauses: &[IfLetClause],
     then_block: &Idx<BlockData>,
@@ -3450,42 +3375,41 @@ fn lower_if_let_clauses(
     // bindings exist once instead of once per clause.
     let else_branch = match else_block {
         Some(blk) => {
-            let e = lower_block(ctx, a, body, scope, blk)?;
+            let e = lower_block(ctx, scope, blk)?;
             // Every clause's miss arm lands here, so no clause's branch-local
             // narrowing may be applied to it.
             if clauses.len() > 1 {
-                body.shared_branch_targets.insert(e);
+                ctx.body.shared_branch_targets.insert(e);
             }
             Some(e)
         }
         None => None,
     };
-    lower_if_let_clauses_with(ctx, a, body, scope, clauses, then_block, else_branch)
+    lower_if_let_clauses_with(ctx, scope, clauses, then_block, else_branch)
 }
 
 fn lower_if_let_clauses_with(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     clauses: &[IfLetClause],
     then_block: &Idx<BlockData>,
     else_branch: Option<Idx<Expr>>,
 ) -> Result<Idx<Expr>, CompilerError> {
+    let a = ctx.ast;
     let Some((clause, rest)) = clauses.split_first() else {
-        return lower_block(ctx, a, body, scope, then_block);
+        return lower_block(ctx, scope, then_block);
     };
 
     let node = match clause {
         IfLetClause::Binding { pattern, value } => {
-            let value = lower_expr(ctx, a, body, scope, a.e(value))?;
-            let then_scope = body.alloc_child_scope(scope);
+            let value = lower_expr(ctx, scope, a.e(value))?;
+            let then_scope = ctx.body.alloc_child_scope(scope);
 
-            let pat = lower_pattern_value(ctx, a, body, then_scope, pattern)?;
+            let pat = lower_pattern_value(ctx, then_scope, pattern)?;
 
-            let pattern = body.pattern_arena.alloc(pat);
+            let pattern = ctx.body.pattern_arena.alloc(pat);
             let then_branch =
-                lower_if_let_clauses_with(ctx, a, body, then_scope, rest, then_block, else_branch)?;
+                lower_if_let_clauses_with(ctx, then_scope, rest, then_block, else_branch)?;
 
             Expr::IfLet {
                 pattern,
@@ -3496,9 +3420,8 @@ fn lower_if_let_clauses_with(
         }
 
         IfLetClause::Condition(cond) => {
-            let cond = lower_expr(ctx, a, body, scope, a.e(cond))?;
-            let then_branch =
-                lower_if_let_clauses_with(ctx, a, body, scope, rest, then_block, else_branch)?;
+            let cond = lower_expr(ctx, scope, a.e(cond))?;
+            let then_branch = lower_if_let_clauses_with(ctx, scope, rest, then_block, else_branch)?;
 
             Expr::If {
                 cond,
@@ -3508,16 +3431,15 @@ fn lower_if_let_clauses_with(
         }
     };
 
-    Ok(ctx.alloc_expr(body, node, a.b(then_block).span))
+    Ok(ctx.alloc_expr(node, a.b(then_block).span))
 }
 
 fn lower_interp_parts(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     parts: &[skull_parser::InterpolatedPart],
 ) -> Result<IdxRange<InterpPart>, CompilerError> {
+    let a = ctx.ast;
     use skull_parser::InterpolatedPart as P;
     // Lower every part before allocating any: a hole can hold its own
     // interpolated string, whose parts would otherwise land inside this range.
@@ -3529,16 +3451,16 @@ fn lower_interp_parts(
 
             P::Expr(e, spec) => {
                 let e = a.e(e);
-                let val = lower_expr_value(ctx, a, body, scope, e)?;
-                let expr = ctx.alloc_expr(body, val, e.span);
+                let val = lower_expr_value(ctx, scope, e)?;
+                let expr = ctx.alloc_expr(val, e.span);
 
                 let spec = match spec {
                     Some(s) => {
                         let width_expr = match s.width_expr {
                             Some(we) => {
                                 let we = a.e(&we);
-                                let v = lower_expr_value(ctx, a, body, scope, we)?;
-                                Some(ctx.alloc_expr(body, v, we.span))
+                                let v = lower_expr_value(ctx, scope, we)?;
+                                Some(ctx.alloc_expr(v, we.span))
                             }
 
                             None => None,
@@ -3547,8 +3469,8 @@ fn lower_interp_parts(
                         let precision_expr = match s.precision_expr {
                             Some(pe) => {
                                 let pe = a.e(&pe);
-                                let v = lower_expr_value(ctx, a, body, scope, pe)?;
-                                Some(ctx.alloc_expr(body, v, pe.span))
+                                let v = lower_expr_value(ctx, scope, pe)?;
+                                Some(ctx.alloc_expr(v, pe.span))
                             }
 
                             None => None,
@@ -3581,28 +3503,28 @@ fn lower_interp_parts(
         lowered.push(hir);
     }
 
-    Ok(alloc_contiguous(&mut body.interp_part_arena, lowered))
+    Ok(alloc_contiguous(&mut ctx.body.interp_part_arena, lowered))
 }
 
 pub fn lower_decorator_def(
     ctx: &mut LowerCtx,
-    a: &Ast,
     d: &skull_parser::DecoratorDef,
     annotations: &[skull_parser::Annotation],
     def_key: Ustr,
 ) -> Result<Idx<DecoratorDef>, CompilerError> {
+    let a = ctx.ast;
     ctx.generics_in_scope.clear();
-    let mut body = Body::default();
+    ctx.body = Body::default();
 
-    let first_param = body.binding_arena.len();
+    let first_param = ctx.body.binding_arena.len();
     let mut param_decls = Vec::new();
     let mut bindings = FxHashMap::default();
 
     for p in &d.params {
-        let ty_ref = lower_type_expr(ctx, a, &mut body, a.te(&p.ty))?;
-        let binding = ctx.alloc_parameter(&mut body, &p.name, Some(ty_ref), p.span);
+        let ty_ref = lower_type_expr(ctx, a.te(&p.ty))?;
+        let binding = ctx.alloc_parameter(&p.name, Some(ty_ref), p.span);
         bindings.insert(p.name.name, binding);
-        let deco_param_annotations = lower_annotations_with_ctx(ctx, a, &p.annotations)?;
+        let deco_param_annotations = lower_annotations_with_ctx(ctx, &p.annotations)?;
         validate_annotations(
             AnnoPos::DecoParam,
             &deco_param_annotations,
@@ -3616,7 +3538,7 @@ pub fn lower_decorator_def(
         });
     }
 
-    let params_range = body.binding_arena.allocated_since(first_param);
+    let params_range = ctx.body.binding_arena.allocated_since(first_param);
     let target_ty = {
         let idx = ctx.module.ty_arena.alloc(TypeExpr::App {
             ctor: TypeCtor::Nominal(ustr("__DecoTarget")),
@@ -3627,7 +3549,6 @@ pub fn lower_decorator_def(
     };
 
     let target = ctx.alloc_binding(
-        &mut body,
         BindingInfo {
             name: ustr("target"),
             kind: BindingKind::Param,
@@ -3639,7 +3560,7 @@ pub fn lower_decorator_def(
 
     bindings.insert(ustr("target"), target);
 
-    let root_scope = body.alloc_root_scope_with_bindings(bindings);
+    let root_scope = ctx.body.alloc_root_scope_with_bindings(bindings);
 
     // Like a function body, the defaults and body report every name they
     // cannot resolve; the body is then dropped, so inference never sees a
@@ -3651,12 +3572,12 @@ pub fn lower_decorator_def(
         .iter()
         .try_for_each(|p| {
             param_defaults.push(match &p.default {
-                Some(expr) => Some(lower_expr(ctx, a, &mut body, root_scope, a.e(expr))?),
+                Some(expr) => Some(lower_expr(ctx, root_scope, a.e(expr))?),
                 None => None,
             });
             Ok(())
         })
-        .and_then(|()| lower_block(ctx, a, &mut body, root_scope, &d.body));
+        .and_then(|()| lower_block(ctx, root_scope, &d.body));
     let names = ctx.name_errors.replace(outer).unwrap_or_default();
     let body_e = lowered?;
 
@@ -3666,11 +3587,11 @@ pub fn lower_decorator_def(
         .filter(|p| p.default.is_none() && !p.is_variadic)
         .count();
 
-    body.root = Some(body_e);
-    body.root_scope = Some(root_scope);
-    body.param_bindings = params_range;
-    body.param_defaults = param_defaults;
-    body.deco_target = Some(target);
+    ctx.body.root = Some(body_e);
+    ctx.body.root_scope = Some(root_scope);
+    ctx.body.param_bindings = params_range;
+    ctx.body.param_defaults = param_defaults;
+    ctx.body.deco_target = Some(target);
 
     let idx = ctx.module.decorators.alloc(DecoratorDef {
         name: d.name.name,
@@ -3678,7 +3599,7 @@ pub fn lower_decorator_def(
         span: d.span,
         param_decls,
         num_required,
-        annotations: lower_annotations_with_ctx(ctx, a, annotations)?,
+        annotations: lower_annotations_with_ctx(ctx, annotations)?,
     });
 
     if !names.is_empty() {
@@ -3687,7 +3608,7 @@ pub fn lower_decorator_def(
             .insert(BodyOwner::Decorator(idx), names);
         return Ok(idx);
     }
-    insert_item_body(ctx, BodyOwner::Decorator(idx), body, d.span);
+    insert_item_body(ctx, BodyOwner::Decorator(idx), d.span);
 
     Ok(idx)
 }
@@ -3717,20 +3638,18 @@ pub fn lower_annotations(ast: &Ast, anns: &[skull_parser::Annotation]) -> Vec<hi
 /// remains the source of builtin behavior.
 pub fn lower_annotations_with_ctx(
     ctx: &LowerCtx,
-    ast: &Ast,
     anns: &[skull_parser::Annotation],
 ) -> Result<Vec<hir::Annotation>, CompilerError> {
-    lower_annotations_in_scope(ctx, ast, anns, ctx.fragment_scope())
+    lower_annotations_in_scope(ctx, anns, ctx.fragment_scope())
 }
 
 /// Lower annotations using the logical module path of their declaration.
 pub fn lower_annotations_in_scope(
     ctx: &LowerCtx,
-    ast: &Ast,
     anns: &[skull_parser::Annotation],
     scope: &bone_core::modules::FragmentScope,
 ) -> Result<Vec<hir::Annotation>, CompilerError> {
-    let mut lowered = lower_annotations(ast, anns);
+    let mut lowered = lower_annotations(ctx.ast, anns);
     for anno in &mut lowered {
         // Only a decorator claims an annotation spelling; a same-named fn or
         // global leaves the builtin in force.
@@ -3841,14 +3760,13 @@ fn compound_place_temps(a: &Ast, place: &Idx<ExprData>) -> Vec<Idx<ExprData>> {
 
 fn lower_named_call(
     ctx: &mut LowerCtx,
-    body: &mut Body,
     scope: Idx<Scope>,
     name: &skull_parser::Ident,
     args_range: IdxRange<Expr>,
     generic_args: IdxRange<TypeExpr>,
 ) -> Result<Expr, CompilerError> {
     // A local value shadows the visible callable family.
-    let local = lookup_local(body, scope, name.name);
+    let local = lookup_local(&ctx.body, scope, name.name);
     let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
         // Keep an unbound call in HIR so inference can report the missing
         // function and editor actions can offer a stub.
@@ -3864,16 +3782,16 @@ fn lower_named_call(
     };
     let callee = match local {
         Some(binding) => hir::Callee::Local(binding),
-        None if name.name.as_str() == "_" => match lookup_in_scope(ctx, body, scope, name)? {
+        None if name.name.as_str() == "_" => match lookup_in_scope(ctx, scope, name)? {
             Expr::Var(binding) => hir::Callee::Local(binding),
             _ => hir::Callee::Unresolved {
                 name: callee_key,
-                name_span: body.name_spans.alloc(name.span),
+                name_span: ctx.body.name_spans.alloc(name.span),
             },
         },
         None => hir::Callee::Unresolved {
             name: callee_key,
-            name_span: body.name_spans.alloc(name.span),
+            name_span: ctx.body.name_spans.alloc(name.span),
         },
     };
 
@@ -3936,8 +3854,6 @@ fn expr_is_pure(a: &Ast, e: &Idx<ExprData>) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn lower_compound_assign_with_temps(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     e: &ExprData,
     op_fn: &str,
@@ -3945,21 +3861,22 @@ fn lower_compound_assign_with_temps(
     right: &Idx<ExprData>,
     temps: &[Idx<ExprData>],
 ) -> Result<Expr, CompilerError> {
-    let scope = body.alloc_child_scope(scope);
+    let a = ctx.ast;
+    let scope = ctx.body.alloc_child_scope(scope);
     let saved = ctx.place_temps.len();
     let result = (|| {
         let mut statements = Vec::with_capacity(temps.len() + 1);
         for part in temps {
             let part = a.e(part);
-            let value = lower_expr(ctx, a, body, scope, part)?;
-            let binding = body.binding_arena.alloc(BindingInfo {
+            let value = lower_expr(ctx, scope, part)?;
+            let binding = ctx.body.binding_arena.alloc(BindingInfo {
                 name: ustr("__place"),
                 kind: BindingKind::Let,
                 declared_ty: None,
                 span: part.span,
             });
-            body.binding_spans.insert(binding, part.span);
-            let pattern = body.pattern_arena.alloc(Pattern::Bind(binding));
+            ctx.body.binding_spans.insert(binding, part.span);
+            let pattern = ctx.body.pattern_arena.alloc(Pattern::Bind(binding));
             statements.push((
                 Statement::Let {
                     pattern,
@@ -3972,12 +3889,11 @@ fn lower_compound_assign_with_temps(
                 .push((part as *const ExprData as usize, binding));
         }
 
-        let target = lower_expr(ctx, a, body, scope, a.e(left))?;
+        let target = lower_expr(ctx, scope, a.e(left))?;
         let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
-        let args = lower_exprs(ctx, a, body, scope, [left, right].into_iter())?;
-        let name_span = body.name_spans.alloc(e.span);
+        let args = lower_exprs(ctx, scope, [left, right].into_iter())?;
+        let name_span = ctx.body.name_spans.alloc(e.span);
         let call = ctx.alloc_expr(
-            body,
             Expr::Call {
                 callee: Callee::Unresolved {
                     name: callee_key,
@@ -3990,7 +3906,6 @@ fn lower_compound_assign_with_temps(
             e.span,
         );
         let assign = ctx.alloc_expr(
-            body,
             Expr::Assign {
                 target,
                 value: call,
@@ -4001,7 +3916,7 @@ fn lower_compound_assign_with_temps(
 
         let mut range: Option<(Idx<Statement>, Idx<Statement>)> = None;
         for (s, span) in statements {
-            let id = body.alloc_statement(s, span);
+            let id = ctx.body.alloc_statement(s, span);
             range = Some((range.map_or(id, |r| r.0), id));
         }
         let (first, last) = range.expect("at least the assignment statement");
@@ -4092,14 +4007,11 @@ fn is_placeholder_lambda(a: &Ast, e: &ExprData) -> bool {
 
 fn lower_placeholder_lambda(
     ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
     scope: Idx<Scope>,
     e: &ExprData,
 ) -> Result<Expr, CompilerError> {
-    let lambda_scope = body.alloc_child_scope(scope);
+    let lambda_scope = ctx.body.alloc_child_scope(scope);
     let param = ctx.alloc_binding(
-        body,
         BindingInfo {
             name: ustr("_"),
             kind: BindingKind::Param,
@@ -4111,10 +4023,10 @@ fn lower_placeholder_lambda(
 
     let prev = ctx.placeholder_param.replace(param);
 
-    let body_val = lower_expr_value(ctx, a, body, lambda_scope, e);
+    let body_val = lower_expr_value(ctx, lambda_scope, e);
     ctx.placeholder_param = prev;
 
-    let body_idx = ctx.alloc_expr(body, body_val?, e.span);
+    let body_idx = ctx.alloc_expr(body_val?, e.span);
 
     Ok(Expr::Lambda {
         params: IdxRange::new_inclusive(param..=param),

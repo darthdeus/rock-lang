@@ -7,7 +7,8 @@ use crate::LowerCtx;
 fn repeated_probes_do_not_inflate_the_module_probe_set() {
     let ws = Workspace::new();
     let mut module = hir::Module::default();
-    let mut ctx = LowerCtx::new(&ws, &mut module, 0);
+    let ast = skull_parser::Ast::default();
+    let mut ctx = LowerCtx::new(&ws, &mut module, &ast, 0);
     let node = |name| ScopeProbe::Node {
         package: 1,
         node: ustr(name),

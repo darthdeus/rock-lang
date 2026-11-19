@@ -99,11 +99,11 @@ fn lower_annotation(
         file,
         ..Default::default()
     };
-    let ctx = LowerCtx::new(&ws, &mut module, 0);
+    let ctx = LowerCtx::new(&ws, &mut module, &ast, 0);
     let ItemKind::Struct(buffer) = &ast.items.last().unwrap().kind else {
         panic!("expected a struct");
     };
-    lower_annotations_with_ctx(&ctx, &ast, &buffer.fields[0].annotations)
+    lower_annotations_with_ctx(&ctx, &buffer.fields[0].annotations)
 }
 
 #[test]
