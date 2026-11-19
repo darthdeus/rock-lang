@@ -220,14 +220,6 @@ impl<'a> Parser<'a> {
             if self.at_end() {
                 break;
             }
-            if self.kind() == TokenKind::At
-                && matches!(self.peek_kind(), TokenKind::Ident(n) if n.as_str() == "memory")
-            {
-                return Err(CompilerError::new_with_label(
-                    self.span(),
-                    "`@memory` was removed; delete it: files have no memory class".to_string(),
-                ));
-            }
             // The header must precede every item except comments.
             if !seen_item {
                 let save = self.pos;
@@ -1134,18 +1126,10 @@ impl<'a> Parser<'a> {
     }
 
     /// After `extern`, read the required `(ffi, "lib")` / `(lua)` / `(js)`
-    /// specifier and return the body kind for the (body-less) declaration. Bare
-    /// `extern` and `extern(c)` were aliases for `extern(lua)` and reject with
-    /// that replacement named; an unknown backend name rejects fail-closed.
+    /// specifier and return the body kind for the (body-less) declaration. An
+    /// unknown backend name rejects fail-closed.
     fn parse_extern_specifier(&mut self) -> PResult<FunctionBody> {
-        if self.kind() != TokenKind::OpenParen {
-            return Err(self.err(
-                "bare `extern` was removed; name the backend: write `extern(lua)` for an \
-                 existing Lua global (what bare `extern` meant), `extern(js)` for a JS \
-                 global, or `extern(ffi, \"lib\")` for a C symbol",
-            ));
-        }
-        self.advance(); // `(`
+        self.expect(TokenKind::OpenParen)?;
         let kind = match self.kind() {
             TokenKind::Ident(n) if n.as_str() == "ffi" => {
                 self.advance();
@@ -1165,12 +1149,6 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(n) if n.as_str() == "js" => {
                 self.advance();
                 FunctionBody::ExternJs
-            }
-            TokenKind::Ident(n) if n.as_str() == "c" => {
-                return Err(self.err(
-                    "`extern(c)` was removed; it named an existing Lua global, so write \
-                     `extern(lua)`; a C symbol goes through `extern(ffi, \"lib\")`",
-                ));
             }
             other => {
                 return Err(self.err(format!(
@@ -2602,14 +2580,6 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            // `::` after a non-path expression is a legacy ascription. Paths
-            // following identifiers have already been consumed in primary.
-            if op == TokenKind::DoubleColon {
-                return Err(self.err(
-                    "legacy infix `expr :: Type` ascription has been removed; write `(expr : Type)`",
-                ));
-            }
-
             // Sigil macro call `name!(args)` — `!` before `(` enables extended
             // (type-shaped) arg parsing; resolves as an ordinary call. A UFCS
             // receiver `recv.method!(args)` desugars to `method(recv, args)` at
@@ -3376,11 +3346,6 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Return | TokenKind::Yield => {
                 self.advance();
-                if kind == TokenKind::Yield && self.kind() == TokenKind::Mul {
-                    return Err(self.err(
-                        "`await` delegation was renamed to `await`: write `await expr`".to_string(),
-                    ));
-                }
                 let value = if self.expr_terminates() {
                     None
                 } else {

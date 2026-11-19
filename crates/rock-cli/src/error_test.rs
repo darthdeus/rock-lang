@@ -193,9 +193,6 @@ fn bone_check_case(
 ) -> Result<bone_semantic::inference::Workspace, String> {
     let mut user = Vec::with_capacity(files.len());
     for (name, code) in files {
-        // Reject obsolete or unknown module directives before parsing.
-        rock_core::source_code::validate_modules_directive(code, ustr::Ustr::from(name.as_str()))
-            .map_err(|e| e.to_string())?;
         match skull_parser::parse_module(code, ustr::Ustr::from(name.as_str())) {
             Ok(mut m) => {
                 if files.len() > 1 {

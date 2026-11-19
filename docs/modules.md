@@ -2,9 +2,7 @@
 
 Modules give every package compile-time namespaces and visibility boundaries.
 Modules v1 is the only dialect. The optional `[language] modules = "v1"`
-manifest setting and `//! modules: v1` source directive are accepted for
-compatibility. `modules = "legacy"` and `//! modules: legacy` are errors;
-migrate contextual ascriptions from `expression :: Type` to `(expression : Type)`.
+manifest setting is accepted for compatibility.
 A standalone source has an implicit one-file package rooted in that file.
 Modules do not
 create runtime namespace objects or copies of definitions. Aliases share the

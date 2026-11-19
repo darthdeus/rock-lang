@@ -94,7 +94,6 @@ fn malformed_source_is_rejected_with_its_diagnostic() {
         ("fn f() { let x = P { a: 1, ..base } }", ""),
         // Functional update on an enum variant is not supported.
         ("fn f() { let x = E::V { ..base, a: 1 } }", ""),
-        ("fn f(x: int) { let y = g(x) :: int }", "(expr : Type)"),
         // `(a : int, b : int)` is not a typed-tuple literal.
         ("fn f() { let t = (a : int, b : int) }", "one expression"),
         (
@@ -252,27 +251,6 @@ fn interpolation_nested_hole_spans_are_file_offsets() {
     for (name, text) in ident_spans(&reparse_item(&full, src, 1), src) {
         assert_eq!(text, name, "reparsed ident span does not cover its source");
     }
-}
-
-#[test]
-fn removed_legacy_module_directive_is_rejected_with_its_span() {
-    let src = "  //! modules: legacy\nfn f() {}\n";
-    let error = parse_module(src, file()).expect_err("removed directive must be rejected");
-    assert!(
-        error.message.contains("directive has been removed"),
-        "{error:?}"
-    );
-    assert_eq!(error.labels[0].span.offset_range(), (2, 21));
-    assert_eq!(error.labels[0].span.line_range(), (0, 0));
-
-    let error = parse_module("//! modules: v2\nfn f() {}\n", file())
-        .expect_err("unknown directive values must be rejected");
-    assert!(
-        error
-            .message
-            .contains("unknown `//! modules:` directive value `v2`"),
-        "{error:?}"
-    );
 }
 
 #[test]

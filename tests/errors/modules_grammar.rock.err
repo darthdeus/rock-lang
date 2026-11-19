@@ -1,11 +1,6 @@
 //! Error: module grammar rejections.
 //! Tags: modules
 
-//=== TEST CASE: legacy_directive_rejects ===
-//! expect: legacy
-//! modules: legacy
-fn main() {}
-
 //=== TEST CASE: misplaced_mod_header_rejects ===
 //! expect: `mod path;` is a file header and must be the file's first item
 fn main() {

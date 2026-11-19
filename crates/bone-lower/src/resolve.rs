@@ -1170,8 +1170,11 @@ pub(crate) fn resolve_member_path(
         let members = module_members(ws, &[frag], pkg_id, &cur, seg)?;
         let not_found = || {
             bare_error.clone().unwrap_or_else(|| {
-                let unbound = (first_unbound && i == 0).then_some(segments[0]);
-                unresolved_value_path(ws, frag, segments, unbound)
+                if first_unbound && i == 0 {
+                    unbound(segments[0])
+                } else {
+                    unbound(joined(segments))
+                }
             })
         };
         let Resolved { key, kind } = collapse(ws, members, seg, not_found, "glob re-exports")?;
@@ -1207,32 +1210,6 @@ pub(crate) fn resolve_member_path(
     // Walked to a module without hitting a definition.
     Err("path names a module, not a definition".to_string())
 }
-
-/// Suggest type-ascription syntax when an unresolved path ends in a type name.
-fn unresolved_value_path(
-    ws: &Workspace,
-    frag: &FragmentScope,
-    segments: &[Ustr],
-    unbound_head: Option<Ustr>,
-) -> String {
-    let message = unbound(joined(segments));
-    let Some((ty, prefix)) = segments.split_last() else {
-        return message;
-    };
-    let names_a_type = BUILTIN_TYPE_NAMES.contains(&ty.as_str())
-        || resolve_bare(ws, frag, *ty).is_ok_and(|r| r.kind == ResolvedKind::Type);
-    if prefix.is_empty() || !names_a_type {
-        return unbound_head.map_or(message, unbound);
-    }
-    format!(
-        "{message}; `::` is a path separator in modules-v1, so a type ascription is written `({} : {ty})`",
-        joined(prefix)
-    )
-}
-
-const BUILTIN_TYPE_NAMES: &[&str] = &[
-    "any", "bool", "f32", "f64", "float", "int", "string", "uint",
-];
 
 fn joined(segments: &[Ustr]) -> String {
     segments

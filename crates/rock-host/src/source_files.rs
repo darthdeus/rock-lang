@@ -108,12 +108,9 @@ fn preprocess_content(contents: &str, apply: bool) -> Result<PreprocessedSource>
     Ok(preprocessed)
 }
 
-fn create_source_file(file: FileContents, source: PreprocessedSource) -> Result<SourceFile> {
+fn create_source_file(file: FileContents, source: PreprocessedSource) -> SourceFile {
     // Package loaders overwrite the standalone default with the graph fact.
-    let file_id = file.to_id_path();
-    rock_core::source_code::validate_modules_directive(&source.content, ustr::Ustr::from(&file_id))
-        .map_err(anyhow::Error::msg)?;
-    Ok(SourceFile {
+    SourceFile {
         file,
         contents: source.content,
         is_script: source.is_script,
@@ -122,7 +119,7 @@ fn create_source_file(file: FileContents, source: PreprocessedSource) -> Result<
         used_packages: source.used_packages,
         package: None,
         global_policy: rock_core::source_code::GlobalPolicy::Any,
-    })
+    }
 }
 
 /// Load a source file without applying preprocessor output (used by the
@@ -132,7 +129,7 @@ pub(crate) fn source_file_new(path: impl AsRef<Path>) -> Result<SourceFile> {
 }
 
 /// Load one unprocessed source with its package's parsing and ownership facts.
-/// Standalone files retain their `//! modules:` directive and have no package.
+/// Standalone files have no package.
 pub fn source_file_new_with_context(path: impl AsRef<Path>) -> Result<SourceFile> {
     let canonical = fs_err::canonicalize(path.as_ref())?;
     let mut source = source_file_from_canonical_path(&canonical, false)?;
@@ -185,7 +182,7 @@ fn source_file_from_canonical_path(path: &Path, preprocess: bool) -> Result<Sour
         filename: filename.to_string_lossy().to_string(),
     };
 
-    create_source_file(file, source)
+    Ok(create_source_file(file, source))
 }
 
 #[cfg(test)]

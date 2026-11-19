@@ -15,43 +15,6 @@ static UNKNOWN_FILE: LazyLock<ustr::Ustr> = LazyLock::new(|| ustr::ustr(UNKNOWN_
 /// outside the identifier grammar, so a manifest name cannot claim it.
 pub const STANDALONE_PACKAGE_PREFIX: &str = "@/";
 
-/// Validate the removed source-language selection directive. The accepted
-/// spelling is kept for migration compatibility; all source uses modules v1.
-pub fn validate_modules_directive(contents: &str, file: Ustr) -> Result<(), CompilerError> {
-    let mut offset = 0;
-    for (line_number, line) in contents.split_inclusive('\n').take(10).enumerate() {
-        let content = line.strip_suffix('\n').unwrap_or(line);
-        let content = content.strip_suffix('\r').unwrap_or(content);
-        let trimmed = content.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("//!") {
-            let rest = rest.trim();
-            if let Some(value) = rest.strip_prefix("modules:") {
-                let value = value.trim();
-                let message = match value {
-                    "" | "v1" => return Ok(()),
-                    "legacy" => {
-                        "the `//! modules: legacy` directive has been removed; migrate this source to modules v1 and remove the directive".to_string()
-                    }
-                    other => {
-                        format!("unknown `//! modules:` directive value `{other}` (known: v1)")
-                    }
-                };
-                let leading_bytes = content.len() - trimmed.len();
-                let leading_chars = content[..leading_bytes].chars().count();
-                let span = Span::new(
-                    file,
-                    (line_number, line_number),
-                    (leading_chars, content.chars().count()),
-                    (offset + leading_bytes, offset + content.len()),
-                );
-                return Err(CompilerError::new_with_label(span, message));
-            }
-        }
-        offset += line.len();
-    }
-    Ok(())
-}
-
 /// Source-facing spelling without the standalone package's file identity.
 pub fn display_name(key: &str) -> &str {
     key.strip_prefix(STANDALONE_PACKAGE_PREFIX)

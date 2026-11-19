@@ -2000,12 +2000,6 @@ pub(crate) fn pass_register_forward_decls(
     for_each_def_item(rock_module.items.as_slice(), &start, &mut |item, path| {
         let def_key = |name: &ustr::Ustr| map_key(scope, path, *name);
         if let ItemKind::Struct(s) = &item.kind {
-            if let Some(anno) = item.annotations.iter().find(|a| a.name.name == "value") {
-                comp_error!(
-                    anno.span,
-                    "`@value` annotation is retired -- declare a value struct with the `value` keyword instead"
-                );
-            }
             let reg_name = def_key(&s.name.name);
             let annotations = bone_lower::lower_annotations(rock_module, &item.annotations);
             let idx = module.structs.alloc(hir::StructDef {

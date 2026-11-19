@@ -162,14 +162,6 @@ fn validate_one(
             positional(2, string),
             "`@sim_env` takes exactly two string arguments: @sim_env(\"KEY\", \"VALUE\")",
         ),
-        "state" => comp_error!(
-            anno.span,
-            "`@state` was removed; delete it: globals have no ownership/world/realization metadata"
-        ),
-        "host_resource" => comp_error!(
-            anno.span,
-            "`@host_resource` was removed; delete it: type declarations no longer carry host-projection metadata"
-        ),
         "shader" => check(
             FnItem,
             positional(

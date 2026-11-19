@@ -42,7 +42,6 @@ pub fn parse_module_with_tokens<T>(
     file: Ustr,
     inspect: impl FnOnce(&[Token]) -> T,
 ) -> Result<(Ast, T), CompilerError> {
-    rock_core::source_code::validate_modules_directive(source, file)?;
     let tokens = Tokenizer::new(source, file).tokenize()?;
     let facts = inspect(&tokens);
     let mut ast = Parser::new(tokens, source, 0).parse_module()?;

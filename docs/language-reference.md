@@ -95,8 +95,7 @@ not.
 
 A body-less `extern` declaration names its backend: `extern(lua) fn` refers to
 an existing Lua global, `extern(js) fn` to a JS global, and
-`extern(ffi, "lib") fn` to a C symbol reached through LuaJIT FFI. A bare
-`extern` or `extern(c)` is rejected; both meant `extern(lua)`.
+`extern(ffi, "lib") fn` to a C symbol reached through LuaJIT FFI.
 
 A global may omit its initializer:
 

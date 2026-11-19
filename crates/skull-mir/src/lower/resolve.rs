@@ -1,6 +1,6 @@
 //! Overload and symbol resolution -- named-arg reordering, overload targets,
 //! fn-value symbols, funcref and backend-variant selection -- plus the
-//! `yield*` delegation forms, which resolve their channel the same way.
+//! `await` delegation forms, which resolve their channel the same way.
 use super::*;
 
 /// Nothing declared under `name` has a body serving the target. Whether that is

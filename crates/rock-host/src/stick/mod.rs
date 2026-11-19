@@ -114,22 +114,12 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
                             let value = map.next_value::<String>()?;
                             match value.as_str() {
                                 "v1" => {}
-                                "legacy" => {
-                                    return Err(serde::de::Error::custom(
-                                        "`[language] modules = \"legacy\"` has been removed; migrate this package to modules v1",
-                                    ));
-                                }
                                 other => {
                                     return Err(serde::de::Error::custom(format!(
                                         "unknown `[language] modules` value `{other}`; known values: \"v1\""
                                     )));
                                 }
                             }
-                        }
-                        "memory" => {
-                            return Err(serde::de::Error::custom(
-                                "`[language] memory` was removed; delete it: packages have no memory class",
-                            ));
                         }
                         "globals" => {
                             let value = map.next_value::<String>()?;
@@ -1258,15 +1248,11 @@ mod tests {
             ),
             (
                 "[language]\nmemory = \"game\"\n",
-                ["`[language] memory` was removed", "delete it"],
+                ["unknown key `memory`", "in [language]"],
             ),
             (
                 "[language]\nmodules = \"v2\"\n",
                 ["unknown `[language] modules` value", "`v2`"],
-            ),
-            (
-                "[language]\nmodules = \"legacy\"\n",
-                ["has been removed", "migrate"],
             ),
             (
                 "[dependencies]\nlib = { path = \"../lib\", allow_legacy = true }\n",
