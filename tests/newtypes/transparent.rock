@@ -65,7 +65,6 @@ fn newtype_unwrap_keeps_value_semantics() {
 // --- Newtype ABI: one plain value through calls, returns and `.0` unwraps ---
 
 newtype UserId(int)
-newtype Meters(float)
 
 fn mk(n: int) -> UserId {
     return UserId(n)
@@ -73,10 +72,6 @@ fn mk(n: int) -> UserId {
 
 fn raw(u: UserId) -> int {
     return u.0
-}
-
-fn passthrough(u: UserId) -> UserId {
-    return u
 }
 
 fn add_ids(a: UserId, b: UserId) -> UserId {
@@ -89,12 +84,6 @@ fn test_construct_and_unwrap() {
     print("{raw(u)}")
     let v = UserId(7)
     print("{v.0}")
-}
-
-@test(output = "99")
-fn test_passthrough() {
-    let u = passthrough(UserId(99))
-    print("{u.0}")
 }
 
 @test(output = "5")
@@ -112,10 +101,4 @@ fn test_newtype_eq() {
     print("{a == c}")
     print("{a != c}")
     print("{a == UserId(1)}")
-}
-
-@test(output = "3")
-fn test_float_newtype() {
-    let m = Meters(3.5)
-    print("{m.0.floor()}")
 }

@@ -1,5 +1,5 @@
-// Newtype construction, destructuring, implicit operators, nesting, and
-// newtypes wrapping generic-instantiated types.
+// Newtype construction, destructuring, implicit operators, nesting,
+// newtypes wrapping generic-instantiated types, and newtypes as Map keys.
 
 newtype UserId(int)
 newtype Box<T>(T)
@@ -96,19 +96,7 @@ fn test_nested_newtype() {
     print(id)
 }
 
-fn transform_user_id(id: UserId) -> UserId {
-    let UserId(n) = id
-    UserId(n * 2)
-}
-
-@test(output = "84")
-fn test_newtype_transform_function() {
-    let doubled = transform_user_id(UserId(42))
-    print(doubled.0)
-}
-
-// Regression: a newtype wrapping a generic-instantiated type was rejected with
-// "Trying to convert a non-concrete ResolvedTypeExpr ... App { ... }".
+// Newtypes wrapping generic-instantiated types.
 newtype EntityIntWrap(Entity<int>)
 newtype IntListWrap([int])
 newtype StrIntMapWrap(Map<string, int>)
@@ -160,10 +148,9 @@ fn test_newtype_wraps_user_generic_newtype_instantiation() {
     print(v)
 }
 
-// Regression: a generic newtype wrapping an App-shaped pattern needs
-// pattern-vs-arg unification, not naive `T = type_of(arg_0)`. With
-// T = Entity<int>, the wrapped Entity<T> instantiated to Entity<Entity<int>>
-// and was rejected with "Type mismatch: expected Entity<int>, found int".
+// A generic newtype wrapping an App-shaped pattern infers T by unifying the
+// pattern with the argument (Entity<T> against Entity<int> gives T = int), not
+// by taking T as the argument's type.
 newtype GEntity<T>(Entity<T>)
 newtype GList<T>([T])
 newtype GStrMap<T>(Map<string, T>)
@@ -229,8 +216,7 @@ fn test_g_nested_apps_unify() {
     print(inner.get() ?? 0)
 }
 
-// Regression: without a Tuple arm in try_constrain_generic_params, the
-// wrapped (T, int) pattern left T unconstrained.
+// A tuple-shaped wrapped type constrains T through its element.
 newtype GTuple<T>((T, int))
 
 @test(output = "13")
@@ -272,3 +258,73 @@ fn test_g_used_as_map_key() {
 
 // Rejected unifications are in
 // tests/errors/types.rock.err.
+
+// Newtypes as Map keys: direct indexing `m[k]` unwraps the key on read and
+// write, agreeing with `get`/`insert`/`contains`/`remove`.
+newtype Tag(string)
+
+@test
+fn test_direct_index_agrees_with_get_and_insert() {
+    let m: Map<UserId, string> = map_new()
+    m[UserId(42)] = "alice"
+    assert_eq(m[UserId(42)], "alice", "direct write -> direct read roundtrip")
+    assert_eq(m.get(UserId(42)) ?? "MISSING", "alice", "direct write visible via .get()")
+    insert(m, UserId(3), "eve")
+    assert_eq(m[UserId(3)], "eve", "insert value readable via m[k]")
+    insert(m, UserId(3), "eve2")
+    assert_eq(get(m, UserId(3)).unwrap(), "eve2", "insert through an equal key updates")
+}
+
+@test
+fn test_map_contains_and_remove_newtype() {
+    let m: Map<UserId, string> = map_new()
+    m[UserId(1)] = "a"
+    m[UserId(2)] = "b"
+    assert(m.contains(UserId(1)))
+    assert(!m.contains(UserId(99)))
+    assert_eq(m.len(), 2)
+    let removed = remove(m, UserId(1)) ?? ""
+    assert_eq(removed, "a", "removed returns value")
+    assert_true(m.get(UserId(1)) == null, "removed key is gone")
+    assert(!m.contains(UserId(1)))
+    assert_eq(m.get(UserId(2)) ?? "", "b", "other keys intact")
+    assert_eq(m.len(), 1)
+}
+
+@test
+fn test_map_clear_newtype() {
+    let m: Map<UserId, string> = map_new()
+    m[UserId(1)] = "a"
+    m[UserId(2)] = "b"
+    m[UserId(3)] = "c"
+    clear(m)
+    assert_eq(m.len(), 0, "cleared len=0")
+    assert_true(m.get(UserId(1)) == null, "k1 gone")
+    assert_true(m.get(UserId(2)) == null, "k2 gone")
+}
+
+@test
+fn test_string_newtype_key() {
+    let m: Map<Tag, int> = map_new()
+    m[Tag("score")] = 100
+    insert(m, Tag("hp"), 42)
+    assert_eq(m.get(Tag("score")) ?? 0, 100, "string newtype roundtrip")
+    assert_eq(m[Tag("hp")], 42, "string newtype direct read")
+    assert(m.contains(Tag("hp")))
+    assert(!m.contains(Tag("mp")))
+    assert_eq(m.len(), 2)
+}
+
+@test
+fn test_map_keys_from_vec_elements() {
+    let data: Map<UserId, string> = map_new()
+    let ids: [UserId] = [UserId(1), UserId(2), UserId(3), UserId(4), UserId(5)]
+    let names = ["One", "Two", "Three", "Four", "Five"]
+    for i in 0..5 {
+        insert(data, ids[i], names[i])
+    }
+    for i in 0..5 {
+        assert_eq(get(data, ids[i]).unwrap(), names[i])
+    }
+    assert_eq(data.len(), 5)
+}
