@@ -16,12 +16,9 @@ fn compile(source: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     std::fs::write(&c, source).unwrap();
     let artifact = stone_cdylib::artifact();
     let lib = artifact.parent().unwrap();
-    let include = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
     let gamelibs = gamelibs::host_dir().join("include");
     let output = Command::new("clang")
         .args(["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror"])
-        .arg("-I")
-        .arg(include)
         .arg("-I")
         .arg(gamelibs)
         .arg("-L")
@@ -58,7 +55,12 @@ fn run(source: &str, headless: bool) {
 fn headless_probe() -> (tempfile::TempDir, std::path::PathBuf) {
     compile(
         r#"
-#include <stone.h>
+#include <stdbool.h>
+typedef struct StoneWindow StoneWindow;
+extern bool stone_init(void);
+extern bool stone_teardown(void);
+extern StoneWindow *stone_create_window_ex(const char *title, int x, int y, int width, int height,
+    int display, bool resizable, int fullscreen);
 #include <assert.h>
 #include <dlfcn.h>
 #define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
@@ -146,7 +148,12 @@ fn desktop_imgui_frame_produces_draw_data() {
     run(
         r#"
 #define _GNU_SOURCE
-#include <stone.h>
+#include <stdbool.h>
+typedef struct StoneWindow StoneWindow;
+extern bool stone_init(void);
+extern bool stone_teardown(void);
+extern StoneWindow *stone_create_window_ex(const char *title, int x, int y, int width, int height,
+    int display, bool resizable, int fullscreen);
 #include <assert.h>
 #include <dlfcn.h>
 #define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
@@ -191,7 +198,15 @@ fn imgui_pointer_follows_a_window_the_wm_moved_out_of_fullscreen() {
     run(
         r#"
 #define _GNU_SOURCE
-#include <stone.h>
+#include <stdbool.h>
+typedef struct StoneWindow StoneWindow;
+extern bool stone_init(void);
+extern bool stone_teardown(void);
+extern StoneWindow *stone_create_window_ex(const char *title, int x, int y, int width, int height,
+    int display, bool resizable, int fullscreen);
+extern bool stone_poll_event(void *event);
+extern void stone_swap_window(StoneWindow *window);
+extern void stone_show_window_if_deferred(void);
 #include <assert.h>
 #include <dlfcn.h>
 #include <stdio.h>
@@ -208,8 +223,8 @@ extern void stone_set_fullscreen(int mode);
 
 static bool hovered;
 static void frame(StoneWindow *window) {
-    StoneEvent event;
-    while (stone_poll_event(&event)) {}
+    _Alignas(8) unsigned char event[128];
+    while (stone_poll_event(event)) {}
     stone_imgui_new_frame();
     IG(igSetNextWindowPos, void (*)(ImVec2, int, ImVec2))((ImVec2){20, 20}, 0, (ImVec2){0, 0});
     IG(igSetNextWindowSize, void (*)(ImVec2, int))((ImVec2){200, 200}, 0);

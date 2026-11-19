@@ -313,8 +313,6 @@ mod actor_query;
 pub mod asset_registry;
 mod asset_watcher;
 mod audio;
-#[cfg(test)]
-mod c_header_abi;
 mod cursor;
 mod file_jobs;
 mod filesystem;
@@ -919,7 +917,7 @@ struct PendingShow {
 }
 
 // =============================================================================
-// Types matching stone.h
+// Types shared with the Stone cdef
 // =============================================================================
 
 /// Opaque window handle - wraps SDL2 window + GL context + glow

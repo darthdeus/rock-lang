@@ -5,7 +5,7 @@ pub @nomangle nobox value NativeNavInt {
     hi: int,
 }
 
-// Each half of the wire is an int32 (stone.h NativeNavIntWire). The halves are
+// Each half of the wire is an int32 (stone-rs NativeNavIntWire). The halves are
 // computed arithmetically, never by letting the FFI truncate an out-of-range
 // double: that conversion is undefined and LuaJIT builds disagree about it.
 pub fn native_nav_int(v: int) -> NativeNavInt {
@@ -40,7 +40,7 @@ pub @nomangle inline(lua) fn stone_native_load() = """
         int stone_log_take_scoped_error(const uint8_t* record, size_t len);
         int stone_log_take_collected_error(const uint8_t* record, size_t len);
         void stone_log_truncate_collected_errors(int len);
-        uint8_t stone_actor_query_rect(const int* records, int64_t len, const int* candidates, int64_t candidate_len, int min_x, int min_y, int max_x, int max_y, uint8_t include_uninstalled, int* output, int64_t output_len);
+        uint8_t stone_actor_query_rect(const int* records, int64_t len, const int* candidates, int64_t candidate_len, int min_x, int min_y, int max_x, int max_y, bool include_uninstalled, int* output, int64_t output_len);
         double stone_terrain_noise(double x, double y);
         double stone_terrain_random(double x, double y, double stream, double seed);
         double stone_terrain_field(double a, double b, double c, double d, double e, double f, double g, double h, double i, double x, double y, double wx, double wy, int noisy);

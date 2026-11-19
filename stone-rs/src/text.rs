@@ -180,8 +180,8 @@ struct AtlasInstance {
 
 impl AtlasInstance {
     /// Bytes of the R8 raster its texture holds; no CPU copy is retained.
-    fn byte_len(&self) -> u64 {
-        self.width.max(0) as u64 * self.height.max(0) as u64
+    fn byte_len(&self) -> c_int {
+        self.width.max(0).saturating_mul(self.height.max(0))
     }
 }
 
@@ -2368,7 +2368,7 @@ pub extern "C" fn stone_get_font_instance_pixel_size(instance_id: u64) -> c_int 
 }
 
 #[no_mangle]
-pub extern "C" fn stone_get_font_instance_byte_len(instance_id: u64) -> u64 {
+pub extern "C" fn stone_get_font_instance_byte_len(instance_id: u64) -> c_int {
     with_atlas_instance(instance_id, 0, AtlasInstance::byte_len)
 }
 

@@ -221,7 +221,7 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         _G._stone_ffi_defined = true
         ffi.cdef[[
         // Opt-in UI trace ABI. Payload pointers are copied before returning.
-        void stone_ui_probe_begin(uint8_t windowless);
+        void stone_ui_probe_begin(bool windowless);
         void stone_ui_probe_stop(void);
         void stone_ui_probe_context(const char *phase, const char *pass, const char *surface, const char *space);
         int stone_ui_probe_accept(const char *kind, const char *key, const char *detail);
@@ -736,7 +736,7 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_graphics_capture_cancel();
         void stone_graphics_capture_scene_depth(StoneCanvasHandle handle);
         const char* stone_graphics_capture_finish_json();
-        void stone_mesh_capture_arm(uint8_t read_depth);
+        void stone_mesh_capture_arm(bool read_depth);
         const char* stone_mesh_capture_finish_json();
         uint8_t stone_shader_snapshot_uniform_block(StoneShaderHandle handle, const char* block_name, uint8_t* dst, int size);
         uint8_t stone_shader_check_uniform_block_layout(StoneShaderHandle handle, const char* block_name, const char* names, int names_len, const int* offsets, int count, int plan_size);
