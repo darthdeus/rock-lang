@@ -1,9 +1,11 @@
-// What a `[T]` element access does when the compiler can prove its index in
+// What a vector element access does when the compiler can prove its index in
 // bounds, and when it cannot. The compiler drops the check for a counter that
-// a loop or a guard keeps below the vector's length, as long as nothing on
-// the way can shrink the vector or rebind it; everywhere else the access
-// still raises on an index outside `[0, len)`. These cases pin that the
-// results and the errors are the same either way.
+// a loop or a guard keeps below the vector's length (or a modulo of it), as
+// long as nothing on the way can shrink the vector or rebind it; everywhere
+// else the access still raises on an index outside `[0, len)`. Column-stored
+// vectors (`[E]` for an all-scalar `value`) check the index once per access
+// and then read each leaf column raw. These cases pin that results and errors
+// are the same either way.
 
 @intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
     local ok, err = pcall(f)
@@ -254,8 +256,6 @@ fn a_descending_subtracted_bound_stays_in_bounds() {
     print(join(xs))
 }
 
-fn main() {}
-
 // --- Ways a loop body can reach the vector that the compiler must not miss.
 
 fn popper(xs: [int]) -> int { xs.pop(); return 0 }
@@ -451,3 +451,100 @@ fn a_callee_that_only_pushes_elsewhere_keeps_the_proof() {
     for i in 0..xs.len() { xs[i] = collect(out, i) }
     print("{join(xs)} {join(out)}")
 }
+
+
+nobox value Mote { x: float, y: float, life: int }
+struct Swarm { motes: [Mote] }
+
+fn motes(n: int) -> [Mote] {
+    let out: [Mote] = []
+    for i in 0..n { out.push(Mote { x: i as float, y: (i * 2) as float, life: i }) }
+    return out
+}
+
+fn join_motes(ms: [Mote]) -> string {
+    let out = ""
+    for m in ms { out = out + "{m.life}," }
+    return out
+}
+
+@test(output = "0,2,4,6,")
+fn counted_loop_scales_each_element() {
+    let ms = motes(4)
+    for i in 0..ms.len() { ms[i] = Mote { x: ms[i].x, y: ms[i].y, life: ms[i].life * 2 } }
+    print(join_motes(ms))
+}
+
+@test(output = "6")
+fn counted_loop_sums_a_leaf() {
+    let ms = motes(4)
+    let t = 0.0
+    for i in 0..ms.len() { t += ms[i].x }
+    print("{t}")
+}
+
+@test(output = "0 3")
+fn first_and_last_under_a_nonempty_guard() {
+    let ms = motes(4)
+    if ms.len() > 0 { print("{ms[0].life} {ms[ms.len() - 1].life}") }
+}
+
+@test(output = "true")
+fn the_last_element_of_an_empty_vector_still_raises() {
+    let ms: [Mote] = []
+    let failed = try_call(() => {
+        let _l = ms[ms.len() - 1].life
+    })
+    print("{failed}")
+}
+
+@test(output = "1 2 3 0")
+fn a_ring_index_wraps_under_a_nonempty_guard() {
+    let ms = motes(4)
+    let out = ""
+    if ms.len() > 0 {
+        for k in 1..5 { out = out + "{ms[k % ms.len()].life} " }
+    }
+    print(out.trim())
+}
+
+fn shrink_motes(ms: [Mote]) { ms.pop() }
+
+@test(output = "true 0,")
+fn a_call_in_the_loop_body_still_raises_on_the_missing_element() {
+    let ms = motes(2)
+    let failed = try_call(() => {
+        for i in 0..ms.len() {
+            let m = ms[i]
+            shrink_motes(ms)
+            ms[i] = Mote { x: m.x, y: m.y, life: 0 }
+        }
+    })
+    print("{failed} {join_motes(ms)}")
+}
+
+@test(output = "1 2 3")
+fn a_struct_field_vector_walks_in_a_counted_loop() {
+    let s = Swarm { motes: motes(3) }
+    let out = ""
+    for i in 0..s.motes.len() { out = out + "{s.motes[i].x + 1.0} " }
+    print(out.trim())
+}
+
+@test(output = "3")
+fn a_loop_over_the_vector_reads_each_element() {
+    let ms = motes(3)
+    let n = 0
+    for m in ms { if m.life >= 0 { n += 1 } }
+    print(n)
+}
+
+@test(output = "true")
+fn an_index_past_the_end_still_raises() {
+    let ms = motes(2)
+    let failed = try_call(() => {
+        let _l = ms[2].life
+    })
+    print("{failed}")
+}
+

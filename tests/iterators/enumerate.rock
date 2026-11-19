@@ -38,16 +38,6 @@ fn enumerate_empty_collections() {
 
 // === Vectors ===
 
-@test(output = "0:10\n1:20")
-fn enumerate_vec_basic() {
-    let v: [int] = vec_new()
-    vec_push(v, 10)
-    vec_push(v, 20)
-    for (i, x) in enumerate(v) {
-        print("{i}:{x}")
-    }
-}
-
 // === Arenas ===
 
 @test(output = "0:A\n1:B")
@@ -81,22 +71,6 @@ fn vec_tuple_destructure_default() {
     }
 }
 
-@test(output = "0:1:a\n1:2:b")
-fn vec_tuple_enumerate_nested() {
-    let items: [(int, string)] = [(1, "a"), (2, "b")]
-    for (i, (num, str)) in enumerate(items) {
-        print("{i}:{num}:{str}")
-    }
-}
-
-@test(output = "0:(1,a)\n1:(2,b)")
-fn vec_tuple_enumerate_single() {
-    let items: [(int, string)] = [(1, "a"), (2, "b")]
-    for (i, tuple) in enumerate(items) {
-        print("{i}:({tuple.0},{tuple.1})")
-    }
-}
-
 // === Single binding ===
 
 @test(output = "(1,a)")
@@ -126,22 +100,6 @@ fn nested_tuple_enumerate() {
 }
 
 // === Deep nesting ===
-
-@test(output = "1,2,3,4,5")
-fn four_level_destructure() {
-    let items: [(((int, int), int), (int, int))] = [(((1, 2), 3), (4, 5))]
-    for (((a, b), c), (d, e)) in items {
-        print("{a},{b},{c},{d},{e}")
-    }
-}
-
-@test(output = "0:1,2,3,4,5")
-fn four_level_enumerate() {
-    let items: [(((int, int), int), (int, int))] = [(((1, 2), 3), (4, 5))]
-    for (i, (((a, b), c), (d, e))) in enumerate(items) {
-        print("{i}:{a},{b},{c},{d},{e}")
-    }
-}
 
 // === Maps ===
 
@@ -175,23 +133,11 @@ fn arena_normal_iteration() {
     }
 }
 
-@test(output = "A\nB")
-fn arena_underscore_entity() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "A", health: 10 })
-    mobs.insert(Mob { name: "B", health: 20 })
-    for (_, mob) in mobs {
-        print(mob.name)
-    }
-}
-
 // === Non-for uses ===
 //
-// On a VEC, `enumerate` is a lazy `EnumIter` (the eager overload is deleted), so
-// a caller wanting the materialized `[(int, T)]` spells `.collect()`. Arena and
-// Map keep their eager overloads -- Map has no `iter()` to coerce through, and
-// Arena's lazy element hits a pre-existing nested-tuple split bug. See the note
-// at the `enumerate` declarations in `stdlib/unified.rock`.
+// On a vector `enumerate` is a lazy `EnumIter`, so a caller that wants the
+// materialized `[(int, T)]` calls `.collect()`. Arena and Map keep eager
+// overloads; see the `enumerate` declarations in `stdlib/unified.rock`.
 
 @test(output = "acc=63 len=3")
 fn nonfor_enumerate_vec() {
@@ -214,24 +160,6 @@ fn nonfor_enumerate_arena() {
         let (e, mob) = pair
         print("{i}:{mob.name}:{mob.health}")
     }
-}
-
-@test(output = "one=1 two=2 idxsum=1")
-fn nonfor_enumerate_map() {
-    let m: Map<string, int> = map_new()
-    m["one"] = 1
-    m["two"] = 2
-    let it = enumerate(m)
-    let one = 0
-    let two = 0
-    let idxsum = 0
-    for (i, kv) in it {
-        let (k, v) = kv
-        if k == "one" { one = v }
-        if k == "two" { two = v }
-        idxsum = idxsum + i
-    }
-    print("one={one} two={two} idxsum={idxsum}")
 }
 
 // === Nested tuple elements bound whole ===

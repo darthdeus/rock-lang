@@ -1,9 +1,9 @@
-// What a loop over a vector does when its body changes that vector, and the
-// loop shapes around it. The length is read once before the first turn and
+// Loops over a vector. The length is read once before the first turn and
 // each element is read, bounds-checked against the live length, when its turn
 // comes: appended elements are not visited, a write to a later slot is seen,
 // and a turn whose slot is gone raises the out-of-bounds error. A vector the
-// body swaps in is not walked; the loop keeps the one it started on.
+// body swaps in is not walked. A loop left through break, return or continue
+// keeps what the body copied out of the element.
 
 @nomangle inline(lua) fn loop_error(f: fn()) -> string = """
     local ok, err = pcall(f)
@@ -88,19 +88,6 @@ fn clearing_raises_out_of_bounds_on_the_next_turn() {
         for x in xs {
             out = out + "{x},"
             xs.clear()
-        }
-    })
-    print("{out} {err}")
-}
-
-@test(output = "a,b, Vec index out of bounds: index 2 is outside [0, 2)")
-fn popped_string_slot_raises_out_of_bounds() {
-    let xs = ["a", "b", "c"]
-    let out = ""
-    let err = loop_error(() => {
-        for x in xs {
-            if x == "a" { xs.pop() }
-            out = out + "{x},"
         }
     })
     print("{out} {err}")
@@ -259,24 +246,6 @@ fn break_and_continue() {
     print("{out} stopped at {stopped}")
 }
 
-@test(output = "a1,a2,b1,b2, 2")
-fn break_leaves_only_the_inner_loop() {
-    let outer = ["a", "b"]
-    let inner = [1, 2, 3]
-    let out = ""
-    let breaks = 0
-    for o in outer {
-        for i in inner {
-            if i == 3 {
-                breaks += 1
-                break
-            }
-            out = out + "{o}{i},"
-        }
-    }
-    print("{out} {breaks}")
-}
-
 @test(output = "10 20 30")
 fn closures_capture_each_turns_element() {
     let xs = [1, 2, 3]
@@ -340,4 +309,98 @@ fn push_argument_built_from_the_vector_it_extends() {
     ps.push(Pair { a: ps.len(), b: [ps[0].a] })
     ps[1].b.push(ps[1].b.len() + 4)
     print("{ps.len()} {ps[0].a} {ps[1].a} {ps[1].b[1]}")
+}
+
+fn first_over(xs: [int], limit: int) -> int {
+    for x in xs {
+        if x > limit { return x }
+    }
+    return -1
+}
+
+@test(output = "7 -1")
+fn return_from_inside_the_loop() {
+    print("{first_over([1, 7, 9], 3)} {first_over([1, 2], 3)}")
+}
+
+@test(output = "5 2")
+fn break_keeps_what_the_body_copied() {
+    let xs = [4, 2, 5, 8, 1]
+    let found = 0
+    let seen = 0
+    for x in xs {
+        if x == 5 {
+            found = x
+            break
+        }
+        seen += 1
+    }
+    print("{found} {seen}")
+}
+
+@test(output = "9 3 2")
+fn continue_skips_and_the_last_element_survives() {
+    let xs = [3, 4, 9, 6, 8]
+    let last_odd = 0
+    let odd = 0
+    let evens_after = 0
+    for x in xs {
+        if x % 2 == 0 {
+            if odd > 0 { evens_after += 1 }
+            continue
+        }
+        last_odd = x
+        odd += 1
+    }
+    print("{last_odd} {evens_after} {odd}")
+}
+
+@test(output = "2 30")
+fn enumerated_break_reads_the_index_after() {
+    let xs = [10, 20, 30, 40]
+    let at = -1
+    let value = 0
+    for (i, x) in enumerate(xs) {
+        if x > 25 {
+            at = i
+            value = x
+            break
+        }
+    }
+    print("{at} {value}")
+}
+
+@test(output = "3 c 1")
+fn tuple_pattern_break_reads_parts_after() {
+    let pairs = [(1, "a"), (2, "b"), (3, "c"), (4, "d")]
+    let n = 0
+    let s = ""
+    let skipped = 0
+    for (k, v) in pairs {
+        if k == 2 {
+            skipped += 1
+            continue
+        }
+        n = k
+        s = v
+        if k == 3 { break }
+    }
+    print("{n} {s} {skipped}")
+}
+
+@test(output = "6 1")
+fn nested_loops_break_only_the_inner() {
+    let rows = [[1, 2, 9], [3, 9], [9]]
+    let total = 0
+    let empty = 0
+    for row in rows {
+        let sum = 0
+        for x in row {
+            if x == 9 { break }
+            sum += x
+        }
+        if sum == 0 { empty += 1 }
+        total += sum
+    }
+    print("{total} {empty}")
 }

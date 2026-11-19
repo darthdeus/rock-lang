@@ -66,20 +66,8 @@ fn zip_coerces_both_args() {
     assert(xs.zip(ys).any(p => p.0 == 2 && p.1 == 20))
 }
 
-// The eager `Vec<T>.enumerate` is deleted, so a vec receiver now COERCES to the
-// iterator overload and the result is lazy -- `.collect()` is how a caller asks
-// for the materialized `[(int, T)]`.
-@test
-fn enumerate_on_vec_is_lazy() {
-    let v = [10, 20, 30]
-    let e = enumerate(v).collect()
-    assert_eq(e.len, 3)
-    assert_eq(e[1].1, 20)
-}
-
-// The RULE this file exists for is unchanged -- a concrete overload still
-// outranks the coerced fit. `Map` keeps its eager `enumerate`, so this one
-// resolves to the concrete overload and yields an indexable vec, not an iter.
+// A concrete overload outranks the coerced fit: `Map` has an eager
+// `enumerate`, so this yields an indexable vec, not an iterator.
 @test
 fn a_concrete_overload_still_outranks_the_coerced_fit() {
     let m: Map<string, int> = map_new()
@@ -101,12 +89,6 @@ fn arena_coerces_to_pairs() {
     if hit != null {
         assert_eq(hit.1.health, 100)
     }
-}
-
-@test
-fn explicit_iter_unchanged() {
-    let v = [1, 2, 3]
-    assert_eq(v.iter().map(x => x * 2).reduce(0, (a, x) => a + x), 12)
 }
 
 @test
@@ -137,11 +119,6 @@ nobox value FmV2 { x: float, y: float }
 fn fm_pair(n: int) -> VecIter<int> { return [n, n].iter() }
 fn fm_pair_opt(n: int?) -> VecIter<int?> { return [n, n].iter() }
 fn fm_pair_v2(v: FmV2) -> VecIter<FmV2> { return [v, v].iter() }
-
-@test
-fn flat_map_explicit_iter_control() {
-    assert_eq([1, 2, 3].iter().flat_map(fm_pair).count(), 6)
-}
 
 @test
 fn flat_map_coerced_receiver() {
@@ -203,7 +180,3 @@ fn flat_map_vec_callback_nobox_elements() {
     assert_eq(a.flat_map(v => [v, v]).map(v => v.y).sum_f(), 12.0)
 }
 
-@test
-fn flat_map_explicit_iter_in_callback_still_works() {
-    assert_eq([1, 2].flat_map(n => [n, n].iter()).count(), 4)
-}

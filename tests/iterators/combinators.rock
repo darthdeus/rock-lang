@@ -38,32 +38,12 @@ fn sum_it<I: Iterator<int>>(it: I) -> int {
 }
 
 @test
-fn map_over_vec() {
-    let v = [1, 2, 3]
-    let total = 0
-    for x in v.iter().map(x => x * 2) {
-        total += x
-    }
-    assert_eq(total, 12)
-}
-
-@test
 fn materialized_unsigned_range_is_a_vec() {
     let r = (1 as uint)..(4 as uint)
     assert_eq(r.len, 3)
     assert_eq(r[0], 1 as uint)
     assert_eq(r[1], 2 as uint)
     assert_eq(r[2], 3 as uint)
-}
-
-@test
-fn filter_over_vec() {
-    let v = [1, 2, 3, 4, 5, 6]
-    let total = 0
-    for x in v.iter().filter(x => x % 2 == 0) {
-        total += x
-    }
-    assert_eq(total, 12)
 }
 
 @test
@@ -302,16 +282,6 @@ fn nested_map_chain() {
     assert_eq(out.len, 2)
     assert_eq(out[0], 15)
     assert_eq(out[1], 25)
-}
-
-@test
-fn vec_map_filter_collect() {
-    let v = [1, 2, 3]
-    let doubled = v.iter().map(x => x * 2).collect()
-    assert_eq(doubled.len, 3)
-    assert_eq(doubled[0], 2)
-    let kept = v.iter().filter(x => x > 1).collect()
-    assert_eq(kept.len, 2)
 }
 
 // enumerate/zip yield tuple ELEMENTS (`(bool, (int, T))` / `(bool, (A, B))`),

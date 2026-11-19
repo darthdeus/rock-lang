@@ -1,0 +1,267 @@
+// User-defined iterators. `for pat in coll { body }` desugars to
+// `let it = iter(coll); loop { let (ok, pat) = next(it); if !ok break; body }`,
+// so a container supplies `iter(coll) -> It` and the cursor `next(It) -> (bool, E)`.
+// Plain and @inline cursors, tuple elements, vec-backed and value elements,
+// and the protocol driven by hand. The @inline cursor scalarizes to locals
+// (skull-codegen-lua `for_user_iter_inline_is_zero_alloc`); these pin that the
+// by-ref cursor mutation persists across turns, break and continue.
+
+struct IntRange {
+    lo: int,
+    hi: int,
+}
+
+struct IntRangeIter {
+    cur: int,
+    hi: int,
+}
+
+fn iter(r: IntRange) -> IntRangeIter {
+    return IntRangeIter { cur: r.lo, hi: r.hi }
+}
+
+fn next(it: IntRangeIter) -> (bool, int) {
+    if it.cur >= it.hi {
+        return (false, 0)
+    }
+    let v = it.cur
+    it.cur = it.cur + 1
+    return (true, v)
+}
+
+@test
+fn for_over_user_iter_empty() {
+    let count = 0
+    for x in (IntRange { lo: 5, hi: 5 }) {
+        count += 1
+    }
+    assert_eq(count, 0)
+}
+
+@test
+fn for_over_user_iter_break() {
+    let seen = 0
+    for x in (IntRange { lo: 0, hi: 100 }) {
+        if x == 3 { break }
+        seen += 1
+    }
+    assert_eq(seen, 3)
+}
+
+@test
+fn for_over_user_iter_continue() {
+    let sum = 0
+    for x in (IntRange { lo: 0, hi: 5 }) {
+        if x == 2 { continue }
+        sum += x
+    }
+    assert_eq(sum, 8)
+}
+
+@test
+fn for_over_user_iter_nested() {
+    let pairs = 0
+    for a in (IntRange { lo: 0, hi: 2 }) {
+        for b in (IntRange { lo: 0, hi: 3 }) {
+            pairs += 1
+        }
+    }
+    assert_eq(pairs, 6)
+}
+
+// Tuple-element iterator: next -> (bool, A, B) flattens into `for (a, b) in ...`.
+struct PairSeq {
+    n: int,
+}
+
+struct PairSeqIter {
+    i: int,
+    n: int,
+}
+
+fn iter(p: PairSeq) -> PairSeqIter {
+    return PairSeqIter { i: 0, n: p.n }
+}
+
+fn next(it: PairSeqIter) -> (bool, int, int) {
+    if it.i >= it.n {
+        return (false, 0, 0)
+    }
+    let i = it.i
+    it.i = it.i + 1
+    return (true, i, i * i)
+}
+
+@test
+fn for_over_tuple_element_iter() {
+    let sum_i = 0
+    let sum_sq = 0
+    for (i, sq) in (PairSeq { n: 4 }) {
+        sum_i += i
+        sum_sq += sq
+    }
+    assert_eq(sum_i, 6)
+    assert_eq(sum_sq, 14)
+}
+
+struct Counter { n: int }
+struct CounterIter { cur: int, n: int }
+
+@inline
+fn iter(c: Counter) -> CounterIter { return CounterIter { cur: 0, n: c.n } }
+
+@inline
+fn next(it: CounterIter) -> (bool, int) {
+    if it.cur >= it.n { return (false, 0) }
+    let v = it.cur
+    it.cur = it.cur + 1
+    return (true, v)
+}
+
+@test
+fn inline_iter_break() {
+    let seen = 0
+    for x in (Counter { n: 100 }) {
+        if x == 4 { break }
+        seen += 1
+    }
+    assert_eq(seen, 4)
+}
+
+@test
+fn inline_iter_continue() {
+    let sum = 0
+    for x in (Counter { n: 6 }) {
+        if x == 2 { continue }
+        sum += x
+    }
+    assert_eq(sum, 13)
+}
+
+@test
+fn inline_iter_nested() {
+    let pairs = 0
+    for a in (Counter { n: 3 }) {
+        for b in (Counter { n: 4 }) { pairs += 1 }
+    }
+    assert_eq(pairs, 12)
+}
+
+// Tuple-element @inline iterator: next -> (bool, int, int).
+struct Squares { n: int }
+struct SquaresIter { i: int, n: int }
+
+@inline
+fn iter(s: Squares) -> SquaresIter { return SquaresIter { i: 0, n: s.n } }
+
+@inline
+fn next(it: SquaresIter) -> (bool, int, int) {
+    if it.i >= it.n { return (false, 0, 0) }
+    let i = it.i
+    it.i = it.i + 1
+    return (true, i, i * i)
+}
+
+@test
+fn inline_iter_tuple_element() {
+    let sum_i = 0
+    let sum_sq = 0
+    for (i, sq) in (Squares { n: 4 }) {
+        sum_i += i
+        sum_sq += sq
+    }
+    assert_eq(sum_i, 6)
+    assert_eq(sum_sq, 14)
+}
+
+// A vec-backed cursor: it scalarizes and yields the real Vec entry.
+struct IntBag { items: [int] }
+struct IntBagIter { items: [int], i: int }
+
+@inline
+fn iter(b: IntBag) -> IntBagIter { return IntBagIter { items: b.items, i: 0 } }
+
+@inline
+fn next(it: IntBagIter) -> (bool, int) {
+    if it.i >= it.items.len { return (false, 0) }
+    let v = it.items[it.i]
+    it.i = it.i + 1
+    return (true, v)
+}
+
+@test
+fn vec_backed_iter_sums() {
+    let b = IntBag { items: [3, 4, 5, 6] }
+    let total = 0
+    for x in b { total += x }
+    assert_eq(total, 18)
+}
+
+// Value elements yield copies; iteration cannot implicitly alias Vec storage.
+value Health { hp: int }
+struct Party { members: [Health] }
+struct PartyIter { members: [Health], i: int }
+
+@inline
+fn iter(p: Party) -> PartyIter { return PartyIter { members: p.members, i: 0 } }
+
+@inline
+fn next(it: PartyIter) -> (bool, Health) {
+    if it.i >= it.members.len { return (false, phantom()) }
+    let m = it.members[it.i]
+    it.i = it.i + 1
+    return (true, m)
+}
+
+@test
+fn vec_backed_value_iter_reads() {
+    let p = Party { members: [Health { hp: 10 }, Health { hp: 20 }] }
+    let total = 0
+    for m in p { total += m.hp }
+    assert_eq(total, 30)
+}
+
+struct ManualVecIter<T> {
+    vec: [T],
+    i: int,
+}
+
+fn manual_iter<T>(v: [T]) -> ManualVecIter<T> {
+    return ManualVecIter { vec: v, i: 0 }
+}
+
+fn manual_next<T>(it: ManualVecIter<T>) -> (bool, T) {
+    if it.i >= it.vec.len {
+        return (false, phantom())
+    }
+    let x = it.vec[it.i]
+    it.i = it.i + 1
+    return (true, x)
+}
+
+@test
+fn manual_protocol_sums_vec() {
+    let v = [10, 20, 30]
+    let it = manual_iter(v)
+    let total = 0
+    loop {
+        let (ok, x) = manual_next(it)
+        if !ok { break }
+        total += x
+    }
+    assert_eq(total, 60)
+}
+
+@test
+fn manual_protocol_string_elems() {
+    let v = ["a", "b", "c"]
+    let it = manual_iter(v)
+    let joined = ""
+    loop {
+        let (ok, x) = manual_next(it)
+        if !ok { break }
+        joined += x
+    }
+    assert_eq(joined, "abc")
+}
+

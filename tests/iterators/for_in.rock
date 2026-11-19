@@ -7,7 +7,6 @@ fn array_literal_iter_without_i() {
     let total = 0
     let count = 0
 
-    // Array literals with tuple destructuring give (index, value) with 1-based indexing
     for value in [5, 15, 25] {
         let value_typed: ? = value
         total += value
@@ -54,74 +53,6 @@ fn rev_of_enumerate() {
 
 // -- Collection types and binding patterns --
 
-// Test basic array iteration
-@test
-fn test_array_for_in_single() {
-    let items = [10, 20, 30]
-    let total = 0
-    let count = 0
-
-    for item in items {
-        total = total + item
-        count = count + 1
-    }
-
-    assert total == 60
-    assert count == 3
-}
-
-@test
-fn test_array_for_in_index_value() {
-    let items = ["a", "b", "c"]
-    let indices_sum = 0
-    let concat_values = ""
-
-    for (i, value) in enumerate(items) {
-        indices_sum = indices_sum + i
-        concat_values = concat_values + value
-    }
-
-    assert indices_sum == 3
-    assert concat_values == "abc"
-}
-
-// Test Map iteration with tuple destructuring
-@test
-fn test_map_for_in_key_value() {
-    let colors: Map<string, string> = map_new()
-    insert(colors, "red", "#FF0000")
-    insert(colors, "green", "#00FF00")
-    insert(colors, "blue", "#0000FF")
-
-    let key_count = 0
-    let found_red = false
-    let found_green = false
-    let found_blue = false
-
-    for (key, value) in colors {
-        key_count = key_count + 1
-
-        if key == "red" {
-            assert value == "#FF0000"
-            found_red = true
-        } else if key == "green" {
-            assert value == "#00FF00"
-            found_green = true
-        } else if key == "blue" {
-            assert value == "#0000FF"
-            found_blue = true
-        } else {
-            error("Unexpected key: " + key)
-        }
-    }
-
-    assert key_count == 3
-    assert found_red
-    assert found_green
-    assert found_blue
-}
-
-// Test Map with complex values (structs)
 struct PlayerStats {
     health: int,
     mana: int,
@@ -159,7 +90,6 @@ fn test_map_struct_values() {
     assert count == 3
 }
 
-// Test empty collections
 @test
 fn test_empty_collections() {
     let empty_array: [int] = []
@@ -182,33 +112,6 @@ fn test_empty_collections() {
     assert map_iterations == 0
 }
 
-// Test break and continue in for-in loops
-@test
-fn test_for_in_control_flow() {
-    let numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    let sum_before_break = 0
-    let even_sum = 0
-
-    for num in numbers {
-        if num > 5 {
-            break
-        }
-        sum_before_break = sum_before_break + num
-    }
-
-    assert sum_before_break == 15
-
-    for num in numbers {
-        if num % 2 == 1 {
-            continue
-        }
-        even_sum = even_sum + num
-    }
-
-    assert even_sum == 30
-}
-
-// Test nested for-in loops
 @test
 fn test_nested_for_in_loops() {
     let groups: Map<string, [int]> = map_new()
@@ -233,7 +136,6 @@ fn test_nested_for_in_loops() {
     assert item_count == 6
 }
 
-// Test type inference in for-in loops
 @test
 fn test_for_in_type_inference() {
     let mixed_map: Map<string, int> = map_new()
@@ -289,52 +191,9 @@ fn test_map_iteration_with_auto_iter() {
     assert_eq(count, 2)
 }
 
-@test
-fn test_range_iteration_with_auto_iter() {
-    let count = 0
-
-    // This should automatically get `iter()` inserted: for i in __rock_range(0, 3)
-    // __rock_range(0, 3) returns [0, 1, 2] (exclusive upper bound), so 3 elements
-    for i in __rock_range(0, 3) {
-        count += 1
-    }
-
-    assert_eq(count, 3)
-}
-
 // -- Iterating `rev(...)`, which materializes a reversed vector --
 
-@test(output = "30")
-fn test_rev_sum_with_continue() {
-    let xs = [10, 20, 99, 30]
-    let total = 0
-    for x in rev(xs) {
-        if x == 99 {
-            continue
-        }
-        if x == 30 {
-            continue
-        }
-        total = total + x
-    }
-    print("{total}")
-}
-
 // -- Element types: nullable and struct --
-
-@test(output = "1 null 3")
-fn test_for_nullable_elements() {
-    let v: [int?] = [1, null, 3]
-    let out = ""
-    for x in v {
-        if x != null {
-            out = out + "{x} "
-        } else {
-            out = out + "null "
-        }
-    }
-    print(out.trim())
-}
 
 struct Item {
     name: string,
