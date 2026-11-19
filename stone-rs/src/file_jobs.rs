@@ -2227,7 +2227,7 @@ mod tests {
         generation: u8,
         publications: usize,
     ) -> (i32, PathBuf, Vec<PathBuf>) {
-        let transaction = begin(&queue);
+        let transaction = begin(queue);
         let mut files = Vec::new();
         for index in 0..publications {
             let path = directories[index % directories.len()]
@@ -2249,14 +2249,14 @@ mod tests {
         let manifest = save.join("manifest.json");
         let listing = manifest_listing(save, &files);
         assert!(fragment(
-            &queue,
+            queue,
             transaction,
             manifest.clone(),
             listing.into_bytes(),
             false,
             true
         ));
-        let job = commit(&queue, transaction);
+        let job = commit(queue, transaction);
         (job, manifest, files)
     }
 
