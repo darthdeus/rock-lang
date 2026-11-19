@@ -1,5 +1,7 @@
 use super::*;
 
+/// Collected in assembly order, so parallel completion cannot change
+/// diagnostic order.
 #[derive(Default)]
 pub(super) struct Rejections(Vec<CompilerError>);
 
@@ -60,6 +62,8 @@ pub(super) struct BodyRejection {
 struct Finding {
     message: String,
     guarantee: bool,
+    // Outranks the enclosing function's span: a whole-function anchor cannot tell
+    // two violations in one body apart.
     site: Option<bone_semantic::prelude::Span>,
 }
 
@@ -74,6 +78,8 @@ impl BodyRejection {
         }
     }
 
+    /// One guarantee violation makes the whole rejection a guarantee, so a body
+    /// holding both is never dropped on the strength of a gap.
     fn guarantee(&self) -> bool {
         self.findings.iter().any(|f| f.guarantee)
     }
@@ -123,6 +129,8 @@ pub(super) fn validate_emitted_body(
     specs: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<(), BodyRejection> {
     let mut acc = BodyRejection::default();
+    // A demand the body cannot state self-contained is a rejection, not a dropped
+    // demand whose call site would name a missing definition.
     if let Err(e) = skull_mir::reach::spec_bound_calls(ws, mf, specs) {
         acc.absorb(BodyRejection::gap(e.message));
     }
@@ -133,6 +141,7 @@ pub(super) fn validate_emitted_body(
         skull_transform::nobox_materialization_violations(ws, mf)
             .into_iter()
             .map(|(message, site)| Finding {
+                // The span often points into an inlined stdlib body, so name the caller.
                 message: format!("{message}, while emitting `{}`", mf.name),
                 guarantee: true,
                 site,
@@ -156,6 +165,8 @@ pub(super) fn check_unit_spec_bindings(
 ) -> Result<(), CompilerError> {
     match validate_emitted_body(ws, mf, out_specs) {
         Ok(()) => Ok(()),
+        // Stdlib emit gaps are the known parity list; a user definition that cannot
+        // emit is a hard error.
         Err(r) if !r.guarantee() && is_stdlib_module_file(ws.module(mid).file.as_str()) => Ok(()),
         Err(r) => Err(r.into_error(span, &format!("cannot emit `{name}`: "))),
     }

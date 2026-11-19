@@ -243,6 +243,8 @@ fn write_code_row(
     Ok(())
 }
 
+/// Both indexes share persistent paths, so transaction snapshots keep their
+/// rows without copying the inventory.
 #[derive(Clone, Default)]
 pub(crate) struct CodeRows {
     root: Option<Arc<RowNode<(String, CodeIdentity), Vec<u8>>>>,

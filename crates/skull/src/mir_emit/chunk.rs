@@ -8,7 +8,10 @@ pub(super) struct Chunk {
     pub(super) definition_count: usize,
     pub(super) literal_globals: Vec<Ustr>,
     pub(super) allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
+    // Invalidation superset: also holds everything inlined away.
     pub(super) deps: FxHashSet<FuncRef>,
+    // Always invalidate on a body edit; a residual edge can instead compare the
+    // old and new candidate's eligibility.
     pub(super) embedded_deps: FxHashSet<FuncRef>,
     pub(super) abi_deps: FxHashMap<FuncRef, u64>,
     pub(super) direct_globals: Vec<Ustr>,
@@ -16,10 +19,14 @@ pub(super) struct Chunk {
     pub(super) times: PhaseTimes,
     pub(super) attribution: Option<Box<UnitAttribution>>,
     pub(super) statics: Vec<skull_mir::mir::StaticCell>,
+    // A stale read is a body edit bone's reinferred set cannot see.
     pub(super) comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
+    // The callees still called after inlining: the reachability edges.
     pub(super) calls: Vec<FuncRef>,
+    // Deduplicated program-wide: each specialization is defined exactly once.
     pub(super) specs: Vec<skull_mir::bound::SpecDemand>,
     pub(super) code_artifact: skull_mir::code_identity::BodyCodeArtifact,
+    // Bound after every definition, so each captured callee is already final.
     pub(super) binds: Vec<skull_codegen_lua::CalleeBindingPlan>,
 }
 
@@ -48,6 +55,8 @@ const LUA_DEFINITIONS_PER_SCOPE: usize = 4_096;
 const LUA_NAMES_PER_BIND_SCOPE: usize = 16_384;
 
 /// Ordered by call-graph component rank: a captured callee's component is
+/// A same-component callee stays a global lookup. Ties break on name so the
+/// text is deterministic.
 /// strictly lower than its caller's, so ascending rank binds callees first.
 pub(super) fn callee_binding_pass_lua<
     P: std::borrow::Borrow<skull_codegen_lua::CalleeBindingPlan> + Sync,

@@ -75,6 +75,7 @@ pub(crate) fn emit_coroutine_with_artifact(
         &mut out.lua,
         &mut nested_times,
     )?;
+    // Hoisted lambdas are frame-free: their frame accesses are already MIR.
     for nf in lambdas.iter() {
         out.emit(&nf.name, &nf.name, nf, None);
     }
@@ -193,6 +194,8 @@ fn emit_constructor(
     use std::fmt::Write as _;
     let name = plan.base();
     let channel = plan.channel.as_ref();
+    // The frame local keeps its raw cell id, so detached hooks and the step
+    // address the same fields.
     let svar = format!("c{}", raw(lowered.s_cell));
     let param_fields: Vec<String> = lowered
         .params
@@ -225,6 +228,7 @@ fn emit_constructor(
                 )
             })
             .collect();
+        // Runners iterate the cleanups in reverse for LIFO.
         init.push(format!("__defers = {{ {} }}", list.join(", ")));
     }
 
@@ -242,6 +246,9 @@ fn emit_constructor(
         format!("{step_name}(s, arg)")
     };
 
+    // The object is the frame: `__advance` steps and a concrete consumer reads
+    // the `__y*` leaves off it without allocating. `__resume` boxes them for
+    // erased consumers.
     if let Some(ch) = channel {
         let mut box_fields = format!(
             "{{__variant = s.{tag}, __ty = {ty}",

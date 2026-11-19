@@ -65,6 +65,8 @@ pub fn type_shape_hashes(ws: &Workspace) -> Result<ShapeHashes, CompilerError> {
     Ok(out)
 }
 
+/// A boxed child has its own entry; an inline child moves the parent's layout.
+/// The visiting guard keeps an invalid embed cycle finite.
 fn struct_shape_hash(
     ws: &Workspace,
     s: &bone_semantic::hir::StructDef,
@@ -234,6 +236,7 @@ pub fn module_tests_with_ids(
             }),
             None => None,
         };
+        // `expect_failure` asserts a compile error, which execution cannot check.
         if test_ann.args.iter().any(|arg| {
             arg.name
                 .as_ref()
@@ -259,6 +262,8 @@ pub fn module_tests_with_ids(
         }) {
             Some(arg) => match &arg.value {
                 bone_semantic::hir::AnnoValue::String(s) => Some(unescape_expected(s.as_str())),
+                // A lone `{` makes the literal an interpolation; dropping it
+                // would silently un-pin the expectation.
                 _ => {
                     return Err(CompilerError::new_with_label(
                         test_ann.span,
@@ -301,6 +306,7 @@ pub fn module_tests_with_ids(
             fid,
             SkullTest {
                 name: display_name(f.name.as_str()).to_string(),
+                // The emitted-name oracle, so a harness calls what the artifact defines.
                 symbol: skull_mir::mangle::mangle_fn(ws, f),
                 output,
                 returns,
@@ -349,6 +355,7 @@ pub(crate) fn decorator_call_args(
     Ok(args)
 }
 
+/// Empty registries are enough: the stdlib accessors nil-guard per key.
 fn runtime_prelude() -> &'static str {
     // LuaJIT can fail to place a second nearby mcode block on arm64. The first block
     // holds the full budget. Higher exit and trace limits reduce repeated recording
@@ -900,6 +907,7 @@ fn value_struct_defs(
         return Ok((String::new(), emitted, gc));
     }
 
+    // GC-carrying value structs are Lua tables (`_vt`), never cdef.
     let mut ffi_structs = Vec::new();
     for &s in vstructs {
         let storage = rep_arena
@@ -932,6 +940,7 @@ fn value_struct_defs(
                     blocked = true;
                     continue;
                 }
+                // Dependencies are keyed by logical name; the cdef text uses the C one.
                 let field_type = skull_mir::mangle::type_symbol(ws, dep);
                 if ffi_names.contains(&dep)
                     || skull_mir::lower::EnumPlan::for_name(ws, dep)
@@ -988,6 +997,8 @@ fn value_struct_defs(
     if typedefs.is_empty() {
         return Ok((String::new(), emitted, gc));
     }
+    // No pcall around `ffi.cdef`: a failure is an emit bug and must abort with
+    // LuaJIT's own message.
     let (checks, storage) = value_leaf_layout_checks(ws, &emitted, rep_arena)?;
     Ok((
         format!("ffi.cdef[[\n{}]]\n{}{}{}", typedefs, ctors, checks, storage),
@@ -1034,6 +1045,7 @@ end
 if jit and jit.off then jit.off(__rock_layout_check) end
 "#;
 
+/// Wrong offsets would corrupt storage on typed leaf access.
 /// Check the compiler offsets against LuaJIT and register buffer layouts.
 fn value_leaf_layout_checks(
     ws: &Workspace,
@@ -1192,6 +1204,8 @@ fn value_struct_gc_defs(
             ));
             continue;
         }
+        // A declared field's name or an inline child's dotted leaf path, shared with
+        // every MIR reader and writer of the box.
         let fields = skull_mir::lower::gc_table_fields(ws, bone_semantic::hir::FnBackend::Lua, n)
             .map_err(|e| CompilerError::new_no_location(e.message))?;
         out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
@@ -1231,6 +1245,8 @@ fn value_struct_gc_defs(
             out.push_str(&display_return(&parts, "  "));
         }
         out.push_str("end\n");
+        // An inline leaf's parameter is positional: a dotted path has no injective
+        // identifier spelling.
         let mut params = Vec::new();
         let mut body = String::new();
         for f in &fields {
@@ -1512,6 +1528,7 @@ pub(crate) fn enum_names_defs(ws: &Workspace, read: &rustc_hash::FxHashSet<ustr:
             {
                 continue;
             }
+            // A Lua global, so its name carries the symbol; the values are display text.
             let name = skull_mir::mangle::enum_names_global(ws, e.name);
             if !read.contains(&name) {
                 continue;
@@ -1534,6 +1551,8 @@ pub(crate) fn enum_names_defs(ws: &Workspace, read: &rustc_hash::FxHashSet<ustr:
     out
 }
 
+/// Mixed enums keep unit singletons across reloads, so preserved values keep
+/// their identity.
 fn enum_runtime_defs(ws: &Workspace) -> String {
     use bone_semantic::hir::VariantPayload;
     let mut out = String::new();
@@ -1576,6 +1595,7 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
     out
 }
 
+/// A reload invalidates the ctype lookup cache so it sees the new registry.
 /// Register inspection and copy functions for C-backed values.
 fn c_struct_inspect_defs(
     ws: &Workspace,
@@ -1967,6 +1987,7 @@ mod tests {
             .lua
     }
 
+    /// Smaller arenas cause global trace flushes.
     /// The hot trace working set needs one 64 MB block on either architecture.
     #[test]
     fn runtime_prelude_keeps_the_application_trace_working_set() {
@@ -2120,6 +2141,8 @@ mod tests {
             "a field added to an EMBEDDED child also relayouts the parent"
         );
 
+        // Control: a boxed child is a pointer either way, so widening it must leave
+        // the parent alone, or every nested edit would request a restart.
         let boxed_wide = "struct Pt { x: int, y: int }\nstruct Holder { p: Pt, tag: int }\n";
         assert_eq!(
             super::shape_diff(&hashes(boxed), &hashes(boxed_wide)),
@@ -2139,6 +2162,7 @@ mod tests {
             "an embed chain propagates the child's shape to every enclosing parent"
         );
 
+        // A boxed link breaks the chain: `Mid` holds `Inner` by pointer.
         let broken = "struct Inner { c: int }\n\
                       struct Mid { b: Inner, m: int }\n\
                       struct Outer { embed a: Mid, o: int }\n";
@@ -2175,6 +2199,7 @@ mod tests {
     }
 
     /// Emit Lua, append `driver`, run under luajit and return trimmed stdout.
+    /// Panics without luajit, so an untested host reports red, never green.
     /// CRLF is normalized because luajit's stdout is text-mode on Windows.
     fn run(src: &str, driver: &str) -> String {
         let lua = format!("{}\n{}", emit(src), driver);
@@ -2196,6 +2221,7 @@ mod tests {
             .to_string()
     }
 
+    /// The nil clears keep the seeds invisible to pairs and snapshots.
     /// Flat-enum yield slots are seeded in the constructor literal so the frame shape never moves under a trace.
     #[test]
     fn channel_constructor_seeds_and_clears_yield_slots() {
@@ -2238,6 +2264,8 @@ mod tests {
             "step must be top-level, not a per-instance closure, got:\n{lua}"
         );
         // A constant-key literal, which LuaJIT builds with one TDUP from a
+        // template table; see the rejected pre-sizing entry in
+        // docs/luajit-performance.md before changing this to assignments.
         assert!(
             lua.contains(r#"{ __ty = "Coroutine", __state = 0, __layout = "#),
             "expected the tagged+stamped frame table, got:\n{lua}"

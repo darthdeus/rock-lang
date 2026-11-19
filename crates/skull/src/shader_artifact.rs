@@ -37,6 +37,7 @@ pub struct ShaderArtifactView {
     pub builtins: BTreeSet<Instance>,
     pub rejections: Vec<ShaderRejection>,
     /// Per-program roots and retained populations, aligned with `programs`.
+    /// A missing root keeps an empty stage list so the denominator cannot shrink.
     pub program_views: Vec<ShaderProgramView>,
     /// The GLSL plan for each accepted program, aligned with `program_views`.
     pub program_plans: Vec<Option<Arc<skull_codegen_glsl::ShaderPlan>>>,
@@ -76,6 +77,8 @@ pub fn realize_shader_with_context(
     realize_shader_with_context_and_plans(ws, g, req, scx, None)
 }
 
+/// Plans are a pure function of `(ws, graph)`, so an emit driver shares its
+/// table; `None` builds one and is for standalone tools only.
 pub(crate) fn realize_shader_with_context_and_plans(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -136,6 +139,7 @@ pub(crate) fn realize_shader_with_context_and_plans(
         let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
         roots.iter().find(|i| DeclKey(i.func) == key)
     };
+    // Programs are independent, so they fan out and fold in program order.
     let program_views: Vec<ShaderProgramView> = {
         use bone_core::prelude::*;
         req.programs
@@ -212,6 +216,7 @@ fn check_program(
     let mut program_roots: Vec<Instance> = vec![root.clone()];
     if let Some(v) = program.vert {
         match entry_of(v) {
+            // A registered vertex stage with no graph instance is not checked around.
             Some(i) => program_roots.push(i.clone()),
             None => {
                 return None;
@@ -319,6 +324,8 @@ fn postorder(
 }
 
 /// The instances reachable from `roots` over the retained shader call relation.
+/// Roots are included: an entry's own substitution governs the pass like a
+/// helper's.
 fn reachable_from(
     roots: &[Instance],
     edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,

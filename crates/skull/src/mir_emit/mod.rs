@@ -236,6 +236,8 @@ pub struct ShapeOverrides {
     pub line_directives: Option<bool>,
 }
 
+/// Rejects a root that matches no module: a relative or stale path would
+/// otherwise silently treat the project's own sources as prunable libraries.
 fn canonical_project_root(
     ws: &Workspace,
     project_root: Option<&str>,

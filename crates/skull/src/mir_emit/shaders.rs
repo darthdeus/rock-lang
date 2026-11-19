@@ -29,6 +29,9 @@ pub(super) fn shader_programs(
         .collect()
 }
 
+/// Projected from instances onto declarations. Projection only merges
+/// components, so a callee reported separate from its caller really is, and
+/// the binding pass never orders a capture after the closure that needs it.
 pub(super) fn call_sccs(
     graph: &crate::instance_graph::InstanceGraph,
 ) -> bone_semantic::prelude::FxHashMap<skull_mir::mir::FuncRef, u32> {
@@ -90,6 +93,9 @@ fn identity_storage_exempt(ws: &Workspace, instance: &Instance) -> bool {
     bone_semantic::identity_storage::identity_storage_exempt(ws, ws.module(instance.func.module))
 }
 
+/// An identity-storage rejection belongs to the package whose call site
+/// instantiated it. A caller in an exempt package whose own type arguments
+/// carry the identity only forwards it, so its callers are asked in turn.
 struct IdentityRejectionWalk<'g> {
     forwarders: FxHashSet<&'g Instance>,
     callers: FxHashMap<&'g Instance, Vec<(&'g Instance, &'g Edge)>>,
@@ -132,6 +138,7 @@ impl<'g> IdentityRejectionWalk<'g> {
             .map(|rejection| &rejection.at)
             .collect();
         let plain = rejected.iter().any(|instance| instance.args.is_empty());
+        // A full build keeps no caller index, so every owner is read twice.
         let into: Vec<Vec<(&Instance, &Edge)>> = owners
             .par_iter()
             .map(|(owner, c)| {
@@ -185,6 +192,8 @@ impl<'g> IdentityRejectionWalk<'g> {
                 }
             }
         }
+        // An instance no edge reaches is rooted by an always-emitted body, so its own
+        // package answers for it.
         (!self.callers.contains_key(&rejection.at) && !identity_storage_exempt(ws, &rejection.at))
             .then(|| CompilerError::new_with_label(rejection.span, rejection.message.clone()))
     }
@@ -217,6 +226,8 @@ pub(super) fn shader_registration_lines(
         use bone_core::prelude::*;
         programs
             .par_iter()
+            // A program the view did not plan is emitted from the view, which reports
+            // the same refusal at the same span.
             .map(|(_, program_view, plan)| match plan {
                 Some(plan) => {
                     skull_codegen_glsl::render_shader_plan(ws, scx.interner(), plan, profile)
@@ -236,6 +247,8 @@ pub(super) fn shader_registration_lines(
             language: ShaderLanguage::Glsl,
             source: emission.source.clone(),
         });
+        // Slot order is the engine's whole view of texture binding: it points each
+        // sampler at its unit once at link time, then binds by slot.
         let slot_names: Vec<&str> = emission
             .abi
             .texture_units
@@ -245,6 +258,7 @@ pub(super) fn shader_registration_lines(
         // The `@uniform` blocks' std140 layouts, as parallel flat lists (one
         // entry per block, members concatenated with a per-block count) so a
         // hand-written driver never nests.
+        // A program with no block still passes the empty lists.
         let w = skull_codegen_glsl::BlockWire::of(
             emission.abi.uniform_blocks.iter(),
             emission.abi.uniform_array_blocks.iter(),

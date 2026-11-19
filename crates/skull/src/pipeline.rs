@@ -80,6 +80,8 @@ pub fn check_modules(
         Err(bone_semantic::semantic_passes::PassFailure::Pass(error)) => Err(error),
         Ok(ws) => apply_closure_gate(ws),
     };
+    // A macro that must not expand leaves the call in place and records why; that
+    // reason explains the type errors it causes, so it reports first.
     let expanded_syntax = syntax_errors(modules.iter());
     if !expanded_syntax.is_empty() {
         return Err(expanded_syntax);
@@ -93,6 +95,7 @@ pub fn check_modules(
     Ok((ws, errs))
 }
 
+/// Runs before expansion removes the macro definitions it checks.
 fn macro_gates(modules: &[&Ast]) -> Vec<CompilerError> {
     skull_parser::check_macro_name_uniqueness(modules.iter().copied())
 }
@@ -146,6 +149,7 @@ pub trait CompileHost {
     fn lint_findings(&mut self, ws: &Workspace) -> Vec<bone_lints::Finding>;
     /// [`Self::checked_comptime_inputs`] and [`Self::lint_findings`] for one
     /// checked workspace.
+    /// Neither reads the other's output, so a host may run them side by side.
     fn checked_inputs_and_lints(
         &mut self,
         ws: &Workspace,

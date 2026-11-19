@@ -45,6 +45,9 @@ pub(super) fn emit_named_with_allocation_report(
     })
 }
 
+/// Coroutines never inline, so a combinator chain leaves a residual call that
+/// a specialized standalone body must serve. The constructor and `__step` are
+/// not the declaration's own body, so they bind no callees.
 fn emit_coroutine_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -94,6 +97,8 @@ fn emit_coroutine_chunk(
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     times.regalloc_work = times.regalloc > Duration::ZERO;
     let mut abi_deps = FxHashMap::default();
+    // No declaration edges: instantiation is the graph's fact. `deps` holds only
+    // what codegen knows, the bodies this chunk's text contains.
     collect_abi_dependencies(mf, &mut abi_deps);
     deps.extend(abi_deps.keys().copied());
     let mut literal_globals = skull_mir::reach::global_ref_names(mf);
@@ -171,6 +176,8 @@ pub(super) fn emit_body_chunk(
         // Hoisted bodies inline only after closure conversion has split them
         // out: inside a closure a cell is an upvalue, and splicing there piles
         // onto LuaJIT's 60-upvalue cap.
+        // It is also needed for correctness: a call given the specialized scalar ABI
+        // has no serviceable shared body.
         inline_hoisted: true,
     };
     let deps =
@@ -265,6 +272,8 @@ fn finish_body_chunk(
         format!("cannot emit specialized `{name}`: ")
     };
     validate_emitted_body(ws, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, &prefix))?;
+    // A specialization's residual callees count as embedded, so any edit to one
+    // rebuilds it.
     let embedded_deps = ordinary.then(|| deps.clone());
     collect_callee_frefs(&mf, &mut deps);
     let mut code_artifact =
@@ -273,6 +282,7 @@ fn finish_body_chunk(
             &ws.comptime_inputs.volatile_vars,
         );
     code_artifact.set_body_names(&mf, name);
+    // Global-init ordering is stated over declarations, not specializations.
     let (direct_globals, direct_calls) = if ordinary {
         direct_refs(ws, cg, &mf)
     } else {
@@ -310,9 +320,11 @@ fn finish_body_chunk(
     let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
     times.regalloc += regalloc;
     times.regalloc_work |= regalloc > Duration::ZERO;
+    // Read before the nested fns are emitted, which detaches their children.
     let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
     let mut abi_deps = FxHashMap::default();
     collect_abi_dependencies(&mf, &mut abi_deps);
+    // Nested-fn statics fold into this chunk, or hot reload would not see them.
     let mut statics = mf.statics.clone();
     emit_nested_fns(
         ws,
@@ -383,6 +395,7 @@ pub(crate) fn emit_nested_fns(
         );
         times.bounds += tb.elapsed();
         collect_callee_frefs(nf, deps);
+        // A flat variant's text is another declaration's body.
         if let Some(source) = nf.flat_variant_source {
             deps.insert(source);
         }
@@ -537,6 +550,8 @@ pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
     !f.is_extern && f.inline_body.is_none() && !f.has_iterator_bounds() && !is_generic(f)
 }
 
+/// An `Iterator`-bounded declaration has no shared chunk: each instantiation
+/// is emitted standalone with its bound calls resolved.
 pub(crate) fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &Instance) -> bool {
     if body.args.is_empty() {
         return is_cached_body(f);
@@ -576,6 +591,8 @@ pub(super) fn emit_spec_chunk(
         inline_cache,
     )
     .map_err(|e| e.or_at(f.name_span))?;
+    // Before every transform: the demand that reached here resolves the bound
+    // placeholders that make the body unemittable on its own.
     let tresolve = Instant::now();
     skull_transform::bound::resolve_standalone_bound_calls(
         ws,
@@ -652,6 +669,7 @@ pub(super) fn order_specialized_callees<'c>(
     let mut moved = Vec::new();
     let mut errs: Vec<(String, CompilerError)> = rejected.to_vec();
     let rejected_names: FxHashSet<&str> = rejected.iter().map(|(n, _)| n.as_str()).collect();
+    // LIFO demand order preserves the ordering of specialized definitions.
     while let Some(demand) = pending.pop() {
         let body = &demand.inst;
         if !done.insert(body) {

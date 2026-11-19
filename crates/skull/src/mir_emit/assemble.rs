@@ -211,6 +211,7 @@ impl Assembly {
         let init_lines = sort_global_init_lines(inits, &leaf_owner)?;
         out.push_str(&state_initializer_lua(&init_lines));
 
+        // After the global inits, so a decorator body can push to a global.
         out.push_str(&decorator_application_lines(ws, decorators, scx)?);
         if cache.build_kind == BuildKind::Program {
             out.push_str(&sim_registration_lines(
@@ -219,6 +220,7 @@ impl Assembly {
                 cache.selected_sim_functions.as_ref(),
             )?);
         }
+        // Top-level, so a reload re-runs them with the new GLSL.
         out.push_str(&cache.shader_registrations.lua);
         if has_code_slot_publication {
             out.push_str(code_slot_publish_lua(
@@ -227,6 +229,7 @@ impl Assembly {
                 lifecycle_declarations,
             ));
         }
+        // Anything appended after this line runs outside it.
         // Closes the block the runtime prelude opens.
         out.push_str("end\n");
         self.t_scaffold += ts.elapsed();
@@ -397,6 +400,7 @@ fn ffi_extern_wrapper(
         ExternRet::Int | ExternRet::Uint => {
             skull_codegen_lua::wrapper_return(&format!("tonumber({lib}.{nm}({params}))"))
         }
+        // `Bool` ends in a compare, not a call.
         ExternRet::Bool => format!("  return {lib}.{nm}({params}) ~= 0"),
         ExternRet::AsIs => skull_codegen_lua::wrapper_return(&format!("{lib}.{nm}({params})")),
         ExternRet::None => format!("  {lib}.{nm}({params})"),
@@ -439,6 +443,8 @@ struct InitOrdering {
     static_resets: Result<String, CompilerError>,
 }
 
+/// Only the bodies the initializers reach are walked. That changes the order
+/// of each dependency list but not its set, and init ordering reads it as a set.
 fn transitive_global_reads(
     inits: &[(Ustr, Ustr, String)],
     units: &[(Ustr, Vec<Ustr>, Vec<Ustr>)],
@@ -468,6 +474,8 @@ fn transitive_global_reads(
     skull_mir::reach::transitive_global_reads(&globals, &calls)
 }
 
+/// A `nobox` global is read through its leaves, so a leaf dependency must
+/// resolve back to its owning global or the dependent initializer sorts first.
 fn global_leaf_owners(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -487,6 +495,8 @@ fn global_leaf_owners(
     Ok(leaf_owner)
 }
 
+/// On reload a static is reset only when its init or type key changed; an
+/// unchanged key keeps the live cell.
 fn static_reset_lines(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -548,6 +558,8 @@ enum Placement<'c> {
     Chunk(bool, Option<Result<(Ustr, &'c Chunk), &'c CompilerError>>),
 }
 
+/// A JS-backend declaration is inert here: a Lua sibling carries the binding,
+/// and a JS-only call from Lua is rejected at call lowering.
 fn place_function<'c>(
     ws: &Workspace,
     cache: &'c SkullEmitCache,
@@ -565,6 +577,8 @@ fn place_function<'c>(
         let Some(lib) = f.ffi_lib else {
             return Placement::None;
         };
+        // Every extern is checked; only the write is gated, since pruning may change
+        // which definitions are emitted and nothing else.
         let (nm, params, body) = match ffi_extern_wrapper(ws, f, lib) {
             Ok(wrapper) => wrapper,
             Err(err) => return Placement::Text(Err(err)),
@@ -755,6 +769,7 @@ fn fold_units(
         &mut decorator_lua,
         &mut Vec::new(),
     );
+    // `par_map` preserves input order, so keys and units pair positionally.
     for (key, u) in global_keys.iter().zip(global_units.iter()) {
         if !u.comptime_reads.is_empty() {
             facts.reads.globals.insert(*key, u.comptime_reads.clone());
@@ -781,6 +796,7 @@ pub(super) struct EarlyAssembly {
     scaffold_time: Duration,
     decorators: DecoratorTable,
     units: FoldedUnits,
+    // Results, reported where assembly reports them, so body rejections come first.
     global_layout: Result<String, String>,
     globals_directory: Result<GlobalsDirectoryLua, CompilerError>,
     leaf_owner: Result<FxHashMap<Ustr, Ustr>, CompilerError>,
@@ -892,6 +908,8 @@ pub(super) fn assemble(
     let mut asm = Assembly::new(cache, unit_facts);
     let (scaffold, value_ctors) = scaffold?;
     asm.out = scaffold;
+    // Value ctors are spliced in here, ahead of any load-time caller, once the
+    // emitted text shows which ones are called.
     let value_ctors_at = asm.out.len();
     asm.t_scaffold += scaffold_time;
     asm.out.push_str(&decorator_lua);
@@ -911,6 +929,7 @@ pub(super) fn assemble(
             Ok::<_, CompilerError>((plan, stage))
         });
         let stage = stage?;
+        // The definition plan stage is the last reader of the concrete plans.
         drop_in_background(std::mem::take(&mut cache.concrete));
         (needed_foreign, Some(stage))
     } else {
@@ -1037,6 +1056,8 @@ pub(super) fn assemble(
     drop(spec_chunks);
     step("assembly: definitions", &mut steps);
 
+    // Every definition has been visited, so body rejections report before any
+    // scaffolding error below.
     std::mem::take(&mut asm.rejections).into_result()?;
     let cg = &cache.cg;
     let scx = &cache.scx;
@@ -1091,6 +1112,7 @@ pub(super) fn assemble(
         "__rock_globals_directory_part",
         &directory.publish,
     ));
+    // A host attaches its own directory fields right after this line.
     out.push_str(GLOBALS_BRIDGE_LINE);
     let bridge_end_in_tail = out.len();
     if !cg.line_directives() {
@@ -1105,6 +1127,7 @@ pub(super) fn assemble(
     code_artifact
         .check_stageable()
         .map_err(CompilerError::new_no_location)?;
+    // Slot staging follows the global initializer bodies and precedes their calls.
     let code_slot_stage =
         code_slot_registration_lua_entries(ws, scx, code_artifact.entries.values(), false)?;
     out.push_str(&wrap_large_lua_section(
@@ -1449,6 +1472,9 @@ pub(super) fn lifecycle_plan_stage_lua(
                     .collect::<Vec<_>>()
                     .join(" or ")
             });
+            // A scene thunk skips a Scene that closed since the population snapshot
+            // (`__scene_root_any` returns nil). Membership in the type's population is
+            // the only test; the value's runtime type is never asked.
             let func_thunk = if entry.owner.as_str() == "scene" {
                 let call = "local __root = __scene_root_any(scene_id); if __root ~= nil then __s(__root) end";
                 let body = sim_guard

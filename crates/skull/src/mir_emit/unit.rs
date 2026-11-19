@@ -12,6 +12,9 @@ fn render_default_lit(body: &bone_semantic::hir::Body, e: Idx<Expr>) -> Option<S
     }
 }
 
+/// Fills a default a Lua or indirect caller omitted; a Rock direct call
+/// already passes it. A nullable parameter's nil can be an explicit `null`,
+/// so it gets no fill when null overrides its default.
 pub(super) fn default_fill_prologue(
     ws: &Workspace,
     mid: ModuleId,
@@ -50,9 +53,12 @@ pub(super) enum ExternRet {
     /// unsupported C function type`). The `cdef` and this arm's `~= 0` must
     /// change together.
     Bool,
+    /// Floats and strings already cross as Lua values; a `Ptr<T>` stays cdata.
     AsIs,
 }
 
+/// The `ffi.cdef` is inside an opaque body, so the declared type is the only
+/// contract: an unresolvable one is an error, never "return it as-is".
 pub(super) fn extern_ret(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
@@ -116,10 +122,13 @@ pub(super) struct UnitOut {
     pub(super) hard_error: Option<CompilerError>,
     pub(super) refs: Option<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
     pub(super) pending_init: Option<(Ustr, Ustr, String)>,
+    // Reachability roots: these bodies are always emitted.
     pub(super) calls: Vec<FuncRef>,
     pub(super) specs: Vec<skull_mir::bound::SpecDemand>,
     pub(super) code_artifact: skull_mir::code_identity::BodyCodeArtifact,
     pub(super) global_names: Vec<Ustr>,
+    // A unit has no chunk to carry these, and most production embeds are in
+    // global initializers.
     pub(super) comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
     pub(super) allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
     pub(super) times: PhaseTimes,
@@ -209,6 +218,7 @@ impl UnitBody<'_> {
         }
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
+        // Runs once at chunk load, outside the definitions section the binding pass covers.
         let emission =
             emit_named_with_allocation_report(ws, cg, scx.interner(), self.symbol, mf, &[], None);
         let mut lua = emission.lua;

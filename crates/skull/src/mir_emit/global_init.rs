@@ -96,6 +96,8 @@ pub(super) fn state_initializer_lua(init_lines: &[String]) -> String {
     out
 }
 
+/// A `nobox` global's storage is its leaves, bound from the initializer's
+/// multiple return; the minted leaf names go through the collision sink.
 pub(super) fn global_init_target(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -115,6 +117,8 @@ pub(super) fn global_init_target(
         .join(", "))
 }
 
+/// Runs only when this load created the global storage: a program loaded over
+/// live storage keeps every value the running program wrote.
 fn global_init_line(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -230,6 +234,7 @@ fn accessor_fields(
         .iter()
         .zip(&shape.paths)
         .map(|(cell, path)| {
+            // Table boxes store dotted paths as literal keys; cdata uses nested fields.
             if shape.storage == skull_mir::lower::ValueStorage::CData {
                 format!("{cell} = v.{path}")
             } else {
@@ -374,6 +379,7 @@ pub(super) fn emit_global_unit(
                 return out;
             };
             let key = Ustr::from(&init_name);
+            // A single returned expression is evaluated in the init line itself.
             let returned = lua
                 .strip_prefix(&format!("function {init_name}()\n do return "))
                 .and_then(|rest| rest.strip_suffix(" end\nend\n"))
@@ -383,10 +389,14 @@ pub(super) fn emit_global_unit(
                 Some(expr) => expr.clone(),
                 None => format!("{init_name}()"),
             };
+            // An unread constant is still lowered: a `@wire(onchange=...)` dependency
+            // compares its body fingerprint.
             let unread = g.is_const && cg.is_unread_constant(g.name);
             if returned.is_some() || unread {
                 lua.clear();
             }
+            // Read after closure conversion: a lambda's global reads run when it is
+            // called, so they are not init-ordering constraints.
             emit_lowered(
                 ws,
                 cg,
@@ -408,6 +418,7 @@ pub(super) fn emit_global_unit(
                     return out;
                 }
             };
+            // A `const` init runs unguarded so an edited literal shows on reload.
             let line = if g.is_const {
                 format!("{target} = {init}\n")
             } else {

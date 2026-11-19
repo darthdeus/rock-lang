@@ -1,3 +1,5 @@
+/// A pool thread waiting in one compile's join can steal another compile's
+/// item, so an item's mode must not depend on what its thread holds.
 #[cfg(not(feature = "sequential"))]
 struct WorkerMode {
     inline_off: bool,
@@ -33,6 +35,7 @@ struct WorkerScope {
     _allocation_activation: crate::allocation_report::ActivationScope,
 }
 
+/// Order-preserving in parallel and under `sequential`, so output is identical.
 pub(super) fn par_map<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync + Send) -> Vec<R> {
     par_map_with(items, || (), move |_, item| f(item))
 }

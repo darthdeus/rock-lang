@@ -42,20 +42,33 @@ pub struct SkullEmitCache {
     pub(super) graph: crate::instance_graph::InstanceGraph,
     pub(super) lua_view: crate::artifact::ArtifactView,
     pub(super) changed_since_full: FxHashSet<Instance>,
+    // Its overload set derives from signatures, so it holds across body edits;
+    // an interface edit takes `emit_full`, which builds a fresh cache.
     pub(super) cg: CodegenCtx,
+    // Updated per body edit. A name whose taken-by-reference membership flips
+    // re-emits that function and its callers, whose scalar ABI changed.
     pub(super) scx: skull_mir::lower::ScalarCtx,
     pub(super) inline_cache: skull_transform::InlineCache,
+    // Codegen reverse dependencies: a chunk's text embeds or specializes another
+    // declaration's body. Not derivable from the graph's call-edge `preds`.
     pub(super) dependents: FxHashMap<FuncRef, FxHashSet<Instance>>,
+    // Bounds elimination depends on transitive callee effects, residual calls included.
     pub(super) effect_snapshot: EffectSnapshot,
+    // The overlay re-runs these inits unguarded. Mutable globals never appear:
+    // their guard keeps the live value across a reload.
     pub(super) changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
+    // Removed cells stay until the next full build, so a later overlay can retry
+    // a drop after a failed or skipped load.
     pub(super) static_cells_since_full: FxHashMap<Ustr, StaticBaseline>,
     pub(super) roots: RootCache,
     pub(super) shader_registrations: ShaderRegistrations,
     pub(super) shader_view: crate::shader_artifact::ShaderArtifactView,
+    // Keyed by emitted body, since a specialization is its own definition.
     pub(super) emitted: FxHashSet<Instance>,
     pub(super) code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
     pub(super) lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
     pub(super) global_layout: Option<String>,
+    // Kept by body overlays: definition structure is a full-reload boundary.
     pub(super) definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
     pub(super) artifact_fingerprint: Option<String>,
     pub(super) fingerprint_code_rows: Option<crate::artifact_fingerprint::CodeRows>,
@@ -251,6 +264,7 @@ impl SkullEmitCache {
     }
 
     /// Every `embed_string` input baked into the program, with the hash of
+    /// Covers the always-emitted units too, which hold most production embeds.
     /// the baked bytes: the files a watcher must treat as sources.
     pub fn comptime_file_hashes(&self) -> Vec<(Ustr, u64)> {
         let mut out: FxHashMap<Ustr, u64> = FxHashMap::default();
@@ -313,6 +327,7 @@ impl SkullEmitCache {
         Ok(current != self.shader_registrations.keys)
     }
 
+    /// A body-only edit must not use the full-workspace check.
     /// [`Self::shader_registration_keys_changed`] over only the re-inferred bodies.
     pub fn shader_registration_keys_changed_for_bodies(
         &self,
@@ -517,6 +532,8 @@ impl SkullEmitCache {
         dependency_edges
     }
 
+    /// A stale chunk would be reassembled by `emit_incremental` and offered to
+    /// every later overlay, though no call reaches it.
     fn forget_instance(&mut self, gone: &Instance) {
         if let Some(Ok(c)) = self.chunks.get(gone) {
             let deps: Vec<FuncRef> = c.deps.iter().copied().collect();
@@ -678,6 +695,8 @@ impl SkullEmitCache {
             BodyOwner::Function(func) => ws.module(mid).functions[func].inline_body.is_some(),
             _ => false,
         }) {
+            // A constant emitted without a global because nothing read it needs one
+            // again once an edited inline Lua body spells it.
             for name in cache.cg.refresh_unread_constants(ws) {
                 cache
                     .changed_consts_since_full
@@ -739,6 +758,7 @@ impl SkullEmitCache {
             cache.roots.roots = current_roots;
         }
         cache.roots.shader_roots = current_shader_roots;
+        // The view's update rows must describe the graph before this update.
         cache.lua_view.prepare_update(&cache.graph);
         let update = cache.graph.update_bodies_with_root_delta(
             ws,
@@ -758,6 +778,8 @@ impl SkullEmitCache {
         );
         cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
 
+        // Only the graph knows an instance was stranded; its chunk must go, or
+        // reassembly re-emits a definition no call reaches.
         for gone in &update.removed {
             cache.forget_instance(gone);
         }
@@ -793,8 +815,11 @@ impl SkullEmitCache {
                 _ => None,
             })
             .collect();
+        // A flipped scalar ABI re-emits a function even if its body is unchanged.
         changed.extend(flipped_frefs.iter().copied());
 
+        // A changed callee memory effect reruns every caller's bounds elimination,
+        // even through a residual call whose inline eligibility is unchanged.
         let effect_changed: FxHashSet<FuncRef> =
             if cache.effect_snapshot.is_empty() && ws.vec_effects.get().is_none() {
                 FxHashSet::default()
@@ -813,6 +838,8 @@ impl SkullEmitCache {
             let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
             for (body, chunk) in cache.chunks.iter() {
                 let Ok(chunk) = chunk else { continue };
+                // Bone hashes only source text, so a stale baked comptime input is a body
+                // edit only this check can see.
                 if comptime_reads_stale(ws, &chunk.comptime_reads, &mut file_hashes) {
                     changed.insert(body.func);
                 }
@@ -840,6 +867,8 @@ impl SkullEmitCache {
             &concrete_update.candidate_keys_added,
             &concrete_update.candidate_keys_removed,
         )?;
+        // A residual call embeds no callee body, so its caller keeps the chunk when
+        // every candidate's decision inputs are unchanged.
         let mut stable_residual_frefs = FxHashSet::default();
         if let Some(previous) = previous_candidate_table.as_ref() {
             for fref in &changed {
@@ -898,6 +927,7 @@ impl SkullEmitCache {
             changed.union(&effect_changed).copied().collect();
         for c in &dependency_seeds {
             if let Some(deps) = cache.dependents.get(c) {
+                // A changed effect invalidates every dependent, whatever its inline decision.
                 if effect_changed.contains(c) {
                     affected.extend(deps.iter().cloned());
                 } else {
@@ -919,9 +949,11 @@ impl SkullEmitCache {
 
         let t_relow = Instant::now();
         for body in &affected {
+            // `affected` holds every lowered body that can have changed.
             cache.inline_cache.invalidate(body.func);
         }
         for body in &affected {
+            // Re-emission can change the deps, or drop the chunk entirely.
             let old_deps: Vec<FuncRef> = match cache.chunks.get(body) {
                 Some(Ok(c)) => c.deps.iter().copied().collect(),
                 _ => Vec::new(),
@@ -960,6 +992,8 @@ impl SkullEmitCache {
                 cache.chunks.remove(body);
             }
         }
+        // After invalidation, so a newly reached body cannot reuse an inline decision
+        // made for the old body.
         let (added_errors, added_fingerprint_identities) =
             Self::build_graph_added_chunks(cache, ws, &update.added);
         fingerprint_identities.extend(added_fingerprint_identities);
@@ -975,6 +1009,8 @@ pub fn emit_incremental(
     reinferred: &[(ModuleId, BodyOwner)],
 ) -> Result<MirEmit, CompilerError> {
     let t_reemit = Instant::now();
+    // Shader registrations first: they are graph roots, so the cache update must
+    // see this edit's set.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
     let (_affected, update, added_errors, _fingerprint_identities) =
         cache.update_chunk_cache(ws, reinferred, &[])?;

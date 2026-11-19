@@ -1,5 +1,7 @@
 use super::*;
 
+/// A declaration's own body sorts ahead of its specializations, which sort by
+/// their instantiation's canonical spelling, an injective key.
 fn overlay_order_key(
     scx: &skull_mir::lower::ScalarCtx,
     body: &Instance,
@@ -15,6 +17,8 @@ fn overlay_order_key(
     (fref.module.index(), u32::from(fref.func.into_raw()), key)
 }
 
+/// Recreates only the factories whose captures changed, in full-build order.
+/// Rebound callers must also publish their escaping CodeRef slots.
 fn overlay_callee_bindings(
     ws: &Workspace,
     cache: &SkullEmitCache,
@@ -77,6 +81,9 @@ fn transactional_overlay(lua: &str, mut globals: BTreeSet<String>) -> String {
     out
 }
 
+/// Loaded after `main.lua`, whose scaffold and globals a body edit cannot
+/// change. Carries every body changed since the full build, so an earlier
+/// edit is not reverted to `main.lua`'s copy.
 fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
@@ -112,6 +119,7 @@ fn assemble_overlay(
         match cache.chunks.get(body) {
             Some(Ok(chunk)) => definitions.push_chunk(chunk),
             Some(Err(err)) => return Err(err.clone()),
+            // An extern or inline(lua) edit is interface-tier and takes a full rebuild.
             None => {}
         }
     }
@@ -142,6 +150,8 @@ fn assemble_overlay(
     )?;
     out.push_str(&code_slot_stage);
     let d_code_slot_stage = t_code_slot_stage.elapsed();
+    // Every cumulative overlay carries the current static keys: only the runtime
+    // knows which earlier overlays loaded, and it keeps a cell whose key is unchanged.
     let t_static_resets = Instant::now();
     let mut static_resets = String::new();
     let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
@@ -163,6 +173,8 @@ fn assemble_overlay(
             );
         }
     }
+    // A generic's static can live in several callers' chunks, so a cell is gone
+    // only when no current chunk declares it.
     if !cache.static_cells_since_full.is_empty() {
         let current: FxHashSet<Ustr> = cache
             .chunks
@@ -188,6 +200,9 @@ fn assemble_overlay(
     let d_static_resets = t_static_resets.elapsed();
 
     let t_const_inits = Instant::now();
+    // Re-emits the changed consts and every const whose initializer transitively
+    // reads one; a dependent can embed an upstream literal. Overloads merge under
+    // one name, which can only add a const. Mutable globals are never re-emitted.
     if !cache.changed_consts_since_full.is_empty() {
         let deps = skull_mir::reach::symbol_references(ws);
 
@@ -394,6 +409,7 @@ fn assemble_overlay(
             setup_lanes: SetupLaneAttribution::default(),
             graph_census: crate::instance_graph::RunStats::default(),
             concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
+            // `main.lua` already installed the entry point.
             emits_main: false,
             shaders: std::sync::Arc::clone(&cache.shader_registrations.sources),
         },
@@ -423,6 +439,7 @@ pub fn emit_overlay_with_span_edits(
     let t_scx = t1.elapsed();
     let t2 = Instant::now();
     let t_shader = Instant::now();
+    // Shader registrations first: the cache update must see this edit's roots.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
     let d_shader = t_shader.elapsed();
     let t_chunk = Instant::now();
@@ -460,6 +477,8 @@ pub fn emit_overlay_with_span_edits(
         ));
     }
     let t_layout = Instant::now();
+    // The overlay runs over live storage, so anything but a function body edit
+    // must keep the mutable-global layout.
     let body_only = reinferred
         .iter()
         .all(|(_, owner)| matches!(owner, BodyOwner::Function(_)));
@@ -477,6 +496,8 @@ pub fn emit_overlay_with_span_edits(
     let t_stale = Instant::now();
     {
         let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
+        // A global initializer's comptime input can go stale with no reinferred body.
+        // A stale mutable global keeps its live value, as for a source edit.
         let stale_consts: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = cache
             .unit_comptime_reads
             .globals
@@ -514,8 +535,10 @@ pub fn emit_overlay_with_span_edits(
     if concrete_stats_requested() {
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
+    // Removed identities stay, so a later overlay can retry a failed removal.
     cache.retain_static_cells(ws)?;
     let t_asm = t3.elapsed();
+    // A newly colliding synthetic name is not safe to deliver as an overlay.
     if let Some(err) = cache.cg.take_rejection() {
         return Err(err);
     }

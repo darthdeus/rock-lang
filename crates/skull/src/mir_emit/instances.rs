@@ -20,6 +20,10 @@ fn demand_clash(
     )
 }
 
+/// The graph silently caps a too-deep instance, so emission raises the
+/// spanned rejection. The depth test is the graph's, so both sides agree.
+/// Depth is the discriminant because only recursion that grows its type
+/// arguments diverges; same-instance recursion is legal.
 fn too_deep_to_instantiate(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -100,6 +104,7 @@ pub(super) fn update_inline_candidate_table(
     }))
 }
 
+// Keyed by symbol, so the queue's completion order never shows in the output.
 type SpecOutcome = (String, Instance, Result<Chunk, CompilerError>);
 
 pub(super) type SpecChunks = (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>);
@@ -107,6 +112,7 @@ pub(super) type SpecChunks = (FxHashMap<Instance, Chunk>, Vec<(String, CompilerE
 pub(super) struct SpecQueue<'a> {
     ws: &'a Workspace,
     scx: &'a skull_mir::lower::ScalarCtx,
+    // A set rather than the graph, so a one-shot build can free the graph first.
     dissenters: FxHashSet<Instance>,
     cached: Option<&'a FxHashMap<Instance, Result<Chunk, CompilerError>>>,
     done: std::sync::Mutex<FxHashSet<Instance>>,
@@ -311,6 +317,8 @@ pub(super) fn should_emit_via_view(
     call_serving || publication
 }
 
+/// An inline(lua) body is emitted when it is published (`@nomangle`), a
+/// declared root, taken as a value, or called without being spliced.
 pub(super) fn emits_foreign_definition(
     ws: &Workspace,
     view: &crate::artifact::ArtifactView,

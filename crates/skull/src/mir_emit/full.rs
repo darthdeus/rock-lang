@@ -174,6 +174,8 @@ fn build_roots(
     })
 }
 
+/// Widens the roots by every sim a reached body names, rebuilding the graph
+/// until no new sim is reached.
 fn expand_selected_sim_roots(
     ws: &Workspace,
     roots: &mut FullRoots,
@@ -479,6 +481,8 @@ fn workspace_codegen_ctx(
     Ok(cg)
 }
 
+/// Checked per signature over every function, not just the emitted set: a
+/// duplicate Lua parameter is illegal whichever body is reached.
 fn reject_abi_param_collisions(ws: &Workspace, scx: &skull_mir::lower::ScalarCtx, cg: &CodegenCtx) {
     for m in ws.source_modules() {
         for (fid, _) in m.functions.iter() {
@@ -534,11 +538,14 @@ fn emit_full_chunks<'a>(
         .enumerate()
         .map(|(at, (self_ref, f))| FanOutJob::Body(at, self_ref, f))
         .collect();
+    // Libraries come before their users; starting the users first starts their
+    // specialization chains early, so no chain runs alone at the end.
     jobs.reverse();
     let inline_candidate_table = setup_phases.timed("setup: inline candidate table", || {
         build_inline_candidate_table(ws, scx, concrete)
     })?;
     queue.attribution = attribution;
+    // One slot per body keeps the chunk map in declaration order without a sort.
     let bodies: std::sync::Mutex<FanOutBodies> =
         std::sync::Mutex::new(std::iter::repeat_with(|| None).take(jobs.len()).collect());
     setup_phases.timed("window: fan-out", || {
