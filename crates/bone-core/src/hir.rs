@@ -158,7 +158,7 @@ pub enum BodyOwner {
     Newtype(Idx<NewtypeDef>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Body {
     /// Bumped on every re-lower. Batch-lowering leaves 0.
     pub generation: u64,
@@ -236,56 +236,6 @@ pub enum SegmentTarget {
         enum_key: Ustr,
         variant: Ustr,
     },
-}
-
-impl Default for Body {
-    fn default() -> Self {
-        Self {
-            generation: 0,
-
-            scope_arena: Default::default(),
-
-            binding_arena: Default::default(),
-            binding_spans: Default::default(),
-
-            pattern_arena: Default::default(),
-            match_arm_arena: Default::default(),
-            record_pat_field_arena: Default::default(),
-            interp_part_arena: Default::default(),
-            struct_lit_field_arena: Default::default(),
-
-            statement_arena: Default::default(),
-            statement_spans: Default::default(),
-
-            expr_arena: Default::default(),
-            expr_spans: Default::default(),
-            name_spans: Default::default(),
-
-            lowered_tys: Default::default(),
-            lowered_ty_spans: Default::default(),
-
-            arg_names: Default::default(),
-            method_call_recvs: Default::default(),
-            shared_branch_targets: Default::default(),
-            method_names: Default::default(),
-            spread_args: Default::default(),
-
-            root: Default::default(),
-            root_scope: None,
-
-            param_bindings: IdxRange::new_empty(),
-            param_defaults: Default::default(),
-
-            deco_target: None,
-
-            field_defaults: Default::default(),
-
-            node_index_cell: Default::default(),
-            node_intervals: Default::default(),
-
-            path_segments: Default::default(),
-        }
-    }
 }
 
 impl Body {
