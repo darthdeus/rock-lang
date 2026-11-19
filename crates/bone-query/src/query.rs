@@ -639,8 +639,7 @@ fn render_variant_payload(ws: &Workspace, v: &hir::EnumVariantDef) -> String {
 }
 
 fn render_variant(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Option<String> {
-    let edef = enum_def_for_variant(ws, enum_name, variant)?;
-    let v = edef.variants.iter().find(|v| v.name == variant)?;
+    let (edef, v) = variant_def(ws, enum_name, variant)?;
     Some(fenced(&format!(
         "{}::{}",
         display_name(edef.name.as_str()),
@@ -651,11 +650,16 @@ fn render_variant(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Opt
 /// Bare record heads keep the struct-literal HIR shape; a real struct is
 /// never treated as a variant.
 fn variant_def_span(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Option<Span> {
+    variant_def(ws, enum_name, variant).map(|(_, v)| v.name_span)
+}
+
+fn variant_def(
+    ws: &Workspace,
+    enum_name: Option<Ustr>,
+    variant: Ustr,
+) -> Option<(&hir::EnumDef, &hir::EnumVariantDef)> {
     let edef = enum_def_for_variant(ws, enum_name, variant)?;
-    edef.variants
-        .iter()
-        .find(|v| v.name == variant)
-        .map(|v| v.name_span)
+    Some((edef, edef.variants.iter().find(|v| v.name == variant)?))
 }
 
 fn bare_nominal_name(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
@@ -685,18 +689,10 @@ fn render_type_hover(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> St
 
 fn render_hover_type(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> String {
     if let Some(name) = bare_nominal_name(ws, bi, ty) {
-        if ws
-            .modules
-            .iter()
-            .any(|m| m.struct_by_name.contains_key(&name))
-        {
+        if struct_def_by_name(ws, name).is_some() {
             return format!("struct {}", display_name(name.as_str()));
         }
-        if ws
-            .modules
-            .iter()
-            .any(|m| m.enums_by_name.contains_key(&name))
-        {
+        if enum_def_by_name(ws, name).is_some() {
             return format!("enum {}", display_name(name.as_str()));
         }
     }
@@ -1048,14 +1044,7 @@ impl ResolvedPosition<'_> {
                 _ => None,
             };
             if let Some(name) = nominal {
-                let target = if enum_def_by_name(ws, name).is_some() {
-                    RefTarget::Enum(name)
-                } else if newtype_declared(ws, name) {
-                    RefTarget::Newtype(name)
-                } else {
-                    RefTarget::Struct(name)
-                };
-                offer(31, target);
+                offer(31, RefTarget::nominal(ws, name));
             }
             for (expr, node) in body.expr_arena.iter() {
                 let selected = selected == Some(NodeRef::Expr(expr));
@@ -1077,14 +1066,7 @@ impl ResolvedPosition<'_> {
                         if body.expr_spans.get(expr).is_some_and(|span| {
                             in_leading_name(offset, span, source_ident(*name).len())
                         }) {
-                            let target = if enum_def_by_name(ws, *name).is_some() {
-                                RefTarget::Enum(*name)
-                            } else if newtype_declared(ws, *name) {
-                                RefTarget::Newtype(*name)
-                            } else {
-                                RefTarget::Struct(*name)
-                            };
-                            offer(31, target);
+                            offer(31, RefTarget::nominal(ws, *name));
                         }
                         if let Some(field) = self.literal_field(expr) {
                             offer(41, field.target);
@@ -1566,12 +1548,6 @@ impl RefTarget {
     }
 }
 
-fn newtype_declared(ws: &Workspace, name: Ustr) -> bool {
-    ws.modules
-        .iter()
-        .any(|m| m.newtypes_by_name.contains_key(&name))
-}
-
 fn decorator_declared(ws: &Workspace, name: Ustr) -> bool {
     ws.modules
         .iter()
@@ -1628,6 +1604,16 @@ impl Token {
 }
 
 impl RefTarget {
+    fn nominal(ws: &Workspace, name: Ustr) -> Self {
+        if enum_def_by_name(ws, name).is_some() {
+            Self::Enum(name)
+        } else if newtype_def_by_name(ws, name).is_some() {
+            Self::Newtype(name)
+        } else {
+            Self::Struct(name)
+        }
+    }
+
     fn declaration(self, ws: &Workspace) -> Option<Span> {
         match self {
             Self::EnumVariant(en, variant) => variant_def_span(ws, Some(en), variant),
@@ -3047,21 +3033,16 @@ pub(crate) fn variant_record_fields(
     enum_name: &str,
     variant: &str,
 ) -> Vec<(String, String)> {
-    let ename = Ustr::from(enum_name);
-    let vname = Ustr::from(variant);
-    for m in ws.modules.iter() {
-        if let Some(idx) = m.enums_by_name.get(&ename) {
-            if let Some(v) = m.enums[*idx].variants.iter().find(|v| v.name == vname) {
-                if let hir::VariantPayload::Record(fields) = &v.payload {
-                    return fields
-                        .iter()
-                        .map(|f| (f.name.to_string(), ws.render(None, f.ty)))
-                        .collect();
-                }
-            }
-        }
-    }
-    Vec::new()
+    let record = RecordType::Variant(Ustr::from(enum_name), Ustr::from(variant));
+    ws.modules
+        .iter()
+        .find_map(|m| record.fields(m))
+        .map_or_else(Vec::new, |fields| {
+            fields
+                .iter()
+                .map(|f| (f.name.to_string(), ws.render(None, f.ty)))
+                .collect()
+        })
 }
 
 fn smallest_expr_covering(
