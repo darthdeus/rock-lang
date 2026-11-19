@@ -1,4 +1,4 @@
-use crate::common::{run_main, try_emit_module};
+use crate::common::{emit_module, run_main};
 
 const SRC: &str = r#"
 struct Mob { hp: int }
@@ -62,7 +62,7 @@ fn main() {
 
 #[test]
 fn nullable_entity_field_assignment_and_consumers_round_trip() {
-    let lua = try_emit_module(SRC).expect("fixture must emit");
+    let lua = emit_module(SRC);
     assert!(lua.contains(r#"slots = ({_data ="#));
     assert!(crate::common::has_vec_header(
         &lua,

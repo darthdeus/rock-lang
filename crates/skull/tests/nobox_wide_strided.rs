@@ -1,4 +1,4 @@
-use crate::common::{function_body, run_luajit, run_main, try_emit_module};
+use crate::common::{emit_module, function_body, run_luajit, run_main, try_emit_module};
 
 const EVENT: &str = r#"
 nobox value P2 { x: float, y: float }
@@ -82,8 +82,7 @@ fn main() {
 
 #[test]
 fn wide_nobox_vec_stores_each_leaf_in_strided_rows() {
-    let lua =
-        try_emit_module(&program(PUSH_MAIN)).expect("a wide nobox element must stay flat in a Vec");
+    let lua = emit_module(&program(PUSH_MAIN));
     let main = function_body(&lua, "main");
     assert!(crate::common::has_vec_header(main, "strided", None));
     assert!(!main.contains(r#"["pay.__tag"] = {}"#));
@@ -113,7 +112,7 @@ fn emit(xs: [Row], row: Row) {{ xs.push(row) }}
 fn main() {{ let xs: [Row] = []; emit(xs, Row {{ {values} }}) }}
 "#
     );
-    let lua = try_emit_module(&src).expect("emits");
+    let lua = emit_module(&src);
     let push = function_body(&lua, "emit");
     assert_eq!(push.matches("._data").count(), 1);
     assert_eq!(push.matches(".len").count(), 2);
@@ -198,7 +197,7 @@ fn main() {
 
 #[test]
 fn strided_first_fill_reserves_once_and_refill_reuses_backing() {
-    let lua = try_emit_module(&program(RESERVE_MAIN)).expect("emits");
+    let lua = emit_module(&program(RESERVE_MAIN));
     let script = format!(
         r#"
 local original = require('table.new')
@@ -263,7 +262,7 @@ fn main() {
 
 #[test]
 fn wide_nobox_strided_vec_keeps_the_mutating_surface() {
-    let lua = try_emit_module(&program(SURFACE_MAIN)).expect("emits");
+    let lua = emit_module(&program(SURFACE_MAIN));
     assert!(crate::common::has_vec_header(&lua, "strided", None));
     assert_eq!(
         run_main(&lua),
@@ -310,7 +309,7 @@ fn main() {
 
 #[test]
 fn wide_nobox_strided_vec_releases_removed_references() {
-    let lua = try_emit_module(RELEASE_MAIN).expect("emits");
+    let lua = emit_module(RELEASE_MAIN);
     assert!(crate::common::has_vec_header(&lua, "strided", None));
     assert_eq!(run_main(&lua), "true,true,true");
 }
@@ -363,7 +362,7 @@ fn main() {
 
 #[test]
 fn wide_generic_rows_keep_one_slot_per_type_argument() {
-    let lua = try_emit_module(GENERIC_WIDE).expect("generic rows emit");
+    let lua = emit_module(GENERIC_WIDE);
     assert_eq!(
         run_luajit(&format!(
             "{lua}\nmain()\nlocal row = __ROCK_STRIDED_ROWS.Wide\nassert(row.a == 1 and row.item == 2 and row.flag == 5)\n"
@@ -386,7 +385,7 @@ fn wide_generic_rows_clone_owned_leaves_and_release_removed_references() {
     return "{before} {shallow[0].a} {owned[0].item[0]} {xs[0].item[0]}"
 }
 "#;
-    let lua = try_emit_module(&format!("{GENERIC_WIDE}\n{extra}")).expect("generic copies emit");
+    let lua = emit_module(&format!("{GENERIC_WIDE}\n{extra}"));
     assert_eq!(
         run_luajit(&format!("{lua}\nprint(copy_rows())\n")),
         "2 2 1 1 21 99",
@@ -402,8 +401,7 @@ fn wide_generic_rows_clone_owned_leaves_and_release_removed_references() {
     return "{xs.len()} {row.item.x} {shared[0].item.x}"
 }
 "#;
-    let lua =
-        try_emit_module(&format!("{GENERIC_WIDE}\n{popped}")).expect("generic value pop emits");
+    let lua = emit_module(&format!("{GENERIC_WIDE}\n{popped}"));
     assert_eq!(
         run_luajit(&format!("{lua}\nprint(pop_value())\n")),
         "0 11 99",
@@ -412,14 +410,14 @@ fn wide_generic_rows_clone_owned_leaves_and_release_removed_references() {
     let release = RELEASE_MAIN
         .replace("value Holder { items: [int]?", "value Holder<T> { items: T")
         .replace("[Holder]", "[Holder<[int]?>]");
-    let lua = try_emit_module(&release).expect("generic reference cleanup emits");
+    let lua = emit_module(&release);
     assert!(crate::common::has_vec_header(&lua, "strided", None));
     assert_eq!(run_main(&lua), "true,true,true",);
 }
 
 #[test]
 fn a_nobox_element_at_the_threshold_keeps_columns() {
-    let lua = try_emit_module(NARROW).expect("emits");
+    let lua = emit_module(NARROW);
     let main = function_body(&lua, "main");
     assert!(
         crate::common::has_vec_header(main, "columns", None)
@@ -455,7 +453,7 @@ fn main() {
 
 #[test]
 fn a_nested_leaf_of_a_flat_stored_element_is_one_slot_write() {
-    let lua = try_emit_module(NESTED_WRITE).expect("emits");
+    let lua = emit_module(NESTED_WRITE);
     assert!(
         crate::common::has_vec_header(&lua, "strided", None)
             && crate::common::has_vec_header(&lua, "columns", None)
@@ -495,7 +493,7 @@ fn main() {
 
 #[test]
 fn an_emptied_strided_vec_answers_like_a_boxed_one() {
-    let lua = try_emit_module(&program(EMPTY_EDGES_MAIN)).expect("emits");
+    let lua = emit_module(&program(EMPTY_EDGES_MAIN));
     assert!(crate::common::has_vec_header(&lua, "strided", None));
     assert_eq!(
         run_main(&lua),
@@ -540,7 +538,7 @@ fn main() {{
 }}
 "#
         );
-        let lua = try_emit_module(&src).expect("row push emits");
+        let lua = emit_module(&src);
         assert_eq!(run_main(&lua), "ok");
     }
 }
@@ -563,7 +561,7 @@ fn append(xs: [Row], i: int) {{ xs.push(Row {{ {values} }}) }}
 fn main() {{ let xs: [Row] = []; append(xs, 1) }}
 "#
         );
-        let lua = try_emit_module(&src).expect("row push emits");
+        let lua = emit_module(&src);
         let push = function_body(&lua, "append");
         assert_eq!(push.matches(".len").count(), 2);
         if width == 12 {

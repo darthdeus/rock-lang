@@ -1,4 +1,4 @@
-use crate::common::{function_body, run_main, try_emit_module};
+use crate::common::{emit_module, function_body, run_main, try_emit_module};
 
 const WIDE_NOBOX_OVERWRITE: &str = r#"
 nobox value Wide { a: int, b: int, c: int, d: int, e: int }
@@ -13,8 +13,7 @@ fn main() {
 
 #[test]
 fn wide_nobox_vec_stays_flat_past_the_implicit_threshold() {
-    let lua = try_emit_module(WIDE_NOBOX_OVERWRITE)
-        .expect("an explicit nobox guarantee must not fall back to boxed Vec elements");
+    let lua = emit_module(WIDE_NOBOX_OVERWRITE);
     let body = function_body(&lua, "main");
     assert!(!body.contains("Wide_lct("));
     assert!(crate::common::has_vec_header(body, "strided", None));
@@ -60,10 +59,8 @@ fn every_leaf_count_round_trips_and_the_storage_tier_flips_at_the_threshold() {
     for extra in 0..5 {
         let leaves = extra + 3;
         let src = source(extra);
-        let lua = match try_emit_module(&src) {
-            Ok(lua) => lua,
-            Err(e) => panic!("{} fields / {leaves} leaves must emit: {e:?}", extra + 1),
-        };
+        let lua = try_emit_module(&src)
+            .unwrap_or_else(|e| panic!("{} fields / {leaves} leaves must emit: {e:?}", extra + 1));
         let want_present: String = std::iter::once("1 2".to_string())
             .chain((0..extra).map(|i| format!(" {}", i + 3)))
             .collect();

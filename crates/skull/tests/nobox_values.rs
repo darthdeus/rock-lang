@@ -270,12 +270,11 @@ fn main() {
 #[test]
 fn closure_capture_stores_nobox_leaves() {
     let lua = emit_module(NOBOX_CLOSURE_CAPTURE);
-    let names = crate::common::definitions_matching(&lua, "capture");
-    assert!(!names.is_empty(), "no `capture` definition in:\n{lua}");
-    let bodies: String = names
+    let bodies: String = crate::common::definitions_matching(&lua, "capture")
         .iter()
-        .map(|name| crate::common::function_body(&lua, name))
+        .map(|name| function_body(&lua, name))
         .collect();
+    assert!(!bodies.is_empty(), "no `capture` definition");
     assert!(
         !bodies.contains("NV2_ct("),
         "closure capture materialized its nobox value:\n{bodies}"
@@ -680,10 +679,8 @@ const NOBOX_IN_GC_VALUE_LEAF_SITES: [(&str, &str, &str, &str); 2] = [
 #[test]
 fn a_gc_tier_value_threaded_as_leaves_keeps_its_nobox_fields_unboxed() {
     for (what, site, main, expected) in NOBOX_IN_GC_VALUE_LEAF_SITES {
-        let lua = match try_emit_module(&nobox_in_gc_value_src(site, main)) {
-            Ok(lua) => lua,
-            Err(e) => panic!("the {what} site must emit: {e:?}"),
-        };
+        let lua = try_emit_module(&nobox_in_gc_value_src(site, main))
+            .unwrap_or_else(|e| panic!("the {what} site must emit: {e:?}"));
         let body = function_body(&lua, "site");
         assert!(
             !body.contains("Id_ct(") && !body.contains("Grid_ct(") && !body.contains("Map_vt("),
@@ -717,10 +714,8 @@ const NOBOX_IN_GC_VALUE_BOXED_SITES: [(&str, &str, &str, &str); 3] = [
 #[test]
 fn a_stored_gc_tier_value_keeps_its_nobox_fields_as_leaves() {
     for (what, site, main, expected) in NOBOX_IN_GC_VALUE_BOXED_SITES {
-        let lua = match try_emit_module(&nobox_in_gc_value_src(site, main)) {
-            Ok(lua) => lua,
-            Err(e) => panic!("the {what} site must emit: {e:?}"),
-        };
+        let lua = try_emit_module(&nobox_in_gc_value_src(site, main))
+            .unwrap_or_else(|e| panic!("the {what} site must emit: {e:?}"));
         let body = function_body(&lua, "site");
         assert!(
             !body.contains("Id_ct(") && !body.contains("Grid_ct("),
@@ -755,10 +750,7 @@ fn main() {
 
 #[test]
 fn a_stored_gc_tier_value_with_a_nobox_field_matches_its_unmarked_twin() {
-    let marked = match try_emit_module(NOBOX_IN_GC_VALUE_SURFACE) {
-        Ok(lua) => lua,
-        Err(e) => panic!("a stored GC-tier value with a nobox field must emit: {e:?}"),
-    };
+    let marked = emit_module(NOBOX_IN_GC_VALUE_SURFACE);
     let plain = emit_module(&NOBOX_IN_GC_VALUE_SURFACE.replacen("nobox value V2", "value V2", 1));
     for name in ["mk", "main"] {
         let body = function_body(&marked, name);
@@ -820,10 +812,7 @@ fn main() {
 
 #[test]
 fn a_stored_gc_tier_value_keeps_nullable_and_nested_nobox_fields_as_leaves() {
-    let lua = match try_emit_module(NOBOX_IN_GC_VALUE_NULLABLE_NESTED) {
-        Ok(lua) => lua,
-        Err(e) => panic!("nullable and nested nobox fields of a GC-tier value must emit: {e:?}"),
-    };
+    let lua = emit_module(NOBOX_IN_GC_VALUE_NULLABLE_NESTED);
     for name in ["mk", "mk_at", "main"] {
         let body = function_body(&lua, name);
         assert!(

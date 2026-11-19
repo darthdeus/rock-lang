@@ -90,6 +90,6 @@ fn an_opaque_body_returning_a_boxed_vec_is_admitted() {
 
 #[test]
 fn the_stdlib_constructors_still_mint_column_storage() {
-    let lua = crate::common::try_emit_module(STDLIB_CTORS_STILL_ROUTE).expect("must emit");
+    let lua = crate::common::emit_module(STDLIB_CTORS_STILL_ROUTE);
     assert_eq!(crate::common::run_main(&lua), "135");
 }

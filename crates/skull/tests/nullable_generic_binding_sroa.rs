@@ -10,7 +10,7 @@ fn main() {
     print("{thru(b, 1).x}")
 }
 "#;
-    let lua = crate::common::try_emit_module(SRC).expect("must emit");
+    let lua = crate::common::emit_module(SRC);
     let body = lua
         .split("function thru")
         .nth(1)

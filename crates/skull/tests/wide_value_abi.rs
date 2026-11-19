@@ -1,8 +1,8 @@
 use skull_mir::lower::{SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT};
 
 use crate::common::{
-    definition_names, emit_module_without_frame_limits, function_body, function_params,
-    luajit_loads, run_main, try_emit_module,
+    definition_names, emit_module, emit_module_without_frame_limits, function_body,
+    function_params, luajit_loads, run_main, try_emit_module,
 };
 
 fn float_fields(leaves: usize) -> String {
@@ -88,7 +88,7 @@ fn main() { print("{queue_sprites(0.5, 3)}") }
 
 #[test]
 fn the_wide_uniform_witness_uses_one_slot_per_wide_value() {
-    let lua = try_emit_module(WIDE_UNIFORM_SRC).expect("the wide-uniform shape must emit");
+    let lua = emit_module(WIDE_UNIFORM_SRC);
     luajit_loads(&lua).expect("the emitted chunk must load");
     assert_eq!(function_params(&lua, "sprite_uniform").len(), 2);
     assert_eq!(function_params(&lua, "uniform_signal").len(), 1);
@@ -115,7 +115,7 @@ fn roundtrip(seed: float) -> float {{
 fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
 "
     );
-    let lua = try_emit_module(&src).expect("reading nobox fields out of a boxed wide value");
+    let lua = emit_module(&src);
     assert_eq!(run_main(&lua), "16");
     assert_eq!(function_params(&lua, "with_anchor").len(), 5);
 }
@@ -148,7 +148,7 @@ fn cut_fixture(payload: usize, nullable: bool) -> String {
 
 #[test]
 fn a_value_at_the_cut_keeps_the_scalar_wire() {
-    let lua = try_emit_module(&cut_fixture(WIDE_VALUE_PAYLOAD_LEAF_CUT, false)).expect("emits");
+    let lua = emit_module(&cut_fixture(WIDE_VALUE_PAYLOAD_LEAF_CUT, false));
     assert_eq!(
         function_params(&lua, "thru").len(),
         WIDE_VALUE_PAYLOAD_LEAF_CUT
@@ -157,7 +157,7 @@ fn a_value_at_the_cut_keeps_the_scalar_wire() {
 
 #[test]
 fn a_value_one_leaf_over_the_cut_takes_the_aggregate_wire() {
-    let lua = try_emit_module(&cut_fixture(WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, false)).expect("emits");
+    let lua = emit_module(&cut_fixture(WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, false));
     assert_eq!(function_params(&lua, "thru").len(), 1);
 }
 
@@ -169,7 +169,7 @@ fn a_nullable_ordinary_value_takes_the_cut_of_its_payload() {
         (WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, Some(1)),
     ] {
         let src = cut_fixture(payload, true);
-        let lua = try_emit_module(&src).expect("emits");
+        let lua = emit_module(&src);
         if let Some(lanes) = lanes {
             assert_eq!(function_params(&lua, "thru").len(), lanes);
         }
@@ -189,7 +189,7 @@ fn a_wide_nobox_value_keeps_its_scalar_lanes() {
         fields = float_fields(payload),
         inits = float_inits(payload, "x"),
     );
-    let lua = try_emit_module(&src).expect("emits");
+    let lua = emit_module(&src);
     assert_eq!(function_params(&lua, "thru").len(), payload);
     assert_eq!(run_main(&lua), "1");
 }
@@ -264,7 +264,7 @@ fn the_lane_budget_boxes_widest_ordinary_values_and_never_nobox_values() {
             .contains(&b)
     );
     let src = budget_src();
-    let lua = try_emit_module(&src).expect("emits");
+    let lua = emit_module(&src);
     let params = function_params(&lua, "budget_five");
     assert_eq!(params.len(), 2 + BUDGET_MEMBER * 3);
     assert!(params.len() < SIGNATURE_SCALAR_LANE_BUDGET);
@@ -340,7 +340,7 @@ fn call_kinds_src() -> String {
 #[test]
 fn every_call_kind_agrees_on_the_boxed_wire() {
     let src = call_kinds_src();
-    let lua = try_emit_module(&src).expect("emits");
+    let lua = emit_module(&src);
     assert_eq!(function_params(&lua, "bump").len(), 1);
     let names = definition_names(&lua);
     for name in names {
@@ -373,7 +373,7 @@ fn main() {{
 ",
         over_cut_value()
     );
-    let lua = try_emit_module(&src).expect("emits");
+    let lua = emit_module(&src);
     assert_eq!(function_params(&lua, "keep_and_mutate").len(), 1);
     assert_eq!(run_main(&lua), "1 99 7 99");
 }
@@ -392,7 +392,7 @@ fn main() {{
 ",
         over_cut_value()
     );
-    let lua = try_emit_module(&src).expect("emits");
+    let lua = emit_module(&src);
     let body = function_body(&lua, "forward");
     assert_eq!(function_params(&lua, "forward").len(), 1);
     assert_eq!(body.matches("_ct(").count(), 0);

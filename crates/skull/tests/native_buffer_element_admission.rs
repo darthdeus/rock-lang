@@ -1,4 +1,4 @@
-use crate::common::try_emit_module;
+use crate::common::{emit_module, try_emit_module};
 
 const NATIVEBUFFER_STRING: &str = r#"
 fn bad(n: int) -> NativeBuffer<string> { return native_buffer_alloc(n) }
@@ -50,5 +50,5 @@ fn non_c_elements_reject_at_the_planner_boundary() {
 
 #[test]
 fn native_buffer_primitives_and_ffi_value_are_valid_controls() {
-    try_emit_module(VALID_CONTROLS).expect("valid c-mappable elements must emit");
+    emit_module(VALID_CONTROLS);
 }

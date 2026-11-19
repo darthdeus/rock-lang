@@ -62,7 +62,7 @@ fn main() {
 
 #[test]
 fn frame_stores_evaluate_rhs_once_clear_payloads_and_preserve_user_writes() {
-    let lua = common::try_emit_module(FRAME_WRITES).expect("frame writes emit");
+    let lua = common::emit_module(FRAME_WRITES);
     assert_eq!(
         common::run_main(&lua),
         "true\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n2"

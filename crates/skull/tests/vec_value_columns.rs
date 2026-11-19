@@ -181,7 +181,7 @@ fn main() {
 
 #[test]
 fn vec_new_at_a_column_element_builds_empty_columns() {
-    let lua = crate::common::try_emit_module(VEC_NEW_COLUMN).expect("vec_new at [V2] must emit");
+    let lua = crate::common::emit_module(VEC_NEW_COLUMN);
     let body = crate::common::function_body(&lua, "main");
     assert!(
         !body.contains("vec_new()"),

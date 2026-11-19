@@ -1,5 +1,5 @@
 use crate::common::{
-    body_id, emit_module_without_frame_limits, function_body, luajit_loads, run_main,
+    body_id, emit_module, emit_module_without_frame_limits, function_body, luajit_loads, run_main,
     try_emit_module, ws_with_stdlib,
 };
 
@@ -48,8 +48,7 @@ fn make_item(seed: int) -> Item? {{
 fn main() {{ assert(gather(-20) == null); print(gather(1).unwrap().checksum) }}
 "#
     );
-    let lua =
-        try_emit_module(&source).expect("retained loader results must fit LuaJIT's local limit");
+    let lua = emit_module(&source);
     luajit_loads(&lua).expect("emitted loader must load");
     assert_eq!(run_main(&lua), "210");
 }
@@ -82,13 +81,13 @@ fn fixture(leaves: usize, held: usize) -> String {
 
 #[test]
 fn three_live_fifty_leaf_values_load_and_run() {
-    let lua = try_emit_module(&fixture(50, 3)).expect("emits");
+    let lua = emit_module(&fixture(50, 3));
     assert_eq!(run_main(&lua), "159");
 }
 
 #[test]
 fn a_wide_multi_return_lands_in_the_locals_that_hold_the_value() {
-    let lua = try_emit_module(&fixture(50, 2)).expect("emits");
+    let lua = emit_module(&fixture(50, 2));
     let run = function_body(&lua, "run");
     let callee = crate::common::bound_callee_name(&lua, "run", "mk_float");
     let receive = run
