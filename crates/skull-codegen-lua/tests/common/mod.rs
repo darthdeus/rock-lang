@@ -14,9 +14,7 @@ pub fn lower_test_ref(
     lower_test_ref_with_graph(ws, mid, fid).map(|(func, interner, _)| (func, interner))
 }
 
-/// [`lower_test_ref`] plus the instance graph it lowered through, for a test
-/// that needs the call edges as well as the body (the tail-call shape reads
-/// them through `skull_codegen_lua::callees_on_cycles`).
+/// [`lower_test_ref`] plus the instance graph it lowered through.
 pub fn lower_test_ref_with_graph(
     ws: &bone_core::workspace::Workspace,
     mid: bone_core::prelude::ModuleId,

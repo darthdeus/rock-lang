@@ -8,7 +8,6 @@ use skull_codegen_lua::{CodegenCtx, emit_function};
 use skull_mir::mir::FuncRef;
 use std::sync::LazyLock;
 
-/// Lower `fn_name` from `modules` (last = the user `<test>` module), emit Lua.
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_stdlib::stdlib_files()
         .iter()
@@ -503,14 +502,6 @@ fn signed_and_unsigned_constant_bitwise_results_match_lua() {
     );
 }
 
-// --- Call-site default fill --
-//
-// The callee keeps its `if p == nil { p = default }` prologue for calls the
-// emitter cannot see (a function value), but every DIRECT call passes a
-// literal scalar default explicitly, so under the JIT the prologue's nil branch
-// is never the direction a trace takes and never a doomed side exit with the
-// caller's floats live.
-
 #[test]
 fn direct_calls_pass_literal_scalar_defaults_explicitly() {
     let src = "
@@ -554,8 +545,6 @@ fn uint_checks_bind_shared_helpers_as_upvalues() {
     );
 }
 
-// --- Multi-return ABI for tuple-returning fns ---
-
 #[test]
 fn tuple_return_and_destructure_use_multiple_values_without_tables() {
     for expr in ["return (true, 42)", "(true, 42)"] {
@@ -577,10 +566,7 @@ fn tuple_return_and_destructure_use_multiple_values_without_tables() {
     );
 }
 
-/// The shipped body chain with inlining (`skull_transform::body_chain::prepare_body`),
-/// then emit. The honest artifact for zero-alloc claims: an `@inline`
-/// `iter`/`next` is only spliced (and its cursor struct scalarized) once the
-/// inliner has run, which `emit_clean` does NOT do.
+/// The shipped body chain with inlining, which `emit_clean` skips.
 fn emit_inlined(src: &str, fn_name: &str) -> String {
     let (ws, mid) = stdlib_workspace(src);
     let fid = test_fn(&ws, mid, fn_name);
@@ -636,9 +622,6 @@ fn assert_counted_zero_alloc(lua: &str) {
     }
 }
 
-// --- A REAL `[T]` for-loop routes through the stdlib
-// VecIter protocol (no skull template) and still compiles to the same
-// zero-alloc native `for` the deleted template emitted.
 #[test]
 fn for_real_vec_loop_is_forl_zero_alloc_with_raw_reads() {
     let lua = emit_inlined(
@@ -654,10 +637,6 @@ fn for_real_vec_loop_is_forl_zero_alloc_with_raw_reads() {
     assert!(!lua.contains("__vec_checked_get("), "{lua}");
 }
 
-/// A register or cell local is assigned `nil` right after its last use, so a
-/// LuaJIT exit snapshot taken later in the parent trace carries it as a
-/// constant instead of a parent SLOAD that needs a register at the side-trace
-/// head. A local still live across the branch is untouched.
 #[test]
 fn dead_locals_are_nil_killed_after_their_last_use() {
     let lua = emit_clean(
@@ -722,11 +701,7 @@ fn loop_scoped_registers_are_never_killed_outside_their_loop() {
     assert!(lines.iter().any(|l| l.ends_with(" = nil")), "{lua}");
 }
 
-// Callee binding
-
-/// [`emit_clean`] with its callee binding plan, the call-graph components
-/// populated from this harness's own instance graph exactly as
-/// `skull::mir_emit` populates them from the whole-program one.
+/// [`emit_clean`] with its callee binding plan.
 fn emit_clean_bound(src: &str, fn_name: &str) -> String {
     let (ws, mid) = stdlib_workspace(src);
     let fid = test_fn(&ws, mid, fn_name);
@@ -751,10 +726,6 @@ fn emit_clean_bound(src: &str, fn_name: &str) -> String {
 
 #[test]
 fn read_only_nullable_value_lookup_does_not_rebuild_the_wrapper() {
-    // #827: a let-bound nullable GC value struct copied out of a
-    // container binds as presence/field lanes; read-only whole uses
-    // (presence test, unwrap field reads) must not pack the lanes
-    // straight back into a fresh `_vt` wrapper.
     let prelude = r#"
 value SlotMetadata { names: [string], by_name: Map<string, int> }
 global METADATA: Map<string, SlotMetadata> = map_new()
@@ -833,11 +804,8 @@ fn backward_gotos(lua: &str) -> Vec<String> {
         .collect()
 }
 
-/// An iterator loop nested inside another loop: its preheader is reachable
-/// from its body through the enclosing back edge, which a body-reachability
-/// split read as a second back edge and bailed on. Back edges are the head's
-/// predecessors that the head DOMINATES; the preheader never is. Both loops
-/// print as counted `for`s and no backward goto survives.
+/// The inner loop's preheader is reachable from its body through the outer
+/// back edge, but it is not a back edge of the inner loop.
 #[test]
 fn nested_iterator_loop_is_recovered_as_a_counted_for() {
     let src = "\
@@ -1301,7 +1269,7 @@ fn native_buffer_and_column_map_accesses_drop_their_checks() {
 }
 
 /// Lower `src`, mark the binding named `field` as a coroutine-frame field
-/// behind a fresh state parameter, and emit. For frame-assignment shapes.
+/// behind a fresh state parameter, and emit.
 fn emit_framed_let(src: &str, fn_name: &str, field: &str) -> String {
     let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic_pass");
