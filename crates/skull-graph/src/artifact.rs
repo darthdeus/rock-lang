@@ -61,7 +61,7 @@ impl SymbolPlanner {
         realized: Realized,
     ) -> String {
         match self {
-            Self::Logical => graph.logical_symbol(ws, instance),
+            Self::Logical => instance.symbol(ws, graph.interner()),
             Self::Realized => Instance {
                 func: realized.decl,
                 args: instance.args.clone(),

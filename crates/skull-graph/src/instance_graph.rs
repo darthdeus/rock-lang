@@ -247,10 +247,6 @@ impl Walk<'_> {
         resolved
     }
 
-    fn reach(&mut self, to: Instance, subst: MonoSubst) {
-        self.out.reached.push((to, subst));
-    }
-
     fn record_bound_tree(&mut self, instance: &Instance, incoming: InstanceBoundTree) {
         self.out.bound_trees.push((instance.clone(), incoming));
     }
@@ -457,7 +453,7 @@ pub struct InstanceGraph {
 }
 
 /// Compiler-owned runtime entries a synthesized call or opaque body may name by bare name.
-pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
+const ERASED_RUNTIME_ENTRIES: &[&str] = &[
     "__descriptor_with",
     "__map_col_clear",
     "__map_col_contains",
@@ -485,7 +481,7 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
     "__rock_vec_strided_elements",
 ];
 
-pub fn is_erased_runtime_entry(f: &Function) -> bool {
+pub(crate) fn is_erased_runtime_entry(f: &Function) -> bool {
     ERASED_RUNTIME_ENTRIES.contains(&f.name.as_str())
 }
 
@@ -528,10 +524,6 @@ impl InstanceGraph {
         }
         let args: Vec<String> = i.args.iter().map(|a| self.interner.canonical(*a)).collect();
         format!("{base}@{}.{}<{}>", decl.0, decl.1, args.join(","))
-    }
-
-    pub fn logical_symbol(&self, ws: &Workspace, i: &Instance) -> String {
-        i.symbol(ws, &self.interner)
     }
 }
 
@@ -1059,11 +1051,10 @@ fn expand_sites(
                 return out;
             }
             let f = &ws.module(inst.func.module).functions[inst.func.func];
-            let is_boundary = declared_boundary(f).is_some();
-            if is_boundary {
+            if skull_mir::lower::declared_boundary_class(f).is_some() {
                 return out;
             }
-            let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
+            let Some((inf, body)) = ready_body(ws, inst.func) else {
                 return out;
             };
             out.expanded = true;
@@ -1520,7 +1511,11 @@ impl InstanceGraph {
             }
         }
         let active_decl_vec: Vec<DeclKey> = active_decls.iter().cloned().collect();
-        record_inline_body_nomangle_roots(self, ws, active_decl_vec.iter().map(|decl| decl.0));
+        self.inline_body_nomangle_roots
+            .extend(opaque_boundary_roots_for_decls(
+                ws,
+                active_decl_vec.iter().map(|decl| decl.0),
+            ));
         classify_boundaries(self, ws, &active_decl_vec);
         self.refresh_coroutine_rejections(ws, touched_instances.iter().cloned());
 
@@ -2343,7 +2338,7 @@ fn record_instantiation(
         w.out.always_emitted_targets.insert(to.clone());
     }
     w.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-    w.reach(to.clone(), subst);
+    w.out.reached.push((to.clone(), subst));
     Some(to)
 }
 
@@ -3047,7 +3042,7 @@ fn dispatched_sites(
 }
 
 /// Resolve a bare runtime entry to its target-neutral declaration.
-pub fn stdlib_entry_representative(ws: &Workspace, name: &str) -> Option<FuncRef> {
+fn stdlib_entry_representative(ws: &Workspace, name: &str) -> Option<FuncRef> {
     let decls = ws.functions_by_name.get(&ustr::Ustr::from(name))?;
     let mut reps = decls
         .iter()
@@ -3071,14 +3066,10 @@ pub fn serves(decl: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend
 }
 
 /// The boundary class of one declaration, or `None` if it has a Rock body.
-pub fn boundary_class_for(f: &Function) -> Option<BoundaryClass> {
+fn boundary_class_for(f: &Function) -> Option<BoundaryClass> {
     if is_erased_runtime_entry(f) {
         return Some(BoundaryClass::ErasedRuntimeEntry);
     }
-    declared_boundary(f)
-}
-
-fn declared_boundary(f: &Function) -> Option<BoundaryClass> {
     skull_mir::lower::declared_boundary_class(f)
 }
 
@@ -3148,15 +3139,6 @@ fn opaque_js_nomangle_targets(
     Some(targets)
 }
 
-fn record_inline_body_nomangle_roots(
-    g: &mut InstanceGraph,
-    ws: &Workspace,
-    decls: impl IntoIterator<Item = FuncRef>,
-) {
-    g.inline_body_nomangle_roots
-        .extend(opaque_boundary_roots_for_decls(ws, decls));
-}
-
 fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey]) {
     let found: Vec<Boundary> = {
         use bone_core::prelude::*;
@@ -3207,26 +3189,9 @@ fn record_coroutine_rejections(g: &mut InstanceGraph, ws: &Workspace, added: &[I
     }
 }
 
-pub(crate) enum FunctionBody<'a> {
-    Ready {
-        inf: &'a BodyInference,
-        body: &'a Body,
-    },
-    NoInference,
-    NoBody,
-    StaleInference,
-}
-
-pub(crate) fn function_body(ws: &Workspace, f: FuncRef) -> FunctionBody<'_> {
+pub(crate) fn ready_body(ws: &Workspace, f: FuncRef) -> Option<(&BodyInference, &Body)> {
     let owner = BodyOwner::Function(f.func);
-    let Some(inf) = ws.inference(f.module).and_then(|ir| ir.per_fn.get(&owner)) else {
-        return FunctionBody::NoInference;
-    };
-    let Some(body) = ws.module(f.module).bodies.get(&owner) else {
-        return FunctionBody::NoBody;
-    };
-    if inf.body_generation != body.generation {
-        return FunctionBody::StaleInference;
-    }
-    FunctionBody::Ready { inf, body }
+    let inf = ws.inference(f.module)?.per_fn.get(&owner)?;
+    let body = ws.module(f.module).bodies.get(&owner)?;
+    (inf.body_generation == body.generation).then_some((inf, body))
 }

@@ -15,8 +15,8 @@ use skull_mir::monoty::{MonoCtor, MonoInterner, MonoSubst, MonoTy, MonoTyId, Mon
 use ustr::Ustr;
 
 use crate::instance_graph::{
-    function_body, BoundaryClass, FunctionBody, Instance, InstanceGraph, Owner, Site, SiteDomain,
-    SiteOp, SiteOutcome,
+    ready_body, BoundaryClass, Instance, InstanceGraph, Owner, Site, SiteDomain, SiteOp,
+    SiteOutcome,
 };
 use crate::target_projection::CpuTargetSpec;
 
@@ -1073,9 +1073,7 @@ fn prepare_instance(
         return None;
     }
     let subst = g.substitution(&inst).cloned()?;
-    let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
-        return None;
-    };
+    let (inf, body) = ready_body(ws, inst.func)?;
 
     let mut stats = ConcreteBuildStats::default();
     let (slot_tyids, unique_slot_tyids) = if timing_enabled {
