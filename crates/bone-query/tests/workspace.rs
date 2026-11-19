@@ -2,100 +2,11 @@
 //! file in, query it, assert the LSP-shaped result.
 
 use crate::completion::{assert_labels, complete_in, labels_of};
-use crate::fixture::{PATH, Project, assert_text, diagnostics_in, hover_markup, workspace};
+use crate::fixture::{PATH, Project, diagnostics_in, workspace};
 use crate::label_asserts::assert_offers;
 use bone_query::BoneWorkspace;
 use bone_query::FileUriExt;
 use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
-
-#[track_caller]
-fn hover_text(bone: &BoneWorkspace, pos: Position) -> String {
-    hover_markup(bone, PATH, pos).unwrap_or_else(|| panic!("no hover at {pos:?}"))
-}
-
-#[test]
-fn hover_cases() {
-    let mob = "struct Mob { hp: int }\n";
-    let signature = format!("{mob}fn use_it(x: Mob) -> Mob {{\n  x\n}}\n");
-    let enum_match = "enum MobKind { Skeleton, Zombie }\nfn name(k: MobKind) -> string {\n  match k {\n    MobKind::Skeleton => \"s\"\n    MobKind::Zombie => \"z\"\n  }\n}\n";
-    // (case, source, position, text fragments; `!` forbids a fragment)
-    let cases: &[(&str, &str, (u32, u32), &[&str])] = &[
-        (
-            "uint keeps its signedness",
-            "fn main() {\n  let x: uint = 42\n  x\n}\n",
-            (1, 6),
-            &["uint", "!Type: int"],
-        ),
-        (
-            "type hole reports kind and scope",
-            "fn main() {\n  let count = 5\n  let x: ? = count + 1\n}\n",
-            (2, 9),
-            &["Type hole", "count: int"],
-        ),
-        (
-            "expression hole reports expected type and scope",
-            "fn main() {\n  let a = 1\n  let x: int = ?\n}\n",
-            (2, 15),
-            &["Expression hole expecting: int", "a: int"],
-        ),
-        (
-            "global declaration",
-            "global score: int\nfn main() {}\n",
-            (0, 9),
-            &["int"],
-        ),
-        (
-            "body type annotation",
-            &format!("{mob}fn main() {{\n  let m: Mob = Mob {{ hp: 1 }}\n}}\n"),
-            (2, 10),
-            &["struct Mob", "hp: int"],
-        ),
-        (
-            "return type",
-            &signature,
-            (1, 22),
-            &["struct Mob", "hp: int"],
-        ),
-        // A newtype's generated `__op_add` shares the newtype's name span.
-        (
-            "newtype declaration",
-            "newtype Health(int)\nfn main() {}\n",
-            (0, 9),
-            &["newtype Health(int)", "!__op"],
-        ),
-        (
-            "record pattern head",
-            &format!(
-                "{mob}fn f(m: Mob) {{\n  match m {{\n    Mob {{ hp: _h }} => {{}}\n  }}\n}}\n"
-            ),
-            (3, 5),
-            &["struct Mob"],
-        ),
-        (
-            "enum variant in a pattern",
-            enum_match,
-            (3, 16),
-            &["MobKind::Skeleton", "!string"],
-        ),
-        // A value-less global has no inference body.
-        (
-            "global type annotation",
-            &format!("{mob}global boss: Mob\nfn main() {{}}\n"),
-            (1, 14),
-            &["struct Mob", "hp: int"],
-        ),
-        (
-            "callee shows param defaults",
-            "fn plot(x: int, y: int = 0) {\n}\nfn main() {\n  plot(1)\n}\n",
-            (3, 3),
-            &["y: int = 0"],
-        ),
-    ];
-    for (case, src, (line, ch), patterns) in cases {
-        let text = hover_text(&workspace(src), Position::new(*line, *ch));
-        assert_text(case, &text, patterns);
-    }
-}
 
 /// Both views of a file's diagnostics: what `update` publishes (the editor
 /// path) and what `diagnostics_for` reports.

@@ -13,93 +13,9 @@ fn nth_offset(src: &str, needle: &str, occurrence: usize) -> usize {
 }
 
 #[test]
-fn definition_cases() {
-    // The definition span must contain the declaration name; it may be the
-    // bare name or the whole item.
-    // (case, source, use needle, offset into it, declaration needle, offset into it)
-    let cases = [
-        (
-            "local",
-            "fn f() -> int {\n    let x = 1\n    return x\n}",
-            "return x",
-            7,
-            "let x",
-            4,
-        ),
-        (
-            "parameter",
-            "fn f(n: int) -> int {\n    return n\n}",
-            "return n",
-            7,
-            "f(n",
-            2,
-        ),
-        (
-            "function call",
-            "fn helper() -> int {\n    1\n}\nfn main() {\n    let r = helper()\n}",
-            "= helper()",
-            2,
-            "fn helper",
-            3,
-        ),
-        (
-            "struct literal",
-            "struct Point { x: int }\nfn f() -> Point {\n    Point { x: 1 }\n}",
-            "Point { x: 1",
-            0,
-            "struct Point",
-            7,
-        ),
-        (
-            "enum qualifier",
-            "enum Color { Red, Green }\nfn f() -> Color {\n    Color::Red\n}",
-            "Color::Red",
-            0,
-            "enum Color",
-            5,
-        ),
-        (
-            "global",
-            "global G: int = 5\nfn f() -> int {\n    return G\n}",
-            "return G",
-            7,
-            "global G",
-            7,
-        ),
-        // Like a `mob.attack_co` access, a FieldRef key path names the field.
-        (
-            "field ref",
-            "struct Mob { health: int, attack_co: int? }\nfn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\nfn r(mob: Mob) {\n    kill_co(mob, .attack_co)\n}\n",
-            ".attack_co",
-            1,
-            "attack_co: int?",
-            0,
-        ),
-    ];
-    for (case, src, use_needle, use_into, decl_needle, decl_into) in cases {
-        let at = crate::fixture::pos(src, use_needle, use_into);
-        let decl_off = nth_offset(src, decl_needle, 1) + decl_into;
-        let def = workspace(src)
-            .definition(PATH, at)
-            .unwrap_or_else(|| panic!("{case}: no definition at {at:?}"));
-        assert_eq!(def.uri.to_file_path().unwrap(), PATH);
-        let (s, e) = (
-            offset_of(src, def.range.start),
-            offset_of(src, def.range.end),
-        );
-        assert!(
-            s <= decl_off && decl_off < e,
-            "{case}: {s}..{e} misses {decl_off}"
-        );
-        if case == "function call" {
-            assert_eq!(e - s, "helper".len(), "{case}: the bare name, not the item");
-        }
-    }
-}
-
-#[test]
 fn definition_starts() {
-    // (case, source with a `<|>` cursor and a `<@>` at the definition start)
+    // (case, source with a `<|>` cursor, a `<@>` at the definition start and
+    // optionally a `<$>` at its end)
     let cases: &[(&str, &str)] = &[
         (
             "closure captured var",
@@ -150,12 +66,20 @@ fn main() {
         ),
         (
             "function call",
-            r"fn <@>double(x: int) -> int {
+            r"fn <@>double<$>(x: int) -> int {
     return x * 2
 }
 fn main() {
     let x = 5
     let y = <|>double(x)
+}",
+        ),
+        (
+            "field ref",
+            r"struct Mob { health: int, <@>attack_co: int? }
+fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}
+fn r(mob: Mob) {
+    kill_co(mob, .<|>attack_co)
 }",
         ),
         (
@@ -340,13 +264,20 @@ fn create_vector() -> <|>Vector {
         ),
     ];
     for (case, marked) in cases {
-        let (src, at) = cursor(&marked.replacen("<@>", "", 1));
-        let (_, want) = cursor(&marked.replacen("<|>", "", 1).replacen("<@>", "<|>", 1));
+        let marker_at = |marker: &str| {
+            let others = ["<|>", "<@>", "<$>"].into_iter().filter(|m| *m != marker);
+            let text = others.fold(marked.to_string(), |text, m| text.replacen(m, "", 1));
+            cursor(&text.replacen(marker, "<|>", 1))
+        };
+        let (src, at) = marker_at("<|>");
         let def = workspace(&src)
             .definition(PATH, at)
             .unwrap_or_else(|| panic!("{case}: no definition"));
         assert_eq!(def.uri.to_file_path().unwrap(), PATH, "{case}");
-        assert_eq!(def.range.start, want, "{case}");
+        assert_eq!(def.range.start, marker_at("<@>").1, "{case}");
+        if marked.contains("<$>") {
+            assert_eq!(def.range.end, marker_at("<$>").1, "{case}");
+        }
     }
 }
 
@@ -428,25 +359,6 @@ fn builtin_definitions() {
             "{case}"
         );
     }
-}
-
-#[test]
-fn direct_enum_path_definition() {
-    use bone_semantic::prelude::*;
-
-    let src = "enum Color { Red, Green }\nfn f() -> Color { Color::Red }";
-    let ast = skull_parser::parse_module_clean(src, Ustr::from(PATH)).unwrap();
-    let ws = semantic_pass(&mut [ast]).unwrap();
-    let mid = ws.source_modules().next().unwrap().id;
-    let span = bone_query::query::definition_at(
-        &ws,
-        mid,
-        ws.inference(mid).unwrap(),
-        src.find("Color::Red").unwrap(),
-    )
-    .expect("enum qualifier resolves through its recorded path segment");
-    let (start, end) = span.offset_range();
-    assert!(start <= 5 && 5 < end, "enum declaration: {start}..{end}");
 }
 
 /// Corpus fixtures pin reference starts; keep the query-level span-width

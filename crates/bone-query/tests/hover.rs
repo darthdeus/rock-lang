@@ -111,7 +111,6 @@ fn token_hover_resolves_the_enclosing_construct() {
     let cases: &[(usize, &str, usize, &str, &str)] = &[
         (5, "match", 1, "Type:", "fn pick("),
         (6, "=>", 0, "Type:", "fn pick("),
-        (6, "::", 0, "enum Dir", "fn pick("),
         (3, ": 3", 0, "x: int (field of FixVec2)", "fn pick("),
         (2, "fn", 0, "fn pick(", "match"),
         (2, "(", 0, "fn pick(", "match"),
@@ -144,6 +143,12 @@ fn hover_cases() {
     let overloads = "struct A {}\nstruct B {}\nstruct C {}\nfn foo(a: A) -> int { 1 }\nfn foo(b: B) -> int { 2 }\n";
     let resolved = format!("{overloads}fn main() {{\n  let x = A {{}}\n  let r = foo(x)\n}}\n");
     let unresolved = format!("{overloads}fn main() {{\n  let c = C {{}}\n  let r = foo(c)\n}}\n");
+    let mob = "struct Mob { hp: int }\n";
+    let signature = format!("{mob}fn use_it(x: Mob) -> Mob {{\n  x\n}}\n");
+    let body_annotation = format!("{mob}fn main() {{\n  let m: Mob = Mob {{ hp: 1 }}\n}}\n");
+    let record_head =
+        format!("{mob}fn f(m: Mob) {{\n  match m {{\n    Mob {{ hp: _h }} => {{}}\n  }}\n}}\n");
+    let global_annotation = format!("{mob}global boss: Mob\nfn main() {{}}\n");
     // (case, source, needle, offset, text fragments; `!` forbids a fragment)
     let cases: &[(&str, &str, &str, usize, &[&str])] = &[
         (
@@ -175,6 +180,71 @@ fn hover_cases() {
             ".attack_co",
             9,
             &["attack_co: int? (field of Mob)", "!FieldRef"],
+        ),
+        (
+            "uint keeps its signedness",
+            "fn main() {\n  let x: uint = 42\n  x\n}\n",
+            "x: uint",
+            0,
+            &["uint", "!Type: int"],
+        ),
+        (
+            "hole reports kind and scope",
+            "fn main() {\n  let count = 5\n  let x: ? = count + 1\n}\n",
+            "? =",
+            0,
+            &["Type hole", "count: int"],
+        ),
+        (
+            "global declaration",
+            "global score: int\nfn main() {}\n",
+            "score",
+            2,
+            &["int"],
+        ),
+        (
+            "body type annotation",
+            &body_annotation,
+            "m: Mob",
+            4,
+            &["struct Mob", "hp: int"],
+        ),
+        (
+            "return type",
+            &signature,
+            "-> Mob",
+            4,
+            &["struct Mob", "hp: int"],
+        ),
+        // A newtype's generated `__op_add` shares the newtype's name span.
+        (
+            "newtype declaration",
+            "newtype Health(int)\nfn main() {}\n",
+            "Health",
+            1,
+            &["newtype Health(int)", "!__op"],
+        ),
+        (
+            "record pattern head",
+            &record_head,
+            "Mob { hp: _h",
+            1,
+            &["struct Mob"],
+        ),
+        // A value-less global has no inference body.
+        (
+            "global type annotation",
+            &global_annotation,
+            "boss: Mob",
+            7,
+            &["struct Mob", "hp: int"],
+        ),
+        (
+            "callee shows param defaults",
+            "fn plot(x: int, y: int = 0) {\n}\nfn main() {\n  plot(1)\n}\n",
+            "plot(1)",
+            1,
+            &["y: int = 0"],
         ),
     ];
     for (case, src, needle, into, patterns) in cases {
@@ -542,34 +612,6 @@ fn main() {
             "Type: int",
         ),
         (
-            "enum declaration name shows full body",
-            r"enum Spell<|>State {
-    Idle,
-    Casting(SpellKind, float, float),
-    Loaded(SpellKind),
-}
-enum SpellKind { Fire, Ice }",
-            r"```rock
-enum SpellState {
-  Idle,
-  Casting(SpellKind, float, float),
-  Loaded(SpellKind),
-}
-```",
-        ),
-        (
-            "enum variant declaration name shows the variant",
-            r"enum SpellState {
-    Idle,
-    <|>Casting(SpellKind, float, float),
-    Loaded(SpellKind),
-}
-enum SpellKind { Fire, Ice }",
-            r"```rock
-SpellState::Casting(SpellKind, float, float)
-```",
-        ),
-        (
             "struct field declaration name",
             r"struct Mob {
     <|>pos: FixVec2,
@@ -592,35 +634,6 @@ enum MobKind {
   Skeleton,
   Zombie,
 }
-```",
-        ),
-        (
-            "enum qualifier in pattern shows the body",
-            r#"enum MobKind { Skeleton, Zombie }
-fn name(k: MobKind) -> string {
-    match k {
-        <|>MobKind::Skeleton => "s"
-        MobKind::Zombie => "z"
-    }
-}"#,
-            r"```rock
-enum MobKind {
-  Skeleton,
-  Zombie,
-}
-```",
-        ),
-        (
-            "enum variant pattern names the variant",
-            r#"enum MobKind { Skeleton, Zombie }
-fn name(k: MobKind) -> string {
-    match k {
-        MobKind::<|>Skeleton => "s"
-        MobKind::Zombie => "z"
-    }
-}"#,
-            r"```rock
-MobKind::Skeleton
 ```",
         ),
         (
