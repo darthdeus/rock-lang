@@ -1,20 +1,12 @@
-//! Which instructions render inline at their use, and fold-depth bounds.
-
 use super::*;
 
 pub(crate) use skull_mir::sinking::always_inlinable;
 
-/// How the values of one scope are read and its cells written, from the one
-/// walk [`compute_inlinable`] makes over it. The fold passes after it decide
-/// from these tables instead of walking the operands again.
 pub(crate) struct ScopeUses {
-    /// Operands reading each value.
     pub(crate) count: Vec<u32>,
-    /// The block of a value's last reader.
     block: Vec<u32>,
-    /// A value's last reader: an instruction, or `NONE` for a terminator.
+    /// `NONE` when the last reader is a terminator.
     user: Vec<u32>,
-    /// Operands that must keep a register: [`PINNED`], [`STORE_BASE`].
     operand: Vec<u8>,
 }
 
@@ -27,7 +19,6 @@ const PINNED: u8 = 1;
 /// expression.
 const STORE_BASE: u8 = 2;
 
-/// The writes of one cell in a scope: how many, and where the last one is.
 #[derive(Clone, Copy, Default)]
 struct CellWrites {
     count: u32,
@@ -37,12 +28,8 @@ struct CellWrites {
 }
 
 /// Cells written exactly once in `scope`, as a multi-return destination, and
-/// read only after that call in the same block. A load of one is the call's
-/// result local itself, like a parameter load: without this every leaf of a
-/// wide value returned by a call occupied two locals (the result and a copy),
-/// which is what pushed functions holding a few wide values past LuaJIT's
-/// 250-slot frame limit. No later write can intervene, because the one write
-/// dominates every read. Narrow receives qualify too.
+/// read only after that call in the same block: a load of one is the call's
+/// result local itself, since the one write dominates every read.
 fn single_receive_cells(
     func: &MirFunc,
     scope: &[Idx<Block>],
@@ -94,22 +81,16 @@ fn single_receive_cells(
     out
 }
 
-/// The set of values to TREE-FOLD into their use site (no `local rN`). Expression
-/// candidates qualify at one same-block use, subject to the shared order check.
-/// Loads of parameters never written in this scope qualify at every use: the
-/// Lua parameter is already their value.
-/// Returns the folded values, the folded loads that may be rendered at any
-/// number of use sites (a parameter never written here, or a cell whose one
-/// write dominates every read), and how `scope` reads its values.
+/// Returns the folded values, the folded loads that may render at any number
+/// of use sites, and how `scope` reads its values.
 pub(crate) fn compute_inlinable(
     func: &MirFunc,
     scope: &[Idx<Block>],
     params: &[Idx<Cell>],
     pinned: &[bool],
 ) -> (Vec<bool>, Vec<bool>, ScopeUses) {
-    // Dense side-tables keyed by raw inst id (no hashing): use count, and the
-    // block of the (single) use and of the def. `NONE` = unset. Insts outside
-    // `scope` (other closures share the arena) stay at 0/NONE and never qualify.
+    // Insts outside `scope` (other closures share the arena) stay unset and
+    // never qualify.
     let ni = func.insts.len();
     let mut uses = ScopeUses {
         count: vec![0u32; ni],
@@ -173,8 +154,6 @@ pub(crate) fn compute_inlinable(
         immutable_params[raw(cell) as usize] = writes[raw(cell) as usize].count == 0;
     }
     let received = single_receive_cells(func, scope, pinned, &writes);
-    // Dense `raw(inst) -> bool` (no hashing); probed per operand in `write_opnd`
-    // and per use in `color_values`'s liveness/interference loops.
     let mut inl = vec![false; ni];
     let mut repeatable = vec![false; ni];
     for &tag in &reread {
@@ -246,13 +225,10 @@ fn spells_operands_once(consumer: &Inst) -> bool {
     )
 }
 
-/// Fold a read or call into its one use in the same block, so its value
-/// never occupies a Lua local of its own: no register, no move into the
-/// cell or argument slot that consumes it, and no kill afterwards. A cell
-/// load qualifies when no write to the cell can run before the consumer
+/// Fold a read or call into its one use in the same block. A cell load
+/// qualifies only when no write to it can run before the consumer
 /// ([`keep_reads_ordered`]); a projection or call is a throwing
-/// instruction whose order with other effects [`preserve_effect_order`]
-/// keeps. Returns the newly folded instructions.
+/// instruction whose order [`preserve_effect_order`] keeps.
 ///
 /// [`preserve_effect_order`]: skull_mir::sinking::preserve_effect_order
 #[allow(clippy::too_many_arguments)]
@@ -305,7 +281,6 @@ pub(crate) fn fold_single_use_reads(
                         if func_of(ws, *f).inline_body.is_some());
                     !splices
                         && match user[k] {
-                            // The one reader is this block's terminator.
                             NONE => {
                                 matches!(func.blocks[b].term, Term::Return(_) | Term::Branch { .. })
                             }
@@ -314,9 +289,8 @@ pub(crate) fn fold_single_use_reads(
                 }
                 _ => false,
             };
-            // A call folded into another call's operands stacks its frame on
-            // the outer one's. One level keeps `f(g(x))` while a chain cannot
-            // grow the frame past LuaJIT's slot cap.
+            // A call folded into another call's operands stacks its frame on the
+            // outer one's; one level keeps chains under LuaJIT's slot cap.
             let mut nested = false;
             if matches!(func.insts[id], Inst::Call { .. } | Inst::CallValue { .. }) {
                 func.insts[id].uses_each(&mut |v| {
@@ -379,7 +353,6 @@ pub(crate) fn keep_reads_ordered(
     uses: &ScopeUses,
 ) {
     let ni = func.insts.len();
-    // Position in its block of the statement that finally evaluates a value.
     let mut eval = vec![0usize; ni];
     let user = &uses.user;
     for &b in scope {
@@ -423,15 +396,10 @@ pub(crate) fn keep_reads_ordered(
     }
 }
 
-/// Fold every `IntToFloat` whose operand renders as a bare local (a register
-/// or a `repeatable` load) into its uses, however many: the conversion is the
-/// identity on LuaJIT numbers, and its own register would only copy that
-/// local. Folded reads see through to the operand, so its register stays live
-/// to the last use of the conversion. A value live across a yield is already
-/// spilled to a frame field by the coroutine transform, so a resumed step
-/// reads the field, never the register. An operand folded into the
-/// conversion (`(a + b) as float`) keeps the conversion's register, so it is
-/// still evaluated once.
+/// Fold every `IntToFloat` whose operand renders as a bare local: the
+/// conversion is the identity on LuaJIT numbers. Folded reads see through to
+/// the operand, so its register stays live to the conversion's last use; a
+/// value live across a yield is already spilled to a frame field.
 pub(crate) fn alias_int_to_float(
     func: &MirFunc,
     scope: &[Idx<Block>],
@@ -450,8 +418,6 @@ pub(crate) fn alias_int_to_float(
     }
 }
 
-/// Append the operands of the flat `..` run `id` renders as: a folded child
-/// `StringConcat` contributes its own operands, anything else is one operand.
 pub(crate) fn concat_run(
     func: &MirFunc,
     inlinable: &[bool],
@@ -534,14 +500,8 @@ fn fold_operand_levels(
 
 /// Give a register to every folded operand that would nest its user's
 /// expression past [`skull_mir::lua_nesting::EXPRESSION_LEVEL_BUDGET`] LuaJIT
-/// syntax levels. Folding is otherwise unbounded: a wide value interpolation
-/// folds into one `..` run (a level per operand) and a run of `total += x`
-/// statements into one expression with a parenthesis per statement, and the
-/// chunk then fails to load. Values are visited in definition order, so every
-/// folded operand is already within the budget; a value over it unfolds the
-/// operands that put it there, which restores the bound without touching any
-/// expression that already fits. An unfolded value is evaluated at its own
-/// definition, which is the order the MIR states.
+/// syntax levels, beyond which the chunk fails to load. Values are visited in
+/// definition order, so every folded operand is already within the budget.
 pub(crate) fn bound_fold_levels(
     func: &MirFunc,
     scope: &[Idx<Block>],
@@ -549,12 +509,10 @@ pub(crate) fn bound_fold_levels(
     unfoldable: &[bool],
 ) {
     let budget = skull_mir::lua_nesting::EXPRESSION_LEVEL_BUDGET;
-    // Levels a value costs where it is rendered as an operand; 0 for a register.
     let mut levels = vec![0u32; func.insts.len()];
     let measure = |inlinable: &[bool], levels: &[u32], id: Idx<Inst>| -> u32 {
         match func.insts[id] {
             Inst::Load(_) => 0,
-            // Rendered as its operand alone.
             Inst::IntToFloat(x) => levels[raw(x) as usize],
             _ => {
                 let mut deepest = 0;
@@ -575,7 +533,6 @@ pub(crate) fn bound_fold_levels(
             if levels[k] <= budget {
                 continue;
             }
-            // A run too long by itself: its folded halves become registers.
             if let Inst::StringConcat(a, b) = func.insts[id] {
                 for half in [a, b] {
                     let h = raw(half) as usize;

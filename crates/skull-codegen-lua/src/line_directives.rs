@@ -1,5 +1,3 @@
-//! Line directives mapping emitted Lua lines back to Rock spans.
-
 use super::*;
 
 /// A statement's start offset in a function's emitted text, and the span of

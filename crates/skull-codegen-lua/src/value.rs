@@ -1,5 +1,3 @@
-//! Value expressions, integer and u32 arithmetic, indexing and frame stores.
-
 use super::*;
 
 impl Emitter<'_> {
@@ -17,7 +15,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// The RHS expression for a value-producing instruction.
     fn write_value_inner(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         if let Some(lit) = constant_bits(self.func, self.inlinable, id) {
             write_lit(out, &lit);
@@ -50,7 +47,6 @@ impl Emitter<'_> {
             Inst::UintAdd(a, b) => self.write_u32_bin(out, "+", a, b),
             Inst::UintSub(a, b) => self.write_u32_bin(out, "-", a, b),
             Inst::UintMul(a, b) => self.write_u32_mul(out, a, b),
-            // Integer `/` is floor-division (rock semantics); float `/` is real.
             Inst::IntDiv(a, b) | Inst::UintDiv(a, b) => {
                 out.push_str("math.floor(");
                 self.write_opnd(out, *a);
@@ -66,10 +62,7 @@ impl Emitter<'_> {
                 self.write_opnd(out, *value);
                 out.push_str(" or false)");
             }
-            // A proven element index: the 1-based column slot, no check. A
-            // folded operand is parenthesized by its consumer.
             Inst::VecIndexSlot(index) => self.write_vec_slot(out, *index),
-            // A proven NativeBuffer index is the index itself.
             Inst::NbIndexSlot(index) => self.write_opnd(out, *index),
             Inst::VecStrideFalseToNil(value) => {
                 out.push('(');
@@ -198,9 +191,8 @@ impl Emitter<'_> {
                 self.write_csv(out, vs);
                 let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", vs.len());
             }
-            // Column storage: one array per leaf, sharing the single `len`.
-            // Keys are written in brackets because a nested leaf path is dotted
-            // (`min.x`), which is not a bare Lua identifier.
+            // A nested leaf path is dotted (`min.x`), not a bare Lua identifier,
+            // so keys are bracketed.
             Inst::MakeVecColumns {
                 elem,
                 columns,
@@ -416,9 +408,6 @@ impl Emitter<'_> {
                     self.write_opnd(out, *base);
                     out.push_str(".len");
                 }
-                // Neither a bare leaf column nor a leaf VIEW has a `len` of its
-                // own -- the owning container holds the single length, so
-                // lowering asks it there.
                 ContainerKind::NativeBufferLeaf => {
                     unreachable!("`len` of a leaf view: lowering must ask the owning buffer")
                 }
@@ -427,14 +416,12 @@ impl Emitter<'_> {
                     self.write_opnd(out, *base);
                 }
                 ContainerKind::Map => {
-                    // No O(1) length on a Map; lowering shouldn't emit this kind.
                     out.push('#');
                     self.write_opnd(out, *base);
                 }
                 ContainerKind::Record => unreachable!("len of a heap record"),
             },
 
-            // Effects don't produce values.
             Inst::Store { .. }
             | Inst::StoreField { .. }
             | Inst::StoreIndex { .. }
@@ -446,14 +433,10 @@ impl Emitter<'_> {
             | Inst::CoroHook { .. }
             | Inst::ArrayPush { .. } => unreachable!("effect has no value"),
 
-            // Substituted by the inliner (or rejected by mir_emit's residual
-            // check) long before codegen.
             Inst::CallBoundMulti { .. } => {
                 unreachable!("placeholder bound-call must be substituted before emit")
             }
 
-            // Closure environments hold a CodeRef. Shared mutable capture boxes hold
-            // only the capture fields.
             Inst::MakeEnv { fn_ref, fields } => match fn_ref {
                 Some(_name) => {
                     out.push_str("setmetatable({ ");
@@ -489,7 +472,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// `a <op> b` written directly into `out` (no per-operand allocation).
     fn write_bin(&self, out: &mut String, op: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
         self.write_opnd(out, *a);
         out.push(' ');
@@ -498,7 +480,6 @@ impl Emitter<'_> {
         self.write_opnd(out, *b);
     }
 
-    /// `f(a, b)` (bit-library call shape) written directly into `out`.
     fn write_bitfn(&self, out: &mut String, f: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
         out.push_str(f);
         out.push('(');
@@ -590,16 +571,12 @@ impl Emitter<'_> {
         }
     }
 
-    /// Whether value `id` is folded into its use or assigned to a local,
-    /// rather than written as a bare statement.
     fn has_home(&self, id: Idx<Inst>) -> bool {
         self.inlinable[raw(id) as usize]
             || self.colors[raw(id) as usize] != u32::MAX
             || regalloc::alias_at(self.alias, id).is_some()
     }
 
-    /// The 1-based backing slot of a 0-based Vec index: a literal is folded,
-    /// anything else prints as `<index> + 1`.
     pub(crate) fn write_vec_slot(&self, out: &mut String, index: Idx<Inst>) {
         match self.func.insts[index] {
             Inst::Const(Lit::Int(i))
@@ -616,11 +593,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// READ index `base[index]`. NativeBuffer and Vec go through the
-    /// debug-mode bounds-checked stdlib helpers (`__nb_checked_get` /
-    /// `__vec_checked_get`) — skull runs debug; release stripping is future
-    /// release-mode work. Map and Record index raw (miss returns nil; `.get` is
-    /// the checked Map form).
     fn write_index(
         &self,
         out: &mut String,
@@ -666,11 +638,8 @@ impl Emitter<'_> {
                 self.write_vec_slot(out, index);
                 out.push(']');
             }
-            // A whole-element read has no single slot to name -- column storage
-            // has no element table. Lowering decomposes every such read into
-            // per-column reads (`column_element_repr`), so reaching emit means
-            // that decomposition was bypassed. Fail loudly: emitting ANY Lua
-            // here would be silently wrong code.
+            // Lowering decomposes whole-element reads of column storage into
+            // per-column reads; any Lua emitted here would be wrong code.
             ContainerKind::VecValueColumns(elem) => {
                 unreachable!(
                     "whole-element index of column-stored [{elem}] reached emit, in `{}`",
@@ -690,17 +659,13 @@ impl Emitter<'_> {
                 self.write_opnd(out, index);
                 out.push(')');
             }
-            // The index was proven within `[0, len)`: the C array, raw.
             ContainerKind::NativeBufferInBounds => {
                 self.write_opnd(out, base);
                 out.push_str(".ptr[");
                 self.write_opnd(out, index);
                 out.push(']');
             }
-            // A leaf column or stride slot: `index` is already 1-based and
-            // checked (`VecCheckedIndex`), so this is a raw array read. A leaf
-            // view is a raw C pointer whose ELEMENT access was bounds-checked
-            // once already.
+            // `index` is already 1-based and checked (`VecCheckedIndex`).
             ContainerKind::VecColumn
             | ContainerKind::VecStrideSlot
             | ContainerKind::NativeBufferLeaf
@@ -758,11 +723,6 @@ impl Emitter<'_> {
         self.frame.is_some_and(|frame| frame.fields.contains(&cell))
     }
 
-    /// A single frame-field store. The nil-write guard goes when the value
-    /// cannot be nil; a guarded plain operand reads twice instead of paying a
-    /// `do local v0` evaluation scope; only a guarded non-plain RHS keeps the
-    /// temporary so it evaluates once. A literal nil drops its statically
-    /// false `v ~= nil` disjunct.
     pub(crate) fn write_single_frame_assignment(
         &self,
         out: &mut String,
@@ -791,9 +751,7 @@ impl Emitter<'_> {
     }
 
     // Nil writes into absent Lua hash slots can repeatedly rehash a full frame.
-    // Only compiler-owned plain frame fields use this path; user stores retain
-    // their ordinary assignment and metamethod behavior. Scoped vN temporaries
-    // evaluate every RHS once before any destination changes.
+    // Scoped vN temporaries evaluate every RHS once before any destination changes.
     pub(crate) fn write_frame_assignment(
         &self,
         out: &mut String,
@@ -824,9 +782,6 @@ impl Emitter<'_> {
         out.push_str(" end\n");
     }
 
-    /// `d0, d1, ... = <rhs>` into cells, through [`Self::write_frame_assignment`]
-    /// when any destination is a frame field. No destinations leave a bare
-    /// `<rhs>` statement.
     pub(crate) fn write_cells_assignment(
         &self,
         out: &mut String,

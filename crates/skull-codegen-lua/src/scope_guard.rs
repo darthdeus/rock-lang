@@ -1,10 +1,6 @@
-//! A compiler-bug check on printed names: every cell or register name must be
-//! printed where the Lua local it means is in scope. A counted loop's counter
-//! is a fresh `for` local, so outside its loop the same name is the outer
-//! local, and a cell sharing that name is shadowed inside the loop. A
-//! loop-owned register is declared inside its `for` block, so outside it the
-//! name is a global. Either mismatch prints valid Lua that reads the wrong
-//! variable, so it is checked here, at print time, when scope checks are on.
+//! Compiler-bug check, when scope checks are on: every printed cell or
+//! register name must be printed where the Lua local it means is in scope.
+//! A mismatch is valid Lua that reads the wrong variable.
 
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +14,6 @@ struct Guard {
     /// `(header, counter cell, counter's printed number)` per counted loop.
     loops: Vec<(Idx<Block>, Idx<Cell>, u32)>,
     open: Vec<Idx<Block>>,
-    /// The next cell name printed is an assignment target.
     writing: bool,
     color_scope: Vec<Option<Idx<Block>>>,
 }
@@ -109,7 +104,6 @@ pub(crate) fn assigning(func: &MirFunc) {
     with_guard(func, |g| g.writing = true);
 }
 
-/// A cell's local name, `c<number>`, is being printed.
 pub(crate) fn cell(func: &MirFunc, c: Idx<Cell>, number: u32) {
     with_guard(func, |g| {
         let writing = std::mem::take(&mut g.writing);
@@ -144,7 +138,6 @@ pub(crate) fn cell_kill(func: &MirFunc, number: u32) {
     });
 }
 
-/// A register's name, `r<color>`, is being printed.
 pub(crate) fn register(func: &MirFunc, color: u32) {
     with_guard(func, |g| {
         if let Some(Some(h)) = g.color_scope.get(color as usize) {

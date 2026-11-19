@@ -1,5 +1,3 @@
-//! Control lines and label references shared by both Lua body layouts.
-
 use super::*;
 
 #[derive(Clone, Copy)]

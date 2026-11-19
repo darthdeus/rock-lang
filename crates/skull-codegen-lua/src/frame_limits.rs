@@ -1,12 +1,7 @@
 //! Check LuaJIT parse-time limits against the emitted body.
 //!
-//! The model is a lower bound. LuaJIT starts each statement with its active
-//! locals reserved, and even a nested call needs slots for the callee,
-//! frame link and fixed arguments. Count only the widths that can be proven
-//! from emission, so a chunk LuaJIT can load remains admissible.
-//!
-//! Length checks use emitted assignments and recorded control lines.
-//! The boundary tests in skull compare the model against LuaJIT loadfile.
+//! The model is a lower bound: count only widths provable from emission, so
+//! a chunk LuaJIT can load is never rejected.
 
 use crate::control::{ControlLines, Target};
 use crate::lua_line_starts_in_code;
@@ -23,11 +18,8 @@ pub(crate) const LJ_MAX_SLOTS: usize = 250;
 /// active locals checks `A - 1`: 200 locals load and 201 do not.
 pub(crate) const LJ_MAX_LOCVAR: usize = 200;
 
-/// Registers a call reserves before its first argument: the callee slot plus
-/// the `LJ_FR2` frame-link slot. Every LuaJIT this repository builds against is
-/// 64-bit (`LJ_FR2 = 1`); a 32-bit build reserves one less and would turn this
-/// term into an upper bound, which is why the assumption is written down here
-/// instead of inlined as a magic 2.
+/// The callee slot plus the `LJ_FR2` frame-link slot. Assumes a 64-bit
+/// LuaJIT (`LJ_FR2 = 1`); a 32-bit build reserves one less.
 pub(crate) const CALL_BASE_SLOTS: usize = 2;
 
 /// Active locals a numeric `for` adds inside its block: `(for index)`,
@@ -48,17 +40,13 @@ const MAX_BACKWARD_JUMP: usize = 32768;
 /// and each counted instruction is a whole line of at least six bytes.
 const MIN_MEASURED_BODY_BYTES: usize = 64 * 1024;
 
-/// A length cap the emitted body breaks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum BodyOverflow {
-    /// Labels, `goto`s and locals on the parser's stack.
     Names(usize),
-    /// Instructions a single jump spans, at least.
     Jump(usize),
 }
 
-/// Whether `line` assigns a register or cell a value that takes an instruction:
-/// a self-move emits nothing, and a `nil` kill may merge with its neighbours.
+/// A self-move emits nothing, and a `nil` kill may merge with its neighbours.
 fn assigns_a_value(line: &str) -> bool {
     let Some((target, value)) = line.split_once(" = ") else {
         return false;
@@ -70,13 +58,9 @@ fn assigns_a_value(line: &str) -> bool {
         && value != "nil"
 }
 
-/// The first length cap `body` breaks, given the names already `declared` by
-/// the parameter list, the top-level `local` line and the counted loops.
-/// `control` describes the body that starts at byte `base` of the printer's
-/// buffer, including any spliced Lua control lines.
-///
-/// A lower bound, like the frame model above: it counts only the emitter's own
-/// label, jump and register-assignment lines, and everything else is free.
+/// `control` describes the body starting at byte `base` of the printer's
+/// buffer. A lower bound: only the emitter's own label, jump and
+/// register-assignment lines count.
 pub(crate) fn measure_body(
     body: &str,
     declared: usize,
@@ -141,9 +125,7 @@ pub(crate) fn measure_body(
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum FrameLimit {
-    /// `LJ_MAX_SLOTS` -- "function or expression too complex".
     Slots,
-    /// `LJ_MAX_LOCVAR` -- "function at line N has more than 200 local variables".
     Locals,
 }
 
@@ -155,7 +137,6 @@ impl FrameLimit {
         }
     }
 
-    /// The widest count that still loads.
     pub(crate) fn max_loadable(self) -> usize {
         match self {
             FrameLimit::Slots => LJ_MAX_SLOTS - 1,
@@ -178,61 +159,32 @@ impl FrameLimit {
     }
 }
 
-/// What the widest emitted statement costs above the locals in scope there.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct StatementCost {
-    /// Registers the statement's own expressions reserve.
     pub(crate) slots: usize,
-    /// Fixed arguments of the statement's call, for the message.
     pub(crate) call_arity: usize,
-    /// Values the statement receives into locals or returns, for the message.
     pub(crate) wire_values: usize,
 }
 
-/// A frame limit the emitted function breaks, with what the emitter counted.
 pub(crate) struct FrameOverflow {
     pub(crate) limit: FrameLimit,
-    /// The emitter's own count: register slots, or active locals.
     pub(crate) count: usize,
-    /// Locals in scope at the offending statement.
     pub(crate) actives: usize,
-    /// The instruction whose statement reaches `count`. `None` when the
-    /// declarations alone are over the cap, which is what the locals limit
-    /// always is.
+    /// `None` when the declarations alone are over the cap (always, for locals).
     pub(crate) at: Option<Idx<Inst>>,
     pub(crate) cost: StatementCost,
-    /// The function's widest emitted call statements, widest first. These are
-    /// what a wide value costs wherever it crosses a call, so they are the
-    /// contributors worth naming even when the overflow is the declaration
-    /// line rather than any one statement.
     pub(crate) wide_calls: Vec<Idx<Inst>>,
 }
 
-/// Per-instruction statement shape the frame model needs from the emitter, so
-/// it reads the emitter's decisions instead of re-deriving them.
 pub(crate) struct EmittedShape<'a> {
-    /// Instructions that emit no text at their definition site: a const-hoisted
-    /// value constructor (a module-scope global is referenced instead), and
-    /// every instruction of a counted loop's header and latch (subsumed by the
-    /// `for` line).
     pub(crate) emits_nothing: &'a [bool],
-    /// Multi-return calls whose results are NOT assigned to locals: the
-    /// producer of a call-argument forward (spliced into the consumer's
-    /// argument list) and the call a tail forward returns directly.
     pub(crate) results_unassigned: &'a [bool],
-    /// Calls whose emitted argument list is shorter than `args`: a
-    /// call-argument-forward consumer spells `f(prefix.., g(..))`, so only
-    /// `prefix` are fixed arguments of `f`.
     pub(crate) fixed_arity_override: &'a [Option<usize>],
-    /// Blocks whose `Term::Return` is replaced by a tail call, so the returned
-    /// values never occupy registers of their own.
     pub(crate) return_replaced: &'a [bool],
-    /// Values rendered inside their single use instead of a local.
     pub(crate) inlinable: Option<&'a [bool]>,
 }
 
 impl EmittedShape<'static> {
-    /// No overrides: every call keeps its arguments and results.
     const PLAIN: Self = EmittedShape {
         emits_nothing: &[],
         results_unassigned: &[],
@@ -246,12 +198,8 @@ fn raw<T>(i: Idx<T>) -> usize {
     u32::from(i.into_raw()) as usize
 }
 
-/// An UPPER bound on the slots one statement can reserve above the locals in
-/// scope, ignoring every emitter decision that only makes a statement narrower
-/// (a spliced constructor, a forwarded producer, a suppressed return). Used by
-/// [`fits_without_measuring`], which is the allocation-free fast path: every
-/// body in the corpus is far enough under both caps that the exact walk never
-/// has to run.
+/// An upper bound on one statement's slots above the locals in scope,
+/// ignoring every emitter decision that only narrows a statement.
 fn statement_slots_upper_bound(inst: &Inst) -> usize {
     match inst {
         Inst::Call { args, .. } | Inst::CallValue { args, .. } => CALL_BASE_SLOTS + args.len(),
@@ -266,7 +214,6 @@ fn statement_slots_upper_bound(inst: &Inst) -> usize {
     }
 }
 
-/// Whether the folded expression `value` renders a call anywhere in its tree.
 pub(crate) fn folded_call_within(func: &MirFunc, inlinable: &[bool], value: Idx<Inst>) -> bool {
     if !inlinable[raw(value)] {
         return false;
@@ -297,8 +244,6 @@ fn folded_height(func: &MirFunc, shape: &EmittedShape<'_>, value: Idx<Inst>) -> 
     operand_height(func, shape, value).max(1)
 }
 
-/// Slots the statement or folded expression `id` stacks above the first free
-/// register, counting its folded operands.
 fn operand_height(func: &MirFunc, shape: &EmittedShape<'_>, id: Idx<Inst>) -> usize {
     let inst = &func.insts[id];
     if let Some(arity) = call_arity(func, shape, id) {
@@ -343,7 +288,6 @@ fn operand_height(func: &MirFunc, shape: &EmittedShape<'_>, id: Idx<Inst>) -> us
     height
 }
 
-/// Slots a terminator's operands stack above the first free register.
 fn terminator_height(func: &MirFunc, shape: &EmittedShape<'_>, term: &Term) -> usize {
     let mut height = 0;
     match term {
@@ -359,16 +303,8 @@ fn terminator_height(func: &MirFunc, shape: &EmittedShape<'_>, term: &Term) -> u
     height
 }
 
-/// Whether this function is so far under both caps that the exact model cannot
-/// possibly reject it. One allocation-free pass over the statements of
-/// `blocks` (the ones [`frame_overflow`] would measure), against an upper
-/// bound of what it would compute: `actives_upper` is the whole loop nest's
-/// declarations summed as if every loop enclosed every block, and the widest
-/// statement is taken without any of the narrowing the emitter applies.
-///
-/// This is what keeps the check off the compile-time budget: a large project emits
-/// tens of thousands of bodies and none of them comes near 200 locals, so the
-/// side tables [`frame_overflow`] needs are never allocated.
+/// Whether this function is so far under both caps that the exact model
+/// [`frame_overflow`] cannot reject it, using only upper bounds.
 pub(crate) fn fits_without_measuring(
     func: &MirFunc,
     blocks: &[Idx<Block>],
@@ -400,9 +336,7 @@ pub(crate) fn fits_without_measuring(
     actives_upper + widest <= FrameLimit::Slots.max_loadable()
 }
 
-/// The fixed arguments the emitter writes for `id`, when it renders as a Lua
-/// CALL. `None` for every other form -- an unlisted form only makes the bound
-/// looser, never wrong.
+/// `None` for non-call forms: an unlisted form only loosens the bound.
 fn call_arity(func: &MirFunc, shape: &EmittedShape<'_>, id: Idx<Inst>) -> Option<usize> {
     if let Some(&Some(fixed)) = shape.fixed_arity_override.get(raw(id)) {
         return Some(fixed);
@@ -412,8 +346,6 @@ fn call_arity(func: &MirFunc, shape: &EmittedShape<'_>, id: Idx<Inst>) -> Option
         | Inst::CallMulti { args, .. }
         | Inst::CallValue { args, .. }
         | Inst::CallValueMulti { args, .. } => args.len(),
-        // `<Name>_ct(f0, .., fN)` / `<Name>_vt(..)`: the constructor's arity is
-        // the value's leaf count, which is exactly what scales.
         Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } => {
             fields.len()
         }
@@ -423,7 +355,6 @@ fn call_arity(func: &MirFunc, shape: &EmittedShape<'_>, id: Idx<Inst>) -> Option
     })
 }
 
-/// Values a multi-assign statement receives into locals (`d0, .., dN = f(..)`).
 fn receive_width(func: &MirFunc, shape: &EmittedShape<'_>, id: Idx<Inst>) -> usize {
     if shape.results_unassigned[raw(id)] {
         return 0;
@@ -435,13 +366,9 @@ fn receive_width(func: &MirFunc, shape: &EmittedShape<'_>, id: Idx<Inst>) -> usi
     }
 }
 
-/// The frame limit this emitted function breaks, if any. `actives[raw(block)]`
-/// is the number of Lua locals in scope inside that block, from the emitter's
-/// own declarations; `blocks` are the blocks it emits, in emission order.
-///
-/// When both limits are broken the LOCALS one is reported: the function-top
-/// `local` line is parsed before any statement, so that is the error LuaJIT
-/// would print.
+/// `actives[raw(block)]` is the number of Lua locals in scope in that block.
+/// When both limits break, LOCALS is reported: LuaJIT parses the
+/// function-top `local` line before any statement.
 pub(crate) fn frame_overflow(
     func: &MirFunc,
     blocks: &[Idx<Block>],
@@ -543,7 +470,6 @@ mod body_measure_tests {
     use super::*;
     use crate::control::Label;
 
-    /// Whether LuaJIT accepts the function, asked of LuaJIT itself.
     fn loads(body: &str, locals: &str) -> bool {
         let chunk = format!("f = function()\n{locals}{body}end\n");
         let dir = std::env::temp_dir().join(format!(

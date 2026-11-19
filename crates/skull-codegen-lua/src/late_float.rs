@@ -65,8 +65,6 @@ pub(crate) fn defer_wide_float_math(func: &MirFunc) -> Option<(MirFunc, Vec<Idx<
                 .collect();
 
             // A value used by an instruction that stays before the call must
-            // stay there too. Reverse order propagates a rejected arithmetic
-            // user's dependency to its earlier operands in one walk.
             for &id in insts[..=call_at].iter().rev() {
                 if !move_it.contains(&id) {
                     func.insts[id].uses_each(&mut |operand| {

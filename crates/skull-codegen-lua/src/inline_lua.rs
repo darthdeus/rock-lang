@@ -1,30 +1,12 @@
-//! Shapes of inline(lua) bodies and their splicing.
-
 use super::*;
 
-/// Whether a value-producing inst is ALWAYS safe to tree-fold into its single use
-/// site, regardless of what executes between def and use: a pure computation over
-/// value operands only (operands are SSA — immutable once computed) with no read
-/// of mutable state (cell/global/heap) and no side effect. Excludes `Load`/
-/// `Global`/`Field`/`Index`/`Len`/`Call` (order-sensitive memory reads / effects)
-/// and closure records — those keep their register.
-/// The splice-able shape of an `inline(lua)` body (for `@inline` splicing).
 #[derive(Clone, Copy)]
 pub(crate) enum InlineLuaShape {
-    /// A single bare expression (no `return`, no statement keyword) -> the body
-    /// IS the rvalue (`<result> = <body>`).
     Expr,
-    /// Statements ending in a single TAIL `return X` -> emit the leading
-    /// statements verbatim, rewrite the tail to `<result> = X`.
     TailReturn,
-    /// Return-free statements (a unit body, e.g. `buf.ptr[i] = v`) -> verbatim,
-    /// no result bound.
     UnitStmts,
 }
 
-/// `Some(rest)` if `line` (trimmed) is a Lua `return` statement, where `rest` is
-/// the returned expression (`""` for a bare `return`). Word-boundary aware so
-/// `returned`/`return_x` don't match. `None` otherwise.
 fn inline_lua_return_rest(line: &str) -> Option<&str> {
     let rest = line.trim_start().strip_prefix("return")?;
     match rest.chars().next() {
@@ -34,9 +16,8 @@ fn inline_lua_return_rest(line: &str) -> Option<&str> {
     }
 }
 
-/// Classify an `inline(lua)` body for splicing, or `None` if it is not
-/// splice-safe (early or multiple `return`s, whose line-by-line rewrite to
-/// `<result> = X` would not preserve the control flow -- fall back to a call).
+/// `None` for early or multiple `return`s: rewriting them line by line to
+/// `<result> = X` would not preserve control flow.
 pub(crate) fn classify_inline_lua_body(body: &str) -> Option<InlineLuaShape> {
     let t = body.trim();
     if t.is_empty() {
@@ -54,7 +35,6 @@ pub(crate) fn classify_inline_lua_body(body: &str) -> Option<InlineLuaShape> {
             InlineLuaShape::UnitStmts
         });
     }
-    // Exactly one return, and it is the LAST non-empty line -> tail return.
     let last_is_return = nonempty
         .last()
         .is_some_and(|l| inline_lua_return_rest(l).is_some());
@@ -65,7 +45,6 @@ pub(crate) fn classify_inline_lua_body(body: &str) -> Option<InlineLuaShape> {
     }
 }
 
-/// The expression a body binds to its result, if it binds one.
 pub(crate) fn result_expr(body: &str, shape: InlineLuaShape) -> Option<&str> {
     match shape {
         InlineLuaShape::Expr => Some(body.trim()),
@@ -93,10 +72,6 @@ pub(crate) fn is_call_statement(e: &str) -> bool {
         && one_group(&e[open..])
 }
 
-/// Emit the spliced (return-free / tail-return) body, rewriting the tail
-/// `return X` to `<lv> = X`, or to the bare call `X` when `lv` is `None`.
-/// Param locals are emitted by the caller; this writes only the body. Each
-/// line keeps the body's own text (Lua ignores indentation).
 pub(crate) fn render_spliced_inline_lua(
     out: &mut String,
     body: &str,
@@ -139,10 +114,6 @@ pub(crate) fn render_spliced_inline_lua(
     }
 }
 
-/// Is this (return-free) `inline(lua)` body a single bare expression (so it can
-/// be the RHS of `lv = …`), vs a statement / multi-statement unit body? Any
-/// statement-keyword start, a top-level `=` assignment, `;`, or a second
-/// non-blank line => stmts.
 fn is_expr_inline_lua_body(s: &str) -> bool {
     let t = s.trim();
     let mut lines = t.lines().filter(|l| !l.trim().is_empty());
@@ -163,7 +134,6 @@ fn is_expr_inline_lua_body(s: &str) -> bool {
     if f.contains(';') {
         return false;
     }
-    // A top-level (paren-depth 0) `=` that is not ==/~=/<=/>= is an assignment.
     let b = f.as_bytes();
     let mut depth: i32 = 0;
     for i in 0..b.len() {
@@ -184,8 +154,6 @@ fn is_expr_inline_lua_body(s: &str) -> bool {
     true
 }
 
-/// Walk identifiers and inert text in a Lua body, skipping strings, comments
-/// and numbers.
 fn visit_lua(body: &str, mut name: impl FnMut(usize, usize), mut inert: impl FnMut(usize, usize)) {
     let b = body.as_bytes();
     // `[`, `=`* and `[` open a long bracket; returns its level and length.
@@ -239,15 +207,12 @@ fn visit_lua(body: &str, mut name: impl FnMut(usize, usize), mut inert: impl FnM
     }
 }
 
-/// The byte ranges of the identifiers and keywords in a Lua body, skipping
-/// strings, comments and numbers.
 fn lua_names(body: &str) -> Vec<(usize, usize)> {
     let mut names: Vec<(usize, usize)> = Vec::new();
     visit_lua(body, |start, end| names.push((start, end)), |_, _| {});
     names
 }
 
-/// Whether each line starts in Lua code rather than inside a string or comment.
 /// Control-flow and assignment accounting only recognizes whole-line forms, so
 /// checking the first non-whitespace byte is sufficient for those candidates.
 pub(crate) fn lua_line_starts_in_code(body: &str) -> Vec<bool> {
@@ -388,8 +353,6 @@ impl<'a> InlineLuaBody<'a> {
     }
 }
 
-/// True if `s` is one parenthesized group, so it reads as a single operand
-/// wherever it is spelled.
 pub(crate) fn one_group(s: &str) -> bool {
     let b = s.as_bytes();
     if b.first() != Some(&b'(') || b.last() != Some(&b')') {
@@ -418,8 +381,6 @@ pub(crate) fn one_group(s: &str) -> bool {
     depth == 0
 }
 
-/// True if `body` declares or labels anything, so splicing it needs a block
-/// to scope its names.
 pub(crate) fn declares_names(body: &str) -> bool {
     let names = lua_names(body);
     body.contains("::")

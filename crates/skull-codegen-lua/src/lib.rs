@@ -180,11 +180,9 @@ mod constant_tests {
     }
 }
 
-/// Reserved names cannot collide with user identifiers.
 const ENV_PARAM: &str = "__rock_env";
 
 thread_local! {
-    // Per-thread accounting lets parallel emit report register allocation time per body.
     static REGALLOC_TIME: std::cell::Cell<std::time::Duration> =
         const { std::cell::Cell::new(std::time::Duration::ZERO) };
 }
@@ -262,9 +260,6 @@ fn allocation_site_id(
     hash
 }
 
-/// Append `n`'s base-10 digits to `out`. A small fast path that skips
-/// `core::fmt`'s padding-aware `Display for u32` machinery — ~2x on the per-
-/// operand `r<n>` / `c<n>` / `bb<n>` sites that dominate the printer.
 fn push_uint(out: &mut String, mut n: u32) {
     if n == 0 {
         out.push('0');
@@ -277,30 +272,24 @@ fn push_uint(out: &mut String, mut n: u32) {
         buf[i] = b'0' + (n % 10) as u8;
         n /= 10;
     }
-    // buf[i..] is guaranteed ASCII digits.
     out.push_str(std::str::from_utf8(&buf[i..]).unwrap());
 }
 
 /// Workspace-wide names, storage and diagnostics shared by function emitters.
 pub struct CodegenCtx {
-    /// Source spans used to reject collisions with synthetic top-level names.
     reserved: HashMap<String, Span>,
-    /// Parallel emitters record errors here; emit boundaries drain them in key order.
+    /// Emit boundaries drain these in key order, keeping diagnostics deterministic.
     rejections: Mutex<Vec<(String, CompilerError)>>,
-    /// Declaration names cached once per build.
     mangled: std::sync::RwLock<HashMap<FuncRef, ustr::Ustr>>,
     /// Separates this context's per-thread specialized-symbol cache from older builds.
     symbols_epoch: u64,
-    /// Compiler-assigned storage slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
     scalar_constants: HashMap<ustr::Ustr, Lit>,
-    /// The scalar constants whose global nothing can read ([`unread_constants`]).
     unread_constants: HashSet<ustr::Ustr>,
     /// An empty graph conservatively disables callee binding.
     call_sccs: HashMap<FuncRef, u32>,
     /// Disabled only by boundary tests that compare our rejection with LuaJIT loadfile.
     frame_limits: bool,
-    /// LuaJIT line directives mapping emitted statements to Rock source.
     line_directives: bool,
     trace_frames: Option<Mutex<trace_frames::Contributors>>,
 }
@@ -328,7 +317,6 @@ impl Clone for CodegenCtx {
     }
 }
 
-/// Reserve lexical names that could shadow a user global inside a body.
 fn is_reserved_lexical(name: &str) -> bool {
     if name == ENV_PARAM {
         return true;
@@ -373,8 +361,6 @@ fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
         }
 
         fn fold(&self, id: Idx<Expr>, depth: usize) -> Option<Lit> {
-            // Initializers can be arbitrarily nested; leave large expressions at
-            // runtime instead of growing the compiler stack without a bound.
             if depth >= 64 {
                 return None;
             }
@@ -404,9 +390,8 @@ fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
                     if args.next().is_some() {
                         return None;
                     }
-                    // Only the primitive numeric route is admitted. In particular,
-                    // uint, newtype operators and string coercions keep their
-                    // runtime checks and overload behavior.
+                    // Only primitive numeric operands fold: uint, newtype operators
+                    // and string coercions keep their runtime checks and overloads.
                     self.numeric_type(left)?;
                     self.numeric_type(right)?;
                     let result_ty = self.numeric_type(id)?;
@@ -486,9 +471,8 @@ fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
     }
 }
 
-/// The scalar constants no emitted code reads by name. Every compiled read of
-/// one is replaced by its literal, so only an `inline(lua)` body spelling the
-/// emitted name can still reach the global; a constant one spells is kept.
+/// Compiled reads of a scalar constant use its literal, so only an
+/// `inline(lua)` body spelling the emitted name can still read its global.
 fn unread_constants(ws: &Workspace, constants: &HashMap<ustr::Ustr, Lit>) -> HashSet<ustr::Ustr> {
     let mut by_symbol: HashMap<&'static str, ustr::Ustr> = constants
         .keys()
@@ -559,8 +543,6 @@ impl CodegenCtx {
     pub fn new_with_state(ws: &Workspace, state_slots: HashMap<ustr::Ustr, u32>) -> Self {
         let mut reserved: HashMap<String, Span> = HashMap::default();
         let mut collisions: Vec<(String, CompilerError)> = Vec::new();
-        // Every function's emitted name, mangled once for both the reserved
-        // table and the collision check below.
         let names: Vec<(&Function, String)> = {
             use bone_core::prelude::*;
             let functions: Vec<&Function> = ws
@@ -584,9 +566,6 @@ impl CodegenCtx {
                 reserved.insert(symbol.as_str().to_string(), g.name_span);
             }
         }
-        // Permanent mangle-collision check (reject, don't fall back): two distinct
-        // signatures mangling alike, or a mangled name equal to an exempt bare
-        // name. Drained through the same sink as the synthetic-name collisions.
         collisions.extend(skull_mir::mangle::collision_errors_of(
             ws,
             names.iter().map(|(f, name)| (*f, name.as_str())),
@@ -679,9 +658,7 @@ impl CodegenCtx {
         name
     }
 
-    /// [`skull_mir::instance::Instance::symbol`], spelled once per thread
-    /// instead of once per call site. Each worker keeps its own table: a shared
-    /// one would put a lock on every specialized call the emitter prints.
+    /// [`skull_mir::instance::Instance::symbol`], cached per worker thread.
     pub fn instance_symbol(
         &self,
         ws: &Workspace,
@@ -787,10 +764,8 @@ pub fn wrapper_return(expr: &str) -> String {
     format!(" local __rock_ret = {expr}\n return __rock_ret")
 }
 
-/// The shared per-type metatable global of a GC-tier `value` struct -- the table
-/// every instance of `<name>` carries, so LuaJIT's `__eq` fires between any two
-/// of them. ONE spelling, read by the definition emitter
-/// (`skull::value_struct_gc_defs`).
+/// The shared per-type metatable global of a GC-tier `value` struct, so
+/// LuaJIT's `__eq` fires between any two instances.
 pub fn value_struct_metatable_name(name: &str) -> String {
     format!("__rock_vt_{name}")
 }
@@ -854,7 +829,6 @@ impl SelectionArm {
 }
 
 thread_local! {
-    /// The context epoch the table belongs to, and the symbols spelled for it.
     static INSTANCE_SYMBOLS: RefCell<(u64, HashMap<skull_mir::instance::Instance, ustr::Ustr>)> =
         RefCell::default();
 }
@@ -871,44 +845,22 @@ struct Emitter<'a> {
     selection_preds: std::cell::OnceCell<PredMap>,
     ws: &'a Workspace,
     ctx: &'a CodegenCtx,
-    /// The build's one arena, so the symbol a call spells comes from the same
-    /// [`Instance`] object the definition was emitted under rather than from a
-    /// second derivation of the same encoder.
-    ///
-    /// [`Instance`]: skull_mir::instance::Instance
     interner: &'a MonoInterner,
     func: &'a MirFunc,
-    /// Dense `raw(inst) -> color` (`u32::MAX` = uncolored); read per operand by
-    /// [`write_vname`] as `colors[raw(id)]` instead of a hash probe.
+    /// `u32::MAX` = uncolored.
     colors: Vec<u32>,
-    /// `color -> owning loop header` (None = function top): loop-owned colors
-    /// get their `local` line inside the `for` block ([`Self::expand_for`]).
+    /// `None` = function top.
     color_scope: Vec<Option<Idx<Block>>>,
     cell_colors: &'a [u32],
     frame: Option<&'a FrameCtx>,
-    /// Recognized counted loops, keyed by header — a goto into an un-emitted
-    /// header expands a structured `for`.
     loops: &'a HashMap<Idx<Block>, ForLoop>,
-    /// Reverse-postorder block layout (loop bodies emit their region in RPO).
     rpo: &'a [Idx<Block>],
-    /// Values tree-folded into their single use site (no register); referenced
-    /// through [`Self::opnd`], which renders their expression in place.
-    /// Dense `raw(inst) -> bool`: values tree-folded into their single use site
-    /// (no register), rendered in place by [`Self::write_opnd`].
     inlinable: &'a [bool],
-    /// Dense `raw(inst) -> cell` for values computed directly in the cell a
-    /// later store copies them into ([`regalloc::store_targets`]).
     alias: &'a [Option<Idx<Cell>>],
-    /// Dense `raw(block) -> bool`: blocks already emitted (loop bodies self-skip).
     emitted: Vec<bool>,
-    /// Dense `raw(block) -> edges that goto it`; a block with none is unlabeled.
     label_refs: Vec<u32>,
     control: ControlLines,
-    /// All-constant `MakeValueStruct` insts hoisted to a module-scope global:
-    /// `inst -> group`. A reference emits `hoist_names[group]`; the statement is
-    /// skipped (the def is emitted once, before the function).
     hoist: &'a HashMap<Idx<Inst>, u32>,
-    /// `group -> global name` for [`Self::hoist`].
     hoist_names: &'a [String],
     state_slots: &'a HashMap<ustr::Ustr, u32>,
     static_slots: &'a HashMap<ustr::Ustr, String>,
@@ -916,10 +868,7 @@ struct Emitter<'a> {
     tail_forwards: &'a [Option<&'a [Idx<Inst>]>],
     call_arg_forwards: &'a CallArgForwards,
     suppressed: &'a [bool],
-    /// Death point of every declared local, written as `<local> = nil`.
     kills: regalloc::NilKills<'a>,
-    /// Where each statement starts and which instruction it renders, when the
-    /// definition is numbered with line directives.
     line_marks: Option<&'a RefCell<Vec<LineMark>>>,
 }
 
@@ -951,8 +900,7 @@ fn write_lit(out: &mut String, l: &Lit) {
     }
 }
 
-/// Escape `s` as a double-quoted Lua string literal (also used by the workspace
-/// emitter for inline(lua) default-value rendering).
+/// Escape `s` as a double-quoted Lua string literal.
 pub fn lua_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     write_lua_string(&mut out, s);
@@ -960,10 +908,6 @@ pub fn lua_string(s: &str) -> String {
 }
 
 /// A Rock `[string]` value as a Lua literal.
-///
-/// The Vec representation is owned by `Inst::MakeVec` above; this is the same
-/// shape, exposed so a compiler-emitted call site (the `rock_shader`
-/// registrations in `skull::mir_emit`) cannot drift from it.
 pub fn lua_string_vec(items: &[&str]) -> String {
     let mut out = String::from("{_data = {");
     for (i, s) in items.iter().enumerate() {
@@ -976,8 +920,7 @@ pub fn lua_string_vec(items: &[&str]) -> String {
     out
 }
 
-/// The `[int]` sibling of [`lua_string_vec`], for driver text handing the engine
-/// a list of integers (a uniform block's member offsets).
+/// The `[int]` sibling of [`lua_string_vec`].
 pub fn lua_int_vec(items: &[i64]) -> String {
     let mut out = String::from("{_data = {");
     for (i, n) in items.iter().enumerate() {
@@ -990,11 +933,7 @@ pub fn lua_int_vec(items: &[i64]) -> String {
     out
 }
 
-/// A field key is a Lua identifier unless it is an `embed` leaf's physical key,
-/// which is a dotted path (`"p.x"`). Lua keywords never reach here -- the
-/// tokenizer already escapes them to `__rock_<kw>` -- so anything non-identifier
-/// is a compiler-minted physical key. Constant-string bracket indexing compiles
-/// to the same `TGETS` as dot sugar, so the bracket form costs nothing.
+/// Lua keywords never reach here: the tokenizer escapes them to `__rock_<kw>`.
 fn is_lua_ident(s: &str) -> bool {
     let mut cs = s.chars();
     cs.next()
@@ -1002,7 +941,6 @@ fn is_lua_ident(s: &str) -> bool {
         && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Suffix position: `base.f` or `base["a.b"]`.
 fn write_field_key(out: &mut String, field: &str) {
     if is_lua_ident(field) {
         let _ = write!(out, ".{field}");
@@ -1013,7 +951,6 @@ fn write_field_key(out: &mut String, field: &str) {
     }
 }
 
-/// Table-constructor key position: `f = ` or `["a.b"] = `.
 fn write_table_key(out: &mut String, field: &str) {
     if is_lua_ident(field) {
         let _ = write!(out, "{field} = ");
@@ -1024,7 +961,6 @@ fn write_table_key(out: &mut String, field: &str) {
     }
 }
 
-/// Append the double-quoted, escaped Lua string literal for `s` into `out`.
 fn write_lua_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
@@ -1043,8 +979,6 @@ fn write_lua_string(out: &mut String, s: &str) {
     out.push('"');
 }
 
-/// Whether `bb` ends in a call that never returns, which lowering leaves with
-/// the open `Unreachable` terminator.
 pub(crate) fn raises(ws: &Workspace, func: &MirFunc, bb: Idx<Block>) -> bool {
     matches!(func.blocks[bb].term, Term::Unreachable)
         && func.blocks[bb].insts.last().is_some_and(|last| {

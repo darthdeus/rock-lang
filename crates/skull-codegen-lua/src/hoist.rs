@@ -1,5 +1,3 @@
-//! Static slots, constant hoisting and representation checks.
-
 use super::*;
 
 pub(crate) fn static_slots_for(
@@ -23,13 +21,9 @@ pub(crate) fn static_slots_for(
     }
 }
 
-/// Whether every use of `cand` is a provably READ-ONLY consumer, so sharing one
-/// module-scope instance across all of them is unobservable.
-///
-/// FAIL-CLOSED by construction: the allow-list is tiny and anything else --
-/// including a new `Inst` variant -- disqualifies. The inverse (list the
-/// escaping consumers) would silently start sharing a mutable value the day the
-/// enum grows.
+/// Whether every use of `cand` is a read-only consumer, so sharing one
+/// module-scope instance is unobservable. Fail-closed: any unlisted use,
+/// including a new `Inst` variant, disqualifies.
 fn const_hoist_uses_are_read_only(func: &MirFunc, cand: Idx<Inst>) -> bool {
     for (_, inst) in func.insts.iter() {
         let allowed = match inst {
@@ -37,11 +31,8 @@ fn const_hoist_uses_are_read_only(func: &MirFunc, cand: Idx<Inst>) -> bool {
             // without retaining or mutating it.
             Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => *base == cand,
             Inst::Eq(a, b) | Inst::NotEq(a, b) => *a == cand || *b == cand,
-            // Storing INTO cdata copies by value, so the destination cannot alias
-            // the shared instance: an FFI-clean `<Name>_ct(..)` ctor copies each
-            // field, and a `slot.f = v` into a NativeBuffer element writes bytes.
-            // A TABLE destination (plain struct, GC-tier `<Name>_vt`, Vec element,
-            // global, cell) stores the REFERENCE and is what aliases.
+            // Storing into cdata copies by value, so it cannot alias the shared
+            // instance. A table destination stores the reference and does alias.
             Inst::MakeValueStruct {
                 representation,
                 fields,
@@ -114,8 +105,6 @@ pub(crate) fn ctor_suffix(
 }
 
 /// Check a leaf-form constructor against the representation it carries.
-/// Callers supply the plan; this routine never reconstructs one from a name or
-/// from the punctuation of the operand keys.
 pub fn leaf_form_violation(
     plan: &skull_mir::lower::RepPlan,
     got: &[ustr::Ustr],
@@ -134,8 +123,7 @@ pub fn leaf_form_violation(
 }
 
 /// Validate every plan-tagged constructor before rendering. A missing plan is
-/// an internal compiler error; it must reach the ordinary rejection sink rather
-/// than making emission recover a tier from a name or operand spelling.
+/// A missing plan must reach the rejection sink, not be recovered from a name.
 pub(crate) fn record_representation_violations(ctx: &CodegenCtx, func: &MirFunc) {
     for (_, inst) in func.insts.iter() {
         let (name, representation, form, fields) = match inst {
@@ -205,11 +193,8 @@ pub(crate) fn collect_const_hoists(
     let mut groups: Vec<(ustr::Ustr, skull_mir::lower::RepId, ValueCtorForm, Vec<Lit>)> =
         Vec::new();
     let mut hoist: HashMap<Idx<Inst>, u32> = HashMap::default();
-    // Only insts still REACHED BY A BLOCK. The arena keeps orphans (DCE unlinks
-    // from blocks, it does not free), and hoisting one emits a module-scope ctor
-    // call for a value the program never builds -- which for a nobox type is a
-    // materialization the verifier cannot see, since it walks `block.insts`.
-    // Few bodies build a value at all, so the table waits for the first one.
+    // Only insts still reached by a block: the arena keeps DCE orphans, and
+    // hoisting one would materialize a nobox value the verifier cannot see.
     let mut live: Option<Vec<bool>> = None;
     for (id, inst) in func.insts.iter() {
         let Inst::MakeValueStruct {
@@ -233,9 +218,7 @@ pub(crate) fn collect_const_hoists(
         if !live[raw(id) as usize] {
             continue;
         }
-        // An int->float-subsumed constant field (`IntToFloat(Const)`) is still a
-        // compile-time constant: hoist as its inner literal (identity on luajit),
-        // so a `Vec2 { x: 0 }` ctor stays hoistable.
+        // `IntToFloat(Const)` is still a compile-time constant: hoist its literal.
         let lits: Option<Vec<Lit>> = fields
             .iter()
             .map(|(_, op)| match &func.insts[*op] {

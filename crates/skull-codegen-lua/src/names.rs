@@ -1,10 +1,7 @@
-//! Cell, value and function names in emitted Lua.
-
 use super::*;
 
-/// The Lua name for a cell read/write: a coroutine frame cell renders as the
-/// state-table field `<s>.c<slot>`; everything else is its colored local
-/// (`c<color>`) or, when uncolored, the raw `c<raw>` fallback.
+/// A frame cell renders as `<s>.c<slot>`; others as `c<color>`, or `c<raw>`
+/// when uncolored.
 pub(crate) fn cellname(
     func: &MirFunc,
     frame: Option<&FrameCtx>,
@@ -16,13 +13,6 @@ pub(crate) fn cellname(
     s
 }
 
-/// Append a cell reference (a coroutine frame field `s.c<slot>` or a plain local)
-/// directly into `out` — the per-operand-allocation-free primitive `cellname`
-/// wraps. A frame cell renders `<s>.c<slot>` in the `__step` body (the `s`
-/// reference resolves recursively through this same fn, itself a plain local
-/// there); env-record captures and box `.v` access are now materialized as MIR
-/// `Field`/`StoreField` by `convert_closures`, so this fn no longer special-cases
-/// them.
 pub(crate) fn write_cellname(
     out: &mut String,
     func: &MirFunc,
@@ -66,9 +56,7 @@ pub(crate) fn cell_is_uint(ws: &Workspace, ty: Option<bone_core::prelude::TyId>)
 }
 
 /// Any source span inside `func`, for a rejection with no single offending
-/// instruction. The declarations that overflow have no instruction of their
-/// own; the body's first spanned instruction still points inside the Rock
-/// function the user has to change.
+/// instruction.
 pub(crate) fn any_inst_span(func: &MirFunc) -> Option<Span> {
     for (_, block) in func.blocks.iter() {
         for &id in &block.insts {
@@ -89,9 +77,6 @@ pub fn mangled(ws: &Workspace, r: FuncRef) -> String {
     mangle_fn(ws, func_of(ws, r))
 }
 
-/// The Lua local name for a value: its register `r<color>` (colored values) or
-/// the raw `v<raw>` fallback (an uncolored value — should not occur once every
-/// value is colored, but keeps the printer total).
 pub(crate) fn write_vname(out: &mut String, func: &MirFunc, colors: &[u32], id: Idx<Inst>) {
     match colors[raw(id) as usize] {
         u32::MAX => {

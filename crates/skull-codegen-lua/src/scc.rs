@@ -1,12 +1,8 @@
-//! Strongly connected components of the call graph.
-
 use super::*;
 
-/// Each function's strongly connected component number over `edges`, the input
-/// callee binding reads through [`CodegenCtx::set_call_sccs`]. Two functions share
-/// a number exactly when they are mutually reachable. Components are numbered
-/// callee-first, so the binding pass emits in ascending rank and every captured
-/// callee is already its final closure.
+/// Each function's strongly connected component number over `edges`.
+/// Components are numbered callee-first, so the binding pass emits in
+/// ascending rank and every captured callee is already its final closure.
 pub fn call_sccs(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashMap<FuncRef, u32> {
     fn intern(
         f: FuncRef,

@@ -1,11 +1,6 @@
-//! Reference counts and the tail-call and call-argument forwarding analyses.
-
 use super::*;
 
-/// Cells REFERENCED (Load/Store/`MapNext` or multi-return dest) anywhere the
-/// blocks of `scope` emit, as a dense `raw(cell) -> bool`. Hoisted closure
-/// bodies are separate ordinary MirFuncs, so the declaration walk only covers
-/// this function's reachable blocks.
+/// Cells referenced anywhere the blocks of `scope` emit, dense by `raw(cell)`.
 pub(crate) fn referenced_cells_in_region(
     func: &MirFunc,
     scope: &[Idx<Block>],
@@ -33,13 +28,11 @@ pub(crate) struct CallArgForward {
     pub(crate) consumer: Idx<Inst>,
 }
 
-/// The call-argument forwards of a body, sorted by consumer. Few calls
-/// forward, so a slot per instruction was mostly empty, large slots.
+/// The call-argument forwards of a body, sorted by consumer.
 #[derive(Default)]
 pub(crate) struct CallArgForwards(Vec<CallArgForward>);
 
 impl CallArgForwards {
-    /// The forward whose consumer is `id`.
     pub(crate) fn get(&self, id: Idx<Inst>) -> Option<&CallArgForward> {
         let at = self
             .0
@@ -53,7 +46,6 @@ impl CallArgForwards {
     }
 }
 
-/// The cells a multi-return call receives its results in.
 fn multi_dests(inst: &Inst) -> Option<&[Idx<Cell>]> {
     match inst {
         Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => Some(dests),
@@ -92,7 +84,6 @@ pub(crate) fn tail_forwards<'a>(
     direct: bool,
 ) -> Vec<Option<&'a [Idx<Inst>]>> {
     let mut forwards = vec![None; func.blocks.len()];
-    // Counted for the first multi-return candidate; most bodies have none.
     let cell_references = std::cell::OnceCell::new();
     for (block_id, block) in func.blocks.iter() {
         let Term::Return(values) = &block.term else {
@@ -155,8 +146,6 @@ pub(crate) fn tail_forwards<'a>(
 pub(crate) fn call_arg_forwards(ws: &Workspace, func: &MirFunc) -> (CallArgForwards, Vec<bool>) {
     let mut forwards = Vec::new();
     let mut suppressed = vec![false; func.insts.len()];
-    // Counted for the first multi-return call that feeds a call; most bodies
-    // have none.
     let references = std::cell::OnceCell::new();
     for (_, block) in func.blocks.iter() {
         for first in 0..block.insts.len() {

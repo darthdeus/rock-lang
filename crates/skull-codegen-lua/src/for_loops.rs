@@ -1,8 +1,6 @@
-//! Recognition of numeric and map loops for native Lua `for` emission.
-
 use super::*;
 
-/// The upper bound of a counted loop — the RHS of the header `i < HI` compare.
+/// The upper bound of a counted loop: the RHS of the header `i < HI` compare.
 pub(crate) enum HiLimit {
     /// A value computed in the preheader (e.g. `#arr`); live through the header.
     Value(Idx<Inst>),
@@ -65,7 +63,6 @@ pub(crate) fn recognize_for_loops(
     frame: Option<&FrameCtx>,
 ) -> HashMap<Idx<Block>, ForLoop> {
     let mut loops = HashMap::default();
-    // Avoid predecessor maps for bodies without either kind of loop.
     let latched = rpo.iter().any(|&p| {
         matches!(func.blocks[p].term, Term::Goto(h) if latch_slot(func, p, h).is_some())
             || func.blocks[p]
@@ -102,12 +99,10 @@ fn try_match_loop(
     else {
         return None;
     };
-    // Header is entered by exactly the preheader + the latch, both via goto.
     let gp = goto_preds.get(&h)?;
     if gp.len() != 2 || all_preds.get(&h).map_or(0, |v| v.len()) != 2 {
         return None;
     }
-    // Exactly one goto-pred is a pure-increment latch; the other is the preheader.
     let mut latch = None;
     let mut slot = None;
     for &p in gp {
@@ -143,10 +138,9 @@ fn try_match_loop(
     })
 }
 
-/// `Some(slot)` iff block `p` is a pure 4-inst increment latch jumping to
-/// `header`: `vj = load slot; one = 1; vinc = vj + one; store slot = vinc`. The
-/// strictness is load-bearing — a loop whose increment is fused into the body
-/// (no dedicated latch) would otherwise match and double-increment.
+/// `Some(slot)` iff `p` is exactly the latch `vj = load slot; one = 1;
+/// vinc = vj + one; store slot = vinc` jumping to `header`. A loop whose
+/// increment is fused into the body would otherwise double-increment.
 fn latch_slot(func: &MirFunc, p: Idx<Block>, header: Idx<Block>) -> Option<Idx<Cell>> {
     if func.blocks[p].term != Term::Goto(header) {
         return None;
@@ -173,7 +167,7 @@ fn latch_slot(func: &MirFunc, p: Idx<Block>, header: Idx<Block>) -> Option<Idx<C
 }
 
 /// The header must be exactly `load slot; [load hi_cell;] (slot < HI | slot <= HI)`
-/// — the counter load(s) feeding the compare, nothing else (no side effects).
+/// -- the counter load(s) feeding the compare, nothing else (no side effects).
 fn match_header(
     func: &MirFunc,
     h: Idx<Block>,
@@ -186,11 +180,9 @@ fn match_header(
         _ => return None,
     };
     let insts = &func.blocks[h].insts;
-    // LHS is a Load(slot) present in the header.
     if !matches!(&func.insts[lhs], Inst::Load(s) if *s == slot) || !insts.contains(&lhs) {
         return None;
     }
-    // RHS is either a bound cell loaded in the header, or a preheader value.
     let rhs_is_cell_load = matches!(&func.insts[rhs], Inst::Load(_)) && insts.contains(&rhs);
     let allowed: HashSet<Idx<Inst>> = if rhs_is_cell_load {
         [lhs, rhs, cond].into_iter().collect()
@@ -207,11 +199,9 @@ fn match_header(
     Some((hi, inclusive))
 }
 
-/// The natural loop of the back-edge `latch -> header`: blocks that reach the
-/// latch WITHOUT crossing the header (backward reach over preds), NOT
-/// "everything reachable from body_entry" — a `break`/early-return path doesn't
-/// reach the latch, so it stays OUTSIDE the loop and exits via goto. Returns
-/// `None` if the body can't iterate, or the loop is multi-entry (irreducible).
+/// The natural loop of `latch -> header`: blocks that reach the latch without
+/// crossing the header, so a `break` path stays outside and exits via goto.
+/// `None` if the body can't iterate or the loop is irreducible.
 fn compute_region(
     all_preds: &PredMap,
     body_entry: Idx<Block>,
@@ -234,8 +224,8 @@ fn compute_region(
         return None;
     }
     natural.remove(&latch);
-    // Reducible / single-entry: a region block may be entered only from within
-    // region ∪ {header, latch} — else a goto jumps into the middle of the `for`.
+    // A region block may be entered only from the region, header or latch;
+    // else a goto jumps into the middle of the `for`.
     for &b in &natural {
         if let Some(ps) = all_preds.get(&b) {
             for &p in ps {
@@ -248,10 +238,9 @@ fn compute_region(
     Some(natural)
 }
 
-/// The counter slot must behave like a loop-scoped `for` variable: stored
-/// EXACTLY twice (preheader init + latch increment — so it's never reassigned in
-/// the body), and never read outside the loop region (incl. closures, whose body
-/// blocks are outside the region — a captured counter can't be the for-variable).
+/// The counter must behave like a `for` variable: stored exactly twice
+/// (preheader init and latch increment) and never read outside the region,
+/// closures included.
 fn slot_sound(
     func: &MirFunc,
     slot: Idx<Cell>,

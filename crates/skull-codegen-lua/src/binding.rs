@@ -1,25 +1,18 @@
-//! Bound-callee plans: which callees a body captures as upvalues.
-
 use super::*;
 
 /// The callees one body binds as immutable upvalues, and the rank its binding
-/// line must sort at. Built by [`callee_binding_plan`]; consumed by the emitter
-/// (which names the factory parameters) and by the assembler (which emits the
-/// second pass).
+/// line must sort at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CalleeBindingPlan {
-    /// The bound function's emitted Lua name.
     pub name: String,
-    /// Its factory's name, minted through [`CodegenCtx::mint_synthetic`].
     pub factory: String,
     /// The callee names to capture, sorted, deduplicated, and truncated to
     /// [`MAX_BOUND_CALLEES`]. These are the globals read at bind time.
     pub captures: Vec<String>,
-    /// Factory-local names in capture order. Global binding names stay stable.
+    /// Factory-local names in capture order.
     pub parameters: Vec<ustr::Ustr>,
-    /// Ascending emission order for the binding pass: the caller's strongly
-    /// connected component number, which is strictly greater than every
-    /// component it captures from (see [`call_sccs`]).
+    /// Emission order for the binding pass: the caller's SCC number, strictly
+    /// greater than every component it captures from.
     pub rank: u32,
     /// True when this body had more bindable callees than [`MAX_BOUND_CALLEES`],
     /// so the tail stayed global lookups.

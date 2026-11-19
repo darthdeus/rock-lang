@@ -1,5 +1,3 @@
-//! Blocks, labels, kills, allocation sites and counted-loop expansion.
-
 use super::*;
 
 impl Emitter<'_> {
@@ -66,8 +64,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// The kills due before the next statement of `bb`: the block's entry kills
-    /// when no statement has been written yet, else the ones after `after`.
     fn write_pending_kills(
         &self,
         out: &mut String,
@@ -141,9 +137,8 @@ impl Emitter<'_> {
         self.emit_block_contents(out, bb);
     }
 
-    /// A goto to the block that follows it is a fallthrough: drop it. Not
-    /// after a label: LuaJIT nests one syntax level per label in a run of
-    /// them, so a long chain of empty blocks would overflow its limit.
+    /// Drops a fallthrough goto, but not after a label: LuaJIT nests one syntax
+    /// level per label in a run, so a long chain of empty blocks would overflow.
     fn drop_fallthrough_goto(&mut self, out: &mut String, bb: Idx<Block>) {
         if let Some((start, end, target)) = self.control.last_goto.take()
             && target == bb
@@ -162,8 +157,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// Report what an earlier pass should have removed. The MIR verifier
-    /// catches this in debug builds; release builds reach here instead.
     pub(crate) fn reject_pass_residue(&self, residue: &str, pass: &str) {
         self.ctx.reject(
             self.func.name.to_string(),
@@ -175,13 +168,10 @@ impl Emitter<'_> {
         );
     }
 
-    /// The statements of `bb` and its terminator, without its label.
     fn emit_block_contents(&mut self, out: &mut String, bb: Idx<Block>) {
         if self.emit_block_statements(out, bb) {
             return;
         }
-        // A goto into an un-emitted counted-loop header becomes a structured
-        // `for` (the preheader falls through into it); everything else is a goto.
         let term = &self.func.blocks[bb].term;
         if let Term::Goto(t) = term {
             let t = *t;
@@ -224,7 +214,6 @@ impl Emitter<'_> {
             None
         };
         let mut live_region = !returns || last_impure.is_some();
-        // Indexed rather than borrowed: `emit_inst` needs `&mut self`.
         let mut pending: Option<Idx<Inst>> = None;
         let mut first = true;
         for &id in &insts[..emitted_len] {
@@ -265,10 +254,8 @@ impl Emitter<'_> {
         out.push_str(" end\n");
     }
 
-    /// The `for <slot> = <slot>, hi[-1] do` line of a counted loop, with the
-    /// loop-scoped registers below it. The init
-    /// reads the slot cell (the preheader's store set it to `lo`), so it never
-    /// depends on `lo`'s register being live at the loop head.
+    /// The init reads the slot cell (the preheader stored `lo` there), so it
+    /// never depends on `lo`'s register being live at the loop head.
     pub(crate) fn write_for_head(&self, out: &mut String, header: Idx<Block>) {
         let cl = &self.loops[&header];
         scope_guard::open(self.func, header);
@@ -302,11 +289,9 @@ impl Emitter<'_> {
                 writeln!(out, " = mk{h}, mv{h}").unwrap();
             }
         }
-        // Body-scoped temp registers: declared INSIDE the `for` block, above the
-        // loop-control slots, so LuaJIT's snapshot liveness can prune them at
-        // loop exits (else they pin their values into every side trace and
-        // `asm_head_side` aborts past ~16 inherited FP values -- the
-        // "NYI: register coalescing too complex" blacklist class).
+        // Declared inside the `for` block so LuaJIT's snapshot liveness can prune
+        // them at loop exits; otherwise side traces inherit them and `asm_head_side`
+        // aborts past ~16 inherited FP values.
         let mut regs = self
             .color_scope
             .iter()
@@ -324,10 +309,7 @@ impl Emitter<'_> {
         }
     }
 
-    /// Emit a recognized counted loop as `for <slot> = <slot>, hi[-1] do .. end`.
-    /// The header's compare/branch and the latch's increment are subsumed by
-    /// the `for`; the latch keeps only its label so a body `goto bb<latch>`
-    /// (continue / normal fall-through) lands at the loop tail and re-iterates.
+    /// The latch keeps only its label, so a body `goto bb<latch>` re-iterates.
     pub(crate) fn expand_for(&mut self, out: &mut String, header: Idx<Block>) {
         let cl = &self.loops[&header];
         let (body_entry, latch, exit) = (cl.body_entry, cl.latch, cl.exit);
@@ -343,8 +325,6 @@ impl Emitter<'_> {
                 self.emit_block(out, bb); // self-skips body_entry / already-emitted
             }
         }
-        // Latch label only (the `for` does the increment); then close + the
-        // loop-done edge (header's false branch).
         self.emitted[raw(latch) as usize] = true;
         self.drop_fallthrough_goto(out, latch);
         self.write_block_label(out, latch);
@@ -357,9 +337,8 @@ impl Emitter<'_> {
     }
 }
 
-/// How many terminator edges name each block (dense by `raw(block)`). A block
-/// with none needs no label. Counts only ever over-state the gotos emitted, so
-/// a label is never dropped while a goto still names it.
+/// Edges naming each block. Counts may over-state the gotos emitted but never
+/// under-state them, so a label is never dropped while a goto names it.
 pub(crate) fn label_ref_counts(
     func: &MirFunc,
     rpo: &[Idx<Block>],

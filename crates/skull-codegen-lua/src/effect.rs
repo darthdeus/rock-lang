@@ -1,14 +1,9 @@
-//! Effect statements.
-
 use super::*;
 
 impl Emitter<'_> {
     /// Whether an operand can only produce a non-nil value, so a store of it
-    /// needs no nil-write guard. Lowering marks the cells it can prove
-    /// ([`Cell::never_nil`]); this adds what the emitted shape decides and
-    /// what a declared type promises. For plain Rock tables, a wrong
-    /// answer costs the rehash the guard avoids, never a wrong value. Host
-    /// metatables can observe the skipped store; see docs/compiler.md.
+    /// needs no nil-write guard. For plain Rock tables a wrong answer costs a
+    /// rehash; host metatables can observe the skipped store (docs/compiler.md).
     pub(crate) fn never_nil(&self, id: Idx<Inst>) -> bool {
         skull_mir::nilness::inst_never_nil_with(self.func, id, &|leaf| match &self.func.insts[leaf]
         {
@@ -40,8 +35,7 @@ impl Emitter<'_> {
                     self.write_single_frame_assignment(out, &target, *value);
                     return;
                 }
-                // Two cells that share a local make a copy between them a
-                // self-assignment. (Frame fields were handled above.)
+                // Two cells that share a local make a copy between them a self-assignment.
                 if let Inst::Load(source) = self.func.insts[*value]
                     && self.inlinable[raw(*value) as usize]
                     && !self.cell_is_frame_field(source)
@@ -105,7 +99,6 @@ impl Emitter<'_> {
                 kind,
             } => {
                 match kind {
-                    // NativeBuffer write -> debug-mode bounds-checked helper.
                     ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                         out.push_str(" __nb_checked_set(");
                         self.write_opnd(out, *base);
@@ -124,7 +117,6 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push_str(")\n");
                     }
-                    // The index was proven within `[0, len)`: a raw C array write.
                     ContainerKind::NativeBufferInBounds => {
                         out.push(' ');
                         self.write_opnd(out, *base);
@@ -134,7 +126,6 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }
-                    // The index was proven within `[0, len)`: a raw slot write.
                     ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
                         out.push(' ');
                         self.write_opnd(out, *base);
@@ -144,7 +135,6 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }
-                    // Raw keyed writes, leaf columns, and already checked slots.
                     ContainerKind::Map
                     | ContainerKind::VecColumn
                     | ContainerKind::VecStrideSlot
@@ -227,11 +217,10 @@ impl Emitter<'_> {
                 }
             }
             Inst::ArrayPush { arr, value, kind } => {
-                // `arr` is referenced up to 4x; render it once.
                 let a = self.opnd_str(*arr);
                 match kind {
                     ContainerKind::Vec | ContainerKind::VecNonNull => {
-                        // increment len BEFORE assign (1-indexed data table).
+                        // Increment len before the write: the data table is 1-indexed.
                         let _ = writeln!(out, " {a}.len = {a}.len + 1");
                         let _ = write!(out, " {a}._data[{a}.len] = ");
                         self.write_opnd(out, *value);
@@ -268,7 +257,6 @@ impl Emitter<'_> {
                     out.push(')');
                 });
             }
-            // Multi-assign keeps every scalar-ABI or tuple result.
             Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => {
                 self.write_cells_assignment(out, dests, |out| self.write_call(out, id));
             }

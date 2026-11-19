@@ -1,8 +1,6 @@
-//! Print structured MIR with forward labels for out-of-line followers.
-//!
-//! Recognized counted loops use Lua numeric or generic for. Other loops
-//! keep a backward goto so LuaJIT records from the backedge. The backedge
-//! needs to share its label's scope for LuaJIT to emit LOOP.
+//! Recognized counted loops use a Lua numeric or generic `for`. Other loops
+//! keep a backward goto so LuaJIT records from the backedge, which must share
+//! its label's scope for LuaJIT to emit LOOP.
 
 use super::*;
 use skull_mir::cfg::structure::{Placement, place};
@@ -24,12 +22,9 @@ pub(crate) struct Shape {
 }
 
 impl Shape {
-    /// `None` when the body cannot be structured (an irreducible CFG, a
-    /// `yield`, or a counted loop whose natural loop is not its recognized
-    /// region); the caller prints it flat.
-    /// Only the blocks in `rpo` (those reachable from the entry) affect
-    /// placement: a hoisted lambda's arena holds every block of its enclosing
-    /// function.
+    /// `None` when the body cannot be structured; the caller prints it flat.
+    /// Only blocks in `rpo` affect placement: a hoisted lambda's arena holds
+    /// every block of its enclosing function.
     pub(crate) fn analyze(
         func: &MirFunc,
         entry: Idx<Block>,

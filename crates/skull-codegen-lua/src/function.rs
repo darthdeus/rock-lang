@@ -1,5 +1,3 @@
-//! Function entry points: plain, named, framed and allocation-tracking emits.
-
 use super::*;
 
 /// Emit one MIR function as a top-level Lua `function <name>(...) ... end`.
@@ -17,7 +15,7 @@ pub fn emit_function(
     emit_named(ws, ctx, interner, &name, func, bound)
 }
 
-/// Emit a MIR function under the EXACT Lua name `name` (no mangling) — for
+/// Emit a MIR function under the EXACT Lua name `name` (no mangling), for
 /// synthetic functions with an already-final name (a global-initializer fn).
 /// Calls inside the body still mangle their `FuncRef`s via `ctx`.
 pub fn emit_named(
@@ -62,12 +60,9 @@ pub fn emit_named_framed(
 
 /// The one Lua emission of a MIR function under the exact name `name`.
 ///
-/// `frame` is the coroutine state-table context of a `__step` fn.
-/// `inherited_statics` are static cells owned by an enclosing function:
-/// closure conversion moves a lambda body into a sibling function while its
-/// static cell stays with the enclosing callable. `allocation_sites`, when
-/// set, collects the body's allocation sites, and `Some(true)` also
-/// instruments them in the emitted Lua.
+/// `inherited_statics` are static cells a closure-converted lambda leaves with
+/// its enclosing function. `allocation_sites` collects the body's allocation
+/// sites; `Some(true)` also instruments them.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_lua_definition(
     ws: &Workspace,
@@ -98,9 +93,8 @@ pub fn emit_lua_definition(
         };
     };
     let sites = RefCell::new(Vec::new());
-    // The header offset comes back from the emission rather than from a search
-    // for `function <name>`: a bound body's only
-    // copy sits inside a factory and that spelling does not appear at all.
+    // A bound body sits inside a factory, so its header cannot be found by
+    // searching for `function <name>`.
     let (lua, header_offset) = emit_body(
         ws,
         ctx,
@@ -142,9 +136,7 @@ pub fn emit_lua_definition(
 }
 
 /// Runs `emit` over `func` with every read of a scalar constant replaced by
-/// its literal, and puts the reads back afterwards. The emit entry points
-/// rewrite a copy of a body that still reads a constant; a caller that owns
-/// its body lends it here and spares the copy.
+/// its literal, and puts the reads back afterwards.
 pub fn with_constants_baked<R>(
     ctx: &CodegenCtx,
     func: &mut MirFunc,
@@ -176,9 +168,7 @@ pub fn with_constants_baked<R>(
     emit(baked.func)
 }
 
-/// Returns the emitted definition and the byte offset of its header (the
-/// `function` keyword that opens the body), which the allocation-site reporter
-/// turns into a body-relative line number.
+/// Returns the definition and the byte offset of its `function` keyword.
 fn emit_body(
     ws: &Workspace,
     ctx: &CodegenCtx,
@@ -364,10 +354,8 @@ fn emit_body(
     } else {
         Vec::new()
     };
-    // Frame fields map to their dense slots before this table is consulted.
-    // Frame accesses name `s` implicitly in the printer rather than through a
-    // MIR cell use; reserve its parameter's color so a later local can never
-    // overwrite the state table itself.
+    // Frame accesses name `s` implicitly; reserve its color so a later local
+    // can never overwrite the state table.
     let t_locals = bone_core::prelude::Instant::now();
     let frame_cell = frame.map(|frame| frame.s_cell);
     let locals = regalloc::Locals::new(
@@ -391,8 +379,6 @@ fn emit_body(
     let mut out = String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     // Keep hoisted constants in the owning chunk so live reload carries them.
     out.push_str(&hoist_defs);
-    // The factory captures final callee globals under private parameter names.
-    // The same plan names its parameters and every bound use in the body.
     let header_offset = match bound {
         Some(plan) => {
             debug_assert_eq!(plan.name, name);

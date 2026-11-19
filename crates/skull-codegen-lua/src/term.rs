@@ -1,5 +1,3 @@
-//! Terminators, numeric selections and enum boxes.
-
 use super::*;
 
 impl Emitter<'_> {
@@ -331,8 +329,8 @@ impl Emitter<'_> {
             _ => {}
         }
         match term {
-            // luajit rule 2: `return` wrapped `do ... end` so it is never the
-            // block's mid-sequence statement (and is legal as the last one too).
+            // Lua allows `return` only as a block's last statement; `do ... end` makes
+            // it legal anywhere.
             Term::Return(vals) if !vals.is_empty() => {
                 out.push_str(" do return ");
                 self.write_csv(out, self.trim_trailing_nils(vals, 1));

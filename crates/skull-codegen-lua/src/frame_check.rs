@@ -1,9 +1,5 @@
-//! Checking LuaJIT's frame limits against the final emission.
-
 use super::*;
 
-/// Diagnose LuaJIT frame overflow at the Rock source using the final
-/// declarations, folds and forwarded calls.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_frame_limits(
     ws: &Workspace,
@@ -19,10 +15,6 @@ pub(crate) fn check_frame_limits(
     call_arg_forwards: &CallArgForwards,
     inlinable: &[bool],
 ) {
-    // Almost every body is far under both caps, and the exact walk below needs
-    // several instruction-sized side tables. Take an allocation-free upper
-    // bound first, so a large project pays one linear scan per body rather than
-    // five allocations.
     let loop_scoped_locals = color_scope.iter().flatten().count();
     if frame_limits::fits_without_measuring(
         func,
@@ -39,10 +31,8 @@ pub(crate) fn check_frame_limits(
         return;
     }
 
-    // Locals in scope inside each block: the function-top declarations, plus,
-    // for every enclosing counted loop, its four control locals and its own
-    // body-scoped `local r<N>` line. Regions nest, so adding per loop over its
-    // region accumulates the whole enclosing nest.
+    // Each enclosing counted loop adds its four control locals and its
+    // body-scoped `local r<N>` line; regions nest, so this accumulates.
     let mut actives = vec![top_locals; func.blocks.len()];
     let mut loop_locals: HashMap<Idx<Block>, usize> = HashMap::default();
     for header in color_scope.iter().flatten() {
@@ -125,9 +115,6 @@ pub(crate) fn check_body_limits(
     ctx.reject(lua_name.to_string(), err);
 }
 
-/// The spanned diagnostic for a [`frame_limits::FrameOverflow`]: which Rock
-/// function, which LuaJIT limit, the emitter's count, and the wide values that
-/// are live across the statement that reaches it.
 fn frame_limit_error(
     ws: &Workspace,
     func: &MirFunc,
@@ -199,8 +186,8 @@ fn frame_limit_error(
 }
 
 /// The widest values on the wire of the call at `id`, as message lines. Read
-/// from the ABI plan the call lowering itself used, so the lane counts are the
-/// ones the emitted argument list actually has.
+/// Read from the ABI plan the call lowering used, so the lane counts match
+/// the emitted argument list.
 pub(crate) fn wide_call_contributors(ws: &Workspace, func: &MirFunc, id: Idx<Inst>) -> Vec<String> {
     let Some(abi) = func.call_abi_plans.get(&id) else {
         return Vec::new();

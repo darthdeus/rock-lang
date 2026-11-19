@@ -1,5 +1,3 @@
-//! Runtime preludes and shims prepended to emitted chunks.
-
 /// Shared validation for numeric uint conversions and shift counts.
 pub const UINT_CHECK_PRELUDE: &str = r#"
 function __rock_checked_u32(value)
