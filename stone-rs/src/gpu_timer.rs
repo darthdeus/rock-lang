@@ -911,6 +911,10 @@ fn metric_percentile_index(p: usize, n: usize) -> usize {
 mod tests {
     use super::{scope_mode_from_env, ScopeAggregator, ScopeMode, ScopeSample};
 
+    fn sample(path: super::PathId, ns: u64) -> ScopeSample {
+        ScopeSample { path, ns }
+    }
+
     #[test]
     fn scope_mode_names_queries_finish_and_rejects_the_rest() {
         assert_eq!(scope_mode_from_env(None), Some(ScopeMode::Off));
@@ -937,22 +941,10 @@ mod tests {
         let b = agg.path(Some(a), "b");
         for (f, a_ms, b1, b2) in [(10, 4, 1, 2), (12, 6, 2, 3)] {
             agg.ingest_frame(&[
-                ScopeSample {
-                    path: frame,
-                    ns: f * MS,
-                },
-                ScopeSample {
-                    path: a,
-                    ns: a_ms * MS,
-                },
-                ScopeSample {
-                    path: b,
-                    ns: b1 * MS,
-                },
-                ScopeSample {
-                    path: b,
-                    ns: b2 * MS,
-                },
+                sample(frame, f * MS),
+                sample(a, a_ms * MS),
+                sample(b, b1 * MS),
+                sample(b, b2 * MS),
             ]);
         }
         let stats = agg.stats();
@@ -973,20 +965,8 @@ mod tests {
         let mut agg = ScopeAggregator::default();
         let frame = agg.path(None, "frame");
         let bloom = agg.path(Some(frame), "bloom");
-        agg.ingest_frame(&[
-            ScopeSample {
-                path: frame,
-                ns: 5 * MS,
-            },
-            ScopeSample {
-                path: bloom,
-                ns: MS,
-            },
-        ]);
-        agg.ingest_frame(&[ScopeSample {
-            path: frame,
-            ns: 5 * MS,
-        }]);
+        agg.ingest_frame(&[sample(frame, 5 * MS), sample(bloom, MS)]);
+        agg.ingest_frame(&[sample(frame, 5 * MS)]);
         let stats = agg.stats();
         let bloom = stat(&stats, "frame/bloom");
         assert_eq!(bloom.frames, 1);
@@ -1008,26 +988,11 @@ mod tests {
         assert_ne!(blit_scene, blit_post);
         assert_eq!(agg.path(Some(scene), "pass:blit"), blit_scene);
         agg.ingest_frame(&[
-            ScopeSample {
-                path: frame,
-                ns: 9 * MS,
-            },
-            ScopeSample {
-                path: scene,
-                ns: 3 * MS,
-            },
-            ScopeSample {
-                path: blit_scene,
-                ns: MS,
-            },
-            ScopeSample {
-                path: post,
-                ns: 4 * MS,
-            },
-            ScopeSample {
-                path: blit_post,
-                ns: 2 * MS,
-            },
+            sample(frame, 9 * MS),
+            sample(scene, 3 * MS),
+            sample(blit_scene, MS),
+            sample(post, 4 * MS),
+            sample(blit_post, 2 * MS),
         ]);
         let stats = agg.stats();
         assert_eq!(stat(&stats, "frame/scene_passes/pass:blit").mean, 1.0);
@@ -1039,35 +1004,14 @@ mod tests {
         let mut agg = ScopeAggregator::default();
         let frame = agg.path(None, "frame");
         let pass = agg.path(Some(frame), "pass:x");
-        agg.ingest_frame(&[
-            ScopeSample {
-                path: frame,
-                ns: 10 * MS,
-            },
-            ScopeSample {
-                path: pass,
-                ns: 4 * MS,
-            },
-        ]);
+        agg.ingest_frame(&[sample(frame, 10 * MS), sample(pass, 4 * MS)]);
         agg.ingest_frame_waits(&[
-            ScopeSample {
-                path: frame,
-                ns: 6 * MS,
-            },
-            ScopeSample { path: pass, ns: MS },
-            ScopeSample {
-                path: pass,
-                ns: 2 * MS,
-            },
+            sample(frame, 6 * MS),
+            sample(pass, MS),
+            sample(pass, 2 * MS),
         ]);
-        agg.ingest_frame(&[ScopeSample {
-            path: frame,
-            ns: 10 * MS,
-        }]);
-        agg.ingest_frame_waits(&[ScopeSample {
-            path: frame,
-            ns: 4 * MS,
-        }]);
+        agg.ingest_frame(&[sample(frame, 10 * MS)]);
+        agg.ingest_frame_waits(&[sample(frame, 4 * MS)]);
         let stats = agg.stats();
         assert_eq!(stat(&stats, "frame").wait_ms_per_frame, 5.0);
         assert_eq!(stat(&stats, "frame/pass:x").wait_ms_per_frame, 1.5);
@@ -1078,10 +1022,7 @@ mod tests {
         let mut agg = ScopeAggregator::default();
         let frame = agg.path(None, "frame");
         for v in 1..=10u64 {
-            agg.ingest_frame(&[ScopeSample {
-                path: frame,
-                ns: v * MS,
-            }]);
+            agg.ingest_frame(&[sample(frame, v * MS)]);
         }
         let f = agg.stats().remove(0);
         assert_eq!((f.p50, f.p90, f.p95, f.p99), (6.0, 9.0, 10.0, 10.0));
@@ -1092,19 +1033,13 @@ mod tests {
     fn reset_keeps_paths_and_clears_samples() {
         let mut agg = ScopeAggregator::default();
         let frame = agg.path(None, "frame");
-        agg.ingest_frame(&[ScopeSample {
-            path: frame,
-            ns: MS,
-        }]);
+        agg.ingest_frame(&[sample(frame, MS)]);
         agg.drop_frame();
         agg.reset_stats();
         assert_eq!((agg.frames(), agg.dropped_frames()), (0, 0));
         assert!(agg.stats().is_empty());
         assert_eq!(agg.path(None, "frame"), frame);
-        agg.ingest_frame(&[ScopeSample {
-            path: frame,
-            ns: 2 * MS,
-        }]);
+        agg.ingest_frame(&[sample(frame, 2 * MS)]);
         agg.drop_frame();
         assert_eq!(agg.stats()[0].mean, 2.0);
         assert_eq!((agg.frames(), agg.dropped_frames()), (1, 1));
