@@ -1593,9 +1593,8 @@ pub extern "C" fn stone_create_window_ex(
     }
 
     let t_video = t_boot.elapsed();
-    // (experiment) Skip Cocoa Accessory override to test hint-only behavior.
     #[cfg(target_os = "macos")]
-    if prevent_focus_steal && std::env::var("STONE_COCOA_POLICY_OFF").is_err() {
+    if prevent_focus_steal {
         macos_focus::set_accessory_policy();
     }
 

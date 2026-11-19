@@ -84,10 +84,6 @@ x11 = { version = "2.21", features = ["xlib", "xtest"] }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 serial_test = "3"
 
-[[example]]
-name = "macos_focus_teardown"
-test = false
-
 [features]
 bundled-sdl2 = ["sdl2/bundled", "sdl2/static-link"]
 
