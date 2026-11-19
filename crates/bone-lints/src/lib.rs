@@ -957,10 +957,6 @@ impl IncrementalLintCache {
         }
     }
 
-    pub fn is_initialized(&self) -> bool {
-        self.initialized
-    }
-
     pub fn clear(&mut self) {
         *self = Self::default();
     }

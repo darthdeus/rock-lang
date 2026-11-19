@@ -183,14 +183,7 @@ impl NsVisibility {
 /// Whether a restricted setter audience (`write_vis`) is strictly within (a proper subset of)
 /// the getter audience (`read_vis`).
 pub fn is_setter_audience_within_getter(write_vis: &NsVisibility, read_vis: &NsVisibility) -> bool {
-    match (write_vis, read_vis) {
-        (NsVisibility::Private, NsVisibility::Pub) => true,
-        (NsVisibility::Private, NsVisibility::Package) => true,
-        (NsVisibility::Private, NsVisibility::Super) => true,
-        (NsVisibility::Private, NsVisibility::In(_)) => true,
-        (NsVisibility::Private, NsVisibility::Private) => false,
-        _ => false,
-    }
+    *write_vis == NsVisibility::Private && *read_vis != NsVisibility::Private
 }
 
 /// One callable declaration in an overload family. The family key alone is
@@ -441,26 +434,16 @@ impl NsTree {
         match vis {
             NsVisibility::Pub => true,
             NsVisibility::Package => owner_pkg == from_pkg,
-            NsVisibility::Private => {
-                // The defining module and its descendants.
-                owner_pkg == from_pkg && from_path_is_ancestor_or_self(owner_path, from_path)
-            }
+            NsVisibility::Private => owner_pkg == from_pkg && from_path.starts_with(owner_path),
             NsVisibility::Super => {
-                // Parent module and its descendants.
                 owner_pkg == from_pkg
-                    && owner_path.len() >= 1
-                    && from_path_is_ancestor_or_self(&owner_path[..owner_path.len() - 1], from_path)
+                    && owner_path
+                        .split_last()
+                        .is_some_and(|(_, parent)| from_path.starts_with(parent))
             }
-            NsVisibility::In(ancestor) => {
-                owner_pkg == from_pkg && from_path_is_ancestor_or_self(ancestor, from_path)
-            }
+            NsVisibility::In(ancestor) => owner_pkg == from_pkg && from_path.starts_with(ancestor),
         }
     }
-}
-
-/// Is `from` the same module as, or a descendant of, `ancestor`?
-fn from_path_is_ancestor_or_self(ancestor: &[Ustr], from: &[Ustr]) -> bool {
-    from.len() >= ancestor.len() && from[..ancestor.len()] == *ancestor
 }
 
 /// Build the canonical DefKey for a definition: the package's
