@@ -329,6 +329,17 @@ pub extern "C" fn stone_image_pending_bytes() -> i64 {
 mod tests {
     use super::*;
 
+    fn isolated(test: &str) -> bool {
+        crate::test_support::in_isolated_child(
+            &format!("image_publication::tests::{test}"),
+            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
+        )
+    }
+
+    fn ids(selected: &[Arc<Decoded>]) -> Vec<u64> {
+        selected.iter().map(|d| d.id).collect()
+    }
+
     fn result(id: u64, bytes: usize) -> Decoded {
         Decoded {
             id,
@@ -352,10 +363,7 @@ mod tests {
 
     #[test]
     fn time_allowance_is_shared_by_pumps_and_required_flushes() {
-        if crate::test_support::in_isolated_child(
-            "image_publication::tests::time_allowance_is_shared_by_pumps_and_required_flushes",
-            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
-        ) {
+        if isolated("time_allowance_is_shared_by_pumps_and_required_flushes") {
             return;
         }
         let mut p = Publications::default();
@@ -403,10 +411,7 @@ mod tests {
 
     #[test]
     fn load_collects_without_publishing_and_preserves_live_readiness_for_flush() {
-        if crate::test_support::in_isolated_child(
-            "image_publication::tests::load_collects_without_publishing_and_preserves_live_readiness_for_flush",
-            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
-        ) {
+        if isolated("load_collects_without_publishing_and_preserves_live_readiness_for_flush") {
             return;
         }
         let mut p = requests();
@@ -446,10 +451,7 @@ mod tests {
 
     #[test]
     fn flush_publishes_each_completion_before_receiving_the_next() {
-        if crate::test_support::in_isolated_child(
-            "image_publication::tests::flush_publishes_each_completion_before_receiving_the_next",
-            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
-        ) {
+        if isolated("flush_publishes_each_completion_before_receiving_the_next") {
             return;
         }
         let mut p = requests();
@@ -552,9 +554,8 @@ mod tests {
 
     #[test]
     fn flush_returns_once_required_work_is_published_and_leaves_deferred_work_pending() {
-        if crate::test_support::in_isolated_child(
-            "image_publication::tests::flush_returns_once_required_work_is_published_and_leaves_deferred_work_pending",
-            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
+        if isolated(
+            "flush_returns_once_required_work_is_published_and_leaves_deferred_work_pending",
         ) {
             return;
         }
@@ -562,12 +563,7 @@ mod tests {
         let tx = image_decode::test_completions(2);
         tx.send(result(2, 4)).unwrap();
         let (signal, deferred_worker) = release_on_signal(tx, 1);
-        let published: Vec<u64> = p
-            .select("flush", |_| true)
-            .unwrap()
-            .iter()
-            .map(|d| d.id)
-            .collect();
+        let published = ids(&p.select("flush", |_| true).unwrap());
         let _ = signal.send(());
         assert!(
             deferred_worker.join().unwrap(),
@@ -582,24 +578,14 @@ mod tests {
         assert!(!p.ready(1), "the Deferred request stays pending");
         assert_eq!(p.pending_bytes(), 16);
         p.receive(image_decode::recv_one().unwrap());
-        assert_eq!(
-            p.select("pump", |_| true)
-                .unwrap()
-                .iter()
-                .map(|d| d.id)
-                .collect::<Vec<_>>(),
-            [1]
-        );
+        assert_eq!(ids(&p.select("pump", |_| true).unwrap()), [1]);
         assert!(p.ready(1));
         assert_eq!(p.pending_bytes(), 0);
     }
 
     #[test]
     fn flush_leaves_received_deferred_results_for_the_budgeted_pump() {
-        if crate::test_support::in_isolated_child(
-            "image_publication::tests::flush_leaves_received_deferred_results_for_the_budgeted_pump",
-            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
-        ) {
+        if isolated("flush_leaves_received_deferred_results_for_the_budgeted_pump") {
             return;
         }
         let mut p = classed(&[
@@ -638,11 +624,7 @@ mod tests {
         );
         p.begin_frame();
         assert_eq!(
-            p.select("pump", |_| true)
-                .unwrap()
-                .iter()
-                .map(|d| d.id)
-                .collect::<Vec<_>>(),
+            ids(&p.select("pump", |_| true).unwrap()),
             [1, 3],
             "Deferred results retain their readiness order for the next frame's pump"
         );
@@ -652,10 +634,7 @@ mod tests {
 
     #[test]
     fn blocking_pump_drains_both_request_classes_in_readiness_order() {
-        if crate::test_support::in_isolated_child(
-            "image_publication::tests::blocking_pump_drains_both_request_classes_in_readiness_order",
-            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
-        ) {
+        if isolated("blocking_pump_drains_both_request_classes_in_readiness_order") {
             return;
         }
         let mut p = classed(&[
@@ -672,20 +651,14 @@ mod tests {
         });
         let published = p.select("pump", |_| true).unwrap();
         worker.join().unwrap();
-        assert_eq!(
-            published.iter().map(|d| d.id).collect::<Vec<_>>(),
-            [2, 1, 3]
-        );
+        assert_eq!(ids(&published), [2, 1, 3]);
         assert!(p.pending.requests.is_empty());
         assert_eq!(image_decode::outstanding_count(), 0);
     }
 
     #[test]
     fn require_turns_a_deferred_request_into_a_flush_wait() {
-        if crate::test_support::in_isolated_child(
-            "image_publication::tests::require_turns_a_deferred_request_into_a_flush_wait",
-            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
-        ) {
+        if isolated("require_turns_a_deferred_request_into_a_flush_wait") {
             return;
         }
         let mut p = classed(&[RequestClass::Deferred, RequestClass::Deferred]);
@@ -700,14 +673,7 @@ mod tests {
         assert!(p.require(2), "an outstanding Deferred request is promoted");
         assert!(!p.require(1), "a Required request has nothing to promote");
         let _ = signal.send(());
-        assert_eq!(
-            p.select("flush", |_| true)
-                .unwrap()
-                .iter()
-                .map(|d| d.id)
-                .collect::<Vec<_>>(),
-            [1, 2]
-        );
+        assert_eq!(ids(&p.select("flush", |_| true).unwrap()), [1, 2]);
         assert!(worker.join().unwrap());
         assert!(p.ready(1));
         assert!(!p.require(1), "a published request has nothing to promote");
@@ -715,10 +681,7 @@ mod tests {
 
     #[test]
     fn pumps_share_one_frame_budget_with_progress_for_an_oversized_image() {
-        if crate::test_support::in_isolated_child(
-            "image_publication::tests::pumps_share_one_frame_budget_with_progress_for_an_oversized_image",
-            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
-        ) {
+        if isolated("pumps_share_one_frame_budget_with_progress_for_an_oversized_image") {
             return;
         }
         let mut p = classed(&[
@@ -781,10 +744,7 @@ mod tests {
 
     #[test]
     fn destroying_a_handle_retires_its_request_so_no_flush_waits_for_it() {
-        if crate::test_support::in_isolated_child(
-            "image_publication::tests::destroying_a_handle_retires_its_request_so_no_flush_waits_for_it",
-            "STONE_IMAGE_PUBLICATION_TEST_CHILD",
-        ) {
+        if isolated("destroying_a_handle_retires_its_request_so_no_flush_waits_for_it") {
             return;
         }
         PUBLICATIONS
