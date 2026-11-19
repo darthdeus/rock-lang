@@ -24,7 +24,6 @@ fn source_name_matches(name: Ustr, expected: &str) -> bool {
     bone_core::modules::display_name(name.as_str()) == expected
 }
 
-#[cfg(test)]
 mod lua_definition_scope_tests {
     use super::*;
     use std::io::Write;
@@ -75,7 +74,6 @@ mod lua_definition_scope_tests {
     }
 }
 
-#[cfg(test)]
 mod unread_constant_tests {
     use super::*;
     use skull_mir::mir::FuncRef;
@@ -120,7 +118,6 @@ mod unread_constant_tests {
     }
 }
 
-#[cfg(test)]
 mod incremental_output_equality_tests {
     use super::*;
 
@@ -222,17 +219,6 @@ fn main() {{ let _ = choose() }}
 
     #[test]
     fn incremental_edits_match_fresh_output_after_roots_and_inline_dependencies_change() {
-        assert_sequence(
-            "<shader-edit>",
-            &[
-                shader_source("return rock_shader(shared_vertex, first_fragment)"),
-                shader_source("return rock_shader(shared_vertex, second_fragment)"),
-                shader_source("return \"none\""),
-            ],
-            EditedBody::Function("choose"),
-            "",
-        );
-
         let global_source = |target: &str| {
             format!(
                 "fn edit_inc(x: int) -> int {{ return x + 1 }}\n\
@@ -242,17 +228,6 @@ fn main() {{ let _ = choose() }}
                  fn main() {{ let _ = invoke(2) }}"
             )
         };
-        assert_sequence(
-            "<fn-value-global-edit>",
-            &[
-                global_source("edit_inc"),
-                global_source("edit_dec"),
-                global_source("edit_inc"),
-            ],
-            EditedBody::Global("CALLBACK"),
-            "",
-        );
-
         let inspect_source = |inspect: bool| {
             let body = if inspect {
                 "return inspect(xs)"
@@ -265,17 +240,6 @@ fn main() {{ let _ = choose() }}
                  fn main() {{ let xs = [V2 {{ x: 1, y: 2 }}]; let _ = caller(xs) }}"
             )
         };
-        assert_sequence(
-            "<inline-dependency-edit>",
-            &[
-                inspect_source(true),
-                inspect_source(false),
-                inspect_source(true),
-            ],
-            EditedBody::Function("caller"),
-            "",
-        );
-
         let generic_source = |call: bool| {
             let result = if call { "identity(7)" } else { "0" };
             format!(
@@ -284,17 +248,48 @@ fn main() {{ let _ = choose() }}
                  fn main() {{ let _ = caller() }}"
             )
         };
-        assert_sequence(
-            "<generic-last-call-edit>",
-            &[
-                generic_source(true),
-                generic_source(false),
-                generic_source(true),
-            ],
-            EditedBody::Function("caller"),
-            "",
-        );
+        for (file, sources, edited) in [
+            (
+                "<shader-edit>",
+                [
+                    shader_source("return rock_shader(shared_vertex, first_fragment)"),
+                    shader_source("return rock_shader(shared_vertex, second_fragment)"),
+                    shader_source("return \"none\""),
+                ],
+                EditedBody::Function("choose"),
+            ),
+            (
+                "<fn-value-global-edit>",
+                [
+                    global_source("edit_inc"),
+                    global_source("edit_dec"),
+                    global_source("edit_inc"),
+                ],
+                EditedBody::Global("CALLBACK"),
+            ),
+            (
+                "<inline-dependency-edit>",
+                [
+                    inspect_source(true),
+                    inspect_source(false),
+                    inspect_source(true),
+                ],
+                EditedBody::Function("caller"),
+            ),
+            (
+                "<generic-last-call-edit>",
+                [
+                    generic_source(true),
+                    generic_source(false),
+                    generic_source(true),
+                ],
+                EditedBody::Function("caller"),
+            ),
+        ] {
+            assert_sequence(file, &sources, edited, "");
+        }
     }
+
     #[test]
     fn pruning_shared_and_cyclic_calls_matches_fresh_output() {
         for (definitions, supported) in [
@@ -388,6 +383,7 @@ fn main() {{ let _ = choose() }}
             );
         }
     }
+
     #[test]
     fn diagnostic_edits_recover_to_fresh_output() {
         let recursive = |bad: bool| {
