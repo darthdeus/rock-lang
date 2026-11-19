@@ -39,24 +39,17 @@ use skull::mir_emit::{RendererTarget, ShaderLanguage};
 use skull::pipeline::{CompileHost, EmitTarget, Stage};
 
 pub fn handle(request: &str) -> Value {
-    match serde_json::from_str::<Value>(request) {
-        Ok(request) => {
-            dispatch(&request).unwrap_or_else(|error| json!({"ok": false, "error": error}))
-        }
-        Err(e) => json!({"ok": false, "error": format!("request is not JSON: {e}")}),
-    }
+    serde_json::from_str(request)
+        .map_err(|e| format!("request is not JSON: {e}"))
+        .and_then(|request| dispatch(&request))
+        .unwrap_or_else(|error| json!({"ok": false, "error": error}))
 }
 
 fn dispatch(request: &Value) -> Result<Value, String> {
     match str_field(request, "op")? {
         "compile" => compile(request),
-        "format" => {
-            let source = str_field(request, "source")?;
-            match skull_fmt::try_format(source, &skull_fmt::FormatConfig::default()) {
-                Ok(source) => Ok(json!({"ok": true, "source": source})),
-                Err(error) => Ok(json!({"ok": false, "error": error})),
-            }
-        }
+        "format" => skull_fmt::try_format(str_field(request, "source")?, &Default::default())
+            .map(|source| json!({"ok": true, "source": source})),
         "info" => Ok(json!({"ok": true, "nesting_limit": rock_core::nesting::MAX_NESTING_DEPTH})),
         "stdlib" => {
             let files: serde_json::Map<String, Value> = rock_stdlib::stdlib_files()
@@ -77,7 +70,7 @@ fn compile(request: &Value) -> Result<Value, String> {
         None | Some("gl") => RendererTarget::Gl,
         Some(other) => return Err(format!("unknown target `{other}` (gl)")),
     };
-    let files = string_map(request, "files")?.unwrap_or_default();
+    let files = string_map(request, "files")?;
     let mut host = PlaygroundHost {
         file: Ustr::from(file),
         source,
@@ -243,9 +236,9 @@ fn str_field<'a>(request: &'a Value, name: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("missing string field `{name}`"))
 }
 
-fn string_map(request: &Value, name: &str) -> Result<Option<Vec<(String, String)>>, String> {
+fn string_map(request: &Value, name: &str) -> Result<Vec<(String, String)>, String> {
     let Some(value) = request.get(name) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let object = value
         .as_object()
@@ -257,8 +250,7 @@ fn string_map(request: &Value, name: &str) -> Result<Option<Vec<(String, String)
                 .map(|v| (k.clone(), v.to_string()))
                 .ok_or_else(|| format!("`{name}.{k}` must be a string"))
         })
-        .collect::<Result<Vec<_>, _>>()
-        .map(Some)
+        .collect()
 }
 
 #[cfg(target_family = "wasm")]
