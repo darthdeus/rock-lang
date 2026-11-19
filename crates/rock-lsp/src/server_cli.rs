@@ -56,11 +56,6 @@ fn build_cli() -> Command {
                         .required(true)
                         .help("The Rock file to analyze"),
                 )
-                .arg(
-                    Arg::new("range").long("range").help(
-                        "Line range to display tokens for (e.g., \"10-20\", \"10\", \"10-\")",
-                    ),
-                )
                 .arg(trace_flag()),
         )
         .subcommand(position_subcmd(
@@ -241,12 +236,13 @@ mod tests {
     use log::Level;
 
     #[test]
-    fn inline_lua_census_is_not_a_subcommand() {
-        assert!(
-            build_cli()
-                .try_get_matches_from(["rock lsp", "inline-lua-census", "."])
-                .is_err()
-        );
+    fn retired_arguments_are_rejected() {
+        for args in [
+            &["rock lsp", "inline-lua-census", "."][..],
+            &["rock lsp", "semantic-tokens", "main.rock", "--range", "1-2"],
+        ] {
+            assert!(build_cli().try_get_matches_from(args).is_err(), "{args:?}");
+        }
     }
 
     fn enabled(rust_log: Option<&str>, timing: bool, probes: &[(&str, Level)]) -> Vec<bool> {
