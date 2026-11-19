@@ -80,14 +80,6 @@ pub fn skin_label_draw(r: UiRect, label: string, s: UiSkin, font_size: float,
     skin_label_content_draw(r, label, s, font_size, text_color, nudge, align)
 }
 
-fn skin_label_presence_draw(r: UiRect, label: string, s: UiSkin, font_size: float,
-    progress: float, pipeline: Pipeline,
-    text_color: Color = WHITE, tint: Color = WHITE, nudge: Vec2 = v(0.0, 0.0),
-    align: TextAlign = TextAlign::Center) {
-    ui_presence_skin_draw(r, s, progress, pipeline, tint: tint)
-    skin_label_content_draw(r, label, s, font_size, text_color, nudge, align)
-}
-
 pub fn skin_label_presence_rich_draw(r: UiRect, spans: [TextSpan], s: UiSkin, font_size: float,
     progress: float, pipeline: Pipeline,
     tint: Color = WHITE, nudge: Vec2 = v(0.0, 0.0), align: TextAlign = TextAlign::Center) {

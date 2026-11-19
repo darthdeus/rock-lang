@@ -397,18 +397,6 @@ fn publish_uniform_blocks(key: string, live: [ShaderUniformBlock]) {
     }
 }
 
-// Whether `name` is a member of `shader_name`'s uniform block, and so cannot be
-// reached by `glGetUniformLocation` at all.
-//
-// `GL_ACTIVE_UNIFORMS` enumerates block members alongside loose uniforms, so a
-// by-name consumer sees them, asks for a location, gets -1 and writes nothing.
-// The compiler's member list is the authority on which those are.
-fn shader_uniform_is_block_member(shader_name: string, name: string) -> bool {
-    let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
-    if entry == null { return false }
-    return entry.member_names.contains(name)
-}
-
 // Upload the scratch the public setter just packed. Keep this separate from
 // the packer so the caller can resolve and validate the runtime block first.
 //

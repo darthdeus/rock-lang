@@ -333,7 +333,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_get_drawable_size(int* width, int* height);
         float stone_get_dpi_scale(void);
         float stone_get_config_imgui_scale(void);
-        void stone_set_window_position(int x, int y);
         void stone_get_window_position(int* x, int* y);
         void stone_get_window_borders(int* top, int* left, int* bottom, int* right);
         void stone_save_window_geometry(const char* title);
@@ -412,7 +411,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_vsync_active(void);
         uint32_t stone_gl_error_count(void);
         uint32_t stone_shader_error_count(void);
-        void stone_shader_force_fail(bool on);
         void stone_gpu_timer_begin(void);
         void stone_gpu_timer_end(void);
         float stone_gpu_timer_poll_ms(void);
@@ -635,12 +633,10 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint64_t stone_get_live_canvas_handle(int index);
         int stone_canvas_report(StoneCanvasHandle handle, int* width, int* height);
         uint32_t stone_get_canvas_texture(StoneCanvasHandle handle);
-        uint32_t stone_get_canvas_depth_texture(StoneCanvasHandle handle);
         void stone_set_viewport_rect(int x, int y, int w, int h);
         // The submission's GpuRect: bottom-left, the bound target's own
         // pixels, no density scaling and no Y flip.
         void stone_set_gl_viewport(int x, int y, int w, int h);
-        uint8_t stone_set_canvas_filter(StoneCanvasHandle handle, int mode);
         uint8_t stone_canvas_attach_id_target(StoneCanvasHandle color_handle, StoneCanvasHandle id_handle);
         uint8_t stone_canvas_attach_color_target(StoneCanvasHandle color_handle, StoneCanvasHandle target_handle, int slot);
         void stone_clear_canvas(float r, float g, float b, float a);
@@ -755,7 +751,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
 
         // Bind a texture to a specific texture unit
         uint8_t stone_bind_image_texture_to_unit(StoneImageHandle handle, int unit);
-        int stone_bind_texture_to_unit(uint32_t texture_id, int unit);
 
         // Text rendering system. stone_load_font returns a 1-based font_id
         // (0 = failure). All draw/measure/glyph functions take a font_id to
@@ -905,7 +900,6 @@ fn stone_pad_type_name_raw() -> string {
 pub struct StoneWindow { }
 pub struct StoneEvent  { }
 
-extern(ffi, "stone") fn stone_create_window(title: string, width: int, height: int) -> StoneWindow
 pub extern(ffi, "stone") fn stone_create_window_ex(title: string, x: int, y: int, width: int, height: int, display: int, resizable: bool, fullscreen: int) -> StoneWindow
 extern(ffi, "stone") fn stone_gpu_host_acquire() -> StoneWindow
 extern(ffi, "stone") fn stone_poll_event(event: StoneEvent) -> bool
@@ -1004,7 +998,6 @@ pub extern(ffi, "stone") fn stone_free_cursor(cursor_id: int)
 
 // Window functions
 pub extern(ffi, "stone") fn stone_set_window_title(window: StoneWindow, title: string)
-extern(ffi, "stone") fn stone_set_window_position(x: int, y: int)
 extern(ffi, "stone") fn stone_get_window_position(x: Ptr<int>, y: Ptr<int>)
 
 pub fn stone_get_window_position() -> (int, int) {
@@ -1770,7 +1763,6 @@ extern(ffi, "stone") fn stone_current_target_width() -> float
 extern(ffi, "stone") fn stone_current_target_height() -> float
 // GL errors since process start: buffer allocations in every build, other calls in debug.
 pub extern(ffi, "stone") fn stone_gl_error_count() -> int
-extern(ffi, "stone") fn stone_shader_force_fail(on: bool)
 // Shader compile/link failures. Counted in release too -- a failed compile sets
 // no GL error, so this is the only machine-readable signal.
 pub extern(ffi, "stone") fn stone_shader_error_count() -> int
@@ -1827,11 +1819,9 @@ pub extern(ffi, "stone") fn stone_get_live_canvas_handle(index: int) -> int
 extern(ffi, "stone") fn stone_canvas_report(handle: int, width: Ptr<int>, height: Ptr<int>) -> int
 // GL names, for cimgui only -- its renderer is GL. Not for the rendering path.
 extern(ffi, "stone") fn stone_get_canvas_texture(handle: int) -> int
-extern(ffi, "stone") fn stone_get_canvas_depth_texture(handle: int) -> int
 pub extern(ffi, "stone") fn stone_set_viewport_rect(x: int, y: int, w: int, h: int)
 // The semantic submission's viewport: GL convention, target pixels, verbatim.
 extern(ffi, "stone") fn stone_set_gl_viewport(x: int, y: int, w: int, h: int)
-extern(ffi, "stone") fn stone_set_canvas_filter(handle: int, mode: int) -> bool
 pub extern(ffi, "stone") fn stone_canvas_attach_id_target(color_handle: int, id_handle: int) -> bool
 pub extern(ffi, "stone") fn stone_canvas_attach_color_target(color_handle: int, target_handle: int, slot: int) -> bool
 
@@ -1961,7 +1951,6 @@ extern(ffi, "stone") fn stone_shader_set_texture(handle: int, name: string, text
 // Bind a texture to a specific texture unit
 extern(ffi, "stone") fn stone_bind_image_texture_to_unit(handle: int, unit: int) -> bool
 extern(ffi, "stone") fn stone_image_exists(handle: int) -> bool
-extern(ffi, "stone") fn stone_bind_texture_to_unit(texture_id: int, unit: int) -> int
 
 // ============================================================================
 // High-level initialization/shutdown functions
@@ -2690,12 +2679,6 @@ pub fn stone_measure_text_vec2(text: string, scale: float) -> Vec2 {
     let f = DEFAULT_FONT ?? return Vec2 { x: 0.0, y: 0.0 }
     let d = f.data() ?? return Vec2 { x: 0.0, y: 0.0 }
     return stone_measure_text_vec2_for(d.backend_id, text, scale)
-}
-
-fn stone_get_font_atlas_image_raw() -> int {
-    let f = DEFAULT_FONT ?? return 0
-    let d = f.data() ?? return 0
-    return stone_get_font_atlas_image_for(d.backend_id)
 }
 
 fn stone_get_font_pixel_size() -> int {

@@ -419,26 +419,6 @@ pub fn rect_batch_push_triangle(b: RectBatch,
     b.count = b.count + 3
 }
 
-fn rect_batch_push_circle(b: RectBatch, pos: Vec2, radius: float,
-    r: float, g: float, bl: float, a: float) {
-    let segments = 32
-    while b.count + segments * 3 > b.capacity * RECT_BATCH_VERTS_PER_RECT {
-        __grow_rect_batch_buf(b)
-    }
-    for i in 0..segments {
-        let angle1 = (i as float) * 2.0 * PI / (segments as float)
-        let angle2 = (((i + 1) % segments) as float) * 2.0 * PI / (segments as float)
-        b.vbo[b.count] = vert(pos.x, pos.y, 0.5, 0.5, r, g, bl, a)
-        b.vbo[b.count + 1] = vert(
-            pos.x + cos(angle1) * radius, pos.y + sin(angle1) * radius,
-            0.5, 0.5, r, g, bl, a)
-        b.vbo[b.count + 2] = vert(
-            pos.x + cos(angle2) * radius, pos.y + sin(angle2) * radius,
-            0.5, 0.5, r, g, bl, a)
-        b.count = b.count + 3
-    }
-}
-
 pub fn rect_batch_push_line(b: RectBatch, start: Vec2, end: Vec2, width: float,
     r: float, g: float, bl: float, a: float) {
     let dx = end.x - start.x

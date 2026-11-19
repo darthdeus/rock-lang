@@ -1670,24 +1670,6 @@ pub fn text_layout_build_scaled(
     return layout
 }
 
-fn text_layout_shift_y(layout: TextLayout, delta: float) {
-    for i in 0..layout.glyphs.len {
-        let glyph = layout.glyphs[i]
-        layout.glyphs[i] = TextGlyph {
-            glyph_index: glyph.glyph_index,
-            source_index: glyph.source_index,
-            glyph: glyph.glyph,
-            face: glyph.face,
-            origin: glyph.origin + v(0.0, delta),
-            ink: rect(glyph.ink.x, glyph.ink.y + delta,
-                glyph.ink.w, glyph.ink.h),
-            advance: glyph.advance,
-            pivot: glyph.pivot + v(0.0, delta),
-        }
-    }
-    layout.ink_bounds.y += delta
-}
-
 pub fn text_layout_build(
     font: Font,
     text: string,

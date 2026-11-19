@@ -276,10 +276,6 @@ fn sim_entry_frame_timing_json() -> string {
         + ",\"present_us\":" + to_string(SIM_ENTRY_TIMING_PRESENT_US) + "}}"
 }
 
-fn sim_elapsed_us(start: float) -> int {
-    return int(round(max(0.0, stone_get_time() - start) * 1000000.0))
-}
-
 // The fixed dt the runner feeds while a sim is in flight, from `SIM_DT`.
 // Empty/unset is the 1/60 default.
 fn sim_apply_fixed_dt() {

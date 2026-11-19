@@ -585,20 +585,6 @@ pub fn sampled_texture_active_uv(source: SampledTexture) -> Vec2 {
     }
 }
 
-fn sampled_texture_uv_lo(source: SampledTexture) -> Vec2 {
-    let dims = sampled_texture_dims(source)
-    return v(0.5 / dims.x, 0.5 / dims.y)
-}
-
-fn sampled_texture_uv_hi(source: SampledTexture) -> Vec2 {
-    let dims = sampled_texture_dims(source)
-    let active = match source {
-        SampledTexture::Image(_image) => dims,
-        SampledTexture::Canvas(canvas) => canvas_active(canvas),
-    }
-    return v(((active.x as float) - 0.5) / dims.x, ((active.y as float) - 0.5) / dims.y)
-}
-
 // Input `b`'s active fraction expressed relative to input `a`'s, for a pass
 // whose TexCoord addresses `a` but which also samples `b`.
 pub fn canvas_active_uv_rel(a: Canvas, b: Canvas) -> Vec2 {
@@ -1665,12 +1651,6 @@ fn end_immediate_shader(state: int) {
     } else if state == 0 {
         end_shader()
     }
-}
-
-fn with_immediate_shader(draw: fn() -> ()) {
-    let state = begin_immediate_shader()
-    if state != 0 { draw() }
-    end_immediate_shader(state)
 }
 
 fn submit_immediate_shape_bound(batch: RenderBatch) {

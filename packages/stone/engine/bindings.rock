@@ -359,10 +359,6 @@ fn get_mouse_y() -> float {
     return transmute(pos.y)
 }
 
-fn is_mouse_button_down(button: float) -> bool {
-    return stone_is_mouse_button_down(transmute(button))
-}
-
 pub fn is_key_held(key: string) -> bool {
     return stone_is_key_down(key)
 }
