@@ -1,3 +1,4 @@
+use rock_core::Span;
 use rock_tokenizer::{TokenKind, Tokenizer};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
@@ -19,7 +20,7 @@ pub(crate) struct Trivia {
 }
 
 struct BlockComment {
-    text: String,
+    end: usize,
     line: usize,
     own_line: bool,
 }
@@ -65,7 +66,7 @@ impl Trivia {
                         block.insert(
                             lo,
                             BlockComment {
-                                text: full.to_string(),
+                                end: hi,
                                 line,
                                 own_line,
                             },
@@ -121,21 +122,26 @@ impl Trivia {
         &self,
         after: usize,
         before: usize,
-    ) -> Vec<(usize, &str)> {
-        if after + 1 >= before {
-            return Vec::new();
-        }
+    ) -> impl Iterator<Item = (usize, &str)> {
         self.standalone
-            .range((Bound::Excluded(after), Bound::Excluded(before)))
-            .map(|(l, t)| (*l, t.as_str()))
-            .collect()
+            .range((after + 1).min(before)..before)
+            .map(|(line, text)| (*line, text.as_str()))
+    }
+
+    pub(crate) fn has_list_comments(&self, span: Span) -> bool {
+        let (open, close) = span.line_range();
+        let (lo, hi) = span.offset_range();
+        self.standalone_comments_between(open, close)
+            .next()
+            .is_some()
+            || self.has_block_comment_in(lo, hi)
     }
 
     pub(crate) fn inline_block_starting_after(&self, offset: usize) -> Option<(usize, usize)> {
         self.block
             .range((Bound::Included(offset), Bound::Unbounded))
             .find(|(_, b)| !b.own_line)
-            .map(|(start, b)| (*start, *start + b.text.len()))
+            .map(|(start, b)| (*start, b.end))
     }
 
     pub(crate) fn has_block_comment_in(&self, lo: usize, hi: usize) -> bool {
@@ -159,17 +165,20 @@ impl Trivia {
     }
 
     pub(crate) fn has_own_line_comment_between(&self, after: usize, before: usize) -> bool {
-        !self.standalone_comments_between(after, before).is_empty()
-            || !self
+        self.standalone_comments_between(after, before)
+            .next()
+            .is_some()
+            || self
                 .own_line_block_comments_between(after, before)
-                .is_empty()
+                .next()
+                .is_some()
     }
 
     pub(crate) fn block_comment_ending_before(&self, offset: usize) -> Option<(usize, usize)> {
         self.block
             .range((Bound::Unbounded, Bound::Included(offset)))
             .rev()
-            .map(|(start, b)| (*start, *start + b.text.len()))
+            .map(|(start, b)| (*start, b.end))
             .find(|(_, end)| *end <= offset)
     }
 
@@ -177,15 +186,13 @@ impl Trivia {
         &self,
         after: usize,
         before: usize,
-    ) -> Vec<(usize, usize, usize)> {
-        if after + 1 >= before {
-            return Vec::new();
-        }
-        self.block
-            .iter()
-            .filter(|(_, b)| b.own_line && b.line > after && b.line < before)
-            .map(|(start, b)| (*start, *start + b.text.len(), b.line))
-            .collect()
+    ) -> impl Iterator<Item = (usize, usize, usize)> {
+        (after + 1 < before)
+            .then_some(&self.block)
+            .into_iter()
+            .flatten()
+            .filter(move |(_, b)| b.own_line && b.line > after && b.line < before)
+            .map(|(start, b)| (*start, b.end, b.line))
     }
 
     /// Number of fully blank lines strictly between two 0-based line numbers,

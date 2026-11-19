@@ -22,11 +22,26 @@ fn inline_comma_list(
     close: impl Into<String>,
     docs: impl IntoIterator<Item = Doc>,
 ) -> Doc {
+    Doc::surround(open, Doc::join(Doc::text(", "), docs), close)
+}
+
+fn indented_body(open: &str, body: Doc, closing_break: Doc, close: &str) -> Doc {
     Doc::concat([
         Doc::text(open),
-        Doc::join(Doc::text(", "), docs),
+        Doc::indent(body),
+        closing_break,
         Doc::text(close),
     ])
+}
+
+fn wrap_parens(docs: impl IntoIterator<Item = Doc>) -> Doc {
+    let items = Doc::join(Doc::concat([Doc::text(","), line()]), docs);
+    Doc::group(indented_body(
+        "(",
+        Doc::concat([softline(), items]),
+        softline(),
+        ")",
+    ))
 }
 
 pub(crate) struct Printer<'a> {
@@ -533,7 +548,7 @@ impl<'a> Printer<'a> {
                 .trivia
                 .has_block_comment_in(span.offset_range().0, span.offset_range().1)
         {
-            Doc::text(self.slice(span).trim_end().to_string())
+            self.raw(span)
         } else {
             fallback()
         }
@@ -666,15 +681,7 @@ impl<'a> Printer<'a> {
             .iter()
             .enumerate()
             .map(|(i, p)| param_doc(p, bare_first && i == 0));
-        Doc::group(Doc::concat([
-            Doc::text("("),
-            Doc::indent(Doc::concat([
-                softline(),
-                Doc::join(Doc::concat([Doc::text(","), line()]), items),
-            ])),
-            softline(),
-            Doc::text(")"),
-        ]))
+        wrap_parens(items)
     }
 
     fn block(&self, block_idx: Idx<BlockData>) -> Doc {
@@ -692,12 +699,7 @@ impl<'a> Printer<'a> {
             stmts.len() == 1 && !self.stmt_forces_multiline(stmts[0]) && !stmt_has_comment;
         if collapsible && source_single_line {
             let s = self.stmt(stmts[0]);
-            return Doc::group(Doc::concat([
-                Doc::text("{"),
-                Doc::indent(Doc::concat([line(), s])),
-                line(),
-                Doc::text("}"),
-            ]));
+            return Doc::group(indented_body("{", Doc::concat([line(), s]), line(), "}"));
         }
         self.expanded_block(stmts)
     }
@@ -719,12 +721,12 @@ impl<'a> Printer<'a> {
     }
 
     fn expanded_block(&self, stmts: &[Idx<StatementData>]) -> Doc {
-        Doc::concat([
-            Doc::text("{"),
-            Doc::indent(Doc::concat([hardline(), self.stmt_seq(stmts)])),
+        indented_body(
+            "{",
+            Doc::concat([hardline(), self.stmt_seq(stmts)]),
             hardline(),
-            Doc::text("}"),
-        ])
+            "}",
+        )
     }
 
     fn inline_single_line_block(&self, block_idx: Idx<BlockData>) -> Option<Doc> {
@@ -891,12 +893,12 @@ impl<'a> Printer<'a> {
                     body.push(hardline());
                 }
             }
-            for (_, d) in &comments {
-                body.push(d.clone());
-                body.push(hardline());
+            let last_comment_line = comments.last().map(|(line, _)| *line);
+            for (_, doc) in comments {
+                body.extend([doc, hardline()]);
             }
-            if let (Some((cline, _)), Some(_)) = (comments.last(), prev_end) {
-                for _ in 0..self.trivia.blank_count_between(*cline, start) {
+            if let (Some(line), Some(_)) = (last_comment_line, prev_end) {
+                for _ in 0..self.trivia.blank_count_between(line, start) {
                     body.push(hardline());
                 }
             }
@@ -927,76 +929,59 @@ impl<'a> Printer<'a> {
                 body.push(d);
             }
         }
-        Doc::concat([
-            Doc::text(open.to_string()),
-            Doc::indent(Doc::concat(body)),
-            hardline(),
-            Doc::text(close.to_string()),
-        ])
+        indented_body(open, Doc::concat(body), hardline(), close)
     }
 
     fn standalone_comments(&self, from: usize, to: usize) -> Vec<(usize, Doc)> {
-        let mut docs: Vec<_> = self
+        let lines = self
             .trivia
             .standalone_comments_between(from, to)
-            .into_iter()
-            .map(|(line, text)| (line, self.comment_line(text)))
-            .collect();
-        docs.extend(
-            self.trivia
-                .own_line_block_comments_between(from, to)
-                .into_iter()
-                .map(|(start, end, line)| {
-                    (line, Doc::text(self.slice_range(start, end).to_string()))
-                }),
-        );
+            .map(|(line, text)| (line, self.comment_line(text)));
+        let blocks = self
+            .trivia
+            .own_line_block_comments_between(from, to)
+            .map(|(start, end, line)| (line, Doc::text(self.slice_range(start, end))));
+        let mut docs: Vec<_> = lines.chain(blocks).collect();
         docs.sort_by_key(|&(line, _)| line);
         docs
     }
 
-    fn verbatim_rows(&self, rows: Vec<(Span, Doc)>, open: &str, close: &str) -> Doc {
-        let last_span = rows.last().map(|(s, _)| *s);
+    fn verbatim_rows(&self, rows: Vec<(Doc, Span)>, open: &str, close: &str) -> Doc {
+        let last_span = rows.last().map(|(_, span)| *span);
         let mut groups = rows
-            .chunk_by(|(a, _), (b, _)| a.line_range().0 == b.line_range().0)
+            .chunk_by(|(_, a), (_, b)| a.line_range().0 == b.line_range().0)
             .peekable();
         let mut body = vec![hardline()];
         let mut prev_end: Option<usize> = None;
         while let Some(group) = groups.next() {
+            let first = group.first().unwrap().1;
+            let last = group.last().unwrap().1;
             if let Some(prev) = prev_end {
                 body.push(hardline());
-                for _ in 0..self
-                    .trivia
-                    .blank_count_between(prev, group[0].0.line_range().0)
-                {
+                for _ in 0..self.trivia.blank_count_between(prev, first.line_range().0) {
                     body.push(hardline());
                 }
             }
-            if group.len() == 1 && group[0].0.line_range().0 != group[0].0.line_range().1 {
-                body.push(group[0].1.clone());
-            } else if group
+            if group
                 .iter()
-                .any(|(sp, _)| sp.line_range().0 != sp.line_range().1)
+                .any(|(_, span)| span.line_range().0 != span.line_range().1)
             {
                 body.push(Doc::join(
                     Doc::text(", "),
-                    group.iter().map(|(_, d)| d.clone()),
+                    group.iter().map(|(doc, _)| doc.clone()),
                 ));
             } else {
-                let lo = group.first().unwrap().0.offset_range().0;
-                let hi = group.last().unwrap().0.offset_range().1;
-                body.push(Doc::text(self.slice_range(lo, hi).trim_end().to_string()));
+                body.push(Doc::text(
+                    self.slice_range(first.offset_range().0, last.offset_range().1)
+                        .trim_end(),
+                ));
             }
             if groups.peek().is_some() || last_span.is_some_and(|s| self.source_trailing_comma(s)) {
                 body.push(Doc::text(","));
             }
-            prev_end = Some(group.last().unwrap().0.line_range().1);
+            prev_end = Some(last.line_range().1);
         }
-        Doc::concat([
-            Doc::text(open.to_string()),
-            Doc::indent(Doc::concat(body)),
-            hardline(),
-            Doc::text(close.to_string()),
-        ])
+        indented_body(open, Doc::concat(body), hardline(), close)
     }
 
     fn line_first_token_offset(&self, off: usize) -> usize {
@@ -1102,10 +1087,6 @@ impl<'a> Printer<'a> {
         result
     }
 
-    fn verbatim_line(&self, span: Span) -> Doc {
-        Doc::text(self.slice(span).trim_end().to_string())
-    }
-
     fn verbatim_full_line(&self, span: Span) -> Doc {
         let b = self.src.as_bytes();
         let stop = span.offset_range().1.min(b.len());
@@ -1166,29 +1147,30 @@ impl<'a> Printer<'a> {
     }
 
     fn stmt_structural(&self, s: Idx<StatementData>) -> Doc {
-        match &self.ast.s(&s).kind {
+        let stmt = self.ast.s(&s);
+        match &stmt.kind {
             StatementKind::Expression(e) => self.expr(*e),
             StatementKind::Use(u) => self.raw(u.span),
             StatementKind::Let(l) => self.let_stmt(l),
             StatementKind::Static(st) => self.static_stmt(st),
-            StatementKind::NestedFn(f) => {
-                self.header_verbatim(self.ast.s(&s).span, f.body, || self.nested_fn_stmt(f))
-            }
+            StatementKind::NestedFn(f) => self
+                .verbatim_header(stmt.span, f.body)
+                .unwrap_or_else(|| self.nested_fn_stmt(f)),
             StatementKind::Return { value, .. } => match value {
                 Some(v) => Doc::concat([Doc::text("return "), self.expr(*v)]),
                 None => Doc::text("return"),
             },
             StatementKind::Break { .. } => Doc::text("break"),
             StatementKind::Continue { .. } => Doc::text("continue"),
-            StatementKind::For(f) => {
-                self.header_verbatim(self.ast.s(&s).span, f.body, || self.for_stmt(f))
-            }
+            StatementKind::For(f) => self
+                .verbatim_header(stmt.span, f.body)
+                .unwrap_or_else(|| self.for_stmt(f)),
             StatementKind::While(w) => {
                 // `loop { .. }` parses as `while true { .. }` (same AST). Render
                 // an always-true condition back as `loop`, normalizing the
                 // literal `while true` spelling to it too (corpus rule).
                 let is_loop = matches!(self.ast.e(&w.condition).kind, ExprKind::Bool(true));
-                self.header_verbatim(self.ast.s(&s).span, w.body, || {
+                self.verbatim_header(stmt.span, w.body).unwrap_or_else(|| {
                     if is_loop {
                         Doc::concat([Doc::text("loop "), self.flow_block(w.body)])
                     } else {
@@ -1209,10 +1191,8 @@ impl<'a> Printer<'a> {
                 Doc::text(" "),
                 self.flow_block(w.body),
             ]),
-            StatementKind::Comment(text) => self.comment_node(self.ast.s(&s).span, text),
-            StatementKind::Defer(_) | StatementKind::LifecycleHook { .. } => {
-                self.raw(self.ast.s(&s).span)
-            }
+            StatementKind::Comment(text) => self.comment_node(stmt.span, text),
+            StatementKind::Defer(_) | StatementKind::LifecycleHook { .. } => self.raw(stmt.span),
         }
     }
 
@@ -1267,27 +1247,22 @@ impl<'a> Printer<'a> {
         Doc::concat(parts)
     }
 
-    fn header_verbatim(
-        &self,
-        stmt_span: Span,
-        body: Idx<BlockData>,
-        fallback: impl FnOnce() -> Doc,
-    ) -> Doc {
+    fn verbatim_header(&self, span: Span, body: Idx<BlockData>) -> Option<Doc> {
         let body_span = self.ast.b(&body).span;
         let body_open = body_span.offset_range().0;
-        if body_span.line_range().0 == stmt_span.line_range().0
+        if body_span.line_range().0 == span.line_range().0
             && self
                 .trivia
-                .has_block_comment_in(stmt_span.offset_range().0, body_open)
+                .has_block_comment_in(span.offset_range().0, body_open)
         {
-            let header = self.slice_range(stmt_span.offset_range().0, body_open);
-            return Doc::concat([
-                Doc::text(header.trim_end().to_string()),
+            let header = self.slice_range(span.offset_range().0, body_open);
+            return Some(Doc::concat([
+                Doc::text(header.trim_end()),
                 Doc::text(" "),
                 self.flow_block(body),
-            ]);
+            ]));
         }
-        fallback()
+        None
     }
 
     fn for_stmt(&self, f: &For) -> Doc {
@@ -1567,7 +1542,7 @@ impl<'a> Printer<'a> {
         let mut docs: Vec<Doc> = arms.iter().map(|a| self.match_arm(a)).collect();
         let no_skip = vec![false; arm_spans.len()];
         for k in self.aligned_indices(&arm_spans, &eligible, &no_skip) {
-            docs[k] = self.verbatim_line(arm_spans[k]);
+            docs[k] = self.raw(arm_spans[k]);
         }
         for k in 0..arm_spans.len() {
             if eligible[k]
@@ -1576,7 +1551,7 @@ impl<'a> Printer<'a> {
                     arm_spans[k].offset_range().1,
                 )
             {
-                docs[k] = self.verbatim_line(arm_spans[k]);
+                docs[k] = self.raw(arm_spans[k]);
             }
         }
         // Entry span is the FULL arm (pattern .. body), so comma_block's
@@ -1775,26 +1750,12 @@ impl<'a> Printer<'a> {
         let has_comments = args
             .iter()
             .any(|a| self.claimed_comment_before(arg_span(a), call_end).is_some())
-            || !self
-                .trivia
-                .standalone_comments_between(span.line_range().0, span.line_range().1)
-                .is_empty()
-            || self
-                .trivia
-                .has_block_comment_in(span.offset_range().0, span.offset_range().1);
+            || self.trivia.has_list_comments(span);
         let docs: Vec<Doc> = args.iter().map(render_arg).collect();
         let renders_multiline = docs.iter().any(Doc::has_hard_line);
         let source_multiline = span.line_range().0 != span.line_range().1 || renders_multiline;
         if source_multiline && self.hugs_trailing_arg(args, span) {
-            let n = args.len();
-            let mut parts = vec![Doc::text("(")];
-            for d in &docs[..n - 1] {
-                parts.push(d.clone());
-                parts.push(Doc::text(", "));
-            }
-            parts.push(docs[n - 1].clone());
-            parts.push(Doc::text(")"));
-            return Doc::concat(parts);
+            return inline_comma_list("(", ")", docs);
         }
         if !has_comments && source_multiline && !renders_multiline {
             if let Some(d) = self.call_arg_rows(args, span) {
@@ -1814,15 +1775,7 @@ impl<'a> Printer<'a> {
             matches!(&self.ast.e(&arg.value).kind, ExprKind::Lambda { body, .. }
                 if self.block_has_braces(*body))
         }) {
-            return Doc::group(Doc::concat([
-                Doc::text("("),
-                Doc::indent(Doc::concat([
-                    softline(),
-                    Doc::join(Doc::concat([Doc::text(","), line()]), docs),
-                ])),
-                softline(),
-                Doc::text(")"),
-            ]));
+            return wrap_parens(docs);
         }
         inline_comma_list("(", ")", docs)
     }
@@ -1977,12 +1930,8 @@ impl<'a> Printer<'a> {
             }
         }
         let close_prefix = if hanging_close { nil() } else { hardline() };
-        Some(Doc::concat([
-            Doc::concat(head),
-            Doc::indent(Doc::concat(body)),
-            close_prefix,
-            Doc::text(")"),
-        ]))
+        head.extend([Doc::indent(Doc::concat(body)), close_prefix, Doc::text(")")]);
+        Some(Doc::concat(head))
     }
 
     fn tuple(&self, items: &[Idx<ExprData>], span: Span) -> Doc {
@@ -1992,16 +1941,16 @@ impl<'a> Printer<'a> {
         if span.line_range().0 == span.line_range().1 && !docs.iter().any(Doc::has_hard_line) {
             return inline_comma_list("(", format!("{trailing})"), docs);
         }
-        Doc::concat([
-            Doc::text("("),
-            Doc::indent(Doc::concat([
+        indented_body(
+            "(",
+            Doc::concat([
                 hardline(),
                 Doc::join(Doc::concat([Doc::text(","), hardline()]), docs),
                 Doc::text(trailing),
-            ])),
+            ]),
             hardline(),
-            Doc::text(")"),
-        ])
+            ")",
+        )
     }
 
     fn list(&self, open: &str, close: &str, items: &[Idx<ExprData>], span: Span) -> Doc {
@@ -2022,24 +1971,18 @@ impl<'a> Printer<'a> {
         let has_comments = items
             .iter()
             .any(|e| self.claimed_trailing_comment(self.ast.e(e).span).is_some())
-            || !self
-                .trivia
-                .standalone_comments_between(span.line_range().0, span.line_range().1)
-                .is_empty()
-            || self
-                .trivia
-                .has_block_comment_in(span.offset_range().0, span.offset_range().1);
+            || self.trivia.has_list_comments(span);
         if !has_comments {
             let rows = items
                 .iter()
-                .map(|e| (self.ast.e(e).span, self.expr(*e)))
+                .map(|e| (self.expr(*e), self.ast.e(e).span))
                 .collect();
             return self.verbatim_rows(rows, open, close);
         }
         let entries = items.iter().map(|e| {
             let s = self.ast.e(e).span;
             let doc = if s.line_range().0 == s.line_range().1 {
-                Doc::text(self.slice(s).trim_end().to_string())
+                self.raw(s)
             } else {
                 self.expr(*e)
             };
@@ -2092,61 +2035,31 @@ impl<'a> Printer<'a> {
                 None => false,
             }
         };
-        let has_comments = fields.iter().any(|(_, v)| field_has_comment(v))
-            || !self
-                .trivia
-                .standalone_comments_between(span.line_range().0, span.line_range().1)
-                .is_empty()
-            || self
-                .trivia
-                .has_block_comment_in(span.offset_range().0, span.offset_range().1);
+        let has_comments =
+            fields.iter().any(|(_, v)| field_has_comment(v)) || self.trivia.has_list_comments(span);
         let source_multiline = span.line_range().0 != span.line_range().1;
         let docs: Vec<Doc> = fields
             .iter()
             .map(|(names, value)| field_doc(names, value))
             .collect();
         let renders_multiline = !source_multiline && docs.iter().any(Doc::has_hard_line);
-        if source_multiline || has_comments || renders_multiline {
-            if !has_comments && !renders_multiline {
-                let rows = fields
-                    .iter()
-                    .zip(docs)
-                    .map(|((names, value), doc)| {
-                        let v = self.ast.e(value).span;
-                        let full = v
-                            .with_line_range((names[0].span.line_range().0, v.line_range().1))
-                            .with_col_range((names[0].span.col_range().0, v.col_range().1))
-                            .with_offset_range((
-                                names[0].span.offset_range().0,
-                                v.offset_range().1,
-                            ));
-                        (full, doc)
-                    })
-                    .collect();
-                return Doc::concat([
-                    Doc::text(format!("{name} ")),
-                    self.verbatim_rows(rows, "{", "}"),
-                ]);
-            }
-            let entries = fields.iter().zip(docs).map(|((names, value), doc)| {
-                let v = self.ast.e(value).span;
-                let key = names[0].span;
-                let span = v
-                    .with_line_range((key.line_range().0, v.line_range().1))
-                    .with_offset_range((key.offset_range().0, v.offset_range().1));
-                (doc, span)
-            });
-            return Doc::concat([
-                Doc::text(format!("{name} ")),
-                self.comma_block(
-                    entries,
-                    Some((span.line_range().0, span.line_range().1)),
-                    "{",
-                    "}",
-                ),
-            ]);
+        if !source_multiline && !has_comments && !renders_multiline {
+            return inline_comma_list(format!("{name} {{ "), " }", docs);
         }
-        inline_comma_list(format!("{name} {{ "), " }", docs)
+        let fields = fields.iter().zip(docs).map(|((names, value), doc)| {
+            let key = names[0].span;
+            let value = self.ast.e(value).span;
+            let span = value
+                .with_line_range((key.line_range().0, value.line_range().1))
+                .with_offset_range((key.offset_range().0, value.offset_range().1));
+            (doc, span)
+        });
+        let body = if !has_comments && !renders_multiline {
+            self.verbatim_rows(fields.collect(), "{", "}")
+        } else {
+            self.comma_block(fields, Some(span.line_range()), "{", "}")
+        };
+        Doc::concat([Doc::text(format!("{name} ")), body])
     }
 
     fn if_expr(
@@ -2158,17 +2071,8 @@ impl<'a> Printer<'a> {
         let mut parts = Vec::new();
         for (i, (cond, body)) in branches.iter().enumerate() {
             if i == 0 {
-                let body_span = self.ast.b(body).span;
-                if if_span.line_range().0 == body_span.line_range().0
-                    && self
-                        .trivia
-                        .has_block_comment_in(if_span.offset_range().0, body_span.offset_range().0)
-                {
-                    let header =
-                        self.slice_range(if_span.offset_range().0, body_span.offset_range().0);
-                    parts.push(Doc::text(header.trim_end().to_string()));
-                    parts.push(Doc::text(" "));
-                    parts.push(self.branch_body(*body));
+                if let Some(header) = self.verbatim_header(if_span, *body) {
+                    parts.push(header);
                     continue;
                 }
                 parts.push(Doc::text("if "));
@@ -2183,7 +2087,7 @@ impl<'a> Printer<'a> {
             }
             parts.push(self.expr(*cond));
             parts.push(Doc::text(" "));
-            parts.push(self.branch_body(*body));
+            parts.push(self.flow_block(*body));
         }
         if let Some(eb) = else_branch {
             let eb_span = self.ast.b(&eb).span;
@@ -2192,41 +2096,19 @@ impl<'a> Printer<'a> {
                 parts.push(hardline());
                 if eb_span.line_range().0 == eb_span.line_range().1 {
                     let start = self.line_first_token_offset(eb_span.offset_range().0);
-                    parts.push(self.verbatim_line(
-                        eb_span.with_offset_range((start, eb_span.offset_range().1)),
-                    ));
+                    parts.push(
+                        self.raw(eb_span.with_offset_range((start, eb_span.offset_range().1))),
+                    );
                 } else {
                     parts.push(Doc::text("else "));
-                    parts.push(self.branch_body(eb));
+                    parts.push(self.flow_block(eb));
                 }
             } else {
                 parts.push(Doc::text(" else "));
-                parts.push(self.branch_body(eb));
+                parts.push(self.flow_block(eb));
             }
         }
         Doc::concat(parts)
-    }
-
-    fn branch_body(&self, block_idx: Idx<BlockData>) -> Doc {
-        let block = self.ast.b(&block_idx);
-        let stmts = &block.statements;
-        let source_single_line = block.span.line_range().0 == block.span.line_range().1;
-        if stmts.is_empty() {
-            return if source_single_line {
-                Doc::text("{}")
-            } else {
-                Doc::concat([Doc::text("{"), hardline(), Doc::text("}")])
-            };
-        }
-        if let Some(d) = self.inline_single_line_block(block_idx) {
-            return d;
-        }
-        Doc::concat([
-            Doc::text("{"),
-            Doc::indent(Doc::concat([hardline(), self.stmt_seq(stmts)])),
-            hardline(),
-            Doc::text("}"),
-        ])
     }
 
     fn type_expr(&self, t: Idx<TypeExprData>) -> Doc {
@@ -2236,7 +2118,7 @@ impl<'a> Printer<'a> {
                 .trivia
                 .has_block_comment_in(data.span.offset_range().0, data.span.offset_range().1)
         {
-            return Doc::text(self.slice(data.span).trim_end().to_string());
+            return self.raw(data.span);
         }
         let inner = match &data.kind {
             TypeExprKind::Any => Doc::text("any"),
@@ -2374,7 +2256,14 @@ impl<'a> Printer<'a> {
     }
 
     fn claimed_trailing_comment(&self, span: Span) -> Option<(&str, usize)> {
+        self.claimed_comment_before(span, usize::MAX)
+    }
+
+    fn claimed_comment_before(&self, span: Span, limit: usize) -> Option<(&str, usize)> {
         let (text, col, offset) = self.trivia.trailing_comment(span.line_range().1)?;
+        if offset >= limit {
+            return None;
+        }
         if offset < span.offset_range().1 {
             return Some((text, col));
         }
@@ -2383,13 +2272,6 @@ impl<'a> Printer<'a> {
             .chars()
             .all(|c| c.is_whitespace() || c == ';' || c == ',')
             .then_some((text, col))
-    }
-
-    fn claimed_comment_before(&self, span: Span, limit: usize) -> Option<(&str, usize)> {
-        let (_, _, offset) = self.trivia.trailing_comment(span.line_range().1)?;
-        (offset < limit)
-            .then(|| self.claimed_trailing_comment(span))
-            .flatten()
     }
 
     fn with_trailing_comment(&self, doc: Doc, span: Span, mode: char) -> Doc {

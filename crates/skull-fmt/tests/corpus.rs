@@ -2,7 +2,9 @@
 //! its expected output, which must reparse and be a fixed point.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use super::collect_files;
 
 struct Case {
     file: String,
@@ -14,7 +16,7 @@ struct Case {
 fn cases() -> Vec<Case> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fmt");
     let mut files = Vec::new();
-    collect(&dir, &mut files);
+    collect_files(&dir, "fmt", &mut files);
     files.sort();
     files
         .iter()
@@ -23,17 +25,6 @@ fn cases() -> Vec<Case> {
             parse_cases(&short, &fs::read_to_string(f).unwrap())
         })
         .collect()
-}
-
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    for e in fs::read_dir(dir).expect("read the corpus").flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            collect(&p, out);
-        } else if p.extension().and_then(|s| s.to_str()) == Some("fmt") {
-            out.push(p);
-        }
-    }
 }
 
 fn parse_cases(file: &str, text: &str) -> Vec<Case> {

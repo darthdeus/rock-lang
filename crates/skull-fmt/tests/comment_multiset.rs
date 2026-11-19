@@ -1,19 +1,7 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir)
-        .expect("read a source directory")
-        .flatten()
-    {
-        let path = entry.path();
-        if path.is_dir() {
-            collect(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rock") {
-            out.push(path);
-        }
-    }
-}
+use super::collect_files;
 
 fn format_v1(src: &str) -> Option<Result<String, String>> {
     let cfg = skull_fmt::FormatConfig::default();
@@ -75,7 +63,7 @@ fn repository_sources_keep_every_comment() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
     for dir in ["tests", "crates/rock-stdlib", "crates/gamelibs"] {
-        collect(&root.join(dir), &mut files);
+        collect_files(&root.join(dir), "rock", &mut files);
     }
     files.sort();
     let mut checked = 0;
