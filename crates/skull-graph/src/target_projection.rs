@@ -18,12 +18,6 @@ pub struct TargetSpec {
     pub shader: Option<ShaderTargetSpec>,
 }
 
-impl TargetSpec {
-    pub fn cpu(self) -> CpuTargetSpec {
-        self.cpu
-    }
-}
-
 const GLSL_330: Option<ShaderTargetSpec> = Some(ShaderTargetSpec::Glsl(
     skull_mir::shader_ir::GlslProfile::Core330,
 ));

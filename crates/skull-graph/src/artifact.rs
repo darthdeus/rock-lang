@@ -270,14 +270,6 @@ fn publication_candidate(
     })
 }
 
-fn publication_candidates(ws: &Workspace, req: &ArtifactRequest<'_>) -> BTreeMap<Instance, String> {
-    let target = req.spec.cpu();
-    req.roots
-        .iter()
-        .filter_map(|&root| publication_candidate(ws, &target, root))
-        .collect()
-}
-
 impl ArtifactView {
     /// Call before updating the graph: the rows must describe the graph this
     /// view was realized from.
@@ -329,37 +321,14 @@ impl ArtifactView {
         root_added: &[FuncRef],
         root_removed: &[FuncRef],
     ) {
-        let root_added: BTreeSet<DeclKey> = root_added
-            .iter()
-            .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
-            .collect();
-        let root_removed: BTreeSet<DeclKey> = root_removed
-            .iter()
-            .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
-            .collect();
-        self.update_local_with_decl_delta(
-            ws,
-            g,
-            req,
-            revisited,
-            added,
-            removed,
-            &root_added,
-            &root_removed,
-        )
-    }
-
-    fn update_local_with_decl_delta(
-        &mut self,
-        ws: &Workspace,
-        g: &InstanceGraph,
-        req: &ArtifactRequest<'_>,
-        revisited: &BTreeSet<Instance>,
-        added: &BTreeSet<Instance>,
-        removed: &BTreeSet<Instance>,
-        root_added: &BTreeSet<DeclKey>,
-        root_removed: &BTreeSet<DeclKey>,
-    ) {
+        let canonical = |roots: &[FuncRef]| -> BTreeSet<DeclKey> {
+            roots
+                .iter()
+                .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
+                .collect()
+        };
+        let root_added = &canonical(root_added);
+        let root_removed = &canonical(root_removed);
         self.prepare_update(g);
         self.index.graph_revision = g.revision();
         let mut root_subjects = BTreeSet::new();
@@ -422,7 +391,7 @@ impl ArtifactView {
             }
         }
 
-        let target = req.spec.cpu();
+        let target = req.spec.cpu;
         for i in &subjects {
             if !g.instances.contains(i) {
                 self.index.realizable.remove(i);
@@ -640,19 +609,21 @@ impl ArtifactView {
             .entry(i.func)
             .or_default()
             .insert(i.clone());
-        if realized.kind.boundary_class().is_none() {
-            self.instances.insert(i.clone());
-        }
-        if let Some(class) = realized.kind.boundary_class() {
-            self.boundaries.insert(
-                i.clone(),
-                BoundaryId {
-                    declaration: realized.decl,
-                    class,
-                    target: req.spec.cpu(),
-                    symbol,
-                },
-            );
+        match realized.kind.boundary_class() {
+            None => {
+                self.instances.insert(i.clone());
+            }
+            Some(class) => {
+                self.boundaries.insert(
+                    i.clone(),
+                    BoundaryId {
+                        declaration: realized.decl,
+                        class,
+                        target: req.spec.cpu,
+                        symbol,
+                    },
+                );
+            }
         }
         if let Some(edges) = self.index.outgoing.get(i) {
             for (site, callee) in edges {
@@ -671,23 +642,19 @@ impl ArtifactView {
             realized.kind,
             Realization::ForeignBody(BoundaryClass::InlineBody)
         ) {
-            {
-                let scx = req.scalar_context(ws, g, scalar_context);
-                if let Ok(signature) =
-                    crate::concrete_body::concrete_signature_for_instance(ws, g, i)
-                {
-                    let selected = Instance {
-                        func: realized.decl,
-                        args: i.args.clone(),
-                    };
-                    self.publisher_lanes.insert(
-                        i.clone(),
-                        skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
-                            ws, scx, &selected, &signature,
-                        )
-                        .result_lanes(),
-                    );
-                }
+            let scx = req.scalar_context(ws, g, scalar_context);
+            if let Ok(signature) = crate::concrete_body::concrete_signature_for_instance(ws, g, i) {
+                let selected = Instance {
+                    func: realized.decl,
+                    args: i.args.clone(),
+                };
+                self.publisher_lanes.insert(
+                    i.clone(),
+                    skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
+                        ws, scx, &selected, &signature,
+                    )
+                    .result_lanes(),
+                );
             }
         }
     }
@@ -727,7 +694,7 @@ impl ArtifactView {
             }
             self.publications.remove(&instance);
         }
-        let target = req.spec.cpu();
+        let target = req.spec.cpu;
         for decl in root_added {
             let Some((instance, symbol)) = publication_candidate(ws, &target, decl.0) else {
                 continue;
@@ -877,7 +844,7 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
 
 /// Realize existing graph instances for the artifact request.
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
-    let target = req.spec.cpu();
+    let target = req.spec.cpu;
     let mut realizable: FxHashMap<Instance, Result<Realized, Unrealizable>> = FxHashMap::default();
     let mut by_decl: FxHashMap<FuncRef, Result<Realized, Unrealizable>> = FxHashMap::default();
     for i in &g.instances {
@@ -1010,42 +977,40 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let scalar_context = std::cell::OnceCell::new();
     let scx = req.scalar_context(ws, g, &scalar_context);
     let mut publisher_lanes: BTreeMap<Instance, usize> = BTreeMap::new();
-    {
-        for (i, r) in &realization {
-            if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
-                continue;
-            }
-            if g.substitution(i).is_none() {
-                continue;
-            }
-            let selected = Instance {
-                func: r.decl,
-                args: i.args.clone(),
-            };
-            debug_assert_eq!(
-                ws.module(selected.func.module).functions[selected.func.func]
-                    .generics
-                    .len(),
-                ws.module(i.func.module).functions[i.func.func]
-                    .generics
-                    .len(),
-                "a backend sibling must declare the same generics as the instance it serves",
-            );
-            let signature = crate::concrete_body::concrete_signature_for_instance(ws, g, i)
-                .unwrap_or_else(|reason| {
-                    panic!(
-                        "retained inline body {:?} has no concrete publisher signature: {reason:?}",
-                        i
-                    )
-                });
-            publisher_lanes.insert(
-                i.clone(),
-                skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
-                    ws, scx, &selected, &signature,
-                )
-                .result_lanes(),
-            );
+    for (i, r) in &realization {
+        if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
+            continue;
         }
+        if g.substitution(i).is_none() {
+            continue;
+        }
+        let selected = Instance {
+            func: r.decl,
+            args: i.args.clone(),
+        };
+        debug_assert_eq!(
+            ws.module(selected.func.module).functions[selected.func.func]
+                .generics
+                .len(),
+            ws.module(i.func.module).functions[i.func.func]
+                .generics
+                .len(),
+            "a backend sibling must declare the same generics as the instance it serves",
+        );
+        let signature = crate::concrete_body::concrete_signature_for_instance(ws, g, i)
+            .unwrap_or_else(|reason| {
+                panic!(
+                    "retained inline body {:?} has no concrete publisher signature: {reason:?}",
+                    i
+                )
+            });
+        publisher_lanes.insert(
+            i.clone(),
+            skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
+                ws, scx, &selected, &signature,
+            )
+            .result_lanes(),
+        );
     }
 
     let missing_substitutions: BTreeSet<Instance> = realization
@@ -1054,7 +1019,11 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .cloned()
         .collect();
 
-    let publication_candidates = publication_candidates(ws, req);
+    let publication_candidates: BTreeMap<Instance, String> = req
+        .roots
+        .iter()
+        .filter_map(|&root| publication_candidate(ws, &target, root))
+        .collect();
     for (instance, symbol) in &publication_candidates {
         index
             .publication_users
