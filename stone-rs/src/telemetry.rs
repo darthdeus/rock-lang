@@ -2059,6 +2059,81 @@ mod tests {
             .collect()
     }
 
+    fn open_client(root: &Path) -> TelemetryClient {
+        TelemetryClient::open(root, identity(), "", "", false).unwrap()
+    }
+
+    fn queue_row(root: &Path, name: &str) {
+        TelemetrySpool::open(root, identity())
+            .unwrap()
+            .record_stat(name, 1)
+            .unwrap();
+    }
+
+    /// Extends `path` to `len` bytes ending in a newline, so the log stays a whole-row file.
+    fn fill_log(path: &Path, len: u64) {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)
+            .unwrap();
+        file.set_len(len).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.sync_all().unwrap();
+    }
+
+    fn wait_until_removed(path: &Path, within: Duration) {
+        let deadline = Instant::now() + within;
+        while path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn assert_child_succeeded(child: &std::process::Output) {
+        assert!(
+            child.status.success(),
+            "child clear failed:\n{}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+
+    /// Row names per request body, as a drain on `channel` delivers them.
+    fn drain_batches(root: &Path, channel: &str) -> Vec<Vec<String>> {
+        let mut batches = Vec::new();
+        TelemetryDrain::open(root, channel)
+            .unwrap()
+            .run(|body| {
+                batches.push(batch_names(body));
+                Ok(())
+            })
+            .unwrap();
+        batches
+    }
+
+    fn upload_worker(
+        root: &Path,
+        ingest: &Ingest,
+        token: &str,
+        timing: UploadTiming,
+    ) -> UploadWorker {
+        UploadWorker::start_with_timing(root, transport(ingest, token), timing).unwrap()
+    }
+
+    fn client_with_timing(root: &Path, ingest: &Ingest, timing: UploadTiming) -> TelemetryClient {
+        TelemetryClient::open_with_timing(
+            root,
+            identity(),
+            &ingest.endpoint(),
+            "secret",
+            false,
+            timing,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn channels_have_independent_spools_and_drains() {
         let root = fresh_root();
@@ -2071,41 +2146,31 @@ mod tests {
         steam.record_stat("steam-event", 1).unwrap();
         direct.record_stat("direct-event", 2).unwrap();
 
-        let mut steam_seen = Vec::new();
-        TelemetryDrain::open(&root, "steam")
-            .unwrap()
-            .run(|body| {
-                steam_seen.push(serde_json::from_str::<Value>(body).unwrap()["n"].clone());
-                Ok(())
-            })
-            .unwrap();
-        let mut direct_seen = Vec::new();
-        TelemetryDrain::open(&root, "direct")
-            .unwrap()
-            .run(|body| {
-                direct_seen.push(serde_json::from_str::<Value>(body).unwrap()["n"].clone());
-                Ok(())
-            })
-            .unwrap();
+        let steam_seen = drain_batches(&root, "steam");
+        let direct_seen = drain_batches(&root, "direct");
 
-        assert_eq!(steam_seen, ["steam-event"]);
-        assert_eq!(direct_seen, ["direct-event"]);
+        assert_eq!(steam_seen, [["steam-event"]]);
+        assert_eq!(direct_seen, [["direct-event"]]);
     }
 
     #[test]
-    fn cursor_ignores_an_unterminated_tail() {
-        let root = fresh_root();
-        let drain = TelemetryDrain::open(&root, "steam").unwrap();
-        std::fs::write(
-            &drain.cursor_path,
-            format!(
-                "{} 100\n{} 1",
-                drain.consent_generation, drain.consent_generation
+    fn cursor_recovery_trusts_only_complete_possible_entries() {
+        let cases = [
+            ("an unterminated tail is ignored", "{g} 100\n{g} 1", 100),
+            (
+                "recovery stops at the first impossible entry",
+                "{g} 100\n{g} 999999\n{g} 1\n",
+                100,
             ),
-        )
-        .unwrap();
+        ];
+        for (name, journal, expected) in cases {
+            let root = fresh_root();
+            let drain = TelemetryDrain::open(&root, "steam").unwrap();
+            let generation = drain.consent_generation.to_string();
+            std::fs::write(&drain.cursor_path, journal.replace("{g}", &generation)).unwrap();
 
-        assert_eq!(drain.cursor_for_len(200).unwrap(), 100);
+            assert_eq!(drain.cursor_for_len(200).unwrap(), expected, "{name}");
+        }
     }
 
     #[test]
@@ -2128,28 +2193,12 @@ mod tests {
         let mut seen = Vec::new();
         drain
             .run(|body| {
-                seen.push(serde_json::from_str::<Value>(body).unwrap()["n"].clone());
+                seen.push(batch_names(body));
                 Ok(())
             })
             .unwrap();
 
-        assert_eq!(seen, ["second"]);
-    }
-
-    #[test]
-    fn cursor_recovery_stops_at_the_first_impossible_complete_entry() {
-        let root = fresh_root();
-        let drain = TelemetryDrain::open(&root, "steam").unwrap();
-        std::fs::write(
-            &drain.cursor_path,
-            format!(
-                "{} 100\n{} 999999\n{} 1\n",
-                drain.consent_generation, drain.consent_generation, drain.consent_generation
-            ),
-        )
-        .unwrap();
-
-        assert_eq!(drain.cursor_for_len(200).unwrap(), 100);
+        assert_eq!(seen, [["second"]]);
     }
 
     #[test]
@@ -2168,26 +2217,11 @@ mod tests {
             .unwrap()
             .record_stat("after-recovery", 2)
             .unwrap();
-        let rows: Vec<Value> = std::fs::read_to_string(&spool.events_path)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let rows = records(&root);
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["n"], "complete");
         assert_eq!(rows[1]["n"], "after-recovery");
-    }
-
-    #[test]
-    fn opening_a_spool_does_not_persist_or_emit_an_install_id() {
-        let root = fresh_root();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-        spool.record_stat("session_start", 1).unwrap();
-
-        assert!(!root.join("reports/.install").exists());
-        let rows = records(&root);
-        assert!(rows[0].get("install").is_none());
     }
 
     #[test]
@@ -2212,7 +2246,7 @@ mod tests {
         });
         fs::write(&events_path, format!("{}\n", legacy)).unwrap();
 
-        let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
+        let mut client = open_client(&root);
         client.record_stat("new", 2).unwrap();
         client.finish(StopMode::Discard);
 
@@ -2225,7 +2259,7 @@ mod tests {
     #[test]
     fn recording_never_waits_for_telemetry_io() {
         let root = fresh_root();
-        let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
+        let mut client = open_client(&root);
         let io_lock = client.io_lock_for_test();
         let held = io_lock.lock().unwrap();
         let (returned_tx, returned_rx) = mpsc::channel();
@@ -2258,7 +2292,7 @@ mod tests {
     #[test]
     fn queued_bursts_are_durable_and_ordered_at_shutdown() {
         let root = fresh_root();
-        let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
+        let mut client = open_client(&root);
         for seq in 1..=130 {
             client.record_stat(&format!("event-{seq}"), seq).unwrap();
         }
@@ -2276,7 +2310,7 @@ mod tests {
     #[test]
     fn explicit_flush_makes_prior_queued_rows_visible() {
         let root = fresh_root();
-        let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
+        let mut client = open_client(&root);
         client.record_stat("before-flush", 1).unwrap();
 
         client.flush().unwrap();
@@ -2289,15 +2323,8 @@ mod tests {
     fn explicit_flush_reports_prior_persistence_failure() {
         let _guard = TEST_LOCK.lock().unwrap();
         let root = fresh_root();
-        let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&client.events_path)
-            .unwrap()
-            .set_len(MAX_SPOOL_BYTES)
-            .unwrap();
+        let mut client = open_client(&root);
+        fill_log(&client.events_path, MAX_SPOOL_BYTES);
         client.record_stat("over-cap", 1).unwrap();
 
         let error = client.flush().unwrap_err();
@@ -2312,15 +2339,8 @@ mod tests {
         crate::rock_log_reexport::init();
         crate::rock_log_reexport::reset_dedup();
         let root = fresh_root();
-        let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&client.events_path)
-            .unwrap()
-            .set_len(MAX_SPOOL_BYTES)
-            .unwrap();
+        let mut client = open_client(&root);
+        fill_log(&client.events_path, MAX_SPOOL_BYTES);
         let before = capped_spool_warnings();
         for _ in 0..256 {
             client.record_stat("over-cap", 1).unwrap();
@@ -2339,14 +2359,7 @@ mod tests {
     fn capped_batch_rejection_workload() {
         let root = fresh_root();
         let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-        fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&spool.events_path)
-            .unwrap()
-            .set_len(MAX_SPOOL_BYTES)
-            .unwrap();
+        fill_log(&spool.events_path, MAX_SPOOL_BYTES);
         let data = serde_json::json!({"values": vec!["x".repeat(200); 16]}).to_string();
         let events: Vec<_> = (0..64)
             .map(|_| QueuedTelemetryEvent::new("over-cap", 1, Some(&data)).unwrap())
@@ -2374,17 +2387,10 @@ mod tests {
     fn near_capacity_worker_still_accepts_a_smaller_row_after_rejection() {
         let _guard = TEST_LOCK.lock().unwrap();
         let root = fresh_root();
-        let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
+        let mut client = open_client(&root);
         let io_lock = Arc::clone(&client.io_lock);
         let guard = io_lock.lock().unwrap();
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .open(&client.events_path)
-            .unwrap();
-        file.set_len(MAX_SPOOL_BYTES - 1024).unwrap();
-        file.seek(SeekFrom::End(-1)).unwrap();
-        file.write_all(b"\n").unwrap();
-        drop(file);
+        fill_log(&client.events_path, MAX_SPOOL_BYTES - 1024);
         let data = serde_json::json!({"values": vec!["x".repeat(200); 16]}).to_string();
         client
             .record_stat_data("too-large", 1, Some(&data))
@@ -2477,17 +2483,7 @@ mod tests {
         )
         .unwrap();
         spool.record_stat("before-cap", 1).unwrap();
-        let mut events = OpenOptions::new()
-            .write(true)
-            .open(&spool.events_path)
-            .unwrap();
-        events.set_len(MAX_SPOOL_BYTES).unwrap();
-        events.seek(SeekFrom::End(-1)).unwrap();
-        events.write_all(b"\n").unwrap();
-        events.sync_all().unwrap();
-        // Windows keeps a deleted-but-open file in its directory, so the teardown
-        // below cannot remove `root` while this handle lives.
-        drop(events);
+        fill_log(&spool.events_path, MAX_SPOOL_BYTES);
         let drain =
             TelemetryDrain::open_with_io_lock(&root, "steam", consent_generation, io_lock).unwrap();
 
@@ -2573,8 +2569,7 @@ mod tests {
         // Keep the first request in flight until withdrawal, so backlogged retries are not
         // mistaken for later requests.
         timing.request_timeout = Duration::from_secs(30);
-        let worker =
-            UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();
+        let worker = upload_worker(&root, &ingest, "secret", timing);
         let events_path = spool.events_path.clone();
         let io_lock = Arc::clone(&spool.io_lock);
         let append_worker = AppendWorker::start(spool, worker.waker());
@@ -2595,12 +2590,7 @@ mod tests {
         client.finish(StopMode::Drain);
         let requests_after_withdrawal = ingest.stop().len();
 
-        assert!(
-            child.status.success(),
-            "child clear failed:\n{}{}",
-            String::from_utf8_lossy(&child.stdout),
-            String::from_utf8_lossy(&child.stderr)
-        );
+        assert_child_succeeded(&child);
         assert_eq!(
             requests_at_publication, 1,
             "test did not expose one initial request"
@@ -2616,10 +2606,7 @@ mod tests {
     #[test]
     fn startup_respects_withdrawal_until_explicit_reconsent() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("before-withdrawal", 1)
-            .unwrap();
+        queue_row(&root, "before-withdrawal");
         fs::write(root.join("reports/.telemetry-revoked"), b"").unwrap();
 
         let error = TelemetryClient::open(&root, identity(), "", "", false)
@@ -2655,30 +2642,13 @@ mod tests {
 
         let mut after = TelemetrySpool::open(&root, identity()).unwrap();
         after.record_stat("after-reconsent", 2).unwrap();
-        let mut sent = Vec::new();
-        TelemetryDrain::open(&root, "steam")
-            .unwrap()
-            .run(|body| {
-                sent.push(
-                    serde_json::from_str::<Value>(body).unwrap()["n"]
-                        .as_str()
-                        .unwrap()
-                        .to_string(),
-                );
-                Ok(())
-            })
-            .unwrap();
-
-        assert_eq!(sent, ["after-reconsent"]);
+        assert_eq!(drain_batches(&root, "steam"), [["after-reconsent"]]);
     }
 
     #[test]
     fn a_missing_consent_journal_with_queued_rows_fails_closed() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("queued", 1)
-            .unwrap();
+        queue_row(&root, "queued");
         let _ = fs::remove_file(root.join("reports/.telemetry-consent"));
 
         let error = TelemetryClient::open(&root, identity(), "", "", false)
@@ -2691,10 +2661,7 @@ mod tests {
     #[test]
     fn withdrawal_journal_blocks_startup_if_the_tombstone_disappears() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("before-withdrawal", 1)
-            .unwrap();
+        queue_row(&root, "before-withdrawal");
         let root_string = std::ffi::CString::new(root.as_os_str().as_encoded_bytes()).unwrap();
         assert!(stone_telemetry_clear(root_string.as_ptr()));
         fs::remove_file(revocation_path(&root)).unwrap();
@@ -2709,7 +2676,7 @@ mod tests {
     #[test]
     fn revocation_stops_an_offline_owner_from_appending() {
         let root = fresh_root();
-        let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
+        let mut client = open_client(&root);
         client.record_stat("before-withdrawal", 1).unwrap();
         publish_revocation(&root).unwrap();
 
@@ -2728,7 +2695,7 @@ mod tests {
         }
 
         let root = fresh_root();
-        let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
+        let mut client = open_client(&root);
         client.record_stat("revoke-me", 1).unwrap();
 
         let child = crate::test_support::child_test(
@@ -2738,19 +2705,11 @@ mod tests {
         )
         .output()
         .unwrap();
-        let deadline = Instant::now() + Duration::from_millis(300);
-        while root.join("reports/stats").exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until_removed(&root.join("reports/stats"), Duration::from_millis(300));
         let stats_remain = root.join("reports/stats").exists();
         client.finish(StopMode::Discard);
 
-        assert!(
-            child.status.success(),
-            "child clear failed:\n{}{}",
-            String::from_utf8_lossy(&child.stdout),
-            String::from_utf8_lossy(&child.stderr)
-        );
+        assert_child_succeeded(&child);
         assert!(!stats_remain, "offline owner did not observe withdrawal");
     }
 
@@ -2783,7 +2742,7 @@ mod tests {
         let root = fresh_root();
         let events = root.join("reports/stats/steam/events.jsonl");
         assert!(!events.exists());
-        let client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
+        let client = open_client(&root);
         assert!(events.exists(), "the open materializes the queue");
         assert_eq!(queue_len(&events), 0, "and writes no row of its own");
         client.finish(StopMode::Discard);
@@ -3050,10 +3009,7 @@ mod tests {
     #[test]
     fn failed_upload_retries_without_another_event() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("retry-me", 1)
-            .unwrap();
+        queue_row(&root, "retry-me");
         let (request_tx, request_rx) = mpsc::channel();
         let ingest = Ingest::start(move |request, _| {
             request_tx.send(()).unwrap();
@@ -3063,12 +3019,7 @@ mod tests {
                 "204 No Content"
             }
         });
-        let worker = UploadWorker::start_with_timing(
-            &root,
-            transport(&ingest, "secret"),
-            test_upload_timing(),
-        )
-        .unwrap();
+        let worker = upload_worker(&root, &ingest, "secret", test_upload_timing());
 
         for _ in 0..2 {
             request_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -3120,15 +3071,7 @@ mod tests {
         });
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_millis(500);
-        let mut client = TelemetryClient::open_with_timing(
-            &root,
-            identity(),
-            &ingest.endpoint(),
-            "secret",
-            false,
-            timing,
-        )
-        .unwrap();
+        let mut client = client_with_timing(&root, &ingest, timing);
 
         client.record_stat("first", 1).unwrap();
         assert!(uploaded_rx
@@ -3145,10 +3088,7 @@ mod tests {
     #[test]
     fn startup_backlog_does_not_wait_for_a_new_flush_window() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("from-last-run", 1)
-            .unwrap();
+        queue_row(&root, "from-last-run");
         let (uploaded_tx, uploaded_rx) = mpsc::channel();
         let ingest = Ingest::start(move |_, request| {
             uploaded_tx.send(http_body(request).to_string()).unwrap();
@@ -3156,8 +3096,7 @@ mod tests {
         });
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_secs(5);
-        let worker =
-            UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();
+        let worker = upload_worker(&root, &ingest, "secret", timing);
 
         let body = uploaded_rx
             .recv_timeout(Duration::from_millis(300))
@@ -3178,15 +3117,7 @@ mod tests {
         });
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_secs(3600);
-        let mut client = TelemetryClient::open_with_timing(
-            &root,
-            identity(),
-            &ingest.endpoint(),
-            "secret",
-            false,
-            timing,
-        )
-        .unwrap();
+        let mut client = client_with_timing(&root, &ingest, timing);
         for seq in 1_i64..=512 {
             let mut name = format!("row-{seq}");
             name.push_str(&"x".repeat(MAX_FIELD_CHARS - name.len()));
@@ -3209,15 +3140,7 @@ mod tests {
         let ingest = Ingest::start(|_, _| "204 No Content");
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_secs(30);
-        let mut client = TelemetryClient::open_with_timing(
-            &root,
-            identity(),
-            &ingest.endpoint(),
-            "secret",
-            false,
-            timing,
-        )
-        .unwrap();
+        let mut client = client_with_timing(&root, &ingest, timing);
 
         client.record_stat("before-close", 1).unwrap();
         client.finish(StopMode::Drain);
@@ -3251,10 +3174,7 @@ mod tests {
 
         client.record_stat("revoke-before-flush", 1).unwrap();
         publish_revocation(&root).unwrap();
-        let deadline = Instant::now() + Duration::from_millis(200);
-        while root.join("reports/stats").exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until_removed(&root.join("reports/stats"), Duration::from_millis(200));
         client.finish(StopMode::Discard);
 
         assert!(!root.join("reports/stats").exists());
@@ -3287,12 +3207,7 @@ mod tests {
                 "204 No Content"
             }
         });
-        let worker = UploadWorker::start_with_timing(
-            &root,
-            transport(&ingest, "secret"),
-            test_upload_timing(),
-        )
-        .unwrap();
+        let worker = upload_worker(&root, &ingest, "secret", test_upload_timing());
 
         for _ in 0..2 {
             request_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -3323,30 +3238,19 @@ mod tests {
     #[test]
     fn authentication_failure_stays_queued_without_busy_retrying() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("keep-for-a-new-build", 1)
-            .unwrap();
+        queue_row(&root, "keep-for-a-new-build");
         let (first_tx, first_rx) = mpsc::channel();
         let ingest = Ingest::start(move |_, _| {
             let _ = first_tx.send(());
             "401 Unauthorized"
         });
-        let worker = UploadWorker::start_with_timing(
-            &root,
-            transport(&ingest, "wrong"),
-            test_upload_timing(),
-        )
-        .unwrap();
+        let worker = upload_worker(&root, &ingest, "wrong", test_upload_timing());
 
         first_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         std::thread::sleep(Duration::from_millis(150));
         assert!(root.join("reports/stats/steam/events.jsonl").exists());
         publish_revocation(&root).unwrap();
-        let deadline = Instant::now() + Duration::from_millis(200);
-        while root.join("reports/stats").exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until_removed(&root.join("reports/stats"), Duration::from_millis(200));
         worker.finish(StopMode::Discard);
 
         assert_eq!(ingest.stop().len(), 1);
@@ -3356,10 +3260,7 @@ mod tests {
     #[test]
     fn shutdown_does_not_resend_an_in_flight_authentication_failure() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("keep-for-a-new-build", 1)
-            .unwrap();
+        queue_row(&root, "keep-for-a-new-build");
         let (received_tx, received_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let ingest = Ingest::start(move |request, _| {
@@ -3369,12 +3270,7 @@ mod tests {
             }
             "401 Unauthorized"
         });
-        let worker = UploadWorker::start_with_timing(
-            &root,
-            transport(&ingest, "wrong"),
-            test_upload_timing(),
-        )
-        .unwrap();
+        let worker = upload_worker(&root, &ingest, "wrong", test_upload_timing());
 
         received_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         let finisher = std::thread::spawn(move || worker.finish(StopMode::Drain));
@@ -3407,10 +3303,7 @@ mod tests {
     #[test]
     fn quarantine_must_be_durable_before_the_rejected_batch_is_acknowledged() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("must-replay", 1)
-            .unwrap();
+        queue_row(&root, "must-replay");
         let drain = TelemetryDrain::open(&root, "steam").unwrap();
         fs::create_dir(&drain.quarantine_path).unwrap();
 
@@ -3435,22 +3328,9 @@ mod tests {
     #[test]
     fn quarantine_storage_is_bounded() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("rejected", 1)
-            .unwrap();
+        queue_row(&root, "rejected");
         let drain = TelemetryDrain::open(&root, "steam").unwrap();
-        let mut quarantine = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&drain.quarantine_path)
-            .unwrap();
-        quarantine.set_len(MAX_SPOOL_BYTES - 1).unwrap();
-        quarantine.seek(SeekFrom::End(-1)).unwrap();
-        quarantine.write_all(b"\n").unwrap();
-        quarantine.sync_all().unwrap();
-        drop(quarantine);
+        fill_log(&drain.quarantine_path, MAX_SPOOL_BYTES - 1);
 
         let outcome = drain
             .run_while(|| true, |_| UploadDisposition::Reject(413))
@@ -3470,10 +3350,7 @@ mod tests {
     #[test]
     fn retry_backoff_does_not_delay_revocation_polling() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("revoke-during-backoff", 1)
-            .unwrap();
+        queue_row(&root, "revoke-during-backoff");
         let (failed_tx, failed_rx) = mpsc::channel();
         let ingest = Ingest::start(move |_, _| {
             let _ = failed_tx.send(());
@@ -3483,15 +3360,11 @@ mod tests {
         timing.retry_initial = Duration::from_secs(5);
         timing.retry_max = Duration::from_secs(5);
         timing.revocation_poll = Duration::from_millis(10);
-        let worker =
-            UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();
+        let worker = upload_worker(&root, &ingest, "secret", timing);
 
         failed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         publish_revocation(&root).unwrap();
-        let deadline = Instant::now() + Duration::from_millis(200);
-        while root.join("reports/stats").exists() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until_removed(&root.join("reports/stats"), Duration::from_millis(200));
         let stats_remain = root.join("reports/stats").exists();
         worker.finish(StopMode::Discard);
 
@@ -3506,10 +3379,7 @@ mod tests {
     #[test]
     fn discard_does_not_retry_a_failed_upload() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("discard-me", 1)
-            .unwrap();
+        queue_row(&root, "discard-me");
         let (failed_tx, failed_rx) = mpsc::channel();
         let ingest = Ingest::start(move |_, _| {
             let _ = failed_tx.send(());
@@ -3518,8 +3388,7 @@ mod tests {
         let mut timing = test_upload_timing();
         timing.retry_initial = Duration::from_secs(5);
         timing.retry_max = Duration::from_secs(5);
-        let worker =
-            UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();
+        let worker = upload_worker(&root, &ingest, "secret", timing);
 
         failed_rx.recv_timeout(Duration::from_secs(30)).unwrap();
         worker.finish(StopMode::Discard);
@@ -3668,15 +3537,13 @@ mod tests {
     #[test]
     fn session_rotates_without_a_persistent_identity() {
         let root = fresh_root();
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("first", 1)
-            .unwrap();
+        queue_row(&root, "first");
         TelemetrySpool::open(&root, identity())
             .unwrap()
             .record_stat("second", 2)
             .unwrap();
 
+        assert!(!root.join("reports/.install").exists());
         let rows = records(&root);
         assert_eq!(rows.len(), 2);
         assert!(rows[0].get("install").is_none());
@@ -3706,27 +3573,11 @@ mod tests {
         assert_eq!(sends, [["first", "second"]], "both rows ride one request");
         assert!(!upload_marker.exists(), "a refused batch is not an upload");
 
-        let mut retried = Vec::new();
-        TelemetryDrain::open(&root, "steam")
-            .unwrap()
-            .run(|body| {
-                retried.push(batch_names(body));
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(retried, [["first", "second"]]);
+        assert_eq!(drain_batches(&root, "steam"), [["first", "second"]]);
 
         spool.record_stat("third", 3).unwrap();
-        let mut appended = Vec::new();
-        TelemetryDrain::open(&root, "steam")
-            .unwrap()
-            .run(|body| {
-                appended.push(batch_names(body));
-                Ok(())
-            })
-            .unwrap();
         assert_eq!(
-            appended,
+            drain_batches(&root, "steam"),
             [["third"]],
             "an accepted batch advances the cursor"
         );
@@ -3756,15 +3607,10 @@ mod tests {
             "the log did not span two request bodies"
         );
 
-        let mut retried = Vec::new();
-        TelemetryDrain::open(&root, "steam")
-            .unwrap()
-            .run(|body| {
-                retried.push(batch_names(body));
-                Ok(())
-            })
-            .unwrap();
-        let delivered: Vec<String> = retried.into_iter().flatten().collect();
+        let delivered: Vec<String> = drain_batches(&root, "steam")
+            .into_iter()
+            .flatten()
+            .collect();
         assert_eq!(delivered, expected, "a refused first batch lost rows");
     }
 
@@ -3790,14 +3636,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(sends.len(), 2, "the log did not span two request bodies");
 
-        let mut retried = Vec::new();
-        TelemetryDrain::open(&root, "steam")
-            .unwrap()
-            .run(|body| {
-                retried.push(batch_names(body));
-                Ok(())
-            })
-            .unwrap();
+        let retried = drain_batches(&root, "steam");
 
         let delivered: Vec<String> = sends[0]
             .iter()
@@ -3823,7 +3662,7 @@ mod tests {
         assert!(root.join("reports/stats/steam/events.jsonl").exists());
         assert!(root.join("reports/stats/steam/cursor.log").exists());
 
-        let client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
+        let client = open_client(&root);
 
         assert_eq!(queue_len(&root.join("reports/stats/steam/events.jsonl")), 0);
         assert!(!root.join("reports/stats/steam/cursor.log").exists());
