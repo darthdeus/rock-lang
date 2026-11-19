@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 pub mod build_vars;
 pub mod graph;
@@ -362,41 +362,24 @@ pub struct EngineConfig {
 /// The invocation's channel selection, recorded once by the CLI before
 /// dispatch. rock-host consumers of the channel (dependency resolution, source
 /// loading) cannot read rock-cli's comptime selection, so the CLI mirrors the
-/// same values here. Explicit `--channel` and a command-implied channel arrive
-/// separately; resolution applies the same precedence as `resolve_build_vars`.
-static INVOCATION_CHANNELS: OnceLock<Mutex<(Option<String>, Option<String>)>> = OnceLock::new();
+/// same value here.
+static INVOCATION_CHANNEL: Mutex<Option<String>> = Mutex::new(None);
 
-fn invocation_channels_slot() -> &'static Mutex<(Option<String>, Option<String>)> {
-    INVOCATION_CHANNELS.get_or_init(|| Mutex::new((None, None)))
-}
-
-pub fn set_invocation_channel(explicit: Option<String>, implied: Option<String>) {
-    *invocation_channels_slot()
-        .lock()
-        .expect("invocation channel lock") = (explicit, implied);
+pub fn set_invocation_channel(channel: Option<String>) {
+    *INVOCATION_CHANNEL.lock().expect("invocation channel lock") = channel;
 }
 
 /// Resolve the channel a manifest's channel-scoped selections evaluate
-/// against: explicit `--channel` > command-implied channel (when the project
-/// declares it) > the project's `default_channel` > `"dev"`. Mirrors
+/// against: explicit `--channel` > the project's `default_channel` > `"dev"`. Mirrors
 /// `resolve_build_vars` so a dependency filter and a build var can never
 /// disagree about which channel a build is on.
 pub fn resolved_channel_for(cfg: &StickConfig) -> String {
-    let (explicit, implied) = invocation_channels_slot()
+    if let Some(channel) = INVOCATION_CHANNEL
         .lock()
         .expect("invocation channel lock")
-        .clone();
-    if let Some(channel) = explicit {
+        .clone()
+    {
         return channel;
-    }
-    if let Some(channel) = implied {
-        if cfg
-            .build
-            .as_ref()
-            .is_some_and(|b| b.channels.iter().any(|c| c == &channel))
-        {
-            return channel;
-        }
     }
     cfg.build
         .as_ref()

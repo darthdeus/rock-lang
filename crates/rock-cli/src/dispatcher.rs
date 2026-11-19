@@ -45,7 +45,6 @@ impl CommandContext {
         if self.args.verbose {
             log::debug!(target: "CLI", "using direct compilation");
         }
-        self.require_optional_features()?;
         // The build lint pass reads its policy after dispatch, far from Args.
         crate::lint_pass::set_policy(if self.args.no_lints {
             crate::lint_pass::LintReport::Off
@@ -64,13 +63,6 @@ impl CommandContext {
             );
         }
         self.run_command()
-    }
-
-    fn require_optional_features(&self) -> Result<()> {
-        if let Route::Omitted(message) = self.args.command.route {
-            anyhow::bail!("{}", message);
-        }
-        Ok(())
     }
 
     pub(crate) fn get_required_file(&self, command_name: &str) -> Result<&str> {
@@ -113,11 +105,9 @@ impl CommandContext {
     /// Resolve a project directory using this build's project conventions.
     pub(crate) fn get_project_dir_or_current(&self) -> Result<String> {
         let arg = self.get_path_or_current()?;
-        Ok(
-            (crate::registry::RuntimeServices::registered().resolve_project_dir)(&arg)?
-                .to_string_lossy()
-                .into_owned(),
-        )
+        Ok(rock_engine_host::project::resolve_project_dir(&arg)?
+            .to_string_lossy()
+            .into_owned())
     }
 
     pub(crate) fn get_path_or_current(&self) -> Result<String> {
@@ -137,16 +127,6 @@ impl CommandContext {
     /// one entry point. `get_path_or_current` drops everything after the first.
     pub(crate) fn get_paths_or_current(&self) -> Result<Vec<String>> {
         self.paths_or_default(".")
-    }
-
-    pub fn get_output_or_default(&self, default: &str) -> Result<String> {
-        let output = self
-            .args
-            .output
-            .clone()
-            .unwrap_or_else(|| default.to_string());
-        reject_device_output(&output)?;
-        Ok(output)
     }
 
     pub(crate) fn get_test_files(&self) -> Result<Vec<String>> {
@@ -188,34 +168,12 @@ impl CommandContext {
                 });
                 handler(self)
             }
-            Route::Omitted(_) => unreachable!(
-                "`{}` is omitted from this build; require_optional_features rejects it first",
-                self.args.command.cli_name()
-            ),
         }
     }
 
     fn require_backend_options(&self) -> Result<()> {
         for rule in OptionRule::all() {
             match rule {
-                OptionRule::Owned {
-                    flag,
-                    given,
-                    backend,
-                    operation,
-                } => {
-                    if given(&self.args)
-                        && (self.args.command.operation() != Some(*operation)
-                            || self.args.backend != *backend)
-                    {
-                        anyhow::bail!(
-                            "`{}` is supported only by `rock {} --backend {}`",
-                            flag,
-                            operation.command().cli_name(),
-                            backend.name()
-                        );
-                    }
-                }
                 OptionRule::TestFilter => self.require_test_filter_support()?,
                 OptionRule::SkipGpu => {
                     if self.args.skip_gpu

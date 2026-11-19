@@ -6,7 +6,7 @@
 
 use crate::Result;
 use crate::bone_backend::categorize;
-use crate::registry::{ProgramKind, RuntimeServices};
+use crate::registry::ProgramKind;
 use bone_core::prelude::Instant;
 use colored::Colorize;
 use rock_core::CompilerError;
@@ -758,11 +758,9 @@ fn skull_build(
     src: &str,
     filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
-    (crate::registry::RuntimeServices::registered().prepare_unit)(file).map_err(|e| {
-        SkullFailure {
-            reason: "sound bank preparation failed".to_string(),
-            rendered: format!("sound bank preparation failed for {file}: {e:#}"),
-        }
+    crate::stone_runtime::prepare_unit(file).map_err(|e| SkullFailure {
+        reason: "sound bank preparation failed".to_string(),
+        rendered: format!("sound bank preparation failed for {file}: {e:#}"),
     })?;
     // bone type-check + skull emit. Errors here are bone's (most files) or a
     // skull codegen gap; both carry a `CompilerError`.
@@ -800,9 +798,9 @@ fn skull_build(
         }
     };
 
-    let host = (crate::registry::RuntimeServices::registered().program_host)(
-        crate::registry::TestUnit::File(std::path::Path::new(file)),
-    )
+    let host = crate::stone_runtime::program_host(crate::registry::TestUnit::File(
+        std::path::Path::new(file),
+    ))
     .map_err(SkullFailure::from)?;
     let lua = TestProgram {
         preamble: host.preamble,
@@ -1402,11 +1400,9 @@ fn skull_build_package_with_limit(
     filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     // Like a game run, so tests never read a bank an earlier tree compiled.
-    (crate::registry::RuntimeServices::registered().prepare_unit)(dir).map_err(|e| {
-        SkullFailure {
-            reason: "sound bank preparation failed".to_string(),
-            rendered: format!("sound bank preparation failed for {dir}: {e:#}"),
-        }
+    crate::stone_runtime::prepare_unit(dir).map_err(|e| SkullFailure {
+        reason: "sound bank preparation failed".to_string(),
+        rendered: format!("sound bank preparation failed for {dir}: {e:#}"),
     })?;
     let slot = crate::compile_slots::acquire(dir).map_err(|e| SkullFailure {
         reason: "no compile slot".to_string(),
@@ -1451,9 +1447,10 @@ fn skull_build_package_with_limit(
     drop((ws, sources));
     crate::allocator::release_freed_memory();
     drop(slot);
-    let host = (crate::registry::RuntimeServices::registered().program_host)(
-        crate::registry::TestUnit::Package { dir, facts: &facts },
-    )
+    let host = crate::stone_runtime::program_host(crate::registry::TestUnit::Package {
+        dir,
+        facts: &facts,
+    })
     .map_err(SkullFailure::from)?;
     let lua = TestProgram {
         preamble: host.preamble,
@@ -1886,7 +1883,7 @@ pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         let result = (|| -> Result<()> {
             let root = std::path::Path::new(path);
             let include_tests = !(root.is_dir()
-                && (RuntimeServices::registered().is_game_project)(root).unwrap_or(false));
+                && rock_engine_host::project::is_game_project(root).unwrap_or(false));
             let edit = if let Some(live) = &mut project {
                 Some(live.refresh_for_publication(include_tests)?)
             } else {
@@ -2193,7 +2190,7 @@ pub(crate) fn skull_compile_project_with_recorded_inputs(
     let preamble = {
         let dir = dir.to_string();
         std::thread::spawn(move || {
-            (RuntimeServices::registered().program_preamble)(&dir, ProgramKind::Project)
+            crate::stone_runtime::program_preamble(&dir, ProgramKind::Project)
         })
     };
     let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs.into())?;
@@ -2223,10 +2220,9 @@ pub(crate) fn skull_compile_project_with_recorded_inputs(
 }
 
 fn skull_run_project(dir: &str, app_args: &[String]) -> Result<()> {
-    let runtime = RuntimeServices::registered();
-    (runtime.prepare_run)(dir)?;
+    crate::stone_runtime::prepare_run(dir)?;
     let (lua, emits_main) = skull_emit_project(dir)?;
-    (runtime.launch)(dir, &lua, emits_main, app_args)
+    crate::stone_runtime::launch(dir, &lua, emits_main, app_args)
 }
 
 /// One JSON line per finished `@test`: `{unit, name, ms, status}`.
@@ -2727,23 +2723,6 @@ impl IncrementalProject {
         Self::init_impl(dir, main_path, incremental_path, true, None, |_| Ok(None))
     }
 
-    pub fn init_with_tests_and_allocation_report(
-        dir: &str,
-        main_path: &std::path::Path,
-        incremental_path: &std::path::Path,
-        allocation_manifest: &std::path::Path,
-    ) -> Result<IncrementalProject> {
-        let _activation = skull::allocation_report::activation_scope(true);
-        Self::init_impl(
-            dir,
-            main_path,
-            incremental_path,
-            true,
-            Some(allocation_manifest),
-            |_| Ok(None),
-        )
-    }
-
     /// Compile checked sim identities selected by the caller. Selection runs
     /// once on the same workspace used for emission; `None` emits every entry.
     pub fn init_for_sim_selection(
@@ -2804,7 +2783,7 @@ impl IncrementalProject {
             let lua = GameProgram::new(emit.lua, ws);
             (lua, c, artifact_fingerprint, emits_main)
         };
-        let preamble = (RuntimeServices::registered().program_preamble)(dir, ProgramKind::Game)?;
+        let preamble = crate::stone_runtime::program_preamble(dir, ProgramKind::Game)?;
         write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
         let shape_hashes = skull::type_shape_hashes(project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
@@ -3005,10 +2984,8 @@ impl IncrementalProject {
                 let lua = GameProgram::new(emit.lua, ws);
                 ((lua, emits_main), c)
             };
-            self.preamble = (RuntimeServices::registered().program_preamble)(
-                self.project.dir(),
-                ProgramKind::Game,
-            )?;
+            self.preamble =
+                crate::stone_runtime::program_preamble(self.project.dir(), ProgramKind::Game)?;
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             let ((lua, emits_main), staged_cache) = lua;
@@ -3121,10 +3098,8 @@ impl IncrementalProject {
             let lua = GameProgram::new(emit.lua, ws);
             (lua, c, artifact_fingerprint, emits_main)
         };
-        self.preamble = (RuntimeServices::registered().program_preamble)(
-            self.project.dir(),
-            ProgramKind::Game,
-        )?;
+        self.preamble =
+            crate::stone_runtime::program_preamble(self.project.dir(), ProgramKind::Game)?;
         write_full_main(
             &self.preamble,
             &lua,

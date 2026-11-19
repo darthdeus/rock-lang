@@ -1,6 +1,6 @@
-//! Public compiler registrations. Private hosts extend these static tables.
+//! The compiler's command and backend tables.
 use crate as rock_cli;
-use crate::registry::{self, OmittedBackend, OptionRule, Route};
+use crate::registry::{OmittedBackend, OptionRule, Route};
 use crate::*;
 
 pub static COMMANDS: &[&CliCommand] = &[
@@ -327,79 +327,43 @@ fn js_run(_: &CommandContext) -> Result<()> {
 
 pub static OPTION_RULES: &[OptionRule] = &[OptionRule::TestFilter, OptionRule::SkipGpu];
 
-pub const RUNTIME_SERVICES: registry::RuntimeServices = registry::RuntimeServices {
-    resolve_project_dir: rock_engine_host::project::resolve_project_dir,
-    is_game_project: rock_engine_host::project::is_game_project,
-    configured_runtime_dir: rock_engine_host::project::configured_stone_dir,
-    build_engine_libs: rock_engine_host::engine_build::build_engine_libs,
-    prepare_unit: crate::stone_runtime::prepare_unit,
-    prepare_sound_bank: crate::package::prepare_sound_bank,
-    sound_project_path: crate::package::sound_project_path_for,
-    prepare_run: crate::stone_runtime::prepare_run,
-    launch: crate::stone_runtime::launch,
-    program_preamble: crate::stone_runtime::program_preamble,
-    program_host: crate::stone_runtime::program_host,
-    resolve_sim_specs: crate::run_sim::resolve_sim_specs,
-};
-
-pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
-    registry::CommandMetadata {
-        log_invocation: matches!(
-            command.cli_name(),
-            "compile"
-                | "test"
-                | "run"
-                | "watch"
-                | "lint"
-                | "fmt"
-                | "frame"
-                | "sim"
-                | "stone-test"
-                | "stone"
-        ),
-        compiler_process: if command.cli_name() == "check"
-            || matches!(
-                command.operation(),
-                Some(Operation::Compile | Operation::Test)
-            ) {
-            registry::CompilerProcess::Always
-        } else if command.operation() == Some(Operation::Sim) {
-            registry::CompilerProcess::WhenListed
-        } else {
-            registry::CompilerProcess::Never
-        },
-        build_command: Some(command.cli_name()),
-        implied_channel: None,
-    }
+/// Commands recorded in the invocation log.
+pub(crate) fn logs_invocation(command: &CliCommand) -> bool {
+    matches!(
+        command.cli_name(),
+        "compile"
+            | "test"
+            | "run"
+            | "watch"
+            | "lint"
+            | "fmt"
+            | "frame"
+            | "sim"
+            | "stone-test"
+            | "stone"
+    )
 }
 
-pub static EARLY_ENTRIES: &[registry::EarlyEntry] = &[
-    // LSP owns its logger, so dispatch it before the process installs the CLI logger.
-    registry::EarlyEntry {
-        name: "lsp",
-        run: |rest| {
-            let mut forwarded = vec!["rock lsp".to_string()];
-            forwarded.extend(rest);
-            match rock_lsp::server_cli::run_cli(forwarded) {
-                Ok(()) => 0,
-                Err(e) => {
-                    eprintln!("{e}");
-                    1
-                }
-            }
-        },
-    },
-];
+/// Whether the command should enter the compiler allocator policy.
+pub fn compiler_process(command: &CliCommand, list: bool) -> bool {
+    command.cli_name() == "check"
+        || matches!(
+            command.operation(),
+            Some(Operation::Compile | Operation::Test)
+        )
+        || (list && command.operation() == Some(Operation::Sim))
+}
 
-pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
-    commands: COMMANDS,
-    backends: BACKENDS,
-    option_rules: OPTION_RULES,
-    arguments: crate::sim_arguments::arguments,
-    decode_arguments: crate::sim_arguments::decode,
-    command_metadata,
-    scan_excluded: |_| false,
-    early_entries: EARLY_ENTRIES,
-    runtime_services: &RUNTIME_SERVICES,
-    initialize_process: crate::frame_commands::initialize_process,
-};
+/// `rock lsp` owns its logger, so it runs before the process installs the CLI
+/// logger. `args` follow the `lsp` argument.
+pub(crate) fn run_lsp(args: impl Iterator<Item = String>) -> i32 {
+    let mut forwarded = vec!["rock lsp".to_string()];
+    forwarded.extend(args);
+    match rock_lsp::server_cli::run_cli(forwarded) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}

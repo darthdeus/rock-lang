@@ -17,23 +17,11 @@ pub mod project;
 pub mod source_files;
 pub mod stick;
 
-static SOURCE_ROOT: std::sync::OnceLock<&'static std::path::Path> = std::sync::OnceLock::new();
-
-/// Supply the binary host's source fallback before the first call to `rock_dir`.
-pub fn install_source_root(root: &'static std::path::Path) {
-    assert_eq!(
-        *SOURCE_ROOT.get_or_init(|| root),
-        root,
-        "source root already installed"
-    );
-}
-
-/// Resolve the Rock root directory from environment, exe path, CWD, or a host fallback.
+/// Resolve the Rock root directory from environment, exe path or CWD.
 pub(crate) fn resolve_rock_dir_with(
     env_override: Option<String>,
     exe_path: Option<&std::path::Path>,
     cwd: Option<&std::path::Path>,
-    source_root: Option<&std::path::Path>,
 ) -> String {
     if let Some(dir) = env_override {
         return dir;
@@ -70,16 +58,14 @@ pub(crate) fn resolve_rock_dir_with(
         }
     }
 
-    source_root
-        .or(cwd)
-        .unwrap_or_else(|| std::path::Path::new("."))
+    cwd.unwrap_or_else(|| std::path::Path::new("."))
         .to_string_lossy()
         .into_owned()
 }
 
 /// Resolve the Rock root directory at runtime. `ROCK_DIR` env wins; else derive
 /// from the running exe's location (release install or dev target/); else workspace
-/// root above cwd; else the host-supplied source root, or cwd when none is installed.
+/// root above cwd; else cwd.
 pub fn rock_dir() -> String {
     use std::sync::OnceLock;
     static CACHED: OnceLock<String> = OnceLock::new();
@@ -88,12 +74,7 @@ pub fn rock_dir() -> String {
             let env = std::env::var("ROCK_DIR").ok();
             let exe = std::env::current_exe().ok();
             let cwd = std::env::current_dir().ok();
-            resolve_rock_dir_with(
-                env,
-                exe.as_deref(),
-                cwd.as_deref(),
-                SOURCE_ROOT.get().copied(),
-            )
+            resolve_rock_dir_with(env, exe.as_deref(), cwd.as_deref())
         })
         .clone()
 }
@@ -113,30 +94,20 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn source_fallback_follows_runtime_roots() {
-        let source = TempDir::new().unwrap();
+    fn rock_dir_falls_back_to_the_workspace_then_cwd() {
         let cwd = TempDir::new().unwrap();
         assert_eq!(
-            resolve_rock_dir_with(None, None, Some(cwd.path()), Some(source.path())),
-            source.path().to_string_lossy()
-        );
-        assert_eq!(
-            resolve_rock_dir_with(None, None, Some(cwd.path()), None),
+            resolve_rock_dir_with(None, None, Some(cwd.path())),
             cwd.path().to_string_lossy()
         );
         assert_eq!(
-            resolve_rock_dir_with(
-                Some("chosen-root".into()),
-                None,
-                Some(cwd.path()),
-                Some(source.path())
-            ),
+            resolve_rock_dir_with(Some("chosen-root".into()), None, Some(cwd.path())),
             "chosen-root"
         );
         fs_err::write(cwd.path().join("Cargo.toml"), "[workspace]\n").unwrap();
         fs_err::create_dir(cwd.path().join("crates")).unwrap();
         assert_eq!(
-            resolve_rock_dir_with(None, None, Some(cwd.path()), Some(source.path())),
+            resolve_rock_dir_with(None, None, Some(cwd.path())),
             cwd.path().canonicalize().unwrap().to_string_lossy()
         );
     }
@@ -150,7 +121,7 @@ mod tests {
         let exe = root.join("bin/rock");
         fs_err::write(&exe, "").unwrap();
         assert_eq!(
-            resolve_rock_dir_with(None, Some(&exe), None, None),
+            resolve_rock_dir_with(None, Some(&exe), None),
             root.to_string_lossy()
         );
     }
@@ -166,7 +137,7 @@ mod tests {
         fs_err::write(&exe, "").unwrap();
 
         let unrelated = TempDir::new().unwrap();
-        let result = resolve_rock_dir_with(None, Some(&exe), Some(unrelated.path()), None);
+        let result = resolve_rock_dir_with(None, Some(&exe), Some(unrelated.path()));
         assert_eq!(result, root.to_string_lossy());
     }
 }

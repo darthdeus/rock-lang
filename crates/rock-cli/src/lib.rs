@@ -69,7 +69,8 @@ pub mod unified_compile;
 pub mod watch;
 pub(crate) use lint_cmd::do_lint;
 pub(crate) use lsp_survey::lsp_survey;
-pub use process::{compiler_process, main_with};
+pub use plain::compiler_process;
+pub use process::main;
 
 pub use common::*;
 pub use dispatcher::*;
@@ -78,10 +79,9 @@ pub(crate) use formatting::*;
 pub use registry::{BackendSpec, CliCommand, Operation};
 pub(crate) use watch::*;
 
-/// Compiler backend selected via `--backend`. Each variant's
-/// name, served operations and policy are registered in
-/// the supplied `Registrations::backends` table; the game compile pipeline
-/// keys on the variant.
+/// Compiler backend selected via `--backend`. Each variant's name, served
+/// operations and policy are registered in `plain::BACKENDS`; the game compile
+/// pipeline keys on the variant.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Backend {
     Skull,
@@ -89,7 +89,7 @@ pub enum Backend {
     Glsl,
 }
 
-/// Shared invocation values plus inert transport filled by registered host decoders.
+/// The parsed invocation.
 pub struct Args {
     pub command: &'static CliCommand,
     pub files: Vec<String>,
@@ -183,6 +183,14 @@ impl Args {
                 .help("For GLSL tests and shader-validate: skip profiles with no display or GL driver; available profiles still run."))
             .arg(Arg::new("output").long("output")
                 .help("Output path; package requires an explicit output directory."))
+            .args([
+            Arg::new("allocation-census").long("allocation-census")
+                .value_name("PATH")
+                .help("For `rock sim`: opt into a sim-wide gross Lua allocation census and write a complete JSON artifact to PATH (discovery evidence only)."),
+            Arg::new("allocation-sites").long("allocation-sites")
+                .value_name("DIR")
+                .help("For `rock sim`: instrument compiler-known allocation sites in isolated sims and write frame-aware joined reports to DIR."),
+            ])
             .arg(Arg::new("profile").long("profile"))
             .arg(Arg::new("iters").long("iters").default_value("1")
                 .value_parser(clap::value_parser!(usize))
@@ -194,6 +202,26 @@ impl Args {
                 .help("Enable verbose debug output"))
             .arg(Arg::new("quiet").long("quiet").action(ArgAction::SetTrue)
                 .help("Disable timing output (Phase Timing, IO Breakdown)"))
+            .args([
+            Arg::new("frames").short('n').long("frames").default_value("1")
+                .value_parser(clap::value_parser!(usize))
+                .help("Frame command process frames; perf command measured frames (default 1200)"),
+            Arg::new("seconds").long("seconds")
+                .value_parser(clap::value_parser!(f64))
+                .help("Perf wall-clock safety cap from runtime launch, including readiness and warmup. Incomplete intervals fail."),
+            Arg::new("warmup-frames").long("warmup-frames")
+                .value_parser(clap::value_parser!(usize))
+                .help("Perf warmup frames after scenario readiness (default: scenario declaration). Zero disables warmup."),
+            Arg::new("gc-window").long("gc-window").default_value("0")
+                .value_parser(clap::value_parser!(usize))
+                .help("`rock perf` only: record N frames of gross Lua allocator request traffic (opening at --gc-window-start), byte flow, and request populations. This is request traffic, not retained heap growth. 0 = disabled."),
+            Arg::new("gc-window-start").long("gc-window-start").default_value("100")
+                .value_parser(clap::value_parser!(usize))
+                .help("`rock perf` only: frame the --gc-window opens on (default 100). Window compilation is counted separately; warmup does not guarantee a settled JIT; the allocation window must fit within the declared measured interval."),
+            Arg::new("gc-window-mode").long("gc-window-mode").default_value("stopped")
+                .value_parser(["stopped", "running"])
+                .help("`rock perf --gc-window` only: `stopped` pauses GC after a collection; gross requests still include JIT compilation; `running` preserves the ordinary collector schedule. The mode is recorded in profiler output."),
+            ])
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
                 .value_parser(["pretty", "json"])
                 .help("Output format for reports: \"pretty\" (default) or \"json\"."))
@@ -205,6 +233,19 @@ impl Args {
             .arg(var.clone())
             .arg(Arg::new("target-os").long("target-os").value_name("OS")
                 .help("Artifact target for the `platform` builtin (linux, osx, windows). Cross-builds package on one OS for another; defaults to the host."))
+            .args([
+            Arg::new("update-snapshots").long("update-snapshots").action(ArgAction::SetTrue)
+                .help("For `rock sim`: rewrite snapshot baselines instead of diffing."),
+            Arg::new("jobs").long("jobs").short('j').value_name("N")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock sim`: run up to N sim children concurrently (default: CPU count, bounded by total RAM at 3.6 GiB per lane and free GPU memory less a 6 GiB reserve at 2 GiB per lane; requests above the RAM budget are rejected, while requests above only the free-GPU budget run at that budget with a warning; at most the core count; a named run narrows N to its name count first; 1 = serial). Applies to the whole-suite and multi-name forms."),
+            Arg::new("full-asset-jobs").long("full-asset-jobs").value_name("R")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock sim`: allow at most R of the concurrent children to hold full-size assets (STONE_ASSET_STUB=0 with STONE_IMAGE_MAX_SIDE=0, 2-4 GB of GPU memory each); the remaining slots up to --jobs run the other entries. Default 2. Bounded by --jobs."),
+
+            Arg::new("list").long("list").action(ArgAction::SetTrue)
+                .help("For `rock sim`: list every `@sim` wire name in the project, one per line, then exit."),
+            ])
             .arg(Arg::new("no-lints").long("no-lints").action(ArgAction::SetTrue)
                 .help("Drop lint warnings/advice from build output. Error-severity lints still run and still fail the build."))
             .arg(Arg::new("lint-summary").long("lint-summary").action(ArgAction::SetTrue)
@@ -218,7 +259,10 @@ impl Args {
             .arg(Arg::new("backend").long("backend")
                 .value_parser(BackendSpec::value_parser())
                 .help(format!("Compiler backend (default: skull). {}.", registry::BackendSpec::all().iter().map(|spec| format!("{}{}", spec.name, if spec.omitted.is_some() { " (not in this build)" } else { "" })).collect::<Vec<_>>().join(", "))))
-            // Host argument groups use this root slot as an insertion point.
+            .args([
+            Arg::new("jv").long("jv").action(ArgAction::SetTrue)
+                .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."),
+            ])
             // Actual app arguments are parsed from the selected command.
             .arg(
                 Arg::new("app_args")
@@ -226,7 +270,7 @@ impl Args {
                     .num_args(0..)
                     .hide(true),
             );
-        let mut command = (registry::registered().arguments)(command).mut_args(|arg| {
+        let mut command = command.mut_args(|arg| {
             if arg.get_id() == "app_args" || arg.get_id() == "var" {
                 arg
             } else {
@@ -275,7 +319,8 @@ impl Args {
                 .unwrap_or_default()
         };
         let test_filter = m.get_one::<String>("filter").cloned();
-        let mut args = Args {
+        let perf = command_name == "perf";
+        Args {
             command,
             files: many_str("files"),
             test_filter: test_filter
@@ -284,19 +329,32 @@ impl Args {
             test_filter_explicit: test_filter.is_some(),
             skip_gpu: m.get_flag("skip-gpu"),
             output: m.get_one::<String>("output").cloned(),
-            allocation_census: Default::default(),
-            allocation_sites: Default::default(),
+            allocation_census: m.get_one::<String>("allocation-census").cloned(),
+            allocation_sites: m.get_one::<String>("allocation-sites").cloned(),
             profile: m.get_one::<String>("profile").cloned(),
             check: command_name == "fmt" && m.get_flag("check"),
             iters: *m.get_one::<usize>("iters").unwrap(),
-            warmup: *m.get_one::<usize>("warmup").unwrap(),
+            // Perf counts warmup in frames, from its own option.
+            warmup: if perf {
+                m.get_one::<usize>("warmup-frames")
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            } else {
+                *m.get_one::<usize>("warmup").unwrap()
+            },
             verbose: m.get_flag("verbose"),
             quiet: m.get_flag("quiet"),
-            frames: Default::default(),
-            seconds: Default::default(),
-            gc_window: Default::default(),
-            gc_window_start: Default::default(),
-            gc_window_mode: Default::default(),
+            frames: if perf
+                && m.value_source("frames") == Some(clap::parser::ValueSource::DefaultValue)
+            {
+                1200
+            } else {
+                *m.get_one::<usize>("frames").unwrap()
+            },
+            seconds: m.get_one::<f64>("seconds").copied(),
+            gc_window: *m.get_one::<usize>("gc-window").unwrap(),
+            gc_window_start: *m.get_one::<usize>("gc-window-start").unwrap(),
+            gc_window_mode: m.get_one::<String>("gc-window-mode").cloned().unwrap(),
             perf_format: m
                 .get_one::<String>("perf-format")
                 .cloned()
@@ -305,12 +363,12 @@ impl Args {
             channel: m.get_one::<String>("channel").cloned(),
             target_os: m.get_one::<String>("target-os").cloned(),
             build_var_overrides,
-            update_snapshots: Default::default(),
-            jobs: Default::default(),
-            full_asset_jobs: Default::default(),
-            list: Default::default(),
+            update_snapshots: m.get_flag("update-snapshots"),
+            jobs: m.get_one::<usize>("jobs").copied(),
+            full_asset_jobs: m.get_one::<usize>("full-asset-jobs").copied(),
+            list: m.get_flag("list"),
             app_args: many_str("app_args"),
-            jv: Default::default(),
+            jv: m.get_flag("jv"),
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
             lints: m.get_one::<String>("lints").cloned(),
@@ -320,9 +378,7 @@ impl Args {
                 .get_one::<Backend>("backend")
                 .copied()
                 .unwrap_or(Backend::Skull),
-        };
-        (registry::registered().decode_arguments)(m, &mut args);
-        args
+        }
     }
 }
 
@@ -354,7 +410,6 @@ mod stone_test;
 pub(crate) mod stone_watch;
 
 mod run_sim;
-mod sim_arguments;
 mod sim_command;
 mod sim_environment;
 mod sim_observability;

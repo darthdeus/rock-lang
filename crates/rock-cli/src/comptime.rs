@@ -12,11 +12,6 @@ use std::sync::OnceLock;
 #[derive(Debug, Default)]
 struct CliSelection {
     channel: Option<String>,
-    /// The command's soft channel (`rock web` -> "web"): used only when the
-    /// project DECLARES it in `[build] channels`, ignored otherwise -- an
-    /// explicit `--channel` must reject when undeclared, but a command
-    /// implication must not break projects that never opted into channels.
-    implied_channel: Option<String>,
     /// `--target-os`: the artifact target for the `platform` builtin. A
     /// cross-build packages on one OS for another, so the packaging host is
     /// only a proxy used when this is absent.
@@ -31,7 +26,6 @@ static SELECTION: OnceLock<CliSelection> = OnceLock::new();
 /// than surfacing as an undeclared-var error later.
 pub(crate) fn set_invocation_selection(
     channel: Option<String>,
-    implied_channel: Option<String>,
     target_os: Option<String>,
     overrides: &[String],
 ) -> Result<()> {
@@ -44,11 +38,10 @@ pub(crate) fn set_invocation_selection(
     }
     // rock-host consumers of the channel (dependency resolution, source
     // loading) cannot read SELECTION; mirror the same values into rock-host.
-    rock_host::stick::set_invocation_channel(channel.clone(), implied_channel.clone());
+    rock_host::stick::set_invocation_channel(channel.clone());
     SELECTION
         .set(CliSelection {
             channel,
-            implied_channel,
             target_os,
             overrides: parsed,
         })
@@ -57,8 +50,7 @@ pub(crate) fn set_invocation_selection(
 }
 
 /// The invocation's explicit selection as `rock` arguments, for a child
-/// `rock` that compiles on this invocation's behalf. The implied channel is
-/// not forwarded: the child's own command implies its own.
+/// `rock` that compiles on this invocation's behalf.
 pub fn invocation_selection_args() -> Vec<String> {
     let Some(selection) = SELECTION.get() else {
         return Vec::new();
@@ -84,9 +76,8 @@ mod tests {
 
     #[test]
     fn repeated_invocation_selection_is_rejected() {
-        assert!(set_invocation_selection(None, None, None, &[]).is_ok());
-        let err =
-            set_invocation_selection(None, None, None, &[]).expect_err("second set must fail");
+        assert!(set_invocation_selection(None, None, &[]).is_ok());
+        let err = set_invocation_selection(None, None, &[]).expect_err("second set must fail");
         assert!(err.to_string().contains("already initialized"));
     }
 }
@@ -208,18 +199,7 @@ pub(crate) fn inputs_for_project_with_config(
     build_command: Option<&str>,
 ) -> Result<ComptimeInputs> {
     let selection = SELECTION.get();
-    let mut channel = selection.and_then(|s| s.channel.as_deref());
-    if channel.is_none() {
-        if let Some(implied) = selection.and_then(|s| s.implied_channel.as_deref()) {
-            let declared = cfg
-                .build
-                .as_ref()
-                .is_some_and(|b| b.channels.iter().any(|c| c == implied));
-            if declared {
-                channel = Some(implied);
-            }
-        }
-    }
+    let channel = selection.and_then(|s| s.channel.as_deref());
     let no_overrides = std::collections::HashMap::new();
     let overrides = selection.map(|s| &s.overrides).unwrap_or(&no_overrides);
 

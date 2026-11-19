@@ -932,9 +932,7 @@ fn skull_compile_game_and_collect_sims_with_allocation(
                 .into_iter()
                 .map(|(_, _, wire)| wire)
                 .collect::<Vec<_>>();
-            let selected = (crate::registry::RuntimeServices::registered().resolve_sim_specs)(
-                &all_names, selection,
-            )?;
+            let selected = crate::run_sim::resolve_sim_specs(&all_names, selection)?;
             let selected = selected
                 .into_iter()
                 .flat_map(|spec| spec.split(',').map(str::to_owned).collect::<Vec<_>>())

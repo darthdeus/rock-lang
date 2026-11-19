@@ -179,9 +179,6 @@ pub fn bin_projects_under(root: &Path) -> Result<Vec<PathBuf>> {
             if name.starts_with('.') || matches!(name, "target" | "node_modules" | "tmp") {
                 continue;
             }
-            if (crate::registry::registered().scan_excluded)(&p) {
-                continue;
-            }
             let file_type = entry.file_type()?;
             let is_dir = if file_type.is_symlink() {
                 match fs_err::metadata(&p) {

@@ -298,9 +298,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     // Route changes to declared inputs using the same set as the watcher.
     let comptime_watch: crate::file_watcher::SharedWatchSet = Default::default();
     let mut sound_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    if let Some(sound_project) =
-        (crate::registry::RuntimeServices::registered().sound_project_path)(path)?
-    {
+    if let Some(sound_project) = crate::package::sound_project_path_for(path)? {
         sound_paths.insert(sound_project.clone());
         let hash = declaration_hash(&sound_project);
         comptime_watch.insert_with_hash(sound_project, hash);
@@ -317,7 +315,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     let initial_build = crate::frame_runtime::beside(
         || build_all_for_game(path),
         || {
-            let result = (crate::registry::RuntimeServices::registered().prepare_sound_bank)(path)
+            let result = crate::package::prepare_sound_bank(path)
                 .and_then(|_| compiler.compile(&std::collections::HashSet::new(), false))
                 .and_then(|_| compiler.artifact_fingerprint());
             Ok(match result {
@@ -510,7 +508,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
                     log::error!(target: "SOUND", "cannot update sound watches: {error}; retaining previous watches")
                 }
             }
-            match (crate::registry::RuntimeServices::registered().prepare_sound_bank)(path) {
+            match crate::package::prepare_sound_bank(path) {
                 Ok(_) => {
                     sound_dirty = false;
                     if game_process.is_none() {

@@ -21,7 +21,7 @@ pub fn check(project: &str, sdk: &Path) -> Result<()> {
     }
     // Sound preparation uses the source workspace even when the compiler lives
     // in an extracted SDK. Resolve it here without compiling or writing a bank.
-    (crate::registry::RuntimeServices::registered().sound_project_path)(project)?;
+    crate::package::sound_project_path_for(project)?;
     Ok(())
 }
 

@@ -5,17 +5,8 @@ mod linux {
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
 
-    static REGISTRATIONS: rock_cli::registry::Registrations = rock_cli::registry::Registrations {
-        early_entries: &[rock_cli::registry::EarlyEntry {
-            name: "command",
-            run: command_thread,
-        }],
-        ..rock_cli::plain::REGISTRATIONS
-    };
-
-    fn command_thread(args: Vec<String>) -> i32 {
-        assert_eq!(std::thread::current().name(), Some("rock"));
-        let ready = Path::new(&args[0]);
+    fn bound_command(ready: &str) {
+        let ready = Path::new(ready);
         let staging = ready.with_extension("staging");
         std::fs::write(&staging, std::process::id().to_string()).unwrap();
         std::fs::rename(staging, ready).unwrap();
@@ -126,7 +117,7 @@ mod linux {
         let args: Vec<String> = std::env::args().collect();
         match args.get(1).map(String::as_str) {
             Some("launcher") => launcher(&args[2]),
-            Some("command") => rock_cli::main_with(&REGISTRATIONS),
+            Some("command") => bound_command(&args[2]),
             _ => bound_command_dies_with_its_launcher(),
         }
     }

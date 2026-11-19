@@ -1,10 +1,10 @@
-//! Shared process lifecycle for the plain and private CLI hosts.
+//! The `rock` process lifecycle.
 use crate as rock_cli;
 use crate::*;
 
-/// Run a CLI process with a static host table, including parsing, logging and cleanup.
+/// Run the `rock` process, including parsing, logging and cleanup.
 /// Call once, before spawning application threads.
-pub fn main_with(registrations: &'static crate::registry::Registrations) {
+pub fn main() {
     crate::compile_budget::mark_process_start();
     // The command runs on its own thread because the main thread's stack is
     // fixed by the OS (often 8 MiB) and compiler passes recurse over the
@@ -12,7 +12,7 @@ pub fn main_with(registrations: &'static crate::registry::Registrations) {
     let command = std::thread::Builder::new()
         .name("rock".into())
         .stack_size(rock_core::nesting::COMPILER_STACK_BYTES)
-        .spawn(move || run_process(registrations))
+        .spawn(run_process)
         .unwrap_or_else(|error| {
             eprintln!("Error: cannot start the compiler thread: {error}");
             std::process::exit(1);
@@ -35,11 +35,11 @@ fn install_compiler_pool(threads: Option<usize>) {
     let _ = pool.build_global();
 }
 
-fn run_process(registrations: &'static crate::registry::Registrations) {
-    crate::registry::install(registrations);
-    // Early entries (`rock lsp`) run before the allocator default, the logger
-    // and clap: they install their own process state.
-    let prepare = || {
+fn run_process() {
+    // `rock lsp` runs before the allocator default, the logger and clap: it
+    // installs its own process state.
+    let mut raw = std::env::args().skip(1);
+    if raw.next().as_deref() == Some("lsp") {
         // `rock lsp` typechecks whole projects, in the server and in its
         // one-shot reports, so it takes the compiler's THP default.
         if let Err(error) = rock_host::compiler_thp::enter_compiler_process() {
@@ -49,9 +49,7 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
         crate::allocator::keep_freed_pages_for_reuse();
         #[cfg(not(feature = "sequential"))]
         install_compiler_pool(None);
-    };
-    if let Some(code) = rock_cli::registry::run_early_entry(std::env::args().skip(1), prepare) {
-        std::process::exit(code);
+        std::process::exit(crate::plain::run_lsp(raw));
     }
 
     // Install the one logger before anything can log. Idempotent; reads
@@ -88,10 +86,7 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
         crate::allocator::keep_freed_pages_for_reuse();
     }
 
-    let metadata = (registrations.command_metadata)(args.command);
-    if let Some(command) = metadata.build_command {
-        unsafe { std::env::set_var("ROCK_BUILD_COMMAND", command) };
-    }
+    unsafe { std::env::set_var("ROCK_BUILD_COMMAND", args.command.cli_name()) };
     // Line directives need a LuaJIT that reads them, which a release channel
     // does not promise; a release build keeps them off.
     if skull::line_directives_mode() {
@@ -106,10 +101,8 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     // Record the invocation's --channel/--var selection before dispatch; the
     // compile chokepoints resolve [build.vars] against it per project.
     // A malformed --var fails here, by name.
-    let implied_channel = metadata.implied_channel.map(str::to_owned);
     if let Err(e) = rock_cli::comptime::set_invocation_selection(
         args.channel.clone(),
-        implied_channel,
         args.target_os.clone(),
         &args.build_var_overrides,
     ) {
@@ -122,7 +115,7 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
         rock_log::set_level(rock_log::level().max(3));
     }
 
-    (registrations.initialize_process)(&args);
+    crate::frame_commands::initialize_process(&args);
 
     // After the env setup above and before rayon: begin() exports the parent
     // marker for nested `rock` runs and starts the delayed status-probe thread.
@@ -173,15 +166,6 @@ fn exit_without_teardown() -> ! {
     // SAFETY: `_exit` takes no pointers; the buffered standard streams are
     // flushed above, and every file the command wrote is closed by now.
     unsafe { libc::_exit(0) }
-}
-
-/// Whether the command should enter the compiler allocator policy.
-pub fn compiler_process(command: &CliCommand, list: bool) -> bool {
-    match (registry::registered().command_metadata)(command).compiler_process {
-        registry::CompilerProcess::Always => true,
-        registry::CompilerProcess::WhenListed => list,
-        registry::CompilerProcess::Never => false,
-    }
 }
 
 /// Whether the MIR verifier and the printer's scope guard run. Both catch

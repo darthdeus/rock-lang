@@ -527,58 +527,6 @@ fn suggest_available_directories(missing_dir: &str) {
     std::process::exit(1);
 }
 
-pub fn arguments(command: clap::Command) -> clap::Command {
-    use clap::{Arg, ArgAction};
-    registry::extend_arguments(command, vec![
-        registry::ArgumentGroup { before: "perf-format", arguments: vec![
-            Arg::new("frames").short('n').long("frames").default_value("1")
-                .value_parser(clap::value_parser!(usize))
-                .help("Frame command process frames; perf command measured frames (default 1200)"),
-            Arg::new("seconds").long("seconds")
-                .value_parser(clap::value_parser!(f64))
-                .help("Perf wall-clock safety cap from runtime launch, including readiness and warmup. Incomplete intervals fail."),
-            Arg::new("warmup-frames").long("warmup-frames")
-                .value_parser(clap::value_parser!(usize))
-                .help("Perf warmup frames after scenario readiness (default: scenario declaration). Zero disables warmup."),
-            Arg::new("gc-window").long("gc-window").default_value("0")
-                .value_parser(clap::value_parser!(usize))
-                .help("`rock perf` only: record N frames of gross Lua allocator request traffic (opening at --gc-window-start), byte flow, and request populations. This is request traffic, not retained heap growth. 0 = disabled."),
-            Arg::new("gc-window-start").long("gc-window-start").default_value("100")
-                .value_parser(clap::value_parser!(usize))
-                .help("`rock perf` only: frame the --gc-window opens on (default 100). Window compilation is counted separately; warmup does not guarantee a settled JIT; the allocation window must fit within the declared measured interval."),
-            Arg::new("gc-window-mode").long("gc-window-mode").default_value("stopped")
-                .value_parser(["stopped", "running"])
-                .help("`rock perf --gc-window` only: `stopped` pauses GC after a collection; gross requests still include JIT compilation; `running` preserves the ordinary collector schedule. The mode is recorded in profiler output."),
-        ] },
-        registry::ArgumentGroup { before: "app_args", arguments: vec![
-            Arg::new("jv").long("jv").action(ArgAction::SetTrue)
-                .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."),
-        ] },
-    ])
-}
-
-pub fn decode(m: &clap::ArgMatches, args: &mut Args) {
-    args.frames = if args.command.cli_name() == "perf"
-        && m.value_source("frames") == Some(clap::parser::ValueSource::DefaultValue)
-    {
-        1200
-    } else {
-        *m.get_one::<usize>("frames").unwrap()
-    };
-    args.seconds = m.get_one::<f64>("seconds").copied();
-    // The shared Args has a generic integer warmup transport; perf owns its units.
-    if args.command.cli_name() == "perf" {
-        args.warmup = m
-            .get_one::<usize>("warmup-frames")
-            .copied()
-            .unwrap_or(usize::MAX);
-    }
-    args.gc_window = *m.get_one::<usize>("gc-window").unwrap();
-    args.gc_window_start = *m.get_one::<usize>("gc-window-start").unwrap();
-    args.gc_window_mode = m.get_one::<String>("gc-window-mode").cloned().unwrap();
-    args.jv = m.get_flag("jv");
-}
-
 pub(crate) fn initialize_process(args: &Args) {
     // The dispatcher calls this before starting worker threads.
     if args.jv {

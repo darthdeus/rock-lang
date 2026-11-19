@@ -143,7 +143,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
 }
 
 fn js_build_unit(unit: &str, is_package: bool) -> JsUnitOutcome {
-    if let Err(error) = (crate::registry::RuntimeServices::registered().prepare_unit)(unit) {
+    if let Err(error) = crate::stone_runtime::prepare_unit(unit) {
         return Err(UnitFailure {
             reason: "sound bank preparation failed".to_string(),
             rendered: format!("sound bank preparation failed for {unit}: {error:#}"),
@@ -431,8 +431,7 @@ fn emit_js_program_project(dir: &str) -> skull_codegen_js::emit::JsProgram {
 fn try_emit_js_program_project(dir: &str) -> Result<skull_codegen_js::emit::JsProgram> {
     // A game builds without its tests, like the luajit compile.
     let is_game =
-        (crate::registry::RuntimeServices::registered().is_game_project)(std::path::Path::new(dir))
-            .unwrap_or(false);
+        rock_engine_host::project::is_game_project(std::path::Path::new(dir)).unwrap_or(false);
     let sources = crate::live_project::project_sources(dir, !is_game)
         .map_err(|e| anyhow::anyhow!("cannot load project {dir}: {e}"))?;
     let (mut ws, entry_file) = crate::skull_backend::check_project(&sources).map_err(|errs| {

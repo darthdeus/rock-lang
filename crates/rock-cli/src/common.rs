@@ -711,7 +711,7 @@ fn parse_thread_count_request(
     }
 }
 
-/// [`thread_count_request`] for pool construction. `main_with` rejects an
+/// [`thread_count_request`] for pool construction. `rock_cli::main` rejects an
 /// invalid value at startup, so reaching the panic means a pool was built
 /// outside the CLI process lifecycle with a bad environment.
 #[cfg(not(feature = "sequential"))]

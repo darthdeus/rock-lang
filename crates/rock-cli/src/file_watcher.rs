@@ -45,7 +45,6 @@ pub struct FileWatcher {
     restart_files: Vec<PathBuf>,
     watch_extensions: Vec<String>,
     watch_all_files: bool,
-    ignored_roots: Vec<PathBuf>,
     /// Exact files watched IN ADDITION to the extension filter, shared with
     /// the owner so it can be updated after watcher creation. Used for
     /// embed_string inputs: the set is only known
@@ -146,20 +145,9 @@ struct InitialFiles {
 
 #[cfg(any(not(target_os = "macos"), test))]
 impl InitialFiles {
-    fn capture(
-        roots: &[PathBuf],
-        extensions: &[String],
-        extra_files: &HashSet<PathBuf>,
-        ignored_roots: &[PathBuf],
-    ) -> Self {
+    fn capture(roots: &[PathBuf], extensions: &[String], extra_files: &HashSet<PathBuf>) -> Self {
         let mut stamps = HashMap::new();
         for root in roots {
-            if ignored_roots
-                .iter()
-                .any(|ignored| root.starts_with(ignored))
-            {
-                continue;
-            }
             if !root.exists() {
                 continue;
             }
@@ -173,9 +161,6 @@ impl InitialFiles {
                 .into_iter()
                 .filter_entry(|entry| {
                     !is_tmp_scratch_file(entry.path(), std::slice::from_ref(root))
-                        && !ignored_roots
-                            .iter()
-                            .any(|ignored| entry.path().starts_with(ignored))
                 })
             {
                 match entry {
@@ -197,12 +182,6 @@ impl InitialFiles {
             }
         }
         for path in extra_files {
-            if ignored_roots
-                .iter()
-                .any(|ignored| path.starts_with(ignored))
-            {
-                continue;
-            }
             if let Some(stamp) = FileStamp::read(path) {
                 stamps.insert(path.clone(), stamp);
             }
@@ -243,7 +222,6 @@ impl FileWatcher {
             restart_files: Vec::new(),
             watch_extensions: vec!["rock".to_string()],
             watch_all_files: false,
-            ignored_roots: Vec::new(),
             extra_files: None,
             ignore_existing_creates: false,
         }
@@ -287,11 +265,6 @@ impl FileWatcher {
     /// stays with the caller, which refreshes it after each compile.
     pub(crate) fn with_shared_extra_files(mut self, files: SharedWatchSet) -> Self {
         self.extra_files = Some(files);
-        self
-    }
-
-    pub fn with_ignored_roots(mut self, roots: Vec<PathBuf>) -> Self {
-        self.ignored_roots = roots;
         self
     }
 
@@ -365,22 +338,12 @@ impl FileWatcher {
                 .filter_map(|path| path.parent().map(Path::to_path_buf)),
         );
         input_parents.retain(|parent| !directory_roots.iter().any(|root| parent.starts_with(root)));
-        let ignored_roots: Vec<PathBuf> = config
-            .ignored_roots
-            .iter()
-            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
-            .collect();
         let initial_files = config.ignore_existing_creates.then(|| {
             let mut extra_files = restart_files.clone();
             if let Some(extra) = &config.extra_files {
                 extra_files.extend(extra.paths().iter().cloned());
             }
-            InitialFiles::capture(
-                &scratch_roots,
-                &config.watch_extensions,
-                &extra_files,
-                &ignored_roots,
-            )
+            InitialFiles::capture(&scratch_roots, &config.watch_extensions, &extra_files)
         });
 
         // Track last data modification time for each file
@@ -403,15 +366,13 @@ impl FileWatcher {
                                 .paths
                                 .iter()
                                 .filter(|path| {
-                                    !ignored_roots.iter().any(|root| path.starts_with(root))
-                                        && !initial_files.as_ref().is_some_and(|initial| {
-                                            initial.is_unchanged_create(&event.kind, path)
-                                        })
-                                        && (scratch_roots.iter().any(|root| path.starts_with(root))
-                                            || restart_files.contains(path.as_path())
-                                            || config.extra_files.as_ref().is_some_and(|extra| {
-                                                extra.paths().contains(path.as_path())
-                                            }))
+                                    !initial_files.as_ref().is_some_and(|initial| {
+                                        initial.is_unchanged_create(&event.kind, path)
+                                    }) && (scratch_roots.iter().any(|root| path.starts_with(root))
+                                        || restart_files.contains(path.as_path())
+                                        || config.extra_files.as_ref().is_some_and(|extra| {
+                                            extra.paths().contains(path.as_path())
+                                        }))
                                 })
                                 .collect();
                             if event_paths.is_empty() {
@@ -586,17 +547,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.rock");
         std::fs::write(&path, "a").unwrap();
-        let ignored = dir.path().join("ignored");
-        std::fs::create_dir(&ignored).unwrap();
-        let ignored_source = ignored.join("omitted.rock");
-        std::fs::write(&ignored_source, "ignored").unwrap();
         let initial = InitialFiles::capture(
             &[dir.path().to_path_buf()],
             &["rock".to_string()],
             &HashSet::new(),
-            &[ignored],
         );
-        assert!(!initial.stamps.contains_key(&ignored_source));
         let created = notify::EventKind::Create(CreateKind::File);
         assert!(initial.is_unchanged_create(&created, &path));
         let replacement = dir.path().join("saving");
@@ -701,12 +656,7 @@ mod macos {
     }
     impl Observation {
         fn admitted(&self, path: &Path) -> bool {
-            if self
-                .config
-                .ignored_roots
-                .iter()
-                .any(|root| path.starts_with(root))
-                || (!self.restart(path) && is_tmp_scratch_file(path, &self.roots))
+            if (!self.restart(path) && is_tmp_scratch_file(path, &self.roots))
                 || path.as_os_str().to_string_lossy().ends_with('~')
             {
                 return false;
@@ -733,12 +683,7 @@ mod macos {
                 || self.config.matches_restart_suffix(path)
         }
         fn descend(&self, path: &Path) -> bool {
-            !self
-                .config
-                .ignored_roots
-                .iter()
-                .any(|root| path.starts_with(root))
-                && !is_tmp_scratch_file(path, &self.roots)
+            !is_tmp_scratch_file(path, &self.roots)
                 && !path
                     .file_name()
                     .is_some_and(|name| name == ".git" || name == "target")
@@ -1031,11 +976,6 @@ mod macos {
             Ok(resolved)
         };
         let roots = paths
-            .into_iter()
-            .map(canonical)
-            .collect::<Result<Vec<_>>>()?;
-        config.ignored_roots = config
-            .ignored_roots
             .into_iter()
             .map(canonical)
             .collect::<Result<Vec<_>>>()?;

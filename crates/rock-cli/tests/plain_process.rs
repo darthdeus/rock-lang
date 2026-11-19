@@ -256,52 +256,6 @@ fn plain_main_errors_containing_interrupt_text_remain_failures() {
 }
 
 #[test]
-fn library_resolves_game_services_without_private_registration() {
-    use rock_cli::registry::{ProgramKind, RuntimeServices};
-    use rock_cli::runtime_process::RuntimeProcess;
-    assert!(std::ptr::eq(
-        rock_cli::CliCommand::all(),
-        rock_cli::plain::COMMANDS
-    ));
-    let services = RuntimeServices::registered();
-    let root = tempfile::tempdir().unwrap();
-    write(root.path(), "stone_ffi.rock", "// engine marker\n");
-    assert!((services.is_game_project)(root.path()).unwrap());
-    assert!(
-        (services.configured_runtime_dir)(root.path())
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        (services.program_preamble)(".", ProgramKind::Project)
-            .unwrap()
-            .is_empty()
-    );
-    let preamble =
-        (services.program_preamble)(root.path().to_str().unwrap(), ProgramKind::Game).unwrap();
-    assert!(preamble.contains("__ROCK_GAME_SOURCE_DIR"));
-    assert!(preamble.contains(root.path().to_str().unwrap()));
-    let mut command = Command::new("unused-runtime");
-    command.arg("sentinel").env("PLAIN_WITNESS", "preserved");
-    let command = rock_cli::runtime_process::configure(command, RuntimeProcess::LuaTest);
-    assert_eq!(
-        command.get_program(),
-        rock_engine_host::runtime::luajit_path().as_os_str()
-    );
-    assert_eq!(command.get_args().collect::<Vec<_>>(), ["sentinel"]);
-    let env: std::collections::HashMap<_, _> = command.get_envs().collect();
-    assert_eq!(
-        env[std::ffi::OsStr::new("PLAIN_WITNESS")],
-        Some(std::ffi::OsStr::new("preserved"))
-    );
-    assert_eq!(
-        env[std::ffi::OsStr::new("STONE_HEADLESS")],
-        Some(std::ffi::OsStr::new("1"))
-    );
-}
-
-#[cfg(feature = "backend-js")]
-#[test]
 fn js_backend_is_served_by_the_plain_cli() {
     let root = tempfile::tempdir().unwrap();
     for command in ["test", "run"] {

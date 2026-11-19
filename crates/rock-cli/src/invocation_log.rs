@@ -53,9 +53,7 @@ static STATE: Mutex<Option<Pending>> = Mutex::new(None);
 
 /// The commands that make up the edit-compile-test loop.
 pub(crate) fn is_loop_command(name: &str) -> bool {
-    crate::registry::CliCommand::named(name).is_some_and(|command| {
-        (crate::registry::registered().command_metadata)(command).log_invocation
-    })
+    crate::registry::CliCommand::named(name).is_some_and(crate::plain::logs_invocation)
 }
 
 /// Explicit destination (`off`, empty or absent disables recording).

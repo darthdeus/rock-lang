@@ -72,14 +72,17 @@ fn diagnostic_copy(source: &std::path::Path, destination: &std::path::Path) -> R
 /// sound bank first, then the engine libraries beside the compile. The compile
 /// does not read the libraries, and they are built before the program starts.
 pub(crate) fn with_game_prepared<T>(path: &str, compile: impl FnOnce() -> Result<T>) -> Result<T> {
-    let services = crate::registry::RuntimeServices::registered();
-    let project = rock_host::timed("resolve project", || (services.resolve_project_dir)(path))?;
+    let project = rock_host::timed("resolve project", || {
+        rock_engine_host::project::resolve_project_dir(path)
+    })?;
     let project = project.to_string_lossy();
-    rock_host::timed("sound bank", || (services.prepare_sound_bank)(&project))?;
+    rock_host::timed("sound bank", || {
+        crate::package::prepare_sound_bank(&project)
+    })?;
     beside(
         || {
             rock_host::timed("engine libraries", || {
-                (services.build_engine_libs)(&project)
+                rock_engine_host::engine_build::build_engine_libs(&project)
             })
         },
         compile,

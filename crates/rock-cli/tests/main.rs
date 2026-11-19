@@ -9,7 +9,6 @@ mod duplicate_decorators;
 mod editor;
 mod gpu_process;
 mod guide;
-mod host_api;
 mod js_run_gate;
 mod js_test_backends;
 mod js_test_exit_status;

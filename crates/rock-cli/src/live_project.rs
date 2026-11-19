@@ -353,10 +353,6 @@ impl LiveProject {
         &self.dir
     }
 
-    pub fn entry_module(&self) -> ModuleId {
-        self.session.workspace().module_ids[&ustr::Ustr::from(&self.entry_path)]
-    }
-
     pub fn verdict(&mut self, context: &str) -> Result<()> {
         self.verdict_with_change(context, &bone_lints::LintCacheUpdate::full())
     }

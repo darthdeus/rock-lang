@@ -67,29 +67,6 @@ fn release_root_from_exe() -> Option<PathBuf> {
     }
 }
 
-/// Ensure that the Rock root directory can be located and is valid.
-///
-/// Does NOT change process current directory, allowing callers to execute
-/// from project subdirectories while finding toolchain resources.
-pub fn ensure_workspace_root() -> Result<()> {
-    if release_root_from_exe().is_some() {
-        return Ok(());
-    }
-    let cwd = std::env::current_dir().unwrap_or_default();
-    if is_rock_root(&cwd) || find_workspace_root(&cwd).is_some() {
-        return Ok(());
-    }
-    let rock_dir = crate::rock_dir();
-    let root = Path::new(&rock_dir);
-    if is_rock_root(root) || root.join("Cargo.toml").exists() {
-        return Ok(());
-    }
-    Err(anyhow::anyhow!(
-        "Could not find Rock root directory.\n\
-         Run this command from within the Rock workspace, or set the ROCK_DIR environment variable."
-    ))
-}
-
 /// The nearest directory at or above `path` holding a `stick.toml`.
 pub fn find_project_root(path: &Path) -> Option<PathBuf> {
     find_ancestor(path, |dir| dir.join("stick.toml").exists())
