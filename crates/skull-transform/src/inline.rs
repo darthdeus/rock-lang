@@ -923,6 +923,59 @@ fn live_closure_at(header: &MirFunc, func: &MirFunc) -> LiveClosure {
     live
 }
 
+macro_rules! copy_inst_tables {
+    ($target:expr, $source:expr, $inst_map:expr, $($field:ident),+ $(,)?) => {
+        $(
+            for (old_id, value) in &$source.$field {
+                if let Some(&new_id) = $inst_map.get(old_id) {
+                    $target.$field.insert(new_id, value.clone());
+                }
+            }
+        )+
+    };
+}
+
+fn copy_inst_metadata(
+    target: &mut MirFunc,
+    source: &MirFunc,
+    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+) {
+    copy_inst_tables!(
+        target,
+        source,
+        inst_map,
+        spec_bindings,
+        callee_instances,
+        call_abi_plans,
+        call_rep_plans,
+        flat_call_lanes,
+        fn_value_symbols,
+        code_value_identities,
+        lambda_abi_fingerprints,
+        lambda_abi_representations,
+        inst_logical_types,
+    );
+    for (old_id, span) in source.inst_spans.iter() {
+        if let Some(&new_id) = inst_map.get(&old_id) {
+            target.inst_spans.insert(new_id, *span);
+        }
+    }
+}
+
+fn copy_projection_metadata(
+    target: &mut MirFunc,
+    source: &MirFunc,
+    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+) {
+    target.synthetic_projections.extend(
+        source
+            .synthetic_projections
+            .iter()
+            .filter_map(|id| inst_map.get(id)),
+    );
+    copy_inst_tables!(target, source, inst_map, flat_box_widths);
+}
+
 fn compact_live_template(
     mut source: MirFunc,
     live: &LiveClosure,
@@ -968,54 +1021,17 @@ fn compact_region(
     for &id in &live_insts {
         inst_map.insert(id, insts.alloc(arena.insts[id].clone()));
     }
-    for id in &live.insts {
-        let new_id = inst_map[id];
-        remap_clone(&mut insts[new_id], &inst_map, &cell_map, &block_map);
+    for (_, inst) in insts.iter_mut() {
+        remap_clone(inst, &inst_map, &cell_map, &block_map);
     }
-    for id in live.blocks.iter().copied() {
-        let new_id = block_map[&id];
-        let old = &arena.blocks[id];
-        blocks[new_id].insts = old.insts.iter().map(|inst| inst_map[inst]).collect();
-        let mut term = old.term.clone();
-        remap_term_clone(&mut term, &inst_map, &block_map);
-        blocks[new_id].term = term;
-    }
-
-    let mut emit_insts = vec![0; insts.len()];
-    for (old, new) in &inst_map {
-        emit_insts[crate::visit::raw(*new)] = arena.emit_inst_id(*old);
-    }
-    let mut emit_cells = vec![0; cells.len()];
-    for (old, new) in &cell_map {
-        emit_cells[crate::visit::raw(*new)] = arena.emit_cell_id(*old);
-    }
-    let mut emit_blocks = vec![0; blocks.len()];
-    for (old, new) in &block_map {
-        emit_blocks[crate::visit::raw(*new)] = arena.emit_block_id(*old);
+    for (&old_id, &new_id) in &block_map {
+        blocks[new_id] = remap_block(&arena.blocks[old_id], &inst_map, &block_map);
     }
 
     let mut template = MirFunc::new(header.name);
     template.code_identity = header.code_identity.clone();
     template.code_abi_fingerprint = header.code_abi_fingerprint.clone();
     template.code_compatibility = header.code_compatibility.clone();
-    template.lambda_abi_fingerprints = arena
-        .lambda_abi_fingerprints
-        .iter()
-        .filter_map(|(old_id, fingerprint)| {
-            inst_map
-                .get(old_id)
-                .map(|new_id| (*new_id, fingerprint.clone()))
-        })
-        .collect();
-    template.lambda_abi_representations = arena
-        .lambda_abi_representations
-        .iter()
-        .filter_map(|(old_id, representation)| {
-            inst_map
-                .get(old_id)
-                .map(|new_id| (*new_id, representation.clone()))
-        })
-        .collect();
     template.nested_fn_identities = arena.nested_fn_identities.clone();
     template.rep_arena = arena.rep_arena.clone();
     template.params = header.params.iter().map(|param| cell_map[param]).collect();
@@ -1049,15 +1065,22 @@ fn compact_region(
     cleanup_load_cells.sort_unstable_by_key(|cell| u32::from(cell.into_raw()));
     cleanup_load_cells.dedup();
     template.inline_cleanup_load_cells = cleanup_load_cells;
-    template.emit_ids = Some(skull_mir::mir::EmitIds {
-        insts: emit_insts,
-        cells: emit_cells,
-        blocks: emit_blocks,
-        forced_cells: source_forced_cells.iter().map(|(cell, _)| *cell).collect(),
-        forced_cell_blocks: source_forced_cells
-            .iter()
-            .map(|(_, block)| *block)
+    let (forced_cells, forced_cell_blocks) = source_forced_cells.into_iter().unzip();
+    template.emit_ids = Some(EmitIds {
+        insts: live_insts
+            .into_iter()
+            .map(|id| arena.emit_inst_id(id))
             .collect(),
+        cells: live_cells
+            .into_iter()
+            .map(|id| arena.emit_cell_id(id))
+            .collect(),
+        blocks: live_blocks
+            .into_iter()
+            .map(|id| arena.emit_block_id(id))
+            .collect(),
+        forced_cells,
+        forced_cell_blocks,
         next_insts: source_inst_span,
         next_cells: source_cell_span,
         next_blocks: source_block_span,
@@ -1079,25 +1102,16 @@ fn compact_region(
         .collect();
     template.hoisted_fn_globals = arena.hoisted_fn_globals.clone();
 
-    macro_rules! remap_inst_table {
-        ($field:ident) => {
-            for (old_id, value) in &arena.$field {
-                if let Some(&new_id) = inst_map.get(old_id) {
-                    template.$field.insert(new_id, value.clone());
-                }
-            }
-        };
-    }
-    remap_inst_table!(bound_trees);
-    remap_inst_table!(resolved_bound_trees);
-    remap_inst_table!(spec_bindings);
-    remap_inst_table!(callee_instances);
-    remap_inst_table!(call_abi_plans);
-    remap_inst_table!(call_rep_plans);
-    remap_inst_table!(flat_call_lanes);
-    remap_inst_table!(fn_value_symbols);
-    remap_inst_table!(param_default_guards);
-    remap_inst_table!(inst_logical_types);
+    copy_inst_metadata(&mut template, arena, &inst_map);
+    copy_projection_metadata(&mut template, arena, &inst_map);
+    copy_inst_tables!(
+        template,
+        arena,
+        inst_map,
+        bound_trees,
+        resolved_bound_trees,
+        param_default_guards,
+    );
     for (param, values) in &arena.param_default_values {
         let values = values
             .iter()
@@ -1105,13 +1119,6 @@ fn compact_region(
             .collect::<Vec<_>>();
         if !values.is_empty() {
             template.param_default_values.insert(*param, values);
-        }
-    }
-    for (old_id, identity) in &arena.code_value_identities {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            template
-                .code_value_identities
-                .insert(new_id, identity.clone());
         }
     }
     for (old_id, plan) in &arena.closure_env_plans {
@@ -1125,53 +1132,18 @@ fn compact_region(
             skull_mir::mir::ClosureEnvPlan::new(captures, env_cell),
         );
     }
-    for old_id in &arena.bound_next_split {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            template.bound_next_split.insert(new_id);
-        }
-    }
-    for old_id in &arena.synthetic_projections {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            template.synthetic_projections.insert(new_id);
-        }
-    }
-    for (old_id, &width) in &arena.flat_box_widths {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            template.flat_box_widths.insert(new_id, width);
-        }
-    }
-    for (old_id, span) in arena.inst_spans.iter() {
-        if let Some(&new_id) = inst_map.get(&old_id) {
-            template.inst_spans.insert(new_id, *span);
-        }
-    }
-
-    let mut owner_map: HashMap<u32, skull_mir::site::OwnerRef> = HashMap::default();
-    for (old_id, site) in &arena.call_sites {
-        let Some(&new_id) = inst_map.get(old_id) else {
-            continue;
-        };
-        let owner = match owner_map.get(&site.owner.0) {
-            Some(&owner) => owner,
-            None => {
-                let owner = arena
-                    .site_owners
-                    .get(site.owner.0 as usize)
-                    .expect("call-site owner must exist in the candidate template")
-                    .clone();
-                let owner = skull_mir::site::intern_owner(&mut template.site_owners, owner);
-                owner_map.insert(site.owner.0, owner);
-                owner
-            }
-        };
-        template.call_sites.insert(
-            new_id,
-            skull_mir::site::CallSite {
-                owner,
-                site: site.site.clone(),
-            },
-        );
-    }
+    template.bound_next_split.extend(
+        arena
+            .bound_next_split
+            .iter()
+            .filter_map(|id| inst_map.get(id)),
+    );
+    import_call_sites(
+        &mut template,
+        arena,
+        &inst_map,
+        Some("call-site owner must exist in the candidate template"),
+    );
 
     template.nested_fns = nested
         .into_iter()
@@ -1769,16 +1741,7 @@ fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratc
         scratch.inst_map.insert(iid, nid);
         scratch.inst_ids.push(nid);
     }
-    for old_id in &callee.synthetic_projections {
-        if let Some(&new_id) = scratch.inst_map.get(old_id) {
-            caller.synthetic_projections.insert(new_id);
-        }
-    }
-    for (old_id, &width) in &callee.flat_box_widths {
-        if let Some(&new_id) = scratch.inst_map.get(old_id) {
-            caller.flat_box_widths.insert(new_id, width);
-        }
-    }
+    copy_projection_metadata(caller, callee, &scratch.inst_map);
     for &nid in &scratch.inst_ids {
         remap_clone(
             &mut caller.insts[nid],
@@ -1789,11 +1752,8 @@ fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratc
     }
     if kind == Kind::General {
         for (bid, block) in callee.blocks.iter() {
-            let nbid = scratch.block_map[&bid];
-            caller.blocks[nbid].insts = block.insts.iter().map(|i| scratch.inst_map[i]).collect();
-            let mut term = block.term.clone();
-            remap_term_clone(&mut term, &scratch.inst_map, &scratch.block_map);
-            caller.blocks[nbid].term = term;
+            caller.blocks[scratch.block_map[&bid]] =
+                remap_block(block, &scratch.inst_map, &scratch.block_map);
         }
         caller.for_iter_headers.extend(
             callee
@@ -1865,13 +1825,18 @@ fn remap_clone(
     }
 }
 
-fn remap_term_clone(
-    term: &mut Term,
+fn remap_block(
+    block: &Block,
     im: &HashMap<Idx<Inst>, Idx<Inst>>,
     bm: &HashMap<Idx<Block>, Idx<Block>>,
-) {
+) -> Block {
+    let mut term = block.term.clone();
     term.remap_uses(&|x| im[&x]);
     term.remap_targets(&|x| bm[&x]);
+    Block {
+        insts: block.insts.iter().map(|id| im[id]).collect(),
+        term,
+    }
 }
 
 /// Coalesce only if the argument cell still holds the value its load read.
@@ -2189,69 +2154,20 @@ fn import_nested_fns(
     names
 }
 
-fn import_spec_bindings(
+fn import_splice_metadata(
     func: &mut MirFunc,
     callee: &MirFunc,
     inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
     nested_names: &HashMap<Ustr, Ustr>,
 ) {
-    for (old_id, key) in &callee.spec_bindings {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.spec_bindings.insert(new_id, key.clone());
-        }
-    }
-    for (old_id, inst) in &callee.callee_instances {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.callee_instances.insert(new_id, inst.clone());
-        }
-    }
-    for (old_id, plan) in &callee.call_abi_plans {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.call_abi_plans.insert(new_id, plan.clone());
-        }
-    }
-    for (old_id, plan) in &callee.call_rep_plans {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.call_rep_plans.insert(new_id, plan.clone());
-        }
-    }
-    for (old_id, &lanes) in &callee.flat_call_lanes {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.flat_call_lanes.insert(new_id, lanes);
-        }
-    }
-    for (old_id, plan) in &callee.closure_env_plans {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.closure_env_plans.insert(new_id, plan.clone());
-        }
-    }
-    for (old_id, tree) in &callee.resolved_bound_trees {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.resolved_bound_trees.insert(new_id, tree.clone());
-        }
-    }
-    for (old_id, fref) in &callee.fn_value_symbols {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.fn_value_symbols.insert(new_id, *fref);
-        }
-    }
-    for (old_id, identity) in &callee.code_value_identities {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.code_value_identities.insert(new_id, identity.clone());
-        }
-    }
-    for (old_id, fingerprint) in &callee.lambda_abi_fingerprints {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.lambda_abi_fingerprints
-                .insert(new_id, fingerprint.clone());
-        }
-    }
-    for (old_id, representation) in &callee.lambda_abi_representations {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.lambda_abi_representations
-                .insert(new_id, representation.clone());
-        }
-    }
+    copy_inst_metadata(func, callee, inst_map);
+    copy_inst_tables!(
+        func,
+        callee,
+        inst_map,
+        resolved_bound_trees,
+        closure_env_plans
+    );
     for (name, identity) in &callee.nested_fn_identities {
         let name = nested_names.get(name).copied().unwrap_or(*name);
         func.nested_fn_identities.insert(name, identity.clone());
@@ -2262,45 +2178,36 @@ fn import_spec_bindings(
             func.hoisted_fn_globals.push(n);
         }
     }
-    // Preserve the callee source location for diagnostics after inlining.
-    for (old_id, span) in callee.inst_spans.iter() {
-        if let Some(&new_id) = inst_map.get(&old_id) {
-            func.inst_spans.insert(new_id, *span);
-        }
-    }
-    for (old_id, ty) in &callee.inst_logical_types {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.inst_logical_types.insert(new_id, *ty);
-        }
-    }
-    for old_id in &callee.synthetic_projections {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.synthetic_projections.insert(new_id);
-        }
-    }
-    for (old_id, &width) in &callee.flat_box_widths {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.flat_box_widths.insert(new_id, width);
-        }
-    }
-    // Intern each callee owner in the caller before remapping its sites.
+    import_call_sites(func, callee, inst_map, None);
+}
+
+fn import_call_sites(
+    target: &mut MirFunc,
+    source: &MirFunc,
+    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+    missing_owner: Option<&str>,
+) {
+    // The site keeps its source expression arena when its owner changes tables.
     let mut owner_map: HashMap<u32, skull_mir::site::OwnerRef> = HashMap::default();
-    for (old_id, cs) in &callee.call_sites {
+    for (old_id, cs) in &source.call_sites {
         let Some(&new_id) = inst_map.get(old_id) else {
             continue;
         };
         let owner = match owner_map.get(&cs.owner.0) {
             Some(&o) => o,
             None => {
-                let Some(inst) = callee.site_owners.get(cs.owner.0 as usize) else {
+                let Some(inst) = source.site_owners.get(cs.owner.0 as usize) else {
+                    if let Some(message) = missing_owner {
+                        panic!("{message}");
+                    }
                     continue;
                 };
-                let o = skull_mir::site::intern_owner(&mut func.site_owners, inst.clone());
+                let o = skull_mir::site::intern_owner(&mut target.site_owners, inst.clone());
                 owner_map.insert(cs.owner.0, o);
                 o
             }
         };
-        func.call_sites.insert(
+        target.call_sites.insert(
             new_id,
             skull_mir::site::CallSite {
                 owner,
@@ -2342,7 +2249,7 @@ fn splice(
         concrete_plans,
     )?;
     let names = import_nested_fns(func, callee, &scratch.inst_map);
-    import_spec_bindings(func, callee, &scratch.inst_map, &names);
+    import_splice_metadata(func, callee, &scratch.inst_map, &names);
     let forwarded = forward_param_reads(func, cand, args, scratch);
     if cand.kind == Kind::General && !forwarded.is_empty() {
         for source in &cand.reachable {
