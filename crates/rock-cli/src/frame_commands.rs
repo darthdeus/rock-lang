@@ -2,7 +2,6 @@ use crate::frame_runtime::*;
 use crate::*;
 use std::process::{Command, Stdio};
 
-/// Run the game for N frames with profiling enabled and display performance summary
 fn apply_perf_env(cmd: &mut Command) {
     let perf_no_sections = std::env::var("PERF_NO_SECTIONS").unwrap_or_else(|_| "1".to_string());
     cmd.env("PERF_MODE", "1")
@@ -56,11 +55,6 @@ pub(crate) fn do_perf(
     cmd.env("STONE_BUILD_ID", &compiled.artifact_fingerprint);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    // Pin the RNG so the measured scene is byte-identical run-to-run: the
-    // prelude otherwise seeds `random()` from os.time() (whole-second
-    // granularity), which drifts RNG-driven content
-    // across runs and made graphics.draw_calls a non-gateable metric. Matches
-    // simulation defaults; an explicit env still overrides.
     if std::env::var_os("ROCK_TEST_SEED").is_none() {
         cmd.env("ROCK_TEST_SEED", "42");
     }
@@ -98,8 +92,6 @@ pub(crate) fn do_perf(
         ),
     }
 
-    // Asset loading is startup, not part of the budget for executing frames
-    // and dumping the summary. The override bounds each phase independently.
     let timeout_override = frame_timeout_override();
     let startup_timeout = timeout_override.unwrap_or(Duration::from_secs(120));
     let timeout_duration = timeout_override.unwrap_or_else(|| {
@@ -126,8 +118,6 @@ pub(crate) fn do_perf(
                 {
                     return Ok(false);
                 }
-                // The cooperative frame boundary owns normal exit and evidence;
-                // this backstop also bounds a blocked init or native frame call.
                 if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
                     return Ok(true);
                 }
@@ -191,7 +181,6 @@ pub(crate) fn do_perf(
         } else {
             "frame_timeout"
         };
-        // A blocked runtime has not published its scenario identity or counters.
         let diagnostic = serde_json::json!({
             "scenario": {"name": serde_json::Value::Null,
                 "ready": false, "complete": false},
@@ -210,21 +199,16 @@ pub(crate) fn do_perf(
         )?;
     }
 
-    // Extract and display the perf summary from stdout
     if !process_result.output.stdout.is_empty() && !killed_by_cap {
         let stdout_str = String::from_utf8_lossy(&process_result.output.stdout);
         const DELIMITER: &str = "--- PERF_SUMMARY ---";
         if let Some(idx) = stdout_str.find(DELIMITER) {
             let summary = stdout_str[idx + DELIMITER.len()..].trim();
-            // Result output, NOT logging: the perf summary is the command's
-            // answer, written to stdout for piping/consumption.
             println!("{}", summary);
         } else {
             // No summary found, print raw output
             warn!("No perf summary found in output");
             if !stdout_str.trim().is_empty() {
-                // Result output, NOT logging: raw game stdout is the
-                // command's output when no structured summary is present.
                 println!("{}", stdout_str.trim());
             }
         }
@@ -234,8 +218,6 @@ pub(crate) fn do_perf(
         let stderr_str = String::from_utf8_lossy(&process_result.output.stderr);
         let child_failed = killed_by_cap || !process_result.output.status.success();
         for line in perf_stderr_lines(&stderr_str, child_failed) {
-            // Result output, NOT logging: forwarding the spawned game
-            // process's own stderr lines verbatim, not rock-cli diagnostics.
             eprintln!("{}", line);
         }
     }
@@ -245,10 +227,6 @@ pub(crate) fn do_perf(
         "perf seconds cap expired while runtime was blocked; diagnostic artifact retained"
     );
 
-    // A perf run that timed out or the child failed did NOT produce a valid
-    // summary -- error out (nonzero exit) instead of the old warn-and-Ok(0),
-    // which let a corrupt/partial benchmark JSON sail past the gate recipes
-    // (justfile render-bench). Same classifier as `rock frame`.
     let timeout_secs = if process_result.timeout_phase == Some(crate::common::TimeoutPhase::Startup)
     {
         startup_timeout.as_secs()
@@ -268,10 +246,6 @@ pub(crate) fn do_perf(
     Ok(())
 }
 
-/// A bounded frame run gets a startup allowance, then must report completed
-/// frames often enough to show it is alive. The old total budget grew with the
-/// requested frame count and killed legitimate slow runs. The explicit env
-/// override remains the escape hatch for unusually slow startup or frames.
 fn frame_timeout_override() -> Option<Duration> {
     std::env::var("ROCK_FRAME_TIMEOUT_SECS")
         .ok()
@@ -279,10 +253,6 @@ fn frame_timeout_override() -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
-/// Run the game for a specified number of frames and take a screenshot
-///
-/// This is useful for debugging and testing - compiles the game and runs it
-/// for N frames, taking a screenshot at the end.
 pub(crate) fn do_one_frame(
     path: &str,
     output: String,
@@ -302,7 +272,6 @@ pub(crate) fn do_one_frame(
         info!("Running stone for {} frames...", frames);
     }
 
-    // Run the compiled Lua with luajit (stone handles window creation)
     let mut cmd = crate::headless_scope::headless_command(
         rock_engine_host::runtime::build_luajit_command(lua_file, app_args),
     );
@@ -312,11 +281,8 @@ pub(crate) fn do_one_frame(
         .env("ROCK_FRAME_WATCHDOG", "1")
         .env("STONE_BUILD_ID", &compiled.artifact_fingerprint);
     apply_headless_audio_env(&mut cmd);
-    // ProcessManager drains both pipes in background threads, so the
-    // watchdog can observe frame markers without risking a full pipe.
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    // Use spawn instead of output to implement the progress watchdog.
     rock_host::process_management::report_spawn_phase("execution");
     let mut child = crate::headless_scope::spawn_bound_child(&mut cmd, lua_file.parent().unwrap())?;
 
@@ -330,9 +296,6 @@ pub(crate) fn do_one_frame(
         true,
     )?;
 
-    // A watchdog timeout means the run did NOT complete -- treat it as a failure
-    // (nonzero exit), not a warning-and-exit-0. Exiting 0 on timeout is precisely
-    // how a load-starved run once masqueraded as a clean-but-empty log
     frame_exit_result_with_progress(
         process_result.timed_out,
         &process_result.output.status,
@@ -351,9 +314,6 @@ pub(crate) fn do_one_frame(
     Ok(())
 }
 
-/// Classify a finished `rock frame` run: Ok only on a clean zero-exit. A
-/// watchdog timeout or a nonzero child exit is an error, so the CLI exits
-/// nonzero (test-games / callers actually fail).
 fn frame_exit_result_with_progress(
     timed_out: bool,
     status: &std::process::ExitStatus,
@@ -396,10 +356,6 @@ fn frame_exit_result_with_progress(
     Ok(())
 }
 
-// The game's stderr lines a perf run forwards. A failed run forwards all of
-// it: a runtime error's message line ("luajit: ...") matches no filter, and
-// keeping only its traceback hid why the run failed. A successful run keeps
-// profile lines, errors and structured logger records that need action.
 fn perf_stderr_lines(stderr: &str, child_failed: bool) -> Vec<&str> {
     if child_failed {
         return stderr.lines().collect();
@@ -414,14 +370,12 @@ fn perf_stderr_lines(stderr: &str, child_failed: bool) -> Vec<&str> {
         })
         .collect()
 }
-/// `rock frame` on the skull backend.
 pub(crate) fn handle_frame(cx: &CommandContext) -> Result<()> {
     let file = get_game_file(cx)?;
     let output = cx.args.output.clone().unwrap_or_else(|| "tmp".into());
     do_one_frame(&file, output, cx.args.frames, &cx.args.app_args)
 }
 
-/// `rock perf` on the skull backend.
 pub(crate) fn handle_perf(cx: &CommandContext) -> Result<()> {
     let file = get_game_file(cx)?;
     let output = cx.args.output.clone().unwrap_or_else(|| "tmp".into());
@@ -441,17 +395,12 @@ pub(crate) fn handle_perf(cx: &CommandContext) -> Result<()> {
 
 fn get_game_file(cx: &CommandContext) -> Result<String> {
     let Some(arg) = cx.args.files.first() else {
-        // No project arg: default to `game/`, with a directory
-        // suggestion (then exit) if it's absent -- unchanged behavior.
         let path = "game".to_string();
         if !std::path::Path::new(&path).exists() {
             suggest_available_directories(&path);
         }
         return Ok(path);
     };
-    // Explicit project arg: bare-name resolution, same as `rock sim`
-    // (a literal path wins; unknown rejects
-    // listing the searched parents).
     Ok(rock_engine_host::project::resolve_project_dir(arg)?
         .to_string_lossy()
         .into_owned())
@@ -462,7 +411,6 @@ fn suggest_available_directories(missing_dir: &str) {
 
     log::error!(target: "FRAME", "directory '{}' not found", missing_dir);
 
-    // Try to find directories that look like game projects
     let mut found_dirs = Vec::new();
 
     if let Ok(entries) = fs::read_dir(".") {
@@ -475,7 +423,6 @@ fn suggest_available_directories(missing_dir: &str) {
                     .to_string_lossy()
                     .to_string();
 
-                // Skip common non-game directories
                 if matches!(
                     name.as_str(),
                     "target"
@@ -492,7 +439,6 @@ fn suggest_available_directories(missing_dir: &str) {
                     continue;
                 }
 
-                // Check if it looks like a game directory (has .rock files)
                 if let Ok(sub_entries) = fs::read_dir(&path) {
                     let has_rock_files = sub_entries
                         .flatten()
@@ -506,12 +452,6 @@ fn suggest_available_directories(missing_dir: &str) {
         }
     }
 
-    // Same level as the "not found" error above: these are the
-    // actionable recovery hints for that fatal error and emit
-    // immediately before exit(1) — at info they'd be suppressed
-    // under ROCK_LOG=warn|error, leaving a bare error with no
-    // guidance (the original unconditional eprintln! always showed
-    // them).
     if !found_dirs.is_empty() {
         found_dirs.sort();
         log::error!(target: "FRAME", "available game directories:");
@@ -528,7 +468,6 @@ fn suggest_available_directories(missing_dir: &str) {
 }
 
 pub(crate) fn initialize_process(args: &Args) {
-    // The dispatcher calls this before starting worker threads.
     if args.jv {
         unsafe { std::env::set_var("STONE_JV", "1") };
     }

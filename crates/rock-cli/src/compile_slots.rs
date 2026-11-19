@@ -22,17 +22,14 @@ const HELD_PREFIX: &str = "held-";
 const QUEUE_DIR: &str = "queue";
 const PEAKS_DIR: &str = "peaks";
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-/// Measured peaks kept per package; the reservation covers the largest.
 const PEAK_SAMPLES: usize = 8;
 
-/// Resolved host admission policy. No configuration means immediate admission.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SlotConfig {
     pub dir: PathBuf,
     pub pool_mib: u64,
     pub full_compile_mib: u64,
-    /// An optional slot outside the shared pool, tried before queueing.
     pub preferred_slot: Option<String>,
     pub try_preferred_slot: bool,
 }
@@ -67,7 +64,6 @@ thread_local! {
     static WAIT_OBSERVER: RefCell<Option<std::sync::mpsc::Sender<()>>> = const { RefCell::new(None) };
 }
 
-/// A held slot file: `held-<ticket>` (removed on release) or the configured preferred slot.
 struct Held {
     file: File,
     path: PathBuf,
@@ -77,11 +73,9 @@ struct Held {
     peak_at_admission: Option<u64>,
 }
 
-/// One compile's slot; dropping it frees the slot.
 #[must_use = "the slot is freed when this guard drops"]
 pub(crate) struct CompileSlot {
     held: Option<Held>,
-    /// Set for guards from [`acquire`], which marks the thread as holding.
     marks_thread: bool,
 }
 
@@ -115,8 +109,6 @@ impl Drop for CompileSlot {
     }
 }
 
-/// Take a compile slot for `what` (named in the wait log), waiting while the
-/// pool cannot fit its reservation.
 pub fn acquire(what: &str) -> Result<CompileSlot> {
     if HOLDING.with(|holding| holding.get()) {
         return Err(anyhow!(
@@ -137,8 +129,6 @@ pub fn acquire(what: &str) -> Result<CompileSlot> {
 
 #[cfg(test)]
 fn current_config() -> Result<Option<SlotConfig>> {
-    // Unit tests never contend with the machine's real compiles; a test that
-    // exercises the limit installs its own configuration on its thread.
     Ok(TEST_CONFIG.with(|config| config.borrow().clone()))
 }
 
@@ -283,7 +273,6 @@ fn acquire_reserving(
     }
 }
 
-/// Only a prefix fits; a smaller reservation cannot pass an older waiter.
 fn admitted_prefix(pool_mib: u64, held_mib: u64, queue: &[Entry]) -> usize {
     let mut used = held_mib;
     queue
@@ -296,8 +285,6 @@ fn admitted_prefix(pool_mib: u64, held_mib: u64, queue: &[Entry]) -> usize {
         .count()
 }
 
-/// The queue lock: every ticket, admission, release and stale removal happens
-/// under it.
 struct QueueGuard(File);
 
 impl QueueGuard {
@@ -319,7 +306,6 @@ impl Drop for QueueGuard {
     }
 }
 
-/// A waiter's place in the queue; dropping it before admission leaves the queue.
 struct Ticket {
     name: String,
     path: PathBuf,
@@ -327,7 +313,6 @@ struct Ticket {
 }
 
 impl Ticket {
-    /// Called under the queue lock, so no scan sees the ticket before it is locked.
     fn enqueue(dir: &Path, what: &str, reserve_mib: u64) -> Result<Self> {
         let seq_path = dir.join(QUEUE_DIR).join("seq");
         let seq = match std::fs::read_to_string(&seq_path) {
@@ -363,7 +348,6 @@ impl Ticket {
         Ok(ticket)
     }
 
-    /// Moves the locked ticket to `held` with the holder record, keeping its lock.
     fn admit(&mut self, held: &Path, what: &str, reserve_mib: u64) -> Result<(File, PathBuf)> {
         let mut file = self.file.take().expect("a ticket is admitted once");
         if let Err(error) = write_holder(&mut file, what, reserve_mib, std::env::args()) {
@@ -397,8 +381,6 @@ struct Entry {
     record: String,
 }
 
-/// The live holders and waiters, oldest ticket first. Scanning removes the
-/// files of dead owners.
 struct PoolState {
     pool_mib: u64,
     holders: Vec<Entry>,
@@ -497,8 +479,6 @@ impl PoolState {
     }
 }
 
-/// The record of a slot file whose owner still holds its lock; `None` when
-/// the file is gone or unlocked.
 fn live_record(path: &Path) -> Result<Option<String>> {
     let file = match OpenOptions::new().read(true).open(path) {
         Ok(file) => file,
@@ -557,10 +537,6 @@ fn write_holder(
     )
 }
 
-/// The peak-measurement key of a compile of `what`: its package name and the
-/// `rock` subcommand, so every worktree's copy of a package and every run of
-/// a test fixture share one measurement, while `rock test project` (tests
-/// included, about 4.9 GB) stays apart from `rock compile project` (about 1.4 GB).
 fn package_key(what: &str) -> Option<String> {
     let manifest = Path::new(what).join("stick.toml");
     match rock_host::stick::StickConfig::from_path_optional(&manifest) {
@@ -587,10 +563,6 @@ fn package_key(what: &str) -> Option<String> {
     }
 }
 
-/// A compile's reservation: the largest recent peak measured for its package
-/// with 25% headroom (one package's peaks vary that much: project measured
-/// 4.3-5.4 GB), capped at a full compile. An unmeasured package reserves a
-/// full compile.
 fn estimate_reserve(dir: &Path, key: Option<&str>, full_compile_mib: u64) -> u64 {
     key.and_then(|key| read_peaks(dir, key).into_iter().max())
         .map_or(full_compile_mib, |peak| {
@@ -620,9 +592,6 @@ fn read_peaks(dir: &Path, key: &str) -> Vec<u64> {
     peaks
 }
 
-/// Records the process peak as `key`'s compile peak when it rose while the
-/// slot was held; an earlier, larger peak bounds nothing about this compile.
-/// Called under the queue lock.
 fn record_peak(dir: &Path, key: &str, at_admission: Option<u64>, at_release: Option<u64>) {
     let (Some(before), Some(peak)) = (at_admission, at_release) else {
         return;
@@ -648,8 +617,6 @@ fn process_peak_mib() -> Option<u64> {
         .map(|bytes| bytes / (1024 * 1024))
 }
 
-/// Run `compile` on a thread whose pool is full, and check it waits for the
-/// holder and takes a slot once freed. Returns the compile's result.
 #[cfg(test)]
 pub(crate) fn assert_compile_waits_for_slot<T: Send + 'static>(
     compile: impl FnOnce() -> T + Send + 'static,
@@ -657,7 +624,6 @@ pub(crate) fn assert_compile_waits_for_slot<T: Send + 'static>(
     assert_compile_waits_for_slot_in(tempfile::tempdir().unwrap().path(), compile)
 }
 
-/// [`assert_compile_waits_for_slot`] with the pool kept in `slots`.
 #[cfg(test)]
 pub(crate) fn assert_compile_waits_for_slot_in<T: Send + 'static>(
     slots: &Path,
@@ -765,7 +731,6 @@ mod tests {
         }
     }
 
-    /// Whether `name` is free right now, without waiting.
     fn slot_is_free(dir: &Path, name: &str) -> bool {
         let file = open_slot(&dir.join(name)).unwrap();
         match file.try_lock() {
@@ -888,7 +853,6 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(200));
                 drop(slot);
             });
-            // The small request fits beside the holder, but the large one is ahead.
             waiting
                 .recv_timeout(test_utils::HANG_BACKSTOP)
                 .expect("waiter never queued");
@@ -1083,8 +1047,6 @@ mod tests {
     const CHILD_DIR_ENV: &str = "ROCK_COMPILE_SLOT_TEST_CHILD_DIR";
     const CHILD_MODE_ENV: &str = "ROCK_COMPILE_SLOT_TEST_CHILD_MODE";
 
-    /// The child half of the dead-owner tests: holds (or queues for) the
-    /// only full-compile slot until it is killed.
     #[test]
     #[ignore = "spawned by the dead-owner tests"]
     fn hold_slot_until_killed() {
@@ -1144,8 +1106,6 @@ mod tests {
         child.wait().unwrap();
         let config = config(dir.path(), 1, CompileClass::Batch);
         let (next, waiting) = spawn_slot_waiter(move || acquire_with(&config, "next"));
-        // The observer's sender drops when the acquiring thread ends: a free
-        // slot is taken on the first scan, without ever reporting contention.
         assert!(
             matches!(
                 waiting.recv_timeout(test_utils::HANG_BACKSTOP),

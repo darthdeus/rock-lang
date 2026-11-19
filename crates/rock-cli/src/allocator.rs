@@ -82,12 +82,6 @@ fn linux_current_rss() -> std::io::Result<u64> {
 // crate's `extended` constants omit it.
 const MI_OPTION_PURGE_DELAY: std::ffi::c_int = 15;
 
-/// Keep freed pages for reuse for a second before returning them, in hosts
-/// that rebuild repeatedly (watch, run, the language server); explicit
-/// environment options win. At mimalloc v2's 10 ms default a rebuild faults
-/// back in what the previous one freed: a signature edit of Stone rebuilt
-/// about 5% slower than with this delay. One-shot compiles keep the default,
-/// which holds their peak lower at the same wall time.
 pub fn keep_freed_pages_for_reuse() {
     // A set default yields to an option mimalloc read from the environment.
     // SAFETY: mi_option_set_default takes no pointers; the option is valid.
@@ -117,9 +111,6 @@ fn take_collected_workers_mask() -> u64 {
     COLLECTED_WORKERS_MASK.swap(0, Ordering::SeqCst)
 }
 
-/// Return memory freed so far to the OS now instead of on mimalloc's lazy
-/// purge, which needs later allocator traffic to run. For a host that frees a
-/// large compile and then only waits on a child process.
 pub(crate) fn release_freed_memory() {
     // mimalloc pages belong to the thread that allocated them, and a collect
     // only reclaims the calling thread's heap. The compiler's parallel passes
@@ -137,10 +128,6 @@ pub(crate) fn release_freed_memory() {
     unsafe { mi_collect(true) }
 }
 
-/// Drops `value` on a thread of its own and then returns the freed pages to
-/// the OS, so a host that only waits on a child afterwards neither delays the
-/// child's start by the teardown nor holds the compile's memory while it runs.
-/// Dropping only frees memory; a process that exits first loses nothing.
 pub(crate) fn drop_and_release_in_background<T: Send + 'static>(value: T) {
     std::thread::spawn(move || {
         rock_host::timed("drop compiler", || drop(value));
@@ -207,7 +194,6 @@ mod tests {
 
     #[test]
     fn negative_mimalloc_commit_counter_is_reported_unknown() {
-        // Measured in a `rock test project` prepare phase after the workspace drop.
         let mut values = [0usize; 8];
         values[5] = -549_257_216i64 as usize;
         values[6] = 3_875_405_824;
@@ -236,14 +222,6 @@ mod tests {
         );
     }
 
-    /// The compiler allocates on rayon workers and the host frees the result
-    /// on its own thread before it waits on a child. Those pages belong to the
-    /// workers' heaps, so a collect on the calling thread alone keeps them.
-    /// A `sequential` build has no pool-owned allocations to collect.
-    ///
-    /// The commit counter is process-wide, and compile tests in this binary
-    /// release freed memory on the same workers, so a release racing ahead of
-    /// the measurement would return these pages before it is taken.
     #[cfg(not(feature = "sequential"))]
     #[test]
     fn release_returns_pages_freed_into_pool_thread_heaps() {
@@ -259,8 +237,6 @@ mod tests {
         if std::env::var_os("ROCK_ALLOC_RELEASE_CHILD").is_none() {
             return;
         }
-        // The unit-test binary keeps the system global allocator, so this
-        // allocates through mimalloc's C API as the `rock` binary does.
         const PER_THREAD: usize = 64 << 20;
         const BLOCK: usize = 1024;
         let threads = rayon::current_num_threads();
@@ -309,10 +285,6 @@ mod tests {
         }
     }
 
-    /// A `sequential` build never constructs a rayon pool (see main.rs), so
-    /// releasing freed memory must not create one either. The child below
-    /// runs in a fresh process: a test-runner process may already own a
-    /// pool, which would hide the initialization this guards against.
     #[cfg(feature = "sequential")]
     #[test]
     fn sequential_release_does_not_create_rayon_pool() {
@@ -322,8 +294,6 @@ mod tests {
         );
     }
 
-    /// Subprocess body for the parent above: a no-op unless spawned as the
-    /// fresh process, so ordinary suite runs stay green either way.
     #[cfg(feature = "sequential")]
     #[test]
     fn sequential_release_child() {

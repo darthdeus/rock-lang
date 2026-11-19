@@ -10,22 +10,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SCHEMA: u64 = 1;
 const LOG_ENV: &str = "ROCK_INVOCATION_LOG";
-/// Set for children so a nested `rock` (the sim compile child) is marked as
-/// such instead of reading as a separate loop step.
 pub(crate) const PARENT_ENV: &str = "ROCK_INVOCATION_PARENT";
-/// Context variables copied into `env` when set.
 const CONTEXT_ENV: &[&str] = &["ROCK_TEST_FILTER", "ROCK_TEST_SHARDS"];
 /// `git status` takes 30-100 ms of stat-heavy work on the Rock tree; run
 /// alongside a 100 ms command it slowed that command by about 60 ms. Starting
 /// it after this delay keeps short commands free of it (`git_status:
 /// "skipped"`) while every command long enough to be a loop step gets it.
 const GIT_DELAY: Duration = Duration::from_millis(300);
-/// How long the record waits for a started probe once the command is done;
-/// a slower one is killed (`git_status: "late"`).
 const GIT_GRACE: Duration = Duration::from_millis(3);
 
-/// The delayed probe: `None` until started; `finished` stops a probe thread
-/// that wakes after the record is written.
 struct GitProbe {
     child: Option<Child>,
     finished: bool,
@@ -34,8 +27,6 @@ static GIT_PROBE: Mutex<GitProbe> = Mutex::new(GitProbe {
     child: None,
     finished: false,
 });
-/// Dirty paths stat'ed for the newest edit time; a larger dirty set records
-/// the newest among the first this many.
 const MTIME_STAT_CAP: usize = 4000;
 
 struct Pending {
@@ -51,12 +42,10 @@ struct Pending {
 
 static STATE: Mutex<Option<Pending>> = Mutex::new(None);
 
-/// The commands that make up the edit-compile-test loop.
 pub(crate) fn is_loop_command(name: &str) -> bool {
     crate::registry::CliCommand::named(name).is_some_and(crate::plain::logs_invocation)
 }
 
-/// Explicit destination (`off`, empty or absent disables recording).
 pub fn log_path() -> Option<PathBuf> {
     std::env::var_os(LOG_ENV)
         .filter(|value| !value.is_empty() && value != "off")
@@ -65,13 +54,10 @@ pub fn log_path() -> Option<PathBuf> {
 
 static COMMAND: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
-/// The running `rock` subcommand, or "other" before `main` names it.
 pub(crate) fn command() -> &'static str {
     COMMAND.get().copied().unwrap_or("other")
 }
 
-/// Start recording this invocation if it is a loop command and the log is on.
-/// Call once from `main`, single-threaded, after its environment setup.
 pub fn begin(command: &'static str, backend: &str) {
     let _ = COMMAND.set(command);
     if !is_loop_command(command) {
@@ -155,8 +141,6 @@ pub fn begin(command: &'static str, backend: &str) {
     }
 }
 
-/// Record counts the command already computed (selected/passed/failed...).
-/// Later values for the same key overwrite earlier ones.
 pub(crate) fn note_counts(counts: &[(&str, usize)]) {
     with_pending(|p| {
         for (k, v) in counts {
@@ -165,14 +149,12 @@ pub(crate) fn note_counts(counts: &[(&str, usize)]) {
     });
 }
 
-/// Record one phase duration the command already measured.
 pub(crate) fn note_phase(name: &str, ms: u64) {
     with_pending(|p| {
         p.phases.insert(name.to_string(), json!(ms));
     });
 }
 
-/// Record an extra top-level field (a selection flag, a linked run id).
 pub fn note(key: &str, value: Value) {
     with_pending(|p| {
         p.record.insert(key.to_string(), value);
@@ -187,8 +169,6 @@ fn with_pending(f: impl FnOnce(&mut Pending)) {
     }
 }
 
-/// Write the record (once). `exit_code` is `None` when the process is leaving
-/// by a path that did not report one.
 pub fn finish(exit_code: Option<i32>, exit_path: &str) {
     let pending = match STATE.try_lock() {
         Ok(mut state) => state.take(),
@@ -207,8 +187,6 @@ pub fn finish(exit_code: Option<i32>, exit_path: &str) {
     }
 }
 
-/// `std::process::exit`, recording the code first. Use for every exit the
-/// CLI takes on purpose, so the record carries the real exit code.
 pub fn exit(code: i32) -> ! {
     finish(Some(code), "exit");
     std::process::exit(code)
@@ -323,7 +301,6 @@ struct GitState {
     dirty_mtime_ms: Option<u64>,
 }
 
-/// `("done", state)`, or `("late" | "failed", None)`.
 fn collect_git(mut child: Child, root: Option<&Path>) -> (&'static str, Option<GitState>) {
     let deadline = Instant::now() + GIT_GRACE;
     loop {
@@ -349,9 +326,6 @@ fn collect_git(mut child: Child, root: Option<&Path>) -> (&'static str, Option<G
     }
 }
 
-/// HEAD's commit and branch, read from the repository files (no git
-/// process): `.git` may be a worktree's `gitdir:` file, refs may be loose or
-/// packed in the common dir.
 fn read_head(root: &Path) -> (Option<String>, Option<String>) {
     let dot_git = root.join(".git");
     let git_dir = match std::fs::read_to_string(&dot_git) {
@@ -386,7 +360,6 @@ fn read_head(root: &Path) -> (Option<String>, Option<String>) {
     (sha, branch)
 }
 
-/// Parse `git status --porcelain=v2 -z`.
 fn parse_status(out: &[u8], root: Option<&Path>) -> GitState {
     let mut state = GitState {
         dirty_paths: 0,
@@ -433,7 +406,6 @@ fn unix_ms(t: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-/// RFC 3339 UTC with milliseconds, e.g. `2026-10-06T12:34:56.789Z`.
 fn utc(t: SystemTime) -> String {
     let ms = unix_ms(t);
     let secs = ms / 1000;
@@ -509,7 +481,6 @@ fn parent_process() -> (Option<u32>, Option<String>) {
     )
 }
 
-/// The parent's process name (`zsh`, `just`, `python3`, a cargo test binary).
 #[cfg(unix)]
 fn process_name(pid: libc::pid_t) -> Option<String> {
     #[cfg(target_os = "linux")]
