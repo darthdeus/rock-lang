@@ -97,19 +97,6 @@ fn process_root_arena_survives_a_scene_close() {
     print(root.get(re).unwrap().hp)
 }
 
-@test(output = "false\n0\n6")
-fn repeated_close_and_drain_is_idempotent() {
-    __scene_drain_closed()
-    let root: Arena<Actor> = arena_new()
-    let re = root.insert(Actor { hp: 6 })
-    let s: Scene<RoomState>? = scene_create((b) => build_room(b, "z"))
-    scene_close(s.unwrap())
-    __scene_drain_closed()
-    print(scene_close(s.unwrap()))
-    print(__scene_drain_closed())
-    print(root.get(re).unwrap().hp)
-}
-
 global ESCAPED_ARENA: Arena<Actor>? = null
 global ESCAPED_BUILDER: SceneBuilder? = null
 

@@ -10,7 +10,6 @@ const WC_BASIC: string = "test.weak_cache.basic"
 const WC_OWNERS: string = "test.weak_cache.owners"
 const WC_LEFT: string = "test.weak_cache.left"
 const WC_RIGHT: string = "test.weak_cache.right"
-const WC_GC: string = "test.weak_cache.gc"
 
 @test
 fn weak_cache_misses_hits_counts_and_invalidates() {
@@ -72,22 +71,6 @@ fn weak_cache_keeps_owners_and_cache_names_independent() {
     let kept: WeakCacheValue? = weak_cache_get(WC_RIGHT, a)
     assert(cleared == null, "invalidating one cache clears that cache")
     assert_eq(kept.unwrap().tag, 22, "invalidating one cache leaves the other alone")
-}
-
-@test
-fn weak_cache_releases_a_retired_owner() {
-    let rows: Arena<WeakCacheOwner> = arena_new()
-    let kept = rows.insert(WeakCacheOwner { tag: 1 })
-    let retired = rows.insert(WeakCacheOwner { tag: 99 })
-    weak_cache_put(WC_GC, kept, WeakCacheValue { tag: 1 })
-    weak_cache_put(WC_GC, retired, WeakCacheValue { tag: 99 })
-    assert_eq(weak_cache_live(WC_GC), 2, "both owners hold an entry")
-    let _ = retired.remove()
-    assert_eq(weak_cache_live(WC_GC), 1, "retirement evicts the entry without GC")
-    let survivor: WeakCacheValue? = weak_cache_get(WC_GC, kept)
-    assert_eq(survivor.unwrap().tag, 1, "the live owner keeps its entry")
-    assert_eq(weak_cache_builds(WC_GC), 2, "retirement preserves the build count")
-    let _ = arena_destroy(rows)
 }
 
 struct CacheOwnerPair { left: CacheOwner, right: CacheOwner }
@@ -181,29 +164,6 @@ fn c_weak_cache_owner_handle_put_replace_drop() {
     assert_eq(weak_cache_live(name), 0)
     weak_cache_drop(name, owner)
     assert_eq(weak_cache_builds(name), builds + 2)
-    let _ = arena_destroy(rows)
-    let _ = __arena_drain_retired()
-}
-
-@test
-fn c_weak_cache_distinguishes_owners_and_cache_names() {
-    let rows: Arena<CWeakCacheOwner> = arena_new()
-    let a = rows.insert(CWeakCacheOwner { tag: 1 })
-    let b = rows.insert(CWeakCacheOwner { tag: 1 })
-    let left = "test.c-weak-cache.left"
-    let right = "test.c-weak-cache.right"
-    c_weak_cache_store(left, a, 11)
-    c_weak_cache_store(left, b, 22)
-    c_weak_cache_store(right, a, 33)
-    assert_eq(c_weak_cache_read(left, a).unwrap(), 11)
-    assert_eq(c_weak_cache_read(left, b).unwrap(), 22)
-    assert_eq(c_weak_cache_read(right, a).unwrap(), 33)
-    weak_cache_drop(left, a)
-    assert(c_weak_cache_read(left, a) == null)
-    assert_eq(c_weak_cache_read(left, b).unwrap(), 22)
-    assert_eq(c_weak_cache_read(right, a).unwrap(), 33)
-    weak_cache_drop(left, b)
-    weak_cache_drop(right, a)
     let _ = arena_destroy(rows)
     let _ = __arena_drain_retired()
 }

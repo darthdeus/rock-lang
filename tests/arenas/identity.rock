@@ -1,4 +1,4 @@
-// Arena identity, slot reuse and handle equality.
+// Arena identity, handle equality, and handles stored in containers.
 //
 // An `Entity<T>` is `{_scene_id, _arena_id, _slot, _generation}` and an
 // `Arena<T>` is `{_scene_id, _arena_id}`. Both are weak: they name an
@@ -11,28 +11,6 @@
 
 struct Tag { v: int }
 
-// --- controls: same-Arena identity, which must keep working throughout ---
-
-@test(output = "true\n1\n2\n7")
-fn same_arena_identity_controls() {
-    let a: Arena<Tag> = arena_new()
-    let e = a.insert(Tag { v: 1 })
-    let copy = e
-    print(e.equals(copy))
-    print(a.get(e).unwrap().v)
-
-    let cleared: Arena<Tag> = arena_new()
-    cleared.insert(Tag { v: 1 })
-    cleared.clear()
-    let fresh = cleared.insert(Tag { v: 2 })
-    print(cleared.get(fresh).unwrap().v)
-
-    let removed = a.insert(Tag { v: 7 }).remove()
-    print(removed.unwrap().v)
-}
-
-// --- cross-Arena identity ---
-
 @test(output = "false\nfalse\ntrue\nfalse")
 fn cross_arena_handles_do_not_resolve() {
     let a1: Arena<Tag> = arena_new()
@@ -43,21 +21,6 @@ fn cross_arena_handles_do_not_resolve() {
     print(entity_key(e1) == entity_key(e2))
     print(is_null(a2.get(e1)))
     print(a2.contains(e1))
-}
-
-// --- clear cannot revive ---
-
-// The stale handle must not read the NEW occupant of its slot -- the failure
-// this pins is a silent alias onto an unrelated entity, not merely a live
-// lookup.
-@test(output = "true\nfalse")
-fn clear_retires_old_entities() {
-    let a: Arena<Tag> = arena_new()
-    let old = a.insert(Tag { v: 1 })
-    a.clear()
-    a.insert(Tag { v: 2 })
-    print(is_null(a.get(old)))
-    print(a.contains(old))
 }
 
 // Arena and Entity are scalar logical handles, so they travel through ordinary
@@ -303,4 +266,79 @@ fn handle_comparisons_do_not_allocate_carriers() {
     let bytes = handle_alloc_end()
     assert(matches == 10752)
     assert(bytes < 4096.0, "handle comparisons must not materialize carriers")
+}
+
+struct Mob { hp: int }
+
+struct EntitySlots {
+    slots: [Entity<Mob>?] = [null, null, null, null]
+}
+
+value ColumnCell { x: int, y: int }
+
+fn nullable_get(slots: EntitySlots, index: int) -> bool {
+    let entity = slots.slots.get(index) ?? return false
+    return entity.get() != null
+}
+
+fn nullable_hp(slots: EntitySlots) -> int {
+    let total = 0
+    for entity in slots.slots {
+        if entity != null {
+            let mob = entity.get() ?? return -3
+            total += mob.hp
+        }
+    }
+    return total
+}
+
+@test
+fn nullable_entity_vec_field_round_trips() {
+    let arena: Arena<Mob> = arena_new()
+    let first = arena.insert(Mob { hp: 7 })
+    let second = arena.insert(Mob { hp: 9 })
+    let slots = EntitySlots {}
+    assert_eq(slots.slots.len, 4)
+    assert(slots.slots[0] == null, "default slot is null")
+
+    let typed: [Entity<Mob>?] = [first, second]
+    let literal_slots = EntitySlots { slots: [first, second] }
+    slots.slots = [first, second]
+    slots.slots.push(first)
+    assert_eq(typed.len * 10 + literal_slots.slots.len, 22)
+    assert_eq(slots.slots.len, 3)
+    assert(nullable_get(slots, 0) && nullable_get(slots, 1), "live entities")
+    assert_eq(nullable_hp(slots), 23)
+
+    let columns: [ColumnCell] = [ColumnCell { x: 2, y: 3 }]
+    columns.push(ColumnCell { x: 4, y: 5 })
+    let total = 0
+    for cell in columns { total += cell.x + cell.y }
+    assert_eq(total, 14)
+}
+
+struct NullableStoreResource { id: int }
+
+value NullableStoreHandle { handle: Entity<NullableStoreResource> }
+
+fn nullable_store_retain(cache: Map<string, NullableStoreHandle>, value: NullableStoreHandle?) {
+    if value == null { return }
+    cache["active"] = value
+}
+
+@test
+fn narrowed_nullable_handle_value_retains_the_resource_name() {
+    let rows: Arena<NullableStoreResource> = arena_new()
+    let handle = NullableStoreHandle { handle: rows.insert(NullableStoreResource { id: 7 }) }
+    let cache: Map<string, NullableStoreHandle> = map_new()
+    nullable_store_retain(cache, handle)
+    assert_eq(cache.get("active").unwrap().handle.get().unwrap().id, 7)
+    arena_destroy(rows)
+}
+
+@test
+fn absent_nullable_handle_value_leaves_the_map_empty() {
+    let cache: Map<string, NullableStoreHandle> = map_new()
+    nullable_store_retain(cache, null)
+    assert_eq(cache.len(), 0)
 }

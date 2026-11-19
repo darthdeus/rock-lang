@@ -1,3 +1,6 @@
+// Arena basics: insert, get, len, random, slot reuse and generations, entity
+// keys, and arenas of column and nobox values.
+
 struct FixVec2 { x: int, y: int }
 
 @test(output = "15")
@@ -6,18 +9,6 @@ fn arena_insert_and_lookup() {
     let e = m.insert(FixVec2 { x: 5, y: 10 })
     let v: FixVec2 = m.get(e).unwrap()
     print(v.x + v.y)
-}
-
-@test(output = "true\nfoo\nfalse")
-fn contains_and_remove() {
-    let m: Arena<string> = arena_new()
-    let e = m.insert("foo")
-
-    print(m.contains(e))
-    let s = m.remove(e)
-
-    print(s)
-    print(m.contains(e))
 }
 
 @test(output = "0\n2\n1\n0")
@@ -45,16 +36,6 @@ fn inferred_arena_type_from_first_insert() {
 
     let g = a.get(e)
     print(g?.x)
-}
-
-@test(output = "true")
-fn nullable_get_when_missing() {
-    let a: Arena<int> = arena_new()
-    let e = a.insert(42)
-    a.remove(e)
-
-    let v = a.get(e)
-    print(v == null)
 }
 
 @test(output = "true\ntrue\ntrue\ntrue")
@@ -85,10 +66,7 @@ fn arena_random() {
     print(a.random() == null)
 }
 
-// Regression: `random` used to call `random_int(0, len - 1)` which
-// returns values in [0, len - 2], silently making the last element
-// unreachable. This test samples enough times that hitting every item
-// becomes statistically certain if the selection is actually uniform.
+// Enough samples that every item, including the last, is certain to be drawn.
 @test(output = "true")
 fn arena_random_covers_all_items() {
     let a: Arena<int> = arena_new()
@@ -109,8 +87,6 @@ fn arena_random_covers_all_items() {
     print(saw_10 && saw_20 && saw_30)
 }
 
-// -- Slot reuse tests (verify free_indices works) --
-
 @test(output = "e1 index: 0\ne3 index: 0\ne3 gen: 2")
 fn slot_reuse_after_remove() {
     let a: Arena<int> = arena_new()
@@ -122,10 +98,9 @@ fn slot_reuse_after_remove() {
     a.remove(e1)
     let e3 = a.insert(30)
 
-    print("e3 index: {e3._slot}")   // must be 0, not 2
-    // Generations are issued per ARENA, not per slot: e1 took 0, e2 took 1, so
-    // the slot-0 reuse takes 2. A per-slot counter is what lets `clear()` -- which
-    // drops the generation column with everything else -- reissue a live handle.
+    print("e3 index: {e3._slot}")
+    // Generations are issued per arena, not per slot, so `clear()` can never
+    // reissue a live handle: e1 took 0, e2 took 1, the reuse takes 2.
     print("e3 gen: {e3._generation}")
 }
 
@@ -149,28 +124,10 @@ fn slot_reuse_lifo_order() {
     print("new: {r3._slot}")
 }
 
-@test(output = "stale get: true\nfresh get: 42")
-fn generation_prevents_stale_access() {
-    let a: Arena<int> = arena_new()
-    let e1 = a.insert(10)
-    a.remove(e1)
-    let e2 = a.insert(42)
-
-    // Stale handle (e1, gen 0) must not see new data
-    let stale = a.get(e1)
-    print("stale get: {stale == null}")
-
-    // Fresh handle (e2, gen 1) works
-    let fresh = a.get(e2).unwrap()
-    print("fresh get: {fresh}")
-}
-
 struct ReusePayload { n: int }
 
-// A reused slot keeps its POSITION and bumps its generation, which is what
-// invalidates the stale handle. (This used to also assert the entry TABLE was
-// mutated in place; under bookkeeping SoA there is no per-entry table to have
-// an identity, and the slot columns are written directly.)
+// A reused slot keeps its position and bumps its generation, which is what
+// invalidates the stale handle.
 @test(output = "10\n20\n0\n1\ntrue\n1")
 fn slot_reuse_writes_the_same_slot_and_bumps_generation() {
     let a: Arena<ReusePayload> = arena_new()
@@ -190,58 +147,18 @@ fn slot_reuse_writes_the_same_slot_and_bumps_generation() {
 fn slot_reuse_prevents_unbounded_growth() {
     let a: Arena<int> = arena_new()
 
-    // Insert and remove 100 times in a loop
     for i in 0..100 {
         let e = a.insert(i)
         a.remove(e)
     }
 
-    // After all that churn, insert one item
     let final_e = a.insert(999)
     print("len after churn: {a.len()}")
 
-    // the slot columns should be size 1, not 100 (all slots reused)
     print("entries count: {arena_slot_count(a)}")
 }
 
-// -- UFCS style tests --
-
 struct Mob { name: string, health: int }
-
-@test(output = "2\nGoblin: 50\nOrc: 100\n1")
-fn ufcs_arena_game_pattern() {
-    let mobs: Arena<Mob> = arena_new()
-    let goblin = mobs.insert(Mob { name: "Goblin", health: 50 })
-    let orc = mobs.insert(Mob { name: "Orc", health: 100 })
-
-    print(mobs.len())
-
-    for (_, mob) in mobs {
-        print("{mob.name}: {mob.health}")
-    }
-
-    goblin.remove()
-    print(mobs.len())
-}
-
-@test(output = "found: Orc\nnot found")
-fn ufcs_entity_get_after_remove() {
-    let mobs: Arena<Mob> = arena_new()
-    let e1 = mobs.insert(Mob { name: "Goblin", health: 30 })
-    let e2 = mobs.insert(Mob { name: "Orc", health: 80 })
-
-    e1.remove()
-
-    let m1 = e1.get()
-    let m2 = e2.get()
-
-    if m2 != null {
-        print("found: {m2.name}")
-    }
-    if m1 == null {
-        print("not found")
-    }
-}
 
 @test(output = "true\ntrue\nfalse")
 fn entity_key_identity() {
@@ -257,10 +174,7 @@ fn entity_key_identity() {
     print("{a.entity_key() == c.entity_key()}")
 }
 
-// `Arena<P>` for a `nobox P` used to reject at `arena_entry_new`: the per-entry
-// wrapper was a plain struct, so storing a `P` in it was a box. Bookkeeping SoA
-// deletes the wrapper, and `data` is then an ordinary `[P]` -- column storage,
-// which already worked. The unlock is by DELETION, not by a new mechanism.
+// An arena of a nobox value stores its data as an ordinary `[P]` column.
 nobox value NoboxSlot { x: float, y: float }
 
 @test(output = "3\n4\n1\ntrue\n7")

@@ -1,5 +1,5 @@
 // Projecting tuple fields out of a vec or iterator via `.map(_.N)`.
-// Arena pair projections with a filter are in tests/arenas/iterators.rock.
+// Arena pair projections with a filter are in tests/arenas/iteration.rock.
 
 struct Mob { name: string, health: int }
 

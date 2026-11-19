@@ -1,85 +1,7 @@
-// `for` over an Arena: pair destructuring `for (e, v) in a`, single binding
-// `for item in a` read through `.0`/`.1` or tuple_first/tuple_second, skipping
-// removed slots, reused slots and a cleared arena, `continue` and `break` in the
-// body, global arenas, and struct payloads with nested fields.
-
-fn count_items(a: Arena<int>) -> int {
-    let count = 0
-    for (_, item) in a {
-        count = count + 1
-    }
-    return count
-}
-
-@test(output = "count: 0\nvalues: 10,20,30\ncount: 3\nsum: 60")
-fn arena_iteration_values() {
-    let a: Arena<int> = arena_new()
-    print("count: {count_items(a)}")
-    a.insert(10)
-    a.insert(20)
-    a.insert(30)
-
-    let values = vec_new()
-    for (_, item) in a {
-        vec_push(values, item)
-    }
-    print("values: {values[0]},{values[1]},{values[2]}")
-    print("count: {vec_len(values)}")
-
-    let total = 0
-    for (e, v) in a {
-        total = total + v
-    }
-    print("sum: {total}")
-}
-
-@test(output = "after remove bar: 2\nafter remove foo: 1\nafter remove baz: 0")
-fn arena_iteration_with_removals() {
-    let a: Arena<string> = arena_new()
-    let e1 = a.insert("foo")
-    let e2 = a.insert("bar")
-    let e3 = a.insert("baz")
-
-    a.remove(e2)
-    let count1 = 0
-    for (_, item) in a {
-        count1 = count1 + 1
-    }
-    print("after remove bar: {count1}")
-
-    a.remove(e1)
-    let count2 = 0
-    for (_, item) in a {
-        count2 = count2 + 1
-    }
-    print("after remove foo: {count2}")
-
-    a.remove(e3)
-    let count3 = 0
-    for (_, item) in a {
-        count3 = count3 + 1
-    }
-    print("after remove baz: {count3}")
-}
-
-@test(output = "initial count: 2\nafter reinsertion count: 2\nbefore clear: 2\nafter clear: 0")
-fn arena_iteration_after_reinsertion_and_clear() {
-    let a: Arena<int> = arena_new()
-    let e1 = a.insert(1)
-    a.insert(2)
-    print("initial count: {count_items(a)}")
-
-    a.remove(e1)
-    a.insert(3)
-    print("after reinsertion count: {count_items(a)}")
-
-    let b: Arena<int> = arena_new()
-    b.insert(100)
-    b.insert(200)
-    print("before clear: {count_items(b)}")
-    b.clear()
-    print("after clear: {count_items(b)}")
-}
+// Iterating an Arena. Bare `for` desugars through `iter(arena)` in pairs mode,
+// read as `(e, v)`, through `.0`/`.1` or tuple_first/tuple_second; `values()`
+// yields T and `pairs()` yields (Entity<T>, T) as a tuple element, so both
+// compose with every combinator and terminal and skip removed slots.
 
 @test(output = "2 11")
 fn test_arena_continue_and_single_binding() {
@@ -139,64 +61,238 @@ fn test_global_arena_binding_forms() {
     }
 }
 
-global arena5: Arena<int> = arena_new()
+struct Mob { name: string, health: int }
+
+fn four_mobs() -> Arena<Mob> {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+    mobs.insert(Mob { name: "Rat", health: 10 })
+    mobs.insert(Mob { name: "Dragon", health: 200 })
+    return mobs
+}
+
+@test(output = "Orc: 100\nDragon: 200\n0")
+fn filter_by_health() {
+    let mobs = four_mobs()
+    let strong = mobs.pairs().filter(p => p.1.health >= 100).collect()
+    for (_, mob) in strong {
+        print("{mob.name}: {mob.health}")
+    }
+    print(vec_len(mobs.values().filter(m => m.health > 1000).collect()))
+}
+
+@test(output = "Boss: 500\nnearest: Orc\ntrue\ntrue\nfalse")
+fn find_by_name() {
+    let mobs = four_mobs()
+    mobs.insert(Mob { name: "Boss", health: 500 })
+
+    let (_, mob) = mobs.pairs().find(p => p.1.name == "Boss").unwrap()
+    print("{mob.name}: {mob.health}")
+    let (_, target) = mobs.pairs().find(p => p.1.health == 100).unwrap()
+    print("nearest: {target.name}")
+    print(mobs.pairs().find(p => p.1.name == "Missing") == null)
+
+    let (e, _) = mobs.pairs().find(p => p.1.name == "Boss").unwrap()
+    e.remove()
+    print(mobs.pairs().find(p => p.1.name == "Boss") == null)
+    print(mobs.pairs().find(p => p.1.name == "Goblin") == null)
+}
+
+@test(output = "Goblin 60\nOrc 200")
+fn map_to_tuples() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Orc", health: 100 })
+
+    let names = mobs.pairs().map(p => (p.0, p.1.name)).collect()
+    let doubled = mobs.pairs().map(p => (p.0, p.1.health * 2)).collect()
+    for i in 0..names.len {
+        let (_, name) = names[i]
+        let (_, hp) = doubled[i]
+        print("{name} {hp}")
+    }
+}
+
+// Projecting tuple fields out of the pair iterator via `.map(_.N)`.
+
+@test(output = "4 2")
+fn dot0_extracts_entities() {
+    let mobs = four_mobs()
+    let entities = mobs.pairs().filter(p => p.1.health > 0).map(_.0).collect()
+    let weak = mobs.pairs().filter(p => p.1.health < 50).map(p => p.0).collect()
+    for e in weak {
+        assert(e.get() != null)
+    }
+    print("{vec_len(entities)} {weak.len}")
+}
+
+@test(output = "killed: Goblin\nkilled: Rat\nsurvivors: 2")
+fn kill_weak_mobs_pattern() {
+    let mobs = four_mobs()
+    let weak = mobs.pairs().filter(p => p.1.health < 50).collect()
+    for (e, mob) in weak {
+        print("killed: {mob.name}")
+        e.remove()
+    }
+    print("survivors: {mobs.len()}")
+}
+
+@test(output = "Orc\nDragon\nGoblin\nOrc\nRat\nDragon")
+fn placeholder_filter_and_map() {
+    let mobs = four_mobs()
+    for mob in mobs.values().filter(_.health >= 100).collect() {
+        print(mob.name)
+    }
+    for name in mobs.pairs().map(_.1).map(_.name).collect() {
+        print(name)
+    }
+}
+
+// `?.1` projects out of a nullable found pair.
+
+@test(output = "Boss\ntrue\nBoss")
+fn find_dot1_nullable() {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Goblin", health: 30 })
+    mobs.insert(Mob { name: "Boss", health: 500 })
+
+    let mob = mobs.pairs().find(_.1.name == "Boss")?.1
+    print(mob.unwrap().name)
+
+    let missing = mobs.pairs().find(_.1.name == "Dragon")?.1
+    print(missing == null)
+
+    let name = mobs.pairs().find(_.1.health > 100)?.1.unwrap().name
+    print(name)
+}
+
+fn mk_arena() -> Arena<Mob> {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "rat", health: 10 })
+    mobs.insert(Mob { name: "bat", health: 20 })
+    mobs.insert(Mob { name: "boss", health: 100 })
+    return mobs
+}
 
 @test
-fn test_arena_iteration_equivalence() {
-    insert(arena5, 100)
-    insert(arena5, 200)
-    insert(arena5, 300)
-
-    let entities1: [Entity<int>] = vec_new()
-    let values1: [int] = vec_new()
-    for item in arena5 {
-        vec_push(entities1, tuple_first(item))
-        vec_push(values1, tuple_second(item))
+fn values_skips_holes() {
+    let mobs = mk_arena()
+    let before = 0
+    for m in mobs.values() {
+        before += m.health
     }
-
-    let entities2: [Entity<int>] = vec_new()
-    let values2: [int] = vec_new()
-    for item in arena5 {
-        vec_push(entities2, item.0)
-        vec_push(values2, item.1)
+    assert_eq(before, 130)
+    let doomed = mobs.pairs().find(p => p.1.name == "bat")
+    assert(doomed != null)
+    if doomed != null {
+        doomed.0.remove()
     }
-
-    let entities3: [Entity<int>] = vec_new()
-    let values3: [int] = vec_new()
-    for (entity, value) in arena5 {
-        vec_push(entities3, entity)
-        vec_push(values3, value)
-    }
-
-    assert_eq(vec_len(values1), 3)
-    assert(values1 == values2 && values2 == values3, "values agree across binding forms")
-    assert(entities1 == entities2 && entities2 == entities3, "entities agree across binding forms")
-}
-
-struct Prefab {
-    name: string,
-    sprite: SpriteInfo,
-}
-
-struct SpriteInfo {
-    source: string,
-}
-
-@test
-fn test_arena_iteration_like_game() {
-    let arena: Arena<Prefab> = arena_new()
-    arena.insert(Prefab {
-        name: "test_prefab",
-        sprite: SpriteInfo { source: "test.png" }
-    })
-
+    let total = 0
     let count = 0
-    for (e, p) in arena {
-        assert(e._slot >= 0, "Entity should have valid index")
-        assert_eq(p.name, "test_prefab", "Prefab name should match")
-        assert_eq(p.sprite.source, "test.png", "Sprite source should match")
+    for m in mobs.values() {
+        total += m.health
         count += 1
     }
+    assert_eq(count, 2)
+    assert_eq(total, 110)
+}
 
-    assert_eq(count, 1, "Should have iterated over 1 item")
+@test
+fn values_through_combinators_and_terminals() {
+    let mobs = mk_arena()
+    assert(mobs.values().any(m => m.health > 50))
+    assert(!mobs.values().all(m => m.health > 15))
+    let names = mobs.values().filter(m => m.health >= 20).map(m => m.name).collect()
+    assert_eq(names.len, 2)
+    let sum = mobs.values().reduce(0, (acc, m) => acc + m.health)
+    assert_eq(sum, 130)
+}
+
+@test
+fn bare_for_is_pair_mode() {
+    let mobs = mk_arena()
+    let total = 0
+    let alive = 0
+    for (e, m) in mobs {
+        total += m.health
+        if e.get() != null {
+            alive += 1
+        }
+    }
+    assert_eq(total, 130)
+    assert_eq(alive, 3)
+}
+
+@test
+fn bare_for_skips_holes() {
+    let mobs = mk_arena()
+    for (e, m) in mobs {
+        if m.name == "rat" {
+            e.remove()
+        }
+    }
+    let count = 0
+    for (e, m) in mobs {
+        count += 1
+    }
+    assert_eq(count, 2)
+}
+
+@test
+fn empty_arena_iteration() {
+    let mobs: Arena<Mob> = arena_new()
+    let count = 0
+    for (e, m) in mobs {
+        count += 1
+    }
+    assert_eq(count, 0)
+    assert(!mobs.values().any(m => true))
+    assert(mobs.values().all(m => m.health > 1000))
+    assert(mobs.pairs().find(p => p.1.health > 0) == null)
+    assert_eq(mobs.pairs().collect().len, 0)
+    assert_eq(mobs.values().filter(m => m.health > 0).collect().len, 0)
+    assert_eq(mobs.values().map(m => m.name).collect().len, 0)
+}
+
+@test
+fn keys_iterates_entities() {
+    let mobs = mk_arena()
+    let n = 0
+    for e in mobs.keys() {
+        assert(e.get() != null)
+        n += 1
+    }
+    assert_eq(n, 3)
+    let dead = mobs.keys().filter(e => (e.get()?.health ?? 0) < 15).collect()
+    assert_eq(dead.len, 1)
+}
+
+@test
+fn pairs_enumerate_nests_a_tuple_element() {
+    let mobs = mk_arena()
+    let rows = mobs.pairs().enumerate().collect()
+    assert_eq(rows.len, 3)
+    assert_eq(rows[0].0, 0)
+    assert_eq(rows[2].0, 2)
+    assert_eq(rows[1].1.1.name, "bat")
+    assert_eq(mobs.pairs().enumerate().count(), 3)
+}
+
+// `enumerate` over an arena has no eager overload -- it coerces to the lazy
+// `EnumIter` like a vec does, so the result stays an iterator until a terminal.
+@test
+fn enumerate_coerces_to_the_lazy_iterator() {
+    let mobs = mk_arena()
+    let rows = mobs.enumerate().collect()
+    assert_eq(rows.len, 3)
+    assert_eq(rows[1].0, 1)
+    assert_eq(rows[1].1.1.name, "bat")
+    assert_eq(mobs.enumerate().filter(r => r.1.1.health > 15).count(), 2)
+    let seen = 0
+    for (i, (e, m)) in enumerate(mobs) {
+        assert(e.get() != null)
+        seen += i + m.health
+    }
+    assert_eq(seen, 133)
 }
