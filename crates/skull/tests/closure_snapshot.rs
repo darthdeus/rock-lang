@@ -14,6 +14,17 @@ fn declares_box(body: &str) -> bool {
     })
 }
 
+fn assert_record_closure(body: &str) {
+    assert!(
+        body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
+        "{body}"
+    );
+    assert!(
+        !body.contains("__fn") && !body.contains("return function"),
+        "{body}"
+    );
+}
+
 const NONLOOP_CAPTURE: &str = r#"
 @nomangle inline(lua) fn use_two(a: int, b: int) = "_G.__sink = (a or 0) + (b or 0)"
 
@@ -30,10 +41,8 @@ fn main() { let f = submit(3) f() }
 fn nonloop_capture_hoists_to_by_value_record() {
     let lua = emit_module(NONLOOP_CAPTURE);
     let body = function_body(&lua, "submit");
-    assert!(body.contains("setmetatable({ __slot = __rock_code_slot_ref("));
-    assert!(!body.contains("__fn"));
+    assert_record_closure(body);
     assert!(!body.contains("function("));
-    assert!(!body.contains("return function"));
     assert!(!declares_box(body));
 }
 
@@ -59,11 +68,8 @@ fn main() {
 fn loop_capture_snapshots_per_iteration_via_record() {
     let lua = emit_module(LOOP_CAPTURE);
     let body = function_body(&lua, "submit_loop");
-    assert!(body.contains("setmetatable({ __slot = __rock_code_slot_ref("));
-    assert!(!body.contains("__fn"));
-    assert!(!body.contains("return function"));
-    let out = run_main(&lua);
-    assert_eq!(out, "1\n2\n3");
+    assert_record_closure(body);
+    assert_eq!(run_main(&lua), "1\n2\n3");
 }
 
 const MUTATED_CAPTURE: &str = r#"
@@ -85,9 +91,7 @@ fn mutated_capture_lowers_to_box_threaded_into_record() {
     let body = function_body(&lua, "capture_box");
     assert!(declares_box(body));
     assert!(body.contains(".v = "));
-    assert!(body.contains("setmetatable({ __slot = __rock_code_slot_ref("));
-    assert!(!body.contains("__fn"));
-    assert!(!body.contains("return function"));
+    assert_record_closure(body);
 }
 
 const PER_ITER_VALUE_CAPTURE: &str = r#"
@@ -107,10 +111,8 @@ fn per_iteration_value_capture_snapshots_flat_leaves() {
     let body = function_body(&lua, "main");
     assert!(!declares_box(body));
     assert!(!body.contains(".v = "));
-    assert!(body.contains("setmetatable({ __slot = __rock_code_slot_ref("));
-    assert!(!body.contains("__fn"));
-    let out = run_main(&lua);
-    assert_eq!(out, "3\n5\n7");
+    assert_record_closure(body);
+    assert_eq!(run_main(&lua), "3\n5\n7");
 }
 
 const PER_ITER_ENUM_CAPTURE: &str = r#"
@@ -144,9 +146,8 @@ fn per_iteration_enum_capture_snapshots_flat_leaves() {
     let body = function_body(&lua, "capture_choices");
     assert!(!declares_box(body));
     assert!(!body.contains(".v = "));
-    assert!(body.contains("setmetatable({ __slot = __rock_code_slot_ref("));
-    let out = run_main(&lua);
-    assert_eq!(out, "1\n2\n3");
+    assert_record_closure(body);
+    assert_eq!(run_main(&lua), "1\n2\n3");
 }
 
 #[test]

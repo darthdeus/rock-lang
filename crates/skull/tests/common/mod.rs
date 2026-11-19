@@ -650,7 +650,11 @@ pub fn run_luajit_capturing(prog: &str) -> (bool, String) {
 pub fn run_luajit(prog: &str) -> String {
     let out = luajit_output(prog);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "luajit failed:\n{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     stdout.trim().replace("\r\n", "\n")
 }
 

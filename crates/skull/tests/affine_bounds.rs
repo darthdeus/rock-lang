@@ -28,9 +28,11 @@ print('ok')
 }
 
 #[test]
-fn affine_capacity_snapshot_does_not_follow_reassigned_count() {
-    let lua = emit_module(
-        r#"
+fn affine_bounds_that_no_longer_hold_keep_the_check() {
+    for (name, source, args) in [
+        (
+            "stale",
+            r#"
 @nomangle fn stale(buf: NativeBuffer<int>, count: float, r: float, l: float) -> int {
     let rows = count as int
     let capacity = rows * 4
@@ -44,23 +46,11 @@ fn affine_capacity_snapshot_does_not_follow_reassigned_count() {
     return -1
 }
 "#,
-    );
-    assert!(function_body(&lua, "stale").contains("__nb_checked_get"));
-    let output = run_luajit(&format!(
-        r#"{lua}
-local buf = {{ptr = ffi.new('int[64]'), len = 4}}
-local ok, err = pcall(stale, buf, 1, 5, 0)
-assert(not ok and tostring(err):find('out of bounds'))
-print('ok')
-"#
-    ));
-    assert_eq!(output.trim(), "ok");
-}
-
-#[test]
-fn affine_loop_reexecution_invalidates_changed_lane() {
-    let lua = emit_module(
-        r#"
+            "1, 5, 0",
+        ),
+        (
+            "changed_lane",
+            r#"
 @nomangle fn changed_lane(buf: NativeBuffer<int>, count: float) -> int {
     let rows = count as int
     let lane = 0
@@ -74,15 +64,19 @@ fn affine_loop_reexecution_invalidates_changed_lane() {
     return sum
 }
 "#,
-    );
-    assert!(function_body(&lua, "changed_lane").contains("__nb_checked_get"));
-    let output = run_luajit(&format!(
-        r#"{lua}
-local buf = {{ptr = ffi.new('int[64]'), len = 8}}
-local ok, err = pcall(changed_lane, buf, 2)
-assert(not ok and tostring(err):find('out of bounds'))
-print('ok')
-"#
-    ));
-    assert_eq!(output.trim(), "ok");
+            "2",
+        ),
+    ] {
+        let lua = emit_module(source);
+        assert!(
+            function_body(&lua, name).contains("__nb_checked_get"),
+            "{name}"
+        );
+        let output = run_luajit(&format!(
+            "{lua}\nlocal buf = {{ptr = ffi.new('int[64]'), len = 8}}\n\
+             local ok, err = pcall({name}, buf, {args})\n\
+             assert(not ok and tostring(err):find('out of bounds'))\nprint('ok')"
+        ));
+        assert_eq!(output, "ok", "{name}");
+    }
 }

@@ -111,68 +111,31 @@ fn assembled_modules_report_all_recovered_errors_in_module_order() {
 }
 
 #[test]
-fn unknown_top_level_macro_cannot_silently_disappear() {
-    let src = "missing!()\nfn main() {}\n";
-    let ast = skull_parser::parse_module_clean(src, Ustr::from("admission.rock"))
-        .expect("source syntax is clean before expansion");
-    assert!(matches!(
-        ast.items[0].kind,
-        ItemKind::MacroInvocation { .. }
-    ));
-    rejected(
-        src,
-        "no macro named `missing` exists",
-        &["parsed", "aliases"],
-    );
-}
-
-#[test]
-fn macro_generated_import_cannot_silently_disappear() {
-    let src = "macro imports() { use absent::item; }\nimports!()\nfn main() {}\n";
-    skull_parser::parse_module_clean(src, Ustr::from("admission.rock"))
-        .expect("source syntax is clean before expansion");
-    rejected(
-        src,
-        "macro-generated `mod`/`use` is not supported",
-        &["parsed", "aliases"],
-    );
-}
-
-#[test]
-fn expression_macro_error_precedes_its_unexpanded_call_error() {
-    let src = "macro declares() { fn generated() {} }\nfn main() { declares!() }\n";
-    skull_parser::parse_module_clean(src, Ustr::from("admission.rock"))
-        .expect("source syntax is clean before expansion");
-    rejected(
-        src,
-        "items declared by macro `declares` cannot be emitted where it is used as an expression",
-        &["parsed", "aliases"],
-    );
-}
-
-#[test]
-fn macro_argument_labels_are_checked_before_expansion_discards_them() {
-    let src = "macro identity(value: expr) { value }\nfn main() { identity(wrong: 7) }\n";
-    skull_parser::parse_module_clean(src, Ustr::from("admission.rock"))
-        .expect("source syntax is clean before expansion");
-    rejected(
-        src,
-        "macro `identity` has no parameter named `wrong`",
-        &["parsed", "aliases"],
-    );
-}
-
-#[test]
-fn macro_function_collision_is_checked_before_macro_definitions_disappear() {
-    let src =
-        "macro conflict() { 7 }\nfn conflict() -> int { 8 }\nfn main() { print(conflict()) }\n";
-    skull_parser::parse_module_clean(src, Ustr::from("admission.rock"))
-        .expect("source syntax is clean before expansion");
-    rejected(
-        src,
-        "macro `conflict` collides with a function named `conflict`",
-        &["parsed", "aliases"],
-    );
+fn macro_errors_are_reported_before_expansion_discards_their_source() {
+    for (src, expected) in [
+        (
+            "missing!()\nfn main() {}\n",
+            "no macro named `missing` exists",
+        ),
+        (
+            "macro imports() { use absent::item; }\nimports!()\nfn main() {}\n",
+            "macro-generated `mod`/`use` is not supported",
+        ),
+        (
+            "macro declares() { fn generated() {} }\nfn main() { declares!() }\n",
+            "items declared by macro `declares` cannot be emitted where it is used as an expression",
+        ),
+        (
+            "macro identity(value: expr) { value }\nfn main() { identity(wrong: 7) }\n",
+            "macro `identity` has no parameter named `wrong`",
+        ),
+        (
+            "macro conflict() { 7 }\nfn conflict() -> int { 8 }\nfn main() { print(conflict()) }\n",
+            "macro `conflict` collides with a function named `conflict`",
+        ),
+    ] {
+        rejected(src, expected, &["parsed", "aliases"]);
+    }
 }
 
 #[test]

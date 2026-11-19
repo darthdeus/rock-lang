@@ -1,7 +1,8 @@
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
 
 use crate::common::{
-    body_id, emit_full_of, function_body, name_matches, run_fn, try_emit_module_with,
+    body_id, check_incremental, emit_full_of, function_body, global_body, run_fn,
+    try_emit_module_with,
 };
 
 fn inputs_with_var(name: &str, value: &str) -> ComptimeInputs {
@@ -41,29 +42,8 @@ fn build_var_inlines_the_resolved_value() {
 }
 
 #[test]
-fn build_var_undeclared_rejects_with_the_name() {
-    let src = "fn broken() -> string { return build_var(\"NOPE\") }";
-    let err = try_emit_module_with(src, ComptimeInputs::default())
-        .expect_err("undeclared build var must reject");
-    let msg = err.message.clone();
-    assert!(msg.contains("NOPE") && msg.contains("build.vars"));
-}
-
-#[test]
-fn build_var_non_literal_arg_rejects() {
-    let src = "fn broken(name: string) -> string { return build_var(name) }";
-    let err = try_emit_module_with(src, inputs_with_var("CHANNEL", "x"))
-        .expect_err("non-literal build_var arg must reject");
-    assert!(err.message.contains("literal"));
-}
-
-#[test]
 fn build_var_misuse_in_uninstantiated_generic_rejects() {
-    let src = r#"
-fn dead_generic<T>(x: T) -> string {
-    return build_var("NOPE")
-}
-"#;
+    let src = "fn dead_generic<T>(x: T) -> string { return build_var(\"NOPE\") }";
     let err = try_emit_module_with(src, ComptimeInputs::default())
         .expect_err("misuse in an uninstantiated generic must still reject");
     assert!(err.message.contains("NOPE"));
@@ -85,40 +65,6 @@ fn greeting() -> string {
     let lua = try_emit_module_with(src, inputs).expect("embed expands");
     let body = function_body(&lua, "greeting");
     assert!(body.contains("hello-from-embed"));
-}
-
-#[test]
-fn embed_string_missing_file_rejects_with_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let src = r#"
-fn broken() -> string {
-    return embed_string("absent.txt")
-}
-"#;
-    let inputs = ComptimeInputs {
-        embed_root: Some(dir.path().to_path_buf()),
-        ..ComptimeInputs::default()
-    };
-    let err = try_emit_module_with(src, inputs).expect_err("missing embed file must reject");
-    assert!(err.message.contains("absent.txt"));
-}
-
-#[test]
-fn embed_string_escaping_root_rejects() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join("proj")).unwrap();
-    std::fs::write(dir.path().join("secret.txt"), "outside\n").unwrap();
-    let src = r#"
-fn broken() -> string {
-    return embed_string("../secret.txt")
-}
-"#;
-    let inputs = ComptimeInputs {
-        embed_root: Some(dir.path().join("proj")),
-        ..ComptimeInputs::default()
-    };
-    let err = try_emit_module_with(src, inputs).expect_err("path escaping the root must reject");
-    assert!(err.message.contains("project root") || err.message.contains("escapes"));
 }
 
 #[test]
@@ -173,18 +119,6 @@ fn greeting() -> string {
     assert!(body.contains("hello-from-memory"));
 }
 
-#[test]
-fn embed_string_of_an_unsupplied_file_names_the_host() {
-    let src = r#"
-fn broken() -> string {
-    return embed_string("absent.txt")
-}
-"#;
-    let err = try_emit_module_with(src, memory_inputs(&[]))
-        .expect_err("an embed the host did not supply must reject");
-    assert!(err.message.contains("absent.txt") && err.message.contains("host supplied no file"));
-}
-
 fn ws_with_inputs(
     src: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
@@ -194,23 +128,6 @@ fn ws_with_inputs(
     ws
 }
 
-fn global_reinferred_of(
-    ws: &bone_semantic::inference::Workspace,
-    name: &str,
-) -> (
-    bone_semantic::prelude::ModuleId,
-    bone_semantic::hir::BodyOwner,
-) {
-    for module in ws.modules.iter() {
-        for (gid, global) in module.globals.iter() {
-            if name_matches(global.name, name) {
-                return (module.id, bone_semantic::hir::BodyOwner::Global(gid));
-            }
-        }
-    }
-    panic!("no global named {name}");
-}
-
 fn assert_input_change_reaches_every_consumer(
     src: &str,
     before: (ComptimeInputs, &str),
@@ -218,7 +135,7 @@ fn assert_input_change_reaches_every_consumer(
     move_input: impl FnOnce(),
     consumers: usize,
 ) {
-    use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
+    use skull::mir_emit::emit_overlay;
 
     let ws1 = ws_with_inputs(src, before.0);
     let (full, mut incremental_cache) = emit_full_of(&ws1, "emit_full v1");
@@ -228,14 +145,9 @@ fn assert_input_change_reaches_every_consumer(
     move_input();
     let ws2 = ws_with_inputs(src, after.0);
     let edit = [body_id(&ws2, "other")];
-    let incremental =
-        emit_incremental(&ws2, &mut incremental_cache, &edit).expect("emit_incremental");
+    let incremental = check_incremental(&ws2, &mut incremental_cache, &edit);
     assert_eq!(incremental.lua.matches(after.1).count(), consumers);
     assert!(!incremental.lua.contains(before.1));
-    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
-        .expect("fresh")
-        .0;
-    assert_eq!(incremental.lua, fresh.lua);
 
     let overlay = emit_overlay(&ws2, &mut overlay_cache, &edit).expect("emit_overlay");
     assert_eq!(overlay.lua.matches(after.1).count(), consumers);
@@ -328,7 +240,7 @@ fn main() {
     let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
 
     let ws2 = ws_with_inputs(&v2, inputs.clone());
-    let first = emit_overlay(&ws2, &mut cache, &[global_reinferred_of(&ws2, "TAG")])
+    let first = emit_overlay(&ws2, &mut cache, &[global_body(&ws2, "TAG")])
         .expect("global body edit overlay");
     assert!(first.lua.contains("second-v1"));
     let first_canonical = first_path.canonicalize().unwrap();
@@ -355,13 +267,50 @@ fn main() {
 }
 
 #[test]
-fn embed_string_without_project_root_rejects() {
-    let src = r#"
-fn broken() -> string {
-    return embed_string("x.txt")
-}
-"#;
-    let err = try_emit_module_with(src, ComptimeInputs::default())
-        .expect_err("embed with no project root must reject");
-    assert!(err.message.contains("project root"));
+fn comptime_misuse_rejects_with_a_specific_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("proj")).unwrap();
+    std::fs::write(dir.path().join("secret.txt"), "outside\n").unwrap();
+    let rooted = |root: std::path::PathBuf| ComptimeInputs {
+        embed_root: Some(root),
+        ..ComptimeInputs::default()
+    };
+    for (body, inputs, fragments) in [
+        (
+            "return build_var(\"NOPE\")",
+            ComptimeInputs::default(),
+            &["NOPE", "build.vars"] as &[&str],
+        ),
+        (
+            "return build_var(name)",
+            inputs_with_var("CHANNEL", "x"),
+            &["literal"],
+        ),
+        (
+            "return embed_string(\"absent.txt\")",
+            rooted(dir.path().to_path_buf()),
+            &["absent.txt"],
+        ),
+        (
+            "return embed_string(\"../secret.txt\")",
+            rooted(dir.path().join("proj")),
+            &["escapes"],
+        ),
+        (
+            "return embed_string(\"absent.txt\")",
+            memory_inputs(&[]),
+            &["absent.txt", "host supplied no file"],
+        ),
+        (
+            "return embed_string(\"x.txt\")",
+            ComptimeInputs::default(),
+            &["project root"],
+        ),
+    ] {
+        let src = format!("fn broken(name: string) -> string {{ {body} }}");
+        let err = try_emit_module_with(&src, inputs).expect_err(body);
+        for fragment in fragments {
+            assert!(err.message.contains(fragment), "{body}: {err:?}");
+        }
+    }
 }

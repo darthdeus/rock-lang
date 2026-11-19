@@ -17,17 +17,10 @@ fn const_value_edit_takes_effect_on_reload_runtime() {
     let foo = crate::common::mangled_name(&after, "foo");
 
     let script = format!(
-        "-- initial cold load\n_G.HOT_RELOAD = false\n{before}\n\
-         -- gameplay mutates the live mutable global\n\
-         __rock_globals[{bar_slot}] = 99\n\
-         -- hot reload: re-dofile the edited program\n_G.HOT_RELOAD = true\n{after}\n\
-         -- verdict\n\
-         if {foo}() == 10 and __rock_globals[{bar_slot}] == 99 then print(\"PASS\")\n\
-         else print(\"FAIL FOO=\"..tostring({foo}())..\" bar=\"..tostring(__rock_globals[{bar_slot}])); os.exit(1) end\n"
+        "{before}\n__rock_globals[{bar_slot}] = 99\n_G.HOT_RELOAD = true\n{after}\n\
+         print({foo}(), __rock_globals[{bar_slot}])"
     );
-
-    let out = run_luajit(&script);
-    assert!(out.trim().starts_with("PASS"));
+    assert_eq!(run_luajit(&script), "10\t99");
 }
 
 #[test]
@@ -36,8 +29,7 @@ fn a_const_whose_reads_are_all_literals_emits_no_global() {
     assert!(!lua.contains("__skull_ginit_FOO"));
     assert!(!lua.contains("FOO ="));
     let foo = crate::common::mangled_name(&lua, "foo");
-    let out = run_luajit(&format!("{lua}\nprint({foo}())\n"));
-    assert_eq!(out.trim(), "5");
+    assert_eq!(run_luajit(&format!("{lua}\nprint({foo}())\n")), "5");
 }
 
 #[test]
@@ -47,8 +39,7 @@ fn a_const_with_a_computed_initializer_keeps_it() {
          const READY: int = setup()\nfn main() {}\n",
     );
     assert!(lua.contains("READY = __skull_ginit_READY()"));
-    let out = run_luajit(&format!("{lua}\nprint(SETUP_RAN)\n"));
-    assert_eq!(out.trim(), "true");
+    assert_eq!(run_luajit(&format!("{lua}\nprint(SETUP_RAN)\n")), "true");
 }
 
 #[test]
@@ -58,6 +49,5 @@ fn a_const_spelled_by_inline_lua_stays_a_global() {
          fn bar() -> int { foo() }\nfn main() {}\n",
     );
     let bar = crate::common::mangled_name(&lua, "bar");
-    let out = run_luajit(&format!("{lua}\nprint({bar}())\n"));
-    assert_eq!(out.trim(), "5");
+    assert_eq!(run_luajit(&format!("{lua}\nprint({bar}())\n")), "5");
 }
