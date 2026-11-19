@@ -36,6 +36,7 @@ impl<'a> ArtifactMappings<'a> {
         self.supply.is_some_and(|s| s.supplies(ws, f))
     }
 
+    /// Native mapping only; a Rock body is the portable rung, a separate question.
     pub fn maps(&self, ws: &Workspace, f: &Function) -> bool {
         if f.inline_body
             .is_some_and(|(be, _)| instance_graph::serves(be, self.inline_backend))
@@ -165,8 +166,10 @@ pub struct Realized {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Unrealizable {
+    /// The `@nomangle`-sibling case: a JS body in a Lua walk.
     ForeignToArtifact,
     ClassUnsupported(BoundaryClass),
+    /// `@native_required`: a Rock fallback does not answer.
     NativeMappingMissing,
 }
 
@@ -284,6 +287,7 @@ impl ArtifactView {
              from; call `prepare_update` before updating the graph"
         );
         self.index.update_rows = true;
+        // Rows are built in parallel; the reverse rows join owners in owner order.
         let owner_rows: Vec<(&Instance, ArtifactSiteRows<'_>)> = {
             use bone_core::prelude::*;
             let owners: Vec<_> = g.call_sites().collect();
@@ -329,6 +333,7 @@ impl ArtifactView {
         };
         let root_added = &canonical(root_added);
         let root_removed = &canonical(root_removed);
+        // A caller that did not update the graph may skip `prepare_update`.
         self.prepare_update(g);
         self.index.graph_revision = g.revision();
         let mut root_subjects = BTreeSet::new();
@@ -379,6 +384,7 @@ impl ArtifactView {
             })
             .collect();
         for i in &subjects {
+            // The removed rows stay in `old_outgoing` for the dirty-region walk.
             if let Some(edges) = self.index.outgoing.remove(i) {
                 for callee in edges.values() {
                     if let Some(preds) = self.index.incoming.get_mut(callee) {
@@ -584,6 +590,7 @@ impl ArtifactView {
         }
         self.publisher_lanes.remove(i);
         self.missing_substitutions.remove(i);
+        // Dirty callers are installed again only after every dirty target is retracted.
         self.fn_value_targets.remove(i);
     }
 
@@ -764,6 +771,8 @@ fn realize_decl(
         });
     }
     if supports(target, BoundaryClass::Intrinsic) && mappings.supplies(ws, rep_f) {
+        // One rung, one oracle: `@intrinsic` only picks the label. Asking separately
+        // is what once let `map_new` reach a body branch.
         let kind = if intrinsics::is_intrinsic(rep_f) {
             Realization::NativeMapping
         } else {
@@ -781,6 +790,7 @@ fn realize_decl(
     })
 }
 
+/// Split from selection so both questions read the same `FuncRef`.
 fn realize_body(
     ws: &Workspace,
     decl: FuncRef,
@@ -788,6 +798,8 @@ fn realize_body(
     target: &CpuTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realization, Unrealizable> {
+    // An erased runtime entry is an identity that exists under its bare name on
+    // every target, so it is classified before any body slot is read.
     if crate::instance_graph::is_erased_runtime_entry(f) {
         return class_or_reject(target, BoundaryClass::ErasedRuntimeEntry);
     }
@@ -803,12 +815,14 @@ fn realize_body(
         if !supports(target, BoundaryClass::Intrinsic) {
             return Err(Unrealizable::ClassUnsupported(BoundaryClass::Intrinsic));
         }
+        // Expansion is compile-time on every backend: no body to map or fall back to.
         if intrinsics::expand_kind(f).is_some() {
             return Ok(Realization::CompileTimeExpansion);
         }
         if mappings.maps(ws, f) {
             return Ok(Realization::NativeMapping);
         }
+        // Asked before the fallback rung, and never satisfied by a Rock body.
         if intrinsics::is_native_required(f) {
             return Err(Unrealizable::NativeMappingMissing);
         }
@@ -846,6 +860,7 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
     let target = req.spec.cpu;
     let mut realizable: FxHashMap<Instance, Result<Realized, Unrealizable>> = FxHashMap::default();
+    // A declaration's instances all realize alike, so each declaration is asked once.
     let mut by_decl: FxHashMap<FuncRef, Result<Realized, Unrealizable>> = FxHashMap::default();
     for i in &g.instances {
         let realized = *by_decl
@@ -854,6 +869,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         realizable.insert(i.clone(), realized);
     }
 
+    // Always-emitted callees are roots: they have no caller instance.
     let root_decls: BTreeSet<DeclKey> = req
         .roots
         .iter()
@@ -878,6 +894,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         }
     }
 
+    // Site records, not graph edges, identify each caller-to-callee relation.
     let site_tables: FxHashMap<&Instance, &BTreeMap<Site, instance_graph::SiteRecord>> =
         g.call_sites().collect();
 
@@ -911,6 +928,8 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for r in root_refs {
         walk.admit(r, &index.realizable);
     }
+    // A value take in a global initializer or decorator has no caller instance,
+    // so the site walk cannot see it.
     index.always_fn_values = roots
         .iter()
         .filter(|r| g.is_always_emitted_fn_value(r))
@@ -945,6 +964,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .collect();
     drop(site_tables);
 
+    // Derived in parallel, recorded in instance order.
     let planned: Vec<(&Instance, String)> = {
         use bone_core::prelude::*;
         let rows: Vec<(&Instance, Realized)> = realization.iter().map(|(i, r)| (i, *r)).collect();
@@ -955,6 +975,8 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let symbols: BTreeMap<Instance, String> =
         planned.into_iter().map(|(i, s)| (i.clone(), s)).collect();
 
+    // Minted once; every consumer reads this map, so one boundary cannot be named
+    // two ways, and a renaming planner shows up here.
     let boundaries: BTreeMap<Instance, BoundaryId> = realization
         .iter()
         .filter_map(|(i, r)| {
@@ -974,6 +996,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
 
     let retained_decls: BTreeSet<DeclKey> = realization.values().map(|r| DeclKey(r.decl)).collect();
 
+    // Lane widths are asked of the selected declaration, whose body is emitted.
     let scalar_context = std::cell::OnceCell::new();
     let scx = req.scalar_context(ws, g, &scalar_context);
     let mut publisher_lanes: BTreeMap<Instance, usize> = BTreeMap::new();
@@ -1013,6 +1036,8 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         );
     }
 
+    // Over every retained instance: a producer that bypassed the recorder is a
+    // graph defect wherever it lands.
     let missing_substitutions: BTreeSet<Instance> = realization
         .keys()
         .filter(|i| g.concreteness(i) == Concreteness::Missing)

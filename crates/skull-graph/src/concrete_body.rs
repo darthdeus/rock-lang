@@ -37,6 +37,8 @@ pub struct ConcreteBodies {
     pub always_plans: ConcreteAlwaysPlans,
     instance_stats: FxHashMap<Instance, ConcreteBuildStats>,
     always_stats: FxHashMap<ConcreteOwner, ConcreteBuildStats>,
+    // Foreign-domain publication has no single owner; local stats never mutate it
+    // or fold a second copy into the aggregate.
     global_build_stats: ConcreteBuildStats,
     plan_failure_index: BTreeMap<Instance, MonoTyReason>,
     always_plan_failure_index: FxHashMap<ConcreteOwner, MonoTyReason>,
@@ -475,6 +477,8 @@ fn declared_tuple_param(ws: &Workspace, ty: TyId) -> Result<bool, MonoTyReason> 
     }
 }
 
+/// For graph-side accounting, which runs before `ConcreteBodies::build`
+/// installs per-body tables.
 pub(crate) fn concrete_signature_for_instance(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -839,6 +843,7 @@ fn publish_signatures(
     instances: Vec<&Instance>,
 ) -> (PublishedSignatures, std::time::Duration) {
     let started = bone_core::prelude::Instant::now();
+    // Keyed by instance, so the parallel derivation order is not observable.
     let published: PublishedSignatures = {
         use bone_core::prelude::*;
         instances
@@ -993,6 +998,7 @@ fn publish_foreign_domains(
         .into_iter()
         .filter(|domain| !matches!(domain, SiteDomain::Own))
         .collect();
+    // Keyed by domain, so the parallel conversion order is not observable.
     let published: Vec<(
         SiteDomain,
         Result<ConcreteTypeTables, MonoTyReason>,
@@ -1229,6 +1235,8 @@ where
     let mut out = BTreeMap::new();
     for domain in domains {
         stats.foreign_domain_requests += 1;
+        // An own-body site is never inserted, so counting it would make every such
+        // request look unique.
         let SiteDomain::StructDefaults(..) = domain else {
             continue;
         };

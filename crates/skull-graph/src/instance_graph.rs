@@ -95,6 +95,12 @@ impl BoundRoot {
 }
 
 /// A construction the model refuses, as opposed to one it could not complete ([`Unresolved`]).
+/// `ChangingInstanceRecursion` recurs at a different instantiation, which
+/// demand-driven instantiation does not terminate on. `GenericFnValue` has no
+/// call site to key an instantiation. `ConcreteTypeUnavailable` is a compiler
+/// invariant break. `UnconstrainedTypeVar` is a type argument no constraint
+/// reaches (a generic read in a shared body is [`Unresolved`] data instead).
+/// `IdentityInOrdinaryStorage` is fatal for the instantiating package.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum RejectionKind {
     ChangingInstanceRecursion,
@@ -112,6 +118,7 @@ pub struct Rejection {
     pub message: String,
 }
 
+/// Data, not an error: the caller may itself be an uninstantiated shared body.
 #[derive(Clone, Debug)]
 pub struct Unresolved {
     pub from: Instance,
@@ -128,6 +135,8 @@ pub enum Owner {
 
 impl Owner {
     /// Neither `ModuleId` nor `BodyOwner` is `Ord`.
+    /// Owners are ordered so derivation is a function of the contribution set,
+    /// not of discovery order.
     fn ord_key(&self) -> (u8, Option<&Instance>, usize, u8, u32) {
         match self {
             Self::Instance(i) => (0, Some(i), 0, 0, 0),
@@ -158,6 +167,7 @@ impl PartialOrd for Owner {
     }
 }
 
+/// Exhaustive on purpose: a new variant must not collapse onto an existing tag.
 fn body_owner_key(o: BodyOwner) -> (u8, u32) {
     match o {
         BodyOwner::Function(i) => (0, i.into_raw().into_u32()),
@@ -171,6 +181,7 @@ fn body_owner_key(o: BodyOwner) -> (u8, u32) {
 
 #[derive(Clone, Default, Debug)]
 pub struct Contribution {
+    /// Empty for an always-emitted body, whose callees are roots, not obligations.
     pub edges: Vec<Edge>,
     pub call_sites: BTreeMap<Site, SiteRecord>,
     pub always_call_sites: BTreeMap<Site, SiteRecord>,
@@ -178,9 +189,12 @@ pub struct Contribution {
     pub unresolved: Vec<Unresolved>,
     pub rejections: Vec<Rejection>,
     pub always_emitted_targets: BTreeSet<Instance>,
+    /// Substitutions are derived from these, so an instance loses its
+    /// substitution with its last caller.
     pub reached: Vec<(Instance, MonoSubst)>,
     pub bound_trees: Vec<(Instance, InstanceBoundTree)>,
     pub span_files: BTreeSet<ustr::Ustr>,
+    /// False for a boundary, a body without usable inference, and a capped instance.
     pub expanded: bool,
 }
 
@@ -278,14 +292,17 @@ impl Walk<'_> {
 
 static EMPTY_SUBST: std::sync::LazyLock<MonoSubst> = std::sync::LazyLock::new(MonoSubst::default);
 
+/// When owners disagree, the first owner in owner order decides.
 #[derive(Default, Debug, Clone)]
 pub struct Indices {
     pub subst: FxHashMap<Instance, Agreed<MonoSubst>>,
     pub trees: BTreeMap<Instance, Agreed<InstanceBoundTree>>,
     pub always_emitted: BTreeMap<Instance, BTreeSet<Owner>>,
+    /// Tells the per-declaration post-passes which declarations entered or left.
     pub decls: FxHashMap<FuncRef, usize>,
     pub preds: FxHashMap<Instance, FxHashSet<Instance>>,
     pub decl_instances: FxHashMap<FuncRef, FxHashSet<Instance>>,
+    /// For span relocation only; membership does not make an owner stale.
     pub span_owners: FxHashMap<ustr::Ustr, FxHashSet<Owner>>,
 }
 
@@ -354,6 +371,7 @@ pub struct Agreed<T> {
     pub owners: BTreeSet<Owner>,
     pub value: T,
     /// Empty on every valid program.
+    /// A non-empty one means a body built from the fact depends on which owner won.
     pub dissent: BTreeMap<Owner, T>,
 }
 
@@ -380,6 +398,7 @@ impl<T: Clone + PartialEq> Agreed<T> {
 
     fn assert_by(&mut self, owner: &Owner, value: &T) {
         if *value == self.value {
+            // A body asserts the fact once per site reaching the callee.
             if !self.owners.contains(owner) {
                 self.owners.insert(owner.clone());
             }
@@ -393,6 +412,7 @@ impl<T: Clone + PartialEq> Agreed<T> {
         self.owners.remove(owner);
         self.dissent.remove(owner);
         if self.owners.is_empty() {
+            // The agreeing side is gone: a dissenter becomes the answer, if any.
             let Some(first) = self.dissent.keys().next().cloned() else {
                 return false;
             };
@@ -430,6 +450,8 @@ fn assert_subst(
 #[derive(Clone)]
 pub struct InstanceGraph {
     incremental_indexes: bool,
+    /// A retained view checks the revision it was realized from instead of
+    /// trusting call order.
     revision: u64,
     interner: std::sync::Arc<MonoInterner>,
     /// The primary records; every derived field is computed from these and `root_instances`.
@@ -438,9 +460,12 @@ pub struct InstanceGraph {
     pub instances: BTreeSet<Instance>,
     pub run_stats: RunStats,
     last_run_owners: BTreeSet<Owner>,
+    /// An always-emitted owner is not an instance, so these are what revisit the
+    /// instances whose root or fn-value status moved.
     last_run_always_targets: BTreeSet<Instance>,
     delta_added: BTreeSet<Instance>,
     delta_removed: BTreeSet<Instance>,
+    /// Whole-graph findings with no single owner, from the recursion search.
     pub graph_rejections: Vec<Rejection>,
     recursion_findings: BTreeMap<Instance, RecursionFinding>,
     recursion_by_subject: BTreeMap<Instance, BTreeSet<Instance>>,
@@ -454,6 +479,8 @@ pub struct InstanceGraph {
 }
 
 /// Compiler-owned runtime entries a synthesized call or opaque body may name by bare name.
+/// An entry need not serve every target: a call on an unserved target is
+/// rejected where it is synthesized.
 const ERASED_RUNTIME_ENTRIES: &[&str] = &[
     "__descriptor_with",
     "__map_col_clear",
@@ -482,12 +509,15 @@ const ERASED_RUNTIME_ENTRIES: &[&str] = &[
     "__rock_vec_strided_elements",
 ];
 
+/// Classified by name, because lowering synthesizes calls to these anywhere.
 pub(crate) fn is_erased_runtime_entry(f: &Function) -> bool {
     ERASED_RUNTIME_ENTRIES.contains(&f.name.as_str())
 }
 
 pub use skull_mir::monoty::MAX_INSTANTIATION_DEPTH;
 
+/// `Concrete` (no logical arguments, empty substitution) is the only case
+/// where declaration-based passes are exact; `Missing` is never `Concrete`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Concreteness {
     Concrete,
@@ -496,6 +526,7 @@ pub enum Concreteness {
 }
 
 impl InstanceGraph {
+    /// The one substitution oracle, shared by publisher lanes and the GLSL passes.
     pub fn concreteness(&self, i: &Instance) -> Concreteness {
         match self.substitution(i) {
             None => Concreteness::Missing,
@@ -515,6 +546,8 @@ impl InstanceGraph {
         format!("{base}<{}>", args.join(", "))
     }
 
+    /// Unambiguous, so sorting and dedup cannot merge instances. Module ids follow
+    /// source order, so it is deterministic across builds.
     pub fn identity(&self, ws: &Workspace, i: &Instance) -> String {
         let f = &ws.module(i.func.module).functions[i.func.func];
         let base = mangle_fn(ws, f);
@@ -528,11 +561,14 @@ impl InstanceGraph {
     }
 }
 
+/// The file sentinel distinguishes it: a zero line range is line 1 of a file.
 pub fn is_spanless(span: &Span) -> bool {
     span.file.as_str() == "<unknown>"
 }
 
 /// Build the shared instance graph for `ws`.
+/// Target-neutral: callees are bone's group representatives and roots are
+/// canonicalized to them; `artifact::realize` selects the sibling per target.
 pub fn build(ws: &Workspace, roots: Vec<FuncRef>) -> InstanceGraph {
     build_in(ws, roots, std::sync::Arc::new(MonoInterner::new()))
 }
@@ -611,6 +647,7 @@ impl InstanceGraph {
         )
     }
 
+    /// There is no owned copy on purpose: a copy would be a second type identity.
     pub fn interner(&self) -> &std::sync::Arc<MonoInterner> {
         &self.interner
     }
@@ -698,6 +735,7 @@ impl InstanceGraph {
             while !pending.is_empty() {
                 let wave: Vec<_> = std::mem::take(&mut pending).into_iter().rev().collect();
                 // Capture every walk's inputs before installing any result.
+                // Rayon keeps this order, so each result installs beside its snapshot's owner.
                 let walks = {
                     let run = |owner: &Owner| {
                         let inputs = self.walk_inputs(owner);
@@ -752,6 +790,7 @@ impl InstanceGraph {
                 }
             }
             // Re-walk owners whose witnesses moved after their walk.
+            // Otherwise its callees are the ones the old witnesses selected.
             let mut stale: Vec<Owner> = walked_with
                 .iter()
                 .filter(|(i, used)| {
@@ -780,6 +819,8 @@ impl InstanceGraph {
         stats
     }
 
+    /// `expand` is the only producer of a contribution, so a full build and an
+    /// incremental re-walk cannot record different facts.
     fn walk_inputs(&self, owner: &Owner) -> WalkInputs {
         match owner {
             Owner::Instance(i) => WalkInputs {
@@ -805,6 +846,8 @@ fn subst_shard(to: &Instance) -> usize {
 #[derive(Default)]
 struct WaveShare {
     installed: Vec<(Owner, Box<Contribution>)>,
+    // Installed by the build thread between waves, so every walk of a wave reads
+    // the conformance trees it began with.
     owned: Vec<usize>,
     demanded: Vec<OwnerWalk>,
     walked_with: Vec<(Instance, InstanceBoundTree)>,
@@ -973,6 +1016,7 @@ impl InstanceGraph {
     }
 }
 
+/// Reads nothing else of the graph, so it can run while other owners install.
 fn expand(
     ws: &Workspace,
     interner: &MonoInterner,
@@ -1040,6 +1084,8 @@ fn expand_sites(
             }
         }
         Owner::Instance(inst) => {
+            // The admissibility oracle both emitters use. A capped instance is a
+            // recursion candidate, not yet a verdict.
             let too_deep = skull_mir::monoty::too_deep_to_instantiate(
                 inst.args
                     .iter()
@@ -1052,6 +1098,7 @@ fn expand_sites(
                 return out;
             }
             let f = &ws.module(inst.func.module).functions[inst.func.func];
+            // Emission uses a boundary's foreign text, so its Rock body is never walked.
             if skull_mir::lower::declared_boundary_class(f).is_some() {
                 return out;
             }
@@ -1225,6 +1272,8 @@ impl InstanceGraph {
         }
     }
 
+    /// An index entry goes with its last owner, never with a count reaching zero,
+    /// so a stale fact cannot survive as an unchecked number.
     fn uninstall(&mut self, owner: &Owner) {
         if !self.contributions.contains_key(owner) {
             return;
@@ -1615,6 +1664,7 @@ impl InstanceGraph {
         self.delta_removed.clear();
         self.shift_contribution_spans(edits);
 
+        // No removal step: `run` replaces each pending owner's contribution.
         let mut affected = self.affected_owners(ws, changed);
         affected.extend(pending_roots);
         affected.sort();
@@ -1711,6 +1761,7 @@ impl InstanceGraph {
         let mut changed_seeds: Vec<Owner> = Vec::new();
         for (module, body_owner) in changed {
             match body_owner {
+                // Instances are keyed on bone's representative, as `build` seeds roots.
                 BodyOwner::Function(f) => {
                     let fref = skull_mir::lower::canonical_variant(
                         ws,
@@ -1723,6 +1774,8 @@ impl InstanceGraph {
                         changed_seeds.extend(instances.iter().cloned().map(Owner::Instance));
                     }
                 }
+                // A `const` initializer's value is a body; a mutable global's edit arrives
+                // as an interface change instead.
                 BodyOwner::Global(_) => {
                     changed_seeds.push(Owner::AlwaysEmitted(*module, *body_owner));
                 }
@@ -2345,6 +2398,7 @@ fn detect_changing_instance_recursion(g: &InstanceGraph, ws: &Workspace) -> Vec<
 
     // A start needs an outgoing edge, but the per-declaration count covers every
     // instance: a declaration's second instance may be a leaf.
+    // Exact skip: a declaration with one instance cannot reach a different one.
     let starts = succ.keys().copied().collect();
     search_changing_instance_recursion(g, ws, starts, |node| succ.get(node).copied().unwrap_or(&[]))
 }
@@ -2413,6 +2467,8 @@ fn search_changing_instance_recursion<'a>(
         while let Some((node, via)) = queue.pop() {
             subjects.push(node);
             if node.func == start.func && node.args != start.args {
+                // Only a witness discharges the declaration; another instance's path may
+                // still recurse.
                 already.insert(key);
                 found.push(RecursionFinding {
                     rejection: Rejection {
@@ -2518,6 +2574,7 @@ fn walk_struct_default_edges(
             else {
                 continue;
             };
+            // A `..base` update writes every field the literal does not.
             if !bases.is_empty() {
                 continue;
             }
@@ -2564,6 +2621,8 @@ fn walk_struct_default_edges(
             let Some(dinf) = ws.inference(*module).and_then(|ir| ir.per_fn.get(&owner)) else {
                 continue;
             };
+            // A struct literal lowers only the defaults it omits, so the defaults body's
+            // calls are attributed per field.
             let mut sub: FxHashSet<Idx<bone_core::hir::Expr>> = FxHashSet::default();
             for f in fields {
                 let Some(root) = defaults.field_defaults.get(f) else {
@@ -2711,6 +2770,8 @@ fn walk_bound_tree(
     resolved
 }
 
+/// The callee's bindings under the caller's substitution: the transitive
+/// instantiation step.
 fn instantiate(
     interner: &MonoInterner,
     ws: &Workspace,
@@ -2943,6 +3004,7 @@ fn fn_value_sites(
                 FuncRef { module: m, func: f }
             }
         };
+        // The fallback picked an arbitrary member of a uniform group; canonicalize it.
         out.push((e, skull_mir::lower::canonical_variant(ws, rep)));
     }
     out.sort_by_key(|(e, _)| *e);
@@ -3063,12 +3125,15 @@ pub fn synthesized_entry_roots(ws: &Workspace) -> Vec<FuncRef> {
 }
 
 /// Whether a declaration with backend `decl` can be emitted for `target`.
+/// The walk, the boundary pass and every view ask this one test.
 pub fn serves(decl: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend) -> bool {
     use bone_core::hir::FnBackend;
     decl == FnBackend::Any || target == FnBackend::Any || decl == target
 }
 
 /// The boundary class of one declaration, or `None` if it has a Rock body.
+/// An `@intrinsic` with a Rock body is expanded; an expansion intrinsic, a
+/// `@native_required` one and one without a body stay foreign.
 fn boundary_class_for(f: &Function) -> Option<BoundaryClass> {
     if is_erased_runtime_entry(f) {
         return Some(BoundaryClass::ErasedRuntimeEntry);
@@ -3077,6 +3142,7 @@ fn boundary_class_for(f: &Function) -> Option<BoundaryClass> {
 }
 
 /// Resolve bare `@nomangle` names in JS opaque bodies into root declarations.
+/// The body stays opaque to MIR; this is only the publication obligation.
 pub fn opaque_boundary_roots_for_decls(
     ws: &Workspace,
     decls: impl IntoIterator<Item = FuncRef>,

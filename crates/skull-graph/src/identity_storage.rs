@@ -40,6 +40,8 @@ impl<'a> IdentityTypes for MonoTypes<'a> {
 }
 
 /// Whether storing a value of `ty` stores an identity.
+/// False is exact: such a type argument cannot make any position store one,
+/// so this gates re-reading a body under its substitution.
 pub fn stores_identity(ws: &Workspace, ty: &MonoTy) -> bool {
     identity_violation_in(
         ws,
@@ -50,6 +52,7 @@ pub fn stores_identity(ws: &Workspace, ty: &MonoTy) -> bool {
     .is_some()
 }
 
+/// Sound because a verdict depends only on the type and the declarations.
 #[derive(Default)]
 pub(crate) struct IdentityVerdicts([FxHashMap<MonoTy, Option<IdentityStorageViolation>>; 3]);
 
