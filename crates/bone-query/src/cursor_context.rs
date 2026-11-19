@@ -734,9 +734,8 @@ impl CursorAst {
                 .any(|(_, st)| matches!(&st.kind, StatementKind::While(w) if w.condition == top))
     }
 
-    pub(crate) fn member_path(&self) -> Option<Vec<String>> {
-        let chain = &self.chain;
-        let &node = chain.first()?;
+    pub(crate) fn member_receiver(&self) -> Option<(usize, Option<Vec<String>>)> {
+        let &node = self.chain.first()?;
         let (ExprKind::FieldAccess(recv, member) | ExprKind::SafeNavigation(recv, member)) =
             &self.expr(node).kind
         else {
@@ -745,8 +744,14 @@ impl CursorAst {
         if self.probe < member.span.offset_range().0 {
             return None;
         }
+        Some((
+            self.expr(*recv).span.offset_range().1,
+            self.receiver_path(*recv),
+        ))
+    }
+
+    fn receiver_path(&self, mut cur: Idx<ExprData>) -> Option<Vec<String>> {
         let mut segs: Vec<String> = Vec::new();
-        let mut cur = *recv;
         loop {
             match &self.expr(cur).kind {
                 ExprKind::Ident(id) => {
@@ -762,20 +767,6 @@ impl CursorAst {
         }
         segs.reverse();
         Some(segs)
-    }
-
-    pub(crate) fn member_receiver_end(&self) -> Option<usize> {
-        let chain = &self.chain;
-        let &node = chain.first()?;
-        let (ExprKind::FieldAccess(recv, member) | ExprKind::SafeNavigation(recv, member)) =
-            &self.expr(node).kind
-        else {
-            return None;
-        };
-        if self.probe < member.span.offset_range().0 {
-            return None;
-        }
-        Some(self.expr(*recv).span.offset_range().1)
     }
 
     /// Matches `call_arg`'s Some-with-receiver cases exactly.

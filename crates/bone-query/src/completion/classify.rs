@@ -394,10 +394,8 @@ pub(crate) enum Context<'a> {
 pub(crate) struct CompletionCx {
     /// None only on the tokenize frontier, where byte-scanner fallbacks apply.
     pub(crate) ast: Option<crate::cursor_context::CursorAst>,
-    /// Fallback receiver resolver, used when `type_at` at `member_recv_end` cannot
-    /// type the receiver.
-    pub(crate) member: Option<Vec<String>>,
-    pub(crate) member_recv_end: Option<usize>,
+    /// The receiver's end offset and optional path for lookup when inference fails.
+    member: Option<(usize, Option<Vec<String>>)>,
     pub(crate) arg_call: Option<(String, u32, Option<usize>)>,
     record: Option<Record>,
     qualified: Option<String>,
@@ -428,8 +426,7 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     };
     let expr_position = !cx.is_some_and(|c| c.is_type_position());
     CompletionCx {
-        member: cx.and_then(|c| c.member_path()),
-        member_recv_end: cx.and_then(|c| c.member_receiver_end()),
+        member: cx.and_then(CursorAst::member_receiver),
         record,
         qualified: cx.and_then(|c| c.qualified_base()),
         decorator: decorator_context(src, offset),
@@ -459,10 +456,12 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
 impl CompletionCx {
     pub(crate) fn contexts(&self) -> impl Iterator<Item = Context<'_>> {
         [
-            self.member_recv_end.map(|receiver| Context::Member {
-                receiver,
-                path: self.member.as_deref(),
-            }),
+            self.member
+                .as_ref()
+                .map(|(receiver, path)| Context::Member {
+                    receiver: *receiver,
+                    path: path.as_deref(),
+                }),
             self.arg_call
                 .as_ref()
                 .map(|(callee, index, receiver)| Context::FieldRef {
