@@ -46,65 +46,58 @@ fn too_deep_to_instantiate(
     ))
 }
 
-pub(super) fn inline_candidate_keys(
-    concrete: &crate::concrete_body::ConcreteBodies,
-) -> Vec<Instance> {
-    concrete.candidate_keys().iter().cloned().collect()
-}
-
 pub(super) fn concrete_stats_requested() -> bool {
     std::env::var("ROCK_LOG").is_ok_and(|value| value == "debug")
+}
+
+fn warm_candidates(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    keys: Vec<Instance>,
+) -> Result<Vec<skull_transform::InlineCandidateWarm>, CompilerError> {
+    par_map_with(
+        keys,
+        skull_transform::InlineCache::default,
+        |inline_cache, inst| inline_cache.warm_candidate(ws, scx, inst, concrete.plans.as_ref()),
+    )
+    .into_iter()
+    .collect()
 }
 
 pub(super) fn build_inline_candidate_table(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     concrete: &crate::concrete_body::ConcreteBodies,
-    keys: Vec<Instance>,
-    base: Option<&std::sync::Arc<skull_transform::InlineCandidateTable>>,
-    invalidated: Option<&FxHashSet<FuncRef>>,
-    warm_keys_override: Option<Vec<Instance>>,
-    added: Option<&BTreeSet<Instance>>,
-    removed: Option<&BTreeSet<Instance>>,
 ) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
-    let warm_keys: Vec<Instance> = warm_keys_override.unwrap_or_else(|| {
-        keys.iter()
-            .filter(|key| match base {
-                None => true,
-                Some(base) => {
-                    invalidated.is_some_and(|frefs| frefs.contains(&key.func))
-                        || !base.contains(key)
-                }
-            })
-            .cloned()
-            .collect()
-    });
-    let warms: Vec<skull_transform::InlineCandidateWarm> = par_map_with(
-        warm_keys,
-        skull_transform::InlineCache::default,
-        |inline_cache, inst| inline_cache.warm_candidate(ws, scx, inst, concrete.plans.as_ref()),
-    )
-    .into_iter()
-    .collect::<Result<_, _>>()?;
-    if let Some(base) = base {
-        if let (Some(added), Some(removed)) = (added, removed) {
-            return Ok(std::sync::Arc::new(
-                skull_transform::InlineCandidateTable::from_warms_incremental(
-                    std::sync::Arc::clone(base),
-                    warms,
-                    &added.iter().cloned().collect::<Vec<_>>(),
-                    &removed.iter().cloned().collect::<Vec<_>>(),
-                ),
-            ));
-        }
-    }
+    let keys: Vec<Instance> = concrete.candidate_keys().iter().cloned().collect();
+    let warms = warm_candidates(ws, scx, concrete, keys.clone())?;
     Ok(std::sync::Arc::new(
-        skull_transform::InlineCandidateTable::from_warms_with_base(
-            base.map(std::sync::Arc::as_ref),
-            keys,
-            warms,
-        ),
+        skull_transform::InlineCandidateTable::from_warms_with_base(None, keys, warms),
     ))
+}
+
+pub(super) fn update_inline_candidate_table(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    base: Option<&std::sync::Arc<skull_transform::InlineCandidateTable>>,
+    warm_keys: Vec<Instance>,
+    added: &BTreeSet<Instance>,
+    removed: &BTreeSet<Instance>,
+) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
+    let warms = warm_candidates(ws, scx, concrete, warm_keys)?;
+    Ok(std::sync::Arc::new(match base {
+        Some(base) => skull_transform::InlineCandidateTable::from_warms_incremental(
+            std::sync::Arc::clone(base),
+            warms,
+            &added.iter().cloned().collect::<Vec<_>>(),
+            &removed.iter().cloned().collect::<Vec<_>>(),
+        ),
+        None => {
+            skull_transform::InlineCandidateTable::from_warms_with_base(None, Vec::new(), warms)
+        }
+    }))
 }
 
 type SpecOutcome = (String, Instance, Result<Chunk, CompilerError>);

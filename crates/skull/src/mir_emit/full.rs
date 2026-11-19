@@ -536,17 +536,7 @@ fn emit_full_chunks<'a>(
         .collect();
     jobs.reverse();
     let inline_candidate_table = setup_phases.timed("setup: inline candidate table", || {
-        build_inline_candidate_table(
-            ws,
-            scx,
-            concrete,
-            inline_candidate_keys(concrete),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        build_inline_candidate_table(ws, scx, concrete)
     })?;
     queue.attribution = attribution;
     let bodies: std::sync::Mutex<FanOutBodies> =

@@ -831,16 +831,14 @@ impl SkullEmitCache {
         let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
         let t_candidate = Instant::now();
         let previous_candidate_table = cache.inline_cache.candidate_table();
-        let candidate_table = build_inline_candidate_table(
+        let candidate_table = update_inline_candidate_table(
             ws,
             scx,
             &cache.concrete,
-            Vec::new(),
             previous_candidate_table.as_ref(),
-            Some(&invalidated_candidate_frefs),
-            Some(warm_keys),
-            Some(&concrete_update.candidate_keys_added),
-            Some(&concrete_update.candidate_keys_removed),
+            warm_keys,
+            &concrete_update.candidate_keys_added,
+            &concrete_update.candidate_keys_removed,
         )?;
         let mut stable_residual_frefs = FxHashSet::default();
         if let Some(previous) = previous_candidate_table.as_ref() {
