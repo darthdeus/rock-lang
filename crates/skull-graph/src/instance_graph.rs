@@ -396,7 +396,68 @@ pub struct Indices {
     pub decl_instances: FxHashMap<FuncRef, FxHashSet<Instance>>,
     /// File -> owners carrying spans in that file. Coordinate relocation uses
     /// this set; membership does not make an owner semantically stale.
-    pub span_owners: FxHashMap<ustr::Ustr, BTreeSet<Owner>>,
+    pub span_owners: FxHashMap<ustr::Ustr, FxHashSet<Owner>>,
+}
+
+impl Indices {
+    /// The rows keyed by the owner that asserted them, which only an update
+    /// reads: owned substitutions, predecessors, declaration instances and
+    /// span files.
+    fn insert_update_rows(&mut self, owner: &Owner, c: &Contribution) {
+        for (to, subst) in &c.reached {
+            assert_subst(&mut self.subst, owner, to, subst);
+        }
+        if let Some(from) = owner.instance() {
+            for e in &c.edges {
+                self.preds
+                    .entry(e.to.clone())
+                    .or_default()
+                    .insert(from.clone());
+            }
+            self.decl_instances
+                .entry(from.func)
+                .or_default()
+                .insert(from.clone());
+        }
+        for file in &c.span_files {
+            self.span_owners
+                .entry(*file)
+                .or_default()
+                .insert(owner.clone());
+        }
+    }
+
+    fn remove_update_rows(&mut self, owner: &Owner, old: &Contribution) {
+        for (to, _) in &old.reached {
+            if let Some(a) = self.subst.get_mut(to) {
+                if !a.retract(owner) {
+                    self.subst.remove(to);
+                }
+            }
+        }
+        if let Some(from) = owner.instance() {
+            for e in &old.edges {
+                remove_from_set(&mut self.preds, &e.to, from);
+            }
+            remove_from_set(&mut self.decl_instances, &from.func, from);
+        }
+        for file in &old.span_files {
+            remove_from_set(&mut self.span_owners, file, owner);
+        }
+    }
+}
+
+fn remove_from_set<K: std::hash::Hash + Eq, V: std::hash::Hash + Eq>(
+    index: &mut FxHashMap<K, FxHashSet<V>>,
+    key: &K,
+    value: &V,
+) {
+    if let Some(set) = index.get_mut(key) {
+        set.remove(value);
+        if set.is_empty() {
+            index.remove(key);
+        }
+    }
 }
 
 /// The body edit's coordinate change; the graph moves its stored spans with
@@ -494,10 +555,8 @@ fn assert_subst(
 
 #[derive(Clone)]
 pub struct InstanceGraph {
-    /// Whether the update-only reverse indexes (`preds`, `decl_instances`,
-    /// `span_owners`) are maintained. A fresh build has no reader for them;
-    /// the first update derives them from the contributions and keeps them
-    /// current from then on.
+    /// Whether [`Indices::insert_update_rows`] is maintained. A fresh build
+    /// has no reader for those rows; the first update derives them.
     incremental_indexes: bool,
     /// How many updates this graph has applied. A retained view derives its
     /// update-only rows from the graph it was realized from, so it checks the
@@ -794,7 +853,6 @@ impl InstanceGraph {
     pub fn take_records(&mut self) -> Self {
         let mut empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
         empty.run_stats = self.run_stats;
-        empty.incremental_indexes = self.incremental_indexes;
         empty.revision = self.revision;
         std::mem::replace(self, empty)
     }
@@ -1442,55 +1500,25 @@ impl InstanceGraph {
         // `always_emitted_targets` marks which of them are ROOTS, it is not a
         // second population.
         let mut disagreed = false;
-        for (to, subst) in &c.reached {
-            if self.incremental_indexes {
-                assert_subst(&mut self.index.subst, &owner, to, subst);
-            } else if let Some(a) = self.index.subst.get_mut(to) {
-                disagreed |= !a.assert_unowned(subst);
-            } else {
-                self.index
-                    .subst
-                    .insert(to.clone(), Agreed::unowned(subst.clone()));
+        if self.incremental_indexes {
+            self.index.insert_update_rows(&owner, &c);
+        } else {
+            for (to, subst) in &c.reached {
+                if let Some(a) = self.index.subst.get_mut(to) {
+                    disagreed |= !a.assert_unowned(subst);
+                } else {
+                    self.index
+                        .subst
+                        .insert(to.clone(), Agreed::unowned(subst.clone()));
+                }
             }
         }
         self.index_owned_rows(&owner, &c);
         if let Some(from) = owner.instance() {
             for e in &c.edges {
-                if self.incremental_indexes {
-                    match self.index.preds.get_mut(&e.to) {
-                        Some(preds) => {
-                            if !preds.contains(from) {
-                                preds.insert(from.clone());
-                            }
-                        }
-                        None => {
-                            self.index
-                                .preds
-                                .insert(e.to.clone(), FxHashSet::from_iter([from.clone()]));
-                        }
-                    }
-                }
                 self.lost.remove(&e.to);
             }
-        }
-        if let Some(from) = owner.instance() {
             *self.index.decls.entry(from.func).or_insert(0) += 1;
-            if self.incremental_indexes {
-                self.index
-                    .decl_instances
-                    .entry(from.func)
-                    .or_default()
-                    .insert(from.clone());
-            }
-        }
-        if self.incremental_indexes {
-            for file in &c.span_files {
-                self.index
-                    .span_owners
-                    .entry(*file)
-                    .or_default()
-                    .insert(owner.clone());
-            }
         }
         for to in &c.always_emitted_targets {
             self.lost.remove(to);
@@ -1568,14 +1596,7 @@ impl InstanceGraph {
                 }
             }
         }
-        let reaches: BTreeSet<&Instance> = old.reached.iter().map(|(to, _)| to).collect();
-        for to in reaches {
-            if let Some(a) = self.index.subst.get_mut(to) {
-                if !a.retract(owner) {
-                    self.index.subst.remove(to);
-                }
-            }
-        }
+        self.index.remove_update_rows(owner, &old);
         let trees: BTreeSet<&Instance> = old.bound_trees.iter().map(|(i, _)| i).collect();
         for i in trees {
             if let Some(a) = self.index.trees.get_mut(i) {
@@ -1598,39 +1619,11 @@ impl InstanceGraph {
             self.lost.insert(to.clone());
         }
         if let Some(from) = owner.instance() {
-            if self.incremental_indexes {
-                for e in &old.edges {
-                    if let Some(set) = self.index.preds.get_mut(&e.to) {
-                        set.remove(from);
-                        if set.is_empty() {
-                            self.index.preds.remove(&e.to);
-                        }
-                    }
-                }
-            }
-            // Its own edges are gone, so its successors may have lost their
-            // last way in. Recorded for the caller to prune from.
             self.lost.extend(old.edges.iter().map(|e| e.to.clone()));
             if let Some(count) = self.index.decls.get_mut(&from.func) {
                 *count -= 1;
                 if *count == 0 {
                     self.index.decls.remove(&from.func);
-                }
-            }
-            if let Some(instances) = self.index.decl_instances.get_mut(&from.func) {
-                instances.remove(from);
-                if instances.is_empty() {
-                    self.index.decl_instances.remove(&from.func);
-                }
-            }
-        }
-        if self.incremental_indexes {
-            for file in &old.span_files {
-                if let Some(owners) = self.index.span_owners.get_mut(file) {
-                    owners.remove(owner);
-                    if owners.is_empty() {
-                        self.index.span_owners.remove(file);
-                    }
                 }
             }
         }
@@ -2011,40 +2004,16 @@ impl InstanceGraph {
         self.revision
     }
 
-    /// Derive the update-only reverse indexes from the contributions the
-    /// build installed without them, once, before the first update reads
-    /// them. Every install and uninstall after this keeps them current.
-    pub fn ensure_incremental_indexes(&mut self) {
+    /// Derive the rows a fresh build defers, once, before the first update
+    /// reads them. Every install and uninstall after this keeps them current.
+    fn ensure_incremental_indexes(&mut self) {
         if self.incremental_indexes {
             return;
         }
         self.incremental_indexes = true;
         self.index.subst.clear();
         for (owner, c) in &self.contributions {
-            for (to, subst) in &c.reached {
-                assert_subst(&mut self.index.subst, owner, to, subst);
-            }
-            if let Some(from) = owner.instance() {
-                for e in &c.edges {
-                    self.index
-                        .preds
-                        .entry(e.to.clone())
-                        .or_default()
-                        .insert(from.clone());
-                }
-                self.index
-                    .decl_instances
-                    .entry(from.func)
-                    .or_default()
-                    .insert(from.clone());
-            }
-            for file in &c.span_files {
-                self.index
-                    .span_owners
-                    .entry(*file)
-                    .or_default()
-                    .insert(owner.clone());
-            }
+            self.index.insert_update_rows(owner, c);
         }
     }
 
