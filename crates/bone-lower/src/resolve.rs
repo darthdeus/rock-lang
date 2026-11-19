@@ -15,7 +15,6 @@ std::thread_local! {
 /// Run a lookup and return the namespace facts it read. The immutable std root
 /// is not recorded.
 pub fn with_probes<R>(lookup: impl FnOnce() -> R) -> (R, Vec<ScopeProbe>) {
-    /// Puts the enclosing frame back even if `lookup` unwinds.
     struct Restore(Option<Option<Vec<ScopeProbe>>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -120,7 +119,6 @@ enum Landing {
     Module(u32, Vec<Ustr>),
 }
 
-/// One callee definition or its merged overload family.
 #[derive(Debug, Clone)]
 pub enum CalleeFamily {
     Single(Resolved),
@@ -228,13 +226,11 @@ pub(crate) fn resolve_v1_optional_callee(
     }))
 }
 
-/// What the tiers bind a bare name to in a v1 fragment.
 enum Bound {
     One(Resolved, FamilyTier),
     /// Several distinct definitions at one tier, sorted by key, and which
     /// tier bound them.
     Several(Vec<Resolved>, Via, FamilyTier),
-    /// No tier binds the name.
     Unbound,
 }
 
@@ -467,7 +463,6 @@ fn several(ws: &Workspace, name: Ustr, hits: &[Resolved], via: Via) -> String {
     }
 }
 
-/// Resolve a compiler-owned name or a standard-library definition.
 fn std_definition(ws: &Workspace, name: Ustr) -> Option<Resolved> {
     // The std exports among the intrinsics (the FieldRef family) live in the
     // std view below; the other formers resolve bare even with no stdlib.
@@ -570,7 +565,6 @@ fn all_admit(
     viewers.iter().all(|v| admits(ws, v, vis, pkg, path))
 }
 
-/// What one module offers under one name to a chain of viewers.
 #[derive(Debug, Default)]
 pub struct Members {
     /// Distinct definitions the viewers may name, sorted by key.
@@ -1207,7 +1201,6 @@ pub(crate) fn resolve_member_path(
         return Ok(MemberTarget::Global(key));
     }
 
-    // Walked to a module without hitting a definition.
     Err("path names a module, not a definition".to_string())
 }
 

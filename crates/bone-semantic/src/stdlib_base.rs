@@ -141,7 +141,6 @@ pub fn checked_alone(warm: &std::sync::Arc<[Ast]>) -> Option<Workspace> {
     base().map(StdlibBase::workspace)
 }
 
-/// Any lowering, interface or body error in `ws`.
 fn has_errors(ws: &Workspace) -> bool {
     ws.inferences
         .iter()

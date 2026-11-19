@@ -138,7 +138,6 @@ pub struct LowerCtx<'w, 'm> {
     pub workspace: &'w Workspace,
     pub module: &'m mut hir::Module,
     pub ast: &'w Ast,
-    /// The body under construction; each item starts a fresh one.
     pub(crate) body: Body,
     pub(crate) generics_in_scope: FxHashMap<Ustr, TyId>,
 
@@ -147,7 +146,6 @@ pub struct LowerCtx<'w, 'm> {
     pub(crate) placeholder_param: Option<Idx<BindingInfo>>,
     pub(crate) placeholder_forbidden: bool,
 
-    /// Namespace facts read by this lowering, flushed when it finishes.
     pub(crate) scope_probes: std::cell::RefCell<Vec<bone_core::modules::ScopeProbe>>,
     pub(crate) resolutions: ResolutionCache,
     /// Already-evaluated place parts, keyed by source address, to avoid running
@@ -203,7 +201,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         result
     }
 
-    /// Collect a name error during recoverable body lowering.
     fn recover_name(&self, e: CompilerError) -> Result<(), CompilerError> {
         match self.name_errors.borrow_mut().as_mut() {
             Some(errors) => {
@@ -352,8 +349,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
                     self.use_tree_refs(frag, child, &full, root, out);
                 }
             }
-            // The selector names the operator family under its internal name,
-            // the same path the import binds.
             skull_parser::UseSuffix::Operator { op, alias } => {
                 full.push(op.name);
                 if let Some(target) = self.use_leaf_target(frag, root, &full) {
@@ -375,7 +370,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
-    /// Resolve the target of a `use` leaf, falling back to a module path.
     fn use_leaf_target(
         &self,
         frag: &bone_core::modules::FragmentScope,
@@ -526,7 +520,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         self.module.iterator_families = Some(families);
     }
 
-    /// Record merged members for inference and return the HIR family.
     fn record_family(
         &mut self,
         name: Ustr,
@@ -885,8 +878,6 @@ pub(crate) fn lower_type_expr_in(
         TypeExprKind::Unit => ctx.workspace.builtins.unit(),
         TypeExprKind::Any => ctx.workspace.builtins.any(),
 
-        // Modules-v1 qualified type paths resolve through the namespace tree
-        // to a canonical DefKey; everything downstream keys on it.
         TypeExprKind::Path(path) | TypeExprKind::AppPath { ctor: path, .. } => {
             let frag = ctx.fragment_scope();
             let use_path = use_path_ref(path);
@@ -1024,8 +1015,6 @@ pub(crate) fn lookup_in_scope(
     if let Some(binding) = lookup_local(&ctx.body, start_scope, name.name) {
         return Ok(Expr::Var(binding));
     }
-    // Tier 1 misses: a user fragment resolves through the namespace tiers to a
-    // canonical key; synthetic modules keep the bare name.
     match ctx.resolve_bare_key(name.name, name.span) {
         Ok(key) => Ok(Expr::Global(key)),
         Err(e) => {
@@ -1093,7 +1082,6 @@ pub(crate) fn lower_statement_value(
                     ctx.node_interval(
                         kw_span.offset_range().0,
                         kw_span.offset_range().1,
-                        // TODO: statement id?
                         hir::NodeRef::Expr(e_id),
                     );
                 }
@@ -1189,7 +1177,7 @@ pub(crate) fn lower_statement_value(
         }
 
         StatementKind::NestedFn(f) => {
-            // Name binds in the ENCLOSING scope, BEFORE the ctx.body is lowered, so a
+            // Name binds in the ENCLOSING scope, BEFORE the body is lowered, so a
             // self-recursive call resolves; a not-yet-declared sibling stays a
             // Global (decl-before-use -> mutual recursion rejected in inference).
             let name_binding = ctx.alloc_binding(
@@ -1246,7 +1234,6 @@ pub(crate) fn lower_statement_value(
             let pattern = ctx.body.pattern_arena.alloc(pat);
             let names_only = normalize_binding_wildcards(ctx, pattern, f.span);
 
-            // `for x: T in xs` — the element annotation rides the binding.
             if let Some(te) = &f.ty {
                 let ty = lower_type_expr_local(ctx, a.te(te))?;
                 match ctx.body.pattern_single_bind(pattern) {
@@ -1262,7 +1249,7 @@ pub(crate) fn lower_statement_value(
                 (pattern, None)
             } else {
                 // Loop codegen wants a plain element binding; anything richer
-                // destructures through a `let` at the ctx.body's head.
+                // destructures through a `let` at the body's head.
                 let elem = ctx.alloc_binding(
                     BindingInfo {
                         name: ustr::ustr("__for_elem"),
@@ -1299,9 +1286,7 @@ pub(crate) fn lower_statement_value(
             }
         }
 
-        // `while let P = v { .. }` IS `while true { let P = v else { break } .. }`:
-        // one loop head, one pattern test, one binding rule -- the same
-        // let-else the ctx.body could have written itself.
+        // `while let P = v { .. }` IS `while true { let P = v else { break } .. }`.
         StatementKind::WhileLet(w) => {
             let body_scope = ctx.body.alloc_child_scope(scope);
 
@@ -1508,9 +1493,6 @@ pub(crate) fn lower_expr_value(
                         .method_names
                         .insert(args_range.start(), method.name);
 
-                    // UFCS and the bare call share one visible family: in a v1
-                    // fragment the method name goes through the same tier
-                    // resolution as `method(recv, ..)` would.
                     let (callee_key, family) =
                         ctx.resolve_method_family(method.name, method.span)?;
                     Expr::Call {
@@ -1700,8 +1682,6 @@ pub(crate) fn lower_expr_value(
             }
 
             let target = lower_expr(ctx, scope, a.e(left))?;
-            // The same callee resolution as the binary operator call, so
-            // `a += b` sees what `a + b` sees.
             let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
 
             if lvalue_has_safe_nav(a, left) {
@@ -1807,8 +1787,6 @@ pub(crate) fn lower_expr_value(
             }
         },
 
-        // Modules-v1 value-position paths: `p::f` (callable family/global),
-        // `p::CONST`, `p::E::V`, or `p::Type` used as a value.
         ExprKind::Path(path) => {
             let frag = ctx.fragment_scope();
             let use_path = use_path_ref(path);
@@ -1839,15 +1817,12 @@ pub(crate) fn lower_expr_value(
             }
         }
 
-        // `p::Type { fields }` / `p::E::V { fields }` — a qualified literal.
         ExprKind::PathStructLiteral {
             path,
             bases,
             fields,
         } => {
             let unqualified = path.segments.len() == 1 && !path.from_root;
-            // Unqualified literals allow functional updates; qualified ones
-            // retain their existing no-update rule.
             let base_range = if unqualified {
                 lower_exprs(ctx, scope, bases.iter())?
             } else {
@@ -1860,7 +1835,6 @@ pub(crate) fn lower_expr_value(
                     Ok(t) => t,
                     Err(msg) => {
                         ctx.recover_name(CompilerError::new_with_label(e.span, msg))?;
-                        // The field values may name more unresolved names.
                         for (_, value) in fields.iter() {
                             lower_expr(ctx, scope, a.e(value))?;
                         }
@@ -2153,9 +2127,8 @@ fn function_footprint_lo(annotations: &[Annotation], f: &FunctionDef) -> usize {
 }
 
 /// Lower a fn's generic bounds: `I: Iterator<T>` becomes `Some(elem)` at I's
-/// index. Runs AFTER `declare_generics` so a bound may reference any sibling
-/// generic, including a later one (`<I: Iterator<T>, T>`). The only bound the
-/// compiler knows is the builtin `Iterator<elem>`; anything else rejects.
+/// index. Runs after `declare_generics` so a bound may reference a later
+/// sibling generic (`<I: Iterator<T>, T>`).
 fn lower_generic_bounds(
     ctx: &mut LowerCtx,
     generics: &[skull_parser::Generic],
@@ -2276,7 +2249,6 @@ fn insert_item_body(ctx: &mut LowerCtx, owner: BodyOwner, span: Span) {
     ctx.module.make_lapper(start, stop, owner);
 }
 
-/// Validate the trailing default forms the pre-pass can publish.
 fn validate_generic_defaults(
     what: &str,
     generics: &[skull_parser::Generic],
@@ -2380,7 +2352,6 @@ pub(crate) fn build_function(
         FunctionBody::Ffi(lib) => (None, true, Some(lib), hir::FnBackend::Lua),
     };
     errors.extend(anno_errors);
-    // Needs the body kind, which only exists after the lower above.
     if let Err(e) = bone_core::annotations::validate_param_repr_against_body(
         f.name.name,
         &param_decls,
@@ -2484,8 +2455,7 @@ fn lower_fn_body_into(
         "lower_fn_body_into needs one resolved param ty per AST param"
     );
 
-    // Collected (not pushed to the module) so the caller can key them by ctx.body --
-    // a ctx.body re-lower must REPLACE its errors, not append. See `Module::lowering_errors`.
+    // Returned rather than stored so a body re-lower replaces its errors.
     let mut errors = Vec::new();
     let mut bindings = FxHashMap::default();
     let mut param_defaults = Vec::with_capacity(f.params.len());
@@ -2500,8 +2470,8 @@ fn lower_fn_body_into(
 
     // Defaults are lowered after every param binding exists: a lambda default
     // allocates its own param bindings, which would otherwise land inside the
-    // `first..=last` param range below. Like the ctx.body, they report every
-    // name they cannot resolve, and such a name fails the ctx.body.
+    // `first..=last` param range below. An unresolved name in a default fails
+    // the body.
     let outer = ctx.name_errors.replace(Some(Vec::new()));
     let lowered = f.params.iter().try_for_each(|p| {
         let param_default = match &p.default {
@@ -2582,9 +2552,6 @@ pub fn relower_function_in_place(
         && module.functions[fid].generics.len() == f.generics.len();
 
     if !sig_reusable {
-        // Defensive: the signature actually changed (classify should have tiered
-        // this as an Interface edit). Fall back to a full rebuild of the fn --
-        // correctness over the no-leak optimization.
         let high_water = module.lower_var_high_water;
         let mut ctx = LowerCtx::new(ws, module, a, high_water);
 
@@ -2596,9 +2563,6 @@ pub fn relower_function_in_place(
         return Ok(install_relowered_body(ctx.module, owner, body, errors));
     }
 
-    // Reuse the existing signature's resolved param types + generic `TyId`s
-    // (snapshot before the `&mut` borrow). `lower_fn_body_into` allocates only
-    // into the fresh `Body`, never the module arena.
     let param_tys: Vec<TyId> = module.functions[fid]
         .param_decls
         .iter()
@@ -2689,7 +2653,6 @@ pub fn lower_struct_def(
     Ok(())
 }
 
-/// The fields of `s`, with their defaults lowered into `body`.
 fn lower_struct_fields(
     ctx: &mut LowerCtx,
     s: &skull_parser::StructDef,
@@ -3087,11 +3050,8 @@ fn reject_mutable_global_if_forbidden(
     );
 }
 
-/// A `globals = "none"` package cannot hide writes in a native Lua body. The
-/// body has no Rock expression arena from which the state checker can derive a
-/// write set, so the package boundary rejects the opaque declaration instead
-/// of pretending it is state-free. JavaScript inline bodies target a separate
-/// backend and are outside this Lua state boundary.
+/// A `globals = "none"` package cannot hide writes in a native Lua body: the
+/// state checker has no expression arena to derive its write set from.
 fn reject_inline_lua_if_forbidden(a: &Ast, f: &FunctionDef) -> Result<(), CompilerError> {
     if f.is_synthetic
         || !matches!(a.global_policy, skull_parser::GlobalPolicy::None)
@@ -3765,7 +3725,6 @@ fn lower_named_call(
     args_range: IdxRange<Expr>,
     generic_args: IdxRange<TypeExpr>,
 ) -> Result<Expr, CompilerError> {
-    // A local value shadows the visible callable family.
     let local = lookup_local(&ctx.body, scope, name.name);
     let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
         // Keep an unbound call in HIR so inference can report the missing

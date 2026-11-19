@@ -92,7 +92,6 @@ impl Effect {
     }
 }
 
-/// One argument of a call, as the caller sees it.
 #[derive(Clone)]
 struct Arg {
     expr: Idx<Expr>,
@@ -126,7 +125,6 @@ enum CallSite {
     Unknown,
 }
 
-/// A function body's calls and its own structural writes.
 struct FnFacts {
     direct: Effect,
     calls: Vec<(Idx<Expr>, CallSite)>,

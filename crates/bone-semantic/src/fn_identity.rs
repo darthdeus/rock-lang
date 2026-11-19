@@ -45,7 +45,6 @@ fn own_generic(
     }
 }
 
-/// Positions aligned with `function.generics`.
 fn generic_vars(ws: &Workspace, function: &Function, body: &Body) -> Vec<Option<VarId>> {
     function
         .generics
@@ -102,7 +101,6 @@ fn facts(ws: &Workspace, function: &Function, body: &Body, bi: &BodyInference) -
     Facts { compared, forwards }
 }
 
-/// The inferred bodies of one module.
 fn module_bodies<'a>(
     ws: &'a Workspace,
     module: &'a crate::hir::Module,

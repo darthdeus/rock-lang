@@ -1186,13 +1186,8 @@ fn for_each_def_item<'a>(
 }
 
 /// What one source file contributes to the namespace tree, read from its
-/// un-expanded AST: its owning package, its `mod` header, and
-/// every item the tree is built from -- each `use`, each inline `mod` block
-/// with its own items, and each definition's name, kind, declared visibility
-/// and span. Signatures, fields and bodies are not part of it, so an edit to
-/// them keeps the contribution. The incremental session keeps one per file
-/// and re-assembles the tree from them after an edit, re-reading only the
-/// edited file.
+/// un-expanded AST. Signatures, fields and bodies are not part of it, so an
+/// edit to them keeps the contribution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FragmentContribution {
     pub file: ustr::Ustr,
@@ -1201,11 +1196,8 @@ pub struct FragmentContribution {
     pub items: Vec<ScopeItem>,
 }
 
-/// One item of a [`FragmentContribution`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScopeItem {
-    /// An inline `mod` block: the item's declared visibility and span, the
-    /// block's span, and the block's own items.
     Module {
         name: ustr::Ustr,
         vis: Option<skull_parser::Visibility>,
@@ -1214,8 +1206,6 @@ pub enum ScopeItem {
         items: Vec<ScopeItem>,
     },
     Use(skull_parser::UseDecl),
-    /// An owned definition: bare name, kind (`owned_name_and_kind`),
-    /// declared visibility and item span.
     Def {
         name: ustr::Ustr,
         kind: DefKind,
@@ -1923,7 +1913,6 @@ pub fn check_module_incremental(
         }
     }
 
-    // The table holds each body's inference inline, and lives to the end.
     result.per_fn.shrink_to_fit();
     Ok(result)
 }
