@@ -5,7 +5,7 @@
 //!   variant);
 //! - `extern(js)` emits a bare driver-/runtime-provided call, no definition;
 //! - a lua-only non-host-mapped fn reached from JS still rejects.
-use crate::common::{node, ws_with};
+use crate::common::ws_with;
 
 #[test]
 fn extern_js_emits_bare_call_no_def() {
@@ -87,13 +87,7 @@ fn main() {
         skull_codegen_js::JS_GLOBALS_RUNTIME,
         prog,
     );
-    let output = node().args(["-e", &source]).output().expect("node");
-    assert!(
-        output.status.success(),
-        "node failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = crate::common::run_node(&source);
     assert!(
         stdout.starts_with("unwrap() called on null value\nError\n"),
         "the JS failure lost its message or traceback: {stdout:?}"

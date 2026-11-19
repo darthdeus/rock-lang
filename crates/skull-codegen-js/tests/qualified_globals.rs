@@ -2,27 +2,10 @@ use bone_core::hir::BodyOwner;
 use bone_core::workspace::Workspace;
 use skull_mir::mir::FuncRef;
 
+use crate::common::run_file;
+
 fn workspace(source: &str) -> Workspace {
-    let mut modules: Vec<_> = rock_stdlib::stdlib_files()
-        .iter()
-        .map(|file| {
-            skull_parser::parse_module_clean(
-                file.contents,
-                ustr::Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str()),
-            )
-            .expect("stdlib parse")
-        })
-        .collect();
-    let mut module = skull_parser::parse_module_clean(source, ustr::Ustr::from("<test>"))
-        .expect("fixture parse");
-    module.package = Some(skull_parser::PackageTag {
-        id: 0,
-        self_name: "app".to_string(),
-        identity_storage: Default::default(),
-        root: String::new(),
-    });
-    modules.push(module);
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic pass")
+    crate::common::ws_of_modules(vec![crate::common::package_module("app", "<test>", source)])
 }
 
 fn root(ws: &Workspace) -> FuncRef {
@@ -37,30 +20,6 @@ fn root(ws: &Workspace) -> FuncRef {
         module: mid,
         func: fid,
     }
-}
-
-pub(crate) fn run(tool: &str, program: &str) -> String {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "skull_qualified_globals_{}_{serial}_{tool}",
-        std::process::id()
-    ));
-    std::fs::write(&path, program).expect("write program");
-    let out = crate::common::tool(tool)
-        .arg(&path)
-        .output()
-        .expect("run tool");
-    let _ = std::fs::remove_file(path);
-    assert!(
-        out.status.success(),
-        "{tool} failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout)
-        .expect("utf8 stdout")
-        .trim()
-        .to_string()
 }
 
 fn js_runtime() -> String {
@@ -78,27 +37,24 @@ fn js_runtime() -> String {
 }
 
 #[test]
-fn qualified_enum_display_globals_match_luajit() {
-    differential(
-        "enum Shade { Dark, Light }\n\
-         fn root() -> string { let shade = Shade::Light; \"{shade}\" }",
-        "app::Shade::Light",
-    );
-    differential(
-        "enum Choice { Empty, Full(string) }\n\
-         fn root() -> string { let choice = Choice::Empty; \"{choice}\" }",
-        "app::Choice::Empty",
-    );
-    differential(
-        r#"fn root() -> string { __rock_quote_string("line\n\t\r\"\\") }"#,
-        r#""line\n\t\r\"\\""#,
-    );
-}
-
-#[test]
-fn clone_into_preserves_argument_effects_and_owns_mutable_storage() {
-    differential(
-        r#"
+fn qualified_programs_match_luajit() {
+    for (source, expected) in [
+        (
+            "enum Shade { Dark, Light }\n\
+             fn root() -> string { let shade = Shade::Light; \"{shade}\" }",
+            "app::Shade::Light",
+        ),
+        (
+            "enum Choice { Empty, Full(string) }\n\
+             fn root() -> string { let choice = Choice::Empty; \"{choice}\" }",
+            "app::Choice::Empty",
+        ),
+        (
+            r#"fn root() -> string { __rock_quote_string("line\n\t\r\"\\") }"#,
+            r#""line\n\t\r\"\\""#,
+        ),
+        (
+            r#"
 struct Counter { calls: int }
 fn destination(counter: Counter) -> Map<string, int> {
     counter.calls = counter.calls + 1
@@ -112,8 +68,31 @@ fn root() -> int {
     return counter.calls * 1000 + original[0] * 100 + copy[0]
 }
 "#,
-        "1901",
-    );
+            "1901",
+        ),
+        (
+            "global BASE: int = 7\n\
+             global DERIVED: int = BASE + 4\n\
+             fn root() -> int { DERIVED = DERIVED + 1; return DERIVED }",
+            "12",
+        ),
+        (
+            "const BASE: int = 7\n\
+             const DERIVED: int = BASE + 4\n\
+             fn root() -> int { BASE + DERIVED }",
+            "18",
+        ),
+        (
+            "nobox value Pair { x: int, y: int }\n\
+             const BASE: int = 7\n\
+             const PAIR: Pair = Pair { x: BASE, y: BASE + 1 }\n\
+             const DERIVED: int = PAIR.x + PAIR.y\n\
+             fn root() -> int { DERIVED + BASE + PAIR.y }",
+            "30",
+        ),
+    ] {
+        differential(source, expected);
+    }
 }
 
 fn lua_value(ws: &Workspace) -> String {
@@ -122,7 +101,7 @@ fn lua_value(ws: &Workspace) -> String {
     let lua = skull::mir_emit::emit_workspace_mir(ws, fr.module)
         .expect("Lua emission")
         .lua;
-    run("luajit", &format!("{lua}\nprint({lua_name}())"))
+    run_file("luajit", &format!("{lua}\nprint({lua_name}())"))
 }
 
 fn differential(source: &str, expected: &str) {
@@ -132,43 +111,11 @@ fn differential(source: &str, expected: &str) {
     assert_eq!(lua_out, expected, "LuaJIT oracle");
     let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(fr, "root".to_string())])
         .expect("JS emission");
-    let js_out = run(
+    let js_out = run_file(
         "node",
         &format!("{}{js}\nconsole.log(root());", js_runtime()),
     );
     assert_eq!(js_out, lua_out, "qualified globals must agree with LuaJIT");
-}
-
-#[test]
-fn qualified_mutable_global_initializers_match_luajit() {
-    differential(
-        "global BASE: int = 7\n\
-         global DERIVED: int = BASE + 4\n\
-         fn root() -> int { DERIVED = DERIVED + 1; return DERIVED }",
-        "12",
-    );
-}
-
-#[test]
-fn qualified_const_globals_match_luajit() {
-    differential(
-        "const BASE: int = 7\n\
-         const DERIVED: int = BASE + 4\n\
-         fn root() -> int { BASE + DERIVED }",
-        "18",
-    );
-}
-
-#[test]
-fn qualified_nobox_const_globals_match_luajit() {
-    differential(
-        "nobox value Pair { x: int, y: int }\n\
-         const BASE: int = 7\n\
-         const PAIR: Pair = Pair { x: BASE, y: BASE + 1 }\n\
-         const DERIVED: int = PAIR.x + PAIR.y\n\
-         fn root() -> int { DERIVED + BASE + PAIR.y }",
-        "30",
-    );
 }
 
 #[test]
@@ -211,7 +158,7 @@ fn qualified_const_overlay_reinitializes_dependents() {
         .expect_overlay();
         let name =
             skull_mir::mangle::mangle_fn(&before, &before.module(fr.module).functions[fr.func]);
-        let output = run(
+        let output = run_file(
             "node",
             &format!(
                 "{}{}\nconsole.log({name}());\n{overlay}\nconsole.log({name}());",

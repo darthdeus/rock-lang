@@ -89,18 +89,10 @@ fn map_get_key_is_checked_independently_of_native_buffer_get() {
 }
 
 fn run_root(src: &str, runtime: &str, check: &str) {
-    let ws = ws_with(src);
-    let runtime = format!("{}\n{runtime}", skull_codegen_js::JS_VALUE_INTEGER_CHECK);
-    let js = crate::common::emit_closure(&ws, "root").unwrap();
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(format!("{runtime}\n{js}\n{check}"))
-        .output()
-        .expect("node");
-    assert!(
-        out.status.success(),
-        "{}\n{js}",
-        String::from_utf8_lossy(&out.stderr)
+    let js = crate::common::emit_closure(&ws_with(src), "root").unwrap();
+    crate::common::run_js(
+        &[skull_codegen_js::JS_VALUE_INTEGER_CHECK, "\n", runtime],
+        &format!("{js}\n{check}"),
     );
 }
 

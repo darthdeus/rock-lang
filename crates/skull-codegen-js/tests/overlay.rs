@@ -1,22 +1,4 @@
-use crate::common::{replace_once, run_node, ws_with};
-use bone_core::hir::BodyOwner;
-
-fn global(
-    ws: &bone_core::workspace::Workspace,
-    name: &str,
-) -> (
-    bone_core::prelude::ModuleId,
-    bone_core::prelude::Idx<bone_core::hir::GlobalDef>,
-) {
-    let mid = crate::common::test_mid(ws);
-    let (gid, _) = ws
-        .module(mid)
-        .globals
-        .iter()
-        .find(|(_, global)| skull_mir::mangle::declared_name(global.name.as_str()) == name)
-        .expect("global");
-    (mid, gid)
-}
+use crate::common::{overlay_of, replace_once, run_node, ws_with};
 
 fn js_runtime() -> String {
     format!(
@@ -26,27 +8,24 @@ fn js_runtime() -> String {
     )
 }
 
-fn overlay_after_edit(
-    before: &str,
-    after: &str,
-    edited: impl FnOnce(&bone_core::workspace::Workspace) -> (bone_core::prelude::ModuleId, BodyOwner),
-) -> (String, String) {
-    let before = ws_with(before);
-    let after = ws_with(after);
-    let mid = crate::common::test_mid(&before);
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let overlay = skull_codegen_js::emit::emit_overlay(&after, mid, &mut cache, &[edited(&after)])
-        .unwrap()
-        .expect_overlay();
-    (program.program, overlay)
+/// Run `program` after the globals and call runtimes, then `tail`.
+fn run_live(program: &str, tail: &str) -> String {
+    run_node(&format!(
+        "{}\nvar __G = {{}};\n{program}\n{tail}",
+        js_runtime()
+    ))
+    .trim()
+    .to_string()
 }
 
-fn function_change(
-    ws: &bone_core::workspace::Workspace,
-    name: &str,
-) -> (bone_core::prelude::ModuleId, BodyOwner) {
-    let f = crate::common::test_fn_ref(ws, name);
-    (f.module, BodyOwner::Function(f.func))
+/// The full program for `before` and the overlay that moves it to `after`,
+/// given the definitions the edit changed.
+fn overlay_after_edit(before: &str, after: &str, edited: &[&str]) -> (String, String) {
+    let before = ws_with(before);
+    let mid = crate::common::test_mid(&before);
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let overlay = overlay_of(&ws_with(after), mid, &mut cache, edited);
+    (program.program, overlay)
 }
 
 #[test]
@@ -75,40 +54,19 @@ fn main() {{ run_wire_systems() }}
         )
     };
     let before = ws_with(&source(1, 10, 7));
-    let unrelated = ws_with(&source(1, 10, 8));
-    let direct = ws_with(&source(1, 11, 8));
-    let transitive = ws_with(&source(4, 11, 8));
-    let mid = crate::common::test_fn_ref(&before, "main").module;
+    let mid = crate::common::test_mid(&before);
     let (program, mut cache) =
         skull_codegen_js::emit::emit_program_cached(&before, mid).expect("initial JS program");
-    let unrelated_fn = crate::common::test_fn_ref(&unrelated, "unrelated");
-    let direct_global = global(&direct, "DIRECT");
-    let base_global = global(&transitive, "BASE");
-    let overlay_unrelated = skull_codegen_js::emit::emit_overlay(
-        &unrelated,
-        mid,
-        &mut cache,
-        &[(unrelated_fn.module, BodyOwner::Function(unrelated_fn.func))],
-    )
-    .expect("unrelated overlay")
-    .expect_overlay();
-    let overlay_direct = skull_codegen_js::emit::emit_overlay(
-        &direct,
-        mid,
-        &mut cache,
-        &[(direct_global.0, BodyOwner::Global(direct_global.1))],
-    )
-    .expect("direct overlay")
-    .expect_overlay();
-    let overlay_transitive = skull_codegen_js::emit::emit_overlay(
-        &transitive,
-        mid,
-        &mut cache,
-        &[(base_global.0, BodyOwner::Global(base_global.1))],
-    )
-    .expect("transitive overlay")
-    .expect_overlay();
-    for overlay in [&overlay_unrelated, &overlay_direct, &overlay_transitive] {
+    let overlays = [
+        ((1, 10, 8), "unrelated"),
+        ((1, 11, 8), "DIRECT"),
+        ((4, 11, 8), "BASE"),
+    ]
+    .map(|((base, direct, unrelated), edited)| {
+        let after = ws_with(&source(base, direct, unrelated));
+        overlay_of(&after, mid, &mut cache, &[edited])
+    });
+    for overlay in &overlays {
         assert_eq!(
             overlay.matches("run_wire_systems();").count(),
             1,
@@ -139,72 +97,58 @@ driver_before = state("DRIVER_RUNS");
 run_wires();
 console.log("transitive:" + state("PLAIN_RUNS") + ":" + state("DIRECT_RUNS") + ":" + state("TRANSITIVE_RUNS") + ":" + state("TRANSITIVE_VALUE") + ":" + (state("DRIVER_RUNS") - driver_before));
 "#;
-    let source = format!(
-        "{}\nvar __G = {{}};\n{}\nvar OVERLAY_UNRELATED = {:?};\nvar OVERLAY_DIRECT = {:?};\nvar OVERLAY_TRANSITIVE = {:?};\n{}",
-        js_runtime(),
-        program.program,
-        overlay_unrelated,
-        overlay_direct,
-        overlay_transitive,
-        driver
+    let [unrelated, direct, transitive] = &overlays;
+    let output = run_live(
+        &program.program,
+        &format!(
+            "var OVERLAY_UNRELATED = {unrelated:?};\nvar OVERLAY_DIRECT = {direct:?};\n\
+             var OVERLAY_TRANSITIVE = {transitive:?};\n{driver}"
+        ),
     );
-    let output = run_node(&source);
     assert_eq!(
-        output.trim(),
+        output,
         "initial:1:1:1:10:2\nunrelated:2:1:1:8:1\ndirect:3:2:1:11:1\ntransitive:4:2:2:5:1"
     );
 }
 
 #[test]
-fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
-    let output = run_node(&format!(
-        "{}\nvar __G = {{}};\n\
-         __rock_code_slot_begin();\n\
-         __rock_code_slot_stage_one(\"probe\", function() {{ return 1; }}, \"abi\");\n\
-         __rock_definition_plan_stage({{panels: {{len: 1, _data: [{{key: \"old\"}}]}}}});\n\
-         __rock_code_slot_publish();\n\
-         var oldPlan = __G.__ROCK_DEFINITION_PLAN;\n\
-         var ok = false;\n\
-         try {{\n\
-           __rock_code_slot_begin();\n\
-           __rock_definition_plan_stage({{panels: {{len: 2, _data: []}}}});\n\
-           __rock_code_slot_stage_one(\"probe\", function() {{ return 2; }}, \"changed-abi\");\n\
-           __rock_code_slot_publish();\n\
-         }} catch (e) {{ ok = true; }}\n\
-         __rock_code_slot_abort();\n\
-         console.log(ok && __rock_definition_plan_pending === null\n\
-           && __G.__ROCK_DEFINITION_PLAN === oldPlan\n\
-           && oldPlan.panels.len === 1\n\
-           && __rock_code_slot_ref(\"probe\").current_body() === 1);",
-        js_runtime()
-    ));
-    assert_eq!(output.trim(), "true");
-}
-
-#[test]
-fn failed_definition_materialization_keeps_the_old_plan_and_clears_pending() {
-    let source = format!("{}\n", js_runtime())
-        + r#"
-var __G = {};
-__rock_code_slot_begin();
-__rock_code_slot_stage_one("probe", function() { return 1; }, "abi");
-__rock_definition_plan_stage({widgets: {len: 1, _data: [{key: "old", factory: function() { return {key: "old"}; }}]}});
+fn failed_code_slot_publication_keeps_the_old_definition_plan() {
+    for (initial_plan, failing_transaction, old_plan_intact) in [
+        (
+            r#"{panels: {len: 1, _data: [{key: "old"}]}}"#,
+            r#"__rock_definition_plan_stage({panels: {len: 2, _data: []}});
+  __rock_code_slot_stage_one("probe", function() { return 2; }, "changed-abi");"#,
+            "oldPlan.panels.len === 1",
+        ),
+        (
+            r#"{widgets: {len: 1, _data: [{key: "old", factory: function() { return {key: "old"}; }}]}}"#,
+            r#"__rock_definition_plan_stage({widgets: {len: 1, _data: [{key: "new", factory: function() { throw new Error("materialization failed"); }}]}});"#,
+            r#"oldPlan.widgets._data[0].definition.key === "old""#,
+        ),
+    ] {
+        let output = run_live(
+            "",
+            &format!(
+                r#"__rock_code_slot_begin();
+__rock_code_slot_stage_one("probe", function() {{ return 1; }}, "abi");
+__rock_definition_plan_stage({initial_plan});
 __rock_code_slot_publish();
 var oldPlan = __G.__ROCK_DEFINITION_PLAN;
 var ok = false;
-try {
+try {{
   __rock_code_slot_begin();
-  __rock_definition_plan_stage({widgets: {len: 1, _data: [{key: "new", factory: function() { throw new Error("materialization failed"); }}]}});
+  {failing_transaction}
   __rock_code_slot_publish();
-} catch (e) { ok = true; }
+}} catch (e) {{ ok = true; }}
 __rock_code_slot_abort();
 console.log(ok && __rock_definition_plan_pending === null
   && __G.__ROCK_DEFINITION_PLAN === oldPlan
-  && oldPlan.widgets._data[0].definition.key === "old"
-  && __rock_code_slot_ref("probe").current_body() === 1);
-"#;
-    let output = run_node(&source);
-    assert_eq!(output.trim(), "true");
+  && {old_plan_intact}
+  && __rock_code_slot_ref("probe").current_body() === 1);"#
+            ),
+        );
+        assert_eq!(output, "true", "{failing_transaction}");
+    }
 }
 
 #[test]
@@ -222,97 +166,71 @@ fn main() {{}}
 "#
         )
     };
-    let before = ws_with(&source("alpha", 1));
-    let body = ws_with(&source("alpha", 2));
-    let membership = ws_with(&source("beta", 2));
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid)
-        .expect("initial typed catalog program");
-    let changed = crate::common::test_fn_ref(&body, "make_alpha");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &body,
-        mid,
-        &mut cache,
-        &[(changed.module, BodyOwner::Function(changed.func))],
-    )
-    .expect("typed catalog body overlay")
-    .expect_overlay();
+    let (_, overlay) =
+        overlay_after_edit(&source("alpha", 1), &source("alpha", 2), &["make_alpha"]);
     assert!(!overlay.contains("__rock_definition_plan_stage("));
 
-    let (_, mut structural_cache) = skull_codegen_js::emit::emit_program_cached(&before, mid)
-        .expect("structural typed catalog program");
-    let changed = crate::common::test_fn_ref(&membership, "make_alpha");
+    let before = ws_with(&source("alpha", 1));
+    let membership = ws_with(&source("beta", 2));
+    let mid = crate::common::test_mid(&before);
+    let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let reload = skull_codegen_js::emit::emit_overlay(
+        &membership,
+        mid,
+        &mut cache,
+        &[crate::common::test_owner(&membership, "make_alpha")],
+    )
+    .expect("typed catalog membership check");
     assert!(matches!(
-        skull_codegen_js::emit::emit_overlay(
-            &membership,
-            mid,
-            &mut structural_cache,
-            &[(changed.module, BodyOwner::Function(changed.func))],
-        )
-        .expect("typed catalog membership check"),
+        reload,
         skull_codegen_js::emit::JsReload::FullRequired
     ));
 }
 
 #[test]
-fn const_value_overlay_redefines_users_without_reinitializing_state() {
-    const SOURCE: &str = "const WISP_COUNT: int = 5\n\
-        global STATE: int = 7\n\
-        @nomangle fn hot() -> int { WISP_COUNT }\n\
-        fn main() { print(hot()) }\n";
-    let after_source = replace_once(SOURCE, "WISP_COUNT: int = 5", "WISP_COUNT: int = 10");
-    let (program, overlay) = overlay_after_edit(SOURCE, &after_source, |ws| {
-        let (mid, gid) = global(ws, "WISP_COUNT");
-        (mid, BodyOwner::Global(gid))
-    });
-
-    let output = run_node(&format!(
-        "{}\nvar __G = {{}};\n{}\n__rock_globals[\"global:<test>::STATE::value\"] = 99;\n{}\nconsole.log(__rock_globals[\"global:<test>::STATE::value\"] + ':' + hot());",
-        js_runtime(),
-        program,
-        overlay
-    ));
-    assert_eq!(output.trim(), "99:10");
-}
-
-#[test]
-fn const_value_overlay_reinitializes_dependent_constants() {
-    const SOURCE: &str = "const BASE: int = 5\n\
-        const COUNT: int = BASE + 1\n\
-        @nomangle fn hot() -> int { COUNT }\n\
-        fn main() { print(hot()) }\n";
-    let after_source = replace_once(SOURCE, "BASE: int = 5", "BASE: int = 10");
-    let (program, overlay) = overlay_after_edit(SOURCE, &after_source, |ws| {
-        let (mid, gid) = global(ws, "BASE");
-        (mid, BodyOwner::Global(gid))
-    });
-
-    let output = run_node(&format!(
-        "{}\nvar __G = {{}};\n{}\n{}\nconsole.log(hot());",
-        js_runtime(),
-        program,
-        overlay
-    ));
-    assert_eq!(output.trim(), "11");
-}
-
-#[test]
-fn overlay_redefines_a_function_without_reinitializing_global_state() {
-    const SOURCE: &str = "global STATE: int = 7\n\
-        @nomangle fn hot() -> int { 1 }\n\
-        fn main() { print(hot()) }\n";
-    let after_source = replace_once(SOURCE, "fn hot() -> int { 1 }", "fn hot() -> int { 2 }");
-    let (program, overlay) =
-        overlay_after_edit(SOURCE, &after_source, |ws| function_change(ws, "hot"));
-
-    assert!(!overlay.contains("__rock_globals[\"global:<test>::STATE::value\"] = "));
-    let output = run_node(&format!(
-        "{}\n{}\n__rock_globals[\"global:<test>::STATE::value\"] = 99;\n{}\nconsole.log(__rock_globals[\"global:<test>::STATE::value\"] + ':' + hot());",
-        js_runtime(),
-        program,
-        overlay
-    ));
-    assert_eq!(output.trim(), "99:2");
+fn edits_redefine_users_without_reinitializing_state() {
+    const STATE: &str = "__rock_globals[\"global:<test>::STATE::value\"]";
+    for (source, old, new, edited, expected) in [
+        (
+            "const WISP_COUNT: int = 5\n\
+             global STATE: int = 7\n\
+             @nomangle fn hot() -> int { WISP_COUNT }\n\
+             fn main() { print(hot()) }\n",
+            "WISP_COUNT: int = 5",
+            "WISP_COUNT: int = 10",
+            "WISP_COUNT",
+            "99:10",
+        ),
+        (
+            "const BASE: int = 5\n\
+             const COUNT: int = BASE + 1\n\
+             global STATE: int = 7\n\
+             @nomangle fn hot() -> int { COUNT }\n\
+             fn main() { print(hot()) }\n",
+            "BASE: int = 5",
+            "BASE: int = 10",
+            "BASE",
+            "99:11",
+        ),
+        (
+            "global STATE: int = 7\n\
+             @nomangle fn hot() -> int { 1 }\n\
+             fn main() { print(hot()) }\n",
+            "fn hot() -> int { 1 }",
+            "fn hot() -> int { 2 }",
+            "hot",
+            "99:2",
+        ),
+    ] {
+        let after = replace_once(source, old, new);
+        let (program, overlay) = overlay_after_edit(source, &after, &[edited]);
+        assert!(!overlay.contains(&format!("{STATE} = ")), "{overlay}");
+        let output = run_live(
+            &program,
+            &format!("{STATE} = 99;\n{overlay}\nconsole.log({STATE} + ':' + hot());"),
+        );
+        assert_eq!(output, expected, "{edited}");
+    }
 }
 
 #[test]
@@ -336,30 +254,15 @@ fn retained_named_and_capture_free_values_refresh_through_slots() {
              fn main() {{ start(); invoke() }}\n"
         )
     };
-    let before = ws_with(&source(1, 10));
-    let after = ws_with(&source(2, 20));
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let named = crate::common::test_fn_ref(&after, "named");
-    let free = crate::common::test_fn_ref(&after, "make_free");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[
-            (named.module, BodyOwner::Function(named.func)),
-            (free.module, BodyOwner::Function(free.func)),
-        ],
-    )
-    .unwrap()
-    .expect_overlay();
-    let output = run_node(&format!(
-        "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
-        js_runtime(),
-        program.program,
-        overlay
-    ));
-    assert_eq!(output.trim(), "14\n25");
+    let (program, overlay) =
+        overlay_after_edit(&source(1, 10), &source(2, 20), &["named", "make_free"]);
+    let output = run_live(
+        &program,
+        &format!(
+            "start();\nconsole.log(invoke());\n(0, eval)({overlay:?});\nconsole.log(invoke());"
+        ),
+    );
+    assert_eq!(output, "14\n25");
     assert!(overlay.contains("__rock_code_slot_stage_one"));
 }
 
@@ -381,28 +284,21 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
              fn main() {{ start(); invoke() }}\n"
         )
     };
-    let before = ws_with(&source(0));
-    let after = ws_with(&source(10));
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let make = crate::common::test_fn_ref(&after, "make");
-    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, make);
-    let output = run_node(&format!(
-        "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
-        js_runtime(),
-        program.program,
-        overlay
-    ));
-    assert_eq!(output.trim(), "1\n12");
+    let (program, overlay) = overlay_after_edit(&source(0), &source(10), &["make"]);
+    let output = run_live(
+        &program,
+        &format!(
+            "start();\nconsole.log(invoke());\n(0, eval)({overlay:?});\nconsole.log(invoke());"
+        ),
+    );
+    assert_eq!(output, "1\n12");
     assert!(overlay.contains("__rock_code_slot_stage_one"));
 
-    let (fresh, _) = skull_codegen_js::emit::emit_program_cached(&after, mid).unwrap();
-    let fresh_output = run_node(&format!(
-        "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());",
-        js_runtime(),
-        fresh.program
-    ));
-    assert_eq!(fresh_output.trim(), "11");
+    let after = ws_with(&source(10));
+    let fresh = skull_codegen_js::emit::emit_program(&after, crate::common::test_mid(&after))
+        .unwrap()
+        .program;
+    assert_eq!(run_live(&fresh, "start();\nconsole.log(invoke());"), "11");
 }
 
 #[test]
@@ -416,36 +312,25 @@ fn wire_failure_after_publication_keeps_the_candidate_code_ref_live() {
              fn main() {{ start(); run_wire_systems() }}\n"
         )
     };
-    let before = ws_with(&source(0, ""));
-    let after = ws_with(&source(10, "error(\"late overlay failure\")"));
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let make = crate::common::test_fn_ref(&after, "make");
-    let wire = crate::common::test_fn_ref(&after, "run_wire_systems");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[
-            (make.module, BodyOwner::Function(make.func)),
-            (wire.module, BodyOwner::Function(wire.func)),
-        ],
-    )
-    .unwrap()
-    .expect_overlay();
+    let (program, overlay) = overlay_after_edit(
+        &source(0, ""),
+        &source(10, "error(\"late overlay failure\")"),
+        &["make", "run_wire_systems"],
+    );
     assert!(overlay.contains("__rock_code_slot_stage_one"));
     assert!(
         overlay.contains("run_wire_systems();"),
         "overlay must contain the later top-level hook:\n{overlay}"
     );
-
-    let output = run_node(&format!(
-        "{}\nvar __G = {{}};\n{}\nstart();\ntry {{ (0, eval)({:?}); }} catch (e) {{ console.log(false); }}\nconsole.log(__rock_code_slot_stage === null);\nconsole.log(__rock_call(__rock_globals[\"global:<test>::CALLBACK::value\"]));",
-        js_runtime(),
-        program.program,
-        overlay
-    ));
-    assert_eq!(output.trim(), "false\ntrue\n10");
+    let output = run_live(
+        &program,
+        &format!(
+            "start();\ntry {{ (0, eval)({overlay:?}); }} catch (e) {{ console.log(false); }}\n\
+             console.log(__rock_code_slot_stage === null);\n\
+             console.log(__rock_call(__rock_globals[\"global:<test>::CALLBACK::value\"]));"
+        ),
+    );
+    assert_eq!(output, "false\ntrue\n10");
 }
 
 #[test]
@@ -460,64 +345,45 @@ fn successive_overlays_accumulate_changed_function_definitions() {
         "fn second() -> int { 20 }",
     );
     let v0 = ws_with(SOURCE);
-    let v1 = ws_with(&v1_source);
-    let v2 = ws_with(&v2_source);
-    let mid = crate::common::test_fn_ref(&v0, "main").module;
+    let mid = crate::common::test_mid(&v0);
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&v0, mid).unwrap();
-    let first = crate::common::test_fn_ref(&v1, "first");
-    crate::common::overlay_of_fn(&v1, mid, &mut cache, first);
-    let second = crate::common::test_fn_ref(&v2, "second");
-    let overlay = crate::common::overlay_of_fn(&v2, mid, &mut cache, second);
-
-    let output = run_node(&format!(
-        "{}\n{}\nconsole.log(first() + ':' + second());",
-        js_runtime(),
-        overlay
-    ));
-    assert_eq!(output.trim(), "2:20");
+    overlay_of(&ws_with(&v1_source), mid, &mut cache, &["first"]);
+    let overlay = overlay_of(&ws_with(&v2_source), mid, &mut cache, &["second"]);
+    assert_eq!(
+        run_live(&overlay, "console.log(first() + ':' + second());"),
+        "2:20"
+    );
 }
 
 #[test]
-fn changed_static_initializer_resets_only_its_live_cell() {
+fn static_initializer_edits_reset_or_drop_only_their_cells() {
     const SOURCE: &str = "@nomangle fn hot() -> int {\n\
         static count = 1\n\
         count += 1\n\
         count\n\
     }\n\
     fn main() { print(hot()) }\n";
-    let after_source = replace_once(SOURCE, "static count = 1", "static count = 10");
-    let (program, overlay) =
-        overlay_after_edit(SOURCE, &after_source, |ws| function_change(ws, "hot"));
+    let changed = replace_once(SOURCE, "static count = 1", "static count = 10");
+    let (program, overlay) = overlay_after_edit(SOURCE, &changed, &["hot"]);
+    assert_eq!(
+        run_live(
+            &program,
+            &format!("hot(); hot();\n{overlay}\nconsole.log(hot());")
+        ),
+        "11"
+    );
 
-    let output = run_node(&format!(
-        "{}\n{}\nhot(); hot();\n{}\nconsole.log(hot());",
-        js_runtime(),
-        program,
-        overlay
-    ));
-    assert_eq!(output.trim(), "11");
-}
-
-#[test]
-fn a_body_edit_that_removes_a_static_drops_its_cells() {
-    let before = "@nomangle fn hot() -> int {\n\
-             static count = 1\n\
-             count += 1\n\
-             count\n\
-         }\n\
-         fn main() { print(hot()) }\n";
-    let after = "@nomangle fn hot() -> int { 7 }\nfn main() { print(hot()) }\n";
-    let (program, overlay) = overlay_after_edit(before, after, |ws| function_change(ws, "hot"));
-
-    let output = run_node(&format!(
-        "{}\n{}\nhot();\n\
-         function cells() {{ return Object.keys(__rock_globals).filter(k => k.includes('::count#')).length; }}\n\
-         let live = cells();\n{}\nconsole.log(live + ':' + cells() + ':' + hot());",
-        js_runtime(),
-        program,
-        overlay
-    ));
-    assert_eq!(output.trim(), "2:0:7");
+    let removed = "@nomangle fn hot() -> int { 7 }\nfn main() { print(hot()) }\n";
+    let (program, overlay) = overlay_after_edit(SOURCE, removed, &["hot"]);
+    let output = run_live(
+        &program,
+        &format!(
+            "hot();\n\
+             function cells() {{ return Object.keys(__rock_globals).filter(k => k.includes('::count#')).length; }}\n\
+             let live = cells();\n{overlay}\nconsole.log(live + ':' + cells() + ':' + hot());"
+        ),
+    );
+    assert_eq!(output, "2:0:7");
 }
 
 #[test]
@@ -534,34 +400,20 @@ fn decorated_function_overlay_refreshes_the_registered_code_ref() {
              fn main() {{ hot() }}\n"
         )
     };
-    let before = ws_with(&source("one"));
-    let after = ws_with(&source("two"));
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let hot = crate::common::test_fn_ref(&after, "hot");
-    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
+    let (program, overlay) = overlay_after_edit(&source("one"), &source("two"), &["hot"]);
     assert!(
         !overlay.contains("__rock_rebind_system"),
         "CodeRef overlays must not emit a registry repair"
     );
-
-    let output = run_node(&format!(
-        "var output = [];\n\
-         function print(value) {{ output.push(value); }}\n\
-         {}\n\
-         {}\n\
-         var __G = {{}};\n\
-         {}\n\
-         __rock_call(__rock_globals[\"global:<test>::SYSTEMS::value\"]._data[0].func);\n\
-         (0, eval)({:?});\n\
-         __rock_call(__rock_globals[\"global:<test>::SYSTEMS::value\"]._data[0].func);\n\
-         console.log(output.join(','));",
-        skull_codegen_js::JS_TABLE_PRIM,
-        js_runtime(),
-        program.program,
-        overlay
-    ));
-    assert_eq!(output.trim(), "one,two");
+    let call = "__rock_call(__rock_globals[\"global:<test>::SYSTEMS::value\"]._data[0].func);";
+    let output = run_live(
+        &format!(
+            "var output = [];\nfunction print(value) {{ output.push(value); }}\n{}\n{program}",
+            skull_codegen_js::JS_TABLE_PRIM
+        ),
+        &format!("{call}\n(0, eval)({overlay:?});\n{call}\nconsole.log(output.join(','));"),
+    );
+    assert_eq!(output, "one,two");
 }
 
 #[test]
@@ -571,17 +423,12 @@ fn unrelated_body_overlay_restages_unchanged_generic_callback_with_concrete_abi(
         @nomangle fn invoke() -> int { apply(7, unchanged) }\n\
         @nomangle fn edited() -> int { 1 }\n\
         fn main() { invoke(); edited() }\n";
-    let before = ws_with(source);
-    let after_source = replace_once(
+    let after = replace_once(
         source,
         "fn edited() -> int { 1 }",
         "fn edited() -> int { 2 }",
     );
-    let after = ws_with(&after_source);
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let caller = crate::common::test_fn_ref(&after, "edited");
-    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, caller);
+    let (program, overlay) = overlay_after_edit(source, &after, &["edited"]);
     let staged: Vec<_> = overlay
         .lines()
         .filter(|line| line.contains("__rock_code_slot_stage_one(") && line.contains("unchanged"))
@@ -595,13 +442,13 @@ fn unrelated_body_overlay_restages_unchanged_generic_callback_with_concrete_abi(
         !staged[0].contains("unresolved-named-value"),
         "stage must carry the concrete ABI"
     );
-    let output = run_node(&format!(
-        "{}\nvar __G = {{}};\n{}\nconsole.log(invoke(), edited());\n(0, eval)({:?});\nconsole.log(invoke(), edited());",
-        js_runtime(),
-        program.program,
-        overlay
-    ));
-    assert_eq!(output.trim(), "10 1\n10 2");
+    let output = run_live(
+        &program,
+        &format!(
+            "console.log(invoke(), edited());\n(0, eval)({overlay:?});\nconsole.log(invoke(), edited());"
+        ),
+    );
+    assert_eq!(output, "10 1\n10 2");
 }
 
 #[test]
@@ -623,21 +470,9 @@ fn static_resets_for_several_edited_functions_emit_in_a_stable_order() {
         text.push_str(&format!("fn main() {{ print({}) }}\n", calls.join(" + ")));
         text
     };
-    let before = ws_with(&source(1));
-    let after = ws_with(&source(100));
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let edited: Vec<_> = (0..8)
-        .map(|i| {
-            let f = crate::common::test_fn_ref(&after, &format!("hot{i}"));
-            (f.module, BodyOwner::Function(f.func))
-        })
-        .collect();
-    let overlay = || {
-        let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-        skull_codegen_js::emit::emit_overlay(&after, mid, &mut cache, &edited)
-            .unwrap()
-            .expect_overlay()
-    };
+    let edited: Vec<String> = (0..8).map(|i| format!("hot{i}")).collect();
+    let edited: Vec<&str> = edited.iter().map(String::as_str).collect();
+    let overlay = || overlay_after_edit(&source(1), &source(100), &edited).1;
     let first = overlay();
     assert_eq!(first.matches("] = false;").count(), 8, "{first}");
     for _ in 0..16 {

@@ -33,65 +33,42 @@ fn main() {
 "#;
 
 #[test]
-fn rock_shader_pair_without_js_register_sibling_rejects() {
-    // No `__rock_shader_register` sibling reachable -> the shader would never be
-    // registered on web. Emit must reject loudly rather than silently drop it.
-    let ws = ws_with(SHADER_SRC);
-    let err = crate::common::emit_program_js(&ws)
+fn rock_shader_pair_roots_a_js_servable_register_under_its_bare_name() {
+    let err = crate::common::emit_program_js(&ws_with(SHADER_SRC))
         .expect_err("rock_shader without a js register sibling must reject");
     assert!(
         err.contains("__rock_shader_register"),
         "reject must name the missing register sibling:\n{err}"
     );
-}
-
-#[test]
-fn rock_shader_pair_with_plain_rock_register_emits_it_bare() {
-    // A host's real `__rock_shader_register` is typically a plain-Rock
-    // @nomangle fn -- portable on JS once its two inline(lua) helpers have js
-    // siblings. A reachable plain-Rock register fn must be rooted under its
-    // bare name (the driver register lines call it verbatim), not rejected.
-    let mut src = String::from(SHADER_SRC);
-    src.push_str(
-        r#"
+    for (register, markers) in [
+        (
+            r#"
 global WEB_SHADER_SRCS: Map<string, string> = map_new()
 
 @nomangle fn __rock_shader_register(key: string, src: string) {
     WEB_SHADER_SRCS.insert(key, src)
 }
 "#,
-    );
-    let ws = ws_with(&src);
-    let prog =
-        crate::common::emit_program_js(&ws).expect("emit js program with plain-rock register");
-    assert!(
-        prog.contains("function __rock_shader_register("),
-        "plain-Rock register fn must emit under its bare name:\n{prog}"
-    );
-}
-
-#[test]
-fn rock_shader_pair_with_inline_js_register_sibling_emits() {
-    // The web layer supplies the sibling; the register fn is forced into the
-    // program under its bare @nomangle name so driver register lines resolve.
-    let mut src = String::from(SHADER_SRC);
-    src.push_str(
-        r#"
+            &["function __rock_shader_register("][..],
+        ),
+        (
+            r#"
 @nomangle inline(js) fn __rock_shader_register(key: string, src: string) = """
   (globalThis.__ROCK_SHADERS = globalThis.__ROCK_SHADERS || {})[key] = src;
 """
 "#,
-    );
-    let ws = ws_with(&src);
-    let prog = crate::common::emit_program_js(&ws).expect("emit js program with register sibling");
-    assert!(
-        prog.contains("function __rock_shader_register(key, src)"),
-        "register sibling must emit under its bare @nomangle name:\n{prog}"
-    );
-    assert!(
-        prog.contains("globalThis.__ROCK_SHADERS"),
-        "register sibling body must emit verbatim:\n{prog}"
-    );
+            &[
+                "function __rock_shader_register(key, src)",
+                "globalThis.__ROCK_SHADERS",
+            ],
+        ),
+    ] {
+        let prog = crate::common::emit_program_js(&ws_with(&format!("{SHADER_SRC}{register}")))
+            .expect("emit js program with a register");
+        for marker in markers {
+            assert!(prog.contains(marker), "missing `{marker}`:\n{prog}");
+        }
+    }
 }
 
 fn qualified_register_workspace(registrations: &[&str]) -> bone_core::workspace::Workspace {
@@ -100,39 +77,13 @@ fn qualified_register_workspace(registrations: &[&str]) -> bone_core::workspace:
             .expect("shader source"),
     ];
     for (index, registration) in registrations.iter().enumerate() {
-        let mut module = skull_parser::parse_module_clean(
+        users.push(crate::common::package_module(
+            "shaders",
+            &format!("<registry{index}>"),
             &format!("mod registry{index};\n{registration}"),
-            ustr::Ustr::from(&format!("<registry{index}>")),
-        )
-        .expect("v1 registration source");
-        module.package = Some(skull_parser::PackageTag {
-            id: 0,
-            self_name: "shaders".into(),
-            identity_storage: Default::default(),
-            root: String::new(),
-        });
-        users.push(module);
+        ));
     }
-    let mut modules = skull::pipeline::with_stdlib(users).expect("stdlib");
-    let ws = skull::pipeline::semantic_pass(&mut modules, &Default::default()).expect("workspace");
-    let errors: Vec<_> = ws
-        .inferences
-        .iter()
-        .flatten()
-        .flat_map(|inference| inference.errors.values().flatten())
-        .chain(
-            ws.modules
-                .iter()
-                .flat_map(|module| module.lowering_errors.values().flatten()),
-        )
-        .chain(
-            ws.modules
-                .iter()
-                .flat_map(|module| module.interface_errors.iter()),
-        )
-        .collect();
-    assert!(errors.is_empty(), "{errors:?}");
-    ws
+    crate::common::ws_of_modules(users)
 }
 
 #[test]
@@ -157,27 +108,23 @@ fn qualified_register_is_rooted_under_the_driver_symbol() {
 }
 
 #[test]
-fn qualified_lua_only_register_is_a_named_rejection() {
-    let ws = qualified_register_workspace(&[
-        "pub @nomangle inline(lua) fn __rock_shader_register(key: string, src: string) = \"print(key)\"",
-    ]);
-    let error =
-        crate::common::emit_program_js(&ws).expect_err("Lua-only registration cannot serve JS");
-    assert!(
-        error.contains("no JS-servable `__rock_shader_register`"),
-        "{error}"
-    );
-}
-
-#[test]
-fn ambiguous_qualified_registers_are_a_named_rejection() {
-    let registration =
+fn unservable_qualified_registers_are_named_rejections() {
+    let rock_register =
         "pub @nomangle fn __rock_shader_register(key: string, src: string) { print(key) }";
-    let ws = qualified_register_workspace(&[registration, registration]);
-    let error = crate::common::emit_program_js(&ws)
-        .expect_err("two registration bodies cannot own one symbol");
-    assert!(
-        error.contains("ambiguous") && error.contains("__rock_shader_register"),
-        "{error}"
-    );
+    for (registrations, needle) in [
+        (
+            &[
+                "pub @nomangle inline(lua) fn __rock_shader_register(key: string, src: string) = \"print(key)\"",
+            ][..],
+            "no JS-servable `__rock_shader_register`",
+        ),
+        (&[rock_register, rock_register], "ambiguous"),
+    ] {
+        let ws = qualified_register_workspace(registrations);
+        let error = crate::common::emit_program_js(&ws).expect_err("register cannot serve JS");
+        assert!(
+            error.contains(needle) && error.contains("__rock_shader_register"),
+            "{error}"
+        );
+    }
 }

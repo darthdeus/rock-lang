@@ -20,11 +20,11 @@ use skull_mir::monoty::MonoInterner;
 /// is set, and says so on stderr. The variable has to be REMOVED, so a fix that
 /// only sets `NO_COLOR` reads correctly and does nothing.
 pub fn node() -> std::process::Command {
-    tool("node")
+    tool_command("node")
 }
 
 /// A command for `name` with the same colour scrub as [`node`].
-pub fn tool(name: &str) -> std::process::Command {
+fn tool_command(name: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(name);
     cmd.env_remove("FORCE_COLOR").env("NO_COLOR", "1");
     cmd
@@ -42,37 +42,68 @@ pub fn run_node(program: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Reload the single function `func` over `cache` and return its overlay text.
-pub fn overlay_of_fn(
+/// The function or global declared as `name` in the `<test>` module.
+pub fn test_owner(
+    ws: &bone_core::workspace::Workspace,
+    name: &str,
+) -> (bone_core::prelude::ModuleId, bone_core::hir::BodyOwner) {
+    let mid = test_mid(ws);
+    let module = ws.module(mid);
+    let declared = |full: &str| skull_mir::mangle::declared_name(full) == name;
+    if let Some((fid, _)) = module
+        .functions
+        .iter()
+        .find(|(_, f)| declared(f.name.as_str()))
+    {
+        return (mid, bone_core::hir::BodyOwner::Function(fid));
+    }
+    let (gid, _) = module
+        .globals
+        .iter()
+        .find(|(_, g)| declared(g.name.as_str()))
+        .unwrap_or_else(|| panic!("no fn or global `{name}` in <test> module"));
+    (mid, bone_core::hir::BodyOwner::Global(gid))
+}
+
+/// Reload the `edited` definitions of `ws` over `cache`, which must accept an
+/// overlay.
+pub fn overlay_of(
     ws: &bone_core::workspace::Workspace,
     mid: bone_core::prelude::ModuleId,
     cache: &mut skull_codegen_js::emit::JsEmitCache,
-    func: FuncRef,
+    edited: &[&str],
 ) -> String {
-    skull_codegen_js::emit::emit_overlay(
-        ws,
-        mid,
-        cache,
-        &[(func.module, bone_core::hir::BodyOwner::Function(func.func))],
-    )
-    .unwrap()
-    .expect_overlay()
+    let edited: Vec<_> = edited.iter().map(|name| test_owner(ws, name)).collect();
+    skull_codegen_js::emit::emit_overlay(ws, mid, cache, &edited)
+        .unwrap()
+        .expect_overlay()
 }
 
-/// The program that prints `<root>()` after the given runtime pieces and defs.
-fn print_root_program(runtime: &[&str], defs: &str, root: &str) -> String {
-    format!("{}\n{defs}\nconsole.log({root}());", runtime.concat())
+/// Run `body` under node after the concatenated `runtime` pieces.
+pub fn run_js(runtime: &[&str], body: &str) -> String {
+    run_node(&format!("{}\n{body}", runtime.concat()))
 }
 
-/// Evaluate `<root>()` under node and check it prints the integer `expect`.
-pub fn eval_int(runtime: &[&str], defs: &str, root: &str, expect: i64) {
-    let program = print_root_program(runtime, defs, root);
-    let s = run_node(&program);
-    let got: i64 = s
+/// Write `program` to a file, run `tool` on it and return trimmed stdout.
+pub fn run_file(tool: &str, program: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "skull_codegen_js_{}_{serial}_{tool}",
+        std::process::id()
+    ));
+    std::fs::write(&path, program).expect("write program");
+    let out = tool_command(tool).arg(&path).output().expect("run tool");
+    let _ = std::fs::remove_file(path);
+    assert!(
+        out.status.success(),
+        "{tool} failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .expect("utf8 stdout")
         .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
-    assert_eq!(got, expect, "wrong result for `{root}`\n{program}");
+        .to_string()
 }
 
 /// The id of the `<test>` module.
@@ -127,15 +158,45 @@ pub fn try_ws_with_named(
     file: &str,
     src: &str,
 ) -> Result<bone_core::workspace::Workspace, skull_parser::CompilerError> {
-    let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
+    let module = skull_parser::parse_module_clean(src, ustr::Ustr::from(file)).expect("parse");
+    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([module])?;
+    skull::pipeline::semantic_pass(&mut modules, &Default::default())
+}
+
+/// `file` parsed as a module of package `package`.
+pub fn package_module(package: &str, file: &str, src: &str) -> skull_parser::Ast {
+    let mut module = skull_parser::parse_module_clean(src, ustr::Ustr::from(file)).expect("parse");
+    module.package = Some(skull_parser::PackageTag {
+        id: 0,
+        self_name: package.to_string(),
+        identity_storage: Default::default(),
+        root: String::new(),
+    });
+    module
+}
+
+/// Stdlib workspace plus `users`, failing on any body or interface error.
+pub fn ws_of_modules(users: Vec<skull_parser::Ast>) -> bone_core::workspace::Workspace {
+    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib(users).expect("stdlib");
+    let ws = skull::pipeline::semantic_pass(&mut modules, &Default::default()).expect("workspace");
+    let errors: Vec<_> = ws
+        .inferences
         .iter()
-        .map(|f| {
-            let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
+        .flatten()
+        .flat_map(|inference| inference.errors.values().flatten())
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|module| module.lowering_errors.values().flatten()),
+        )
+        .chain(
+            ws.modules
+                .iter()
+                .flat_map(|module| module.interface_errors.iter()),
+        )
         .collect();
-    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from(file)).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules)
+    assert!(errors.is_empty(), "{errors:?}");
+    ws
 }
 
 pub fn replace_once(source: &str, old: &str, new: &str) -> String {

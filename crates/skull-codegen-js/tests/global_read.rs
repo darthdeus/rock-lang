@@ -38,7 +38,7 @@ fn emit_programs(
 #[test]
 fn uninitialized_global_reads_fail_on_both_backends() {
     let (lua, js) = programs(SOURCE);
-    let lua_result = crate::qualified_globals::run(
+    let lua_result = crate::common::run_file(
         "luajit",
         &format!("{lua}\nlocal ok, err = pcall(read); print(ok); print(err)"),
     );
@@ -59,7 +59,7 @@ fn uninitialized_global_reads_fail_on_both_backends() {
 fn assigned_and_optional_globals_survive_reload_on_both_backends() {
     let (lua, js) = programs(SOURCE);
     assert_eq!(
-        crate::qualified_globals::run(
+        crate::common::run_file(
             "luajit",
             &format!(
                 "{lua}\nassert(optional() == nil); assign(); assert(read() == 42)\n{lua}\nassert(read() == 42); print('ok')"
@@ -76,7 +76,7 @@ fn assigned_and_optional_globals_survive_reload_on_both_backends() {
 #[test]
 fn lifecycle_callback_read_checks_when_called_on_both_backends() {
     let (lua, js) = programs(SOURCE);
-    let lua_result = crate::qualified_globals::run(
+    let lua_result = crate::common::run_file(
         "luajit",
         &format!(
             "{lua}\nlocal cb = callback(); local ok, err = pcall(cb); assert(not ok); print(err)"
@@ -93,26 +93,16 @@ fn lifecycle_callback_read_checks_when_called_on_both_backends() {
 
 #[test]
 fn cross_module_global_read_reports_the_consumer_location() {
-    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).unwrap();
-    for (file, source) in [
-        (
+    let ws = crate::common::ws_of_modules(vec![
+        crate::common::package_module(
+            "app",
             "<test>",
             "use state::LATE;\n@nomangle fn read() -> int { LATE }\nfn main() { read() }\n",
         ),
-        ("state.rock", "mod state;\npub global LATE: int\n"),
-    ] {
-        let mut ast = skull_parser::parse_module_clean(source, ustr::Ustr::from(file)).unwrap();
-        ast.package = Some(skull_parser::PackageTag {
-            id: 0,
-            self_name: "app".to_string(),
-            identity_storage: Default::default(),
-            root: String::new(),
-        });
-        modules.push(ast);
-    }
-    let ws = skull::pipeline::semantic_pass(&mut modules, &Default::default()).unwrap();
+        crate::common::package_module("app", "state.rock", "mod state;\npub global LATE: int\n"),
+    ]);
     let (lua, js) = emit_programs(&ws, test_mid(&ws));
-    let lua_result = crate::qualified_globals::run(
+    let lua_result = crate::common::run_file(
         "luajit",
         &format!("{lua}\nlocal ok, err = pcall(read); assert(not ok); print(err)"),
     );
@@ -146,7 +136,7 @@ fn flattened_global_initialization_survives_compatible_reload() {
          fn main() { assign(); read() }\n",
     );
     assert_eq!(
-        crate::qualified_globals::run(
+        crate::common::run_file(
             "luajit",
             &format!("{lua}\nassign(); assert(read());\n{lua}\nassert(read()); print('ok')")
         ),

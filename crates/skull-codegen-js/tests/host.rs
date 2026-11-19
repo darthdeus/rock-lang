@@ -21,13 +21,7 @@ process.stdout.write(vm.runInContext("JSON.stringify([__out.join(''), __err.join
 "#,
         body = skull_codegen_js::emit::js_string_lit(body)
     );
-    let output = node().arg("-e").arg(script).output().expect("run node");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).expect("decode captured streams")
+    serde_json::from_str(&crate::common::run_node(&script)).expect("decode captured streams")
 }
 
 /// The coroutine and log runtimes plus a program global table, then `tail`.

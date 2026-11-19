@@ -42,16 +42,7 @@ for (const width of [8, 1000, 1000000000]) {{
             calls = skull_codegen_js::JS_CALL_HELPER,
             control = if result == "s" { "s" } else { "'[' + s + ']'" }
         );
-        let run = crate::common::node()
-            .arg("-e")
-            .arg(&program)
-            .output()
-            .expect("run ordering probe");
-        assert!(
-            run.status.success(),
-            "{}\n{js}",
-            String::from_utf8_lossy(&run.stderr)
-        );
+        crate::common::run_node(&program);
     }
 }
 
@@ -77,15 +68,6 @@ for (const input of [2, {bad}]) {{
 "#,
             calls = skull_codegen_js::JS_CALL_HELPER
         );
-        let run = crate::common::node()
-            .arg("-e")
-            .arg(&program)
-            .output()
-            .expect("run numeric ordering probe");
-        assert!(
-            run.status.success(),
-            "{}\n{js}",
-            String::from_utf8_lossy(&run.stderr)
-        );
+        crate::common::run_node(&program);
     }
 }

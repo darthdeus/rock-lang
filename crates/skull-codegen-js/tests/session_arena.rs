@@ -2,7 +2,7 @@
 //! Removing and reintroducing it must keep live behavior in step with a fresh
 //! emission.
 
-use crate::common::{overlay_of_fn, run_node, ws_with};
+use crate::common::{overlay_of, run_node, ws_with};
 
 const BEFORE: &str = "\
 fn pick<T>(x: T, y: T) -> T { x }\n\
@@ -54,8 +54,7 @@ fn generic_instance_edits_match_fresh_runtime_results() {
     let stages = [AFTER, BEFORE, AFTER];
     for source in stages {
         let ws = ws_with(source);
-        let hot = crate::common::test_fn_ref(&ws, "hot");
-        let overlay = overlay_of_fn(&ws, mid, &mut cache, hot);
+        let overlay = overlay_of(&ws, mid, &mut cache, &["hot"]);
         overlay_run.push_str(&format!("\n(0, eval)({overlay:?});\nconsole.log(hot());"));
     }
 

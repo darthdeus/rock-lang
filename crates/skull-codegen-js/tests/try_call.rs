@@ -48,15 +48,14 @@ fn root() -> int {{
     );
     let ws = ws_with(&src);
     let js = crate::common::emit_closure(&ws, "root").expect("foreign getters emit");
-    crate::common::eval_int(
+    let out = crate::common::run_js(
         &[
             skull_codegen_js::JS_NB_CHECK_SHIMS,
             skull_codegen_js::JS_VEC_CHECK_SHIMS,
             skull_codegen_js::JS_CALL_HELPER,
             skull_codegen_js::JS_TABLE_PRIM,
         ],
-        &js,
-        "root",
-        1,
+        &format!("{js}\nconsole.log(root());"),
     );
+    assert_eq!(out.trim(), "1", "{js}");
 }
