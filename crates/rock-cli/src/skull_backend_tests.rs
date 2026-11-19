@@ -1654,7 +1654,7 @@ mod value_test_exec {
 #[cfg(test)]
 mod backend_stats_workspace_tests {
     use super::super::skull_emit_timed;
-    use crate::unified_compile::discover_project_sources;
+    use rock_host::compilation_units::load_sources_for_project;
 
     #[test]
     fn timed_emission_prepares_comptime_inputs_and_populates_attribution() {
@@ -1670,7 +1670,7 @@ mod backend_stats_workspace_tests {
         )
         .expect("main.rock");
 
-        let sources = discover_project_sources(dir.path()).expect("discover timed project");
+        let sources = load_sources_for_project(dir.path()).expect("discover timed project");
         let (ws, entry) = crate::bone_backend::workspace_frontend_timed(&sources)
             .0
             .expect("timed project checks");
@@ -1713,7 +1713,7 @@ mod backend_stats_workspace_tests {
             "fn main() { print(build_var(\"REQUIRED\")); print(library_value()) }\n",
         )
         .unwrap();
-        let sources = discover_project_sources(&project).unwrap();
+        let sources = load_sources_for_project(&project).unwrap();
         let (_, entry, _) = crate::bone_backend::parse_user_modules(&sources).unwrap();
         assert!(
             std::path::Path::new(entry.as_str()).starts_with(

@@ -358,7 +358,7 @@ pub(crate) fn bone_check_single(path: &str, iters: usize) -> Result<()> {
 }
 
 fn bone_check_project(path: &str, iters: usize) -> Result<()> {
-    let sources = crate::unified_compile::discover_sources(std::path::Path::new(path))?;
+    let sources = rock_host::compilation_units::load_sources(std::path::Path::new(path))?;
 
     let iters = iters.max(1);
     let mut agg = BonePhaseTimes::default();

@@ -231,13 +231,12 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
     let (mut sources, lint_root) = if let Some((file, contents)) = source {
         crate::lint_pass::single_file_scope(file, contents)
     } else {
-        let discovered = crate::unified_compile::discover_project_sources(std::path::Path::new(
-            path,
-        ))
-        .map_err(|error| CliBuildFailure::Setup {
-            context: Some("cannot load project"),
-            error,
-        })?;
+        let discovered =
+            rock_host::compilation_units::load_sources_for_project(std::path::Path::new(path))
+                .map_err(|error| CliBuildFailure::Setup {
+                    context: Some("cannot load project"),
+                    error,
+                })?;
         let sources = if production {
             rock_host::source_files::production_only(&discovered, std::path::Path::new(path))
                 .map_err(|error| CliBuildFailure::Setup {

@@ -558,7 +558,7 @@ fn load_sim_receipt(receipt_dir: &Path, project: &Path, output: &Path) -> Result
     let current_context = sim_receipt_context(project)?;
     let mut current_inputs = receipt_source_inputs(
         project,
-        &crate::unified_compile::discover_project_sources(project)?,
+        &rock_host::compilation_units::load_sources_for_project(project)?,
     )?;
     if expected_context != &current_context {
         return Err(anyhow!(

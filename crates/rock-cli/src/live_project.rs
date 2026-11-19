@@ -42,7 +42,7 @@ pub struct LiveProject {
 /// The sources a live project of `dir` compiles and accepts edits to: every
 /// discovered file, or without `include_tests` the production build's.
 pub(crate) fn project_sources(dir: &str, include_tests: bool) -> Result<SourceFiles> {
-    let discovered = crate::unified_compile::discover_project_sources(Path::new(dir))?;
+    let discovered = rock_host::compilation_units::load_sources_for_project(Path::new(dir))?;
     if include_tests {
         return Ok(discovered);
     }

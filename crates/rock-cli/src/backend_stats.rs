@@ -40,7 +40,7 @@ pub(crate) fn do_backend_stats(input: &str, iters: usize, warmup: usize, json: b
     let iters = iters.max(1);
     let project_path = std::path::Path::new(input);
 
-    let sources = crate::unified_compile::discover_sources(project_path)?;
+    let sources = rock_host::compilation_units::load_sources(project_path)?;
     if sources.files.is_empty() {
         anyhow::bail!("no Rock source files found at `{}`", input);
     }

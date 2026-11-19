@@ -121,7 +121,7 @@ fn unreached_in(
     // Whole-project scope on purpose: `tests/` holds `@sim`/`@test` roots, and a
     // production-only source set would report every sim-only engine helper as
     // dead.
-    let sources = crate::unified_compile::discover_project_sources(consumer)?;
+    let sources = rock_host::compilation_units::load_sources_for_project(consumer)?;
     let reaches_lib = sources.files.iter().any(|f| {
         let f = f.borrow();
         Path::new(&f.file.to_id_path()).starts_with(lib_root)

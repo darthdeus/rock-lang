@@ -106,7 +106,7 @@ pub(crate) fn check_file(file: &str, build_vars: bool) -> Result<UnitCheck, Unit
 
 /// Assemble and bone-check a package with its tests as one workspace.
 pub(crate) fn check_package(dir: &str, build_vars: bool) -> Result<UnitCheck, UnitFailure> {
-    let sources = crate::unified_compile::discover_project_sources(std::path::Path::new(dir))
+    let sources = rock_host::compilation_units::load_sources_for_project(std::path::Path::new(dir))
         .map_err(|e| UnitFailure {
             reason: "cannot load project".to_string(),
             rendered: e.to_string(),

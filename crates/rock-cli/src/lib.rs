@@ -65,7 +65,6 @@ pub mod plain;
 mod process;
 pub mod registry;
 pub mod runtime_process;
-pub mod unified_compile;
 pub mod watch;
 pub(crate) use lint_cmd::do_lint;
 pub(crate) use lsp_survey::lsp_survey;

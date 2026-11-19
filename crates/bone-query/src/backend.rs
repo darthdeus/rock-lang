@@ -647,17 +647,11 @@ impl BoneWorkspace {
     }
 
     fn project_sources(file_path: &str) -> Result<Vec<SessionFile>, String> {
-        let sources = if !Path::new(file_path)
-            .try_exists()
-            .map_err(|e| format!("source discovery failed: {e}"))?
-            && let Some(root) = Self::stick_root(file_path)
-        {
-            rock_host::compilation_units::load_sources_for_project(&root)
-                .map_err(|e| format!("source loading failed: {e:#}"))?
-        } else {
-            rock_host::compilation_units::load_sources_for_file(file_path)
-                .map_err(|e| format!("source loading failed: {e:#}"))?
-        };
+        let sources = match Self::stick_root(file_path) {
+            Some(root) => rock_host::compilation_units::load_sources_for_project(&root),
+            None => rock_host::compilation_units::load_sources_for_file(file_path),
+        }
+        .map_err(|e| format!("source loading failed: {e:#}"))?;
         let mut out = Vec::new();
         for f in &sources.files {
             let f = f.borrow();
