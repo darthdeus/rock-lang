@@ -25,13 +25,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn pair_iter_tuple_scalarizes() {
-    let lua = emit_module(PAIR_ITER_LOOP);
-    let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("{"));
-}
-
 const SKIP_PAIR_ITER_LOOP: &str = r#"
 struct SkipShapeIter { cur: int, limit: int }
 
@@ -62,10 +55,11 @@ fn main() {
 "#;
 
 #[test]
-fn skip_pair_iter_tuple_scalarizes() {
-    let lua = emit_module(SKIP_PAIR_ITER_LOOP);
-    let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("{"));
+fn pair_iterator_tuples_scalarize() {
+    for src in [PAIR_ITER_LOOP, SKIP_PAIR_ITER_LOOP] {
+        let lua = emit_module(src);
+        assert!(!function_body(&lua, "hot").contains("{"));
+    }
 }
 
 const TUPLE_WHOLE_USE: &str = r#"
@@ -108,18 +102,12 @@ fn main() {
 "#;
 
 #[test]
-fn arena_bare_loop_unused_entity_allocates_nothing() {
-    let lua = emit_module(ARENA_BARE_LOOP_UNUSED_ENTITY);
-    let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("{"));
-}
-
-#[test]
-fn arena_bare_loop_is_a_counted_for() {
+fn arena_bare_loop_is_an_allocation_free_counted_for() {
     for src in [ARENA_BARE_LOOP_UNUSED_ENTITY, ARENA_BARE_LOOP_USED_ENTITY] {
         let lua = emit_module(src);
         let hot = function_body(&lua, "hot");
         assert!(hot.contains("for ") && !hot.contains("goto") && !hot.contains("next"));
+        assert!(!hot.contains("{"));
     }
 }
 
@@ -147,7 +135,7 @@ fn main() {
 fn arena_bare_loop_used_entity_scalarizes_into_call() {
     let lua = emit_module(ARENA_BARE_LOOP_USED_ENTITY);
     let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("Entity_vt") && !hot.contains("{"));
+    assert!(!hot.contains("Entity_vt"));
     assert!(
         crate::common::definitions_of(&lua, "get_Entity")
             .iter()

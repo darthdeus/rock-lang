@@ -1,4 +1,5 @@
 use crate::common::{emit_module, function_body, run_main};
+
 const COLUMN_RECEIVER: &str = r#"
 value PushCell { a: int, b: int }
 
@@ -28,33 +29,21 @@ fn main() {
 }
 "#;
 
-fn reaches_boxed_body(lua: &str) -> bool {
-    // The always-emitted `vec_push` definition also contains `._data`.
-    function_body(lua, "main").contains("._data")
-}
-
 #[test]
-fn a_column_receiver_never_reaches_the_boxed_body() {
-    let lua = emit_module(COLUMN_RECEIVER);
-    assert!(!reaches_boxed_body(&lua));
-    assert_eq!(run_main(&lua), "7");
-}
-
-#[test]
-fn a_boxed_receiver_does_reach_the_boxed_body() {
-    let lua = emit_module(BOXED_RECEIVER);
-    assert!(reaches_boxed_body(&lua));
-    let defs: Vec<&str> = lua
-        .match_indices("function vec_push")
-        .filter_map(|(i, _)| lua[i..].lines().next())
-        .collect();
-    assert_eq!(defs.len(), 1);
-    assert_eq!(run_main(&lua), "7");
-}
-
-#[test]
-fn a_column_payload_reaches_the_boxed_body_and_is_correct() {
-    let lua = emit_module(COLUMN_PAYLOAD);
-    assert!(reaches_boxed_body(&lua));
-    assert_eq!(run_main(&lua), "1");
+fn only_boxed_receivers_and_column_payloads_reach_the_boxed_push_body() {
+    for (src, boxed, expected) in [
+        (COLUMN_RECEIVER, false, "7"),
+        (BOXED_RECEIVER, true, "7"),
+        (COLUMN_PAYLOAD, true, "1"),
+    ] {
+        let lua = emit_module(src);
+        // The always-emitted `vec_push` definition also contains `._data`.
+        assert_eq!(
+            function_body(&lua, "main").contains("._data"),
+            boxed,
+            "{src}"
+        );
+        assert_eq!(lua.matches("function vec_push").count(), 1, "{src}");
+        assert_eq!(run_main(&lua), expected, "{src}");
+    }
 }

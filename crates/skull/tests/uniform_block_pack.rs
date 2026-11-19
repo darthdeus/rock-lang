@@ -24,9 +24,7 @@ fn main() {
 
 #[test]
 fn uniform_values_expands_to_canonical_leaves() {
-    let rejects = bone_rejections(CANONICAL_VALUES);
-    assert!(rejects.is_empty());
-
+    assert!(bone_rejections(CANONICAL_VALUES).is_empty());
     let lua = emit_module(CANONICAL_VALUES);
     let body = function_body(&lua, "main");
     assert!(!body.contains("uniform_values("));
@@ -36,8 +34,7 @@ fn uniform_values_expands_to_canonical_leaves() {
     for variant in ["Float", "Bool", "Int", "Uint"] {
         assert!(body.contains(&format!("__variant = (\"{variant}\")")));
     }
-    let out = run_main(&lua);
-    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["true", "6"]);
+    assert_eq!(run_main(&lua), "true\n6");
 }
 
 const BLOOM: &str = r#"
@@ -52,9 +49,11 @@ fn main() {
 "#;
 
 #[test]
-fn bloom_blur_packs_at_its_std140_element_indices() {
+fn bloom_blur_packs_as_unboxed_stores_at_its_std140_element_indices() {
     let lua = emit_module(BLOOM);
     let body = function_body(&lua, "main");
+    assert!(!body.contains("pack_uniform_block"));
+    assert!(!body.contains("BloomBlurU_lct") && !body.contains("BloomBlurU_ct"));
     for idx in ["[(0)] = ", "[(2)] = ", "[(3)] = ", "[(4)] = "] {
         assert!(body.contains(idx));
     }
@@ -106,16 +105,7 @@ fn main() {
     print(i[0])
 }
 "#;
-    let out = run_main(&emit_module(src));
-    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["-1"]);
-}
-
-#[test]
-fn the_pack_is_stores_not_a_call_and_never_boxes() {
-    let lua = emit_module(BLOOM);
-    let body = function_body(&lua, "main");
-    assert!(!body.contains("pack_uniform_block"));
-    assert!(!body.contains("BloomBlurU_lct") && !body.contains("BloomBlurU_ct"));
+    assert_eq!(run_main(&emit_module(src)), "-1");
 }
 
 const GLOBAL_SOURCE: &str = r#"
@@ -159,9 +149,5 @@ fn a_global_block_packs_one_leaf_at_a_time() {
         .filter(|n| n.trim().starts_with('r') || n.trim().starts_with("local r"))
         .count();
     assert!(registers < 32);
-    let out = run_main(&lua);
-    assert_eq!(
-        out.split_whitespace().collect::<Vec<_>>(),
-        ["1", "6", "16", "17", "20"]
-    );
+    assert_eq!(run_main(&lua), "1\n6\n16\n17\n20");
 }

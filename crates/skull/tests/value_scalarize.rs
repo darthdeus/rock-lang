@@ -60,7 +60,6 @@ fn value_struct_with_whole_use_keeps_cdata() {
     let body = function_body(&lua, "coexist");
     assert!(body.contains("Color_ct("));
     assert!(!body.contains(".r"));
-
     assert_eq!(run_main(&lua), "33");
 }
 
@@ -209,17 +208,17 @@ fn main() {
 "#;
 
 #[test]
-fn unmarked_value_through_fn_value_rejects() {
-    let err = crate::common::try_emit_module(UNMARKED_VALUE_VIA_FN_VALUE)
-        .expect_err("an unreconcilable fn-value ABI must reject");
-    assert!(err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"));
-}
-
-#[test]
-fn unmarked_value_through_a_nullable_fn_value_still_rejects() {
-    let err = crate::common::try_emit_module(UNMARKED_VALUE_VIA_NULLABLE_FN_VALUE)
-        .expect_err("a nullable fn-value reference must not launder an unreconcilable ABI");
-    assert!(err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"));
+fn unmarked_value_through_a_plain_or_nullable_fn_value_rejects() {
+    for src in [
+        UNMARKED_VALUE_VIA_FN_VALUE,
+        UNMARKED_VALUE_VIA_NULLABLE_FN_VALUE,
+    ] {
+        let err = crate::common::try_emit_module(src)
+            .expect_err("an unreconcilable fn-value ABI must reject");
+        assert!(
+            err.message.contains("cannot be taken as a fn value") && err.message.contains("probe")
+        );
+    }
 }
 
 #[test]
@@ -330,13 +329,9 @@ fn main() {
 
 #[test]
 fn a_recursive_value_rejects_at_definition_whatever_its_use() {
-    for (_use_kind, src) in [
-        ("copy", RECURSIVE_VALUE_COPY),
-        ("read", RECURSIVE_VALUE_READ),
-    ] {
-        let errs = crate::common::bone_rejections(src);
+    for src in [RECURSIVE_VALUE_COPY, RECURSIVE_VALUE_READ] {
         assert_eq!(
-            errs,
+            crate::common::bone_rejections(src),
             ["recursive value type: Chain -> Chain; use a reference or handle"]
         );
     }

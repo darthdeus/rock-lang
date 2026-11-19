@@ -23,7 +23,7 @@ fn vector_handle_equality_does_not_materialize_carriers() {
 
 #[test]
 fn only_types_without_a_native_eq_take_the_structural_walk() {
-    for (src, _name, walks) in [
+    for (src, case, walks) in [
         (
             "value Wrap { tag: int, name: string }\n\
              fn f(a: Wrap, b: Wrap) -> bool { return a == b }\n",
@@ -50,7 +50,7 @@ fn only_types_without_a_native_eq_take_the_structural_walk() {
     ] {
         let lua = emit_module(src);
         let body = function_body(&lua, "f");
-        assert_eq!(body.contains("__op_eq"), walks);
+        assert_eq!(body.contains("__op_eq"), walks, "{case}");
     }
 }
 
