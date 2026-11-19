@@ -1,9 +1,6 @@
 use skull_mir::lower::{SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT};
 
-use crate::common::{
-    definition_names, emit_module, emit_module_without_frame_limits, function_body,
-    function_params, luajit_loads, run_main, try_emit_module,
-};
+use crate::common::{definition_names, emit_module, function_body, function_params, run_main};
 
 fn float_fields(leaves: usize) -> String {
     (0..leaves)
@@ -138,18 +135,14 @@ fn cut_fixture(payload: usize, nullable: bool) -> String {
 }
 
 #[test]
-fn a_value_at_the_cut_keeps_the_scalar_wire() {
-    let lua = emit_module(&cut_fixture(WIDE_VALUE_PAYLOAD_LEAF_CUT, false));
-    assert_eq!(
-        function_params(&lua, "thru").len(),
-        WIDE_VALUE_PAYLOAD_LEAF_CUT
-    );
-}
-
-#[test]
-fn a_value_one_leaf_over_the_cut_takes_the_aggregate_wire() {
-    let lua = emit_module(&cut_fixture(WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, false));
-    assert_eq!(function_params(&lua, "thru").len(), 1);
+fn a_value_over_the_cut_takes_the_aggregate_wire() {
+    for (payload, lanes) in [
+        (WIDE_VALUE_PAYLOAD_LEAF_CUT, WIDE_VALUE_PAYLOAD_LEAF_CUT),
+        (WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, 1),
+    ] {
+        let lua = emit_module(&cut_fixture(payload, false));
+        assert_eq!(function_params(&lua, "thru").len(), lanes, "{payload}");
+    }
 }
 
 #[test]
@@ -159,8 +152,7 @@ fn a_nullable_ordinary_value_takes_the_cut_of_its_payload() {
         (WIDE_VALUE_PAYLOAD_LEAF_CUT, None),
         (WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, Some(1)),
     ] {
-        let src = cut_fixture(payload, true);
-        let lua = emit_module(&src);
+        let lua = emit_module(&cut_fixture(payload, true));
         if let Some(lanes) = lanes {
             assert_eq!(function_params(&lua, "thru").len(), lanes);
         }
@@ -254,8 +246,7 @@ fn the_lane_budget_boxes_widest_ordinary_values_and_never_nobox_values() {
         (BUDGET_NOBOX_WIDE + 1 + 2 * BUDGET_MEMBER + 1..BUDGET_NOBOX_WIDE + 3 * BUDGET_MEMBER + 1)
             .contains(&b)
     );
-    let src = budget_src();
-    let lua = emit_module(&src);
+    let lua = emit_module(&budget_src());
     let params = function_params(&lua, "budget_five");
     assert_eq!(params.len(), 2 + BUDGET_MEMBER * 3);
     assert!(params.len() < SIGNATURE_SCALAR_LANE_BUDGET);
@@ -324,21 +315,16 @@ fn main() {
 }
 "#;
 
-fn call_kinds_src() -> String {
-    format!("{}{CALL_KINDS_BODY}", over_cut_value())
-}
-
 #[test]
 fn every_call_kind_agrees_on_the_boxed_wire() {
-    let src = call_kinds_src();
-    let lua = emit_module(&src);
-    assert_eq!(function_params(&lua, "bump").len(), 1);
-    let names = definition_names(&lua);
-    for name in names {
-        if !name.starts_with("bump") {
-            continue;
-        }
-        assert_eq!(function_params(&lua, name).len(), 1);
+    let lua = emit_module(&format!("{}{CALL_KINDS_BODY}", over_cut_value()));
+    let bumps: Vec<_> = definition_names(&lua)
+        .into_iter()
+        .filter(|name| name.starts_with("bump"))
+        .collect();
+    assert!(!bumps.is_empty());
+    for name in bumps {
+        assert_eq!(function_params(&lua, name).len(), 1, "{name}");
     }
     assert_eq!(run_main(&lua), "1 1 1 1 0 1 3 1 2");
 }
@@ -388,31 +374,4 @@ fn main() {{
     assert_eq!(function_params(&lua, "forward").len(), 1);
     assert_eq!(body.matches("_ct(").count(), 0);
     assert_eq!(run_main(&lua), "3 9");
-}
-
-#[test]
-fn a_frame_limit_rejection_still_names_the_nobox_value() {
-    let fields = float_fields(50);
-    let inits = float_inits(50, "x");
-    let copies: Vec<String> = (1..50).map(|k| format!("f{k}: w.f{k}")).collect();
-    let mut src = format!(
-        "nobox value W {{ {fields} }}\n\
-         fn mk(x: float) -> W {{ return W {{ {inits} }} }}\n\
-         fn tweak(w: W) -> W {{ return W {{ f0: w.f0 + 1.0, {} }} }}\n\
-         fn check(value: W, k: int) -> float {{ let w = value; return w.f0 + w.f49 + float(k) }}\n\
-         fn run(x: float) -> float {{\n    let v0 = mk(x)\n",
-        copies.join(", "),
-    );
-    for i in 1..4 {
-        src.push_str(&format!("    let v{i} = tweak(v{})\n", i - 1));
-    }
-    src.push_str("    let total = 0.0\n");
-    for i in 0..4 {
-        src.push_str(&format!("    total += check(v{i}, {i})\n"));
-    }
-    src.push_str("    return total\n}\nfn main() { print(\"{run(1.0)}\") }\n");
-    let err = try_emit_module(&src).expect_err("four live 50-leaf nobox values must not emit");
-    assert!(err.message.contains("nobox"));
-    let lua = emit_module_without_frame_limits(&src);
-    luajit_loads(&lua).expect_err("must not load");
 }

@@ -159,64 +159,56 @@ fn wide_decls(leaves: usize) -> String {
     )
 }
 
-fn padded_receive(leaves: usize, pad: usize) -> String {
-    let mut src = wide_decls(leaves);
-    src.push_str("fn run(x: float) -> float {\n");
+const MAIN: &str = "fn main() { print(\"{run(1.0)}\") }\n";
+
+fn padded(indent: &str, arg: &str, pad: usize, middle: &str) -> String {
+    let mut body = String::new();
     for i in 0..pad {
-        src.push_str(&format!("    let a{i} = one(x, {i})\n"));
+        body.push_str(&format!("{indent}let a{i} = one({arg}, {i})\n"));
     }
-    src.push_str("    let v = mk(x)\n    let total = use_w(v, 0)\n");
+    body.push_str(middle);
     for i in 0..pad {
-        src.push_str(&format!("    total += a{i}\n"));
+        body.push_str(&format!("{indent}total += a{i}\n"));
     }
-    src.push_str("    return total\n}\nfn main() { print(\"{run(1.0)}\") }\n");
-    src
+    body.push_str(&format!("{indent}return total\n"));
+    body
 }
 
-fn padded_receive_in_loop(leaves: usize, pad: usize) -> String {
-    let mut src = wide_decls(leaves);
-    src.push_str("fn run(x: float) -> float {\n");
-    for i in 0..pad {
-        src.push_str(&format!("    let a{i} = one(x, {i})\n"));
-    }
-    src.push_str(
+fn padded_run(pad: usize, middle: &str) -> String {
+    format!(
+        "{}fn run(x: float) -> float {{\n{}}}\n{MAIN}",
+        wide_decls(50),
+        padded("    ", "x", pad, middle)
+    )
+}
+
+fn padded_receive(pad: usize) -> String {
+    padded_run(pad, "    let v = mk(x)\n    let total = use_w(v, 0)\n")
+}
+
+fn padded_receive_in_loop(pad: usize) -> String {
+    padded_run(
+        pad,
         "    let total = 0.0\n    for i in 0..3 {\n        let v = mk(x + float(i))\n        \
          total += use_w(v, i)\n    }\n",
-    );
-    for i in 0..pad {
-        src.push_str(&format!("    total += a{i}\n"));
-    }
-    src.push_str("    return total\n}\nfn main() { print(\"{run(1.0)}\") }\n");
-    src
+    )
 }
 
-fn nested_wide_call(leaves: usize, pad: usize) -> String {
-    let mut src = wide_decls(leaves);
-    src.push_str("fn run(x: float) -> float {\n");
-    for i in 0..pad {
-        src.push_str(&format!("    let a{i} = one(x, {i})\n"));
-    }
-    src.push_str("    let total = use_w(mk(x), 0)\n");
-    for i in 0..pad {
-        src.push_str(&format!("    total += a{i}\n"));
-    }
-    src.push_str("    return total\n}\nfn main() { print(\"{run(1.0)}\") }\n");
-    src
+fn nested_wide_call(pad: usize) -> String {
+    padded_run(pad, "    let total = use_w(mk(x), 0)\n")
 }
 
-fn wide_in_closure(leaves: usize, pad: usize) -> String {
-    let mut src = wide_decls(leaves);
-    src.push_str("fn run(x: float) -> float {\n    let f = (y: float) => {\n");
-    for i in 0..pad {
-        src.push_str(&format!("        let a{i} = one(y, {i})\n"));
-    }
-    src.push_str("        let v = mk(y)\n        let total = use_w(v, 0)\n");
-    for i in 0..pad {
-        src.push_str(&format!("        total += a{i}\n"));
-    }
-    src.push_str("        return total\n    }\n    return f(x)\n}\n");
-    src.push_str("fn main() { print(\"{run(1.0)}\") }\n");
-    src
+fn wide_in_closure(pad: usize) -> String {
+    format!(
+        "{}fn run(x: float) -> float {{\n    let f = (y: float) => {{\n{}    }}\n    return f(x)\n}}\n{MAIN}",
+        wide_decls(50),
+        padded(
+            "        ",
+            "y",
+            pad,
+            "        let v = mk(y)\n        let total = use_w(v, 0)\n"
+        )
+    )
 }
 
 fn flat_locals(pad: usize) -> String {
@@ -234,39 +226,25 @@ fn flat_locals(pad: usize) -> String {
 }
 
 #[test]
-fn a_wide_receive_agrees_with_luajit_across_the_boundary() {
-    walk("padded_receive", 144, 147, |pad| padded_receive(50, pad));
-}
-
-#[test]
-fn a_wide_call_in_a_loop_agrees_with_luajit_across_the_boundary() {
-    walk("in_loop", 136, 139, |pad| padded_receive_in_loop(50, pad));
-}
-
-#[test]
-fn a_nested_wide_call_agrees_with_luajit_across_the_boundary() {
-    walk("nested", 144, 147, |pad| nested_wide_call(50, pad));
-}
-
-#[test]
-fn a_wide_value_in_a_closure_agrees_with_luajit_across_the_boundary() {
-    walk("closure", 144, 147, |pad| wide_in_closure(50, pad));
-}
-
-#[test]
-fn the_local_variable_cap_agrees_with_luajit_across_the_boundary() {
-    walk("flat_locals", 198, 201, flat_locals);
-}
-
-#[test]
-fn the_held_wide_value_witness_agrees_with_luajit() {
-    walk("held_values", 3, 4, |held| fixture(50, held));
+fn frame_limit_verdicts_agree_with_luajit_across_each_boundary() {
+    type Fixture = fn(usize) -> String;
+    let cases: [(&str, usize, usize, Fixture); 6] = [
+        ("padded_receive", 144, 147, padded_receive),
+        ("in_loop", 136, 139, padded_receive_in_loop),
+        ("nested", 144, 147, nested_wide_call),
+        ("closure", 144, 147, wide_in_closure),
+        ("flat_locals", 198, 201, flat_locals),
+        ("held_values", 3, 4, |held| fixture(50, held)),
+    ];
+    for (name, lo, hi, mk) in cases {
+        walk(name, lo, hi, mk);
+    }
 }
 
 #[test]
 fn the_frame_limit_rejection_reaches_the_incremental_path() {
-    let fits = padded_receive(50, 100);
-    let over = padded_receive(50, 160);
+    let fits = padded_receive(100);
+    let over = padded_receive(160);
     let ws1 = ws_with_stdlib(&fits);
     let mid = skull::user_module_id(&ws1).expect("user module");
     let (_full, mut cache) = skull::mir_emit::emit_full(&ws1, mid).expect("emit_full fits");

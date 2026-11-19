@@ -22,26 +22,14 @@ fn main() { let _ = fill(8) }
 fn vec_of_value_struct_uses_columns_for_push_and_read() {
     let lua = emit_module(VEC_VALUE_LOOP);
     let body = function_body(&lua, "fill");
-    assert!(
-        !body.contains("V2_ct("),
-        "[V2] push boxed the element (`V2_ct(..)`); source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
-    );
-    assert!(
-        !body.contains("_data"),
-        "[V2] push still wrote the single `_data` backing; source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
-    );
+    assert!(!body.contains("V2_ct("), "{body}");
+    assert!(!body.contains("_data"), "{body}");
     assert!(
         body.contains(r#"["x"] = {}"#) && body.contains(r#"["y"] = {}"#),
-        "[V2] literal did not build per-leaf column arrays; source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
+        "{body}"
     );
-    assert!(
-        body.contains(".x") && body.contains(".y"),
-        "[V2] push did not reach the leaf columns; source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
-    );
-    assert!(
-        !body.contains("__vec_checked_get("),
-        "`xs[i].x` still fetched the whole element; source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
-    );
+    assert!(body.contains(".x") && body.contains(".y"), "{body}");
+    assert!(!body.contains("__vec_checked_get("), "{body}");
 }
 
 const VEC_SPREAD_LITERAL: &str = r#"
