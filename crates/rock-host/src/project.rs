@@ -41,13 +41,8 @@ pub(crate) fn context_root_from_env() -> Option<PathBuf> {
 /// another workspace must use its own lib/.
 fn release_root_from_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let bin_dir = exe.parent()?;
-    let root = bin_dir.parent()?;
-    if is_rock_root(root) && !root.join("Cargo.toml").exists() {
-        Some(root.to_path_buf())
-    } else {
-        None
-    }
+    let root = exe.parent()?.parent()?;
+    is_release_layout_in(root).then(|| root.to_path_buf())
 }
 
 pub fn find_project_root(path: &Path) -> Option<PathBuf> {
@@ -92,20 +87,16 @@ fn locate_luajit(
     } else {
         "luajit"
     };
-    if let Some(candidate) = exe.and_then(Path::parent).map(|dir| dir.join(name)) {
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    if let Some(path) = path {
-        for dir in std::env::split_paths(path) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    PathBuf::from(name)
+    let sibling = exe.and_then(Path::parent).map(|dir| dir.join(name));
+    sibling
+        .into_iter()
+        .chain(
+            path.into_iter()
+                .flat_map(std::env::split_paths)
+                .map(|dir| dir.join(name)),
+        )
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 pub fn lua_path_value() -> String {
@@ -185,8 +176,7 @@ pub fn write_atomic_streamed(
     // Same directory keeps `persist` an atomic same-filesystem rename.
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     write(tmp.as_file_mut())?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
+    tmp.persist(path).map(|_| ()).map_err(|e| e.error)
 }
 
 pub fn luajit_command() -> std::process::Command {

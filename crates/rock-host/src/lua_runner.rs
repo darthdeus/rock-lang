@@ -6,6 +6,7 @@
 
 use crate::process_management::{register_child_process, unregister_child_process};
 use rock_core::CompilerError;
+use std::io::{self, Read, Write};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
@@ -66,26 +67,14 @@ pub fn run_lua_code_with_command(
     // soon as the child fills a pipe buffer, which is the ~50k-line-script hang
     // that can otherwise block a child before its pipes are drained.
     let mut stdin = child.stdin.take().expect("stdin piped");
-    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
-    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
-    let stdout_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut stdout_pipe, &mut buf).map(|_| buf)
-    });
-    let stderr_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut stderr_pipe, &mut buf).map(|_| buf)
-    });
+    let stdout_thread = drain_pipe(child.stdout.take().expect("stdout piped"));
+    let stderr_thread = drain_pipe(child.stderr.take().expect("stderr piped"));
 
     // LuaJIT can report a load error and exit before the whole script has been
     // written. Keep that write error until the child status and stderr are
     // available so it cannot mask the load diagnostic.
-    let write_error = {
-        use std::io::Write;
-        let result = stdin.write_all(code.as_bytes());
-        drop(stdin);
-        result.err()
-    };
+    let write_error = stdin.write_all(code.as_bytes()).err();
+    drop(stdin);
 
     // `wait_timeout` reaps the child itself: take the status from it, since a later
     // `wait` would fabricate exit(0). On a wait error the child stays registered so
@@ -130,22 +119,29 @@ pub fn run_lua_code_with_command(
     let stdout = drained(stdout_thread, "stdout")?;
     let stderr = drained(stderr_thread, "stderr")?;
 
-    if let Some(e) = write_error {
-        // A child load/runtime failure is the useful result even when it
-        // closed stdin before the host finished writing. A successful child
-        // has no load/runtime failure that can replace the write failure.
-        if status.success() {
-            return Err(CompilerError::new_no_location(format!(
-                "Failed to write test code to luajit process: {}.",
-                e
-            )));
-        }
+    // A child load/runtime failure is the useful result even when it
+    // closed stdin before the host finished writing. A successful child
+    // has no load/runtime failure that can replace the write failure.
+    if let Some(error) = write_error.filter(|_| status.success()) {
+        return Err(CompilerError::new_no_location(format!(
+            "Failed to write test code to luajit process: {error}."
+        )));
     }
 
     Ok(LuaRun {
         stdout: String::from_utf8_lossy(&stdout).to_string(),
         stderr: String::from_utf8_lossy(&stderr).to_string(),
         success: status.success(),
+    })
+}
+
+fn drain_pipe(
+    mut pipe: impl Read + Send + 'static,
+) -> std::thread::JoinHandle<io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes)?;
+        Ok(bytes)
     })
 }
 
