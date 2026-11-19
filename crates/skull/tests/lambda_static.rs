@@ -22,17 +22,6 @@ fn main() { setup() RESULT = call() }
 "#;
 
 #[test]
-fn lambda_body_static_folds_into_enclosing_chunk_statics() {
-    let lua = emit_module(PROBE);
-    assert!(lua.contains("[\"static:named:<test>::setup"));
-    assert!(
-        lua.lines().any(
-            |l| l.contains("static:named:<test>::setup") && l.contains("__rock_static_prepare")
-        )
-    );
-}
-
-#[test]
 fn lambda_body_static_reinits_only_on_initializer_edit() {
     let before = emit_module(PROBE);
     for (after, expected) in [

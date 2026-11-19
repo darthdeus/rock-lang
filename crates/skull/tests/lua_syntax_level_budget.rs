@@ -1,4 +1,4 @@
-use crate::common::{function_body, luajit_loads, run_main, try_emit_module};
+use crate::common::{emit_module, function_body, run_main};
 
 fn display_tiers(n: usize) -> String {
     let list = |f: &dyn Fn(usize) -> String| (0..n).map(f).collect::<Vec<_>>().join(", ");
@@ -74,7 +74,7 @@ fn display_tiers_expected(n: usize) -> String {
 
 #[test]
 fn narrow_display_helpers_render_expected_formats() {
-    let lua = try_emit_module(&display_tiers(2)).expect("emits");
+    let lua = emit_module(&display_tiers(2));
     let expected = "CdataWide { f0: 0.5, f1: 1.5 }\n\
                     CdataWide { f0 = 0.5, f1 = 1.5 }\n\
                     GcWide { g0: s0, g1: s1 }\n\
@@ -90,8 +90,7 @@ fn narrow_display_helpers_render_expected_formats() {
 #[test]
 fn wide_display_helpers_load_and_render() {
     let n = 100;
-    let lua = try_emit_module(&display_tiers(n)).expect("emits");
-    luajit_loads(&lua).expect("the emitted chunk must load");
+    let lua = emit_module(&display_tiers(n));
     assert_eq!(run_main(&lua), display_tiers_expected(n));
 }
 
@@ -104,8 +103,7 @@ fn wide_value_interpolation_loads_and_renders() {
         .join(", ");
     let src =
         format!("value Row {{ {fields} }}\nfn main() {{ let r = Row {{}}; print(\"<{{r}}>\") }}\n");
-    let lua = try_emit_module(&src).expect("emits");
-    luajit_loads(&lua).expect("the emitted chunk must load");
+    let lua = emit_module(&src);
     let body = (0..n)
         .map(|i| format!("f{i}: {i}"))
         .collect::<Vec<_>>()
@@ -133,14 +131,13 @@ fn accumulation(statements: usize) -> String {
 
 #[test]
 fn long_accumulation_loads_and_runs() {
-    let lua = try_emit_module(&accumulation(300)).expect("emits");
-    luajit_loads(&lua).expect("the emitted chunk must load");
+    let lua = emit_module(&accumulation(300));
     assert_eq!(run_main(&lua), "1650");
 }
 
 #[test]
 fn accumulation_within_the_budget_stays_one_expression() {
-    let lua = try_emit_module(&accumulation(120)).expect("emits");
+    let lua = emit_module(&accumulation(120));
     let body = function_body(&lua, "sum");
     let sums = body.lines().filter(|line| line.contains(" + ")).count();
     assert_eq!(sums, 1);

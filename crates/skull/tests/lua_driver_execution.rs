@@ -129,55 +129,37 @@ fn shrunk(xs: [int], m: Map<string, int>) -> int {
 }
 
 #[test]
-fn callee_binding_ignores_calls_removed_by_cleanup() {
+fn callee_binding_keeps_calls_to_the_right_function() {
     let _inline_off = common::inline_off_guard();
-    let src = "fn discarded(a: int) -> int { a + 2 }\nfn live(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { if false { discarded(a) } else { live(a) } }";
-    assert_eq!(run(src, "caller(7)"), "8");
-}
-
-#[test]
-fn callee_binding_ignores_discarded_uint_helpers() {
-    let _inline_off = common::inline_off_guard();
-    let src = "fn checked(value: float, count: uint) -> uint { if false { (value as uint) << count } else { count } }";
-    assert_eq!(run(src, "checked(-1, 3)"), "3");
-}
-
-#[test]
-fn callee_binding_short_names_skip_public_globals() {
-    let _inline_off = common::inline_off_guard();
-    let src = "fn leaf(a: int) -> int { a + 1 }\n\
-               @nomangle fn b0(a: int) -> int { a + 2 }\n\
-               fn caller(a: int) -> int { leaf(a) + b0(a) }";
-    assert_eq!(run(src, "caller(3)"), "9");
-}
-
-#[test]
-fn callee_binding_aliases_skip_names_inline_lua_reads() {
-    let _inline_off = common::inline_off_guard();
-    let src = "fn leaf(a: int) -> int { a + 1 }\n\
-               @inline inline(lua) fn raw(a: int) -> int = \"return b0(a)\"\n\
-               fn caller(a: int) -> int { leaf(a) + raw(a) }";
-    assert_eq!(
-        run(
-            src,
-            "(function() b0 = function(a) return a + 10 end; return caller(3) end)()"
+    for (src, driver, expected) in [
+        (
+            "fn discarded(a: int) -> int { a + 2 }\nfn live(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { if false { discarded(a) } else { live(a) } }",
+            "caller(7)",
+            "8",
         ),
-        "17"
-    );
-}
-
-#[test]
-fn aliased_captures_around_a_spliced_body_in_a_loop_run_correctly() {
-    let _inline_off = common::inline_off_guard();
-    let src = "fn leaf(a: int) -> int { a + 1 }\n\
-               fn other(a: int) -> int { a * 3 }\n\
-               @inline inline(lua) fn twice(a: int) -> int = \"local b0 = a * 2\\nreturn b0\"\n\
-               fn caller(n: int) -> int {\n\
-                 let s = 0\n\
-                 for i in 0..n { s = s + leaf(twice(i)) + other(i) }\n\
-                 return s\n\
-               }";
-    assert_eq!(run(src, "caller(4)"), "34");
+        (
+            "fn caller(value: float, count: uint) -> uint { if false { (value as uint) << count } else { count } }",
+            "caller(-1, 3)",
+            "3",
+        ),
+        (
+            "fn leaf(a: int) -> int { a + 1 }\n@nomangle fn b0(a: int) -> int { a + 2 }\nfn caller(a: int) -> int { leaf(a) + b0(a) }",
+            "caller(3)",
+            "9",
+        ),
+        (
+            "fn leaf(a: int) -> int { a + 1 }\n@inline inline(lua) fn raw(a: int) -> int = \"return b0(a)\"\nfn caller(a: int) -> int { leaf(a) + raw(a) }",
+            "(function() b0 = function(a) return a + 10 end; return caller(3) end)()",
+            "17",
+        ),
+        (
+            "fn leaf(a: int) -> int { a + 1 }\nfn other(a: int) -> int { a * 3 }\n@inline inline(lua) fn twice(a: int) -> int = \"local b0 = a * 2\\nreturn b0\"\nfn caller(n: int) -> int {\n  let s = 0\n  for i in 0..n { s = s + leaf(twice(i)) + other(i) }\n  return s\n}",
+            "caller(4)",
+            "34",
+        ),
+    ] {
+        assert_eq!(run(src, driver), expected, "{src}");
+    }
 }
 
 #[test]
