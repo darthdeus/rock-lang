@@ -22,13 +22,6 @@ pub struct Boundary {
     pub symbol: String,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct CoroutineHelper {
-    pub owner_identity: String,
-    pub suffix: &'static str,
-    pub symbol_today: String,
-}
-
 #[derive(Clone, Debug)]
 pub struct Edge {
     pub to: Instance,
@@ -458,8 +451,6 @@ pub struct InstanceGraph {
     recursion_positions: BTreeMap<Instance, usize>,
     coroutine_positions: BTreeMap<Instance, usize>,
     pub boundaries: BTreeMap<String, Boundary>,
-    pub coroutine_helpers: BTreeSet<CoroutineHelper>,
-    coroutine_helpers_by_owner: BTreeMap<String, BTreeSet<CoroutineHelper>>,
     pub inline_body_nomangle_roots: BTreeMap<DeclKey, FxHashSet<FuncRef>>,
     lost: BTreeSet<Instance>,
     pub index: Indices,
@@ -661,8 +652,6 @@ impl InstanceGraph {
             recursion_positions: BTreeMap::new(),
             coroutine_positions: BTreeMap::new(),
             boundaries: BTreeMap::new(),
-            coroutine_helpers: BTreeSet::new(),
-            coroutine_helpers_by_owner: BTreeMap::new(),
             inline_body_nomangle_roots: BTreeMap::new(),
         }
     }
@@ -1405,38 +1394,16 @@ impl InstanceGraph {
     ) {
         let touched: BTreeSet<Instance> = touched.into_iter().collect();
         let mut active = Vec::new();
-        let mut removed = Vec::new();
         for instance in &touched {
-            let identity = self.identity(ws, instance);
-            self.remove_coroutine_helpers(&identity);
             self.remove_coroutine_rejection(instance);
             if self
                 .contributions
                 .contains_key(&Owner::Instance(instance.clone()))
             {
                 active.push(instance.clone());
-            } else {
-                removed.push(instance.clone());
             }
         }
-        record_coroutine_helpers(self, ws, &active, &removed);
-    }
-
-    fn remove_coroutine_helpers(&mut self, owner_identity: &str) {
-        let Some(helpers) = self.coroutine_helpers_by_owner.remove(owner_identity) else {
-            return;
-        };
-        for helper in helpers {
-            self.coroutine_helpers.remove(&helper);
-        }
-    }
-
-    fn insert_coroutine_helper(&mut self, helper: CoroutineHelper) {
-        self.coroutine_helpers.insert(helper.clone());
-        self.coroutine_helpers_by_owner
-            .entry(helper.owner_identity.clone())
-            .or_default()
-            .insert(helper);
+        record_coroutine_rejections(self, ws, &active);
     }
 
     fn apply_root_delta(
@@ -1504,7 +1471,7 @@ impl InstanceGraph {
             self.install_recursion_finding(finding);
         }
         classify_boundaries(self, ws, &decls);
-        record_coroutine_helpers(self, ws, &coroutines, &[]);
+        record_coroutine_rejections(self, ws, &coroutines);
     }
 
     fn derive_incremental(
@@ -1681,8 +1648,7 @@ impl InstanceGraph {
         affected.extend(pending_roots);
         affected.sort();
         affected.dedup();
-        let run = self.run(ws, affected.clone(), true);
-        self.run_stats = run;
+        self.run_stats = self.run(ws, affected.clone(), true);
         let revisited_owners = self.last_run_owners.clone();
         let changed_decls = changed.iter().filter_map(|(module, owner)| match owner {
             BodyOwner::Function(func) => Some(skull_mir::lower::canonical_variant(
@@ -1712,13 +1678,8 @@ impl InstanceGraph {
                 .cloned(),
         );
         UpdateStats {
-            affected: affected.len(),
-            expanded: run.expanded,
-            newly_reached: added.len(),
             added,
             removed,
-            owners: self.contributions.len(),
-            instances: self.instances.len(),
             revisited,
             revisited_owners,
         }
@@ -1976,13 +1937,8 @@ pub struct RunStats {
 
 #[derive(Default, Debug, Clone)]
 pub struct UpdateStats {
-    pub affected: usize,
-    pub expanded: usize,
-    pub newly_reached: usize,
     pub added: BTreeSet<Instance>,
     pub removed: BTreeSet<Instance>,
-    pub owners: usize,
-    pub instances: usize,
     pub revisited: BTreeSet<Instance>,
     pub revisited_owners: BTreeSet<Owner>,
 }
@@ -3221,53 +3177,31 @@ fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey])
     }
 }
 
-fn record_coroutine_helpers(
-    g: &mut InstanceGraph,
-    ws: &Workspace,
-    added: &[Instance],
-    removed: &[Instance],
-) {
-    for i in removed {
-        let identity = g.identity(ws, i);
-        g.remove_coroutine_helpers(&identity);
-        g.remove_coroutine_rejection(i);
-    }
+fn record_coroutine_rejections(g: &mut InstanceGraph, ws: &Workspace, added: &[Instance]) {
     for i in added {
         let f = &ws.module(i.func.module).functions[i.func.func];
         if !f.is_coroutine {
             continue;
         }
-        let plan = match crate::concrete_body::concrete_signature_for_instance(ws, g, i).and_then(
-            |signature| {
+        if let Err(reason) = crate::concrete_body::concrete_signature_for_instance(ws, g, i)
+            .and_then(|signature| {
                 skull_mir::lower::CoroutinePlan::from_concrete_signature(
                     ws,
                     g.interner(),
                     &signature,
                     i.symbol(ws, g.interner()),
                 )
-            },
-        ) {
-            Ok(plan) => plan,
-            Err(reason) => {
-                g.install_coroutine_rejection(Rejection {
-                    kind: RejectionKind::ConcreteTypeUnavailable,
-                    at: i.clone(),
-                    span: f.name_span,
-                    message: format!(
-                        "cannot build concrete coroutine plan for `{}`: {}",
-                        f.name,
-                        reason.bucket()
-                    ),
-                });
-                continue;
-            }
-        };
-        let owner_identity = g.identity(ws, i);
-        for suffix in plan.declared_suffixes() {
-            g.insert_coroutine_helper(CoroutineHelper {
-                owner_identity: owner_identity.clone(),
-                suffix,
-                symbol_today: format!("{}{suffix}", plan.base()),
+            })
+        {
+            g.install_coroutine_rejection(Rejection {
+                kind: RejectionKind::ConcreteTypeUnavailable,
+                at: i.clone(),
+                span: f.name_span,
+                message: format!(
+                    "cannot build concrete coroutine plan for `{}`: {}",
+                    f.name,
+                    reason.bucket()
+                ),
             });
         }
     }
