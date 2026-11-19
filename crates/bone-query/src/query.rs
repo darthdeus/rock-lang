@@ -215,14 +215,10 @@ pub fn definition_at(
                 RefTarget::Struct(*name).declaration(ws)
             }
 
-            hir::Expr::EnumVariant { enum_name, .. } => {
-                if let Some(seg) = path_segment_at(ws, mid, offset) {
-                    return segment_target_def(ws, seg.target);
-                }
-                at.enum_variant_token(e)
-                    .map_or(RefTarget::Enum(*enum_name), |token| token.target)
-                    .declaration(ws)
-            }
+            hir::Expr::EnumVariant { enum_name, .. } => at
+                .enum_variant_token(e)
+                .map_or(RefTarget::Enum(*enum_name), |token| token.target)
+                .declaration(ws),
 
             // `recv.field` -> the field's declaration in recv's struct.
             hir::Expr::FieldAccess { base, field } => {

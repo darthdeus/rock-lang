@@ -1326,9 +1326,6 @@ impl Session {
         self.files.contains_key(path)
     }
 
-    pub fn tracked_paths(&self) -> Vec<&str> {
-        self.paths.iter().map(|s| s.as_str()).collect()
-    }
     /// Evict every module `keep` rejects, except permanent ones: the builtin
     /// module owns the builtin type nodes and outlives every eviction.
     pub fn retain_modules(&mut self, keep: impl Fn(ModuleId) -> bool) {
