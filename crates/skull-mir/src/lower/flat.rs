@@ -1,6 +1,3 @@
-//! Flattened enums: an enum whose payload lives in dotted parent slots rather
-//! than a nested table, plus the cell group/repr conversions a coroutine frame
-//! and a flat literal both go through.
 use super::*;
 impl<'a> Builder<'a> {
     pub(crate) fn new_flat_enum_cells(
@@ -81,7 +78,6 @@ impl<'a> Builder<'a> {
         Ok(Some(cells))
     }
 
-    /// Lower the tag followed by the shared payload slots.
     pub(crate) fn lower_flat_value(
         &mut self,
         shape: &EnumFlatShape,
@@ -140,11 +136,8 @@ impl<'a> Builder<'a> {
         let mut slots: Vec<Option<Idx<Inst>>> = vec![None; shape.tuple_width()];
         for (pos, arg) in positional.into_iter().enumerate() {
             let off = shape.slot_offset(pos);
-            // Use this variant's payload width and leave the remaining slots inactive.
             match self.flat_payload_leaf_shape(Some(shape.name), variant, pos) {
                 Some(vs) => {
-                    // The enum is immutable and outlives its operands, so its
-                    // payload owns its value children from the start.
                     let leaves = match arg {
                         FlatPayload::Expr(a) => {
                             let r = self.lower_expr_repr(a)?;
@@ -166,8 +159,6 @@ impl<'a> Builder<'a> {
                 None => {
                     let v = match arg {
                         FlatPayload::Expr(a) => self.lower_expr(a)?,
-                        // A compiler-built payload has no source line to mark
-                        // `materialize`, so the box it needs is the authorized one.
                         FlatPayload::Repr(r) => {
                             let v = self.pack(r)?;
                             self.authorize_nobox_box(v);
@@ -218,8 +209,7 @@ impl<'a> Builder<'a> {
         self.repr_group_to_cells(shape, leaves.into_iter().map(ValueRepr::Scalar).collect())
     }
 
-    /// Whether `variant` of `enum_name` is a Unit (payload-free) variant -- its
-    /// materialized box is the interned singleton `__rock_enum_<E>_<variant>`.
+    /// Its materialized box is the interned singleton `__rock_enum_<E>_<variant>`.
     pub(crate) fn variant_is_unit(&self, enum_name: Ustr, variant: Ustr) -> bool {
         self.ws
             .enums_by_name
@@ -229,14 +219,10 @@ impl<'a> Builder<'a> {
             .is_some_and(|v| matches!(v.payload, VariantPayload::Unit))
     }
 
-    /// Whether `e`'s inferred type is a flat enum (`expr_ty` peels `Nullable`, so
-    /// this is true for both `E` and `E?`).
     pub(crate) fn expr_is_flat_enum(&self, e: Idx<Expr>) -> bool {
         self.dispatch().expr_is_flat_enum(e)
     }
 
-    /// The flat-enum `ValueShape` of `e`'s (non-nullable) inferred type, else `None`
-    /// -- the gate for threading a `let`/reassign target as leaf cells.
     pub(crate) fn flat_enum_value_shape_of(
         &self,
         e: Idx<Expr>,
@@ -285,7 +271,6 @@ impl<'a> Builder<'a> {
             self.store_cell(*c, z);
         }
         self.f.set_term(self.cur, Term::Goto(join));
-        // Live: spread the reused frame slots into the leaf cells.
         self.cur = live_bb;
         for (i, c) in cells.iter().enumerate() {
             let v = self.read_field(frame, yield_slot(i));
@@ -298,9 +283,7 @@ impl<'a> Builder<'a> {
         Self::rebuild_from_leaves(value_shape, &leaves, &mut idx)
     }
 
-    /// Split a flat-enum `ValueRepr::Group` into its cells (the inverse of
-    /// `flat_cells_to_repr`) -- no box. Parts are leaf Scalars in `value_shape`
-    /// order: `[tag, _0.., <rec>..]`.
+    /// Parts are leaf Scalars in `[tag, _0.., <rec>..]` order.
     pub(crate) fn repr_group_to_cells(
         &mut self,
         shape: &EnumFlatShape,
@@ -325,8 +308,7 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// A flat enum's runtime cells as a `ValueRepr::Group` in `value_shape` leaf
-    /// order (`[tag, _0.., <rec>..]`) -- the scalar-ABI carrier for a flat enum.
+    /// Cells as a `Group` in `[tag, _0.., <rec>..]` leaf order.
     pub(crate) fn flat_cells_to_repr(&self, shape: &EnumFlatShape, cells: FlatCells) -> ValueRepr {
         let mut parts = Vec::with_capacity(shape.leaf_count());
         parts.push(ValueRepr::Scalar(cells.tag));
@@ -339,8 +321,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Read a boxed enum's keys back out into flattened cells (`__variant` -> tag,
-    /// `[i+1]` -> positional, `.field` -> named) -- the box-to-slots spread.
+    /// Box keys to cells: `__variant` -> tag, `[i+1]` -> positional, `.field` -> named.
     pub(crate) fn spread_box_to_cells(
         &mut self,
         bv: Idx<Inst>,
@@ -363,7 +344,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Read a flat enum field from the physical slots of its parent struct.
     pub(crate) fn load_flat_cells(
         &mut self,
         parent: Idx<Inst>,
@@ -472,8 +452,7 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Re-materialize a flattened enum field `parent.{prefix}` at a whole-value
-    /// read boundary. A nil tag materializes to nil, never `{__variant = nil}`.
+    /// A nil tag materializes to nil, never `{__variant = nil}`.
     pub(crate) fn materialize_flat(
         &mut self,
         parent: Idx<Inst>,
@@ -484,8 +463,6 @@ impl<'a> Builder<'a> {
         self.materialize_flat_cells(shape, cells)
     }
 
-    /// Emit the per-slot stores for a flattened enum field assignment
-    /// `parent.{prefix} = <cells>` (tag + every positional + every named slot).
     pub(crate) fn store_flat_cells(&mut self, parent: Idx<Inst>, prefix: Ustr, cells: FlatCells) {
         self.write_field(parent, flat_tag_slot(prefix), cells.tag);
         for (i, p) in cells.positional.into_iter().enumerate() {
@@ -496,8 +473,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The `(slot_name, value)` pairs for a flattened enum field in a struct literal
-    /// (tag + every positional + every named slot), keyed by the parent field name.
     pub(crate) fn flat_literal_slots(
         &self,
         field: Ustr,

@@ -1,5 +1,3 @@
-//! Flat-stored element references carry their container and checked slot.
-//! A callee uses a specialized body for each argument storage signature.
 use super::call::{DirectCall, call_argument_parameter, call_uses_parameter_slots};
 use super::*;
 use crate::instance::Instance;
@@ -30,10 +28,6 @@ impl FlatStorage {
     }
 }
 
-/// What a flat `ref` addresses: the stored element and the dotted path of the
-/// nested value field inside it (empty for the whole element). Every key
-/// derived from it is static, so a body lowered for one key addresses leaves
-/// directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FlatRefKey {
     pub(crate) elem: ColumnElem,
@@ -52,7 +46,6 @@ impl FlatRefKey {
     }
 }
 
-/// Per callee parameter, the flat storage its `ref` argument has.
 pub(crate) type FlatSig = Vec<Option<FlatRefKey>>;
 
 #[derive(Clone, Copy)]
@@ -62,17 +55,13 @@ pub(crate) struct FlatRefVal {
     pub(crate) key: FlatRefKey,
 }
 
-/// A direct call that passes or returns a flat `ref`.
 pub(crate) struct FlatCallPlan {
     inst: Instance,
     sig: FlatSig,
-    /// `(argument, parameter index, key)` for each flat argument.
     args: Vec<(Idx<Expr>, usize, FlatRefKey)>,
     ret: Option<FlatRefKey>,
 }
 
-/// The flat arguments of the call whose arguments are being lowered. Each
-/// `ref` argument it expects lowers to its vec, and its slot is recorded here.
 pub(crate) struct FlatArgCapture {
     expected: Vec<(Idx<Expr>, usize, FlatRefKey)>,
     slots: Vec<(usize, Idx<Inst>)>,
@@ -83,32 +72,20 @@ pub(crate) enum FlatCallOut {
     Value(ValueRepr),
 }
 
-/// Flat variants and flat-return answers of one emitted root body, shared by
-/// every builder that lowers into it (nested fns and variants included).
 #[derive(Default)]
 pub(crate) struct FlatVariants {
-    /// The root instance, set only by a root that hoists the variants into
-    /// its `nested_fns`; variants are named after its symbol.
     root: Option<Instance>,
     counter: u32,
     by_key: HashMap<(Instance, FlatSig), Ustr>,
     funcs: Vec<MirFunc>,
     returns: HashMap<(Instance, FlatSig), Option<FlatRefKey>>,
-    /// Return scans in progress, innermost last.
     scanning: Vec<ReturnScan>,
 }
 
-/// One in-progress return scan. A call back into it (recursion, direct or
-/// mutual) reads `assumed`; the scan repeats until its answer equals what
-/// it assumed.
 struct ReturnScan {
     key: (Instance, FlatSig),
-    /// `None` until a pass has an answer: a return that reads an unknown
-    /// answer decides nothing, rather than counting as boxed.
     assumed: Option<Option<FlatRefKey>>,
-    /// The outermost in-progress scan this pass read an answer from.
     depends_on: Option<usize>,
-    /// Reads of an unknown answer during this pass.
     unknown_reads: u32,
 }
 
@@ -135,8 +112,6 @@ fn is_phantom_call(body: &Body, e: Idx<Expr>) -> bool {
     )
 }
 
-/// Every returned expression of a body and every `let` in it, excluding the
-/// bodies of lambdas and nested fns, which return for themselves.
 fn scan_returns(
     body: &Body,
     node: HirChild,
@@ -159,7 +134,6 @@ fn scan_returns(
             Statement::Return(Some(value)) => returns.push(value),
             _ => {}
         },
-        // A pattern holds neither a return nor a let.
         HirChild::Pattern(_) => return,
     }
     body.for_each_child(node, |child| scan_returns(body, child, returns, lets));
@@ -178,7 +152,6 @@ impl<'a> Builder<'a> {
             .map(|elem| (elem, FlatStorage::Columns)))
     }
 
-    /// The value shape a flat `ref` with `key` addresses.
     pub(crate) fn flat_target_shape(&self, key: &FlatRefKey) -> Result<ValueShape, CompilerError> {
         let mut shape = self.column_shape(key.elem)?;
         if key.prefix.is_empty() {
@@ -198,8 +171,6 @@ impl<'a> Builder<'a> {
         Ok(shape)
     }
 
-    /// Whether `ty` is `ref V` or `(ref V)?` for a value struct `V`, the only
-    /// `ref` that can address a flat element.
     fn is_value_ref_type(&self, ty: &MonoTy) -> bool {
         match ty.peel_nullable().0 {
             MonoTy::App {
@@ -213,9 +184,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `Some(key)` iff `e` denotes a flat-stored element or a nested value
-    /// field of one: an index into a flat container, a field of such a place,
-    /// a flat `ref` binding, or a call whose `ref` result is flat.
     pub(crate) fn classify_flat_ref(
         &self,
         e: Idx<Expr>,
@@ -253,9 +221,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The flat arguments and flat result of direct call `e`, or `None` when
-    /// it has neither. Cheap for an ordinary call: only `ref` arguments are
-    /// classified, and only a value-`ref` result consults the callee's body.
     pub(crate) fn flat_call_plan(
         &self,
         e: Idx<Expr>,
@@ -333,10 +298,6 @@ impl<'a> Builder<'a> {
         }))
     }
 
-    /// Whether argument `a` of call `e` can carry a `ref`: one bone records
-    /// for a `ref` parameter, or a `ref`-typed binding or call handed to a
-    /// generic parameter (`unwrap(c)` with `T = ref V`), which bone does not
-    /// record because `T` is still open when it checks the call.
     fn flat_ref_arg_candidate(&self, e: Idx<Expr>, a: Idx<Expr>) -> Result<bool, CompilerError> {
         if self.is_ref_call_arg(e, a) {
             return Ok(true);
@@ -353,18 +314,12 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Whether `a` is a flat argument of the call whose arguments are being
-    /// lowered, which lowers through [`Self::lower_ref_borrow`] like a `ref`
-    /// argument bone records.
     pub(crate) fn is_flat_ref_call_arg(&self, a: Idx<Expr>) -> bool {
         self.flat_arg_captures
             .last()
             .is_some_and(|capture| capture.expected.iter().any(|(arg, _, _)| *arg == a))
     }
 
-    /// Whether `inst`, entered with flat arguments `sig`, returns a flat `ref`,
-    /// and with which key. Every returned place must agree: one `ref` result
-    /// cannot be `vec, slot` on one path and a table on another.
     fn flat_return_of(
         &self,
         inst: &Instance,
@@ -478,8 +433,6 @@ impl<'a> Builder<'a> {
         let done = reg.scanning.pop().expect("pushed above");
         let answer = result?;
         match done.depends_on {
-            // Read an answer of an enclosing scan, which rescans this one
-            // once its own answer changes.
             Some(d) if d < depth => {
                 let reader = reg.scanning.last_mut().expect("an enclosing scan");
                 reader.depends_on = Some(reader.depends_on.map_or(d, |r| r.min(d)));
@@ -487,8 +440,6 @@ impl<'a> Builder<'a> {
                     reader.unknown_reads += 1;
                 }
             }
-            // Settled. A body whose every return recurses never returns and
-            // keeps the ordinary boxed result.
             _ => {
                 reg.returns.insert(key, answer.flatten());
             }
@@ -496,18 +447,12 @@ impl<'a> Builder<'a> {
         Ok(answer.flatten())
     }
 
-    /// The agreed result of `returns` for the scan at `depth`, repeated with
-    /// each new answer assumed for the scan's own recursive calls until the
-    /// answer stops changing. `None` while every return reads an unknown
-    /// answer.
     fn settle_flat_returns(
         &self,
         decl: &Function,
         returns: &[Idx<Expr>],
         depth: usize,
     ) -> Result<Option<Option<FlatRefKey>>, CompilerError> {
-        // Agreement only refines an unknown answer. Once known, a return
-        // either confirms it or agree_flat_returns rejects the disagreement.
         loop {
             let answer = self.agree_flat_returns(decl, returns, depth)?;
             let mut reg = self.flat_variants.borrow_mut();
@@ -561,8 +506,6 @@ impl<'a> Builder<'a> {
         Ok(agreed)
     }
 
-    /// The flat `ref` result of the body being lowered, when its declared
-    /// result is a value `ref` and every return addresses a flat element.
     pub(crate) fn own_flat_return(
         &self,
         subject: &Instance,
@@ -572,8 +515,6 @@ impl<'a> Builder<'a> {
         self.flat_return_scan(subject, self.concrete_plan, &sig)
     }
 
-    /// Reject a call path that cannot take the `vec, slot` result of an
-    /// instance whose `ref` result is flat (a safe-nav call, a function value).
     pub(crate) fn reject_flat_return_outside_direct_call(
         &self,
         e: Idx<Expr>,
@@ -594,8 +535,6 @@ impl<'a> Builder<'a> {
         ))
     }
 
-    /// Lower `e`, which [`Self::classify_flat_ref`] classified flat, to its
-    /// vec and slot.
     pub(crate) fn lower_flat_ref(&mut self, e: Idx<Expr>) -> Result<FlatRefVal, CompilerError> {
         let key = self
             .classify_flat_ref(e)?
@@ -650,9 +589,8 @@ impl<'a> Builder<'a> {
         self.lower_flat_call(e, func, &arg_idxs, any_named, &dc, &plan, None)
     }
 
-    /// Lower a direct call with a flat plan. Flat arguments go first as
-    /// slots, in parameter order, and each one's own argument position holds
-    /// its vec; a flat result arrives as `vec, slot`.
+    /// Flat arguments go first as slots, in parameter order; each one's own
+    /// argument position holds its vec. A flat result arrives as `vec, slot`.
     pub(crate) fn lower_flat_call(
         &mut self,
         e: Idx<Expr>,
@@ -695,8 +633,6 @@ impl<'a> Builder<'a> {
         if !self.f.hoisted_fn_globals.contains(&hoisted) {
             self.f.hoisted_fn_globals.push(hoisted);
         }
-        // Only ever called directly, so the call names the global rather than
-        // a reload code slot; the variant never escapes as a value.
         let callee = self.emit_cur(Inst::Global(hoisted));
         let mut argv: Vec<Idx<Inst>> = slots.into_iter().map(|(_, slot)| slot).collect();
         argv.extend(args);
@@ -739,8 +675,6 @@ impl<'a> Builder<'a> {
         )))
     }
 
-    /// The hoisted flat variant of `plan`'s callee for its flat signature,
-    /// lowered on first use and shared by every call in this root.
     fn flat_variant(
         &mut self,
         plan: &FlatCallPlan,
@@ -763,7 +697,6 @@ impl<'a> Builder<'a> {
                 "__flatref_{}_{n}",
                 root.symbol(self.ws, self.scx.interner())
             ));
-            // Generated callable machinery of the root, named by its symbol.
             let identity = crate::code_identity::CodeIdentity::Generated {
                 enclosing: crate::code_identity::CodeOwner::Instance(root),
                 role: name,
@@ -904,17 +837,12 @@ impl<'a> Builder<'a> {
         child.fill_param_defaults()?;
         child.copy_ref_borrowed_params(&params)?;
         child.lower_root()?;
-        // Code belongs to the generated variant; persistent state belongs to
-        // the concrete callable whose body it implements.
         for cell in &mut child.f.statics {
             cell.owner = Some(crate::code_identity::CodeIdentity::Named(inst.clone()));
         }
         Ok(finish_lower_attribution(child.f))
     }
 
-    /// A flat `ref` argument of the call whose arguments are being lowered:
-    /// its vec, with the slot recorded for the call. `None` for any other
-    /// borrow.
     pub(crate) fn capture_flat_ref_arg(
         &mut self,
         e: Idx<Expr>,
@@ -935,8 +863,6 @@ impl<'a> Builder<'a> {
         Ok(Some(val.vec))
     }
 
-    /// `let x: ref T = <flat place>` (or `(ref T)?`, from a borrow call): bind
-    /// the vec and slot. `false` when the binding is not a flat `ref`.
     pub(crate) fn lower_flat_let(
         &mut self,
         name: Idx<BindingInfo>,
@@ -981,7 +907,6 @@ impl<'a> Builder<'a> {
         Ok(true)
     }
 
-    /// The `return` wire of a body whose result is a flat `ref`.
     pub(crate) fn flat_return_leaves(
         &mut self,
         e: Idx<Expr>,
@@ -1015,7 +940,6 @@ impl<'a> Builder<'a> {
         })))
     }
 
-    /// The leaf keys of the value a flat `ref` addresses, in leaf order.
     fn flat_leaf_keys(&self, key: &FlatRefKey, shape: &ValueShape) -> Vec<Ustr> {
         leaf_names(shape, key.prefix.as_str(), ".")
             .iter()
@@ -1090,7 +1014,6 @@ impl<'a> Builder<'a> {
         Ok((at, data))
     }
 
-    /// Resolve a field path against an indexed element or a flat borrow.
     pub(crate) fn flat_root_place(
         &mut self,
         root: Idx<Expr>,
@@ -1120,8 +1043,6 @@ impl<'a> Builder<'a> {
         }))
     }
 
-    /// The root of a flat field path that is not an index: a flat `ref`
-    /// binding or call, with its key.
     pub(crate) fn flat_ref_root_key(
         &self,
         root: Idx<Expr>,
@@ -1135,9 +1056,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// A read through a flat `ref` binding or call (`c`, `c.inner`, `c.w`,
-    /// `a.borrow(e).unwrap().w`): the addressed leaves, never a table. An
-    /// index-rooted read keeps its own path.
     pub(crate) fn flat_ref_read(
         &mut self,
         e: Idx<Expr>,
