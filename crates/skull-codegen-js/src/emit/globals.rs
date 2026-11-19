@@ -414,12 +414,10 @@ pub(super) fn schedule_global_reads(
                     "JS: nobox leaf `{name}` has no compiler-owned storage slot"
                 )));
             }
-            if let Some(&site) = st.state_index.get(&base) {
-                if st.ginit_seen.insert(base) {
-                    st.ginit_queue.push((base, site));
-                }
+            if st.state_index.contains_key(&base) {
+                st.queue_ginit(base);
             }
-        } else if let Some(&site) = st.state_index.get(&name) {
+        } else if st.state_index.contains_key(&name) {
             if st.deco_globals.contains(&name) {
                 return Err(err(format!(
                     "JS subset: global `{name}` is populated by decorator application \
@@ -433,9 +431,7 @@ pub(super) fn schedule_global_reads(
                     "JS: global `{name}` has no compiler-owned storage slot"
                 )));
             }
-            if st.ginit_seen.insert(name) {
-                st.ginit_queue.push((name, site));
-            }
+            st.queue_ginit(name);
         } else if ws.functions_by_name.contains_key(&name) {
             return Err(err(format!(
                 "JS: function global `{name}` has no MIR fn-value record"

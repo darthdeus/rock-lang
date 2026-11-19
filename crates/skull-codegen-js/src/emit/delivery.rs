@@ -305,10 +305,10 @@ pub(super) fn drain_worklists(
             delivery.visit_fn(fr, None)?;
         }
         delivery.st.queue_opaque_js_global_initializers(ws);
-        while let Some((gname, _)) = delivery.st.ginit_queue.pop() {
+        while let Some(gname) = delivery.st.ginit_queue.pop() {
             delivery.visit_ginit(gname)?;
         }
-        if !delivery.st.queue.is_empty() || !delivery.st.ginit_queue.is_empty() {
+        if !delivery.st.queue.is_empty() {
             continue;
         }
         if let Some(inst) = delivery.st.standalone_specs.get(spec_cursor).cloned() {

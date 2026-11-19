@@ -74,20 +74,12 @@ pub fn emit_overlay_with_span_edits(
         }
     }
 
-    if let Some(main) = nullary_main(ws, user_mid) {
-        if !cache.root_plan.refs.contains(&main) {
-            return Ok(JsReload::FullRequired);
-        }
-    }
-
-    let root_plan = cache.root_plan.clone();
-    let current_roots: HashSet<FuncRef> = root_plan.refs.iter().copied().collect();
-    let session_roots: HashSet<FuncRef> = cache.session.roots.iter().copied().collect();
-    if current_roots != session_roots {
+    if nullary_main(ws, user_mid).is_some_and(|main| !cache.session.contains_root(main)) {
         return Ok(JsReload::FullRequired);
     }
-    let update = update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred, edits);
-    let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session, true)?;
+
+    let update = cache.session.update(ws, reinferred, edits);
+    let current = cache.session.assemble(ws, &cache.scx, true)?;
     if current.global_layout != cache.build.global_layout {
         return Ok(JsReload::FullRequired);
     }
@@ -107,25 +99,21 @@ pub fn emit_overlay_with_span_edits(
         return Ok(JsReload::FullRequired);
     }
 
-    let newly_reached_specs: BTreeSet<_> = current
+    if current
         .spec_chunks
         .keys()
-        .filter(|instance| !cache.build.spec_chunks.contains_key(*instance))
-        .cloned()
-        .collect();
-    if !newly_reached_specs.is_subset(&update.added) {
+        .any(|inst| !cache.build.spec_chunks.contains_key(inst) && !update.added.contains(inst))
+    {
         return Err(CompilerError::new_no_location(
             "JS graph delta omitted a newly retained specialization".to_string(),
         ));
     }
-    let stranded_specs: BTreeSet<_> = cache
+    if cache
         .build
         .spec_chunks
         .keys()
-        .filter(|instance| !current.spec_chunks.contains_key(*instance))
-        .cloned()
-        .collect();
-    if !stranded_specs.is_subset(&update.removed) {
+        .any(|inst| !current.spec_chunks.contains_key(inst) && !update.removed.contains(inst))
+    {
         return Err(CompilerError::new_no_location(
             "JS graph delta omitted a removed specialization".to_string(),
         ));
@@ -154,7 +142,7 @@ pub fn emit_overlay_with_span_edits(
     changed_specs.sort_by(|left, right| left.name.cmp(&right.name));
     removed_specs.sort_by(|left, right| left.name.cmp(&right.name));
 
-    let mut changed_now: Vec<FuncRef> = current
+    let mut changed_now: Vec<_> = current
         .chunks
         .iter()
         .filter(|(fref, chunk)| {
@@ -164,9 +152,8 @@ pub fn emit_overlay_with_span_edits(
                 .get(fref)
                 .is_none_or(|previous| previous.js != chunk.js)
         })
-        .map(|(fref, _)| *fref)
         .collect();
-    changed_now.sort_by_key(|fref| definition_order(*fref));
+    changed_now.sort_by_key(|(fref, _)| definition_order(**fref));
     let changed_consts: HashSet<ustr::Ustr> = current
         .const_chunks
         .iter()
@@ -189,7 +176,9 @@ pub fn emit_overlay_with_span_edits(
         cache.build = current;
         return Ok(JsReload::NoChange);
     }
-    cache.changed_since_full.extend(changed_now.iter().copied());
+    cache
+        .changed_since_full
+        .extend(changed_now.iter().map(|(fref, _)| **fref));
 
     let has_code_slots = current.code_artifact.has_escaping();
     let mut out = String::from("// skull JS incremental overlay\n");
@@ -206,10 +195,7 @@ pub fn emit_overlay_with_span_edits(
         }
     }
     let mut reset_cells = HashSet::new();
-    for fref in &changed_now {
-        let Some(chunk) = current.chunks.get(fref) else {
-            continue;
-        };
+    for (_, chunk) in changed_now {
         for cell in &chunk.statics {
             let base = StaticBaseline::of(ws, cache.scx.interner(), cell).map_err(err)?;
             if cache

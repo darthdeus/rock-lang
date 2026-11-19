@@ -26,8 +26,8 @@ pub(super) struct WorklistState<'a> {
     pub(super) deco_globals: HashSet<ustr::Ustr>,
     pub(super) enum_defs: HashMap<ustr::Ustr, String>,
     pub(super) gctx: GlobalCtx,
-    pub(super) ginit_queue: Vec<(ustr::Ustr, GlobalSite)>,
-    pub(super) ginit_seen: HashSet<ustr::Ustr>,
+    pub(super) ginit_queue: Vec<Ustr>,
+    ginit_seen: HashSet<Ustr>,
     pub(super) ginits: Vec<GlobalInit>,
     pub(super) rejections: Vec<(String, CompilerError)>,
     pub(super) artifact_decls: HashMap<Instance, FuncRef>,
@@ -162,16 +162,12 @@ impl<'a> WorklistState<'a> {
         }
         let fr = self.artifact_decls.get(&key).copied().unwrap_or(requested);
         let f = &ws.module(fr.module).functions[fr.func];
-        if matches!(f.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
-            if self.seen.insert(fr) {
+        if self.seen.insert(fr) {
+            if matches!(f.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
                 self.add_inline_js_body(ws, key, fr)?;
-            }
-        } else if !(f.is_extern && f.backend == bone_core::hir::FnBackend::Js) {
-            if self.seen.insert(fr) {
+            } else if !(f.is_extern && f.backend == bone_core::hir::FnBackend::Js) {
                 self.queue.push(fr);
             }
-        } else {
-            self.seen.insert(fr);
         }
         Ok(())
     }
@@ -204,6 +200,12 @@ impl<'a> WorklistState<'a> {
         self.rejections.push((name.to_string(), e));
     }
 
+    pub(super) fn queue_ginit(&mut self, name: Ustr) {
+        if self.ginit_seen.insert(name) {
+            self.ginit_queue.push(name);
+        }
+    }
+
     /// An opaque `inline(js)` body has no MIR global-read facts: recover its explicit `__G.name`
     /// reads; dynamic `__G[...]` has no fallback.
     pub(super) fn queue_opaque_js_global_initializers(&mut self, ws: &Workspace) {
@@ -214,11 +216,8 @@ impl<'a> WorklistState<'a> {
             .collect();
         for name in names {
             let base = self.nobox_leaf_globals.get(&name).copied().unwrap_or(name);
-            let Some(&site) = self.state_index.get(&base) else {
-                continue;
-            };
-            if self.ginit_seen.insert(base) {
-                self.ginit_queue.push((base, site));
+            if self.state_index.contains_key(&base) {
+                self.queue_ginit(base);
             }
         }
     }
@@ -316,15 +315,7 @@ pub(super) fn queue_lifecycle_dependency_initializers(
                     "JS: lifecycle dependency `{name}` is not immutable"
                 )));
             }
-            if st.ginit_seen.insert(*name) {
-                st.ginit_queue.push((
-                    *name,
-                    GlobalSite {
-                        module: source_module.id,
-                        gid,
-                    },
-                ));
-            }
+            st.queue_ginit(*name);
         }
     }
     Ok(())

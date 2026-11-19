@@ -223,31 +223,25 @@ pub(super) fn lifecycle_plan_stage_js(
                     .collect::<Vec<_>>()
                     .join(" || ")
             });
-            if entry.owner.as_str() == "scene" {
-                out.push_str("]}, func: (function(){var __s = __rock_code_slot_ref(");
-                out.push_str(&key_lit);
-                out.push_str("); return function(scene_id){");
-                if let Some(guard) = &sim_guard {
-                    write!(out, "if ({guard}) {{").unwrap();
-                }
-                out.push_str("var __root = __scene_root_any(scene_id); if (__root !== null) { __rock_call(__s, __root); }");
-                if sim_guard.is_some() {
-                    out.push('}');
-                }
-                out.push_str("};})()},\n");
+            let (param, call) = if entry.owner.as_str() == "scene" {
+                (
+                    "scene_id",
+                    "var __root = __scene_root_any(scene_id); if (__root !== null) { __rock_call(__s, __root); }",
+                )
             } else {
-                out.push_str("]}, func: (function(){var __s = __rock_code_slot_ref(");
-                out.push_str(&key_lit);
-                out.push_str("); return function(__scene_id){");
-                if let Some(guard) = &sim_guard {
-                    write!(out, "if ({guard}) {{").unwrap();
-                }
-                out.push_str("__rock_call(__s);");
-                if sim_guard.is_some() {
-                    out.push('}');
-                }
-                out.push_str("};})()},\n");
+                ("__scene_id", "__rock_call(__s);")
+            };
+            write!(
+                out,
+                "]}}, func: (function(){{var __s = __rock_code_slot_ref({key_lit}); return function({param}){{",
+            )
+            .unwrap();
+            if let Some(guard) = sim_guard {
+                write!(out, "if ({guard}) {{{call}}}").unwrap();
+            } else {
+                out.push_str(call);
             }
+            out.push_str("};})()},\n");
         }
         out.push_str("]},\n");
     }

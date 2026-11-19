@@ -9,28 +9,24 @@ pub(super) fn js_scx(ws: &Workspace) -> skull_mir::lower::ScalarCtx {
 }
 
 #[derive(Clone)]
-pub(super) struct JsRootPlan {
-    pub(super) named: Vec<(FuncRef, String)>,
-    pub(super) refs: Vec<FuncRef>,
+struct JsRootPlan {
+    named: Vec<(FuncRef, String)>,
+    refs: Vec<FuncRef>,
 }
 
 #[derive(Clone)]
 pub(super) struct JsSession {
-    pub(super) roots: Vec<FuncRef>,
+    root_plan: JsRootPlan,
     pub(super) graph: InstanceGraph,
     pub(super) view: ArtifactView,
     pub(super) concrete: skull_graph::concrete_body::ConcreteBodies,
-}
-
-pub(super) struct JsGraphUpdate {
-    pub(super) added: BTreeSet<Instance>,
-    pub(super) removed: BTreeSet<Instance>,
 }
 
 fn js_root_plan(
     ws: &Workspace,
     extra_roots: &[(FuncRef, String)],
     program_mode: bool,
+    shader_pairs: &[skull_mir::lower::ShaderPair],
 ) -> Result<JsRootPlan, CompilerError> {
     let mut named = extra_roots.to_vec();
     let mut seen: HashSet<FuncRef> = named.iter().map(|(fr, _)| *fr).collect();
@@ -51,14 +47,18 @@ fn js_root_plan(
         }
         // Driver registration calls are outside MIR, so root their target under
         // the bare symbol the driver calls, before building the artifact graph.
-        if let Some(fr) = shader_register_sibling(ws)? {
+        if !shader_pairs.is_empty() {
+            let fr = shader_register_sibling(ws)?;
             if seen.insert(fr) {
                 named.push((fr, "__rock_shader_register".to_string()));
             }
         }
     }
     let mut refs: Vec<FuncRef> = named.iter().map(|(fr, _)| *fr).collect();
-    for shader_root in shader_root_refs(ws)? {
+    for shader_root in shader_pairs
+        .iter()
+        .flat_map(|pair| pair.vert.into_iter().chain([pair.frag]))
+    {
         if seen.insert(shader_root) {
             refs.push(shader_root);
         }
@@ -102,19 +102,9 @@ fn push_synthesized_entry_roots(
     }
 }
 
-fn shader_root_refs(ws: &Workspace) -> Result<Vec<FuncRef>, CompilerError> {
-    Ok(skull_mir::lower::collect_shader_pairs(ws)?
-        .into_iter()
-        .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
-        .collect())
-}
-
 /// Graph roots only: the worklist emits an opaque body's `@nomangle` targets
 /// once it emits the body that names them.
-pub(super) fn extend_root_plan_from_inline_view(
-    plan: &mut JsRootPlan,
-    view: &ArtifactView,
-) -> bool {
+fn extend_root_plan_from_inline_view(plan: &mut JsRootPlan, view: &ArtifactView) -> bool {
     let mut seen: HashSet<FuncRef> = plan.refs.iter().copied().collect();
     let mut added = false;
     for &target in view.opaque_boundary_roots.values().flatten() {
@@ -126,80 +116,62 @@ pub(super) fn extend_root_plan_from_inline_view(
     added
 }
 
-fn new_js_session(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    roots: &[FuncRef],
-) -> JsSession {
-    let graph = skull_graph::instance_graph::build_in(ws, roots.to_vec(), scx.interner_handle());
+fn js_artifact_request(roots: &[FuncRef]) -> artifact::ArtifactRequest<'_> {
     let mappings = artifact::ArtifactMappings::for_backend(bone_core::hir::FnBackend::Js)
         .with_supply(&crate::JsBackendRealization);
-    let view = artifact::realize(
-        ws,
-        &graph,
-        &artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, roots)
-            .with_mappings(mappings)
-            .with_symbols(&artifact::REALIZED_SYMBOLS),
-    );
-    let concrete = skull_graph::concrete_body::build(ws, &graph);
-    JsSession {
-        roots: roots.to_vec(),
-        graph,
-        view,
-        concrete,
+    artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, roots)
+        .with_mappings(mappings)
+        .with_symbols(&artifact::REALIZED_SYMBOLS)
+}
+
+impl JsSession {
+    pub(super) fn contains_root(&self, root: FuncRef) -> bool {
+        self.root_plan.refs.contains(&root)
+    }
+
+    pub(super) fn assemble(
+        &self,
+        ws: &Workspace,
+        scx: &skull_mir::lower::ScalarCtx,
+        program_mode: bool,
+    ) -> Result<ProgramBuild, CompilerError> {
+        assemble_program_core(ws, scx, &self.root_plan.named, self, program_mode)
+    }
+
+    pub(super) fn update(
+        &mut self,
+        ws: &Workspace,
+        changed: &[(bone_core::prelude::ModuleId, bone_core::hir::BodyOwner)],
+        edits: &[skull_graph::instance_graph::TextEditDelta],
+    ) -> skull_graph::instance_graph::UpdateStats {
+        // The view retracts against the graph it was realized from.
+        self.view.prepare_update(&self.graph);
+        let update = self
+            .graph
+            .update_bodies_with_root_delta(ws, &[], &[], changed, edits);
+        self.concrete.update_local(
+            ws,
+            &self.graph,
+            &update.revisited,
+            &update.removed,
+            &update.revisited_owners,
+        );
+        self.view.update_local_with_root_delta(
+            ws,
+            &self.graph,
+            &js_artifact_request(&self.root_plan.refs),
+            &update.revisited,
+            &update.added,
+            &update.removed,
+            &[],
+            &[],
+        );
+        update
     }
 }
 
-pub(super) fn update_js_session(
-    ws: &Workspace,
-    session: &mut JsSession,
-    roots: &[FuncRef],
-    changed: &[(bone_core::prelude::ModuleId, bone_core::hir::BodyOwner)],
-    edits: &[skull_graph::instance_graph::TextEditDelta],
-) -> JsGraphUpdate {
-    let previous_roots = session.roots.clone();
-    let root_added: Vec<FuncRef> = roots
-        .iter()
-        .filter(|root| !previous_roots.contains(root))
-        .copied()
-        .collect();
-    let root_removed: Vec<FuncRef> = previous_roots
-        .iter()
-        .filter(|root| !roots.contains(root))
-        .copied()
-        .collect();
-    session.view.prepare_update(&session.graph);
-    let update =
-        session
-            .graph
-            .update_bodies_with_root_delta(ws, &root_added, &root_removed, changed, edits);
-    session.concrete.update_local(
-        ws,
-        &session.graph,
-        &update.revisited,
-        &update.removed,
-        &update.revisited_owners,
-    );
-    let mappings = artifact::ArtifactMappings::for_backend(bone_core::hir::FnBackend::Js)
-        .with_supply(&crate::JsBackendRealization);
-    let request = artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, roots)
-        .with_mappings(mappings)
-        .with_symbols(&artifact::REALIZED_SYMBOLS);
-    session.view.update_local_with_root_delta(
-        ws,
-        &session.graph,
-        &request,
-        &update.revisited,
-        &update.added,
-        &update.removed,
-        &root_added,
-        &root_removed,
-    );
-    session.roots = roots.to_vec();
-    JsGraphUpdate {
-        added: update.added,
-        removed: update.removed,
-    }
+fn entry_root(ws: &Workspace, user_mid: bone_core::prelude::ModuleId) -> Option<(FuncRef, String)> {
+    nullary_main(ws, user_mid).map(|fr| (fr, callee_js_name(ws, fr)))
 }
 
 pub fn emit_program(
@@ -207,16 +179,11 @@ pub fn emit_program(
     user_mid: bone_core::prelude::ModuleId,
 ) -> Result<JsProgram, CompilerError> {
     let scx = js_scx(ws);
-    let mut extra: Vec<(FuncRef, String)> = Vec::new();
-    let main_js_name = nullary_main(ws, user_mid).map(|fr| {
-        let nm = callee_js_name(ws, fr);
-        extra.push((fr, nm.clone()));
-        nm
-    });
-    let (build, _, _) = build_program_session(ws, &scx, &extra, true)?;
+    let entry = entry_root(ws, user_mid);
+    let (build, _, _) = build_program_session(ws, &scx, entry.as_slice(), true)?;
     Ok(JsProgram {
         program: build.program,
-        main_js_name,
+        main_js_name: entry.map(|(_, name)| name),
         code_artifact: build.code_artifact,
         lifecycle_plan: build.lifecycle_plan,
         global_layout: build.global_layout,
@@ -228,14 +195,8 @@ pub fn emit_program_cached(
     user_mid: bone_core::prelude::ModuleId,
 ) -> Result<(JsProgram, JsEmitCache), CompilerError> {
     let scx = js_scx(ws);
-    let mut extra = Vec::new();
-    let main_js_name = nullary_main(ws, user_mid).map(|fr| {
-        let name = callee_js_name(ws, fr);
-        extra.push((fr, name.clone()));
-        name
-    });
-    let (build, session, root_plan) = build_program_session(ws, &scx, &extra, true)?;
-    let shader_collection = skull_mir::lower::collect_shader_collection(ws)?;
+    let entry = entry_root(ws, user_mid);
+    let (build, session, shaders) = build_program_session(ws, &scx, entry.as_slice(), true)?;
     let static_keys = build
         .chunks
         .values()
@@ -249,7 +210,7 @@ pub fn emit_program_cached(
         .collect::<Result<_, CompilerError>>()?;
     let program = JsProgram {
         program: build.program.clone(),
-        main_js_name,
+        main_js_name: entry.map(|(_, name)| name),
         code_artifact: build.code_artifact.clone(),
         lifecycle_plan: build.lifecycle_plan.clone(),
         global_layout: build.global_layout.clone(),
@@ -258,8 +219,7 @@ pub fn emit_program_cached(
         build,
         changed_since_full: HashSet::new(),
         static_keys,
-        shader_contributions: shader_collection.contributions,
-        root_plan,
+        shader_contributions: shaders.contributions,
         opaque_root_contributions: session.view.opaque_boundary_roots.clone(),
         scx,
         session,
@@ -291,7 +251,7 @@ fn build_program_session(
     scx: &skull_mir::lower::ScalarCtx,
     extra_roots: &[(FuncRef, String)],
     program_mode: bool,
-) -> Result<(ProgramBuild, JsSession, JsRootPlan), CompilerError> {
+) -> Result<(ProgramBuild, JsSession, skull_mir::lower::ShaderCollection), CompilerError> {
     if program_mode {
         for module in ws.source_modules() {
             if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, module.id) {
@@ -302,13 +262,26 @@ fn build_program_session(
             }
         }
     }
-    let mut root_plan = js_root_plan(ws, extra_roots, program_mode)?;
+    let shaders = skull_mir::lower::collect_shader_collection(ws)?;
+    let mut root_plan = js_root_plan(ws, extra_roots, program_mode, &shaders.pairs)?;
     loop {
-        let session = new_js_session(ws, scx, &root_plan.refs);
-        if extend_root_plan_from_inline_view(&mut root_plan, &session.view) {
+        let graph = skull_graph::instance_graph::build_in(
+            ws,
+            root_plan.refs.clone(),
+            scx.interner_handle(),
+        );
+        let view = artifact::realize(ws, &graph, &js_artifact_request(&root_plan.refs));
+        let concrete = skull_graph::concrete_body::build(ws, &graph);
+        if extend_root_plan_from_inline_view(&mut root_plan, &view) {
             continue;
         }
-        let build = assemble_program_core(ws, scx, &root_plan.named, &session, program_mode)?;
-        return Ok((build, session, root_plan));
+        let session = JsSession {
+            root_plan,
+            graph,
+            view,
+            concrete,
+        };
+        let build = session.assemble(ws, scx, program_mode)?;
+        return Ok((build, session, shaders));
     }
 }

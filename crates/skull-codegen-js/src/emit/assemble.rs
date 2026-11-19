@@ -384,10 +384,7 @@ fn globals_directory_js(
     Ok(out)
 }
 
-pub(super) fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>, CompilerError> {
-    if skull_mir::lower::collect_shader_pairs(ws)?.is_empty() {
-        return Ok(None);
-    }
+pub(super) fn shader_register_sibling(ws: &Workspace) -> Result<FuncRef, CompilerError> {
     let cands: Vec<_> = ws
         .functions_by_name
         .iter()
@@ -415,7 +412,7 @@ pub(super) fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>,
                     ws.module(other_module).functions[other_func].name,
                 )));
             }
-            return Ok(Some(FuncRef { module, func }));
+            return Ok(FuncRef { module, func });
         }
     }
     Err(err(
@@ -475,7 +472,6 @@ pub struct JsEmitCache {
         (bone_core::prelude::ModuleId, bone_core::hir::BodyOwner),
         Vec<skull_mir::lower::ShaderPair>,
     >,
-    pub(super) root_plan: JsRootPlan,
     pub(super) opaque_root_contributions:
         BTreeMap<skull_graph::instance_graph::DeclKey, rustc_hash::FxHashSet<FuncRef>>,
     pub(super) scx: skull_mir::lower::ScalarCtx,
