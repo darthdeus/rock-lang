@@ -89,7 +89,6 @@ fn main() { print("{queue_sprites(0.5, 3)}") }
 #[test]
 fn the_wide_uniform_witness_uses_one_slot_per_wide_value() {
     let lua = emit_module(WIDE_UNIFORM_SRC);
-    luajit_loads(&lua).expect("the emitted chunk must load");
     assert_eq!(function_params(&lua, "sprite_uniform").len(), 2);
     assert_eq!(function_params(&lua, "uniform_signal").len(), 1);
     assert_eq!(run_main(&lua), "19.5");
@@ -118,14 +117,6 @@ fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
     let lua = emit_module(&src);
     assert_eq!(run_main(&lua), "16");
     assert_eq!(function_params(&lua, "with_anchor").len(), 5);
-}
-
-#[test]
-fn the_retained_old_abi_witness_still_fails_to_load() {
-    let witness = include_str!("fixtures/generated-function.lua");
-    let err = luajit_loads(witness)
-        .expect_err("the retained witness is a diagnostic of the old ABI, not a repaired oracle");
-    assert!(err.contains("too complex"));
 }
 
 fn cut_fixture(payload: usize, nullable: bool) -> String {

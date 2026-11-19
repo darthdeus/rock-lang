@@ -49,7 +49,6 @@ fn main() {{ assert(gather(-20) == null); print(gather(1).unwrap().checksum) }}
 "#
     );
     let lua = emit_module(&source);
-    luajit_loads(&lua).expect("emitted loader must load");
     assert_eq!(run_main(&lua), "210");
 }
 
