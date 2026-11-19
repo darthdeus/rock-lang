@@ -2552,6 +2552,8 @@ pub fn relower_function_in_place(
         && module.functions[fid].generics.len() == f.generics.len();
 
     if !sig_reusable {
+        // The signature changed after all: rebuild the whole function, which may
+        // grow the module arena.
         let high_water = module.lower_var_high_water;
         let mut ctx = LowerCtx::new(ws, module, a, high_water);
 
@@ -2563,6 +2565,8 @@ pub fn relower_function_in_place(
         return Ok(install_relowered_body(ctx.module, owner, body, errors));
     }
 
+    // Reuse the resolved signature: `lower_fn_body_into` allocates only into the
+    // fresh `Body`, never the module arena.
     let param_tys: Vec<TyId> = module.functions[fid]
         .param_decls
         .iter()

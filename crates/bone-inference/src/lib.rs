@@ -119,9 +119,13 @@ pub struct Gamma<'a> {
     pub declared_ret_ty: Option<TyId>,
     pub coroutine_ret: Option<TyId>,
     pub loop_depth: u32,
+    /// A `defer` body runs while the function is already leaving, so `return`
+    /// has nothing to return from.
     pub in_defer: bool,
 
+    /// Path refinements expire on effects that can mutate fields or globals.
     pub(crate) refined_nonnull: FxHashSet<Narrow>,
+    /// A call can revoke whole-local refinements of bindings a lambda writes.
     pub(crate) closure_assigned: FxHashSet<Idx<BindingInfo>>,
     /// Whole-local narrows of `closure_assigned` bindings in force, with the
     /// type each replaced; drained by [`Gamma::invalidate_mutable_refinements`].

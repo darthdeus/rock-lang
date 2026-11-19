@@ -375,6 +375,8 @@ impl Workspace {
                     self.modules.len(),
                     "insert_modules: non-sequential module id leaves a gap"
                 );
+                // Modules are large; growing one push at a time copies every placed module
+                // at each doubling.
                 if self.modules.len() == self.modules.capacity() {
                     self.modules.reserve(1 + modules.size_hint().0);
                 }

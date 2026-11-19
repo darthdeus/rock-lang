@@ -486,6 +486,7 @@ impl Module {
     }
 
     pub fn insert_body(&mut self, owner: BodyOwner, mut body: Body) {
+        // Bodies survive until emission; discard arena growth slack.
         body.shrink_to_fit();
         self.bodies.insert(owner, body);
     }
