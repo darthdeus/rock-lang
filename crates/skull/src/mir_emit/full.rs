@@ -573,20 +573,12 @@ fn emit_full_chunks<'a>(
     Ok((bodies, inline_candidate_table, queue))
 }
 
-fn index_dependents(
-    chunks: &ChunkMap,
-    lifetime: CacheLifetime,
-) -> (FxHashMap<FuncRef, FxHashSet<Instance>>, usize) {
-    let mut dependents: FxHashMap<FuncRef, FxHashSet<Instance>> = FxHashMap::default();
+fn index_dependents(chunks: &ChunkMap) -> (FxHashMap<FuncRef, FxHashSet<Instance>>, usize) {
+    let mut dependents = FxHashMap::default();
     let mut dependency_edges = 0;
     for (body, chunk) in chunks {
-        if let Ok(c) = chunk {
-            dependency_edges += c.deps.len();
-            if lifetime == CacheLifetime::Retained {
-                for d in &c.deps {
-                    dependents.entry(*d).or_default().insert(body.clone());
-                }
-            }
+        if let Ok(chunk) = chunk {
+            dependency_edges += chunk.index_dependents(body, &mut dependents);
         }
     }
     (dependents, dependency_edges)
@@ -746,7 +738,11 @@ pub(super) fn emit_full_build(
         "window: shader view",
         shader_lane.finished - shader_lane.started,
     ));
-    let (dependents, dependency_edges) = index_dependents(&chunks, build.lifetime());
+    let (dependents, dependency_edges) = if build.lifetime() == CacheLifetime::Retained {
+        index_dependents(&chunks)
+    } else {
+        Default::default()
+    };
     let mut cache = SkullEmitCache {
         chunks,
         value_ctors: Vec::new(),

@@ -15,24 +15,6 @@ fn current_effect_snapshot(
         .collect()
 }
 
-fn rebuild_chunk(
-    ws: &Workspace,
-    cg: &CodegenCtx,
-    scx: &skull_mir::lower::ScalarCtx,
-    concrete: &crate::concrete_body::ConcreteBodies,
-    body: &Instance,
-    f: &bone_semantic::hir::Function,
-    inline_cache: &mut skull_transform::InlineCache,
-) -> Result<Chunk, CompilerError> {
-    match body.args.is_empty() {
-        true => emit_body_chunk(ws, cg, scx, concrete, body.func, f, inline_cache),
-        false => {
-            let name = body.symbol(ws, scx.interner());
-            emit_spec_chunk(ws, cg, scx, concrete, body, &name, inline_cache)
-        }
-    }
-}
-
 /// Per-body emit cache for incremental codegen, keyed by [`Instance`].
 pub struct SkullEmitCache {
     pub(super) chunks: FxHashMap<Instance, Result<Chunk, CompilerError>>,
@@ -180,7 +162,10 @@ impl SkullEmitCache {
             .map_err(|error| CompilerError::new_no_location(error.to_string()))?,
         );
         self.edit.unit_comptime_reads = unit_reads;
-        let dependency_edges = self.absorb_spec_chunks(built_specs);
+        let dependency_edges = built_specs
+            .into_iter()
+            .map(|(body, chunk)| self.insert_chunk(body, Ok(chunk)))
+            .sum();
         self.refresh_effect_snapshot(ws);
         Ok(dependency_edges)
     }
@@ -511,36 +496,56 @@ impl SkullEmitCache {
         Ok(())
     }
 
-    fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) -> usize {
-        let mut dependency_edges = 0;
-        for (body, chunk) in built {
-            dependency_edges += chunk.deps.len();
-            for d in &chunk.deps {
-                self.dependents.entry(*d).or_default().insert(body.clone());
-            }
-            self.chunks.insert(body, Ok(chunk));
+    fn rebuild_chunk(
+        &mut self,
+        ws: &Workspace,
+        body: &Instance,
+        function: &bone_semantic::hir::Function,
+    ) -> Result<Chunk, CompilerError> {
+        let Self {
+            cg,
+            scx,
+            concrete,
+            inline_cache,
+            ..
+        } = self;
+        if body.args.is_empty() {
+            emit_body_chunk(ws, cg, scx, concrete, body.func, function, inline_cache)
+        } else {
+            let name = body.symbol(ws, scx.interner());
+            emit_spec_chunk(ws, cg, scx, concrete, body, &name, inline_cache)
         }
+    }
+
+    fn insert_chunk(&mut self, body: Instance, chunk: Result<Chunk, CompilerError>) -> usize {
+        let dependency_edges = chunk.as_ref().map_or(0, |chunk| {
+            chunk.index_dependents(&body, &mut self.dependents)
+        });
+        self.chunks.insert(body, chunk);
         dependency_edges
+    }
+
+    fn unindex_chunk(&mut self, body: &Instance) {
+        if let Some(Ok(chunk)) = self.chunks.get(body) {
+            for callee in &chunk.deps {
+                if let Some(callers) = self.dependents.get_mut(callee) {
+                    callers.remove(body);
+                }
+            }
+        }
     }
 
     /// A stale chunk would be reassembled by `emit_incremental` and offered to
     /// every later overlay, though no call reaches it.
     fn forget_instance(&mut self, gone: &Instance) {
-        if let Some(Ok(c)) = self.chunks.get(gone) {
-            let deps: Vec<FuncRef> = c.deps.iter().copied().collect();
-            for d in deps {
-                if let Some(set) = self.dependents.get_mut(&d) {
-                    set.remove(gone);
-                }
-            }
-        }
+        self.unindex_chunk(gone);
         self.chunks.remove(gone);
         self.edit.changed_since_full.remove(gone);
         self.edit.emitted.remove(gone);
     }
 
     fn build_graph_added_chunks(
-        cache: &mut SkullEmitCache,
+        &mut self,
         ws: &Workspace,
         added: &std::collections::BTreeSet<Instance>,
     ) -> (
@@ -561,64 +566,31 @@ impl SkullEmitCache {
             if !is_cached_emitted_body(f, &body) {
                 continue;
             }
-            if let Some(Ok(chunk)) = cache.chunks.get(&body) {
-                if !cache.edit.emitted.contains(&body) {
-                    cache.edit.changed_since_full.insert(body.clone());
-                    fingerprint_identities.extend(
-                        chunk
-                            .code_artifact
-                            .entries()
-                            .iter()
-                            .map(|entry| entry.identity.clone()),
-                    );
+            if let Some(Ok(chunk)) = self.chunks.get(&body) {
+                if !self.edit.emitted.contains(&body) {
+                    self.edit.changed_since_full.insert(body.clone());
+                    fingerprint_identities.extend(chunk.code_identities());
                 }
                 continue;
             }
-            let chunk = if body.args.is_empty() {
-                match rebuild_chunk(
-                    ws,
-                    &cache.cg,
-                    &cache.scx,
-                    &cache.concrete,
-                    &body,
-                    f,
-                    &mut cache.inline_cache,
-                ) {
-                    Ok(chunk) => chunk,
-                    Err(err) => {
-                        errs.push(err);
-                        continue;
-                    }
-                }
-            } else {
-                let name = body.symbol(ws, cache.scx.interner());
-                match emit_spec_chunk(
-                    ws,
-                    &cache.cg,
-                    &cache.scx,
-                    &cache.concrete,
-                    &body,
-                    &name,
-                    &mut cache.inline_cache,
-                ) {
-                    Ok(chunk) => chunk,
-                    Err(err) => {
-                        errs.push(err);
-                        continue;
-                    }
+            let chunk = match self.rebuild_chunk(ws, &body, f) {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    errs.push(err);
+                    continue;
                 }
             };
             let mut valid = true;
             for demand in &chunk.specs {
-                if cache.graph.concreteness(&demand.inst)
+                if self.graph.concreteness(&demand.inst)
                     == crate::instance_graph::Concreteness::Missing
                 {
                     errs.push(CompilerError::new_with_label(
                         f.name_span,
                         format!(
                             "graph omitted added specialization `{}` demanded by `{}`",
-                            demand.inst.symbol(ws, cache.scx.interner()),
-                            body.symbol(ws, cache.scx.interner())
+                            demand.inst.symbol(ws, self.scx.interner()),
+                            body.symbol(ws, self.scx.interner())
                         ),
                     ));
                     valid = false;
@@ -632,30 +604,16 @@ impl SkullEmitCache {
         }
 
         for (body, chunk) in built {
-            fingerprint_identities.extend(
-                chunk
-                    .code_artifact
-                    .entries()
-                    .iter()
-                    .map(|entry| entry.identity.clone()),
-            );
-            for dep in &chunk.deps {
-                cache
-                    .dependents
-                    .entry(*dep)
-                    .or_default()
-                    .insert(body.clone());
-            }
-            cache.chunks.insert(body.clone(), Ok(chunk));
-            cache.edit.changed_since_full.insert(body);
+            fingerprint_identities.extend(chunk.code_identities());
+            self.insert_chunk(body.clone(), Ok(chunk));
+            self.edit.changed_since_full.insert(body);
         }
         (errs, fingerprint_identities)
     }
 
-    pub(super) fn combine_errors(mut errors: Vec<CompilerError>) -> Option<CompilerError> {
-        let first = errors.first()?.clone();
-        errors.remove(0);
-        Some(first.with_siblings(errors))
+    pub(super) fn combine_errors(errors: Vec<CompilerError>) -> Option<CompilerError> {
+        let mut errors = errors.into_iter();
+        Some(errors.next()?.with_siblings(errors))
     }
 
     pub(super) fn update_chunk_cache(
@@ -793,10 +751,7 @@ impl SkullEmitCache {
         );
         cache.edit.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
 
-        let scx = &cache.scx;
-        let cg = &cache.cg;
-
-        let t_aff = Instant::now();
+        let t_affected = Instant::now();
         let mut changed: FxHashSet<FuncRef> = reinferred
             .iter()
             .filter_map(|(mid, owner)| match owner {
@@ -853,7 +808,7 @@ impl SkullEmitCache {
         let previous_candidate_table = cache.inline_cache.candidate_table();
         let candidate_table = update_inline_candidate_table(
             ws,
-            scx,
+            &cache.scx,
             &cache.concrete,
             previous_candidate_table.as_ref(),
             warm_keys,
@@ -938,7 +893,7 @@ impl SkullEmitCache {
                 }
             }
         }
-        cache.edit.repair_stats.affected_selection_ns = t_aff.elapsed().as_nanos() as u64;
+        cache.edit.repair_stats.affected_selection_ns = t_affected.elapsed().as_nanos() as u64;
 
         let t_relow = Instant::now();
         for body in &affected {
@@ -947,40 +902,15 @@ impl SkullEmitCache {
         }
         for body in &affected {
             // Re-emission can change the deps, or drop the chunk entirely.
-            let old_deps: Vec<FuncRef> = match cache.chunks.get(body) {
-                Some(Ok(c)) => c.deps.iter().copied().collect(),
-                _ => Vec::new(),
-            };
-            for d in &old_deps {
-                if let Some(set) = cache.dependents.get_mut(d) {
-                    set.remove(body);
-                }
-            }
+            cache.unindex_chunk(body);
             let fref = body.func;
             let f = &ws.module(fref.module).functions[fref.func];
             if is_cached_emitted_body(f, body) {
-                let chunk = rebuild_chunk(
-                    ws,
-                    cg,
-                    scx,
-                    &cache.concrete,
-                    body,
-                    f,
-                    &mut cache.inline_cache,
-                );
-                if let Ok(c) = &chunk {
-                    fingerprint_identities.extend(
-                        c.code_artifact
-                            .entries()
-                            .iter()
-                            .map(|entry| entry.identity.clone()),
-                    );
-                    let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
-                    for d in new_deps {
-                        cache.dependents.entry(d).or_default().insert(body.clone());
-                    }
+                let chunk = cache.rebuild_chunk(ws, body, f);
+                if let Ok(chunk) = &chunk {
+                    fingerprint_identities.extend(chunk.code_identities());
                 }
-                cache.chunks.insert(body.clone(), chunk);
+                cache.insert_chunk(body.clone(), chunk);
             } else {
                 cache.chunks.remove(body);
             }
@@ -988,7 +918,7 @@ impl SkullEmitCache {
         // After invalidation, so a newly reached body cannot reuse an inline decision
         // made for the old body.
         let (added_errors, added_fingerprint_identities) =
-            Self::build_graph_added_chunks(cache, ws, &update.added);
+            cache.build_graph_added_chunks(ws, &update.added);
         fingerprint_identities.extend(added_fingerprint_identities);
         cache.refresh_effect_snapshot(ws);
         cache.edit.repair_stats.relowering_ns = t_relow.elapsed().as_nanos() as u64;

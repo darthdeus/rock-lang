@@ -31,6 +31,26 @@ pub(super) struct Chunk {
 }
 
 impl Chunk {
+    pub(super) fn index_dependents(
+        &self,
+        body: &Instance,
+        dependents: &mut FxHashMap<FuncRef, FxHashSet<Instance>>,
+    ) -> usize {
+        for callee in &self.deps {
+            dependents.entry(*callee).or_default().insert(body.clone());
+        }
+        self.deps.len()
+    }
+
+    pub(super) fn code_identities(
+        &self,
+    ) -> impl Iterator<Item = skull_mir::code_identity::CodeIdentity> + '_ {
+        self.code_artifact
+            .entries()
+            .iter()
+            .map(|entry| entry.identity.clone())
+    }
+
     // `shrink_to_fit` would not do: mimalloc keeps a block in place when it
     // shrinks by less than half.
     pub(super) fn finish(&mut self, started: Option<std::time::Duration>) {
