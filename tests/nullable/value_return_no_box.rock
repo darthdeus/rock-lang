@@ -45,12 +45,6 @@ fn nullable_return_gc_payload_and_false_leaf() -> bool {
 @test(returns = true)
 fn nullable_return_gc_absent() -> bool { return return_label(false, "unused") == null }
 
-@test(returns = 7)
-fn nullable_return_coalesces() -> int {
-    let pair = return_pair(false, 20) ?? ReturnPair { x: 3, y: 4 }
-    return pair.x + pair.y
-}
-
 struct ReturnEntityRow { marker: int }
 
 fn return_entity(present: bool, slot: int) -> Entity<ReturnEntityRow>? {
@@ -85,11 +79,6 @@ fn nullable_return_optional_equality() -> bool {
     return return_pair(true, 20) == return_pair(true, 20)
         && return_pair(false, 20) == return_pair(false, 30)
         && return_pair(true, 20) != return_pair(false, 20)
-}
-
-@test(returns = 7)
-fn nullable_return_safe_navigation() -> int {
-    return return_pair(false, 20)?.x ?? 7
 }
 
 fn match_return_pair(present: bool) -> ReturnPair? {

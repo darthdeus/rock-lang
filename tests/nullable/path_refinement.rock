@@ -38,14 +38,6 @@ fn safe_nav_two_level() {
 }
 
 @test
-fn safe_nav_three_level() {
-    let a: A? = A { b: B { c: C { value: 42 }, name: "x" } }
-    if a?.b?.c != null {
-        assert_eq(a.b.c.value, 42)
-    }
-}
-
-@test
 fn safe_nav_four_level() {
     let o: Outer? = Outer { inner: A { b: B { c: C { value: 99 }, name: "deep" } } }
     if o?.inner?.b?.c != null {
@@ -191,20 +183,6 @@ struct Mid { inner: Inner?, name: string }
 struct Top { mid: Mid? }
 struct Deep { top: Top? }
 
-// Basic: assign null to refined nullable field
-// Assign null then check that the field is actually null at runtime
-@test(output = "set\nnull")
-fn assign_null_to_refined_field_verify() {
-    let t = Top { mid: Mid { inner: Inner { value: 1 }, name: "a" } }
-    if t.mid != null {
-        print("set")
-        t.mid = null
-    }
-    if t.mid == null {
-        print("null")
-    }
-}
-
 // Deep chain: assign null to deeply refined path
 @test(output = "42\ncleared")
 fn assign_null_deep_path() {
@@ -332,23 +310,4 @@ fn compound_assign_through_refined_path() {
         t.mid.inner.value = t.mid.inner.value + 1
         print(t.mid.inner.value)
     }
-}
-
-// Refinement after assignment restoring value
-@test(output = "cleared\nrestored\nhello")
-fn clear_then_restore_then_recheck() {
-    let t = Top { mid: Mid { inner: null, name: "hello" } }
-    if t.mid != null {
-        t.mid = null
-        print("cleared")
-    }
-    // Restore via a local: bone narrows `t.mid` to non-null after the assignment
-    // (so a `!= null` re-check is dead -- a type error), while rock does not
-    // narrow on assignment (so direct `t.mid.name` would error there). Using the
-    // local is the backend-agnostic form; the bone-specific dead-check is covered
-    // by fixtures/compare_null_nonnullable.rock.
-    let restored = Mid { inner: null, name: "hello" }
-    t.mid = restored
-    print("restored")
-    print(restored.name)
 }

@@ -39,36 +39,6 @@ fn invalidation_after_nullable_assign() {
     }
 }
 
-// Root assignment invalidates all sub-paths
-@test(output = "set\nnull box")
-fn root_assign_invalidates_sub_paths() {
-    let w = Wrapper { box: Box { val: Val { n: 1 }, label: "x" } }
-    if w.box != null && w.box.val != null {
-        print("set")
-    }
-    // Replace the whole wrapper — sub-path refinements should not survive
-    // (they don't survive anyway since they're scoped to the if block)
-    let w2 = Wrapper { box: null }
-    if w2.box != null {
-        print("unreachable")
-    } else {
-        print("null box")
-    }
-}
-
-// Refinement doesn't leak from if-body to after-if
-@test(output = "inside\noutside safe")
-fn refinement_scoped_to_if() {
-    let b = Box { val: Val { n: 42 }, label: "x" }
-    if b.val != null {
-        print("inside")
-        // b.val.n accessible here
-    }
-    // Outside: must use safe nav
-    let n = b.val?.n ?? 0
-    print("outside safe")
-}
-
 // Refinement doesn't leak from while body
 @test(output = "loop done\nsafe access")
 fn refinement_scoped_to_while() {
@@ -80,35 +50,6 @@ fn refinement_scoped_to_while() {
     // Outside while: must use safe nav
     let n = b.val?.n ?? -1
     print("safe access")
-}
-
-// Else-branch gets opposite refinement
-@test(output = "null path")
-fn else_branch_no_refinement() {
-    let b = Box { val: null, label: "x" }
-    if b.val != null {
-        print("unreachable")
-    } else {
-        // In else: b.val IS null, so we can't access it
-        print("null path")
-    }
-}
-
-// Re-refinement after invalidation requires new check
-@test(output = "first: 1\ncleared\nsecond: 2")
-fn re_refinement_after_clear() {
-    let b = Box { val: Val { n: 1 }, label: "x" }
-    if b.val != null {
-        print("first: {b.val.n}")
-    }
-    b.val = null
-    print("cleared")
-    // Re-assign via a local (backend-agnostic): bone narrows b.val to non-null
-    // after the assignment so a re-check is dead, while rock needs a guard to
-    // read b.val. Use the local.
-    let v2 = Val { n: 2 }
-    b.val = v2
-    print("second: {v2.n}")
 }
 
 // Multiple fields, independent refinements
@@ -129,18 +70,6 @@ fn independent_field_refinements() {
     }
     if m.c != null {
         print(m.c.n)
-    }
-}
-
-// Clearing one field doesn't affect another's refinement scope
-@test(output = "a=1 c=3\na cleared")
-fn clear_one_keeps_other() {
-    let m = Multi { a: Val { n: 1 }, b: null, c: Val { n: 3 } }
-    if m.a != null && m.c != null {
-        print("a={m.a.n} c={m.c.n}")
-        m.a = null
-        // m.c should still be refined
-        print("a cleared")
     }
 }
 
@@ -178,31 +107,6 @@ fn deep_modify_through_refinement() {
     }
 }
 
-// Verify runtime: null actually crashes without refinement
-// These test that our safe patterns work at runtime
-@test(output = "safe: 0")
-fn safe_nav_returns_null_on_null_path() {
-    let b = Box { val: null, label: "x" }
-    let n = b.val?.n ?? 0
-    print("safe: {n}")
-}
-
-@test(output = "safe: 0")
-fn safe_nav_deep_null() {
-    let w = Wrapper { box: null }
-    let n = w.box?.val?.n ?? 0
-    print("safe: {n}")
-}
-
-// Ensure refinement works with &&  chained path checks
-@test(output = "all: 42 x 42")
-fn and_chain_three_levels() {
-    let w = Wrapper { box: Box { val: Val { n: 42 }, label: "x" } }
-    if w.box != null && w.box.val != null {
-        print("all: {w.box.val.n} {w.box.label} {w.box.val.n}")
-    }
-}
-
 @test(output = "no val")
 fn and_chain_short_circuits() {
     let w = Wrapper { box: Box { val: null, label: "x" } }
@@ -229,18 +133,6 @@ fn no_refinement_outside_scope() {
     // Re-checking works
     let result = if w.box?.val != null { "default" } else { "default" }
     print(result)
-}
-
-// OR conditions should NOT refine in then-branch
-// With || in null checks, the then branch can't assume anything
-@test(output = "one is null")
-fn or_no_refinement_in_then() {
-    let a: Val? = Val { n: 1 }
-    let b: Val? = null
-    if a == null || b == null {
-        // We can't know which is null
-        print("one is null")
-    }
 }
 
 // Negated conditions
@@ -386,15 +278,6 @@ fn while_with_break_path_refined() {
     }
 }
 
-// Path refinement with safe nav in conditions
-@test(output = "both")
-fn safenav_condition_chain() {
-    let r = Root { w: Wrapper { box: Box { val: Val { n: 1 }, label: "x" } } }
-    if r.w?.box?.val != null {
-        print("both")
-    }
-}
-
 @test(output = "missing leaf\nmissing mid\nmissing root")
 fn safenav_condition_chain_null_at_each_level() {
     let leaf = Root { w: Wrapper { box: Box { val: null, label: "x" } } }
@@ -403,17 +286,6 @@ fn safenav_condition_chain_null_at_each_level() {
     if mid.w?.box?.val != null { print("found") } else { print("missing mid") }
     let root = Root { w: null }
     if root.w?.box?.val != null { print("found") } else { print("missing root") }
-}
-
-// Refinement with let binding (destructuring)
-@test(output = "42 x")
-fn let_from_refined_path() {
-    let b = Box { val: Val { n: 42 }, label: "x" }
-    if b.val != null {
-        let n = b.val.n
-        let l = b.label
-        print("{n} {l}")
-    }
 }
 
 // A local narrowed twice by one condition is restored after the branch

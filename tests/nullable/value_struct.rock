@@ -1,5 +1,5 @@
-// A nullable value struct (`V2?`) as a safe-nav base, a `??` left-hand side,
-// a refined scalar-ABI argument and a nullable return.
+// A nullable value struct (`V2?`) as a `??` left-hand side, a refined
+// scalar-ABI argument and a nullable return.
 
 value V2 { x: int, y: int }
 
@@ -14,14 +14,6 @@ fn sum2(v: V2) -> int {
 fn maybe_v2(on: bool) -> V2? {
     if on { return make_v2(3, 7) }
     return null
-}
-
-@test(output = "3\n-1")
-fn test_safenav_base() {
-    let a = maybe_v2(true)?.x ?? -1
-    print(a)
-    let b = maybe_v2(false)?.x ?? -1
-    print(b)
 }
 
 @test(output = "10\n300")

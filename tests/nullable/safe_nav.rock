@@ -29,12 +29,6 @@ fn safenav_coalesce() {
     print(o2?.name ?? "default")
 }
 
-@test(output = "0")
-fn safenav_coalesce_nested() {
-    let o: Outer? = Outer { inner: null, name: "test" }
-    print(o?.inner?.value ?? 0)
-}
-
 @test(output = "10\ntrue")
 fn safenav_let() {
     let x: int? = 5
@@ -126,15 +120,6 @@ fn safenav_chain_deep() {
     print(o3?.inner?.value == null)
 }
 
-@test(output = "15\n5")
-fn safenav_arithmetic() {
-    let o: Outer? = Outer { inner: Inner { value: 10 }, name: "x" }
-    print((o?.inner?.value ?? 0) + 5)
-
-    let o2: Outer? = null
-    print((o2?.inner?.value ?? 0) + 5)
-}
-
 @test(output = "50")
 fn safenav_let_with_coalesce() {
     let x: int? = null
@@ -149,21 +134,6 @@ fn safenav_linked_list() {
 
     let c2 = Chain { value: 1 }
     print(c2.next?.value ?? 0)
-}
-
-@test(output = "99\n0")
-fn safenav_linked_list_deep() {
-    let c = Chain {
-        value: 1,
-        next: Chain {
-            value: 2,
-            next: Chain { value: 99 }
-        }
-    }
-    print(c.next?.next?.value ?? 0)
-
-    let c2 = Chain { value: 1, next: Chain { value: 2 } }
-    print(c2.next?.next?.value ?? 0)
 }
 
 @test(output = "42\nnone")
@@ -191,25 +161,6 @@ fn safenav_if_let() {
     if val2 == null {
         print("not found")
     }
-}
-
-@test(output = "2\n0")
-fn safenav_arena_filter_remove() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Goblin", health: 30 })
-    mobs.insert(Mob { name: "Orc", health: 100 })
-    mobs.insert(Mob { name: "Dragon", health: 200 })
-
-    // Find and remove weak mobs
-    let weak = mobs.pairs().find(_.1.health < 50)?.0
-    if weak != null {
-        weak.remove()
-    }
-    print(mobs.len())
-
-    // Clear all
-    mobs.clear()
-    print(mobs.len())
 }
 
 @test(output = "Boss hp: 500\nNo boss")

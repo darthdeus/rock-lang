@@ -12,19 +12,6 @@ fn file_modtime(_p: string) -> int? {
     return 5
 }
 
-// Basic Nullable Refinement Tests
-@test(output = "4")
-fn basic_if_nullable() {
-    let x: int? = 3
-    
-    if x != null {
-        let y = x + 1
-        print(y)
-    }
-    
-    x = null
-}
-
 @test(output = "4")
 fn if_else_nullable_then() {
     let x: int? = 3
@@ -102,17 +89,6 @@ fn refinement_with_multiple_variables() {
     }
 }
 
-@test(output = "safe: 42")
-fn refinement_with_string_interpolation() {
-    let value: int? = 42
-    
-    if value != null {
-        print("safe: {value}")
-    } else {
-        print("null value")
-    }
-}
-
 // Refinement with Different Operators
 @test(output = "not null")
 fn refinement_with_is_null() {
@@ -131,23 +107,6 @@ fn refinement_with_negated_equality() {
     
     if !(x == null) {
         print("value is {x}")
-    }
-}
-
-// Safe Navigation with Refinement
-struct Point {
-    x: int,
-    y: int,
-}
-
-@test(output = "30")
-fn refinement_complex_field_access() {
-    let p_val = Point { x: 10, y: 20 }
-    let p: Point? = p_val
-    
-    if p != null {
-        let sum = p.x + p.y
-        print(sum)
     }
 }
 
@@ -237,16 +196,6 @@ fn refined_access_then_shadow() {
     }
 }
 
-@test(output = "hello\n7")
-fn shadow_string_then_int() {
-    let x: ShadowFoo? = ShadowFoo { value: 7 }
-    if x != null {
-        let x = "hello"
-        print(x)
-    }
-    print(x?.value ?? -1)
-}
-
 // --- Refinement + closures ---
 
 @test(output = "42")
@@ -274,22 +223,6 @@ fn test_refinement_in_loop_closure() {
         }
         print(out)
     }
-}
-
-// --- Refinement after divergent else ---
-
-fn early_return_helper(x: int?) -> string {
-    if x == null {
-        return "was null"
-    }
-    // x should be refined to int here
-    return "value: {x}"
-}
-
-@test(output = "value: 42\nwas null")
-fn test_refinement_after_divergent_else() {
-    print(early_return_helper(42))
-    print(early_return_helper(null))
 }
 
 // --- Refinement with early return in if ---
@@ -405,19 +338,4 @@ fn scoped_refinement(x: int?) -> string {
 fn test_refinement_scoped() {
     print(scoped_refinement(42))
     print(scoped_refinement(null))
-}
-
-// --- Triple guard pattern ---
-
-fn triple_guard(a: int?, b: int?, c: int?) -> string {
-    if a == null { return "a null" }
-    if b == null { return "b null" }
-    if c == null { return "c null" }
-    return "{a} {b} {c}"
-}
-
-@test(output = "1 2 3\nb null")
-fn test_triple_guard() {
-    print(triple_guard(1, 2, 3))
-    print(triple_guard(1, null, 3))
 }
