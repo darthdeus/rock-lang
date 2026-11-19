@@ -1,9 +1,3 @@
-//! The target-neutral shader spine's own invariants.
-//!
-//! These are properties of `skull_mir::shader_ir` alone -- no workspace, no
-//! backend -- so a defect here is a defect in the spine rather than in GLSL's
-//! use of it.
-
 use comfy_la_arena::Idx;
 use skull_mir::gpu_layout::{SamplerKind, WireKind};
 use skull_mir::mir::FuncRef;
@@ -20,9 +14,6 @@ fn fref(module: u32, func: u32) -> FuncRef {
     }
 }
 
-/// `None` is a NON-GENERIC instance -- an empty key, not a one-slot key holding
-/// nothing. Those were the same value while a key slot was optional; they are
-/// different lengths now, which is the point of the narrowing.
 fn inst(module: u32, func: u32, tag: Option<skull_mir::monoty::MonoTy>) -> ShaderInstance {
     static ARENA: std::sync::LazyLock<skull_mir::monoty::MonoInterner> =
         std::sync::LazyLock::new(skull_mir::monoty::MonoInterner::new);
@@ -44,17 +35,8 @@ fn stage_ir(entry: ShaderInstance, order: Vec<ShaderInstance>) -> ShaderStageIr 
     }
 }
 
-/// **The reload set dedups NONADJACENT repeats.**
-///
-/// Two instantiations of one generic helper are two entries in `order`, and
-/// emission order interleaves them with whatever each reached -- so the same
-/// declaration appears at positions that are not neighbours. A bare `dedup()`
-/// only collapses adjacent runs, so it silently reported one declaration twice
-/// and a file watcher would have rebuilt it twice.
-///
-/// The fixture is deliberately NONADJACENT: `helper` at 0 and 2 with a
-/// different declaration between them. An adjacent-only fixture passes against
-/// the broken form and proves nothing.
+/// A bare `dedup()` collapses only adjacent repeats; emission order interleaves
+/// two instantiations of one helper with other declarations.
 #[test]
 fn a_stage_reload_set_dedups_a_nonadjacent_repeat() {
     use skull_mir::monoty::MonoTy;
@@ -67,13 +49,10 @@ fn a_stage_reload_set_dedups_a_nonadjacent_repeat() {
         vec![
             inst(0, 7, Some(MonoTy::Float)),
             inst(0, 9, None),
-            // The SAME declaration as position 0, a different instantiation,
-            // and not adjacent to it.
             inst(0, 7, Some(MonoTy::Int)),
         ],
     );
 
-    // The denominator: the order really does hold the repeat this is about.
     assert_eq!(ir.order.len(), 3);
     assert_eq!(ir.order.iter().filter(|i| i.fref() == helper).count(), 2);
 
@@ -91,9 +70,6 @@ fn a_stage_reload_set_dedups_a_nonadjacent_repeat() {
     assert!(decls.contains(&other) && decls.contains(&entry));
 }
 
-/// The program-level set has the same obligation across STAGES: a helper both
-/// stages reach is one declaration to reload, and the two stages' orders are
-/// concatenated rather than merged.
 #[test]
 fn a_program_reload_set_dedups_across_stages() {
     use skull_mir::monoty::MonoTy;
@@ -121,9 +97,6 @@ fn a_program_reload_set_dedups_across_stages() {
     assert_eq!(decls.len(), 3, "two entries + one shared helper: {decls:?}");
 }
 
-/// **The interface plan's member list is the layout INPUT.** A guard on the
-/// shape rather than on a number: perturbing a member's kind must be visible
-/// in the plan itself, so a layout derived from it cannot be identical.
 #[test]
 fn perturbing_an_interface_member_changes_the_interface() {
     let base = ShaderInterfacePlan {
@@ -145,7 +118,6 @@ fn perturbing_an_interface_member_changes_the_interface() {
     );
 }
 
-/// A legacy-spelled type: its key is already its symbol.
 fn nominal(name: &str) -> NominalType {
     NominalType {
         key: Ustr::from(name),
@@ -153,9 +125,8 @@ fn nominal(name: &str) -> NominalType {
     }
 }
 
-/// The wire spells a group by its symbol, which the runtime joins to the
-/// physical block by name; the group fingerprint hashes the key, which the CPU
-/// packer's plan of the same type hashes too.
+/// The runtime joins a group to its physical block by symbol; the CPU packer
+/// fingerprints the same type by key.
 #[test]
 fn semantic_wire_spells_symbols_and_fingerprints_keys() {
     let exempt = NominalType {

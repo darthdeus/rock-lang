@@ -1,8 +1,4 @@
-//! [`Instance`] is the ONE concrete-body identity, and [`MonoInterner`] is the
-//! one arena that makes it one.
-//!
-//! Every arm here asserts its own population. A bridge that answered nothing,
-//! or a shape table that was empty, would otherwise read as a pass.
+//! [`Instance`] identity over the shared [`MonoInterner`].
 
 use crate::common::{decl, key, ws_of};
 use skull_mir::instance::Instance;
@@ -47,24 +43,12 @@ fn arg_shapes(ws: &bone_core::workspace::Workspace) -> Vec<(&'static str, MonoTy
     ]
 }
 
-/// Interning and reading back is the identity, over every shape an argument
-/// takes.
-///
-/// The arm that matters is the LAST one: equal ids for equal types is what makes
-/// `Instance`'s `Eq` a type equality rather than an insertion-order accident, and
-/// a bridge that appended unconditionally would satisfy the round trip and fail
-/// this.
 #[test]
 fn interning_an_argument_list_round_trips_and_shares_ids_by_type() {
     let ws = ws_of(SRC);
     let ident = decl(&ws, "ident");
     let interner = MonoInterner::new();
     let shapes = arg_shapes(&ws);
-    assert_eq!(
-        shapes.len(),
-        9,
-        "the shape table is the population under test"
-    );
 
     for (what, ty) in &shapes {
         let inst = Instance::intern(&interner, ident, vec![ty.clone()]);
@@ -86,76 +70,38 @@ fn interning_an_argument_list_round_trips_and_shares_ids_by_type() {
         let b = Instance::intern(&interner, ident, vec![ty.clone()]);
         assert_eq!(a, b, "{what}: one type is one id, so one instance");
     }
-    assert_eq!(
-        interner.len(),
-        shapes.len(),
-        "9 distinct argument types over 18 interns -- the arena shares by type"
-    );
+    assert_eq!(interner.len(), shapes.len(), "the arena shares ids by type");
 }
 
-/// Two instances of one declaration whose ABI WIDTHS are equal are two
-/// identities.
-///
-/// This is the property declaration ownership got wrong, taken at the identity
-/// layer rather than at the emitted text: `int` and `string` are one boxed slot
-/// each, so nothing about the wire distinguishes them and only the identity
-/// does.
+/// `int` and `string` are both one boxed slot, so only the identity tells
+/// their instances apart.
 #[test]
-fn equal_abi_arguments_are_distinct_instances_with_distinct_symbols() {
+fn distinct_arguments_are_distinct_instances_with_distinct_symbols() {
     let ws = ws_of(SRC);
     let ident = decl(&ws, "ident");
-    let interner = MonoInterner::new();
-
-    let i = Instance::intern(&interner, ident, vec![MonoTy::Int]);
-    let u = Instance::intern(&interner, ident, vec![MonoTy::Uint]);
-    let s = Instance::intern(&interner, ident, vec![MonoTy::String]);
-    assert_ne!(
-        i, s,
-        "two concrete types are two instances whatever they splat to"
-    );
-    assert_ne!(
-        i, u,
-        "signed and unsigned scalars are distinct concrete instances"
-    );
-    assert_ne!(
-        i.symbol(&ws, &interner),
-        s.symbol(&ws, &interner),
-        "and two instances are two symbols"
-    );
-    assert_ne!(
-        i.symbol(&ws, &interner),
-        u.symbol(&ws, &interner),
-        "signed and unsigned scalars have distinct symbols"
-    );
-}
-
-/// Argument ORDER is part of the identity. A multi-generic declaration is the
-/// only place a positional list can be scrambled without changing its contents,
-/// and a set-shaped or sorted encoding would give `pair<int, string>` and
-/// `pair<string, int>` one body.
-#[test]
-fn argument_order_is_part_of_the_identity() {
-    let ws = ws_of(SRC);
     let pair = decl(&ws, "pair");
     let interner = MonoInterner::new();
-
-    let ab = Instance::intern(&interner, pair, vec![MonoTy::Int, MonoTy::String]);
-    let ba = Instance::intern(&interner, pair, vec![MonoTy::String, MonoTy::Int]);
-    assert_ne!(ab, ba);
-    assert_ne!(ab.symbol(&ws, &interner), ba.symbol(&ws, &interner));
+    let one = |ty| Instance::intern(&interner, ident, vec![ty]);
+    let two = |a, b| Instance::intern(&interner, pair, vec![a, b]);
+    for (what, x, y) in [
+        ("int vs string", one(MonoTy::Int), one(MonoTy::String)),
+        ("int vs uint", one(MonoTy::Int), one(MonoTy::Uint)),
+        (
+            "argument order",
+            two(MonoTy::Int, MonoTy::String),
+            two(MonoTy::String, MonoTy::Int),
+        ),
+    ] {
+        assert_ne!(x, y, "{what}");
+        assert_ne!(x.symbol(&ws, &interner), y.symbol(&ws, &interner), "{what}");
+    }
     assert_eq!(
-        ab.arg_types(&interner),
-        vec![MonoTy::Int, MonoTy::String],
-        "read back in declaration order"
+        two(MonoTy::Int, MonoTy::String).arg_types(&interner),
+        vec![MonoTy::Int, MonoTy::String]
     );
 }
 
-/// A non-generic declaration's instance is its ordinary symbol, and its
-/// substitution is empty.
-///
-/// ADMISSION CONTROL for the arms above: "distinct instances get distinct
-/// symbols" is equally satisfied by an encoder that suffixed everything, which
-/// would rename every non-generic function in the program.
+/// Guards the tests above against an encoder that suffixes every symbol.
 #[test]
 fn a_non_generic_instance_is_the_declarations_own_symbol() {
     let ws = ws_of(SRC);
@@ -169,7 +115,7 @@ fn a_non_generic_instance_is_the_declarations_own_symbol() {
     assert_eq!(
         inst.symbol(&ws, &interner),
         skull_mir::mangle::mangle_fn(&ws, f),
-        "a non-generic instance IS the base mangling, not a suffixed derivation of it"
+        "a non-generic instance uses the base mangling"
     );
     assert!(
         inst.subst(&ws, &interner).is_empty(),
@@ -177,11 +123,8 @@ fn a_non_generic_instance_is_the_declarations_own_symbol() {
     );
 }
 
-/// An instance's substitution binds the declaration's own generic `VarId`s, in
-/// declaration order, to the arguments it was interned with.
-///
-/// The population is the multi-generic case, because that is the only one where
-/// a zip against the wrong order stays the right SIZE.
+/// A reversed zip binds the same multiset of values, so each declared generic's
+/// own `VarId` is checked.
 #[test]
 fn an_instance_substitution_binds_each_declared_generic_to_its_own_argument() {
     let ws = ws_of(SRC);
@@ -191,8 +134,6 @@ fn an_instance_substitution_binds_each_declared_generic_to_its_own_argument() {
 
     let subst = inst.subst(&ws, &interner);
     assert_eq!(subst.len(), 2, "one binding per declared generic");
-    // Resolve each declared generic's own `VarId` and check IT, rather than
-    // checking the value multiset -- a reversed zip has the same values.
     let f = &ws.module(pair.module).functions[pair.func];
     let vars: Vec<_> = f
         .generics

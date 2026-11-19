@@ -1,7 +1,6 @@
-//! A mangled name never equals its source name (ZERO_ARG_MANGLING):
-//! a non-exempt function with no parameters
-//! carries the `_0` arity marker, so Lua's `_G[name]` cannot reach it by its
-//! declared name. Exempt surface names stay bare.
+//! A non-exempt function with no parameters carries the `_0` arity marker, so
+//! Lua's `_G[name]` cannot reach it by its declared name. Exempt surface names
+//! stay bare.
 
 use crate::common::{has_name_tail, ws_of};
 use skull_mir::mangle::{collision_errors, mangle_fn};

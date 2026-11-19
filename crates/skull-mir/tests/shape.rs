@@ -1,16 +1,8 @@
-//! Phase-0 shape contracts for the cell-model IR + dump.
-//!
-//! These hand-build MIR and assert the dump. They pin the IR *contract* that
-//! Phase-2 lowering must reproduce — so when lowering lands, an
-//! `assert_eq!(lower(src), <this shape>)` test goes red the moment lowering
-//! emits the wrong thing. Today they also exercise the dump (the oracle every
-//! later test reads through).
+//! Hand-built MIR checked against its dump.
 
 use skull_mir::mir::*;
 use ustr::ustr;
 
-/// Exercises every aggregate / projection / container dump arm, so the oracle
-/// is trustworthy before Phase-2.5 lowering relies on it.
 #[test]
 fn dump_covers_aggregates_and_containers() {
     let mut f = MirFunc::new(ustr("probe"));
