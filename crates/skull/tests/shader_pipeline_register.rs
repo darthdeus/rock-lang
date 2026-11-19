@@ -1,17 +1,13 @@
-use crate::common::{body_id, emit_mir, emit_module, function_body, module_id, ws_with_stdlib};
-use bone_semantic::hir::BodyOwner;
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::ModuleId;
-use skull::mir_emit::{
-    MirEmit, SkullEmitCache, emit_full, emit_incremental, emit_overlay as emit_overlay_result,
+use crate::common::{
+    body_id, edit, emit_full_of, emit_mir, emit_module, function_body, ws_with_stdlib,
 };
 
-fn emit_overlay(
-    ws: &Workspace,
-    cache: &mut SkullEmitCache,
-    reinferred: &[(ModuleId, BodyOwner)],
-) -> MirEmit {
-    emit_overlay_result(ws, cache, reinferred).expect("emit_overlay")
+fn overlay_lua(before: &str, after: &str, edited: &str) -> String {
+    let (_, mut cache) = emit_full_of(&ws_with_stdlib(before), "base emit");
+    let after = ws_with_stdlib(after);
+    skull::mir_emit::emit_overlay(&after, &mut cache, &[body_id(&after, edited)])
+        .expect("emit_overlay")
+        .lua
 }
 
 const SRC: &str = r#"
@@ -37,12 +33,24 @@ fn make_b() -> string { return rock_shader(ui_vert, ui_sim_solid_frag) }
 const KEY: &str = "ui_vert+ui_sim_solid_frag";
 
 #[test]
-fn call_collapses_to_key_const() {
+fn a_pipeline_call_collapses_to_its_key_and_registers_once() {
     let lua = emit_module(SRC);
     let body = function_body(&lua, "make_a");
     assert!(body.contains(&format!("\"{KEY}\"")));
     assert!(!body.contains("rock_shader("));
     assert!(!body.contains("compile-time shader-pipeline intrinsic"));
+    let needle = format!("__rock_shader_register(\"{KEY}\"");
+    assert_eq!(lua.matches(&needle).count(), 1);
+    let reg = &lua[lua.find(&needle).unwrap()..];
+    for glsl in [
+        "#version 330 core",
+        "#ifdef VERTEX",
+        "#ifdef PIXEL",
+        "layout (location = 0) in vec2 aPos;",
+    ] {
+        assert!(reg.contains(glsl), "{glsl}");
+    }
+    assert!(reg.contains("false, [[") && reg.contains("fullscreen 0"));
 }
 
 #[test]
@@ -57,42 +65,6 @@ fn emission_lists_each_registered_shader_source() {
     let source = &emit.shaders[0].source;
     assert!(source.contains("void main"));
     assert!(emit.lua.contains(source.as_str()));
-}
-
-#[test]
-fn one_registration_per_distinct_pair() {
-    let lua = emit_module(SRC);
-    let needle = format!("__rock_shader_register(\"{KEY}\"");
-    let count = lua.matches(&needle).count();
-    assert_eq!(count, 1);
-}
-
-#[test]
-fn registration_carries_generated_glsl() {
-    let lua = emit_module(SRC);
-    let at = lua.find("__rock_shader_register(").expect("a registration");
-    let reg = &lua[at..];
-    for needle in [
-        "#version 330 core",
-        "#ifdef VERTEX",
-        "#ifdef PIXEL",
-        "layout (location = 0) in vec2 aPos;",
-    ] {
-        assert!(reg.contains(needle));
-    }
-}
-
-#[test]
-fn explicit_vertex_registration_marks_that_it_is_not_fullscreen() {
-    let lua = emit_module(SRC);
-    let at = lua.find("__rock_shader_register(").expect("a registration");
-    let reg = &lua[at..];
-    assert!(reg.contains("false, [[") && reg.contains("fullscreen 0"));
-}
-
-#[test]
-fn reemission_is_byte_identical() {
-    assert_eq!(emit_module(SRC), emit_module(SRC));
 }
 
 fn src_with_frag(x: &str) -> String {
@@ -116,10 +88,6 @@ fn use_it() -> string {{ return rock_shader(ui_vert, ui_sim_solid_frag) }}
     )
 }
 
-fn test_mid(ws: &Workspace) -> ModuleId {
-    module_id(ws, "<test>")
-}
-
 #[test]
 fn changed_fragment_body_changes_registration() {
     let a = emit_module(&src_with_frag("1.0"));
@@ -130,47 +98,22 @@ fn changed_fragment_body_changes_registration() {
 }
 
 #[test]
-fn incremental_shader_edit_stays_byte_identical() {
-    let ws1 = ws_with_stdlib(&src_with_frag("1.0"));
-    let mid1 = test_mid(&ws1);
-    let (_full1, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
-
-    let ws2 = ws_with_stdlib(&src_with_frag("0.5"));
-    let mid2 = test_mid(&ws2);
-    let reinferred = vec![body_id(&ws2, "ui_sim_solid_frag")];
-    let inc = emit_incremental(&ws2, &mut cache, &reinferred).expect("emit_incremental");
-    let fresh = emit_full(&ws2, mid2).expect("emit_full v2").0;
-    assert_eq!(inc.lua, fresh.lua);
+fn a_fragment_edit_rebuilds_its_registration_incrementally_and_in_an_overlay() {
+    let before = ws_with_stdlib(&src_with_frag("1.0"));
+    let after = ws_with_stdlib(&src_with_frag("0.5"));
+    let edit = edit(&before, &after, &[body_id(&after, "ui_sim_solid_frag")]);
+    let overlay = edit.overlay.expect("emit_overlay").lua;
+    assert!(overlay.contains(&format!("__rock_shader_register(\"{KEY}\"")));
+    assert!(overlay.contains("vec4(0.5, 0.0, 1.0, 1.0)"));
 }
 
 #[test]
-fn overlay_carries_edited_shader_registration() {
-    let ws1 = ws_with_stdlib(&src_with_frag("1.0"));
-    let mid1 = test_mid(&ws1);
-    let (_full1, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
-
-    let ws2 = ws_with_stdlib(&src_with_frag("0.5"));
-    let reinferred = vec![body_id(&ws2, "ui_sim_solid_frag")];
-    let overlay = emit_overlay(&ws2, &mut cache, &reinferred);
-    assert!(
-        overlay
-            .lua
-            .contains("__rock_shader_register(\"ui_vert+ui_sim_solid_frag\"")
-    );
-    assert!(overlay.lua.contains("vec4(0.5, 0.0, 1.0, 1.0)"));
-}
-
-#[test]
-fn unrelated_body_overlay_omits_shader_registrations() {
+fn an_unrelated_body_overlay_omits_shader_registrations() {
     let src = format!(
         "{}\nfn unrelated_shader_user() -> int {{ return 1 }}\n",
         src_with_frag("1.0")
     );
-    let ws = ws_with_stdlib(&src);
-    let mid = test_mid(&ws);
-    let (_full, mut cache) = emit_full(&ws, mid).expect("emit_full");
-    let overlay = emit_overlay(&ws, &mut cache, &[body_id(&ws, "unrelated_shader_user")]);
-    assert!(!overlay.lua.contains("__rock_shader_register("));
+    assert!(!overlay_lua(&src, &src, "unrelated_shader_user").contains("__rock_shader_register("));
 }
 
 fn src_with_shader_helper(x: &str) -> String {
@@ -178,23 +121,6 @@ fn src_with_shader_helper(x: &str) -> String {
         "@shader(fragment)",
         "fn shader_color_component(x: float) -> float { return x }\n\n@shader(fragment)",
     )
-}
-
-#[test]
-fn shader_helper_overlay_carries_affected_registration() {
-    let ws1 = ws_with_stdlib(&src_with_shader_helper("1.0"));
-    let mid1 = test_mid(&ws1);
-    let (_full, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
-
-    let ws2 =
-        ws_with_stdlib(&src_with_shader_helper("1.0").replace("return x }", "return x * 0.5 }"));
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "shader_color_component")]);
-    assert!(
-        overlay
-            .lua
-            .contains("__rock_shader_register(\"ui_vert+ui_sim_solid_frag\"")
-    );
-    assert!(overlay.lua.contains("0.5"));
 }
 
 fn src_with_optional_call(include_call: bool) -> String {
@@ -211,18 +137,23 @@ fn src_with_optional_call(include_call: bool) -> String {
 }
 
 #[test]
-fn new_shader_callsite_overlay_carries_registration() {
-    let ws1 = ws_with_stdlib(&src_with_optional_call(false));
-    let mid1 = test_mid(&ws1);
-    let (_full, mut cache) = emit_full(&ws1, mid1).expect("emit_full without callsite");
-
-    let ws2 = ws_with_stdlib(&src_with_optional_call(true));
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "shader_choice")]);
-    assert!(
-        overlay
-            .lua
-            .contains("__rock_shader_register(\"ui_vert+ui_sim_solid_frag\"")
+fn overlays_that_reach_a_pipeline_carry_its_registration() {
+    let helper = src_with_shader_helper("1.0");
+    let helper_overlay = overlay_lua(
+        &helper,
+        &helper.replace("return x }", "return x * 0.5 }"),
+        "shader_color_component",
     );
+    assert!(helper_overlay.contains(&format!("__rock_shader_register(\"{KEY}\"")));
+    assert!(helper_overlay.contains("0.5"));
+    let callsite_overlay = overlay_lua(
+        &src_with_optional_call(false),
+        &src_with_optional_call(true),
+        "shader_choice",
+    );
+    assert!(callsite_overlay.contains(&format!("__rock_shader_register(\"{KEY}\"")));
+    let single = overlay_lua(MIXED_SRC, MIXED_SRC, "fs_frag");
+    assert!(single.contains("__rock_shader_register(\"fs_frag\""));
 }
 
 const FS_SRC: &str = r#"
@@ -256,24 +187,17 @@ fn make_fs() -> string { return rock_shader(fs_frag) }
 "#;
 
 #[test]
-fn single_arg_call_collapses_to_bare_frag_key() {
+fn a_single_fragment_call_collapses_to_its_key_and_registers_fullscreen() {
     let lua = emit_module(FS_SRC);
     let body = function_body(&lua, "make_fs");
     assert!(body.contains("\"fs_frag\""));
     assert!(!body.contains("rock_shader("));
     assert!(!body.contains("compile-time shader-pipeline intrinsic"));
-}
-
-#[test]
-fn single_arg_registration_carries_both_ifdef_blocks() {
-    let lua = emit_module(FS_SRC);
     let needle = "__rock_shader_register(\"fs_frag\"";
-    let count = lua.matches(needle).count();
-    assert_eq!(count, 1);
-    let at = lua.find(needle).expect("a registration");
-    let reg = &lua[at..];
-    for n in ["#version 330 core", "#ifdef PIXEL", "#ifdef VERTEX"] {
-        assert!(reg.contains(n));
+    assert_eq!(lua.matches(needle).count(), 1);
+    let reg = &lua[lua.find(needle).unwrap()..];
+    for glsl in ["#version 330 core", "#ifdef PIXEL", "#ifdef VERTEX"] {
+        assert!(reg.contains(glsl), "{glsl}");
     }
     assert!(reg.contains("true, [[") && reg.contains("fullscreen 1"));
 }
@@ -293,14 +217,4 @@ fn mixed_single_and_pair_register_both_sorted() {
 #[test]
 fn mixed_reemission_byte_identical() {
     assert_eq!(emit_module(MIXED_SRC), emit_module(MIXED_SRC));
-}
-
-#[test]
-fn single_arg_overlay_carries_registration() {
-    let ws = ws_with_stdlib(MIXED_SRC);
-    let mid = test_mid(&ws);
-    let (_full, mut cache) = emit_full(&ws, mid).expect("emit_full");
-    let reinferred = vec![body_id(&ws, "fs_frag")];
-    let overlay = emit_overlay(&ws, &mut cache, &reinferred);
-    assert!(overlay.lua.contains("__rock_shader_register(\"fs_frag\""));
 }
