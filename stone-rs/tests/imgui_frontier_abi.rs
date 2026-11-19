@@ -63,6 +63,7 @@ fn headless_probe() -> (tempfile::TempDir, std::path::PathBuf) {
 #include <dlfcn.h>
 #define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
 #include <cimgui/cimgui.h>
+#define IG(name, type) ((type)dlsym(RTLD_DEFAULT, #name))
 extern bool stone_imgui_init(StoneWindow *window);
 extern void stone_imgui_shutdown(void);
 extern void stone_imgui_new_frame(void);
@@ -76,9 +77,9 @@ int main(void) {
     assert(get_io != NULL);
     get_io()->ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     stone_imgui_new_frame();
-    stone_imgui_begin_window("Headless ini", 0);
-    stone_imgui_text("Concurrent settings probe");
-    stone_imgui_end();
+    IG(igBegin, bool (*)(const char *, bool *, int))("Headless ini", NULL, 0);
+    IG(igTextUnformatted, void (*)(const char *, const char *))("Concurrent settings probe", NULL);
+    IG(igEnd, void (*)(void))();
     assert(stone_imgui_prepare_render() != NULL);
     stone_imgui_shutdown();
     assert(stone_teardown());
@@ -135,7 +136,7 @@ fn concurrent_headless_imgui_ignores_shared_dock_settings() {
 }
 
 #[test]
-fn desktop_imgui_frontier_reaches_real_widgets_and_draw_lists() {
+fn desktop_imgui_frame_produces_draw_data() {
     // The probe needs a real window; SDL's headless `offscreen` driver aborts
     // on `window != NULL`. macOS always has a GUI session.
     #[cfg(target_os = "linux")]
@@ -150,6 +151,7 @@ fn desktop_imgui_frontier_reaches_real_widgets_and_draw_lists() {
 #include <dlfcn.h>
 #define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
 #include <cimgui/cimgui.h>
+#define IG(name, type) ((type)dlsym(RTLD_DEFAULT, #name))
 extern bool stone_imgui_init(StoneWindow *window);
 extern void stone_imgui_shutdown(void);
 extern void stone_imgui_new_frame(void);
@@ -163,33 +165,11 @@ int main(void) {
     assert(stone_imgui_init(window));
     assert(stone_imgui_initialized());
     stone_imgui_new_frame();
-    stone_imgui_set_next_window_pos(20, 20);
-    ((void (*)(ImVec2, int))dlsym(RTLD_DEFAULT, "igSetNextWindowSize"))((ImVec2){400, 400}, 0);
-    assert(stone_imgui_begin_window("frontier", 0));
-    stone_imgui_set_window_focus("frontier");
-    float x, y;
-    stone_imgui_get_cursor_screen_pos(&x, &y);
-    assert(stone_imgui_is_rect_visible(20, 20));
-    assert(!stone_imgui_button_sized("sized", 30, 20));
-    assert(stone_imgui_is_item_fully_visible());
-    assert(!stone_imgui_invisible_button("hidden", 30, 20));
-    assert(stone_imgui_collapsing_header("default open"));
-    bool changed = true;
-    float value = -1;
-    stone_imgui_input_float("value", 1.25f, 0.5f, 2.0f, "%.3f", &changed, &value);
-    assert(!changed && value == 1.25f);
-    float r, g, b, a;
-    stone_imgui_color_edit4("color", 0.125f, 0.25f, 0.5f, 0.75f, &changed, &r, &g, &b, &a);
-    assert(!changed && r == 0.125f && g == 0.25f && b == 0.5f && a == 0.75f);
-    stone_imgui_window_add_line(x, y, x+20, y+20, 0xAABBCCDDu, 2.25f);
-    stone_imgui_window_add_rect_filled(x, y, x+20, y+20, 0xAABBCCDDu);
-    stone_imgui_window_add_quad_filled(x, y, x+20, y, x+20, y+20, x, y+20, 0xAABBCCDDu);
-    stone_imgui_window_add_image_quad(0, x, y, x+20, y, x+20, y+20, x, y+20,
-        0, 0, 1, 0, 1, 1, 0, 1, 0xFFFFFFFFu);
-    stone_imgui_image_raw(0, 20, 20, 0, 0, 1, 1, 0.125f, 0.25f, 0.5f, 0.75f, 0, 0, 0, 0);
-    assert(!stone_imgui_image_button_raw("image", 0, 20, 20, 0, 0, 1, 1,
-        0, 0, 0, 0, 0.125f, 0.25f, 0.5f, 0.75f));
-    stone_imgui_end();
+    IG(igSetNextWindowPos, void (*)(ImVec2, int, ImVec2))((ImVec2){20, 20}, 0, (ImVec2){0, 0});
+    IG(igSetNextWindowSize, void (*)(ImVec2, int))((ImVec2){400, 400}, 0);
+    assert(IG(igBegin, bool (*)(const char *, bool *, int))("frontier", NULL, 0));
+    assert(!IG(igButton, bool (*)(const char *, ImVec2))("button", (ImVec2){30, 20}));
+    IG(igEnd, void (*)(void))();
     assert(stone_imgui_prepare_render() != NULL);
     assert(stone_imgui_last_vtx_count() > 0);
     stone_imgui_shutdown();
@@ -219,6 +199,7 @@ fn imgui_pointer_follows_a_window_the_wm_moved_out_of_fullscreen() {
 #include <unistd.h>
 #define CIMGUI_DEFINE_ENUMS_AND_STRUCTS
 #include <cimgui/cimgui.h>
+#define IG(name, type) ((type)dlsym(RTLD_DEFAULT, #name))
 extern bool stone_imgui_init(StoneWindow *window);
 extern void stone_imgui_shutdown(void);
 extern void stone_imgui_new_frame(void);
@@ -230,12 +211,12 @@ static void frame(StoneWindow *window) {
     StoneEvent event;
     while (stone_poll_event(&event)) {}
     stone_imgui_new_frame();
-    stone_imgui_set_next_window_pos(20, 20);
-    ((void (*)(ImVec2, int))dlsym(RTLD_DEFAULT, "igSetNextWindowSize"))((ImVec2){200, 200}, 0);
-    stone_imgui_begin_window("moved", 0);
-    stone_imgui_button_sized("target", 150, 100);
-    hovered = ((bool (*)(int))dlsym(RTLD_DEFAULT, "igIsItemHovered"))(0);
-    stone_imgui_end();
+    IG(igSetNextWindowPos, void (*)(ImVec2, int, ImVec2))((ImVec2){20, 20}, 0, (ImVec2){0, 0});
+    IG(igSetNextWindowSize, void (*)(ImVec2, int))((ImVec2){200, 200}, 0);
+    IG(igBegin, bool (*)(const char *, bool *, int))("moved", NULL, 0);
+    IG(igButton, bool (*)(const char *, ImVec2))("target", (ImVec2){150, 100});
+    hovered = IG(igIsItemHovered, bool (*)(int))(0);
+    IG(igEnd, void (*)(void))();
     stone_imgui_render();
     stone_swap_window(window);
     stone_show_window_if_deferred();

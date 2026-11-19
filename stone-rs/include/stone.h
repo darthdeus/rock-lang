@@ -89,85 +89,6 @@ typedef struct StoneImageLoadStats {
 bool stone_init(void);
 void stone_quit(void);
 bool stone_teardown(void);
-bool stone_imgui_using_mouse(void);
-bool stone_imgui_wants_mouse(void);
-bool stone_imgui_wants_text_input(void);
-bool stone_imgui_begin_window(const char *title, int flags);
-bool stone_imgui_button(const char *label);
-bool stone_imgui_begin_combo(const char *label, const char *preview);
-void stone_imgui_end_combo(void);
-void stone_imgui_set_item_default_focus(void);
-void stone_imgui_open_popup(const char *id);
-bool stone_imgui_begin_popup(const char *id);
-void stone_imgui_end_popup(void);
-bool stone_imgui_menu_item(const char *label, bool enabled);
-void stone_imgui_combo_str(
-    const char *label, int current_item, StoneString items,
-    bool *changed, int *out_current_item);
-bool stone_imgui_input_text(
-    const char *label, char *buffer, size_t buffer_size, int flags);
-bool stone_imgui_input_text_multiline(
-    const char *label, char *buffer, size_t buffer_size,
-    float width, float height, int flags);
-bool stone_imgui_begin_table(const char *id, int columns, int flags);
-void stone_imgui_end_table(void);
-void stone_imgui_table_headers_row(void);
-void stone_imgui_table_next_row(void);
-bool stone_imgui_table_next_column(void);
-void stone_imgui_table_setup_column_fixed(const char *label, float width);
-void stone_imgui_table_setup_column_stretch(const char *label);
-void stone_imgui_begin_disabled(bool disabled);
-void stone_imgui_end_disabled(void);
-void stone_imgui_indent(float amount);
-void stone_imgui_unindent(float amount);
-bool stone_imgui_collapsing_header_closed(const char *label);
-bool stone_imgui_invisible_button(const char *label, float size_x, float size_y);
-bool stone_imgui_selectable(const char *label, bool selected);
-void stone_imgui_get_mouse_pos(float *x, float *y);
-void stone_imgui_get_content_region_avail(float *x, float *y);
-void stone_imgui_get_window_pos(float *x, float *y);
-void stone_imgui_get_window_size(float *x, float *y);
-bool stone_imgui_is_any_item_active(void);
-bool stone_imgui_is_item_visible(void);
-bool stone_imgui_is_window_docked(void);
-void stone_imgui_same_line(void);
-void stone_imgui_get_cursor_screen_pos(float *x, float *y);
-void stone_imgui_get_item_rect_min(float *x, float *y);
-void stone_imgui_get_item_rect_max(float *x, float *y);
-void stone_imgui_dummy(float size_x, float size_y);
-void stone_imgui_set_cursor_screen_pos(float pos_x, float pos_y);
-void stone_imgui_push_style_color(int idx, uint32_t col_abgr);
-void stone_imgui_pop_style_color(int count);
-void stone_imgui_set_next_item_width(float width);
-void stone_imgui_slider_float(
-    const char *label, float value, float min, float max,
-    bool *changed, float *out_value);
-void stone_imgui_slider_int(
-    const char *label, int value, int min, int max,
-    bool *changed, int *out_value);
-void stone_imgui_checkbox(
-    const char *label, bool value, bool *changed, bool *out_value);
-void stone_imgui_color_edit4(
-    const char *label, float r, float g, float b, float a,
-    bool *changed, float *out_r, float *out_g, float *out_b, float *out_a);
-void stone_imgui_set_scroll_here_y(float center_y_ratio);
-void stone_imgui_window_add_line(
-    float p1_x, float p1_y, float p2_x, float p2_y,
-    uint32_t col_abgr, float thickness);
-void stone_imgui_end_child(void);
-void stone_imgui_end(void);
-void stone_imgui_text(const char *text);
-void stone_imgui_set_tooltip(const char *text);
-void stone_imgui_text_colored(
-    const char *text, float r, float g, float b, float a);
-void stone_imgui_window_add_rect_filled(
-    float min_x, float min_y, float max_x, float max_y, uint32_t col_abgr);
-void stone_imgui_separator(void);
-bool stone_imgui_is_item_hovered(int flags);
-bool stone_imgui_is_item_active(void);
-bool stone_imgui_is_item_activated(void);
-bool stone_imgui_is_item_deactivated(void);
-bool stone_imgui_is_item_deactivated_after_edit(void);
 StoneWindow *stone_create_window_ex(
     const char *title,
     int x,
@@ -516,14 +437,6 @@ int64_t stone_nav_route_copy(
     int64_t handle, int64_t slot, int64_t generation,
     NativeNavIntWire *out, int64_t len);
 
-// Native-artifact ImGui stubs: the C artifact has no cimgui, so key state is
-// "not down", name resolution reports the imgui-absent contract value, and
-// injection is a no-op.
-bool stone_imgui_is_key_down(int id);
-bool stone_imgui_ctrl_down(void);
-int stone_imgui_key_id(const char *name);
-void stone_imgui_inject_key(int id);
-void stone_imgui_release_key(int id);
 
 void stone_show_cursor(bool show);
 uint64_t stone_create_cursor(const char *path, int hot_x, int hot_y);
@@ -537,28 +450,6 @@ int stone_poll_changed_assets(void);
 const char *stone_changed_asset_path(int index);
 
 // Native ImGui transports use GL texture names rather than resource handles.
-void stone_imgui_image_raw(uint64_t texture, float size_x, float size_y,
-    float uv1_x, float uv1_y, float uv2_x, float uv2_y,
-    float tint_r, float tint_g, float tint_b, float tint_a,
-    float border_r, float border_g, float border_b, float border_a);
-bool stone_imgui_image_button_raw(const char *id, uint64_t texture, float size_x, float size_y,
-    float uv1_x, float uv1_y, float uv2_x, float uv2_y,
-    float bg_r, float bg_g, float bg_b, float bg_a,
-    float tint_r, float tint_g, float tint_b, float tint_a);
-void stone_imgui_window_add_image_quad(uint64_t texture,
-    float p1_x, float p1_y, float p2_x, float p2_y, float p3_x, float p3_y, float p4_x, float p4_y,
-    float uv1_x, float uv1_y, float uv2_x, float uv2_y, float uv3_x, float uv3_y, float uv4_x, float uv4_y,
-    uint32_t col);
-void stone_imgui_window_add_quad_filled(float p1_x, float p1_y, float p2_x, float p2_y,
-    float p3_x, float p3_y, float p4_x, float p4_y, uint32_t col);
-bool stone_imgui_is_rect_visible(float x, float y);
-bool stone_imgui_is_item_fully_visible(void);
-void stone_imgui_set_next_window_pos(float x, float y);
-void stone_imgui_set_window_focus(const char *name);
-bool stone_imgui_button_sized(const char *label, float x, float y);
-bool stone_imgui_collapsing_header(const char *label);
-void stone_imgui_input_float(const char *label, float value, float step, float step_fast,
-    const char *format, bool *changed, float *result);
 
 #ifdef __cplusplus
 }
