@@ -324,6 +324,15 @@ pub fn known_refresh_rate(refresh_rate: i32) -> Option<i32> {
 mod tests {
     use super::*;
 
+    const fn title_bar(top: i32) -> Borders {
+        Borders {
+            top,
+            left: 0,
+            bottom: 0,
+            right: 0,
+        }
+    }
+
     #[test]
     fn known_refresh_rate_treats_zero_as_unknown() {
         assert_eq!(known_refresh_rate(144), Some(144));
@@ -363,12 +372,7 @@ mod tests {
     fn fit_exceeds_reports_overflow() {
         let r = report(
             (2560, 1600),
-            Borders {
-                top: 28,
-                left: 0,
-                bottom: 0,
-                right: 0,
-            },
+            title_bar(28),
         );
         let f = r.fit().unwrap();
         assert_eq!(f.max_content_w, 1440);
@@ -385,12 +389,7 @@ mod tests {
     fn fit_within_reports_headroom() {
         let r = report(
             (800, 700),
-            Borders {
-                top: 28,
-                left: 0,
-                bottom: 0,
-                right: 0,
-            },
+            title_bar(28),
         );
         let f = r.fit().unwrap();
         assert!(!f.exceeds);
@@ -405,12 +404,7 @@ mod tests {
     fn fit_none_when_landed_display_missing() {
         let mut r = report(
             (800, 700),
-            Borders {
-                top: 0,
-                left: 0,
-                bottom: 0,
-                right: 0,
-            },
+            title_bar(0),
         );
         r.landed_display = 5;
         assert!(r.fit().is_none());
@@ -455,12 +449,7 @@ mod tests {
         }
     }
 
-    const NO_BORDERS: Borders = Borders {
-        top: 0,
-        left: 0,
-        bottom: 0,
-        right: 0,
-    };
+    const NO_BORDERS: Borders = title_bar(0);
 
     #[test]
     fn placement_shrinks_oversized_request() {
@@ -473,12 +462,7 @@ mod tests {
         let p = resolve_window_placement(
             req,
             &[d],
-            Borders {
-                top: 28,
-                left: 0,
-                bottom: 0,
-                right: 0,
-            },
+            title_bar(28),
         );
         assert_eq!(p.size, (1440, 842)); // 870 usable - 28 title
         assert_eq!(p.display, 0);
@@ -572,35 +556,28 @@ mod tests {
     }
 
     #[test]
-    fn closest_mode_exact_match() {
-        let modes = vec![(1920, 1080, 60), (2560, 1440, 60), (1280, 720, 60)];
-        assert_eq!(
-            closest_display_mode(&modes, 1920, 1080),
-            Some((1920, 1080, 60))
-        );
-    }
-
-    #[test]
-    fn closest_mode_picks_nearest_area() {
-        let modes = vec![(1280, 720, 60), (2560, 1440, 60)];
-        assert_eq!(
-            closest_display_mode(&modes, 1920, 1080),
-            Some((1280, 720, 60))
-        );
-    }
-
-    #[test]
-    fn closest_mode_breaks_ties_by_refresh() {
-        let modes = vec![(1920, 1080, 60), (1920, 1080, 120)];
-        assert_eq!(
-            closest_display_mode(&modes, 1920, 1080),
-            Some((1920, 1080, 120))
-        );
-    }
-
-    #[test]
-    fn closest_mode_empty_is_none() {
-        assert_eq!(closest_display_mode(&[], 800, 600), None);
+    fn closest_mode_prefers_exact_then_nearest_area_then_refresh() {
+        let cases: [(&[(i32, i32, i32)], Option<(i32, i32, i32)>, &str); 4] = [
+            (
+                &[(1920, 1080, 60), (2560, 1440, 60), (1280, 720, 60)],
+                Some((1920, 1080, 60)),
+                "exact",
+            ),
+            (
+                &[(1280, 720, 60), (2560, 1440, 60)],
+                Some((1280, 720, 60)),
+                "nearest area",
+            ),
+            (
+                &[(1920, 1080, 60), (1920, 1080, 120)],
+                Some((1920, 1080, 120)),
+                "refresh tie",
+            ),
+            (&[], None, "empty"),
+        ];
+        for (modes, expected, name) in cases {
+            assert_eq!(closest_display_mode(modes, 1920, 1080), expected, "{name}");
+        }
     }
 
     #[test]
@@ -620,12 +597,7 @@ mod tests {
     fn units_are_labelled() {
         let r = report(
             (800, 700),
-            Borders {
-                top: 28,
-                left: 0,
-                bottom: 0,
-                right: 0,
-            },
+            title_bar(28),
         );
         let h = r.render_human();
         assert!(h.contains("pt=points, px=pixels"));
