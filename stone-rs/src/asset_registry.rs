@@ -50,30 +50,26 @@ pub extern "C" fn stone_register_asset(path: *const c_char, data: *const u8, len
 /// Look up an asset by path. Returns None if not registered.
 /// Normalizes path separators (backslash → forward slash) for cross-platform compatibility.
 pub fn get_asset(path: &str) -> Option<Vec<u8>> {
-    let normalized = normalize_key(path);
-    let guard = REGISTRY.lock().unwrap();
-    guard
-        .as_ref()
-        .and_then(|registry| registry.assets.get(&normalized).cloned())
+    with_asset(path, |data| data.to_vec())
 }
 
 /// Cheap presence check without copying the bytes.
 pub fn contains_asset(path: &str) -> bool {
-    let normalized = normalize_key(path);
-    let guard = REGISTRY.lock().unwrap();
-    guard
-        .as_ref()
-        .is_some_and(|registry| registry.assets.contains_key(&normalized))
+    with_asset(path, |_| ()).is_some()
 }
 
 /// Return the byte length of a registered asset without copying its contents.
 pub fn asset_size(path: &str) -> Option<i64> {
+    with_asset(path, |data| data.len() as i64)
+}
+
+fn with_asset<T>(path: &str, f: impl FnOnce(&[u8]) -> T) -> Option<T> {
     let normalized = normalize_key(path);
     let guard = REGISTRY.lock().unwrap();
     guard
         .as_ref()
         .and_then(|registry| registry.assets.get(&normalized))
-        .map(|data| data.len() as i64)
+        .map(|data| f(data))
 }
 
 pub fn directory_entries(path: &str) -> Vec<String> {
@@ -146,7 +142,7 @@ enum OverrideRead {
 }
 
 fn read_override(root: &Path, path: &str, prefix: Option<usize>) -> OverrideRead {
-    let normalized = path.replace('\\', "/");
+    let normalized = normalize_key(path);
     let rel = Path::new(&normalized);
     if rel.is_absolute()
         || rel.components().any(|c| {
@@ -160,12 +156,7 @@ fn read_override(root: &Path, path: &str, prefix: Option<usize>) -> OverrideRead
     }
     let override_path = root.join(rel);
     let result = match prefix {
-        Some(n) => std::fs::File::open(&override_path).and_then(|mut file| {
-            let mut bytes = vec![0; n];
-            let read = read_up_to(&mut file, &mut bytes)?;
-            bytes.truncate(read);
-            Ok(bytes)
-        }),
+        Some(n) => std::fs::File::open(&override_path).and_then(|file| read_prefix(file, n)),
         None => std::fs::read(&override_path),
     };
     match result {
@@ -186,40 +177,47 @@ fn read_override(root: &Path, path: &str, prefix: Option<usize>) -> OverrideRead
 /// The mods override applies only to registered paths, so it cannot shadow saves or other
 /// runtime-written files.
 pub fn resolve_asset(path: &str) -> Option<Vec<u8>> {
-    match mod_root() {
-        ModRoot::Present(root) => resolve_with_root(Some(root), path),
-        ModRoot::Missing => resolve_with_root(None, path),
-        ModRoot::Failed if contains_asset(path) => None,
-        ModRoot::Failed => resolve_with_root(None, path),
-    }
+    resolve(path, None)
 }
 
 pub fn resolve_asset_prefix(path: &str, n: usize) -> Option<Vec<u8>> {
+    resolve(path, Some(n))
+}
+
+fn resolve(path: &str, prefix: Option<usize>) -> Option<Vec<u8>> {
     match mod_root() {
-        ModRoot::Present(root) => resolve_prefix_with_root(Some(root), path, n),
-        ModRoot::Missing => resolve_prefix_with_root(None, path, n),
+        ModRoot::Present(root) => resolve_with_root(Some(root), path, prefix),
         ModRoot::Failed if contains_asset(path) => None,
-        ModRoot::Failed => resolve_prefix_with_root(None, path, n),
+        ModRoot::Missing | ModRoot::Failed => resolve_with_root(None, path, prefix),
     }
 }
 
-fn resolve_prefix_with_root(root: Option<&Path>, path: &str, n: usize) -> Option<Vec<u8>> {
+fn resolve_with_root(root: Option<&Path>, path: &str, prefix: Option<usize>) -> Option<Vec<u8>> {
     if contains_asset(path) {
         if let Some(root) = root {
-            match read_override(root, path, Some(n)) {
+            match read_override(root, path, prefix) {
                 OverrideRead::Found(bytes) => return Some(bytes),
                 OverrideRead::Missing => {}
                 OverrideRead::Failed => return None,
             }
         }
-        let normalized = normalize_key(path);
-        let guard = REGISTRY.lock().unwrap();
-        return guard
-            .as_ref()
-            .and_then(|registry| registry.assets.get(&normalized))
-            .map(|bytes| bytes[..n.min(bytes.len())].to_vec());
+        // The registry is immutable after boot, so a positive contains_asset means the
+        // asset resolves.
+        return with_asset(path, |bytes| {
+            bytes[..prefix.unwrap_or(bytes.len()).min(bytes.len())].to_vec()
+        });
     }
-    let mut f = match std::fs::File::open(path) {
+    let Some(n) = prefix else {
+        return match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                ::log::error!(target: "ASSETS", "failed to read asset {path}: {error}");
+                None
+            }
+        };
+    };
+    let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
@@ -227,55 +225,30 @@ fn resolve_prefix_with_root(root: Option<&Path>, path: &str, n: usize) -> Option
             return None;
         }
     };
-    let mut buf = vec![0u8; n];
-    let read = match read_up_to(&mut f, &mut buf) {
-        Ok(read) => read,
+    match read_prefix(file, n) {
+        Ok(bytes) => Some(bytes),
         Err(error) => {
             ::log::error!(target: "ASSETS", "failed to read asset prefix {path}: {error}");
-            return None;
+            None
         }
-    };
-    buf.truncate(read);
-    Some(buf)
+    }
 }
 
-/// Fills `buf` as far as the file allows. A short read is the file being
-/// smaller than the prefix, not a failure.
-fn read_up_to(f: &mut std::fs::File, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+/// A short read is the file being smaller than the prefix, not a failure.
+fn read_prefix(mut file: std::fs::File, n: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
+    let mut buf = vec![0; n];
     let mut total = 0;
-    while total < buf.len() {
-        match f.read(&mut buf[total..]) {
+    while total < n {
+        match file.read(&mut buf[total..]) {
             Ok(0) => break,
             Ok(n) => total += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
     }
-    Ok(total)
-}
-
-fn resolve_with_root(root: Option<&Path>, path: &str) -> Option<Vec<u8>> {
-    if contains_asset(path) {
-        if let Some(root) = root {
-            match read_override(root, path, None) {
-                OverrideRead::Found(bytes) => return Some(bytes),
-                OverrideRead::Missing => {}
-                OverrideRead::Failed => return None,
-            }
-        }
-        // The registry is immutable after boot, so a positive contains_asset means get_asset
-        // resolves.
-        return get_asset(path);
-    }
-    match std::fs::read(path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            ::log::error!(target: "ASSETS", "failed to read asset {path}: {error}");
-            None
-        }
-    }
+    buf.truncate(total);
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -378,7 +351,7 @@ mod resolve_tests {
             .unwrap()
             .set_len(8 * 1024 * 1024)
             .unwrap();
-        let header = resolve_prefix_with_root(Some(&root), &key, 3).unwrap();
+        let header = resolve_with_root(Some(&root), &key, Some(3)).unwrap();
         assert_eq!(header, b"mod");
         assert!(header.capacity() <= 3);
         assert_eq!(
@@ -387,11 +360,11 @@ mod resolve_tests {
         );
         std::fs::remove_file(&modded).unwrap();
         assert_eq!(
-            resolve_prefix_with_root(Some(&root), &key, 24),
+            resolve_with_root(Some(&root), &key, Some(24)),
             Some(b"embedded".to_vec())
         );
         std::fs::create_dir(&modded).unwrap();
-        assert_eq!(resolve_prefix_with_root(Some(&root), &key, 3), None);
+        assert_eq!(resolve_with_root(Some(&root), &key, Some(3)), None);
     }
 
     #[test]
@@ -401,12 +374,12 @@ mod resolve_tests {
         let key = format!("world/floor_{}.png", UNIQ.fetch_add(1, Ordering::SeqCst));
         let embedded = b"EMBEDDED".to_vec();
         let _asset = register_guarded_asset(key.clone(), embedded.clone());
-        assert_eq!(resolve_with_root(Some(&root), &key), Some(embedded));
+        assert_eq!(resolve_with_root(Some(&root), &key, None), Some(embedded));
         let modded = root.join(&key);
         std::fs::create_dir_all(modded.parent().unwrap()).unwrap();
         std::fs::write(&modded, b"MODDED").unwrap();
         assert_eq!(
-            resolve_with_root(Some(&root), &key),
+            resolve_with_root(Some(&root), &key, None),
             Some(b"MODDED".to_vec())
         );
     }
@@ -418,7 +391,7 @@ mod resolve_tests {
         let modded = root.join(&key);
         std::fs::create_dir_all(modded.parent().unwrap()).unwrap();
         std::fs::write(&modded, b"MOD_SAVE").unwrap();
-        assert_eq!(resolve_with_root(Some(&root), &key), None);
+        assert_eq!(resolve_with_root(Some(&root), &key, None), None);
     }
 
     #[test]
@@ -441,7 +414,7 @@ mod resolve_tests {
     #[test]
     fn miss_falls_through_to_none_without_mods() {
         let key = format!("nope_{}.png", UNIQ.fetch_add(1, Ordering::SeqCst));
-        assert_eq!(resolve_with_root(None, &key), None);
+        assert_eq!(resolve_with_root(None, &key, None), None);
     }
 
     #[cfg(unix)]
@@ -456,7 +429,7 @@ mod resolve_tests {
         let is_loop = observed.raw_os_error() == Some(libc::ELOOP);
         let _asset = register_guarded_asset(key.clone(), b"embedded bytes".to_vec());
 
-        let resolution = resolve_with_root(Some(&root), &key);
+        let resolution = resolve_with_root(Some(&root), &key, None);
 
         assert!(
             is_loop,
