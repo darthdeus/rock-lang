@@ -134,45 +134,39 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_bound_callees_and_physical_headers_with_directives() {
-        let report = analyze(
-            "# 20 \"sample.rock\"\nfunction leaf(x) return x + 1 end\n# 40 \"sample.rock\"\n__rock_mk_run = function(leaf) return function(x) local y = leaf(x); return y + x end end\n",
-        );
-        assert!(report.contains("function run: frame="), "{report}");
-        assert!(report.contains("run -> leaf"), "{report}");
-    }
-
-    #[test]
-    fn resolves_private_factory_parameters_through_the_binding_line() {
-        let report = analyze(
-            "function leaf(x) return x + 1 end\n__rock_mk_run = function(b0) return function(x) local y = b0(x); return y + x end end\nrun = __rock_mk_run(leaf)\n",
-        );
-        assert!(report.contains("run -> leaf"), "{report}");
-        assert!(!report.contains("-> b0"), "{report}");
-    }
-
-    #[test]
-    fn does_not_resolve_global_calls_to_scoped_local_functions() {
-        let report = analyze(
-            "do\nlocal function leaf(x) return x + 1 end\nend\nfunction run(x) local y = leaf(x); return y + x end\n",
-        );
-        assert!(
-            !report.contains("run -> leaf"),
-            "a local declaration was treated as a global target: {report}"
-        );
-        let run = report.split("function run:").nth(1).expect("run report");
-        assert!(run.contains("indirect/external: unknown"), "{run}");
-    }
-
-    #[test]
-    fn duplicate_names_remain_ambiguous_call_targets() {
-        let report = analyze(
-            "function duplicate(x) return x + 1 end\nfunction duplicate(x) return x + 2 end\nfunction run(x) local y = duplicate(x); return y + x end\n",
-        );
-        let run = report.split("function run:").nth(1).expect("run report");
-        assert!(!run.contains("run -> duplicate"), "{run}");
-        assert!(run.contains("-> duplicate frame=unknown"), "{run}");
-        assert!(run.contains("indirect/external: unknown"), "{run}");
+    fn resolves_only_unambiguous_global_call_targets() {
+        let cases: [(&str, &[&str], &[&str]); 4] = [
+            (
+                "# 20 \"sample.rock\"\nfunction leaf(x) return x + 1 end\n# 40 \"sample.rock\"\n__rock_mk_run = function(leaf) return function(x) local y = leaf(x); return y + x end end\n",
+                &["run -> leaf"],
+                &[],
+            ),
+            (
+                "function leaf(x) return x + 1 end\n__rock_mk_run = function(b0) return function(x) local y = b0(x); return y + x end end\nrun = __rock_mk_run(leaf)\n",
+                &["run -> leaf"],
+                &["-> b0"],
+            ),
+            (
+                "do\nlocal function leaf(x) return x + 1 end\nend\nfunction run(x) local y = leaf(x); return y + x end\n",
+                &["indirect/external: unknown"],
+                &["run -> leaf"],
+            ),
+            (
+                "function duplicate(x) return x + 1 end\nfunction duplicate(x) return x + 2 end\nfunction run(x) local y = duplicate(x); return y + x end\n",
+                &["-> duplicate frame=unknown", "indirect/external: unknown"],
+                &["run -> duplicate"],
+            ),
+        ];
+        for (lua, present, absent) in cases {
+            let report = analyze(lua);
+            let run = report.split("function run:").nth(1).expect("run report");
+            for needle in present {
+                assert!(run.contains(needle), "{needle}:\n{run}");
+            }
+            for needle in absent {
+                assert!(!run.contains(needle), "{needle}:\n{run}");
+            }
+        }
     }
 
     #[test]
