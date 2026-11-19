@@ -1,6 +1,7 @@
-// Tests for the Never (bottom) type and return/break/continue as expressions.
-// Goal: enable patterns like `let g = G ?? return` and
-// `let x = if c { 5 } else { return }`.
+// The Never (bottom) type: return, break and continue as expressions in value
+// position (`let g = G ?? return`, `let x = if c { 5 } else { return }`),
+// with the divergent sub-expression at any depth. Each shape has a taken
+// test and a diverging test whose sentinel FAIL line must never print.
 
 global G_INT: int? = 42
 
@@ -13,9 +14,6 @@ fn coalesce_with_return_taken_path() {
 @test(output = "before")
 fn coalesce_with_return_diverging_path() {
     let x: int? = null
-    // `print("before")` + sentinel `print("FAIL...")` on the post-divergence
-    // line: if `return` lowers to a no-op, the FAIL line runs and the actual
-    // output ends up "before\nFAIL...", mismatching the expected.
     print("before")
     let g = x ?? return
     print("FAIL: passed return")
@@ -36,8 +34,7 @@ fn if_else_return_diverging_path() {
     print("FAIL: passed return")
 }
 
-// `let x = E1 op E2` where one operand is a divergent if-expression.
-// Codegen hoists the divergent operand to a temp before emitting the binop.
+// One operand of a binary operator diverges.
 @test(output = "6")
 fn binop_divergent_right_taken() {
     let x = 1 + if true { 5 } else { return }
@@ -57,9 +54,7 @@ fn binop_divergent_left_taken() {
     print(x)
 }
 
-// `let arr = [..., if c { v } else { return }, ...]` — array literal
-// element, codegen hoists divergent element to a temp and builds Vec
-// inline (no IIFE).
+// An array literal element diverges.
 @test(output = "1")
 fn array_lit_divergent_taken() {
     let arr = [1, if true { 2 } else { return }, 3]
@@ -73,7 +68,7 @@ fn array_lit_divergent_diverging() {
     print("FAIL: passed return")
 }
 
-// `let t = (1, if c { v } else { return }, 3)` — tuple element.
+// A tuple element diverges.
 @test(output = "1\n2\n3")
 fn tuple_divergent_taken() {
     let t = (1, if true { 2 } else { return }, 3)
@@ -89,7 +84,7 @@ fn tuple_divergent_diverging() {
     print("FAIL: passed return")
 }
 
-// `let x = arr[if c { i } else { return }]` — index expression.
+// An index expression diverges.
 @test(output = "20")
 fn index_divergent_taken() {
     let arr = [10, 20, 30]
@@ -105,9 +100,7 @@ fn index_divergent_diverging() {
     print("FAIL: passed return")
 }
 
-// `print(if c { v } else { return })` — function-call argument. Both
-// statement-level (last in fn body, routed via `generate_ast_function_body`)
-// and let-bound forms.
+// A call argument diverges, as the last statement of the body and let-bound.
 @test(output = "42")
 fn fncall_arg_divergent_taken() {
     print(if true { 42 } else { return })
@@ -137,15 +130,7 @@ fn coalesce_with_continue() {
     }
 }
 
-// Shapes the per-form arms didn't cover, only reachable now that ANF
-// hoists divergent sub-expressions at any depth in the value-position
-// expression tree.
-
-// `f(g(if c { ... } else { return }))` — divergent if nested two levels
-// deep under function calls. The inner call `add_one` is itself a
-// FunctionCall arg, so under the old per-form arms the divergent if
-// would only get hoisted if the OUTER FunctionCall arm walked deep
-// enough — which it didn't (`expr_has_divergent_if` is shallow).
+// The divergent if sits two calls deep.
 fn add_one(x: int) -> int { x + 1 }
 
 @test(output = "43")
@@ -160,8 +145,7 @@ fn nested_fncall_divergent_diverging() {
     print("FAIL: passed return")
 }
 
-// Divergent if inside a struct literal field. Struct literals weren't
-// in the old per-form set; ANF generalizes to any value-position child.
+// A struct literal field diverges.
 struct Pair { a: int, b: int }
 
 @test(output = "1 7")
@@ -177,10 +161,7 @@ fn struct_lit_divergent_diverging() {
     print("FAIL: passed return")
 }
 
-// Divergent if inside a function-call argument that's itself nested
-// inside another expression — the divergent if is NOT a direct child
-// of any single per-form arm's parent (BinOp -> FunctionCall -> If),
-// only ANF's tree-walk finds it.
+// The divergent if is a call argument inside a binary operand.
 @test(output = "43")
 fn binop_with_nested_fncall_divergent_taken() {
     let x = 1 + add_one(if true { 41 } else { return })
@@ -194,10 +175,8 @@ fn binop_with_nested_fncall_divergent_diverging() {
     print("FAIL: x={x}")
 }
 
-// Match / IfLet / IfLetChain in value position with a divergent arm.
-// Both at the top of a `let x = …` (the new arms in
-// `generate_expr_into_local`) and nested inside another expression (ANF
-// hoists the Match/IfLet/IfLetChain via `expr_has_divergent_if`).
+// Match, if-let and if-let chains with a divergent arm, at the top of a let
+// and nested inside a binary operand.
 
 enum Maybe { Some(int), None }
 
@@ -285,11 +264,7 @@ fn if_let_chain_nested_in_binop_diverging() {
     print("FAIL: x={x}")
 }
 
-// Paren-wrapped divergent if. `peel_transparent_wrappers` (used by
-// emit_value_arg_cdata) drops Paren on the way into BinOp operand
-// codegen, so the early-out in generate_expr_core sees the *inner* If's
-// id, not the Paren's. The ANF prep peels Paren before pushing into
-// the side-table so both keys match.
+// A parenthesized divergent if as a binary operand.
 @test(output = "6")
 fn paren_wrapped_divergent_if_taken() {
     let x = (if true { 5 } else { return }) + 1
