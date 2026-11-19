@@ -89,28 +89,12 @@ pub(crate) fn wire_kind_of(t: GlslTy) -> WireKind {
 pub(crate) fn stage_uniform_fields(
     iface: &ShaderInterfacePlan,
     stage: IrStage,
-) -> Vec<(Ustr, GlslTy)> {
+) -> impl Iterator<Item = (Ustr, GlslTy)> + '_ {
     iface
         .uniform_group(UniformRole::Engine)
         .into_iter()
         .chain(iface.uniform_group(UniformRole::Stage(stage)))
         .flat_map(|g| g.members.iter().map(|(n, k)| (*n, wire_glsl(*k))))
-        .collect()
-}
-
-pub(crate) fn interface_varyings(iface: &ShaderInterfacePlan) -> Vec<(Ustr, GlslTy, bool)> {
-    iface
-        .varyings
-        .iter()
-        .map(|v| (v.name, wire_glsl(v.kind), v.flat))
-        .collect()
-}
-
-pub(crate) fn interface_mrt_outputs(iface: &ShaderInterfacePlan) -> Option<Vec<(Ustr, GlslTy)>> {
-    match &iface.fragment_output {
-        FragmentOutput::Mrt(outs) => Some(outs.iter().map(|(n, k)| (*n, wire_glsl(*k))).collect()),
-        FragmentOutput::Single(_) | FragmentOutput::None => None,
-    }
 }
 
 /// A neutral wire kind spelled as a GLSL type. The inverse of `wire_kind_of`,
@@ -128,96 +112,53 @@ pub(crate) fn wire_glsl(k: WireKind) -> GlslTy {
     }
 }
 
-/// ABI declarations used by one stage.
-pub(crate) struct StageAbi<'a> {
-    pub(crate) uniform_block: Option<&'a GlslUniformBlock>,
-    pub(crate) engine_block: Option<&'a GlslUniformBlock>,
-    pub(crate) array_block: Option<&'a UniformArrayBlockPlan>,
-    pub(crate) samplers: Vec<(Ustr, SamplerKind)>,
-}
-
-impl StageAbi<'_> {
-    pub(crate) fn declarations(&self) -> String {
-        let mut out = String::new();
-        for block in self.engine_block.iter().chain(&self.uniform_block) {
-            out.push_str(&uniform_block_decl(block));
-        }
-        if let Some(plan) = self.array_block {
-            out.push_str(&uniform_array_block_decl(plan));
-        }
-        for (n, k) in &self.samplers {
-            out.push_str(&format!(
-                "uniform {} {n};\n",
-                sampler_glsl_ty(*k).uniform_decl()
-            ));
-        }
-        out
-    }
-}
-
-/// Project grouped samplers in ABI order, then append bare samplers.
-fn stage_samplers_in_unit_order(
+pub(crate) fn emit_stage_resources(
+    out: &mut String,
     iface: &ShaderInterfacePlan,
     abi: &ShaderAbiPlan,
     stage: IrStage,
-) -> Vec<(Ustr, SamplerKind)> {
-    let group: Vec<Ustr> = iface.sampler_names();
-    let mine = iface.stage_samplers(stage);
-    let mut out: Vec<(Ustr, SamplerKind)> = Vec::new();
-    for u in &abi.texture_units {
-        if let Some(s) = mine.iter().find(|(n, _)| n == u) {
-            out.push(*s);
+) {
+    let blocks = [
+        block_at(&abi.uniform_blocks, UNIFORM_BLOCK_BINDING_ENGINE),
+        block_at(
+            &abi.uniform_blocks,
+            ShaderAbiPlan::binding_of(UniformRole::Stage(stage)),
+        ),
+    ];
+    let arrays = block_at(
+        &abi.uniform_array_blocks,
+        ShaderAbiPlan::array_binding_of(stage),
+    );
+    for block in blocks.into_iter().flatten() {
+        out.push_str(&format!("layout(std140) uniform {} {{\n", block.name));
+        for m in &block.plan.members {
+            out.push_str(&format!("    {} {};\n", wire_glsl(m.kind).name(), m.name));
         }
+        out.push_str("};\n");
     }
-    out.extend(mine.iter().filter(|(n, _)| !group.contains(n)).copied());
-    out
+    if let Some(plan) = arrays {
+        out.push_str(&format!("layout(std140) uniform {} {{\n", plan.block_name));
+        for m in &plan.members {
+            out.push_str(&format!(
+                "    {} {}[{}];\n",
+                wire_glsl(m.elem).name(),
+                m.name,
+                m.capacity
+            ));
+        }
+        out.push_str("};\n");
+    }
+    for (name, kind) in iface.stage_samplers(stage) {
+        let ty = sampler_glsl_ty(kind).uniform_decl();
+        out.push_str(&format!("uniform {ty} {name};\n"));
+    }
+    if stage == IrStage::Fragment || arrays.is_some() || blocks.into_iter().any(|b| b.is_some()) {
+        out.push('\n');
+    }
 }
 
 fn block_at<T>(blocks: &[(u32, T)], binding: u32) -> Option<&T> {
     blocks.iter().find(|(b, _)| *b == binding).map(|(_, p)| p)
-}
-
-pub(crate) fn stage_abi<'a>(
-    iface: &ShaderInterfacePlan,
-    abi: &'a ShaderAbiPlan,
-    stage: IrStage,
-) -> StageAbi<'a> {
-    StageAbi {
-        uniform_block: block_at(
-            &abi.uniform_blocks,
-            ShaderAbiPlan::binding_of(UniformRole::Stage(stage)),
-        ),
-        engine_block: block_at(&abi.uniform_blocks, UNIFORM_BLOCK_BINDING_ENGINE),
-        array_block: block_at(
-            &abi.uniform_array_blocks,
-            ShaderAbiPlan::array_binding_of(stage),
-        ),
-        samplers: stage_samplers_in_unit_order(iface, abi, stage),
-    }
-}
-
-pub(crate) fn bare_sampler_list(
-    samplers: &[(usize, Ustr, SamplerKind)],
-    grouped_params: &[usize],
-    stage: IrStage,
-) -> Vec<LogicalSampler> {
-    samplers
-        .iter()
-        .filter(|(i, _, _)| !grouped_params.contains(i))
-        .map(|(_, n, k)| LogicalSampler {
-            name: *n,
-            kind: *k,
-            stage,
-        })
-        .collect()
-}
-
-fn logical_members(
-    ws: &Workspace,
-    struct_name: Ustr,
-    span: Span,
-) -> Result<Vec<(Ustr, WireKind)>, CompilerError> {
-    skull_mir::gpu_layout::uniform_group_members(ws, struct_name).map_err(|e| err(span, e.message))
 }
 
 pub(crate) fn logical_uniform_group(
@@ -229,31 +170,49 @@ pub(crate) fn logical_uniform_group(
     Ok(LogicalUniformGroup {
         role,
         struct_name: NominalType::of(ws, struct_name),
-        members: logical_members(ws, struct_name, span)?,
+        members: skull_mir::gpu_layout::uniform_group_members(ws, struct_name)
+            .map_err(|e| err(span, e.message))?,
     })
 }
 
 pub(crate) fn logical_textures(
     ws: &Workspace,
-    group: Option<Ustr>,
+    vertex: Option<&TextureSlots>,
+    fragment: Option<&TextureSlots>,
     has_bare_sampler: bool,
-    stages: Vec<IrStage>,
     span: Span,
 ) -> Result<Option<LogicalTextureGroup>, CompilerError> {
-    let Some(g) = group else { return Ok(None) };
+    if let (Some(v), Some(f)) = (vertex, fragment)
+        && v.struct_name != f.struct_name
+    {
+        return Err(err(
+            span,
+            format!(
+                "shader pipeline: the stages declare different @textures groups (`{}` and `{}`) -- texture units are program-scoped, so one program has one group",
+                v.struct_name, f.struct_name
+            ),
+        ));
+    }
+    let Some(group) = vertex.or(fragment) else {
+        return Ok(None);
+    };
+    let name = group.struct_name;
     if has_bare_sampler {
         return Err(err(
             span,
             format!(
-                "shader: `{g}` is a @textures group, so every sampler must join it -- a bare Sampler2D param keeps a CPU-assigned unit, which can collide with a compiler-assigned slot"
+                "shader: `{name}` is a @textures group, so every sampler must join it -- a bare Sampler2D param keeps a CPU-assigned unit, which can collide with a compiler-assigned slot"
             ),
         ));
     }
-    let ts = texture_slots(ws, g).map_err(|e| err(span, e.message))?;
     Ok(Some(LogicalTextureGroup {
-        struct_name: Some(NominalType::of(ws, g)),
-        samplers: ts.slots.iter().map(|s| (s.name, s.kind)).collect(),
-        stages,
+        struct_name: Some(NominalType::of(ws, name)),
+        samplers: group.slots.iter().map(|s| (s.name, s.kind)).collect(),
+        stages: vertex
+            .map(|_| IrStage::Vertex)
+            .into_iter()
+            .chain(fragment.map(|_| IrStage::Fragment))
+            .collect(),
     }))
 }
 

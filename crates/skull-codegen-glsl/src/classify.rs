@@ -4,16 +4,15 @@ use super::*;
 
 #[derive(Default)]
 pub(crate) struct StageResources {
-    pub(crate) uniform_params: Vec<usize>,
+    uniform_params: Vec<usize>,
     /// The `@uniform` group's struct name, if the stage declares one. Each
     /// stage gets its own std140 block at its own binding index -- the stages
     /// declare DIFFERENT types and cannot be made to share one.
     pub(crate) uniform_group: Option<Ustr>,
-    pub(crate) engine_params: Vec<usize>,
+    engine_params: Vec<usize>,
     pub(crate) engine_group: Option<Ustr>,
-    pub(crate) texture_params: Vec<usize>,
-    pub(crate) texture_group: Option<Ustr>,
-    pub(crate) samplers: Vec<(usize, Ustr, SamplerKind)>,
+    textures: Option<(usize, TextureSlots)>,
+    bare_samplers: Vec<(usize, Ustr, SamplerKind)>,
     pub(crate) arrays: Vec<ArrayParam>,
 }
 
@@ -36,29 +35,55 @@ impl StageResources {
             return Ok(None);
         }
         if has_anno(&pd.annotations, "textures") {
-            reject_conflicting_texture_role(&pd.annotations, pd.name, span, stage)?;
-            if self.texture_group.is_some() {
-                return Err(err(
-                    span,
-                    format!(
-                        "shader {stage}: at most one @textures group param is allowed -- one group is the binding set"
-                    ),
-                ));
-            }
-            self.texture_group = nominal_name(ws, pd.ty);
-            self.samplers
-                .extend(texture_group_samplers(ws, pd.ty, i, span, stage)?);
-            self.texture_params.push(i);
+            self.add_textures(ws, pd, i, span, stage)?;
             return Ok(None);
         }
         match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
             Ok(t) if t.is_sampler() => {
-                self.samplers.push((i, pd.name, sampler_kind_of(t)));
+                self.bare_samplers.push((i, pd.name, sampler_kind_of(t)));
                 Ok(None)
             }
             Ok(other) => Ok(Some(OtherParam::Value(other))),
             Err(_) => Ok(Some(OtherParam::Struct)),
         }
+    }
+
+    fn add_textures(
+        &mut self,
+        ws: &Workspace,
+        pd: &bone_core::hir::ParamDecl,
+        index: usize,
+        span: Span,
+        stage: &str,
+    ) -> Result<(), CompilerError> {
+        reject_conflicting_texture_role(&pd.annotations, pd.name, span, stage)?;
+        if self.textures.is_some() {
+            return Err(err(
+                span,
+                if stage == "entry" {
+                    "shader entry: at most one @textures group param is allowed".to_owned()
+                } else {
+                    format!(
+                        "shader {stage}: at most one @textures group param is allowed -- one group is the binding set"
+                    )
+                },
+            ));
+        }
+        let name = nominal_name(ws, pd.ty).ok_or_else(|| {
+            err(
+                span,
+                if stage == "entry" {
+                    "shader entry: an @textures param must be a value struct".to_owned()
+                } else {
+                    format!("shader {stage}: an @textures param must be a struct")
+                },
+            )
+        })?;
+        self.textures = Some((
+            index,
+            texture_slots(ws, name).map_err(|e| err(span, e.message))?,
+        ));
+        Ok(())
     }
 
     // A group's fields are validated where they become the interface's
@@ -95,16 +120,28 @@ impl StageResources {
         self.engine_params
             .iter()
             .chain(&self.uniform_params)
-            .chain(&self.texture_params)
             .copied()
+            .chain(self.textures.iter().map(|(index, _)| *index))
     }
 
-    pub(crate) fn has_bare_sampler(&self) -> bool {
-        has_bare_sampler(&self.samplers, &self.texture_params)
+    pub(crate) fn sampler_params(&self) -> impl Iterator<Item = usize> + '_ {
+        self.bare_samplers
+            .iter()
+            .map(|(index, _, _)| *index)
+            .chain(self.textures.iter().map(|(index, _)| *index))
     }
 
-    pub(crate) fn bare_samplers(&self, stage: IrStage) -> Vec<LogicalSampler> {
-        bare_sampler_list(&self.samplers, &self.texture_params, stage)
+    pub(crate) fn textures(&self) -> Option<&TextureSlots> {
+        self.textures.as_ref().map(|(_, slots)| slots)
+    }
+
+    pub(crate) fn bare_samplers(
+        &self,
+        stage: IrStage,
+    ) -> impl Iterator<Item = LogicalSampler> + '_ {
+        self.bare_samplers
+            .iter()
+            .map(move |&(_, name, kind)| LogicalSampler { name, kind, stage })
     }
 }
 
@@ -113,10 +150,6 @@ pub(crate) struct VertexShape {
     pub(crate) inputs: Vec<LogicalVertexInput>,
     pub(crate) res: StageResources,
     pub(crate) varyings_ty: TyId,
-}
-
-pub(crate) struct VaryingsShape {
-    pub(crate) varyings: Vec<LogicalVarying>,
 }
 
 pub(crate) const VARYINGS_PARAM: usize = 0;
@@ -222,33 +255,10 @@ fn classify_array_param(
     }))
 }
 
-pub(crate) fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
-    let mut s = format!("layout(std140) uniform {} {{\n", plan.block_name);
-    for m in &plan.members {
-        s.push_str(&format!(
-            "    {} {}[{}];\n",
-            wire_glsl(m.elem).name(),
-            m.name,
-            m.capacity
-        ));
-    }
-    s.push_str("};\n");
-    s
-}
-
 fn struct_def_of(ws: &Workspace, ty: TyId) -> Option<&StructDef> {
     let sname = nominal_name(ws, ty)?;
     let &sid = ws.struct_by_name.get(&sname)?;
     Some(&ws.modules[sid.module.index()].structs[sid.def])
-}
-
-pub(crate) fn uniform_block_decl(block: &GlslUniformBlock) -> String {
-    let mut s = format!("layout(std140) uniform {} {{\n", block.name);
-    for m in &block.plan.members {
-        s.push_str(&format!("    {} {};\n", wire_glsl(m.kind).name(), m.name));
-    }
-    s.push_str("};\n");
-    s
 }
 
 fn struct_gl_fields(
@@ -291,13 +301,6 @@ fn struct_gl_fields(
     Ok(out)
 }
 
-pub(crate) fn has_bare_sampler(
-    samplers: &[(usize, Ustr, SamplerKind)],
-    texture_params: &[usize],
-) -> bool {
-    samplers.iter().any(|(i, _, _)| !texture_params.contains(i))
-}
-
 fn sampler_kind_of(t: GlslTy) -> SamplerKind {
     match t {
         GlslTy::ISampler2D => SamplerKind::Int,
@@ -310,31 +313,6 @@ pub(crate) fn sampler_glsl_ty(k: SamplerKind) -> GlslTy {
         SamplerKind::Float => GlslTy::Sampler2D,
         SamplerKind::Int => GlslTy::ISampler2D,
     }
-}
-
-fn texture_group_samplers(
-    ws: &Workspace,
-    ty: TyId,
-    param_index: usize,
-    span: Span,
-    stage: &str,
-) -> Result<Vec<(usize, Ustr, SamplerKind)>, CompilerError> {
-    let sname = nominal_name(ws, ty).ok_or_else(|| {
-        err(
-            span,
-            if stage == "entry" {
-                "shader entry: an @textures param must be a value struct".to_owned()
-            } else {
-                format!("shader {stage}: an @textures param must be a struct")
-            },
-        )
-    })?;
-    let ts = texture_slots(ws, sname).map_err(|e| err(span, e.message))?;
-    Ok(ts
-        .slots
-        .iter()
-        .map(|s| (param_index, s.name, s.kind))
-        .collect())
 }
 
 const PARAM_ROLES: [&str; 4] = ["attr", "instance", "uniform", "engine"];
@@ -417,13 +395,13 @@ pub(crate) fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShap
         }
     }
     res.check_counts(span, "vertex")?;
-    let mut attr_params = Vec::new();
-    let mut inputs: Vec<LogicalVertexInput> = Vec::new();
     // @attr params first, then @instance -- the ORDER locations are assigned
     // in, which is all the classification owns; the numbers are the ABI's.
     let instanced_from = per_vertex.len();
-    for (n, &i) in per_vertex.iter().chain(instanced.iter()).enumerate() {
-        attr_params.push(i);
+    let mut attr_params = per_vertex;
+    attr_params.extend(instanced);
+    let mut inputs = Vec::new();
+    for (n, &i) in attr_params.iter().enumerate() {
         let gl_fields = struct_gl_fields(ws, f.param_decls[i].ty, span, "attribute")?;
         // GLSL forbids `in bool`.
         if let Some((n, _)) = gl_fields.iter().find(|&&(_, t)| t == GlslTy::Bool) {
@@ -469,7 +447,7 @@ pub(crate) fn classify_varyings(
     ws: &Workspace,
     ty: TyId,
     span: Span,
-) -> Result<VaryingsShape, CompilerError> {
+) -> Result<Vec<LogicalVarying>, CompilerError> {
     let sd = struct_def_of(ws, ty)
         .ok_or_else(|| err(span, "shader: the varyings type must be a value struct"))?;
     let mut has_position = false;
@@ -534,7 +512,7 @@ pub(crate) fn classify_varyings(
             "shader: the varyings struct must have a `position: Vec4` field (it becomes gl_Position)",
         ));
     }
-    Ok(VaryingsShape { varyings })
+    Ok(varyings)
 }
 
 pub(crate) fn classify_pipeline_fragment(
@@ -686,41 +664,23 @@ pub(crate) fn reject_position_read(
     Ok(())
 }
 
-pub(crate) struct EntryClass {
-    pub global_params: Vec<usize>,
-    pub sampler_params: Vec<usize>,
-    pub samplers: Vec<(usize, Ustr, SamplerKind)>,
-    pub texture_group: Option<Ustr>,
-    pub uniform_group: Option<Ustr>,
-}
-
 pub(crate) fn classify_entry(
     ws: &Workspace,
     function: &Function,
-) -> Result<EntryClass, CompilerError> {
+) -> Result<StageResources, CompilerError> {
     let span = function.name_span;
-    let mut uniform_param = None;
-    let mut samplers = Vec::new();
+    let mut res = StageResources::default();
     let mut tex_coord = None;
-    let mut texture_params = Vec::new();
-    let mut texture_group = None;
-    let mut uniform_group = None;
     for (index, param) in function.param_decls.iter().enumerate() {
         if has_anno(&param.annotations, "textures") {
-            reject_conflicting_texture_role(&param.annotations, param.name, span, "entry")?;
-            if texture_group.is_some() {
-                return Err(err(
-                    span,
-                    "shader entry: at most one @textures group param is allowed",
-                ));
-            }
-            texture_group = nominal_name(ws, param.ty);
-            samplers.extend(texture_group_samplers(ws, param.ty, index, span, "entry")?);
-            texture_params.push(index);
+            res.add_textures(ws, param, index, span, "entry")?;
             continue;
         }
         match fullscreen_ty(ws, param.ty, span, "parameter") {
-            Ok(ty) if ty.is_sampler() => samplers.push((index, param.name, sampler_kind_of(ty))),
+            Ok(ty) if ty.is_sampler() => {
+                res.bare_samplers
+                    .push((index, param.name, sampler_kind_of(ty)))
+            }
             Ok(GlslTy::Vec2) => {
                 if tex_coord.replace(index).is_some() {
                     return Err(err(
@@ -758,14 +718,14 @@ pub(crate) fn classify_entry(
                         ),
                     ));
                 }
-                if uniform_param.is_some() {
+                if res.uniform_group.is_some() {
                     return Err(err(
                         span,
                         "shader entry: at most one uniform struct param is allowed",
                     ));
                 }
-                uniform_param = Some(index);
-                uniform_group = Some(group);
+                res.uniform_params.push(index);
+                res.uniform_group = Some(group);
             }
         }
     }
@@ -780,13 +740,7 @@ pub(crate) fn classify_entry(
     ) {
         return Err(err(span, "shader entry: the return type must be Vec4"));
     }
-    Ok(EntryClass {
-        global_params: uniform_param.into_iter().chain(texture_params).collect(),
-        sampler_params: samplers.iter().map(|(index, _, _)| *index).collect(),
-        samplers,
-        texture_group,
-        uniform_group,
-    })
+    Ok(res)
 }
 
 fn fullscreen_ty(
@@ -822,18 +776,7 @@ pub(crate) fn check_entry_collisions(
     let mut seen: HashSet<Ustr> = [Ustr::from("TexCoord"), Ustr::from("FragColor")]
         .into_iter()
         .collect();
-    let names = interface
-        .uniform_groups
-        .iter()
-        .flat_map(|group| group.members.iter().map(|(name, _)| *name))
-        .chain(
-            interface
-                .textures
-                .iter()
-                .flat_map(|group| group.samplers.iter().map(|(name, _)| *name)),
-        )
-        .chain(interface.bare_samplers.iter().map(|sampler| sampler.name));
-    for name in names {
+    for name in interface_global_names(interface) {
         if !seen.insert(name) {
             return Err(err(
                 span,

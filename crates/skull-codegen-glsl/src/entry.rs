@@ -32,21 +32,6 @@ pub(crate) fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
     }
 }
 
-fn entry_shape(
-    global_params: &[usize],
-    sampler_params: &[usize],
-    iface: &ShaderInterfacePlan,
-) -> EntryShape {
-    EntryShape {
-        global_params: global_params.to_vec(),
-        uniform_fields: stage_uniform_fields(iface, IrStage::Fragment),
-        sampler_params: sampler_params.to_vec(),
-        arrays: Vec::new(),
-        main_out: None,
-        reserved: entry_reserved_names(iface),
-    }
-}
-
 pub struct ShaderEmission {
     pub source: String,
     pub dependencies: Vec<FuncRef>,
@@ -66,12 +51,16 @@ pub(crate) struct StagePlan {
 }
 
 impl StagePlan {
-    pub(crate) fn render_helpers(
+    pub(crate) fn render(
         &self,
+        out: &mut String,
         ws: &Workspace,
         interner: &MonoInterner,
-    ) -> Result<String, CompilerError> {
-        let mut out = helper_prelude(self.ir.bodies.values().chain([&self.ir.body]));
+        shape: &EntryShape,
+    ) -> Result<(), CompilerError> {
+        out.push_str(&helper_prelude(
+            self.ir.bodies.values().chain([&self.ir.body]),
+        ));
         for href in &self.ir.order {
             let body_plan = self.concrete_plans.get(&href.inst).ok_or_else(|| {
                 let f = &ws.module(href.fref().module).functions[href.fref().func];
@@ -87,21 +76,20 @@ impl StagePlan {
             )?);
             out.push('\n');
         }
-        Ok(out)
-    }
-
-    pub(crate) fn render_entry(
-        &self,
-        ws: &Workspace,
-        interner: &MonoInterner,
-        shape: &EntryShape,
-    ) -> Result<String, CompilerError> {
         let entry = &self.ir.entry;
         let plan = self.concrete_plans.get(&entry.inst).ok_or_else(|| {
             let f = &ws.module(entry.fref().module).functions[entry.fref().func];
             err(f.name_span, "shader profile: entry has no concrete plan")
         })?;
-        emit_fn_def_with(ws, interner, entry, &self.ir.body, Some(shape), plan)
+        out.push_str(&emit_fn_def_with(
+            ws,
+            interner,
+            entry,
+            &self.ir.body,
+            Some(shape),
+            plan,
+        )?);
+        Ok(())
     }
 }
 
@@ -246,7 +234,6 @@ pub(crate) fn reject_population_cycles(
 }
 
 pub(crate) struct EntryPlan {
-    fref: FuncRef,
     shape: EntryShape,
     stage: StagePlan,
     /// What the program's interface MEANS -- roles, names, order, neutral
@@ -299,11 +286,12 @@ pub(crate) fn plan_shader_entry_program(
             ));
         }
     }
-    let class = classify_entry(ws, f)?;
+    let res = classify_entry(ws, f)?;
     let stage = plan_stage_from_view(ws, scx, stage_view, IrStage::Fragment, &view.concrete_plans)?;
+    let bare_samplers: Vec<_> = res.bare_samplers(IrStage::Fragment).collect();
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Fragment],
-        uniform_groups: class
+        uniform_groups: res
             .uniform_group
             .map(|g| {
                 logical_uniform_group(ws, UniformRole::Stage(IrStage::Fragment), g, f.name_span)
@@ -313,21 +301,27 @@ pub(crate) fn plan_shader_entry_program(
             .collect(),
         textures: logical_textures(
             ws,
-            class.texture_group,
-            has_bare_sampler(&class.samplers, &class.global_params),
-            vec![IrStage::Fragment],
+            None,
+            res.textures(),
+            !bare_samplers.is_empty(),
             f.name_span,
         )?,
-        bare_samplers: bare_sampler_list(&class.samplers, &class.global_params, IrStage::Fragment),
+        bare_samplers,
         fragment_output: FragmentOutput::Single(WireKind::F32x4),
         ..Default::default()
     };
     check_entry_collisions(&interface, f.name_span)?;
     check_stage_sampler_budget(&interface, IrStage::Fragment, &f.name, f.name_span)?;
     let abi = ShaderAbiPlan::glsl(&interface, f.name_span)?;
-    let shape = entry_shape(&class.global_params, &class.sampler_params, &interface);
+    let shape = EntryShape {
+        global_params: res.global_params().collect(),
+        uniform_fields: stage_uniform_fields(&interface, IrStage::Fragment).collect(),
+        sampler_params: res.sampler_params().collect(),
+        arrays: Vec::new(),
+        main_out: None,
+        reserved: entry_reserved_names(&interface),
+    };
     Ok(EntryPlan {
-        fref,
         shape,
         stage,
         interface,
@@ -341,17 +335,11 @@ pub(crate) fn render_shader_entry(
     plan: &EntryPlan,
     profile: GlslProfile,
 ) -> Result<ShaderEmission, CompilerError> {
-    let f = &ws.module(plan.fref.module).functions[plan.fref.func];
-    let shape = &plan.shape;
-
-    let resolved = stage_abi(&plan.interface, &plan.abi, IrStage::Fragment);
-
-    let mut px = String::new();
-    px.push_str("in vec2 TexCoord;\nout vec4 FragColor;\n\n");
-    px.push_str(&resolved.declarations());
-    px.push('\n');
-    px.push_str(&plan.stage.render_helpers(ws, interner)?);
-    px.push_str(&plan.stage.render_entry(ws, interner, shape)?);
+    let fref = plan.stage.ir.entry.fref();
+    let f = &ws.module(fref.module).functions[fref.func];
+    let mut px = "in vec2 TexCoord;\nout vec4 FragColor;\n\n".to_owned();
+    emit_stage_resources(&mut px, &plan.interface, &plan.abi, IrStage::Fragment);
+    plan.stage.render(&mut px, ws, interner, &plan.shape)?;
     px.push('\n');
     px.push_str(&format!(
         "void main() {{\n  FragColor = {}(TexCoord);\n}}\n",

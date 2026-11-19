@@ -2,13 +2,15 @@
 
 use super::*;
 
-fn varying_decls(iface: &ShaderInterfacePlan, dir: &str) -> String {
-    let mut out = String::new();
-    for (n, t, flat) in interface_varyings(iface) {
-        let q = if flat { "flat " } else { "" };
-        out.push_str(&format!("{q}{dir} {} {n};\n", t.name()));
+fn emit_varyings(out: &mut String, iface: &ShaderInterfacePlan, dir: &str) {
+    for v in &iface.varyings {
+        let flat = if v.flat { "flat " } else { "" };
+        out.push_str(&format!(
+            "{flat}{dir} {} {};\n",
+            wire_glsl(v.kind).name(),
+            v.name
+        ));
     }
-    out
 }
 
 fn emit_vertex_stage(
@@ -19,7 +21,6 @@ fn emit_vertex_stage(
     iface: &ShaderInterfacePlan,
     abi: &ShaderAbiPlan,
 ) -> Result<String, CompilerError> {
-    let resolved = stage_abi(iface, abi, IrStage::Vertex);
     let shape = EntryShape {
         global_params: v
             .attr_params
@@ -33,7 +34,7 @@ fn emit_vertex_stage(
             .flat_map(|i| i.attrs.iter().map(|(n, k)| (*n, attr_glsl_ty(*k))))
             .chain(stage_uniform_fields(iface, IrStage::Vertex))
             .collect(),
-        sampler_params: v.res.samplers.iter().map(|&(i, _, _)| i).collect(),
+        sampler_params: v.res.sampler_params().collect(),
         arrays: v.res.arrays.iter().map(|a| a.param).collect(),
         main_out: Some(MainOut {
             fields: iface
@@ -59,17 +60,10 @@ fn emit_vertex_stage(
         ));
     }
     out.push('\n');
-    out.push_str(&resolved.declarations());
-    if resolved.uniform_block.is_some()
-        || resolved.engine_block.is_some()
-        || resolved.array_block.is_some()
-    {
-        out.push('\n');
-    }
-    out.push_str(&varying_decls(iface, "out"));
+    emit_stage_resources(&mut out, iface, abi, IrStage::Vertex);
+    emit_varyings(&mut out, iface, "out");
     out.push('\n');
-    out.push_str(&stage.render_helpers(ws, interner)?);
-    out.push_str(&stage.render_entry(ws, interner, &shape)?);
+    stage.render(&mut out, ws, interner, &shape)?;
     Ok(out)
 }
 
@@ -81,19 +75,36 @@ fn emit_fragment_stage(
     iface: &ShaderInterfacePlan,
     abi: &ShaderAbiPlan,
 ) -> Result<String, CompilerError> {
-    let fref = stage.ir.entry.fref();
-    let entry_f = &ws.module(fref.module).functions[fref.func];
-    let resolved = stage_abi(iface, abi, IrStage::Fragment);
+    let mut out = String::new();
+    emit_varyings(&mut out, iface, "in");
     // MRT: the entry is emitted as `void main()` destructuring its returned
     // output struct into the `layout(location=N) out` globals (like the vertex
     // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
-    let mrt_outputs = interface_mrt_outputs(iface);
-    let main_out = mrt_outputs.as_ref().map(|outs| MainOut {
-        fields: outs.iter().copied().collect(),
-        builtin: iface
-            .frag_depth
-            .then_some((FRAG_DEPTH_FIELD, "gl_FragDepth", GlslTy::Float)),
-    });
+    let main_out = match &iface.fragment_output {
+        FragmentOutput::Single(kind) => {
+            out.push_str(&format!("out {} FragColor;\n\n", wire_glsl(*kind).name()));
+            None
+        }
+        FragmentOutput::Mrt(outs) => {
+            for (loc, (name, kind)) in outs.iter().enumerate() {
+                let ty = wire_glsl(*kind).name();
+                out.push_str(&format!("layout(location = {loc}) out {ty} {name};\n"));
+            }
+            out.push('\n');
+            Some(MainOut {
+                fields: outs
+                    .iter()
+                    .map(|&(name, kind)| (name, wire_glsl(kind)))
+                    .collect(),
+                builtin: iface.frag_depth.then_some((
+                    FRAG_DEPTH_FIELD,
+                    "gl_FragDepth",
+                    GlslTy::Float,
+                )),
+            })
+        }
+        FragmentOutput::None => unreachable!("a planned fragment stage has an output"),
+    };
     let shape = EntryShape {
         global_params: std::iter::once(VARYINGS_PARAM)
             .chain(fs.res.global_params())
@@ -104,32 +115,17 @@ fn emit_fragment_stage(
             .map(|v| (v.name, wire_glsl(v.kind)))
             .chain(stage_uniform_fields(iface, IrStage::Fragment))
             .collect(),
-        sampler_params: fs.res.samplers.iter().map(|&(i, _, _)| i).collect(),
+        sampler_params: fs.res.sampler_params().collect(),
         arrays: fs.res.arrays.iter().map(|a| a.param).collect(),
         main_out,
         reserved: entry_reserved_names(iface),
     };
 
-    let mut out = varying_decls(iface, "in");
-    match &mrt_outputs {
-        None => {
-            let FragmentOutput::Single(k) = iface.fragment_output else {
-                unreachable!("a planned fragment stage has an output")
-            };
-            out.push_str(&format!("out {} FragColor;\n\n", wire_glsl(k).name()))
-        }
-        Some(outs) => {
-            for (loc, (n, t)) in outs.iter().enumerate() {
-                out.push_str(&format!("layout(location = {loc}) out {} {n};\n", t.name()));
-            }
-            out.push('\n');
-        }
-    }
-    out.push_str(&resolved.declarations());
-    out.push('\n');
-    out.push_str(&stage.render_helpers(ws, interner)?);
-    out.push_str(&stage.render_entry(ws, interner, &shape)?);
-    if mrt_outputs.is_none() {
+    emit_stage_resources(&mut out, iface, abi, IrStage::Fragment);
+    stage.render(&mut out, ws, interner, &shape)?;
+    if shape.main_out.is_none() {
+        let fref = stage.ir.entry.fref();
+        let entry_f = &ws.module(fref.module).functions[fref.func];
         out.push_str(&format!(
             "\nvoid main() {{\n  FragColor = {}();\n}}\n",
             symbol_of_key(entry_f.name)
@@ -138,7 +134,13 @@ fn emit_fragment_stage(
     Ok(out)
 }
 
-fn interface_global_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
+pub(crate) fn interface_global_names(
+    iface: &ShaderInterfacePlan,
+) -> impl Iterator<Item = Ustr> + '_ {
+    let outputs = match &iface.fragment_output {
+        FragmentOutput::Mrt(outs) => outs.as_slice(),
+        _ => &[],
+    };
     iface
         .vertex_inputs
         .iter()
@@ -163,16 +165,11 @@ fn interface_global_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
                 .flat_map(|t| t.samplers.iter().map(|(n, _)| *n)),
         )
         .chain(iface.bare_samplers.iter().map(|s| s.name))
-        .chain(match &iface.fragment_output {
-            FragmentOutput::Mrt(outs) => outs.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
-            _ => Vec::new(),
-        })
-        .collect()
+        .chain(outputs.iter().map(|(name, _)| *name))
 }
 
 pub(crate) fn entry_reserved_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
     interface_global_names(iface)
-        .into_iter()
         .chain([
             Ustr::from("TexCoord"),
             Ustr::from("FragColor"),
@@ -315,49 +312,28 @@ pub(crate) fn plan_shader_pipeline_from_view(
     let vert_array_group = logical_array_group(IrStage::Vertex, vf.name, &vshape.res.arrays);
     let frag_array_group = logical_array_group(IrStage::Fragment, ff.name, &fshape.res.arrays);
 
-    let group = match (vshape.res.texture_group, fshape.res.texture_group) {
-        (Some(v), Some(f)) if v != f => {
-            return Err(err(
-                vf.name_span,
-                format!(
-                    "shader pipeline: the stages declare different @textures groups (`{v}` and `{f}`) -- texture units are program-scoped, so one program has one group"
-                ),
-            ));
-        }
-        (v, f) => v.or(f),
-    };
-    let bare = vshape.res.has_bare_sampler() || fshape.res.has_bare_sampler();
-    let group_stages: Vec<IrStage> = [
-        vshape
-            .res
-            .texture_group
-            .is_some()
-            .then_some(IrStage::Vertex),
-        fshape
-            .res
-            .texture_group
-            .is_some()
-            .then_some(IrStage::Fragment),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    let textures = logical_textures(ws, group, bare, group_stages, vf.name_span)?;
+    let bare_samplers: Vec<_> = vshape
+        .res
+        .bare_samplers(IrStage::Vertex)
+        .chain(fshape.res.bare_samplers(IrStage::Fragment))
+        .collect();
+    let textures = logical_textures(
+        ws,
+        vshape.res.textures(),
+        fshape.res.textures(),
+        !bare_samplers.is_empty(),
+        vf.name_span,
+    )?;
 
     // THE program's logical interface. Everything downstream -- the name
     // census, the ABI plan and every emitted declaration -- reads this.
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Vertex, IrStage::Fragment],
         vertex_inputs: vshape.inputs.clone(),
-        varyings: varyings.varyings.clone(),
+        varyings,
         fragment_output: fshape.output.clone(),
         frag_depth: fshape.frag_depth,
-        bare_samplers: vshape
-            .res
-            .bare_samplers(IrStage::Vertex)
-            .into_iter()
-            .chain(fshape.res.bare_samplers(IrStage::Fragment))
-            .collect(),
+        bare_samplers,
         uniform_groups: engine_logical
             .into_iter()
             .chain(vert_group)

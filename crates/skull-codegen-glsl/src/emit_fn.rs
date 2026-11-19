@@ -3,12 +3,6 @@
 use super::*;
 
 impl FnEmit<'_> {
-    pub(crate) fn callee_inst(&self, iid: Idx<Inst>) -> &ShaderInstance {
-        self.callee_insts
-            .get(&iid)
-            .expect("every Call in this body was resolved by `callee_inst_at` before emission")
-    }
-
     pub(crate) fn concrete_call_signature(
         &self,
         iid: Idx<Inst>,
@@ -36,10 +30,11 @@ impl FnEmit<'_> {
         iid: Idx<Inst>,
     ) -> Result<Vec<Option<GlslTy>>, CompilerError> {
         let sig = self.concrete_call_signature(iid)?;
-        sig.params
+        Ok(sig
+            .params
             .iter()
-            .map(|&id| Ok(mono_glsl_ty(&self.interner.get(id))))
-            .collect()
+            .map(|&id| mono_glsl_ty(&self.interner.get(id)))
+            .collect())
     }
 }
 
@@ -92,13 +87,6 @@ pub(crate) fn emit_fn_def_with(
     };
     let ret = ret_ty.map_or("void", |t| t.name());
 
-    let mut callee_insts: HashMap<Idx<Inst>, ShaderInstance> = HashMap::default();
-    for (iid, inst) in mf.insts.iter() {
-        if let Inst::Call { func, .. } = inst {
-            callee_insts.insert(iid, callee_inst_at(mf, iid, *func));
-        }
-    }
-
     let st = structure::analyze(mf);
     let (counted, general) = structure::split_loops(mf, &st, CountedBound::Any);
 
@@ -150,19 +138,8 @@ pub(crate) fn emit_fn_def_with(
         main_out: entry.and_then(|s| s.main_out.clone()),
         fn_span: f.name_span,
         concrete_plan,
-        callee_insts,
         value_name: HashMap::default(),
     };
-    let dropped: HashSet<usize> = entry
-        .map(|s| {
-            s.global_params
-                .iter()
-                .copied()
-                .chain(s.sampler_params.iter().copied())
-                .chain(s.arrays.iter().copied())
-                .collect()
-        })
-        .unwrap_or_default();
     for (i, &c) in mf.params.iter().enumerate() {
         if e.ignored_type_cells.contains(&c) {
             continue;
@@ -189,9 +166,8 @@ pub(crate) fn emit_fn_def_with(
     let params: Vec<String> = mf
         .params
         .iter()
-        .enumerate()
-        .filter(|(i, _)| !dropped.contains(i))
-        .map(|(_, &c)| {
+        .filter(|c| !e.global_cells.contains(c) && !e.global_ref_cells.contains(c))
+        .map(|&c| {
             let ty = e.cell_ty[&c].name();
             format!("{ty} {}", e.cell_name[&c])
         })
@@ -212,7 +188,7 @@ pub(crate) fn emit_fn_def_with(
     }
 
     e.emit_seq(mf.entry, None, LoopCtx::default())?;
-    let body = std::mem::take(&mut e.out);
+    let body = e.out;
 
     Ok(format!(
         "{ret} {name}({}) {{\n{decls}{body}}}\n",

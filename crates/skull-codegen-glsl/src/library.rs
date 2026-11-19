@@ -101,7 +101,6 @@ fn visit_shader_library(
     retained: &mut BTreeSet<Instance>,
     builtins: &mut BTreeSet<Instance>,
     active: &mut BTreeSet<Instance>,
-    done: &mut BTreeSet<Instance>,
     order: &mut Vec<Instance>,
 ) -> Result<(), CompilerError> {
     if active.contains(&instance) {
@@ -114,7 +113,7 @@ fn visit_shader_library(
             ),
         ));
     }
-    if !done.insert(instance.clone()) {
+    if !retained.insert(instance.clone()) {
         return Ok(());
     }
     if graph.concreteness(&instance) == skull_graph::instance_graph::Concreteness::Missing {
@@ -124,7 +123,6 @@ fn visit_shader_library(
         )));
     }
     active.insert(instance.clone());
-    retained.insert(instance.clone());
     if let Some(sites) = graph.sites_of(&instance) {
         for record in sites.values() {
             let callee = match &record.outcome {
@@ -151,7 +149,7 @@ fn visit_shader_library(
             {
                 continue;
             } else {
-                visit_shader_library(ws, graph, callee, retained, builtins, active, done, order)?;
+                visit_shader_library(ws, graph, callee, retained, builtins, active, order)?;
             }
         }
     }
@@ -176,7 +174,6 @@ pub(crate) fn realize_shader_library_view(
     let mut retained = BTreeSet::new();
     let mut builtins = BTreeSet::new();
     let mut active = BTreeSet::new();
-    let mut done = BTreeSet::new();
     let mut order = Vec::new();
     for root in &root_instances {
         visit_shader_library(
@@ -186,7 +183,6 @@ pub(crate) fn realize_shader_library_view(
             &mut retained,
             &mut builtins,
             &mut active,
-            &mut done,
             &mut order,
         )?;
     }

@@ -301,7 +301,6 @@ impl FnEmit<'_> {
         args: &[Idx<Inst>],
     ) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
-        let callee = self.callee_inst(iid);
         let param_types = self.call_param_types(iid)?;
         let name = declared_name(cf.name.as_str());
         if let Some(sym) = vec_op_symbol(name) {
@@ -392,7 +391,10 @@ impl FnEmit<'_> {
             }
             return Ok(s);
         }
-        let gname = callee.symbol(self.ws, self.interner);
+        let gname = match self.f.callee_instances.get(&iid) {
+            Some(callee) => callee.symbol(self.ws, self.interner),
+            None => Instance::base(func).symbol(self.ws, self.interner),
+        };
         let rargs: Result<Vec<String>, CompilerError> = args
             .iter()
             .enumerate()

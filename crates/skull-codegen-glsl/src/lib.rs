@@ -16,8 +16,8 @@ use skull_mir::cfg::reverse_postorder;
 use skull_mir::cfg::structure::{self, CountedBound, CountedLoop, LoopRegion, Structure};
 use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteSignature};
 use skull_mir::gpu_layout::{
-    ArrayMemberDecl, AttrKind, SamplerKind, UniformArrayBlockPlan, UniformBlockPlan, WireKind,
-    texture_slots, uniform_array_block, vertex_attrs,
+    ArrayMemberDecl, AttrKind, SamplerKind, TextureSlots, UniformArrayBlockPlan, UniformBlockPlan,
+    WireKind, texture_slots, uniform_array_block, vertex_attrs,
 };
 use skull_mir::instance::Instance;
 use skull_mir::lower::{ScalarCtx, SpecSubst};
@@ -340,5 +340,4 @@ struct FnEmit<'a> {
     /// no spans, so per-expression precision is not available).
     fn_span: Span,
     concrete_plan: &'a ConcreteBodyPlan,
-    callee_insts: HashMap<Idx<Inst>, ShaderInstance>,
 }
