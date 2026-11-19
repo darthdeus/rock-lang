@@ -13,7 +13,7 @@ use std::io::Write;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::JoinHandle;
 
-use crate::RowOrigin;
+use crate::{copy_reversed_rows, rgba_len, RowOrigin};
 
 struct Frame {
     rgba: Vec<u8>,
@@ -85,15 +85,12 @@ impl FrameStream {
             }
             _ => {}
         }
-        let len = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|px| px.checked_mul(4))
-            .ok_or_else(|| {
-                format!(
-                    "frame stream {}: frame size overflows ({width}x{height})",
-                    self.path
-                )
-            })?;
+        let len = rgba_len(width, height).ok_or_else(|| {
+            format!(
+                "frame stream {}: frame size overflows ({width}x{height})",
+                self.path
+            )
+        })?;
         let Ok(mut buffer) = self.free_rx.recv() else {
             return Err(self.writer_failure());
         };
@@ -106,7 +103,8 @@ impl FrameStream {
         let (width, height) = self
             .size
             .ok_or_else(|| format!("frame stream {}: no frame buffer taken", self.path))?;
-        if rgba.len() != width as usize * height as usize * 4 {
+        let row_bytes = width as usize * 4;
+        if rgba.len() != row_bytes * height as usize {
             return Err(format!(
                 "frame stream {}: {} bytes submitted for {width}x{height}",
                 self.path,
@@ -117,7 +115,6 @@ impl FrameStream {
             .frames_tx
             .as_ref()
             .expect("frames_tx lives until finish");
-        let row_bytes = width as usize * 4;
         if tx
             .send(Frame {
                 rgba,
@@ -195,10 +192,7 @@ fn write_frames(
         let bytes = match origin {
             RowOrigin::TopDown => &rgba,
             RowOrigin::BottomUp => {
-                ordered.clear();
-                for row in rgba.chunks_exact(row_bytes).rev() {
-                    ordered.extend_from_slice(row);
-                }
+                copy_reversed_rows(&rgba, row_bytes, &mut ordered);
                 &ordered
             }
         };
@@ -292,18 +286,12 @@ mod tests {
         let mut pngs = Vec::new();
         for seed in [1u8, 90] {
             let png = dir.join(format!("frame_{seed}.png"));
-            crate::save_rgba_png(
-                png.to_str().unwrap(),
-                3,
-                2,
-                RowOrigin::BottomUp,
-                bottom_up_frame(seed),
-                0,
-            )
-            .unwrap();
-            pngs.push(png);
+            let pixels = bottom_up_frame(seed);
             let mut buffer = stream.next_buffer(3, 2).unwrap();
-            buffer.copy_from_slice(&bottom_up_frame(seed));
+            buffer.copy_from_slice(&pixels);
+            crate::save_rgba_png(png.to_str().unwrap(), 3, 2, RowOrigin::BottomUp, pixels, 0)
+                .unwrap();
+            pngs.push((seed, png));
             stream.submit(buffer, RowOrigin::BottomUp).unwrap();
         }
         let summary = stream.finish().unwrap();
@@ -318,9 +306,13 @@ mod tests {
 
         let raw = std::fs::read(&stream_path).unwrap();
         assert_eq!(raw.len(), 2 * 3 * 2 * 4);
-        for (i, png) in pngs.iter().enumerate() {
+        for (i, (seed, png)) in pngs.iter().enumerate() {
+            let rows = bottom_up_frame(*seed);
             let decoded = image::open(png).unwrap().to_rgba8().into_raw();
-            assert_eq!(&raw[i * 24..(i + 1) * 24], decoded.as_slice(), "frame {i}");
+            let frame = &raw[i * 24..(i + 1) * 24];
+            assert_eq!(frame, decoded.as_slice(), "frame {i}");
+            assert_eq!(&frame[..12], &rows[12..], "top row of frame {i}");
+            assert_eq!(&frame[12..], &rows[..12], "bottom row of frame {i}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

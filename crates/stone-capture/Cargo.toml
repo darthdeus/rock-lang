@@ -6,9 +6,6 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# The one owner of the CPU-RGBA screenshot policy -- PNG encoding, vertical
-# orientation and long-edge resizing -- used by stone-rs (GL readback).
-
 [dependencies]
 log = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
