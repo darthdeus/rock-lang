@@ -290,12 +290,15 @@ impl TokenKind {
 
             Dollar => right(1),
 
+            // Above every assignment so `x = a ?? b` is `x = (a ?? b)`; below `||`.
             DoubleQuestionMark => left(11),
 
             _ => None,
         }
     }
 
+    /// Single source of truth for the operator-as-function mapping the parser emits and
+    /// resolution, mangling and codegen recognize.
     pub fn overloadable_binop_fn(&self) -> Option<&'static str> {
         Some(match self {
             TokenKind::Plus => "__op_add",

@@ -13,9 +13,16 @@ const MAX_MACRO_DEPTH: usize = 64;
 struct MacroTemplate {
     params: Vec<MParam>,
     body: Idx<BlockData>,
+    /// The macro's declared return type, if any. An expr-macro expansion is
+    /// wrapped in `(:: <body> <return_ty>)` so the post-expansion type-checker
+    /// sees the expected-type signal (rock parity — see `try_expand`).
     return_ty: Option<Idx<TypeExprData>>,
+    /// Item declarations the macro emits when invoked at module scope.
     items: Vec<Item>,
     tmpl: Ast,
+    /// The macro DEFINITION's name-ident span (carries its own file). Expansion
+    /// erases the invocation name, so IDE goto-def on an invocation reads the
+    /// target off the registry -- `MacroRegistry::def_name_span`.
     def_name_span: Span,
 }
 
@@ -211,7 +218,13 @@ pub(crate) fn expand_one(ast: &mut Ast, registry: &MacroRegistry) {
         return;
     }
     if !reg.is_empty() {
+        // Item-macro invocations splice their items in first, so the spliced
+        // bodies also get expr-expanded by the walk below.
         expand_top_level_macros(ast, reg);
+        // Skip the recursive expr walk when no call names a registered macro:
+        // `try_expand` only mutates a `name(args)` whose `name` is a registry
+        // key, so a flat scan that finds none proves `expand_in_ast` would be a
+        // pure no-op; in a project with one macro definition nearly every module skips it.
         if module_calls_macro(ast, reg) {
             expand_in_ast(ast, reg);
         }
@@ -223,6 +236,10 @@ pub(crate) fn expand_one(ast: &mut Ast, registry: &MacroRegistry) {
 /// Expand every macro call across the workspace, then drop the macro defs.
 pub fn expand_macros(modules: &mut [Ast]) {
     let registry = collect_registry(modules.iter());
+    // Each module expands independently against the immutable prebuilt registry
+    // (see `expand_one`), so the per-module work parallelizes -- and on real
+    // workspaces a macro like `log_once` is called from ~half the modules, so
+    // the recursive walk is the dominant cost, not a rare case.
     use rayon::prelude::*;
     modules.par_iter_mut().for_each(|ast| {
         expand_one(ast, &registry);
@@ -330,6 +347,8 @@ fn expand_top_level_macros(ast: &mut Ast, reg: &Registry) {
             .into_iter()
             .map(|value| MacroArg { label: None, value })
             .collect();
+        // Dropping an unexpandable invocation would compile the module with
+        // that part of the source silently missing.
         let span = item.span;
         let errors_before = ast.recovery_errors.len();
         match expand_item_macro(ast, name.clone(), &args, reg) {
@@ -427,6 +446,9 @@ fn expand_item_macro(
     };
     let mut g = Graft::new(&tmpl.tmpl, ast, fragments);
     let items: Vec<Item> = tmpl.items.iter().map(|it| g.item(it)).collect();
+    // Macro-generated module headers, `mod` declarations, and `use`
+    // declarations are rejected: file/module/import selection is
+    // fixed before expansion, so generated ones would mis-scope output.
     for it in &items {
         if let ItemKind::Use(_) | ItemKind::Module(_) = &it.kind {
             ast.recovery_errors.push(CompilerError::new_with_label(
@@ -621,6 +643,8 @@ fn try_expand(
     let Some(tmpl) = select_overload(cands, args.len() + usize::from(receiver.is_some())) else {
         return;
     };
+    // Item declarations only reach a module through a top-level invocation;
+    // expanding just the body here would drop them (a `use` included).
     if !tmpl.items.is_empty() {
         let span = ast.exprs[e].span;
         ast.recovery_errors.push(CompilerError::new_with_label(
@@ -656,9 +680,14 @@ fn try_expand(
         }
     }
 
+    // Copy the body into the caller arena, rewriting it on the way
+    // (`Instantiation`). Args and defaults are already in the caller arena and
+    // are only ever copied plainly, so they keep their own names and spans.
     let body = Graft::new(&tmpl.tmpl, ast, inst).block(tmpl.body);
+    // Expand macros that appear inside the spliced body (macros calling macros).
     expand_block(ast, body, reg, depth + 1, stack);
 
+    // Preserve the expected type supplied by a macro return annotation.
     let value = extract_body_value(ast, body);
     ast.exprs[e].kind = match tmpl.return_ty {
         Some(rt) => {
@@ -805,6 +834,8 @@ fn bind_macro_args(params: &[MParam], args: &[MacroArg]) -> Result<Bound, BindEr
                 let Some(i) = params.iter().position(|p| p.name == l) else {
                     return Err(BindErr::UnknownLabel(l));
                 };
+                // A variadic captures a RUN of args; naming it binds one, which
+                // has no meaning. Reject rather than pick an interpretation.
                 if params[i].is_variadic {
                     return Err(BindErr::LabelOnVariadic(l));
                 }
@@ -818,6 +849,9 @@ fn bind_macro_args(params: &[MParam], args: &[MacroArg]) -> Result<Bound, BindEr
                     next += 1;
                 }
                 if next >= params.len() {
+                    // Arity selection admitted this call, so the only way to run
+                    // past the last param is a trailing variadic; without one
+                    // there is no slot and the overload was mis-selected.
                     match variadic.as_mut() {
                         Some((_, rest)) => rest.push(a.value),
                         None => {

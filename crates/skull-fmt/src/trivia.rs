@@ -37,6 +37,8 @@ impl Trivia {
         let mut block = BTreeMap::new();
         let mut code = BTreeMap::new();
         let mut line_comments = BTreeSet::new();
+        // Track the last line on which we saw a non-comment token, so a comment
+        // sharing that line is classified as trailing.
         let mut code_on_line: Option<usize> = None;
         for tok in &tokens {
             let line = tok.span.line_range().0;
@@ -51,6 +53,10 @@ impl Trivia {
             match &tok.kind {
                 TokenKind::Comment(text) => {
                     let (lo, hi) = tok.span.offset_range();
+                    // A `/* */` block comment shares the `Comment` kind but must
+                    // NOT enter the `//` trailing/standalone maps -- those render
+                    // as `// text`, silently rewriting `/* text */` and dropping
+                    // its in-place position. Record it verbatim, by offset.
                     if src.as_bytes().get(lo) == Some(&b'/')
                         && src.as_bytes().get(lo + 1) == Some(&b'*')
                     {

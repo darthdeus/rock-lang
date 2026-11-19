@@ -3,7 +3,15 @@ use crate::walk;
 use rock_core::Span;
 use ustr::Ustr;
 
+/// How a copy changes the expressions, statements and blocks it copies. Every
+/// hook defaults to leaving the node as it was, which is what [`Plain`] does.
+///
+/// Binders are reported as the walk meets them: `enter`/`exit` bracket a
+/// scope, and a binder is bound after the expressions that cannot see it (a
+/// `let`'s value, an `if let`'s scrutinee) were copied.
 pub(crate) trait Rewrite {
+    /// The span every copied node gets instead of its own; a stamped block
+    /// has no braces.
     fn stamp(&self) -> Option<Span> {
         None
     }

@@ -100,6 +100,11 @@ fn fits(mut width: isize, mut stack: Vec<(usize, Mode, &Doc)>) -> bool {
                 }
             }
             Doc::Indent(d) => stack.push((indent + 1, mode, d)),
+            // An inner group that must break (it contains a hard line) ends the
+            // current line at its first break, so probe it in Break mode; a
+            // breakless inner group is assumed flat. This lets `head() @ [<multi-
+            // line>]` keep the head flat (the array breaks) while still breaking
+            // `(params) => long_body` (the breakless body overflows the line).
             Doc::Group(d) => {
                 let m = if d.has_hard_line() {
                     Mode::Break
@@ -163,6 +168,11 @@ pub fn render(doc: &Doc, width: usize, indent_unit: usize) -> String {
             }
             Doc::Indent(sub) => stack.push((indent + 1, mode, sub)),
             Doc::Group(sub) => {
+                // A group lays out flat iff the group AND the rest of the
+                // current line (the continuation already on the stack, in their
+                // decided modes) fit before the next break. Measuring the
+                // continuation is what makes `(params) => long_body` break its
+                // params: the params alone fit, but params-plus-body do not.
                 let mut probe = stack.clone();
                 probe.push((indent, Mode::Flat, sub));
                 let flat_fits = !sub.has_hard_line() && fits(width as isize - col as isize, probe);

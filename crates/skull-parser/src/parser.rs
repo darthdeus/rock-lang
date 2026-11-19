@@ -11,25 +11,50 @@ pub(crate) struct Parser<'a> {
     pos: usize,
     eof_span: Span,
     ast: Ast,
+    /// Depth inside `(` / `[` — a newline does not separate inside these.
     delimiter_depth: i32,
+    /// Depth inside `{ }` code blocks — a newline DOES separate here.
     brace_depth: i32,
+    /// Whether `Name { ... }` is a struct literal here. False while parsing
+    /// `if`/`while`/`for`/`match` condition heads (where `{` opens the body),
+    /// true in delimited contexts and statement/value position.
     allow_literals: bool,
+    /// True while parsing a no-parens call's argument list, to block recursive
+    /// no-parens (`f a b` is `f(a, b)`, not `f(a(b))`).
     in_no_parens_args: bool,
+    /// Keep the match-arm delimiter `=>` from parsing as a lambda.
     arrow_lambda_blocked: bool,
+    /// Set by `parse_operator` so `parse_item` can replicate rock's implicit
+    /// `@inline` on block-bodied operator overloads (the `@_transparent` model).
     last_was_operator: bool,
+    /// Shared counter for expression and type holes.
     hole_counter: u32,
+    /// Depth of paren groups whose head is currently parsing. While > 0 the
+    /// Pratt loop breaks at `:` so the paren arm owns the `(expr : Type)`
+    /// ascription form instead of `:` binding as a binop.
     paren_head: u32,
+    /// Expression and block levels enclosing the current parse position.
     nesting: u32,
+    /// Height, in nesting levels, of the deepest expression or block completed
+    /// within the innermost level still open; see [`Parser::nesting_level`].
     nested_height: u32,
+    /// Set when the nesting limit is hit, so statement recovery propagates
+    /// the error to the item instead of resuming at the same depth.
     too_deep: bool,
+    /// Source text a span can be read back from, innermost last. Interpolated
+    /// strings are re-scanned from RAW source so each hole's sub-expression gets
+    /// a real file span; a hole whose text carried `\`-escapes is cooked into
+    /// its own frame, which maps back byte-for-byte.
     frames: Vec<Frame<'a>>,
 }
 
+/// A source text the parser can locate a span in.
 enum Frame<'a> {
-    File {
-        text: &'a str,
-        base: usize,
-    },
+    /// The parsed source. `base` is the file offset of its first byte
+    /// (`parse_one_item` parses a slice of a bigger file).
+    File { text: &'a str, base: usize },
+    /// A cooked interpolation hole. `map[k]` is the file offset of `text[k]`,
+    /// with a trailing entry for the end.
     Hole {
         text: String,
         map: Vec<usize>,
@@ -38,8 +63,10 @@ enum Frame<'a> {
     },
 }
 
+/// A cooked hole (expression half or `:spec` half) awaiting its sub-parse.
 struct HoleFrame {
     text: String,
+    /// `map[k]` is the file offset of `text[k]`, with a trailing end entry.
     map: Vec<usize>,
     line: usize,
     column: usize,
@@ -53,6 +80,8 @@ struct Pos {
 }
 
 impl Pos {
+    /// Move forward to byte offset `to`, counting newlines. Backwards moves are
+    /// a no-op -- pieces are visited in source order.
     fn advance(&mut self, text: &str, to: usize) {
         if to <= self.at {
             return;
@@ -73,6 +102,9 @@ fn identity_map(base: usize, len: usize) -> Vec<usize> {
     (base..=base + len).collect()
 }
 
+/// `{{` / `}}` stand for a single literal brace. The tokenizer keeps them
+/// doubled (its content is what non-interpolation consumers read); collapsing
+/// is the interpolation parse's step.
 fn collapse_brace_escapes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -121,6 +153,10 @@ impl Frame<'_> {
 type PResult<T> = Result<T, CompilerError>;
 
 impl<'a> Parser<'a> {
+    /// `source` is the text `tokens` were produced from, and `base` the file
+    /// offset of its first byte. Interpolated strings are re-scanned from it, so
+    /// a caller that passes the wrong text gets spanned errors, not silent
+    /// drift.
     pub(crate) fn new(tokens: Vec<Token>, source: &'a str, base: usize) -> Self {
         let eof_span = tokens.last().map(|t| t.span).unwrap_or_else(Span::unknown);
         let ast = Ast::with_capacity(tokens.len());
@@ -150,6 +186,8 @@ impl<'a> Parser<'a> {
         id
     }
 
+    /// Run `f` with struct-literal parsing forced on/off (condition heads
+    /// turn it off; delimited contexts turn it back on), restoring after.
     fn with_allow_literals<T>(&mut self, allow: bool, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved = std::mem::replace(&mut self.allow_literals, allow);
         let out = f(self);
@@ -330,6 +368,10 @@ impl<'a> Parser<'a> {
             .unwrap_or(self.eof_span)
     }
 
+    /// Span of the most-recently-consumed token (`pos - 1`). A node's full
+    /// extent runs from its first token (`start`, captured before consuming it)
+    /// through this — `self.span()` is the *next*, unconsumed token, so it
+    /// overshoots.
     fn prev_span(&self) -> Span {
         if self.pos == 0 {
             self.span()
@@ -351,6 +393,9 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Full-extent span from a node's first token (`start`) through the last
+    /// token consumed so far. The canonical way to span a node: capture
+    /// `let start = self.span();` before consuming, build, then `span_from(start)`.
     fn span_from(&self, start: Span) -> Span {
         self.merge_spans(start, self.prev_span())
     }
@@ -362,6 +407,8 @@ impl<'a> Parser<'a> {
             .unwrap_or(TokenKind::EOF)
     }
 
+    /// Newlines that followed the *previous* token (the tokenizer folds
+    /// `Newline` into `Token::trailing_newlines`).
     fn prev_trailing_newlines(&self) -> usize {
         if self.pos == 0 {
             0
@@ -404,6 +451,10 @@ impl<'a> Parser<'a> {
         CompilerError::new_with_label(self.span(), msg.into())
     }
 
+    /// Consume the `>` closing a generic argument list. A nested close like
+    /// `Map<K, Vec<V>>` tokenizes the trailing `>>` as a single `RightShift`;
+    /// the inner close consumes that token and reinserts one `>` for the
+    /// enclosing list (mirrors rock's `expect_generic_close`).
     fn expect_generic_close(&mut self) -> PResult<Span> {
         match self.kind() {
             TokenKind::GreaterThan => self.expect(TokenKind::GreaterThan),
@@ -468,6 +519,9 @@ impl<'a> Parser<'a> {
         self.eat(TokenKind::Comma)
     }
 
+    /// Parse a comma-separated list, leaving its closing token for the caller.
+    /// `list_item_follows` and `list_continues` keep comments and split `>>`
+    /// closes consistent across the list forms that share this grammar.
     fn parse_comma_list<T>(
         &mut self,
         close: TokenKind,
@@ -483,8 +537,16 @@ impl<'a> Parser<'a> {
         Ok(items)
     }
 
+    // ---- items ------------------------------------------------------------
+
+    /// Parse leading visibility modifiers (v1): any sequence of `pub`,
+    /// `pub(super)`, `pub(package)`, `pub(in a::b)`, `private`, `private(set)`
+    /// in either order. All words are contextual: `private: bool` is still a
+    /// field named `private` because `parse_vis_mods` only commits when the
+    /// modifier is followed by something item-like.
     fn parse_vis_mods(&mut self) -> PResult<VisMods> {
         let mut mods = VisMods::default();
+        // Peek two tokens ahead: `pub(package)` / `private(set)` put a `(` between.
         let peek2 = |p: &Self| {
             p.tokens
                 .get(p.pos + 2)
@@ -512,6 +574,7 @@ impl<'a> Parser<'a> {
         loop {
             let is_pub = matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "pub");
             let is_private = matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "private");
+            // `in` is a keyword token (for loops), not an Ident.
             let pub_follows = starts_item_like(&self.peek_kind())
                 || (self.peek_kind() == TokenKind::OpenParen
                     && match peek2(self) {
@@ -615,6 +678,10 @@ impl<'a> Parser<'a> {
             self.advance();
             UseSuffix::Glob
         } else if self.suffix_is_operator_selector() {
+            // `geo::operator(+);` — the leading segments name the module and
+            // the trailing `operator(<glyph>)` is the selector. The glyph is
+            // an operator token (`+`, `*` is glob here so no clash, `-`, ..):
+            // take its spelling from the source.
             self.advance(); // `operator`
             self.expect(TokenKind::OpenParen)?;
             let glyph_span = self.span();
@@ -747,6 +814,8 @@ impl<'a> Parser<'a> {
         self.last_was_operator = false;
         let mut item = self.parse_item_inner()?;
         item.vis = mods.vis;
+        // rock injects `@inline` on block-bodied operator overloads (no source
+        // form) unless one is already present.
         if self.last_was_operator
             && matches!(&item.kind, ItemKind::Function(f) if f.body.rock_block().is_some())
             && !annotations.iter().any(|a| a.name.name.as_str() == "inline")
@@ -768,6 +837,8 @@ impl<'a> Parser<'a> {
     fn parse_item_inner(&mut self) -> PResult<Item> {
         match self.kind() {
             TokenKind::Fn => self.parse_fn(false, None, FnBackend::Lua),
+            // `co fn name(...)` — coroutine; body may use `yield`. `co` is a
+            // contextual keyword: only reserved immediately before `fn`.
             TokenKind::Ident(n)
                 if n.as_str() == "co" && matches!(self.peek_kind(), TokenKind::Fn) =>
             {
@@ -882,6 +953,10 @@ impl<'a> Parser<'a> {
         if !sigil {
             return self.with_allow_literals(true, |p| p.parse_expr(0));
         }
+        // Cursor-backtracking (rock parity): try the type-shaped parse; accept
+        // it ONLY if it lands cleanly at an arg boundary. Otherwise reset and
+        // parse an ordinary expression — so `(a < b)` (a comparison) isn't
+        // mis-read as the generic `a<b>`.
         let saved = self.pos;
         if let Ok(e) = self.parse_sigil_type_arg() {
             if matches!(
@@ -1263,6 +1338,9 @@ impl<'a> Parser<'a> {
                         self.advance();
                         s
                     }
+                    // Rock has no expression-bodied fn form. Parsing past this and
+                    // keeping an empty source emitted `function f(x) return end` --
+                    // a fn that type-checks and answers nil.
                     _ => {
                         return Err(self.err(
                             "an `= <body>` function body must be a string literal (an inline \
@@ -1272,6 +1350,10 @@ impl<'a> Parser<'a> {
                 };
                 FunctionBody::Inline(backend, src)
             } else {
+                // Only `extern fn` declares a body-less foreign symbol. Every other
+                // form reaching here is missing its body, and defaulting to an
+                // extern made it a call to a Lua global that does not exist --
+                // accepted by the compiler, fatal at runtime.
                 let Some(eb) = extern_body else {
                     return Err(self.err(
                         "this function has no body: expected a block `{ .. }` or an inline \
@@ -1284,6 +1366,9 @@ impl<'a> Parser<'a> {
             (body, Vec::new())
         };
         let span = self.span_from(start);
+        // Record this macro's parameter reference spans (decl + template uses)
+        // while we still hold the definition with its source spans -- expansion
+        // would only see retagged clones. The IDE reads `Ast.macro_param_refs`.
         if is_macro {
             let refs = crate::macro_expand::index_macro_param_refs(
                 &self.ast,
@@ -1517,6 +1602,8 @@ impl<'a> Parser<'a> {
             let mods = self.parse_vis_mods()?;
             let (vis, set_private) = (mods.vis, mods.set_private);
             let annotations = self.parse_item_annotations()?;
+            // `embed` is contextual: it is the modifier only when a field name
+            // follows it, so `embed: int` stays a field named `embed`.
             let is_embed = matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "embed")
                 && matches!(self.peek_kind(), TokenKind::Ident(_));
             if is_embed {
@@ -1802,6 +1889,8 @@ impl<'a> Parser<'a> {
                 } else if ts.is_empty() {
                     TypeExprKind::Unit
                 } else if ts.len() == 1 && !trailing_comma {
+                    // `(T)` is parenthesized T, not a 1-tuple — reuse the inner
+                    // type's kind, ORing in any outer `?`.
                     let inner = ts[0];
                     let data = &self.ast.types[inner];
                     nullable = data.is_nullable;
@@ -1860,8 +1949,13 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::QuestionMark => {
+                // `?` type hole (inferred). Note: a `?` AFTER a type is the
+                // nullable suffix, handled below — this arm is the leading form.
                 self.advance();
                 let id = self.gen_hole_id();
+                // Optional name immediately after `?` (`?foo`): in type position
+                // `?` + ident is unambiguous (nullable is post-fix, `??` is a
+                // value op), so no adjacency check is needed.
                 let name = if let TokenKind::Ident(n) = self.kind() {
                     self.advance();
                     Some(n)
@@ -1900,6 +1994,8 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Bound tree height as well as recursion depth: a Pratt loop can build
+    /// a deep left-associative tree without a deep parser call stack.
     fn nesting_level<T>(&mut self, parse: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
         if self.nesting >= MAX_NESTING_DEPTH {
             return Err(self.too_deep_error(self.span()));
@@ -1936,6 +2032,10 @@ impl<'a> Parser<'a> {
         let mut statements = Vec::new();
         loop {
             while self.eat(TokenKind::Semicolon) {}
+            // A comment on its own line is a standalone `(comment ...)`
+            // statement (rock's parse_block does the same); a comment on the
+            // same line as the previous statement was already consumed as a
+            // trailing attachment below.
             while let TokenKind::Comment(text) = self.kind() {
                 let span = self.span();
                 statements.push(self.ast.stmt(span, StatementKind::Comment(text)));
@@ -1963,7 +2063,13 @@ impl<'a> Parser<'a> {
                     return Err(e);
                 }
                 Err(e) => {
+                    // Statement-level recovery: a broken statement (e.g. a `let`
+                    // with an empty RHS mid-edit) drops just that statement, not
+                    // the whole `fn` body -- the lets before and after it survive
+                    // so scope-based LSP features keep working on broken code.
                     self.ast.recovery_errors.push(e);
+                    // Guarantee forward progress: if the failed parse consumed
+                    // nothing, drop one token so recovery can't spin.
                     if self.pos == before {
                         self.advance();
                     }
@@ -2017,6 +2123,9 @@ impl<'a> Parser<'a> {
             return Ok(self.ast.stmt(decl.span, StatementKind::Use(decl)));
         }
 
+        // Contextual `static <name> ...` local. Only fires when `static` heads a
+        // statement and is followed by an identifier (the binding name), so
+        // `static` stays usable as an ordinary ident (`load_audio(p, static)`).
         if matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "static")
             && matches!(self.peek_kind(), TokenKind::Ident(_) | TokenKind::OpenParen)
         {
@@ -2198,6 +2307,7 @@ impl<'a> Parser<'a> {
                 ))
             }
             TokenKind::Loop => {
+                // `loop { .. }` is `while true { .. }` (rock lowers it the same).
                 self.advance();
                 let condition = self.ast.expr(start, ExprKind::Bool(true));
                 let body = self.parse_block()?;
@@ -2287,6 +2397,9 @@ impl<'a> Parser<'a> {
             self.skip_comments_in_expr();
             let op = self.kind();
 
+            // Inside a paren group's head the `:` belongs to the
+            // `(expr : Type)` ascription form owned by the paren arm, so stop
+            // here instead of consuming it as a binop.
             if op == TokenKind::Colon && self.paren_head > 0 {
                 break;
             }
@@ -2829,6 +2942,8 @@ impl<'a> Parser<'a> {
         if kind == TokenKind::TripleDot {
             self.advance();
             let operand = self.parse_expr(0)?;
+            // The Pratt loop can consume a trailing comment before a closer.
+            // Keep it outside the spread span so formatting emits it once.
             let span = self.merge_spans(start, self.ast.exprs[operand].span);
             return Ok(self.ast.expr(span, ExprKind::Spread(operand)));
         }
@@ -2844,6 +2959,7 @@ impl<'a> Parser<'a> {
             return Ok(self.ast.expr(self.span_from(start), expr));
         }
 
+        // Only a byte-adjacent name belongs to the hole.
         if kind == TokenKind::QuestionMark {
             self.advance();
             let id = self.gen_hole_id();
@@ -2900,6 +3016,8 @@ impl<'a> Parser<'a> {
                         start,
                     );
                 }
+                // `::` after an ident is ALWAYS a path - the resolver decides
+                // whether the head names a module, type, or enum (no case heuristic).
                 let qualified = self.kind() == TokenKind::DoubleColon;
                 let path = if qualified {
                     self.parse_path_tail(base)?
@@ -2947,8 +3065,10 @@ impl<'a> Parser<'a> {
                 self.delimiter_depth += 1;
                 if self.eat(TokenKind::CloseParen) {
                     self.delimiter_depth -= 1;
+                    // Span the whole `()`, not just the open paren.
                     return Ok(self.ast.expr(self.span_from(start), ExprKind::Unit));
                 }
+                // The paren head stops Pratt parsing at the ascription colon.
                 let first =
                     self.with_paren_head(|p| p.with_allow_literals(true, |p| p.parse_expr(0)))?;
                 let kind = if self.eat(TokenKind::Colon) {
@@ -2969,6 +3089,8 @@ impl<'a> Parser<'a> {
                         items.push(self.with_paren_head(|p| {
                             p.with_allow_literals(true, |p| p.parse_expr(0))
                         })?);
+                        // A colon after an element is the un-added bare
+                        // ascription grammar, not a new typed-tuple form.
                         if self.kind() == TokenKind::Colon {
                             return Err(self.err(
                                 "bare `expr : Type` is not grammar; parenthesize the ascription: `(expr : Type)`",
@@ -3433,6 +3555,9 @@ impl<'a> Parser<'a> {
                         self.parse_statement()?
                     }
                     _ => {
+                        // A bare arm body allows struct literals (`=> S { .. }`,
+                        // Rust parity): the `{` can't open a block here (the block
+                        // form is the `OpenCurly` branch above), so it is a literal.
                         let e = self.with_allow_literals(true, |p| p.parse_expr(0))?;
                         let s = self.span_from(stmt_span);
                         self.ast.stmt(s, StatementKind::Expression(e))
@@ -3467,6 +3592,8 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The formatter cannot round-trip a comment inside a pattern, so the
+    /// grammar does not take one: say that, rather than leaking the token.
     fn reject_pattern_comment(&mut self) -> PResult<()> {
         if matches!(self.kind(), TokenKind::Comment(_)) {
             return Err(self.err(
@@ -3491,6 +3618,8 @@ impl<'a> Parser<'a> {
         if let Some(lit) = self.plain_literal() {
             if matches!(self.kind(), TokenKind::DoubleDot) {
                 self.advance();
+                // `..=` (inclusive) lexes as `DoubleDot` + `Assign`. The end is
+                // optional: `N..` (end-less) yields `end: None`.
                 let inclusive = self.eat(TokenKind::Assign);
                 let end = self.plain_literal();
                 return Ok(Pattern::Range {
@@ -3754,8 +3883,12 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_comments_in_expr(&mut self) {
+        // Only skip a comment if an operator/continuation follows, matching
+        // rock's `skip_comments_if_followed_by_match`. Conservative: skip
+        // when the token after the comment continues the expression.
         while matches!(self.kind(), TokenKind::Comment(_)) {
             let next = self.peek_kind();
+            // A fresh-line expression starter after a comment belongs to the next statement.
             let next_on_fresh_line = self
                 .tokens
                 .get(self.pos)
@@ -3809,6 +3942,9 @@ fn take_balanced_brace_body(
     ))
 }
 
+/// A tuple index after `.`/`?.` is a plain decimal digit run. The tokenizer
+/// lexes a sign into the literal, so `t.-1` would otherwise wrap to a huge
+/// index.
 fn is_tuple_index(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }

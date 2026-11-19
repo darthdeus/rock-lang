@@ -1,3 +1,4 @@
+// The parser output is never cooked: cooking lowers surface syntax the formatter must preserve.
 mod align;
 mod doc;
 mod printer;

@@ -10,6 +10,9 @@ use rock_tokenizer::{TokenKind, Tokenizer};
 use skull_parser::ast::*;
 use ustr::Ustr;
 
+/// Identifier spelling for output. The tokenizer escapes Lua keywords used as
+/// Rock identifiers (`end` is stored as `__rock_end`); undo that so the source
+/// name is emitted. A non-keyword name passes through unchanged.
 fn kw(name: Ustr) -> String {
     Tokenizer::unescape_lua_keyword(name.as_str()).to_string()
 }
@@ -43,6 +46,9 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// The separator for an infix operator. The range operator `..` is set
+    /// tight (`a..b`) unless an operand edge is a `.`, which would fuse into
+    /// `...`; everything else gets one space on each side.
     fn binop_sep(&self, op: &TokenKind, left: Idx<ExprData>, right: Idx<ExprData>) -> Doc {
         match op {
             TokenKind::DoubleDot
@@ -64,6 +70,7 @@ impl<'a> Printer<'a> {
         Doc::text(self.slice(span).trim_end())
     }
 
+    /// Parser spans are byte offsets on UTF-8 boundaries in this source.
     fn slice_range(&self, b0: usize, b1: usize) -> &str {
         crate::trivia::source_slice(self.src, b0, b1)
     }
@@ -104,6 +111,9 @@ impl<'a> Printer<'a> {
                     && !matches!(it.kind, ItemKind::Comment(_))
             })
             .collect();
+        // A trailing-comment `Comment` item (re-emitted as a trailing comment on
+        // the preceding item) is transparent: it mustn't break an aligned run of
+        // globals that carry trailing comments (`global X: T = ..  // note`).
         let item_skip: Vec<bool> = self
             .ast
             .items
@@ -122,6 +132,7 @@ impl<'a> Printer<'a> {
 
         let mut parts = Vec::new();
         if let Some(h) = header {
+            // The file header leads the output with one blank line after it.
             parts.push(h);
             parts.push(hardline());
             parts.push(hardline());
@@ -130,6 +141,9 @@ impl<'a> Printer<'a> {
         let mut prev_was_comment = false;
         let mut prev_multiline = false;
         for (idx, item) in self.ast.items.iter().enumerate() {
+            // At the top level the parser captures a trailing comment as its own
+            // `Comment` item; trivia already re-emits it as a trailing comment on
+            // the preceding item, so skip it here to avoid double output.
             if matches!(item.kind, ItemKind::Comment(_))
                 && prev_end == Some(item.span.line_range().0)
             {
@@ -204,12 +218,19 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// A user operator overload, folded by the parser to `fn __op_*` and given a
+    /// parser-synthesized `@inline` annotation (`parser.rs`, "rock injects
+    /// @inline") whose span is the whole decl and has no source form.
     fn is_operator_item(&self, item: &Item) -> bool {
         matches!(&item.kind, ItemKind::Function(f) if f.name.name.starts_with("__op_"))
     }
 
     fn item(&self, item: &Item) -> Doc {
         if self.is_operator_item(item) {
+            // The synthetic `@inline` (span = whole decl) makes the structural
+            // path below print a phantom `@inline` and slice an empty decl after
+            // it. `item.span` already covers the real leading annotations, so
+            // slice the whole operator verbatim instead.
             let decl = self.slice(item.span).trim();
             let decl = decl.strip_suffix(';').unwrap_or(decl).trim_end();
             return self.with_trailing_comment(Doc::text(decl), item.span, 'N');
@@ -321,6 +342,10 @@ impl<'a> Printer<'a> {
             return Doc::concat([sig, self.block(block)]);
         }
 
+        // A macro body's item declarations (`macro m() { fn f() {..} }`) are
+        // parked in `macro_items`, outside the block's statement list, so
+        // printing the block alone DELETED them. Keep such a body verbatim
+        // until the printer can interleave items with statements.
         if f.is_macro && !f.macro_items.is_empty() {
             let sig_start = f.keyword_span.unwrap_or(f.span);
             let block_span = self.ast.b(&block).span;
@@ -514,6 +539,10 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// Prepend an inline block comment the parser dropped from just before a
+    /// node (`/* second */ 2`, `/* y field */ y: 2`). Only a SAME-LINE leading
+    /// comment (gap is spaces/tabs, no newline) is inlined; an own-line block
+    /// comment is left for gap recovery so it stays on its own line.
     fn prepend_leading_block(&self, doc: Doc, node_start: usize) -> Doc {
         if let Some((cstart, cend)) = self.trivia.block_comment_ending_before(node_start) {
             let gap = self.slice_range(cend, node_start);
@@ -525,6 +554,10 @@ impl<'a> Printer<'a> {
         doc
     }
 
+    /// A `Comment` AST node (statement / item). The parser stores the inner text
+    /// only, losing whether it was `//` or `/* */`; slice the node's span to
+    /// preserve a block comment verbatim (`/* between */`, not `// between`).
+    /// `//` comments keep the reconstructed form (no source-whitespace churn).
     fn comment_node(&self, span: Span, text: &str) -> Doc {
         let src = self.slice(span);
         if src.trim_start().starts_with("/*") {
@@ -553,6 +586,10 @@ impl<'a> Printer<'a> {
         inline_comma_list("<", ">", items)
     }
 
+    /// A signature holding a comment [`Self::params_impl`] has no place for,
+    /// sliced from the keyword up to the body's `{`: any comment outside the
+    /// parentheses, or a block comment sharing a line inside them. A line
+    /// comment outside them would swallow the `{`, so the brace moves down.
     fn verbatim_signature(&self, start: Span, params: Span, body: Span) -> Option<Doc> {
         let sig_start = start.offset_range().0;
         let body_open = body.offset_range().0;
@@ -722,6 +759,9 @@ impl<'a> Printer<'a> {
         let multi_line_block = stmts.first().zip(stmts.last()).is_some_and(|(f, l)| {
             self.ast.s(f).span.line_range().0 != self.ast.s(l).span.line_range().1
         });
+        // A group is sliced up to the end of its last source line, so a
+        // multi-line statement whose last line starts another statement would
+        // copy that statement into the slice as well as printing it.
         let ends_on_next_start = |i: usize| {
             spans[i].line_range().0 != spans[i].line_range().1
                 && spans
@@ -789,6 +829,9 @@ impl<'a> Printer<'a> {
                 }
             }
             let mut d = docs[gi].clone();
+            // A line starting with an infix operator (`-b`, `.x = 1`, `*p = 2`)
+            // continues the previous expression, so `a; -b` printed on two
+            // lines would reparse as `a - b`: keep the separator.
             let next_continues = groups.get(gi + 1).is_some_and(|ng| {
                 self.slice(spans[ng[0]])
                     .starts_with(['-', '+', '*', '&', '.'])
@@ -1141,6 +1184,9 @@ impl<'a> Printer<'a> {
                 self.header_verbatim(self.ast.s(&s).span, f.body, || self.for_stmt(f))
             }
             StatementKind::While(w) => {
+                // `loop { .. }` parses as `while true { .. }` (same AST). Render
+                // an always-true condition back as `loop`, normalizing the
+                // literal `while true` spelling to it too (corpus rule).
                 let is_loop = matches!(self.ast.e(&w.condition).kind, ExprKind::Bool(true));
                 self.header_verbatim(self.ast.s(&s).span, w.body, || {
                     if is_loop {
@@ -1436,6 +1482,8 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// A member access receiver. A postfix `?` receiver keeps a space before
+    /// the `.`/`?.`, or it would fuse into `?.`/`??` and change the access.
     fn receiver(&self, x: Idx<ExprData>) -> Doc {
         let d = self.expr(x);
         if matches!(self.ast.e(&x).kind, ExprKind::QuestionMark(_)) {
@@ -1555,6 +1603,9 @@ impl<'a> Printer<'a> {
             parts.push(self.expr(g));
         }
         parts.push(Doc::text(" => "));
+        // Arm body: `=> expr` if the author wrote no braces, else a block that
+        // PRESERVES the author's layout -- a single-line `=> { stmt }` stays
+        // inline, a multi-line block stays expanded.
         if !self.block_has_braces(arm.body) {
             let stmts = &self.ast.b(&arm.body).statements;
             if stmts.len() == 1 {
@@ -1935,6 +1986,7 @@ impl<'a> Printer<'a> {
     }
 
     fn tuple(&self, items: &[Idx<ExprData>], span: Span) -> Doc {
+        // A singleton tuple needs a comma to distinguish it from grouping.
         let trailing = if items.len() == 1 { "," } else { "" };
         let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
         if span.line_range().0 == span.line_range().1 && !docs.iter().any(Doc::has_hard_line) {
@@ -2011,6 +2063,10 @@ impl<'a> Printer<'a> {
             return Doc::text(format!("{name} {{}}"));
         }
         let field_doc = |names: &[Ident], value: &Idx<ExprData>| -> Doc {
+            // Shorthand `{ x }` parses as ([x], Ident(x)) where the value shares
+            // the key's source span; `{ x: x }` parses the same but with the
+            // value at a distinct span. Only collapse the former (preserve an
+            // explicit `x: x` the author wrote).
             if names.len() == 1 {
                 if let ExprKind::Ident(id) = &self.ast.e(value).kind {
                     if id.name == names[0].name

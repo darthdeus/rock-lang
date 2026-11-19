@@ -1,4 +1,6 @@
 /// Marks a trailing comment in rendered output: `\0<origcol>\0//text`.
+/// Trailing comments are marked with a sentinel rather than found by scanning for `//`,
+/// so string literals containing `//` are never mistaken for comments.
 pub const SENTINEL: char = '\u{0}';
 
 struct Trailing {
@@ -61,6 +63,10 @@ pub fn align(text: &str) -> String {
             }
             j += 1;
         }
+        // Decide the group's column. A lone comment, or a non-aligned group of
+        // statements/items, normalizes each to a two-space gap. Comma-block
+        // groups (`always`) and already-aligned statement groups align to the
+        // author's column (widest original `//`), clamped to longest code + 1.
         let mode = parsed[members[0]].as_ref().unwrap().1.mode;
         let orig_cols: Vec<usize> = members
             .iter()

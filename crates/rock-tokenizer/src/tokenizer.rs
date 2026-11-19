@@ -16,6 +16,7 @@ pub struct Tokenizer<'a> {
     pub line: usize,
     pub column: usize,
 
+    // Byte position in `input`, not a char index.
     byte_index: usize,
 
     last_token_kind: Option<TokenKind>,
@@ -211,6 +212,7 @@ impl<'a> Tokenizer<'a> {
         }
 
         self.byte_index = i;
+        // Columns count chars, offsets count bytes.
         self.byte_offset += i - start;
         self.column += char_count;
         self.current = decode_at(bytes, i).map(|(c, _)| c);
@@ -237,6 +239,7 @@ impl<'a> Tokenizer<'a> {
         &input[start..i]
     }
 
+    /// Leaves the cursor in place when an escape, line break or interpolation needs the full scanner.
     fn try_read_plain_string(&mut self) -> Option<&'a str> {
         let input = self.input;
         let bytes = input.as_bytes();
@@ -298,6 +301,7 @@ impl<'a> Tokenizer<'a> {
                 "unmatched `{` in string literal: use `{{` to emit a literal `{`".to_string(),
             ));
         }
+        // After the structural refusals, so an unterminated literal is reported as such.
         if let Some(bad) = scan.bad_escapes.first() {
             let (at, len, message) = (bad.at, bad.len, bad.message.clone());
             self.advance_to(at);

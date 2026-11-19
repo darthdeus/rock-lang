@@ -25,11 +25,25 @@ impl Ident {
 pub enum CallSyntax {
     Normal,
     At,
+    /// rock's no-parens call surface form (`foo a b` == `foo(a, b)`). Semantically
+    /// identical to `Normal` -- every consumer that cares about call semantics
+    /// treats it the same -- but kept distinct so the formatter can re-emit the
+    /// no-parens spelling instead of normalizing to `foo(a, b)`.
     NoParens,
+    /// Sigil macro call `name!(args)`. Resolves like `Normal`; kept so the
+    /// formatter re-emits the `!` that enables type-shaped arg parsing.
     Macro,
+    /// Method-form sigil macro call `recv.name!(args)`, desugared at parse
+    /// time to `name(recv, args)`: the receiver is the first arg. Resolves
+    /// like `Normal`.
     MethodMacro,
+    /// `name!(args) @ rhs`: a `Macro` call that took a trailing `@` lambda.
     AtMacro,
+    /// `recv.name!(args) @ rhs`: a `MethodMacro` call that took a trailing `@`
+    /// lambda.
     AtMethodMacro,
+    /// Type-shaped sigil arg `Name<A, B>`, parsed as a call of `Name` on the
+    /// type args so `expr_to_type_expr` can recover the type.
     TypeArgs,
 }
 
@@ -143,8 +157,11 @@ pub enum ExprKind {
 
     Paren(Idx<ExprData>),
 
+    /// `expr as Type`
     As(Idx<ExprData>, Idx<TypeExprData>),
+    /// bitcast<Type>(expr) preserves the low 32 bits between int and uint.
     Bitcast(Idx<ExprData>, Idx<TypeExprData>),
+    /// `(expr : Type)` - contextual ascription supplies an expected type.
     ParenAscription(Idx<ExprData>, Idx<TypeExprData>),
 
     Not(Idx<ExprData>),
@@ -365,6 +382,10 @@ pub struct For {
     pub body: Idx<BlockData>,
 }
 
+/// `static <name>[: T] = <init>` -- a local with private module-level storage
+/// that persists across calls, initialized on first reach. The initializer is
+/// mandatory (an immutable never-written static should be a `const`). Name is a
+/// plain ident; no destructuring binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct While {
     pub span: Span,
@@ -495,6 +516,9 @@ pub struct FunctionDef {
     pub is_synthetic: bool,
     /// A generated default or omission function for one JSON field.
     pub json_field_for: Option<(Ident, Ustr, JsonFieldOperation)>,
+    /// Item declarations in a macro body (`macro m() { fn f() {..} }`). Empty
+    /// for non-macros and expression-only macros. Spliced at module scope when
+    /// the macro is invoked as a top-level statement.
     pub macro_items: Vec<Item>,
     /// Written receiver tail and the formatter's split in the generics list.
     pub receiver_surface: Option<(Ident, usize)>,
@@ -524,6 +548,9 @@ pub struct Field {
     /// Leading `@name` / `@name(args)` on the field. Preserved for the
     /// bone-side registry pass; no skull consumer reads it yet.
     pub annotations: Vec<Annotation>,
+    /// `embed f: Foo` -- the field's leaves live in the parent and the field
+    /// has no independently storable aggregate (projection-only).
+    /// `embed` is CONTEXTUAL: `embed: int` is still a field named `embed`.
     pub is_embed: bool,
 }
 
@@ -660,6 +687,8 @@ pub struct Item {
     pub vis: Option<Visibility>,
 }
 
+// Items live in a Vec, so a boxed function body would cost an allocation per
+// definition without saving anything.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ItemKind {
@@ -696,6 +725,9 @@ pub struct ModBlock {
 /// item list. Children reference each other by `Idx` into these arenas.
 #[derive(Clone, Debug, Default)]
 pub struct Ast {
+    /// The module's source-file identity, as passed to `parse_module`. The id
+    /// for the whole module -- independent of item spans (which macro expansion
+    /// can retag) and defined even for an item-less module.
     pub file: Ustr,
     /// The owning package (set by the loader from the package graph; `None`
     /// for standalone/editor sources). Package loaders stamp graph facts here.
@@ -703,6 +735,9 @@ pub struct Ast {
     /// The file's `mod a::b;` header (v1), if the first non-comment item was
     /// one. Selects the logical module this file's items contribute to.
     pub module_header: Option<ModuleHeader>,
+    /// The owning package's mutable-global policy, stamped by the loader with
+    /// the other package facts. `Any` keeps standalone sources and packages
+    /// without the key on today's behavior.
     pub global_policy: rock_core::source_code::GlobalPolicy,
     pub exprs: Arena<ExprData>,
     pub stmts: Arena<StatementData>,

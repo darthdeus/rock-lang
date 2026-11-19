@@ -7,6 +7,7 @@ pub enum LexRegion {
 }
 
 pub fn region_at(src: &str, offset: usize) -> LexRegion {
+    // Regions nest (a literal in a hole in a string): the innermost, latest-starting one wins.
     let mut found = (LexRegion::Code, 0usize, false);
     scan(src, offset, &mut |start, end, region| {
         if start < offset && offset <= end && (!found.2 || start >= found.1) {
@@ -20,6 +21,8 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Emits `(start, end, region)` with `end` the closing delimiter's LAST byte (end of input
+/// when unterminated), so a cursor up to and including the closer is inside.
 fn scan(src: &str, limit: usize, emit: &mut dyn FnMut(usize, usize, LexRegion)) {
     let b = src.as_bytes();
     let n = b.len();
