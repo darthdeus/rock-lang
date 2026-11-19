@@ -149,7 +149,6 @@ mod read_folding;
 mod return_kills;
 
 mod argument_demand;
-mod overlay_function_values;
 
 mod optional_receiver_once;
 

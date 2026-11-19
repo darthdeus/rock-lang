@@ -499,13 +499,7 @@ pub fn fn_ref(ws: &Workspace, name: &str) -> skull_mir::mir::FuncRef {
     found[0]
 }
 
-pub fn body_id(
-    ws: &Workspace,
-    name: &str,
-) -> (
-    bone_semantic::prelude::ModuleId,
-    bone_semantic::hir::BodyOwner,
-) {
+pub fn body_id(ws: &Workspace, name: &str) -> EditedBody {
     let f = fn_ref(ws, name);
     (f.module, bone_semantic::hir::BodyOwner::Function(f.func))
 }
@@ -516,6 +510,69 @@ pub fn emit_full_of(
 ) -> (skull::mir_emit::MirEmit, skull::mir_emit::SkullEmitCache) {
     let mid = skull::user_module_id(ws).unwrap();
     skull::mir_emit::emit_full(ws, mid).unwrap_or_else(|e| panic!("{what}: {e:?}"))
+}
+
+pub fn full_lua(ws: &Workspace) -> String {
+    emit_full_of(ws, "emit_full").0.lua
+}
+
+pub type EditedBody = (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::hir::BodyOwner,
+);
+
+pub fn global_body(ws: &Workspace, name: &str) -> EditedBody {
+    ws.modules
+        .iter()
+        .find_map(|m| {
+            m.globals
+                .iter()
+                .find(|(_, g)| name_matches(g.name, name))
+                .map(|(id, _)| (m.id, bone_semantic::hir::BodyOwner::Global(id)))
+        })
+        .unwrap_or_else(|| panic!("no global `{name}`"))
+}
+
+pub fn check_incremental(
+    ws: &Workspace,
+    cache: &mut skull::mir_emit::SkullEmitCache,
+    edited: &[EditedBody],
+) -> skull::mir_emit::MirEmit {
+    let incremental =
+        skull::mir_emit::emit_incremental(ws, cache, edited).expect("incremental emit");
+    assert_eq!(incremental.lua, full_lua(ws));
+    incremental
+}
+
+pub struct Edit {
+    pub base: skull::mir_emit::MirEmit,
+    pub incremental: skull::mir_emit::MirEmit,
+    pub overlay: Result<skull::mir_emit::MirEmit, skull_parser::CompilerError>,
+}
+
+pub fn edit(before: &Workspace, after: &Workspace, edited: &[EditedBody]) -> Edit {
+    let (base, mut cache) = emit_full_of(before, "base emit");
+    let (_, mut overlay_cache) = emit_full_of(before, "overlay base emit");
+    Edit {
+        base,
+        incremental: check_incremental(after, &mut cache, edited),
+        overlay: skull::mir_emit::emit_overlay(after, &mut overlay_cache, edited),
+    }
+}
+
+pub fn overlay_or_restart(
+    overlay: Result<skull::mir_emit::MirEmit, skull_parser::CompilerError>,
+) -> Option<skull::mir_emit::MirEmit> {
+    match overlay {
+        Ok(overlay) => Some(overlay),
+        Err(e) => {
+            assert!(
+                e.message.contains("compatibility") && e.message.contains("restart"),
+                "{e:?}"
+            );
+            None
+        }
+    }
 }
 
 pub fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {

@@ -1,6 +1,6 @@
 use crate::common::{
-    body_id, definition_names, definitions_matching, emit_full_of, function_body, name_matches,
-    ws_of, ws_with_stdlib,
+    body_id, check_incremental, definition_names, definitions_matching, edit, emit_full_of,
+    function_body, global_body, name_matches, run_luajit, ws_of, ws_with_stdlib,
 };
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
@@ -15,17 +15,6 @@ fn emit_overlay(
     emit_overlay_result(ws, cache, reinferred).expect("emit_overlay")
 }
 
-fn check_incremental(
-    ws: &Workspace,
-    cache: &mut skull::mir_emit::SkullEmitCache,
-    edited: &[(ModuleId, BodyOwner)],
-) -> MirEmit {
-    let incremental = emit_incremental(ws, cache, edited).expect("incremental emit");
-    let (fresh, _) = emit_full_of(ws, "fresh emit");
-    assert_eq!(incremental.lua, fresh.lua);
-    incremental
-}
-
 fn check_edit(build: fn(&str) -> Workspace, before: &str, after: &str, edited: &str) {
     let (_, mut cache) = emit_full_of(&build(before), "initial emit");
     let ws = build(after);
@@ -36,23 +25,11 @@ fn check_edit(build: fn(&str) -> Workspace, before: &str, after: &str, edited: &
 fn scalar_constant_edits_refresh_full_incremental_and_overlay_emission() {
     let v1 = "const BASE: float = 1.5\nconst ALIAS: float = BASE\n@nomangle fn choose() -> float { ALIAS }";
     let v2 = v1.replace("1.5", "-0.0");
-    let ws1 = ws_of(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut incremental_cache) = emit_full(&ws1, mid).unwrap();
-    let (_, mut overlay_cache) = emit_full(&ws1, mid).unwrap();
-    assert!(crate::common::function_body(&full.lua, "choose").contains("1.5"));
     let ws2 = ws_of(&v2);
-    let gid = ws2
-        .module(mid)
-        .globals
-        .iter()
-        .find(|(_, g)| name_matches(g.name, "BASE"))
-        .unwrap()
-        .0;
-    let edited = [(mid, BodyOwner::Global(gid))];
-    check_incremental(&ws2, &mut incremental_cache, &edited);
-    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
-    let body = crate::common::function_body(&overlay.lua, "choose");
+    let edit = edit(&ws_of(v1), &ws2, &[global_body(&ws2, "BASE")]);
+    assert!(function_body(&edit.base.lua, "choose").contains("1.5"));
+    let overlay = edit.overlay.expect("overlay");
+    let body = function_body(&overlay.lua, "choose");
     assert!(body.contains("-0.0") && !body.contains("ALIAS"));
 }
 
@@ -73,20 +50,10 @@ fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
     ] {
         let source = with_init(init);
         let ws2 = ws_with_stdlib(&source);
-        let (mid2, gid) = ws2
-            .modules
-            .iter()
-            .find_map(|m| {
-                m.globals
-                    .iter()
-                    .find(|(_, g)| name_matches(g.name, "BASE"))
-                    .map(|(id, _)| (m.id, id))
-            })
-            .unwrap();
-        let edited = [(mid2, BodyOwner::Global(gid))];
+        let edited = [global_body(&ws2, "BASE")];
         check_incremental(&ws2, &mut incremental_cache, &edited);
         let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
-        let after = crate::common::function_body(&overlay.lua, "choose");
+        let after = function_body(&overlay.lua, "choose");
         assert_eq!(
             after.contains(&expected_after.to_string()),
             folded_after,
@@ -99,7 +66,7 @@ fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
         ));
     }
     runtime.push_str("print('ok')");
-    assert_eq!(crate::common::run_luajit(&runtime), "ok");
+    assert_eq!(run_luajit(&runtime), "ok");
 }
 
 #[test]
@@ -107,14 +74,10 @@ fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
     let v1 =
         "@nomangle fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }";
     let v2 = v1.replace("a < b", "a > b");
-    let ws1 = ws_of(v1);
-    let (full, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
-    let (_, mut overlay_cache) = emit_full_of(&ws1, "initial overlay base");
-    assert!(full.lua.contains("math.min("));
     let ws2 = ws_of(&v2);
-    let edited = [body_id(&ws2, "choose")];
-    check_incremental(&ws2, &mut incremental_cache, &edited);
-    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
+    let edit = edit(&ws_of(v1), &ws2, &[body_id(&ws2, "choose")]);
+    assert!(edit.base.lua.contains("math.min("));
+    let overlay = edit.overlay.expect("overlay");
     assert!(overlay.lua.contains("math.max("));
     assert!(!overlay.lua.contains("math.min("));
 }
@@ -161,7 +124,7 @@ fn main() {
         "fn leaf(xs: [int]) { xs.len = 0 }",
     );
     let checked = |lua: &str| {
-        let hot = crate::common::function_body(lua, "hot");
+        let hot = function_body(lua, "hot");
         hot.contains("__vec_checked_get(") || hot.contains("__vec_checked_index(")
     };
     let ws1 = ws_with_stdlib(grow);
@@ -261,13 +224,9 @@ fn body_edit_to_a_function_with_lambdas_matches_a_full_emit() {
         )
     };
     let (v1, v2) = (fixture(1), fixture(4));
-    let ws1 = ws_with_stdlib(&v1);
-    let (_, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
-    let (_, mut overlay_cache) = emit_full_of(&ws1, "initial overlay base");
     let ws2 = ws_with_stdlib(&v2);
-    let edited = [body_id(&ws2, "lambdas")];
-    let updated = check_incremental(&ws2, &mut incremental_cache, &edited);
-    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
+    let edit = edit(&ws_with_stdlib(&v1), &ws2, &[body_id(&ws2, "lambdas")]);
+    let (updated, overlay) = (edit.incremental, edit.overlay.expect("overlay"));
     let lambdas = definitions_matching(&updated.lua, "__lambda");
     assert!(lambdas.len() >= 2);
     for name in lambdas {
@@ -298,7 +257,7 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
         + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
            fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
 
-    let ws1 = crate::common::ws_with_stdlib(&v1);
+    let ws1 = ws_with_stdlib(&v1);
     let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let defines = |lua: &str, ty: &str| {
         lua.lines()
@@ -307,11 +266,11 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
     let defines_q = |lua: &str| defines(lua, "Q");
     assert!(defines(&full.lua, "P") && !defines_q(&full.lua));
 
-    let ws2 = crate::common::ws_with_stdlib(&v2);
+    let ws2 = ws_with_stdlib(&v2);
     let o1 = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
     assert!(defines_q(&o1.lua));
 
-    let ws3 = crate::common::ws_with_stdlib(&v3);
+    let ws3 = ws_with_stdlib(&v3);
     let o2 = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
     let bodies: Vec<&str> = o2
         .lua
@@ -338,7 +297,7 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     let v3 = types.to_string() + &generic("MARK2") + keep_alive + no_q;
     let v4 = types.to_string() + &generic("MARK2") + keep_alive + calls_q;
 
-    let ws1 = crate::common::ws_with_stdlib(&v1);
+    let ws1 = ws_with_stdlib(&v1);
     let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let q_bodies = |lua: &str| -> Vec<String> {
         lua.lines()
@@ -348,13 +307,13 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     };
     assert_eq!(q_bodies(&full.lua).len(), 1);
 
-    let ws2 = crate::common::ws_with_stdlib(&v2);
+    let ws2 = ws_with_stdlib(&v2);
     let removal = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
     assert_eq!(q_bodies(&removal.lua).len(), 0);
-    let ws3 = crate::common::ws_with_stdlib(&v3);
+    let ws3 = ws_with_stdlib(&v3);
     let _ = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
 
-    let ws4 = crate::common::ws_with_stdlib(&v4);
+    let ws4 = ws_with_stdlib(&v4);
     let back = emit_overlay(&ws4, &mut cache, &[body_id(&ws4, "use_it")]);
     assert_eq!(q_bodies(&back.lua).len(), 1);
     let text = &back.lua;
@@ -377,7 +336,7 @@ fn an_overlay_carries_a_graph_added_library_body() {
     let v2 = "fn use_it(c: int) -> bool { return is_ascii_ws(c) }\n\
               fn main() { print(\"{use_it(9)}\") }";
 
-    let ws1 = crate::common::ws_with_stdlib(v1);
+    let ws1 = ws_with_stdlib(v1);
     let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let defines = |lua: &str| {
         lua.lines()
@@ -385,7 +344,7 @@ fn an_overlay_carries_a_graph_added_library_body() {
     };
     assert!(!defines(&full.lua));
 
-    let ws2 = crate::common::ws_with_stdlib(v2);
+    let ws2 = ws_with_stdlib(v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
     assert!(overlay.lua.contains("is_ascii_ws_int("));
     assert!(defines(&overlay.lua));
@@ -429,7 +388,7 @@ fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
               }";
     let v2 = v1.replace("let s = 0", "let s = 100");
     let standalone = |lua: &str| {
-        crate::common::definitions_matching(lua, "_spec_")
+        definitions_matching(lua, "_spec_")
             .into_iter()
             .filter(|name| name.starts_with("total_"))
             .count()
@@ -460,23 +419,19 @@ inline(lua) fn slots_empty(c: Coroutine<FrameYield>) -> bool = """
 }
 "#;
     let v2 = v1.replace("Pair(1, 2)", "Pair(3, 2)");
-    let ws1 = ws_with_stdlib(v1);
-    let (full, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
-    let (_, mut overlay_cache) = emit_full_of(&ws1, "initial overlay base");
     let ws2 = ws_with_stdlib(&v2);
-    let edited = [body_id(&ws2, "stream")];
-    let updated = check_incremental(&ws2, &mut incremental_cache, &edited);
-    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
+    let edit = edit(&ws_with_stdlib(v1), &ws2, &[body_id(&ws2, "stream")]);
+    let overlay = edit.overlay.expect("overlay");
     let step = "stream_0__step";
     assert_eq!(
         function_body(&overlay.lua, step),
-        function_body(&updated.lua, step)
+        function_body(&edit.incremental.lua, step)
     );
     let run = format!(
         "{}\nprint(sample(1))\n{}\nprint(sample(3))\n",
-        full.lua, overlay.lua
+        edit.base.lua, overlay.lua
     );
-    assert_eq!(crate::common::run_luajit(&run), "true\ntrue");
+    assert_eq!(run_luajit(&run), "true\ntrue");
 }
 
 const SHARED_ABI_SLOTS: &str = r#"
@@ -535,7 +490,7 @@ print(before)
         full = full.lua,
         overlay = overlay.lua
     );
-    let out = crate::common::run_luajit(&run);
+    let out = run_luajit(&run);
     assert_eq!(out.lines().count(), escaping.len());
     for entry in escaping {
         let abi = format!("={}", entry.compatibility.call_abi);
@@ -623,16 +578,12 @@ enum Mode { Idle, Busy }
 fn main() { print(describe(Mode::Busy)) }
 "#;
     let v2 = v1.replace("return \"mode\"", "return \"{m}\"");
-    let ws1 = ws_with_stdlib(v1);
-    let (full, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
-    let (_, mut overlay_cache) = emit_full_of(&ws1, "initial overlay base");
-    assert!(!full.lua.contains("Mode::Busy"));
     let ws2 = ws_with_stdlib(&v2);
-    let edited = [body_id(&ws2, "describe")];
-    check_incremental(&ws2, &mut incremental_cache, &edited);
-    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
-    let run = format!("{}\n{}\nprint(describe(1))\n", full.lua, overlay.lua);
-    assert_eq!(crate::common::run_luajit(&run), "Mode::Busy");
+    let edit = edit(&ws_with_stdlib(v1), &ws2, &[body_id(&ws2, "describe")]);
+    assert!(!edit.base.lua.contains("Mode::Busy"));
+    let overlay = edit.overlay.expect("overlay");
+    let run = format!("{}\n{}\nprint(describe(1))\n", edit.base.lua, overlay.lua);
+    assert_eq!(run_luajit(&run), "Mode::Busy");
 }
 
 #[test]
@@ -714,7 +665,7 @@ fn inline_decisions_follow_helper_edits() {
             false,
         ),
     ] {
-        let residual = |lua: &str| crate::common::function_body(lua, "caller").contains("helper(");
+        let residual = |lua: &str| function_body(lua, "caller").contains("helper(");
         let (full, mut cache) = emit_full_of(&ws_of(&v1), "initial emit");
         assert_eq!(residual(&full.lua), residual_before);
         let ws = ws_of(&v2);
@@ -777,16 +728,10 @@ fn body_edit_to_a_generic_reemits_its_specializations() {
               fn use_g() -> float { return G }";
     let v2 = v1.replace("xs[0]", "xs[1]");
     let spec = "function first_arr_T_spec_a_n2_V2_0_z(";
-    let ws1 = ws_of(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    assert_eq!(full.lua.matches(spec).count(), 1);
-
-    let (_, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
     let ws2 = ws_of(&v2);
-    let edited = [body_id(&ws2, "first")];
-    check_incremental(&ws2, &mut incremental_cache, &edited);
-    let overlay = emit_overlay(&ws2, &mut cache, &edited);
-    assert!(overlay.lua.contains(spec));
+    let edit = edit(&ws_of(v1), &ws2, &[body_id(&ws2, "first")]);
+    assert_eq!(edit.base.lua.matches(spec).count(), 1);
+    assert!(edit.overlay.expect("overlay").lua.contains(spec));
 }
 
 const ABI_FLIP_V1: &str = "value V2 { x: float, y: float }\n\
@@ -1004,6 +949,6 @@ return c.v }
             "{}\nseed()\nassert(tick(2))\nlocal before = snapshot()\n{}\nassert(snapshot() == before)\nassert(tick(3))\nassert(snapshot() < before)\nprint('ok')\n",
             full.lua, overlay.lua,
         );
-        assert_eq!(crate::common::run_luajit(&run), "ok");
+        assert_eq!(run_luajit(&run), "ok");
     }
 }

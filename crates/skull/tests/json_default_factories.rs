@@ -1,31 +1,17 @@
-use crate::common::{emit_v1_package, name_matches, run_luajit, ws_of};
-use bone_semantic::hir::BodyOwner;
-use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
+use crate::common::{body_id, edit, emit_v1_package, full_lua, run_luajit, ws_of};
+use skull::mir_emit::emit_full;
 
 #[test]
 fn json_default_factory_updates_with_its_called_function() {
     let source =
         "fn initial() -> int { return 7 }\nstruct Row { @json_default value: int = initial() }";
-    let before = ws_of(source);
-    let mid = skull::user_module_id(&before).unwrap();
-    let (full, mut incremental_cache) = emit_full(&before, mid).unwrap();
-    let (_, mut overlay_cache) = emit_full(&before, mid).unwrap();
     let after = ws_of(&source.replace("return 7", "return 13"));
-    let id = after
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| name_matches(f.name, "initial"))
-        .unwrap()
-        .0;
-    let edited = [(mid, BodyOwner::Function(id))];
-    let incremental = emit_incremental(&after, &mut incremental_cache, &edited).unwrap();
-    assert_eq!(incremental.lua, emit_full(&after, mid).unwrap().0.lua);
-    let overlay = emit_overlay(&after, &mut overlay_cache, &edited).unwrap();
+    let edit = edit(&ws_of(source), &after, &[body_id(&after, "initial")]);
+    let overlay = edit.overlay.expect("overlay");
     let read = "_G[_G.__ROCK_TYPE_TABLE.Row.fields[1].json_default]()";
     let script = format!(
         "{}\nassert({read} == 7)\n{}\nassert({read} == 13)\nprint('ok')",
-        full.lua, overlay.lua
+        edit.base.lua, overlay.lua
     );
     assert_eq!(run_luajit(&script), "ok");
 }
@@ -86,11 +72,10 @@ struct Row {
 }
 "#;
     let ws = ws_of(source);
-    let mid = skull::user_module_id(&ws).unwrap();
-    let emitted = emit_full(&ws, mid).unwrap().0;
+    let emitted_lua = full_lua(&ws);
     let script = format!(
         "{}\nlocal fields = _G.__ROCK_TYPE_TABLE.Row.fields\nfor i = 1, 3 do local p = _G[fields[i].json_default](); assert(p.x == i * 2 + 1 and p.y == i * 2 + 2) end\nprint('ok')",
-        emitted.lua
+        emitted_lua
     );
     assert_eq!(run_luajit(&script), "ok");
 }
@@ -105,11 +90,10 @@ struct Row {
 }
 "#,
     );
-    let mid = skull::user_module_id(&ws).unwrap();
-    let emitted = emit_full(&ws, mid).unwrap().0;
+    let emitted_lua = full_lua(&ws);
     let script = format!(
         "{}\nlocal callback = _G[_G.__ROCK_TYPE_TABLE.Row.fields[1].json_default](); local x, y = callback(); assert(x == 3 and y == 4)\nprint('ok')",
-        emitted.lua
+        emitted_lua
     );
     assert_eq!(run_luajit(&script), "ok");
 }
