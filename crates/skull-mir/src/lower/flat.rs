@@ -298,30 +298,14 @@ impl<'a> Builder<'a> {
             .into_iter()
             .map(|p| self.pack(p))
             .collect::<Result<Vec<_>, _>>()?;
-        let tag = packed[0];
-        let positional = packed[1..1 + shape.tuple_width()].to_vec();
-        let named = shape
-            .record_fields
-            .iter()
-            .enumerate()
-            .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
-            .collect();
-        Ok(FlatCells {
-            tag,
-            positional,
-            named,
-        })
+        Ok(FlatCells::from_slots(shape, &packed))
     }
 
     /// Cells as a `Group` in `[tag, _0.., <rec>..]` leaf order.
     pub(crate) fn flat_cells_to_repr(&self, shape: &EnumFlatShape, cells: FlatCells) -> ValueRepr {
-        let mut parts = Vec::with_capacity(shape.leaf_count());
-        parts.push(ValueRepr::Scalar(cells.tag));
-        parts.extend(cells.positional.into_iter().map(ValueRepr::Scalar));
-        parts.extend(cells.named.into_iter().map(|(_, c)| ValueRepr::Scalar(c)));
         ValueRepr::Group {
             name: shape.name,
-            parts,
+            parts: cells.into_slots().map(ValueRepr::Scalar).collect(),
             present: None,
         }
     }

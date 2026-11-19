@@ -217,6 +217,28 @@ struct FlatCells {
     named: Vec<(Ustr, Idx<Inst>)>,
 }
 
+impl FlatCells {
+    fn from_slots(shape: &EnumFlatShape, slots: &[Idx<Inst>]) -> Self {
+        let named_start = 1 + shape.tuple_width();
+        Self {
+            tag: slots[0],
+            positional: slots[1..named_start].to_vec(),
+            named: shape
+                .record_fields()
+                .iter()
+                .enumerate()
+                .map(|(i, &field)| (field, slots[named_start + i]))
+                .collect(),
+        }
+    }
+
+    fn into_slots(self) -> impl Iterator<Item = Idx<Inst>> {
+        std::iter::once(self.tag)
+            .chain(self.positional)
+            .chain(self.named.into_iter().map(|(_, value)| value))
+    }
+}
+
 /// A source argument is lowered in place so it keeps its evaluation order.
 enum FlatPayload {
     Expr(Idx<Expr>),

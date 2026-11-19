@@ -2189,57 +2189,42 @@ impl<'a> Builder<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(self.element_tuple(vs))
             }
-            // A flat-enum Group packs to the `{__variant}` box, not a `<name>_ct` cdata.
-            ValueRepr::Group { name, parts, .. }
-                if EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
-            {
-                let shape = EnumPlan::for_name(self.ws, name)
-                    .and_then(|plan| plan.flat().cloned())
-                    .ok_or_else(|| {
-                        self.gap_here(format!("flat enum `{name}` lost its representation plan"))
-                    })?;
-                let expected_len = 1 + shape.tuple_width() + shape.record_fields.len();
-                if parts.len() != expected_len {
-                    return Err(self.gap_here(format!(
-                        "flat enum `{name}` produced {} fields for a plan requiring {expected_len}",
-                        parts.len()
-                    )));
-                }
-                let packed: Vec<Idx<Inst>> = parts
-                    .into_iter()
-                    .map(|p| self.pack_maybe_absent_boxed(p, kind))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let cells = FlatCells {
-                    tag: packed[0],
-                    positional: packed[1..1 + shape.tuple_width()].to_vec(),
-                    named: shape
-                        .record_fields
-                        .iter()
-                        .enumerate()
-                        .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
-                        .collect(),
-                };
-                Ok(self.materialize_flat_cells(&shape, cells))
-            }
-            // Ordinary nullable boxes preserve absence as nil. `nobox` groups bypass
-            // this so consumers handle presence explicitly and SROA still sees the ctor.
-            ValueRepr::Group {
-                name,
-                parts,
-                present: Some(present),
-            } if !self.is_nobox_struct(name) => self.pack_maybe_absent_boxed(
-                ValueRepr::Group {
-                    name,
-                    parts,
-                    present: Some(present),
-                },
-                kind,
-            ),
             ValueRepr::Group {
                 name,
                 parts,
                 present,
             } => {
+                // A flat-enum Group packs to the `{__variant}` box, not a `<name>_ct` cdata.
+                if let Some(plan) = EnumPlan::for_name(self.ws, name)
+                    && let Some(shape) = plan.flat()
+                {
+                    let expected_len = shape.leaf_count();
+                    if parts.len() != expected_len {
+                        return Err(self.gap_here(format!(
+                            "flat enum `{name}` produced {} fields for a plan requiring {expected_len}",
+                            parts.len()
+                        )));
+                    }
+                    let packed = parts
+                        .into_iter()
+                        .map(|p| self.pack_maybe_absent_boxed(p, kind))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return Ok(
+                        self.materialize_flat_cells(shape, FlatCells::from_slots(shape, &packed))
+                    );
+                }
+                // Ordinary nullable boxes preserve absence as nil. `nobox` groups bypass
+                // this so consumers handle presence explicitly and SROA still sees the ctor.
+                if present.is_some() && !self.is_nobox_struct(name) {
+                    return self.pack_maybe_absent_boxed(
+                        ValueRepr::Group {
+                            name,
+                            parts,
+                            present,
+                        },
+                        kind,
+                    );
+                }
                 // A leaf-table struct's physical keys are its leaves, so it packs through the
                 // flat `<Name>_lct` ctor; packing it field-wise would violate the plan.
                 let storage = if self.is_value_struct(name) {
@@ -2794,11 +2779,7 @@ impl<'a> Builder<'a> {
             }
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = val_bb;
-            let fc = self.spread_box_to_cells(v, &es);
-            let leaves: Vec<Idx<Inst>> = std::iter::once(fc.tag)
-                .chain(fc.positional)
-                .chain(fc.named.into_iter().map(|(_, c)| c))
-                .collect();
+            let leaves = self.spread_box_to_cells(v, &es).into_slots();
             for (c, lv) in cells.iter().zip(leaves) {
                 self.store_cell(*c, lv);
             }
