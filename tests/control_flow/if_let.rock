@@ -15,10 +15,7 @@ fn get_null_item() -> Item? { return null }
 fn get_container(v: int) -> Container? { return Container { item: Item { value: v } } }
 fn get_null_container() -> Container? { return null }
 
-// ==============================
 // Single binding
-// ==============================
-
 @test(output = "5\nmissing")
 fn basic_nonnull_and_null_else() {
     if let x = get_item(5) {
@@ -38,11 +35,8 @@ fn discard_binding() {
     if let _ = get_null_item() { print("null exists") }
 }
 
-// ==============================
 // Value expression context
 // Distinct from statement use: the if let produces a value.
-// ==============================
-
 @test
 fn value_expr() {
     let x: int? = 42
@@ -65,10 +59,7 @@ fn value_expr_nested() {
     assert_eq(result, 15)
 }
 
-// ==============================
 // Scope and shadowing
-// ==============================
-
 // Inner binding shadows outer; outer is unaffected after block
 @test(output = "99\n42")
 fn shadows_outer() {
@@ -87,10 +78,7 @@ fn binding_not_in_scope_after() {
     print(x?.value ?? -1)
 }
 
-// ==============================
 // Nested if let
-// ==============================
-
 @test(output = "1\n2\n1")
 fn nested() {
     let a: Item? = Item { value: 1 }
@@ -106,10 +94,7 @@ fn nested() {
     }
 }
 
-// ==============================
 // Safe navigation in value expr
-// ==============================
-
 @test(output = "7")
 fn with_safe_nav() {
     let o: Outer? = Outer { inner: Container { item: Item { value: 7 } } }
@@ -122,11 +107,8 @@ fn with_safe_nav() {
     }
 }
 
-// ==============================
 // Chain: two bindings
 // First-null and second-null are distinct: first exits before evaluating second.
-// ==============================
-
 @test(output = "42\nnope\nnope")
 fn chain_two_bindings() {
     if let c = get_container(42) && let item = c.item {
@@ -154,10 +136,7 @@ fn chain_both_in_scope() {
     }
 }
 
-// ==============================
 // Chain: binding + condition, and condition before binding
-// ==============================
-
 @test(output = "42\nnope")
 fn chain_binding_then_condition() {
     if let x = get_item(42) && x.value > 0 {
@@ -184,10 +163,7 @@ fn chain_condition_then_binding() {
     }
 }
 
-// ==============================
 // Three-clause chain
-// ==============================
-
 @test(output = "42\n42")
 fn three_clause() {
     if let c = get_container(42) && let item = c.item && item.value > 0 {
@@ -202,10 +178,7 @@ fn three_clause() {
     }
 }
 
-// ==============================
 // Literal pattern in a chain
-// ==============================
-
 fn maybe_seven(b: bool) -> int? {
     if b { return 7 }
     return null
@@ -219,11 +192,8 @@ fn chain_literal_pattern() {
     if let 7 = maybe_seven(false) && let c = maybe_seven(true) { print(c) } else { print("no") }
 }
 
-// ==============================
 // Value position with a call as the value; each chain clause short-circuits
 // to the else branch
-// ==============================
-
 fn maybe(have: bool, v: int) -> int? {
     if have { v } else { null }
 }
@@ -276,12 +246,9 @@ fn test_iflet_chain_with_cond_value() {
     print(fail)
 }
 
-// ==============================
 // if let as a function's result. Regressions: an implicit-return if let
 // compiled to a bare expression statement, and explicit returns in its
 // branches were rejected as a type mismatch.
-// ==============================
-
 fn lookup_in_map(m: Map<int, string>, key: int) -> string? {
     let val = m.get(key)
     if let v = val {

@@ -1,14 +1,5 @@
-// Adversarial tests: @inline — match bodies with binding-free arms
-//
-// V0 @inline allows `match` when no arm pattern binds a new name.
-// Wildcard, literal, range, and unit enum-variant patterns are safe;
-// Some(v) or Point { x, y } still reject (covered in errors/).
-//
-// Note: avoids `+= <match>` and `+= "{inline_call(x)}"` because the
-// current Lua codegen emits `do ... end` for match-as-compound-RHS,
-// which is an unrelated pre-existing context-stack bug. The tests use
-// `let r = inline_call(x); print(r)` patterns where the match ends up
-// as a `let` initializer (existing block-rvalue lowering handles it).
+// @inline bodies containing match and if-let, with and without binding arms,
+// must behave exactly like the out-of-line call.
 
 enum Sign { Pos, Neg, Zero }
 
@@ -94,4 +85,74 @@ fn test_range_pattern() {
         let r = band(x)
         print(r)
     }
+}
+
+enum Opt { None, Some(int) }
+
+@inline
+fn unwrap_or_zero(o: Opt) -> int {
+    return match o {
+        Opt::None => 0,
+        Opt::Some(v) => v,
+    }
+}
+
+@test(output = "42\n0\n7")
+fn test_unwrap_or_zero() {
+    print(unwrap_or_zero(Opt::Some(42)))
+    print(unwrap_or_zero(Opt::None))
+    print(unwrap_or_zero(Opt::Some(7)))
+}
+
+// Caller has a `v` in scope; the body's pattern binding `v` must
+// rename to avoid collision.
+@test(output = "999 42")
+fn test_match_bind_caller_collision() {
+    let v = 999
+    let r = unwrap_or_zero(Opt::Some(42))
+    print("{v} {r}")
+}
+
+// Nested tuple pattern — both `a` and `b` should rename.
+enum OptPair { None, Some((int, int)) }
+
+@inline
+fn sum_pair_or_zero(p: OptPair) -> int {
+    return match p {
+        OptPair::None => 0,
+        OptPair::Some((a, b)) => a + b,
+    }
+}
+
+@test(output = "11\n0")
+fn test_nested_tuple_pattern() {
+    print(sum_pair_or_zero(OptPair::Some((4, 7))))
+    print(sum_pair_or_zero(OptPair::None))
+}
+
+// `if let` binding.
+@inline
+fn unwrap_double_or_zero(o: int?) -> int {
+    if let x = o {
+        return x * 2
+    } else {
+        return 0
+    }
+}
+
+@test(output = "10\n0")
+fn test_if_let() {
+    let a: int? = 5
+    let b: int? = null
+    print(unwrap_double_or_zero(a))
+    print(unwrap_double_or_zero(b))
+}
+
+// if let with caller-side same-name local — must not clash.
+@test(output = "777 10")
+fn test_if_let_caller_collision() {
+    let x = 777
+    let a: int? = 5
+    let r = unwrap_double_or_zero(a)
+    print("{x} {r}")
 }

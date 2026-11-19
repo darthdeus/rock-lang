@@ -1,0 +1,154 @@
+// `let x = { ... }` and `let x = if ... { ... }` lower without a closure wrapper;
+// observable semantics must be unchanged.
+
+@test(output = "3")
+fn test_let_block_rvalue_simple() {
+    let x = {
+        let t = 1
+        t + 2
+    }
+    print(x)
+}
+
+@test(output = "6")
+fn test_let_block_rvalue_multiple_lets() {
+    let x = {
+        let a = 1
+        let b = 2
+        let c = 3
+        a + b + c
+    }
+    print(x)
+}
+
+@test(output = "5")
+fn test_let_block_rvalue_with_trailing_if() {
+    let x = {
+        let t = 5
+        if t > 0 { t } else { 0 }
+    }
+    print(x)
+}
+
+@test(output = "6")
+fn test_let_block_rvalue_nested() {
+    let x = {
+        let t = {
+            let u = 1
+            u + 1
+        }
+        t * 3
+    }
+    print(x)
+}
+
+@test(output = "15\n7")
+fn test_let_if_arm_is_block() {
+    let c = true
+    let x = if c { let t = 10; t + 5 } else { 7 }
+    print(x)
+    let d = false
+    let y = if d { let t = 10; t + 5 } else { 7 }
+    print(y)
+}
+
+// Block locals must not leak into the surrounding scope — the inner `t`
+// here is scoped to the block, so the outer `t` keeps its value.
+@test(output = "1\n99")
+fn test_let_block_rvalue_scope_isolation() {
+    let t = 99
+    let x = {
+        let t = 1
+        t
+    }
+    print(x)
+    print(t)
+}
+
+// Side-effect ordering and single-execution through a block rvalue.
+global BLOCK_CALLS: int = 0
+
+fn bump_block() -> int {
+    BLOCK_CALLS = BLOCK_CALLS + 1
+    10
+}
+
+@test(output = "20\n1")
+fn test_let_block_rvalue_single_eval() {
+    BLOCK_CALLS = 0
+    let x = {
+        let v = bump_block()
+        v * 2
+    }
+    print(x)
+    print(BLOCK_CALLS)
+}
+
+@test(output = "1\n2")
+fn test_let_if_rvalue_both_branches() {
+    let c = true
+    let x = if c { 1 } else { 2 }
+    print(x)
+    let d = false
+    let y = if d { 1 } else { 2 }
+    print(y)
+}
+
+@test(output = "many")
+fn test_let_if_rvalue_elseif_chain() {
+    let n = 2
+    let s = if n == 0 { "zero" } else if n == 1 { "one" } else { "many" }
+    print(s)
+}
+
+@test(output = "2")
+fn test_let_if_rvalue_nested() {
+    let a = true
+    let b = false
+    let x = if a { if b { 1 } else { 2 } } else { 3 }
+    print(x)
+}
+
+@test(output = "7")
+fn test_let_if_rvalue_shadowing() {
+    let x = 99
+    let x = if x > 0 { 7 } else { 8 }
+    print(x)
+}
+
+@test(output = "42\n-1")
+fn test_let_if_rvalue_nullable() {
+    let c = true
+    let x: int? = if c { 42 } else { null }
+    if x != null { print(x) } else { print(-1) }
+    let d = false
+    let y: int? = if d { 42 } else { null }
+    if y != null { print(y) } else { print(-1) }
+}
+
+// Side effects in the branches must fire exactly once, matching the
+// taken arm. This catches any accidental double-evaluation in the
+// new lowering.
+global SIDE_A: int = 0
+
+global SIDE_B: int = 0
+
+fn bump_a() -> int {
+    SIDE_A = SIDE_A + 1
+    10
+}
+
+fn bump_b() -> int {
+    SIDE_B = SIDE_B + 1
+    20
+}
+
+@test(output = "10 1 0\n20 1 1")
+fn test_let_if_rvalue_side_effects() {
+    SIDE_A = 0
+    SIDE_B = 0
+    let x = if true { bump_a() } else { bump_b() }
+    print("{x} {SIDE_A} {SIDE_B}")
+    let y = if false { bump_a() } else { bump_b() }
+    print("{y} {SIDE_A} {SIDE_B}")
+}

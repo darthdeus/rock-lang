@@ -108,10 +108,7 @@ struct C { d: D? }
 struct B { c: C? }
 struct A { b: B? }
 
-// ============================================
 // 3-level chains
-// ============================================
-
 @test(output = "99")
 fn assign_3_levels_deep() {
     let a: A? = A { b: B { c: C { d: D { e: E { value: 1 } } } } }
@@ -126,10 +123,7 @@ fn assign_3_levels_null_at_middle() {
     print(a?.b?.c?.d?.e?.value ?? -1)
 }
 
-// ============================================
 // 4-level chains
-// ============================================
-
 @test(output = "77")
 fn assign_4_levels_deep() {
     let a: A? = A { b: B { c: C { d: D { e: E { value: 1 } } } } }

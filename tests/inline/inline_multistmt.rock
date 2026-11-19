@@ -1,5 +1,5 @@
-// @inline bodies with side-effecting prefix statements before the result:
-// the fluent-builder "side effect then return receiver" shape.
+// @inline bodies with side-effecting prefix statements before the result (the
+// fluent-builder shape), and indirect multi-return calls inside an inlined body.
 
 global SIDE: int = 0
 
@@ -92,4 +92,29 @@ fn test_let_call_then_multistmt_inline_stmts() {
     run_once(2)
     run_once(3)
     print(SIDE)
+}
+
+fn make_pair(x: int) -> (int, int) {
+    return (x + 1, x * 2)
+}
+
+@inline
+fn call_pair(f: fn(int) -> (int, int), x: int) -> int {
+    let (a, b) = f(x)
+    return a + b
+}
+
+@test(output = "31")
+fn test_inline_indirect_multi_return() {
+    print(call_pair(make_pair, 10))
+}
+
+// Caller locals live in low-numbered cells -- exactly what stale callee dest
+// ids would corrupt. Pin that they survive the splice.
+@test(output = "7 9 31")
+fn test_caller_locals_survive_splice() {
+    let keep_a = 7
+    let keep_b = 9
+    let r = call_pair(make_pair, 10)
+    print("{keep_a} {keep_b} {r}")
 }

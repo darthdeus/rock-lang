@@ -3,10 +3,7 @@
 
 struct Mob { name: string, health: int }
 
-// ============================================
 // Vec<T>? - nullable vector
-// ============================================
-
 @test(output = "present\nabsent")
 fn nullable_vec_null_check() {
     let mobs: [Mob]? = [Mob { name: "a", health: 10 }]
@@ -37,10 +34,7 @@ fn nullable_vec_index_after_unwrap() {
     }
 }
 
-// ============================================
 // Vec<T?> - vector of nullable elements
-// ============================================
-
 @test(output = "2\npresent\nskipped")
 fn vec_of_nullable_basic() {
     let mobs: [Mob?] = []
@@ -110,10 +104,7 @@ fn vec_of_nullable_int_sum() {
     print(sum)
 }
 
-// ============================================
 // Refinement inside loops over Vec<T?>
-// ============================================
-
 @test(output = "a\nc")
 fn vec_of_nullable_refinement_in_loop() {
     let mobs: [Mob?] = []

@@ -1,6 +1,5 @@
 // Tests for the pure-Rock JSON library (stone/engine/json.rock).
 
-// ---------------------------------------------------------------------------
 // Encoder
 
 // Whole-valued floats lose the trailing .0 -- keeps round-trips compact.
@@ -88,7 +87,6 @@ fn test_encode_nested() {
     assert_eq(json_encode(json_object(outer)), "{{\"inner\":{{\"x\":10}},\"list\":[1,2]}}")
 }
 
-// ---------------------------------------------------------------------------
 // Decoder
 
 @test
@@ -198,7 +196,6 @@ fn test_decode_nested() {
     assert_eq(json_as_str(arr[3]) ?? "", "s")
 }
 
-// ---------------------------------------------------------------------------
 // Errors
 
 @test
@@ -214,7 +211,6 @@ fn test_decode_malformed_fails() {
     assert(json_decode("\"\\uZZZZ\"") == null, "non-hex unicode fails")
 }
 
-// ---------------------------------------------------------------------------
 // Roundtrip
 
 @test
@@ -244,7 +240,6 @@ fn roundtrip_assert(v: JsonValue) {
     assert_eq(re_encoded, encoded)
 }
 
-// ---------------------------------------------------------------------------
 // Pretty encoder
 
 // Scalars and all-scalar containers stay on one line (no expansion).
@@ -306,7 +301,6 @@ fn test_pretty_roundtrips() {
     assert_eq(json_encode(decoded.unwrap()), json_encode(v))
 }
 
-// ---------------------------------------------------------------------------
 // Nesting depth
 //
 // Malformed input is data, not a programmer error: a document nested past the
@@ -389,7 +383,6 @@ fn test_json_nesting_past_limit_rejects_without_crashing() {
         "5000 nested objects must reject, not crash")
 }
 
-// ---------------------------------------------------------------------------
 // Number grammar
 //
 // JSON's number is `[-] int [frac] [exp]` where int is a lone 0 or a nonzero
@@ -448,7 +441,6 @@ fn test_json_number_grammar_admits() {
     assert_eq(jv_float(json_decode("1.5e2"), 0.0), 150.0, "1.5e2 decodes to 150")
 }
 
-// ---------------------------------------------------------------------------
 // Unescaped control characters
 //
 // JSON requires every byte below 0x20 inside a string to be escaped. The

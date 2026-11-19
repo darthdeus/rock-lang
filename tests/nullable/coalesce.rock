@@ -82,10 +82,7 @@ fn coalesce_in_expression_positions() {
     print(arr[0])
 }
 
-// ============================================
 // Controls for the nullable coalesce join: scalar and boxed value payloads
-// ============================================
-
 value BoxedPair { x: int, y: int }
 
 fn maybe_int(present: bool) -> int? {
@@ -114,9 +111,7 @@ fn boxed_value_payload_control() {
     }
 }
 
-// ============================================
 // Precedence: `??` must bind TIGHTER than assignment.
-// ============================================
 //
 // It did not: `rock-tokenizer`'s infix_bp put DoubleQuestionMark at 3 and
 // Assign at 5, so `x = a ?? b` parsed as `(x = a) ?? b` -- the assignment

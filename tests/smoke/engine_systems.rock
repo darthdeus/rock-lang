@@ -1,9 +1,6 @@
 // Test for engine system decorators
 
-// ============================================================================
 // System Registries (copy from systems.rock for standalone testing)
-// ============================================================================
-
 struct InitSystem {
     func: fn() -> (),
     name: string,
@@ -26,10 +23,7 @@ global RESET_SYSTEMS: [ResetSystem] = []
 
 global DEFAULT_UPDATE_STAGE: int = 100
 
-// ============================================================================
 // Decorators
-// ============================================================================
-
 deco init init {
     INIT_SYSTEMS.push(InitSystem {
         func: transmute(target.func),
@@ -52,10 +46,7 @@ deco init reset {
     })
 }
 
-// ============================================================================
 // System Runners
-// ============================================================================
-
 fn run_init_systems() {
     for system in INIT_SYSTEMS {
         system.func()
@@ -75,10 +66,7 @@ fn run_reset_systems() {
     }
 }
 
-// ============================================================================
 // Test Systems
-// ============================================================================
-
 global INIT_LOG: [string] = []
 global UPDATE_LOG: [string] = []
 global RESET_LOG: [string] = []
@@ -123,10 +111,7 @@ fn reset_world() {
     RESET_LOG.push("world")
 }
 
-// ============================================================================
 // Tests
-// ============================================================================
-
 @test
 fn test_systems_registered() {
     assert_eq(vec_len(INIT_SYSTEMS), 2)

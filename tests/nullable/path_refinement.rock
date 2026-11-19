@@ -6,10 +6,7 @@ struct B { c: C?, name: string }
 struct A { b: B? }
 struct Outer { inner: A? }
 
-// ==============================
 // && short-circuit variable refinement
-// ==============================
-
 @test(output = "hello\ndefault\nno inner")
 fn and_variable_refinement() {
     let o: A? = A { b: B { c: C { value: 42 }, name: "hello" } }
@@ -30,10 +27,7 @@ fn and_variable_refinement() {
     }
 }
 
-// ==============================
 // Safe navigation chain refinement
-// ==============================
-
 // a?.b?.c != null refines a, a.b, a.b.c in the body
 @test
 fn safe_nav_two_level() {
@@ -59,10 +53,7 @@ fn safe_nav_four_level() {
     }
 }
 
-// ==============================
 // Mixed && with path refinements
-// ==============================
-
 // Each clause uses refinements from prior clauses
 @test
 fn and_chain_incremental() {
@@ -90,10 +81,7 @@ fn and_condition_on_refined_path() {
     }
 }
 
-// ==============================
 // Mixed . and ?. in chains
-// ==============================
-
 // a.b?.c where a is non-nullable, b is nullable field
 @test
 fn dot_then_safenav() {
@@ -114,10 +102,7 @@ fn post_divergence_then_deeper() {
     }
 }
 
-// ==============================
 // Null cases (runtime correctness)
-// ==============================
-
 @test(output = "missing root\nmissing intermediate\nmissing leaf")
 fn safe_nav_chain_null_at_each_level() {
     let root: A? = null
@@ -128,10 +113,7 @@ fn safe_nav_chain_null_at_each_level() {
     if leaf?.b?.c != null { print("found") } else { print("missing leaf") }
 }
 
-// ==============================
 // Post-divergence path refinement (guard patterns)
-// ==============================
-
 // if a?.b == null { return } refines a.b after the guard
 @test
 fn guard_safe_nav_eq_null() {
@@ -171,10 +153,7 @@ fn else_diverges_path_refined() {
     assert_eq(a.b.name, "else")
 }
 
-// ==============================
 // While loop path refinement
-// ==============================
-
 @test(output = "3\n2\n1")
 fn while_safe_nav_path_refined() {
     let a: A? = A { b: B { c: C { value: 3 }, name: "w" } }
@@ -194,10 +173,7 @@ fn while_safe_nav_null_skip() {
     print("done")
 }
 
-// ==============================
 // Scoping: refinement doesn't leak
-// ==============================
-
 @test(output = "inside\n7")
 fn refinement_scoped_to_block() {
     let a: A? = A { b: B { c: C { value: 7 }, name: "s" } }
@@ -208,20 +184,14 @@ fn refinement_scoped_to_block() {
     print(a?.b?.c?.value ?? 0)
 }
 
-// ==============================
 // Assignment to refined paths. Regression: assigning null to a path-refined
 // nullable field was rejected.
-// ==============================
-
 struct Inner { value: int }
 struct Mid { inner: Inner?, name: string }
 struct Top { mid: Mid? }
 struct Deep { top: Top? }
 
-// ==============================
 // Basic: assign null to refined nullable field
-// ==============================
-
 // Assign null then check that the field is actually null at runtime
 @test(output = "set\nnull")
 fn assign_null_to_refined_field_verify() {
@@ -235,10 +205,7 @@ fn assign_null_to_refined_field_verify() {
     }
 }
 
-// ==============================
 // Deep chain: assign null to deeply refined path
-// ==============================
-
 @test(output = "42\ncleared")
 fn assign_null_deep_path() {
     let t = Top { mid: Mid { inner: Inner { value: 42 }, name: "deep" } }
@@ -262,10 +229,7 @@ fn assign_null_intermediate_path() {
     }
 }
 
-// ==============================
 // Guard pattern + assignment
-// ==============================
-
 // Guard, use the refined value, then clear it
 @test(output = "x\ncleared")
 fn guard_use_then_clear() {
@@ -276,10 +240,7 @@ fn guard_use_then_clear() {
     print("cleared")
 }
 
-// ==============================
 // Assign non-null: should preserve refinement ability
-// ==============================
-
 @test(output = "before\nafter")
 fn assign_nonnull_to_refined_field() {
     let t = Top { mid: Mid { inner: Inner { value: 1 }, name: "before" } }
@@ -291,10 +252,7 @@ fn assign_nonnull_to_refined_field() {
     }
 }
 
-// ==============================
 // While loop: mutate through refined path
-// ==============================
-
 @test(output = "3\n2\n1\ndone")
 fn while_loop_mutate_refined_path() {
     let t = Top { mid: Mid { inner: Inner { value: 3 }, name: "loop" } }
@@ -317,10 +275,7 @@ fn while_loop_clear_refined_path() {
     print("done")
 }
 
-// ==============================
 // Multiple refined paths: invalidate one, use another
-// ==============================
-
 struct TwoFields {
     a: Inner?,
     b: Inner?,
@@ -340,10 +295,7 @@ fn invalidate_one_path_keep_other() {
     }
 }
 
-// ==============================
 // Assign in else branch
-// ==============================
-
 @test(output = "was null\nset")
 fn assign_in_else_branch() {
     let t = Top { mid: null }
@@ -356,10 +308,7 @@ fn assign_in_else_branch() {
     }
 }
 
-// ==============================
 // Nested if with progressive refinement and assignment
-// ==============================
-
 @test(output = "a\n42\ncleared inner")
 fn nested_refinement_then_partial_clear() {
     let t = Top { mid: Mid { inner: Inner { value: 42 }, name: "a" } }
@@ -375,10 +324,7 @@ fn nested_refinement_then_partial_clear() {
     }
 }
 
-// ==============================
 // Compound assignment through refined path
-// ==============================
-
 @test(output = "11")
 fn compound_assign_through_refined_path() {
     let t = Top { mid: Mid { inner: Inner { value: 10 }, name: "x" } }
@@ -388,10 +334,7 @@ fn compound_assign_through_refined_path() {
     }
 }
 
-// ==============================
 // Refinement after assignment restoring value
-// ==============================
-
 @test(output = "cleared\nrestored\nhello")
 fn clear_then_restore_then_recheck() {
     let t = Top { mid: Mid { inner: null, name: "hello" } }

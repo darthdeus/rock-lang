@@ -138,12 +138,9 @@ fn test_multiple_conditional_branches() {
     print(category)
 }
 
-// ============================================
 // If-expressions in every value position. These once lowered to IIFEs;
 // they now lower inline, and the cases below pin that the inline forms
 // keep their behavior.
-// ============================================
-
 // Test 1: If-expression in value position (assignment)
 @test
 fn test_if_expr_in_assignment() {

@@ -137,7 +137,6 @@ fn test_defer_expression_in_nested_blocks() {
     print("function end")
 }
 
-// ============================================
 // Defer and lambdas. A lambda lowered
 // while an enclosing `defer` is pending must NOT splice that defer into its
 // own body: the lambda is a separate fn scope whose `return` runs only the
@@ -145,8 +144,6 @@ fn test_defer_expression_in_nested_blocks() {
 // defer into every lambda call (miscompile) and, when the defer body created
 // the lambda, recursed forever during lowering (compiler stack overflow).
 // Co-fn variants live in closures/capture_semantics_cofn.rock.
-// ============================================
-
 global R1: int = 0
 
 fn defer_then_lambda() -> int {
@@ -246,14 +243,11 @@ fn test_multi_defer_lambda_early_return() {
     print("a={a} b={b} R={R5}")
 }
 
-// ============================================
 // Defer and locals. A defer body reads its locals when it RUNS, at scope
 // exit, not when it is registered; it sees the binding in scope at the
 // `defer`, not a later shadow; a loop body's defer runs once per iteration,
 // on `continue` and `break` too; and a `return` value is computed before
 // the defers run.
-// ============================================
-
 global DL: string = ""
 
 fn dl(s: string) { DL = DL + s }

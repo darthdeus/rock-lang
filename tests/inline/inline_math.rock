@@ -1,6 +1,5 @@
-// @inline vector math and struct-returning helpers. The returned struct
-// literal is exposed to the caller, where scalarization can fire; results
-// must match the out-of-line calls.
+// @inline vector math, struct-returning helpers and float coercions on inlined
+// int parameters; results must match the out-of-line calls.
 
 struct FixVec2 {
     x: float,
@@ -84,4 +83,19 @@ fn test_scale_and_convert() {
     let i = IVec2 { x: 7, y: -4 }
     let v = iv_to_v(i)
     print("{v.x as int} {v.y as int}")
+}
+
+fn fit(w: int, h: int, available: float) -> Vec2 {
+    let width = 256
+    let height = max(1, (width as float * h as float / w as float) as int)
+    let size = v(width as float, height as float)
+    let factor = min(1.0, available / size.x)
+    return size * factor
+}
+
+@test(output = "32 16 256 128")
+fn inlined_numeric_parameters_preserve_float_coercions() {
+    let small = fit(128, 64, 32.0)
+    let large = fit(128, 64, 512.0)
+    print("{small.x as int} {small.y as int} {large.x as int} {large.y as int}")
 }

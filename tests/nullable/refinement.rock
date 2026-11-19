@@ -2,10 +2,7 @@
 // the branch. The second half holds adversarial cases around closures,
 // reassignment and control-flow edges.
 
-// ============================================
 // Helper structures and functions
-// ============================================
-
 struct Item {
     file: string,
     last_modified: int,
@@ -15,10 +12,7 @@ fn file_modtime(_p: string) -> int? {
     return 5
 }
 
-// ============================================
 // Basic Nullable Refinement Tests
-// ============================================
-
 @test(output = "4")
 fn basic_if_nullable() {
     let x: int? = 3
@@ -59,10 +53,7 @@ fn if_else_nullable_else() {
     x = null
 }
 
-// ============================================
 // Nested Refinement Tests
-// ============================================
-
 @test(output = "updated 5", type_holes = [[0, "int"]])
 fn nullable_refine_nested_else() {
     let item = Item{ file: "foo", last_modified: 0 }
@@ -96,10 +87,7 @@ fn double_refinement_chain() {
     x = null
 }
 
-// ============================================
 // Complex Refinement Scenarios
-// ============================================
-
 @test(output = "5\n10", type_holes = [[4, "int"], [5, "int"]])
 fn refinement_with_multiple_variables() {
     let a: int? = 5
@@ -125,10 +113,7 @@ fn refinement_with_string_interpolation() {
     }
 }
 
-// ============================================
 // Refinement with Different Operators
-// ============================================
-
 @test(output = "not null")
 fn refinement_with_is_null() {
     let x: int? = 5
@@ -149,10 +134,7 @@ fn refinement_with_negated_equality() {
     }
 }
 
-// ============================================
 // Safe Navigation with Refinement
-// ============================================
-
 struct Point {
     x: int,
     y: int,
@@ -169,10 +151,7 @@ fn refinement_complex_field_access() {
     }
 }
 
-// ============================================
 // Refinement in Loops
-// ============================================
-
 @test(output = "1\n2\n3")
 fn refinement_in_while_loop() {
     let counter: int? = 1
@@ -187,10 +166,7 @@ fn refinement_in_while_loop() {
     }
 }
 
-// ============================================
 // Refinement with Function Calls
-// ============================================
-
 fn process_value(x: int) -> int {
     return x * 2
 }
@@ -205,10 +181,7 @@ fn refinement_with_function_call() {
     }
 }
 
-// ============================================
 // Advanced Refinement Patterns
-// ============================================
-
 @test(output = "either null")
 fn refinement_or_conditions() {
     let a: int? = 5

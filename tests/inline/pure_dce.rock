@@ -1,10 +1,5 @@
-// Dead-code elimination for unused @pure calls.
-//
-// A call to a `@pure` function whose result is discarded (bare
-// expression statement, or bound to `_`) can be dropped — pure by
-// definition means no observable side effect. Arguments themselves
-// must also be dup-safe (no side-effecting sub-expressions) so we're
-// not throwing away an unrelated effect buried in an arg.
+// Unused @pure calls are dropped unless an argument has an effect; a @pure
+// function that calls a @debug_impure one is demoted to impure but still runs.
 
 @pure
 fn square(x: int) -> int { return x * x }
@@ -34,4 +29,30 @@ fn print_and_return(x: int) -> int {
 fn test_pure_call_with_impure_arg_preserved() {
     sum(print_and_return(1), 2)
     print("ok")
+}
+
+@debug_impure
+inline(lua) fn trace_int(n: int) = "-- trace {n}"
+
+@debug_impure
+inline(js) fn trace_int(n: int) = "/* trace {n} */"
+
+@pure
+fn noisy_identity(n: int) -> int {
+    trace_int(n)
+    return n
+}
+
+@pure
+fn shout(n: int) -> int {
+    print("shout")
+    return n * 2
+}
+
+@test(output = "7\nshout\n20")
+fn test_debug_impure_demotes_but_compiles() {
+    let x = noisy_identity(7)
+    print(x)
+    let r = shout(10)
+    print(r)
 }

@@ -16,10 +16,7 @@
 // overload accepts an explicit site key — tests exercising multiple
 // lines pass it so calls share a dedup key.
 
-// ============================================================
 // log_once
-// ============================================================
-
 // dedup_count reflects the number of unique sites remembered.
 // log_once also prints, so the expected output is the [DC] line plus the count.
 @test(output = "[DC] x\n1")
@@ -67,10 +64,7 @@ fn test_log_dedup_count_many_sites() {
     }
 }
 
-// ============================================================
 // log_throttled — tested via the mockable seam log_throttled_with_now
-// ============================================================
-
 // Two distinct sites are independent: both fire immediately, both then suppressed.
 @test(output = "[A] a\n[B] b")
 fn test_log_throttled_distinct_sites_independent() {
@@ -103,7 +97,6 @@ fn test_log_throttled_just_under_boundary_suppressed() {
     log_throttled_with_now(0.499, "E", "go", 0.5, "boundary")
 }
 
-// ============================================================
 // B3 (adversarial): edge-case interval values for log_throttled
 //
 // The throttle predicate is `(now - last) < interval`. With:
@@ -122,8 +115,6 @@ fn test_log_throttled_just_under_boundary_suppressed() {
 // comparison is false. If the predicate were ever rewritten as
 // `(now - last) >= interval` (negated), NaN would flip to suppress-forever.
 // Severity: documented behavior, not a bug.
-// ============================================================
-
 // Rock has no nan() literal; 0.0 / 0.0 constructs NaN.
 @test(output = "[Z] go\n[Z] go\n[Z] go\n[N] go\n[N] go\n[N] go\n[NAN] go\n[NAN] go\n[NAN] go")
 fn test_log_throttled_degenerate_intervals_fire_every_call() {
@@ -141,7 +132,6 @@ fn test_log_throttled_degenerate_intervals_fire_every_call() {
     log_throttled_with_now(2.0, "NAN", "go", nan, "nan-key")
 }
 
-// ============================================================
 // B9 (adversarial): log_once dedup key is the call site, NOT
 // (call_site, message). A single textual call site that emits
 // different messages on each invocation is still a single dedup
@@ -153,8 +143,6 @@ fn test_log_throttled_degenerate_intervals_fire_every_call() {
 // established suppression contract for varying interpolated
 // messages and warrants its own discussion. Catching the
 // behavioral change at test time makes that visible.
-// ============================================================
-
 @test(output = "[M] i=0")
 fn test_log_once_dedup_is_site_only_not_message() {
     log_reset_dedup()
@@ -164,10 +152,7 @@ fn test_log_once_dedup_is_site_only_not_message() {
     }
 }
 
-// ============================================================
 // Forwarding wrapper preserves outermost call site for dedup
-// ============================================================
-
 // Wrapper macro: __SITE__ resolves to the *user's* call site (where
 // `forward_once(...)` is written), not the macro body or any helper —
 // so 10 iterations all share one dedup key.
@@ -184,10 +169,7 @@ fn test_log_once_through_wrapper_dedupes_by_outer_site() {
     }
 }
 
-// ============================================================
 // log_throttled now-source seam: log_set_now / log_clear_now
-// ============================================================
-
 // When the engine sets the now-source, log_throttled uses it instead of
 // os.clock(). Drive it like a fake clock and confirm interval gating works.
 @test(output = "[NS] tick\n[NS] tick\n[NS] tick")
@@ -226,10 +208,7 @@ fn test_log_throttled_falls_back_to_os_clock() {
 }
 
 
-// ============================================================
 // log_suppression_summary / the reset contract
-// ============================================================
-
 // A reset clears everything a suppression is recorded in -- the dedup and
 // throttle stamps, the counts and last messages the summary reads, and the
 // once-per-process latch that stops the summary running twice. Half a reset
@@ -289,10 +268,7 @@ fn test_log_suppression_summary_orders_by_count_then_site() {
     log_suppression_summary()
 }
 
-// ============================================================
 // Levels: a deduplicated or throttled site is not an error by construction
-// ============================================================
-
 // A warning site obeys the level gate that an error site ignores: under
 // error-only logging it is silent, and so is its suppression summary line.
 @test(output = "[E] kept")
