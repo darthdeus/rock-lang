@@ -1,0 +1,30 @@
+// `@test` harness attributes: `@ignore` skips a test whatever its body or
+// expectation, and `returns = <literal>` compares the returned value host-side
+// on every backend, alone or together with an `output` expectation.
+
+@ignore
+@test
+fn test_should_be_ignored() {
+    assert(false, "This test should be ignored and not fail")
+}
+
+@ignore
+@test(output = "Hello World")
+fn test_output_ignored() {
+    print("This should not run")
+}
+
+@test(returns = 42)
+fn returns_an_int() -> int { return 42 }
+
+@test(returns = -1.5)
+fn returns_a_float() -> float { return -1.5 }
+
+@test(returns = true)
+fn returns_a_bool() -> bool { return true }
+
+@test(returns = 6, output = "hi")
+fn returns_a_value_after_printing() -> int {
+    print("hi")
+    return 6
+}

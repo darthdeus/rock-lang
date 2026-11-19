@@ -37,3 +37,17 @@ fn test_expand_with_macro_and_site_literal() {
     let s = site_paren()
     assert(s.contains("expand_annotation.rock:37"), "got: {s}")
 }
+
+// Thin shims over Lua stdlib symbols, including the statement-only form.
+@inline inline(lua) fn my_sqrt(x: float) -> float = "math.sqrt(x)"
+@inline inline(lua) fn my_upper(s: string) -> string = "string.upper(s)"
+
+@inline inline(lua) fn my_seed(n: int) = "math.randomseed(n)"
+
+@test(backends = "lua", output = "seeded")
+fn test_lua_annotation_shims() {
+    assert_eq(my_sqrt(9.0), 3.0, "sqrt(9) == 3")
+    assert_eq(my_upper("abc"), "ABC", "upper")
+    my_seed(42)
+    print("seeded")
+}

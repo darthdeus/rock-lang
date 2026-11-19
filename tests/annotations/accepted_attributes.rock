@@ -1,4 +1,7 @@
-// Accepted positions and argument shapes adjacent to registry rejections.
+// Accepted attribute positions and argument shapes adjacent to registry
+// rejections, and a @shader(fragment) fn calling GPU-only texture(): it is
+// compiled (never executed) because its annotation exempts the call from the
+// CPU-call rejection.
 
 @nomangle
 struct NamedRecord {
@@ -32,4 +35,9 @@ fn role_params(@attr a: int, @uniform b: int, @instance c: int, @size(32) d: int
 @test
 fn test_role_and_integer_size_params() {
     assert(role_params(1, 2, 3, 4) == 10)
+}
+
+@shader(fragment)
+fn gpu_only_test_frag(s: Sampler2D, tc: Vec2) -> Vec4 {
+    return texture(s, tc)
 }

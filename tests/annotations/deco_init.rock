@@ -1,21 +1,58 @@
-// `deco init` decorators with arguments: a default parameter, several
-// optional parameters selected by call shape, and decorators declared ahead of
-// their use as if from another module.
+// `deco init` decorators: decorated functions register at init and undecorated
+// ones do not, `target.name` captures the name whatever the parameter list, and
+// decorator arguments may be required, defaulted or optional by call shape.
+
+global PARAM_NAMES: [string] = []
+
+deco init capture_params {
+    vec_push(PARAM_NAMES, target.name)
+}
+
+@capture_params
+fn no_params() {
+    print("no params")
+}
+
+@capture_params
+fn one_param(x: int) {
+    print("x = {x}")
+}
+
+@capture_params
+fn two_params(name: string, age: int) {
+    print("{name} is {age}")
+}
+
+@capture_params
+fn many_params(a: int, b: int, c: int, d: int) {
+    print("{a} {b} {c} {d}")
+}
+
+fn not_registered() {
+    print("not registered")
+}
+
+@test
+fn test_function_names_captured() {
+    // Init decorators run at module load time, before any test.
+    assert_eq(PARAM_NAMES.len, 4, "only the four decorated functions register")
+    assert(PARAM_NAMES.any(_ == "no_params"), "no_params should be registered")
+    assert(PARAM_NAMES.any(_ == "one_param"), "one_param should be registered")
+    assert(PARAM_NAMES.any(_ == "two_params"), "two_params should be registered")
+    assert(PARAM_NAMES.any(_ == "many_params"), "many_params should be registered")
+}
 
 global REGISTRATIONS: [string] = []
 
-// Decorator with default argument
 deco init register(priority: int = 100) {
     vec_push(REGISTRATIONS, "priority({priority}): {target.name}")
 }
 
-// Use default priority
 @register
 fn system_default() {
     print("default priority system")
 }
 
-// Use explicit priority
 @register(priority = 10)
 fn system_low_priority() {
     print("low priority system")
@@ -34,11 +71,8 @@ fn test_default_args_work() {
     assert(REGISTRATIONS.any(_ == "priority(50): system_mid_priority"), "system_mid_priority should have priority 50")
 }
 
-// --- One decorator whose optional params cover several call shapes ---
-
 global opt_registered: [string] = []
 
-// Single decorator with optional parameters covers multiple call shapes
 deco init register_opt(priority: int = -1, tag: string = "") {
     if priority == -1 && tag == "" {
         vec_push(opt_registered, "default: {target.name}")
@@ -49,19 +83,16 @@ deco init register_opt(priority: int = -1, tag: string = "") {
     }
 }
 
-// Use no args (all defaults)
 @register_opt
 fn opt_system_default() {
     print("default system")
 }
 
-// Use one arg
 @register_opt(priority = 10)
 fn opt_system_priority() {
     print("priority system")
 }
 
-// Use two args
 @register_opt(priority = 5, tag = "physics")
 fn opt_system_tagged() {
     print("tagged system")
@@ -69,71 +100,49 @@ fn opt_system_tagged() {
 
 @test
 fn test_overload_selection() {
-    // The provided args select the branch.
     assert_eq(opt_registered.len, 3, "Expected 3 registrations")
     assert(opt_registered.any(_ == "default: opt_system_default"), "Default should be selected for @register_opt")
     assert(opt_registered.any(_ == "priority(10): opt_system_priority"), "Priority should be selected for @register_opt(priority=10)")
     assert(opt_registered.any(_ == "priority(5), tag(physics): opt_system_tagged"), "Tagged should be selected for @register_opt(priority=5, tag=\"physics\")")
 }
 
-// --- Decorators declared before use, as if from another module ---
+global TAGGED: [string] = []
 
-// Decorator registry - simulates being in a separate "systems" module
-global CROSS_MODULE_REGISTRY: [string] = []
-
-// Simple decorator - would be in systems.rock in real usage
-deco init cross_module_decorator {
-    vec_push(CROSS_MODULE_REGISTRY, "registered: {target.name}")
+deco init register_tagged(tag: string) {
+    vec_push(TAGGED, "registered({tag}): {target.name}")
 }
 
-// Parameterized decorator - tests arg + deco across modules
-deco init cross_module_with_arg(tag: string) {
-    vec_push(CROSS_MODULE_REGISTRY, "registered({tag}): {target.name}")
-}
-
-// These functions simulate being in a different file (e.g., game.rock)
-// In real multi-file projects, the decorators above would be in a different .rock file
-
-@cross_module_decorator
-fn system_a() {
-    print("system_a executed")
-}
-
-@cross_module_decorator
-fn system_b() {
-    print("system_b executed")
-}
-
-@cross_module_with_arg(tag = "physics")
+@register_tagged(tag = "physics")
 fn physics_system() {
     print("physics_system executed")
 }
 
-@cross_module_with_arg(tag = "render")
+@register_tagged(tag = "render")
 fn render_system() {
     print("render_system executed")
 }
 
 @test
-fn test_cross_module_registration() {
-    assert_eq(CROSS_MODULE_REGISTRY.len, 4, "Expected 4 registrations")
-    assert(CROSS_MODULE_REGISTRY.any(_ == "registered: system_a"), "system_a should be registered")
-    assert(CROSS_MODULE_REGISTRY.any(_ == "registered: system_b"), "system_b should be registered")
-    assert(CROSS_MODULE_REGISTRY.any(_ == "registered(physics): physics_system"), "physics_system should be registered with tag")
-    assert(CROSS_MODULE_REGISTRY.any(_ == "registered(render): render_system"), "render_system should be registered with tag")
+fn test_required_arg_registration() {
+    assert_eq(TAGGED.len, 2, "Expected 2 registrations")
+    assert(TAGGED.any(_ == "registered(physics): physics_system"), "physics_system should be registered with tag")
+    assert(TAGGED.any(_ == "registered(render): render_system"), "render_system should be registered with tag")
 }
 
 // Decorated functions stay callable.
-@test(output="default priority system\nlow priority system\nmid priority system\ndefault system\npriority system\ntagged system\nsystem_a executed\nsystem_b executed\nphysics_system executed\nrender_system executed")
+@test(output="no params\nx = 1\nAda is 36\n1 2 3 4\nnot registered\ndefault priority system\nlow priority system\nmid priority system\ndefault system\npriority system\ntagged system\nphysics_system executed\nrender_system executed")
 fn test_decorated_functions_work() {
+    no_params()
+    one_param(1)
+    two_params("Ada", 36)
+    many_params(1, 2, 3, 4)
+    not_registered()
     system_default()
     system_low_priority()
     system_mid_priority()
     opt_system_default()
     opt_system_priority()
     opt_system_tagged()
-    system_a()
-    system_b()
     physics_system()
     render_system()
 }
