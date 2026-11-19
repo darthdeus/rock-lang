@@ -62,10 +62,6 @@ fn reassign_nullable_local() {
     if a != null { print("{a.x}") }
 }
 
-fn make_v2_scalarized_nullable(x: int, y: int) -> V2 {
-    return V2 { x: x, y: y }
-}
-
 // `dest: V2? = null`: the cdata-ABI nullable slot that triggered the
 // widening at the call site. Sum the components to distinguish from
 // the default-arg path (which would receive nil -> 0).
@@ -79,10 +75,8 @@ fn consume_or_default(dest: V2? = null) -> int {
 
 @test(output = "30")
 fn scalarized_value_at_nullable_arg() {
-    let v = make_v2_scalarized_nullable(10, 20)
-    // Receiving nil here would return -1.
-    let got = consume_or_default(v)
-    print(got)
+    let v = make_v2(10, 20)
+    print(consume_or_default(v))
 }
 
 // The same local consumed at a V2 slot and at a V2? slot; both must observe
@@ -91,7 +85,7 @@ fn consume_nonnull(d: V2) -> int { return d.x * 100 + d.y }
 
 @test(output = "1020\n30")
 fn scalarized_value_at_both_arg_shapes() {
-    let v = make_v2_scalarized_nullable(10, 20)
+    let v = make_v2(10, 20)
     print(consume_nonnull(v))
     print(consume_or_default(v))
 }

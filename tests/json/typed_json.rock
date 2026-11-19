@@ -89,17 +89,17 @@ fn typed_json_flat_enum_fields_and_widened_payloads() {
     print("ok")
 }
 
-enum Event_typed_json_records { Empty, Text(string), Pair(int, float), Names([string]) }
+enum ChangeEvent { Empty, Text(string), Pair(int, float), Names([string]) }
 
-value Tint_typed_json_records { red: float, visible: bool }
+value ValueTint { red: float, visible: bool }
 
-value Change { event: Event_typed_json_records, count: int }
+value Change { event: ChangeEvent, count: int }
 
-struct Record_typed_json_records {
+struct ChangeLog {
     rows: [Change],
     title: string?,
     weights: Map<string, float>,
-    tint: Tint_typed_json_records,
+    tint: ValueTint,
 }
 
 @test(output = "ok")
@@ -107,15 +107,15 @@ fn typed_json_records_roundtrip_and_reject_malformed_fields() {
     let codec = JsonRecordCodec {}
     let weights: Map<string, float> = map_new()
     weights["alpha"] = 1.25
-    let source = Record_typed_json_records { rows: [Change { event: Event_typed_json_records::Empty, count: 1 },
-        Change { event: Event_typed_json_records::Pair(5, 2.5), count: 2 },
-        Change { event: Event_typed_json_records::Names(["a", "b"]), count: 3 }],
-        title: null, weights, tint: Tint_typed_json_records { red: 0.75, visible: false } }
+    let source = ChangeLog { rows: [Change { event: ChangeEvent::Empty, count: 1 },
+        Change { event: ChangeEvent::Pair(5, 2.5), count: 2 },
+        Change { event: ChangeEvent::Names(["a", "b"]), count: 3 }],
+        title: null, weights, tint: ValueTint { red: 0.75, visible: false } }
     let wire = json_record_encode(codec, source)
     let copy = json_record_decode(codec, json_decode(json_encode(wire)).unwrap(), source).unwrap()
     assert(copy == source)
     assert(!same_ref(copy, source))
-    copy.rows[0] = Change { event: Event_typed_json_records::Text("changed"), count: 8 }
+    copy.rows[0] = Change { event: ChangeEvent::Text("changed"), count: 8 }
     assert(source.rows[0].count == 1)
     let fields = json_as_object(wire).unwrap()
     fields["rows"] = json_str("wrong")

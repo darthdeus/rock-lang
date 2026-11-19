@@ -75,15 +75,15 @@ fn boxed_wide_projection_preserves_selected_snapshots_and_opaque_children() {
 
 value Point { x: int = 3, y: int = 5 }
 
-nobox value Flat_projection_globals { x: int = 7, y: int = 11 }
+nobox value DefaultFlat { x: int = 7, y: int = 11 }
 
-value Config { child: Point = Point {}, optional: Point? = Point {}, flat: Flat_projection_globals? = Flat_projection_globals {}, spare: int = 13 }
+value Config { child: Point = Point {}, optional: Point? = Point {}, flat: DefaultFlat? = DefaultFlat {}, spare: int = 13 }
 
 global CONFIG: Config = Config {}
 
 global MAYBE: Config? = Config {}
 
-global FLAT: Flat_projection_globals? = Flat_projection_globals {}
+global FLAT: DefaultFlat? = DefaultFlat {}
 
 value Generic<T> { child: T, spare: int }
 
@@ -93,7 +93,7 @@ fn mutate() -> int { CONFIG.child.y = 99; CONFIG.optional = null; CONFIG.flat = 
 
 fn observe(p: Point, ignored: int) -> int { p.y }
 
-fn narrowed_projection_globals() -> int { if MAYBE != null { return MAYBE.child.y }; return -1 }
+fn maybe_child_y() -> int { if MAYBE != null { return MAYBE.child.y }; return -1 }
 
 fn flat() -> int { if FLAT != null { return FLAT.y }; return -1 }
 
@@ -116,55 +116,51 @@ fn global_projections_preserve_snapshots_and_read_order() {
     print(selected_flat?.y ?? -1)
     print(CONFIG.optional == null)
     print(CONFIG.flat == null)
-    print(narrowed_projection_globals())
+    print(maybe_child_y())
     MAYBE = null
-    print(narrowed_projection_globals())
+    print(maybe_child_y())
     print(flat())
     FLAT = null
     print(flat())
 }
 
-nobox value Point_projection_snapshots { x: int, y: int }
+nobox value Branch { spare: int, child: Flat? }
 
-nobox value Branch { spare: int, child: Point_projection_snapshots? }
-
-value PlainPoint { x: int, y: int }
-
-value Box { child: PlainPoint?, spare: int }
+value Box { child: Plain?, spare: int }
 
 struct State { branch: Branch, ordinary: Box, calls: int }
 
-fn selected_projection_snapshots(v: Branch) -> Point_projection_snapshots? { v.child }
+fn branch_child(v: Branch) -> Flat? { v.child }
 
-fn nested_projection_snapshots(v: Branch) -> int { if let p = v.child { return p.y }; return -1 }
+fn branch_child_y(v: Branch) -> int { if let p = v.child { return p.y }; return -1 }
 
-fn ordinary(v: Box) -> PlainPoint? { v.child }
+fn ordinary(v: Box) -> Plain? { v.child }
 
-fn produced_projection_snapshots(s: State) -> Branch { s.calls += 1; return s.branch }
+fn produced_branch(s: State) -> Branch { s.calls += 1; return s.branch }
 
-fn mutate_projection_snapshots(s: State) -> int { s.branch.child = Point_projection_snapshots { x: 30, y: 40 }; return 1 }
+fn mutate_branch(s: State) -> int { s.branch.child = Flat { x: 30, y: 40 }; return 1 }
 
-fn ordered_projection_snapshots(v: Branch) -> int { sum(v.spare, { v = Branch { spare: 99, child: null }; 1 }) }
+fn ordered_branch(v: Branch) -> int { sum(v.spare, { v = Branch { spare: 99, child: null }; 1 }) }
 
 @test(output = "5\n8\n5\n40\n13\n40\n1\ntrue\n-1")
 fn immediate_projections_preserve_nullable_snapshots_and_evaluation_order() {
     let s = State {
-        branch: Branch { spare: 7, child: Point_projection_snapshots { x: 3, y: 5 } },
-        ordinary: Box { child: PlainPoint { x: 11, y: 13 }, spare: 17 }, calls: 0 }
-    let saved = selected_projection_snapshots(s.branch)
+        branch: Branch { spare: 7, child: Flat { x: 3, y: 5 } },
+        ordinary: Box { child: Plain { x: 11, y: 13 }, spare: 17 }, calls: 0 }
+    let saved = branch_child(s.branch)
     let opaque = ordinary(s.ordinary)
-    print(nested_projection_snapshots(s.branch))
-    print(ordered_projection_snapshots(s.branch))
+    print(branch_child_y(s.branch))
+    print(ordered_branch(s.branch))
     print(saved?.y ?? -1)
-    mutate_projection_snapshots(s)
-    print(nested_projection_snapshots(s.branch))
+    mutate_branch(s)
+    print(branch_child_y(s.branch))
     if s.ordinary.child != null { s.ordinary.child.y = 100 }
     print(opaque?.y ?? -1)
-    print(produced_projection_snapshots(s).child?.y ?? -1)
+    print(produced_branch(s).child?.y ?? -1)
     print(s.calls)
     s.branch.child = null
-    print(selected_projection_snapshots(s.branch) == null)
-    print(nested_projection_snapshots(s.branch))
+    print(branch_child(s.branch) == null)
+    print(branch_child_y(s.branch))
 }
 
 struct P { x: int, y: int }
@@ -215,9 +211,9 @@ fn folded_reads_stay_ordered_against_writes() {
     print("{field_before_store(p)} {field_before_call(q)} {cell_before_store(1)} {length_before_push()} {product} {marks}")
 }
 
-value Point_covered_field_reads { x: float, y: float }
+value FloatPoint { x: float, y: float }
 
-value Layer { volume: float, speed: float, at: Point_covered_field_reads, name: string }
+value Layer { volume: float, speed: float, at: FloatPoint, name: string }
 
 struct Step { layers: Vec<Layer> }
 
@@ -227,8 +223,8 @@ fn count() -> int { calls += 1; return 1 }
 
 fn step() -> Step {
     return Step { layers: [
-        Layer { volume: 1.0, speed: 2.0, at: Point_covered_field_reads { x: 3.0, y: 4.0 }, name: "ab" },
-        Layer { volume: 5.0, speed: 6.0, at: Point_covered_field_reads { x: 7.0, y: 8.0 }, name: "cde" },
+        Layer { volume: 1.0, speed: 2.0, at: FloatPoint { x: 3.0, y: 4.0 }, name: "ab" },
+        Layer { volume: 5.0, speed: 6.0, at: FloatPoint { x: 7.0, y: 8.0 }, name: "cde" },
     ] }
 }
 

@@ -184,45 +184,45 @@ fn test_scalarized_abi() {
     print("{sum_xy(v).floor()}")
 }
 
-value V2_scalar_abi_container {
+value IV2 {
     x: int,
     y: int,
 }
 
-fn make_v2_scalar_abi_container(a: int, b: int) -> V2_scalar_abi_container {
-    return V2_scalar_abi_container { x: a, y: b }
+fn make_iv2(a: int, b: int) -> IV2 {
+    return IV2 { x: a, y: b }
 }
 
-fn v2_sum(v: V2_scalar_abi_container) -> int {
+fn iv2_sum(v: IV2) -> int {
     return v.x + v.y
 }
 
-fn v2_scale(v: V2_scalar_abi_container, k: int) -> V2_scalar_abi_container {
-    return V2_scalar_abi_container { x: v.x * k, y: v.y * k }
+fn iv2_scale(v: IV2, k: int) -> IV2 {
+    return IV2 { x: v.x * k, y: v.y * k }
 }
 
 // --- 1. Arena of value structs ---------------------------------------------
 
 @test(output = "3\n7\n10")
 fn test_arena_value_insert_get() {
-    let a: Arena<V2_scalar_abi_container> = arena_new()
-    let e1 = a.insert(V2_scalar_abi_container { x: 1, y: 2 })
-    let e2 = a.insert(make_v2_scalar_abi_container(3, 4))
-    let e3 = a.insert(v2_scale(V2_scalar_abi_container { x: 1, y: 1 }, 5))
-    let v1 = e1.get() ?? V2_scalar_abi_container { x: 0, y: 0 }
-    let v2 = e2.get() ?? V2_scalar_abi_container { x: 0, y: 0 }
-    let v3 = e3.get() ?? V2_scalar_abi_container { x: 0, y: 0 }
-    print(v2_sum(v1))
-    print(v2_sum(v2))
-    print(v2_sum(v3))
+    let a: Arena<IV2> = arena_new()
+    let e1 = a.insert(IV2 { x: 1, y: 2 })
+    let e2 = a.insert(make_iv2(3, 4))
+    let e3 = a.insert(iv2_scale(IV2 { x: 1, y: 1 }, 5))
+    let v1 = e1.get() ?? IV2 { x: 0, y: 0 }
+    let v2 = e2.get() ?? IV2 { x: 0, y: 0 }
+    let v3 = e3.get() ?? IV2 { x: 0, y: 0 }
+    print(iv2_sum(v1))
+    print(iv2_sum(v2))
+    print(iv2_sum(v3))
 }
 
 @test(output = "21")
 fn test_arena_value_for_iter() {
-    let a: Arena<V2_scalar_abi_container> = arena_new()
-    a.insert(V2_scalar_abi_container { x: 1, y: 2 })
-    a.insert(V2_scalar_abi_container { x: 3, y: 4 })
-    a.insert(V2_scalar_abi_container { x: 5, y: 6 })
+    let a: Arena<IV2> = arena_new()
+    a.insert(IV2 { x: 1, y: 2 })
+    a.insert(IV2 { x: 3, y: 4 })
+    a.insert(IV2 { x: 5, y: 6 })
     let sum = 0
     for (_, v) in a {
         sum = sum + v.x + v.y
@@ -232,62 +232,62 @@ fn test_arena_value_for_iter() {
 
 // --- 2. Coroutine yield of value types ------------------------------------
 
-co fn yield_value_call() -> Coroutine<V2_scalar_abi_container> {
-    yield make_v2_scalar_abi_container(1, 2)
-    yield make_v2_scalar_abi_container(10, 20)
+co fn yield_value_call() -> Coroutine<IV2> {
+    yield make_iv2(1, 2)
+    yield make_iv2(10, 20)
 }
 
 @test(output = "3\n30")
 fn test_yield_value_call() {
     let c = yield_value_call()
-    let a = c.resume() ?? V2_scalar_abi_container { x: 0, y: 0 }
-    let b = c.resume() ?? V2_scalar_abi_container { x: 0, y: 0 }
-    print(v2_sum(a))
-    print(v2_sum(b))
+    let a = c.resume() ?? IV2 { x: 0, y: 0 }
+    let b = c.resume() ?? IV2 { x: 0, y: 0 }
+    print(iv2_sum(a))
+    print(iv2_sum(b))
 }
 
-co fn yield_value_literal() -> Coroutine<V2_scalar_abi_container> {
-    yield V2_scalar_abi_container { x: 7, y: 8 }
-    yield V2_scalar_abi_container { x: 100, y: 200 }
+co fn yield_value_literal() -> Coroutine<IV2> {
+    yield IV2 { x: 7, y: 8 }
+    yield IV2 { x: 100, y: 200 }
 }
 
 @test(output = "15\n300")
 fn test_yield_value_literal() {
     let c = yield_value_literal()
-    let a = c.resume() ?? V2_scalar_abi_container { x: 0, y: 0 }
-    let b = c.resume() ?? V2_scalar_abi_container { x: 0, y: 0 }
-    print(v2_sum(a))
-    print(v2_sum(b))
+    let a = c.resume() ?? IV2 { x: 0, y: 0 }
+    let b = c.resume() ?? IV2 { x: 0, y: 0 }
+    print(iv2_sum(a))
+    print(iv2_sum(b))
 }
 
-co fn yield_value_local() -> Coroutine<V2_scalar_abi_container> {
-    let v = V2_scalar_abi_container { x: 5, y: 6 }
+co fn yield_value_local() -> Coroutine<IV2> {
+    let v = IV2 { x: 5, y: 6 }
     yield v
-    let w = make_v2_scalar_abi_container(50, 60)
+    let w = make_iv2(50, 60)
     yield w
 }
 
 @test(output = "11\n110")
 fn test_yield_value_local() {
     let c = yield_value_local()
-    let a = c.resume() ?? V2_scalar_abi_container { x: 0, y: 0 }
-    let b = c.resume() ?? V2_scalar_abi_container { x: 0, y: 0 }
-    print(v2_sum(a))
-    print(v2_sum(b))
+    let a = c.resume() ?? IV2 { x: 0, y: 0 }
+    let b = c.resume() ?? IV2 { x: 0, y: 0 }
+    print(iv2_sum(a))
+    print(iv2_sum(b))
 }
 
 // --- 3. FunctionRef to fn with value-typed params -------------------------
 
 @test(output = "30\n200\n7")
 fn test_fn_ref_value_param() {
-    let f: fn(V2_scalar_abi_container) -> int = v2_sum
-    let g: fn(V2_scalar_abi_container, int) -> V2_scalar_abi_container = v2_scale
-    print(f(V2_scalar_abi_container { x: 10, y: 20 }))
-    let scaled = g(V2_scalar_abi_container { x: 10, y: 10 }, 10)
+    let f: fn(IV2) -> int = iv2_sum
+    let g: fn(IV2, int) -> IV2 = iv2_scale
+    print(f(IV2 { x: 10, y: 20 }))
+    let scaled = g(IV2 { x: 10, y: 10 }, 10)
     print(scaled.x + scaled.y)
     // Also verify: fn-ref called on a value-returning Rock call as an arg
-    let h: fn(V2_scalar_abi_container) -> int = v2_sum
-    print(h(make_v2_scalar_abi_container(3, 4)))
+    let h: fn(IV2) -> int = iv2_sum
+    print(h(make_iv2(3, 4)))
 }
 
 // --- 4. defer with value-returning call -----------------------------------
@@ -297,7 +297,7 @@ fn test_fn_ref_value_param() {
 
 global SIDE_EFFECT_ACC: int = 0
 
-fn record_sum(v: V2_scalar_abi_container) -> V2_scalar_abi_container {
+fn record_sum(v: IV2) -> IV2 {
     SIDE_EFFECT_ACC = SIDE_EFFECT_ACC + v.x + v.y
     return v
 }
@@ -306,27 +306,27 @@ fn record_sum(v: V2_scalar_abi_container) -> V2_scalar_abi_container {
 fn test_defer_value_call() {
     SIDE_EFFECT_ACC = 0
     {
-        defer { record_sum(make_v2_scalar_abi_container(3, 4)) }
+        defer { record_sum(make_iv2(3, 4)) }
     }
     print(SIDE_EFFECT_ACC)
 }
 
 // --- 5. Operator-overload chains (3-deep) ---------------------------------
 
-fn __op_add(a: V2_scalar_abi_container, b: V2_scalar_abi_container) -> V2_scalar_abi_container {
-    return V2_scalar_abi_container { x: a.x + b.x, y: a.y + b.y }
+fn __op_add(a: IV2, b: IV2) -> IV2 {
+    return IV2 { x: a.x + b.x, y: a.y + b.y }
 }
 
-fn __op_mul(a: V2_scalar_abi_container, k: int) -> V2_scalar_abi_container {
-    return V2_scalar_abi_container { x: a.x * k, y: a.y * k }
+fn __op_mul(a: IV2, k: int) -> IV2 {
+    return IV2 { x: a.x * k, y: a.y * k }
 }
 
 @test(output = "19")
 fn test_op_chain_4_terms() {
     // (a + b) * 2 + c
-    let a = V2_scalar_abi_container { x: 1, y: 2 }
-    let b = V2_scalar_abi_container { x: 3, y: 1 }
-    let c = V2_scalar_abi_container { x: 2, y: 3 }
+    let a = IV2 { x: 1, y: 2 }
+    let b = IV2 { x: 3, y: 1 }
+    let c = IV2 { x: 2, y: 3 }
     let r = (a + b) * 2 + c
     print(r.x + r.y)
 }
@@ -334,7 +334,7 @@ fn test_op_chain_4_terms() {
 // --- 6. Generics with value types -----------------------------------------
 // A generic fn with `T: value` or an unconstrained T receiving a value
 // struct uses cdata ABI (generic monomorphizations always keep cdata).
-// Verifies the stdlib pattern used by Vec<V2_scalar_abi_container>, Arena<V2_scalar_abi_container>, etc.
+// Verifies the stdlib pattern used by Vec<IV2>, Arena<IV2>, etc.
 
 fn box_first<T>(items: [T]) -> T? {
     if items.len() > 0 {
@@ -345,8 +345,8 @@ fn box_first<T>(items: [T]) -> T? {
 
 @test(output = "5")
 fn test_generic_passthrough_value() {
-    let xs: [V2_scalar_abi_container] = [V2_scalar_abi_container { x: 2, y: 3 }, V2_scalar_abi_container { x: 10, y: 20 }]
-    let first = box_first(xs) ?? V2_scalar_abi_container { x: 0, y: 0 }
+    let xs: [IV2] = [IV2 { x: 2, y: 3 }, IV2 { x: 10, y: 20 }]
+    let first = box_first(xs) ?? IV2 { x: 0, y: 0 }
     print(first.x + first.y)
 }
 
@@ -359,8 +359,8 @@ fn test_defer_value_binop_chain() {
     SIDE_EFFECT_ACC = 0
     {
         defer {
-            record_sum(make_v2_scalar_abi_container(1, 2))
-            record_sum(v2_scale(V2_scalar_abi_container { x: 1, y: 1 }, 7) * 1)
+            record_sum(make_iv2(1, 2))
+            record_sum(iv2_scale(IV2 { x: 1, y: 1 }, 7) * 1)
         }
     }
     print(SIDE_EFFECT_ACC)

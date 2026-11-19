@@ -80,36 +80,14 @@ fn strided_vec_equality_compares_logical_elements_not_storage_metadata() {
     print("{a == b},{a != b},{a == c},{a != c}")
 }
 
-nobox value Row_wide_flat_enum_eleme { a: int, b: int, c: int, d: int }
-
-enum Slot_wide_flat_enum_eleme { Entry(Row_wide_flat_enum_eleme), Overflow(int) }
-
-fn score_wide_flat_enum_eleme(slot: Slot_wide_flat_enum_eleme) -> int {
-    return match slot {
-        Slot_wide_flat_enum_eleme::Entry(row) => row.a * 1000 + row.b * 100 + row.c * 10 + row.d,
-        Slot_wide_flat_enum_eleme::Overflow(hidden) => hidden,
-    }
-}
-
-@test
-fn wide_flat_enum_vec_equality() {
-    let equal: [Slot_wide_flat_enum_eleme] = [Slot_wide_flat_enum_eleme::Entry(Row_wide_flat_enum_eleme { a: 1, b: 2, c: 3, d: 4 }), Slot_wide_flat_enum_eleme::Overflow(8)]
-    let grown: [Slot_wide_flat_enum_eleme] = []
-    grown.push(Slot_wide_flat_enum_eleme::Entry(Row_wide_flat_enum_eleme { a: 1, b: 2, c: 3, d: 4 }))
-    grown.push(Slot_wide_flat_enum_eleme::Overflow(8))
-    assert(equal == grown, "equal contents")
-    let differing: [Slot_wide_flat_enum_eleme] = [Slot_wide_flat_enum_eleme::Entry(Row_wide_flat_enum_eleme { a: 1, b: 2, c: 3, d: 5 }), Slot_wide_flat_enum_eleme::Overflow(8)]
-    assert(equal != differing, "a differing last leaf")
-}
-
 @test(returns = 12340807)
 fn wide_flat_enum_vec_mutation_and_sort() -> int {
-    let slots: [Slot_wide_flat_enum_eleme] = [Slot_wide_flat_enum_eleme::Entry(Row_wide_flat_enum_eleme { a: 1, b: 2, c: 3, d: 4 }), Slot_wide_flat_enum_eleme::Overflow(8)]
-    slots.insert_at(1, Slot_wide_flat_enum_eleme::Overflow(9))
+    let slots: [QuadSlot] = [QuadSlot::Entry(Quad { a: 1, b: 2, c: 3, d: 4 }), QuadSlot::Overflow(8)]
+    slots.insert_at(1, QuadSlot::Overflow(9))
     let removed = slots.remove_at(0)
     let copy = slots.clone()
-    copy.sort(score_wide_flat_enum_eleme)
+    copy.sort(quad_score)
     slots.clear()
-    let spread: [Slot_wide_flat_enum_eleme] = [...copy, Slot_wide_flat_enum_eleme::Overflow(7)]
-    return score_wide_flat_enum_eleme(removed.unwrap()) * 10000 + score_wide_flat_enum_eleme(spread[0]) * 100 + score_wide_flat_enum_eleme(spread[2])
+    let spread: [QuadSlot] = [...copy, QuadSlot::Overflow(7)]
+    return quad_score(removed.unwrap()) * 10000 + quad_score(spread[0]) * 100 + quad_score(spread[2])
 }
