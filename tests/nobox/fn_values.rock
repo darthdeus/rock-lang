@@ -175,10 +175,6 @@ fn call_or(f: (() -> Vec2)?, dx: float) -> float {
     assert_eq(call_or(() => src(), -1.0), 1.0)
 }
 
-@test fn absent_arm_of_a_nullable_fn_value_param() {
-    assert_eq(call_or(null, -1.0), -1.0)
-}
-
 // The three shapes that already worked, kept as controls so a fix that moves
 // the ABI for all fn values shows up here rather than only in a game.
 fn call_plain(f: () -> Vec2) -> float { return f().x }

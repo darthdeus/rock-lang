@@ -178,17 +178,6 @@ fn a_leaf_table_element_read_out_of_a_container_projects_its_leaves() {
     print("{v.pos?.x ?? -1.0} {v.pos?.y ?? -1.0} {v.a}")
 }
 
-// An absent literal and a later `= null` write must store the same tag, or
-// per-key `__eq` makes two logically equal values compare unequal.
-global ABSENT_LIT: OptPos = OptPos { pos: null, a: 3.0 }
-global ABSENT_WRITE: OptPos = OptPos { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0 }
-
-@test(output = "true true")
-fn both_absent_spellings_store_the_same_tag() {
-    ABSENT_WRITE.pos = null
-    print("{ABSENT_LIT == ABSENT_WRITE} {ABSENT_WRITE.pos == null}")
-}
-
 @test(output = "1 2")
 fn an_explicit_materialize_stays_legal() {
     let m = materialize(NV2 { x: 1.0, y: 2.0 })

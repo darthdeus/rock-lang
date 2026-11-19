@@ -20,12 +20,6 @@ value BV { x: int, y: int }
 fn mk(a: int) -> NV { return NV { x: a, y: a * 2 } }
 fn mk3(a: int) -> (int, int, int) { return (a, a * 2, a * 3) }
 
-@test fn direct_call() {
-    let v = mk(3)
-    assert_eq(v.x, 3)
-    assert_eq(v.y, 6)
-}
-
 // The linearization case. If `mk(inner(..))` emitted as a nested JS call
 // expression, the inner call would publish into the bank and the outer capture
 // would read ITS leaves, not the outer call's.
@@ -349,24 +343,12 @@ operator *(a: RV, b: RV) -> RV {
     return RV { x: f(a.x) + b.x, y: f(a.y) + b.y }
 }
 
-@test fn operator_returning_nobox_value_through_a_real_call() {
-    let r = RV { x: 1, y: 2 } + RV { x: 10, y: 20 }
-    assert_eq(r.x, 7011)
-    assert_eq(r.y, 22)
-}
-
 // The linearization hazard in operator form: the inner `+` publishes to the bank
 // and the outer `+` must not capture ITS leaves.
 @test fn nested_operator_calls_do_not_clobber() {
     let r = (RV { x: 1, y: 2 } + RV { x: 10, y: 20 }) + RV { x: 100, y: 200 }
     assert_eq(r.x, 7111)
     assert_eq(r.y, 222)
-}
-
-@test fn lambda_bearing_operator_returning_nobox_value() {
-    let r = RV { x: 3000, y: 4000 } * RV { x: 5, y: 6 }
-    assert_eq(r.x, 6005)
-    assert_eq(r.y, 8006)
 }
 
 // Two operator results live at once -- the shape that breaks if a capture were

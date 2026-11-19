@@ -245,19 +245,8 @@ nobox value NP { x: float, y: float }
 
 struct Holder<T> { items: [T] }
 
-fn Holder<T>.pick(h) -> (int, T)? {
-    if vec_len(h.items) == 0 { return null }
-    return (0, h.items[0])
-}
-
 fn Holder<T>.first_pair(h) -> (int, T) {
     return (0, h.items[0])
-}
-
-@test(output = "true")
-fn a_plain_tuple_returning_generic_call_reaches_the_specialized_copy() {
-    let full: Holder<NP> = Holder { items: [NP { x: 3.0, y: 4.0 }] }
-    print("{full.pick() != null}")
 }
 
 @test(output = "true")

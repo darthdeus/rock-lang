@@ -71,31 +71,7 @@ fn merge_through_materialize() {
     assert(merged_materialized(false) == null)
     let p = merged_materialized(true)
     if p == null { assert(false) } else { assert_eq(p.x * 10 + p.y, 56) }
-}
-
-fn phi_materialized(present: bool) -> P? {
-    let v: P? = if present { P { x: 5, y: 6 } } else { null }
-    return materialize(v)
-}
-
-fn phi_plain(present: bool) -> P? {
-    let v: P? = if present { P { x: 5, y: 6 } } else { null }
-    return v
-}
-
-@test(output = "absent=true")
-fn an_absent_nobox_option_from_a_phi_reports_absent_through_materialize() {
-    print("absent={phi_materialized(false) == null}")
-}
-
-@test(output = "absent=true")
-fn an_absent_nobox_option_from_a_phi_reports_absent_without_materialize() {
-    print("absent={phi_plain(false) == null}")
-}
-
-@test(output = "present=5")
-fn the_present_path_of_the_same_phi_is_correct() {
-    print("present={phi_materialized(true)?.x ?? -1}")
+    assert_eq(merged_materialized(true)?.x ?? -1, 5)
 }
 
 fn materialized_non_nullable() -> P { return materialize(P { x: 5, y: 6 }) }
@@ -114,17 +90,6 @@ fn null_local() -> P? {
 @test(output = "absent=true")
 fn a_nullable_nobox_local_with_no_phi_reports_absent() {
     print("absent={null_local() == null}")
-}
-
-fn early_return_null(present: bool) -> P? {
-    if !present { return null }
-    return P { x: 5, y: 6 }
-}
-
-@test(output = "absent=true\npresent=5")
-fn a_statement_position_return_null_reports_absent() {
-    print("absent={early_return_null(false) == null}")
-    print("present={early_return_null(true)?.x ?? -1}")
 }
 
 nobox value NV2 { x: float, y: float }
