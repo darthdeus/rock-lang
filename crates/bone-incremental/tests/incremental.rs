@@ -1010,13 +1010,6 @@ fn fuzz_session_synthetic_env_seed() {
     run_fuzz_session(seed, 120);
 }
 
-fn is_script_source(text: &str) -> bool {
-    text.lines().any(|l| {
-        let t = l.trim_start();
-        t == "#script" || t.starts_with("#script ") || t.starts_with("#script\t")
-    })
-}
-
 #[test]
 #[ignore = "requires ROCK_FUZZ_REAL=1; run explicitly with --ignored"]
 fn fuzz_session_fixture_package_graph() {
@@ -1050,14 +1043,6 @@ fn fuzz_session_fixture_package_graph() {
         for path in selected {
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            // Production skips `#script` files in dependencies
-            // (`unified_compile`); none exist in this closure today, so a
-            // newcomer fails loudly rather than silently diverging.
-            assert!(
-                *id == root || !is_script_source(&text),
-                "dependency {} gained a #script file; mirror unified_compile's is_script skip",
-                path.display()
-            );
             let f = bone_incremental::session::SessionFile {
                 path: path.to_string_lossy().to_string(),
                 text,

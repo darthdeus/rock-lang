@@ -48,14 +48,13 @@ fn a_stdlib_with_a_recovered_syntax_error_is_a_diagnostic() {
 #[test]
 fn a_package_graph_that_does_not_build_is_a_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
-    // The dependency does not exist, so the graph cannot be built. A script is
-    // loaded without the graph, so only the alias table needs it.
+    // The dependency does not exist, so the graph cannot be built.
     std::fs::write(
         dir.path().join("stick.toml"),
         "[package]\nname = \"app\"\n\n[dependencies]\nmissing = { path = \"../missing\" }\n",
     )
     .unwrap();
-    let source = "#script\nfn main() {\n}\n";
+    let source = "fn main() {\n}\n";
     let file = dir.path().join("tool.rock");
     std::fs::write(&file, source).unwrap();
     let file = std::fs::canonicalize(file).unwrap();
@@ -66,7 +65,7 @@ fn a_package_graph_that_does_not_build_is_a_diagnostic() {
     let errs = errors(&diags, path);
     assert!(
         errs.iter()
-            .any(|m| m.contains("package graph") && !m.contains("Cannot load project sources")),
+            .any(|m| m.contains("dependency `missing`") && m.contains("stick.toml")),
         "expected a package-graph diagnostic, got {diags:?}"
     );
 }

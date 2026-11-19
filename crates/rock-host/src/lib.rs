@@ -10,7 +10,6 @@ pub mod compilation_units;
 pub mod compiler_thp;
 #[cfg(not(target_family = "wasm"))]
 pub mod lua_runner;
-pub(crate) mod preprocessor;
 pub mod process_management;
 pub mod program_inputs;
 pub mod project;

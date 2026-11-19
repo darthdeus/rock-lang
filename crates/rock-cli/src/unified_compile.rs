@@ -5,8 +5,7 @@ pub(crate) fn discover_sources(path: &Path) -> Result<SourceFiles> {
     if path.is_dir() {
         return discover_project_sources(path);
     }
-    let unit = rock_host::compilation_units::determine_compilation_unit_for_file(path)?;
-    rock_host::compilation_units::load_sources_for_compilation_unit(&unit)
+    rock_host::compilation_units::load_sources_for_file(path)
 }
 
 pub(crate) fn discover_project_sources(project_dir: &Path) -> Result<SourceFiles> {
@@ -39,7 +38,7 @@ pub(crate) fn discover_project_sources(project_dir: &Path) -> Result<SourceFiles
                         graph.package(*id).root.as_path()
                     };
                     let selected = graph.selected_canonical_rock_files(*id, load_dir)?;
-                    SourceFiles::from_canonical_paths(&selected, true)
+                    SourceFiles::from_canonical_paths(&selected)
                 })
                 .collect()
         };
@@ -53,11 +52,8 @@ pub(crate) fn discover_project_sources(project_dir: &Path) -> Result<SourceFiles
             let node = graph.package(*id);
             let package_sources = package_sources?;
             for file in package_sources.files {
-                // Skip files with #script directive (test/example files in library dependencies)
-                if !file.borrow().is_script || *id == graph.root() {
-                    node.stamp(&mut file.borrow_mut());
-                    dependency_files.push(file);
-                }
+                node.stamp(&mut file.borrow_mut());
+                dependency_files.push(file);
             }
         }
 
@@ -75,7 +71,7 @@ pub(crate) fn discover_project_sources(project_dir: &Path) -> Result<SourceFiles
         // No stick.toml - check if there's exactly one .rock file
         let rock_files = rock_host::project::find_rock_files_at_path(project_dir)?;
         if rock_files.len() == 1 {
-            SourceFiles::from_single_path_preprocessed(&rock_files[0])
+            SourceFiles::from_single_path(&rock_files[0])
         } else if rock_files.is_empty() {
             Err(anyhow::anyhow!(
                 "No .rock files found in directory: {}",

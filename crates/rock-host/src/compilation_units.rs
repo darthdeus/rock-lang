@@ -3,203 +3,44 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use atomic_refcell::AtomicRefCell;
-use rock_core::{SourceFile, SourceFiles};
+use rock_core::SourceFiles;
 
-use crate::source_files::{SourceFilesExt, source_file_new, source_file_new_preprocessed};
+use crate::source_files::source_file_load;
 
-/// Represents different types of compilation units based on file directives
-#[derive(Debug, Clone)]
-pub enum CompilationUnit {
-    /// Regular project compilation: all files without directives
-    Project(Vec<PathBuf>),
-
-    /// Script compilation: one file with optional package dependencies
-    Script {
-        file: PathBuf,
-        used_packages: Vec<String>,
-    },
-
-    /// Test compilation: project + test-utils + one test file
-    Test {
-        project_files: Vec<PathBuf>,
-        test_util_files: Vec<PathBuf>,
-        test_file: PathBuf,
-    },
-
-    /// Library compilation: project + additional file
-    Lib {
-        lib_project_dir: PathBuf,
-        file: PathBuf,
-    },
-}
-
-/// Analyzes files in a directory and categorizes them by directive type
-pub(crate) fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnalysis> {
-    let mut project_files = Vec::new();
-    let mut test_util_files = Vec::new();
-
-    let dir_path_ref = dir_path.as_ref();
-    let rock_files =
-        if let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(dir_path_ref)? {
-            let root = manifest.parent().unwrap_or(&manifest);
-            let graph = crate::stick::graph::PackageGraph::build_with_channel(
-                root,
-                &config,
-                &crate::stick::resolved_channel_for(&config),
-            )?;
-            graph
-                .selected_rock_files(graph.root(), dir_path_ref)?
-                .into_iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect()
-        } else {
-            crate::project::find_rock_files_at_path(dir_path_ref)?
-        };
-
-    // Check if this is a tests directory or a directory without a project
-    let is_tests_directory = dir_path_ref
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == "tests")
-        .unwrap_or(false);
-
-    let has_stick_toml = dir_path_ref.join("stick.toml").exists();
-
-    for file_path in rock_files {
-        let path = PathBuf::from(&file_path);
-        let source_file = source_file_new(&path)?;
-
-        if source_file.is_script || source_file.is_test {
-            continue;
-        }
-        if source_file.is_test_util {
-            test_util_files.push(path);
-        } else if !is_tests_directory && has_stick_toml {
-            // Files without directives belong to the project unless they sit
-            // in a tests/ directory.
-            project_files.push(path);
-        }
+/// The files a project compile loads from `dir`: the root package's selected
+/// files. A `tests/` directory or one without its own `stick.toml`
+/// contributes none.
+fn project_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let is_tests_directory = dir.file_name().is_some_and(|name| name == "tests");
+    if is_tests_directory || !dir.join("stick.toml").exists() {
+        return Ok(Vec::new());
     }
-
-    Ok(FileAnalysis {
-        project_files,
-        test_util_files,
-    })
+    let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(dir)? else {
+        return Ok(Vec::new());
+    };
+    let root = manifest.parent().unwrap_or(&manifest);
+    let graph = crate::stick::graph::PackageGraph::build_with_channel(
+        root,
+        &config,
+        &crate::stick::resolved_channel_for(&config),
+    )?;
+    graph.selected_rock_files(graph.root(), dir)
 }
 
-/// Result of analyzing files in a directory
-#[derive(Debug, Clone)]
-pub(crate) struct FileAnalysis {
-    pub project_files: Vec<PathBuf>,
-    pub test_util_files: Vec<PathBuf>,
-}
-
-impl FileAnalysis {
-    /// Get compilation unit for running/compiling the entire project
-    pub(crate) fn project_compilation_unit(&self) -> CompilationUnit {
-        CompilationUnit::Project(self.project_files.clone())
-    }
-
-    /// Get compilation unit for a specific test file
-    pub(crate) fn test_compilation_unit(&self, test_file: PathBuf) -> CompilationUnit {
-        CompilationUnit::Test {
-            project_files: self.project_files.clone(),
-            test_util_files: self.test_util_files.clone(),
-            test_file,
-        }
-    }
-}
-
-/// Parse the lib directive from a file's contents
-/// This is public so the LSP can reuse it
-/// Supports both `//! lib:` and legacy `//! love-lib:` syntax
-pub(crate) fn parse_lib_directive(contents: &str) -> Option<String> {
-    // Look for //! lib: or //! love-lib: path directive at the beginning of the file
-    for line in contents.lines().take(10) {
-        // Only check first 10 lines
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//! lib:") || trimmed.starts_with("//! love-lib:") {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() >= 2 {
-                return Some(parts[1..].join(":").trim().to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Resolve a lib path to the actual project directory
-/// This is public so the LSP can reuse it
-pub(crate) fn resolve_lib_path(lib_path: &str, file_dir: &Path) -> PathBuf {
-    let lib_project_path = file_dir.join(lib_path);
-
-    // If it's a stick.toml file, get its parent directory
-    if lib_project_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n == "stick.toml")
-        .unwrap_or(false)
-    {
-        lib_project_path
-            .parent()
-            .unwrap_or(&lib_project_path)
-            .to_path_buf()
-    } else {
-        lib_project_path
-    }
-}
-
-/// Determines the appropriate compilation unit for a given file
-pub fn determine_compilation_unit_for_file(file_path: impl AsRef<Path>) -> Result<CompilationUnit> {
+/// Load the sources a compile of `file_path` reads: its enclosing project, or
+/// the file alone outside any project.
+pub fn load_sources_for_file(file_path: impl AsRef<Path>) -> Result<SourceFiles> {
     let path = file_path.as_ref();
-    let source_file = source_file_new(path)?;
-
-    // Check for lib directive first
-    if let Some(lib_path) = parse_lib_directive(&source_file.contents) {
-        // Resolve the lib path relative to the file's directory
-        let file_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let lib_project_dir = resolve_lib_path(&lib_path, file_dir);
-
-        return Ok(CompilationUnit::Lib {
-            lib_project_dir,
-            file: path.to_path_buf(),
-        });
-    }
-
-    if source_file.is_script {
-        Ok(CompilationUnit::Script {
-            file: path.to_path_buf(),
-            used_packages: source_file.used_packages.clone(),
-        })
-    } else if source_file.is_test {
-        // For a test file, we need to find all project and test-util files
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let analysis = analyze_files_in_directory(dir)?;
-        Ok(analysis.test_compilation_unit(path.to_path_buf()))
-    } else if source_file.is_test_util {
-        Err(anyhow::anyhow!(
-            "Cannot run test-util files directly. Test utilities are meant to be used by test files."
-        ))
-    } else {
-        // Regular file - find the project directory and compile the whole project
-        if let Some((stick_path, _)) =
-            crate::stick::StickConfig::find_from_dir(path.parent().unwrap_or(path))?
-        {
-            // Found stick.toml, get the project directory
-            let project_dir = stick_path.parent().unwrap_or(&stick_path);
-            let analysis = analyze_files_in_directory(project_dir)?;
-            Ok(analysis.project_compilation_unit())
-        } else {
-            // No project found, just compile this file
-            Ok(CompilationUnit::Project(vec![path.to_path_buf()]))
-        }
-    }
+    let files = match crate::stick::StickConfig::find_from_dir(path.parent().unwrap_or(path))? {
+        Some((stick_path, _)) => project_files(stick_path.parent().unwrap_or(&stick_path))?,
+        None => vec![path.to_path_buf()],
+    };
+    load_project_sources(&files, files.first().and_then(|file| file.parent()))
 }
 
 /// Load an editor buffer's enclosing project, even before its first file is saved.
 pub fn load_sources_for_project(project_dir: &Path) -> Result<SourceFiles> {
-    let analysis = analyze_files_in_directory(project_dir)?;
-    load_project_sources(&analysis.project_files, Some(project_dir))
+    load_project_sources(&project_files(project_dir)?, Some(project_dir))
 }
 
 /// The package that owns the file at the canonical `path` in `graph`: its
@@ -214,81 +55,6 @@ pub fn source_package<'g>(
     graph
         .includes_file(owner, path)
         .then(|| graph.package(owner))
-}
-
-/// Load SourceFiles based on a compilation unit
-pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<SourceFiles> {
-    match unit {
-        CompilationUnit::Project(files) => {
-            load_project_sources(files, files.first().and_then(|file| file.parent()))
-        }
-        CompilationUnit::Script {
-            file,
-            used_packages,
-        } => {
-            if used_packages.is_empty() {
-                // No dependencies, just load the script file
-                SourceFiles::from_single_path_preprocessed(file)
-            } else {
-                // Load the script file and all files from used packages
-                let mut all_files = vec![];
-
-                // First add files from dependencies
-                for package_name in used_packages {
-                    // Resolve package path relative to the script file's directory
-                    let script_dir = file.parent().unwrap_or_else(|| Path::new("."));
-                    let package_path = script_dir.join(package_name);
-
-                    if package_path.exists() && package_path.is_dir() {
-                        // Load all .rock files from the package directory
-                        let package_files = crate::project::find_rock_files_at_path(&package_path)?;
-
-                        // Filter out files marked with #script directive - they should not be loaded via #use
-                        for package_file_path in package_files {
-                            let path = PathBuf::from(&package_file_path);
-                            let source = source_file_new(&path)?;
-                            if !source.is_script {
-                                all_files.push(path);
-                            }
-                        }
-                    } else {
-                        eprintln!(
-                            "Warning: Package '{}' not found at {:?}",
-                            package_name, package_path
-                        );
-                    }
-                }
-
-                // Add the script file itself
-                all_files.push(file.clone());
-
-                load_sources_from_paths(&all_files)
-            }
-        }
-        CompilationUnit::Test {
-            project_files,
-            test_util_files,
-            test_file,
-        } => {
-            let mut all_files = project_files.clone();
-            all_files.extend(test_util_files.clone());
-            all_files.push(test_file.clone());
-            load_sources_from_paths(&all_files)
-        }
-        CompilationUnit::Lib {
-            lib_project_dir,
-            file,
-        } => {
-            // Load all library project files
-            let mut sources = SourceFiles::from_dir_preprocessed(lib_project_dir)?;
-
-            // Add the additional file
-            let additional_file = source_file_new_preprocessed(file)?;
-            sources.add_or_update_file(additional_file);
-
-            Ok(sources)
-        }
-    }
 }
 
 fn load_project_sources(files: &[PathBuf], project_dir: Option<&Path>) -> Result<SourceFiles> {
@@ -317,15 +83,7 @@ fn load_project_sources(files: &[PathBuf], project_dir: Option<&Path>) -> Result
                     continue;
                 }
                 let node = resolved.package(*id);
-                let dep_files = resolved.selected_rock_files(*id, &node.root)?;
-
-                // Filter out script files
-                for path in dep_files {
-                    let source = source_file_new(&path)?;
-                    if !source.is_script {
-                        all_files.push(path);
-                    }
-                }
+                all_files.extend(resolved.selected_rock_files(*id, &node.root)?);
             }
             graph = Some(resolved);
         }
@@ -361,8 +119,7 @@ fn load_sources_from_paths(paths: &[PathBuf]) -> Result<SourceFiles> {
     let mut sources = Vec::new();
 
     for path in paths {
-        let source_file: SourceFile = source_file_new_preprocessed(path)?;
-        sources.push(Arc::new(AtomicRefCell::new(source_file)));
+        sources.push(Arc::new(AtomicRefCell::new(source_file_load(path)?)));
     }
 
     Ok(SourceFiles {

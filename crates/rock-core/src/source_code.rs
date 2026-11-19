@@ -122,10 +122,6 @@ impl PackageTag {
 pub struct SourceFile {
     pub contents: String,
     pub file: FileContents,
-    pub is_script: bool,
-    pub is_test: bool,
-    pub is_test_util: bool,
-    pub used_packages: Vec<String>,
     /// Owning package, stamped by the loader that resolved the package graph.
     /// `None` for files loaded outside a package (standalone scripts, editor
     /// synthetic sources).
@@ -145,10 +141,6 @@ pub fn source_file_from_path_and_contents(
     SourceFile {
         file,
         contents,
-        is_script: false,
-        is_test: false,
-        is_test_util: false,
-        used_packages: vec![],
         package: None,
         global_policy: GlobalPolicy::Any,
     }
@@ -517,10 +509,6 @@ mod tests {
         );
         assert_eq!(file.file.to_id_path(), "src/main.rock");
         assert_eq!(file.contents, "fn main() {}\n");
-        assert!(!file.is_script);
-        assert!(!file.is_test);
-        assert!(!file.is_test_util);
-        assert!(file.used_packages.is_empty());
         assert_eq!(file.global_policy, GlobalPolicy::Any);
     }
 }

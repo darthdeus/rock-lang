@@ -778,9 +778,7 @@ impl BoneWorkspace {
             rock_host::compilation_units::load_sources_for_project(&root)
                 .map_err(|e| format!("source loading failed: {e:#}"))?
         } else {
-            let unit = rock_host::compilation_units::determine_compilation_unit_for_file(file_path)
-                .map_err(|e| format!("source discovery failed: {e:#}"))?;
-            rock_host::compilation_units::load_sources_for_compilation_unit(&unit)
+            rock_host::compilation_units::load_sources_for_file(file_path)
                 .map_err(|e| format!("source loading failed: {e:#}"))?
         };
         let mut out = Vec::new();

@@ -1,9 +1,4 @@
-//! Preprocessor-dependent `SourceFile` / `SourceFiles` constructors.
-//!
-//! These can't live in `rock-core` (where `SourceFile`/`SourceFiles` are
-//! defined) because they depend on the preprocessor: every load runs the
-//! `#if`/`#script`/`#test`/`#use` directive pass to extract the
-//! `is_script`/`is_test`/`is_test_util`/`used_packages` flags.
+//! `SourceFile` / `SourceFiles` constructors that read from disk.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,41 +7,18 @@ use anyhow::{Context, Result};
 use atomic_refcell::AtomicRefCell;
 use rock_core::{FileContents, SourceFile, SourceFiles};
 
-use crate::preprocessor::{PreprocessedSource, PreprocessorContext, preprocess};
-
-/// Preprocessor-dependent SourceFiles constructors (can't be in rock-core since
-/// they depend on the preprocessor).
 pub trait SourceFilesExt {
-    fn from_dir_preprocessed<P: AsRef<Path>>(source_dir: P) -> Result<SourceFiles>;
-    fn from_single_path_preprocessed<P: AsRef<Path>>(path: P) -> Result<SourceFiles>;
-    fn from_multiple_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles>;
-    /// [`Self::from_multiple_paths`] for paths that are canonical already.
-    fn from_canonical_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles>;
+    fn from_single_path<P: AsRef<Path>>(path: P) -> Result<SourceFiles>;
+    fn from_canonical_paths(paths: &[PathBuf]) -> Result<SourceFiles>;
 }
 
 impl SourceFilesExt for SourceFiles {
-    fn from_dir_preprocessed<P: AsRef<Path>>(source_dir: P) -> Result<SourceFiles> {
-        // The walk starts at a canonical directory, so its paths are canonical.
-        let paths: Vec<PathBuf> = crate::project::find_rock_files_at_path(source_dir)?
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
-        Self::from_canonical_paths(&paths, true)
+    fn from_single_path<P: AsRef<Path>>(path: P) -> Result<SourceFiles> {
+        Ok(SourceFiles::from_single_file(source_file_load(path)?))
     }
 
-    fn from_single_path_preprocessed<P: AsRef<Path>>(path: P) -> Result<SourceFiles> {
-        let file = source_file_load(path, true)?;
-        Ok(SourceFiles::from_single_file(file))
-    }
-
-    fn from_multiple_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles> {
-        load_paths(paths, |path| source_file_load(path, preprocess))
-    }
-
-    fn from_canonical_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles> {
-        load_paths(paths, |path| {
-            source_file_from_canonical_path(path, preprocess)
-        })
+    fn from_canonical_paths(paths: &[PathBuf]) -> Result<SourceFiles> {
+        load_paths(paths, |path| source_file_from_canonical_path(path))
     }
 }
 
@@ -96,43 +68,11 @@ pub fn production_only(
     Ok(sources.retaining(&keep))
 }
 
-// The preprocessor always runs (to extract is_script/is_test/used_packages
-// flags), but `apply` controls whether its output replaces the raw contents.
-// Callers that format or display source pass `apply: false`; callers that
-// compile pass `apply: true`.
-fn preprocess_content(contents: &str, apply: bool) -> Result<PreprocessedSource> {
-    let mut preprocessed = preprocess(contents, &PreprocessorContext::new("lua"))?;
-    if !apply {
-        preprocessed.content = contents.to_string();
-    }
-    Ok(preprocessed)
-}
-
-fn create_source_file(file: FileContents, source: PreprocessedSource) -> SourceFile {
-    // Package loaders overwrite the standalone default with the graph fact.
-    SourceFile {
-        file,
-        contents: source.content,
-        is_script: source.is_script,
-        is_test: source.is_test,
-        is_test_util: source.is_test_util,
-        used_packages: source.used_packages,
-        package: None,
-        global_policy: rock_core::source_code::GlobalPolicy::Any,
-    }
-}
-
-/// Load a source file without applying preprocessor output (used by the
-/// formatter and LSP, which want the original text with #if blocks intact).
-pub(crate) fn source_file_new(path: impl AsRef<Path>) -> Result<SourceFile> {
-    source_file_load(path, false)
-}
-
-/// Load one unprocessed source with its package's parsing and ownership facts.
+/// Load one source with its package's parsing and ownership facts.
 /// Standalone files have no package.
 pub fn source_file_new_with_context(path: impl AsRef<Path>) -> Result<SourceFile> {
     let canonical = fs_err::canonicalize(path.as_ref())?;
-    let mut source = source_file_from_canonical_path(&canonical, false)?;
+    let mut source = source_file_from_canonical_path(&canonical)?;
     let start_dir = canonical.parent().unwrap_or(&canonical);
     if let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(start_dir)? {
         let manifest_dir = manifest.parent().unwrap_or(&manifest);
@@ -152,24 +92,16 @@ pub fn source_file_new_with_context(path: impl AsRef<Path>) -> Result<SourceFile
     Ok(source)
 }
 
-/// Load a source file and apply preprocessor output (used by the compilation
-/// pipeline, which wants #if blocks resolved).
-pub fn source_file_new_preprocessed(path: impl AsRef<Path>) -> Result<SourceFile> {
-    source_file_load(path, true)
-}
-
-fn source_file_load(path: impl AsRef<Path>, preprocess: bool) -> Result<SourceFile> {
+pub(crate) fn source_file_load(path: impl AsRef<Path>) -> Result<SourceFile> {
     let path = fs_err::canonicalize(path.as_ref())
         .with_context(|| format!("Failed to resolve path '{}'", path.as_ref().display()))?;
-    source_file_from_canonical_path(&path, preprocess)
+    source_file_from_canonical_path(&path)
 }
 
 /// Load a source file from an already-canonical absolute path (skips canonicalize syscall).
-fn source_file_from_canonical_path(path: &Path, preprocess: bool) -> Result<SourceFile> {
-    let raw_contents = fs_err::read_to_string(path)
+fn source_file_from_canonical_path(path: &Path) -> Result<SourceFile> {
+    let contents = fs_err::read_to_string(path)
         .with_context(|| format!("Failed to read '{}'", path.display()))?;
-
-    let source = preprocess_content(&raw_contents, preprocess)?;
 
     let utf8_path = path
         .to_str()
@@ -182,7 +114,13 @@ fn source_file_from_canonical_path(path: &Path, preprocess: bool) -> Result<Sour
         filename: filename.to_string_lossy().to_string(),
     };
 
-    Ok(create_source_file(file, source))
+    // Package loaders overwrite the standalone default with the graph fact.
+    Ok(SourceFile {
+        file,
+        contents,
+        package: None,
+        global_policy: rock_core::source_code::GlobalPolicy::Any,
+    })
 }
 
 #[cfg(test)]
@@ -241,7 +179,7 @@ mod tests {
             .path()
             .join(std::ffi::OsStr::from_bytes(b"bad\xff.rock"));
         fs_err::write(&path, "fn main() {}\n").unwrap();
-        let err = super::source_file_new(&path).expect_err("non-UTF-8 path must be rejected");
+        let err = super::source_file_load(&path).expect_err("non-UTF-8 path must be rejected");
         assert!(format!("{err:#}").contains("not valid UTF-8"), "{err:#}");
     }
 }
