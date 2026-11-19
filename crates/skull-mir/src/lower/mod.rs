@@ -94,13 +94,11 @@ pub(crate) fn required_wire_slot<T>(
     index: usize,
     variadic: bool,
     context: impl std::fmt::Display,
-    to_slot: impl Fn(&T) -> RetSlot,
     missing: impl FnOnce(String) -> CompilerError,
-) -> Result<RetSlot, CompilerError> {
+) -> Result<&T, CompilerError> {
     slots
         .get(index)
         .or_else(|| variadic.then(|| slots.last()).flatten())
-        .map(to_slot)
         .ok_or_else(|| missing(format!("{context} has no ABI slot {index}")))
 }
 
@@ -133,7 +131,7 @@ mod abi;
 pub use abi::{
     AbiPlanMemoStats, AbiQuestion, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass,
     FunctionRepPlan, GlobalPlan, RepArena, RepArenaStats, RepError, RepGuarantees, RepId,
-    RepLayout, RepPlan, RepUse, RepUseFacts, SIGNATURE_SCALAR_LANE_BUDGET,
+    RepLayout, RepPlan, RepUse, RepUseFacts, SIGNATURE_SCALAR_LANE_BUDGET, TupleLayout,
     WIDE_VALUE_PAYLOAD_LEAF_CUT, WirePosition, boundary_requires_boxed_representation,
     declared_boundary_class, owner_abi_plan, owner_abi_plan_for_body, requires_concrete_body_plan,
     selected_sibling_abi_plan,
@@ -561,11 +559,11 @@ impl NestedFn {
         self.representation.uses_scalar_abi()
     }
 
-    pub(crate) fn param_slots(&self, arena: &RepArena) -> Vec<RetSlot> {
+    pub(crate) fn param_slots<'arena>(&self, arena: &'arena RepArena) -> Vec<&'arena RepLayout> {
         self.representation
             .params()
             .iter()
-            .map(|id| arena.ret_slot(*id))
+            .map(|&id| arena.layout(id))
             .collect()
     }
 
@@ -590,7 +588,7 @@ pub fn scalar_abi_param_collisions(
     let Some(names) = plan.lua_param_names(ws) else {
         return Vec::new();
     };
-    let origins = scalar_abi_param_origins(ws, &plan);
+    let origins = scalar_abi_param_origins(ws, scx.rep_arena(), &plan);
     debug_assert_eq!(names.len(), origins.len(), "one derivation, two spellings");
 
     let mut out = Vec::new();
@@ -621,16 +619,19 @@ pub fn scalar_abi_param_collisions(
     out
 }
 
-fn scalar_abi_param_origins(ws: &Workspace, plan: &BackendFnAbiPlan) -> Vec<String> {
+fn scalar_abi_param_origins(
+    ws: &Workspace,
+    arena: &RepArena,
+    plan: &BackendFnAbiPlan,
+) -> Vec<String> {
     if !plan.uses_scalar_abi() {
         return Vec::new();
     }
-    let shapes = plan.param_shapes();
     let decl = plan.decl();
     let f = &ws.module(decl.module).functions[decl.func];
     let mut out = Vec::new();
-    for (pd, slot) in f.param_decls.iter().zip(shapes.iter()) {
-        slot_param_origins(pd.name.as_str(), slot, &mut out);
+    for (pd, &id) in f.param_decls.iter().zip(plan.param_reps()) {
+        slot_param_origins(arena, pd.name.as_str(), arena.layout(id), &mut out);
     }
     out
 }
@@ -647,11 +648,11 @@ fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {
 /// A tuple slot indexes into the base (`pq__0__x`) using the same `__` join the
 /// leaf encoding already uses, so the whole list stays one namespace and the
 /// injectivity check below sees tuple leaves like any other.
-fn slot_param_names(base: &str, slot: &RetSlot, out: &mut Vec<String>) {
+fn slot_param_names(arena: &RepArena, base: &str, slot: &RepLayout, out: &mut Vec<String>) {
     match slot {
-        RetSlot::Opaque => out.push(base.to_string()),
-        RetSlot::Leaves(shape) => leaf_param_names(base, shape, out),
-        RetSlot::Nested(inner) => {
+        RepLayout::Opaque => out.push(base.to_string()),
+        RepLayout::Leaves(shape) => leaf_param_names(base, shape, out),
+        RepLayout::Tuple(inner) => {
             // The presence leads the slots, so it takes the FIRST name -- the
             // order `bind_param_slot` binds cells in and `tuple_repr_to_slots`
             // writes values in. Skipping it emits a list one short of
@@ -660,7 +661,12 @@ fn slot_param_names(base: &str, slot: &RetSlot, out: &mut Vec<String>) {
                 out.push(format!("{base}{LEAF_PARAM_SEP}p"));
             }
             for (i, s) in inner.slots.iter().enumerate() {
-                slot_param_names(&format!("{base}{LEAF_PARAM_SEP}{i}"), s, out);
+                slot_param_names(
+                    arena,
+                    &format!("{base}{LEAF_PARAM_SEP}{i}"),
+                    arena.layout(*s),
+                    out,
+                );
             }
         }
     }
@@ -669,20 +675,20 @@ fn slot_param_names(base: &str, slot: &RetSlot, out: &mut Vec<String>) {
 /// [`slot_param_names`] in the human-facing spelling the collision diagnostic
 /// uses -- the same traversal, so a reported origin always names a real emitted
 /// param.
-fn slot_param_origins(base: &str, slot: &RetSlot, out: &mut Vec<String>) {
+fn slot_param_origins(arena: &RepArena, base: &str, slot: &RepLayout, out: &mut Vec<String>) {
     match slot {
-        RetSlot::Opaque => out.push(format!("the declared param `{base}`")),
-        RetSlot::Leaves(shape) => out.extend(
+        RepLayout::Opaque => out.push(format!("the declared param `{base}`")),
+        RepLayout::Leaves(shape) => out.extend(
             leaf_names(shape, base, ".")
                 .into_iter()
                 .map(|p| format!("the leaf `{p}` of value param `{base}`")),
         ),
-        RetSlot::Nested(inner) => {
+        RepLayout::Tuple(inner) => {
             if inner.nullable {
                 out.push(format!("the presence of nullable tuple param `{base}`"));
             }
             for (i, s) in inner.slots.iter().enumerate() {
-                slot_param_origins(&format!("{base}.{i}"), s, out);
+                slot_param_origins(arena, &format!("{base}.{i}"), arena.layout(*s), out);
             }
         }
     }
@@ -2111,7 +2117,7 @@ struct Builder<'a> {
     /// CURRENT scrutinee whose payload instantiates to a SPLATTING tuple --
     /// the generic-enum case the declared-type lookup cannot answer. Set
     /// around one match walk, from the scrutinee's own concrete type.
-    payload_splat_shapes: rustc_hash::FxHashMap<(Ustr, Ustr, usize), TupleRetShape>,
+    payload_splat_shapes: rustc_hash::FxHashMap<(Ustr, Ustr, usize), TupleLayout>,
     /// A local snapshot may defer child copies until its whole-value escape.
     shallow_pack: bool,
     /// Immutable call, return and local uses may share proven immutable boxes.
@@ -2127,7 +2133,7 @@ struct Builder<'a> {
     /// rebuild the unboxed repr on each read of `t` instead of packing it.
     /// Keyed the same way; the shape is stored non-nullable because presence
     /// was already consumed by the branch that bound it.
-    tuple_binds: HashMap<u32, (Vec<Idx<Cell>>, TupleRetShape)>,
+    tuple_binds: HashMap<u32, (Vec<Idx<Cell>>, TupleLayout)>,
     /// `static` locals: raw binding idx -> the private global cell name a read /
     /// write of the binding resolves to (an `Inst::Global`/`StoreGlobal`, not a
     /// local cell). Populated by `lower_static`.
@@ -2334,14 +2340,14 @@ impl<'a> Builder<'a> {
         true
     }
 
-    fn rep_slot(&self, id: RepId) -> RetSlot {
-        self.scx.rep_arena().ret_slot(id)
+    fn rep_slot(&self, id: RepId) -> &'a RepLayout {
+        self.scx.rep_arena().layout(id)
     }
 
-    fn param_slot(&self, index: usize) -> Result<RetSlot, CompilerError> {
+    fn param_slot(&self, index: usize) -> Result<&'a RepLayout, CompilerError> {
         if let Some(plan) = self.param_plan.as_ref() {
             if !plan.representation().uses_scalar_abi() {
-                return Ok(RetSlot::Opaque);
+                return Ok(&RepLayout::Opaque);
             }
             return plan
                 .representation()
@@ -2365,7 +2371,7 @@ impl<'a> Builder<'a> {
             .and_then(|id| self.scx.rep_arena().value_shape(id))
     }
 
-    fn result_tuple(&self) -> Option<TupleRetShape> {
+    fn result_tuple(&self) -> Option<&'a TupleLayout> {
         self.ret_rep
             .and_then(|id| self.scx.rep_arena().tuple_shape(id))
     }
@@ -2781,7 +2787,7 @@ impl<'a> Builder<'a> {
                     .iter()
                     .map(|&leaf| self.read_leaf(leaf))
                     .collect::<Vec<_>>();
-                let repr = self.rebuild_from_leaves(&shape, &leaves, &mut 0);
+                let repr = Self::rebuild_from_leaves(&shape, &leaves, &mut 0);
                 self.mark_borrowed_value_children(&shape, &repr, Some(ty))?;
                 let value = self.with_value_lending(false, |s| s.pack(repr))?;
                 let cell = self.new_binding_cell(
@@ -2810,7 +2816,7 @@ impl<'a> Builder<'a> {
         &mut self,
         pb: Idx<BindingInfo>,
         name: Ustr,
-        slot: &RetSlot,
+        slot: &RepLayout,
     ) -> Result<(), CompilerError> {
         if !slot.splats() {
             let cty = self.binding_ty(pb);
@@ -2821,7 +2827,7 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         let cells = match slot {
-            RetSlot::Leaves(shape) => {
+            RepLayout::Leaves(shape) => {
                 let owner = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
                 match self.new_flat_enum_cells(pb, name, shape, owner)? {
                     Some(cells) => cells,
@@ -2829,7 +2835,7 @@ impl<'a> Builder<'a> {
                         // Refuses any nullable nesting, so a `Some` here means
                         // every slot is a data leaf of the type it names.
                         let leaf_tys = self.value_shape_leaf_monos(shape);
-                        (0..slot.slot_count())
+                        (0..slot.slot_count(self.scx.rep_arena()))
                             .map(|li| {
                                 let cell = self.new_binding_cell(
                                     pb,
@@ -2847,7 +2853,7 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            RetSlot::Nested(_) | RetSlot::Opaque => (0..slot.slot_count())
+            RepLayout::Tuple(_) | RepLayout::Opaque => (0..slot.slot_count(self.scx.rep_arena()))
                 .map(|li| {
                     self.new_binding_cell(
                         pb,
@@ -2858,11 +2864,11 @@ impl<'a> Builder<'a> {
                 })
                 .collect(),
         };
-        if cells.len() != slot.slot_count() {
+        if cells.len() != slot.slot_count(self.scx.rep_arena()) {
             return Err(self.gap_here(format!(
                 "parameter {name} has {} cells for {} ABI slots",
                 cells.len(),
-                slot.slot_count()
+                slot.slot_count(self.scx.rep_arena())
             )));
         }
         for &cell in &cells {
@@ -2870,7 +2876,7 @@ impl<'a> Builder<'a> {
         }
         self.f.params.extend(cells.iter().copied());
         match slot {
-            RetSlot::Leaves(shape) => {
+            RepLayout::Leaves(shape) => {
                 self.group_binds.insert(
                     raw(pb),
                     (
@@ -2879,10 +2885,10 @@ impl<'a> Builder<'a> {
                     ),
                 );
             }
-            RetSlot::Nested(inner) => {
+            RepLayout::Tuple(inner) => {
                 self.tuple_binds.insert(raw(pb), (cells, inner.clone()));
             }
-            RetSlot::Opaque => unreachable!("guarded by slot.splats"),
+            RepLayout::Opaque => unreachable!("guarded by slot.splats"),
         }
         Ok(())
     }
@@ -3083,15 +3089,16 @@ impl<'a> Builder<'a> {
     pub(crate) fn emit_param_default(
         &mut self,
         default: &CallParamDefault,
-        slot: &RetSlot,
+        slot: &RepLayout,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         match default {
-            CallParamDefault::Scalar(lit) if slot.slot_count() == 1 => {
+            CallParamDefault::Scalar(lit) if slot.slot_count(self.scx.rep_arena()) == 1 => {
                 Ok(vec![self.emit_cur(Inst::Const(lit.clone()))])
             }
             // A scalarized nullable value tells omitted from null by its
             // presence leaf, so an omitted one is nil in every leaf.
-            CallParamDefault::Scalar(Lit::Omitted) => Ok((0..slot.slot_count())
+            CallParamDefault::Scalar(Lit::Omitted) => Ok((0..slot
+                .slot_count(self.scx.rep_arena()))
                 .map(|_| self.emit_cur(Inst::Const(Lit::Nil)))
                 .collect()),
             CallParamDefault::Vector { shape, literals } => {
@@ -3100,8 +3107,8 @@ impl<'a> Builder<'a> {
                     .map(|lit| self.emit_cur(Inst::Const(lit.clone())))
                     .collect();
                 match slot {
-                    RetSlot::Leaves(expected) if expected == shape => Ok(leaves),
-                    RetSlot::Opaque => {
+                    RepLayout::Leaves(expected) if expected == shape => Ok(leaves),
+                    RepLayout::Opaque => {
                         let parts = leaves.into_iter().map(ValueRepr::Scalar).collect();
                         let value = self.pack(ValueRepr::Group {
                             name: shape.name,
@@ -3129,13 +3136,13 @@ impl<'a> Builder<'a> {
         &mut self,
         func: FuncRef,
         provided: usize,
-        param_shapes: Option<&[RetSlot]>,
+        param_shapes: Option<&[&RepLayout]>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let defaults = self.call_param_defaults(func);
         let slots_of = |i: usize| {
             param_shapes
                 .and_then(|s| s.get(i))
-                .map_or(1, |s| s.slot_count())
+                .map_or(1, |s| s.slot_count(self.scx.rep_arena()))
         };
         let last = (provided..defaults.len())
             .rev()
@@ -3148,8 +3155,8 @@ impl<'a> Builder<'a> {
             match default {
                 Some(default) => {
                     let slot = param_shapes
-                        .and_then(|shapes| shapes.get(i))
-                        .unwrap_or(&RetSlot::Opaque);
+                        .and_then(|shapes| shapes.get(i).copied())
+                        .unwrap_or(&RepLayout::Opaque);
                     out.extend(self.emit_param_default(default, slot)?);
                 }
                 _ => {
@@ -3430,22 +3437,22 @@ impl<'a> Builder<'a> {
                     );
                     self.repr_to_leaves_for_shape(&r, actual, shape)
                 }
-                RepLayout::Tuple { .. } => Err(self.gap_here(format!(
+                RepLayout::Tuple(_) => Err(self.gap_here(format!(
                     "representation {representation:?} is not an opaque boundary at return boundary"
                 ))),
             };
         }
         if let Some(shape) = self.result_tuple() {
             if shape.nullable {
-                return self.nullable_tuple_return_slots(e, &shape);
+                return self.nullable_tuple_return_slots(e, shape);
             }
-            if shape.splats() {
+            if shape.splats(self.scx.rep_arena()) {
                 let r = self.lower_expr_repr(e)?.into_value();
                 if !self.is_open() {
                     return Ok(Vec::new());
                 }
                 let r = self.owned_value_children(r)?;
-                return self.tuple_repr_to_slots(r, &shape);
+                return self.tuple_repr_to_slots(r, shape);
             }
             if let Expr::Tuple(elems) = self.body.expr_arena[e] {
                 return self.lower_tuple_operands(e, elems);
@@ -3475,12 +3482,13 @@ impl<'a> Builder<'a> {
         Ok(vec![v])
     }
 
-    fn absent_tuple_slots(&mut self, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
-        let mut out = Vec::with_capacity(shape.slot_count());
+    fn absent_tuple_slots(&mut self, shape: &TupleLayout) -> Vec<Idx<Inst>> {
+        let count = shape.slot_count(self.scx.rep_arena());
+        let mut out = Vec::with_capacity(count);
         if shape.nullable {
             out.push(self.emit_cur(Inst::Const(Lit::Bool(false))));
         }
-        while out.len() < shape.slot_count() {
+        while out.len() < count {
             out.push(self.emit_cur(Inst::Const(Lit::Nil)));
         }
         out
@@ -3489,7 +3497,7 @@ impl<'a> Builder<'a> {
     fn nullable_tuple_return_slots(
         &mut self,
         e: Idx<Expr>,
-        shape: &TupleRetShape,
+        shape: &TupleLayout,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let r = self.lower_expr_repr(e)?.into_value();
         if !self.is_open() {
@@ -3571,7 +3579,7 @@ impl<'a> Builder<'a> {
     fn tuple_repr_to_slots(
         &mut self,
         r: ValueRepr,
-        shape: &TupleRetShape,
+        shape: &TupleLayout,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         // A phantom tuple has no aggregate to project; every wire slot is absent.
         if let ValueRepr::Scalar(v) = &r {
@@ -3589,6 +3597,7 @@ impl<'a> Builder<'a> {
             ) => Some(*p),
             (true, _) => Some(self.emit_cur(Inst::Const(Lit::Bool(true)))),
         };
+        let count = shape.slot_count(self.scx.rep_arena());
         let parts: Vec<ValueRepr> = match r {
             ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
             other => {
@@ -3596,10 +3605,10 @@ impl<'a> Builder<'a> {
                 // A box read out of STORAGE (a field or container read) is the
                 // flat wire in a table; an explicit `materialize` box (a fresh
                 // `MakeTuple`, a loaded local) keeps per-element user layout.
-                if shape.splats() && self.reads_stored_box(base) {
-                    let mut out = Vec::with_capacity(shape.slot_count());
+                if shape.splats(self.scx.rep_arena()) && self.reads_stored_box(base) {
+                    let mut out = Vec::with_capacity(count);
                     out.extend(present);
-                    let n = shape.slot_count() - shape.nullable as usize;
+                    let n = count - shape.nullable as usize;
                     for index in 0..n {
                         out.push(self.emit_cur(Inst::TupleIndex { base, index }));
                     }
@@ -3610,20 +3619,22 @@ impl<'a> Builder<'a> {
                     .collect()
             }
         };
-        let mut out = Vec::with_capacity(shape.slot_count());
+        let mut out = Vec::with_capacity(count);
         out.extend(present);
-        for (slot, part) in shape.slots.iter().zip(parts) {
-            match slot {
-                RetSlot::Opaque => out.push(self.pack(part)?),
+        for (&slot, part) in shape.slots.iter().zip(parts) {
+            match self.scx.rep_arena().layout(slot) {
+                RepLayout::Opaque => out.push(self.pack(part)?),
                 // The iterator's missing element can leave an otherwise non-null slot empty.
-                RetSlot::Leaves(vs) if !vs.nullable && !matches!(part, ValueRepr::Group { .. }) => {
+                RepLayout::Leaves(vs)
+                    if !vs.nullable && !matches!(part, ValueRepr::Group { .. }) =>
+                {
                     let mut nullable = vs.clone();
                     nullable.nullable = true;
                     let leaves = self.repr_to_leaves_shape(&part, &nullable)?;
                     out.extend(leaves.into_iter().skip(1));
                 }
-                RetSlot::Leaves(vs) => out.extend(self.repr_to_leaves_shape(&part, vs)?),
-                RetSlot::Nested(inner) => out.extend(self.tuple_repr_to_slots(part, inner)?),
+                RepLayout::Leaves(vs) => out.extend(self.repr_to_leaves_shape(&part, vs)?),
+                RepLayout::Tuple(inner) => out.extend(self.tuple_repr_to_slots(part, inner)?),
             }
         }
         Ok(out)
@@ -3634,7 +3645,7 @@ impl<'a> Builder<'a> {
     /// destructure its elements without ever boxing a `nobox` one.
     pub(crate) fn tuple_from_slots(
         &mut self,
-        shape: &TupleRetShape,
+        shape: &TupleLayout,
         slots: &[Idx<Inst>],
         idx: &mut usize,
     ) -> ValueRepr {
@@ -3647,23 +3658,22 @@ impl<'a> Builder<'a> {
         });
         let parts = shape
             .slots
-            .clone()
             .iter()
-            .map(|slot| self.slot_repr(slot, slots, idx))
+            .map(|&slot| self.slot_repr(self.scx.rep_arena().layout(slot), slots, idx))
             .collect();
         ValueRepr::Tuple { parts, present }
     }
 
     /// One element of [`Self::tuple_from_slots`], consuming its slots from `*idx`.
-    fn slot_repr(&mut self, slot: &RetSlot, slots: &[Idx<Inst>], idx: &mut usize) -> ValueRepr {
+    fn slot_repr(&mut self, slot: &RepLayout, slots: &[Idx<Inst>], idx: &mut usize) -> ValueRepr {
         match slot {
-            RetSlot::Opaque => {
+            RepLayout::Opaque => {
                 let v = slots[*idx];
                 *idx += 1;
                 ValueRepr::Scalar(v)
             }
-            RetSlot::Leaves(vs) => self.rebuild_from_leaves(vs, slots, idx),
-            RetSlot::Nested(inner) => self.tuple_from_slots(inner, slots, idx),
+            RepLayout::Leaves(vs) => Self::rebuild_from_leaves(vs, slots, idx),
+            RepLayout::Tuple(inner) => self.tuple_from_slots(inner, slots, idx),
         }
     }
 
@@ -3673,7 +3683,7 @@ impl<'a> Builder<'a> {
     /// there is silent, since a short list is nil-filled rather than rejected.
     pub(crate) fn arg_values_for_slot(
         &mut self,
-        slot: &RetSlot,
+        slot: &RepLayout,
         a: Idx<Expr>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         self.arg_values_for_slot_lending(slot, a, true)
@@ -3681,7 +3691,7 @@ impl<'a> Builder<'a> {
 
     pub(crate) fn arg_values_for_slot_lending(
         &mut self,
-        slot: &RetSlot,
+        slot: &RepLayout,
         a: Idx<Expr>,
         lend: bool,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
@@ -3704,12 +3714,12 @@ impl<'a> Builder<'a> {
     pub(crate) fn snapshot_argument_slot(
         &mut self,
         r: ValueBundle,
-        slot: &RetSlot,
+        slot: &RepLayout,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let representation = r.representation();
         let value = r.into_value();
         let owned = match slot {
-            RetSlot::Leaves(shape) => self.own_opaque_parameter_children(value, shape)?,
+            RepLayout::Leaves(shape) => self.own_opaque_parameter_children(value, shape)?,
             _ => self.owned_value_children(value)?,
         };
         let r = ValueBundle::new(representation, owned);
@@ -3729,7 +3739,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn arg_values_for_call_slot(
         &mut self,
         call: Idx<Expr>,
-        slot: &RetSlot,
+        slot: &RepLayout,
         arg: Idx<Expr>,
         lend: bool,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {

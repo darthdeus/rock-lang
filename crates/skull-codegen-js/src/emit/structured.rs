@@ -150,7 +150,8 @@ impl Emitter<'_> {
     ) -> bool {
         let rep_plan = plan.rep_plan(rep);
         match rep_plan.layout() {
-            skull_mir::lower::RepLayout::Tuple { slots, nullable } => {
+            skull_mir::lower::RepLayout::Tuple(tuple) => {
+                let (slots, nullable) = (&tuple.slots, &tuple.nullable);
                 if *nullable {
                     return false;
                 }

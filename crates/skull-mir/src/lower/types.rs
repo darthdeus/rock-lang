@@ -167,10 +167,10 @@ impl<'a> Builder<'a> {
         use_context: RepUse,
         tuple_spelled: bool,
         nobox: bool,
-    ) -> Result<Option<TupleRetShape>, CompilerError> {
+    ) -> Result<Option<TupleLayout>, CompilerError> {
         let arena = self.scx.rep_arena();
         let id = self.concrete_rep_id(ty, use_context, tuple_spelled, nobox)?;
-        Ok(arena.tuple_shape(id))
+        Ok(arena.tuple_shape(id).cloned())
     }
 
     pub(crate) fn expr_rep_id(
@@ -565,12 +565,12 @@ impl<'a> Builder<'a> {
     pub(crate) fn tuple_opaque_slot_types(
         &self,
         e: Idx<Expr>,
-        shape: &TupleRetShape,
+        shape: &TupleLayout,
     ) -> Vec<Option<TyId>> {
         fn append(
             b: &Builder<'_>,
             ty: TyId,
-            shape: &TupleRetShape,
+            shape: &TupleLayout,
             out: &mut Vec<Option<TyId>>,
         ) -> Option<()> {
             if shape.nullable {
@@ -589,30 +589,32 @@ impl<'a> Builder<'a> {
             }
             for (element, slot) in elements.into_iter().zip(&shape.slots) {
                 let element = ty.with_idx(element);
-                match slot {
-                    RetSlot::Opaque => out.push(Some(element)),
-                    RetSlot::Leaves(value) => out.extend((0..value.leaf_count()).map(|_| None)),
-                    RetSlot::Nested(inner) => append(b, element, inner, out)?,
+                match b.scx.rep_arena().layout(*slot) {
+                    RepLayout::Opaque => out.push(Some(element)),
+                    RepLayout::Leaves(value) => out.extend((0..value.leaf_count()).map(|_| None)),
+                    RepLayout::Tuple(inner) => append(b, element, inner, out)?,
                 }
             }
             Some(())
         }
 
         let Some(ty) = self.inf.and_then(|inf| inf.expr_types.get(e).copied()) else {
-            return vec![None; shape.slot_count()];
+            return vec![None; shape.slot_count(self.scx.rep_arena())];
         };
-        let mut out = Vec::with_capacity(shape.slot_count());
-        if append(self, ty, shape, &mut out).is_some() && out.len() == shape.slot_count() {
+        let mut out = Vec::with_capacity(shape.slot_count(self.scx.rep_arena()));
+        if append(self, ty, shape, &mut out).is_some()
+            && out.len() == shape.slot_count(self.scx.rep_arena())
+        {
             out
         } else {
-            vec![None; shape.slot_count()]
+            vec![None; shape.slot_count(self.scx.rep_arena())]
         }
     }
 
     pub(crate) fn expr_tuple_shape(
         &self,
         e: Idx<Expr>,
-    ) -> Result<Option<TupleRetShape>, CompilerError> {
+    ) -> Result<Option<TupleLayout>, CompilerError> {
         // Use the bound declaration's return ABI instead of the generic call type.
         if let Some(&gidx) = self.inf.and_then(|inf| inf.bound_calls.get(&e)) {
             return self.bound_next_tuple_shape(gidx).map(Some);
@@ -625,20 +627,23 @@ impl<'a> Builder<'a> {
         Ok(None)
     }
 
-    pub(crate) fn repr_join_slot(&self, e: Idx<Expr>) -> Result<Option<RetSlot>, CompilerError> {
-        if let Some(shape) = self.expr_tuple_shape(e)?.filter(TupleRetShape::splats) {
-            return Ok(Some(RetSlot::Nested(shape)));
+    pub(crate) fn repr_join_slot(&self, e: Idx<Expr>) -> Result<Option<RepLayout>, CompilerError> {
+        if let Some(shape) = self
+            .expr_tuple_shape(e)?
+            .filter(|shape| shape.splats(self.scx.rep_arena()))
+        {
+            return Ok(Some(RepLayout::Tuple(shape)));
         }
         // A join can keep a nullable tuple's presence slot.
         if let Some(shape) = self.nullable_tuple_wire_shape(e)? {
-            return Ok(Some(RetSlot::Nested(shape)));
+            return Ok(Some(RepLayout::Tuple(shape)));
         }
         if let Some(shape) = self.flat_enum_value_shape_of(e)? {
             let non_null = self
                 .concrete_expr_ty(e)
                 .is_some_and(|ty| !matches!(*ty, MonoTy::Nullable(_)));
             if !self.scx.native_flat_enums && non_null {
-                return Ok(Some(RetSlot::Leaves(shape)));
+                return Ok(Some(RepLayout::Leaves(shape)));
             }
         }
         let shape = match self
@@ -662,23 +667,22 @@ impl<'a> Builder<'a> {
                 shape
             }
         };
-        Ok(Some(RetSlot::Leaves(shape)))
+        Ok(Some(RepLayout::Leaves(shape)))
     }
 
     /// A boxed tuple can carry `nobox` fields as flattened slots.
     pub(crate) fn tuple_box_shape(
         &self,
         e: Idx<Expr>,
-    ) -> Result<Option<TupleRetShape>, CompilerError> {
-        Ok(self.expr_tuple_shape(e)?.filter(|s| s.splats()))
+    ) -> Result<Option<TupleLayout>, CompilerError> {
+        Ok(self
+            .expr_tuple_shape(e)?
+            .filter(|s| s.splats(self.scx.rep_arena())))
     }
 
     /// The full `(bool, E)` shape of a placeholder `next` on the generic at
     /// `gidx` from the concrete bound plan.
-    pub(crate) fn bound_next_tuple_shape(
-        &self,
-        gidx: usize,
-    ) -> Result<TupleRetShape, CompilerError> {
+    pub(crate) fn bound_next_tuple_shape(&self, gidx: usize) -> Result<TupleLayout, CompilerError> {
         let next = self.concrete_plan.bound_tree.get(gidx).ok_or_else(|| {
             gap(format!(
                 "concrete plan is missing bound `next` witness {gidx}"
@@ -695,6 +699,7 @@ impl<'a> Builder<'a> {
         let shape = self
             .callee_abi_plan_for_instance(&instance)?
             .ret_tuple()
+            .cloned()
             .ok_or_else(|| gap("concrete bound `next` must return a tuple"))?;
         if shape.slots.len() < 2 {
             return Err(gap("concrete bound `next` must return `(bool, E)`"));
@@ -771,7 +776,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn peeled_tuple_shape(
         &self,
         e: Idx<Expr>,
-    ) -> Result<Option<TupleRetShape>, CompilerError> {
+    ) -> Result<Option<TupleLayout>, CompilerError> {
         let Some(concrete) = self.concrete_expr_ty(e) else {
             return Ok(None);
         };

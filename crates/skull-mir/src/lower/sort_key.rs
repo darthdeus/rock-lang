@@ -151,22 +151,22 @@ impl<'a> Builder<'a> {
         let mut params = Vec::new();
         let mut argv = Vec::new();
         for (&source, &dest) in plan.params().iter().zip(original.params()) {
-            let source = arena.ret_slot(source);
-            let cells = self.fresh_cells(source.slot_count());
+            let source = arena.layout(source);
+            let cells = self.fresh_cells(source.slot_count(self.scx.rep_arena()));
             let loads = self.load_cells(&cells);
             params.extend(cells);
-            let value = self.slot_repr(&source, &loads, &mut 0);
-            argv.extend(self.sort_slot_values(value, &arena.ret_slot(dest))?);
+            let value = self.slot_repr(source, &loads, &mut 0);
+            argv.extend(self.sort_slot_values(value, arena.layout(dest))?);
         }
         let result = original
             .result()
             .ok_or_else(|| self.gap_here("sort key has no result"))?;
-        let slot = arena.ret_slot(result);
+        let slot = arena.layout(result);
         let value = if slot.splats() {
-            let cells = self.fresh_cells(slot.slot_count());
+            let cells = self.fresh_cells(slot.slot_count(self.scx.rep_arena()));
             let (call, loads) = self.call_value_multi(cells, callee, argv);
             self.f.call_rep_plans.insert(call, original);
-            self.slot_repr(&slot, &loads, &mut 0)
+            self.slot_repr(slot, &loads, &mut 0)
         } else {
             let call = self.emit_cur(Inst::CallValue { callee, args: argv });
             self.f.call_rep_plans.insert(call, original);
@@ -175,7 +175,7 @@ impl<'a> Builder<'a> {
         let result = plan
             .result()
             .ok_or_else(|| self.gap_here("sort key has no result"))?;
-        let leaves = self.sort_slot_values(value, &arena.ret_slot(result))?;
+        let leaves = self.sort_slot_values(value, arena.layout(result))?;
         self.f.set_term(self.cur, Term::Return(leaves));
         self.cur = saved;
         let outer_expr = self.cur_expr.replace(key);
@@ -193,12 +193,12 @@ impl<'a> Builder<'a> {
     fn sort_slot_values(
         &mut self,
         value: ValueRepr,
-        slot: &RetSlot,
+        slot: &RepLayout,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         match slot {
-            RetSlot::Opaque => Ok(vec![self.pack(value)?]),
-            RetSlot::Leaves(shape) => self.repr_to_leaves_shape(&value, shape),
-            RetSlot::Nested(shape) => self.tuple_repr_to_slots(value, shape),
+            RepLayout::Opaque => Ok(vec![self.pack(value)?]),
+            RepLayout::Leaves(shape) => self.repr_to_leaves_shape(&value, shape),
+            RepLayout::Tuple(shape) => self.tuple_repr_to_slots(value, shape),
         }
     }
 

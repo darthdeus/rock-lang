@@ -379,7 +379,7 @@ impl<'a> Builder<'a> {
         let repr = match selected {
             FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
             FieldShape::Nested(shape) => {
-                let repr = self.rebuild_from_leaves(&shape, &leaves, &mut 0);
+                let repr = Self::rebuild_from_leaves(&shape, &leaves, &mut 0);
                 let owner = self.concrete_expr_ty(e);
                 self.mark_borrowed_value_children(&shape, &repr, owner)?;
                 repr
@@ -456,9 +456,12 @@ impl<'a> Builder<'a> {
             }
         } else {
             let slot = self.read_index(b, i, kind);
-            match self.expr_tuple_shape(e)?.filter(TupleRetShape::splats) {
+            match self
+                .expr_tuple_shape(e)?
+                .filter(|shape| shape.splats(self.scx.rep_arena()))
+            {
                 Some(shape) => {
-                    let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
+                    let slots: Vec<Idx<Inst>> = (0..shape.slot_count(self.scx.rep_arena()))
                         .map(|index| self.emit_cur(Inst::TupleIndex { base: slot, index }))
                         .collect();
                     self.tuple_from_slots(&shape, &slots, &mut 0)
@@ -490,7 +493,9 @@ impl<'a> Builder<'a> {
             }
         }
         let expr_tuple_shape = self.expr_tuple_shape(e)?;
-        let tuple_box_shape = expr_tuple_shape.clone().filter(TupleRetShape::splats);
+        let tuple_box_shape = expr_tuple_shape
+            .clone()
+            .filter(|shape| shape.splats(self.scx.rep_arena()));
         let nobox_global_place = self.nobox_global_place(e)?;
         let nullable_place_value = self.nullable_place_value_of(e)?;
         match self.body.expr_arena[e] {
@@ -553,7 +558,11 @@ impl<'a> Builder<'a> {
             // A tuple literal whose type splats stays a `Tuple` repr, so a
             // `nobox` element reaches the return boundary as leaves instead of
             // being packed into the table first.
-            Expr::Tuple(elems) if expr_tuple_shape.as_ref().is_some_and(TupleRetShape::splats) => {
+            Expr::Tuple(elems)
+                if expr_tuple_shape
+                    .as_ref()
+                    .is_some_and(|shape| shape.splats(self.scx.rep_arena())) =>
+            {
                 let parts = elems
                     .into_iter()
                     .map(|el| self.lower_expr_repr_inner(el).map(ValueBundle::into_value))
@@ -611,7 +620,7 @@ impl<'a> Builder<'a> {
                 let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
                 let leaves: Vec<Idx<Inst>> = cells.iter().map(|&c| self.read_leaf(c)).collect();
                 let mut idx = 0;
-                let repr = self.rebuild_from_leaves(&shape, &leaves, &mut idx);
+                let repr = Self::rebuild_from_leaves(&shape, &leaves, &mut idx);
                 if !self.scx.values_first_class {
                     let owner = self.concrete_expr_ty(e);
                     self.mark_borrowed_value_children(&shape, &repr, owner)?;
@@ -736,7 +745,7 @@ impl<'a> Builder<'a> {
                             .into_iter()
                             .map(|key| self.read_field(parent, crate::names::ustr(&key)))
                             .collect::<Vec<_>>();
-                        return Ok(self.rebuild_from_leaves(&shape, &leaves, &mut 0));
+                        return Ok(Self::rebuild_from_leaves(&shape, &leaves, &mut 0));
                     }
                     if let Some(name) = self.value_struct_of(e)
                         && self.is_nobox_struct(name)
@@ -870,7 +879,7 @@ impl<'a> Builder<'a> {
             _ if tuple_box_shape.is_some() => {
                 let shape = tuple_box_shape.expect("guard matched");
                 let base = self.lower_expr(e)?;
-                let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
+                let slots: Vec<Idx<Inst>> = (0..shape.slot_count(self.scx.rep_arena()))
                     .map(|i| self.emit_cur(Inst::TupleIndex { base, index: i }))
                     .collect();
                 let mut idx = 0;
@@ -908,7 +917,7 @@ impl<'a> Builder<'a> {
         let owned = self.snapshot_opaque_value(lhs_bundle.value().clone())?;
         let lhs_bundle = ValueBundle::new(lhs_bundle.representation(), owned);
         let lhs_leaves =
-            self.repr_to_slot_values_bundle(&lhs_bundle, &RetSlot::Leaves(lhs_shape))?;
+            self.repr_to_slot_values_bundle(&lhs_bundle, &RepLayout::Leaves(lhs_shape))?;
         let (first, rest) = lhs_leaves
             .split_first()
             .ok_or_else(|| gap("coalesce lhs has no presence or tag leaf"))?;
@@ -927,7 +936,7 @@ impl<'a> Builder<'a> {
 
         self.cur = rhs_bb;
         let rhs_bundle = self.lower_expr_repr(rhs)?;
-        self.store_bundle_and_join(&cells, &RetSlot::Leaves(shape.clone()), &rhs_bundle, join)?;
+        self.store_bundle_and_join(&cells, &RepLayout::Leaves(shape.clone()), &rhs_bundle, join)?;
 
         self.cur = lhs_bb;
         let mut lhs_slots = Vec::with_capacity(cells.len());
@@ -940,7 +949,7 @@ impl<'a> Builder<'a> {
         self.cur = join;
         let loads = self.load_cells(&cells);
         let mut idx = 0;
-        Ok(self.rebuild_from_leaves(&shape, &loads, &mut idx))
+        Ok(Self::rebuild_from_leaves(&shape, &loads, &mut idx))
     }
 
     /// Branch on the tuple's presence slot. Packing first would hide absence.
@@ -954,7 +963,7 @@ impl<'a> Builder<'a> {
             .expect("caller checked");
         // `??` always yields a value, so the result wire is the lhs wire minus its
         // presence -- which is also what makes the rhs (non-nullable) arm fit it.
-        let shape = TupleRetShape {
+        let shape = TupleLayout {
             nullable: false,
             ..lhs_shape.clone()
         };
@@ -974,7 +983,7 @@ impl<'a> Builder<'a> {
 
         self.cur = rhs_bb;
         let rhs_bundle = self.lower_expr_repr(rhs)?;
-        self.store_bundle_and_join(&cells, &RetSlot::Nested(shape.clone()), &rhs_bundle, join)?;
+        self.store_bundle_and_join(&cells, &RepLayout::Tuple(shape.clone()), &rhs_bundle, join)?;
 
         // The lhs slots were read before the branch, so their block dominates this
         // one -- the same reason the value twin can reuse its leaves here.

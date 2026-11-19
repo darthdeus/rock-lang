@@ -295,7 +295,7 @@ impl<'a> Builder<'a> {
         self.cur = join;
         let leaves = self.load_cells(&cells);
         let mut idx = 0;
-        self.rebuild_from_leaves(value_shape, &leaves, &mut idx)
+        Self::rebuild_from_leaves(value_shape, &leaves, &mut idx)
     }
 
     /// Split a flat-enum `ValueRepr::Group` into its cells (the inverse of

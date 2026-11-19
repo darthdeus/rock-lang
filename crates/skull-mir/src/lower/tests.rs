@@ -2,28 +2,25 @@ use super::*;
 
 #[test]
 fn missing_wire_slot_rejects_instead_of_boxing() {
-    let slots = [RetSlot::Opaque];
+    let slots = [RepLayout::Opaque];
     assert!(
-        super::required_wire_slot(&slots, 0, false, "fixture", Clone::clone, |message| {
+        super::required_wire_slot(&slots, 0, false, "fixture", |message| {
             super::gap(message)
         },)
         .is_ok()
     );
-    let err = super::required_wire_slot(&slots, 1, false, "fixture", Clone::clone, |message| {
-        super::gap(message)
-    })
-    .expect_err("a missing non-variadic slot must reject");
+    let err = super::required_wire_slot(&slots, 1, false, "fixture", |message| super::gap(message))
+        .expect_err("a missing non-variadic slot must reject");
     assert!(
         err.message.contains("fixture has no ABI slot 1"),
         "{}",
         err.message
     );
 
-    let variadic = super::required_wire_slot(&slots, 3, true, "fixture", Clone::clone, |message| {
-        super::gap(message)
-    })
-    .expect("a variadic call reuses its declared tail slot");
-    assert!(matches!(variadic, RetSlot::Opaque));
+    let variadic =
+        super::required_wire_slot(&slots, 3, true, "fixture", |message| super::gap(message))
+            .expect("a variadic call reuses its declared tail slot");
+    assert!(matches!(variadic, RepLayout::Opaque));
 }
 
 // -- Stage 0b route-table invariants.

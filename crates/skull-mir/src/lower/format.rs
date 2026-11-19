@@ -505,7 +505,7 @@ impl<'a> Builder<'a> {
             {
                 let shape = self.nominal_rep_shape_required(name, false)?;
                 let leaves = self.cdata_leaves(v, &shape)?;
-                self.rebuild_from_leaves(&shape, &leaves, &mut 0)
+                Self::rebuild_from_leaves(&shape, &leaves, &mut 0)
             }
             repr => repr,
         };

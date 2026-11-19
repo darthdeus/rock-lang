@@ -258,24 +258,13 @@ impl<'a> Builder<'a> {
         let outer_span = self.cur_span.replace(self.body.expr_spans[e]);
         let outer_expr = self.cur_expr.replace(e);
         let result = (|| -> Result<Idx<Inst>, CompilerError> {
-            let param_slots: Vec<RetSlot> = params
-                .into_iter()
-                .enumerate()
-                .map(|(i, _)| {
-                    let id = lam_plan.params().get(i).ok_or_else(|| {
-                        self.gap_here(format!("lambda ABI has no parameter slot {i}"))
-                    })?;
-                    Ok(self.scx.rep_arena().ret_slot(*id))
-                })
-                .collect::<Result<_, CompilerError>>()?;
-            // Lambda parameter cells share the enclosing arena.
             let before = self.f.params.len();
             for (i, pb) in params.into_iter().enumerate() {
                 let pname = self.body.binding_arena[pb].name;
-                let slot = param_slots.get(i).cloned().ok_or_else(|| {
-                    self.gap_here(format!("lambda ABI has no collected parameter slot {i}"))
+                let &id = lam_plan.params().get(i).ok_or_else(|| {
+                    self.gap_here(format!("lambda ABI has no parameter slot {i}"))
                 })?;
-                self.bind_param_slot(pb, pname, &slot)?;
+                self.bind_param_slot(pb, pname, self.scx.rep_arena().layout(id))?;
             }
             let param_cells: Vec<Idx<Cell>> = self.f.params.split_off(before);
             let entry = self.f.new_block();
@@ -309,7 +298,7 @@ impl<'a> Builder<'a> {
                 match self.result_tuple() {
                     // A splatting tuple return needs the body as a repr, so a
                     // `nobox` element reaches the wire as leaves.
-                    Some(shape) if shape.splats() => {
+                    Some(shape) if shape.splats(self.scx.rep_arena()) => {
                         let r = self.lower_expr_repr(body)?;
                         if self.is_open() {
                             self.tuple_repr_to_slots(r.into_value(), &shape)?
@@ -862,9 +851,13 @@ impl<'a> Builder<'a> {
             let mut vs = Vec::new();
             for (i, el) in elems.into_iter().enumerate() {
                 let bundle = self.lower_expr_repr(el)?;
-                match shape.as_ref().and_then(|s| s.slots.get(i)).cloned() {
+                match shape
+                    .as_ref()
+                    .and_then(|s| s.slots.get(i))
+                    .map(|&id| self.scx.rep_arena().layout(id))
+                {
                     Some(slot) if slot.splats() => {
-                        let vals = self.repr_to_slot_values_bundle(&bundle, &slot)?;
+                        let vals = self.repr_to_slot_values_bundle(&bundle, slot)?;
                         vs.extend(vals);
                     }
                     _ => {
@@ -2230,7 +2223,7 @@ impl<'a> Builder<'a> {
         receiver: Idx<Expr>,
         binding: Idx<bone_core::hir::BindingInfo>,
         body: Idx<Expr>,
-        shape: RetSlot,
+        shape: RepLayout,
     ) -> Result<ValueRepr, CompilerError> {
         self.safe_nav_repr(receiver, shape, |s, recv| {
             let cell = s.new_binding_cell(
@@ -2250,7 +2243,7 @@ impl<'a> Builder<'a> {
         e: Idx<Expr>,
         base: Idx<Expr>,
         field: Ustr,
-        shape: RetSlot,
+        shape: RepLayout,
     ) -> Result<ValueRepr, CompilerError> {
         let plan = self.safe_nav_field_plan(base, field)?;
         let embed = plan.and_then(|p| p.inline_child());

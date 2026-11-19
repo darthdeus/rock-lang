@@ -457,7 +457,7 @@ impl<'a> Builder<'a> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let repr = self.lower_if_repr(cond, then_branch, else_branch, RetSlot::Opaque)?;
+        let repr = self.lower_if_repr(cond, then_branch, else_branch, RepLayout::Opaque)?;
         self.pack_maybe_absent(repr)
     }
 
@@ -466,9 +466,9 @@ impl<'a> Builder<'a> {
         cond: Idx<Expr>,
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
-        shape: RetSlot,
+        shape: RepLayout,
     ) -> Result<ValueRepr, CompilerError> {
-        let result_ty = matches!(shape, RetSlot::Opaque)
+        let result_ty = matches!(shape, RepLayout::Opaque)
             .then(|| self.current_expr_unit_storage_ty_id())
             .flatten();
         // An opaque slot is the whole if-expression's value in one cell, so
@@ -481,7 +481,7 @@ impl<'a> Builder<'a> {
                 .cur_expr
                 .and_then(|e| self.concrete_expr_ty(e))
                 .is_some_and(|ty| crate::nilness::monoty_never_nil(self.ws, ty));
-        let results: Vec<Idx<Cell>> = (0..shape.slot_count())
+        let results: Vec<Idx<Cell>> = (0..shape.slot_count(self.scx.rep_arena()))
             .map(|_| {
                 let cell = self.f.new_cell_typed(None, result_ty);
                 self.f.cells[cell].never_nil = never_nil;
@@ -507,7 +507,7 @@ impl<'a> Builder<'a> {
     pub(super) fn lower_value_arms(
         &mut self,
         results: &[Idx<Cell>],
-        shape: &RetSlot,
+        shape: &RepLayout,
         else_bb: Idx<Block>,
         join: Idx<Block>,
         then_value: impl FnOnce(&mut Self) -> Result<ValueBundle, CompilerError>,
@@ -580,12 +580,12 @@ impl<'a> Builder<'a> {
     pub(crate) fn safe_nav_repr(
         &mut self,
         receiver: Idx<Expr>,
-        shape: RetSlot,
+        shape: RepLayout,
         value_arm: impl FnOnce(&mut Self, Idx<Inst>) -> Result<ValueBundle, CompilerError>,
     ) -> Result<ValueRepr, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
         let is_nil = self.safe_nav_absent_cond(&recv);
-        let results = self.fresh_cells(shape.slot_count());
+        let results = self.fresh_cells(shape.slot_count(self.scx.rep_arena()));
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -647,7 +647,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn store_bundle_and_join(
         &mut self,
         results: &[Idx<Cell>],
-        shape: &RetSlot,
+        shape: &RepLayout,
         value: &ValueBundle,
         join: Idx<Block>,
     ) -> Result<(), CompilerError> {

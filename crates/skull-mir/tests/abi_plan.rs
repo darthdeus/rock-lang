@@ -385,9 +385,10 @@ fn nested_opaque_tuple_elements_keep_one_physical_slot() {
         )
         .expect("nested tuple representation must be total");
     let outer_plan = arena.get(id);
-    let RepLayout::Tuple { slots, .. } = outer_plan.layout() else {
+    let RepLayout::Tuple(tuple) = outer_plan.layout() else {
         panic!("outer tuple must retain its top-level return lanes")
     };
+    let slots = &tuple.slots;
     assert_eq!(slots.len(), 2, "the outer tuple population must be nonzero");
     assert!(matches!(arena.get(slots[0]).layout(), RepLayout::Opaque));
 }

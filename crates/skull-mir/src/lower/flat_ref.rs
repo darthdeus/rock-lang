@@ -667,7 +667,7 @@ impl<'a> Builder<'a> {
         any_named: bool,
         dc: &DirectCall<'a>,
         plan: &FlatCallPlan,
-        ret_tuple: Option<TupleRetShape>,
+        ret_tuple: Option<&TupleLayout>,
     ) -> Result<FlatCallOut, CompilerError> {
         if plan.inst != dc.callee_inst {
             return Err(self.gap_here("flat `ref` call disagrees with its concrete callee"));
@@ -727,11 +727,11 @@ impl<'a> Builder<'a> {
         if let Some(shape) = ret_shape {
             let dests = self.fresh_cells(shape.leaf_count());
             let leaves = multi(self, dests, argv);
-            return Ok(FlatCallOut::Value(
-                self.rebuild_from_leaves(shape, &leaves, &mut 0),
-            ));
+            return Ok(FlatCallOut::Value(Self::rebuild_from_leaves(
+                shape, &leaves, &mut 0,
+            )));
         }
-        if let Some(shape) = &ret_tuple {
+        if let Some(shape) = ret_tuple {
             let dests: Vec<Idx<Cell>> = self
                 .tuple_opaque_slot_types(e, shape)
                 .into_iter()
@@ -1233,7 +1233,7 @@ impl<'a> Builder<'a> {
         };
         Ok(ValueBundle::new(
             representation,
-            self.rebuild_from_leaves(&shape, &leaves, &mut 0),
+            Self::rebuild_from_leaves(&shape, &leaves, &mut 0),
         ))
     }
 

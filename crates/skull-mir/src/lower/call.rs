@@ -10,7 +10,7 @@ enum CallArgMode<'s, 'a> {
         &'s crate::concrete::ConcreteSignature,
     ),
     Scalar {
-        shapes: &'s [RetSlot],
+        shapes: &'s [&'s RepLayout],
         types: &'s [Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>],
     },
 }
@@ -621,7 +621,7 @@ impl<'a> Builder<'a> {
             let index = self.emit_cur(Inst::StringConcat(*selector, suffix));
             leaves.push(self.read_index(*owner, index, ContainerKind::Map));
         }
-        Ok(Some(self.rebuild_from_leaves(shape, &leaves, &mut 0)))
+        Ok(Some(Self::rebuild_from_leaves(shape, &leaves, &mut 0)))
     }
 
     pub(crate) fn concrete_callee_for_site(
@@ -988,7 +988,7 @@ impl<'a> Builder<'a> {
                                  leaves ride the box, so it would be read as a wider \
                                  tuple (project the slots, or `materialize` the \
                                  element deliberately)",
-                                shape.slot_count()
+                                shape.slot_count(self.scx.rep_arena())
                             ),
                         ));
                     }
@@ -1336,13 +1336,13 @@ impl<'a> Builder<'a> {
                 // it opaque forces the splice to rebuild an aggregate, which a
                 // presence-carrying element cannot be rebuilt into.
                 let shape = self.bound_next_tuple_shape(gidx)?;
-                let dests = self.fresh_cells(shape.slot_count());
+                let dests = self.fresh_cells(shape.slot_count(self.scx.rep_arena()));
                 let call = self.emit_cur(Inst::CallBoundMulti {
                     dests: dests.clone(),
                     generic_idx: gidx as u32,
                     args: vec![arg_v],
                 });
-                if shape.splats() {
+                if shape.splats(self.scx.rep_arena()) {
                     self.f.bound_next_split.insert(call);
                 }
                 let loads = self.load_cells(&dests);
@@ -1478,7 +1478,7 @@ impl<'a> Builder<'a> {
                         .call_rep_plans
                         .insert(call, abi.representation.clone());
                     let mut idx = 0;
-                    let value = self.rebuild_from_leaves(shape, &leaves, &mut idx);
+                    let value = Self::rebuild_from_leaves(shape, &leaves, &mut idx);
                     return self.call_result_bundle(&abi.representation, value);
                 }
                 let callee_v = match self.value_binds.get(&raw(b)) {
@@ -1641,12 +1641,12 @@ impl<'a> Builder<'a> {
     pub(crate) fn call_ret_tuple_shape(
         &self,
         e: Idx<Expr>,
-    ) -> Result<Option<TupleRetShape>, CompilerError> {
+    ) -> Result<Option<TupleLayout>, CompilerError> {
         let owner = self
             .concrete_callee_for_site(e)?
             .ok_or_else(|| self.gap_here("tuple-return call has no concrete callee identity"))?;
         let abi = self.callee_abi_plan_for_instance(&owner)?;
-        Ok(abi.ret_tuple())
+        Ok(abi.ret_tuple().cloned())
     }
 
     /// Lower a statically resolved call using its concrete ABI plan. Bounded
@@ -1715,13 +1715,13 @@ impl<'a> Builder<'a> {
                 // CALLEE, so making it arity-dependent would be a guarantee hole the
                 // day a `@gpu_only` intrinsic returns a tuple.
                 self.authorize_gpu_boundary_boxes(&func, &args);
-                return self.emit_direct_call(e, func, args, None, ret_tuple.as_ref(), &dc);
+                return self.emit_direct_call(e, func, args, None, ret_tuple, &dc);
             }
             let (args, tail) = self.direct_call_args(e, func, arg_idxs, any_named, &dc, true)?;
             if let Some(tail) = tail {
                 return self.emit_preflight_tail(e, tail, args);
             }
-            self.emit_direct_call(e, func, args, dc.plan.ret_shape(), ret_tuple.as_ref(), &dc)
+            self.emit_direct_call(e, func, args, dc.plan.ret_shape(), ret_tuple, &dc)
         })()?;
         self.call_result_bundle(dc.plan.representation(), value)
     }
@@ -1849,13 +1849,13 @@ impl<'a> Builder<'a> {
             .representation()
             .params()
             .iter()
-            .any(|&id| matches!(dc.plan.rep_plan(id).layout(), RepLayout::Tuple { .. }));
+            .any(|&id| matches!(dc.plan.rep_plan(id).layout(), RepLayout::Tuple(_)));
         Ok(if has_tuple_storage {
-            let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
+            let opaque = vec![&RepLayout::Opaque; callee.param_decls.len()];
             self.scalar_call_args(e, func, arg_idxs, any_named, &opaque, &[], preflight)?
         } else if any_named {
             if preflight.is_some() {
-                let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
+                let opaque = vec![&RepLayout::Opaque; callee.param_decls.len()];
                 self.scalar_call_args(e, func, arg_idxs, true, &opaque, &[], preflight)?
             } else {
                 self.boxed_slotted_call_args(e, arg_idxs, func, &dc.callee_inst)?
@@ -1895,14 +1895,14 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         args: Vec<Idx<Inst>>,
         value: Option<&ValueShape>,
-        tuple: Option<&TupleRetShape>,
+        tuple: Option<&TupleLayout>,
         dc: &DirectCall<'a>,
     ) -> Result<ValueRepr, CompilerError> {
         if let Some(shape) = value {
             let dests = self.fresh_cells(shape.leaf_count());
             let (call, leaves) = self.call_multi(dests, func, args);
             self.record_call(call, func, dc)?;
-            return Ok(self.rebuild_from_leaves(shape, &leaves, &mut 0));
+            return Ok(Self::rebuild_from_leaves(shape, &leaves, &mut 0));
         }
         if let Some(shape) = tuple {
             return self.emit_tuple_call_tree(e, func, args, shape, dc);
@@ -1920,7 +1920,7 @@ impl<'a> Builder<'a> {
         e: Idx<Expr>,
         func: FuncRef,
         args: Vec<Idx<Inst>>,
-        shape: &TupleRetShape,
+        shape: &TupleLayout,
         dc: &DirectCall<'a>,
     ) -> Result<ValueRepr, CompilerError> {
         let slot_types = self.tuple_opaque_slot_types(e, shape);
@@ -1936,8 +1936,8 @@ impl<'a> Builder<'a> {
     /// The call-site result for a captured tuple return: the plain
     /// `MakeTuple(slots)` when nothing splats, else the `Tuple` repr rebuilt
     /// from the slots.
-    pub(crate) fn tuple_result(&mut self, shape: &TupleRetShape, slots: &[Idx<Inst>]) -> ValueRepr {
-        if !shape.splats() {
+    pub(crate) fn tuple_result(&mut self, shape: &TupleLayout, slots: &[Idx<Inst>]) -> ValueRepr {
+        if !shape.splats(self.scx.rep_arena()) {
             return ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(slots.to_vec())));
         }
         let mut idx = 0;
@@ -1960,10 +1960,9 @@ impl<'a> Builder<'a> {
                 i,
                 false,
                 "indirect function-value call",
-                |id| arena.ret_slot(*id),
                 |message| self.gap_here(message),
             )?;
-            argv.extend(self.arg_values_for_slot(&slot, a)?);
+            argv.extend(self.arg_values_for_slot(arena.layout(*slot), a)?);
         }
         let Some(result) = plan.result() else {
             let call = self.emit_cur(Inst::CallValue { callee, args: argv });
@@ -1971,10 +1970,10 @@ impl<'a> Builder<'a> {
             return self.call_result_bundle(&plan, ValueRepr::Scalar(call));
         };
         if let Some(shape) = arena.tuple_shape(result) {
-            let dests = self.fresh_cells(shape.slot_count());
+            let dests = self.fresh_cells(shape.slot_count(self.scx.rep_arena()));
             let (call, loads) = self.call_value_multi(dests, callee, argv);
             self.f.call_rep_plans.insert(call, plan.clone());
-            return Ok(ValueBundle::new(result, self.tuple_result(&shape, &loads)));
+            return Ok(ValueBundle::new(result, self.tuple_result(shape, &loads)));
         }
         let Some(shape) = arena.value_shape(result) else {
             let call = self.emit_cur(Inst::CallValue { callee, args: argv });
@@ -1987,7 +1986,7 @@ impl<'a> Builder<'a> {
         let mut idx = 0;
         Ok(ValueBundle::new(
             result,
-            self.rebuild_from_leaves(shape, &leaves, &mut idx),
+            Self::rebuild_from_leaves(shape, &leaves, &mut idx),
         ))
     }
 
@@ -2001,7 +2000,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         match self.expr_tuple_shape(e)? {
             Some(shape) => {
-                let dests = self.fresh_cells(shape.slot_count());
+                let dests = self.fresh_cells(shape.slot_count(self.scx.rep_arena()));
                 let (_, loads) = self.call_value_multi(dests, callee, args);
                 let r = self.tuple_result(&shape, &loads);
                 Ok(self.pack(r)?)
@@ -2054,38 +2053,33 @@ impl<'a> Builder<'a> {
                 // join forwards that tag rather than minting `true` -- `a?.m()` is
                 // absent when either link is.
                 let ret_tuple = dc.plan.ret_tuple();
-                return self.emit_direct_call(e, func, argv, None, ret_tuple.as_ref(), &dc);
+                return self.emit_direct_call(e, func, argv, None, ret_tuple, &dc);
             };
             let param_shapes = dc.plan.argument_shapes();
             let mut argv = Vec::new();
             // The RECEIVER arrives already lowered, so it cannot go through
             // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
             // `Leaves` is the only splatting slot reachable here.
-            let receiver_slot = required_wire_slot(
-                &param_shapes,
-                0,
-                false,
-                "UFCS receiver",
-                |slot| slot.clone(),
-                |message| self.gap_here(message),
-            )?;
+            let receiver_slot =
+                *required_wire_slot(&param_shapes, 0, false, "UFCS receiver", |message| {
+                    self.gap_here(message)
+                })?;
             match receiver_slot {
-                RetSlot::Leaves(shape) => {
-                    let leaves = self.cdata_leaves(recv, &shape)?;
+                RepLayout::Leaves(shape) => {
+                    let leaves = self.cdata_leaves(recv, shape)?;
                     argv.extend(leaves);
                 }
                 _ => argv.push(recv),
             }
             for (i, &a) in arg_idxs.iter().enumerate() {
-                let slot = required_wire_slot(
+                let slot = *required_wire_slot(
                     &param_shapes,
                     i + 1,
                     self.ws.module(func.module).functions[func.func].is_variadic,
                     "UFCS call",
-                    |slot| slot.clone(),
                     |message| self.gap_here(message),
                 )?;
-                argv.extend(self.arg_values_for_slot(&slot, a)?);
+                argv.extend(self.arg_values_for_slot(slot, a)?);
             }
             let argv = dc.plan.transport_arguments(argv)?;
             self.emit_direct_call(e, func, argv, dc.plan.ret_shape(), None, &dc)
@@ -2103,25 +2097,24 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
-        param_shapes: &[RetSlot],
+        param_shapes: &[&RepLayout],
         param_tys: &[Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>],
         preflight: Option<&PreflightPlan>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if !any_named {
             let mut out = Vec::new();
             for (i, &a) in arg_idxs.iter().enumerate() {
-                let slot = required_wire_slot(
+                let slot = *required_wire_slot(
                     param_shapes,
                     i,
                     self.ws.module(func.module).functions[func.func].is_variadic,
                     "direct scalar-ABI call",
-                    |slot| slot.clone(),
                     |message| self.gap_here(message),
                 )?;
                 let callee = &self.ws.module(func.module).functions[func.func];
                 let lend = callee.inline_body.is_none() && !callee.is_extern;
-                let values = self.arg_values_for_call_slot(e, &slot, a, lend)?;
-                let mut values = self.coerced_scalar_arg(values, a, &slot, param_tys.get(i));
+                let values = self.arg_values_for_call_slot(e, slot, a, lend)?;
+                let mut values = self.coerced_scalar_arg(values, a, slot, param_tys.get(i));
                 if i == 0
                     && let Some(plan) = preflight
                     && let [receiver] = values.as_slice()
@@ -2159,7 +2152,7 @@ impl<'a> Builder<'a> {
         &mut self,
         values: Vec<Idx<Inst>>,
         arg: Idx<Expr>,
-        slot: &RetSlot,
+        slot: &RepLayout,
         param_ty: Option<&Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>>,
     ) -> Vec<Idx<Inst>> {
         match (values.as_slice(), param_ty) {
@@ -2225,8 +2218,8 @@ impl<'a> Builder<'a> {
                             let representation = bundle.representation();
                             let owned = self.snapshot_opaque_value(bundle.into_value())?;
                             let bundle = ValueBundle::new(representation, owned);
-                            let slot = shapes.get(pidx).cloned().unwrap_or(RetSlot::Opaque);
-                            CallArgValue::Scalar(self.snapshot_argument_slot(bundle, &slot)?)
+                            let slot = shapes.get(pidx).copied().unwrap_or(&RepLayout::Opaque);
+                            CallArgValue::Scalar(self.snapshot_argument_slot(bundle, slot)?)
                         }
                     });
                 }
@@ -2280,12 +2273,12 @@ impl<'a> Builder<'a> {
                 }
                 CallArgMode::Scalar { shapes, types } => {
                     let bundle = scalar.expect("scalar argument");
-                    let slot = shapes.get(pidx).cloned().unwrap_or(RetSlot::Opaque);
+                    let slot = shapes.get(pidx).copied().unwrap_or(&RepLayout::Opaque);
                     CallArgValue::Scalar(if is_ref {
-                        self.repr_to_slot_values_bundle(&bundle, &slot)?
+                        self.repr_to_slot_values_bundle(&bundle, slot)?
                     } else {
-                        let values = self.snapshot_argument_slot(bundle, &slot)?;
-                        self.coerced_scalar_arg(values, a, &slot, types.get(pidx))
+                        let values = self.snapshot_argument_slot(bundle, slot)?;
+                        self.coerced_scalar_arg(values, a, slot, types.get(pidx))
                     })
                 }
             };
@@ -2306,26 +2299,23 @@ impl<'a> Builder<'a> {
         let mut out = Vec::with_capacity(hi);
         for (i, value) in slots.into_iter().take(hi).enumerate() {
             let slot = match mode {
-                CallArgMode::Boxed(..) => RetSlot::Opaque,
-                CallArgMode::Scalar { shapes, .. } => required_wire_slot(
-                    shapes,
-                    i,
-                    false,
-                    "slotted call",
-                    |slot| slot.clone(),
-                    |message| self.gap_here(message),
-                )?,
+                CallArgMode::Boxed(..) => &RepLayout::Opaque,
+                CallArgMode::Scalar { shapes, .. } => {
+                    *required_wire_slot(shapes, i, false, "slotted call", |message| {
+                        self.gap_here(message)
+                    })?
+                }
             };
             match value {
                 Some(CallArgValue::Boxed(value)) => out.push(value),
                 Some(CallArgValue::Scalar(values)) => out.extend(values),
                 None if defaults.get(i).is_some_and(Option::is_some) => {
                     let default = defaults[i].as_ref().expect("checked above");
-                    out.extend(self.emit_param_default(default, &slot)?);
+                    out.extend(self.emit_param_default(default, slot)?);
                 }
                 None => {
                     // Omitted values need nil in every wire for default-fill.
-                    for _ in 0..slot.slot_count() {
+                    for _ in 0..slot.slot_count(self.scx.rep_arena()) {
                         out.push(self.emit_cur(Inst::Const(Lit::Nil)));
                     }
                 }
@@ -2682,7 +2672,7 @@ impl<'a> Builder<'a> {
         let iter_ref = inst.func;
         let plan = self.callee_abi_plan_for_instance(inst)?;
         let slot = if !plan.uses_scalar_abi() {
-            RetSlot::Opaque
+            &RepLayout::Opaque
         } else {
             plan.argument_shapes().first().cloned().ok_or_else(|| {
                 gap(format!(
@@ -2692,7 +2682,7 @@ impl<'a> Builder<'a> {
                 ))
             })?
         };
-        let args = self.repr_to_slot_values_bundle(&bundle, &slot)?;
+        let args = self.repr_to_slot_values_bundle(&bundle, slot)?;
         plan.transport_arguments(args)
     }
 
@@ -2863,7 +2853,7 @@ impl<'a> Builder<'a> {
         match plan.layout() {
             RepLayout::Opaque => self.repr_to_leaves_shape(bundle.value(), expected),
             RepLayout::Leaves(actual) => self.repr_to_leaves_for_shape(bundle, actual, expected),
-            RepLayout::Tuple { .. } => Err(self.gap_here(format!(
+            RepLayout::Tuple(_) => Err(self.gap_here(format!(
                 "tuple representation {:?} cannot fill a value storage shape at {reason}",
                 bundle.representation()
             ))),
@@ -2873,11 +2863,11 @@ impl<'a> Builder<'a> {
     pub(crate) fn repr_to_slot_values_bundle(
         &mut self,
         bundle: &ValueBundle,
-        slot: &RetSlot,
+        slot: &RepLayout,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         match slot {
-            RetSlot::Opaque => self.pack_bundle(bundle).map(|value| vec![value]),
-            RetSlot::Leaves(expected) => {
+            RepLayout::Opaque => self.pack_bundle(bundle).map(|value| vec![value]),
+            RepLayout::Leaves(expected) => {
                 let plan = self
                     .scx
                     .rep_arena()
@@ -2901,13 +2891,13 @@ impl<'a> Builder<'a> {
                         }
                     }
                     RepLayout::Opaque => self.repr_to_leaves_shape(bundle.value(), expected),
-                    RepLayout::Tuple { .. } => Err(self.gap_here(format!(
+                    RepLayout::Tuple(_) => Err(self.gap_here(format!(
                         "tuple representation {:?} cannot fill a leaves slot",
                         bundle.representation()
                     ))),
                 }
             }
-            RetSlot::Nested(expected) => {
+            RepLayout::Tuple(expected) => {
                 let actual = self
                     .scx
                     .rep_arena()
@@ -2918,10 +2908,7 @@ impl<'a> Builder<'a> {
                             bundle.representation()
                         ))
                     })?;
-                if !ret_slot_can_fill(
-                    &RetSlot::Nested(actual.clone()),
-                    &RetSlot::Nested(expected.clone()),
-                ) {
+                if !actual.can_fill(expected, self.scx.rep_arena()) {
                     return Err(self.gap_here(format!(
                         "representation {:?} tuple shape {:?} does not match its nested tuple slot {:?}",
                         bundle.representation(), actual, expected
@@ -3589,7 +3576,7 @@ impl<'a> Builder<'a> {
                             let copy = s.owned_value_children(copy)?;
                             s.repr_to_leaves_shape(&copy, inner)
                         })?;
-                        return Ok(s.rebuild_from_leaves(shape, &leaves, &mut 0));
+                        return Ok(Self::rebuild_from_leaves(shape, &leaves, &mut 0));
                     }
                 }
                 s.owned_value_children(r)
@@ -3735,7 +3722,7 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueRepr, CompilerError> {
         if !self.boxed_copy_uses_gc_fields(shape)? {
             let leaves = self.cdata_leaves(v, shape)?;
-            let copy = self.rebuild_from_leaves(shape, &leaves, &mut 0);
+            let copy = Self::rebuild_from_leaves(shape, &leaves, &mut 0);
             self.mark_borrowed_value_children(shape, &copy, owner_ty)?;
             return Ok(copy);
         }
@@ -3776,7 +3763,7 @@ impl<'a> Builder<'a> {
                 .collect();
             return Ok(match fs {
                 FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
-                FieldShape::Nested(sub) => self.rebuild_from_leaves(sub, &leaves, &mut 0),
+                FieldShape::Nested(sub) => Self::rebuild_from_leaves(sub, &leaves, &mut 0),
             });
         }
         let fv = self.read_value_field(v, *fname);
@@ -3795,7 +3782,7 @@ impl<'a> Builder<'a> {
             }
             FieldShape::Nested(sub) if sub.nullable => {
                 let leaves = self.nullable_child_leaf_range(fv, sub, 0..sub.leaf_count())?;
-                let copy = self.rebuild_from_leaves(sub, &leaves, &mut 0);
+                let copy = Self::rebuild_from_leaves(sub, &leaves, &mut 0);
                 let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
                 self.mark_borrowed_value_children(sub, &copy, sub_ty.as_deref())?;
                 copy
@@ -3914,34 +3901,29 @@ impl<'a> Builder<'a> {
     /// Reconstruct a nested `Group` from a flat leaf list per `shape` (the inverse
     /// of `repr_to_leaves`), consuming leaves depth-first from `*idx`.
     pub(crate) fn rebuild_from_leaves(
-        &mut self,
         shape: &ValueShape,
         leaves: &[Idx<Inst>],
         idx: &mut usize,
     ) -> ValueRepr {
-        // `shape` is borrowed from a clone at the call sites, so collect the field
-        // shapes first to avoid holding the borrow across `&mut self` calls.
-        let fields: Vec<FieldShape> = shape.fields.iter().map(|(_, fs)| fs.clone()).collect();
-        let name = shape.name;
         let present = shape.nullable.then(|| {
             let value = leaves[*idx];
             *idx += 1;
             value
         });
-        let mut parts = Vec::with_capacity(fields.len());
-        for fs in &fields {
-            let part = match fs {
+        let parts = shape
+            .fields
+            .iter()
+            .map(|(_, field)| match field {
                 FieldShape::Prim => {
-                    let v = leaves[*idx];
+                    let value = leaves[*idx];
                     *idx += 1;
-                    ValueRepr::Scalar(v)
+                    ValueRepr::Scalar(value)
                 }
-                FieldShape::Nested(sub) => self.rebuild_from_leaves(sub, leaves, idx),
-            };
-            parts.push(part);
-        }
+                FieldShape::Nested(sub) => Self::rebuild_from_leaves(sub, leaves, idx),
+            })
+            .collect();
         ValueRepr::Group {
-            name,
+            name: shape.name,
             parts,
             present,
         }

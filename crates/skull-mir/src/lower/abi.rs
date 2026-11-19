@@ -11,10 +11,7 @@ use bone_core::prelude::Span;
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
-use super::{
-    FieldShape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape, ValueStorage,
-    slot_param_names,
-};
+use super::{FieldShape, ScalarCtx, SpecSubst, ValueShape, ValueStorage, slot_param_names};
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::mir::FuncRef;
 
@@ -129,7 +126,67 @@ impl std::error::Error for RepError {}
 pub enum RepLayout {
     Opaque,
     Leaves(ValueShape),
-    Tuple { slots: Vec<RepId>, nullable: bool },
+    Tuple(TupleLayout),
+}
+
+/// The wire layout of a tuple. A nullable tuple transports its presence
+/// before the lanes of its elements.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TupleLayout {
+    pub slots: Vec<RepId>,
+    pub nullable: bool,
+}
+
+impl TupleLayout {
+    pub(super) fn slot_count(&self, arena: &RepArena) -> usize {
+        self.slots
+            .iter()
+            .map(|&id| arena.get(id).lanes(arena))
+            .sum::<usize>()
+            + usize::from(self.nullable)
+    }
+
+    pub(super) fn splats(&self, arena: &RepArena) -> bool {
+        self.slots.iter().any(|&id| arena.get(id).layout().splats())
+    }
+
+    pub(super) fn can_fill(&self, expected: &Self, arena: &RepArena) -> bool {
+        if self == expected {
+            return true;
+        }
+        (!self.nullable || expected.nullable)
+            && self.slots.len() == expected.slots.len()
+            && self
+                .slots
+                .iter()
+                .zip(&expected.slots)
+                .all(
+                    |(&actual, &expected)| match (arena.layout(actual), arena.layout(expected)) {
+                        (RepLayout::Opaque, RepLayout::Opaque) => true,
+                        (RepLayout::Leaves(actual), RepLayout::Leaves(expected)) => {
+                            super::value_shape_can_fill(actual, expected)
+                        }
+                        (RepLayout::Tuple(actual), RepLayout::Tuple(expected)) => {
+                            actual.can_fill(expected, arena)
+                        }
+                        _ => false,
+                    },
+                )
+    }
+}
+
+impl RepLayout {
+    pub(super) fn slot_count(&self, arena: &RepArena) -> usize {
+        match self {
+            RepLayout::Opaque => 1,
+            RepLayout::Leaves(shape) => shape.leaf_count(),
+            RepLayout::Tuple(tuple) => tuple.slot_count(arena),
+        }
+    }
+
+    pub(super) fn splats(&self) -> bool {
+        !matches!(self, RepLayout::Opaque)
+    }
 }
 
 /// One concrete physical answer in the target/use context supplied by the
@@ -184,35 +241,25 @@ impl RepPlan {
     pub fn leaf_paths(&self) -> Option<Vec<Ustr>> {
         match self.layout() {
             RepLayout::Leaves(shape) => Some(crate::lower::value_leaf_paths(shape)),
-            RepLayout::Opaque | RepLayout::Tuple { .. } => None,
+            RepLayout::Opaque | RepLayout::Tuple(_) => None,
         }
     }
 
     pub(crate) fn presence_flags(&self) -> Option<Vec<bool>> {
         match self.layout() {
             RepLayout::Leaves(shape) => Some(crate::lower::value_leaf_presence_flags(shape)),
-            RepLayout::Opaque | RepLayout::Tuple { .. } => None,
+            RepLayout::Opaque | RepLayout::Tuple(_) => None,
         }
     }
 
     pub fn lanes(&self, arena: &RepArena) -> usize {
-        match self.layout() {
-            RepLayout::Opaque => 1,
-            RepLayout::Leaves(shape) => shape.leaf_count(),
-            RepLayout::Tuple { slots, nullable } => {
-                slots
-                    .iter()
-                    .map(|slot| arena.get(*slot).lanes(arena))
-                    .sum::<usize>()
-                    + usize::from(*nullable)
-            }
-        }
+        self.layout().slot_count(arena)
     }
 
     pub(crate) fn splats(&self, arena: &RepArena) -> bool {
         match self.layout() {
             RepLayout::Leaves(_) => true,
-            RepLayout::Tuple { slots, .. } => {
+            RepLayout::Tuple(TupleLayout { slots, .. }) => {
                 slots.iter().any(|slot| arena.get(*slot).splats(arena))
             }
             RepLayout::Opaque => false,
@@ -1054,7 +1101,7 @@ impl RepArena {
             .iter()
             .filter_map(|plan| match plan.layout() {
                 RepLayout::Leaves(shape) => Some((shape.name, plan.id)),
-                RepLayout::Opaque | RepLayout::Tuple { .. } => None,
+                RepLayout::Opaque | RepLayout::Tuple(_) => None,
             })
             .collect()
     }
@@ -1225,17 +1272,6 @@ impl RepArena {
         Ok(out)
     }
 
-    pub(crate) fn ret_slot(&self, id: RepId) -> RetSlot {
-        match self.get(id).layout() {
-            RepLayout::Opaque => RetSlot::Opaque,
-            RepLayout::Leaves(shape) => RetSlot::Leaves(shape.clone()),
-            RepLayout::Tuple { slots, nullable } => RetSlot::Nested(TupleRetShape {
-                slots: slots.iter().map(|&slot| self.ret_slot(slot)).collect(),
-                nullable: *nullable,
-            }),
-        }
-    }
-
     pub(crate) fn value_shape(&self, id: RepId) -> Option<&ValueShape> {
         match self.get(id).layout() {
             RepLayout::Leaves(shape) => Some(shape),
@@ -1243,12 +1279,13 @@ impl RepArena {
         }
     }
 
-    pub(crate) fn tuple_shape(&self, id: RepId) -> Option<TupleRetShape> {
+    pub(super) fn layout(&self, id: RepId) -> &RepLayout {
+        self.get(id).layout()
+    }
+
+    pub(crate) fn tuple_shape(&self, id: RepId) -> Option<&TupleLayout> {
         match self.get(id).layout() {
-            RepLayout::Tuple { slots, nullable } => Some(TupleRetShape {
-                slots: slots.iter().map(|&slot| self.ret_slot(slot)).collect(),
-                nullable: *nullable,
-            }),
+            RepLayout::Tuple(tuple) => Some(tuple),
             _ => None,
         }
     }
@@ -1380,7 +1417,11 @@ impl RepArena {
             if (return_slot && !nullable)
                 || (splats && (return_slot || tuple_element_shape || facts.tuple_spelled))
             {
-                return Ok(self.intern(target, use_context, RepLayout::Tuple { slots, nullable }));
+                return Ok(self.intern(
+                    target,
+                    use_context,
+                    RepLayout::Tuple(TupleLayout { slots, nullable }),
+                ));
             }
             if nullable && guarantees.nobox && !guarantees.allow_opaque {
                 return Err(reject(
@@ -2340,10 +2381,10 @@ impl BackendFnAbiPlan {
                     self.representation.params[i] = self.arena.intern_with_facts(
                         self.target,
                         RepUse::Parameter,
-                        RepLayout::Tuple {
+                        RepLayout::Tuple(TupleLayout {
                             slots: Vec::new(),
                             nullable: false,
-                        },
+                        }),
                         None,
                         false,
                         false,
@@ -2391,17 +2432,12 @@ impl BackendFnAbiPlan {
 
     /// Evaluate the original argument layout before dropping unused transport.
     /// A projected layout is not a complete value and must never be boxed.
-    pub(super) fn argument_shapes(&self) -> Vec<RetSlot> {
-        self.transport.as_ref().map_or_else(
-            || self.param_shapes(),
-            |transport| {
-                transport
-                    .original
-                    .iter()
-                    .map(|id| self.arena.ret_slot(*id))
-                    .collect()
-            },
-        )
+    pub(super) fn argument_shapes(&self) -> Vec<&RepLayout> {
+        let reps = self.transport.as_ref().map_or_else(
+            || self.param_reps(),
+            |transport| transport.original.as_slice(),
+        );
+        reps.iter().map(|&id| self.arena.layout(id)).collect()
     }
 
     pub(super) fn transport_arguments<T: Copy>(
@@ -2483,23 +2519,14 @@ impl BackendFnAbiPlan {
         self.arena.get(id)
     }
 
-    /// Per declared param, what it occupies on the wire. Empty when this body
-    /// keeps the boxed ABI, which is what the lowering path already treats as
-    /// "no splatting".
-    pub(super) fn param_shapes(&self) -> Vec<RetSlot> {
-        if !self.uses_scalar_abi() {
-            return Vec::new();
+    pub(super) fn param_reps(&self) -> &[RepId] {
+        if self.uses_scalar_abi() {
+            self.representation.params()
+        } else {
+            &[]
         }
-        self.representation
-            .params()
-            .iter()
-            .map(|id| self.arena.ret_slot(*id))
-            .collect()
     }
 
-    /// The per-declared-param wire slots, or `None` under the boxed ABI --
-    /// distinct from [`Self::param_shapes`], which flattens the distinction
-    /// away for the lowering path that treats both as "no splatting".
     pub(super) fn ret_shape(&self) -> Option<&ValueShape> {
         self.representation
             .result()
@@ -2507,7 +2534,7 @@ impl BackendFnAbiPlan {
     }
 
     /// The declared return's tuple shape under this body's substitution.
-    pub(crate) fn ret_tuple(&self) -> Option<TupleRetShape> {
+    pub(crate) fn ret_tuple(&self) -> Option<&TupleLayout> {
         self.representation
             .result()
             .and_then(|id| self.arena.tuple_shape(id))
@@ -2530,11 +2557,15 @@ impl BackendFnAbiPlan {
         if !self.uses_scalar_abi() {
             return None;
         }
-        let shapes = self.param_shapes();
         let f = &ws.module(self.decl().module).functions[self.decl().func];
         let mut names = Vec::new();
-        for (pd, slot) in f.param_decls.iter().zip(shapes.iter()) {
-            slot_param_names(pd.name.as_str(), slot, &mut names);
+        for (pd, &id) in f.param_decls.iter().zip(self.param_reps()) {
+            slot_param_names(
+                &self.arena,
+                pd.name.as_str(),
+                self.arena.layout(id),
+                &mut names,
+            );
         }
         Some(names)
     }
@@ -2567,9 +2598,9 @@ impl BackendFnAbiPlan {
     /// defaulted value-struct param counts as its whole leaf group.
     pub fn param_leaf_widths(&self) -> Option<Vec<usize>> {
         self.uses_scalar_abi().then(|| {
-            self.param_shapes()
+            self.param_reps()
                 .iter()
-                .map(RetSlot::slot_count)
+                .map(|&id| self.arena.get(id).lanes(&self.arena))
                 .collect()
         })
     }
@@ -2609,7 +2640,7 @@ fn render_rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
             plan.leaf_paths().unwrap_or_default(),
             plan.presence_flags().unwrap_or_default()
         ),
-        RepLayout::Tuple { slots, nullable } => format!(
+        RepLayout::Tuple(TupleLayout { slots, nullable }) => format!(
             "tuple(nullable={nullable};[{}])",
             slots
                 .iter()
@@ -2674,10 +2705,10 @@ mod rep_read_cache_tests {
         let ib = b.intern(
             FnBackend::Lua,
             RepUse::Return,
-            RepLayout::Tuple {
+            RepLayout::Tuple(TupleLayout {
                 slots: vec![],
                 nullable: false,
-            },
+            }),
         );
         assert_eq!(
             ia.raw(),
@@ -2687,7 +2718,7 @@ mod rep_read_cache_tests {
         assert_ne!(ia, ib, "arena ownership must distinguish equal local ids");
         for _ in 0..2 {
             assert!(matches!(a.get(ia).layout(), RepLayout::Opaque));
-            assert!(matches!(b.get(ib).layout(), RepLayout::Tuple { .. }));
+            assert!(matches!(b.get(ib).layout(), RepLayout::Tuple(_)));
         }
         let ib2 = b.intern(FnBackend::Lua, RepUse::Return, RepLayout::Opaque);
         assert_ne!(
@@ -2745,15 +2776,17 @@ mod rep_read_cache_tests {
         let id = arena.intern(
             FnBackend::Lua,
             RepUse::Return,
-            RepLayout::Tuple {
+            RepLayout::Tuple(TupleLayout {
                 slots: vec![scalar, scalar],
                 nullable: false,
-            },
+            }),
         );
         let first = arena.get(id);
         let second = arena.get(id);
-        let (RepLayout::Tuple { slots: left, .. }, RepLayout::Tuple { slots: right, .. }) =
-            (first.layout(), second.layout())
+        let (
+            RepLayout::Tuple(TupleLayout { slots: left, .. }),
+            RepLayout::Tuple(TupleLayout { slots: right, .. }),
+        ) = (first.layout(), second.layout())
         else {
             panic!("tuple representation expected");
         };

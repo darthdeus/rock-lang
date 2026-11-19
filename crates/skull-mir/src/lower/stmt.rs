@@ -126,7 +126,7 @@ impl<'a> Builder<'a> {
             .collect();
         let boxed = self.lower_place_base(value)?;
         let leaves = self.cdata_leaf_demand(boxed, &expanded, &demand)?;
-        let repr = self.rebuild_from_leaves(&selected, &leaves, &mut 0);
+        let repr = Self::rebuild_from_leaves(&selected, &leaves, &mut 0);
         self.mark_borrowed_value_children(&selected, &repr, self.concrete_expr_ty(value))?;
         let repr = self.own_opaque_parameter_children(repr, &selected)?;
         let leaves = self.repr_to_leaves_shape(&repr, &selected)?;
@@ -422,7 +422,10 @@ impl<'a> Builder<'a> {
                         // `let (a, b) = e` — destructure via TupleIndex into a
                         // cell per leaf (the same machinery `for (k,v)` uses).
                         Some(vars @ BindingPattern::Tuple(_)) => {
-                            match self.expr_tuple_shape(value)?.filter(TupleRetShape::splats) {
+                            match self
+                                .expr_tuple_shape(value)?
+                                .filter(|shape| shape.splats(self.scx.rep_arena()))
+                            {
                                 Some(shape) => {
                                     let r = self.lower_expr_repr(value)?.into_value();
                                     self.bind_tuple_repr(&vars, &shape, r)?;
@@ -570,9 +573,9 @@ impl<'a> Builder<'a> {
                         }
                     }
                     if !threaded {
-                        let shape = self
-                            .nullable_tuple_wire_shape(value)?
-                            .or(self.expr_tuple_shape(value)?.filter(TupleRetShape::splats));
+                        let shape = self.nullable_tuple_wire_shape(value)?.or(self
+                            .expr_tuple_shape(value)?
+                            .filter(|shape| shape.splats(self.scx.rep_arena())));
                         if let Some(shape) = shape {
                             // A splatting tuple binds its WIRE -- one cell per slot, led
                             // by presence when the wire carries one. Packing it instead

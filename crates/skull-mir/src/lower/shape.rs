@@ -909,7 +909,7 @@ pub(crate) enum ValueRepr {
         present: Option<Idx<Inst>>,
     },
     /// A tuple whose elements are still reprs -- produced only by a tuple return
-    /// that splats (`TupleRetShape::splats`), so an element that arrived as
+    /// that splats (`TupleLayout::splats`), so an element that arrived as
     /// leaves can reach a destructure without being packed. Packing one emits
     /// the ordinary `MakeTuple` of packed parts, which is how a whole-tuple use
     /// of a `nobox` element still reaches the guarantee's rejection.
@@ -1569,33 +1569,6 @@ pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &Vec<MonoTy>) -> 
     subst
 }
 
-/// The wire shape of ONE element of a tuple return.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RetSlot {
-    /// One opaque value -- today's ABI, and what every element that is not a
-    /// `nobox` value keeps.
-    Opaque,
-    /// A `nobox` value: its leaves ride the return directly, so the element
-    /// never needs a box to cross the boundary.
-    Leaves(ValueShape),
-    /// A nested tuple that itself carries a `nobox` element somewhere inside.
-    Nested(TupleRetShape),
-}
-
-impl RetSlot {
-    pub(crate) fn slot_count(&self) -> usize {
-        match self {
-            RetSlot::Opaque => 1,
-            RetSlot::Leaves(shape) => shape.leaf_count(),
-            RetSlot::Nested(inner) => inner.slot_count(),
-        }
-    }
-
-    pub(crate) fn splats(&self) -> bool {
-        !matches!(self, RetSlot::Opaque)
-    }
-}
-
 pub(crate) fn value_shape_can_fill(actual: &ValueShape, expected: &ValueShape) -> bool {
     actual.name == expected.name
         && (!actual.nullable || expected.nullable)
@@ -1614,50 +1587,6 @@ pub(crate) fn value_shape_can_fill(actual: &ValueShape, expected: &ValueShape) -
         )
 }
 
-pub(crate) fn ret_slot_can_fill(actual: &RetSlot, expected: &RetSlot) -> bool {
-    match (actual, expected) {
-        (RetSlot::Opaque, RetSlot::Opaque) => true,
-        (RetSlot::Leaves(actual), RetSlot::Leaves(expected)) => {
-            value_shape_can_fill(actual, expected)
-        }
-        (RetSlot::Nested(actual), RetSlot::Nested(expected)) => {
-            (!actual.nullable || expected.nullable)
-                && actual.slots.len() == expected.slots.len()
-                && actual
-                    .slots
-                    .iter()
-                    .zip(&expected.slots)
-                    .all(|(actual, expected)| ret_slot_can_fill(actual, expected))
-        }
-        _ => false,
-    }
-}
-
-/// Per-element wire shape for a tuple return. Only `nobox` elements splat;
-/// ordinary values remain boxed. The return type alone determines this shape,
-/// so direct calls, function values, and definitions agree.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TupleRetShape {
-    pub(crate) slots: Vec<RetSlot>,
-    /// A declared nullable tuple adds a presence bool before its slots. This is
-    /// set only from the return declaration: safe-nav's `Nullable(Tuple)` has
-    /// no call-wire presence slot.
-    pub(crate) nullable: bool,
-}
-
-impl TupleRetShape {
-    /// Total returned values.
-    pub(crate) fn slot_count(&self) -> usize {
-        self.slots.iter().map(RetSlot::slot_count).sum::<usize>() + self.nullable as usize
-    }
-
-    /// Whether any element carries leaves -- `false` means this is byte-for-byte
-    /// the pre-existing ABI and every splat-aware path stays off.
-    pub(crate) fn splats(&self) -> bool {
-        self.slots.iter().any(RetSlot::splats)
-    }
-}
-
 /// Concrete `(bool, E)` return shape for a bounded `next` splice. The slot
 /// count sizes the call destinations; the element plan rebuilds `E` when its
 /// shape is available. Keep opaque, rebuildable, and unsupported cases distinct
@@ -1674,7 +1603,7 @@ pub enum BoundNextElem {
 }
 
 /// How to rebuild one splatting element from the wire values, public because the
-/// splice that consumes it lives in `skull-transform`. It mirrors [`RetSlot`],
+/// splice that consumes it lives in `skull-transform`. It mirrors [`RepLayout`],
 /// which stays private: this is the part the other crate needs, not the shape
 /// machinery behind it.
 pub enum ElemRebuild {
@@ -1711,15 +1640,15 @@ fn elem_rebuild_from_rep(arena: &RepArena, id: RepId) -> Option<ElemRebuild> {
                 .collect();
             fields.map(|f| ElemRebuild::Value(shape.name, id, f))
         }
-        RepLayout::Tuple {
+        RepLayout::Tuple(TupleLayout {
             slots,
             nullable: false,
-        } => slots
+        }) => slots
             .iter()
             .map(|slot| elem_rebuild_from_rep(arena, *slot))
             .collect::<Option<Vec<_>>>()
             .map(ElemRebuild::Tuple),
-        RepLayout::Leaves(_) | RepLayout::Tuple { nullable: true, .. } => None,
+        RepLayout::Leaves(_) | RepLayout::Tuple(TupleLayout { nullable: true, .. }) => None,
     }
 }
 
@@ -1769,7 +1698,7 @@ pub fn bound_next_shape_from_concrete(
         span: None,
         message: "bound witness return plan does not belong to the build arena".into(),
     })?;
-    let RepLayout::Tuple { slots, .. } = plan.layout() else {
+    let RepLayout::Tuple(TupleLayout { slots, .. }) = plan.layout() else {
         return Err(RepError {
             span: None,
             message: "bound witness return plan is not a tuple layout".into(),
@@ -1810,7 +1739,7 @@ pub fn bound_next_shape_from_concrete(
         BoundNextElem::Opaque
     };
     Ok(BoundNextShape {
-        slot_count: shape.slot_count(),
+        slot_count: shape.slot_count(arena),
         elem,
     })
 }

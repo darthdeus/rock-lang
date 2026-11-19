@@ -9,7 +9,7 @@ enum LetScrutinee {
         binding: Idx<BindingInfo>,
         shape: ValueShape,
     },
-    Tuple(TupleRetShape),
+    Tuple(TupleLayout),
 }
 
 impl<'a> Builder<'a> {
@@ -23,7 +23,7 @@ impl<'a> Builder<'a> {
         scrut: Idx<Expr>,
         arms: comfy_la_arena::IdxRange<MatchArm>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let repr = self.lower_match_repr(scrut, arms, RetSlot::Opaque)?;
+        let repr = self.lower_match_repr(scrut, arms, RepLayout::Opaque)?;
         self.pack_maybe_absent(repr)
     }
 
@@ -31,9 +31,9 @@ impl<'a> Builder<'a> {
         &mut self,
         scrut: Idx<Expr>,
         arms: comfy_la_arena::IdxRange<MatchArm>,
-        shape: RetSlot,
+        shape: RepLayout,
     ) -> Result<ValueRepr, CompilerError> {
-        let results = self.fresh_cells(shape.slot_count());
+        let results = self.fresh_cells(shape.slot_count(self.scx.rep_arena()));
         self.lower_match_arms(scrut, arms, |s, body, join| {
             let bv = s.lower_expr_repr(body)?;
             s.store_bundle_and_join(&results, &shape, &bv, join)
@@ -831,7 +831,7 @@ impl<'a> Builder<'a> {
         value: Idx<Expr>,
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
-        result_shape: Option<RetSlot>,
+        result_shape: Option<RepLayout>,
     ) -> Result<ValueRepr, CompilerError> {
         self.lower_if_let_inner(
             pattern,
@@ -861,15 +861,15 @@ impl<'a> Builder<'a> {
         value: Idx<Expr>,
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
-        result_shape: Option<RetSlot>,
+        result_shape: Option<RepLayout>,
         statement: bool,
     ) -> Result<Option<ValueRepr>, CompilerError> {
         let use_repr = result_shape.is_some();
-        let shape = result_shape.unwrap_or(RetSlot::Opaque);
+        let shape = result_shape.unwrap_or(RepLayout::Opaque);
         let results = if statement {
             Vec::new()
         } else if use_repr {
-            self.fresh_cells(shape.slot_count())
+            self.fresh_cells(shape.slot_count(self.scx.rep_arena()))
         } else {
             let ty = self.current_expr_unit_storage_ty_id();
             vec![self.f.new_cell_typed(None, ty)]
@@ -935,7 +935,7 @@ impl<'a> Builder<'a> {
         if self.pattern_is_names_only(pattern)
             && let Some(shape) = self.nullable_tuple_wire_shape(value)?
         {
-            return Ok(LetScrutinee::Tuple(TupleRetShape {
+            return Ok(LetScrutinee::Tuple(TupleLayout {
                 slots: shape.slots,
                 nullable: false,
             }));
@@ -1051,7 +1051,7 @@ impl<'a> Builder<'a> {
         }
         let Some(shape) = self
             .peeled_tuple_shape(value)?
-            .filter(TupleRetShape::splats)
+            .filter(|shape| shape.splats(self.scx.rep_arena()))
         else {
             return Ok(None);
         };
@@ -1065,7 +1065,7 @@ impl<'a> Builder<'a> {
     fn declared_splat_tuple_shape(
         &self,
         ty: bone_core::prelude::TyId,
-    ) -> Result<Option<TupleRetShape>, CompilerError> {
+    ) -> Result<Option<TupleLayout>, CompilerError> {
         let Ok(mono) = crate::monoty::convert_decl(self.ws, ty, &SpecSubst::default()) else {
             return Ok(None);
         };
@@ -1074,7 +1074,7 @@ impl<'a> Builder<'a> {
         }
         Ok(self
             .concrete_rep_tuple(&mono, RepUse::Return, true, false)?
-            .filter(TupleRetShape::splats))
+            .filter(|shape| shape.splats(self.scx.rep_arena())))
     }
 
     /// The declared type of `fname` on a record pattern's owner: a record
@@ -1110,7 +1110,7 @@ impl<'a> Builder<'a> {
     fn instance_payload_splats(
         &self,
         scrut: Idx<Expr>,
-    ) -> Result<rustc_hash::FxHashMap<(Ustr, Ustr, usize), TupleRetShape>, CompilerError> {
+    ) -> Result<rustc_hash::FxHashMap<(Ustr, Ustr, usize), TupleLayout>, CompilerError> {
         use bone_core::hir::VariantPayload;
         let mut out = rustc_hash::FxHashMap::default();
         let Some(ty) = self.concrete_expr_ty(scrut) else {
@@ -1150,7 +1150,7 @@ impl<'a> Builder<'a> {
                 }
                 if let Some(shape) = self
                     .concrete_rep_tuple(&mono, RepUse::Return, true, false)?
-                    .filter(TupleRetShape::splats)
+                    .filter(|shape| shape.splats(self.scx.rep_arena()))
                 {
                     out.insert((*name, v.name, i), shape);
                 }
@@ -1180,14 +1180,14 @@ impl<'a> Builder<'a> {
     /// Read the flat slots of `val_v` back into per-element scruts.
     fn rebuild_splat_box(
         &mut self,
-        shape: TupleRetShape,
+        shape: TupleLayout,
         val_v: Idx<Inst>,
     ) -> Result<Scrut, CompilerError> {
-        let shape = TupleRetShape {
+        let shape = TupleLayout {
             nullable: false,
             ..shape
         };
-        let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
+        let slots: Vec<Idx<Inst>> = (0..shape.slot_count(self.scx.rep_arena()))
             .map(|i| {
                 self.emit_cur(Inst::TupleIndex {
                     base: val_v,
@@ -1235,7 +1235,7 @@ impl<'a> Builder<'a> {
                 let owned = self.snapshot_opaque_value(bundle.value().clone())?;
                 let bundle = ValueBundle::new(bundle.representation(), owned);
                 let leaves =
-                    self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
+                    self.repr_to_slot_values_bundle(&bundle, &RepLayout::Leaves(scrut_shape))?;
                 let (&present, values) = leaves
                     .split_first()
                     .expect("a nullable shape carries its presence leaf first");
@@ -1280,7 +1280,7 @@ impl<'a> Builder<'a> {
             LetScrutinee::Nobox { binding, shape } => self.bind_leaves(binding, values, shape),
             LetScrutinee::Tuple(shape) => {
                 let mut idx = 0;
-                self.bind_names_slot(pattern, &RetSlot::Nested(shape), values, &mut idx)
+                self.bind_names_slot(pattern, &RepLayout::Tuple(shape), values, &mut idx)
             }
             LetScrutinee::Generic => Ok(()),
         }
@@ -1294,7 +1294,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn nullable_tuple_call_shape(
         &self,
         e: Idx<Expr>,
-    ) -> Result<Option<TupleRetShape>, CompilerError> {
+    ) -> Result<Option<TupleLayout>, CompilerError> {
         let Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
@@ -1329,7 +1329,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn nullable_tuple_wire_shape(
         &self,
         e: Idx<Expr>,
-    ) -> Result<Option<TupleRetShape>, CompilerError> {
+    ) -> Result<Option<TupleLayout>, CompilerError> {
         if let Expr::Var(b) = self.body.expr_arena[e] {
             let Some((_, shape)) = self.tuple_binds.get(&raw(b)) else {
                 return Ok(None);
@@ -1337,10 +1337,13 @@ impl<'a> Builder<'a> {
             return Ok(shape.nullable.then(|| shape.clone()));
         }
         if self.is_safe_nav(e) {
-            let Some(inner) = self.peeled_tuple_shape(e)?.filter(TupleRetShape::splats) else {
+            let Some(inner) = self
+                .peeled_tuple_shape(e)?
+                .filter(|shape| shape.splats(self.scx.rep_arena()))
+            else {
                 return Ok(None);
             };
-            return Ok(Some(TupleRetShape {
+            return Ok(Some(TupleLayout {
                 nullable: true,
                 ..inner
             }));
@@ -1374,17 +1377,17 @@ impl<'a> Builder<'a> {
     fn bind_names_slot(
         &mut self,
         pat: Idx<Pattern>,
-        slot: &RetSlot,
+        slot: &RepLayout,
         values: &[Idx<Inst>],
         idx: &mut usize,
     ) -> Result<(), CompilerError> {
         match self.body.pattern_arena[pat] {
-            Pattern::Wildcard => *idx += slot.slot_count(),
+            Pattern::Wildcard => *idx += slot.slot_count(self.scx.rep_arena()),
             Pattern::Bind(b) => {
                 self.bind_pattern_slot(&BindingPattern::Leaf(b), slot, values, idx)?;
             }
             Pattern::Tuple { elements } => {
-                let RetSlot::Nested(inner) = slot else {
+                let RepLayout::Tuple(inner) = slot else {
                     return Err(gap("a tuple pattern against a non-tuple wire slot"));
                 };
                 if elements.len() != inner.slots.len() {
@@ -1392,8 +1395,8 @@ impl<'a> Builder<'a> {
                         "a tuple pattern of a different arity than its wire slot",
                     ));
                 }
-                for (p, s) in elements.into_iter().zip(inner.slots.clone()) {
-                    self.bind_names_slot(p, &s, values, idx)?;
+                for (p, &s) in elements.into_iter().zip(&inner.slots) {
+                    self.bind_names_slot(p, self.scx.rep_arena().layout(s), values, idx)?;
                 }
             }
             _ => return Err(gap("bind_names_slot on a pattern that needs a test")),

@@ -290,9 +290,9 @@ impl<'a> Builder<'a> {
         &self,
         e: Idx<Expr>,
         func: FuncRef,
-        shape: &TupleRetShape,
+        shape: &TupleLayout,
     ) -> Result<(), CompilerError> {
-        if self.call_scx.values_first_class || !shape.splats() {
+        if self.call_scx.values_first_class || !shape.splats(self.scx.rep_arena()) {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
@@ -640,7 +640,7 @@ impl<'a> Builder<'a> {
         match shape {
             Some(shape) => {
                 let mut idx = 0;
-                self.rebuild_from_leaves(&shape, &vals, &mut idx)
+                Self::rebuild_from_leaves(&shape, &vals, &mut idx)
             }
             None => ValueRepr::Scalar(vals[0]),
         }

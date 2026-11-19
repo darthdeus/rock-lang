@@ -305,7 +305,7 @@ impl<'a> Builder<'a> {
             .into_iter()
             .map(|key| self.read_field(parent, crate::names::ustr(&key)))
             .collect::<Vec<_>>();
-        self.rebuild_from_leaves(shape, &leaves, &mut 0)
+        Self::rebuild_from_leaves(shape, &leaves, &mut 0)
     }
 
     /// Read one physically embedded child without rediscovering its representation.
@@ -483,7 +483,7 @@ impl<'a> Builder<'a> {
             shape.nullable = true;
             let bundle = self.lower_expr_repr(value)?;
             let leaves =
-                self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(shape.clone()))?;
+                self.repr_to_slot_values_bundle(&bundle, &RepLayout::Leaves(shape.clone()))?;
             let mut leaves = leaves.into_iter();
             let present = leaves
                 .next()

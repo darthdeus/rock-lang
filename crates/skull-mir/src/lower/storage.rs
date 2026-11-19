@@ -112,7 +112,7 @@ impl<'a> Builder<'a> {
         let mut idx = 0;
         Ok(ValueBundle::new(
             elem.representation(),
-            self.rebuild_from_leaves(&shape, &leaves, &mut idx),
+            Self::rebuild_from_leaves(&shape, &leaves, &mut idx),
         ))
     }
 
@@ -348,7 +348,7 @@ impl<'a> Builder<'a> {
             let shape = self.column_shape(elem)?;
             let leaves = self.cdata_leaves(value, &shape)?;
             let mut leaf = 0;
-            let unpacked = self.rebuild_from_leaves(&shape, &leaves, &mut leaf);
+            let unpacked = Self::rebuild_from_leaves(&shape, &leaves, &mut leaf);
             ValueBundle::new(elem.representation(), unpacked)
         };
         self.strided_append_bundle(vec, &bundle, elem)?;
@@ -558,7 +558,7 @@ impl<'a> Builder<'a> {
         let mut idx = 0;
         Ok(ValueBundle::new(
             container.element_rep(),
-            self.rebuild_from_leaves(&shape, &leaves, &mut idx),
+            Self::rebuild_from_leaves(&shape, &leaves, &mut idx),
         ))
     }
 
@@ -669,7 +669,7 @@ impl<'a> Builder<'a> {
         let mut idx = 0;
         Ok(ValueBundle::new(
             elem.representation(),
-            self.rebuild_from_leaves(&shape, &leaves, &mut idx),
+            Self::rebuild_from_leaves(&shape, &leaves, &mut idx),
         ))
     }
 
@@ -1641,7 +1641,7 @@ impl<'a> Builder<'a> {
             ));
         }
         let mut idx = 0;
-        let inner = self.rebuild_from_leaves(&shape, &loaded, &mut idx);
+        let inner = Self::rebuild_from_leaves(&shape, &loaded, &mut idx);
         let value = match inner {
             ValueRepr::Group { name, parts, .. } => ValueRepr::Group {
                 name,
