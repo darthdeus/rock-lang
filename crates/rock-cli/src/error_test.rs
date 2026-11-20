@@ -35,7 +35,6 @@ impl ErrorTest {
         let content = fs::read_to_string(path)?;
         let is_todo = content.lines().any(|l| l.contains("//! TODO:"));
 
-        // Parse test cases from the .err file
         let test_cases = parse_error_test_cases(&content)?;
 
         Ok(ErrorTest {
@@ -47,64 +46,49 @@ impl ErrorTest {
 
 fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
     let mut test_cases = Vec::new();
-    let lines: Vec<&str> = content.lines().collect();
-    let mut i = 0;
-
-    while i < lines.len() {
-        let line = lines[i].trim();
-
-        // Look for test case start: //=== TEST CASE: name_ExpectedErrorKind ===
-        if line.starts_with("//=== TEST CASE:") && line.ends_with(" ===") {
-            let case_header = line
-                .strip_prefix("//=== TEST CASE:")
-                .unwrap()
-                .strip_suffix(" ===")
-                .unwrap()
-                .trim();
-
-            let (case_name, expected_error_kind) = parse_test_case_name(case_header)?;
-
-            // Collect the input code until we find the next test case or end of file
-            i += 1;
-            let mut input_lines = Vec::new();
-
-            while i < lines.len() {
-                let current_line = lines[i];
-
-                // The next case header, or any other `//===` delimiter.
-                if current_line.trim().starts_with("//===") {
-                    break;
+    let mut lines = content.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(header) = line
+            .trim()
+            .strip_prefix("//=== TEST CASE:")
+            .and_then(|header| header.strip_suffix(" ==="))
+        else {
+            continue;
+        };
+        let (name, expected_error_kind) = parse_test_case_name(header.trim())?;
+        let mut expected_reasons = Vec::new();
+        let mut files = Vec::new();
+        let mut file = None;
+        let mut code = String::new();
+        while let Some(line) = lines.next_if(|line| !line.trim_start().starts_with("//===")) {
+            let trimmed = line.trim();
+            if let Some(want) = trimmed.strip_prefix("//! expect:") {
+                expected_reasons.push(want.trim().to_owned());
+            } else if let Some(next) = trimmed
+                .strip_prefix("//--- FILE:")
+                .and_then(|header| header.strip_suffix("---"))
+            {
+                if let Some(file) = file.replace(next.trim()) {
+                    files.push((file.to_owned(), code.trim().to_owned()));
                 }
-
-                input_lines.push(current_line);
-                i += 1;
+                // Once explicit files are present, text before the first header
+                // belongs to the fixture, not to any source file.
+                code.clear();
+            } else {
+                code.push_str(line);
+                code.push('\n');
             }
-
-            // `//! expect:` is harness input, not source: strip it before the
-            // body becomes files, so it cannot reach the parser.
-            let mut expected_reasons = Vec::new();
-            let body: Vec<&str> = input_lines
-                .iter()
-                .filter(|l| match l.trim().strip_prefix("//! expect:") {
-                    Some(want) => {
-                        expected_reasons.push(want.trim().to_string());
-                        false
-                    }
-                    None => true,
-                })
-                .copied()
-                .collect();
-            let files = split_body_into_files(&body);
-
-            test_cases.push(ErrorTestCase {
-                name: case_name,
-                files,
-                expected_error_kind,
-                expected_reasons,
-            });
-        } else {
-            i += 1;
         }
+        files.push((
+            file.unwrap_or("test.rock").to_owned(),
+            code.trim().to_owned(),
+        ));
+        test_cases.push(ErrorTestCase {
+            name,
+            files,
+            expected_error_kind,
+            expected_reasons,
+        });
     }
 
     if test_cases.is_empty() {
@@ -125,48 +109,6 @@ fn parse_test_case_name(case_header: &str) -> Result<(String, String)> {
         }
         _ => Err(anyhow!("Invalid test case name format: {}", case_header)),
     }
-}
-
-fn split_body_into_files(body_lines: &[&str]) -> Vec<(String, String)> {
-    let is_marker = |line: &str| {
-        let t = line.trim();
-        t.starts_with("//--- FILE:") && t.ends_with("---")
-    };
-
-    if !body_lines.iter().any(|l| is_marker(l)) {
-        let input = body_lines.join("\n").trim().to_string();
-        return vec![("test.rock".to_string(), input)];
-    }
-
-    let mut files: Vec<(String, String)> = Vec::new();
-    let mut current_name: Option<String> = None;
-    let mut current_lines: Vec<&str> = Vec::new();
-
-    let flush = |name: &Option<String>, lines: &[&str], out: &mut Vec<(String, String)>| {
-        if let Some(n) = name {
-            let content = lines.join("\n").trim().to_string();
-            out.push((n.clone(), content));
-        }
-    };
-
-    for line in body_lines {
-        if is_marker(line) {
-            flush(&current_name, &current_lines, &mut files);
-            current_lines.clear();
-            let t = line.trim();
-            let inner = t
-                .strip_prefix("//--- FILE:")
-                .and_then(|s| s.strip_suffix("---"))
-                .unwrap_or("")
-                .trim();
-            current_name = Some(inner.to_string());
-        } else {
-            current_lines.push(line);
-        }
-    }
-    flush(&current_name, &current_lines, &mut files);
-
-    files
 }
 
 fn bone_check_case(
@@ -418,6 +360,37 @@ fn find_error_test_dir(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_sections_keep_explicit_files_and_diagnostic_expectations() {
+        let cases = parse_error_test_cases(
+            "//=== TEST CASE: named_UndefinedSymbol ===
+discarded preamble
+//! expect: missing name
+//--- FILE: first.rock ---
+fn first() { missing() }
+//--- FILE: second.rock ---
+fn second() { first() }
+//=== NOTES ===
+discarded notes
+//=== TEST CASE: implicit_UndefinedSymbol ===
+fn implicit() { missing() }",
+        )
+        .unwrap();
+        assert_eq!(cases.len(), 2);
+        assert_eq!(cases[0].expected_reasons, ["missing name"]);
+        assert_eq!(
+            cases[0].files,
+            [
+                ("first.rock".into(), "fn first() { missing() }".into()),
+                ("second.rock".into(), "fn second() { first() }".into()),
+            ]
+        );
+        assert_eq!(
+            cases[1].files,
+            [("test.rock".into(), "fn implicit() { missing() }".into())]
+        );
+    }
 
     #[test]
     fn a_case_name_ends_in_a_bare_error_kind() {
