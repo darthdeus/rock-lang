@@ -80,24 +80,23 @@ fn incremental_missing_policy_notice_survives_updates_and_report_changes() {
     let mut sources = all_sources.clone();
     for (options, change, report_second_only) in [
         (&plain, LintCacheUpdate::full(), false),
-        (&plain, LintCacheUpdate::body_only([], [], []), false),
+        (&plain, LintCacheUpdate::body_only([], []), false),
         (
             &plain,
-            LintCacheUpdate::body_only([Ustr::from(FILES[0].0)], [], []),
+            LintCacheUpdate::body_only([Ustr::from(FILES[0].0)], []),
             false,
         ),
-        (&plain, LintCacheUpdate::body_only([], [], []), true),
-        (&configured, LintCacheUpdate::body_only([], [], []), false),
-        (&plain, LintCacheUpdate::body_only([], [], []), false),
-        (&disabled, LintCacheUpdate::body_only([], [], []), false),
-        (&plain, LintCacheUpdate::body_only([], [], []), false),
+        (&plain, LintCacheUpdate::body_only([], []), true),
+        (&configured, LintCacheUpdate::body_only([], []), false),
+        (&plain, LintCacheUpdate::body_only([], []), false),
+        (&disabled, LintCacheUpdate::body_only([], []), false),
+        (&plain, LintCacheUpdate::body_only([], []), false),
     ] {
         sources.clone_from(&all_sources);
         if report_second_only {
             sources.remove(&Ustr::from(FILES[0].0));
         }
-        let (cached, _) =
-            cache.update(&ws, &FxHashSet::default(), true, &sources, options, &change);
+        let cached = cache.update(&ws, &FxHashSet::default(), true, &sources, options, &change);
         let fresh = lint_workspace(&ws, &FxHashSet::default(), true, &sources, options);
         assert_eq!(format!("{cached:?}"), format!("{fresh:?}"));
         let notices = cached
@@ -167,13 +166,13 @@ fn policy_changes_invalidate_incremental_action_findings() {
     let configured = plain.clone().with_action_policy(Some(&POLICY));
     let mut cache = IncrementalLintCache::default();
     for options in [&configured, &plain, &configured] {
-        let (cached, _) = cache.update(
+        let cached = cache.update(
             &ws,
             &FxHashSet::default(),
             true,
             &sources,
             options,
-            &LintCacheUpdate::body_only([], [], []),
+            &LintCacheUpdate::body_only([], []),
         );
         let fresh = lint_workspace(&ws, &FxHashSet::default(), true, &sources, options);
         assert_eq!(cached.len(), 1);
@@ -199,7 +198,7 @@ fn allow_comments_never_hide_the_missing_policy_notice_on_either_path() {
     let sources = [(Ustr::from(file), source)].into_iter().collect();
     let options = LintOptions::only([ACTION_CALLERS.to_owned()]);
     let fresh = lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options);
-    let (cached, _) = IncrementalLintCache::default().update(
+    let cached = IncrementalLintCache::default().update(
         &ws,
         &FxHashSet::default(),
         true,

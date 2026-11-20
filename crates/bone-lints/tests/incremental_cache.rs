@@ -1,7 +1,6 @@
 use crate::support;
 use bone_lints::{
-    Finding, IncrementalLintCache, LintCacheStats, LintCacheUpdate, LintOptions, TextEditDelta,
-    UNUSED_VAR, lint_workspace,
+    Finding, IncrementalLintCache, LintCacheUpdate, LintOptions, UNUSED_VAR, lint_workspace,
 };
 use bone_semantic::prelude::*;
 
@@ -14,7 +13,7 @@ fn run_update(
     sources: &FxHashMap<Ustr, &str>,
     options: &LintOptions,
     change: &LintCacheUpdate,
-) -> (Vec<Finding>, LintCacheStats) {
+) -> Vec<Finding> {
     cache.update(ws, &support::warm(ws), true, sources, options, change)
 }
 
@@ -75,16 +74,6 @@ fn seed(src: &str) -> IncrementalLintCache {
     seeded_cache(&[(FILE, src)], &LintOptions::default())
 }
 
-/// Text in `FILE` from `at` on moved from `old` to `new` and by `lines` lines.
-fn shift(at: usize, old: &str, new: &str, lines: isize) -> TextEditDelta {
-    TextEditDelta {
-        file: Ustr::from(FILE),
-        at,
-        byte_delta: new.len() as isize - old.len() as isize,
-        line_delta: lines,
-    }
-}
-
 /// Move `cache` to `parts` as a body edit of `changed`, re-inferring
 /// `function`.
 fn body_edit(
@@ -93,29 +82,21 @@ fn body_edit(
     selection: &LintOptions,
     changed: &[&str],
     function: Option<&str>,
-    edit: Option<TextEditDelta>,
-) -> (Vec<Finding>, LintCacheStats) {
+) -> Vec<Finding> {
     let (ws, sources) = support::setup(parts);
     let reinferred = function.map(|name| function_owner(&ws, name));
-    let change =
-        LintCacheUpdate::body_only(changed.iter().map(|f| Ustr::from(f)), reinferred, edit);
+    let change = LintCacheUpdate::body_only(changed.iter().map(|f| Ustr::from(f)), reinferred);
     run_update(cache, &ws, &sources, selection, &change)
 }
 
 /// `body_edit` of the single file `FILE` with every default lint.
-fn edit(
-    cache: &mut IncrementalLintCache,
-    src: &str,
-    function: Option<&str>,
-    edit: Option<TextEditDelta>,
-) -> (Vec<Finding>, LintCacheStats) {
+fn edit(cache: &mut IncrementalLintCache, src: &str, function: Option<&str>) -> Vec<Finding> {
     body_edit(
         cache,
         &[(FILE, src)],
         &LintOptions::default(),
         &[FILE],
         function,
-        edit,
     )
 }
 
@@ -123,10 +104,10 @@ fn edit(
 fn local_body_findings_can_be_added_and_removed() {
     let mut cache = seed("fn main() { let used = 1\n print(used) }\n");
     let added = "fn main() { let unused = 1\n let used = 1\n print(used) }\n";
-    let (findings, _) = edit(&mut cache, added, Some("main"), None);
+    let findings = edit(&mut cache, added, Some("main"));
     assert!(findings.iter().any(|f| f.lint == UNUSED_VAR));
 
-    let (findings, _) = edit(&mut cache, "fn main() { print(1) }\n", Some("main"), None);
+    let findings = edit(&mut cache, "fn main() { print(1) }\n", Some("main"));
     assert!(findings.iter().all(|f| f.lint != UNUSED_VAR));
 }
 
@@ -144,21 +125,10 @@ fn suppression_edits_hide_and_restore_findings() {
             bone_lints::UNUSED_FN,
         ),
     ] {
-        let at = suppressed.find("// rock").expect("suppression");
         let mut cache = seed(old);
-        let (hidden, _) = edit(
-            &mut cache,
-            suppressed,
-            None,
-            Some(shift(at, old, suppressed, 1)),
-        );
+        let hidden = edit(&mut cache, suppressed, None);
         assert!(hidden.is_empty());
-        let (shown, _) = edit(
-            &mut cache,
-            old,
-            Some("main"),
-            Some(shift(at, suppressed, old, -1)),
-        );
+        let shown = edit(&mut cache, old, Some("main"));
         assert_eq!(shown.iter().filter(|f| f.lint == lint).count(), 1);
     }
 }
@@ -173,13 +143,12 @@ fn reinferred_consumer_refreshes_when_a_callee_changes() {
         &[("<dep-main>", main), ("<dep-callee>", callee_old)],
         &options,
     );
-    let (findings, _) = body_edit(
+    let findings = body_edit(
         &mut cache,
         &[("<dep-main>", main), ("<dep-callee>", callee_new)],
         &options,
         &["<dep-callee>"],
         Some("main"),
-        None,
     );
     assert!(
         findings
@@ -195,25 +164,23 @@ fn deprecated_findings_refresh_in_reinferred_consumers() {
     let after = "@deprecated(\"use fresh\")\nfn old() {}\n";
     let options = LintOptions::default();
     let mut cache = seeded_cache(&[("<dep-main>", main), ("<dep-callee>", before)], &options);
-    let (findings, _) = body_edit(
+    let findings = body_edit(
         &mut cache,
         &[("<dep-main>", main), ("<dep-callee>", after)],
         &options,
         &["<dep-callee>"],
         Some("main"),
-        None,
     );
     assert_eq!(
         findings.iter().filter(|f| f.lint == "deprecated").count(),
         1
     );
-    let (findings, _) = body_edit(
+    let findings = body_edit(
         &mut cache,
         &[("<dep-main>", main), ("<dep-callee>", before)],
         &options,
         &["<dep-callee>"],
         Some("main"),
-        None,
     );
     assert!(findings.iter().all(|f| f.lint != "deprecated"));
 }
@@ -224,14 +191,9 @@ fn cached_findings_match_fresh_after_body_edit_and_span_shift() {
     let new = "fn first() {\n    let first_unused = 1\n}\n// inserted before an unchanged finding\nfn second() {\n    let second_unused = 2\n}\nfn main() { first(); second() }\n";
     let mut cache = seed(old);
     let options = LintOptions::default();
-    let insertion = old.find("fn second").expect("second function");
     let (ws, sources) = support::setup(&[(FILE, new)]);
-    let change = LintCacheUpdate::body_only(
-        [Ustr::from(FILE)],
-        [function_owner(&ws, "first")],
-        Some(shift(insertion, old, new, 1)),
-    );
-    let (updated, _) = run_update(&mut cache, &ws, &sources, &options, &change);
+    let change = LintCacheUpdate::body_only([Ustr::from(FILE)], [function_owner(&ws, "first")]);
+    let updated = run_update(&mut cache, &ws, &sources, &options, &change);
     assert_matches_fresh(&updated, &ws, &sources, &options);
     let second = updated
         .iter()
@@ -247,7 +209,7 @@ fn cached_findings_match_fresh_after_body_edit_and_span_shift() {
 fn findings_keep_source_order_after_a_body_edit() {
     let src = "fn first(a: int) {\n    a == 1\n    let first_unused = 1\n}\nfn second(b: int) {\n    b == 2\n    let second_unused = 2\n}\nfn main() { first(1); second(2) }\n";
     let mut cache = seed(src);
-    let (findings, _) = edit(&mut cache, src, Some("second"), None);
+    let findings = edit(&mut cache, src, Some("second"));
     assert_eq!(findings.len(), 4, "{findings:#?}");
     let starts: Vec<_> = findings
         .iter()
@@ -267,13 +229,12 @@ fn action_caller_edits_refresh_opt_in_findings() {
     let selection = action_selection();
     let mut cache = seeded_cache(&[(ACTION_FILE, uncalled)], &selection);
     for (src, expected) in [(called, 0), (uncalled, 1)] {
-        let (cached, _) = body_edit(
+        let cached = body_edit(
             &mut cache,
             &[(ACTION_FILE, src)],
             &selection,
             &[ACTION_FILE],
             Some("gameplay"),
-            None,
         );
         assert_eq!(cached.len(), expected);
         assert!(cached.iter().all(|f| f.error.message.contains("ACT_USED")));
@@ -291,14 +252,14 @@ fn always_int() -> int { return 1 }
         format!("{prelude}\nfn main() -> int {{ let _value: int = cast(always_int()) 3 }}\n");
     let bad = format!("{prelude}\nfn main() -> int {{ let _value: int = cast(maybe_int()) 3 }}\n");
     let mut cache = seed(&good);
-    let (bad_findings, _) = edit(&mut cache, &bad, Some("main"), None);
+    let bad_findings = edit(&mut cache, &bad, Some("main"));
     assert!(
         bad_findings
             .iter()
             .any(|f| f.lint == bone_lints::TRANSMUTE_OF_NULLABLE)
     );
 
-    let (fixed_findings, _) = edit(&mut cache, &good, Some("main"), None);
+    let fixed_findings = edit(&mut cache, &good, Some("main"));
     assert!(
         fixed_findings
             .iter()
@@ -363,7 +324,7 @@ fn unused_fn_caller_edits_update_reachability() {
     for case in cases {
         let name = case.name;
         let mut cache = seed(case.old);
-        let (cached, _) = edit(&mut cache, case.new, Some("main"), None);
+        let cached = edit(&mut cache, case.new, Some("main"));
         let unused: Vec<String> = cached
             .iter()
             .filter(|finding| finding.lint == bone_lints::UNUSED_FN)

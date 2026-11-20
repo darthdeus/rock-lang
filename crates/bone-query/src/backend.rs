@@ -724,7 +724,7 @@ impl BoneWorkspace {
 
         let mut this_file_parse_err: Option<CompilerError> = None;
         let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut lint_change = bone_lints::LintCacheUpdate::body_only([], [], []);
+        let mut lint_change = bone_lints::LintCacheUpdate::body_only([], []);
         changed.insert(path.to_string());
         let mut drop_type_caches = false;
         if !proj.session.is_tracked(path) {
@@ -3239,7 +3239,7 @@ pub fn lint_cache_update(
         )
     };
     match upd.tier {
-        UpdateTier::NoChange => bone_lints::LintCacheUpdate::body_only([], [], []),
+        UpdateTier::NoChange => bone_lints::LintCacheUpdate::body_only([], []),
         UpdateTier::BodyOnly
             if upd.reinferred.len() > 1
                 || upd
@@ -3252,7 +3252,6 @@ pub fn lint_cache_update(
         UpdateTier::BodyOnly => bone_lints::LintCacheUpdate::body_only(
             [Ustr::from(path)],
             upd.reinferred.iter().copied(),
-            upd.body_update.edit,
         ),
         UpdateTier::Interface | UpdateTier::Scope => relowered(),
         UpdateTier::FullUser => bone_lints::LintCacheUpdate::full(),
@@ -3275,16 +3274,14 @@ fn update_lint_cache(
                 .then_some((Ustr::from(path.as_str()), text.as_str()))
         })
         .collect();
-    proj.lint_cache
-        .update(
-            session.workspace(),
-            &session.warm_mids,
-            is_bin,
-            &sources,
-            &proj.lint_options,
-            change,
-        )
-        .0
+    proj.lint_cache.update(
+        session.workspace(),
+        &session.warm_mids,
+        is_bin,
+        &sources,
+        &proj.lint_options,
+        change,
+    )
 }
 
 fn prime_lint_cache(proj: &mut BoneProject) {

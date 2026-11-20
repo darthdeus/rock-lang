@@ -167,7 +167,7 @@ impl Harness {
         self.texts.retain(|f| f.path != path);
         self.assert_matches_batch();
         self.lints.invalidate_file(Ustr::from(path));
-        self.assert_lints_match(&bone_lints::LintCacheUpdate::body_only([], [], []));
+        self.assert_lints_match(&bone_lints::LintCacheUpdate::body_only([], []));
     }
 
     fn assert_lints_match(&mut self, change: &bone_lints::LintCacheUpdate) {
@@ -179,7 +179,7 @@ impl Harness {
         let ws = self.session.workspace();
         let warm = &self.session.warm_mids;
         let options = bone_lints::LintOptions::default();
-        let (cached, _) = self
+        let cached = self
             .lints
             .update(ws, warm, true, &sources, &options, change);
         let fresh = bone_lints::lint_workspace(ws, warm, true, &sources, &options);

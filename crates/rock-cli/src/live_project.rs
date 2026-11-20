@@ -154,18 +154,7 @@ impl LiveProject {
             )
         })?;
         self.session.ws.comptime_inputs = snapshot.comptime_inputs;
-        crate::lint_pass::rollback_build_lints_cached(
-            &mut self.lint_cache,
-            self.session.workspace(),
-            &self.sources,
-            Path::new(&self.dir),
-            self.lint_scope,
-        )
-        .map_err(|error| anyhow::anyhow!("lint-cache rollback failed: {error}"))?;
-        self.verdict_with_change(
-            "after failed publication rollback",
-            &bone_lints::LintCacheUpdate::body_only([], [], []),
-        )
+        self.verdict("after failed publication rollback")
     }
 
     pub(crate) fn finish_publication<T>(
@@ -176,10 +165,7 @@ impl LiveProject {
         restore_cache: impl FnOnce(&Workspace) -> std::result::Result<(), CompilerError>,
     ) -> Result<T> {
         match result {
-            Ok(output) => {
-                self.lint_cache.commit_body_transaction();
-                Ok(output)
-            }
+            Ok(output) => Ok(output),
             Err(error) => {
                 self.restore(snapshot).map_err(|restore| {
                     anyhow::anyhow!(
@@ -459,15 +445,8 @@ impl LiveProject {
         let lint_change = if full {
             bone_lints::LintCacheUpdate::full()
         } else {
-            bone_lints::LintCacheUpdate::body_only(
-                lint_changed_files,
-                reinferred.iter().copied(),
-                span_edits.iter().copied(),
-            )
+            bone_lints::LintCacheUpdate::body_only(lint_changed_files, reinferred.iter().copied())
         };
-        if changed && !full {
-            self.lint_cache.begin_body_transaction(&lint_change);
-        }
         self.verdict_with_change("during rebuild", &lint_change)?;
         if !changed {
             return Ok(LiveUpdate::NoChange);

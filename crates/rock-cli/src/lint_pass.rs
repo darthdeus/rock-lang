@@ -61,7 +61,7 @@ pub(crate) fn run_build_lints_cached(
     scope: Scope,
     change: &bone_lints::LintCacheUpdate,
 ) -> Vec<CompilerError> {
-    let (found, _stats) = with_source_texts(sources, |texts| {
+    let found = with_source_texts(sources, |texts| {
         let warm = skull::pipeline::warm_module_ids(ws, texts);
         let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
         let owned = owned_files(texts, root);
@@ -80,33 +80,6 @@ pub(crate) fn run_build_lints_cached(
         )
     });
     report(found, sources, root, policy())
-}
-
-pub(crate) fn rollback_build_lints_cached(
-    cache: &mut bone_lints::IncrementalLintCache,
-    ws: &Workspace,
-    sources: &SourceFiles,
-    root: &Path,
-    scope: Scope,
-) -> Result<(), String> {
-    with_source_texts(sources, |texts| {
-        let warm = skull::pipeline::warm_module_ids(ws, texts);
-        let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
-        let owned = owned_files(texts, root);
-        let owned_sources: FxHashMap<Ustr, &str> = texts
-            .iter()
-            .filter(|(file, _)| owned.contains(*file))
-            .map(|(&file, &text)| (file, text))
-            .collect();
-        cache.rollback_body_transaction(
-            ws,
-            &warm,
-            is_bin,
-            &owned_sources,
-            &bone_lints::LintOptions::default(),
-        )?;
-        Ok(())
-    })
 }
 
 fn report(
@@ -260,25 +233,13 @@ pub(crate) fn unused_fns_under(
     with_source_texts(sources, |texts| {
         let warm = skull::pipeline::warm_module_ids(ws, texts);
         let is_bin = rock_host::stick::StickConfig::is_bin_at(consumer);
-        let by_file = bone_lints::workspace_findings_by_file_with(
-            ws,
-            &warm,
-            is_bin,
-            &bone_lints::LintOptions::default(),
-        );
-        let mut out = Vec::new();
-        for (file, findings) in by_file {
-            if !Path::new(file.as_str()).starts_with(report_root) {
-                continue;
-            }
-            let src = texts.get(&file).copied().unwrap_or("");
-            out.extend(
-                bone_lints::filter_suppressed_findings(findings, src)
-                    .into_iter()
-                    .filter(|f| f.lint == bone_lints::UNUSED_FN),
-            );
-        }
-        out
+        let report: FxHashMap<Ustr, &str> = texts
+            .iter()
+            .filter(|(file, _)| Path::new(file.as_str()).starts_with(report_root))
+            .map(|(&file, &text)| (file, text))
+            .collect();
+        let only = bone_lints::LintOptions::only([bone_lints::UNUSED_FN.to_owned()]);
+        bone_lints::lint_workspace(ws, &warm, is_bin, &report, &only)
     })
 }
 
