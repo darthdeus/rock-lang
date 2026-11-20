@@ -30,7 +30,7 @@ impl<'a> Builder<'a> {
         args: &[Idx<Expr>],
         recv: Option<Idx<Inst>>,
     ) -> Result<Option<Vec<Idx<Inst>>>, CompilerError> {
-        let func = dc.callee_inst.func;
+        let func = dc.callee.instance.func;
         if !self.is_stdlib_sort(func) {
             return Ok(None);
         }
@@ -44,7 +44,7 @@ impl<'a> Builder<'a> {
         }
         let signature = self.direct_call_signature(dc)?;
         let key_ty = self
-            .concrete_param_ty_of(signature, &dc.callee_inst, 1)?
+            .concrete_param_ty_of(signature, &dc.callee.instance, 1)?
             .ok_or_else(|| self.gap_here("sort key function has no concrete type"))?;
         let MonoTy::Function { ret, .. } = key_ty.as_ref() else {
             return Err(self.gap_here("sort key function has no concrete function type"));

@@ -260,15 +260,11 @@ fn preflight_collect_reads(
     });
 }
 
-/// Keeps the concrete callee, delivery instance, bound tree and ABI together
-/// so the arguments and the emitted call use the same instance.
 pub(crate) struct DirectCall<'a> {
-    pub(crate) tree: Option<bone_core::prelude::BoundTree>,
-    pub(crate) delivery: Option<crate::instance::Instance>,
-    pub(crate) callee_inst: crate::instance::Instance,
+    tree: Option<&'a bone_core::prelude::BoundTree>,
+    pub(super) callee: &'a crate::concrete::ConcreteCallee,
     pub(crate) plan: BackendFnAbiPlanHandle,
-    callee: &'a crate::concrete::ConcreteCallee,
-    callee_plan: Option<&'a crate::concrete::ConcreteBodyPlan>,
+    callee_plan: Option<&'a ConcreteBodyPlan>,
 }
 
 impl<'a> Builder<'a> {
@@ -622,7 +618,7 @@ impl<'a> Builder<'a> {
             e,
             func,
             args,
-            CallArgMode::Boxed(&inst, &signature),
+            CallArgMode::Boxed(&inst, signature),
             None,
         )?;
         let [owner, selector] = args.as_slice() else {
@@ -696,13 +692,14 @@ impl<'a> Builder<'a> {
         &self,
         e: Idx<Expr>,
         inst: &crate::instance::Instance,
-    ) -> Result<crate::concrete::ConcreteSignatureHandle, CompilerError> {
+    ) -> Result<&'a crate::concrete::ConcreteSignature, CompilerError> {
         let callee = self.concrete_callee_entry(e, self.cur_op.clone())?;
         if crate::verify::checks_enabled() && &callee.instance != inst {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
-        self.callee_signature(inst, callee)
-            .map(std::sync::Arc::clone)
+        self.callee_signature(inst, callee, || {
+            self.concrete_plans.get(inst).map(AsRef::as_ref)
+        })
     }
 
     /// A callee with its own body plan answers for its signature; any other keeps
@@ -711,13 +708,13 @@ impl<'a> Builder<'a> {
         &self,
         inst: &crate::instance::Instance,
         site: &'a crate::concrete::ConcreteCallee,
-    ) -> Result<&'a crate::concrete::ConcreteSignatureHandle, CompilerError> {
+        body_plan: impl FnOnce() -> Option<&'a ConcreteBodyPlan>,
+    ) -> Result<&'a crate::concrete::ConcreteSignature, CompilerError> {
         if !callee_has_body_plan(self.ws, self.scx, inst) {
             return Ok(&site.signature);
         }
-        self.concrete_plans
-            .get(inst)
-            .map(|plan| &plan.signature)
+        body_plan()
+            .map(|plan| plan.signature.as_ref())
             .ok_or_else(|| self.gap_here("concrete callee body plan is missing for its site"))
     }
 
@@ -725,14 +722,7 @@ impl<'a> Builder<'a> {
         &self,
         dc: &DirectCall<'a>,
     ) -> Result<&'a crate::concrete::ConcreteSignature, CompilerError> {
-        let inst = &dc.callee_inst;
-        if callee_has_body_plan(self.ws, self.scx, inst) {
-            dc.callee_plan
-                .map(|plan| &*plan.signature)
-                .ok_or_else(|| self.gap_here("concrete callee body plan is missing for its site"))
-        } else {
-            Ok(&dc.callee.signature)
-        }
+        self.callee_signature(&dc.callee.instance, dc.callee, || dc.callee_plan)
     }
 
     pub(crate) fn concrete_callee_param_ty(
@@ -742,7 +732,7 @@ impl<'a> Builder<'a> {
         pidx: usize,
     ) -> Result<Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>, CompilerError> {
         let signature = self.concrete_callee_signature(e, inst)?;
-        self.concrete_param_ty_of(&signature, inst, pidx)
+        self.concrete_param_ty_of(signature, inst, pidx)
     }
 
     /// A variadic callee's trailing parameter covers every extra argument.
@@ -785,7 +775,9 @@ impl<'a> Builder<'a> {
             op: crate::site::SiteOp::DirectCall,
         };
         let result = if let Some(callee) = body_plan.callees.get(&site) {
-            let signature = self.callee_signature(&callee.instance, callee)?;
+            let signature = self.callee_signature(&callee.instance, callee, || {
+                self.concrete_plans.get(&callee.instance).map(AsRef::as_ref)
+            })?;
             signature.result.map(|id| self.concrete_mono(id))
         } else {
             Some(
@@ -1441,26 +1433,17 @@ impl<'a> Builder<'a> {
             self.inf
                 .and_then(|i| i.bound_call_trees.get(&e))
                 .filter(|t| !t.is_empty())
-                .cloned()
         } else {
             None
         };
         // Identity is independent of delivery: a call the policy declines to
         // specialize still names exactly one concrete instance.
         let callee = self.concrete_callee_entry(e, self.cur_op.clone())?;
-        let concrete_plans: &'a crate::concrete::ConcretePlans = self.concrete_plans;
-        let callee_plan = concrete_plans.get(&callee.instance).map(|plan| &**plan);
-        let callee_inst = callee.instance.clone();
-        let delivery =
-            (!callee_inst.args.is_empty() && callee_plan.is_some()).then(|| callee_inst.clone());
-        let plan = self.callee_abi_plan_for_instance(&callee_inst)?;
         Ok(DirectCall {
             tree,
-            delivery,
-            callee_inst,
-            plan,
             callee,
-            callee_plan,
+            plan: self.callee_abi_plan_for_instance(&callee.instance)?,
+            callee_plan: self.concrete_plans.get(&callee.instance).map(AsRef::as_ref),
         })
     }
 
@@ -1470,22 +1453,18 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         dc: &DirectCall<'a>,
     ) -> Result<(), CompilerError> {
-        if let Some(t) = &dc.tree {
-            self.f.bound_trees.insert(call, t.clone());
+        if let Some(tree) = dc.tree {
+            self.f.bound_trees.insert(call, tree.clone());
         }
-        if let Some(inst) = &dc.delivery {
-            self.f.spec_bindings.insert(call, inst.clone());
+        let owner = &dc.callee.instance;
+        if dc.callee_plan.is_some() && !owner.args.is_empty() {
+            self.f.spec_bindings.insert(call, owner.clone());
         }
-        let owner = &dc.callee_inst;
         debug_assert_eq!(
             crate::lower::canonical_variant(self.ws, owner.func),
             crate::lower::canonical_variant(self.ws, func)
         );
-        self.record_planned_bound_tree(
-            call,
-            dc.callee_plan,
-            dc.tree.as_ref().is_some_and(|tree| !tree.is_empty()),
-        )?;
+        self.record_planned_bound_tree(call, dc.callee_plan, dc.tree.is_some())?;
         self.f.callee_instances.insert(call, owner.clone());
         self.f.call_abi_plans.insert(call, dc.plan.clone());
         Ok(())
@@ -1558,7 +1537,7 @@ impl<'a> Builder<'a> {
             if let Some(shape) = &declared_ret_tuple {
                 self.reject_nobox_opaque_tuple_return(e, func, shape)?;
             } else {
-                self.reject_nobox_opaque_value_return(e, func, &dc.callee_inst)?;
+                self.reject_nobox_opaque_value_return(e, func, &dc.callee.instance)?;
             }
             let lua_opaque = self.scx.target() == bone_core::hir::FnBackend::Lua
                 && callee.inline_body.is_some()
@@ -1654,7 +1633,6 @@ impl<'a> Builder<'a> {
         let callee = &self.ws.module(func.module).functions[func.func];
         let scalar_abi = dc.plan.uses_scalar_abi();
         let shapes;
-        let named_signature;
         let mode = if scalar_abi {
             // The callee's use of a parameter cannot change admission at its boundary.
             let dropped = dc.plan.dropped_opaque_parameters();
@@ -1682,7 +1660,7 @@ impl<'a> Builder<'a> {
             }
         } else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
-            self.reject_column_container_opaque_slots(e, &dc.callee_inst)?;
+            self.reject_column_container_opaque_slots(e, &dc.callee.instance)?;
             let has_tuple_storage = dc
                 .plan
                 .representation()
@@ -1696,13 +1674,7 @@ impl<'a> Builder<'a> {
                     types: &[],
                 }
             } else {
-                let signature = if any_named {
-                    named_signature = self.concrete_callee_signature(e, &dc.callee_inst)?;
-                    &named_signature
-                } else {
-                    self.direct_call_signature(dc)?
-                };
-                CallArgMode::Boxed(&dc.callee_inst, signature)
+                CallArgMode::Boxed(&dc.callee.instance, self.direct_call_signature(dc)?)
             }
         };
         let args = if any_named {
@@ -1868,7 +1840,7 @@ impl<'a> Builder<'a> {
                 let args = dc.plan.transport_arguments(args)?;
                 return self.emit_direct_call(e, func, args, None, None, &dc);
             }
-            self.reject_flat_return_outside_direct_call(e, &dc.callee_inst)?;
+            self.reject_flat_return_outside_direct_call(e, &dc.callee.instance)?;
             if !dc.plan.uses_scalar_abi() {
                 let mut argv = vec![recv];
                 for &a in arg_idxs {

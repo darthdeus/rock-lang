@@ -610,7 +610,7 @@ impl<'a> Builder<'a> {
         plan: &FlatCallPlan,
         ret_tuple: Option<&TupleLayout>,
     ) -> Result<FlatCallOut, CompilerError> {
-        if plan.inst != dc.callee_inst {
+        if plan.inst != dc.callee.instance {
             return Err(self.gap_here("flat `ref` call disagrees with its concrete callee"));
         }
         self.flat_arg_captures.push(FlatArgCapture {
