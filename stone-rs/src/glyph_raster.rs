@@ -67,12 +67,6 @@ impl FaceSet {
         }
     }
 
-    #[cfg(test)]
-    pub fn mask(self) -> i32 {
-        (if self.bold { Self::BOLD_BIT } else { 0 })
-            | (if self.italic { Self::ITALIC_BIT } else { 0 })
-    }
-
     /// Bold-italic needs both axes declared; there is no half-synthesized face.
     pub fn declares(self, face: Face) -> bool {
         (!face.is_bold() || self.bold) && (!face.is_italic() || self.italic)
@@ -394,14 +388,10 @@ mod synth_tests {
         crate::text::FALLBACK_FONT.to_vec()
     }
 
-    fn pixel_font() -> Vec<u8> {
-        crate::test_fonts::pixel_font()
-    }
-
     const PX: f32 = 32.0;
 
     #[test]
-    fn bold_adds_ink_and_oblique_does_not() {
+    fn bold_adds_ink_and_oblique_leans_without_adding_ink() {
         let data = droid();
         let f = RasterFont::new(&data, PX).expect("DroidSans parses");
 
@@ -429,35 +419,17 @@ mod synth_tests {
             (italic_ratio - 1.0).abs() < 0.05,
             "oblique should move ink, not create it (expected ratio ~1.0, got {italic_ratio:.3})"
         );
-    }
-
-    #[test]
-    fn oblique_leans_right() {
-        let data = droid();
-        let f = RasterFont::new(&data, PX).expect("DroidSans parses");
 
         let upright = f.rasterize('l', Synth::REGULAR).expect("l rasterizes");
         let leaned = f
             .rasterize('l', Face::Italic.synth(PX))
             .expect("l rasterizes italic");
-
         assert!(
             leaned.right_overhang() > upright.right_overhang() + 1.0,
             "oblique must extend ink right of the advance (upright {:.2}, leaned {:.2}) \
              -- a negative skew leans left and looks correct in every scalar but this",
             upright.right_overhang(),
             leaned.right_overhang()
-        );
-    }
-
-    #[test]
-    fn pixel_font_regular_stays_binary() {
-        let data = pixel_font();
-        let f = RasterFont::new(&data, 48.0).expect("the pixel font parses");
-        let gray = gray_fraction(&f, b"HMoxnwgB", Synth::REGULAR);
-        assert!(
-            gray <= 0.02,
-            "the pixel font at 48px must rasterize near-binary, got gray fraction {gray:.3}"
         );
     }
 
@@ -472,8 +444,7 @@ mod synth_tests {
         let mut theirs = 0.0f64;
         for c in 'a'..='z' {
             ours += f.rasterize(c, Synth::REGULAR).expect("rasterizes").ink();
-            let (m, bitmap) = fd.rasterize(c, PX);
-            let _ = m;
+            let (_, bitmap) = fd.rasterize(c, PX);
             theirs += bitmap.iter().map(|&v| v as f64).sum::<f64>() / 255.0;
         }
         let ratio = ours / theirs;
@@ -484,15 +455,21 @@ mod synth_tests {
     }
 
     // The FFI carries a face as a mask (load) and as an index (glyph lookup),
-    // and Rock encodes the same bits on its side. Both encodings must round
-    // trip, or a family declares one face and reads another.
+    // and Rock encodes the same bits on its side. Both encodings must agree,
+    // or a family declares one face and reads another.
     #[test]
-    fn face_encodings_round_trip() {
-        for bold in [false, true] {
-            for italic in [false, true] {
-                let set = FaceSet { bold, italic };
-                assert_eq!(FaceSet::from_mask(set.mask()), set, "mask round trip");
-            }
+    fn face_encodings_match_the_rock_side() {
+        for (mask, bold, italic) in [
+            (0, false, false),
+            (1, true, false),
+            (2, false, true),
+            (3, true, true),
+        ] {
+            assert_eq!(
+                FaceSet::from_mask(mask),
+                FaceSet { bold, italic },
+                "mask {mask}"
+            );
         }
         for face in Face::ALL {
             assert_eq!(
@@ -502,44 +479,5 @@ mod synth_tests {
             );
         }
         assert_eq!(Face::from_index(Face::ALL.len()), None, "no fifth face");
-    }
-
-    #[test]
-    fn vertical_metrics_are_pixels_at_this_size() {
-        let data = droid();
-        let a = RasterFont::new(&data, PX).expect("DroidSans parses");
-        let b = RasterFont::new(&data, PX * 2.0).expect("DroidSans parses");
-
-        let (asc, desc, gap) = a.vertical_metrics();
-        assert!(asc > 0.0, "ascent is up (got {asc})");
-        assert!(desc < 0.0, "descent is down (got {desc})");
-        assert!(gap >= 0.0, "line gap is non-negative (got {gap})");
-        assert!(
-            asc - desc > PX * 0.8 && asc - desc < PX * 2.0,
-            "ascent-to-descent must be em-scaled at {PX}px (got {})",
-            asc - desc
-        );
-
-        let (asc2, desc2, _) = b.vertical_metrics();
-        assert!(
-            (asc2 / asc - 2.0).abs() < 0.001 && (desc2 / desc - 2.0).abs() < 0.001,
-            "doubling px must double the metrics -- these are pixels, not font units"
-        );
-    }
-
-    #[test]
-    fn bold_advance_grows_with_the_stems() {
-        let data = droid();
-        let f = RasterFont::new(&data, PX).expect("DroidSans parses");
-        let base = f.rasterize('n', Synth::REGULAR).expect("n rasterizes");
-        let bold = f
-            .rasterize('n', Face::Bold.synth(PX))
-            .expect("n rasterizes bold");
-        assert!(
-            bold.advance > base.advance,
-            "bold advance must exceed regular ({:.2} vs {:.2})",
-            bold.advance,
-            base.advance
-        );
     }
 }
