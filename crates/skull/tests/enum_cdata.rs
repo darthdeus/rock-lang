@@ -34,7 +34,11 @@ fn cdata_enum_emits_ctype_and_no_table() {
     let lua = emit_module(SRC);
     assert!(lua.contains("} Shape;") && lua.contains("Shape_ct = ffi.typeof"));
     assert!(!lua.contains("__variant = \"Circle\""));
-    assert!(lua.contains("ffi.metatype, \"Shape\""));
+    let trampolines = lua
+        .lines()
+        .find(|l| l.starts_with("trampolines({"))
+        .expect("metatype trampoline loop");
+    assert!(trampolines.contains("\"Shape\""));
     assert!(lua.contains(".__tag"));
     assert_eq!(run_fn(&lua, "t"), "1 4 7 4 | 10");
 }

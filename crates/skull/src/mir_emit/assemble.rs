@@ -621,12 +621,15 @@ end
         rep_arena,
         &mut value_ctors,
     )?);
+    let mut metatype_syms = Vec::new();
     out.push_str(&crate::value_struct_metatypes(
         ws,
         &vstructs,
         &value_emitted,
+        &mut metatype_syms,
     ));
-    out.push_str(&crate::enum_cdata_metatypes(ws));
+    out.push_str(&crate::enum_cdata_metatypes(ws, &mut metatype_syms));
+    out.push_str(&crate::cdata_metatype_trampolines(&metatype_syms));
     out.push_str(&crate::c_struct_inspect_defs(ws, &vstructs, &value_emitted));
     out.push_str(&crate::type_table_defs(ws, &value_gc, rep_arena)?);
     out.push_str(&crate::enum_runtime_defs(ws));

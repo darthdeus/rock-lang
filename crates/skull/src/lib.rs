@@ -1321,22 +1321,20 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
     format!("ffi.cdef[[\n{}]]\n{}", typedefs, ctors)
 }
 
-/// Attach an `ffi.metatype` to each cdata-eligible enum ctype: without
-/// `__eq`, LuaJIT compares struct cdata by identity.
-fn enum_cdata_metatypes(ws: &Workspace) -> String {
+/// The `ffi.metatype` impl table of each cdata-eligible enum ctype (without
+/// `__eq`, LuaJIT compares struct cdata by identity); its symbol goes to `syms`.
+fn enum_cdata_metatypes(ws: &Workspace, syms: &mut Vec<String>) -> String {
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
     names.sort_by(|a, b| display_name(a.as_str()).cmp(display_name(b.as_str())));
     let mut out = String::new();
-    let mut any = false;
     for name in names {
         let Some(shape) =
             skull_mir::lower::EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned())
         else {
             continue;
         };
-        if !any {
+        if syms.is_empty() {
             out.push_str("_G.__ROCK_C_METATYPE = _G.__ROCK_C_METATYPE or {}\n");
-            any = true;
         }
         let mut eq = String::from("a.__tag == b.__tag");
         for (nm, _) in &shape.slots {
@@ -1398,38 +1396,53 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
         }
         ts.push_str("    return \"?\"\n  end,\n}\n");
         out.push_str(&ts);
-        push_cdata_metatype_trampoline(&mut out, &sym);
+        syms.push(sym.to_string());
     }
     out
 }
 
-fn push_cdata_metatype_trampoline(out: &mut String, sym: &str) {
-    out.push_str(&format!(
-            "pcall(ffi.metatype, \"{sym}\", {{\n\
-             \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{sym}\"].__eq(a, b) end,\n\
-             \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{sym}\"].__tostring(v) end,\n\
-             }})\n"
-        ));
+/// Metatypes seal once, so each trampoline delegates to the mutable
+/// `_G.__ROCK_C_METATYPE[name]` impl table, which a reload can update. The
+/// loop is kept out of the JIT: it runs once at load and its closure creation
+/// (FNEW) would abort a trace.
+pub(crate) fn cdata_metatype_trampolines(syms: &[String]) -> String {
+    if syms.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = syms.iter().map(|s| format!("\"{s}\"")).collect();
+    format!(
+        "do\n\
+         local function trampolines(syms)\n\
+         \x20 for _, sym in ipairs(syms) do\n\
+         \x20   pcall(ffi.metatype, sym, {{\n\
+         \x20     __eq = function(a, b) return _G.__ROCK_C_METATYPE[sym].__eq(a, b) end,\n\
+         \x20     __tostring = function(v) return _G.__ROCK_C_METATYPE[sym].__tostring(v) end,\n\
+         \x20   }})\n\
+         \x20 end\n\
+         end\n\
+         jit.off(trampolines)\n\
+         trampolines({{{}}})\n\
+         end\n",
+        list.join(", ")
+    )
 }
 
-/// Attach an `ffi.metatype` to each value-struct ctype. Metatypes seal once,
-/// so a trampoline delegates to the mutable `_G.__ROCK_C_METATYPE[name]`
-/// impl table, which a reload can update.
+/// The `ffi.metatype` impl table of each emitted value-struct ctype; its
+/// symbol goes to `syms` for `cdata_metatype_trampolines`.
 fn value_struct_metatypes(
     ws: &Workspace,
     vstructs: &[&bone_semantic::hir::StructDef],
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
+    syms: &mut Vec<String>,
 ) -> String {
     let mut out = String::new();
-    let mut any = false;
     {
         for s in vstructs {
             if !emitted.contains(&s.name) {
                 continue;
             }
-            if !any {
+            if syms.is_empty() {
                 out.push_str("_G.__ROCK_C_METATYPE = _G.__ROCK_C_METATYPE or {}\n");
-                any = true;
             }
             let n = s.name;
             let sym = skull_mir::mangle::type_symbol(ws, n);
@@ -1466,7 +1479,7 @@ fn value_struct_metatypes(
                 out.push_str(&display_return(&parts, "    "));
             }
             out.push_str("  end,\n}\n");
-            push_cdata_metatype_trampoline(&mut out, &sym);
+            syms.push(sym.to_string());
         }
     }
     out

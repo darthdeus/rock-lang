@@ -69,7 +69,7 @@ fn v1_nominal_types_mint_identifiers() {
         "ffi.typeof(\"v1ty::a::V2\")",
         "ffi.sizeof(\"v1ty::a::NV2\")",
         "__rock_nb_storage(\"v1ty::a::NV2\"",
-        "ffi.metatype, \"v1ty::a::V2\"",
+        "__ROCK_C_METATYPE[\"v1ty::a::V2\"]",
         "__rock_enum_v1ty::a::Color",
         "v1ty::a::V2_ct(",
     ] {
