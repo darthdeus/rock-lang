@@ -487,10 +487,6 @@ impl Bus {
         }
     }
 
-    fn mixer(&self) -> &rodio::mixer::Mixer {
-        &self.mixer
-    }
-
     /// Hand the wrapper to a parent. Panics if called twice -- a bus has one
     /// output, and a second call would mean a bus wired into two parents.
     fn take_source(&self) -> BusSource {
@@ -743,25 +739,15 @@ struct MusicPlayback {
     player: Player,
 }
 
-/// Bus ids, mirrored by `STONE_BUS_*` in `stone/engine/lib.rock`. Fixed set --
-/// buses are a mixing topology, not content, so there is no dynamic creation.
-pub const BUS_MASTER: u32 = 0;
-pub const BUS_SFX: u32 = 1;
-pub const BUS_MUSIC: u32 = 2;
-pub const BUS_AMBIENCE: u32 = 3;
-pub const BUS_UI: u32 = 4;
-pub const BUS_FOLEY: u32 = 5;
+/// Bus ids, mirrored by `STONE_BUS_*` in `stone/engine/lib.rock`: master, then
+/// sfx, music, ambience, ui and foley, which all feed master. Fixed set -- buses
+/// are a mixing topology, not content, so there is no dynamic creation.
+const BUS_MASTER: u32 = 0;
+const BUS_MUSIC: u32 = 2;
+const BUS_COUNT: usize = 6;
 
-/// The whole tree: sfx/music/ambience/ui/foley feed master, master is the single
-/// child of the device sink's mixer.
-struct Buses {
-    master: Bus,
-    sfx: Bus,
-    music: Bus,
-    ambience: Bus,
-    ui: Bus,
-    foley: Bus,
-}
+/// Master is the single child of the device sink's mixer.
+struct Buses([Bus; BUS_COUNT]);
 
 impl Buses {
     fn new(sink: &MixerDeviceSink, muted: bool) -> Self {
@@ -780,7 +766,7 @@ impl Buses {
         muted: bool,
     ) -> Self {
         let buses = Buses::detached(channels, rate);
-        let master = buses.master.take_source();
+        let master = buses.0[BUS_MASTER as usize].take_source();
         if muted {
             mixer.add(master.amplify(0.0));
         } else {
@@ -790,38 +776,16 @@ impl Buses {
     }
 
     fn detached(channels: rodio::ChannelCount, rate: rodio::SampleRate) -> Self {
-        let master = Bus::new(channels, rate);
-        let buses = Buses {
-            sfx: Bus::new(channels, rate),
-            music: Bus::new(channels, rate),
-            ambience: Bus::new(channels, rate),
-            ui: Bus::new(channels, rate),
-            foley: Bus::new(channels, rate),
-            master,
-        };
-
-        for leaf in [
-            &buses.sfx,
-            &buses.music,
-            &buses.ambience,
-            &buses.ui,
-            &buses.foley,
-        ] {
-            buses.master.mixer().add(leaf.take_source());
+        let buses = Buses(std::array::from_fn(|_| Bus::new(channels, rate)));
+        let (master, leaves) = buses.0.split_first().expect("master bus");
+        for leaf in leaves {
+            master.mixer.add(leaf.take_source());
         }
         buses
     }
 
     fn get(&self, id: u32) -> Option<&Bus> {
-        match id {
-            BUS_MASTER => Some(&self.master),
-            BUS_SFX => Some(&self.sfx),
-            BUS_MUSIC => Some(&self.music),
-            BUS_AMBIENCE => Some(&self.ambience),
-            BUS_UI => Some(&self.ui),
-            BUS_FOLEY => Some(&self.foley),
-            _ => None,
-        }
+        self.0.get(id as usize)
     }
 }
 
@@ -1624,7 +1588,7 @@ pub extern "C" fn stone_play_sound(
         let Some(input) = sound_data.voice(looped, ratio, decay, pan_control.clone()) else {
             return 0;
         };
-        let player = Player::connect_new(bus.mixer());
+        let player = Player::connect_new(&bus.mixer);
         player.set_volume(gain);
         player.append(input);
 
@@ -1787,7 +1751,7 @@ pub extern "C" fn stone_play_music(handle: u64) {
         if audio._stream.is_none() {
             return;
         }
-        let player = Player::connect_new(audio.buses.music.mixer());
+        let player = Player::connect_new(&audio.buses.0[BUS_MUSIC as usize].mixer);
         player.append(source);
         audio.music_playback = Some(MusicPlayback { handle, player });
     });
@@ -2187,9 +2151,9 @@ mod tests {
 
         let (bus, mut out) = wired();
         assert_eq!(bus.samples_pulled(), 0);
-        bus.mixer().add(blip());
+        bus.mixer.add(blip());
         assert!(heard(&mut out, 64), "bus should be audible at first");
-        bus.mixer().add(blip());
+        bus.mixer.add(blip());
         assert!(heard(&mut out, 64), "bus went deaf after falling silent");
         assert_eq!(bus.samples_pulled(), 128, "every parent pull is a bus pull");
     }
@@ -2263,7 +2227,7 @@ mod tests {
     /// Steady-state level of `source` through a bus configured by `configure`.
     fn bus_level(source: SamplesBuffer, configure: impl FnOnce(&Bus)) -> f32 {
         let (bus, mut out) = wired();
-        bus.mixer().add(source);
+        bus.mixer.add(source);
         configure(&bus);
         mean_abs(&mut out, 8192, 8192)
     }
@@ -2301,7 +2265,7 @@ mod tests {
     #[test]
     fn duck_attacks_then_releases() {
         let (bus, mut out) = wired();
-        bus.mixer().add(dc(400_000, 1.0));
+        bus.mixer.add(dc(400_000, 1.0));
 
         let full = mean_abs(&mut out, 2048, 256);
         assert!(full > 0.9, "undicked bus should be near unity, got {full}");
@@ -2331,7 +2295,7 @@ mod tests {
             if reverb {
                 bus.set_reverb(true, 0.9, 0.2, 0.9, 0.1, 1.0);
             }
-            bus.mixer().add(dc(64, 1.0));
+            bus.mixer.add(dc(64, 1.0));
             mean_abs(&mut out, 512, 4096)
         };
         let ringing = tail(true);
@@ -2349,7 +2313,7 @@ mod tests {
     #[test]
     fn bus_peak_is_post_fader() {
         let (bus, mut out) = wired();
-        bus.mixer().add(dc(400_000, 1.0));
+        bus.mixer.add(dc(400_000, 1.0));
 
         let steady_meter = |out: &mut dyn Iterator<Item = f32>| {
             for _ in 0..(1.5 * 44100.0) as usize * 2 {
@@ -2375,7 +2339,7 @@ mod tests {
     #[test]
     fn bus_meter_falls_after_signal_stops() {
         let (bus, mut out) = wired();
-        bus.mixer().add(dc(64, 1.0));
+        bus.mixer.add(dc(64, 1.0));
         let _ = mean_abs(&mut out, 512, 1);
 
         let lit = bus.meter();
@@ -2407,7 +2371,7 @@ mod tests {
     #[test]
     fn bus_gain_slews_to_target() {
         let (bus, mut out) = wired();
-        bus.mixer().add(dc(20_000, 1.0));
+        bus.mixer.add(dc(20_000, 1.0));
 
         for _ in 0..2048 {
             let _ = out.next();
@@ -2684,16 +2648,15 @@ mod tests {
         let heard_through = |muted: bool| {
             let (mixer, mut out) = rodio::mixer::mixer(ch2(), sr());
             let buses = Buses::attached(&mixer, ch2(), sr(), muted);
-            buses
-                .sfx
-                .mixer()
+            let (master, sfx) = (&buses.0[0], &buses.0[1]);
+            sfx.mixer
                 .add(SamplesBuffer::new(ch2(), sr(), vec![1.0f32; 256]));
             let any = heard(&mut out, 256);
             (
                 any,
-                buses.master.samples_pulled(),
-                buses.sfx.samples_pulled(),
-                buses.sfx.meter(),
+                master.samples_pulled(),
+                sfx.samples_pulled(),
+                sfx.meter(),
             )
         };
 
