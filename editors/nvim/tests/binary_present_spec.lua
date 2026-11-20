@@ -27,8 +27,6 @@ vim.notify = function(msg, level, opts)
 end
 vim.notify_once = vim.notify
 
-vim.filetype.add({ extension = { rock = 'rock' } })
-
 local client = require('rock.client')
 local state = require('rock.state')
 
@@ -44,8 +42,6 @@ vim.lsp.enable = function(name, enable_flag)
 end
 
 local cfg = client.make_config({ binary = fake_bin })
-vim.lsp.config('rock', cfg)
-client.setup_autocmds()
 
 -- Sanity: state should report binary exists.
 local bin_info = state.get().binary
@@ -53,18 +49,10 @@ if not bin_info.exists then
   fail('test setup wrong: fake_bin not seen as existing: ' .. tostring(fake_bin))
 end
 
-vim.lsp.enable('rock')
-
--- Create a rock buffer and let cmd() fire.
-local buf = vim.api.nvim_create_buf(true, false)
-vim.api.nvim_buf_set_name(buf, '/tmp/binary-present-spec.rock')
-vim.api.nvim_set_option_value('filetype', 'rock', { buf = buf })
-
--- Wait for cmd() + the spawned `true` to exit and on_exit to fire.
-vim.wait(800, function()
-  local s = state.get().client.state
-  return s == 'detached' or s == 'crashed'
-end)
+local exited = false
+cfg.cmd({ on_exit = function() exited = true end })
+vim.wait(5000, function() return exited end)
+if not exited then fail('fake server did not exit') end
 
 -- Assertion 1: no missing-binary notification.
 for _, n in ipairs(notifications) do

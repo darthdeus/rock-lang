@@ -88,7 +88,7 @@ for _, s in ipairs(doc_res or {}) do
   names[s.name] = true
 end
 for _, want in ipairs({ 'Player', 'heal', 'main' }) do
-  if not names[want] then
+  if not names['symbol_smoke::' .. want] then
     fail(('missing %q in document symbols (got: %s)')
       :format(want, vim.inspect(doc_res)))
   end
