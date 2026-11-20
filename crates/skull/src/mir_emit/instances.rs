@@ -1,55 +1,5 @@
 use super::*;
 
-fn demand_clash(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    body: &Instance,
-) -> (String, CompilerError) {
-    let fref = body.func;
-    let f = &ws.module(fref.module).functions[fref.func];
-    let name = body.symbol(ws, scx.interner());
-    (
-        name.clone(),
-        CompilerError::new_with_label(
-            f.name_span,
-            format!(
-                "internal: two call sites demand `{name}` with different `Iterator` \
-                 bound resolutions, so one emitted definition cannot serve both"
-            ),
-        ),
-    )
-}
-
-/// The graph silently caps a too-deep instance, so emission raises the
-/// spanned rejection. The depth test is the graph's, so both sides agree.
-/// Depth is the discriminant because only recursion that grows its type
-/// arguments diverges; same-instance recursion is legal.
-fn too_deep_to_instantiate(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    inst: &Instance,
-) -> Option<(String, CompilerError)> {
-    let args = inst.arg_types(scx.interner());
-    let at = skull_mir::monoty::too_deep_to_instantiate(args.iter())?.render();
-    let f = &ws.module(inst.func.module).functions[inst.func.func];
-    let name = inst.symbol(ws, scx.interner());
-    Some((
-        name,
-        CompilerError::new_with_label(
-            f.name_span,
-            format!(
-                "polymorphic recursion: instantiating `{}` at `{at}` exceeds the \
-             instantiation depth limit of {}. A recursive call whose type \
-             arguments GROW never terminates -- each call needs a new body -- so \
-             it is rejected rather than expanded. Same-instance recursion (type \
-             arguments unchanged) is unaffected.",
-                f.name,
-                crate::instance_graph::MAX_INSTANTIATION_DEPTH,
-            ),
-        ),
-    ))
-}
-
 fn warm_candidates(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -151,13 +101,14 @@ impl<'a> SpecQueue<'a> {
         {
             return;
         }
-        if let Some((name, err)) = too_deep_to_instantiate(self.ws, self.scx, &inst) {
-            self.record(name, inst, Err(err));
-            return;
-        }
-        if self.dissenters.contains(&inst) {
-            let (name, err) = demand_clash(self.ws, self.scx, &inst);
-            self.record(name, inst, Err(err));
+        let interner = self.scx.interner();
+        let rejection = inst.too_deep_error(self.ws, interner).or_else(|| {
+            self.dissenters
+                .contains(&inst)
+                .then(|| inst.bound_clash_error(self.ws, interner))
+        });
+        if let Some(err) = rejection {
+            self.record(inst.symbol(self.ws, interner), inst, Err(err));
             return;
         }
         if let Some(Ok(c)) = self.cached.and_then(|cached| cached.get(&inst)) {

@@ -62,6 +62,50 @@ impl Instance {
         crate::mangle::spec_fn_name(ws, f, &self.arg_types(interner))
             .expect("an instance with arguments always has a specialized symbol")
     }
+
+    /// The graph silently caps a too-deep instance, so whoever needs its body
+    /// raises this. Only recursion that grows its type arguments diverges;
+    /// same-instance recursion is legal.
+    pub fn too_deep_error(
+        &self,
+        ws: &Workspace,
+        interner: &MonoInterner,
+    ) -> Option<skull_parser::CompilerError> {
+        let args = self.arg_types(interner);
+        let at = crate::monoty::too_deep_to_instantiate(args.iter())?.render();
+        let f = &ws.module(self.func.module).functions[self.func.func];
+        Some(skull_parser::CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "polymorphic recursion: instantiating `{}` at `{}` exceeds the \
+                 instantiation depth limit of {}. A recursive call whose type \
+                 arguments GROW never terminates -- each call needs a new body -- so it \
+                 is rejected rather than expanded. Same-instance recursion (type \
+                 arguments unchanged) is unaffected.",
+                f.name,
+                at,
+                crate::monoty::MAX_INSTANTIATION_DEPTH,
+            ),
+        ))
+    }
+
+    /// Raised for an instance whose call sites resolve its `Iterator` bounds
+    /// differently.
+    pub fn bound_clash_error(
+        &self,
+        ws: &Workspace,
+        interner: &MonoInterner,
+    ) -> skull_parser::CompilerError {
+        let f = &ws.module(self.func.module).functions[self.func.func];
+        skull_parser::CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "internal: two call sites demand `{}` with different `Iterator` \
+                 bound resolutions, so one emitted definition cannot serve both",
+                self.symbol(ws, interner)
+            ),
+        )
+    }
 }
 
 /// `(module, function index)`: stable within a build and used only to make

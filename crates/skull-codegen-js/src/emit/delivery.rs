@@ -112,41 +112,15 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             );
             return Ok(());
         }
-        if self.st.bound_tree_disagreements.contains(&inst) {
-            let f = &self.ws.module(inst.func.module).functions[inst.func.func];
-            let name = inst.symbol(self.ws, self.scx.interner());
-            self.st.reject(
-                &name,
-                CompilerError::new_with_label(
-                    f.name_span,
-                    format!(
-                        "internal: two call sites demand `{name}` with different `Iterator` \
-                         bound resolutions, so one emitted definition cannot serve both"
-                    ),
-                ),
-            );
-            return Ok(());
-        }
-        if let Some(at) =
-            skull_mir::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter())
-        {
-            let f = &self.ws.module(inst.func.module).functions[inst.func.func];
-            let at = at.render();
-            self.st.reject(
-                f.name.as_ref(),
-                CompilerError::new_with_label(
-                    f.name_span,
-                    format!(
-                        "polymorphic recursion: instantiating `{}` at `{at}` exceeds the \
-                         instantiation depth limit of {}. A recursive call whose type \
-                         arguments GROW never terminates -- each call needs a new body -- so it \
-                         is rejected rather than expanded. Same-instance recursion (type \
-                         arguments unchanged) is unaffected.",
-                        f.name,
-                        skull_mir::monoty::MAX_INSTANTIATION_DEPTH,
-                    ),
-                ),
-            );
+        let interner = self.scx.interner();
+        let rejection = inst.too_deep_error(self.ws, interner).or_else(|| {
+            self.st
+                .bound_tree_disagreements
+                .contains(&inst)
+                .then(|| inst.bound_clash_error(self.ws, interner))
+        });
+        if let Some(error) = rejection {
+            self.st.reject(&inst.symbol(self.ws, interner), error);
             return Ok(());
         }
         let Some(&fr) = self.st.artifact_decls.get(&inst) else {
@@ -269,19 +243,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         );
         for demand in demands {
             if st.bound_tree_disagreements.contains(&demand.inst) {
-                let f = &ws.module(demand.inst.func.module).functions[demand.inst.func.func];
-                collect::<()>(
-                    &mut findings,
-                    Err(CompilerError::new_with_label(
-                        f.name_span,
-                        format!(
-                            "internal: two call sites demand a specialization of `{}` with \
-                             different `Iterator` bound resolutions, so one emitted \
-                             definition cannot serve both",
-                            f.name
-                        ),
-                    )),
-                );
+                findings.push(demand.inst.bound_clash_error(ws, self.scx.interner()));
             } else {
                 queue_standalone(st, ws, demand.inst, &mut findings);
             }

@@ -1589,23 +1589,8 @@ pub(super) fn callee_abi_plan_for_instance(
     let derived = if !requires_concrete_body_plan(ws, inst) {
         Arc::new(BackendFnAbiPlan::for_boundary_instance(ws, scx, &selected))
     } else {
-        if let Some(at) =
-            crate::monoty::too_deep_to_instantiate(inst.arg_types(scx.interner()).iter())
-        {
-            let f = &ws.module(inst.func.module).functions[inst.func.func];
-            return Err(skull_parser::CompilerError::new_with_label(
-                f.name_span,
-                format!(
-                    "polymorphic recursion: instantiating `{}` at `{}` exceeds the \
-                     instantiation depth limit of {}. A recursive call whose type \
-                     arguments GROW never terminates -- each call needs a new body -- so it \
-                     is rejected rather than expanded. Same-instance recursion (type \
-                     arguments unchanged) is unaffected.",
-                    f.name,
-                    at.render(),
-                    crate::monoty::MAX_INSTANTIATION_DEPTH,
-                ),
-            ));
+        if let Some(error) = inst.too_deep_error(ws, scx.interner()) {
+            return Err(error);
         }
         let plan = plans.get(inst).ok_or_else(|| {
             let name = ws.module(inst.func.module).functions[inst.func.func].name;
