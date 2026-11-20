@@ -439,12 +439,7 @@ impl SkullEmitCache {
         Ok(())
     }
 
-    fn rebuild_chunk(
-        &mut self,
-        ws: &Workspace,
-        body: &Instance,
-        function: &bone_semantic::hir::Function,
-    ) -> Result<Chunk, CompilerError> {
+    fn rebuild_chunk(&mut self, ws: &Workspace, body: &Instance) -> Result<Chunk, CompilerError> {
         let Self {
             cg,
             scx,
@@ -452,12 +447,8 @@ impl SkullEmitCache {
             inline_cache,
             ..
         } = self;
-        if body.args.is_empty() {
-            emit_body_chunk(ws, cg, scx, concrete, body.func, function, inline_cache)
-        } else {
-            let name = body.symbol(ws, scx.interner());
-            emit_spec_chunk(ws, cg, scx, concrete, body, &name, inline_cache)
-        }
+        let name = (!body.args.is_empty()).then(|| body.symbol(ws, scx.interner()));
+        emit_body_chunk(ws, cg, scx, concrete, body, name.as_deref(), inline_cache)
     }
 
     fn insert_chunk(&mut self, body: Instance, chunk: Result<Chunk, CompilerError>) -> usize {
@@ -516,7 +507,7 @@ impl SkullEmitCache {
                 }
                 continue;
             }
-            let chunk = match self.rebuild_chunk(ws, &body, f) {
+            let chunk = match self.rebuild_chunk(ws, &body) {
                 Ok(chunk) => chunk,
                 Err(err) => {
                     errs.push(err);
@@ -848,7 +839,7 @@ impl SkullEmitCache {
             let fref = body.func;
             let f = &ws.module(fref.module).functions[fref.func];
             if is_cached_emitted_body(f, body) {
-                let chunk = cache.rebuild_chunk(ws, body, f);
+                let chunk = cache.rebuild_chunk(ws, body);
                 if let Ok(chunk) = &chunk {
                     fingerprint_identities.extend(chunk.code_identities());
                 }

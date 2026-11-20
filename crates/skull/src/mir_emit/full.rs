@@ -426,8 +426,8 @@ type ChunkMap = FxHashMap<Instance, Result<Chunk, CompilerError>>;
 
 type FanOutBodies = Vec<Option<(Instance, Result<Chunk, CompilerError>)>>;
 
-enum FanOutJob<'w> {
-    Body(usize, FuncRef, &'w bone_semantic::hir::Function),
+enum FanOutJob {
+    Body(usize, FuncRef),
     Spec(Instance),
 }
 
@@ -448,7 +448,7 @@ fn emit_full_chunks<'a>(
     ),
     CompilerError,
 > {
-    let mut jobs: Vec<FanOutJob<'_>> = ws
+    let mut jobs: Vec<FanOutJob> = ws
         .source_modules()
         .flat_map(|m| {
             m.functions.iter().filter_map(move |(fid, f)| {
@@ -457,11 +457,11 @@ fn emit_full_chunks<'a>(
                     func: fid,
                 };
                 (is_cached_body(f) && should_emit_via_view(ws, lua_view, self_ref))
-                    .then_some((self_ref, f))
+                    .then_some(self_ref)
             })
         })
         .enumerate()
-        .map(|(at, (self_ref, f))| FanOutJob::Body(at, self_ref, f))
+        .map(|(at, self_ref)| FanOutJob::Body(at, self_ref))
         .collect();
     // Libraries come before their users; starting the users first starts their
     // specialization chains early, so no chain runs alone at the end.
@@ -480,17 +480,17 @@ fn emit_full_chunks<'a>(
             |inline_cache, job, follow_ups| {
                 let mut demanded = Vec::new();
                 match job {
-                    FanOutJob::Body(at, self_ref, f) => {
+                    FanOutJob::Body(at, self_ref) => {
+                        let instance = shared(self_ref);
                         let mut chunk =
-                            emit_body_chunk(ws, cg, scx, concrete, self_ref, f, inline_cache);
+                            emit_body_chunk(ws, cg, scx, concrete, &instance, None, inline_cache);
                         if let Ok(chunk) = &mut chunk {
                             chunk.finish(attribution);
                         }
                         if let Ok(chunk) = &chunk {
                             queue.admit_all(&chunk.specs, &mut demanded);
                         }
-                        bodies.lock().expect("fan-out chunks")[at] =
-                            Some((shared(self_ref), chunk));
+                        bodies.lock().expect("fan-out chunks")[at] = Some((instance, chunk));
                     }
                     FanOutJob::Spec(inst) => {
                         queue.build(cg, concrete, inline_cache, inst, &mut demanded)

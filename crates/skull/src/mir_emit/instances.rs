@@ -129,8 +129,15 @@ impl<'a> SpecQueue<'a> {
         follow_ups: &mut Vec<Instance>,
     ) {
         let name = inst.symbol(self.ws, self.scx.interner());
-        let mut result =
-            emit_spec_chunk(self.ws, cg, self.scx, concrete, &inst, &name, inline_cache);
+        let mut result = emit_body_chunk(
+            self.ws,
+            cg,
+            self.scx,
+            concrete,
+            &inst,
+            Some(&name),
+            inline_cache,
+        );
         if let Ok(chunk) = &mut result {
             chunk.finish(self.attribution);
         }

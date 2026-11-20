@@ -1,11 +1,5 @@
 use super::*;
 
-#[derive(Clone, Copy)]
-enum LoweredInstanceKind {
-    Ordinary,
-    Specialized,
-}
-
 fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
     for (_, inst) in mf.insts.iter() {
         match inst {
@@ -121,7 +115,7 @@ fn emit_coroutine_chunk(
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
         times,
-        attribution: Some(Box::default()),
+        attribution: None,
         statics,
         comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(mf),
@@ -136,105 +130,113 @@ pub(super) fn emit_body_chunk(
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     concrete: &crate::concrete_body::ConcreteBodies,
-    self_ref: FuncRef,
-    f: &bone_semantic::hir::Function,
+    instance: &Instance,
+    specialized_name: Option<&str>,
     inline_cache: &mut skull_transform::InlineCache,
 ) -> Result<Chunk, CompilerError> {
-    let plan = concrete.plan_for(&shared(self_ref)).ok_or_else(|| {
-        CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name))
+    let fref = instance.func;
+    let f = &ws.module(fref.module).functions[fref.func];
+    let specialized = specialized_name.is_some();
+    let plan = concrete.plan_for(instance).ok_or_else(|| {
+        let name = specialized_name.unwrap_or(f.name.as_str());
+        CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{name}`"))
     })?;
-    let ordinary_instance = plan.function_instance().cloned();
-    let (mut mf, mut times, mut attribution) = lower_body(
-        ws,
-        scx,
-        concrete,
-        plan,
-        ordinary_instance.as_ref(),
-        inline_owner_key(self_ref),
-        self_ref,
-        inline_cache,
-    )?;
+    if specialized {
+        skull_mir::lower::validate_concrete_bound_plan(f, plan)?;
+    }
+    let started = Instant::now();
+    let lowered = match inline_cache.canonical_body(instance) {
+        Some(body) => Ok((*body).clone()),
+        None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans),
+    };
+    let mut mf = if specialized {
+        lowered.map_err(|e| e.or_at(f.name_span))
+    } else {
+        lowered
+    }?;
+    let mut times = PhaseTimes {
+        lower: started.elapsed(),
+        lower_work: !mf.insts.is_empty(),
+        ..PhaseTimes::default()
+    };
+    let mut attribution = UnitAttribution {
+        owner: specialized_name.map_or_else(|| inline_owner_key(fref), str::to_owned),
+        examined: true,
+        hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
+        ..UnitAttribution::default()
+    };
+    if specialized {
+        let started = Instant::now();
+        skull_transform::bound::resolve_standalone_bound_calls(
+            ws,
+            scx,
+            scx.interner(),
+            &mut mf,
+            &plan.bound_tree,
+            &concrete.plans,
+        )
+        .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+        times.validation += started.elapsed();
+        times.validation_work = true;
+    }
+    let declared_name;
+    let name: &str = match specialized_name {
+        Some(name) => name,
+        None => {
+            declared_name = mangle_fn(ws, f);
+            &declared_name
+        }
+    };
     if f.is_coroutine {
-        let name = mangle_fn(ws, f);
-        let mut chunk = emit_coroutine_chunk(ws, cg, scx, plan, f, &name, &mut mf, times)?;
+        let mut chunk = emit_coroutine_chunk(ws, cg, scx, plan, f, name, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
         attribution.times = chunk.times;
         chunk.attribution = Some(Box::new(attribution));
         return Ok(chunk);
     }
-    let name = mangle_fn(ws, f);
-    let mut stats = ChainStats::new(&mut times, &mut attribution.inline);
-    let inliner = skull_transform::body_chain::Inliner {
-        scx,
-        self_ref,
-        cache: inline_cache,
-        plans: &concrete.plans,
-    };
     let opts = skull_transform::body_chain::ChainOptions {
-        target: bone_core::hir::FnBackend::Lua,
         reserve: &|name| {
             cg.mint_synthetic(name.to_string());
         },
-        counted_loops: skull_transform::body_chain::CountedLoops::Root,
-        // Hoisted bodies inline only after closure conversion has split them
-        // out: inside a closure a cell is an upvalue, and splicing there piles
-        // onto LuaJIT's 60-upvalue cap.
-        // It is also needed for correctness: a call given the specialized scalar ABI
-        // has no serviceable shared body.
-        inline_hoisted: true,
+        // A hoisted shared body can need a splice to reach a specialized ABI.
+        // After hoisting, that splice no longer adds LuaJIT upvalues.
+        inline_hoisted: !specialized,
+        ..skull_transform::body_chain::ChainOptions::PLAIN
     };
-    let deps =
-        skull_transform::body_chain::prepare_body(ws, inliner, &mut mf, &name, &opts, &mut stats)
-            .map_err(|e| match e.pass {
-            skull_transform::body_chain::BodyPass::HoistedInline => {
-                CompilerError::new_with_label(f.name_span, e.error.message)
-            }
-            _ => e.error,
-        })?;
+    let inliner = skull_transform::body_chain::Inliner {
+        scx,
+        self_ref: fref,
+        cache: inline_cache,
+        plans: &concrete.plans,
+    };
+    let deps = skull_transform::body_chain::prepare_body(
+        ws,
+        inliner,
+        &mut mf,
+        name,
+        &opts,
+        &mut ChainStats::new(&mut times, &mut attribution.inline),
+    )
+    .map_err(|e| {
+        if specialized || e.pass == skull_transform::body_chain::BodyPass::HoistedInline {
+            CompilerError::new_with_label(f.name_span, e.error.message)
+        } else {
+            e.error
+        }
+    })?;
     finish_body_chunk(
         ws,
         cg,
         scx,
         f,
-        self_ref,
-        &name,
-        LoweredInstanceKind::Ordinary,
+        fref,
+        name,
+        !specialized,
         mf,
         deps,
         times,
         attribution,
     )
-}
-
-fn lower_body(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    concrete: &crate::concrete_body::ConcreteBodies,
-    plan: &skull_mir::concrete::ConcreteBodyPlan,
-    instance: Option<&Instance>,
-    owner: String,
-    fref: FuncRef,
-    inline_cache: &mut skull_transform::InlineCache,
-) -> Result<(MirFunc, PhaseTimes, UnitAttribution), CompilerError> {
-    let tl = Instant::now();
-    let canonical_body = instance.and_then(|instance| inline_cache.canonical_body(instance));
-    let mf = match canonical_body {
-        Some(body) => (*body).clone(),
-        None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)?,
-    };
-    let times = PhaseTimes {
-        lower: tl.elapsed(),
-        lower_work: !mf.insts.is_empty(),
-        ..PhaseTimes::default()
-    };
-    let attribution = UnitAttribution {
-        owner,
-        examined: true,
-        hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
-        mir_instructions: mf.insts.len(),
-        ..UnitAttribution::default()
-    };
-    Ok((mf, times, attribution))
 }
 
 fn finish_body_chunk(
@@ -244,13 +246,12 @@ fn finish_body_chunk(
     f: &bone_semantic::hir::Function,
     self_ref: FuncRef,
     name: &str,
-    kind: LoweredInstanceKind,
+    ordinary: bool,
     mut mf: MirFunc,
     mut deps: FxHashSet<FuncRef>,
     mut times: PhaseTimes,
     mut attribution: UnitAttribution,
 ) -> Result<Chunk, CompilerError> {
-    let ordinary = matches!(kind, LoweredInstanceKind::Ordinary);
     let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     skull_transform::body_chain::debug_verify(
@@ -469,94 +470,6 @@ pub(crate) fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &In
 
 pub fn is_generic(f: &bone_semantic::hir::Function) -> bool {
     !f.generics.is_empty()
-}
-
-pub(super) fn emit_spec_chunk(
-    ws: &Workspace,
-    cg: &CodegenCtx,
-    scx: &skull_mir::lower::ScalarCtx,
-    concrete: &crate::concrete_body::ConcreteBodies,
-    body: &Instance,
-    name: &str,
-    inline_cache: &mut skull_transform::InlineCache,
-) -> Result<Chunk, CompilerError> {
-    let fref = body.func;
-    let f = &ws.module(fref.module).functions[fref.func];
-    let plan = concrete.plan_for(body).ok_or_else(|| {
-        CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{name}`"))
-    })?;
-    let tree = &plan.bound_tree;
-    skull_mir::lower::validate_concrete_bound_plan(f, plan)?;
-    let (mut mf, mut times, mut attribution) = lower_body(
-        ws,
-        scx,
-        concrete,
-        plan,
-        Some(body),
-        name.to_string(),
-        fref,
-        inline_cache,
-    )
-    .map_err(|e| e.or_at(f.name_span))?;
-    // Before every transform: the demand that reached here resolves the bound
-    // placeholders that make the body unemittable on its own.
-    let tresolve = Instant::now();
-    skull_transform::bound::resolve_standalone_bound_calls(
-        ws,
-        scx,
-        scx.interner(),
-        &mut mf,
-        tree,
-        &concrete.plans,
-    )
-    .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
-    times.validation += tresolve.elapsed();
-    times.validation_work = true;
-    if f.is_coroutine {
-        let mut chunk = emit_coroutine_chunk(ws, cg, scx, plan, f, name, &mut mf, times)?;
-        attribution.mir_instructions = mf.insts.len();
-        attribution.times = chunk.times;
-        chunk.attribution = Some(Box::new(attribution));
-        return Ok(chunk);
-    }
-    let opts = skull_transform::body_chain::ChainOptions {
-        reserve: &|name| {
-            cg.mint_synthetic(name.to_string());
-        },
-        ..skull_transform::body_chain::ChainOptions::PLAIN
-    };
-    let mut prepared_times = PhaseTimes::default();
-    let mut prepared_inline = InlineAttribution::default();
-    let inliner = skull_transform::body_chain::Inliner {
-        scx,
-        self_ref: fref,
-        cache: inline_cache,
-        plans: &concrete.plans,
-    };
-    let deps = skull_transform::body_chain::prepare_body(
-        ws,
-        inliner,
-        &mut mf,
-        name,
-        &opts,
-        &mut ChainStats::new(&mut prepared_times, &mut prepared_inline),
-    )
-    .map_err(|e| CompilerError::new_with_label(f.name_span, e.error.message))?;
-    times.add(&prepared_times);
-    attribution.inline.add(&prepared_inline);
-    finish_body_chunk(
-        ws,
-        cg,
-        scx,
-        f,
-        fref,
-        name,
-        LoweredInstanceKind::Specialized,
-        mf,
-        deps,
-        times,
-        attribution,
-    )
 }
 
 pub(super) fn order_specialized_callees<'c>(
