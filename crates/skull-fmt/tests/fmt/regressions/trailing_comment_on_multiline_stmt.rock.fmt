@@ -5,9 +5,7 @@
 // (the multi-line form once lost it on the next pass) and not duplicated onto
 // every inner statement that shares the source line.
 
-//=== TEST CASE: comment_lands_once_on_closing_brace ===
+//- comment_lands_once_on_closing_brace
 fn handle() {
     if code == 82 { refresh(); return true }   // R refresh
 }
-
-//=== NO CHANGE ===

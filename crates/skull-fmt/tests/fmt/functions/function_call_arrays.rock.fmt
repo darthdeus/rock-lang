@@ -1,7 +1,6 @@
 //! Test: Function calls with array arguments
 
-//=== TEST CASE:function_call_with_array_argument_formatting ===
-
+//- function_call_with_array_argument_formatting
 fn test() {
     let sfx_footsteps = load_multisound([
         "assets/SFX/Footsteps/footsteps-1.wav",
@@ -12,10 +11,7 @@ fn test() {
     ])
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:nested_array_function_calls ===
-
+//- nested_array_function_calls
 fn load_assets() {
     let sounds = load_sounds([
         load_audio("music.wav"),
@@ -28,5 +24,3 @@ fn load_assets() {
         "background.jpg"
     ])
 }
-
-//=== NO CHANGE ===

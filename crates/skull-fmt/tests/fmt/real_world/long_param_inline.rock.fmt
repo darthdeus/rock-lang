@@ -1,7 +1,6 @@
 //! Test: Long parameter list inline functions
 
-//=== TEST CASE:long_param_inline_functions ===
-
+//- long_param_inline_functions
 // Inline functions with many parameters should stay multi-line when too long
 @nomangle
 inline(lua) fn __register_decorated_function(
@@ -14,7 +13,6 @@ inline(lua) fn __register_decorated_function(
     -- Initialize the annotation registry
     _G.__ROCK_ANNOTATION_REGISTRY = {}
 """
-
 //=== EXPECTED ===
 // Inline functions with many parameters should stay multi-line when too long
 @nomangle inline(lua) fn __register_decorated_function(
@@ -27,8 +25,7 @@ inline(lua) fn __register_decorated_function(
     -- Initialize the annotation registry
     _G.__ROCK_ANNOTATION_REGISTRY = {}
 """
-//=== TEST CASE: short_inline_functions_stay_inline ===
+
+//- short_inline_functions_stay_inline
 // Short inline functions should stay on one line
 @nomangle inline(lua) fn simple_func(x: int) = "return x * 2"
-
-//=== NO CHANGE ===

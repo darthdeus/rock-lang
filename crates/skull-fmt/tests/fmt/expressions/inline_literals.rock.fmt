@@ -1,6 +1,6 @@
 //! Test: Inline function literals
 
-//=== TEST CASE: inline_literal_preservation ===
+//- inline_literal_preservation
 // Single-line inline functions should preserve their quotes
 inline(lua) fn table_new() -> any = "return {}"
 inline(lua) fn random() -> float = "return math.random()"
@@ -13,5 +13,3 @@ inline(lua) fn complex_function(x: int) -> int = """
     end
     return result
 """
-
-//=== NO CHANGE ===

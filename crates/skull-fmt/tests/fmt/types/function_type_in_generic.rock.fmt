@@ -6,8 +6,6 @@
 // `>>>` and the output no longer parsed. Params/return now render structurally;
 // only the `fn(` vs `(` prefix is read from the (reliable) span start.
 
-//=== TEST CASE: function_type_returning_generic_in_map ===
+//- function_type_returning_generic_in_map
 global SIMS: Map<string, () -> Coroutine<CoFrame>> = map_new()
 global HANDLERS: Map<int, () -> Foo<Bar>> = map_new()
-
-//=== NO CHANGE ===

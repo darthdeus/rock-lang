@@ -1,6 +1,6 @@
 //! Test: Global variable declarations with comments
 
-//=== TEST CASE: globals_with_comments ===
+//- globals_with_comments
 global global_counter: int = 0  // Track application state
 global max_connections: int = 100  // Connection limit
 
@@ -10,11 +10,7 @@ global retry_count: int = 3  // Maximum retry attempts
 
 global debug_enabled: bool = false  // Debug flag
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE:multiline_global_with_comments ===
-
+//- multiline_global_with_comments
 // Application configuration
 global app_config: AppConfig = AppConfig {
     name: "MyApp",  // Application name
@@ -24,7 +20,6 @@ global app_config: AppConfig = AppConfig {
     enable_logging: true,
     enable_metrics: false,
 }
-
 //=== EXPECTED ===
 // Application configuration
 global app_config: AppConfig = AppConfig {

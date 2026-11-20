@@ -6,7 +6,7 @@
 //! is silent -- the stripped form reparses and re-formats to itself, so the
 //! idempotency gate cannot see it.
 
-//=== TEST CASE: param_annotations_survive ===
+//- param_annotations_survive
 value UiVary {
     uv: Vec2,
 }
@@ -16,24 +16,18 @@ fn frag(@attr a: UiVary, @uniform u: UiVary, @engine e: UiVary) {
     let x = 1
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: param_annotations_with_args_survive ===
+//- param_annotations_with_args_survive
 fn sized(@size(32) n: int, @instance i: int, @repr(opaque) o: int) {
     let x = 1
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: struct_field_annotation_survives ===
+//- struct_field_annotation_survives
 value UiVary {
     @flat kind: int,
     uv: Vec2,
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: annotated_params_wrap_one_per_line ===
+//- annotated_params_wrap_one_per_line
 @shader(fragment)
 fn wide_entry(
     @attr attributes: SomeVeryLongAttributeStructName,
@@ -42,5 +36,3 @@ fn wide_entry(
 ) {
     let x = 1
 }
-
-//=== NO CHANGE ===

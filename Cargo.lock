@@ -2181,6 +2181,7 @@ dependencies = [
  "rock-core",
  "rock-tokenizer",
  "skull-parser",
+ "test-utils",
  "ustr",
 ]
 

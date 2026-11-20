@@ -1,7 +1,6 @@
 //! Test: Break and continue statement formatting
 
-//=== TEST CASE:break_fmt ===
-
+//- break_fmt
 fn test() {
     loop {
         if condition {
@@ -17,9 +16,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: single_line_control_flow ===
+//- single_line_control_flow
 fn test() {
     while running {
         if should_skip { continue }
@@ -28,11 +25,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE:multiline_control_flow ===
-
+//- multiline_control_flow
 fn test() {
     for item in items {
         if complex_condition(item) {
@@ -48,5 +41,3 @@ fn test() {
         default_processing(item)
     }
 }
-
-//=== NO CHANGE ===

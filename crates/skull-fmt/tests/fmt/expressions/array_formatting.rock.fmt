@@ -1,16 +1,13 @@
 //! Test: Array formatting and preservation
 
-//=== TEST CASE: preserve_array_formatting ===
+//- preserve_array_formatting
 fn test() {
     let simple = [1, 2, 3, 4, 5]
     let strings = ["hello", "world", "test"]
     let mixed = [item1, item2, item3]
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:tabular_array_formatting_preservation ===
-
+//- tabular_array_formatting_preservation
 fn test() {
     let matrix = [
         [1, 2, 3],
@@ -25,10 +22,7 @@ fn test() {
     ]
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:long_array_wrapping ===
-
+//- long_array_wrapping
 fn test() {
     let long_array = [
         "first_very_long_string_element",
@@ -38,9 +32,7 @@ fn test() {
     ]
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: nested_array_structures ===
+//- nested_array_structures
 fn test() {
     let nested = [
         [
@@ -54,9 +46,7 @@ fn test() {
     ]
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: spread_elements_keep_trailing_comments ===
+//- spread_elements_keep_trailing_comments
 fn test() {
     let all = [
         ...position,   // xyz
@@ -65,5 +55,3 @@ fn test() {
     ]
     return all
 }
-
-//=== NO CHANGE ===

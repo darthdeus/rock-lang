@@ -1,6 +1,6 @@
 //! Test: Preserve single-line if statements when appropriate
 
-//=== TEST CASE: simple_single_line_ifs ===
+//- simple_single_line_ifs
 fn test() {
     // Simple returns should stay single-line
     if x > 0 { return x }
@@ -22,9 +22,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: single_line_ifs_stay_inline ===
+//- single_line_ifs_stay_inline
 fn test() {
     // Layout preserver: the author's line breaks are authoritative. A single-line
     // if stays inline, even with multiple statements or past the width limit.
@@ -32,5 +30,3 @@ fn test() {
 
     if very_long_condition_that_definitely_exceeds_the_line_limit { return another_very_long_expression }
 }
-
-//=== NO CHANGE ===

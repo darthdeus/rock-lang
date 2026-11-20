@@ -1,6 +1,6 @@
 //! Test: nested function declarations
 
-//=== TEST CASE: nested_fn_inferred_and_annotated ===
+//- nested_fn_inferred_and_annotated
 fn outer(xs: [int]) -> int {
     fn inc(x: int) -> int { x + 1 }
     fn total() {
@@ -9,14 +9,10 @@ fn outer(xs: [int]) -> int {
     return xs.map(inc).len()
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: nested_fn_normalizes_spacing ===
+//- nested_fn_normalizes_spacing
 fn g() {
     fn  h(x:int)->int{ x*2 }
 }
-
 //=== EXPECTED ===
 fn g() {
     fn h(x: int) -> int { x * 2 }

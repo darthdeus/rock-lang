@@ -1,6 +1,6 @@
 //! Test: Struct field grouping with blank lines
 
-//=== TEST CASE: struct_field_grouping_with_blank_lines ===
+//- struct_field_grouping_with_blank_lines
 fn test() {
     let camera = Camera {
         world_center: zero(),
@@ -16,11 +16,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE:complex_struct_with_nested_grouping ===
-
+//- complex_struct_with_nested_grouping
 fn create_config() {
     let config = GameConfig {
         // Graphics settings
@@ -43,9 +39,7 @@ fn create_config() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: struct_field_spacing_in_knockback ===
+//- struct_field_spacing_in_knockback
 fn test() {
     let k = Knockback {
         chase_range: 8.0,
@@ -66,5 +60,3 @@ fn test() {
         jump_duration: 0.3,
     }
 }
-
-//=== NO CHANGE ===

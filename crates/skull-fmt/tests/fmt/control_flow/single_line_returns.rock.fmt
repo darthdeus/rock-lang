@@ -1,17 +1,13 @@
 //! Test: Single line return statements
 
-//=== TEST CASE:single_line_if_return_with_comment ===
-
+//- single_line_if_return_with_comment
 fn test() {
     if result == -1 {
         return 25
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:multiple_single_line_returns ===
-
+//- multiple_single_line_returns
 fn check_bounds(x: int, y: int) {
     if x < 0 {
         return false
@@ -27,5 +23,3 @@ fn check_bounds(x: int, y: int) {
     }
     return true
 }
-
-//=== NO CHANGE ===

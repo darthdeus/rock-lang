@@ -1,15 +1,12 @@
 //! Test: Annotation formatting
 
-//=== TEST CASE: annotation_without_params ===
+//- annotation_without_params
 @test
 fn test_basic() {
     let x = 1
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:annotation_parentheses_for_single_string ===
-
+//- annotation_parentheses_for_single_string
 // Test that single string annotations maintain parentheses for idempotent formatting
 @test("basic test")
 fn test_basic() {
@@ -21,19 +18,7 @@ struct LegacyStruct {
     field: int,
 }
 
-//=== EXPECTED ===
-// Test that single string annotations maintain parentheses for idempotent formatting
-@test("basic test")
-fn test_basic() {
-    assert_eq(1 + 1, 2)
-}
-
-@deprecated("old version")
-struct LegacyStruct {
-    field: int,
-}
-//=== TEST CASE:annotation_with_parentheses_multiple_args ===
-
+//- annotation_with_parentheses_multiple_args
 @test("complex test", timeout=5000)
 fn test_with_timeout() {
     // Test implementation
@@ -44,18 +29,13 @@ fn get_user_data() {
     // Function implementation
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:annotation_with_complex_string ===
-
+//- annotation_with_complex_string
 @description("This is a complex test with\nmultiple lines and special characters: !@#$%")
 fn complex_test() {
     // Implementation
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: comment_between_annotations ===
+//- comment_between_annotations
 @sim_env("A", "1")
 // pinned between annotations: must survive formatting
 @sim_env("B", "2")
@@ -63,5 +43,3 @@ fn complex_test() {
 fn annotated_with_comment() {
     let x = 1
 }
-
-//=== NO CHANGE ===

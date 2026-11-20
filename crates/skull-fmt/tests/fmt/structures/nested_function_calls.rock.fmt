@@ -1,7 +1,6 @@
 //! Test: Nested function call indentation in struct literals
 
-//=== TEST CASE:nested_function_calls_in_struct_literals ===
-
+//- nested_function_calls_in_struct_literals
 fn create_prefabs() -> Arena<Prefab> {
     let prefabs: Arena<Prefab> = arena_new()
 
@@ -53,7 +52,6 @@ fn create_prefabs() -> Arena<Prefab> {
 
     return prefabs
 }
-
 //=== EXPECTED ===
 fn create_prefabs() -> Arena<Prefab> {
     let prefabs: Arena<Prefab> = arena_new()

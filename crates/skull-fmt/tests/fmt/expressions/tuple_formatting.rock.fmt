@@ -1,7 +1,6 @@
 //! Test: Tuple expression formatting
 
-//=== TEST CASE:basic_tuple_literals ===
-
+//- basic_tuple_literals
 fn create_tuples() {
     let point = (1, 2)
     let triple = (x, y, z)
@@ -10,10 +9,7 @@ fn create_tuples() {
     return (result, status, message)
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: tuple_destructuring ===
+//- tuple_destructuring
 fn destructure_tuples() {
     let pos = get_position()
     let (x, y) = pos
@@ -25,11 +21,7 @@ fn destructure_tuples() {
     }
 }
 
-//=== NO CHANGE ===
-
-
-
-//=== TEST CASE: long_tuple_formatting ===
+//- long_tuple_formatting
 fn long_tuples() {
     let short_tuple = (a, b, c)
 
@@ -48,12 +40,7 @@ fn long_tuples() {
     )
 }
 
-//=== NO CHANGE ===
-
-
-
-//=== TEST CASE:tuple_in_function_parameters ===
-
+//- tuple_in_function_parameters
 fn process_coordinate_data(point: (float, float), size: (int, int)) {
     let (x, y) = point
     let (width, height) = size
@@ -65,11 +52,7 @@ fn return_multiple_values() -> (bool, string, int) {
     return (true, "success", 42)
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE:tuple_assignment_and_expressions ===
-
+//- tuple_assignment_and_expressions
 fn tuple_operations() -> (bool, string) {
     let coords = (10.5, 20.3)
     let (x, y) = coords
@@ -84,21 +67,14 @@ fn tuple_operations() -> (bool, string) {
     return result
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: tuple_formatting_simple_expressions ===
+//- tuple_formatting_simple_expressions
 fn test() {
     let simple = (a, b)
     let with_ops = (x + 1, y - 2)
     let mixed = (value, calculate(), "literal")
 }
 
-//=== NO CHANGE ===
-
-
-
-//=== TEST CASE:tuple_formatting_complex_expressions ===
-
+//- tuple_formatting_complex_expressions
 fn test() {
     let complex = (
         function_call_with_long_name(param1, param2),
@@ -112,5 +88,3 @@ fn test() {
         final_tuple
     )
 }
-
-//=== NO CHANGE ===

@@ -1,28 +1,19 @@
 //! Test: Struct literal formatting
 
-//=== TEST CASE: simple_struct_literals_oneline ===
+//- simple_struct_literals_oneline
 fn test() {
     let point = Point { x: 10, y: 20 }
     let color = Color { r: 255, g: 0, b: 0 }
     let small = Small { value: 42 }
 }
 
-//=== NO CHANGE ===
-
-
-
-//=== TEST CASE: struct_literal_single_line ===
+//- struct_literal_single_line
 fn test() {
     let simple = SimpleStruct { a: 1, b: 2 }
     let point = Point { x: 0.0, y: 0.0 }
 }
 
-//=== NO CHANGE ===
-
-
-
-//=== TEST CASE:struct_literal_multiline ===
-
+//- struct_literal_multiline
 fn test() {
     let complex = ComplexStruct {
         field_one: calculate_value(),
@@ -34,30 +25,19 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: single_field_struct_collapse ===
+//- single_field_struct_collapse
 fn test() {
     let wrapper = Wrapper { value: 42 }
     let name_holder = NameHolder { name: "test" }
 }
 
-//=== NO CHANGE ===
-
-
-
-//=== TEST CASE: struct_literal_single_field_stays_inline ===
+//- struct_literal_single_field_stays_inline
 fn test() {
     let config = Config { enabled: true }
     let point = Point { x: 10 }
 }
 
-//=== NO CHANGE ===
-
-
-
-//=== TEST CASE:struct_literal_formatting ===
-
+//- struct_literal_formatting
 fn test() {
     let person = Person {
         name: "Alice",
@@ -67,10 +47,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:struct_literal_with_inline_comments ===
-
+//- struct_literal_with_inline_comments
 fn test() {
     let config = ServerConfig {
         host: "localhost",  // Default host
@@ -79,10 +56,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: multifield_struct_trailing_comma ===
+//- multifield_struct_trailing_comma
 fn test() {
     let settings = AppSettings {
         theme: Theme::Dark,
@@ -92,12 +66,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-
-
-//=== TEST CASE:struct_trailing_comma_consistency ===
-
+//- struct_trailing_comma_consistency
 fn test() {
     // Single field - no trailing comma
     let simple = Simple { value: 1 }
@@ -108,5 +77,3 @@ fn test() {
         field2: "value2",
     }
 }
-
-//=== NO CHANGE ===

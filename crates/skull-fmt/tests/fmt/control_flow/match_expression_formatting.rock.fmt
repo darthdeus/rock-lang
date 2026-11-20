@@ -1,7 +1,6 @@
 //! Test: Match expression formatting
 
-//=== TEST CASE:match_enum_shorthand_fields ===
-
+//- match_enum_shorthand_fields
 fn test(opt: Option) {
     match opt {
         Option::Some { value } => {
@@ -13,11 +12,7 @@ fn test(opt: Option) {
     }
 }
 
-//=== NO CHANGE ===
-
-// Single-line arm blocks stay inline (preserve); only the genuinely multi-line
-// arm expands.
-//=== TEST CASE: match_arm_indentation ===
+//- match_arm_indentation
 fn test(x: MyEnum) {
     match x {
         MyEnum::A => { return 1 },
@@ -29,9 +24,7 @@ fn test(x: MyEnum) {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: match_enum_pattern_formatting ===
+//- match_enum_pattern_formatting
 fn test(option: Option<int>) {
     match option {
         Option::Some { value } => {
@@ -45,9 +38,7 @@ fn test(option: Option<int>) {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: match_standalone_interior_comments ===
+//- match_standalone_interior_comments
 fn test(kind: Kind) -> int {
     return match kind {
         Kind::A => 1,
@@ -57,5 +48,3 @@ fn test(kind: Kind) -> int {
         _ => 0,
     }
 }
-
-//=== NO CHANGE ===

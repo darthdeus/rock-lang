@@ -1,24 +1,12 @@
 //! Test: Function type syntax
 
-//=== TEST CASE: function_type_syntax ===
+//- function_type_syntax
 struct Test {
     callback: (int) -> string? = null,
     update: (float, bool) -> ()? = null,
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:function_type_parameter_syntax ===
-
-fn with_callback(f: fn() -> ()) {
-    f()
-}
-
-fn with_params(handler: fn(int, string) -> bool) {
-    return handler(42, "test")
-}
-
-//=== EXPECTED ===
+//- function_type_parameter_syntax
 fn with_callback(f: fn() -> ()) {
     f()
 }

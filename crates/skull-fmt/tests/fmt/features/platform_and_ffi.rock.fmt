@@ -2,7 +2,7 @@
 //! NOTE: These syntax features are not yet supported in current Rock parser
 //! NOTE: Tests are commented out until conditional compilation and varargs are supported
 
-//=== COMMENTED OUT TEST CASE: conditional_compilation_format ===
+//- COMMENTED OUT  conditional_compilation_format
 // #if lua
 // fn lua_specific_function() {
 //     return "lua implementation"
@@ -45,5 +45,3 @@ fn placeholder() {
     // when those language features are implemented
     log("Future platform-specific and FFI formatting tests will go here")
 }
-
-//=== NO CHANGE ===

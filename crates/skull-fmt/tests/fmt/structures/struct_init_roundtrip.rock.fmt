@@ -1,15 +1,13 @@
 //! Test: Struct init formatter regressions (multi-field, shorthand, block values)
 
-//=== TEST CASE: struct_init_field_shorthand ===
+//- struct_init_field_shorthand
 fn f() {
     let a = 1
     let f = 4
     let six = Six { a, b + c: 2, d + e: 3, f }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: block_expression_as_field_value_indent ===
+//- block_expression_as_field_value_indent
 fn f() {
     let q = FourInts {
         a + b: {
@@ -22,5 +20,3 @@ fn f() {
         },
     }
 }
-
-//=== NO CHANGE ===

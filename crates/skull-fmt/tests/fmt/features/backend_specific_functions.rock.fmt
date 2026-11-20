@@ -1,18 +1,12 @@
 //! Test: Backend-specific function formatting
 
-//=== TEST CASE: inline_lua_format ===
+//- inline_lua_format
 inline(lua) fn get_platform_name() -> string = """return "Lua Backend" """
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: extern_lua_format ===
+//- extern_lua_format
 extern(lua) fn lua_only()
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: lua_backend_functions ===
+//- lua_backend_functions
 inline(lua) fn lua_math() -> float = "return math.pi"
 
 extern(lua) fn canvas_clear()
-
-//=== NO CHANGE ===

@@ -1,6 +1,6 @@
 //! Test: Struct literal formatting
 
-//=== TEST CASE: simple_struct_literals_stay_inline ===
+//- simple_struct_literals_stay_inline
 fn test() {
     // Single field structs can stay on one line
     let p = Point { x: 1 }
@@ -14,9 +14,7 @@ fn test() {
     let empty = Empty {}
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: struct_literals_preserve_author_layout ===
+//- struct_literals_preserve_author_layout
 fn test() {
     // Layout preserver: a struct literal keeps the author's line layout. A
     // single-line literal stays inline (even past the width limit); one already
@@ -33,5 +31,3 @@ fn test() {
         values: [1, 2, 3, 4, 5],
     }
 }
-
-//=== NO CHANGE ===

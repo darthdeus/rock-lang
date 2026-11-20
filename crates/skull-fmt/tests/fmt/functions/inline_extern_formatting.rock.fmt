@@ -1,35 +1,27 @@
 //! Test: Inline and extern function formatting
 
-//=== TEST CASE: inline_lua_format ===
+//- inline_lua_format
 inline(lua) fn lua_specific_code() -> string = """return "lua_result" """
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: extern_lua_format ===
+//- extern_lua_format
 extern(lua) fn lua_external_function(param: string) -> string
 
 fn use_backend_specific() {
     let lua_result = lua_external_function("test")
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: extern_function_formatting ===
+//- extern_function_formatting
 extern(lua) fn malloc(size: int) -> any
 extern(lua) fn free(ptr: any)
 extern(lua) fn strlen(str: string) -> int
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: consecutive_single_line_extern_functions ===
+//- consecutive_single_line_extern_functions
 extern(lua) fn open(path: string, mode: int) -> int
 extern(lua) fn close(fd: int) -> int
 extern(lua) fn read(fd: int, buf: any, count: int) -> int
 extern(lua) fn write(fd: int, buf: any, count: int) -> int
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:extern_function_multiline_lua ===
+//- extern_function_multiline_lua
 // Layout preserver: a signature the author wrote across multiple lines keeps
 // that layout (author line breaks are authoritative).
 extern(lua) fn complex_lua_function(
@@ -38,8 +30,7 @@ extern(lua) fn complex_lua_function(
     param3: bool
 ) -> any
 
-//=== NO CHANGE ===
-//=== TEST CASE: extern_function_preservation ===
+//- extern_function_preservation
 extern(lua) fn system_call(command: string) -> int
 extern(lua) fn get_environment_variable(name: string) -> string?
 
@@ -47,5 +38,3 @@ fn use_extern_functions() {
     let result = system_call("ls -la")
     let home = get_environment_variable("HOME")
 }
-
-//=== NO CHANGE ===

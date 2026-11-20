@@ -1,7 +1,6 @@
 //! Test: Comprehensive if statement formatting
 
-//=== TEST CASE:simple_if_statement_formatting ===
-
+//- simple_if_statement_formatting
 fn test() {
     if condition {
         action()
@@ -14,29 +13,20 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: single_line_if_statements_preserve_braces ===
+//- single_line_if_statements_preserve_braces
 fn test() {
     if simple_condition { simple_action() }
     if x < 0 { return }
     if found { break }
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE:single_line_if_with_comment_formatting ===
-
+//- single_line_if_with_comment_formatting
 fn test() {
     if debug_enabled { log("Debug mode active") } // Development only
     if user.is_admin { grant_access() } // Admin privileges
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:multiline_if_statements_not_collapsed ===
-
+//- multiline_if_statements_not_collapsed
 fn test() {
     if complex_condition_that_spans_multiple_checks {
         perform_complex_operation()
@@ -49,10 +39,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:single_statement_if_blocks_stay_multiline ===
-
+//- single_statement_if_blocks_stay_multiline
 fn test() {
     if error_occurred {
         handle_error_with_detailed_logging_and_cleanup()
@@ -63,10 +50,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:if_statement_body_formatting ===
-
+//- if_statement_body_formatting
 fn test() {
     if condition {
         let temp = prepare_data()
@@ -81,10 +65,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:if_statements_with_aligned_comments_preservation ===
-
+//- if_statements_with_aligned_comments_preservation
 fn test() {
     if state == State::Loading {    // Still initializing
         show_spinner()
@@ -94,7 +75,6 @@ fn test() {
         show_error_message()
     }
 }
-
 //=== EXPECTED ===
 fn test() {
     if state == State::Loading {

@@ -1,6 +1,6 @@
 //! Test: Single-line if preservation
 
-//=== TEST CASE: single_line_if_preservation ===
+//- single_line_if_preservation
 fn draw_debug_lines(neighbors: Neighbors, pos: Vec2) {
     let l = 0.5
     let c1 = color(1, 1, 0, 0.5)
@@ -29,5 +29,3 @@ fn process_data(x: int) {
     // Simple if with else should preserve formatting
     if x > 50 { print("Medium") } else { print("Small") }
 }
-
-//=== NO CHANGE ===

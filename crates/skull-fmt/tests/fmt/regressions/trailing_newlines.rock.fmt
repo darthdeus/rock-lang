@@ -1,29 +1,18 @@
 //! Test: Trailing newline normalization
 
-//=== TEST CASE:no_trailing_newline ===
-
-fn test() { return 42 }
-//=== EXPECTED ===
-fn test() { return 42 }
-//=== TEST CASE: single_trailing_newline ===
+//- no_trailing_newline
 fn test() { return 42 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:multiple_trailing_newlines ===
-
+//- single_trailing_newline
 fn test() { return 42 }
 
-
-
-//=== EXPECTED ===
+//- multiple_trailing_newlines
 fn test() { return 42 }
-//=== TEST CASE:preserves_final_newline ===
 
+//- preserves_final_newline
 fn test() {
     return;
 }
-
 //=== EXPECTED ===
 fn test() {
     return

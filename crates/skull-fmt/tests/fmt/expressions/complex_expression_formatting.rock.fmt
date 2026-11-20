@@ -1,7 +1,6 @@
 //! Test: Complex expression formatting and line breaking
 
-//=== TEST CASE:complex_let_statements_with_long_expressions ===
-
+//- complex_let_statements_with_long_expressions
 fn test() {
     let result = { very_long_function_call_that_should_break_across_lines(param1, param2, param3) }
 
@@ -14,10 +13,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:complex_return_statements_with_long_expressions ===
-
+//- complex_return_statements_with_long_expressions
 fn test() {
     let result = {
         return very_long_function_call_that_should_break_for_readability(
@@ -36,26 +32,7 @@ fn test() {
     }
 }
 
-//=== EXPECTED ===
-fn test() {
-    let result = {
-        return very_long_function_call_that_should_break_for_readability(
-            parameter_one,
-            parameter_two,
-            parameter_three
-        )
-    }
-
-    let conditional_return = {
-        return if condition_is_true {
-            complex_calculation_with_multiple_parameters()
-        } else {
-            default_fallback_value()
-        }
-    }
-}
-//=== TEST CASE:nested_complex_expressions ===
-
+//- nested_complex_expressions
 fn test() {
     let nested_result = {
         process_data({
@@ -66,9 +43,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: long_conditional_expressions_in_lets ===
+//- long_conditional_expressions_in_lets
 fn test() {
     let conditional_value = if very_long_condition_that_spans_multiple_parts {
         calculate_positive_branch_with_complex_logic()
@@ -76,5 +51,3 @@ fn test() {
         calculate_negative_branch_with_fallback_logic()
     }
 }
-
-//=== NO CHANGE ===

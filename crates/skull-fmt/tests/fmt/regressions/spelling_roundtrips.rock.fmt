@@ -1,6 +1,6 @@
 //! Test: forms whose spelling the printer once changed or broke
 
-//=== TEST CASE: call_type_arguments_and_single_tuples_are_kept ===
+//- call_type_arguments_and_single_tuples_are_kept
 fn f() {
     let nb = native_buffer_alloc<WideLeaf>(1)
     let k = key<T>()
@@ -9,9 +9,8 @@ fn f() {
     let r = a.b(1).c<int>(2).d()
     let single = (5,)
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: unary_minus_over_a_negative_operand_keeps_its_space ===
+//- unary_minus_over_a_negative_operand_keeps_its_space
 fn f() {
     return - -1
 }
@@ -19,9 +18,8 @@ fn f() {
 fn g() {
     let x = sin(- -1.3) - - --y
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: spaced_unary_minus_over_a_number_keeps_its_shape ===
+//- spaced_unary_minus_over_a_number_keeps_its_shape
 fn f() {
     x += - 1
     x = - 1
@@ -31,9 +29,8 @@ fn f() {
     x -= -1
     x = -y
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: macro_call_bang_is_kept ===
+//- macro_call_bang_is_kept
 fn f() {
     let a = m!(1, 2)
     let a = m!()
@@ -53,9 +50,8 @@ fn f() {
     let g = m!(...rest)
     let h = x.m!(a) + n!(b)
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: comment_after_a_dollar_call_stays_on_the_statement ===
+//- comment_after_a_dollar_call_stays_on_the_statement
 fn f() {
     assert $ g(x) // why
 }
@@ -72,7 +68,7 @@ fn g() {
     let y = assert(1)  // why
 }
 
-//=== TEST CASE: comment_after_a_multi_line_dollar_argument_appears_once ===
+//- comment_after_a_multi_line_dollar_argument_appears_once
 fn f() {
     assert $ g(
         x
@@ -87,33 +83,30 @@ fn f() {
     ) // why
 }
 
-//=== TEST CASE: comment_on_the_last_argument_of_an_at_head_appears_once ===
+//- comment_on_the_last_argument_of_an_at_head_appears_once
 fn f() {
     g(
         a // why
     ) @ print(1)
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: comment_after_the_last_argument_of_an_at_head_survives ===
+//- comment_after_the_last_argument_of_an_at_head_survives
 fn f() {
     g(
         a,
         // why
     ) @ print(1)
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: comment_after_an_at_survives ===
+//- comment_after_an_at_survives
 fn f() {
     g(
         a,
     ) @ // why
     print(1)
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: at_form_keeps_the_macro_sigil ===
+//- at_form_keeps_the_macro_sigil
 fn f() {
     m!(1) @ print(1)
     m!() @ x
@@ -128,22 +121,19 @@ fn f() {
         print(2)
     }
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: at_form_keeps_explicit_generic_arguments ===
+//- at_form_keeps_explicit_generic_arguments
 fn f() {
     g<int>(1) @ print(1)
     g<int>() @ print(1)
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: nullable_function_returning_nullable_value_keeps_its_outer_parens ===
+//- nullable_function_returning_nullable_value_keeps_its_outer_parens
 struct Hooks {
     callback: (() -> Vec2?)? = null,
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: nullable_parenthesized_function_type ===
+//- nullable_parenthesized_function_type
 struct Hooks {
     on_close: (fn())? = null,
 }
@@ -152,7 +142,7 @@ struct Hooks {
     on_close: (fn() -> ())? = null,
 }
 
-//=== TEST CASE: item_annotations_preserve_trailing_comments ===
+//- item_annotations_preserve_trailing_comments
 @sim_env("SIM_DRAW", "every_frame") // draw policy
 @sim
 co fn probe() {
@@ -165,9 +155,8 @@ co fn probe() {
 @first @second // shared line
 fn probe() {
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: call_splat_in_a_variadic_macro ===
+//- call_splat_in_a_variadic_macro
 macro sum_of(x: expr, rest: ...expr) -> int {
     x + sum_of(...rest)
 }
@@ -176,12 +165,12 @@ macro sum_of(x: expr, rest: expr...) -> int {
     x + sum_of(...rest)
 }
 
-//=== TEST CASE: call_splat_in_a_macro_call ===
+//- call_splat_in_a_macro_call
 macro fwd(rest: ...expr) -> int { sum_of!(...rest) }
 //=== EXPECTED ===
 macro fwd(rest: expr...) -> int { sum_of!(...rest) }
 
-//=== TEST CASE: call_splat_after_an_argument ===
+//- call_splat_after_an_argument
 fn f(xs: ...int) {
     g(1, ...xs)
 }
@@ -190,43 +179,37 @@ fn f(xs: int...) {
     g(1, ...xs)
 }
 
-//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_1 ===
+//- range_and_safe_navigation_keep_their_spaces_1
 fn f() {
     print(src .. .w.f0)
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_2 ===
+//- range_and_safe_navigation_keep_their_spaces_2
 fn f() {
     let r = a..b
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_3 ===
+//- range_and_safe_navigation_keep_their_spaces_3
 fn f() {
     sum2(.. .p)
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_4 ===
+//- range_and_safe_navigation_keep_their_spaces_4
 fn f() {
     (s? ?.x)
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_5 ===
+//- range_and_safe_navigation_keep_their_spaces_5
 fn f() {
     s? .x
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: range_and_safe_navigation_keep_their_spaces_6 ===
+//- range_and_safe_navigation_keep_their_spaces_6
 fn f() {
     s? .a().b()
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: split_statement_keeps_its_boundary_1 ===
+//- split_statement_keeps_its_boundary_1
 fn f(){({y 7;&  y})}fn g(){}
 //=== EXPECTED ===
 fn f() {
@@ -239,7 +222,7 @@ fn f() {
 fn g() {
 }
 
-//=== TEST CASE: split_statement_keeps_its_boundary_2 ===
+//- split_statement_keeps_its_boundary_2
 fn f() {
     a(); -b
 }
@@ -249,7 +232,7 @@ fn f() {
     -b
 }
 
-//=== TEST CASE: split_statement_keeps_its_boundary_3 ===
+//- split_statement_keeps_its_boundary_3
 fn f() {
     x = 7; .y = 1
 }
@@ -259,7 +242,7 @@ fn f() {
     .y = 1
 }
 
-//=== TEST CASE: split_statement_keeps_its_boundary_4 ===
+//- split_statement_keeps_its_boundary_4
 fn f() {
     x = 7; -q // note
 }
@@ -269,7 +252,7 @@ fn f() {
     -q        // note
 }
 
-//=== TEST CASE: shared_line_group_does_not_duplicate_the_next_statement_1 ===
+//- shared_line_group_does_not_duplicate_the_next_statement_1
 fn f() {
     () let
     y 13
@@ -281,7 +264,7 @@ fn f() {
     13
 }
 
-//=== TEST CASE: shared_line_group_does_not_duplicate_the_next_statement_2 ===
+//- shared_line_group_does_not_duplicate_the_next_statement_2
 fn f() {
     a(); b(() => {
         c()
@@ -296,7 +279,7 @@ fn f() {
     d()
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_1 ===
+//- single_line_container_with_multiline_children_1
 fn f() {
     print({ let x = 5; x * 2 })
 }
@@ -308,7 +291,7 @@ fn f() {
     })
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_2 ===
+//- single_line_container_with_multiline_children_2
 fn f() {
     print({ let x = 5; x * 2 } + { let y = 3; y + 1 })
 }
@@ -325,7 +308,7 @@ fn f() {
     )
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_3 ===
+//- single_line_container_with_multiline_children_3
 fn f() {
     print(if { let r = true; r } { 1 } else { 2 })
 }
@@ -339,7 +322,7 @@ fn f() {
     )
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_4 ===
+//- single_line_container_with_multiline_children_4
 fn f() {
     print({})
 }
@@ -349,7 +332,7 @@ fn f() {
     })
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_5 ===
+//- single_line_container_with_multiline_children_5
 fn f() -> C {
     return C { bump: () => { n = n + 1; return n }, tag: 1 }
 }
@@ -364,7 +347,7 @@ fn f() -> C {
     }
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_6 ===
+//- single_line_container_with_multiline_children_6
 fn f() -> P {
     return P { get: () => n, bump: () => { n = n + 1; return n } }
 }
@@ -379,7 +362,7 @@ fn f() -> P {
     }
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_7 ===
+//- single_line_container_with_multiline_children_7
 fn f() {
     let q = F { a + b: { c = c + 1; 10 }, d: 2 }
 }
@@ -394,7 +377,7 @@ fn f() {
     }
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_8 ===
+//- single_line_container_with_multiline_children_8
 fn f() {
     for x in v.iter().map(x => { t.push(x); x }).filter(x => { u(); true }) {
         print(x)
@@ -415,7 +398,7 @@ fn f() {
     }
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_9 ===
+//- single_line_container_with_multiline_children_9
 fn f() -> P {
     return P { get: () => n, bump: () => {
         n = n + 1
@@ -432,7 +415,7 @@ fn f() -> P {
     }
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_10 ===
+//- single_line_container_with_multiline_children_10
 fn f() {
     x = [{ y: {} }]
 }
@@ -446,7 +429,7 @@ fn f() {
     ]
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_11 ===
+//- single_line_container_with_multiline_children_11
 fn f() {
     let a = [1, { let x = 5; x * 2 }]
 }
@@ -461,7 +444,7 @@ fn f() {
     ]
 }
 
-//=== TEST CASE: single_line_container_with_multiline_children_12 ===
+//- single_line_container_with_multiline_children_12
 fn f() {
     let t = ({ let x = 5; x * 2 }, 1)
 }
@@ -476,13 +459,12 @@ fn f() {
     )
 }
 
-//=== TEST CASE: qualified_call_keeps_path_separators_tight ===
+//- qualified_call_keeps_path_separators_tight
 fn probe() {
     app_world::world_tick::update(actor)
 }
-//=== NO CHANGE ===
 
-//=== TEST CASE: contextual_ascription_normalizes_spacing ===
+//- contextual_ascription_normalizes_spacing
 fn ratio(value: int) {
     let wide = (value  :  float)
     let tight = (value:float)
@@ -495,8 +477,7 @@ fn ratio(value: int) {
     let sum = ((value + 1) : float)
 }
 
-//=== TEST CASE: path_qualified_return_literal ===
+//- path_qualified_return_literal
 fn profile(mob: Mob) {
     if mob.active { return app_world::world_tick::WorldActorTurnProfile { move_speed: mob.move_speed() } }
 }
-//=== NO CHANGE ===

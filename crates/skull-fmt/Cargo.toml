@@ -17,6 +17,9 @@ rock-tokenizer = { path = "../rock-tokenizer" }
 skull-parser = { path = "../skull-parser" }
 ustr = { workspace = true }
 
+[dev-dependencies]
+test-utils = { workspace = true }
+
 [[test]]
 name = "skull_fmt_tests"
 path = "tests/main.rs"

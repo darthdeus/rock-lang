@@ -1,131 +1,61 @@
-//! Runs the `tests/fmt` corpus through skull-fmt: every case must format to
-//! its expected output, which must reparse and be a fixed point.
-
 use std::fs;
 use std::path::Path;
 
 use super::collect_files;
 
-struct Case {
-    file: String,
-    name: String,
-    input: String,
-    expected: String,
-}
-
-fn cases() -> Vec<Case> {
+#[test]
+fn corpus_cases_format_to_their_expected_output() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fmt");
     let mut files = Vec::new();
     collect_files(&dir, "fmt", &mut files);
     files.sort();
-    files
-        .iter()
-        .flat_map(|f| {
-            let short = f.strip_prefix(&dir).unwrap().to_string_lossy().to_string();
-            parse_cases(&short, &fs::read_to_string(f).unwrap())
-        })
-        .collect()
-}
 
-fn parse_cases(file: &str, text: &str) -> Vec<Case> {
-    let mut cases = Vec::new();
-    let lines: Vec<&str> = text.lines().collect();
-    let mut i = 0;
-    let marker = |l: &str, kw: &str| {
-        let t = l.trim();
-        t.starts_with("//===") && t.contains(kw)
-    };
-    while i < lines.len() {
-        if !marker(lines[i], "TEST CASE") {
-            i += 1;
-            continue;
-        }
-        let name = lines[i]
-            .trim()
-            .trim_start_matches("//===")
-            .trim_end_matches("===")
-            .replace("TEST CASE:", "")
-            .trim()
-            .to_string();
-        i += 1;
-        let start = i;
-        while i < lines.len() && !marker(lines[i], "EXPECTED") && !marker(lines[i], "NO CHANGE") {
-            i += 1;
-        }
-        let input = trim_block(&lines[start..i]);
-        let no_change = i < lines.len() && marker(lines[i], "NO CHANGE");
-        i += 1; // consume sentinel
-        let expected = if no_change {
-            input.clone()
-        } else {
-            let start = i.min(lines.len());
-            while i < lines.len() && !marker(lines[i], "TEST CASE") {
-                i += 1;
-            }
-            trim_block(&lines[start..i.max(start)])
-        };
-        cases.push(Case {
-            file: file.to_string(),
-            name,
-            input,
-            expected,
-        });
-    }
-    cases
-}
-
-fn trim_block(lines: &[&str]) -> String {
-    let is_blank = |l: &&str| l.trim().is_empty();
-    let start = lines
-        .iter()
-        .position(|l| !is_blank(l))
-        .unwrap_or(lines.len());
-    let end = lines
-        .iter()
-        .rposition(|l| !is_blank(l))
-        .map_or(start, |e| e + 1);
-    lines[start..end].join("\n")
-}
-
-#[test]
-fn corpus_cases_format_to_their_expected_output() {
-    let cases = cases();
-    assert!(!cases.is_empty(), "corpus silently empty");
+    let mut checked = 0;
     let mut failures = Vec::new();
-    for c in &cases {
-        let id = format!("{} :: {}", c.file, c.name);
-        let parses = skull_parser::parse_module_clean(&c.input, "<corpus>".into()).is_ok();
-        if parses == c.name.starts_with("parse_error") {
-            failures.push(format!("{id}: parses is {parses}"));
-            continue;
-        }
-        let got = if parses {
-            match skull_fmt::try_format(&c.input, &skull_fmt::FormatConfig::default()) {
-                Ok(got) => got,
-                Err(e) => {
-                    failures.push(format!("{id}: {e}"));
-                    continue;
-                }
+    for file in files {
+        let short = file.strip_prefix(&dir).unwrap().display();
+        let text = fs::read_to_string(&file).unwrap().replace("\r\n", "\n");
+        for case in test_utils::parse_sections(&text) {
+            let (input, expected) = case
+                .content
+                .split_once("\n//=== EXPECTED ===\n")
+                .unwrap_or((case.content, case.content));
+            checked += 1;
+            if let Err(error) = check_case(case.name, input.trim_matches('\n'), expected.trim_end())
+            {
+                failures.push(format!("{short} :: {}: {error}", case.name));
             }
-        } else {
-            skull_fmt::format_code(&c.input)
-        };
-        if got.trim_end() != c.expected.trim_end() {
-            failures.push(format!(
-                "{id}\nINPUT:\n{}\nEXPECTED:\n{}\nGOT:\n{got}",
-                c.input, c.expected
-            ));
-        } else if parses && skull_parser::parse_module_clean(&got, "<corpus>".into()).is_err() {
-            failures.push(format!("{id}: output does not parse:\n{got}"));
-        } else if skull_fmt::format_code(&got) != got {
-            failures.push(format!("{id}: output is not a fixed point:\n{got}"));
         }
     }
+    assert!(checked > 0, "corpus silently empty");
     assert!(
         failures.is_empty(),
-        "{} of {} corpus case(s) failed:\n{}",
+        "{} of {checked} corpus case(s) failed:\n{}",
         failures.len(),
-        cases.len(),
         failures.join("\n\n")
     );
+}
+
+fn check_case(name: &str, input: &str, expected: &str) -> Result<(), String> {
+    let parses = skull_parser::parse_module_clean(input, "<corpus>".into()).is_ok();
+    if parses == name.starts_with("parse_error") {
+        return Err(format!("parses is {parses}"));
+    }
+    let got = if parses {
+        skull_fmt::try_format(input, &skull_fmt::FormatConfig::default())?
+    } else {
+        skull_fmt::format_code(input)
+    };
+    if got.trim_end() != expected {
+        return Err(format!(
+            "\nINPUT:\n{input}\nEXPECTED:\n{expected}\nGOT:\n{got}"
+        ));
+    }
+    if parses && skull_parser::parse_module_clean(&got, "<corpus>".into()).is_err() {
+        return Err(format!("output does not parse:\n{got}"));
+    }
+    if skull_fmt::format_code(&got) != got {
+        return Err(format!("output is not a fixed point:\n{got}"));
+    }
+    Ok(())
 }

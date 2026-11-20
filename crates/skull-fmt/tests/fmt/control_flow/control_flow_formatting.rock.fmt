@@ -1,20 +1,13 @@
 //! Test: Control flow statement formatting
 
-//=== TEST CASE:break_fmt ===
-
+//- break_fmt
 fn test() {
     loop {
         if x > max_x { break }
     }
 }
 
-//=== EXPECTED ===
-fn test() {
-    loop {
-        if x > max_x { break }
-    }
-}
-//=== TEST CASE: single_line_control_flow ===
+//- single_line_control_flow
 fn game_loop() {
     loop {
         if should_exit() { break }
@@ -25,9 +18,7 @@ fn game_loop() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: mixed_control_flow_statements ===
+//- mixed_control_flow_statements
 fn process_items() {
     for item in items {
         if item.is_invalid() { continue }
@@ -37,5 +28,3 @@ fn process_items() {
         process_normal_item(item)
     }
 }
-
-//=== NO CHANGE ===

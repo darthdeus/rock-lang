@@ -1,20 +1,19 @@
 //! Test: Bitwise and arithmetic operator formatting
 
-//=== TEST CASE:preserve_spacing_around_operators ===
-
+//- preserve_spacing_around_operators
 fn test() {
     let result = a + b * c
     let check = x == y
     return;
 }
-
 //=== EXPECTED ===
 fn test() {
     let result = a + b * c
     let check = x == y
     return
 }
-//=== TEST CASE: bitwise_operators_formatting ===
+
+//- bitwise_operators_formatting
 fn test_bitwise() {
     let a = 5
     let b = 3
@@ -25,5 +24,3 @@ fn test_bitwise() {
     let left_shift = a << 2
     let right_shift = a >> 1
 }
-
-//=== NO CHANGE ===

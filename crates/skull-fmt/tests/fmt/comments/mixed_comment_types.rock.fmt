@@ -1,7 +1,6 @@
 //! Test: Mixed trailing and separate comments
 
-//=== TEST CASE:mixed_trailing_and_separate_comments ===
-
+//- mixed_trailing_and_separate_comments
 fn test() {
     let x = 42 // Trailing comment
 
@@ -11,7 +10,6 @@ fn test() {
     }
     return;
 }
-
 //=== EXPECTED ===
 fn test() {
     let x = 42 // Trailing comment
@@ -23,8 +21,7 @@ fn test() {
     return
 }
 
-//=== TEST CASE:complex_comment_patterns ===
-
+//- complex_comment_patterns
 fn complex_function() {
     // Initialize variables
     let count = 0  // Track iterations
@@ -40,5 +37,3 @@ fn complex_function() {
 
     return result  // Return processed data
 }
-
-//=== NO CHANGE ===

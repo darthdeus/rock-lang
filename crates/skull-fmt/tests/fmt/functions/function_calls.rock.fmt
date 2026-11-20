@@ -1,7 +1,6 @@
 //! Test: Function call formatting
 
-//=== TEST CASE:function_call_with_array_argument_formatting ===
-
+//- function_call_with_array_argument_formatting
 fn test() {
     let result = process_data([
         "item1",
@@ -13,20 +12,13 @@ fn test() {
     let compact = process_compact(["a", "b", "c"])
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:fn_calls_nowrap ===
-
+//- fn_calls_nowrap
 fn test() {
     call_function_with_many_parameters(param1, param2, param3, param4)
     another_function(a, b, c, d, e)
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE:complex_multiline_fn_call_remains_multiline ===
-
+//- complex_multiline_fn_call_remains_multiline
 fn test() {
     let result = calculate_complex_result(
         first_parameter_with_long_name,
@@ -39,9 +31,7 @@ fn test() {
     )
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: short_function_calls_stay_single_line ===
+//- short_function_calls_stay_single_line
 fn test() {
     let result1 = add(1, 2)
     let result2 = multiply(x, y)
@@ -49,10 +39,7 @@ fn test() {
     let chained = process(get_data())
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: long_function_call_wrapping ===
+//- long_function_call_wrapping
 fn test() {
     let result = very_long_function_name_that_should_wrap(
         first_very_long_parameter_name,
@@ -61,10 +48,7 @@ fn test() {
     )
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: function_call_wrapping_consistency ===
+//- function_call_wrapping_consistency
 fn test() {
     // Short calls stay on one line
     simple_call(a, b, c)
@@ -77,11 +61,7 @@ fn test() {
     )
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE:function_call_arguments_dont_collapse_inappropriately ===
-
+//- function_call_arguments_dont_collapse_inappropriately
 fn test() {
     // These should remain multiline due to complexity
     configure_system(
@@ -96,10 +76,7 @@ fn test() {
     )
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:complex_function_calls_not_collapsed ===
-
+//- complex_function_calls_not_collapsed
 fn test() {
     let result = process_data(
         {
@@ -112,7 +89,6 @@ fn test() {
         context
     )
 }
-
 //=== EXPECTED ===
 fn test() {
     let result = process_data(

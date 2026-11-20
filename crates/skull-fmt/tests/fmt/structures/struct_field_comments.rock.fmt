@@ -1,14 +1,12 @@
 //! Test: Struct field inline comments preservation
 
-//=== TEST CASE:struct_field_comments ===
-
+//- struct_field_comments
 struct User {
     name: string,        // The user's full name
     email: string,       // Primary email address
     age: int,           // Age in years
     active: bool,       // Account status
 }
-
 //=== EXPECTED ===
 struct User {
     name: string,        // The user's full name
@@ -17,7 +15,7 @@ struct User {
     active: bool,        // Account status
 }
 
-//=== TEST CASE: struct_field_comments_with_alignment ===
+//- struct_field_comments_with_alignment
 struct ServerConfig {
     host: string,           // Server hostname
     port: int,              // Port number
@@ -25,10 +23,7 @@ struct ServerConfig {
     ssl_enabled: bool,      // Enable SSL/TLS
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: mixed_struct_field_comments ===
+//- mixed_struct_field_comments
 struct GameEntity {
     id: int,                // Unique entity identifier
     position: Vec2,
@@ -39,11 +34,7 @@ struct GameEntity {
     active: bool,
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE:struct_field_comments_multiline ===
-
+//- struct_field_comments_multiline
 struct ComplexConfig {
     // Network settings
     network_host: string,       // Primary host
@@ -54,9 +45,7 @@ struct ComplexConfig {
     db_timeout: float,          // Query timeout in seconds
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: enum_variant_standalone_comments ===
+//- enum_variant_standalone_comments
 enum Token {
     // literals
     Number,
@@ -66,19 +55,14 @@ enum Token {
     Semicolon,
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: struct_comment_before_close ===
+//- struct_comment_before_close
 struct Buffer {
     data: int,
     len: int,
     // capacity is fixed at construction
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: struct_grouping_blank_without_comment_preserved ===
+//- struct_grouping_blank_without_comment_preserved
 struct Layout {
     x: int,
     y: int,
@@ -86,5 +70,3 @@ struct Layout {
     width: int,
     height: int,
 }
-
-//=== NO CHANGE ===

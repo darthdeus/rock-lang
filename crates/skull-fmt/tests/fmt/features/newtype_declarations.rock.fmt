@@ -1,12 +1,9 @@
 //! Test: Newtype declarations formatting
 
-//=== TEST CASE: newtype_basic ===
+//- newtype_basic
 newtype UserId(int)
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:newtype_spacing_before_annotation ===
-
+//- newtype_spacing_before_annotation
 @external
 newtype NetworkId(int)
 
@@ -15,23 +12,11 @@ newtype EntityId(string)
 
 newtype PlayerId(int)
 
-//=== EXPECTED ===
-@external
-newtype NetworkId(int)
-
-@serializable
-newtype EntityId(string)
-
-newtype PlayerId(int)
-//=== TEST CASE: multiple_newtypes ===
+//- multiple_newtypes
 newtype ClientId(int)
 newtype ServerId(string)
 newtype Timestamp(float)
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: newtype_with_generic ===
+//- newtype_with_generic
 newtype Wrapper<T>(T)
 newtype Tagged<Tag, Value>(Value)
-
-//=== NO CHANGE ===

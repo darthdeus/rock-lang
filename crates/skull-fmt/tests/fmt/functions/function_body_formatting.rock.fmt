@@ -1,7 +1,6 @@
 //! Test: Function body formatting
 
-//=== TEST CASE:preserve_newlines_in_function_body ===
-
+//- preserve_newlines_in_function_body
 fn test() {
     let a = 1
 
@@ -9,14 +8,7 @@ fn test() {
     return
 }
 
-//=== EXPECTED ===
-fn test() {
-    let a = 1
-
-    let b = 2
-    return
-}
-//=== TEST CASE: multiple_statement_groups ===
+//- multiple_statement_groups
 fn complex_function() {
     // Setup phase
     let config = load_config()
@@ -31,5 +23,3 @@ fn complex_function() {
     save_state(state)
     cleanup_resources()
 }
-
-//=== NO CHANGE ===

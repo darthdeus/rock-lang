@@ -1,6 +1,6 @@
 //! Test: Preserve aligned inline comments
 
-//=== TEST CASE: aligned_inline_comments ===
+//- aligned_inline_comments
 // Aligned comments should maintain their column alignment
 fn neighbors_to_bits(n: Neighbors) -> int {
     let index = 0
@@ -32,5 +32,3 @@ fn process(value: int) -> string {
         _ => "large",        // Everything else
     }
 }
-
-//=== NO CHANGE ===

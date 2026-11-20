@@ -1,17 +1,15 @@
 //! Test: Basic function formatting
 
-//=== TEST CASE:simple_function_collapse ===
-
+//- simple_function_collapse
 fn hello() {
     return;
 }
-
 //=== EXPECTED ===
 fn hello() {
     return
 }
-//=== TEST CASE:preserve_single_blank_line ===
 
+//- preserve_single_blank_line
 fn first() {
     return;
 }
@@ -19,7 +17,6 @@ fn first() {
 fn second() {
     return;
 }
-
 //=== EXPECTED ===
 fn first() {
     return
@@ -28,8 +25,8 @@ fn first() {
 fn second() {
     return
 }
-//=== TEST CASE:preserve_multiple_blank_lines ===
 
+//- preserve_multiple_blank_lines
 fn first() {
     return;
 }
@@ -38,7 +35,6 @@ fn first() {
 fn second() {
     return;
 }
-
 //=== EXPECTED ===
 fn first() {
     return

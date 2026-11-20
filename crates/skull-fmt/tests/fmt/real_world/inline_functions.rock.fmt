@@ -1,6 +1,6 @@
 //! Test: Inline function formatting
 
-//=== TEST CASE: inline_function_formatting ===
+//- inline_function_formatting
 // Inline functions should stay on same line with their annotation
 @nomangle inline(lua) fn __rock_hash(obj: any) -> int = """
     if type(obj) ~= "table" then
@@ -23,7 +23,6 @@ inline(lua) fn __register_decorated_function(
         _G.__ROCK_ANNOTATION_REGISTRY = {}
     end
 """
-
 //=== EXPECTED ===
 // Inline functions should stay on same line with their annotation
 @nomangle inline(lua) fn __rock_hash(obj: any) -> int = """

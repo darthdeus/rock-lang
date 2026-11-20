@@ -1,7 +1,6 @@
 //! Test: Comment location preservation
 
-//=== TEST CASE:preserve_comment_location_in_function ===
-
+//- preserve_comment_location_in_function
 // Right fold processes from right to left
 fn vec_fold_right<T, U>(vec: [T], initial: U, f: (T, U) -> U) -> U {
     let result = initial
@@ -14,9 +13,7 @@ fn vec_fold_right<T, U>(vec: [T], initial: U, f: (T, U) -> U) -> U {
     return result
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: comments_are_preserved ===
+//- comments_are_preserved
 fn test() {
     // Leading comment
     let value = calculate()  // Trailing comment
@@ -29,10 +26,7 @@ fn test() {
     return result
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: overloaded_functions_preserve_comments ===
+//- overloaded_functions_preserve_comments
 fn process(x: int) {
     // Handle integer input
     return x * 2
@@ -43,9 +37,7 @@ fn process(x: string) {
     return x + "_processed"
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: standalone_comment_before_decorated_item ===
+//- standalone_comment_before_decorated_item
 global SCORE: int = 0
 
 // section header before a decorated item must survive
@@ -53,5 +45,3 @@ global SCORE: int = 0
 fn tick() {
     return
 }
-
-//=== NO CHANGE ===

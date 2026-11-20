@@ -6,12 +6,10 @@
 // once drifted every later slice by 2 bytes, stripping the first chars off
 // identifiers and literals after it (`camera` -> `mera`, `clamp` -> `amp`).
 
-//=== TEST CASE: multibyte_comment_then_code ===
+//- multibyte_comment_then_code
 // note — an em dash (3 bytes) precedes this code
 fn compute() -> int {
     let camera = 1
     let mouse_wheel_delta = 2
     return clamp(camera, mouse_wheel_delta, 60)
 }
-
-//=== NO CHANGE ===

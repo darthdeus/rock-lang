@@ -3,15 +3,12 @@
 // Item declarations in a macro body live outside the block's statement list.
 // Printing the block alone DELETED them, silently emptying the macro.
 
-//=== TEST CASE: macro_item_body_survives ===
+//- macro_item_body_survives
 macro emit() {
     fn forty_two() -> int { 42 }
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: macro_mixed_items_and_statements_survive ===
+//- macro_mixed_items_and_statements_survive
 macro mixed() {
     struct Pair {
         a: int,
@@ -22,12 +19,7 @@ macro mixed() {
     print(p.a + p.b)
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: expression_macro_body_still_formats ===
+//- expression_macro_body_still_formats
 macro twice(x: expr) {
     x + x
 }
-
-//=== NO CHANGE ===

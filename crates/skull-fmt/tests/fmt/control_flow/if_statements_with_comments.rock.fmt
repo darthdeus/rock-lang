@@ -1,16 +1,13 @@
 //! Test: If statements with inline comments
 
-//=== TEST CASE: single_line_if_statements_with_comments ===
+//- single_line_if_statements_with_comments
 fn test() {
     if n.north { index = index + 1 }
     if n.north_east { index = index + 2 }
     if n.east { index = index + 4 }
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE: if_statement_with_inline_comment ===
+//- if_statement_with_inline_comment
 fn test() {
     if tile.tile_type == 0 {
         // Lab wall uses autotiling
@@ -20,11 +17,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-
-//=== TEST CASE:multiple_if_statements_with_mixed_comments ===
-
+//- multiple_if_statements_with_mixed_comments
 fn process_directions() {
     if input.left { player.x -= speed } // Move left
 
@@ -36,10 +29,7 @@ fn process_directions() {
     if input.up { player.y -= speed } // Jump
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:if_loops_on_separate_line ===
-
+//- if_loops_on_separate_line
 fn test() {
     if condition
     {
@@ -51,7 +41,6 @@ fn test() {
         update()
     }
 }
-
 //=== EXPECTED ===
 fn test() {
     if condition {
@@ -63,8 +52,7 @@ fn test() {
     }
 }
 
-//=== TEST CASE:nested_short_if_fmt ===
-
+//- nested_short_if_fmt
 fn test() {
     if outer_condition {
         if inner_condition { action() }
@@ -77,10 +65,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:aligned_comments_in_if_statements ===
-
+//- aligned_comments_in_if_statements
 fn test() {
     if condition_a {     // Comment A
         action_a()
@@ -90,7 +75,6 @@ fn test() {
         default_action()
     }
 }
-
 //=== EXPECTED ===
 fn test() {
     if condition_a {

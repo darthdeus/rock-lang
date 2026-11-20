@@ -1,13 +1,11 @@
 //! Test: Lambda expression formatting
 
-//=== TEST CASE:lambda_arrow_syntax ===
-
+//- lambda_arrow_syntax
 fn test() {
     let simple = (x) => x + 1
     let binary = (a, b) => a + b
     let no_params = () => 42
 }
-
 //=== EXPECTED ===
 fn test() {
     let simple = x => x + 1
@@ -15,8 +13,7 @@ fn test() {
     let no_params = () => 42
 }
 
-//=== TEST CASE:lambda_arrow_syntax_with_complex_body ===
-
+//- lambda_arrow_syntax_with_complex_body
 fn test() {
     let complex = (data) => {
         let processed = transform(data)
@@ -32,7 +29,6 @@ fn test() {
         }
     }
 }
-
 //=== EXPECTED ===
 fn test() {
     let complex = data => {
@@ -50,14 +46,12 @@ fn test() {
     }
 }
 
-//=== TEST CASE:lambda_arrow_syntax_with_field_access ===
-
+//- lambda_arrow_syntax_with_field_access
 fn test() {
     let get_name = (person) => person.name
     let get_age = (user) => user.profile.age
     let calculate = (obj) => obj.width * obj.height
 }
-
 //=== EXPECTED ===
 fn test() {
     let get_name = person => person.name
@@ -65,8 +59,7 @@ fn test() {
     let calculate = obj => obj.width * obj.height
 }
 
-//=== TEST CASE:lambda_in_function_calls ===
-
+//- lambda_in_function_calls
 fn test() {
     let numbers = [1, 2, 3, 4, 5]
 
@@ -74,7 +67,6 @@ fn test() {
     let filtered = filter(numbers, (n) => n > 3)
     let sum = reduce(numbers, (acc, x) => acc + x, 0)
 }
-
 //=== EXPECTED ===
 fn test() {
     let numbers = [1, 2, 3, 4, 5]
@@ -84,8 +76,7 @@ fn test() {
     let sum = reduce(numbers, (acc, x) => acc + x, 0)
 }
 
-//=== TEST CASE:nested_lambda_expressions ===
-
+//- nested_lambda_expressions
 fn test() {
     let outer = (x) => {
         let inner = (y) => x + y
@@ -94,7 +85,6 @@ fn test() {
 
     let curried = (a) => (b) => (c) => a + b + c
 }
-
 //=== EXPECTED ===
 fn test() {
     let outer = x => {

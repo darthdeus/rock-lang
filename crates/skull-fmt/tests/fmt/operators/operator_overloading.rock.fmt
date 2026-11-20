@@ -1,25 +1,18 @@
 //! Test: Operator overloading syntax formatting
 
-//=== TEST CASE: basic_operator_overloading ===
+//- basic_operator_overloading
 operator(lua) +(a: int, b: int) -> int = "a + b"
 operator(lua) +(a: float, b: float) -> float = "a + b"
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: arithmetic_operators ===
+//- arithmetic_operators
 operator(lua) *(a: Vec2, b: float) -> Vec2 = "Vec2(a.x * b, a.y * b)"
 operator(lua) -(a: Vec3, b: Vec3) -> Vec3 = "Vec3(a.x - b.x, a.y - b.y, a.z - b.z)"
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: comparison_operators ===
+//- comparison_operators
 operator(lua) ==(a: any, b: any) -> bool = "__op_eq(a, b)"
 operator(lua) !=(a: any, b: any) -> bool = "__op_ne(a, b)"
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:complex_operator_implementations ===
-
+//- complex_operator_implementations
 operator(lua) +(a: string, b: string) -> string = """
     return a .. b
 """
@@ -36,18 +29,14 @@ operator(lua) *(matrix: [[float]], vector: [float]) -> [float] = """
     return result
 """
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: operator_with_generic_types ===
+//- operator_with_generic_types
 operator(lua) ==(a: Option<T>, b: Option<T>) -> bool = """
     if a == nil and b == nil then return true end
     if a == nil or b == nil then return false end
     return a.value == b.value
 """
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: block_bodied_operators ===
+//- block_bodied_operators
 // The parser folds these to `fn __op_*` and injects a synthetic `@inline`
 // (span = whole decl). Slicing the decl after that annotation once yielded an
 // empty body; the operator is sliced whole from source instead.
@@ -58,5 +47,3 @@ operator(lua) ==(a: Option<T>, b: Option<T>) -> bool = """
 operator -(a: Vec2, b: Vec2) -> Vec2 {
     return Vec2 { x: a.x - b.x, y: a.y - b.y }
 }
-
-//=== NO CHANGE ===

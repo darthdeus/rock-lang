@@ -1,25 +1,18 @@
 //! Test: Advanced if statement formatting
 
-//=== TEST CASE:simple_if_collapse ===
-
+//- simple_if_collapse
 fn test() {
     if vec_len(multi_sound.sources) == 0 {
         return
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:complex_if_conditions_multiline ===
-
+//- complex_if_conditions_multiline
 fn test() {
     let result = if input_key == KeyCode::Up && can_move_up { move_player_up() } else { if input_key == KeyCode::Down && can_move_down { move_player_down() } else { if input_key == KeyCode::Space { jump() } else { idle_animation() } } }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE:nested_if_expressions ===
-
+//- nested_if_expressions
 fn test() {
     let result = if game_state == GameState::Playing {
         if player.position.distance_to(objective) < trigger_radius {
@@ -32,9 +25,7 @@ fn test() {
     }
 }
 
-//=== NO CHANGE ===
-
-//=== TEST CASE: deeply_nested_indentation_stress_test ===
+//- deeply_nested_indentation_stress_test
 fn complex_nested_logic() {
     for i in [1, 2, 3] {
         if true {
@@ -74,7 +65,6 @@ fn complex_nested_logic() {
         }
     }
 }
-
 //=== EXPECTED ===
 fn complex_nested_logic() {
     for i in [1, 2, 3] {
