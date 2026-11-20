@@ -676,7 +676,7 @@ mod tests {
         let p = |game, pid| rock_engine_host::project::stone_session_main_lua_path(game, pid);
         let root = rock_engine_host::project::STONE_SESSION_DIR;
         assert!(p("games/nested", 7).starts_with(root));
-        assert!(!rock_host::project::default_main_lua_path().starts_with(root));
+        assert!(!Path::new("tmp/main.lua").starts_with(root));
         assert_ne!(p("sample", 1), p("sample", 2));
         assert_ne!(p("sample", 1), p("other", 1));
         assert_eq!(p("sample", 1), p("sample", 1));

@@ -25,7 +25,7 @@ pub fn set_level(level: u8) {
     // Keep the `log` facade's static max-level gate in sync. Without
     // this, `log::info!` etc. short-circuit against the max-level set
     // once at init() and runtime level changes never open the gate even though our atomic
-    // changed. Found by ROCK_LOG=error + --verbose showing nothing.
+    // changed.
     log::set_max_level(facade_max());
 }
 
@@ -252,10 +252,7 @@ pub fn init() {
             set_level(l);
         }
     });
-    // set_logger is one-shot; set_level (here + at runtime via
-    // --verbose / the FFI bridge) keeps the facade max-level == our
-    // level. This final sync covers ROCK_LOG-unset (set_level above
-    // not called) and idempotent re-init.
+    // Sync the facade even when ROCK_LOG is unset or the logger is already installed.
     log::set_max_level(facade_max());
 }
 

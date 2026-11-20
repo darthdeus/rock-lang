@@ -99,11 +99,6 @@ fn run_process() {
         rock_cli::invocation_log::exit(1);
     }
 
-    // `--verbose` only raises the level, never lowers a ROCK_LOG=trace base.
-    if args.verbose {
-        rock_log::set_level(rock_log::level().max(3));
-    }
-
     crate::frame_commands::initialize_process(&args);
 
     // After the env setup above and before rayon: begin() exports the parent

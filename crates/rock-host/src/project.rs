@@ -148,12 +148,6 @@ pub fn build_luajit_bytecode_command(
     cmd
 }
 
-pub(crate) const DEFAULT_OUTPUT_DIR: &str = "tmp";
-
-pub fn default_main_lua_path() -> PathBuf {
-    PathBuf::from(DEFAULT_OUTPUT_DIR).join(MAIN_LUA_FILENAME)
-}
-
 /// Rename into place so a concurrent reader (hot reload polling main.lua) never sees a
 /// truncated file.
 pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {

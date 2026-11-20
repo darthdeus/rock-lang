@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub const ENV: &str = "GAME_ART_VAULT";
 pub const TOKEN: &str = "$GAME_ART_VAULT";
@@ -42,16 +42,6 @@ pub fn expand_token(raw: &str, root: impl FnOnce() -> Result<PathBuf>) -> Result
         Some(tail) => Ok(Some(root()?.join(tail))),
         None => Ok(None),
     }
-}
-
-/// Callers compare canonical paths so a symlinked vault still matches.
-pub fn tokenize(path: &Path, root: &Path) -> Option<String> {
-    let relative = path.strip_prefix(root).ok()?;
-    Some(if relative.as_os_str().is_empty() {
-        TOKEN.to_string()
-    } else {
-        format!("{TOKEN}/{}", relative.display())
-    })
 }
 
 #[cfg(test)]
@@ -93,20 +83,5 @@ mod tests {
         let err =
             expand_token("$GAME_ART_VAULT/demo", || anyhow::bail!("vault not found")).unwrap_err();
         assert!(err.to_string().contains("vault not found"));
-    }
-
-    #[test]
-    fn paths_under_the_vault_are_tokenized() {
-        let root = Path::new("/vault");
-        assert_eq!(
-            tokenize(Path::new("/vault/blender-assets/kit/a.glb"), root).as_deref(),
-            Some("$GAME_ART_VAULT/blender-assets/kit/a.glb")
-        );
-        assert_eq!(
-            tokenize(Path::new("/vault"), root).as_deref(),
-            Some("$GAME_ART_VAULT")
-        );
-        assert_eq!(tokenize(Path::new("/vault2/a.glb"), root), None);
-        assert_eq!(tokenize(Path::new("/tmp/a.glb"), root), None);
     }
 }

@@ -10,7 +10,7 @@ pub(crate) type ReportBuilder<'a> = ariadne::ReportBuilder<'a, (String, std::ops
 /// column; the index type is therefore fixed to bytes. Colour is settled here
 /// as well, because styling the source frame is a large share of ariadne's
 /// per-diagnostic cost and a piped stderr renders none of it. `ROCK_FORCE_COLOR`
-/// and `ROCK_NO_COLOR` / `NO_COLOR` override the terminal probe.
+/// and `NO_COLOR` override the terminal probe.
 pub(crate) fn make_report_builder<'a>(
     kind: ariadne::ReportKind<'a>,
     file: String,
@@ -35,7 +35,7 @@ fn stderr_is_tty() -> bool {
         if std::env::var_os("ROCK_FORCE_COLOR").is_some() {
             return true;
         }
-        if std::env::var_os("ROCK_NO_COLOR").is_some() || std::env::var_os("NO_COLOR").is_some() {
+        if std::env::var_os("NO_COLOR").is_some() {
             return false;
         }
         std::io::stderr().is_terminal()

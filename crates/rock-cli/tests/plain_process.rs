@@ -768,8 +768,7 @@ fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
     assert_eq!(test.target_os.as_deref(), Some("web"));
     assert_eq!(test.perf_format, "json");
 
-    let prefixed = parse(&["rock", "--verbose", "--format", "json", "sim", "game"]);
-    assert!(prefixed.verbose);
+    let prefixed = parse(&["rock", "--format", "json", "sim", "game"]);
     assert_eq!(prefixed.perf_format, "json");
     let sim = parse(&["rock", "--jobs", "2", "sim", "game"]);
     assert_eq!(sim.jobs, Some(2));

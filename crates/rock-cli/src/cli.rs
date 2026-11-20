@@ -285,9 +285,6 @@ pub struct Args {
     /// Untimed warmup runs before the timed iters (used by `backend-stats`). Set to 0 to disable.
     #[arg(long, default_value_t = 3)]
     pub warmup: usize,
-    /// Enable verbose debug output
-    #[arg(long)]
-    pub verbose: bool,
     /// Disable timing output (Phase Timing, IO Breakdown)
     #[arg(long)]
     pub quiet: bool,
