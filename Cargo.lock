@@ -1624,8 +1624,6 @@ dependencies = [
  "lsp-server",
  "lsp-types",
  "mimalloc",
- "notify",
- "notify-debouncer-full",
  "parking_lot",
  "png",
  "rayon",

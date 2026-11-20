@@ -159,7 +159,6 @@ impl StoneWatcher {
         }
         let handle = FileWatcher::default_for_rock_sources()
             .with_restart_suffix(PathBuf::from("tmp/restart.txt"))
-            .filter_initial_creates()
             .with_restart_files(self.restart_files.clone())
             .with_extensions(vec![
                 "rock".to_string(),

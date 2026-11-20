@@ -1,5 +1,4 @@
 pub use colored::*;
-pub use notify_debouncer_full::DebouncedEvent;
 pub use std::path::PathBuf;
 pub use walkdir::WalkDir;
 

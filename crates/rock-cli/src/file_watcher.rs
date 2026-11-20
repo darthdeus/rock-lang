@@ -1,25 +1,9 @@
 use anyhow::Result;
-#[cfg(not(target_os = "macos"))]
-use bone_core::prelude::Instant;
-#[cfg(not(target_os = "macos"))]
-use notify::RecursiveMode;
-#[cfg(not(target_os = "macos"))]
-use notify::event::ModifyKind;
-#[cfg(not(target_os = "macos"))]
-use notify_debouncer_full::{DebouncedEvent, new_debouncer};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-#[cfg(not(target_os = "macos"))]
-use std::time::Duration;
 
-#[cfg(not(target_os = "macos"))]
-type DebouncerCacheType = notify_debouncer_full::RecommendedCache;
-#[cfg(not(target_os = "macos"))]
-pub(crate) type WatchHandle =
-    notify_debouncer_full::Debouncer<notify::RecommendedWatcher, DebouncerCacheType>;
-#[cfg(target_os = "macos")]
-pub(crate) type WatchHandle = macos::MacHandle;
+pub(crate) use state::WatchHandle;
 
 fn is_tmp_scratch_file(path: &Path, roots: &[PathBuf]) -> bool {
     match roots.iter().find_map(|r| path.strip_prefix(r).ok()) {
@@ -37,7 +21,6 @@ pub struct FileWatcher {
     watch_extensions: Vec<String>,
     watch_all_files: bool,
     extra_files: Option<SharedWatchSet>,
-    ignore_existing_creates: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -53,7 +36,6 @@ impl SharedWatchSet {
     pub(crate) fn set_compiled_hash(&self, path: PathBuf, hash: u64) {
         self.compiled.lock().insert(path, hash);
     }
-    #[cfg(any(target_os = "macos", all(test, unix)))]
     pub(crate) fn compiled_hash(&self, path: &Path) -> Option<u64> {
         self.compiled.lock().get(path).copied()
     }
@@ -70,107 +52,6 @@ impl SharedWatchSet {
             paths.insert(path.clone());
             compiled.insert(path, hash);
         }
-    }
-}
-
-// Snapshot filter for the notify backend (`watch_notify`) and its unit test;
-// the macOS watcher polls instead, so this is dead in non-test macOS builds.
-#[cfg(any(not(target_os = "macos"), test))]
-#[derive(PartialEq, Eq)]
-struct FileStamp {
-    len: u64,
-    modified: std::time::SystemTime,
-    #[cfg(unix)]
-    inode: u64,
-}
-
-#[cfg(any(not(target_os = "macos"), test))]
-impl FileStamp {
-    fn read(path: &Path) -> Option<Self> {
-        let metadata = match std::fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(error) => {
-                log::warn!(target: "WATCH", "cannot inspect {}: {error}", path.display());
-                return None;
-            }
-        };
-        let modified = match metadata.modified() {
-            Ok(modified) => modified,
-            Err(error) => {
-                log::warn!(target: "WATCH", "cannot read modification time for {}: {error}", path.display());
-                return None;
-            }
-        };
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-        Some(Self {
-            len: metadata.len(),
-            modified,
-            #[cfg(unix)]
-            inode: metadata.ino(),
-        })
-    }
-}
-
-#[cfg(any(not(target_os = "macos"), test))]
-#[derive(Default)]
-struct InitialFiles {
-    stamps: HashMap<PathBuf, FileStamp>,
-}
-
-#[cfg(any(not(target_os = "macos"), test))]
-impl InitialFiles {
-    fn capture(roots: &[PathBuf], extensions: &[String], extra_files: &HashSet<PathBuf>) -> Self {
-        let mut stamps = HashMap::new();
-        for root in roots {
-            if !root.exists() {
-                continue;
-            }
-            if root.is_file() {
-                if let Some(stamp) = FileStamp::read(root) {
-                    stamps.insert(root.clone(), stamp);
-                }
-                continue;
-            }
-            for entry in walkdir::WalkDir::new(root)
-                .into_iter()
-                .filter_entry(|entry| {
-                    !is_tmp_scratch_file(entry.path(), std::slice::from_ref(root))
-                })
-            {
-                match entry {
-                    Ok(entry) if entry.file_type().is_file() => {
-                        let path = entry.path();
-                        let selected = path
-                            .extension()
-                            .and_then(|ext| ext.to_str())
-                            .is_some_and(|ext| extensions.iter().any(|candidate| candidate == ext));
-                        if (selected || extra_files.contains(path))
-                            && let Some(stamp) = FileStamp::read(path)
-                        {
-                            stamps.insert(path.to_path_buf(), stamp);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => log::warn!(target: "WATCH", "initial watch snapshot: {error}"),
-                }
-            }
-        }
-        for path in extra_files {
-            if let Some(stamp) = FileStamp::read(path) {
-                stamps.insert(path.clone(), stamp);
-            }
-        }
-        Self { stamps }
-    }
-
-    fn is_unchanged_create(&self, kind: &notify::EventKind, path: &Path) -> bool {
-        matches!(kind, notify::EventKind::Create(_))
-            && self
-                .stamps
-                .get(path)
-                .is_some_and(|initial| FileStamp::read(path).as_ref() == Some(initial))
     }
 }
 
@@ -197,7 +78,6 @@ impl FileWatcher {
             watch_extensions: vec!["rock".to_string()],
             watch_all_files: false,
             extra_files: None,
-            ignore_existing_creates: false,
         }
     }
 
@@ -233,234 +113,12 @@ impl FileWatcher {
         self
     }
 
-    pub(crate) fn filter_initial_creates(mut self) -> Self {
-        self.ignore_existing_creates = true;
-        self
-    }
-
     pub fn watch(
         self,
         paths: Vec<PathBuf>,
         change_tx: Sender<FileChangeEvent>,
     ) -> Result<WatchHandle> {
-        #[cfg(target_os = "macos")]
-        {
-            macos::start(self, paths, change_tx)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.watch_notify(paths, change_tx)
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn watch_notify(
-        self,
-        paths: Vec<PathBuf>,
-        change_tx: Sender<FileChangeEvent>,
-    ) -> Result<WatchHandle> {
-        let config = self;
-
-        let scratch_roots: Vec<PathBuf> = paths
-            .iter()
-            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
-            .collect();
-        let restart_files: HashSet<PathBuf> = config
-            .restart_files
-            .iter()
-            .map(|path| {
-                // The trigger need not exist yet, but its parent must be watchable.
-                path.parent()
-                    .and_then(|parent| parent.canonicalize().ok())
-                    .map(|parent| parent.join(path.file_name().expect("restart file name")))
-                    .unwrap_or_else(|| path.clone())
-            })
-            .collect();
-        let mut input_parents: HashSet<PathBuf> = restart_files
-            .iter()
-            .filter_map(|path| path.parent().map(Path::to_path_buf))
-            .collect();
-        if let Some(extra) = &config.extra_files {
-            input_parents.extend(
-                extra
-                    .paths()
-                    .iter()
-                    .filter_map(|path| path.parent().map(Path::to_path_buf)),
-            );
-        }
-        let directory_roots: Vec<PathBuf> = scratch_roots
-            .iter()
-            .filter(|path| path.is_dir())
-            .cloned()
-            .collect();
-        input_parents.extend(
-            scratch_roots
-                .iter()
-                .filter(|path| path.is_file())
-                .filter_map(|path| path.parent().map(Path::to_path_buf)),
-        );
-        input_parents.retain(|parent| !directory_roots.iter().any(|root| parent.starts_with(root)));
-        let initial_files = config.ignore_existing_creates.then(|| {
-            let mut extra_files = restart_files.clone();
-            if let Some(extra) = &config.extra_files {
-                extra_files.extend(extra.paths().iter().cloned());
-            }
-            InitialFiles::capture(&scratch_roots, &config.watch_extensions, &extra_files)
-        });
-
-        let mut data_write_timestamps: HashMap<PathBuf, Instant> = HashMap::new();
-        const METADATA_DEBOUNCE_MS: u64 = 50;
-
-        let mut debouncer = new_debouncer(
-            Duration::from_millis(config.debounce_ms),
-            None,
-            move |result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| match result {
-                Ok(events) => {
-                    let mut affected_paths = HashSet::new();
-                    let mut has_relevant_changes = false;
-                    let mut is_restart_trigger = false;
-
-                    for event in events {
-                        let event_paths: Vec<&PathBuf> = event
-                            .paths
-                            .iter()
-                            .filter(|path| {
-                                !initial_files.as_ref().is_some_and(|initial| {
-                                    initial.is_unchanged_create(&event.kind, path)
-                                }) && (scratch_roots.iter().any(|root| path.starts_with(root))
-                                    || restart_files.contains(path.as_path())
-                                    || config.extra_files.as_ref().is_some_and(|extra| {
-                                        extra.paths().contains(path.as_path())
-                                    }))
-                            })
-                            .collect();
-                        if event_paths.is_empty() {
-                            continue;
-                        }
-                        for &path in &event_paths {
-                            if restart_files.contains(path.as_path())
-                                || config.matches_restart_suffix(path)
-                            {
-                                is_restart_trigger = true;
-                                has_relevant_changes = true;
-                                affected_paths.insert(path.clone());
-                            }
-                        }
-
-                        let affects_watched_files = event_paths.iter().any(|path| {
-                            if config.watch_all_files {
-                                return !path.to_string_lossy().ends_with('~');
-                            }
-                            if let Some(extra) = config.extra_files.as_ref() {
-                                let member = extra.paths().contains(path.as_path());
-                                if member {
-                                    return true;
-                                }
-                            }
-                            if let Some(ext) = path.extension() {
-                                if let Some(ext_str) = ext.to_str() {
-                                    if path.to_string_lossy().ends_with('~') {
-                                        return false;
-                                    }
-                                    return config.watch_extensions.contains(&ext_str.to_string());
-                                }
-                            }
-                            false
-                        });
-
-                        let is_relevant = match event.kind {
-                            notify::EventKind::Modify(modify_kind) => match modify_kind {
-                                ModifyKind::Data(_) => {
-                                    let now = Instant::now();
-                                    for &path in &event_paths {
-                                        if restart_files.contains(path.as_path())
-                                            || config.matches_restart_suffix(path)
-                                            || !is_tmp_scratch_file(path, &scratch_roots)
-                                        {
-                                            data_write_timestamps.insert(path.clone(), now);
-                                        }
-                                    }
-                                    true
-                                }
-                                ModifyKind::Metadata(_) => {
-                                    let mut should_debounce = false;
-                                    for &path in &event_paths {
-                                        if let Some(last_data_write) =
-                                            data_write_timestamps.get(path)
-                                        {
-                                            let elapsed =
-                                                Instant::now().duration_since(*last_data_write);
-                                            if elapsed < Duration::from_millis(METADATA_DEBOUNCE_MS)
-                                            {
-                                                should_debounce = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-
-                                    if should_debounce {
-                                        false
-                                    } else {
-                                        is_restart_trigger || affects_watched_files
-                                    }
-                                }
-                                ModifyKind::Name(_) => true,
-                                ModifyKind::Any => true,
-                                ModifyKind::Other => true,
-                            },
-                            notify::EventKind::Remove(_) => true,
-                            notify::EventKind::Create(_) => true,
-                            notify::EventKind::Other => true,
-                            notify::EventKind::Any => true,
-                            notify::EventKind::Access(_) => false,
-                        };
-
-                        if is_relevant && (affects_watched_files || is_restart_trigger) {
-                            has_relevant_changes = true;
-                            for &path in &event_paths {
-                                if !restart_files.contains(path.as_path())
-                                    && !config.matches_restart_suffix(path)
-                                    && is_tmp_scratch_file(path, &scratch_roots)
-                                {
-                                    continue;
-                                }
-                                let is_backup = path.to_string_lossy().ends_with('~');
-                                if !path.is_dir() && !is_backup {
-                                    affected_paths.insert(path.clone());
-                                }
-                            }
-                        }
-                    }
-
-                    if has_relevant_changes && !affected_paths.is_empty() {
-                        let event = FileChangeEvent {
-                            paths: affected_paths,
-                            is_restart_trigger,
-                        };
-                        let _ = change_tx.send(event);
-                    }
-                }
-                Err(errors) => {
-                    for error in errors {
-                        log::error!(target: "WATCH", "file watcher error: {}", error);
-                    }
-                }
-            },
-        )?;
-
-        // Watch parents, not input inodes: editors replace the inode on save.
-        // The callback admits only exact inputs outside the source roots.
-        for parent in input_parents {
-            if parent.exists() {
-                debouncer.watch(&parent, RecursiveMode::NonRecursive)?;
-            }
-        }
-
-        for root in directory_roots {
-            debouncer.watch(&root, RecursiveMode::Recursive)?;
-        }
-
-        Ok(debouncer)
+        state::start(self, paths, change_tx)
     }
 }
 
@@ -478,43 +136,16 @@ mod tests {
         }));
         assert!(set.paths().contains(&PathBuf::from("held")));
     }
-
-    #[test]
-    fn unchanged_preexisting_create_is_filtered_but_later_edits_are_not() {
-        use notify::event::CreateKind;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("main.rock");
-        std::fs::write(&path, "a").unwrap();
-        let initial = InitialFiles::capture(
-            &[dir.path().to_path_buf()],
-            &["rock".to_string()],
-            &HashSet::new(),
-        );
-        let created = notify::EventKind::Create(CreateKind::File);
-        assert!(initial.is_unchanged_create(&created, &path));
-        let replacement = dir.path().join("saving");
-        std::fs::write(&replacement, "a").unwrap();
-        std::fs::rename(&replacement, &path).unwrap();
-        assert!(!initial.is_unchanged_create(&created, &path));
-        std::fs::write(&path, "longer body").unwrap();
-        assert!(!initial.is_unchanged_create(&created, &path));
-        std::fs::remove_file(&path).unwrap();
-        assert!(!initial.is_unchanged_create(&created, &path));
-        std::fs::write(&path, "recreated body").unwrap();
-        assert!(!initial.is_unchanged_create(&created, &path));
-        let new_path = dir.path().join("later.rock");
-        std::fs::write(&new_path, "new source").unwrap();
-        assert!(!initial.is_unchanged_create(&created, &new_path));
-    }
 }
 
-#[cfg(any(target_os = "macos", all(test, unix)))]
-mod macos {
+/// Changes are observed from file state (stamps, then content hashes) rather
+/// than from OS change notifications.
+mod state {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
-    #[cfg(target_os = "macos")]
     use std::sync::mpsc::{RecvTimeoutError, channel};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -526,6 +157,7 @@ mod macos {
         changed: (i64, i64),
     }
     impl Stamp {
+        #[cfg(unix)]
         fn read(path: &Path) -> std::io::Result<Self> {
             let meta = std::fs::metadata(path)?;
             Ok(Self {
@@ -533,6 +165,20 @@ mod macos {
                 size: meta.len(),
                 modified: (meta.mtime(), meta.mtime_nsec()),
                 changed: (meta.ctime(), meta.ctime_nsec()),
+            })
+        }
+        #[cfg(not(unix))]
+        fn read(path: &Path) -> std::io::Result<Self> {
+            let meta = std::fs::metadata(path)?;
+            let modified = meta
+                .modified()?
+                .duration_since(UNIX_EPOCH)
+                .map_or((0, 0), |d| (d.as_secs() as i64, d.subsec_nanos() as i64));
+            Ok(Self {
+                inode: 0,
+                size: meta.len(),
+                modified,
+                changed: modified,
             })
         }
     }
@@ -574,6 +220,18 @@ mod macos {
             Ok(elapsed) => elapsed < FILESYSTEM_TICK,
             Err(_) => true,
         }
+    }
+    #[cfg(unix)]
+    fn directory_identity(metadata: &std::fs::Metadata, _: &Path) -> (u64, u64) {
+        (metadata.dev(), metadata.ino())
+    }
+    #[cfg(not(unix))]
+    fn directory_identity(_: &std::fs::Metadata, path: &Path) -> (u64, u64) {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        (
+            0,
+            xxhash_rust::xxh3::xxh3_64(canonical.as_os_str().as_encoded_bytes()),
+        )
     }
     struct Directory {
         stamp: Stamp,
@@ -637,7 +295,7 @@ mod macos {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                 Err(error) => return Err(stat_error(error, root)),
             };
-            let identity = (metadata.dev(), metadata.ino());
+            let identity = directory_identity(&metadata, root);
             if !ancestors.insert(identity) {
                 return Ok(());
             }
@@ -852,13 +510,11 @@ mod macos {
             Ok(event)
         }
     }
-    #[cfg(target_os = "macos")]
-    pub struct MacHandle {
+    pub struct WatchHandle {
         stop: Sender<()>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
-    #[cfg(target_os = "macos")]
-    impl Drop for MacHandle {
+    impl Drop for WatchHandle {
         fn drop(&mut self) {
             if self.stop.send(()).is_err() {
                 log::debug!(target: "WATCH", "file watcher worker already stopped");
@@ -872,12 +528,11 @@ mod macos {
             }
         }
     }
-    #[cfg(target_os = "macos")]
     pub fn start(
         mut config: FileWatcher,
         paths: Vec<PathBuf>,
         change_tx: Sender<FileChangeEvent>,
-    ) -> Result<MacHandle> {
+    ) -> Result<WatchHandle> {
         let canonical = |path: PathBuf| -> Result<PathBuf> {
             let absolute = std::path::absolute(&path)
                 .map_err(|error| path_error(error, "resolve watch path", &path))?;
@@ -939,12 +594,12 @@ mod macos {
                     }
                 }
             })?;
-        Ok(MacHandle {
+        Ok(WatchHandle {
             stop,
             thread: Some(thread),
         })
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     mod tests {
         use super::*;
         fn observation(root: PathBuf, config: FileWatcher) -> Observation {
@@ -1165,7 +820,6 @@ mod macos {
                 assert!(event.is_restart_trigger);
             }
         }
-        #[cfg(target_os = "macos")]
         #[test]
         fn restart_file_in_a_missing_directory_is_watched_until_created() {
             let dir = tempfile::tempdir().unwrap();

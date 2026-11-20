@@ -60,8 +60,6 @@ serde = { workspace = true, features = ["derive"] }
 fs-err = { workspace = true }
 walkdir = { workspace = true }
 tempfile = "3.0"
-notify = { workspace = true }
-notify-debouncer-full = { workspace = true }
 rustc-hash = { workspace = true }
 ustr = { workspace = true }
 mimalloc = { version = "0.1", features = ["v2"] }
