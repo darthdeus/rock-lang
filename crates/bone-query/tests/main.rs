@@ -61,6 +61,8 @@ mod phantom_block_sentinel;
 mod program_inputs;
 #[path = "query.rs"]
 mod query;
+#[path = "query_mutations.rs"]
+mod query_mutations;
 #[path = "reachability.rs"]
 mod reachability;
 #[path = "rename_read_only.rs"]
