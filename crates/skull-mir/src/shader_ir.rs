@@ -162,20 +162,13 @@ pub struct LogicalUniformGroup {
 
 /// Physical offsets, padding, bindings and block size are deliberately absent.
 pub fn semantic_uniform_group_fingerprint(struct_name: Ustr, members: &[(Ustr, WireKind)]) -> u64 {
-    let mut hash = 0xa5a5_5a5a_c3c3_3c3cu64;
-    for byte in bone_core::modules::artifact_name(struct_name.as_str()).as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
+    let name = bone_core::modules::artifact_name(struct_name.as_str());
+    let mut hash = crate::fnv1a(0xa5a5_5a5a_c3c3_3c3c, name.as_bytes());
     for (name, kind) in members {
-        for byte in name.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash ^= u64::from(kind.code());
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash = crate::fnv1a(hash, name.as_bytes());
+        hash = crate::fnv1a(hash, &[kind.code() as u8]);
     }
-    (hash ^ (hash >> 53)) & ((1 << 53) - 1)
+    crate::fold53(hash)
 }
 
 impl LogicalUniformGroup {
@@ -308,13 +301,7 @@ impl ShaderInterfacePlan {
     /// offsets, sizes and source text are not part of the semantic interface.
     pub fn semantic_fingerprint(&self, fullscreen: bool) -> u64 {
         let payload = self.semantic_payload(fullscreen);
-        let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        for byte in payload.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        let folded = hash ^ (hash >> 53);
-        folded & ((1 << 53) - 1)
+        crate::fold53(crate::fnv1a(crate::FNV_OFFSET, payload.as_bytes()))
     }
 
     /// A separate wire from every target's physical ABI wire; the runtime never

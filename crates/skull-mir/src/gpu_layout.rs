@@ -5,6 +5,8 @@
 //! a second set here. Applying either family's rules to the other corrupts buffers.
 
 use bone_core::hir::{BuiltinTy, TypeCtor, TypeExpr};
+
+use crate::{fnv1a, fold53};
 use bone_core::prelude::{Span, TyId};
 use bone_core::workspace::Workspace;
 use skull_parser::CompilerError;
@@ -279,25 +281,12 @@ impl BlockMember {
     }
 }
 
-/// Written out rather than `DefaultHasher`: the value is emitted into the chunk
-/// and must stay byte-stable across toolchains.
-fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
-    let mut h = seed;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
-
 impl UniformBlockPlan {
-    /// Folded to 53 bits: it is emitted as a numeric literal, and LuaJIT and JS
-    /// represent integers exactly only that far.
     /// Kinds and names are hashed: `{float, Vec2}` and `{Vec2, float}` agree on
     /// size and offsets, and the driver resolves members by name.
     pub fn fingerprint(&self) -> u64 {
         let mut h = fnv1a(
-            0xcbf2_9ce4_8422_2325,
+            crate::FNV_OFFSET,
             bone_core::modules::artifact_name(self.struct_name.as_str()).as_bytes(),
         );
         for m in &self.members {
@@ -305,9 +294,7 @@ impl UniformBlockPlan {
             h = fnv1a(h, &[m.kind as u8]);
             h = fnv1a(h, &m.offset.to_le_bytes());
         }
-        let h = fnv1a(h, &self.size.to_le_bytes());
-        // XOR-fold the high bits down so they still contribute to the 53 that survive.
-        (h ^ (h >> 53)) & ((1 << 53) - 1)
+        fold53(fnv1a(h, &self.size.to_le_bytes()))
     }
 
     /// In the order [`Self::leaf_stores`] writes them.
@@ -518,8 +505,6 @@ pub struct UniformArrayBlockPlan {
 }
 
 impl UniformArrayBlockPlan {
-    /// Folded to 53 bits: it is emitted as a numeric literal, and LuaJIT and JS
-    /// represent integers exactly only that far.
     /// Seeded apart from the scalar fingerprint so the two blocks never hash alike.
     pub fn fingerprint(&self) -> u64 {
         let mut h = fnv1a(
@@ -533,8 +518,7 @@ impl UniformArrayBlockPlan {
             h = fnv1a(h, &m.capacity.to_le_bytes());
             h = fnv1a(h, &m.stride.to_le_bytes());
         }
-        let h = fnv1a(h, &self.size.to_le_bytes());
-        (h ^ (h >> 53)) & ((1 << 53) - 1)
+        fold53(fnv1a(h, &self.size.to_le_bytes()))
     }
 }
 

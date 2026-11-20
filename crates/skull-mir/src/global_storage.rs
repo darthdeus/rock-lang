@@ -175,13 +175,9 @@ pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, Strin
         ));
     }
     rows.sort();
-    let mut hash = 0xcbf29ce484222325u64;
-    for row in &rows {
-        for byte in row.bytes().chain(std::iter::once(0xff)) {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-    }
+    let hash = rows.iter().fold(crate::FNV_OFFSET, |hash, row| {
+        crate::fnv1a(crate::fnv1a(hash, row.as_bytes()), &[0xff])
+    });
     Ok(format!("{hash:016x}"))
 }
 

@@ -1452,24 +1452,23 @@ struct Fnv64(u64);
 
 impl Fnv64 {
     fn new() -> Self {
-        Self(0xcbf29ce484222325)
+        Self(crate::FNV_OFFSET)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = crate::fnv1a(self.0, bytes);
     }
 
     fn write_u8(&mut self, byte: u8) {
-        self.0 ^= u64::from(byte);
-        self.0 = self.0.wrapping_mul(0x100000001b3);
+        self.write(&[byte]);
     }
 
     fn write_u32(&mut self, value: u32) {
-        for byte in value.to_le_bytes() {
-            self.write_u8(byte);
-        }
+        self.write(&value.to_le_bytes());
     }
 
     fn write_u64(&mut self, value: u64) {
-        for byte in value.to_le_bytes() {
-            self.write_u8(byte);
-        }
+        self.write(&value.to_le_bytes());
     }
 
     fn write_usize(&mut self, value: usize) {
@@ -1478,9 +1477,7 @@ impl Fnv64 {
 
     fn write_str(&mut self, value: &str) {
         self.write_usize(value.len());
-        for byte in value.as_bytes() {
-            self.write_u8(*byte);
-        }
+        self.write(value.as_bytes());
     }
 
     fn finish(self) -> u64 {
