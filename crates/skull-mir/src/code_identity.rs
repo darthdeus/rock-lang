@@ -21,12 +21,7 @@ pub(crate) fn logical_def_key(file: Ustr, name: Ustr) -> String {
         .as_str()
         .strip_prefix(bone_core::modules::STANDALONE_PACKAGE_PREFIX)
     {
-        let (file_key, item) = key.split_once("::").expect("standalone definition key");
-        let file_key = file_key
-            .replace("%5f", "_")
-            .replace("%24", "$")
-            .replace("%25", "%");
-        return format!("{file_key}::{item}");
+        return key.to_string();
     }
     match name.as_str().contains("::") {
         true => name.to_string(),
@@ -1501,7 +1496,7 @@ mod tests {
     #[test]
     fn mono_arguments_and_enclosing_instances_are_identity_axes() {
         let standalone_name = format!(
-            "{}script%5ffile.rock::counter",
+            "{}script_file.rock::counter",
             bone_core::modules::STANDALONE_PACKAGE_PREFIX
         );
         assert_eq!(

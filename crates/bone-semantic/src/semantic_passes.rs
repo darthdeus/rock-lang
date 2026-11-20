@@ -1303,12 +1303,7 @@ pub fn assemble_namespaces(
                 self_name: format!(
                     "{}{}",
                     bone_core::modules::STANDALONE_PACKAGE_PREFIX,
-                    contribution
-                        .file
-                        .as_str()
-                        .replace('%', "%25")
-                        .replace('$', "%24")
-                        .replace('_', "%5f")
+                    contribution.file
                 ),
                 identity_storage: Default::default(),
                 root: String::new(),
