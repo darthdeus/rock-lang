@@ -218,25 +218,7 @@ pub fn compile_project<R: AssetResolver + ?Sized>(
     project: &SoundProject,
     resolver: &R,
 ) -> Result<RuntimeBank, SoundCoreError> {
-    compile_project_with_asset_requirement(project, resolver, true)
-}
-
-pub fn compile_project_allowing_missing_assets<R: AssetResolver + ?Sized>(
-    project: &SoundProject,
-    resolver: &R,
-) -> Result<RuntimeBank, SoundCoreError> {
-    compile_project_with_asset_requirement(project, resolver, false)
-}
-
-fn compile_project_with_asset_requirement<R: AssetResolver + ?Sized>(
-    project: &SoundProject,
-    resolver: &R,
-    require_assets: bool,
-) -> Result<RuntimeBank, SoundCoreError> {
-    compile_prepared_project(
-        prepare_project(project, resolver, require_assets)?,
-        resolver,
-    )
+    compile_prepared_project(prepare_project(project, resolver, true)?, resolver)
 }
 
 pub fn compile_prepared_project<R: AssetResolver + ?Sized>(
@@ -379,164 +361,147 @@ pub(crate) fn validate_project<R: AssetResolver + ?Sized>(
     require_assets: bool,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
-    if project.version != AUTHORING_SCHEMA_VERSION {
-        diagnostics.push(diagnostic(
-            "version",
-            format!(
-                "unsupported schema version {}; expected {}",
-                project.version, AUTHORING_SCHEMA_VERSION
-            ),
-        ));
-    }
-    if project.events.is_empty() {
-        diagnostics.push(diagnostic(
-            "events",
-            "project must contain at least one event",
-        ));
-    }
-
-    if !project.normalization_lufs.is_finite() {
-        diagnostics.push(diagnostic("normalization_lufs", "target must be finite"));
-    }
+    let mut check = |ok: bool, path: &dyn Display, message: &dyn Display| {
+        if !ok {
+            diagnostics.push(diagnostic(path.to_string(), message.to_string()));
+        }
+    };
+    let finite_gain = |db: f64| db.is_finite() && db_gain(db).is_finite();
+    let explained = |value: f64, reason: &Option<String>| {
+        value == 0.0
+            || reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+    };
+    check(
+        project.version == AUTHORING_SCHEMA_VERSION,
+        &"version",
+        &format_args!(
+            "unsupported schema version {}; expected {AUTHORING_SCHEMA_VERSION}",
+            project.version
+        ),
+    );
+    check(
+        !project.events.is_empty(),
+        &"events",
+        &"project must contain at least one event",
+    );
+    check(
+        project.normalization_lufs.is_finite(),
+        &"normalization_lufs",
+        &"target must be finite",
+    );
     for (name, group) in &project.groups {
-        if name.trim().is_empty() || !group.gain_db.is_finite() {
-            diagnostics.push(diagnostic(
-                format!("groups.{name}"),
-                "group name must be nonempty and gain_db finite",
-            ));
-        }
-        if !["sfx", "ui", "foley", "ambience", "music"].contains(&group.bus.as_str()) {
-            diagnostics.push(diagnostic(
-                format!("groups.{name}.bus"),
-                "unknown sound bus",
-            ));
-        }
+        check(
+            !name.trim().is_empty() && group.gain_db.is_finite(),
+            &format_args!("groups.{name}"),
+            &"group name must be nonempty and gain_db finite",
+        );
+        check(
+            ["sfx", "ui", "foley", "ambience", "music"].contains(&group.bus.as_str()),
+            &format_args!("groups.{name}.bus"),
+            &"unknown sound bus",
+        );
     }
     let mut seen_ids = BTreeMap::new();
     let mut source_kinds: BTreeMap<&str, (bool, String)> = BTreeMap::new();
     for (event_index, event) in project.events.iter().enumerate() {
         let event_path = format!("events[{event_index}]");
+        let id_path = format_args!("{event_path}.id");
         if event.id.trim().is_empty() {
-            diagnostics.push(diagnostic(
-                format!("{event_path}.id"),
-                "event ID must not be empty",
-            ));
-        } else if let Some(previous_index) = seen_ids.insert(event.id.clone(), event_index) {
-            diagnostics.push(diagnostic(
-                format!("{event_path}.id"),
-                format!("duplicate event ID; first declared at events[{previous_index}]"),
-            ));
+            check(false, &id_path, &"event ID must not be empty");
+        } else if let Some(previous) = seen_ids.insert(event.id.clone(), event_index) {
+            let message = format_args!("duplicate event ID; first declared at events[{previous}]");
+            check(false, &id_path, &message);
         }
-        if !project.groups.contains_key(&event.group) {
-            diagnostics.push(diagnostic(
-                format!("{event_path}.group"),
-                format!("unknown mix group: {}", event.group),
-            ));
-        }
-        if !event.offset_db.is_finite() || !db_gain(event.offset_db).is_finite() {
-            diagnostics.push(diagnostic(
-                format!("{event_path}.offset_db"),
-                "offset must be finite",
-            ));
-        }
-        if event.offset_db != 0.0
-            && event
-                .reason
-                .as_deref()
-                .is_none_or(|reason| reason.trim().is_empty())
-        {
-            diagnostics.push(diagnostic(
-                format!("{event_path}.reason"),
-                "a nonzero event offset needs a reason",
-            ));
-        }
-        if event.steps.is_empty() {
-            diagnostics.push(diagnostic(
-                format!("{event_path}.steps"),
-                "event must contain at least one step",
-            ));
-        }
+        let group = project.groups.get(&event.group);
+        check(
+            group.is_some(),
+            &format_args!("{event_path}.group"),
+            &format_args!("unknown mix group: {}", event.group),
+        );
+        check(
+            finite_gain(event.offset_db),
+            &format_args!("{event_path}.offset_db"),
+            &"offset must be finite",
+        );
+        check(
+            explained(event.offset_db, &event.reason),
+            &format_args!("{event_path}.reason"),
+            &"a nonzero event offset needs a reason",
+        );
+        check(
+            !event.steps.is_empty(),
+            &format_args!("{event_path}.steps"),
+            &"event must contain at least one step",
+        );
 
         for (step_index, step) in event.steps.iter().enumerate() {
             let step_path = format!("{event_path}.steps[{step_index}]");
-            if step.layers.is_empty() {
-                diagnostics.push(diagnostic(
-                    format!("{step_path}.layers"),
-                    "step must contain at least one layer",
-                ));
-            }
+            check(
+                !step.layers.is_empty(),
+                &format_args!("{step_path}.layers"),
+                &"step must contain at least one layer",
+            );
             for (layer_index, layer) in step.layers.iter().enumerate() {
                 let layer_path = format!("{step_path}.layers[{layer_index}]");
-                if layer.sources.is_empty() {
-                    diagnostics.push(diagnostic(
-                        format!("{layer_path}.sources"),
-                        "layer must contain at least one source variant",
-                    ));
-                }
-                if !layer.volume.is_finite() || !db_gain(f64::from(layer.volume)).is_finite() {
-                    diagnostics.push(diagnostic(
-                        format!("{layer_path}.volume"),
-                        "volume must be finite dB",
-                    ));
-                }
-                if let Some(group) = project.groups.get(&event.group) {
-                    let gain =
-                        db_gain(group.gain_db + event.offset_db + f64::from(layer.volume)) as f32;
-                    if !gain.is_finite() {
-                        diagnostics.push(diagnostic(
-                            format!("{layer_path}.volume"),
-                            "combined group, event and layer gain overflows runtime gain",
-                        ));
-                    }
-                }
-                if layer.volume != 0.0
-                    && layer
-                        .reason
-                        .as_deref()
-                        .is_none_or(|reason| reason.trim().is_empty())
-                {
-                    diagnostics.push(diagnostic(
-                        format!("{layer_path}.reason"),
-                        "a nonzero layer balance needs a reason",
-                    ));
-                }
-                if !layer.speed.is_finite() || layer.speed <= 0.0 {
-                    diagnostics.push(diagnostic(
-                        format!("{layer_path}.speed"),
-                        "speed must be finite and strictly positive",
-                    ));
-                }
-                if !layer.offset.is_finite() || layer.offset < 0.0 {
-                    diagnostics.push(diagnostic(
-                        format!("{layer_path}.offset"),
-                        "offset must be finite and non-negative",
-                    ));
-                }
+                let volume = f64::from(layer.volume);
+                check(
+                    !layer.sources.is_empty(),
+                    &format_args!("{layer_path}.sources"),
+                    &"layer must contain at least one source variant",
+                );
+                check(
+                    finite_gain(volume),
+                    &format_args!("{layer_path}.volume"),
+                    &"volume must be finite dB",
+                );
+                check(
+                    group.is_none_or(|group| {
+                        (db_gain(group.gain_db + event.offset_db + volume) as f32).is_finite()
+                    }),
+                    &format_args!("{layer_path}.volume"),
+                    &"combined group, event and layer gain overflows runtime gain",
+                );
+                check(
+                    explained(volume, &layer.reason),
+                    &format_args!("{layer_path}.reason"),
+                    &"a nonzero layer balance needs a reason",
+                );
+                check(
+                    layer.speed.is_finite() && layer.speed > 0.0,
+                    &format_args!("{layer_path}.speed"),
+                    &"speed must be finite and strictly positive",
+                );
+                check(
+                    layer.offset.is_finite() && layer.offset >= 0.0,
+                    &format_args!("{layer_path}.offset"),
+                    &"offset must be finite and non-negative",
+                );
                 for (source_index, source) in layer.sources.iter().enumerate() {
                     let source_path = format!("{layer_path}.sources[{source_index}]");
+                    let kind = |stream: bool| if stream { "stream" } else { "decoded" };
                     match source_kinds.get(source.as_str()) {
-                        Some((stream, first)) if *stream != layer.stream => {
-                            diagnostics.push(diagnostic(
-                                source_path.clone(),
-                                format!(
-                                    "{source} is a {} source here and a {} source at {first}",
-                                    if layer.stream { "stream" } else { "decoded" },
-                                    if *stream { "stream" } else { "decoded" },
-                                ),
-                            ));
-                        }
-                        Some(_) => {}
+                        Some((stream, first)) => check(
+                            *stream == layer.stream,
+                            &source_path,
+                            &format_args!(
+                                "{source} is a {} source here and a {} source at {first}",
+                                kind(layer.stream),
+                                kind(*stream),
+                            ),
+                        ),
                         None => {
                             source_kinds.insert(source, (layer.stream, source_path.clone()));
                         }
                     }
-                    if let Err(message) = validate_asset_key(source) {
-                        diagnostics.push(diagnostic(source_path.clone(), message));
-                    } else if require_assets && resolver.resolve(source).is_none() {
-                        diagnostics.push(diagnostic(
-                            source_path,
-                            format!("referenced asset does not exist: {source}"),
-                        ));
+                    match validate_asset_key(source) {
+                        Err(message) => check(false, &source_path, &message),
+                        Ok(()) => check(
+                            !require_assets || resolver.resolve(source).is_some(),
+                            &source_path,
+                            &format_args!("referenced asset does not exist: {source}"),
+                        ),
                     }
                 }
             }
@@ -594,7 +559,7 @@ mod tests {
 
     use super::{
         AssetMapResolver, MixGroup, SoundCoreError, SoundEvent, SoundLayer, SoundProject,
-        SoundStep, compile_project, compile_project_allowing_missing_assets, parse_project,
+        SoundStep, compile_prepared_project, compile_project, parse_project, prepare_project,
         serialize_runtime_bank,
     };
 
@@ -754,7 +719,9 @@ mod tests {
     #[test]
     fn development_compile_retains_missing_dependencies_for_runtime_silence() {
         let project = valid_project();
-        let bank = compile_project_allowing_missing_assets(&project, &resolver(&[SHARED, SOLO]))
+        let resolver = resolver(&[SHARED, SOLO]);
+        let bank = prepare_project(&project, &resolver, false)
+            .and_then(|prepared| compile_prepared_project(prepared, &resolver))
             .expect("a missing sound must not reject a development bank");
 
         assert_eq!(bank.events[2].steps[0].layers[0].sources, vec![SHARED, ALT]);

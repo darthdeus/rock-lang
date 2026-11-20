@@ -114,10 +114,12 @@ fn played_peak_warning_does_not_reduce_source_or_layer_gains() {
         .as_array_mut()
         .unwrap()
         .insert(1, serde_json::json!({"sources":["assets/missing.wav"]}));
-    let partial = sound_core::compile_project_allowing_missing_assets(
+    let partial = sound_core::prepare_project(
         &parse_project(&partial.to_string()).unwrap(),
         &resolver,
+        false,
     )
+    .and_then(|prepared| sound_core::compile_prepared_project(prepared, &resolver))
     .unwrap();
     assert_eq!(
         partial.played["tone"][0].sum, compiled.played["tone"][0].sum,
