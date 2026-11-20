@@ -26,7 +26,7 @@ fn main() {{
     let error = emit_rejection(
         r#"
 value G { x: float, y: float }
-@nomangle inline(lua) fn make<T>() -> T = "return {_data = {}, len = 0, __ty = 'Vec'}"
+@nomangle inline(lua) fn make<T>() -> T = "return {_data = {}, len = 0}"
 fn main() { let xs: [G] = make(); print(xs.len) }
 "#,
     );

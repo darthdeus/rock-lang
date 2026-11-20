@@ -128,7 +128,7 @@ fn strided_element_reconstruction_canonicalizes_units() {
     let out = run_luajit(&format!(
         r#"{lua}
 local unit = constant_unit()
-local vec = {{__ty = "Vec", _data = {{"None", false}}, len = 1,
+local vec = {{_data = {{"None", false}}, len = 1,
     ["@vec"] = {{repr = "strided", elem = unit.__ty, stride = 2}}}}
 assert(rawequal(__rock_materialize_strided_element(vec, 1), unit))
 vec._data[1], vec._data[2] = "Text", "payload"

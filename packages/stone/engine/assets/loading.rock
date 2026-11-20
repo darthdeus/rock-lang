@@ -4,7 +4,7 @@ inline(lua) fn __resolve_asset_dev_mode() -> bool = """
 pub global ASSET_DEV_MODE: bool = __resolve_asset_dev_mode()
 
 inline(lua) fn __resolve_asset_overlay_dirs() -> [string] = """
-    local result = { _data = {}, len = 0, __ty = "Vec" }
+    local result = { _data = {}, len = 0 }
     local raw = os.getenv("ROCK_ASSET_OVERLAYS")
     if raw == nil then
         for _, root in ipairs(_G.__ROCK_ASSET_OVERLAY_DEFAULTS or {}) do

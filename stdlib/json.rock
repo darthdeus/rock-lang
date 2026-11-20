@@ -1337,7 +1337,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return { __ty = 'JsonValue', __variant = tag, item }
 """
 
-@nomangle inline(lua) fn __json_record_vec(items: any, count: int) -> any = "return { __ty = 'Vec', _data = items, len = count }"
+@nomangle inline(lua) fn __json_record_vec(items: any, count: int) -> any = "return { _data = items, len = count }"
 @nomangle inline(lua) fn __json_record_tag(value: any, tag: string) -> bool = "return type(value) == 'table' and value.__variant == tag"
 @nomangle inline(lua) fn __json_record_finite(n: float) -> bool = "return n == n and n ~= math.huge and n ~= -math.huge"
 
@@ -1563,7 +1563,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         end
         if reading then
             if columns then
-                result.__ty, result.len = 'Vec', items.len
+                result.len = items.len
                 result['@vec'] = { repr = 'columns', elem = shape.elem.name, cap = items.len }
                 return true, result
             end

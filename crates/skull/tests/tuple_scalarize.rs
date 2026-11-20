@@ -244,7 +244,7 @@ fn nullable_value_binding_return_keeps_presence_and_leaves() {
     let pick = function_body(&lua, "pick");
     assert_eq!(pick.matches("Bag_vt(").count(), 0);
     assert!(!pick.contains("Bag_ct("));
-    assert_eq!(pick.matches("__ty = \"Vec\"").count(), 1);
+    assert_eq!(pick.matches("_data = {").count(), 1);
     assert_eq!(pick.matches('{').count(), 2);
     assert!(!pick.contains("__ty = \"Bag\""));
     assert_eq!(run_main(&lua), "1 1 true");

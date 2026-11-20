@@ -918,7 +918,7 @@ pub fn lua_string_vec(items: &[&str]) -> String {
         }
         write_lua_string(&mut out, s);
     }
-    let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", items.len());
+    let _ = write!(out, "}}, len = {}}}", items.len());
     out
 }
 
@@ -931,7 +931,7 @@ pub fn lua_int_vec(items: &[i64]) -> String {
         }
         let _ = write!(out, "{n}");
     }
-    let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", items.len());
+    let _ = write!(out, "}}, len = {}}}", items.len());
     out
 }
 

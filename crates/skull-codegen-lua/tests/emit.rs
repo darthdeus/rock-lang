@@ -1335,3 +1335,11 @@ fn string_interpolation_holes_concatenate_without_tostring() {
     );
     assert_eq!(out, "hi a aka nil #3|hi b aka c #4");
 }
+
+#[test]
+fn vec_literal_carries_no_type_tag() {
+    let (lua, rejection) = emit_run("fn run(x: int) -> [int] {\n    [x, 2]\n}\n");
+    assert!(rejection.is_none(), "{rejection:?}");
+    assert!(lua.contains("{_data = {c0, (2)}, len = 2}"), "{lua}");
+    assert!(!lua.contains("__ty"), "{lua}");
+}

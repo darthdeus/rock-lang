@@ -276,13 +276,12 @@ function __vec_sort(vec, key_fn) {
   });
   for (var i = 0; i < n; i++) vec._data[i] = part[i];
 }
-// `__range(a, b)`: the materialized half-open range `a..b` as a Vec-shaped
-// object (0-based `_data[0..len)` = a..b-1), matching the stdlib inline(lua)
-// `{_data, len}`.
+// `__range(a, b)`: the materialized half-open range `a..b` as a Vec
+// (0-based `_data[0..len)` = a..b-1).
 function __range(a, b) {
   var d = [];
   for (var i = a; i < b; i++) d.push(i);
-  return { _data: d, len: b - a };
+  return { _data: d, len: b - a, __ty: \"Vec\" };
 }
 ";
 

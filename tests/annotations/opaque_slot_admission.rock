@@ -8,7 +8,7 @@ value G { x: float, y: float }
 struct B { s: string }
 
 @nomangle inline(lua) fn make_boxed<T>() -> T = """
-    return {_data = {}, len = 0, __ty = "Vec"}
+    return {_data = {}, len = 0}
 """
 
 @test(output = "0", backends = "lua")

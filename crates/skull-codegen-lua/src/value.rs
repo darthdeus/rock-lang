@@ -157,7 +157,7 @@ impl Emitter<'_> {
             Inst::MakeVec(vs) => {
                 out.push_str("{_data = {");
                 self.write_csv(out, vs);
-                let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", vs.len());
+                let _ = write!(out, "}}, len = {}}}", vs.len());
             }
             // A nested leaf path is dotted (`min.x`), not a bare Lua identifier,
             // so keys are bracketed.
@@ -180,7 +180,7 @@ impl Emitter<'_> {
                     self.write_csv(out, vs);
                     out.push_str("}, ");
                 }
-                let _ = write!(out, "len = {len}, __ty = \"Vec\"}}");
+                let _ = write!(out, "len = {len}}}");
             }
             Inst::MakeVecColumnHeader { elem, capacity, .. } => {
                 self.write_vec_header(out, skull_mir::mir::VEC_COLUMN_REPR, *elem, None, *capacity);
@@ -197,7 +197,7 @@ impl Emitter<'_> {
                 self.write_csv(out, values);
                 out.push_str("}, len = ");
                 let _ = write!(out, "{len}");
-                out.push_str(", __ty = \"Vec\", [");
+                out.push_str(", [");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
                 out.push_str("] = ");
                 self.write_vec_header(
@@ -226,9 +226,10 @@ impl Emitter<'_> {
             Inst::MakeStruct { ty, fields } => {
                 out.push('{');
                 let mut first = true;
-                if let Some(name) = ty {
+                // A Lua Vec is untagged; `__rock_get_type` recognizes it by shape.
+                if let Some(name) = ty.filter(|name| name.as_str() != "Vec") {
                     out.push_str("__ty = ");
-                    write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *name).as_str());
+                    write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, name).as_str());
                     first = false;
                 }
                 for (n, id) in fields {

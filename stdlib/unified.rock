@@ -595,14 +595,23 @@ value SceneBuilder {
     _scene_id: int,
 }
 
-// Compiler-created structs/newtypes/Vecs carry a direct __ty tag. Foreign
-// tables can supply it through __index, which can mutate Rock state.
-// cdata values reflect through __ROCK_TYPE_TABLE and ffi.istype, not here.
+// Compiler-created structs/newtypes carry a direct __ty tag. Foreign tables
+// can supply it through __index, which can mutate Rock state. A Vec is
+// untagged, so it is recognized by shape: `len` plus a `_data` array or a
+// `@vec` header, on a table that is not a closure record. cdata values reflect
+// through __ROCK_TYPE_TABLE and ffi.istype, not here.
 @nomangle inline(lua) fn __rock_get_type(obj: any) -> string? = """
     if type(obj) ~= "table" then
         return nil
     end
-    return obj.__ty
+    local ty = obj.__ty
+    if ty ~= nil then return ty end
+    if rawget(obj, "len") ~= nil
+            and (rawget(obj, "_data") ~= nil or rawget(obj, "@vec") ~= nil)
+            and not __rock_is_fn_record(obj) then
+        return "Vec"
+    end
+    return nil
 """
 
 // Values must not retain this owner: LuaJIT weak tables are not ephemerons.
@@ -994,7 +1003,7 @@ deco init on_reload {
         if ar == "columns" then
             if ah.elem ~= bh.elem then return false end
             for k, col in pairs(a) do
-                if k ~= "len" and k ~= "__ty" and k ~= "@vec" then
+                if k ~= "len" and k ~= "@vec" then
                     local other = b[k]
                     if type(col) ~= "table" or type(other) ~= "table" then return false end
                     for i = 1, a.len do
@@ -1003,7 +1012,7 @@ deco init on_reload {
                 end
             end
             for k, _ in pairs(b) do
-                if k ~= "len" and k ~= "__ty" and k ~= "@vec" and a[k] == nil then
+                if k ~= "len" and k ~= "@vec" and a[k] == nil then
                     return false
                 end
             end
@@ -1296,13 +1305,11 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 //     table directly and never calls it.
 //   - `@nomangle`: a single fixed name, so `inline(lua)` bodies that need an
 //     empty Vec to push into call `vec_new()` directly.
-// Emits the SAME shape skull uses for literals: a bare table with a direct
-// `__ty = "Vec"` tag and NO metatable, so every Vec has one representation
-// regardless of origin. `__ty` is the lone type marker (`__rock_get_type` reads
-// it, the serializer checks `v.__ty == "Vec"`, methods resolve statically via
-// UFCS).
+// Emits the SAME shape skull uses for literals: a bare `{_data, len}` table
+// with no tag and NO metatable, so every Vec has one representation regardless
+// of origin. Methods resolve statically via UFCS.
 @nowrite @intrinsic inline(lua) fn vec_new<T>() -> [T] = """
-    return { _data = {}, len = 0, __ty = "Vec" }
+    return { _data = {}, len = 0 }
 """
 
 // Bridges between a `[T]` and the raw 1-indexed backing array, for Rock code
@@ -1321,7 +1328,7 @@ inline(lua) fn __rock_vec_to_lua_array<T>(vec: [T]) -> any = """
 """
 
 inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
-    return { _data = arr, len = len, __ty = "Vec" }
+    return { _data = arr, len = len }
 """
 
 // Repeated appends make the call frame itself expensive. The body is
@@ -1909,7 +1916,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 @intrinsic inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
     local tbl = {}
     for i = 1, capacity do tbl[i] = false end
-    return { _data = tbl, len = 0, __ty = "Vec" }
+    return { _data = tbl, len = 0 }
 """
 
 @intrinsic inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
@@ -1921,7 +1928,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 @intrinsic inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
     local copy = {}
     for i = 1, #vec._data do copy[i] = vec._data[i] end
-    return { _data = copy, len = vec.len, __ty = "Vec" }
+    return { _data = copy, len = vec.len }
 """
 
 @intrinsic @relocates inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
@@ -2029,13 +2036,13 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 """
 
 @nomangle inline(lua) fn __rock_is_column_vec(v: any) -> bool = """
-    if type(v) ~= "table" or v.__ty ~= "Vec" then return false end
+    if type(v) ~= "table" then return false end
     local h = rawget(v, "@vec")
     return type(h) == "table" and h.repr == "columns"
 """
 
 @nomangle inline(lua) fn __rock_is_strided_vec(v: any) -> bool = """
-    if type(v) ~= "table" or v.__ty ~= "Vec" then return false end
+    if type(v) ~= "table" then return false end
     local h = rawget(v, "@vec")
     return type(h) == "table" and h.repr == "strided"
 """
@@ -2085,7 +2092,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 @nomangle inline(lua) fn __rock_col_paths(vec: any) -> any = """
     local names = {}
     for k, v in pairs(vec) do
-        if k ~= "len" and k ~= "__ty" and k ~= "@vec" and type(v) == "table" then
+        if k ~= "len" and k ~= "@vec" and type(v) == "table" then
             names[#names + 1] = k
         end
     end
@@ -3454,7 +3461,7 @@ inline(lua) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
     local order = {}
     for i = 1, n do order[i] = i - 1 end
     table.sort(order, function(a, b) return lt(a, b) end)
-    return { _data = order, len = n, __ty = "Vec" }
+    return { _data = order, len = n }
 """
 
 fn Vec<T>.sample(vec) -> T? {

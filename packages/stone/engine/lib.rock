@@ -1094,7 +1094,7 @@ pub @nomangle inline(lua) fn stone_list_directory(path: string) -> [string]? = "
     local count = count_ptr[0]
     local files = files_ptr[0]
 
-    local result = { _data = {}, len = count, __ty = "Vec" }
+    local result = { _data = {}, len = count }
     for i = 0, count - 1 do
         result._data[i + 1] = ffi.string(files[i])
     end
