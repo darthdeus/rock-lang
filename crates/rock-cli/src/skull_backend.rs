@@ -1494,90 +1494,44 @@ pub(crate) fn skull_shader(
 
     let is_pipeline = roots
         .iter()
-        .any(|r| skull_codegen_glsl::is_vertex_shader_root(&ws, user_mid, r));
-
-    let glsl = if is_pipeline {
-        if roots.len() != 2 {
-            anyhow::bail!(
-                "rock shader: the vertex+fragment pipeline form takes exactly two roots: <vert_fn> <frag_fn>"
-            );
-        }
-        let prof = parse_glsl_profile(profile.as_deref())?;
-        let vert = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[0]) {
-            Ok(root) => root,
-            Err(e) => {
-                eprintln!("{}", render_file_errs(path, &src, &[e]));
-                crate::invocation_log::exit(1);
-            }
-        };
-        let frag = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[1]) {
-            Ok(root) => root,
-            Err(e) => {
-                eprintln!("{}", render_file_errs(path, &src, &[e]));
-                crate::invocation_log::exit(1);
-            }
-        };
-        match emit_shader_program_with_view(
-            &ws,
-            skull::shader_artifact::ShaderProgram {
-                vert: Some(vert),
-                frag,
-            },
-            prof,
-        )
-        .map(|emission| emission.source)
-        {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("{}", render_file_errs(path, &src, &[e]));
-                crate::invocation_log::exit(1);
-            }
-        }
-    } else {
-        let is_entry = roots.len() == 1
-            && skull_codegen_glsl::is_fragment_shader_root(&ws, user_mid, &roots[0]);
-        if profile.is_some() && !is_entry {
-            anyhow::bail!(
-                "rock shader: --profile applies to shader entries (pipeline or @shader(fragment) fullscreen), not the route-B fn library (it emits no #version line)"
-            );
-        }
-        let prof = parse_glsl_profile(profile.as_deref())?;
-        let glsl = if is_entry {
-            let frag = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[0]) {
-                Ok(root) => root,
-                Err(e) => {
-                    eprintln!("{}", render_file_errs(path, &src, &[e]));
-                    crate::invocation_log::exit(1);
-                }
-            };
-            emit_shader_program_with_view(
+        .any(|root| skull_codegen_glsl::is_vertex_shader_root(&ws, user_mid, root));
+    let is_fullscreen = !is_pipeline
+        && roots.len() == 1
+        && skull_codegen_glsl::is_fragment_shader_root(&ws, user_mid, &roots[0]);
+    if is_pipeline && roots.len() != 2 {
+        anyhow::bail!(
+            "rock shader: the vertex+fragment pipeline form takes exactly two roots: <vert_fn> <frag_fn>"
+        );
+    }
+    if profile.is_some() && !is_pipeline && !is_fullscreen {
+        anyhow::bail!(
+            "rock shader: --profile applies to shader entries (pipeline or @shader(fragment) fullscreen), not the route-B fn library (it emits no #version line)"
+        );
+    }
+    let prof = parse_glsl_profile(profile.as_deref())?;
+    let glsl = (|| {
+        let mut roots = roots
+            .iter()
+            .map(|root| skull_codegen_glsl::resolve_root(&ws, user_mid, root));
+        if !is_pipeline && !is_fullscreen {
+            return skull_codegen_glsl::emit_shader_library(
                 &ws,
-                skull::shader_artifact::ShaderProgram { vert: None, frag },
-                prof,
-            )
-            .map(|emission| emission.source)
-        } else {
-            let root_refs = roots
-                .iter()
-                .map(|root| skull_codegen_glsl::resolve_root(&ws, user_mid, root))
-                .collect::<std::result::Result<Vec<_>, _>>();
-            let root_refs = match root_refs {
-                Ok(root_refs) => root_refs,
-                Err(e) => {
-                    eprintln!("{}", render_file_errs(path, &src, &[e]));
-                    crate::invocation_log::exit(1);
-                }
-            };
-            skull_codegen_glsl::emit_shader_library(&ws, root_refs)
-        };
-        match glsl {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("{}", render_file_errs(path, &src, &[e]));
-                crate::invocation_log::exit(1);
-            }
+                roots.collect::<std::result::Result<Vec<_>, _>>()?,
+            );
         }
-    };
+        let vert = if is_pipeline {
+            Some(roots.next().unwrap()?)
+        } else {
+            None
+        };
+        let frag = roots.next().unwrap()?;
+        let program = skull::shader_artifact::ShaderProgram { vert, frag };
+        emit_shader_program_with_view(&ws, program, prof).map(|emission| emission.source)
+    })()
+    .unwrap_or_else(|error| {
+        eprintln!("{}", render_file_errs(path, &src, &[error]));
+        crate::invocation_log::exit(1);
+    });
 
     match output {
         Some(out) => {
