@@ -10,53 +10,34 @@ use std::ptr;
 
 use crate::{with_window, StoneEvent, StoneEventType, StoneWindow};
 
-const PAD_DEVICE_CLAIM_THRESHOLD: i16 = 16_384;
+const PAD_DEVICE_CLAIM_THRESHOLD: i32 = 16_384;
 const PAD_AXIS_COUNT: usize = sdl2::sys::SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_MAX as usize;
 const PAD_BUTTON_COUNT: usize =
     sdl2::sys::SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_MAX as usize;
-const VIRTUAL_CONTROLLER_MAPPING: &str = "03000000000000000000000000000000,Stone Virtual Pad,a:b0,b:b1,x:b2,y:b3,back:b4,start:b5,leftshoulder:b6,rightshoulder:b7,leftstick:b8,rightstick:b9,dpup:b10,dpdown:b11,dpleft:b12,dpright:b13,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5";
+const VIRTUAL_CONTROLLER_MAPPING: &CStr = c"03000000000000000000000000000000,Stone Virtual Pad,a:b0,b:b1,x:b2,y:b3,back:b4,start:b5,leftshoulder:b6,rightshoulder:b7,leftstick:b8,rightstick:b9,dpup:b10,dpdown:b11,dpleft:b12,dpright:b13,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5";
 
 thread_local! {
     static TEST_VIRTUAL_PAD_INDICES: RefCell<Vec<c_int>> = const { RefCell::new(Vec::new()) };
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ControllerManagerEvent {
-    DeviceAdded {
-        instance_id: u32,
-    },
-    DeviceRemoved {
-        instance_id: u32,
-    },
-    ActiveChanged {
-        from: Option<u32>,
-        to: Option<u32>,
-    },
-    Button {
-        instance_id: u32,
-        button: Button,
-        down: bool,
-        sync: bool,
-    },
-    Axis {
-        instance_id: u32,
-        axis: Axis,
-        value: i16,
-        sync: bool,
-    },
+/// Every button, then every axis; a button's value is 1 while held.
+type ControlValues = [i16; PAD_BUTTON_COUNT + PAD_AXIS_COUNT];
+
+fn button_slot(button: Button) -> usize {
+    button as usize
 }
 
-#[derive(Default)]
-struct ControllerState {
-    buttons: [bool; PAD_BUTTON_COUNT],
-    axes: [i16; PAD_AXIS_COUNT],
+fn axis_slot(axis: Axis) -> usize {
+    PAD_BUTTON_COUNT + axis as usize
 }
 
-/// Pure controller identity/state policy. SDL handles and event translation
-/// live in `SdlControllerManager`; this type is the testable authority rule.
+/// Controller identity and state policy without SDL handles: the last pad to
+/// press a button or push an axis past the claim threshold becomes active, and
+/// only the active pad's input reaches the game.
 pub(crate) struct ControllerManager {
-    controllers: HashMap<u32, ControllerState>,
+    controllers: HashMap<u32, ControlValues>,
     active_instance: Option<u32>,
+    pending: VecDeque<StoneEvent>,
 }
 
 impl ControllerManager {
@@ -64,29 +45,60 @@ impl ControllerManager {
         Self {
             controllers: HashMap::new(),
             active_instance: None,
+            pending: VecDeque::new(),
         }
     }
 
-    pub(crate) fn add_controller(&mut self, instance_id: u32) -> Vec<ControllerManagerEvent> {
+    fn push(&mut self, event_type: StoneEventType, instance_id: Option<u32>) -> &mut StoneEvent {
+        self.pending.push_back(StoneEvent {
+            event_type,
+            pad_instance_id: instance_id.map_or(-1, |id| id as c_int),
+            ..StoneEvent::default()
+        });
+        self.pending.back_mut().unwrap()
+    }
+
+    fn push_control(&mut self, instance_id: u32, slot: usize, value: i16, sync: bool) {
+        let event = if slot < PAD_BUTTON_COUNT {
+            let event_type = if value != 0 {
+                StoneEventType::PadButtonDown
+            } else {
+                StoneEventType::PadButtonUp
+            };
+            let event = self.push(event_type, Some(instance_id));
+            let button = unsafe {
+                std::mem::transmute::<i32, sdl2::sys::SDL_GameControllerButton>(slot as i32)
+            };
+            event.pad_button = unsafe { sdl2::sys::SDL_GameControllerGetStringForButton(button) };
+            event
+        } else {
+            let event = self.push(StoneEventType::PadAxisMotion, Some(instance_id));
+            let axis = unsafe {
+                std::mem::transmute::<i32, sdl2::sys::SDL_GameControllerAxis>(
+                    (slot - PAD_BUTTON_COUNT) as i32,
+                )
+            };
+            event.pad_axis = unsafe { sdl2::sys::SDL_GameControllerGetStringForAxis(axis) };
+            event.pad_value = value as c_int;
+            event
+        };
+        event.pad_sync = sync;
+    }
+
+    pub(crate) fn add_controller(&mut self, instance_id: u32) {
         self.controllers
-            .insert(instance_id, ControllerState::default());
-        vec![ControllerManagerEvent::DeviceAdded { instance_id }]
+            .insert(instance_id, [0; PAD_BUTTON_COUNT + PAD_AXIS_COUNT]);
     }
 
-    pub(crate) fn remove_controller(&mut self, instance_id: u32) -> Vec<ControllerManagerEvent> {
+    pub(crate) fn remove_controller(&mut self, instance_id: u32) {
         if self.controllers.remove(&instance_id).is_none() {
-            return Vec::new();
+            return;
         }
-
-        let mut events = vec![ControllerManagerEvent::DeviceRemoved { instance_id }];
+        self.push(StoneEventType::PadDeviceRemoved, Some(instance_id));
         if self.active_instance == Some(instance_id) {
-            let previous = self.active_instance.take();
-            events.push(ControllerManagerEvent::ActiveChanged {
-                from: previous,
-                to: None,
-            });
+            self.active_instance = None;
+            self.push(StoneEventType::PadActiveChanged, None);
         }
-        events
     }
 
     pub(crate) fn active_instance_id(&self) -> Option<u32> {
@@ -94,180 +106,59 @@ impl ControllerManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn effective_button(&self, button: Button) -> bool {
+    fn effective(&self, slot: usize) -> i16 {
         self.active_instance
             .and_then(|instance_id| self.controllers.get(&instance_id))
-            .map(|state| state.buttons[button_index(button)])
-            .unwrap_or(false)
+            .map_or(0, |values| values[slot])
     }
 
-    #[cfg(test)]
-    pub(crate) fn effective_axis(&self, axis: Axis) -> i16 {
-        self.active_instance
-            .and_then(|instance_id| self.controllers.get(&instance_id))
-            .map(|state| state.axes[axis_index(axis)])
-            .unwrap_or(0)
-    }
-
-    pub(crate) fn button_event(
-        &mut self,
-        instance_id: u32,
-        button: Button,
-        down: bool,
-    ) -> Vec<ControllerManagerEvent> {
-        let Some(state) = self.controllers.get_mut(&instance_id) else {
-            return Vec::new();
-        };
-        state.buttons[button_index(button)] = down;
-
-        if down && self.active_instance != Some(instance_id) {
-            let mut events = self.activate(instance_id);
-            events.push(ControllerManagerEvent::Button {
-                instance_id,
-                button,
-                down,
-                sync: false,
-            });
-            self.append_resync_events(&mut events, instance_id, Some(button), None);
-            return events;
-        }
-
-        if self.active_instance == Some(instance_id) {
-            return vec![ControllerManagerEvent::Button {
-                instance_id,
-                button,
-                down,
-                sync: false,
-            }];
-        }
-        Vec::new()
-    }
-
-    pub(crate) fn axis_event(
-        &mut self,
-        instance_id: u32,
-        axis: Axis,
-        value: i16,
-    ) -> Vec<ControllerManagerEvent> {
-        let Some(state) = self.controllers.get_mut(&instance_id) else {
-            return Vec::new();
-        };
-        state.axes[axis_index(axis)] = value;
-
-        let claims_pad = (value as i32).abs() > PAD_DEVICE_CLAIM_THRESHOLD as i32;
-        if self.active_instance != Some(instance_id) && !claims_pad {
-            return Vec::new();
-        }
-
-        if self.active_instance != Some(instance_id) {
-            let mut events = self.activate(instance_id);
-            events.push(ControllerManagerEvent::Axis {
-                instance_id,
-                axis,
-                value,
-                sync: false,
-            });
-            self.append_resync_events(&mut events, instance_id, None, Some(axis));
-            return events;
-        }
-
-        vec![ControllerManagerEvent::Axis {
-            instance_id,
-            axis,
-            value,
-            sync: false,
-        }]
-    }
-
-    fn activate(&mut self, instance_id: u32) -> Vec<ControllerManagerEvent> {
-        let previous = self.active_instance.replace(instance_id);
-        if previous == Some(instance_id) {
-            return Vec::new();
-        }
-        vec![ControllerManagerEvent::ActiveChanged {
-            from: previous,
-            to: Some(instance_id),
-        }]
-    }
-
-    fn append_resync_events(
-        &self,
-        events: &mut Vec<ControllerManagerEvent>,
-        instance_id: u32,
-        cause_button: Option<Button>,
-        cause_axis: Option<Axis>,
-    ) {
-        let Some(state) = self.controllers.get(&instance_id) else {
+    /// A pad that takes over resends what it already holds as sync events, so
+    /// the game sees its state without a fresh edge.
+    fn control(&mut self, instance_id: u32, slot: usize, value: i16) {
+        let Some(values) = self.controllers.get_mut(&instance_id) else {
             return;
         };
-        for (index, &down) in state.buttons.iter().enumerate() {
-            if !down {
-                continue;
-            }
-            let Some(button) = button_from_index(index) else {
-                continue;
-            };
-            if cause_button == Some(button) {
-                continue;
-            }
-            events.push(ControllerManagerEvent::Button {
-                instance_id,
-                button,
-                down: true,
-                sync: true,
-            });
+        values[slot] = value;
+        let values = *values;
+        if self.active_instance == Some(instance_id) {
+            self.push_control(instance_id, slot, value, false);
+            return;
         }
-        for (index, &value) in state.axes.iter().enumerate() {
-            if value == 0 {
-                continue;
+        let claims = if slot < PAD_BUTTON_COUNT {
+            value != 0
+        } else {
+            (value as i32).abs() > PAD_DEVICE_CLAIM_THRESHOLD
+        };
+        if !claims {
+            return;
+        }
+        self.active_instance = Some(instance_id);
+        self.push(StoneEventType::PadActiveChanged, Some(instance_id));
+        self.push_control(instance_id, slot, value, false);
+        for (held, &held_value) in values.iter().enumerate() {
+            if held != slot && held_value != 0 {
+                self.push_control(instance_id, held, held_value, true);
             }
-            let Some(axis) = axis_from_index(index) else {
-                continue;
-            };
-            if cause_axis == Some(axis) {
-                continue;
-            }
-            events.push(ControllerManagerEvent::Axis {
-                instance_id,
-                axis,
-                value,
-                sync: true,
-            });
         }
     }
-}
 
-fn button_index(button: Button) -> usize {
-    button as usize
-}
-
-fn axis_index(axis: Axis) -> usize {
-    axis as usize
-}
-
-fn button_from_index(index: usize) -> Option<Button> {
-    if index >= PAD_BUTTON_COUNT {
-        return None;
+    pub(crate) fn button_event(&mut self, instance_id: u32, button: Button, down: bool) {
+        self.control(instance_id, button_slot(button), down as i16);
     }
-    let raw =
-        unsafe { std::mem::transmute::<i32, sdl2::sys::SDL_GameControllerButton>(index as i32) };
-    Button::from_ll(raw)
-}
 
-fn axis_from_index(index: usize) -> Option<Axis> {
-    if index >= PAD_AXIS_COUNT {
-        return None;
+    pub(crate) fn axis_event(&mut self, instance_id: u32, axis: Axis, value: i16) {
+        self.control(instance_id, axis_slot(axis), value);
     }
-    let raw =
-        unsafe { std::mem::transmute::<i32, sdl2::sys::SDL_GameControllerAxis>(index as i32) };
-    Axis::from_ll(raw)
+
+    pub(crate) fn pop_stone_event(&mut self) -> Option<StoneEvent> {
+        self.pending.pop_front()
+    }
 }
 
 pub(crate) struct SdlControllerManager {
     subsystem: GameControllerSubsystem,
     controllers: HashMap<u32, GameController>,
-    manager: ControllerManager,
-    pending: VecDeque<ControllerManagerEvent>,
+    pub(crate) manager: ControllerManager,
 }
 
 impl SdlControllerManager {
@@ -277,75 +168,50 @@ impl SdlControllerManager {
             subsystem,
             controllers: HashMap::new(),
             manager: ControllerManager::new(),
-            pending: VecDeque::new(),
         };
-        manager.open_existing_controllers();
+        for index in 0..manager.subsystem.num_joysticks().unwrap_or(0) {
+            manager.open(index);
+        }
         manager
     }
 
-    fn open_existing_controllers(&mut self) {
-        let count = self.subsystem.num_joysticks().unwrap_or(0);
-        for index in 0..count {
-            if !self.subsystem.is_game_controller(index) {
-                continue;
-            }
-            let Ok(controller) = self.subsystem.open(index) else {
-                continue;
-            };
-            let instance_id = controller.instance_id();
-            self.controllers.insert(instance_id, controller);
-            self.manager.add_controller(instance_id);
+    fn open(&mut self, index: u32) -> Option<u32> {
+        if !self.subsystem.is_game_controller(index) {
+            return None;
         }
+        let controller = self.subsystem.open(index).ok()?;
+        let instance_id = controller.instance_id();
+        self.controllers.insert(instance_id, controller);
+        self.manager.add_controller(instance_id);
+        Some(instance_id)
     }
 
-    pub(crate) fn handle_sdl_event(&mut self, event: &Event) -> Vec<ControllerManagerEvent> {
-        match event {
+    pub(crate) fn handle_sdl_event(&mut self, event: &Event) {
+        match *event {
             Event::ControllerDeviceAdded { which, .. } => {
-                let index = *which;
-                if !self.subsystem.is_game_controller(index) {
-                    return Vec::new();
+                if let Some(instance_id) = self.open(which) {
+                    self.manager
+                        .push(StoneEventType::PadDeviceAdded, Some(instance_id));
                 }
-                let controller = match self.subsystem.open(index) {
-                    Ok(controller) => controller,
-                    Err(_) => return Vec::new(),
-                };
-                let instance_id = controller.instance_id();
-                self.controllers.insert(instance_id, controller);
-                self.manager.add_controller(instance_id)
             }
             Event::ControllerDeviceRemoved { which, .. } => {
-                let instance_id = *which;
-                self.controllers.remove(&instance_id);
-                self.manager.remove_controller(instance_id)
+                self.controllers.remove(&which);
+                self.manager.remove_controller(which);
             }
             Event::ControllerButtonDown { which, button, .. } => {
-                self.manager.button_event(*which, *button, true)
+                self.manager.button_event(which, button, true)
             }
             Event::ControllerButtonUp { which, button, .. } => {
-                self.manager.button_event(*which, *button, false)
+                self.manager.button_event(which, button, false)
             }
             Event::ControllerAxisMotion {
                 which, axis, value, ..
-            } => self.manager.axis_event(*which, *axis, *value),
-            _ => Vec::new(),
+            } => self.manager.axis_event(which, axis, value),
+            _ => {}
         }
     }
 
-    pub(crate) fn enqueue(&mut self, events: Vec<ControllerManagerEvent>) {
-        self.pending.extend(events);
-    }
-
-    pub(crate) fn pop_stone_event(&mut self) -> Option<StoneEvent> {
-        self.pending
-            .pop_front()
-            .and_then(|event| controller_manager_event_to_stone_event(&event))
-    }
-
-    pub(crate) fn connected(&self) -> bool {
-        !self.controllers.is_empty()
-    }
-
-    pub(crate) fn active_type_name(&self) -> Option<&'static str> {
+    fn active_type_name(&self) -> Option<&'static CStr> {
         let instance_id = self.manager.active_instance_id()?;
         let controller = unsafe {
             sdl2::sys::SDL_GameControllerFromInstanceID(instance_id as sdl2::sys::SDL_JoystickID)
@@ -353,28 +219,38 @@ impl SdlControllerManager {
         if controller.is_null() {
             return None;
         }
-        Some(match unsafe { sdl2::sys::SDL_GameControllerGetType(controller) } {
-            sdl2::sys::SDL_GameControllerType::SDL_CONTROLLER_TYPE_XBOX360
-            | sdl2::sys::SDL_GameControllerType::SDL_CONTROLLER_TYPE_XBOXONE => "xbox",
-            sdl2::sys::SDL_GameControllerType::SDL_CONTROLLER_TYPE_PS3
-            | sdl2::sys::SDL_GameControllerType::SDL_CONTROLLER_TYPE_PS4
-            | sdl2::sys::SDL_GameControllerType::SDL_CONTROLLER_TYPE_PS5 => "playstation",
-            sdl2::sys::SDL_GameControllerType::SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO
-            | sdl2::sys::SDL_GameControllerType::SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT
-            | sdl2::sys::SDL_GameControllerType::SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT
-            | sdl2::sys::SDL_GameControllerType::SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR => "nintendo",
-            sdl2::sys::SDL_GameControllerType::SDL_CONTROLLER_TYPE_VIRTUAL => "virtual",
-            _ => "unknown",
-        })
-    }
-
-    #[cfg(test)]
-    fn is_open(&self, instance_id: u32) -> bool {
-        self.controllers.contains_key(&instance_id)
+        use sdl2::sys::SDL_GameControllerType as T;
+        Some(
+            match unsafe { sdl2::sys::SDL_GameControllerGetType(controller) } {
+                T::SDL_CONTROLLER_TYPE_XBOX360 | T::SDL_CONTROLLER_TYPE_XBOXONE => c"xbox",
+                T::SDL_CONTROLLER_TYPE_PS3
+                | T::SDL_CONTROLLER_TYPE_PS4
+                | T::SDL_CONTROLLER_TYPE_PS5 => c"playstation",
+                T::SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO
+                | T::SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT
+                | T::SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT
+                | T::SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR => c"nintendo",
+                T::SDL_CONTROLLER_TYPE_VIRTUAL => c"virtual",
+                _ => c"unknown",
+            },
+        )
     }
 }
 
-fn test_virtual_pad_joystick(index: c_int) -> Option<*mut sdl2::sys::SDL_Joystick> {
+#[no_mangle]
+pub extern "C" fn stone_pad_connected() -> bool {
+    with_window(|window| !window.controller_manager.borrow().controllers.is_empty())
+        .unwrap_or(false)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_pad_type_name() -> *const c_char {
+    with_window(|window| window.controller_manager.borrow().active_type_name())
+        .flatten()
+        .map_or(ptr::null(), CStr::as_ptr)
+}
+
+fn virtual_pad_joystick(index: c_int) -> Option<*mut sdl2::sys::SDL_Joystick> {
     if index < 0 {
         return None;
     }
@@ -392,13 +268,40 @@ fn test_virtual_pad_joystick(index: c_int) -> Option<*mut sdl2::sys::SDL_Joystic
     (!joystick.is_null()).then_some(joystick)
 }
 
-pub(crate) fn test_virtual_pad_attach() -> c_int {
+fn token_str<'a>(token: *const c_char) -> Option<&'a str> {
+    (!token.is_null()).then(|| unsafe { CStr::from_ptr(token) }.to_str().unwrap_or(""))
+}
+
+/// Set one virtual control and pump SDL so its controller event is queued.
+fn drive_virtual_pad(
+    index: c_int,
+    control: Option<c_int>,
+    set: impl FnOnce(*mut sdl2::sys::SDL_Joystick, c_int) -> c_int,
+) -> bool {
+    let Some(control) = control else {
+        return false;
+    };
+    let Some(joystick) = virtual_pad_joystick(index) else {
+        return false;
+    };
+    unsafe {
+        sdl2::sys::SDL_GameControllerEventState(sdl2::sys::SDL_ENABLE as i32);
+        sdl2::sys::SDL_JoystickEventState(sdl2::sys::SDL_ENABLE as i32);
+        let result = set(joystick, control) == 0;
+        sdl2::sys::SDL_JoystickUpdate();
+        sdl2::sys::SDL_GameControllerUpdate();
+        sdl2::sys::SDL_JoystickUpdate();
+        sdl2::sys::SDL_PumpEvents();
+        result
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stone_test_virtual_pad_attach() -> c_int {
     if with_window(|_| ()).is_none() {
         return -1;
     }
-    let mapping = CString::new(VIRTUAL_CONTROLLER_MAPPING).expect("virtual mapping has no NUL");
-    let mapping_result = unsafe { sdl2::sys::SDL_GameControllerAddMapping(mapping.as_ptr()) };
-    if mapping_result < 0 {
+    if unsafe { sdl2::sys::SDL_GameControllerAddMapping(VIRTUAL_CONTROLLER_MAPPING.as_ptr()) } < 0 {
         return -1;
     }
     let index = unsafe {
@@ -415,63 +318,40 @@ pub(crate) fn test_virtual_pad_attach() -> c_int {
     index
 }
 
-pub(crate) fn test_virtual_pad_button(index: c_int, token: *const c_char, down: bool) -> bool {
-    if token.is_null() {
-        return false;
-    }
-    let token = unsafe { CStr::from_ptr(token) }.to_str().unwrap_or("");
-    let Some(button) = Button::from_string(token) else {
-        return false;
-    };
-    let Some(joystick) = test_virtual_pad_joystick(index) else {
-        return false;
-    };
-    unsafe { sdl2::sys::SDL_GameControllerEventState(sdl2::sys::SDL_ENABLE as i32) };
-    unsafe { sdl2::sys::SDL_JoystickEventState(sdl2::sys::SDL_ENABLE as i32) };
-    let result = unsafe {
-        sdl2::sys::SDL_JoystickSetVirtualButton(
-            joystick,
-            button as c_int,
-            if down {
-                sdl2::sys::SDL_PRESSED as u8
-            } else {
-                sdl2::sys::SDL_RELEASED as u8
-            },
-        )
-    } == 0;
-    unsafe { sdl2::sys::SDL_JoystickUpdate() };
-    unsafe { sdl2::sys::SDL_GameControllerUpdate() };
-    unsafe { sdl2::sys::SDL_JoystickUpdate() };
-    unsafe { sdl2::sys::SDL_PumpEvents() };
-    result
+#[no_mangle]
+pub extern "C" fn stone_test_virtual_pad_button(
+    index: c_int,
+    token: *const c_char,
+    down: bool,
+) -> bool {
+    let button = token_str(token).and_then(Button::from_string);
+    drive_virtual_pad(
+        index,
+        button.map(|b| b as c_int),
+        |joystick, button| unsafe {
+            sdl2::sys::SDL_JoystickSetVirtualButton(joystick, button, down as u8)
+        },
+    )
 }
 
-pub(crate) fn test_virtual_pad_axis(index: c_int, token: *const c_char, value: c_int) -> bool {
-    if token.is_null() {
-        return false;
-    }
-    let token = unsafe { CStr::from_ptr(token) }.to_str().unwrap_or("");
-    let Some(axis) = Axis::from_string(token) else {
-        return false;
-    };
-    let Ok(value) = i16::try_from(value) else {
-        return false;
-    };
-    let Some(joystick) = test_virtual_pad_joystick(index) else {
-        return false;
-    };
-    unsafe { sdl2::sys::SDL_GameControllerEventState(sdl2::sys::SDL_ENABLE as i32) };
-    unsafe { sdl2::sys::SDL_JoystickEventState(sdl2::sys::SDL_ENABLE as i32) };
-    let result =
-        unsafe { sdl2::sys::SDL_JoystickSetVirtualAxis(joystick, axis as c_int, value) } == 0;
-    unsafe { sdl2::sys::SDL_JoystickUpdate() };
-    unsafe { sdl2::sys::SDL_GameControllerUpdate() };
-    unsafe { sdl2::sys::SDL_JoystickUpdate() };
-    unsafe { sdl2::sys::SDL_PumpEvents() };
-    result
+#[no_mangle]
+pub extern "C" fn stone_test_virtual_pad_axis(
+    index: c_int,
+    token: *const c_char,
+    value: c_int,
+) -> bool {
+    let (axis, value) = (
+        token_str(token).and_then(Axis::from_string),
+        i16::try_from(value),
+    );
+    let control = axis.filter(|_| value.is_ok()).map(|a| a as c_int);
+    drive_virtual_pad(index, control, |joystick, axis| unsafe {
+        sdl2::sys::SDL_JoystickSetVirtualAxis(joystick, axis, value.unwrap_or(0))
+    })
 }
 
-pub(crate) fn test_virtual_pad_detach(index: c_int) -> bool {
+#[no_mangle]
+pub extern "C" fn stone_test_virtual_pad_detach(index: c_int) -> bool {
     let result = unsafe { sdl2::sys::SDL_JoystickDetachVirtual(index) } == 0;
     if result {
         TEST_VIRTUAL_PAD_INDICES.with(|indices| {
@@ -489,63 +369,6 @@ pub(crate) fn test_virtual_pad_cleanup() {
             }
         }
     });
-}
-
-fn controller_manager_event_to_stone_event(event: &ControllerManagerEvent) -> Option<StoneEvent> {
-    let mut translated = StoneEvent::default();
-    match event {
-        ControllerManagerEvent::DeviceAdded { instance_id } => {
-            translated.event_type = StoneEventType::PadDeviceAdded;
-            translated.pad_instance_id = *instance_id as c_int;
-        }
-        ControllerManagerEvent::DeviceRemoved { instance_id } => {
-            translated.event_type = StoneEventType::PadDeviceRemoved;
-            translated.pad_instance_id = *instance_id as c_int;
-        }
-        ControllerManagerEvent::ActiveChanged { to, .. } => {
-            translated.event_type = StoneEventType::PadActiveChanged;
-            translated.pad_instance_id = to.map(|id| id as c_int).unwrap_or(-1);
-        }
-        ControllerManagerEvent::Button {
-            instance_id,
-            button,
-            down,
-            sync,
-        } => {
-            translated.event_type = if *down {
-                StoneEventType::PadButtonDown
-            } else {
-                StoneEventType::PadButtonUp
-            };
-            translated.pad_instance_id = *instance_id as c_int;
-            translated.pad_button = controller_button_token(*button);
-            translated.pad_sync = *sync;
-        }
-        ControllerManagerEvent::Axis {
-            instance_id,
-            axis,
-            value,
-            sync,
-        } => {
-            translated.event_type = StoneEventType::PadAxisMotion;
-            translated.pad_instance_id = *instance_id as c_int;
-            translated.pad_axis = controller_axis_token(*axis);
-            translated.pad_value = *value as c_int;
-            translated.pad_sync = *sync;
-        }
-    }
-    Some(translated)
-}
-
-fn controller_button_token(button: Button) -> *const c_char {
-    let raw =
-        unsafe { std::mem::transmute::<i32, sdl2::sys::SDL_GameControllerButton>(button as i32) };
-    unsafe { sdl2::sys::SDL_GameControllerGetStringForButton(raw) }
-}
-
-fn controller_axis_token(axis: Axis) -> *const c_char {
-    let raw = unsafe { std::mem::transmute::<i32, sdl2::sys::SDL_GameControllerAxis>(axis as i32) };
-    unsafe { sdl2::sys::SDL_GameControllerGetStringForAxis(raw) }
 }
 
 struct ScancodeToken {
@@ -743,61 +566,28 @@ pub extern "C" fn stone_get_global_mouse_position(x: *mut c_int, y: *mut c_int) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::{CStr, CString};
 
-    fn run_virtual_controller_test_in_child() -> bool {
-        crate::test_support::in_isolated_child(
-            "input::tests::virtual_gamecontroller_exercises_production_sdl_controller_path",
-            "STONE_VIRTUAL_CONTROLLER_TEST_CHILD",
-        )
+    fn describe(event: &StoneEvent) -> String {
+        let id = event.pad_instance_id;
+        let token = |ptr: *const c_char| unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
+        let sync = if event.pad_sync { " sync" } else { "" };
+        match event.event_type {
+            StoneEventType::PadDeviceAdded => format!("added {id}"),
+            StoneEventType::PadDeviceRemoved => format!("removed {id}"),
+            StoneEventType::PadActiveChanged => format!("active {id}"),
+            StoneEventType::PadButtonDown => format!("{id} {} down{sync}", token(event.pad_button)),
+            StoneEventType::PadButtonUp => format!("{id} {} up{sync}", token(event.pad_button)),
+            StoneEventType::PadAxisMotion => {
+                format!("{id} {} {}{sync}", token(event.pad_axis), event.pad_value)
+            }
+            other => format!("{other:?}"),
+        }
     }
 
-    fn event_has_button(
-        events: &[ControllerManagerEvent],
-        button: Button,
-        down: bool,
-        sync: bool,
-    ) -> bool {
-        events.iter().any(|event| {
-            matches!(
-                event,
-                ControllerManagerEvent::Button {
-                    button: actual,
-                    down: actual_down,
-                    sync: actual_sync,
-                    ..
-                } if *actual == button && *actual_down == down && *actual_sync == sync
-            )
-        })
-    }
-
-    fn has_active_changed(
-        events: &[ControllerManagerEvent],
-        expected_from: Option<u32>,
-        expected_to: Option<u32>,
-    ) -> bool {
-        events.iter().any(|event| {
-            matches!(
-                event,
-                ControllerManagerEvent::ActiveChanged { from, to }
-                    if *from == expected_from && *to == expected_to
-            )
-        })
-    }
-
-    fn has_axis(
-        events: &[ControllerManagerEvent],
-        expected_axis: Axis,
-        expected_value: i16,
-        expected_sync: bool,
-    ) -> bool {
-        events.iter().any(|event| {
-            matches!(
-                event,
-                ControllerManagerEvent::Axis { axis, value, sync, .. }
-                    if *axis == expected_axis && *value == expected_value && *sync == expected_sync
-            )
-        })
+    fn drain(manager: &mut ControllerManager) -> Vec<String> {
+        std::iter::from_fn(|| manager.pop_stone_event())
+            .map(|event| describe(&event))
+            .collect()
     }
 
     #[test]
@@ -825,47 +615,45 @@ mod tests {
         let mut manager = ControllerManager::new();
         manager.add_controller(10);
         manager.add_controller(20);
+        let mut step = |input: &dyn Fn(&mut ControllerManager), expected: &[&str]| {
+            input(&mut manager);
+            assert_eq!(drain(&mut manager), expected);
+        };
 
-        let noise = manager.axis_event(10, Axis::LeftX, 1_000);
-        assert!(
-            noise.is_empty(),
-            "sub-threshold axis noise must not claim a pad"
+        // Sub-threshold axis noise does not claim a pad.
+        step(&|m| m.axis_event(10, Axis::LeftX, 1_000), &[]);
+        step(
+            &|m| m.axis_event(10, Axis::LeftX, 20_000),
+            &["active 10", "10 leftx 20000"],
         );
-        assert_eq!(manager.active_instance_id(), None);
-
-        let first_activity = manager.axis_event(10, Axis::LeftX, 20_000);
-        assert!(has_active_changed(&first_activity, None, Some(10)));
-        assert!(has_axis(&first_activity, Axis::LeftX, 20_000, false));
-        assert_eq!(manager.active_instance_id(), Some(10));
-
-        let held = manager.button_event(10, Button::A, true);
-        assert!(event_has_button(&held, Button::A, true, false));
-        assert!(manager.effective_button(Button::A));
-
-        let switched = manager.axis_event(20, Axis::RightX, -20_000);
-        assert!(has_active_changed(&switched, Some(10), Some(20)));
-        assert!(has_axis(&switched, Axis::RightX, -20_000, false));
-        assert!(!event_has_button(&switched, Button::A, true, false));
-        assert!(!manager.effective_button(Button::A));
-        assert_eq!(manager.effective_axis(Axis::LeftX), 0);
-
-        let second_press = manager.button_event(20, Button::B, true);
-        assert!(event_has_button(&second_press, Button::B, true, false));
-
-        let removed = manager.remove_controller(20);
-        assert!(has_active_changed(&removed, Some(20), None));
-        assert_eq!(manager.active_instance_id(), None);
-        assert!(!manager.effective_button(Button::B));
-
-        manager.add_controller(20);
-        assert_eq!(
-            manager.active_instance_id(),
-            None,
-            "a reused instance value starts idle"
+        step(&|m| m.button_event(10, Button::A, true), &["10 a down"]);
+        step(
+            &|m| m.axis_event(20, Axis::RightX, -20_000),
+            &["active 20", "20 rightx -20000"],
         );
-        let reused = manager.button_event(20, Button::X, true);
-        assert!(event_has_button(&reused, Button::X, true, false));
-        assert_eq!(manager.active_instance_id(), Some(20));
+        step(&|m| m.button_event(10, Button::Y, false), &[]);
+        step(&|m| m.button_event(20, Button::B, true), &["20 b down"]);
+        step(
+            &|m| m.button_event(10, Button::B, true),
+            &[
+                "active 10",
+                "10 b down",
+                "10 a down sync",
+                "10 leftx 20000 sync",
+            ],
+        );
+        step(&|m| m.remove_controller(10), &["removed 10", "active -1"]);
+        step(&|m| m.remove_controller(10), &[]);
+        assert_eq!(manager.active_instance_id(), None);
+        assert_eq!(manager.effective(button_slot(Button::B)), 0);
+
+        // A reused instance value starts idle.
+        manager.add_controller(10);
+        assert_eq!(manager.active_instance_id(), None);
+        manager.button_event(10, Button::X, true);
+        assert_eq!(drain(&mut manager), ["active 10", "10 x down"]);
+        assert_eq!(manager.effective(button_slot(Button::X)), 1);
+        assert_eq!(manager.effective(axis_slot(Axis::LeftX)), 0);
     }
 
     struct VirtualJoystickGuard {
@@ -875,43 +663,53 @@ mod tests {
     impl Drop for VirtualJoystickGuard {
         fn drop(&mut self) {
             for index in self.indices.drain(..) {
-                if index >= 0 {
-                    unsafe {
-                        sdl2::sys::SDL_JoystickDetachVirtual(index);
-                    }
+                unsafe {
+                    sdl2::sys::SDL_JoystickDetachVirtual(index);
                 }
             }
         }
     }
 
-    fn drain_sdl_controller_events(
-        manager: &mut SdlControllerManager,
-        pump: &mut sdl2::EventPump,
-    ) -> Vec<ControllerManagerEvent> {
-        let mut events = Vec::new();
+    fn drain_sdl(manager: &mut SdlControllerManager, pump: &mut sdl2::EventPump) -> Vec<String> {
         for _ in 0..8 {
             let mut polled = false;
             for event in pump.poll_iter() {
                 polled = true;
-                events.extend(manager.handle_sdl_event(&event));
+                manager.handle_sdl_event(&event);
             }
             if !polled {
                 break;
             }
         }
-        events
+        drain(&mut manager.manager)
     }
 
-    fn virtual_mapping() -> CString {
-        CString::new(
-            "03000000000000000000000000000000,Stone Virtual Pad,a:b0,b:b1,x:b2,y:b3,back:b4,start:b5,leftshoulder:b6,rightshoulder:b7,leftstick:b8,rightstick:b9,dpup:b10,dpdown:b11,dpleft:b12,dpright:b13,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5",
-        )
-        .unwrap()
+    fn attach_virtual_pad() -> c_int {
+        unsafe {
+            sdl2::sys::SDL_JoystickAttachVirtual(
+                sdl2::sys::SDL_JoystickType::SDL_JOYSTICK_TYPE_GAMECONTROLLER,
+                PAD_AXIS_COUNT as c_int,
+                PAD_BUTTON_COUNT as c_int,
+                0,
+            )
+        }
+    }
+
+    fn added_instance(events: &[String]) -> u32 {
+        events
+            .iter()
+            .find_map(|event| event.strip_prefix("added "))
+            .expect("device-added must publish an instance ID")
+            .parse()
+            .unwrap()
     }
 
     #[test]
     fn virtual_gamecontroller_exercises_production_sdl_controller_path() {
-        if run_virtual_controller_test_in_child() {
+        if crate::test_support::in_isolated_child(
+            "input::tests::virtual_gamecontroller_exercises_production_sdl_controller_path",
+            "STONE_VIRTUAL_CONTROLLER_TEST_CHILD",
+        ) {
             return;
         }
 
@@ -919,193 +717,110 @@ mod tests {
         let subsystem = sdl
             .game_controller()
             .expect("SDL game-controller subsystem must initialize");
-        subsystem.set_event_state(true);
-
-        let mapping = virtual_mapping();
-        let mapping_result = unsafe { sdl2::sys::SDL_GameControllerAddMapping(mapping.as_ptr()) };
+        let mapping_result =
+            unsafe { sdl2::sys::SDL_GameControllerAddMapping(VIRTUAL_CONTROLLER_MAPPING.as_ptr()) };
         assert!(
             mapping_result >= 0,
             "virtual controller mapping must be accepted"
         );
 
-        let mut manager = SdlControllerManager::new(subsystem.clone());
+        let mut manager = SdlControllerManager::new(subsystem);
         let mut pump = sdl.event_pump().expect("SDL event pump must initialize");
         let mut virtual_devices = VirtualJoystickGuard {
             indices: Vec::new(),
         };
 
-        let axis_count = sdl2::sys::SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_MAX as c_int;
-        let button_count = sdl2::sys::SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_MAX as c_int;
-        let first_index = unsafe {
-            sdl2::sys::SDL_JoystickAttachVirtual(
-                sdl2::sys::SDL_JoystickType::SDL_JOYSTICK_TYPE_GAMECONTROLLER,
-                axis_count,
-                button_count,
-                0,
-            )
-        };
+        let first_index = attach_virtual_pad();
         assert!(first_index >= 0, "SDL virtual joystick attach must succeed");
         virtual_devices.indices.push(first_index);
-        assert!(unsafe {
-            sdl2::sys::SDL_JoystickIsVirtual(first_index) == sdl2::sys::SDL_bool::SDL_TRUE
-        });
 
-        let initial_events = drain_sdl_controller_events(&mut manager, &mut pump);
-        let added_count = initial_events
-            .iter()
-            .filter(|event| matches!(event, ControllerManagerEvent::DeviceAdded { .. }))
-            .count();
+        let first_instance = added_instance(&drain_sdl(&mut manager, &mut pump));
         assert!(
-            added_count > 0,
-            "production SDL path must observe device-added"
-        );
-        let first_instance = initial_events
-            .iter()
-            .find_map(|event| match event {
-                ControllerManagerEvent::DeviceAdded { instance_id } => Some(*instance_id),
-                _ => None,
-            })
-            .expect("device-added must publish an instance ID");
-        assert!(
-            manager.is_open(first_instance),
+            manager.controllers.contains_key(&first_instance),
             "device-added must open the controller"
         );
-        assert!(unsafe {
-            sdl2::sys::SDL_IsGameController(first_index) != sdl2::sys::SDL_bool::SDL_FALSE
-        });
 
-        let joystick = unsafe { sdl2::sys::SDL_JoystickFromInstanceID(first_instance as i32) };
-        assert!(
-            !joystick.is_null(),
-            "production open must expose the joystick handle"
+        assert!(stone_test_virtual_pad_button(
+            first_index,
+            c"a".as_ptr(),
+            true
+        ));
+        let pressed = drain_sdl(&mut manager, &mut pump);
+        assert!(pressed.contains(&format!("{first_instance} a down")));
+        assert!(stone_test_virtual_pad_button(
+            first_index,
+            c"a".as_ptr(),
+            false
+        ));
+        assert_eq!(
+            drain_sdl(&mut manager, &mut pump),
+            [format!("{first_instance} a up")]
         );
-
-        let mut observed = Vec::new();
-        assert!(test_virtual_pad_button(first_index, c"a".as_ptr(), true));
-        observed.extend(drain_sdl_controller_events(&mut manager, &mut pump));
-        assert!(manager.manager.effective_button(Button::A));
-
-        assert!(test_virtual_pad_button(first_index, c"a".as_ptr(), false));
-        observed.extend(drain_sdl_controller_events(&mut manager, &mut pump));
-
-        for value in [1_000_i16, 22_000_i16] {
-            assert!(test_virtual_pad_axis(
-                first_index,
-                c"leftx".as_ptr(),
-                value as c_int
-            ));
-            observed.extend(drain_sdl_controller_events(&mut manager, &mut pump));
-            if value == 1_000 {
-                assert_eq!(manager.manager.effective_axis(Axis::LeftX), 1_000);
-            }
-        }
-        assert_eq!(manager.manager.effective_axis(Axis::LeftX), 22_000);
-
-        let button_down_count = observed
-            .iter()
-            .filter(|event| matches!(event, ControllerManagerEvent::Button { down: true, .. }))
-            .count();
-        let button_up_count = observed
-            .iter()
-            .filter(|event| matches!(event, ControllerManagerEvent::Button { down: false, .. }))
-            .count();
-        let observed_axis_count = observed
-            .iter()
-            .filter(|event| matches!(event, ControllerManagerEvent::Axis { .. }))
-            .count();
-        assert!(
-            button_down_count > 0,
-            "button press must cross the production boundary"
+        assert!(stone_test_virtual_pad_axis(
+            first_index,
+            c"leftx".as_ptr(),
+            1_000
+        ));
+        assert_eq!(
+            drain_sdl(&mut manager, &mut pump),
+            [format!("{first_instance} leftx 1000")]
         );
-        assert!(
-            button_up_count > 0,
-            "button release must cross the production boundary"
-        );
-        assert!(
-            observed_axis_count >= 2,
-            "both below- and above-threshold axes must cross the boundary"
-        );
-
-        let translated = observed
-            .iter()
-            .filter_map(controller_manager_event_to_stone_event)
-            .collect::<Vec<_>>();
-        assert!(translated
-            .iter()
-            .any(|event| event.event_type == StoneEventType::PadButtonDown));
-        assert!(translated
-            .iter()
-            .any(|event| event.event_type == StoneEventType::PadButtonUp));
-        assert!(translated
-            .iter()
-            .any(|event| event.event_type == StoneEventType::PadAxisMotion));
-        let button_event = translated
-            .iter()
-            .find(|event| event.event_type == StoneEventType::PadButtonDown)
-            .expect("button event must carry a stable token");
-        assert!(!button_event.pad_button.is_null());
-        let button_token = unsafe { CStr::from_ptr(button_event.pad_button) }
-            .to_str()
-            .unwrap();
-        assert_eq!(button_token, "a");
+        assert_eq!(manager.manager.effective(axis_slot(Axis::LeftX)), 1_000);
+        assert!(stone_test_virtual_pad_axis(
+            first_index,
+            c"leftx".as_ptr(),
+            22_000
+        ));
+        drain_sdl(&mut manager, &mut pump);
+        assert_eq!(manager.manager.effective(axis_slot(Axis::LeftX)), 22_000);
+        assert!(!stone_test_virtual_pad_axis(
+            first_index,
+            c"leftx".as_ptr(),
+            40_000
+        ));
+        assert!(!stone_test_virtual_pad_button(
+            first_index,
+            c"nope".as_ptr(),
+            true
+        ));
+        assert!(!stone_test_virtual_pad_button(-1, c"a".as_ptr(), true));
 
         let removed_index = virtual_devices.indices.pop().unwrap();
         assert_eq!(
             unsafe { sdl2::sys::SDL_JoystickDetachVirtual(removed_index) },
             0
         );
-        let removed_events = drain_sdl_controller_events(&mut manager, &mut pump);
-        assert!(removed_events.iter().any(|event| matches!(
-            event,
-            ControllerManagerEvent::DeviceRemoved { instance_id } if *instance_id == first_instance
-        )));
         assert_eq!(
-            manager.manager.active_instance_id(),
-            None,
-            "removal must clear the active instance"
+            drain_sdl(&mut manager, &mut pump),
+            [
+                format!("{first_instance} leftx 0"),
+                format!("removed {first_instance}"),
+                "active -1".to_string()
+            ]
         );
 
-        let second_index = unsafe {
-            sdl2::sys::SDL_JoystickAttachVirtual(
-                sdl2::sys::SDL_JoystickType::SDL_JOYSTICK_TYPE_GAMECONTROLLER,
-                axis_count,
-                button_count,
-                0,
-            )
-        };
+        let second_index = attach_virtual_pad();
         assert_eq!(
             second_index, removed_index,
             "SDL device index must be reused in this gate"
         );
         virtual_devices.indices.push(second_index);
-        let reconnect_events = drain_sdl_controller_events(&mut manager, &mut pump);
-        let second_instance = reconnect_events
-            .iter()
-            .find_map(|event| match event {
-                ControllerManagerEvent::DeviceAdded { instance_id } => Some(*instance_id),
-                _ => None,
-            })
-            .expect("reconnect must publish a new device-added event");
+        let second_instance = added_instance(&drain_sdl(&mut manager, &mut pump));
         assert_ne!(
             second_instance, first_instance,
             "SDL instance IDs must not be reused"
         );
-        assert!(manager.is_open(second_instance));
-        let second_joystick =
-            unsafe { sdl2::sys::SDL_JoystickFromInstanceID(second_instance as i32) };
-        assert!(!second_joystick.is_null());
+        assert!(stone_test_virtual_pad_button(
+            second_index,
+            c"b".as_ptr(),
+            true
+        ));
         assert_eq!(
-            unsafe {
-                sdl2::sys::SDL_JoystickSetVirtualButton(
-                    second_joystick,
-                    Button::B as c_int,
-                    sdl2::sys::SDL_PRESSED as u8,
-                )
-            },
-            0
+            drain_sdl(&mut manager, &mut pump),
+            [
+                format!("active {second_instance}"),
+                format!("{second_instance} b down")
+            ]
         );
-        let reconnect_input = drain_sdl_controller_events(&mut manager, &mut pump);
-        assert!(event_has_button(&reconnect_input, Button::B, true, false));
-        assert_eq!(manager.manager.active_instance_id(), Some(second_instance));
     }
 }

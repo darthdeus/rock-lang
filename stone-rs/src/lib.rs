@@ -1332,53 +1332,6 @@ pub extern "C" fn stone_is_initialized() -> bool {
     INITIALIZED.load(Ordering::SeqCst)
 }
 
-#[no_mangle]
-pub extern "C" fn stone_test_virtual_pad_attach() -> c_int {
-    input::test_virtual_pad_attach()
-}
-
-#[no_mangle]
-pub extern "C" fn stone_test_virtual_pad_button(
-    index: c_int,
-    token: *const c_char,
-    down: bool,
-) -> bool {
-    input::test_virtual_pad_button(index, token, down)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_test_virtual_pad_axis(
-    index: c_int,
-    token: *const c_char,
-    value: c_int,
-) -> bool {
-    input::test_virtual_pad_axis(index, token, value)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_test_virtual_pad_detach(index: c_int) -> bool {
-    input::test_virtual_pad_detach(index)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_pad_connected() -> bool {
-    with_window(|window| window.controller_manager.borrow().connected()).unwrap_or(false)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_pad_type_name() -> *const c_char {
-    let type_name =
-        with_window(|window| window.controller_manager.borrow().active_type_name()).flatten();
-    match type_name {
-        Some("xbox") => c"xbox".as_ptr(),
-        Some("playstation") => c"playstation".as_ptr(),
-        Some("nintendo") => c"nintendo".as_ptr(),
-        Some("virtual") => c"virtual".as_ptr(),
-        Some("unknown") => c"unknown".as_ptr(),
-        _ => ptr::null(),
-    }
-}
-
 #[cfg(any(test, target_os = "linux"))]
 fn sdl_graphics_driver_paths(
     search_path: &std::ffi::OsStr,
@@ -1988,7 +1941,12 @@ pub extern "C" fn stone_poll_event(event: *mut StoneEvent) -> bool {
     }
 
     with_window_mut(|window| {
-        if let Some(translated) = window.controller_manager.borrow_mut().pop_stone_event() {
+        if let Some(translated) = window
+            .controller_manager
+            .borrow_mut()
+            .manager
+            .pop_stone_event()
+        {
             unsafe {
                 (*event) = translated;
             }
@@ -2070,9 +2028,8 @@ pub extern "C" fn stone_poll_event(event: *mut StoneEvent) -> bool {
         let _ = crate::imgui::process_event(&raw as *const _ as *mut std::ffi::c_void);
         let controller_event = {
             let mut manager = window.controller_manager.borrow_mut();
-            let events = manager.handle_sdl_event(&sdl_event);
-            manager.enqueue(events);
-            manager.pop_stone_event()
+            manager.handle_sdl_event(&sdl_event);
+            manager.manager.pop_stone_event()
         };
         if let Some(translated) = controller_event {
             unsafe {
