@@ -708,6 +708,12 @@ fn inlay_hint_cases() {
             vec![": int"],
         ),
         (
+            "receiver types use their declaration spelling",
+            "struct Parcel<T, U> { data: T, index: U }\nfn Parcel<T, U>.describe<V>(self, value: V) {}\nfn int.inspect(self) {}\npub mod boxes { pub struct Crate {} }\nfn boxes::Crate.peek(self) {}\n",
+            lines(0, 5),
+            vec![": Parcel<T, U>", ": int", ": boxes::Crate"],
+        ),
+        (
             "only positional call args",
             "fn make(a: int, b: int, c: int, d: int) -> int { return a }\nfn r() -> int {\n    return make(1, b: 2, d: 4)\n}\n",
             lines(0, 4),

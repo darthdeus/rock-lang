@@ -1174,9 +1174,9 @@ pub(crate) fn receiver_param_hints(ast: &Ast, start: usize, end: usize) -> Vec<(
         let skull_parser::ItemKind::Function(f) = &item.kind else {
             continue;
         };
-        if f.receiver_surface.is_none() {
+        let Some((name, generic_count)) = &f.receiver_surface else {
             continue;
-        }
+        };
         let Some(recv) = f.params.first() else {
             continue;
         };
@@ -1184,68 +1184,28 @@ pub(crate) fn receiver_param_hints(ast: &Ast, start: usize, end: usize) -> Vec<(
         if s < start || s >= end {
             continue;
         }
-        out.push((recv.span, format!(": {}", render_type_expr(ast, recv.ty))));
+        let ty = match &ast.te(&recv.ty).kind {
+            skull_parser::TypeExprKind::Path(path) => {
+                let root = if path.from_root { "::" } else { "" };
+                let names = path
+                    .segments
+                    .iter()
+                    .map(|seg| seg.name.as_str())
+                    .collect::<Vec<_>>();
+                format!("{root}{}", names.join("::"))
+            }
+            _ if *generic_count != 0 => {
+                let args = f.generics[..*generic_count]
+                    .iter()
+                    .map(|arg| arg.name.name.as_str())
+                    .collect::<Vec<_>>();
+                format!("{}<{}>", name.name, args.join(", "))
+            }
+            _ => name.name.to_string(),
+        };
+        out.push((recv.span, format!(": {ty}")));
     }
     out
-}
-
-fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData>) -> String {
-    use skull_parser::TypeExprKind as K;
-    let te = ast.te(&idx);
-    let join = |xs: &[skull_parser::Idx<skull_parser::TypeExprData>]| {
-        xs.iter()
-            .map(|x| render_type_expr(ast, *x))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let base = match &te.kind {
-        K::Any => "any".to_string(),
-        K::Unit => "()".to_string(),
-        K::String => "string".to_string(),
-        K::Int => "int".to_string(),
-        K::Uint => "uint".to_string(),
-        K::Float => "float".to_string(),
-        K::F64 => "f64".to_string(),
-        K::F32 => "f32".to_string(),
-        K::Bool => "bool".to_string(),
-        K::Ref(target) => format!("ref {}", render_type_expr(ast, *target)),
-        K::Ident(id) => id.name.to_string(),
-        K::Path(path) => {
-            let root = if path.from_root { "::" } else { "" };
-            format!(
-                "{root}{}",
-                path.segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("::")
-            )
-        }
-        K::Array(el) => format!("[{}]", render_type_expr(ast, *el)),
-        K::AppPath { ctor, args } => {
-            let root = if ctor.from_root { "::" } else { "" };
-            format!(
-                "{root}{}<{}>",
-                ctor.segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("::"),
-                join(args)
-            )
-        }
-        K::App { ctor, args } => format!("{}<{}>", ctor.name, join(args)),
-        K::Tuple(els) => format!("({})", join(els)),
-        K::Function { params, ret } => {
-            format!("fn({}) -> {}", join(params), render_type_expr(ast, *ret))
-        }
-        K::Hole(..) => "?".to_string(),
-    };
-    if te.is_nullable {
-        format!("{base}?")
-    } else {
-        base
-    }
 }
 
 pub(crate) struct LocalBinding {
