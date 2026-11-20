@@ -46,7 +46,7 @@ pub(super) fn decorator_application_lines_js(
     ws: &Workspace,
     decorators: &DecoratorTable,
     interner: &skull_mir::monoty::MonoInterner,
-    names: &CalleeNames,
+    names: &CalleeNames<'_>,
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
     for app in decorators.applications(ws, bone_core::hir::FnBackend::Js) {
@@ -178,7 +178,7 @@ pub(super) fn queue_standalone(
     inst: Instance,
     findings: &mut Vec<CompilerError>,
 ) {
-    let Some(&selected) = st.artifact_decls.get(&inst) else {
+    let Some(selected) = st.selected_decl(&inst) else {
         findings.push(err(
             "JS: a retained specialization has no artifact declaration",
         ));
@@ -187,7 +187,7 @@ pub(super) fn queue_standalone(
     if js_supply(ws, &ws.module(selected.module).functions[selected.func]).is_some() {
         return;
     }
-    if !st.view_instances.contains(&inst) {
+    if !st.view.instances.contains(&inst) {
         let f = &ws.module(inst.func.module).functions[inst.func.func];
         findings.push(CompilerError::new_with_label(
             f.name_span,
@@ -232,7 +232,7 @@ pub(super) fn schedule_residual_calls(
             )));
             continue;
         };
-        let Some(&selected) = st.artifact_decls.get(&instance) else {
+        let Some(selected) = st.selected_decl(&instance) else {
             if requested_f.inline_body.is_some() || requested_f.is_extern {
                 findings.push(err(format!(
                     "JS subset: call to `{}` is not a mapped JS intrinsic",
@@ -334,12 +334,12 @@ fn register_fn_values_from_view(
                 "JS: function value `{surface}` has no shared InstanceGraph resolution"
             )));
         };
-        if !st.fn_value_targets.contains(&instance) {
+        if !st.view.fn_value_targets.contains(&instance) {
             return Err(err(format!(
                 "JS: function value `{surface}` is absent from ArtifactView::fn_value_targets"
             )));
         }
-        let Some(&selected) = st.artifact_decls.get(&instance) else {
+        let Some(selected) = st.selected_decl(&instance) else {
             return Err(err(format!(
                 "JS: function value `{surface}` resolves to an instance absent from the artifact view"
             )));
@@ -454,7 +454,7 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
 pub(super) fn order_global_inits(
     ginits: &[GlobalInit],
     lowered: &[(FuncRef, MirFunc)],
-    names: &CalleeNames,
+    names: &CalleeNames<'_>,
     state_slots: &HashMap<ustr::Ustr, String>,
 ) -> Result<Vec<String>, CompilerError> {
     let mut direct_globals: rustc_hash::FxHashMap<Ustr, Vec<Ustr>> = Default::default();

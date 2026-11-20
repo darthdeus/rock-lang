@@ -16,7 +16,7 @@ use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Te
 
 const OMITTED_ARG: &str = "__rock_omitted";
 use skull_graph::artifact::{self, ArtifactView};
-use skull_graph::instance_graph::{InstanceGraph, Site, SiteOutcome};
+use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 use skull_graph::target_projection;
 use skull_parser::{CompilerError, Span};
 use ustr::Ustr;
@@ -227,52 +227,26 @@ fn js_member(base: &str, f: &str) -> String {
 /// The JS name every co-emitted callee is called by; a call carrying an `Instance` targets that
 /// instantiation's standalone copy.
 #[derive(Default)]
-pub struct CalleeNames {
-    names: HashMap<Instance, String>,
-    graph_instances: Vec<Instance>,
-    owner_instances: Vec<Instance>,
-    site_targets: HashMap<(Instance, Site), Instance>,
+struct CalleeNames<'a> {
+    session: Option<&'a JsSession>,
+    overrides: HashMap<Instance, String>,
 }
 
-impl CalleeNames {
-    fn from_graph(graph: &InstanceGraph) -> Self {
-        let owner_instances = graph
-            .substitutions()
-            .map(|(instance, _)| instance.clone())
-            .collect();
-        let site_targets = graph
-            .call_sites()
-            .flat_map(|(caller, sites)| {
-                sites.iter().filter_map(|(site, record)| {
-                    let SiteOutcome::Resolved(callee) = &record.outcome else {
-                        return None;
-                    };
-                    Some(((caller.clone(), site.clone()), callee.clone()))
-                })
-            })
-            .collect();
-        Self {
-            names: HashMap::new(),
-            graph_instances: graph.instances.iter().cloned().collect(),
-            owner_instances,
-            site_targets,
-        }
-    }
-
+impl CalleeNames<'_> {
     fn get(&self, body: &Instance) -> Option<&String> {
-        self.names.get(body)
-    }
-
-    fn insert(&mut self, body: Instance, name: String) {
-        self.names.insert(body, name);
+        self.overrides.get(body).or_else(|| {
+            let view = &self.session?.view;
+            view.realization.get(body)?;
+            view.publications
+                .get(body)
+                .or_else(|| view.symbols.get(body))
+        })
     }
 
     fn base_instance(&self, ws: &Workspace, fr: FuncRef) -> Option<Instance> {
-        let canonical = skull_mir::lower::canonical_variant(ws, fr);
-        self.graph_instances
-            .iter()
-            .find(|instance| instance.func == canonical && instance.args.is_empty())
-            .cloned()
+        let graph = &self.session?.graph;
+        let instance = Instance::base(skull_mir::lower::canonical_variant(ws, fr));
+        graph.instances.contains(&instance).then_some(instance)
     }
 
     fn name_for_decl(&self, ws: &Workspace, fr: FuncRef) -> Option<&String> {
@@ -281,11 +255,12 @@ impl CalleeNames {
     }
 
     fn instance_for_owner(&self, ws: &Workspace, owner: &Instance) -> Option<Instance> {
-        let func = skull_mir::lower::canonical_variant(ws, owner.func);
-        self.owner_instances
-            .iter()
-            .find(|candidate| candidate.func == func && candidate.args == owner.args)
-            .cloned()
+        let graph = &self.session?.graph;
+        let instance = Instance {
+            func: skull_mir::lower::canonical_variant(ws, owner.func),
+            args: owner.args.clone(),
+        };
+        graph.substitution(&instance).map(|_| instance)
     }
 
     fn instance_for_call(
@@ -312,16 +287,18 @@ impl CalleeNames {
         let call_site = mf.call_sites.get(&iid)?;
         let owner = mf.site_owners.get(call_site.owner.0 as usize)?;
         let owner = self.instance_for_owner(ws, owner)?;
-        self.site_targets
-            .get(&(owner, call_site.site.clone()))
-            .cloned()
+        let graph = &self.session?.graph;
+        match &graph.sites_of(&owner)?.get(&call_site.site)?.outcome {
+            SiteOutcome::Resolved(callee) => Some(callee.clone()),
+            SiteOutcome::Failed(_) => None,
+        }
     }
 }
 
 struct Emitter<'a> {
     ws: &'a Workspace,
     mf: &'a MirFunc,
-    callees: &'a CalleeNames,
+    callees: &'a CalleeNames<'a>,
     /// Hoisted closure body names: the only `Inst::Global` a capture-free lambda creation site may
     /// reference.
     hoisted: &'a HashSet<ustr::Ustr>,

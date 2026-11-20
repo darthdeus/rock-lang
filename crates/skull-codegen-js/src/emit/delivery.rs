@@ -105,7 +105,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
     }
 
     fn lower_standalone(&mut self, inst: Instance) -> Result<(), CompilerError> {
-        if !self.st.view_instances.contains(&inst) {
+        if !self.st.view.instances.contains(&inst) {
             self.st.reject(
                 &format!("instance:{:?}", inst.func),
                 err("JS: a residual specialization is absent from the artifact view"),
@@ -115,15 +115,15 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         let interner = self.scx.interner();
         let rejection = inst.too_deep_error(self.ws, interner).or_else(|| {
             self.st
-                .bound_tree_disagreements
-                .contains(&inst)
+                .graph
+                .has_bound_tree_disagreement(&inst)
                 .then(|| inst.bound_clash_error(self.ws, interner))
         });
         if let Some(error) = rejection {
             self.st.reject(&inst.symbol(self.ws, interner), error);
             return Ok(());
         }
-        let Some(&fr) = self.st.artifact_decls.get(&inst) else {
+        let Some(fr) = self.st.selected_decl(&inst) else {
             self.st.reject(
                 &format!("instance:{:?}", inst.func),
                 err("JS: a lowered specialization is absent from the artifact view"),
@@ -242,7 +242,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             collect_spec_bound_calls(ws, mf, &mut demands),
         );
         for demand in demands {
-            if st.bound_tree_disagreements.contains(&demand.inst) {
+            if st.graph.has_bound_tree_disagreement(&demand.inst) {
                 findings.push(demand.inst.bound_clash_error(ws, self.scx.interner()));
             } else {
                 queue_standalone(st, ws, demand.inst, &mut findings);
@@ -289,7 +289,7 @@ pub(super) fn emit_lowered_fn(
     mf: &MirFunc,
     js_name: &str,
     concrete: &skull_mir::concrete::ConcreteBodyPlan,
-    names: &CalleeNames,
+    names: &CalleeNames<'_>,
     hoisted: &HashSet<ustr::Ustr>,
     gctx: &GlobalCtx,
 ) -> Result<(String, CodeArtifact), CompilerError> {
@@ -327,7 +327,7 @@ pub(super) fn emit_spec_chunks(
             .names
             .get(inst)
             .expect("a lowered specialization has a name");
-        let selected_decl = match st.artifact_decls.get(inst).copied() {
+        let selected_decl = match st.selected_decl(inst) {
             Some(decl) => decl,
             None => {
                 rejections.push((
@@ -367,7 +367,7 @@ pub(super) fn check_scalar_abi(
     st: &WorklistState,
     bodies: &[&MirFunc],
 ) -> Vec<(String, CompilerError)> {
-    let (concrete, artifact_decls) = (st.concrete, &st.artifact_decls);
+    let concrete = st.concrete;
     let arities: HashMap<FuncRef, usize> = st
         .lowered
         .iter()
@@ -403,8 +403,8 @@ pub(super) fn check_scalar_abi(
                         Some(&arity) => (Instance::base(*callee), arity, ""),
                     },
                 };
-                let selected = artifact_decls.get(&body).map(|decl| Instance {
-                    func: *decl,
+                let selected = st.selected_decl(&body).map(|func| Instance {
+                    func,
                     args: body.args.clone(),
                 });
                 let abi = match selected.as_ref().filter(|inst| inst.func != body.func) {

@@ -16,16 +16,7 @@ pub(super) fn assemble_program_core(
     {
         return Err(error);
     }
-    let mut st = WorklistState::new(
-        ws,
-        scx,
-        roots,
-        program_mode,
-        &session.graph,
-        &session.view,
-        session.concrete.plans.as_ref(),
-        &session.concrete.always_plans,
-    )?;
+    let mut st = WorklistState::new(ws, scx, roots, program_mode, session)?;
     let effects = if program_mode {
         let lifecycle = skull_mir::lifecycle::collect(ws)?;
         queue_lifecycle_dependency_initializers(ws, &mut st, &lifecycle)?;

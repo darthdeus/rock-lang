@@ -11,15 +11,15 @@ pub(super) struct WorklistState<'a> {
     pub(super) concrete: &'a skull_mir::concrete::ConcretePlans,
     pub(super) always: &'a skull_mir::concrete::ConcreteAlwaysPlans,
     pub(super) cache: skull_transform::InlineCache,
-    pub(super) names: CalleeNames,
+    pub(super) names: CalleeNames<'a>,
+    pub(super) view: &'a ArtifactView,
     pub(super) queue: Vec<FuncRef>,
     pub(super) seen: HashSet<FuncRef>,
     pub(super) lowered: Vec<(FuncRef, MirFunc)>,
     pub(super) spec_lowered: Vec<(Instance, MirFunc)>,
     pub(super) standalone_specs: Vec<Instance>,
     pub(super) standalone_seen: HashSet<Instance>,
-    pub(super) view_instances: BTreeSet<Instance>,
-    pub(super) bound_tree_disagreements: HashSet<Instance>,
+    pub(super) graph: &'a InstanceGraph,
     pub(super) inline_js: Vec<JsInlineBody>,
     pub(super) state_index: HashMap<ustr::Ustr, GlobalSite>,
     pub(super) nobox_leaf_globals: HashMap<ustr::Ustr, ustr::Ustr>,
@@ -30,9 +30,6 @@ pub(super) struct WorklistState<'a> {
     ginit_seen: HashSet<Ustr>,
     pub(super) ginits: Vec<GlobalInit>,
     pub(super) rejections: Vec<(String, CompilerError)>,
-    pub(super) artifact_decls: HashMap<Instance, FuncRef>,
-    pub(super) fn_value_targets: HashSet<Instance>,
-    opaque_targets: BTreeMap<skull_graph::instance_graph::DeclKey, rustc_hash::FxHashSet<FuncRef>>,
     pub(super) json_types: super::json_types::JsonTypes,
 }
 
@@ -71,12 +68,17 @@ impl<'a> WorklistState<'a> {
         scx: &skull_mir::lower::ScalarCtx,
         roots: &[(FuncRef, String)],
         program_mode: bool,
-        graph: &InstanceGraph,
-        view: &ArtifactView,
-        concrete: &'a skull_mir::concrete::ConcretePlans,
-        always: &'a skull_mir::concrete::ConcreteAlwaysPlans,
+        session: &'a JsSession,
     ) -> Result<Self, CompilerError> {
-        let mut names = CalleeNames::from_graph(graph);
+        let JsSession {
+            graph,
+            view,
+            concrete,
+        } = session;
+        let mut names = CalleeNames {
+            session: Some(session),
+            ..Default::default()
+        };
         for (fr, name) in roots {
             let key = names.base_instance(ws, *fr).ok_or_else(|| {
                 err(format!(
@@ -84,23 +86,8 @@ impl<'a> WorklistState<'a> {
                     ws.module(fr.module).functions[fr.func].name
                 ))
             })?;
-            names.insert(key, name.clone());
+            names.overrides.insert(key, name.clone());
         }
-        for inst in view.realization.keys() {
-            let name = view
-                .publications
-                .get(inst)
-                .or_else(|| view.symbols.get(inst))
-                .expect("artifact view names every retained instance")
-                .clone();
-            names.names.entry(inst.clone()).or_insert(name);
-        }
-        let bound_tree_disagreements = graph.bound_tree_dissenters().into_iter().collect();
-        let artifact_decls = view
-            .realization
-            .iter()
-            .map(|(inst, realized)| (inst.clone(), realized.decl))
-            .collect();
         let gctx = GlobalCtx {
             state: skull_mir::global_storage::global_storage_keys(ws, scx)
                 .map_err(err)?
@@ -110,12 +97,12 @@ impl<'a> WorklistState<'a> {
             ..GlobalCtx::default()
         };
         let mut st = WorklistState {
-            concrete,
-            always,
+            concrete: &concrete.plans,
+            always: &concrete.always_plans,
             standalone_specs: Vec::new(),
             standalone_seen: HashSet::new(),
-            view_instances: view.instances.clone(),
-            bound_tree_disagreements,
+            view,
+            graph,
             cache: skull_transform::InlineCache::default(),
             names,
             queue: Vec::new(),
@@ -136,15 +123,19 @@ impl<'a> WorklistState<'a> {
             ginit_seen: HashSet::new(),
             ginits: Vec::new(),
             rejections: Vec::new(),
-            artifact_decls,
-            fn_value_targets: view.fn_value_targets.iter().cloned().collect(),
-            opaque_targets: view.opaque_boundary_roots.clone(),
             json_types: super::json_types::JsonTypes::new(scx),
         };
         for &(requested, _) in roots {
             st.queue_root(ws, requested)?;
         }
         Ok(st)
+    }
+
+    pub(super) fn selected_decl(&self, instance: &Instance) -> Option<FuncRef> {
+        self.view
+            .realization
+            .get(instance)
+            .map(|realized| realized.decl)
     }
 
     fn queue_root(&mut self, ws: &Workspace, requested: FuncRef) -> Result<(), CompilerError> {
@@ -158,9 +149,10 @@ impl<'a> WorklistState<'a> {
         // name.
         if self.names.get(&key).is_none() {
             self.names
+                .overrides
                 .insert(key.clone(), callee_js_name(ws, requested));
         }
-        let fr = self.artifact_decls.get(&key).copied().unwrap_or(requested);
+        let fr = self.selected_decl(&key).unwrap_or(requested);
         let f = &ws.module(fr.module).functions[fr.func];
         if self.seen.insert(fr) {
             if matches!(f.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
@@ -184,7 +176,8 @@ impl<'a> WorklistState<'a> {
         let factories = self.json_types.add_body(ws, decl, &instance.args)?;
         self.inline_js.push(JsInlineBody { instance, decl });
         let mut targets: Vec<FuncRef> = self
-            .opaque_targets
+            .view
+            .opaque_boundary_roots
             .get(&skull_graph::instance_graph::DeclKey(decl))
             .map(|targets| targets.iter().copied().collect())
             .unwrap_or_default();

@@ -15,7 +15,7 @@ pub(super) fn emit_coroutine_js(
     plan: &skull_mir::lower::CoroutinePlan,
     concrete: &skull_mir::concrete::ConcreteBodyPlan,
     mf: &MirFunc,
-    callees: &CalleeNames,
+    callees: &CalleeNames<'_>,
     hoisted: &HashSet<ustr::Ustr>,
     globals: &GlobalCtx,
 ) -> Result<(String, CodeArtifact), CompilerError> {

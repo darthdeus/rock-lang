@@ -16,11 +16,11 @@ pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, Co
 
 /// [`emit_fn`] with known co-emitted callees: a call to one renders as `<js name>(args)`; anything
 /// else unmapped rejects.
-pub(crate) fn emit_fn_with_callees(
+pub(super) fn emit_fn_with_callees(
     ws: &Workspace,
     mf: &MirFunc,
     js_name: &str,
-    callees: &CalleeNames,
+    callees: &CalleeNames<'_>,
     hoisted: &HashSet<ustr::Ustr>,
     globals: &GlobalCtx,
 ) -> Result<String, CompilerError> {
@@ -44,11 +44,11 @@ pub(crate) fn emit_fn_with_callees(
 /// A block trampoline `for(;;) switch(__bb)` for a region, the coroutine-step shape (dispatch-into-
 /// loops is irreducible, so the relooper cannot apply). Case bodies are braced so `let v<N>` temps
 /// stay case-local.
-pub fn emit_fn_trampoline(
+pub(super) fn emit_fn_trampoline(
     ws: &Workspace,
     mf: &MirFunc,
     js_name: &str,
-    callees: &CalleeNames,
+    callees: &CalleeNames<'_>,
     hoisted: &HashSet<ustr::Ustr>,
     globals: &GlobalCtx,
     entry: Idx<Block>,
@@ -95,7 +95,7 @@ impl<'a> FnFrame<'a> {
     fn new(
         ws: &'a Workspace,
         mf: &'a MirFunc,
-        callees: &'a CalleeNames,
+        callees: &'a CalleeNames<'a>,
         hoisted: &'a HashSet<ustr::Ustr>,
         globals: &'a GlobalCtx,
         entry: Idx<Block>,
@@ -197,7 +197,7 @@ pub(super) fn emit_body_with_nested(
     ws: &Workspace,
     mf: &MirFunc,
     js_name: &str,
-    names: &CalleeNames,
+    names: &CalleeNames<'_>,
     hoisted: &HashSet<ustr::Ustr>,
     gctx: &GlobalCtx,
 ) -> Result<String, CompilerError> {
@@ -218,7 +218,7 @@ pub(super) fn emit_body_with_nested(
 pub(super) fn emit_ginit_with_nested(
     ws: &Workspace,
     g: &GlobalInit,
-    names: &CalleeNames,
+    names: &CalleeNames<'_>,
     hoisted: &HashSet<ustr::Ustr>,
     gctx: &GlobalCtx,
 ) -> Result<String, CompilerError> {
