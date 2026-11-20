@@ -427,10 +427,7 @@ fn try_emit_js_program_project(dir: &str) -> Result<skull_codegen_js::emit::JsPr
     })?;
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir))?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-    // The cached emission also collects the project's shaders, so a project
-    // whose shaders do not collect is rejected here, unlike a single file.
-    skull_codegen_js::emit::emit_program_cached(&ws, user_mid)
-        .map(|(program, _cache)| program)
+    skull_codegen_js::emit::emit_program(&ws, user_mid)
         .map_err(|e| anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e)))
 }
 

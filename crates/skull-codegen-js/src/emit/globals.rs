@@ -93,11 +93,6 @@ pub(super) struct GlobalInit {
     pub(super) order: (usize, u32),
 }
 
-pub(super) struct GlobalInitLine {
-    pub(super) name: ustr::Ustr,
-    pub(super) js: String,
-}
-
 /// Use the shared symbol spelling: a qualified logical name is not a JS
 /// identifier, and flattening its separators would merge distinct namespaces.
 pub(super) fn global_init_js_name(name: ustr::Ustr) -> String {
@@ -454,27 +449,6 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
     out
 }
 
-pub(super) fn affected_const_names(
-    ws: &Workspace,
-    changed: &HashSet<ustr::Ustr>,
-    const_order: &[ustr::Ustr],
-) -> HashSet<ustr::Ustr> {
-    if changed.is_empty() {
-        return HashSet::default();
-    }
-    let deps = skull_mir::reach::symbol_references(ws);
-    const_order
-        .iter()
-        .copied()
-        .filter(|name| {
-            changed.contains(name)
-                || skull_mir::reach::forward_reach(&deps, *name)
-                    .iter()
-                    .any(|dependency| changed.contains(dependency))
-        })
-        .collect()
-}
-
 /// Order global-init assignments so each global inits after every global it transitively reads
 /// through its call graph; a cycle rejects.
 pub(super) fn order_global_inits(
@@ -482,7 +456,7 @@ pub(super) fn order_global_inits(
     lowered: &[(FuncRef, MirFunc)],
     names: &CalleeNames,
     state_slots: &HashMap<ustr::Ustr, String>,
-) -> Result<Vec<GlobalInitLine>, CompilerError> {
+) -> Result<Vec<String>, CompilerError> {
     let mut direct_globals: rustc_hash::FxHashMap<Ustr, Vec<Ustr>> = Default::default();
     let mut direct_calls: rustc_hash::FxHashMap<Ustr, Vec<Ustr>> = Default::default();
     let mut record = |key: Ustr, mf: &MirFunc| {
@@ -531,7 +505,7 @@ pub(super) fn order_global_inits(
 fn global_init_line(
     g: &GlobalInit,
     state_slots: &HashMap<ustr::Ustr, String>,
-) -> Result<GlobalInitLine, CompilerError> {
+) -> Result<String, CompilerError> {
     let slot = |name: Ustr, scalar: bool| {
         if g.is_const {
             return Ok(js_member("__G", name.as_str()));
@@ -566,7 +540,7 @@ fn global_init_line(
         js.push_str(&format!("{} = {}();", slot(g.name, true)?, g.init_name));
     }
     js.push('\n');
-    Ok(GlobalInitLine { name: g.name, js })
+    Ok(js)
 }
 
 fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {

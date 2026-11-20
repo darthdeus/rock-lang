@@ -1,4 +1,4 @@
-//! Whole-program assembly and the program/cache types it produces.
+//! Whole-program assembly and the program types it produces.
 
 use super::*;
 
@@ -94,7 +94,6 @@ pub(super) fn assemble_program_core(
     let (hoisted, tables) = check_bodies(ws, scx, &st, &bodies, &mut rejections)?;
 
     let mut out = String::new();
-    let mut stable = String::new();
     let mut code_artifact = CodeArtifact::default();
     for (name, mf) in &deco_bodies {
         let mut artifact = js_code_artifact(ws, mf);
@@ -102,45 +101,27 @@ pub(super) fn assemble_program_core(
         code_artifact.merge(artifact);
     }
     out.push_str(&tables);
-    stable.push_str(&tables);
     if program_mode {
-        let json_types = st.json_types.render();
-        out.push_str(&json_types);
-        stable.push_str(&json_types);
+        out.push_str(&st.json_types.render());
     }
     let ret_slots = ret_slot_decls(
         max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
     );
     out.push_str(&ret_slots);
-    stable.push_str(&ret_slots);
     for (name, mf) in &deco_bodies {
         match emit_body_with_nested(ws, mf, name, &st.names, &hoisted, &st.gctx) {
-            Ok(definition) => {
-                out.push_str(&definition);
-                stable.push_str(&definition);
-            }
+            Ok(definition) => out.push_str(&definition),
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
-    let mut chunks = HashMap::new();
-    emit_lowered_defs(
-        ws,
-        scx,
-        &st,
-        &hoisted,
-        &mut rejections,
-        |fr, mf, js, artifact| {
-            out.push_str(&js);
-            code_artifact.merge(artifact);
-            let statics = collect_statics(mf);
-            chunks.insert(fr, JsChunk { js, statics });
-        },
-    )?;
-    let spec_chunks = emit_spec_chunks(ws, scx.interner(), &st, &hoisted, &mut rejections);
-    for chunk in ordered_spec_chunks(&spec_chunks, &st.spec_lowered) {
-        out.push_str(&chunk.js);
+    emit_lowered_defs(ws, scx, &st, &hoisted, &mut rejections, |js, artifact| {
+        out.push_str(&js);
+        code_artifact.merge(artifact);
+    })?;
+    for (js, artifact) in emit_spec_chunks(ws, scx.interner(), &st, &hoisted, &mut rejections) {
+        out.push_str(&js);
         if program_mode {
-            code_artifact.merge(chunk.code_artifact.clone());
+            code_artifact.merge(artifact);
         }
     }
     for body in &st.inline_js {
@@ -149,14 +130,10 @@ pub(super) fn assemble_program_core(
             .get(&body.instance)
             .expect("emitted body has a name");
         match emit_inline_js_fn(ws, scx, st.concrete, &body.instance, body.decl, name) {
-            Ok(definition) => {
-                out.push_str(&definition);
-                stable.push_str(&definition);
-            }
+            Ok(definition) => out.push_str(&definition),
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
-    let mut const_chunks = HashMap::new();
     for g in &st.ginits {
         let definition = match emit_ginit_with_nested(ws, g, &st.names, &hoisted, &st.gctx) {
             Ok(js) => js,
@@ -169,40 +146,16 @@ pub(super) fn assemble_program_core(
         let mut artifact = js_code_artifact(ws, &g.mf);
         artifact.set_body_names(&g.mf, &g.init_name);
         code_artifact.merge(artifact);
-        if g.is_const {
-            const_chunks
-                .entry(g.name)
-                .or_insert_with(String::new)
-                .push_str(&definition);
-        } else {
-            stable.push_str(&definition);
-        }
     }
-    let mut const_order = Vec::new();
-    let mut const_init_lines = HashMap::new();
     let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
     // Report rejected bodies before staging could raise an incomplete-census error.
     combine_rejections(rejections)?;
     let lifecycle_plan = if let Some((decorators, lifecycle_skeleton)) = effects {
         out.push_str("function __rock_state_initialize() {\n");
-        stable.push_str("function __rock_state_initialize() {\n");
-        for init in &init_lines {
-            out.push_str(&init.js);
-            if !const_chunks.contains_key(&init.name) {
-                stable.push_str(&init.js);
-            }
-        }
+        out.extend(init_lines.iter().map(String::as_str));
         // A global initialized from a lambda stores its CodeRef, so initializers run after the code
         // slots are staged.
         out.push_str("}\n");
-        stable.push_str("}\n");
-        for init in init_lines {
-            if let Some(chunk) = const_chunks.get_mut(&init.name) {
-                chunk.push_str(&init.js);
-                const_order.push(init.name);
-                const_init_lines.insert(init.name, init.js);
-            }
-        }
         decorators.mark_generated_code_values(
             ws,
             bone_core::hir::FnBackend::Js,
@@ -226,7 +179,6 @@ pub(super) fn assemble_program_core(
         // definition plan materializes (a materializer may read them).
         let definition_stage = definition_plan_stage_js(ws, scx, st.concrete, &definition_plan)?;
         out.push_str(&definition_stage);
-        stable.push_str(&definition_stage);
         out.push_str(&lifecycle_plan_stage_js(
             ws,
             scx.interner(),
@@ -237,7 +189,6 @@ pub(super) fn assemble_program_core(
         let applications =
             decorator_application_lines_js(ws, &decorators, scx.interner(), &st.names)?;
         out.push_str(&applications);
-        stable.push_str(&applications);
         out.push_str(code_slot_publish_js(
             &code_artifact,
             has_definition_plan,
@@ -250,9 +201,7 @@ pub(super) fn assemble_program_core(
             scx.interner(),
             &code_artifact,
         )?);
-        for init in init_lines {
-            out.push_str(&init.js);
-        }
+        out.extend(init_lines.iter().map(String::as_str));
         out.push_str(code_slot_publish_js(&code_artifact, false, false));
         Default::default()
     };
@@ -269,15 +218,9 @@ pub(super) fn assemble_program_core(
 
     Ok(ProgramBuild {
         program,
-        stable,
-        chunks,
-        spec_chunks,
         code_artifact,
         lifecycle_plan,
         global_layout,
-        const_chunks,
-        const_order,
-        const_init_lines,
     })
 }
 
@@ -310,7 +253,7 @@ pub(super) fn emit_lowered_defs(
     st: &WorklistState,
     hoisted: &HashSet<ustr::Ustr>,
     rejections: &mut Vec<(String, CompilerError)>,
-    mut each: impl FnMut(FuncRef, &MirFunc, String, CodeArtifact),
+    mut each: impl FnMut(String, CodeArtifact),
 ) -> Result<(), CompilerError> {
     for (fr, mf) in &st.lowered {
         let name = st
@@ -331,7 +274,7 @@ pub(super) fn emit_lowered_defs(
             hoisted,
             &st.gctx,
         ) {
-            Ok((js, artifact)) => each(*fr, mf, js, artifact),
+            Ok((js, artifact)) => each(js, artifact),
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
@@ -436,60 +379,9 @@ impl JsProgram {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct JsChunk {
-    pub(super) js: String,
-    pub(super) statics: Vec<skull_mir::mir::StaticCell>,
-}
-
-#[derive(Clone)]
-pub(super) struct JsSpecChunk {
-    pub(super) name: String,
-    pub(super) js: String,
-    pub(super) code_artifact: CodeArtifact,
-}
-
-#[derive(Clone)]
 pub(super) struct ProgramBuild {
     pub(super) program: String,
-    pub(super) stable: String,
-    pub(super) chunks: HashMap<FuncRef, JsChunk>,
-    pub(super) spec_chunks: HashMap<Instance, JsSpecChunk>,
     pub(super) code_artifact: CodeArtifact,
     pub(super) lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
     pub(super) global_layout: String,
-    pub(super) const_chunks: HashMap<ustr::Ustr, String>,
-    pub(super) const_order: Vec<ustr::Ustr>,
-    pub(super) const_init_lines: HashMap<ustr::Ustr, String>,
-}
-
-#[derive(Clone)]
-pub struct JsEmitCache {
-    pub(super) build: ProgramBuild,
-    pub(super) changed_since_full: HashSet<FuncRef>,
-    pub(super) static_keys: HashMap<ustr::Ustr, StaticBaseline>,
-    pub(super) shader_contributions: HashMap<
-        (bone_core::prelude::ModuleId, bone_core::hir::BodyOwner),
-        Vec<skull_mir::lower::ShaderPair>,
-    >,
-    pub(super) opaque_root_contributions:
-        BTreeMap<skull_graph::instance_graph::DeclKey, rustc_hash::FxHashSet<FuncRef>>,
-    pub(super) scx: skull_mir::lower::ScalarCtx,
-    pub(super) session: JsSession,
-}
-
-pub enum JsReload {
-    Overlay(String),
-    FullRequired,
-    NoChange,
-}
-
-impl JsReload {
-    pub fn expect_overlay(self) -> String {
-        match self {
-            Self::Overlay(js) => js,
-            Self::FullRequired => panic!("JS overlay required a full reload"),
-            Self::NoChange => panic!("JS overlay reported no emitted change"),
-        }
-    }
 }

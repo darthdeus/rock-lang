@@ -1,4 +1,3 @@
-use bone_core::hir::BodyOwner;
 use bone_core::workspace::Workspace;
 use skull_mir::mir::FuncRef;
 
@@ -116,60 +115,6 @@ fn differential(source: &str, expected: &str) {
         &format!("{}{js}\nconsole.log(root());", js_runtime()),
     );
     assert_eq!(js_out, lua_out, "qualified globals must agree with LuaJIT");
-}
-
-#[test]
-fn qualified_const_overlay_reinitializes_dependents() {
-    for (definition, read, expected) in [
-        ("const DERIVED: int = BASE + 1", "DERIVED", "8\n11"),
-        (
-            "nobox value Pair { x: int, y: int }\n\
-             const DERIVED: Pair = Pair { x: BASE + 1, y: BASE + 2 }",
-            "DERIVED.x + DERIVED.y",
-            "17\n23",
-        ),
-    ] {
-        let source = |base| {
-            format!(
-                "deco keep {{}}\n\
-             const BASE: int = {base}\n\
-             {definition}\n\
-             @keep @nomangle fn root() -> int {{ {read} }}"
-            )
-        };
-        let before = workspace(&source(7));
-        let after = workspace(&source(10));
-        let fr = root(&before);
-        let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, fr.module)
-            .expect("initial JS program");
-        let (gid, _) = after
-            .module(fr.module)
-            .globals
-            .iter()
-            .find(|(_, global)| global.name.as_str() == "app::BASE")
-            .expect("qualified global");
-        let overlay = skull_codegen_js::emit::emit_overlay(
-            &after,
-            fr.module,
-            &mut cache,
-            &[(fr.module, BodyOwner::Global(gid))],
-        )
-        .expect("overlay")
-        .expect_overlay();
-        let name =
-            skull_mir::mangle::mangle_fn(&before, &before.module(fr.module).functions[fr.func]);
-        let output = run_file(
-            "node",
-            &format!(
-                "{}{}\nconsole.log({name}());\n{overlay}\nconsole.log({name}());",
-                js_runtime(),
-                program.program,
-            ),
-        );
-        let lua_out = format!("{}\n{}", lua_value(&before), lua_value(&after));
-        assert_eq!(lua_out, expected, "LuaJIT oracle");
-        assert_eq!(output, lua_out);
-    }
 }
 
 /// A package decorator that shares its spelling with the stdlib's `on_reload`

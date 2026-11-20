@@ -1,22 +1,18 @@
-//! Root plans and the cached instance-graph session behind a program emission.
+//! Root plans and the instance-graph session behind a program emission.
 
 use super::*;
 
 /// One lowering context supplies the interner for the graph, view and emitter.
-/// Live reload keeps that interner so retained instances stay valid.
 pub(super) fn js_scx(ws: &Workspace) -> skull_mir::lower::ScalarCtx {
     skull_mir::lower::ScalarCtx::new(ws).with_target(bone_core::hir::FnBackend::Js)
 }
 
-#[derive(Clone)]
 struct JsRootPlan {
     named: Vec<(FuncRef, String)>,
     refs: Vec<FuncRef>,
 }
 
-#[derive(Clone)]
 pub(super) struct JsSession {
-    root_plan: JsRootPlan,
     pub(super) graph: InstanceGraph,
     pub(super) view: ArtifactView,
     pub(super) concrete: skull_graph::concrete_body::ConcreteBodies,
@@ -124,52 +120,6 @@ fn js_artifact_request(roots: &[FuncRef]) -> artifact::ArtifactRequest<'_> {
         .with_symbols(&artifact::REALIZED_SYMBOLS)
 }
 
-impl JsSession {
-    pub(super) fn contains_root(&self, root: FuncRef) -> bool {
-        self.root_plan.refs.contains(&root)
-    }
-
-    pub(super) fn assemble(
-        &self,
-        ws: &Workspace,
-        scx: &skull_mir::lower::ScalarCtx,
-        program_mode: bool,
-    ) -> Result<ProgramBuild, CompilerError> {
-        assemble_program_core(ws, scx, &self.root_plan.named, self, program_mode)
-    }
-
-    pub(super) fn update(
-        &mut self,
-        ws: &Workspace,
-        changed: &[(bone_core::prelude::ModuleId, bone_core::hir::BodyOwner)],
-        edits: &[skull_graph::instance_graph::TextEditDelta],
-    ) -> skull_graph::instance_graph::UpdateStats {
-        // The view retracts against the graph it was realized from.
-        self.view.prepare_update(&self.graph);
-        let update = self
-            .graph
-            .update_bodies_with_root_delta(ws, &[], &[], changed, edits);
-        self.concrete.update_local(
-            ws,
-            &self.graph,
-            &update.revisited,
-            &update.removed,
-            &update.revisited_owners,
-        );
-        self.view.update_local_with_root_delta(
-            ws,
-            &self.graph,
-            &js_artifact_request(&self.root_plan.refs),
-            &update.revisited,
-            &update.added,
-            &update.removed,
-            &[],
-            &[],
-        );
-        update
-    }
-}
-
 fn entry_root(ws: &Workspace, user_mid: bone_core::prelude::ModuleId) -> Option<(FuncRef, String)> {
     nullary_main(ws, user_mid).map(|fr| (fr, callee_js_name(ws, fr)))
 }
@@ -180,7 +130,7 @@ pub fn emit_program(
 ) -> Result<JsProgram, CompilerError> {
     let scx = js_scx(ws);
     let entry = entry_root(ws, user_mid);
-    let (build, _, _) = build_program_session(ws, &scx, entry.as_slice(), true)?;
+    let build = build_program_session(ws, &scx, entry.as_slice(), true)?;
     Ok(JsProgram {
         program: build.program,
         main_js_name: entry.map(|(_, name)| name),
@@ -190,49 +140,12 @@ pub fn emit_program(
     })
 }
 
-pub fn emit_program_cached(
-    ws: &Workspace,
-    user_mid: bone_core::prelude::ModuleId,
-) -> Result<(JsProgram, JsEmitCache), CompilerError> {
-    let scx = js_scx(ws);
-    let entry = entry_root(ws, user_mid);
-    let (build, session, shaders) = build_program_session(ws, &scx, entry.as_slice(), true)?;
-    let static_keys = build
-        .chunks
-        .values()
-        .flat_map(|chunk| chunk.statics.iter())
-        .map(|cell| {
-            Ok((
-                cell.cell,
-                StaticBaseline::of(ws, scx.interner(), cell).map_err(err)?,
-            ))
-        })
-        .collect::<Result<_, CompilerError>>()?;
-    let program = JsProgram {
-        program: build.program.clone(),
-        main_js_name: entry.map(|(_, name)| name),
-        code_artifact: build.code_artifact.clone(),
-        lifecycle_plan: build.lifecycle_plan.clone(),
-        global_layout: build.global_layout.clone(),
-    };
-    let cache = JsEmitCache {
-        build,
-        changed_since_full: HashSet::new(),
-        static_keys,
-        shader_contributions: shaders.contributions,
-        opaque_root_contributions: session.view.opaque_boundary_roots.clone(),
-        scx,
-        session,
-    };
-    Ok((program, cache))
-}
-
 pub fn emit_program_with_roots_artifact(
     ws: &Workspace,
     roots: &[(FuncRef, String)],
 ) -> Result<(String, CodeArtifact), CompilerError> {
     let scx = js_scx(ws);
-    let build = build_program_session(ws, &scx, roots, true)?.0;
+    let build = build_program_session(ws, &scx, roots, true)?;
     Ok((build.program, build.code_artifact))
 }
 
@@ -243,7 +156,7 @@ pub fn emit_with_closure(
     roots: &[(FuncRef, String)],
 ) -> Result<String, CompilerError> {
     let scx = js_scx(ws);
-    Ok(build_program_session(ws, &scx, roots, false)?.0.program)
+    Ok(build_program_session(ws, &scx, roots, false)?.program)
 }
 
 fn build_program_session(
@@ -251,7 +164,7 @@ fn build_program_session(
     scx: &skull_mir::lower::ScalarCtx,
     extra_roots: &[(FuncRef, String)],
     program_mode: bool,
-) -> Result<(ProgramBuild, JsSession, skull_mir::lower::ShaderCollection), CompilerError> {
+) -> Result<ProgramBuild, CompilerError> {
     if program_mode {
         for module in ws.source_modules() {
             if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, module.id) {
@@ -276,12 +189,10 @@ fn build_program_session(
             continue;
         }
         let session = JsSession {
-            root_plan,
             graph,
             view,
             concrete,
         };
-        let build = session.assemble(ws, scx, program_mode)?;
-        return Ok((build, session, shaders));
+        return assemble_program_core(ws, scx, &root_plan.named, &session, program_mode);
     }
 }

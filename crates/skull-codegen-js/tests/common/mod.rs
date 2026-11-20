@@ -42,43 +42,6 @@ pub fn run_node(program: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// The function or global declared as `name` in the `<test>` module.
-pub fn test_owner(
-    ws: &bone_core::workspace::Workspace,
-    name: &str,
-) -> (bone_core::prelude::ModuleId, bone_core::hir::BodyOwner) {
-    let mid = test_mid(ws);
-    let module = ws.module(mid);
-    let declared = |full: &str| skull_mir::mangle::declared_name(full) == name;
-    if let Some((fid, _)) = module
-        .functions
-        .iter()
-        .find(|(_, f)| declared(f.name.as_str()))
-    {
-        return (mid, bone_core::hir::BodyOwner::Function(fid));
-    }
-    let (gid, _) = module
-        .globals
-        .iter()
-        .find(|(_, g)| declared(g.name.as_str()))
-        .unwrap_or_else(|| panic!("no fn or global `{name}` in <test> module"));
-    (mid, bone_core::hir::BodyOwner::Global(gid))
-}
-
-/// Reload the `edited` definitions of `ws` over `cache`, which must accept an
-/// overlay.
-pub fn overlay_of(
-    ws: &bone_core::workspace::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    cache: &mut skull_codegen_js::emit::JsEmitCache,
-    edited: &[&str],
-) -> String {
-    let edited: Vec<_> = edited.iter().map(|name| test_owner(ws, name)).collect();
-    skull_codegen_js::emit::emit_overlay(ws, mid, cache, &edited)
-        .unwrap()
-        .expect_overlay()
-}
-
 /// Run `body` under node after the concatenated `runtime` pieces.
 pub fn run_js(runtime: &[&str], body: &str) -> String {
     run_node(&format!("{}\n{body}", runtime.concat()))
@@ -197,15 +160,6 @@ pub fn ws_of_modules(users: Vec<skull_parser::Ast>) -> bone_core::workspace::Wor
         .collect();
     assert!(errors.is_empty(), "{errors:?}");
     ws
-}
-
-pub fn replace_once(source: &str, old: &str, new: &str) -> String {
-    assert_eq!(
-        source.matches(old).count(),
-        1,
-        "fixture replacement must match exactly once: {old:?}"
-    );
-    source.replacen(old, new, 1)
 }
 
 /// Lower one test root through the graph-owned concrete plan. Keeping this

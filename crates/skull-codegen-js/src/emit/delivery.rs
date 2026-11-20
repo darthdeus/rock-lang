@@ -358,8 +358,8 @@ pub(super) fn emit_spec_chunks(
     st: &WorklistState,
     hoisted: &HashSet<ustr::Ustr>,
     rejections: &mut Vec<(String, CompilerError)>,
-) -> HashMap<Instance, JsSpecChunk> {
-    let mut chunks = HashMap::new();
+) -> Vec<(String, CodeArtifact)> {
+    let mut chunks = Vec::new();
     for (inst, mf) in &st.spec_lowered {
         let name = st
             .names
@@ -390,36 +390,11 @@ pub(super) fn emit_spec_chunks(
             }
         };
         match emit_lowered_fn(ws, interner, mf, name, plan, &st.names, hoisted, &st.gctx) {
-            Ok((js, code_artifact)) => {
-                chunks.insert(
-                    inst.clone(),
-                    JsSpecChunk {
-                        name: name.clone(),
-                        js,
-                        code_artifact,
-                    },
-                );
-            }
+            Ok(chunk) => chunks.push(chunk),
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
     chunks
-}
-
-pub(super) fn ordered_spec_chunks<'a>(
-    chunks: &'a HashMap<Instance, JsSpecChunk>,
-    order: &[(Instance, MirFunc)],
-) -> Vec<&'a JsSpecChunk> {
-    let ordered: Vec<_> = order
-        .iter()
-        .filter_map(|(inst, _)| chunks.get(inst))
-        .collect();
-    assert_eq!(
-        ordered.len(),
-        chunks.len(),
-        "every emitted specialization must retain its delivery order"
-    );
-    ordered
 }
 
 /// Reject calls whose scalarized argument lanes a callee retaining a whole-value parameter would
