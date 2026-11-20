@@ -372,7 +372,7 @@ impl LiveProject {
                 UpdateTier::NoChange => continue,
                 UpdateTier::BodyOnly => {
                     lint_changed_files.push(ustr::Ustr::from(path.as_str()));
-                    span_edits.extend(update.body_update.edit);
+                    span_edits.extend(update.text_edit);
                 }
                 UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser => full = true,
             }

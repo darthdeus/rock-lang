@@ -23,15 +23,6 @@ pub type BodyId = (ModuleId, BodyOwner);
 
 pub use bone_core::text_edit::TextEditDelta;
 
-/// The semantic part of a body-only update, kept separate from coordinate
-/// relocation so graph owners are not re-walked merely because spans moved.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BodyUpdate {
-    pub edit: Option<TextEditDelta>,
-    pub semantic_bodies: Vec<BodyId>,
-    pub span_only: bool,
-}
-
 /// The broadest rebuild needed after an edit.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum UpdateTier {
@@ -48,7 +39,7 @@ pub struct UpdateResult {
     pub tier: UpdateTier,
     pub reinferred: Vec<BodyId>,
     pub relowered: Vec<BodyId>,
-    pub body_update: BodyUpdate,
+    pub text_edit: Option<TextEditDelta>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -832,7 +823,6 @@ impl Session {
                 classify(&old.item_prints, &new_prints)
             }
         });
-        let span_only = matches!(&diff, Some(FileDiff::BodiesOnly(items)) if items.is_empty());
         let next = UserFile {
             text_hash: hash,
             item_prints: new_prints,
@@ -844,7 +834,7 @@ impl Session {
             scope_hash,
             contribution,
         };
-        self.apply_file(path, Some(next), span_only, |s| match diff {
+        self.apply_file(path, Some(next), |s| match diff {
             Some(FileDiff::BodiesOnly(changed)) => match changed.as_slice() {
                 [idx] => s.rebuild_body_incremental(path, module, *idx, false),
                 _ => s.rebuild_module(path, module, &changed),
@@ -1197,7 +1187,7 @@ impl Session {
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<UpdateResult, CompilerError> {
-        self.apply_file(path, None, false, Self::rebuild_users)
+        self.apply_file(path, None, Self::rebuild_users)
     }
 
     pub fn diagnostics(&self) -> Vec<CompilerError> {
@@ -1518,7 +1508,7 @@ impl Session {
             scope_hash: old.scope_hash,
             contribution: old.contribution.clone(),
         };
-        self.apply_file(path, Some(next), false, |s| {
+        self.apply_file(path, Some(next), |s| {
             s.rebuild_body_incremental(path, mini, idx, true)
         })
         .map(Some)
@@ -1673,7 +1663,6 @@ impl Session {
         &mut self,
         path: &str,
         next: Option<UserFile>,
-        span_only: bool,
         rebuild: impl FnOnce(&mut Self) -> Result<UpdateResult, CompilerError>,
     ) -> Result<UpdateResult, CompilerError> {
         let (previous, position) = if let Some(file) = next {
@@ -1696,18 +1685,10 @@ impl Session {
         };
         match rebuild(self) {
             Ok(mut result) => {
-                if result.tier == UpdateTier::BodyOnly && result.body_update.edit.is_none() {
-                    result.body_update = BodyUpdate {
-                        edit: previous
-                            .as_ref()
-                            .map(|file| text_edit_delta(path, &file.text, &self.files[path].text)),
-                        semantic_bodies: if span_only {
-                            Vec::new()
-                        } else {
-                            result.reinferred.clone()
-                        },
-                        span_only,
-                    };
+                if result.tier == UpdateTier::BodyOnly {
+                    result.text_edit = previous
+                        .as_ref()
+                        .map(|file| text_edit_delta(path, &file.text, &self.files[path].text));
                 }
                 if position.is_none() && result.tier != UpdateTier::NoChange {
                     bone_semantic::relocation::check_relocation(&mut self.ws);
