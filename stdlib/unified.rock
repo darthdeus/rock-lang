@@ -2725,10 +2725,6 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     m.occupied_count = 0
 """
 
-@nomangle inline(lua) fn __map_col_spine(m: any) -> any = """
-    return m.spine
-"""
-
 // An absent key is not unset: LuaJIT turns a nil store to an absent key into a
 // new hash node, and a table with no free node left rehashes on every one.
 fn Map<K, V>.remove(map, key: K) -> V? {
@@ -3357,14 +3353,6 @@ fn __vec_sort_by_key_leaves<T, K>(vec: [T], key_fn: fn(T) -> K) {
         }
     }
 }
-
-// `0..n` ordered by `lt`, as 0-based row indices.
-inline(lua) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
-    local order = {}
-    for i = 1, n do order[i] = i - 1 end
-    table.sort(order, function(a, b) return lt(a, b) end)
-    return { _data = order, len = n }
-"""
 
 fn Vec<T>.sample(vec) -> T? {
     let len = vec_len(vec)

@@ -87,15 +87,6 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   });
 """
 
-inline(js) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
-  var order = [];
-  for (var i = 0; i < n; i++) order.push(i);
-  order.sort(function(a, b) {
-    return __rock_call(lt, a, b) ? -1 : (__rock_call(lt, b, a) ? 1 : 0);
-  });
-  return { _data: order, len: n };
-"""
-
 @intrinsic @inline inline(js) fn table_len(tbl: any) -> int = "return __table_len(tbl);"
 
 // `len` rather than the array's length: a column reserved past `len` holds
@@ -351,10 +342,6 @@ inline(js) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
   }
   m.spine.clear();
   m.occupied_count = 0;
-"""
-
-@nomangle inline(js) fn __map_col_spine(m: any) -> any = """
-  return m.spine;
 """
 
 @nomangle inline(js) fn __weak_cache_retire(scene: int, arena: int, slot: int) = """

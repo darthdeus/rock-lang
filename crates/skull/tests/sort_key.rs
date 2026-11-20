@@ -10,7 +10,6 @@ fn column_sort_key_uses_leaves_without_boxing_or_row_indices() {
              print(xs[0].x)
          }",
     );
-    assert!(!lua.contains("= __sort_rows_int_fn_int_int_ret_bool("));
     let bodies: Vec<_> = lua
         .lines()
         .filter(|line| {
@@ -28,6 +27,7 @@ fn column_sort_key_uses_leaves_without_boxing_or_row_indices() {
             .unwrap();
         let body = function_body(&lua, name);
         assert!(!body.contains("V2_ct("));
+        assert!(!body.contains('{'));
     }
 }
 
