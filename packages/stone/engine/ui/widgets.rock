@@ -434,7 +434,7 @@ fn ui_text_input_edit() -> (bool, bool) {
     } else if ui_text_input_key("home") || ui_text_input_key("end")
         || ui_text_input_key("left") || ui_text_input_key("right")
         || ui_text_input_key("backspace") || ui_text_input_key("delete")
-        || text_input_this_frame != "" {
+        || GAME_INPUT.text != "" {
         let chars = ui_text_input_codepoints(s.value)
         let dirty = false
         let ctrl = is_scancode_down("lctrl") || is_scancode_down("rctrl")
@@ -486,14 +486,14 @@ fn ui_text_input_edit() -> (bool, bool) {
             s.invalid = false
         }
 
-        if text_input_this_frame != "" {
+        if GAME_INPUT.text != "" {
             if s.select_all {
                 chars.clear()
                 dirty = true
                 s.cursor = 0
             }
             s.select_all = false
-            for cp in text_input_this_frame.chars() {
+            for cp in GAME_INPUT.text.chars() {
                 if chars.len >= s.max_chars { break }
                 if cp < 0x20 || cp == 0x7f { continue }
                 chars.insert_at(s.cursor, cp)
