@@ -252,10 +252,6 @@ impl Walk<'_> {
         resolved
     }
 
-    fn record_bound_tree(&mut self, instance: &Instance, incoming: InstanceBoundTree) {
-        self.out.bound_trees.push((instance.clone(), incoming));
-    }
-
     fn push_edge(&mut self, e: Edge) {
         self.saw(e.span);
         self.out.edges.push(e);
@@ -1975,7 +1971,6 @@ fn walk_body_edges(
     only: Option<&FxHashSet<Idx<bone_core::hir::Expr>>>,
 ) {
     let reached = |e: Idx<bone_core::hir::Expr>| only.is_none_or(|s| s.contains(&e));
-    let mut resolved_calls: FxHashMap<Idx<bone_core::hir::Expr>, Instance> = FxHashMap::default();
     let mut calls: Vec<(Idx<bone_core::hir::Expr>, (ModuleId, Idx<Function>))> = inf
         .resolved_overload_calls
         .iter()
@@ -1983,7 +1978,6 @@ fn walk_body_edges(
         .collect();
     calls.sort_by_key(|(e, _)| *e);
     if only.is_none() {
-        resolved_calls.reserve(calls.len());
         w.out.reached.reserve(calls.len());
         if from.is_some() {
             w.out.edges.reserve(calls.len());
@@ -2001,7 +1995,7 @@ fn walk_body_edges(
         let span = body
             .and_then(|b| b.expr_spans.get(e).copied())
             .unwrap_or_else(Span::unknown);
-        if let Some(to) = record_call(
+        record_call(
             w,
             ws,
             inf,
@@ -2015,9 +2009,7 @@ fn walk_body_edges(
                 expr: e,
                 op: SiteOp::DirectCall,
             },
-        ) {
-            resolved_calls.insert(e, to);
-        }
+        );
         let function = &ws.module(m).functions[f];
         if let Some(annotation) = function
             .annotations
@@ -2196,8 +2188,17 @@ fn walk_body_edges(
             domain,
             &[],
         );
-        if let Some(to) = resolved_calls.get(&e) {
-            w.record_bound_tree(to, concrete);
+        let call_site = Site {
+            domain: domain.clone(),
+            expr: e,
+            op: SiteOp::DirectCall,
+        };
+        if let Some(SiteRecord {
+            outcome: SiteOutcome::Resolved(to),
+            ..
+        }) = w.out.call_sites.get(&call_site)
+        {
+            w.out.bound_trees.push((to.clone(), concrete));
         }
     }
 
@@ -2269,7 +2270,7 @@ fn record_call(
     bindings: Option<&Vec<bone_core::prelude::TyId>>,
     span: Span,
     site: Site,
-) -> Option<Instance> {
+) {
     let cf = &ws.module(callee.module).functions[callee.func];
     let instantiated = instantiate(
         w.interner,
@@ -2290,7 +2291,7 @@ fn record_call(
         span,
         site,
         CallKind::Direct,
-    )
+    );
 }
 
 enum CallKind {
@@ -2513,149 +2514,126 @@ fn walk_struct_default_edges(
     from: Option<&Instance>,
     subst: &MonoSubst,
 ) {
-    use bone_core::hir::Expr as E;
-    // Keyed by canonical encoding rather than interner order.
-    type Key = (usize, u32, Vec<String>);
-    let mut omitted: BTreeMap<
-        Key,
-        (
-            ModuleId,
-            Idx<bone_core::hir::StructDef>,
-            Vec<skull_mir::monoty::MonoTy>,
-            BTreeSet<ustr::Ustr>,
-        ),
-    > = BTreeMap::new();
-    let Some(top_inf) = ws
+    use bone_core::hir::Expr;
+
+    struct DefaultDomain<'a> {
+        body: &'a Body,
+        inf: &'a BodyInference,
+        subst: MonoSubst,
+        reached: FxHashSet<Idx<Expr>>,
+    }
+
+    let Some(inf) = ws
         .inference(module)
         .and_then(|ir| ir.per_fn.get(&top_owner))
     else {
         return;
     };
-    let mut pending: Vec<(
-        &Body,
-        &BodyInference,
-        MonoSubst,
-        Option<FxHashSet<Idx<bone_core::hir::Expr>>>,
-    )> = vec![(body, top_inf, subst.clone(), None)];
-    // A later literal can omit more fields, so rescan a key whose omitted set grew.
-    let mut scanned: BTreeMap<Key, usize> = BTreeMap::new();
-    while let Some((scan, scan_inf, scan_subst, reached)) = pending.pop() {
-        let mut fresh: Vec<Key> = Vec::new();
-        for (e, expr) in scan.expr_arena.iter() {
-            if reached.as_ref().is_some_and(|r| !r.contains(&e)) {
-                continue;
-            }
-            let E::StructLiteral {
+    let mut domains = BTreeMap::new();
+    let mut pending = vec![(body, inf, subst.clone(), None::<Vec<Idx<Expr>>>)];
+    while let Some((scan, inf, subst, added)) = pending.pop() {
+        let mut visit = |e: Idx<Expr>| {
+            let Expr::StructLiteral {
                 name,
                 fields,
                 bases,
-            } = expr
+            } = &scan.expr_arena[e]
             else {
-                continue;
+                return;
             };
-            // A `..base` update writes every field the literal does not.
+            // A spread initializes every field the literal leaves out.
             if !bases.is_empty() {
-                continue;
+                return;
             }
             let Some(sid) = ws.nominals.struct_id(*name) else {
-                continue;
+                return;
             };
-            // Must key the domain as lowering does, including its shared-body fallback.
-            let generics = skull_mir::struct_defaults::declared_generics(ws, sid);
-            let Ok(args) =
-                skull_mir::struct_defaults::args_at(ws, scan_inf, &scan_subst, e, *name, generics)
+            let decl = &ws.module(sid.module).structs[sid.def];
+            let mut omitted = decl
+                .fields
+                .iter()
+                .filter(|f| {
+                    let mut written = *fields;
+                    f.has_default && !written.any(|i| scan.struct_lit_field_arena[i].name == f.name)
+                })
+                .peekable();
+            if omitted.peek().is_none() {
+                return;
+            }
+            let owner = BodyOwner::StructDefaults(sid.def);
+            let Some(defaults) = ws.module(sid.module).bodies.get(&owner) else {
+                return;
+            };
+            let Some(default_inf) = ws
+                .inference(sid.module)
+                .and_then(|ir| ir.per_fn.get(&owner))
             else {
-                continue;
+                return;
+            };
+            let Ok(args) =
+                skull_mir::struct_defaults::args_at(ws, inf, &subst, e, *name, decl.generics.len())
+            else {
+                return;
             };
             let args = args.to_vec();
-            let written: BTreeSet<ustr::Ustr> = (*fields)
-                .map(|f| scan.struct_lit_field_arena[f].name)
-                .collect();
-            let decl = &ws.modules[sid.module.index()].structs[sid.def];
-            let key: Key = (
-                sid.module.index(),
-                sid.def.into_raw().into_u32(),
-                args.iter().map(|a| a.canonical()).collect(),
-            );
-            for f in &decl.fields {
-                if !written.contains(&f.name) && f.has_default {
-                    omitted
-                        .entry(key.clone())
-                        .or_insert_with(|| (sid.module, sid.def, args.clone(), BTreeSet::new()))
-                        .3
-                        .insert(f.name);
+            let default_subst = || skull_mir::struct_defaults::slot_subst(Some(default_inf), &args);
+            let row = domains
+                .entry(SiteDomain::struct_defaults(
+                    sid.module,
+                    sid.def,
+                    args.clone(),
+                ))
+                .or_insert_with(|| DefaultDomain {
+                    body: defaults,
+                    inf: default_inf,
+                    subst: default_subst(),
+                    reached: FxHashSet::default(),
+                });
+            let mut added = Vec::new();
+            let mut reach = |child| match child {
+                HirChild::Expr(expr) => {
+                    let fresh = row.reached.insert(expr);
+                    if fresh {
+                        added.push(expr);
+                    }
+                    fresh
+                }
+                _ => true,
+            };
+            for field in omitted {
+                if let Some(&root) = row.body.field_defaults.get(&field.name) {
+                    let root = HirChild::Expr(root);
+                    if reach(root) {
+                        row.body.walk_descendants(root, &mut reach);
+                    }
                 }
             }
-            let now = omitted.get(&key).map(|(_, _, _, f)| f.len()).unwrap_or(0);
-            if now > 0 && scanned.insert(key.clone(), now).unwrap_or(0) < now {
-                fresh.push(key);
+            if !added.is_empty() {
+                pending.push((row.body, row.inf, row.subst.clone(), Some(added)));
             }
-        }
-        for key in fresh {
-            let (module, def, args, fields) = &omitted[&key];
-            let owner = BodyOwner::StructDefaults(*def);
-            let Some(defaults) = ws.modules[module.index()].bodies.get(&owner) else {
-                continue;
-            };
-            let Some(dinf) = ws.inference(*module).and_then(|ir| ir.per_fn.get(&owner)) else {
-                continue;
-            };
-            // A struct literal lowers only the defaults it omits, so the defaults body's
-            // calls are attributed per field.
-            let mut sub: FxHashSet<Idx<bone_core::hir::Expr>> = FxHashSet::default();
-            for f in fields {
-                let Some(root) = defaults.field_defaults.get(f) else {
-                    continue;
-                };
-                sub.extend(expr_subtree(defaults, *root));
+        };
+        if let Some(added) = added {
+            added.into_iter().for_each(visit);
+        } else {
+            for (expr, _) in scan.expr_arena.iter() {
+                visit(expr);
             }
-            let inner = skull_mir::struct_defaults::slot_subst(Some(dinf), args);
-            pending.push((defaults, dinf, inner, Some(sub)));
         }
     }
 
-    for (_, (module, def, args, fields)) in omitted {
-        let owner = BodyOwner::StructDefaults(def);
-        let Some(defaults) = ws.modules[module.index()].bodies.get(&owner) else {
-            continue;
-        };
-        let Some(inf) = ws.inference(module).and_then(|ir| ir.per_fn.get(&owner)) else {
-            continue;
-        };
-        let mut reached: FxHashSet<Idx<bone_core::hir::Expr>> = FxHashSet::default();
-        for f in &fields {
-            let Some(root) = defaults.field_defaults.get(f) else {
-                continue;
-            };
-            reached.extend(expr_subtree(defaults, *root));
-        }
-        // Defaults resolve under the struct's slot bindings, not the enclosing instance's.
-        let inner = skull_mir::struct_defaults::slot_subst(Some(inf), &args);
-        let domain = SiteDomain::struct_defaults(module, def, args);
+    for (domain, row) in domains {
         w.out.struct_default_domains.insert(domain.clone());
         walk_body_edges(
             w,
             ws,
-            inf,
-            Some(defaults),
+            row.inf,
+            Some(row.body),
             from,
-            &inner,
+            &row.subst,
             &domain,
-            Some(&reached),
+            Some(&row.reached),
         );
     }
-}
-
-fn expr_subtree(
-    body: &Body,
-    root: Idx<bone_core::hir::Expr>,
-) -> FxHashSet<Idx<bone_core::hir::Expr>> {
-    let mut out = FxHashSet::from_iter([root]);
-    body.walk_descendants(HirChild::Expr(root), &mut |child| match child {
-        HirChild::Expr(x) => out.insert(x),
-        HirChild::Statement(_) | HirChild::Pattern(_) => true,
-    });
-    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2702,7 +2680,7 @@ fn record_bound_next(
     )?;
     let concrete_sub =
         walk_bound_tree(w, ws, inf, from, subst, sub, span, expr, root, domain, path);
-    w.record_bound_tree(&to, concrete_sub.clone());
+    w.out.bound_trees.push((to.clone(), concrete_sub.clone()));
     Some(InstanceBoundNext {
         callee: to,
         sub: concrete_sub,
@@ -2970,23 +2948,22 @@ fn fn_value_sites(
         let rep = match inf.resolved_overload_calls.get(&e) {
             Some(&(m, f)) => FuncRef { module: m, func: f },
             None => {
-                let mut manglings: Vec<String> = cands
+                let Some((&(m, f), others)) = cands.split_first() else {
+                    continue;
+                };
+                let symbol = mangle_fn(ws, &ws.module(m).functions[f]);
+                if others
                     .iter()
-                    .map(|&(m, fi)| mangle_fn(ws, &ws.module(m).functions[fi]))
-                    .collect();
-                manglings.sort();
-                manglings.dedup();
-                if manglings.len() != 1 {
+                    .any(|&(m, f)| mangle_fn(ws, &ws.module(m).functions[f]) != symbol)
+                {
                     continue;
                 }
-                let (m, f) = cands[0];
                 FuncRef { module: m, func: f }
             }
         };
         // The fallback picked an arbitrary member of a uniform group; canonicalize it.
         out.push((e, skull_mir::lower::canonical_variant(ws, rep)));
     }
-    out.sort_by_key(|(e, _)| *e);
     out
 }
 
