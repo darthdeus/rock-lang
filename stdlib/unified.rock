@@ -2554,19 +2554,22 @@ const EPSILON: float = 0.0000001
 // very small/large magnitudes; up to 4 decimals otherwise, trailing
 // zeros and trailing decimal point trimmed. Module-level (not an
 // IIFE per interpolation) so LuaJIT can trace per-frame string
-// building without an FNEW abort. See
-//
+// building without an FNEW abort.
 @intrinsic @nomangle inline(lua) fn __rock_format_float(v: float) -> string = """
     local av = math.abs(v)
     if av ~= 0 and (av < 0.0001 or av >= 1000000) then
         local r = string.format("%.2g", v)
         return r
-    else
-        local s = string.format("%.4f", v)
-        s = s:gsub("0+$", "")
-        s = s:gsub("%.$", "")
-        return s
     end
+    if v == math.floor(v) then return tostring(v) end
+    -- Byte checks instead of gsub, which LuaJIT does not compile.
+    local s = string.format("%.4f", v)
+    local n = #s
+    if string.byte(s, n) ~= 48 then return s end
+    if string.byte(s, n - 1) ~= 48 then return string.sub(s, 1, n - 1) end
+    if string.byte(s, n - 2) ~= 48 then return string.sub(s, 1, n - 2) end
+    if string.byte(s, n - 3) ~= 48 then return string.sub(s, 1, n - 3) end
+    return string.sub(s, 1, n - 5)
 """
 
 

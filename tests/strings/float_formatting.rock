@@ -44,6 +44,12 @@ fn test_float_interpolation_smart_formatting() {
     assert_eq("{tiny}", "1e-09")
     assert_eq("{negative}", "-42.5")
     assert_eq("{half}", "0.5")
+    assert_eq("{same_float(100.0)}", "100")
+    assert_eq("{same_float(999999.0)}", "999999")
+    assert_eq("{same_float(-0.0)}", "-0")
+    assert_eq("{same_float(2.00001)}", "2")
+    assert_eq("{same_float(-12.30001)}", "-12.3")
+    assert_eq("{same_float(0.1 + 0.2)}", "0.3")
 
     // Explicit format specifiers work as expected
     assert_eq("{pi:.2f}", "3.14")
