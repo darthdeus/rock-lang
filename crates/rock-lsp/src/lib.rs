@@ -20,8 +20,6 @@ use lsp_types::{
     CompletionList, ExecuteCommandParams, InlayHint, Location, TextDocumentPositionParams, Uri,
 };
 
-#[cfg(not(target_family = "wasm"))]
-pub mod cli;
 mod code_actions;
 pub mod semantic_tokens;
 #[cfg(not(target_family = "wasm"))]

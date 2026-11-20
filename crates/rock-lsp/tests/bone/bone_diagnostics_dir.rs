@@ -2,7 +2,7 @@
 //! file under a directory.
 
 use crate::fixture::Project;
-use rock_lsp::cli::bone_lsp::{diagnostics_report, lint_report};
+use rock_lsp::server_cli::{diagnostics_report, lint_report, print_report};
 
 fn messages(report: &serde_json::Value) -> Vec<String> {
     report["files"]
@@ -89,10 +89,10 @@ fn unreadable_file_fails_the_dir_report_by_name() {
     std::fs::write(dir.path().join("bad.rock"), b"fn main() {}\n\xff\xfe\n").unwrap();
     let path = dir.path().to_str().unwrap();
     for (what, res) in [
-        ("diagnostics", rock_lsp::cli::bone_lsp::diagnostics(path)),
-        ("lint", rock_lsp::cli::bone_lsp::lint(path)),
+        ("diagnostics", diagnostics_report(path)),
+        ("lint", lint_report(path)),
     ] {
-        let err = res.expect_err(what).to_string();
+        let err = print_report(res.unwrap()).expect_err(what).to_string();
         assert!(
             err.contains("bad.rock") && !err.contains("a.rock,"),
             "{what}: {err}"
