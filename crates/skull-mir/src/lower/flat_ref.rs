@@ -109,7 +109,7 @@ struct ReturnScan {
     /// rather than counting as boxed.
     assumed: Option<Option<FlatRefKey>>,
     depends_on: Option<usize>,
-    unknown_reads: u32,
+    pending: bool,
 }
 
 pub(crate) type FlatVariantsHandle = Rc<RefCell<FlatVariants>>;
@@ -133,34 +133,6 @@ fn is_phantom_call(body: &Body, e: Idx<Expr>) -> bool {
         Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. }
             if name.as_str() == "phantom" && (*args).into_iter().next().is_none()
     )
-}
-
-/// Excludes lambda and nested fn bodies, which return for themselves.
-fn scan_returns(
-    body: &Body,
-    node: HirChild,
-    returns: &mut Vec<Idx<Expr>>,
-    lets: &mut Vec<(Idx<BindingInfo>, Idx<Expr>)>,
-) {
-    match node {
-        HirChild::Expr(e) => match body.expr_arena[e] {
-            Expr::Lambda { .. } => return,
-            Expr::Return(Some(value)) => returns.push(value),
-            _ => {}
-        },
-        HirChild::Statement(s) => match body.statement_arena[s] {
-            Statement::Fn { .. } => return,
-            Statement::Let { pattern, value, .. } => {
-                if let bone_core::hir::Pattern::Bind(name) = body.pattern_arena[pattern] {
-                    lets.push((name, value));
-                }
-            }
-            Statement::Return(Some(value)) => returns.push(value),
-            _ => {}
-        },
-        HirChild::Pattern(_) => return,
-    }
-    body.for_each_child(node, |child| scan_returns(body, child, returns, lets));
 }
 
 impl<'a> Builder<'a> {
@@ -265,9 +237,8 @@ impl<'a> Builder<'a> {
         else {
             return Ok(None);
         };
-        let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
         let mut ref_args = Vec::new();
-        for &a in &arg_idxs {
+        for a in args {
             if self.flat_ref_arg_candidate(e, a)? {
                 ref_args.push(a);
             }
@@ -291,19 +262,22 @@ impl<'a> Builder<'a> {
             return Ok(None);
         }
         let decl = &self.ws.module(func.module).functions[func.func];
-        let mut sig: FlatSig = vec![None; decl.param_decls.len()];
+        let mut sig = FlatSig::new();
         let mut flat_args = Vec::new();
         let mut next_pos = 0usize;
-        for &a in &arg_idxs {
+        for a in args {
             let Some(pidx) = call_argument_parameter(self.body, a, &mut next_pos, |name| {
                 decl.param_decls.iter().position(|p| p.name == name)
             }) else {
                 continue;
             };
-            if pidx >= sig.len() || !ref_args.contains(&a) {
+            if pidx >= decl.param_decls.len() || !ref_args.contains(&a) {
                 continue;
             }
             if let Some(key) = self.classify_flat_ref(a)? {
+                if sig.is_empty() {
+                    sig.resize(decl.param_decls.len(), None);
+                }
                 sig[pidx] = Some(key);
                 flat_args.push((a, pidx, key));
             }
@@ -359,6 +333,7 @@ impl<'a> Builder<'a> {
         inst: &Instance,
         sig: &[Option<FlatRefKey>],
     ) -> Result<Option<FlatRefKey>, CompilerError> {
+        let sig = &sig[..sig.iter().rposition(Option::is_some).map_or(0, |i| i + 1)];
         let key = (inst.clone(), sig.to_vec());
         {
             let mut reg = self.flat_variants.borrow_mut();
@@ -369,29 +344,18 @@ impl<'a> Builder<'a> {
                 let assumed = reg.scanning[i].assumed;
                 let reader = reg.scanning.last_mut().expect("a scan is in progress");
                 reader.depends_on = Some(reader.depends_on.map_or(i, |d| d.min(i)));
-                if assumed.is_none() {
-                    reader.unknown_reads += 1;
-                }
+                reader.pending |= assumed.is_none();
                 return Ok(assumed.flatten());
             }
         }
         let Some(plan) = self.concrete_plans.get(inst) else {
             return Ok(None);
         };
-        self.flat_return_scan(inst, plan, sig)
-    }
-
-    fn flat_return_scan(
-        &self,
-        inst: &Instance,
-        plan: &'a ConcreteBodyPlan,
-        sig: &[Option<FlatRefKey>],
-    ) -> Result<Option<FlatRefKey>, CompilerError> {
-        let returns_value_ref = plan
+        if !plan
             .signature
             .result
-            .is_some_and(|result| self.is_value_ref_type(self.concrete_mono(result)));
-        if !returns_value_ref {
+            .is_some_and(|result| self.is_value_ref_type(self.concrete_mono(result)))
+        {
             return Ok(None);
         }
         let module = self.ws.module(inst.func.module);
@@ -423,89 +387,91 @@ impl<'a> Builder<'a> {
                 scan.flat_ref_binds.insert(raw(pb), *key);
             }
         }
-        let mut returns = Vec::new();
-        let mut lets = Vec::new();
-        if let Some(root) = body.root {
-            match body.expr_arena[root] {
-                Expr::Block { tail: Some(t), .. } => returns.push(t),
-                Expr::Block { tail: None, .. } => {}
-                _ => returns.push(root),
-            }
-            scan_returns(body, HirChild::Expr(root), &mut returns, &mut lets);
-        }
-        for (name, value) in lets {
-            if scan
-                .binding_ty(name)
-                .and_then(|ty| scan.concrete_ty_id(ty))
-                .is_some_and(|ty| {
-                    matches!(
-                        ty.peel_nullable().0,
-                        MonoTy::App {
-                            ctor: MonoCtor::Ref,
-                            ..
-                        }
-                    )
-                })
-            {
-                scan.flat_scan_lets.insert(raw(name), value);
-            }
-        }
-        let key = (inst.clone(), sig.to_vec());
+        scan.solve_flat_returns(key, decl)
+    }
+
+    fn solve_flat_returns(
+        &mut self,
+        key: (Instance, FlatSig),
+        decl: &Function,
+    ) -> Result<Option<FlatRefKey>, CompilerError> {
+        let returns = self.flat_return_sources();
         let depth = {
             let mut reg = self.flat_variants.borrow_mut();
+            let depth = reg.scanning.len();
             reg.scanning.push(ReturnScan {
-                key: key.clone(),
+                key,
                 assumed: None,
                 depends_on: None,
-                unknown_reads: 0,
+                pending: false,
             });
-            reg.scanning.len() - 1
+            depth
         };
-        let result = scan.settle_flat_returns(decl, &returns, depth);
+        let result = self.agree_flat_returns(decl, &returns, depth);
+        self.flat_scan_lets = HashMap::default();
         let mut reg = self.flat_variants.borrow_mut();
-        let done = reg.scanning.pop().expect("pushed above");
+        let scan = reg.scanning.pop().expect("pushed above");
         let answer = result?;
-        match done.depends_on {
-            // An enclosing scan's answer was read; it rescans this one once that changes.
-            Some(d) if d < depth => {
-                let reader = reg.scanning.last_mut().expect("an enclosing scan");
-                reader.depends_on = Some(reader.depends_on.map_or(d, |r| r.min(d)));
-                if answer.is_none() {
-                    reader.unknown_reads += 1;
-                }
-            }
-            // A body whose every return recurses never returns and keeps the boxed result.
-            _ => {
-                reg.returns.insert(key, answer.flatten());
-            }
+        if let Some(ancestor) = scan.depends_on.filter(|&d| d < depth) {
+            let reader = reg.scanning.last_mut().expect("an enclosing scan");
+            reader.depends_on = Some(reader.depends_on.map_or(ancestor, |d| d.min(ancestor)));
+            reader.pending |= answer.is_none();
+        } else {
+            // An all-recursive body never returns and keeps the boxed result.
+            reg.returns.insert(scan.key, answer.flatten());
         }
         Ok(answer.flatten())
     }
 
-    /// Repeats with each new answer assumed for the scan's own recursive calls until
-    /// it stops changing. `None` while every return reads an unknown answer.
-    fn settle_flat_returns(
-        &self,
-        decl: &Function,
-        returns: &[Idx<Expr>],
-        depth: usize,
-    ) -> Result<Option<Option<FlatRefKey>>, CompilerError> {
-        // Agreement only refines an unknown answer; once known, a return confirms it or
-        // `agree_flat_returns` rejects the disagreement.
-        loop {
-            let answer = self.agree_flat_returns(decl, returns, depth)?;
-            let mut reg = self.flat_variants.borrow_mut();
-            let scan = &mut reg.scanning[depth];
-            match scan.depends_on {
-                Some(d) if d < depth => return Ok(answer),
-                Some(_) if answer != scan.assumed => {
-                    scan.assumed = answer;
-                    scan.depends_on = None;
-                    scan.unknown_reads = 0;
-                }
-                _ => return Ok(answer),
+    fn flat_return_sources(&mut self) -> Vec<Idx<Expr>> {
+        let body = self.body;
+        let Some(root) = body.root else {
+            return Vec::new();
+        };
+        let mut returns = match body.expr_arena[root] {
+            Expr::Block { tail, .. } => tail.into_iter().collect(),
+            _ => vec![root],
+        };
+        let mut walk = |node| {
+            match node {
+                HirChild::Expr(e) => match body.expr_arena[e] {
+                    Expr::Lambda { .. } => return false,
+                    Expr::Return(Some(value)) => returns.push(value),
+                    _ => {}
+                },
+                HirChild::Statement(s) => match body.statement_arena[s] {
+                    Statement::Fn { .. } => return false,
+                    Statement::Let { pattern, value, .. }
+                        if let bone_core::hir::Pattern::Bind(name) =
+                            body.pattern_arena[pattern]
+                            && self
+                                .binding_ty(name)
+                                .and_then(|ty| self.concrete_ty_id(ty))
+                                .is_some_and(|ty| {
+                                    matches!(
+                                        ty.peel_nullable().0,
+                                        MonoTy::App {
+                                            ctor: MonoCtor::Ref,
+                                            ..
+                                        }
+                                    )
+                                }) =>
+                    {
+                        self.flat_scan_lets.insert(raw(name), value);
+                    }
+                    Statement::Return(Some(value)) => returns.push(value),
+                    _ => {}
+                },
+                HirChild::Pattern(_) => return false,
             }
+            true
+        };
+        let root = HirChild::Expr(root);
+        if walk(root) {
+            body.walk_descendants(root, &mut walk);
         }
+        returns.retain(|&r| !matches!(body.expr_arena[r], Expr::Null) && !is_phantom_call(body, r));
+        returns
     }
 
     fn agree_flat_returns(
@@ -514,21 +480,15 @@ impl<'a> Builder<'a> {
         returns: &[Idx<Expr>],
         depth: usize,
     ) -> Result<Option<Option<FlatRefKey>>, CompilerError> {
-        let unknown_reads = || self.flat_variants.borrow().scanning[depth].unknown_reads;
-        let mut agreed = self.flat_variants.borrow().scanning[depth].assumed;
-        for &r in returns {
-            if matches!(self.body.expr_arena[r], Expr::Null) || is_phantom_call(self.body, r) {
-                continue;
-            }
-            let before = unknown_reads();
-            let key = self.classify_flat_ref(r)?;
-            if unknown_reads() != before {
-                continue;
-            }
-            match agreed {
-                None => agreed = Some(key),
-                Some(prev) if prev == key => {}
-                Some(_) => {
+        let mut agreed = None;
+        loop {
+            for &r in returns {
+                self.flat_variants.borrow_mut().scanning[depth].pending = false;
+                let key = self.classify_flat_ref(r)?;
+                if self.flat_variants.borrow().scanning[depth].pending {
+                    continue;
+                }
+                if agreed.is_some_and(|prev| prev != key) {
                     return Err(CompilerError::new_with_label(
                         decl.name_span,
                         format!(
@@ -540,18 +500,27 @@ impl<'a> Builder<'a> {
                         ),
                     ));
                 }
+                agreed = Some(key);
             }
+            let mut reg = self.flat_variants.borrow_mut();
+            let scan = &mut reg.scanning[depth];
+            if scan.depends_on != Some(depth) || scan.assumed == agreed {
+                return Ok(agreed);
+            }
+            scan.assumed = agreed;
+            scan.depends_on = None;
         }
-        Ok(agreed)
     }
 
     pub(crate) fn own_flat_return(
-        &self,
+        &mut self,
         subject: &Instance,
     ) -> Result<Option<FlatRefKey>, CompilerError> {
+        if !self.ret_ty.is_some_and(|ty| self.is_value_ref_type(ty)) {
+            return Ok(None);
+        }
         let decl = &self.ws.module(subject.func.module).functions[subject.func.func];
-        let sig: FlatSig = vec![None; decl.param_decls.len()];
-        self.flat_return_scan(subject, self.concrete_plan, &sig)
+        self.solve_flat_returns((subject.clone(), Vec::new()), decl)
     }
 
     /// A safe-nav call or function value cannot take the `vec, slot` result of a
@@ -562,8 +531,7 @@ impl<'a> Builder<'a> {
         inst: &Instance,
     ) -> Result<(), CompilerError> {
         let decl = &self.ws.module(inst.func.module).functions[inst.func.func];
-        let sig: FlatSig = vec![None; decl.param_decls.len()];
-        if self.flat_return_of(inst, &sig)?.is_none() {
+        if self.flat_return_of(inst, &[])?.is_none() {
             return Ok(());
         }
         Err(CompilerError::new_with_label(

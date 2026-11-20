@@ -511,3 +511,26 @@ fn fer_returned_place_survives_compound_rhs_mutation() {
     assert_eq(xs[1].inner.v, 3, "the adjacent slot is untouched")
     assert_eq(cursor.next, 1, "index evaluated once")
 }
+
+co fn fer_sample(xs: [FerCell]) -> Coroutine<int> {
+    yield fer_descend_even(xs[0], 2).inner.v
+}
+
+co fn fer_sample_twice(xs: [FerCell]) -> Coroutine<int> {
+    let read = () => fer_descend_odd(xs[0], 3).inner.v
+    yield read()
+    await fer_sample(xs)
+    yield read()
+}
+
+@test
+fn fer_flat_return_reads_current_slot_across_await() {
+    let xs = fer_cells()
+    let samples = fer_sample_twice(xs)
+    assert_eq(samples.resume(), 1)
+    xs[0].inner.v = 15
+    assert_eq(samples.resume(), 15)
+    xs[0].inner.v = 27
+    assert_eq(samples.resume(), 27)
+    assert_eq(samples.resume(), null)
+}
