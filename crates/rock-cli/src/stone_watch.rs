@@ -166,10 +166,15 @@ fn declared_inputs(
     hashed
 }
 
-fn wait_for_reload_resume(control: &std::path::Path) -> Result<()> {
+fn wait_for_reload_resume(
+    control: &std::path::Path,
+    game: &mut Option<crate::headless_scope::BoundChild>,
+) -> Result<()> {
     let acknowledged = control.with_extension("held");
     let mut announced: Option<Vec<u8>> = None;
+    crate::runtime_process::exit_after_game_interrupt(game.as_mut())?;
     while control.exists() {
+        crate::runtime_process::exit_after_game_interrupt(game.as_mut())?;
         let requested = match fs_err::read(control) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
@@ -299,12 +304,12 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
 
     let reload_control = output_path.with_file_name("reload.hold");
     loop {
-        wait_for_reload_resume(&reload_control)?;
+        wait_for_reload_resume(&reload_control, &mut game_process)?;
         let event = watch.tick();
         if event.paths.is_empty() {
             continue;
         }
-        wait_for_reload_resume(&reload_control)?;
+        wait_for_reload_resume(&reload_control, &mut game_process)?;
         if event.is_restart_trigger {
             info!("Manual restart triggered (tmp/restart.txt detected)");
         }
@@ -416,14 +421,14 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
 
         // This process still has the previous compiler mapped.
         if compiler_rebuilt {
-            wait_for_reload_resume(&reload_control)?;
+            wait_for_reload_resume(&reload_control, &mut game_process)?;
             reexec_with_new_binary(&mut game_process);
         }
 
         let has_game_changes = !changed_paths.is_empty() || force_game_compile;
         let mut compilation_succeeded = false;
         if has_game_changes || compiler_rebuilt {
-            wait_for_reload_resume(&reload_control)?;
+            wait_for_reload_resume(&reload_control, &mut game_process)?;
             match compiler.compile(&changed_paths, compiler_rebuilt) {
                 Ok(outcome) => {
                     // Consumed successfully; start the next edit clean. On error
@@ -459,7 +464,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
 
         // Compilation may have overlapped the hold request. Acknowledge only
         // after publication ends, before any child replacement can occur.
-        wait_for_reload_resume(&reload_control)?;
+        wait_for_reload_resume(&reload_control, &mut game_process)?;
 
         let restarting = should_restart && game_process.is_some();
         if restarting || (game_process.is_none() && compilation_succeeded) {
@@ -1194,7 +1199,7 @@ mod reload_hold_tests {
         let path = control.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            super::wait_for_reload_resume(&path).unwrap();
+            super::wait_for_reload_resume(&path, &mut None).unwrap();
             tx.send(()).unwrap();
         });
         let deadline = Instant::now() + Duration::from_secs(5);
