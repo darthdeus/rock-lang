@@ -234,3 +234,18 @@ fn test_complex_short_circuit_case() {
 
     assert_false(result, "Result should be false")
 }
+
+@test
+fn primitive_arithmetic_dispatches_across_types() {
+    let a = -7
+    let b = 2
+    assert_eq((a + b, a - b, a * b, a ./ b, a % b), (-5, -9, -14, -4, 1))
+    let x = a as float
+    let y = b as float
+    assert_eq((x + y, x - y, x * y, x / y, x % y), (-5.0, -9.0, -14.0, -3.5, 1.0))
+    let u: uint = 4294967295
+    let two: uint = 2
+    assert_eq((u + two, u - two, u * two, u ./ two, u % two),
+        (1 as uint, 4294967293 as uint, 4294967294 as uint, 2147483647 as uint, 1 as uint))
+    assert_eq("rock" + " salt", "rock salt")
+}

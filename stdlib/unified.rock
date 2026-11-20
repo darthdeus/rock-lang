@@ -1110,21 +1110,21 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 @pure @inline operator !=(a: float, b: float) -> bool { return a != b }
 @pure @inline operator !=(a: bool, b: bool) -> bool { return a != b }
 
-@pure @inline operator(lua) +(a: int, b: int) -> int = "return a + b"
-@pure @inline operator(lua) +(a: uint, b: uint) -> uint = "return a + b"
-@pure @inline operator(lua) +(a: float, b: float) -> float = "return a + b"
-@pure @inline operator(lua) -(a: int, b: int) -> int = "return a - b"
-@pure @inline operator(lua) -(a: uint, b: uint) -> uint = "return a - b"
-@pure @inline operator(lua) -(a: float, b: float) -> float = "return a - b"
-@pure @inline operator(lua) *(a: int, b: int) -> int = "return a * b"
-@pure @inline operator(lua) *(a: uint, b: uint) -> uint = "return a * b"
-@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
-@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
-@pure @inline operator(lua) ./(a: int, b: int) -> int = "return math.floor(a / b)"
-@pure @inline operator(lua) ./(a: uint, b: uint) -> uint = "return math.floor(a / b)"
-@pure @inline operator(lua) %(a: int, b: int) -> int = "return a % b"
-@pure @inline operator(lua) %(a: uint, b: uint) -> uint = "return a % b"
-@pure @inline operator(lua) %(a: float, b: float) -> float = "return a % b"
+@pure @inline operator +(a: int, b: int) -> int { return a + b }
+@pure @inline operator +(a: uint, b: uint) -> uint { return a + b }
+@pure @inline operator +(a: float, b: float) -> float { return a + b }
+@pure @inline operator -(a: int, b: int) -> int { return a - b }
+@pure @inline operator -(a: uint, b: uint) -> uint { return a - b }
+@pure @inline operator -(a: float, b: float) -> float { return a - b }
+@pure @inline operator *(a: int, b: int) -> int { return a * b }
+@pure @inline operator *(a: uint, b: uint) -> uint { return a * b }
+@pure @inline operator *(a: float, b: float) -> float { return a * b }
+@pure @inline operator /(a: float, b: float) -> float { return a / b }
+@pure @inline operator ./(a: int, b: int) -> int { return a ./ b }
+@pure @inline operator ./(a: uint, b: uint) -> uint { return a ./ b }
+@pure @inline operator %(a: int, b: int) -> int { return a % b }
+@pure @inline operator %(a: uint, b: uint) -> uint { return a % b }
+@pure @inline operator %(a: float, b: float) -> float { return a % b }
 
 @pure @inline operator <(a: int, b: int) -> bool { return a < b }
 @pure @inline operator <(a: uint, b: uint) -> bool { return a < b }
@@ -1147,7 +1147,7 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 @pure @inline operator !(a: bool) -> bool { return !a }
 @pure @inline operator ~(a: int) -> int { return ~a }
 
-@pure @inline operator(lua) +(a: string, b: string) -> string = "return a .. b"
+@pure @inline operator +(a: string, b: string) -> string { return a + b }
 @pure @inline operator ==(a: string, b: string) -> bool { return a == b }
 @pure @inline operator !=(a: string, b: string) -> bool { return a != b }
 
@@ -1518,13 +1518,9 @@ fn Vec<T>.rev(collection) -> [T] {
     return out
 }
 
-inline(lua) fn __op_null_coalesce<T>(a: T?, b: T) -> T = """
-    if a == nil then return b else return a end
-"""
+fn __op_null_coalesce<T>(a: T?, b: T) -> T { return a ?? b }
 
-inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
-    if a == nil then return b else return a end
-"""
+fn __op_null_coalesce<T>(a: T?, b: T?) -> T? { return a ?? b }
 
 @nowrite @intrinsic @nomangle @inline fn is_null(value: any) -> bool { return value == null }
 
@@ -1584,15 +1580,13 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
 @intrinsic @pure @inline fn int_to_float(value: int) -> float { return value as float }
 @intrinsic @pure @inline fn to_float(value: int) -> float { return value as float }
 
-// Taken as a fn value, so it needs a real JS sibling, not a template.
-@nowrite inline(lua) fn float_to_int(value: float) -> int = """
-    if type(value) ~= "number" then
-        error("Expected a number, got " .. type(value))
-    end
-    local r = math.floor(value)
-    return r
-"""
-@nowrite inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
+@nowrite fn float_to_int(value: float) -> int {
+    let kind = typeof(value)
+    if kind != "number" {
+        error("Expected a number, got " + kind)
+    }
+    return value as int
+}
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
 

@@ -303,3 +303,11 @@ fn test_coalescing_a_widened_absent_value() {
     let v: float? = a
     print("{(v ?? 0.0).floor()}")
 }
+
+@test
+fn direct_coalescing_helpers_preserve_false_and_absence() {
+    let absent: bool? = null
+    let present: bool? = false
+    assert(is_null(__op_null_coalesce(absent, absent)))
+    assert_eq(__op_null_coalesce(absent, present), present)
+}
