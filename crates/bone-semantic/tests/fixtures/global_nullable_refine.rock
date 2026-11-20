@@ -1,7 +1,13 @@
-//- global_refine_basic
 value Player { name: string }
 global P: Player? = null
-fn f() -> Player? {
+
+value Inner { v: int }
+struct Outer { inner: Inner? }
+global G: Outer = Outer { inner: null }
+
+fn impure() -> int { 0 }
+
+fn global_refine_basic() -> Player? {
     if P != null {
         P
       //^ Player
@@ -10,10 +16,7 @@ fn f() -> Player? {
     }
 }
 
-//- global_refine_field_access
-value Player { name: string }
-global P: Player? = null
-fn f() -> string {
+fn global_refine_field_access() -> string {
     if P != null {
         let nm = P.name
           //^ string
@@ -23,11 +26,7 @@ fn f() -> string {
     }
 }
 
-//- global_refine_field_path
-value Inner { v: int }
-struct Outer { inner: Inner? }
-global G: Outer = Outer { inner: null }
-fn f() -> int {
+fn global_refine_field_path() -> int {
     if G.inner != null {
         let n = G.inner.v
           //^ int
@@ -36,10 +35,7 @@ fn f() -> int {
     0
 }
 
-//- global_refine_guard_early_return
-value Player { name: string }
-global P: Player? = null
-fn f() -> string {
+fn global_refine_guard_early_return() -> string {
     if P == null {
         return "none"
     }
@@ -48,11 +44,8 @@ fn f() -> string {
     nm
 }
 
-//- global_refine_survives_pure_call
-value Player { name: string }
-global P: Player? = null
 @pure fn noop() -> int { 0 }
-fn f() -> int {
+fn global_refine_survives_pure_call() -> int {
     if P != null {
         let a = noop()
         P
@@ -61,11 +54,8 @@ fn f() -> int {
     0
 }
 
-//- global_refine_survives_pure_in_cond
-value Player { name: string }
-global P: Player? = null
 @pure fn ok() -> bool { return true }
-fn f() -> int {
+fn global_refine_survives_pure_in_cond() -> int {
     if P != null && ok() {
         P
       //^ Player
@@ -73,11 +63,7 @@ fn f() -> int {
     0
 }
 
-//- global_refine_use_before_impure_call
-value Player { name: string }
-global P: Player? = null
-fn impure() -> int { 0 }
-fn f() -> int {
+fn global_refine_use_before_impure_call() -> int {
     if P != null {
         let n = P.name
           //^ string
@@ -86,11 +72,7 @@ fn f() -> int {
     0
 }
 
-//- global_refine_dropped_after_impure_call
-value Player { name: string }
-global P: Player? = null
-fn impure() -> int { 0 }
-fn f() -> int {
+fn global_refine_dropped_after_impure_call() -> int {
     if P != null {
         impure()
         P
@@ -99,12 +81,7 @@ fn f() -> int {
     0
 }
 
-//- global_refine_field_path_dropped_after_impure_call
-value Inner { v: int }
-struct Outer { inner: Inner? }
-global G: Outer = Outer { inner: null }
-fn impure() -> int { 0 }
-fn f() -> int {
+fn global_refine_field_path_dropped_after_impure_call() -> int {
     if G.inner != null {
         impure()
         let n = G.inner
@@ -114,10 +91,7 @@ fn f() -> int {
     0
 }
 
-//- global_refine_dropped_after_write
-value Player { name: string }
-global P: Player? = null
-fn f() -> int {
+fn global_refine_dropped_after_write() -> int {
     if P != null {
         P = null
         P
@@ -126,10 +100,7 @@ fn f() -> int {
     0
 }
 
-//- global_not_refined_inside_lambda_body
-value Player { name: string }
-global P: Player? = null
-fn f() -> int {
+fn global_not_refined_inside_lambda_body() -> int {
     if P != null {
         let g = () => {
             let q = P
@@ -141,10 +112,7 @@ fn f() -> int {
     return 0
 }
 
-//- global_refine_dropped_after_yield
-value Player { name: string }
-global P: Player? = null
-co fn f() -> Coroutine<int> {
+co fn global_refine_dropped_after_yield() -> Coroutine<int> {
     if P != null {
         yield 1
         P
@@ -152,22 +120,16 @@ co fn f() -> Coroutine<int> {
     }
 }
 
-//- global_refine_dropped_after_impure_in_cond
-value Player { name: string }
-global P: Player? = null
-fn impure() -> bool { return true }
-fn f() -> int {
-    if P != null && impure() {
+fn impure_condition() -> bool { return true }
+fn global_refine_dropped_after_impure_in_cond() -> int {
+    if P != null && impure_condition() {
         P
       //^ Player?
     }
     0
 }
 
-//- global_refine_restored_after_branch
-value Player { name: string }
-global P: Player? = null
-fn f() -> int {
+fn global_refine_restored_after_branch() -> int {
     if P != null {
         let a = P
           //^ Player

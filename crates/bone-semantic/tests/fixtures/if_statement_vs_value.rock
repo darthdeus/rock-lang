@@ -1,6 +1,6 @@
-//- stmt_open_chain_uniform_tails
 fn gives_bool() -> bool { true }
-fn f() -> int {
+
+fn stmt_open_chain_uniform_tails() -> int {
     let x = 1
     if x == 1 {
         gives_bool()
@@ -14,9 +14,7 @@ fn f() -> int {
     y
 }
 
-//- stmt_open_chain_mismatched_tails
-fn gives_bool() -> bool { true }
-fn f() -> int {
+fn stmt_open_chain_mismatched_tails() -> int {
     let x = 1
     if x == 1 {
         gives_bool()
@@ -28,9 +26,7 @@ fn f() -> int {
     y
 }
 
-//- stmt_closed_mismatched_tails
-fn gives_bool() -> bool { true }
-fn f() -> int {
+fn stmt_closed_mismatched_tails() -> int {
     let x = 1
     if x == 1 {
         gives_bool()
@@ -42,9 +38,7 @@ fn f() -> int {
     y
 }
 
-//- stmt_nested_open_if_bool_tail
-fn gives_bool() -> bool { true }
-fn f() -> int {
+fn stmt_nested_open_if_bool_tail() -> int {
     let x = 1
     if x == 1 {
         if x < 5 {
@@ -58,9 +52,7 @@ fn f() -> int {
     y
 }
 
-//- stmt_while_body_tail_mismatched_if
-fn gives_bool() -> bool { true }
-fn f() -> int {
+fn stmt_while_body_tail_mismatched_if() -> int {
     let x = 1
     while x < 3 {
         x = 5
@@ -75,9 +67,7 @@ fn f() -> int {
     y
 }
 
-//- stmt_for_body_tail_mismatched_if
-fn gives_bool() -> bool { true }
-fn f() -> int {
+fn stmt_for_body_tail_mismatched_if() -> int {
     let x = 1
     for i in 0..3 {
         if i == 1 {
@@ -91,9 +81,7 @@ fn f() -> int {
     y
 }
 
-//- stmt_fn_tail_no_ret_mismatched_if
-fn gives_bool() -> bool { true }
-fn f() {
+fn stmt_fn_tail_no_ret_mismatched_if() {
     let x = 1
       //^ int
     if x == 1 {
@@ -103,16 +91,14 @@ fn f() {
     }
 }
 
-//- value_let_closed_uniform
-fn f() -> int {
+fn value_let_closed_uniform() -> int {
     let x = 1
     let u = if x == 1 { 10 } else { 20 }
       //^ int
     u
 }
 
-//- value_fn_tail_closed
-fn f(x: int) -> int {
+fn value_fn_tail_closed(x: int) -> int {
     let y = x
       //^ int
     if y == 1 {
@@ -122,9 +108,7 @@ fn f(x: int) -> int {
     }
 }
 
-//- stmt_iflet_nonunit_tail
-fn gives_bool() -> bool { true }
-fn f() -> int {
+fn stmt_iflet_nonunit_tail() -> int {
     let m: int? = 42
     if let n = m {
         gives_bool()
@@ -134,21 +118,18 @@ fn f() -> int {
     y
 }
 
-//- value_iflet_closed
-fn f() -> int {
+fn value_iflet_closed() -> int {
     let m: int? = 42
     let u = if let n = m { n } else { 0 }
       //^ int
     u
 }
 
-//- lambda_arg_unit_ret_tail_if
-fn gives_bool() -> bool { true }
 fn run(cb: fn()) -> int {
     cb()
     1
 }
-fn f() -> int {
+fn lambda_arg_unit_ret_tail_if() -> int {
     let r = run(() => {
         let x = 1
         if x == 1 {
@@ -160,9 +141,7 @@ fn f() -> int {
     y
 }
 
-//- lambda_annotated_unit_ret_tail_if
-fn gives_bool() -> bool { true }
-fn f() -> int {
+fn lambda_annotated_unit_ret_tail_if() -> int {
     let g: fn() = () => {
         let x = 1
         if x == 1 {
@@ -174,10 +153,8 @@ fn f() -> int {
     y
 }
 
-//- lambda_field_unit_ret_tail_if
-fn gives_bool() -> bool { true }
 struct Hooks { cb: fn() }
-fn f() -> int {
+fn lambda_field_unit_ret_tail_if() -> int {
     let h = Hooks { cb: () => {
         let x = 1
         if x == 1 {
