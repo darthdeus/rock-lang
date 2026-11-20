@@ -268,3 +268,23 @@ fn decorator_declaration_named_like_a_function_elsewhere() {
     let toks = rendered(&bone, &project.path("b.rock"));
     assert_tokens("decorator declaration", &toks, &[(2, 10, "decorator")]);
 }
+
+#[test]
+fn semantic_name_fallback_follows_macro_edits() {
+    let function = "fn twice(x: int) -> int { x * 2 }\nfn f() -> int { twice(3) }\n";
+    let definition = function.replacen("fn twice", "macro twice", 1);
+    let mut bone = workspace(function);
+    for (src, column, kind) in [
+        (function, 3, "function"),
+        (definition.as_str(), 6, "macro"),
+        (function, 3, "function"),
+    ] {
+        bone.update(PATH, src.into());
+        let tokens = rendered(&bone, PATH);
+        assert_tokens(
+            "twice after edit",
+            &tokens,
+            &[(0, column, kind), (1, 16, kind)],
+        );
+    }
+}

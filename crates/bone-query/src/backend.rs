@@ -149,6 +149,7 @@ struct BoneProject {
     reach: Option<crate::reachability::ReachabilityIndex>,
     call_through: Option<CallThroughIndex>,
     completion_scopes: HashMap<Ustr, completion::CompletionScope>,
+    semantic_names: OnceLock<HashMap<Ustr, u32>>,
     /// `unused_fn` is closed-world (a `lib`'s public API has no in-project
     /// caller yet isn't dead), so it runs only for `bin` projects.
     is_bin: bool,
@@ -184,6 +185,7 @@ impl BoneProject {
             reach: None,
             call_through: None,
             completion_scopes: HashMap::new(),
+            semantic_names: OnceLock::new(),
             is_bin: rock_host::stick::StickConfig::is_bin_at(root),
             root: root.to_path_buf(),
             module_touched: HashMap::new(),
@@ -218,6 +220,7 @@ impl BoneProject {
         self.call_through = None;
         self.freq = None;
         self.completion_scopes.clear();
+        self.semantic_names.take();
     }
 
     fn reparse_user_file(&self, path: &str, request: &'static str) -> Option<skull_parser::Ast> {
@@ -1825,12 +1828,9 @@ impl BoneWorkspace {
             return SemanticTokens::default();
         };
         let ws = proj.session.workspace();
-        let mut names = semantic_name_map(ws);
-        // Macros are expanded before lowering; only the Session's parse-time capture
-        // knows them.
-        for (_, md) in proj.session.all_macro_defs() {
-            names.entry(md.name).or_insert(TT_MACRO);
-        }
+        let names = proj
+            .semantic_names
+            .get_or_init(|| semantic_name_map(&proj.session));
         let hir = user_module_for_path(ws, path)
             .map(|mid| {
                 let text_of = |f: &str| proj.texts.get(f).map(String::as_str);
@@ -1840,6 +1840,22 @@ impl BoneWorkspace {
 
         let mut data = Vec::new();
         let (mut prev_line, mut prev_start) = (0u32, 0u32);
+        let mut emit = |line: u32, col: u32, length, (token_type, token_modifiers_bitset)| {
+            let delta_line = line.saturating_sub(prev_line);
+            let delta_start = if delta_line == 0 {
+                col.saturating_sub(prev_start)
+            } else {
+                col
+            };
+            data.push(SemanticToken {
+                delta_line,
+                delta_start,
+                length,
+                token_type,
+                token_modifiers_bitset,
+            });
+            (prev_line, prev_start) = (line, col);
+        };
         let mut prev_kind: Option<&rock_tokenizer::TokenKind> = None;
         let mut prev_end = 0usize;
         for (i, tok) in toks.iter().enumerate() {
@@ -1855,87 +1871,79 @@ impl BoneWorkspace {
             prev_kind = Some(&tok.kind);
             prev_end = tok.span.offset_range().1;
 
-            let next_kind = toks[i + 1..]
-                .iter()
-                .map(|t| &t.kind)
-                .find(|k| !matches!(k, rock_tokenizer::TokenKind::Comment(_)));
+            let next_kind = if matches!(tok.kind, rock_tokenizer::TokenKind::Ident(_)) {
+                toks[i + 1..]
+                    .iter()
+                    .map(|t| &t.kind)
+                    .find(|k| !matches!(k, rock_tokenizer::TokenKind::Comment(_)))
+            } else {
+                None
+            };
 
-            let Some((token_type, token_modifiers_bitset)) = classify_token(
+            let Some(class) = classify_token(
                 &tok.kind,
                 next_kind,
                 &hir.by_offset,
-                &names,
+                names,
                 tok.span.offset_range().0,
                 is_member,
                 is_annotation,
             ) else {
                 continue;
             };
-            let token_type = match &tok.kind {
-                rock_tokenizer::TokenKind::Comment(body)
-                    if is_magic_rock_directive(body.as_str()) =>
-                {
-                    TT_MACRO
-                }
-                _ => token_type,
+            let (start, end) = tok.span.offset_range();
+            let Some(text) = src.get(start..end) else {
+                continue;
             };
-            for segment in token_line_segments(src, tok) {
-                if let Some((lo, hi)) = range {
-                    if segment.lo < lo || segment.lo >= hi {
-                        continue;
-                    }
+            let (first_line, last_line) = tok.span.line_range();
+            let mut emit_line = |line: usize, lo, text: &str| {
+                if text.is_empty() || range.is_some_and(|(from, to)| lo < from || lo >= to) {
+                    return;
                 }
-                let SingleLine {
-                    line,
-                    start,
-                    length,
-                    lo: ts,
-                    hi: te,
-                } = segment;
-                let mut pieces: Vec<(u32, u32, u32, u32)> = Vec::new();
-                if token_type == TT_STRING {
-                    let mut cur = start;
-                    for h in hir
+                let col = if line == first_line {
+                    utf16_col_at(src, lo)
+                } else {
+                    0
+                };
+                let line = line as u32;
+                let end_col = col + text.encode_utf16().count() as u32;
+                let mut cur = col;
+                if class.0 == TT_STRING {
+                    let hi = lo + text.len();
+                    let start = hir
                         .interp_holes
+                        .partition_point(|h| h.offset_range().0 < lo);
+                    for (hs, he) in hir.interp_holes[start..]
                         .iter()
-                        .filter(|h| h.offset_range().0 >= ts && h.offset_range().1 <= te)
+                        .map(Span::offset_range)
+                        .take_while(|&(hs, _)| hs <= hi)
+                        .filter(|&(_, he)| he <= hi)
                     {
-                        let hs = utf16_col_at(src, h.offset_range().0);
-                        let he = utf16_col_at(src, h.offset_range().1);
-                        if hs > cur {
-                            pieces.push((cur, hs - cur, TT_STRING, 0));
+                        let hole_col = utf16_col_at(src, hs);
+                        let end = utf16_col_at(src, he);
+                        if hole_col > cur {
+                            emit(line, cur, hole_col - cur, class);
                         }
-                        let (tt, mods) = hir
-                            .by_offset
-                            .get(&h.offset_range().0)
-                            .copied()
-                            .unwrap_or((TT_VARIABLE, 0));
-                        pieces.push((hs, he - hs, tt, mods));
-                        cur = he;
-                    }
-                    if !pieces.is_empty() && start + length > cur {
-                        pieces.push((cur, start + length - cur, TT_STRING, 0));
+                        emit(
+                            line,
+                            hole_col,
+                            end - hole_col,
+                            hir.by_offset.get(&hs).copied().unwrap_or((TT_VARIABLE, 0)),
+                        );
+                        cur = end;
                     }
                 }
-                if pieces.is_empty() {
-                    pieces.push((start, length, token_type, token_modifiers_bitset));
+                if end_col > cur {
+                    emit(line, cur, end_col - cur, class);
                 }
-                for (col, len, tt, mods) in pieces {
-                    let delta_line = line.saturating_sub(prev_line);
-                    let delta_start = if delta_line == 0 {
-                        col.saturating_sub(prev_start)
-                    } else {
-                        col
-                    };
-                    data.push(SemanticToken {
-                        delta_line,
-                        delta_start,
-                        length: len,
-                        token_type: tt,
-                        token_modifiers_bitset: mods,
-                    });
-                    prev_line = line;
-                    prev_start = col;
+            };
+            if first_line == last_line {
+                emit_line(first_line, start, text);
+            } else {
+                let mut offset = start;
+                for (i, raw) in text.split_inclusive('\n').enumerate() {
+                    emit_line(first_line + i, offset, raw.trim_end_matches(['\n', '\r']));
+                    offset += raw.len();
                 }
             }
         }
@@ -1944,51 +1952,6 @@ impl BoneWorkspace {
             data,
         }
     }
-}
-
-/// One line of a token: LSP semantic tokens cannot span lines.
-struct SingleLine {
-    line: u32,
-    start: u32,
-    length: u32,
-    lo: usize,
-    hi: usize,
-}
-
-/// Columns and lengths count UTF-16 code units, as the protocol requires.
-fn token_line_segments(src: &str, tok: &rock_tokenizer::Token) -> Vec<SingleLine> {
-    let (first_line, last_line) = tok.span.line_range();
-    let (lo, hi) = tok.span.offset_range();
-    if first_line == last_line {
-        return vec![SingleLine {
-            line: first_line as u32,
-            start: utf16_col_at(src, lo),
-            length: src.get(lo..hi).map_or(0, |t| t.encode_utf16().count()) as u32,
-            lo,
-            hi,
-        }]
-        .into_iter()
-        .filter(|s| s.length > 0)
-        .collect();
-    }
-    let mut offset = lo;
-    src[lo..hi]
-        .split_inclusive('\n')
-        .enumerate()
-        .filter_map(|(i, raw)| {
-            let lo = offset;
-            offset += raw.len();
-            let text = raw.trim_end_matches('\n').trim_end_matches('\r');
-            let length = text.encode_utf16().count() as u32;
-            (length > 0).then_some(SingleLine {
-                line: (first_line + i) as u32,
-                start: if i == 0 { utf16_col_at(src, lo) } else { 0 },
-                length,
-                lo,
-                hi: lo + text.len(),
-            })
-        })
-        .collect()
 }
 
 pub fn semantic_tokens_legend() -> Vec<SemanticTokenType> {
@@ -2072,40 +2035,8 @@ fn classify_token(
         {
             (TT_MACRO, 0)
         }
-        T::Fn
-        | T::Operator
-        | T::Table
-        | T::Let
-        | T::Return
-        | T::Defer
-        | T::Yield
-        | T::Await
-        | T::Struct
-        | T::Newtype
-        | T::If
-        | T::Else
-        | T::For
-        | T::Loop
-        | T::In
-        | T::While
-        | T::Break
-        | T::Continue
-        | T::Null
-        | T::Enum
-        | T::Match
-        | T::Extern
-        | T::Global
-        | T::Const
-        | T::Type
-        | T::As
-        | T::Deco
-        | T::Macro
-        | T::True
-        | T::False
-        | T::DirectiveIf
-        | T::DirectiveElseIf
-        | T::DirectiveElse
-        | T::DirectiveEnd => (TT_KEYWORD, 0),
+        T::DirectiveIf | T::DirectiveElseIf | T::DirectiveElse | T::DirectiveEnd => (TT_KEYWORD, 0),
+        T::Comment(body) if is_magic_rock_directive(body.as_str()) => (TT_MACRO, 0),
         T::Comment(_) => (TT_COMMENT, 0),
         T::Int(..) | T::Float(_) => (TT_NUMBER, 0),
         T::String(_) | T::RawString(_) => (TT_STRING, 0),
@@ -2124,6 +2055,9 @@ fn classify_token(
             .or_else(|| matches!(next_kind, Some(T::Colon)).then_some((TT_PARAMETER, 0)))
             .or_else(|| names.get(n).map(|&t| (t, 0)))
             .unwrap_or((TT_VARIABLE, 0)),
+        _ if !matches!(kind, T::And | T::Or) && kind.as_keyword_identifier().is_some() => {
+            (TT_KEYWORD, 0)
+        }
         _ => return None,
     })
 }
@@ -2297,9 +2231,9 @@ struct SemanticClassifications {
 }
 
 /// Structs win over later kinds on a name clash (`entry` keeps first).
-fn semantic_name_map(ws: &Workspace) -> HashMap<Ustr, u32> {
+fn semantic_name_map(session: &Session) -> HashMap<Ustr, u32> {
     let mut names: HashMap<Ustr, u32> = HashMap::new();
-    for m in ws.modules.iter() {
+    for m in &session.workspace().modules {
         for (n, def) in m.nominals.iter() {
             names.entry(*n).or_insert(match def {
                 Nominal::Struct(_) => TT_STRUCT,
@@ -2313,6 +2247,9 @@ fn semantic_name_map(ws: &Workspace) -> HashMap<Ustr, u32> {
         for d in m.decorators.values() {
             names.entry(d.name).or_insert(TT_DECORATOR);
         }
+    }
+    for (_, macro_def) in session.all_macro_defs() {
+        names.entry(macro_def.name).or_insert(TT_MACRO);
     }
     names
 }
