@@ -60,7 +60,7 @@ impl Emitter<'_> {
                     push_uint(out, c);
                 }
             }
-            out.push_str(" = nil\n");
+            out.push_str("=nil\n");
         }
     }
 

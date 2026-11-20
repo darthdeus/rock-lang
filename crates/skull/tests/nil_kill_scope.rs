@@ -129,7 +129,7 @@ fn undeclared_kills(lua: &str) -> Vec<(String, usize, String)> {
         }
         declared.extend(declared_on(line));
         let trimmed = line.trim();
-        if let Some(name) = trimmed.strip_suffix(" = nil") {
+        if let Some(name) = trimmed.strip_suffix("=nil") {
             let scalar = name.starts_with(['r', 'c'])
                 && name.len() > 1
                 && name[1..].bytes().all(|b| b.is_ascii_digit());

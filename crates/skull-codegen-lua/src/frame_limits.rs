@@ -631,7 +631,7 @@ mod body_measure_tests {
     fn a_self_move_and_a_kill_cost_no_measured_instruction() {
         let body = format!(
             "  goto bb1\n{}  ::bb1::\n",
-            "  r0 = r0\n  r0 = nil\n".repeat(40_000)
+            "  r0 = r0\n  r0=nil\n".repeat(40_000)
         );
         assert_eq!(measure_raw(&body), None);
     }

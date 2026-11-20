@@ -29,11 +29,11 @@ fn main() {
 fn a_kill_before_a_call_free_return_is_dropped() {
     let lua = emit_module(SRC);
     let body = function_body(&lua, "plain");
-    assert!(!body.contains(" = nil"));
+    assert!(!body.contains("=nil"));
     let body = function_body(&lua, "calls");
-    assert!(body.contains(" = nil"));
+    assert!(body.contains("=nil"));
     let body = function_body(&lua, "joined");
-    assert!(!body.contains(" = nil\n else"));
-    assert!(!body.contains(" = nil\n end"));
+    assert!(!body.contains("=nil\n else"));
+    assert!(!body.contains("=nil\n end"));
     assert_eq!(run_main(&lua), "8 12 2 3");
 }

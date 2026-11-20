@@ -747,10 +747,10 @@ fn dead_locals_are_nil_killed_after_their_last_use() {
         .position(|l| l.starts_with("if "))
         .unwrap_or_else(|| panic!("missing branch in:\n{lua}"));
     // `c1` (param `b`) dies at the product: killed before the next statement.
-    let kill_b = at("c1 = nil");
+    let kill_b = at("c1=nil");
     assert!(product < kill_b && kill_b < double, "{lua}");
     // `r0` is live across the branch (`t`): no kill between its def and the `if`.
-    assert!(!lines[double..branch].contains(&"r0 = nil"), "{lua}");
+    assert!(!lines[double..branch].contains(&"r0=nil"), "{lua}");
     // A kill immediately before a plain `return` buys nothing (RET drops the
     // frame): `t` is returned straight from its register with no kill before it.
     let ret = at("do return r0 end");
@@ -780,14 +780,14 @@ fn loop_scoped_registers_are_never_killed_outside_their_loop() {
         .unwrap_or_else(|| panic!("no loop end:\n{lua}"));
     let scoped: Vec<&str> = inner_decl["local ".len()..].split(", ").collect();
     for name in scoped {
-        let kill = format!("{name} = nil");
+        let kill = format!("{name}=nil");
         for (i, l) in lines.iter().enumerate() {
             if *l == kill {
                 assert!(for_line < i && i < end_line, "{lua}");
             }
         }
     }
-    assert!(lines.iter().any(|l| l.ends_with(" = nil")), "{lua}");
+    assert!(lines.iter().any(|l| l.ends_with("=nil")), "{lua}");
 }
 
 /// [`emit_clean`] with its callee binding plan.

@@ -227,7 +227,7 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "h");
-    assert!(!body.contains(" = nil"));
+    assert!(!body.contains("=nil"));
     assert_eq!(run_main(&lua), "f3\nf6");
 }
 
@@ -252,6 +252,6 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "h");
-    assert!(!body.contains(" = nil"));
+    assert!(!body.contains("=nil"));
     assert_eq!(run_main(&lua), "t1\nt2");
 }
