@@ -67,13 +67,3 @@ fn semantic_token_range_and_delta_agree_with_full() {
     }
     assert_eq!(Value::Array(data), doc.tokens());
 }
-
-#[test]
-fn execute_command_accepts_a_completion_record() {
-    let mut doc = Document::single(LOCAL);
-    let reply = doc.request(
-        "workspace/executeCommand",
-        json!({"command": "rock.completionAccepted", "arguments": [1, 0, "count"]}),
-    );
-    assert!(reply.is_null(), "{reply}");
-}

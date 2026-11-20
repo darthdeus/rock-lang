@@ -176,7 +176,6 @@ fn initialize_replies_with_the_advertised_capabilities() {
             "renameProvider": { "prepareProvider": true },
             "codeActionProvider": { "codeActionKinds": ["refactor.inline"], "resolveProvider": false },
             "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
-            "executeCommandProvider": { "commands": ["rock.completionAccepted"] },
         })
     );
 }

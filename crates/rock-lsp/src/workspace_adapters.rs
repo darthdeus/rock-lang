@@ -68,10 +68,9 @@ pub fn do_completion_workspace(
         c.trigger_kind == lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER
             && c.trigger_character.as_deref() == Some(" ")
     });
-    let mut items = workspace
+    let items = workspace
         .bone
         .completion_with_trigger(&file_path, pos, space_triggered);
-    crate::completion_record::stash_and_tag(&workspace.bone, &file_path, pos, &mut items);
     // Re-request on each keystroke because ranking depends on the typed prefix.
     Ok(Some(CompletionList {
         is_incomplete: true,

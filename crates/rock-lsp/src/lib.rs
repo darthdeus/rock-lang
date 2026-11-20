@@ -10,15 +10,13 @@ use lsp_types::notification::{
     Notification as LspNotification, PublishDiagnostics, ShowMessage,
 };
 use lsp_types::request::{
-    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, ExecuteCommand,
-    GotoDefinition, GotoTypeDefinition, HoverRequest, InlayHintRefreshRequest, InlayHintRequest,
+    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentSymbolRequest, GotoDefinition,
+    GotoTypeDefinition, HoverRequest, InlayHintRefreshRequest, InlayHintRequest,
     PrepareRenameRequest, References, Rename, Request as LspRequest,
     SemanticTokensFullDeltaRequest, SemanticTokensFullRequest, SemanticTokensRangeRequest,
     Shutdown, SignatureHelpRequest, WorkspaceSymbolRequest,
 };
-use lsp_types::{
-    CompletionList, ExecuteCommandParams, InlayHint, Location, TextDocumentPositionParams, Uri,
-};
+use lsp_types::{CompletionList, InlayHint, Location, TextDocumentPositionParams, Uri};
 
 mod code_actions;
 pub mod semantic_tokens;
@@ -33,8 +31,6 @@ pub use server_cli::run_cli;
 pub use code_actions::*;
 pub use workspace::*;
 pub use workspace_adapters::*;
-
-pub mod completion_record;
 
 fn default_debug_file(name: &str) -> std::path::PathBuf {
     #[cfg(windows)]
@@ -159,9 +155,6 @@ pub fn server_capabilities() -> serde_json::Value {
             "resolveProvider": false,
         },
         "renameProvider": { "prepareProvider": true },
-        // nvim will not send a command the server left undeclared; completions only
-        // bear it while ROCK_LSP_RECORD records.
-        "executeCommandProvider": { "commands": [completion_record::ACCEPT_COMMAND] },
         "semanticTokensProvider": {
             "full": { "delta": true },
             "legend": semantic_tokens::get_semantic_tokens_legend(),
@@ -409,19 +402,6 @@ impl LspServer {
             }
             "rock/modules" => {
                 serialize_response(req.id, Ok(modules_json(ws.bone.projects_summary())))
-            }
-            // `rock.completionAccepted`: the corpus recorder's accept signal (ROCK_LSP_RECORD).
-            ExecuteCommand::METHOD => {
-                let parsed = serde_json::from_value::<ExecuteCommandParams>(req.params)
-                    .map_err(|e| format!("malformed executeCommand params: {e}"))
-                    .and_then(|p| completion_record::handle_execute_command(&p));
-                match parsed {
-                    Ok(value) => serialize_response(req.id, Ok(value)),
-                    Err(detail) => {
-                        log::warn!("workspace/executeCommand rejected: {detail}");
-                        failed_request(req.id, ErrorCode::InvalidParams, detail)
-                    }
-                }
             }
             method => {
                 log::warn!("Unhandled request method: {method}");
