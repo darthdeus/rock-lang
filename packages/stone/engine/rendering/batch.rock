@@ -943,7 +943,7 @@ fn batch_resolve(pool: RenderBatchPool, cache: Map<int, [string]>, fast: bool,
     return batch_birth(pool, cache, key, fast, texture, criteria, normal, surface, custom_draw)
 }
 
-fn ensure_batch_common(
+pub fn ensure_batch_of(
     texture: SampledTexture,
     z_layer: int,
     blend: BlendMode,
@@ -976,30 +976,6 @@ fn ensure_batch_common(
     }, shared_pipeline, parametric_slot: parametric_slot, custom_draw: custom_draw, normal: normal, surface: surface)
 }
 
-pub fn ensure_batch_of(
-    texture: SampledTexture,
-    z_layer: int,
-    blend: BlendMode,
-    pixel_snap: bool,
-    depth: DepthMode,
-    custom_draw: (fn() -> ())? = null,
-    order: int = 0,
-    normal: SampledTexture? = null,
-    pipeline: Pipeline? = null,
-    unlit: bool = false,
-    sampling: TextureFilter? = null,
-    surface: SampledTexture? = null,
-    shared_pipeline: bool = false,
-    text_batch: bool = false,
-    parametric_slot: int? = null,
-) -> RenderBatch {
-    return ensure_batch_common(
-        texture, z_layer, blend, pixel_snap, depth, custom_draw, order,
-        normal, pipeline, unlit, sampling,
-        surface: surface, shared_pipeline: shared_pipeline, text_batch: text_batch, parametric_slot: parametric_slot,
-    )
-}
-
 pub fn ensure_world_sprite_batch(
     texture: SampledTexture,
     z_layer: int,
@@ -1015,7 +991,7 @@ pub fn ensure_world_sprite_batch(
     shared_pipeline: bool = false,
     text_batch: bool = false,
 ) -> RenderBatch {
-    return ensure_batch_common(
+    return ensure_batch_of(
         texture, z_layer, blend, pixel_snap, depth, null, order,
         normal, pipeline, unlit, sampling,
         surface: surface, shared_pipeline: shared_pipeline, text_batch: text_batch,
