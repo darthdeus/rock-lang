@@ -157,7 +157,7 @@ fn test_json_float_encode_round_trips_exactly() {
     }
     assert_eq(json_encode(json_int(42)), "42")
     assert_eq(json_encode(json_float(42.0)), "42")
-    assert_eq(json_encode(json_float(-0.0)), "-0")
+    assert_eq(json_encode(json_float(-0.0)), "-0.0")
     assert_eq(json_encode(json_float(1e15)), "1e+15")
 }
 
@@ -165,12 +165,15 @@ fn test_json_float_encode_round_trips_exactly() {
 @test
 fn test_json_signed_zero_survives_a_warm_integer_shortcut() {
     let values = [42.0, -0.0, 0.0]
-    let expected = ["42", "-0", "0"]
+    let expected = ["42", "-0.0", "0"]
     for i in 0..12000 {
         let index = if i < 9000 { 0 } else { 1 + i % 2 }
         let scalar = json_float(values[index])
-        assert_eq(json_encode(scalar), expected[index])
-        assert_eq(json_encode_pretty(scalar), expected[index])
+        for text in [json_encode(scalar), json_encode_pretty(scalar)] {
+            let decoded = decoded_float(text)
+            assert((1.0 / decoded < 0.0) == (index == 1), "round-trip sign for {text}")
+            assert_eq(text, expected[index])
+        }
     }
 }
 

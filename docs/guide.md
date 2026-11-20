@@ -635,7 +635,9 @@ fn main() {
 
 `json_decode` parses into the `JsonValue` enum and fails softly with
 null; `json_encode` renders the compact form. The `json_as_*` helpers
-and `json_field` pull typed data out.
+and `json_field` pull typed data out. Both `json_encode` and
+`json_encode_pretty` write floating-point negative zero as `-0.0` so decoding
+preserves its sign. A bare `-0` token takes the integer path.
 
 ```rock
 // The stdlib decodes JSON into the JsonValue enum and encodes it back.
