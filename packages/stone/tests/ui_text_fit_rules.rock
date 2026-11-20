@@ -1,38 +1,26 @@
 fn ui_text_fit_width(text: string) -> float { return measure_ui(text, 12.0).x }
 
 @test
-fn ui_fit_text_keeps_text_that_fits() {
+fn ui_fit_text_keeps_the_longest_complete_prefix() {
     ui_with_test_font(() => {
         let room = ui_text_fit_width("Fireball")
-        assert_eq(ui_fit_text("Fireball", room, 12.0), "Fireball", "exact fit is kept")
-        assert_eq(ui_fit_text("Fireball", room, 12.0, ellipsis: true), "Fireball",
-            "fitting text takes no ellipsis")
-        assert_eq(ui_fit_text("", 0.0, 12.0, ellipsis: true), "", "empty text stays empty")
-    })
-}
-
-@test
-fn ui_fit_text_cuts_overflow_to_the_longest_fitting_prefix() {
-    ui_with_test_font(() => {
-        assert_eq(ui_fit_text("Fireball", ui_text_fit_width("Fire"), 12.0), "Fire",
-            "plain cut keeps the longest prefix that fits")
-        assert_eq(ui_fit_text("Fireball", ui_text_fit_width("Fir..."), 12.0, ellipsis: true),
-            "Fir...", "the ellipsis is measured with the prefix")
-        assert_eq(ui_fit_text("Fireball", 0.0, 12.0), "", "no room keeps nothing")
-        assert_eq(ui_fit_text("Fireball", 0.0, 12.0, ellipsis: true), "...",
-            "no room still marks the cut")
-    })
-}
-
-@test
-fn ui_fit_text_cuts_on_whole_glyphs() {
-    ui_with_test_font(() => {
-        let e = "\u{00e9}"
-        let text = e + e + e + e + e
-        let plain = ui_fit_text(text, ui_text_fit_width(e + e) + 0.5 * ui_text_fit_width(e), 12.0)
-        assert_eq(plain, e + e, "a plain cut never splits a multi-byte glyph")
-        let marked = ui_fit_text(text, ui_text_fit_width(e + "...") + 0.5 * ui_text_fit_width(e),
-            12.0, ellipsis: true)
-        assert_eq(marked, e + "...", "an ellipsis cut never splits a multi-byte glyph")
+        let glyph = "\u{00e9}"
+        let multibyte = glyph + glyph + glyph + glyph + glyph
+        let extra = 0.5 * ui_text_fit_width(glyph)
+        for (text, width, ellipsis, expected, rule) in [
+            ("Fireball", room, false, "Fireball", "exact fit is kept"),
+            ("Fireball", room, true, "Fireball", "fitting text takes no ellipsis"),
+            ("", 0.0, true, "", "empty text stays empty"),
+            ("Fireball", ui_text_fit_width("Fire"), false, "Fire", "plain cut keeps the longest prefix"),
+            ("Fireball", ui_text_fit_width("Fir..."), true, "Fir...", "the ellipsis is measured with the prefix"),
+            ("Fireball", 0.0, false, "", "no room keeps nothing"),
+            ("Fireball", 0.0, true, "...", "no room still marks the cut"),
+            (multibyte, ui_text_fit_width(glyph + glyph) + extra, false, glyph + glyph, "plain cut keeps whole glyphs"),
+            (multibyte, ui_text_fit_width(glyph + "...") + extra, true, glyph + "...", "ellipsis cut keeps whole glyphs"),
+        ] {
+            let actual = if ellipsis { ui_fit_text(text, width, 12.0, ellipsis: true) }
+                else { ui_fit_text(text, width, 12.0) }
+            assert_eq(actual, expected, rule)
+        }
     })
 }
