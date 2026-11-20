@@ -19,6 +19,13 @@ fn write_project(dir: &Path, package: &str, manifest: &str, files: &[(&str, &str
     dir.to_path_buf()
 }
 
+/// Sends the command's stdout and stderr to a fresh file at `log`, so a
+/// long-lived child can be watched without filling a pipe.
+fn log_output<'a>(command: &'a mut Command, log: &Path) -> &'a mut Command {
+    let file = std::fs::File::create(log).unwrap();
+    command.stdout(file.try_clone().unwrap()).stderr(file)
+}
+
 fn rock_in(cwd: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
     command.current_dir(cwd);
@@ -398,7 +405,7 @@ fn main() {{ run_probe() }}
     let log = fixture.path().join("watch.log");
     let mut watch = Runs(
         vec![
-            support::log_output(
+            log_output(
                 rock_in(fixture.path())
                     .arg("stone")
                     .arg(&game)
@@ -502,7 +509,7 @@ fn main() {
     let log = fixture.path().join("watch.log");
     let mut watch = Runs(
         vec![
-            support::log_output(
+            log_output(
                 skip_engine_build(fixture.path())
                     .arg("stone")
                     .arg(&game)
@@ -656,7 +663,7 @@ fn main() {{ wait_for_release() }}
             &[("main_stone.rock", &source)],
         );
         runs.0.push(
-            support::log_output(
+            log_output(
                 skip_engine_build(root.path())
                     .arg("run")
                     .arg(project)
@@ -818,7 +825,7 @@ exit 97
         );
         write_files(&output, &[("incremental.lua", "stale overlay")]);
         runs.0.push(
-            support::log_output(
+            log_output(
                 skip_engine_build(root.path())
                     .arg("frame")
                     .arg(&project)

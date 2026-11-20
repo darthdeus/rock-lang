@@ -74,7 +74,6 @@ pub use dispatcher::*;
 pub use file_watcher::*;
 pub(crate) use formatting::*;
 pub use registry::{BackendSpec, CliCommand, Operation};
-pub(crate) use watch::*;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Backend {

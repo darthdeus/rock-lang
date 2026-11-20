@@ -43,7 +43,6 @@ pub enum Operation {
     Test,
     Compile,
     Run,
-    Watch,
     Stone,
     Frame,
     Perf,

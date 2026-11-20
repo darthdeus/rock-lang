@@ -60,13 +60,6 @@ pub fn read_jsonl(path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Sends the command's stdout and stderr to a fresh file at `log`, so a
-/// long-lived child can be watched without filling a pipe.
-pub fn log_output<'a>(command: &'a mut Command, log: &Path) -> &'a mut Command {
-    let file = std::fs::File::create(log).unwrap();
-    command.stdout(file.try_clone().unwrap()).stderr(file)
-}
-
 /// Asserts the command succeeded and returns its stdout.
 #[track_caller]
 pub fn success(out: Output) -> String {

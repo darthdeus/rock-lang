@@ -71,21 +71,3 @@ pub(crate) fn reexec_current_binary() -> Result<()> {
         crate::invocation_log::exit(0);
     }
 }
-
-pub(crate) fn run_compile_watch_loop(
-    mut watch_paths: Vec<PathBuf>,
-    watching_msg: &str,
-    mut on_event: impl FnMut(&FileChangeEvent),
-) -> Result<()> {
-    match rock_stdlib::stdlib_origin() {
-        rock_stdlib::StdlibSource::Dir(dir) => watch_paths.push(dir),
-        rock_stdlib::StdlibSource::Embedded => {
-            log::info!(target: "WATCH", "the stdlib is built in; watching without a stdlib directory");
-        }
-    }
-    let mut watch = FileWatcher::default_for_rock_sources().watch(watch_paths)?;
-    log::info!(target: "WATCH", "{}", watching_msg);
-    loop {
-        on_event(&watch.wait());
-    }
-}

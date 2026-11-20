@@ -68,7 +68,7 @@ mod allocator_tests {
             assert!(rock_cli::compiler_process(named(command), false));
         }
         assert!(rock_cli::compiler_process(named("sim"), true));
-        for command in ["sim", "run", "stone", "frame", "watch", "perf"] {
+        for command in ["sim", "run", "stone", "frame", "perf"] {
             assert!(!rock_cli::compiler_process(named(command), false));
         }
     }

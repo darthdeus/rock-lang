@@ -113,10 +113,6 @@ pub static COMMANDS: &[&CliCommand] = &[
         route: Route::Backend(Operation::Run),
     },
     &CliCommand {
-        name: "watch",
-        route: Route::Backend(Operation::Watch),
-    },
-    &CliCommand {
         name: "fmt",
         route: Route::Direct(|cx| {
             let paths = cx.get_paths_or_current()?;
@@ -242,10 +238,6 @@ pub(crate) static SKULL: BackendSpec = BackendSpec {
             let file = cx.get_required_file("run")?;
             rock_cli::skull_backend::skull_run(file, &cx.args.app_args)
         }),
-        (Operation::Watch, |cx| {
-            let path = cx.get_project_dir_or_current()?;
-            rock_cli::skull_backend::skull_watch(&path, cx.args.output.clone())
-        }),
     ],
     filter_rejection: None,
 };
@@ -315,7 +307,7 @@ fn js_run(_: &CommandContext) -> Result<()> {
 pub(crate) fn logs_invocation(command: &CliCommand) -> bool {
     matches!(
         command.name,
-        "compile" | "test" | "run" | "watch" | "lint" | "fmt" | "frame" | "sim" | "stone"
+        "compile" | "test" | "run" | "lint" | "fmt" | "frame" | "sim" | "stone"
     )
 }
 

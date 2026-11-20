@@ -68,15 +68,6 @@ impl LiveProject {
         Self::checked(dir, include_tests, sources, scope)
     }
 
-    pub(crate) fn init_for_watch(dir: &str, include_tests: bool) -> Result<Self> {
-        Self::checked(
-            dir,
-            include_tests,
-            project_sources(dir, include_tests)?,
-            Scope::WholeProject,
-        )
-    }
-
     fn checked(
         dir: &str,
         include_tests: bool,
@@ -194,29 +185,6 @@ impl LiveProject {
     ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
         self.transaction(changed, "compile error", |project| {
             project.recompile_inner(changed)
-        })
-    }
-
-    /// A directory watch rescans the sources, including their package facts.
-    pub(crate) fn refresh_for_publication(
-        &mut self,
-        include_tests: bool,
-    ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
-        let started = Instant::now();
-        let sources = project_sources(&self.dir, include_tests)?;
-        let feed = if include_tests == self.include_tests {
-            changed_texts(&self.sources, &sources)
-        } else {
-            None
-        };
-        self.transaction(&[], "watch refresh", |project| {
-            project.include_tests = include_tests;
-            if let Some(feed) = feed {
-                project.sources = sources;
-                project.update(&feed, started)
-            } else {
-                project.rebuild(sources, started)
-            }
         })
     }
 
@@ -478,30 +446,6 @@ fn new_session(dir: &str, sources: &SourceFiles) -> Result<bone_incremental::ses
 }
 
 /// A change to file membership or package facts requires a new session.
-fn changed_texts(before: &SourceFiles, after: &SourceFiles) -> Option<Vec<(String, String)>> {
-    if before.package_roots != after.package_roots
-        || before.ns_aliases != after.ns_aliases
-        || before.files.len() != after.files.len()
-    {
-        return None;
-    }
-    let mut feed = Vec::new();
-    for (before, after) in before.files.iter().zip(&after.files) {
-        let before = before.borrow();
-        let after = after.borrow();
-        if before.file != after.file
-            || before.package != after.package
-            || before.global_policy != after.global_policy
-        {
-            return None;
-        }
-        if before.contents != after.contents {
-            feed.push((after.file.to_id_path(), after.contents.clone()));
-        }
-    }
-    Some(feed)
-}
-
 fn entry_path(sources: &SourceFiles) -> Result<String> {
     let mut first = None;
     let mut main = None;

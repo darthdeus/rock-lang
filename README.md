@@ -140,7 +140,7 @@ rock sim demos/match3 boot_idle animated_swap
 
 ## What else is in here
 
-- `rock fmt`, `rock lint` and `rock watch`.
+- `rock fmt` and `rock lint`.
 - A language server (`crates/rock-lsp`) and a Neovim plugin (`editors/nvim`).
 - A JavaScript backend (`--backend js`) and a browser playground (`playground/`).
 

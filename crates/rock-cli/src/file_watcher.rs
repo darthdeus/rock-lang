@@ -243,14 +243,6 @@ mod state {
                 }
             })
         }
-        pub(crate) fn wait(&mut self) -> FileChangeEvent {
-            loop {
-                let event = self.tick();
-                if !event.paths.is_empty() {
-                    return event;
-                }
-            }
-        }
         /// Edits under the old roots stay pending; files that only the new
         /// roots reach are observed without being reported.
         pub(crate) fn set_roots(
