@@ -32,6 +32,7 @@ fn json_record_uses_declared_wire_names_in_both_directions() {
     codec.on_error = error => errors.push(error)
     assert(json_record_decode(codec, json_decode("{{\"wire_name\":false}}").unwrap(), value) == null)
     assert_eq(errors[0].path, "/wire_name")
+    assert_eq(errors[0].actual, "Bool")
 }
 
 struct JsonEscapedNameRecord {
@@ -109,6 +110,46 @@ fn json_record_presence_preserves_native_payloads() {
 struct JsonPresenceFlag {
     @json_name("enabled")
     flag: JsonField<bool>,
+}
+
+@test
+fn json_booleans_share_boxes_across_construction_and_storage() {
+    let codec = JsonRecordCodec {}
+    let items = json_as_array(json_decode("[true,false,null,true,false]").unwrap()).unwrap()
+    let fields = json_as_object(json_decode("{{\"on\":true,\"off\":false}}").unwrap()).unwrap()
+    for (flag, key, index) in [(true, "on", 0), (false, "off", 1)] {
+        let node = json_bool(flag)
+        let record = JsonPresenceFlag { flag: JsonField { present: true, value: flag } }
+        let encoded = json_record_encode(codec, record)
+        assert(same_ref(node, items[index]))
+        assert(same_ref(node, items[index + 3]))
+        assert(same_ref(node, fields[key]))
+        assert(same_ref(node, json_field(encoded, "enabled").unwrap()))
+        assert_eq(json_record_decode(codec, encoded, record).unwrap().flag.value.unwrap(), flag)
+        items[index] = json_null()
+        fields[key] = json_null()
+        assert_eq(json_as_bool(items[index + 3]).unwrap(), flag)
+        assert_eq(json_as_bool(node).unwrap(), flag)
+    }
+}
+
+@test
+fn json_record_boolean_variants_keep_their_wire_format() {
+    let errors: [JsonRecordError] = []
+    let codec = JsonRecordCodec { on_error: error => errors.push(error) }
+    for (flag, text) in [(true, "[\"Bool\",true]"), (false, "[\"Bool\",false]")] {
+        let node = json_bool(flag)
+        assert_eq(json_encode(json_record_encode(codec, node)), text)
+        let decoded = json_record_decode<JsonValue>(codec, json_decode(text).unwrap()).unwrap()
+        assert_eq(json_as_bool(decoded).unwrap(), flag)
+        assert(same_ref(decoded, node))
+    }
+    for text in ["[\"Bool\"]", "[\"True\"]", "[\"False\"]", "[\"Bool\",1]"] {
+        assert(json_record_decode<JsonValue>(codec, json_decode(text).unwrap()) == null)
+    }
+    assert_eq(errors[3].path, "/1")
+    assert_eq(errors[3].expected, "bool")
+    assert_eq(errors[3].actual, "Int")
 }
 
 struct JsonPresenceNested {

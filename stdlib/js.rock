@@ -533,6 +533,7 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
     if (value === null || value === undefined) actual = "missing";
     else if (typeof value === "object") actual = value.__variant !== undefined ? value.__variant : "table";
     else actual = typeof value;
+    if ((actual === "True" || actual === "False") && value.__ty === "JsonValue") actual = "Bool";
     return { __json_record_js_error: { __ty: "JsonRecordError", path: "",
         expected: shape.name !== undefined ? shape.name : shape.k, actual: actual } };
 """
@@ -751,10 +752,15 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         if (!Number.isFinite(value)) throw new Error("json record cannot encode a nonfinite float");
         return __rock_call(codec.encode_float, value);
     }
-    if (kind === "string" || kind === "bool") {
-        var tag = kind === "string" ? "Str" : "Bool";
-        if (reading) return tagged(value, tag) ? value[0] : fail(shape, value);
-        return node(tag, value);
+    if (kind === "string") {
+        if (reading) return tagged(value, "Str") ? value[0] : fail(shape, value);
+        return node("Str", value);
+    }
+    if (kind === "bool") {
+        if (!reading) return json_bool(value);
+        if (tagged(value, "True")) return true;
+        if (tagged(value, "False")) return false;
+        return fail(shape, value);
     }
     if (kind === "vec") {
         var element = shape.elem.k === "nom" ? types[shape.elem.name] : undefined;
@@ -857,7 +863,7 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
     }
     var out, data;
     if (decl.kind === "enum" || decl.kind === "c_enum") {
-        var variant, payload = [], selected, fields = null, count;
+        var variant, payload = [], selected, fields = null, count, jsonBoolWire;
         if (reading) {
             if (!tagged(value, "Array") || value[0].len < 1) return fail(shape, value);
             label = value[0]._data[0];
@@ -880,7 +886,15 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
             }
         } else {
             variant = reading ? label[0] : value.__variant;
-            selected = has.call(decl.variant_desc, variant) ? decl.variant_desc[variant] : undefined;
+            // Typed JsonValue records use ["Bool", value] on the wire.
+            if (name === "JsonValue") {
+                var unit = variant === "True" || variant === "False";
+                if (reading && unit) return fail(shape, value);
+                jsonBoolWire = reading ? variant === "Bool" : unit;
+                if (jsonBoolWire) variant = "Bool";
+            }
+            selected = jsonBoolWire ? { pos: [{ k: "bool" }] }
+                : has.call(decl.variant_desc, variant) ? decl.variant_desc[variant] : undefined;
             if (selected === undefined) {
                 if (!reading) throw new Error("json record invalid variant " + name + ":" + String(variant));
                 return fail(shape, value);
@@ -891,12 +905,13 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         count = payload.length;
         if (reading && value[0].len !== count + 1) return fail(shape, value);
         if (reading) {
-            out = fields ? { __ty: name, __tag: variant } : { __variant: variant, __ty: name };
+            if (!jsonBoolWire) out = fields ? { __ty: name, __tag: variant } : { __variant: variant, __ty: name };
             if (fields) for (i = 0; i < decl.slots.length; i++) out[decl.slots[i]] = 0;
         } else data = [];
         for (i = 0; i < count; i++) {
             if (reading) item = value[0]._data[i + 1];
             else if (fields) item = value[fields[i].slot];
+            else if (jsonBoolWire) item = value.__variant === "True";
             else item = __json_record_js_payload_get(value, payload[i], i);
             r = __json_record_js_visit(codec, payload[i], item, reading, seen, depth + 1, null);
             if (failed(r)) {
@@ -905,6 +920,7 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
             }
             if (!reading) data.push(r);
             else if (fields) out[fields[i].slot] = r;
+            else if (jsonBoolWire) out = json_bool(r);
             else __json_record_js_payload_put(out, payload[i], i, r);
         }
         if (!reading) {
