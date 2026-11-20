@@ -1241,7 +1241,6 @@ pub(super) fn assemble(
             arena_traffic: ArenaTraffic::default(),
             setup_lanes: SetupLaneAttribution::default(),
             graph_census: crate::instance_graph::RunStats::default(),
-            concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
             emits_main,
             shaders: std::sync::Arc::clone(&cache.shader_registrations.sources),
         },

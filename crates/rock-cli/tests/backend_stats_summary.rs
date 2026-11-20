@@ -1,6 +1,6 @@
-//! `rock backend-stats` under `ROCK_LOG=debug`: every concrete build logs a
-//! summary line, and its totals must be the folded owner totals the report's
-//! concrete-facts lines print, on every repeated build in the process.
+//! `rock backend-stats` under `ROCK_LOG=debug`: every graph build logs its
+//! walk counts, and they must match the report's totals on every repeated
+//! build in the process.
 
 const PROGRAM: &str = r#"
 fn seed<T>() -> T? { return null }
@@ -36,7 +36,7 @@ fn pair(line: &str, key: &str, sep: &str) -> (u64, u64) {
 }
 
 #[test]
-fn concrete_build_summary_reports_folded_totals_on_every_build() {
+fn graph_build_walks_match_the_report_on_every_build() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("main.rock"), PROGRAM).unwrap();
     let out = crate::support::rock(root.path())
@@ -74,33 +74,5 @@ fn concrete_build_summary_reports_folded_totals_on_every_build() {
     for build in builds {
         let (_, walks) = build.split_once(" (").expect("graph build walk counts");
         assert_eq!(pair(walks, "", " owner walks, "), totals, "{build}");
-    }
-
-    let facts = text
-        .lines()
-        .find(|l| l.contains("concrete plan facts"))
-        .unwrap_or_else(|| panic!("no concrete plan facts line:\n{text}"));
-    let tables = text
-        .lines()
-        .find(|l| l.contains("concrete tables (one timed run)"))
-        .unwrap_or_else(|| panic!("no concrete tables line:\n{text}"));
-    let slots = pair(facts, "source slots expr/binding ", "/");
-    let type_nodes = pair(tables, "type nodes ", " examined, ");
-    let foreign = pair(tables, "foreign domains ", "/");
-    assert_eq!(foreign.1, 2, "two Box instantiation tables: {tables}");
-
-    let summaries: Vec<&str> = text
-        .lines()
-        .filter(|l| l.contains("concrete build:"))
-        .collect();
-    assert_eq!(summaries.len(), 3, "one summary per build:\n{text}");
-    for summary in summaries {
-        assert_eq!(pair(summary, "slots ", " expr + "), slots, "{summary}");
-        assert_eq!(pair(summary, "type nodes ", "/"), type_nodes, "{summary}");
-        assert_eq!(pair(summary, "foreign domains ", "/"), foreign, "{summary}");
-        assert!(
-            !summary.contains("(0 generic bodies)"),
-            "`pick` and `seed` are generic: {summary}"
-        );
     }
 }

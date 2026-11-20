@@ -359,7 +359,6 @@ pub(crate) struct SkullPhaseTimes {
     pub attribution: skull::mir_emit::EmitAttribution,
     pub setup_lanes: skull::mir_emit::SetupLaneAttribution,
     pub graph_census: skull::instance_graph::RunStats,
-    pub concrete_stats: skull::concrete_body::ConcreteBuildStats,
 }
 
 pub(crate) fn skull_emit_timed(
@@ -397,7 +396,6 @@ pub(crate) fn skull_emit_timed(
             times.attribution = e.attribution;
             times.setup_lanes = e.setup_lanes;
             times.graph_census = e.graph_census;
-            times.concrete_stats = e.concrete_stats;
             true
         }
         Err(e) => {

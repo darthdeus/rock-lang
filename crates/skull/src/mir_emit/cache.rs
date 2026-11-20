@@ -955,9 +955,6 @@ pub fn emit_incremental(
         None,
         None,
     )?;
-    if concrete_stats_requested() {
-        emit.concrete_stats = cache.concrete.snapshot_build_stats();
-    }
     cache.retain_assembly(ws, &emit, emitted, unit_reads, built_specs)?;
     emit.compile_counts.chunks = cache.chunks.len();
     let reassemble = t_asm.elapsed();

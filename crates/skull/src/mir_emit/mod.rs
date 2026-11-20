@@ -80,7 +80,6 @@ pub struct MirEmit {
     pub arena_traffic: ArenaTraffic,
     pub setup_lanes: SetupLaneAttribution,
     pub graph_census: crate::instance_graph::RunStats,
-    pub concrete_stats: crate::concrete_body::ConcreteBuildStats,
     /// Whether the host should append the generated main call.
     pub emits_main: bool,
     /// Every registered shader, in registration order.

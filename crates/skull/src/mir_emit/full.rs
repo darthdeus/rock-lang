@@ -635,7 +635,7 @@ pub(super) fn emit_full_build(
         )
     });
     let (mut graph, selected_sim_functions) = graph_result?;
-    let (mut concrete, lanes) = setup_phases.timed("setup: concrete plans+lanes", || {
+    let (concrete, lanes) = setup_phases.timed("setup: concrete plans+lanes", || {
         run_setup_lanes(
             ws,
             &graph,
@@ -657,14 +657,6 @@ pub(super) fn emit_full_build(
     });
 
     let setup_traffic = (scx.rep_arena_stats(), scx.interner().stats());
-    let concrete_stats = if concrete_stats_requested() {
-        concrete.snapshot_build_stats()
-    } else {
-        crate::concrete_body::ConcreteBuildStats::default()
-    };
-    if build.lifetime() == CacheLifetime::OneShot {
-        drop_in_background(concrete.take_build_stats());
-    }
     let graph_records = (build.lifetime() == CacheLifetime::OneShot).then(|| graph.take_records());
     let spec_queue = SpecQueue::new(ws, &scx, graph_records.as_ref().unwrap_or(&graph), None);
     let (chunks, ((early, early_window), (shader_result, shader_lane))) = parallel_join(
@@ -777,7 +769,6 @@ pub(super) fn emit_full_build(
         Some(specs),
     )?;
     let assembly_window = assembly_started.elapsed();
-    emit.concrete_stats = concrete_stats;
     emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases.0;
     phases.extend(emit.phases);

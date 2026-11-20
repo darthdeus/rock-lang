@@ -602,39 +602,6 @@ fn print_report(input: &str, iters: usize, warmup: usize, stats: &Stats) {
             graph.expanded, graph.settle_rounds,
         );
     }
-    let concrete = &emit.concrete_stats;
-    if concrete.plan_attempts > 0 || concrete.always_plan_attempts > 0 {
-        println!(
-            "  concrete plan facts (one timed run): ordinary plans {}/{} success/fail over {}; always {}/{} over {}; source slots expr/binding {}/{}; callee scans {} over {} borrowed rows; plan maps callees/signatures {}/{}",
-            concrete.plan_successes,
-            concrete.plan_failures,
-            concrete.plan_attempts,
-            concrete.always_plan_successes,
-            concrete.always_plan_failures,
-            concrete.always_plan_attempts,
-            concrete.source_expr_slots,
-            concrete.source_binding_slots,
-            concrete.callee_scans,
-            concrete.callee_rows_visited,
-            concrete.plan_callee_map_inserts,
-            concrete.plan_callee_signature_inserts,
-        );
-        println!(
-            "    concrete tables (one timed run): type nodes {} examined, {} conversions, {} memo hits, unresolved {}; struct literals {} with {} field conversions; foreign domains {}/{} requests/unique; elapsed ns type/struct/foreign/signature {}/{}/{}/{}",
-            concrete.type_nodes_examined,
-            concrete.type_node_conversion_attempts,
-            concrete.type_node_memo_hits,
-            concrete.type_node_unresolved,
-            concrete.struct_literals_examined,
-            concrete.struct_field_conversion_attempts,
-            concrete.foreign_domain_requests,
-            concrete.foreign_domain_unique,
-            concrete.type_nodes_ns,
-            concrete.struct_fields_ns,
-            concrete.foreign_domains_ns,
-            concrete.signature_ns,
-        );
-    }
     let memo = &stats.abi_plan_stats;
     if memo.requests() > 0 {
         let per_run = |v: u64| v / iters as u64;

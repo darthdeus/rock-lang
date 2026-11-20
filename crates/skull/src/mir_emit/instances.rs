@@ -50,10 +50,6 @@ fn too_deep_to_instantiate(
     ))
 }
 
-pub(super) fn concrete_stats_requested() -> bool {
-    std::env::var("ROCK_LOG").is_ok_and(|value| value == "debug")
-}
-
 fn warm_candidates(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,

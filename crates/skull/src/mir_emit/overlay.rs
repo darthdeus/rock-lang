@@ -415,7 +415,6 @@ fn assemble_overlay(
             arena_traffic: ArenaTraffic::default(),
             setup_lanes: SetupLaneAttribution::default(),
             graph_census: crate::instance_graph::RunStats::default(),
-            concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
             // `main.lua` already installed the entry point.
             emits_main: false,
             shaders: std::sync::Arc::clone(&cache.shader_registrations.sources),
@@ -541,9 +540,6 @@ pub fn emit_overlay_with_span_edits(
         } else {
             cache.edit.unit_comptime_reads.globals.insert(key, reads);
         }
-    }
-    if concrete_stats_requested() {
-        emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
     // Removed identities stay, so a later overlay can retry a failed removal.
     cache.retain_static_cells(ws)?;
