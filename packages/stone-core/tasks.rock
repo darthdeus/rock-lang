@@ -292,10 +292,6 @@ pub fn tween(from: float, to: float, duration: float, easing_fn: int, update: (f
 }
 
 pub fn coroutine_poller_update(poller: CoroutinePoller) {
-    coroutine_poller_step(poller, null)
-}
-
-fn coroutine_poller_step(poller: CoroutinePoller, selected: Task?) {
     if poller.scope.disposed { return }
     let clock = poller.clock.state()
     let delta = clock.dt
@@ -311,9 +307,6 @@ fn coroutine_poller_step(poller: CoroutinePoller, selected: Task?) {
                     entry.last = task
                 }
             } else { entry.last = task }
-            if let wanted = selected {
-                if !task_same_instance(task, wanted) { continue }
-            }
             if !task_protected_step(task, delta, frame, false, task_step_error) {
                 if let current = entry.live_task() {
                     entry.last = current
