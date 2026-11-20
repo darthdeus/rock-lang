@@ -196,8 +196,6 @@ inline(lua) fn copy_resource_new(value: int) -> any = """
 """
 inline(lua) fn copy_resource_value(resource: any) -> int = "return getmetatable(resource).value"
 inline(lua) fn copy_resource_set(resource: any, value: int) = "getmetatable(resource).value = value"
-inline(lua) fn copy_resource_same(a: any, b: any) -> bool = "return rawequal(a, b)"
-
 inline(lua) fn copy_resource_shared() -> any = "return newproxy(false)"
 
 struct ResourceCopyPair { first: any, second: any }
@@ -205,13 +203,13 @@ struct ResourceCopyPair { first: any, second: any }
 @test(backends = "lua")
 fn deepcopy_preserves_resource_aliases_with_independent_ownership() {
     let shared = copy_resource_shared()
-    assert(copy_resource_same(shared, deepcopy(shared)), "unmanaged userdata retains its shared semantics")
+    assert(same_ref(shared, deepcopy(shared)), "unmanaged userdata retains its shared semantics")
     let resource = copy_resource_new(17)
     let original = ResourceCopyPair { first: resource, second: resource }
     let branch = deepcopy(original)
     let sibling = deepcopy(original)
-    assert(copy_resource_same(branch.first, branch.second), "one resource copy per graph")
-    assert(!copy_resource_same(original.first, branch.first), "resource ownership is independent")
+    assert(same_ref(branch.first, branch.second), "one resource copy per graph")
+    assert(!same_ref(original.first, branch.first), "resource ownership is independent")
     copy_resource_set(branch.first, 29)
     assert_eq(copy_resource_value(branch.second), 29)
     assert_eq(copy_resource_value(original.first), 17)

@@ -82,7 +82,6 @@ use stone::*
 
 @nomangle inline(lua) fn __sprite_mesh_growth_meter_bytes(meter: any) -> int = "return meter.bytes"
 
-@nomangle inline(lua) fn __sprite_mesh_growth_string_len(value: string) -> int = "return #value"
 
 @nomangle inline(lua) fn __sprite_mesh_growth_prefix(buf: NativeBuffer<Vertex>, count: int) -> string = """
     return ffi.string(ffi.cast("const char*", buf.ptr), count * ffi.sizeof("Vertex"))
@@ -270,7 +269,7 @@ fn sprite_mesh_growth_from_zero_matches_preallocated_vertices() {
 fn sprite_mesh_growth_assert_one_copy(meter: any, before: string, after: string) {
     assert_eq(__sprite_mesh_growth_meter_calls(meter), 1,
         "one growth transfers the live prefix in one FFI copy")
-    assert_eq(__sprite_mesh_growth_meter_bytes(meter), __sprite_mesh_growth_string_len(before),
+    assert_eq(__sprite_mesh_growth_meter_bytes(meter), before.len(),
         "the FFI copy covers exactly the live vertex prefix")
     assert_eq(after, before, "growth preserves every live vertex byte")
 }

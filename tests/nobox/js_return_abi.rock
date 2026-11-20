@@ -414,20 +414,12 @@ co fn op_in_coroutine(seed: IV) -> Coroutine<int> {
 // change of effects, and a lane written before `f` could throw. The trace below
 // reads "12" only if the arguments evaluate in source order.
 
-@nomangle inline(lua) fn __order_note(tag: int) -> int = """
-    __order_trace = (__order_trace or "") .. tostring(tag)
+global ORDER_TRACE: string = ""
+
+@nomangle fn __order_note(tag: int) -> int {
+    ORDER_TRACE += "{tag}"
     return tag
-"""
-@nomangle inline(js) fn __order_note(tag: int) -> int = """
-    __order_trace = (typeof __order_trace === "string" ? __order_trace : "") + tag;
-    return tag;
-"""
-@nomangle inline(lua) fn __order_trace_read() -> string = """
-    return __order_trace or ""
-"""
-@nomangle inline(js) fn __order_trace_read() -> string = """
-    return typeof __order_trace === "string" ? __order_trace : "";
-"""
+}
 
 @scalar_abi inline(lua) fn ordered_pair() -> NV = """
     return __order_note(1), __order_note(2)
@@ -437,10 +429,11 @@ co fn op_in_coroutine(seed: IV) -> Coroutine<int> {
 """
 
 @test fn a_publisher_evaluates_left_to_right() {
+    ORDER_TRACE = ""
     let v = ordered_pair()
     assert_eq(v.x, 1)
     assert_eq(v.y, 2)
-    assert_eq(__order_trace_read(), "12")
+    assert_eq(ORDER_TRACE, "12")
 }
 
 // --- bound calls, nullable phis, changed widths and shared-tail captures ------

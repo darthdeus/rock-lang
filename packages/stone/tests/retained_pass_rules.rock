@@ -1,7 +1,5 @@
 use stone::*
 
-inline(lua) fn retained_pass_same(a: Pass, b: Pass) -> bool = "return rawequal(a, b)"
-
 fn retained_pass_canvas(handle: int, width: float = 16.0, height: float = 8.0) -> Canvas {
     return Canvas { handle: CanvasId(handle), width, height }
 }
@@ -25,22 +23,22 @@ fn retained_pass_input_updates_preserve_queued_records() {
     queue_scene_pass(original)
     queue_final_pass(original)
     pipeline_inspector_record_pass(original)
-    assert(retained_pass_same(original,
+    assert(same_ref(original,
         original.with_canvas_input(0, canvas, TextureFilter::Nearest)))
-    assert(retained_pass_same(original,
+    assert(same_ref(original,
         original.with_image_input(1, Image(2), TextureFilter::Linear)))
 
     let changed = original.with_canvas_input(0, retained_pass_canvas(4), TextureFilter::Linear)
-    assert(!retained_pass_same(original, changed))
+    assert(!same_ref(original, changed))
     queue_scene_pass(changed)
     assert(sampled_texture_matches_canvas(SCENE_PASSES[0].slot_inputs[0].0, canvas))
     assert(SCENE_PASSES[0].slot_inputs[0].1 == TextureFilter::Nearest)
     assert(sampled_texture_matches_canvas(SCENE_PASSES[1].slot_inputs[0].0, retained_pass_canvas(4)))
     assert(SCENE_PASSES[1].slot_inputs[0].1 == TextureFilter::Linear)
-    assert(retained_pass_same(FINAL_PASSES[0], original))
+    assert(same_ref(FINAL_PASSES[0], original))
     match PIPELINE_PASS_LOG[0] {
         PipelinePassInfo::Legacy(seen) => {
-            assert(retained_pass_same(seen, original))
+            assert(same_ref(seen, original))
             assert(sampled_texture_matches_canvas(seen.slot_inputs[0].0, canvas))
         }
         PipelinePassInfo::Semantic(_) => { error("unexpected GPU command") }
@@ -48,17 +46,17 @@ fn retained_pass_input_updates_preserve_queued_records() {
     assert(changed.timed == 9 && changed.draw_buffers == 3 && changed.output.unwrap().handle.0 == 3)
 
     let resized = original.with_canvas_input(0, retained_pass_canvas(1, 32.0, 8.0), TextureFilter::Nearest)
-    assert(!retained_pass_same(original, resized))
+    assert(!same_ref(original, resized))
     assert(sampled_texture_matches_canvas(resized.slot_inputs[0].0, retained_pass_canvas(1, 32.0, 8.0)))
     let taller = resized.with_canvas_input(0, retained_pass_canvas(1, 32.0, 24.0), TextureFilter::Nearest)
-    assert(!retained_pass_same(resized, taller))
+    assert(!same_ref(resized, taller))
     let filtered = original.with_canvas_input(0, canvas, TextureFilter::Linear)
-    assert(!retained_pass_same(original, filtered))
+    assert(!same_ref(original, filtered))
     let image = original.with_image_input(0, Image(1), TextureFilter::Nearest)
-    assert(!retained_pass_same(original, image), "equal handles of different kinds are not equal inputs")
-    assert(!retained_pass_same(image, image.with_canvas_input(0, canvas, TextureFilter::Nearest)))
-    assert(!retained_pass_same(image, image.with_image_input(0, Image(5), TextureFilter::Nearest)))
-    assert(!retained_pass_same(image, image.with_image_input(0, Image(1), TextureFilter::Linear)))
+    assert(!same_ref(original, image), "equal handles of different kinds are not equal inputs")
+    assert(!same_ref(image, image.with_canvas_input(0, canvas, TextureFilter::Nearest)))
+    assert(!same_ref(image, image.with_image_input(0, Image(5), TextureFilter::Nearest)))
+    assert(!same_ref(image, image.with_image_input(0, Image(1), TextureFilter::Linear)))
     assert(world_fixture_raised(() => { let _ = original.with_canvas_input(-1, canvas, TextureFilter::Nearest) }) != null)
     assert(world_fixture_raised(() => { let _ = original.with_image_input(2, Image(1), TextureFilter::Nearest) }) != null)
     assert(original.slot_inputs.len() == 2)
@@ -68,18 +66,18 @@ fn retained_pass_input_updates_preserve_queued_records() {
 fn retained_pass_output_updates_preserve_previous_output() {
     let canvas = retained_pass_canvas(3)
     let original = Pass { pipeline: Pipeline { shader_name: "retained_pass_test" }, output: canvas }
-    assert(retained_pass_same(original, original.with_output(canvas)))
+    assert(same_ref(original, original.with_output(canvas)))
     let resized = original.with_output(retained_pass_canvas(3, 32.0, 8.0))
-    assert(!retained_pass_same(original, resized))
+    assert(!same_ref(original, resized))
     assert(original.output.unwrap().width == 16.0 && resized.output.unwrap().width == 32.0)
     let taller = resized.with_output(retained_pass_canvas(3, 32.0, 24.0))
-    assert(!retained_pass_same(resized, taller))
+    assert(!same_ref(resized, taller))
     let changed = original.with_output(retained_pass_canvas(4))
-    assert(!retained_pass_same(original, changed))
+    assert(!same_ref(original, changed))
     let cleared = original.with_output(null)
     assert(cleared.output == null && original.output != null)
-    assert(retained_pass_same(cleared, cleared.with_output(null)))
-    assert(!retained_pass_same(cleared, cleared.with_output(canvas)))
+    assert(same_ref(cleared, cleared.with_output(null)))
+    assert(!same_ref(cleared, cleared.with_output(canvas)))
 }
 
 @test
@@ -89,13 +87,13 @@ fn retained_pass_scene_return_reuses_only_matching_snapshots() {
     let source = retained_pass_canvas(10)
     let output = retained_pass_canvas(11)
     let first = scene_return_pass(source, output)
-    assert(retained_pass_same(first, scene_return_pass(source, output)))
+    assert(same_ref(first, scene_return_pass(source, output)))
     reset_scene_return_pass()
     assert(SCENE_RETURN_PASS == null)
-    assert(!retained_pass_same(first, scene_return_pass(source, output)))
+    assert(!same_ref(first, scene_return_pass(source, output)))
     assert(sampled_texture_matches_canvas(first.slot_inputs[0].0, source))
     let resized = scene_return_pass(retained_pass_canvas(10, 32.0, 8.0), output)
-    assert(!retained_pass_same(first, resized))
+    assert(!same_ref(first, resized))
     assert(sampled_texture_matches_canvas(first.slot_inputs[0].0, source))
     let retargeted = scene_return_pass(source, retained_pass_canvas(12))
     assert(retargeted.output.unwrap().handle.0 == 12 && first.output.unwrap().handle.0 == 11)
