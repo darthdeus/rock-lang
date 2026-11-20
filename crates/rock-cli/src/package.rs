@@ -5,7 +5,6 @@ use bone_semantic::inference::ComptimeInputs;
 use rodio::Source;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use sound_core::AssetResolver;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -137,15 +136,8 @@ pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
     };
     let game_key = &config.package.name;
     let overlays = rock_engine_host::release::asset_overlay_roots(&project, Some(&config))?;
-    let mut selection = rock_engine_host::release::AssetSelection::default();
-    let Some(sound) = crate::asset_selection::prepare_sound(
-        &project,
-        game_key,
-        Some(&config),
-        &overlays,
-        &mut selection,
-        false,
-    )?
+    let Some(sound) =
+        crate::asset_selection::prepare_sound(&project, Some(&config), &overlays, false)?
     else {
         return Ok(None);
     };
@@ -352,7 +344,9 @@ fn compile_sound_project(
     game_key: &str,
     sound: crate::asset_selection::SelectedSound,
 ) -> Result<CompiledSoundPackage> {
-    let bank = sound_core::compile_prepared_project(sound.catalog, &sound.resolver)
+    let bank = sound
+        .catalog
+        .compile()
         .map_err(|error| anyhow::anyhow!("sound project {}: {error}", sound.declaration))?;
     for warning in bank.played_peak_warnings() {
         log::warn!(target: "SOUND", "sound project {}: {}", sound.declaration, warning);
@@ -362,20 +356,19 @@ fn compile_sound_project(
     })?;
     let mut dependencies = Vec::with_capacity(bank.dependencies.len());
     let mut recipes = serde_json::Map::new();
-    for dependency in &bank.dependencies {
-        let Some(source) = sound.resolver.resolve(dependency) else {
-            continue;
-        };
-        let source_bytes = std::fs::read(&source).map_err(|error| {
+    for (dependency, source) in sound.catalog.resolved_sources() {
+        let source_bytes = std::fs::read(source).map_err(|error| {
             anyhow::anyhow!(
                 "sound dependency {} could not be read: {error}",
                 source.display()
             )
         })?;
-        recipes.insert(dependency.clone(), sound_metadata(&source, &source_bytes)?);
+        recipes.insert(
+            dependency.to_owned(),
+            sound_metadata(source, &source_bytes)?,
+        );
         dependencies.push(format!("{game_key}/{dependency}"));
     }
-    dependencies.sort();
     let mut bank_value: Value = serde_json::from_slice(&bank_bytes).map_err(|error| {
         anyhow::anyhow!("package: compiled sound bank could not be decoded: {error}")
     })?;
@@ -665,7 +658,7 @@ mod tests {
         let fixture = tempfile::tempdir_in(tmp).unwrap();
         std::fs::write(
             fixture.path().join("stick.toml"),
-            "[package]\nname = \"stable-sound-dev\"\n[sound]\nproject = \"sound_project.json\"\n",
+            "[package]\nname = \"stable-sound-dev\"\n[sound]\nproject = \"sound_project.json\"\n[release]\nassets = []\n",
         )
         .unwrap();
         let project = fixture.path().join("sound_project.json");
@@ -707,24 +700,16 @@ mod tests {
         let config =
             rock_host::stick::StickConfig::from_path_optional(&fixture.path().join("stick.toml"))
                 .unwrap();
-        let mut selection = rock_engine_host::release::AssetSelection::default();
-        let sound = crate::asset_selection::prepare_sound(
-            fixture.path(),
-            "game",
-            config.as_ref(),
-            &[],
-            &mut selection,
-            true,
-        )
-        .unwrap()
-        .unwrap();
-        let packaged = compile_sound_project("game", sound).unwrap();
+        let prepared =
+            crate::asset_selection::prepare(fixture.path(), "game", config.as_ref(), &[]).unwrap();
+        let packaged = compile_sound_project("game", prepared.sound.unwrap()).unwrap();
         assert_eq!(
             packaged.bank_bytes, selected,
             "development and packaging must select the same bank"
         );
         assert_eq!(
-            selection
+            prepared
+                .assets
                 .files
                 .keys()
                 .map(String::as_str)

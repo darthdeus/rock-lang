@@ -4,7 +4,6 @@ use rock_engine_host::{
     release::{self, AssetSelection},
     stick::EngineConfigExt,
 };
-use sound_core::AssetResolver;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -48,7 +47,6 @@ impl PreparedAssets {
 pub(crate) struct SelectedSound {
     pub declaration: String,
     pub catalog: sound_core::PreparedSoundProject,
-    pub resolver: sound_core::AssetMapResolver,
 }
 
 pub(crate) struct SelectedVisual {
@@ -149,7 +147,16 @@ pub(crate) fn prepare(
             !key.contains("/assets/.eat/") && !overlays.iter().any(|root| source.starts_with(root))
         });
     }
-    let sound = prepare_sound(project, game_key, config, overlays, &mut assets, true)?;
+    let sound = prepare_sound(project, config, overlays, true)?;
+    if let Some(sound) = &sound {
+        for (key, source) in sound.catalog.resolved_sources() {
+            assets.insert(release::ReleaseAsset::new(
+                game_key,
+                key,
+                source.to_path_buf(),
+            ));
+        }
+    }
     let main_bank = rock_visual_bank::BANK_PATH;
     if !project.join(main_bank).is_file()
         && release::resolve_asset_with_overlays(project, game_key, overlays, main_bank)?.is_some()
@@ -173,10 +180,8 @@ pub(crate) fn prepare(
 
 pub(crate) fn prepare_sound(
     project: &Path,
-    game_key: &str,
     config: Option<&rock_host::stick::StickConfig>,
     overlays: &[PathBuf],
-    selection: &mut AssetSelection,
     require_assets: bool,
 ) -> Result<Option<SelectedSound>> {
     let Some(sound) = config.and_then(|config| config.sound.as_ref()) else {
@@ -185,11 +190,9 @@ pub(crate) fn prepare_sound(
     let path = release::sound_project_path(project, config)?.expect("declared sound project");
     let prepare = || -> Result<_> {
         let catalog = sound_core::parse_project(&std::fs::read_to_string(&path)?)?;
-        let resolver = ReleaseSoundResolver {
-            project_dir: project,
-            game_key,
-            overlays,
-        };
+        let mut roots = overlays.to_vec();
+        roots.push(project.to_path_buf());
+        let resolver = sound_core::FsAssetResolver::new(roots);
         Ok(sound_core::prepare_project(
             &catalog,
             &resolver,
@@ -198,56 +201,13 @@ pub(crate) fn prepare_sound(
     };
     let catalog =
         prepare().map_err(|error| anyhow::anyhow!("sound project {}: {error}", path.display()))?;
-    let mut sources = BTreeMap::new();
-    for key in &catalog.dependencies {
-        if let Some(asset) = release::resolve_asset_with_overlays(project, game_key, overlays, key)?
-        {
-            sources.insert(key.clone(), asset.source.clone());
-            selection.insert(asset);
-        } else if require_assets {
-            anyhow::bail!(
-                "sound project {}: selected source disappeared: {key}",
-                sound.project
-            );
-        } else {
-            log::warn!(target: "SOUND", "sound project {} references missing asset {}; plays using it will be silent", sound.project, key);
-        }
+    for key in catalog.missing_sources() {
+        log::warn!(target: "SOUND", "sound project {} references missing asset {}; plays using it will be silent", sound.project, key);
     }
     Ok(Some(SelectedSound {
         declaration: sound.project.clone(),
         catalog,
-        resolver: sound_core::AssetMapResolver::new(sources),
     }))
-}
-
-struct ReleaseSoundResolver<'a> {
-    project_dir: &'a Path,
-    game_key: &'a str,
-    overlays: &'a [PathBuf],
-}
-
-impl AssetResolver for ReleaseSoundResolver<'_> {
-    fn discover(&self, pattern: &str) -> Result<Vec<String>, String> {
-        let roots = self
-            .overlays
-            .iter()
-            .cloned()
-            .chain(std::iter::once(self.project_dir.to_path_buf()))
-            .collect();
-        sound_core::FsAssetResolver::new(roots).discover(pattern)
-    }
-
-    fn resolve(&self, key: &str) -> Option<PathBuf> {
-        rock_engine_host::release::resolve_asset_with_overlays(
-            self.project_dir,
-            self.game_key,
-            self.overlays,
-            key,
-        )
-        .ok()
-        .flatten()
-        .map(|asset| asset.source)
-    }
 }
 
 fn include_declared_overlay_assets(

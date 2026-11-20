@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt::{self, Display, Formatter},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -162,27 +162,32 @@ pub trait AssetResolver {
 
 #[derive(Debug, Clone, Default)]
 pub struct AssetMapResolver {
-    assets: BTreeMap<String, PathBuf>,
+    assets: BTreeMap<String, Option<PathBuf>>,
 }
 
 impl AssetMapResolver {
     pub fn new(assets: BTreeMap<String, PathBuf>) -> Self {
-        Self { assets }
+        Self {
+            assets: assets
+                .into_iter()
+                .map(|(key, path)| (key, Some(path)))
+                .collect(),
+        }
     }
 }
 
 impl AssetResolver for AssetMapResolver {
     fn resolve(&self, key: &str) -> Option<PathBuf> {
-        self.assets.get(key).cloned()
+        self.assets.get(key).cloned().flatten()
     }
 
     fn discover(&self, pattern: &str) -> Result<Vec<String>, String> {
         let matcher = sources::source_matcher(pattern)?;
         Ok(self
             .assets
-            .keys()
-            .filter(|key| matcher.is_match(key))
-            .cloned()
+            .iter()
+            .filter(|(key, path)| path.is_some() && matcher.is_match(key))
+            .map(|(key, _)| key.clone())
             .collect())
     }
 }
@@ -218,78 +223,87 @@ pub fn compile_project<R: AssetResolver + ?Sized>(
     project: &SoundProject,
     resolver: &R,
 ) -> Result<RuntimeBank, SoundCoreError> {
-    compile_prepared_project(prepare_project(project, resolver, true)?, resolver)
-}
-
-pub fn compile_prepared_project<R: AssetResolver + ?Sized>(
-    prepared: PreparedSoundProject,
-    resolver: &R,
-) -> Result<RuntimeBank, SoundCoreError> {
-    let PreparedSoundProject {
-        project,
-        dependencies,
-        looped_sources,
-    } = prepared;
-    let project = &project;
-    let cache = MeasurementCache::standard().map_err(measurement_error)?;
-    let mut normalizations = BTreeMap::new();
-    for key in &dependencies {
-        let Some(path) = resolver.resolve(key) else {
-            continue;
-        };
-        let measurement = cache
-            .measure(&path, 1.0)
-            .map_err(|error| measurement_error(format!("{key}: {error}")))?;
-        let normalized = measurement
-            .normalize(project.normalization_lufs, looped_sources.contains(key))
-            .map_err(|error| measurement_error(format!("{key}: {error}")))?;
-        normalizations.insert(key.clone(), normalized);
-    }
-    let mut events = project
-        .events
-        .iter()
-        .map(|event| {
-            let group = &project.groups[&event.group];
-            RuntimeEvent {
-                id: event.id.clone(),
-                group: event.group.clone(),
-                bus: group.bus.clone(),
-                steps: event
-                    .steps
-                    .iter()
-                    .map(|step| RuntimeStep {
-                        layers: step
-                            .layers
-                            .iter()
-                            .map(|layer| RuntimeLayer {
-                                sources: layer.sources.clone(),
-                                volume: db_gain(layer_gain_db(project, event, layer)) as f32,
-                                speed: layer.speed,
-                                offset: layer.offset,
-                                stream: layer.stream,
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-            }
-        })
-        .collect::<Vec<_>>();
-    events.sort_by(|left, right| left.id.cmp(&right.id));
-    let played = played::analyze_project(project, &normalizations, resolver, &cache)
-        .map_err(measurement_error)?;
-    Ok(RuntimeBank {
-        schema_version: RUNTIME_SCHEMA_VERSION,
-        events,
-        dependencies: dependencies.into_iter().collect(),
-        normalizations,
-        played,
-    })
+    prepare_project(project, resolver, true)?.compile()
 }
 
 pub struct PreparedSoundProject {
     pub project: SoundProject,
-    pub dependencies: BTreeSet<String>,
     looped_sources: BTreeSet<String>,
+    sources: AssetMapResolver,
+}
+
+impl PreparedSoundProject {
+    pub fn resolved_sources(&self) -> impl Iterator<Item = (&str, &Path)> {
+        self.sources
+            .assets
+            .iter()
+            .filter_map(|(key, path)| Some((key.as_str(), path.as_deref()?)))
+    }
+
+    pub fn missing_sources(&self) -> impl Iterator<Item = &str> {
+        self.sources
+            .assets
+            .iter()
+            .filter(|(_, path)| path.is_none())
+            .map(|(key, _)| key.as_str())
+    }
+
+    pub fn compile(&self) -> Result<RuntimeBank, SoundCoreError> {
+        let project = &self.project;
+        let cache = MeasurementCache::standard().map_err(measurement_error)?;
+        let mut normalizations = BTreeMap::new();
+        for (key, path) in self.resolved_sources() {
+            let measurement = cache
+                .measure(path, 1.0)
+                .map_err(|error| measurement_error(format!("{key}: {error}")))?;
+            let normalized = measurement
+                .normalize(
+                    project.normalization_lufs,
+                    self.looped_sources.contains(key),
+                )
+                .map_err(|error| measurement_error(format!("{key}: {error}")))?;
+            normalizations.insert(key.to_owned(), normalized);
+        }
+        let mut events = project
+            .events
+            .iter()
+            .map(|event| {
+                let group = &project.groups[&event.group];
+                RuntimeEvent {
+                    id: event.id.clone(),
+                    group: event.group.clone(),
+                    bus: group.bus.clone(),
+                    steps: event
+                        .steps
+                        .iter()
+                        .map(|step| RuntimeStep {
+                            layers: step
+                                .layers
+                                .iter()
+                                .map(|layer| RuntimeLayer {
+                                    sources: layer.sources.clone(),
+                                    volume: db_gain(layer_gain_db(project, event, layer)) as f32,
+                                    speed: layer.speed,
+                                    offset: layer.offset,
+                                    stream: layer.stream,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| left.id.cmp(&right.id));
+        let played = played::analyze_project(project, &normalizations, &self.sources, &cache)
+            .map_err(measurement_error)?;
+        Ok(RuntimeBank {
+            schema_version: RUNTIME_SCHEMA_VERSION,
+            events,
+            dependencies: self.sources.assets.keys().cloned().collect(),
+            normalizations,
+            played,
+        })
+    }
 }
 
 pub fn prepare_project<R: AssetResolver + ?Sized>(
@@ -298,7 +312,6 @@ pub fn prepare_project<R: AssetResolver + ?Sized>(
     require_assets: bool,
 ) -> Result<PreparedSoundProject, SoundCoreError> {
     let mut project = project.clone();
-    let mut dependencies = BTreeSet::new();
     let mut looped_sources = BTreeSet::new();
     for event in &mut project.events {
         for (step_index, step) in event.steps.iter_mut().enumerate() {
@@ -312,21 +325,26 @@ pub fn prepare_project<R: AssetResolver + ?Sized>(
                         error,
                     )])
                 })?;
-                dependencies.extend(layer.sources.iter().cloned());
                 if layer.looped || layer.stream {
                     looped_sources.extend(layer.sources.iter().cloned());
                 }
             }
         }
     }
-    let diagnostics = validate_project(&project, resolver, require_assets);
+    let mut sources = BTreeMap::new();
+    let diagnostics = validate_project(&project, |key| {
+        let source = sources
+            .entry(key.to_owned())
+            .or_insert_with(|| resolver.resolve(key));
+        source.is_some() || !require_assets
+    });
     if !diagnostics.is_empty() {
         return Err(SoundCoreError::Diagnostics(diagnostics));
     }
     Ok(PreparedSoundProject {
         project,
-        dependencies,
         looped_sources,
+        sources: AssetMapResolver { assets: sources },
     })
 }
 
@@ -346,10 +364,9 @@ pub fn serialize_runtime_bank(bank: &RuntimeBank) -> Result<Vec<u8>, SoundCoreEr
     serde_json::to_vec(bank).map_err(|error| SoundCoreError::Serialize(error.to_string()))
 }
 
-pub(crate) fn validate_project<R: AssetResolver + ?Sized>(
+fn validate_project(
     project: &SoundProject,
-    resolver: &R,
-    require_assets: bool,
+    mut source_available: impl FnMut(&str) -> bool,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut check = |ok: bool, path: &dyn Display, message: &dyn Display| {
@@ -493,7 +510,7 @@ pub(crate) fn validate_project<R: AssetResolver + ?Sized>(
                     match validate_asset_key(source) {
                         Err(message) => check(false, &source_path, &message),
                         Ok(()) => check(
-                            !require_assets || resolver.resolve(source).is_some(),
+                            source_available(source),
                             &source_path,
                             &format_args!("referenced asset does not exist: {source}"),
                         ),
@@ -554,8 +571,7 @@ mod tests {
 
     use super::{
         AssetMapResolver, MixGroup, SoundCoreError, SoundEvent, SoundLayer, SoundProject,
-        SoundStep, compile_prepared_project, compile_project, parse_project, prepare_project,
-        serialize_runtime_bank,
+        SoundStep, compile_project, parse_project, prepare_project, serialize_runtime_bank,
     };
 
     const SHARED: &str = "assets/sfx/shared.ogg";
@@ -686,6 +702,32 @@ mod tests {
     }
 
     #[test]
+    fn shared_sources_resolve_once_per_bank() {
+        use super::AssetResolver;
+        use std::cell::RefCell;
+
+        struct CountedResolver(AssetMapResolver, RefCell<BTreeMap<String, usize>>);
+
+        impl AssetResolver for CountedResolver {
+            fn resolve(&self, key: &str) -> Option<PathBuf> {
+                *self.1.borrow_mut().entry(key.to_owned()).or_default() += 1;
+                self.0.resolve(key)
+            }
+
+            fn discover(&self, pattern: &str) -> Result<Vec<String>, String> {
+                self.0.discover(pattern)
+            }
+        }
+
+        let resolver = CountedResolver(resolver(&[SHARED, ALT, SOLO]), RefCell::default());
+        compile_project(&valid_project(), &resolver).unwrap();
+        assert_eq!(
+            resolver.1.into_inner(),
+            BTreeMap::from([(ALT.into(), 1), (SHARED.into(), 1), (SOLO.into(), 1)])
+        );
+    }
+
+    #[test]
     fn discovered_variants_compile_to_the_same_bank_as_explicit_sources() {
         let mut explicit = valid_project();
         explicit.events[0].steps[0].layers[0].sources =
@@ -716,7 +758,7 @@ mod tests {
         let project = valid_project();
         let resolver = resolver(&[SHARED, SOLO]);
         let bank = prepare_project(&project, &resolver, false)
-            .and_then(|prepared| compile_prepared_project(prepared, &resolver))
+            .and_then(|prepared| prepared.compile())
             .expect("a missing sound must not reject a development bank");
 
         assert_eq!(bank.events[2].steps[0].layers[0].sources, vec![SHARED, ALT]);

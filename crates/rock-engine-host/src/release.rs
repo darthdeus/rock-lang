@@ -42,6 +42,15 @@ pub struct ReleaseAsset {
     pub source: PathBuf,
 }
 
+impl ReleaseAsset {
+    pub fn new(game_key: &str, logical_key: &str, source: PathBuf) -> Self {
+        Self {
+            key: key_for(game_key, logical_key),
+            source,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AssetSelection {
     pub files: BTreeMap<String, PathBuf>,
@@ -245,10 +254,7 @@ pub fn resolve_asset_with_overlays(
         .chain(std::iter::once(project_dir))
         .map(|root| root.join(logical_key))
         .find(|path| path.is_file())
-        .map(|source| ReleaseAsset {
-            key: key_for(game_key, logical_key),
-            source,
-        }))
+        .map(|source| ReleaseAsset::new(game_key, logical_key, source)))
 }
 
 pub fn resolve_worktree_asset(

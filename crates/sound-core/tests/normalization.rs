@@ -119,7 +119,7 @@ fn played_peak_warning_does_not_reduce_source_or_layer_gains() {
         &resolver,
         false,
     )
-    .and_then(|prepared| sound_core::compile_prepared_project(prepared, &resolver))
+    .and_then(|prepared| prepared.compile())
     .unwrap();
     assert_eq!(
         partial.played["tone"][0].sum, compiled.played["tone"][0].sum,
