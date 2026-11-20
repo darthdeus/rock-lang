@@ -69,12 +69,6 @@ enum UploadDisposition {
     Cancelled,
 }
 
-enum HttpFailureClass {
-    Retry,
-    Reject,
-    Blocked,
-}
-
 enum DrainOutcome {
     Complete,
     Retry(io::Error),
@@ -831,35 +825,6 @@ impl TelemetryDrain {
         sync_parent(&self.last_upload_path)
     }
 
-    fn settle_batch(
-        &self,
-        disposition: UploadDisposition,
-        body: &str,
-        pending: u64,
-        cursor: &mut u64,
-    ) -> io::Result<Option<DrainOutcome>> {
-        match disposition {
-            UploadDisposition::Accepted => {
-                if let Err(error) = self.mark_uploaded() {
-                    log::warn!(target: "TELEMETRY", "could not record last upload time: {error}");
-                }
-            }
-            UploadDisposition::Reject(status) => {
-                self.quarantine(status, body)?;
-                log::warn!(
-                    target: "TELEMETRY",
-                    "quarantined a batch rejected with HTTP {status}"
-                );
-            }
-            UploadDisposition::Retry(error) => return Ok(Some(DrainOutcome::Retry(error))),
-            UploadDisposition::Blocked(error) => return Ok(Some(DrainOutcome::Blocked(error))),
-            UploadDisposition::Cancelled => return Ok(Some(DrainOutcome::Cancelled)),
-        }
-        *cursor += pending;
-        self.acknowledge(*cursor)?;
-        Ok(None)
-    }
-
     fn reclaim_if_fully_acknowledged(&self) -> io::Result<()> {
         let len = match fs::metadata(&self.events_path) {
             Ok(metadata) => metadata.len(),
@@ -916,29 +881,37 @@ impl TelemetryDrain {
             }
             line.clear();
             let read = reader.read_line(&mut line)?;
-            if read == 0 {
-                if !batch.is_empty() {
-                    if let Some(outcome) =
-                        self.settle_batch(send(&batch), &batch, pending, &mut cursor)?
-                    {
-                        return Ok(outcome);
-                    }
-                } else if pending > 0 {
-                    cursor += pending;
-                    self.acknowledge(cursor)?;
-                }
-                return Ok(DrainOutcome::Complete);
-            }
             let body = line.trim_end_matches(['\r', '\n']);
-            let keep = event_consent_generation(body) == Some(self.consent_generation);
-            if keep && !batch.is_empty() && batch.len() + 1 + body.len() > MAX_BODY_BYTES {
-                if let Some(outcome) =
-                    self.settle_batch(send(&batch), &batch, pending, &mut cursor)?
-                {
-                    return Ok(outcome);
+            let keep = read > 0 && event_consent_generation(body) == Some(self.consent_generation);
+            let full = keep && batch.len() + 1 + body.len() > MAX_BODY_BYTES;
+            let settle = !batch.is_empty() && (read == 0 || full);
+            if settle {
+                match send(&batch) {
+                    UploadDisposition::Accepted => {
+                        if let Err(error) = self.mark_uploaded() {
+                            log::warn!(target: "TELEMETRY", "could not record last upload time: {error}");
+                        }
+                    }
+                    UploadDisposition::Reject(status) => {
+                        self.quarantine(status, &batch)?;
+                        log::warn!(
+                            target: "TELEMETRY",
+                            "quarantined a batch rejected with HTTP {status}"
+                        );
+                    }
+                    UploadDisposition::Retry(error) => return Ok(DrainOutcome::Retry(error)),
+                    UploadDisposition::Blocked(error) => return Ok(DrainOutcome::Blocked(error)),
+                    UploadDisposition::Cancelled => return Ok(DrainOutcome::Cancelled),
                 }
                 batch.clear();
+            }
+            if pending > 0 && (settle || read == 0) {
+                cursor += pending;
                 pending = 0;
+                self.acknowledge(cursor)?;
+            }
+            if read == 0 {
+                return Ok(DrainOutcome::Complete);
             }
             if keep {
                 if !batch.is_empty() {
@@ -988,11 +961,12 @@ fn hmac_sha256_hex(token: &str, body: &str) -> String {
         .collect()
 }
 
-fn classify_http_status(status: u16) -> HttpFailureClass {
+fn classify_http_status(status: u16) -> UploadDisposition {
+    let error = || io::Error::other(format!("telemetry ingest returned HTTP {status}"));
     match status {
-        408 | 429 | 500..=599 => HttpFailureClass::Retry,
-        400 | 409 | 413 | 422 => HttpFailureClass::Reject,
-        _ => HttpFailureClass::Blocked,
+        408 | 429 | 500..=599 => UploadDisposition::Retry(error()),
+        400 | 409 | 413 | 422 => UploadDisposition::Reject(status),
+        _ => UploadDisposition::Blocked(error()),
     }
 }
 
@@ -1008,14 +982,7 @@ impl TelemetryTransport {
             .send(body)
         {
             Ok(_) => UploadDisposition::Accepted,
-            Err(ureq::Error::StatusCode(status)) => {
-                let error = || io::Error::other(format!("telemetry ingest returned HTTP {status}"));
-                match classify_http_status(status) {
-                    HttpFailureClass::Retry => UploadDisposition::Retry(error()),
-                    HttpFailureClass::Reject => UploadDisposition::Reject(status),
-                    HttpFailureClass::Blocked => UploadDisposition::Blocked(error()),
-                }
-            }
+            Err(ureq::Error::StatusCode(status)) => classify_http_status(status),
             Err(error) => UploadDisposition::Retry(io::Error::other(error)),
         }
     }
@@ -2835,19 +2802,28 @@ mod tests {
 
     #[test]
     fn http_statuses_have_explicit_retry_reject_and_block_classes() {
-        assert!(matches!(classify_http_status(408), HttpFailureClass::Retry));
-        assert!(matches!(classify_http_status(429), HttpFailureClass::Retry));
-        assert!(matches!(classify_http_status(503), HttpFailureClass::Retry));
+        assert!(matches!(
+            classify_http_status(408),
+            UploadDisposition::Retry(_)
+        ));
+        assert!(matches!(
+            classify_http_status(429),
+            UploadDisposition::Retry(_)
+        ));
+        assert!(matches!(
+            classify_http_status(503),
+            UploadDisposition::Retry(_)
+        ));
         for status in [400, 409, 413, 422] {
             assert!(matches!(
                 classify_http_status(status),
-                HttpFailureClass::Reject
+                UploadDisposition::Reject(_)
             ));
         }
         for status in [401, 403, 404, 405] {
             assert!(matches!(
                 classify_http_status(status),
-                HttpFailureClass::Blocked
+                UploadDisposition::Blocked(_)
             ));
         }
     }
