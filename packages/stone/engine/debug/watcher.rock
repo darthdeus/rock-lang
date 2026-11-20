@@ -96,241 +96,190 @@ struct ShaderArtifactGeneration {
 }
 global GL_SHADER_ARTIFACTS: Map<string, ShaderArtifactGeneration> = map_new()
 
-fn semantic_line(lines: [string], at: int, tag: string, min_fields: int) -> [string]? {
-    if at < 0 || at >= lines.len { return null }
-    let fields = lines[at].split(" ")
+struct SemanticWireReader {
+    lines: [string],
+    at: int,
+}
+
+// The next line, split, when it carries `tag` and at least `min_fields` fields.
+fn SemanticWireReader.line(r, tag: string, min_fields: int) -> [string]? {
+    if r.at >= r.lines.len { return null }
+    let fields = r.lines[r.at].split(" ")
     if fields.len < min_fields || fields[0] != tag { return null }
+    r.at += 1
     return fields
 }
 
+// A `tag N` section header with N >= 0.
+fn SemanticWireReader.count(r, tag: string) -> int? {
+    let header = r.line(tag, 2) ?? return null
+    let n = semantic_int(header, 1) ?? return null
+    return if n < 0 { null } else { n }
+}
+
+fn SemanticWireReader.skip(r, tag: string, item_tag: string, min_fields: int) -> bool {
+    let n = r.count(tag) ?? return false
+    for _ in 0..n {
+        if r.line(item_tag, min_fields) == null { return false }
+    }
+    return true
+}
+
 fn semantic_int(fields: [string], index: int) -> int? {
-    if index < 0 || index >= fields.len { return null }
+    if index >= fields.len { return null }
     return fields[index].parse_int()
 }
 
-fn semantic_skip_lines(lines: [string], at: int, count: int, tag: string, min_fields: int) -> int? {
-    let cursor = at
+fn semantic_members(
+    r: SemanticWireReader,
+    count: int,
+    tag: string,
+    with_capacity: bool
+) -> [SemanticShaderMember]? {
+    let members: [SemanticShaderMember] = vec_new()
     for _ in 0..count {
-        if semantic_line(lines, cursor, tag, min_fields) == null { return null }
-        cursor += 1
+        let member = r.line(tag, if with_capacity { 4 } else { 3 }) ?? return null
+        let kind = semantic_int(member, 2) ?? return null
+        let capacity = if with_capacity { semantic_int(member, 3) ?? return null } else { 0 }
+        if with_capacity && capacity <= 0 { return null }
+        members.push(SemanticShaderMember { name: member[1], kind: kind, capacity: capacity })
     }
-    return cursor
+    return members
+}
+
+fn parse_semantic_compute(r: SemanticWireReader) -> bool {
+    let workgroup = r.line("compute_workgroup", 4) ?? return false
+    for i in 1..4 {
+        if (semantic_int(workgroup, i) ?? return false) <= 0 { return false }
+    }
+    let dispatch = r.line("compute_dispatch", 3) ?? return false
+    if dispatch[1] == "runtime" {
+        let dimensions = semantic_int(dispatch, 2) ?? return false
+        if dimensions < 1 || dimensions > 3 { return false }
+    } else if dispatch[1] == "fixed" {
+        if dispatch.len != 5 { return false }
+        for i in 2..5 {
+            if (semantic_int(dispatch, i) ?? return false) <= 0 { return false }
+        }
+    } else { return false }
+    let builtin_count = r.count("compute_builtins") ?? return false
+    for _ in 0..builtin_count {
+        let builtin = r.line("compute_builtin", 2) ?? return false
+        if builtin[1] != "global_invocation_id"
+            && builtin[1] != "local_invocation_id"
+            && builtin[1] != "workgroup_id"
+            && builtin[1] != "local_invocation_index"
+            && builtin[1] != "num_workgroups" { return false }
+    }
+    let resource_count = r.count("compute_resources") ?? return false
+    for _ in 0..resource_count {
+        let resource = r.line("compute_resource", 6) ?? return false
+        let shape = semantic_int(resource, 4) ?? return false
+        let kind = semantic_int(resource, 5) ?? return false
+        if resource[2] != "storage"
+            || (resource[3] != "read" && resource[3] != "read_write")
+            || shape != 1
+            || (kind < 0 || kind > 3)
+            || (kind == 3 && resource[3] != "read_write") { return false }
+    }
+    let memory_count = r.count("compute_workgroup_arrays") ?? return false
+    for _ in 0..memory_count {
+        let memory = r.line("compute_workgroup_array", 4) ?? return false
+        let kind = semantic_int(memory, 2) ?? return false
+        let size = semantic_int(memory, 3) ?? return false
+        if kind < 0 || kind > 4 || size <= 0 { return false }
+    }
+    return true
 }
 
 fn parse_semantic_shader_wire(wire: string) -> SemanticShaderInterface? {
-    let lines = wire.split("\n")
-    if lines.len < 3 || lines[0] != "SHADER_INTERFACE_V1" { return null }
-    let fingerprint_line = semantic_line(lines, 1, "fingerprint", 2) ?? return null
-    let fingerprint = semantic_int(fingerprint_line, 1) ?? return null
-    let fullscreen_line = semantic_line(lines, 2, "fullscreen", 2) ?? return null
-    let fullscreen_value = semantic_int(fullscreen_line, 1) ?? return null
-    if fullscreen_value != 0 && fullscreen_value != 1 { return null }
-    let cursor = 3
+    let r = SemanticWireReader { lines: wire.split("\n"), at: 1 }
+    if r.lines.len < 3 || r.lines[0] != "SHADER_INTERFACE_V1" { return null }
+    let fingerprint = semantic_int(r.line("fingerprint", 2) ?? return null, 1) ?? return null
+    let fullscreen = semantic_int(r.line("fullscreen", 2) ?? return null, 1) ?? return null
+    if fullscreen != 0 && fullscreen != 1 { return null }
 
-    let stages_line = semantic_line(lines, cursor, "stages", 2) ?? return null
-    let stage_count = semantic_int(stages_line, 1) ?? return null
-    if stage_count < 0 { return null }
-    cursor += 1
+    let stage_count = r.count("stages") ?? return null
     let has_compute_stage = false
     for _ in 0..stage_count {
-        let stage = semantic_line(lines, cursor, "stage", 2) ?? return null
+        let stage = r.line("stage", 2) ?? return null
         if stage[1] == "compute" { has_compute_stage = true }
-        cursor += 1
     }
 
-    let inputs_line = semantic_line(lines, cursor, "vertex_inputs", 2) ?? return null
-    let input_count = semantic_int(inputs_line, 1) ?? return null
-    if input_count < 0 { return null }
-    cursor += 1
+    let input_count = r.count("vertex_inputs") ?? return null
     let vertex_inputs: [SemanticShaderVertexInput] = vec_new()
     for _ in 0..input_count {
-        let input = semantic_line(lines, cursor, "vertex_input", 4) ?? return null
+        let input = r.line("vertex_input", 4) ?? return null
         let attr_count = semantic_int(input, 3) ?? return null
         if attr_count < 0 { return null }
-        cursor += 1
         let attrs: [SemanticShaderVertexAttr] = vec_new()
         for _ in 0..attr_count {
-            let attr = semantic_line(lines, cursor, "attr", 3) ?? return null
-            let kind = semantic_int(attr, 2) ?? return null
-            attrs.push(SemanticShaderVertexAttr { name: attr[1], kind: kind })
-            cursor += 1
+            let attr = r.line("attr", 3) ?? return null
+            attrs.push(SemanticShaderVertexAttr { name: attr[1], kind: semantic_int(attr, 2) ?? return null })
         }
-        vertex_inputs.push(SemanticShaderVertexInput {
-            name: input[1],
-            rate: input[2],
-            attrs: attrs,
-        })
+        vertex_inputs.push(SemanticShaderVertexInput { name: input[1], rate: input[2], attrs: attrs })
     }
 
-    let varyings_line = semantic_line(lines, cursor, "varyings", 2) ?? return null
-    let varying_count = semantic_int(varyings_line, 1) ?? return null
-    if varying_count < 0 { return null }
-    cursor += 1
-    cursor = semantic_skip_lines(lines, cursor, varying_count, "varying", 4) ?? return null
+    if !r.skip("varyings", "varying", 4) { return null }
 
-    let group_line = semantic_line(lines, cursor, "groups", 2) ?? return null
-    let group_count = semantic_int(group_line, 1) ?? return null
-    if group_count < 0 { return null }
-    cursor += 1
+    let group_count = r.count("groups") ?? return null
     let blocks: [SemanticShaderBlock] = vec_new()
     for _ in 0..group_count {
-        let group = semantic_line(lines, cursor, "group", 5) ?? return null
-        let fingerprint = semantic_int(group, 3) ?? return null
+        let group = r.line("group", 5) ?? return null
+        let group_fingerprint = semantic_int(group, 3) ?? return null
         let member_count = semantic_int(group, 4) ?? return null
         if member_count < 0 { return null }
-        cursor += 1
-        let members: [SemanticShaderMember] = vec_new()
-        for _ in 0..member_count {
-            let member = semantic_line(lines, cursor, "member", 3) ?? return null
-            let kind = semantic_int(member, 2) ?? return null
-            members.push(SemanticShaderMember { name: member[1], kind: kind, capacity: 0 })
-            cursor += 1
-        }
-        blocks.push(SemanticShaderBlock { role: group[1], name: group[2], fingerprint: fingerprint, members: members })
+        let members = semantic_members(r, member_count, "member", false) ?? return null
+        blocks.push(SemanticShaderBlock { role: group[1], name: group[2], fingerprint: group_fingerprint, members: members })
     }
 
+    let array_count = r.count("arrays") ?? return null
     let array_blocks: [SemanticShaderBlock] = vec_new()
-    let array_line = semantic_line(lines, cursor, "arrays", 2) ?? return null
-    let array_count = semantic_int(array_line, 1) ?? return null
-    if array_count < 0 { return null }
-    cursor += 1
     for _ in 0..array_count {
-        let array = semantic_line(lines, cursor, "array", 4) ?? return null
+        let array = r.line("array", 4) ?? return null
         let member_count = semantic_int(array, 3) ?? return null
         if member_count < 0 { return null }
-        cursor += 1
-        let members: [SemanticShaderMember] = vec_new()
-        for _ in 0..member_count {
-            let member = semantic_line(lines, cursor, "array_member", 4) ?? return null
-            let kind = semantic_int(member, 2) ?? return null
-            let capacity = semantic_int(member, 3) ?? return null
-            if capacity <= 0 { return null }
-            members.push(SemanticShaderMember { name: member[1], kind: kind, capacity: capacity })
-            cursor += 1
-        }
+        let members = semantic_members(r, member_count, "array_member", true) ?? return null
         array_blocks.push(SemanticShaderBlock { role: array[1], name: array[2], fingerprint: 0, members: members })
     }
 
-    let compute_line = semantic_line(lines, cursor, "compute", 2)
-    if compute_line != null {
-        let compute_line = compute_line
-        if compute_line[1] != "some" || !has_compute_stage { return null }
-        cursor += 1
-        let workgroup = semantic_line(lines, cursor, "compute_workgroup", 4) ?? return null
-        let wx = semantic_int(workgroup, 1) ?? return null
-        let wy = semantic_int(workgroup, 2) ?? return null
-        let wz = semantic_int(workgroup, 3) ?? return null
-        if wx <= 0 || wy <= 0 || wz <= 0 { return null }
-        cursor += 1
-        let dispatch = semantic_line(lines, cursor, "compute_dispatch", 3) ?? return null
-        if dispatch[1] == "runtime" {
-            let dimensions = semantic_int(dispatch, 2) ?? return null
-            if dimensions < 1 || dimensions > 3 { return null }
-        } else if dispatch[1] == "fixed" {
-            if dispatch.len != 5 { return null }
-            if (semantic_int(dispatch, 2) ?? return null) <= 0
-                || (semantic_int(dispatch, 3) ?? return null) <= 0
-                || (semantic_int(dispatch, 4) ?? return null) <= 0 { return null }
-        } else { return null }
-        cursor += 1
-        let builtin_line = semantic_line(lines, cursor, "compute_builtins", 2) ?? return null
-        let builtin_count = semantic_int(builtin_line, 1) ?? return null
-        if builtin_count < 0 { return null }
-        cursor += 1
-        for _ in 0..builtin_count {
-            let builtin = semantic_line(lines, cursor, "compute_builtin", 2) ?? return null
-            if builtin[1] != "global_invocation_id"
-                && builtin[1] != "local_invocation_id"
-                && builtin[1] != "workgroup_id"
-                && builtin[1] != "local_invocation_index"
-                && builtin[1] != "num_workgroups" { return null }
-            cursor += 1
-        }
-        let resources_line = semantic_line(lines, cursor, "compute_resources", 2) ?? return null
-        let resource_count = semantic_int(resources_line, 1) ?? return null
-        if resource_count < 0 { return null }
-        cursor += 1
-        for _ in 0..resource_count {
-            let resource = semantic_line(lines, cursor, "compute_resource", 6) ?? return null
-            let shape = semantic_int(resource, 4) ?? return null
-            let kind = semantic_int(resource, 5) ?? return null
-            if resource[2] != "storage"
-                || (resource[3] != "read" && resource[3] != "read_write")
-                || shape != 1
-                || (kind < 0 || kind > 3)
-                || (kind == 3 && resource[3] != "read_write") { return null }
-            cursor += 1
-        }
-        let workgroup_line = semantic_line(lines, cursor, "compute_workgroup_arrays", 2) ?? return null
-        let workgroup_count = semantic_int(workgroup_line, 1) ?? return null
-        if workgroup_count < 0 { return null }
-        cursor += 1
-        for _ in 0..workgroup_count {
-            let memory = semantic_line(lines, cursor, "compute_workgroup_array", 4) ?? return null
-            let kind = semantic_int(memory, 2) ?? return null
-            let size = semantic_int(memory, 3) ?? return null
-            if kind < 0 || kind > 4 || size <= 0 { return null }
-            cursor += 1
-        }
+    if let compute = r.line("compute", 2) {
+        if compute[1] != "some" || !has_compute_stage || !parse_semantic_compute(r) { return null }
     }
 
-    let texture_line = semantic_line(lines, cursor, "textures", 3) ?? return null
-    let texture_count = semantic_int(texture_line, 2) ?? return null
-    if texture_count < 0 || texture_line[1] == "" || (texture_count > 0 && texture_line[1] == "none") { return null }
-    cursor += 1
+    let textures = r.line("textures", 3) ?? return null
+    let texture_count = semantic_int(textures, 2) ?? return null
+    if texture_count < 0 || textures[1] == "" || (texture_count > 0 && textures[1] == "none") { return null }
     let texture_slots: [string] = vec_new()
     let texture_kinds: [int] = vec_new()
     for _ in 0..texture_count {
-        let texture = semantic_line(lines, cursor, "texture", 3) ?? return null
-        let kind = semantic_int(texture, 2) ?? return null
+        let texture = r.line("texture", 3) ?? return null
+        texture_kinds.push(semantic_int(texture, 2) ?? return null)
         texture_slots.push(texture[1])
-        texture_kinds.push(kind)
-        cursor += 1
     }
-    let texture_stages = semantic_line(lines, cursor, "texture_stages", 2) ?? return null
-    let texture_stage_count = semantic_int(texture_stages, 1) ?? return null
-    if texture_stage_count < 0 { return null }
-    cursor += 1
-    cursor = semantic_skip_lines(lines, cursor, texture_stage_count, "texture_stage", 2) ?? return null
+    if !r.skip("texture_stages", "texture_stage", 2) || !r.skip("bare_samplers", "bare_sampler", 4) { return null }
 
-    let bare_line = semantic_line(lines, cursor, "bare_samplers", 2) ?? return null
-    let bare_count = semantic_int(bare_line, 1) ?? return null
-    if bare_count < 0 { return null }
-    cursor += 1
-    cursor = semantic_skip_lines(lines, cursor, bare_count, "bare_sampler", 4) ?? return null
-
-    let output = semantic_line(lines, cursor, "output", 2) ?? return null
+    let output = r.line("output", 2) ?? return null
     let outputs: [SemanticShaderOutput] = vec_new()
     if output[1] == "single" {
-        let kind = semantic_int(output, 2) ?? return null
-        outputs.push(SemanticShaderOutput { name: "FragColor", location: 0, kind: kind })
+        outputs.push(SemanticShaderOutput { name: "FragColor", location: 0, kind: semantic_int(output, 2) ?? return null })
     } else if output[1] == "mrt" {
         let output_count = semantic_int(output, 2) ?? return null
         if output_count < 0 { return null }
-        cursor += 1
         for location in 0..output_count {
-            let member = semantic_line(lines, cursor, "output_member", 3) ?? return null
-            let kind = semantic_int(member, 2) ?? return null
-            outputs.push(SemanticShaderOutput { name: member[1], location: location, kind: kind })
-            cursor += 1
+            let member = r.line("output_member", 3) ?? return null
+            outputs.push(SemanticShaderOutput { name: member[1], location: location, kind: semantic_int(member, 2) ?? return null })
         }
-        output = semantic_line(lines, cursor, "end", 1) ?? return null
-        return if output[0] == "end" {
-            SemanticShaderInterface { fingerprint: fingerprint, fullscreen: fullscreen_value != 0,
-                                      vertex_inputs: vertex_inputs,
-                                      texture_slots: texture_slots, texture_kinds: texture_kinds, blocks: blocks,
-                                      array_blocks: array_blocks, outputs: outputs }
-        } else { null }
     } else if output[1] != "none" {
         return null
     }
-    cursor += 1
-    let end = semantic_line(lines, cursor, "end", 1) ?? return null
-    if end[0] != "end" { return null }
-    SemanticShaderInterface { fingerprint: fingerprint, fullscreen: fullscreen_value != 0,
-                              vertex_inputs: vertex_inputs,
-                              texture_slots: texture_slots, texture_kinds: texture_kinds, blocks: blocks,
-                              array_blocks: array_blocks, outputs: outputs }
+    r.line("end", 1) ?? return null
+    SemanticShaderInterface {
+        fingerprint: fingerprint, fullscreen: fullscreen != 0,
+        vertex_inputs: vertex_inputs,
+        texture_slots: texture_slots, texture_kinds: texture_kinds, blocks: blocks,
+        array_blocks: array_blocks, outputs: outputs
+    }
 }
 
 fn next_semantic_shader_generation() -> int {
