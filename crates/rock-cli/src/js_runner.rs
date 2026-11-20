@@ -4,9 +4,7 @@
 //! for the JS backend explicitly).
 
 use rock_core::CompilerError;
-use rock_host::process_management::{
-    join_drained_pipe, register_child_process, unregister_child_process,
-};
+use rock_host::process_management::{register_child_process, unregister_child_process};
 use std::process::{Child, Stdio};
 use std::time::Duration;
 
@@ -55,25 +53,12 @@ fn spawn_node(code: &str, output: fn() -> Stdio) -> Result<Child, CompilerError>
     Ok(child)
 }
 
-fn drain(
-    mut pipe: impl std::io::Read + Send + 'static,
-) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        pipe.read_to_end(&mut buf).map(|_| buf)
-    })
-}
-
 pub(crate) fn run_node_code_with_timeout(
     code: &str,
     timeout: Duration,
 ) -> Result<NodeRun, CompilerError> {
     let mut child = spawn_node(code, Stdio::piped)?;
     let pid = child.id();
-    // Drain while node runs: waiting first blocks a child whose output
-    // outgrows the pipe buffer until it reads as a timeout.
-    let stdout = drain(child.stdout.take().expect("node stdout is piped"));
-    let stderr = drain(child.stderr.take().expect("node stderr is piped"));
     let waited = crate::common::ProcessManager::wait_with_cpu_budget(&mut child, timeout)
         .map_err(|e| error(format!("failed to wait for node process: {e}")));
     if waited.is_err() {
@@ -81,20 +66,16 @@ pub(crate) fn run_node_code_with_timeout(
         let _ = child.wait();
     }
     unregister_child_process(pid);
-    if waited?.timed_out {
+    let run = waited?;
+    if run.timed_out {
         return Err(error(format!(
             "node process timed out after {} seconds",
             timeout.as_secs_f32()
         )));
     }
-    let text = |thread, pipe| {
-        join_drained_pipe(thread, pipe)
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .map_err(|e| error(format!("node run: {e}")))
-    };
     Ok(NodeRun {
-        stdout: text(stdout, "stdout")?,
-        stderr: text(stderr, "stderr")?,
+        stdout: String::from_utf8_lossy(&run.output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&run.output.stderr).into_owned(),
     })
 }
 

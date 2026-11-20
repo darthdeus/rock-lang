@@ -247,16 +247,17 @@ impl BackendTotals {
     }
 }
 
-/// Builds and runs every unit under `paths` serially, printing each unit's
+/// Builds and runs every unit under `paths`, printing each unit's
 /// line, its FAIL details and, under `ROCK_TEST_VERBOSE`, its skips.
 pub(crate) fn run_backend(
     paths: &[String],
     elsewhere_label: &str,
+    file_threads: usize,
     build: impl Fn(&str, bool) -> Result<UnitRun, UnitFailure> + Sync,
 ) -> crate::Result<BackendTotals> {
     use colored::Colorize;
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
-    let outcomes = run_units(&files, &package_dirs, None, build);
+    let outcomes = run_units(&files, &package_dirs, file_threads, build);
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
     let mut totals = BackendTotals {
         passed: 0,
@@ -324,13 +325,23 @@ pub(crate) fn check_unit(
     }
 }
 
-/// Run files in input order, optionally on a bounded worker pool, then run
+pub(crate) fn file_threads(requested: Option<usize>) -> usize {
+    if cfg!(feature = "sequential") {
+        1
+    } else {
+        requested.unwrap_or_else(|| {
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        })
+    }
+}
+
+/// Collect file results in input order, optionally on a bounded worker pool, then run
 /// package units serially. Catch panics per unit and return short labels in
 /// files-before-packages order.
 pub(crate) fn run_units<T: Send>(
     files: &[String],
     package_dirs: &[String],
-    file_threads: Option<usize>,
+    file_threads: usize,
     build: impl Fn(&str, bool) -> T + Sync,
 ) -> Vec<(String, std::thread::Result<T>)> {
     let prev_hook = std::panic::take_hook();
@@ -338,14 +349,15 @@ pub(crate) fn run_units<T: Send>(
     let run = |unit: &str, is_package| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(unit, is_package)))
     };
-    let mut outcomes = match file_threads {
-        Some(threads) => crate::parallel_runner::map_in_order(files, threads, |file| {
+    let mut outcomes = if file_threads > 1 && files.len() > 1 {
+        crate::parallel_runner::map_in_order(files, file_threads, |file| {
             (short_path(file), run(file, false))
-        }),
-        None => files
+        })
+    } else {
+        files
             .iter()
             .map(|file| (short_path(file), run(file, false)))
-            .collect(),
+            .collect()
     };
     outcomes.extend(
         package_dirs
@@ -362,7 +374,7 @@ mod tests {
     fn schedules_preserve_order_and_contain_unit_panics() {
         let files = vec!["panic-file".to_string(), "file".to_string()];
         let packages = vec!["package".to_string()];
-        for file_threads in [None, Some(2)] {
+        for file_threads in [1, 2] {
             let outcomes = super::run_units(&files, &packages, file_threads, |unit, package| {
                 if unit == "panic-file" {
                     panic!("isolated unit panic");

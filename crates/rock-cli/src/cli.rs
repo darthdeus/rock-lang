@@ -99,7 +99,9 @@ fn backend_handler(backend: Backend, command: Command) -> Option<Handler> {
             rock_cli::skull_backend::skull_run(file, &args.app_args)
         },
         #[cfg(feature = "backend-js")]
-        (Js, Test) => |args| rock_cli::js_test::js_test(&args.get_test_files()?),
+        (Js, Test) => |args| {
+            rock_cli::js_test::js_test_with_threads(&args.get_test_files()?, args.test_threads)
+        },
         #[cfg(feature = "backend-js")]
         (Js, Run) => |args| rock_cli::js_test::js_run(args.get_required_file("run")?),
         (Glsl, Test) => |args| {

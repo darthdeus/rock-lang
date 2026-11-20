@@ -16,10 +16,15 @@ fn all_reasons(e: &rock_core::CompilerError) -> Vec<String> {
 type JsUnitOutcome = std::result::Result<UnitRun, UnitFailure>;
 
 pub fn js_test(paths: &[String]) -> Result<()> {
+    js_test_with_threads(paths, None)
+}
+
+pub(crate) fn js_test_with_threads(paths: &[String], test_threads: Option<usize>) -> Result<()> {
     let start = Instant::now();
     // Tests `@test(backends = ...)` limits to other backends are never
     // emitted and are not skips: the CI skip cap measures only JS gaps.
-    let totals = crate::test_unit::run_backend(paths, "not for js", js_build_unit)?;
+    let threads = crate::test_unit::file_threads(test_threads);
+    let totals = crate::test_unit::run_backend(paths, "not for js", threads, js_build_unit)?;
     println!(
         "\njs backend: {}/{} @tests passed ({} failed, {} skipped, {} not for js) across {} files ({:.2}s)",
         totals.passed.to_string().green(),

@@ -156,3 +156,59 @@ fn mismatched_value() -> int { return 42 }
         "{text}"
     );
 }
+
+#[cfg(not(feature = "sequential"))]
+#[test]
+fn concurrent_js_files_keep_verdicts_when_a_node_exits() {
+    if !crate::support::require_node() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    crate::support::write_files(
+        dir.path(),
+        &[
+            (
+                "a.rock",
+                r#"
+inline(js) fn wait_for_peer() -> bool = """
+    const fs = require("node:fs");
+    const marker = process.env.ROCK_JS_TEST_PEER;
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    const deadline = Date.now() + 10000;
+    while (!fs.existsSync(marker) && Date.now() < deadline) {
+        Atomics.wait(pause, 0, 0, 10);
+    }
+    return fs.existsSync(marker);
+    """
+@test(returns = true)
+fn waits() -> bool { return wait_for_peer() }
+"#,
+            ),
+            (
+                "b.rock",
+                r#"
+inline(js) fn notify_and_exit() = """
+    require("node:fs").writeFileSync(process.env.ROCK_JS_TEST_PEER, "");
+    process.exit(17);
+    """
+@test
+fn exits() { notify_and_exit() }
+"#,
+            ),
+        ],
+    );
+    let output = crate::support::rock(&repo_root())
+        .args(["test", "--backend", "js", "--test-threads", "2"])
+        .arg(dir.path())
+        .env("ROCK_JS_TEST_PEER", dir.path().join("ready"))
+        .output()
+        .unwrap();
+    let text = crate::support::text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("1/1 @tests passed"), "{text}");
+    assert!(text.contains("1 unit(s) failed to build/run"), "{text}");
+    assert!(
+        text.find("a.rock").unwrap() < text.find("b.rock").unwrap(),
+        "{text}"
+    );
+}

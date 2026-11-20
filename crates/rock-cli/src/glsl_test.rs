@@ -21,7 +21,7 @@ pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
     let runner = locate_runner()?;
     let gl_available = probe_gl(&runner, PROFILE_NAME, skip_gpu)?;
     let totals =
-        crate::test_unit::run_backend(paths, "outside the value class", |unit, is_package| {
+        crate::test_unit::run_backend(paths, "outside the value class", 1, |unit, is_package| {
             build_unit(unit, is_package, &runner, gl_available)
         })?;
     println!(

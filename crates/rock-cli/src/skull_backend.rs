@@ -1968,15 +1968,9 @@ pub(crate) fn skull_test(
     let mut details: Vec<(String, String)> = Vec::new();
     let mut timings: Vec<(String, TestTiming)> = Vec::new();
 
-    let threads = if cfg!(feature = "sequential") {
-        1
-    } else {
-        test_threads.unwrap_or_else(|| {
-            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-        })
-    };
+    let threads = crate::test_unit::file_threads(test_threads);
     let outcomes =
-        crate::test_unit::run_units(&files, &package_dirs, Some(threads), |unit, is_package| {
+        crate::test_unit::run_units(&files, &package_dirs, threads, |unit, is_package| {
             if is_package {
                 skull_build_package(unit, shards, filter)
             } else {
