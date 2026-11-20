@@ -1,5 +1,57 @@
+use std::ffi::{c_char, c_int, CStr};
+
+fn to_log_level(level: c_int) -> ::log::Level {
+    match level {
+        ..=0 => ::log::Level::Error,
+        1 => ::log::Level::Warn,
+        2 => ::log::Level::Info,
+        3 => ::log::Level::Debug,
+        _ => ::log::Level::Trace,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stone_log_set_level(level: c_int) {
+    rock_log::set_level(level.clamp(0, 4) as u8);
+}
+
+#[no_mangle]
+pub extern "C" fn stone_log_get_level() -> c_int {
+    rock_log::init();
+    rock_log::level().min(4) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn stone_log(
+    level: c_int,
+    category: *const c_char,
+    msg: *const c_char,
+    wall_clock: c_int,
+) {
+    let category = if category.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(category) }.to_str().unwrap_or("")
+    };
+    let message = if msg.is_null() {
+        std::borrow::Cow::Borrowed("")
+    } else {
+        unsafe { CStr::from_ptr(msg) }.to_string_lossy()
+    };
+    rock_log::init();
+    if level.clamp(0, 4) as u8 > rock_log::level() {
+        return;
+    }
+    let level = to_log_level(level);
+    if wall_clock != 0 {
+        rock_log::emit_wall_clock(level, category, format_args!("{message}"));
+        return;
+    }
+    ::log::log!(target: category, level, "{message}");
+}
+
 /// Rock's level numbering (0 error, 1 warn); only those two keep records.
-fn record_level(level: std::os::raw::c_int) -> Option<::log::Level> {
+fn record_level(level: c_int) -> Option<::log::Level> {
     match level {
         0 => Some(::log::Level::Error),
         1 => Some(::log::Level::Warn),
@@ -10,18 +62,15 @@ fn record_level(level: std::os::raw::c_int) -> Option<::log::Level> {
 /// Every record at `level` (0 error, 1 warn) this process emitted, Rust and
 /// Rock alike, saturating. What the development error badge counts.
 #[no_mangle]
-pub extern "C" fn stone_log_record_total(level: std::os::raw::c_int) -> std::os::raw::c_int {
+pub extern "C" fn stone_log_record_total(level: c_int) -> c_int {
     record_level(level).map_or(0, |l| {
-        rock_log::records_total(l).min(std::os::raw::c_int::MAX as u64) as std::os::raw::c_int
+        rock_log::records_total(l).min(c_int::MAX as u64) as c_int
     })
 }
 
 /// Valid until the next call on this thread.
 #[no_mangle]
-pub extern "C" fn stone_log_records_text(
-    level: std::os::raw::c_int,
-    max_rows: std::os::raw::c_int,
-) -> *const std::os::raw::c_char {
+pub extern "C" fn stone_log_records_text(level: c_int, max_rows: c_int) -> *const c_char {
     let mut out = String::new();
     if let Some(level) = record_level(level) {
         for row in rock_log::records(level)
@@ -58,16 +107,16 @@ pub extern "C" fn stone_log_collect_errors() {
 /// NUL-separated records, then the overflow count. Valid until the next call on this
 /// thread.
 #[no_mangle]
-pub extern "C" fn stone_log_collected_errors(len: *mut usize) -> *const std::os::raw::c_char {
+pub extern "C" fn stone_log_collected_errors(len: *mut usize) -> *const c_char {
     collected_error_reply(rock_log::collected_errors(), len)
 }
 
 #[no_mangle]
-pub extern "C" fn stone_log_scoped_errors(len: *mut usize) -> *const std::os::raw::c_char {
+pub extern "C" fn stone_log_scoped_errors(len: *mut usize) -> *const c_char {
     collected_error_reply(rock_log::scoped_errors(), len)
 }
 
-fn collected_error_reply(records: Vec<String>, len: *mut usize) -> *const std::os::raw::c_char {
+fn collected_error_reply(records: Vec<String>, len: *mut usize) -> *const c_char {
     let mut out = String::new();
     for record in records {
         out.push_str(&record.replace('\0', " "));
@@ -80,38 +129,28 @@ fn collected_error_reply(records: Vec<String>, len: *mut usize) -> *const std::o
     COLLECTED_ERRORS_REPLY.with(|reply| {
         let mut reply = reply.borrow_mut();
         *reply = out.into_bytes();
-        reply.as_ptr() as *const std::os::raw::c_char
+        reply.as_ptr() as *const c_char
     })
 }
 
 /// Remove the first collected record equal to `record` (`len` bytes); 0 when
 /// none is.
 #[no_mangle]
-pub extern "C" fn stone_log_take_collected_error(
-    record: *const u8,
-    len: usize,
-) -> std::os::raw::c_int {
+pub extern "C" fn stone_log_take_collected_error(record: *const u8, len: usize) -> c_int {
     take_collected_error(record, len, rock_log::take_collected_error)
 }
 
 #[no_mangle]
-pub extern "C" fn stone_log_take_scoped_error(
-    record: *const u8,
-    len: usize,
-) -> std::os::raw::c_int {
+pub extern "C" fn stone_log_take_scoped_error(record: *const u8, len: usize) -> c_int {
     take_collected_error(record, len, rock_log::take_scoped_error)
 }
 
-fn take_collected_error(
-    record: *const u8,
-    len: usize,
-    take: fn(&str) -> bool,
-) -> std::os::raw::c_int {
+fn take_collected_error(record: *const u8, len: usize, take: fn(&str) -> bool) -> c_int {
     if record.is_null() {
         return 0;
     }
     let record = unsafe { std::slice::from_raw_parts(record, len) };
-    take(&String::from_utf8_lossy(record)) as std::os::raw::c_int
+    take(&String::from_utf8_lossy(record)) as c_int
 }
 
 thread_local! {

@@ -320,7 +320,6 @@ mod image_texture;
 mod imgui;
 mod input;
 mod light_table;
-mod logging;
 mod meadow;
 mod nav;
 mod relight_jobs;
@@ -1255,7 +1254,7 @@ where
 
 #[no_mangle]
 pub extern "C" fn stone_init() -> bool {
-    logging::init();
+    rock_log::init();
     QUIT_REQUESTED.store(false, Ordering::SeqCst);
     INITIALIZED.store(true, Ordering::SeqCst);
     true
