@@ -42,6 +42,25 @@ fn smoke() {
     }
 }
 
+#[test]
+fn traced_floor_preserves_negative_zero() {
+    if require_node() {
+        runner::check(
+            r#"
+fn main() {
+    let xs = vec_new_with_capacity<float>(12000)
+    for i in 0..12000 { xs.push(if i == 11999 { -0.0 } else { 1.75 }) }
+    let last = 1.0
+    for i in 0..xs.len() { last = floor(xs[i]) }
+    assert(1.0 / last < 0.0, "floor lost the sign of zero")
+    print("negative zero")
+}
+"#,
+        )
+        .unwrap_or_else(|finding| panic!("{finding}"));
+    }
+}
+
 fn seeds() -> impl Iterator<Item = u64> {
     let setting =
         |name, default| std::env::var(name).map_or(default, |s| s.parse::<u64>().unwrap());

@@ -2558,7 +2558,8 @@ fn presentation_random_range(min: float, max: float) -> float { return presentat
 @intrinsic @pure fn sign(x: float) -> float {
     if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
 }
-@intrinsic @pure @inline inline(lua) fn floor(x: float) -> float = "math.floor(x)"
+// LuaJIT can narrow a traced floor result to an integer and lose negative zero.
+@intrinsic @pure @inline inline(lua) fn floor(x: float) -> float = "(x == 0 and x or math.floor(x))"
 @intrinsic @pure @inline inline(lua) fn ceil(x: float) -> float = "math.ceil(x)"
 
 inline(lua) fn get_os() -> string = """
