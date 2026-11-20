@@ -234,7 +234,6 @@ impl<'a> Builder<'a> {
                 .scx
                 .rep_arena()
                 .boxed_function(self.call_scx.target, param_names.len()),
-            logical_type: (*fn_ty).clone(),
         };
         let taken_by_value = self
             .body
@@ -255,7 +254,6 @@ impl<'a> Builder<'a> {
             hoisted,
             param_names,
             representation,
-            logical_type: (*fn_ty).clone(),
         };
         Ok(if abi.uses_scalar_abi() { abi } else { boxed })
     }
@@ -322,7 +320,6 @@ impl<'a> Builder<'a> {
         child.nested_fn_globals = self.nested_fn_globals.clone();
 
         child.f.abi_representation = Some(abi.representation.clone());
-        child.f.abi_logical_type = Some(abi.logical_type.clone());
         child.f.code_identity = nested_identity;
         child.f.code_abi_fingerprint =
             Some(abi.representation.logical_fingerprint(self.scx.rep_arena()));

@@ -425,7 +425,6 @@ struct NestedFn {
     /// Lets a call site place named args into slots as for a top-level callee.
     param_names: Vec<Ustr>,
     representation: FunctionRepPlan,
-    logical_type: MonoTy,
 }
 
 impl NestedFn {
@@ -1205,7 +1204,6 @@ pub(crate) fn lower_global_with_call_context(
     // A `nobox` global's initializer returns leaves; `mir_emit` binds one Lua
     // global per leaf.
     b.ret_rep = (!scx.values_first_class).then(|| global_plan.representation());
-    b.f.global_plan = Some(global_plan);
     b.lower_root()
         .map_err(|e| b.located(e).or_at(def.name_span))?;
     Ok(Some(b.f))
@@ -1976,29 +1974,6 @@ impl<'a> Builder<'a> {
         let id = self.f.emit(self.cur, inst);
         if let Some(span) = self.cur_span {
             self.f.inst_spans.insert(id, span);
-        }
-        let enum_name = match self.f.insts[id] {
-            Inst::MakeEnum { ty, .. } | Inst::MakeEnumDyn { ty, .. } => Some(ty),
-            _ => None,
-        };
-        if let (Some(enum_name), Some(expr)) = (enum_name, self.cur_expr) {
-            if let Some(logical_ty) = self
-                .concrete_plan
-                .domain_types(&self.cur_domain)
-                .and_then(|types| types.expr_type(expr))
-            {
-                let logical = self.scx.interner().get(logical_ty);
-                let matches_owner = matches!(
-                    logical.peel_nullable().0,
-                    MonoTy::App {
-                        ctor: MonoCtor::Nominal(name),
-                        ..
-                    } if *name == enum_name
-                );
-                if matches_owner {
-                    self.f.inst_logical_types.entry(id).or_insert(logical_ty);
-                }
-            }
         }
         // Record the source site before instruction indices enter later passes.
         let is_mint = self.cur_op == crate::site::SiteOp::FnValue;

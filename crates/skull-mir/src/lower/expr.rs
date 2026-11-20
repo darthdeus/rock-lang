@@ -139,7 +139,6 @@ impl<'a> Builder<'a> {
         condition: bool,
         coerce_iterator: bool,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let first_inst = self.f.insts.len();
         let outer = self.cur_span.replace(self.body.expr_spans[e]);
         let outer_expr = self.cur_expr.replace(e);
         let v = match self.body.expr_arena[e] {
@@ -158,46 +157,6 @@ impl<'a> Builder<'a> {
         self.cur_expr = outer_expr;
         let v = v?;
         self.mark_record_base(e, v);
-        // Ascriptions and transparent newtype constructors reuse their operand, which
-        // keeps its constructor's logical type.
-        let reuses_operand = matches!(self.body.expr_arena[e], Expr::As { .. })
-            || matches!(
-                &self.body.expr_arena[e],
-                Expr::Call {
-                    callee: Callee::Unresolved { name, .. },
-                    args,
-                    ..
-                } if args.len() == 1 && self.ws.newtypes_by_name.contains_key(name)
-            );
-        // A projection can forward a constructor from an inactive enum payload lane;
-        // its logical type belongs to the producer, not this use.
-        if !reuses_operand
-            && v.into_raw().into_u32() as usize >= first_inst
-            && matches!(
-                self.f.insts[v],
-                Inst::MakeValueStruct { .. }
-                    | Inst::MaterializeValueStruct { .. }
-                    | Inst::MakeTuple(..)
-            )
-        {
-            if let Some(ty) = self
-                .concrete_plan
-                .domain_types(&self.cur_domain)
-                .and_then(|types| types.expr_type(e))
-            {
-                match self.f.inst_logical_types.get(&v) {
-                    Some(existing) if *existing != ty => {
-                        return Err(self.gap_here(
-                            "one MIR value was assigned conflicting concrete logical types",
-                        ));
-                    }
-                    Some(_) => {}
-                    None => {
-                        self.f.inst_logical_types.insert(v, ty);
-                    }
-                }
-            }
-        }
         if coerce_iterator && let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
             let (m, f) = w.func;
             let iter_ref = FuncRef { module: m, func: f };

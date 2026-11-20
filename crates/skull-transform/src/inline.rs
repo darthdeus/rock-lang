@@ -585,7 +585,6 @@ fn copy_inst_metadata(
         code_value_identities,
         lambda_abi_fingerprints,
         lambda_abi_representations,
-        inst_logical_types,
     );
     for (old_id, span) in source.inst_spans.iter() {
         if let Some(&new_id) = inst_map.get(&old_id) {
@@ -671,7 +670,6 @@ fn compact_region(
     template.value_leaves = header.value_leaves;
     template.abi_plan = header.abi_plan.clone();
     template.abi_representation = header.abi_representation.clone();
-    template.global_plan = arena.global_plan.clone();
     template.statics = header.statics.clone();
     template.comptime_reads = arena.comptime_reads.clone();
     template.struct_registry_roots = arena.struct_registry_roots.clone();

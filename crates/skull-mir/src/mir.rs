@@ -914,8 +914,6 @@ pub struct MirFunc {
     pub value_leaves: usize,
     pub abi_plan: Option<crate::lower::BackendFnAbiPlanHandle>,
     pub abi_representation: Option<crate::lower::FunctionRepPlan>,
-    pub abi_logical_type: Option<crate::monoty::MonoTy>,
-    pub global_plan: Option<crate::lower::GlobalPlan>,
     pub statics: Vec<StaticCell>,
     pub comptime_reads: Vec<ComptimeRead>,
     pub struct_registry_roots: std::collections::BTreeSet<Ustr>,
@@ -961,9 +959,6 @@ pub struct MirFunc {
     /// Stamped for every lowered instruction because transforms rewrite
     /// instructions in place.
     pub inst_spans: bone_core::prelude::ArenaMap<Idx<Inst>, bone_core::prelude::Span>,
-    /// Representation plans erase nominal generic arguments, so native backends
-    /// read them here.
-    pub inst_logical_types: bone_core::prelude::FxHashMap<Idx<Inst>, crate::monoty::MonoTyId>,
     /// A span cannot key this: a `for` head's `iter` and `next` share one span.
     pub call_sites: bone_core::prelude::FxHashMap<Idx<Inst>, crate::site::CallSite>,
     pub fn_value_symbols: bone_core::prelude::FxHashMap<Idx<Inst>, FuncRef>,
@@ -1032,8 +1027,6 @@ impl MirFunc {
             value_leaves: 0,
             abi_plan: None,
             abi_representation: None,
-            abi_logical_type: None,
-            global_plan: None,
             statics: Vec::new(),
             comptime_reads: Vec::new(),
             struct_registry_roots: Default::default(),
@@ -1055,7 +1048,6 @@ impl MirFunc {
             flat_box_widths: Default::default(),
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
-            inst_logical_types: Default::default(),
             call_sites: Default::default(),
             callee_instances: Default::default(),
             call_abi_plans: Default::default(),
