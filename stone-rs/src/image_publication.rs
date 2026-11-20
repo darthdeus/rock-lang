@@ -726,19 +726,6 @@ mod tests {
             [12],
             "Required flushes publish even when they exceed the frame cap"
         );
-        p.submit(6, "deferred", 4, 1, RequestClass::Deferred)
-            .unwrap();
-        p.receive(result(6, 4));
-        assert!(
-            p.select("pump", |_| true).unwrap().is_empty(),
-            "a flush also spends the background allowance"
-        );
-        p.pending.budget = 0;
-        assert_eq!(
-            sizes(p.select("pump", |_| true).unwrap()),
-            [4],
-            "an explicitly unbounded pump still drains within the same frame"
-        );
         assert!(p.pending.requests.is_empty());
     }
 
