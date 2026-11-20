@@ -175,14 +175,12 @@ fn show(s: string) -> string {
 
 @test
 fn test_basic_forms() {
-    assert_eq(show("12"), "12")
-    assert_eq(show("1.5"), "1.5")
-    assert_eq(show("1e3"), "1000")
-    assert_eq(show("0x1A"), "26")
-    assert_eq(show("  3  "), "3")
-    assert_eq(show("12abc"), "nil")
-    assert_eq(show(""), "nil")
-    assert_eq(show("   "), "nil")
+    for (literal, expected) in [
+        ("12", "12"), ("1.5", "1.5"), ("1e3", "1000"), ("0x1A", "26"),
+        ("  3  ", "3"), ("12abc", "nil"), ("", "nil"), ("   ", "nil"),
+    ] {
+        assert_eq(show(literal), expected, literal)
+    }
 }
 
 // A parsed value flows through arithmetic (it is a real float).
@@ -198,49 +196,35 @@ fn test_arith() {
 // rejects the `0o` octal prefix that JS `Number` accepts.
 @test
 fn test_non_finite_spellings() {
-    assert_eq(show("inf"), "inf")
-    assert_eq(show("-INF"), "-inf")
-    assert_eq(show("+Infinity"), "inf")
-    assert_eq(show("  -infinity  "), "-inf")
-    assert_eq(show("nan"), "nan")
-    assert_eq(show("-NaN"), "nan")
-    assert_eq(show("infinit"), "nil")
-    assert_eq(show("infx"), "nil")
-    assert_eq(show("nan(1)"), "nil")
+    for (literal, expected) in [
+        ("inf", "inf"), ("-INF", "-inf"), ("+Infinity", "inf"),
+        ("  -infinity  ", "-inf"), ("nan", "nan"), ("-NaN", "nan"),
+        ("infinit", "nil"), ("infx", "nil"), ("nan(1)", "nil"),
+    ] {
+        assert_eq(show(literal), expected, literal)
+    }
 }
 
 @test
 fn test_hex_forms() {
-    assert_eq(show("-0x10"), "-16")
-    assert_eq(show("+0x10"), "16")
-    assert_eq(show("0X1F"), "31")
-    assert_eq(show("0x1.8"), "1.5")
-    assert_eq(show("0x.8"), "0.5")
-    assert_eq(show("0x1p4"), "16")
-    assert_eq(show("0x1P-2"), "0.25")
-    assert_eq(show("0x1.8p1"), "3")
-    assert_eq(show("0x1e3"), "483")
-    assert_eq(show("0x"), "nil")
-    assert_eq(show("0x."), "nil")
-    assert_eq(show("0x1p"), "nil")
-    assert_eq(show("0x-1"), "nil")
-    assert_eq(show("0xG"), "nil")
+    for (literal, expected) in [
+        ("-0x10", "-16"), ("+0x10", "16"), ("0X1F", "31"), ("0x1.8", "1.5"),
+        ("0x.8", "0.5"), ("0x1p4", "16"), ("0x1P-2", "0.25"), ("0x1.8p1", "3"),
+        ("0x1e3", "483"), ("0x", "nil"), ("0x.", "nil"), ("0x1p", "nil"),
+        ("0x-1", "nil"), ("0xG", "nil"),
+    ] {
+        assert_eq(show(literal), expected, literal)
+    }
 }
 
 @test
 fn test_prefixes_and_signs() {
-    assert_eq(show("0b101"), "5")
-    assert_eq(show("-0B11"), "-3")
-    assert_eq(show("0b102"), "nil")
-    assert_eq(show("0b1.1"), "nil")
-    assert_eq(show("0o17"), "nil")
-    assert_eq(show("-0"), "-0")
-    assert_eq(show("+.5"), "0.5")
-    assert_eq(show("1."), "1")
-    assert_eq(show("."), "nil")
-    assert_eq(show("1e"), "nil")
-    assert_eq(show("+-1"), "nil")
-    assert_eq(show("- 5"), "nil")
-    assert_eq(show("1_0"), "nil")
-    assert_eq(show("1e400"), "inf")
+    for (literal, expected) in [
+        ("0b101", "5"), ("-0B11", "-3"), ("0b102", "nil"), ("0b1.1", "nil"),
+        ("0o17", "nil"), ("-0", "-0"), ("+.5", "0.5"), ("1.", "1"),
+        (".", "nil"), ("1e", "nil"), ("+-1", "nil"), ("- 5", "nil"),
+        ("1_0", "nil"), ("1e400", "inf"),
+    ] {
+        assert_eq(show(literal), expected, literal)
+    }
 }
