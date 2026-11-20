@@ -149,19 +149,114 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct StickConfig {
-    pub package: Package,
-    pub native: Option<NativeConfig>,
-    pub build: Option<BuildConfig>,
-    pub release: Option<ReleaseConfig>,
-    pub assets: Option<AssetsConfig>,
-    pub sound: Option<SoundConfig>,
-    pub sim: Option<SimConfig>,
-    pub lint: Option<LintConfig>,
-    pub language: Option<LanguageConfig>,
-    pub dependencies: HashMap<String, Dependency>,
-    pub source_groups: HashMap<String, SourceGroupConfig>,
+fn unknown_key<E: serde::de::Error>(key: &str, scope: &str, keys: &[&str]) -> E {
+    E::custom(format!(
+        "unknown key `{key}` {scope}; known keys: {}",
+        keys.join(", ")
+    ))
+}
+
+struct ManifestKey {
+    scope: &'static str,
+    keys: &'static [&'static str],
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for ManifestKey {
+    type Value = String;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<String, D::Error> {
+        let key = <String as serde::Deserialize>::deserialize(d)?;
+        if !self.keys.contains(&key.as_str()) {
+            return Err(unknown_key(&key, self.scope, self.keys));
+        }
+        Ok(key)
+    }
+}
+
+macro_rules! manifest_table {
+    (
+        $(#[$meta:meta])*
+        pub struct $name:ident {
+            $($(#[$attr:meta])* $field:ident: $ty:ty, $mode:ident $(as $key:literal)?;)*
+        }
+        $scope:literal $(, $spanned:ident)?
+        $(, $expected:literal, |$literal:ident| $shorthand:expr)?
+    ) => {
+        $(#[$meta])*
+        pub struct $name {
+            $($(#[$attr])* pub $field: $ty,)*
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct Visitor;
+                impl<'de> serde::de::Visitor<'de> for Visitor {
+                    type Value = $name;
+
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str(manifest_table!(@expected $name $($expected)?))
+                    }
+
+                    $(fn visit_str<E: serde::de::Error>(self, $literal: &str) -> Result<$name, E> {
+                        Ok($shorthand)
+                    })?
+
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<$name, A::Error> {
+                        const KEYS: &[&str] = &[$(manifest_table!(@key $field $($key)?)),*];
+                        $(let mut $field = None;)*
+                        while let Some(key) = manifest_table!(@next map $scope KEYS $($spanned)?)? {
+                            match key.as_str() {
+                                $(manifest_table!(@key $field $($key)?) => {
+                                    $field = Some(manifest_table!(@read map $mode));
+                                })*
+                                _ => return Err(unknown_key(&key, $scope, KEYS)),
+                            }
+                        }
+                        Ok($name {$($field: manifest_table!(@finish $field $mode $($key)?),)*})
+                    }
+                }
+                manifest_table!(@deserialize d Visitor $($expected)?)
+            }
+        }
+    };
+    (@key $field:ident) => { stringify!($field) };
+    (@key $field:ident $key:literal) => { $key };
+    (@expected $name:ident) => { concat!(stringify!($name), " struct") };
+    (@expected $name:ident $expected:literal) => { $expected };
+    (@next $map:ident $scope:literal $keys:ident) => { $map.next_key::<String>() };
+    (@next $map:ident $scope:literal $keys:ident spanned) => {
+        $map.next_key_seed(ManifestKey { scope: $scope, keys: $keys })
+    };
+    (@read $map:ident required) => { $map.next_value()? };
+    (@read $map:ident default) => { $map.next_value()? };
+    (@read $map:ident present) => { Some($map.next_value()?) };
+    (@finish $field:ident required $($key:literal)?) => {
+        $field.ok_or_else(|| serde::de::Error::missing_field(manifest_table!(@key $field $($key)?)))?
+    };
+    (@finish $field:ident $mode:ident $($key:literal)?) => { $field.unwrap_or_default() };
+    (@deserialize $d:ident $visitor:ident) => { $d.deserialize_map($visitor) };
+    (@deserialize $d:ident $visitor:ident $expected:literal) => { $d.deserialize_any($visitor) };
+}
+
+manifest_table! {
+    #[derive(Debug, Clone)]
+    pub struct StickConfig {
+        package: Package, required;
+        build: Option<BuildConfig>, present;
+        release: Option<ReleaseConfig>, present;
+        assets: Option<AssetsConfig>, present;
+        sound: Option<SoundConfig>, present;
+        sim: Option<SimConfig>, default;
+        lint: Option<LintConfig>, present;
+        native: Option<NativeConfig>, present;
+        language: Option<LanguageConfig>, present;
+        dependencies: HashMap<String, Dependency>, default;
+        source_groups: HashMap<String, SourceGroupConfig>, default;
+    }
+    "at top level", spanned
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -256,30 +351,34 @@ impl StickConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct BuildConfig {
-    pub channels: Vec<String>,
-    pub default_channel: Option<String>,
-    pub vars: HashMap<String, BuildVar>,
+manifest_table! {
+    #[derive(Debug, Clone, Default)]
+    pub struct BuildConfig {
+        channels: Vec<String>, default;
+        default_channel: Option<String>, present;
+        vars: HashMap<String, BuildVar>, default;
+    }
+    "in [build]"
 }
 
-/// One declared build variable. Exactly one of `cmd`/`builtin`/`value`/
-/// `source_fingerprint` is its source (`validate_build` enforces arity; the
-/// shorthand `NAME = "literal"` parses as `value`). `channels` restricts where
-/// the source runs; outside the list the var resolves to `default`, and a
-/// restricted var with no default is a resolution error there.
-#[derive(Debug, Clone, Default)]
-pub struct BuildVar {
-    pub cmd: Option<String>,
-    pub builtin: Option<String>,
-    pub value: Option<String>,
-    pub source_fingerprint: Option<SourceFingerprint>,
-    pub channels: Option<Vec<String>>,
-    pub default: Option<String>,
-    /// Hash the value into cache keys but never store it in plaintext in any
-    /// on-disk artifact or manifest.
-    pub secret: bool,
-    pub volatile: bool,
+manifest_table! {
+    /// The shorthand `NAME = "literal"` supplies `value`.
+    #[derive(Debug, Clone, Default)]
+    pub struct BuildVar {
+        cmd: Option<String>, present;
+        builtin: Option<String>, present;
+        value: Option<String>, present;
+        source_fingerprint: Option<SourceFingerprint>, present;
+        channels: Option<Vec<String>>, present;
+        default: Option<String>, present;
+        /// Hash the value into cache keys but never store it in plaintext in any
+        /// on-disk artifact or manifest.
+        secret: bool, default;
+        volatile: bool, default;
+    }
+    "in [build.vars] entry",
+    "a literal string or a table with cmd/builtin/value/source_fingerprint/channels/default/secret/volatile",
+    |literal| BuildVar { value: Some(literal.to_string()), ..BuildVar::default() }
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -290,21 +389,30 @@ pub struct SourceFingerprint {
     pub vars: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ReleaseConfig {
-    pub assets: Option<Vec<String>>,
-    pub overlay_assets: Option<Vec<String>>,
-    pub visual_banks: Option<Vec<String>>,
+manifest_table! {
+    #[derive(Debug, Clone, Default)]
+    pub struct ReleaseConfig {
+        assets: Option<Vec<String>>, present;
+        overlay_assets: Option<Vec<String>>, present;
+        visual_banks: Option<Vec<String>>, present;
+    }
+    "in [release]"
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct AssetsConfig {
-    pub overlays: Vec<String>,
+manifest_table! {
+    #[derive(Debug, Clone, Default)]
+    pub struct AssetsConfig {
+        overlays: Vec<String>, default;
+    }
+    "in [assets]"
 }
 
-#[derive(Debug, Clone)]
-pub struct SoundConfig {
-    pub project: String,
+manifest_table! {
+    #[derive(Debug, Clone)]
+    pub struct SoundConfig {
+        project: String, required;
+    }
+    "in [sound]"
 }
 
 pub(crate) const KNOWN_BUILD_BUILTINS: [&str; 3] = ["channel", "platform", "source_revision"];
@@ -355,12 +463,15 @@ pub(crate) fn dependency_matches_channel(dep: &Dependency, channel: &str) -> boo
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Package {
-    pub name: String,
-    /// `Option` so a minimal `[package]` manifest parses; `version()` defaults to "0.0.0".
-    pub version: Option<String>,
-    pub package_type: Option<PackageType>,
+manifest_table! {
+    #[derive(Debug, Clone)]
+    pub struct Package {
+        name: String, required;
+        /// `Option` so a minimal `[package]` manifest parses; `version()` defaults to "0.0.0".
+        version: Option<String>, default;
+        package_type: Option<PackageType>, default as "type";
+    }
+    "in [package]"
 }
 
 impl Package {
@@ -399,9 +510,6 @@ pub enum DependencySource {
     Path(String),
     Package(String),
 }
-
-// serde::Deserialize impls — hand-rolled to avoid pulling serde_derive
-// (and thus syn) into the front end's compile-time critical path.
 
 impl<'de> serde::Deserialize<'de> for PackageType {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -500,355 +608,6 @@ impl<'de> serde::Deserialize<'de> for Dependency {
             }
         }
         d.deserialize_any(Vis)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for BuildVar {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = BuildVar;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(
-                    f,
-                    "a literal string or a table with cmd/builtin/value/source_fingerprint/channels/default/secret/volatile"
-                )
-            }
-            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<BuildVar, E> {
-                Ok(BuildVar {
-                    value: Some(s.to_string()),
-                    ..BuildVar::default()
-                })
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<BuildVar, A::Error> {
-                let mut var = BuildVar::default();
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "cmd" => {
-                            var.cmd = Some(map.next_value()?);
-                        }
-                        "builtin" => {
-                            var.builtin = Some(map.next_value()?);
-                        }
-                        "value" => {
-                            var.value = Some(map.next_value()?);
-                        }
-                        "source_fingerprint" => {
-                            var.source_fingerprint = Some(map.next_value()?);
-                        }
-                        "channels" => {
-                            var.channels = Some(map.next_value()?);
-                        }
-                        "default" => {
-                            var.default = Some(map.next_value()?);
-                        }
-                        "secret" => {
-                            var.secret = map.next_value()?;
-                        }
-                        "volatile" => {
-                            var.volatile = map.next_value()?;
-                        }
-                        other => {
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [build.vars] entry; known keys: \
-                                 cmd, builtin, value, source_fingerprint, channels, default, secret, volatile"
-                            )));
-                        }
-                    }
-                }
-                Ok(var)
-            }
-        }
-        d.deserialize_any(Vis)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for BuildConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = BuildConfig;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "BuildConfig struct")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<BuildConfig, A::Error> {
-                let mut build = BuildConfig::default();
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "channels" => {
-                            build.channels = map.next_value()?;
-                        }
-                        "default_channel" => {
-                            build.default_channel = Some(map.next_value()?);
-                        }
-                        "vars" => {
-                            build.vars = map.next_value()?;
-                        }
-                        other => {
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [build]; known keys: \
-                                 channels, default_channel, vars"
-                            )));
-                        }
-                    }
-                }
-                Ok(build)
-            }
-        }
-        d.deserialize_map(Vis)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for ReleaseConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = ReleaseConfig;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "ReleaseConfig struct")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<ReleaseConfig, A::Error> {
-                let mut release = ReleaseConfig::default();
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "assets" => {
-                            release.assets = Some(map.next_value()?);
-                        }
-                        "visual_banks" => {
-                            release.visual_banks = Some(map.next_value()?);
-                        }
-                        "overlay_assets" => {
-                            release.overlay_assets = Some(map.next_value()?);
-                        }
-                        other => {
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [release]; known keys: assets, overlay_assets, visual_banks"
-                            )));
-                        }
-                    }
-                }
-                Ok(release)
-            }
-        }
-        d.deserialize_map(Vis)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for AssetsConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = AssetsConfig;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "AssetsConfig struct")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<AssetsConfig, A::Error> {
-                let mut assets = AssetsConfig::default();
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "overlays" => {
-                            assets.overlays = map.next_value()?;
-                        }
-                        other => {
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [assets]; known keys: overlays"
-                            )));
-                        }
-                    }
-                }
-                Ok(assets)
-            }
-        }
-        d.deserialize_map(Vis)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SoundConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = SoundConfig;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "SoundConfig struct")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<SoundConfig, A::Error> {
-                let mut project: Option<String> = None;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "project" => {
-                            project = Some(map.next_value()?);
-                        }
-                        other => {
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [sound]; known keys: project"
-                            )));
-                        }
-                    }
-                }
-                let project = project.ok_or_else(|| serde::de::Error::missing_field("project"))?;
-                Ok(SoundConfig { project })
-            }
-        }
-        d.deserialize_map(Vis)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Package {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = Package;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "Package struct")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Package, A::Error> {
-                let mut name: Option<String> = None;
-                let mut version: Option<String> = None;
-                let mut package_type: Option<PackageType> = None;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "name" => {
-                            name = Some(map.next_value()?);
-                        }
-                        "version" => {
-                            version = map.next_value()?;
-                        }
-                        "type" => {
-                            package_type = map.next_value()?;
-                        }
-                        other => {
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [package]; known keys: name, version, type"
-                            )));
-                        }
-                    }
-                }
-                let name = name.ok_or_else(|| serde::de::Error::missing_field("name"))?;
-                Ok(Package {
-                    name,
-                    version,
-                    package_type,
-                })
-            }
-        }
-        d.deserialize_map(Vis)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for StickConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct KeySeed;
-        impl<'de> serde::de::DeserializeSeed<'de> for KeySeed {
-            type Value = String;
-
-            fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<String, D::Error> {
-                let key = <String as serde::Deserialize>::deserialize(d)?;
-                match key.as_str() {
-                    "package" | "build" | "release" | "assets" | "sound" | "sim" | "lint"
-                    | "native" | "language" | "dependencies" | "source_groups" => Ok(key),
-                    other => Err(serde::de::Error::custom(format!(
-                        "unknown key `{other}` at top level; known keys: package, build, release, \
-                         assets, sound, sim, lint, native, language, dependencies, source_groups"
-                    ))),
-                }
-            }
-        }
-
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = StickConfig;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "StickConfig struct")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<StickConfig, A::Error> {
-                let mut package: Option<Package> = None;
-                let mut native: Option<NativeConfig> = None;
-                let mut build: Option<BuildConfig> = None;
-                let mut release: Option<ReleaseConfig> = None;
-                let mut assets: Option<AssetsConfig> = None;
-                let mut sound: Option<SoundConfig> = None;
-                let mut sim: Option<SimConfig> = None;
-                let mut lint: Option<LintConfig> = None;
-                let mut language: Option<LanguageConfig> = None;
-                let mut dependencies: HashMap<String, Dependency> = HashMap::new();
-                let mut source_groups: HashMap<String, SourceGroupConfig> = HashMap::new();
-                // Reject keys during deserialization so the parser attaches the key span.
-                while let Some(key) = map.next_key_seed(KeySeed)? {
-                    match key.as_str() {
-                        "package" => {
-                            package = Some(map.next_value()?);
-                        }
-                        "build" => {
-                            build = Some(map.next_value()?);
-                        }
-                        "release" => {
-                            release = Some(map.next_value()?);
-                        }
-                        "assets" => {
-                            assets = Some(map.next_value()?);
-                        }
-                        "lint" => {
-                            lint = Some(map.next_value()?);
-                        }
-                        "sim" => {
-                            sim = map.next_value()?;
-                        }
-                        "sound" => {
-                            sound = Some(map.next_value()?);
-                        }
-                        "native" => {
-                            native = map.next_value()?;
-                        }
-                        "language" => {
-                            language = map.next_value()?;
-                        }
-                        "dependencies" => {
-                            dependencies = map.next_value()?;
-                        }
-                        "source_groups" => {
-                            source_groups = map.next_value()?;
-                        }
-                        _ => unreachable!("validated top-level key"),
-                    }
-                }
-                let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig {
-                    package,
-                    native,
-                    build,
-                    release,
-                    assets,
-                    sound,
-                    sim,
-                    lint,
-                    language,
-                    dependencies,
-                    source_groups,
-                })
-            }
-        }
-        d.deserialize_map(Vis)
     }
 }
 
