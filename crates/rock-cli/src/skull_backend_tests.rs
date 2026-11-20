@@ -7,21 +7,18 @@ use std::time::Duration;
 
 #[test]
 fn source_fingerprint_support_files_follow_successful_live_compiles() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"),
-        "[package]\nname = \"fingerprint-watch\"\n[build.vars]\nREV = { source_fingerprint = { roots = [\"Root\"], files = [\"support.txt\"] } }\n").unwrap();
-    std::fs::write(
-        dir.path().join("main.rock"),
-        "value Root { count: int }\nfn main() { print(build_var(\"REV\")) }\n",
-    )
-    .unwrap();
-    let support = dir.path().join("support.txt");
-    std::fs::write(&support, "first decoder").unwrap();
-    let support = support.canonicalize().unwrap();
-    let main = dir.path().join("main.lua");
-    let overlay = dir.path().join("incremental.lua");
-    let mut project =
-        super::IncrementalProject::init(dir.path().to_str().unwrap(), &main, &overlay).unwrap();
+    let mut fx = ProjectFixture::boot_files(&[
+        (
+            "stick.toml",
+            "[package]\nname = \"fingerprint-watch\"\n[build.vars]\nREV = { source_fingerprint = { roots = [\"Root\"], files = [\"support.txt\"] } }\n",
+        ),
+        (
+            "main.rock",
+            "value Root { count: int }\nfn main() { print(build_var(\"REV\")) }\n",
+        ),
+        ("support.txt", "first decoder"),
+    ]);
+    let support = fx.path("support.txt").canonicalize().unwrap();
     let recorded_hash = |project: &super::IncrementalProject| {
         project
             .comptime_watch_files_with_hashes()
@@ -35,46 +32,38 @@ fn source_fingerprint_support_files_follow_successful_live_compiles() {
             .value
             .clone()
     };
-    let first_hash = recorded_hash(&project);
-    let first_revision = revision(&project);
+    let first_hash = recorded_hash(&fx.project);
+    let first_revision = revision(&fx.project);
     std::fs::write(&support, "second decoder").unwrap();
     assert_eq!(
-        recorded_hash(&project),
+        recorded_hash(&fx.project),
         first_hash,
         "watch seeding must describe compiled bytes, not reread current disk"
     );
     assert!(matches!(
-        project
-            .recompile(std::slice::from_ref(&support), &main, &overlay)
-            .unwrap(),
+        fx.recompile(std::slice::from_ref(&support)).unwrap(),
         super::SkullReload::Full { .. }
     ));
-    let second_hash = recorded_hash(&project);
-    let second_revision = revision(&project);
+    let second_hash = recorded_hash(&fx.project);
+    let second_revision = revision(&fx.project);
     assert_ne!(first_hash, second_hash);
     assert_ne!(first_revision, second_revision);
     std::fs::remove_file(&support).unwrap();
-    assert!(
-        project
-            .recompile(std::slice::from_ref(&support), &main, &overlay)
-            .is_err()
-    );
-    assert_eq!(recorded_hash(&project), second_hash);
-    assert_eq!(revision(&project), second_revision);
-    let manifest = dir.path().join("stick.toml");
-    std::fs::write(
-        &manifest,
+    assert!(fx.recompile(std::slice::from_ref(&support)).is_err());
+    assert_eq!(recorded_hash(&fx.project), second_hash);
+    assert_eq!(revision(&fx.project), second_revision);
+    fx.edit_files(&[(
+        "stick.toml",
         "[package]\nname = \"fingerprint-watch\"\n[build.vars]\nREV = \"fixed\"\n",
-    )
+    )])
     .unwrap();
-    project.recompile(&[manifest], &main, &overlay).unwrap();
     assert!(
-        project
+        fx.project
             .comptime_watch_files_with_hashes()
             .iter()
             .all(|(path, _)| path != &support)
     );
-    assert_eq!(revision(&project), "fixed");
+    assert_eq!(revision(&fx.project), "fixed");
 }
 
 #[test]
@@ -96,50 +85,56 @@ use overlay_test_support::*;
 
 struct ProjectFixture {
     dir: tempfile::TempDir,
-    root: String,
     project: super::IncrementalProject,
     main: std::path::PathBuf,
     incremental: std::path::PathBuf,
-    source: std::path::PathBuf,
 }
 
 impl ProjectFixture {
     fn boot(source_text: &str) -> Self {
-        Self::try_boot(source_text).expect("initial build")
+        Self::boot_files(&[("main.rock", source_text)])
     }
 
-    fn try_boot(source_text: &str) -> anyhow::Result<Self> {
-        Self::try_boot_with_manifest(None, source_text)
-    }
-
-    fn try_boot_with_manifest(manifest: Option<&str>, source_text: &str) -> anyhow::Result<Self> {
+    fn boot_files(files: &[(&str, &str)]) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        if let Some(manifest) = manifest {
-            std::fs::write(dir.path().join("stick.toml"), manifest).expect("stick.toml");
+        for (name, text) in files {
+            std::fs::write(dir.path().join(name), text).expect("initial fixture file");
         }
-        let root = dir.path().to_str().expect("tempdir path").to_string();
         let main = dir.path().join("main.lua");
         let incremental = dir.path().join("incremental.lua");
-        let source = dir.path().join("main.rock");
-        std::fs::write(&source, source_text).expect("initial source");
-        let project = super::IncrementalProject::init(&root, &main, &incremental)?;
-        Ok(Self {
+        let project =
+            super::IncrementalProject::init(dir.path().to_str().unwrap(), &main, &incremental)
+                .expect("initial build");
+        Self {
             dir,
-            root,
             project,
             main,
             incremental,
-            source,
-        })
+        }
+    }
+
+    fn path(&self, file: &str) -> std::path::PathBuf {
+        self.dir.path().join(file)
     }
 
     fn edit(&mut self, text: &str) -> anyhow::Result<super::SkullReload> {
-        std::fs::write(&self.source, text).expect("edited source");
-        self.project.recompile(
-            std::slice::from_ref(&self.source),
-            &self.main,
-            &self.incremental,
-        )
+        self.edit_files(&[("main.rock", text)])
+    }
+
+    fn edit_files(&mut self, files: &[(&str, &str)]) -> anyhow::Result<super::SkullReload> {
+        let paths = files
+            .iter()
+            .map(|(name, text)| {
+                let path = self.path(name);
+                std::fs::write(&path, text).expect("edited fixture file");
+                path
+            })
+            .collect::<Vec<_>>();
+        self.recompile(&paths)
+    }
+
+    fn recompile(&mut self, paths: &[std::path::PathBuf]) -> anyhow::Result<super::SkullReload> {
+        self.project.recompile(paths, &self.main, &self.incremental)
     }
 
     fn force_full(&mut self) -> anyhow::Result<()> {
@@ -176,21 +171,16 @@ fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
 #[cfg(test)]
 mod overlay_runtime_tests {
 
-    use super::super::{IncrementalProject, SkullReload};
-    use super::files;
+    use super::super::SkullReload;
     use super::{ExecOutcome, exec_lua, normalize_stdout};
+    use super::{ProjectFixture, files};
     use crate::bone_backend::bone_session;
-    use std::path::Path;
 
     use super::overlay_test_support::{SYS_STUB, run_parts, stub_for};
 
-    fn run_project_artifacts(
-        main_path: &Path,
-        incremental_path: &Path,
-        call_after_overlay: bool,
-    ) -> String {
-        let main = std::fs::read_to_string(main_path).expect("read generated main.lua");
-        let overlay = std::fs::read_to_string(incremental_path).unwrap_or_default();
+    fn run_project_artifacts(fx: &ProjectFixture, call_after_overlay: bool) -> String {
+        let main = fx.main_text();
+        let overlay = std::fs::read_to_string(&fx.incremental).unwrap_or_default();
         let tail = if call_after_overlay {
             "\nmain()\n"
         } else {
@@ -210,8 +200,9 @@ mod overlay_runtime_tests {
     fn run_production_body_overlay(manifest: Option<&str>) -> String {
         let v0 = "fn probe() -> int { static value = 1\n value = value + 1\n value }\nfn main() { print(probe()) }\n";
         let v1 = "fn probe() -> int { static value = 1\n value = value + 10\n value }\nfn main() { print(probe()) }\n";
-        let mut fx = super::ProjectFixture::try_boot_with_manifest(manifest, v0)
-            .expect("initial production build");
+        let mut files = vec![("main.rock", v0)];
+        files.extend(manifest.map(|text| ("stick.toml", text)));
+        let mut fx = ProjectFixture::boot_files(&files);
         assert!(
             !fx.incremental.exists(),
             "initial load must not leave an overlay"
@@ -226,7 +217,7 @@ mod overlay_runtime_tests {
             "body edit must write incremental.lua"
         );
 
-        run_project_artifacts(&fx.main, &fx.incremental, true)
+        run_project_artifacts(&fx, true)
     }
 
     #[test]
@@ -250,7 +241,7 @@ mod overlay_runtime_tests {
 
     #[test]
     fn production_reload_defines_an_own_function_an_edit_starts_calling() {
-        let mut fx = super::ProjectFixture::boot(
+        let mut fx = ProjectFixture::boot(
             "fn later(x: int) -> int { return x * 3 + 2 }\nfn main() { print(0) }\n",
         );
         assert!(
@@ -259,61 +250,36 @@ mod overlay_runtime_tests {
         );
         fx.edit("fn later(x: int) -> int { return x * 3 + 2 }\nfn main() { print(later(4)) }\n")
             .expect("recompile after the edit");
-        let out = run_project_artifacts(&fx.main, &fx.incremental, true);
+        let out = run_project_artifacts(&fx, true);
         assert_eq!(out.trim().lines().last(), Some("14"), "{out}");
     }
 
     #[test]
     fn production_v1_namespace_edit_takes_full_reload_and_runs_new_definition() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join("stick.toml"),
-            "[package]\nname = \"namespace-v1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
-        )
-        .expect("stick.toml");
-        let main_path = dir.path().join("main.lua");
-        let incremental_path = dir.path().join("incremental.lua");
-        let main_source = dir.path().join("main.rock");
-        let module_source = dir.path().join("a.rock");
-        std::fs::write(&main_source, "fn main() { print(a::bump(2)) }\n")
-            .expect("initial main source");
-        std::fs::write(
-            &module_source,
-            "mod a;\npub fn bump(n: int) -> int { n + 1 }\n",
-        )
-        .expect("initial module source");
-        let mut project = IncrementalProject::init(
-            dir.path().to_str().expect("tempdir path"),
-            &main_path,
-            &incremental_path,
-        )
-        .expect("initial v1 namespace build");
-        let baseline = run_project_artifacts(&main_path, &incremental_path, false);
+        let mut fx = ProjectFixture::boot_files(&[
+            (
+                "stick.toml",
+                "[package]\nname = \"namespace-v1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+            ),
+            ("main.rock", "fn main() { print(a::bump(2)) }\n"),
+            ("a.rock", "mod a;\npub fn bump(n: int) -> int { n + 1 }\n"),
+        ]);
+        let baseline = run_project_artifacts(&fx, false);
         assert_eq!(baseline.trim(), "3");
 
-        std::fs::write(&main_source, "fn main() { print(a::twice(3)) }\n")
-            .expect("edited main source");
-        std::fs::write(
-            &module_source,
-            "mod a;\npub fn bump(n: int) -> int { n + 1 }\npub fn twice(n: int) -> int { n * 2 }\n",
-        )
-        .expect("edited module source");
-        let reload = project
-            .recompile(
-                &[module_source.clone(), main_source.clone()],
-                &main_path,
-                &incremental_path,
-            )
-            .expect("namespace edit through production recompile");
+        let reload = fx.edit_files(&[
+            ("a.rock", "mod a;\npub fn bump(n: int) -> int { n + 1 }\npub fn twice(n: int) -> int { n * 2 }\n"),
+            ("main.rock", "fn main() { print(a::twice(3)) }\n"),
+        ]).expect("namespace edit through production recompile");
         assert!(
             matches!(reload, SkullReload::Full { .. }),
             "a namespace-affecting edit must publish the supported full path, got {reload:?}"
         );
         assert!(
-            !incremental_path.exists(),
+            !fx.incremental.exists(),
             "full namespace reload must wipe the overlay"
         );
-        let updated = run_project_artifacts(&main_path, &incremental_path, false);
+        let updated = run_project_artifacts(&fx, false);
         assert_eq!(
             updated.trim(),
             "6",
@@ -1374,7 +1340,7 @@ fn main() {}
         }
         assert_eq!(fx.main_text(), baseline);
         assert_eq!(
-            fx.project.source_text(&fx.source).as_deref(),
+            fx.project.source_text(&fx.path("main.rock")).as_deref(),
             Some(removed.as_str()),
             "the current source may remain restart-pending while the published artifact stays old"
         );
@@ -1420,10 +1386,11 @@ mod force_full_tests {
             "force_full must fold the v2 edit into main.lua, not serve the stale v1 baseline"
         );
 
-        let fresh_main = fx.dir.path().join("fresh_main.lua");
-        let fresh_inc = fx.dir.path().join("fresh_incremental.lua");
+        let fresh_main = fx.path("fresh_main.lua");
+        let fresh_inc = fx.path("fresh_incremental.lua");
         let fresh =
-            IncrementalProject::init(&fx.root, &fresh_main, &fresh_inc).expect("fresh init v2");
+            IncrementalProject::init(fx.dir.path().to_str().unwrap(), &fresh_main, &fresh_inc)
+                .expect("fresh init v2");
         let main_fresh = std::fs::read_to_string(&fresh_main).expect("fresh main.lua");
         assert_eq!(
             main_forced, main_fresh,
@@ -1499,6 +1466,7 @@ mod incremental_lint_snapshot_tests {
         let v3 =
             "fn helper() -> int { 3 }\nfn other() -> int { 11 }\nfn main() { print(other()) }\n";
         let mut fx = ProjectFixture::boot(v1);
+        let source = fx.path("main.rock");
         if fx.incremental.is_file() {
             std::fs::remove_file(&fx.incremental).expect("initial overlay");
         }
@@ -1506,16 +1474,16 @@ mod incremental_lint_snapshot_tests {
 
         assert!(
             fx.project
-                .apply_edit(&fx.source, v2, &fx.main, &fx.incremental)
+                .apply_edit(&source, v2, &fx.main, &fx.incremental)
                 .is_err(),
             "a body publication to a directory must fail"
         );
-        assert_eq!(fx.project.source_text(&fx.source).as_deref(), Some(v1));
+        assert_eq!(fx.project.source_text(&source).as_deref(), Some(v1));
 
         std::fs::remove_dir(&fx.incremental).expect("unblock overlay");
         let reload = fx
             .project
-            .apply_edit(&fx.source, v3, &fx.main, &fx.incremental)
+            .apply_edit(&source, v3, &fx.main, &fx.incremental)
             .expect("next body edit");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
@@ -2051,40 +2019,14 @@ fn plain_luajit_without_runtime_layout() {
 #[cfg(test)]
 mod watch_route_tests {
 
-    use super::super::{IncrementalProject, SkullReload};
+    use super::super::SkullReload;
     use super::{ExecOutcome, ProjectFixture, exec_lua};
-    use std::path::Path;
 
     fn run(program: &str) -> String {
         match exec_lua(program) {
             ExecOutcome::Output(output) => output,
             ExecOutcome::Errored(error) => panic!("{error}\n--- program ---\n{program}"),
         }
-    }
-
-    fn boot_files(files: &[(&str, &str)]) -> (tempfile::TempDir, IncrementalProject) {
-        let dir = tempfile::tempdir().unwrap();
-        for (name, text) in files {
-            std::fs::write(dir.path().join(name), text).unwrap();
-        }
-        let project = IncrementalProject::init(
-            dir.path().to_str().unwrap(),
-            &dir.path().join("main.lua"),
-            &dir.path().join("incremental.lua"),
-        )
-        .expect("initial build");
-        (dir, project)
-    }
-
-    fn recompile(dir: &Path, project: &mut IncrementalProject, file: &str) -> SkullReload {
-        let path = dir.join(file);
-        project
-            .recompile(
-                std::slice::from_ref(&path),
-                &dir.join("main.lua"),
-                &dir.join("incremental.lua"),
-            )
-            .expect("recompile")
     }
 
     #[test]
@@ -2114,7 +2056,7 @@ mod watch_route_tests {
                       fn apply<T>(value: T, callback: fn(T) -> T) -> T { callback(value) }\n\
                       @nomangle fn bump() { SCORE = SCORE + 1 }\n\
                       @nomangle fn invoke() -> int { apply(7, unchanged) }\n";
-        let (dir, mut project) = boot_files(&[
+        let mut fx = ProjectFixture::boot_files(&[
             ("stick.toml", "[package]\nname = \"callbackwatch\"\n"),
             ("caller.rock", caller),
             (
@@ -2122,18 +2064,18 @@ mod watch_route_tests {
                 "fn unchanged(value: int) -> int { value + 3 }\n",
             ),
         ]);
-        let before = std::fs::read_to_string(dir.path().join("main.lua")).unwrap();
-        std::fs::write(
-            dir.path().join("caller.rock"),
-            caller.replace("apply(7, unchanged)", "apply(17, unchanged)"),
-        )
-        .unwrap();
-        let reload = recompile(dir.path(), &mut project, "caller.rock");
+        let before = fx.main_text();
+        let reload = fx
+            .edit_files(&[(
+                "caller.rock",
+                &caller.replace("apply(7, unchanged)", "apply(17, unchanged)"),
+            )])
+            .unwrap();
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "{reload:?}"
         );
-        let after = std::fs::read_to_string(dir.path().join("incremental.lua")).unwrap();
+        let after = fx.overlay_text();
         let script = format!(
             "_G.HOT_RELOAD = false\n{before}\nassert(invoke() == 10)\nbump()\n\
              _G.HOT_RELOAD = true\n{after}\n_G.HOT_RELOAD = false\n\
@@ -2163,7 +2105,7 @@ mod watch_route_tests {
 
     #[test]
     fn a_global_initializer_embed_is_watched_and_rebuilt() {
-        let (dir, mut project) = boot_files(&[
+        let mut fx = ProjectFixture::boot_files(&[
             ("stick.toml", "[package]\nname = \"globalembedwatch\"\n"),
             (
                 "main.rock",
@@ -2171,17 +2113,16 @@ mod watch_route_tests {
             ),
             ("banner.txt", "global-embed-v1"),
         ]);
-        let banner = dir.path().join("banner.txt").canonicalize().unwrap();
+        let banner = fx.path("banner.txt").canonicalize().unwrap();
         assert!(
-            project
+            fx.project
                 .comptime_watch_files_with_hashes()
                 .iter()
                 .any(|(path, _)| path == &banner)
         );
-        std::fs::write(&banner, "global-embed-v2").unwrap();
-        let reload = recompile(dir.path(), &mut project, "banner.txt");
+        let reload = fx.edit_files(&[("banner.txt", "global-embed-v2")]).unwrap();
         assert!(matches!(reload, SkullReload::Full { .. }), "{reload:?}");
-        let main = std::fs::read_to_string(dir.path().join("main.lua")).unwrap();
+        let main = fx.main_text();
         assert!(main.contains("global-embed-v2") && !main.contains("global-embed-v1"));
     }
 
@@ -2197,9 +2138,8 @@ mod watch_route_tests {
                       @shutdown\nfn cleanup() {}\n\
                       @sim\nco fn dummy_sim() -> Coroutine<Wait> {\n  yield wait_frame()\n}\n\
                       fn main() {}\n";
-        let (dir, _project) = boot_files(&[("stick.toml", manifest), ("main.rock", source)]);
-        let main_lua = dir.path().join("main.lua");
-        let text = std::fs::read_to_string(&main_lua).unwrap();
+        let fx = ProjectFixture::boot_files(&[("stick.toml", manifest), ("main.rock", source)]);
+        let text = fx.main_text();
         let clears: Vec<&str> = text
             .lines()
             .filter_map(|line| {
@@ -2230,11 +2170,11 @@ mod watch_route_tests {
              assert(shutdowns() == plan, 'reload keeps one plan')\n\
              assert(sims() == 1, 'reload registers the sim once')\n\
              print('PASS')\n",
-            path = main_lua.display().to_string(),
+            path = fx.main.display().to_string(),
             clear = clears[0],
         );
         // Stone's program is too large for the piped-stdin runner.
-        let script_path = dir.path().join("reload_clear.lua");
+        let script_path = fx.path("reload_clear.lua");
         std::fs::write(&script_path, script).unwrap();
         let output = std::process::Command::new(rock_engine_host::runtime::luajit_path())
             .arg(&script_path)
