@@ -435,7 +435,7 @@ fn the_classed_pool_caps_live_capped_tasks_and_runs_everything_once() {
     let renders: Vec<bool> = (0..40).map(|i| i % 3 == 0).collect();
     let live = AtomicUsize::new(0);
     let peak = AtomicUsize::new(0);
-    let results = run_bounded_classed(&PoolWidth::fixed(8), 2, &renders, |i| {
+    let results = SimPool::new(8, renders.len(), 2, &renders, false).run(|i| {
         if renders[i] {
             let now = live.fetch_add(1, Ordering::SeqCst) + 1;
             peak.fetch_max(now, Ordering::SeqCst);
@@ -463,19 +463,38 @@ fn the_classed_pool_caps_live_capped_tasks_and_runs_everything_once() {
 }
 
 #[test]
-fn the_pool_takes_the_reload_lanes_slot_back_when_the_lane_finishes() {
-    let capped: Vec<bool> = (0..60).map(|i| i % 4 == 0).collect();
-    reload_lane_slot_returns(|width, task| run_bounded(width, 60, task));
-    reload_lane_slot_returns(|width, task| run_bounded_classed(width, 1, &capped, task));
+fn a_panicking_sim_releases_its_full_asset_slot() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (finished, outcome) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let second_ran = AtomicBool::new(false);
+        let panic = std::panic::catch_unwind(|| {
+            SimPool::new(2, 2, 1, &[true; 2], false).run(|i| {
+                assert_ne!(i, 0, "worker panic");
+                second_ran.store(true, Ordering::Relaxed);
+            });
+        });
+        finished
+            .send((panic.is_err(), second_ran.into_inner()))
+            .unwrap();
+    });
+    assert_eq!(
+        outcome
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("a panicking worker must release the slot so the pool can finish"),
+        (true, true)
+    );
 }
 
-fn reload_lane_slot_returns(
-    pool: impl FnOnce(
-        &PoolWidth,
-        &(dyn Fn(usize) -> Result<usize> + Sync),
-    ) -> Vec<(usize, Result<usize>)>
-    + Send,
-) {
+#[test]
+fn the_pool_takes_the_reload_lanes_slot_back_when_the_lane_finishes() {
+    let capped: Vec<bool> = (0..60).map(|i| i % 4 == 0).collect();
+    reload_lane_slot_returns(3, &[]);
+    reload_lane_slot_returns(1, &capped);
+}
+
+fn reload_lane_slot_returns(full_asset_jobs: usize, full: &[bool]) {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let deadline = rock_core::clock::Instant::now() + test_utils::HANG_BACKSTOP;
     let wait_for = |done: &dyn Fn() -> bool| {
@@ -499,16 +518,11 @@ fn reload_lane_slot_returns(
         live.fetch_sub(1, Ordering::SeqCst);
         Ok::<usize, anyhow::Error>(i)
     };
-    let (pool, ()) = beside_reload_lane(
-        3,
-        true,
-        |width| pool(width, &task),
-        || {
-            wait_for(&|| live.load(Ordering::SeqCst) >= 2);
-            std::thread::sleep(std::time::Duration::from_millis(40));
-            lane_done.store(true, Ordering::SeqCst);
-        },
-    );
+    let (pool, ()) = SimPool::new(3, 60, full_asset_jobs, full, true).beside_reload(task, || {
+        wait_for(&|| live.load(Ordering::SeqCst) >= 2);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        lane_done.store(true, Ordering::SeqCst);
+    });
     assert_eq!(pool.len(), 60, "every task exactly once");
     assert_eq!(
         peak_beside_lane.load(Ordering::SeqCst),

@@ -1363,20 +1363,18 @@ impl SimRun<'_> {
             Ok((display_name, summary))
         };
 
-        let (pool, lane) = beside_reload_lane(
+        let pool = SimPool::new(
             jobs,
+            dispatch.len(),
+            asset_cap,
+            &full_assets,
             !reload_idx.is_empty(),
-            |width| {
-                let task = |k| run_at(dispatch[k], None);
-                if asset_cap < jobs {
-                    run_bounded_classed(width, asset_cap, &full_assets, task)
-                } else {
-                    run_bounded(width, dispatch.len(), task)
-                }
-            },
+        );
+        let (completed, lane) = pool.beside_reload(
+            |k| run_at(dispatch[k], None),
             || run_reload_lane_serially(reload_lane, &reload_idx, |i, lane| run_at(i, Some(lane))),
         );
-        let mut results: HashMap<_, _> = pool
+        let mut results: HashMap<_, _> = completed
             .into_iter()
             .map(|(k, result)| (dispatch[k], result))
             .collect();
@@ -1413,96 +1411,146 @@ fn print_record(display_name: &str, summary: &SimSummary, streamed: bool) {
     summary.print(display_name, streamed);
 }
 
-fn run_bounded<T, F>(width: &PoolWidth, n: usize, task: F) -> Vec<(usize, Result<T>)>
-where
-    F: Fn(usize) -> Result<T> + Sync,
-    T: Send,
-{
-    if width.jobs <= 1 || n <= 1 {
-        return (0..n).map(|i| (i, task(i))).collect();
-    }
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    run_pool(width, n, || {
-        let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        (i < n).then(|| (i, task(i)))
-    })
-}
-
-fn run_pool<T: Send>(
-    width: &PoolWidth,
-    n: usize,
-    run_next: impl Fn() -> Option<T> + Sync,
-) -> Vec<T> {
-    let collected = Mutex::new(Vec::with_capacity(n));
-    std::thread::scope(|scope| {
-        for _ in 0..width.jobs.min(n) {
-            scope.spawn(|| {
-                loop {
-                    let _slot = width.enter();
-                    let Some(result) = run_next() else { break };
-                    collected.lock().unwrap().push(result);
-                }
-            });
-        }
-    });
-    collected
-        .into_inner()
-        .expect("no lane panicked while holding the results lock")
-}
-
-struct PoolWidth {
+struct SimPool {
+    workers: usize,
     jobs: usize,
-    slots: Mutex<(usize, usize)>,
+    full_asset_jobs: usize,
+    reload_reserved: bool,
+    queue: Mutex<SimQueue>,
     changed: std::sync::Condvar,
 }
 
-impl PoolWidth {
-    fn fixed(jobs: usize) -> Self {
-        Self::starting_at(jobs, jobs)
-    }
+struct SimQueue {
+    limit: usize,
+    active: usize,
+    full_asset_active: usize,
+    full: VecDeque<usize>,
+    other: VecDeque<usize>,
+}
 
-    fn starting_at(jobs: usize, width: usize) -> Self {
+impl SimPool {
+    fn new(
+        jobs: usize,
+        count: usize,
+        full_asset_jobs: usize,
+        full: &[bool],
+        reload_reserved: bool,
+    ) -> Self {
         let jobs = jobs.max(1);
+        let workers = jobs.min(count);
+        let mut queue = SimQueue {
+            limit: jobs.saturating_sub(usize::from(reload_reserved)).max(1),
+            active: 0,
+            full_asset_active: 0,
+            full: VecDeque::new(),
+            other: VecDeque::new(),
+        };
+        if workers <= 1 || full_asset_jobs >= jobs {
+            queue.other.extend(0..count);
+        } else {
+            assert_eq!(full.len(), count);
+            for (i, &full_asset) in full.iter().enumerate() {
+                let pending = if full_asset {
+                    &mut queue.full
+                } else {
+                    &mut queue.other
+                };
+                pending.push_back(i);
+            }
+        }
         Self {
+            workers,
             jobs,
-            slots: Mutex::new((width.clamp(1, jobs), 0)),
+            full_asset_jobs,
+            reload_reserved,
+            queue: Mutex::new(queue),
             changed: std::sync::Condvar::new(),
         }
     }
 
-    fn widen_to_jobs(&self) {
-        self.slots.lock().unwrap().0 = self.jobs;
-        self.changed.notify_all();
-    }
-
-    fn enter(&self) -> PoolSlot<'_> {
-        self.acquire();
-        PoolSlot(self)
-    }
-
-    fn acquire(&self) {
-        let mut slots = self.slots.lock().unwrap();
-        while slots.1 >= slots.0 {
-            slots = self.changed.wait(slots).unwrap();
+    fn next(&self) -> Option<SimSlot<'_>> {
+        let mut queue = self.queue.lock().unwrap();
+        loop {
+            if queue.full.is_empty() && queue.other.is_empty() {
+                return None;
+            }
+            if queue.active < queue.limit {
+                let full = if queue.full_asset_active < self.full_asset_jobs {
+                    queue.full.pop_front()
+                } else {
+                    None
+                };
+                if let Some(index) = full.or_else(|| queue.other.pop_front()) {
+                    queue.active += 1;
+                    queue.full_asset_active += usize::from(full.is_some());
+                    return Some(SimSlot {
+                        pool: self,
+                        index,
+                        full: full.is_some(),
+                    });
+                }
+            }
+            queue = self.changed.wait(queue).unwrap();
         }
-        slots.1 += 1;
     }
 
-    fn release(&self) {
-        // A poisoned count accompanies a task panic, which the joining scope
-        // re-raises. Wake other waiters even during teardown.
-        if let Ok(mut slots) = self.slots.lock() {
-            slots.1 -= 1;
+    fn run<T: Send>(&self, task: impl Fn(usize) -> T + Sync) -> Vec<(usize, T)> {
+        let drain = || {
+            std::iter::from_fn(|| self.next())
+                .map(|slot| (slot.index, task(slot.index)))
+                .collect::<Vec<_>>()
+        };
+        if self.workers <= 1 {
+            return drain();
         }
-        self.changed.notify_all();
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..self.workers).map(|_| scope.spawn(drain)).collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| {
+                    worker
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect()
+        })
+    }
+
+    fn beside_reload<T: Send, R>(
+        &self,
+        task: impl Fn(usize) -> T + Sync,
+        lane: impl FnOnce() -> R,
+    ) -> (Vec<(usize, T)>, R) {
+        if !self.reload_reserved {
+            return (self.run(task), lane());
+        }
+        std::thread::scope(|scope| {
+            let pool = scope.spawn(|| self.run(&task));
+            let lane = lane();
+            self.queue.lock().unwrap().limit = self.jobs;
+            self.changed.notify_all();
+            (
+                pool.join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                lane,
+            )
+        })
     }
 }
 
-struct PoolSlot<'a>(&'a PoolWidth);
+struct SimSlot<'a> {
+    pool: &'a SimPool,
+    index: usize,
+    full: bool,
+}
 
-impl Drop for PoolSlot<'_> {
+impl Drop for SimSlot<'_> {
     fn drop(&mut self) {
-        self.0.release();
+        let mut queue = self.pool.queue.lock().unwrap();
+        queue.active -= 1;
+        queue.full_asset_active -= usize::from(self.full);
+        drop(queue);
+        self.pool.changed.notify_all();
     }
 }
 
@@ -1512,106 +1560,23 @@ fn longest_first(estimates: &[Option<u64>]) -> Vec<usize> {
     order
 }
 
-fn beside_reload_lane<A, B>(
-    jobs: usize,
-    lane_has_work: bool,
-    pool: impl FnOnce(&PoolWidth) -> A + Send,
-    lane: impl FnOnce() -> B,
-) -> (A, B)
-where
-    A: Send,
-{
-    if !lane_has_work {
-        return (pool(&PoolWidth::fixed(jobs)), lane());
-    }
-    let width = PoolWidth::starting_at(jobs, jobs.saturating_sub(1));
-    std::thread::scope(|scope| {
-        let pool = scope.spawn(|| pool(&width));
-        let lane = lane();
-        width.widen_to_jobs();
-        let pool = pool
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        (pool, lane)
-    })
-}
-
 fn run_reload_lane_serially<T>(
-    lane: Option<&mut ReloadLaneSession>,
+    mut lane: Option<&mut ReloadLaneSession>,
     indices: &[usize],
     mut run: impl FnMut(usize, (&mut crate::skull_backend::IncrementalProject, &str)) -> Result<T>,
 ) -> Vec<(usize, Result<T>)> {
-    let Some(lane) = lane else {
-        return indices
-            .iter()
-            .map(|&i| {
-                (
-                    i,
-                    Err(anyhow!(
-                        "reload entry {i} was selected without a lane session"
-                    )),
-                )
-            })
-            .collect();
-    };
     indices
         .iter()
-        .map(|&i| (i, run(i, (&mut lane.stone, lane.output.as_str()))))
+        .map(|&i| {
+            let result = match lane.as_deref_mut() {
+                Some(lane) => run(i, (&mut lane.stone, lane.output.as_str())),
+                None => Err(anyhow!(
+                    "reload entry {i} was selected without a lane session"
+                )),
+            };
+            (i, result)
+        })
         .collect()
-}
-
-fn run_bounded_classed<T, F>(
-    width: &PoolWidth,
-    capped_jobs: usize,
-    capped: &[bool],
-    task: F,
-) -> Vec<(usize, Result<T>)>
-where
-    F: Fn(usize) -> Result<T> + Sync,
-    T: Send,
-{
-    let n = capped.len();
-    let jobs = width.jobs;
-    if jobs <= 1 || n <= 1 || capped_jobs >= jobs {
-        return run_bounded(width, n, task);
-    }
-    struct Queue {
-        capped: std::collections::VecDeque<usize>,
-        other: std::collections::VecDeque<usize>,
-        live_capped: usize,
-    }
-    let queue = Mutex::new(Queue {
-        capped: (0..n).filter(|&i| capped[i]).collect(),
-        other: (0..n).filter(|&i| !capped[i]).collect(),
-        live_capped: 0,
-    });
-    let freed = std::sync::Condvar::new();
-    run_pool(width, n, || {
-        let (i, is_capped) = {
-            let mut q = queue.lock().unwrap();
-            loop {
-                if q.live_capped < capped_jobs {
-                    if let Some(i) = q.capped.pop_front() {
-                        q.live_capped += 1;
-                        break (i, true);
-                    }
-                }
-                if let Some(i) = q.other.pop_front() {
-                    break (i, false);
-                }
-                if q.capped.is_empty() {
-                    return None;
-                }
-                q = freed.wait(q).unwrap();
-            }
-        };
-        let result = task(i);
-        if is_capped {
-            queue.lock().unwrap().live_capped -= 1;
-            freed.notify_all();
-        }
-        Some((i, result))
-    })
 }
 
 const DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES: usize = 2;
