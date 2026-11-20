@@ -48,6 +48,7 @@ mod js_runner;
 pub mod js_test;
 mod lint_cmd;
 pub(crate) mod lint_pass;
+pub mod lint_union;
 pub mod live_project;
 mod lsp_survey;
 mod package_test_sources;

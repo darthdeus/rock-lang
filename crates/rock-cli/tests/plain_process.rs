@@ -484,6 +484,41 @@ type = "bin"
 }
 
 #[test]
+fn plain_scan_assigns_no_archive_semantics() {
+    let root = tempfile::tempdir().unwrap();
+    let projects = [
+        root.path().join("games/live"),
+        root.path().join("games/archived/past"),
+    ];
+    for (index, project) in projects.iter().enumerate() {
+        std::fs::create_dir_all(project).unwrap();
+        std::fs::write(
+            project.join("stick.toml"),
+            format!("[package]\nname = \"project{index}\"\ntype = \"bin\"\n"),
+        )
+        .unwrap();
+    }
+    let mut expected = projects.to_vec();
+    expected.sort();
+    assert_eq!(
+        rock_cli::lint_union::bin_projects_under(root.path()).unwrap(),
+        expected
+    );
+    assert_eq!(
+        rock_cli::lint_union::bin_projects_under(&projects[1]).unwrap(),
+        vec![projects[1].clone()]
+    );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(".", root.path().join("cycle")).unwrap();
+        assert_eq!(
+            rock_cli::lint_union::bin_projects_under(root.path()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn plain_writes_an_invocation_log_only_where_rock_invocation_log_names() {
     let root = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
