@@ -2249,6 +2249,7 @@ const EPSILON: float = 0.0000001
         return "\"" .. v .. "\""
     elseif vt == "number" then
         if precision >= 0 and v ~= math.floor(v) then
+            if v < 1e-100 and v > -1e-100 then v = v * 0 end
             return string.format("%." .. precision .. "f", v)
         end
         return tostring(v)
@@ -2512,6 +2513,7 @@ const EPSILON: float = 0.0000001
         if obj_type == "string" then
             return "\"" .. obj .. "\""
         elseif obj_type == "number" and precision >= 0 and obj ~= math.floor(obj) then
+            if obj < 1e-100 and obj > -1e-100 then obj = obj * 0 end
             return string.format("%." .. precision .. "f", obj)
         else
             return tostring(obj)
@@ -3725,6 +3727,9 @@ inline(lua) fn le(a: string, b: string) -> bool = "return a <= b"
 }
 
 @intrinsic inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
+    -- LuaJIT's %f prints garbage digits below about 1e-152; every valid
+    -- precision rounds these magnitudes to a signed zero.
+    if v < 1e-100 and v > -1e-100 then v = v * 0 end
     local r = string.format("%" .. tostring(width) .. "." .. tostring(decimals) .. "f", v)
     return r
 """

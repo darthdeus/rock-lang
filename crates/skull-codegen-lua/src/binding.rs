@@ -77,6 +77,11 @@ pub fn callee_binding_plan(
             {
                 captures.push(skull_mir::names::ustr(U32_SHIFT_COUNT));
             }
+            Inst::Format { .. } | Inst::FormatDyn { .. }
+                if crate::value::fixed_point_format(func, inst) =>
+            {
+                captures.push(skull_mir::names::ustr(FIXED_POINT));
+            }
             _ => {}
         }
         let callee = match inst {
@@ -135,7 +140,12 @@ pub fn callee_binding_plan(
         .map(|capture| {
             // Runtime helper calls are printed directly, so their captures
             // retain the original spelling.
-            if preserve_names || matches!(capture.as_str(), CHECKED_U32 | U32_SHIFT_COUNT) {
+            if preserve_names
+                || matches!(
+                    capture.as_str(),
+                    CHECKED_U32 | U32_SHIFT_COUNT | FIXED_POINT
+                )
+            {
                 return (capture, capture);
             }
             loop {
@@ -161,6 +171,7 @@ pub fn callee_binding_plan(
 
 const CHECKED_U32: &str = "__rock_checked_u32";
 const U32_SHIFT_COUNT: &str = "__rock_u32_shift_count";
+pub(crate) const FIXED_POINT: &str = "__rock_fixed_point";
 
 /// The words of a Lua text spelled like a factory alias (`b<N>`), strings and
 /// comments included: a name to avoid needs no exact tokenizer.

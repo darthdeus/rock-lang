@@ -1,4 +1,5 @@
-/// Shared validation for numeric uint conversions and shift counts.
+/// Runtime helpers that emitted bodies call by name: numeric uint validation
+/// and the fixed-point format argument.
 pub const UINT_CHECK_PRELUDE: &str = r#"
 function __rock_checked_u32(value)
   if value >= 0 and value <= 4294967295 then
@@ -9,6 +10,12 @@ function __rock_checked_u32(value)
 end
 function __rock_u32_shift_count(count)
   if count <= 31 then return count else error('uint shift count out of range') end
+end
+-- LuaJIT's %f prints garbage digits below about 1e-152; every valid
+-- precision rounds these magnitudes to a signed zero.
+function __rock_fixed_point(value)
+  if value < 1e-100 and value > -1e-100 then return value * 0 end
+  return value
 end
 "#;
 

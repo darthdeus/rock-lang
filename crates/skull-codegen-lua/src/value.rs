@@ -81,11 +81,15 @@ impl Emitter<'_> {
                 out.push_str("string.format(");
                 write_lua_string(out, fmt.as_str());
                 out.push_str(", ");
-                self.write_opnd(out, *value);
+                self.write_format_arg(out, inst, *value);
                 out.push(')');
             }
             Inst::FormatDyn { value, fmt } => {
-                self.write_builtin_call(out, "string.format", &[*fmt, *value]);
+                out.push_str("string.format(");
+                self.write_opnd(out, *fmt);
+                out.push_str(", ");
+                self.write_format_arg(out, inst, *value);
+                out.push(')');
             }
             Inst::FloatToInt(x) => self.write_builtin_call(out, "math.floor", &[*x]),
             // These LuaJIT identity conversions must reference their operand:
@@ -427,6 +431,17 @@ impl Emitter<'_> {
         out.push_str("__rock_code_slot_ref(");
         write_lua_string(out, &identity.logical_key(self.ws, self.interner));
         out.push(')');
+    }
+
+    /// LuaJIT's `%f` prints garbage digits below about 1e-152. Every valid
+    /// precision (at most 99) rounds a magnitude under 1e-100 to zero, so the
+    /// argument becomes a zero of the same sign.
+    fn write_format_arg(&self, out: &mut String, format: &Inst, value: Idx<Inst>) {
+        if fixed_point_format(self.func, format) {
+            self.write_builtin_call(out, crate::binding::FIXED_POINT, &[value]);
+        } else {
+            self.write_opnd(out, value);
+        }
     }
 
     fn write_bin(&self, out: &mut String, op: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
@@ -803,4 +818,29 @@ fn constant_bits(func: &MirFunc, inline: &[bool], id: Idx<Inst>) -> Option<Lit> 
             Lit::Int(i64::from(value as i32))
         },
     )
+}
+
+/// Whether a `Format`/`FormatDyn` ends in an `f`/`F` conversion; a dynamic
+/// specifier concatenates its pieces with the conversion last.
+pub(crate) fn fixed_point_format(func: &MirFunc, format: &Inst) -> bool {
+    let (Inst::Format { value, .. } | Inst::FormatDyn { value, .. }) = format else {
+        return false;
+    };
+    match func.insts[*value] {
+        Inst::Const(Lit::Int(_) | Lit::Uint(_)) => return false,
+        Inst::Const(Lit::Float(x)) if x.abs() >= 1e-100 || x.is_nan() => return false,
+        _ => {}
+    }
+    let mut fmt = match format {
+        Inst::Format { fmt, .. } => return fmt.ends_with(['f', 'F']),
+        Inst::FormatDyn { fmt, .. } => *fmt,
+        _ => return false,
+    };
+    loop {
+        match &func.insts[fmt] {
+            Inst::StringConcat(_, last) => fmt = *last,
+            Inst::Const(Lit::Str(s)) => return s.ends_with(['f', 'F']),
+            _ => return false,
+        }
+    }
 }

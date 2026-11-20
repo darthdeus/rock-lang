@@ -180,5 +180,7 @@ fn __char_units(b0: int, cp: int) -> int {
 @intrinsic inline(lua) fn __rock_fmt_percent(v: float, p: int) -> string = """
     local __p = p
     if __p < 0 then __p = 6 end
-    return string.format("%." .. __p .. "f", v * 100) .. "%"
+    local scaled = v * 100
+    if scaled < 1e-100 and scaled > -1e-100 then scaled = scaled * 0 end
+    return string.format("%." .. __p .. "f", scaled) .. "%"
 """
