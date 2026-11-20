@@ -1,8 +1,8 @@
 //! Context-coverage sweep: completion, hover and goto-definition in every syntactic context.
 
 use crate::completion::{complete_in, cursor, label_matches, labels_of};
-use bone_query::BoneWorkspace;
-use lsp_types::{HoverContents, Position};
+use crate::fixture::{hover_markup, workspace_at};
+use lsp_types::Position;
 
 #[cfg(not(windows))]
 const PATH: &str = "/tmp/rock_lsp_sweep.rock";
@@ -14,9 +14,40 @@ const PREAMBLE: &str = "global MARKER: int = 0\n\
      struct MarkerS { f: int }\n\
      enum MarkerE { AAA, BBB }\n";
 
-/// The preamble plus `body`, and the position of `body`'s cursor marker.
-fn fixture(body: &str) -> (String, Position) {
-    cursor(&format!("{PREAMBLE}{body}"))
+const CALL_CONTEXTS: &[(&str, &str)] = &[
+    ("statement", "fn f() {\n  <expr>\n}\n"),
+    ("call arg", "fn g(x: int) {}\nfn f() {\n  g(<expr>)\n}\n"),
+    ("array element", "fn f() {\n  let xs = [<expr>]\n}\n"),
+    ("lambda body", "fn f() {\n  let g = () => <expr>\n}\n"),
+];
+
+const VALUE_CONTEXTS: &[(&str, &str)] = &[
+    ("return value", "fn f() -> int {\n  return <expr>\n}\n"),
+    ("let value", "fn f() {\n  let a = <expr>\n}\n"),
+    ("binary operand", "fn f() {\n  let a = 1 + <expr>\n}\n"),
+    (
+        "match arm body",
+        "fn f(e: MarkerE) {\n  match e {\n    MarkerE::AAA => <expr>\n  }\n}\n",
+    ),
+    (
+        "if-expr branch value",
+        "fn f() {\n  let a = if true { <expr> } else { 0 }\n}\n",
+    ),
+];
+
+const NESTED_CONTEXTS: &[(&str, &str)] = &[
+    (
+        "struct field value",
+        "struct B { n: int }\nfn f() {\n  let s = B { n: <expr> }\n}\n",
+    ),
+    (
+        "lambda in struct-lit in array global-init",
+        "struct P { get: fn() -> int }\nglobal PANELS: [P] = [\n  P { get: () => <expr> }\n]\n",
+    ),
+];
+
+fn fixture(body: &str, expression: &str) -> String {
+    format!("{PREAMBLE}{}", body.replace("<expr>", expression))
 }
 
 fn report(what: &str, fails: Vec<String>) {
@@ -32,13 +63,8 @@ fn completion_context_sweep() {
     // Expression contexts share the same global; type/member contexts below
     // select the symbol appropriate to that slot.
     let expressions = [
-        ("statement", "fn f() {\n  mar<|>\n}\n"),
-        ("return value", "fn f() -> int {\n  return mar<|>\n}\n"),
-        ("let value", "fn f() {\n  let a = mar<|>\n}\n"),
         ("if condition", "fn f() {\n  if mar<|> {}\n}\n"),
         ("while condition", "fn f() {\n  while mar<|> {}\n}\n"),
-        ("binary operand", "fn f() {\n  let a = 1 + mar<|>\n}\n"),
-        ("call arg", "fn g(x: int) {}\nfn f() {\n  g(mar<|>)\n}\n"),
         (
             "second call arg",
             "fn g(x: int, y: int) {}\nfn f() {\n  g(1, mar<|>)\n}\n",
@@ -47,7 +73,6 @@ fn completion_context_sweep() {
             "nested call arg",
             "fn g(x: int) -> int { x }\nfn f() {\n  let a = g(g(mar<|>))\n}\n",
         ),
-        ("array element", "fn f() {\n  let xs = [mar<|>]\n}\n"),
         (
             "array element after comma",
             "fn f() {\n  let xs = [1, mar<|>]\n}\n",
@@ -65,18 +90,9 @@ fn completion_context_sweep() {
             "struct value in array global init",
             "global XS: [MarkerS] = [\n  MarkerS { f: mar<|> }\n]\n",
         ),
-        (
-            "match arm body",
-            "fn f(e: MarkerE) {\n  match e {\n    MarkerE::AAA => mar<|>\n  }\n}\n",
-        ),
         ("match scrutinee", "fn f() {\n  match mar<|> {}\n}\n"),
         ("for iterable", "fn f() {\n  for x in mar<|> {}\n}\n"),
         ("index expr", "fn f(xs: [int]) {\n  let a = xs[mar<|>]\n}\n"),
-        ("lambda body", "fn f() {\n  let g = () => mar<|>\n}\n"),
-        (
-            "if-expr branch value",
-            "fn f() {\n  let a = if true { mar<|> } else { 0 }\n}\n",
-        ),
         (
             "nullable coalesce rhs",
             "fn f(a: int?) {\n  let b = a ?? mar<|>\n}\n",
@@ -152,12 +168,15 @@ fn completion_context_sweep() {
         ),
     ];
     let mut fails = Vec::new();
-    for (name, body, expected) in expressions
-        .into_iter()
+    for (name, body, expected) in CALL_CONTEXTS
+        .iter()
+        .chain(VALUE_CONTEXTS)
+        .copied()
+        .chain(expressions)
         .map(|(name, body)| (name, body, "MARKER"))
         .chain(other_contexts)
     {
-        let labels = labels_of(&complete_in(PATH, &format!("{PREAMBLE}{body}")));
+        let labels = labels_of(&complete_in(PATH, &fixture(body, "mar<|>")));
         if !labels
             .iter()
             .any(|l| label_matches(l, &format!("*{expected}*")))
@@ -175,44 +194,17 @@ fn completion_context_sweep() {
 /// Each `MARKER` (int) must hover informatively, identically at its first char and one char in.
 #[test]
 fn hover_context_sweep() {
-    let cases: &[(&str, &str)] = &[
-        ("statement", "fn f() {\n  <|>MARKER\n}\n"),
-        ("return value", "fn f() -> int {\n  return <|>MARKER\n}\n"),
-        ("let value", "fn f() {\n  let a = <|>MARKER\n}\n"),
-        ("binary operand", "fn f() {\n  let a = 1 + <|>MARKER\n}\n"),
-        ("call arg", "fn g(x: int) {}\nfn f() {\n  g(<|>MARKER)\n}\n"),
-        ("array element", "fn f() {\n  let xs = [<|>MARKER]\n}\n"),
-        (
-            "struct field value",
-            "struct B { n: int }\nfn f() {\n  let s = B { n: <|>MARKER }\n}\n",
-        ),
-        ("lambda body", "fn f() {\n  let g = () => <|>MARKER\n}\n"),
-        (
-            "lambda in struct-lit in array global-init",
-            "struct P { get: fn() -> int }\nglobal PANELS: [P] = [\n  P { get: () => <|>MARKER }\n]\n",
-        ),
-        (
-            "match arm body",
-            "fn f(e: MarkerE) {\n  match e {\n    MarkerE::AAA => <|>MARKER\n  }\n}\n",
-        ),
-        (
-            "if branch value",
-            "fn f() {\n  let a = if true { <|>MARKER } else { 0 }\n}\n",
-        ),
-    ];
-    let hover = |src: &str, pos: Position| {
-        let mut bone = BoneWorkspace::new();
-        bone.update(PATH, src.to_string());
-        match bone.hover(PATH, pos).map(|h| h.contents) {
-            Some(HoverContents::Markup(m)) => m.value,
-            _ => String::new(),
-        }
-    };
     let mut fails = Vec::new();
-    for (name, body) in cases {
-        let (src, pos) = fixture(body);
-        let start = hover(&src, pos);
-        let mid = hover(&src, Position::new(pos.line, pos.character + 1));
+    for (name, body) in CALL_CONTEXTS
+        .iter()
+        .chain(VALUE_CONTEXTS)
+        .chain(NESTED_CONTEXTS)
+    {
+        let (src, pos) = cursor(&fixture(body, "<|>MARKER"));
+        let bone = workspace_at(PATH, &src);
+        let start = hover_markup(&bone, PATH, pos).unwrap_or_default();
+        let mid = hover_markup(&bone, PATH, Position::new(pos.line, pos.character + 1))
+            .unwrap_or_default();
         if start.is_empty() || start.contains("never") || start.contains("<error>") {
             fails.push(format!(
                 "  [{name}] hover at START uninformative = {start:?}"
@@ -228,34 +220,10 @@ fn hover_context_sweep() {
 /// Goto-definition must resolve at the first char of a lambda-body identifier.
 #[test]
 fn definition_context_sweep() {
-    let cases: &[(&str, &str)] = &[
-        ("statement call", "fn f() {\n  <|>marker_fn()\n}\n"),
-        (
-            "call arg",
-            "fn g(x: int) {}\nfn f() {\n  g(<|>marker_fn())\n}\n",
-        ),
-        (
-            "array element",
-            "fn f() {\n  let xs = [<|>marker_fn()]\n}\n",
-        ),
-        (
-            "lambda body",
-            "fn f() {\n  let g = () => <|>marker_fn()\n}\n",
-        ),
-        (
-            "lambda in struct-lit in array global-init",
-            "struct P { get: fn() -> int }\nglobal PANELS: [P] = [\n  P { get: () => <|>marker_fn() }\n]\n",
-        ),
-        (
-            "struct field value",
-            "struct B { n: int }\nfn f() {\n  let s = B { n: <|>marker_fn() }\n}\n",
-        ),
-    ];
     let mut fails = Vec::new();
-    for (name, body) in cases {
-        let (src, pos) = fixture(body);
-        let mut bone = BoneWorkspace::new();
-        bone.update(PATH, src);
+    for (name, body) in CALL_CONTEXTS.iter().chain(NESTED_CONTEXTS) {
+        let (src, pos) = cursor(&fixture(body, "<|>marker_fn()"));
+        let bone = workspace_at(PATH, &src);
         if bone.definition(PATH, pos).is_none() {
             fails.push(format!(
                 "  [{name}] goto-definition at START resolved nothing"
