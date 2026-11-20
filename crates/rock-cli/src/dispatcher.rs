@@ -1,4 +1,4 @@
-use crate::registry::{OptionRule, Route};
+use crate::registry::Route;
 use crate::*;
 
 /// Special device files cannot serve as an input path: the compiler reads them
@@ -53,13 +53,13 @@ impl CommandContext {
         } else {
             crate::lint_pass::LintReport::Full
         });
-        if self.args.profile.is_some() && self.args.command.cli_name() != "shader" {
+        if self.args.profile.is_some() && self.args.command.name != "shader" {
             anyhow::bail!(
                 "rock {}: --profile applies only to `rock shader` (offline GLSL emission). \
                  In-game shader source is emitted once and adapted to the live GL context by \
                  the engine, so no other command selects a profile. `rock shader-validate` \
                  gates both profiles and takes no flag.",
-                self.args.command.cli_name(),
+                self.args.command.name,
             );
         }
         self.run_command()
@@ -172,21 +172,15 @@ impl CommandContext {
     }
 
     fn require_backend_options(&self) -> Result<()> {
-        for rule in OptionRule::all() {
-            match rule {
-                OptionRule::TestFilter => self.require_test_filter_support()?,
-                OptionRule::SkipGpu => {
-                    if self.args.skip_gpu
-                        && self.args.command.cli_name() != "shader-validate"
-                        && !(self.args.command.operation() == Some(Operation::Test)
-                            && self.args.backend == Backend::Glsl)
-                    {
-                        anyhow::bail!(
-                            "`--skip-gpu` is supported only by `rock test --backend glsl` and `rock shader-validate`"
-                        );
-                    }
-                }
-            }
+        self.require_test_filter_support()?;
+        if self.args.skip_gpu
+            && self.args.command.name != "shader-validate"
+            && !(self.args.command.operation() == Some(Operation::Test)
+                && self.args.backend == Backend::Glsl)
+        {
+            anyhow::bail!(
+                "`--skip-gpu` is supported only by `rock test --backend glsl` and `rock shader-validate`"
+            );
         }
         Ok(())
     }

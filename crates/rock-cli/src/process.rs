@@ -116,7 +116,7 @@ fn run_process() {
     // After the env setup above and before rayon: begin() exports the parent
     // marker for nested `rock` runs and starts the delayed status-probe thread.
     rock_cli::invocation_log::begin(
-        args.command.cli_name(),
+        args.command.name,
         &format!("{:?}", args.backend).to_lowercase(),
     );
 

@@ -76,10 +76,6 @@ pub struct CliCommand {
 }
 
 impl CliCommand {
-    pub(crate) fn cli_name(&self) -> &'static str {
-        self.name
-    }
-
     pub fn operation(&self) -> Option<Operation> {
         match self.route {
             Route::Backend(op) => Some(op),
@@ -110,15 +106,6 @@ impl std::fmt::Debug for CliCommand {
     }
 }
 
-/// Why a recognized backend is unavailable in this build.
-#[derive(Clone, Copy)]
-pub enum OmittedBackend {
-    Feature {
-        feature: &'static str,
-        hint: &'static str,
-    },
-}
-
 /// One `--backend` registration.
 #[derive(Clone, Copy)]
 pub struct BackendSpec {
@@ -126,7 +113,8 @@ pub struct BackendSpec {
     pub name: &'static str,
     /// One-clause description of what the backend is, for the reject message.
     pub tagline: &'static str,
-    pub omitted: Option<OmittedBackend>,
+    /// The cargo feature this build omitted the backend with.
+    pub omitted_feature: Option<&'static str>,
     /// Served operations in the order the reject message lists them.
     pub operations: &'static [(Operation, Handler)],
     /// Why `rock test` on this backend rejects `--filter` / ROCK_TEST_FILTER;
@@ -195,11 +183,11 @@ impl Backend {
 
     pub(crate) fn omitted_reason(self) -> Option<String> {
         let spec = self.spec();
-        let omitted = spec.omitted.as_ref()?;
-        let OmittedBackend::Feature { feature, hint } = omitted;
+        let feature = spec.omitted_feature?;
         Some(format!(
-            "the `{}` backend was omitted from this build; enable the `{}` feature ({})",
-            spec.name, feature, hint,
+            "the `{}` backend was omitted from this build; enable the `{feature}` feature \
+             (rebuild with default features or `--features {feature}`)",
+            spec.name,
         ))
     }
 
@@ -210,34 +198,13 @@ impl Backend {
         if self.serves(cmd) {
             return None;
         }
-        let names: Vec<&str> = self
-            .supported_commands()
-            .iter()
-            .map(|c| c.cli_name())
-            .collect();
+        let names: Vec<&str> = self.supported_commands().iter().map(|c| c.name).collect();
         Some(format!(
             "the `{}` backend cannot serve `{}` \u{2014} {}. Supported commands: {}.",
             self.name(),
-            cmd.cli_name(),
+            cmd.name,
             self.spec().tagline,
             names.join(", "),
         ))
-    }
-}
-
-/// Validation of an option some backends do not accept, checked in
-/// registration order before dispatch.
-#[derive(Clone, Copy)]
-pub enum OptionRule {
-    /// `--filter` / ROCK_TEST_FILTER: only `rock test`, and only on a backend
-    /// without a `filter_rejection`.
-    TestFilter,
-    /// `--skip-gpu`: GLSL tests and shader validation only.
-    SkipGpu,
-}
-
-impl OptionRule {
-    pub fn all() -> &'static [OptionRule] {
-        crate::plain::OPTION_RULES
     }
 }

@@ -1,6 +1,6 @@
 //! The compiler's command and backend tables.
 use crate as rock_cli;
-use crate::registry::{OmittedBackend, OptionRule, Route};
+use crate::registry::Route;
 use crate::*;
 
 pub static COMMANDS: &[&CliCommand] = &[
@@ -221,7 +221,7 @@ pub(crate) static SKULL: BackendSpec = BackendSpec {
     backend: Backend::Skull,
     name: "skull",
     tagline: "skull is a bone-HIR codegen",
-    omitted: None,
+    omitted_feature: None,
     operations: &[
         (Operation::Frame, crate::frame_commands::handle_frame),
         (Operation::Perf, crate::frame_commands::handle_perf),
@@ -257,13 +257,10 @@ pub static JS: BackendSpec = BackendSpec {
     backend: Backend::Js,
     name: "js",
     tagline: "js is a JS-subset executor (node)",
-    omitted: if cfg!(feature = "backend-js") {
+    omitted_feature: if cfg!(feature = "backend-js") {
         None
     } else {
-        Some(OmittedBackend::Feature {
-            feature: "backend-js",
-            hint: "rebuild with default features or `--features backend-js`",
-        })
+        Some("backend-js")
     },
     operations: &[(Operation::Test, js_test), (Operation::Run, js_run)],
     filter_rejection: Some("`rock test` filtering is supported only by the skull test runner"),
@@ -273,7 +270,7 @@ pub static GLSL: BackendSpec = BackendSpec {
     backend: Backend::Glsl,
     name: "glsl",
     tagline: "glsl is a GLSL value-test executor (GPU), not a program codegen",
-    omitted: None,
+    omitted_feature: None,
     operations: &[(Operation::Test, |cx| {
         let files = cx.get_test_files()?;
         rock_cli::glsl_test::glsl_test(&files, cx.args.skip_gpu)
@@ -318,18 +315,16 @@ fn js_run(_: &CommandContext) -> Result<()> {
     unreachable!("JS dispatch requires the `backend-js` feature")
 }
 
-pub static OPTION_RULES: &[OptionRule] = &[OptionRule::TestFilter, OptionRule::SkipGpu];
-
 pub(crate) fn logs_invocation(command: &CliCommand) -> bool {
     matches!(
-        command.cli_name(),
+        command.name,
         "compile" | "test" | "run" | "watch" | "lint" | "fmt" | "frame" | "sim" | "stone"
     )
 }
 
 /// Whether the command should enter the compiler allocator policy.
 pub fn compiler_process(command: &CliCommand, list: bool) -> bool {
-    command.cli_name() == "check"
+    command.name == "check"
         || matches!(
             command.operation(),
             Some(Operation::Compile | Operation::Test)

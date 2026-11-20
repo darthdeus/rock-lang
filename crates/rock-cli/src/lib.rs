@@ -253,7 +253,7 @@ impl Args {
                 .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/example-core`."))
             .arg(Arg::new("backend").long("backend")
                 .value_parser(BackendSpec::value_parser())
-                .help(format!("Compiler backend (default: skull). {}.", registry::BackendSpec::all().iter().map(|spec| format!("{}{}", spec.name, if spec.omitted.is_some() { " (not in this build)" } else { "" })).collect::<Vec<_>>().join(", "))))
+                .help(format!("Compiler backend (default: skull). {}.", registry::BackendSpec::all().iter().map(|spec| format!("{}{}", spec.name, if spec.omitted_feature.is_some() { " (not in this build)" } else { "" })).collect::<Vec<_>>().join(", "))))
             .args([
             Arg::new("jv").long("jv").action(ArgAction::SetTrue)
                 .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."),
