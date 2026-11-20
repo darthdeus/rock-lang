@@ -4,6 +4,7 @@ use crate::ast::*;
 use rock_core::nesting::MAX_NESTING_DEPTH;
 use rock_core::{CompilerError, Span};
 use rock_tokenizer::{Token, TokenKind, Tokenizer, interp};
+use std::rc::Rc;
 use ustr::Ustr;
 
 pub(crate) struct Parser<'a> {
@@ -41,29 +42,11 @@ pub(crate) struct Parser<'a> {
     /// Set when the nesting limit is hit, so statement recovery propagates
     /// the error to the item instead of resuming at the same depth.
     too_deep: bool,
-    /// Source text a span can be read back from, innermost last. Interpolated
-    /// strings are re-scanned from RAW source so each hole's sub-expression gets
-    /// a real file span; a hole whose text carried `\`-escapes is cooked into
-    /// its own frame, which maps back byte-for-byte.
-    frames: Vec<Frame<'a>>,
+    source: &'a str,
+    source_base: usize,
+    holes: Vec<Rc<HoleFrame>>,
 }
 
-/// A source text the parser can locate a span in.
-enum Frame<'a> {
-    /// The parsed source. `base` is the file offset of its first byte
-    /// (`parse_one_item` parses a slice of a bigger file).
-    File { text: &'a str, base: usize },
-    /// A cooked interpolation hole. `map[k]` is the file offset of `text[k]`,
-    /// with a trailing entry for the end.
-    Hole {
-        text: String,
-        map: Vec<usize>,
-        line: usize,
-        column: usize,
-    },
-}
-
-/// A cooked hole (expression half or `:spec` half) awaiting its sub-parse.
 struct HoleFrame {
     text: String,
     /// `map[k]` is the file offset of `text[k]`, with a trailing end entry.
@@ -120,39 +103,6 @@ fn collapse_brace_escapes(text: &str) -> String {
     out
 }
 
-impl Frame<'_> {
-    fn text(&self) -> &str {
-        match self {
-            Frame::File { text, .. } => text,
-            Frame::Hole { text, .. } => text,
-        }
-    }
-
-    fn to_local(&self, at: usize) -> Option<usize> {
-        match self {
-            Frame::File { text, base } => {
-                let l = at.checked_sub(*base)?;
-                (l <= text.len()).then_some(l)
-            }
-            Frame::Hole { map, .. } => map.iter().position(|&o| o == at),
-        }
-    }
-
-    fn to_file(&self, local: usize) -> usize {
-        match self {
-            Frame::File { base, .. } => base + local,
-            Frame::Hole { map, .. } => map[local],
-        }
-    }
-
-    fn origin(&self) -> Option<(usize, usize)> {
-        match self {
-            Frame::File { .. } => None,
-            Frame::Hole { line, column, .. } => Some((*line, *column)),
-        }
-    }
-}
-
 type PResult<T> = Result<T, CompilerError>;
 
 impl<'a> Parser<'a> {
@@ -164,7 +114,9 @@ impl<'a> Parser<'a> {
         let eof_span = tokens.last().map(|t| t.span).unwrap_or_else(Span::unknown);
         let ast = Ast::with_capacity(tokens.len());
         Self {
-            frames: vec![Frame::File { text: source, base }],
+            source,
+            source_base: base,
+            holes: Vec::new(),
             tokens,
             pos: 0,
             eof_span,
@@ -2822,9 +2774,14 @@ impl<'a> Parser<'a> {
         }
 
         match kind {
-            TokenKind::String(_) => {
+            TokenKind::String(s) => {
                 self.advance();
-                self.parse_interpolated(start)
+                // Cooked text keeps interpolation holes and doubled braces.
+                if self.holes.is_empty() && !s.as_str().contains(['{', '}']) {
+                    Ok(self.ast.expr(start, ExprKind::String(s)))
+                } else {
+                    self.parse_interpolated(start)
+                }
             }
             TokenKind::RawString(s) => {
                 self.advance();
@@ -3014,38 +2971,51 @@ impl<'a> Parser<'a> {
     fn parse_interpolated(&mut self, span: Span) -> PResult<Idx<ExprData>> {
         let file = span.file;
         let lit_start = span.offset_range().0;
-        let Some(fi) = self
-            .frames
-            .iter()
-            .rposition(|f| f.to_local(lit_start).is_some())
-        else {
+        let nested = self.holes.iter().rev().find_map(|hole| {
+            let local = hole.map.iter().position(|&offset| offset == lit_start)?;
+            Some((Rc::clone(hole), local))
+        });
+        let base = self.source_base;
+        let (text, map, mut pos) = if let Some((hole, local)) = &nested {
+            (
+                hole.text.as_str(),
+                Some(hole.map.as_slice()),
+                Pos {
+                    at: *local,
+                    line: hole.line,
+                    column: hole.column,
+                },
+            )
+        } else {
+            let at = lit_start
+                .checked_sub(base)
+                .filter(|&at| at <= self.source.len())
+                .ok_or_else(|| {
+                    CompilerError::new_with_label(
+                        span,
+                        "string literal span does not point into the parsed source".to_string(),
+                    )
+                })?;
+            (
+                self.source,
+                None,
+                Pos {
+                    at,
+                    line: span.line_range().0,
+                    column: span.col_range().0,
+                },
+            )
+        };
+        if interp::Flavor::at(text, pos.at).is_none() {
             return Err(CompilerError::new_with_label(
                 span,
-                "string literal span does not point into the parsed source".to_string(),
+                "string literal span does not start a literal in the parsed source".to_string(),
             ));
-        };
-        let (scan, mut pos) = {
-            let frame = &self.frames[fi];
-            let local = frame.to_local(lit_start).expect("checked above");
-            if interp::Flavor::at(frame.text(), local).is_none() {
-                return Err(CompilerError::new_with_label(
-                    span,
-                    "string literal span does not start a literal in the parsed source".to_string(),
-                ));
-            }
-            let scan = interp::scan_string(frame.text(), local);
-            let pos = Pos {
-                at: local,
-                line: frame.origin().map_or(span.line_range().0, |o| o.0),
-                column: frame.origin().map_or(span.col_range().0, |o| o.1),
-            };
-            (scan, pos)
-        };
-
+        }
+        let scan = interp::scan_string(text, pos.at);
         let mut parts = Vec::with_capacity(scan.pieces.len());
         for piece in &scan.pieces {
-            let frame = &self.frames[fi];
-            pos.advance(frame.text(), piece.range().0);
+            pos.advance(text, piece.range().0);
             match piece {
                 interp::Piece::Literal { text, .. } => {
                     parts.push(InterpolatedPart::Literal(Ustr::from(
@@ -3055,25 +3025,28 @@ impl<'a> Parser<'a> {
                 interp::Piece::Hole { expr, spec, .. } => {
                     let cook = |at: (usize, usize)| {
                         let mut p = pos;
-                        p.advance(frame.text(), at.0);
-                        let (text, local) = scan.hole_source(frame.text(), at);
+                        p.advance(text, at.0);
+                        let (text, local) = scan.hole_source(text, at);
                         HoleFrame {
                             text,
-                            map: local.into_iter().map(|o| frame.to_file(o)).collect(),
+                            map: local
+                                .into_iter()
+                                .map(|o| map.map_or(base + o, |m| m[o]))
+                                .collect(),
                             line: p.line,
                             column: p.column,
                         }
                     };
                     let expr = cook(*expr);
                     let spec = spec.map(cook);
-                    let e = self.in_hole_frame(&expr, |p, f| {
+                    let e = self.in_hole_frame(expr, |p, f| {
                         p.parse_interp_subexpr(&f.text, file, &f.map, f.line, f.column)
                     })?;
                     let spec = match spec {
                         None => None,
-                        Some(sf) => Some(self.in_hole_frame(&sf, |p, f| {
-                            p.parse_format_spec(&f.text, file, f.map[0], f.line, f.column)
-                        })?),
+                        Some(sf) => {
+                            Some(self.in_hole_frame(sf, |p, f| p.parse_format_spec(f, file))?)
+                        }
                     };
                     parts.push(InterpolatedPart::Expr(e, spec));
                 }
@@ -3090,17 +3063,13 @@ impl<'a> Parser<'a> {
 
     fn in_hole_frame<T>(
         &mut self,
-        frame: &HoleFrame,
+        frame: HoleFrame,
         f: impl FnOnce(&mut Self, &HoleFrame) -> PResult<T>,
     ) -> PResult<T> {
-        self.frames.push(Frame::Hole {
-            text: frame.text.clone(),
-            map: frame.map.clone(),
-            line: frame.line,
-            column: frame.column,
-        });
-        let r = f(self, frame);
-        self.frames.pop();
+        let frame = Rc::new(frame);
+        self.holes.push(Rc::clone(&frame));
+        let r = f(self, &frame);
+        self.holes.pop();
         r
     }
 
@@ -3149,116 +3118,50 @@ impl<'a> Parser<'a> {
         result
     }
 
-    fn parse_format_spec(
-        &mut self,
-        format_str: &str,
-        file: Ustr,
-        fmt_offset: usize,
-        fmt_line: usize,
-        fmt_col: usize,
-    ) -> PResult<FormatSpec> {
+    fn parse_format_spec(&mut self, frame: &HoleFrame, file: Ustr) -> PResult<FormatSpec> {
         let mut spec = FormatSpec::new();
+        let format_str = &frame.text;
         let mut chars = format_str.chars().peekable();
 
-        if let Some(&first) = chars.peek() {
-            if chars
-                .clone()
-                .nth(1)
-                .map_or(false, |c| matches!(c, '<' | '>' | '^' | '='))
-            {
-                spec.fill = Some(first);
-                chars.next();
-                if let Some(align) = chars.next() {
-                    spec.alignment = Some(align);
-                }
-            } else if matches!(first, '<' | '>' | '^' | '=') {
-                spec.alignment = Some(first);
-                chars.next();
-            }
+        let is_align = |c: &char| matches!(c, '<' | '>' | '^' | '=');
+        if chars.clone().nth(1).is_some_and(|c| is_align(&c)) {
+            spec.fill = chars.next();
         }
-        if let Some(&c) = chars.peek() {
-            if matches!(c, '+' | '-' | ' ') {
-                spec.sign = Some(c);
-                chars.next();
-            }
+        spec.alignment = chars.next_if(is_align);
+        spec.sign = chars.next_if(|c| matches!(c, '+' | '-' | ' '));
+        spec.alternate = chars.next_if_eq(&'#').is_some();
+        spec.zero_pad = chars.next_if_eq(&'0').is_some();
+        (spec.width, spec.width_expr) = self.parse_spec_size(frame, &mut chars, file, "width")?;
+        spec.grouping = chars.next_if(|c| matches!(c, ',' | '_'));
+        if chars.next_if_eq(&'.').is_some() {
+            (spec.precision, spec.precision_expr) =
+                self.parse_spec_size(frame, &mut chars, file, "precision")?;
         }
-        if chars.peek() == Some(&'#') {
-            spec.alternate = true;
-            chars.next();
-        }
-        if chars.peek() == Some(&'0') {
-            spec.zero_pad = true;
-            chars.next();
-        }
-        if chars.peek() == Some(&'{') {
-            spec.width_expr = Some(
-                self.parse_spec_expr(format_str, &mut chars, file, fmt_offset, fmt_line, fmt_col)?,
-            );
-        } else {
-            let w = take_ascii_digits(&mut chars);
-            if !w.is_empty() {
-                spec.width = Some(w.parse().map_err(|_| self.err("format width overflow"))?);
-            }
-        }
-        if let Some(&c) = chars.peek() {
-            if c == ',' || c == '_' {
-                spec.grouping = Some(c);
-                chars.next();
-            }
-        }
-        if chars.peek() == Some(&'.') {
-            chars.next(); // `.`
-            if chars.peek() == Some(&'{') {
-                spec.precision_expr = Some(self.parse_spec_expr(
-                    format_str, &mut chars, file, fmt_offset, fmt_line, fmt_col,
-                )?);
-            } else {
-                let p = take_ascii_digits(&mut chars);
-                if !p.is_empty() {
-                    spec.precision = Some(
-                        p.parse()
-                            .map_err(|_| self.err("format precision overflow"))?,
-                    );
-                }
-            }
-        }
-        if let Some(&c) = chars.peek() {
-            if matches!(
-                c,
-                'b' | 'c'
-                    | 'd'
-                    | 'e'
-                    | 'E'
-                    | 'f'
-                    | 'F'
-                    | 'g'
-                    | 'G'
-                    | 'n'
-                    | 'o'
-                    | 's'
-                    | 'x'
-                    | 'X'
-                    | '%'
-            ) {
-                spec.format_type = Some(c);
-                chars.next();
-            }
-        }
+        spec.format_type = chars.next_if(|c| "bcdeEfFgGnosxX%".contains(*c));
         if chars.peek().is_some() {
             return Err(self.err(format!("Invalid format specifier: '{}'", format_str)));
         }
         Ok(spec)
     }
 
-    fn parse_spec_expr(
+    fn parse_spec_size(
         &mut self,
-        format_str: &str,
+        frame: &HoleFrame,
         chars: &mut std::iter::Peekable<std::str::Chars>,
         file: Ustr,
-        fmt_offset: usize,
-        fmt_line: usize,
-        fmt_col: usize,
-    ) -> PResult<Idx<ExprData>> {
+        label: &str,
+    ) -> PResult<(Option<usize>, Option<Idx<ExprData>>)> {
+        if chars.peek() != Some(&'{') {
+            let digits = take_ascii_digits(chars);
+            if digits.is_empty() {
+                return Ok((None, None));
+            }
+            let size = digits
+                .parse()
+                .map_err(|_| self.err(format!("format {label} overflow")))?;
+            return Ok((Some(size), None));
+        }
+        let format_str = &frame.text;
         let brace_idx = format_str.chars().count() - chars.clone().count();
         let brace_byte = format_str
             .char_indices()
@@ -3267,8 +3170,10 @@ impl<'a> Parser<'a> {
             .unwrap_or(format_str.len());
         chars.next(); // `{`
         let src = take_balanced_brace_body(chars, format_str)?;
-        let map = identity_map(fmt_offset + brace_byte + 1, src.len());
-        self.parse_interp_subexpr(&src, file, &map, fmt_line, fmt_col + brace_idx + 1)
+        let map = identity_map(frame.map[0] + brace_byte + 1, src.len());
+        let value =
+            self.parse_interp_subexpr(&src, file, &map, frame.line, frame.column + brace_idx + 1)?;
+        Ok((None, Some(value)))
     }
 
     fn struct_literal_follows(&self) -> bool {
