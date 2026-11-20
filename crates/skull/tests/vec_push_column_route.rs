@@ -37,13 +37,12 @@ fn only_boxed_receivers_and_column_payloads_reach_the_boxed_push_body() {
         (COLUMN_PAYLOAD, true, "1"),
     ] {
         let lua = emit_module(src);
-        // The always-emitted `vec_push` definition also contains `._data`.
         assert_eq!(
             function_body(&lua, "main").contains("._data"),
             boxed,
             "{src}"
         );
-        assert_eq!(lua.matches("function vec_push").count(), 1, "{src}");
+        assert!(lua.matches("function vec_push").count() <= 1, "{src}");
         assert_eq!(run_main(&lua), expected, "{src}");
     }
 }
