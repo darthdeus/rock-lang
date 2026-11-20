@@ -622,6 +622,34 @@ fn assert_counted_zero_alloc(lua: &str) {
 }
 
 #[test]
+fn non_counted_loop_records_at_a_while_header() {
+    let lua = emit_clean(
+        r#"
+@nomangle fn scan_until_break(n: int) -> int {
+    let i = n
+    let sum = 0
+    while i > 0 {
+        i -= 1
+        if i == 5 { continue }
+        if i == 2 { break }
+        sum += i
+    }
+    return sum
+}
+"#,
+        "scan_until_break",
+    );
+    assert!(lua.contains("while ("), "{lua}");
+    assert!(!lua.contains("goto w"), "{lua}");
+    luajit_ok(
+        &format!(
+            "{lua}\nassert(scan_until_break(0) == 0 and scan_until_break(2) == 1 and scan_until_break(8) == 20)"
+        ),
+        &lua,
+    );
+}
+
+#[test]
 fn for_real_vec_loop_is_forl_zero_alloc_with_raw_reads() {
     let lua = emit_inlined(
         "fn sum_vec(xs: [int]) -> int {

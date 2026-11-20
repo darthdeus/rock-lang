@@ -1,6 +1,5 @@
-//! Recognized counted loops use a Lua numeric or generic `for`. Other loops
-//! keep a backward goto so LuaJIT records from the backedge, which must share
-//! its label's scope for LuaJIT to emit LOOP.
+//! Recognized loops use a Lua `for` or `while`. Other loops keep a backward
+//! goto in the label's scope so LuaJIT emits LOOP.
 
 use super::*;
 use skull_mir::cfg::structure::{Placement, place};
@@ -115,6 +114,42 @@ struct LoopLines {
 }
 
 impl Printer<'_, '_> {
+    fn while_loop(&self, header: Idx<Block>) -> Option<NativeLoop> {
+        if !self.sh.placement.is_header(header) {
+            return None;
+        }
+        let Term::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = self.em.func.blocks[header].term
+        else {
+            return None;
+        };
+        let mut body = self.sh.thread(then_bb);
+        let mut exit = self.sh.thread(else_bb);
+        let placement = &self.sh.placement;
+        if placement.in_loop(header, exit) {
+            std::mem::swap(&mut body, &mut exit);
+        }
+        let follower = placement
+            .followers(header)
+            .iter()
+            .copied()
+            .find(|&block| !placement.in_loop(header, block));
+        (body != header
+            && placement.in_loop(header, body)
+            && !placement.is_follower(body)
+            && follower == Some(exit)
+            && !matches!(self.em.func.insts[cond], Inst::Const(_))
+            && self.chainable(header))
+        .then_some(NativeLoop {
+            latch: header,
+            body,
+            exit,
+        })
+    }
+
     fn line(&mut self, s: &str, instructions: u8) -> u32 {
         let at = self.em.control.line(self.out.len(), instructions);
         self.out.push(' ');
@@ -176,7 +211,9 @@ impl PlacementEmit for Printer<'_, '_> {
     }
 
     fn native_loop(&self, header: Idx<Block>) -> Option<NativeLoop> {
-        let latch = self.sh.counted_latch(header)?;
+        let Some(latch) = self.sh.counted_latch(header) else {
+            return self.while_loop(header);
+        };
         let lp = &self.em.loops[&header];
         Some(NativeLoop {
             latch,
@@ -291,11 +328,24 @@ impl PlacementEmit for Printer<'_, '_> {
         header: Idx<Block>,
         native: Option<NativeLoop>,
     ) -> Result<LoopLines, Infallible> {
-        let head = if native.is_some() {
+        let head = if self.sh.counted_latch(header).is_some() {
             self.em
                 .write_kills(self.out, self.em.kills.at_entry(header));
             let at = self.em.control.line(self.out.len(), 1);
             self.em.write_for_head(self.out, header);
+            Some(at)
+        } else if let Some(lp) = native {
+            let Term::Branch { cond, then_bb, .. } = self.em.func.blocks[header].term else {
+                unreachable!("while loop header must branch");
+            };
+            self.em.mark_inline_operand(self.out, cond);
+            let at = self.em.control.line(self.out.len(), 3);
+            self.out.push_str(" while ");
+            if self.sh.thread(then_bb) != lp.body {
+                self.out.push_str("not ");
+            }
+            self.em.write_opnd(self.out, cond);
+            self.out.push_str(" do\n");
             Some(at)
         } else {
             self.em.write_label(self.out, Label::Header, header);
@@ -324,10 +374,15 @@ impl PlacementEmit for Printer<'_, '_> {
                     .write_kills(self.out, self.em.kills.at_entry(lp.latch));
             }
             let end = self.line("end", 1);
-            scope_guard::close(self.em.func, header);
             let head = token.head.expect("native loop header");
-            self.jump((head, 0), (end, 1));
-            self.jump((end, 0), (head, 1));
+            if self.sh.counted_latch(header).is_some() {
+                scope_guard::close(self.em.func, header);
+                self.jump((head, 0), (end, 1));
+                self.jump((end, 0), (head, 1));
+            } else {
+                self.jump((head, 1), (end, 1));
+                self.jump((end, 0), (head, 0));
+            }
             end
         } else {
             if continued {
