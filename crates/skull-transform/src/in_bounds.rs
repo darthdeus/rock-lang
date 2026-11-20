@@ -33,9 +33,6 @@ pub fn elide_bounds_checks_for_target(
     func: &mut MirFunc,
     target: FnBackend,
 ) -> usize {
-    if disabled_by_env() {
-        return 0;
-    }
     let proven = proven_accesses(ws, func, target);
     for &id in &proven {
         match &mut func.insts[id] {
@@ -291,16 +288,6 @@ fn is_boxed_vec_push(ws: Option<&Workspace>, fref: FuncRef) -> bool {
             ..
         }
     )
-}
-
-fn disabled_by_env() -> bool {
-    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OFF.get_or_init(|| {
-        matches!(
-            std::env::var("ROCK_SKULL_BOUNDS_OFF").ok().as_deref(),
-            Some("1") | Some("true")
-        )
-    })
 }
 
 /// Every cyclic block lies within a backward-edge interval in RPO.

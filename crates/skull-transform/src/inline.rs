@@ -48,21 +48,6 @@ impl Drop for InlineOffGuard {
     }
 }
 
-/// Process-wide switch for comparing emitted code with and without inlining.
-fn inline_disabled_by_env() -> bool {
-    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OFF.get_or_init(|| {
-        matches!(
-            std::env::var("ROCK_SKULL_INLINE_OFF").as_deref(),
-            Ok("1") | Ok("true")
-        )
-    })
-}
-
-fn inline_disabled() -> bool {
-    inline_off_active() || inline_disabled_by_env()
-}
-
 #[derive(Copy, Clone, PartialEq)]
 enum Kind {
     Straight,
@@ -1933,7 +1918,7 @@ pub(crate) fn inline_functions_with_plans(
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
     let mut spliced = HashSet::default();
     let mut records: Vec<SpliceRecord> = Vec::new();
-    if inline_disabled() {
+    if inline_off_active() {
         return Ok((spliced, records));
     }
     let mut top: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
