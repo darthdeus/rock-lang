@@ -179,6 +179,8 @@ use jobs::*;
 mod ffi;
 
 #[cfg(test)]
+mod differential;
+#[cfg(test)]
 mod tests;
 
 pub(super) fn shutdown() {

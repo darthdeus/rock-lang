@@ -12,7 +12,7 @@ pub struct NativeNavIntWire {
     hi: i32,
 }
 impl NativeNavIntWire {
-    fn value(self) -> int {
+    pub(super) fn value(self) -> int {
         ((self.hi as int) << 32) | (self.lo as u32 as int)
     }
 }
