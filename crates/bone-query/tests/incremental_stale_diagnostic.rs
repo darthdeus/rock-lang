@@ -91,3 +91,37 @@ fn const_to_global_clears_assign_error_cross_file() {
         messages(&bone, &user)
     );
 }
+
+/// One update that edits a body and text before it (a comment, recovered junk)
+/// must leave the same diagnostics as a fresh check of the final buffer.
+#[test]
+fn body_edit_with_shifted_prefix_matches_fresh_check() {
+    let located = |bone: &BoneWorkspace| {
+        bone.diagnostics_for(PATH)
+            .into_iter()
+            .map(|d| (d.range.start.line, d.message))
+            .collect::<Vec<_>>()
+    };
+    let main = "fn main() { let s: string = a() }\n";
+    let cases = [
+        vec![
+            format!("// cccc\nfn a() -> int {{ 1 }}\nfn b() -> int {{ 2 }}\n{main}"),
+            format!("// c\nfn a() -> int {{ 1 }}\nfn b() -> int {{ 3 }}\n{main}"),
+        ],
+        // The first two buffers carry recovery errors, so the third takes the
+        // full path with a single changed body.
+        vec![
+            "fn a(x: int) { a(x) }\nenum E {\n, fn o(x: E) {\n}\nfn b() { }\n".to_string(),
+            "fn a(x: int) { a(x) }\nenum E {\nfn o(x: E) {\n}\nfn b() { print} (1) }\n".to_string(),
+            "fn a(x: int) { a(1) }\nenum E {\nfn o(x: E) {\n}\nfn b() { }\n".to_string(),
+        ],
+    ];
+    for states in cases {
+        let mut bone = BoneWorkspace::new();
+        for text in &states {
+            bone.update(PATH, text.clone());
+        }
+        let fresh = crate::fixture::workspace(states.last().unwrap());
+        assert_eq!(located(&bone), located(&fresh), "{states:#?}");
+    }
+}

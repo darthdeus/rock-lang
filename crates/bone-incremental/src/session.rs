@@ -823,6 +823,12 @@ impl Session {
                 classify(&old.item_prints, &new_prints)
             }
         });
+        // The in-place body path keeps every other item's spans, so text
+        // outside that body (comments, recovered junk) must be unchanged.
+        let body_edit = old.and_then(|old| {
+            let (start, end, _) = byte_diff(&old.text, text);
+            locate_body_edit(&old.item_prints, start, end)
+        });
         let next = UserFile {
             text_hash: hash,
             item_prints: new_prints,
@@ -836,7 +842,9 @@ impl Session {
         };
         self.apply_file(path, Some(next), |s| match diff {
             Some(FileDiff::BodiesOnly(changed)) => match changed.as_slice() {
-                [idx] => s.rebuild_body_incremental(path, module, *idx, false),
+                [idx] if body_edit == Some(*idx) => {
+                    s.rebuild_body_incremental(path, module, *idx, false)
+                }
                 _ => s.rebuild_module(path, module, &changed),
             },
             Some(FileDiff::Interface { only_functions }) if !touches_macros => s.rebuild_interface(
