@@ -125,3 +125,37 @@ fn imgui_semantic_click_fixture_restores_on_failure() {
     assert(IMGUI_TEST_ITEMS == items && IMGUI_BODIES_RAN == bodies)
     assert_eq(IMGUI_TEST_REVEAL_TARGET, target)
 }
+
+inline(lua) fn imgui_check_scalar_out_args(draw: fn()) = """
+    local new = ffi.new
+    ffi.new = function(...)
+        local ctype, initial = ...
+        if ctype == "float[1]" or ctype == "int[1]" or ctype == "bool[1]" then
+            assert(type(initial) ~= "table", "ImGui scalar out buffer has a table initializer")
+        end
+        return new(...)
+    end
+    local ok, err = pcall(draw)
+    ffi.new = new
+    if not ok then error(err, 0) end
+"""
+
+@test
+fn imgui_scalar_widgets_keep_their_initial_out_values() {
+    let previous = imgui_click_test_context()
+    defer { imgui_click_test_destroy_context(previous) }
+    imgui_click_test_new_frame()
+    imgui_begin("Scalar widgets")
+    imgui_check_scalar_out_args(() => {
+        let (float_changed, fraction) = imgui_slider_float("Float", 1.5, 0.0, 4.0)
+        let (int_changed, whole) = imgui_slider_int("Integer", 2, 0, 4)
+        let (bool_changed, checked) = imgui_checkbox("Boolean", true)
+        let (combo_changed, choice) = imgui_combo("Combo", 1, ["One", "Two"])
+        let (vertical_changed, vertical) = imgui_v_slider_float("Vertical", v(32.0, 64.0), 2.5, 0.0, 4.0, "%.1f")
+        assert(!float_changed && !int_changed && !bool_changed && !combo_changed && !vertical_changed)
+        assert(fraction == 1.5 && whole == 2 && checked)
+        assert(choice == 1 && vertical == 2.5)
+    })
+    imgui_end()
+    imgui_click_test_render()
+}

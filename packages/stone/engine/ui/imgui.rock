@@ -167,20 +167,26 @@ pub @scalar_abi inline(lua) fn imgui_get_mouse_pos() -> Vec2 = """
     return pos.x, pos.y
 """
 
-pub inline(lua) fn imgui_slider_float(label: string, value: float, min: float, max: float) -> (bool, float) = """
-    local v = ffi.new("float[1]", {value})
-    local changed = imgui.SliderFloat(label, v, min, max)
-    return changed, v[0]
-"""
+extern(lua, "ffi.new") fn __imgui_new_out<T>(ctype: string, initial: T) -> Ptr<T>
+@inline @nowrite inline(lua) fn __imgui_read_out<T>(out: Ptr<T>) -> T = "return out[0]"
 
-pub inline(lua) fn imgui_slider_int(label: string, value: int, min: int, max: int) -> (bool, int) = """
-    local v = ffi.new("int[1]", {value})
-    local changed = imgui.SliderInt(label, v, min, max)
-    return changed, v[0]
-"""
+extern(lua, "imgui.SliderFloat") fn __imgui_slider_float(label: string, out: Ptr<float>, min: float, max: float) -> bool
+extern(lua, "imgui.SliderInt") fn __imgui_slider_int(label: string, out: Ptr<int>, min: int, max: int) -> bool
+
+pub fn imgui_slider_float(label: string, value: float, min: float, max: float) -> (bool, float) {
+    let out = __imgui_new_out("float[1]", value)
+    let changed = __imgui_slider_float(label, out, min, max)
+    return (changed, __imgui_read_out(out))
+}
+
+pub fn imgui_slider_int(label: string, value: int, min: int, max: int) -> (bool, int) {
+    let out = __imgui_new_out("int[1]", value)
+    let changed = __imgui_slider_int(label, out, min, max)
+    return (changed, __imgui_read_out(out))
+}
 
 @scalar_abi inline(lua) fn imgui_v_slider_float(label: string, size: Vec2, value: float, min: float, max: float, format: string) -> (bool, float) = """
-    local v = ffi.new("float[1]", {value})
+    local v = ffi.new("float[1]", value)
     local cache = __imgui_shared_image_packet()
     cache.s.x, cache.s.y = size__x, size__y
     local changed = imgui.VSliderFloat(label, cache.s, v, min, max, format)
@@ -198,11 +204,13 @@ pub fn imgui_combo(label: string, current_idx: int, items: [string]) -> (bool, i
 
 fn __nul_byte() -> string { return string_char(0) }
 
-inline(lua) fn __imgui_combo_str(label: string, current_idx: int, items_nul: string) -> (bool, int) = """
-    local v = ffi.new("int[1]", {current_idx})
-    local changed = imgui.Combo_Str(label, v, items_nul)
-    return changed, v[0]
-"""
+extern(lua, "imgui.Combo_Str") fn __imgui_combo_out(label: string, out: Ptr<int>, items_nul: string) -> bool
+
+fn __imgui_combo_str(label: string, current_idx: int, items_nul: string) -> (bool, int) {
+    let out = __imgui_new_out("int[1]", current_idx)
+    let changed = __imgui_combo_out(label, out, items_nul)
+    return (changed, __imgui_read_out(out))
+}
 
 @inline inline(lua) fn imgui_begin_combo(label: string, preview: string) -> bool = "return imgui.BeginCombo(label, preview, 0)"
 extern(lua, "imgui.EndCombo") fn imgui_end_combo()
@@ -210,11 +218,13 @@ extern(lua, "imgui.SetItemDefaultFocus") fn imgui_set_item_default_focus()
 
 pub extern(lua, "imgui.Selectable_Bool") fn imgui_selectable(label: string, selected: bool) -> bool
 
-pub inline(lua) fn imgui_checkbox(label: string, value: bool) -> (bool, bool) = """
-    local v = ffi.new("bool[1]", {value})
-    local changed = imgui.Checkbox(label, v)
-    return changed, v[0]
-"""
+extern(lua, "imgui.Checkbox") fn __imgui_checkbox(label: string, out: Ptr<bool>) -> bool
+
+pub fn imgui_checkbox(label: string, value: bool) -> (bool, bool) {
+    let out = __imgui_new_out("bool[1]", value)
+    let changed = __imgui_checkbox(label, out)
+    return (changed, __imgui_read_out(out))
+}
 
 pub @scalar_abi inline(lua) fn imgui_get_cursor_screen_pos() -> Vec2 = """
     local cache = __imgui_shared_image_packet()
