@@ -321,15 +321,7 @@ pub fn build_optional_engine_lib(lib: &NativeLibrary) -> Result<()> {
         }
     }
     let artifact = artifact.context("Cargo succeeded without producing the requested cdylib")?;
-    fs_err::create_dir_all(&lib.stage_dir)?;
-    let destination = lib
-        .stage_dir
-        .join(crate::engine_build::cdylib_name(&lib.dst_stem));
-    rock_host::timed(format!("{}: staging", lib.dst_stem), || {
-        crate::engine_build::stage_cdylib_from(&artifact, &destination, |path| {
-            crate::engine_build::prepare_staged_cdylib(path, &lib.dst_stem)
-        })
-    })
+    crate::engine_build::stage_library(&artifact, &lib.stage_dir, &lib.dst_stem)
 }
 
 pub fn registry_json(libs: &[NativeLibrary]) -> Result<Value> {

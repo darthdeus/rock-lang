@@ -24,15 +24,20 @@ pub fn require_source_build() -> Result<()> {
 }
 
 const ENGINE_BUILD_RECEIPT_VERSION: u32 = 1;
+const CORE_TARGET: &str = "stone_rs";
+const CORE_STEM: &str = "stone";
 
-#[derive(Debug)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct EngineBuildReceipt {
     version: u32,
+    // Older receipts may lack the launcher capability field.
+    #[serde(skip_deserializing)]
+    prebuilt_game_protocol: u32,
     workspace: String,
     libs: Vec<ReceiptLib>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct ReceiptLib {
     src_stem: String,
     dst_stem: String,
@@ -547,16 +552,33 @@ mod tests {
     }
 
     #[test]
+    fn engine_receipt_rejects_versions_outside_its_wire_range() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        let path = workspace.join("receipt.json");
+        for version in [0, 2, u64::from(u32::MAX) + 2] {
+            let data =
+                serde_json::json!({ "version": version, "workspace": workspace, "libs": [] });
+            fs_err::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
+            assert!(
+                load_engine_build_receipt(&workspace, &path).is_err(),
+                "version {version}"
+            );
+        }
+    }
+
+    #[test]
     fn a_shared_engine_receipt_round_trips_its_workspace_and_library_identity() {
         let (root, lib) = receipt_fixture();
         let root_path = fs_err::canonicalize(root.path()).expect("canonical root");
         let receipt = EngineBuildReceipt {
             version: ENGINE_BUILD_RECEIPT_VERSION,
+            prebuilt_game_protocol: 1,
             workspace: root_path.to_string_lossy().into_owned(),
             libs: vec![lib],
         };
         let path = root.path().join("receipt.json");
-        fs_err::write(&path, engine_build_receipt_json(&receipt).expect("encode"))
+        fs_err::write(&path, serde_json::to_vec_pretty(&receipt).expect("encode"))
             .expect("receipt");
 
         let advertised: serde_json::Value =
@@ -571,60 +593,11 @@ mod tests {
     }
 }
 
-fn cargo_build_and_stage_lib(
-    display_name: &str,
-    cargo_args: &[&str],
-    src_stem: &str,
-    dst_stem: &str,
-) -> Result<()> {
-    if rock_host::project::is_release_layout() {
-        return Ok(());
-    }
-    if validate_receipted_lib(dst_stem)? {
-        return Ok(());
-    }
-    require_source_build()?;
-    rock_host::timed(format!("{display_name}: cargo build"), || {
-        run_cargo(cargo_args, &format!("Failed to build {}", display_name))
-    })?;
-    rock_host::timed(format!("{display_name}: staging"), || {
-        stage_cdylib(src_stem, dst_stem)
-    })
-}
-
-/// Accepted build receipts retain ownership; otherwise the source artifact and the
-/// published library must both match the recorded staging identity.
-pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
-    if validate_receipted_lib(dst_stem)? {
-        return Ok(());
-    }
-    let rock_root = PathBuf::from(rock_host::rock_dir());
-    let target_debug = cargo_target_dir(&rock_root).join("debug");
-    let dev_tmp = rock_root.join("tmp");
-    fs_err::create_dir_all(&dev_tmp)?;
-
-    let src = target_debug.join(cdylib_name(src_stem));
-    let dst = staged_cdylib_path(&rock_root, dst_stem);
-
-    stage_cdylib_from(&src, &dst, |staging| {
-        prepare_staged_cdylib(staging, dst_stem)
-    })
-    .map_err(|error| {
-        // `cargo build -p` can exit 0 without producing the cdylib (foreign target dir,
-        // crate-type without `cdylib`); the copy error alone names neither cause nor fix.
-        if src.exists() {
-            return error;
-        }
-        let pkg = src_stem.replace('_', "-");
-        anyhow::anyhow!(
-            "cargo build reported success but the cdylib was not produced at `{src}`.\n\
-             Likely: `CARGO_TARGET_DIR` selects a stale/cleaned/foreign target \
-             dir (worktrees sharing a target), `{pkg}` `crate-type` missing \
-             `cdylib`, or the build only touched dependents.\n\
-             Recover: `cargo build -p {pkg}` from this worktree (with the same \
-             `CARGO_TARGET_DIR`, if set) and confirm `{src}` exists, then re-run.",
-            src = src.display(),
-        )
+pub(crate) fn stage_library(src: &Path, dir: &Path, stem: &str) -> Result<()> {
+    fs_err::create_dir_all(dir)?;
+    let dst = dir.join(cdylib_name(stem));
+    rock_host::timed(format!("{stem}: staging"), || {
+        stage_cdylib_from(src, &dst, |path| prepare_staged_cdylib(path, stem))
     })
 }
 
@@ -765,16 +738,49 @@ fn set_macos_install_name(path: &Path, dst_stem: &str) -> Result<()> {
 }
 
 pub fn build_libstone() -> Result<()> {
-    if rock_host::project::is_release_layout() {
-        return Ok(());
+    if !rock_host::project::is_release_layout() {
+        let root = fs_err::canonicalize(rock_host::rock_dir())?;
+        prepare_core(&root)?;
     }
-    cargo_build_and_stage_lib(
-        "stone-rs",
-        &["build", "-p", "stone-rs"],
-        "stone_rs",
-        "stone",
-    )?;
     Ok(())
+}
+
+fn prepare_core(root: &Path) -> Result<Option<ReceiptLib>> {
+    if let Some(path) = std::env::var_os(ENGINE_BUILD_RECEIPT_ENV).filter(|value| !value.is_empty())
+    {
+        let path = PathBuf::from(path);
+        let receipt = load_engine_build_receipt(root, &path)?;
+        let lib = receipt
+            .libs
+            .into_iter()
+            .find(|lib| lib.dst_stem == CORE_STEM)
+            .with_context(|| {
+                format!(
+                    "engine build receipt `{}` does not contain core libstone",
+                    path.display()
+                )
+            })?;
+        validate_receipt_lib(root, &lib)?;
+        return Ok(Some(lib));
+    }
+
+    require_source_build()?;
+    rock_host::timed("stone-rs: cargo build", || {
+        run_cargo(&["build", "-p", "stone-rs"], "Failed to build stone-rs")
+    })?;
+    let src = cargo_target_dir(root)
+        .join("debug")
+        .join(cdylib_name(CORE_TARGET));
+    stage_library(&src, &root.join("tmp"), CORE_STEM).map_err(|error| {
+        if src.exists() {
+            return error;
+        }
+        anyhow::anyhow!(
+            "cargo build reported success but the cdylib was not produced at `{}`. Verify `CARGO_TARGET_DIR` and re-run `cargo build -p stone-rs`.",
+            src.display()
+        )
+    })?;
+    Ok(None)
 }
 
 pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Result<()> {
@@ -782,13 +788,7 @@ pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Resul
         anyhow::bail!("engine build receipts are only meaningful in a source workspace");
     }
     let root = fs_err::canonicalize(rock_host::rock_dir())?;
-    let inherited = engine_build_receipt_from_env()?.map(|(_, _, receipt)| receipt);
-    cargo_build_and_stage_lib(
-        "stone-rs",
-        &["build", "-p", "stone-rs"],
-        "stone_rs",
-        "stone",
-    )?;
+    let inherited = prepare_core(&root)?;
 
     for game_path in game_paths {
         for lib in game_engine_libs(game_path)? {
@@ -796,41 +796,21 @@ pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Resul
         }
     }
 
-    let target_dir = cargo_target_dir(&root);
-    let capture = |src_stem: &str, dst_stem: &str| -> Result<ReceiptLib> {
-        if let Some(lib) = inherited
-            .as_ref()
-            .and_then(|receipt| receipt_lib(receipt, dst_stem))
-        {
-            validate_receipt_lib(&root, lib)?;
-            return Ok(lib.clone());
+    let lib = match inherited {
+        Some(lib) => {
+            validate_receipt_lib(&root, &lib)?;
+            lib
         }
-        capture_receipt_lib(&root, &target_dir, src_stem, dst_stem)
+        None => capture_receipt_lib(&root, &cargo_target_dir(&root), CORE_TARGET, CORE_STEM)?,
     };
-    let libs = vec![capture("stone_rs", "stone")?];
     let receipt = EngineBuildReceipt {
         version: ENGINE_BUILD_RECEIPT_VERSION,
+        prebuilt_game_protocol: 1,
         workspace: root.to_string_lossy().into_owned(),
-        libs,
+        libs: vec![lib],
     };
-    rock_host::project::write_atomic(path, engine_build_receipt_json(&receipt)?)?;
+    rock_host::project::write_atomic(path, serde_json::to_vec_pretty(&receipt)?)?;
     Ok(())
-}
-
-fn engine_build_receipt_json(receipt: &EngineBuildReceipt) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec_pretty(&serde_json::json!({
-        "version": receipt.version,
-        // Lets launchers reject older binaries that ignore ROCK_PREBUILT_GAME and invoke Cargo.
-        "prebuilt_game_protocol": 1,
-        "workspace": receipt.workspace,
-        "libs": receipt.libs.iter().map(|lib| serde_json::json!({
-            "src_stem": lib.src_stem,
-            "dst_stem": lib.dst_stem,
-            "inputs": lib.inputs,
-            "inputs_sha1": lib.inputs_sha1,
-            "staged_sha1": lib.staged_sha1,
-        })).collect::<Vec<_>>(),
-    }))?)
 }
 
 fn load_engine_build_receipt(root: &Path, path: &Path) -> Result<EngineBuildReceipt> {
@@ -840,81 +820,18 @@ fn load_engine_build_receipt(root: &Path, path: &Path) -> Result<EngineBuildRece
             path.display()
         )
     })?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-        anyhow::anyhow!("invalid engine build receipt `{}`: {error}", path.display())
-    })?;
-    let object = value.as_object().ok_or_else(|| {
-        anyhow::anyhow!(
-            "invalid engine build receipt `{}`: root is not an object",
-            path.display()
-        )
-    })?;
-    let required_string = |object: &serde_json::Map<String, serde_json::Value>, field: &str| {
-        object
-            .get(field)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                anyhow::anyhow!("invalid engine build receipt: `{field}` is not a string")
-            })
-    };
-    let version = object
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid engine build receipt `{}`: `version` is not an integer",
-                path.display()
-            )
-        })? as u32;
-    let workspace_name = required_string(object, "workspace")?;
-    let lib_values = object
-        .get("libs")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid engine build receipt `{}`: `libs` is not an array",
-                path.display()
-            )
-        })?;
-    let mut libs = Vec::with_capacity(lib_values.len());
-    for value in lib_values {
-        let lib = value.as_object().ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid engine build receipt `{}`: a library is not an object",
-                path.display()
-            )
-        })?;
-        let input_values = lib
-            .get("inputs")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "invalid engine build receipt `{}`: `inputs` is not an array",
-                    path.display()
-                )
-            })?;
-        let inputs = input_values
-            .iter()
-            .map(|value| {
-                value.as_str().map(str::to_owned).ok_or_else(|| {
-                    anyhow::anyhow!("invalid engine build receipt: an input is not a string")
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        libs.push(ReceiptLib {
-            src_stem: required_string(lib, "src_stem")?,
-            dst_stem: required_string(lib, "dst_stem")?,
-            inputs,
-            inputs_sha1: required_string(lib, "inputs_sha1")?,
-            staged_sha1: required_string(lib, "staged_sha1")?,
-        });
-    }
-    let receipt = EngineBuildReceipt {
-        version,
-        workspace: workspace_name,
-        libs,
-    };
+    let invalid =
+        |error| anyhow::anyhow!("invalid engine build receipt `{}`: {error}", path.display());
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+    anyhow::ensure!(
+        value.is_object()
+            && value["libs"]
+                .as_array()
+                .is_some_and(|libs| libs.iter().all(serde_json::Value::is_object)),
+        "invalid engine build receipt `{}`: expected an object with library objects",
+        path.display(),
+    );
+    let receipt: EngineBuildReceipt = serde_json::from_value(value).map_err(invalid)?;
     if receipt.version != ENGINE_BUILD_RECEIPT_VERSION {
         anyhow::bail!(
             "engine build receipt `{}` has version {}, expected {}",
@@ -938,38 +855,6 @@ fn load_engine_build_receipt(root: &Path, path: &Path) -> Result<EngineBuildRece
         );
     }
     Ok(receipt)
-}
-
-fn receipt_lib<'a>(receipt: &'a EngineBuildReceipt, dst_stem: &str) -> Option<&'a ReceiptLib> {
-    receipt.libs.iter().find(|lib| lib.dst_stem == dst_stem)
-}
-
-fn engine_build_receipt_from_env() -> Result<Option<(PathBuf, PathBuf, EngineBuildReceipt)>> {
-    let Some(path) = std::env::var_os(ENGINE_BUILD_RECEIPT_ENV).filter(|value| !value.is_empty())
-    else {
-        return Ok(None);
-    };
-    let root = fs_err::canonicalize(rock_host::rock_dir())?;
-    let path = PathBuf::from(path);
-    let receipt = load_engine_build_receipt(&root, &path)?;
-    Ok(Some((root, path, receipt)))
-}
-
-fn validate_receipted_lib(dst_stem: &str) -> Result<bool> {
-    let Some((root, receipt_path, receipt)) = engine_build_receipt_from_env()? else {
-        return Ok(false);
-    };
-    let Some(lib) = receipt_lib(&receipt, dst_stem) else {
-        if dst_stem == "stone" {
-            anyhow::bail!(
-                "engine build receipt `{}` does not contain core libstone",
-                receipt_path.display()
-            );
-        }
-        return Ok(false);
-    };
-    validate_receipt_lib(&root, lib)?;
-    Ok(true)
 }
 
 pub fn build_engine_libs(game_path: &str) -> Result<()> {
