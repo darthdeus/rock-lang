@@ -1,0 +1,35 @@
+inline(lua) fn vm_jit_status() -> string = """
+    local status = { jit.status() }
+    return (status[1] and "on:" or "off:") .. table.concat(status, ",", 2)
+"""
+inline(js) fn vm_jit_status() -> string = 'return "off:";'
+
+inline(lua) fn vm_jit_identity() -> string =
+    'return jit.version .. "/" .. jit.os .. "/" .. jit.arch'
+inline(js) fn vm_jit_identity() -> string = 'return "//";'
+
+fn check_jit_status() {
+    let (on, flags) = luajit_status()
+    let status = (if on { "on:" } else { "off:" }) + flags
+    assert_eq(status, vm_jit_status())
+    assert_eq(on, luajit_enabled())
+}
+
+@test
+fn typed_jit_status_and_controls() {
+    let identity = luajit_version() + "/" + luajit_os() + "/" + luajit_arch()
+    assert_eq(identity, vm_jit_identity())
+    assert_eq(luajit_available(), identity != "//")
+    let was_on = luajit_enabled()
+    defer {
+        if was_on { luajit_on() } else { luajit_off() }
+    }
+    check_jit_status()
+    luajit_off()
+    luajit_flush()
+    assert(!luajit_enabled())
+    check_jit_status()
+    luajit_on()
+    assert_eq(luajit_enabled(), luajit_available())
+    check_jit_status()
+}

@@ -3861,3 +3861,20 @@ fn get_env_float(var: string, default_val: float) -> float {
     end
     return true
 """
+
+inline(lua) fn luajit_available() -> bool = "jit ~= nil"
+inline(lua) fn luajit_enabled() -> bool = "jit ~= nil and jit.status() == true"
+
+@scalar_abi inline(lua) fn luajit_status() -> (bool, string) = """
+    if jit == nil then return false, "" end
+    local status = { jit.status() }
+    return status[1], table.concat(status, ",", 2)
+"""
+
+inline(lua) fn luajit_version() -> string = 'jit and jit.version or ""'
+inline(lua) fn luajit_os() -> string = 'jit and jit.os or ""'
+inline(lua) fn luajit_arch() -> string = 'jit and jit.arch or ""'
+
+inline(lua) fn luajit_on() = "if jit then jit.on() end"
+inline(lua) fn luajit_off() = "if jit then jit.off() end"
+inline(lua) fn luajit_flush() = "if jit then jit.flush() end"

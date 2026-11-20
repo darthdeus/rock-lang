@@ -351,9 +351,12 @@ fn env_flag_override(name: string, fallback: bool) -> bool {
 // STONE_NO_JIT=1 runs the whole game interpreted -- the discriminant for
 // suspected trace-compiler defects. Flush too: jit.off() alone does not
 // retire already-compiled traces.
-@nomangle inline(lua) fn stone_apply_jit_env() = """
-    if os.getenv("STONE_NO_JIT") == "1" and jit ~= nil then jit.off(); jit.flush() end
-"""
+@nomangle fn stone_apply_jit_env() {
+    if luajit_available() && (env_var("STONE_NO_JIT") ?? "") == "1" {
+        luajit_off()
+        luajit_flush()
+    }
+}
 
 @nomangle inline(lua) fn stone_gc_set_pause(pause: int) -> int = """
     return collectgarbage("setpause", pause)
@@ -1355,24 +1358,18 @@ fn run_one_frame(
 // (see KEY_DEBUG_JIT_TRACE) for chasing LuaJIT bailout.
 // ============================================================================
 
-// LuaJIT-only. `jit.status()` returns variadic; first value is on/off,
-// rest are flag strings. We render to a compact string for the banner.
-// On non-LuaJIT this is a no-op returning "off".
-pub @nomangle inline(lua) fn jit_status_string() -> string = """
-    if jit == nil then return "off (no LuaJIT)" end
-    local r = { jit.status() }
-    local on = r[1]
-    local flags = {}
-    for i = 2, #r do flags[#flags + 1] = tostring(r[i]) end
-    local prefix = on and "on" or "off"
-    if #flags == 0 then return prefix end
-    return prefix .. " [" .. table.concat(flags, ",") .. "]"
-"""
+pub @nomangle fn jit_status_string() -> string {
+    if !luajit_available() { return "off (no LuaJIT)" }
+    let (on, flags) = luajit_status()
+    let prefix = if on { "on" } else { "off" }
+    if flags == "" { return prefix }
+    return prefix + " [" + flags + "]"
+}
 
-@nomangle inline(lua) fn jit_version_string() -> string = """
-    if jit == nil then return "(no LuaJIT)" end
-    return tostring(jit.version) .. " " .. tostring(jit.os) .. "/" .. tostring(jit.arch)
-"""
+@nomangle fn jit_version_string() -> string {
+    if !luajit_available() { return "(no LuaJIT)" }
+    return luajit_version() + " " + luajit_os() + "/" + luajit_arch()
+}
 
 fn print_environment_banner(config: GameConfig) {
     let os_name = get_os()
@@ -2032,27 +2029,21 @@ pub @nomangle inline(lua) fn drain_jit_abort_top(n: int) -> string = """
 // existing traces so we're not just freezing the broken state — the next
 // hot loop will re-enter the interpreter cleanly. Returns the new state
 // as a string so the hotkey handler can log it without re-querying.
-pub @nomangle inline(lua) fn jit_set_enabled(enabled: bool) -> string = """
-    if jit == nil then return "no-luajit" end
-    if enabled then
-        jit.on()
+pub @nomangle fn jit_set_enabled(enabled: bool) -> string {
+    if !luajit_available() { return "no-luajit" }
+    if enabled {
+        luajit_on()
         return "ON"
-    else
-        jit.off()
-        jit.flush()
-        return "OFF"
-    end
-"""
-
-inline(lua) fn jit_is_enabled() -> bool = """
-    if jit == nil then return false end
-    return jit.status() == true
-"""
+    }
+    luajit_off()
+    luajit_flush()
+    return "OFF"
+}
 
 // Reads the live runtime flag: STONE_NO_JIT changes the runtime without touching
 // Rock globals.
 fn toggle_jit_enabled() {
-    let state = jit_set_enabled(!jit_is_enabled())
+    let state = jit_set_enabled(!luajit_enabled())
     log_info("JIT", "runtime {state} (F3) — flushed traces; A/B for trace-thrash")
 }
 

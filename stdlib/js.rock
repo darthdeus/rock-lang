@@ -1009,3 +1009,13 @@ inline(js) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, valu
 inline(js) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue) -> T? = """
     return __json_record_js_decode(codec, __json_record_js_context(codec, __rock_json_types), name, value, null);
 """
+
+inline(js) fn luajit_available() -> bool = "return false;"
+inline(js) fn luajit_enabled() -> bool = "return false;"
+@scalar_abi inline(js) fn luajit_status() -> (bool, string) = 'return __rock_publish(false, "");'
+inline(js) fn luajit_version() -> string = 'return "";'
+inline(js) fn luajit_os() -> string = 'return "";'
+inline(js) fn luajit_arch() -> string = 'return "";'
+inline(js) fn luajit_on() = ""
+inline(js) fn luajit_off() = ""
+inline(js) fn luajit_flush() = ""
