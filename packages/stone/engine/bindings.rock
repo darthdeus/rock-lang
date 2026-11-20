@@ -343,12 +343,6 @@ pub fn clear_screen(r: float, g: float, b: float, a: float) {
     stone_clear_canvas(r, g, b, a)
 }
 
-// Point a sampler uniform at a texture unit. Under `@textures` this runs once
-// per slot at link time, never per draw.
-inline(lua) fn stone_shader_set_texture(shader: ShaderId, name: string, unit: int) = """
-    stone.stone_shader_set_texture(shader, name, unit)
-"""
-
 pub fn get_screen_width() -> float {
     let (w, _) = stone_get_window_size()
     return float(w)
@@ -942,7 +936,7 @@ fn get_game_identity() -> string {
 
 pub @inline fn os_time() -> int { clock_unix_seconds() }
 
-pub @nowrite @nomangle @inline inline(lua) fn os_getenv(var: string) -> string? = "os.getenv(var)"
+pub @nowrite @nomangle @inline fn os_getenv(var: string) -> string? { return env_var(var) }
 
 pub inline(lua) fn os_getpid() -> int = """
     pcall(ffi.cdef, "int getpid(void);")

@@ -549,7 +549,7 @@ pub fn shader_uses_compiler_fullscreen_vertex(shader_name: string) -> bool {
 // fresh program has fresh uniform state.
 fn bind_texture_slots(sid: ShaderId, names: [string]) {
     for (slot, name) in enumerate(names) {
-        stone_shader_set_texture(sid, name, slot)
+        stone_shader_set_texture(sid.0, name, slot)
     }
 }
 

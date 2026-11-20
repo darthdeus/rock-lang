@@ -52,8 +52,7 @@ pub value LifecycleSystem {
     dependencies: [LifecycleDependency],
 }
 
-inline(lua) fn lifecycle_wire_schedule_all() = "__rock_lifecycle_schedule_all_wires()"
-inline(lua) fn lifecycle_wire_take(key: string) -> bool = "return __rock_lifecycle_take_wire(key)"
+extern(lua) fn __rock_lifecycle_take_wire(key: string) -> bool
 
 pub inline(lua) fn lifecycle_systems(phase: string) -> [LifecycleSystem] = "return (_G.__ROCK_LIFECYCLE_PLAN or {})[phase] or {len=0,_data={}}"
 inline(lua) fn lifecycle_phase_has_scene(phase: string) -> bool = "local p = (_G.__ROCK_LIFECYCLE_PLAN or {})[phase]; return p ~= nil and (p.scene_owned or 0) > 0"
@@ -204,7 +203,7 @@ fn run_wire_systems() {
     if count == 0 { return }
     log_debug("SYSTEMS", "Running {count} wire systems...")
     for system in systems {
-        if lifecycle_wire_take(system.key) { system.func(0) }
+        if __rock_lifecycle_take_wire(system.key) { system.func(0) }
     }
     stone_flush_image_uploads()
     log_debug("SYSTEMS", "wire complete")

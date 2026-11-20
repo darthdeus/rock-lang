@@ -576,9 +576,7 @@ macro image_snapshot(name: expr, tol: expr) {
         + ",\"ok\":" + to_string(ok) + "}}", site)
 }
 
-pub inline(lua) fn tmpdir() -> string = """
-    return os.getenv("OUT") or ""
-"""
+pub fn tmpdir() -> string { return env_var("OUT") ?? "" }
 
 pub fn _shell_impl(cmd: string, site: string) {
     let ok = sim_shell_run(cmd)

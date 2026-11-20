@@ -1503,3 +1503,9 @@ fn scan_json_number(src: string, at: int) -> (int, bool, bool) {
     assert_eq!(lua.matches(" for c").count(), 3, "{lua}");
     assert!(!lua.contains("goto w"), "{lua}");
 }
+
+#[test]
+fn empty_vec_constructor_emits_the_literal_at_the_call_site() {
+    let lua = emit_inlined("fn run() -> [int] { return vec_new<int>() }", "run");
+    assert!(lua.contains("_data") && !lua.contains("vec_new"), "{lua}");
+}

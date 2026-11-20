@@ -113,16 +113,6 @@ inline(js) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
 
 @nomangle inline(js) fn __rock_col_copy(col: any, len: int) -> any = "return col.slice(0, len);"
 
-@nomangle inline(js) fn __rock_col_capacity(reserved: int, physical: int) -> int = """
-  return reserved > physical ? reserved : physical;
-"""
-
-@nomangle inline(js) fn __rock_stride_capacity(
-  reserved: int,
-  physical: int,
-  stride: int
-) -> int = "return Math.max(reserved, Math.floor(physical / stride));"
-
 @nomangle inline(js) fn __rock_stride_insert(
   data: any,
   lua_index: int,

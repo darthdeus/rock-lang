@@ -876,14 +876,11 @@ pub fn stone_get_global_mouse_position() -> IVec2 {
 
 pub extern(ffi, "stone") fn stone_show_cursor(show: bool)
 
-pub inline(lua) fn stone_create_cursor(path: string, hot_x: int, hot_y: int) -> int =
-    "return tonumber(stone.stone_create_cursor(path, hot_x, hot_y))"
+pub extern(ffi, "stone") fn stone_create_cursor(path: string, hot_x: int, hot_y: int) -> int
 
-pub inline(lua) fn stone_create_cursor_from_image_data(image_data_handle: int, hot_x: int, hot_y: int) -> int =
-    "return tonumber(stone.stone_create_cursor_from_image_data(image_data_handle, hot_x, hot_y))"
+pub extern(ffi, "stone") fn stone_create_cursor_from_image_data(image_data_handle: int, hot_x: int, hot_y: int) -> int
 
-pub inline(lua) fn stone_set_system_cursor(cursor_type: int) -> int =
-    "return tonumber(stone.stone_set_system_cursor(cursor_type))"
+pub extern(ffi, "stone") fn stone_set_system_cursor(cursor_type: int) -> int
 
 pub extern(ffi, "stone") fn stone_set_cursor(cursor_id: int)
 extern(ffi, "stone") fn stone_reset_cursor()
@@ -1012,9 +1009,6 @@ pub inline(lua) fn stone_window_hide() = """
     stone.stone_hide_window()
 """
 
-inline(lua) fn stone_window_show() = """
-    stone.stone_show_window()
-"""
 
 pub extern(ffi, "stone") fn stone_show_window_mode(mode: int)
 
@@ -1418,9 +1412,7 @@ pub extern(ffi, "stone") fn stone_unload_sound(handle: int) -> bool
 pub extern(ffi, "stone") fn stone_reload_sound(handle: int, path: string) -> bool
 pub extern(ffi, "stone") fn stone_load_music(path: string) -> int
 pub extern(ffi, "stone") fn stone_unload_music(handle: int) -> bool
-pub inline(lua) fn stone_music_playing_handle() -> int = """
-    return tonumber(stone.stone_music_playing_handle())
-"""
+pub extern(ffi, "stone") fn stone_music_playing_handle() -> int
 pub extern(ffi, "stone") fn stone_music_position_ms() -> int
 pub extern(ffi, "stone") fn stone_play_sound(handle: int, bus: int, volume: float,
     speed: float, decay: float, looped: bool, spatial: bool, pan: float) -> int
@@ -1968,7 +1960,6 @@ extern(ffi, "stone") fn stone_get_font_atlas_size(font_id: int, width: Ptr<int>,
 
 pub @inline inline(lua) fn stone_ensure_font_atlas_instance_ffi(font_id: int, pixel_size: int) -> int = "tonumber(stone.stone_ensure_font_atlas_instance(font_id, pixel_size))"
 pub @inline inline(lua) fn stone_get_font_instance_image_ffi(instance_id: int) -> int = "tonumber(stone.stone_get_font_instance_image(instance_id))"
-@inline inline(lua) fn stone_get_font_atlas_instance_pixel_size_ffi(font_id: int, index: int) -> int = "stone.stone_get_font_atlas_instance_pixel_size(font_id, index)"
 extern(ffi, "stone") fn stone_ensure_font_atlas_instance(font_id: int, pixel_size: int) -> int
 extern(ffi, "stone") fn stone_get_font_instance_image(instance_id: int) -> int
 extern(ffi, "stone") fn stone_get_font_atlas_instance_pixel_size(font_id: int, index: int) -> int
@@ -2392,25 +2383,10 @@ inline(lua) fn set_global_bool(name: string, value: bool) = """
     _G[name] = value
 """
 
-inline(lua) fn get_global_bool(name: string) -> bool = """
-    return _G[name] or false
-"""
 
-inline(lua) fn set_global_float(name: string, value: float) = """
-    _G[name] = value
-"""
 
-inline(lua) fn get_global_float(name: string) -> float = """
-    return _G[name] or 0.0
-"""
 
-inline(lua) fn set_global_any(name: string, value: any) = """
-    _G[name] = value
-"""
 
-inline(lua) fn get_global_any(name: string) -> any = """
-    return _G[name]
-"""
 
 inline(lua) fn get_stone_handle() -> any = """
     return _G.stone

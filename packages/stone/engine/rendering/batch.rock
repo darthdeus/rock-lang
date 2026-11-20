@@ -233,9 +233,9 @@ fn restore_after_custom_draw(target: int, depth: DepthMode, blend: BlendMode) {
     __nb_refresh_views(b.verts)
 """
 
-@nomangle inline(lua) fn __grow_vertex_buf(b: RenderBatch) = """
+@nomangle fn __grow_vertex_buf(b: RenderBatch) {
     __ensure_vertex_capacity(b, b.capacity + 1)
-"""
+}
 
 pub global RENDER_BATCHES: RenderBatchPool = render_batch_pool_new()
 pub global RENDER_BATCH_VERTS_LAST: int = 0
@@ -1178,9 +1178,9 @@ pub fn push_silhouette_mask_quad(
     emit_sprite_quad(mb, texture, pos, source, dest_size, pivot, rotation, flip_x, flip_y, tint, z_off, entity_id, false)
 }
 
-pub @nomangle inline(lua) fn reserve_vertices(batch: RenderBatch, n: int) = """
+pub @nomangle fn reserve_vertices(batch: RenderBatch, n: int) {
     __ensure_vertex_capacity(batch, batch.count + n)
-"""
+}
 
 // entity_id is stored as a float, exact in f32 up to 2^24.
 fn append_vertex(

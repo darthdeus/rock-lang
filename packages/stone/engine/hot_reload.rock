@@ -14,9 +14,7 @@ pub global hot_reload_full_count: int = 0
 
 // Only `rock stone` sets STONE_HOT_RELOAD=1. Other commands must never poll or
 // dofile an overlay: a stale incremental.lua would shadow the fresh main.lua.
-inline(lua) fn __hot_reload_enabled() -> bool = """
-    return os.getenv("STONE_HOT_RELOAD") == "1"
-"""
+fn __hot_reload_enabled() -> bool { return env_var("STONE_HOT_RELOAD") == "1" }
 
 pub inline(lua) fn stone_reload_hold(held: bool) -> bool = """
     local path = os.getenv("STONE_RELOAD_CONTROL")

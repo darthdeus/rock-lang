@@ -1287,19 +1287,7 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
     }
 }
 
-// THE Vec constructor. Two roles, one function:
-//   - typed (`-> [T]`): the type checker resolves `[...]` / `[]` literals to a
-//     `vec_new` call so a Vec is `[T]`, not `any`. rock codegen also lowers
-//     literals to this call (rock-codegen/src/anf/emit.rs); skull inlines the
-//     table directly and never calls it.
-//   - `@nomangle`: a single fixed name, so `inline(lua)` bodies that need an
-//     empty Vec to push into call `vec_new()` directly.
-// Emits the SAME shape skull uses for literals: a bare `{_data, len}` table
-// with no tag and NO metatable, so every Vec has one representation regardless
-// of origin. Methods resolve statically via UFCS.
-@nowrite @intrinsic inline(lua) fn vec_new<T>() -> [T] = """
-    return { _data = {}, len = 0 }
-"""
+@nowrite @intrinsic @inline fn vec_new<T>() -> [T] { return [] }
 
 // Bridges between a `[T]` and the raw 1-indexed backing array, for Rock code
 // handing that array to a C/Lua API or wrapping one built in raw Lua. Keeps the
@@ -1929,10 +1917,10 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     return copy
 """
 
-@nomangle inline(lua) fn __rock_col_capacity(reserved: int, physical: int) -> int = """
-    if reserved > physical then return reserved end
+@nomangle fn __rock_col_capacity(reserved: int, physical: int) -> int {
+    if reserved > physical { return reserved }
     return physical
-"""
+}
 
 // Appends realize the reservation once; clear releases leaves, not backing
 // storage.
@@ -1947,15 +1935,15 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     h.reserved = true
 """
 
-@nomangle inline(lua) fn __rock_stride_capacity(
+@nomangle fn __rock_stride_capacity(
     reserved: int,
     physical: int,
     stride: int
-) -> int = """
-    local populated = math.floor(physical / stride)
-    if reserved > populated then return reserved end
+) -> int {
+    let populated = physical ./ stride
+    if reserved > populated { return reserved }
     return populated
-"""
+}
 
 @nomangle inline(lua) fn __rock_stride_insert(
     data: any,
@@ -2558,16 +2546,15 @@ const EPSILON: float = 0.0000001
 """
 
 
-// Math functions
-// random / random_range / random_int / random_seed read and mutate the
-// 32-bit gameplay RNG state (`__rock_rng_next`, seeded in skull's prelude) —
-// NotPure, intentionally no @pure. Two streams: authoritative gameplay
-// (`random*`) and presentation (`presentation_random*`).
-// A 32-bit draw / 2^32 gives a uniform [0, 1) double.
-@intrinsic inline(lua) fn random() -> float = """
-    return __rock_rng_next() * (1.0 / 4294967296.0)
-"""
+// A 32-bit draw scaled by 2^-32 gives a double in [0, 1).
+extern(lua) fn __rock_rng_next() -> int
+extern(lua) fn __rock_rng_seed(seed: int)
+extern(lua) fn __rock_rng_state_get() -> int
+extern(lua) fn __rock_rng_state_set(state: int)
+
+@intrinsic fn random() -> float { return __rock_rng_next() * (1.0 / 4294967296.0) }
 fn random_range(min: float, max: float) -> float { return random() * (max - min) + min }
+
 @intrinsic inline(lua) fn random_int(min: int, max: int) -> int = """
     local r = max - min
     if r <= 0 then return min end
@@ -2576,20 +2563,19 @@ fn random_range(min: float, max: float) -> float { return random() * (max - min)
     local lo = __rock_rng_next()
     return (hi * 2097152 + math.floor(lo / 2048)) % r + min
 """
-@intrinsic inline(lua) fn random_seed(seed: int) = """
-    __rock_rng_seed(seed)
-"""
-@intrinsic inline(lua) fn random_get_state() -> int = """
-    return __rock_rng_state_get()
-"""
-@intrinsic inline(lua) fn random_set_state(state: int) = """
-    __rock_rng_state_set(state)
-"""
 
-@intrinsic inline(lua) fn presentation_random() -> float = """
-    return __rock_presentation_rng_next() * (1.0 / 4294967296.0)
-"""
+@intrinsic fn random_seed(seed: int) { __rock_rng_seed(seed) }
+@intrinsic fn random_get_state() -> int { return __rock_rng_state_get() }
+@intrinsic fn random_set_state(state: int) { __rock_rng_state_set(state) }
+
+extern(lua) fn __rock_presentation_rng_next() -> int
+extern(lua) fn __rock_presentation_rng_seed(seed: int)
+extern(lua) fn __rock_presentation_rng_state_get() -> int
+extern(lua) fn __rock_presentation_rng_state_set(state: int)
+
+@intrinsic fn presentation_random() -> float { return __rock_presentation_rng_next() * (1.0 / 4294967296.0) }
 fn presentation_random_range(min: float, max: float) -> float { return presentation_random() * (max - min) + min }
+
 @intrinsic inline(lua) fn presentation_random_int(min: int, max: int) -> int = """
     local r = max - min
     if r <= 0 then return min end
@@ -2598,15 +2584,11 @@ fn presentation_random_range(min: float, max: float) -> float { return presentat
     local lo = __rock_presentation_rng_next()
     return (hi * 2097152 + math.floor(lo / 2048)) % r + min
 """
-@intrinsic inline(lua) fn presentation_random_seed(seed: int) = """
-    __rock_presentation_rng_seed(seed)
-"""
-@intrinsic inline(lua) fn presentation_random_get_state() -> int = """
-    return __rock_presentation_rng_state_get()
-"""
-@intrinsic inline(lua) fn presentation_random_set_state(state: int) = """
-    __rock_presentation_rng_state_set(state)
-"""
+
+@intrinsic fn presentation_random_seed(seed: int) { __rock_presentation_rng_seed(seed) }
+@intrinsic fn presentation_random_get_state() -> int { return __rock_presentation_rng_state_get() }
+@intrinsic fn presentation_random_set_state(state: int) { __rock_presentation_rng_state_set(state) }
+
 @intrinsic @pure @inline inline(lua) fn sin(x: float) -> float = "math.sin(x)"
 @intrinsic @pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
 @intrinsic @pure @inline inline(lua) fn tan(x: float) -> float = "math.tan(x)"
