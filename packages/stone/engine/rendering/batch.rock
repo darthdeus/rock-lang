@@ -1947,7 +1947,6 @@ pub fn clear_ui_batches(pool: RenderBatchPool = UI_RENDER_BATCHES) {
         sweep_idle_batches(pool)
         if render_batch_pool_same(pool, UI_RENDER_BATCHES) { UI_BATCH_FAST.clear() }
     }
-    invalidate_text_batch_caches()
 }
 
 pub fn ensure_ui_batch(

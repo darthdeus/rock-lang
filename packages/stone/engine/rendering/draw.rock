@@ -471,11 +471,6 @@ pub fn mouse_canvas_pixel() -> IVec2 {
     return canvas_pixel_for(mouse_screen())
 }
 
-pub fn get_entity_id_at_mouse() -> int {
-    let p = mouse_canvas_pixel()
-    return get_entity_id_at_pixel(p.x, p.y)
-}
-
 pub fn get_nearest_entity_id_at_mouse(side: int) -> int {
     let p = mouse_canvas_pixel()
     return get_nearest_entity_id_at_pixel(p.x, p.y, side)
@@ -1042,12 +1037,6 @@ fn world_text_anchor(pos: Vec2, dims: Vec2, offset: Vec2) -> Vec2 {
     let ax = round((raw.x + cam.x) * ppwu) / ppwu - cam.x
     let ay = round((raw.y + cam.y) * ppwu) / ppwu - cam.y
     return v(ax, ay)
-}
-
-pub fn world_text_raster_for(font: Font, text: string, pos: Vec2, offset: Vec2, size: float) -> (float, Vec2) {
-    let em_wu = world_text_em_for(font, size)
-    let dims = measure_world_text_for(font, text, em_wu)
-    return (em_wu, world_text_anchor(pos, dims, offset))
 }
 
 fn queue_world_text_at_for(font: Font, text: string, pos: Vec2, size: float, color: Color, offset: Vec2, layer: int, depth: DepthMode) {

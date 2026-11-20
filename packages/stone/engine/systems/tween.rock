@@ -51,10 +51,6 @@ pub struct RateGate {
     accum: float = 0,
 }
 
-pub fn rate_gate(rate: float) -> RateGate {
-    return RateGate { rate: rate }
-}
-
 pub fn RateGate.advance(g, step: float) -> int {
     g.accum += step
     let interval = 1.0 / g.rate

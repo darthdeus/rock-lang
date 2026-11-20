@@ -101,6 +101,3 @@ pub fn ui_event_count(ev: UiEvent) -> int {
     }
 }
 
-pub fn ui_feel_plays() -> int {
-    return UI_FEEL.plays_n
-}

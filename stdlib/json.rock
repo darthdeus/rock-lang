@@ -1160,43 +1160,6 @@ fn JsonReaderArray.get_at(array, index: int) -> JsonReader {
     return json_reader_null()
 }
 
-@consume struct JsonReaderFieldIter {
-    reader: JsonReader,
-    pos: int,
-    keys: [string]? = null,
-    index: int = 0,
-}
-
-// Members stream in document order, duplicates included; consumers overwrite
-// earlier fields to keep JSON's last-member-wins behavior.
-fn json_reader_each_field(reader: JsonReader) -> JsonReaderFieldIter? {
-    if let value = reader.value {
-        let object = json_as_object(value) ?? return null
-        return JsonReaderFieldIter { reader, pos: -1, keys: object.keys() }
-    }
-    if reader.at < 0 || reader.src.unwrap().unit_at(reader.at) != 123 { return null }
-    return JsonReaderFieldIter { reader, pos: parse_skip_ws_inline_at(reader.src.unwrap(), reader.at + 1) }
-}
-
-fn JsonReaderFieldIter.iter(it) -> JsonReaderFieldIter { return it }
-
-fn JsonReaderFieldIter.next(it) -> (bool, (string, JsonReader)) {
-    if let keys = it.keys {
-        if it.index >= keys.len() { return (false, ("", json_reader_null())) }
-        let key = keys[it.index]
-        it.index += 1
-        return (true, (key, json_reader_field(it.reader, key).unwrap()))
-    }
-    let src = it.reader.src.unwrap()
-    if src.unit_at(it.pos) == 125 { return (false, ("", json_reader_null())) }
-    let (key, end) = parse_string_raw_at(src, it.pos)
-    let at = parse_skip_ws_inline_at(src, parse_skip_ws_inline_at(src, end) + 1)
-    let pos = parse_skip_ws_inline_at(src, json_reader_skip(src, at, it.reader.offsets))
-    if src.unit_at(pos) == 44 { pos = parse_skip_ws_inline_at(src, pos + 1) }
-    it.pos = pos
-    return (true, (key.unwrap(), json_reader_at(it.reader, at)))
-}
-
 fn json_reader_as_object(reader: JsonReader) -> Map<string, JsonReader>? {
     let fields: Map<string, JsonReader> = map_new()
     if let value = reader.value {

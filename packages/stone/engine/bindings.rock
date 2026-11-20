@@ -38,16 +38,10 @@ pub enum SampledTexture {
     Canvas(Canvas),
 }
 
-pub global SRGB_COLOR_CANVASES: Map<int, bool> = map_new()
-
-pub fn canvas_color_srgb(canvas: Canvas) {
-    SRGB_COLOR_CANVASES[canvas.handle.0] = true
-}
-
 pub fn sampled_color_srgb(source: SampledTexture) -> bool {
     match source {
         SampledTexture::Image(_) => return true,
-        SampledTexture::Canvas(canvas) => return SRGB_COLOR_CANVASES.get(canvas.handle.0) ?? false,
+        SampledTexture::Canvas(_) => return false,
     }
 }
 
@@ -677,7 +671,6 @@ pub fn resize_canvas(canvas: Canvas, width: float, height: float) -> Canvas? {
 
 pub fn destroy_canvas(canvas: Canvas) {
     CANVAS_ACTIVE.remove(canvas.handle.0)
-    SRGB_COLOR_CANVASES.remove(canvas.handle.0)
     if canvas.handle.0 == 0 { return }
     stone_destroy_canvas(canvas.handle.0)
 }

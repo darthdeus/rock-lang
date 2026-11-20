@@ -108,18 +108,6 @@ fn __arena_new_owned<T>(scene_id: int) -> Arena<T> {
     return Arena { _scene_id: scene_id, _arena_id: id }
 }
 
-fn __arena_reinitialize<T>(arena: Arena<T>) {
-    __weak_cache_retire(arena._scene_id, arena._arena_id, -1)
-    assert(!is_null(__arena_store_any(arena._scene_id, arena._arena_id)),
-        "Arena {arena._arena_id} is not live")
-    let store: ArenaStore<T> = ArenaStore {
-        _owner_scene_id: arena._scene_id,
-        generations: [], occupied: [], data: [], free_indices: [],
-        occupied_count: 0, next_generation: 0,
-    }
-    __ARENA_REGISTRY.stores.insert(arena._arena_id, __arena_store_erased(store))
-}
-
 fn arena_destroy<T>(arena: Arena<T>) -> bool {
     return __arena_destroy_id(arena._scene_id, arena._arena_id)
 }

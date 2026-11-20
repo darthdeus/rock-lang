@@ -144,33 +144,6 @@ fn __scene_type_bucket_remove(scene_id: int) {
     __SCENE_REGISTRY.type_bucket_pos.set(scene_id, -1)
 }
 
-@nomangle
-fn __scene_rebuild_type_buckets() {
-    let type_keys: [string] = []
-    let type_buckets: [[int]] = []
-    let type_bucket_pos: [int] = []
-    let root_type_bucket: [int] = []
-    let lookup: Map<string, int> = map_new()
-    __SCENE_REGISTRY.type_keys = type_keys
-    __SCENE_REGISTRY.type_buckets = type_buckets
-    __SCENE_REGISTRY.type_bucket_pos = type_bucket_pos
-    __SCENE_REGISTRY.root_type_bucket = root_type_bucket
-    __SCENE_REGISTRY.type_bucket_lookup = lookup
-    __SCENE_REGISTRY.phase_bucket_lengths = []
-    for i in 0..vec_len(__SCENE_REGISTRY.states) {
-        vec_push(__SCENE_REGISTRY.root_type_bucket, -1)
-        vec_push(__SCENE_REGISTRY.type_bucket_pos, -1)
-    }
-    for i in 0..vec_len(__SCENE_REGISTRY.states) {
-        if __SCENE_REGISTRY.states[i] == __SCENE_LIVE {
-            let key = __SCENE_REGISTRY.root_type_key.get(i)
-            if !is_null(key) && key != "" {
-                __scene_type_bucket_insert(i, key)
-            }
-        }
-    }
-}
-
 // `graceful` runs teardown actions in registration order BEFORE any Arena is
 // retired, while their rows still resolve. A throwing closer propagates and
 // leaves the Scene queued with its rows intact.

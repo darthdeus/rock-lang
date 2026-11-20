@@ -2,7 +2,7 @@
 // emission/measurement. Split out of `batch.rock`, which keeps the generic
 // batch pools, geometry, ordering and flushing; this file calls into those
 // (ensure_ui_batch, append_vertex, batch_key_of) and batch calls back only
-// through `invalidate_text_batch_caches` and the `text_batch` batch key.
+// through the `text_batch` batch key.
 //
 // Stays out on purpose: font loading and default-family resolution live in
 // `stone/engine/font_resolve.rock`; text-art effects live in
@@ -70,15 +70,6 @@ fn text_line_metrics(font_idx: int, scale_y: float) -> TextLineMetrics {
     }
 }
 
-pub fn invalidate_text_batch_caches() {
-    let i = 0
-    while i < TEXT_BATCH_CACHES.len {
-        TEXT_BATCH_CACHES[i] = null
-        TEXT_BATCH_POOLS[i] = null
-        i = i + 1
-    }
-}
-
 // Initialize per-font batch state. Called by load_font() in lib.rock
 // after the FFI succeeds, so each loaded font automatically gets its
 // atlas image, pixel size, and glyph cache populated. Grows the
@@ -105,8 +96,6 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
         GLYPH_CACHES.push([])
         GLYPH_UNIT_CACHES.push([])
         FONT_CP_SLOTS.push(map_new())
-        TEXT_BATCH_CACHES.push(null)
-        TEXT_BATCH_POOLS.push(null)
     }
 
     if atlas {
@@ -200,8 +189,6 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
         unit_face = unit_face + 1
     }
     GLYPH_UNIT_CACHES[idx] = unit_faces
-    TEXT_BATCH_CACHES[idx] = null
-    TEXT_BATCH_POOLS[idx] = null
     text_layout_cache_clear()
     text_prepare_cache_clear()
     let glyphs = faces[FACE_REGULAR]
@@ -228,8 +215,6 @@ fn drop_text_batch_for(backend_id: int) {
     GLYPH_CACHES[idx] = []
     GLYPH_UNIT_CACHES[idx] = []
     FONT_CP_SLOTS[idx] = map_new()
-    TEXT_BATCH_CACHES[idx] = null
-    TEXT_BATCH_POOLS[idx] = null
     text_layout_cache_clear()
     text_prepare_cache_clear()
 }
@@ -239,36 +224,6 @@ fn drop_all_text_batches() {
     for i in 0..count {
         drop_text_batch_for(i + 1)
     }
-}
-
-// A cached batch belongs to ONE pool: keyed with its pool so a surface switch
-// (pixel_screen vs screen) misses instead of hitting the other surface's batch.
-pub global TEXT_BATCH_CACHES: [Entity<RenderBatch>?] = []
-global TEXT_BATCH_POOLS: [RenderBatchPool?] = []
-
-pub fn get_text_batch(font: Font) -> RenderBatch {
-    let d = font.data().unwrap()
-    let idx = d.backend_id - 1
-    if FONT_ATLASES[idx] == Image(0) {
-        error("font {d.backend_id} text requested a font with no atlas")
-    }
-    let pool = current_ui_pool()
-    if let cached = TEXT_BATCH_CACHES[idx] {
-        let owner = TEXT_BATCH_POOLS[idx]
-        if owner != null && render_batch_pool_same(owner, pool) {
-            if let batch = cached.get() { return batch }
-        }
-    }
-
-    let batch = ensure_ui_batch(sampled_image(FONT_ATLASES[idx]), RenderProps {
-        z_layer: UI_TEXT_Z_LAYER,
-        depth: DepthMode::Off,
-        sampling: d.sampling,
-        text_batch: true,
-    })
-    TEXT_BATCH_CACHES[idx] = batch.handle.entity().unwrap()
-    TEXT_BATCH_POOLS[idx] = pool
-    batch
 }
 
 fn __queue_text_quad(

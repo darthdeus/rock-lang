@@ -57,12 +57,6 @@ pub fn ui_submission_probe_stop() {
     stone_ui_probe_stop()
 }
 
-pub fn ui_submission_probe_write_if_requested(name: string) {
-    let directory = env_var("ROCK_UI_TRACE_DIR")
-    if directory == null { return }
-    if !stone_ui_probe_write("{directory}/{name}.json") { error("UI probe could not write requested trace") }
-}
-
 fn ui_probe_texture(texture: SampledTexture) -> JsonValue {
     let m: Map<string, JsonValue> = map_new()
     match texture {
@@ -303,7 +297,3 @@ pub fn ui_submission_probe_refusal(kind: string, reason: string) {
     if !stone_ui_probe_refuse(kind, json_encode(json_object(m))) { error("UI probe rejected refusal observation") }
 }
 
-pub fn ui_submission_probe_empty_pass(viewport: GpuRect) -> bool {
-    return submit_pass(GpuPass { target: GpuTarget::Window, load: GpuLoad::Load,
-        viewport: viewport, draws: [] })
-}

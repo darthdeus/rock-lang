@@ -887,7 +887,6 @@ fn render_commands_begin_frame() {
     discard_pool_batches(OVERLAY_RENDER_BATCHES)
     discard_pool_batches(pixel_screen.batches)
     retire_outline_commands(snapshot: false)
-    invalidate_text_batch_caches()
 
     recycle_pending_meshes()
     recycle_acquired_meshes()

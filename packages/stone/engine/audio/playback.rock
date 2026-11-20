@@ -115,10 +115,6 @@ pub @pure fn decibels(db: float) -> float {
     return pow(10.0, db / 20.0)
 }
 
-pub fn load_sound(path: string) -> Sound {
-    return load_sound_asset(path)
-}
-
 pub fn _play_random_sound_impl(sounds: [Sound], volume: float, speed: float,
                            decay: float, bus: int, pitch_jitter: float, looped: bool,
                            spatial: bool, pan: float, site: string) {

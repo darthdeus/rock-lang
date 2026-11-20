@@ -137,10 +137,6 @@ pub fn sfx_log_recent(i: int) -> SfxEvent? {
     return SFX_LOG[((start - 1 - i) % n + n) % n]
 }
 
-pub fn sfx_last() -> SfxEvent? {
-    return sfx_log_recent(0)
-}
-
 pub fn sfx_log_clear() {
     SFX_LOG = []
     SFX_LOG_HEAD = 0

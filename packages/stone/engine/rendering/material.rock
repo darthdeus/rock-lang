@@ -83,10 +83,6 @@ pub fn material_cached_batch(handle: Entity<Material>) -> RenderBatch? {
     return batch.get()
 }
 
-pub fn material_resolve_batch(handle: Entity<Material>) -> RenderBatch {
-    return material_resolve_batch_row(handle.get().unwrap())
-}
-
 fn material_resolve_batch_row(mat: Material) -> RenderBatch {
     let cached = if mat.cached_batch != null { mat.cached_batch.get() } else { null }
     let batch = if CURRENT_RENDER_POOL.active() {

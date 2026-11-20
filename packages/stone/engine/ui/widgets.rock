@@ -158,31 +158,6 @@ pub fn skin_button(r: UiRect, label: string, skin: Entity<UiSkin>, scope: string
     return skin_button_fired(id, r, resolved.feel, skin)
 }
 
-pub fn ui_button(r: UiRect, label: string, base: Color, scope: string, key: string = "", font_size: float = 18.0, disabled: bool = false) -> bool {
-    let id = ui_button_id(scope, label, key)
-    if disabled {
-        ui_mouse_item(id, r)
-        ui_button_flat_draw(r, label, base, ButtonState::Disabled, font_size)
-        return false
-    }
-    let st = ui_button_state(id, r, scope)
-    ui_button_flat_draw(r, label, base, st, font_size)
-    return ui_button_fired(id, r)
-}
-
-pub fn ui_button_flat_draw(r: UiRect, label: string, base: Color, st: ButtonState, font_size: float) {
-    let bg = match st {
-        ButtonState::Hovered  => base.lighten(1.18),
-        ButtonState::Pressed  => base.darken(0.78),
-        ButtonState::Normal   => base,
-        ButtonState::Disabled => base.darken(0.45),
-    }
-    r.fill(bg)
-    let tcol = if st == ButtonState::Disabled { WHITE.darken(0.55) } else { WHITE }
-    let content = if st == ButtonState::Pressed { r.offset(v(0.0, 1.0)) } else { r }
-    content.text(label, font_size, tcol, TextAlign::Center)
-}
-
 pub struct UiSliderDrag {
     id: int,
     rect: UiRect,
