@@ -1727,6 +1727,7 @@ dependencies = [
  "bone-semantic",
  "clap",
  "clap_complete",
+ "errno",
  "colored",
  "fs-err",
  "globset",

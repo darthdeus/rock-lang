@@ -77,6 +77,9 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 sysinfo = { workspace = true }
 libc = "0.2"
 
+[target.'cfg(unix)'.dependencies]
+errno = "0.3"
+
 [dev-dependencies]
 test-utils = { workspace = true }
 

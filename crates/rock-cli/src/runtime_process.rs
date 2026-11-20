@@ -44,7 +44,20 @@ pub(crate) fn spawn_game(
     std::os::unix::process::CommandExt::process_group(command, 0);
     let child = crate::headless_scope::spawn_bound_child(command, scratch)?;
     crate::child_lifetime::guard_against_parent_kill(&child)?;
+    crate::child_lifetime::track_game(child.id());
     Ok(child)
+}
+
+pub(crate) fn exit_after_game_interrupt(
+    game: Option<&mut crate::headless_scope::BoundChild>,
+) -> Result<()> {
+    if crate::child_lifetime::game_interrupted() {
+        if let Some(game) = game {
+            game.wait()?;
+        }
+        crate::invocation_log::exit(130);
+    }
+    Ok(())
 }
 
 /// Portable scratch belongs to the OS/user-selected temporary directory,
@@ -76,6 +89,66 @@ mod process_tests {
                 &rock_engine_host::runtime::lib_path_with_inherited()
             ))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_waits_for_game_shutdown() {
+        use bone_core::prelude::{Duration, Instant};
+        use std::process::Command;
+
+        const SCRATCH: &str = "ROCK_INTERRUPT_TEST_SCRATCH";
+        if let Some(root) = std::env::var_os(SCRATCH) {
+            let root = std::path::PathBuf::from(root);
+            let mut command = Command::new("sh");
+            command.current_dir(&root).args([
+                "-c",
+                r#"trap 'touch draining; read -r release; touch finished; exit 0' TERM
+touch ready
+while :; do sleep 0.02; done"#,
+            ]);
+            let mut game = super::spawn_game(&mut command, &root).unwrap();
+            std::fs::write(root.join("bound"), "").unwrap();
+            game.wait().unwrap();
+            super::exit_after_game_interrupt(None).unwrap();
+            panic!("launcher should have exited with the interrupt status");
+        }
+
+        let scratch = tempfile::tempdir().unwrap();
+        let mut launcher = Command::new(std::env::current_exe().unwrap());
+        launcher
+            .args([
+                "--exact",
+                "runtime_process::process_tests::interrupt_waits_for_game_shutdown",
+            ])
+            .env(SCRATCH, scratch.path())
+            .stdin(std::process::Stdio::piped());
+        let mut launcher = crate::child_lifetime::spawn_bound_child(&mut launcher).unwrap();
+        let wait_for = |name| {
+            let marker = scratch.path().join(name);
+            let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
+            while !marker.exists() {
+                assert!(Instant::now() < deadline, "timed out waiting for {name}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait_for("bound");
+        wait_for("ready");
+        assert_eq!(unsafe { libc::kill(launcher.id() as i32, libc::SIGINT) }, 0);
+        wait_for("draining");
+        assert!(
+            launcher.try_wait().unwrap().is_none(),
+            "launcher exited during shutdown"
+        );
+        use std::io::Write;
+        launcher
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"finish\n")
+            .unwrap();
+        wait_for("finished");
+        assert_eq!(launcher.wait().unwrap().code(), Some(130));
     }
 }
 

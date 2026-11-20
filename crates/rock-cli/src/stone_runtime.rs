@@ -236,6 +236,7 @@ fn exec_luajit_file(lua_file: &Path, app_args: &[String]) -> Result<()> {
     let status = child
         .wait()
         .map_err(|e| anyhow::anyhow!("wait failed: {}", e))?;
+    crate::runtime_process::exit_after_game_interrupt(None)?;
     if !status.success() {
         crate::invocation_log::exit(status.code().unwrap_or(1));
     }
