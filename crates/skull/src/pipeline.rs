@@ -181,7 +181,7 @@ pub fn emit_program(
     target: EmitTarget,
 ) -> Result<MirEmit, CompilerError> {
     let mut emit = crate::mir_emit::FullEmit::one_shot()
-        .without_fingerprint()
+        .without_artifact_validation()
         .project_root(target.project_root)
         .renderer(target.renderer);
     if target.global_accessors {

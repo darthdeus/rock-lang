@@ -74,8 +74,6 @@ pub struct MirEmit {
     /// The mutable-global layout fingerprint the program opens its storage with.
     pub global_layout: String,
     pub definition_plan: skull_mir::definition::DefinitionPlan,
-    /// `None` when built with [`FullEmit::without_fingerprint`].
-    pub artifact_fingerprint: Option<String>,
     pub phases: Vec<(&'static str, std::time::Duration)>,
     pub attribution: EmitAttribution,
     /// Whether the host should append the generated main call.
@@ -117,7 +115,7 @@ pub struct FullEmit<'a> {
     project_root: Option<&'a str>,
     renderer_target: RendererTarget,
     shapes: ShapeOverrides,
-    fingerprint: bool,
+    validate_artifact: bool,
     global_accessors: bool,
     attribution: bool,
 }
@@ -129,7 +127,7 @@ impl<'a> FullEmit<'a> {
             project_root: None,
             renderer_target: RendererTarget::Gl,
             shapes: ShapeOverrides::default(),
-            fingerprint: true,
+            validate_artifact: true,
             global_accessors: false,
             attribution: false,
         }
@@ -171,10 +169,8 @@ impl<'a> FullEmit<'a> {
         self
     }
 
-    /// Skip the artifact fingerprint. Only a host that writes the program once
-    /// and never reloads or replays it can do without.
-    pub fn without_fingerprint(mut self) -> Self {
-        self.fingerprint = false;
+    pub(crate) fn without_artifact_validation(mut self) -> Self {
+        self.validate_artifact = false;
         self
     }
 

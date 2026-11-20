@@ -8,8 +8,7 @@ pub fn emit_incremental(
     // Shader registrations first: they are graph roots, so the cache update must
     // see this edit's set.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (_affected, update, added_errors, _fingerprint_identities) =
-        cache.update_chunk_cache(ws, reinferred, &[])?;
+    let (_affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, &[])?;
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
@@ -26,7 +25,7 @@ pub fn emit_incremental(
         None,
         None,
     )?;
-    cache.retain_assembly(ws, &emit, emitted, unit_reads, built_specs)?;
+    cache.retain_assembly(ws, &emit, emitted, unit_reads, built_specs);
     emit.compile_counts.chunks = cache.chunks.len();
     // A codegen rejection is recorded on the shared `CodegenCtx`, so it must
     // be drained here or it would surface at a later, unrelated emit.

@@ -210,12 +210,12 @@ fn reload_lane_reuses_the_compiled_session_and_isolates_its_chunk() {
     )
     .expect("compile once");
     let original = std::fs::read(&main).unwrap();
-    let fingerprint = stone.artifact_fingerprint().to_string();
+    let fingerprint = stone.artifact_fingerprint().unwrap();
     std::fs::remove_file(&source).unwrap();
     let lane = reload_lane_session(project.path(), true, shared.path(), Some(stone), true)
         .expect("reuse without reading source")
         .expect("selected lane");
-    assert_eq!(lane.stone.artifact_fingerprint(), fingerprint);
+    assert_eq!(lane.stone.artifact_fingerprint().unwrap(), fingerprint);
     let lane_main = Path::new(&lane.output).join(rock_host::project::MAIN_LUA_FILENAME);
     assert_eq!(std::fs::read(&lane_main).unwrap(), original);
     std::fs::write(&lane_main, "fixture rewrite").unwrap();

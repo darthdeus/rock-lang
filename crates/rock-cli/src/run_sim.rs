@@ -1890,7 +1890,7 @@ pub(crate) fn do_run_allocation_sites(
     let output = out_dir.path().to_string_lossy().into_owned();
     let registry = SimRegistry::from(compiled.registry);
     let sim_sources = resolve_sim_sources(&project_path, &registry.source_files)?;
-    let artifact_fingerprint = compiled.stone.artifact_fingerprint().to_string();
+    let artifact_fingerprint = compiled.stone.artifact_fingerprint()?;
     drop(compiled.stone);
     let generated_lua_path = artifact_dir.join("main.lua");
     fs_err::copy(

@@ -89,15 +89,7 @@ fn assemble_overlay(
     cache: &SkullEmitCache,
     shader_changed: bool,
     initialize_code_slots: bool,
-    mut fingerprint_identities: FxHashSet<skull_mir::code_identity::CodeIdentity>,
-) -> Result<
-    (
-        MirEmit,
-        UnitComptimeReads,
-        crate::artifact_fingerprint::CodeRows,
-    ),
-    CompilerError,
-> {
+) -> Result<(MirEmit, UnitComptimeReads), CompilerError> {
     let t_clone_artifact = Instant::now();
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     if initialize_code_slots {
@@ -261,12 +253,6 @@ fn assemble_overlay(
             let line = {
                 let unit =
                     emit_global_unit(ws, &cache.scx, &cache.cg, &cache.concrete, a.mid, a.gid);
-                fingerprint_identities.extend(
-                    unit.code_artifact
-                        .entries()
-                        .iter()
-                        .map(|entry| entry.identity.clone()),
-                );
                 candidate_code_artifact = std::sync::Arc::new(
                     candidate_code_artifact.with_replacements(unit.code_artifact.entries()),
                 );
@@ -329,48 +315,24 @@ fn assemble_overlay(
         .cloned()
         .ok_or_else(|| {
             CompilerError::new_no_location(
-                "Artifact fingerprint generation requires a complete DefinitionPlan".to_string(),
+                "Artifact validation requires a complete DefinitionPlan".to_string(),
             )
         })?;
     let global_layout = cache.edit.global_layout.clone().ok_or_else(|| {
-        CompilerError::new_no_location(
-            "Artifact fingerprint generation requires a global layout".to_string(),
-        )
+        CompilerError::new_no_location("Artifact validation requires a global layout".to_string())
     })?;
     let artifact_reads = artifact_comptime_reads(cache, &[], &unit_reads, false);
     let d_metadata = t_metadata.elapsed();
-    let t_fingerprint = Instant::now();
-    let mut fingerprint_code_rows = cache.edit.fingerprint_code_rows.clone().ok_or_else(|| {
-        CompilerError::new_no_location(
-            "overlay requires a complete code fingerprint inventory".to_string(),
-        )
-    })?;
-    let t_fingerprint_rows = Instant::now();
-    fingerprint_code_rows
-        .replace(
-            ws,
-            cache.scx.interner(),
-            &candidate_code_artifact,
-            &fingerprint_identities,
-        )
-        .map_err(|error| CompilerError::new_no_location(error.to_string()))?;
-    let d_fingerprint_rows = t_fingerprint_rows.elapsed();
-    let artifact_fingerprint = crate::artifact_fingerprint::compute_cached(
+    let t_validation = Instant::now();
+    crate::artifact_fingerprint::validate(
         ws,
-        cache.scx.interner(),
         &candidate_code_artifact,
-        &lifecycle_plan,
         &definition_plan,
-        &global_layout,
         &artifact_reads,
-        &ws.comptime_inputs.volatile_vars,
-        renderer_fingerprint_tag(cache.renderer_target),
-        &fingerprint_code_rows,
     )
-    .map_err(|error| {
-        CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}"))
-    })?;
-    let d_fingerprint = t_fingerprint.elapsed();
+    .map_err(artifact_validation_error)?;
+    let d_validation = t_validation.elapsed();
+
     let mut ctor_calls = Vec::new();
     crate::push_value_ctor_calls(&out[value_ctors_at..], &mut ctor_calls);
     out.insert_str(
@@ -397,7 +359,6 @@ fn assemble_overlay(
             lifecycle_plan,
             global_layout,
             definition_plan,
-            artifact_fingerprint: Some(artifact_fingerprint),
             phases: vec![
                 ("  overlay artifact clone", d_clone_artifact),
                 ("  overlay definitions", d_definitions),
@@ -407,8 +368,7 @@ fn assemble_overlay(
                 ("  overlay lifecycle collection", d_lifecycle),
                 ("  overlay publication", d_publication),
                 ("  overlay metadata", d_metadata),
-                ("  overlay fingerprint", d_fingerprint),
-                ("  overlay fingerprint code rows", d_fingerprint_rows),
+                ("  overlay validate artifact", d_validation),
             ],
             attribution: EmitAttribution::default(),
             // `main.lua` already installed the entry point.
@@ -416,7 +376,6 @@ fn assemble_overlay(
             shaders: std::sync::Arc::clone(&cache.shader_registrations.sources),
         },
         unit_reads,
-        fingerprint_code_rows,
     ))
 }
 
@@ -445,8 +404,7 @@ pub fn emit_overlay_with_span_edits(
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
     let d_shader = t_shader.elapsed();
     let t_chunk = Instant::now();
-    let (affected, update, added_errors, fingerprint_identities) =
-        cache.update_chunk_cache(ws, reinferred, edits)?;
+    let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, edits)?;
     let d_chunk = t_chunk.elapsed();
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
@@ -521,14 +479,8 @@ pub fn emit_overlay_with_span_edits(
     let d_stale = t_stale.elapsed();
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let (mut emit, overlay_unit_reads, fingerprint_code_rows) = assemble_overlay(
-        ws,
-        cache,
-        shader_changed,
-        initialize_code_slots,
-        fingerprint_identities,
-    )?;
-    cache.edit.fingerprint_code_rows = Some(fingerprint_code_rows);
+    let (mut emit, overlay_unit_reads) =
+        assemble_overlay(ws, cache, shader_changed, initialize_code_slots)?;
     cache.edit.record_artifact(&emit);
     for (key, reads) in overlay_unit_reads.globals {
         if reads.is_empty() {

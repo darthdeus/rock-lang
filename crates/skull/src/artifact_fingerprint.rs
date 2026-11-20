@@ -5,13 +5,12 @@ use std::fmt;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use rustc_hash::{FxHashMap, FxHashSet};
-use skull_mir::code_identity::{CaptureMode, CodeArtifact, CodeEntry, CodeIdentity};
+use rustc_hash::FxHashSet;
+use skull_mir::code_identity::{CaptureMode, CodeArtifact, CodeEntry};
 use skull_mir::definition::DefinitionPlan;
 use skull_mir::lifecycle::LifecyclePlan;
 use skull_mir::mir::{ComptimeInputId, ComptimeRead, comptime_value_hash};
 use skull_mir::monoty::MonoInterner;
-use std::sync::Arc;
 use ustr::Ustr;
 
 const FINGERPRINT_VERSION: &str = "semantic-artifact-v3";
@@ -27,7 +26,7 @@ impl fmt::Display for FingerprintError {
 
 impl std::error::Error for FingerprintError {}
 
-/// The exact identity consumed by replay recording and replay admission.
+/// The canonical identity published with allocation-site diagnostics.
 pub fn compute(
     ws: &Workspace,
     interner: &MonoInterner,
@@ -39,59 +38,7 @@ pub fn compute(
     volatile_vars: &FxHashSet<Ustr>,
     renderer: &str,
 ) -> Result<String, FingerprintError> {
-    compute_inner(
-        ws,
-        interner,
-        artifact,
-        lifecycle,
-        definitions,
-        global_layout,
-        comptime_reads,
-        volatile_vars,
-        renderer,
-        None,
-    )
-}
-
-pub(crate) fn compute_cached(
-    ws: &Workspace,
-    interner: &MonoInterner,
-    artifact: &CodeArtifact,
-    lifecycle: &LifecyclePlan,
-    definitions: &DefinitionPlan,
-    global_layout: &str,
-    comptime_reads: &[ComptimeRead],
-    volatile_vars: &FxHashSet<Ustr>,
-    renderer: &str,
-    code_rows: &CodeRows,
-) -> Result<String, FingerprintError> {
-    compute_inner(
-        ws,
-        interner,
-        artifact,
-        lifecycle,
-        definitions,
-        global_layout,
-        comptime_reads,
-        volatile_vars,
-        renderer,
-        Some(code_rows),
-    )
-}
-
-fn compute_inner(
-    ws: &Workspace,
-    interner: &MonoInterner,
-    artifact: &CodeArtifact,
-    lifecycle: &LifecyclePlan,
-    definitions: &DefinitionPlan,
-    global_layout: &str,
-    comptime_reads: &[ComptimeRead],
-    volatile_vars: &FxHashSet<Ustr>,
-    renderer: &str,
-    code_rows: Option<&CodeRows>,
-) -> Result<String, FingerprintError> {
-    validate_inputs(ws, artifact, comptime_reads, volatile_vars)?;
+    validate_inventory(ws, artifact, volatile_vars)?;
 
     let mut h = CanonicalHasher::default();
     h.string(FINGERPRINT_VERSION);
@@ -108,25 +55,15 @@ fn compute_inner(
         h.string(name);
     }
 
-    if let Some(rows) = code_rows {
-        if rows.len() != artifact.entries.len() {
-            return Err(FingerprintError(
-                "cached code fingerprint inventory is incomplete".to_string(),
-            ));
-        }
-        h.len(rows.len());
-        rows.append_to(&mut h.bytes);
-    } else {
-        let mut code = artifact
-            .entries
-            .values()
-            .map(|entry| (entry.identity.logical_key(ws, interner), entry))
-            .collect::<Vec<_>>();
-        code.sort_by(|left, right| left.0.cmp(&right.0));
-        h.len(code.len());
-        for (key, entry) in code {
-            write_code_row(&mut h, &key, entry)?;
-        }
+    let mut code = artifact
+        .entries
+        .values()
+        .map(|entry| (entry.identity.logical_key(ws, interner), entry))
+        .collect::<Vec<_>>();
+    code.sort_by(|left, right| left.0.cmp(&right.0));
+    h.len(code.len());
+    for (key, entry) in code {
+        write_code_row(&mut h, &key, entry);
     }
 
     h.string("lifecycle");
@@ -160,7 +97,10 @@ fn compute_inner(
         let accessor = catalog
             .accessor
             .as_ref()
-            .map(|accessor| function_key(ws, accessor.module, accessor.func))
+            .map(|accessor| {
+                let (file, name) = definition_accessor(ws, accessor.module, accessor.func)?;
+                Ok::<_, FingerprintError>(format!("{file}::{name}"))
+            })
             .transpose()?;
         h.string(accessor.as_deref().unwrap_or(""));
         if let Some(definition_type) = &catalog.definition_type {
@@ -192,11 +132,7 @@ fn compute_inner(
     Ok(format!("{:016x}", h.finish()))
 }
 
-fn write_code_row(
-    h: &mut CanonicalHasher,
-    key: &str,
-    entry: &CodeEntry,
-) -> Result<(), FingerprintError> {
+fn write_code_row(h: &mut CanonicalHasher, key: &str, entry: &CodeEntry) {
     h.string(key);
     h.string(&entry.compatibility.call_abi);
     h.boolean(entry.compatibility.capture.complete);
@@ -232,81 +168,36 @@ fn write_code_row(
     }
     h.u64(entry.compatibility.lambda_topology.0);
     h.u64(entry.body_fingerprint);
-    h.string(entry.body_name.as_deref().ok_or_else(|| {
-        FingerprintError(format!(
-            "incomplete CodeArtifact body realization for {:?}",
-            entry.identity
-        ))
-    })?);
+    h.string(
+        entry
+            .body_name
+            .as_deref()
+            .expect("validated body realization"),
+    );
     h.boolean(entry.escaping);
     h.boolean(entry.capture_free);
+}
+
+pub(crate) fn validate(
+    ws: &Workspace,
+    artifact: &CodeArtifact,
+    definitions: &DefinitionPlan,
+    reads: &[ComptimeRead],
+) -> Result<(), FingerprintError> {
+    let volatile_vars = &ws.comptime_inputs.volatile_vars;
+    validate_inventory(ws, artifact, volatile_vars)?;
+    for catalog in &definitions.catalogs {
+        if let Some(accessor) = &catalog.accessor {
+            definition_accessor(ws, accessor.module, accessor.func)?;
+        }
+    }
+    canonical_reads(ws, reads, volatile_vars)?;
     Ok(())
 }
 
-type RowKey = Arc<(String, CodeIdentity)>;
-
-/// Encoded rows in fingerprint order, and each identity's current key so an edit
-/// that moves a logical key drops its stale row. Transactions clone on write.
-#[derive(Clone, Default)]
-pub(crate) struct CodeRows {
-    rows: Arc<BTreeMap<RowKey, Arc<[u8]>>>,
-    keys: Arc<FxHashMap<Arc<CodeIdentity>, RowKey>>,
-}
-
-impl CodeRows {
-    pub(crate) fn collect(
-        ws: &Workspace,
-        interner: &MonoInterner,
-        artifact: &CodeArtifact,
-    ) -> Result<Self, FingerprintError> {
-        let mut rows = Self::default();
-        rows.replace(ws, interner, artifact, artifact.entries.keys())?;
-        Ok(rows)
-    }
-
-    pub(crate) fn replace<'a>(
-        &mut self,
-        ws: &Workspace,
-        interner: &MonoInterner,
-        artifact: &CodeArtifact,
-        identities: impl IntoIterator<Item = &'a CodeIdentity>,
-    ) -> Result<(), FingerprintError> {
-        let rows = Arc::make_mut(&mut self.rows);
-        let keys = Arc::make_mut(&mut self.keys);
-        for identity in identities {
-            let entry = artifact.entries.get(identity).ok_or_else(|| {
-                FingerprintError(format!(
-                    "missing edited code fingerprint row for {identity:?}"
-                ))
-            })?;
-            let key = Arc::new((entry.identity.logical_key(ws, interner), identity.clone()));
-            let mut encoded = CanonicalHasher::default();
-            write_code_row(&mut encoded, &key.0, entry)?;
-            if let Some(old) = keys.insert(Arc::new(identity.clone()), key.clone()) {
-                if old != key {
-                    rows.remove(&old);
-                }
-            }
-            rows.insert(key, encoded.bytes.into());
-        }
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    fn append_to(&self, bytes: &mut Vec<u8>) {
-        for row in self.rows.values() {
-            bytes.extend_from_slice(row);
-        }
-    }
-}
-
-fn validate_inputs(
+fn validate_inventory(
     ws: &Workspace,
     artifact: &CodeArtifact,
-    reads: &[ComptimeRead],
     volatile_vars: &FxHashSet<Ustr>,
 ) -> Result<(), FingerprintError> {
     if !artifact.is_total() {
@@ -328,15 +219,6 @@ fn validate_inputs(
             return Err(FingerprintError(format!(
                 "volatile metadata declaration `{name}` is missing from resolved build inputs"
             )));
-        }
-    }
-    for read in reads {
-        if let ComptimeInputId::Var(name) = &read.input {
-            if !ws.comptime_inputs.vars.contains_key(name) {
-                return Err(FingerprintError(format!(
-                    "comptime read `{name}` is missing from resolved build inputs"
-                )));
-            }
         }
     }
     Ok(())
@@ -408,11 +290,11 @@ fn canonical_reads(
         .collect())
 }
 
-fn function_key(
+fn definition_accessor(
     ws: &Workspace,
     module: ModuleId,
     function: bone_semantic::prelude::Idx<bone_semantic::hir::Function>,
-) -> Result<String, FingerprintError> {
+) -> Result<(&str, &str), FingerprintError> {
     let module = ws.modules.get(module.index()).ok_or_else(|| {
         FingerprintError(format!(
             "definition accessor references missing module {module:?}"
@@ -421,11 +303,11 @@ fn function_key(
     let function = module
         .functions
         .iter()
-        .find_map(|(id, function_def)| (id == function).then_some(function_def))
+        .find_map(|(id, item)| (id == function).then_some(item))
         .ok_or_else(|| {
             FingerprintError("definition accessor references missing function".to_string())
         })?;
-    Ok(format!("{}::{}", module.file, function.name))
+    Ok((module.file.as_str(), function.name.as_str()))
 }
 
 #[derive(Default)]

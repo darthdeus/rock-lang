@@ -525,7 +525,7 @@ pub(super) fn emit_full_build(
         project_root,
         renderer_target,
         shapes,
-        fingerprint,
+        validate_artifact,
         global_accessors,
         attribution,
     } = options;
@@ -675,7 +675,7 @@ pub(super) fn emit_full_build(
         shader_registrations,
         shader_view,
         renderer_target,
-        publish_fingerprint: fingerprint,
+        validate_artifact,
         global_accessors,
         build_kind: build.kind(),
         selected_sim_functions,
@@ -698,7 +698,7 @@ pub(super) fn emit_full_build(
     phases.push(("window: assembly", assembly_window));
     emit.phases = phases;
     if build.lifetime() == CacheLifetime::Retained {
-        let spec_edges = cache.retain_assembly(ws, &emit, emitted, unit_reads, built_specs)?;
+        let spec_edges = cache.retain_assembly(ws, &emit, emitted, unit_reads, built_specs);
         cache.retain_static_cells(ws)?;
         emit.compile_counts.chunks = cache.chunks.len();
         emit.compile_counts.dependency_edges = Some(dependency_edges + spec_edges);

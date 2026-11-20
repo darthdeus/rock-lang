@@ -47,30 +47,10 @@ pub(super) fn artifact_comptime_reads(
     reads
 }
 
-pub(super) fn artifact_fingerprint(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    artifact: &skull_mir::code_identity::CodeArtifact,
-    lifecycle: &skull_mir::lifecycle::LifecyclePlan,
-    definitions: &skull_mir::definition::DefinitionPlan,
-    global_layout: &str,
-    reads: &[skull_mir::mir::ComptimeRead],
-    renderer_target: RendererTarget,
-) -> Result<String, CompilerError> {
-    crate::artifact_fingerprint::compute(
-        ws,
-        scx.interner(),
-        artifact,
-        lifecycle,
-        definitions,
-        global_layout,
-        reads,
-        &ws.comptime_inputs.volatile_vars,
-        renderer_fingerprint_tag(renderer_target),
-    )
-    .map_err(|error| {
-        CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}"))
-    })
+pub(super) fn artifact_validation_error(
+    error: crate::artifact_fingerprint::FingerprintError,
+) -> CompilerError {
+    CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}"))
 }
 
 struct Assembly {
@@ -558,10 +538,8 @@ fn place_function<'c>(
 fn release_one_shot_chunks(
     cache: &mut SkullEmitCache,
     built_specs: &mut Vec<(Instance, Chunk)>,
-    unit_reads: &UnitComptimeReads,
     compile_counts: &mut CompileCounts,
-) -> Vec<skull_mir::mir::ComptimeRead> {
-    let reads = artifact_comptime_reads(cache, built_specs, unit_reads, true);
+) {
     compile_counts.chunks += built_specs
         .iter()
         .filter(|(key, _)| !cache.chunks.contains_key(key))
@@ -580,7 +558,6 @@ fn release_one_shot_chunks(
     );
     drop_in_background(std::mem::take(&mut cache.chunks));
     drop_in_background(std::mem::take(built_specs));
-    reads
 }
 
 type GlobalKey = (ModuleId, Idx<bone_semantic::hir::GlobalDef>);
@@ -994,8 +971,15 @@ pub(super) fn assemble(
             enum_names_lua,
         )
     };
-    let one_shot_reads = (lifetime == CacheLifetime::OneShot)
-        .then(|| release_one_shot_chunks(cache, built_specs, &asm.unit_reads, &mut compile_counts));
+    let one_shot_reads = if lifetime == CacheLifetime::OneShot {
+        let reads = cache
+            .validate_artifact
+            .then(|| artifact_comptime_reads(cache, built_specs, &asm.unit_reads, true));
+        release_one_shot_chunks(cache, built_specs, &mut compile_counts);
+        reads
+    } else {
+        None
+    };
     drop(spec_chunks);
     step("assembly: definitions", &mut steps);
 
@@ -1135,23 +1119,12 @@ pub(super) fn assemble(
         emits_main,
         ..
     } = asm;
-    let artifact_reads = one_shot_reads
-        .unwrap_or_else(|| artifact_comptime_reads(cache, built_specs, &unit_reads, true));
-    let artifact_fingerprint = cache
-        .publish_fingerprint
-        .then(|| {
-            artifact_fingerprint(
-                ws,
-                scx,
-                &code_artifact,
-                &lifecycle_plan,
-                &definition_plan,
-                &global_layout,
-                &artifact_reads,
-                cache.renderer_target,
-            )
-        })
-        .transpose()?;
+    if cache.validate_artifact {
+        let reads = one_shot_reads
+            .unwrap_or_else(|| artifact_comptime_reads(cache, built_specs, &unit_reads, true));
+        crate::artifact_fingerprint::validate(ws, &code_artifact, &definition_plan, &reads)
+            .map_err(artifact_validation_error)?;
+    }
     step("assembly: fingerprint", &mut steps);
     if cache.cg.line_directives() {
         out = skull_codegen_lua::resolve_line_directive_resets(&out, "main.lua");
@@ -1176,7 +1149,6 @@ pub(super) fn assemble(
             lifecycle_plan,
             global_layout,
             definition_plan,
-            artifact_fingerprint,
             phases,
             attribution: attribution.finish(),
             emits_main,

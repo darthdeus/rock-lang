@@ -37,7 +37,7 @@ pub struct SkullEmitCache {
     pub(super) shader_registrations: ShaderRegistrations,
     pub(super) shader_view: crate::shader_artifact::ShaderArtifactView,
     pub(super) renderer_target: RendererTarget,
-    pub(super) publish_fingerprint: bool,
+    pub(super) validate_artifact: bool,
     pub(super) global_accessors: bool,
     pub(super) build_kind: BuildKind,
     pub(super) selected_sim_functions: Option<FxHashSet<Ustr>>,
@@ -86,8 +86,6 @@ pub(super) struct BodyEditState {
     pub(super) global_layout: Option<String>,
     // Kept by body overlays: definition structure is a full-reload boundary.
     pub(super) definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
-    artifact_fingerprint: Option<String>,
-    pub(super) fingerprint_code_rows: Option<crate::artifact_fingerprint::CodeRows>,
     pub(super) unit_comptime_reads: UnitComptimeReads,
     pub(super) repair_stats: IncrementalRepairStats,
 }
@@ -96,7 +94,6 @@ impl BodyEditState {
     pub(super) fn record_artifact(&mut self, emit: &MirEmit) {
         self.code_artifact = emit.code_artifact.clone();
         self.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
-        self.artifact_fingerprint = emit.artifact_fingerprint.clone();
     }
 }
 
@@ -148,26 +145,18 @@ impl SkullEmitCache {
         emitted: FxHashSet<Instance>,
         unit_reads: UnitComptimeReads,
         built_specs: Vec<(Instance, Chunk)>,
-    ) -> Result<usize, CompilerError> {
+    ) -> usize {
         self.edit.emitted = emitted;
         self.edit.record_artifact(emit);
         self.edit.global_layout = Some(emit.global_layout.clone());
         self.edit.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
-        self.edit.fingerprint_code_rows = Some(
-            crate::artifact_fingerprint::CodeRows::collect(
-                ws,
-                self.scx.interner(),
-                &emit.code_artifact,
-            )
-            .map_err(|error| CompilerError::new_no_location(error.to_string()))?,
-        );
         self.edit.unit_comptime_reads = unit_reads;
         let dependency_edges = built_specs
             .into_iter()
             .map(|(body, chunk)| self.insert_chunk(body, Ok(chunk)))
             .sum();
         self.refresh_effect_snapshot(ws);
-        Ok(dependency_edges)
+        dependency_edges
     }
 
     fn refresh_effect_snapshot(&mut self, ws: &Workspace) {
@@ -220,7 +209,7 @@ impl SkullEmitCache {
             .collect();
         let result = (|| {
             let shader_changed = self.update_shader_registrations(ws, &reinferred)?;
-            let (_affected, update, added_errors, _fingerprint_identities) =
+            let (_affected, update, added_errors) =
                 self.update_chunk_cache(ws, &reinferred, &inverse_edits)?;
             if let Some(error) = Self::combine_errors(added_errors) {
                 return Err(error);
@@ -284,8 +273,31 @@ impl SkullEmitCache {
             .and_then(|snapshot| snapshot.baseline.lifecycle_plan.as_deref())
     }
 
-    pub fn artifact_fingerprint(&self) -> Option<&str> {
-        self.edit.artifact_fingerprint.as_deref()
+    /// Compute the canonical identity of the retained artifact on request.
+    pub fn artifact_fingerprint(&self, ws: &Workspace) -> Result<String, CompilerError> {
+        let edit = &self.edit;
+        let (Some(lifecycle), Some(definitions), Some(layout)) = (
+            edit.lifecycle_plan.as_deref(),
+            edit.definition_plan.as_deref(),
+            edit.global_layout.as_deref(),
+        ) else {
+            return Err(CompilerError::new_no_location(
+                "Artifact fingerprint requires retained assembly".to_string(),
+            ));
+        };
+        let reads = artifact_comptime_reads(self, &[], &edit.unit_comptime_reads, true);
+        crate::artifact_fingerprint::compute(
+            ws,
+            self.scx.interner(),
+            &edit.code_artifact,
+            lifecycle,
+            definitions,
+            layout,
+            &reads,
+            &ws.comptime_inputs.volatile_vars,
+            renderer_fingerprint_tag(self.renderer_target),
+        )
+        .map_err(artifact_validation_error)
     }
 
     /// A live shader registry cannot remove a key from the running process,
@@ -477,11 +489,7 @@ impl SkullEmitCache {
         &mut self,
         ws: &Workspace,
         added: &std::collections::BTreeSet<Instance>,
-    ) -> (
-        Vec<CompilerError>,
-        FxHashSet<skull_mir::code_identity::CodeIdentity>,
-    ) {
-        let mut fingerprint_identities = FxHashSet::default();
+    ) -> Vec<CompilerError> {
         let mut pending: Vec<Instance> = added.iter().cloned().collect();
         let mut seen: FxHashSet<Instance> = FxHashSet::default();
         let mut built: Vec<(Instance, Chunk)> = Vec::new();
@@ -495,10 +503,9 @@ impl SkullEmitCache {
             if !is_cached_emitted_body(f, &body) {
                 continue;
             }
-            if let Some(Ok(chunk)) = self.chunks.get(&body) {
+            if matches!(self.chunks.get(&body), Some(Ok(_))) {
                 if !self.edit.emitted.contains(&body) {
                     self.edit.changed_since_full.insert(body.clone());
-                    fingerprint_identities.extend(chunk.code_identities());
                 }
                 continue;
             }
@@ -533,11 +540,10 @@ impl SkullEmitCache {
         }
 
         for (body, chunk) in built {
-            fingerprint_identities.extend(chunk.code_identities());
             self.insert_chunk(body.clone(), Ok(chunk));
             self.edit.changed_since_full.insert(body);
         }
-        (errs, fingerprint_identities)
+        errs
     }
 
     pub(super) fn combine_errors(errors: Vec<CompilerError>) -> Option<CompilerError> {
@@ -555,7 +561,6 @@ impl SkullEmitCache {
             FxHashSet<Instance>,
             crate::instance_graph::UpdateStats,
             Vec<CompilerError>,
-            FxHashSet<skull_mir::code_identity::CodeIdentity>,
         ),
         CompilerError,
     > {
@@ -587,7 +592,6 @@ impl SkullEmitCache {
                     }));
             }
         }
-        let mut fingerprint_identities = FxHashSet::default();
         cache.edit.repair_stats = IncrementalRepairStats::default();
         let mut flipped_frefs: FxHashSet<FuncRef> = FxHashSet::default();
         for (mid, owner) in reinferred {
@@ -835,9 +839,6 @@ impl SkullEmitCache {
             let f = &ws.module(fref.module).functions[fref.func];
             if is_cached_emitted_body(f, body) {
                 let chunk = cache.rebuild_chunk(ws, body);
-                if let Ok(chunk) = &chunk {
-                    fingerprint_identities.extend(chunk.code_identities());
-                }
                 cache.insert_chunk(body.clone(), chunk);
             } else {
                 cache.chunks.remove(body);
@@ -845,11 +846,9 @@ impl SkullEmitCache {
         }
         // After invalidation, so a newly reached body cannot reuse an inline decision
         // made for the old body.
-        let (added_errors, added_fingerprint_identities) =
-            cache.build_graph_added_chunks(ws, &update.added);
-        fingerprint_identities.extend(added_fingerprint_identities);
+        let added_errors = cache.build_graph_added_chunks(ws, &update.added);
         cache.refresh_effect_snapshot(ws);
         cache.edit.repair_stats.relowering_ns = t_relow.elapsed().as_nanos() as u64;
-        Ok((affected, update, added_errors, fingerprint_identities))
+        Ok((affected, update, added_errors))
     }
 }

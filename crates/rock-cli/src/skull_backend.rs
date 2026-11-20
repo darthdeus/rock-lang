@@ -2280,7 +2280,6 @@ pub struct IncrementalProject {
     cache: skull::mir_emit::SkullEmitCache,
     preamble: String,
     shape_hashes: skull::ShapeHashes,
-    artifact_fingerprint: String,
 }
 
 fn emit_live_full(
@@ -2361,7 +2360,7 @@ impl IncrementalProject {
         explicit_allocation_report: Option<&std::path::Path>,
         select_sims: impl FnOnce(&bone_semantic::inference::Workspace) -> Result<Option<Vec<String>>>,
     ) -> Result<Self> {
-        let (lua, cache, artifact_fingerprint, emits_main) = {
+        let (lua, cache, emits_main) = {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
@@ -2369,12 +2368,9 @@ impl IncrementalProject {
             let (emit, c) = emit_live_full(ws, mid, dir, selected.as_deref())
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
             write_allocation_report(explicit_allocation_report, &emit.allocation_report)?;
-            let artifact_fingerprint = emit.artifact_fingerprint.clone().ok_or_else(|| {
-                anyhow::anyhow!("compiler did not publish an Artifact fingerprint")
-            })?;
             let emits_main = emit.emits_main;
             let lua = GameProgram::new(emit.lua, ws);
-            (lua, c, artifact_fingerprint, emits_main)
+            (lua, c, emits_main)
         };
         let preamble = crate::stone_runtime::program_preamble(dir, ProgramKind::Game)?;
         write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
@@ -2385,7 +2381,6 @@ impl IncrementalProject {
             cache,
             preamble,
             shape_hashes,
-            artifact_fingerprint,
         })
     }
 
@@ -2397,8 +2392,10 @@ impl IncrementalProject {
         self.cache.registered_sim_names(self.project.workspace())
     }
 
-    pub fn artifact_fingerprint(&self) -> &str {
-        &self.artifact_fingerprint
+    pub fn artifact_fingerprint(&self) -> Result<String> {
+        self.cache
+            .artifact_fingerprint(self.workspace())
+            .map_err(|error| anyhow::anyhow!(error.message))
     }
 
     pub fn sources(&self) -> &SourceFiles {
@@ -2583,11 +2580,6 @@ impl IncrementalProject {
                 incremental_path,
             )?;
             self.cache = staged_cache;
-            self.artifact_fingerprint = self
-                .cache
-                .artifact_fingerprint()
-                .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
-                .to_string();
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Full {
                 bytes,
@@ -2644,11 +2636,6 @@ impl IncrementalProject {
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             rock_host::project::write_atomic(incremental_path, &overlay.lua)?;
-            self.artifact_fingerprint = self
-                .cache
-                .artifact_fingerprint()
-                .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
-                .to_string();
             self.cache.commit_body_edit_transaction();
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Incremental {
@@ -2670,18 +2657,15 @@ impl IncrementalProject {
         // mutated the session into the broken state, so the restart-path fold must
         // re-gate or it would write a partial `main.lua` to the respawned process.
         self.project.verdict("on restart fold")?;
-        let (lua, cache, artifact_fingerprint, emits_main) = {
+        let (lua, cache, emits_main) = {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
             let (emit, c) = emit_live_full(ws, mid, self.project.dir(), None)
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
-            let artifact_fingerprint = emit.artifact_fingerprint.clone().ok_or_else(|| {
-                anyhow::anyhow!("compiler did not publish an Artifact fingerprint")
-            })?;
             let emits_main = emit.emits_main;
             let lua = GameProgram::new(emit.lua, ws);
-            (lua, c, artifact_fingerprint, emits_main)
+            (lua, c, emits_main)
         };
         self.preamble =
             crate::stone_runtime::program_preamble(self.project.dir(), ProgramKind::Game)?;
@@ -2692,7 +2676,6 @@ impl IncrementalProject {
             main_path,
             incremental_path,
         )?;
-        self.artifact_fingerprint = artifact_fingerprint;
         self.cache = cache; // resets changed_since_full -- the overlay is now folded in
         self.shape_hashes = skull::type_shape_hashes(self.project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;

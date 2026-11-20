@@ -500,7 +500,7 @@ print(before)
 }
 
 #[test]
-fn fingerprint_code_rows_include_new_body_specializations() {
+fn fingerprint_includes_new_body_specializations() {
     let original =
         "fn identity<T>(value: T) -> T { return value }\nfn main() { let _ = identity(1) }";
     let changed = original.replace(
@@ -509,10 +509,11 @@ fn fingerprint_code_rows_include_new_body_specializations() {
     );
     let ws1 = ws_of(original);
     let (baseline, mut cache) = emit_full_of(&ws1, "emit_full");
+    let before = cache.artifact_fingerprint(&ws1).unwrap();
     let ws2 = ws_of(&changed);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "main")]);
     assert!(overlay.code_artifact.entries.len() > baseline.code_artifact.entries.len());
-    assert_ne!(overlay.artifact_fingerprint, baseline.artifact_fingerprint);
+    assert_ne!(cache.artifact_fingerprint(&ws2).unwrap(), before);
 }
 
 #[test]
@@ -903,18 +904,23 @@ fn repeated_body_overlays_keep_the_fingerprint_of_a_full_emit() {
     }
     let original = ws_of(&source);
     let (_, mut cache) = emit_full_of(&original, "emit_full v1");
+    let before = cache.artifact_fingerprint(&original).unwrap();
     let edit = |value: i32| ws_of(&source.replacen("return 1 }", &format!("return {value} }}"), 1));
     let rolled_back = edit(2);
     let edited = [body_id(&rolled_back, "helper")];
     cache.begin_body_edit_transaction(&edited, &[]);
     let _ = emit_overlay(&rolled_back, &mut cache, &edited);
     cache.rollback_body_edit(&original).expect("rollback");
+    assert_eq!(cache.artifact_fingerprint(&original).unwrap(), before);
     for value in [3, 4, 5] {
         let changed = edit(value);
         let overlay = emit_overlay(&changed, &mut cache, &[body_id(&changed, "helper")]);
         assert!(overlay.code_artifact.entries.len() > 40);
-        let (fresh, _) = emit_full_of(&changed, "emit_full v2");
-        assert_eq!(overlay.artifact_fingerprint, fresh.artifact_fingerprint);
+        let (_, fresh) = emit_full_of(&changed, "emit_full v2");
+        assert_eq!(
+            cache.artifact_fingerprint(&changed).unwrap(),
+            fresh.artifact_fingerprint(&changed).unwrap(),
+        );
     }
 }
 

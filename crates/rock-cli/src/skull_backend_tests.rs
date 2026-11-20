@@ -1430,8 +1430,8 @@ mod force_full_tests {
             "force_full main.lua must be byte-identical to a fresh full build of the edited source"
         );
         assert_eq!(
-            fx.project.artifact_fingerprint(),
-            fresh.artifact_fingerprint(),
+            fx.project.artifact_fingerprint().unwrap(),
+            fresh.artifact_fingerprint().unwrap(),
             "force_full must publish the fingerprint of the Artifact it writes"
         );
     }
