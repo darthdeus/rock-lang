@@ -1,4 +1,6 @@
-use crate::support::{failure, success};
+use crate::support::{assert_mentions, failure, success, write_files};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Output;
 
@@ -18,17 +20,34 @@ fn run(cwd: &Path, args: &[&str], overlay: Option<&Path>) -> Output {
     command.output().expect("run public packaging command")
 }
 
-fn project(root: &Path, extra_release: &str) {
-    std::fs::create_dir_all(root.join("assets")).unwrap();
-    std::fs::write(root.join("main.rock"), "fn main() {}\n").unwrap();
-    std::fs::write(root.join("assets/owned.txt"), "owned asset").unwrap();
-    std::fs::write(
-        root.join("stick.toml"),
-        format!(
-            "[package]\nname = \"sample\"\n[release]\nassets = [\"assets/owned.txt\"]\n{extra_release}\n"
-        ),
-    )
-    .unwrap();
+fn write_project(root: &Path, extra_release: &str) {
+    write_files(
+        root,
+        &[
+            ("main.rock", "fn main() {}\n"),
+            ("assets/owned.txt", "owned asset"),
+            (
+                "stick.toml",
+                &format!(
+                    "[package]\nname = \"sample\"\n[release]\nassets = [\"assets/owned.txt\"]\n{extra_release}\n"
+                ),
+            ),
+        ],
+    );
+}
+
+fn project(extra_release: &str) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    write_project(root.path(), extra_release);
+    root
+}
+
+fn package(root: &Path, overlay: Option<&Path>) -> Output {
+    run(root, &["package", "--output", "dist"], overlay)
+}
+
+fn asset_check(root: &Path, overlay: Option<&Path>) -> Output {
+    run(root, &["asset-check"], overlay)
 }
 
 /// Releases the whole `assets` directory instead of the one owned file.
@@ -42,19 +61,16 @@ fn release_all_assets(root: &Path) {
 
 #[test]
 fn package_requires_an_output_directory_and_packages_the_current_project() {
-    let root = tempfile::tempdir().unwrap();
-    project(root.path(), "");
+    let root = project("");
     failure(
         run(root.path(), &["package"], None),
         "package requires --output <directory>",
     );
-    success(run(root.path(), &["package", "--output", "dist"], None));
+    success(package(root.path(), None));
     let output = root.path().join("dist");
     assert!(!std::fs::read(output.join("main.bc")).unwrap().is_empty());
     assert!(output.join("main.lua").is_file());
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(output.join("package-manifest.json")).unwrap())
-            .unwrap();
+    let manifest = manifest(root.path());
     assert_eq!(manifest["package"]["name"], "sample");
     assert_eq!(
         std::fs::read_to_string(output.join("assets/sample/assets/owned.txt")).unwrap(),
@@ -67,7 +83,7 @@ fn asset_check_and_package_validate_the_same_declared_overlay_assets() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("project");
     let overlay = root.path().join("overlay");
-    project(&source, "overlay_assets = [\"assets/selected.txt\"]");
+    write_project(&source, "overlay_assets = [\"assets/selected.txt\"]");
     std::fs::create_dir_all(overlay.join("assets")).unwrap();
     failure(
         run(root.path(), &["asset-check", "project"], Some(&overlay)),
@@ -83,7 +99,7 @@ fn asset_check_and_package_validate_the_same_declared_overlay_assets() {
     );
     assert!(!root.path().join("dist").exists());
     std::fs::write(overlay.join("assets/selected.txt"), "selected overlay").unwrap();
-    success(run(&source, &["asset-check"], Some(&overlay)));
+    success(asset_check(&source, Some(&overlay)));
     success(run(
         root.path(),
         &["package", "project", "--output", "dist"],
@@ -96,25 +112,35 @@ fn asset_check_and_package_validate_the_same_declared_overlay_assets() {
     );
 }
 
-fn sheet(root: &Path, value: u8) -> String {
-    use sha2::{Digest, Sha256};
+fn png(value: u8) -> Vec<u8> {
     let mut bytes = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder
-            .write_header()
-            .unwrap()
-            .write_image_data(&[value; 16])
-            .unwrap();
-    }
-    let listing = format!("{:x}  color.png\n", Sha256::digest(&bytes));
+    let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&[value; 16])
+        .unwrap();
+    bytes
+}
+
+fn write_sheet(root: &Path, files: &BTreeMap<&str, Vec<u8>>) -> String {
+    let listing: String = files
+        .iter()
+        .map(|(name, bytes)| format!("{:x}  {name}\n", Sha256::digest(bytes)))
+        .collect();
     let digest = format!("{:x}", Sha256::digest(listing.as_bytes()));
     let directory = root.join(format!("assets/.eat/{digest}"));
     std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(directory.join("color.png"), bytes).unwrap();
+    for (name, bytes) in files {
+        std::fs::write(directory.join(name), bytes).unwrap();
+    }
     digest
+}
+
+fn sheet(root: &Path, value: u8) -> String {
+    write_sheet(root, &BTreeMap::from([("color.png", png(value))]))
 }
 
 fn bank(root: &Path, path: &str, digest: &str, size: u32) {
@@ -145,7 +171,7 @@ fn diagnostics(output: &Output) -> Vec<String> {
 }
 
 fn reject_both(root: &Path, overlay: Option<&Path>, expected: &str) {
-    let check = run(root, &["asset-check"], overlay);
+    let check = asset_check(root, overlay);
     let diagnostic = diagnostics(&check);
     failure(check, expected);
     for existing in [false, true] {
@@ -154,7 +180,7 @@ fn reject_both(root: &Path, overlay: Option<&Path>, expected: &str) {
             std::fs::create_dir_all(&output).unwrap();
             std::fs::write(output.join("sentinel"), "untouched").unwrap();
         }
-        let package = run(root, &["package", "--output", "dist"], overlay);
+        let package = package(root, overlay);
         assert_eq!(diagnostics(&package), diagnostic);
         failure(package, expected);
         if existing {
@@ -172,24 +198,18 @@ fn reject_both(root: &Path, overlay: Option<&Path>, expected: &str) {
 
 #[test]
 fn auxiliary_banks_select_shared_closures_without_a_main_bank_and_rebake() {
-    let root = tempfile::tempdir().unwrap();
-    let overlay = root.path().join("overlay");
-    project(
-        root.path(),
+    let root = project(
         "visual_banks = [\"assets/extra.jsonl\", \"assets/extra.jsonl\", \"assets/other.jsonl\"]",
     );
+    let overlay = root.path().join("overlay");
     let old = sheet(&overlay, 10);
     bank(root.path(), "assets/extra.jsonl", &old, 2);
     bank(root.path(), "assets/other.jsonl", &old, 2);
     // Unreferenced generations and loose overlay files must not be admitted.
     let stale = sheet(root.path(), 11);
     std::fs::write(overlay.join("assets/loose.txt"), "loose").unwrap();
-    success(run(root.path(), &["asset-check"], Some(&overlay)));
-    success(run(
-        root.path(),
-        &["package", "--output", "dist"],
-        Some(&overlay),
-    ));
+    success(asset_check(root.path(), Some(&overlay)));
+    success(package(root.path(), Some(&overlay)));
     let old_key = format!("sample/assets/.eat/{old}/color.png");
     let staged = manifest(root.path());
     let keys = staged["artifacts"]["assets"]["keys"].as_array().unwrap();
@@ -218,11 +238,7 @@ fn auxiliary_banks_select_shared_closures_without_a_main_bank_and_rebake() {
     let new = sheet(&overlay, 12);
     bank(root.path(), "assets/extra.jsonl", &new, 2);
     bank(root.path(), "assets/other.jsonl", &new, 2);
-    success(run(
-        root.path(),
-        &["package", "--output", "dist"],
-        Some(&overlay),
-    ));
+    success(package(root.path(), Some(&overlay)));
     assert!(!root.path().join("dist/assets").join(old_key).exists());
     assert!(
         root.path()
@@ -233,13 +249,12 @@ fn auxiliary_banks_select_shared_closures_without_a_main_bank_and_rebake() {
 
 #[test]
 fn main_and_auxiliary_bank_closures_are_both_packaged() {
-    let root = tempfile::tempdir().unwrap();
-    project(root.path(), "visual_banks = [\"assets/extra.jsonl\"]");
+    let root = project("visual_banks = [\"assets/extra.jsonl\"]");
     let main = sheet(root.path(), 1);
     let extra = sheet(root.path(), 2);
     bank(root.path(), "assets/visual_bank.jsonl", &main, 2);
     bank(root.path(), "assets/extra.jsonl", &extra, 2);
-    success(run(root.path(), &["package", "--output", "dist"], None));
+    success(package(root.path(), None));
     for digest in [main, extra] {
         assert!(
             root.path()
@@ -251,19 +266,14 @@ fn main_and_auxiliary_bank_closures_are_both_packaged() {
 
 #[test]
 fn missing_visual_dependency_rejects_both_commands_without_touching_output() {
-    let root = tempfile::tempdir().unwrap();
-    project(root.path(), "visual_banks = [\"assets/extra.jsonl\"]");
+    let root = project("visual_banks = [\"assets/extra.jsonl\"]");
     bank(root.path(), "assets/extra.jsonl", &"a".repeat(64), 2);
     reject_both(root.path(), None, "color.png");
 }
 
 #[test]
 fn every_bank_reference_is_verified_even_when_the_digest_is_shared() {
-    let root = tempfile::tempdir().unwrap();
-    project(
-        root.path(),
-        "visual_banks = [\"assets/extra.jsonl\", \"assets/other.jsonl\"]",
-    );
+    let root = project("visual_banks = [\"assets/extra.jsonl\", \"assets/other.jsonl\"]");
     let digest = sheet(root.path(), 1);
     bank(root.path(), "assets/extra.jsonl", &digest, 2);
     bank(root.path(), "assets/other.jsonl", &digest, 4);
@@ -284,12 +294,10 @@ fn overlay_entries_cannot_target_worktree_banks() {
         ("assets/visual_bank.jsonl", "assets/./visual_bank.jsonl"),
         ("assets/extra.jsonl", "assets//extra.jsonl"),
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = project(&format!(
+            "visual_banks = [\"{bank_path}\"]\noverlay_assets = [\"{overlay_path}\"]"
+        ));
         let overlay = root.path().join("overlay");
-        project(
-            root.path(),
-            &format!("visual_banks = [\"{bank_path}\"]\noverlay_assets = [\"{overlay_path}\"]"),
-        );
         let digest = sheet(root.path(), 1);
         bank(root.path(), bank_path, &digest, 2);
         bank(&overlay, bank_path, &digest, 4);
@@ -304,8 +312,7 @@ fn overlay_entries_cannot_target_worktree_banks() {
 #[test]
 fn asset_check_verifies_pngs_and_digests_like_package() {
     for corrupt_png in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        project(root.path(), "visual_banks = []");
+        let root = project("visual_banks = []");
         let digest = sheet(root.path(), 1);
         let wrong = "a".repeat(64);
         std::fs::rename(
@@ -331,13 +338,12 @@ fn asset_check_verifies_pngs_and_digests_like_package() {
 
 #[test]
 fn undeclared_packaged_banks_warn_and_require_selected_dependencies() {
-    let root = tempfile::tempdir().unwrap();
-    project(root.path(), "");
+    let root = project("");
     release_all_assets(root.path());
     let digest = sheet(root.path(), 1);
     bank(root.path(), "assets/extra.jsonl", &digest, 2);
-    let checked = run(root.path(), &["asset-check"], None);
-    crate::support::assert_mentions(&checked, "not declared in [release].visual_banks");
+    let checked = asset_check(root.path(), None);
+    assert_mentions(&checked, "not declared in [release].visual_banks");
     success(checked);
     std::fs::remove_dir_all(root.path().join(format!("assets/.eat/{digest}"))).unwrap();
     reject_both(root.path(), None, "missing selected file");
@@ -357,11 +363,10 @@ fn bank_roots_are_canonical_existing_worktree_jsonl_files() {
         "assets/extra?.jsonl",
         "assets/extra[1].jsonl",
     ] {
-        let root = tempfile::tempdir().unwrap();
-        project(
-            root.path(),
-            &format!("visual_banks = [{}]", serde_json::to_string(path).unwrap()),
-        );
+        let root = project(&format!(
+            "visual_banks = [{}]",
+            serde_json::to_string(path).unwrap()
+        ));
         reject_both(
             root.path(),
             None,
@@ -369,9 +374,8 @@ fn bank_roots_are_canonical_existing_worktree_jsonl_files() {
         );
     }
     for path in ["assets/visual_bank.jsonl", "assets/extra.jsonl"] {
-        let root = tempfile::tempdir().unwrap();
+        let root = project(&format!("visual_banks = [\"{path}\"]"));
         let overlay = root.path().join("overlay");
-        project(root.path(), &format!("visual_banks = [\"{path}\"]"));
         let digest = sheet(&overlay, 1);
         bank(&overlay, path, &digest, 2);
         reject_both(
@@ -380,9 +384,8 @@ fn bank_roots_are_canonical_existing_worktree_jsonl_files() {
             "worktree visual bank is missing",
         );
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = project("");
     let overlay = root.path().join("overlay");
-    project(root.path(), "");
     let digest = sheet(&overlay, 1);
     bank(&overlay, "assets/visual_bank.jsonl", &digest, 2);
     reject_both(root.path(), Some(&overlay), "refusing the overlay bank");
@@ -393,7 +396,7 @@ fn redundant_sheet_entries_warn_and_preserve_unrelated_overlay_assets() {
     let root = tempfile::tempdir().unwrap();
     let overlay = root.path().join("overlay");
     let digest = sheet(&overlay, 1);
-    project(
+    write_project(
         root.path(),
         &format!(
             "visual_banks = [\"assets/extra.jsonl\"]\noverlay_assets = [\"assets/.eat/{digest}/color.png\", \"assets/loose.txt\"]"
@@ -405,14 +408,10 @@ fn redundant_sheet_entries_warn_and_preserve_unrelated_overlay_assets() {
     let directory = format!("assets/.eat/{digest}");
     std::fs::create_dir_all(root.path().join("assets/.eat")).unwrap();
     std::fs::rename(overlay.join(&directory), root.path().join(&directory)).unwrap();
-    let checked = run(root.path(), &["asset-check"], Some(&overlay));
-    crate::support::assert_mentions(&checked, "already supplied by visual bank");
+    let checked = asset_check(root.path(), Some(&overlay));
+    assert_mentions(&checked, "already supplied by visual bank");
     success(checked);
-    success(run(
-        root.path(),
-        &["package", "--output", "dist"],
-        Some(&overlay),
-    ));
+    success(package(root.path(), Some(&overlay)));
     assert!(
         root.path()
             .join("dist/assets/sample/assets/loose.txt")
@@ -422,9 +421,8 @@ fn redundant_sheet_entries_warn_and_preserve_unrelated_overlay_assets() {
 
 #[test]
 fn higher_priority_corruption_does_not_fall_back_to_worktree_sheets() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project("visual_banks = [\"assets/extra.jsonl\"]");
     let overlay = root.path().join("overlay");
-    project(root.path(), "visual_banks = [\"assets/extra.jsonl\"]");
     let digest = sheet(root.path(), 1);
     bank(root.path(), "assets/extra.jsonl", &digest, 2);
     let directory = overlay.join(format!("assets/.eat/{digest}"));
@@ -435,9 +433,8 @@ fn higher_priority_corruption_does_not_fall_back_to_worktree_sheets() {
 
 #[test]
 fn split_generations_and_malformed_banks_reject_both_commands() {
-    let root = tempfile::tempdir().unwrap();
+    let root = project("visual_banks = [\"assets/extra.jsonl\"]");
     let overlay = root.path().join("overlay");
-    project(root.path(), "visual_banks = [\"assets/extra.jsonl\"]");
     let digest = sheet(root.path(), 1);
     bank(root.path(), "assets/extra.jsonl", &digest, 2);
     let path = root.path().join("assets/extra.jsonl");
@@ -459,12 +456,11 @@ fn split_generations_and_malformed_banks_reject_both_commands() {
 
 #[test]
 fn declaring_a_bank_already_in_release_assets_deduplicates_it() {
-    let root = tempfile::tempdir().unwrap();
-    project(root.path(), "visual_banks = [\"assets/extra.jsonl\"]");
+    let root = project("visual_banks = [\"assets/extra.jsonl\"]");
     release_all_assets(root.path());
     let digest = sheet(root.path(), 1);
     bank(root.path(), "assets/extra.jsonl", &digest, 2);
-    success(run(root.path(), &["package", "--output", "dist"], None));
+    success(package(root.path(), None));
     let staged = manifest(root.path());
     let keys = staged["artifacts"]["assets"]["keys"].as_array().unwrap();
     assert_eq!(
@@ -477,13 +473,11 @@ fn declaring_a_bank_already_in_release_assets_deduplicates_it() {
 
 #[test]
 fn auxiliary_studio_surface_closure_includes_lighting_and_checks_geometry() {
-    use sha2::{Digest, Sha256};
-    let root = tempfile::tempdir().unwrap();
+    let root = project("visual_banks = [\"assets/studio.jsonl\"]");
     let overlay = root.path().join("overlay");
-    project(root.path(), "visual_banks = [\"assets/studio.jsonl\"]");
     let seed = sheet(&overlay, 1);
     let png = std::fs::read(overlay.join(format!("assets/.eat/{seed}/color.png"))).unwrap();
-    let mut files = std::collections::BTreeMap::new();
+    let mut files = BTreeMap::new();
     for name in [
         "albedo.png",
         "normal.png",
@@ -498,16 +492,7 @@ fn auxiliary_studio_surface_closure_includes_lighting_and_checks_geometry() {
         files.insert(name, png.clone());
     }
     files.insert("sheet.json", br#"{"rects":[[0,0,2,2,0,0,0]]}"#.to_vec());
-    let listing: String = files
-        .iter()
-        .map(|(name, bytes)| format!("{:x}  {name}\n", Sha256::digest(bytes)))
-        .collect();
-    let digest = format!("{:x}", Sha256::digest(listing.as_bytes()));
-    let directory = overlay.join(format!("assets/.eat/{digest}"));
-    std::fs::create_dir_all(&directory).unwrap();
-    for (name, bytes) in &files {
-        std::fs::write(directory.join(name), bytes).unwrap();
-    }
+    let digest = write_sheet(&overlay, &files);
     let bank = serde_json::json!({
         "kind":"surface", "id":"relief", "dir":digest,
         "size":[2,2], "cell":[2,2], "pivot":[0.5,0.5], "skin_mask":true,
@@ -519,12 +504,8 @@ fn auxiliary_studio_surface_closure_includes_lighting_and_checks_geometry() {
         bank.to_string() + "\n",
     )
     .unwrap();
-    success(run(root.path(), &["asset-check"], Some(&overlay)));
-    success(run(
-        root.path(),
-        &["package", "--output", "dist"],
-        Some(&overlay),
-    ));
+    success(asset_check(root.path(), Some(&overlay)));
+    success(package(root.path(), Some(&overlay)));
     let staged = root
         .path()
         .join(format!("dist/assets/sample/assets/.eat/{digest}"));
@@ -533,6 +514,7 @@ fn auxiliary_studio_surface_closure_includes_lighting_and_checks_geometry() {
         assert_eq!(std::fs::read(staged.join(name)).unwrap(), *bytes);
     }
     std::fs::remove_dir_all(root.path().join("dist")).unwrap();
-    std::fs::write(directory.join("sheet.json"), br#"{"rects":[]}"#).unwrap();
+    let sheet_json = overlay.join(format!("assets/.eat/{digest}/sheet.json"));
+    std::fs::write(sheet_json, br#"{"rects":[]}"#).unwrap();
     reject_both(root.path(), Some(&overlay), "sheet.json has 0 rects");
 }
