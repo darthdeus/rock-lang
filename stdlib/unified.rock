@@ -38,10 +38,11 @@ fn is_nan(value: float) -> bool {
 //   get_image_size(handle, w, h)  // extern takes (int, Ptr<int>, Ptr<int>)
 //   return IVec2 { x: w.read(), y: h.read() }
 
-extern(lua, "ffi.new") fn __ffi_new_out<T>(ctype: string) -> Ptr<T>
+extern(lua, "ffi.new") fn __ffi_new_int_out(ctype: string) -> Ptr<int>
+extern(lua, "ffi.new") fn __ffi_new_float_out(ctype: string) -> Ptr<float>
 
-fn ffi_out_int() -> Ptr<int> { return __ffi_new_out<int>("int[1]") }
-fn ffi_out_float() -> Ptr<float> { return __ffi_new_out<float>("float[1]") }
+fn ffi_out_int() -> Ptr<int> { return __ffi_new_int_out("int[1]") }
+fn ffi_out_float() -> Ptr<float> { return __ffi_new_float_out("float[1]") }
 
 @nowrite inline(lua) fn read(p: Ptr<int>) -> int = "return p[0]"
 @nowrite inline(lua) fn read(p: Ptr<float>) -> float = "return p[0]"
