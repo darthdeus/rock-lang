@@ -1,0 +1,58 @@
+@test
+fn immediate_text_stream_preserves_line_order_and_coverage() {
+    text_test_host()
+    load_pending_shader_sources()
+    let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24,
+        TextureFilter::Nearest, raster: FontRasterPolicy::Fixed).unwrap()
+    let canvas = new_canvas(96, 96, "rgba8")
+    let restore = render_state_saved()
+    defer {
+        restore()
+        destroy_canvas(canvas)
+        unload_font(font)
+    }
+
+    set_canvas(canvas)
+    clear_screen(0.0, 0.0, 0.0, 1.0)
+    set_camera(v(7.0, 11.0), 3.0)
+    let camera = CAMERA_VIEW
+    let font_id = font.data().unwrap().backend_id
+    stone_mesh_capture_arm(false)
+    draw_font_text(DrawSpace::Target, font_id, "A\n\n A", 8.0, 4.0, 1.0, 1.0, RED)
+    draw_font_text(DrawSpace::Target, font_id, "A\nA", 65.0, 50.0, -0.7, -1.1, BLUE, 15.0)
+    let draws = json_array_at(json_decode(stone_mesh_capture_finish_json()).unwrap(), ["draws"])
+    assert_eq(draws.len(), 3, "upload only lines with ink and submit explicit-baseline text together")
+    for (i, count) in enumerate([6, 6, 12]) {
+        let draw = draws[i]
+        assert_eq(json_int_at(draw, ["vertex_count"]), count)
+        assert_eq(json_int_at(draw, ["stride_bytes"]), 16)
+        assert(json_bool_at(draw, ["gpu_matches_cpu"]))
+    }
+    assert(CAMERA_VIEW == camera, "target text preserves the world camera")
+
+    let capture = stone_canvas_capture_begin(canvas.handle.0)
+    assert(capture != 0)
+    defer { stone_canvas_capture_release(capture) }
+    let rgba = native_buffer_u8(96 * 96 * 4)
+    let bytes = stone_canvas_capture_poll(capture, rgba.ptr, rgba.len)
+    let deadline = stone_get_time() + 5.0
+    while bytes == 0 && stone_get_time() < deadline {
+        bytes = stone_canvas_capture_poll(capture, rgba.ptr, rgba.len)
+    }
+    assert_eq(bytes, rgba.len)
+    let blue = 0
+    let bands = 0
+    let in_band = false
+    for y in 0..96 {
+        let ink = false
+        for x in 0..96 {
+            let i = (y * 96 + x) * 4
+            if rgba[i] > 127 { ink = true }
+            if rgba[i + 2] > 127 { blue += 1 }
+        }
+        if ink && !in_band { bands += 1 }
+        in_band = ink
+    }
+    assert(blue > 0, "the explicit-baseline draw writes blue ink")
+    assert_eq(bands, 2, "the multiline draw writes two separated bands of red ink")
+}

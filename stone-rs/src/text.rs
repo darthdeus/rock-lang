@@ -129,11 +129,6 @@ impl Charset {
     }
 }
 
-struct TextPipeline {
-    vao: glow::VertexArray,
-    vbo: glow::Buffer,
-}
-
 /// Where a font's glyphs sit in one raster of it.
 #[derive(Clone, Default, PartialEq)]
 struct AtlasLayout {
@@ -283,7 +278,7 @@ fn drop_coverage(instances: &[AtlasInstance]) {
 }
 
 thread_local! {
-    static TEXT_PIPELINE: RefCell<Option<TextPipeline>> = const { RefCell::new(None) };
+    static TEXT_VERTICES: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     // font_ids are 1-based and never reuse a slot; unloaded slots become None.
     static FONTS: RefCell<Vec<Option<FontEntry>>> = const { RefCell::new(Vec::new()) };
 }
@@ -320,77 +315,20 @@ fn c_str<'a>(ptr: *const c_char) -> &'a str {
 
 #[no_mangle]
 pub extern "C" fn stone_text_init() -> bool {
-    // Hot reload re-enters init, so release the previous pipeline and fonts first.
     shutdown();
-    with_gl(|gl| unsafe { init_geometry(gl) }).unwrap_or(false)
-}
-
-unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
-    let vao = match gl.create_vertex_array() {
-        Ok(vao) => vao,
-        Err(error) => {
-            ::log::error!(target: "STONE", "stone_text_init: failed to create VAO: {error}");
-            return false;
-        }
-    };
-    let vbo = match gl.create_buffer() {
-        Ok(vbo) => vbo,
-        Err(error) => {
-            ::log::error!(target: "STONE", "stone_text_init: failed to create VBO: {error}");
-            gl.delete_vertex_array(vao);
-            return false;
-        }
-    };
-
-    gl.bind_vertex_array(Some(vao));
-    gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-
-    let empty_data: [f32; 24] = [0.0; 24];
-    if gl
-        .buffer_data_u8_slice(
-            glow::ARRAY_BUFFER,
-            bytemuck::cast_slice(&empty_data),
-            glow::DYNAMIC_DRAW,
-        )
-        .is_err()
-    {
-        gl.bind_vertex_array(None);
-        gl.delete_buffer(vbo);
-        gl.delete_vertex_array(vao);
+    if !crate::sprite::stone_sprite_init() {
         return false;
     }
-
-    // Lockstep with text_shader.rock's TextVert: loc 0 = pos, loc 1 = texcoord, stride 16.
-    let stride = 4 * std::mem::size_of::<f32>() as i32;
-    gl.enable_vertex_attrib_array(0);
-    gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
-    gl.enable_vertex_attrib_array(1);
-    gl.vertex_attrib_pointer_f32(
-        1,
-        2,
-        glow::FLOAT,
-        false,
-        stride,
-        2 * std::mem::size_of::<f32>() as i32,
-    );
-
-    gl.bind_buffer(glow::ARRAY_BUFFER, None);
-    gl.bind_vertex_array(None);
-
-    TEXT_PIPELINE.with(|tp| {
-        *tp.borrow_mut() = Some(TextPipeline { vao, vbo });
-    });
-
-    true
+    with_gl(|gl| unsafe {
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        true
+    })
+    .unwrap_or(false)
 }
 
 pub(crate) fn shutdown() {
-    if let Some(pipeline) = TEXT_PIPELINE.with(|tp| tp.borrow_mut().take()) {
-        with_gl(|gl| unsafe {
-            gl.delete_vertex_array(pipeline.vao);
-            gl.delete_buffer(pipeline.vbo);
-        });
-    }
+    TEXT_VERTICES.with_borrow_mut(|vertices| *vertices = Vec::new());
     let drained: Vec<FontEntry> =
         FONTS.with(|fonts| fonts.borrow_mut().drain(..).flatten().collect());
     for entry in &drained {
@@ -837,40 +775,74 @@ pub extern "C" fn stone_resize_font(font_id: c_uint, pixel_size: c_int) -> bool 
         .is_some_and(|source| rebake(font_id, source, pixel_size, false))
 }
 
-/// Drawing needs the text pipeline as well as the font; metrics readers use `font`.
-fn with_font<R>(font_id: u32, default: R, f: impl FnOnce(&TextPipeline, &FontEntry) -> R) -> R {
-    TEXT_PIPELINE
-        .with(|tp| {
-            let tp = tp.borrow();
-            font(font_id, |entry| {
-                tp.as_ref().map(|pipeline| f(pipeline, entry))
-            })
-            .flatten()
-        })
-        .unwrap_or(default)
-}
-
-fn draw_text_line_internal(
-    shader: u64,
-    font_id: u32,
-    text: &str,
+fn text_line_vertices(
+    entry: &FontEntry,
+    vertices: &mut Vec<f32>,
+    line: &str,
     x: f32,
     y: f32,
     sx: f32,
     sy: f32,
-    baseline_override: f32,
+    baseline: f32,
 ) {
-    with_font(font_id, (), |pipeline, entry| {
-        let program = match SHADERS.with(|s| s.borrow().get(&shader).map(|sh| sh.program)) {
-            Some(p) => p,
-            None => {
-                crate::log_once!(
-                    "TEXT",
-                    "text shader program (handle {}) not in registry; skipping text draw",
-                    shader
-                );
-                return;
-            }
+    let abs_sy = sy.abs();
+    let ascent = if baseline >= 0.0 {
+        baseline
+    } else {
+        entry.max_ascent(line, abs_sy).unwrap_or(0.0)
+    };
+
+    vertices.clear();
+    let mut pen_x = x;
+    for gi in line.chars().filter_map(|c| entry.regular_glyph(c)) {
+        if gi.valid && gi.width != 0.0 && gi.height != 0.0 {
+            let x0 = pen_x + gi.bearing_x * sx;
+            let y0 = if sy < 0.0 {
+                y - gi.bearing_y * sy
+            } else {
+                y + (ascent - gi.bearing_y * abs_sy)
+            };
+            let (x1, y1) = (x0 + gi.width * sx, y0 + gi.height * sy);
+            let (u0, v0, u1, v1) = (gi.u0, gi.v0, gi.u1, gi.v1);
+            vertices.extend_from_slice(&[
+                x0, y0, u0, v0, x0, y1, u0, v1, x1, y1, u1, v1, x0, y0, u0, v0, x1, y1, u1, v1, x1,
+                y0, u1, v0,
+            ]);
+        }
+        pen_x += gi.advance * sx;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn stone_stream_text(
+    shader: c_uint,
+    font_id: c_uint,
+    text: *const c_char,
+    x: c_float,
+    y: c_float,
+    sx: c_float,
+    sy: c_float,
+    baseline: c_float,
+    multiline: bool,
+) {
+    let text = c_str(text);
+    if text.is_empty() || (multiline && text.bytes().all(|byte| byte == b'\n')) {
+        return;
+    }
+    let Some(vao) = crate::sprite::mesh_vao() else {
+        return;
+    };
+    let shader = u64::from(shader);
+    font(font_id, |entry| {
+        let Some(program) =
+            SHADERS.with_borrow(|shaders| shaders.get(&shader).map(|sh| sh.program))
+        else {
+            crate::log_once!(
+                "TEXT",
+                "text shader program (handle {}) not in registry; skipping text draw",
+                shader
+            );
+            return;
         };
         let Some(atlas) = entry.atlas_texture else {
             crate::log_once!(
@@ -880,42 +852,13 @@ fn draw_text_line_internal(
             );
             return;
         };
-        let abs_sy = sy.abs();
-        let max_ascent = if baseline_override >= 0.0 {
-            baseline_override
-        } else {
-            entry.max_ascent(text, abs_sy).unwrap_or(0.0)
-        };
-
-        let mut vertices: Vec<f32> = Vec::with_capacity(text.len() * 24);
-        let mut pen_x = x;
-        for gi in text.chars().filter_map(|c| entry.regular_glyph(c)) {
-            if gi.valid && gi.width != 0.0 && gi.height != 0.0 {
-                let x0 = pen_x + gi.bearing_x * sx;
-                let y0 = if sy < 0.0 {
-                    y - gi.bearing_y * sy
-                } else {
-                    y + (max_ascent - gi.bearing_y * abs_sy)
-                };
-                let (x1, y1) = (x0 + gi.width * sx, y0 + gi.height * sy);
-                let (u0, v0, u1, v1) = (gi.u0, gi.v0, gi.u1, gi.v1);
-                vertices.extend_from_slice(&[
-                    x0, y0, u0, v0, x0, y1, u0, v1, x1, y1, u1, v1, //
-                    x0, y0, u0, v0, x1, y1, u1, v1, x1, y0, u1, v0,
-                ]);
-            }
-            pen_x += gi.advance * sx;
-        }
 
         with_gl(|gl| unsafe {
             gl.use_program(Some(program));
-            // Goes current without `stone_set_shader`, so it re-binds the global block indices too.
             crate::uniform_block::bind_block_for_program(gl, shader);
-
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(atlas));
-            gl.bind_vertex_array(Some(pipeline.vao));
-
+            gl.bind_vertex_array(Some(vao));
             gl.enable(glow::BLEND);
             gl.blend_func_separate(
                 glow::SRC_ALPHA,
@@ -924,48 +867,33 @@ fn draw_text_line_internal(
                 glow::ONE_MINUS_SRC_ALPHA,
             );
 
-            if !vertices.is_empty() {
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(pipeline.vbo));
-                let uploaded = gl.buffer_data_u8_slice(
-                    glow::ARRAY_BUFFER,
-                    bytemuck::cast_slice(&vertices),
-                    glow::STREAM_DRAW,
-                );
-                gl.bind_buffer(glow::ARRAY_BUFFER, None);
-                if uploaded.is_ok() {
-                    gl.draw_arrays(glow::TRIANGLES, 0, (vertices.len() / 4) as i32);
-                    crate::uniform_block::mark_program_drawn(program);
-                    track_text_draw_call();
+            TEXT_VERTICES.with_borrow_mut(|vertices| {
+                let mut line_y = y;
+                let line_height = entry.line_height() * sy.abs();
+                for line in text.splitn(if multiline { usize::MAX } else { 1 }, '\n') {
+                    if !line.is_empty() {
+                        text_line_vertices(entry, vertices, line, x, line_y, sx, sy, baseline);
+                        if !vertices.is_empty() {
+                            let _ = crate::sprite::stream_triangles(
+                                gl,
+                                bytemuck::cast_slice(vertices),
+                                vertices.len() / 4,
+                                4,
+                                &[2, 2],
+                                |_, _| {
+                                    crate::uniform_block::mark_program_drawn(program);
+                                    track_text_draw_call();
+                                },
+                            );
+                            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+                        }
+                    }
+                    line_y += line_height;
                 }
-            }
-
+            });
             gl.bind_vertex_array(None);
         });
     });
-}
-
-#[no_mangle]
-pub extern "C" fn stone_draw_text(
-    shader: c_uint,
-    font_id: c_uint,
-    text: *const c_char,
-    x: c_float,
-    y: c_float,
-    sx: c_float,
-    sy: c_float,
-) {
-    let text = c_str(text);
-    if text.is_empty() {
-        return;
-    }
-    let line_height = with_font(font_id, 20.0, |_, entry| entry.line_height() * sy.abs());
-    let mut line_y = y;
-    for line in text.split('\n') {
-        if !line.is_empty() {
-            draw_text_line_internal(shader.into(), font_id, line, x, line_y, sx, sy, -1.0);
-        }
-        line_y += line_height;
-    }
 }
 
 /// Out-params, NOT struct-by-value return. LuaJIT cannot JIT-compile a
@@ -1030,24 +958,6 @@ pub extern "C" fn stone_get_text_baseline(
     font(font_id, |entry| entry.max_ascent(text, scale.abs()))
         .flatten()
         .unwrap_or(-1.0)
-}
-
-/// Draw text with explicit baseline for per-character rendering
-#[no_mangle]
-pub extern "C" fn stone_draw_text_ex(
-    shader: c_uint,
-    font_id: c_uint,
-    text: *const c_char,
-    x: c_float,
-    y: c_float,
-    sx: c_float,
-    sy: c_float,
-    baseline: c_float,
-) {
-    let text = c_str(text);
-    if !text.is_empty() {
-        draw_text_line_internal(shader.into(), font_id, text, x, y, sx, sy, baseline);
-    }
 }
 
 fn register_r8_alias(texture: glow::Texture, layout: &AtlasLayout) -> u64 {
@@ -2357,27 +2267,5 @@ mod logo_atlas_tests {
             bake.layout.height,
             bake.layout.width as u64 * bake.layout.height as u64,
         );
-    }
-}
-
-#[cfg(test)]
-mod startup_allocation_tests {
-    #[test]
-    fn required_text_allocation_fails_without_publishing_or_leaking() {
-        let gl = crate::sprite::tests::failing_driver(1);
-        let result = std::panic::catch_unwind(|| {
-            assert!(!unsafe { super::init_geometry(&gl) });
-            super::TEXT_PIPELINE.with(|pipeline| assert!(pipeline.borrow().is_none()));
-            crate::sprite::tests::assert_no_driver_objects();
-        });
-        if let Some(pipeline) = super::TEXT_PIPELINE.with(|pipeline| pipeline.borrow_mut().take()) {
-            unsafe {
-                gl.delete_vertex_array(pipeline.vao);
-                gl.delete_buffer(pipeline.vbo);
-            }
-        }
-        if let Err(error) = result {
-            std::panic::resume_unwind(error);
-        }
     }
 }

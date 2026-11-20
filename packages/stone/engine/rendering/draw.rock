@@ -4,7 +4,7 @@
 
 pub const sprite_batch_shader: string = rock_shader(sprite_batch_vert, sprite_batch_frag)  // sprite_batch_shader.rock (A2b)
 pub const sprite_basic_shader: string = rock_shader(sprite_basic_vert, sprite_basic_frag)  // sprite_basic_shader.rock (C2); the immediate/present sprite program
-const text_shader: string = rock_shader(text_vert, text_frag)  // text_shader.rock (C3); text.rs binds it by handle
+const text_shader: string = rock_shader(text_vert, text_frag)
 
 pub const tonemap_shader: string = rock_shader(tonemap_frag)  // tonemapping_shader.rock
 pub const tonemap_split_shader: string = rock_shader(tonemap_split_frag)  // tonemapping_shader.rock

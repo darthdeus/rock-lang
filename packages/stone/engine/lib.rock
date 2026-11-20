@@ -1077,7 +1077,7 @@ fn stone_init_window(
     }
 
     if !stone_text_init() {
-        log_once("STONE/INIT", "stone_text_init() failed (FreeType text system)")
+        log_once("STONE/INIT", "stone_text_init() failed")
         stone_audio_quit()
         stone_teardown()
         return null
@@ -1222,11 +1222,6 @@ pub enum FontRasterPolicy { Fixed, OutputDensity }
 // that a removed Entity stays removed.
 //
 // `DEFAULT_FONT` is set by runner.rock after loading the engine font.
-// All existing top-level text wrappers (stone_draw_text,
-// stone_measure_text_vec2, etc.) consult DEFAULT_FONT under the hood —
-// games keep calling `measure_text(text, font_size)` without thinking
-// about font handles. Code that wants a specific font uses the Font
-// UFCS methods (font.measure, font.draw, etc.).
 pub struct FontData {
     backend_id: int,
     base_pixel_size: int,
@@ -1523,57 +1518,20 @@ pub fn font_release_coverage(font: Font) {
     FONT_ATLASES[idx] = Image(0)
 }
 
-pub fn stone_draw_text_for(
-    space: DrawSpace,
-    font_id: int,
-    text: string,
-    x: float,
-    y: float,
-    scale_x: float,
-    scale_y: float,
-    r: float,
-    g: float,
-    b: float,
-    a: float
-) {
+fn draw_font_text(space: DrawSpace, font_id: int, text: string,
+    x: float, y: float, scale_x: float, scale_y: float, tint: Color, baseline: float? = null) {
     if space == DrawSpace::Target { begin_cleared_camera() }
     set_engine_uniforms(text_shader, camera_y_bounds())
     if space == DrawSpace::Target { end_cleared_camera() }
-    set_uniform_block(text_shader, TextFragU { textColor: v(r, g, b, a) })
-    __stone_draw_text_ffi(get_shader_handle(text_shader), font_id, text, x, y, scale_x, scale_y)
-    audit_text_texture_slot()
-}
-
-pub fn stone_draw_text_ex_for(
-    space: DrawSpace,
-    font_id: int,
-    text: string,
-    x: float,
-    y: float,
-    scale_x: float,
-    scale_y: float,
-    r: float,
-    g: float,
-    b: float,
-    a: float,
-    baseline: float
-) {
-    if space == DrawSpace::Target { begin_cleared_camera() }
-    set_engine_uniforms(text_shader, camera_y_bounds())
-    if space == DrawSpace::Target { end_cleared_camera() }
-    set_uniform_block(text_shader, TextFragU { textColor: v(r, g, b, a) })
-    __stone_draw_text_ex_ffi(get_shader_handle(text_shader), font_id, text, x, y, scale_x, scale_y, baseline)
-    audit_text_texture_slot()
-}
-
-fn audit_text_texture_slot() {
+    set_uniform_block(text_shader, TextFragU { textColor: v(tint.r, tint.g, tint.b, tint.a) })
+    stone_stream_text(get_shader_handle(text_shader), font_id, text, x, y, scale_x, scale_y,
+        baseline ?? -1.0, baseline == null)
     mark_texture_slot_filled(text_shader, 0)
     audit_texture_slots_for_draw(text_shader)
 }
 
-extern(lua, "stone.stone_draw_text") fn __stone_draw_text_ffi(shader: int, font_id: int, text: string, x: float, y: float, scale_x: float, scale_y: float)
-
-extern(lua, "stone.stone_draw_text_ex") fn __stone_draw_text_ex_ffi(shader: int, font_id: int, text: string, x: float, y: float, scale_x: float, scale_y: float, baseline: float)
+extern(lua, "stone.stone_stream_text") fn stone_stream_text(shader: int, font_id: int, text: string,
+    x: float, y: float, scale_x: float, scale_y: float, baseline: float, multiline: bool)
 
 pub extern(lua, "stone.stone_get_text_baseline") fn stone_get_text_baseline_for(font_id: int, text: string, scale: float) -> float
 
@@ -1600,41 +1558,6 @@ pub @inline inline(lua) fn stone_get_font_atlas_image_for(font_id: int) -> int =
 pub extern(lua, "stone.stone_get_font_pixel_size") fn stone_get_font_pixel_size_for(font_id: int) -> int
 
 pub extern(lua, "stone.stone_get_glyph_info") fn stone_get_glyph_info_for(font_id: int, face: int, char_code: int, out: Ptr<float>) -> bool
-
-pub fn stone_draw_text(
-    space: DrawSpace,
-    text: string,
-    x: float,
-    y: float,
-    scale_x: float,
-    scale_y: float,
-    r: float,
-    g: float,
-    b: float,
-    a: float
-) {
-    let f = DEFAULT_FONT ?? return
-    let d = f.data() ?? return
-    stone_draw_text_for(space, d.backend_id, text, x, y, scale_x, scale_y, r, g, b, a)
-}
-
-pub fn stone_draw_text_ex(
-    space: DrawSpace,
-    text: string,
-    x: float,
-    y: float,
-    scale_x: float,
-    scale_y: float,
-    r: float,
-    g: float,
-    b: float,
-    a: float,
-    baseline: float
-) {
-    let f = DEFAULT_FONT ?? return
-    let d = f.data() ?? return
-    stone_draw_text_ex_for(space, d.backend_id, text, x, y, scale_x, scale_y, r, g, b, a, baseline)
-}
 
 pub fn stone_get_text_baseline(text: string, scale: float) -> float {
     let f = DEFAULT_FONT ?? return -1.0

@@ -528,8 +528,7 @@ int stone_get_font_slot_codepoint(uint32_t font_id, int slot);
 bool stone_unload_font(uint32_t font_id);
 bool stone_reload_font(uint32_t font_id, const char* path, int pixel_size);
 bool stone_resize_font(uint32_t font_id, int pixel_size);
-void stone_draw_text(uint32_t shader, uint32_t font_id, const char* text, float x, float y, float scale_x, float scale_y);
-void stone_draw_text_ex(uint32_t shader, uint32_t font_id, const char* text, float x, float y, float scale_x, float scale_y, float baseline);
+void stone_stream_text(uint32_t shader, uint32_t font_id, const char* text, float x, float y, float scale_x, float scale_y, float baseline, bool multiline);
 float stone_get_text_baseline(uint32_t font_id, const char* text, float scale);
 void stone_measure_text(uint32_t font_id, const char* text, float scale, float* out_width, float* out_height);
 

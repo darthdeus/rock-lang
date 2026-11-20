@@ -479,10 +479,9 @@ fn scene_render_scope_restore_case(fail: bool) {
                 set_camera(v(7.0,9.0),2.0)
                 set_engine_uniforms(sprite_batch_shader,v(0.0,1.0))
                 let text_uploads = shader_block_uploads(text_shader, 2)
-                stone_draw_text_for(DrawSpace::Target, font.data().unwrap().backend_id,
-                    "scope", 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0)
-                stone_draw_text_ex_for(DrawSpace::Target, font.data().unwrap().backend_id,
-                    "scope", 0.0, 24.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 18.0)
+                let font_id = font.data().unwrap().backend_id
+                draw_font_text(DrawSpace::Target, font_id, "scope", 0.0, 0.0, 1.0, 1.0, RED)
+                draw_font_text(DrawSpace::Target, font_id, "scope", 0.0, 24.0, 1.0, 1.0, GREEN, 18.0)
                 assert(shader_block_uploads(text_shader, 2) > text_uploads,
                     "immediate native text goes through tracked block uploads")
                 queue_scene_pass(Pass { pipeline: BLIT_PIPELINE,

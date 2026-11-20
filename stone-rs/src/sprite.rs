@@ -27,6 +27,54 @@ fn stream_draw_chunks(total: usize) -> impl Iterator<Item = (usize, usize)> {
         .map(move |offset| (offset, (total - offset).min(MAX_STREAM_DRAW_VERTICES)))
 }
 
+pub(crate) fn mesh_vao() -> Option<glow::VertexArray> {
+    SPRITE_STATE.with_borrow(|state| state.as_ref().map(|state| state.mesh_vao))
+}
+
+unsafe fn stream_mesh_vertices(
+    gl: &DebugGl,
+    data: &[u8],
+    count: usize,
+    stride: i32,
+    sizes: &[i32],
+) -> Result<i32, ()> {
+    let range = crate::stream_buffer::upload(gl, crate::stream_buffer::Stream::Vertex, data)
+        .map_err(|error| ::log::error!(target: "STONE", "stone_draw_mesh: {error}"))?;
+    gl.bind_buffer(glow::ARRAY_BUFFER, Some(range.buffer));
+    crate::mesh::setup_attribs(gl, 0, sizes, stride, 0, range.offset);
+    crate::track_stream_upload(count, data.len(), range.replaced);
+    Ok(range.offset)
+}
+
+pub(crate) unsafe fn stream_triangles(
+    gl: &DebugGl,
+    data: &[u8],
+    count: usize,
+    stride: i32,
+    sizes: &[i32],
+    mut drawn: impl FnMut(usize, usize),
+) -> Result<(), ()> {
+    let stride_bytes = stride as usize * std::mem::size_of::<f32>();
+    for (first, count) in stream_draw_chunks(count) {
+        let vertex_data = &data[first * stride_bytes..(first + count) * stride_bytes];
+        let offset = stream_mesh_vertices(gl, vertex_data, count, stride, sizes)?;
+        if crate::mesh_capture::armed() {
+            crate::mesh_capture::record(
+                gl,
+                vertex_data,
+                offset,
+                count,
+                stride_bytes,
+                sizes.len(),
+                None,
+            );
+        }
+        gl.draw_arrays(glow::TRIANGLES, 0, count as c_int);
+        drawn(first, count);
+    }
+    Ok(())
+}
+
 fn build_fan_indices(
     vertices: usize,
     ranges: &[i32],
@@ -432,25 +480,23 @@ fn draw_mesh(
                 }
 
                 let stride_bytes = stride_usize * std::mem::size_of::<f32>();
-                let upload = |stream, bytes: &[u8]| {
-                    crate::stream_buffer::upload(gl, stream, bytes)
-                        .map_err(|error| ::log::error!(target: "STONE", "stone_draw_mesh: {error}"))
-                };
+                let vertex_data = std::slice::from_raw_parts(data.cast::<u8>(), count_usize * stride_bytes);
                 if indexed {
-                    let bytes = count_usize * stride_bytes;
-                    let vertex_data = std::slice::from_raw_parts(data.cast::<u8>(), bytes);
-                    let Ok(vertices) = upload(crate::stream_buffer::Stream::Vertex, vertex_data) else { return -1 };
-                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices.buffer));
-                    crate::mesh::setup_attribs(gl, 0, sizes.as_slice(), stride, 0, vertices.offset);
-                    crate::track_stream_upload(count_usize, bytes, vertices.replaced);
+                    let Ok(vertex_offset) = stream_mesh_vertices(gl, vertex_data, count_usize, stride, sizes.as_slice()) else { return -1 };
                     for (offset, count) in stream_draw_chunks(state.triangle_indices.len()) {
                         let indices = &state.triangle_indices[offset..offset + count];
                         let bytes = bytemuck::cast_slice(indices);
-                        let Ok(range) = upload(crate::stream_buffer::Stream::Index, bytes) else { return -1 };
+                        let range = match crate::stream_buffer::upload(gl, crate::stream_buffer::Stream::Index, bytes) {
+                            Ok(range) => range,
+                            Err(error) => {
+                                ::log::error!(target: "STONE", "stone_draw_mesh: {error}");
+                                return -1;
+                            }
+                        };
                         gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(range.buffer));
                         crate::track_stream_upload(0, bytes.len(), range.replaced);
                         if crate::mesh_capture::armed() {
-                            crate::mesh_capture::record(gl, vertex_data, vertices.offset, count_usize,
+                            crate::mesh_capture::record(gl, vertex_data, vertex_offset, count_usize,
                                 stride_bytes, sizes.as_slice().len(), Some((bytes, range.offset)));
                         }
                         gl.draw_elements(glow::TRIANGLES, count as c_int, glow::UNSIGNED_INT, range.offset);
@@ -463,27 +509,18 @@ fn draw_mesh(
                         track_draw_call();
                     }
                 } else {
-                    for (vertex_offset, chunk_count) in stream_draw_chunks(count_usize) {
-                        let data_size = chunk_count * stride_bytes;
-                        let vertex_data = std::slice::from_raw_parts(
-                            data.add(vertex_offset * stride_usize).cast::<u8>(), data_size);
-                        let Ok(vertices) = upload(crate::stream_buffer::Stream::Vertex, vertex_data) else { return -1 };
-                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices.buffer));
-                        crate::mesh::setup_attribs(gl, 0, sizes.as_slice(), stride, 0, vertices.offset);
-                        crate::track_stream_upload(chunk_count, data_size, vertices.replaced);
-                        if crate::mesh_capture::armed() {
-                            crate::mesh_capture::record(gl, vertex_data, vertices.offset, chunk_count,
-                                stride_bytes, sizes.as_slice().len(), None);
-                        }
-                        gl.draw_arrays(glow::TRIANGLES, 0, chunk_count as c_int);
+                    let result = stream_triangles(gl, vertex_data, count_usize, stride, sizes.as_slice(), |first, count| {
                         if crate::ui_submission_probe::enabled() {
                             crate::ui_submission_probe::mesh_consumed(
-                                data.add(vertex_offset * stride_usize), chunk_count,
-                                stride_usize, tex_kind, tex, vertex_offset);
+                                data.add(first * stride_usize), count,
+                                stride_usize, tex_kind, tex, first);
                             crate::ui_submission_probe::device_state(gl);
                         }
                         crate::uniform_block::mark_program_drawn(active_shader);
                         track_draw_call();
+                    });
+                    if result.is_err() {
+                        return -1;
                     }
                 }
 
@@ -510,7 +547,7 @@ pub(crate) mod tests {
     }
     thread_local! { static DRIVER: RefCell<Driver> = RefCell::new(Driver::default()); }
 
-    pub(crate) fn failing_driver(fail_at: usize) -> crate::DebugGl {
+    fn failing_driver(fail_at: usize) -> crate::DebugGl {
         DRIVER.with_borrow_mut(|driver| {
             *driver = Driver {
                 fail_at,
@@ -576,7 +613,7 @@ pub(crate) mod tests {
         })
     }
 
-    pub(crate) fn assert_no_driver_objects() {
+    fn assert_no_driver_objects() {
         DRIVER.with_borrow(|driver| {
             assert!(
                 driver.objects.is_empty(),

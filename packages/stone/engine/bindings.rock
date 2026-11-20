@@ -907,7 +907,7 @@ fn height(font: Font, display_size: float) -> float {
 pub fn draw_text(font: Font, space: DrawSpace, text: string, x: float, y: float, display_size: float, color: Color) {
     let d = font.data() ?? return
     let s = font_scale(font, display_size)
-    stone_draw_text_for(space, d.backend_id, text, x, y, s, s, color.r, color.g, color.b, color.a)
+    draw_font_text(space, d.backend_id, text, x, y, s, s, color)
 }
 
 pub fn get_save_directory() -> string {
