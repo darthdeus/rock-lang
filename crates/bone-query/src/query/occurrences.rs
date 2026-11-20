@@ -550,6 +550,45 @@ fn walk_body<'t>(
     }
 }
 
+/// Every name token of a module's declarations and of the bodies `keep`
+/// accepts: the body it is in, its symbol, its span and the node it resolves on.
+pub(crate) fn named_tokens<'t>(
+    ws: &Workspace,
+    module: &hir::Module,
+    keep: &dyn Fn(hir::BodyOwner) -> bool,
+    text_of: TextOf<'_, 't>,
+    each: &mut dyn FnMut(Option<hir::BodyOwner>, RefTarget, Span, Option<NodeRef>),
+) {
+    let owner = std::cell::Cell::new(None);
+    let mut emit = |occ: Occurrence| {
+        let node = match occ.hit {
+            Hit::Node(node) | Hit::SpanOnNode(_, node) => Some(node),
+            Hit::Nowhere | Hit::Span(_) => None,
+        };
+        if let Some(site) = occ.site {
+            each(owner.get(), occ.target, site.span, node);
+        }
+    };
+    walk_module(ws, module, Bodies::Only(None), None, text_of, &mut emit);
+    let inf = ws.inference(module.id);
+    let want = |_| true;
+    for (body_owner, body) in module.bodies.iter().filter(|(o, _)| keep(**o)) {
+        owner.set(Some(*body_owner));
+        let bi = inf.and_then(|inf| inf.per_fn.get(body_owner));
+        walk_body(
+            ws,
+            module,
+            *body_owner,
+            body,
+            bi,
+            &want,
+            true,
+            text_of,
+            &mut emit,
+        );
+    }
+}
+
 /// The qualifier resolves up to its variant, `::` included.
 fn enum_qualifier(name: Ustr, span: Span, variant: Option<Span>) -> Occurrence {
     let (start, end) = span.offset_range();
@@ -568,10 +607,7 @@ fn global_occurrences(
     inferred: bool,
     emit: &mut dyn FnMut(Occurrence),
 ) {
-    let function = ws
-        .modules
-        .iter()
-        .find_map(|m| m.functions_by_name.get(&name).and_then(|f| f.first()));
+    let function = ws.functions_by_name.get(&name).and_then(|f| f.first());
     if let Some(&(fmid, fid)) = function {
         let mut occ = Occurrence::new(RefTarget::Function(fmid, fid), 60)
             .on((!name.as_str().starts_with("__")).then_some(node))
@@ -579,10 +615,7 @@ fn global_occurrences(
         occ.by_name = true;
         emit(occ);
     }
-    let global = ws
-        .modules
-        .iter()
-        .any(|m| m.global_by_name.contains_key(&name));
+    let global = ws.globals_by_name.contains_key(&name);
     emit(
         Occurrence::new(RefTarget::Global(name), 71)
             .on(global.then_some(node))

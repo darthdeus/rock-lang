@@ -201,6 +201,26 @@ fn token_classification() {
             &[(4, 8, "parameter"), (5, 8, "parameter")],
         ),
         (
+            "field access named like a function",
+            "struct M { min: int }\nfn min(a: int, b: int) -> int { return a }\nfn f(m: M) -> int {\n  return m.min\n}\n",
+            &[(3, 11, "property")],
+        ),
+        (
+            "called function parameter",
+            "fn f(body: fn(int) -> ()) {\n  body(1)\n}\n",
+            &[(1, 2, "parameter")],
+        ),
+        (
+            "record variant field declaration",
+            "enum In {\n  Key { scan: string },\n}\n",
+            &[(1, 8, "property")],
+        ),
+        (
+            "nullable generic annotation",
+            "fn inputs() {}\nstruct B<T> {\n  inputs: T?,\n}\n",
+            &[(2, 10, "typeParameter")],
+        ),
+        (
             "rock directive comment",
             "fn run() {\n  // rock: allow(unused_var)\n  // just a note\n  let x = 1\n}\n",
             &[(1, 2, "macro"), (2, 2, "comment")],
@@ -228,4 +248,23 @@ fn cross_file_struct_name_colors_as_struct() {
     let (bone, _) = project.open("b.rock");
     let toks = rendered(&bone, &project.path("b.rock"));
     assert_tokens("cross-file struct", &toks, &[(2, 13, "struct")]);
+}
+
+#[test]
+fn decorator_declaration_named_like_a_function_elsewhere() {
+    let project = Project::new(&[
+        (
+            "stick.toml",
+            "[package]\nname = \"xp\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+        ),
+        ("main.rock", "fn main() -> int { 0 }\n"),
+        ("a.rock", "pub mod a;\npub fn update() {}\n"),
+        (
+            "b.rock",
+            "pub mod b;\n@lifecycle(phase=\"update\", owner=\"process\", stage_param=\"stage\")\ndeco init update(stage: int = 100) {}\n",
+        ),
+    ]);
+    let (bone, _) = project.open("b.rock");
+    let toks = rendered(&bone, &project.path("b.rock"));
+    assert_tokens("decorator declaration", &toks, &[(2, 10, "decorator")]);
 }

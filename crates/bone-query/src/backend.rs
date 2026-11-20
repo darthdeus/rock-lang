@@ -29,11 +29,10 @@ use lsp_types::{
 use bone_core::prelude::Nominal;
 use bone_core::type_equiv::TyRef;
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
-use bone_semantic::hir::TypeExpr;
 use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{
-    Arena, ArenaMap, BodyInference, FxHashMap, FxHashSet, Idx, InferenceResult, ModuleId, Span,
-    TyId, Workspace, is_field_ref_former,
+    BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span, TyId, Workspace,
+    is_field_ref_former,
 };
 use skull_parser::CompilerError;
 use ustr::Ustr;
@@ -1829,7 +1828,10 @@ impl BoneWorkspace {
             names.entry(md.name).or_insert(TT_MACRO);
         }
         let hir = user_module_for_path(ws, path)
-            .map(|mid| semantic_classifications(ws, mid, range))
+            .map(|mid| {
+                let text_of = |f: &str| proj.texts.get(f).map(String::as_str);
+                semantic_classifications(ws, mid, range, &text_of)
+            })
             .unwrap_or_default();
 
         let mut data = Vec::new();
@@ -2042,7 +2044,7 @@ const TT_MACRO: u32 = 14;
 fn classify_token(
     kind: &rock_tokenizer::TokenKind,
     next_kind: Option<&rock_tokenizer::TokenKind>,
-    hir: &HashMap<usize, (u32, u32)>,
+    hir: &FxHashMap<usize, (u32, u32)>,
     names: &HashMap<Ustr, u32>,
     offset: usize,
     is_member: bool,
@@ -2122,229 +2124,108 @@ fn classify_token(
     })
 }
 
-fn semantic_classifications(
+fn semantic_classifications<'t>(
     ws: &Workspace,
     mid: ModuleId,
     range: Option<(usize, usize)>,
+    text_of: crate::query::TextOf<'_, 't>,
 ) -> SemanticClassifications {
-    use bone_semantic::hir::{BindingKind, BodyOwner, Expr};
-    let binding_tt = |k: BindingKind| match k {
-        BindingKind::Param => TT_PARAMETER,
-        BindingKind::Let | BindingKind::Static | BindingKind::Fn => TT_VARIABLE,
-    };
-    let mut map: HashMap<usize, (u32, u32)> = HashMap::new();
-    let mut holes: Vec<Span> = Vec::new();
+    use crate::query::RefTarget;
+    use bone_semantic::hir::{BindingKind, BodyOwner, Expr, InterpPart, NodeRef};
     let Some(module) = ws.modules.get(mid.index()) else {
         return SemanticClassifications::default();
     };
     let inf = ws.inference(mid);
+    let mut map: FxHashMap<usize, (u32, u32)> = FxHashMap::default();
     mark_semantic_path_segments(ws, &mut map, &module.path_segments);
-    for s in module.structs.values() {
-        map.insert(s.name_span.offset_range().0, (TT_STRUCT, 0));
-        for f in &s.fields {
-            map.insert(f.span.offset_range().0, (TT_PROPERTY, 0));
+    // Only bodies overlapping the viewport: the per-body walk is what scales
+    // with file size.
+    let in_view = |owner: BodyOwner| match (range, owner) {
+        (Some((lo, hi)), BodyOwner::Function(fid)) => {
+            let (s, e) = module.functions[fid].span.offset_range();
+            e > lo && s < hi
         }
-    }
-    for en in module.enums.values() {
-        map.insert(en.name_span.offset_range().0, (TT_ENUM, 0));
-    }
-    for nt in module.newtypes.values() {
-        map.insert(nt.name_span.offset_range().0, (TT_TYPE, 0));
-    }
-    for f in module.functions.values() {
-        map.insert(f.name_span.offset_range().0, (TT_FUNCTION, 0));
-    }
-    mark_semantic_types(ws, &mut map, &module.ty_arena, &module.ty_spans);
-    for en in module.enums.values() {
-        for v in &en.variants {
-            map.insert(v.name_span.offset_range().0, (TT_ENUM_MEMBER, 0));
-        }
-    }
-    for f in module.functions.values() {
-        for anno in &f.annotations {
-            map.insert(anno.name.span.offset_range().0, (TT_DECORATOR, 0));
-        }
-    }
-    // `span_recordable` excludes generics, so uses never clobber a decl's span.
-    for g in crate::query::declared_generics(module) {
-        if let bone_semantic::prelude::TyId::Static(gmid, idx) = g {
-            if *gmid == mid {
-                if let Some(sp) = module.ty_spans.get(*idx) {
-                    map.insert(sp.offset_range().0, (TT_TYPE_PARAMETER, 0));
+        _ => true,
+    };
+    let global = |name: Ustr| {
+        let ty = *ws.globals_by_name.get(&name)?;
+        Some((ty, ws.const_globals.contains(&name)))
+    };
+    crate::query::named_tokens(
+        ws,
+        module,
+        &in_view,
+        text_of,
+        &mut |owner, target, span, node| {
+            let body = owner.map(|o| &module.bodies[&o]);
+            let bi = owner.and_then(|o| inf?.per_fn.get(&o));
+            let used = |e| bi.and_then(|bi| bi.expr_types.get(e).copied());
+            let class = match target {
+                // A binding named outside its body is a parameter's label.
+                RefTarget::Binding(bmid, binding_owner, b) => {
+                    let kind = match body {
+                        Some(body) if bmid == mid && Some(binding_owner) == owner => {
+                            body.binding_arena[b].kind
+                        }
+                        _ => BindingKind::Param,
+                    };
+                    let tt = match kind {
+                        BindingKind::Param => TT_PARAMETER,
+                        BindingKind::Let | BindingKind::Static | BindingKind::Fn => TT_VARIABLE,
+                    };
+                    let declared = bi.and_then(|bi| bi.binding_types.get(b).copied());
+                    let mods = match node {
+                        // No flow narrowing applies at a declaration.
+                        Some(NodeRef::Binding(_)) => match declared {
+                            Some(ty) if crate::types::is_nullable(ws, bi, ty) => MOD_NULLABLE,
+                            _ => 0,
+                        },
+                        Some(NodeRef::Expr(e))
+                            if body
+                                .is_some_and(|body| matches!(body.expr_arena[e], Expr::Var(_))) =>
+                        {
+                            semantic_flow_modifiers(ws, bi, declared, used(e))
+                        }
+                        _ => 0,
+                    };
+                    Some((tt, mods))
                 }
-            }
-        }
-    }
-    let global_mod = |is_const: bool| if is_const { MOD_READONLY } else { MOD_STATIC };
-    let mut global_tys: HashMap<Ustr, (bone_semantic::prelude::TyId, bool)> = HashMap::new();
-    for m in ws.modules.iter() {
-        for (_, g) in m.globals.iter() {
-            global_tys.entry(g.name).or_insert((g.ty, g.is_const));
-        }
-    }
-    for (_, g) in module.globals.iter() {
-        let mods = global_mod(g.is_const)
-            | if crate::types::is_nullable(ws, None, g.ty) {
-                MOD_NULLABLE
-            } else {
-                0
+                RefTarget::Global(name) => global(name).map(|(ty, is_const)| {
+                    let place = if is_const { MOD_READONLY } else { MOD_STATIC };
+                    let flow = match node {
+                        Some(NodeRef::Expr(e)) => {
+                            semantic_flow_modifiers(ws, bi, Some(ty), used(e))
+                        }
+                        _ if crate::types::is_nullable(ws, None, ty) => MOD_NULLABLE,
+                        _ => 0,
+                    };
+                    (TT_VARIABLE, place | flow)
+                }),
+                RefTarget::GenericParam(..) => Some((TT_TYPE_PARAMETER, 0)),
+                RefTarget::EnumVariant(..) => Some((TT_ENUM_MEMBER, 0)),
+                RefTarget::Field(..) => Some((TT_PROPERTY, 0)),
+                RefTarget::Function(..) => Some((TT_FUNCTION, 0)),
+                RefTarget::Decorator(_) => Some((TT_DECORATOR, 0)),
+                RefTarget::Enum(name) | RefTarget::Newtype(name) | RefTarget::Struct(name) => {
+                    semantic_symbol_token(ws, name).map(|tt| (tt, 0))
+                }
             };
-        map.insert(g.name_span.offset_range().0, (TT_VARIABLE, mods));
-    }
-    for (owner, body) in module.bodies.iter() {
+            if let Some(class) = class {
+                map.insert(span.offset_range().0, class);
+            }
+        },
+    );
+    let mut holes: Vec<Span> = Vec::new();
+    for (_, body) in module.bodies.iter().filter(|(o, _)| in_view(**o)) {
         mark_semantic_path_segments(ws, &mut map, &body.path_segments);
-        // Only bodies overlapping the viewport: the per-body walk is what scales
-        // with file size.
-        if let (Some((lo, hi)), BodyOwner::Function(fid)) = (range, owner) {
-            let (s, e) = module.functions[*fid].span.offset_range();
-            if e <= lo || s >= hi {
+        for expr in body.expr_arena.values() {
+            let Expr::InterpolatedString(parts) = expr else {
                 continue;
-            }
-        }
-        let bi = inf.and_then(|i| i.per_fn.get(owner));
-        mark_semantic_types(ws, &mut map, &body.lowered_tys, &body.lowered_ty_spans);
-        // No flow narrowing applies at a declaration.
-        for (b, info) in body.binding_arena.iter() {
-            if let Some(sp) = body.binding_spans.get(b) {
-                let mods = match bi.and_then(|bi| bi.binding_types.get(b)) {
-                    Some(&ty) if crate::types::is_nullable(ws, bi, ty) => MOD_NULLABLE,
-                    _ => 0,
-                };
-                map.insert(sp.offset_range().0, (binding_tt(info.kind), mods));
-            }
-        }
-        for (e, expr) in body.expr_arena.iter() {
-            match expr {
-                Expr::Var(b) => {
-                    if let Some(sp) = body.expr_spans.get(e) {
-                        let tt = binding_tt(body.binding_arena[*b].kind);
-                        let mods = semantic_flow_modifiers(
-                            ws,
-                            bi,
-                            bi.and_then(|bi| bi.binding_types.get(*b).copied()),
-                            bi.and_then(|bi| bi.expr_types.get(e).copied()),
-                        );
-                        map.insert(sp.offset_range().0, (tt, mods));
-                    }
+            };
+            for pi in *parts {
+                if let InterpPart::Value { expr, .. } = &body.interp_part_arena[pi] {
+                    holes.extend(body.expr_spans.get(*expr).copied());
                 }
-                Expr::EnumVariant {
-                    enum_name,
-                    enum_name_span,
-                    variant_span,
-                    ..
-                } => {
-                    if let Some(token_type) = semantic_symbol_token(ws, *enum_name) {
-                        map.insert(
-                            body.name_spans[*enum_name_span].offset_range().0,
-                            (token_type, 0),
-                        );
-                    }
-                    map.insert(
-                        body.name_spans[*variant_span].offset_range().0,
-                        (TT_ENUM_MEMBER, 0),
-                    );
-                }
-                Expr::StructLiteral { name, fields, .. } => {
-                    if let (Some(token_type), Some(span)) =
-                        (semantic_symbol_token(ws, *name), body.expr_spans.get(e))
-                    {
-                        let start = span.offset_range().0;
-                        if !body
-                            .path_segments
-                            .iter()
-                            .any(|segment| segment.span.offset_range().0 == start)
-                        {
-                            map.insert(start, (token_type, 0));
-                        }
-                    }
-                    for fi in *fields {
-                        let f = &body.struct_lit_field_arena[fi];
-                        map.insert(f.name_span.offset_range().0, (TT_PROPERTY, 0));
-                    }
-                }
-                Expr::Call {
-                    callee: bone_semantic::hir::Callee::Unresolved { name, name_span },
-                    ..
-                } => {
-                    if let Some(token_type) = semantic_symbol_token(ws, *name) {
-                        map.insert(
-                            body.name_spans[*name_span].offset_range().0,
-                            (token_type, 0),
-                        );
-                    }
-                }
-                // A function used as a value is not a declared global; the name map
-                // classifies it.
-                Expr::Global(name) => {
-                    if let Some(sp) = body.expr_spans.get(e) {
-                        if let Some(token_type) = semantic_symbol_token(ws, *name) {
-                            map.insert(sp.offset_range().0, (token_type, 0));
-                        }
-                        if let Some(&(decl_ty, is_const)) = global_tys.get(name) {
-                            let mods = global_mod(is_const)
-                                | semantic_flow_modifiers(
-                                    ws,
-                                    bi,
-                                    Some(decl_ty),
-                                    bi.and_then(|bi| bi.expr_types.get(e).copied()),
-                                );
-                            map.insert(sp.offset_range().0, (TT_VARIABLE, mods));
-                        }
-                    }
-                }
-                Expr::InterpolatedString(parts) => {
-                    for pi in *parts {
-                        if let bone_semantic::hir::InterpPart::Value { expr, .. } =
-                            &body.interp_part_arena[pi]
-                        {
-                            if let Some(sp) = body.expr_spans.get(*expr) {
-                                holes.push(*sp);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        // Generic uses share the decl's TyId; the node interval is the only per-use
-        // record.
-        for iv in &body.node_intervals {
-            if let bone_semantic::hir::NodeRef::StaticTy { mid: tmid, idx } = iv.val {
-                if matches!(
-                    ws.module(tmid).ty_arena[idx],
-                    bone_semantic::hir::TypeExpr::Generic(..)
-                ) {
-                    map.insert(iv.start, (TT_TYPE_PARAMETER, 0));
-                }
-            }
-        }
-        for (_, pat) in body.pattern_arena.iter() {
-            match pat {
-                bone_semantic::hir::Pattern::EnumVariant {
-                    enum_name,
-                    enum_name_span,
-                    variant_span,
-                    ..
-                } => {
-                    if let (Some(name), Some(span)) = (enum_name, enum_name_span) {
-                        if let Some(token_type) = semantic_symbol_token(ws, *name) {
-                            map.insert(span.offset_range().0, (token_type, 0));
-                        }
-                    }
-                    map.insert(variant_span.offset_range().0, (TT_ENUM_MEMBER, 0));
-                }
-                bone_semantic::hir::Pattern::Record {
-                    enum_name: Some(name),
-                    enum_name_span: Some(enum_span),
-                    name_span: Some(sp),
-                    ..
-                } => {
-                    if let Some(token_type) = semantic_symbol_token(ws, *name) {
-                        map.insert(enum_span.offset_range().0, (token_type, 0));
-                    }
-                    map.insert(sp.offset_range().0, (TT_ENUM_MEMBER, 0));
-                }
-                _ => {}
             }
         }
     }
@@ -2352,21 +2233,6 @@ fn semantic_classifications(
     SemanticClassifications {
         by_offset: map,
         interp_holes: holes,
-    }
-}
-
-fn mark_semantic_types(
-    ws: &Workspace,
-    map: &mut HashMap<usize, (u32, u32)>,
-    arena: &Arena<TypeExpr>,
-    spans: &ArenaMap<Idx<TypeExpr>, Span>,
-) {
-    for (ty, span) in spans.iter() {
-        if let Some(token) = crate::types::annotation_nominal(arena, ty)
-            .and_then(|key| semantic_symbol_token(ws, key))
-        {
-            map.insert(span.offset_range().0, (token, 0));
-        }
     }
 }
 
@@ -2405,7 +2271,7 @@ fn semantic_symbol_token(ws: &Workspace, key: Ustr) -> Option<u32> {
 
 fn mark_semantic_path_segments(
     ws: &Workspace,
-    map: &mut HashMap<usize, (u32, u32)>,
+    map: &mut FxHashMap<usize, (u32, u32)>,
     segments: &[bone_semantic::hir::PathSegmentRef],
 ) {
     for segment in segments {
@@ -2422,7 +2288,7 @@ fn mark_semantic_path_segments(
 
 #[derive(Default)]
 struct SemanticClassifications {
-    by_offset: HashMap<usize, (u32, u32)>,
+    by_offset: FxHashMap<usize, (u32, u32)>,
     interp_holes: Vec<Span>,
 }
 

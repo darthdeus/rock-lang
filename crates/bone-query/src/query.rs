@@ -8,6 +8,7 @@ use skull_parser::Ast;
 use crate::types;
 
 mod occurrences;
+pub(crate) use occurrences::named_tokens;
 
 pub(crate) fn source_ident(name: Ustr) -> &'static str {
     name.as_str().rsplit("::").next().unwrap_or(name.as_str())
@@ -644,7 +645,7 @@ pub enum FnRefScope {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum RefTarget {
+pub(crate) enum RefTarget {
     Binding(ModuleId, hir::BodyOwner, Idx<hir::BindingInfo>),
     GenericParam(ModuleId, hir::VarId),
     EnumVariant(Ustr, Ustr),
@@ -739,7 +740,7 @@ fn leading_name_span(span: &Span, name: Ustr) -> Span {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum RecordType {
+pub(crate) enum RecordType {
     Struct(Ustr),
     Variant(Ustr, Ustr),
 }
@@ -1590,9 +1591,8 @@ fn enum_def_for_variant(
 }
 
 fn struct_def_by_name(ws: &Workspace, name: Ustr) -> Option<&hir::StructDef> {
-    ws.modules
-        .iter()
-        .find_map(|m| m.nominals.struct_id(name).map(|i| &m.structs[i.def]))
+    let id = ws.nominals.struct_id(name)?;
+    Some(&ws.module(id.module).structs[id.def])
 }
 
 /// `Variant` / `Variant($0)` / `Variant { $0 }`.
@@ -2359,9 +2359,8 @@ fn concrete_type_str(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Str
 }
 
 fn enum_def_by_name(ws: &Workspace, name: Ustr) -> Option<&hir::EnumDef> {
-    ws.modules
-        .iter()
-        .find_map(|m| m.nominals.enum_id(name).map(|idx| &m.enums[idx.def]))
+    let id = ws.nominals.enum_id(name)?;
+    Some(&ws.module(id.module).enums[id.def])
 }
 
 fn pattern_is_catch_all(body: &Body, pat: Idx<hir::Pattern>) -> bool {
