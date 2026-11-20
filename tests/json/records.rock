@@ -1,6 +1,20 @@
 // JSON records: wire names, presence, declared defaults and omission,
 // diagnostics, native arrays, adapters, flat enums and malformed fields.
 
+@test
+fn json_record_context_only_keeps_maps_used_by_the_walk() {
+    let codec = JsonRecordCodec { reject_unknown_fields: true }
+    let encoding = __json_record_context(codec, false)
+    let decoding = __json_record_context(codec, true)
+    assert(encoding.adapters == null && encoding.field_names == null)
+    assert(decoding.adapters == null && decoding.field_names != null)
+
+    let adapter = JsonRecordAdapter { name: "test", encode: _ => json_null(), decode: _ => null }
+    codec.adapters.push(adapter)
+    let adapted = __json_record_context(codec, false)
+    assert_eq(adapted.adapters.unwrap().get(adapter.name).unwrap().name, adapter.name)
+}
+
 struct JsonNamedRecord {
     @json_name("wire_name")
     name: string,

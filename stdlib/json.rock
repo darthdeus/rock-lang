@@ -1573,7 +1573,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
     if kind ~= 'nom' then error('json record unsupported shape: ' .. tostring(kind), 0) end
     local name = shape.name
-    local adapter = codec.adapters[name]
+    local adapter = codec.adapters and codec.adapters[name]
     if adapter then
         if not reading then return true, adapter.encode(value) end
         local result = adapter.decode(value)
@@ -1665,7 +1665,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         end
     elseif decl.kind == 'struct' or decl.kind == 'value_table' or decl.kind == 'c_struct' then
         if reading and not __json_record_tag(value, 'Object') then return false, __json_record_failure(shape, value) end
-        if reading and codec.reject_unknown_fields then
+        if codec.field_names then
             local names = codec.field_names[name]
             if not names then
                 names = {}
@@ -1731,25 +1731,39 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return true, result
 """
 
-@nomangle inline(lua) fn __json_record_context(codec: JsonRecordCodec) -> any = """
-    local adapters = {}
-    for i = 1, codec.adapters.len do
-        local adapter = codec.adapters._data[i]
-        if adapters[adapter.name] then error('json record duplicate adapter: ' .. adapter.name, 0) end
-        adapters[adapter.name] = adapter
-    end
-    return { adapters = adapters, encode_float = codec.encode_float, decode_float = codec.decode_float,
-        reject_unknown_fields = codec.reject_unknown_fields, field_names = codec.reject_unknown_fields and {} or nil }
-"""
+struct __JsonRecordContext {
+    adapters: Map<string, JsonRecordAdapter>?,
+    field_names: Map<string, Map<string, bool>>?,
+    encode_float: fn(float) -> JsonValue,
+    decode_float: fn(JsonValue) -> float?,
+}
+
+@nomangle fn __json_record_context(codec: JsonRecordCodec, reading: bool) -> __JsonRecordContext {
+    let adapters: Map<string, JsonRecordAdapter>? = null
+    if codec.adapters.len() > 0 {
+        let lookup: Map<string, JsonRecordAdapter> = map_new()
+        for adapter in codec.adapters {
+            if lookup.contains(adapter.name) { error("json record duplicate adapter: {adapter.name}") }
+            lookup[adapter.name] = adapter
+        }
+        adapters = lookup
+    }
+    return __JsonRecordContext {
+        adapters,
+        field_names: if reading && codec.reject_unknown_fields { map_new() } else { null },
+        encode_float: codec.encode_float,
+        decode_float: codec.decode_float,
+    }
+}
 
 inline(lua) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, value: T) -> JsonValue = """
-    local ok, result = __json_record_visit(__json_record_context(codec), { k = 'nom', name = name }, value, false, {}, 0)
+    local ok, result = __json_record_visit(__json_record_context(codec, false), { k = 'nom', name = name }, value, false, {}, 0)
     if not ok then error('invalid value for json record encoding', 0) end
     return result
 """
 
 inline(lua) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue) -> T? = """
-    local ok, result = __json_record_visit(__json_record_context(codec), { k = 'nom', name = name }, value, true, {}, 0)
+    local ok, result = __json_record_visit(__json_record_context(codec, true), { k = 'nom', name = name }, value, true, nil, 0)
     if ok then return result end
     if codec.on_error then codec.on_error(result) end
     return nil
