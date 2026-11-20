@@ -127,7 +127,6 @@ returns everything. Test functions are listed after other symbols.
 | `:RockCapture [note]` | write a bug snapshot (buffer, position, LSP state) for a report |
 | `:RockSemTokens` / `:RockSemTokensAll` | dump the semantic tokens Neovim holds for the current line / whole buffer |
 | `:RockSemTokensDebug` / `:RockSemTokensHook` / `:RockSemTokensTrace` | inspect, hook, and trace the semantic-token highlighter |
-| `:RockCompletionLog [on\|off\|toggle]` | runtime switch for the JSONL completion log |
 | `:RockDump [path]` | write a JSON snapshot of state + events + timings to `/tmp/rock-nvim-<ts>.json` (or given path) |
 | `:RockRestart` | stop+reattach rock clients (also `<Tab>`, `<F3>`) |
 

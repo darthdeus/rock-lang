@@ -84,16 +84,6 @@ function M.capture(opts)
   local ts_ms = math.floor(uv.hrtime() / 1e6) % 1000
   local s = state.get()
   local last_completion = s.last_completion
-  -- Episode state: the struggle so far, not
-  -- just the last response. Read NOW -- cmp events mutate it constantly.
-  local episode = nil
-  do
-    local ok, cl = pcall(require, 'rock.completion_log')
-    if ok and type(cl.episode_snapshot) == 'function' then
-      local ok_ep, ep = pcall(cl.episode_snapshot)
-      if ok_ep then episode = ep end
-    end
-  end
 
   local dir = ('%s/%d-%s'):format(opts.base_dir or BASE_DIR, ts, sanitize(basename))
   local summary = {
@@ -157,11 +147,6 @@ function M.capture(opts)
     if last_completion then
       local ok, encoded = pcall(vim.json.encode, last_completion)
       if ok then write_file(dir .. '/last_completion.json', encoded) end
-    end
-
-    if episode then
-      local ok, encoded = pcall(vim.json.encode, episode)
-      if ok then write_file(dir .. '/episode.json', encoded) end
     end
 
     local repro_path = dir .. '/buffer.rock'

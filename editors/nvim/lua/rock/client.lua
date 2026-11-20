@@ -285,10 +285,7 @@ local function build_cmd(bin_path)
 
     -- `rock lsp serve` is the LSP server (no separate rock-lsp binary); bone
     -- is the only typechecker backend.
-    local extra = nil
-    local rec_env = M.completion_record_env(opts_cache)
-    if rec_env then extra = { env = rec_env } end
-    local rpc = vim.lsp.rpc.start({ bin_path, 'lsp', 'serve' }, wrapped, extra)
+    local rpc = vim.lsp.rpc.start({ bin_path, 'lsp', 'serve' }, wrapped)
     if not rpc then
       state.set_client({ state = 'crashed' })
       state.record_event('local', 'server/start_failed', { bin = bin_path })
@@ -354,17 +351,6 @@ local function build_cmd(bin_path)
     state.set_client({ pid = rpc.pid, state = 'attached' })
     return rpc
   end
-end
-
--- ROCK_LSP_RECORD env for the spawned server when `completion_record` is on
--- (the server-side corpus recorder; rock-lsp completion_record.rs). Pure so
--- specs can pin the resolution; vim.system merges it into the inherited env.
-function M.completion_record_env(opts)
-  opts = opts or {}
-  if not opts.completion_record then return nil end
-  local path = opts.completion_record_path
-    or (vim.fn.stdpath('data') .. '/rock/completion-corpus.jsonl')
-  return { ROCK_LSP_RECORD = path }
 end
 
 function M.make_config(opts)

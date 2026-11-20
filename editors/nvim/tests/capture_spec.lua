@@ -12,14 +12,6 @@ end
 vim.notify = function() end
 vim.notify_once = function() end
 
--- Stub the completion log: capture must dump its episode snapshot as
--- episode.json (the struggle so far), read SYNCHRONOUSLY at capture time.
-package.loaded['rock.completion_log'] = {
-  episode_snapshot = function()
-    return { recent = { { event = 'dismiss', post_word = 'spawn_mob' } } }
-  end,
-}
-
 local tmp = vim.fn.tempname()
 vim.fn.mkdir(tmp, 'p')
 local fname = tmp .. '/thing.rock'
@@ -67,11 +59,6 @@ end
 local buffer = slurp(summary.dir .. '/buffer.rock')
 if not buffer:find('let x = mob_k', 1, true) then
   fail('buffer.rock missing source:\n' .. buffer)
-end
-
-local episode = slurp(summary.dir .. '/episode.json')
-if not episode:find('spawn_mob', 1, true) then
-  fail('episode.json missing the episode snapshot:\n' .. episode)
 end
 
 print('PASS  capture_spec')

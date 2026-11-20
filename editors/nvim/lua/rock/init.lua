@@ -71,19 +71,6 @@ M.defaults = {
   -- otherwise only breaks ties. Buffer-local, preserves the rest of your
   -- comparator list. Set false to leave cmp untouched (no-op without nvim-cmp).
   cmp_type_priority = true,
-  -- Append a JSONL row per completion accept/dismiss to
-  -- $XDG_DATA_HOME/nvim/rock/completion-log.jsonl. Restricted to rock
-  -- buffers. Requires nvim-cmp. See lua/rock/completion_log.lua.
-  completion_log = false,
-  -- Override the log path. nil = stdpath('data')/rock/completion-log.jsonl.
-  completion_log_path = nil,
-  -- Spawn the server with ROCK_LSP_RECORD so it writes the authoritative
-  -- replay-corpus row per accepted completion (buffer as the ranker saw it,
-  -- full ranked list for completion analytics). Client-agnostic
-  -- server feature; pairs with completion_log via chosen.record_id.
-  completion_record = false,
-  -- Override the corpus path. nil = stdpath('data')/rock/completion-corpus.jsonl.
-  completion_record_path = nil,
 }
 
 M.opts = nil
@@ -145,9 +132,6 @@ function M.setup(user)
   require('rock.log').start()
   require('rock.semtok').setup()
   require('rock.highlights').setup(M.opts.highlights)
-  if M.opts.completion_log then
-    require('rock.completion_log').setup(M.opts)
-  end
 
   -- Pass the client id into log.lua once the server attaches so its
   -- relevance filter can match log lines tagged with our client id.
@@ -238,29 +222,6 @@ function M.setup(user)
   })
   vim.api.nvim_create_user_command('RockRestart', function() require('rock.client').restart() end,
     { desc = 'rock.nvim: restart LSP' })
-
-  -- Runtime toggle for completion logging — A/B perf testing without
-  -- restarting nvim. `:RockCompletionLog` reports state.
-  vim.api.nvim_create_user_command('RockCompletionLog', function(args)
-    local a = (args.args or ''):lower()
-    if a == 'on' or a == 'enable' then
-      vim.g.rock_completion_log_disabled = false
-    elseif a == 'off' or a == 'disable' then
-      vim.g.rock_completion_log_disabled = true
-    elseif a == 'toggle' then
-      vim.g.rock_completion_log_disabled = not (vim.g.rock_completion_log_disabled == true)
-    elseif a ~= '' then
-      vim.notify('RockCompletionLog: usage on|off|toggle', vim.log.levels.WARN)
-      return
-    end
-    local on = not (vim.g.rock_completion_log_disabled == true
-                 or vim.g.rock_completion_log_disabled == 1)
-    vim.notify('rock.nvim completion_log: ' .. (on and 'on' or 'off'))
-  end, {
-    nargs = '?',
-    complete = function() return { 'on', 'off', 'toggle' } end,
-    desc = 'rock.nvim: toggle completion logging at runtime',
-  })
 end
 
 -- Convenience re-exports for users.
