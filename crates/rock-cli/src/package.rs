@@ -7,7 +7,6 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sound_core::AssetResolver;
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -167,7 +166,7 @@ pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
     else {
         return Ok(None);
     };
-    let sound = compile_sound_project(&context.project, &context.game_key, sound)?;
+    let sound = compile_sound_project(&context.game_key, sound)?;
     let bank_path = context.project.join("assets/sound_bank.json");
     match std::fs::read(&bank_path) {
         Ok(existing) if existing == sound.bank_bytes => return Ok(Some(bank_path)),
@@ -210,7 +209,7 @@ pub fn run_package(project: &str, output: &Path) -> Result<()> {
     let visual = prepared.visual;
     let sound = prepared
         .sound
-        .map(|sound| compile_sound_project(&project_abs, &game_key, sound))
+        .map(|sound| compile_sound_project(&game_key, sound))
         .transpose()?;
     for missing in &selection.missing {
         log::warn!(target: "PACKAGE", "release asset {} does not exist, skipping", missing.display());
@@ -310,93 +309,63 @@ struct CompiledSoundPackage {
     dependencies: Vec<String>,
 }
 
-fn sound_metadata_cached(project_dir: &Path, source_path: &Path, bytes: &[u8]) -> Result<Value> {
-    let digest = format!("{:x}", Sha256::digest(bytes));
-    let cache_dir = project_dir.join("assets/.runtime-data/sounds");
-    let cache_path = cache_dir.join(format!("{digest}.json"));
-    if let Ok(cached) = std::fs::read(&cache_path) {
-        if let Ok(value) = serde_json::from_slice::<Value>(&cached) {
-            if sound_metadata_valid(&value) && value["digest"].as_str() == Some(digest.as_str()) {
-                return Ok(value);
-            }
-        }
-        log::warn!(target: "SOUND", "invalid sound metadata cache {}; decoding {}",
-            cache_path.display(), source_path.display());
-        match std::fs::remove_file(&cache_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-
-    let mut metadata = decode_sound_metadata(bytes).map_err(|error| {
-        anyhow::anyhow!("package: sound source {}: {error}", source_path.display())
-    })?;
-    metadata["digest"] = json!(digest);
-    std::fs::create_dir_all(&cache_dir)?;
-    let encoded = serde_json::to_vec(&metadata)?;
-    let mut pending = tempfile::Builder::new()
-        .prefix("sound-metadata-")
-        .tempfile_in(&cache_dir)?;
-    pending.write_all(&encoded)?;
-    match pending.persist(&cache_path) {
-        Ok(_) => {}
-        Err(error) if cache_path.exists() => {
-            let cached = std::fs::read(&cache_path)?;
-            let value: Value = serde_json::from_slice(&cached)?;
-            if !sound_metadata_valid(&value) || value["digest"].as_str() != Some(digest.as_str()) {
-                return Err(anyhow::anyhow!(
-                    "package: invalid sound metadata cache {}",
-                    cache_path.display()
-                ));
-            }
-            drop(error.file);
-        }
-        Err(error) => return Err(error.error.into()),
-    }
-    Ok(metadata)
+fn sound_metadata(source_path: &Path, bytes: &[u8]) -> Result<Value> {
+    let (frames, rate, channels) = header_shape(bytes)
+        .map_or_else(|| decoded_shape(bytes), Ok)
+        .map_err(|error| {
+            anyhow::anyhow!("package: sound source {}: {error}", source_path.display())
+        })?;
+    Ok(json!({
+        "frames": frames,
+        "rate": rate,
+        "channels": channels,
+        "digest": format!("{:x}", Sha256::digest(bytes)),
+    }))
 }
 
-fn sound_metadata_valid(value: &Value) -> bool {
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    if object.len() != 4
-        || object
-            .keys()
-            .any(|key| !matches!(key.as_str(), "frames" | "rate" | "channels" | "digest"))
-    {
-        return false;
-    }
-    let frames = value["frames"].as_u64().unwrap_or(0);
-    let rate = value["rate"].as_u64().unwrap_or(0);
-    let channels = value["channels"].as_u64().unwrap_or(0);
-    let digest = value["digest"].as_str().unwrap_or("");
-    frames > 0
-        && rate > 0
-        && channels > 0
-        && digest.len() == 64
-        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+/// WAV and Ogg headers carry the exact frame count. An MP3 header count is an
+/// estimate that differs from what playback decodes, so MP3 is decoded.
+fn header_shape(bytes: &[u8]) -> Option<(u64, u64, u64)> {
+    use symphonia::core::{codecs::CODEC_TYPE_MP3, io::MediaSourceStream};
+    let source = MediaSourceStream::new(
+        Box::new(std::io::Cursor::new(bytes.to_vec())),
+        Default::default(),
+    );
+    let format = symphonia::default::get_probe()
+        .format(
+            &Default::default(),
+            source,
+            &Default::default(),
+            &Default::default(),
+        )
+        .ok()?
+        .format;
+    let params = &format.default_track()?.codec_params;
+    let shape = (
+        params.n_frames.filter(|_| params.codec != CODEC_TYPE_MP3)?,
+        u64::from(params.sample_rate?),
+        params.channels?.count() as u64,
+    );
+    (shape.0 > 0 && shape.1 > 0 && shape.2 > 0).then_some(shape)
 }
 
-fn decode_sound_metadata(bytes: &[u8]) -> Result<Value> {
+fn decoded_shape(bytes: &[u8]) -> Result<(u64, u64, u64)> {
     let decoder = rodio::Decoder::new(std::io::Cursor::new(bytes.to_vec()))
         .map_err(|error| anyhow::anyhow!("decode failed: {error}"))?;
-    let rate = decoder.sample_rate().get();
-    let channels = decoder.channels().get();
-    let sample_count = decoder.count();
+    let rate = u64::from(decoder.sample_rate().get());
+    let channels = u64::from(decoder.channels().get());
+    let sample_count = decoder.count() as u64;
     if sample_count == 0 || channels == 0 || rate == 0 {
         anyhow::bail!("decoded source has no PCM frames");
     }
-    let frames = sample_count / channels as usize;
+    let frames = sample_count / channels;
     if frames == 0 {
         anyhow::bail!("decoded source has no complete frame");
     }
-    Ok(json!({ "frames": frames, "rate": rate, "channels": channels }))
+    Ok((frames, rate, channels))
 }
 
 fn compile_sound_project(
-    project_dir: &Path,
     game_key: &str,
     sound: crate::asset_selection::SelectedSound,
 ) -> Result<CompiledSoundPackage> {
@@ -420,10 +389,7 @@ fn compile_sound_project(
                 source.display()
             )
         })?;
-        recipes.insert(
-            dependency.clone(),
-            sound_metadata_cached(project_dir, &source, &source_bytes)?,
-        );
+        recipes.insert(dependency.clone(), sound_metadata(&source, &source_bytes)?);
         dependencies.push(format!("{game_key}/{dependency}"));
     }
     dependencies.sort();
@@ -684,95 +650,27 @@ mod tests {
     }
 
     #[test]
-    fn sound_metadata_is_cached_by_digest_without_peak_thumbnails() {
-        let project = tempfile::tempdir().expect("metadata cache fixture");
+    fn sound_metadata_reads_the_header_and_keeps_no_cache() {
+        let project = tempfile::tempdir().expect("metadata fixture");
         let source = project.path().join("cue.wav");
         let samples: Vec<i16> = (0..128)
             .map(|index| if index % 2 == 0 { 16_384 } else { 0 })
             .collect();
         let bytes = pcm_wav(&samples, 8_000);
-        std::fs::write(&source, &bytes).expect("source fixture");
         let (frames, rate, channels) = wav_header_oracle(&bytes);
-
-        let first = sound_metadata_cached(project.path(), &source, &bytes)
-            .expect("the PCM source should be decoded");
+        let shape = (frames as u64, u64::from(rate), u64::from(channels));
+        assert_eq!(header_shape(&bytes), Some(shape));
+        assert_eq!(decoded_shape(&bytes).unwrap(), shape);
         assert_eq!(
-            first["frames"].as_u64(),
-            Some(frames as u64),
-            "frame count agrees with the encoded WAV header"
+            sound_metadata(&source, &bytes).unwrap(),
+            json!({
+                "frames": frames,
+                "rate": rate,
+                "channels": channels,
+                "digest": format!("{:x}", Sha256::digest(&bytes)),
+            })
         );
-        assert_eq!(
-            first["rate"].as_u64(),
-            Some(rate as u64),
-            "sample rate agrees with the encoded WAV header"
-        );
-        assert_eq!(
-            first["channels"].as_u64(),
-            Some(channels as u64),
-            "channel count agrees with the encoded WAV header"
-        );
-        let digest = format!("{:x}", Sha256::digest(&bytes));
-        assert_eq!(
-            first["digest"].as_str(),
-            Some(digest.as_str()),
-            "the runtime recipe carries its source identity"
-        );
-        assert!(
-            first.get("peaks").is_none(),
-            "compiled sound recipes carry no peak thumbnails"
-        );
-
-        let cache_dir = project.path().join("assets/.runtime-data/sounds");
-        let cache_path = cache_dir.join(format!("{digest}.json"));
-        assert!(
-            cache_path.is_file(),
-            "the cache entry is named by the source digest"
-        );
-        let cached_bytes = std::fs::read(&cache_path).unwrap();
-        let second = sound_metadata_cached(project.path(), &source, &bytes)
-            .expect("the same digest should reuse its recipe");
-        assert_eq!(second, first);
-        assert_eq!(
-            std::fs::read(&cache_path).unwrap(),
-            cached_bytes,
-            "a cache hit leaves its metadata untouched"
-        );
-
-        let mut thumbnail_cache = first.clone();
-        thumbnail_cache["peaks"] = json!(vec![0.5; 64]);
-        std::fs::write(&cache_path, serde_json::to_vec(&thumbnail_cache).unwrap()).unwrap();
-        let repaired_thumbnail = sound_metadata_cached(project.path(), &source, &bytes)
-            .expect("an old thumbnail-bearing cache should be replaced");
-        assert_eq!(
-            repaired_thumbnail, first,
-            "the cached recipe is rebuilt without compile-time peaks"
-        );
-        let persisted: Value =
-            serde_json::from_slice(&std::fs::read(&cache_path).unwrap()).unwrap();
-        assert!(
-            persisted.get("peaks").is_none(),
-            "the digest cache does not retain editor peak thumbnails"
-        );
-
-        std::fs::write(&cache_path, b"corrupt cache entry").unwrap();
-        let repaired = sound_metadata_cached(project.path(), &source, &bytes)
-            .expect("a corrupt digest entry should be decoded and repaired");
-        assert_eq!(repaired, first);
-        assert!(
-            sound_metadata_valid(
-                &serde_json::from_slice::<Value>(&std::fs::read(&cache_path).unwrap()).unwrap()
-            ),
-            "the repaired digest entry is valid metadata"
-        );
-
-        let changed = pcm_wav(&[0; 128], 8_000);
-        let _ = sound_metadata_cached(project.path(), &source, &changed)
-            .expect("changed bytes have their own cache entry");
-        let changed_digest = format!("{:x}", Sha256::digest(&changed));
-        assert!(
-            cache_dir.join(format!("{changed_digest}.json")).is_file(),
-            "changed source bytes receive a separate metadata entry"
-        );
+        assert!(!project.path().join("assets").exists());
     }
 
     #[test]
@@ -837,7 +735,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let packaged = compile_sound_project(fixture.path(), "game", sound).unwrap();
+        let packaged = compile_sound_project("game", sound).unwrap();
         assert_eq!(
             packaged.bank_bytes, selected,
             "development and packaging must select the same bank"

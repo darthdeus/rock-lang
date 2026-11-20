@@ -1649,6 +1649,7 @@ dependencies = [
  "skull-mir",
  "skull-parser",
  "sound-core",
+ "symphonia",
  "sysinfo",
  "tempfile",
  "test-utils",

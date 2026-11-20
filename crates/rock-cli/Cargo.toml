@@ -26,6 +26,7 @@ rock-engine-host = { path = "../rock-engine-host" }
 rock-visual-bank = { path = "../rock-visual-bank" }
 sound-core = { workspace = true }
 globset = "0.4.19"
+symphonia = { workspace = true }
 rodio = { version = "0.22", default-features = false, features = ["mp3", "vorbis", "wav"] }
 
 test-utils = { workspace = true, optional = true }
