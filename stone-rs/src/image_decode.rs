@@ -251,7 +251,15 @@ pub(crate) enum DecodeSource {
     Asset { dimensions: (u32, u32) },
 }
 
-/// Queue asset reading and decode on the rayon pool under `id`. Non-blocking.
+pub(crate) fn fixed_perf_work() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("PERF_MODE").as_deref() == Ok("1")
+            && std::env::var("PERF_FIXED_WORK").as_deref() == Ok("1")
+    })
+}
+
+/// Queue a decode under `id`. Fixed-work perf runs complete it before returning.
 pub(crate) fn submit(
     id: u64,
     path: String,
@@ -262,7 +270,7 @@ pub(crate) fn submit(
     let q = queue();
     *q.outstanding.lock().expect("outstanding poisoned") += 1;
     let tx = q.tx.clone();
-    rayon::spawn(move || {
+    let decode = move || {
         let (data, expected) = match source {
             DecodeSource::Bytes(data) => (Some(data), None),
             DecodeSource::Asset { dimensions } => {
@@ -322,7 +330,12 @@ pub(crate) fn submit(
         if let Err(e) = tx.send(decoded) {
             crate::log_once!("IMAGE", "decode result for {} lost: {}", path, e);
         }
-    });
+    };
+    if fixed_perf_work() {
+        decode();
+    } else {
+        rayon::spawn(decode);
+    }
 }
 
 pub fn try_drain() -> Vec<Decoded> {
@@ -559,10 +572,19 @@ mod queue_tests {
 
     #[test]
     fn drain_returns_every_submitted_job_with_serial_stored_pixels() {
-        if crate::test_support::in_isolated_child(
-            "image_decode::queue_tests::drain_returns_every_submitted_job_with_serial_stored_pixels",
-            "STONE_IMAGE_DECODE_TEST_CHILD",
-        ) {
+        use crate::test_support::{assert_child_passes, child_test};
+        const TEST: &str =
+            "image_decode::queue_tests::drain_returns_every_submitted_job_with_serial_stored_pixels";
+        const CHILD: &str = "STONE_IMAGE_DECODE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            for fixed in ["0", "1"] {
+                assert_child_passes(
+                    child_test(TEST, CHILD, "1")
+                        .env("PERF_MODE", "1")
+                        .env("PERF_FIXED_WORK", fixed),
+                    TEST,
+                );
+            }
             return;
         }
         let dir = tempfile::Builder::new()
@@ -596,8 +618,15 @@ mod queue_tests {
             );
         }
 
-        let mut got = Vec::new();
-        drain_with(|decoded| got.push(decoded));
+        let mut got = if fixed_perf_work() {
+            let completed = try_drain();
+            assert!(completed.iter().map(|d| d.id).eq(0..sizes.len() as u64));
+            completed
+        } else {
+            let mut completed = Vec::new();
+            drain_with(|decoded| completed.push(decoded));
+            completed
+        };
         assert_eq!(
             got.len(),
             sizes.len(),

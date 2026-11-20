@@ -30,16 +30,28 @@ struct Publications {
     ready: VecDeque<u64>,
     budget: usize,
     time_budget: Duration,
+    fixed_work: bool,
     selection_wait_us: u64,
     frame_uploaded_bytes: usize,
     frame_upload_time: Duration,
 }
 
 thread_local! {
-    static PUBLICATIONS: RefCell<Publications> = RefCell::new(Publications::default());
+    static PUBLICATIONS: RefCell<Publications> = RefCell::new(Publications {
+        fixed_work: image_decode::fixed_perf_work(),
+        ..Publications::default()
+    });
 }
 
 impl Publications {
+    fn set_time_budget(&mut self, duration: Duration) {
+        self.time_budget = if self.fixed_work {
+            Duration::ZERO
+        } else {
+            duration
+        };
+    }
+
     fn begin_frame(&mut self) {
         self.frame_uploaded_bytes = 0;
         self.frame_upload_time = Duration::ZERO;
@@ -213,8 +225,10 @@ pub(crate) fn set_budget(bytes: usize) {
 }
 #[no_mangle]
 pub extern "C" fn stone_set_frame_image_upload_time_budget(microseconds: c_int) {
-    PUBLICATIONS
-        .with(|p| p.borrow_mut().time_budget = Duration::from_micros(microseconds.max(0) as u64));
+    PUBLICATIONS.with(|p| {
+        p.borrow_mut()
+            .set_time_budget(Duration::from_micros(microseconds.max(0) as u64));
+    });
 }
 
 pub(crate) fn pending() -> usize {
@@ -279,6 +293,32 @@ mod tests {
             p.submit(id, 4, 1, RequestClass::Required);
         }
         p
+    }
+
+    #[test]
+    fn fixed_work_preserves_the_byte_quota_across_pumps() {
+        if isolated("fixed_work_preserves_the_byte_quota_across_pumps") {
+            return;
+        }
+        let mut p = Publications {
+            fixed_work: true,
+            ..requests()
+        };
+        p.set_time_budget(Duration::from_millis(2));
+        for id in 1..=4 {
+            p.receive(result(id, 4));
+        }
+        let mut published = Vec::new();
+        let mut publish = |d: Decoded| {
+            published.push(d.id);
+            Duration::from_millis(3)
+        };
+        p.select_timed_with(Pump, &mut publish);
+        p.select_timed_with(Pump, &mut publish);
+        assert!(p.ready(1) && p.ready(2) && !p.ready(3));
+        p.begin_frame();
+        p.select_timed_with(Pump, &mut publish);
+        assert_eq!(published, [1, 2, 3, 4]);
     }
 
     #[test]
