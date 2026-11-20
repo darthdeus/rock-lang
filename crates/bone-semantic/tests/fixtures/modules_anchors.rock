@@ -8,7 +8,7 @@ fn f() -> int {
     n
 }
 
-//-- lib_inner.rock @pkg=chess,1 @v1
+//-- public_inner_ply=lib_inner.rock @pkg=chess,1 @v1
 pub mod inner;
 
 pub fn ply() -> int {
@@ -195,7 +195,7 @@ fn f() -> int {
     n
 }
 
-//-- lib_inner.rock @pkg=geo,1 @v1
+//-- private_inner_public_ply=lib_inner.rock @pkg=geo,1 @v1
 mod inner;
 
 pub fn ply() -> int {
@@ -206,12 +206,7 @@ pub fn ply() -> int {
 //-- lib.rock @pkg=geo,1 @v1
 pub(package) use self::inner as api;
 
-//-- lib_inner.rock @pkg=geo,1 @v1
-mod inner;
-
-pub fn ply() -> int {
-    1
-}
+//-- =private_inner_public_ply
 
 //-- app.rock @pkg=app,2 @v1
 fn f() -> int {
@@ -227,25 +222,15 @@ fn f() -> int {
     inner::ply()
 }
 
-//-- lib_inner.rock @pkg=chess,1 @v1
-pub mod inner;
-
-pub fn ply() -> int {
-    1
-}
+//-- =public_inner_ply
 
 //- a_module_alias_that_names_a_child_module_is_diagnosed @fail=`use` binds `other` to module `chess::inner`, but `other` is also a child module of this module
 //-- lib.rock @pkg=chess,1 @v1
 use inner as other;
 
-//-- lib_inner.rock @pkg=chess,1 @v1
-pub mod inner;
+//-- =public_inner_ply
 
-pub fn ply() -> int {
-    1
-}
-
-//-- lib_other.rock @pkg=chess,1 @v1
+//-- other_ply=lib_other.rock @pkg=chess,1 @v1
 pub mod other;
 
 pub fn ply() -> int {
@@ -261,7 +246,7 @@ pub fn ply() -> int {
 //-- app.rock @pkg=app,2 @v1
 use inner as geo;
 
-//-- app_inner.rock @pkg=app,2 @v1
+//-- app_inner_ply=app_inner.rock @pkg=app,2 @v1
 pub mod inner;
 
 pub fn ply() -> int {
@@ -272,30 +257,15 @@ pub fn ply() -> int {
 //-- app.rock @pkg=app,2 @v1
 use inner as app;
 
-//-- app_inner.rock @pkg=app,2 @v1
-pub mod inner;
-
-pub fn ply() -> int {
-    2
-}
+//-- =app_inner_ply
 
 //- a_module_reexport_that_names_a_child_module_is_diagnosed @fail=`use` binds `other` to module `chess::inner`, but `other` is also a child module of this module
 //-- lib.rock @pkg=chess,1 @v1
 pub use inner as other;
 
-//-- lib_inner.rock @pkg=chess,1 @v1
-pub mod inner;
+//-- =public_inner_ply
 
-pub fn ply() -> int {
-    1
-}
-
-//-- lib_other.rock @pkg=chess,1 @v1
-pub mod other;
-
-pub fn ply() -> int {
-    2
-}
+//-- =other_ply
 
 //- two_imports_of_different_modules_under_one_name_are_diagnosed @fail=`m` is imported from several modules
 //-- lib_a.rock @pkg=chess,1 @v1
@@ -326,34 +296,19 @@ fn f() -> int {
 //-- lib.rock @pkg=chess,1 @v1
 use inner as self;
 
-//-- lib_inner.rock @pkg=chess,1 @v1
-pub mod inner;
-
-pub fn ply() -> int {
-    1
-}
+//-- =public_inner_ply
 
 //- super_is_reserved_as_an_import_alias @fail=`super` is a reserved path root and cannot name an import
 //-- lib.rock @pkg=chess,1 @v1
 use inner::ply as super;
 
-//-- lib_inner.rock @pkg=chess,1 @v1
-pub mod inner;
-
-pub fn ply() -> int {
-    1
-}
+//-- =public_inner_ply
 
 //- std_is_reserved_as_an_import_alias @fail=`std` is a reserved path root and cannot name an import
 //-- lib.rock @pkg=chess,1 @v1
 use inner as std;
 
-//-- lib_inner.rock @pkg=chess,1 @v1
-pub mod inner;
-
-pub fn ply() -> int {
-    1
-}
+//-- =public_inner_ply
 
 //- an_import_alias_cycle_names_no_module @fail=invalid `use` target: `a` did not resolve to any definition or module
 //-- lib.rock @pkg=chess,1 @v1

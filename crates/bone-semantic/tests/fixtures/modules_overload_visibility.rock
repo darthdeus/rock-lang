@@ -11,7 +11,7 @@ fn same_module() -> string {
     s
 }
 
-//-- app.rock @pkg=app,2 @v1
+//-- call_external_int=app.rock @pkg=app,2 @v1
 use lib::f;
 
 fn external() -> int {
@@ -33,21 +33,14 @@ fn same_module() -> string {
     s
 }
 
-//-- app.rock @pkg=app,2 @v1
-use lib::f;
-
-fn external() -> int {
-    let n = f(1)
-           //^ int
-    n
-}
+//-- =call_external_int
 
 //- public_then_private_external_private_is_access_error @fail=not accessible
 //-- lib.rock @pkg=lib,1 @v1
 pub fn f(n: int) -> int { n }
 fn f(s: string) -> string { s }
 
-//-- app.rock @pkg=app,2 @v1
+//-- call_external_string=app.rock @pkg=app,2 @v1
 use lib::f;
 
 fn external() -> string {
@@ -59,19 +52,14 @@ fn external() -> string {
 fn f(s: string) -> string { s }
 pub fn f(n: int) -> int { n }
 
-//-- app.rock @pkg=app,2 @v1
-use lib::f;
-
-fn external() -> string {
-    f("private")
-}
+//-- =call_external_string
 
 //- public_any_then_private_exact_external_keeps_public
 //-- lib.rock @pkg=lib,1 @v1
 pub fn choose(x: any) -> int { 1 }
 fn choose(x: int) -> string { "private" }
 
-//-- app.rock @pkg=app,2 @v1
+//-- call_choose=app.rock @pkg=app,2 @v1
 use lib::choose;
 
 fn external() -> int {
@@ -85,17 +73,10 @@ fn external() -> int {
 fn choose(x: int) -> string { "private" }
 pub fn choose(x: any) -> int { 1 }
 
-//-- app.rock @pkg=app,2 @v1
-use lib::choose;
-
-fn external() -> int {
-    let result = choose(1)
-                 //^ int
-    result
-}
+//-- =call_choose
 
 //- restricted_members_of_a_two_file_module_keep_their_own_visibility
-//-- m1.rock @pkg=chess,1 @v1
+//-- package_f=m1.rock @pkg=chess,1 @v1
 mod m;
 
 pub(package) fn f(n: int) -> int {
@@ -125,12 +106,7 @@ fn outside() -> int {
 }
 
 //- a_private_member_of_a_two_file_module_stays_hidden @fail=No accessible overload for `chess::m::f` with argument types (string)
-//-- m1.rock @pkg=chess,1 @v1
-mod m;
-
-pub(package) fn f(n: int) -> int {
-    n
-}
+//-- =package_f
 
 //-- m2.rock @pkg=chess,1 @v1
 mod m;

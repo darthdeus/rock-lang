@@ -39,7 +39,7 @@ fn bad() -> Pt {
 }
 
 //- a_named_operator_import_keeps_builtin_arithmetic
-//-- geo.rock @pkg=geo,1 @v1
+//-- point_pick_axes=geo.rock @pkg=geo,1 @v1
 pub struct Pt {
     pub x: int,
     pub y: int,
@@ -63,15 +63,7 @@ fn sums() -> int {
 }
 
 //- a_glob_operator_import_keeps_builtin_arithmetic
-//-- geo.rock @pkg=geo,1 @v1
-pub struct Pt {
-    pub x: int,
-    pub y: int,
-}
-
-pub operator +(a: Pt, b: Pt) -> Pt {
-    Pt { x: a.x, y: b.y }
-}
+//-- =point_pick_axes
 
 //-- app.rock @pkg=app,2 @v1
 use geo::*;
@@ -142,12 +134,12 @@ fn imported(h: Holder?) {
 }
 
 //- explicit_imports_of_two_callables_compose
-//-- a.rock @pkg=lib_a,1 @v1
+//-- pick_int=a.rock @pkg=lib_a,1 @v1
 pub fn pick(n: int) -> int {
     n
 }
 
-//-- b.rock @pkg=lib_b,2 @v1
+//-- pick_string=b.rock @pkg=lib_b,2 @v1
 pub fn pick(s: string) -> string {
     s
 }
@@ -167,15 +159,9 @@ fn use_it() -> int {
 }
 
 //- explicit_imports_compose_in_either_order
-//-- a.rock @pkg=lib_a,1 @v1
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =pick_int
 
-//-- b.rock @pkg=lib_b,2 @v1
-pub fn pick(s: string) -> string {
-    s
-}
+//-- =pick_string
 
 //-- main.rock @pkg=game,3 @v1
 use lib_b::pick;
@@ -190,10 +176,7 @@ fn use_it() -> int {
 }
 
 //- same_signature_explicit_imports_tie_at_the_call @fail=lib_b::pick(n: int) -> int (v1 definition lib_b::pick)
-//-- a.rock @pkg=lib_a,1 @v1
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =pick_int
 
 //-- b.rock @pkg=lib_b,2 @v1
 pub fn pick(n: int) -> int {
@@ -212,7 +195,7 @@ fn use_it() -> int {
 //-- a.rock @pkg=lib_a,1 @v1
 pub use self::inner::pick;
 
-//-- a_inner.rock @pkg=lib_a,1 @v1
+//-- inner_pick_int=a_inner.rock @pkg=lib_a,1 @v1
 pub mod inner;
 
 pub fn pick(n: int) -> int {
@@ -231,15 +214,9 @@ fn use_it() -> int {
 }
 
 //- an_own_definition_joins_the_composed_imports
-//-- a.rock @pkg=lib_a,1 @v1
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =pick_int
 
-//-- b.rock @pkg=lib_b,2 @v1
-pub fn pick(s: string) -> string {
-    s
-}
+//-- =pick_string
 
 //-- main.rock @pkg=game,3 @v1
 use lib_a::pick;
@@ -258,15 +235,9 @@ fn use_it() -> int {
 }
 
 //- a_composed_import_family_is_not_a_single_value @fail=`pick` names an overload family of several imports (lib_a::pick, lib_b::pick), not a single definition
-//-- a.rock @pkg=lib_a,1 @v1
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =pick_int
 
-//-- b.rock @pkg=lib_b,2 @v1
-pub fn pick(s: string) -> string {
-    s
-}
+//-- =pick_string
 
 //-- main.rock @pkg=game,3 @v1
 use lib_a::pick;
@@ -277,7 +248,7 @@ fn use_it() {
 }
 
 //- explicit_imports_of_two_types_are_an_error @fail=`Pick` is imported from several definitions that do not form one overload family: lib_a::Pick, lib_b::Pick
-//-- a.rock @pkg=lib_a,1 @v1
+//-- pick_struct=a.rock @pkg=lib_a,1 @v1
 pub struct Pick {
     pub n: int,
 }
@@ -394,10 +365,7 @@ fn use_it(p: P) -> P {
 }
 
 //- explicit_imports_of_a_callable_and_a_type_are_an_error @fail=`Pick` is imported from several definitions that do not form one overload family: lib_a::Pick, lib_b::Pick
-//-- a.rock @pkg=lib_a,1 @v1
-pub struct Pick {
-    pub n: int,
-}
+//-- =pick_struct
 
 //-- b.rock @pkg=lib_b,2 @v1
 pub fn Pick(n: int) -> int {
@@ -413,15 +381,9 @@ fn use_it() -> int {
 }
 
 //- glob_imported_callables_of_two_modules_compose
-//-- a.rock @pkg=lib_a,1 @v1
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =pick_int
 
-//-- b.rock @pkg=lib_b,2 @v1
-pub fn pick(s: string) -> string {
-    s
-}
+//-- =pick_string
 
 //-- main.rock @pkg=game,3 @v1
 use lib_a::*;
@@ -438,10 +400,7 @@ fn use_it() -> int {
 }
 
 //- same_signature_glob_callables_tie_at_the_call @fail=lib_b::pick(n: int) -> int (v1 definition lib_b::pick)
-//-- a.rock @pkg=lib_a,1 @v1
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =pick_int
 
 //-- b.rock @pkg=lib_b,2 @v1
 pub fn pick(n: int) -> int {
@@ -460,12 +419,7 @@ fn use_it() -> int {
 //-- a.rock @pkg=lib_a,1 @v1
 pub use self::inner::*;
 
-//-- a_inner.rock @pkg=lib_a,1 @v1
-pub mod inner;
-
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =inner_pick_int
 
 //-- main.rock @pkg=game,3 @v1
 use lib_a::*;
@@ -479,15 +433,9 @@ fn use_it() -> int {
 }
 
 //- a_composed_glob_family_is_not_a_single_value @fail=`pick` names an overload family of several glob imports (lib_a::pick, lib_b::pick), not a single definition
-//-- a.rock @pkg=lib_a,1 @v1
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =pick_int
 
-//-- b.rock @pkg=lib_b,2 @v1
-pub fn pick(s: string) -> string {
-    s
-}
+//-- =pick_string
 
 //-- main.rock @pkg=game,3 @v1
 use lib_a::*;
@@ -498,10 +446,7 @@ fn use_it() {
 }
 
 //- glob_imported_types_of_two_modules_stay_ambiguous @fail=`Pick` is ambiguous between glob imports lib_a::Pick, lib_b::Pick
-//-- a.rock @pkg=lib_a,1 @v1
-pub struct Pick {
-    pub n: int,
-}
+//-- =pick_struct
 
 //-- b.rock @pkg=lib_b,2 @v1
 pub struct Pick {
@@ -517,10 +462,7 @@ fn use_it(p: Pick) -> int {
 }
 
 //- a_globbed_callable_and_type_stay_ambiguous_at_the_call @fail=`Pick` is ambiguous between glob imports lib_a::Pick, lib_b::Pick
-//-- a.rock @pkg=lib_a,1 @v1
-pub struct Pick {
-    pub n: int,
-}
+//-- =pick_struct
 
 //-- b.rock @pkg=lib_b,2 @v1
 pub fn Pick(n: int) -> int {
@@ -536,15 +478,9 @@ fn use_it() -> int {
 }
 
 //- an_explicit_import_joins_the_composed_glob_family
-//-- a.rock @pkg=lib_a,1 @v1
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =pick_int
 
-//-- b.rock @pkg=lib_b,2 @v1
-pub fn pick(s: string) -> string {
-    s
-}
+//-- =pick_string
 
 //-- main.rock @pkg=game,3 @v1
 use lib_a::pick;
@@ -558,15 +494,9 @@ fn use_it() -> string {
 }
 
 //- an_own_definition_joins_the_composed_glob_family
-//-- a.rock @pkg=lib_a,1 @v1
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =pick_int
 
-//-- b.rock @pkg=lib_b,2 @v1
-pub fn pick(s: string) -> string {
-    s
-}
+//-- =pick_string
 
 //-- main.rock @pkg=game,3 @v1
 use lib_a::*;
@@ -583,7 +513,7 @@ fn use_it() -> int {
 }
 
 //- globbed_operators_of_two_modules_compose_with_builtin_arithmetic
-//-- geo.rock @pkg=geo,1 @v1
+//-- point_add=geo.rock @pkg=geo,1 @v1
 pub struct Pt {
     pub x: int,
     pub y: int,
@@ -593,7 +523,7 @@ pub operator +(a: Pt, b: Pt) -> Pt {
     Pt { x: a.x + b.x, y: a.y + b.y }
 }
 
-//-- clr.rock @pkg=clr,2 @v1
+//-- rgb_add=clr.rock @pkg=clr,2 @v1
 pub struct Rgb {
     pub r: int,
 }
@@ -623,24 +553,9 @@ fn sums() -> int {
 }
 
 //- globbed_operators_do_not_admit_an_undeclared_operand @fail=No overload for `__op_add` with argument types (geo::Pt, clr::Rgb)
-//-- geo.rock @pkg=geo,1 @v1
-pub struct Pt {
-    pub x: int,
-    pub y: int,
-}
+//-- =point_add
 
-pub operator +(a: Pt, b: Pt) -> Pt {
-    Pt { x: a.x + b.x, y: a.y + b.y }
-}
-
-//-- clr.rock @pkg=clr,2 @v1
-pub struct Rgb {
-    pub r: int,
-}
-
-pub operator +(a: Rgb, b: Rgb) -> Rgb {
-    Rgb { r: a.r + b.r }
-}
+//-- =rgb_add
 
 //-- app.rock @pkg=app,3 @v1
 use geo::*;
@@ -675,7 +590,7 @@ fn neg() -> int {
 }
 
 //- globbed_unary_operators_of_two_modules_compose
-//-- geo.rock @pkg=geo,1 @v1
+//-- point_negate=geo.rock @pkg=geo,1 @v1
 pub struct Pt {
     pub x: int,
 }
@@ -725,14 +640,7 @@ fn neg() -> bool {
 }
 
 //- an_unimported_unary_operator_is_not_reached @fail=operator `-` is not defined for `geo::Pt`
-//-- geo.rock @pkg=geo,1 @v1
-pub struct Pt {
-    pub x: int,
-}
-
-pub fn __unm(a: Pt) -> Pt {
-    Pt { x: 0 - a.x }
-}
+//-- =point_negate
 
 //-- app.rock @pkg=app,2 @v1
 use geo::Pt;
@@ -759,7 +667,7 @@ fn neg() -> bool {
 }
 
 //- an_aliased_operator_import_binds_the_alias
-//-- geo.rock @pkg=geo,1 @v1
+//-- unary_point_add=geo.rock @pkg=geo,1 @v1
 pub struct Pt {
     pub x: int,
 }
@@ -782,14 +690,7 @@ fn sums() -> int {
 }
 
 //- a_nested_aliased_operator_import_binds_the_alias
-//-- geo.rock @pkg=geo,1 @v1
-pub struct Pt {
-    pub x: int,
-}
-
-pub operator +(a: Pt, b: Pt) -> Pt {
-    Pt { x: a.x + b.x }
-}
+//-- =unary_point_add
 
 //-- app.rock @pkg=app,2 @v1
 use geo::{Pt, operator(+) as add_pt};
@@ -801,14 +702,7 @@ fn sums() -> int {
 }
 
 //- an_aliased_operator_import_does_not_expose_the_glyph @fail=No overload for `__op_add` with argument types (geo::Pt, geo::Pt)
-//-- geo.rock @pkg=geo,1 @v1
-pub struct Pt {
-    pub x: int,
-}
-
-pub operator +(a: Pt, b: Pt) -> Pt {
-    Pt { x: a.x + b.x }
-}
+//-- =unary_point_add
 
 //-- app.rock @pkg=app,2 @v1
 use geo::Pt;

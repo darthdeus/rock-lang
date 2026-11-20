@@ -5,7 +5,7 @@ struct Holder<T = uint> { value: T }
 enum Choice<T = f64> { Value(T), Empty }
 newtype Wrapped<T = uint>(T)
 
-//-- use.rock @pkg=shared,1
+//-- read_default_types=use.rock @pkg=shared,1
 fn second(p: Pair<string>) -> int {
     let b = p.b
       //^ int
@@ -22,21 +22,7 @@ fn read_choice(c: Choice) -> float {
 fn read_wrapped(w: Wrapped) -> uint { w.0 }
 
 //- use_module_first
-//-- use.rock @pkg=shared,1
-fn second(p: Pair<string>) -> int {
-    let b = p.b
-      //^ int
-    b
-}
-fn read_holder(h: Holder) -> uint {
-    let v = h.value
-      //^ uint
-    v
-}
-fn read_choice(c: Choice) -> float {
-    match c { Choice::Value(v) => v, Choice::Empty => 0.0 }
-}
-fn read_wrapped(w: Wrapped) -> uint { w.0 }
+//-- =read_default_types
 
 //-- decl.rock @pkg=shared,1
 struct Pair<T, U = int> { a: T, b: U }

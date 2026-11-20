@@ -1,5 +1,5 @@
 //- imported_generic_tuple_iterator
-//-- sequence.rock @pkg=sample,1 @v1
+//-- sequence_iterator=sequence.rock @pkg=sample,1 @v1
 pub mod sequence;
 pub value Sequence<T> { item: T }
 pub struct Cursor<T> { item: T, done: bool = false }
@@ -21,16 +21,7 @@ fn consume(sequence: Sequence<int>) -> int {
 }
 
 //- unimported_next_is_not_visible @fail=no `next(
-//-- sequence.rock @pkg=sample,1 @v1
-pub mod sequence;
-pub value Sequence<T> { item: T }
-pub struct Cursor<T> { item: T, done: bool = false }
-pub fn iter<T>(sequence: Sequence<T>) -> Cursor<T> { return Cursor { item: sequence.item } }
-pub fn next<T>(cursor: Cursor<T>) -> (bool, int, T) {
-    let live = !cursor.done
-    cursor.done = true
-    return (live, 0, cursor.item)
-}
+//-- =sequence_iterator
 //-- caller.rock @pkg=sample,1 @v1
 use self::sequence::{Sequence, iter};
 fn consume(sequence: Sequence<int>) -> int {

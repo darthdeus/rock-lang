@@ -5,7 +5,7 @@ pub struct State {
 }
 
 //- direct_read_private_field_rejects @fail=field `secret` on struct `Actor` is not accessible from this module
-//-- actor.rock @pkg=game,1 @v1
+//-- actor_private_secret=actor.rock @pkg=game,1 @v1
 mod actor;
 pub struct Actor {
     pub name: string,
@@ -20,7 +20,7 @@ fn test(a: game::actor::Actor) -> int {
 }
 
 //- direct_write_private_set_field_rejects @fail=field `health` on struct `Actor` is not writable from this module
-//-- actor.rock @pkg=game,1 @v1
+//-- actor_private_health=actor.rock @pkg=game,1 @v1
 mod actor;
 pub struct Actor {
     pub name: string,
@@ -51,12 +51,7 @@ pub fn update(a: Actor) -> int {
 }
 
 //- compound_assign_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
-//-- actor.rock @pkg=game,1 @v1
-mod actor;
-pub struct Actor {
-    pub name: string,
-    private(set) health: int = 100,
-}
+//-- =actor_private_health
 
 //-- other.rock @pkg=game,1 @v1
 mod other;
@@ -66,12 +61,7 @@ fn test(a: game::actor::Actor) {
 }
 
 //- inc_dec_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
-//-- actor.rock @pkg=game,1 @v1
-mod actor;
-pub struct Actor {
-    pub name: string,
-    private(set) health: int = 100,
-}
+//-- =actor_private_health
 
 //-- other.rock @pkg=game,1 @v1
 mod other;
@@ -81,12 +71,7 @@ fn test(a: game::actor::Actor) {
 }
 
 //- safe_nav_private_field_rejects @fail=field `secret` on struct `Actor` is not accessible from this module
-//-- actor.rock @pkg=game,1 @v1
-mod actor;
-pub struct Actor {
-    pub name: string,
-    private secret: int,
-}
+//-- =actor_private_secret
 
 //-- other.rock @pkg=game,1 @v1
 mod other;
@@ -96,12 +81,7 @@ fn test(a: game::actor::Actor?) -> int? {
 }
 
 //- pattern_destructure_private_field_rejects @fail=field `secret` on struct `Actor` is not accessible from this module
-//-- actor.rock @pkg=game,1 @v1
-mod actor;
-pub struct Actor {
-    pub name: string,
-    private secret: int,
-}
+//-- =actor_private_secret
 
 //-- other.rock @pkg=game,1 @v1
 mod other;
@@ -126,7 +106,7 @@ pub struct Actor {
     private(set) pos: Vec2,
 }
 
-//-- other.rock @pkg=game,1 @v1
+//-- write_position=other.rock @pkg=game,1 @v1
 mod other;
 
 fn test(a: game::actor::Actor) {
@@ -145,12 +125,7 @@ pub struct Actor {
     private(set) embed pos: Pos,
 }
 
-//-- other.rock @pkg=game,1 @v1
-mod other;
-
-fn test(a: game::actor::Actor) {
-    a.pos.x = 10
-}
+//-- =write_position
 
 //- private_set_identity_field_is_rejected_as_storage @fail=cannot store identity struct
 //-- state.rock @pkg=game,1 @v1
@@ -191,12 +166,7 @@ fn test(s: game::state::State) {
 }
 
 //- field_ref_write_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
-//-- actor.rock @pkg=game,1 @v1
-mod actor;
-pub struct Actor {
-    pub name: string,
-    private(set) health: int = 100,
-}
+//-- =actor_private_health
 
 //-- other.rock @pkg=game,1 @v1
 mod other;
@@ -206,12 +176,7 @@ fn test() {
 }
 
 //- field_ref_read_private_set_allowed
-//-- actor.rock @pkg=game,1 @v1
-mod actor;
-pub struct Actor {
-    pub name: string,
-    private(set) health: int = 100,
-}
+//-- =actor_private_health
 
 //-- other.rock @pkg=game,1 @v1
 mod other;
@@ -223,12 +188,7 @@ fn test() {
 }
 
 //- struct_lit_explicit_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
-//-- actor.rock @pkg=game,1 @v1
-mod actor;
-pub struct Actor {
-    pub name: string,
-    private(set) health: int = 100,
-}
+//-- =actor_private_health
 
 //-- other.rock @pkg=game,1 @v1
 mod other;
@@ -239,7 +199,7 @@ fn test() -> Actor {
 }
 
 //- struct_lit_explicit_private_rejects @fail=field `secret` on struct `Actor` is not writable from this module
-//-- actor.rock @pkg=game,1 @v1
+//-- actor_secret_default=actor.rock @pkg=game,1 @v1
 mod actor;
 pub struct Actor {
     pub name: string,
@@ -275,14 +235,9 @@ fn test() -> Actor {
 }
 
 //- struct_lit_spread_private_set_rejects @fail=field `health` on struct `Actor` is not writable from this module
-//-- actor.rock @pkg=game,1 @v1
-mod actor;
-pub struct Actor {
-    pub name: string,
-    private(set) health: int = 100,
-}
+//-- =actor_private_health
 
-//-- other.rock @pkg=game,1 @v1
+//-- clone_actor=other.rock @pkg=game,1 @v1
 mod other;
 use game::actor::Actor;
 
@@ -291,20 +246,9 @@ fn test(a: Actor) -> Actor {
 }
 
 //- struct_lit_spread_private_rejects @fail=field `secret` on struct `Actor` is not accessible from this module
-//-- actor.rock @pkg=game,1 @v1
-mod actor;
-pub struct Actor {
-    pub name: string,
-    private secret: int = 42,
-}
+//-- =actor_secret_default
 
-//-- other.rock @pkg=game,1 @v1
-mod other;
-use game::actor::Actor;
-
-fn test(a: Actor) -> Actor {
-    Actor { ..a, name: "clone" }
-}
+//-- =clone_actor
 
 //- newtype_public_payload_allowed
 //-- id.rock @pkg=game,1 @v1

@@ -1,5 +1,6 @@
 use bone_core::prelude::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use test_utils::EmbeddedFile;
 
 type Result = std::result::Result<(), String>;
 
@@ -38,10 +39,11 @@ fn fixtures_type_check_as_annotated() {
 
 fn check_rock(file_name: &str, contents: &str) -> Result {
     let modules = file_name.starts_with("modules_");
-    let check = |src: &str| {
+    let mut shared = FxHashMap::default();
+    let mut check = |src| {
         if modules {
             crate::test_support::check_types_embedded(
-                &crate::test_support::parse_embedded_files(src),
+                &fixture_files(src, &mut shared),
                 stdlib_sources(),
                 skull_parser::stdlib::cached()
                     .as_ref()
@@ -64,6 +66,43 @@ fn check_rock(file_name: &str, contents: &str) -> Result {
     } else {
         Err(failures.join("\n\n"))
     }
+}
+
+// A `//-- name=file.rock` header also saves the file for later `//-- =name` references.
+fn fixture_files<'a>(
+    src: &'a str,
+    shared: &mut FxHashMap<&'a str, EmbeddedFile<'a>>,
+) -> Vec<EmbeddedFile<'a>> {
+    let mut files = test_utils::parse_embedded_files(src);
+    for file in &mut files {
+        match file.file.split_once('=') {
+            Some(("", name)) => {
+                assert!(file.src.trim().is_empty() && file.package.is_none());
+                let saved = shared
+                    .get(name)
+                    .unwrap_or_else(|| panic!("unknown fixture file `{name}`"));
+                *file = EmbeddedFile {
+                    file: saved.file,
+                    package: saved.package,
+                    src: saved.src,
+                };
+            }
+            Some((name, path)) => {
+                file.file = path;
+                let saved = EmbeddedFile {
+                    file: path,
+                    package: file.package,
+                    src: file.src,
+                };
+                assert!(
+                    shared.insert(name, saved).is_none(),
+                    "duplicate fixture file `{name}`"
+                );
+            }
+            None => {}
+        }
+    }
+    files
 }
 
 /// `@fail` expects a rejection, `@fail=<text>` one containing `<text>`, and a
