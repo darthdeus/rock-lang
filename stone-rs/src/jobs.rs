@@ -41,7 +41,7 @@ impl<R> Entry<R> {
 }
 
 struct State<W, R> {
-    // Pending entries stay until the worker drops their work, so their bytes stay reserved.
+    // A running entry stays until the worker finishes it, so its bytes stay reserved.
     entries: HashMap<u64, Entry<R>, BuildHasherDefault<DefaultHasher>>,
     queue: VecDeque<(u64, W, Arc<AtomicBool>)>,
     reserved: usize,
@@ -228,11 +228,21 @@ impl<W: Send + 'static, R: Send + 'static> Jobs<W, R> {
 
     pub(crate) fn cancel(&self, handle: u64) {
         let mut state = self.lock();
-        if let Some(entry) = state.entries.get(&handle) {
-            entry.cancelled.store(true, Ordering::Release);
-            if entry.result.is_some() {
-                state.remove(handle);
-            }
+        let Some(entry) = state.entries.get(&handle) else {
+            return;
+        };
+        entry.cancelled.store(true, Ordering::Release);
+        let ready = entry.result.is_some();
+        // Only a running job keeps its slot until the worker sees the flag.
+        let queued = state
+            .queue
+            .iter()
+            .position(|(queued, ..)| *queued == handle);
+        if let Some(index) = queued {
+            state.queue.remove(index);
+        }
+        if ready || queued.is_some() {
+            state.remove(handle);
         }
         self.wake.notify_all();
     }
@@ -286,6 +296,8 @@ mod tests {
         assert_eq!((JOBS.poll(first), JOBS.poll(second)), (0, 0));
         JOBS.cancel(second);
         assert_eq!(JOBS.poll(second), -1);
+        let refill = JOBS.submit(8, 6).ok().unwrap();
+        JOBS.cancel(refill);
         drop(gate);
         assert_eq!(JOBS.wait(first), 1);
         assert!(matches!(JOBS.take(first, |_| false), Taken::Rejected));
