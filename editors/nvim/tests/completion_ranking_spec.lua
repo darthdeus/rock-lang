@@ -15,71 +15,19 @@ local function fail(msg)
   os.exit(1)
 end
 
-local bin = vim.env.ROCK_LSP_BIN
-if not bin or bin == '' then
-  print('SKIP: $ROCK_LSP_BIN not set')
-  os.exit(0)
-end
-
-vim.notify = function() end
-vim.notify_once = function() end
-vim.filetype.add({ extension = { rock = 'rock' } })
-
-local root = vim.fn.tempname()
-vim.fn.mkdir(root, 'p')
-do
-  local f = assert(io.open(root .. '/stick.toml', 'w'))
-  f:write('[package]\nname = "ranking"\nversion = "0.1.0"\n'); f:close()
-  -- Two globals share a fuzzy match for prefix `LOOTPA`. `LOOT_PANEL`
-  -- is the obviously-intended one. The other has every prefix char
-  -- on a word boundary but is much longer with no contiguous run, so
-  -- the ranking algorithm must score `LOOT_PANEL` lower (=higher
-  -- relevance).
-  f = assert(io.open(root .. '/main.rock', 'w'))
-  f:write([[
+local project = dofile('tests/_lib/project.lua')
+local buf = project.open('ranking', { ['main.rock'] = [[
 global LOOT_PANEL: int = 0
 global LATER_OUT_OF_TOWN_PERSON_ASTEROID: int = 0
 
 fn main() {
     let x = LOOTPA
 }
-]])
-  f:close()
-end
-
-local client = require('rock.client')
-vim.lsp.config('rock', client.make_config({ binary = bin }))
-client.setup_autocmds()
-vim.lsp.enable('rock')
-
-vim.cmd('edit ' .. vim.fn.fnameescape(root .. '/main.rock'))
-local attached_id
-vim.api.nvim_create_autocmd('LspAttach', {
-  callback = function(args)
-    local c = vim.lsp.get_client_by_id(args.data.client_id)
-    if c and c.name == 'rock' then attached_id = args.data.client_id end
-  end,
-})
-if not vim.wait(5000, function() return attached_id ~= nil end, 50) then
-  fail('LspAttach did not fire')
-end
-vim.wait(500, function() return false end)
-
-local bufnr = vim.api.nvim_get_current_buf()
-
--- Cursor right after `LOOTPA` on line index 4 (0-based), char 18.
--- Line content: "    let x = LOOTPA"
-local response, err
-vim.lsp.buf_request(bufnr, 'textDocument/completion', {
-  textDocument = { uri = vim.uri_from_bufnr(bufnr) },
+]] })
+local response = project.request(buf, 'textDocument/completion', {
   position = { line = 4, character = 18 },
   context = { triggerKind = 1 },
-}, function(e, result) err = e; response = result end)
-
-if not vim.wait(3000, function() return response ~= nil or err ~= nil end, 25) then
-  fail('completion did not respond within 3s')
-end
-if err then fail('completion returned error: ' .. vim.inspect(err)) end
+})
 
 -- Server returns `CompletionResponse::Array`; lsp_types deserializes
 -- it as a plain table list of items.

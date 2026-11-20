@@ -16,73 +16,14 @@ local function fail(msg)
   os.exit(1)
 end
 
-local bin = vim.env.ROCK_LSP_BIN
-if not bin or bin == '' then
-  print('SKIP: $ROCK_LSP_BIN not set')
-  os.exit(0)
-end
-
-vim.notify = function() end
-vim.notify_once = function() end
-vim.filetype.add({ extension = { rock = 'rock' } })
-
--- Two-file project: declaration in lib.rock, use in main.rock. The
--- jump goes main.rock -> lib.rock so we exercise the cross-file path.
-local root = vim.fn.tempname()
-vim.fn.mkdir(root, 'p')
-do
-  local f = assert(io.open(root .. '/stick.toml', 'w'))
-  f:write('[package]\nname = "gotodef"\nversion = "0.1.0"\n'); f:close()
-
-  -- line 0: fn make_foo() -> int { return 42 }
-  f = assert(io.open(root .. '/lib.rock', 'w'))
-  f:write('fn make_foo() -> int { return 42 }\n'); f:close()
-
-  -- line 0: fn main() { let x = make_foo() }
-  -- `make_foo` starts at column 20 in `fn main() { let x = make_foo() }`.
-  f = assert(io.open(root .. '/main.rock', 'w'))
-  f:write('fn main() { let x = make_foo() }\n'); f:close()
-end
-
-local client = require('rock.client')
-vim.lsp.config('rock', client.make_config({ binary = bin }))
-client.setup_autocmds()
-vim.lsp.enable('rock')
-
--- Open main.rock so the cursor lands on the call site.
-vim.cmd('edit ' .. vim.fn.fnameescape(root .. '/main.rock'))
-
-local attached_id
-vim.api.nvim_create_autocmd('LspAttach', {
-  callback = function(args)
-    local c = vim.lsp.get_client_by_id(args.data.client_id)
-    if c and c.name == 'rock' then attached_id = args.data.client_id end
-  end,
+local project = dofile('tests/_lib/project.lua')
+local buf = project.open('gotodef', {
+  ['lib.rock'] = 'fn make_foo() -> int { return 42 }\n',
+  ['main.rock'] = 'fn main() { let x = make_foo() }\n',
 })
-if not vim.wait(5000, function() return attached_id ~= nil end, 50) then
-  fail('LspAttach did not fire within 5s')
-end
-
-local bufnr = vim.api.nvim_get_current_buf()
-local done, def_err, def_result = false, nil, nil
--- Cursor on `make_foo` call site at main.rock:0:22 (middle of the name).
-local req_ok, _ = vim.lsp.buf_request(bufnr, 'textDocument/definition', {
-  textDocument = { uri = vim.uri_from_bufnr(bufnr) },
+local def_result = project.request(buf, 'textDocument/definition', {
   position = { line = 0, character = 22 },
-}, function(err, result)
-  def_err = err
-  def_result = result
-  done = true
-end)
-if not req_ok then fail('vim.lsp.buf_request returned false (no client?)') end
-
-if not vim.wait(5000, function() return done end, 25) then
-  fail('definition response did not arrive within 5s')
-end
-
-if def_err then
-  fail('definition returned error: ' .. vim.inspect(def_err))
-end
+})
 
 -- LSP allows either Location or Location[]. Normalize to a list.
 local locs = def_result
