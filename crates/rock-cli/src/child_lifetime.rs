@@ -5,7 +5,7 @@ use std::process::{Child, Command};
 #[cfg(unix)]
 use std::sync::Once;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 #[cfg(unix)]
 const SLOTS: usize = 256;
@@ -16,9 +16,17 @@ const SLOTS: usize = 256;
 static BOUND: [AtomicI32; SLOTS] = [const { AtomicI32::new(0) }; SLOTS];
 #[cfg(unix)]
 static INSTALL: Once = Once::new();
+#[cfg(unix)]
+static GAME_PID: AtomicI32 = AtomicI32::new(0);
+#[cfg(unix)]
+static GAME_INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
-extern "C" fn forward_and_die(signal: libc::c_int) {
+extern "C" fn forward_shutdown(signal: libc::c_int) {
+    let saved_errno = errno::errno();
+    let wait_for_game = signal == libc::SIGINT
+        && GAME_PID.load(Ordering::Relaxed) > 0
+        && !GAME_INTERRUPTED.swap(true, Ordering::Relaxed);
     for slot in BOUND.iter() {
         let pid = slot.load(Ordering::Relaxed);
         if pid > 0 {
@@ -28,10 +36,30 @@ extern "C" fn forward_and_die(signal: libc::c_int) {
             }
         }
     }
+    // The command's normal wait path keeps the foreground job alive while the
+    // runtime drains shutdown. Another interrupt can still terminate Rock.
+    if wait_for_game {
+        errno::set_errno(saved_errno);
+        return;
+    }
     unsafe {
         libc::signal(signal, libc::SIG_DFL);
         libc::raise(signal);
     }
+}
+
+pub(crate) fn track_game(pid: u32) {
+    #[cfg(unix)]
+    GAME_PID.store(pid as i32, Ordering::Relaxed);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+pub(crate) fn game_interrupted() -> bool {
+    #[cfg(unix)]
+    return GAME_INTERRUPTED.load(Ordering::Relaxed);
+    #[cfg(not(unix))]
+    false
 }
 
 #[cfg(unix)]
@@ -41,7 +69,7 @@ fn install_forwarding() {
             unsafe {
                 libc::signal(
                     signal,
-                    forward_and_die as extern "C" fn(libc::c_int) as libc::sighandler_t,
+                    forward_shutdown as extern "C" fn(libc::c_int) as libc::sighandler_t,
                 );
             }
         }
@@ -204,6 +232,8 @@ fn assign_kill_on_close_job(child: &Child) -> io::Result<()> {
 
 /// Forget a bound child that has been waited for.
 pub(crate) fn release_bound_child(pid: u32) {
+    #[cfg(unix)]
+    let _ = GAME_PID.compare_exchange(pid as i32, 0, Ordering::Relaxed, Ordering::Relaxed);
     #[cfg(unix)]
     for slot in BOUND.iter() {
         let _ = slot.compare_exchange(pid as i32, 0, Ordering::SeqCst, Ordering::SeqCst);
