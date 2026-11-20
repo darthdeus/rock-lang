@@ -1032,7 +1032,7 @@ pub inline(lua) fn get_pref_path(organization: string, application: string) -> s
     return ffi.string(path)
 """
 
-pub @inline inline(lua) fn to_lower(s: string) -> string = "return string.lower(s)"
+pub @inline fn to_lower(s: string) -> string { return s.lower() }
 
 pub extern(ffi, "stone") fn stone_file_exists_status(path: string) -> int
 pub extern(ffi, "stone") fn stone_is_directory_status(path: string) -> int
@@ -2420,14 +2420,9 @@ inline(lua) fn restore_stone_handle(handle: any) = """
     _G.stone = handle
 """
 
-inline(lua) fn gl_push_debug_group(msg: string) = ""
-inline(lua) fn gl_pop_debug_group() = ""
-
-// TODO: not available on MacOS, do we have this implemented elsewhere?
 pub fn with_debug_group(msg: string, f: fn() -> ()) {
-    gl_push_debug_group(msg)
+    let _ = msg
     f()
-    gl_pop_debug_group()
 }
 
 // The live hover query, called ONCE per frame from `input_imgui_new_frame`

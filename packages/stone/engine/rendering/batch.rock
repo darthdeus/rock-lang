@@ -1775,15 +1775,12 @@ pub fn render_batches(after_scene: bool = false) {
 
                 if UNIFORM_BLOCK_DUMP_ON { stone_mesh_capture_arm(after_scene) }
 
-                // Direct push/pop: the trailing-closure form is a per-iteration UCLO abort.
-                gl_push_debug_group(key)
                 draw_batch_mesh(batch)
                 if UNIFORM_BLOCK_DUMP_ON {
                     UNIFORM_BLOCK_DUMP_MESH_JSON = stone_mesh_capture_finish_json()
                     UNIFORM_BLOCK_DUMP_DRAW_HOOK.unwrap()(key, batch, active_shader, after_scene)
                 }
                 release_batch_samplers(active_shader, batch)
-                gl_pop_debug_group()
             }
 
             if let capture = UNIFORM_BLOCK_DUMP_STAGE_HOOK {
@@ -1858,18 +1855,11 @@ pub fn render_silhouette_mask(
                     // disabled or some drivers drop fragments unpredictably.
                     unset_depth_mode()
 
-                    for (tex, batch_row) in pool.entries {
-
+                    for (_, batch_row) in pool.entries {
                         let batch = batch_row.borrow().unwrap()
                         if batch.count == 0 { continue }
 
-                        // Direct push/pop instead of `with_debug_group(...) @ {}`:
-                        // the trailing-closure form allocates a `batch`-capturing
-                        // closure every iteration, which LuaJIT aborts on (NYI:
-                        // bytecode UCLO).
-                        gl_push_debug_group(tex)
                         draw_batch_mesh(batch)
-                        gl_pop_debug_group()
                         drawn = drawn + 1
                     }
 

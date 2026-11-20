@@ -151,3 +151,11 @@ fn shader_metadata_preserves_53_bit_fingerprints() {
     }]
     assert_eq(keys[0].semantic_fingerprint as int, fingerprint)
 }
+
+@test
+fn uniform_member_names_are_nul_separated_and_terminated() {
+    let blob = __ub_join_names(["one", "two[0]"])
+    assert_eq(blob, "one\u{0}two[0]\u{0}")
+    assert_eq(blob.len(), 11)
+    assert_eq(__ub_join_names([]), "\u{0}")
+}

@@ -12,7 +12,7 @@ struct ArtifactDefinition<T> {
     definition: T,
 }
 
-@pure @inline inline(lua) fn int(value: int) -> int = "return value"
+@pure @inline fn int(value: int) -> int { return value }
 
 @pure fn int(value: float) -> int { return floor(value) as int }
 
@@ -1196,8 +1196,7 @@ fn to_string(value: float) -> string {
     return str_value + ".0"
 }
 
-// `to_string(string)` is the identity via @expand — does NOT allocate.
-@inline inline(lua) fn to_string(value: string) -> string = "return value"
+@inline fn to_string(value: string) -> string { return value }
 
 fn to_string(value: bool) -> string { return tostring(value) }
 
@@ -1585,11 +1584,8 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
 
 @nowrite @inline inline(lua) fn typeof(x: any) -> string = "type(x)"
 
-// Historical aliases for `float(int)`. All three — `float`, `int_to_float`,
-// `to_float` — are `@expand("$1")` identities, substituted at call sites
-// with zero runtime cost. `float(int)` is the canonical name.
-@intrinsic @pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
-@intrinsic @pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
+@intrinsic @pure @inline fn int_to_float(value: int) -> float { return value as float }
+@intrinsic @pure @inline fn to_float(value: int) -> float { return value as float }
 
 // Taken as a fn value, so it needs a real JS sibling, not a template.
 @nowrite inline(lua) fn float_to_int(value: float) -> int = """
@@ -1753,11 +1749,7 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
 @intrinsic @inline inline(lua) fn cast<T>(value: any) -> T = "return value"
 @nowrite @intrinsic @inline inline(lua) fn transmute<A, B>(x: A) -> B = "return x"
 
-// int and float are both `number` in Lua — this cast is a no-op at runtime.
-// `@expand("$1")` substitutes the argument expression at the call site with
-// zero function-call overhead. Confirmed in tmp/codegen_expand.lua: calls
-// vanish entirely in the generated Lua.
-@intrinsic @pure @inline inline(lua) fn float(value: int) -> float = "return value"
+@intrinsic @pure @inline fn float(value: int) -> float { return value as float }
 
 @intrinsic inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>) -> Y? = """
     return c.__resume(c)
@@ -2656,8 +2648,8 @@ inline(lua) fn get_os() -> string = """
 """
 
 @nowrite @intrinsic @inline inline(lua) fn phantom<T>() -> T = """return nil"""
-@intrinsic inline(lua) fn tuple_first<A, B>(tuple: (A, B)) -> A = """return tuple[1]"""
-@intrinsic inline(lua) fn tuple_second<A, B>(tuple: (A, B)) -> B = """return tuple[2]"""
+@intrinsic @inline fn tuple_first<A, B>(tuple: (A, B)) -> A { return tuple.0 }
+@intrinsic @inline fn tuple_second<A, B>(tuple: (A, B)) -> B { return tuple.1 }
 
 fn char_to_byte(c: string) -> int { return unit_at(c, 0) }
 

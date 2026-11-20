@@ -249,3 +249,25 @@ fn nullable_value_binding_return_keeps_presence_and_leaves() {
     assert!(!pick.contains("__ty = \"Bag\""));
     assert_eq!(run_main(&lua), "1 1 true");
 }
+
+#[test]
+fn tuple_helpers_keep_fresh_pairs_scalar() {
+    let lua = emit_module(
+        r#"
+fn sum_pairs(n: int) -> int {
+    let total = 0
+    for i in 0..n {
+        let pair = (i * 2, i + 1)
+        total += tuple_first(pair) + tuple_second(pair)
+    }
+    return total
+}
+
+fn main() { print(sum_pairs(4)) }
+"#,
+    );
+    let body = function_body(&lua, "sum_pairs");
+    assert!(!body.contains("tuple_first") && !body.contains("tuple_second"));
+    assert!(!body.contains("{"));
+    assert_eq!(run_main(&lua), "22");
+}

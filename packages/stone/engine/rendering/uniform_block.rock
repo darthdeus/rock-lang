@@ -246,13 +246,10 @@ inline(lua) fn __ub_int_view(p: PtrU8) -> Ptr<int> = 'return ffi.cast("int32_t*"
 
 // The member-name blob `stone_shader_check_uniform_block_layout` reads: NUL
 // separated, NUL terminated, with its byte length passed alongside.
-inline(lua) fn __ub_join_names(names: [string]) -> string = """
-    local parts = {}
-    for i = 1, names.len do parts[i] = names._data[i] end
-    return table.concat(parts, string.char(0)) .. string.char(0)
-"""
-
-inline(lua) fn __ub_str_len(s: string) -> int = "return #s"
+fn __ub_join_names(names: [string]) -> string {
+    let nul = "\u{0}"
+    return names.join(nul) + nul
+}
 
 pub inline(lua) fn __ub_write_float(p: Ptr<float>, i: int, v: float) = "p[i] = v"
 inline(lua) fn __ub_read_int(p: Ptr<int>, i: int) -> int = "return p[i]"
@@ -283,7 +280,7 @@ fn check_uniform_block_layout(sid: ShaderId, block: string, members: [string], o
         buf[i] = off
     }
     return stone_shader_check_uniform_block_layout(
-        transmute(sid.0), block, blob, __ub_str_len(blob), buf.ptr, offsets.len(), size
+        transmute(sid.0), block, blob, blob.len(), buf.ptr, offsets.len(), size
     )
 }
 
