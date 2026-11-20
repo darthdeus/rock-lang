@@ -65,12 +65,6 @@ struct SceneRenderSaved2 {
     image_map: Map<string, Image>,
 }
 
-inline(lua) fn scene_render_try(body: fn() -> ()) -> string? = """
-    local ok, err = xpcall(body, debug.traceback)
-    if ok then return nil end
-    return tostring(err)
-"""
-
 pub fn with_scene_render_scope(view: FrameView, body: fn() -> ()) {
     let saved0 = scene_render_save0()
     let saved1 = scene_render_save1()
@@ -94,7 +88,7 @@ pub fn with_scene_render_scope(view: FrameView, body: fn() -> ()) {
     let targets: [Canvas] = []
     let pools: [RenderBatchPool] = []
     let cleanup_error: string? = null
-    let failure = scene_render_try(() => {
+    let failure = protected_run(() => {
         RENDER_VIEW = view
         outline_target_canvas = new_canvas(view.scene_size.x,view.scene_size.y,"r32i")
         targets.push(outline_target_canvas)
@@ -156,7 +150,7 @@ pub fn with_scene_render_scope(view: FrameView, body: fn() -> ()) {
             set_canvas_handle(saved1.current_canvas_handle)
             set_blend_mode(saved1.current_blend)
         }
-        cleanup_error = scene_render_try(() => {
+        cleanup_error = protected_run(() => {
             scene_render_blocks_restore(blocks)
             for c in [world_surface_owner_canvas, world_normal_canvas, world_material_canvas] {
                 if let target = c { destroy_canvas(target) }
@@ -458,7 +452,7 @@ fn scene_render_scope_restore_case(fail: bool) {
     let prior_profiler = ENGINE.profiler_enabled
     let prior_shader = WATCHER.current_shader_name
     let prior_activations = TEXTURE_SLOT_ACTIVATION
-    let failure = scene_render_try(() => {
+    let failure = protected_run(() => {
         set_camera(v(13.0,17.0),3.0)
         ENGINE.show_pipeline_inspector = true
         ENGINE.profiler_enabled = true
@@ -478,7 +472,7 @@ fn scene_render_scope_restore_case(fail: bool) {
         let arenas = arena_live_count()
         let canvases = stone_get_graphics_stats().canvases
         let view = resolve_frame_view(v(64,64),iv(64,64),Camera2D {},RENDER_CONFIG).unwrap()
-        let body_error = scene_render_try(() => {
+        let body_error = protected_run(() => {
             with_scene_render_scope(view, () => {
                 let _ = ensure_world_surface_owner_canvas()
                 set_canvas(screen_canvas)

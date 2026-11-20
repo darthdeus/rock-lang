@@ -7,7 +7,6 @@
 //   target/debug/rock compile benchmarks/tuple_copy.rock --output tuple_copy.lua
 //   luajit -e 'dofile("tuple_copy.lua"); main()'
 
-@nomangle inline(lua) fn bench_clock() -> float = "return os.clock()"
 @nomangle inline(lua) fn heap_kb() -> float = "return collectgarbage('count')"
 @nomangle inline(lua) fn gc_stop() = "collectgarbage('collect'); collectgarbage('stop')"
 @nomangle inline(lua) fn gc_restart() = "collectgarbage('restart'); collectgarbage('collect')"
@@ -280,9 +279,9 @@ fn drive(name: string, pass: fn() -> float) {
     let bytes = (heap_kb() - k0) * 1024.0 / (20.0 * N as float)
     gc_restart()
     let reps = 3000
-    let t0 = bench_clock()
+    let t0 = clock_process_seconds()
     for r in 0..reps { sink += pass() }
-    let ns = (bench_clock() - t0) * 1000000000.0 / (reps as float * N as float)
+    let ns = (clock_process_seconds() - t0) * 1000000000.0 / (reps as float * N as float)
     print("{name} bytes_per_elem={bytes} ns_per_elem={ns} aborts={aborts} sink={sink > 0.0}")
 }
 

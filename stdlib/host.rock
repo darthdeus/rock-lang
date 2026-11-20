@@ -1,0 +1,83 @@
+// Run a callback and return its traceback if it raises.
+inline(lua) fn protected_run(body: fn() -> ()) -> string? = """
+    local ok, message = xpcall(body, __rock_traceback)
+    if not ok then return message end
+"""
+
+inline(js) fn protected_run(body: fn() -> ()) -> string? = """
+    try { __rock_call(body); return null; }
+    catch (e) {
+        try { return String(e && e.stack || e); }
+        catch (_) { return "<unprintable " + (e === null ? "nil" : typeof e) + " error>"; }
+    }
+"""
+
+// Preserve the callback's Rock ABI, including tuples returned in multiple lanes.
+fn protected_call<R>(body: fn() -> R) -> (R?, string?) {
+    let result: R? = null
+    let failure = protected_run(() => { result = body() })
+    return (result, failure)
+}
+
+// Whole seconds since the Unix epoch.
+@nowrite @inline inline(lua) fn clock_unix_seconds() -> int = "os.time()"
+@nowrite @inline inline(js) fn clock_unix_seconds() -> int = "return Math.floor(Date.now() / 1000);"
+
+// CPU seconds for process profiling. Windows LuaJIT and browsers use elapsed
+// seconds because their process clock does not report CPU time.
+@nowrite @inline inline(lua) fn clock_process_seconds() -> float = "os.clock()"
+@nowrite inline(js) fn clock_process_seconds() -> float = """
+    if (typeof process === "undefined" || !process.cpuUsage) return performance.now() * 1e-3;
+    const t = process.cpuUsage();
+    return (t.user + t.system) * 1e-6;
+"""
+
+@nomangle inline(lua) fn __rock_read_posix_clock(id: int) -> float? = """
+    local ts = _G.__rock_clock_timespec
+    if not ts then
+        ffi.cdef[[
+            struct __rock_clock_timespec { long tv_sec; long tv_nsec; };
+            int __rock_clock_gettime(int, struct __rock_clock_timespec *) __asm__("clock_gettime");
+        ]]
+        ts = ffi.new("struct __rock_clock_timespec")
+        _G.__rock_clock_timespec = ts
+    end
+    if ffi.C.__rock_clock_gettime(id, ts) ~= 0 then return nil end
+    return tonumber(ts.tv_sec) + tonumber(ts.tv_nsec) * 1e-9
+"""
+
+// High-resolution elapsed seconds from an arbitrary monotonic origin.
+inline(lua) fn clock_monotonic_seconds() -> float = """
+    if ffi.os == "Windows" then
+        local tick = _G.__rock_clock_qpc_tick
+        if not tick then
+            ffi.cdef[[
+                int QueryPerformanceCounter(int64_t*);
+                int QueryPerformanceFrequency(int64_t*);
+            ]]
+            tick = ffi.new("int64_t[1]")
+            assert(ffi.C.QueryPerformanceFrequency(tick) ~= 0)
+            _G.__rock_clock_qpc_scale = 1 / tonumber(tick[0])
+            _G.__rock_clock_qpc_tick = tick
+        end
+        assert(ffi.C.QueryPerformanceCounter(tick) ~= 0)
+        return tonumber(tick[0]) * _G.__rock_clock_qpc_scale
+    end
+    local id = (ffi.os == "OSX" and 6) or (ffi.os == "Linux" and 1)
+    assert(id, "monotonic clock unavailable")
+    return assert(__rock_read_posix_clock(id), "clock_gettime failed")
+"""
+
+@nowrite @inline inline(js) fn clock_monotonic_seconds() -> float = "return performance.now() * 1e-3;"
+
+// CPU seconds on the calling thread, or null when the host has no thread clock.
+inline(lua) fn clock_thread_seconds() -> float? = """
+    local id = (ffi.os == "Linux" and 3) or (ffi.os == "OSX" and 16)
+    if id then return __rock_read_posix_clock(id) end
+"""
+
+@nowrite inline(js) fn clock_thread_seconds() -> float? = """
+    if (typeof process === "undefined" || !process.threadCpuUsage) return null;
+    const t = process.threadCpuUsage();
+    return (t.user + t.system) * 1e-6;
+"""

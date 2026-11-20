@@ -59,16 +59,6 @@ inline(js) fn raised_same_value(check: fn() -> ()) -> bool = """
     catch (e) { return e === globalThis.__defer_probe_err; }
 """
 
-inline(lua) fn traceback_of(check: fn() -> ()) -> string = """
-    local ok, tb = xpcall(check, __rock_traceback)
-    if ok then return "no error" end
-    return tostring(tb)
-"""
-
-inline(js) fn traceback_of(check: fn() -> ()) -> string = """
-    try { __rock_call(check); return "no error"; } catch (e) { return String(e && e.stack); }
-"""
-
 fn fails_after_defer() {
     defer { LOG = LOG + "d1;" }
     assert(false, "boom")
@@ -205,7 +195,7 @@ fn traced() {
 @test(output = "t; true 0")
 fn traceback_names_the_original_raise_site() {
     LOG = ""
-    let tb = traceback_of(() => traced())
+    let tb = protected_run(() => traced())
     print("{LOG} {has(tb, "traced_origin")} {defer_depth()}")
 }
 
@@ -361,7 +351,7 @@ fn same_second_origin(n: int) {
 fn equal_error_after_a_caught_one_reports_its_own_site() {
     LOG = ""
     let _ = raised(() => same_first())
-    let tb = traceback_of(() => {
+    let tb = protected_run(() => {
         same_second_origin(1)
         LOG = LOG + "unreached;"
     })
@@ -396,8 +386,8 @@ fn cleanup_catches_raising_fn() {
 @test(output = "h;h; true true true")
 fn cleanup_calling_a_raising_fn_keeps_the_original_trace() {
     LOG = ""
-    let raising = traceback_of(() => cleanup_calls_raising_fn())
-    let catching = traceback_of(() => cleanup_catches_raising_fn())
+    let raising = protected_run(() => cleanup_calls_raising_fn())
+    let catching = protected_run(() => cleanup_catches_raising_fn())
     print("{LOG} {has(raising, "original_site")} {has(raising, "helper boom")} {has(catching, "original_site")}")
 }
 
@@ -408,6 +398,12 @@ inline(lua) fn throw_unprintable() = """
 inline(js) fn throw_unprintable() = """
     throw { toString: function() { throw new Error("formatting failure"); } };
 """
+
+@test
+fn protected_run_handles_an_unprintable_error() {
+    let message = protected_run(() => throw_unprintable()) ?? ""
+    assert(message.contains("unprintable"))
+}
 
 fn unprintable_cleanup_error() {
     defer { LOG = LOG + "remaining;" }

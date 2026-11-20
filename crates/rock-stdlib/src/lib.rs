@@ -49,6 +49,7 @@ define_stdlib_files!(
     "strings.rock",
     "json.rock",
     "shader.rock",
+    "host.rock",
     "js.rock",
 );
 

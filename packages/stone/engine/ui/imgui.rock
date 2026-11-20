@@ -459,12 +459,7 @@ pub fn imgui_begin_child_fit_height(id: string, max_height: float) -> bool {
     return open
 }
 
-// High-resolution monotonic-ish timer for in-editor profiling. Returns
-// CPU seconds since process start; subtract two readings for an elapsed
-// duration. Sub-microsecond resolution on LuaJIT/macOS+Linux.
-pub inline(lua) fn imgui_perf_now() -> float = """
-    return os.clock()
-"""
+pub @inline fn imgui_perf_now() -> float { clock_process_seconds() }
 
 pub @scalar_abi inline(lua) fn imgui_slider_float2(label: string, value: Vec2, min: float, max: float) -> (bool, Vec2) = """
     local v = ffi.new("float[2]", {value__x, value__y})

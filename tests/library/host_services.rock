@@ -1,0 +1,46 @@
+fn protected_pair_probe(a: int, b: int, c: int, d: int) -> (bool, int) {
+    if a < 0 { error("protected pair failed") }
+    return (false, a + b * c - d)
+}
+
+@test
+fn protected_call_returns_both_results_and_traces_errors() {
+    let (result, failure) = protected_call(() => protected_pair_probe(4, 7, 3, 2))
+    let (first, last) = result ?? (true, -1)
+    assert_eq(first, false)
+    assert_eq(last, 23)
+    assert_eq(failure, null)
+    let (bad_result, trace) = protected_call(() => protected_pair_probe(-1, 7, 3, 2))
+    assert_eq(bad_result, null)
+    let message = trace ?? ""
+    assert(message.contains("protected pair failed"))
+    assert(message.lines().len() > 1)
+}
+
+@test
+fn protected_call_runs_captures_and_keeps_unwound_trace() {
+    let actions: [string] = []
+    assert_eq(protected_run(() => { actions.push("ok") }), null)
+    let trace = protected_run(() => {
+        defer { actions.push("defer") }
+        error("protected closure failed")
+    }) ?? ""
+    assert(trace.contains("protected closure failed"))
+    assert(trace.lines().len() > 1)
+    assert_eq(actions, ["ok", "defer"])
+}
+
+@test
+fn host_clocks_return_seconds() {
+    let wall = clock_unix_seconds()
+    assert(wall >= 1700000000)
+    let start = clock_monotonic_seconds()
+    let cpu = clock_process_seconds()
+    let i = 0
+    for n in 0..10000 { i += n }
+    assert_eq(i, 49995000)
+    assert(clock_monotonic_seconds() >= start)
+    assert(clock_process_seconds() >= cpu)
+    let thread = clock_thread_seconds()
+    if thread != null { assert((clock_thread_seconds() ?? -1.0) >= thread) }
+}

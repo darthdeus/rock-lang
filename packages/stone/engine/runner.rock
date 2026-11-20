@@ -297,38 +297,25 @@ fn frame_error_recover() {
     let _ = residency_service_uploads()
 }
 
-// Wraps run_one_frame in xpcall so runtime errors produce full stack traces
-// instead of just a one-line message. Returns (ok, running, time).
-//
-// Ctrl+C (SIGINT) surfaces in LuaJIT as an "interrupted!" error raised at
-// whatever bytecode was executing. Detect the interrupted signature and exit
-// the loop cleanly rather than reporting it as a game error.
+@nomangle
+fn frame_error_outcome(frame: int, last_time: float, message: string) -> (bool, bool, float) {
+    frame_error_recover()
+    if message.contains("interrupted!") {
+        log_info("GAME", "Interrupted (Ctrl+C), exiting...")
+        return (true, false, last_time)
+    }
+    // The traceback and frame number vary even when the same fault repeats.
+    let newline = message.find("\n")
+    let key = if newline < 0 { message } else { message.substring(0, newline) }
+    log_once("GAME", "Error in frame {frame}:\n{message}", key)
+    return (false, true, last_time)
+}
+
+// Forward both result lanes without constructing a callback or a result box per frame.
 @nomangle inline(lua) fn xpcall_run_one_frame(frame: int, last_time: float, window: StoneWindow, config: GameConfig) -> (bool, bool, float) = """
-    -- run_one_frame returns a tuple (multi-return ABI): xpcall yields
-    -- ok, <should_exit>, <new_time>.
-    local ok, a, b = xpcall(run_one_frame, __rock_traceback, frame, last_time, window, config)
-    if not ok then
-        local msg = tostring(a)
-        frame_error_recover()
-        if msg:find("interrupted!") then
-            __rock_log(2, "GAME", "Interrupted (Ctrl+C), exiting...")
-            return true, false, last_time
-        end
-        -- Keyed on the MESSAGE, not this call site: a deterministic fault
-        -- reproduces every frame, and at 60fps an unthrottled traceback buries
-        -- the rest of the log. A site key would collapse DIFFERENT errors into
-        -- the first one, which is worse than the spam. The frame number stays
-        -- out of the key (it varies) but in the message. log_suppression_summary
-        -- reports the total at shutdown, and FRAME_ERROR_COUNT still fails the
-        -- run, so this collapses the log without losing the error.
-        -- First line only as the key ("file:line: message"): the full traceback
-        -- identifies the same fault but makes the shutdown summary, which
-        -- prints the key, unreadable.
-        local key = msg:match("^[^\n]*") or msg
-        _log_once_impl(0, "GAME", "Error in frame " .. frame .. ":\n" .. msg, key)
-        return false, true, last_time
-    end
-    return true, a, b
+    local ok, running, time = xpcall(run_one_frame, __rock_traceback, frame, last_time, window, config)
+    if ok then return true, running, time end
+    return frame_error_outcome(frame, last_time, running)
 """
 
 global FRAME_FORCE_ERROR_AT: int = -1

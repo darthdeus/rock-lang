@@ -1,7 +1,6 @@
 // Guard-exit pressure from scalar value leaves. Run with the JIT on:
 //     rock run benchmarks/live_floats.rock
 // Diagnostics report per-parent/exit double refs, rather than snapshot slots.
-@nomangle inline(lua) fn clock() -> float = "return os.clock()"
 @nomangle inline(lua) fn reset() = """
     jit.flush()
     local u, v, bit = require('jit.util'), require('jit.vmdef'), require('bit')
@@ -204,9 +203,9 @@ fn run(name: string, pass: fn(int) -> float) {
     reset()
     let warm = batch(pass, 300000)
     let diagnostics = counts()
-    let start = clock()
+    let start = clock_process_seconds()
     let timed = batch(pass, 1000000)
-    let ns = (clock() - start) * 1000.0
+    let ns = (clock_process_seconds() - start) * 1000.0
     let sum = warm + timed
     print("workload={name} {diagnostics} ns_per_iter={ns} sink={sum}")
 }
