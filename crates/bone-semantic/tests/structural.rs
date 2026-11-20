@@ -787,6 +787,35 @@ fn annotations_resolve_like_other_names() {
 }
 
 #[test]
+fn glob_imported_names_claim_an_annotation_only_as_decorators() {
+    let field = "use a::*; use b::*; fn probe(@size(4) values: [int]) {}";
+    let errors = |a: &str, b: &str| {
+        annotation_resolution_errors(&[
+            ("a.rock", &format!("mod a; {a}")),
+            ("b.rock", &format!("mod b; {b}")),
+            ("main.rock", field),
+        ])
+    };
+    for definition in ["pub fn size() {}", "pub global size: int = 1"] {
+        assert_eq!(errors(definition, definition), [""; 0], "{definition}");
+    }
+    let ambiguous = errors("pub deco size() {}", "pub deco size() {}");
+    assert!(
+        ambiguous.iter().any(|error| error.contains("ambiguous")
+            && error.contains("sample::a::size")
+            && error.contains("sample::b::size")),
+        "{ambiguous:?}"
+    );
+    let mixed = errors("pub deco size() {}", "pub fn size() {}");
+    assert!(
+        mixed
+            .iter()
+            .any(|error| error.contains("it applies to a fn") && !error.contains("ambiguous")),
+        "{mixed:?}"
+    );
+}
+
+#[test]
 fn enum_variant_uses_carry_name_token_spans() {
     use bone_semantic::hir::{Expr, Pattern};
 
