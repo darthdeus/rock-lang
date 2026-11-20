@@ -76,55 +76,72 @@ fn json_field(v: JsonValue, key: string) -> JsonValue? {
 }
 
 fn json_encode(v: JsonValue) -> string {
-    let parts: [string] = []
-    encode_into(v, parts)
-    return join(parts, "")
+    if let scalar = encode_scalar(v) { return scalar }
+    let parts = sb_new()
+    encode_container(v, parts)
+    return sb_build(parts)
 }
 
-fn encode_into(v: JsonValue, parts: [string]) {
-    match v {
-        Null => parts.push("null"),
-        Bool(b) => parts.push(if b { "true" } else { "false" }),
-        Int(i) => parts.push(if i > -100000000000000 && i < 100000000000000 { "{i}" } else { "{i:d}" }),
-        Float(f) => parts.push(format_float(f)),
-        Str(s) => parts.push(encode_string(s)),
-        Array(items) => encode_array(items, parts),
-        Object(m) => encode_object(m, parts),
+fn encode_scalar(v: JsonValue) -> string? {
+    return match v {
+        Null => "null",
+        Bool(b) => if b { "true" } else { "false" },
+        Int(i) => if i > -100000000000000 && i < 100000000000000 { "{i}" } else { "{i:d}" },
+        Float(f) => format_float(f),
+        Str(s) => encode_string(s),
+        _ => null,
     }
 }
 
-fn encode_array(items: [JsonValue], parts: [string]) {
-    parts.push("[")
+fn encode_into(v: JsonValue, parts: StringBuilder) {
+    if let scalar = encode_scalar(v) {
+        sb_push(parts, scalar)
+    } else {
+        encode_container(v, parts)
+    }
+}
+
+fn encode_container(v: JsonValue, parts: StringBuilder) {
+    match v {
+        Array(items) => encode_array(items, parts),
+        Object(m) => encode_object(m, parts),
+        _ => {},
+    }
+}
+
+fn encode_array(items: [JsonValue], parts: StringBuilder) {
+    sb_push(parts, "[")
     let first = true
     for item in items {
-        if !first { parts.push(",") }
+        if !first { sb_push(parts, ",") }
         first = false
         encode_into(item, parts)
     }
-    parts.push("]")
+    sb_push(parts, "]")
 }
 
-fn encode_object(m: Map<string, JsonValue>, parts: [string]) {
+fn encode_object(m: Map<string, JsonValue>, parts: StringBuilder) {
     let keys = keys(m)
-    parts.push("{{")
+    sb_push(parts, "{{")
     let first = true
     for k in keys {
-        if !first { parts.push(",") }
+        if !first { sb_push(parts, ",") }
         first = false
-        parts.push(encode_string(k))
-        parts.push(":")
+        sb_push(parts, encode_string(k))
+        sb_push(parts, ":")
         encode_into(m[k], parts)
     }
-    parts.push("}}")
+    sb_push(parts, "}}")
 }
 
 fn json_encode_pretty(v: JsonValue, compact_items_of: [string] = []) -> string {
-    let parts: [string] = []
+    if let scalar = encode_scalar(v) { return scalar }
+    let parts = sb_new()
     encode_pretty_into(v, parts, 0, compact_items_of)
-    return join(parts, "")
+    return sb_build(parts)
 }
 
-fn encode_pretty_into(v: JsonValue, parts: [string], level: int, compact_items_of: [string],
+fn encode_pretty_into(v: JsonValue, parts: StringBuilder, level: int, compact_items_of: [string],
                       compact_items: bool = false) {
     match v {
         Array(items) => {
@@ -171,43 +188,43 @@ fn json_has_nested_container(v: JsonValue) -> bool {
     }
 }
 
-fn encode_pretty_array(items: [JsonValue], parts: [string], level: int,
+fn encode_pretty_array(items: [JsonValue], parts: StringBuilder, level: int,
                        compact_items_of: [string], compact_items: bool) {
-    parts.push("[\n")
+    sb_push(parts, "[\n")
     let inner = json_indent(level + 1)
     let first = true
     for item in items {
-        if !first { parts.push(",\n") }
+        if !first { sb_push(parts, ",\n") }
         first = false
-        parts.push(inner)
+        sb_push(parts, inner)
         if compact_items {
             encode_into(item, parts)
         } else {
             encode_pretty_into(item, parts, level + 1, compact_items_of)
         }
     }
-    parts.push("\n")
-    parts.push(json_indent(level))
-    parts.push("]")
+    sb_push(parts, "\n")
+    sb_push(parts, json_indent(level))
+    sb_push(parts, "]")
 }
 
-fn encode_pretty_object(m: Map<string, JsonValue>, parts: [string], level: int,
+fn encode_pretty_object(m: Map<string, JsonValue>, parts: StringBuilder, level: int,
                         compact_items_of: [string]) {
     let ks = keys(m)
-    parts.push("{{\n")
+    sb_push(parts, "{{\n")
     let inner = json_indent(level + 1)
     let first = true
     for k in ks {
-        if !first { parts.push(",\n") }
+        if !first { sb_push(parts, ",\n") }
         first = false
-        parts.push(inner)
-        parts.push(encode_string(k))
-        parts.push(": ")
+        sb_push(parts, inner)
+        sb_push(parts, encode_string(k))
+        sb_push(parts, ": ")
         encode_pretty_into(m[k], parts, level + 1, compact_items_of, json_key_listed(compact_items_of, k))
     }
-    parts.push("\n")
-    parts.push(json_indent(level))
-    parts.push("}}")
+    sb_push(parts, "\n")
+    sb_push(parts, json_indent(level))
+    sb_push(parts, "}}")
 }
 
 fn json_key_listed(keys: [string], key: string) -> bool {
@@ -218,13 +235,7 @@ fn json_key_listed(keys: [string], key: string) -> bool {
 }
 
 fn json_indent(level: int) -> string {
-    let parts: [string] = []
-    let i = 0
-    while i < level {
-        parts.push("  ")
-        i = i + 1
-    }
-    return join(parts, "")
+    return "  ".repeat(level)
 }
 
 fn encode_string(s: string) -> string {

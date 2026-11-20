@@ -3698,9 +3698,16 @@ inline(lua) fn __rock_parse_float_at_init(declared: bool) -> any = """
 @nowrite @inline inline(js) fn string.repeat(s, count: int) -> string = "return count > 0 ? s.repeat(count) : \"\";"
 
 struct StringBuilder {}
-@intrinsic inline(lua) fn sb_new() -> StringBuilder = "return {}"
-@intrinsic inline(lua) fn sb_push(sb: StringBuilder, s: string) = "sb[#sb + 1] = s"
-@intrinsic inline(lua) fn sb_build(sb: StringBuilder) -> string = "local r = table.concat(sb); return r"
+@intrinsic inline(lua) fn sb_new() -> StringBuilder = """
+    local new = _G.__rock_string_buffer_new
+    if not new then
+        new = require("string.buffer").new
+        _G.__rock_string_buffer_new = new
+    end
+    return new()
+"""
+@intrinsic inline(lua) fn sb_push(sb: StringBuilder, s: string) = "sb:put(s)"
+@intrinsic inline(lua) fn sb_build(sb: StringBuilder) -> string = "return sb:tostring()"
 
 fn lt(a: string, b: string) -> bool { return le(a, b) && a != b }
 inline(lua) fn le(a: string, b: string) -> bool = "return a <= b"

@@ -66,9 +66,9 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     ),
     template("nb_get", 2, "$1.ptr[$2]"),
     template("nb_set", 3, "($1.ptr[$2] = $3)"),
-    template("sb_new", 0, "[]"),
-    template("sb_push", 2, "$1.push($2)"),
-    template("sb_build", 1, "$1.join(\"\")"),
+    template("sb_new", 0, "({ text: \"\" })"),
+    template("sb_push", 2, "$1.text += $2"),
+    template("sb_build", 1, "$1.text"),
     // Signature key: keeps Map get distinct from NativeBuffer get, and wins before the latter's
     // name/arity key.
     template("get_map_K_V_K", 2, "$1.get($2)"),

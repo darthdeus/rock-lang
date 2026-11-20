@@ -231,3 +231,21 @@ fn repeat_negative_count_is_empty() {
     let count = -1
     assert_eq("ab".repeat(count), "")
 }
+
+inline(lua) fn is_native_string_builder(sb: StringBuilder) -> bool =
+    "return type(sb) == 'userdata' and type(sb.put) == 'function'"
+inline(js) fn is_native_string_builder(sb: StringBuilder) -> bool =
+    "return typeof sb.text === 'string'"
+
+@test
+fn test_string_builder_snapshots_can_be_extended() {
+    let sb = sb_new()
+    assert(is_native_string_builder(sb))
+    sb_push(sb, "a")
+    let first = sb_build(sb)
+    sb_push(sb, "")
+    sb_push(sb, "b")
+    assert_eq(first, "a")
+    assert_eq(sb_build(sb), "ab")
+    assert_eq(sb_build(sb), "ab")
+}
