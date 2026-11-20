@@ -89,3 +89,36 @@ perf/output_census.py /tmp/stone.lua
 perf/output_census.py game.lua --engine /tmp/stone.lua --mask   # private symbols print as hashes
 ```
 
+
+## Comparing JIT-on runtime
+
+Run `runtime_pairs.py` from the project directory with the same scenario,
+settings, assets, and display size for both arms. Supply absolute paths to
+the binaries or launcher scripts. Keep workload arguments and profiling
+options fixed. Pin volatile build variables with `--var NAME=VALUE`.
+`--work SECTION` checks a scenario's work counter, such as its simulation
+checksum, across all runs. Repeat it for additional counters.
+
+```sh
+/path/to/rock-lang/perf/runtime_pairs.py . /path/to/base/rock --out /tmp/runtime-aa
+/path/to/rock-lang/perf/runtime_pairs.py . /path/to/base/rock /path/to/tip/rock \
+    --noise /tmp/runtime-aa/summary.json --out /tmp/runtime-ab
+```
+
+The runner alternates pair order and checks that A/A and the A/B baseline
+emit the same Lua. It uses Stone's fixed-step perf mode, pins the random seed, disables
+post-present sync, and records the GC-running allocation window and per-run
+frame and thread CPU percentiles. Raw reports and load readings stay in
+`--out`. Run A/A on the same host and under comparable load to A/B.
+
+Each metric gets a distribution-free 95% interval for the median paired
+difference. Its A/A band is the largest absolute paired difference seen
+in calibration. An A/B interval fully inside that band is within observed
+noise. One fully outside resolves a change. An overlapping interval remains
+unresolved. Work-counter mismatches make the comparison inconclusive.
+
+On macOS, `--instructions` samples process-wide retired instructions at frame
+boundaries. It reports the mean over complete intervals between measured
+frame entries, starting after the opening frame and ending at the last frame
+entry. The probe adds a syscall per frame. Use it on both A/A and A/B for
+that comparison.

@@ -70,8 +70,12 @@ def summary(walls):
 def paired_ratio(base, cand):
     """Median of the per-run ratios cand/base and a distribution-free 95%
     confidence interval for it: the order statistics a sign test allows."""
-    ratios = sorted(c / b for b, c in zip(base, cand))
-    n = len(ratios)
+    return median_interval([c / b for b, c in zip(base, cand)])
+
+
+def median_interval(values):
+    ordered = sorted(values)
+    n = len(ordered)
     k, tail = 0, 0.0
     while True:
         next_tail = tail + math.comb(n, k) / 2 ** n
@@ -80,7 +84,7 @@ def paired_ratio(base, cand):
         k, tail = k + 1, next_tail
     if k == 0:
         raise ValueError("a 95% interval needs at least 6 paired runs")
-    return statistics.median(ratios), ratios[k - 1], ratios[n - k]
+    return statistics.median(ordered), ordered[k - 1], ordered[n - k]
 
 
 def phases(rock, workload, env):
