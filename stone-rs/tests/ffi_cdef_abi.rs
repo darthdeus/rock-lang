@@ -5,7 +5,7 @@
 //! every Rust export against some cdef, and every Rock `extern(ffi, "stone")`
 //! against its cdef's arity.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Exports reached without a cdef: Lua C modules the runtime opens and the
@@ -60,15 +60,14 @@ fn files_with_extension(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) {
     out.sort();
 }
 
-fn rock_sources() -> Vec<(String, String)> {
-    let root = workspace_root();
+fn read_sources(root: &Path, dir: &str, extension: &str) -> Vec<(String, String)> {
     let mut paths = Vec::new();
-    files_with_extension(&root.join("packages"), "rock", &mut paths);
+    files_with_extension(&root.join(dir), extension, &mut paths);
     paths
         .into_iter()
         .map(|path| {
             let text = std::fs::read_to_string(&path).unwrap();
-            let name = path.strip_prefix(&root).unwrap().display().to_string();
+            let name = path.strip_prefix(root).unwrap().display().to_string();
             (name, text)
         })
         .collect()
@@ -177,7 +176,7 @@ fn cdef_sources() -> Vec<(String, String)> {
             std::fs::read_to_string(root.join(rel)).unwrap(),
         ));
     }
-    for (file, text) in rock_sources() {
+    for (file, text) in read_sources(&root, "packages", "rock") {
         sources.extend(
             cdef_blocks(&text)
                 .into_iter()
@@ -414,22 +413,9 @@ fn balanced(src: &str, open: usize) -> &str {
     panic!("unbalanced parameter list");
 }
 
-fn rust_sources() -> Vec<(String, String)> {
-    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut paths = Vec::new();
-    files_with_extension(&src_dir, "rs", &mut paths);
-    paths
-        .into_iter()
-        .map(|path| {
-            let text = std::fs::read_to_string(&path).unwrap();
-            let name = path.strip_prefix(&src_dir).unwrap().display().to_string();
-            (name, text)
-        })
-        .collect()
-}
-
 fn rust_exports() -> BTreeMap<String, Vec<Signature>> {
-    let sources = rust_sources();
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let sources = read_sources(&src_dir, "", "rs");
     let aliases = rust_aliases(&sources);
     let mut exports: BTreeMap<String, Vec<Signature>> = BTreeMap::new();
     for (file, text) in &sources {
@@ -476,10 +462,16 @@ fn compatible(rust: &Ty, c: &Ty, is_return: bool) -> bool {
 }
 
 #[test]
-fn every_cdef_prototype_matches_its_rust_export() {
+fn cdef_and_rust_exports_agree() {
     let cdef = read_cdefs();
     let exports = rust_exports();
-    let mut problems = Vec::new();
+    let mut problems: Vec<_> = exports
+        .keys()
+        .filter(|name| {
+            !cdef.functions.contains_key(*name) && !EXPORTS_WITHOUT_CDEF.contains(&name.as_str())
+        })
+        .map(|name| format!("{name}: exported without a cdef"))
+        .collect();
     for (name, decls) in &cdef.functions {
         if !name.starts_with("stone_") {
             continue;
@@ -518,24 +510,13 @@ fn every_cdef_prototype_matches_its_rust_export() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
-#[test]
-fn every_rust_export_has_a_cdef() {
-    let cdef = read_cdefs();
-    let allowed: BTreeSet<&str> = EXPORTS_WITHOUT_CDEF.iter().copied().collect();
-    let missing: Vec<String> = rust_exports()
-        .into_keys()
-        .filter(|name| !cdef.functions.contains_key(name) && !allowed.contains(name.as_str()))
-        .collect();
-    assert!(missing.is_empty(), "exports with no cdef: {missing:?}");
-}
-
 /// Rock spells parameter types its own way, so arity and whether a value
 /// comes back are what is comparable with the cdef.
 #[test]
 fn rock_externs_match_their_cdef_shape() {
     let cdef = read_cdefs();
     let mut problems = Vec::new();
-    for (file, text) in rock_sources() {
+    for (file, text) in read_sources(&workspace_root(), "packages", "rock") {
         let needle = "extern(ffi, \"stone\") fn ";
         let mut rest = text.as_str();
         while let Some(at) = rest.find(needle) {
@@ -588,21 +569,24 @@ fn stone_event_cdef_layout_matches_rust() {
         })
         .collect();
     assert_eq!(decls.len(), 3, "StoneEvent cdef types not found");
+    use std::mem::{offset_of, size_of, size_of_val};
+    use stone_rs::StoneEvent as E;
+
     let fields = [
-        "type",
-        "key",
-        "scancode",
-        "modifiers",
-        "repeat",
-        "mouse_button",
-        "mouse_x",
-        "mouse_y",
-        "pad_instance_id",
-        "pad_button",
-        "pad_axis",
-        "pad_value",
-        "pad_sync",
-        "text",
+        ("type", offset_of!(E, event_type)),
+        ("key", offset_of!(E, key)),
+        ("scancode", offset_of!(E, scancode)),
+        ("modifiers", offset_of!(E, modifiers)),
+        ("repeat", offset_of!(E, repeat)),
+        ("mouse_button", offset_of!(E, mouse_button)),
+        ("mouse_x", offset_of!(E, mouse_x)),
+        ("mouse_y", offset_of!(E, mouse_y)),
+        ("pad_instance_id", offset_of!(E, pad_instance_id)),
+        ("pad_button", offset_of!(E, pad_button)),
+        ("pad_axis", offset_of!(E, pad_axis)),
+        ("pad_value", offset_of!(E, pad_value)),
+        ("pad_sync", offset_of!(E, pad_sync)),
+        ("text", offset_of!(E, text)),
     ];
     let script = format!(
         "local ffi = require('ffi')\nffi.cdef[[{};]]\n\
@@ -611,7 +595,7 @@ fn stone_event_cdef_layout_matches_rust() {
          for _, f in ipairs({{ '{}' }}) do out[#out + 1] = ffi.offsetof('StoneEvent', f) end\n\
          print(table.concat(out, ' '))",
         decls.join(";\n"),
-        fields.join("', '")
+        fields.map(|(name, _)| name).join("', '")
     );
     let output = std::process::Command::new(gamelibs::host_dir().join("bin/luajit"))
         .args(["-e", &script])
@@ -627,25 +611,13 @@ fn stone_event_cdef_layout_matches_rust() {
         .split_whitespace()
         .map(|n| n.parse().unwrap())
         .collect();
-    use stone_rs::StoneEvent as E;
-    let rust = vec![
-        std::mem::size_of::<E>(),
-        std::mem::size_of_val(&E::default().text),
+    let rust = [
+        size_of::<E>(),
+        size_of_val(&E::default().text),
         stone_rs::StoneEventType::TextInput as usize,
-        std::mem::offset_of!(E, event_type),
-        std::mem::offset_of!(E, key),
-        std::mem::offset_of!(E, scancode),
-        std::mem::offset_of!(E, modifiers),
-        std::mem::offset_of!(E, repeat),
-        std::mem::offset_of!(E, mouse_button),
-        std::mem::offset_of!(E, mouse_x),
-        std::mem::offset_of!(E, mouse_y),
-        std::mem::offset_of!(E, pad_instance_id),
-        std::mem::offset_of!(E, pad_button),
-        std::mem::offset_of!(E, pad_axis),
-        std::mem::offset_of!(E, pad_value),
-        std::mem::offset_of!(E, pad_sync),
-        std::mem::offset_of!(E, text),
-    ];
+    ]
+    .into_iter()
+    .chain(fields.map(|(_, offset)| offset))
+    .collect::<Vec<_>>();
     assert_eq!(luajit, rust);
 }
