@@ -565,81 +565,34 @@ mod xfer_tests {
 
     #[cfg(unix)]
     #[test]
-    fn file_exists_status_distinguishes_metadata_errors_from_misses() {
-        let root = fresh_root();
-        let existing = std::fs::metadata(&root).unwrap();
-        let existing_exists = stone_file_exists_status(cs(&root).as_ptr());
-        let existing_is_directory = stone_is_directory_status(cs(&root).as_ptr());
-        let path = root.join("loop");
-        std::os::unix::fs::symlink(&path, &path).unwrap();
-        let observed = std::fs::metadata(&path).unwrap_err();
-        let expected = observed.raw_os_error() == Some(libc::ELOOP);
-        let exists = stone_file_exists_status(cs(&path).as_ptr());
-        let is_directory = stone_is_directory_status(cs(&path).as_ptr());
-        let missing_path = root.join("missing");
-        let missing_error = std::fs::metadata(&missing_path).unwrap_err();
-        let missing_oracle = missing_error.kind() == std::io::ErrorKind::NotFound;
-        let missing_exists = stone_file_exists_status(cs(&missing_path).as_ptr());
-        let missing_is_directory = stone_is_directory_status(cs(&missing_path).as_ptr());
-
-        assert!(
-            expected,
-            "symlink loop must produce an independent ELOOP oracle: {observed}"
-        );
-        assert!(
-            existing.is_dir(),
-            "fixture root must be a directory according to OS metadata"
-        );
-        assert_eq!(
-            existing_exists, 1,
-            "an OS-confirmed existing path is present"
-        );
-        assert_eq!(
-            existing_is_directory, 1,
-            "an OS-confirmed directory is a directory"
-        );
-        assert_eq!(
-            exists, -1,
-            "metadata failure must have a distinct error status"
-        );
-        assert_eq!(
-            is_directory, -1,
-            "directory metadata failure must have a distinct error status"
-        );
-        assert!(
-            missing_oracle,
-            "missing path must produce an independent ENOENT oracle: {missing_error}"
-        );
-        assert_eq!(missing_exists, 0, "a missing path remains absent");
-        assert_eq!(
-            missing_is_directory, 0,
-            "a missing path remains non-directory"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn file_exists_status_treats_not_a_directory_as_absent() {
+    fn existence_status_separates_hits_misses_and_metadata_errors() {
         let root = fresh_root();
         let blocker = root.join("blocker");
         std::fs::write(&blocker, "block").unwrap();
-        let child = blocker.join("quests.json");
-        let observed = std::fs::metadata(&child).unwrap_err();
-        assert_eq!(
-            observed.raw_os_error(),
-            Some(libc::ENOTDIR),
-            "a path under a regular file must produce an independent ENOTDIR oracle: {observed}"
-        );
-        assert_eq!(
-            stone_file_exists_status(cs(&child).as_ptr()),
-            0,
-            "a path under a non-directory cannot exist"
-        );
-        assert_eq!(
-            stone_is_directory_status(cs(&child).as_ptr()),
-            0,
-            "a path under a non-directory is not a directory"
-        );
+        let symlink_loop = root.join("loop");
+        std::os::unix::fs::symlink(&symlink_loop, &symlink_loop).unwrap();
+        let cases = [
+            (root.to_path_buf(), None, 1),
+            (root.join("missing"), Some(libc::ENOENT), 0),
+            (blocker.join("quests.json"), Some(libc::ENOTDIR), 0),
+            (symlink_loop, Some(libc::ELOOP), -1),
+        ];
+        for (path, errno, status) in cases {
+            let observed = std::fs::metadata(&path)
+                .err()
+                .and_then(|e| e.raw_os_error());
+            assert_eq!(observed, errno, "fixture {path:?}");
+            assert_eq!(
+                stone_file_exists_status(cs(&path).as_ptr()),
+                status,
+                "{path:?}"
+            );
+            assert_eq!(
+                stone_is_directory_status(cs(&path).as_ptr()),
+                status,
+                "{path:?}"
+            );
+        }
     }
 
     #[test]
@@ -683,7 +636,7 @@ mod xfer_tests {
     }
 
     #[test]
-    fn copy_file_copies_contents() {
+    fn copy_file_copies_contents_and_rejects_a_missing_source() {
         let root = fresh_root();
         let src = root.join("a.txt");
         let dst = root.join("b.txt");
@@ -692,62 +645,55 @@ mod xfer_tests {
         assert!(stone_copy_file(cs(&src).as_ptr(), cs(&dst).as_ptr()));
         assert_eq!(fs::read(&dst).unwrap(), b"hello");
         assert!(src.exists(), "copy must not remove the source");
+        let missing = root.join("nope.txt");
+        assert!(!stone_copy_file(cs(&missing).as_ptr(), cs(&dst).as_ptr()));
+    }
+
+    fn write_pack(pack: &Path) {
+        fs::create_dir_all(pack.join("Sub")).unwrap();
+        fs::write(pack.join("kick.wav"), b"k").unwrap();
+        fs::write(pack.join("Sub").join("snare.wav"), b"s").unwrap();
+    }
+
+    fn assert_pack(pack: &Path) {
+        assert_eq!(fs::read(pack.join("kick.wav")).unwrap(), b"k");
+        assert_eq!(fs::read(pack.join("Sub").join("snare.wav")).unwrap(), b"s");
     }
 
     #[test]
-    fn copy_file_rejects_missing_source() {
-        let root = fresh_root();
-        let src = root.join("nope.txt");
-        let dst = root.join("out.txt");
-        assert!(!stone_copy_file(cs(&src).as_ptr(), cs(&dst).as_ptr()));
-    }
-
-    #[test]
-    fn rename_moves_file_and_removes_source() {
+    fn rename_moves_files_and_directory_trees() {
         let root = fresh_root();
         let src = root.join("song.wav");
         let dst = root.join("moved.wav");
         fs::write(&src, b"pcm").unwrap();
-
         assert!(stone_rename(cs(&src).as_ptr(), cs(&dst).as_ptr()));
         assert!(!src.exists());
         assert_eq!(fs::read(&dst).unwrap(), b"pcm");
-    }
 
-    #[test]
-    fn rename_moves_directory_tree() {
-        let root = fresh_root();
         let src = root.join("Pack");
-        let sub = src.join("Sub");
-        fs::create_dir_all(&sub).unwrap();
-        fs::write(src.join("kick.wav"), b"k").unwrap();
-        fs::write(sub.join("snare.wav"), b"s").unwrap();
+        write_pack(&src);
         let dst = root.join("dest").join("Pack");
         fs::create_dir_all(dst.parent().unwrap()).unwrap();
-
         assert!(stone_rename(cs(&src).as_ptr(), cs(&dst).as_ptr()));
         assert!(!src.exists());
-        assert_eq!(fs::read(dst.join("kick.wav")).unwrap(), b"k");
-        assert_eq!(fs::read(dst.join("Sub").join("snare.wav")).unwrap(), b"s");
+        assert_pack(&dst);
     }
 
     #[test]
-    fn copy_tree_copies_file_and_tree() {
+    fn copy_tree_copies_a_file_or_a_nested_tree() {
         let root = fresh_root();
         let file = root.join("one.wav");
         let file_copy = root.join("one_copy.wav");
         fs::write(&file, b"1").unwrap();
         copy_tree(&file, &file_copy).unwrap();
         assert_eq!(fs::read(&file_copy).unwrap(), b"1");
+
         let pack = root.join("Pack");
-        fs::create_dir_all(pack.join("Sub")).unwrap();
-        fs::write(pack.join("k.wav"), b"k").unwrap();
-        fs::write(pack.join("Sub").join("s.wav"), b"s").unwrap();
+        write_pack(&pack);
         let dst = root.join("PackCopy");
         copy_tree(&pack, &dst).unwrap();
-        assert_eq!(fs::read(dst.join("k.wav")).unwrap(), b"k");
-        assert_eq!(fs::read(dst.join("Sub").join("s.wav")).unwrap(), b"s");
-        assert!(pack.exists(), "copy must not remove the source");
+        assert_pack(&dst);
+        assert_pack(&pack);
     }
 
     #[cfg(unix)]
@@ -762,25 +708,6 @@ mod xfer_tests {
 
         let _ = copy_tree(&src, &dst);
         assert_eq!(fs::read(dst.join("a.wav")).unwrap(), b"a");
-    }
-
-    #[test]
-    fn copy_tree_mirrors_a_nested_tree() {
-        let root = fresh_root();
-        let src = root.join("src");
-        let deep = src.join("a").join("b");
-        fs::create_dir_all(&deep).unwrap();
-        fs::write(src.join("top.txt"), b"1").unwrap();
-        fs::write(deep.join("leaf.txt"), b"2").unwrap();
-        let dst = root.join("dst");
-
-        copy_tree(&src, &dst).unwrap();
-        assert_eq!(fs::read(dst.join("top.txt")).unwrap(), b"1");
-        assert_eq!(
-            fs::read(dst.join("a").join("b").join("leaf.txt")).unwrap(),
-            b"2"
-        );
-        assert!(src.exists(), "copy_tree must not remove the source");
     }
 
     #[test]
@@ -819,25 +746,12 @@ mod xfer_tests {
     fn directory_listing_keeps_valid_names_visible() {
         let root = fresh_root();
         fs::write(root.join("visible.txt"), b"visible").unwrap();
-        let dir = cs(&root);
-        let names = list_names(&dir);
-        assert_eq!(names, vec!["visible.txt"]);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn directory_listing_skips_non_utf8_entries_without_hiding_valid_names() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let root = fresh_root();
-        fs::write(root.join("visible.txt"), b"visible").unwrap();
-        fs::write(
-            root.join(std::ffi::OsString::from_vec(vec![b'h', b'i', 0xff])),
-            b"opaque",
-        )
-        .unwrap();
-        let dir = cs(&root);
-        let names = list_names(&dir);
-        assert_eq!(names, vec!["visible.txt"]);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let opaque = std::ffi::OsString::from_vec(vec![b'h', b'i', 0xff]);
+            fs::write(root.join(opaque), b"opaque").unwrap();
+        }
+        assert_eq!(list_names(&cs(&root)), vec!["visible.txt"]);
     }
 }
