@@ -235,11 +235,6 @@ co fn bare_return() -> Coroutine<int> {
     return
 }
 
-co fn plain_unit() -> Coroutine<int> {
-    yield 1
-    yield 2
-}
-
 co fn explicit_unit() -> Coroutine<int, ()> {
     yield 1
     return
@@ -255,7 +250,7 @@ fn test_unit_returns_leave_result_null() {
     let pr = if r != null { "stashed" } else { "null" }
     print("{pv} {pr}")
 
-    let c = plain_unit()
+    let c = falls_off()
     let _drain1 = c.resume()
     let _drain2 = c.resume()
     let _drain3 = c.resume()

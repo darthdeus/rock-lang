@@ -66,14 +66,9 @@ fn test_unit_falloff_is_completed_and_kill_is_noop() {
     print("falloff:{f} kill-after:{completed(c)}")
 }
 
-co fn clean() -> Coroutine<int> {
-    yield 1
-    yield 2
-}
-
 @test(output = "1\n2\nnull\ndead\ntrue\ndead")
 fn test_no_error_clean_path() {
-    let c = clean()
+    let c = cp_unit()
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
     let v = c.resume()

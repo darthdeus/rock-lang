@@ -350,20 +350,15 @@ fn int_to_float_alias_survives_a_yield() {
     print(c.resume())
 }
 
-co fn counter() -> Coroutine<int> {
-    yield 1
-    yield 2
-}
-
 @test(output = "Coroutine")
 fn coroutine_handle_is_ty_tagged() {
-    let c = counter()
+    let c = two_items()
     print(__rock_get_type(c) ?? "untagged")
 }
 
 @test(output = "suspended\n1\n2\nnull")
 fn driver_fns_work_without_a_guard() {
-    let c = counter()
+    let c = two_items()
     print(c.status())
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
