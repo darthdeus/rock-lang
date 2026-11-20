@@ -20,9 +20,6 @@ local KIND = {
 
 local TRIGGER_KIND = { [1] = 'Invoked', [2] = 'TriggerChar', [3] = 'IncompleteReTrigger' }
 
-local FLOAT_BUF = nil
-local FLOAT_WIN = nil
-
 local function short_uri(u)
   if not u then return '-' end
   return vim.fn.fnamemodify(u:gsub('^file://', ''), ':t')
@@ -72,43 +69,13 @@ local function render(lc)
   return lines
 end
 
-function M.is_open()
-  return FLOAT_WIN and vim.api.nvim_win_is_valid(FLOAT_WIN)
-end
-
-function M.close()
-  if M.is_open() then pcall(vim.api.nvim_win_close, FLOAT_WIN, true) end
-  FLOAT_WIN = nil
-end
-
-function M.open()
-  if M.is_open() then M.close(); return end
-  if not FLOAT_BUF or not vim.api.nvim_buf_is_valid(FLOAT_BUF) then
-    FLOAT_BUF = require('rock.ui').ensure_named_buffer('rock://completion')
-    vim.keymap.set('n', 'q', M.close, { buffer = FLOAT_BUF, silent = true })
-    vim.keymap.set('n', '<esc>', M.close, { buffer = FLOAT_BUF, silent = true })
-  end
-
-  local lc = state.get().last_completion
-  local lines = render(lc)
-  vim.api.nvim_set_option_value('modifiable', true, { buf = FLOAT_BUF })
-  vim.api.nvim_buf_set_lines(FLOAT_BUF, 0, -1, false, lines)
-  vim.api.nvim_set_option_value('modifiable', false, { buf = FLOAT_BUF })
-
-  local w = math.min(90, math.floor(vim.o.columns * 0.8))
-  local h = math.min(#lines + 2, math.floor(vim.o.lines * 0.8))
-  FLOAT_WIN = vim.api.nvim_open_win(FLOAT_BUF, true, {
-    relative = 'editor', width = w, height = h,
-    row = math.floor((vim.o.lines - h) / 2),
-    col = math.floor((vim.o.columns - w) / 2),
-    style = 'minimal', border = 'rounded',
-    title = ' rock.nvim: last completion ', title_pos = 'center',
-  })
-  vim.api.nvim_set_option_value('wrap', false, { win = FLOAT_WIN })
-end
-
-function M.toggle()
-  if M.is_open() then M.close() else M.open() end
-end
-
-return M
+return require('rock.ui').float(M, {
+  name = 'completion',
+  title = 'last completion',
+  nowrap = true,
+  lines = function() return render(state.get().last_completion) end,
+  size = function(lines)
+    return math.min(90, math.floor(vim.o.columns * 0.8)),
+      math.min(#lines + 2, math.floor(vim.o.lines * 0.8))
+  end,
+})

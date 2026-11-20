@@ -10,8 +10,6 @@ local uv = vim.uv or vim.loop
 
 local M = {}
 
-local FLOAT_BUF = nil
-local FLOAT_WIN = nil
 local SERVER_NAME = 'rock'
 
 -- Returns { status = 'PASS'|'WARN'|'FAIL', msg, detail }
@@ -190,47 +188,17 @@ function M.run(on_done)
   end)
 end
 
-function M.is_open()
-  return FLOAT_WIN and vim.api.nvim_win_is_valid(FLOAT_WIN)
+local function probe(show)
+  M.run(function(results) show(render_lines(results)) end)
 end
 
-function M.close()
-  if M.is_open() then pcall(vim.api.nvim_win_close, FLOAT_WIN, true) end
-  FLOAT_WIN = nil
-end
-
-local function set_lines(results)
-  if not FLOAT_BUF or not vim.api.nvim_buf_is_valid(FLOAT_BUF) then return end
-  vim.api.nvim_set_option_value('modifiable', true, { buf = FLOAT_BUF })
-  vim.api.nvim_buf_set_lines(FLOAT_BUF, 0, -1, false, render_lines(results))
-  vim.api.nvim_set_option_value('modifiable', false, { buf = FLOAT_BUF })
-end
-
-function M.open()
-  if M.is_open() then M.close(); return end
-  if not FLOAT_BUF or not vim.api.nvim_buf_is_valid(FLOAT_BUF) then
-    FLOAT_BUF = ui.ensure_named_buffer('rock://doctor')
-    vim.keymap.set('n', 'q', M.close, { buffer = FLOAT_BUF, silent = true })
-    vim.keymap.set('n', '<esc>', M.close, { buffer = FLOAT_BUF, silent = true })
-    vim.keymap.set('n', 'r', function() M.run(set_lines) end,
-      { buffer = FLOAT_BUF, silent = true })
-  end
-
-  local w = math.min(100, math.floor(vim.o.columns * 0.9))
-  local h = math.min(24, math.floor(vim.o.lines * 0.7))
-  FLOAT_WIN = vim.api.nvim_open_win(FLOAT_BUF, true, {
-    relative = 'editor', width = w, height = h,
-    row = math.floor((vim.o.lines - h) / 2),
-    col = math.floor((vim.o.columns - w) / 2),
-    style = 'minimal', border = 'rounded',
-    title = ' rock.nvim: doctor ', title_pos = 'center',
-  })
-
-  M.run(set_lines)
-end
-
-function M.toggle()
-  if M.is_open() then M.close() else M.open() end
-end
-
-return M
+return ui.float(M, {
+  name = 'doctor',
+  title = 'doctor',
+  size = function()
+    return math.min(100, math.floor(vim.o.columns * 0.9)),
+      math.min(24, math.floor(vim.o.lines * 0.7))
+  end,
+  refresh = probe,
+  on_open = probe,
+})

@@ -8,8 +8,6 @@ local state = require('rock.state')
 
 local M = {}
 
-local FLOAT_BUF = nil
-local FLOAT_WIN = nil
 local SERVER_NAME = 'rock'
 
 -- Fan out across every attached rock client and collect responses
@@ -106,55 +104,22 @@ local function build_lines(data, err)
   return lines
 end
 
-function M.is_open()
-  return FLOAT_WIN and vim.api.nvim_win_is_valid(FLOAT_WIN)
+local function refetch(show)
+  show(build_lines(nil, 'fetching...'))
+  fetch(function(result, err)
+    vim.schedule(function() show(build_lines(result, err)) end)
+  end)
 end
 
-function M.close()
-  if M.is_open() then pcall(vim.api.nvim_win_close, FLOAT_WIN, true) end
-  FLOAT_WIN = nil
-end
-
-local function set_lines(data, err)
-  if not FLOAT_BUF or not vim.api.nvim_buf_is_valid(FLOAT_BUF) then return end
-  local lines = build_lines(data, err)
-  vim.api.nvim_set_option_value('modifiable', true, { buf = FLOAT_BUF })
-  vim.api.nvim_buf_set_lines(FLOAT_BUF, 0, -1, false, lines)
-  vim.api.nvim_set_option_value('modifiable', false, { buf = FLOAT_BUF })
-end
-
-local function do_refetch()
-  set_lines(nil, 'fetching...')
-  fetch(function(result, err) vim.schedule(function() set_lines(result, err) end) end)
-end
-
-function M.open()
-  if M.is_open() then M.close(); return end
-  if not FLOAT_BUF or not vim.api.nvim_buf_is_valid(FLOAT_BUF) then
-    FLOAT_BUF = require('rock.ui').ensure_named_buffer('rock://modules')
-    vim.keymap.set('n', 'q', M.close, { buffer = FLOAT_BUF, silent = true })
-    vim.keymap.set('n', '<esc>', M.close, { buffer = FLOAT_BUF, silent = true })
-    vim.keymap.set('n', 'r', do_refetch, { buffer = FLOAT_BUF, silent = true })
-  end
-
-  set_lines(state.get().modules, nil)
-
-  local w = math.min(130, math.floor(vim.o.columns * 0.95))
-  local h = math.floor(vim.o.lines * 0.85)
-  FLOAT_WIN = vim.api.nvim_open_win(FLOAT_BUF, true, {
-    relative = 'editor', width = w, height = h,
-    row = math.floor((vim.o.lines - h) / 2),
-    col = math.floor((vim.o.columns - w) / 2),
-    style = 'minimal', border = 'rounded',
-    title = ' rock.nvim: loaded modules ', title_pos = 'center',
-  })
-  vim.api.nvim_set_option_value('wrap', false, { win = FLOAT_WIN })
-
-  do_refetch()
-end
-
-function M.toggle()
-  if M.is_open() then M.close() else M.open() end
-end
-
-return M
+return require('rock.ui').float(M, {
+  name = 'modules',
+  title = 'loaded modules',
+  nowrap = true,
+  lines = function() return build_lines(state.get().modules, nil) end,
+  size = function()
+    return math.min(130, math.floor(vim.o.columns * 0.95)),
+      math.floor(vim.o.lines * 0.85)
+  end,
+  refresh = refetch,
+  on_open = refetch,
+})

@@ -10,9 +10,6 @@ local state = require('rock.state')
 
 local M = {}
 
-local FLOAT_BUF = nil
-local FLOAT_WIN = nil
-
 -- Sample stats. Returns nil for empty input.
 function M.summarize(samples)
   local n = #samples
@@ -120,55 +117,23 @@ local function build_lines()
   return lines
 end
 
-function M.is_open()
-  return FLOAT_WIN and vim.api.nvim_win_is_valid(FLOAT_WIN)
-end
-
-function M.close()
-  if M.is_open() then pcall(vim.api.nvim_win_close, FLOAT_WIN, true) end
-  FLOAT_WIN = nil
-end
-
-local function refresh_buf()
-  if not FLOAT_BUF or not vim.api.nvim_buf_is_valid(FLOAT_BUF) then return end
-  local lines = build_lines()
-  vim.api.nvim_set_option_value('modifiable', true, { buf = FLOAT_BUF })
-  vim.api.nvim_buf_set_lines(FLOAT_BUF, 0, -1, false, lines)
-  vim.api.nvim_set_option_value('modifiable', false, { buf = FLOAT_BUF })
-end
-
-function M.open()
-  if M.is_open() then M.close(); return end
-  if not FLOAT_BUF or not vim.api.nvim_buf_is_valid(FLOAT_BUF) then
-    FLOAT_BUF = require('rock.ui').ensure_named_buffer('rock://perf')
-    vim.keymap.set('n', 'q', M.close, { buffer = FLOAT_BUF, silent = true })
-    vim.keymap.set('n', '<esc>', M.close, { buffer = FLOAT_BUF, silent = true })
-    vim.keymap.set('n', 'r', function()
-      state.clear_request_timings()
-      refresh_buf()
-    end, { buffer = FLOAT_BUF, silent = true })
-  end
-  refresh_buf()
-
-  local w = math.min(120, math.floor(vim.o.columns * 0.95))
-  local h = math.min(math.max(#build_lines() + 2, 10), math.floor(vim.o.lines * 0.85))
-  FLOAT_WIN = vim.api.nvim_open_win(FLOAT_BUF, true, {
-    relative = 'editor', width = w, height = h,
-    row = math.floor((vim.o.lines - h) / 2),
-    col = math.floor((vim.o.columns - w) / 2),
-    style = 'minimal', border = 'rounded',
-    title = ' rock.nvim: per-method latency ', title_pos = 'center',
-  })
-  vim.api.nvim_set_option_value('wrap', false, { win = FLOAT_WIN })
-  -- Live refresh while open. Cheap: only re-renders this buffer.
-  local timer = (vim.uv or vim.loop).new_timer()
-  timer:start(1000, 1000, vim.schedule_wrap(function()
-    if M.is_open() then refresh_buf() else timer:stop(); timer:close() end
-  end))
-end
-
-function M.toggle()
-  if M.is_open() then M.close() else M.open() end
-end
-
-return M
+return require('rock.ui').float(M, {
+  name = 'perf',
+  title = 'per-method latency',
+  nowrap = true,
+  lines = build_lines,
+  size = function(lines)
+    return math.min(120, math.floor(vim.o.columns * 0.95)),
+      math.min(math.max(#lines + 2, 10), math.floor(vim.o.lines * 0.85))
+  end,
+  refresh = function(show)
+    state.clear_request_timings()
+    show(build_lines())
+  end,
+  on_open = function(show)
+    local timer = (vim.uv or vim.loop).new_timer()
+    timer:start(1000, 1000, vim.schedule_wrap(function()
+      if M.is_open() then show(build_lines()) else timer:stop(); timer:close() end
+    end))
+  end,
+})
