@@ -4,39 +4,6 @@ pub(super) fn nav_edge_cost(step: int, ea: int, eb: int) -> int {
     step + (ea + eb) * step / 1000
 }
 
-pub(super) fn nav_teleport_bit(requirement: int) -> int {
-    requirement
-}
-
-pub(super) fn nav_ints(n: int, value: int) -> IdxVec<int> {
-    vec![value; n.max(0) as usize].into()
-}
-
-pub(super) fn nav_bools(n: int, value: bool) -> IdxVec<bool> {
-    vec![value; n.max(0) as usize].into()
-}
-
-pub(super) fn nav_buffer_resize(buffer: &IdxVec<int>, n: int, value: int) -> IdxVec<int> {
-    if buffer.len() == n {
-        return buffer.clone();
-    }
-    let mut resized = nav_ints(n, value);
-    let retained = buffer.len().min(n);
-    for i in 0..retained {
-        resized[i] = buffer[i];
-    }
-    resized
-}
-
-pub(super) fn nav_resize(v: &mut IdxVec<int>, n: int, value: int) {
-    while v.len() > n {
-        v.pop();
-    }
-    while v.len() < n {
-        v.push(value);
-    }
-}
-
 pub(super) fn nav_graph_owned_input_error(
     spaces: &[NavSpaceLayout],
     blocked: &IdxVec<bool>,
@@ -177,7 +144,7 @@ pub(super) fn nav_graph_layout_create(
             }
         }
     }
-    g.cluster_border = nav_ints(clusters * 4, -1);
+    g.cluster_border = IdxVec::filled(clusters * 4, -1);
     for c in 0..clusters {
         let east = nav_world_cluster(&g, g.cluster_wx[c] + s, g.cluster_wy[c]);
         if east >= 0 {
@@ -191,31 +158,28 @@ pub(super) fn nav_graph_layout_create(
     let borders = g.border_a.len();
     let k = g.k;
     let cost_slots = clusters * k * (k + 1) / 2;
-    g.cost = nav_ints(cost_slots, -1);
-    g.border_count = nav_ints(borders, 0);
+    g.cost = IdxVec::filled(cost_slots, -1);
+    g.border_count = IdxVec::filled(borders, 0);
     g.corner_base = borders * 2 * per_side;
     nav_vertices_init(&mut g);
     let vertices = g.vertex_x.len();
     g.ep_base = g.corner_base + 4 * vertices;
-    g.pending = nav_bools(clusters, false);
-    g.cluster_version = nav_ints(clusters, 0);
-    g.cluster_ep_start = nav_ints(clusters, 0);
-    g.cluster_ep_count = nav_ints(clusters, 0);
-    g.round_full = nav_bools(clusters, false);
-    g.round_dir = nav_bools(clusters * 4, false);
-    g.round_corner = nav_bools(clusters * 4, false);
-    g.round_stamp = nav_ints(clusters, 0);
-    g.border_old_x = nav_ints(per_side, 0);
-    g.border_old_y = nav_ints(per_side, 0);
-    g.border_old_bx = nav_ints(per_side, 0);
-    g.border_old_by = nav_ints(per_side, 0);
-    g.round_borders = nav_ints(borders, 0);
-    g.border_stamp = nav_ints(borders, 0);
-    g.corner_live = nav_bools(vertices * 4, false);
-    g.round_vertices = nav_ints(vertices, 0);
-    g.vertex_stamp = nav_ints(vertices, 0);
-    g.search_edges = vec![None; (s * s * 9) as usize].into();
-    g.search_ready = nav_bools(s * s, false);
+    g.pending = IdxVec::filled(clusters, false);
+    g.cluster_version = IdxVec::filled(clusters, 0);
+    g.cluster_ep_start = IdxVec::filled(clusters, 0);
+    g.cluster_ep_count = IdxVec::filled(clusters, 0);
+    g.round_full = IdxVec::filled(clusters, false);
+    g.round_dir = IdxVec::filled(clusters * 4, false);
+    g.round_corner = IdxVec::filled(clusters * 4, false);
+    g.round_stamp = IdxVec::filled(clusters, 0);
+    g.border_old = IdxVec::filled(per_side, [0; 4]);
+    g.round_borders = IdxVec::filled(borders, 0);
+    g.border_stamp = IdxVec::filled(borders, 0);
+    g.corner_live = IdxVec::filled(vertices * 4, false);
+    g.round_vertices = IdxVec::filled(vertices, 0);
+    g.vertex_stamp = IdxVec::filled(vertices, 0);
+    g.search_edges = IdxVec::filled(s * s * 9, None);
+    g.search_ready = IdxVec::filled(s * s, false);
     g.window.reserve(s * s);
     nav_graph_set_links(&mut g, links);
     for v in 0..vertices {
@@ -250,7 +214,7 @@ pub(super) fn nav_world_cluster(g: &NavGraph, wx: int, wy: int) -> int {
 pub(super) fn nav_vertices_init(g: &mut NavGraph) {
     let clusters = g.cluster_space.len();
     let s = g.cluster_size;
-    g.cluster_vertex = nav_ints(clusters * 4, -1);
+    g.cluster_vertex = IdxVec::filled(clusters * 4, -1);
     for c in 0..clusters {
         let x = g.cluster_wx[c];
         let y = g.cluster_wy[c];
@@ -298,7 +262,7 @@ pub(super) fn nav_graph_set_links(g: &mut NavGraph, links: &[NavLinkInput]) {
     }
     let clusters = g.cluster_ep_count.len();
     if g.tile_link_head.len() == 0 {
-        g.tile_link_head = nav_buffer_resize(&g.tile_link_head, g.blocked.len(), -1);
+        g.tile_link_head.resize(g.blocked.len(), -1);
     }
     for i in 0..g.link_from_tile.len() {
         let t = g.link_from_tile[i];
@@ -311,24 +275,28 @@ pub(super) fn nav_graph_set_links(g: &mut NavGraph, links: &[NavLinkInput]) {
     g.link_bit.clear();
     g.ep_cluster.clear();
     let nb = g.ep_base;
-    nav_resize(&mut g.node_x, nb, 0);
-    nav_resize(&mut g.node_y, nb, 0);
-    g.gap_lo = nav_buffer_resize(&g.gap_lo, nb, 0);
-    g.gap_hi = nav_buffer_resize(&g.gap_hi, nb, 0);
+    g.node_x.resize(nb, 0);
+    g.node_y.resize(nb, 0);
+    g.gap_lo.resize(nb, 0);
+    g.gap_hi.resize(nb, 0);
     for link in links {
         if link.cost < 0 {
             panic!("nav link cost must not be negative, got {}", link.cost);
         }
         g.link_cost.push(link.cost);
-        g.link_bit.push(nav_teleport_bit(link.requirement));
+        g.link_bit.push(link.requirement);
         nav_link_endpoint(g, link.from);
         nav_link_endpoint(g, link.to);
         let from_si = nav_space_index(g, link.from.space);
         let to_si = nav_space_index(g, link.to.space);
-        g.link_from_tile
-            .push(g.space_tile_base[from_si] + link.from.grid.y * SPACE_SIZE + link.from.grid.x);
+        g.link_from_tile.push(nav_tile_index(
+            g,
+            from_si,
+            link.from.grid.x,
+            link.from.grid.y,
+        ));
         g.link_to_tile
-            .push(g.space_tile_base[to_si] + link.to.grid.y * SPACE_SIZE + link.to.grid.x);
+            .push(nav_tile_index(g, to_si, link.to.grid.x, link.to.grid.y));
         g.link_next.push(-1);
     }
     let mut l = g.link_cost.len() - 1;
@@ -351,9 +319,9 @@ pub(super) fn nav_graph_set_links(g: &mut NavGraph, links: &[NavLinkInput]) {
         g.cluster_ep_start[c] = at;
         at += g.cluster_ep_count[c];
     }
-    nav_resize(&mut g.cluster_eps, eps, 0);
-    nav_resize(&mut g.ep_index, eps, 0);
-    nav_resize(&mut g.ep_row, eps, 0);
+    g.cluster_eps.resize(eps, 0);
+    g.ep_index.resize(eps, 0);
+    g.ep_row.resize(eps, 0);
     for c in 0..clusters {
         g.cluster_ep_count[c] = 0;
     }
@@ -370,16 +338,16 @@ pub(super) fn nav_graph_set_links(g: &mut NavGraph, links: &[NavLinkInput]) {
         row += g.k + g.cluster_ep_count[g.ep_cluster[e]];
     }
     g.ep_cost.clear();
-    nav_resize(&mut g.ep_cost, row, -1);
+    g.ep_cost.resize(row, -1);
     g.ep_blocked.clear();
     for _ in 0..eps {
         g.ep_blocked.push(false);
     }
-    g.component = nav_buffer_resize(&g.component, nb + eps, -1);
-    g.queue = nav_buffer_resize(&g.queue, nb + eps, 0);
-    g.comp_visit = nav_buffer_resize(&g.comp_visit, nb + eps, 0);
-    g.comp_group = nav_buffer_resize(&g.comp_group, nb + eps, 0);
-    g.comp_next = nav_buffer_resize(&g.comp_next, nb + eps, -1);
+    g.component.resize(nb + eps, -1);
+    g.queue.resize(nb + eps, 0);
+    g.comp_visit.resize(nb + eps, 0);
+    g.comp_group.resize(nb + eps, 0);
+    g.comp_next.resize(nb + eps, -1);
     for e in 0..eps {
         let c = g.ep_cluster[e];
         nav_mark_pending(g, c);
@@ -427,8 +395,17 @@ pub(super) fn nav_graph_world_tile(g: &NavGraph, place: Place) -> IVec2 {
     iv(g.space_ox[si] + place.grid.x, g.space_oy[si] + place.grid.y)
 }
 
+pub(super) fn nav_tile_index(g: &NavGraph, si: int, x: int, y: int) -> int {
+    g.space_tile_base[si] + y * SPACE_SIZE + x
+}
+
+pub(super) fn nav_world_tile_index(g: &NavGraph, wx: int, wy: int, hint: int) -> Option<int> {
+    let si = nav_world_space(g, wx, wy, hint);
+    (si >= 0).then(|| nav_tile_index(g, si, wx - g.space_ox[si], wy - g.space_oy[si]))
+}
+
 pub(super) fn nav_tile_blocked(g: &NavGraph, si: int, x: int, y: int) -> bool {
-    g.blocked[g.space_tile_base[si] + y * SPACE_SIZE + x]
+    g.blocked[nav_tile_index(g, si, x, y)]
 }
 
 pub(super) fn nav_world_space(g: &NavGraph, wx: int, wy: int, hint: int) -> int {
@@ -449,32 +426,20 @@ pub(super) fn nav_world_space(g: &NavGraph, wx: int, wy: int, hint: int) -> int 
 }
 
 pub(super) fn nav_tile_extra(g: &NavGraph, si: int, x: int, y: int) -> int {
-    g.extra[g.space_tile_base[si] + y * SPACE_SIZE + x]
+    g.extra[nav_tile_index(g, si, x, y)]
 }
 
 pub(super) fn nav_world_extra(g: &NavGraph, wx: int, wy: int, hint: int) -> int {
-    let si = nav_world_space(g, wx, wy, hint);
-    if si < 0 {
-        return 0;
-    }
-    g.extra[g.space_tile_base[si] + (wy - g.space_oy[si]) * SPACE_SIZE + wx - g.space_ox[si]]
-}
-
-pub(super) fn nav_tile_open_corners(g: &NavGraph, si: int, x: int, y: int) -> int {
-    g.corners[g.space_tile_base[si] + y * SPACE_SIZE + x]
+    nav_world_tile_index(g, wx, wy, hint).map_or(0, |t| g.extra[t])
 }
 
 pub(super) fn nav_tile_elbow_clear(g: &NavGraph, si: int, x: int, y: int, corner: int) -> bool {
-    let t = g.space_tile_base[si] + y * SPACE_SIZE + x;
+    let t = nav_tile_index(g, si, x, y);
     diagonal_elbow_clear(g.blocked[t], g.corners[t], corner)
 }
 
 pub(super) fn nav_world_blocked(g: &NavGraph, wx: int, wy: int, hint: int) -> bool {
-    let si = nav_world_space(g, wx, wy, hint);
-    if si < 0 {
-        return true;
-    }
-    g.blocked[g.space_tile_base[si] + (wy - g.space_oy[si]) * SPACE_SIZE + wx - g.space_ox[si]]
+    nav_world_tile_index(g, wx, wy, hint).is_none_or(|t| g.blocked[t])
 }
 
 pub(super) fn nav_world_elbow_clear(
@@ -484,12 +449,8 @@ pub(super) fn nav_world_elbow_clear(
     corner: int,
     hint: int,
 ) -> bool {
-    let si = nav_world_space(g, wx, wy, hint);
-    if si < 0 {
-        return false;
-    }
-    let t = g.space_tile_base[si] + (wy - g.space_oy[si]) * SPACE_SIZE + wx - g.space_ox[si];
-    diagonal_elbow_clear(g.blocked[t], g.corners[t], corner)
+    nav_world_tile_index(g, wx, wy, hint)
+        .is_some_and(|t| diagonal_elbow_clear(g.blocked[t], g.corners[t], corner))
 }
 
 pub(super) fn nav_world_step_open(
@@ -541,7 +502,7 @@ pub(super) fn nav_graph_set_tile(
             grid.x, grid.y, space.value
         );
     }
-    let t = g.space_tile_base[si] + grid.y * SPACE_SIZE + grid.x;
+    let t = nav_tile_index(g, si, grid.x, grid.y);
     g.search_cluster = -1;
     g.blocked[t] = blocked;
     g.corners[t] = open_corners;
@@ -573,10 +534,6 @@ pub(super) fn nav_graph_invalidate(g: &mut NavGraph, space: SpaceId, rect: IRect
     }
 }
 
-pub(super) fn nav_graph_refresh_spent(g: &NavGraph) -> int {
-    g.refresh_spent
-}
-
 pub(super) fn nav_graph_refresh_pending(g: &NavGraph) -> bool {
     g.phase != NAV_PHASE_IDLE || g.pending_list.len() > 0
 }
@@ -592,45 +549,34 @@ pub(super) fn nav_graph_refresh(g: &mut NavGraph, budget: int) -> bool {
                 return false;
             }
             nav_round_begin(g);
-        } else if g.phase == NAV_PHASE_BEGIN {
-            if g.cursor >= g.pending_list.len() {
-                g.pending_list.clear();
-                g.phase = NAV_PHASE_BORDERS;
-                g.cursor = 0;
-                continue;
-            }
-            if g.refresh_spent >= budget {
-                return false;
-            }
-            let c = g.pending_list[g.cursor];
-            nav_round_take(g, c);
-            g.cursor += 1;
-            g.refresh_spent += 1;
-        } else if g.phase == NAV_PHASE_BORDERS {
-            if g.cursor >= g.round_border_count {
-                g.phase = NAV_PHASE_VERTICES;
-                g.cursor = 0;
-                continue;
-            }
-            if g.refresh_spent >= budget {
-                return false;
-            }
-            let b = g.round_borders[g.cursor];
-            g.refresh_spent += nav_border_rebuild(g, b);
-            g.cursor += 1;
-        } else if g.phase == NAV_PHASE_VERTICES {
-            if g.cursor >= g.round_vertex_count {
-                g.phase = NAV_PHASE_SEARCH;
+        } else if g.phase != NAV_PHASE_SEARCH && g.phase != NAV_PHASE_COMPONENTS {
+            let (len, next) = match g.phase {
+                NAV_PHASE_BEGIN => (g.pending_list.len(), NAV_PHASE_BORDERS),
+                NAV_PHASE_BORDERS => (g.round_border_count, NAV_PHASE_VERTICES),
+                _ => (g.round_vertex_count, NAV_PHASE_SEARCH),
+            };
+            if g.cursor >= len {
+                if g.phase == NAV_PHASE_BEGIN {
+                    g.pending_list.clear();
+                }
+                g.phase = next;
                 g.cursor = 0;
                 g.cursor_slot = 0;
-            } else {
-                if g.refresh_spent >= budget {
-                    return false;
-                }
-                let v = g.round_vertices[g.cursor];
-                g.refresh_spent += nav_vertex_rebuild(g, v);
-                g.cursor += 1;
+                continue;
             }
+            if g.refresh_spent >= budget {
+                return false;
+            }
+            let item = g.cursor;
+            g.cursor += 1;
+            g.refresh_spent += match g.phase {
+                NAV_PHASE_BEGIN => {
+                    nav_round_take(g, g.pending_list[item]);
+                    1
+                }
+                NAV_PHASE_BORDERS => nav_border_rebuild(g, g.round_borders[item]),
+                _ => nav_vertex_rebuild(g, g.round_vertices[item]),
+            };
         } else if g.phase == NAV_PHASE_SEARCH {
             if g.cursor >= g.round_clusters.len() {
                 g.phase = NAV_PHASE_COMPONENTS;
@@ -754,21 +700,24 @@ pub(super) fn nav_place_entrance(
     g.border_count[b] = slot + 1;
 }
 
-pub(super) fn nav_clear_dir(g: &mut NavGraph, c: int, dir: int, count: int) -> int {
-    let k = g.k;
-    for slot in 0..count {
-        let i = dir * g.per_side + slot;
-        for j in 0..k {
-            let at = nav_cost_index(g, c, i, j);
-            g.cost[at] = -1;
-        }
-        for q in 0..g.cluster_ep_count[c] {
-            let endpoint = g.cluster_eps[g.cluster_ep_start[c] + q];
-            g.ep_cost[g.ep_row[endpoint] + i] = -1;
-        }
+/// Forgets every cost from slot `i` of cluster `c`; returns the work charged.
+fn nav_clear_slot(g: &mut NavGraph, c: int, i: int) -> int {
+    for j in 0..g.k {
+        let at = nav_cost_index(g, c, i, j);
+        g.cost[at] = -1;
     }
+    for q in 0..g.cluster_ep_count[c] {
+        let endpoint = g.cluster_eps[g.cluster_ep_start[c] + q];
+        g.ep_cost[g.ep_row[endpoint] + i] = -1;
+    }
+    g.k + g.cluster_ep_count[c]
+}
+
+pub(super) fn nav_clear_dir(g: &mut NavGraph, c: int, dir: int, count: int) -> int {
     g.round_dir[c * 4 + dir] = true;
-    count * (k + g.cluster_ep_count[c])
+    (0..count)
+        .map(|slot| nav_clear_slot(g, c, dir * g.per_side + slot))
+        .sum()
 }
 
 pub(super) fn nav_border_rebuild(g: &mut NavGraph, b: int) -> int {
@@ -796,11 +745,12 @@ pub(super) fn nav_border_rebuild(g: &mut NavGraph, b: int) -> int {
     let wy = g.cluster_wy[a] + ay - g.cluster_y[a];
     let old_count = g.border_count[b];
     let first = b * 2 * g.per_side;
+    let entrance = |g: &NavGraph, i: int| {
+        let (n0, n1) = (first + i, first + g.per_side + i);
+        [g.node_x[n0], g.node_y[n0], g.node_x[n1], g.node_y[n1]]
+    };
     for i in 0..old_count {
-        g.border_old_x[i] = g.node_x[first + i];
-        g.border_old_y[i] = g.node_y[first + i];
-        g.border_old_bx[i] = g.node_x[first + g.per_side + i];
-        g.border_old_by[i] = g.node_y[first + g.per_side + i];
+        g.border_old[i] = entrance(g, i);
     }
     g.border_count[b] = 0;
     let mut span_start = -1;
@@ -878,16 +828,8 @@ pub(super) fn nav_border_rebuild(g: &mut NavGraph, b: int) -> int {
         }
     }
     let mut work = 2 * len;
-    let mut moved = g.border_count[b] != old_count;
-    for i in 0..old_count {
-        if g.node_x[first + i] != g.border_old_x[i]
-            || g.node_y[first + i] != g.border_old_y[i]
-            || g.node_x[first + g.per_side + i] != g.border_old_bx[i]
-            || g.node_y[first + g.per_side + i] != g.border_old_by[i]
-        {
-            moved = true;
-        }
-    }
+    let moved =
+        g.border_count[b] != old_count || (0..old_count).any(|i| entrance(g, i) != g.border_old[i]);
     if !moved {
         return work;
     }
@@ -904,20 +846,10 @@ pub(super) fn nav_border_rebuild(g: &mut NavGraph, b: int) -> int {
 }
 
 pub(super) fn nav_clear_corner(g: &mut NavGraph, c: int, q: int) -> int {
-    let k = g.k;
-    let i = 4 * g.per_side + q;
-    for j in 0..k {
-        let at = nav_cost_index(g, c, i, j);
-        g.cost[at] = -1;
-    }
-    for e in 0..g.cluster_ep_count[c] {
-        let endpoint = g.cluster_eps[g.cluster_ep_start[c] + e];
-        g.ep_cost[g.ep_row[endpoint] + i] = -1;
-    }
     g.round_corner[c * 4 + q] = true;
     nav_round_add(g, c);
     g.cluster_version[c] += 1;
-    k + g.cluster_ep_count[c]
+    nav_clear_slot(g, c, 4 * g.per_side + q)
 }
 
 pub(super) fn nav_vertex_rebuild(g: &mut NavGraph, v: int) -> int {
@@ -988,7 +920,7 @@ fn nav_cluster_prepare(g: &mut NavGraph, c: int) {
     let ox = g.cluster_x[c];
     let oy = g.cluster_y[c];
     let s = g.cluster_size;
-    let tbase = g.space_tile_base[si] + oy * SPACE_SIZE + ox;
+    let tbase = nav_tile_index(g, si, ox, oy);
     let uniform = g.extra[tbase];
     g.search_uniform = if uniform >= 0
         && (0..s).all(|y| {
@@ -1632,14 +1564,6 @@ pub(super) fn nav_graph_node_limit(g: &NavGraph) -> int {
     g.component.len()
 }
 
-pub(super) fn nav_graph_cluster_count(g: &NavGraph) -> int {
-    g.round_full.len()
-}
-
-pub(super) fn nav_cluster_slot_count(g: &NavGraph) -> int {
-    g.k
-}
-
 pub(super) fn nav_node_live(g: &NavGraph, n: int) -> bool {
     if n >= g.ep_base {
         return true;
@@ -1746,38 +1670,18 @@ pub(super) fn nav_node_slot(g: &NavGraph, n: int) -> int {
     dir * g.per_side + n % g.per_side
 }
 
-pub(super) fn nav_node_component(g: &NavGraph, n: int) -> int {
-    g.component[n]
-}
-
-pub(super) fn nav_graph_label_limit(g: &NavGraph) -> int {
-    g.label_size.len()
-}
-
 pub(super) fn nav_cluster_slot_limit(g: &NavGraph, c: int) -> int {
     g.k + g.cluster_ep_count[c]
 }
 
+/// The live node in slot `i` of cluster `c`, or -1.
 pub(super) fn nav_cluster_node(g: &NavGraph, c: int, i: int) -> int {
-    if i >= g.k {
-        return g.ep_base + g.cluster_eps[g.cluster_ep_start[c] + i - g.k];
+    let n = nav_cluster_slot_node(g, c, i);
+    if n >= 0 && nav_node_live(g, n) {
+        n
+    } else {
+        -1
     }
-    if i >= 4 * g.per_side {
-        let q = i - 4 * g.per_side;
-        let v = g.cluster_vertex[c * 4 + q];
-        if v < 0 || !g.corner_live[v * 4 + q] {
-            return -1;
-        }
-        return g.corner_base + v * 4 + q;
-    }
-    let dir = i.div_euclid(g.per_side);
-    let slot = i % g.per_side;
-    let b = g.cluster_border[c * 4 + dir];
-    if b < 0 || slot >= g.border_count[b] {
-        return -1;
-    }
-    let side = if dir == 0 || dir == 3 { 1 } else { 0 };
-    b * 2 * g.per_side + side * g.per_side + slot
 }
 
 pub(super) fn nav_cluster_pending(g: &NavGraph, c: int) -> bool {

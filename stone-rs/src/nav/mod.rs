@@ -41,6 +41,20 @@ impl<T> IdxVec<T> {
         self.reserve(if self.1 < 2 { 4 } else { self.1 * 2 });
     }
 }
+impl<T: Clone> IdxVec<T> {
+    pub fn filled(n: int, value: T) -> Self {
+        vec![value; n.max(0) as usize].into()
+    }
+    pub fn resize(&mut self, n: int, value: T) {
+        self.0.resize(n.max(0) as usize, value);
+        self.1 = self.1.max(self.len());
+    }
+    pub fn grow_to(&mut self, n: int, value: T) {
+        if self.len() < n {
+            self.resize(n, value);
+        }
+    }
+}
 impl<T> Index<int> for IdxVec<T> {
     type Output = T;
     fn index(&self, index: int) -> &T {

@@ -414,14 +414,14 @@ pub extern "C" fn stone_nav_get(handle: int, op: int, a: int, b: int, c: int) ->
         let g = &n.graph;
         match op {
             0 => nav_graph_refresh_pending(g) as int,
-            1 => nav_graph_refresh_spent(g),
+            1 => g.refresh_spent,
             2 => nav_graph_node_limit(g),
-            3 => nav_graph_cluster_count(g),
-            4 => nav_cluster_slot_count(g),
-            5 => nav_graph_label_limit(g),
+            3 => g.cluster_space.len(),
+            4 => g.k,
+            5 => g.label_size.len(),
             7 => nav_graph_holds(g, place(a, b, c)) as int,
             8 => nav_tile_blocked(g, a, b, c) as int,
-            9 => nav_tile_open_corners(g, a, b, c),
+            9 => g.corners[nav_tile_index(g, a, b, c)],
             10 => nav_tile_extra(g, a, b, c),
             11 => nav_node_live(g, a) as int,
             12 => nav_node_place(g, a).space.value,
@@ -433,7 +433,7 @@ pub extern "C" fn stone_nav_get(handle: int, op: int, a: int, b: int, c: int) ->
             18 => nav_node_is_pad(g, a) as int,
             19 => nav_node_cluster(g, a),
             20 => nav_node_slot(g, a),
-            21 => nav_node_component(g, a),
+            21 | 38 => g.component[a],
             22 => nav_cluster_slot_limit(g, a),
             23 => nav_cluster_node(g, a, b),
             24 => nav_cluster_pending(g, a) as int,
@@ -450,7 +450,6 @@ pub extern "C" fn stone_nav_get(handle: int, op: int, a: int, b: int, c: int) ->
             35 => g.cluster_size,
             36 => g.node_x[a],
             37 => g.node_y[a],
-            38 => g.component[a],
             39 => g.id_space.get(&a).copied().unwrap_or(-1),
             40 => n.query.cert_link_visits,
             41 => n.query.plans.len(),
@@ -652,16 +651,8 @@ pub unsafe extern "C" fn stone_nav_route_restore(
             );
             let si = nav_world_space(&n.graph, tile.x, tile.y, -1);
             assert!(si >= 0, "navigation route tile is outside every space");
-            assert!(
-                nav_tile_cluster(
-                    &n.graph,
-                    si,
-                    tile.x - n.graph.space_ox[si],
-                    tile.y - n.graph.space_oy[si]
-                ) >= 0,
-                "navigation route tile is outside its space"
-            );
-            route.push(tile);
+            let (x, y) = (tile.x - n.graph.space_ox[si], tile.y - n.graph.space_oy[si]);
+            route.push((tile, nav_tile_cluster(&n.graph, si, x, y)));
         }
 
         if let Some(pending) = n.jobs.remove(&slot) {
@@ -674,24 +665,14 @@ pub unsafe extern "C" fn stone_nav_route_restore(
             nav_unlink(&mut n.query, &mut plan);
         }
         plan.route.clear();
-        for tile in route {
+        for &(tile, _) in &route {
             plan.route.push(tile);
         }
         plan.path_pos = path_pos;
         plan.state = NAV_PLAN_READY;
         plan.epoch = n.graph.epoch;
         plan.versions.clear();
-        for i in (0..plan.route.len()).rev() {
-            let tile = plan.route[i];
-            let si = nav_world_space(&n.graph, tile.x, tile.y, plan.si);
-            assert!(si >= 0, "navigation route tile is outside every space");
-            let cluster = nav_tile_cluster(
-                &n.graph,
-                si,
-                tile.x - n.graph.space_ox[si],
-                tile.y - n.graph.space_oy[si],
-            );
-            assert!(cluster >= 0, "navigation route tile is outside its space");
+        for &(_, cluster) in route.iter().rev() {
             nav_add_version(&n.graph, &mut plan, cluster);
         }
         nav_plan_restore_route_costs(

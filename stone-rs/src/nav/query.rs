@@ -1,27 +1,15 @@
 use super::*;
 
-pub(super) fn nav_fill(v: &mut IdxVec<int>, n: int, value: int) {
-    while v.len() < n {
-        v.push(value);
-    }
-}
-
 pub(super) fn nav_query_size(g: &NavGraph, q: &mut NavQuery) {
     let nodes = nav_graph_node_limit(g);
     macro_rules! size {
-        ($f:ident, $n:expr, $v:expr) => {
-            if q.$f.len() < $n {
-                q.$f.0.resize($n as usize, $v);
-            }
+        ($($f:ident).+, $n:expr, $v:expr) => {
+            q.$($f).+.grow_to($n, $v)
         };
     }
-    if q.areas.nodes.len() < nodes {
-        q.areas.nodes.0.resize(nodes as usize, -1);
-    }
-    if q.areas.index.len() < nodes {
-        q.areas.index.0.resize(nodes as usize, -1);
-    }
-    nav_fill(&mut q.areas.cluster_epoch, g.cluster_space.len(), -1);
+    size!(areas.nodes, nodes, -1);
+    size!(areas.index, nodes, -1);
+    size!(areas.cluster_epoch, g.cluster_space.len(), -1);
     size!(area_rank, nodes, 0);
     size!(area_rank_stamp, nodes, 0);
     size!(node_g, nodes, 0);

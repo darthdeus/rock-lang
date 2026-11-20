@@ -36,8 +36,8 @@ fn nav_test_graph(spaces: &[NavTestSpace], links: &[NavLinkInput], cluster: int)
     let mut graph = nav_graph_create_owned(
         &layouts,
         blocked.into(),
-        nav_ints(count, 0),
-        nav_ints(count, 0),
+        IdxVec::filled(count, 0),
+        IdxVec::filled(count, 0),
         links,
         cluster,
     );

@@ -129,7 +129,7 @@ pub(super) fn nav_window_tile(g: &NavGraph, c1: int, c2: int, x: int, y: int) ->
         return -1;
     };
     let si = g.cluster_space[c];
-    g.space_tile_base[si] + (y - g.space_oy[si]) * SPACE_SIZE + x - g.space_ox[si]
+    nav_tile_index(g, si, x - g.space_ox[si], y - g.space_oy[si])
 }
 
 pub(super) fn nav_elbow_clear(g: &NavGraph, c1: int, c2: int, x: int, y: int, corner: int) -> bool {

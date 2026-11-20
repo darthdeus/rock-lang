@@ -28,7 +28,7 @@ pub(super) fn nav_query_next_stamp(q: &mut NavQuery) {
 }
 
 pub(super) fn nav_query_begin(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) {
-    let label_limit = nav_graph_label_limit(g);
+    let label_limit = g.label_size.len();
     while q.comp_mark.len() < label_limit {
         q.comp_mark.push(0);
     }
@@ -661,7 +661,7 @@ pub(super) fn nav_cert_h(q: &NavQuery, plan: &NavPlan, x: int, y: int) -> int {
 pub(super) fn nav_cert_begin(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) {
     q.heap.clear();
     q.phase = NAV_Q_CERTIFY;
-    let t = g.space_tile_base[plan.si] + plan.from_y * SPACE_SIZE + plan.from_x;
+    let t = nav_tile_index(g, plan.si, plan.from_x, plan.from_y);
     if nav_cert_offer(q, plan, t, 0, -1, 0) {
         let h = nav_cert_h(
             q,
@@ -751,8 +751,7 @@ pub(super) fn nav_certify(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan, bu
             let nx = wx + dx;
             let ny = wy + dy;
             if nav_world_step_open(g, wx, wy, nx, ny, si) {
-                let ns = nav_world_space(g, nx, ny, si);
-                let nt = g.space_tile_base[ns] + (ny - g.space_oy[ns]) * size + nx - g.space_ox[ns];
+                let nt = nav_world_tile_index(g, nx, ny, si).unwrap();
                 let hop = if dx != 0 && dy != 0 {
                     NAV_COST_DIAGONAL
                 } else {
