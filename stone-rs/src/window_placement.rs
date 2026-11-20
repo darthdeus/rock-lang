@@ -20,10 +20,12 @@
 //! The precedence merge + parsers are pure and unit-tested; the file/dir I/O is
 //! a thin layer on top.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::log_once;
-use crate::window_report::DisplayReport;
+use crate::window_report::{
+    resolve_window_placement, Borders, DisplayReport, WindowPlacement, WindowRequest,
+};
 
 /// A source of geometry that may specify any subset of the three fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,69 +71,37 @@ pub struct HiddenWindowState {
 
 pub fn resolve_hidden_window_restore(
     saved: HiddenWindowState,
-    displays: &[crate::window_report::DisplayReport],
-    borders: crate::window_report::Borders,
-) -> (
-    WindowMode,
-    crate::window_report::WindowPlacement,
-    WindowedBounds,
-) {
-    let wb_req = crate::window_report::WindowRequest {
-        size: saved.windowed_bounds.size,
-        pos: saved.windowed_bounds.pos,
-        display: saved.windowed_bounds.display,
+    displays: &[DisplayReport],
+    borders: Borders,
+) -> (WindowMode, WindowPlacement, WindowedBounds) {
+    let place = |size, pos, display| {
+        let placement =
+            resolve_window_placement(WindowRequest { size, pos, display }, displays, borders);
+        let bounds = WindowedBounds {
+            pos: placement.pos,
+            size: placement.size,
+            display: Some(placement.display),
+        };
+        (placement, bounds)
     };
-    let wb_placement = crate::window_report::resolve_window_placement(wb_req, displays, borders);
-    let resolved_windowed_bounds = WindowedBounds {
-        pos: wb_placement.pos,
-        size: wb_placement.size,
-        display: Some(wb_placement.display),
-    };
-
-    match saved.mode {
-        WindowMode::Windowed => {
-            let req = crate::window_report::WindowRequest {
-                size: saved.size,
-                pos: saved.pos,
-                display: saved.display,
-            };
-            let placement = crate::window_report::resolve_window_placement(req, displays, borders);
-            let bounds = WindowedBounds {
-                pos: placement.pos,
-                size: placement.size,
-                display: Some(placement.display),
-            };
-            (WindowMode::Windowed, placement, bounds)
-        }
-        WindowMode::Maximized => {
-            let target_display = saved
-                .display
-                .filter(|&d| displays.iter().any(|disp| disp.index == d))
-                .unwrap_or(resolved_windowed_bounds.display.unwrap_or(0));
-            let placement = crate::window_report::WindowPlacement {
-                pos: resolved_windowed_bounds.pos,
-                size: resolved_windowed_bounds.size,
-                display: target_display,
-            };
-            (WindowMode::Maximized, placement, resolved_windowed_bounds)
-        }
-        WindowMode::Fullscreen(mode_code) => {
-            let target_display = saved
-                .display
-                .filter(|&d| displays.iter().any(|disp| disp.index == d))
-                .unwrap_or(resolved_windowed_bounds.display.unwrap_or(0));
-            let placement = crate::window_report::WindowPlacement {
-                pos: resolved_windowed_bounds.pos,
-                size: resolved_windowed_bounds.size,
-                display: target_display,
-            };
-            (
-                WindowMode::Fullscreen(mode_code),
-                placement,
-                resolved_windowed_bounds,
-            )
-        }
+    if saved.mode == WindowMode::Windowed {
+        let (placement, bounds) = place(saved.size, saved.pos, saved.display);
+        return (saved.mode, placement, bounds);
     }
+    let windowed = saved.windowed_bounds;
+    let (windowed, bounds) = place(windowed.size, windowed.pos, windowed.display);
+    let display = saved
+        .display
+        .filter(|&d| displays.iter().any(|disp| disp.index == d))
+        .unwrap_or(windowed.display);
+    (
+        saved.mode,
+        WindowPlacement {
+            display,
+            ..windowed
+        },
+        bounds,
+    )
 }
 
 /// Which source won each field -- logged so a dev can see where a window's
@@ -192,27 +162,21 @@ pub fn parse_env_geometry(window: Option<&str>, display: Option<&str>) -> Partia
 
 /// `WxH`, `WxH+X+Y`, or `WxH-X-Y` mixes -- the sign precedes each coordinate.
 fn parse_window_spec(spec: &str) -> PartialGeometry {
-    let mut out = PartialGeometry::default();
-    let bytes = spec.as_bytes();
-    let mut split = spec.len();
-    for (i, &b) in bytes.iter().enumerate() {
-        if i > 0 && (b == b'+' || b == b'-') {
-            split = i;
-            break;
-        }
-    }
-    let (head, tail) = spec.split_at(split);
-    if let Some((w, h)) = parse_pair(head, 'x') {
-        out.size = Some((w, h));
-    } else {
+    let (head, tail) = split_at_sign(spec).unwrap_or((spec, ""));
+    let Some(size) = parse_pair(head, 'x') else {
         return PartialGeometry::default();
+    };
+    let pos = split_at_sign(tail).and_then(|(x, y)| {
+        Some((
+            x.trim_start_matches('+').parse().ok()?,
+            y.trim_start_matches('+').parse().ok()?,
+        ))
+    });
+    PartialGeometry {
+        size: Some(size),
+        pos,
+        display: None,
     }
-    if !tail.is_empty() {
-        if let Some((x, y)) = parse_signed_pair(tail) {
-            out.pos = Some((x, y));
-        }
-    }
-    out
 }
 
 fn parse_pair(s: &str, sep: char) -> Option<(i32, i32)> {
@@ -220,23 +184,14 @@ fn parse_pair(s: &str, sep: char) -> Option<(i32, i32)> {
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
-/// Parse `+X+Y` / `-X-Y` (each coordinate carries its own leading sign).
-fn parse_signed_pair(s: &str) -> Option<(i32, i32)> {
-    let bytes = s.as_bytes();
-    let mut split = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        if i > 0 && (b == b'+' || b == b'-') {
-            split = i;
-            break;
-        }
-    }
-    if split == 0 {
-        return None;
-    }
-    let (xs, ys) = s.split_at(split);
-    let x: i32 = xs.trim_start_matches('+').parse().ok()?;
-    let y: i32 = ys.trim_start_matches('+').parse().ok()?;
-    Some((x, y))
+/// Splits before the first `+` or `-` past the first character.
+fn split_at_sign(s: &str) -> Option<(&str, &str)> {
+    let split = s
+        .char_indices()
+        .skip(1)
+        .find(|&(_, c)| c == '+' || c == '-')?
+        .0;
+    Some(s.split_at(split))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -341,56 +296,59 @@ pub fn game_slug(title: &str) -> String {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+fn stone_dir(xdg_var: &str, native: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
+    (std::env::var_os(xdg_var).map(PathBuf::from))
+        .or_else(native)
+        .map(|dir| dir.join("stone"))
 }
 
 fn state_dir() -> Option<PathBuf> {
-    if let Some(x) = std::env::var_os("XDG_STATE_HOME") {
-        return Some(PathBuf::from(x).join("stone"));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        dirs::data_local_dir().map(|p| p.join("stone"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        home_dir().map(|h| h.join(".local").join("state").join("stone"))
-    }
+    stone_dir("XDG_STATE_HOME", || {
+        #[cfg(target_os = "windows")]
+        {
+            dirs::data_local_dir()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+        }
+    })
 }
 
 fn config_dir() -> Option<PathBuf> {
-    if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(x).join("stone"));
-    }
-    #[cfg(target_os = "windows")]
-    {
-        dirs::config_dir().map(|p| p.join("stone"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        home_dir().map(|h| h.join(".config").join("stone"))
-    }
-}
-
-fn geometry_file() -> Option<PathBuf> {
-    state_dir().map(|d| d.join("window-geometry.json"))
-}
-
-fn config_file() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("window.toml"))
+    stone_dir("XDG_CONFIG_HOME", || {
+        #[cfg(target_os = "windows")]
+        {
+            dirs::config_dir()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
+        }
+    })
 }
 
 /// Path to the engine-written saved-geometry file (may not exist yet), for
 /// callers that want to tell the user where to look/reset it.
 pub fn geometry_file_path() -> Option<PathBuf> {
-    geometry_file()
+    state_dir().map(|d| d.join("window-geometry.json"))
 }
 
 /// Path to the hand-editable machine config file (may not exist yet).
 pub fn config_file_path() -> Option<PathBuf> {
-    config_file()
+    config_dir().map(|d| d.join("window.toml"))
+}
+
+/// The file's text, or None when it is absent or unreadable (logged).
+fn read_optional(path: &Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            ::log::error!(target: "STONE", "reading {} failed: {}", path.display(), e);
+            None
+        }
+    }
 }
 
 /// Read the env override partial (both vars, either may be absent/malformed).
@@ -414,18 +372,11 @@ pub fn env_geometry() -> PartialGeometry {
 }
 
 pub fn machine_config(game_slug: &str) -> MachineConfig {
-    let Some(path) = config_file() else {
+    let Some(path) = config_file_path() else {
         return MachineConfig::default();
     };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return MachineConfig::default();
-        }
-        Err(e) => {
-            ::log::error!(target: "STONE", "reading {} failed: {}", path.display(), e);
-            return MachineConfig::default();
-        }
+    let Some(text) = read_optional(&path) else {
+        return MachineConfig::default();
     };
     match parse_config_toml(&text, game_slug) {
         Ok(config) => config,
@@ -444,15 +395,8 @@ pub fn saved_geometry(
     game_slug: &str,
     topo: &str,
 ) -> Option<(PartialGeometry, Option<(i32, i32)>)> {
-    let path = geometry_file()?;
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            ::log::error!(target: "STONE", "reading {} failed: {}", path.display(), e);
-            return None;
-        }
-    };
+    let path = geometry_file_path()?;
+    let text = read_optional(&path)?;
     let root: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
         Err(e) => {
@@ -510,34 +454,23 @@ fn saved_key(game_slug: &str, topo: &str) -> String {
 
 /// Write the current window geometry for (game, topology), merging into the
 /// existing file. Atomic (temp + rename). Errors are logged, never swallowed.
-#[allow(clippy::too_many_arguments)]
 pub fn save_geometry(
     game_slug: &str,
     topo: &str,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    display: Option<i32>,
+    geometry: ResolvedGeometry,
     requested: (i32, i32),
 ) -> bool {
-    let Some(path) = geometry_file() else {
+    let Some(path) = geometry_file_path() else {
         ::log::error!(target: "STONE", "cannot resolve user state directory for window geometry");
         return false;
     };
-    save_geometry_to(&path, game_slug, topo, x, y, w, h, display, requested)
+    save_geometry_to(&path, &saved_key(game_slug, topo), geometry, requested)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn save_geometry_to(
-    path: &std::path::Path,
-    game_slug: &str,
-    topo: &str,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    display: Option<i32>,
+    path: &Path,
+    key: &str,
+    geometry: ResolvedGeometry,
     requested: (i32, i32),
 ) -> bool {
     let Some(dir) = path.parent() else {
@@ -552,6 +485,11 @@ fn save_geometry_to(
         .and_then(|t| serde_json::from_str(&t).ok())
         .filter(|v: &serde_json::Value| v.is_object())
         .unwrap_or_else(|| serde_json::json!({}));
+    let ResolvedGeometry {
+        size: (w, h),
+        pos: (x, y),
+        display,
+    } = geometry;
     let mut entry = serde_json::json!({
         "x": x, "y": y, "w": w, "h": h,
         "req_w": requested.0, "req_h": requested.1,
@@ -559,7 +497,7 @@ fn save_geometry_to(
     if let Some(d) = display {
         entry["display"] = serde_json::json!(d);
     }
-    root[saved_key(game_slug, topo)] = entry;
+    root[key] = entry;
     let serialized = match serde_json::to_string_pretty(&root) {
         Ok(s) => s,
         Err(e) => {
@@ -588,54 +526,37 @@ mod tests {
     fn geometry_write_reports_failure_and_preserves_other_entries() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("\u{6f22}\u{1f680}").join("geometry.json");
+        let at = |x, y, w, h, display| ResolvedGeometry {
+            size: (w, h),
+            pos: (x, y),
+            display,
+        };
         assert!(save_geometry_to(
             &path,
             "first",
-            "topology",
-            1,
-            2,
-            640,
-            480,
-            None,
+            at(1, 2, 640, 480, None),
             (640, 480)
         ));
         assert!(save_geometry_to(
             &path,
             "second",
-            "topology",
-            3,
-            4,
-            800,
-            600,
-            Some(1),
+            at(3, 4, 800, 600, Some(1)),
             (800, 600)
         ));
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(json[saved_key("first", "topology")]["x"], 1);
-        assert_eq!(json[saved_key("second", "topology")]["x"], 3);
+        assert_eq!(json["first"]["x"], 1);
+        assert_eq!(json["second"]["x"], 3);
+        assert_eq!(json["second"]["display"], 1);
+        assert!(json["first"].get("display").is_none());
+        let unit = at(0, 0, 1, 1, None);
         assert!(!save_geometry_to(
             &path.join("blocked.json"),
             "first",
-            "topology",
-            0,
-            0,
-            1,
-            1,
-            None,
+            unit,
             (1, 1)
         ));
-        assert!(!save_geometry_to(
-            dir.path(),
-            "first",
-            "topology",
-            0,
-            0,
-            1,
-            1,
-            None,
-            (1, 1)
-        ));
+        assert!(!save_geometry_to(dir.path(), "first", unit, (1, 1)));
     }
 
     #[cfg(target_os = "windows")]

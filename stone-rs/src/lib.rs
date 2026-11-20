@@ -2893,16 +2893,12 @@ pub extern "C" fn stone_save_window_geometry(title: *const c_char) {
         let (ww, wh) = window.window.size();
         let (wx, wy) = window.window.position();
         let display = window.window.display_index().ok();
-        if window_placement::save_geometry(
-            &slug,
-            &topo,
-            wx,
-            wy,
-            ww as i32,
-            wh as i32,
+        let geometry = window_placement::ResolvedGeometry {
+            size: (ww as i32, wh as i32),
+            pos: (wx, wy),
             display,
-            window.requested_size,
-        ) {
+        };
+        if window_placement::save_geometry(&slug, &topo, geometry, window.requested_size) {
             ::log::info!(
                 target: "STONE",
                 "saved window geometry (game '{}' topo {}): pos ({},{}) size {}x{} display {:?}",
