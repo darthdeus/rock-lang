@@ -1,4 +1,4 @@
-use super::{accept, consumed, enabled, reject, PROBE};
+use super::{hook, lanes};
 use serde_json::{json, Value};
 use stone_imgui_abi::{ImDrawData, ImVector, IM_DRAW_CALLBACK_RESET_RENDER_STATE};
 
@@ -16,7 +16,7 @@ fn floats(xs: &[f32]) -> Result<Value, String> {
     if xs.iter().any(|v| !v.is_finite()) {
         return Err("nonfinite ImGui geometry".into());
     }
-    Ok(json!({"values": xs, "f32_bits": xs.iter().map(|v| v.to_bits()).collect::<Vec<_>>() }))
+    Ok(lanes(xs))
 }
 
 unsafe fn snapshot(data: *const ImDrawData) -> Result<Value, String> {
@@ -83,45 +83,26 @@ unsafe fn snapshot(data: *const ImDrawData) -> Result<Value, String> {
 }
 
 pub(crate) unsafe fn imgui_prepared(data: *const ImDrawData) {
-    if !enabled() {
-        return;
-    }
-    match unsafe { snapshot(data) } {
-        Ok(packet) => {
-            if packet["vertex_count"] == 0 || packet["index_count"] == 0 {
-                return;
-            }
-            let id = accept("imgui", "imgui_draw_data", packet);
-            PROBE.with(|p| {
-                let mut p = p.borrow_mut();
-                p.imgui_pending = Some(id);
-                p.stack.pop();
-                p.active = p.stack.last().copied();
-            });
+    hook((), (), |p| {
+        let packet = unsafe { snapshot(data) }?;
+        if packet["vertex_count"] != 0 && packet["index_count"] != 0 {
+            p.accept("imgui", "imgui_draw_data", packet);
+            p.imgui_pending = p.open.pop();
         }
-        Err(e) => reject(e),
-    }
+        Ok(())
+    })
 }
 
 pub(crate) unsafe fn imgui_consumed(data: *const ImDrawData) {
-    if !enabled() {
-        return;
-    }
-    match unsafe { snapshot(data) } {
-        Ok(packet) => {
-            let id = PROBE.with(|p| p.borrow_mut().imgui_pending.take());
-            if let Some(id) = id {
-                PROBE.with(|p| {
-                    let mut p = p.borrow_mut();
-                    p.stack.push(id);
-                    p.active = Some(id);
-                });
-                consumed("imgui", packet);
-                super::stone_ui_probe_end_operation();
-            }
+    hook((), (), |p| {
+        let packet = unsafe { snapshot(data) }?;
+        if let Some(id) = p.imgui_pending.take() {
+            p.open.push(id);
+            p.consume("imgui", packet);
+            p.open.pop();
         }
-        Err(e) => reject(e),
-    }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
