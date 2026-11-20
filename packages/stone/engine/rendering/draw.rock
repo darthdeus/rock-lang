@@ -525,15 +525,15 @@ pub fn entity_id_async_answer_pixel() -> IVec2? {
     return PICK_ANSWER_POS
 }
 
-value DurationItem {
+nobox value TimedDrawItem {
     draw_fn: () -> (),
     time_remaining: float,
 }
 
-global duration_items: [DurationItem] = []
+global duration_items: [TimedDrawItem] = []
 
 pub fn run_with_duration(duration: float, draw_fn: () -> ()) {
-    duration_items.push(DurationItem {
+    duration_items.push(TimedDrawItem {
         draw_fn: draw_fn,
         time_remaining: duration,
     })
