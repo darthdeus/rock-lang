@@ -298,6 +298,8 @@ pub fn prepare_project<R: AssetResolver + ?Sized>(
     require_assets: bool,
 ) -> Result<PreparedSoundProject, SoundCoreError> {
     let mut project = project.clone();
+    let mut dependencies = BTreeSet::new();
+    let mut looped_sources = BTreeSet::new();
     for event in &mut project.events {
         for (step_index, step) in event.steps.iter_mut().enumerate() {
             for (layer_index, layer) in step.layers.iter_mut().enumerate() {
@@ -310,27 +312,16 @@ pub fn prepare_project<R: AssetResolver + ?Sized>(
                         error,
                     )])
                 })?;
+                dependencies.extend(layer.sources.iter().cloned());
+                if layer.looped || layer.stream {
+                    looped_sources.extend(layer.sources.iter().cloned());
+                }
             }
         }
     }
     let diagnostics = validate_project(&project, resolver, require_assets);
     if !diagnostics.is_empty() {
         return Err(SoundCoreError::Diagnostics(diagnostics));
-    }
-
-    let mut dependencies = BTreeSet::new();
-    let mut looped_sources = BTreeSet::new();
-    for event in &project.events {
-        for step in &event.steps {
-            for layer in &step.layers {
-                for source in &layer.sources {
-                    dependencies.insert(source.clone());
-                    if layer.looped || layer.stream {
-                        looped_sources.insert(source.clone());
-                    }
-                }
-            }
-        }
     }
     Ok(PreparedSoundProject {
         project,
@@ -410,9 +401,13 @@ pub(crate) fn validate_project<R: AssetResolver + ?Sized>(
         let id_path = format_args!("{event_path}.id");
         if event.id.trim().is_empty() {
             check(false, &id_path, &"event ID must not be empty");
-        } else if let Some(previous) = seen_ids.insert(event.id.clone(), event_index) {
-            let message = format_args!("duplicate event ID; first declared at events[{previous}]");
-            check(false, &id_path, &message);
+        } else {
+            let first = seen_ids.entry(event.id.as_str()).or_insert(event_index);
+            check(
+                *first == event_index,
+                &id_path,
+                &format_args!("duplicate event ID; first declared at events[{first}]"),
+            );
         }
         let group = project.groups.get(&event.group);
         check(
@@ -772,15 +767,19 @@ mod tests {
     #[test]
     fn duplicate_and_empty_event_ids_are_rejected() {
         let solo = r#"{"sources": ["assets/sfx/solo.ogg"]}"#;
-        let duplicate = project(&[event_json("event", solo), event_json("event", solo)]);
+        let duplicate = project(&[(); 3].map(|()| event_json("event", solo)));
         let empty = project(&[event_json("  ", solo)]);
-        for (project, message) in [
-            (duplicate, "duplicate event ID"),
-            (empty, "event ID must not be empty"),
+        for (project, message, count) in [
+            (
+                duplicate,
+                "duplicate event ID; first declared at events[0]",
+                2,
+            ),
+            (empty, "event ID must not be empty", 1),
         ] {
             let error = compile_project(&project, &resolver(&[SOLO]))
                 .expect_err("a bad event ID should reject");
-            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(error.to_string().matches(message).count(), count, "{error}");
         }
     }
 
