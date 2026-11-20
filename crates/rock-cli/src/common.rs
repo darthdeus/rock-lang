@@ -37,13 +37,13 @@ impl ProcessManager {
     /// pipe buffer (~64KB on macOS/Linux) blocks on write(), the parent's
     /// try_wait() never sees an exit, and the process appears to hang until timeout.
     pub fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<ProcessResult> {
-        Self::wait_with_policy_and_tests(
+        Self::wait_with_policy(
             child,
             WaitPolicy::Total(timeout),
             false,
             false,
-            None,
-            None,
+            |_| None,
+            |()| None,
         )
     }
 
@@ -56,7 +56,7 @@ impl ProcessManager {
         forward_stdout: bool,
         forward_stderr: bool,
     ) -> Result<ProcessResult<P>> {
-        Self::wait_with_policy_and_tests(
+        Self::wait_with_policy(
             child,
             WaitPolicy::Progress {
                 startup,
@@ -64,8 +64,8 @@ impl ProcessManager {
             },
             forward_stdout,
             forward_stderr,
-            None,
-            Some(decode),
+            decode,
+            Some,
         )
     }
 
@@ -76,45 +76,58 @@ impl ProcessManager {
         budget: Duration,
         decode: fn(&[u8]) -> Option<P>,
     ) -> Result<ProcessResult<P>> {
-        Self::wait_with_policy_and_tests(
+        Self::wait_with_policy(
             child,
             WaitPolicy::ProgressBudget { startup, budget },
             false,
             false,
-            None,
-            Some(decode),
+            decode,
+            Some,
         )
     }
 
-    /// Bound program loading and test progress by the child's CPU time. Valid
-    /// START and TIME markers reset the CPU budget; a generous wall backstop
-    /// still catches a child blocked without consuming CPU.
-    pub(crate) fn wait_with_test_watchdog(
+    #[cfg(feature = "backend-js")]
+    pub(crate) fn wait_with_cpu_budget(
         child: &mut Child,
-        limit: Duration,
-        watch: TestWatch,
+        budget: Duration,
     ) -> Result<ProcessResult> {
-        Self::wait_with_policy_and_tests(
+        Self::wait_with_policy(
             child,
-            WaitPolicy::Test {
-                cpu_limit: limit,
-                wall_limit: test_watchdog_wall_backstop(limit),
+            WaitPolicy::Cpu {
+                cpu_limit: budget,
+                wall_limit: Duration::MAX,
             },
             false,
             false,
-            Some(watch),
-            None,
+            |_| None,
+            |()| None,
         )
     }
 
-    pub(crate) fn wait_with_policy_and_tests<P: Send + 'static>(
+    pub(crate) fn wait_with_test_watchdog(
+        child: &mut Child,
+        policy: WaitPolicy,
+        token: String,
+        tests: &mut crate::test_protocol::LuaTestSequence,
+    ) -> Result<ProcessResult> {
+        Self::wait_with_policy(
+            child,
+            policy,
+            false,
+            false,
+            move |line| crate::test_protocol::decode_lua_test(line, &token),
+            |event| tests.observe(event).then_some(()),
+        )
+    }
+
+    fn wait_with_policy<P: Send + 'static, R>(
         child: &mut Child,
         policy: WaitPolicy,
         forward_stdout: bool,
         forward_stderr: bool,
-        test_watch: Option<TestWatch>,
-        decode: Option<fn(&[u8]) -> Option<P>>,
-    ) -> Result<ProcessResult<P>> {
+        decode: impl Fn(&[u8]) -> Option<P> + Send + 'static,
+        mut observe: impl FnMut(P) -> Option<R>,
+    ) -> Result<ProcessResult<R>> {
         use std::io::{self, BufRead, BufReader, Read, Write};
         use std::sync::mpsc;
         use std::thread;
@@ -126,7 +139,7 @@ impl ProcessManager {
         } else {
             (None, None)
         };
-        let test_token = test_watch.as_ref().map(|watch| watch.token.clone());
+        let sample_cpu = matches!(policy, WaitPolicy::Cpu { .. });
         let child_pid = child.id();
 
         // Spawn background threads to drain pipes continuously. This prevents
@@ -134,44 +147,14 @@ impl ProcessManager {
         // A read error ends the thread with that error, and the join below
         // fails the wait: truncated output must never be judged as complete.
         let stdout_thread = child.stdout.take().map(|mut h| {
-            let progress_tx = progress_tx.clone();
-            let test_token = test_token.clone();
             thread::spawn(move || {
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 8192];
-                let mut line = Vec::with_capacity(128);
-                let mut line_overflow = false;
                 loop {
                     match h.read(&mut chunk) {
                         Ok(0) => break,
                         Ok(n) => {
                             buf.extend_from_slice(&chunk[..n]);
-                            if let (Some(tx), Some(token)) = (&progress_tx, test_token.as_deref()) {
-                                for &byte in &chunk[..n] {
-                                    if !line_overflow {
-                                        line.push(byte);
-                                        if line.len() > 4096 {
-                                            line.clear();
-                                            line_overflow = true;
-                                        }
-                                    }
-                                    if byte == b'\n' {
-                                        if !line_overflow {
-                                            if let Some(ordinal) =
-                                                parse_test_time_progress(&line, token)
-                                            {
-                                                let _ = tx.send(ProgressEvent {
-                                                    at: bone_core::prelude::Instant::now(),
-                                                    progress: ProcessProgress::TestTime(ordinal),
-                                                    child_cpu: child_process_cpu_time(child_pid),
-                                                });
-                                            }
-                                        }
-                                        line.clear();
-                                        line_overflow = false;
-                                    }
-                                }
-                            }
                             if forward_stdout {
                                 let mut stdout = io::stdout().lock();
                                 let _ = stdout.write_all(&chunk[..n]);
@@ -186,67 +169,45 @@ impl ProcessManager {
             })
         });
         let stderr_thread = child.stderr.take().map(|h| {
-            let progress_tx = progress_tx.clone();
             thread::spawn(move || {
                 let mut reader = BufReader::new(h);
                 let mut buf = Vec::new();
                 let mut line = Vec::new();
-                loop {
-                    line.clear();
-                    match reader.read_until(b'\n', &mut line) {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            buf.extend_from_slice(&line);
-                            if forward_stderr {
-                                let mut stderr = io::stderr().lock();
-                                let _ = stderr.write_all(&line);
-                                let _ = stderr.flush();
-                            }
-                            if let Some(tx) = &progress_tx {
-                                let progress = match policy {
-                                    WaitPolicy::Test { .. } => test_token
-                                        .as_deref()
-                                        .and_then(|token| parse_test_start(&line, token))
-                                        .map(ProcessProgress::TestStart),
-                                    _ => decode
-                                        .and_then(|decode| decode(&line))
-                                        .map(ProcessProgress::Observed),
-                                };
-                                if let Some(progress) = progress {
-                                    let child_cpu =
-                                        if matches!(&progress, ProcessProgress::TestStart(_)) {
-                                            child_process_cpu_time(child_pid)
-                                        } else {
-                                            None
-                                        };
-                                    let _ = tx.send(ProgressEvent {
-                                        at: bone_core::prelude::Instant::now(),
-                                        progress,
-                                        child_cpu,
-                                    });
-                                }
-                            }
-                        }
-                        Err(e) => return Err(e),
+                while reader.read_until(b'\n', &mut line)? != 0 {
+                    if forward_stderr {
+                        let mut stderr = io::stderr().lock();
+                        let _ = stderr.write_all(&line);
+                        let _ = stderr.flush();
                     }
+                    if let Some(tx) = &progress_tx
+                        && let Some(progress) = decode(&line)
+                    {
+                        let _ = tx.send(ProgressEvent {
+                            at: bone_core::prelude::Instant::now(),
+                            progress,
+                            child_cpu: sample_cpu
+                                .then(|| child_process_cpu_time(child_pid))
+                                .flatten(),
+                        });
+                        if !sample_cpu {
+                            buf.extend_from_slice(&line);
+                        }
+                    } else {
+                        buf.extend_from_slice(&line);
+                    }
+                    line.clear();
                 }
                 Ok(buf)
             })
         });
-        drop(progress_tx);
 
         let start_time = bone_core::prelude::Instant::now();
         let mut last_progress_at = start_time;
         let mut first_progress_at = None;
         let mut latest_progress = None;
-        let mut tests = test_watch.map(|watch| TestSequence {
-            count: watch.tests,
-            next_start: 0,
-            next_time: 0,
-            running: None,
-            last_completed: None,
-        });
-        let mut last_test_cpu = child_process_cpu_time(child_pid);
+        let mut last_test_cpu = sample_cpu
+            .then(|| child_process_cpu_time(child_pid))
+            .flatten();
         // Most children exit within a few milliseconds, so start polling
         // fast and back off to the long-running interval.
         let mut poll = Duration::from_millis(1);
@@ -254,32 +215,19 @@ impl ProcessManager {
         let (status, timeout_phase) = loop {
             if let Some(rx) = &progress_rx {
                 for event in rx.try_iter() {
-                    let accepted = match &event.progress {
-                        ProcessProgress::TestStart(ordinal) => {
-                            tests.as_mut().is_some_and(|tests| tests.start(*ordinal))
-                        }
-                        ProcessProgress::TestTime(ordinal) => {
-                            tests.as_mut().is_some_and(|tests| tests.complete(*ordinal))
-                        }
-                        ProcessProgress::Observed(_) => true,
-                    };
-                    if !accepted {
+                    let Some(progress) = observe(event.progress) else {
                         continue;
-                    }
-                    last_progress_at = if matches!(policy, WaitPolicy::Test { .. }) {
+                    };
+                    latest_progress = Some(progress);
+                    last_progress_at = if sample_cpu {
                         last_progress_at.max(event.at)
                     } else {
                         bone_core::prelude::Instant::now()
                     };
                     first_progress_at.get_or_insert(last_progress_at);
-                    if let ProcessProgress::Observed(progress) = event.progress {
-                        latest_progress = Some(progress);
-                    }
-                    if matches!(policy, WaitPolicy::Test { .. }) {
-                        if let Some(sample) = event.child_cpu {
-                            last_test_cpu =
-                                Some(last_test_cpu.map_or(sample, |previous| previous.max(sample)));
-                        }
+                    if let Some(sample) = event.child_cpu {
+                        last_test_cpu =
+                            Some(last_test_cpu.map_or(sample, |previous| previous.max(sample)));
                     }
                 }
             }
@@ -306,7 +254,7 @@ impl ProcessManager {
                         (start_time.elapsed(), startup, TimeoutPhase::Startup)
                     }
                 }
-                WaitPolicy::Test {
+                WaitPolicy::Cpu {
                     cpu_limit,
                     wall_limit,
                 } => {
@@ -360,31 +308,13 @@ impl ProcessManager {
         let stdout = drained(stdout_thread, "stdout")?;
         let stderr = drained(stderr_thread, "stderr")?;
 
-        // Reader joins ensure the final markers have arrived. After a timeout
-        // retain the test state observed when the budget expired.
-        if !timed_out || !matches!(policy, WaitPolicy::Test { .. }) {
-            if let Some(rx) = &progress_rx {
-                for event in rx.try_iter() {
-                    match event.progress {
-                        ProcessProgress::Observed(progress) => latest_progress = Some(progress),
-                        ProcessProgress::TestStart(ordinal) => {
-                            if let Some(tests) = tests.as_mut() {
-                                tests.start(ordinal);
-                            }
-                        }
-                        ProcessProgress::TestTime(ordinal) => {
-                            if let Some(tests) = tests.as_mut() {
-                                tests.complete(ordinal);
-                            }
-                        }
-                    }
+        if let Some(rx) = &progress_rx {
+            for event in rx.try_iter() {
+                if let Some(progress) = observe(event.progress) {
+                    latest_progress = Some(progress);
                 }
             }
         }
-
-        let (running_test, last_completed_test) = tests
-            .map(|tests| (tests.running, tests.last_completed))
-            .unwrap_or((None, None));
         Ok(ProcessResult {
             output: std::process::Output {
                 status,
@@ -394,8 +324,6 @@ impl ProcessManager {
             timed_out,
             timeout_phase,
             progress: latest_progress,
-            running_test,
-            last_completed_test,
             progress_stopped: matches!(policy, WaitPolicy::Progress { .. })
                 && first_progress_at.is_some()
                 && timed_out,
@@ -421,7 +349,7 @@ pub(crate) enum WaitPolicy {
         startup: Duration,
         budget: Duration,
     },
-    Test {
+    Cpu {
         cpu_limit: Duration,
         wall_limit: Duration,
     },
@@ -456,87 +384,8 @@ impl std::fmt::Display for TimeoutPhase {
 
 struct ProgressEvent<P> {
     at: bone_core::prelude::Instant,
-    progress: ProcessProgress<P>,
+    progress: P,
     child_cpu: Option<Duration>,
-}
-
-enum ProcessProgress<P> {
-    Observed(P),
-    TestStart(usize),
-    TestTime(usize),
-}
-
-/// A test harness's start and completion events. The token is generated per
-/// run and distinct from accidental test output, so marker-shaped output
-/// without this run's token is not an event.
-#[derive(Debug, Clone)]
-pub(crate) struct TestWatch {
-    pub token: String,
-    pub tests: usize,
-}
-
-/// Starts and TIME completions are accepted once each, in declaration order.
-/// They arrive on separate pipes, so either side may be observed first.
-struct TestSequence {
-    count: usize,
-    next_start: usize,
-    next_time: usize,
-    running: Option<usize>,
-    last_completed: Option<usize>,
-}
-
-impl TestSequence {
-    fn start(&mut self, ordinal: usize) -> bool {
-        if ordinal != self.next_start || ordinal >= self.count {
-            return false;
-        }
-        self.next_start += 1;
-        if ordinal < self.next_time {
-            return false;
-        }
-        self.running = Some(ordinal);
-        true
-    }
-
-    fn complete(&mut self, ordinal: usize) -> bool {
-        if ordinal != self.next_time || ordinal >= self.count {
-            return false;
-        }
-        self.next_time += 1;
-        self.last_completed = Some(ordinal);
-        if self.running == Some(ordinal) {
-            self.running = None;
-        }
-        true
-    }
-}
-
-/// `ROCK_TEST_START<TAB>token<TAB>ordinal`, ordinal counting from 0.
-fn parse_test_start(line: &[u8], token: &str) -> Option<usize> {
-    let line = std::str::from_utf8(line).ok()?;
-    let fields = line.strip_prefix("ROCK_TEST_START\t")?.strip_suffix('\n')?;
-    let (got, ordinal) = fields.split_once('\t')?;
-    if got != token {
-        return None;
-    }
-    ordinal.parse().ok()
-}
-
-/// `__SKULL__ TIME` completion records carry the token and ordinal at the tail.
-fn parse_test_time_progress(line: &[u8], token: &str) -> Option<usize> {
-    let line = std::str::from_utf8(line).ok()?;
-    let fields = line.strip_suffix('\n')?.split('\t').collect::<Vec<_>>();
-    if fields.len() != 7
-        || fields[0] != "__SKULL__"
-        || fields[1] != "TIME"
-        || fields[2].is_empty()
-        || fields[3].parse::<f64>().is_err()
-        || !matches!(fields[4], "pass" | "fail" | "value")
-        || fields[5] != token
-    {
-        return None;
-    }
-    fields[6].parse().ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -674,11 +523,20 @@ pub struct ProcessResult<P = ()> {
     pub timed_out: bool,
     pub timeout_phase: Option<TimeoutPhase>,
     pub progress: Option<P>,
-    /// Index of the test whose START has no matching TIME completion.
-    pub running_test: Option<usize>,
-    /// Index of the last `TIME` completion a [`TestWatch`] run observed.
-    pub last_completed_test: Option<usize>,
     pub progress_stopped: bool,
+}
+
+#[cfg(not(unix))]
+impl ProcessResult {
+    pub(crate) fn with_progress<P>(self, progress: Option<P>) -> ProcessResult<P> {
+        ProcessResult {
+            output: self.output,
+            timed_out: self.timed_out,
+            timeout_phase: self.timeout_phase,
+            progress,
+            progress_stopped: self.progress_stopped,
+        }
+    }
 }
 
 /// Thread count requested by `ROCK_NUM_THREADS`, else `RAYON_NUM_THREADS`.
@@ -721,8 +579,6 @@ pub(crate) fn requested_thread_count() -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TestSequence, parse_test_start, parse_test_time_progress};
-
     #[test]
     fn thread_count_request_rejects_a_value_that_is_not_a_count() {
         use super::parse_thread_count_request as parse;
@@ -788,73 +644,5 @@ mod tests {
             fastest < std::time::Duration::from_millis(40),
             "fastest wait took {fastest:?}"
         );
-    }
-
-    #[test]
-    fn test_start_requires_the_run_token() {
-        assert_eq!(
-            parse_test_start(b"ROCK_TEST_START\tabc\t3\n", "abc"),
-            Some(3)
-        );
-        assert_eq!(
-            parse_test_start(b"ROCK_TEST_START\tforged\t3\n", "abc"),
-            None
-        );
-        assert_eq!(parse_test_start(b"ROCK_TEST_START\tabc\t3", "abc"), None);
-        assert_eq!(parse_test_start(b"ROCK_TEST_START\tabc\tx\n", "abc"), None);
-        assert_eq!(
-            parse_test_start(b"ROCK_TEST_START\t\"a.rock\"\t\"t\"\n", "abc"),
-            None
-        );
-        assert_eq!(parse_test_start(b"ordinary output\n", "abc"), None);
-    }
-
-    #[test]
-    fn test_time_requires_the_run_token_and_protocol_fields() {
-        assert_eq!(
-            parse_test_time_progress(b"__SKULL__\tTIME\tt_a\t12.500\tpass\tabc\t3\n", "abc"),
-            Some(3),
-        );
-        assert_eq!(
-            parse_test_time_progress(b"__SKULL__\tTIME\tt_a\t12.500\tpass\tforged\t3\n", "abc"),
-            None,
-        );
-        assert_eq!(
-            parse_test_time_progress(b"__SKULL__\tTIME\tt_a\t12.500\tpass\tabc\tx\n", "abc"),
-            None,
-        );
-        assert_eq!(parse_test_time_progress(b"ordinary output\n", "abc"), None);
-    }
-
-    #[test]
-    fn test_sequence_accepts_each_start_and_time_once_in_order() {
-        let mut tests = TestSequence {
-            count: 3,
-            next_start: 0,
-            next_time: 0,
-            running: None,
-            last_completed: None,
-        };
-        assert!(!tests.start(1), "skipped ahead");
-        assert!(tests.start(0));
-        assert!(!tests.start(0), "repeated");
-        assert!(
-            tests.start(1),
-            "the next start may be observed before the previous TIME line"
-        );
-        assert!(!tests.complete(1), "completion cannot skip ahead");
-        assert!(tests.complete(0));
-        assert_eq!(
-            tests.running,
-            Some(1),
-            "TIME for the previous test keeps the current test active"
-        );
-        assert!(!tests.complete(0), "repeated completion");
-        assert!(tests.complete(1));
-        assert!(!tests.start(0), "stale start");
-        assert!(tests.start(2));
-        assert!(!tests.start(3), "beyond the declared tests");
-        assert_eq!(tests.running, Some(2));
-        assert_eq!(tests.last_completed, Some(1));
     }
 }

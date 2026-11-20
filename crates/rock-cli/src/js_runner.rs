@@ -74,18 +74,8 @@ pub(crate) fn run_node_code_with_timeout(
     // outgrows the pipe buffer until it reads as a timeout.
     let stdout = drain(child.stdout.take().expect("node stdout is piped"));
     let stderr = drain(child.stderr.take().expect("node stderr is piped"));
-    let waited = crate::common::ProcessManager::wait_with_policy_and_tests::<()>(
-        &mut child,
-        crate::common::WaitPolicy::Test {
-            cpu_limit: timeout,
-            wall_limit: Duration::MAX,
-        },
-        false,
-        false,
-        None,
-        None,
-    )
-    .map_err(|e| error(format!("failed to wait for node process: {e}")));
+    let waited = crate::common::ProcessManager::wait_with_cpu_budget(&mut child, timeout)
+        .map_err(|e| error(format!("failed to wait for node process: {e}")));
     if waited.is_err() {
         let _ = child.kill();
         let _ = child.wait();

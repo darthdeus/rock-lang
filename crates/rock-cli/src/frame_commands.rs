@@ -145,15 +145,7 @@ pub(crate) fn do_perf(
                 &mut child,
                 Duration::from_secs_f64(seconds).saturating_sub(launch_start.elapsed()),
             )?;
-            crate::common::ProcessResult {
-                output: result.output,
-                timed_out: result.timed_out,
-                timeout_phase: result.timeout_phase,
-                progress: None,
-                running_test: result.running_test,
-                last_completed_test: result.last_completed_test,
-                progress_stopped: result.progress_stopped,
-            }
+            result.with_progress(None)
         } else {
             ProcessManager::wait_with_progress_budget(
                 &mut child,

@@ -1,42 +1,108 @@
-//! The `__SKULL__` test-result line protocol shared by the per-backend test
-//! executors (luajit in `skull_backend`, node in `js_test`). One parser, one
-//! histogram helper.
+use skull::ValueExpect;
 
-/// Parsed marker lines of one test-program run.
+#[derive(Debug, PartialEq)]
+pub(crate) struct LuaTestRow {
+    pub ms: f64,
+    pub result: LuaTestResult,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum LuaTestResult {
+    Pass,
+    Fail(String),
+    Value(String),
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum LuaTestEvent {
+    Start(usize),
+    Finish(usize, LuaTestRow),
+}
+
+pub(crate) fn decode_lua_test(line: &[u8], token: &str) -> Option<LuaTestEvent> {
+    let line = line.strip_prefix(b"ROCK_TEST\t")?.strip_suffix(b"\n")?;
+    let line = String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(line));
+    let mut fields = line.splitn(5, '\t');
+    if fields.next()? != token {
+        return None;
+    }
+    let ordinal = fields.next()?.parse().ok()?;
+    let time = fields.next()?;
+    if time == "start" && fields.next().is_none() {
+        return Some(LuaTestEvent::Start(ordinal));
+    }
+    let ms: f64 = time.parse().ok()?;
+    if !ms.is_finite() || ms < 0.0 {
+        return None;
+    }
+    let result = match (fields.next()?, fields.next()?) {
+        ("pass", "") => LuaTestResult::Pass,
+        ("fail", detail) if !detail.is_empty() => LuaTestResult::Fail(detail.to_owned()),
+        ("value", value) => LuaTestResult::Value(value.to_owned()),
+        _ => return None,
+    };
+    Some(LuaTestEvent::Finish(ordinal, LuaTestRow { ms, result }))
+}
+
+#[derive(Debug)]
+pub(crate) struct LuaTestSequence {
+    count: usize,
+    active: bool,
+    pub finished: Vec<LuaTestRow>,
+}
+
+impl LuaTestSequence {
+    pub(crate) fn new(count: usize) -> Self {
+        Self {
+            count,
+            active: false,
+            finished: Vec::new(),
+        }
+    }
+
+    pub(crate) fn running(&self) -> Option<usize> {
+        self.active.then_some(self.finished.len())
+    }
+
+    pub(crate) fn observe(&mut self, event: LuaTestEvent) -> bool {
+        let next = self.finished.len();
+        match event {
+            LuaTestEvent::Start(n) if n == next && n < self.count && !self.active => {
+                self.active = true;
+            }
+            LuaTestEvent::Finish(n, row) if self.running() == Some(n) => {
+                self.finished.push(row);
+                self.active = false;
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+impl LuaTestResult {
+    pub(crate) fn check(self, expect: Option<&ValueExpect>) -> Result<(), String> {
+        match (self, expect) {
+            (Self::Pass, None) => Ok(()),
+            (Self::Fail(detail), _) => Err(detail),
+            (Self::Value(value), Some(expect)) => compare_value(expect, &value, FLOAT_REL_TOL),
+            _ => Err("test result protocol: unexpected return value status".into()),
+        }
+    }
+}
+
 pub(crate) struct SkullMarkers {
-    /// Number of `PASS` lines.
     pub passed: usize,
-    /// The `<detail>` of every `FAIL` line.
     pub fails: Vec<String>,
     pub values: Vec<(String, String)>,
-    /// Every `TIME` line: one per test the harness finished, in run order.
-    pub times: Vec<TestTime>,
 }
 
-/// `__SKULL__\tTIME\t<name>\t<ms>\t<pass|fail|value>`: a test's wall time and
-/// the harness-side result; a `value` result is judged by the host. The Skull
-/// harness appends its run token and ordinal for watchdog progress tracking.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct TestTime {
-    pub name: String,
-    pub ms: f64,
-    pub result: String,
-}
-
-/// Parse the `__SKULL__\tPASS\t`, `__SKULL__\tFAIL\t<detail>` and
-/// `__SKULL__\tVALUE\t<name>\t<serialized>` result lines and the
-/// [`TestTime`] lines out of a test program's stdout. `None` = no valid result
-/// protocol: either no result lines at all (the program never reached the
-/// harness, an emit/load bug rather than a test failure) or a `__SKULL__` line
-/// of an unknown kind or shape, which is logged. Every caller treats `None` as
-/// a harness failure that shows the whole stdout; counting an unrecognized line
-/// as a pass would let a broken harness report green.
+/// A JS/GLSL run must report at least one result and no malformed markers.
 pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
     let mut markers = SkullMarkers {
         passed: 0,
         fails: Vec::new(),
         values: Vec::new(),
-        times: Vec::new(),
     };
     let mut results = 0usize;
     for line in stdout.lines() {
@@ -62,21 +128,13 @@ pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
             },
             "TIME" => {
                 let mut parts = rest.split('\t');
-                let time = (|| {
-                    Some(TestTime {
-                        name: parts.next().filter(|n| !n.is_empty())?.to_string(),
-                        ms: parts.next()?.parse().ok()?,
-                        result: parts.next()?.to_string(),
-                    })
-                })();
-                match time {
-                    Some(time) => {
-                        markers.times.push(time);
-                        // TIME is bookkeeping, not a result.
-                        continue;
-                    }
-                    None => false,
+                if parts.next().is_some_and(|name| !name.is_empty())
+                    && parts.next().is_some_and(|ms| ms.parse::<f64>().is_ok())
+                    && parts.next().is_some()
+                {
+                    continue;
                 }
+                false
             }
             _ => false,
         };
@@ -197,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn time_lines_are_parsed_and_not_counted_as_results() {
+    fn legacy_time_lines_do_not_count_as_results() {
         let stdout = "__SKULL__\tPASS\t\n\
                       __SKULL__\tTIME\tt_a\t12.500\tpass\twatch-token\t0\n\
                       __SKULL__\tVALUE\tt_b\t42\n\
@@ -205,21 +263,7 @@ mod tests {
         let m = parse_skull_markers(stdout).expect("markers present");
         assert_eq!(m.passed, 1);
         assert_eq!(m.values.len(), 1);
-        assert_eq!(
-            m.times,
-            vec![
-                TestTime {
-                    name: "t_a".into(),
-                    ms: 12.5,
-                    result: "pass".into()
-                },
-                TestTime {
-                    name: "t_b".into(),
-                    ms: 0.031,
-                    result: "value".into()
-                },
-            ]
-        );
+        assert!(parse_skull_markers("__SKULL__\tTIME\tt_a\t12.500\tpass\n").is_none());
     }
 
     #[test]

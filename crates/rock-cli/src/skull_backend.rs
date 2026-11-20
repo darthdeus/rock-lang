@@ -3,13 +3,14 @@
 use crate::Result;
 use crate::bone_backend::categorize;
 use crate::stone_runtime::ProgramKind;
+use crate::test_protocol::LuaTestSequence;
 use crate::test_unit::UnitFailure;
 use bone_core::prelude::Instant;
 use colored::Colorize;
 use rock_core::CompilerError;
 use rock_core::SourceFiles;
 use rock_core::source_file_from_path_and_contents;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
 fn skull_emit(file: &str, src: &str) -> std::result::Result<(String, bool), Vec<CompilerError>> {
@@ -424,17 +425,10 @@ fn build_test_harness(tests: &[&skull::SkullTest], token: &str) -> String {
             Some(s) => skull_codegen_lua::lua_string(s),
             None => "nil".to_string(),
         };
-        // `f` is the global test fn by its EMITTED symbol; `out` is the expected
-        // stdout (or nil). `name` labels the FAIL line and stays the logical
-        // DefKey, which is what a human reading the report wants (a package unit
-        // runs many tests together, and two modules may declare the same name).
-        // `val` marks a `@test(returns = ...)` test: the harness emits a VALUE
-        // line carrying the serialized return value; the HOST compares it.
         h.push_str(&format!(
-            "  {{ f = {}, out = {}, name = {}, val = {} }},\n",
+            "  {{ f = {}, out = {}, val = {} }},\n",
             t.symbol,
             out,
-            skull_codegen_lua::lua_string(&t.name),
             t.returns.is_some()
         ));
     }
@@ -469,9 +463,14 @@ if __skull_shard then
 else
   __skull_run = __skull_T
 end
+local __skull_report_prefix = "\nROCK_TEST\t" .. __skull_token .. "\t"
+local __skull_stderr = io.stderr
+local function __skull_report(n, fields)
+  __skull_stderr:write(__skull_report_prefix .. (n - 1) .. "\t" .. fields .. "\n")
+  __skull_stderr:flush()
+end
 for n, t in ipairs(__skull_run) do
-  io.stderr:write("\nROCK_TEST_START\t", __skull_token, "\t", n - 1, "\n")
-  io.stderr:flush()
+  __skull_report(n, "start")
   local buf = {}
   local rp = print
   local rw = io.write
@@ -511,28 +510,22 @@ for n, t in ipairs(__skull_run) do
     if not last then expected_errors = false; break end
     pos = last
   end
-  local result = "fail"
+  local result, detail = "fail", ""
   if not ok then
-    io.write("\n__SKULL__\tFAIL\t", t.name, ": error: ", __esc(tostring(ret)), "\n")
+    detail = "error: " .. __esc(tostring(ret))
   elseif (#errors > 0 or overflow > 0) and not expected_errors then
-    local detail = table.concat(errors, "\n")
+    detail = table.concat(errors, "\n")
     if overflow > 0 then detail = detail .. "\n" .. overflow .. " additional error record(s) dropped" end
-    io.write("\n__SKULL__\tFAIL\t", t.name, ": error: logged error(s): ", __esc(detail), "\n")
+    detail = "error: logged error(s): " .. __esc(detail)
   elseif t.out ~= nil and got ~= t.out then
-    io.write("\n__SKULL__\tFAIL\t", t.name, ": output mismatch: expected <", __esc(t.out), "> got <", __esc(got), ">\n")
+    detail = "output mismatch: expected <" .. __esc(t.out) .. "> got <" .. __esc(got) .. ">"
   elseif t.val then
     result = "value"
-    -- %.17g round-trips any f64; booleans via tostring. The host does the
-    -- comparison (test_protocol::compare_value), never this harness.
-    local s
-    if type(ret) == "number" then s = string.format("%.17g", ret) else s = tostring(ret) end
-    io.write("\n__SKULL__\tVALUE\t", t.name, "\t", s, "\n")
+    detail = type(ret) == "number" and string.format("%.17g", ret) or __esc(tostring(ret))
   else
     result = "pass"
-    io.write("\n__SKULL__\tPASS\t\n")
   end
-  io.write("\n__SKULL__\tTIME\t", t.name, "\t", string.format("%.3f", ms), "\t", result,
-    "\t", __skull_token, "\t", n - 1, "\n")
+  __skull_report(n, string.format("%.3f\t%s\t%s", ms, result, detail))
   -- Reclaim floating test garbage without changing the collector's pacing.
   if __skull_gc_limit_kb > 0 and collectgarbage("count") > __skull_gc_limit_kb then
     collectgarbage("collect")
@@ -761,8 +754,9 @@ fn run_emitted_tests(
         if skipped == 0 {
             let (script, excerpt) = write_test_program(lua, "")
                 .map_err(|e| UnitFailure::new("invalid lua emitted (skull bug)", e))?;
-            let run = run_test_program(script.path(), limit, run_token(), 0, None)
-                .map_err(|e| UnitFailure::new("invalid lua emitted (skull bug)", e))?;
+            let run =
+                run_test_program(script.path(), limit, "", &mut LuaTestSequence::new(0), None)
+                    .map_err(|e| UnitFailure::new("invalid lua emitted (skull bug)", e))?;
             if run.timed_out || !run.output.status.success() {
                 return Err(UnitFailure {
                     reason: format!(
@@ -817,11 +811,11 @@ fn run_emitted_tests(
     }
     assignment.retain(|indices| !indices.is_empty());
     let shards = assignment.len();
-    let runs: Vec<Result<Vec<ShardRun>>> = std::thread::scope(|scope| {
+    let runs: Vec<Result<Vec<ShardRun<'_>>>> = std::thread::scope(|scope| {
         let handles: Vec<_> = assignment
             .iter()
             .map(|indices| {
-                let (script, token) = (script.path(), token.clone());
+                let (script, token) = (script.path(), token.as_str());
                 scope.spawn(move || run_shard(script, limit, token, indices, shards > 1))
             })
             .collect();
@@ -836,187 +830,165 @@ fn run_emitted_tests(
     });
     drop(script);
 
-    let expects: HashMap<&str, &skull::ValueExpect> = tests
-        .iter()
-        .filter_map(|t| t.returns.as_ref().map(|v| (t.name.as_str(), v)))
-        .collect();
-    let mut passed = 0;
-    let mut fails = Vec::new();
-    let mut diagnostics = Vec::new();
+    let mut outcome = SkullOutcome {
+        skipped,
+        ..SkullOutcome::default()
+    };
     let mut timings = Vec::new();
-    let mut segments = Vec::new();
     for (shard, run) in runs.into_iter().enumerate() {
-        let run = run.map_err(|e| UnitFailure::new("test run errored (skull bug)", e))?;
-        for (process, segment) in run.into_iter().enumerate() {
-            let label = if process == 0 {
-                format!("shard {}/{shards}: ", shard + 1)
-            } else {
-                format!("shard {}/{shards} process {}: ", shard + 1, process + 1)
-            };
-            segments.push((label, segment));
-        }
-    }
-    for (label, ShardRun { indices, run }) in segments {
-        let indices = indices.as_slice();
-        // The harness `pcall`s each test, so an ordinary assertion failure is a
-        // FAIL marker and the process still exits 0. A non-zero status means
-        // the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
-        // after that point never ran in this process. A truncated run still
-        // reports what it got; `run_shard` reruns the tests after a stopped one.
-        let stdout = String::from_utf8_lossy(&run.output.stdout);
-        let stderr = String::from_utf8_lossy(&run.output.stderr);
-        let died = !run.output.status.success();
-
-        let markers = crate::test_protocol::parse_skull_markers(&stdout);
-        if markers.is_none() && !run.timed_out && !died && run.running_test.is_none() {
-            return Err(UnitFailure::new(
-                "invalid lua emitted (skull bug)",
-                format!("{label}{stdout}\n{stderr}\n\n--- emitted lua (truncated) ---\n{excerpt}"),
-            ));
-        }
-        let markers = markers.unwrap_or(crate::test_protocol::SkullMarkers {
-            passed: 0,
-            fails: Vec::new(),
-            values: Vec::new(),
-            times: Vec::new(),
-        });
-        let reported = markers.passed + markers.fails.len() + markers.values.len();
-        passed += markers.passed;
-        fails.extend(markers.fails);
-
-        let mut value_fails = HashSet::new();
-        for (name, val) in &markers.values {
-            let Some(expect) = expects.get(name.as_str()) else {
-                return Err(UnitFailure::new(
-                    "harness invariant breach (skull bug)",
-                    format!("VALUE line for `{name}` without a returns expectation"),
-                ));
-            };
-            match crate::test_protocol::compare_value(
-                expect,
-                val,
-                crate::test_protocol::FLOAT_REL_TOL,
-            ) {
-                Ok(()) => passed += 1,
-                Err(detail) => {
-                    value_fails.insert(name.as_str());
-                    fails.push(format!("{name}: {detail}"));
+        let segments = run.map_err(|e| UnitFailure::new("test run errored (skull bug)", e))?;
+        for (
+            process,
+            ShardRun {
+                indices,
+                run,
+                sequence,
+            },
+        ) in segments.into_iter().enumerate()
+        {
+            let running = sequence.running();
+            let reported = sequence.finished.len();
+            let died = !run.output.status.success();
+            let stopped = run.timed_out || died || reported < indices.len();
+            let label = || {
+                if process == 0 {
+                    format!("shard {}/{shards}: ", shard + 1)
+                } else {
+                    format!("shard {}/{shards} process {}: ", shard + 1, process + 1)
                 }
+            };
+            if reported == 0 && running.is_none() && !run.timed_out && !died {
+                return Err(UnitFailure::new(
+                    "invalid lua emitted (skull bug)",
+                    format!(
+                        "{}{}\n{}\n\n--- emitted lua (truncated) ---\n{excerpt}",
+                        label(),
+                        String::from_utf8_lossy(&run.output.stdout),
+                        String::from_utf8_lossy(&run.output.stderr),
+                    ),
+                ));
+            }
+            for (&index, row) in indices.iter().zip(sequence.finished) {
+                let test = tests[index];
+                let status = match row.result.check(test.returns.as_ref()) {
+                    Ok(()) => {
+                        outcome.passed += 1;
+                        "pass"
+                    }
+                    Err(detail) => {
+                        outcome.fails.push(format!("{}: {detail}", test.name));
+                        "fail"
+                    }
+                };
+                timings.push((
+                    index,
+                    TestTiming {
+                        name: test.name.clone(),
+                        ms: row.ms,
+                        status,
+                    },
+                ));
+            }
+            if stopped {
+                report_stopped_shard(
+                    &mut outcome,
+                    &label(),
+                    indices,
+                    &tests,
+                    &files,
+                    &run,
+                    running,
+                    reported,
+                    limit,
+                );
             }
         }
-        timings.extend(markers.times.iter().zip(indices).map(|(time, &index)| {
-            (
-                index,
-                TestTiming {
-                    name: time.name.clone(),
-                    ms: time.ms,
-                    status: match time.result.as_str() {
-                        "pass" => "pass",
-                        "value" if !value_fails.contains(time.name.as_str()) => "pass",
-                        _ => "fail",
-                    },
-                },
-            )
-        }));
-
-        // Every selected test owes exactly one marker. Counting only the
-        // markers that ARRIVED makes a truncated run self-consistent -- three
-        // tests, one marker, `1/1 passed` -- so each test that never reported
-        // is a named failure. This is the only signal for a premature
-        // `os.exit(0)`, which exits success and emits no marker at all.
-        let stop = if run.timed_out {
-            timeout_cause(&run, limit)
-        } else if died {
-            "child process stopped".to_string()
-        } else {
-            "process exited 0 before all tests reported".to_string()
-        };
-        let missing = indices.iter().copied().skip(reported).collect::<Vec<_>>();
-        if run.timed_out || died || !missing.is_empty() {
-            let state = if let Some(position) = run.running_test {
-                indices
-                    .get(position)
-                    .map(|&index| {
-                        format!("running test `{}` ({})", tests[index].name, files[index],)
-                    })
-                    .unwrap_or_else(|| format!("running shard test ordinal {position}"))
-            } else if let Some(position) = run.last_completed_test {
-                indices
-                    .get(position)
-                    .map(|&index| {
-                        format!(
-                            "between tests after `{}` ({})",
-                            tests[index].name, files[index],
-                        )
-                    })
-                    .unwrap_or_else(|| "between tests".to_string())
-            } else {
-                "before the first test started".to_string()
-            };
-            let missing = missing
-                .iter()
-                .map(|&index| format!("{}: never reported ({})", tests[index].name, files[index],))
-                .collect::<Vec<_>>()
-                .join(", ");
-            diagnostics.push(format!(
-                "{label}stopped: {stop}; exit status: {}; {state}; never reported: {}; stderr:\n{}",
-                child_exit_status(&run.output.status),
-                if missing.is_empty() {
-                    "<none>"
-                } else {
-                    &missing
-                },
-                stderr_excerpt(&run.output.stderr),
-            ));
-        }
-        for (position, &index) in indices.iter().enumerate().skip(reported) {
-            let reason = if run.running_test == Some(position) {
-                format!("{stop} while it ran")
-            } else if run.running_test.is_none() && run.last_completed_test.is_some() {
-                format!("{stop} between tests")
-            } else {
-                "its process stopped before it ran".to_string()
-            };
-            fails.push(format!(
-                "{}: never reported ({}; {label}{reason})",
-                tests[index].name, files[index]
-            ));
-        }
-        if reported >= indices.len() && died {
-            fails.push(format!(
-                "{label}every @test reported, but the harness process exited non-zero -- \
-                 something after the tests failed"
-            ));
-        }
     }
-    timings.sort_by_key(|(index, _)| *index);
-    let timings = timings.into_iter().map(|(_, timing)| timing).collect();
+    timings.sort_unstable_by_key(|(index, _)| *index);
+    outcome.timings = timings.into_iter().map(|(_, timing)| timing).collect();
+    Ok(outcome)
+}
 
-    Ok(SkullOutcome {
-        passed,
-        fails,
-        skipped,
-        timings,
-        diagnostics,
-    })
+fn report_stopped_shard(
+    outcome: &mut SkullOutcome,
+    label: &str,
+    indices: &[usize],
+    tests: &[&skull::SkullTest],
+    files: &[&String],
+    run: &crate::common::ProcessResult,
+    running: Option<usize>,
+    reported: usize,
+    limit: Duration,
+) {
+    let stop = if run.timed_out {
+        timeout_cause(run, limit)
+    } else if !run.output.status.success() {
+        "child process stopped".to_string()
+    } else {
+        "process exited 0 before all tests reported".to_string()
+    };
+    let state = if let Some(position) = running {
+        let index = indices[position];
+        format!("running test `{}` ({})", tests[index].name, files[index])
+    } else if reported > 0 {
+        let index = indices[reported - 1];
+        format!(
+            "between tests after `{}` ({})",
+            tests[index].name, files[index]
+        )
+    } else {
+        "before the first test started".to_string()
+    };
+    let mut missing = Vec::new();
+    for (position, &index) in indices.iter().enumerate().skip(reported) {
+        let reason = if running == Some(position) {
+            format!("{stop} while it ran")
+        } else if running.is_none() && reported > 0 {
+            format!("{stop} between tests")
+        } else {
+            "its process stopped before it ran".to_string()
+        };
+        missing.push(format!(
+            "{}: never reported ({})",
+            tests[index].name, files[index]
+        ));
+        outcome.fails.push(format!(
+            "{}: never reported ({}; {label}{reason})",
+            tests[index].name, files[index]
+        ));
+    }
+    if missing.is_empty() {
+        outcome.fails.push(format!(
+            "{label}every @test reported, but the harness process exited non-zero -- \
+             something after the tests failed"
+        ));
+        missing.push("<none>".into());
+    }
+    outcome.diagnostics.push(format!(
+        "{label}stopped: {stop}; exit status: {}; {state}; never reported: {}; stderr:\n{}",
+        child_exit_status(&run.output.status),
+        missing.join(", "),
+        stderr_excerpt(&run.output.stderr),
+    ));
 }
 
 const TEST_CPU_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
 
-struct ShardRun {
-    indices: Vec<usize>,
+struct ShardRun<'a> {
+    indices: &'a [usize],
     run: crate::common::ProcessResult,
+    sequence: LuaTestSequence,
 }
 
 const SHARD_RESTARTS: usize = 3;
 
-fn run_shard(
+fn run_shard<'a>(
     script: &std::path::Path,
     limit: std::time::Duration,
-    token: String,
-    indices: &[usize],
+    token: &str,
+    indices: &'a [usize],
     select: bool,
-) -> Result<Vec<ShardRun>> {
+) -> Result<Vec<ShardRun<'a>>> {
     let mut runs = Vec::new();
     let mut rest = indices;
     loop {
@@ -1026,22 +998,16 @@ fn run_shard(
                 .collect::<Vec<_>>()
                 .join(",")
         });
-        let run = run_test_program(
-            script,
-            limit,
-            token.clone(),
-            rest.len(),
-            selection.as_deref(),
-        )?;
-        let resume_at = run
-            .running_test
+        let mut sequence = LuaTestSequence::new(rest.len());
+        let run = run_test_program(script, limit, token, &mut sequence, selection.as_deref())?;
+        let next = sequence
+            .running()
             .filter(|_| runs.len() < SHARD_RESTARTS)
-            .map(|position| position + 1)
-            .filter(|&next| next < rest.len());
-        let next = resume_at.unwrap_or(rest.len());
+            .map_or(rest.len(), |position| position + 1);
         runs.push(ShardRun {
-            indices: rest[..next].to_vec(),
+            indices: &rest[..next],
             run,
+            sequence,
         });
         if next == rest.len() {
             return Ok(runs);
@@ -1127,8 +1093,8 @@ fn write_test_program(
 fn run_test_program(
     script: &std::path::Path,
     limit: std::time::Duration,
-    token: String,
-    tests: usize,
+    token: &str,
+    tests: &mut LuaTestSequence,
     selection: Option<&str>,
 ) -> Result<crate::common::ProcessResult> {
     use rock_host::process_management::{register_child_process, unregister_child_process};
@@ -1153,8 +1119,12 @@ fn run_test_program(
     register_child_process(pid);
     let result = crate::common::ProcessManager::wait_with_test_watchdog(
         &mut child,
-        limit,
-        crate::common::TestWatch { token, tests },
+        crate::common::WaitPolicy::Cpu {
+            cpu_limit: limit,
+            wall_limit: crate::common::test_watchdog_wall_backstop(limit),
+        },
+        token.to_owned(),
+        tests,
     );
     if result.is_err() {
         if let Err(error) = child.kill() {

@@ -1,5 +1,7 @@
 use crate::compile_cmd;
 #[cfg(unix)]
+use crate::test_protocol::LuaTestSequence;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -1800,6 +1802,17 @@ fn test_limit_reruns_the_tests_after_a_stopped_one() {
 }
 
 #[test]
+fn marker_shaped_stdout_cannot_report_a_test_that_exits() {
+    let dir = file_limit_package(
+        "assert(io.stdout:write('__SKULL__', string.char(9), 'PASS', string.char(9,10))); os.exit(0)",
+        None,
+    );
+    let fails = failures_after(build_with_limit(&dir, Duration::from_secs(10)), 0);
+    assert_eq!(fails.len(), 1);
+    assert!(fails[0].contains("process exited 0 before all tests reported while it ran"));
+}
+
+#[test]
 fn test_limit_bounds_the_reruns_of_a_shard() {
     let dir = file_limit_package("while true do end", None);
     let hung = (0..super::SHARD_RESTARTS + 1)
@@ -1851,8 +1864,8 @@ fn test_limit_bounds_the_reruns_of_a_shard() {
 #[cfg(unix)]
 fn wait_for_test_watchdog_fixture(
     script: &str,
-    policy: crate::common::WaitPolicy,
-) -> crate::common::ProcessResult {
+    wall_limit: Duration,
+) -> (crate::common::ProcessResult, LuaTestSequence) {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(script)
@@ -1860,16 +1873,15 @@ fn wait_for_test_watchdog_fixture(
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn watchdog fixture");
-    let run = crate::common::ProcessManager::wait_with_policy_and_tests::<()>(
+    let mut sequence = LuaTestSequence::new(2);
+    let run = crate::common::ProcessManager::wait_with_test_watchdog(
         &mut child,
-        policy,
-        false,
-        false,
-        Some(crate::common::TestWatch {
-            token: "watch-token".to_string(),
-            tests: 2,
-        }),
-        None,
+        crate::common::WaitPolicy::Cpu {
+            cpu_limit: Duration::from_millis(100),
+            wall_limit,
+        },
+        "watch-token".into(),
+        &mut sequence,
     )
     .expect("wait for watchdog fixture");
     // Child::try_wait can reap the child itself; ECHILD proves the watchdog did.
@@ -1883,23 +1895,17 @@ fn wait_for_test_watchdog_fixture(
     let error = std::io::Error::last_os_error();
     assert_eq!(waited, -1, "watchdog must reap its child: {run:?}");
     assert_eq!(error.raw_os_error(), Some(libc::ECHILD), "{error}");
-    run
+    (run, sequence)
 }
 
 #[cfg(unix)]
 #[test]
 fn test_limit_kills_a_blocked_test_at_the_wall_backstop() {
     let script = r#"
-printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
+printf 'ROCK_TEST\twatch-token\t0\tstart\n' >&2
 exec sleep 600
 "#;
-    let run = wait_for_test_watchdog_fixture(
-        script,
-        crate::common::WaitPolicy::Test {
-            cpu_limit: Duration::from_millis(100),
-            wall_limit: Duration::from_secs(1),
-        },
-    );
+    let (run, sequence) = wait_for_test_watchdog_fixture(script, Duration::from_secs(1));
     assert!(
         run.timed_out,
         "a blocked child must eventually be bounded: {run:?}"
@@ -1908,7 +1914,51 @@ exec sleep 600
         run.timeout_phase,
         Some(crate::common::TimeoutPhase::TestWall)
     );
-    assert_eq!(run.running_test, Some(0));
+    assert_eq!(sequence.running(), Some(0));
+    assert!(sequence.finished.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn watchdog_replays_only_complete_ordered_terminal_rows() {
+    use crate::test_protocol::{LuaTestResult, LuaTestRow};
+    use std::os::unix::process::ExitStatusExt;
+
+    let prefix = r#"
+printf 'ROCK_TEST\tforged\t0\tstart\n' >&2
+printf 'ROCK_TEST\twatch-token\t1\tstart\n' >&2
+printf 'ROCK_TEST\twatch-token\t0\t1\tpass\t\n' >&2
+printf 'ROCK_TEST\twatch-token\t0\tstart\n' >&2
+printf 'ROCK_TEST\twatch-token\t0\tstart\n' >&2
+printf 'ROCK_TEST\twatch-token\t0\tnot-ms\tpass\t\n' >&2
+printf 'ROCK_TEST\twatch-token\t0\t12.' >&2
+printf '500\tvalue\t42\n' >&2
+printf 'ROCK_TEST\twatch-token\t0\t1\tfail\trepeated\n' >&2
+"#;
+    for (suffix, code, signal, active) in [
+        ("exit 0", Some(0), None, None),
+        ("kill -TERM $$", None, Some(libc::SIGTERM), None),
+        (
+            r"printf 'ROCK_TEST\twatch-token\t1\tstart\nROCK_TEST\twatch-token\t1\t1\tpass\t' >&2; kill -TERM $$",
+            None,
+            Some(libc::SIGTERM),
+            Some(1),
+        ),
+    ] {
+        let (run, sequence) =
+            wait_for_test_watchdog_fixture(&format!("{prefix}\n{suffix}"), Duration::from_secs(10));
+        assert!(!run.timed_out, "{run:?}");
+        assert_eq!(run.output.status.code(), code);
+        assert_eq!(run.output.status.signal(), signal);
+        assert_eq!(sequence.running(), active);
+        assert_eq!(
+            sequence.finished,
+            [LuaTestRow {
+                ms: 12.5,
+                result: LuaTestResult::Value("42".into())
+            }],
+        );
+    }
 }
 
 #[test]
