@@ -103,7 +103,6 @@ const WORLD_TEXT_SIDE_COLUMN_GAP_PX: float = 2.0
 pub const WORLD_TEXT_SIDE_FLIGHT_SECS: float = 0.18
 const WORLD_TEXT_COMPOSITION_RESPONSE: float = 12.0
 pub const WORLD_TEXT_Z_LAYER: int = -1
-pub const WORLD_TEXT_NARRATION_PLATE_Z: int = 1
 pub const WORLD_TEXT_NARRATION_TEXT_Z: int = 2
 
 pub fn world_text_z_for_style(style: WorldTextStyle) -> int {

@@ -525,20 +525,6 @@ pub fn entity_id_async_answer_pixel() -> IVec2? {
     return PICK_ANSWER_POS
 }
 
-struct TextDraw {
-    pos: Vec2,
-    text: string,
-    color: Color,
-    size: float,
-}
-
-struct RectDraw {
-    pos: Vec2,
-    size: Vec2,
-    color: Color,
-    mode: string,
-}
-
 value DurationItem {
     draw_fn: () -> (),
     time_remaining: float,

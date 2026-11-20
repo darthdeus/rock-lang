@@ -132,16 +132,6 @@ struct SemanticUniformBlock {
     leaves: [CanonicalUniformLeaf],
 }
 
-value SemanticUniformArrayMember {
-    name: string,
-    values: [CanonicalUniformLeaf],
-}
-
-value SemanticUniformArrayBlock {
-    name: string,
-    members: [SemanticUniformArrayMember],
-}
-
 @uniform_values inline(lua) fn uniform_values<T>(u: T) -> SemanticUniformBlock = """
     error("uniform_values is compiler-expanded")
 """

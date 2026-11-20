@@ -14,7 +14,6 @@ pub global TIME_SCALE: float = get_env_float("STONE_TIME_SCALE", 1.0)
 // consumers use the host task clock.
 pub global frame_seq: int = 0
 
-const KEY_DEBUG_ENTITY_ID: string = "m"
 const KEY_DEBUG_PROFILER: ToolKey = ToolKey::F8
 const KEY_DEBUG_TIME_SLOWER: ToolKey = ToolKey::LeftBracket
 const KEY_DEBUG_TIME_FASTER: ToolKey = ToolKey::RightBracket
@@ -163,9 +162,6 @@ pub const STONE_MOD_GUI: int = 8
 global STONE_KEY_ESCAPE: int = 27
 global STONE_KEY_SPACE: int = 32
 
-// SDL window position constants
-global SDL_WINDOWPOS_UNDEFINED: int = 0x1FFF0000
-const SDL_WINDOWPOS_CENTERED: int = 0x2FFF0000
 
 // SDL keycodes for non-ASCII keys are SDL_SCANCODE_FOO | SDLK_SCANCODE_MASK
 // where SDLK_SCANCODE_MASK = (1 << 30) = 0x40000000.
@@ -1488,14 +1484,6 @@ pub fn stone_get_drawable_size() -> (int, int) {
 extern(ffi, "stone") fn stone_get_dpi_scale() -> float
 extern(ffi, "stone") fn stone_get_config_imgui_scale() -> float
 
-// SDL Scancodes for common keys
-const SDL_SCANCODE_ESCAPE: int = 41
-const SDL_SCANCODE_SPACE: int = 44
-const SDL_SCANCODE_W: int = 26
-const SDL_SCANCODE_A: int = 4
-const SDL_SCANCODE_S: int = 22
-const SDL_SCANCODE_D: int = 7
-
 pub const MOUSE_BUTTON_LEFT: int = 1
 pub const MOUSE_BUTTON_MIDDLE: int = 2
 pub const MOUSE_BUTTON_RIGHT: int = 3
@@ -1812,15 +1800,6 @@ pub extern(ffi, "stone") fn stone_get_live_canvas_bytes() -> int
 
 pub extern(ffi, "stone") fn stone_reset_frame_stats()
 extern(ffi, "stone") fn stone_track_text_draw_call()
-
-global STATS_HISTORY_SIZE: int = 300  // 5 seconds at 60fps
-
-global stats_history_draw_calls: [int] = []
-global stats_history_text_draws: [int] = []
-global stats_history_canvas_switches: [int] = []
-global stats_history_shader_switches: [int] = []
-global stats_history_index: int = 0
-global stats_history_count: int = 0
 
 // The live counters reset at frame start, so update-stage readers see a
 // mid-frame value; this holds the last complete frame.

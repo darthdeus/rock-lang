@@ -117,8 +117,6 @@ fn ui_id_debug_new() -> UiIdDebug {
 
 pub global UI_ID_DEBUG: UiIdDebug = ui_id_debug_new()
 
-pub const UI_ID_JOIN_FORMATS: int = 0
-
 // djb2 over "scope/label", masked to positive 31 bits (h*33 stays exact in a double). 0 is
 // the "none" sentinel, remapped to 1.
 inline(lua) fn __ui_id_hash(scope: string, label: string) -> int = """

@@ -2198,9 +2198,6 @@ inline(lua) fn table_copy(tbl: any) -> any = """
 
 const PI: float = 3.141592653589793
 const TAU: float = 6.283185307179586
-const TWO_PI: float = TAU
-const HALF_PI: float = 1.5707963267948966
-const QTR_PI: float = 0.7853981633974483
 const PHI: float = 1.618033988749895
 const EPSILON: float = 0.0000001
 
@@ -3887,11 +3884,6 @@ fn get_env_float(var: string, default_val: float) -> float {
 // When Rock's string interpolation supports all common format specifiers
 // (including %q for Lua-style quoting), this should be removed.
 @inline inline(lua) fn format_lua(fmt: string, arg: any) -> string = "string.format(fmt, arg)"
-
-struct FunctionCallInfo {
-    name: string,
-    stage: int,
-}
 
 @build_var_expand inline(lua) fn build_var(name: string) -> string = """
     error("build_var is a compile-time intrinsic (expanded at compile time)")

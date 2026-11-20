@@ -22,7 +22,6 @@ pub global GLYPH_UNIT_CACHES: [[[GlyphUnitData]]] = []
 pub global FONT_CP_SLOTS: [Map<int, int>] = []
 pub const UI_TEXT_Z_LAYER: int = 1            // default z_layer for batched text
 global TEXT_LAYOUT_INSTANCE_GLYPH_SCRATCH: NativeBuffer<float> = native_buffer_float(9)
-pub const TEXT_LAYOUT_INSTANCE_GLYPH_SCRATCH_ALLOCS: int = 0
 pub global TEXT_LAYOUT_INSTANCE_GLYPH_FETCHES: int = 0
 // How many times the raster geometry walked `Font` -> `FontData` (`Font.data`
 // -> `Entity.get` -> the Session arena registry -> `arena_slot_live`). That
