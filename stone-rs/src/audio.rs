@@ -438,15 +438,16 @@ enum DuckPhase {
     Release,
 }
 
+#[derive(Clone)]
 struct Bus {
     mixer: rodio::mixer::Mixer,
-    source: RefCell<Option<BusSource>>,
     params: Arc<BusParams>,
     sample_rate: SampleRate,
 }
 
 impl Bus {
-    fn new(channels: ChannelCount, sample_rate: SampleRate) -> Self {
+    /// A bus and its one output, for exactly one parent.
+    fn new(channels: ChannelCount, sample_rate: SampleRate) -> (Self, BusSource) {
         let (mixer, inner) = rodio::mixer::mixer(channels, sample_rate);
         let params = Arc::new(BusParams::new(sample_rate));
         let rate = sample_rate.get() as f32;
@@ -454,46 +455,38 @@ impl Bus {
         let mut lowpass = Biquad::new();
         lowpass.set_lowpass(max_cutoff(sample_rate), 0.707, rate);
 
-        Bus {
+        let source = BusSource {
+            inner,
+            params: params.clone(),
+            channels: channels.get() as usize,
+            ch: 0,
+            frame: [0.0; MAX_CHANNELS],
+            applied_gain: 1.0,
+            meter_env: 0.0,
+            meter_decay: (10.0f32).powf(-METER_FALL_DB_PER_SEC / 20.0 / rate),
+            applied_cutoff_log2: max_cutoff(sample_rate).log2(),
+            applied_drive: 1.0,
+            applied_mix: 0.0,
+            lowpass,
+            coeff_cutoff_log2: max_cutoff(sample_rate).log2(),
+            reverb: Freeverb::new(sample_rate.get() as usize),
+            reverb_gen: 0,
+            reverb_enabled: false,
+            duck_phase: DuckPhase::Idle,
+            duck_env: 1.0,
+            duck_depth: 1.0,
+            duck_attack_step: 0.0,
+            duck_release_step: 0.0,
+            duck_gen: 0,
+            slew: slew_coeff(sample_rate),
+            sample_rate: rate,
+        };
+        let bus = Bus {
             mixer,
-            source: RefCell::new(Some(BusSource {
-                inner,
-                params: params.clone(),
-                channels: channels.get() as usize,
-                ch: 0,
-                frame: [0.0; MAX_CHANNELS],
-                applied_gain: 1.0,
-                meter_env: 0.0,
-                meter_decay: (10.0f32).powf(-METER_FALL_DB_PER_SEC / 20.0 / rate),
-                applied_cutoff_log2: max_cutoff(sample_rate).log2(),
-                applied_drive: 1.0,
-                applied_mix: 0.0,
-                lowpass,
-                coeff_cutoff_log2: max_cutoff(sample_rate).log2(),
-                reverb: Freeverb::new(sample_rate.get() as usize),
-                reverb_gen: 0,
-                reverb_enabled: false,
-                duck_phase: DuckPhase::Idle,
-                duck_env: 1.0,
-                duck_depth: 1.0,
-                duck_attack_step: 0.0,
-                duck_release_step: 0.0,
-                duck_gen: 0,
-                slew: slew_coeff(sample_rate),
-                sample_rate: rate,
-            })),
             params,
             sample_rate,
-        }
-    }
-
-    /// Hand the wrapper to a parent. Panics if called twice -- a bus has one
-    /// output, and a second call would mean a bus wired into two parents.
-    fn take_source(&self) -> BusSource {
-        self.source
-            .borrow_mut()
-            .take()
-            .expect("bus source already taken: a bus has exactly one output")
+        };
+        (bus, source)
     }
 
     fn set_gain(&self, gain: f32) {
@@ -765,8 +758,7 @@ impl Buses {
         rate: rodio::SampleRate,
         muted: bool,
     ) -> Self {
-        let buses = Buses::detached(channels, rate);
-        let master = buses.0[BUS_MASTER as usize].take_source();
+        let (buses, master) = Buses::detached(channels, rate);
         if muted {
             mixer.add(master.amplify(0.0));
         } else {
@@ -775,13 +767,18 @@ impl Buses {
         buses
     }
 
-    fn detached(channels: rodio::ChannelCount, rate: rodio::SampleRate) -> Self {
-        let buses = Buses(std::array::from_fn(|_| Bus::new(channels, rate)));
-        let (master, leaves) = buses.0.split_first().expect("master bus");
-        for leaf in leaves {
-            master.mixer.add(leaf.take_source());
-        }
-        buses
+    /// The buses with every leaf wired into master, and master's output.
+    fn detached(channels: rodio::ChannelCount, rate: rodio::SampleRate) -> (Self, BusSource) {
+        let (master, master_out) = Bus::new(channels, rate);
+        let buses = Buses(std::array::from_fn(|id| {
+            if id == BUS_MASTER as usize {
+                return master.clone();
+            }
+            let (leaf, out) = Bus::new(channels, rate);
+            master.mixer.add(out);
+            leaf
+        }));
+        (buses, master_out)
     }
 
     fn get(&self, id: u32) -> Option<&Bus> {
@@ -928,7 +925,7 @@ pub extern "C" fn stone_audio_init() -> bool {
         if audio_device_disabled() {
             *state.borrow_mut() = Some(AudioState::new(
                 None,
-                Buses::detached(STUB_CHANNELS, STUB_SAMPLE_RATE),
+                Buses::detached(STUB_CHANNELS, STUB_SAMPLE_RATE).0,
             ));
             return true;
         }
@@ -1436,11 +1433,8 @@ fn constant_power_pan(pan: f32) -> (f32, f32) {
     (angle.cos(), angle.sin())
 }
 
-struct SpatialVoiceSource<I>
-where
-    I: Source<Item = f32>,
-{
-    input: I,
+struct SpatialVoiceSource {
+    input: BoxedSource,
     pan: Arc<AtomicU32>,
     pan_bits: u32,
     left: f32,
@@ -1449,11 +1443,8 @@ where
     mono: f32,
 }
 
-impl<I> SpatialVoiceSource<I>
-where
-    I: Source<Item = f32>,
-{
-    fn new(input: I, pan: Arc<AtomicU32>) -> Self {
+impl SpatialVoiceSource {
+    fn new(input: BoxedSource, pan: Arc<AtomicU32>) -> Self {
         let pan_bits = pan.load(Ordering::Relaxed);
         let (left, right) = constant_power_pan(f32::from_bits(pan_bits));
         Self {
@@ -1468,10 +1459,7 @@ where
     }
 }
 
-impl<I> Iterator for SpatialVoiceSource<I>
-where
-    I: Source<Item = f32>,
-{
+impl Iterator for SpatialVoiceSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1509,10 +1497,7 @@ where
     }
 }
 
-impl<I> Source for SpatialVoiceSource<I>
-where
-    I: Source<Item = f32>,
-{
+impl Source for SpatialVoiceSource {
     fn current_span_len(&self) -> Option<usize> {
         None
     }
@@ -2035,7 +2020,7 @@ mod tests {
     }
 
     fn empty_audio_state() -> AudioState {
-        AudioState::new(None, Buses::detached(ch2(), sr()))
+        AudioState::new(None, Buses::detached(ch2(), sr()).0)
     }
 
     fn ch2() -> ChannelCount {
@@ -2046,8 +2031,8 @@ mod tests {
     }
     fn wired() -> (Bus, impl Iterator<Item = f32>) {
         let (parent, out) = rodio::mixer::mixer(ch2(), sr());
-        let bus = Bus::new(ch2(), sr());
-        parent.add(bus.take_source());
+        let (bus, source) = Bus::new(ch2(), sr());
+        parent.add(source);
         (bus, out)
     }
     fn blip() -> SamplesBuffer {
@@ -2442,7 +2427,7 @@ mod tests {
     fn positional_voice_changes_pan_without_restarting() {
         let pan = Arc::new(AtomicU32::new((-1.0f32).to_bits()));
         let source = SamplesBuffer::new(NonZero::new(1u16).unwrap(), sr(), vec![1.0f32, 0.5]);
-        let mut out = SpatialVoiceSource::new(source, pan.clone());
+        let mut out = SpatialVoiceSource::new(Box::new(source), pan.clone());
         assert_eq!(out.next(), Some(1.0));
         pan.store(1.0f32.to_bits(), Ordering::Relaxed);
         assert_eq!(out.next(), Some(0.0), "one stereo frame uses one pan");
