@@ -94,6 +94,20 @@ A body-less `extern` declaration names its backend: `extern(lua) fn` refers to
 an existing Lua global, `extern(js) fn` to a JS global, and
 `extern(ffi, "lib") fn` to a C symbol reached through LuaJIT FFI.
 
+Use `extern(lua, "module.member")` to give a Lua callable its own Rock name
+and signature.
+
+```rock
+extern(lua, "imgui.Button") fn imgui_button(label: string) -> bool
+```
+
+Calls look up the path and call the member directly. Taking a function value
+reads the current member. The host supplies the global and its fields, and the
+member must accept the declared arguments and return the declared Lua values.
+A raw C function reached this way uses its LuaJIT return values as-is. Use
+`extern(ffi, "lib")` when the call needs Rock's C return conversions. A JS
+caller needs a JS binding for the same Rock signature.
+
 A global may omit its initializer:
 
 ```rock

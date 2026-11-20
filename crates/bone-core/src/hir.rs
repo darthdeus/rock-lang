@@ -442,6 +442,7 @@ pub struct Function {
     /// Target backend and verbatim body for `inline(<backend>)` declarations.
     pub inline_body: Option<(FnBackend, Ustr)>,
     pub is_extern: bool,
+    pub lua_extern_path: Option<Ustr>,
     /// Backend used to select the emitted variant. Same-signature declarations
     /// for different backends share one overload candidate.
     pub backend: FnBackend,

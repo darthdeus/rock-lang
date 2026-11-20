@@ -102,7 +102,7 @@ pub fn callee_binding_plan(
             _ => continue,
         }
         let decl = func_of(ws, callee);
-        if skull_mir::mangle::is_exempt(decl) || decl.inline_body.is_some() {
+        if decl.is_extern || skull_mir::mangle::is_exempt(decl) || decl.inline_body.is_some() {
             continue;
         }
         if decl.has_iterator_bounds() {

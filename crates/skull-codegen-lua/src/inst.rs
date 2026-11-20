@@ -26,7 +26,11 @@ impl Emitter<'_> {
     pub(crate) fn write_call(&self, out: &mut String, id: Idx<Inst>) {
         match &self.func.insts[id] {
             Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
-                out.push_str(&self.callee_name(id, *func));
+                if let Some(path) = func_of(self.ws, *func).lua_extern_path {
+                    self.write_lua_extern_path(out, path.as_str());
+                } else {
+                    out.push_str(&self.callee_name(id, *func));
+                }
                 out.push('(');
                 if let Some(forward) = self.call_arg_forwards.get(id) {
                     self.write_csv(out, &args[..forward.prefix_len]);
@@ -46,6 +50,26 @@ impl Emitter<'_> {
             _ => unreachable!("not a call"),
         }
         out.push(')');
+    }
+
+    pub(crate) fn write_lua_extern_path(&self, out: &mut String, path: &str) {
+        let root = path.split('.').next().unwrap();
+        // These names can be lexical locals or upvalues in an emitted body.
+        let generated_local = root.starts_with("__")
+            || root == "_"
+            || root.split_at_checked(1).is_some_and(|(prefix, suffix)| {
+                matches!(prefix, "b" | "c" | "r" | "v")
+                    && !suffix.is_empty()
+                    && suffix.bytes().all(|b| b.is_ascii_digit())
+            });
+        if generated_local
+            || self
+                .bound
+                .is_some_and(|plan| plan.parameters.iter().any(|p| p.as_str() == root))
+        {
+            out.push_str("_G.");
+        }
+        out.push_str(path);
     }
 
     pub(crate) fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> ustr::Ustr {

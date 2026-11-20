@@ -7,6 +7,19 @@ use rock_tokenizer::{BindingPower, Token, TokenKind, Tokenizer, interp};
 use std::rc::Rc;
 use ustr::Ustr;
 
+fn is_lua_identifier(segment: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if",
+        "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+    ];
+    let mut bytes = segment.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && !KEYWORDS.contains(&segment)
+}
+
 pub(crate) struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
@@ -1021,7 +1034,22 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(n) if n.as_str() == "lua" => {
                 self.advance();
-                FunctionBody::ExternLua
+                let path = if self.eat(TokenKind::Comma) {
+                    let (TokenKind::String(path) | TokenKind::RawString(path)) = self.kind() else {
+                        return Err(self.err("expected a Lua symbol path string"));
+                    };
+                    if !path.split('.').all(is_lua_identifier) {
+                        return Err(
+                            self.err("expected a Lua symbol path of dot-separated identifiers")
+                        );
+                    }
+                    self.advance();
+                    Some(path)
+                } else {
+                    None
+                };
+                self.expect(TokenKind::CloseParen)?;
+                return Ok(FunctionBody::ExternLua(path));
             }
             TokenKind::Ident(n) if n.as_str() == "js" => {
                 self.advance();
@@ -1270,6 +1298,12 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+
+        if matches!(extern_body, Some(FunctionBody::ExternLua(Some(_))))
+            && matches!(self.kind(), TokenKind::OpenCurly | TokenKind::Assign)
+        {
+            return Err(self.err("an extern Lua symbol binding cannot have a body"));
+        }
 
         let (body, macro_items) = if self.kind() == TokenKind::OpenCurly {
             if is_macro {

@@ -25,6 +25,13 @@ impl Emitter<'_> {
             Inst::Global(g) => {
                 if let Some(identity) = self.func.code_value_identities.get(&id) {
                     self.write_code_slot_ref(out, identity);
+                } else if let Some(path) = self
+                    .func
+                    .fn_value_symbols
+                    .get(&id)
+                    .and_then(|&f| func_of(self.ws, f).lua_extern_path)
+                {
+                    self.write_lua_extern_path(out, path.as_str());
                 } else {
                     self.write_global(out, *g);
                 }

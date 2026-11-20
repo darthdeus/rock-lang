@@ -879,9 +879,9 @@ pub fn unset_depth_mode() {
 
 // The bound shader's vertex stage must emit raw NDC:
 // `gl_Position = vec4(aPos, 0.0, 1.0)` (no uProjection/uView).
-pub @inline inline(lua) fn draw_fullscreen_quad() = "stone.stone_draw_fullscreen_quad()"
+pub extern(lua, "stone.stone_draw_fullscreen_quad") fn draw_fullscreen_quad()
 
-@inline inline(lua) fn set_fullscreen_uv_scale(sx: float, sy: float) = "stone.stone_set_fullscreen_uv_scale(sx, sy)"
+extern(lua, "stone.stone_set_fullscreen_uv_scale") fn set_fullscreen_uv_scale(sx: float, sy: float)
 
 
 pub fn draw_sampled_texture(texture: SampledTexture, x: float, y: float, w: float, h: float,

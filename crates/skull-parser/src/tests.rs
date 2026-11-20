@@ -85,6 +85,18 @@ fn malformed_source_is_rejected_with_its_diagnostic() {
             "unknown inline backend",
         ),
         ("extern(wasm) fn now() -> float", "unknown extern backend"),
+        (
+            r#"extern(lua, "host..get") fn get() -> int"#,
+            "expected a Lua symbol path",
+        ),
+        (
+            r#"extern(lua, "host.end") fn get() -> int"#,
+            "expected a Lua symbol path",
+        ),
+        (
+            r#"extern(lua, "host.get") fn get() -> int { 0 }"#,
+            "an extern Lua symbol binding cannot have a body",
+        ),
         ("struct Box<T { value: int }\n", ""),
         // A hole that fails to parse is never emitted as literal brace text.
         (r#"fn f() { let x = "{add2(2,}" }"#, ""),

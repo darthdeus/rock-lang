@@ -143,6 +143,31 @@ fn prelude_predicates_emit_without_wrapper_calls() {
 }
 
 #[test]
+fn qualified_lua_extern_calls_and_function_values_use_the_host_path() {
+    let lua = emit_clean(
+        r#"
+extern(lua, "host.C.add") fn add(n: int) -> int
+extern(lua, "c0.get") fn get() -> int
+
+@nomangle fn run(n: int) -> int {
+    let f: fn(int) -> int = add
+    return add(n) + f(n) + get()
+}
+"#,
+        "run",
+    );
+    assert!(lua.contains("host.C.add(c0)"), "{lua}");
+    assert!(lua.contains(" = host.C.add\n"), "{lua}");
+    assert!(lua.contains("_G.c0.get()"), "{lua}");
+    let driver = format!(
+        "host = {{C = {{add = function(n) return n + 1 end}}}}\n\
+         c0 = {{get = function() return 5 end}}\n\
+         {lua}\nassert(run(10) == 27)"
+    );
+    luajit_ok(&driver, &lua);
+}
+
+#[test]
 fn sinking_preserves_dynamic_format_error_order() {
     for result in ["s", "\"[{s}]\""] {
         let lua = emit_clean(

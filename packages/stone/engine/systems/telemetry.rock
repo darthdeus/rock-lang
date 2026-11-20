@@ -12,11 +12,9 @@ pub fn telemetry_start_at(root: string, game: string, build: string,
     return telemetry_configure_native(root, game, build, platform, channel, endpoint, token, explicit_reconsent)
 }
 
-inline(lua) fn telemetry_configure_native(root: string, game: string, build: string,
+extern(lua, "stone.stone_telemetry_configure") fn telemetry_configure_native(root: string, game: string, build: string,
     platform: string, channel: string, endpoint: string, token: string,
-    explicit_reconsent: bool) -> bool = """
-    return stone.stone_telemetry_configure(root, game, build, platform, channel, endpoint, token, explicit_reconsent)
-"""
+    explicit_reconsent: bool) -> bool
 
 // Ingest bounds: at most 32 keys of at most 64 characters; values are 64-bit
 // ints, finite floats, bools, strings of at most 256 characters, or arrays of at
@@ -85,20 +83,16 @@ pub fn telemetry_record(name: string, timestamp: int, data: TelemetryData? = nul
     return telemetry_record_native(name, timestamp, encoded)
 }
 
-inline(lua) fn telemetry_record_native(name: string, timestamp: int, data: string) -> bool = """
-    return stone.stone_telemetry_record(name, timestamp, data)
-"""
+extern(lua, "stone.stone_telemetry_record") fn telemetry_record_native(name: string, timestamp: int, data: string) -> bool
 
-inline(lua) fn telemetry_validate_native(name: string, timestamp: int, data: string) -> bool = """
-    return stone.stone_telemetry_validate(name, timestamp, data)
-"""
+extern(lua, "stone.stone_telemetry_validate") fn telemetry_validate_native(name: string, timestamp: int, data: string) -> bool
 
 pub fn telemetry_close() {
     telemetry_capture_close()
     telemetry_close_native()
 }
 
-@inline inline(lua) fn telemetry_close_native() = "stone.stone_telemetry_close()"
+extern(lua, "stone.stone_telemetry_close") fn telemetry_close_native()
 
 // Last shutdown stage: closing the queue bounds the final upload, so anything to
 // record must be appended by an earlier stage.
@@ -117,13 +111,13 @@ pub fn telemetry_clear_at(root: string) -> bool {
     return telemetry_clear_native(root)
 }
 
-inline(lua) fn telemetry_clear_native(root: string) -> bool = "return stone.stone_telemetry_clear(root)"
+extern(lua, "stone.stone_telemetry_clear") fn telemetry_clear_native(root: string) -> bool
 
 pub fn telemetry_withdrawn_at(root: string) -> bool {
     return telemetry_withdrawn_native(root)
 }
 
-inline(lua) fn telemetry_withdrawn_native(root: string) -> bool = "return stone.stone_telemetry_withdrawn(root)"
+extern(lua, "stone.stone_telemetry_withdrawn") fn telemetry_withdrawn_native(root: string) -> bool
 
 pub value TelemetryCapturedEvent {
     name: string,

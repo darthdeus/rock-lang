@@ -1974,7 +1974,7 @@ fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
             .unwrap_or_default();
         let _ = writeln!(
             out,
-            "fn {} co={} var={} gen=[{generics}] params=[{params}] req={} ret={ret} inline={:?} backend={:?} extern={} anns={:?} ffi={:?}",
+            "fn {} co={} var={} gen=[{generics}] params=[{params}] req={} ret={ret} inline={:?} backend={:?} extern={} anns={:?} ffi={:?} lua_path={:?}",
             f.name,
             f.is_coroutine,
             f.is_variadic,
@@ -1984,6 +1984,7 @@ fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
             f.is_extern,
             f.annotations,
             f.ffi_lib,
+            f.lua_extern_path,
         );
     }
 

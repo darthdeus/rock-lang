@@ -137,16 +137,16 @@ pub fn imgui_begin(title: string) {
     let _ = __imgui_begin_window_raw(title, 0)
     imgui_note_body(title)
 }
-pub @inline inline(lua) fn imgui_end() = "imgui.End()"
+pub extern(lua, "imgui.End") fn imgui_end()
 pub @inline inline(lua) fn imgui_text(text: string) = "imgui.TextUnformatted(text, nil)"
 pub inline(lua) fn imgui_text_wrapped(text: string) = """
     imgui.PushTextWrapPos(0)
     imgui.TextUnformatted(text, nil)
     imgui.PopTextWrapPos()
 """
-pub @inline inline(lua) fn imgui_button(label: string) -> bool = "imgui.Button(label)"
+pub extern(lua, "imgui.Button") fn imgui_button(label: string) -> bool
 
-pub @inline inline(lua) fn imgui_same_line() = "imgui.SameLine()"
+pub extern(lua, "imgui.SameLine") fn imgui_same_line()
 
 pub inline(lua) fn imgui_same_line_if_fits(label: string) = """
     local style = imgui.C.igGetStyle()
@@ -205,10 +205,10 @@ inline(lua) fn __imgui_combo_str(label: string, current_idx: int, items_nul: str
 """
 
 @inline inline(lua) fn imgui_begin_combo(label: string, preview: string) -> bool = "return imgui.BeginCombo(label, preview, 0)"
-@inline inline(lua) fn imgui_end_combo() = "imgui.EndCombo()"
-@inline inline(lua) fn imgui_set_item_default_focus() = "imgui.SetItemDefaultFocus()"
+extern(lua, "imgui.EndCombo") fn imgui_end_combo()
+extern(lua, "imgui.SetItemDefaultFocus") fn imgui_set_item_default_focus()
 
-pub @inline inline(lua) fn imgui_selectable(label: string, selected: bool) -> bool = "imgui.Selectable_Bool(label, selected)"
+pub extern(lua, "imgui.Selectable_Bool") fn imgui_selectable(label: string, selected: bool) -> bool
 
 pub inline(lua) fn imgui_checkbox(label: string, value: bool) -> (bool, bool) = """
     local v = ffi.new("bool[1]", {value})
@@ -228,17 +228,13 @@ pub @scalar_abi inline(lua) fn imgui_is_rect_visible(size: Vec2) -> bool = """
     return imgui.IsRectVisible_Nil(cache.s)
 """
 
-pub inline(lua) fn imgui_is_item_hovered() -> bool = """
-    return imgui.IsItemHovered()
-"""
+pub extern(lua, "imgui.IsItemHovered") fn imgui_is_item_hovered() -> bool
 
 inline(lua) fn imgui_is_item_hovered_allow_active() -> bool = """
     return imgui.IsItemHovered(128)
 """
 
-pub inline(lua) fn imgui_is_item_active() -> bool = """
-    return imgui.IsItemActive()
-"""
+pub extern(lua, "imgui.IsItemActive") fn imgui_is_item_active() -> bool
 
 pub @scalar_abi inline(lua) fn imgui_invisible_button(label: string, size: Vec2) -> bool = """
     local cache = __imgui_shared_image_packet()
@@ -485,11 +481,11 @@ pub @scalar_abi inline(lua) fn imgui_color_picker4(label: string, value: Color) 
     return changed, v[0], v[1], v[2], v[3]
 """
 
-pub @inline inline(lua) fn imgui_tree_node(label: string) -> bool = "imgui.TreeNode_Str(label)"
-pub @inline inline(lua) fn imgui_tree_pop() = "imgui.TreePop()"
+pub extern(lua, "imgui.TreeNode_Str") fn imgui_tree_node(label: string) -> bool
+pub extern(lua, "imgui.TreePop") fn imgui_tree_pop()
 
-pub inline(lua) fn imgui_indent(amount: float = 0.0) = "imgui.Indent(amount)"
-pub inline(lua) fn imgui_unindent(amount: float = 0.0) = "imgui.Unindent(amount)"
+pub extern(lua, "imgui.Indent") fn imgui_indent(amount: float = 0.0)
+pub extern(lua, "imgui.Unindent") fn imgui_unindent(amount: float = 0.0)
 
 // Full-width section header; 32 = ImGuiTreeNodeFlags_DefaultOpen.
 pub inline(lua) fn imgui_collapsing_header(label: string) -> bool = """
@@ -685,10 +681,10 @@ pub @scalar_abi inline(lua) fn imgui_begin_child(id: string, size: Vec2, border:
     return imgui.BeginChild_Str(id, cache.s, border and 1 or 0, 0)
 """
 
-pub @inline inline(lua) fn imgui_end_child() = "imgui.EndChild()"
+pub extern(lua, "imgui.EndChild") fn imgui_end_child()
 
-pub @inline inline(lua) fn imgui_separator() = "imgui.Separator()"
-pub @inline inline(lua) fn imgui_set_next_item_width(width: float) = "imgui.SetNextItemWidth(width)"
+pub extern(lua, "imgui.Separator") fn imgui_separator()
+pub extern(lua, "imgui.SetNextItemWidth") fn imgui_set_next_item_width(width: float)
 
 pub @scalar_abi inline(lua) fn imgui_text_colored(text: string, c: Color) = """
     imgui.TextColored({c__r, c__g, c__b, c__a}, text)
@@ -699,12 +695,12 @@ pub @scalar_abi inline(lua) fn imgui_text_colored(text: string, c: Color) = """
 pub inline(lua) fn imgui_begin_table(id: string, columns: int, flags: int) -> bool = """
     return imgui.BeginTable(id, columns, flags, {0, 0}, 0)
 """
-pub @inline inline(lua) fn imgui_end_table() = "imgui.EndTable()"
-pub @inline inline(lua) fn imgui_table_headers_row() = "imgui.TableHeadersRow()"
+pub extern(lua, "imgui.EndTable") fn imgui_end_table()
+pub extern(lua, "imgui.TableHeadersRow") fn imgui_table_headers_row()
 pub inline(lua) fn imgui_table_next_row() = """
     imgui.TableNextRow(0, 0)
 """
-pub @inline inline(lua) fn imgui_table_next_column() -> bool = "imgui.TableNextColumn()"
+pub extern(lua, "imgui.TableNextColumn") fn imgui_table_next_column() -> bool
 
 // ImGuiTableColumnFlags_WidthFixed = 1 << 4 = 16. The earlier 1<<0 was
 // wrong (that's _Disabled) and triggered the runtime assertion about
@@ -744,13 +740,13 @@ pub inline(lua) fn imgui_input_text_multiline(
 """
 
 
-pub @inline inline(lua) fn imgui_clear_active_item() = "imgui.ClearActiveID()"
+pub extern(lua, "imgui.ClearActiveID") fn imgui_clear_active_item()
 
-pub @inline inline(lua) fn imgui_set_keyboard_focus_here(offset: int) = "imgui.SetKeyboardFocusHere(offset)"
+pub extern(lua, "imgui.SetKeyboardFocusHere") fn imgui_set_keyboard_focus_here(offset: int)
 
-pub @inline inline(lua) fn imgui_set_scroll_here_y(center_y_ratio: float) = "imgui.SetScrollHereY(center_y_ratio)"
+pub extern(lua, "imgui.SetScrollHereY") fn imgui_set_scroll_here_y(center_y_ratio: float)
 
-pub @inline inline(lua) fn imgui_set_tooltip(text: string) = "imgui.SetTooltip(text)"
+pub extern(lua, "imgui.SetTooltip") fn imgui_set_tooltip(text: string)
 
 // True when ImGui is capturing the mouse this frame (cursor over a window /
 // dragging a widget). Gate world-space click handling on `!imgui_wants_mouse()`
@@ -892,13 +888,9 @@ inline(lua) fn imgui_dock_split(id: int, dir: int, ratio: float) -> (int, int) =
     return carved, rest
 """
 
-inline(lua) fn imgui_dock_window(window: string, node: int) = """
-    imgui.DockBuilderDockWindow(window, node)
-"""
+extern(lua, "imgui.DockBuilderDockWindow") fn imgui_dock_window(window: string, node: int)
 
-inline(lua) fn imgui_dock_finish(id: int) = """
-    imgui.DockBuilderFinish(id)
-"""
+extern(lua, "imgui.DockBuilderFinish") fn imgui_dock_finish(id: int)
 
 // Rebuilds when the coded default changed (stamp mismatch) or nothing is docked
 // (fresh boot, deleted imgui.ini); otherwise a user arrangement in imgui.ini
@@ -1013,21 +1005,13 @@ fn imgui_build_dock_layout(id: int, layout: DockLayout) {
 //   1  = Text, 7  = FrameBg
 // `col_abgr` follows ImGui's ABGR packing — 0xAABBGGRR — so 0xff_00_80_ff
 // is opaque red.
-pub @inline inline(lua) fn imgui_push_style_color(idx: int, col_abgr: int) = """
-    imgui.PushStyleColor_U32(idx, col_abgr)
-"""
+pub extern(lua, "imgui.PushStyleColor_U32") fn imgui_push_style_color(idx: int, col_abgr: int)
 
-pub @inline inline(lua) fn imgui_pop_style_color(count: int) = """
-    imgui.PopStyleColor(count)
-"""
+pub extern(lua, "imgui.PopStyleColor") fn imgui_pop_style_color(count: int)
 
-pub inline(lua) fn imgui_begin_disabled(disabled: bool) = """
-    imgui.BeginDisabled(disabled)
-"""
+pub extern(lua, "imgui.BeginDisabled") fn imgui_begin_disabled(disabled: bool)
 
-pub inline(lua) fn imgui_end_disabled() = """
-    imgui.EndDisabled()
-"""
+pub extern(lua, "imgui.EndDisabled") fn imgui_end_disabled()
 
 // Inject a button-up event into ImGui's input queue so its IsItemActive
 // / IsItemActivated edge detectors see a release the OS did not deliver.
@@ -1065,7 +1049,7 @@ pub inline(lua) fn imgui_inject_text(text: string) = """
     return p.x, p.y
 """
 
-@inline inline(lua) fn imgui_is_item_visible() -> bool = "return imgui.IsItemVisible()"
+extern(lua, "imgui.IsItemVisible") fn imgui_is_item_visible() -> bool
 
 inline(lua) fn imgui_is_item_fully_visible() -> bool = """
     local cache = __imgui_shared_image_packet()
@@ -1081,13 +1065,9 @@ inline(lua) fn imgui_is_item_fully_visible() -> bool = """
 // on subsequent frames even while the press is held. Use this to gate
 // drag-detect against ImGui's `IsItemActive` getting stuck true when
 // the OS eats the mouse-up event during a native drag session.
-pub inline(lua) fn imgui_is_item_activated() -> bool = """
-    return imgui.IsItemActivated()
-"""
+pub extern(lua, "imgui.IsItemActivated") fn imgui_is_item_activated() -> bool
 
-pub inline(lua) fn imgui_is_item_deactivated() -> bool = """
-    return imgui.IsItemDeactivated()
-"""
+pub extern(lua, "imgui.IsItemDeactivated") fn imgui_is_item_deactivated() -> bool
 
 // Is the mouse over the current window? Must be called between begin/end.
 //
@@ -1101,9 +1081,7 @@ inline(lua) fn imgui_is_window_hovered() -> bool = """
 """
 
 // Global, not per-window, and true for keyboard activation too.
-pub inline(lua) fn imgui_is_any_item_active() -> bool = """
-    return imgui.IsAnyItemActive()
-"""
+pub extern(lua, "imgui.IsAnyItemActive") fn imgui_is_any_item_active() -> bool
 
 // Must be called between begin/end.
 inline(lua) fn imgui_is_window_focused() -> bool = """
@@ -1115,9 +1093,7 @@ pub @inline inline(lua) fn imgui_set_next_window_dock_id(id: int) = "imgui.SetNe
 // Is a mouse button held, as ImGui sees it? 0 left, 1 right, 2 middle.
 // _Nil is cimgui's overload suffix for the plain (button) form -- there is no
 // bare `IsMouseDown` in the table, and no __index fallback to catch the miss.
-inline(lua) fn imgui_is_mouse_down(button: int) -> bool = """
-    return imgui.IsMouseDown_Nil(button)
-"""
+extern(lua, "imgui.IsMouseDown_Nil") fn imgui_is_mouse_down(button: int) -> bool
 
 // Close a frame that a Rock error unwound out of mid-draw, so the loop can
 // continue. Without it the next NewFrame trips ImGui's
@@ -1138,13 +1114,9 @@ inline(lua) fn imgui_end_frame_after_error() = """
     io.ConfigErrorRecoveryEnableAssert = prev
 """
 
-inline(lua) fn imgui_discard_frame() = """
-    imgui.EndFrame()
-"""
+extern(lua, "imgui.EndFrame") fn imgui_discard_frame()
 
-pub inline(lua) fn imgui_is_item_deactivated_after_edit() -> bool = """
-    return imgui.IsItemDeactivatedAfterEdit()
-"""
+pub extern(lua, "imgui.IsItemDeactivatedAfterEdit") fn imgui_is_item_deactivated_after_edit() -> bool
 
 // Like imgui_button but with an explicit size. Pass 0 in either dim to
 // auto-size that axis. Useful for grid layouts where every cell must

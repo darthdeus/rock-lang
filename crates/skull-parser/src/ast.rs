@@ -506,8 +506,8 @@ pub enum FunctionBody {
     Rock(Idx<BlockData>),
     /// Raw backend source, emitted verbatim; bare `inline` means Lua.
     Inline(FnBackend, Ustr),
-    /// An existing Lua global; C symbols go through `Ffi`.
-    ExternLua,
+    /// An existing Lua global or dotted path.
+    ExternLua(Option<Ustr>),
     ExternJs,
     Ffi(Ustr),
 }

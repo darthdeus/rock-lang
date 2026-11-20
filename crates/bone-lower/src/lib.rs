@@ -2345,12 +2345,14 @@ pub(crate) fn build_function(
 
     let (body_failed, mut errors) = lower_fn_body_into(ctx, f, &param_tys)?;
     use skull_parser::FunctionBody;
-    let (inline_body, is_extern, ffi_lib, backend) = match f.body {
-        FunctionBody::Rock(_) => (None, false, None, hir::FnBackend::Any),
-        FunctionBody::Inline(backend, source) => (Some((backend, source)), false, None, backend),
-        FunctionBody::ExternLua => (None, true, None, hir::FnBackend::Lua),
-        FunctionBody::ExternJs => (None, true, None, hir::FnBackend::Js),
-        FunctionBody::Ffi(lib) => (None, true, Some(lib), hir::FnBackend::Lua),
+    let (inline_body, is_extern, ffi_lib, lua_extern_path, backend) = match f.body {
+        FunctionBody::Rock(_) => (None, false, None, None, hir::FnBackend::Any),
+        FunctionBody::Inline(backend, source) => {
+            (Some((backend, source)), false, None, None, backend)
+        }
+        FunctionBody::ExternLua(path) => (None, true, None, path, hir::FnBackend::Lua),
+        FunctionBody::ExternJs => (None, true, None, None, hir::FnBackend::Js),
+        FunctionBody::Ffi(lib) => (None, true, Some(lib), None, hir::FnBackend::Lua),
     };
     errors.extend(anno_errors);
     if let Err(e) = bone_core::annotations::validate_param_repr_against_body(
@@ -2377,6 +2379,7 @@ pub(crate) fn build_function(
         return_ty,
         inline_body,
         is_extern,
+        lua_extern_path,
         backend,
         annotations,
         ffi_lib,

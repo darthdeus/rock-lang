@@ -2,7 +2,7 @@
 //! contain `__`, which GLSL ES reserves.
 //!
 //! Every function mangles on its own name and declared parameter types except
-//! `extern`, `@nomangle`, `@test`, `main` and `test_*`. A function with no
+//! externs with implicit names, `@nomangle`, `@test`, `main` and `test_*`. A function with no
 //! parameters gets `_0`, so a mangled name never equals its source name.
 //! [`collision_errors`] rejects any residual collision; nothing is renamed.
 
@@ -44,7 +44,7 @@ fn encode_mono_type(ty: &crate::monoty::MonoTy, out: &mut String) {
 /// declared name: `v1pkg::main` is still `main` to the runtime.
 pub fn is_exempt(f: &Function) -> bool {
     let name = declared_name(f.name.as_str());
-    f.is_extern
+    (f.is_extern && f.lua_extern_path.is_none())
         || has_annotation(f, "nomangle")
         || has_annotation(f, "test")
         || name == "main"

@@ -119,3 +119,14 @@ fn scalar_constant_values_preserve_runtime_boundaries() {
     assert_eq(BOUNDARY_QUOTIENT, 3.5)
     assert_eq(2147483648 | 1, -2147483647)
 }
+
+extern(lua, "math.abs") fn backend_abs(value: int = -42) -> int
+inline(js) fn backend_abs(value: int = -42) -> int = "return Math.abs(value);"
+
+@test
+fn lua_extern_path_selects_a_backend_and_passes_default_arguments() {
+    let absolute: fn(int) -> int = backend_abs
+    assert_eq(backend_abs(), 42)
+    assert_eq(backend_abs(value: -4), 4)
+    assert_eq(absolute(-9), 9)
+}
