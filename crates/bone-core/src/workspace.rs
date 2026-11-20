@@ -3,10 +3,6 @@
 use crate::hir::*;
 use crate::prelude::*;
 
-/// Record [`Workspace::module_timings`]; off unless a host reports source costs.
-pub static MODULE_TIMINGS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Generic parameters read by lowering before nominal definitions are available.
 #[derive(Clone, Debug)]
 pub struct TypeGenerics {
@@ -45,9 +41,6 @@ pub struct Workspace {
     pub decorator_names: FxHashSet<Ustr>,
 
     pub phase_timings: Vec<(&'static str, Duration)>,
-    /// Per-module time of the front-end passes that run module by module,
-    /// recorded only while [`MODULE_TIMINGS`] is set.
-    pub module_timings: Vec<(ModuleId, &'static str, Duration)>,
 
     /// Counts re-inferred bodies since the last session update reset. Parallel
     /// checks share this counter.
@@ -166,7 +159,6 @@ impl Workspace {
             decorator_names: Default::default(),
 
             phase_timings: Default::default(),
-            module_timings: Default::default(),
 
             reinferred_body_count: Default::default(),
             vec_effects: Default::default(),

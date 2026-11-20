@@ -320,35 +320,23 @@ pub fn lower_modules_seeded(
 
     let lower_field_time = lower_field_timer.elapsed();
 
-    let lower_times: Vec<(ModuleId, &'static str, std::time::Duration)>;
     {
         let _span = tracing::info_span!("lower_functions").entered();
         let timer = Instant::now();
 
-        let timed = module_timings_requested();
-        let (modules, times): (Vec<_>, Vec<_>) = par_map_largest_first(
+        let modules = par_map_largest_first(
             ctxts,
             |c| c.ast.exprs.len(),
             |mut c| {
-                let started = timed.then(Instant::now);
                 pass_lower_functions(&mut c)?;
                 c.flush_scope_probes();
 
                 c.module.lower_var_high_water = c._next_var_id;
-
-                let time = started.map(|started| started.elapsed());
-                Ok::<_, CompilerError>((c.module, time))
+                Ok::<_, CompilerError>(c.module)
             },
         )
         .into_iter()
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .unzip();
-        lower_times = modules
-            .iter()
-            .zip(times)
-            .filter_map(|(module, time)| Some((module.module_id(), "lower functions", time?)))
-            .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
         for module in modules.iter() {
             for (name, fns) in module.functions_by_name.iter() {
@@ -396,7 +384,6 @@ pub fn lower_modules_seeded(
 
     let gap_timer = Instant::now();
     ws.insert_modules(modules);
-    ws.module_timings.extend(lower_times);
     ws.log_time("insert modules", gap_timer);
 
     check_duplicate_definitions(ws, &ids);
@@ -703,7 +690,6 @@ pub(crate) fn infer_modules(ws: &mut Workspace, ids: &[ModuleId]) -> Result<(), 
         let _span = tracing::info_span!("infer_functions").entered();
         let timer = Instant::now();
 
-        let timed = module_timings_requested();
         let inference_results = par_map_largest_first(
             ids.to_vec(),
             |id| {
@@ -715,19 +701,14 @@ pub(crate) fn infer_modules(ws: &mut Workspace, ids: &[ModuleId]) -> Result<(), 
             },
             |id| {
                 let _m = tracing::info_span!("check_module", module = %id.0).entered();
-                let started = timed.then(Instant::now);
-                let inf = check_module(ws, id, ws.module(id))?;
-                Ok((id, inf, started.map(|started| started.elapsed())))
+                Ok((id, check_module(ws, id, ws.module(id))?))
             },
         )
         .into_iter()
         .collect::<Result<Vec<_>, CompilerError>>()?;
 
-        for (key, inf, time) in inference_results.into_iter() {
+        for (key, inf) in inference_results.into_iter() {
             ws.set_inference(key, inf);
-            if let Some(time) = time {
-                ws.module_timings.push((key, "infer functions", time));
-            }
         }
 
         ws.log_time("infer functions", timer);
@@ -2051,8 +2032,4 @@ pub(crate) fn pass_lower_functions(ctx: &mut LowerCtx) -> Result<(), CompilerErr
         Ok(())
     })?;
     Ok(())
-}
-
-fn module_timings_requested() -> bool {
-    bone_core::workspace::MODULE_TIMINGS.load(std::sync::atomic::Ordering::Relaxed)
 }
