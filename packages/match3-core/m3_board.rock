@@ -181,136 +181,33 @@ pub struct M3Collapse {
     spawns: [M3Spawn],
 }
 
-// Place a gem at (x, y) that completes no run THROUGH THAT CELL, in any
-// direction, and return the type placed.
-//
-// Not `m3_random_type_no_match`, which looks only BACK along a fill order --
-// correct when generating into an empty grid, wrong whenever there are already
-// gems below or to the right, because a run in those directions is invisible to
-// it. `m3_best_run` asks the question the resolver asks.
-//
-// Every type is tried before giving up, and giving up is safe: a caller either
-// settles the board afterwards or lets the resolver treat the leftover as the
-// cascade it is. What cannot be avoided is a run through a cell that has not
-// been filled YET -- nothing can know a gem that has not been chosen.
-pub fn m3_place_quiet(b: M3Board, x: int, y: int, types: M3Types) -> int {
-    let first = m3_random_type(types)
-    let n = m3_type_count(types)
-    for k in 0..n {
-        let t = (first + k) % n
-        m3_set(b, x, y, t)
-        if m3_best_run(b, x, y) < 3 {
-            return t
-        }
-    }
-    m3_set(b, x, y, first)
-    return first
-}
-
-// How the holes a collapse leaves are filled.
-pub enum M3Refill {
-    // A uniform draw, free to complete a run -- which is what makes a refill
-    // cascade, and is the historical behaviour every existing caller has.
-    Random,
-    // A gem completing no run through its own cell. Removes the cascades a
-    // refill MANUFACTURES while leaving the ones formed by gems that fell.
-    Quiet,
-}
-
-// Clear the matched cells, compact each column to the bottom, and refill the
-// holes. Mutates the board; returns the fall + spawn geometry (recorded once
-// here, replayed by the game). Spawns consume the seeded RNG at this point,
-// matching the game loop's order.
+// Journal order is left to right by column, from bottom to top within each column.
 pub fn m3_collapse(b: M3Board, matched: [(int, int)], types: M3Types) -> M3Collapse {
-    return m3_collapse_with(b, matched, types, M3Refill::Random)
-}
-
-// TWO passes: every column is compacted before any hole is filled.
-//
-// One pass cannot support `M3Refill::Quiet` at all -- it filled column 0 while
-// columns 1+ still held their pre-collapse contents, so the horizontal check
-// read gems that were about to fall away. Compacting everything first makes the
-// board a refill looks at the board it is actually joining.
-//
-// This is behaviour-preserving for `Random`: compaction draws no randomness, and
-// the refill still runs column 0 upward through column w-1, so the RNG is
-// consumed in exactly the old sequence and `falls`/`spawns` are pushed in
-// exactly the old order.
-pub fn m3_collapse_with(b: M3Board, matched: [(int, int)], types: M3Types, refill: M3Refill) -> M3Collapse {
     let falls: [M3Fall] = []
     let spawns: [M3Spawn] = []
-
-    for (mx, my) in matched {
-        m3_set(b, mx, my, M3_EMPTY)
+    for (x, y) in matched {
+        m3_set(b, x, y, M3_EMPTY)
     }
-
-    // Pass 1: compact. How many holes each column ends up with is recorded,
-    // because the spawn's visual drop height is measured from it.
-    let holes: [int] = []
-    let col = 0
-    while col < b.w {
-        let gems: [int] = []
-        let gem_rows: [int] = []
-        let row = b.h - 1
+    for col in 0..b.w {
+        let dest = b.h - 1
+        let row = dest
         while row >= 0 {
-            let t = m3_at(b, col, row)
-            if t != M3_EMPTY {
-                gems.push(t)
-                gem_rows.push(row)
+            let gem = m3_at(b, col, row)
+            if gem != M3_EMPTY {
+                if row != dest {
+                    m3_set(b, col, dest, gem)
+                    falls.push(M3Fall { col, from_row: row, to_row: dest })
+                }
+                dest -= 1
             }
-            row = row - 1
+            row -= 1
         }
-
-        let dest_row = b.h - 1
-        let g = 0
-        while g < gems.len() {
-            let from_row = gem_rows[g]
-            m3_set(b, col, dest_row, gems[g])
-            if from_row != dest_row {
-                falls.push(M3Fall { col: col, from_row: from_row, to_row: dest_row })
-            }
-            dest_row = dest_row - 1
-            g = g + 1
+        while dest >= 0 {
+            let gem = m3_random_type(types)
+            m3_set(b, col, dest, gem)
+            spawns.push(M3Spawn { col, row: dest, gem_type: gem, above_rows: dest + 1 })
+            dest -= 1
         }
-        // Everything above the compacted stack is a hole. Cleared explicitly:
-        // the cells still hold whatever they held before the compaction copied
-        // them downward, and a quiet refill that read those would be checking
-        // against gems that have already fallen.
-        let clear_row = dest_row
-        while clear_row >= 0 {
-            m3_set(b, col, clear_row, M3_EMPTY)
-            clear_row = clear_row - 1
-        }
-        holes.push(b.h - gems.len())
-        col = col + 1
     }
-
-    // Pass 2: refill, in the same column order as before.
-    col = 0
-    while col < b.w {
-        let new_count = holes[col]
-        // Row 0 is the TOP and gravity compacts toward `b.h - 1`, so the holes
-        // are rows `new_count - 1` down to 0 -- which is where the one-pass form
-        // left `dest_row` after placing the survivors.
-        let dest_row = new_count - 1
-        let spawn_idx = 0
-        while dest_row >= 0 {
-            let new_type = match refill {
-                Random => m3_random_type(types),
-                Quiet => m3_place_quiet(b, col, dest_row, types),
-            }
-            m3_set(b, col, dest_row, new_type)
-            spawns.push(M3Spawn {
-                col: col,
-                row: dest_row,
-                gem_type: new_type,
-                above_rows: new_count - spawn_idx,
-            })
-            spawn_idx = spawn_idx + 1
-            dest_row = dest_row - 1
-        }
-        col = col + 1
-    }
-
-    return M3Collapse { falls: falls, spawns: spawns }
+    return M3Collapse { falls, spawns }
 }

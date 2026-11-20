@@ -35,66 +35,17 @@ pub fn m3_first_move(b: M3Board) -> M3Move? {
     return null
 }
 
-pub struct M3Types {
-    weight: [float],
-    total: float,
-    uniform: bool,
-}
+pub newtype M3Types(int)
 
 pub fn m3_uniform(n: int) -> M3Types {
     if n <= 0 {
         error("m3: a board needs at least one gem type, got {n}")
     }
-    let w: [float] = []
-    let i = 0
-    while i < n {
-        w.push(1.0)
-        i = i + 1
-    }
-    return M3Types { weight: w, total: n as float, uniform: true }
-}
-
-fn m3_type_count(t: M3Types) -> int {
-    return t.weight.len()
-}
-
-// The distribution math, split from the draw so both ends of it have a
-// population: the interesting inputs are `u = 0` and `u` a hair under 1, and
-// neither is reachable often enough to test through the RNG.
-//
-// Zero-weight types are skipped rather than compared past, which is what makes
-// "a type with no weight never spawns" true by construction instead of true by
-// a strict inequality that a rounding change could flip.
-fn m3_pick_type(t: M3Types, u: float) -> int {
-    let pick = u * t.total
-    let acc = 0.0
-    let last = -1
-    let i = 0
-    while i < t.weight.len() {
-        if t.weight[i] > 0.0 {
-            acc = acc + t.weight[i]
-            if pick < acc {
-                return i
-            }
-            last = i
-        }
-        i = i + 1
-    }
-    // Summing floats can leave `pick` a hair above the final accumulation. The
-    // last type CARRYING WEIGHT is the right answer there; the last index would
-    // not be, and handing back a zero-weight type is the one thing this must
-    // never do.
-    if last < 0 {
-        error("m3: distribution has no positive weight")
-    }
-    return last
+    return M3Types(n)
 }
 
 fn m3_random_type(t: M3Types) -> int {
-    if t.uniform {
-        return random_int(0, t.weight.len())
-    }
-    return m3_pick_type(t, random())
+    return random_int(0, t.0)
 }
 
 fn m3_random_type_no_match(b: M3Board, x: int, y: int, types: M3Types) -> int {
