@@ -268,37 +268,19 @@ pub global PROFILER_UI_ENABLED: bool = get_env_int("STONE_PROFILER_UI", 1) != 0
 // per-frame ones). `name_id` is the interned section id; duration is
 // derived at read time from end_t - start_t.
 pub struct EntryLog {
-    name_id: NativeBuffer<int>,
-    depth: NativeBuffer<int>,
-    parent_event: NativeBuffer<int>,
-    start_t: NativeBuffer<float>,
-    end_t: NativeBuffer<float>,
-    start_request_kb: NativeBuffer<float>,
-    request_kb: NativeBuffer<float>,
-    child_request_kb: NativeBuffer<float>,
-    exclusive_request_kb: NativeBuffer<float>,
-    gc_self_alloc_kb: NativeBuffer<float>,
-    gc_child_inclusive_kb: NativeBuffer<float>,
-    count: int,
-    dropped: int,
-}
-
-fn entry_log_new() -> EntryLog {
-    return EntryLog {
-        name_id: native_buffer_int(MAX_PROFILE_ENTRIES),
-        depth: native_buffer_int(MAX_PROFILE_ENTRIES),
-        parent_event: native_buffer_int(MAX_PROFILE_ENTRIES),
-        start_t: native_buffer_float(MAX_PROFILE_ENTRIES),
-        end_t: native_buffer_float(MAX_PROFILE_ENTRIES),
-        start_request_kb: native_buffer_float(MAX_PROFILE_ENTRIES),
-        request_kb: native_buffer_float(MAX_PROFILE_ENTRIES),
-        child_request_kb: native_buffer_float(MAX_PROFILE_ENTRIES),
-        exclusive_request_kb: native_buffer_float(MAX_PROFILE_ENTRIES),
-        gc_self_alloc_kb: native_buffer_float(MAX_PROFILE_ENTRIES),
-        gc_child_inclusive_kb: native_buffer_float(MAX_PROFILE_ENTRIES),
-        count: 0,
-        dropped: 0,
-    }
+    name_id: NativeBuffer<int> = native_buffer_int(MAX_PROFILE_ENTRIES),
+    depth: NativeBuffer<int> = native_buffer_int(MAX_PROFILE_ENTRIES),
+    parent_event: NativeBuffer<int> = native_buffer_int(MAX_PROFILE_ENTRIES),
+    start_t: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES),
+    end_t: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES),
+    start_request_kb: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES),
+    request_kb: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES),
+    child_request_kb: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES),
+    exclusive_request_kb: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES),
+    gc_self_alloc_kb: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES),
+    gc_child_inclusive_kb: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES),
+    count: int = 0,
+    dropped: int = 0,
 }
 
 // Zero-alloc: writes into dst's preallocated buffers.
@@ -322,37 +304,37 @@ fn entry_log_copy(dst: EntryLog, src: EntryLog) {
 }
 
 pub struct ProfilerData {
-    frame_count: int,
-    current_depth: int,
-    cur_frame_start: float,
-    lag_spikes: [float],
-    lag_spike_count: int,
-    max_lag_spikes: int,
-    lag_threshold: float,
-    worst_frame_time: float,
-    warmup_seconds: float,
-    warmup_min_frames: int,
-    warmup_start_time: float,
-    warmup_active: bool,
+    frame_count: int = 0,
+    current_depth: int = 0,
+    cur_frame_start: float = 0.0,
+    lag_spikes: [float] = vec_new(),
+    lag_spike_count: int = 0,
+    max_lag_spikes: int = 100,
+    lag_threshold: float = 1.0 / 50.0,
+    worst_frame_time: float = 0.0,
+    warmup_seconds: float = 0.0,
+    warmup_min_frames: int = 0,
+    warmup_start_time: float = 0.0,
+    warmup_active: bool = false,
     // Heap sampling remains the live-size signal. Allocator callback counters
     // below are the traffic signal; a heap delta is not an allocation oracle.
-    mem_frame_begin_kb: float,
-    heap_drops: int,
-    last_heap_bytes: int,
-    last_heap_growth_bytes: int,
-    last_frame_collected: bool,
+    mem_frame_begin_kb: float = 0.0,
+    heap_drops: int = 0,
+    last_heap_bytes: int = 0,
+    last_heap_growth_bytes: int = 0,
+    last_frame_collected: bool = false,
 
     // Per-frame markers in wall-clock seconds; -1 = not marked this frame.
-    frame_t0: float,
-    frame_t_logic_end: float,
-    frame_t_pre_swap: float,
-    frame_t_post_swap: float,
-    pending_latency_event_t0: float,
-    last_event_to_end_frame_ms: float,
-    frame_profile_active: bool,
+    frame_t0: float = 0.0,
+    frame_t_logic_end: float = -1.0,
+    frame_t_pre_swap: float = -1.0,
+    frame_t_post_swap: float = -1.0,
+    pending_latency_event_t0: float = -1.0,
+    last_event_to_end_frame_ms: float = -1.0,
+    frame_profile_active: bool = false,
     // GPU timer support: false once the poll reports unsupported (macOS GL).
     // Displays render `n/a` instead of a fake 0.
-    gpu_supported: bool,
+    gpu_supported: bool = true,
 }
 
 pub inline(lua) fn lua_gc_kb() -> float = "return collectgarbage('count')"
@@ -586,58 +568,33 @@ fn live_allocation_frame_end() {
 }
 
 pub value SimAllocationCensus {
-    enabled: bool,
-    started: bool,
-    finished: bool,
-    warmup_frames_requested: int,
-    frame_count: int,
-    measured_frames: int,
-    frame_started: bool,
-    start_kb: float,
-    last_kb: float,
-    frame_start_kb: float,
-    initialization_kb: float,
-    outside_frame_kb: float,
-    warmup_kb: float,
-    measured_kb: float,
-    frame_start_calls: int,
-    frame_start_allocation_calls: int,
-    frame_start_reallocation_calls: int,
-    measured_calls: int,
-    measured_allocation_calls: int,
-    measured_reallocation_calls: int,
+    enabled: bool = false,
+    started: bool = false,
+    finished: bool = false,
+    warmup_frames_requested: int = 0,
+    frame_count: int = 0,
+    measured_frames: int = 0,
+    frame_started: bool = false,
+    start_kb: float = 0.0,
+    last_kb: float = 0.0,
+    frame_start_kb: float = 0.0,
+    initialization_kb: float = 0.0,
+    outside_frame_kb: float = 0.0,
+    warmup_kb: float = 0.0,
+    measured_kb: float = 0.0,
+    frame_start_calls: int = 0,
+    frame_start_allocation_calls: int = 0,
+    frame_start_reallocation_calls: int = 0,
+    measured_calls: int = 0,
+    measured_allocation_calls: int = 0,
+    measured_reallocation_calls: int = 0,
 }
 
-fn sim_allocation_census_new() -> SimAllocationCensus {
-    return SimAllocationCensus {
-        enabled: false,
-        started: false,
-        finished: false,
-        warmup_frames_requested: 0,
-        frame_count: 0,
-        measured_frames: 0,
-        frame_started: false,
-        start_kb: 0.0,
-        last_kb: 0.0,
-        frame_start_kb: 0.0,
-        initialization_kb: 0.0,
-        outside_frame_kb: 0.0,
-        warmup_kb: 0.0,
-        measured_kb: 0.0,
-        frame_start_calls: 0,
-        frame_start_allocation_calls: 0,
-        frame_start_reallocation_calls: 0,
-        measured_calls: 0,
-        measured_allocation_calls: 0,
-        measured_reallocation_calls: 0,
-    }
-}
-
-pub global SIM_ALLOC_CENSUS: SimAllocationCensus = sim_allocation_census_new()
+pub global SIM_ALLOC_CENSUS: SimAllocationCensus = SimAllocationCensus {}
 
 fn sim_alloc_census_begin() {
     let warmup = max(get_env_int("STONE_SIM_ALLOCATION_WARMUP_FRAMES", 2), 0)
-    SIM_ALLOC_CENSUS = sim_allocation_census_new()
+    SIM_ALLOC_CENSUS = SimAllocationCensus {}
     SIM_ALLOC_CENSUS.warmup_frames_requested = warmup
     SIM_ALLOC_CENSUS.enabled = get_env_int("STONE_SIM_ALLOCATION_CENSUS", 0) == 1
     if !SIM_ALLOC_CENSUS.enabled { return () }
@@ -928,9 +885,9 @@ global SECTION_LAST_OBSERVATION_MS: NativeBuffer<float> = native_buffer_float(MA
 
 // Once CUR overflows, every later begin in the frame is dropped, so open dropped scopes always
 // nest inside the recorded ones.
-pub global PROF_CUR: EntryLog = entry_log_new()
-pub global PROF_LAST: EntryLog = entry_log_new()
-global PROF_WORST: EntryLog = entry_log_new()
+pub global PROF_CUR: EntryLog = EntryLog {}
+pub global PROF_LAST: EntryLog = EntryLog {}
+global PROF_WORST: EntryLog = EntryLog {}
 pub global PROF_OPEN_STACK: NativeBuffer<int> = native_buffer_int(MAX_PROFILE_ENTRIES)
 pub global PROF_OPEN_TOP: int = 0
 global PROF_DROPPED_STACK: NativeBuffer<int> = native_buffer_int(MAX_PROFILE_ENTRIES)
@@ -1504,37 +1461,7 @@ pub fn gc_window_unknown_sections_json() -> string {
     return "{{\"capacity\":{MAX_GC_WINDOW_UNKNOWN_NAMES},\"unretained_hits\":{GC_WIN_UNKNOWN_UNRETAINED},\"sections\":[{rows.join(\",\")}]}}"
 }
 
-fn new_profiler() -> ProfilerData {
-    return ProfilerData {
-        frame_count: 0,
-        current_depth: 0,
-        cur_frame_start: 0.0,
-        lag_spikes: vec_new(),
-        lag_spike_count: 0,
-        max_lag_spikes: 100,
-        lag_threshold: 1.0 / 50.0,
-        worst_frame_time: 0.0,
-        warmup_seconds: 0.0,
-        warmup_min_frames: 0,
-        warmup_start_time: 0.0,
-        warmup_active: false,
-        mem_frame_begin_kb: 0.0,
-        heap_drops: 0,
-        last_heap_bytes: 0,
-        last_heap_growth_bytes: 0,
-        last_frame_collected: false,
-        frame_t0: 0.0,
-        frame_t_logic_end: -1.0,
-        frame_t_pre_swap: -1.0,
-        frame_t_post_swap: -1.0,
-        pending_latency_event_t0: -1.0,
-        last_event_to_end_frame_ms: -1.0,
-        frame_profile_active: false,
-        gpu_supported: true,
-    }
-}
-
-pub global PROFILER: ProfilerData = new_profiler()
+pub global PROFILER: ProfilerData = ProfilerData {}
 pub global PROFILE_HEAP_KB: Metric = metric_new("heap_kb", MAX_FRAME_HISTORY)
 pub global FRAME_LOGIC_CPU: Metric = metric_new("logic_cpu", MAX_FRAME_HISTORY)
 pub global FRAME_RENDER_CPU: Metric = metric_new("render_cpu", MAX_FRAME_HISTORY)
@@ -1673,7 +1600,7 @@ fn init_profiler() {
     let frame_t_logic_end = PROFILER.frame_t_logic_end
     let frame_t_pre_swap = PROFILER.frame_t_pre_swap
     let frame_t_post_swap = PROFILER.frame_t_post_swap
-    PROFILER = new_profiler()
+    PROFILER = ProfilerData {}
     frame_metrics_reset()
     PROFILER.frame_t0 = frame_t0
     PROFILER.frame_t_logic_end = frame_t_logic_end
@@ -1682,7 +1609,7 @@ fn init_profiler() {
     live_allocation_capture_reset()
     PROFILER_ENABLED_PENDING = -1
     PROFILER_ALLOC_COUNTER_OWNER = if GC_STEP_ENABLED { 3 } else { 0 }
-    SIM_ALLOC_CENSUS = sim_allocation_census_new()
+    SIM_ALLOC_CENSUS = SimAllocationCensus {}
     gc_step_capture_init()
     SECTION_IDS = map_new()
     SECTION_NAMES = vec_new()
@@ -1706,9 +1633,9 @@ fn init_profiler() {
     SECTION_WINDOWS = vec_new()
     SECTION_LAST_SECONDS = native_buffer_float(MAX_PROFILE_ENTRIES)
     SECTION_LAST_OBSERVATION_MS = native_buffer_float(MAX_PROFILE_ENTRIES)
-    PROF_CUR = entry_log_new()
-    PROF_LAST = entry_log_new()
-    PROF_WORST = entry_log_new()
+    PROF_CUR = EntryLog {}
+    PROF_LAST = EntryLog {}
+    PROF_WORST = EntryLog {}
     PROF_OPEN_TOP = 0
     PROF_DROPPED_TOP = 0
     GC_WIN_SECTION_REGISTRY_FROZEN = false

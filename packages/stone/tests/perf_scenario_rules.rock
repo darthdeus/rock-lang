@@ -2,7 +2,7 @@
 fn perf_scenario_interval_entry(_which: int) {
     init_profiler()
     ENGINE.profiler_enabled = true
-    HITCH = hitch_ledger_new()
+    HITCH = HitchLedger {}
     PERF_FRAME_CAPTURE = true
     PERF_RECORDS = perf_records_new()
     perf_scenario_wait("synthetic")
@@ -135,7 +135,7 @@ fn perf_scenario_recorder_allocation_entry(which: int) {
     PERF_SECTION_HISTORY = which == 1
     init_profiler()
     ENGINE.profiler_enabled = true
-    HITCH = hitch_ledger_new()
+    HITCH = HitchLedger {}
     PERF_RECORDS = perf_records_new()
     perf_scenario_wait("recorder")
     let warmup = if which >= 2 { which - 2 } else { 2 }

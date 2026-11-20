@@ -37,118 +37,66 @@ const HITCH_CAUSES: [string] = ["gc", "alloc", "jit", "present", "upload", "resi
     "logic", "render"]
 
 pub struct HitchLedger {
-    enabled: bool,
-    threshold_ms: float,
-    loud_ms: float,
-    warmup_frames: int,
-    window_secs: float,
+    enabled: bool = os_getenv("HITCH_LEDGER") != "0",
+    threshold_ms: float = get_env_float("HITCH_MS", 25.0),
+    loud_ms: float = get_env_float("HITCH_LOUD_MS", 50.0),
+    warmup_frames: int = get_env_int("HITCH_WARMUP_FRAMES", 600),
+    window_secs: float = get_env_float("HITCH_WINDOW_SECS", 60.0),
     // Negative until the first frame.
-    window_start: float,
-    dump_path: string,
+    window_start: float = -1.0,
+    dump_path: string = os_getenv("HITCH_LEDGER_PATH") ?? "",
     // The ring: `count` records written; slot = count % HITCH_RING_FRAMES.
-    frame: NativeBuffer<int>,
-    frame_ms: NativeBuffer<float>,
-    logic_ms: NativeBuffer<float>,
-    render_ms: NativeBuffer<float>,
-    present_ms: NativeBuffer<float>,
+    frame: NativeBuffer<int> = native_buffer_int(HITCH_RING_FRAMES),
+    frame_ms: NativeBuffer<float> = native_buffer_float(HITCH_RING_FRAMES),
+    logic_ms: NativeBuffer<float> = native_buffer_float(HITCH_RING_FRAMES),
+    render_ms: NativeBuffer<float> = native_buffer_float(HITCH_RING_FRAMES),
+    present_ms: NativeBuffer<float> = native_buffer_float(HITCH_RING_FRAMES),
     // Negative when the CPU clock is unknown.
-    cpu_ms: NativeBuffer<float>,
-    last_cpu_s: float,
-    heap_kb: NativeBuffer<float>,
-    heap_delta_kb: NativeBuffer<float>,
-    gc: NativeBuffer<float>,
-    starts: NativeBuffer<int>,
-    aborts: NativeBuffer<int>,
-    load_us: NativeBuffer<int>,
-    upload_us: NativeBuffer<int>,
-    decode_wait_us: NativeBuffer<int>,
-    residency_us: NativeBuffer<int>,
-    residency_paths: [string],
-    slow_ms: NativeBuffer<float>,
-    slow_name: [string],
-    cause: [string],
-    count: int,
+    cpu_ms: NativeBuffer<float> = native_buffer_float(HITCH_RING_FRAMES),
+    last_cpu_s: float = thread_cpu_seconds(),
+    heap_kb: NativeBuffer<float> = native_buffer_float(HITCH_RING_FRAMES),
+    heap_delta_kb: NativeBuffer<float> = native_buffer_float(HITCH_RING_FRAMES),
+    gc: NativeBuffer<float> = native_buffer_float(HITCH_RING_FRAMES * GC_STEP_FIELDS),
+    starts: NativeBuffer<int> = native_buffer_int(HITCH_RING_FRAMES),
+    aborts: NativeBuffer<int> = native_buffer_int(HITCH_RING_FRAMES),
+    load_us: NativeBuffer<int> = native_buffer_int(HITCH_RING_FRAMES),
+    upload_us: NativeBuffer<int> = native_buffer_int(HITCH_RING_FRAMES),
+    decode_wait_us: NativeBuffer<int> = native_buffer_int(HITCH_RING_FRAMES),
+    residency_us: NativeBuffer<int> = native_buffer_int(HITCH_RING_FRAMES),
+    residency_paths: [string] = hitch_string_ring(),
+    slow_ms: NativeBuffer<float> = native_buffer_float(HITCH_RING_FRAMES),
+    slow_name: [string] = hitch_string_ring(),
+    cause: [string] = hitch_string_ring(),
+    count: int = 0,
     // Previous frame's heap sample and process-wide trace counts
     // (`jit_trace_count_of`), for the per-frame deltas.
-    last_heap_kb: float,
-    last_starts: int,
-    last_aborts: int,
-    last_compiles: int,
-    last_flushes: int,
-    cur_slow_ms: float,
-    cur_slow_name: string,
-    cur_slow_phase: string,
-    win_hitches: int,
-    total_hitches: int,
+    last_heap_kb: float = -1.0,
+    last_starts: int = jit_trace_count_of("starts"),
+    last_aborts: int = jit_trace_count_of("aborts"),
+    last_compiles: int = jit_trace_count_of("compiles"),
+    last_flushes: int = jit_trace_count_of("flushes"),
+    cur_slow_ms: float = 0.0,
+    cur_slow_name: string = "",
+    cur_slow_phase: string = "",
+    win_hitches: int = 0,
+    total_hitches: int = 0,
     // Per HITCH_CAUSES entry.
-    win_causes: NativeBuffer<int>,
-    total_causes: NativeBuffer<int>,
-    last_cause: string,
-    last_slow_name: string,
-    last_logic_system: string,
-    log_second: int,
-    log_used: int,
+    win_causes: NativeBuffer<int> = native_buffer_int(HITCH_CAUSES.len()),
+    total_causes: NativeBuffer<int> = native_buffer_int(HITCH_CAUSES.len()),
+    last_cause: string = "",
+    last_slow_name: string = "",
+    last_logic_system: string = "",
+    log_second: int = -1,
+    log_used: int = 0,
 }
 
-fn hitch_ledger_new() -> HitchLedger {
-    let names: [string] = []
-    let causes: [string] = []
-    let residency_paths: [string] = []
-    for _ in 0..HITCH_RING_FRAMES {
-        names.push("")
-        causes.push("")
-        residency_paths.push("")
-    }
-    return HitchLedger {
-        enabled: os_getenv("HITCH_LEDGER") != "0",
-        threshold_ms: get_env_float("HITCH_MS", 25.0),
-        loud_ms: get_env_float("HITCH_LOUD_MS", 50.0),
-        warmup_frames: get_env_int("HITCH_WARMUP_FRAMES", 600),
-        window_secs: get_env_float("HITCH_WINDOW_SECS", 60.0),
-        window_start: -1.0,
-        dump_path: os_getenv("HITCH_LEDGER_PATH") ?? "",
-        frame: native_buffer_int(HITCH_RING_FRAMES),
-        frame_ms: native_buffer_float(HITCH_RING_FRAMES),
-        logic_ms: native_buffer_float(HITCH_RING_FRAMES),
-        render_ms: native_buffer_float(HITCH_RING_FRAMES),
-        present_ms: native_buffer_float(HITCH_RING_FRAMES),
-        cpu_ms: native_buffer_float(HITCH_RING_FRAMES),
-        last_cpu_s: thread_cpu_seconds(),
-        heap_kb: native_buffer_float(HITCH_RING_FRAMES),
-        heap_delta_kb: native_buffer_float(HITCH_RING_FRAMES),
-        gc: native_buffer_float(HITCH_RING_FRAMES * GC_STEP_FIELDS),
-        starts: native_buffer_int(HITCH_RING_FRAMES),
-        aborts: native_buffer_int(HITCH_RING_FRAMES),
-        load_us: native_buffer_int(HITCH_RING_FRAMES),
-        upload_us: native_buffer_int(HITCH_RING_FRAMES),
-        decode_wait_us: native_buffer_int(HITCH_RING_FRAMES),
-        residency_us: native_buffer_int(HITCH_RING_FRAMES),
-        residency_paths: residency_paths,
-        slow_ms: native_buffer_float(HITCH_RING_FRAMES),
-        slow_name: names,
-        cause: causes,
-        count: 0,
-        last_starts: jit_trace_count_of("starts"),
-        last_aborts: jit_trace_count_of("aborts"),
-        last_compiles: jit_trace_count_of("compiles"),
-        last_flushes: jit_trace_count_of("flushes"),
-        last_heap_kb: -1.0,
-        cur_slow_ms: 0.0,
-        cur_slow_name: "",
-        cur_slow_phase: "",
-        win_hitches: 0,
-        total_hitches: 0,
-        win_causes: native_buffer_int(HITCH_CAUSES.len()),
-        total_causes: native_buffer_int(HITCH_CAUSES.len()),
-        last_cause: "",
-        last_slow_name: "",
-        last_logic_system: "",
-        log_second: -1,
-        log_used: 0,
-    }
+fn hitch_string_ring() -> [string] {
+    let ring: [string] = []
+    for _ in 0..HITCH_RING_FRAMES { ring.push("") }
+    return ring
 }
 
-pub global HITCH: HitchLedger = hitch_ledger_new()
+pub global HITCH: HitchLedger = HitchLedger {}
 
 fn hitch_system_begin() -> float {
     if !HITCH.enabled && !PERF_FRAME_CAPTURE { return 0.0 }

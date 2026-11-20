@@ -37,7 +37,7 @@ fn perf_stall_sections_entry(_which: int) {
     assert(json_is_null(perf_stall_sections_report()), "no section history, no stall sections")
 
     perf_stall_sections_profiler(true)
-    HITCH = hitch_ledger_new()
+    HITCH = HitchLedger {}
     PERF_RECORDS = perf_records_new()
     perf_scenario_wait("synthetic")
     perf_scenario_window("fighting", 1, 3)

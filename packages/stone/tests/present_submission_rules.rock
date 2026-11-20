@@ -43,8 +43,8 @@ fn present_test_fixture(body: fn(Canvas, Canvas) -> ()) {
         SECTION_OBSERVATION = vec_new()
         SECTION_WINDOWS = vec_new()
         SECTION_LAST_SECONDS = native_buffer_float(MAX_PROFILE_ENTRIES)
-        PROFILER = new_profiler()
-        PROF_CUR = entry_log_new()
+        PROFILER = ProfilerData {}
+        PROF_CUR = EntryLog {}
         PROF_OPEN_STACK = native_buffer_int(MAX_PROFILE_ENTRIES)
         PROF_OPEN_TOP = 0
         ui_submission_probe_begin()

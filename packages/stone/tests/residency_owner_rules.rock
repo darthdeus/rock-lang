@@ -5,7 +5,7 @@ fn hitch_image_upload_column_uses_native_upload_time() {
         residency_flush_required()
         assert(image_load_ready(image))
         let native = stone_get_image_frame_stats()
-        HITCH = hitch_ledger_new()
+        HITCH = HitchLedger {}
         HITCH.enabled = true
         HITCH.warmup_frames = 10
         hitch_frame_record(1, 20.0, 0.0, false)
@@ -208,7 +208,7 @@ fn residency_owner_miss_wait_classifies_at_half_frame() {
         assert_eq(hitch_classify(20.0, 0.0, 1.0, 0.0,
             0.0, 0, 0, waited), "residency", "a half-frame miss wait precedes upload attribution")
         assert(RESIDENCY_FRAME_WAIT_PATHS.join(";").contains(paths[0]), "the missed path accompanies the frame")
-        HITCH = hitch_ledger_new()
+        HITCH = HitchLedger {}
         HITCH.enabled = true
         HITCH.threshold_ms = 0.0
         HITCH.warmup_frames = 0

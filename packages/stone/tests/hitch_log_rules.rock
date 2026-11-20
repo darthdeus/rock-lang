@@ -2,7 +2,7 @@
 fn hitch_present_misses_log_only_when_loud() {
     let saved = HITCH
     defer { HITCH = saved }
-    HITCH = hitch_ledger_new()
+    HITCH = HitchLedger {}
     HITCH.loud_ms = 50.0
     assert(!hitch_logs_frame("present", 30.0), "a short present wait is counted, not printed")
     assert(hitch_logs_frame("present", 50.0), "a loud present wait prints")
@@ -14,7 +14,7 @@ fn hitch_present_misses_log_only_when_loud() {
 fn hitch_window_tally_resets_once_per_window() {
     let saved = HITCH
     defer { HITCH = saved }
-    HITCH = hitch_ledger_new()
+    HITCH = HitchLedger {}
     HITCH.window_secs = 60.0
     hitch_window_tick(100.0)
     hitch_tally("present")
