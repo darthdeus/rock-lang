@@ -2703,15 +2703,15 @@ pub fn gc_window_pretty_summary() -> string {
     } else {
         SECTION_NAMES[GC_WIN_WORST_FRAME_SECTION_ID_RESULT]
     }
-    let cache_examined = if TEXT_LAYOUT_CACHE_WINDOW_REQUESTS > 0 {
-        (TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED as float)
-            / (TEXT_LAYOUT_CACHE_WINDOW_REQUESTS as float)
-    } else { 0.0 }
+    let cache_ui = TEXT_LAYOUT_CACHE_WINDOW_UI
+    let cache_world = TEXT_LAYOUT_CACHE_WINDOW_WORLD
+    let cache = text_layout_cache_counts_add(cache_ui, cache_world, 1)
+    let cache_examined = text_layout_cache_examined_avg(cache)
     let allocator_stats = if GC_WIN_ALLOC_STATS_AVAILABLE {
         "gross requests {GC_WIN_RESULT:.2f} KB/f, positive growth {gc_window_alloc_per_frame(1):.2f} KB/f, explicit frees {gc_window_alloc_per_frame(2):.2f} KB/f, realloc shrinks {gc_window_alloc_per_frame(3):.2f} KB/f, calls alloc/realloc/free {gc_window_alloc_calls(5)}/{gc_window_alloc_calls(6)}/{gc_window_alloc_calls(7)}"
     } else { "allocator request detail unavailable" }
     let mode = if GC_WIN_MODE_RUNNING { "running" } else { "stopped" }
-    return "GC-window ({validity}, mode={mode}, n={GC_WIN_N}) {allocator_stats}   exclusive sections {GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT:.2f} KB/f   unsectioned {GC_WIN_UNSECTIONED_RESULT:.2f} KB/f   accounting residual {GC_WIN_RESIDUAL_RESULT:.4f} KB/f   section events {gc_window_section_event_count()}   frame-section slots {GC_WIN_FRAME_SECTION_SLOT_COUNT} overflow {GC_WIN_FRAME_SECTION_OVERFLOW}   late sections {GC_WIN_LATE_SECTIONS}/{GC_WIN_LATE_POOL_CAPACITY} pool exhausted {GC_WIN_LATE_POOL_EXHAUSTED}   unknown sections {GC_WIN_UNKNOWN_SECTIONS} {gc_window_unknown_sections_json()}\nGC-window frames mean {GC_WIN_FRAME_MEAN_RESULT:.2f} p50 {GC_WIN_FRAME_P50_RESULT:.2f} p95 {GC_WIN_FRAME_P95_RESULT:.2f} p99 {GC_WIN_FRAME_P99_RESULT:.2f} max {GC_WIN_FRAME_MAX_RESULT:.2f}   worst frame {GC_WIN_WORST_FRAME_INDEX_RESULT} total {GC_WIN_WORST_FRAME_TOTAL_KB_RESULT:.2f} KB; max single event {GC_WIN_WORST_FRAME_SECTION_KB_RESULT:.2f} KB in {max_event_section}\n{gc_window_worst_frame_pretty()}\nText-layout cache requests {TEXT_LAYOUT_CACHE_WINDOW_REQUESTS} hits {TEXT_LAYOUT_CACHE_WINDOW_HITS} misses {TEXT_LAYOUT_CACHE_WINDOW_MISSES} builds {TEXT_LAYOUT_CACHE_WINDOW_BUILDS} evictions {TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS} high-water {TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER} examined avg {cache_examined:.2f} max {TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED} UI req/hit/miss/build/evict {TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS}/{TEXT_LAYOUT_CACHE_WINDOW_UI_HITS}/{TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES}/{TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS}/{TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS} world req/hit/miss/build/evict {TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS}/{TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS}/{TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES}/{TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS}/{TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS}\n"
+    return "GC-window ({validity}, mode={mode}, n={GC_WIN_N}) {allocator_stats}   exclusive sections {GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT:.2f} KB/f   unsectioned {GC_WIN_UNSECTIONED_RESULT:.2f} KB/f   accounting residual {GC_WIN_RESIDUAL_RESULT:.4f} KB/f   section events {gc_window_section_event_count()}   frame-section slots {GC_WIN_FRAME_SECTION_SLOT_COUNT} overflow {GC_WIN_FRAME_SECTION_OVERFLOW}   late sections {GC_WIN_LATE_SECTIONS}/{GC_WIN_LATE_POOL_CAPACITY} pool exhausted {GC_WIN_LATE_POOL_EXHAUSTED}   unknown sections {GC_WIN_UNKNOWN_SECTIONS} {gc_window_unknown_sections_json()}\nGC-window frames mean {GC_WIN_FRAME_MEAN_RESULT:.2f} p50 {GC_WIN_FRAME_P50_RESULT:.2f} p95 {GC_WIN_FRAME_P95_RESULT:.2f} p99 {GC_WIN_FRAME_P99_RESULT:.2f} max {GC_WIN_FRAME_MAX_RESULT:.2f}   worst frame {GC_WIN_WORST_FRAME_INDEX_RESULT} total {GC_WIN_WORST_FRAME_TOTAL_KB_RESULT:.2f} KB; max single event {GC_WIN_WORST_FRAME_SECTION_KB_RESULT:.2f} KB in {max_event_section}\n{gc_window_worst_frame_pretty()}\nText-layout cache requests {cache.requests} hits {cache.hits} misses {cache.misses} builds {cache.builds} evictions {cache.evictions} high-water {TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER} examined avg {cache_examined:.2f} max {TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED} UI req/hit/miss/build/evict {cache_ui.requests}/{cache_ui.hits}/{cache_ui.misses}/{cache_ui.builds}/{cache_ui.evictions} world req/hit/miss/build/evict {cache_world.requests}/{cache_world.hits}/{cache_world.misses}/{cache_world.builds}/{cache_world.evictions}\n"
 }
 
 fn dump_perf_summary_pretty(
@@ -3238,12 +3238,7 @@ fn __perf_json_memory() -> string {
     let distribution = "{{\"mean_kb_per_frame\":{__perf_json_gc_float(GC_WIN_FRAME_MEAN_RESULT, available)},\"p50_kb_per_frame\":{__perf_json_gc_float(GC_WIN_FRAME_P50_RESULT, available)},\"p95_kb_per_frame\":{__perf_json_gc_float(GC_WIN_FRAME_P95_RESULT, available)},\"p99_kb_per_frame\":{__perf_json_gc_float(GC_WIN_FRAME_P99_RESULT, available)},\"max_kb_per_frame\":{__perf_json_gc_float(GC_WIN_FRAME_MAX_RESULT, available)}}}"
     let allocator_available = available && GC_WIN_ALLOC_STATS_AVAILABLE
     let worst_frame = "{{\"frame_index\":{__perf_json_gc_int(GC_WIN_WORST_FRAME_INDEX_RESULT, available)},\"total_kb\":{__perf_json_gc_float(GC_WIN_WORST_FRAME_TOTAL_KB_RESULT, available)},\"max_single_event\":{{\"section_id\":{__perf_json_gc_int(GC_WIN_WORST_FRAME_SECTION_ID_RESULT, available)},\"kb\":{__perf_json_gc_float(GC_WIN_WORST_FRAME_SECTION_KB_RESULT, available)}}},\"sections\":{__perf_json_worst_frame_sections(available)}}}"
-    let cache = if TEXT_LAYOUT_CACHE_WINDOW_REQUESTS >= 0 {
-        let examined_avg = if TEXT_LAYOUT_CACHE_WINDOW_REQUESTS > 0 {
-            (TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED as float) / (TEXT_LAYOUT_CACHE_WINDOW_REQUESTS as float)
-        } else { 0.0 }
-        "{{\"requests\":{TEXT_LAYOUT_CACHE_WINDOW_REQUESTS},\"hits\":{TEXT_LAYOUT_CACHE_WINDOW_HITS},\"misses\":{TEXT_LAYOUT_CACHE_WINDOW_MISSES},\"builds\":{TEXT_LAYOUT_CACHE_WINDOW_BUILDS},\"evictions\":{TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS},\"high_water\":{TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER},\"avg_entries_examined\":{examined_avg:.4f},\"max_entries_examined\":{TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED},\"world_layout_builds\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS},\"ui\":{{\"requests\":{TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS},\"hits\":{TEXT_LAYOUT_CACHE_WINDOW_UI_HITS},\"misses\":{TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES},\"builds\":{TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS},\"evictions\":{TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS}}},\"world\":{{\"requests\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS},\"hits\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS},\"misses\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES},\"builds\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS},\"evictions\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS}}}}}"
-    } else { "null" }
+    let cache = __perf_json_text_layout_cache()
     let unknown_sections = __perf_json_gc_int(GC_WIN_UNKNOWN_SECTIONS, available)
     let late_sections = __perf_json_gc_int(GC_WIN_LATE_SECTIONS, available)
     let late_capacity = __perf_json_gc_int(GC_WIN_LATE_POOL_CAPACITY, available)
@@ -3311,4 +3306,21 @@ pub fn draw_profiler_graph() {
     let font = DEFAULT_FONT ?? return
     queue_ui_text_output_px(font, "Frame ms  red=rendered cyan=effective",
         v(graph_x + 5.0, graph_y + 5.0), PROFILER_GRAPH_FONT_SIZE, WHITE, v(), z + 1)
+}
+
+fn text_layout_cache_examined_avg(c: TextLayoutCacheCounts) -> float {
+    if c.requests <= 0 { return 0.0 }
+    return (c.entries_examined as float) / (c.requests as float)
+}
+
+fn __perf_json_text_layout_cache_counts(c: TextLayoutCacheCounts) -> string {
+    return "\"requests\":{c.requests},\"hits\":{c.hits},\"misses\":{c.misses},\"builds\":{c.builds},\"evictions\":{c.evictions}"
+}
+
+fn __perf_json_text_layout_cache() -> string {
+    if !TEXT_LAYOUT_CACHE_WINDOW_OPENED { return "null" }
+    let ui = TEXT_LAYOUT_CACHE_WINDOW_UI
+    let world = TEXT_LAYOUT_CACHE_WINDOW_WORLD
+    let c = text_layout_cache_counts_add(ui, world, 1)
+    return "{{{__perf_json_text_layout_cache_counts(c)},\"high_water\":{TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER},\"avg_entries_examined\":{text_layout_cache_examined_avg(c):.4f},\"max_entries_examined\":{TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED},\"world_layout_builds\":{world.builds},\"ui\":{{{__perf_json_text_layout_cache_counts(ui)}}},\"world\":{{{__perf_json_text_layout_cache_counts(world)}}}}}"
 }

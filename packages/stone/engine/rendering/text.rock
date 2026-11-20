@@ -1066,10 +1066,9 @@ pub const TEXT_LAYOUT_CACHE_CAPACITY: int = 256
 struct TextLayoutCacheEntry {
     font_id: int,
     text: string,
+    // World entries store their x/y scale here.
     size: float,
     render_scale: float,
-    scale_x: float,
-    scale_y: float,
     world_raster: bool,
     cap_height_fonts: bool,
     align: TextAlign,
@@ -1087,43 +1086,44 @@ global TEXT_LAYOUT_CACHE_CLOCK: int = 0
 // Two map reads instead of a probe over cached variants, which was a standing
 // trace abort (register coalescing too complex).
 global TEXT_LAYOUT_CACHE_INDEX: Map<string, Map<int, int>> = map_new()
-pub global TEXT_LAYOUT_CACHE_HITS: int = 0
-pub global TEXT_LAYOUT_CACHE_INDEX_HITS: int = 0
-global TEXT_LAYOUT_CACHE_REQUESTS: int = 0
-global TEXT_LAYOUT_CACHE_MISSES: int = 0
-pub global TEXT_LAYOUT_CACHE_BUILDS: int = 0
-global TEXT_LAYOUT_CACHE_EVICTIONS: int = 0
-global TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED: int = 0
-global TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED: int = 0
-global TEXT_LAYOUT_CACHE_WINDOW_REQUESTS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_HITS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_MISSES: int = -1
-pub global TEXT_LAYOUT_CACHE_WINDOW_BUILDS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_UI_HITS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS: int = -1
-global TEXT_LAYOUT_CACHE_WINDOW_START_REQUESTS: int = 0
-global TEXT_LAYOUT_CACHE_WINDOW_START_HITS: int = 0
-global TEXT_LAYOUT_CACHE_WINDOW_START_MISSES: int = 0
-global TEXT_LAYOUT_CACHE_WINDOW_START_BUILDS: int = 0
-global TEXT_LAYOUT_CACHE_WINDOW_START_EVICTIONS: int = 0
-global TEXT_LAYOUT_CACHE_WINDOW_START_ENTRIES_EXAMINED: int = 0
-global TEXT_LAYOUT_CACHE_WINDOW_START_WORLD_BUILDS: int = 0
-const TEXT_LAYOUT_CACHE_WINDOW_START_OCCUPANCY: int = 0
-global TEXT_LAYOUT_CACHE_HIGH_WATER: int = 0
+pub struct TextLayoutCacheCounts {
+    requests: int = 0,
+    hits: int = 0,
+    misses: int = 0,
+    builds: int = 0,
+    evictions: int = 0,
+    entries_examined: int = 0,
+}
+
+fn text_layout_cache_counts_add(a: TextLayoutCacheCounts, b: TextLayoutCacheCounts, sign: int) -> TextLayoutCacheCounts {
+    let sum = TextLayoutCacheCounts {}
+    text_layout_cache_counts_set(sum, a, b, sign)
+    return sum
+}
+
+fn text_layout_cache_counts_set(dst: TextLayoutCacheCounts, a: TextLayoutCacheCounts,
+    b: TextLayoutCacheCounts, sign: int) {
+    dst.requests = a.requests + sign * b.requests
+    dst.hits = a.hits + sign * b.hits
+    dst.misses = a.misses + sign * b.misses
+    dst.builds = a.builds + sign * b.builds
+    dst.evictions = a.evictions + sign * b.evictions
+    dst.entries_examined = a.entries_examined + sign * b.entries_examined
+}
+
+global TEXT_LAYOUT_CACHE_UI_COUNTS: TextLayoutCacheCounts = TextLayoutCacheCounts {}
+global TEXT_LAYOUT_CACHE_WORLD_COUNTS: TextLayoutCacheCounts = TextLayoutCacheCounts {}
+// The counts at the window's start while it is open, its deltas once it ends.
+pub global TEXT_LAYOUT_CACHE_WINDOW_UI: TextLayoutCacheCounts = TextLayoutCacheCounts {}
+pub global TEXT_LAYOUT_CACHE_WINDOW_WORLD: TextLayoutCacheCounts = TextLayoutCacheCounts {}
+pub global TEXT_LAYOUT_CACHE_WINDOW_OPENED: bool = false
+pub global TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED: int = -1
+pub global TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER: int = -1
 global TEXT_LAYOUT_CACHE_WINDOW_ACTIVE: bool = false
-global TEXT_WORLD_LAYOUT_BUILD_CALLS: int = 0
+
+pub fn text_layout_cache_totals() -> TextLayoutCacheCounts {
+    return text_layout_cache_counts_add(TEXT_LAYOUT_CACHE_UI_COUNTS, TEXT_LAYOUT_CACHE_WORLD_COUNTS, 1)
+}
 
 pub struct TextLayoutEmissionProbe {
     frame: int,
@@ -1571,43 +1571,18 @@ pub fn text_layout_build(
 }
 
 fn text_layout_cache_window_begin() {
-    TEXT_LAYOUT_CACHE_WINDOW_START_REQUESTS = TEXT_LAYOUT_CACHE_REQUESTS
-    TEXT_LAYOUT_CACHE_WINDOW_START_HITS = TEXT_LAYOUT_CACHE_HITS
-    TEXT_LAYOUT_CACHE_WINDOW_START_MISSES = TEXT_LAYOUT_CACHE_MISSES
-    TEXT_LAYOUT_CACHE_WINDOW_START_BUILDS = TEXT_LAYOUT_CACHE_BUILDS
-    TEXT_LAYOUT_CACHE_WINDOW_START_EVICTIONS = TEXT_LAYOUT_CACHE_EVICTIONS
-    TEXT_LAYOUT_CACHE_WINDOW_START_ENTRIES_EXAMINED = TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED
-    TEXT_LAYOUT_CACHE_WINDOW_START_WORLD_BUILDS = TEXT_WORLD_LAYOUT_BUILD_CALLS
-    TEXT_LAYOUT_CACHE_WINDOW_REQUESTS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_HITS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_MISSES = 0
-    TEXT_LAYOUT_CACHE_WINDOW_BUILDS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED = 0
+    text_layout_cache_counts_set(TEXT_LAYOUT_CACHE_WINDOW_UI, TEXT_LAYOUT_CACHE_UI_COUNTS, TEXT_LAYOUT_CACHE_WINDOW_UI, 0)
+    text_layout_cache_counts_set(TEXT_LAYOUT_CACHE_WINDOW_WORLD, TEXT_LAYOUT_CACHE_WORLD_COUNTS, TEXT_LAYOUT_CACHE_WINDOW_WORLD, 0)
     TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = 0
     TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER = TEXT_LAYOUT_CACHE.len
-    TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_UI_HITS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES = 0
-    TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES = 0
-    TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS = 0
-    TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_OPENED = true
     TEXT_LAYOUT_CACHE_WINDOW_ACTIVE = true
 }
 
 fn text_layout_cache_window_end() {
     if !TEXT_LAYOUT_CACHE_WINDOW_ACTIVE { return () }
-    TEXT_LAYOUT_CACHE_WINDOW_REQUESTS = TEXT_LAYOUT_CACHE_REQUESTS - TEXT_LAYOUT_CACHE_WINDOW_START_REQUESTS
-    TEXT_LAYOUT_CACHE_WINDOW_HITS = TEXT_LAYOUT_CACHE_HITS - TEXT_LAYOUT_CACHE_WINDOW_START_HITS
-    TEXT_LAYOUT_CACHE_WINDOW_MISSES = TEXT_LAYOUT_CACHE_MISSES - TEXT_LAYOUT_CACHE_WINDOW_START_MISSES
-    TEXT_LAYOUT_CACHE_WINDOW_BUILDS = TEXT_LAYOUT_CACHE_BUILDS - TEXT_LAYOUT_CACHE_WINDOW_START_BUILDS
-    TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS = TEXT_LAYOUT_CACHE_EVICTIONS - TEXT_LAYOUT_CACHE_WINDOW_START_EVICTIONS
-    TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED = TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED - TEXT_LAYOUT_CACHE_WINDOW_START_ENTRIES_EXAMINED
-    TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS = TEXT_WORLD_LAYOUT_BUILD_CALLS - TEXT_LAYOUT_CACHE_WINDOW_START_WORLD_BUILDS
+    text_layout_cache_counts_set(TEXT_LAYOUT_CACHE_WINDOW_UI, TEXT_LAYOUT_CACHE_UI_COUNTS, TEXT_LAYOUT_CACHE_WINDOW_UI, -1)
+    text_layout_cache_counts_set(TEXT_LAYOUT_CACHE_WINDOW_WORLD, TEXT_LAYOUT_CACHE_WORLD_COUNTS, TEXT_LAYOUT_CACHE_WINDOW_WORLD, -1)
     TEXT_LAYOUT_CACHE_WINDOW_ACTIVE = false
 }
 
@@ -1711,7 +1686,7 @@ fn text_layout_cache_slot(text: string, variant: int) -> int {
 // entry, evicted here. The caller stores the entry it built straight into this
 // slot so the layout is constructed in the cache's own storage; a stored copy
 // would deep-copy every glyph row on each miss (Lua has no owner to move into).
-fn text_layout_cache_claim_slot(world_raster: bool) -> int {
+fn text_layout_cache_claim_slot(counts: TextLayoutCacheCounts) -> int {
     if TEXT_LAYOUT_CACHE.len < TEXT_LAYOUT_CACHE_CAPACITY {
         return TEXT_LAYOUT_CACHE.len
     }
@@ -1723,15 +1698,7 @@ fn text_layout_cache_claim_slot(world_raster: bool) -> int {
             oldest_used = TEXT_LAYOUT_CACHE[i].last_used
         }
     }
-    TEXT_LAYOUT_CACHE_EVICTIONS += 1
-    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
-        TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS += 1
-        if world_raster {
-            TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS += 1
-        } else {
-            TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS += 1
-        }
-    }
+    counts.evictions += 1
     let old = TEXT_LAYOUT_CACHE[oldest_idx]
     text_layout_cache_index_remove(old.text, old.variant, oldest_idx)
     return oldest_idx
@@ -1740,9 +1707,6 @@ fn text_layout_cache_claim_slot(world_raster: bool) -> int {
 fn text_layout_cache_commit(slot: int) -> TextLayout {
     let entry = TEXT_LAYOUT_CACHE[slot]
     text_layout_cache_index_add(entry.text, entry.variant, slot)
-    if TEXT_LAYOUT_CACHE.len > TEXT_LAYOUT_CACHE_HIGH_WATER {
-        TEXT_LAYOUT_CACHE_HIGH_WATER = TEXT_LAYOUT_CACHE.len
-    }
     if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE
         && TEXT_LAYOUT_CACHE.len > TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER {
         TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER = TEXT_LAYOUT_CACHE.len
@@ -1759,98 +1723,8 @@ pub fn text_layout_cached(
     raster_physical_target_scale: float,
     face: int = FACE_REGULAR
 ) -> TextLayout {
-    TEXT_LAYOUT_CACHE_CLOCK += 1
-    TEXT_LAYOUT_CACHE_REQUESTS += 1
-    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
-        TEXT_LAYOUT_CACHE_WINDOW_REQUESTS += 1
-        TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS += 1
-    }
-    let data = font.data()
-    if data == null {
-        let owned_text = text.clone_into(TEXT_LAYOUT_CACHE.storage)
-        return text_layout_empty(font, owned_text, face, align)
-    }
-    let font_id = data.backend_id
-    let variant = text_layout_variant_key(false, font_id, face, align,
-        CAP_HEIGHT_FONTS, size, render_scale, raster_physical_target_scale)
-    let examined = 0
-    let head_slot = text_layout_cache_slot(text, variant)
-    let slot = head_slot
-    while slot >= 0 {
-        examined += 1
-        let entry = TEXT_LAYOUT_CACHE[slot]
-        if !entry.world_raster && entry.font_id == font_id
-            && entry.text == text
-            && entry.size == size
-            && entry.render_scale == render_scale
-            && entry.cap_height_fonts == CAP_HEIGHT_FONTS
-            && entry.align == align
-            && entry.layout.face == face
-            && entry.raster_physical_target_scale == raster_physical_target_scale {
-            entry.last_used = TEXT_LAYOUT_CACHE_CLOCK
-            TEXT_LAYOUT_CACHE_HITS += 1
-            TEXT_LAYOUT_CACHE_INDEX_HITS += 1
-            TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED += examined
-            if examined > TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED {
-                TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED = examined
-            }
-            if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
-                TEXT_LAYOUT_CACHE_WINDOW_HITS += 1
-                TEXT_LAYOUT_CACHE_WINDOW_UI_HITS += 1
-                TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED += examined
-                if examined > TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED {
-                    TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = examined
-                }
-            }
-            return entry.layout
-        }
-        slot = entry.next_variant_slot
-    }
-    TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED += examined
-    if examined > TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED {
-        TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED = examined
-    }
-    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
-        TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED += examined
-        if examined > TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED {
-            TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = examined
-        }
-        TEXT_LAYOUT_CACHE_WINDOW_MISSES += 1
-        TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES += 1
-    }
-    TEXT_LAYOUT_CACHE_MISSES += 1
-    let owned_text = text.clone_into(TEXT_LAYOUT_CACHE.storage)
-    let layout = text_layout_build(font, owned_text, size, render_scale,
-        face: face, align: align,
-        raster_physical_target_scale: raster_physical_target_scale)
-    TEXT_LAYOUT_CACHE_BUILDS += 1
-    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
-        TEXT_LAYOUT_CACHE_WINDOW_BUILDS += 1
-        TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS += 1
-    }
-    let entry = TextLayoutCacheEntry {
-        font_id: font_id,
-        text: owned_text,
-        size: size,
-        render_scale: render_scale,
-        scale_x: 0.0,
-        scale_y: 0.0,
-        world_raster: false,
-        cap_height_fonts: CAP_HEIGHT_FONTS,
-        align: align,
-        raster_physical_target_scale: raster_physical_target_scale,
-        variant: variant,
-        next_variant_slot: -1,
-        last_used: TEXT_LAYOUT_CACHE_CLOCK,
-        layout: layout,
-    }
-    let slot = text_layout_cache_claim_slot(false)
-    if slot == TEXT_LAYOUT_CACHE.len {
-        TEXT_LAYOUT_CACHE.push(entry)
-    } else {
-        TEXT_LAYOUT_CACHE[slot] = entry
-    }
-    return text_layout_cache_commit(slot)
+    return text_layout_cache_get(false, font, text, size, render_scale, align,
+        CAP_HEIGHT_FONTS, raster_physical_target_scale, face)
 }
 
 fn text_layout_cached_world(
@@ -1861,95 +1735,82 @@ fn text_layout_cached_world(
     raster_physical_target_scale: float = -1.0,
     face: int = FACE_REGULAR
 ) -> TextLayout {
-    TEXT_LAYOUT_CACHE_CLOCK += 1
-    TEXT_LAYOUT_CACHE_REQUESTS += 1
-    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
-        TEXT_LAYOUT_CACHE_WINDOW_REQUESTS += 1
-        TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS += 1
-    }
-    let data = font.data()
-    if data == null {
-        let owned_text = text.clone_into(TEXT_LAYOUT_CACHE.storage)
-        return text_layout_empty(font, owned_text, face, TextAlign::TopLeft)
-    }
-    let font_id = data.backend_id
     let density = if raster_physical_target_scale > 0.0 {
         raster_physical_target_scale
     } else { world_text_scene_density() }
-    let variant = text_layout_variant_key(true, font_id, face, TextAlign::TopLeft,
-        false, scale_x, scale_y, density)
+    return text_layout_cache_get(true, font, text, scale_x, scale_y, TextAlign::TopLeft,
+        false, density, face)
+}
+
+fn text_layout_cache_get(world_raster: bool, font: Font, text: string, size: float,
+    render_scale: float, align: TextAlign, cap_height_fonts: bool,
+    raster_physical_target_scale: float, face: int) -> TextLayout {
+    TEXT_LAYOUT_CACHE_CLOCK += 1
+    let counts = if world_raster { TEXT_LAYOUT_CACHE_WORLD_COUNTS } else { TEXT_LAYOUT_CACHE_UI_COUNTS }
+    counts.requests += 1
+    let data = font.data()
+    if data == null {
+        let owned_text = text.clone_into(TEXT_LAYOUT_CACHE.storage)
+        return text_layout_empty(font, owned_text, face, align)
+    }
+    let font_id = data.backend_id
+    let variant = text_layout_variant_key(world_raster, font_id, face, align,
+        cap_height_fonts, size, render_scale, raster_physical_target_scale)
     let examined = 0
-    let head_slot = text_layout_cache_slot(text, variant)
-    let slot = head_slot
+    let hit = -1
+    let slot = text_layout_cache_slot(text, variant)
     while slot >= 0 {
         examined += 1
         let entry = TEXT_LAYOUT_CACHE[slot]
-        if entry.world_raster && entry.font_id == font_id
+        if entry.world_raster == world_raster && entry.font_id == font_id
             && entry.text == text
-            && entry.scale_x == scale_x
-            && entry.scale_y == scale_y
-            && entry.raster_physical_target_scale == density
-            && entry.layout.face == face {
-            entry.last_used = TEXT_LAYOUT_CACHE_CLOCK
-            TEXT_LAYOUT_CACHE_HITS += 1
-            TEXT_LAYOUT_CACHE_INDEX_HITS += 1
-            if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
-                TEXT_LAYOUT_CACHE_WINDOW_HITS += 1
-                TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS += 1
-            }
-            TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED += examined
-            if examined > TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED {
-                TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED = examined
-            }
-            if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
-                TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED += examined
-                if examined > TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED {
-                    TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = examined
-                }
-            }
-            return entry.layout
+            && entry.size == size
+            && entry.render_scale == render_scale
+            && entry.cap_height_fonts == cap_height_fonts
+            && entry.align == align
+            && entry.layout.face == face
+            && entry.raster_physical_target_scale == raster_physical_target_scale {
+            hit = slot
+            break
         }
         slot = entry.next_variant_slot
     }
-    TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED += examined
-    if examined > TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED {
-        TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED = examined
+    counts.entries_examined += examined
+    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE && examined > TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED {
+        TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = examined
     }
-    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
-        TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED += examined
-        if examined > TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED {
-            TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = examined
-        }
-        TEXT_LAYOUT_CACHE_WINDOW_MISSES += 1
-        TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES += 1
+    if hit >= 0 {
+        let entry = TEXT_LAYOUT_CACHE[hit]
+        entry.last_used = TEXT_LAYOUT_CACHE_CLOCK
+        counts.hits += 1
+        return entry.layout
     }
-    TEXT_LAYOUT_CACHE_MISSES += 1
-    TEXT_WORLD_LAYOUT_BUILD_CALLS += 1
+    counts.misses += 1
     let owned_text = text.clone_into(TEXT_LAYOUT_CACHE.storage)
-    let layout = text_layout_build_scaled(font, owned_text, scale_x, scale_y,
-        face, TextAlign::TopLeft, false, true, "", density)
-    TEXT_LAYOUT_CACHE_BUILDS += 1
-    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
-        TEXT_LAYOUT_CACHE_WINDOW_BUILDS += 1
-        TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS += 1
+    let layout = if world_raster {
+        text_layout_build_scaled(font, owned_text, size, render_scale,
+            face, align, false, true, "", raster_physical_target_scale)
+    } else {
+        text_layout_build(font, owned_text, size, render_scale,
+            face: face, align: align,
+            raster_physical_target_scale: raster_physical_target_scale)
     }
+    counts.builds += 1
     let entry = TextLayoutCacheEntry {
         font_id: font_id,
         text: owned_text,
-        size: 0.0,
-        render_scale: 0.0,
-        scale_x: scale_x,
-        scale_y: scale_y,
-        world_raster: true,
-        cap_height_fonts: false,
-        align: TextAlign::TopLeft,
-        raster_physical_target_scale: density,
+        size: size,
+        render_scale: render_scale,
+        world_raster: world_raster,
+        cap_height_fonts: cap_height_fonts,
+        align: align,
+        raster_physical_target_scale: raster_physical_target_scale,
         variant: variant,
         next_variant_slot: -1,
         last_used: TEXT_LAYOUT_CACHE_CLOCK,
         layout: layout,
     }
-    let slot = text_layout_cache_claim_slot(true)
+    let slot = text_layout_cache_claim_slot(counts)
     if slot == TEXT_LAYOUT_CACHE.len {
         TEXT_LAYOUT_CACHE.push(entry)
     } else {

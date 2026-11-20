@@ -33,9 +33,9 @@ fn text_layout_cache_index_fill_to_capacity(font: Font, prefix: string) {
     }
     assert_eq(TEXT_LAYOUT_CACHE.len, TEXT_LAYOUT_CACHE_CAPACITY,
         "{prefix} setup fills the unchanged production cache")
-    let evictions_before = TEXT_LAYOUT_CACHE_EVICTIONS
+    let evictions_before = text_layout_cache_totals().evictions
     text_layout_cache_index_layout(font, "{prefix}-eviction-trigger")
-    assert_eq(TEXT_LAYOUT_CACHE_EVICTIONS, evictions_before + 1,
+    assert_eq(text_layout_cache_totals().evictions, evictions_before + 1,
         "the existing LRU evicts one entry at capacity")
 }
 
@@ -62,20 +62,20 @@ fn text_layout_cache_collision_finds_each_resident_exact_key() {
         assert_eq(TEXT_LAYOUT_CACHE[colliding_slot].next_variant_slot, first_slot,
             "the variant chain retains the older resident entry")
 
-        let examined_before = TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED
-        let misses_before = TEXT_LAYOUT_CACHE_MISSES
-        let hits_before = TEXT_LAYOUT_CACHE_HITS
+        let examined_before = text_layout_cache_totals().entries_examined
+        let misses_before = text_layout_cache_totals().misses
+        let hits_before = text_layout_cache_totals().hits
         text_layout_cache_index_layout(font, text, first_size)
-        assert_eq(TEXT_LAYOUT_CACHE_HITS, hits_before + 1,
+        assert_eq(text_layout_cache_totals().hits, hits_before + 1,
             "production lookup finds the exact key behind the colliding head")
-        assert_eq(TEXT_LAYOUT_CACHE_MISSES, misses_before,
+        assert_eq(text_layout_cache_totals().misses, misses_before,
             "a resident exact key does not build again")
-        assert_eq(TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED, examined_before + 2,
+        assert_eq(text_layout_cache_totals().entries_examined, examined_before + 2,
             "lookup accounts for the mismatching head and matching next entry")
 
-        let hits_after_first = TEXT_LAYOUT_CACHE_HITS
+        let hits_after_first = text_layout_cache_totals().hits
         text_layout_cache_index_layout(font, text, colliding_size)
-        assert_eq(TEXT_LAYOUT_CACHE_HITS, hits_after_first + 1,
+        assert_eq(text_layout_cache_totals().hits, hits_after_first + 1,
             "production lookup also finds the chain head")
         assert_eq(text_layout_cache_index_chain(text, variant).len, 2,
             "both exact variants remain indexed after hits")
@@ -89,9 +89,9 @@ fn text_layout_cache_collision_finds_each_resident_exact_key() {
         let reused_head = text_layout_cache_slot(text, variant)
         assert_eq(TEXT_LAYOUT_CACHE[reused_head].next_variant_slot, reused_first,
             "reused slots rebuild a complete collision chain after reset")
-        let hits_after_reset = TEXT_LAYOUT_CACHE_HITS
+        let hits_after_reset = text_layout_cache_totals().hits
         text_layout_cache_index_layout(font, text, first_size)
-        assert_eq(TEXT_LAYOUT_CACHE_HITS, hits_after_reset + 1,
+        assert_eq(text_layout_cache_totals().hits, hits_after_reset + 1,
             "the pre-reset exact key is findable after slot reuse")
     })
 }
@@ -120,12 +120,12 @@ fn text_layout_cache_world_collision_finds_each_exact_scale_key() {
         assert_eq(TEXT_LAYOUT_CACHE[colliding_slot].next_variant_slot, first_slot,
             "world collision entries share the same collision-safe index chain")
 
-        let hits_before = TEXT_LAYOUT_CACHE_HITS
-        let misses_before = TEXT_LAYOUT_CACHE_MISSES
+        let hits_before = text_layout_cache_totals().hits
+        let misses_before = text_layout_cache_totals().misses
         let _first_again = text_layout_cached_world(font, text, first_scale_x, 1.0, density)
-        assert_eq(TEXT_LAYOUT_CACHE_HITS, hits_before + 1,
+        assert_eq(text_layout_cache_totals().hits, hits_before + 1,
             "world production lookup finds the exact scale behind the colliding head")
-        assert_eq(TEXT_LAYOUT_CACHE_MISSES, misses_before,
+        assert_eq(text_layout_cache_totals().misses, misses_before,
             "a resident world-raster key does not build again")
     })
 }
@@ -170,5 +170,20 @@ fn text_layout_cache_collision_index_unlinks_lru_head_and_interior() {
             "interior removal links the head to the surviving tail")
         assert_eq(TEXT_LAYOUT_CACHE[middle_slot].text, "interior-eviction-trigger",
             "the evicted interior slot is safely reused for the new entry")
+    })
+}
+
+@test
+fn text_layout_cache_window_reports_ui_and_world_deltas() {
+    text_layout_cache_index_fixture(font => {
+        text_layout_cache_index_layout(font, "window-before")
+        text_layout_cache_window_begin()
+        text_layout_cache_index_layout(font, "window-ui")
+        text_layout_cache_index_layout(font, "window-ui")
+        let _world = text_layout_cached_world(font, "window-world", 1.0, 1.0, 1.0)
+        text_layout_cache_window_end()
+        text_layout_cache_index_layout(font, "window-after")
+        assert_eq(__perf_json_text_layout_cache(),
+            "{{\"requests\":3,\"hits\":1,\"misses\":2,\"builds\":2,\"evictions\":0,\"high_water\":3,\"avg_entries_examined\":0.3333,\"max_entries_examined\":1,\"world_layout_builds\":1,\"ui\":{{\"requests\":2,\"hits\":1,\"misses\":1,\"builds\":1,\"evictions\":0}},\"world\":{{\"requests\":1,\"hits\":0,\"misses\":1,\"builds\":1,\"evictions\":0}}}}")
     })
 }
