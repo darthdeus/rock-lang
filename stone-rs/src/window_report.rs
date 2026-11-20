@@ -440,106 +440,54 @@ mod tests {
         }
     }
 
-    const NO_BORDERS: Borders = title_bar(0);
-
     #[test]
-    fn placement_shrinks_oversized_request() {
-        let d = display_at(0, (0, 0, 1440, 900), (0, 30, 1440, 870));
-        let req = WindowRequest {
-            size: (2560, 1600),
-            pos: (0, 30),
-            display: None,
+    fn placement_fits_the_request_to_its_display() {
+        let displays = [
+            display_at(0, (0, 0, 1440, 900), (0, 30, 1440, 870)),
+            display_at(1, (1440, 0, 2560, 1440), (1440, 0, 2560, 1440)),
+        ];
+        let place = |n: usize, borders, size, pos, display| {
+            let p = resolve_window_placement(
+                WindowRequest { size, pos, display },
+                &displays[..n],
+                borders,
+            );
+            (p.size, p.pos, p.display)
         };
-        let p = resolve_window_placement(req, &[d], title_bar(28));
-        assert_eq!(p.size, (1440, 842)); // 870 usable - 28 title
-        assert_eq!(p.display, 0);
-    }
-
-    #[test]
-    fn placement_leaves_fitting_request_untouched() {
-        let d = display_at(0, (0, 0, 1440, 900), (0, 30, 1440, 870));
-        let req = WindowRequest {
-            size: (800, 700),
-            pos: (100, 100),
-            display: None,
+        let none = title_bar(0);
+        let framed = Borders {
+            top: 28,
+            left: 4,
+            bottom: 2,
+            right: 4,
         };
-        let p = resolve_window_placement(req, &[d], NO_BORDERS);
-        assert_eq!(p.size, (800, 700));
-        assert_eq!(p.pos, (100, 100));
-    }
-
-    #[test]
-    fn placement_pulls_offscreen_position_back() {
-        let d = display_at(0, (0, 0, 1440, 900), (0, 30, 1440, 870));
-        let req = WindowRequest {
-            size: (800, 700),
-            pos: (2560, 0),
-            display: None,
-        };
-        let p = resolve_window_placement(req, &[d], NO_BORDERS);
-        assert_eq!(p.pos, (640, 30));
-        assert_eq!(p.display, 0);
-    }
-
-    #[test]
-    fn placement_position_clamp_respects_borders() {
-        let d = display_at(0, (0, 0, 1440, 900), (0, 30, 1440, 870));
-        let req = WindowRequest {
-            size: (800, 700),
-            pos: (2560, 0),
-            display: None,
-        };
-        let p = resolve_window_placement(
-            req,
-            &[d],
-            Borders {
-                top: 28,
-                left: 4,
-                bottom: 2,
-                right: 4,
-            },
+        // 870 usable - 28 title
+        assert_eq!(
+            place(1, title_bar(28), (2560, 1600), (0, 30), None).0,
+            (1440, 842)
         );
-        assert_eq!(p.pos, (636, 58));
-    }
-
-    #[test]
-    fn placement_explicit_display_wins_when_valid() {
-        let d0 = display_at(0, (0, 0, 1440, 900), (0, 30, 1440, 870));
-        let d1 = display_at(1, (1440, 0, 2560, 1440), (1440, 0, 2560, 1440));
-        let req = WindowRequest {
-            size: (800, 700),
-            pos: (100, 100),
-            display: Some(1),
-        };
-        let p = resolve_window_placement(req, &[d0, d1], NO_BORDERS);
-        assert_eq!(p.display, 1);
-        assert_eq!(p.pos, (1440, 100));
-    }
-
-    #[test]
-    fn placement_selects_display_containing_position() {
-        let d0 = display_at(0, (0, 0, 1440, 900), (0, 30, 1440, 870));
-        let d1 = display_at(1, (1440, 0, 2560, 1440), (1440, 0, 2560, 1440));
-        let req = WindowRequest {
-            size: (800, 700),
-            pos: (2000, 200),
-            display: None,
-        };
-        let p = resolve_window_placement(req, &[d0, d1], NO_BORDERS);
-        assert_eq!(p.display, 1);
-        assert_eq!(p.pos, (2000, 200));
-    }
-
-    #[test]
-    fn placement_invalid_explicit_display_falls_back_to_primary() {
-        let d0 = display_at(0, (0, 0, 1440, 900), (0, 30, 1440, 870));
-        let req = WindowRequest {
-            size: (800, 700),
-            pos: (100, 100),
-            display: Some(7),
-        };
-        let p = resolve_window_placement(req, &[d0], NO_BORDERS);
-        assert_eq!(p.display, 0);
+        assert_eq!(
+            place(1, none, (800, 700), (100, 100), None),
+            ((800, 700), (100, 100), 0)
+        );
+        assert_eq!(
+            place(1, none, (800, 700), (2560, 0), None),
+            ((800, 700), (640, 30), 0)
+        );
+        assert_eq!(place(1, framed, (800, 700), (2560, 0), None).1, (636, 58));
+        assert_eq!(
+            place(2, none, (800, 700), (100, 100), Some(1)),
+            ((800, 700), (1440, 100), 1)
+        );
+        assert_eq!(
+            place(2, none, (800, 700), (2000, 200), None),
+            ((800, 700), (2000, 200), 1)
+        );
+        assert_eq!(place(1, none, (800, 700), (100, 100), Some(7)).2, 0);
+        assert_eq!(
+            place(0, none, (800, 700), (2560, 0), Some(3)),
+            ((800, 700), (2560, 0), 3)
+        );
     }
 
     #[test]
@@ -566,19 +514,6 @@ mod tests {
         for (modes, expected, name) in cases {
             assert_eq!(closest_display_mode(modes, 1920, 1080), expected, "{name}");
         }
-    }
-
-    #[test]
-    fn placement_empty_displays_is_identity() {
-        let req = WindowRequest {
-            size: (800, 700),
-            pos: (2560, 0),
-            display: Some(3),
-        };
-        let p = resolve_window_placement(req, &[], NO_BORDERS);
-        assert_eq!(p.size, (800, 700));
-        assert_eq!(p.pos, (2560, 0));
-        assert_eq!(p.display, 3);
     }
 
     #[test]
