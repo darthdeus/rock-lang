@@ -1124,7 +1124,7 @@ mod shape_drift_tests {
     use super::ProjectFixture;
 
     #[test]
-    fn struct_shape_edit_requests_restart_and_defers_the_write() {
+    fn struct_layout_edits_request_restart_and_defer_the_write() {
         let v0 = "struct Mob { hp: int }\n\
                   global M: Mob? = null\n\
                   @nomangle\n\
@@ -1135,37 +1135,42 @@ mod shape_drift_tests {
                   @nomangle\n\
                   fn spawn() { M = Mob { hp: 10, armor: 5 } }\n\
                   fn main() { }\n";
-        let mut fx = ProjectFixture::boot(v0);
-        let baseline = fx.main_text();
+        let reordered = v1.replace("hp: int, armor: int", "armor: int, hp: int");
+        for (before, after) in [(v0, v1), (v1, v0), (v1, reordered.as_str())] {
+            let mut fx = ProjectFixture::boot(before);
+            let baseline = fx.main_text();
 
-        let reload = fx.edit(v1).expect("recompile v1");
-        match &reload {
-            SkullReload::ShapeChanged { types } => assert!(
-                types.iter().any(|t| t == "Mob"),
-                "the restart request must name the drifted type, got {types:?}"
-            ),
-            other => {
-                panic!("a struct shape edit must request a restart (ShapeChanged), got {other:?}")
+            let reload = fx.edit(after).expect("recompile edited layout");
+            match &reload {
+                SkullReload::ShapeChanged { types } => assert!(
+                    types.iter().any(|t| t == "Mob"),
+                    "the restart request must name the drifted type, got {types:?}"
+                ),
+                other => {
+                    panic!(
+                        "a struct shape edit must request a restart (ShapeChanged), got {other:?}"
+                    )
+                }
             }
+            assert_eq!(
+                fx.main_text(),
+                baseline,
+                "the new-shape main.lua write must be DEFERRED -- the old process must never dofile it"
+            );
+
+            fx.force_full().expect("force_full");
+            assert_ne!(
+                fx.main_text(),
+                baseline,
+                "canonicalize after the kill must write the deferred new-shape program"
+            );
+
+            let again = fx.edit(after).expect("recompile same");
+            assert!(
+                matches!(again, SkullReload::NoChange),
+                "the shape delta must be consumed by the restart, got {again:?}"
+            );
         }
-        assert_eq!(
-            fx.main_text(),
-            baseline,
-            "the new-shape main.lua write must be DEFERRED -- the old process must never dofile it"
-        );
-
-        fx.force_full().expect("force_full");
-        assert_ne!(
-            fx.main_text(),
-            baseline,
-            "canonicalize after the kill must write the deferred new-shape program"
-        );
-
-        let again = fx.edit(v1).expect("recompile same");
-        assert!(
-            matches!(again, SkullReload::NoChange),
-            "the shape delta must be consumed by the restart, got {again:?}"
-        );
     }
 
     #[test]
