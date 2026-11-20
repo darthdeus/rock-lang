@@ -114,11 +114,6 @@ fn hit_display(ws: &Workspace, hit: &Resolved) -> String {
     }
 }
 
-enum Landing {
-    Def(Resolved),
-    Module(u32, Vec<Ustr>),
-}
-
 #[derive(Debug, Clone)]
 pub enum CalleeFamily {
     Single(Resolved),
@@ -309,13 +304,9 @@ fn bind_tiers(
         tiers.bind(vec![hit], FamilyTier::Own, Via::Imports);
     }
 
-    // Tier 3: the fragment's explicit imports. A bound name does not fall
-    // through, even if a target is missing or a module; below a callable
-    // binding, an import that lands on a module is a non-callable and adds
-    // nothing.
+    // Tier 3: an explicit import failure blocks lower tiers.
     if tiers.wants_more(callee) {
-        let below = !matches!(tiers.first, Bound::Unbound);
-        if let Some(hits) = import_tier(ws, frag, name, below)? {
+        if let Some(hits) = import_tier(ws, frag, name)? {
             tiers.bind(hits, FamilyTier::Imports, Via::Imports);
         }
     }
@@ -343,16 +334,11 @@ fn import_tier(
     ws: &Workspace,
     frag: &FragmentScope,
     name: Ustr,
-    below: bool,
 ) -> Result<Option<Vec<Resolved>>, String> {
     if let Some(targets) = frag.named.get(&name) {
         let mut hits: Vec<Resolved> = Vec::new();
         for target in targets {
-            match resolve_import_target(ws, frag, name, target)? {
-                Some(found) => hits.extend(found),
-                None if below => {}
-                None => return Err(format!("`{name}` names a module, not a definition")),
-            }
+            hits.extend(resolve_import_target(ws, frag, name, target)?);
         }
         hits.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
         hits.dedup();
@@ -368,12 +354,10 @@ fn import_tier(
         if let Some(targets) = frag.named.get(&binary) {
             let mut hits = Vec::new();
             for target in targets {
-                let Some(unary) = operator_family_paths(target).nth(1) else {
+                let Some(unary) = unary_selector_path(target) else {
                     continue;
                 };
-                if let Some(resolved) =
-                    walk_optional_definition(ws, frag, &[], &unary, &mut Vec::new())?
-                {
+                if let Some(resolved) = walk_optional_definition(ws, frag, &unary)? {
                     hits.push(resolved);
                 }
             }
@@ -387,17 +371,14 @@ fn import_tier(
     Ok(None)
 }
 
-/// Add the prefix family selected by an `operator(-)` import of `__op_sub`.
-fn operator_family_paths(path: &UsePathRef) -> impl Iterator<Item = UsePathRef> {
-    let mut paths = vec![path.clone()];
-    if path.segments.last().copied() == Some(Ustr::from("__op_sub")) {
-        let mut unary = path.clone();
-        if let Some(last) = unary.segments.last_mut() {
-            *last = Ustr::from("__unm");
-        }
-        paths.push(unary);
+/// The prefix family selected alongside subtraction by an `operator(-)` import.
+fn unary_selector_path(path: &UsePathRef) -> Option<UsePathRef> {
+    if path.segments.last().copied()? != Ustr::from("__op_sub") {
+        return None;
     }
-    paths.into_iter()
+    let mut unary = path.clone();
+    *unary.segments.last_mut().unwrap() = Ustr::from("__unm");
+    Some(unary)
 }
 
 fn resolve_import_target(
@@ -405,27 +386,21 @@ fn resolve_import_target(
     frag: &FragmentScope,
     name: Ustr,
     path: &UsePathRef,
-) -> Result<Option<Vec<Resolved>>, String> {
-    let candidates = operator_family_paths(path).collect::<Vec<_>>();
+) -> Result<Vec<Resolved>, String> {
+    let Some(unary) = unary_selector_path(path) else {
+        return resolve_path(ws, frag, path).map(|hit| vec![hit]);
+    };
+
     let mut hits = Vec::new();
-    if path.segments.last().copied() == Some(Ustr::from("__op_sub")) {
-        for candidate in &candidates {
-            if let Some(resolved) =
-                walk_optional_definition(ws, frag, &[], candidate, &mut Vec::new())?
-            {
-                hits.push(resolved);
-            }
-        }
-    } else {
-        match walk_path(ws, frag, &[], path, WalkMode::Definition, &mut Vec::new())? {
-            Landing::Def(r) => hits.push(r),
-            Landing::Module(..) => return Ok(None),
+    for candidate in [path, &unary] {
+        if let Some(hit) = walk_optional_definition(ws, frag, candidate)? {
+            hits.push(hit);
         }
     }
     if hits.is_empty() {
         Err(unbound(name))
     } else {
-        Ok(Some(hits))
+        Ok(hits)
     }
 }
 
@@ -497,11 +472,8 @@ fn glob_candidates(
     for glob in &frag.globs {
         // Every fragment glob was checked where it is declared
         // (`check_use_target`), so a failure here is a real diagnostic.
-        if let Landing::Module(pkg_id, path) =
-            walk_path(ws, frag, &[], glob, WalkMode::Module, &mut visiting)?
-        {
-            hits.extend(members_of(ws, &viewers, pkg_id, &path, name, &mut visiting)?.found);
-        }
+        let (pkg_id, path) = resolve_path_to_module(ws, frag, glob)?;
+        hits.extend(members_of(ws, &viewers, pkg_id, &path, name, &mut visiting)?.found);
     }
     hits.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
     hits.dedup();
@@ -745,17 +717,7 @@ fn glob_export_members(
         if !all_admit(ws, viewers, &binding.vis, pkg_id, path) {
             continue;
         }
-        let (target_pkg, target_path) = match walk_path(
-            ws,
-            &exporter,
-            &[],
-            &binding.target,
-            WalkMode::Module,
-            visiting,
-        )? {
-            Landing::Module(target_pkg, target_path) => (target_pkg, target_path),
-            Landing::Def(_) => return Err("expected a module in use path".to_string()),
-        };
+        let (target_pkg, target_path) = resolve_path_to_module(ws, &exporter, &binding.target)?;
         if ws.ns.package(target_pkg).is_none() {
             continue;
         }
@@ -837,16 +799,8 @@ fn collect_member_names(
         if !all_admit(ws, viewers, &binding.vis, pkg_id, path) {
             continue;
         }
-        if let Landing::Module(target_pkg, target_path) = walk_path(
-            ws,
-            &exporter,
-            &[],
-            &binding.target,
-            WalkMode::Module,
-            &mut Vec::new(),
-        )? {
-            collect_member_names(ws, viewers, target_pkg, &target_path, names, seen)?;
-        }
+        let (target_pkg, target_path) = resolve_path_to_module(ws, &exporter, &binding.target)?;
+        collect_member_names(ws, viewers, target_pkg, &target_path, names, seen)?;
     }
     Ok(())
 }
@@ -858,14 +812,24 @@ fn collapse(
     not_found: impl Fn() -> String,
     what: &str,
 ) -> Result<Resolved, String> {
+    pick_member(ws, members, || format!("`{name}`"), what)?.ok_or_else(not_found)
+}
+
+fn pick_member(
+    ws: &Workspace,
+    members: Members,
+    name: impl FnOnce() -> String,
+    what: &str,
+) -> Result<Option<Resolved>, String> {
     match members.found.as_slice() {
-        [single] => Ok(*single),
+        [single] => Ok(Some(*single)),
         [] if members.cycle => Err("circular `use` binding with no defining target".to_string()),
-        [] if members.denied => Err(format!("`{name}` is not accessible from this module")),
-        [] if members.module => Err(format!("`{name}` names a module, not a definition")),
-        [] => Err(not_found()),
+        [] if members.denied => Err(format!("{} is not accessible from this module", name())),
+        [] if members.module => Err(format!("{} names a module, not a definition", name())),
+        [] => Ok(None),
         many => Err(format!(
-            "`{name}` is ambiguous between {what} {}",
+            "{} is ambiguous between {what} {}",
+            name(),
             many.iter()
                 .map(|hit| hit_display(ws, hit))
                 .collect::<Vec<_>>()
@@ -922,10 +886,13 @@ pub fn resolve_path(
     frag: &FragmentScope,
     path: &UsePathRef,
 ) -> Result<Resolved, String> {
-    match walk_path(ws, frag, &[], path, WalkMode::Definition, &mut Vec::new())? {
-        Landing::Def(resolved) => Ok(resolved),
-        Landing::Module(..) => Err("path names a module, not a definition".to_string()),
-    }
+    collapse(
+        ws,
+        walk_members(ws, frag, &[], path, &mut Vec::new())?,
+        last_of(&path.segments),
+        || unbound(joined(&path.segments)),
+        "glob re-exports",
+    )
 }
 
 pub fn check_use_target(
@@ -960,17 +927,14 @@ fn check_operator_selector_target(
     export: bool,
 ) -> Result<(), String> {
     let result = check_target(ws, frag, path, glob, export);
-    if result.is_ok() || glob || path.segments.last().copied() != Some(Ustr::from("__op_sub")) {
-        return result;
+    if !glob
+        && result.is_err()
+        && let Some(unary) = unary_selector_path(path)
+        && check_target(ws, frag, &unary, false, export).is_ok()
+    {
+        return Ok(());
     }
-    let unary = operator_family_paths(path)
-        .nth(1)
-        .expect("an `__op_sub` path");
-    if check_target(ws, frag, &unary, false, export).is_ok() {
-        Ok(())
-    } else {
-        result
-    }
+    result
 }
 
 fn check_target(
@@ -1217,15 +1181,7 @@ pub fn resolve_path_to_module(
     frag: &FragmentScope,
     path: &UsePathRef,
 ) -> Result<(u32, Vec<Ustr>), String> {
-    match walk_path(ws, frag, &[], path, WalkMode::Module, &mut Vec::new())? {
-        Landing::Module(pkg_id, path) => Ok((pkg_id, path)),
-        Landing::Def(_) => Err("expected a module in use path".to_string()),
-    }
-}
-
-enum WalkMode {
-    Definition,
-    Module,
+    walk_modules(ws, frag, path, path.segments.len())
 }
 
 fn resolve_anchor(
@@ -1387,71 +1343,23 @@ fn step_module(
     Ok(Some(target))
 }
 
-/// Resolve the path as written: the requester checks its path, and all export
-/// viewers check the final member.
-fn walk_path(
-    ws: &Workspace,
-    frag: &FragmentScope,
-    outer: &[&FragmentScope],
-    path: &UsePathRef,
-    mode: WalkMode,
-    visiting: &mut Visiting,
-) -> Result<Landing, String> {
-    match mode {
-        WalkMode::Module => {
-            let (pkg_id, cur) = walk_modules(ws, frag, path, path.segments.len())?;
-            Ok(Landing::Module(pkg_id, cur))
-        }
-        WalkMode::Definition => {
-            let members = walk_members(ws, frag, outer, path, visiting)?;
-            let not_found = || unbound(joined(&path.segments));
-            let hit = collapse(
-                ws,
-                members,
-                last_of(&path.segments),
-                not_found,
-                "glob re-exports",
-            )?;
-            Ok(Landing::Def(hit))
-        }
-    }
-}
-
 /// Resolve a definition while distinguishing a missing final member from errors.
 fn walk_optional_definition(
     ws: &Workspace,
     frag: &FragmentScope,
-    outer: &[&FragmentScope],
     path: &UsePathRef,
-    visiting: &mut Visiting,
 ) -> Result<Option<Resolved>, String> {
-    let members = walk_members(ws, frag, outer, path, visiting)?;
+    let members = walk_members(ws, frag, &[], path, &mut Vec::new())?;
     let name = last_of(&path.segments);
-    let diagnostic_name = || match unary_operator_entry(name.as_str()) {
-        Some(symbol) => format!("operator `{symbol}`"),
-        None => format!("`{name}`"),
-    };
-    match members.found.as_slice() {
-        [single] => Ok(Some(*single)),
-        [] if members.cycle => Err("circular `use` binding with no defining target".to_string()),
-        [] if members.denied => Err(format!(
-            "{} is not accessible from this module",
-            diagnostic_name()
-        )),
-        [] if members.module => Err(format!(
-            "{} names a module, not a definition",
-            diagnostic_name()
-        )),
-        [] => Ok(None),
-        many => Err(format!(
-            "{} is ambiguous between glob re-exports {}",
-            diagnostic_name(),
-            many.iter()
-                .map(|hit| hit_display(ws, hit))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
+    pick_member(
+        ws,
+        members,
+        || match unary_operator_entry(name.as_str()) {
+            Some(symbol) => format!("operator `{symbol}`"),
+            None => format!("`{name}`"),
+        },
+        "glob re-exports",
+    )
 }
 
 fn walk_members(
