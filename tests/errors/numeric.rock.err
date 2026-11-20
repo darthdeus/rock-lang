@@ -265,6 +265,31 @@ fn main() { let v = V { x: 0 }; v.x = 4294967295 }
 value V { x: int = 4294967295 }
 fn main() { let v = V {} }
 
+//=== TEST CASE: value_int_cast_literal_Generic ===
+//! expect: value struct `int` field must be in the range -2147483648..=2147483647
+value V { x: int }
+fn main() { let v = V { x: 2147483648 as int } }
+
+//=== TEST CASE: value_int_float_cast_literal_Generic ===
+//! expect: value struct `int` field must be in the range -2147483648..=2147483647
+value V { x: int }
+fn main() { let v = V { x: 2147483648.0 as int } }
+
+//=== TEST CASE: value_int_assignment_low_Generic ===
+//! expect: value struct `int` field must be in the range -2147483648..=2147483647
+value V { x: int }
+fn main() { let v = V { x: 0 }; v.x = -2147483649.0 as int }
+
+//=== TEST CASE: value_int_generic_field_Generic ===
+//! expect: value struct `int` field must be in the range -2147483648..=2147483647
+value G<T> { x: T? }
+fn main() { let v: G<int> = G { x: 2147483648 } }
+
+//=== TEST CASE: value_int_generic_assignment_Generic ===
+//! expect: value struct `int` field must be in the range -2147483648..=2147483647
+value G<T> { x: T? }
+fn main() { let v: G<int> = G { x: 0 }; v.x = -2147483649 }
+
 //=== TEST CASE: int_div_float_operand_unify ===
 //! expect: No overload for `__op_idiv` with argument types (float, int)
 fn main() {

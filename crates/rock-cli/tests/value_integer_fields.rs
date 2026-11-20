@@ -18,39 +18,6 @@ fn assert_checked_store_fails(dir: &Path, backend: &str, source: &str, case: &st
 }
 
 #[test]
-fn value_integer_field_literals_have_source_diagnostics() {
-    let dir = tempfile::tempdir().unwrap();
-    for body in [
-        "let v = V { x: 2147483648 }",
-        "let v = V { x: -2147483649 }",
-        "let v = V { x: 2147483648 as int }",
-        "let v = V { x: 2147483648.0 as int }",
-        "let v = V { x: 0 }; v.x = 2147483648",
-        "let v = V { x: 0 }; v.x = -2147483649",
-        "let v = V { x: 0 }; v.x = -2147483649.0 as int",
-        "let v: G<int> = G { x: 2147483648 }",
-        "let v: G<int> = G { x: 0 }; v.x = -2147483649",
-    ] {
-        std::fs::write(
-            dir.path().join("range.rock"),
-            format!("value V {{ x: int }} value G<T> {{ x: T? }}\nfn main() {{ {body} }}\n"),
-        )
-        .unwrap();
-        let out = rock(dir.path())
-            .args(["check", "range.rock"])
-            .output()
-            .unwrap();
-        let diagnostic = text(&out);
-        assert!(!out.status.success(), "{body}: {diagnostic}");
-        assert!(
-            diagnostic.contains("value struct `int` field"),
-            "{diagnostic}"
-        );
-        assert!(diagnostic.contains(":2:"), "{diagnostic}");
-    }
-}
-
-#[test]
 fn checked_value_integer_stores_do_not_depend_on_boxing() {
     let dir = tempfile::tempdir().unwrap();
     for backend in ["skull", "js"] {
