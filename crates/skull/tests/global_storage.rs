@@ -92,6 +92,46 @@ print(storage == __rock_globals, __rock_globals_fresh)
 }
 
 #[test]
+fn a_body_reload_keeps_a_live_scene_and_its_arena_row() {
+    use crate::common::{body_id, edit, ws_with_stdlib};
+
+    let before = r#"
+struct Row { n: int }
+struct Root { rows: Arena<Row> }
+global SCENE: Scene<Root>? = null
+global HANDLE: Entity<Row>? = null
+
+fn build_scene(builder: SceneBuilder) -> Root? {
+    return Root { rows: builder.arena() }
+}
+
+@nomangle fn seed() {
+    let scene: Scene<Root> = scene_create(build_scene).unwrap()
+    SCENE = scene
+    HANDLE = scene.get().unwrap().rows.insert(Row { n: 17 })
+}
+
+@nomangle fn live_arena_row() -> int {
+    let rows = SCENE.unwrap().get().unwrap().rows
+    return rows.get(HANDLE.unwrap()).unwrap().n + 1
+}
+"#;
+    let after = ws_with_stdlib(&before.replace(".n + 1", ".n + 2"));
+    let change = edit(
+        &ws_with_stdlib(before),
+        &after,
+        &[body_id(&after, "live_arena_row")],
+    );
+    let overlay = change.overlay.expect("compatible arena layout");
+    assert_eq!(change.base.global_layout, change.incremental.global_layout);
+    let program = format!(
+        "{}\nseed()\nprint(live_arena_row())\n{}\nprint(live_arena_row())",
+        change.base.lua, overlay.lua,
+    );
+    assert_eq!(run_luajit(&program), "18\n19");
+}
+
+#[test]
 fn a_program_with_a_different_global_layout_refuses_live_storage() {
     let before = emit_mir(FIXTURE).lua;
     let after = emit_mir(&FIXTURE.replace(

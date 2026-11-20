@@ -2169,7 +2169,14 @@ impl<'a> Builder<'a> {
                 } else {
                     None
                 };
-                if storage == Some(ValueStorage::LeafTable) {
+                // LuaJIT cannot record an aggregate argument to an FFI constructor.
+                let leaf_ctor = storage == Some(ValueStorage::LeafTable)
+                    || (self.scx.target == bone_core::hir::FnBackend::Lua
+                        && storage == Some(ValueStorage::CData)
+                        && self
+                            .nominal_rep_shape_required(name, false)?
+                            .has_registry_field());
+                if leaf_ctor {
                     let representation = self.nominal_value_representation(name)?;
                     let shape = self
                         .scx

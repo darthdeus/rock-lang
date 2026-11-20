@@ -135,7 +135,7 @@ fn main() {
 fn arena_bare_loop_used_entity_scalarizes_into_call() {
     let lua = emit_module(ARENA_BARE_LOOP_USED_ENTITY);
     let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("Entity_vt"));
+    assert!(!hot.contains("Entity_vt(") && !hot.contains("Entity_ct("));
     assert!(
         crate::common::definitions_of(&lua, "get_Entity")
             .iter()
@@ -180,7 +180,7 @@ fn arena_scan_returning_entity_keeps_leaves_until_a_boxed_sink() {
     assert!(!find.contains("Entity_vt(") && !find.contains("Entity_ct(") && !find.contains('{'));
     assert!(!find.contains("_arena ="));
     let main = function_body(&lua, "main");
-    assert_eq!(main.matches("Entity_vt(").count(), 1);
+    assert_eq!(main.matches("Entity_ct(").count(), 1);
     assert_eq!(run_main(&lua), "true 2 true true true");
 }
 
@@ -218,7 +218,7 @@ fn main() {
 fn arena_entity_threads_through_enum_payload_without_boxing() {
     let lua = emit_module(ARENA_ENTITY_IN_ENUM);
     let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("Entity_vt("));
+    assert!(!hot.contains("Entity_vt(") && !hot.contains("Entity_ct("));
 }
 
 const NULLABLE_VALUE_RETURN: &str = r#"
@@ -270,4 +270,24 @@ fn main() { print(sum_pairs(4)) }
     assert!(!body.contains("tuple_first") && !body.contains("tuple_second"));
     assert!(!body.contains("{"));
     assert_eq!(run_main(&lua), "22");
+}
+
+#[test]
+fn a_boxed_handle_parent_packs_without_an_ffi_aggregate_initializer() {
+    let lua = emit_module(
+        r#"
+value Token { handle: Entity<int> }
+struct Pick { token: Token, speed: float }
+
+@nomangle fn pick_token(tokens: [Token], index: int) -> Pick? {
+    let token = tokens.get(index)
+    if token == null { return null }
+    return Pick { token: token, speed: 1.0 }
+}
+"#,
+    );
+    let body = function_body(&lua, "pick_token");
+    assert!(body.contains("Token_lct("));
+    assert!(!body.contains("Token_ct("));
+    assert!(!body.contains("Entity_ct("));
 }

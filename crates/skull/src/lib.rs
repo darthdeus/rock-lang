@@ -1420,9 +1420,15 @@ fn value_struct_metatypes(
             let shown = display_name(n.as_str());
             out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{sym}\"] = {{\n"));
             out.push_str("  __eq = function(a, b)\n");
-            out.push_str(
-                "    if type(b) ~= \"cdata\" or type(a) ~= \"cdata\" then return false end\n",
-            );
+            if s.generics.is_empty() {
+                out.push_str(
+                    "    if type(b) ~= \"cdata\" or type(a) ~= \"cdata\" then return false end\n",
+                );
+            } else {
+                out.push_str(&format!(
+                    "    if not ffi.istype({sym}_ct, a) or not ffi.istype({sym}_ct, b) then return false end\n",
+                ));
+            }
             if s.fields.is_empty() {
                 out.push_str("    return true\n");
             } else {

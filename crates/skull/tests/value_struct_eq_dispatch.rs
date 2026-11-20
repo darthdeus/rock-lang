@@ -18,7 +18,7 @@ fn vector_handle_equality_does_not_materialize_carriers() {
     let lua = emit_module(HANDLE_EQUALITY_FIXTURE);
     let body = function_body(&lua, "entity_matches");
     assert!(body.contains("==") && (body.contains("~=") || body.contains("not")));
-    assert!(!body.contains("Entity_vt("));
+    assert!(!body.contains("Entity_vt(") && !body.contains("Entity_ct("));
 }
 
 #[test]

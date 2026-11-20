@@ -529,16 +529,7 @@ value Arena<T> {
     _arena_id: int,
 }
 
-// A weak scalar address into an Arena: four integers, trivially copyable, and
-// scalarized through calls/loops so a non-escaping arena `for (e, d)` pair-scan
-// builds no per-iteration value. `==` is the value eq over all four fields,
-// which is the same answer `.equals` gives.
-//
-// Both of these land at the GC-carrying `value_table` tier, NOT `nobox` cdata:
-// a generic `value` struct does not reach the cdata tier even when every field
-// is scalar. That costs a table where one escapes, and it is why `Entity`
-// remains rejected as a `Map` key. Nothing here is a backend address -- the
-// logical identity is the integers, never the table.
+// The four coordinates identify an Arena row without retaining the store.
 value Entity<T> {
     _scene_id: int,
     _arena_id: int,

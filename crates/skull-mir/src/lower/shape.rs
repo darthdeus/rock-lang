@@ -401,6 +401,15 @@ impl ValueShape {
             .sum::<usize>()
             + usize::from(self.nullable)
     }
+
+    pub(super) fn has_registry_field(&self) -> bool {
+        self.fields.iter().any(|(_, field)| match field {
+            FieldShape::Prim => false,
+            FieldShape::Nested(child) => {
+                is_registry_handle(child.name) || child.has_registry_field()
+            }
+        })
+    }
 }
 
 impl FieldShape {
@@ -482,6 +491,10 @@ pub(super) fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bo
     }
 }
 
+fn is_registry_handle(name: Ustr) -> bool {
+    matches!(name.as_str(), "Arena" | "Entity" | "Scene")
+}
+
 fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<PlannedValue> {
     if let Some(enum_plan) = EnumPlan::for_name(ws, name)
         && let Some(cdata) = enum_plan.cdata()
@@ -508,10 +521,19 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
     }
     visiting.push(name);
     let mut fields = Vec::with_capacity(sd.fields.len());
-    let mut cdata = sd.generics.is_empty();
+    // Handle type arguments select a registry row type. Double lanes keep the
+    // Lua-number representation of the IDs when a handle escapes scalarization.
+    let handle = is_registry_handle(name);
+    let mut cdata = sd.generics.is_empty() || handle;
     let mut scalarizable = true;
     for field in &sd.fields {
-        let planned = plan_field(ws, field, visiting).unwrap_or(PlannedField::Opaque);
+        let planned = if handle
+            && static_ty(ws, field.storage_ty) == Some(TypeExpr::Builtin(BuiltinTy::Int))
+        {
+            PlannedField::Primitive("double")
+        } else {
+            plan_field(ws, field, visiting).unwrap_or(PlannedField::Opaque)
+        };
         let (field_cdata, field_scalar) = match &planned {
             PlannedField::Primitive(_) => (true, true),
             PlannedField::Nested(child) => {

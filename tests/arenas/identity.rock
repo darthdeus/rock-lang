@@ -342,3 +342,12 @@ fn absent_nullable_handle_value_leaves_the_map_empty() {
     nullable_store_retain(cache, null)
     assert_eq(cache.len(), 0)
 }
+
+@test fn distinct_erased_handles_are_unequal() {
+    let arena: Arena<int> = arena_new()
+    let entity = arena.insert(17)
+    let erased_arena: any = arena
+    let erased_entity: any = entity
+    assert(erased_arena != erased_entity)
+    assert(erased_entity != erased_arena)
+}

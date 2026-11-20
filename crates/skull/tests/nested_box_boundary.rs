@@ -209,7 +209,7 @@ print(tables, cdata, rawequal(receipt.landing, result[1]))
         (
             "passing a handle field through keeps the handle",
             r#"
-local handle = { __ty = "Entity", _scene_id = 1, _arena_id = 2, _slot = 3, _generation = 4 }
+local handle = Entity_ct(1, 2, 3, 4)
 tables, cdata = 0, 0
 local row = { __ty = "HandleRow", handle = handle, sequence = 7 }
 local result = relay_handle(row)
@@ -220,7 +220,7 @@ print(tables, cdata, rawequal(handle, result.handle), result.sequence)
         (
             "passing a handle through keeps the callers box",
             r#"
-local handle = { __ty = "Entity", _scene_id = 1, _arena_id = 2, _slot = 3, _generation = 4 }
+local handle = Entity_ct(1, 2, 3, 4)
 tables, cdata = 0, 0
 local result = relay_token(handle)
 print(tables, cdata, rawequal(handle, result))
