@@ -21,7 +21,7 @@ fn collect_abi_dependencies(mf: &MirFunc, out: &mut FxHashMap<FuncRef, u64>) {
     }
 }
 
-pub(super) fn emit_named_with_allocation_report(
+fn emit_named_with_allocation_report(
     ws: &Workspace,
     cg: &CodegenCtx,
     interner: &skull_mir::monoty::MonoInterner,
@@ -284,53 +284,30 @@ fn finish_body_chunk(
     };
     times.validation += tv.elapsed();
     times.validation_work = true;
-    skull_codegen_lua::regalloc_time_reset();
-    let te = Instant::now();
     let bind = skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), name, self_ref, &mf);
-    let emission = emit_named_with_allocation_report(
+    let mut allocation_bodies = Vec::new();
+    let mut emitter = BodyEmitter {
         ws,
         cg,
-        scx.interner(),
-        name,
-        &mut mf,
-        &[],
-        bind.as_ref(),
-    );
-    let mut lua = emission.lua;
-    let mut allocation_bodies = Vec::new();
-    if let Some(body) = crate::allocation_report::collect_emitted_body(
-        ws,
-        scx.interner(),
-        name,
-        f.name.as_str(),
-        &mf,
-        emission.allocation_sites,
-    ) {
-        allocation_bodies.push(body);
-    }
-    let root_emit = te.elapsed();
-    times.emit += root_emit;
-    times.emit_work |= root_emit > Duration::ZERO;
-    let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
-    times.regalloc += regalloc;
-    times.regalloc_work |= regalloc > Duration::ZERO;
+        scx,
+        allocation_bodies: &mut allocation_bodies,
+        times: &mut times,
+    };
+    let mut lua = emitter.emit(name, f.name.as_str(), &mut mf, &[], bind.as_ref());
     // Read before the nested fns are emitted, which detaches their children.
     let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
     let mut abi_deps = FxHashMap::default();
     collect_abi_dependencies(&mf, &mut abi_deps);
     // Nested-fn statics fold into this chunk, or hot reload would not see them.
     let mut statics = mf.statics.clone();
-    emit_nested_fns(
-        ws,
-        cg,
-        scx,
+    emitter.emit_nested(
         &mut mf.nested_fns,
         &mf.statics,
-        &mut deps,
-        &mut statics,
-        &mut allocation_bodies,
+        Some(&mut NestedChunk {
+            deps: &mut deps,
+            statics: &mut statics,
+        }),
         &mut lua,
-        &mut times,
     )?;
     attribution.mir_instructions = mf.insts.len();
     attribution.times = times;
@@ -358,87 +335,104 @@ fn finish_body_chunk(
     })
 }
 
-pub(crate) fn emit_nested_fns(
-    ws: &Workspace,
-    cg: &CodegenCtx,
-    scx: &skull_mir::lower::ScalarCtx,
-    nested: &mut [MirFunc],
-    inherited_statics: &[skull_mir::mir::StaticCell],
-    deps: &mut FxHashSet<FuncRef>,
-    statics: &mut Vec<skull_mir::mir::StaticCell>,
-    allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
-    out: &mut String,
-    times: &mut PhaseTimes,
-) -> Result<(), CompilerError> {
-    for nf in nested.iter_mut() {
-        let cleanup_before = mir_live_instructions(nf);
-        let tc = Instant::now();
-        skull_transform::cleanup_with_nobox(ws, nf)?;
-        times.cleanup += tc.elapsed();
-        times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
-        let counted_before = nf.blocks.len();
-        let tl = Instant::now();
-        skull_transform::recover_counted_loops(ws, nf);
-        times.counted_loop += tl.elapsed();
-        times.counted_loop_work |= nf.blocks.len() > counted_before;
-        let tb = Instant::now();
-        times.bounds_elided += skull_transform::elide_bounds_checks_for_target(
-            Some(ws),
-            nf,
-            bone_core::hir::FnBackend::Lua,
-        );
-        times.bounds += tb.elapsed();
-        collect_callee_frefs(nf, deps);
-        // A flat variant's text is another declaration's body.
-        if let Some(source) = nf.flat_variant_source {
-            deps.insert(source);
-        }
-        statics.extend(nf.statics.iter().cloned());
+pub(crate) struct BodyEmitter<'a> {
+    pub(crate) ws: &'a Workspace,
+    pub(crate) cg: &'a CodegenCtx,
+    pub(crate) scx: &'a skull_mir::lower::ScalarCtx,
+    pub(crate) allocation_bodies: &'a mut Vec<crate::allocation_report::AllocationBody>,
+    pub(crate) times: &'a mut PhaseTimes,
+}
+
+pub(crate) struct NestedChunk<'a> {
+    pub(crate) deps: &'a mut FxHashSet<FuncRef>,
+    pub(crate) statics: &'a mut Vec<skull_mir::mir::StaticCell>,
+}
+
+impl BodyEmitter<'_> {
+    pub(super) fn emit(
+        &mut self,
+        name: &str,
+        source: &str,
+        mf: &mut MirFunc,
+        inherited_statics: &[skull_mir::mir::StaticCell],
+        bound: Option<&skull_codegen_lua::CalleeBindingPlan>,
+    ) -> String {
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
+        let interner = self.scx.interner();
         let emission = emit_named_with_allocation_report(
-            ws,
-            cg,
-            scx.interner(),
-            nf.name.as_str(),
-            nf,
+            self.ws,
+            self.cg,
+            interner,
+            name,
+            mf,
             inherited_statics,
-            None,
+            bound,
         );
-        out.push_str(&emission.lua);
         if let Some(body) = crate::allocation_report::collect_emitted_body(
-            ws,
-            scx.interner(),
-            nf.name.as_str(),
-            nf.name.as_str(),
-            nf,
+            self.ws,
+            interner,
+            name,
+            source,
+            mf,
             emission.allocation_sites,
         ) {
-            allocation_bodies.push(body);
+            self.allocation_bodies.push(body);
         }
         let emit = te.elapsed();
-        times.emit += emit;
-        times.emit_work |= emit > Duration::ZERO;
+        self.times.emit += emit;
+        self.times.emit_work |= emit > Duration::ZERO;
         let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(emit);
-        times.regalloc += regalloc;
-        times.regalloc_work |= regalloc > Duration::ZERO;
-        let mut children = std::mem::take(&mut nf.nested_fns);
-        let mut next_inherited = inherited_statics.to_vec();
-        next_inherited.extend(nf.statics.iter().cloned());
-        emit_nested_fns(
-            ws,
-            cg,
-            scx,
-            &mut children,
-            &next_inherited,
-            deps,
-            statics,
-            allocation_bodies,
-            out,
-            times,
-        )?;
+        self.times.regalloc += regalloc;
+        self.times.regalloc_work |= regalloc > Duration::ZERO;
+        emission.lua
     }
-    Ok(())
+
+    pub(crate) fn emit_nested(
+        &mut self,
+        nested: &mut [MirFunc],
+        inherited_statics: &[skull_mir::mir::StaticCell],
+        mut chunk: Option<&mut NestedChunk<'_>>,
+        lua: &mut String,
+    ) -> Result<(), CompilerError> {
+        for nf in nested {
+            let cleanup_before = mir_live_instructions(nf);
+            let tc = Instant::now();
+            skull_transform::cleanup_with_nobox(self.ws, nf)?;
+            self.times.cleanup += tc.elapsed();
+            self.times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
+            if let Some(chunk) = chunk.as_deref_mut() {
+                let counted_before = nf.blocks.len();
+                let tl = Instant::now();
+                skull_transform::recover_counted_loops(self.ws, nf);
+                self.times.counted_loop += tl.elapsed();
+                self.times.counted_loop_work |= nf.blocks.len() > counted_before;
+                let tb = Instant::now();
+                self.times.bounds_elided += skull_transform::elide_bounds_checks_for_target(
+                    Some(self.ws),
+                    nf,
+                    bone_core::hir::FnBackend::Lua,
+                );
+                self.times.bounds += tb.elapsed();
+                collect_callee_frefs(nf, chunk.deps);
+                // A flat variant's text is another declaration's body.
+                chunk.deps.extend(nf.flat_variant_source);
+                chunk.statics.extend(nf.statics.iter().cloned());
+            }
+            let name = nf.name.as_str();
+            lua.push_str(&self.emit(name, name, nf, inherited_statics, None));
+            if chunk.is_some() {
+                let mut children = std::mem::take(&mut nf.nested_fns);
+                let mut next_inherited = inherited_statics.to_vec();
+                next_inherited.extend(nf.statics.iter().cloned());
+                self.emit_nested(&mut children, &next_inherited, chunk.as_deref_mut(), lua)?;
+            } else {
+                // The unit still needs its whole MIR tree to record code identities.
+                self.emit_nested(&mut nf.nested_fns, inherited_statics, None, lua)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn convert_unit_body(
@@ -459,84 +453,6 @@ pub(super) fn convert_unit_body(
     let mut work = InlineWork::default();
     let mut stats = ChainStats::new(times, &mut work);
     skull_transform::body_chain::convert_body(ws, mf, name, &opts, &mut stats).map_err(|e| e.error)
-}
-
-pub(super) fn emit_pass_nested_fns(
-    ws: &Workspace,
-    cg: &CodegenCtx,
-    scx: &skull_mir::lower::ScalarCtx,
-    nested: &mut [MirFunc],
-    inherited_statics: &[skull_mir::mir::StaticCell],
-    mut allocation_bodies: Option<&mut Vec<crate::allocation_report::AllocationBody>>,
-    out: &mut String,
-    times: &mut PhaseTimes,
-) -> Result<(), CompilerError> {
-    for nf in nested.iter_mut() {
-        let cleanup_before = mir_live_instructions(nf);
-        let tc = Instant::now();
-        skull_transform::cleanup_with_nobox(ws, nf)?;
-        times.cleanup += tc.elapsed();
-        times.cleanup_work |= mir_live_instructions(nf) != cleanup_before;
-        skull_codegen_lua::regalloc_time_reset();
-        let te = Instant::now();
-        if let Some(bodies) = allocation_bodies.as_deref_mut() {
-            let emission = emit_named_with_allocation_report(
-                ws,
-                cg,
-                scx.interner(),
-                nf.name.as_str(),
-                nf,
-                inherited_statics,
-                None,
-            );
-            out.push_str(&emission.lua);
-            if let Some(body) = crate::allocation_report::collect_emitted_body(
-                ws,
-                scx.interner(),
-                nf.name.as_str(),
-                nf.name.as_str(),
-                nf,
-                emission.allocation_sites,
-            ) {
-                bodies.push(body);
-            }
-        } else {
-            let name = nf.name;
-            out.push_str(&skull_codegen_lua::with_constants_baked(cg, nf, |nf| {
-                skull_codegen_lua::emit_lua_definition(
-                    ws,
-                    cg,
-                    scx.interner(),
-                    name.as_str(),
-                    nf,
-                    None,
-                    inherited_statics,
-                    None,
-                    None,
-                )
-                .lua
-            }));
-        }
-        let emit = te.elapsed();
-        times.emit += emit;
-        times.emit_work |= emit > Duration::ZERO;
-        let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(emit);
-        times.regalloc += regalloc;
-        times.regalloc_work |= regalloc > Duration::ZERO;
-        let mut children = std::mem::take(&mut nf.nested_fns);
-        emit_pass_nested_fns(
-            ws,
-            cg,
-            scx,
-            &mut children,
-            inherited_statics,
-            allocation_bodies.as_deref_mut(),
-            out,
-            times,
-        )?;
-        nf.nested_fns = children;
-    }
-    Ok(())
 }
 
 pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {

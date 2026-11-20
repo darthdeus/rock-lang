@@ -63,17 +63,21 @@ pub(crate) fn emit_coroutine_with_artifact(
     let mut nested_times = crate::mir_emit::PhaseTimes::default();
     let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
     let (named, lambdas) = hoisted.split_at_mut(named_nested);
-    crate::mir_emit::emit_nested_fns(
+    crate::mir_emit::BodyEmitter {
         ws,
-        ctx,
+        cg: ctx,
         scx,
+        allocation_bodies: &mut out.allocation_bodies,
+        times: &mut nested_times,
+    }
+    .emit_nested(
         named,
         &lowered.step.statics,
-        &mut nested_deps,
-        &mut nested_statics,
-        &mut out.allocation_bodies,
+        Some(&mut crate::mir_emit::NestedChunk {
+            deps: &mut nested_deps,
+            statics: &mut nested_statics,
+        }),
         &mut out.lua,
-        &mut nested_times,
     )?;
     // Hoisted lambdas are frame-free: their frame accesses are already MIR.
     for nf in lambdas.iter() {

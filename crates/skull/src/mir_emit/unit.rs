@@ -210,38 +210,16 @@ impl UnitBody<'_> {
             out.hard_error = Some(e);
             return None;
         }
-        skull_codegen_lua::regalloc_time_reset();
-        let te = Instant::now();
-        // Runs once at chunk load, outside the definitions section the binding pass covers.
-        let emission =
-            emit_named_with_allocation_report(ws, cg, scx.interner(), self.symbol, mf, &[], None);
-        let mut lua = emission.lua;
-        if let Some(body) = crate::allocation_report::collect_emitted_body(
-            ws,
-            scx.interner(),
-            self.symbol,
-            self.source_name,
-            mf,
-            emission.allocation_sites,
-        ) {
-            out.allocation_bodies.push(body);
-        }
-        let root_emit = te.elapsed();
-        out.times.emit += root_emit;
-        out.times.emit_work |= root_emit > Duration::ZERO;
-        let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(root_emit);
-        out.times.regalloc += regalloc;
-        out.times.regalloc_work |= regalloc > Duration::ZERO;
-        if let Err(e) = emit_pass_nested_fns(
+        let mut emitter = BodyEmitter {
             ws,
             cg,
             scx,
-            &mut mf.nested_fns,
-            &mf.statics,
-            Some(&mut out.allocation_bodies),
-            &mut lua,
-            &mut out.times,
-        ) {
+            allocation_bodies: &mut out.allocation_bodies,
+            times: &mut out.times,
+        };
+        // Runs once at chunk load, outside the definitions section the binding pass covers.
+        let mut lua = emitter.emit(self.symbol, self.source_name, mf, &[], None);
+        if let Err(e) = emitter.emit_nested(&mut mf.nested_fns, &mf.statics, None, &mut lua) {
             out.hard_error = Some(e);
             return None;
         }
