@@ -329,6 +329,17 @@ and cannot escape that root. Both calls require string literals; undeclared
 variables and missing files are errors. These values are embedded in the
 program: do not treat them as secrets.
 
+### Registering C declarations
+
+Call `ffi_cdef_once` before using bindings that need the declarations. For
+example, `ffi_cdef_once("__example_ffi_defined", embed_string("example.h"))`
+loads the header into LuaJIT's FFI parser while keeping symbol lookup in the
+existing `extern(ffi, "lib")` binding. Use a unique global key for each set
+of declarations. A successful registration survives hot reload, so changes
+to the declarations take effect in a fresh process. The call normally raises
+on invalid input. Passing `true` as the third argument instead returns
+`false` on a parse error. Registration requires LuaJIT.
+
 ## Typed pointers
 
 `Ptr<T>` and the sized pointer types `PtrU8`, `PtrI8`, `PtrU16`, `PtrI16` and

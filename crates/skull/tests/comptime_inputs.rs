@@ -314,3 +314,37 @@ fn comptime_misuse_rejects_with_a_specific_diagnostic() {
         }
     }
 }
+
+#[test]
+fn ffi_cdef_once_embeds_declarations_before_linked_symbol_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let declarations = "typedef struct { int x; } RockCdefProbe;\nint abs(int n);\n";
+    std::fs::write(dir.path().join("probe.h"), declarations).unwrap();
+    let src = r#"
+extern(ffi, "ffi.C") fn abs(n: int) -> int
+
+fn start() {
+    assert(ffi_cdef_once("__rock_test_cdef", embed_string("probe.h")))
+    print(abs(-7))
+}
+
+fn main() {
+    assert(!ffi_cdef_once("__rock_test_cdef", "!", true))
+    start()
+    start()
+}
+"#;
+    let inputs = ComptimeInputs {
+        embed_root: Some(dir.path().to_path_buf()),
+        ..ComptimeInputs::default()
+    };
+    let lua = try_emit_module_with(src, inputs).expect("typed declaration registration compiles");
+    let register = function_body(&lua, "ffi_cdef_once");
+    assert!(register.contains("ffi.cdef(declarations)"), "{register}");
+    assert_eq!(
+        lua.matches("typedef struct { int x; } RockCdefProbe;")
+            .count(),
+        1
+    );
+    assert_eq!(run_fn(&lua, "main"), "7\n7");
+}

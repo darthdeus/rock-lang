@@ -3576,6 +3576,18 @@ pub(crate) fn resolve_comptime_value(
             // library embeds its own files; synthetic files fall back to embed_root.
             let call_file = body.expr_spans[call_expr].file;
             let files = &ws.comptime_inputs.embed_files;
+            if bone_core::modules::is_stdlib_module_file(call_file.as_str()) {
+                let (file, value) = files.read_stdlib(key.as_str()).map_err(|e| {
+                    reject(
+                        *arg,
+                        format!("`embed_string` cannot read stdlib asset {key:?}: {e:?}"),
+                    )
+                })?;
+                return Ok(ResolvedComptime {
+                    value,
+                    file_abs: file.as_deref().map(crate::names::ustr),
+                });
+            }
             let package_root = files.package_root(call_file.as_str());
             let Some(root) = package_root.or_else(|| ws.comptime_inputs.embed_root.clone()) else {
                 return Err(reject(

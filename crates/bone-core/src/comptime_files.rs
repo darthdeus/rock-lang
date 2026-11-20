@@ -24,6 +24,10 @@ pub trait ComptimeFiles: Send + Sync + std::fmt::Debug {
     /// The package root a call in `calling_file` resolves against, if the
     /// file belongs to one.
     fn package_root(&self, calling_file: &str) -> Option<PathBuf>;
+    /// The disk-backed stdlib directory, if this host reads stdlib assets there.
+    fn stdlib_root(&self) -> Option<PathBuf> {
+        None
+    }
     /// Read `rel` under `root`. Returns the identity of the read (the path it
     /// landed on, which the fingerprint re-reads and a watcher watches) and
     /// the contents.
@@ -36,6 +40,20 @@ pub trait ComptimeFiles: Send + Sync + std::fmt::Debug {
 /// the filesystem.
 #[derive(Clone, Debug)]
 pub struct EmbedFiles(pub Arc<dyn ComptimeFiles>);
+
+impl EmbedFiles {
+    pub fn read_stdlib(&self, name: &str) -> Result<(Option<String>, String), EmbedReadError> {
+        let text = rock_stdlib::embedded_asset(name).ok_or_else(|| {
+            EmbedReadError::Unreadable(format!("no bundled stdlib asset named {name:?}"))
+        })?;
+        if let Some(root) = self.0.stdlib_root() {
+            let (file, value) = self.read(&root, Path::new(name))?;
+            Ok((Some(file), value))
+        } else {
+            Ok((None, text.into()))
+        }
+    }
+}
 
 impl Default for EmbedFiles {
     fn default() -> Self {
@@ -70,6 +88,13 @@ impl ComptimeFiles for FsComptimeFiles {
             dir = d.parent();
         }
         None
+    }
+
+    fn stdlib_root(&self) -> Option<PathBuf> {
+        match rock_stdlib::stdlib_origin() {
+            rock_stdlib::StdlibSource::Dir(dir) => Some(dir),
+            rock_stdlib::StdlibSource::Embedded => None,
+        }
     }
 
     fn read(&self, root: &Path, rel: &Path) -> Result<(String, String), EmbedReadError> {

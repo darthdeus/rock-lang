@@ -53,6 +53,13 @@ define_stdlib_files!(
     "js.rock",
 );
 
+pub fn embedded_asset(name: &str) -> Option<&'static str> {
+    match name {
+        "parse_float.h" => Some(include_str!("../../../stdlib/parse_float.h")),
+        _ => None,
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 const BUILD_CHECKOUT_STDLIB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib");
 

@@ -3608,7 +3608,12 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
     return f(s, start, end_idx)
 """
 
-@nomangle inline(lua) fn __rock_parse_float_at_setup() -> any = """
+@nomangle fn __rock_parse_float_at_setup() -> any {
+    let declared = ffi_cdef_once("__rock_parse_float_ffi_defined", embed_string("parse_float.h"), true)
+    return __rock_parse_float_at_init(declared)
+}
+
+inline(lua) fn __rock_parse_float_at_init(declared: bool) -> any = """
     local f
     local cast = ffi.cast
     -- LC_NUMERIC_MASK is a header constant the ffi cannot read: 16 on Darwin,
@@ -3616,12 +3621,7 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
     -- every category outside `mask` from "C" when `base` is NULL, so LC_NUMERIC
     -- lands on "C" either way -- but the probe below refuses to install the
     -- fast path if that reasoning ever fails.
-    local ok = pcall(ffi.cdef, [[
-typedef void *__rock_locale_t;
-__rock_locale_t newlocale(int mask, const char *locale, __rock_locale_t base);
-double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
-]])
-    if ok then
+    if declared then
         local mask = (ffi.os == "OSX" or ffi.os == "BSD") and 16 or 2
         local got, loc = pcall(function() return ffi.C.newlocale(mask, "C", nil) end)
         if got and loc ~= nil then
@@ -3848,4 +3848,16 @@ fn get_env_float(var: string, default_val: float) -> float {
 
 @embed_expand inline(lua) fn embed_string(path: string) -> string = """
     error("embed_string is a compile-time intrinsic (expanded at compile time)")
+"""
+
+@intrinsic @native_required inline(lua) fn ffi_cdef_once(key: string, declarations: string, optional: bool = false) -> bool = """
+    if not _G[key] then
+        if optional then
+            if not pcall(ffi.cdef, declarations) then return false end
+        else
+            ffi.cdef(declarations)
+        end
+        _G[key] = true
+    end
+    return true
 """

@@ -22,6 +22,7 @@ nonmax = { workspace = true }
 
 skull-parser = { path = "../skull-parser" }
 rock-core = { workspace = true }
+rock-stdlib = { workspace = true }
 
 [lints]
 workspace = true

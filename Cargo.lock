@@ -142,6 +142,7 @@ dependencies = [
  "nonmax",
  "rayon",
  "rock-core",
+ "rock-stdlib",
  "rust-lapper",
  "rustc-hash",
  "skull-parser",

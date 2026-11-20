@@ -164,49 +164,70 @@ fn split_params(params: &str) -> Vec<String> {
     out
 }
 
+fn cdef_sources() -> Vec<(String, String)> {
+    let root = workspace_root();
+    let mut sources = Vec::new();
+    for rel in [
+        "packages/stone/engine/stone.h",
+        "packages/stone-native/stone_native.h",
+        "packages/stone/engine/debug/lua_alloc_split.h",
+    ] {
+        sources.push((
+            rel.to_string(),
+            std::fs::read_to_string(root.join(rel)).unwrap(),
+        ));
+    }
+    for (file, text) in rock_sources() {
+        sources.extend(
+            cdef_blocks(&text)
+                .into_iter()
+                .map(|body| (file.clone(), body.to_string())),
+        );
+    }
+    sources
+}
+
 fn read_cdefs() -> Cdef {
     let mut cdef = Cdef::default();
-    for (file, text) in rock_sources() {
-        for block in cdef_blocks(&text) {
-            for decl in c_declarations(block) {
-                if let Some(rest) = decl.strip_prefix("typedef ") {
-                    let name = rest
-                        .rsplit([' ', '}', '*'])
-                        .next()
-                        .unwrap()
-                        .trim()
-                        .to_string();
-                    let target = if rest.starts_with("enum") {
-                        "int".to_string()
-                    } else if rest.starts_with("struct") {
-                        name.clone()
-                    } else {
-                        rest[..rest.len() - name.len()].trim().to_string()
-                    };
-                    cdef.typedefs.insert(name, target);
-                    continue;
-                }
-                let Some(open) = decl.find('(') else { continue };
-                if decl[..open].contains('{') || decl[open..].starts_with("(*") {
-                    continue;
-                }
-                let head = decl[..open].trim();
-                let name_at = head.rfind([' ', '*']).map_or(0, |at| at + 1);
-                let name = head[name_at..].to_string();
-                let ret = head[..name_at].trim().to_string();
-                let close = decl.rfind(')').expect("prototype closes");
-                let params = decl[open + 1..close].trim();
-                let params = if params == "void" {
-                    Vec::new()
+    for (file, block) in cdef_sources() {
+        for decl in c_declarations(&block) {
+            if let Some(rest) = decl.strip_prefix("typedef ") {
+                let name = rest
+                    .rsplit([' ', '}', '*'])
+                    .next()
+                    .unwrap()
+                    .trim()
+                    .to_string();
+                let target = if rest.starts_with("enum") {
+                    "int".to_string()
+                } else if rest.starts_with("struct") {
+                    name.clone()
                 } else {
-                    split_params(params)
+                    rest[..rest.len() - name.len()].trim().to_string()
                 };
-                cdef.functions.entry(name).or_default().push(Prototype {
-                    params,
-                    ret,
-                    file: file.clone(),
-                });
+                cdef.typedefs.insert(name, target);
+                continue;
             }
+            let Some(open) = decl.find('(') else { continue };
+            if decl[..open].contains('{') || decl[open..].starts_with("(*") {
+                continue;
+            }
+            let head = decl[..open].trim();
+            let name_at = head.rfind([' ', '*']).map_or(0, |at| at + 1);
+            let name = head[name_at..].to_string();
+            let ret = head[..name_at].trim().to_string();
+            let close = decl.rfind(')').expect("prototype closes");
+            let params = decl[open + 1..close].trim();
+            let params = if params == "void" {
+                Vec::new()
+            } else {
+                split_params(params)
+            };
+            cdef.functions.entry(name).or_default().push(Prototype {
+                params,
+                ret,
+                file: file.clone(),
+            });
         }
     }
     cdef
@@ -555,11 +576,10 @@ fn rock_externs_match_their_cdef_shape() {
 
 #[test]
 fn stone_event_cdef_layout_matches_rust() {
-    let lib =
-        std::fs::read_to_string(workspace_root().join("packages/stone/engine/lib.rock")).unwrap();
-    let decls: Vec<String> = cdef_blocks(&lib)
+    let header =
+        std::fs::read_to_string(workspace_root().join("packages/stone/engine/stone.h")).unwrap();
+    let decls: Vec<String> = c_declarations(&header)
         .into_iter()
-        .flat_map(c_declarations)
         .filter(|decl| {
             decl.starts_with("typedef")
                 && ["StoneEventType", "StoneKeyCode", "StoneEvent"]

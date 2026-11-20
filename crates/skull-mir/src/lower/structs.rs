@@ -827,19 +827,19 @@ impl<'a> Builder<'a> {
             unreachable!()
         };
         let input = match (kind, resolved.file_abs) {
-            (ExpandKind::BuildVar, _) => crate::mir::ComptimeInputId::Var(key),
-            // File reads are keyed by the absolute path the resolver landed on.
-            (_, Some(abs)) => crate::mir::ComptimeInputId::File(abs),
-            (_, None) => unreachable!("embed resolution always lands on a file"),
+            (ExpandKind::BuildVar, _) => Some(crate::mir::ComptimeInputId::Var(key)),
+            (_, file) => file.map(crate::mir::ComptimeInputId::File),
         };
+        if let Some(input) = input {
+            self.f.comptime_reads.push(crate::mir::ComptimeRead {
+                input,
+                value_hash: crate::mir::comptime_value_hash(&resolved.value),
+                span: self.body.expr_spans[call],
+            });
+        }
         let inst = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(
             resolved.value.as_str(),
         ))));
-        self.f.comptime_reads.push(crate::mir::ComptimeRead {
-            input,
-            value_hash: crate::mir::comptime_value_hash(&resolved.value),
-            span: self.body.expr_spans[call],
-        });
         Ok(ValueRepr::Scalar(inst))
     }
 

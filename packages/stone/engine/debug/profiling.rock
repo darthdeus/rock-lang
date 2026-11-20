@@ -340,13 +340,9 @@ pub fn thread_cpu_seconds() -> float { clock_thread_seconds() ?? -1.0 }
 @early_init
 fn lua_alloc_split_declare() { lua_alloc_split_init() }
 
-inline(lua) fn lua_alloc_split_init() = """
-    require("ffi").cdef[[
-        int stone_lua_alloc_split_available(void);
-        uint64_t stone_lua_alloc_origin_bytes(int origin);
-        uint64_t stone_lua_alloc_origin_calls(int origin);
-    ]]
-"""
+fn lua_alloc_split_init() {
+    ffi_cdef_once("__stone_lua_alloc_split_ffi_defined", embed_string("engine/debug/lua_alloc_split.h"))
+}
 pub inline(lua) fn lua_alloc_split_available() -> bool = "return stone.stone_lua_alloc_split_available() ~= 0"
 pub inline(lua) fn lua_alloc_origin_bytes(origin: int) -> float = "return tonumber(stone.stone_lua_alloc_origin_bytes(origin))"
 pub inline(lua) fn lua_alloc_origin_calls(origin: int) -> int = "return tonumber(stone.stone_lua_alloc_origin_calls(origin))"
