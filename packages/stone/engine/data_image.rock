@@ -24,44 +24,25 @@
         "float", "double", "long double",
     }) do SCALAR_CTYPE["ctype<" .. n .. ">"] = n end
 
-    -- This table's storage fields, and the leaf VIEWS that actually exist over
-    -- them: `{ field, cast, key }` per view, plus a field -> storage-key map.
-    --
-    -- A view is identified by what it IS, not by where it sits. Holding storage
-    -- makes a table a candidate, but a field is only that storage's view when it
-    -- carries a cdata of the descriptor's own cast type addressing the storage's
-    -- base -- which is also true of a zero-length buffer's view, where no
-    -- interior address exists to test. Co-location is not enough on its own:
-    -- `__vf` is a legal user field name, and a table holding a vertex buffer may
-    -- perfectly well carry an unrelated `__vf` number, which must be imaged as
-    -- the value it is rather than dropped and re-minted as a float pointer.
-    local function storage_shape(x)
-        local keys = nil
-        for k, v in pairs(x) do
-            if type(v) == "cdata" and storage_desc(v) then
-                keys = keys or {}
-                keys[#keys + 1] = k
-            end
-        end
-        if not keys then return nil, nil, nil end
-        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-
-        local views, by_field = nil, nil
-        for _, k in ipairs(keys) do
-            local storage = x[k]
-            local base = ffi.cast("uintptr_t", storage)
-            for field, cast_ty in pairs(storage_desc(storage).views) do
-                local v = x[field]
-                if type(v) == "cdata" and ffi.istype(cast_ty, v)
-                   and ffi.cast("uintptr_t", v) == base then
-                    views = views or {}
-                    by_field = by_field or {}
-                    views[#views + 1] = { field = field, cast = cast_ty, key = k }
-                    by_field[field] = k
+    local function storage_fields(x)
+        local has_storage, views
+        for _, storage in pairs(x) do
+            local desc = type(storage) == "cdata" and storage_desc(storage)
+            if desc then
+                has_storage = true
+                local base = ffi.cast("uintptr_t", storage)
+                for field, cast_ty in pairs(desc.views) do
+                    local v = x[field]
+                    -- A user field can share a view name; match its type and address.
+                    if type(v) == "cdata" and ffi.istype(cast_ty, v)
+                       and ffi.cast("uintptr_t", v) == base then
+                        views = views or {}
+                        views[field] = true
+                    end
                 end
             end
         end
-        return keys, views, by_field
+        return has_storage, views
     end
     -- The field the walk last entered, formatted only when an error names it:
     -- a large capture walks millions of fields, and formatting each one
@@ -208,19 +189,14 @@
             else setmetatable(o, __rock_box_mts[rt]) end
         end
         seen[x] = o
-        -- One scan: which fields of THIS table are storage, and which fields are
-        -- genuinely views over that storage.
-        local storage_keys, views, view_fields = nil, nil, nil
-        -- Logical images carry their storage shape marker; live storage is
-        -- rejected later in this walk.
+        local has_storage, view_fields
         if image_mode == "capture" then
-            storage_keys, views, view_fields = storage_shape(x)
-        end
-        if image_mode == "materialize" then
+            has_storage, view_fields = storage_fields(x)
+        else
             local shape = rawget(x, "__stone_image_storage_shape")
-            if shape then
-                storage_keys, views, view_fields = shape.keys, shape.views, {}
-                for _, view in ipairs(views or {}) do view_fields[view.field] = view.key end
+            if shape and shape.views then
+                view_fields = {}
+                for _, view in ipairs(shape.views) do view_fields[view.field] = view.key end
             end
         end
         for k, v in pairs(x) do
@@ -240,8 +216,9 @@
                 end
             end
         end
-        if image_mode == "capture" and storage_keys then
-            o.__stone_image_storage_shape = { keys = storage_keys, views = views }
+        -- The cache decoder uses this marker to visit untagged storage owners.
+        if has_storage then
+            o.__stone_image_storage_shape = {}
         end
         return o
     end

@@ -28,6 +28,8 @@ inline(lua) fn image_leaf_views_are_omitted(buffer: NativeBuffer<ImageLeafViews>
     end
     local capture = { image_mode = "capture", global = "test", storage = {}, storage_records = {} }
     local image = __stone_data_image(buffer, {}, capture)
+    local marker = image.__stone_image_storage_shape
+    assert(type(marker) == "table" and next(marker) == nil, "storage owners need only an empty marker")
     local materialize = { image_mode = "materialize", global = "test", storage = {},
         image_storage = capture.storage_records }
     local copy = __stone_data_image(image, {}, materialize)
@@ -38,6 +40,18 @@ inline(lua) fn image_leaf_views_are_omitted(buffer: NativeBuffer<ImageLeafViews>
     assert(copy.len == buffer.len)
     assert(copy.ptr[0].x == 1.5 and copy.ptr[0].id == 7 and copy.ptr[0].active)
     assert(copy.ptr ~= buffer.ptr, "materialization must own fresh storage")
+
+    local user_field = __stone_data_image({ ptr = buffer.ptr, __vf = 17 }, {}, capture)
+    local restored = __stone_data_image(user_field, {}, materialize)
+    assert(restored.__vf == 17 and rawequal(restored.ptr, copy.ptr),
+        "a user field can have the same name as a view")
+
+    user_field.__stone_image_storage_shape = { keys = { "ptr" }, views = {
+        { field = "__vf", cast = "float*", key = "ptr" },
+    } }
+    restored = __stone_data_image(user_field, {}, materialize)
+    assert(restored.__vf == nil and rawequal(restored.ptr, copy.ptr),
+        "a serialized legacy shape still suppresses its view field")
     return true
 """
 
