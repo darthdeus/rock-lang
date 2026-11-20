@@ -1,7 +1,7 @@
-use crate::common::{emit_module, run_fn, try_emit_module};
+use crate::common::{bone_rejections, emit_module, run_fn};
 
 #[test]
-fn widened_enum_record_match_rejects_a_field_missing_from_its_variant() {
+fn record_variant_pattern_must_name_the_scrutinee_enum() {
     const SRC: &str = r#"
 enum Choice { A { left: int, shared: int }, B { right: string, shared: string } }
 enum Other { A { ghost: int } }
@@ -15,7 +15,10 @@ fn read() -> int {
 fn main() { print(read()) }
 "#;
 
-    assert!(try_emit_module(SRC).is_err());
+    assert_eq!(
+        bone_rejections(SRC),
+        ["pattern for enum `Other` cannot match a value of type `Choice`"]
+    );
 }
 
 const SRC: &str = r#"
