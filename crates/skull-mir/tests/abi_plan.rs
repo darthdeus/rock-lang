@@ -488,28 +488,36 @@ fn missing_bound_result_plan_is_an_explicit_error() {
     );
 }
 
-#[test]
-fn leaf_places_carry_the_container_element_representation() {
-    let ws = checked_ws_of("nobox value V2 { x: float, y: float }");
-    let arena = RepArena::default();
+fn native_buffer_plan(
+    ws: &bone_core::workspace::Workspace,
+    arena: &RepArena,
+    element: &str,
+) -> ContainerPlan {
     let ty = MonoTy::App {
-        ctor: MonoCtor::Nominal(key(&ws, "NativeBuffer")),
-        params: vec![nominal(&ws, "V2")],
+        ctor: MonoCtor::Nominal(key(ws, "NativeBuffer")),
+        params: vec![nominal(ws, element)],
     };
-    let plan = ContainerPlan::for_type(
-        &ws,
+    ContainerPlan::for_type(
+        ws,
         bone_core::hir::FnBackend::Lua,
-        &arena,
+        arena,
         ContainerFamily::NativeBuffer,
         &ty,
     )
-    .expect("a NativeBuffer value must have a concrete container plan");
+    .expect("a NativeBuffer value must have a concrete container plan")
+}
+
+#[test]
+fn leaf_places_carry_the_container_element_representation() {
+    let ws = checked_ws_of("nobox value V2 { x: float, y: float }");
+    let plan = native_buffer_plan(&ws, &RepArena::default(), "V2");
     assert!(plan.is_leaf_addressed());
-    let addresses = arena
-        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "V2"))
-        .expect("V2 has a leaf address plan");
-    assert!(!addresses.is_empty());
-    assert_eq!(plan.leaf_places(), Some(&addresses[..]));
+    let addresses = plan.leaf_places().expect("V2 has a leaf address plan");
+    let places: Vec<_> = addresses
+        .iter()
+        .map(|a| (a.path.as_str(), a.view_field.as_str(), a.stride, a.offset))
+        .collect();
+    assert_eq!(places, [("x", "__vd", 2, 0), ("y", "__vd", 2, 1)]);
 }
 
 #[test]
@@ -845,8 +853,9 @@ fn nominal_value_paths_and_addresses_are_owned_by_the_rep_plan() {
             .expect("the required leaf-path plan must exist"),
         expected
     );
-    let addresses = arena
-        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Boxed"))
+    let plan = native_buffer_plan(&ws, &arena, "Boxed");
+    let addresses = plan
+        .leaf_places()
         .expect("the concrete value plan must own nonzero leaf addresses");
     assert_eq!(
         addresses

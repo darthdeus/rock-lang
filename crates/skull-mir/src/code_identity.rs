@@ -501,12 +501,6 @@ impl CodeArtifact {
         visit(self, root, root_name);
     }
 
-    /// The root body is a definition, not automatically a slot; nested lambda
-    /// bodies are escaping values. Named value mints are marked separately.
-    pub fn from_mir_tree(root: &MirFunc) -> Self {
-        Self::from_mir_tree_with_volatile_vars(root, &FxHashSet::default())
-    }
-
     /// Volatile comptime values are metadata in body witnesses, but the
     /// surrounding code shape is still hashed, so a body edit cannot hide.
     pub fn from_mir_tree_with_volatile_vars(

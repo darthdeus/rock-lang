@@ -3,7 +3,7 @@
 //! stay bare.
 
 use crate::common::{has_name_tail, ws_of};
-use skull_mir::mangle::{collision_errors, mangle_fn};
+use skull_mir::mangle::{collision_errors_of, mangle_fn};
 use ustr::Ustr;
 
 fn mangled(ws: &bone_core::workspace::Workspace, name: &str) -> Vec<String> {
@@ -68,7 +68,9 @@ fn foo() -> int { return 1 }
 @nomangle fn foo_0() -> int { return 2 }
 "#,
     );
-    let errors = collision_errors(&ws);
+    let funcs = &ws.module(ws.module_ids[&Ustr::from("<test>")]).functions;
+    let names: Vec<_> = funcs.iter().map(|(_, f)| (f, mangle_fn(&ws, f))).collect();
+    let errors = collision_errors_of(&ws, names.iter().map(|(f, name)| (*f, name.as_str())));
     assert_eq!(
         errors.len(),
         1,

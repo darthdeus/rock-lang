@@ -76,7 +76,7 @@ mod abi;
 pub use abi::{
     AbiQuestion, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass, FunctionRepPlan,
     GlobalPlan, RepArena, RepError, RepGuarantees, RepId, RepLayout, RepPlan, RepUse, RepUseFacts,
-    SIGNATURE_SCALAR_LANE_BUDGET, TupleLayout, WIDE_VALUE_PAYLOAD_LEAF_CUT, WirePosition,
+    SIGNATURE_SCALAR_LANE_BUDGET, TupleLayout, WIDE_VALUE_PAYLOAD_LEAF_CUT,
     boundary_requires_boxed_representation, declared_boundary_class, owner_abi_plan,
     owner_abi_plan_for_body, requires_concrete_body_plan, selected_sibling_abi_plan,
 };

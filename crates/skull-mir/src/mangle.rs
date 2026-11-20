@@ -4,7 +4,7 @@
 //! Every function mangles on its own name and declared parameter types except
 //! externs with implicit names, `@nomangle`, `@test`, `main` and `test_*`. A function with no
 //! parameters gets `_0`, so a mangled name never equals its source name.
-//! [`collision_errors`] rejects any residual collision; nothing is renamed.
+//! [`collision_errors_of`] rejects any residual collision; nothing is renamed.
 
 use bone_core::hir::{self, Function, TyId, TypeExpr};
 use bone_core::prelude::Span;
@@ -373,17 +373,7 @@ fn function_collision_error(
     )
 }
 
-/// Rejects two distinct signatures with one mangled name, and a mangled name
-/// equal to an exempt bare name. Keyed by mangled name for deterministic order.
-pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
-    let names: Vec<(&Function, String)> = ws
-        .modules
-        .iter()
-        .flat_map(|m| m.functions.iter().map(|(_, f)| (f, mangle_fn(ws, f))))
-        .collect();
-    collision_errors_of(ws, names.iter().map(|(f, name)| (*f, name.as_str())))
-}
-
+/// Rejects two distinct signatures with one emitted name, in deterministic order.
 pub fn collision_errors_of<'a>(
     ws: &Workspace,
     names: impl IntoIterator<Item = (&'a Function, &'a str)>,

@@ -1013,19 +1013,6 @@ impl RepArena {
         })
     }
 
-    pub fn nominal_leaf_addresses(
-        &self,
-        ws: &Workspace,
-        target: FnBackend,
-        name: Ustr,
-    ) -> Result<Vec<crate::lower::LeafAddr>, RepError> {
-        let id = self.plan_nominal_value(ws, target, name)?;
-        self.leaf_addresses(ws, id)?.ok_or_else(|| RepError {
-            span: None,
-            message: format!("{name} has no concrete leaf-addressed representation"),
-        })
-    }
-
     pub fn nominal_leaf_layout(
         &self,
         ws: &Workspace,
@@ -1737,15 +1724,6 @@ pub struct BackendFnAbiPlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WirePosition {
-    /// Lua values it occupies.
-    pub lanes: usize,
-    pub flattened: Option<Ustr>,
-    pub nobox: bool,
-    pub result: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct ParameterTransport {
     original: Vec<RepId>,
     lanes: Vec<usize>,
@@ -2195,27 +2173,6 @@ impl BackendFnAbiPlan {
             slot_param_labels(&self.arena, pd.name.as_str(), id, origins, &mut labels);
         }
         Some(labels)
-    }
-
-    pub fn wire_positions(&self) -> Vec<WirePosition> {
-        let position = |id: RepId, result: bool| {
-            let plan = self.arena.get(id);
-            WirePosition {
-                lanes: plan.lanes(&self.arena),
-                flattened: match plan.layout() {
-                    RepLayout::Leaves(shape) => Some(shape.name),
-                    _ => None,
-                },
-                nobox: plan.nobox(),
-                result,
-            }
-        };
-        self.representation
-            .params()
-            .iter()
-            .map(|id| position(*id, false))
-            .chain(self.representation.result().map(|id| position(id, true)))
-            .collect()
     }
 
     /// Per declared parameter, so a defaulted value parameter counts as its whole
