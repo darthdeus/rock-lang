@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::ffi::{c_char, c_float, CStr};
+use std::ffi::{c_char, c_float};
 use std::num::NonZero;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -82,44 +82,56 @@ fn audio_asset_exists(path_str: &str) -> bool {
     }
 }
 
-#[derive(Clone)]
+/// A decoded source holds PCM; a stream source holds its encoded file and each
+/// voice decodes it incrementally.
+enum Payload {
+    Pcm(Arc<Vec<f32>>),
+    Encoded(Arc<[u8]>),
+}
+
+struct Loaded {
+    payload: Payload,
+    sample_rate: u32,
+    channels: u16,
+}
+
+enum SoundState {
+    Recipe,
+    Admitting,
+    /// A play needs no decode or file read on the game thread.
+    Playable(Payload),
+}
+
 struct SoundData {
     path: String,
     frames: u64,
     sample_rate: u32,
     channels: u16,
-    samples: Option<Arc<Vec<f32>>>,
-    /// A stream source admits its encoded file instead of PCM; each voice
-    /// decodes it incrementally (`StreamSource`).
     stream: bool,
-    encoded: Option<Arc<[u8]>>,
-    admitting: bool,
+    state: SoundState,
 }
 
 impl SoundData {
-    fn recipe(path: String, frames: u64, sample_rate: u32, channels: u16) -> Self {
+    fn recipe(path: String, frames: u64, sample_rate: u32, channels: u16, stream: bool) -> Self {
         Self {
             path,
             frames,
             sample_rate,
             channels,
-            samples: None,
-            stream: false,
-            encoded: None,
-            admitting: false,
+            stream,
+            state: SoundState::Recipe,
         }
     }
 
-    fn stream_recipe(path: String, frames: u64, sample_rate: u32, channels: u16) -> Self {
-        Self {
-            stream: true,
-            ..Self::recipe(path, frames, sample_rate, channels)
-        }
-    }
-
-    /// Admitted: a play needs no decode or file read on the game thread.
     fn playable(&self) -> bool {
-        self.samples.is_some() || self.encoded.is_some()
+        matches!(self.state, SoundState::Playable(_))
+    }
+
+    fn samples(&self) -> Option<&Arc<Vec<f32>>> {
+        match &self.state {
+            SoundState::Playable(Payload::Pcm(samples)) => Some(samples),
+            _ => None,
+        }
     }
 
     fn estimated_bytes(&self) -> u64 {
@@ -136,62 +148,77 @@ impl SoundData {
         }
     }
 
-    fn publish_decoded(&mut self, samples: Vec<f32>, sample_rate: u32, channels: u16) -> bool {
-        if self.stream
-            || self.samples.is_some()
-            || samples.len() < channels as usize
-            || sample_rate == 0
-            || channels == 0
-        {
-            self.admitting = false;
+    /// The first valid load wins; a later one cannot replace admitted data.
+    fn publish(&mut self, loaded: Loaded) -> bool {
+        if self.playable() {
             return false;
         }
-        self.frames = (samples.len() / channels as usize) as u64;
-        self.sample_rate = sample_rate;
-        self.channels = channels;
-        self.samples = Some(Arc::new(samples));
-        self.admitting = false;
-        true
-    }
-
-    fn publish_encoded(&mut self, encoded: Arc<[u8]>, sample_rate: u32, channels: u16) -> bool {
-        if !self.stream
-            || self.encoded.is_some()
-            || encoded.is_empty()
-            || sample_rate == 0
-            || channels == 0
-        {
-            self.admitting = false;
+        let Loaded {
+            payload,
+            sample_rate,
+            channels,
+        } = loaded;
+        let valid = sample_rate > 0
+            && channels > 0
+            && match &payload {
+                Payload::Pcm(samples) => samples.len() >= channels as usize,
+                Payload::Encoded(bytes) => !bytes.is_empty(),
+            };
+        if !valid {
+            self.state = SoundState::Recipe;
             return false;
+        }
+        if let Payload::Pcm(samples) = &payload {
+            self.frames = (samples.len() / channels as usize) as u64;
         }
         self.sample_rate = sample_rate;
         self.channels = channels;
-        self.encoded = Some(encoded);
-        self.admitting = false;
+        self.state = SoundState::Playable(payload);
         true
     }
 
-    fn as_source(&self, looped: bool) -> Option<SoundSource> {
-        Some(SoundSource {
-            samples: self.samples.as_ref()?.clone(),
-            sample_rate: self.sample_rate,
-            channels: self.channels,
-            position: 0,
-            looped,
-        })
+    fn voice(
+        &self,
+        looped: bool,
+        ratio: f32,
+        decay: f32,
+        pan: Option<Arc<AtomicU32>>,
+    ) -> Option<BoxedSource> {
+        match &self.state {
+            SoundState::Playable(Payload::Pcm(samples)) => {
+                let source = SoundSource {
+                    samples: samples.clone(),
+                    sample_rate: self.sample_rate,
+                    channels: self.channels,
+                    position: 0,
+                    looped,
+                };
+                Some(voice_source(source, ratio, decay, pan))
+            }
+            SoundState::Playable(Payload::Encoded(bytes)) => {
+                match stream_source(bytes.clone(), looped) {
+                    Ok(source) => Some(voice_source(source, ratio, decay, pan)),
+                    Err(e) => {
+                        crate::log_once!(
+                            "AUDIO",
+                            "stone_play_sound: stream {} does not decode: {}",
+                            self.path,
+                            e
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
     }
-}
-
-enum AdmissionPayload {
-    Pcm(Vec<f32>, u32, u16),
-    Encoded(Arc<[u8]>, u32, u16),
 }
 
 struct SoundAdmissionResult {
     handle: u64,
     path: String,
     reserved_bytes: u64,
-    payload: Option<AdmissionPayload>,
+    loaded: Option<Loaded>,
 }
 
 static SOUND_ADMISSION_RESULTS: OnceLock<Mutex<VecDeque<SoundAdmissionResult>>> = OnceLock::new();
@@ -254,68 +281,19 @@ impl Source for SoundSource {
     }
 }
 
-type EncodedCursor = std::io::Cursor<Arc<[u8]>>;
+type BoxedSource = Box<dyn Source<Item = f32> + Send>;
 
-enum StreamDecoder {
-    Once(Decoder<EncodedCursor>),
-    Looped(rodio::decoder::LoopedDecoder<EncodedCursor>),
-}
-
-struct StreamSource {
-    decoder: StreamDecoder,
-}
-
-impl StreamSource {
-    fn new(encoded: Arc<[u8]>, looped: bool) -> Result<Self, rodio::decoder::DecoderError> {
-        let cursor = std::io::Cursor::new(encoded);
-        let decoder = if looped {
-            StreamDecoder::Looped(Decoder::new_looped(cursor)?)
-        } else {
-            StreamDecoder::Once(Decoder::new(cursor)?)
-        };
-        Ok(Self { decoder })
-    }
-}
-
-impl Iterator for StreamSource {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match &mut self.decoder {
-            StreamDecoder::Once(decoder) => decoder.next(),
-            StreamDecoder::Looped(decoder) => decoder.next(),
-        }
-    }
-}
-
-impl Source for StreamSource {
-    fn current_span_len(&self) -> Option<usize> {
-        match &self.decoder {
-            StreamDecoder::Once(decoder) => decoder.current_span_len(),
-            StreamDecoder::Looped(decoder) => decoder.current_span_len(),
-        }
-    }
-
-    fn channels(&self) -> ChannelCount {
-        match &self.decoder {
-            StreamDecoder::Once(decoder) => decoder.channels(),
-            StreamDecoder::Looped(decoder) => decoder.channels(),
-        }
-    }
-
-    fn sample_rate(&self) -> SampleRate {
-        match &self.decoder {
-            StreamDecoder::Once(decoder) => decoder.sample_rate(),
-            StreamDecoder::Looped(decoder) => decoder.sample_rate(),
-        }
-    }
-
-    fn total_duration(&self) -> Option<std::time::Duration> {
-        match &self.decoder {
-            StreamDecoder::Once(decoder) => decoder.total_duration(),
-            StreamDecoder::Looped(_) => None,
-        }
-    }
+/// Decodes an encoded file incrementally as it plays.
+fn stream_source(
+    encoded: Arc<[u8]>,
+    looped: bool,
+) -> Result<BoxedSource, rodio::decoder::DecoderError> {
+    let cursor = std::io::Cursor::new(encoded);
+    Ok(if looped {
+        Box::new(Decoder::new_looped(cursor)?)
+    } else {
+        Box::new(Decoder::new(cursor)?)
+    })
 }
 
 const SLEW_TAU_SECS: f32 = 0.010;
@@ -1032,94 +1010,65 @@ pub extern "C" fn stone_audio_quit() {
         .clear();
 }
 
-/// Decode an audio file (asset registry first, then disk) to PCM samples. Shared
-/// by load + reload; `None` on failure (no embedded fallback -- callers decide).
-fn decode_sound_samples(path_str: &str) -> Option<(Vec<f32>, u32, u16)> {
-    let audio_bytes = match crate::asset_registry::resolve_asset(path_str) {
-        Some(data) => data,
-        None => {
-            crate::log_once!("AUDIO", "decode_sound_samples: Failed to read {}", path_str);
-            return None;
-        }
-    };
-    decode_sound_bytes(audio_bytes, path_str)
+fn read_audio_asset(path: &str) -> Option<Vec<u8>> {
+    let bytes = crate::asset_registry::resolve_asset(path);
+    if bytes.is_none() {
+        crate::log_once!("AUDIO", "sound load: Failed to read {}", path);
+    }
+    bytes
 }
 
-fn decode_sound_bytes(audio_bytes: Vec<u8>, path_str: &str) -> Option<(Vec<f32>, u32, u16)> {
-    let decoder = match Decoder::new(std::io::Cursor::new(audio_bytes)) {
-        Ok(d) => d,
-        Err(e) => {
-            crate::log_once!(
-                "AUDIO",
-                "decode_sound_samples: Failed to decode {}: {}",
-                path_str,
-                e
-            );
-            return None;
-        }
-    };
+fn open_decoder<R>(reader: R, path: &str) -> Option<Decoder<R>>
+where
+    R: std::io::Read + std::io::Seek + Send + Sync + 'static,
+{
+    Decoder::new(reader)
+        .map_err(|e| crate::log_once!("AUDIO", "sound load: Failed to decode {}: {}", path, e))
+        .ok()
+}
 
+/// Decoded PCM, or a stream source's encoded file. The stream's decoder probe
+/// checks the format once here so a voice never starts on bytes that cannot decode.
+fn load_sound(path: &str, stream: bool) -> Option<Loaded> {
+    let bytes = read_audio_asset(path)?;
+    if !stream {
+        let (samples, sample_rate, channels) = decode_sound_bytes(bytes, path)?;
+        return Some(Loaded {
+            payload: Payload::Pcm(Arc::new(samples)),
+            sample_rate,
+            channels,
+        });
+    }
+    let bytes: Arc<[u8]> = bytes.into();
+    let decoder = open_decoder(std::io::Cursor::new(bytes.clone()), path)?;
+    Some(Loaded {
+        sample_rate: decoder.sample_rate().get(),
+        channels: decoder.channels().get(),
+        payload: Payload::Encoded(bytes),
+    })
+}
+
+fn decode_sound_bytes(audio_bytes: Vec<u8>, path: &str) -> Option<(Vec<f32>, u32, u16)> {
+    let decoder = open_decoder(std::io::Cursor::new(audio_bytes), path)?;
     let sample_rate = decoder.sample_rate().get();
     let channels = decoder.channels().get();
     let mut samples: Vec<f32> = decoder.collect();
     samples.shrink_to_fit();
-
     if samples.is_empty() {
-        crate::log_once!("AUDIO", "decode_sound_samples: No samples in {}", path_str);
+        crate::log_once!("AUDIO", "sound load: No samples in {}", path);
         return None;
     }
-
     Some((samples, sample_rate, channels))
 }
 
-fn probe_sound_recipe(path_str: &str) -> Option<(u64, u32, u16)> {
-    let bytes = crate::asset_registry::resolve_asset(path_str).or_else(|| {
-        crate::log_once!(
-            "AUDIO",
-            "stone_load_sound_deferred: Failed to read {}",
-            path_str
-        );
-        None
-    })?;
-    let decoder = Decoder::new(std::io::Cursor::new(bytes)).ok().or_else(|| {
-        crate::log_once!(
-            "AUDIO",
-            "stone_load_sound_deferred: Failed to probe {}",
-            path_str
-        );
-        None
-    })?;
+fn probe_sound_recipe(path: &str) -> Option<(u64, u32, u16)> {
+    let decoder = open_decoder(std::io::Cursor::new(read_audio_asset(path)?), path)?;
     let sample_rate = decoder.sample_rate().get();
     let channels = decoder.channels().get();
     let frames = decoder.total_duration().map_or(0, |duration| {
         (duration.as_secs_f64() * sample_rate as f64).round() as u64
     });
     Some((frames, sample_rate, channels))
-}
-
-/// Read and validate a stream source's encoded file. The decoder probe checks
-/// the format once here so a voice never starts on bytes that cannot decode.
-fn load_stream_bytes(path_str: &str) -> Option<(Arc<[u8]>, u32, u16)> {
-    let bytes: Arc<[u8]> = match crate::asset_registry::resolve_asset(path_str) {
-        Some(data) => data.into(),
-        None => {
-            crate::log_once!("AUDIO", "stream source: Failed to read {}", path_str);
-            return None;
-        }
-    };
-    let decoder = match Decoder::new(std::io::Cursor::new(bytes.clone())) {
-        Ok(decoder) => decoder,
-        Err(e) => {
-            crate::log_once!(
-                "AUDIO",
-                "stream source: Failed to decode {}: {}",
-                path_str,
-                e
-            );
-            return None;
-        }
-    };
-    Some((bytes, decoder.sample_rate().get(), decoder.channels().get()))
 }
 
 fn load_sound_recipe(
@@ -1129,14 +1078,9 @@ fn load_sound_recipe(
     channels: i64,
     stream: bool,
 ) -> u64 {
-    if path.is_null() {
+    let Some(path_str) = (unsafe { crate::filesystem::cstr(path) }) else {
         return 0;
-    }
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return 0,
     };
-
     if !audio_asset_exists(path_str) {
         return 0;
     }
@@ -1149,24 +1093,19 @@ fn load_sound_recipe(
         return 0;
     };
 
-    AUDIO_STATE.with(|state| {
-        let Some(ref mut audio) = *state.borrow_mut() else {
-            crate::log_once!(
-                "AUDIO",
-                "sound load: no audio state, so `{}` gets no handle",
-                path_str
-            );
-            return 0;
-        };
+    with_audio_mut(|audio| {
         let id = crate::handles::mint(Class::Sound);
-        let path = path_str.to_owned();
-        let sound = if stream {
-            SoundData::stream_recipe(path, frames, sample_rate, channels)
-        } else {
-            SoundData::recipe(path, frames, sample_rate, channels)
-        };
+        let sound = SoundData::recipe(path_str.to_owned(), frames, sample_rate, channels, stream);
         audio.sounds.insert(id, sound);
         id
+    })
+    .unwrap_or_else(|| {
+        crate::log_once!(
+            "AUDIO",
+            "sound load: no audio state, so `{}` gets no handle",
+            path_str
+        );
+        0
     })
 }
 
@@ -1199,11 +1138,10 @@ pub extern "C" fn stone_sound_admit(handle: u64) -> bool {
         let Some(sound) = audio.sounds.get_mut(&handle) else {
             return false;
         };
-        if sound.playable() || sound.admitting {
-            return true;
+        if matches!(sound.state, SoundState::Recipe) {
+            sound.state = SoundState::Admitting;
+            audio.pending_sound_admissions.push_back(handle);
         }
-        sound.admitting = true;
-        audio.pending_sound_admissions.push_back(handle);
         true
     })
     .unwrap_or(false)
@@ -1226,22 +1164,13 @@ pub extern "C" fn stone_service_sound_admissions() -> i64 {
             let Some(sound) = audio.sounds.get_mut(&result.handle) else {
                 continue;
             };
-            if sound.path != result.path || !sound.admitting {
+            if sound.path != result.path || !matches!(sound.state, SoundState::Admitting) {
                 continue;
             }
-            match result.payload {
-                Some(AdmissionPayload::Pcm(samples, sample_rate, channels)) => {
-                    if sound.publish_decoded(samples, sample_rate, channels) {
-                        published += 1
-                    }
-                }
-                Some(AdmissionPayload::Encoded(encoded, sample_rate, channels)) => {
-                    if sound.publish_encoded(encoded, sample_rate, channels) {
-                        published += 1
-                    }
-                }
+            match result.loaded {
+                Some(loaded) => published += i64::from(sound.publish(loaded)),
                 None => {
-                    sound.admitting = false;
+                    sound.state = SoundState::Recipe;
                     crate::log_once!("AUDIO", "sound admission failed for {}", sound.path);
                 }
             }
@@ -1249,25 +1178,19 @@ pub extern "C" fn stone_service_sound_admissions() -> i64 {
 
         let mut scheduled = Vec::new();
         while let Some(handle) = audio.pending_sound_admissions.front().copied() {
-            let Some(sound) = audio.sounds.get(&handle) else {
+            let Some(sound) = audio
+                .sounds
+                .get(&handle)
+                .filter(|sound| matches!(sound.state, SoundState::Admitting))
+            else {
                 audio.pending_sound_admissions.pop_front();
                 continue;
             };
-            if !sound.admitting || sound.playable() {
-                audio.pending_sound_admissions.pop_front();
-                continue;
-            }
             let limit = SOUND_DECODE_IN_FLIGHT_BYTES;
-            let stream = sound.stream;
-            let bytes = if stream {
-                0
-            } else {
-                let estimated = sound.estimated_bytes();
-                if estimated == 0 {
-                    limit
-                } else {
-                    estimated
-                }
+            let bytes = match (sound.stream, sound.estimated_bytes()) {
+                (true, _) => 0,
+                (false, 0) => limit,
+                (false, estimated) => estimated,
             };
             if bytes > 0
                 && audio.inflight_sound_bytes.saturating_add(bytes) > limit
@@ -1275,10 +1198,9 @@ pub extern "C" fn stone_service_sound_admissions() -> i64 {
             {
                 break;
             }
-            let path = sound.path.clone();
+            scheduled.push((handle, sound.path.clone(), bytes, sound.stream));
             audio.pending_sound_admissions.pop_front();
             audio.inflight_sound_bytes = audio.inflight_sound_bytes.saturating_add(bytes);
-            scheduled.push((handle, path, bytes, stream));
         }
         (published, scheduled)
     })
@@ -1286,24 +1208,17 @@ pub extern "C" fn stone_service_sound_admissions() -> i64 {
 
     for (handle, path, reserved_bytes, stream) in scheduled {
         rayon::spawn(move || {
-            let payload = if stream {
-                load_stream_bytes(&path).map(|(encoded, rate, channels)| {
-                    AdmissionPayload::Encoded(encoded, rate, channels)
-                })
-            } else {
-                decode_sound_samples(&path)
-                    .map(|(samples, rate, channels)| AdmissionPayload::Pcm(samples, rate, channels))
-            };
+            let loaded = load_sound(&path, stream);
             let result = SoundAdmissionResult {
                 handle,
-                path: path.clone(),
+                path,
                 reserved_bytes,
-                payload,
+                loaded,
             };
-            let mut results = sound_admission_results()
+            sound_admission_results()
                 .lock()
-                .expect("sound admissions poisoned");
-            results.push_back(result);
+                .expect("sound admissions poisoned")
+                .push_back(result);
         });
     }
     published
@@ -1311,9 +1226,7 @@ pub extern "C" fn stone_service_sound_admissions() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn stone_sound_decode_sync(handle: u64) -> i64 {
-    let path = AUDIO_STATE.with(|state| {
-        let state = state.borrow();
-        let sound = state.as_ref()?.sounds.get(&handle)?;
+    let path = with_sound(handle, |sound| {
         if sound.stream {
             crate::log_once!(
                 "AUDIO",
@@ -1322,15 +1235,13 @@ pub extern "C" fn stone_sound_decode_sync(handle: u64) -> i64 {
             );
             return None;
         }
-        if sound.samples.is_some() {
-            return Some(None);
-        }
-        Some(Some(sound.path.clone()))
-    });
+        Some((!sound.playable()).then(|| sound.path.clone()))
+    })
+    .flatten();
     let Some(path) = path else { return -1 };
     let Some(path) = path else { return 0 };
     let started = std::time::Instant::now();
-    let Some((samples, sample_rate, channels)) = decode_sound_samples(&path) else {
+    let Some(loaded) = load_sound(&path, false) else {
         return -1;
     };
     let elapsed_us = started.elapsed().as_micros().min(i64::MAX as u128) as i64;
@@ -1338,7 +1249,7 @@ pub extern "C" fn stone_sound_decode_sync(handle: u64) -> i64 {
         audio
             .sounds
             .get_mut(&handle)
-            .is_some_and(|sound| sound.publish_decoded(samples, sample_rate, channels))
+            .is_some_and(|sound| sound.publish(loaded))
     })
     .unwrap_or(false);
     if published {
@@ -1350,7 +1261,7 @@ pub extern "C" fn stone_sound_decode_sync(handle: u64) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn stone_sound_resident(handle: u64) -> bool {
-    with_sound(handle, |sound| sound.samples.is_some()).unwrap_or(false)
+    with_sound(handle, |sound| sound.samples().is_some()).unwrap_or(false)
 }
 
 /// Admitted for playback: resident PCM, or a stream source's encoded file.
@@ -1363,60 +1274,37 @@ pub extern "C" fn stone_sound_playable(handle: u64) -> bool {
 /// handle that is not a live stream source.
 #[no_mangle]
 pub extern "C" fn stone_sound_stream_bytes(handle: u64) -> i64 {
-    with_sound(handle, |sound| {
-        if !sound.stream {
-            return -1;
-        }
-        sound.encoded.as_ref().map_or(0, |bytes| bytes.len() as i64)
+    with_sound(handle, |sound| match &sound.state {
+        _ if !sound.stream => -1,
+        SoundState::Playable(Payload::Encoded(bytes)) => bytes.len() as i64,
+        _ => 0,
     })
     .unwrap_or(-1)
 }
 
 #[no_mangle]
 pub extern "C" fn stone_reload_sound(handle: u64, path: *const c_char) -> bool {
-    if handle == 0 || path.is_null() {
+    if handle == 0 {
         return false;
     }
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return false,
+    let Some(path_str) = (unsafe { crate::filesystem::cstr(path) }) else {
+        return false;
     };
-
     let Some(stream) = with_sound(handle, |sound| sound.stream) else {
         return false;
     };
-    let payload = if stream {
-        let Some((encoded, rate, channels)) = load_stream_bytes(path_str) else {
-            return false;
-        };
-        AdmissionPayload::Encoded(encoded, rate, channels)
-    } else {
-        let Some((samples, rate, channels)) = decode_sound_samples(path_str) else {
-            return false;
-        };
-        AdmissionPayload::Pcm(samples, rate, channels)
+    let Some(loaded) = load_sound(path_str, stream) else {
+        return false;
     };
-
     with_audio_mut(|audio| {
-        if !audio.sounds.contains_key(&handle) {
-            return false;
-        }
-        stop_voices_of(&mut audio.voices, handle);
         let Some(sound) = audio.sounds.get_mut(&handle) else {
             return false;
         };
         sound.path = path_str.to_owned();
-        sound.admitting = false;
-        sound.samples = None;
-        sound.encoded = None;
-        match payload {
-            AdmissionPayload::Pcm(samples, rate, channels) => {
-                sound.publish_decoded(samples, rate, channels)
-            }
-            AdmissionPayload::Encoded(encoded, rate, channels) => {
-                sound.publish_encoded(encoded, rate, channels)
-            }
-        }
+        sound.state = SoundState::Recipe;
+        let published = sound.publish(loaded);
+        stop_voices_of(&mut audio.voices, handle);
+        published
     })
     .unwrap_or(false)
 }
@@ -1426,10 +1314,7 @@ pub extern "C" fn stone_reload_sound(handle: u64, path: *const c_char) -> bool {
 #[no_mangle]
 pub extern "C" fn stone_sound_sample_count(handle: u64) -> i64 {
     with_sound(handle, |sound| {
-        sound
-            .samples
-            .as_ref()
-            .map_or(0, |samples| samples.len() as i64)
+        sound.samples().map_or(0, |s| s.len() as i64)
     })
     .unwrap_or(-1)
 }
@@ -1445,46 +1330,37 @@ pub extern "C" fn stone_music_position_ms() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn stone_load_music(path: *const c_char) -> u64 {
-    if path.is_null() {
+    let Some(path_str) = (unsafe { crate::filesystem::cstr(path) }) else {
         return 0;
-    }
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return 0,
     };
-
-    let bytes = if stub_audio() {
+    let bytes: Arc<[u8]> = if stub_audio() {
         if !audio_asset_exists(path_str) {
             return 0;
         }
-        Vec::new()
+        Arc::new([])
     } else {
-        let bytes = match crate::asset_registry::resolve_asset(path_str) {
-            Some(b) => b,
-            None => {
-                crate::log_once!("AUDIO", "stone_load_music: Failed to read {}", path_str);
-                return 0;
-            }
+        let Some(bytes) = read_audio_asset(path_str) else {
+            return 0;
         };
-        if Decoder::new(std::io::Cursor::new(bytes.clone())).is_err() {
-            crate::log_once!("AUDIO", "stone_load_music: Failed to decode {}", path_str);
+        let bytes: Arc<[u8]> = bytes.into();
+        if open_decoder(std::io::Cursor::new(bytes.clone()), path_str).is_none() {
             return 0;
         }
         bytes
     };
 
-    AUDIO_STATE.with(|state| {
-        let Some(ref mut audio) = *state.borrow_mut() else {
-            crate::log_once!(
-                "AUDIO",
-                "stone_load_music: no audio state, so `{}` gets no handle",
-                path_str
-            );
-            return 0;
-        };
+    with_audio_mut(|audio| {
         let id = crate::handles::mint(Class::Music);
-        audio.music.insert(id, bytes.into());
+        audio.music.insert(id, bytes);
         id
+    })
+    .unwrap_or_else(|| {
+        crate::log_once!(
+            "AUDIO",
+            "stone_load_music: no audio state, so `{}` gets no handle",
+            path_str
+        );
+        0
     })
 }
 
@@ -1570,7 +1446,7 @@ fn sound_play_params(volume: f32, speed: f32) -> (f32, f32) {
 }
 
 // `decay` is in seconds of output, so it is applied after the speed change.
-fn shaped_source<S>(source: S, ratio: f32, decay: f32) -> Box<dyn Source<Item = f32> + Send>
+fn shaped_source<S>(source: S, ratio: f32, decay: f32) -> BoxedSource
 where
     S: Source<Item = f32> + Send + 'static,
 {
@@ -1695,12 +1571,7 @@ where
     }
 }
 
-fn voice_source<S>(
-    source: S,
-    ratio: f32,
-    decay: f32,
-    pan: Option<Arc<AtomicU32>>,
-) -> Box<dyn Source<Item = f32> + Send>
+fn voice_source<S>(source: S, ratio: f32, decay: f32, pan: Option<Arc<AtomicU32>>) -> BoxedSource
 where
     S: Source<Item = f32> + Send + 'static,
 {
@@ -1750,28 +1621,8 @@ pub extern "C" fn stone_play_sound(
         };
         let (gain, ratio) = sound_play_params(volume, speed);
         let pan_control = spatial.then(|| Arc::new(AtomicU32::new(pan.to_bits())));
-        let input = if sound_data.stream {
-            let Some(encoded) = sound_data.encoded.clone() else {
-                return 0;
-            };
-            let source = match StreamSource::new(encoded, looped) {
-                Ok(source) => source,
-                Err(e) => {
-                    crate::log_once!(
-                        "AUDIO",
-                        "stone_play_sound: stream {} does not decode: {}",
-                        sound_data.path,
-                        e
-                    );
-                    return 0;
-                }
-            };
-            voice_source(source, ratio, decay, pan_control.clone())
-        } else {
-            let Some(source) = sound_data.as_source(looped) else {
-                return 0;
-            };
-            voice_source(source, ratio, decay, pan_control.clone())
+        let Some(input) = sound_data.voice(looped, ratio, decay, pan_control.clone()) else {
+            return 0;
         };
         let player = Player::connect_new(bus.mixer());
         player.set_volume(gain);
@@ -1830,7 +1681,7 @@ pub unsafe extern "C" fn stone_get_sound_peaks(
         return 0;
     }
     with_sound(handle, |sound| {
-        let Some(samples) = sound.samples.as_ref() else {
+        let Some(samples) = sound.samples() else {
             return 0;
         };
         let n = samples.len();
@@ -1919,7 +1770,7 @@ pub extern "C" fn stone_play_music(handle: u64) {
             crate::log_once!("AUDIO", "stone_play_music: unknown music handle {}", handle);
             return;
         };
-        let source = match StreamSource::new(bytes, true) {
+        let source = match stream_source(bytes, true) {
             Ok(source) => source,
             Err(e) => {
                 crate::log_once!(
@@ -2211,6 +2062,14 @@ mod tests {
         }
     }
 
+    fn pcm(samples: Vec<f32>, sample_rate: u32, channels: u16) -> Loaded {
+        Loaded {
+            payload: Payload::Pcm(Arc::new(samples)),
+            sample_rate,
+            channels,
+        }
+    }
+
     fn empty_audio_state() -> AudioState {
         AudioState::new(None, Buses::detached(ch2(), sr()))
     }
@@ -2253,8 +2112,8 @@ mod tests {
             samples.clone(),
         );
         let expected_duration = oracle.total_duration().unwrap().as_secs_f32();
-        let sound = SoundData::recipe("fixture.wav".to_owned(), 2, 22_050, 2);
-        assert!(sound.samples.is_none(), "a recipe must not allocate PCM");
+        let sound = SoundData::recipe("fixture.wav".to_owned(), 2, 22_050, 2, false);
+        assert!(sound.samples().is_none(), "a recipe must not allocate PCM");
         assert!(
             (sound.duration_seconds() - expected_duration).abs() < f32::EPSILON,
             "duration comes from decoded frame metadata"
@@ -2263,15 +2122,15 @@ mod tests {
 
     #[test]
     fn decoded_sound_admission_publishes_one_arc() {
-        let mut sound = SoundData::recipe("fixture.ogg".to_owned(), 2, 44_100, 1);
-        assert!(sound.publish_decoded(vec![0.25, -0.5], 44_100, 1));
-        let published = sound.samples.as_ref().unwrap().clone();
+        let mut sound = SoundData::recipe("fixture.ogg".to_owned(), 2, 44_100, 1, false);
+        assert!(sound.publish(pcm(vec![0.25, -0.5], 44_100, 1)));
+        let published = sound.samples().unwrap().clone();
         assert!(
-            !sound.publish_decoded(vec![1.0, 1.0], 22_050, 1),
+            !sound.publish(pcm(vec![1.0, 1.0], 22_050, 1)),
             "a second completion cannot replace an admitted buffer"
         );
         assert!(
-            Arc::ptr_eq(&published, sound.samples.as_ref().unwrap()),
+            Arc::ptr_eq(&published, sound.samples().unwrap()),
             "the resident handle keeps the one Arc published by the winning decode"
         );
     }
@@ -2290,8 +2149,12 @@ mod tests {
     #[test]
     fn resident_sound_peaks_partition_pcm_into_known_buckets() {
         let mut audio = empty_audio_state();
-        let mut sound = SoundData::recipe("fixture.ogg".to_owned(), 7, 48_000, 1);
-        assert!(sound.publish_decoded(vec![0.2, -0.91, 0.1, -0.75, 0.3, -0.4, 0.67], 48_000, 1));
+        let mut sound = SoundData::recipe("fixture.ogg".to_owned(), 7, 48_000, 1, false);
+        assert!(sound.publish(pcm(
+            vec![0.2, -0.91, 0.1, -0.75, 0.3, -0.4, 0.67],
+            48_000,
+            1
+        )));
         audio.sounds.insert(0x57, sound);
         let _restore = install_audio_state(audio);
 
@@ -2687,7 +2550,7 @@ mod tests {
     }
 
     fn looped_stream(bytes: Vec<u8>, decoded: &[f32], passes: usize) -> Vec<f32> {
-        let stream = StreamSource::new(Arc::from(bytes), true).expect("the fixture streams");
+        let stream = stream_source(Arc::from(bytes), true).expect("the fixture streams");
         let streamed: Vec<f32> = stream.take(decoded.len() * passes + 6).collect();
         assert_eq!(
             streamed.len(),

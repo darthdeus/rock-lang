@@ -20,7 +20,7 @@ thread_local! {
 ///
 /// # Safety
 /// `p` is null or points at a NUL-terminated string that outlives `'a`.
-unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
+pub(crate) unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {
         return None;
     }
