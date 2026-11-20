@@ -84,6 +84,21 @@ fn tail_span(span: &Span, len: usize) -> Span {
     span.with_offset_range((end - len, end))
 }
 
+/// The field name ends an access but not its span, which may close a
+/// parenthesis, and a Lua keyword field is stored escaped.
+fn field_token(text: &str, span: &Span, field: Ustr) -> Option<Span> {
+    let name = rock_tokenizer::Tokenizer::unescape_lua_keyword(field.as_str());
+    let (from, to) = span.offset_range();
+    let access = text
+        .get(from..to)?
+        .trim_end_matches(|c: char| c == ')' || c.is_whitespace());
+    let head = access.strip_suffix(name)?;
+    head.trim_end().ends_with('.').then(|| {
+        let start = from + head.len();
+        span.with_offset_range((start, start + name.len()))
+    })
+}
+
 /// Narrows a walk to one symbol: tokens spelled otherwise are skipped before
 /// they are resolved, and type annotations are visited only for a type.
 #[derive(Clone, Copy)]
@@ -375,8 +390,9 @@ fn walk_body<'t>(
             {
                 let record =
                     bi.and_then(|bi| types::nominal_name(ws, Some(bi), *bi.expr_types.get(base)?));
-                if let (Some(record), Some(span)) = (record, span) {
-                    let token = tail_span(&span, field.len());
+                let token =
+                    span.and_then(|span| field_token(text_of(span.file.as_str())?, &span, field));
+                if let (Some(record), Some(token)) = (record, token) {
                     let hit = matches!(node, hir::Expr::FieldAccess { .. }).then_some(token);
                     emit(
                         Occurrence::new(RefTarget::Field(RecordType::Struct(record), field), 41)

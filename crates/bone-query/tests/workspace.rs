@@ -744,3 +744,32 @@ fn references_from_return_resolve_the_returned_name() {
         [(0, 3), (4, 11)]
     );
 }
+
+// A parenthesized field access spans its parentheses; the field token does not.
+#[test]
+fn a_parenthesized_field_access_names_its_field() {
+    let src = "struct B {\n    f: (fn() -> ())? = null,\n}\nfn main(b: B) {\n    (b.f)()\n}\n";
+    let bone = workspace(src);
+    assert_eq!(
+        reference_starts(&bone, Position::new(1, 4)),
+        [(1, 4), (4, 7)]
+    );
+    let def = bone
+        .definition(PATH, Position::new(4, 7))
+        .expect("definition");
+    assert_eq!(def.range.start, Position::new(1, 4));
+}
+
+#[test]
+fn a_lua_keyword_field_access_names_its_field() {
+    let src = "struct R {\n    end: int,\n}\nfn main(r: R) -> int {\n    return r.end\n}\n";
+    let bone = workspace(src);
+    assert_eq!(
+        reference_starts(&bone, Position::new(1, 4)),
+        [(1, 4), (4, 13)]
+    );
+    let def = bone
+        .definition(PATH, Position::new(4, 13))
+        .expect("definition");
+    assert_eq!(def.range.start, Position::new(1, 4));
+}
