@@ -800,11 +800,6 @@ if not _G.__rock_rng_next then
 end
 "#;
 
-/// A value-struct field's C type for `ffi.cdef`, or `None` when not C-mappable.
-fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
-    skull_mir::lower::value_field_c_type(ws, ty)
-}
-
 fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
     ws.nominals
         .struct_id(name)
@@ -853,45 +848,27 @@ fn leaf_ctor_def(ws: &Workspace, name: ustr::Ustr, paths: &[ustr::Ustr]) -> Stri
 
 fn cdata_alias_fields(
     ws: &Workspace,
-    ffi_names: &rustc_hash::FxHashSet<ustr::Ustr>,
     root: ustr::Ustr,
     child: ustr::Ustr,
     prefix: &str,
 ) -> Result<String, CompilerError> {
-    if let Some(shape) =
-        skull_mir::lower::EnumPlan::for_name(ws, child).and_then(|plan| plan.cdata().cloned())
-    {
-        let tag = skull_mir::lower::cdata_leaf_alias(ws, root, &format!("{prefix}.__tag"));
-        let mut out = format!("int {tag}; ");
-        for (name, ct) in shape.slots {
-            let alias = skull_mir::lower::cdata_leaf_alias(ws, root, &format!("{prefix}.{name}"));
-            out.push_str(&format!("{ct} {alias}; "));
-        }
-        return Ok(out);
-    }
-    let sid = ws.nominals.struct_id(child).unwrap();
+    use skull_mir::lower::CFieldType;
+
     let mut out = String::new();
-    for field in &ws.modules[sid.module.index()].structs[sid.def].fields {
-        let ct = c_field_type(ws, field.storage_ty).ok_or_else(|| {
-            CompilerError::new_no_location(format!(
-                "native leaf alias has no C type: {child}.{}",
-                field.name
-            ))
-        })?;
-        let dep = ustr::Ustr::from(&ct);
-        let path = format!("{prefix}.{}", field.name);
-        if ffi_names.contains(&dep)
-            || skull_mir::lower::EnumPlan::for_name(ws, dep)
-                .is_some_and(|plan| plan.cdata().is_some())
-        {
-            let nested = cdata_alias_fields(ws, ffi_names, root, dep, &path)?;
-            out.push_str(&format!("struct {{ {nested} }}; "));
-        } else {
-            let alias = skull_mir::lower::cdata_leaf_alias(ws, root, &path);
-            out.push_str(&format!(
-                "{} {alias}; ",
-                skull_mir::mangle::type_symbol(ws, dep)
-            ));
+    let fields = skull_mir::lower::value_c_fields(ws, child).ok_or_else(|| {
+        CompilerError::new_no_location(format!("native leaf alias has no C fields: {child}"))
+    })?;
+    for (field, ctype) in fields {
+        let path = format!("{prefix}.{field}");
+        match ctype {
+            CFieldType::Scalar(ctype) => {
+                let alias = skull_mir::lower::cdata_leaf_alias(ws, root, &path);
+                out.push_str(&format!("{ctype} {alias}; "));
+            }
+            CFieldType::Aggregate(dep) => {
+                let nested = cdata_alias_fields(ws, root, dep, &path)?;
+                out.push_str(&format!("struct {{ {nested} }}; "));
+            }
         }
     }
     Ok(out)
@@ -941,31 +918,24 @@ fn value_struct_defs(
         for s in remaining {
             let mut body = String::new();
             let mut blocked = false;
-            for f in &s.fields {
-                let ct = c_field_type(ws, f.storage_ty).expect(
-                    "FFI-clean value-struct field must be C-mappable (CData storage invariant)",
-                );
-                let dep = ustr::Ustr::from(ct.as_str());
-                if ffi_names.contains(&dep) && !emitted.contains(&dep) {
-                    blocked = true;
-                    continue;
-                }
-                // Dependencies are keyed by logical name; the cdef text uses the C one.
-                let field_type = skull_mir::mangle::type_symbol(ws, dep);
-                if ffi_names.contains(&dep)
-                    || skull_mir::lower::EnumPlan::for_name(ws, dep)
-                        .is_some_and(|plan| plan.cdata().is_some())
-                {
-                    // Mirror nested aggregates rather than spelling padding as
-                    // char arrays: padding fields would change the native ABI's
-                    // integer/SSE classification for by-value FFI calls.
-                    let aliases = cdata_alias_fields(ws, &ffi_names, s.name, dep, f.name.as_str())?;
-                    body.push_str(&format!(
-                        "  union {{ {field_type} {}; struct {{ {aliases} }}; }};\n",
-                        f.name
-                    ));
-                } else {
-                    body.push_str(&format!("  {field_type} {};\n", f.name));
+            let fields = skull_mir::lower::value_c_fields(ws, s.name)
+                .expect("CData representation must have C fields");
+            use skull_mir::lower::CFieldType;
+            for (field, ctype) in fields {
+                match ctype {
+                    CFieldType::Scalar(ctype) => body.push_str(&format!("  {ctype} {field};\n")),
+                    CFieldType::Aggregate(dep) => {
+                        if ffi_names.contains(&dep) && !emitted.contains(&dep) {
+                            blocked = true;
+                            continue;
+                        }
+                        let field_type = skull_mir::mangle::type_symbol(ws, dep);
+                        // Keep the nested aggregate's native ABI classification.
+                        let aliases = cdata_alias_fields(ws, s.name, dep, field.as_str())?;
+                        body.push_str(&format!(
+                            "  union {{ {field_type} {field}; struct {{ {aliases} }}; }};\n"
+                        ));
+                    }
                 }
             }
             if blocked {

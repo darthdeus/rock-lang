@@ -275,7 +275,7 @@ pub struct LeafSlot {
 }
 
 /// Size and alignment of a primitive C type as LuaJIT lays it out.
-/// The only types [`value_field_c_type`] admits as leaves.
+/// The only types [`value_c_fields`] admits as leaves.
 pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
     match cty {
         "double" => Some((8, 8)),
@@ -1656,35 +1656,25 @@ fn build_enum_cdata_shape(ws: &Workspace, ed: &EnumDef) -> Option<EnumCdataShape
     })
 }
 
-/// The C type for a `value`-struct field, or `None` when it is not
-/// C-layout-mappable.
-/// The single mappability oracle: a struct is GC-carrying when any field maps
-/// to `None`. A payload-free enum stores as its int tag.
-pub fn value_field_c_type(ws: &Workspace, ty: TyId) -> Option<String> {
-    let ty = static_ty(ws, ty)?;
-    if let Some(cty) = primitive_c_type(&ty) {
-        return Some(cty.into());
-    }
-    match ty {
-        // A nested value struct is C-mappable only if it is itself FFI-clean.
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } if is_value_struct(ws, name) => planned_value(ws, name)
-            .is_none_or(|plan| plan.storage == ValueStorage::CData)
-            .then(|| name.to_string()),
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } if is_payload_free_enum(ws, name) => Some("int".into()),
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } if EnumPlan::for_name(ws, name).is_some_and(|plan| plan.cdata().is_some()) => {
-            Some(name.as_str().to_string())
-        }
-        _ => None,
-    }
+pub enum CFieldType {
+    Scalar(&'static str),
+    Aggregate(Ustr),
+}
+
+pub fn value_c_fields(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, CFieldType)>> {
+    let plan = planned_value(ws, name)?;
+    (plan.storage == ValueStorage::CData).then_some(())?;
+    plan.fields
+        .iter()
+        .map(|(name, field)| {
+            let ty = match field {
+                PlannedField::Primitive(ctype) => CFieldType::Scalar(ctype),
+                PlannedField::Nested(child) => CFieldType::Aggregate(child.name),
+                _ => return None,
+            };
+            Some((*name, ty))
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1695,16 +1685,17 @@ pub enum GcFieldEq {
 }
 
 pub fn gc_field_eq(ws: &Workspace, ty: TyId) -> GcFieldEq {
-    if value_field_c_type(ws, ty).is_some() {
-        return GcFieldEq::Native;
-    }
     match static_ty(ws, ty) {
+        Some(ref primitive) if primitive_c_type(primitive).is_some() => GcFieldEq::Native,
         Some(TypeExpr::Nullable(inner)) => gc_field_eq(ws, ty.with_idx(inner)),
         Some(TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
         }) => {
-            if is_value_struct(ws, name) {
+            if is_value_struct(ws, name)
+                || is_payload_free_enum(ws, name)
+                || EnumPlan::for_name(ws, name).is_some_and(|plan| plan.cdata().is_some())
+            {
                 GcFieldEq::Native
             } else if ws.nominals.enum_id(name).is_some() {
                 GcFieldEq::Structural
