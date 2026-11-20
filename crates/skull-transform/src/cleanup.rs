@@ -3,8 +3,9 @@ use crate::sroa::scalarize_struct_cells_once;
 use crate::visit::raw;
 use bone_core::prelude::CompilerError;
 use bone_core::workspace::Workspace;
-use comfy_la_arena::{Idx, RawIdx};
+use comfy_la_arena::Idx;
 use skull_mir::mir::*;
+use std::num::NonZeroU32;
 
 pub(crate) fn dce(func: &mut MirFunc) {
     dce_core(func, None);
@@ -15,7 +16,9 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
     let nc = func.cells.len();
     let mut use_count = vec![0u32; ni];
     let mut load_count = vec![0u32; nc];
-    let mut store_n = vec![0u32; nc];
+    // Removing the final load needs only the stores of that cell.
+    let mut last_store = vec![None; nc];
+    let mut stores = Vec::new();
     {
         let MirFunc { blocks, insts, .. } = &mut *func;
         for (_, b) in blocks.iter_mut() {
@@ -26,7 +29,10 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
                 insts[i].uses_each(&mut |op| use_count[raw(op)] += 1);
                 match &insts[i] {
                     Inst::Load(c) => load_count[raw(*c)] += 1,
-                    Inst::Store { cell, .. } => store_n[raw(*cell)] += 1,
+                    Inst::Store { cell, .. } => {
+                        let next = NonZeroU32::new(stores.len() as u32 + 1);
+                        stores.push((i, std::mem::replace(&mut last_store[raw(*cell)], next)));
+                    }
                     _ => {}
                 }
             }
@@ -40,24 +46,6 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
     for &cell in &func.inline_cleanup_load_cells {
         load_count[raw(cell)] = load_count[raw(cell)].saturating_add(1);
     }
-    // CSR: stores grouped by cell, so a cell whose last `Load` is removed cascades
-    // its now-dead stores in O(stores-of-that-cell).
-    let mut store_off = vec![0u32; nc + 1];
-    for c in 0..nc {
-        store_off[c + 1] = store_off[c] + store_n[c];
-    }
-    let mut store_list = vec![0u32; store_off[nc] as usize];
-    let mut fill = store_off.clone();
-    for (_, b) in func.blocks.iter() {
-        for &i in &b.insts {
-            if let Inst::Store { cell, .. } = &func.insts[i] {
-                let c = raw(*cell);
-                store_list[fill[c] as usize] = raw(i) as u32;
-                fill[c] += 1;
-            }
-        }
-    }
-
     let mut dead = vec![false; ni];
     let mut work: Vec<Idx<Inst>> = Vec::new();
     for (_, b) in func.blocks.iter() {
@@ -103,12 +91,14 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
             let ck = raw(*c);
             load_count[ck] = load_count[ck].saturating_sub(1);
             if load_count[ck] == 0 {
-                for si in store_off[ck]..store_off[ck + 1] {
-                    let s = Idx::from_raw(RawIdx::from_u32(store_list[si as usize]));
-                    if !dead[raw(s)] {
-                        dead[raw(s)] = true;
-                        work.push(s);
+                let mut store = last_store[ck];
+                while let Some(link) = store {
+                    let (id, prev) = stores[(link.get() - 1) as usize];
+                    if !dead[raw(id)] {
+                        dead[raw(id)] = true;
+                        work.push(id);
                     }
+                    store = prev;
                 }
             }
         }
@@ -185,11 +175,8 @@ fn end_run(used: bool, unused: &mut Vec<Idx<Inst>>, dead: &mut [bool], work: &mu
 }
 
 fn drop_flagged(func: &mut MirFunc, dead: &[bool]) {
-    let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
-    for bid in block_ids {
-        let mut insts = std::mem::take(&mut func.blocks[bid].insts);
-        insts.retain(|&i| !dead[raw(i)]);
-        func.blocks[bid].insts = insts;
+    for (_, block) in func.blocks.iter_mut() {
+        block.insts.retain(|&id| !dead[raw(id)]);
     }
 }
 
