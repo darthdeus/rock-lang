@@ -229,8 +229,7 @@ local function collect_lines()
         cid, m.total_modules or 0, #(m.contexts or {})))
       for _, ctx in ipairs(m.contexts or {}) do
         local root_tail = ctx.root and vim.fn.fnamemodify(ctx.root, ':t') or '-'
-        push(('  [%s] %4d  %s'):format(
-          (ctx.kind or '-'):sub(1, 7), ctx.module_count or 0, root_tail))
+        push(('  %4d  %s'):format(ctx.module_count or 0, root_tail))
         local mods = ctx.modules or {}
         local recent = {}
         for _, md in ipairs(mods) do table.insert(recent, md) end

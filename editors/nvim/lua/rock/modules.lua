@@ -39,15 +39,6 @@ end
 
 local function short(s, n) return #s > n and (s:sub(1, n - 1) .. '...') or s end
 
-local function fmt_us(us)
-  -- JSON null -> vim.NIL (truthy userdata); bone always sends this field null,
-  -- so guard on the type rather than falsiness.
-  if type(us) ~= 'number' or us == 0 then return '-' end
-  if us < 1000 then return ('%d us'):format(us) end
-  if us < 1000000 then return ('%.1f ms'):format(us / 1000) end
-  return ('%.2f s'):format(us / 1000000)
-end
-
 local function fmt_ago(ms)
   if type(ms) ~= 'number' or ms == 0 then return '-' end
   if ms < 1000 then return ('%dms ago'):format(ms) end
@@ -80,22 +71,13 @@ local function build_lines(data, err)
       cid, d.total_modules or 0, #(d.contexts or {})))
     push('')
     for _, ctx in ipairs(d.contexts or {}) do
-      push((' [%s]  %s   (%d modules)'):format(
-        ctx.kind or '-', short(ctx.root or '-', 80), ctx.module_count or 0))
-      push(' ' .. string.rep('-', 110))
-      push((' %-60s %-10s %-12s %s'):format('module', 'compile', 'age', 'flags'))
+      push((' %s   (%d modules)'):format(short(ctx.root or '-', 80), ctx.module_count or 0))
+      push(' ' .. string.rep('-', 76))
+      push((' %-60s %s'):format('module', 'age'))
       local mods = ctx.modules or {}
       if #mods == 0 then push(' (none)') end
       for _, m in ipairs(mods) do
-        local flags = {}
-        if m.stale then table.insert(flags, 'STALE') end
-        if m.is_stdlib then table.insert(flags, 'stdlib') end
-        if m.is_builtin then table.insert(flags, 'builtin') end
-        push((' %-60s %-10s %-12s %s'):format(
-          short(m.id or '-', 60),
-          fmt_us(m.last_compile_us),
-          fmt_ago(m.ago_ms),
-          table.concat(flags, ' ')))
+        push((' %-60s %s'):format(short(m.id or '-', 60), fmt_ago(m.ago_ms)))
       end
       push('')
     end

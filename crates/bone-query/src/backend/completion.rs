@@ -419,7 +419,6 @@ fn general_completions(
         pattern_pos,
     };
 
-    let t_cands = bone_core::prelude::Instant::now();
     let fallback_scope = fallback_ws
         .is_some()
         .then(|| CompletionScope::build(ws, frag));
@@ -444,11 +443,8 @@ fn general_completions(
     }
     let import_edits =
         push_import_candidates(&g, session, rq, cx.expr_position || pattern_pos, &mut cands);
-    let cands_ms = t_cands.elapsed().as_secs_f64() * 1000.0;
-    let n_cands = cands.len();
 
     let mut expected = cx.expected(ws, mid, inf, rq.offset);
-    let t_build = bone_core::prelude::Instant::now();
     let has_expected = expected.is_some();
     let mut general: Vec<Cand> = {
         let mut ranker = GeneralRanker::new(
@@ -470,9 +466,7 @@ fn general_completions(
     push_entity_synth(&g, rq, cx, &mut sink);
     push_named_args(&g, rq, cx, &mut sink);
     push_coroutine_synths(&g, rq, cx, &mut sink);
-    let rank_ms = t_build.elapsed().as_secs_f64() * 1000.0;
 
-    let t_reach = bone_core::prelude::Instant::now();
     let fallback_indexes = fallback_ws
         .is_some()
         .then(|| (ReachabilityIndex::build(ws), CallThroughIndex::build(ws)));
@@ -494,10 +488,7 @@ fn general_completions(
             );
         }
     }
-    let reach_ms = t_reach.elapsed().as_secs_f64() * 1000.0;
 
-    let t_ct = bone_core::prelude::Instant::now();
-    let mut ct_counts = CtCounts::default();
     // Skipping call-through at the cap can hide a better local-seeded call;
     // narrowing the prefix surfaces it.
     if cx.expr_position && !pattern_pos && rq.prefix.len() >= 2 && sink.len() < MAX_COMPLETION_ITEMS
@@ -505,7 +496,7 @@ fn general_completions(
         let scoped = scope.call_through.get_or_init(|| {
             ScopedCallThroughIndex::build(ws, frag, &scope.names, call_through, reach)
         });
-        ct_counts = call_through_param_completions(
+        call_through_param_completions(
             ws,
             &g.locals,
             &rq.prefix,
@@ -520,20 +511,6 @@ fn general_completions(
             &mut sink,
         );
     }
-    let call_through_ms = t_ct.elapsed().as_secs_f64() * 1000.0;
-    LAST_COMPLETION_PHASES.with(|c| {
-        c.set(CompletionPhaseTimings {
-            candidates_ms: cands_ms,
-            rank_ms,
-            reach_ms,
-            call_through_ms,
-            n_general: n_cands,
-            n_out: sink.len(),
-            ct_fns: ct_counts.fns,
-            ct_arg_iters: ct_counts.arg_iters,
-            ct_survivors: ct_counts.survivors,
-        })
-    });
     finish(&g, sink, rq, &import_edits)
 }
 

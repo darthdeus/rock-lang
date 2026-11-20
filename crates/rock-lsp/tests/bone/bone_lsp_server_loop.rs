@@ -379,6 +379,34 @@ fn stats_count_every_request_by_method() {
     assert_eq!(stats["requests_total"], 251);
 }
 
+#[test]
+fn module_recency_and_stats_describe_the_same_project_files() {
+    let (_tmp, dir) = package_dir("module-stats");
+    let main = dir.join("main.rock");
+    std::fs::write(&main, FIXED).unwrap();
+    let mut server = LspServer::new();
+    let uri = uri_of(&main);
+    roundtrip(&mut server, did_open(&uri, FIXED));
+    roundtrip(&mut server, did_change(&uri, &FIXED.replace("1.5", "2.5")));
+
+    let out = roundtrip(&mut server, req(1, "rock/modules", json!({})));
+    let modules = response(&out).result.as_ref().expect("modules");
+    let context = &modules["contexts"][0];
+    let files = context["modules"].as_array().unwrap();
+    assert_eq!(context["module_count"], files.len());
+    let module = files
+        .iter()
+        .find(|file| file["id"] == main.to_str().unwrap())
+        .expect("opened module");
+    assert!(module["ago_ms"].is_u64());
+    assert_eq!(context.as_object().unwrap().len(), 3);
+    assert_eq!(module.as_object().unwrap().len(), 2);
+
+    let out = roundtrip(&mut server, req(2, "rock/stats", json!({})));
+    let stats = response(&out).result.as_ref().expect("stats");
+    assert_eq!(stats["loaded_modules"], modules["total_modules"]);
+}
+
 /// A package directory under its canonical path: returned locations use
 /// canonical paths, and the macOS temporary directory is behind a symlink.
 fn package_dir(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {

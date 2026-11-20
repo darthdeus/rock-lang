@@ -199,12 +199,6 @@ function M.add_capture(cap)
   notify()
 end
 
--- Fire subscribers without structural changes; use after mutating an
--- existing capture entry in place.
-function M.add_capture_tick()
-  notify()
-end
-
 function M.set_doctor(results)
   state.doctor = results
   state.doctor_at = os.time()

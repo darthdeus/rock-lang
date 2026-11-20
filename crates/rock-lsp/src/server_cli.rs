@@ -114,6 +114,13 @@ fn parse_position(position: &str) -> Result<(String, u32, u32)> {
     Ok((parts[2].to_string(), line, column))
 }
 
+fn default_debug_file() -> std::path::PathBuf {
+    #[cfg(windows)]
+    return std::env::temp_dir().join("lsp_debug.log");
+    #[cfg(not(windows))]
+    std::path::PathBuf::from("/tmp/lsp_debug.log")
+}
+
 fn open_debug_log(log_path: &str) -> Result<fs_err::File> {
     fs_err::OpenOptions::new()
         .create(true)
@@ -123,11 +130,8 @@ fn open_debug_log(log_path: &str) -> Result<fs_err::File> {
 }
 
 /// Warn floor refined by `RUST_LOG`; an unparsable `RUST_LOG` is an error.
-fn stderr_log_filter(rust_log: Option<&str>, timing: bool) -> Result<rock_log::Filter> {
-    // ROCK_LSP_TIMING=1 shows the request timer without lifting the warn floor.
-    let timing_override = [("lsp_timing", log::LevelFilter::Info)];
-    let overrides: &[_] = if timing { &timing_override } else { &[] };
-    rock_log::Filter::parse(log::LevelFilter::Warn, rust_log, overrides).map_err(|e| {
+fn stderr_log_filter(rust_log: Option<&str>) -> Result<rock_log::Filter> {
+    rock_log::Filter::parse(log::LevelFilter::Warn, rust_log, &[]).map_err(|e| {
         anyhow!(
             "RUST_LOG={:?} is not a valid log filter: {e}",
             rust_log.unwrap_or_default()
@@ -143,9 +147,7 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
     match std::env::var("ROCK_LSP_DEBUG") {
         Ok(val) => {
             let log_path = if val == "1" || val.is_empty() {
-                crate::default_debug_file("lsp_debug.log")
-                    .to_string_lossy()
-                    .into_owned()
+                default_debug_file().to_string_lossy().into_owned()
             } else {
                 val
             };
@@ -157,10 +159,7 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
         }
         Err(_) => {
             let rust_log = std::env::var("RUST_LOG").ok();
-            let filter = stderr_log_filter(
-                rust_log.as_deref(),
-                std::env::var_os("ROCK_LSP_TIMING").is_some(),
-            )?;
+            let filter = stderr_log_filter(rust_log.as_deref())?;
             rock_log::init_filtered(filter, rock_log::Sink::Stderr);
         }
     }
@@ -444,8 +443,8 @@ mod tests {
     use super::*;
     use log::Level;
 
-    fn enabled(rust_log: Option<&str>, timing: bool, probes: &[(&str, Level)]) -> Vec<bool> {
-        let filter = stderr_log_filter(rust_log, timing).unwrap();
+    fn enabled(rust_log: Option<&str>, probes: &[(&str, Level)]) -> Vec<bool> {
+        let filter = stderr_log_filter(rust_log).unwrap();
         probes
             .iter()
             .map(|(target, level)| filter.enabled(target, *level))
@@ -458,7 +457,6 @@ mod tests {
         assert_eq!(
             enabled(
                 Some("rock_lsp=debug"),
-                false,
                 &[("rock_lsp", Debug), ("other", Warn), ("other", Info)]
             ),
             [true, true, false]
@@ -466,30 +464,28 @@ mod tests {
         assert_eq!(
             enabled(
                 Some("info,bone_query=trace"),
-                false,
                 &[("x", Info), ("x", Debug), ("bone_query", Trace)]
             ),
             [true, false, true]
         );
-        assert_eq!(
-            enabled(
-                None,
-                true,
-                &[("x", Warn), ("x", Info), ("lsp_timing", Info)]
-            ),
-            [true, false, true]
-        );
+        assert_eq!(enabled(None, &[("x", Warn), ("x", Info)]), [true, false]);
     }
 
     #[test]
     fn rust_log_rejects_unparsable_directives() {
         for bad in ["rock_lsp=loud", "a=b=c"] {
-            let err = stderr_log_filter(Some(bad), false)
-                .err()
-                .expect(bad)
-                .to_string();
+            let err = stderr_log_filter(Some(bad)).err().expect(bad).to_string();
             assert!(err.contains("RUST_LOG") && err.contains(bad), "{err}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn debug_log_uses_the_system_temp_directory() {
+        assert_eq!(
+            default_debug_file(),
+            std::env::temp_dir().join("lsp_debug.log")
+        );
     }
 
     #[test]

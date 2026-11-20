@@ -410,21 +410,12 @@ end
 -- by reuse_client_default and crash on `is_stopped`.
 local function purge_zombies()
   local all = vim.lsp.client and vim.lsp.client._all
-  if type(all) ~= 'table' then return 0 end
-  local n = 0
+  if type(all) ~= 'table' then return end
   for id, c in pairs(all) do
     if c and c.name == SERVER_NAME and c.rpc == nil then
       all[id] = nil
-      n = n + 1
     end
   end
-  return n
-end
-
-function M.purge_zombies()
-  local n = purge_zombies()
-  if n > 0 then state.record_event('local', 'client/purge_zombies', { count = n }) end
-  return n
 end
 
 function M.restart()

@@ -544,6 +544,13 @@ impl BoneWorkspace {
         self.batch_load_for_file(path);
     }
 
+    pub fn loaded_module_count(&self) -> usize {
+        self.projects
+            .values()
+            .map(|project| project.texts.len())
+            .sum()
+    }
+
     /// Module recency for the editor's `rock/modules` request.
     pub fn projects_summary(&self) -> Vec<(String, Vec<ModuleRecency>)> {
         let now = bone_core::prelude::Instant::now();
@@ -2755,48 +2762,6 @@ pub(crate) fn bind_generic(
         },
         _ => None,
     }
-}
-
-/// Timings for the most recent general completion on this thread.
-#[derive(Clone, Copy)]
-pub struct CompletionPhaseTimings {
-    pub candidates_ms: f64,
-    pub rank_ms: f64,
-    pub reach_ms: f64,
-    pub call_through_ms: f64,
-    pub n_general: usize,
-    pub n_out: usize,
-    /// Call-through magnitude: fns passing the noise guard, (fn,arg) pairs tested,
-    /// and pairs matched.
-    pub ct_fns: usize,
-    pub ct_arg_iters: usize,
-    pub ct_survivors: usize,
-}
-
-thread_local! {
-    static LAST_COMPLETION_PHASES: std::cell::Cell<CompletionPhaseTimings> = const {
-        std::cell::Cell::new(CompletionPhaseTimings {
-            candidates_ms: 0.0,
-            rank_ms: 0.0,
-            reach_ms: 0.0,
-            call_through_ms: 0.0,
-            n_general: 0,
-            n_out: 0,
-            ct_fns: 0,
-            ct_arg_iters: 0,
-            ct_survivors: 0,
-        })
-    };
-}
-
-/// Phase timings of the most recent `completion()` on this thread.
-pub fn last_completion_phase_timings() -> CompletionPhaseTimings {
-    LAST_COMPLETION_PHASES.with(|c| c.get())
-}
-
-/// The identifier prefix ending at `pos`, as completion's own filter computes it.
-pub fn ident_prefix_at(src: &str, pos: Position) -> &str {
-    crate::completion::classify::ident_prefix(src, byte_offset(src, pos))
 }
 
 /// A space trigger on a blank line prefix is `<CR>` auto-indent, not a typed space.

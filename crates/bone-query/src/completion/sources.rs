@@ -213,13 +213,6 @@ pub(crate) fn field_ref_candidates(
     )
 }
 
-#[derive(Clone, Copy, Default)]
-pub(crate) struct CtCounts {
-    pub(crate) fns: usize,
-    pub(crate) arg_iters: usize,
-    pub(crate) survivors: usize,
-}
-
 pub(crate) fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
     let mut qi = k.min(q.len());
     if qi < q.len() && q[qi] == b'(' {
@@ -457,15 +450,14 @@ pub(crate) fn call_through_param_completions(
     mut expected: Option<&mut ExpectedArg>,
     enclosing_fn: Option<&str>,
     sink: &mut Sink,
-) -> CtCounts {
-    let mut counts = CtCounts::default();
+) {
     let q = prefix.as_bytes();
     if q.len() < 2 {
         // One char only completes the fn name's first letter.
-        return counts;
+        return;
     }
     let Some(scoped_fns) = scoped_index.fns_by_first_char.get(&q[0]) else {
-        return counts;
+        return;
     };
     let shadowed = |name| locals.get(name).is_some();
     let mut local_args: HashMap<Ustr, Vec<CtArg>> = HashMap::new();
@@ -504,7 +496,6 @@ pub(crate) fn call_through_param_completions(
         if k < q.len().div_ceil(2) && !local.iter().any(|a| arg_matches_residual(q, k, &a.text)) {
             continue;
         }
-        counts.fns += 1;
         let group = match_memo.entry((t, k)).or_insert_with(|| {
             let global = scoped_index
                 .global_type_args
@@ -520,7 +511,6 @@ pub(crate) fn call_through_param_completions(
                 .map(|arg| (arg, true));
             let mut v = Vec::new();
             for (a, local) in global.chain(local) {
-                counts.arg_iters += 1;
                 if arg_matches_residual(q, k, &a.text) {
                     let mut suffix = Vec::new();
                     fuzzy_suffix_scores(a.text.as_bytes(), q, &mut suffix);
@@ -529,7 +519,6 @@ pub(crate) fn call_through_param_completions(
             }
             v
         });
-        counts.survivors += group.len();
         fuzzy_prefix_scores(scoped_fns[si].name.as_bytes(), q, &mut prefix_scores);
         let mut scored: Vec<(i32, &CtArg, bool)> = Vec::with_capacity(group.len());
         for (a, suffix, penalty, local) in group.iter() {
@@ -614,7 +603,6 @@ pub(crate) fn call_through_param_completions(
     }
     // The final stable sort preserves insertion order on full ties.
     sink.cands[ct_start..].sort_by(cand_cmp);
-    counts
 }
 
 pub(crate) fn build_freq_index(ws: &Workspace) -> HashMap<Ustr, u32> {
