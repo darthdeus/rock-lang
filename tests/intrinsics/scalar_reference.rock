@@ -3,7 +3,7 @@
 // scalar returns are also checked by the GLSL runner (exact int/bool values,
 // float results within the host runner's tolerance).
 //
-// `tan`, `log` and `log2` have no portable fallback, so their tests assert
+// `tan` and `log` have no portable fallback, so their tests assert
 // identities that pin the base against the host's own math (tolerance 1e-9:
 // wide enough for libm last-bit drift, far tighter than a wrong base). The
 // tuple projections and `__range` pin their JS index and runtime-helper
@@ -270,6 +270,8 @@ fn near(a: float, b: float) -> bool {
     assert(near(log2(8.0), 3.0), "log2(8) == 3")
     assert(near(log2(1024.0), 10.0), "log2(1024) == 10")
     assert(near(log2(0.25), -2.0), "log2(0.25) == -2")
+    assert_eq(log2(0.0), -1.0 / 0.0)
+    assert(is_nan(log2(-1.0)))
 }
 
 @test(output = "1 2")

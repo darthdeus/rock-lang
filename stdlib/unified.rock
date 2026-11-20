@@ -1096,22 +1096,15 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
     return { _data = t, len = end_val - start_val }
 """
 
-// Comparison operators
-// Operators are functions. These primitive ones are pure and inline
-// to native Lua ops (the parser lowers `a + b` to `__op_add(a, b)`;
-// @inline inline(lua) splices the body back so hot loops stay native).
-// Concrete primitive ==/!= overloads so resolution is exact (no
-// ambiguity vs the `any` fallback). Operators are ordinary overloaded
-// functions now; precise overloads replace the old operator-registry
-// special disambiguation.
-@pure @inline operator(lua) ==(a: int, b: int) -> bool = "return a == b"
-@pure @inline operator(lua) ==(a: uint, b: uint) -> bool = "return a == b"
-@pure @inline operator(lua) ==(a: float, b: float) -> bool = "return a == b"
-@pure @inline operator(lua) ==(a: bool, b: bool) -> bool = "return a == b"
-@pure @inline operator(lua) !=(a: int, b: int) -> bool = "return a ~= b"
-@pure @inline operator(lua) !=(a: uint, b: uint) -> bool = "return a ~= b"
-@pure @inline operator(lua) !=(a: float, b: float) -> bool = "return a ~= b"
-@pure @inline operator(lua) !=(a: bool, b: bool) -> bool = "return a ~= b"
+// Fixed-operator syntax lowers directly. Arithmetic signatures participate in overload resolution.
+@pure @inline operator ==(a: int, b: int) -> bool { return a == b }
+@pure @inline operator ==(a: uint, b: uint) -> bool { return a == b }
+@pure @inline operator ==(a: float, b: float) -> bool { return a == b }
+@pure @inline operator ==(a: bool, b: bool) -> bool { return a == b }
+@pure @inline operator !=(a: int, b: int) -> bool { return a != b }
+@pure @inline operator !=(a: uint, b: uint) -> bool { return a != b }
+@pure @inline operator !=(a: float, b: float) -> bool { return a != b }
+@pure @inline operator !=(a: bool, b: bool) -> bool { return a != b }
 
 @pure @inline operator(lua) +(a: int, b: int) -> int = "return a + b"
 @pure @inline operator(lua) +(a: uint, b: uint) -> uint = "return a + b"
@@ -1129,40 +1122,40 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 @pure @inline operator(lua) %(a: uint, b: uint) -> uint = "return a % b"
 @pure @inline operator(lua) %(a: float, b: float) -> float = "return a % b"
 
-@pure @inline operator(lua) <(a: int, b: int) -> bool = "return a < b"
-@pure @inline operator(lua) <(a: uint, b: uint) -> bool = "return a < b"
-@pure @inline operator(lua) <(a: float, b: float) -> bool = "return a < b"
-@pure @inline operator(lua) <=(a: int, b: int) -> bool = "return a <= b"
-@pure @inline operator(lua) <=(a: uint, b: uint) -> bool = "return a <= b"
-@pure @inline operator(lua) <=(a: float, b: float) -> bool = "return a <= b"
-@pure @inline operator(lua) >(a: int, b: int) -> bool = "return a > b"
-@pure @inline operator(lua) >(a: uint, b: uint) -> bool = "return a > b"
-@pure @inline operator(lua) >(a: float, b: float) -> bool = "return a > b"
-@pure @inline operator(lua) >=(a: int, b: int) -> bool = "return a >= b"
-@pure @inline operator(lua) >=(a: uint, b: uint) -> bool = "return a >= b"
-@pure @inline operator(lua) >=(a: float, b: float) -> bool = "return a >= b"
+@pure @inline operator <(a: int, b: int) -> bool { return a < b }
+@pure @inline operator <(a: uint, b: uint) -> bool { return a < b }
+@pure @inline operator <(a: float, b: float) -> bool { return a < b }
+@pure @inline operator <=(a: int, b: int) -> bool { return a <= b }
+@pure @inline operator <=(a: uint, b: uint) -> bool { return a <= b }
+@pure @inline operator <=(a: float, b: float) -> bool { return a <= b }
+@pure @inline operator >(a: int, b: int) -> bool { return a > b }
+@pure @inline operator >(a: uint, b: uint) -> bool { return a > b }
+@pure @inline operator >(a: float, b: float) -> bool { return a > b }
+@pure @inline operator >=(a: int, b: int) -> bool { return a >= b }
+@pure @inline operator >=(a: uint, b: uint) -> bool { return a >= b }
+@pure @inline operator >=(a: float, b: float) -> bool { return a >= b }
 
-@pure @inline operator(lua) &&(a: bool, b: bool) -> bool = "return a and b"
-@pure @inline operator(lua) ||(a: bool, b: bool) -> bool = "return a or b"
+@pure @inline operator &&(a: bool, b: bool) -> bool { return a && b }
+@pure @inline operator ||(a: bool, b: bool) -> bool { return a || b }
 
-@pure @inline operator(lua) -(a: int) -> int = "return -a"
-@pure @inline operator(lua) -(a: float) -> float = "return -a"
-@pure @inline operator(lua) !(a: bool) -> bool = "return not a"
-@pure @inline operator(lua) ~(a: int) -> int = "return bit.bnot(a)"
+@pure @inline operator -(a: int) -> int { return -a }
+@pure @inline operator -(a: float) -> float { return -a }
+@pure @inline operator !(a: bool) -> bool { return !a }
+@pure @inline operator ~(a: int) -> int { return ~a }
 
 @pure @inline operator(lua) +(a: string, b: string) -> string = "return a .. b"
-@pure @inline operator(lua) ==(a: string, b: string) -> bool = "return a == b"
-@pure @inline operator(lua) !=(a: string, b: string) -> bool = "return a ~= b"
+@pure @inline operator ==(a: string, b: string) -> bool { return a == b }
+@pure @inline operator !=(a: string, b: string) -> bool { return a != b }
 
-@pure @inline operator(lua) &(a: int, b: int) -> int = "return bit.band(a, b)"
+@pure @inline operator &(a: int, b: int) -> int { return a & b }
 @pure @inline operator(lua) &(a: uint, b: uint) -> uint = "return bit.band(a, b)"
-@pure @inline operator(lua) |(a: int, b: int) -> int = "return bit.bor(a, b)"
+@pure @inline operator |(a: int, b: int) -> int { return a | b }
 @pure @inline operator(lua) |(a: uint, b: uint) -> uint = "return bit.bor(a, b)"
-@pure @inline operator(lua) ^(a: int, b: int) -> int = "return bit.bxor(a, b)"
+@pure @inline operator ^(a: int, b: int) -> int { return a ^ b }
 @pure @inline operator(lua) ^(a: uint, b: uint) -> uint = "return bit.bxor(a, b)"
-@pure @inline operator(lua) <<(a: int, b: int) -> int = "return bit.lshift(a, b)"
+@pure @inline operator <<(a: int, b: int) -> int { return a << b }
 @pure @inline operator(lua) <<(a: uint, b: uint) -> uint = "return bit.lshift(a, b)"
-@pure @inline operator(lua) >>(a: int, b: int) -> int = "return bit.rshift(a, b)"
+@pure @inline operator >>(a: int, b: int) -> int { return a >> b }
 @pure @inline operator(lua) >>(a: uint, b: uint) -> uint = "return bit.rshift(a, b)"
 
 // Print function
@@ -2614,7 +2607,7 @@ fn presentation_random_range(min: float, max: float) -> float { return presentat
 @intrinsic @pure @inline inline(lua) fn exp(x: float) -> float = "math.exp(x)"
 @intrinsic @pure @inline inline(lua) fn pow(a: float, b: float) -> float = "math.pow(a, b)"
 @intrinsic @pure @inline inline(lua) fn log(x: float) -> float = "math.log(x)"
-@intrinsic @pure @inline inline(lua) fn log2(x: float) -> float = "math.log(x) / 0.6931471805599453"
+@intrinsic @pure @inline fn log2(x: float) -> float { return log(x) / 0.6931471805599453 }
 @intrinsic @pure @inline inline(lua) fn atan2(y: float, x: float) -> float = "math.atan2(y, x)"
 @intrinsic @pure fn round(x: float) -> float { return floor(x + 0.5) }
 @pure fn round_to_places(x: float, places: int) -> float {
@@ -3859,7 +3852,7 @@ fn get_env_float(var: string, default_val: float) -> float {
     return v.parse_float() ?? default_val
 }
 
-@nowrite @inline inline(lua) fn format_float_roundtrip(value: float) -> string = "string.format(\"%.17g\", value)"
+@nowrite @inline fn format_float_roundtrip(value: float) -> string { return "{value:.17g}" }
 
 // TODO: format_lua is an escape hatch for printf-style formatting.
 // When Rock's string interpolation supports all common format specifiers

@@ -135,6 +135,7 @@ fn test_json_nested_numbers_match_host_parser() {
 // top level or nested; non-finite values encode as null.
 @test
 fn test_json_float_encode_round_trips_exactly() {
+    assert_eq(format_float_roundtrip(1.25), "1.25")
     let values = [0.12345678901234566, -0.12345678901234566, 1.0 / 3.0,
         0.1, 1.2345678901234567e-200, -1.2345678901234567e-200, 5e-324,
         123456789012345.0, -123456789012345.0, 9007199254740992.0,

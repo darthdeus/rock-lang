@@ -17,26 +17,16 @@ inline(js) fn raised(check: fn() -> ()) -> string? = """
     catch (e) { return (e instanceof Error) ? e.message : String(e); }
 """
 
-inline(lua) fn has(s: string?, sub: string) -> bool = """
-    return s ~= nil and string.find(s, sub, 1, true) ~= nil
-"""
+fn has(s: string?, sub: string) -> bool {
+    return s != null && s.contains(sub)
+}
 
-inline(js) fn has(s: string?, sub: string) -> bool = """
-    return s !== null && s !== undefined && s.indexOf(sub) >= 0;
-"""
-
-inline(lua) fn before(s: string?, a: string, b: string) -> bool = """
-    if s == nil then return false end
-    local i = string.find(s, a, 1, true)
-    local j = string.find(s, b, 1, true)
-    return i ~= nil and j ~= nil and i < j
-"""
-
-inline(js) fn before(s: string?, a: string, b: string) -> bool = """
-    if (s === null || s === undefined) return false;
-    var i = s.indexOf(a), j = s.indexOf(b);
-    return i >= 0 && j >= 0 && i < j;
-"""
+fn before(s: string?, a: string, b: string) -> bool {
+    if s == null { return false }
+    let i = s.find(a)
+    let j = s.find(b)
+    return i >= 0 && j >= 0 && i < j
+}
 
 // Runtime cleanup-stack depth; 0 when every registration was unwound.
 inline(lua) fn defer_depth() -> int = """
