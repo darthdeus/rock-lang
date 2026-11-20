@@ -319,6 +319,7 @@ mod image_publication;
 mod image_texture;
 mod imgui;
 mod input;
+mod jobs;
 mod light_table;
 mod meadow;
 mod nav;

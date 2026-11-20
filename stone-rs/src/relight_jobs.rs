@@ -1,87 +1,45 @@
 //! Copied occupancy snapshots; no Lua or graphics state crosses this worker.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::thread::JoinHandle;
+use std::hash::{BuildHasherDefault, DefaultHasher};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-const MAX_JOBS: usize = 16;
+use crate::jobs::{Jobs, Refused, Taken};
+
 const MAX_BYTES: usize = 8 * 1024 * 1024;
-const MAX_RESERVED: usize = 128 * 1024 * 1024;
-struct Reservation {
-    bytes: usize,
-    total: Arc<AtomicUsize>,
-}
-impl Drop for Reservation {
-    fn drop(&mut self) {
-        self.total.fetch_sub(self.bytes, Ordering::AcqRel);
-    }
-}
-static NEXT: AtomicU64 = AtomicU64::new(1);
+
+static JOBS: Jobs<Work, ResultData> = Jobs::new("stone-relight-worker", 16, 128 * 1024 * 1024, run);
+// Locked before `JOBS` wherever both are held.
+static SNAPSHOTS: Mutex<HashMap<i64, Arc<Vec<u8>>, BuildHasherDefault<DefaultHasher>>> =
+    Mutex::new(HashMap::with_hasher(BuildHasherDefault::new()));
+
 struct ResultData {
+    snapshot: i64,
     pixels: Vec<u8>,
     region: [f32; 4],
 }
-struct Entry {
-    snapshot: i64,
-    cancelled: Arc<AtomicBool>,
-    result: Option<ResultData>,
-    _reservation: Arc<Reservation>,
-}
 struct Work {
-    handle: u64,
+    snapshot: i64,
     width: usize,
     samples: usize,
     border: i32,
     old: Option<Arc<Vec<u8>>>,
     next: Vec<u8>,
-    cancelled: Arc<AtomicBool>,
-    _reservation: Arc<Reservation>,
 }
-struct Service {
-    entries: Arc<Mutex<HashMap<u64, Entry>>>,
-    // Locked after `entries` wherever both are held.
-    snapshots: Mutex<HashMap<i64, Arc<Vec<u8>>>>,
-    sender: mpsc::SyncSender<Work>,
-    worker: JoinHandle<()>,
-    reserved: Arc<AtomicUsize>,
-}
-static SERVICE: OnceLock<Mutex<Option<Service>>> = OnceLock::new();
-fn slot() -> &'static Mutex<Option<Service>> {
-    SERVICE.get_or_init(|| Mutex::new(None))
-}
-fn start() -> Option<Service> {
-    let entries = Arc::new(Mutex::new(HashMap::<u64, Entry>::new()));
-    let output = Arc::clone(&entries);
-    let (sender, receiver) = mpsc::sync_channel::<Work>(MAX_JOBS);
-    let worker = std::thread::Builder::new()
-        .name("stone-relight-worker".into())
-        .spawn(move || {
-            while let Ok(work) = receiver.recv() {
-                let result = diff(
-                    work.width,
-                    work.samples,
-                    work.border,
-                    work.old.as_ref().map_or(&[][..], |old| old.as_slice()),
-                    work.next,
-                    &work.cancelled,
-                );
-                let mut entries = output.lock().unwrap();
-                if let Some(entry) = entries.get_mut(&work.handle) {
-                    if let Some(result) = result {
-                        entry.result = Some(result);
-                    }
-                }
-            }
-        })
-        .map_err(|error| crate::log_once!("RELIGHT", "worker start failed: {}", error))
-        .ok()?;
-    Some(Service {
-        entries,
-        snapshots: Mutex::new(HashMap::new()),
-        sender,
-        worker,
-        reserved: Arc::new(AtomicUsize::new(0)),
+fn run(work: Work, cancelled: &AtomicBool) -> Option<ResultData> {
+    let (pixels, region) = diff(
+        work.width,
+        work.samples,
+        work.border,
+        work.old.as_ref().map_or(&[][..], |old| old.as_slice()),
+        work.next,
+        cancelled,
+    )?;
+    Some(ResultData {
+        snapshot: work.snapshot,
+        pixels,
+        region,
     })
 }
 fn diff(
@@ -91,15 +49,12 @@ fn diff(
     old: &[u8],
     next: Vec<u8>,
     cancelled: &AtomicBool,
-) -> Option<ResultData> {
+) -> Option<(Vec<u8>, [f32; 4])> {
     if cancelled.load(Ordering::Acquire) {
         return None;
     }
     if old.len() != next.len() {
-        return Some(ResultData {
-            pixels: next,
-            region: [-1e9, -1e9, 1e9, 1e9],
-        });
+        return Some((next, [-1e9, -1e9, 1e9, 1e9]));
     }
     let height = next.len() / 4 / width;
     let mut region = [1e9f32, 1e9f32, -1e9f32, -1e9f32];
@@ -119,10 +74,7 @@ fn diff(
             }
         }
     }
-    Some(ResultData {
-        pixels: next,
-        region,
-    })
+    Some((next, region))
 }
 
 #[no_mangle]
@@ -146,119 +98,54 @@ pub unsafe extern "C" fn stone_relight_diff_submit(
     {
         return -1;
     }
-    let mut service_slot = slot().lock().unwrap();
-    if service_slot.is_none() {
-        *service_slot = start();
-    }
-    let Some(service) = service_slot.as_ref() else {
-        return -1;
-    };
-    let mut entries = service.entries.lock().unwrap();
-    if entries.len() >= MAX_JOBS {
-        return 0;
-    }
-    let bytes = len as usize;
-    if service
-        .reserved
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-            used.checked_add(bytes).filter(|next| *next <= MAX_RESERVED)
-        })
-        .is_err()
-    {
-        return 0;
-    }
-    let reservation = Arc::new(Reservation {
-        bytes,
-        total: Arc::clone(&service.reserved),
-    });
-    let handle = NEXT.fetch_add(1, Ordering::Relaxed);
-    if handle == 0 || handle >= (1 << 53) {
-        return 0;
-    }
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let old = service
-        .snapshots
-        .lock()
-        .unwrap()
-        .get(&snapshot)
-        .filter(|old| old.len() == len as usize)
-        .cloned();
+    let len = len as usize;
+    let snapshots = SNAPSHOTS.lock().unwrap();
     let work = Work {
-        handle,
+        snapshot,
         width: width as usize,
         samples: samples as usize,
         border,
-        old,
-        next: std::slice::from_raw_parts(next, len as usize).to_vec(),
-        cancelled: Arc::clone(&cancelled),
-        _reservation: Arc::clone(&reservation),
+        old: snapshots
+            .get(&snapshot)
+            .filter(|old| old.len() == len)
+            .cloned(),
+        next: std::slice::from_raw_parts(next, len).to_vec(),
     };
-    entries.insert(
-        handle,
-        Entry {
-            snapshot,
-            cancelled,
-            result: None,
-            _reservation: reservation,
-        },
-    );
-    if service.sender.try_send(work).is_err() {
-        entries.remove(&handle);
-        return 0;
+    match JOBS.submit(work, len) {
+        Ok(handle) => handle as i64,
+        Err(Refused::Worker(error)) => {
+            crate::log_once!("RELIGHT", "worker start failed: {}", error);
+            -1
+        }
+        Err(Refused::Busy | Refused::Handles) => 0,
     }
-    handle as i64
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn stone_relight_diff_publish(handle: u64, region: *mut f32) -> i32 {
-    let service_slot = slot().lock().unwrap();
-    let Some(service) = service_slot.as_ref() else {
-        return -1;
-    };
-    let mut entries = service.entries.lock().unwrap();
-    let Some(entry) = entries.get(&handle) else {
-        return -1;
-    };
-    if entry.result.is_none() {
-        return 0;
+    let mut snapshots = SNAPSHOTS.lock().unwrap();
+    match JOBS.take(handle, |_| !region.is_null()) {
+        Taken::Missing | Taken::Rejected => -1,
+        Taken::Pending => 0,
+        Taken::Ready(result) => {
+            std::ptr::copy_nonoverlapping(result.region.as_ptr(), region, 4);
+            snapshots.insert(result.snapshot, Arc::new(result.pixels));
+            1
+        }
     }
-    if region.is_null() {
-        return -1;
-    }
-    let entry = entries.remove(&handle).unwrap();
-    let result = entry.result.unwrap();
-    std::ptr::copy_nonoverlapping(result.region.as_ptr(), region, 4);
-    service
-        .snapshots
-        .lock()
-        .unwrap()
-        .insert(entry.snapshot, Arc::new(result.pixels));
-    1
 }
 // The caller cancels the key's pending job first.
 #[no_mangle]
 pub extern "C" fn stone_relight_snapshot_drop(snapshot: i64) {
-    if let Some(service) = slot().lock().unwrap().as_ref() {
-        service.snapshots.lock().unwrap().remove(&snapshot);
-    }
+    SNAPSHOTS.lock().unwrap().remove(&snapshot);
 }
 #[no_mangle]
 pub extern "C" fn stone_relight_diff_cancel(handle: u64) {
-    if let Some(service) = slot().lock().unwrap().as_ref() {
-        if let Some(entry) = service.entries.lock().unwrap().remove(&handle) {
-            entry.cancelled.store(true, Ordering::Release);
-        }
-    }
+    JOBS.cancel(handle);
 }
 pub(crate) fn shutdown() {
-    let Some(service) = slot().lock().unwrap().take() else {
-        return;
-    };
-    for (_, entry) in service.entries.lock().unwrap().drain() {
-        entry.cancelled.store(true, Ordering::Release);
-    }
-    drop(service.sender);
-    let _ = service.worker.join();
+    JOBS.shutdown();
+    SNAPSHOTS.lock().unwrap().clear();
 }
 #[cfg(test)]
 mod tests {
@@ -320,8 +207,8 @@ mod tests {
         let mut next = old.clone();
         next[(8 + 6) * 4 + 3] = 1;
         next[(6 * 8 + 1) * 4] = 1;
-        let result = diff(8, 2, 1, &old, next.clone(), &AtomicBool::new(false)).unwrap();
-        assert_eq!(result.region, [-1.0, -1.0, 2.0, 2.0]);
+        let (_, region) = diff(8, 2, 1, &old, next.clone(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(region, [-1.0, -1.0, 2.0, 2.0]);
         assert!(diff(8, 2, 1, &old, next, &AtomicBool::new(true)).is_none());
     }
 }

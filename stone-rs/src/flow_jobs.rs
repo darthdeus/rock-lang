@@ -1,22 +1,18 @@
 //! No Lua state crosses into the worker thread; it reads copied snapshots.
 
-use std::collections::HashMap;
-use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::jobs::{Jobs, Refused, Taken};
 
 #[path = "terrain_field.rs"]
 mod terrain_field;
 
 const FLOW_UNREACHABLE: f32 = 1_000_000.0;
-const MAX_FLOW_JOBS: usize = 64;
 const MAX_FLOW_CELLS: usize = 1_000_000;
 const MAX_FLOW_BYTES: usize = 128 * 1024 * 1024;
-const MAX_FLOW_HANDLE: u64 = (1 << 53) - 1;
 
-static NEXT_FLOW_HANDLE: AtomicU64 = AtomicU64::new(1);
+static FIELD_JOBS: Jobs<FieldWork, FlowResult> =
+    Jobs::new("stone-flow-worker", 64, MAX_FLOW_BYTES, run_field);
 
 #[derive(Debug, PartialEq)]
 struct FlowResult {
@@ -24,390 +20,48 @@ struct FlowResult {
     truncated: bool,
 }
 
-#[derive(Debug)]
-enum EntryState {
-    Pending,
-    Ready(FlowResult),
-}
-
-struct FlowEntry {
-    cancellation: Arc<AtomicBool>,
-    state: EntryState,
-    reserved_bytes: usize,
-}
-
-struct FlowData {
-    entries: HashMap<u64, FlowEntry>,
-    reserved_bytes: usize,
-}
-
-impl FlowData {
-    fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            reserved_bytes: 0,
-        }
-    }
-
-    fn remove(&mut self, handle: u64) -> Option<FlowEntry> {
-        let entry = self.entries.remove(&handle)?;
-        self.reserved_bytes = self.reserved_bytes.saturating_sub(entry.reserved_bytes);
-        Some(entry)
-    }
-}
-
-struct FlowState {
-    data: Mutex<FlowData>,
-    wake: Condvar,
-}
-
-impl FlowState {
-    fn new() -> Self {
-        Self {
-            data: Mutex::new(FlowData::new()),
-            wake: Condvar::new(),
-        }
-    }
-}
-
-struct FlowWork {
-    handle: u64,
+struct FieldWork {
     width: usize,
     height: usize,
-    goal_x: i64,
-    goal_y: i64,
-    cap: usize,
-    walkable: Vec<u8>,
-    cancellation: Arc<AtomicBool>,
-    reserved_bytes: usize,
+    snapshot: Vec<u8>,
     kernel: FieldKernel,
 }
 
 enum FieldKernel {
-    Flow,
-    Terrain { sub: usize },
+    Flow {
+        goal_x: i64,
+        goal_y: i64,
+        cap: usize,
+    },
+    Terrain {
+        sub: usize,
+    },
 }
 
-struct FlowService {
-    sender: Mutex<Option<SyncSender<FlowWork>>>,
-    state: Arc<FlowState>,
-    stopping: Arc<AtomicBool>,
-    worker: Mutex<Option<JoinHandle<()>>>,
-}
-
-static FLOW_SERVICE: OnceLock<Mutex<Option<Arc<FlowService>>>> = OnceLock::new();
-
-fn flow_service_slot() -> &'static Mutex<Option<Arc<FlowService>>> {
-    FLOW_SERVICE.get_or_init(|| Mutex::new(None))
-}
-
-fn active_flow_service() -> Option<Arc<FlowService>> {
-    flow_service_slot().lock().unwrap().as_ref().cloned()
-}
-
-fn allocate_flow_handle() -> Option<u64> {
-    NEXT_FLOW_HANDLE
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |next| {
-            if next == 0 || next > MAX_FLOW_HANDLE {
-                None
-            } else {
-                next.checked_add(1)
-            }
-        })
-        .ok()
-}
-
-impl FlowService {
-    fn new() -> Option<Arc<Self>> {
-        let (sender, receiver) = mpsc::sync_channel(MAX_FLOW_JOBS);
-        let state = Arc::new(FlowState::new());
-        let stopping = Arc::new(AtomicBool::new(false));
-        let worker_state = Arc::clone(&state);
-        let worker_stopping = Arc::clone(&stopping);
-        let worker = match thread::Builder::new()
-            .name("stone-flow-worker".to_string())
-            .spawn(move || flow_worker(receiver, worker_state, worker_stopping))
-        {
-            Ok(worker) => worker,
-            Err(error) => {
-                crate::log_once!("FLOW", "failed to start flow worker: {}", error);
-                return None;
-            }
-        };
-        Some(Arc::new(Self {
-            sender: Mutex::new(Some(sender)),
-            state,
-            stopping,
-            worker: Mutex::new(Some(worker)),
-        }))
-    }
-
-    fn reserve(&self, work: &FlowWork) -> bool {
-        let mut data = self.state.data.lock().unwrap();
-        if data.entries.len() >= MAX_FLOW_JOBS
-            || data
-                .reserved_bytes
-                .checked_add(work.reserved_bytes)
-                .is_none_or(|bytes| bytes > MAX_FLOW_BYTES)
-        {
-            return false;
-        }
-        data.reserved_bytes += work.reserved_bytes;
-        data.entries.insert(
-            work.handle,
-            FlowEntry {
-                cancellation: Arc::clone(&work.cancellation),
-                state: EntryState::Pending,
-                reserved_bytes: work.reserved_bytes,
-            },
-        );
-        true
-    }
-
-    fn submit(&self, work: FlowWork) -> bool {
-        if self.stopping.load(Ordering::Acquire) {
-            return false;
-        }
-
-        // Held across reserve and try_send so shutdown cannot detach the sender in between.
-        let sender = self.sender.lock().unwrap();
-        if self.stopping.load(Ordering::Acquire) || !self.reserve(&work) {
-            return false;
-        }
-        let Some(sender) = sender.as_ref() else {
-            let mut data = self.state.data.lock().unwrap();
-            data.remove(work.handle);
-            return false;
-        };
-        match sender.try_send(work) {
-            Ok(()) => true,
-            Err(TrySendError::Full(work)) | Err(TrySendError::Disconnected(work)) => {
-                let mut data = self.state.data.lock().unwrap();
-                data.remove(work.handle);
-                false
-            }
-        }
-    }
-
-    fn poll(&self, handle: u64) -> i32 {
-        let data = self.state.data.lock().unwrap();
-        match data.entries.get(&handle) {
-            Some(entry) if entry.cancellation.load(Ordering::Acquire) => -1,
-            Some(entry) => match &entry.state {
-                EntryState::Pending => 0,
-                EntryState::Ready(_) => 1,
-            },
-            None => -1,
-        }
-    }
-
-    fn wait(&self, handle: u64) -> i32 {
-        let mut data = self.state.data.lock().unwrap();
-        loop {
-            match data.entries.get(&handle) {
-                Some(entry) if entry.cancellation.load(Ordering::Acquire) => return -1,
-                Some(entry) => match &entry.state {
-                    EntryState::Pending => {
-                        data = self.state.wake.wait(data).unwrap();
-                    }
-                    EntryState::Ready(_) => return 1,
+fn run_field(work: FieldWork, cancelled: &AtomicBool) -> Option<FlowResult> {
+    match work.kernel {
+        FieldKernel::Flow {
+            goal_x,
+            goal_y,
+            cap,
+        } => compute_flow_with_cancel(
+            work.width,
+            work.height,
+            goal_x,
+            goal_y,
+            cap,
+            &work.snapshot,
+            cancelled,
+        ),
+        FieldKernel::Terrain { sub } => {
+            terrain_field::compute(work.width, work.height, sub, &work.snapshot, cancelled).map(
+                |distances| FlowResult {
+                    distances,
+                    truncated: false,
                 },
-                None => return -1,
-            }
-        }
-    }
-
-    fn copy(&self, handle: u64, output: *mut f32, output_len: i64) -> i32 {
-        if output_len < 0 {
-            return -1;
-        }
-        let output_len = output_len as usize;
-        let mut data = self.state.data.lock().unwrap();
-        let (required, truncated) = match data.entries.get(&handle) {
-            Some(entry) if entry.cancellation.load(Ordering::Acquire) => return -1,
-            Some(entry) => match &entry.state {
-                EntryState::Pending => return -2,
-                EntryState::Ready(result) => (result.distances.len(), result.truncated),
-            },
-            None => return -1,
-        };
-        if output.is_null() || output_len < required {
-            crate::log_once!(
-                "FLOW",
-                "stone_flow_copy: output buffer is too small (need {}, got {})",
-                required,
-                output_len
-            );
-            return -1;
-        }
-        let entry = data.remove(handle).expect("ready flow entry disappeared");
-        let EntryState::Ready(result) = entry.state else {
-            return -2;
-        };
-        // The output pointer is part of the C ABI contract and is validated by
-        // the caller. Keep the state lock until the result is consumed so a
-        // concurrent cancel cannot release it during the copy.
-        unsafe {
-            ptr::copy_nonoverlapping(result.distances.as_ptr(), output, required);
-        }
-        self.state.wake.notify_all();
-        if truncated {
-            1
-        } else {
-            0
-        }
-    }
-
-    fn cancel(&self, handle: u64) {
-        let mut data = self.state.data.lock().unwrap();
-        let remove_ready = match data.entries.get(&handle) {
-            Some(entry) => {
-                entry.cancellation.store(true, Ordering::Release);
-                matches!(&entry.state, EntryState::Ready(_))
-            }
-            None => false,
-        };
-        if remove_ready {
-            data.remove(handle);
-        }
-        self.state.wake.notify_all();
-    }
-
-    fn cancel_all(&self) {
-        let mut data = self.state.data.lock().unwrap();
-        let ready_handles: Vec<u64> = data
-            .entries
-            .iter()
-            .filter_map(|(handle, entry)| {
-                if matches!(&entry.state, EntryState::Ready(_)) {
-                    Some(*handle)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for entry in data.entries.values() {
-            entry.cancellation.store(true, Ordering::Release);
-        }
-        // Ready results have no worker message left; pending entries keep their reservation until
-        // the worker consumes the cancelled snapshot.
-        for handle in ready_handles {
-            data.remove(handle);
-        }
-        self.state.wake.notify_all();
-    }
-
-    fn shutdown(&self) {
-        self.stopping.store(true, Ordering::Release);
-        {
-            let mut sender = self.sender.lock().unwrap();
-            sender.take();
-        }
-        self.cancel_all();
-        let worker = self.worker.lock().unwrap().take();
-        if let Some(worker) = worker {
-            if worker.join().is_err() {
-                crate::log_once!("FLOW", "flow worker terminated with a panic");
-            }
-        }
-    }
-}
-
-fn ensure_flow_service() -> Option<Arc<FlowService>> {
-    let slot = flow_service_slot();
-    let mut service = slot.lock().unwrap();
-    if let Some(existing) = service.as_ref() {
-        return Some(Arc::clone(existing));
-    }
-    let created = FlowService::new()?;
-    *service = Some(Arc::clone(&created));
-    Some(created)
-}
-
-fn flow_worker(receiver: Receiver<FlowWork>, state: Arc<FlowState>, stopping: Arc<AtomicBool>) {
-    while let Ok(work) = receiver.recv() {
-        if stopping.load(Ordering::Acquire) || work.cancellation.load(Ordering::Acquire) {
-            let mut data = state.data.lock().unwrap();
-            data.remove(work.handle);
-            state.wake.notify_all();
-            continue;
-        }
-        let result = match work.kernel {
-            FieldKernel::Flow => compute_flow_with_cancel(
-                work.width,
-                work.height,
-                work.goal_x,
-                work.goal_y,
-                work.cap,
-                &work.walkable,
-                &work.cancellation,
-                &stopping,
-            ),
-            FieldKernel::Terrain { sub } => terrain_field::compute(
-                work.width,
-                work.height,
-                sub,
-                &work.walkable,
-                &work.cancellation,
-                &stopping,
             )
-            .map(|distances| FlowResult {
-                distances,
-                truncated: false,
-            }),
-        };
-        let Some(result) = result else {
-            let mut data = state.data.lock().unwrap();
-            data.remove(work.handle);
-            state.wake.notify_all();
-            continue;
-        };
-
-        let mut data = state.data.lock().unwrap();
-        let remove = stopping.load(Ordering::Acquire)
-            || work.cancellation.load(Ordering::Acquire)
-            || !data.entries.contains_key(&work.handle);
-        if remove {
-            data.remove(work.handle);
-        } else if let Some(entry) = data.entries.get_mut(&work.handle) {
-            entry.state = EntryState::Ready(result);
         }
-        state.wake.notify_all();
     }
-}
-
-fn request_shape(
-    width: i32,
-    height: i32,
-    goal_x: i32,
-    goal_y: i32,
-    cap: i32,
-    walkable_len: i64,
-) -> Option<(usize, usize, i64, i64, usize, usize)> {
-    if width <= 0 || height <= 0 || cap < 0 {
-        return None;
-    }
-    let width = width as usize;
-    let height = height as usize;
-    let goal_x = goal_x as i64;
-    let goal_y = goal_y as i64;
-    let padded_width = width.checked_add(2)?;
-    let padded_height = height.checked_add(2)?;
-    let output_cells = width.checked_mul(height)?;
-    let padded_cells = padded_width.checked_mul(padded_height)?;
-    if output_cells > MAX_FLOW_CELLS {
-        return None;
-    }
-    let expected_len = i64::try_from(padded_cells).ok()?;
-    if walkable_len != expected_len {
-        return None;
-    }
-    Some((width, height, goal_x, goal_y, cap as usize, padded_cells))
-}
-
-fn reserved_bytes(input_len: usize, output_cells: usize) -> Option<usize> {
-    let per_cell = std::mem::size_of::<f32>().checked_add(std::mem::size_of::<usize>())?;
-    input_len.checked_add(output_cells.checked_mul(per_cell)?)
 }
 
 #[cfg(test)]
@@ -419,8 +73,6 @@ fn compute_flow(
     cap: usize,
     walkable: &[u8],
 ) -> FlowResult {
-    let cancellation = AtomicBool::new(false);
-    let stopping = AtomicBool::new(false);
     compute_flow_with_cancel(
         width,
         height,
@@ -428,8 +80,7 @@ fn compute_flow(
         goal_y,
         cap,
         walkable,
-        &cancellation,
-        &stopping,
+        &AtomicBool::new(false),
     )
     .expect("non-cancellable flow computation was cancelled")
 }
@@ -458,35 +109,26 @@ fn compute_flow_with_cancel(
     goal_y: i64,
     cap: usize,
     walkable: &[u8],
-    cancellation: &AtomicBool,
-    stopping: &AtomicBool,
+    cancelled: &AtomicBool,
 ) -> Option<FlowResult> {
-    let output_cells = width.checked_mul(height)?;
-    let padded_width = width.checked_add(2)?;
-    let padded_cells = padded_width.checked_mul(height.checked_add(2)?)?;
-    if width == 0
-        || height == 0
-        || goal_x < 0
-        || goal_y < 0
-        || goal_x >= width as i64
-        || goal_y >= height as i64
-        || walkable.len() != padded_cells
-    {
-        return Some(FlowResult {
-            distances: vec![FLOW_UNREACHABLE; output_cells],
-            truncated: false,
-        });
-    }
+    let output_cells = width * height;
+    let padded_width = width + 2;
     let mut distances = vec![FLOW_UNREACHABLE; output_cells];
+    let unreached = |distances| {
+        Some(FlowResult {
+            distances,
+            truncated: false,
+        })
+    };
+    if goal_x < 0 || goal_y < 0 || goal_x >= width as i64 || goal_y >= height as i64 {
+        return unreached(distances);
+    }
     let goal_x = goal_x as usize;
     let goal_y = goal_y as usize;
     let goal_index = goal_y * width + goal_x;
     let goal_padded_index = (goal_y + 1) * padded_width + goal_x + 1;
     if walkable[goal_padded_index] & CELL_WALKABLE == 0 {
-        return Some(FlowResult {
-            distances,
-            truncated: false,
-        });
+        return unreached(distances);
     }
     distances[goal_index] = 0.0;
     let mut queue = Vec::with_capacity(output_cells);
@@ -500,9 +142,7 @@ fn compute_flow_with_cancel(
         let current = queue[queue_head];
         queue_head += 1;
         expanded += 1;
-        if expanded & 63 == 0
-            && (cancellation.load(Ordering::Acquire) || stopping.load(Ordering::Acquire))
-        {
+        if expanded & 63 == 0 && cancelled.load(Ordering::Acquire) {
             return None;
         }
         let current_x = current % width;
@@ -569,35 +209,38 @@ pub extern "C" fn stone_flow_submit(
     walkable: *const u8,
     walkable_len: i64,
 ) -> u64 {
-    let Some((width, height, goal_x, goal_y, cap, padded_cells)) =
-        request_shape(width, height, goal_x, goal_y, cap, walkable_len)
-    else {
+    if width <= 0 || height <= 0 || cap < 0 {
         crate::log_once!("FLOW", "stone_flow_submit: invalid request shape");
         return 0;
-    };
+    }
+    let (width, height) = (width as usize, height as usize);
+    let output_cells = width * height;
+    let padded_cells = (width + 2) * (height + 2);
+    if output_cells > MAX_FLOW_CELLS || i64::try_from(padded_cells) != Ok(walkable_len) {
+        crate::log_once!("FLOW", "stone_flow_submit: invalid request shape");
+        return 0;
+    }
     if walkable.is_null() {
         crate::log_once!("FLOW", "stone_flow_submit: null walkability snapshot");
         return 0;
     }
-    let output_cells = width * height;
-    let Some(reserved_bytes) = reserved_bytes(padded_cells, output_cells) else {
-        crate::log_once!("FLOW", "stone_flow_submit: request size overflow");
-        return 0;
-    };
+    let reserved_bytes = padded_cells + output_cells * (size_of::<f32>() + size_of::<usize>());
     if reserved_bytes > MAX_FLOW_BYTES {
         crate::log_once!("FLOW", "stone_flow_submit: request exceeds bounded storage");
         return 0;
     }
-    let snapshot = unsafe { std::slice::from_raw_parts(walkable, padded_cells) }.to_vec();
+    let kernel = FieldKernel::Flow {
+        goal_x: goal_x.into(),
+        goal_y: goal_y.into(),
+        cap: cap as usize,
+    };
     submit_field(
         width,
         height,
-        goal_x,
-        goal_y,
-        cap,
-        snapshot,
+        walkable,
+        padded_cells,
         reserved_bytes,
-        FieldKernel::Flow,
+        kernel,
     )
 }
 
@@ -609,116 +252,113 @@ pub extern "C" fn stone_terrain_submit(
     solid: *const u8,
     solid_len: i64,
 ) -> u64 {
-    let Some((width, height, sub, cells, bytes)) =
-        terrain_request_shape(width, height, sub, solid_len)
-    else {
+    if width <= 0 || height <= 0 || sub <= 0 {
         crate::log_once!("FIELD", "stone_terrain_submit: invalid request shape");
         return 0;
-    };
+    }
+    let (width, height, sub) = (width as usize, height as usize, sub as usize);
+    let cells = width * height;
+    let bytes = cells
+        .checked_mul(sub)
+        .and_then(|n| n.checked_mul(sub))
+        .filter(|&samples| samples <= MAX_FLOW_CELLS)
+        .map(|samples| cells + samples * size_of::<f32>());
+    if i64::try_from(cells) != Ok(solid_len) || bytes.is_none_or(|bytes| bytes > MAX_FLOW_BYTES) {
+        crate::log_once!("FIELD", "stone_terrain_submit: invalid request shape");
+        return 0;
+    }
     if solid.is_null() {
         crate::log_once!("FIELD", "stone_terrain_submit: null solid snapshot");
         return 0;
     }
-    let snapshot = unsafe { std::slice::from_raw_parts(solid, cells) }.to_vec();
-    submit_field(
-        width,
-        height,
-        0,
-        0,
-        0,
-        snapshot,
-        bytes,
-        FieldKernel::Terrain { sub },
-    )
-}
-
-fn terrain_request_shape(
-    width: i32,
-    height: i32,
-    sub: i32,
-    len: i64,
-) -> Option<(usize, usize, usize, usize, usize)> {
-    if width <= 0 || height <= 0 || sub <= 0 {
-        return None;
-    }
-    let (width, height, sub) = (width as usize, height as usize, sub as usize);
-    let cells = width.checked_mul(height)?;
-    let samples = cells.checked_mul(sub)?.checked_mul(sub)?;
-    if samples > MAX_FLOW_CELLS || i64::try_from(cells).ok()? != len {
-        return None;
-    }
-    let bytes = cells.checked_add(samples.checked_mul(std::mem::size_of::<f32>())?)?;
-    if bytes > MAX_FLOW_BYTES {
-        return None;
-    }
-    Some((width, height, sub, cells, bytes))
+    let kernel = FieldKernel::Terrain { sub };
+    submit_field(width, height, solid, cells, bytes.unwrap(), kernel)
 }
 
 fn submit_field(
     width: usize,
     height: usize,
-    goal_x: i64,
-    goal_y: i64,
-    cap: usize,
-    snapshot: Vec<u8>,
+    snapshot: *const u8,
+    snapshot_len: usize,
     reserved_bytes: usize,
     kernel: FieldKernel,
 ) -> u64 {
-    let Some(handle) = allocate_flow_handle() else {
-        crate::log_once!("FIELD", "field submit: handle space exhausted");
-        return 0;
-    };
-    let work = FlowWork {
-        handle,
+    let work = FieldWork {
         width,
         height,
-        goal_x,
-        goal_y,
-        cap,
-        walkable: snapshot,
-        cancellation: Arc::new(AtomicBool::new(false)),
-        reserved_bytes,
+        snapshot: unsafe { std::slice::from_raw_parts(snapshot, snapshot_len) }.to_vec(),
         kernel,
     };
-    let Some(service) = ensure_flow_service() else {
-        crate::log_once!("FIELD", "field submit: worker unavailable");
-        return 0;
-    };
-    if service.submit(work) {
-        handle
-    } else {
-        crate::log_once!("FIELD", "field submit: bounded worker queue is full");
-        0
+    match FIELD_JOBS.submit(work, reserved_bytes) {
+        Ok(handle) => handle,
+        Err(Refused::Busy) => {
+            crate::log_once!("FIELD", "field submit: bounded worker queue is full");
+            0
+        }
+        Err(Refused::Handles) => {
+            crate::log_once!("FIELD", "field submit: handle space exhausted");
+            0
+        }
+        Err(Refused::Worker(error)) => {
+            crate::log_once!("FLOW", "failed to start flow worker: {}", error);
+            crate::log_once!("FIELD", "field submit: worker unavailable");
+            0
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn stone_flow_poll(handle: u64) -> i32 {
-    active_flow_service().map_or(-1, |service| service.poll(handle))
+    FIELD_JOBS.poll(handle)
 }
 
 #[no_mangle]
 pub extern "C" fn stone_flow_wait(handle: u64) -> i32 {
-    active_flow_service().map_or(-1, |service| service.wait(handle))
+    FIELD_JOBS.wait(handle)
 }
 
 #[no_mangle]
 pub extern "C" fn stone_flow_copy(handle: u64, output: *mut f32, output_len: i64) -> i32 {
-    active_flow_service().map_or(-1, |service| service.copy(handle, output, output_len))
+    if output_len < 0 {
+        return -1;
+    }
+    let fits = |result: &FlowResult| {
+        let required = result.distances.len();
+        let fits = !output.is_null() && output_len as usize >= required;
+        if !fits {
+            crate::log_once!(
+                "FLOW",
+                "stone_flow_copy: output buffer is too small (need {}, got {})",
+                required,
+                output_len
+            );
+        }
+        fits
+    };
+    match FIELD_JOBS.take(handle, fits) {
+        Taken::Missing | Taken::Rejected => -1,
+        Taken::Pending => -2,
+        Taken::Ready(result) => {
+            // The output pointer and its length are part of the C ABI contract.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    result.distances.as_ptr(),
+                    output,
+                    result.distances.len(),
+                );
+            }
+            i32::from(result.truncated)
+        }
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn stone_flow_cancel(handle: u64) {
-    if let Some(service) = active_flow_service() {
-        service.cancel(handle);
-    }
+    FIELD_JOBS.cancel(handle);
 }
 
 pub(crate) fn shutdown() {
-    let service = flow_service_slot().lock().unwrap().take();
-    if let Some(service) = service {
-        service.shutdown();
-    }
+    FIELD_JOBS.shutdown();
 }
 
 #[cfg(test)]

@@ -6,11 +6,6 @@ const FIELD_FAR: f32 = 1_000_000.0;
 const FIELD_DIAG: f64 = std::f64::consts::SQRT_2;
 
 #[inline]
-fn cancelled(cancellation: &AtomicBool, stopping: &AtomicBool) -> bool {
-    cancellation.load(Ordering::Acquire) || stopping.load(Ordering::Acquire)
-}
-
-#[inline]
 fn solid_at(solid: &[u8], tile_width: usize, sub: usize, x: usize, y: usize) -> bool {
     solid[(y / sub) * tile_width + x / sub] != 0
 }
@@ -20,8 +15,7 @@ pub(super) fn compute(
     height: usize,
     sub: usize,
     solid: &[u8],
-    cancellation: &AtomicBool,
-    stopping: &AtomicBool,
+    cancelled: &AtomicBool,
 ) -> Option<Vec<f32>> {
     let sample_width = width.checked_mul(sub)?;
     let sample_height = height.checked_mul(sub)?;
@@ -34,7 +28,7 @@ pub(super) fn compute(
     let mut distance = vec![FIELD_FAR; sample_len];
 
     for y in 0..sample_height {
-        if cancelled(cancellation, stopping) {
+        if cancelled.load(Ordering::Acquire) {
             return None;
         }
         for x in 0..sample_width {
@@ -54,7 +48,7 @@ pub(super) fn compute(
     // Cells are stored as f32 but Rock's float is f64: widen, keep mins in f64, round once on
     // write.
     for y in 0..sample_height {
-        if cancelled(cancellation, stopping) {
+        if cancelled.load(Ordering::Acquire) {
             return None;
         }
         for x in 0..sample_width {
@@ -77,7 +71,7 @@ pub(super) fn compute(
     }
 
     for y in (0..sample_height).rev() {
-        if cancelled(cancellation, stopping) {
+        if cancelled.load(Ordering::Acquire) {
             return None;
         }
         for x in (0..sample_width).rev() {
@@ -100,7 +94,7 @@ pub(super) fn compute(
     }
 
     for y in 0..sample_height {
-        if cancelled(cancellation, stopping) {
+        if cancelled.load(Ordering::Acquire) {
             return None;
         }
         for x in 0..sample_width {
