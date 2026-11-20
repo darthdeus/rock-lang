@@ -546,14 +546,8 @@ pub extern "C" fn stone_get_mouse_position(x: *mut c_int, y: *mut c_int) {
     with_window(|window: &StoneWindow| {
         let pump = window.event_pump.borrow();
         let mouse = pump.mouse_state();
-        unsafe {
-            if !x.is_null() {
-                *x = mouse.x();
-            }
-            if !y.is_null() {
-                *y = mouse.y();
-            }
-        }
+        crate::write_out(x, mouse.x());
+        crate::write_out(y, mouse.y());
     });
 }
 
