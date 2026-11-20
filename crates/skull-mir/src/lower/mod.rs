@@ -20,7 +20,7 @@ use skull_parser::CompilerError;
 use ustr::Ustr;
 
 use crate::code_identity::{CodeIdentity, CodeOwner, CodeOwnerKind};
-use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteTypeTables};
+use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans};
 use crate::intrinsics::ExpandKind;
 use crate::mir::*;
 use crate::monoty::{MonoCtor, MonoTy};
@@ -1017,18 +1017,10 @@ pub fn lower_instance_with_plans(
     let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
     // The plan audits only fail on a compiler bug, so they run with the debug checks.
     if crate::verify::checks_enabled() {
-        if let Some(inf) = inf {
-            validate_plan_type_tables(
-                ws,
-                inf,
-                body,
-                &plan.types,
-                "concrete plan",
-                func.param_decls
-                    .iter()
-                    .map(|param| param.ty)
-                    .chain(func.return_ty),
-            )?;
+        if inf.is_some() {
+            plan.types
+                .check_source(scx.interner(), (mid, owner), body, "concrete plan")
+                .map_err(gap)?;
         }
         validate_plan_domains(plan, "concrete plan")?;
         validate_concrete_callee_plans(ws, scx, plan, concrete_plans).map_err(at_decl)?;
@@ -1154,15 +1146,8 @@ pub fn lower_global_with_plans(
     }
     let gid = Idx::from_raw(RawIdx::from_u32(*index));
     let def = &module.globals[gid];
-    let (body, inf) = validate_always_plan(
-        ws,
-        scx,
-        mid,
-        BodyOwner::Global(gid),
-        plan,
-        concrete_plans,
-        [def.ty],
-    )?;
+    let (body, inf) =
+        validate_always_plan(ws, scx, mid, BodyOwner::Global(gid), plan, concrete_plans)?;
     if body.root.is_none() {
         return Ok(None);
     }
@@ -1219,7 +1204,6 @@ pub fn lower_decorator_with_plans(
         BodyOwner::Decorator(did),
         plan,
         concrete_plans,
-        def.param_decls.iter().map(|param| param.ty),
     )?;
     let target = body
         .deco_target
@@ -1284,7 +1268,6 @@ fn validate_always_plan<'a>(
     owner: BodyOwner,
     plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
-    declared_types: impl IntoIterator<Item = TyId>,
 ) -> Result<(&'a Body, &'a BodyInference), CompilerError> {
     let inf = ws
         .inference(mid)
@@ -1297,33 +1280,13 @@ fn validate_always_plan<'a>(
         .ok_or_else(|| gap("concrete always-emitted plan has no body"))?;
     if crate::verify::checks_enabled() {
         let label = "concrete always-emitted plan";
-        validate_plan_type_tables(ws, inf, body, &plan.types, label, declared_types)?;
+        plan.types
+            .check_source(scx.interner(), (mid, owner), body, label)
+            .map_err(gap)?;
         validate_plan_domains(plan, label)?;
         validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
     }
     Ok((body, inf))
-}
-
-fn validate_plan_type_tables(
-    ws: &Workspace,
-    inf: &BodyInference,
-    body: &Body,
-    tables: &ConcreteTypeTables,
-    label: &str,
-    declared_types: impl IntoIterator<Item = TyId>,
-) -> Result<(), CompilerError> {
-    validate_concrete_type_tables(ws, inf, body, tables, label, declared_types)?;
-    for (expr, _) in inf.expr_types.iter() {
-        if tables.expr_type(expr).is_none() && !tables.is_untyped_expr(expr) {
-            return Err(gap(format!("{label} is missing expression type {expr:?}")));
-        }
-    }
-    for (binding, _) in inf.binding_types.iter() {
-        if tables.binding_type(binding).is_none() && !tables.is_untyped_binding(binding) {
-            return Err(gap(format!("{label} is missing binding type {binding:?}")));
-        }
-    }
-    Ok(())
 }
 
 fn validate_plan_domains(plan: &ConcreteBodyPlan, label: &str) -> Result<(), CompilerError> {
@@ -1372,115 +1335,6 @@ fn validate_concrete_callee_plans(
                 "concrete callee signature disagrees with its body plan at site {:?}",
                 site.op
             )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_concrete_type_tables(
-    ws: &Workspace,
-    inf: &BodyInference,
-    body: &Body,
-    tables: &ConcreteTypeTables,
-    label: &str,
-    declared_types: impl IntoIterator<Item = TyId>,
-) -> Result<(), CompilerError> {
-    fn visit(
-        ws: &Workspace,
-        inf: &BodyInference,
-        tables: &ConcreteTypeTables,
-        label: &str,
-        ty: TyId,
-        seen: &mut HashSet<TyId>,
-    ) -> Result<(), CompilerError> {
-        if !seen.insert(ty) {
-            return Ok(());
-        }
-        if tables.ty_type(ty).is_none() {
-            return Err(gap(format!("{label} is missing concrete type node {ty:?}")));
-        }
-        let node = match ty {
-            TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
-            TyId::Local(idx) => inf.ty_arena[idx],
-        };
-        match node {
-            TypeExpr::Nullable(inner) => visit(ws, inf, tables, label, ty.with_idx(inner), seen),
-            TypeExpr::App { params, .. } => {
-                for param in params {
-                    visit(ws, inf, tables, label, ty.with_idx(param), seen)?;
-                }
-                Ok(())
-            }
-            TypeExpr::Function { params, ret } => {
-                for param in params {
-                    visit(ws, inf, tables, label, ty.with_idx(param), seen)?;
-                }
-                visit(ws, inf, tables, label, ty.with_idx(ret), seen)
-            }
-            TypeExpr::Tuple { elements } => {
-                for element in elements {
-                    visit(ws, inf, tables, label, ty.with_idx(element), seen)?;
-                }
-                Ok(())
-            }
-            TypeExpr::Infer(var, _) => match inf.substitutions.get(var) {
-                Some(next) => visit(ws, inf, tables, label, next, seen),
-                None => Ok(()),
-            },
-            TypeExpr::Builtin(_) | TypeExpr::Generic(..) => Ok(()),
-        }
-    }
-
-    let mut seen = HashSet::default();
-    for (expr, ty) in inf.expr_types.iter() {
-        if tables.is_untyped_expr(expr) {
-            continue;
-        }
-        visit(ws, inf, tables, label, *ty, &mut seen)?;
-    }
-    for (binding, ty) in inf.binding_types.iter() {
-        if tables.is_untyped_binding(binding) {
-            continue;
-        }
-        visit(ws, inf, tables, label, *ty, &mut seen)?;
-    }
-    for ty in inf.fn_field_call_types.values() {
-        visit(ws, inf, tables, label, *ty, &mut seen)?;
-    }
-    for ty in declared_types {
-        visit(ws, inf, tables, label, ty, &mut seen)?;
-    }
-    for (_, binding) in body.binding_arena.iter() {
-        if let Some(ty) = binding.declared_ty {
-            visit(ws, inf, tables, label, ty, &mut seen)?;
-        }
-    }
-    for (_, node) in body.expr_arena.iter() {
-        if let Expr::As { target, .. } = node {
-            visit(ws, inf, tables, label, *target, &mut seen)?;
-        }
-    }
-    for (expr, node) in body.expr_arena.iter() {
-        let Expr::StructLiteral { name, .. } = node else {
-            continue;
-        };
-        let fields = tables.struct_field_types.get(expr).ok_or_else(|| {
-            gap(format!(
-                "{label} is missing concrete fields for struct literal `{name}` ({expr:?})"
-            ))
-        })?;
-        let sid = ws
-            .nominals
-            .struct_id(*name)
-            .ok_or_else(|| gap(format!("{label} names unknown struct `{name}`")))?;
-        let def = &ws.modules[sid.module.index()].structs[sid.def];
-        for field in &def.fields {
-            if !fields.contains_key(&field.name) {
-                return Err(gap(format!(
-                    "{label} is missing concrete field `{name}.{}` ({expr:?})",
-                    field.name
-                )));
-            }
         }
     }
     Ok(())

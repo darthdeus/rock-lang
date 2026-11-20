@@ -1,18 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use bone_core::hir::{Body, BodyOwner, Expr, TypeExpr};
+use bone_core::hir::{BodyOwner, TypeExpr};
 use bone_core::prelude::TyId;
-use bone_core::workspace::{BodyInference, Workspace};
-use comfy_la_arena::{ArenaMap, Idx};
+use bone_core::workspace::Workspace;
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::concrete::{
     ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteCallee, ConcreteOwner, ConcretePlans,
     ConcreteSignature, ConcreteSignatureHandle, ConcreteTypeTables,
 };
 use skull_mir::mir::FuncRef;
-use skull_mir::monoty::{MonoCtor, MonoInterner, MonoSubst, MonoTy, MonoTyId, MonoTyReason, TyEnv};
-use ustr::Ustr;
+use skull_mir::monoty::{MonoSubst, MonoTyReason, TyEnv};
 
 use crate::instance_graph::{
     ready_body, BoundaryClass, Contribution, Instance, InstanceGraph, Owner, Site, SiteDomain,
@@ -28,8 +26,6 @@ pub struct BoundaryId {
     pub target: CpuTargetSpec,
     pub symbol: String,
 }
-
-type TypeConversionMemo = FxHashMap<TyId, Result<MonoTyId, MonoTyReason>>;
 
 #[derive(Clone, Default)]
 pub struct ConcreteBodies {
@@ -261,67 +257,6 @@ impl ConcreteBodies {
     }
 }
 
-#[derive(Default)]
-struct Converted {
-    types: ConcreteTypeTables,
-    error: Option<MonoTyReason>,
-    type_memo: TypeConversionMemo,
-}
-
-fn convert_body(
-    arena: &MonoInterner,
-    ws: &Workspace,
-    inf: &BodyInference,
-    body: &Body,
-    subst: &MonoSubst,
-) -> Converted {
-    let mut c = Converted::default();
-    let mut memo: TypeConversionMemo = FxHashMap::default();
-    let mut convert = |ty: TyId| {
-        memo.entry(ty)
-            .or_insert_with(|| arena.convert(ws, inf, ty, subst))
-            .clone()
-    };
-    for (expr, ty) in inf.expr_types.iter() {
-        match convert(*ty) {
-            Ok(id) => {
-                c.types.expr_types.insert(expr, id);
-            }
-            Err(MonoTyReason::UnresolvedInfer(_)) => {
-                c.types.untyped_exprs.insert(expr);
-            }
-            Err(reason) => {
-                c.error.get_or_insert(reason);
-            }
-        }
-    }
-    for (expr, _) in body.expr_arena.iter() {
-        if inf.expr_types.get(expr).is_none() {
-            c.types.untyped_exprs.insert(expr);
-        }
-    }
-    for (binding, _) in body.binding_arena.iter() {
-        if inf.binding_types.get(binding).is_none() {
-            c.types.untyped_bindings.insert(binding);
-        }
-    }
-    for (binding, ty) in inf.binding_types.iter() {
-        match convert(*ty) {
-            Ok(id) => {
-                c.types.binding_types.insert(binding, id);
-            }
-            Err(MonoTyReason::UnresolvedInfer(_)) => {
-                c.types.untyped_bindings.insert(binding);
-            }
-            Err(reason) => {
-                c.error.get_or_insert(reason);
-            }
-        }
-    }
-    c.type_memo = memo;
-    c
-}
-
 fn concrete_signature(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -375,168 +310,6 @@ pub(crate) fn concrete_signature_for_instance(
 ) -> Result<ConcreteSignature, MonoTyReason> {
     let subst = g.substitution(inst).ok_or(MonoTyReason::NoNode)?;
     concrete_signature(ws, g, inst, subst)
-}
-
-fn concrete_tables(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    inf: &BodyInference,
-    body: &Body,
-    subst: &MonoSubst,
-    declared_types: impl IntoIterator<Item = TyId>,
-) -> Result<ConcreteTypeTables, MonoTyReason> {
-    let mut converted = convert_body(g.interner(), ws, inf, body, subst);
-    if let Some(reason) = converted.error {
-        return Err(reason);
-    }
-    let ty_types = concrete_ty_types(
-        ws,
-        g,
-        inf,
-        body,
-        subst,
-        declared_types,
-        &mut converted.type_memo,
-    )?;
-    let struct_field_types = concrete_struct_field_types(ws, g, body, &converted.types.expr_types)?;
-    converted.types.ty_types = ty_types;
-    converted.types.struct_field_types = struct_field_types;
-    Ok(converted.types)
-}
-
-fn concrete_struct_field_types(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    body: &Body,
-    expr_types: &ArenaMap<Idx<Expr>, MonoTyId>,
-) -> Result<ArenaMap<Idx<Expr>, FxHashMap<Ustr, MonoTyId>>, MonoTyReason> {
-    let mut out = ArenaMap::default();
-    for (expr, node) in body.expr_arena.iter() {
-        let Expr::StructLiteral { name, .. } = node else {
-            continue;
-        };
-        let sid = ws.nominals.struct_id(*name).ok_or(MonoTyReason::NoNode)?;
-        let def = &ws.modules[sid.module.index()].structs[sid.def];
-        let params = match expr_types.get(expr).copied() {
-            Some(ty_id) => {
-                let concrete = g.interner().get(ty_id);
-                let (payload, _) = concrete.peel_nullable();
-                let MonoTy::App {
-                    ctor: MonoCtor::Nominal(actual),
-                    params,
-                } = payload
-                else {
-                    return Err(MonoTyReason::NoNode);
-                };
-                if *actual != *name || def.generics.len() != params.len() {
-                    return Err(MonoTyReason::NoNode);
-                }
-                params.to_vec()
-            }
-            None if def.generics.is_empty() => Vec::new(),
-            None => return Err(MonoTyReason::NoNode),
-        };
-        let mut subst = MonoSubst::default();
-        for (generic, param) in def.generics.iter().zip(params) {
-            let TypeExpr::Generic(var, _) = TyEnv::Decl.decl_node(ws, *generic)? else {
-                return Err(MonoTyReason::NoNode);
-            };
-            subst.insert(var, param.clone());
-        }
-        let arena = g.interner();
-        let fields = def
-            .fields
-            .iter()
-            .map(|field| {
-                arena
-                    .convert_decl(ws, field.ty, &subst)
-                    .map(|ty| (field.name, ty))
-            })
-            .collect::<Result<FxHashMap<_, _>, _>>()?;
-        out.insert(expr, fields);
-    }
-    Ok(out)
-}
-
-fn concrete_ty_types(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    inf: &BodyInference,
-    body: &Body,
-    subst: &MonoSubst,
-    declared_types: impl IntoIterator<Item = TyId>,
-    memo: &mut TypeConversionMemo,
-) -> Result<rustc_hash::FxHashMap<TyId, MonoTyId>, MonoTyReason> {
-    let mut nodes = FxHashSet::default();
-    for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
-        collect_type_nodes(ws, inf, *ty, &mut nodes);
-    }
-    for ty in inf.fn_field_call_types.values() {
-        collect_type_nodes(ws, inf, *ty, &mut nodes);
-    }
-    for ty in declared_types {
-        collect_type_nodes(ws, inf, ty, &mut nodes);
-    }
-    for (_, binding) in body.binding_arena.iter() {
-        if let Some(ty) = binding.declared_ty {
-            collect_type_nodes(ws, inf, ty, &mut nodes);
-        }
-    }
-    for (_, expr) in body.expr_arena.iter() {
-        if let Expr::As { target, .. } = expr {
-            collect_type_nodes(ws, inf, *target, &mut nodes);
-        }
-    }
-    let arena = g.interner();
-    nodes
-        .into_iter()
-        .filter_map(|ty| {
-            let converted = memo
-                .entry(ty)
-                .or_insert_with(|| arena.convert(ws, inf, ty, subst))
-                .clone();
-            match converted {
-                Ok(id) => Some(Ok((ty, id))),
-                Err(MonoTyReason::UnresolvedInfer(_)) => None,
-                Err(reason) => Some(Err(reason)),
-            }
-        })
-        .collect()
-}
-
-fn collect_type_nodes(ws: &Workspace, inf: &BodyInference, ty: TyId, out: &mut FxHashSet<TyId>) {
-    if !out.insert(ty) {
-        return;
-    }
-    let node = match ty {
-        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
-        TyId::Local(idx) => inf.ty_arena[idx],
-    };
-    match node {
-        TypeExpr::Nullable(inner) => collect_type_nodes(ws, inf, ty.with_idx(inner), out),
-        TypeExpr::App { params, .. } => {
-            for param in params {
-                collect_type_nodes(ws, inf, ty.with_idx(param), out);
-            }
-        }
-        TypeExpr::Function { params, ret } => {
-            for param in params {
-                collect_type_nodes(ws, inf, ty.with_idx(param), out);
-            }
-            collect_type_nodes(ws, inf, ty.with_idx(ret), out);
-        }
-        TypeExpr::Tuple { elements } => {
-            for element in elements {
-                collect_type_nodes(ws, inf, ty.with_idx(element), out);
-            }
-        }
-        TypeExpr::Infer(var, _) => {
-            if let Some(next) = inf.substitutions.get(var) {
-                collect_type_nodes(ws, inf, next, out);
-            }
-        }
-        TypeExpr::Builtin(_) | TypeExpr::Generic(..) => {}
-    }
 }
 
 struct BuiltInstance {
@@ -734,11 +507,11 @@ fn publish_foreign_domains(
                                     Some(defaults_inf),
                                     args,
                                 );
-                                concrete_tables(
+                                ConcreteTypeTables::publish(
                                     ws,
-                                    g,
-                                    defaults_inf,
-                                    defaults_body,
+                                    g.interner(),
+                                    (*module, owner),
+                                    (defaults_inf, defaults_body),
                                     &defaults_subst,
                                     std::iter::empty(),
                                 )
@@ -754,8 +527,7 @@ fn publish_foreign_domains(
 
 struct PreparedInstance {
     instance: Instance,
-    types: ConcreteTypeTables,
-    type_error: Option<MonoTyReason>,
+    types: Result<ConcreteTypeTables, MonoTyReason>,
 }
 
 fn prepare_instance(ws: &Workspace, g: &InstanceGraph, inst: Instance) -> Option<PreparedInstance> {
@@ -765,30 +537,23 @@ fn prepare_instance(ws: &Workspace, g: &InstanceGraph, inst: Instance) -> Option
     let subst = g.substitution(&inst).cloned()?;
     let (inf, body) = ready_body(ws, inst.func)?;
 
-    let converted = convert_body(g.interner(), ws, inf, body, &subst);
-    let mut types = converted.types;
-    let mut memo = converted.type_memo;
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     let declared_types = f
         .param_decls
         .iter()
         .map(|param| param.ty)
         .chain(f.return_ty);
-    let type_error = match concrete_ty_types(ws, g, inf, body, &subst, declared_types, &mut memo) {
-        Ok(ty_types) => match concrete_struct_field_types(ws, g, body, &types.expr_types) {
-            Ok(struct_field_types) => {
-                types.ty_types = ty_types;
-                types.struct_field_types = struct_field_types;
-                None
-            }
-            Err(reason) => Some(reason),
-        },
-        Err(reason) => Some(reason),
-    };
+    let types = ConcreteTypeTables::publish(
+        ws,
+        g.interner(),
+        (inst.func.module, BodyOwner::Function(inst.func.func)),
+        (inf, body),
+        &subst,
+        declared_types,
+    );
     Some(PreparedInstance {
         instance: inst,
         types,
-        type_error,
     })
 }
 
@@ -837,11 +602,22 @@ fn prepare_always(
             .inference(module)
             .and_then(|ir| ir.per_fn.get(&body_owner))
             .ok_or(MonoTyReason::NoNode)?;
-        let declared_type = match body_owner {
-            BodyOwner::Global(index) => Some(module_data.globals[index].ty),
-            _ => None,
+        let (global_ty, params) = match body_owner {
+            BodyOwner::Global(index) => (Some(module_data.globals[index].ty), &[][..]),
+            BodyOwner::Decorator(index) => (None, &module_data.decorators[index].param_decls[..]),
+            _ => (None, &[][..]),
         };
-        concrete_tables(ws, g, inf, body, &MonoSubst::default(), declared_type).map(Some)
+        ConcreteTypeTables::publish(
+            ws,
+            g.interner(),
+            (module, body_owner),
+            (inf, body),
+            &MonoSubst::default(),
+            global_ty
+                .into_iter()
+                .chain(params.iter().map(|param| param.ty)),
+        )
+        .map(Some)
     })();
     PreparedAlways {
         module,
@@ -877,8 +653,7 @@ where
 fn concrete_plan_from_sites(
     g: &InstanceGraph,
     inst: &Instance,
-    types: ConcreteTypeTables,
-    type_error: Option<MonoTyReason>,
+    types: Result<ConcreteTypeTables, MonoTyReason>,
     signatures: &PublishedSignatures,
     domains: &PublishedDomains,
 ) -> Result<(ConcreteBodyPlan, FxHashSet<Instance>), MonoTyReason> {
@@ -928,9 +703,7 @@ fn concrete_plan_from_sites(
         return Err(reason);
     }
     let signature = owner_signature?;
-    if let Some(reason) = type_error {
-        return Err(reason);
-    }
+    let types = types?;
 
     let default_domains = g
         .contributions
@@ -985,10 +758,9 @@ fn produce_instance(
     let PreparedInstance {
         instance: inst,
         types,
-        type_error,
     } = prepared;
     let (plan, candidate_refs) =
-        match concrete_plan_from_sites(g, &inst, types, type_error, signatures, domains) {
+        match concrete_plan_from_sites(g, &inst, types, signatures, domains) {
             Ok((plan, candidate_refs)) => (Ok(plan), candidate_refs),
             Err(reason) => (Err(reason), FxHashSet::default()),
         };
@@ -1054,11 +826,7 @@ fn produce_always(
         let (params, result) = match body_owner {
             BodyOwner::Global(gid) => {
                 let ty = module_data.globals[gid].ty;
-                let result = types
-                    .ty_types
-                    .get(&ty)
-                    .copied()
-                    .ok_or(MonoTyReason::NoNode)?;
+                let result = types.ty_type(ty).ok_or(MonoTyReason::NoNode)?;
                 (Vec::new(), Some(result))
             }
             BodyOwner::Decorator(_) => {
@@ -1070,13 +838,7 @@ fn produce_always(
                     .deco_target
                     .into_iter()
                     .chain(body.param_bindings)
-                    .map(|binding| {
-                        types
-                            .binding_types
-                            .get(binding)
-                            .copied()
-                            .ok_or(MonoTyReason::NoNode)
-                    })
+                    .map(|binding| types.binding_type(binding).ok_or(MonoTyReason::NoNode))
                     .collect::<Result<Vec<_>, _>>()?;
                 (params, None)
             }

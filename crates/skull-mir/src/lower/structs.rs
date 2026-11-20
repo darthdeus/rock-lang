@@ -564,21 +564,21 @@ impl<'a> Builder<'a> {
             .and_then(|ir| ir.per_fn.get(&owner));
         let args = self.struct_default_args(struct_name, sid)?;
         let domain = crate::site::SiteDomain::struct_defaults(sid.module, sid.def, args);
-        if let Some(defaults_inf) = defaults_inf.filter(|_| crate::verify::checks_enabled()) {
+        if defaults_inf.is_some() && crate::verify::checks_enabled() {
             let plan = self.concrete_plan;
             let tables = plan.domain_types(&domain).ok_or_else(|| {
                 gap(format!(
                     "concrete plan is missing type tables for site domain {domain:?}"
                 ))
             })?;
-            super::validate_concrete_type_tables(
-                self.ws,
-                defaults_inf,
-                defaults_body,
-                tables,
-                "concrete struct-default plan",
-                std::iter::empty(),
-            )?;
+            tables
+                .check_source(
+                    self.scx.interner(),
+                    (sid.module, owner),
+                    defaults_body,
+                    "concrete struct-default plan",
+                )
+                .map_err(gap)?;
         }
         let saved_body = self.body;
         let saved_inf = self.inf;

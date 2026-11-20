@@ -658,6 +658,10 @@ impl MonoInterner {
         }
     }
 
+    pub(crate) fn generation(&self) -> u64 {
+        self.arena_gen
+    }
+
     pub fn len(&self) -> usize {
         self.types.len()
     }

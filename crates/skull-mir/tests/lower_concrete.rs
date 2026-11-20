@@ -133,6 +133,61 @@ fn lower_test_root_with_context(
 }
 
 #[test]
+#[cfg(debug_assertions)]
+fn checked_lowering_rejects_incomplete_and_stale_type_tables() {
+    use bone_core::hir::BodyOwner;
+    use skull_mir::mir::FuncRef;
+
+    let mut ws = crate::common::checked_ws_of(
+        "struct Boxed { n: int = 7 }\n\
+         fn main() -> int { let x = Boxed {}; return x.n }",
+    );
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name == key(&ws, "main"))
+        .unwrap();
+    let root = FuncRef {
+        module: mid,
+        func: fid,
+    };
+    let graph = instance_graph::build(&ws, vec![root]);
+    let concrete = skull_graph::concrete_body::build(&ws, &graph);
+    let scx = ScalarCtx::new(&ws).sharing(Arc::clone(graph.interner()));
+    let plan = concrete.plan_for(&Instance::base(root)).unwrap();
+    lower_instance_with_plans(&ws, &scx, plan, &concrete.plans).unwrap();
+
+    let mut missing = plan.clone();
+    missing.types = Default::default();
+    let error = lower_instance_with_plans(&ws, &scx, &missing, &concrete.plans).unwrap_err();
+    assert!(error.message.contains("missing concrete type"), "{error:?}");
+
+    missing = plan.clone();
+    assert!(!missing.foreign_domains.is_empty());
+    missing.foreign_domains.clear();
+    let error = lower_instance_with_plans(&ws, &scx, &missing, &concrete.plans).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("missing type tables for site domain"),
+        "{error:?}"
+    );
+
+    ws.modules[mid.index()]
+        .bodies
+        .get_mut(&BodyOwner::Function(fid))
+        .unwrap()
+        .generation += 1;
+    let error = lower_instance_with_plans(&ws, &scx, plan, &concrete.plans).unwrap_err();
+    assert!(
+        error.message.contains("stale concrete type tables"),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn nested_first_class_field_updates_rebuild_every_parent() {
     let ws = crate::common::checked_ws_of(
         "value Inner { x: int, y: int }\n\
