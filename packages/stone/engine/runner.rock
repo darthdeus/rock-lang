@@ -464,22 +464,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         toggle_jit_trace_logging()
     }
 
-    if let join_path = os_getenv("STONE_JIT_FRAME_JOIN") {
-        if join_path != "" {
-            if !JIT_TRACE_INSTALLED {
-                if install_jit_trace_attach() {
-                    JIT_TRACE_INSTALLED = true
-                } else {
-                    log_warn("JIT", "jit.attach unavailable; frame join disabled")
-                }
-            }
-            if JIT_TRACE_INSTALLED {
-                JIT_FRAME_JOIN_PATH = join_path
-                log_info("JIT", "frame join enabled -> {join_path}")
-            }
-        }
-    }
-
     // The hitch ledger and timeline read recorder counters every frame. Without the
     // full trace attach above, a counter-only callback keeps them moving; the
     // full one replaces it if trace logging is toggled on later (LuaJIT keeps
@@ -601,7 +585,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
             sim_entry_frame_timing(sim_entry_diagnostic_timing(ok))
         }
 
-        jit_frame_join_capture(frame, frame_ms)
         metric_add(fps_window, frame_ms)
         // Seeking suppresses world rendering and presentation even though its
         // hidden UI phase still evaluates @late_draw.
@@ -653,7 +636,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     if churn_report != "" { log_info("JIT", "{churn_report}") }
     let churn_sites = jit_churn_guard_sites()
     if churn_sites != "" { log_debug("JIT", "{churn_sites}") }
-    jit_frame_join_flush()
     hitch_ledger_flush()
 
     let total_elapsed = stone_get_time() - loop_start
@@ -2061,68 +2043,7 @@ fn toggle_jit_trace_logging() {
     log_info("JIT", "trace logging {state} (total starts={jit_trace_count_of("starts")} aborts={jit_trace_count_of("aborts")})")
 }
 
-// Per-frame join of wall time with the recorder events that happened during
-// that frame (`STONE_JIT_FRAME_JOIN=<path>`). Hitch triage needs to separate
-// "this frame was slow because the JIT was compiling" from "this frame was
-// slow because the machine was busy", and a frame carrying zero aborts is not
-// the JIT. Live capture, so it needs no deterministic replay -- attribution is
-// within one run, not across two.
 const JIT_ABORT_TOP_N: int = 3
-global JIT_FRAME_JOIN_PATH: string = ""
-global JIT_FRAME_JOIN_LAST_STARTS: int = 0
-global JIT_FRAME_JOIN_LAST_ABORTS: int = 0
-global JIT_FRAME_JOIN_LAST_FLUSHES: int = 0
-
-@nomangle inline(lua) fn jit_frame_join_record(
-    frame: int, frame_ms: float, logic_ms: float, render_ms: float,
-    present_ms: float, starts: int, aborts: int, flushes: int
-) = """
-    local rows = _G.__rock_jit_frame_join
-    if rows == nil then rows = {}; _G.__rock_jit_frame_join = rows end
-    rows[#rows + 1] = string.format("%d\t%.4f\t%.4f\t%.4f\t%.4f\t%d\t%d\t%d",
-        frame, frame_ms, logic_ms, render_ms, present_ms, starts, aborts, flushes)
-"""
-
-@nomangle inline(lua) fn jit_frame_join_write(path: string) -> int = """
-    local rows = _G.__rock_jit_frame_join
-    if rows == nil or #rows == 0 then return 0 end
-    local f = io.open(path, "w")
-    if f == nil then return -1 end
-    f:write("frame\tframe_ms\tlogic_ms\trender_ms\tpresent_ms\tstarts\taborts\tflushes\n")
-    f:write(table.concat(rows, "\n"), "\n")
-    f:close()
-    return #rows
-"""
-
-fn jit_frame_join_capture(frame: int, frame_ms: float) {
-    if JIT_FRAME_JOIN_PATH == "" { return }
-    let starts = jit_trace_count_of("starts")
-    let aborts = jit_trace_count_of("aborts")
-    let flushes = jit_trace_count_of("flushes")
-    let ds = starts - JIT_FRAME_JOIN_LAST_STARTS
-    let da = aborts - JIT_FRAME_JOIN_LAST_ABORTS
-    let df = flushes - JIT_FRAME_JOIN_LAST_FLUSHES
-    JIT_FRAME_JOIN_LAST_STARTS = starts
-    JIT_FRAME_JOIN_LAST_ABORTS = aborts
-    JIT_FRAME_JOIN_LAST_FLUSHES = flushes
-    let phase = frame_diagnostic_timing()
-    jit_frame_join_record(frame, frame_ms, phase.logic_ms, phase.render_ms,
-        phase.present_ms, ds, da, df)
-}
-
-fn jit_frame_join_flush() {
-    if JIT_FRAME_JOIN_PATH == "" { return }
-    let written = jit_frame_join_write(JIT_FRAME_JOIN_PATH)
-    if written < 0 {
-        log_error("JIT", "could not write frame join to {JIT_FRAME_JOIN_PATH}")
-        return
-    }
-    log_info("JIT", "frame join: {written} rows -> {JIT_FRAME_JOIN_PATH}")
-    let top = drain_jit_abort_top(JIT_ABORT_TOP_N)
-    if top != "" {
-        log_info("JIT", "final top aborts: {top}")
-    }
-}
 
 fn jit_trace_window_delta() -> (int, int) {
     let starts = jit_trace_count_of("starts")
