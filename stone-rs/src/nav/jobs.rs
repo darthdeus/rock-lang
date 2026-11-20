@@ -82,7 +82,6 @@ fn reset_worker_query(query: &mut NavQuery) {
     let mut previous = std::mem::take(query);
     // Keep storage, not cached answers: worker assignment must not change the work charged.
     query.stamp = previous.stamp;
-    query.tile_stamp_id = previous.tile_stamp_id;
     macro_rules! retain {
         ($($field:ident),* $(,)?) => {
             $(query.$field = std::mem::take(&mut previous.$field);)*
@@ -109,12 +108,7 @@ fn reset_worker_query(query: &mut NavQuery) {
         cert_parent,
         cert_link,
         cert_closed,
-        tile_dist,
-        tile_stamp,
-        tile_parent,
-        open_cost,
-        open_tile,
-        open_slot,
+        window,
     );
     query.heap = std::mem::take(&mut previous.heap);
     query.heap.clear();

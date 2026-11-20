@@ -116,7 +116,7 @@ pub(super) fn nav_descend_prepare(
     if q.tile_found < 0 {
         return None;
     }
-    let here = q.tile_dist[q.tile_found];
+    let here = q.window.dist[q.tile_found];
     let mut candidates = Vec::new();
     for dy in -1..2 {
         for dx in -1..2 {
@@ -129,7 +129,7 @@ pub(super) fn nav_descend_prepare(
                 continue;
             }
             let t = (ny - q.tile_oy) * q.tile_stride + nx - q.tile_ox;
-            if q.tile_stamp[t] != q.tile_stamp_id || q.tile_dist[t] >= here {
+            if !q.window.reached(t) || q.window.dist[t] >= here {
                 continue;
             }
             if !nav_world_step_open(g, wx, wy, nx, ny, si) {
@@ -148,7 +148,7 @@ pub(super) fn nav_descend_prepare(
                 },
                 x: nx,
                 y: ny,
-                distance: q.tile_dist[t],
+                distance: q.window.dist[t],
                 hop: if dx != 0 && dy != 0 {
                     NAV_COST_DIAGONAL
                 } else {

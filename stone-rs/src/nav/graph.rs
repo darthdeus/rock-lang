@@ -216,11 +216,7 @@ pub(super) fn nav_graph_layout_create(
     g.vertex_stamp = nav_ints(vertices, 0);
     g.search_edges = vec![None; (s * s * 9) as usize].into();
     g.search_ready = nav_bools(s * s, false);
-    g.dist = nav_ints(s * s, 0);
-    g.dist_stamp = nav_ints(s * s, 0);
-    g.open_cost = nav_ints(s * s, 0);
-    g.open_tile = nav_ints(s * s, 0);
-    g.open_slot = nav_ints(s * s, -1);
+    g.window.reserve(s * s);
     nav_graph_set_links(&mut g, links);
     for v in 0..vertices {
         for q in 0..4 {
@@ -1009,57 +1005,66 @@ fn nav_cluster_prepare(g: &mut NavGraph, c: int) {
     g.search_cluster = c;
 }
 
+/// The cost of stepping from local tile `(x, y)` of cluster `c` by `(dx, dy)`,
+/// or `None` when a diagonal step's elbow tiles are closed.
+fn nav_cluster_step_cost(g: &NavGraph, c: int, x: int, y: int, dx: int, dy: int) -> Option<int> {
+    let si = g.cluster_space[c];
+    let ox = g.cluster_x[c];
+    let oy = g.cluster_y[c];
+    let mut step = NAV_COST_STRAIGHT;
+    if dx != 0 && dy != 0 {
+        if !nav_tile_elbow_clear(
+            g,
+            si,
+            ox + x + dx,
+            oy + y,
+            diagonal_step_corner(dx, dy, true),
+        ) || !nav_tile_elbow_clear(
+            g,
+            si,
+            ox + x,
+            oy + y + dy,
+            diagonal_step_corner(dx, dy, false),
+        ) {
+            return None;
+        }
+        step = NAV_COST_DIAGONAL;
+    }
+    Some(nav_edge_cost(
+        step,
+        nav_tile_extra(g, si, ox + x, oy + y),
+        nav_tile_extra(g, si, ox + x + dx, oy + y + dy),
+    ))
+}
+
+/// Calls `f` with each in-cluster neighbour of local tile `t` and its offset.
+fn nav_cluster_neighbours(s: int, t: int, mut f: impl FnMut(int, int, int)) {
+    let (x, y) = (t % s, t / s);
+    for dy in -1..2 {
+        for dx in -1..2 {
+            let (nx, ny) = (x + dx, y + dy);
+            if (dx != 0 || dy != 0) && nx >= 0 && nx < s && ny >= 0 && ny < s {
+                f(dx, dy, ny * s + nx);
+            }
+        }
+    }
+}
+
 fn nav_cluster_prepare_steps(g: &mut NavGraph, c: int, tile: int) {
     if g.search_ready[tile] {
         return;
     }
-    let si = g.cluster_space[c];
-    let ox = g.cluster_x[c];
-    let oy = g.cluster_y[c];
     let s = g.cluster_size;
-    let x = tile % s;
-    let y = tile / s;
-    let tbase = g.space_tile_base[si] + oy * SPACE_SIZE + ox;
-    let here_extra = g.extra[tbase + y * SPACE_SIZE + x];
-    for dy in -1..2 {
-        let ny = y + dy;
-        for dx in -1..2 {
-            let nx = x + dx;
-            let mut open = (dx != 0 || dy != 0)
-                && nx >= 0
-                && nx < s
-                && ny >= 0
-                && ny < s
-                && !nav_tile_blocked(g, si, ox + nx, oy + ny);
-            let mut step = NAV_COST_STRAIGHT;
-            if open && dx != 0 && dy != 0 {
-                open = nav_tile_elbow_clear(
-                    g,
-                    si,
-                    ox + nx,
-                    oy + y,
-                    diagonal_step_corner(dx, dy, true),
-                ) && nav_tile_elbow_clear(
-                    g,
-                    si,
-                    ox + x,
-                    oy + ny,
-                    diagonal_step_corner(dx, dy, false),
-                );
-                step = NAV_COST_DIAGONAL;
-            }
-            let edge = tile * 9 + (dy + 1) * 3 + dx + 1;
-            g.search_edges[edge] = if open {
-                Some(nav_edge_cost(
-                    step,
-                    here_extra,
-                    g.extra[tbase + ny * SPACE_SIZE + nx],
-                ))
-            } else {
-                None
-            };
-        }
+    let (si, ox, oy) = (g.cluster_space[c], g.cluster_x[c], g.cluster_y[c]);
+    for edge in 0..9 {
+        g.search_edges[tile * 9 + edge] = None;
     }
+    nav_cluster_neighbours(s, tile, |dx, dy, nt| {
+        if !nav_tile_blocked(g, si, ox + nt % s, oy + nt / s) {
+            g.search_edges[tile * 9 + (dy + 1) * 3 + dx + 1] =
+                nav_cluster_step_cost(g, c, tile % s, tile / s, dx, dy);
+        }
+    });
     g.search_ready[tile] = true;
 }
 
@@ -1072,8 +1077,7 @@ pub(super) fn nav_cluster_search(g: &mut NavGraph, c: int, from: int) -> int {
     let woy = g.cluster_wy[c];
     let s = g.cluster_size;
     let limit = g.k + g.cluster_ep_count[c];
-    g.search_stamp += 1;
-    let stamp = g.search_stamp;
+    g.window.begin();
     let src = nav_cluster_node(g, c, from);
     let start = (g.node_y[src] - woy) * s + (g.node_x[src] - wox);
     let mut expanded = 0;
@@ -1098,49 +1102,14 @@ pub(super) fn nav_cluster_search(g: &mut NavGraph, c: int, from: int) -> int {
         return s * s + 1;
     }
     if !start_blocked || (src >= g.ep_base && !nav_node_is_pad(g, src)) {
-        g.dist[start] = 0;
-        g.dist_stamp[start] = stamp;
-        g.open_cost[0] = 0;
-        g.open_tile[0] = start;
-        g.open_slot[start] = 0;
-        let mut count = 1;
-        while count > 0 {
-            let mut best = 0;
-            let mut d = g.open_cost[0];
-            let mut t = g.open_tile[0];
-            for e in 1..count {
-                let ec = g.open_cost[e];
-                if ec < d || (ec == d && g.open_tile[e] < t) {
-                    best = e;
-                    d = ec;
-                    t = g.open_tile[e];
-                }
-            }
-            count -= 1;
-            let moved = g.open_tile[count];
-            g.open_cost[best] = g.open_cost[count];
-            g.open_tile[best] = moved;
-            g.open_slot[moved] = best;
-            g.open_slot[t] = -1;
+        g.window.seed(start);
+        while let Some((t, d)) = g.window.pop() {
             expanded += 1;
             nav_cluster_prepare_steps(g, c, t);
             for edge in 0..9 {
-                let Some(cost) = g.search_edges[t * 9 + edge] else {
-                    continue;
-                };
-                let nt = t + (edge / 3 - 1) * s + edge % 3 - 1;
-                let nd = d + cost;
-                if g.dist_stamp[nt] != stamp {
-                    g.dist[nt] = nd;
-                    g.dist_stamp[nt] = stamp;
-                    g.open_cost[count] = nd;
-                    g.open_tile[count] = nt;
-                    g.open_slot[nt] = count;
-                    count += 1;
-                } else if nd < g.dist[nt] {
-                    g.dist[nt] = nd;
-                    let slot = g.open_slot[nt];
-                    g.open_cost[slot] = nd;
+                if let Some(cost) = g.search_edges[t * 9 + edge] {
+                    g.window
+                        .relax(t, t + (edge / 3 - 1) * s + edge % 3 - 1, d + cost);
                 }
             }
         }
@@ -1152,65 +1121,33 @@ pub(super) fn nav_cluster_search(g: &mut NavGraph, c: int, from: int) -> int {
         }
         let t = (g.node_y[n] - woy) * s + (g.node_x[n] - wox);
         let mut cost = -1;
-        if g.dist_stamp[t] == stamp {
-            cost = g.dist[t];
+        if g.window.reached(t) {
+            cost = g.window.dist[t];
         } else if n >= g.ep_base
             && !nav_node_is_pad(g, n)
             && nav_tile_blocked(g, si, ox + t % s, oy + t / s)
         {
-            cost = nav_exit_cost(g, c, t, stamp);
+            cost = nav_exit_cost(g, c, t);
         }
         nav_slot_set(g, c, from, j, cost);
     }
     expanded + 1
 }
 
-pub(super) fn nav_exit_cost(g: &NavGraph, c: int, t: int, stamp: int) -> int {
-    let si = g.cluster_space[c];
-    let ox = g.cluster_x[c];
-    let oy = g.cluster_y[c];
+/// The cheapest step onto blocked local tile `t` from a tile the last search reached.
+pub(super) fn nav_exit_cost(g: &NavGraph, c: int, t: int) -> int {
     let s = g.cluster_size;
-    let lx = t % s;
-    let ly = t / s;
-    let tbase = g.space_tile_base[si] + oy * SPACE_SIZE + ox;
-    let here_extra = g.extra[tbase + ly * SPACE_SIZE + lx];
     let mut best = -1;
-    for dy in -1..2 {
-        let ny = ly + dy;
-        for dx in -1..2 {
-            let nx = lx + dx;
-            let mut reached = (dx != 0 || dy != 0)
-                && nx >= 0
-                && nx < s
-                && ny >= 0
-                && ny < s
-                && g.dist_stamp[ny * s + nx] == stamp;
-            let mut step = NAV_COST_STRAIGHT;
-            if reached && dx != 0 && dy != 0 {
-                reached = nav_tile_elbow_clear(
-                    g,
-                    si,
-                    ox + nx,
-                    oy + ly,
-                    diagonal_step_corner(dx, dy, true),
-                ) && nav_tile_elbow_clear(
-                    g,
-                    si,
-                    ox + lx,
-                    oy + ny,
-                    diagonal_step_corner(dx, dy, false),
-                );
-                step = NAV_COST_DIAGONAL;
-            }
-            if reached {
-                let cost = g.dist[ny * s + nx]
-                    + nav_edge_cost(step, here_extra, g.extra[tbase + ny * SPACE_SIZE + nx]);
+    nav_cluster_neighbours(s, t, |dx, dy, nt| {
+        if g.window.reached(nt) {
+            if let Some(step) = nav_cluster_step_cost(g, c, t % s, t / s, dx, dy) {
+                let cost = g.window.dist[nt] + step;
                 if best < 0 || cost < best {
                     best = cost;
                 }
             }
         }
-    }
+    });
     best
 }
 

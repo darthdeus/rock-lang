@@ -34,12 +34,7 @@ pub(super) fn nav_query_size(g: &NavGraph, q: &mut NavQuery) {
     size!(pad_h, nodes, 0);
     size!(pad_h_stamp, nodes, 0);
     let window = 4 * g.cluster_size * g.cluster_size;
-    size!(tile_dist, window, 0);
-    size!(tile_stamp, window, 0);
-    size!(tile_parent, window, -1);
-    size!(open_cost, window, 0);
-    size!(open_tile, window, 0);
-    size!(open_slot, window, -1);
+    q.window.reserve(window);
     let tiles = g.blocked.len();
     size!(cert_dist, tiles, 0);
     size!(cert_stamp, tiles, 0);
@@ -393,11 +388,5 @@ pub(super) fn nav_next_step(
 }
 
 pub(super) fn nav_query_follow_size(g: &NavGraph, q: &mut NavQuery) {
-    let window = (4 * g.cluster_size * g.cluster_size) as usize;
-    q.tile_dist.0.resize(window, 0);
-    q.tile_stamp.0.resize(window, 0);
-    q.tile_parent.0.resize(window, -1);
-    q.open_cost.0.resize(window, 0);
-    q.open_tile.0.resize(window, 0);
-    q.open_slot.0.resize(window, -1);
+    q.window.reserve(4 * g.cluster_size * g.cluster_size);
 }

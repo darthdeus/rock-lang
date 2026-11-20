@@ -99,7 +99,7 @@ pub(super) fn nav_refine(
                 q.tile_ox + t % q.tile_stride,
                 q.tile_oy + t / q.tile_stride,
             ));
-            t = q.tile_parent[t];
+            t = q.window.parent[t];
         }
         plan.seg.0.reverse();
         if plan.seg.len() > 1 {
@@ -156,39 +156,19 @@ pub(super) fn nav_tile_search(
     q.tile_ox = ox;
     q.tile_oy = oy;
     q.tile_stride = stride;
-    q.tile_stamp_id += 1;
-    let stamp = q.tile_stamp_id;
     q.tile_found = -1;
-    let mut count = 0;
-    if seed.w == 1 && seed.h == 1 {
-        count = nav_tile_seed(g, q, c1, c2, seed.x, seed.y, seed_blocked_ok, count);
-    } else {
-        for y in seed.y..(seed.y + seed.h) {
-            for x in seed.x..(seed.x + seed.w) {
-                count = nav_tile_seed(g, q, c1, c2, x, y, seed_blocked_ok, count);
+    let w = &mut q.window;
+    w.begin();
+    for y in seed.y..(seed.y + seed.h) {
+        for x in seed.x..(seed.x + seed.w) {
+            let bt = nav_window_tile(g, c1, c2, x, y);
+            if bt >= 0 && (seed_blocked_ok || !g.blocked[bt]) {
+                w.seed((y - oy) * stride + (x - ox));
             }
         }
     }
     let mut expanded = 0;
-    while count > 0 {
-        let mut best = 0;
-        let mut d = q.open_cost[0];
-        let mut t = q.open_tile[0];
-        for e in 1..count {
-            let ec = q.open_cost[e];
-            let et = q.open_tile[e];
-            if ec < d || (ec == d && et < t) {
-                best = e;
-                d = ec;
-                t = et;
-            }
-        }
-        count -= 1;
-        let moved = q.open_tile[count];
-        q.open_cost[best] = q.open_cost[count];
-        q.open_tile[best] = moved;
-        q.open_slot[moved] = best;
-        q.open_slot[t] = -1;
+    while let Some((t, d)) = w.pop() {
         expanded += 1;
         let x = ox + t % stride;
         let y = oy + t / stride;
@@ -202,20 +182,16 @@ pub(super) fn nav_tile_search(
             q.tile_found = t;
             return expanded;
         }
+        let mut relax = |nx: int, ny: int, step: int, bt: int| {
+            let cost = d + nav_edge_cost(step, here_extra, g.extra[bt]);
+            w.relax(t, (ny - oy) * stride + nx - ox, cost);
+        };
         for i in 0..4 {
             let nx = x + (i % 2) * (i - 2);
             let ny = y + ((i + 1) % 2) * (i - 1);
             let bt = nav_window_tile(g, c1, c2, nx, ny);
             if bt >= 0 && !g.blocked[bt] {
-                count = nav_tile_relax(
-                    g,
-                    q,
-                    stamp,
-                    count,
-                    t,
-                    (ny - oy) * stride + nx - ox,
-                    d + nav_edge_cost(NAV_COST_STRAIGHT, here_extra, g.extra[bt]),
-                );
+                relax(nx, ny, NAV_COST_STRAIGHT, bt);
             }
         }
         for i in 0..4 {
@@ -229,70 +205,11 @@ pub(super) fn nav_tile_search(
                 && nav_elbow_clear(g, c1, c2, nx, y, diagonal_step_corner(dx, dy, true))
                 && nav_elbow_clear(g, c1, c2, x, ny, diagonal_step_corner(dx, dy, false))
             {
-                count = nav_tile_relax(
-                    g,
-                    q,
-                    stamp,
-                    count,
-                    t,
-                    (ny - oy) * stride + nx - ox,
-                    d + nav_edge_cost(NAV_COST_DIAGONAL, here_extra, g.extra[bt]),
-                );
+                relax(nx, ny, NAV_COST_DIAGONAL, bt);
             }
         }
     }
     expanded
-}
-
-#[inline]
-pub(super) fn nav_tile_relax(
-    _g: &NavGraph,
-    q: &mut NavQuery,
-    stamp: int,
-    count: int,
-    t: int,
-    nt: int,
-    nd: int,
-) -> int {
-    let mut next = count;
-    if q.tile_stamp[nt] != stamp {
-        q.tile_dist[nt] = nd;
-        q.tile_stamp[nt] = stamp;
-        q.tile_parent[nt] = t;
-        q.open_cost[count] = nd;
-        q.open_tile[count] = nt;
-        q.open_slot[nt] = count;
-        next = count + 1;
-    } else if nd < q.tile_dist[nt] {
-        q.tile_dist[nt] = nd;
-        q.tile_parent[nt] = t;
-        q.open_cost[q.open_slot[nt]] = nd;
-    }
-    next
-}
-
-pub(super) fn nav_tile_seed(
-    g: &NavGraph,
-    q: &mut NavQuery,
-    c1: int,
-    c2: int,
-    x: int,
-    y: int,
-    seed_blocked_ok: bool,
-    count: int,
-) -> int {
-    let bt = nav_window_tile(g, c1, c2, x, y);
-    if bt < 0 || (!seed_blocked_ok && g.blocked[bt]) {
-        return count;
-    }
-    let t = (y - q.tile_oy) * q.tile_stride + (x - q.tile_ox);
-    q.tile_dist[t] = 0;
-    q.tile_stamp[t] = q.tile_stamp_id;
-    q.tile_parent[t] = -1;
-    q.open_cost[count] = 0;
-    q.open_tile[count] = t;
-    q.open_slot[t] = count;
-    count + 1
 }
 
 pub(super) fn nav_tile_dist(q: &NavQuery, x: int, y: int) -> int {
@@ -302,10 +219,10 @@ pub(super) fn nav_tile_dist(q: &NavQuery, x: int, y: int) -> int {
         return -1;
     }
     let t = ly * q.tile_stride + lx;
-    if q.tile_stamp[t] != q.tile_stamp_id {
+    if !q.window.reached(t) {
         return -1;
     }
-    q.tile_dist[t]
+    q.window.dist[t]
 }
 
 pub(super) fn nav_hop_cost(g: &NavGraph, plan: &NavPlan, x: int, y: int, nx: int, ny: int) -> int {
@@ -587,12 +504,12 @@ pub(super) fn nav_reconnect(
         let next = plan.route[p];
         removed += nav_hop_cost(g, plan, here.x, here.y, next.x, next.y);
     }
-    let remaining = plan.cost - plan.walked_cost - removed + q.tile_dist[q.tile_found];
+    let remaining = plan.cost - plan.walked_cost - removed + q.window.dist[q.tile_found];
     let mut len = 0;
     let mut t = q.tile_found;
     while t >= 0 {
         len += 1;
-        t = q.tile_parent[t];
+        t = q.window.parent[t];
     }
     let tail = plan.route.len() - target - 1;
     let total = len + tail;
@@ -624,7 +541,7 @@ pub(super) fn nav_reconnect(
         plan.route[i].y = q.tile_oy + t / q.tile_stride;
         plan.route[i].link = 0;
         i -= 1;
-        t = q.tile_parent[t];
+        t = q.window.parent[t];
     }
     if plan.route.len() > total {
         plan.route.0.resize(total as usize, NavRouteTile::default());

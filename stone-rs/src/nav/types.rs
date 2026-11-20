@@ -199,16 +199,11 @@ nav_struct! {
         pub label_owner: IdxVec<int>,
         pub label_owner_stamp: IdxVec<int>,
         pub label_free: IdxVec<int>,
-        pub search_stamp: int,
         pub search_cluster: int = -1,
         pub search_uniform: int = -1,
         pub search_edges: IdxVec<Option<int>>,
         pub search_ready: IdxVec<bool>,
-        pub dist: IdxVec<int>,
-        pub dist_stamp: IdxVec<int>,
-        pub open_cost: IdxVec<int>,
-        pub open_tile: IdxVec<int>,
-        pub open_slot: IdxVec<int>,
+        pub window: WindowSearch,
         pub queue: IdxVec<int>,
     }
 }
@@ -270,18 +265,12 @@ nav_struct! {
         pub cert_parent: IdxVec<int>,
         pub cert_link: IdxVec<int>,
         pub cert_closed: IdxVec<int>,
-        pub tile_stamp_id: int,
         pub tile_ox: int,
         pub tile_oy: int,
         pub tile_stride: int,
         pub tile_found: int = -1,
         pub refine_work: int,
-        pub tile_dist: IdxVec<int>,
-        pub tile_stamp: IdxVec<int>,
-        pub tile_parent: IdxVec<int>,
-        pub open_cost: IdxVec<int>,
-        pub open_tile: IdxVec<int>,
-        pub open_slot: IdxVec<int>,
+        pub window: WindowSearch,
     }
 }
 
