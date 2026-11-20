@@ -989,11 +989,6 @@ fn world_text_layout(font: Font, text: string, em_wu: float) -> TextLayout? {
     return text_world_layout_scaled(font, text, scale, scale)
 }
 
-fn measure_world_text_for(font: Font, text: string, em_wu: float) -> Vec2 {
-    let layout = world_text_layout(font, text, em_wu) ?? return v()
-    return v(layout.logical_bounds.w, layout.logical_bounds.h)
-}
-
 pub fn world_text_em_for(font: Font, size: float) -> float {
     if !WORLD_TEXT_QUANTIZE_EM { return size }
     let view = RENDER_VIEW ?? return size

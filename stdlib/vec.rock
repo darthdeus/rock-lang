@@ -179,10 +179,6 @@ fn random_vec(min: float, max: float) -> Vec2 {
     return random_dir() * random_range(min, max)
 }
 
-fn random_offset(radius: float) -> Vec2 {
-    return random_dir() * random_range(0.0, radius)
-}
-
 fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     return position + random_vec(min, max)
 }
@@ -194,10 +190,6 @@ fn presentation_random_dir() -> Vec2 {
 
 fn presentation_random_vec(min: float, max: float) -> Vec2 {
     return presentation_random_dir() * presentation_random_range(min, max)
-}
-
-fn presentation_random_offset(radius: float) -> Vec2 {
-    return presentation_random_dir() * presentation_random_range(0.0, radius)
 }
 
 fn presentation_random_around(position: Vec2, min: float, max: float) -> Vec2 {

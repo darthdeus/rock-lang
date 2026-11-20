@@ -712,25 +712,6 @@ fn jv_float_arr(v: JsonValue?, default_val: [float]) -> [float] {
     return out
 }
 
-fn jv_int_pair(v: JsonValue?, def_w: int, def_h: int) -> (int, int) {
-    if v == null { return (def_w, def_h) }
-    let arr_opt = json_as_array(v) ?? return (def_w, def_h)
-    let arr = arr_opt
-    if arr.len() < 2 { return (def_w, def_h) }
-    let i = 0
-    let out_w = def_w
-    let out_h = def_h
-    for e in arr {
-        if i == 0 {
-            if let f = json_as_float(e) { out_w = int(f) }
-        } else if i == 1 {
-            if let f = json_as_float(e) { out_h = int(f) }
-        }
-        i = i + 1
-    }
-    return (out_w, out_h)
-}
-
 nobox value JsonReader {
     src: string? = null,
     at: int = -1,
