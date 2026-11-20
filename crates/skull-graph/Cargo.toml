@@ -18,7 +18,6 @@ sequential = ["bone-core/sequential"]
 [dependencies]
 bone-core = { workspace = true }
 skull-mir = { workspace = true }
-skull-parser = { workspace = true }
 comfy-la-arena = { workspace = true }
 ustr = { workspace = true }
 rustc-hash = { workspace = true }

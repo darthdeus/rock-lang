@@ -26,4 +26,3 @@ skull = { workspace = true }
 skull-fmt = { workspace = true }
 skull-parser = { workspace = true }
 serde_json = { workspace = true }
-ustr = { workspace = true }

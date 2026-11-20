@@ -49,7 +49,6 @@ skull-codegen-js = { workspace = true, optional = true }
 skull-mir = { workspace = true }
 skull-codegen-lua = { workspace = true }
 png = "0.18"
-lsp-server = { workspace = true }
 lsp-types = { workspace = true }
 
 clap = { workspace = true }
@@ -67,8 +66,6 @@ mimalloc = { version = "0.1", features = ["v2"] }
 rayon = { workspace = true }
 atomic_refcell = { workspace = true }
 log = { workspace = true }
-parking_lot = { workspace = true }
-wait-timeout = { workspace = true }
 sha2 = "0.10"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 sysinfo = { workspace = true }
@@ -78,6 +75,8 @@ libc = "0.2"
 errno = "0.3"
 
 [dev-dependencies]
+wait-timeout = { workspace = true }
+lsp-server = { workspace = true }
 test-utils = { workspace = true }
 
 # Cargo cannot combine workspace lint inheritance with this crate's check-cfg.

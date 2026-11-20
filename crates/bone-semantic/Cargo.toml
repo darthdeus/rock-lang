@@ -20,9 +20,9 @@ bone-core = { path = "../bone-core" }
 bone-lower = { path = "../bone-lower" }
 bone-inference = { path = "../bone-inference" }
 skull-parser = { path = "../skull-parser" }
-rock-core = { path = "../rock-core" }
 
 [dev-dependencies]
+rock-core = { path = "../rock-core" }
 rock-stdlib = { path = "../rock-stdlib" }
 test-utils = { path = "../test-utils" }
 

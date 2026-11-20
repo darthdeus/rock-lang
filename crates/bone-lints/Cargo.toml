@@ -16,7 +16,6 @@ doctest = false
 rock-host = { workspace = true }
 bone-core = { workspace = true }
 rock-core = { workspace = true }
-ustr = { workspace = true }
 
 [dev-dependencies]
 bone-semantic = { workspace = true }

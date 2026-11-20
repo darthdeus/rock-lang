@@ -20,7 +20,6 @@ colored = { workspace = true }
 
 # Unused: pins features other members toggle, so all cargo commands share one build.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-getrandom = { version = "0.3.4", features = ["std"] }
 log = { workspace = true, features = ["std"] }
 once_cell = { workspace = true }
 
