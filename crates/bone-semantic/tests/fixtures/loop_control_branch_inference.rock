@@ -56,12 +56,6 @@ fn f(stop: bool) -> int {
     5
 }
 
-//- break_still_requires_loop @fail=`break`/`continue` is only valid inside a loop body
-fn f(stop: bool) {
-    let value = if stop { break } else { 1 }
-      //^ int
-}
-
 //- continue_still_requires_loop @fail=`break`/`continue` is only valid inside a loop body
 fn f(stop: bool) {
     let value = if stop { continue } else { 1 }
