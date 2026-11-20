@@ -363,9 +363,38 @@ fn scenario(seed: u64, h: &mut Hasher) {
             h.put(slot);
             plans.push((slot, stone_nav_plan(handle, slot, -1, 0, 0, 0, 0)));
         }
+        if rng.chance(30) {
+            let fork = Owned(stone_nav_fork(handle));
+            publish(&mut rng, h, fork.0);
+            for &(slot, generation) in &plans {
+                plan_summary(h, fork.0, slot, generation);
+            }
+        }
         publish(&mut rng, h, handle);
         for &(slot, generation) in &plans {
-            plan_summary(h, handle, slot, generation);
+            let route = plan_summary(h, handle, slot, generation);
+            if route.len() >= 3 && rng.chance(30) {
+                let path_pos = rng.below(route.len() as int / 3);
+                let cost = if rng.chance(50) {
+                    -1
+                } else {
+                    rng.below(100000)
+                };
+                let saved = wire(&route);
+                h.put(unsafe {
+                    stone_nav_route_restore(
+                        handle,
+                        slot,
+                        generation,
+                        saved.as_ptr(),
+                        saved.len() as int,
+                        path_pos,
+                        cost,
+                        rng.below(5000),
+                    )
+                });
+                plan_summary(h, handle, slot, generation);
+            }
         }
         for &(slot, generation) in &plans {
             if rng.chance(70) {
@@ -429,5 +458,5 @@ fn random_graphs_queries_and_edits_keep_their_answers() {
     for seed in 1..=24u64 {
         scenario(seed.wrapping_mul(0x9e3779b97f4a7c15), &mut h);
     }
-    assert_eq!((h.0, h.1), (0x2a5dce637398549e, 31501245));
+    assert_eq!((h.0, h.1), (0x816b8ee05a770af4, 31544936));
 }
