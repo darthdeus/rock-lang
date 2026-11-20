@@ -623,11 +623,7 @@ fn write_atomic(
         Ok(())
     })();
     if result.is_err() {
-        if let Err(error) = std::fs::remove_file(&temporary) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                log_io_error("temporary cleanup", &temporary, &error);
-            }
-        }
+        remove_file_logged("temporary cleanup", &temporary);
     }
     result
 }
@@ -654,6 +650,14 @@ fn append_synced(path: &Path, fragments: &[Vec<u8>]) -> std::io::Result<()> {
 fn log_io_error(operation: &str, path: &Path, error: &std::io::Error) {
     ::log::error!(target: "FILE", "file transaction {} failed for {}: {}", operation, path.display(), error);
 }
+
+fn remove_file_logged(operation: &str, path: &Path) {
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log_io_error(operation, path, &error);
+        }
+    }
+}
 fn directory_of(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -676,37 +680,21 @@ fn sync_directory(_directory: &Path) -> std::io::Result<()> {
 }
 
 fn ensure_directory(directory: &Path, barriers: &mut DirectoryBarriers) -> std::io::Result<()> {
-    if directory.as_os_str().is_empty() {
-        return Ok(());
-    }
     match std::fs::create_dir(directory) {
         Ok(()) => {
             barriers.record_created(directory);
             Ok(())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            match std::fs::metadata(directory) {
-                Ok(metadata) if metadata.is_dir() => Ok(()),
-                _ => Err(error),
-            }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {
+            Ok(())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let Some(parent) = directory.parent() else {
-                return Err(error);
-            };
-            if parent.as_os_str().is_empty() {
-                return Err(error);
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match directory.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => {
+                ensure_directory(parent, barriers)?;
+                ensure_directory(directory, barriers)
             }
-            ensure_directory(parent, barriers)?;
-            match std::fs::create_dir(directory) {
-                Ok(()) => {
-                    barriers.record_created(directory);
-                    Ok(())
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-                Err(error) => Err(error),
-            }
-        }
+            _ => Err(error),
+        },
         Err(error) => Err(error),
     }
 }
@@ -840,11 +828,7 @@ fn encode_png(pixels: &[u8], width: u32, height: u32) -> std::io::Result<Vec<u8>
 
 fn cleanup(paths: &[PathBuf]) {
     for path in paths {
-        if let Err(error) = std::fs::remove_file(path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                ::log::error!(target: "FILE", "file transaction cleanup failed for {}: {}", path.display(), error);
-            }
-        }
+        remove_file_logged("cleanup", path);
     }
 }
 
@@ -867,27 +851,18 @@ fn cleanup_directories(directories: &[CleanupDirectory]) {
                 }
             };
             let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_file() => {}
+                Ok(_) => continue,
                 Err(error) => {
                     log_io_error("cleanup directory inspect", &path, &error);
                     continue;
                 }
-            };
-            if !file_type.is_file() {
-                continue;
             }
-            let filename = entry.file_name();
-            if filename
-                .to_str()
-                .is_some_and(|filename| cleanup.keep.iter().any(|keep| keep == filename))
-            {
-                continue;
-            }
-            if let Err(error) = std::fs::remove_file(&path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    log_io_error("cleanup directory remove", &path, &error);
-                }
+            let kept = (entry.file_name().to_str())
+                .is_some_and(|filename| cleanup.keep.iter().any(|keep| keep == filename));
+            if !kept {
+                remove_file_logged("cleanup directory remove", &path);
             }
         }
     }
