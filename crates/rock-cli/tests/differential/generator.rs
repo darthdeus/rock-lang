@@ -69,7 +69,7 @@ struct Variable {
 
 type Env = Vec<Variable>;
 
-struct Generator {
+pub(super) struct Generator {
     random: u64,
     serial: usize,
     helpers: Vec<(String, Ty)>,
@@ -78,7 +78,7 @@ struct Generator {
 }
 
 impl Generator {
-    fn pick<T: Copy>(&mut self, choices: &[T]) -> T {
+    pub(super) fn pick<T: Copy>(&mut self, choices: &[T]) -> T {
         self.random = self.random.wrapping_add(0x9e3779b97f4a7c15);
         let mut n = self.random;
         n = (n ^ (n >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
@@ -756,7 +756,9 @@ pub(super) fn program(seed: u64) -> String {
     for v in &env {
         g.trace_variable(&mut body, v);
     }
-    writeln!(out, "fn probe(input: int) {{\n{body}\nlet c = stream(input)\nfor step in 0..128 {{\nif let e = c.resume() {{ observe(step, e) }} else {{ break }}\n}}\n}}\nfn main() {{\nassert(jit_enabled())\nfor round in 0..64 {{ probe(round) }}\n}}").unwrap();
+    writeln!(out, "fn probe(input: int) {{\n{body}\nlet c = stream(input)\nfor step in 0..128 {{\nif let e = c.resume() {{ observe(step, e) }} else {{ break }}\n}}\n}}\nfn main() {{\nassert(jit_enabled())\ncheck_generated_loops()\ncheck_generated_json()\nfor round in 0..64 {{ probe(round) }}\n}}").unwrap();
+    super::oracle::loops(&mut g, &mut out);
+    super::oracle::json(&mut g, &mut out);
     out
 }
 

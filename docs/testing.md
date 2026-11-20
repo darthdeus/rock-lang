@@ -61,6 +61,10 @@ between LuaJIT platforms; signed bitwise inputs stay below the documented
 platform-dependent conversion range. Integer leaves stay within signed 32 bits
 so generated stores obey the value-struct `int` field range;
 uint covers its full unsigned 32-bit range.
+Each program also asserts results computed in Rust for fixed shapes that
+random statements rarely reach: counted while loops whose bound or counter is
+written in the body, by a closure or by a callee, re-entered inner loops, and
+JSON trees decoded from text and round-tripped through both encoders.
 
 ```sh
 cargo test --locked -p rock-cli --test rock_cli_tests differential::smoke

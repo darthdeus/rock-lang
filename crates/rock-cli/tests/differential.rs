@@ -2,6 +2,7 @@
 #![cfg(feature = "backend-js")]
 
 mod generator;
+mod oracle;
 mod runner;
 
 use crate::support::require_node;
