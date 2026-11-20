@@ -18,12 +18,7 @@ impl UnitFailure {
     /// `ROCK_TEST_VERBOSE`.
     pub fn print(&self, label: &str) {
         use colored::Colorize;
-        println!(
-            "{:.<60} {}  {}",
-            label,
-            "FAILED".red(),
-            self.reason.dimmed()
-        );
+        print_unit_line(label, "FAILED".red(), self.reason.dimmed());
         if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
             println!("{}", self.rendered);
         }
@@ -179,7 +174,141 @@ pub(crate) fn check_package(dir: &str, build_vars: bool) -> Result<UnitCheck, Un
 pub(crate) fn print_unit_panic(label: &str, panic: &(dyn std::any::Any + Send)) {
     use colored::Colorize;
     let msg = crate::common::panic_message(panic);
-    println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
+    print_unit_line(label, "PANIC".red().bold(), msg.dimmed());
+}
+
+/// The one per-unit line every test runner prints: label, verdict, detail.
+pub(crate) fn print_unit_line(
+    label: &str,
+    status: colored::ColoredString,
+    detail: impl std::fmt::Display,
+) {
+    println!("{label:.<60} {status}  {detail}");
+}
+
+/// Reasons bucketed by exact message, most frequent first.
+pub(crate) fn print_reasons(title: &str, reasons: &[String]) {
+    use colored::Colorize;
+    let rows = crate::test_protocol::reason_histogram(reasons.iter().map(String::as_str));
+    if rows.is_empty() {
+        return;
+    }
+    println!("\n{}", format!("=== {title} ===").bold());
+    const SHOWN: usize = 50;
+    for (reason, count) in rows.iter().take(SHOWN) {
+        println!("  {:>5}  {}", count.to_string().yellow(), reason);
+    }
+    if rows.len() > SHOWN {
+        println!(
+            "  {:>5}  ({} more distinct reasons)",
+            "...",
+            rows.len() - SHOWN
+        );
+    }
+}
+
+/// What one unit of a JS or GLSL run produced.
+#[derive(Default)]
+pub(crate) struct UnitRun {
+    pub passed: usize,
+    /// FAIL detail lines.
+    pub fails: Vec<String>,
+    /// (test name, reasons) for tests the backend could not emit.
+    pub skips: Vec<(String, Vec<String>)>,
+    /// Tests outside this backend's reach, which are not skips.
+    pub elsewhere: usize,
+}
+
+pub(crate) struct BackendTotals {
+    pub passed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub elsewhere: usize,
+    pub files: usize,
+    unit_failures: usize,
+    skip_reasons: Vec<String>,
+}
+
+impl BackendTotals {
+    /// Prints what follows the backend's summary line, then exits 1 if any
+    /// test or unit failed.
+    pub fn finish(self, skip_title: &str) {
+        use colored::Colorize;
+        if self.unit_failures > 0 {
+            println!(
+                "  {} unit(s) failed to build/run (see FAILED lines above)",
+                self.unit_failures.to_string().red()
+            );
+        }
+        print_reasons(skip_title, &self.skip_reasons);
+        if self.failed > 0 || self.unit_failures > 0 {
+            crate::invocation_log::exit(1);
+        }
+    }
+}
+
+/// Builds and runs every unit under `paths` serially, printing each unit's
+/// line, its FAIL details and, under `ROCK_TEST_VERBOSE`, its skips.
+pub(crate) fn run_backend(
+    paths: &[String],
+    elsewhere_label: &str,
+    build: impl Fn(&str, bool) -> Result<UnitRun, UnitFailure> + Sync,
+) -> crate::Result<BackendTotals> {
+    use colored::Colorize;
+    let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
+    let outcomes = run_units(&files, &package_dirs, None, build);
+    let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
+    let mut totals = BackendTotals {
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        elsewhere: 0,
+        files: outcomes.len(),
+        unit_failures: 0,
+        skip_reasons: Vec::new(),
+    };
+    for (label, outcome) in outcomes {
+        let Some(run) = unit_run(&label, outcome) else {
+            totals.unit_failures += 1;
+            continue;
+        };
+        totals.passed += run.passed;
+        totals.failed += run.fails.len();
+        totals.skipped += run.skips.len();
+        totals.elsewhere += run.elsewhere;
+        for (_, reasons) in &run.skips {
+            totals.skip_reasons.extend(reasons.iter().cloned());
+        }
+        if run.passed + run.fails.len() + run.skips.len() + run.elsewhere == 0 {
+            continue;
+        }
+        let status = if run.fails.is_empty() {
+            "ok".green()
+        } else {
+            "FAILED".red()
+        };
+        let elsewhere = if run.elsewhere > 0 {
+            format!(", {} {elsewhere_label}", run.elsewhere)
+        } else {
+            String::new()
+        };
+        let counts = format!(
+            "({} pass, {} fail, {} skip{elsewhere})",
+            run.passed,
+            run.fails.len(),
+            run.skips.len()
+        );
+        print_unit_line(&label, status, counts);
+        for detail in &run.fails {
+            println!("  {} {}", "FAIL".red(), detail);
+        }
+        if verbose {
+            for (name, reasons) in &run.skips {
+                println!("  {} {}: {}", "SKIP".yellow(), name, reasons.join(" | "));
+            }
+        }
+    }
+    Ok(totals)
 }
 
 /// Check either one file or one package with the backend's build-var policy.

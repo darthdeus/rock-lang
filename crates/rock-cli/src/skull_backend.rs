@@ -2034,15 +2034,14 @@ pub(crate) fn skull_test(
                 if fails.is_empty() {
                     exec_pass += 1;
                     if verbose {
-                        println!("{:.<60} {}", label, "PASS".green());
+                        crate::test_unit::print_unit_line(&label, "ok".green(), "");
                     }
                     continue;
                 }
-                println!(
-                    "{:.<60} {}  {}",
-                    label,
-                    "TESTFAIL".yellow(),
-                    format!("{} @test(s) failed", fails.len()).dimmed()
+                crate::test_unit::print_unit_line(
+                    &label,
+                    "FAILED".red(),
+                    format!("{} @test(s) failed", fails.len()).dimmed(),
                 );
                 for diagnostic in diagnostics {
                     println!("  {diagnostic}");
@@ -2054,7 +2053,7 @@ pub(crate) fn skull_test(
             }
             Ok(Err(UnitFailure { reason, rendered })) => {
                 failed += 1;
-                println!("{:.<60} {}  {}", label, "FAILED".red(), reason.dimmed());
+                crate::test_unit::print_unit_line(&label, "FAILED".red(), reason.dimmed());
                 reasons.push(reason);
                 if verbose {
                     details.push((label, rendered));
@@ -2071,21 +2070,7 @@ pub(crate) fn skull_test(
         }
     }
 
-    if !reasons.is_empty() {
-        let rows = crate::test_protocol::reason_histogram(reasons.iter().map(String::as_str));
-        println!("\n{}", "=== failure reasons (skull) ===".bold());
-        let shown = rows.len().min(25);
-        for (reason, count) in rows.iter().take(shown) {
-            println!("  {:>4}  {}", count.to_string().yellow(), reason);
-        }
-        if rows.len() > shown {
-            println!(
-                "  {:>4}  ({} more distinct reasons)",
-                "...",
-                rows.len() - shown
-            );
-        }
-    }
+    crate::test_unit::print_reasons("failure reasons (skull)", &reasons);
 
     if verbose && !details.is_empty() {
         println!("\n{}", "=== failure details ===".bold());

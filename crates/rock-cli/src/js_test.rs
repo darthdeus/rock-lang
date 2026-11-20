@@ -1,8 +1,8 @@
 //! Emit JS test units, run them under Node, and report failures and skips.
 
 use crate::Result;
-use crate::test_protocol::{parse_skull_markers, reason_histogram};
-use crate::test_unit::{UnitCheck, UnitFailure};
+use crate::test_protocol::parse_skull_markers;
+use crate::test_unit::{UnitCheck, UnitFailure, UnitRun};
 use bone_core::prelude::Instant;
 use colored::Colorize;
 use skull_mir::mir::FuncRef;
@@ -13,125 +13,28 @@ fn all_reasons(e: &rock_core::CompilerError) -> Vec<String> {
         .collect()
 }
 
-#[derive(Default)]
-struct JsUnitRun {
-    passed: usize,
-    /// FAIL detail lines (throw under node, or a harness-invariant breach).
-    fails: Vec<String>,
-    /// All findings take part in the skip-reason histogram.
-    skips: Vec<(String, Vec<String>)>,
-    /// Tests `@test(backends = ...)` limits to other backends.
-    other_backend: usize,
-}
-
-type JsUnitOutcome = std::result::Result<JsUnitRun, UnitFailure>;
+type JsUnitOutcome = std::result::Result<UnitRun, UnitFailure>;
 
 pub fn js_test(paths: &[String]) -> Result<()> {
     let start = Instant::now();
-    let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
-    let outcomes = crate::test_unit::run_units(&files, &package_dirs, None, js_build_unit);
-
-    let mut tests_passed = 0;
-    let mut tests_failed = 0;
-    let mut tests_skipped = 0;
-    // Tests `@test(backends = ...)` limits to other backends: never emitted,
-    // never run, and not skips (the CI skip cap measures only JS gaps).
-    let mut tests_other_backend = 0;
-    let mut unit_failures = 0;
-    let mut all_skip_reasons: Vec<String> = Vec::new();
-    let file_count = outcomes.len();
-
-    for (label, outcome) in outcomes {
-        match crate::test_unit::unit_run(&label, outcome) {
-            Some(JsUnitRun {
-                passed,
-                fails,
-                skips,
-                other_backend,
-            }) => {
-                tests_passed += passed;
-                tests_failed += fails.len();
-                tests_skipped += skips.len();
-                tests_other_backend += other_backend;
-                for (_, reasons) in &skips {
-                    all_skip_reasons.extend(reasons.iter().cloned());
-                }
-                if passed + fails.len() + skips.len() + other_backend > 0 {
-                    let status = if fails.is_empty() {
-                        "ok".green()
-                    } else {
-                        "FAILED".red()
-                    };
-                    let elsewhere = if other_backend > 0 {
-                        format!(", {other_backend} not for js")
-                    } else {
-                        String::new()
-                    };
-                    println!(
-                        "{:.<60} {}  ({} pass, {} fail, {} skip{})",
-                        label,
-                        status,
-                        passed,
-                        fails.len(),
-                        skips.len(),
-                        elsewhere
-                    );
-                    for detail in &fails {
-                        println!("  {} {}", "FAIL".red(), detail);
-                    }
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        for (name, reasons) in &skips {
-                            println!("  {} {}: {}", "SKIP".yellow(), name, reasons.join(" | "));
-                        }
-                    }
-                }
-            }
-            None => unit_failures += 1,
-        }
-    }
-
+    // Tests `@test(backends = ...)` limits to other backends are never
+    // emitted and are not skips: the CI skip cap measures only JS gaps.
+    let totals = crate::test_unit::run_backend(paths, "not for js", js_build_unit)?;
     println!(
         "\njs backend: {}/{} @tests passed ({} failed, {} skipped, {} not for js) across {} files ({:.2}s)",
-        tests_passed.to_string().green(),
-        tests_passed + tests_failed + tests_skipped,
-        if tests_failed == 0 {
-            tests_failed.to_string().green()
+        totals.passed.to_string().green(),
+        totals.passed + totals.failed + totals.skipped,
+        if totals.failed == 0 {
+            totals.failed.to_string().green()
         } else {
-            tests_failed.to_string().red()
+            totals.failed.to_string().red()
         },
-        tests_skipped.to_string().yellow(),
-        tests_other_backend,
-        file_count,
+        totals.skipped.to_string().yellow(),
+        totals.elsewhere,
+        totals.files,
         start.elapsed().as_secs_f64(),
     );
-    if unit_failures > 0 {
-        println!(
-            "  {} unit(s) failed to build/run (see FAILED lines above)",
-            unit_failures.to_string().red()
-        );
-    }
-    // Bucketed by exact message, count desc: the emitter work list.
-    let skip_reasons = reason_histogram(all_skip_reasons.iter().map(|s| s.as_str()));
-    if !skip_reasons.is_empty() {
-        println!(
-            "\n{}",
-            "=== skip reasons (js) -- the emitter work list ===".bold()
-        );
-        let shown = skip_reasons.len().min(50);
-        for (reason, count) in skip_reasons.iter().take(shown) {
-            println!("  {:>5}  {}", count.to_string().yellow(), reason);
-        }
-        if skip_reasons.len() > shown {
-            println!(
-                "  {:>5}  ({} more distinct reasons)",
-                "...",
-                skip_reasons.len() - shown
-            );
-        }
-    }
-    if tests_failed > 0 || unit_failures > 0 {
-        crate::invocation_log::exit(1);
-    }
+    totals.finish("skip reasons (js) -- the emitter work list");
     Ok(())
 }
 
@@ -141,9 +44,9 @@ fn js_build_unit(unit: &str, is_package: bool) -> JsUnitOutcome {
         UnitCheck::Checked { ws, tests, sources } => js_run_tests(&ws, &tests, &|e| {
             crate::skull_backend::render_project_errs(&sources, std::slice::from_ref(e))
         }),
-        UnitCheck::ExpectedFailure(tests) => Ok(JsUnitRun {
+        UnitCheck::ExpectedFailure(tests) => Ok(UnitRun {
             passed: tests,
-            ..JsUnitRun::default()
+            ..UnitRun::default()
         }),
     }
 }
@@ -232,12 +135,12 @@ fn js_run_tests(
     tests: &[(FuncRef, skull::SkullTest)],
     render: &dyn Fn(&rock_core::CompilerError) -> String,
 ) -> JsUnitOutcome {
-    let (tests, elsewhere): (Vec<_>, Vec<_>) = tests
+    let (tests, other_backends): (Vec<_>, Vec<_>) = tests
         .iter()
         .cloned()
         .partition(|(_, t)| t.runs_on(bone_core::annotations::TestBackend::Js));
     let tests = tests.as_slice();
-    let other_backend = elsewhere.len();
+    let elsewhere = other_backends.len();
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, Vec<String>)> = Vec::new();
 
@@ -248,11 +151,11 @@ fn js_run_tests(
     };
 
     if run_idxs.is_empty() {
-        return Ok(JsUnitRun {
+        return Ok(UnitRun {
             passed: 0,
             fails,
             skips,
-            other_backend,
+            elsewhere,
         });
     }
 
@@ -328,11 +231,11 @@ fn js_run_tests(
             Err(detail) => fails.push(format!("{name}: {detail}")),
         }
     }
-    Ok(JsUnitRun {
+    Ok(UnitRun {
         passed,
         fails,
         skips,
-        other_backend,
+        elsewhere,
     })
 }
 

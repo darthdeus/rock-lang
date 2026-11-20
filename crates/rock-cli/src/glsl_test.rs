@@ -2,8 +2,8 @@
 //! Only the runner's no-context exit can be skipped with --skip-gpu.
 
 use crate::Result;
-use crate::test_protocol::{compare_value, parse_skull_markers, reason_histogram};
-use crate::test_unit::{UnitCheck, UnitFailure};
+use crate::test_protocol::{compare_value, parse_skull_markers};
+use crate::test_unit::{UnitCheck, UnitFailure, UnitRun};
 use bone_core::prelude::Instant;
 use colored::Colorize;
 use skull::ValueExpect;
@@ -18,118 +18,35 @@ const PROFILE: GlslProfile = GlslProfile::Core330;
 
 pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
     let start = Instant::now();
-    let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
-
     let runner = locate_runner()?;
     let gl_available = probe_gl(&runner, PROFILE_NAME, skip_gpu)?;
-
-    let mut outside_value_class = 0;
-    let mut unit_failures = 0;
-    let mut passed_total = 0;
-    // FAIL detail lines (a GL compile/link/render error, or a value mismatch).
-    let mut failed_total: Vec<String> = Vec::new();
-    let mut skip_reasons: Vec<String> = Vec::new();
-
-    let outcomes = crate::test_unit::run_units(&files, &package_dirs, None, |unit, is_package| {
-        build_unit(unit, is_package, &runner, gl_available)
-    });
-    let file_count = outcomes.len();
-
-    for (label, outcome) in outcomes {
-        match crate::test_unit::unit_run(&label, outcome) {
-            Some(UnitRun {
-                outside_value_class: outside,
-                passed,
-                failed,
-                skips,
-            }) => {
-                outside_value_class += outside;
-                passed_total += passed;
-                let any = passed + failed.len() + skips.len();
-                if gl_available && any > 0 {
-                    let status = if failed.is_empty() {
-                        "ok".green()
-                    } else {
-                        "FAILED".red()
-                    };
-                    println!(
-                        "{:.<52} [{}] {}  ({} pass, {} fail, {} skip)",
-                        label,
-                        PROFILE_NAME.cyan(),
-                        status,
-                        passed,
-                        failed.len(),
-                        skips.len(),
-                    );
-                }
-                failed_total.extend(failed.iter().map(|d| format!("{d} [{PROFILE_NAME}]")));
-                skip_reasons.extend(skips.into_iter().map(|(_, reason)| reason));
-            }
-            None => unit_failures += 1,
-        }
-    }
-
+    let totals =
+        crate::test_unit::run_backend(paths, "outside the value class", |unit, is_package| {
+            build_unit(unit, is_package, &runner, gl_available)
+        })?;
     println!(
-        "\nglsl backend: {} @tests outside the value class (no returns=), across {} files ({:.2}s)",
-        outside_value_class.to_string().yellow(),
-        file_count,
+        "\nglsl backend [{}]: {}/{} value tests passed ({} failed), {} skipped, {} outside the value class (no returns=), across {} files ({:.2}s)",
+        PROFILE_NAME.cyan(),
+        totals.passed.to_string().green(),
+        totals.passed + totals.failed,
+        if totals.failed == 0 {
+            totals.failed.to_string().green()
+        } else {
+            totals.failed.to_string().red()
+        },
+        totals.skipped.to_string().yellow(),
+        totals.elsewhere,
+        totals.files,
         start.elapsed().as_secs_f64(),
     );
     if !gl_available {
         println!(
-            "  [{}] {} -- value verdicts SKIPPED (no GL context)",
-            PROFILE_NAME.cyan(),
+            "  {} -- value verdicts SKIPPED (no GL context)",
             "no display / driver".yellow()
         );
-    } else {
-        let total = passed_total + failed_total.len();
-        println!(
-            "  [{}] {}/{} value tests passed ({} failed)",
-            PROFILE_NAME.cyan(),
-            passed_total.to_string().green(),
-            total,
-            if failed_total.is_empty() {
-                failed_total.len().to_string().green()
-            } else {
-                failed_total.len().to_string().red()
-            },
-        );
-        for detail in &failed_total {
-            println!("    {} {}", "FAIL".red(), detail);
-        }
-        let skip_reasons = reason_histogram(skip_reasons.iter().map(|s| s.as_str()));
-        if !skip_reasons.is_empty() {
-            println!(
-                "    {}",
-                format!(
-                    "=== [{PROFILE_NAME}] skip reasons (glsl) -- the A1 fn-emission work list ==="
-                )
-                .bold()
-            );
-            for (reason, count) in skip_reasons.iter().take(50) {
-                println!("      {:>5}  {}", count.to_string().yellow(), reason);
-            }
-        }
     }
-    if unit_failures > 0 {
-        println!(
-            "  {} unit(s) failed to build (see FAILED lines above)",
-            unit_failures.to_string().red()
-        );
-    }
-    if !failed_total.is_empty() || unit_failures > 0 {
-        crate::invocation_log::exit(1);
-    }
+    totals.finish("skip reasons (glsl) -- the fn-emission work list");
     Ok(())
-}
-
-#[derive(Default)]
-struct UnitRun {
-    outside_value_class: usize,
-    passed: usize,
-    failed: Vec<String>,
-    /// (test name, reason) for value tests whose GLSL emission rejected.
-    skips: Vec<(String, String)>,
 }
 
 fn build_unit(
@@ -169,7 +86,7 @@ fn run_tests(
             .as_ref()
             .filter(|_| t.runs_on(bone_core::annotations::TestBackend::Glsl))
         else {
-            run.outside_value_class += 1;
+            run.elsewhere += 1;
             continue;
         };
         // An int expectation outside i32 can't survive the R32I readback
@@ -178,14 +95,17 @@ fn run_tests(
             if *i < i32::MIN as i64 || *i > i32::MAX as i64 {
                 run.skips.push((
                     t.name.clone(),
-                    "value test: returns literal exceeds i32 range (GLSL has no int64)".to_string(),
+                    vec![
+                        "value test: returns literal exceeds i32 range (GLSL has no int64)"
+                            .to_string(),
+                    ],
                 ));
                 continue;
             }
         }
         match emit_value_test(ws, fr.module, &t.name, PROFILE) {
             Ok(shaders) => runnable.push((t.name.clone(), *expect, shaders)),
-            Err(e) => run.skips.push((t.name.clone(), e.message.clone())),
+            Err(e) => run.skips.push((t.name.clone(), vec![e.message.clone()])),
         }
     }
 
@@ -195,20 +115,20 @@ fn run_tests(
     }
     match run_batch(runner, PROFILE_NAME, &runnable) {
         Ok(markers) => {
-            run.failed.extend(markers.fails);
+            run.fails.extend(markers.fails);
             run.passed += markers.passed;
             let expects: std::collections::HashMap<&str, &ValueExpect> =
                 runnable.iter().map(|(n, e, _)| (n.as_str(), e)).collect();
             for (name, val) in &markers.values {
                 let Some(expect) = expects.get(name.as_str()) else {
-                    run.failed.push(format!(
+                    run.fails.push(format!(
                         "harness breach: VALUE for `{name}` without an expectation"
                     ));
                     continue;
                 };
                 match compare_value(expect, val, GLSL_FLOAT_REL_TOL) {
                     Ok(()) => run.passed += 1,
-                    Err(detail) => run.failed.push(format!("{name}: {detail}")),
+                    Err(detail) => run.fails.push(format!("{name}: {detail}")),
                 }
             }
         }
@@ -216,7 +136,7 @@ fn run_tests(
             // A runner-level failure (bad emitted GLSL, protocol breach) is a
             // loud FAIL for every runnable test, never a silent skip.
             for (name, _, _) in &runnable {
-                run.failed.push(format!("{name}: runner error: {detail}"));
+                run.fails.push(format!("{name}: runner error: {detail}"));
             }
         }
     }
