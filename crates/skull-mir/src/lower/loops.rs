@@ -555,126 +555,114 @@ impl<'a> Builder<'a> {
             c
         });
 
-        let header = self.f.new_block();
-        let body_bb = self.f.new_block();
-        let occ_bb = self.f.new_block();
-        let do_bb = self.f.new_block();
-        let latch = self.f.new_block();
-        let exit = self.f.new_block();
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = header;
-        let i = self.emit_cur(Inst::Load(i_cell));
-        let c = self.emit_cur(Inst::IntLt(i, n));
-        self.branch_to(c, body_bb, exit);
-
         // The walk is bounded by the occupancy column's own length, and a `[bool]`
         // column has no holes, so no nil test is needed.
-        self.cur = body_bb;
-        let idx = self.emit_cur(Inst::Load(i_cell));
-        self.f.set_term(self.cur, Term::Goto(occ_bb));
+        self.lower_index_loop(
+            i_cell,
+            false,
+            body,
+            |_| n,
+            |s, latch| {
+                let idx = s.emit_cur(Inst::Load(i_cell));
+                let occ_bb = s.f.new_block();
+                let do_bb = s.f.new_block();
+                s.f.set_term(s.cur, Term::Goto(occ_bb));
 
-        self.cur = occ_bb;
-        let occ = self.read_index(occupied, idx, occupied_kind);
-        self.branch_to(occ, do_bb, latch);
+                s.cur = occ_bb;
+                let occ = s.read_index(occupied, idx, occupied_kind);
+                s.branch_to(occ, do_bb, latch);
 
-        self.cur = do_bb;
-        let entity = if let Some(generations) = generations {
-            let e_gen = self.read_index(generations, idx, self.boxed_vec_kind(Some(&MonoTy::Int)));
-            let entity_representation =
-                self.nominal_value_representation(crate::names::ustr("Entity"))?;
-            Some(self.emit_cur(Inst::MakeValueStruct {
-                name: crate::names::ustr("Entity"),
-                representation: entity_representation,
-                form: ValueCtorForm::Declared,
-                fields: vec![
-                    (crate::names::ustr("_scene_id"), scene_id),
-                    (crate::names::ustr("_arena_id"), arena_id),
-                    (crate::names::ustr("_slot"), idx),
-                    (crate::names::ustr("_generation"), e_gen),
-                ],
-            }))
-        } else {
-            None
-        };
-        // A column element is rebuilt from its leaves; for a `nobox` element that is
-        // an implicit materialization, which the verifier rejects by name.
-        let data = if let Some(data) = data {
-            Some(match column_elem {
-                Some(elem) => {
-                    let repr = self.column_element_repr(data, idx, elem)?;
-                    self.pack(repr.into_value())?
-                }
-                None => {
-                    // The stored element stays the entry's; the binder gets its own copy.
-                    let elem = match self.concrete_expr_ty(iter).map(|ty| ty.peel_nullable().0) {
-                        Some(MonoTy::App { params, .. }) if self.iter_is_arena(iter) => {
-                            params.first()
-                        }
-                        _ => None,
-                    };
-                    let stored = self.read_index(data, idx, self.boxed_vec_kind(elem));
-                    let ty = match &pat {
-                        BindingPattern::Tuple(subs) if subs.len() == 2 => {
-                            self.loop_binder_ty(&subs[1], None)
-                        }
-                        _ => self.loop_binder_ty(&pat, Some(1)),
-                    };
-                    match ty {
-                        Some(ty) => self.copied_value_box(&ty, stored)?,
-                        None => stored,
-                    }
-                }
-            })
-        } else {
-            None
-        };
-        match &pat {
-            BindingPattern::Tuple(subs) if subs.len() == 2 => {
-                if let Some(entity) = entity {
-                    self.bind_for_pattern(&subs[0], entity)?;
-                }
-                if let Some(data) = data {
-                    self.bind_for_pattern(&subs[1], data)?;
-                }
-            }
-            BindingPattern::Leaf(_) if entity_used || data_used => {
-                // A whole-pair use demands both components, so no source read sees this
-                // placeholder.
-                let entity = entity.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Nil)));
-                let data = data.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Nil)));
-                let pair = ValueRepr::Tuple {
-                    parts: vec![ValueRepr::Scalar(entity), ValueRepr::Scalar(data)],
-                    present: None,
+                s.cur = do_bb;
+                let entity = if let Some(generations) = generations {
+                    let e_gen =
+                        s.read_index(generations, idx, s.boxed_vec_kind(Some(&MonoTy::Int)));
+                    let entity_representation =
+                        s.nominal_value_representation(crate::names::ustr("Entity"))?;
+                    Some(s.emit_cur(Inst::MakeValueStruct {
+                        name: crate::names::ustr("Entity"),
+                        representation: entity_representation,
+                        form: ValueCtorForm::Declared,
+                        fields: vec![
+                            (crate::names::ustr("_scene_id"), scene_id),
+                            (crate::names::ustr("_arena_id"), arena_id),
+                            (crate::names::ustr("_slot"), idx),
+                            (crate::names::ustr("_generation"), e_gen),
+                        ],
+                    }))
+                } else {
+                    None
                 };
-                self.bind_loop_element_repr(&pat, pair)?;
-            }
-            _ => {}
-        }
-        if let (Some(ev), Some(ec)) = (enum_var, enum_cell) {
-            let cur = self.emit_cur(Inst::Load(ec));
-            let bind_cell = self.new_binding_cell(
-                ev,
-                self.body.binding_arena[ev].name,
-                self.binding_ty(ev),
-                crate::names::ustr(""),
-            );
-            self.binds.insert(raw(ev), bind_cell);
-            self.store_cell(bind_cell, cur);
-            let inc = self.int_plus_one(cur);
-            self.store_cell(ec, inc);
-        }
-        self.push_loop_target(latch, exit, self.defers.len());
-        self.lower_stmt_expr(body)?;
-        self.loop_targets.pop();
-        self.goto_if_open(latch);
-
-        self.cur = latch;
-        self.increment_cell(i_cell);
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = exit;
-        Ok(())
+                // A column element is rebuilt from its leaves; for a `nobox` element that is
+                // an implicit materialization, which the verifier rejects by name.
+                let data = if let Some(data) = data {
+                    Some(match column_elem {
+                        Some(elem) => {
+                            let repr = s.column_element_repr(data, idx, elem)?;
+                            s.pack(repr.into_value())?
+                        }
+                        None => {
+                            // The stored element stays the entry's; the binder gets its own copy.
+                            let elem = match s.concrete_expr_ty(iter).map(|ty| ty.peel_nullable().0)
+                            {
+                                Some(MonoTy::App { params, .. }) if s.iter_is_arena(iter) => {
+                                    params.first()
+                                }
+                                _ => None,
+                            };
+                            let stored = s.read_index(data, idx, s.boxed_vec_kind(elem));
+                            let ty = match &pat {
+                                BindingPattern::Tuple(subs) if subs.len() == 2 => {
+                                    s.loop_binder_ty(&subs[1], None)
+                                }
+                                _ => s.loop_binder_ty(&pat, Some(1)),
+                            };
+                            match ty {
+                                Some(ty) => s.copied_value_box(&ty, stored)?,
+                                None => stored,
+                            }
+                        }
+                    })
+                } else {
+                    None
+                };
+                match &pat {
+                    BindingPattern::Tuple(subs) if subs.len() == 2 => {
+                        if let Some(entity) = entity {
+                            s.bind_for_pattern(&subs[0], entity)?;
+                        }
+                        if let Some(data) = data {
+                            s.bind_for_pattern(&subs[1], data)?;
+                        }
+                    }
+                    BindingPattern::Leaf(_) if entity_used || data_used => {
+                        // A whole-pair use demands both components, so no source read sees this
+                        // placeholder.
+                        let entity = entity.unwrap_or_else(|| s.emit_cur(Inst::Const(Lit::Nil)));
+                        let data = data.unwrap_or_else(|| s.emit_cur(Inst::Const(Lit::Nil)));
+                        let pair = ValueRepr::Tuple {
+                            parts: vec![ValueRepr::Scalar(entity), ValueRepr::Scalar(data)],
+                            present: None,
+                        };
+                        s.bind_loop_element_repr(&pat, pair)?;
+                    }
+                    _ => {}
+                }
+                if let (Some(ev), Some(ec)) = (enum_var, enum_cell) {
+                    let cur = s.emit_cur(Inst::Load(ec));
+                    let bind_cell = s.new_binding_cell(
+                        ev,
+                        s.body.binding_arena[ev].name,
+                        s.binding_ty(ev),
+                        crate::names::ustr(""),
+                    );
+                    s.binds.insert(raw(ev), bind_cell);
+                    s.store_cell(bind_cell, cur);
+                    let inc = s.int_plus_one(cur);
+                    s.store_cell(ec, inc);
+                }
+                Ok(())
+            },
+        )
     }
 
     /// Lua stateless `next` iteration: the key cell is the cursor and a nil key
@@ -956,6 +944,30 @@ impl<'a> Builder<'a> {
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         self.store_cell(i_cell, zero);
 
+        self.lower_index_loop(
+            i_cell,
+            false,
+            body,
+            |_| len_v,
+            |s, _| {
+                let i_now = s.emit_cur(Inst::Load(i_cell));
+                let repr = s.loop_element_repr_at(arr_v, i_now, kind)?;
+                bind(s, i_now, repr)
+            },
+        )
+    }
+
+    /// Counts `i_cell` up from its stored start while it is below `limit`, which the
+    /// header reads after the index. `enter` starts the body and may branch to the
+    /// latch to skip an iteration.
+    pub(crate) fn lower_index_loop(
+        &mut self,
+        i_cell: Idx<Cell>,
+        uint: bool,
+        body: Idx<Expr>,
+        limit: impl FnOnce(&mut Self) -> Idx<Inst>,
+        enter: impl FnOnce(&mut Self, Idx<Block>) -> Result<(), CompilerError>,
+    ) -> Result<(), CompilerError> {
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
         let latch = self.f.new_block();
@@ -964,20 +976,31 @@ impl<'a> Builder<'a> {
 
         self.cur = header;
         let i = self.emit_cur(Inst::Load(i_cell));
-        let cmp = self.emit_cur(Inst::IntLt(i, len_v));
-        self.branch_to(cmp, body_bb, exit);
+        let limit = limit(self);
+        let below = self.emit_cur(if uint {
+            Inst::UintLt(i, limit)
+        } else {
+            Inst::IntLt(i, limit)
+        });
+        self.branch_to(below, body_bb, exit);
 
         self.cur = body_bb;
-        let i_now = self.emit_cur(Inst::Load(i_cell));
-        let repr = self.loop_element_repr_at(arr_v, i_now, kind)?;
-        bind(self, i_now, repr)?;
+        enter(self, latch)?;
         self.push_loop_target(latch, exit, self.defers.len());
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         self.goto_if_open(latch);
 
         self.cur = latch;
-        self.increment_cell(i_cell);
+        let i = self.emit_cur(Inst::Load(i_cell));
+        let (one, add): (Lit, fn(_, _) -> Inst) = if uint {
+            (Lit::Uint(1), Inst::UintAdd)
+        } else {
+            (Lit::Int(1), Inst::IntAdd)
+        };
+        let one = self.emit_cur(Inst::Const(one));
+        let next = self.emit_cur(add(i, one));
+        self.store_cell(i_cell, next);
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = exit;

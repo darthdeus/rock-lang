@@ -1105,47 +1105,15 @@ impl<'a> Builder<'a> {
         let hi_cell = self.f.new_cell(None);
         self.store_cell(hi_cell, hi_v);
 
-        let header = self.f.new_block();
-        let body_bb = self.f.new_block();
-        let latch = self.f.new_block();
-        let exit = self.f.new_block();
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = header;
-        let i_v = self.emit_cur(Inst::Load(i_cell));
-        let h_v = self.emit_cur(Inst::Load(hi_cell));
         let is_uint = matches!(self.arith_ty(low), Some(ArithTy::Uint))
             || matches!(self.arith_ty(high), Some(ArithTy::Uint));
-        let cmp = if is_uint {
-            self.emit_cur(Inst::UintLt(i_v, h_v))
-        } else {
-            self.emit_cur(Inst::IntLt(i_v, h_v))
-        };
-        self.branch_to(cmp, body_bb, exit);
-
-        self.cur = body_bb;
-        self.push_loop_target(latch, exit, self.defers.len());
-        self.lower_stmt_expr(body)?;
-        self.loop_targets.pop();
-        self.goto_if_open(latch);
-
-        self.cur = latch;
-        let i_v2 = self.emit_cur(Inst::Load(i_cell));
-        let one = self.emit_cur(Inst::Const(if is_uint {
-            Lit::Uint(1)
-        } else {
-            Lit::Int(1)
-        }));
-        let inc = if is_uint {
-            self.emit_cur(Inst::UintAdd(i_v2, one))
-        } else {
-            self.emit_cur(Inst::IntAdd(i_v2, one))
-        };
-        self.store_cell(i_cell, inc);
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = exit;
-        Ok(())
+        self.lower_index_loop(
+            i_cell,
+            is_uint,
+            body,
+            |s| s.emit_cur(Inst::Load(hi_cell)),
+            |_, _| Ok(()),
+        )
     }
 }
 
