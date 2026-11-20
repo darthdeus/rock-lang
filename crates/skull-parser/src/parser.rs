@@ -3,7 +3,7 @@
 use crate::ast::*;
 use rock_core::nesting::MAX_NESTING_DEPTH;
 use rock_core::{CompilerError, Span};
-use rock_tokenizer::{Token, TokenKind, Tokenizer, interp};
+use rock_tokenizer::{BindingPower, Token, TokenKind, Tokenizer, interp};
 use std::rc::Rc;
 use ustr::Ustr;
 
@@ -2296,12 +2296,15 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            if let Some(generic_args) = self.try_generic_call_args() {
+            if op == TokenKind::LessThan
+                && let Some(generic_args) = self.try_generic_call_args()
+            {
                 left = self.parse_call(left, generic_args)?;
                 continue;
             }
 
-            if let Some((l_bp, ())) = op.postfix_bp() {
+            let power = op.binding_power();
+            if let Some(BindingPower::Postfix(l_bp)) = power {
                 if l_bp < min_bp {
                     break;
                 }
@@ -2372,14 +2375,10 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            if let Some((l_bp, r_bp)) = op.infix_bp() {
+            if let Some(BindingPower::Infix(l_bp, r_bp)) = power {
                 if l_bp < min_bp {
                     break;
                 }
-                if op_starts_expr(op) && self.newline_breaks() {
-                    break;
-                }
-
                 if op == TokenKind::Dot {
                     left = self.parse_dot(left)?;
                     continue;
@@ -2432,50 +2431,20 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
 
-        let allow = self.allow_literals;
         self.in_no_parens_args = true;
         let mut args = Vec::new();
-        while !self.at_end() {
-            let stop = matches!(
-                self.kind(),
-                TokenKind::Comma
-                    | TokenKind::CloseCurly
-                    | TokenKind::CloseParen
-                    | TokenKind::CloseSquare
-                    | TokenKind::Semicolon
-                    | TokenKind::EOF
-                    | TokenKind::Return
-                    | TokenKind::Let
-                    | TokenKind::If
-                    | TokenKind::For
-                    | TokenKind::While
-                    | TokenKind::Loop
-                    | TokenKind::Break
-                    | TokenKind::Continue
-            ) || self.prev_trailing_newlines() > 0;
-            if stop {
-                break;
-            }
-            let is_splat = self.eat(TokenKind::TripleDot);
-            let value = self.with_allow_literals(allow, |p| p.parse_expr(15))?;
-            args.push(FunctionCallArg {
-                is_splat,
-                ..FunctionCallArg::positional(value)
-            });
+        loop {
+            args.push(FunctionCallArg::positional(self.parse_expr(15)?));
 
             if !no_parens_arg_continue(self.kind())
                 || self.prev_trailing_newlines() > 0
                 || self.delimiter_depth > 0
-                || no_parens_breaks_on_op(self.kind())
             {
                 break;
             }
         }
         self.in_no_parens_args = false;
 
-        if args.is_empty() {
-            return Ok(None);
-        }
         let span = self.node_span(func, self.prev_span());
         Ok(Some(self.ast.expr(
             span,
@@ -2565,9 +2534,7 @@ impl<'a> Parser<'a> {
 
     fn try_generic_call_args(&mut self) -> Option<Vec<Idx<TypeExprData>>> {
         let saved = self.pos;
-        if !self.eat(TokenKind::LessThan) {
-            return None;
-        }
+        self.advance(); // `<`
         let args = self.parse_bare_comma_list(TokenKind::GreaterThan, Self::parse_type);
         if let Ok(args) = args
             && self.expect_generic_close().is_ok()
@@ -3600,12 +3567,7 @@ impl<'a> Parser<'a> {
             if op_starts_expr(next) && next_on_fresh_line {
                 break;
             }
-            let continues = next.is_op()
-                || matches!(
-                    next,
-                    TokenKind::OpenParen | TokenKind::OpenSquare | TokenKind::Dot
-                );
-            if continues {
+            if next.is_op() {
                 self.advance();
             } else {
                 break;
@@ -3700,43 +3662,13 @@ fn no_parens_arg_start(op: TokenKind) -> bool {
 }
 
 fn no_parens_arg_continue(op: TokenKind) -> bool {
-    matches!(
-        op,
-        TokenKind::Ident(_)
-            | TokenKind::Int(_, _)
-            | TokenKind::Float(_)
-            | TokenKind::String(_)
-            | TokenKind::RawString(_)
-            | TokenKind::True
-            | TokenKind::False
-            | TokenKind::Null
-            | TokenKind::OpenParen
-            | TokenKind::OpenSquare
-            | TokenKind::OpenCurly
-            | TokenKind::Minus
-            | TokenKind::Bang
-            | TokenKind::PlusPlus
-            | TokenKind::MinusMinus
-    )
-}
-
-fn no_parens_breaks_on_op(op: TokenKind) -> bool {
-    matches!(
-        op,
-        TokenKind::Plus
-            | TokenKind::Minus
-            | TokenKind::Mul
-            | TokenKind::Div
-            | TokenKind::IntDiv
-            | TokenKind::Equals
-            | TokenKind::NotEquals
-            | TokenKind::LessThan
-            | TokenKind::GreaterThan
-            | TokenKind::And
-            | TokenKind::Or
-            | TokenKind::Assign
-            | TokenKind::Dot
-            | TokenKind::Dollar
-            | TokenKind::At
-    )
+    no_parens_arg_start(op)
+        || matches!(
+            op,
+            TokenKind::OpenParen
+                | TokenKind::OpenSquare
+                | TokenKind::OpenCurly
+                | TokenKind::PlusPlus
+                | TokenKind::MinusMinus
+        )
 }

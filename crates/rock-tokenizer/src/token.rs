@@ -180,71 +180,97 @@ rock_keywords! {
     False = "false",
 }
 
+#[derive(Clone, Copy)]
+pub enum BindingPower {
+    Postfix(u8),
+    Infix(u8, u8),
+}
+
+macro_rules! operators {
+    (@bp left $bp:literal) => { Some(BindingPower::Infix($bp, $bp + 1)) };
+    (@bp right $bp:literal) => { Some(BindingPower::Infix($bp + 1, $bp)) };
+    ($($kind:ident $($text:literal)? $(= $assoc:ident($bp:literal))? $(=> $func:literal)? ,)*) => {
+        impl TokenKind {
+            pub fn is_op(&self) -> bool {
+                matches!(
+                    self,
+                    $(Self::$kind |)*
+                    Self::TripleDot | Self::PlusPlus | Self::MinusMinus
+                        | Self::CloseSquare | Self::OpenParen | Self::CloseParen
+                        | Self::QuestionMark | Self::QuestionDot | Self::TripleQuestionMark
+                        | Self::At
+                )
+            }
+
+            #[inline]
+            pub fn binding_power(&self) -> Option<BindingPower> {
+                match self {
+                    $($(Self::$kind => operators!(@bp $assoc $bp),)?)*
+                    Self::OpenParen | Self::OpenSquare => Some(BindingPower::Postfix(49)),
+                    Self::QuestionDot => Some(BindingPower::Postfix(51)),
+                    Self::At => Some(BindingPower::Postfix(10)),
+                    Self::QuestionMark | Self::PlusPlus | Self::MinusMinus => {
+                        Some(BindingPower::Postfix(17))
+                    }
+                    _ => None,
+                }
+            }
+
+            pub fn operator_spelling(&self) -> &'static str {
+                match self {
+                    $($(Self::$kind => $text,)?)*
+                    _ => unreachable!("operator token"),
+                }
+            }
+
+            pub fn overloadable_binop_fn(&self) -> Option<&'static str> {
+                match self {
+                    $($(Self::$kind => Some($func),)?)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+operators! {
+    Dollar = right(1),
+    Assign = right(5),
+    DoubleColon "::" = left(7),
+    AddAssign "+=" = right(9),
+    SubAssign "-=" = right(9),
+    MulAssign "*=" = right(9),
+    DivAssign "/=" = right(9),
+    DoubleQuestionMark "??" = left(11),
+    DoubleDot ".." = left(12),
+    Or "or" = left(13),
+    And "and" = left(15),
+    Equals "==" = left(19),
+    NotEquals "!=" = left(19),
+    LeftShift "<<" = left(23),
+    RightShift ">>" = left(23),
+    LessThan "<" = left(25),
+    LessThanEqual "<=" = left(25),
+    GreaterThan ">" = left(25),
+    GreaterThanEqual ">=" = left(25),
+    BitAnd "&" = left(27),
+    BitXor "^" = left(28),
+    BitOr "|" = left(29),
+    Plus "+" = left(31) => "__op_add",
+    Minus "-" = left(31) => "__op_sub",
+    Mul "*" = left(35) => "__op_mul",
+    Div "/" = left(35) => "__op_div",
+    IntDiv "./" = left(35) => "__op_idiv",
+    Mod "%" = left(35) => "__op_mod",
+    As "as" = left(37),
+    Dot "." = left(51),
+    Colon ":" = left(51),
+    Bang "!",
+    BitNot "~",
+    OpenSquare "[",
+}
+
 impl TokenKind {
-    pub fn is_op(&self) -> bool {
-        use TokenKind::*;
-
-        matches!(
-            self,
-            Dot | DoubleDot
-                | TripleDot
-                | Colon
-                | DoubleColon
-                | As
-                | Bang
-                | Plus
-                | PlusPlus
-                | Minus
-                | MinusMinus
-                | Mul
-                | Div
-                | IntDiv
-                | Mod
-                | And
-                | Or
-                | BitAnd
-                | BitOr
-                | BitXor
-                | BitNot
-                | LeftShift
-                | RightShift
-                | OpenSquare
-                | CloseSquare
-                | OpenParen
-                | CloseParen
-                | Assign
-                | AddAssign
-                | SubAssign
-                | MulAssign
-                | DivAssign
-                | Equals
-                | NotEquals
-                | LessThan
-                | LessThanEqual
-                | GreaterThan
-                | GreaterThanEqual
-                | QuestionMark
-                | QuestionDot
-                | DoubleQuestionMark
-                | TripleQuestionMark
-                | Dollar
-                | At
-        )
-    }
-
-    pub fn postfix_bp(&self) -> Option<(u8, ())> {
-        use TokenKind::*;
-        let val = match self {
-            OpenParen | OpenSquare => Some(49),
-            QuestionDot => Some(51),
-            At => Some(10), // @ operator for block/lambda passing (lower precedence than no-parens)
-            QuestionMark | PlusPlus | MinusMinus => Some(17),
-            _ => None,
-        };
-
-        Some((val?, ()))
-    }
-
     pub fn prefix_bp(&self) -> Option<((), u8)> {
         use TokenKind::*;
         let val = match self {
@@ -253,100 +279,5 @@ impl TokenKind {
         };
 
         Some(((), val?))
-    }
-
-    pub fn infix_bp(&self) -> Option<(u8, u8)> {
-        let left = |x| Some((x, x + 1));
-        let right = |x| Some((x + 1, x));
-
-        use TokenKind::*;
-        match self {
-            Assign => right(5),
-
-            DoubleColon => left(7),
-            DoubleDot => left(12), // Range operator: between logical ops and comparisons
-
-            AddAssign | SubAssign | MulAssign | DivAssign => right(9),
-
-            Or => left(13),
-            And => left(15),
-
-            As => left(37),
-
-            Equals | NotEquals => left(19),
-
-            LeftShift | RightShift => left(23),
-
-            LessThan | LessThanEqual | GreaterThan | GreaterThanEqual => left(25),
-
-            BitAnd => left(27),
-            BitXor => left(28),
-            BitOr => left(29),
-
-            Plus | Minus => left(31),
-            Mul | Div | IntDiv | Mod => left(35),
-
-            Dot | Colon => left(51),
-
-            Dollar => right(1),
-
-            // Above every assignment so `x = a ?? b` is `x = (a ?? b)`; below `||`.
-            DoubleQuestionMark => left(11),
-
-            _ => None,
-        }
-    }
-
-    /// Single source of truth for the operator-as-function mapping the parser emits and
-    /// resolution, mangling and codegen recognize.
-    pub fn overloadable_binop_fn(&self) -> Option<&'static str> {
-        Some(match self {
-            TokenKind::Plus => "__op_add",
-            TokenKind::Minus => "__op_sub",
-            TokenKind::Mul => "__op_mul",
-            TokenKind::Div => "__op_div",
-            TokenKind::IntDiv => "__op_idiv",
-            TokenKind::Mod => "__op_mod",
-            _ => return None,
-        })
-    }
-
-    pub fn operator_spelling(&self) -> &'static str {
-        use TokenKind::*;
-        match self {
-            And => "and",
-            Or => "or",
-            Equals => "==",
-            NotEquals => "!=",
-            LessThan => "<",
-            LessThanEqual => "<=",
-            GreaterThan => ">",
-            GreaterThanEqual => ">=",
-            LeftShift => "<<",
-            RightShift => ">>",
-            BitAnd => "&",
-            BitOr => "|",
-            BitXor => "^",
-            Plus => "+",
-            Minus => "-",
-            Mul => "*",
-            Div => "/",
-            IntDiv => "./",
-            Mod => "%",
-            AddAssign => "+=",
-            SubAssign => "-=",
-            MulAssign => "*=",
-            DivAssign => "/=",
-            DoubleDot => "..",
-            DoubleQuestionMark => "??",
-            DoubleColon => "::",
-            As => "as",
-            Dot => ".",
-            Colon => ":",
-            Bang => "!",
-            BitNot => "~",
-            OpenSquare => "[",
-            _ => unreachable!("operator token"),
-        }
     }
 }
