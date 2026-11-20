@@ -28,10 +28,6 @@ impl SourceFiles {
         }
     }
 
-    pub fn set_package_roots(&mut self, roots: impl IntoIterator<Item = (u32, PathBuf)>) {
-        self.package_roots = roots.into_iter().collect();
-    }
-
     // A re-add keeps its slot so the set order does not depend on how often a file was loaded.
     pub fn add_or_update_file(&mut self, updated: SourceFile) {
         let path = updated.file.id_path();
@@ -237,7 +233,7 @@ mod tests {
 
         let package_root = project_root.join("tests");
         let mut sources = SourceFiles::empty();
-        sources.set_package_roots([(0, project_root.join("src")), (7, package_root.clone())]);
+        sources.package_roots = vec![(0, project_root.join("src")), (7, package_root.clone())];
         let filter = sources.production_filter(&project_root);
         let keeps = |path: &Path| {
             filter
