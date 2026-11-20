@@ -105,10 +105,11 @@ checksum, across all runs. Repeat it for additional counters.
     --noise /tmp/runtime-aa/summary.json --out /tmp/runtime-ab
 ```
 
-The runner alternates pair order and checks that A/A and the A/B baseline
-emit the same Lua. It uses Stone's fixed-step perf mode, pins the random seed, disables
-post-present sync, and records the GC-running allocation window and per-run
-frame and thread CPU percentiles. Raw reports and load readings stay in
+The runner alternates pair order, checks emitted Lua within each arm, and
+checks the A/B baseline against the A/A Lua. It uses Stone's fixed-step perf
+mode, pins the random seed, disables post-present sync, and records the
+GC-running allocation window and per-run frame and thread CPU percentiles.
+Raw reports and load readings stay in
 `--out`. Run A/A on the same host and under comparable load to A/B.
 
 Each metric gets a distribution-free 95% interval for the median paired
@@ -121,4 +122,26 @@ On macOS, `--instructions` samples process-wide retired instructions at frame
 boundaries. It reports the mean over complete intervals between measured
 frame entries, starting after the opening frame and ending at the last frame
 entry. The probe adds a syscall per frame. Use it on both A/A and A/B for
-that comparison.
+that comparison. Repeat any instruction calibration recorded before the
+probe moved into inline `LUA_INIT`.
+
+`--luajit /path/to/luajit` selects the same VM for both arms through
+`ROCK_LUAJIT` and records its executable digest in the calibration.
+
+For repeatability experiments on Apple Silicon, build a separate LuaJIT
+from the gamelibs tag in `gamelibs.version`. In a fresh gamelibs checkout
+with its LuaJIT submodule initialized, run:
+
+```sh
+./apply-luajit-patches.sh
+git -C luajit apply /path/to/rock-lang/perf/measurement-luajit.patch
+MACOSX_DEPLOYMENT_TARGET=15.0 make -C luajit \
+    XCFLAGS='-DLUAJIT_SECURITY_PRNG=0 -DROCK_PERF_HEAP_BASE=0x7400000000ULL'
+```
+
+Pass `--luajit /path/to/gamelibs/luajit/src/luajit` to both runs. This build
+fixes the VM seed and Lua heap mapping addresses and gives staged `main.lua`
+chunks a constant name. It keeps the JIT and collector running. Use the
+patched binary for trusted benchmark inputs only. Calibrate each workload
+with A/A since native work and wall-clock budgets can still change the
+allocation and trace counts.

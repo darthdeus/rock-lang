@@ -16,8 +16,7 @@ from compare import median_interval
 ALLOC_START = 100
 INSTRUCTION_PROBE = r'''
 local frames = tonumber(os.getenv("PERF_DEFAULT_MEASURE_FRAMES"))
-local output = os.getenv("PERF_OUT")
-if not frames or not output then return end
+if not frames then return end
 local ffi = require("ffi")
 ffi.cdef[[
     int getpid(void);
@@ -39,6 +38,7 @@ end
 jit.off(snapshot)
 _G.__rock_allocation_activation_frame_begin = snapshot
 _G.__rock_allocation_activation_dump = function()
+    local output = assert(os.getenv("PERF_OUT"))
     local file = assert(io.open(output .. ".instructions", "w"))
     local first = math.max(1, frame - span + 1)
     file:write(first, "\n")
@@ -48,6 +48,11 @@ _G.__rock_allocation_activation_dump = function()
     file:close()
 end
 '''
+
+
+def sha256_file(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def samples(report, frames, work_names):
@@ -174,10 +179,8 @@ def measure(args, binary, env, name):
                 report, output / "perf-summary.json.instructions")
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise ValueError(f"{output}: {error}") from error
-    with (output / "main.lua").open("rb") as lua:
-        lua_sha256 = hashlib.file_digest(lua, "sha256").hexdigest()
     return {"metrics": metrics, "work": work, "settings": settings, "uptime": load,
-            "lua_sha256": lua_sha256,
+            "lua_sha256": sha256_file(output / "main.lua"),
             "end_uptime": subprocess.check_output(["uptime"], text=True).strip()}
 
 
@@ -195,6 +198,7 @@ def main():
     parser.add_argument("--seed", default="42")
     parser.add_argument("--instructions", action="store_true",
                         help="sample frame-window retired instructions on macOS")
+    parser.add_argument("--luajit", type=Path, help="use this LuaJIT executable for both arms")
     parser.add_argument("--var", action="append", default=[], help="common compiler build var NAME=VALUE")
     parser.add_argument("--work", action="append", default=[], help="require equal work_units for this section")
     args = parser.parse_args()
@@ -208,6 +212,13 @@ def main():
     plan = {"frames": args.frames, "warmup_frames": args.warmup_frames, "seed": args.seed,
             "project": args.project, "work": args.work, "instructions": args.instructions,
             "vars_sha256": hashlib.sha256(json.dumps(args.var).encode()).hexdigest()}
+    if args.luajit:
+        args.luajit = args.luajit.resolve()
+        if not args.luajit.is_file() or not os.access(args.luajit, os.X_OK):
+            parser.error("--luajit requires an executable file")
+        plan["luajit_sha256"] = sha256_file(args.luajit)
+    if args.instructions:
+        plan["instruction_probe_sha256"] = hashlib.sha256(INSTRUCTION_PROBE.encode()).hexdigest()
     if calibration and (not calibration["aa"] or calibration["plan"] != plan
                         or not calibration["work_matches"]):
         parser.error("--noise requires A/A calibration with matching inputs and work")
@@ -215,24 +226,23 @@ def main():
     args.out.mkdir(parents=True)
     env = dict(os.environ, ROCK_TEST_SEED=args.seed, PERF_NO_SECTIONS="1", STONE_PRESENT_SYNC="none",
                PERF_GC_WINDOW_AFTER_WARMUP="0")
+    if args.luajit:
+        env["ROCK_LUAJIT"] = str(args.luajit)
     if args.instructions:
-        probe = args.out / "instructions.lua"
-        probe.write_text(INSTRUCTION_PROBE)
-        env["LUA_INIT"] = f"@{probe}"
+        env["LUA_INIT"] = INSTRUCTION_PROBE
     aa = args.candidate is None
     binaries = (args.base, args.candidate or args.base)
-    reference = calibration["pairs"][0][0]["lua_sha256"] if calibration else None
+    references = {0: calibration["pairs"][0][0]["lua_sha256"]} if calibration else {}
     pairs = []
     for pair in range(args.pairs):
         rows = [None, None]
         for arm in ((1, 0) if pair % 2 else (0, 1)):
             name = f"{pair + 1:02}-{'ab'[arm]}"
             rows[arm] = measure(args, binaries[arm], env, name)
-            if aa or (calibration and arm == 0):
-                digest = rows[arm]["lua_sha256"]
-                reference = reference or digest
-                if digest != reference:
-                    raise ValueError(f"{name}: Lua differs from A/A; freeze sources and build variables")
+            digest = rows[arm]["lua_sha256"]
+            source_arm = 0 if aa else arm
+            if digest != references.setdefault(source_arm, digest):
+                raise ValueError(f"{name}: Lua differs from its reference; freeze sources and build variables")
         pairs.append(rows)
 
     result = summarize(pairs, aa, calibration)

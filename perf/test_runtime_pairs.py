@@ -1,9 +1,12 @@
 """Intervals use paired windows and a matching-work A/A reference."""
+import hashlib
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from runtime_pairs import instructions_per_frame, summarize
+from runtime_pairs import INSTRUCTION_PROBE, instructions_per_frame, main, summarize
 
 
 def pairs(deltas, work=1):
@@ -39,6 +42,34 @@ class RuntimePairTests(unittest.TestCase):
             report["measurement"]["completed_frames"] = 10
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 instructions_per_frame(report, path)
+
+    def test_candidate_lua_must_match_its_first_run(self):
+        with TemporaryDirectory() as directory:
+            args = ["runtime_pairs.py", ".", "base", "candidate", "--out", str(Path(directory) / "run")]
+            with patch("sys.argv", args), patch("runtime_pairs.measure", side_effect=[
+                {"lua_sha256": "base"}, {"lua_sha256": "candidate"}, {"lua_sha256": "different"},
+            ]):
+                with self.assertRaisesRegex(ValueError, "02-b:.*Lua differs"):
+                    main()
+
+    def test_selected_vm_and_instruction_probe_are_passed_to_each_arm(self):
+        with TemporaryDirectory() as directory:
+            vm = Path(directory) / "luajit"
+            vm.write_bytes(b"test runtime")
+            vm.chmod(0o755)
+            args = ["runtime_pairs.py", ".", "base", "--out", str(Path(directory) / "run"),
+                    "--luajit", str(vm), "--instructions", "--pairs", "6"]
+            row = {"lua_sha256": "same", "settings": {}, "work": {}, "metrics": {}}
+            with patch("sys.argv", args), patch("sys.platform", "darwin"), patch.dict("os.environ", {}, clear=True):
+                with patch("runtime_pairs.measure", return_value=row) as measure:
+                    main()
+            self.assertEqual(measure.call_count, 12)
+            for call in measure.call_args_list:
+                env = call.args[2]
+                self.assertEqual(env["ROCK_LUAJIT"], str(vm.resolve()))
+                self.assertEqual(env["LUA_INIT"], INSTRUCTION_PROBE)
+            plan = json.loads((Path(directory) / "run" / "summary.json").read_text())["plan"]
+            self.assertEqual(plan["luajit_sha256"], hashlib.sha256(vm.read_bytes()).hexdigest())
 
 
 if __name__ == "__main__":

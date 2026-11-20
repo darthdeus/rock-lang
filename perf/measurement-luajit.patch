@@ -1,0 +1,66 @@
+diff --git a/src/lj_alloc.c b/src/lj_alloc.c
+index 7dfbed8..3f7c378 100644
+--- a/src/lj_alloc.c
++++ b/src/lj_alloc.c
+@@ -91,6 +91,12 @@
+ #include <errno.h>
+ /* If this include fails, then rebuild with: -DLUAJIT_USE_SYSMALLOC */
+ #include <sys/mman.h>
++#if LJ_TARGET_OSX && LJ_TARGET_ARM64 && defined(ROCK_PERF_HEAP_BASE)
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#include <stdio.h>
++#include <stdlib.h>
++#endif
+
+ #define LJ_ALLOC_MMAP		1
+
+@@ -232,6 +238,20 @@ static int CALL_MUNMAP(void *ptr, size_t size)
+
+ static void *mmap_probe(PRNGState *rs, size_t size)
+ {
++#if LJ_TARGET_OSX && LJ_TARGET_ARM64 && defined(ROCK_PERF_HEAP_BASE)
++  static mach_vm_address_t next = ROCK_PERF_HEAP_BASE;
++  mach_vm_address_t address = next;
++  int olderr = errno;
++  UNUSED(rs);
++  /* A fixed allocation fails if the range is already mapped. */
++  if (mach_vm_allocate(mach_task_self(), &address, size, VM_FLAGS_FIXED) != KERN_SUCCESS) {
++    fprintf(stderr, "LuaJIT measurement heap address unavailable: %p\n", (void *)(uintptr_t)next);
++    abort();
++  }
++  next += (size + LJ_PAGESIZE - 1) & ~(size_t)(LJ_PAGESIZE - 1);
++  errno = olderr;
++  return (void *)(uintptr_t)address;
++#else
+   /* Hint for next allocation. Doesn't need to be thread-safe. */
+   static uintptr_t hint_addr = 0;
+   int olderr = errno;
+@@ -271,6 +291,7 @@ static void *mmap_probe(PRNGState *rs, size_t size)
+   }
+   errno = olderr;
+   return MFAIL;
++#endif
+ }
+
+ #endif
+diff --git a/src/lj_load.c b/src/lj_load.c
+index ce7814b..df073ce 100644
+--- a/src/lj_load.c
++++ b/src/lj_load.c
+@@ -103,7 +103,14 @@ LUALIB_API int luaL_loadfilex(lua_State *L, const char *filename,
+   const char *chunkname;
+   int err = 0;
+   if (filename) {
+-    chunkname = lua_pushfstring(L, "@%s", filename);
++    const char *chunk_file = filename;
++#if LJ_TARGET_OSX && LJ_TARGET_ARM64 && defined(ROCK_PERF_HEAP_BASE)
++    const char *base = strrchr(filename, '/');
++    /* The compiler stages main.lua under a fresh directory per run. */
++    if (strcmp(base ? base + 1 : filename, "main.lua") == 0)
++      chunk_file = "main.lua";
++#endif
++    chunkname = lua_pushfstring(L, "@%s", chunk_file);
+     ctx.fp = fopen(filename, "rb");
+     if (ctx.fp == NULL) {
+       L->top--;
