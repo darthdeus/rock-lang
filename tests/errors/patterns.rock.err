@@ -613,3 +613,30 @@ fn main() {
     let UserId(x) = user
     print(x)
 }
+
+//=== TEST CASE: other_enum_variant_TypeMismatch ===
+//! expect: pattern for enum `B` cannot match a value of type `A`
+enum A { X(int, int), Y }
+enum B { P(int), Q }
+
+fn main() {
+    let r = match A::X(1, 2) {
+        B::P(n) => n,
+        _ => 0,
+    }
+    print(r)
+}
+
+//=== TEST CASE: other_enum_record_variant_TypeMismatch ===
+//! expect: pattern for enum `B` cannot match a value of type `A`
+enum A { X { n: int }, Y }
+enum B { P { n: int }, Q }
+
+fn main() {
+    let a = A::X { n: 1 }
+    let r = match a {
+        B::P { n } => n,
+        _ => 0,
+    }
+    print(r)
+}

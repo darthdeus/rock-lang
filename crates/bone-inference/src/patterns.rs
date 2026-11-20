@@ -123,6 +123,7 @@ pub(crate) fn check_pattern(
             let eid = resolve_enum(gamma, ename).ok_or_else(|| {
                 CompilerError::new_with_label(span, format!("unknown enum `{}`", ename))
             })?;
+            same_enum(gamma, eid, scrut_name, expected, span)?;
 
             let def = &gamma.workspace.module(eid.module).enums[eid.def];
 
@@ -196,6 +197,7 @@ pub(crate) fn check_pattern(
                 let ename = enum_name.unwrap_or(scrut);
 
                 if let Some(eid) = resolve_enum(gamma, ename) {
+                    same_enum(gamma, eid, scrut, expected, span)?;
                     let def = &gamma.workspace.module(eid.module).enums[eid.def];
 
                     let subs = generic_arg_subs(gamma, &def.generics, expected, params);
@@ -381,5 +383,25 @@ pub(crate) fn require_irrefutable(
         "this pattern can fail: `{}` is not matched; {}",
         missing.join("`, `"),
         suggestion
+    )
+}
+
+/// A pattern naming its enum must name the scrutinee's enum.
+fn same_enum(
+    gamma: &Gamma,
+    pattern: EnumId,
+    scrut: Ustr,
+    expected: TyId,
+    span: Span,
+) -> Result<(), CompilerError> {
+    if resolve_enum(gamma, scrut) == Some(pattern) {
+        return Ok(());
+    }
+    let name = gamma.workspace.module(pattern.module).enums[pattern.def].name;
+    comp_error!(
+        span,
+        "pattern for enum `{}` cannot match a value of type `{}`",
+        name,
+        gamma.render(expected)
     )
 }
