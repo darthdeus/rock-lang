@@ -5,9 +5,8 @@ use std::ffi::{c_char, CStr};
 use std::fs::{self, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender, TryRecvError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -29,9 +28,6 @@ const ENVELOPE_VERSION: i64 = 2;
 const REVOCATION_FILE: &str = ".telemetry-revoked";
 const CONSENT_FILE: &str = ".telemetry-consent";
 const LAST_UPLOAD_FILE: &str = ".telemetry-last-upload";
-const WORKER_RUNNING: u8 = 0;
-const WORKER_DRAINING: u8 = 1;
-const WORKER_DISCARDING: u8 = 2;
 
 struct TelemetryIdentity {
     game: String,
@@ -47,7 +43,6 @@ struct TelemetrySpool {
     consent_generation: Uuid,
     next_seq: u64,
     events_path: PathBuf,
-    io_lock: Arc<Mutex<()>>,
     writable: bool,
 }
 
@@ -57,7 +52,6 @@ struct TelemetryDrain {
     quarantine_path: PathBuf,
     last_upload_path: PathBuf,
     consent_generation: Uuid,
-    io_lock: Arc<Mutex<()>>,
 }
 
 struct TelemetryTransport {
@@ -94,40 +88,20 @@ enum StopMode {
     Discard,
 }
 
-enum UploadCommand {
-    Wake(Instant),
-    Finish { mode: StopMode, deadline: Instant },
-}
-
-struct UploadWorker {
-    tx: SyncSender<UploadCommand>,
-    control: Arc<AtomicU8>,
-    shutdown_budget: Duration,
-    handle: JoinHandle<()>,
-}
-
-#[derive(Clone)]
-struct UploadWaker {
-    tx: SyncSender<UploadCommand>,
-    control: Arc<AtomicU8>,
-}
-
 struct QueuedTelemetryEvent {
     name: String,
     timestamp: i64,
     data: Option<String>,
 }
 
-enum AppendCommand {
+enum Command {
     Record(QueuedTelemetryEvent),
     #[cfg_attr(not(test), allow(dead_code))]
     Flush(Sender<bool>),
-    Finish,
-}
-
-struct AppendWorker {
-    tx: Sender<AppendCommand>,
-    handle: JoinHandle<()>,
+    Finish {
+        mode: StopMode,
+        deadline: Instant,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -156,12 +130,11 @@ impl Default for UploadTiming {
 }
 
 struct TelemetryClient {
-    append_worker: AppendWorker,
-    upload_worker: UploadWorker,
+    tx: Sender<Command>,
+    worker: JoinHandle<()>,
+    shutdown_budget: Duration,
     #[cfg(test)]
     events_path: PathBuf,
-    #[cfg(test)]
-    io_lock: Arc<Mutex<()>>,
     _root_lock: TelemetryRootLock,
 }
 
@@ -196,18 +169,7 @@ impl std::fmt::Display for SpoolAtCapacity {
 impl std::error::Error for SpoolAtCapacity {}
 
 impl TelemetrySpool {
-    #[cfg(test)]
-    fn open(root: &Path, identity: TelemetryIdentity) -> io::Result<Self> {
-        let consent_generation = load_or_create_consent_generation(root)?;
-        Self::open_with_io_lock(root, identity, consent_generation, Arc::new(Mutex::new(())))
-    }
-
-    fn open_with_io_lock(
-        root: &Path,
-        identity: TelemetryIdentity,
-        consent_generation: Uuid,
-        io_lock: Arc<Mutex<()>>,
-    ) -> io::Result<Self> {
+    fn new(root: &Path, identity: TelemetryIdentity, consent_generation: Uuid) -> io::Result<Self> {
         identity.validate()?;
         let stats_dir = prepare_channel_stats_dir(root, &identity.channel)?;
 
@@ -221,37 +183,8 @@ impl TelemetrySpool {
             consent_generation,
             next_seq: 1,
             events_path,
-            io_lock,
             writable: true,
         })
-    }
-
-    #[cfg(test)]
-    fn record_stat(&mut self, name: &str, timestamp: i64) -> io::Result<()> {
-        self.record_stat_data(name, timestamp, None)
-    }
-
-    #[cfg(test)]
-    fn record_stat_data(
-        &mut self,
-        name: &str,
-        timestamp: i64,
-        data: Option<&str>,
-    ) -> io::Result<()> {
-        let events_path = self.events_path.clone();
-        self.record_stat_with_persist(name, timestamp, data, sync_file_and_parent(&events_path))
-    }
-
-    #[cfg(test)]
-    fn record_stat_with_persist(
-        &mut self,
-        name: &str,
-        timestamp: i64,
-        data: Option<&str>,
-        persist: impl FnOnce(&fs::File) -> io::Result<()>,
-    ) -> io::Result<()> {
-        let event = QueuedTelemetryEvent::new(name, timestamp, data)?;
-        self.record_batch_with_persist(&[event], persist)
     }
 
     fn record_batch(&mut self, events: &[QueuedTelemetryEvent]) -> io::Result<()> {
@@ -267,8 +200,6 @@ impl TelemetrySpool {
         if events.is_empty() {
             return Ok(());
         }
-        let io_lock = Arc::clone(&self.io_lock);
-        let _guard = lock_io(&io_lock)?;
         if telemetry_revoked(&self.root) {
             let _ = discard_stats(&self.root);
             return Err(consent_withdrawn());
@@ -327,8 +258,31 @@ impl TelemetrySpool {
         Ok(())
     }
 
+    /// Appends `events` in one transaction, or one at a time when the batch failed for a
+    /// reason other than the cap. Answers whether any event was appended and whether any
+    /// failed.
+    fn append_reporting(&mut self, events: &[QueuedTelemetryEvent]) -> (bool, bool) {
+        let Err(error) = self.record_batch(events) else {
+            return (true, false);
+        };
+        if events.len() == 1 || error.get_ref().is_some_and(|e| e.is::<SpoolAtCapacity>()) {
+            report_append_failure(&error);
+            return (false, true);
+        }
+        let (mut appended, mut failed) = (false, false);
+        for event in events {
+            match self.record_batch(std::slice::from_ref(event)) {
+                Ok(()) => appended = true,
+                Err(error) => {
+                    failed = true;
+                    report_append_failure(&error);
+                }
+            }
+        }
+        (appended, failed)
+    }
+
     fn discard_legacy_events(&self) -> io::Result<()> {
-        let _guard = lock_io(&self.io_lock)?;
         let raw = match fs::read_to_string(&self.events_path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -419,11 +373,6 @@ fn discard_stats(root: &Path) -> io::Result<()> {
     }
 }
 
-fn discard_stats_with_io_lock(root: &Path, io_lock: &Mutex<()>) -> io::Result<()> {
-    let _guard = lock_io(io_lock)?;
-    discard_stats(root)
-}
-
 fn load_consent_state_unlocked(root: &Path) -> io::Result<Option<ConsentState>> {
     let path = consent_path(root);
     truncate_torn_tail(&path)?;
@@ -470,35 +419,11 @@ fn load_consent_state_unlocked(root: &Path) -> io::Result<Option<ConsentState>> 
     Ok(latest)
 }
 
-#[cfg(test)]
-fn begin_consent_generation(root: &Path) -> io::Result<Uuid> {
-    let path = consent_path(root);
-    begin_consent_generation_with_persist(root, sync_file_and_parent(&path))
-}
-
-#[cfg(test)]
-fn begin_consent_generation_with_persist(
-    root: &Path,
-    persist: impl FnOnce(&fs::File) -> io::Result<()>,
-) -> io::Result<Uuid> {
-    append_consent_state_with_persist(root, true, persist)
-}
-
 fn publish_withdrawal(root: &Path) -> io::Result<Uuid> {
     let _lock = ConsentJournalLock::acquire(root)?;
     publish_revocation(root)?;
     let path = consent_path(root);
     append_consent_state_unlocked(root, false, sync_file_and_parent(&path))
-}
-
-#[cfg(test)]
-fn append_consent_state_with_persist(
-    root: &Path,
-    enabled: bool,
-    persist: impl FnOnce(&fs::File) -> io::Result<()>,
-) -> io::Result<Uuid> {
-    let _lock = ConsentJournalLock::acquire(root)?;
-    append_consent_state_unlocked(root, enabled, persist)
 }
 
 fn append_consent_state_unlocked(
@@ -754,11 +679,6 @@ fn truncate_torn_tail(path: &Path) -> io::Result<()> {
     sync_parent(path)
 }
 
-fn lock_io(lock: &Mutex<()>) -> io::Result<MutexGuard<'_, ()>> {
-    lock.lock()
-        .map_err(|_| io::Error::other("telemetry I/O lock was poisoned"))
-}
-
 fn consent_withdrawn() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -807,18 +727,7 @@ fn sync_parent(_path: &Path) -> io::Result<()> {
 }
 
 impl TelemetryDrain {
-    #[cfg(test)]
-    fn open(root: &Path, channel: &str) -> io::Result<Self> {
-        let consent_generation = load_or_create_consent_generation(root)?;
-        Self::open_with_io_lock(root, channel, consent_generation, Arc::new(Mutex::new(())))
-    }
-
-    fn open_with_io_lock(
-        root: &Path,
-        channel: &str,
-        consent_generation: Uuid,
-        io_lock: Arc<Mutex<()>>,
-    ) -> io::Result<Self> {
+    fn new(root: &Path, channel: &str, consent_generation: Uuid) -> io::Result<Self> {
         let stats_dir = prepare_channel_stats_dir(root, channel)?;
         let drain = Self {
             events_path: stats_dir.join("events.jsonl"),
@@ -826,7 +735,6 @@ impl TelemetryDrain {
             quarantine_path: stats_dir.join("quarantine.jsonl"),
             last_upload_path: root.join("reports").join(LAST_UPLOAD_FILE),
             consent_generation,
-            io_lock,
         };
         truncate_torn_tail(&drain.events_path)?;
         Ok(drain)
@@ -884,7 +792,6 @@ impl TelemetryDrain {
     }
 
     fn quarantine(&self, status: u16, body: &str) -> io::Result<()> {
-        let _guard = lock_io(&self.io_lock)?;
         truncate_torn_tail(&self.quarantine_path)?;
         let mut record = serde_json::to_vec(&serde_json::json!({
             "status": status,
@@ -914,7 +821,6 @@ impl TelemetryDrain {
             .duration_since(UNIX_EPOCH)
             .map_err(|error| io::Error::other(format!("system clock before Unix epoch: {error}")))?
             .as_secs();
-        let _guard = lock_io(&self.io_lock)?;
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -955,7 +861,6 @@ impl TelemetryDrain {
     }
 
     fn reclaim_if_fully_acknowledged(&self) -> io::Result<()> {
-        let _guard = lock_io(&self.io_lock)?;
         let len = match fs::metadata(&self.events_path) {
             Ok(metadata) => metadata.len(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -971,30 +876,6 @@ impl TelemetryDrain {
         fs::remove_file(&self.cursor_path)?;
         fs::remove_file(&self.events_path)?;
         sync_parent(&self.events_path)
-    }
-
-    #[cfg(test)]
-    fn run(&self, mut send: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
-        match self.run_while(
-            || true,
-            |body| match send(body) {
-                Ok(()) => UploadDisposition::Accepted,
-                Err(error) => UploadDisposition::Retry(error),
-            },
-        )? {
-            DrainOutcome::Complete => Ok(()),
-            DrainOutcome::Retry(error) | DrainOutcome::Blocked(error) => Err(error),
-            DrainOutcome::Cancelled => Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "telemetry drain cancelled",
-            )),
-        }
-    }
-
-    #[cfg(test)]
-    fn run_reclaiming(&self, send: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
-        self.run(send)?;
-        self.reclaim_if_fully_acknowledged()
     }
 
     fn run_while_reclaiming(
@@ -1181,226 +1062,6 @@ fn final_drain(
     }
 }
 
-fn finish_upload(
-    root: &Path,
-    mode: StopMode,
-    deadline: Instant,
-    drain: &TelemetryDrain,
-    transport: &TelemetryTransport,
-    request_timeout: Duration,
-    upload_blocked: bool,
-) {
-    if mode == StopMode::Drain && !upload_blocked && !telemetry_revoked(root) {
-        final_drain(root, drain, transport, deadline, request_timeout);
-    }
-}
-
-impl UploadWorker {
-    #[cfg(test)]
-    fn start_with_timing(
-        root: &Path,
-        transport: TelemetryTransport,
-        timing: UploadTiming,
-    ) -> io::Result<Self> {
-        let consent_generation = load_or_create_consent_generation(root)?;
-        Self::start_with_io_lock(
-            root,
-            transport,
-            timing,
-            consent_generation,
-            Arc::new(Mutex::new(())),
-        )
-    }
-
-    fn start_with_io_lock(
-        root: &Path,
-        transport: TelemetryTransport,
-        timing: UploadTiming,
-        consent_generation: Uuid,
-        io_lock: Arc<Mutex<()>>,
-    ) -> io::Result<Self> {
-        let drain = TelemetryDrain::open_with_io_lock(
-            root,
-            &transport.channel,
-            consent_generation,
-            Arc::clone(&io_lock),
-        )?;
-        let startup_pending = drain.pending_bytes()? > 0;
-        let (tx, rx) = mpsc::sync_channel(1);
-        let control = Arc::new(AtomicU8::new(WORKER_RUNNING));
-        let worker_control = Arc::clone(&control);
-        let worker_root = root.to_path_buf();
-        let handle = std::thread::spawn(move || {
-            let config = ureq::Agent::config_builder()
-                .timeout_global(Some(timing.request_timeout))
-                .build();
-            let agent: ureq::Agent = config.into();
-            let mut retry_at: Option<Instant> = None;
-            let mut flush_at = startup_pending.then(Instant::now);
-            let mut retry_delay = timing.retry_initial;
-            let mut upload_blocked = false;
-            loop {
-                let upload_at = retry_at.or(flush_at);
-                let command = match rx.recv_timeout(worker_wait(
-                    upload_at,
-                    Instant::now(),
-                    timing.revocation_poll,
-                )) {
-                    Ok(command) => Some(command),
-                    Err(RecvTimeoutError::Timeout) => None,
-                    Err(RecvTimeoutError::Disconnected) => return,
-                };
-                if telemetry_revoked(&worker_root) {
-                    let _ = discard_stats_with_io_lock(&worker_root, &io_lock);
-                    return;
-                }
-                match command {
-                    Some(UploadCommand::Finish { mode, deadline }) => {
-                        finish_upload(
-                            &worker_root,
-                            mode,
-                            deadline,
-                            &drain,
-                            &transport,
-                            timing.shutdown_request_timeout,
-                            upload_blocked,
-                        );
-                        return;
-                    }
-                    Some(UploadCommand::Wake(_)) if retry_at.is_some() || upload_blocked => {
-                        continue
-                    }
-                    Some(UploadCommand::Wake(first_pending_at)) => {
-                        let pending = match drain.pending_bytes() {
-                            Ok(pending) => pending,
-                            Err(error) => {
-                                log::warn!(target: "TELEMETRY", "upload paused: {error}");
-                                flush_at = None;
-                                retry_at = Some(Instant::now() + retry_delay);
-                                retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max);
-                                continue;
-                            }
-                        };
-                        if pending == 0 {
-                            continue;
-                        }
-                        schedule_flush(
-                            &mut flush_at,
-                            first_pending_at,
-                            timing.flush_window,
-                            pending >= MAX_BODY_BYTES as u64,
-                        );
-                        if flush_at.is_some_and(|deadline| Instant::now() < deadline) {
-                            continue;
-                        }
-                    }
-                    None if upload_at.is_none_or(|deadline| Instant::now() < deadline) => continue,
-                    None => {}
-                }
-
-                match drain.run_while_reclaiming(
-                    || {
-                        worker_control.load(Ordering::SeqCst) == WORKER_RUNNING
-                            && !telemetry_revoked(&worker_root)
-                    },
-                    |body| send_if_consented(&worker_root, &transport, &agent, body),
-                ) {
-                    Ok(DrainOutcome::Complete) => {
-                        retry_at = None;
-                        flush_at = None;
-                        retry_delay = timing.retry_initial;
-                    }
-                    Ok(DrainOutcome::Blocked(error)) => {
-                        if telemetry_revoked(&worker_root) {
-                            let _ = discard_stats_with_io_lock(&worker_root, &io_lock);
-                            return;
-                        }
-                        log::warn!(target: "TELEMETRY", "upload blocked: {error}");
-                        retry_at = None;
-                        flush_at = None;
-                        upload_blocked = true;
-                    }
-                    Ok(DrainOutcome::Cancelled) => {}
-                    Ok(DrainOutcome::Retry(error)) | Err(error) => {
-                        if telemetry_revoked(&worker_root) {
-                            let _ = discard_stats_with_io_lock(&worker_root, &io_lock);
-                            return;
-                        }
-                        if worker_control.load(Ordering::SeqCst) != WORKER_RUNNING {
-                            continue;
-                        }
-                        log::warn!(target: "TELEMETRY", "upload paused: {error}");
-                        flush_at = None;
-                        retry_at = Some(Instant::now() + retry_delay);
-                        retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max);
-                    }
-                }
-            }
-        });
-        let worker = Self {
-            tx,
-            control,
-            shutdown_budget: timing.shutdown_budget,
-            handle,
-        };
-        Ok(worker)
-    }
-
-    fn start_offline(root: &Path, io_lock: Arc<Mutex<()>>) -> Self {
-        let timing = UploadTiming::default();
-        let (tx, rx) = mpsc::sync_channel(1);
-        let control = Arc::new(AtomicU8::new(WORKER_RUNNING));
-        let worker_root = root.to_path_buf();
-        let handle = std::thread::spawn(move || loop {
-            let command = match rx.recv_timeout(timing.revocation_poll) {
-                Ok(command) => Some(command),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => return,
-            };
-            if telemetry_revoked(&worker_root) {
-                let _ = discard_stats_with_io_lock(&worker_root, &io_lock);
-                return;
-            }
-            if matches!(command, Some(UploadCommand::Finish { .. })) {
-                return;
-            }
-        });
-        Self {
-            tx,
-            control,
-            shutdown_budget: timing.shutdown_budget,
-            handle,
-        }
-    }
-
-    fn waker(&self) -> UploadWaker {
-        UploadWaker {
-            tx: self.tx.clone(),
-            control: Arc::clone(&self.control),
-        }
-    }
-
-    fn finish(self, mode: StopMode) {
-        let state = if mode == StopMode::Drain {
-            WORKER_DRAINING
-        } else {
-            WORKER_DISCARDING
-        };
-        let deadline = Instant::now() + self.shutdown_budget;
-        self.control.store(state, Ordering::SeqCst);
-        let _ = self.tx.send(UploadCommand::Finish { mode, deadline });
-        let _ = self.handle.join();
-    }
-}
-
-impl UploadWaker {
-    fn wake(&self) {
-        if self.control.load(Ordering::SeqCst) == WORKER_RUNNING {
-            let _ = self.tx.try_send(UploadCommand::Wake(Instant::now()));
-        }
-    }
-}
-
 impl QueuedTelemetryEvent {
     fn new(name: &str, timestamp: i64, data: Option<&str>) -> io::Result<Self> {
         validate_field("n", name)?;
@@ -1418,114 +1079,178 @@ impl QueuedTelemetryEvent {
     }
 }
 
-impl AppendWorker {
-    fn report_failure(error: &io::Error) {
-        if error.kind() == io::ErrorKind::StorageFull {
-            crate::log_throttled!(
-                "TELEMETRY",
-                Duration::from_secs(10),
-                "telemetry append failed: {error}"
-            );
-        } else {
-            log::warn!(target: "TELEMETRY", "telemetry append failed: {error}");
+fn report_append_failure(error: &io::Error) {
+    if error.kind() == io::ErrorKind::StorageFull {
+        crate::log_throttled!(
+            "TELEMETRY",
+            Duration::from_secs(10),
+            "telemetry append failed: {error}"
+        );
+    } else {
+        log::warn!(target: "TELEMETRY", "telemetry append failed: {error}");
+    }
+}
+
+/// The worker's command queue and the spool it appends to. The drain pumps it between
+/// lines, so appends keep up with a long upload and a finish cancels the upload.
+struct Inbox {
+    rx: Receiver<Command>,
+    spool: TelemetrySpool,
+    failed_since_flush: bool,
+    appended_at: Option<Instant>,
+    finish: Option<(StopMode, Instant)>,
+}
+
+impl Inbox {
+    fn handle(&mut self, command: Command) {
+        match command {
+            Command::Record(event) => {
+                let mut events = vec![event];
+                let mut next = None;
+                while events.len() < MAX_APPEND_BATCH_EVENTS {
+                    match self.rx.try_recv() {
+                        Ok(Command::Record(event)) => events.push(event),
+                        Ok(command) => {
+                            next = Some(command);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let (appended, failed) = self.spool.append_reporting(&events);
+                self.failed_since_flush |= failed;
+                if appended {
+                    self.appended_at.get_or_insert_with(Instant::now);
+                }
+                if let Some(command) = next {
+                    self.handle(command);
+                }
+            }
+            Command::Flush(done) => {
+                let _ = done.send(!std::mem::take(&mut self.failed_since_flush));
+            }
+            Command::Finish { mode, deadline } => self.finish = Some((mode, deadline)),
         }
     }
 
-    fn start(mut spool: TelemetrySpool, upload_waker: UploadWaker) -> Self {
-        let (tx, rx) = mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            let mut failed_since_flush = false;
-            while let Ok(command) = rx.recv() {
-                match command {
-                    AppendCommand::Record(event) => {
-                        let mut events = vec![event];
-                        let mut flush = None;
-                        let mut finished = false;
-                        while events.len() < MAX_APPEND_BATCH_EVENTS {
-                            match rx.try_recv() {
-                                Ok(AppendCommand::Record(event)) => events.push(event),
-                                Ok(AppendCommand::Flush(done)) => {
-                                    flush = Some(done);
-                                    break;
-                                }
-                                Ok(AppendCommand::Finish) | Err(TryRecvError::Disconnected) => {
-                                    finished = true;
-                                    break;
-                                }
-                                Err(TryRecvError::Empty) => break,
-                            }
-                        }
-                        let mut appended = false;
-                        if let Err(batch_error) = spool.record_batch(&events) {
-                            if events.len() == 1
-                                || batch_error
-                                    .get_ref()
-                                    .is_some_and(|error| error.is::<SpoolAtCapacity>())
-                            {
-                                failed_since_flush = true;
-                                Self::report_failure(&batch_error);
-                            } else {
-                                for event in &events {
-                                    match spool.record_batch(std::slice::from_ref(event)) {
-                                        Ok(()) => appended = true,
-                                        Err(error) => {
-                                            failed_since_flush = true;
-                                            Self::report_failure(&error);
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            appended = true;
-                        }
-                        if appended {
-                            upload_waker.wake();
-                        }
-                        if let Some(done) = flush {
-                            let _ = done.send(!failed_since_flush);
-                            failed_since_flush = false;
-                        }
-                        if finished {
-                            return;
-                        }
-                    }
-                    AppendCommand::Flush(done) => {
-                        let _ = done.send(!failed_since_flush);
-                        failed_since_flush = false;
-                    }
-                    AppendCommand::Finish => return,
+    fn pump(&mut self) {
+        while self.finish.is_none() {
+            let Ok(command) = self.rx.try_recv() else {
+                return;
+            };
+            self.handle(command);
+        }
+    }
+}
+
+fn run_worker(
+    root: PathBuf,
+    mut inbox: Inbox,
+    drain: TelemetryDrain,
+    mut transport: Option<TelemetryTransport>,
+    timing: UploadTiming,
+    startup_pending: bool,
+) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timing.request_timeout))
+        .build()
+        .into();
+    let mut watching = true;
+    let mut retry_at: Option<Instant> = None;
+    let mut flush_at = startup_pending.then(Instant::now);
+    let mut retry_delay = timing.retry_initial;
+    let mut upload_blocked = false;
+    loop {
+        if watching && telemetry_revoked(&root) {
+            let _ = discard_stats(&root);
+            watching = false;
+            transport = None;
+        }
+        if let Some((mode, deadline)) = inbox.finish {
+            if let Some(transport) = &transport {
+                if mode == StopMode::Drain && !upload_blocked {
+                    final_drain(
+                        &root,
+                        &drain,
+                        transport,
+                        deadline,
+                        timing.shutdown_request_timeout,
+                    );
                 }
             }
-        });
-        Self { tx, handle }
-    }
-
-    fn record(&self, event: QueuedTelemetryEvent) -> io::Result<()> {
-        self.tx.send(AppendCommand::Record(event)).map_err(|_| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "telemetry append worker stopped")
-        })
-    }
-
-    fn finish(self) {
-        let _ = self.tx.send(AppendCommand::Finish);
-        let _ = self.handle.join();
-    }
-
-    #[cfg(test)]
-    fn flush(&self) -> io::Result<()> {
-        let (done_tx, done_rx) = mpsc::channel();
-        self.tx.send(AppendCommand::Flush(done_tx)).map_err(|_| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "telemetry append worker stopped")
-        })?;
-        let persisted = done_rx.recv().map_err(|_| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "telemetry append worker stopped")
-        })?;
-        if persisted {
-            Ok(())
+            return;
+        }
+        if let Some(transport) = &transport {
+            let appended_at = inbox.appended_at.take();
+            if let Some(appended_at) = appended_at.filter(|_| retry_at.is_none() && !upload_blocked)
+            {
+                match drain.pending_bytes() {
+                    Ok(0) => {}
+                    Ok(pending) => schedule_flush(
+                        &mut flush_at,
+                        appended_at,
+                        timing.flush_window,
+                        pending >= MAX_BODY_BYTES as u64,
+                    ),
+                    Err(error) => {
+                        log::warn!(target: "TELEMETRY", "upload paused: {error}");
+                        flush_at = None;
+                        retry_at = Some(Instant::now() + retry_delay);
+                        retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max);
+                    }
+                }
+            }
+            if retry_at
+                .or(flush_at)
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                let outcome = drain.run_while_reclaiming(
+                    || {
+                        inbox.pump();
+                        inbox.finish.is_none() && !telemetry_revoked(&root)
+                    },
+                    |body| send_if_consented(&root, transport, &agent, body),
+                );
+                inbox.pump();
+                match outcome {
+                    Ok(DrainOutcome::Complete) => {
+                        retry_at = None;
+                        flush_at = None;
+                        retry_delay = timing.retry_initial;
+                    }
+                    Ok(DrainOutcome::Cancelled) => {}
+                    Ok(DrainOutcome::Blocked(_) | DrainOutcome::Retry(_)) | Err(_)
+                        if telemetry_revoked(&root) => {}
+                    Ok(DrainOutcome::Blocked(error)) => {
+                        log::warn!(target: "TELEMETRY", "upload blocked: {error}");
+                        retry_at = None;
+                        flush_at = None;
+                        upload_blocked = true;
+                    }
+                    Ok(DrainOutcome::Retry(_)) | Err(_) if inbox.finish.is_some() => {}
+                    Ok(DrainOutcome::Retry(error)) | Err(error) => {
+                        log::warn!(target: "TELEMETRY", "upload paused: {error}");
+                        flush_at = None;
+                        retry_at = Some(Instant::now() + retry_delay);
+                        retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max);
+                    }
+                }
+                continue;
+            }
+        }
+        let wait = if watching {
+            worker_wait(
+                retry_at.or(flush_at),
+                Instant::now(),
+                timing.revocation_poll,
+            )
         } else {
-            Err(io::Error::other(
-                "telemetry persistence failed before flush",
-            ))
+            Duration::MAX
+        };
+        match inbox.rx.recv_timeout(wait) {
+            Ok(command) => inbox.handle(command),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
         }
     }
 }
@@ -1569,58 +1294,52 @@ impl TelemetryClient {
         } else {
             load_or_create_consent_generation(root)?
         };
-        let channel = identity.channel.clone();
-        let game = identity.game.clone();
-        let io_lock = Arc::new(Mutex::new(()));
-        TelemetryDrain::open_with_io_lock(
-            root,
-            &channel,
-            consent_generation,
-            Arc::clone(&io_lock),
-        )?
-        .reclaim_if_fully_acknowledged()?;
-        let spool = TelemetrySpool::open_with_io_lock(
-            root,
-            identity,
-            consent_generation,
-            Arc::clone(&io_lock),
-        )?;
+        let transport = (!endpoint.is_empty() && !token.is_empty()).then(|| TelemetryTransport {
+            endpoint: endpoint.into(),
+            token: token.into(),
+            game: identity.game.clone(),
+            channel: identity.channel.clone(),
+        });
+        let drain = TelemetryDrain::new(root, &identity.channel, consent_generation)?;
+        drain.reclaim_if_fully_acknowledged()?;
+        let spool = TelemetrySpool::new(root, identity, consent_generation)?;
         spool.discard_legacy_events()?;
+        let startup_pending = transport.is_some() && drain.pending_bytes()? > 0;
         #[cfg(test)]
         let events_path = spool.events_path.clone();
-        #[cfg(test)]
-        let client_io_lock = Arc::clone(&io_lock);
-        let upload_worker = if endpoint.is_empty() || token.is_empty() {
-            UploadWorker::start_offline(root, Arc::clone(&io_lock))
-        } else {
-            UploadWorker::start_with_io_lock(
-                root,
-                TelemetryTransport {
-                    endpoint: endpoint.into(),
-                    token: token.into(),
-                    game,
-                    channel,
-                },
-                timing,
-                consent_generation,
-                Arc::clone(&io_lock),
-            )?
+        let (tx, rx) = mpsc::channel();
+        let inbox = Inbox {
+            rx,
+            spool,
+            failed_since_flush: false,
+            appended_at: None,
+            finish: None,
         };
-        let append_worker = AppendWorker::start(spool, upload_worker.waker());
+        let worker_root = root.to_path_buf();
+        let worker = std::thread::spawn(move || {
+            run_worker(
+                worker_root,
+                inbox,
+                drain,
+                transport,
+                timing,
+                startup_pending,
+            )
+        });
         Ok(Self {
-            append_worker,
-            upload_worker,
+            tx,
+            worker,
+            shutdown_budget: timing.shutdown_budget,
             #[cfg(test)]
             events_path,
-            #[cfg(test)]
-            io_lock: client_io_lock,
             _root_lock: root_lock,
         })
     }
 
-    #[cfg(test)]
-    fn record_stat(&mut self, name: &str, timestamp: i64) -> io::Result<()> {
-        self.record_stat_data(name, timestamp, None)
+    fn send(&self, command: Command) -> io::Result<()> {
+        self.tx
+            .send(command)
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "telemetry worker stopped"))
     }
 
     fn record_stat_data(
@@ -1629,23 +1348,15 @@ impl TelemetryClient {
         timestamp: i64,
         data: Option<&str>,
     ) -> io::Result<()> {
-        self.append_worker
-            .record(QueuedTelemetryEvent::new(name, timestamp, data)?)
+        self.send(Command::Record(QueuedTelemetryEvent::new(
+            name, timestamp, data,
+        )?))
     }
 
     fn finish(self, mode: StopMode) {
-        self.append_worker.finish();
-        self.upload_worker.finish(mode);
-    }
-
-    #[cfg(test)]
-    fn flush(&self) -> io::Result<()> {
-        self.append_worker.flush()
-    }
-
-    #[cfg(test)]
-    fn io_lock_for_test(&self) -> Arc<Mutex<()>> {
-        Arc::clone(&self.io_lock)
+        let deadline = Instant::now() + self.shutdown_budget;
+        let _ = self.tx.send(Command::Finish { mode, deadline });
+        let _ = self.worker.join();
     }
 }
 
@@ -1810,6 +1521,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::process::Stdio;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     // Serializes tests that can emit through the process-global throttled warning site.
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -1824,6 +1536,89 @@ mod tests {
             })
             .map(|row| row.count)
             .sum()
+    }
+
+    impl TelemetrySpool {
+        fn open(root: &Path, identity: TelemetryIdentity) -> io::Result<Self> {
+            Self::new(root, identity, load_or_create_consent_generation(root)?)
+        }
+
+        fn record_stat(&mut self, name: &str, timestamp: i64) -> io::Result<()> {
+            self.record_stat_data(name, timestamp, None)
+        }
+
+        fn record_stat_data(
+            &mut self,
+            name: &str,
+            timestamp: i64,
+            data: Option<&str>,
+        ) -> io::Result<()> {
+            self.record_batch(&[QueuedTelemetryEvent::new(name, timestamp, data)?])
+        }
+
+        fn record_stat_with_persist(
+            &mut self,
+            name: &str,
+            timestamp: i64,
+            persist: impl FnOnce(&fs::File) -> io::Result<()>,
+        ) -> io::Result<()> {
+            let event = QueuedTelemetryEvent::new(name, timestamp, None)?;
+            self.record_batch_with_persist(&[event], persist)
+        }
+    }
+
+    impl TelemetryDrain {
+        fn open(root: &Path, channel: &str) -> io::Result<Self> {
+            Self::new(root, channel, load_or_create_consent_generation(root)?)
+        }
+
+        fn run(&self, mut send: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
+            match self.run_while(
+                || true,
+                |body| match send(body) {
+                    Ok(()) => UploadDisposition::Accepted,
+                    Err(error) => UploadDisposition::Retry(error),
+                },
+            )? {
+                DrainOutcome::Complete => Ok(()),
+                DrainOutcome::Retry(error) | DrainOutcome::Blocked(error) => Err(error),
+                DrainOutcome::Cancelled => unreachable!("the test drain never cancels"),
+            }
+        }
+    }
+
+    impl TelemetryClient {
+        fn record_stat(&mut self, name: &str, timestamp: i64) -> io::Result<()> {
+            self.record_stat_data(name, timestamp, None)
+        }
+
+        fn flush(&self) -> io::Result<()> {
+            let (done_tx, done_rx) = mpsc::channel();
+            self.send(Command::Flush(done_tx))?;
+            match done_rx.recv() {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(io::Error::other(
+                    "telemetry persistence failed before flush",
+                )),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "telemetry worker stopped",
+                )),
+            }
+        }
+    }
+
+    fn begin_consent_generation_with_persist(
+        root: &Path,
+        persist: impl FnOnce(&fs::File) -> io::Result<()>,
+    ) -> io::Result<Uuid> {
+        let _lock = ConsentJournalLock::acquire(root)?;
+        append_consent_state_unlocked(root, true, persist)
+    }
+
+    fn begin_consent_generation(root: &Path) -> io::Result<Uuid> {
+        let path = consent_path(root);
+        begin_consent_generation_with_persist(root, sync_file_and_parent(&path))
     }
 
     fn fresh_root() -> crate::test_support::TestRoot {
@@ -2079,20 +1874,20 @@ mod tests {
         ingest: &Ingest,
         token: &str,
         timing: UploadTiming,
-    ) -> UploadWorker {
-        UploadWorker::start_with_timing(root, transport(ingest, token), timing).unwrap()
-    }
-
-    fn client_with_timing(root: &Path, ingest: &Ingest, timing: UploadTiming) -> TelemetryClient {
+    ) -> TelemetryClient {
         TelemetryClient::open_with_timing(
             root,
             identity(),
             &ingest.endpoint(),
-            "secret",
+            token,
             false,
             timing,
         )
         .unwrap()
+    }
+
+    fn client_with_timing(root: &Path, ingest: &Ingest, timing: UploadTiming) -> TelemetryClient {
+        upload_worker(root, ingest, "secret", timing)
     }
 
     #[test]
@@ -2192,34 +1987,41 @@ mod tests {
     #[test]
     fn recording_never_waits_for_telemetry_io() {
         let root = fresh_root();
-        let mut client = open_client(&root);
-        let io_lock = client.io_lock_for_test();
-        let held = io_lock.lock().unwrap();
-        let (returned_tx, returned_rx) = mpsc::channel();
-        let recorder = std::thread::spawn(move || {
-            let started = Instant::now();
-            let data = r#"{"run":1,"spell":"Flamestrike","phase":"started"}"#;
-            let accepted = (0..1_024).all(|seq| {
-                client
-                    .record_stat_data("spell_cast", seq, Some(data))
-                    .is_ok()
-            });
-            returned_tx.send((accepted, started.elapsed())).unwrap();
-            client
+        queue_row(&root, "backlog");
+        let (received_tx, received_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let ingest = Ingest::start(move |request, _| {
+            if request == 1 {
+                received_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            }
+            "204 No Content"
         });
+        let mut timing = test_upload_timing();
+        timing.request_timeout = Duration::from_secs(10);
+        let mut client = upload_worker(&root, &ingest, "secret", timing);
+        received_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
-        let returned_without_io = returned_rx.recv_timeout(Duration::from_millis(100));
-        drop(held);
-        let client = recorder.join().unwrap();
+        let started = Instant::now();
+        let data = r#"{"run":1,"spell":"Flamestrike","phase":"started"}"#;
+        let accepted = (0..1_024).all(|seq| {
+            client
+                .record_stat_data("spell_cast", seq, Some(data))
+                .is_ok()
+        });
+        let elapsed = started.elapsed();
+        release_tx.send(()).unwrap();
         client.finish(StopMode::Discard);
+        ingest.stop();
 
-        let (accepted, elapsed) = returned_without_io
-            .expect("gameplay-side telemetry recording waited for the persistence lock");
         assert!(
             accepted,
             "the nonblocking queue refused one of 1,024 events"
         );
-        eprintln!("queued 1,024 telemetry events in {elapsed:?} while persistence was locked");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "recording waited {elapsed:?} on an in-flight upload"
+        );
     }
 
     #[test]
@@ -2261,6 +2063,10 @@ mod tests {
             client.record_stat("over-cap", 1).unwrap();
         }
         assert_eq!(client.flush().unwrap_err().kind(), io::ErrorKind::Other);
+        assert!(
+            client.flush().is_ok(),
+            "a flush reports only failures since the last one"
+        );
         client.finish(StopMode::Discard);
         let warnings = capped_spool_warnings() - before;
 
@@ -2271,22 +2077,20 @@ mod tests {
     }
 
     #[test]
-    fn near_capacity_worker_still_accepts_a_smaller_row_after_rejection() {
+    fn near_capacity_spool_still_accepts_a_smaller_row_after_rejection() {
         let _guard = TEST_LOCK.lock().unwrap();
         let root = fresh_root();
-        let mut client = open_client(&root);
-        let io_lock = Arc::clone(&client.io_lock);
-        let guard = io_lock.lock().unwrap();
-        fill_log(&client.events_path, MAX_SPOOL_BYTES - 1024);
+        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
+        fill_log(&spool.events_path, MAX_SPOOL_BYTES - 1024);
         let data = serde_json::json!({"values": vec!["x".repeat(200); 16]}).to_string();
-        client
-            .record_stat_data("too-large", 1, Some(&data))
-            .unwrap();
-        client.record_stat("fits", 1).unwrap();
-        drop(guard);
-        assert!(client.flush().is_err());
-        let length = fs::metadata(&client.events_path).unwrap().len();
-        let bytes = fs::read(&client.events_path).unwrap();
+        let events = [
+            QueuedTelemetryEvent::new("too-large", 1, Some(&data)).unwrap(),
+            QueuedTelemetryEvent::new("fits", 1, None).unwrap(),
+        ];
+
+        assert_eq!(spool.append_reporting(&events), (true, true));
+        let length = fs::metadata(&spool.events_path).unwrap().len();
+        let bytes = fs::read(&spool.events_path).unwrap();
         let row: serde_json::Value = serde_json::from_slice(
             bytes
                 .split(|b| *b == b'\n')
@@ -2298,8 +2102,6 @@ mod tests {
         assert_eq!(row["n"], "fits");
         assert_eq!(row["seq"], 1);
         assert!(length > MAX_SPOOL_BYTES - 1024 && length <= MAX_SPOOL_BYTES);
-        assert!(client.flush().is_ok());
-        client.finish(StopMode::Discard);
     }
 
     #[test]
@@ -2326,7 +2128,7 @@ mod tests {
         spool.record_stat("before-failure", 0).unwrap();
 
         let error = spool
-            .record_stat_with_persist("failed", 1, None, |_| Err(io::Error::other("sync failed")))
+            .record_stat_with_persist("failed", 1, |_| Err(io::Error::other("sync failed")))
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Other);
         spool.record_stat("after-recovery", 2).unwrap();
@@ -2363,21 +2165,13 @@ mod tests {
     #[test]
     fn draining_a_capped_spool_allows_an_append_without_reopening() {
         let root = fresh_root();
-        let io_lock = Arc::new(Mutex::new(()));
-        let consent_generation = load_or_create_consent_generation(&root).unwrap();
-        let mut spool = TelemetrySpool::open_with_io_lock(
-            &root,
-            identity(),
-            consent_generation,
-            Arc::clone(&io_lock),
-        )
-        .unwrap();
+        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
         spool.record_stat("before-cap", 1).unwrap();
         fill_log(&spool.events_path, MAX_SPOOL_BYTES);
-        let drain =
-            TelemetryDrain::open_with_io_lock(&root, "steam", consent_generation, io_lock).unwrap();
+        let drain = TelemetryDrain::open(&root, "steam").unwrap();
 
-        drain.run_reclaiming(|_| Ok(())).unwrap();
+        drain.run(|_| Ok(())).unwrap();
+        drain.reclaim_if_fully_acknowledged().unwrap();
         spool.record_stat("after-drain", 2).unwrap();
 
         let rows = records(&root);
@@ -2423,9 +2217,7 @@ mod tests {
         }
 
         let root = fresh_root();
-        let root_lock = TelemetryRootLock::acquire(&root).unwrap().unwrap();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-        spool.record_stat("revoke-me", 1).unwrap();
+        queue_row(&root, "revoke-me");
         let child_gate = root.join("publish-revocation");
         let revocation = revocation_path(&root);
         let child = crate::test_support::child_test(
@@ -2458,17 +2250,7 @@ mod tests {
         // Keep the first request in flight until withdrawal, so backlogged retries are not
         // mistaken for later requests.
         timing.request_timeout = Duration::from_secs(30);
-        let worker = upload_worker(&root, &ingest, "secret", timing);
-        let events_path = spool.events_path.clone();
-        let io_lock = Arc::clone(&spool.io_lock);
-        let append_worker = AppendWorker::start(spool, worker.waker());
-        let client = TelemetryClient {
-            append_worker,
-            upload_worker: worker,
-            events_path,
-            io_lock,
-            _root_lock: root_lock,
-        };
+        let client = upload_worker(&root, &ingest, "secret", timing);
 
         let requests_at_publication = published_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         let child = child.wait_with_output().unwrap();
@@ -2598,7 +2380,7 @@ mod tests {
         let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
 
         let error = spool
-            .record_stat_with_persist("raced", 1, None, |file| {
+            .record_stat_with_persist("raced", 1, |file| {
                 file.sync_all()?;
                 publish_revocation(&root)
             })
@@ -3181,14 +2963,12 @@ mod tests {
         let transport = transport(&ingest, "secret");
 
         let started = Instant::now();
-        finish_upload(
+        final_drain(
             &root,
-            StopMode::Drain,
-            started + Duration::from_millis(80),
             &drain,
             &transport,
+            started + Duration::from_millis(80),
             Duration::from_millis(500),
-            false,
         );
         let elapsed = started.elapsed();
 
