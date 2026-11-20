@@ -5,7 +5,7 @@ use std::fmt;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::code_identity::{CaptureMode, CodeArtifact, CodeEntry, CodeIdentity};
 use skull_mir::definition::DefinitionPlan;
 use skull_mir::lifecycle::LifecyclePlan;
@@ -243,151 +243,14 @@ fn write_code_row(
     Ok(())
 }
 
-/// Both indexes share persistent paths, so transaction snapshots keep their
-/// rows without copying the inventory.
+type RowKey = Arc<(String, CodeIdentity)>;
+
+/// Encoded rows in fingerprint order, and each identity's current key so an edit
+/// that moves a logical key drops its stale row. Transactions clone on write.
 #[derive(Clone, Default)]
 pub(crate) struct CodeRows {
-    root: Option<Arc<RowNode<(String, CodeIdentity), Vec<u8>>>>,
-    identities: Option<Arc<RowNode<CodeIdentity, (String, CodeIdentity)>>>,
-}
-
-struct RowNode<K, V> {
-    key: Arc<K>,
-    value: Arc<V>,
-    priority: u64,
-    weight: usize,
-    left: Option<Arc<Self>>,
-    right: Option<Arc<Self>>,
-    len: usize,
-    bytes: usize,
-}
-
-impl<K: Ord, V> RowNode<K, V> {
-    fn new(
-        key: Arc<K>,
-        value: Arc<V>,
-        priority: u64,
-        weight: usize,
-        left: Option<Arc<Self>>,
-        right: Option<Arc<Self>>,
-    ) -> Arc<Self> {
-        let len = 1
-            + left.as_ref().map_or(0, |node| node.len)
-            + right.as_ref().map_or(0, |node| node.len);
-        let bytes = weight
-            + left.as_ref().map_or(0, |node| node.bytes)
-            + right.as_ref().map_or(0, |node| node.bytes);
-        Arc::new(Self {
-            key,
-            value,
-            priority,
-            weight,
-            left,
-            right,
-            len,
-            bytes,
-        })
-    }
-
-    fn with_children(&self, left: Option<Arc<Self>>, right: Option<Arc<Self>>) -> Arc<Self> {
-        Self::new(
-            self.key.clone(),
-            self.value.clone(),
-            self.priority,
-            self.weight,
-            left,
-            right,
-        )
-    }
-
-    fn before(&self, other: &Self) -> bool {
-        (self.priority, &self.key) < (other.priority, &other.key)
-    }
-
-    fn insert(
-        root: &Option<Arc<Self>>,
-        key: Arc<K>,
-        value: Arc<V>,
-        priority: u64,
-        weight: usize,
-    ) -> Arc<Self> {
-        let Some(old) = root else {
-            return Self::new(key, value, priority, weight, None, None);
-        };
-        match key.cmp(&old.key) {
-            std::cmp::Ordering::Equal => Self::new(
-                key,
-                value,
-                priority,
-                weight,
-                old.left.clone(),
-                old.right.clone(),
-            ),
-            std::cmp::Ordering::Less => {
-                let left = Self::insert(&old.left, key, value, priority, weight);
-                if left.before(old) {
-                    let right = old.with_children(left.right.clone(), old.right.clone());
-                    left.with_children(left.left.clone(), Some(right))
-                } else {
-                    old.with_children(Some(left), old.right.clone())
-                }
-            }
-            std::cmp::Ordering::Greater => {
-                let right = Self::insert(&old.right, key, value, priority, weight);
-                if right.before(old) {
-                    let left = old.with_children(old.left.clone(), right.left.clone());
-                    right.with_children(Some(left), right.right.clone())
-                } else {
-                    old.with_children(old.left.clone(), Some(right))
-                }
-            }
-        }
-    }
-
-    fn get<'a>(root: &'a Option<Arc<Self>>, key: &K) -> Option<&'a Arc<V>> {
-        let mut node = root.as_ref()?;
-        loop {
-            match key.cmp(node.key.as_ref()) {
-                std::cmp::Ordering::Equal => return Some(&node.value),
-                std::cmp::Ordering::Less => node = node.left.as_ref()?,
-                std::cmp::Ordering::Greater => node = node.right.as_ref()?,
-            }
-        }
-    }
-
-    fn join(left: &Option<Arc<Self>>, right: &Option<Arc<Self>>) -> Option<Arc<Self>> {
-        match (left, right) {
-            (None, _) => right.clone(),
-            (_, None) => left.clone(),
-            (Some(a), Some(b)) if a.before(b) => {
-                Some(a.with_children(a.left.clone(), Self::join(&a.right, right)))
-            }
-            (Some(_), Some(b)) => Some(b.with_children(Self::join(left, &b.left), b.right.clone())),
-        }
-    }
-
-    fn remove(root: &Option<Arc<Self>>, key: &K) -> Option<Arc<Self>> {
-        let node = root.as_ref()?;
-        match key.cmp(node.key.as_ref()) {
-            std::cmp::Ordering::Equal => Self::join(&node.left, &node.right),
-            std::cmp::Ordering::Less => {
-                Some(node.with_children(Self::remove(&node.left, key), node.right.clone()))
-            }
-            std::cmp::Ordering::Greater => {
-                Some(node.with_children(node.left.clone(), Self::remove(&node.right, key)))
-            }
-        }
-    }
-
-    fn visit(&self, visit: &mut impl FnMut(&V)) {
-        if let Some(left) = &self.left {
-            left.visit(visit);
-        }
-        visit(&self.value);
-        if let Some(right) = &self.right {
-            right.visit(visit);
-        }
-    }
+    rows: Arc<BTreeMap<RowKey, Arc<[u8]>>>,
+    keys: Arc<FxHashMap<Arc<CodeIdentity>, RowKey>>,
 }
 
 impl CodeRows {
@@ -408,7 +271,8 @@ impl CodeRows {
         artifact: &CodeArtifact,
         identities: impl IntoIterator<Item = &'a CodeIdentity>,
     ) -> Result<(), FingerprintError> {
-        use std::hash::{Hash, Hasher};
+        let rows = Arc::make_mut(&mut self.rows);
+        let keys = Arc::make_mut(&mut self.keys);
         for identity in identities {
             let entry = artifact.entries.get(identity).ok_or_else(|| {
                 FingerprintError(format!(
@@ -418,41 +282,23 @@ impl CodeRows {
             let key = Arc::new((entry.identity.logical_key(ws, interner), identity.clone()));
             let mut encoded = CanonicalHasher::default();
             write_code_row(&mut encoded, &key.0, entry)?;
-            if let Some(old) = RowNode::get(&self.identities, identity) {
-                if old != &key {
-                    self.root = RowNode::remove(&self.root, old);
+            if let Some(old) = keys.insert(Arc::new(identity.clone()), key.clone()) {
+                if old != key {
+                    rows.remove(&old);
                 }
             }
-            let priority = xxhash64(key.0.as_bytes());
-            let weight = encoded.bytes.len();
-            self.root = Some(RowNode::insert(
-                &self.root,
-                key.clone(),
-                Arc::new(encoded.bytes),
-                priority,
-                weight,
-            ));
-            let mut hasher = rustc_hash::FxHasher::default();
-            identity.hash(&mut hasher);
-            self.identities = Some(RowNode::insert(
-                &self.identities,
-                Arc::new(identity.clone()),
-                key,
-                hasher.finish(),
-                0,
-            ));
+            rows.insert(key, encoded.bytes.into());
         }
         Ok(())
     }
 
     fn len(&self) -> usize {
-        self.root.as_ref().map_or(0, |node| node.len)
+        self.rows.len()
     }
 
     fn append_to(&self, bytes: &mut Vec<u8>) {
-        if let Some(root) = &self.root {
-            bytes.reserve(root.bytes);
-            root.visit(&mut |row| bytes.extend_from_slice(row));
+        for row in self.rows.values() {
+            bytes.extend_from_slice(row);
         }
     }
 }
