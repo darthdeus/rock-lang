@@ -521,31 +521,34 @@ pub extern "C" fn stone_image_data_fill_rect_rgba8(
 mod tests {
     use super::*;
 
-    #[test]
-    fn owned_rgba_pixels_enter_and_leave_the_image_data_registry() {
-        let before = stone_get_image_data_count();
-        let pixels = vec![255, 0, 0, 255, 0, 128, 255, 64];
-        let handle = store_owned_rgba(2, 1, pixels.clone()).expect("valid RGBA image");
-
-        assert_eq!(stone_get_image_data_count(), before + 1);
-        assert_eq!(
-            with_image_data(handle, |width, height, bytes| (
-                width,
-                height,
-                bytes.to_vec()
-            )),
-            Some((2, 1, pixels)),
-        );
-
-        stone_destroy_image_data(handle);
-        assert_eq!(stone_get_image_data_count(), before);
+    fn contents(handle: u64) -> Option<(u32, u32, Vec<u8>)> {
+        with_image_data(handle, |width, height, bytes| {
+            (width, height, bytes.to_vec())
+        })
     }
 
     #[test]
-    fn owned_rgba_rejects_invalid_shape_without_registering() {
+    fn rgba_pixels_enter_and_leave_the_image_data_registry() {
         let before = stone_get_image_data_count();
         assert_eq!(store_owned_rgba(0, 1, vec![]), None);
         assert_eq!(store_owned_rgba(2, 2, vec![0; 15]), None);
+        assert_eq!(
+            stone_get_image_data_count(),
+            before,
+            "an invalid shape registers nothing"
+        );
+
+        let pixels = vec![255, 0, 0, 255, 0, 128, 255, 64];
+        let owned = store_owned_rgba(2, 1, pixels.clone()).expect("valid RGBA image");
+        let encoded = encode_test_png(2, 1, &pixels);
+        let decoded =
+            unsafe { stone_image_data_load_png_bytes(encoded.as_ptr(), encoded.len() as c_int) };
+        assert_ne!(decoded, 0, "memory PNG decode returns an ImageData handle");
+        assert_eq!(stone_get_image_data_count(), before + 2);
+        for handle in [owned, decoded] {
+            assert_eq!(contents(handle), Some((2, 1, pixels.clone())));
+            stone_destroy_image_data(handle);
+        }
         assert_eq!(stone_get_image_data_count(), before);
     }
 
@@ -558,30 +561,9 @@ mod tests {
 
         let handle = stone_image_data_load_png(c_path.as_ptr());
         assert_ne!(handle, 0, "PNG load must use the embedded asset registry");
-        let (width, height) = IMAGE_DATAS
-            .with(|ids| ids.borrow().get(&handle).map(|img| (img.width, img.height)))
-            .expect("loaded image data must be live");
-        assert_eq!((width, height), (32, 32));
-        stone_destroy_image_data(handle);
-    }
-
-    #[test]
-    fn png_bytes_load_reads_a_transient_payload() {
-        let encoded = encode_test_png(2, 1, &[255, 0, 0, 255, 0, 128, 255, 64]);
-
-        let handle =
-            unsafe { stone_image_data_load_png_bytes(encoded.as_ptr(), encoded.len() as c_int) };
-        assert_ne!(
-            handle, 0,
-            "memory PNG decode must return an ImageData handle"
-        );
         assert_eq!(
-            with_image_data(handle, |width, height, bytes| (
-                width,
-                height,
-                bytes.to_vec()
-            )),
-            Some((2, 1, vec![255, 0, 0, 255, 0, 128, 255, 64])),
+            contents(handle),
+            Some((32, 32, [255, 128, 0, 255].repeat(32 * 32)))
         );
         stone_destroy_image_data(handle);
     }
