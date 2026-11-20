@@ -19,7 +19,6 @@ pub(crate) fn source_ident(name: Ustr) -> &'static str {
 enum NodePolicy {
     Narrowest,
     Hover,
-    Definition,
 }
 
 struct ResolvedPosition<'a> {
@@ -53,10 +52,6 @@ impl<'a> ResolvedPosition<'a> {
                     let (outside_name, uninformative) = match policy {
                         NodePolicy::Narrowest => (false, 0),
                         NodePolicy::Hover => (false, uninformative()),
-                        NodePolicy::Definition => (
-                            !definition_node_name_contains(body, iv.val, offset),
-                            uninformative(),
-                        ),
                     };
                     (outside_name, uninformative, iv.stop - iv.start)
                 })
@@ -153,111 +148,38 @@ impl<'a> ResolvedPosition<'a> {
     }
 }
 
-pub fn definition_at(
+pub fn definition_at<'t>(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
+    text_of: TextOf<'_, 't>,
 ) -> Option<Span> {
-    let at = ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Definition)?;
-    let body = at.body?;
+    let at = ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)?;
+    // A builtin type has no declaration; its node below names a landmark.
     if let Some(span) = at
-        .record_pattern_field()
-        .and_then(|field| field.target.declaration(ws))
+        .symbol(text_of)
+        .and_then(|symbol| symbol.definition(ws, text_of))
     {
         return Some(span);
     }
     let owner = at.owner?;
     match at.node? {
-        NodeRef::Binding(b) => body.binding_spans.get(b).copied(),
-
-        NodeRef::Expr(e) => match &body.expr_arena[e] {
-            hir::Expr::Var(b) => body.binding_spans.get(*b).copied(),
-
-            hir::Expr::Call { callee, .. } => match callee {
-                hir::Callee::Local(b) => body.binding_spans.get(*b).copied(),
-
-                hir::Callee::Unresolved { .. } => {
-                    let bi = inf.per_fn.get(&owner)?;
-                    let (cmid, fid) = bi.resolved_overload_calls.get(&e)?;
-
-                    Some(ws.modules.get(cmid.index())?.functions[*fid].name_span)
-                }
-
-                hir::Callee::Value(_) => None,
-            },
-
-            hir::Expr::Global(name) => def_of_name(ws, *name),
-
-            // In a `FieldRef<Struct, V>` slot a `.field` ref names the struct's field.
+        // In a `FieldRef<Struct, V>` slot a `.field` ref names the struct's field.
+        NodeRef::Expr(e) => match at.body?.expr_arena[e] {
             hir::Expr::SiblingRef(name) => inf
                 .per_fn
                 .get(&owner)
                 .and_then(|bi| field_ref_struct(ws, bi, *bi.expr_types.get(e)?))
-                .and_then(|sname| {
-                    RefTarget::Field(RecordType::Struct(sname), *name).declaration(ws)
-                })
-                .or_else(|| def_of_name(ws, *name)),
-
-            hir::Expr::StructLiteral { name, .. } => {
-                if let Some(field) = at.literal_field(e) {
-                    return field.target.declaration(ws);
-                }
-                RefTarget::Struct(*name).declaration(ws)
-            }
-
-            hir::Expr::EnumVariant { enum_name, .. } => at
-                .enum_variant_token(e)
-                .map_or(RefTarget::Enum(*enum_name), |token| token.target)
-                .declaration(ws),
-
-            hir::Expr::FieldAccess { base, field } => {
-                let bi = inf.per_fn.get(&owner)?;
-                let base_ty = *bi.expr_types.get(*base)?;
-                let sname = types::nominal_name(ws, Some(bi), base_ty)?;
-                RefTarget::Field(RecordType::Struct(sname), *field).declaration(ws)
-            }
-
+                .and_then(|sname| RefTarget::Field(RecordType::Struct(sname), name).declaration(ws))
+                .or_else(|| def_of_name(ws, name)),
             _ => None,
         },
-
         NodeRef::StaticTy { mid, idx } => {
             type_def_target(ws, &ws.modules.get(mid.index())?.ty_arena[idx])
         }
-        NodeRef::LocalTy(idx) => {
-            let bi = inf.per_fn.get(&owner)?;
-            type_def_target(ws, &bi.ty_arena[idx])
-        }
-        NodeRef::Statement(..) => None,
-    }
-}
-
-fn definition_node_name_contains(body: &hir::Body, node: NodeRef, offset: usize) -> bool {
-    match node {
-        NodeRef::Binding(binding) => span_contains(&body.binding_arena[binding].span, offset),
-        NodeRef::Expr(expr) => {
-            let expr_node = &body.expr_arena[expr];
-            match expr_node {
-                hir::Expr::Var(_) | hir::Expr::Global(_) | hir::Expr::SiblingRef(_) => body
-                    .expr_spans
-                    .get(expr)
-                    .is_some_and(|span| span_contains(span, offset)),
-                hir::Expr::Call {
-                    callee: hir::Callee::Unresolved { name_span, .. },
-                    ..
-                } => span_contains(&body.name_spans[*name_span], offset),
-                hir::Expr::EnumVariant {
-                    enum_name_span,
-                    variant_span,
-                    ..
-                } => {
-                    span_contains(&body.name_spans[*enum_name_span], offset)
-                        || span_contains(&body.name_spans[*variant_span], offset)
-                }
-                _ => false,
-            }
-        }
-        _ => false,
+        NodeRef::LocalTy(idx) => type_def_target(ws, &inf.per_fn.get(&owner)?.ty_arena[idx]),
+        _ => None,
     }
 }
 
@@ -905,37 +827,6 @@ enum RefTarget {
     Decorator(Ustr),
 }
 
-impl ResolvedPosition<'_> {
-    fn generic(&self) -> Option<(ModuleId, Idx<hir::TypeExpr>)> {
-        for ty in declared_generics(self.module) {
-            if let TyId::Static(mid, idx) = *ty {
-                if self
-                    .ws
-                    .modules
-                    .get(mid.index())
-                    .and_then(|module| module.ty_spans.get(idx))
-                    .is_some_and(|span| span_contains(span, self.offset))
-                {
-                    return Some((mid, idx));
-                }
-            }
-        }
-        let NodeRef::StaticTy { mid, idx } = self.node? else {
-            return None;
-        };
-        let arena = &self.ws.modules.get(mid.index())?.ty_arena;
-        match arena[idx] {
-            hir::TypeExpr::Generic(..) => Some((mid, idx)),
-            hir::TypeExpr::Nullable(inner)
-                if matches!(arena[inner], hir::TypeExpr::Generic(..)) =>
-            {
-                Some((mid, inner))
-            }
-            _ => None,
-        }
-    }
-}
-
 fn decorator_name_span<'t>(def: &hir::DecoratorDef, text_of: TextOf<'_, 't>) -> Option<Span> {
     decl_name_span_in(
         text_of(def.span.file.as_str())?,
@@ -1051,6 +942,36 @@ impl RefTarget {
             Self::Newtype(name)
         } else {
             Self::Struct(name)
+        }
+    }
+
+    fn definition<'t>(self, ws: &Workspace, text_of: TextOf<'_, 't>) -> Option<Span> {
+        match self {
+            Self::Binding(mid, owner, b) => {
+                ws.module(mid).bodies[&owner].binding_spans.get(b).copied()
+            }
+            Self::GenericParam(mid, var) => {
+                let m = ws.module(mid);
+                declared_generics(m).find_map(|g| match *g {
+                    TyId::Static(gm, gi)
+                        if gm == mid
+                            && matches!(m.ty_arena[gi], hir::TypeExpr::Generic(v, _) if v == var) =>
+                    {
+                        m.ty_spans.get(gi).copied()
+                    }
+                    _ => None,
+                })
+            }
+            Self::Newtype(name) => newtype_def_by_name(ws, name).map(|def| def.name_span),
+            Self::Function(mid, fid) => Some(ws.module(mid).functions[fid].name_span),
+            Self::Global(name) => def_of_name(ws, name),
+            Self::Decorator(name) => ws.modules.iter().find_map(|m| {
+                m.decorators
+                    .values()
+                    .find(|d| d.def_key == name)
+                    .and_then(|d| decorator_name_span(d, text_of))
+            }),
+            _ => self.declaration(ws),
         }
     }
 
@@ -1186,30 +1107,6 @@ pub(crate) fn declared_generics(module: &hir::Module) -> impl Iterator<Item = &T
         .flat_map(|f| &f.generics)
         .chain(module.structs.values().flat_map(|s| &s.generics))
         .chain(module.enums.values().flat_map(|e| &e.generics))
-}
-
-/// The `<T>` name that declares the generic at `(gmid, gidx)`, which may be a
-/// copy of the declared slot.
-fn generic_decl_span(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeExpr>) -> Option<Span> {
-    let m = ws.modules.get(gmid.index())?;
-    let hir::TypeExpr::Generic(var, _) = m.ty_arena[gidx] else {
-        return None;
-    };
-    declared_generics(m).find_map(|g| match g {
-        TyId::Static(gm, gi)
-            if *gm == gmid
-                && matches!(m.ty_arena[*gi], hir::TypeExpr::Generic(v, _) if v == var) =>
-        {
-            m.ty_spans.get(*gi).copied()
-        }
-        _ => None,
-    })
-}
-
-pub(crate) fn generic_param_def(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Span> {
-    let (gmid, gidx) =
-        ResolvedPosition::new(ws, mid, None, offset, NodePolicy::Narrowest)?.generic()?;
-    generic_decl_span(ws, gmid, gidx)
 }
 
 fn named_arguments(body: &Body, call: Idx<hir::Expr>) -> impl Iterator<Item = (Ustr, &Span)> {

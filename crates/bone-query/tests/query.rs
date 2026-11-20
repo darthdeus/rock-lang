@@ -255,6 +255,38 @@ fn create_vector() -> <|>Vector {
 }",
         ),
         (
+            "named argument label",
+            r"fn put(<@>count: int) {}
+fn main() {
+    put(<|>count: 1)
+}",
+        ),
+        (
+            "function used as a value",
+            r"fn <@>double<$>(x: int) -> int {
+    return x * 2
+}
+fn main() {
+    let f = <|>double
+}",
+        ),
+        (
+            "compound assignment field",
+            r"struct P {
+    <@>n: int,
+}
+fn main(p: P) {
+    p.<|>n += 1
+}",
+        ),
+        ("declaration name", r"fn <@><|>main<$>() {}"),
+        (
+            "decorator annotation",
+            r"deco init <@>reset<$> {}
+@<|>reset
+fn clear() {}",
+        ),
+        (
             "variable",
             r"fn main() {
     let <@>number = 42

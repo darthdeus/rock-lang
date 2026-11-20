@@ -1052,9 +1052,9 @@ impl BoneWorkspace {
             .as_ref()
             .and_then(|ast| crate::query::enum_variant_pattern_at(ws, mid, ast, offset))
             .and_then(|token| token.declaration(ws));
-        let span = pat_def
-            .or_else(|| crate::query::generic_param_def(ws, mid, offset))
-            .or_else(|| crate::query::definition_at(ws, mid, inf, offset))?;
+        let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
+        let span =
+            pat_def.or_else(|| crate::query::definition_at(ws, mid, inf, offset, &text_of))?;
         location(proj, &span, None)
     }
 
@@ -1294,7 +1294,14 @@ impl BoneWorkspace {
             None => {
                 let key =
                     crate::query::v1_def_named_at(ws, Ustr::from(path), offset).or_else(|| {
-                        let def = crate::query::definition_at(ws, mid, ws.inference(mid)?, offset)?;
+                        let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
+                        let def = crate::query::definition_at(
+                            ws,
+                            mid,
+                            ws.inference(mid)?,
+                            offset,
+                            &text_of,
+                        )?;
                         crate::query::v1_def_declared_at(ws, &def)
                     })?;
                 let src = proj.texts.get(path)?;
