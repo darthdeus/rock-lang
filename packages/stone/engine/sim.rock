@@ -424,14 +424,6 @@ macro start_game(name: expr) {
     _start_game_impl(name, __SITE__)
 }
 
-pub fn _sim_exclude_impl(reason: string, site: string) {
-    _sim_emit_impl("{{\"op\":\"exclude\",\"reason\":\"" + reason + "\"}}", site)
-    stop_sim()
-}
-macro sim_exclude(reason: expr) {
-    _sim_exclude_impl(reason, __SITE__)
-}
-
 pub fn _sim_no_checks_impl(reason: string, site: string) {
     _sim_emit_impl("{{\"op\":\"no_checks\",\"reason\":\"" + reason + "\"}}", site)
 }
@@ -769,17 +761,6 @@ macro sim_gt_float(actual: expr, threshold: expr, message: expr) {
     _sim_gt_float_impl(actual, threshold, message, __SITE__)
 }
 
-pub fn _sim_ge_float_impl(actual: float, threshold: float, message: string, site: string) {
-    if actual >= threshold {
-        sim_emit_ok(message, site)
-    } else {
-        sim_emit_fail(message, to_string(actual), ">= " + to_string(threshold), site)
-    }
-}
-macro sim_ge_float(actual: expr, threshold: expr, message: expr) {
-    _sim_ge_float_impl(actual, threshold, message, __SITE__)
-}
-
 pub fn _sim_lt_float_impl(actual: float, threshold: float, message: string, site: string) {
     if actual < threshold {
         sim_emit_ok(message, site)
@@ -800,17 +781,6 @@ pub fn _sim_le_float_impl(actual: float, threshold: float, message: string, site
 }
 macro sim_le_float(actual: expr, threshold: expr, message: expr) {
     _sim_le_float_impl(actual, threshold, message, __SITE__)
-}
-
-pub fn _sim_between_float_impl(actual: float, low: float, high: float, message: string, site: string) {
-    if actual >= low && actual <= high {
-        sim_emit_ok(message, site)
-    } else {
-        sim_emit_fail(message, to_string(actual), "in [" + to_string(low) + ", " + to_string(high) + "]", site)
-    }
-}
-macro sim_between_float(actual: expr, low: expr, high: expr, message: expr) {
-    _sim_between_float_impl(actual, low, high, message, __SITE__)
 }
 
 // Mirrors the .sim runner's `~=`: pass within `max(rel * |expected|, abs_min)`.

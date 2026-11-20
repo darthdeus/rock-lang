@@ -173,13 +173,6 @@ pub inline(lua) fn imgui_slider_float(label: string, value: float, min: float, m
     return changed, v[0]
 """
 
-pub inline(lua) fn imgui_input_float(label: string, value: float, step: float,
-                                 step_fast: float, format: string) -> (bool, float) = """
-    local v = ffi.new("float[1]", {value})
-    local changed = imgui.InputFloat(label, v, step, step_fast, format, 0)
-    return changed, v[0]
-"""
-
 pub inline(lua) fn imgui_slider_int(label: string, value: int, min: int, max: int) -> (bool, int) = """
     local v = ffi.new("int[1]", {value})
     local changed = imgui.SliderInt(label, v, min, max)
@@ -503,13 +496,6 @@ pub @inline inline(lua) fn imgui_tree_pop() = "imgui.TreePop()"
 pub inline(lua) fn imgui_indent(amount: float = 0.0) = "imgui.Indent(amount)"
 pub inline(lua) fn imgui_unindent(amount: float = 0.0) = "imgui.Unindent(amount)"
 
-pub inline(lua) fn imgui_open_popup(id: string) = "imgui.OpenPopup_Str(id, 0)"
-pub inline(lua) fn imgui_begin_popup(id: string) -> bool = "return imgui.BeginPopup(id, 0)"
-pub inline(lua) fn imgui_end_popup() = "imgui.EndPopup()"
-pub inline(lua) fn imgui_menu_item(label: string, enabled: bool = true) -> bool = """
-    return imgui.MenuItem_Bool(label, nil, false, enabled)
-"""
-
 // Full-width section header; 32 = ImGuiTreeNodeFlags_DefaultOpen.
 pub inline(lua) fn imgui_collapsing_header(label: string) -> bool = """
     return imgui.CollapsingHeader_TreeNodeFlags(label, 32)
@@ -548,11 +534,6 @@ pub @scalar_abi inline(lua) fn imgui_set_next_window_pos_pivot(pos: Vec2, pivot:
     imgui.SetNextWindowPos(cache.pos, 0, cache.u1)
 """
 
-pub @scalar_abi inline(lua) fn imgui_set_window_pos_named(title: string, pos: Vec2) = """
-    local cache = __imgui_shared_image_packet()
-    cache.pos.x, cache.pos.y = pos__x, pos__y
-    imgui.C.igSetWindowPos_Str(title, cache.pos, 0)
-"""
 pub @scalar_abi inline(lua) fn imgui_set_next_window_size(size: Vec2) = """
     local cache = __imgui_shared_image_packet()
     cache.s.x, cache.s.y = size__x, size__y
@@ -1134,31 +1115,7 @@ inline(lua) fn imgui_is_window_focused() -> bool = """
     return imgui.IsWindowFocused(0)
 """
 
-pub @inline inline(lua) fn imgui_set_window_focus(name: string) = "imgui.SetWindowFocus_Str(name)"
-
-pub @scalar_abi inline(lua) fn imgui_get_window_dock_placement() -> (int, int) = """
-    local w = imgui.GetCurrentWindow()
-    return tonumber(w.DockId), tonumber(w.DockOrder)
-"""
-
-// The new tab may not exist until the dock node has submitted another frame.
-pub inline(lua) fn imgui_restore_window_tab_order(order: int) -> bool = """
-    local w = imgui.GetCurrentWindow()
-    if w.DockNode == nil or w.DockNode.TabBar == nil then return false end
-    local bar = w.DockNode.TabBar
-    local tab = imgui.TabBarFindTabByID(bar, w.TabId)
-    if tab == nil then return false end
-    local current = imgui.TabBarGetTabOrder(bar, tab)
-    local target = math.min(order, bar.Tabs.Size - 1)
-    if current ~= target then imgui.TabBarQueueReorder(bar, tab, target - current) end
-    return true
-"""
-
 pub @inline inline(lua) fn imgui_set_next_window_dock_id(id: int) = "imgui.SetNextWindowDockID(id, 1)"
-
-pub @inline inline(lua) fn imgui_is_window_docked() -> bool = """
-    return imgui.IsWindowDocked()
-"""
 
 // Is a mouse button held, as ImGui sees it? 0 left, 1 right, 2 middle.
 // _Nil is cimgui's overload suffix for the plain (button) form -- there is no
