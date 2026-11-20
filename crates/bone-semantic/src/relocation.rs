@@ -29,8 +29,11 @@ const ARENA_REJECTION: &str = "Arena value borrow may be used after invalidation
 
 const ANNOTATION_MESSAGE: &str = "`@relocates` is reserved for the standard Vec and Map primitives";
 
-/// A key for an unknown type: it matches every key.
-const ANY_KEY: &str = "_";
+/// A key for an unknown type: it matches every key. This and [`GENERIC`]
+/// are control characters so that no type or package name can contain them.
+const ANY_KEY: &str = "\x01";
+/// Delimits the position of one of the function's generics.
+const GENERIC: char = '\x02';
 
 /// Keys longer than this (polymorphic recursion) degrade to [`ANY_KEY`].
 const MAX_KEY_LEN: usize = 256;
@@ -48,7 +51,7 @@ struct Effect {
     /// Changes the structure of the collection passed as this parameter.
     params: BTreeMap<u16, Span>,
     /// Changes the structure of some other reachable collection with this
-    /// element-type key (the function's generics as `$i$`).
+    /// element-type key.
     elements: BTreeMap<String, Span>,
     /// Changes the structure of this fresh local of the calling body. Only
     /// that body can reach it, so it never enters a summary.
@@ -680,7 +683,7 @@ fn render_key(
     match expr {
         TypeExpr::Builtin(builtin) => out.push_str(&format!("{builtin:?}")),
         TypeExpr::Generic(var, _) => match generics.iter().position(|&g| g == var) {
-            Some(i) => out.push_str(&format!("${i}$")),
+            Some(i) => out.push_str(&format!("{GENERIC}{i}{GENERIC}")),
             None => out.push_str(ANY_KEY),
         },
         TypeExpr::Infer(..) => out.push_str(ANY_KEY),
@@ -705,14 +708,14 @@ fn render_key(
     }
 }
 
-/// `key` with the callee's `$i$` replaced by the caller's bindings.
+/// `key` with the callee's generics replaced by the caller's bindings.
 fn substitute(key: &str, generics: &[String]) -> String {
     let mut out = String::new();
     let mut rest = key;
-    while let Some(start) = rest.find('$') {
+    while let Some(start) = rest.find(GENERIC) {
         out.push_str(&rest[..start]);
         let tail = &rest[start + 1..];
-        let Some(end) = tail.find('$') else {
+        let Some(end) = tail.find(GENERIC) else {
             return ANY_KEY.to_string();
         };
         let binding = tail[..end]
@@ -730,10 +733,17 @@ fn substitute(key: &str, generics: &[String]) -> String {
     }
 }
 
-/// Keys may alias when equal or when either is only partly known (an
-/// unresolved type, or a generic of the caller).
+/// Only partly known: an unresolved type, or a generic of the function.
+fn partial(key: &str) -> bool {
+    key.contains(ANY_KEY) || key.contains(GENERIC)
+}
+
 fn keys_may_alias(a: &str, b: &str) -> bool {
-    a == b || a.contains(ANY_KEY) || b.contains(ANY_KEY) || a.contains('$') || b.contains('$')
+    a == b || partial(a) || partial(b)
+}
+
+fn shown(key: &str) -> String {
+    key.replace(ANY_KEY, "_").replace(GENERIC, "$")
 }
 
 /// The callee's summary as seen from one call.
@@ -811,14 +821,14 @@ struct Relevance {
 
 impl Relevance {
     fn add(&mut self, key: &str) {
-        if key.contains('$') || key.contains(ANY_KEY) {
+        if partial(key) {
             self.all = true;
         }
         self.keys.insert(key.to_string());
     }
 
     fn keeps(&self, key: &str) -> bool {
-        self.all || key.contains('$') || key.contains(ANY_KEY) || self.keys.contains(key)
+        self.all || partial(key) || self.keys.contains(key)
     }
 
     /// Unknown code subsumes structural effects; retention still propagates.
@@ -1240,8 +1250,8 @@ fn rejection(
             .iter()
             .find(|(key, _)| keys_may_alias(&root.key, key));
         let (key, witness) = match (local, element) {
-            (Some(&witness), _) => (root.key.as_str(), witness),
-            (None, Some((key, &witness))) => (key.as_str(), witness),
+            (Some(&witness), _) => (shown(&root.key), witness),
+            (None, Some((key, &witness))) => (shown(key), witness),
             (None, None) => continue,
         };
         return Some(

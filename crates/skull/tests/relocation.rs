@@ -227,6 +227,26 @@ fn main() {
 }
 "#,
         ),
+        (
+            "element ref into a call that grows a vec of an underscored type",
+            r#"
+value Cell { v: int }
+value Mark_row { at: int }
+
+fn grow(marks: [Mark_row]) { marks.push(Mark_row { at: 1 }) }
+
+fn grow_then_write(cell: ref Cell, marks: [Mark_row]) {
+    grow(marks)
+    cell.v = 7
+}
+
+fn main() {
+    let cells: [Cell] = [Cell { v: 1 }]
+    let marks: [Mark_row] = []
+    grow_then_write(cells[0], marks)
+}
+"#,
+        ),
     ] {
         assert!(bone_rejection_errors(src).is_empty(), "{case}");
     }
