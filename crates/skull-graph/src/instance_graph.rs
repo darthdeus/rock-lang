@@ -450,9 +450,6 @@ fn assert_subst(
 #[derive(Clone)]
 pub struct InstanceGraph {
     incremental_indexes: bool,
-    /// A retained view checks the revision it was realized from instead of
-    /// trusting call order.
-    revision: u64,
     interner: std::sync::Arc<MonoInterner>,
     /// The primary records; every derived field is computed from these and `root_instances`.
     pub contributions: BTreeMap<Owner, Box<Contribution>>,
@@ -652,15 +649,13 @@ impl InstanceGraph {
 
     /// Release one-shot build records, keeping the shared type arena.
     pub fn take_records(&mut self) -> Self {
-        let mut empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
-        empty.revision = self.revision;
+        let empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
         std::mem::replace(self, empty)
     }
 
     fn empty_in(interner: std::sync::Arc<MonoInterner>) -> Self {
         InstanceGraph {
             incremental_indexes: false,
-            revision: 0,
             interner,
             contributions: BTreeMap::new(),
             lost: BTreeSet::new(),
@@ -1639,7 +1634,6 @@ impl InstanceGraph {
         changed: &[(ModuleId, BodyOwner)],
         edits: &[TextEditDelta],
     ) -> UpdateStats {
-        self.revision += 1;
         self.ensure_incremental_indexes();
         let pending_roots: Vec<Owner> = canonical_roots(ws, root_added.to_vec())
             .into_iter()
@@ -1699,10 +1693,6 @@ impl InstanceGraph {
             revisited,
             revisited_owners: std::mem::take(&mut self.last_run_owners),
         }
-    }
-
-    pub fn revision(&self) -> u64 {
-        self.revision
     }
 
     fn ensure_incremental_indexes(&mut self) {
