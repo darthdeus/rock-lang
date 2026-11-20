@@ -469,82 +469,29 @@ pub extern "C" fn stone_create_canvas(
                 return 0;
             }
         };
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-
-        let TextureFormat {
-            internal_format,
-            tex_format,
-            data_type,
-            int_format,
-        } = resolve_texture_format(format);
-
-        gl.tex_image_2d(
-            glow::TEXTURE_2D,
-            0,
-            internal_format as i32,
-            width,
-            height,
-            0,
-            tex_format,
-            data_type,
-            glow::PixelUnpackData::Slice(None::<&[u8]>),
-        );
-
-        // Integer textures must be NEAREST: a linear-filtered integer texture is incomplete.
-        let filter = glow::NEAREST as i32;
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-
-        gl.framebuffer_texture_2d(
-            glow::FRAMEBUFFER,
-            glow::COLOR_ATTACHMENT0,
-            glow::TEXTURE_2D,
-            Some(texture),
-            0,
-        );
-
         let depth_texture = if with_depth {
-            let dt = match gl.create_texture() {
-                Ok(t) => Some(t),
-                Err(e) => {
-                    crate::log_once!("CANVAS", "Failed to create depth texture ({}x{}): {} (depth testing disabled for this canvas)", width, height, e);
-                    None
-                }
-            };
-            if let Some(dt) = dt {
-                gl.bind_texture(glow::TEXTURE_2D, Some(dt));
-                gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::DEPTH_COMPONENT24 as i32,
-                    width,
-                    height,
-                    0,
-                    glow::DEPTH_COMPONENT,
-                    glow::UNSIGNED_INT,
-                    glow::PixelUnpackData::Slice(None),
-                );
-                // No mips: the default MIPMAP min filter would leave the depth texture incomplete.
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_COMPARE_MODE, glow::NONE as i32);
-                gl.bind_texture(glow::TEXTURE_2D, None);
-                gl.framebuffer_texture_2d(
-                    glow::FRAMEBUFFER,
-                    glow::DEPTH_ATTACHMENT,
-                    glow::TEXTURE_2D,
-                    Some(dt),
-                    0,
-                );
-            }
-            dt
+            gl.create_texture()
+                .inspect_err(|e| crate::log_once!("CANVAS", "Failed to create depth texture ({}x{}): {} (depth testing disabled for this canvas)", width, height, e))
+                .ok()
         } else {
             None
         };
+        // NEAREST without mips: a linear-filtered integer texture is incomplete, and so
+        // is a depth texture under the default MIPMAP min filter.
+        for tex in std::iter::once(texture).chain(depth_texture) {
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        }
+        if depth_texture.is_some() {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_COMPARE_MODE, glow::NONE as i32);
+        }
+        let spec = resolve_texture_format(format);
+        respecify_storage(gl, &spec, texture, depth_texture, width, height);
+        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
+        gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, depth_texture, 0);
 
         let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
         if status != glow::FRAMEBUFFER_COMPLETE {
@@ -558,7 +505,7 @@ pub extern "C" fn stone_create_canvas(
             return 0;
         }
 
-        establish_blank_contents(gl, int_format, depth_texture.is_some());
+        establish_blank_contents(gl, spec.int_format, depth_texture.is_some());
 
         let current = CURRENT_FBO.with(|c| *c.borrow());
         gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(current));
