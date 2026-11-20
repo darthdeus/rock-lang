@@ -9,6 +9,7 @@ fn a_tuple_intrinsic_rejects_lanes_that_cannot_use_the_return_bank() {
     for src in [
         // nullable tuple result
         "nobox value NP { x: int, y: int }\n\
+         @intrinsic inline(lua) fn tuple_first(tuple: (((NP, int)?, int), int)) -> ((NP, int)?, int) = \"return tuple[1]\"\n\
          fn root(input: (((NP, int)?, int), int)) -> int {\n\
              let result = tuple_first(input)\n\
              return result.1\n\
