@@ -290,33 +290,39 @@ pub(super) fn shader_registration_lines(
         .iter()
         .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
         .collect();
-    let keys = collection
-        .pairs
-        .iter()
-        .map(|pair| pair.key.clone())
-        .collect();
-    let mut shader_pair_users = BTreeMap::new();
-    for pairs in collection.contributions.values() {
-        for pair in pairs {
-            *shader_pair_users.entry(pair.key.clone()).or_insert(0) += 1;
-        }
-    }
-    let shader_pairs = collection
-        .pairs
-        .iter()
-        .map(|pair| (pair.key.clone(), pair.clone()))
-        .collect();
-    let shader_root_set = roots.iter().copied().collect();
     Ok(ShaderRegistrations {
         lua: out,
         sources: sources.into(),
         dependencies,
-        callsites: collection.callsites.iter().copied().collect(),
-        shader_contributions: collection.contributions.clone(),
-        shader_pair_users,
-        shader_pairs,
-        shader_root_set,
-        roots: roots.into_iter().collect(),
-        keys,
+        shader_contributions: collection
+            .contributions
+            .iter()
+            .filter(|(_, pairs)| !pairs.is_empty())
+            .map(|(&key, pairs)| (key, pairs.clone()))
+            .collect(),
+        roots,
     })
+}
+
+impl ShaderRegistrations {
+    pub(super) fn collection(&self) -> skull_mir::lower::ShaderCollection {
+        let mut pairs = BTreeMap::new();
+        for pair in self.shader_contributions.values().flatten() {
+            pairs
+                .entry(pair.key.as_str())
+                .or_insert_with(|| pair.clone());
+        }
+        skull_mir::lower::ShaderCollection {
+            pairs: pairs.into_values().collect(),
+            callsites: self.shader_contributions.keys().copied().collect(),
+            contributions: self.shader_contributions.clone(),
+        }
+    }
+
+    pub(super) fn keys_match<'a>(&self, keys: impl Iterator<Item = &'a str>) -> bool {
+        self.sources
+            .iter()
+            .map(|source| source.key.as_str())
+            .eq(keys)
+    }
 }

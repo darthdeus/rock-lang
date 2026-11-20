@@ -31,14 +31,9 @@ pub(super) struct ShaderRegistrations {
     pub(super) lua: String,
     pub(super) sources: std::sync::Arc<[ShaderSource]>,
     pub(super) dependencies: FxHashSet<FuncRef>,
-    pub(super) callsites: FxHashSet<(ModuleId, BodyOwner)>,
     pub(super) shader_contributions:
         HashMap<(ModuleId, BodyOwner), Vec<skull_mir::lower::ShaderPair>>,
-    pub(super) shader_pair_users: BTreeMap<String, usize>,
-    pub(super) shader_pairs: BTreeMap<String, skull_mir::lower::ShaderPair>,
-    pub(super) shader_root_set: FxHashSet<FuncRef>,
     pub(super) roots: Vec<FuncRef>,
-    pub(super) keys: BTreeSet<String>,
 }
 
 #[derive(Default)]

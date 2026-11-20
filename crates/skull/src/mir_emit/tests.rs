@@ -291,6 +291,25 @@ fn main() {{ let _ = choose() }}
     }
 
     #[test]
+    fn removing_a_shader_pair_keeps_its_shared_vertex_root() {
+        let source = |body: &str| {
+            shader_source(body).replace(
+                "fn main() { let _ = choose() }",
+                "fn main() { let _ = choose(); let _ = rock_shader(shared_vertex, second_fragment) }",
+            )
+        };
+        assert_sequence(
+            "shared-shader-root",
+            &[
+                source("return rock_shader(shared_vertex, first_fragment)"),
+                source("return \"none\""),
+            ],
+            EditedBody::Function("choose"),
+            "",
+        );
+    }
+
+    #[test]
     fn pruning_shared_and_cyclic_calls_matches_fresh_output() {
         for (definitions, supported) in [
             (

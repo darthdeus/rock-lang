@@ -296,44 +296,45 @@ impl SkullEmitCache {
     /// A live shader registry cannot remove a key from the running process,
     /// so a key-set change must take the process-restarting reload path.
     pub fn shader_registration_keys_changed(&self, ws: &Workspace) -> Result<bool, CompilerError> {
-        let graphics = skull_mir::lower::collect_shader_pairs(ws)?
-            .into_iter()
-            .map(|pair| pair.key);
-        let current: BTreeSet<String> = graphics.collect();
-        Ok(current != self.shader_registrations.keys)
+        let pairs = skull_mir::lower::collect_shader_pairs(ws)?;
+        Ok(!self
+            .shader_registrations
+            .keys_match(pairs.iter().map(|pair| pair.key.as_str())))
     }
 
-    /// A body-only edit must not use the full-workspace check.
-    /// [`Self::shader_registration_keys_changed`] over only the re-inferred bodies.
+    /// Check the registration keys over only the re-inferred bodies.
     pub fn shader_registration_keys_changed_for_bodies(
         &self,
         ws: &Workspace,
         reinferred: &[(ModuleId, BodyOwner)],
     ) -> Result<bool, CompilerError> {
-        let mut users = self.shader_registrations.shader_pair_users.clone();
+        let mut changed = FxHashSet::default();
+        let mut new_pairs = Vec::new();
         for &(mid, owner) in reinferred {
-            if let Some(previous) = self
-                .shader_registrations
-                .shader_contributions
-                .get(&(mid, owner))
+            let (pairs, _) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
+            if !pairs.is_empty()
+                || self
+                    .shader_registrations
+                    .shader_contributions
+                    .contains_key(&(mid, owner))
             {
-                for pair in previous {
-                    let count = users
-                        .get_mut(&pair.key)
-                        .expect("shader key index lost a body contribution");
-                    *count -= 1;
-                    if *count == 0 {
-                        users.remove(&pair.key);
-                    }
-                }
-            }
-            let (shader, _) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
-            for pair in shader {
-                *users.entry(pair.key).or_insert(0) += 1;
+                changed.insert((mid, owner));
+                new_pairs.extend(pairs);
             }
         }
-        let current: BTreeSet<String> = users.keys().cloned().collect();
-        Ok(current != self.shader_registrations.keys)
+        if changed.is_empty() {
+            return Ok(false);
+        }
+        let keys: BTreeSet<&str> = self
+            .shader_registrations
+            .shader_contributions
+            .iter()
+            .filter(|(key, _)| !changed.contains(key))
+            .flat_map(|(_, pairs)| pairs)
+            .chain(&new_pairs)
+            .map(|pair| pair.key.as_str())
+            .collect();
+        Ok(!self.shader_registrations.keys_match(keys.into_iter()))
     }
 
     pub(super) fn update_shader_registrations(
@@ -342,7 +343,9 @@ impl SkullEmitCache {
         reinferred: &[(ModuleId, BodyOwner)],
     ) -> Result<bool, CompilerError> {
         let affected = reinferred.iter().any(|&(mid, owner)| {
-            self.shader_registrations.callsites.contains(&(mid, owner))
+            self.shader_registrations
+                .shader_contributions
+                .contains_key(&(mid, owner))
                 || matches!(
                     owner,
                     BodyOwner::Function(fid)
@@ -356,73 +359,27 @@ impl SkullEmitCache {
         if !affected {
             return Ok(false);
         }
+        let registrations = &mut self.shader_registrations;
         for &(mid, owner) in reinferred {
-            let key = (mid, owner);
-            let old_shader = self
-                .shader_registrations
-                .shader_contributions
-                .remove(&key)
-                .unwrap_or_default();
-            for pair in old_shader {
-                let users = self
-                    .shader_registrations
-                    .shader_pair_users
-                    .get_mut(&pair.key)
-                    .expect("shader contribution index lost an existing key");
-                *users -= 1;
-                if *users == 0 {
-                    self.shader_registrations
-                        .shader_pair_users
-                        .remove(&pair.key);
-                    self.shader_registrations.shader_pairs.remove(&pair.key);
-                    if let Some(vert) = pair.vert {
-                        self.shader_registrations.shader_root_set.remove(&vert);
-                    }
-                    self.shader_registrations.shader_root_set.remove(&pair.frag);
-                }
-            }
-
-            let (shader, shader_callsite) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
-            for pair in &shader {
-                let users = self
-                    .shader_registrations
-                    .shader_pair_users
-                    .entry(pair.key.clone())
-                    .or_insert(0);
-                *users += 1;
-                if *users == 1 {
-                    self.shader_registrations
-                        .shader_pairs
-                        .insert(pair.key.clone(), pair.clone());
-                    if let Some(vert) = pair.vert {
-                        self.shader_registrations.shader_root_set.insert(vert);
-                    }
-                    self.shader_registrations.shader_root_set.insert(pair.frag);
-                }
-            }
-            self.shader_registrations
-                .shader_contributions
-                .insert(key, shader);
-            if shader_callsite {
-                self.shader_registrations.callsites.insert(key);
+            let (pairs, _) = skull_mir::lower::collect_shader_body(ws, mid, owner)?;
+            if pairs.is_empty() {
+                registrations.shader_contributions.remove(&(mid, owner));
             } else {
-                self.shader_registrations.callsites.remove(&key);
+                registrations
+                    .shader_contributions
+                    .insert((mid, owner), pairs);
             }
         }
-        let mut shader_roots: Vec<FuncRef> = self
-            .shader_registrations
-            .shader_root_set
-            .iter()
-            .copied()
+        registrations.roots = registrations
+            .shader_contributions
+            .values()
+            .flatten()
+            .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
             .collect();
-        shader_roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
-        self.shader_registrations.roots = shader_roots;
-        self.shader_registrations.keys = self
-            .shader_registrations
-            .shader_pairs
-            .keys()
-            .cloned()
-            .collect();
+        registrations
+            .roots
+            .sort_unstable_by_key(|f| (f.module.index(), f.func.into_raw()));
+        registrations.roots.dedup();
         Ok(true)
     }
 
@@ -430,21 +387,7 @@ impl SkullEmitCache {
         &mut self,
         ws: &Workspace,
     ) -> Result<(), CompilerError> {
-        let collection = skull_mir::lower::ShaderCollection {
-            pairs: self
-                .shader_registrations
-                .shader_pairs
-                .values()
-                .cloned()
-                .collect(),
-            callsites: self
-                .shader_registrations
-                .callsites
-                .iter()
-                .copied()
-                .collect(),
-            contributions: self.shader_registrations.shader_contributions.clone(),
-        };
+        let collection = self.shader_registrations.collection();
         let programs = shader_programs(&collection);
         let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
             .sharing(std::sync::Arc::clone(self.graph.interner()));
