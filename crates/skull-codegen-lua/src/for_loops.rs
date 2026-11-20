@@ -4,7 +4,7 @@ use super::*;
 pub(crate) enum HiLimit {
     /// A value computed in the preheader (e.g. `#arr`); live through the header.
     Value(Idx<Inst>),
-    /// A bound cell loaded in the header (`for i in lo..hi`'s `hi`).
+    /// An invariant local loaded in the header.
     Cell(Idx<Cell>),
 }
 
@@ -112,17 +112,25 @@ fn try_match_loop(
         }
     }
     let (latch, slot) = (latch?, slot?);
-    if frame.is_some_and(|f| f.fields.contains(&slot)) {
+    let (hi, inclusive) = match_header(func, h, cond, slot)?;
+    let limit_cell = match hi {
+        HiLimit::Cell(c) if c == slot => return None,
+        HiLimit::Cell(c) => Some(c),
+        HiLimit::Value(_) => None,
+    };
+    if std::iter::once(slot)
+        .chain(limit_cell)
+        .any(|c| func.cells[c].borrowed || frame.is_some_and(|f| f.fields.contains(&c)))
+    {
         return None;
     }
-    let (hi, inclusive) = match_header(func, h, cond, slot)?;
     let region = compute_region(all_preds, then_bb, h, latch)?;
     // The post-for edge must leave the loop. A short-circuit condition can
     // route the false arm through a join that is still inside the body.
     if else_bb == h || else_bb == latch || region.contains(&else_bb) {
         return None;
     }
-    if !slot_sound(func, slot, h, latch, &region) {
+    if !control_sound(func, slot, limit_cell, h, latch, &region) {
         return None;
     }
     Some(ForLoop {
@@ -238,32 +246,39 @@ fn compute_region(
     Some(natural)
 }
 
-/// The counter must behave like a `for` variable: stored exactly twice
-/// (preheader init and latch increment) and never read outside the region,
-/// closures included.
-fn slot_sound(
+/// A Lua numeric `for` shadows the counter and snapshots the limit.
+fn control_sound(
     func: &MirFunc,
     slot: Idx<Cell>,
+    limit: Option<Idx<Cell>>,
     header: Idx<Block>,
     latch: Idx<Block>,
     region: &HashSet<Idx<Block>>,
 ) -> bool {
-    let in_loop: HashSet<Idx<Block>> = region.iter().copied().chain([header, latch]).collect();
-    let mut stores = 0usize;
+    let mut inits = 0;
     for (bid, b) in func.blocks.iter() {
-        let inside = in_loop.contains(&bid);
+        let inside = bid == header || bid == latch || region.contains(&bid);
         for &i in &b.insts {
-            match &func.insts[i] {
-                Inst::Store { cell, .. } if *cell == slot => stores += 1,
-                Inst::Load(c) if *c == slot && !inside => return false,
-                Inst::MapNext {
-                    key_cell, val_cell, ..
-                } if *key_cell == slot || *val_cell == slot => return false,
-                _ => {}
+            let inst = &func.insts[i];
+            if matches!(inst, Inst::Load(c) if *c == slot && !inside) {
+                return false;
+            }
+            let mut sound = true;
+            inst.cell_writes_each(&mut |cell| {
+                if inside && limit == Some(cell) {
+                    sound = false;
+                }
+                if cell == slot && bid != latch {
+                    sound &= !inside && matches!(inst, Inst::Store { .. });
+                    inits += 1;
+                }
+            });
+            if !sound {
+                return false;
             }
         }
     }
-    stores == 2
+    inits == 1
 }
 
 // A map loop has no separate increment: the header is also its continue

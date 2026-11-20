@@ -642,6 +642,19 @@ impl<'a> Builder<'a> {
                 self.boxed_value_copy_repr(boxed, name, self.concrete_expr_ty(e))
             }
             Expr::FieldAccess { base, field } => {
+                if field.as_str() == "len"
+                    && matches!(
+                        self.concrete_expr_ty(base),
+                        Some(MonoTy::App {
+                            ctor: MonoCtor::Array,
+                            ..
+                        })
+                    )
+                {
+                    let vec = self.lower_expr(base)?;
+                    // Every Vec header has a raw length, even with a foreign backing table.
+                    return Ok(ValueRepr::Scalar(self.read_value_field(vec, field)));
+                }
                 if let Some(repr) = self.immediate_value_projection_repr(e)? {
                     return Ok(repr);
                 }

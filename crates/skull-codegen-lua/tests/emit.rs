@@ -1410,3 +1410,34 @@ value Entry { key: int, refs: [int] }
     );
     assert!(!lua.contains("Entry_vt("), "{lua}");
 }
+
+#[test]
+fn numeric_for_requires_an_invariant_bound_and_unit_step() {
+    let src = include_str!("../../../tests/control_flow/counted_bounds.rock");
+    for (name, fors, general) in [
+        ("local_bound", 0, true),
+        ("vec_bound", 0, true),
+        ("field_bound", 0, true),
+        ("global_bound", 0, true),
+        ("closure_bound", 0, true),
+        ("mutable_step", 0, true),
+        ("assigned_counter", 0, true),
+        ("assigned_parameter", 0, true),
+        ("invariant_bound", 1, false),
+        ("range_snapshot", 1, false),
+        ("bounds_in_nested_loops", 1, true),
+    ] {
+        let lua = emit_clean(src, name);
+        assert_eq!(lua.matches(" for c").count(), fors, "{name}: {lua}");
+        assert_eq!(has_general_loop(&lua), general, "{name}: {lua}");
+    }
+    for name in ["iter_field_bound", "iterator_reads_vec_length_each_turn"] {
+        let lua = emit_inlined(src, name);
+        assert!(!lua.contains(" for c"), "{name}: {lua}");
+        assert!(has_general_loop(&lua), "{name}: {lua}");
+    }
+}
+
+fn has_general_loop(lua: &str) -> bool {
+    lua.contains(" while ") || lua.contains("goto w")
+}

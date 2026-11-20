@@ -1,6 +1,5 @@
 //! Recover a counted loop from an inlined iterator's test, yield and done arms.
-//! Only tagged iterator loops may snapshot their bound. A handwritten while
-//! must still read it on each iteration.
+//! A tagged iterator loop can snapshot a bound that is invariant on its back edges.
 //!
 //! The rewrite keeps yield-path copies, routes filter rejects to the latch
 //! and take_while rejects to the exit, and clears the obsolete flag branches.
@@ -83,25 +82,33 @@ fn retarget(term: &mut Term, from: Idx<Block>, to: Idx<Block>) {
     term.remap_targets(&|target| if target == from { to } else { target });
 }
 
-fn cell_written_in(func: &MirFunc, c: Idx<Cell>, blocks: &HashSet<Idx<Block>>) -> bool {
-    for &b in blocks {
-        for &i in &func.blocks[b].insts {
-            match &func.insts[i] {
-                Inst::Store { cell, .. } if *cell == c => return true,
-                Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. }
-                    if dests.contains(&c) =>
-                {
-                    return true;
-                }
-                Inst::MapNext {
-                    key_cell, val_cell, ..
-                } if *key_cell == c || *val_cell == c => return true,
-                Inst::Lambda { params, .. } if params.contains(&c) => return true,
-                _ => {}
-            }
+fn may_write_fields(inst: &Inst) -> bool {
+    match inst {
+        Inst::Store { .. } | Inst::MapNext { .. } => false,
+        // Absent slots can invoke code through a backing table's metatable.
+        Inst::Index { kind, .. } => matches!(
+            kind,
+            ContainerKind::Vec
+                | ContainerKind::VecInBounds
+                | ContainerKind::Record
+                | ContainerKind::Map
+        ),
+        _ => {
+            !inst.produces_value()
+                || matches!(
+                    inst,
+                    Inst::Call { .. }
+                        | Inst::CallValue { .. }
+                        | Inst::Field {
+                            nonthrowing: false,
+                            ..
+                        }
+                        | Inst::Format { .. }
+                        | Inst::FormatDyn { .. }
+                        | Inst::ToString(_)
+                )
         }
     }
-    false
 }
 
 /// The flag cell a combinator join branches on.
@@ -702,7 +709,14 @@ fn try_match(
     if !tset.contains(&slot_load) || !tset.contains(&cond) {
         return None;
     }
+    let loop_insts = || {
+        in_loop
+            .iter()
+            .flat_map(|&block| &func.blocks[block].insts)
+            .map(|&id| &func.insts[id])
+    };
     let mut chain_set: HashSet<Idx<Inst>> = HashSet::default();
+    let mut reads_fields = false;
     let mut work = vec![bound];
     while let Some(v) = work.pop() {
         if !tset.contains(&v) || !chain_set.insert(v) {
@@ -711,13 +725,34 @@ fn try_match(
         match &func.insts[v] {
             Inst::Const(_) => {}
             Inst::Load(c) => {
-                if cell_written_in(func, *c, &in_loop) {
+                if func.cells[*c].borrowed
+                    || loop_insts().any(|inst| {
+                        let mut written = false;
+                        inst.cell_writes_each(&mut |cell| written |= cell == *c);
+                        written
+                    })
+                {
                     return None;
                 }
             }
-            Inst::Field { base, .. } => work.push(*base),
+            Inst::Field {
+                base,
+                nonthrowing: true,
+                ..
+            } => {
+                reads_fields = true;
+                work.push(*base);
+            }
             _ => return None,
         }
+    }
+    if reads_fields
+        && (loop_insts().any(may_write_fields)
+            || in_loop
+                .iter()
+                .any(|&block| matches!(func.blocks[block].term, Term::Yield { .. })))
+    {
+        return None;
     }
     // T must contain nothing but the compare pieces (the detector's header
     // rule: any extra per-iteration inst would be silently hoisted).
