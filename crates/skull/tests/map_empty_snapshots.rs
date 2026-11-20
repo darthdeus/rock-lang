@@ -170,16 +170,10 @@ fn nonempty_snapshots_stay_sorted_and_survive_map_mutation() {
 }
 
 #[test]
-fn string_backed_snapshot_keys_use_native_sort_only() {
+fn snapshot_keys_sort_by_text_and_keep_ties_in_traversal_order() {
     let lua = emit_module(SOURCE);
     let output = run_luajit(&format!(
         r#"{lua}
-local sort = table.sort
-local comparators = {{}}
-table.sort = function(keys, compare)
-    comparators[#comparators + 1] = compare or false
-    return sort(keys, compare)
-end
 local boxed, column = empty_boxed_map(), empty_column_map()
 boxed['10'], boxed['2'] = {{ id = 10 }}, {{ id = 2 }}
 column.spine['10'], column.spine['2'] = 1, 2
@@ -187,19 +181,18 @@ column.occupied_count = 2
 local labels, numbers = {{}}, {{}}
 labels['10'], labels['2'] = 10, 2
 numbers[10], numbers[2] = 10, 2
-local mixed = {{ [10] = 10, ['2'] = 2 }}
+local mixed = {{ [10] = 10, ['10'] = 10, ['2'] = 2 }}
+local tied = {{}}
+for key in pairs(mixed) do
+    if tostring(key) == '10' then tied[#tied + 1] = key end
+end
 local a, b, c = boxed_keys(boxed), column_keys(column), label_keys(labels)
 assert(a._data[1] == '10' and b._data[1] == '10' and c._data[1] == '10')
 sorted_snapshots()
 local d, e = number_keys(numbers), mixed_keys(mixed)
 assert(d._data[1] == 10 and d._data[2] == 2, 'numeric keys keep tostring order')
-assert(e._data[1] == 10 and e._data[2] == '2', 'mixed keys keep tostring order')
-assert(#comparators >= 5)
-for i = 1, #comparators - 2 do
-    assert(comparators[i] == false, 'string-backed maps should use native sort')
-end
-assert(type(comparators[#comparators - 1]) == 'function', 'numeric maps need the comparator')
-assert(type(comparators[#comparators]) == 'function', 'mixed maps need the comparator')
+assert(e.len == 3 and e._data[3] == '2', 'mixed keys keep tostring order')
+assert(e._data[1] == tied[1] and e._data[2] == tied[2], 'equal key text keeps traversal order')
 print('ok')
 "#
     ));
