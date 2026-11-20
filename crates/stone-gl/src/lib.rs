@@ -134,6 +134,16 @@ impl DebugGl {
             .get_framebuffer_attachment_parameter_i32(target, attachment, name)
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    pub unsafe fn set_enabled(&self, cap: u32, on: bool) {
+        if on {
+            self.enable(cap);
+        } else {
+            self.disable(cap);
+        }
+    }
+
     pub fn set_capture(&self, hook: Option<DrawCaptureHook>) {
         DRAW_CAPTURE.with(|capture| capture.set(hook));
     }

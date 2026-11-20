@@ -146,72 +146,42 @@ pub extern "C" fn stone_bind_sampler(unit: c_int, mode: c_int, image: u64) {
     });
 }
 
-/// Mirrors the Rock BlendMode enum (blend_mode_to_int in commands.rock). Every arm resets
-/// the blend equation so lighten's GL_MAX cannot leak into later draws.
+/// Indexed by the Rock BlendMode enum (blend_mode_to_int in commands.rock): the blend
+/// equation and `blend_func_separate` factors, `None` for blending off. Every mode sets the
+/// equation so lighten's GL_MAX cannot leak into later draws.
+const BLEND_MODES: [(u32, Option<[u32; 4]>); 7] = {
+    use glow::*;
+    [
+        (
+            FUNC_ADD,
+            Some([SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA]),
+        ),
+        (FUNC_ADD, Some([SRC_ALPHA, ONE, ONE, ONE_MINUS_SRC_ALPHA])),
+        (FUNC_ADD, Some([DST_COLOR, ZERO, DST_ALPHA, ZERO])),
+        (MAX, Some([ONE, ONE, ONE, ONE])),
+        (FUNC_ADD, None),
+        (FUNC_ADD, Some([ONE, ONE, ONE, ONE])),
+        (
+            FUNC_ADD,
+            Some([ONE, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA]),
+        ),
+    ]
+};
+
 #[no_mangle]
 pub extern "C" fn stone_set_blend_mode_i(mode: i32) {
+    let (equation, factors) = match usize::try_from(mode).ok().and_then(|m| BLEND_MODES.get(m)) {
+        Some(row) => *row,
+        None => {
+            warn_unknown_blend_mode(mode);
+            BLEND_MODES[0]
+        }
+    };
     with_gl(|gl| unsafe {
-        match mode {
-            0 => {
-                gl.enable(glow::BLEND);
-                gl.blend_equation(glow::FUNC_ADD);
-                gl.blend_func_separate(
-                    glow::SRC_ALPHA,
-                    glow::ONE_MINUS_SRC_ALPHA,
-                    glow::ONE,
-                    glow::ONE_MINUS_SRC_ALPHA,
-                );
-            }
-            1 => {
-                gl.enable(glow::BLEND);
-                gl.blend_equation(glow::FUNC_ADD);
-                gl.blend_func_separate(
-                    glow::SRC_ALPHA,
-                    glow::ONE,
-                    glow::ONE,
-                    glow::ONE_MINUS_SRC_ALPHA,
-                );
-            }
-            2 => {
-                gl.enable(glow::BLEND);
-                gl.blend_equation(glow::FUNC_ADD);
-                gl.blend_func_separate(glow::DST_COLOR, glow::ZERO, glow::DST_ALPHA, glow::ZERO);
-            }
-            3 => {
-                gl.enable(glow::BLEND);
-                gl.blend_equation(glow::MAX);
-                gl.blend_func_separate(glow::ONE, glow::ONE, glow::ONE, glow::ONE);
-            }
-            4 => {
-                gl.disable(glow::BLEND);
-                gl.blend_equation(glow::FUNC_ADD);
-            }
-            5 => {
-                gl.enable(glow::BLEND);
-                gl.blend_equation(glow::FUNC_ADD);
-                gl.blend_func_separate(glow::ONE, glow::ONE, glow::ONE, glow::ONE);
-            }
-            6 => {
-                gl.enable(glow::BLEND);
-                gl.blend_equation(glow::FUNC_ADD);
-                gl.blend_func_separate(
-                    glow::ONE,
-                    glow::ONE_MINUS_SRC_ALPHA,
-                    glow::ONE,
-                    glow::ONE_MINUS_SRC_ALPHA,
-                );
-            }
-            other => {
-                warn_unknown_blend_mode(other);
-                gl.enable(glow::BLEND);
-                gl.blend_equation(glow::FUNC_ADD);
-                gl.blend_func_separate(
-                    glow::SRC_ALPHA,
-                    glow::ONE_MINUS_SRC_ALPHA,
-                    glow::ONE,
-                    glow::ONE_MINUS_SRC_ALPHA,
-                );
-            }
+        gl.set_enabled(glow::BLEND, factors.is_some());
+        gl.blend_equation(equation);
+        if let Some([src_rgb, dst_rgb, src_alpha, dst_alpha]) = factors {
+            gl.blend_func_separate(src_rgb, dst_rgb, src_alpha, dst_alpha);
         }
     });
 }
@@ -243,11 +213,7 @@ impl BlendGlState {
     }
 
     unsafe fn restore(self, gl: &DebugGl) {
-        if self.enabled {
-            gl.enable(glow::BLEND);
-        } else {
-            gl.disable(glow::BLEND);
-        }
+        gl.set_enabled(glow::BLEND, self.enabled);
         gl.blend_equation_separate(self.equation_rgb, self.equation_alpha);
         gl.blend_func_separate(self.src_rgb, self.dst_rgb, self.src_alpha, self.dst_alpha);
     }
@@ -309,11 +275,7 @@ pub extern "C" fn stone_gl_pass_state_end(scope: u32) -> bool {
         let state = states[states.len() - 1];
         let restored = with_gl(|gl| unsafe {
             state.blend.restore(gl);
-            if state.depth_enabled {
-                gl.enable(glow::DEPTH_TEST);
-            } else {
-                gl.disable(glow::DEPTH_TEST);
-            }
+            gl.set_enabled(glow::DEPTH_TEST, state.depth_enabled);
             gl.depth_func(state.depth_func);
             gl.depth_mask(state.depth_write);
             gl.color_mask(
@@ -328,11 +290,7 @@ pub extern "C" fn stone_gl_pass_state_end(scope: u32) -> bool {
                 state.clear_color[2],
                 state.clear_color[3],
             );
-            if state.cull_enabled {
-                gl.enable(glow::CULL_FACE);
-            } else {
-                gl.disable(glow::CULL_FACE);
-            }
+            gl.set_enabled(glow::CULL_FACE, state.cull_enabled);
         })
         .is_some();
         if restored {
@@ -376,29 +334,23 @@ pub extern "C" fn stone_gl_write_state() -> *const c_char {
             box_[3],
         )
     });
-    match read {
-        Some(s) => write_state_reply(s),
-        None => write_state_reply("no-gl".to_string()),
-    }
+    reply(&WRITE_STATE_REPLY, read)
 }
 
 thread_local! {
     static WRITE_STATE_REPLY: RefCell<Option<std::ffi::CString>> = const { RefCell::new(None) };
-}
-
-fn write_state_reply(s: String) -> *const c_char {
-    WRITE_STATE_REPLY.with(|b| {
-        let Ok(c) = std::ffi::CString::new(s) else {
-            return std::ptr::null();
-        };
-        let ptr = c.as_ptr();
-        *b.borrow_mut() = Some(c);
-        ptr
-    })
-}
-
-thread_local! {
     static BLEND_STATE_REPLY: RefCell<Option<std::ffi::CString>> = const { RefCell::new(None) };
+}
+
+/// The pointer stays valid until the next reply through the same slot.
+fn reply(
+    slot: &'static std::thread::LocalKey<RefCell<Option<std::ffi::CString>>>,
+    text: Option<String>,
+) -> *const c_char {
+    let Ok(c) = std::ffi::CString::new(text.unwrap_or_else(|| "no-gl".to_string())) else {
+        return std::ptr::null();
+    };
+    slot.with(|b| b.borrow_mut().insert(c).as_ptr())
 }
 
 /// The blend state as GL currently has it, `on/off eq=<e> src=<s> dst=<d>` with
@@ -421,16 +373,8 @@ pub extern "C" fn stone_gl_blend_state() -> *const c_char {
             gl.get_parameter_i32(glow::BLEND_SRC_RGB),
             gl.get_parameter_i32(glow::BLEND_DST_RGB),
         )
-    })
-    .unwrap_or_else(|| "no-gl".to_string());
-    BLEND_STATE_REPLY.with(|b| {
-        let Ok(c) = std::ffi::CString::new(s) else {
-            return std::ptr::null();
-        };
-        let ptr = c.as_ptr();
-        *b.borrow_mut() = Some(c);
-        ptr
-    })
+    });
+    reply(&BLEND_STATE_REPLY, s)
 }
 
 fn warn_unknown_blend_mode(mode: i32) {
@@ -533,11 +477,7 @@ pub extern "C" fn stone_set_clear_color(r: c_float, g: c_float, b: c_float, a: c
 pub extern "C" fn stone_set_scissor(enabled: bool, x: c_int, y: c_int, w: c_int, h: c_int) {
     with_gl(|gl| unsafe {
         gl.scissor(x, y, w, h);
-        if enabled {
-            gl.enable(glow::SCISSOR_TEST);
-        } else {
-            gl.disable(glow::SCISSOR_TEST);
-        }
+        gl.set_enabled(glow::SCISSOR_TEST, enabled);
     });
 }
 
