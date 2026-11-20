@@ -821,16 +821,16 @@ fn def_of_name(ws: &Workspace, name: Ustr) -> Option<Span> {
             return Some(ws.module(f.0).functions[f.1].span);
         }
 
-        if let Some(s) = m.struct_by_name.get(&name) {
-            return Some(m.structs[*s].name_span);
+        if let Some(s) = m.nominals.struct_id(name) {
+            return Some(m.structs[s.def].name_span);
         }
 
-        if let Some(en) = m.enums_by_name.get(&name) {
-            return Some(m.enums[*en].name_span);
+        if let Some(en) = m.nominals.enum_id(name) {
+            return Some(m.enums[en.def].name_span);
         }
 
-        if let Some(nt) = m.newtypes_by_name.get(&name) {
-            return Some(m.newtypes[*nt].name_span);
+        if let Some(nt) = m.nominals.newtype_id(name) {
+            return Some(m.newtypes[nt.def].name_span);
         }
     }
 
@@ -1117,7 +1117,7 @@ impl RecordType {
             _ => ty,
         };
         let owner = types::member_owner_name(ws, Some(bi), ty)?;
-        let record = if ws.enums_by_name.contains_key(&owner) {
+        let record = if ws.nominals.enum_id(owner).is_some() {
             Self::Variant(owner, ustr(source_ident(name?)))
         } else {
             Self::Struct(owner)
@@ -1144,9 +1144,11 @@ impl RecordType {
 
     fn fields(self, module: &hir::Module) -> Option<&[hir::StructFieldDef]> {
         match self {
-            Self::Struct(name) => Some(&module.structs[*module.struct_by_name.get(&name)?].fields),
+            Self::Struct(name) => {
+                Some(&module.structs[module.nominals.struct_id(name)?.def].fields)
+            }
             Self::Variant(name, variant) => {
-                let def = &module.enums[*module.enums_by_name.get(&name)?];
+                let def = &module.enums[module.nominals.enum_id(name)?.def];
                 let v = def.variants.iter().find(|v| v.name == variant)?;
                 match &v.payload {
                     hir::VariantPayload::Record(fields) => Some(fields),
@@ -1901,7 +1903,7 @@ pub(crate) fn enum_variant_pattern_at(
                     name_span: Some(span),
                     ..
                 } if *span == name_span => {
-                    Some(name.is_some_and(|name| ws.struct_by_name.contains_key(&name)))
+                    Some(name.is_some_and(|name| ws.nominals.struct_id(name).is_some()))
                 }
                 _ => None,
             })
@@ -2007,7 +2009,7 @@ fn enum_def_for_variant(
 fn struct_def_by_name(ws: &Workspace, name: Ustr) -> Option<&hir::StructDef> {
     ws.modules
         .iter()
-        .find_map(|m| m.struct_by_name.get(&name).map(|i| &m.structs[*i]))
+        .find_map(|m| m.nominals.struct_id(name).map(|i| &m.structs[i.def]))
 }
 
 /// `Variant` / `Variant($0)` / `Variant { $0 }`.
@@ -2043,7 +2045,7 @@ pub(crate) fn enum_variants_with_shape(
 fn newtype_def_by_name(ws: &Workspace, name: Ustr) -> Option<&NewtypeDef> {
     ws.modules
         .iter()
-        .find_map(|m| m.newtypes_by_name.get(&name).map(|i| &m.newtypes[*i]))
+        .find_map(|m| m.nominals.newtype_id(name).map(|i| &m.newtypes[i.def]))
 }
 
 pub(crate) struct UfcsMethod {
@@ -2484,7 +2486,7 @@ fn init_operator_is_pure(
                         hir::TypeExpr::App {
                             ctor: hir::TypeCtor::Nominal(name),
                             ..
-                        } => ws.newtypes_by_name.contains_key(&name),
+                        } => ws.nominals.newtype_id(name).is_some(),
                         _ => false,
                     }),
             );
@@ -2776,7 +2778,7 @@ fn concrete_type_str(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Str
 fn enum_def_by_name(ws: &Workspace, name: Ustr) -> Option<&hir::EnumDef> {
     ws.modules
         .iter()
-        .find_map(|m| m.enums_by_name.get(&name).map(|idx| &m.enums[*idx]))
+        .find_map(|m| m.nominals.enum_id(name).map(|idx| &m.enums[idx.def]))
 }
 
 fn pattern_is_catch_all(body: &Body, pat: Idx<hir::Pattern>) -> bool {
@@ -2978,9 +2980,9 @@ pub(crate) fn resolve_visible_binding(
             },
             module.file,
         )
-    } else if let Some(sid) = ws.struct_by_name.get(&key) {
+    } else if let Some(sid) = ws.nominals.struct_id(key) {
         (VisibleBindingKind::Struct, ws.module(sid.module).file)
-    } else if let Some(eid) = ws.enums_by_name.get(&key) {
+    } else if let Some(eid) = ws.nominals.enum_id(key) {
         let module = ws.module(eid.module);
         let variants = module.enums[eid.def]
             .variants
@@ -2995,7 +2997,7 @@ pub(crate) fn resolve_visible_binding(
             })
             .collect();
         (VisibleBindingKind::Enum(variants), module.file)
-    } else if let Some(nid) = ws.newtypes_by_name.get(&key) {
+    } else if let Some(nid) = ws.nominals.newtype_id(key) {
         (VisibleBindingKind::Newtype, ws.module(nid.module).file)
     } else if ws.globals_by_name.contains_key(&key) {
         let def_file = global_def_file.unwrap_or_else(|| {

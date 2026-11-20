@@ -11,6 +11,7 @@
 //! nothing, so recursion through any of them is admitted.
 
 use crate::hir::{TypeCtor, TypeExpr, VarId};
+use crate::prelude::Nominal as Def;
 use crate::prelude::*;
 
 /// A by-value nominal: a `value` struct or a newtype.
@@ -99,32 +100,27 @@ pub(crate) fn check_value_recursion(ws: &mut Workspace, fresh: &[ModuleId]) {
 
 fn collect_nominals(ws: &Workspace) -> FxHashMap<Ustr, Nominal> {
     let mut out = FxHashMap::default();
-    for (&key, sid) in ws.struct_by_name.iter() {
-        let module = ws.module(sid.module);
-        let def = &module.structs[sid.def];
-        if !def.is_value {
-            continue;
-        }
+    for (&key, &def) in ws.nominals.iter() {
+        let module = ws.module(def.module());
+        let (display, generics, members) = match def {
+            Def::Struct(id) if module.structs[id.def].is_value => {
+                let def = &module.structs[id.def];
+                let members = def.fields.iter().map(|f| (f.ty, f.span)).collect();
+                (def.name, &def.generics, members)
+            }
+            Def::Newtype(id) => {
+                let def = &module.newtypes[id.def];
+                (def.name, &def.generics, vec![(def.wrapped, def.span)])
+            }
+            _ => continue,
+        };
         out.insert(
             key,
             Nominal {
-                module: sid.module,
-                display: def.name,
-                params: generic_vars(ws, &def.generics),
-                members: def.fields.iter().map(|f| (f.ty, f.span)).collect(),
-            },
-        );
-    }
-    for (&key, nid) in ws.newtypes_by_name.iter() {
-        let module = ws.module(nid.module);
-        let def = &module.newtypes[nid.def];
-        out.insert(
-            key,
-            Nominal {
-                module: nid.module,
-                display: def.name,
-                params: generic_vars(ws, &def.generics),
-                members: vec![(def.wrapped, def.span)],
+                module: module.id,
+                display,
+                params: generic_vars(ws, generics),
+                members,
             },
         );
     }

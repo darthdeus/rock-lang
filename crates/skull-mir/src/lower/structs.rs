@@ -190,8 +190,9 @@ impl<'a> Builder<'a> {
 
     pub(crate) fn struct_field_names(&self, name: Ustr) -> Option<Vec<Ustr>> {
         self.ws
-            .struct_by_name
-            .contains_key(&name)
+            .nominals
+            .struct_id(name)
+            .is_some()
             .then(|| struct_field_names(self.ws, name))
     }
 
@@ -538,10 +539,10 @@ impl<'a> Builder<'a> {
         field: Ustr,
         f: impl FnOnce(&mut Self, Idx<Expr>) -> Result<T, CompilerError>,
     ) -> Result<T, CompilerError> {
-        let sid = *self
+        let sid = self
             .ws
-            .struct_by_name
-            .get(&struct_name)
+            .nominals
+            .struct_id(struct_name)
             .ok_or_else(|| gap(format!("unknown struct `{struct_name}` for default")))?;
         let owner = BodyOwner::StructDefaults(sid.def);
         let defaults_body = self.ws.modules[sid.module.index()]

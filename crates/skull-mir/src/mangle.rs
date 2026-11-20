@@ -113,8 +113,8 @@ pub fn symbol_of_key(name: ustr::Ustr) -> ustr::Ustr {
 /// (cdefs, `ffi.new`, tag compares).
 pub fn type_symbol(ws: &Workspace, key: ustr::Ustr) -> ustr::Ustr {
     let exempt = ws
-        .struct_by_name
-        .get(&key)
+        .nominals
+        .struct_id(key)
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].nomangle);
     if exempt {
         ustr::Ustr::from(declared_name(key.as_str()))

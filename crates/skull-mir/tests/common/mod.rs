@@ -77,9 +77,7 @@ pub fn key(ws: &bone_core::workspace::Workspace, name: &str) -> Ustr {
         .collect::<Vec<_>>();
     if source.is_empty() {
         let bare = Ustr::from(name.as_str());
-        if ws.struct_by_name.contains_key(&bare)
-            || ws.enums_by_name.contains_key(&bare)
-            || ws.newtypes_by_name.contains_key(&bare)
+        if ws.nominals.contains_key(&bare)
             || ws.globals_by_name.contains_key(&bare)
             || ws.functions_by_name.contains_key(&bare)
         {

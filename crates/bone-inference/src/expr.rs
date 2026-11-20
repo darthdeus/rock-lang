@@ -1801,7 +1801,7 @@ fn may_be_numeric(gamma: &mut Gamma, ty: TyId, span: Span) -> bool {
             TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),
                 ..
-            } if gamma.workspace.newtypes_by_name.contains_key(&name) => {
+            } if gamma.workspace.nominals.newtype_id(name).is_some() => {
                 let NewtypeId { module, def } = resolve_newtype(gamma, name).unwrap();
                 let wrapped = gamma.workspace.module(module).newtypes[def].wrapped;
                 ty = peel_nullable(gamma, wrapped, span);

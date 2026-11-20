@@ -7,6 +7,7 @@ use skull_parser::{
 };
 
 use bone_core::modules::ScopeProbe;
+use bone_core::prelude::Nominal;
 use bone_semantic::{
     hir::{Function, Module, TypeCtor, TypeExpr},
     prelude::*,
@@ -1024,23 +1025,15 @@ impl Session {
         let old_types = {
             use bone_semantic::semantic_passes::{NominalFacts, NominalFlavor};
             self.ws
-                .struct_by_name
+                .nominals
                 .iter()
-                .map(|(name, id)| (name, id.module, NominalFlavor::Struct))
-                .chain(
-                    self.ws
-                        .enums_by_name
-                        .iter()
-                        .map(|(name, id)| (name, id.module, NominalFlavor::Enum)),
-                )
-                .chain(
-                    self.ws
-                        .newtypes_by_name
-                        .iter()
-                        .map(|(name, id)| (name, id.module, NominalFlavor::Newtype)),
-                )
-                .filter(|(_, owner, _)| *owner == mid)
-                .map(|(name, _, flavor)| {
+                .filter(|(_, def)| def.module() == mid)
+                .map(|(name, def)| {
+                    let flavor = match def {
+                        Nominal::Struct(_) => NominalFlavor::Struct,
+                        Nominal::Enum(_) => NominalFlavor::Enum,
+                        Nominal::Newtype(_) => NominalFlavor::Newtype,
+                    };
                     let generics = self.ws.type_generics.get(name);
                     (
                         *name,
@@ -1233,9 +1226,7 @@ impl Session {
             }
         }
 
-        self.ws.struct_by_name.retain(|_, id| keep(id.module));
-        self.ws.enums_by_name.retain(|_, id| keep(id.module));
-        self.ws.newtypes_by_name.retain(|_, id| keep(id.module));
+        self.ws.nominals.retain(|_, def| keep(def.module()));
 
         // Facts owned by kept modules stay, so a kept first definer still wins over a
         // re-lowered duplicate.
@@ -1906,12 +1897,7 @@ fn fingerprint(value: impl std::hash::Hash) -> u64 {
 
 /// Nominal definitions whose users must see a re-lowered interface.
 fn exported_type_names(module: &Module) -> impl Iterator<Item = Ustr> + '_ {
-    module
-        .struct_by_name
-        .keys()
-        .chain(module.enums_by_name.keys())
-        .chain(module.newtypes_by_name.keys())
-        .copied()
+    module.nominals.keys().copied()
 }
 
 fn iface_dep_names(module: &Module) -> FxHashSet<Ustr> {

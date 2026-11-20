@@ -121,7 +121,7 @@ impl ContainerPlan {
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
-                } if ws.struct_by_name.contains_key(name)
+                } if ws.nominals.struct_id(*name).is_some()
             )
             && shape
                 .as_ref()

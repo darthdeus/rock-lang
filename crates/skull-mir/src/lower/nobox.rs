@@ -353,13 +353,13 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn struct_field_ty(&self, name: Ustr, field: Ustr) -> Option<TyId> {
-        let sid = *self.ws.struct_by_name.get(&name)?;
+        let sid = self.ws.nominals.struct_id(name)?;
         let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
         sd.fields.iter().find(|f| f.name == field).map(|f| f.ty)
     }
 
     pub(crate) fn field_is_f32(&self, name: Ustr, field: Ustr) -> bool {
-        self.ws.struct_by_name.get(&name).is_some_and(|sid| {
+        self.ws.nominals.struct_id(name).is_some_and(|sid| {
             self.ws.modules[sid.module.index()].structs[sid.def].fields.iter().any(|f| {
                 f.name == field
                     && matches!(
@@ -444,8 +444,8 @@ impl<'a> Builder<'a> {
             TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),
                 ..
-            } if self.ws.newtypes_by_name.contains_key(&name) => {
-                let nid = self.ws.newtypes_by_name.get(&name)?;
+            } if self.ws.nominals.newtype_id(name).is_some() => {
+                let nid = self.ws.nominals.newtype_id(name)?;
                 let wrapped = self.ws.modules[nid.module.index()].newtypes[nid.def].wrapped;
                 self.arith_ty_of(self.resolve_ty(wrapped)?)
             }

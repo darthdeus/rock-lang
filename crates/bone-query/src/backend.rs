@@ -26,6 +26,7 @@ use lsp_types::{
     SignatureInformation, SymbolInformation, SymbolKind, TextEdit, Uri, WorkspaceEdit,
 };
 
+use bone_core::prelude::Nominal;
 use bone_core::type_equiv::TyRef;
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use bone_semantic::hir::TypeExpr;
@@ -2388,11 +2389,11 @@ fn semantic_flow_modifiers(
 }
 
 fn semantic_symbol_token(ws: &Workspace, key: Ustr) -> Option<u32> {
-    if ws.struct_by_name.contains_key(&key) {
+    if ws.nominals.struct_id(key).is_some() {
         Some(TT_STRUCT)
-    } else if ws.enums_by_name.contains_key(&key) {
+    } else if ws.nominals.enum_id(key).is_some() {
         Some(TT_ENUM)
-    } else if ws.newtypes_by_name.contains_key(&key) {
+    } else if ws.nominals.newtype_id(key).is_some() {
         Some(TT_TYPE)
     } else if ws.functions_by_name.contains_key(&key) {
         Some(TT_FUNCTION)
@@ -2432,14 +2433,12 @@ struct SemanticClassifications {
 fn semantic_name_map(ws: &Workspace) -> HashMap<Ustr, u32> {
     let mut names: HashMap<Ustr, u32> = HashMap::new();
     for m in ws.modules.iter() {
-        for n in m.struct_by_name.keys() {
-            names.entry(*n).or_insert(TT_STRUCT);
-        }
-        for n in m.enums_by_name.keys() {
-            names.entry(*n).or_insert(TT_ENUM);
-        }
-        for n in m.newtypes_by_name.keys() {
-            names.entry(*n).or_insert(TT_TYPE);
+        for (n, def) in m.nominals.iter() {
+            names.entry(*n).or_insert(match def {
+                Nominal::Struct(_) => TT_STRUCT,
+                Nominal::Enum(_) => TT_ENUM,
+                Nominal::Newtype(_) => TT_TYPE,
+            });
         }
         for n in m.functions_by_name.keys() {
             names.entry(*n).or_insert(TT_FUNCTION);

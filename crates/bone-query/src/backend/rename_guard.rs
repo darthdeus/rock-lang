@@ -175,7 +175,7 @@ pub(super) fn check_opaque<'t>(
     }
     if let RenameSubject::Type(Some(name)) = subject {
         for m in ws.modules.iter() {
-            if let Some(s) = m.struct_by_name.get(&name).map(|i| &m.structs[*i]) {
+            if let Some(s) = m.nominals.struct_id(name).map(|i| &m.structs[i.def]) {
                 if s.nomangle {
                     return Err(RenameRefusal(format!(
                         "cannot rename `{old}`: `@nomangle` keeps its emitted type name, \

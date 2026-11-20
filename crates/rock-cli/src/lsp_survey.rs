@@ -259,9 +259,7 @@ pub(crate) fn collect_stats(
         let defined = module
             .functions_by_name
             .keys()
-            .chain(module.struct_by_name.keys())
-            .chain(module.enums_by_name.keys())
-            .chain(module.newtypes_by_name.keys())
+            .chain(module.nominals.keys())
             .chain(module.global_by_name.keys());
         for name in defined {
             if let Some(set) = session.dependents.get(name) {

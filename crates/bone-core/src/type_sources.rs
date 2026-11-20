@@ -35,7 +35,7 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
             if owners.contains_key(&name) {
                 continue;
             }
-            let module = if let Some(id) = ws.struct_by_name.get(&name) {
+            let module = if let Some(id) = ws.nominals.struct_id(name) {
                 let module = ws.module(id.module);
                 types.extend(
                     module.structs[id.def]
@@ -44,7 +44,7 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
                         .map(|field| field.storage_ty),
                 );
                 module
-            } else if let Some(id) = ws.enums_by_name.get(&name) {
+            } else if let Some(id) = ws.nominals.enum_id(name) {
                 let module = ws.module(id.module);
                 for variant in &module.enums[id.def].variants {
                     match &variant.payload {
@@ -56,7 +56,7 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
                     }
                 }
                 module
-            } else if let Some(id) = ws.newtypes_by_name.get(&name) {
+            } else if let Some(id) = ws.nominals.newtype_id(name) {
                 let module = ws.module(id.module);
                 types.push(module.newtypes[id.def].wrapped);
                 module
@@ -98,7 +98,7 @@ pub fn declaration_sources(ws: &Workspace, roots: &[Ustr]) -> Result<Vec<TypeSou
                     TypeCtor::Nominal(name) => names.push(name),
                     TypeCtor::Array => {
                         let name = Ustr::from("Vec");
-                        if ws.struct_by_name.contains_key(&name) {
+                        if ws.nominals.struct_id(name).is_some() {
                             names.push(name);
                         }
                     }

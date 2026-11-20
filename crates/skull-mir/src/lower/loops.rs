@@ -458,7 +458,7 @@ impl<'a> Builder<'a> {
             let Some(name) = ty.peel_nullable().0.nominal() else {
                 return HashSet::default();
             };
-            if let Some(&eid) = self.ws.enums_by_name.get(&name) {
+            if let Some(eid) = self.ws.nominals.enum_id(name) {
                 let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
                 return ed.variants.iter().map(|v| v.name).collect();
             }
@@ -472,7 +472,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn scrut_enum_name(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let name = ty.peel_nullable().0.nominal()?;
-            return self.ws.enums_by_name.contains_key(&name).then_some(name);
+            return self.ws.nominals.enum_id(name).is_some().then_some(name);
         }
         None
     }
@@ -483,7 +483,7 @@ impl<'a> Builder<'a> {
                 .peel_nullable()
                 .0
                 .nominal()
-                .is_some_and(|name| self.ws.newtypes_by_name.contains_key(&name));
+                .is_some_and(|name| self.ws.nominals.newtype_id(name).is_some());
         }
         false
     }

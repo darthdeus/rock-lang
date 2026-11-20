@@ -85,7 +85,7 @@ impl StructFieldPlan {
 /// A native primitive projection aliases the original nested bytes. Hex paths
 /// keep dots injective; avoid the entire declared-field prefix namespace.
 pub fn cdata_leaf_alias(ws: &Workspace, owner: Ustr, path: &str) -> Ustr {
-    let sid = ws.struct_by_name[&owner];
+    let sid = ws.nominals.struct_id(owner).unwrap();
     let fields = &ws.modules[sid.module.index()].structs[sid.def].fields;
     let mut prefix = "__rock_leaf_".to_string();
     while fields
@@ -135,7 +135,7 @@ impl StructRegistryPlan {
             arena.value_plan_catalog().into_iter().collect();
         let mut queue: Vec<Ustr> = names.iter().copied().collect();
         while let Some(name) = queue.pop() {
-            let sid = ws.struct_by_name.get(&name).ok_or_else(|| {
+            let sid = ws.nominals.struct_id(name).ok_or_else(|| {
                 plan_error(format!("struct registry type `{name}` is not declared"))
             })?;
             let s = &ws.modules[sid.module.index()].structs[sid.def];
@@ -146,7 +146,7 @@ impl StructRegistryPlan {
                 let plan = struct_field_plan(ws, target, name, field.name, false)?;
                 if let Some(child) = plan
                     .child()
-                    .filter(|child| ws.struct_by_name.contains_key(child))
+                    .filter(|child| ws.nominals.struct_id(*child).is_some())
                 {
                     if names.insert(child) {
                         queue.push(child);
@@ -204,7 +204,7 @@ fn collect_struct_roots(
             | Inst::MaterializeValueStruct { name, .. } => *name,
             _ => continue,
         };
-        if ws.struct_by_name.contains_key(&name) {
+        if ws.nominals.struct_id(name).is_some() {
             names.insert(name);
         }
     }
@@ -250,7 +250,7 @@ pub fn struct_field_plan(
     field: Ustr,
     spliced: bool,
 ) -> Result<StructFieldPlan, RepError> {
-    let Some(&sid) = ws.struct_by_name.get(&sname) else {
+    let Some(sid) = ws.nominals.struct_id(sname) else {
         return Err(plan_error(format!("struct `{sname}` has no field plan")));
     };
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
@@ -271,13 +271,13 @@ pub fn struct_field_plan(
         });
     };
     let child = ws
-        .struct_by_name
-        .get(&child_name)
+        .nominals
+        .struct_id(child_name)
         .map(|sid| &ws.modules[sid.module.index()].structs[sid.def]);
     let known_nominal = bone_core::modules::is_intrinsic_key(child_name, "Coroutine")
         || child.is_some()
-        || ws.enums_by_name.contains_key(&child_name)
-        || ws.newtypes_by_name.contains_key(&child_name);
+        || ws.nominals.enum_id(child_name).is_some()
+        || ws.nominals.newtype_id(child_name).is_some();
     if !known_nominal {
         return Err(plan_error(format!(
             "struct `{sname}` field `{field}` has missing resolved type `{child_name}`"
@@ -372,7 +372,7 @@ fn leaf_eq(ws: &Workspace, shape: &ValueShape, nested: bool, out: &mut Vec<GcFie
     if shape.nullable && nested {
         out.push(GcFieldEq::Native);
     }
-    if ws.enums_by_name.contains_key(&shape.name) {
+    if ws.nominals.enum_id(shape.name).is_some() {
         // Native equality on flat enum payload slots would skip the enum's contents walk.
         let payload_eq = if super::shape::flat_enum_equality_is_leafwise(ws, shape.name) {
             GcFieldEq::Native
@@ -384,8 +384,8 @@ fn leaf_eq(ws: &Workspace, shape: &ValueShape, nested: bool, out: &mut Vec<GcFie
         return;
     }
     let decl = ws
-        .struct_by_name
-        .get(&shape.name)
+        .nominals
+        .struct_id(shape.name)
         .map(|sid| &ws.modules[sid.module.index()].structs[sid.def]);
     for (fname, fs) in &shape.fields {
         match fs {
@@ -438,8 +438,8 @@ pub fn gc_table_fields(
     name: Ustr,
 ) -> Result<Vec<GcTableField>, RepError> {
     let sid = ws
-        .struct_by_name
-        .get(&name)
+        .nominals
+        .struct_id(name)
         .ok_or_else(|| plan_error(format!("GC-table value `{name}` is not a declared struct")))?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
     let shape = super::shape::value_shape_gc(ws, name)

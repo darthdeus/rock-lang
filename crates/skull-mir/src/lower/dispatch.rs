@@ -355,7 +355,7 @@ impl<'a> DispatchCtx<'a> {
             MonoTy::App {
                 ctor: MonoCtor::Nominal(name),
                 ..
-            } if self.ws.newtypes_by_name.contains_key(name) => StringifyRoute::Newtype(*name),
+            } if self.ws.nominals.newtype_id(*name).is_some() => StringifyRoute::Newtype(*name),
             MonoTy::App {
                 ctor: MonoCtor::Nominal(name),
                 ..
@@ -363,8 +363,8 @@ impl<'a> DispatchCtx<'a> {
             MonoTy::App {
                 ctor: MonoCtor::Nominal(name),
                 ..
-            } if self.ws.struct_by_name.contains_key(name)
-                || self.ws.enums_by_name.contains_key(name) =>
+            } if self.ws.nominals.struct_id(*name).is_some()
+                || self.ws.nominals.enum_id(*name).is_some() =>
             {
                 StringifyRoute::Inspect
             }
@@ -420,7 +420,7 @@ impl<'a> DispatchCtx<'a> {
                 let name = ty.peel_nullable().0.nominal()?;
                 let leaf_table = super::shape::planned_value(self.ws, name)
                     .is_some_and(|plan| plan.storage == super::ValueStorage::LeafTable);
-                if !self.ws.enums_by_name.contains_key(&name) && !leaf_table {
+                if !self.ws.nominals.enum_id(name).is_some() && !leaf_table {
                     return None;
                 }
                 Some((arg, self.structural_route(arg)?))
@@ -476,8 +476,8 @@ impl<'a> DispatchCtx<'a> {
                     ctor: MonoCtor::Nominal(name),
                     ..
                 } => {
-                    self.ws.struct_by_name.contains_key(name)
-                        || self.ws.enums_by_name.contains_key(name)
+                    self.ws.nominals.struct_id(*name).is_some()
+                        || self.ws.nominals.enum_id(*name).is_some()
                 }
                 _ => false,
             })

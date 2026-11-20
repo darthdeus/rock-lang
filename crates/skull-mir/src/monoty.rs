@@ -389,7 +389,7 @@ pub fn resolve_newtype_chain(ws: &Workspace, ty: MonoTy) -> Result<MonoTy, Newty
             } => (*name, params.clone()),
             _ => return Ok(arena.get(current).clone()),
         };
-        let Some(nid) = ws.newtypes_by_name.get(&name).copied() else {
+        let Some(nid) = ws.nominals.newtype_id(name) else {
             return Ok(arena.get(current).clone());
         };
         if visited.contains(&current) {

@@ -87,13 +87,13 @@ impl JsonTypes {
             // A key can name both a stdlib struct and a user enum. Lua writes
             // structs, then newtypes, then enums into one table keyed by
             // symbol, so the later kind wins; resolve in that priority.
-            let entries = if let Some(eid) = ws.enums_by_name.get(&key) {
+            let entries = if let Some(eid) = ws.nominals.enum_id(key) {
                 skull_mir::type_table::enum_entries(ws, &ws.module(eid.module).enums[eid.def])
-            } else if ws.newtypes_by_name.contains_key(&key) {
+            } else if ws.nominals.newtype_id(key).is_some() {
                 vec![Entry::Newtype {
                     name: skull_mir::mangle::type_symbol(ws, key),
                 }]
-            } else if let Some(sid) = ws.struct_by_name.get(&key) {
+            } else if let Some(sid) = ws.nominals.struct_id(key) {
                 let s = &ws.module(sid.module).structs[sid.def];
                 skull_mir::type_table::struct_entries(
                     ws,
@@ -237,10 +237,8 @@ impl JsonTypes {
 
 /// Every declared nominal's emitted type symbol, mapped back to its key.
 fn symbol_keys(ws: &Workspace) -> rustc_hash::FxHashMap<Ustr, Ustr> {
-    ws.struct_by_name
+    ws.nominals
         .keys()
-        .chain(ws.newtypes_by_name.keys())
-        .chain(ws.enums_by_name.keys())
         .map(|&key| (skull_mir::mangle::type_symbol(ws, key), key))
         .collect()
 }

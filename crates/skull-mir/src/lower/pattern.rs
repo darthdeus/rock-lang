@@ -299,7 +299,7 @@ impl<'a> Builder<'a> {
                     });
                 // Snapshot a bound value before an arm can write back into its source.
                 let struct_destructure = name
-                    .is_some_and(|n| self.ws.struct_by_name.contains_key(&n))
+                    .is_some_and(|n| self.ws.nominals.struct_id(n).is_some())
                     && enum_name.is_none()
                     && !(top && name.is_some_and(|n| variants.contains(&n)));
                 for rfidx in fields {
@@ -307,7 +307,7 @@ impl<'a> Builder<'a> {
                     // Embedded children are rebuilt from their parent's leaves.
                     let embedded = match (name, scrut) {
                         (Some(sname), Scrut::Val(parent))
-                            if self.ws.struct_by_name.contains_key(&sname) =>
+                            if self.ws.nominals.struct_id(sname).is_some() =>
                         {
                             let plan = self.struct_field_plan(sname, rpf.name, false)?;
                             plan.embed()
@@ -438,7 +438,7 @@ impl<'a> Builder<'a> {
             TypeExpr::App {
                 ctor: TypeCtor::Nominal(n),
                 ..
-            } if self.ws.enums_by_name.contains_key(&n) => Some(n),
+            } if self.ws.nominals.enum_id(n).is_some() => Some(n),
             _ => None,
         }
     }
@@ -901,7 +901,7 @@ impl<'a> Builder<'a> {
         else {
             return None;
         };
-        let (generics, decl) = if let Some(eid) = self.ws.enums_by_name.get(name) {
+        let (generics, decl) = if let Some(eid) = self.ws.nominals.enum_id(*name) {
             let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
             let v = ed.variants.iter().find(|v| v.name == owner)?;
             let decl = match (&v.payload, member) {
@@ -912,14 +912,14 @@ impl<'a> Builder<'a> {
                 _ => return None,
             };
             (&ed.generics, decl)
-        } else if let Some(sid) = self.ws.struct_by_name.get(name) {
+        } else if let Some(sid) = self.ws.nominals.struct_id(*name) {
             let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
             let Member::Field(f) = member else {
                 return None;
             };
             (&sd.generics, sd.fields.iter().find(|sf| sf.name == f)?.ty)
         } else {
-            let nid = self.ws.newtypes_by_name.get(name)?;
+            let nid = self.ws.nominals.newtype_id(*name)?;
             let nd = &self.ws.modules[nid.module.index()].newtypes[nid.def];
             (&nd.generics, nd.wrapped)
         };
@@ -988,7 +988,7 @@ impl<'a> Builder<'a> {
         else {
             return Ok(None);
         };
-        if self.ws.newtypes_by_name.contains_key(&name) {
+        if self.ws.nominals.newtype_id(name).is_some() {
             return Ok(None);
         }
         let arg_idxs: Vec<_> = args.into_iter().collect();

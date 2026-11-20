@@ -1109,7 +1109,7 @@ pub(crate) fn resolve_member_path(
                 if resolved.kind == ResolvedKind::Type {
                     let key = resolved.key;
                     let variant = segments[1];
-                    if ws.enums_by_name.contains_key(&key) {
+                    if ws.nominals.enum_id(key).is_some() {
                         check_key_access(ws, frag, key)?;
                         return Ok(MemberTarget::EnumVariant {
                             enum_key: key,
@@ -1179,7 +1179,7 @@ pub(crate) fn resolve_member_path(
             // `Type::Variant` — exactly one segment must remain.
             if i + 2 == segments.len() {
                 let variant = segments[i + 1];
-                if !ws.enums_by_name.contains_key(&key) {
+                if !ws.nominals.enum_id(key).is_some() {
                     return Err(format!(
                         "`{}` is not an enum; `{}` cannot be selected from it",
                         key, variant

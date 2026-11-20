@@ -1012,7 +1012,7 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
         "{missing_field}"
     );
 
-    let sid = *ws.struct_by_name.get(&holder).expect("holder declaration");
+    let sid = ws.nominals.struct_id(holder).expect("holder declaration");
     ws.modules[sid.module.index()].structs[sid.def].fields[0].ty = bone_core::prelude::TyId::Local(
         comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from(0)),
     );

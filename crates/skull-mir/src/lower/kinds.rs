@@ -24,8 +24,8 @@ impl<'a> Builder<'a> {
                     ..
                 } => self
                     .ws
-                    .struct_by_name
-                    .get(name)
+                    .nominals
+                    .struct_id(*name)
                     .is_some_and(|sid| !self.ws.module(sid.module).structs[sid.def].is_value),
                 MonoTy::Any => true,
                 _ => false,
@@ -37,8 +37,8 @@ impl<'a> Builder<'a> {
                     ..
                 }) => self
                     .ws
-                    .struct_by_name
-                    .get(&name)
+                    .nominals
+                    .struct_id(name)
                     .is_some_and(|sid| !self.ws.module(sid.module).structs[sid.def].is_value),
                 None
                 | Some(
@@ -127,7 +127,7 @@ impl<'a> Builder<'a> {
         else {
             return Ok(None);
         };
-        let Some(&sid) = self.ws.struct_by_name.get(name) else {
+        let Some(sid) = self.ws.nominals.struct_id(*name) else {
             return Ok(None);
         };
         if !has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def]) {
@@ -325,8 +325,8 @@ impl<'a> Builder<'a> {
             MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(name),
                 ..
-            } if self.ws.newtypes_by_name.contains_key(name) => {
-                let nid = self.ws.newtypes_by_name.get(name)?;
+            } if self.ws.nominals.newtype_id(*name).is_some() => {
+                let nid = self.ws.nominals.newtype_id(*name)?;
                 let wrapped = self.ws.modules[nid.module.index()].newtypes[nid.def].wrapped;
                 self.arith_ty_of(self.resolve_ty(wrapped)?)
             }

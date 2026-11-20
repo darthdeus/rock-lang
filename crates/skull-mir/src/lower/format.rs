@@ -93,7 +93,7 @@ impl FmtNode {
 
 /// Enums, value records and handles format structurally; identity structs keep `inspect`.
 pub(crate) fn formats_structurally(ws: &Workspace, name: Ustr) -> bool {
-    if handle_fields(name).is_some() || ws.enums_by_name.contains_key(&name) {
+    if handle_fields(name).is_some() || ws.nominals.enum_id(name).is_some() {
         return true;
     }
     super::shape::is_value_struct(ws, name)
@@ -252,7 +252,7 @@ fn nominal_tree(
             .map_err(|r| format!("a field of `{}` has no type ({r:?})", source_name(name)))?;
         format_tree_in(ws, &ty, visiting)
     };
-    if let Some(nid) = ws.newtypes_by_name.get(&name) {
+    if let Some(nid) = ws.nominals.newtype_id(name) {
         let def = &ws.module(nid.module).newtypes[nid.def];
         let subst = nominal_subst(ws, &def.generics, params)
             .ok_or_else(|| format!("`{}` arity", source_name(name)))?;
@@ -261,7 +261,7 @@ fn nominal_tree(
             inner: Box::new(field_tree(def.wrapped, &subst, visiting)?),
         });
     }
-    if let Some(eid) = ws.enums_by_name.get(&name) {
+    if let Some(eid) = ws.nominals.enum_id(name) {
         if is_payload_free_enum(ws, name) {
             return Ok(FmtNode::Leaf {
                 route: StringifyRoute::EnumNames(name),
@@ -293,7 +293,7 @@ fn nominal_tree(
         }
         return Ok(FmtNode::Enum { name, variants });
     }
-    if let Some(sid) = ws.struct_by_name.get(&name) {
+    if let Some(sid) = ws.nominals.struct_id(name) {
         let def = &ws.module(sid.module).structs[sid.def];
         if !def.is_value {
             return Err(format!("`{}` is an identity struct", source_name(name)));
@@ -424,7 +424,7 @@ impl<'a> Builder<'a> {
         wanted: impl Iterator<Item = Ustr>,
         repr: ValueRepr,
     ) -> Result<Vec<ValueRepr>, CompilerError> {
-        let sid = *self.ws.struct_by_name.get(&name).ok_or_else(|| {
+        let sid = self.ws.nominals.struct_id(name).ok_or_else(|| {
             gap(format!(
                 "formatted record `{}` has no definition",
                 source_name(name)

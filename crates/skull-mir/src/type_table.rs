@@ -116,7 +116,7 @@ fn shape_of(ws: &Workspace, ty: TyId, depth: u32) -> (Shape, bool) {
             }
             TypeCtor::Nominal(name) => {
                 if name.as_str() == "JsonField"
-                    && ws.struct_by_name.get(&name).is_some_and(|sid| {
+                    && ws.nominals.struct_id(name).is_some_and(|sid| {
                         bone_core::modules::is_stdlib_module_file(
                             ws.module(sid.module).file.as_str(),
                         )

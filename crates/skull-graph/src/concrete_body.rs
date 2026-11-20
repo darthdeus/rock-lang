@@ -421,7 +421,7 @@ fn concrete_struct_field_types(
         let Expr::StructLiteral { name, .. } = node else {
             continue;
         };
-        let sid = *ws.struct_by_name.get(name).ok_or(MonoTyReason::NoNode)?;
+        let sid = ws.nominals.struct_id(*name).ok_or(MonoTyReason::NoNode)?;
         let def = &ws.modules[sid.module.index()].structs[sid.def];
         let params = match expr_types.get(expr).copied() {
             Some(ty_id) => {

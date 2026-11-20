@@ -2133,7 +2133,7 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
         }
         let pair = skull_mir::monoty::MonoTy::App {
             ctor: skull_mir::monoty::MonoCtor::Nominal(
-                *ws.struct_by_name
+                *ws.nominals
                     .keys()
                     .find(|name| skull_mir::mangle::declared_name(name.as_str()) == "Pair")
                     .expect("Pair definition"),

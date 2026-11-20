@@ -260,7 +260,7 @@ pub fn lower_modules_seeded(
                 validate_annotations(pos, &lowered, &ws.decorator_names)?;
                 if let ItemKind::Struct(def) = &ast_item.kind {
                     let name = map_key(fragment_scope, path, def.name.name);
-                    let index = ctx.module.struct_by_name[&name];
+                    let index = ctx.module.nominals.struct_id(name).unwrap().def;
                     ctx.module.structs[index].consume =
                         lowered.iter().any(|anno| anno.is_builtin("consume"));
                 }
@@ -276,73 +276,25 @@ pub fn lower_modules_seeded(
         let timer = Instant::now();
 
         for (module, _) in &mut items {
-            let mid = module.module_id();
-
             // Keep the first declaration so its uses still lower. Record duplicates as
             // interface errors so the editor can show them with partial results.
-            let mut dup_errs: Vec<CompilerError> = Vec::new();
-
-            let type_taken = |ws: &Workspace, name: &Ustr| {
-                ws.struct_by_name.contains_key(name)
-                    || ws.enums_by_name.contains_key(name)
-                    || ws.newtypes_by_name.contains_key(name)
-            };
-
-            for (name, def) in module.struct_by_name.iter() {
-                if type_taken(ws, name) {
-                    let span = module.structs[*def].span;
-                    dup_errs.push(CompilerError::new_with_label(
+            let module = &mut **module;
+            for (&name, &nominal) in module.nominals.iter() {
+                let std::collections::hash_map::Entry::Vacant(slot) = ws.nominals.entry(name)
+                else {
+                    let (kind, span) = match nominal {
+                        Nominal::Struct(id) => ("struct", module.structs[id.def].span),
+                        Nominal::Enum(id) => ("enum", module.enums[id.def].span),
+                        Nominal::Newtype(id) => ("newtype", module.newtypes[id.def].span),
+                    };
+                    module.interface_errors.push(CompilerError::new_with_label(
                         span,
-                        format!("duplicate struct `{}` across modules", name),
+                        format!("duplicate {kind} `{name}` across modules"),
                     ));
-                } else {
-                    ws.struct_by_name.insert(
-                        *name,
-                        StructId {
-                            module: mid,
-                            def: *def,
-                        },
-                    );
-                }
+                    continue;
+                };
+                slot.insert(nominal);
             }
-
-            for (name, def) in module.enums_by_name.iter() {
-                if type_taken(ws, name) {
-                    let span = module.enums[*def].span;
-                    dup_errs.push(CompilerError::new_with_label(
-                        span,
-                        format!("duplicate enum `{}` across modules", name),
-                    ));
-                } else {
-                    ws.enums_by_name.insert(
-                        *name,
-                        EnumId {
-                            module: mid,
-                            def: *def,
-                        },
-                    );
-                }
-            }
-
-            for (name, def) in module.newtypes_by_name.iter() {
-                if type_taken(ws, name) {
-                    let span = module.newtypes[*def].span;
-                    dup_errs.push(CompilerError::new_with_label(
-                        span,
-                        format!("duplicate newtype `{}` across modules", name),
-                    ));
-                } else {
-                    ws.newtypes_by_name.insert(
-                        *name,
-                        NewtypeId {
-                            module: mid,
-                            def: *def,
-                        },
-                    );
-                }
-            }
-
-            module.interface_errors.extend(dup_errs);
         }
 
         ws.log_time("register names", timer);
@@ -639,8 +591,8 @@ fn embed_target(ws: &Workspace, ty: TyId) -> EmbedTarget {
         TypeExpr::App {
             ctor: TypeCtor::Nominal(n),
             ..
-        } => match ws.struct_by_name.get(&n) {
-            Some(sid) => EmbedTarget::Struct(*sid),
+        } => match ws.nominals.struct_id(n) {
+            Some(sid) => EmbedTarget::Struct(sid),
             None => EmbedTarget::NotAStruct("a non-struct nominal type"),
         },
         TypeExpr::App {
@@ -986,14 +938,14 @@ fn api_closure_failure_of(
                 }
             }
             DefKind::Type => {
-                if let Some(sid) = ws.struct_by_name.get(def_key) {
+                if let Some(sid) = ws.nominals.struct_id(*def_key) {
                     let s = &ws.module(sid.module).structs[sid.def];
                     for f in &s.fields {
                         if f.read_vis == NsVisibility::Pub {
                             need(f.ty, f.span, "field type of exported record")?;
                         }
                     }
-                } else if let Some(eid) = ws.enums_by_name.get(def_key) {
+                } else if let Some(eid) = ws.nominals.enum_id(*def_key) {
                     let e = &ws.module(eid.module).enums[eid.def];
                     for v in &e.variants {
                         match &v.payload {
@@ -1010,7 +962,7 @@ fn api_closure_failure_of(
                             }
                         }
                     }
-                } else if let Some(nid) = ws.newtypes_by_name.get(def_key) {
+                } else if let Some(nid) = ws.nominals.newtype_id(*def_key) {
                     let nt = &ws.module(nid.module).newtypes[nid.def];
                     need(nt.wrapped, nt.span, "payload of exported newtype")?;
                 }
@@ -1936,7 +1888,8 @@ pub(crate) fn pass_register_forward_decls(
 ) -> Result<(), CompilerError> {
     for_each_def_item(&rock_module.items, &scope.module_path, &mut |item, path| {
         let def_key = |name: &ustr::Ustr| map_key(scope, path, *name);
-        if let ItemKind::Struct(s) = &item.kind {
+        let mid = module.module_id();
+        let (reg_name, name, nominal, kind) = if let ItemKind::Struct(s) = &item.kind {
             let reg_name = def_key(&s.name.name);
             let annotations = bone_lower::lower_annotations(rock_module, &item.annotations);
             let idx = module.structs.alloc(hir::StructDef {
@@ -1951,14 +1904,11 @@ pub(crate) fn pass_register_forward_decls(
                 fields: Vec::new(),
             });
 
-            if module.struct_by_name.insert(reg_name, idx).is_some() {
-                comp_error!(item.span, "duplicate struct definition: `{}`", s.name.name);
-            }
-            if module.enums_by_name.contains_key(&reg_name)
-                || module.newtypes_by_name.contains_key(&reg_name)
-            {
-                comp_error!(item.span, "duplicate type definition: `{}`", s.name.name);
-            }
+            let id = StructId {
+                module: mid,
+                def: idx,
+            };
+            (reg_name, s.name.name, Nominal::Struct(id), "struct")
         } else if let ItemKind::Enum(e) = &item.kind {
             let reg_name = def_key(&e.name.name);
             let idx = module.enums.alloc(hir::EnumDef {
@@ -1969,14 +1919,11 @@ pub(crate) fn pass_register_forward_decls(
                 variants: Vec::new(),
             });
 
-            if module.enums_by_name.insert(reg_name, idx).is_some() {
-                comp_error!(item.span, "duplicate enum definition: `{}`", e.name.name);
-            }
-            if module.struct_by_name.contains_key(&reg_name)
-                || module.newtypes_by_name.contains_key(&reg_name)
-            {
-                comp_error!(item.span, "duplicate type definition: `{}`", e.name.name);
-            }
+            let id = EnumId {
+                module: mid,
+                def: idx,
+            };
+            (reg_name, e.name.name, Nominal::Enum(id), "enum")
         } else if let ItemKind::Newtype(n) = &item.kind {
             let placeholder = module
                 .ty_arena
@@ -1992,16 +1939,21 @@ pub(crate) fn pass_register_forward_decls(
                 wrapped,
             });
 
-            if module.newtypes_by_name.insert(reg_name, idx).is_some() {
-                comp_error!(item.span, "duplicate newtype definition: `{}`", n.name.name);
+            let id = NewtypeId {
+                module: mid,
+                def: idx,
+            };
+            (reg_name, n.name.name, Nominal::Newtype(id), "newtype")
+        } else {
+            return Ok(());
+        };
+        match module.nominals.insert(reg_name, nominal) {
+            Some(prev) if std::mem::discriminant(&prev) == std::mem::discriminant(&nominal) => {
+                comp_error!(item.span, "duplicate {kind} definition: `{name}`")
             }
-            if module.struct_by_name.contains_key(&reg_name)
-                || module.enums_by_name.contains_key(&reg_name)
-            {
-                comp_error!(item.span, "duplicate type definition: `{}`", n.name.name);
-            }
+            Some(_) => comp_error!(item.span, "duplicate type definition: `{name}`"),
+            None => Ok(()),
         }
-        Ok(())
     })?;
     Ok(())
 }

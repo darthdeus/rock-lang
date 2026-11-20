@@ -1470,8 +1470,8 @@ fn validate_concrete_type_tables(
             ))
         })?;
         let sid = ws
-            .struct_by_name
-            .get(name)
+            .nominals
+            .struct_id(*name)
             .ok_or_else(|| gap(format!("{label} names unknown struct `{name}`")))?;
         let def = &ws.modules[sid.module.index()].structs[sid.def];
         for field in &def.fields {
@@ -1715,7 +1715,7 @@ impl<'a> Builder<'a> {
                 crate::monoty::MonoTy::Tuple(_) => true,
                 other => other
                     .nominal()
-                    .is_some_and(|n| self.ws.struct_by_name.contains_key(&n)),
+                    .is_some_and(|n| self.ws.nominals.struct_id(n).is_some()),
             });
         // An aggregate read records its own logical type, which the binding's type
         // need not match.
@@ -3100,7 +3100,7 @@ fn map_key_rejection_reason(
             ctor: TypeCtor::Nominal(name),
             ..
         } => {
-            if let Some(nid) = ws.newtypes_by_name.get(&name) {
+            if let Some(nid) = ws.nominals.newtype_id(name) {
                 let wrapped = ws.modules[nid.module.index()].newtypes[nid.def].wrapped;
                 let wrapped = resolve_tyid(ws, inf, wrapped)?;
                 return map_key_rejection_reason(ws, inf, wrapped, depth + 1).map(|why| {
@@ -3109,7 +3109,7 @@ fn map_key_rejection_reason(
             }
             // A payload-free enum lowers to an int ordinal; one payload variant makes the
             // type cdata- or table-carrying.
-            if ws.enums_by_name.contains_key(&name) {
+            if ws.nominals.enum_id(name).is_some() {
                 return (!is_payload_free_enum(ws, name)).then(|| {
                     format!(
                         "`{name}` has payload-carrying variants, keyed by cdata or object \

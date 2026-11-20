@@ -24,11 +24,9 @@ pub struct Workspace {
     pub builtins: Builtins,
     pub inferences: Vec<Option<InferenceResult>>,
 
-    pub struct_by_name: FxHashMap<Ustr, StructId>,
+    pub nominals: Nominals,
     /// Set when an embed field is registered. A stale true only costs a check.
     pub has_embed_fields: bool,
-    pub enums_by_name: FxHashMap<Ustr, EnumId>,
-    pub newtypes_by_name: FxHashMap<Ustr, NewtypeId>,
     /// Keys are canonical DefKeys for user items and bare names for compiler-owned items.
     /// The first defining module owns an entry; re-lowering refreshes its own.
     pub type_generics: FxHashMap<Ustr, TypeGenerics>,
@@ -157,10 +155,8 @@ impl Workspace {
             builtins,
             inferences: Default::default(),
 
-            struct_by_name: Default::default(),
+            nominals: Default::default(),
             has_embed_fields: false,
-            enums_by_name: Default::default(),
-            newtypes_by_name: Default::default(),
             type_generics: Default::default(),
             interface_names: Default::default(),
             globals_by_name: Default::default(),
@@ -452,8 +448,8 @@ impl Workspace {
 
     /// Whether `name` is a nominal identity type: a `struct`, not a `value`.
     pub fn is_identity_struct(&self, name: Ustr) -> bool {
-        self.struct_by_name
-            .get(&name)
+        self.nominals
+            .struct_id(name)
             .is_some_and(|sid| !self.module(sid.module).structs[sid.def].is_value)
     }
 

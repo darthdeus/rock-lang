@@ -60,8 +60,8 @@ fn is_consumable(
                 ..
             },
         )) => ws
-            .struct_by_name
-            .get(&name)
+            .nominals
+            .struct_id(name)
             .is_some_and(|id| ws.module(id.module).structs[id.def].consume),
         Some((base, TypeExpr::Nullable(inner))) => {
             is_consumable(ws, inference, function, base.with_idx(inner))

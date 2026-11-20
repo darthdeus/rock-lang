@@ -2573,11 +2573,11 @@ fn walk_struct_default_edges(
             if !bases.is_empty() {
                 continue;
             }
-            let Some(sid) = ws.struct_by_name.get(name) else {
+            let Some(sid) = ws.nominals.struct_id(*name) else {
                 continue;
             };
             // Must key the domain as lowering does, including its shared-body fallback.
-            let generics = skull_mir::struct_defaults::declared_generics(ws, *sid);
+            let generics = skull_mir::struct_defaults::declared_generics(ws, sid);
             let Ok(args) =
                 skull_mir::struct_defaults::args_at(ws, scan_inf, &scan_subst, e, *name, generics)
             else {

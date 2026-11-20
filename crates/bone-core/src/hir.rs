@@ -329,13 +329,9 @@ pub struct Module {
     pub functions_by_name: FxHashMap<Ustr, FnList>,
 
     pub structs: Arena<StructDef>,
-    pub struct_by_name: FxHashMap<Ustr, Idx<StructDef>>,
-
     pub enums: Arena<EnumDef>,
-    pub enums_by_name: FxHashMap<Ustr, Idx<EnumDef>>,
-
     pub newtypes: Arena<NewtypeDef>,
-    pub newtypes_by_name: FxHashMap<Ustr, Idx<NewtypeDef>>,
+    pub nominals: Nominals,
 
     pub globals: Arena<GlobalDef>,
     pub global_by_name: FxHashMap<Ustr, Idx<GlobalDef>>,

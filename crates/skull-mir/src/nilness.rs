@@ -163,7 +163,7 @@ pub fn monoty_never_nil(ws: &bone_core::workspace::Workspace, ty: &crate::monoty
         MonoTy::App { ctor, .. } => match ctor {
             MonoCtor::Array | MonoCtor::Map | MonoCtor::Ref => true,
             MonoCtor::Nominal(name) => {
-                ws.struct_by_name.contains_key(name) || ws.enums_by_name.contains_key(name)
+                ws.nominals.struct_id(*name).is_some() || ws.nominals.enum_id(*name).is_some()
             }
         },
         MonoTy::Any | MonoTy::Unit | MonoTy::Never | MonoTy::Nullable(..) => false,

@@ -68,7 +68,7 @@ pub(super) fn emit_tostring_ty(
         let open = format!("{display_name} {{ ");
         let fields: Vec<(String, Vec<LuaDisplayPart>)> = match storage {
             ValueStorage::CData => {
-                let sid = ws.struct_by_name.get(&name).ok_or_else(|| {
+                let sid = ws.nominals.struct_id(name).ok_or_else(|| {
                     err(format!(
                         "JS subset: value `{name}` is not a declared struct"
                     ))
@@ -182,7 +182,7 @@ pub(super) fn emit_inspect_ty(
 pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
     use bone_core::hir::VariantPayload;
 
-    let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
+    let mut names: Vec<ustr::Ustr> = ws.nominals.enum_names().collect();
     names.sort_by(|a, b| {
         bone_core::modules::display_name(a.as_str())
             .cmp(bone_core::modules::display_name(b.as_str()))
@@ -195,7 +195,7 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
         {
             continue;
         }
-        let Some(eid) = ws.enums_by_name.get(&name) else {
+        let Some(eid) = ws.nominals.enum_id(name) else {
             continue;
         };
         let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -253,7 +253,7 @@ pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> String {
     use bone_core::hir::{TypeCtor, TypeExpr, VariantPayload};
     use bone_core::prelude::TyId;
 
-    let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
+    let mut names: Vec<ustr::Ustr> = ws.nominals.enum_names().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut out = String::new();
     for name in names {
@@ -262,7 +262,7 @@ pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> String {
         else {
             continue;
         };
-        let Some(eid) = ws.enums_by_name.get(&name) else {
+        let Some(eid) = ws.nominals.enum_id(name) else {
             continue;
         };
         let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -285,7 +285,7 @@ pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> String {
                     TyId::Local(_) => None,
                 };
                 let fields = nominal.and_then(|child| {
-                    let sid = ws.struct_by_name.get(&child)?;
+                    let sid = ws.nominals.struct_id(child)?;
                     let structure = &ws.modules[sid.module.index()].structs[sid.def];
                     // Lua's payload-name helper refuses a record walk when any declared field type
                     // is nominal, even if it occupies one scalar slot.
@@ -431,8 +431,8 @@ fn col_mat_object(
     for (head, sub) in &groups {
         let child = nested_field_struct_name(ws, name, head.as_str())?
             .filter(|child| {
-                ws.struct_by_name
-                    .get(child)
+                ws.nominals
+                    .struct_id(*child)
                     .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_value)
             })
             .ok_or_else(|| {
@@ -476,8 +476,8 @@ pub(super) fn nested_field_struct_name(
     field: &str,
 ) -> Result<Option<ustr::Ustr>, CompilerError> {
     let sid = ws
-        .struct_by_name
-        .get(&parent)
+        .nominals
+        .struct_id(parent)
         .ok_or_else(|| err(format!("value `{parent}` has no declared struct")))?;
     let s = &ws.module(sid.module).structs[sid.def];
     let Some(f) = s.fields.iter().find(|f| f.name.as_str() == field) else {
@@ -493,7 +493,7 @@ pub(super) fn nested_field_struct_name(
     .map_err(|e| err(e.message))?;
     Ok(plan
         .child()
-        .filter(|child| ws.struct_by_name.contains_key(child)))
+        .filter(|child| ws.nominals.struct_id(*child).is_some()))
 }
 
 /// Matched by declared name: a modules-v1 entry's key is `<package>::main`.
@@ -587,8 +587,8 @@ fn embed_view_expr(
     nullable: bool,
 ) -> Result<String, CompilerError> {
     let sid = ws
-        .struct_by_name
-        .get(&ty_name)
+        .nominals
+        .struct_id(ty_name)
         .ok_or_else(|| err(format!("embed view `{ty_name}` has no declared struct")))?;
     let s = &ws.module(sid.module).structs[sid.def];
     let mut parts = vec![format!(
@@ -663,7 +663,7 @@ fn build_inspect_ty_defs(
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
     for name in names {
-        let sid = ws.struct_by_name.get(name).ok_or_else(|| {
+        let sid = ws.nominals.struct_id(*name).ok_or_else(|| {
             err(format!(
                 "JS subset: inspected registry type `{name}` is not declared"
             ))
@@ -763,7 +763,7 @@ pub(super) fn build_vt_eq_defs(
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
     for (name, storage) in names {
-        let sid = ws.struct_by_name.get(name).ok_or_else(|| {
+        let sid = ws.nominals.struct_id(*name).ok_or_else(|| {
             err(format!(
                 "JS subset: value equality registry type `{name}` is not declared"
             ))

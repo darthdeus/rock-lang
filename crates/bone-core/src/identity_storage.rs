@@ -181,7 +181,7 @@ pub(crate) fn is_identity_storage_edge(
 
 /// Whether `field` of the struct `name` is an `@identity_storage` edge.
 pub(crate) fn is_identity_storage_struct_field(ws: &Workspace, name: Ustr, field: Ustr) -> bool {
-    ws.struct_by_name.get(&name).is_some_and(|sid| {
+    ws.nominals.struct_id(name).is_some_and(|sid| {
         ws.module(sid.module).structs[sid.def]
             .fields
             .iter()
@@ -343,7 +343,7 @@ fn visit<V: IdentityTypes>(
 /// no declaration (compiler intrinsics such as `FieldRef`), which stores
 /// nothing.
 fn nominal_storage(ws: &Workspace, name: Ustr) -> Option<(Vec<TyId>, Vec<(TyId, bool)>)> {
-    if let Some(sid) = ws.struct_by_name.get(&name) {
+    if let Some(sid) = ws.nominals.struct_id(name) {
         let def = &ws.module(sid.module).structs[sid.def];
         let fields = def
             .fields
@@ -352,7 +352,7 @@ fn nominal_storage(ws: &Workspace, name: Ustr) -> Option<(Vec<TyId>, Vec<(TyId, 
             .collect();
         return Some((def.generics.clone(), fields));
     }
-    if let Some(eid) = ws.enums_by_name.get(&name) {
+    if let Some(eid) = ws.nominals.enum_id(name) {
         let def = &ws.module(eid.module).enums[eid.def];
         let mut fields = Vec::new();
         for variant in &def.variants {
@@ -366,7 +366,7 @@ fn nominal_storage(ws: &Workspace, name: Ustr) -> Option<(Vec<TyId>, Vec<(TyId, 
         }
         return Some((def.generics.clone(), fields));
     }
-    if let Some(nid) = ws.newtypes_by_name.get(&name) {
+    if let Some(nid) = ws.nominals.newtype_id(name) {
         let def = &ws.module(nid.module).newtypes[nid.def];
         return Some((def.generics.clone(), vec![(def.wrapped, false)]));
     }

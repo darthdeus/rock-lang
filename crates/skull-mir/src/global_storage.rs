@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use bone_core::hir::FnBackend;
+use bone_core::prelude::Nominal;
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
@@ -154,7 +155,11 @@ pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, Strin
         rows.extend(flags);
     }
     let arena = scx.rep_arena();
-    for name in ws.struct_by_name.keys() {
+    for (name, _) in ws
+        .nominals
+        .iter()
+        .filter(|(_, def)| matches!(def, Nominal::Struct(_)))
+    {
         let cdata = arena
             .nominal_value_storage_required(ws, FnBackend::Lua, *name)
             .is_ok_and(|storage| storage == ValueStorage::CData);

@@ -3,6 +3,7 @@
 //! partition minima rather than all paths.
 
 use bone_core::modules::{FragmentScope, NsVisibility};
+use bone_core::prelude::Nominal;
 use bone_semantic::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -81,8 +82,9 @@ impl ReachabilityIndex {
         // Keyed by the struct's bare name, which is how a value of that struct
         // type renders.
         for m in ws.modules.iter() {
-            for (&src, &sid) in &m.struct_by_name {
-                let s = &m.structs[sid];
+            for (&src, &def) in m.nominals.iter() {
+                let Nominal::Struct(sid) = def else { continue };
+                let s = &m.structs[sid.def];
                 for f in s.fields.iter() {
                     edges.entry(src).or_default().push(Edge {
                         label: f.name.to_string(),

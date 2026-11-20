@@ -18,8 +18,8 @@ pub fn has_value_plan(sd: &bone_core::hir::StructDef) -> bool {
 }
 
 pub(crate) fn is_value_struct(ws: &Workspace, name: Ustr) -> bool {
-    ws.struct_by_name
-        .get(&name)
+    ws.nominals
+        .struct_id(name)
         .is_some_and(|sid| has_value_plan(&ws.modules[sid.module.index()].structs[sid.def]))
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
                 ctor: TypeCtor::Nominal(child),
                 ..
             }) => {
-                let Some(sid) = ws.struct_by_name.get(&child) else {
+                let Some(sid) = ws.nominals.struct_id(child) else {
                     return false;
                 };
                 let decl = &ws.modules[sid.module.index()].structs[sid.def];
@@ -68,7 +68,7 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
     if shape.leaf_count() <= MAX_COLUMN_LEAVES {
         return false;
     }
-    let Some(eid) = ws.enums_by_name.get(&name) else {
+    let Some(eid) = ws.nominals.enum_id(name) else {
         return false;
     };
     ws.modules[eid.module.index()].enums[eid.def]
@@ -501,7 +501,7 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
             fields,
         });
     }
-    let sid = *ws.struct_by_name.get(&name)?;
+    let sid = ws.nominals.struct_id(name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
     if !has_value_plan(sd) || visiting.contains(&name) {
         return None;
@@ -697,7 +697,7 @@ pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bo
 }
 
 pub(super) fn enum_definition(ws: &Workspace, name: Ustr) -> Option<&EnumDef> {
-    let id = ws.enums_by_name.get(&name)?;
+    let id = ws.nominals.enum_id(name)?;
     Some(&ws.modules[id.module.index()].enums[id.def])
 }
 
@@ -741,7 +741,7 @@ fn lua_nominal_is_immutable(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>
     if is_payload_free_enum(ws, name) {
         return true;
     }
-    let Some(sid) = ws.struct_by_name.get(&name) else {
+    let Some(sid) = ws.nominals.struct_id(name) else {
         return false;
     };
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
@@ -916,7 +916,7 @@ pub(crate) fn declared_value_storage(
 }
 
 pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
-    ws.struct_by_name.get(&name)?;
+    ws.nominals.struct_id(name)?;
     planned_value(ws, name)?
         .shape
         .as_ref()
@@ -930,7 +930,7 @@ pub(crate) fn value_shape_gc(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
 /// Declared field names in positional `<name>_ct` ctor order; a cdata-eligible
 /// enum is `[__tag, _0]`.
 pub fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
-    let Some(sid) = ws.struct_by_name.get(&name) else {
+    let Some(sid) = ws.nominals.struct_id(name) else {
         if let Some(es) = EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned()) {
             return es.field_names();
         }
@@ -975,7 +975,7 @@ pub(crate) fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
     else {
         return None;
     };
-    ws.enums_by_name.get(&name)?;
+    ws.nominals.enum_id(name)?;
     Some(name)
 }
 
@@ -1088,7 +1088,7 @@ pub(crate) fn uniform_values_return_shape(
     ws: &Workspace,
     block_name: Ustr,
 ) -> Result<UniformValuesShape, String> {
-    let Some(&sid) = ws.struct_by_name.get(&block_name) else {
+    let Some(sid) = ws.nominals.struct_id(block_name) else {
         return Err(format!(
             "`@uniform_values` must return a named packet struct, got `{block_name}`"
         ));
@@ -1133,7 +1133,7 @@ pub(crate) fn uniform_values_return_shape(
             "`{block_name}.leaves` must contain a named canonical leaf enum"
         ));
     };
-    let Some(&eid) = ws.enums_by_name.get(&leaf_enum) else {
+    let Some(eid) = ws.nominals.enum_id(leaf_enum) else {
         return Err(format!("canonical leaf type `{leaf_enum}` is not an enum"));
     };
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -1213,7 +1213,7 @@ pub(crate) fn uniform_expand_arg_msg(fname: Ustr) -> String {
 }
 
 pub(crate) fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, TyId)>> {
-    let sid = *ws.struct_by_name.get(&name)?;
+    let sid = ws.nominals.struct_id(name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
     if !has_value_plan(sd) {
         return None;
@@ -1222,7 +1222,7 @@ pub(crate) fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(
 }
 
 pub(crate) fn variants_for_payload(ws: &Workspace, enum_name: Ustr, want: TyId) -> Vec<Ustr> {
-    let Some(&eid) = ws.enums_by_name.get(&enum_name) else {
+    let Some(eid) = ws.nominals.enum_id(enum_name) else {
         return Vec::new();
     };
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -1267,7 +1267,7 @@ pub(crate) fn struct_expand_variants(
 
 /// A flat enum encodes absence in its tag, so only structs gain a presence lane.
 pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
-    if ws.struct_by_name.contains_key(&n)
+    if ws.nominals.struct_id(n).is_some()
         && let Some(mut shape) = planned_value(ws, n).and_then(|plan| plan.value_shape().cloned())
     {
         shape.nullable = true;
@@ -1294,8 +1294,8 @@ pub(crate) fn nobox_global_leaf_name(base: Ustr, leaf: usize) -> Ustr {
 }
 
 pub(crate) fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
-    ws.struct_by_name
-        .get(&name)
+    ws.nominals
+        .struct_id(name)
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
 }
 
@@ -1706,7 +1706,7 @@ pub fn gc_field_eq(ws: &Workspace, ty: TyId) -> GcFieldEq {
         }) => {
             if is_value_struct(ws, name) {
                 GcFieldEq::Native
-            } else if ws.enums_by_name.contains_key(&name) {
+            } else if ws.nominals.enum_id(name).is_some() {
                 GcFieldEq::Structural
             } else {
                 GcFieldEq::Reference
@@ -1944,7 +1944,7 @@ fn reaches_enum_in(ws: &Workspace, ty: TyId, goals: &[Ustr], seen: &mut HashSet<
             if !seen.insert(n) {
                 return false;
             }
-            if let Some(sid) = ws.struct_by_name.get(&n) {
+            if let Some(sid) = ws.nominals.struct_id(n) {
                 let sd = &ws.modules[sid.module.index()].structs[sid.def];
                 return sd.is_value
                     && sd
@@ -1952,7 +1952,7 @@ fn reaches_enum_in(ws: &Workspace, ty: TyId, goals: &[Ustr], seen: &mut HashSet<
                         .iter()
                         .any(|f| reaches_enum_in(ws, f.ty, goals, seen));
             }
-            if let Some(eid) = ws.enums_by_name.get(&n) {
+            if let Some(eid) = ws.nominals.enum_id(n) {
                 let ed = &ws.modules[eid.module.index()].enums[eid.def];
                 return ed.variants.iter().any(|v| match &v.payload {
                     VariantPayload::Unit => false,
@@ -1982,7 +1982,7 @@ fn flat_enum_equality_is_leafwise_inner(
     if visiting.contains(&name) {
         return false;
     }
-    let Some(eid) = ws.enums_by_name.get(&name) else {
+    let Some(eid) = ws.nominals.enum_id(name) else {
         return false;
     };
     visiting.push(name);

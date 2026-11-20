@@ -418,7 +418,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
             // undefined global, because a newtype constructor is resolved by
             // name, exactly as `NT(x)` is inside the defining module.
             Ok(resolve::MemberTarget::Type(key))
-                if self.workspace.newtypes_by_name.contains_key(&key) =>
+                if self.workspace.nominals.newtype_id(key).is_some() =>
             {
                 Some(key)
             }
@@ -708,11 +708,7 @@ fn span_recordable(
         TypeExprKind::Ident(n) => {
             !ctx.generics_in_scope.contains_key(&n.name)
                 && n.name.as_str() != "_"
-                && resolved_key.is_some_and(|key| {
-                    ctx.workspace.struct_by_name.contains_key(key)
-                        || ctx.workspace.enums_by_name.contains_key(key)
-                        || ctx.workspace.newtypes_by_name.contains_key(key)
-                })
+                && resolved_key.is_some_and(|key| ctx.workspace.nominals.contains_key(key))
         }
         _ => true,
     }
@@ -734,12 +730,7 @@ fn lower_type_application(
         _ => None,
     };
     let is_field_ref = bone_core::modules::is_field_ref_former(key);
-    if args.is_none()
-        && !is_field_ref
-        && !(ctx.workspace.struct_by_name.contains_key(&key)
-            || ctx.workspace.enums_by_name.contains_key(&key)
-            || ctx.workspace.newtypes_by_name.contains_key(&key))
-    {
+    if args.is_none() && !is_field_ref && !(ctx.workspace.nominals.contains_key(&key)) {
         let error = CompilerError::new_with_label(te.span, format!("Unknown type name {}", key));
         return match pos {
             TyPos::Iface => {
@@ -2655,7 +2646,7 @@ pub fn lower_struct_def(
         ctx.collect_name_errors(|ctx| lower_struct_fields(ctx, s, def_scope, &mut fields));
     lowered?;
 
-    let idx = ctx.module.struct_by_name[&reg_key];
+    let idx = ctx.module.nominals.struct_id(reg_key).unwrap().def;
     ctx.module.structs[idx].fields = fields;
     ctx.module.structs[idx].generics = generic_var_ids;
 
@@ -2872,7 +2863,7 @@ pub fn lower_enum_def(
         });
     }
 
-    let idx = ctx.module.enums_by_name[&reg_key];
+    let idx = ctx.module.nominals.enum_id(reg_key).unwrap().def;
     ctx.module.enums[idx].variants = variants;
     ctx.module.enums[idx].generics = generic_var_ids;
 
@@ -2889,7 +2880,7 @@ pub fn lower_newtype_def(
     let a = ctx.ast;
     let generic_var_ids = type_def_generics(ctx, "a newtype", &n.generics)?;
 
-    let idx = ctx.module.newtypes_by_name[&reg_key];
+    let idx = ctx.module.nominals.newtype_id(reg_key).unwrap().def;
 
     ctx.module.newtypes[idx].wrapped = lower_type_expr(ctx, a.te(&n.wrapped))?;
     ctx.module.newtypes[idx].generics = generic_var_ids;
@@ -3190,7 +3181,7 @@ fn lower_pattern_value(
                 && let Some(subs) = args
                 && let segment = &path.segments[0]
                 && let Ok(key) = ctx.resolve_bare_key(segment.name, segment.span)
-                && ctx.workspace.newtypes_by_name.contains_key(&key)
+                && ctx.workspace.nominals.newtype_id(key).is_some()
             {
                 if subs.len() != 1 {
                     comp_error!(
@@ -3252,7 +3243,7 @@ fn lower_pattern_value(
                 let name = ctx
                     .resolve_bare_key(segment.name, segment.span)
                     .ok()
-                    .filter(|key| ctx.workspace.struct_by_name.contains_key(key))
+                    .filter(|key| ctx.workspace.nominals.struct_id(*key).is_some())
                     .unwrap_or(segment.name);
                 (None, None, Some(name), Some(segment.span))
             } else {

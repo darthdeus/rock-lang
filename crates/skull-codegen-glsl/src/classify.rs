@@ -257,7 +257,7 @@ fn classify_array_param(
 
 fn struct_def_of(ws: &Workspace, ty: TyId) -> Option<&StructDef> {
     let sname = nominal_name(ws, ty)?;
-    let &sid = ws.struct_by_name.get(&sname)?;
+    let sid = ws.nominals.struct_id(sname)?;
     Some(&ws.modules[sid.module.index()].structs[sid.def])
 }
 

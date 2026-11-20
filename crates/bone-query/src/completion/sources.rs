@@ -47,10 +47,10 @@ pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v: TyId) -> Vec<Ustr>
     let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
     let mut out = Vec::new();
     for m in ws.modules.iter() {
-        let Some(&idx) = m.struct_by_name.get(&t_name) else {
+        let Some(idx) = m.nominals.struct_id(t_name) else {
             continue;
         };
-        for fld in &m.structs[idx].fields {
+        for fld in &m.structs[idx.def].fields {
             if !ws.types_equivalent(TyRef::of_static(fld.ty), TyRef::of_static(v)) {
                 continue;
             }
@@ -800,7 +800,7 @@ pub(crate) fn nominal_exists(
     };
     ws.modules
         .iter()
-        .any(|m| m.struct_by_name.contains_key(&key) || m.enums_by_name.contains_key(&key))
+        .any(|m| m.nominals.struct_id(key).is_some() || m.nominals.enum_id(key).is_some())
 }
 
 pub(crate) fn fn_prefix_struct(
@@ -818,7 +818,7 @@ pub(crate) fn fn_prefix_struct(
             let key = crate::modules_scope::resolve_type_key(ws, frag, &cap)?;
             ws.modules
                 .iter()
-                .any(|m| m.struct_by_name.contains_key(&key))
+                .any(|m| m.nominals.struct_id(key).is_some())
                 .then(|| Ustr::from(&cap))
         })
 }

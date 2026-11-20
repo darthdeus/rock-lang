@@ -22,7 +22,7 @@ pub fn nobox_materialization_violations(
                 continue;
             };
             // Cdata enums share the value-struct constructor opcode.
-            let Some(sid) = ws.struct_by_name.get(name) else {
+            let Some(sid) = ws.nominals.struct_id(*name) else {
                 if skull_mir::lower::EnumPlan::for_name(ws, *name)
                     .is_some_and(|plan| plan.cdata().is_some())
                 {
@@ -58,7 +58,7 @@ fn ctor_tree_has_implicit_nobox(ws: &Workspace, func: &MirFunc, mvs: Idx<Inst>) 
         Inst::MaterializeValueStruct { name, fields, .. } => (name, fields),
         _ => return false,
     };
-    if let Some(sid) = ws.struct_by_name.get(name) {
+    if let Some(sid) = ws.nominals.struct_id(*name) {
         if ws.modules[sid.module.index()].structs[sid.def].is_nobox {
             return true;
         }
@@ -107,8 +107,8 @@ fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> Result<bool
     let any_nobox = func.blocks.iter().any(|(_, b)| {
         b.insts.iter().any(|&i| match &func.insts[i] {
             Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => ws
-                .struct_by_name
-                .get(name)
+                .nominals
+                .struct_id(*name)
                 .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox),
             _ => false,
         })
@@ -277,8 +277,8 @@ fn fold_nobox_projections(ws: &Workspace, func: &mut MirFunc) {
                 continue;
             };
             if !ws
-                .struct_by_name
-                .get(name)
+                .nominals
+                .struct_id(*name)
                 .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
             {
                 continue;

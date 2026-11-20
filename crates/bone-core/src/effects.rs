@@ -219,9 +219,7 @@ fn is_fn_typed(ws: &Workspace, ty: TyId) -> bool {
 fn is_constructor(ws: &Workspace, name: Ustr) -> bool {
     let bare = name.as_str().rsplit("::").next().unwrap_or_default();
     let bare = Ustr::from(bare);
-    ws.struct_by_name.contains_key(&bare)
-        || ws.enums_by_name.contains_key(&bare)
-        || ws.newtypes_by_name.contains_key(&bare)
+    ws.nominals.contains_key(&bare)
 }
 
 fn expr_type(ws: &Workspace, bi: &BodyInference, expr: Idx<Expr>) -> Option<TypeExpr> {

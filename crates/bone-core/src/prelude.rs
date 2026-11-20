@@ -125,6 +125,69 @@ pub struct NewtypeId {
     pub def: Idx<NewtypeDef>,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Nominal {
+    Struct(StructId),
+    Enum(EnumId),
+    Newtype(NewtypeId),
+}
+
+impl Nominal {
+    pub fn module(self) -> ModuleId {
+        match self {
+            Nominal::Struct(id) => id.module,
+            Nominal::Enum(id) => id.module,
+            Nominal::Newtype(id) => id.module,
+        }
+    }
+}
+
+/// Structs, enums and newtypes by DefKey: they share one name space.
+#[derive(Clone, Debug, Default)]
+pub struct Nominals(pub FxHashMap<Ustr, Nominal>);
+
+impl std::ops::Deref for Nominals {
+    type Target = FxHashMap<Ustr, Nominal>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Nominals {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Nominals {
+    pub fn struct_id(&self, name: Ustr) -> Option<StructId> {
+        match self.get(&name)? {
+            Nominal::Struct(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    pub fn enum_id(&self, name: Ustr) -> Option<EnumId> {
+        match self.get(&name)? {
+            Nominal::Enum(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    pub fn newtype_id(&self, name: Ustr) -> Option<NewtypeId> {
+        match self.get(&name)? {
+            Nominal::Newtype(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    pub fn enum_names(&self) -> impl Iterator<Item = Ustr> + '_ {
+        self.iter()
+            .filter(|(_, def)| matches!(def, Nominal::Enum(_)))
+            .map(|(&name, _)| name)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NewtypeDef {
     pub name: Ustr,

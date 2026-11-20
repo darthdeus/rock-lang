@@ -264,7 +264,7 @@ impl<'a> Builder<'a> {
     /// be corrupted by the flat-enum tier's nil-to-false densifying.
     /// Enum rows are numeric by eligibility and keep the sentinel.
     pub(crate) fn strided_stores_raw(&self, elem: ColumnElem) -> bool {
-        self.ws.struct_by_name.contains_key(&elem.name)
+        self.ws.nominals.struct_id(elem.name).is_some()
     }
 
     pub(crate) fn strided_encode(&mut self, elem: ColumnElem, leaf: Idx<Inst>) -> Idx<Inst> {

@@ -107,7 +107,7 @@ fn sampler_kind(ws: &Workspace, ty: TyId) -> Option<SamplerKind> {
 
 /// Field order is slot order, the same contract `@attr` uses for locations.
 pub fn texture_slots(ws: &Workspace, struct_name: Ustr) -> Result<TextureSlots, CompilerError> {
-    let Some(&sid) = ws.struct_by_name.get(&struct_name) else {
+    let Some(sid) = ws.nominals.struct_id(struct_name) else {
         return Err(CompilerError::new_no_location(format!(
             "texture slots: no struct named `{struct_name}`"
         )));
@@ -356,8 +356,8 @@ pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
 /// Field order is member order.
 pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPlan, CompilerError> {
     let span = ws
-        .struct_by_name
-        .get(&struct_name)
+        .nominals
+        .struct_id(struct_name)
         .map(|sid| ws.modules[sid.module.index()].structs[sid.def].name_span);
     std140_block(struct_name, &uniform_group_members(ws, struct_name)?, span)
 }
@@ -366,7 +366,7 @@ pub fn uniform_group_members(
     ws: &Workspace,
     struct_name: Ustr,
 ) -> Result<Vec<(Ustr, WireKind)>, CompilerError> {
-    let Some(&sid) = ws.struct_by_name.get(&struct_name) else {
+    let Some(sid) = ws.nominals.struct_id(struct_name) else {
         return Err(CompilerError::new_no_location(format!(
             "uniform block: no struct named `{struct_name}`"
         )));
@@ -670,7 +670,7 @@ fn attr_kind(ws: &Workspace, ty: TyId) -> Option<AttrKind> {
 
 /// Field order is attribute order is location order.
 pub fn vertex_attrs(ws: &Workspace, struct_name: Ustr) -> Result<VertexAttrs, CompilerError> {
-    let Some(&sid) = ws.struct_by_name.get(&struct_name) else {
+    let Some(sid) = ws.nominals.struct_id(struct_name) else {
         return Err(CompilerError::new_no_location(format!(
             "vertex attributes: no struct named `{struct_name}`"
         )));

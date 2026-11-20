@@ -1333,7 +1333,7 @@ mod tests {
             skull_parser::parse_module_clean("value Cell { n: int }", ustr::ustr(file)).unwrap()
         });
         let ws = crate::semantic_passes::semantic_pass(&mut asts).unwrap();
-        let keys: Vec<_> = ws.struct_by_name.keys().map(|key| key.as_str()).collect();
+        let keys: Vec<_> = ws.nominals.keys().map(|key| key.as_str()).collect();
         assert_eq!(keys.len(), 2);
         assert!(!keys_may_alias(keys[0], keys[1]));
         for key in keys {

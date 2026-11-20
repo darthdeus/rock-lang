@@ -166,8 +166,8 @@ impl<'a> Builder<'a> {
     /// Its materialized box is the interned singleton `__rock_enum_<E>_<variant>`.
     pub(crate) fn variant_is_unit(&self, enum_name: Ustr, variant: Ustr) -> bool {
         self.ws
-            .enums_by_name
-            .get(&enum_name)
+            .nominals
+            .enum_id(enum_name)
             .map(|eid| &self.ws.modules[eid.module.index()].enums[eid.def])
             .and_then(|ed| ed.variants.iter().find(|v| v.name == variant))
             .is_some_and(|v| matches!(v.payload, VariantPayload::Unit))
@@ -325,7 +325,7 @@ impl<'a> Builder<'a> {
         self.store_cell(result, absent);
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = box_bb;
-        let eid = self.ws.enums_by_name[&shape.name];
+        let eid = self.ws.nominals.enum_id(shape.name).unwrap();
         let units: Vec<_> = self.ws.modules[eid.module.index()].enums[eid.def]
             .variants
             .iter()
@@ -422,7 +422,7 @@ impl<'a> Builder<'a> {
 
 impl EnumFlatShape {
     pub fn box_layout(&self, ws: &Workspace, variant: Ustr) -> (usize, Vec<Ustr>) {
-        let eid = ws.enums_by_name[&self.name];
+        let eid = ws.nominals.enum_id(self.name).unwrap();
         let payload = &ws.modules[eid.module.index()].enums[eid.def]
             .variants
             .iter()

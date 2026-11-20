@@ -663,7 +663,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                                 ),
                             ));
                         };
-                        let Some(struct_id) = ws.struct_by_name.get(root_name) else {
+                        let Some(struct_id) = ws.nominals.struct_id(*root_name) else {
                             return Err(CompilerError::new_with_label(
                                 f.span,
                                 format!(

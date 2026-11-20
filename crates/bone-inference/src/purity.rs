@@ -150,7 +150,7 @@ pub(crate) fn verify_pure(
                 }),
                 Expr::Index { .. } => Some("`@pure` function indexes a collection (reads potentially-mutable state)".into()),
                 Expr::Array(_) => Some("`@pure` function builds an array literal (allocates a heap table, identity observable)".into()),
-                Expr::StructLiteral { name, .. } if !ws.struct_by_name.get(&name)
+                Expr::StructLiteral { name, .. } if !ws.nominals.struct_id(name)
                     .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_value) =>
                     Some("`@pure` function constructs a heap struct literal (identity observable); only `value` structs are allowed".into()),
                 Expr::Lambda { .. } => {

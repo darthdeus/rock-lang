@@ -360,10 +360,10 @@ impl<'a> Builder<'a> {
         field: Ustr,
         origin: Option<Idx<Expr>>,
     ) -> Result<std::borrow::Cow<'a, MonoTy>, CompilerError> {
-        let sid = *self
+        let sid = self
             .ws
-            .struct_by_name
-            .get(&sname)
+            .nominals
+            .struct_id(sname)
             .ok_or_else(|| gap(format!("spread struct `{sname}` is not declared")))?;
         let fdef = self.ws.modules[sid.module.index()].structs[sid.def]
             .fields
@@ -402,10 +402,10 @@ impl<'a> Builder<'a> {
         field: Ustr,
         owner: &MonoTy,
     ) -> Result<std::borrow::Cow<'a, MonoTy>, CompilerError> {
-        let sid = *self
+        let sid = self
             .ws
-            .struct_by_name
-            .get(&sname)
+            .nominals
+            .struct_id(sname)
             .ok_or_else(|| gap(format!("struct `{sname}` is not declared")))?;
         let def = &self.ws.modules[sid.module.index()].structs[sid.def];
         let fdef = def

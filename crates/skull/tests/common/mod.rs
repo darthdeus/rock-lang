@@ -437,9 +437,7 @@ pub fn key(ws: &Workspace, name: &str) -> Ustr {
         .defs
         .keys()
         .chain(ws.functions_by_name.keys())
-        .chain(ws.struct_by_name.keys())
-        .chain(ws.enums_by_name.keys())
-        .chain(ws.newtypes_by_name.keys())
+        .chain(ws.nominals.keys())
         .chain(ws.globals_by_name.keys())
         .chain(ws.type_generics.keys())
         .copied()

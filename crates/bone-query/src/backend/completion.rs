@@ -298,11 +298,11 @@ fn module_path_candidates(
                     crate::modules_scope::Member::Def(key) => {
                         if ws.functions_by_name.contains_key(&key) {
                             CompletionItemKind::FUNCTION
-                        } else if ws.struct_by_name.contains_key(&key) {
+                        } else if ws.nominals.struct_id(key).is_some() {
                             CompletionItemKind::STRUCT
-                        } else if ws.enums_by_name.contains_key(&key) {
+                        } else if ws.nominals.enum_id(key).is_some() {
                             CompletionItemKind::ENUM
-                        } else if ws.newtypes_by_name.contains_key(&key) {
+                        } else if ws.nominals.newtype_id(key).is_some() {
                             CompletionItemKind::STRUCT
                         } else {
                             CompletionItemKind::VARIABLE

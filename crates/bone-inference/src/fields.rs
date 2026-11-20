@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) fn resolve_struct(gamma: &Gamma, name: Ustr) -> Option<StructId> {
     gamma.dep_acc.borrow_mut().insert(name);
-    gamma.workspace.struct_by_name.get(&name).copied()
+    gamma.workspace.nominals.struct_id(name)
 }
 
 pub(crate) fn generic_arg_subs(
@@ -24,7 +24,7 @@ pub(crate) fn generic_arg_subs(
 
 pub(crate) fn resolve_enum(gamma: &Gamma, name: Ustr) -> Option<EnumId> {
     gamma.dep_acc.borrow_mut().insert(name);
-    gamma.workspace.enums_by_name.get(&name).copied()
+    gamma.workspace.nominals.enum_id(name)
 }
 
 pub(crate) fn structs_with_field(gamma: &Gamma, field: Ustr) -> Vec<StructId> {
@@ -400,7 +400,7 @@ pub(crate) fn tuple_or_newtype_index_ty(
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             params,
-        } if gamma.workspace.newtypes_by_name.contains_key(&name) => {
+        } if gamma.workspace.nominals.newtype_id(name).is_some() => {
             let NewtypeId { module: ntm, def } = resolve_newtype(gamma, name).unwrap();
             let nt = &gamma.workspace.module(ntm).newtypes[def];
 
@@ -451,7 +451,7 @@ pub(crate) fn resolve_global(gamma: &Gamma, name: Ustr) -> Option<TyId> {
 
 pub(crate) fn resolve_newtype(gamma: &Gamma, name: Ustr) -> Option<NewtypeId> {
     gamma.dep_acc.borrow_mut().insert(name);
-    gamma.workspace.newtypes_by_name.get(&name).copied()
+    gamma.workspace.nominals.newtype_id(name)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

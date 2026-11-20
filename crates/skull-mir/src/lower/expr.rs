@@ -1855,7 +1855,7 @@ impl<'a> Builder<'a> {
                 ctor: TypeCtor::Nominal(owner_name),
                 ..
             }) = self.field_base_ty(owner)
-            && self.ws.struct_by_name.contains_key(&owner_name)
+            && self.ws.nominals.struct_id(owner_name).is_some()
             && !self.is_value_struct(owner_name)
             && let plan = self.struct_field_plan(owner_name, slot, false)?
             && plan.is_direct()

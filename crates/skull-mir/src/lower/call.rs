@@ -138,7 +138,7 @@ fn preflight_safe_node(
                 fields,
             } => {
                 bases.is_empty()
-                    && ws.struct_by_name.get(&name).is_some_and(|id| {
+                    && ws.nominals.struct_id(name).is_some_and(|id| {
                         let definition = &ws.module(id.module).structs[id.def];
                         definition.is_value
                             && definition.is_nobox
@@ -362,8 +362,8 @@ impl<'a> Builder<'a> {
                     params,
                 } if params.is_empty() => self
                     .ws
-                    .struct_by_name
-                    .get(&name)
+                    .nominals
+                    .struct_id(name)
                     .is_some_and(|id| !self.ws.module(id.module).structs[id.def].is_value),
                 _ => false,
             },
@@ -416,8 +416,8 @@ impl<'a> Builder<'a> {
                 params,
             }) if params.is_empty() => self
                 .ws
-                .struct_by_name
-                .get(name)
+                .nominals
+                .struct_id(*name)
                 .is_some_and(|id| !self.ws.module(id.module).structs[id.def].is_value),
             _ => false,
         };
@@ -962,7 +962,7 @@ impl<'a> Builder<'a> {
                     if let Some(name) = self
                         .concrete_expr_ty(arg)
                         .and_then(|ty| ty.peel_nullable().0.nominal())
-                        .filter(|name| self.ws.struct_by_name.contains_key(name))
+                        .filter(|name| self.ws.nominals.struct_id(*name).is_some())
                     {
                         self.f.struct_registry_roots.insert(name);
                     }
@@ -1301,7 +1301,7 @@ impl<'a> Builder<'a> {
         }
         match callee {
             // A transparent newtype constructor is identity at runtime.
-            Callee::Unresolved { name, .. } if self.ws.newtypes_by_name.contains_key(&name) => {
+            Callee::Unresolved { name, .. } if self.ws.nominals.newtype_id(name).is_some() => {
                 match arg_idxs.as_slice() {
                     [inner] => {
                         let value = ValueRepr::Scalar(self.lower_expr(*inner)?);
@@ -3088,7 +3088,7 @@ impl<'a> Builder<'a> {
     }
 
     fn struct_is_generic(&self, name: Ustr) -> bool {
-        self.ws.struct_by_name.get(&name).is_some_and(|sid| {
+        self.ws.nominals.struct_id(name).is_some_and(|sid| {
             !self.ws.modules[sid.module.index()].structs[sid.def]
                 .generics
                 .is_empty()

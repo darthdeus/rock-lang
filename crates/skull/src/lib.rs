@@ -91,7 +91,7 @@ fn struct_shape_hash(
         .map_err(|e| CompilerError::new_no_location(e.message))?;
         plan.embed().is_some().hash(&mut h);
         if let Some(child_name) = plan.inline_child() {
-            let sid = ws.struct_by_name.get(&child_name).ok_or_else(|| {
+            let sid = ws.nominals.struct_id(child_name).ok_or_else(|| {
                 CompilerError::new_no_location(format!(
                     "struct `{}` field `{}` has no planned child `{child_name}`",
                     s.name, f.name
@@ -799,8 +799,8 @@ fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<Stri
 }
 
 fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
-    ws.struct_by_name
-        .get(&name)
+    ws.nominals
+        .struct_id(name)
         .and_then(|sid| {
             ws.modules
                 .get(sid.module.index())
@@ -812,9 +812,12 @@ fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
 /// Deduped, name-sorted `value` structs.
 fn canonical_value_structs(ws: &Workspace) -> Vec<&bone_semantic::hir::StructDef> {
     let mut v: Vec<_> = ws
-        .struct_by_name
+        .nominals
         .values()
-        .filter_map(|sid| {
+        .filter_map(|def| {
+            let bone_core::prelude::Nominal::Struct(sid) = def else {
+                return None;
+            };
             let s = &ws.modules.get(sid.module.index())?.structs[sid.def];
             skull_mir::lower::has_value_plan(s).then_some(s)
         })
@@ -859,7 +862,7 @@ fn cdata_alias_fields(
         }
         return Ok(out);
     }
-    let sid = ws.struct_by_name[&child];
+    let sid = ws.nominals.struct_id(child).unwrap();
     let mut out = String::new();
     for field in &ws.modules[sid.module.index()].structs[sid.def].fields {
         let ct = c_field_type(ws, field.storage_ty).ok_or_else(|| {
@@ -1294,7 +1297,7 @@ fn lua_key_read(table: &str, key: &str) -> String {
 
 /// The `ffi.cdef` typedef and `<Enum>_ct` ctor for every cdata-eligible enum.
 fn enum_cdata_defs(ws: &Workspace) -> String {
-    let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
+    let mut names: Vec<ustr::Ustr> = ws.nominals.enum_names().collect();
     names.sort_by(|a, b| display_name(a.as_str()).cmp(display_name(b.as_str())));
     let mut typedefs = String::new();
     let mut ctors = String::new();
@@ -1324,7 +1327,7 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
 /// The `ffi.metatype` impl table of each cdata-eligible enum ctype (without
 /// `__eq`, LuaJIT compares struct cdata by identity); its symbol goes to `syms`.
 fn enum_cdata_metatypes(ws: &Workspace, syms: &mut Vec<String>) -> String {
-    let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
+    let mut names: Vec<ustr::Ustr> = ws.nominals.enum_names().collect();
     names.sort_by(|a, b| display_name(a.as_str()).cmp(display_name(b.as_str())));
     let mut out = String::new();
     for name in names {
@@ -1348,7 +1351,7 @@ fn enum_cdata_metatypes(ws: &Workspace, syms: &mut Vec<String>) -> String {
              \x20   return {eq}\n  end,\n"
         ));
         let mut ts = String::from("  __tostring = function(v)\n    local t = v.__tag\n");
-        if let Some(eid) = ws.enums_by_name.get(&name) {
+        if let Some(eid) = ws.nominals.enum_id(name) {
             use bone_semantic::hir::VariantPayload;
             let ed = &ws.modules[eid.module.index()].enums[eid.def];
             for (i, var) in ed.variants.iter().enumerate() {
@@ -1617,7 +1620,7 @@ fn c_struct_inspect_defs(
 ) -> String {
     let mut out = String::new();
     {
-        let mut enums: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
+        let mut enums: Vec<ustr::Ustr> = ws.nominals.enum_names().collect();
         enums.sort_by(|a, b| display_name(a.as_str()).cmp(display_name(b.as_str())));
         for name in enums {
             let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, name)

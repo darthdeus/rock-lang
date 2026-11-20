@@ -1769,7 +1769,7 @@ impl Eq for BackendFnAbiPlan {}
 /// A boxed value child is read through its declared field position, which a
 /// narrowed parameter group no longer has.
 fn keeps_opaque_value_child(ws: &Workspace, shape: &ValueShape, kept: &[ustr::Ustr]) -> bool {
-    let Some(sid) = ws.struct_by_name.get(&shape.name) else {
+    let Some(sid) = ws.nominals.struct_id(shape.name) else {
         return false;
     };
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
@@ -1790,7 +1790,7 @@ pub(super) fn expanded_nullable_parameter_shape(ws: &Workspace, shape: &ValueSha
     if shape.nullable {
         return expanded;
     }
-    if let Some(sid) = ws.struct_by_name.get(&shape.name) {
+    if let Some(sid) = ws.nominals.struct_id(shape.name) {
         let sd = &ws.modules[sid.module.index()].structs[sid.def];
         for (name, field) in &mut expanded.fields {
             if !matches!(field, FieldShape::Prim) {
@@ -2011,7 +2011,7 @@ impl BackendFnAbiPlan {
             let width = rep.lanes(&self.arena);
             let struct_leaves = match rep.layout() {
                 RepLayout::Leaves(shape)
-                    if !shape.nullable && ws.struct_by_name.contains_key(&shape.name) =>
+                    if !shape.nullable && ws.nominals.struct_id(shape.name).is_some() =>
                 {
                     Some(shape)
                 }
