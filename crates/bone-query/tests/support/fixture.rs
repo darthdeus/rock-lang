@@ -68,6 +68,11 @@ impl Project {
         Self { dir }
     }
 
+    pub fn package(files: &[(&str, &str)]) -> Self {
+        let manifest = [("stick.toml", "[package]\nname = \"p\"\n")];
+        Self::new(&[&manifest[..], files].concat())
+    }
+
     /// Workspace key for `rel`: `canonicalize_lenient`, not `fs::canonicalize` (differs on Windows).
     pub fn path(&self, rel: &str) -> String {
         bone_query::canonicalize_lenient(&self.dir.path().join(rel).to_string_lossy())

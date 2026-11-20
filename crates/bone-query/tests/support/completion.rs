@@ -1,5 +1,6 @@
 //! Completion fixtures: `<|>` is the cursor; every response must satisfy the response invariants.
 
+use crate::fixture::position_of_offset;
 pub use crate::label_asserts::{assert_offers, label_matches};
 use bone_query::BoneWorkspace;
 use lsp_types::{CompletionItem, InsertTextFormat, Position};
@@ -17,11 +18,10 @@ pub fn cursor(marked: &str) -> (String, Position) {
     let at = marked
         .find(CURSOR)
         .unwrap_or_else(|| panic!("no `<|>` cursor in {marked:?}"));
-    let before = &marked[..at];
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    let line = before.matches('\n').count() as u32;
-    let col = before[line_start..].encode_utf16().count() as u32;
-    (marked.replacen(CURSOR, "", 1), Position::new(line, col))
+    (
+        marked.replacen(CURSOR, "", 1),
+        position_of_offset(marked, at),
+    )
 }
 
 /// The response at the cursor, in rank order.
@@ -204,21 +204,4 @@ pub fn check_inserts(cases: &[(&str, &str, &str, Insert)]) {
     for (case, src, label, want) in cases {
         assert_insert(case, &item(src, label), *want);
     }
-}
-
-/// A temporary project: a `stick.toml` plus `files` (relative path, source).
-pub fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"p\"\n").unwrap();
-    for (rel, src) in files {
-        let path = dir.path().join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, src).unwrap();
-    }
-    dir
-}
-
-/// The canonical path of `rel` inside `dir`, as the workspace keys it.
-pub fn project_path(dir: &tempfile::TempDir, rel: &str) -> String {
-    bone_query::canonicalize_lenient(&dir.path().join(rel).to_string_lossy())
 }

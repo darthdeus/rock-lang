@@ -1,8 +1,16 @@
 //! Completion ranking corpus: each case pins a scoring outcome.
 
 use crate::completion::*;
+use crate::fixture::Project;
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
+
+const RECEIVER_OVERLOAD: &str = "value Color { r: float, g: float, b: float, a: float }\nstruct UiRect { x: float }\n\
+    struct Image { w: int }\nglobal WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }\n\
+    global WHITE_PIXEL: Image = Image { w: 1 }\nfn image_dims(i: Image) -> float { 1.0 }\n\
+    fn text(r: UiRect, s: string, size: float, color: Color) -> UiRect { r }\n\
+    fn text(d: Image, s: string, size: float, alpha: float) -> Image { d }\n\
+    fn draw(ui: UiRect) {\n  ui.text(\"x\", 12.0, WHI<|>)\n}\n";
 
 #[test]
 fn match_quality_orders_candidates() {
@@ -82,12 +90,7 @@ fn expected_type_orders_candidates() {
         // UFCS makes the receiver param 0, and the receiver picks the overload.
         (
             "UFCS arg slot uses the receiver overload's param type",
-            "value Color { r: float, g: float, b: float, a: float }\nstruct UiRect { x: float }\n\
-             struct Image { w: int }\nglobal WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }\n\
-             global WHITE_PIXEL: Image = Image { w: 1 }\nfn image_dims(i: Image) -> float { 1.0 }\n\
-             fn text(r: UiRect, s: string, size: float, color: Color) -> UiRect { r }\n\
-             fn text(d: Image, s: string, size: float, alpha: float) -> Image { d }\n\
-             fn draw(ui: UiRect) {\n  ui.text(\"x\", 12.0, WHI<|>)\n}\n",
+            RECEIVER_OVERLOAD,
             "WHITE < ?WHITE_PIXEL",
         ),
         (
@@ -292,12 +295,7 @@ fn ranking_contexts_offer() {
         // No float-typed reach expansion (`WHITE_PIXEL.image_dims()`).
         (
             "UFCS arg slot of the receiver overload",
-            "value Color { r: float, g: float, b: float, a: float }\nstruct UiRect { x: float }\n\
-             struct Image { w: int }\nglobal WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }\n\
-             global WHITE_PIXEL: Image = Image { w: 1 }\nfn image_dims(i: Image) -> float { 1.0 }\n\
-             fn text(r: UiRect, s: string, size: float, color: Color) -> UiRect { r }\n\
-             fn text(d: Image, s: string, size: float, alpha: float) -> Image { d }\n\
-             fn draw(ui: UiRect) {\n  ui.text(\"x\", 12.0, WHI<|>)\n}\n",
+            RECEIVER_OVERLOAD,
             &["WHITE", "!*image_dims*", "!*->*", "!*.*"],
         ),
         // The trailing arg is broken, so the chain's last method return type
@@ -415,57 +413,38 @@ const REC: usize = 14;
 fn rank_key_digits() {
     let test_fn = "fn test_apply() {}\nfn r() {\n  test_ap<|>\n}\n";
     let locals = "fn r(dt: float) {\n  let alpha = 1\n  let dmg = 1.0\n  <|>\n}\n";
-    let cases: &[(&str, &str, &str, &str, usize, char)] = &[
+    let cases: &[(&str, &str, &[(&str, usize, char)])] = &[
         (
-            "partial fn name with a local arg promotes the call-through",
             PATH,
             "struct Mob { hp: int }\nfn give(m: Mob) {}\nfn r(mob: Mob) {\n  givemob<|>\n}\n",
-            "give(mob)",
-            TYPE,
-            '0',
+            &[("give(mob)", TYPE, '0')],
         ),
+        (PATH, test_fn, &[("test_apply", KIND, '4')]),
         (
-            "test_ fn demoted outside test files",
-            PATH,
-            test_fn,
-            "test_apply",
-            KIND,
-            '4',
-        ),
-        (
-            "test_ fn normal inside a tests/ dir",
             "/tmp/tests/rock_lsp_ranking_t.rock",
             test_fn,
-            "test_apply",
-            KIND,
-            '2',
+            &[("test_apply", KIND, '2')],
         ),
         (
-            "same-file fn",
             PATH,
             "fn zzz_mine() {}\nfn r() {\n  <|>\n}\n",
-            "zzz_mine",
-            PROX,
-            '0',
+            &[("zzz_mine", PROX, '0'), ("abs", PROX, '3')],
         ),
         (
-            "stdlib fn",
             PATH,
-            "fn zzz_mine() {}\nfn r() {\n  <|>\n}\n",
-            "abs",
-            PROX,
-            '3',
+            locals,
+            &[("dmg", REC, '0'), ("alpha", REC, '1'), ("dt", REC, '2')],
         ),
-        ("closest declaration", PATH, locals, "dmg", REC, '0'),
-        ("next declaration", PATH, locals, "alpha", REC, '1'),
-        ("param", PATH, locals, "dt", REC, '2'),
     ];
-    for (case, path, src, label, idx, want) in cases {
-        assert_eq!(
-            sort_digit(&complete_in(path, src), label, *idx),
-            *want,
-            "{case}"
-        );
+    for (path, src, expected) in cases {
+        let items = complete_in(path, src);
+        for &(label, digit, want) in *expected {
+            assert_eq!(
+                sort_digit(&items, label, digit),
+                want,
+                "{path} {src:?}: {label}"
+            );
+        }
     }
 }
 
@@ -494,7 +473,7 @@ fn tests_dir_symbols_demote_only_outside_test_files() {
     let main_src = "fn zzz_real() {}\nfn game() {\n  aaa_h\n}\nfn game2() {\n  zzz_r\n}\n";
     let helper_src = "fn aaa_helper() {}\nfn sim_run() {\n  aaa_h\n}\n";
     let files = [("main.rock", main_src), ("tests/helpers.rock", helper_src)];
-    let dir = project(&files);
+    let project = Project::package(&files);
     let cases = [
         ("tests/ fn from main", 0, (2, 7), "aaa_helper", KIND, '4'),
         ("main fn from main", 0, (5, 7), "zzz_real", KIND, '2'),
@@ -517,7 +496,7 @@ fn tests_dir_symbols_demote_only_outside_test_files() {
     ];
     for (case, file, (line, col), label, idx, want) in cases {
         let (rel, src) = files[file];
-        let path = project_path(&dir, rel);
+        let path = project.path(rel);
         let mut bone = BoneWorkspace::new();
         bone.update(&path, src.to_string());
         let items = bone.completion(&path, Position::new(line, col));
@@ -529,11 +508,11 @@ fn tests_dir_symbols_demote_only_outside_test_files() {
 fn project_dir_named_stdlib_keeps_project_proximity() {
     // Stdlib ownership comes from the loader's source id, not a path component.
     let main_src = "fn game() {\n  aaa_h\n  ab\n}\n";
-    let dir = project(&[
+    let project = Project::package(&[
         ("main.rock", main_src),
         ("stdlib/helpers.rock", "fn aaa_helper() {}\n"),
     ]);
-    let main = project_path(&dir, "main.rock");
+    let main = project.path("main.rock");
     let mut bone = BoneWorkspace::new();
     bone.update(&main, main_src.to_string());
     let helper = bone.completion(&main, Position::new(1, 7));

@@ -2,6 +2,7 @@
 
 use crate::completion::Insert::{Label, Plain, Snippet, Text};
 use crate::completion::*;
+use crate::fixture::Project;
 use bone_query::BoneWorkspace;
 use lsp_types::CompletionItemKind;
 
@@ -251,7 +252,7 @@ fn member_receiver_resolves_in_broken_statements() {
 fn member_completion_resolves_cross_file_types() {
     // The completion reparse includes the whole project, not just the edited
     // file, and Rock has one global namespace.
-    let dir = project(&[
+    let project = Project::package(&[
         ("a.rock", "struct IVec2 { x: int, y: int }\n"),
         ("b.rock", "fn f(g: IVec2) {\n  g.\n}\n"),
         (
@@ -260,10 +261,10 @@ fn member_completion_resolves_cross_file_types() {
         ),
         ("use.rock", "fn r() {\n  let z = player\n}\n"),
     ]);
-    let b = project_path(&dir, "b.rock");
+    let b = project.path("b.rock");
     let l = labels_of(&complete_in(&b, "fn f(g: IVec2) {\n  g.<|>\n}\n"));
     assert_offers(&l, &["x: int", "y: int"]);
-    let used = project_path(&dir, "use.rock");
+    let used = project.path("use.rock");
     let l = labels_of(&complete_in(&used, "fn r() {\n  let z = player.<|>\n}\n"));
     assert_offers(&l, &["movable*"]);
 }
@@ -915,54 +916,6 @@ fn count(counter: Counter) {
             &["value: int", "max: int", "step: int"],
         ),
         (
-            "in match arm body",
-            r"struct Point { x: int, y: int }
-enum Opt {
-    None,
-    Some(Point),
-}
-fn main() {
-    let o = Opt::Some(Point { x: 1, y: 2 })
-    match o {
-        Opt::Some(p) => p.<|>,
-        Opt::None => {},
-    }
-}",
-            &["x: int", "y: int"],
-        ),
-        (
-            "in match arm braced body",
-            r"struct Point { x: int, y: int }
-enum Opt {
-    None,
-    Some(Point),
-}
-fn main() {
-    let o = Opt::Some(Point { x: 1, y: 2 })
-    match o {
-        Opt::Some(p) => { p.<|> },
-        Opt::None => {},
-    }
-}",
-            &["x: int", "y: int"],
-        ),
-        (
-            "in match arm without trailing comma",
-            r"struct Point { x: int, y: int }
-enum Opt {
-    None,
-    Some(Point),
-}
-fn main() {
-    let o = Opt::Some(Point { x: 1, y: 2 })
-    match o {
-        Opt::Some(p) => p.<|>
-        Opt::None => {},
-    }
-}",
-            &["x: int", "y: int"],
-        ),
-        (
             "in nested incomplete if",
             r"struct Game {
     player_x: float,
@@ -1122,6 +1075,26 @@ fn setup() {
             &["debug_mode: bool"],
         ),
     ]);
+    let match_arm = r"struct Point { x: int, y: int }
+enum Opt {
+    None,
+    Some(Point),
+}
+fn main() {
+    let o = Opt::Some(Point { x: 1, y: 2 })
+    match o {
+        Opt::Some(p) => BODY
+        Opt::None => {},
+    }
+}";
+    for (case, body) in [
+        ("in match arm body", "p.<|>,"),
+        ("in match arm braced body", "{ p.<|> },"),
+        ("in match arm without trailing comma", "p.<|>"),
+    ] {
+        let source = match_arm.replace("BODY", body);
+        assert_labels(case, &labels(&source), &["x: int", "y: int"]);
+    }
 }
 
 #[test]
