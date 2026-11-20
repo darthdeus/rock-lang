@@ -368,6 +368,18 @@ fn unknown_or_malformed_requests_answer_errors_and_unknown_notifications_are_sil
     assert!(!server.exited());
 }
 
+#[test]
+fn stats_count_every_request_by_method() {
+    let mut server = LspServer::new();
+    for id in 0..250 {
+        roundtrip(&mut server, req(id, "frobnicate/do", json!({})));
+    }
+    let out = roundtrip(&mut server, req(250, "rock/stats", json!({})));
+    let stats = response(&out).result.clone().expect("stats");
+    assert_eq!(stats["method_counts"]["frobnicate/do"], 250);
+    assert_eq!(stats["requests_total"], 251);
+}
+
 /// A package directory under its canonical path: returned locations use
 /// canonical paths, and the macOS temporary directory is behind a symlink.
 fn package_dir(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {

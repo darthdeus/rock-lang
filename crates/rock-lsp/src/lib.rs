@@ -68,7 +68,6 @@ struct ReqTiming {
 impl Drop for ReqTiming {
     fn drop(&mut self) {
         let ms = self.start.elapsed().as_secs_f64() as f32 * 1000.0;
-        record_request_time(&self.method, ms);
         if lsp_timing_enabled() {
             log::info!(
                 target: "lsp_timing",
@@ -81,32 +80,16 @@ impl Drop for ReqTiming {
     }
 }
 
-static REQUEST_STATS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<f32>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-const REQUEST_STATS_CAP: usize = 200;
-
-fn record_request_time(method: &str, ms: f32) {
-    if let Ok(mut map) = REQUEST_STATS.lock() {
-        let q = map.entry(method.to_string()).or_default();
-        if q.len() == REQUEST_STATS_CAP {
-            q.pop_front();
-        }
-        q.push_back(ms);
-    }
-}
-
 /// Snapshot for `rock/stats`, rendered generically by the panel's STATS block.
-fn request_stats_json(loaded_modules: usize) -> serde_json::Value {
-    let mut method_counts = serde_json::Map::new();
-    let mut total = 0usize;
-    if let Ok(map) = REQUEST_STATS.lock() {
-        for (method, samples) in map.iter() {
-            method_counts.insert(method.clone(), serde_json::json!(samples.len()));
-            total += samples.len();
-        }
-    }
+fn request_stats_json(
+    loaded_modules: usize,
+    counts: &std::collections::HashMap<String, usize>,
+) -> serde_json::Value {
+    let total: usize = counts.values().sum();
+    let method_counts: serde_json::Map<_, _> = counts
+        .iter()
+        .map(|(method, count)| (method.clone(), serde_json::json!(count)))
+        .collect();
     serde_json::json!({
         "loaded_modules": loaded_modules,
         "requests_total": total,
@@ -260,6 +243,7 @@ pub struct LspServer {
     exited: bool,
     inlay_hint_refresh_support: bool,
     next_request_id: u64,
+    request_counts: std::collections::HashMap<String, usize>,
 }
 
 impl LspServer {
@@ -270,6 +254,7 @@ impl LspServer {
             exited: false,
             inlay_hint_refresh_support: false,
             next_request_id: 0,
+            request_counts: Default::default(),
         }
     }
 
@@ -325,6 +310,7 @@ impl LspServer {
             );
         }
 
+        *self.request_counts.entry(req.method.clone()).or_default() += 1;
         let _timing = ReqTiming {
             method: req.method.clone(),
             id: req.id.clone(),
@@ -419,7 +405,7 @@ impl LspServer {
                     .iter()
                     .map(|(_, m)| m.len())
                     .sum();
-                serialize_response(req.id, Ok(request_stats_json(loaded)))
+                serialize_response(req.id, Ok(request_stats_json(loaded, &self.request_counts)))
             }
             "rock/modules" => {
                 serialize_response(req.id, Ok(modules_json(ws.bone.projects_summary())))
