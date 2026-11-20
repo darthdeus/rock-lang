@@ -152,7 +152,6 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
 #[derive(Debug, Clone)]
 pub struct StickConfig {
     pub package: Package,
-    pub engine: Option<EngineConfig>,
     pub native: Option<NativeConfig>,
     pub build: Option<BuildConfig>,
     pub release: Option<ReleaseConfig>,
@@ -276,9 +275,6 @@ pub struct BuildVar {
     pub value: Option<String>,
     pub source_fingerprint: Option<SourceFingerprint>,
     pub channels: Option<Vec<String>>,
-    /// Per channel on purpose: a credential a dev build can lack is one a release build
-    /// cannot, so failure degrades to `default` only on these channels.
-    pub optional_channels: Option<Vec<String>>,
     pub default: Option<String>,
     /// Hash the value into cache keys but never store it in plaintext in any
     /// on-disk artifact or manifest.
@@ -297,7 +293,6 @@ pub struct SourceFingerprint {
 #[derive(Debug, Clone, Default)]
 pub struct ReleaseConfig {
     pub assets: Option<Vec<String>>,
-    pub predefined_levels: Option<Vec<String>>,
     pub overlay_assets: Option<Vec<String>>,
     pub visual_banks: Option<Vec<String>>,
 }
@@ -325,11 +320,6 @@ pub struct NativeConfig {
 
 fn native_shipped_default() -> bool {
     true
-}
-
-#[derive(Debug, Clone)]
-pub struct EngineConfig {
-    pub needs: Vec<String>,
 }
 
 /// The CLI mirrors its comptime channel selection here; rock-host cannot read it.
@@ -513,38 +503,6 @@ impl<'de> serde::Deserialize<'de> for Dependency {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for EngineConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = EngineConfig;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "EngineConfig struct")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<EngineConfig, A::Error> {
-                let mut needs: Vec<String> = Vec::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "needs" => {
-                            needs = map.next_value()?;
-                        }
-                        other => {
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [engine]; known keys: needs"
-                            )));
-                        }
-                    }
-                }
-                Ok(EngineConfig { needs })
-            }
-        }
-        d.deserialize_map(Vis)
-    }
-}
-
 impl<'de> serde::Deserialize<'de> for BuildVar {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Vis;
@@ -553,7 +511,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 write!(
                     f,
-                    "a literal string or a table with cmd/builtin/value/source_fingerprint/channels/optional_channels/default/secret/volatile"
+                    "a literal string or a table with cmd/builtin/value/source_fingerprint/channels/default/secret/volatile"
                 )
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<BuildVar, E> {
@@ -584,9 +542,6 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                         "channels" => {
                             var.channels = Some(map.next_value()?);
                         }
-                        "optional_channels" => {
-                            var.optional_channels = Some(map.next_value()?);
-                        }
                         "default" => {
                             var.default = Some(map.next_value()?);
                         }
@@ -599,7 +554,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [build.vars] entry; known keys: \
-                                 cmd, builtin, value, source_fingerprint, channels, optional_channels, default, secret, volatile"
+                                 cmd, builtin, value, source_fingerprint, channels, default, secret, volatile"
                             )));
                         }
                     }
@@ -668,9 +623,6 @@ impl<'de> serde::Deserialize<'de> for ReleaseConfig {
                         "assets" => {
                             release.assets = Some(map.next_value()?);
                         }
-                        "predefined_levels" => {
-                            release.predefined_levels = Some(map.next_value()?);
-                        }
                         "visual_banks" => {
                             release.visual_banks = Some(map.next_value()?);
                         }
@@ -679,7 +631,7 @@ impl<'de> serde::Deserialize<'de> for ReleaseConfig {
                         }
                         other => {
                             return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [release]; known keys: assets, predefined_levels, overlay_assets, visual_banks"
+                                "unknown key `{other}` in [release]; known keys: assets, overlay_assets, visual_banks"
                             )));
                         }
                     }
@@ -811,12 +763,10 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let key = <String as serde::Deserialize>::deserialize(d)?;
                 match key.as_str() {
                     "package" | "build" | "release" | "assets" | "sound" | "sim" | "lint"
-                    | "engine" | "native" | "language" | "dependencies" | "source_groups" => {
-                        Ok(key)
-                    }
+                    | "native" | "language" | "dependencies" | "source_groups" => Ok(key),
                     other => Err(serde::de::Error::custom(format!(
                         "unknown key `{other}` at top level; known keys: package, build, release, \
-                         assets, sound, sim, lint, engine, native, language, dependencies, source_groups"
+                         assets, sound, sim, lint, native, language, dependencies, source_groups"
                     ))),
                 }
             }
@@ -833,7 +783,6 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 mut map: A,
             ) -> Result<StickConfig, A::Error> {
                 let mut package: Option<Package> = None;
-                let mut engine: Option<EngineConfig> = None;
                 let mut native: Option<NativeConfig> = None;
                 let mut build: Option<BuildConfig> = None;
                 let mut release: Option<ReleaseConfig> = None;
@@ -871,9 +820,6 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "native" => {
                             native = map.next_value()?;
                         }
-                        "engine" => {
-                            engine = map.next_value()?;
-                        }
                         "language" => {
                             language = map.next_value()?;
                         }
@@ -889,7 +835,6 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
                 Ok(StickConfig {
                     package,
-                    engine,
                     native,
                     build,
                     release,
@@ -1021,27 +966,6 @@ impl StickConfig {
                     }
                 }
             }
-            if let Some(optional_channels) = var.optional_channels.as_deref() {
-                if var.cmd.is_none() {
-                    anyhow::bail!(
-                        "[build.vars] {name} declares optional_channels but has no cmd source"
-                    );
-                }
-                if var.default.is_none() {
-                    anyhow::bail!(
-                        "[build.vars] {name} declares optional_channels but has no default"
-                    );
-                }
-                for chan in optional_channels {
-                    if !build.channels.iter().any(|c| c == chan) {
-                        anyhow::bail!(
-                            "[build.vars] {name} declares optional channel {:?}, which is not in [build] channels {:?}",
-                            chan,
-                            build.channels
-                        );
-                    }
-                }
-            }
         }
         Ok(())
     }
@@ -1128,7 +1052,18 @@ mod tests {
                 ["unknown key `ios`", "top level"],
             ),
             ("verison = \"1\"\n", ["`verison`", "[package]"]),
-            ("[engine]\nneed = []\n", ["`need`", "[engine]"]),
+            (
+                "[engine]\nneeds = []\n",
+                ["unknown key `engine`", "top level"],
+            ),
+            (
+                "[release]\npredefined_levels = []\n",
+                ["`predefined_levels`", "[release]"],
+            ),
+            (
+                "[build.vars]\nX = { cmd = \"true\", optional_channels = [\"dev\"] }\n",
+                ["`optional_channels`", "[build.vars] entry"],
+            ),
             ("[build]\nchanels = [\"dev\"]\n", ["`chanels`", "[build]"]),
             (
                 "[build.vars]\nX = { comand = \"echo hi\" }\n",
@@ -1425,11 +1360,6 @@ mod tests {
                 "[build.vars]\nTREE = { source_fingerprint = { roots = [\"src\"] }, volatile = true }\n"
                     .into(),
                 "cannot be volatile",
-            ),
-            (
-                "[build]\nchannels = [\"dev\"]\n[build.vars]\nTREE = { source_fingerprint = { roots = [\"src\"] }, optional_channels = [\"dev\"], default = \"\" }\n"
-                    .into(),
-                "optional_channels but has no cmd source",
             ),
         ] {
             let cfg = manifest(&body).expect(&body);

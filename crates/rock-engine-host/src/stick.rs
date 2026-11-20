@@ -16,18 +16,11 @@ pub trait EngineConfigExt {
 
 impl EngineConfigExt for StickConfig {
     fn release_assets(&self) -> Result<Vec<String>> {
-        let mut assets = self
+        let assets = self
             .release
             .as_ref()
             .and_then(|release| release.assets.clone())
             .unwrap_or_else(|| vec!["assets".to_string()]);
-        if let Some(levels) = self
-            .release
-            .as_ref()
-            .and_then(|release| release.predefined_levels.as_ref())
-        {
-            assets.extend(levels.iter().cloned());
-        }
         for rel in &assets {
             let path = Path::new(rel);
             if rel.is_empty()

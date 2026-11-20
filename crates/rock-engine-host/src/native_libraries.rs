@@ -31,16 +31,6 @@ pub fn game_engine_libs(project: &str) -> Result<Vec<NativeLibrary>> {
     let mut names = BTreeSet::new();
     for package in graph.packages() {
         let config = StickConfig::from_path(&package.root.join("stick.toml"))?;
-        if config
-            .engine
-            .as_ref()
-            .is_some_and(|engine| !engine.needs.is_empty())
-        {
-            anyhow::bail!(
-                "{}: replace [engine].needs with [native] declarations on the packages that own the libraries",
-                package.root.display()
-            );
-        }
         let Some(native) = config.native else {
             continue;
         };

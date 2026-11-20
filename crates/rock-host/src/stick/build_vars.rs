@@ -32,7 +32,6 @@ pub struct ResolvedBuildVars {
 struct PendingCommand<'a> {
     name: &'a String,
     var: &'a super::BuildVar,
-    fall_back: bool,
     run: Box<dyn FnOnce() -> Result<String> + Send + 'a>,
 }
 
@@ -151,7 +150,6 @@ pub fn resolve_build_vars(
                 commands.push(PendingCommand {
                     name,
                     var,
-                    fall_back: false,
                     run: Box::new(move || resolve_source_revision(project_dir, channel)),
                 });
                 continue;
@@ -162,7 +160,6 @@ pub fn resolve_build_vars(
             commands.push(PendingCommand {
                 name,
                 var,
-                fall_back: true,
                 run: Box::new(move || run_var_cmd(name, cmd, var.secret, project_dir, channel)),
             });
             continue;
@@ -179,27 +176,10 @@ pub fn resolve_build_vars(
     }
     let (pending, jobs): (Vec<_>, Vec<_>) = commands
         .into_iter()
-        .map(|command| ((command.name, command.var, command.fall_back), command.run))
+        .map(|command| ((command.name, command.var), command.run))
         .unzip();
-    for ((name, var, fall_back), outcome) in pending.into_iter().zip(run_concurrently(jobs)) {
-        let value = match outcome {
-            Ok(value) => value,
-            Err(_error)
-                if fall_back
-                    && var
-                        .optional_channels
-                        .as_deref()
-                        .is_some_and(|channels| channels.iter().any(|entry| entry == &channel)) =>
-            {
-                log::warn!(
-                    "[build.vars] {name}: source unavailable for channel {channel:?}; continuing with its declared default"
-                );
-                var.default
-                    .clone()
-                    .expect("validate_build requires an optional default")
-            }
-            Err(error) => return Err(error),
-        };
+    for ((name, var), outcome) in pending.into_iter().zip(run_concurrently(jobs)) {
+        let value = outcome?;
         vars.insert(
             name.clone(),
             ResolvedVar {
@@ -616,23 +596,6 @@ mod tests {
             resolved.vars["TOKEN"].value, "none",
             "off-channel uses default, cmd never runs"
         );
-    }
-
-    #[test]
-    fn optional_command_failure_uses_default_only_on_the_declared_channel() {
-        let cfg = fixture(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nTOKEN = { cmd = \"false\", optional_channels = [\"dev\"], default = \"\" }\n",
-        ));
-        let dir = tempfile::tempdir().unwrap();
-        let dev = resolve(&cfg, dir.path(), Some("dev"))
-            .expect("optional dev command failure uses its default");
-        assert_eq!(dev.vars["TOKEN"].value, "");
-
-        let err = resolve(&cfg, dir.path(), Some("steam"))
-            .expect_err("the same command must remain required on steam");
-        assert!(format!("{err}").contains("TOKEN"));
     }
 
     #[test]

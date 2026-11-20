@@ -515,58 +515,6 @@ mod tests {
     use rock_host::stick::StickConfig;
 
     #[test]
-    fn configured_predefined_levels_match_selected_and_packaged_keys() {
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("games/configured-levels");
-        std::fs::create_dir_all(project.join("assets")).unwrap();
-        std::fs::create_dir_all(project.join("levels")).unwrap();
-        std::fs::write(project.join("assets/ui.txt"), "ui").unwrap();
-        std::fs::write(project.join("levels/index.json"), "catalog").unwrap();
-        std::fs::write(project.join("levels/crypt.json"), "level").unwrap();
-        std::fs::write(project.join("levels/editor.json"), "editor-only").unwrap();
-        std::fs::write(project.join("level.txt"), "legacy").unwrap();
-        let select = |config: Option<&str>| {
-            let config = config.map(|text| StickConfig::new_from_str(text).unwrap());
-            select_assets_with_overlays(
-                &project,
-                "games/configured-levels",
-                config.as_ref(),
-                Some(&root.path().join("stone")),
-                &[],
-            )
-            .unwrap()
-        };
-        let keys = |selection: &AssetSelection| {
-            selection
-                .assets
-                .iter()
-                .map(|asset| asset.key.clone())
-                .collect::<Vec<_>>()
-        };
-
-        let native = select(Some(concat!(
-            "[package]\nname = \"configured-levels\"\n",
-            "[release]\nassets = [\"assets\"]\n",
-            "predefined_levels = [\"levels/index.json\", \"levels/crypt.json\"]\n",
-        )));
-        let expected = [
-            "games/configured-levels/assets/ui.txt",
-            "games/configured-levels/levels/crypt.json",
-            "games/configured-levels/levels/index.json",
-        ];
-        assert_eq!(keys(&native), expected);
-        let staged = stage_assets(&native, &root.path().join("package/assets")).unwrap();
-        assert_eq!(staged.keys, expected, "packaging follows the selection");
-
-        let defaults = ["games/configured-levels/assets/ui.txt"];
-        assert_eq!(keys(&select(None)), defaults);
-        assert_eq!(
-            keys(&select(Some("[package]\nname = \"defaults\"\n"))),
-            defaults
-        );
-    }
-
-    #[test]
     fn selection_and_staging_share_game_engine_and_fallback_assets() {
         let root = tempfile::tempdir().unwrap();
         let engine = tempfile::tempdir().unwrap();
