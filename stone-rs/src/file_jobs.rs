@@ -10,71 +10,69 @@ use crate::jobs::{Refused, Taken};
 
 const MAX_PATH_BYTES: usize = 4096;
 
-struct PausePoint {
-    paused: AtomicU8,
-    entered: AtomicU8,
+/// Test hooks that hold the worker before a job or a publication, enabled only by
+/// `STONE_FILE_JOBS_TEST_CONTROL=1`.
+#[derive(Clone, Copy)]
+enum Pause {
+    Worker,
+    Publication,
 }
 
-impl PausePoint {
-    const fn new() -> Self {
-        Self {
-            paused: AtomicU8::new(0),
-            entered: AtomicU8::new(0),
-        }
+#[derive(Clone, Copy)]
+struct PauseState {
+    paused: bool,
+    entered: bool,
+}
+
+static PAUSES: Mutex<[PauseState; 2]> = Mutex::new(
+    [PauseState {
+        paused: false,
+        entered: false,
+    }; 2],
+);
+static PAUSE_RELEASED: Condvar = Condvar::new();
+
+impl Pause {
+    fn enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var("STONE_FILE_JOBS_TEST_CONTROL").as_deref() == Ok("1"))
     }
 
-    fn gate(&self) {
-        if !file_jobs_test_enabled() {
+    fn gate(self) {
+        if !Self::enabled() {
             return;
         }
-        let control = file_jobs_test_control();
-        let mut guard = control.state.lock().unwrap();
-        if self.paused.load(Ordering::Acquire) == 0 {
-            return;
+        let mut pauses = PAUSES.lock().unwrap();
+        pauses[self as usize].entered = pauses[self as usize].paused;
+        while pauses[self as usize].paused {
+            pauses = PAUSE_RELEASED.wait(pauses).unwrap();
         }
-        self.entered.store(1, Ordering::Release);
-        control.wake.notify_all();
-        while self.paused.load(Ordering::Acquire) != 0 {
-            guard = control.wake.wait(guard).unwrap();
-        }
-        self.entered.store(0, Ordering::Release);
+        pauses[self as usize].entered = false;
     }
 
-    fn pause(&self) -> bool {
-        if !file_jobs_test_enabled() {
-            return false;
+    fn pause(self) -> bool {
+        Self::enabled() && {
+            PAUSES.lock().unwrap()[self as usize] = PauseState {
+                paused: true,
+                entered: false,
+            };
+            true
         }
-        let control = file_jobs_test_control();
-        let _guard = control.state.lock().unwrap();
-        self.entered.store(0, Ordering::Release);
-        self.paused.store(1, Ordering::Release);
-        true
     }
 
-    fn entered(&self) -> bool {
-        file_jobs_test_enabled() && self.entered.load(Ordering::Acquire) != 0
+    fn entered(self) -> bool {
+        Self::enabled() && PAUSES.lock().unwrap()[self as usize].entered
     }
-}
 
-static WORKER_PAUSE: PausePoint = PausePoint::new();
-static PUBLICATION_PAUSE: PausePoint = PausePoint::new();
-
-struct FileJobsTestControl {
-    state: Mutex<()>,
-    wake: Condvar,
-}
-
-fn file_jobs_test_control() -> &'static FileJobsTestControl {
-    static CONTROL: OnceLock<FileJobsTestControl> = OnceLock::new();
-    CONTROL.get_or_init(|| FileJobsTestControl {
-        state: Mutex::new(()),
-        wake: Condvar::new(),
-    })
-}
-
-fn file_jobs_test_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("STONE_FILE_JOBS_TEST_CONTROL").as_deref() == Ok("1"))
+    fn release_all() -> bool {
+        Self::enabled() && {
+            for pause in PAUSES.lock().unwrap().iter_mut() {
+                pause.paused = false;
+            }
+            PAUSE_RELEASED.notify_all();
+            true
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -424,7 +422,7 @@ impl Transaction {
 type Queue = crate::jobs::Jobs<Request, JobResult>;
 
 fn run(request: Request, _: &AtomicBool) -> Option<JobResult> {
-    WORKER_PAUSE.gate();
+    Pause::Worker.gate();
     request.control.probe(Probe::Request);
     Some(execute_transaction(
         &request.transaction,
@@ -761,7 +759,7 @@ fn run_transaction(
         let outcome = match operation {
             TransactionOp::Publish(write) => {
                 control.probe(Probe::Publication);
-                PUBLICATION_PAUSE.gate();
+                Pause::Publication.gate();
                 // Everything the root reaches must be durable before the root name can be.
                 if let Err(failure) = barriers.flush() {
                     log_io_error("directory barrier", &failure.directory, &failure.error);
@@ -1180,35 +1178,27 @@ pub extern "C" fn stone_file_transaction_poll(job: i32, wait: bool) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_pause() -> bool {
-    WORKER_PAUSE.pause()
+    Pause::Worker.pause()
 }
 
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_pause_publication() -> bool {
-    PUBLICATION_PAUSE.pause()
+    Pause::Publication.pause()
 }
 
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_release() -> bool {
-    if !file_jobs_test_enabled() {
-        return false;
-    }
-    let control = file_jobs_test_control();
-    let _guard = control.state.lock().unwrap();
-    WORKER_PAUSE.paused.store(0, Ordering::Release);
-    PUBLICATION_PAUSE.paused.store(0, Ordering::Release);
-    control.wake.notify_all();
-    true
+    Pause::release_all()
 }
 
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_entered() -> bool {
-    WORKER_PAUSE.entered()
+    Pause::Worker.entered()
 }
 
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_publication_entered() -> bool {
-    PUBLICATION_PAUSE.entered()
+    Pause::Publication.entered()
 }
 
 #[cfg(test)]
