@@ -1526,7 +1526,7 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
     if a == nil then return b else return a end
 """
 
-@nowrite @intrinsic @nomangle @inline inline(lua) fn is_null(value: any) -> bool = "return value == nil"
+@nowrite @intrinsic @nomangle @inline fn is_null(value: any) -> bool { return value == null }
 
 // Out of line, so a failing site is one call. Level 2 is the function that
 // unwrapped, for both the error position and the traceback.
@@ -3702,23 +3702,17 @@ struct StringBuilder {}
 fn lt(a: string, b: string) -> bool { return le(a, b) && a != b }
 inline(lua) fn le(a: string, b: string) -> bool = "return a <= b"
 
-@nowrite inline(lua) fn string.pad_right(s, width: int) -> string = """
-    local len = #s
-    if len >= width then return s end
-    return s .. string.rep(" ", width - len)
-"""
-@nowrite inline(js) fn string.pad_right(s, width: int) -> string = """
-    return s.length >= width ? s : s + " ".repeat(width - s.length);
-"""
+@nowrite fn string.pad_right(s, width: int) -> string {
+    let n = s.len()
+    if n >= width { return s }
+    return s + " ".repeat(width - n)
+}
 
-@nowrite inline(lua) fn string.pad_left(s, width: int) -> string = """
-    local len = #s
-    if len >= width then return s end
-    return string.rep(" ", width - len) .. s
-"""
-@nowrite inline(js) fn string.pad_left(s, width: int) -> string = """
-    return s.length >= width ? s : " ".repeat(width - s.length) + s;
-"""
+@nowrite fn string.pad_left(s, width: int) -> string {
+    let n = s.len()
+    if n >= width { return s }
+    return " ".repeat(width - n) + s
+}
 
 @intrinsic inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
     local r = string.format("%" .. tostring(width) .. "." .. tostring(decimals) .. "f", v)

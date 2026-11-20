@@ -136,24 +136,22 @@ fn __char_units(b0: int, cp: int) -> int {
 
 // ---------------------------------------------------------------------------
 // String-interpolation format helpers. Called by generated code by name, so
-// they keep @nomangle. Emitted as inline(lua) on the luajit backend.
+// they keep @nomangle.
 // ---------------------------------------------------------------------------
 
 @nomangle
-@intrinsic inline(lua) fn __rock_fmt_pad(s: string, width: int, align: string, fill: string) -> string = """
-    s = tostring(s)
-    local n = #s
-    if n >= width then return s end
-    local pad = width - n
-    if align == "<" then
-        return s .. string.rep(fill, pad)
-    elseif align == "^" then
-        local left = math.floor(pad / 2)
-        return string.rep(fill, left) .. s .. string.rep(fill, pad - left)
-    else
-        return string.rep(fill, pad) .. s
-    end
-"""
+@intrinsic fn __rock_fmt_pad(s: string, width: int, align: string, fill: string) -> string {
+    let text = tostring(s)
+    let n = text.len()
+    if n >= width { return text }
+    let pad = width - n
+    if align == "<" { return text + fill.repeat(pad) }
+    if align == "^" {
+        let left = pad ./ 2
+        return fill.repeat(left) + text + fill.repeat(pad - left)
+    }
+    return fill.repeat(pad) + text
+}
 
 @nomangle
 @intrinsic inline(lua) fn __rock_fmt_grouping(s: string, sep: string, group: int) -> string = """

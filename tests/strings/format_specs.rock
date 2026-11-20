@@ -296,6 +296,17 @@ fn formatting_entry_points() {
 }
 
 @test
+fn padding_with_odd_slack_and_embedded_nul() {
+    let text = "a\u{0}b"
+    let width = 6
+    assert_eq(text.pad_left(width), "   a\u{0}b")
+    assert_eq(text.pad_right(width), "a\u{0}b   ")
+    assert_eq(text.pad_left(-1), text)
+    assert_eq(text.pad_right(3), text)
+    assert_eq("{text:*^{width}}", "*a\u{0}b**")
+}
+
+@test
 fn test_grouping_comma() {
     let n = 1000000
     assert_eq("{n:,}", "1,000,000")

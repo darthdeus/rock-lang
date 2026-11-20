@@ -202,11 +202,17 @@ fn v_isinf_finite() -> bool {
     return isinf(1.5)
 }
 
-// The positive isnan/isinf cases are NOT corpus rows: the value-test harness has
-// no runtime inputs, so `0.0/0.0` / `1.0/0.0` are compile-time constants the GL
-// driver folds to finite values before isnan/isinf run (folds to 0.0 here). The
-// TRUE nan/inf path is validated by the nonfinite pixel sim, where the values
-// flow through an rgba16f texel and cannot be folded away.
+// GLSL drivers can fold division by zero to a finite constant.
+@test(backends = "lua,js")
+fn ieee_predicates_distinguish_nan_and_infinity() {
+    let nan = 0.0 / 0.0
+    assert(isnan(nan))
+    assert(!isinf(nan))
+    for inf in [1.0 / 0.0, -1.0 / 0.0] {
+        assert(isinf(inf))
+        assert(!isnan(inf))
+    }
+}
 
 // Bvec3 construction + a direct component read: the read must type as Bool, not
 // the "Vec component" Float fallback (the easy-to-miss ty_of Field site).

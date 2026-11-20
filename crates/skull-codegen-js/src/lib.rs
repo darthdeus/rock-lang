@@ -54,9 +54,6 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("lower", 1, "$1.toLowerCase()"),
     template("string_char", 1, "String.fromCharCode($1)"),
     template("same_ref", 2, "($1 === $2)"),
-    template("isnan", 1, "Number.isNaN($1)"),
-    // isinf excludes NaN (a NaN is neither finite nor infinite).
-    template("isinf", 1, "(!Number.isFinite($1) && !Number.isNaN($1))"),
     template("__nb_alloc_u8", 1, "new Uint8Array($1)"),
     template("__nb_alloc_i8", 1, "new Int8Array($1)"),
     template("__nb_alloc_u16", 1, "new Uint16Array($1)"),
@@ -162,7 +159,6 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("__rock_deepcopy_value", 2, "__rock_deepcopy_value($1, $2)"),
     template("inspect", 3, "inspect($1, $2, $3)"),
     template("inspect_formatted", 2, "inspect_formatted($1, $2)"),
-    template("__rock_fmt_pad", 4, "__rock_fmt_pad($1, $2, $3, $4)"),
     template("__rock_fmt_grouping", 3, "__rock_fmt_grouping($1, $2, $3)"),
     template("__rock_fmt_binary", 1, "__rock_fmt_binary($1)"),
     template("__rock_fmt_percent", 2, "__rock_fmt_percent($1, $2)"),
@@ -1493,20 +1489,10 @@ function __from_codepoint(cp) {
   return String.fromCodePoint(cp);
 }
 // The `{x:spec}` string-interpolation format helpers (stdlib/strings.rock,
-// @nomangle inline(lua)). ASCII fill/sep. `__rock_fmt_pad` pads `s` to `width`
-// (`<` left, `^` centered, else right); `__rock_fmt_grouping` inserts `sep`
+// @nomangle inline(lua)). `__rock_fmt_grouping` inserts `sep`
 // every `group` digits from the right of the integer part (sign + fractional
 // tail preserved); `__rock_fmt_binary` is sign + magnitude base-2 of floor(n);
 // `__rock_fmt_percent` is `v*100` with `p` decimals (p<0 -> 6) + literal `%`.
-function __rock_fmt_pad(s, width, align, fill) {
-  s = lua_tostring(s);
-  var n = s.length;
-  if (n >= width) return s;
-  var pad = width - n;
-  if (align === "<") return s + fill.repeat(pad);
-  if (align === "^") { var left = Math.floor(pad / 2); return fill.repeat(left) + s + fill.repeat(pad - left); }
-  return fill.repeat(pad) + s;
-}
 function __rock_fmt_grouping(s, sep, group) {
   var m = s.match(/^([+\-]?)([a-zA-Z0-9]+)(\.?[\s\S]*)$/);
   if (!m) return s;

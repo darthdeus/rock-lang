@@ -62,17 +62,12 @@ struct UniformArray<T> { }
     error("at() is GPU-only (uniform-array indexing)")
 """
 
-// IEEE non-finite predicates. GLES 3.00 has isnan/isinf natively (the GLSL
-// templates map straight through). NOT @gpu_only -- CPU-callable, so the
-// value-test corpus exercises them on luajit and JS; the inline(lua) body IS
-// the luajit mapping, JS gets a table row (crates/skull-codegen-js).
-@intrinsic inline(lua) fn isnan(x: float) -> bool = """
-    return x ~= x
-"""
+// GLSL uses the native IEEE predicates.
+@intrinsic @inline fn isnan(x: float) -> bool { return x != x }
 
-@intrinsic inline(lua) fn isinf(x: float) -> bool = """
-    return x == math.huge or x == -math.huge
-"""
+@intrinsic @inline fn isinf(x: float) -> bool {
+    return abs(x) == 1.0 / 0.0
+}
 
 value Bvec3 { x: bool, y: bool, z: bool }
 

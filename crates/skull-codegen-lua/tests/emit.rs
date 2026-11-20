@@ -130,6 +130,19 @@ fn emit(src: &str, fn_name: &str) -> String {
 }
 
 #[test]
+fn prelude_predicates_emit_without_wrapper_calls() {
+    let lua = emit_inlined(
+        "fn run(x: float, value: any?) -> (bool, bool, bool) { return (isnan(x), isinf(x), is_null(value)) }",
+        "run",
+    );
+    for name in ["isnan_", "isinf_", "is_null("] {
+        assert!(!lua.contains(name), "{lua}");
+    }
+    assert!(lua.contains(" ~= ") && lua.contains("math.abs("), "{lua}");
+    assert!(lua.contains(" == (nil)"), "{lua}");
+}
+
+#[test]
 fn sinking_preserves_dynamic_format_error_order() {
     for result in ["s", "\"[{s}]\""] {
         let lua = emit_clean(
