@@ -146,11 +146,6 @@ struct ConsentState {
     generation: Uuid,
 }
 
-struct AppendFailure {
-    error: io::Error,
-    rollback_failed: bool,
-}
-
 #[derive(Debug)]
 struct SpoolAtCapacity;
 
@@ -238,11 +233,9 @@ impl TelemetrySpool {
                 "telemetry spool reached its 8 MiB cap",
             ));
         }
-        if let Err(failure) = append_transaction(&self.events_path, &lines, persist) {
-            if failure.rollback_failed {
-                self.writable = false;
-            }
-            return Err(failure.error);
+        if let Err(error) = append_transaction(&self.events_path, &lines, persist) {
+            self.writable = file_len(&self.events_path).ok() == Some(current_len);
+            return Err(error);
         }
         if telemetry_revoked(&self.root) {
             discard_stats(&self.root)?;
@@ -375,29 +368,16 @@ fn load_consent_state_unlocked(root: &Path) -> io::Result<Option<ConsentState>> 
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid consent journal");
     let mut generations = Vec::new();
     let mut latest = None;
     for line in raw.lines() {
-        let mut fields = line.split(' ');
-        let (Some(state), Some(generation), None) = (fields.next(), fields.next(), fields.next())
-        else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid consent journal",
-            ));
+        let (enabled, generation) = match line.split_once(' ') {
+            Some(("on", generation)) => (true, generation),
+            Some(("off", generation)) => (false, generation),
+            _ => return Err(invalid()),
         };
-        let enabled = match state {
-            "on" => true,
-            "off" => false,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid consent journal",
-                ));
-            }
-        };
-        let generation = Uuid::parse_str(generation)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid consent journal"))?;
+        let generation = Uuid::parse_str(generation).map_err(|_| invalid())?;
         if generations.contains(&generation) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -427,20 +407,15 @@ fn append_consent_state_unlocked(
 ) -> io::Result<Uuid> {
     let reports = root.join("reports");
     sync_parent(&reports)?;
-    if !enabled {
-        if let Some(state) = load_consent_state_unlocked(root)? {
-            if !state.enabled {
-                return Ok(state.generation);
-            }
-        }
-    } else {
-        let _ = load_consent_state_unlocked(root)?;
+    let latest = load_consent_state_unlocked(root)?;
+    if let Some(state) = latest.filter(|state| !enabled && !state.enabled) {
+        return Ok(state.generation);
     }
     let path = consent_path(root);
     let generation = Uuid::new_v4();
     let state = if enabled { "on" } else { "off" };
     let line = format!("{state} {generation}\n");
-    append_transaction(&path, line.as_bytes(), persist).map_err(|failure| failure.error)?;
+    append_transaction(&path, line.as_bytes(), persist)?;
     Ok(generation)
 }
 
@@ -478,47 +453,27 @@ fn append_transaction(
     path: &Path,
     bytes: &[u8],
     persist: impl FnOnce(&fs::File) -> io::Result<()>,
-) -> Result<(), AppendFailure> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
+) -> io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let original_len = file.metadata()?.len();
+    let Err(error) = file.write_all(bytes).and_then(|_| persist(&file)) else {
+        return Ok(());
+    };
+    // Windows append handles cannot truncate; rollback needs a write handle.
+    OpenOptions::new()
+        .write(true)
         .open(path)
-        .map_err(|error| AppendFailure {
-            error,
-            rollback_failed: false,
+        .and_then(|writer| {
+            writer.set_len(original_len)?;
+            writer.sync_all()
+        })
+        .and_then(|_| sync_parent(path))
+        .map_err(|rollback| {
+            io::Error::other(format!(
+                "telemetry append failed ({error}); rollback failed ({rollback})"
+            ))
         })?;
-    let original_len = file
-        .metadata()
-        .map_err(|error| AppendFailure {
-            error,
-            rollback_failed: false,
-        })?
-        .len();
-    let result = file.write_all(bytes).and_then(|_| persist(&file));
-    if let Err(error) = result {
-        // Windows append handles cannot truncate; rollback needs a write handle.
-        let rollback = OpenOptions::new()
-            .write(true)
-            .open(path)
-            .and_then(|writer| {
-                writer.set_len(original_len)?;
-                writer.sync_all()
-            })
-            .and_then(|_| sync_parent(path));
-        return match rollback {
-            Ok(()) => Err(AppendFailure {
-                error,
-                rollback_failed: false,
-            }),
-            Err(rollback) => Err(AppendFailure {
-                error: io::Error::other(format!(
-                    "telemetry append failed ({error}); rollback failed ({rollback})"
-                )),
-                rollback_failed: true,
-            }),
-        };
-    }
-    Ok(())
+    Err(error)
 }
 
 impl TelemetryIdentity {
@@ -807,7 +762,6 @@ impl TelemetryDrain {
             &record,
             sync_file_and_parent(&self.quarantine_path),
         )
-        .map_err(|failure| failure.error)
     }
 
     fn mark_uploaded(&self) -> io::Result<()> {
