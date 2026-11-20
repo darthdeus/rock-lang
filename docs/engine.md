@@ -331,6 +331,23 @@ or replace its provider, rather than adding another family of action queries.
 Touch bindings require a concrete remappable-control use; a gesture can instead
 be a pointer event, virtual action or text input.
 
+## Adding a cimgui wrapper
+
+Stone embeds the cimgui Lua bindings from the release pinned by
+`gamelibs.version`. The release's `build_imgui_bindings.py` pairs the cimgui
+headers and native library with the vendored cimgui-love generator. Its
+`overloads.txt`, `ignored_defaults.txt` and `ignored_out_arg.txt` describe the
+generator's decisions.
+
+Add the Lua export name or `Type.Method` to
+`packages/stone/prebuilt/cimgui/wrappers.txt`, then run
+`python3 scripts/stone_imgui_wrappers.py` from the repository root. The script
+reads the pinned release's `wrap.lua`, follows references to wrapper helpers,
+and writes the embedded subset. Commit the list and generated file together.
+Run the same command with `--check` to verify the output. Include names used
+through computed wrapper lookups in the list. The full C namespace (`imgui.C`)
+and all enum names are available independently of the list.
+
 ## Audio
 
 The pipeline is: source libraries and authoring tools, the `sound-core`
