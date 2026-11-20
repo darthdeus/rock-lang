@@ -173,3 +173,16 @@ fn test_json_signed_zero_survives_a_warm_integer_shortcut() {
         assert_eq(json_encode_pretty(scalar), expected[index])
     }
 }
+
+// Ints past the 14 digits of the backend's tostring must keep every digit.
+@test
+fn test_json_int_encode_round_trips_exactly() {
+    for value in [99999999999999, 100000000000000, 123456789012345, 9007199254740991,
+        9007199254740992, -9007199254740992] {
+        let scalar = json_int(value)
+        for text in [json_encode(scalar), json_encode_pretty(scalar)] {
+            assert_eq(text, "{value:d}")
+            assert_eq(json_as_int(json_decode(text).unwrap()).unwrap(), value)
+        }
+    }
+}

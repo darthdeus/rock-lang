@@ -85,7 +85,7 @@ fn encode_into(v: JsonValue, parts: [string]) {
     match v {
         Null => parts.push("null"),
         Bool(b) => parts.push(if b { "true" } else { "false" }),
-        Int(i) => parts.push("{i}"),
+        Int(i) => parts.push(if i > -100000000000000 && i < 100000000000000 { "{i}" } else { "{i:d}" }),
         Float(f) => parts.push(format_float(f)),
         Str(s) => parts.push(encode_string(s)),
         Array(items) => encode_array(items, parts),
