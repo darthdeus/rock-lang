@@ -76,34 +76,21 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn expr_is_flat_vec(&self, e: Idx<Expr>) -> bool {
-        if let Some(ty) = self.concrete_expr_ty(e) {
-            let (payload, _) = ty.peel_nullable();
-            return matches!(
-                payload,
-                MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(n), ..
-                } if bone_core::modules::is_intrinsic_key(*n, "FlatVec")
-            );
-        }
-        false
+        self.concrete_expr_ty(e).is_some_and(|ty| {
+            matches!(
+                ContainerFamily::of(ty.peel_nullable().0),
+                Some((ContainerFamily::FlatVec, _))
+            )
+        })
     }
 
     pub(crate) fn nb_value_elem(&self, e: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
         let Some(concrete) = self.concrete_expr_ty(e) else {
             return Ok(None);
         };
-        let family = match concrete.peel_nullable().0 {
-            MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                ..
-            } => {
-                if bone_core::modules::is_intrinsic_key(*name, "NativeBuffer") {
-                    ContainerFamily::NativeBuffer
-                } else if bone_core::modules::is_intrinsic_key(*name, "FlatVec") {
-                    ContainerFamily::FlatVec
-                } else {
-                    return Ok(None);
-                }
+        let family = match ContainerFamily::of(concrete.peel_nullable().0) {
+            Some((family @ (ContainerFamily::NativeBuffer | ContainerFamily::FlatVec), _)) => {
+                family
             }
             _ => return Ok(None),
         };
@@ -162,18 +149,15 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn flat_stored_container_type(&self, ty: &MonoTy) -> Result<bool, CompilerError> {
-        for family in [
-            ContainerFamily::Vec,
-            ContainerFamily::Map,
-            ContainerFamily::Arena,
-        ] {
-            if ContainerPlan::matches_type(family, ty) {
-                let plan = self.container_plan_for_type(ty, family)?;
-                let arena = self.scx.rep_arena();
-                return Ok(plan.flat_elem(arena).is_some());
-            }
-        }
-        Ok(false)
+        let Some((
+            family @ (ContainerFamily::Vec | ContainerFamily::Map | ContainerFamily::Arena),
+            _,
+        )) = ContainerFamily::of(ty.peel_nullable().0)
+        else {
+            return Ok(false);
+        };
+        let plan = self.container_plan_for_type(ty, family)?;
+        Ok(plan.flat_elem(self.scx.rep_arena()).is_some())
     }
 
     pub(crate) fn arena_column_elem_of(

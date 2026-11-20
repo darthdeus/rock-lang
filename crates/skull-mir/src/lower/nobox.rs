@@ -144,32 +144,7 @@ impl<'a> Builder<'a> {
         mono: &crate::monoty::MonoTy,
         leaf_views_rebuilt: bool,
     ) -> Result<Option<(String, &'static str)>, CompilerError> {
-        let family = match mono {
-            crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Array,
-                ..
-            } => Some(ContainerFamily::Vec),
-            crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Map,
-                ..
-            } => Some(ContainerFamily::Map),
-            crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                ..
-            } => {
-                if bone_core::modules::is_intrinsic_key(*name, "Arena") {
-                    Some(ContainerFamily::Arena)
-                } else if bone_core::modules::is_intrinsic_key(*name, "NativeBuffer") {
-                    Some(ContainerFamily::NativeBuffer)
-                } else if bone_core::modules::is_intrinsic_key(*name, "FlatVec") {
-                    Some(ContainerFamily::FlatVec)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        let Some(family) = family else {
+        let Some((family, _)) = ContainerFamily::of(mono) else {
             return Ok(None);
         };
         let plan = self.container_plan_for_type(mono, family)?;

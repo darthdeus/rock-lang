@@ -9,6 +9,32 @@ pub enum ContainerFamily {
     FlatVec,
 }
 
+impl ContainerFamily {
+    /// The family of `ty` itself (a nullable container is not one) and its type arguments.
+    pub fn of(ty: &crate::monoty::MonoTy) -> Option<(Self, &[crate::monoty::MonoTy])> {
+        use crate::monoty::{MonoCtor, MonoTy};
+        let MonoTy::App { ctor, params } = ty else {
+            return None;
+        };
+        let family = match ctor {
+            MonoCtor::Array => Self::Vec,
+            MonoCtor::Map => Self::Map,
+            MonoCtor::Nominal(name) => {
+                [
+                    ("Arena", Self::Arena),
+                    ("NativeBuffer", Self::NativeBuffer),
+                    ("FlatVec", Self::FlatVec),
+                ]
+                .into_iter()
+                .find(|(key, _)| bone_core::modules::is_intrinsic_key(*name, key))?
+                .1
+            }
+            _ => return None,
+        };
+        Some((family, params))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContainerStorage {
     Boxed { element: RepId },
@@ -27,48 +53,7 @@ pub struct ContainerPlan {
 
 impl ContainerPlan {
     pub fn matches_type(family: ContainerFamily, ty: &crate::monoty::MonoTy) -> bool {
-        match (family, ty.peel_nullable().0) {
-            (
-                ContainerFamily::Vec,
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Array,
-                    ..
-                },
-            ) => true,
-            (
-                ContainerFamily::Map,
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Map,
-                    ..
-                },
-            ) => true,
-            (
-                ContainerFamily::Arena,
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name),
-                    ..
-                },
-            ) if family == ContainerFamily::Arena
-                && bone_core::modules::is_intrinsic_key(*name, "Arena") =>
-            {
-                true
-            }
-            (
-                ContainerFamily::NativeBuffer,
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name),
-                    ..
-                },
-            ) if bone_core::modules::is_intrinsic_key(*name, "NativeBuffer") => true,
-            (
-                ContainerFamily::FlatVec,
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name),
-                    ..
-                },
-            ) if bone_core::modules::is_intrinsic_key(*name, "FlatVec") => true,
-            _ => false,
-        }
+        ContainerFamily::of(ty.peel_nullable().0).is_some_and(|(found, _)| found == family)
     }
 
     pub fn for_type(
@@ -90,67 +75,8 @@ impl ContainerPlan {
         family: ContainerFamily,
         ty: &crate::monoty::MonoTy,
     ) -> Result<Self, RepError> {
-        let (element, nullable) = match (family, ty.peel_nullable().0) {
-            (
-                ContainerFamily::Vec,
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Array,
-                    params,
-                },
-            ) => {
-                let element = params.first().ok_or_else(|| RepError {
-                    span: None,
-                    message: "Vec has no element type".into(),
-                })?;
-                let (payload, nullable) = element.peel_nullable();
-                (payload.clone(), nullable)
-            }
-            (
-                ContainerFamily::Map,
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Map,
-                    params,
-                },
-            ) => {
-                let value = params.get(1).ok_or_else(|| RepError {
-                    span: None,
-                    message: "Map has no value type".into(),
-                })?;
-                let (value, _) = value.peel_nullable();
-                (value.clone(), false)
-            }
-            (
-                ContainerFamily::Arena,
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name),
-                    params,
-                },
-            ) if bone_core::modules::is_intrinsic_key(*name, "Arena") => {
-                let element = params.first().ok_or_else(|| RepError {
-                    span: None,
-                    message: "Arena has no element type".into(),
-                })?;
-                let (element, nullable) = element.peel_nullable();
-                (element.clone(), nullable)
-            }
-            (
-                family @ (ContainerFamily::NativeBuffer | ContainerFamily::FlatVec),
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name),
-                    params,
-                },
-            ) if (family == ContainerFamily::NativeBuffer
-                && bone_core::modules::is_intrinsic_key(*name, "NativeBuffer"))
-                || (family == ContainerFamily::FlatVec
-                    && bone_core::modules::is_intrinsic_key(*name, "FlatVec")) =>
-            {
-                let element = params.first().ok_or_else(|| RepError {
-                    span: None,
-                    message: "native buffer has no element type".into(),
-                })?;
-                let (element, nullable) = element.peel_nullable();
-                (element.clone(), nullable)
-            }
+        let params = match ContainerFamily::of(ty.peel_nullable().0) {
+            Some((found, params)) if found == family => params,
             _ => {
                 return Err(RepError {
                     span: None,
@@ -158,6 +84,14 @@ impl ContainerPlan {
                 });
             }
         };
+        // A Map stores its values under keys, so a nullable value needs no presence.
+        let element_index = usize::from(family == ContainerFamily::Map);
+        let element = params.get(element_index).ok_or_else(|| RepError {
+            span: None,
+            message: format!("{family:?} has no element type"),
+        })?;
+        let (element, nullable) = element.peel_nullable();
+        let (element, nullable) = (element.clone(), nullable && family != ContainerFamily::Map);
         let physical_element = if nullable {
             crate::monoty::MonoTy::nullable(element.clone())
         } else {

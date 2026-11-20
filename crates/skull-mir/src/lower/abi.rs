@@ -513,15 +513,7 @@ fn rep_slot(
 }
 
 fn container_slot(target: FnBackend, family: super::container::ContainerFamily) -> usize {
-    use super::container::ContainerFamily;
-    let family_index = match family {
-        ContainerFamily::Vec => 0,
-        ContainerFamily::Map => 1,
-        ContainerFamily::Arena => 2,
-        ContainerFamily::NativeBuffer => 3,
-        ContainerFamily::FlatVec => 4,
-    };
-    target_index(target) * CONTAINER_FAMILIES + family_index
+    target_index(target) * CONTAINER_FAMILIES + family as usize
 }
 
 struct TypeFacts {
