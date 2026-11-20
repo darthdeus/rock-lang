@@ -152,9 +152,6 @@ pub static COMMANDS: &[&CliCommand] = &[
         name: "lint",
         route: Route::Direct(|cx| {
             let path = cx.get_path_or_current()?;
-            if cx.args.union {
-                return rock_cli::lint_union::do_lint_union(&path, cx.args.consumers.as_deref());
-            }
             rock_cli::do_lint(&path, cx.args.lints.as_deref())
         }),
     },

@@ -49,7 +49,6 @@ mod js_runner;
 pub mod js_test;
 mod lint_cmd;
 pub(crate) mod lint_pass;
-pub mod lint_union;
 pub mod live_project;
 mod lsp_survey;
 mod package_test_sources;
@@ -142,14 +141,6 @@ pub struct Args {
     /// which a build and the LSP never run. `rock lint` only -- a build's
     /// catalog is not the author's to narrow per invocation.
     pub lints: Option<String>,
-
-    /// `rock lint --union <lib>`: judge a library's reachability against every
-    /// consumer in the repo at once, reporting only what none of them reach.
-    pub union: bool,
-    /// Where `--union` looks for consumers. Defaults to the lib's parent, which
-    /// is right when the lib sits beside its consumers (`libs/example/`); a nested lib
-    /// (`libs/example-core`) needs the repo root passed explicitly.
-    pub consumers: Option<String>,
 }
 
 impl Args {
@@ -246,10 +237,6 @@ impl Args {
                 .help("Report build lint warnings/advice as a one-line count instead of rendering each. Error-severity lints always render in full."))
             .arg(Arg::new("lints").long("lints")
                 .help("For `rock lint <path>`: run ONLY the named lints (comma-separated), including opt-in ones a build never runs."))
-            .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
-                .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
-            .arg(Arg::new("consumers").long("consumers")
-                .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/example-core`."))
             .arg(Arg::new("backend").long("backend")
                 .value_parser(BackendSpec::value_parser())
                 .help(format!("Compiler backend (default: skull). {}.", registry::BackendSpec::all().iter().map(|spec| format!("{}{}", spec.name, if spec.omitted_feature.is_some() { " (not in this build)" } else { "" })).collect::<Vec<_>>().join(", "))))
@@ -366,8 +353,6 @@ impl Args {
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
             lints: m.get_one::<String>("lints").cloned(),
-            union: m.get_flag("union"),
-            consumers: m.get_one::<String>("consumers").cloned(),
             backend: m
                 .get_one::<Backend>("backend")
                 .copied()

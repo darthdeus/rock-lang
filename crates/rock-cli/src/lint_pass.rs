@@ -223,26 +223,6 @@ fn summary_line(soft: &[bone_lints::Finding], root: &Path) -> String {
     )
 }
 
-/// Judge the library's reachability in one consumer. The union pass intersects these findings.
-pub(crate) fn unused_fns_under(
-    ws: &Workspace,
-    sources: &SourceFiles,
-    consumer: &Path,
-    report_root: &Path,
-) -> Vec<bone_lints::Finding> {
-    with_source_texts(sources, |texts| {
-        let warm = skull::pipeline::warm_module_ids(ws, texts);
-        let is_bin = rock_host::stick::StickConfig::is_bin_at(consumer);
-        let report: FxHashMap<Ustr, &str> = texts
-            .iter()
-            .filter(|(file, _)| Path::new(file.as_str()).starts_with(report_root))
-            .map(|(&file, &text)| (file, text))
-            .collect();
-        let only = bone_lints::LintOptions::only([bone_lints::UNUSED_FN.to_owned()]);
-        bone_lints::lint_workspace(ws, &warm, is_bin, &report, &only)
-    })
-}
-
 fn with_source_texts<R>(
     sources: &SourceFiles,
     use_texts: impl FnOnce(&FxHashMap<Ustr, &str>) -> R,
