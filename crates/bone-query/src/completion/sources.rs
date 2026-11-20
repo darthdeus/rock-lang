@@ -953,7 +953,7 @@ pub(crate) fn pattern_scrutinee_enum(
     let arm_munge = balance_delimiters(format!("{head}__rock_completion__ => {{}}{tail}"));
     let [m1, m2] = completion_munges(src, offset);
     for munged in [arm_munge, m1, m2] {
-        let hit = analyze_variant(session, path, &munged, |ws| {
+        let hit = analyze_variant(session, path, &munged, |ws, _| {
             let mid = user_module_for_path(ws, path)?;
             let inf = ws.inference(mid)?;
             let at = bone_semantic::query::type_at(ws, mid, inf, anchor)?;

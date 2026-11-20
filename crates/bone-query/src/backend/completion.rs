@@ -26,7 +26,7 @@ impl Request<'_> {
     ) -> Option<T> {
         self.munges()
             .iter()
-            .find_map(|text| analyze_variant(session, self.path, text, &query).flatten())
+            .find_map(|text| analyze_variant(session, self.path, text, |ws, _| query(ws)).flatten())
     }
 }
 
@@ -245,8 +245,15 @@ fn member_candidates_at(
             break;
         }
         for text in rq.munges() {
-            let candidates = analyze_variant(session, rq.path, text, |ws| {
+            let candidates = analyze_variant(session, rq.path, text, |ws, live| {
                 let mid = user_module_for_path(ws, rq.path)?;
+                let fallback_reach;
+                let reach = if live {
+                    reach
+                } else {
+                    fallback_reach = crate::reachability::ReachabilityIndex::build(ws);
+                    &fallback_reach
+                };
                 let members = if named {
                     crate::query::members_of_name_path(ws, mid, rq.offset, path?)
                 } else {

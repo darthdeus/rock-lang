@@ -2868,13 +2868,15 @@ fn recover_missing_module(
     )
 }
 
+/// `f` also learns whether `ws` is the live session's workspace; indexes
+/// cached from the session do not describe a single-file fallback.
 pub(crate) fn analyze_variant<R>(
     session: &mut Session,
     path: &str,
     munged: &str,
-    f: impl Fn(&Workspace) -> R,
+    f: impl Fn(&Workspace, bool) -> R,
 ) -> Option<R> {
-    match session.with_file_variant(path, munged, &f) {
+    match session.with_file_variant(path, munged, |ws| f(ws, true)) {
         Ok(r) => Some(r),
         Err(e) => {
             log::warn!(
@@ -2884,7 +2886,7 @@ pub(crate) fn analyze_variant<R>(
             let fallback = skull_parser::parse_module(munged, Ustr::from(path))
                 .and_then(|m| bone_semantic::semantic_passes::semantic_pass(&mut [m]));
             match fallback {
-                Ok(ws) => Some(f(&ws)),
+                Ok(ws) => Some(f(&ws, false)),
                 Err(error) => {
                     log::warn!(
                         "completion: single-file fallback also failed for `{path}`: {}; \

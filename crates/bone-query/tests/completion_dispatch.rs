@@ -36,3 +36,11 @@ fn a_scalar_call_receiver_falls_through_to_general_completion() {
         Insert::Plain("sc_two()"),
     );
 }
+
+#[test]
+fn single_file_fallback_member_completion_reaches_only_its_own_modules() {
+    let items = complete(
+        "value Vary { id: float }\nfn frag(vary: Vary, t: Missing) -> int {\n  return vary.i<|> as int\n}\n",
+    );
+    assert_offers(&labels_of(&items), &["id: float"]);
+}
