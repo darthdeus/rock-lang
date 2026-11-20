@@ -648,29 +648,6 @@ pub @scalar_abi inline(lua) fn imgui_window_add_image_quad(
         cache.u1, cache.u2, cache.u3, cache.u4, col_abgr)
 """
 
-// ImTextureID is the canvas texture's native GL name.
-@scalar_abi inline(lua) fn imgui_canvas_image_raw(
-    texture: int,
-    size: Vec2,
-    uv1: Vec2,
-    uv2: Vec2,
-    tint_color: Color,
-    border_color: Color
-) = """
-    local cache = __imgui_shared_image_packet()
-    cache.s.x, cache.s.y = size__x, size__y
-    cache.u1.x, cache.u1.y = uv1__x, uv1__y
-    cache.u2.x, cache.u2.y = uv2__x, uv2__y
-    cache.tint.x, cache.tint.y = tint_color__r, tint_color__g
-    cache.tint.z, cache.tint.w = tint_color__b, tint_color__a
-    cache.bg.x, cache.bg.y = border_color__r, border_color__g
-    cache.bg.z, cache.bg.w = border_color__b, border_color__a
-
-    cache.tex._TexData = nil
-    cache.tex._TexID = texture
-    imgui.Image(cache.tex, cache.s, cache.u1, cache.u2, cache.tint, cache.bg)
-"""
-
 // Canvas textures are Y-flipped relative to imgui's UV convention, hence the (0,1)-(1,0) default.
 pub fn imgui_canvas_image(
     canvas: Canvas,
@@ -681,7 +658,7 @@ pub fn imgui_canvas_image(
     border_color: Color = TRANSPARENT
 ) {
     let texture = stone_get_canvas_texture(canvas.handle.0)
-    imgui_canvas_image_raw(texture, size, uv1, uv2, color, border_color)
+    imgui_image_raw(texture, size, uv1, uv2, color, border_color)
 }
 
 // imgui.ImageButton takes the background before the tint; only pixels catch a swap.
