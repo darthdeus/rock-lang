@@ -186,3 +186,66 @@ fn iterator_reads_vec_length_each_turn() {
     }
     assert_eq(count, 4)
 }
+
+fn fused_latch(n: int, stop: int) -> int {
+    let i = 0
+    let sum = 0
+    while i < n {
+        if i == stop { break }
+        if i % 2 == 0 { sum += i } else { sum -= 1 }
+        sum += 1
+        i += 1
+    }
+    sum
+}
+
+fn straight_latch() -> int {
+    let i = 0
+    let sum = 0
+    while i < 5 {
+        sum += i
+        i += 1
+    }
+    sum
+}
+
+fn continue_skips_latch(n: int) -> int {
+    let i = 0
+    let sum = 0
+    while i < n {
+        if i == 0 {
+            i += 2
+            continue
+        }
+        sum += i
+        i += 1
+    }
+    sum
+}
+
+@test
+fn invariant_bound_with_work_in_the_latch() {
+    assert_eq(fused_latch(5, 8), 9)
+    assert_eq(fused_latch(5, 3), 4)
+    assert_eq(fused_latch(0, 8), 0)
+    assert_eq(straight_latch(), 10)
+    assert_eq(continue_skips_latch(5), 9)
+}
+
+co fn indices(xs: [int]) -> Coroutine<int> {
+    let i = 0
+    while i < xs.len() {
+        yield i
+        i += 1
+    }
+}
+
+@test
+fn resumed_test_reads_the_current_bound() {
+    let xs = [0]
+    let c = indices(xs)
+    assert_eq(c.resume(), 0)
+    vec_push(xs, 1)
+    assert_eq(c.resume(), 1)
+    assert(c.resume() == null)
+}

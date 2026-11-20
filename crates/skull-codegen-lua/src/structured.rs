@@ -370,8 +370,7 @@ impl PlacementEmit for Printer<'_, '_> {
                 self.em.write_label(self.out, Label::Continue, header);
             }
             if lp.latch != header {
-                self.em
-                    .write_kills(self.out, self.em.kills.at_entry(lp.latch));
+                self.em.emit_for_latch(self.out, header, lp.latch);
             }
             let end = self.line("end", 1);
             let head = token.head.expect("native loop header");

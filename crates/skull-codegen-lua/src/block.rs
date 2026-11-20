@@ -180,7 +180,11 @@ impl Emitter<'_> {
     /// The statements of `bb` without its terminator. True when a tail
     /// forward already ended the block with its `return`.
     pub(crate) fn emit_block_statements(&mut self, out: &mut String, bb: Idx<Block>) -> bool {
-        let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
+        self.emit_block_prefix(out, bb, self.func.blocks[bb].insts.len())
+    }
+
+    fn emit_block_prefix(&mut self, out: &mut String, bb: Idx<Block>, len: usize) -> bool {
+        let insts = &self.func.blocks[bb].insts[..len];
         let tail = self.tail_forwards[raw(bb) as usize];
         let emitted_len = insts.len() - tail.map_or(0, <[_]>::len);
         // Kills are written before the next statement, so the ones after the
@@ -307,7 +311,9 @@ impl Emitter<'_> {
         // redefined, so the header's kills go once, above the `for`.
         self.write_kills(out, self.kills.at_entry(header));
         self.write_for_head(out, header);
-        self.emit_block(out, body_entry);
+        if body_entry != latch {
+            self.emit_block(out, body_entry);
+        }
         for &bb in self.rpo {
             if region.contains(&bb) {
                 self.emit_block(out, bb);
@@ -317,11 +323,20 @@ impl Emitter<'_> {
         self.drop_fallthrough_goto(out, latch);
         self.write_block_label(out, latch);
         if latch != header {
-            self.write_kills(out, self.kills.at_entry(latch));
+            self.emit_for_latch(out, header, latch);
         }
         out.push_str(" end\n");
         scope_guard::close(self.func, header);
         self.write_goto(out, Label::Block, exit);
+    }
+
+    pub(crate) fn emit_for_latch(
+        &mut self,
+        out: &mut String,
+        header: Idx<Block>,
+        latch: Idx<Block>,
+    ) {
+        self.emit_block_prefix(out, latch, self.loops[&header].latch_body_len(self.func));
     }
 }
 

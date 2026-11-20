@@ -1,8 +1,10 @@
 use super::*;
 
+const NUMERIC_LATCH_LEN: usize = 4;
+
 /// The upper bound of a counted loop: the RHS of the header `i < HI` compare.
 pub(crate) enum HiLimit {
-    /// A value computed in the preheader (e.g. `#arr`); live through the header.
+    /// A value computed before the header, or an integer literal.
     Value(Idx<Inst>),
     /// An invariant local loaded in the header.
     Cell(Idx<Cell>),
@@ -39,6 +41,13 @@ impl ForLoop {
             ForControl::Map { .. } => 5,
         }
     }
+
+    pub(crate) fn latch_body_len(&self, func: &MirFunc) -> usize {
+        match self.control {
+            ForControl::Numeric { .. } => func.blocks[self.latch].insts.len() - NUMERIC_LATCH_LEN,
+            ForControl::Map { .. } => 0,
+        }
+    }
 }
 
 /// Instructions replaced by a native Lua `for`'s head and increment.
@@ -47,11 +56,12 @@ pub(crate) fn for_control_insts<'a>(
     loops: &'a HashMap<Idx<Block>, ForLoop>,
 ) -> impl Iterator<Item = Idx<Inst>> + 'a {
     loops.iter().flat_map(move |(&header, cl)| {
-        func.blocks[header]
-            .insts
-            .iter()
-            .chain(&func.blocks[cl.latch].insts)
-            .copied()
+        let latch = if cl.latch == header {
+            &[]
+        } else {
+            &func.blocks[cl.latch].insts[cl.latch_body_len(func)..]
+        };
+        func.blocks[header].insts.iter().chain(latch).copied()
     })
 }
 
@@ -103,15 +113,11 @@ fn try_match_loop(
     if gp.len() != 2 || all_preds.get(&h).map_or(0, |v| v.len()) != 2 {
         return None;
     }
-    let mut latch = None;
-    let mut slot = None;
-    for &p in gp {
-        if let Some(s) = latch_slot(func, p, h) {
-            latch = Some(p);
-            slot = Some(s);
-        }
-    }
-    let (latch, slot) = (latch?, slot?);
+    let (latch, slot, preheader) = match (latch_slot(func, gp[0], h), latch_slot(func, gp[1], h)) {
+        (Some(slot), None) => (gp[0], slot, gp[1]),
+        (None, Some(slot)) => (gp[1], slot, gp[0]),
+        _ => return None,
+    };
     let (hi, inclusive) = match_header(func, h, cond, slot)?;
     let limit_cell = match hi {
         HiLimit::Cell(c) if c == slot => return None,
@@ -127,7 +133,8 @@ fn try_match_loop(
     let region = compute_region(all_preds, then_bb, h, latch)?;
     // The post-for edge must leave the loop. A short-circuit condition can
     // route the false arm through a join that is still inside the body.
-    if else_bb == h || else_bb == latch || region.contains(&else_bb) {
+    if else_bb == h || else_bb == latch || region.contains(&else_bb) || region.contains(&preheader)
+    {
         return None;
     }
     if !control_sound(func, slot, limit_cell, h, latch, &region) {
@@ -146,17 +153,14 @@ fn try_match_loop(
     })
 }
 
-/// `Some(slot)` iff `p` is exactly the latch `vj = load slot; one = 1;
-/// vinc = vj + one; store slot = vinc` jumping to `header`. A loop whose
-/// increment is fused into the body would otherwise double-increment.
+/// The latch ends in `vj = load slot; one = 1; vinc = vj + one; store slot = vinc`.
 fn latch_slot(func: &MirFunc, p: Idx<Block>, header: Idx<Block>) -> Option<Idx<Cell>> {
     if func.blocks[p].term != Term::Goto(header) {
         return None;
     }
-    let ins = &func.blocks[p].insts;
-    if ins.len() != 4 {
-        return None;
-    }
+    let (_, ins) = func.blocks[p]
+        .insts
+        .split_last_chunk::<NUMERIC_LATCH_LEN>()?;
     let (
         Inst::Load(slot),
         Inst::Const(Lit::Int(1)),
@@ -191,18 +195,17 @@ fn match_header(
     if !matches!(&func.insts[lhs], Inst::Load(s) if *s == slot) || !insts.contains(&lhs) {
         return None;
     }
-    let rhs_is_cell_load = matches!(&func.insts[rhs], Inst::Load(_)) && insts.contains(&rhs);
-    let allowed: HashSet<Idx<Inst>> = if rhs_is_cell_load {
-        [lhs, rhs, cond].into_iter().collect()
-    } else {
-        [lhs, cond].into_iter().collect()
-    };
-    if insts.iter().any(|i| !allowed.contains(i)) {
+    if insts.iter().any(|&i| i != lhs && i != cond && i != rhs) {
         return None;
     }
-    let hi = match &func.insts[rhs] {
-        Inst::Load(c) if rhs_is_cell_load => HiLimit::Cell(*c),
-        _ => HiLimit::Value(rhs),
+    let hi = if insts.contains(&rhs) {
+        match func.insts[rhs] {
+            Inst::Load(c) => HiLimit::Cell(c),
+            Inst::Const(Lit::Int(n)) if inclusive || n > -(1_i64 << 53) => HiLimit::Value(rhs),
+            _ => return None,
+        }
+    } else {
+        HiLimit::Value(rhs)
     };
     Some((hi, inclusive))
 }
@@ -255,10 +258,16 @@ fn control_sound(
     latch: Idx<Block>,
     region: &HashSet<Idx<Block>>,
 ) -> bool {
+    let latch_body_len = func.blocks[latch].insts.len() - NUMERIC_LATCH_LEN;
     let mut inits = 0;
     for (bid, b) in func.blocks.iter() {
         let inside = bid == header || bid == latch || region.contains(&bid);
-        for &i in &b.insts {
+        let insts = if bid == latch {
+            &b.insts[..latch_body_len]
+        } else {
+            &b.insts
+        };
+        for &i in insts {
             let inst = &func.insts[i];
             if matches!(inst, Inst::Load(c) if *c == slot && !inside) {
                 return false;
@@ -268,8 +277,10 @@ fn control_sound(
                 if inside && limit == Some(cell) {
                     sound = false;
                 }
-                if cell == slot && bid != latch {
-                    sound &= !inside && matches!(inst, Inst::Store { .. });
+                if cell == slot {
+                    // Below -2^53, subtracting one may round back to the exclusive limit.
+                    sound &= !inside && matches!(inst, Inst::Store { value, .. }
+                        if latch_body_len == 0 || matches!(func.insts[*value], Inst::Const(Lit::Int(0..=2_147_483_647))));
                     inits += 1;
                 }
             });

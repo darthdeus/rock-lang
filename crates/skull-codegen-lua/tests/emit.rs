@@ -1441,3 +1441,17 @@ fn numeric_for_requires_an_invariant_bound_and_unit_step() {
 fn has_general_loop(lua: &str) -> bool {
     lua.contains(" while ") || lua.contains("goto w")
 }
+
+#[test]
+fn numeric_for_keeps_latch_work_and_respects_continue() {
+    let src = include_str!("../../../tests/control_flow/counted_bounds.rock");
+    for (name, expected_for) in [
+        ("fused_latch", true),
+        ("straight_latch", true),
+        ("continue_skips_latch", false),
+    ] {
+        let lua = emit_clean(src, name);
+        assert_eq!(lua.contains(" for c"), expected_for, "{name}: {lua}");
+        assert_eq!(has_general_loop(&lua), !expected_for, "{name}: {lua}");
+    }
+}

@@ -229,8 +229,16 @@ impl<E: PlacementEmit> Walk<'_, E> {
             self.visited[index(lp.latch)] = true;
         }
         let token = self.emit.begin_loop(header, native)?;
-        let body = native.map_or(Inner::Node(header), |lp| Inner::Tree(lp.body));
-        self.with_followers(&inside, Follow::Continue(header), body)?;
+        match native {
+            Some(lp) if lp.body == lp.latch => {
+                debug_assert!(inside.is_empty());
+                self.reaches_end = true;
+            }
+            Some(lp) => {
+                self.with_followers(&inside, Follow::Continue(header), Inner::Tree(lp.body))?
+            }
+            None => self.with_followers(&inside, Follow::Continue(header), Inner::Node(header))?,
+        }
         self.emit.end_loop(
             header,
             native,
