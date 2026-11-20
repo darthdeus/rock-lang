@@ -419,6 +419,27 @@ mod overlay_runtime_tests {
         assert_stdout(run_parts(&parts), expected, ctx);
     }
 
+    fn assert_overlay_matches_full(v0: &str, v1: &str, driver: &str, before: &str, after: &str) {
+        let mut live = Live::boot(v0);
+        assert_run(&live.baseline, &[driver], before, "baseline");
+        let overlay = live.overlay(v1);
+        assert_run(&live.full(), &[driver], after, "fresh build");
+        assert_run(&live.baseline, &[&overlay, driver], after, "overlay");
+    }
+
+    fn assert_resume_after_overlay(
+        v0: &str,
+        v1: &str,
+        resume: &[&str],
+        expected: &str,
+        case: &str,
+    ) {
+        let mut live = Live::boot(v0);
+        let overlay = live.overlay(v1);
+        let steps = [&["start()", "pump()", &overlay][..], resume].concat();
+        assert_run(&live.baseline, &steps, expected, case);
+    }
+
     #[test]
     fn overlay_referencing_baseline_value_ctor_runtime_eq() {
         let decl = "value P { x: int, y: int }\nglobal INPUT: int = 5\n\
@@ -466,31 +487,7 @@ mod overlay_runtime_tests {
         let v0 = sim_fixture(1);
         let v1 = sim_fixture(2);
 
-        let mut live = Live::boot(&v0);
-
-        assert_run(
-            &live.baseline,
-            &[SIM_DRIVER],
-            "1",
-            "baseline frame should run the v0 system body",
-        );
-
-        let result = live.body_edit(&v1);
-        let overlay = live.emit(&result);
-        let fresh = live.full();
-
-        assert_run(
-            &fresh,
-            &[SIM_DRIVER],
-            "2",
-            "fresh full build should run the v1 body",
-        );
-        assert_run(
-            &live.baseline,
-            &[&overlay, SIM_DRIVER],
-            "2",
-            "the retained registry CodeRef must run the EDITED decorated body",
-        );
+        assert_overlay_matches_full(&v0, &v1, SIM_DRIVER, "1", "2");
     }
 
     #[test]
@@ -723,27 +720,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     fn coroutine_body_edit_overlay_runs_new_body() {
         let v0 = "co fn counter() -> Coroutine<int> {\n  yield 1\n  yield 2\n}\n\
                   fn main() {\n  let c = counter()\n  let a = c.resume() ?? -1\n  let b = c.resume() ?? -1\n  print(\"{a} {b}\")\n}\n";
-        let v1 = "co fn counter() -> Coroutine<int> {\n  yield 10\n  yield 20\n}\n\
-                  fn main() {\n  let c = counter()\n  let a = c.resume() ?? -1\n  let b = c.resume() ?? -1\n  print(\"{a} {b}\")\n}\n";
-
-        let mut live = Live::boot(v0);
-        assert_run(&live.baseline, &["main()"], "1 2", "baseline co fn body");
-
-        let result = live.body_edit(v1);
-        let overlay = live.emit(&result);
-        let fresh = live.full();
-        assert_run(
-            &fresh,
-            &["main()"],
-            "10 20",
-            "fresh full build runs the v1 co fn body",
-        );
-        assert_run(
-            &live.baseline,
-            &[&overlay, "main()"],
-            "10 20",
-            "overlay must run the EDITED coroutine body, not the stale one",
-        );
+        let v1 = v0.replace("yield 1\n  yield 2", "yield 10\n  yield 20");
+        assert_overlay_matches_full(v0, &v1, "main()", "1 2", "10 20");
     }
 
     #[test]
@@ -758,28 +736,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(1, 2), prog(10, 20));
 
-        let mut live = Live::boot(&v0);
-        assert_run(
-            &live.baseline,
-            &["main()"],
-            "1 3",
-            "baseline flat-enum co fn (Tick(1)=1, Pair(1,2)=3)",
-        );
-
-        let overlay = live.overlay(&v1);
-        let fresh = live.full();
-        assert_run(
-            &fresh,
-            &["main()"],
-            "10 30",
-            "fresh v1: Tick(10)=10, Pair(10,20)=30",
-        );
-        assert_run(
-            &live.baseline,
-            &[&overlay, "main()"],
-            "10 30",
-            "overlay must run the EDITED flat-enum body via the re-emitted frame-slot channel",
-        );
+        assert_overlay_matches_full(&v0, &v1, "main()", "1 3", "10 30");
     }
 
     #[test]
@@ -795,15 +752,12 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(1, 2), prog(10, 20));
 
-        let mut live = Live::boot(&v0);
-
-        let overlay = live.overlay(&v1);
-
-        assert_run(
-            &live.baseline,
-            &["start()", "pump()", &overlay, "pump()", "pump()", "pump()"],
+        assert_resume_after_overlay(
+            &v0,
+            &v1,
+            &["pump()", "pump()", "pump()"],
             "1\n30\n100\n-1",
-            "live coroutine: v0 first yield (Tick=1), then v1 body across the reload (Pair=30, Done=100, done)",
+            "retained coroutine yields the edited Pair, then Done, then completes",
         );
     }
 
@@ -822,22 +776,12 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(""), prog("  yield Ev::Done\n"));
 
-        let mut live = Live::boot(&v0);
-
-        let overlay = live.overlay(&v1);
-
-        assert_run(
-            &live.baseline,
-            &[
-                "start()",
-                "pump()",
-                &overlay,
-                EXPECT_LAYOUT_ERROR,
-                "pump()",
-                "pump()",
-            ],
+        assert_resume_after_overlay(
+            &v0,
+            &v1,
+            &[EXPECT_LAYOUT_ERROR, "pump()", "pump()"],
             "1\n-1\n-1\n-1",
-            "a yield-renumbering overlay must stamp-kill the live coroutine, not teleport its resume point",
+            "inserting a yield invalidates the retained resume point",
         );
     }
 
@@ -855,15 +799,12 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(1, 2), prog(10, 20));
 
-        let mut live = Live::boot(&v0);
-
-        let overlay = live.overlay(&v1);
-
-        assert_run(
-            &live.baseline,
-            &["start()", "pump()", &overlay, "pump()", "pump()"],
+        assert_resume_after_overlay(
+            &v0,
+            &v1,
+            &["pump()", "pump()"],
             "1\n20\n-1",
-            "a live await chain must thread a BodyOnly inner edit (v0 Tick(1), then v1 Tick(20), then done)",
+            "retained await chain resumes the edited inner body",
         );
     }
 
@@ -886,20 +827,12 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(""), prog("  let z = mk(9)\n"));
 
-        let mut live = Live::boot(&v0);
-        let overlay = live.overlay(&v1);
-
-        assert_run(
-            &live.baseline,
-            &[
-                "start()",
-                "pump()",
-                &overlay,
-                EXPECT_LAYOUT_ERROR,
-                "report()",
-            ],
+        assert_resume_after_overlay(
+            &v0,
+            &v1,
+            &[EXPECT_LAYOUT_ERROR, "report()"],
             "1\n-1\n1",
-            "a stamp-killed outer must chain-kill its delegated inner (inner's on_killed fires exactly once)",
+            "killing the outer coroutine fires the delegated inner hook once",
         );
     }
 
@@ -960,29 +893,24 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let full1 = live.full_reload(&v1);
 
+        let mut steps = vec![
+            "start()",
+            "pump()",
+            "_G.HOT_RELOAD = true",
+            &full1,
+            "print(_G.GEN ~= nil)",
+        ];
         assert_run(
             &live.baseline,
-            &[
-                "start()",
-                "pump()",
-                "_G.HOT_RELOAD = true",
-                &full1,
-                "print(_G.GEN ~= nil)",
-            ],
+            &steps,
             "7\ntrue",
             "a live coroutine in a mutable global must survive a full re-dofile (HOT_RELOAD guard)",
         );
 
+        steps.push(EXPECT_LAYOUT_ERROR);
         assert_run(
             &live.baseline,
-            &[
-                "start()",
-                "pump()",
-                "_G.HOT_RELOAD = true",
-                &full1,
-                "print(_G.GEN ~= nil)",
-                EXPECT_LAYOUT_ERROR,
-            ],
+            &steps,
             "7\ntrue\n-1",
             "a shape-edit full reload must stamp-kill the surviving live coroutine, not corrupt it",
         );
