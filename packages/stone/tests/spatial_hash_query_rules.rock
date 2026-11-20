@@ -1,0 +1,44 @@
+fn spatial_hash_query_fixture() -> SpatialHash<string> {
+    let sh: SpatialHash<string> = spatial_hash_new(4.0)
+    spatial_hash_begin(sh)
+    spatial_hash_add_circle(sh, v(0, 0), 1.0, 1, "near")
+    spatial_hash_add_circle(sh, v(5, 0), 1.0, 2, "east")
+    spatial_hash_add_rect(sh, v(0, 6), 10.0, 2.0, 1, "wall")
+    spatial_hash_add_circle(sh, v(40, 40), 1.0, 1, "far")
+    spatial_hash_build(sh)
+    return sh
+}
+
+fn spatial_hash_query_names(sh: SpatialHash<string>, hits: [int]) -> string {
+    let names: [string] = []
+    for i in hits { names.push(spatial_hash_payload(sh, i)) }
+    names.sort(n => n)
+    return names.join(",")
+}
+
+@test
+fn spatial_hash_queries_report_each_overlapping_entry_once() {
+    let sh = spatial_hash_query_fixture()
+    assert_eq(spatial_hash_query_names(sh, spatial_hash_query_circle_all(sh, v(2, 0), 2.5, null)),
+        "east,near")
+    assert_eq(spatial_hash_query_names(sh, spatial_hash_query_circle_all(sh, v(2, 0), 2.5, 1)),
+        "near")
+    assert_eq(spatial_hash_query_names(sh, spatial_hash_query_circle_all(sh, v(0, 4), 1.5, null)),
+        "wall")
+    assert_eq(spatial_hash_query_names(sh, spatial_hash_query_rect(sh, v(0, 3), v(12, 8), null)),
+        "east,near,wall")
+    assert_eq(spatial_hash_query_names(sh, spatial_hash_query_rect(sh, v(0, 3), v(12, 8), 2)),
+        "east")
+    assert_eq(spatial_hash_query_names(sh, spatial_hash_query_rect(sh, v(20, 20), v(2, 2), null)),
+        "")
+}
+
+@test
+fn spatial_hash_nearest_circle_query_picks_the_closest_center() {
+    let sh = spatial_hash_query_fixture()
+    assert_eq(spatial_hash_payload(sh, spatial_hash_query_circle(sh, v(3.5, 0), 3.0, null).unwrap()),
+        "east")
+    assert_eq(spatial_hash_payload(sh, spatial_hash_query_circle(sh, v(3.5, 0), 4.0, 1).unwrap()),
+        "near")
+    assert(spatial_hash_query_circle(sh, v(20, 20), 1.0, null) == null, "an empty area has no nearest entry")
+}

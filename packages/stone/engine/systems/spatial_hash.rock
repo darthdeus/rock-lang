@@ -294,109 +294,69 @@ fn sh_layer_matches<T>(sh: SpatialHash<T>, entry: int, layer: int?) -> bool {
     return sh.layer[entry] == layer
 }
 
-// Results are live entry indices, valid until the next begin.
-pub fn spatial_hash_query_circle_all<T>(sh: SpatialHash<T>, pos: Vec2, radius: float,
-                                    layer: int?, result: [int]) {
+fn sh_query_into<T>(sh: SpatialHash<T>, pos: Vec2, half: Vec2, circle: bool,
+                   layer: int?, result: [int]) {
     result.clear()
     let qid = sh_begin_query(sh)
     let cs = sh.cell_size
-
-    let cx0 = sh_cell_coord(pos.x - radius, cs)
-    let cx1 = sh_cell_coord(pos.x + radius, cs)
-    let cy0 = sh_cell_coord(pos.y - radius, cs)
-    let cy1 = sh_cell_coord(pos.y + radius, cs)
-
+    let cx0 = sh_cell_coord(pos.x - half.x, cs)
+    let cx1 = sh_cell_coord(pos.x + half.x, cs)
+    let cy0 = sh_cell_coord(pos.y - half.y, cs)
+    let cy1 = sh_cell_coord(pos.y + half.y, cs)
     for cx in cx0..(cx1 + 1) {
         for cy in cy0..(cy1 + 1) {
-            let found = sh.cell_of.get(sh_cell_key(cx, cy))
-            if found == null { continue }
-            let slot = found
-
+            let slot = sh.cell_of.get(sh_cell_key(cx, cy)) ?? continue
             for at in sh.starts[slot]..sh.starts[slot + 1] {
                 let entry = sh.sorted[at]
                 if sh_seen(sh, entry, qid) { continue }
                 if !sh_layer_matches(sh, entry, layer) { continue }
-                if sh_circle_hits_entry(sh, entry, pos, radius) { result.push(entry) }
+                let hit = if circle { sh_circle_hits_entry(sh, entry, pos, half.x) } else {
+                    sh_rect_hits_entry(sh, entry, pos, half)
+                }
+                if hit { result.push(entry) }
             }
         }
     }
+}
+
+// Results are live entry indices, valid until the next begin.
+pub fn spatial_hash_query_circle_all<T>(sh: SpatialHash<T>, pos: Vec2, radius: float,
+                                    layer: int?, result: [int]) {
+    sh_query_into(sh, pos, v(radius, radius), true, layer, result)
 }
 
 pub fn spatial_hash_query_circle_all<T>(sh: SpatialHash<T>, pos: Vec2, radius: float,
                                     layer: int?) -> [int] {
     let result: [int] = []
-    spatial_hash_query_circle_all(sh, pos, radius, layer, result)
+    sh_query_into(sh, pos, v(radius, radius), true, layer, result)
     return result
 }
 
+global SH_NEAREST_SCRATCH: [int] = []
+
 pub fn spatial_hash_query_circle<T>(sh: SpatialHash<T>, pos: Vec2, radius: float, layer: int?) -> int? {
+    sh_query_into(sh, pos, v(radius, radius), true, layer, SH_NEAREST_SCRATCH)
     let best: int? = null
     let best_dist = 0.0
-    let qid = sh_begin_query(sh)
-    let cs = sh.cell_size
-
-    let cx0 = sh_cell_coord(pos.x - radius, cs)
-    let cx1 = sh_cell_coord(pos.x + radius, cs)
-    let cy0 = sh_cell_coord(pos.y - radius, cs)
-    let cy1 = sh_cell_coord(pos.y + radius, cs)
-
-    for cx in cx0..(cx1 + 1) {
-        for cy in cy0..(cy1 + 1) {
-            let found = sh.cell_of.get(sh_cell_key(cx, cy))
-            if found == null { continue }
-            let slot = found
-
-            for at in sh.starts[slot]..sh.starts[slot + 1] {
-                let entry = sh.sorted[at]
-                if sh_seen(sh, entry, qid) { continue }
-                if !sh_layer_matches(sh, entry, layer) { continue }
-                if !sh_circle_hits_entry(sh, entry, pos, radius) { continue }
-
-                let d = v(sh.pos_x[entry], sh.pos_y[entry]).distance(pos)
-                if best == null || d < best_dist {
-                    best = entry
-                    best_dist = d
-                }
-            }
+    for entry in SH_NEAREST_SCRATCH {
+        let d = v(sh.pos_x[entry], sh.pos_y[entry]).distance(pos)
+        if best == null || d < best_dist {
+            best = entry
+            best_dist = d
         }
     }
-
     return best
 }
 
 pub fn spatial_hash_query_rect<T>(sh: SpatialHash<T>, pos: Vec2, size: Vec2,
                               layer: int?, result: [int]) {
-    result.clear()
-    let qid = sh_begin_query(sh)
-    let cs = sh.cell_size
-    let half = size * 0.5
-
-    let cx0 = sh_cell_coord(pos.x - half.x, cs)
-    let cx1 = sh_cell_coord(pos.x + half.x, cs)
-    let cy0 = sh_cell_coord(pos.y - half.y, cs)
-    let cy1 = sh_cell_coord(pos.y + half.y, cs)
-
-    for cx in cx0..(cx1 + 1) {
-        for cy in cy0..(cy1 + 1) {
-            let found = sh.cell_of.get(sh_cell_key(cx, cy))
-            if found == null { continue }
-            let slot = found
-
-            for at in sh.starts[slot]..sh.starts[slot + 1] {
-                let entry = sh.sorted[at]
-                if sh_seen(sh, entry, qid) { continue }
-                if !sh_layer_matches(sh, entry, layer) { continue }
-                if sh_rect_hits_entry(sh, entry, pos, half) { result.push(entry) }
-            }
-        }
-    }
-
+    sh_query_into(sh, pos, size * 0.5, false, layer, result)
 }
 
 pub fn spatial_hash_query_rect<T>(sh: SpatialHash<T>, pos: Vec2, size: Vec2,
                               layer: int?) -> [int] {
     let result: [int] = []
-    spatial_hash_query_rect(sh, pos, size, layer, result)
+    sh_query_into(sh, pos, size * 0.5, false, layer, result)
     return result
 }
 
