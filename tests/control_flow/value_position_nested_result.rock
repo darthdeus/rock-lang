@@ -14,6 +14,13 @@ value Seg {
     b: V2,
 }
 
+macro print_segment(s: ident) {
+    print("{s.a.x.floor()}")
+    print("{s.a.y.floor()}")
+    print("{s.b.x.floor()}")
+    print("{s.b.y.floor()}")
+}
+
 @test(output = "1\n2\n3\n4")
 fn test_value_if_nested() {
     let cond = true
@@ -22,10 +29,7 @@ fn test_value_if_nested() {
     } else {
         Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } }
     }
-    print("{s.a.x.floor()}")
-    print("{s.a.y.floor()}")
-    print("{s.b.x.floor()}")
-    print("{s.b.y.floor()}")
+    print_segment!(s)
 }
 
 @test(output = "10\n20\n30\n40")
@@ -35,10 +39,7 @@ fn test_value_block_nested() {
         let ay = 20.0
         Seg { a: V2 { x: ax, y: ay }, b: V2 { x: 30, y: 40 } }
     }
-    print("{s.a.x.floor()}")
-    print("{s.a.y.floor()}")
-    print("{s.b.x.floor()}")
-    print("{s.b.y.floor()}")
+    print_segment!(s)
 }
 
 fn maybe_seg(want: bool) -> Seg? {
@@ -53,10 +54,7 @@ fn maybe_seg(want: bool) -> Seg? {
 fn test_value_coalesce_nested() {
     let fallback = Seg { a: V2 { x: 9, y: 9 }, b: V2 { x: 9, y: 9 } }
     let s: Seg = maybe_seg(false) ?? fallback
-    print("{s.a.x.floor()}")
-    print("{s.a.y.floor()}")
-    print("{s.b.x.floor()}")
-    print("{s.b.y.floor()}")
+    print_segment!(s)
 }
 
 fn maybe_seven(have: bool) -> int? {
@@ -70,10 +68,7 @@ fn test_value_iflet_nested() {
     } else {
         Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } }
     }
-    print("{s.a.x.floor()}")
-    print("{s.a.y.floor()}")
-    print("{s.b.x.floor()}")
-    print("{s.b.y.floor()}")
+    print_segment!(s)
 }
 
 fn maybe_three(have: bool) -> int? {
@@ -87,10 +82,7 @@ fn test_value_iflet_chain_nested() {
     } else {
         Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } }
     }
-    print("{s.a.x.floor()}")
-    print("{s.a.y.floor()}")
-    print("{s.b.x.floor()}")
-    print("{s.b.y.floor()}")
+    print_segment!(s)
 }
 
 enum Tag {
@@ -107,8 +99,5 @@ fn test_value_match_nested() {
         Tag::B => { Seg { a: V2 { x: 5, y: 6 }, b: V2 { x: 7, y: 8 } } }
         Tag::C => { Seg { a: V2 { x: 0, y: 0 }, b: V2 { x: 0, y: 0 } } }
     }
-    print("{s.a.x.floor()}")
-    print("{s.a.y.floor()}")
-    print("{s.b.x.floor()}")
-    print("{s.b.y.floor()}")
+    print_segment!(s)
 }
