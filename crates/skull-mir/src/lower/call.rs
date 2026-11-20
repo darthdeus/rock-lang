@@ -2904,27 +2904,35 @@ impl<'a> Builder<'a> {
         shape: &ValueShape,
         path: &[Ustr],
     ) -> Option<(std::ops::Range<usize>, FieldShape)> {
-        let mut shape = shape;
-        let mut selected = None;
+        Self::project_value_fields(shape, path.iter().map(|&field| (field, false)), |_| {})
+    }
+
+    pub(super) fn project_value_fields(
+        root: &ValueShape,
+        path: impl IntoIterator<Item = (Ustr, bool)>,
+        mut guard: impl FnMut(usize),
+    ) -> Option<(std::ops::Range<usize>, FieldShape)> {
+        let mut selected: Option<&FieldShape> = None;
         let mut offset = 0;
-        for (depth, field) in path.iter().enumerate() {
+        for (field, safe) in path {
+            let shape = match selected {
+                None => root,
+                Some(FieldShape::Nested(shape)) => shape,
+                Some(FieldShape::Prim) => return None,
+            };
+            if shape.nullable && safe {
+                guard(offset);
+            }
             offset += usize::from(shape.nullable);
-            let mut found = None;
+            selected = None;
             for (name, field_shape) in &shape.fields {
-                if name == field {
-                    found = Some(field_shape);
+                if *name == field {
+                    selected = Some(field_shape);
                     break;
                 }
                 offset += field_shape.leaf_count();
             }
-            let field_shape = found?;
-            selected = Some(field_shape);
-            if depth + 1 < path.len() {
-                let FieldShape::Nested(child) = field_shape else {
-                    return None;
-                };
-                shape = child;
-            }
+            selected?;
         }
         let selected = selected?.clone();
         let count = selected.leaf_count();

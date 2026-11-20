@@ -479,3 +479,35 @@ fn fer_value_reads_through_refs_see_the_current_leaves() {
     assert_eq(v, 8, "the int leaf")
     assert_eq(xs[1].w, 41, "the element took the write")
 }
+
+struct FerIndex { next: int }
+
+fn fer_next_index(cursor: FerIndex) -> int {
+    let current = cursor.next
+    cursor.next += 1
+    return current
+}
+
+fn fer_change_first_leaf(cursor: FerIndex, xs: [FerCell]) -> int {
+    assert_eq(cursor.next, 1, "address evaluated before the RHS")
+    xs[0].inner.v = 99
+    return 4
+}
+
+fn fer_update_first(r: ref FerCell, cursor: FerIndex, xs: [FerCell]) -> (int, int) {
+    let before = r.inner.v
+    r.inner.v += fer_change_first_leaf(cursor, xs)
+    return (before, r.inner.v)
+}
+
+@test
+fn fer_returned_place_survives_compound_rhs_mutation() {
+    let xs = fer_cells()
+    let cursor = FerIndex { next: 0 }
+    let (before, after) = fer_update_first(fer_descend_even(xs[fer_next_index(cursor)], 2), cursor, xs)
+    assert_eq(before, 1, "read before the update")
+    assert_eq(after, 5, "compound update uses the pre-RHS value")
+    assert_eq(xs[0].inner.v, 5, "write uses the saved slot")
+    assert_eq(xs[1].inner.v, 3, "the adjacent slot is untouched")
+    assert_eq(cursor.next, 1, "index evaluated once")
+}

@@ -1,4 +1,4 @@
-use super::flat_ref::FlatRefVal;
+use super::flat_ref::{FlatProjection, FlatRefVal};
 use super::*;
 
 enum Place {
@@ -510,8 +510,7 @@ impl<'a> Builder<'a> {
                     let r = self.lower_expr_repr(e)?.into_value();
                     return self.pack_maybe_absent(r);
                 }
-                let (b, kind) = self.lower_index_base(base)?;
-                let i = self.lower_expr(index)?;
+                let (b, i, kind) = self.index_place(base, index)?;
                 Ok(self.read_index(b, i, kind))
             }
             Expr::FieldAccess { .. } => {
@@ -842,36 +841,11 @@ impl<'a> Builder<'a> {
                 _ => return None,
             }
         };
-        if links.is_empty() {
-            return None;
-        }
-        links.reverse();
         let (cells, shape) = &self.group_binds[&raw(b)];
-        let path: Vec<Ustr> = links.iter().map(|(field, _)| *field).collect();
         let mut guards = Vec::new();
-        for (depth, &(_, safe)) in links.iter().enumerate() {
-            if !safe {
-                continue;
-            }
-            let nullable = if depth == 0 {
-                shape.nullable
-            } else {
-                match self.value_projection_range(shape, &path[..depth])? {
-                    (range, FieldShape::Nested(level)) => {
-                        level.nullable && {
-                            guards.push(cells[range.start]);
-                            false
-                        }
-                    }
-                    // A `?.` off an opaque child tests a box, not a leaf.
-                    (_, FieldShape::Prim) => return None,
-                }
-            };
-            if nullable {
-                guards.push(cells[0]);
-            }
-        }
-        let (range, selected) = self.value_projection_range(shape, &path)?;
+        let (range, selected) = Self::project_value_fields(shape, links.into_iter().rev(), |i| {
+            guards.push(cells[i]);
+        })?;
         Some((guards, cells[range].to_vec(), selected))
     }
 
@@ -1068,7 +1042,7 @@ impl<'a> Builder<'a> {
         Ok(result)
     }
 
-    fn index_place(
+    pub(super) fn index_place(
         &mut self,
         base: Idx<Expr>,
         index: Idx<Expr>,
@@ -1150,7 +1124,10 @@ impl<'a> Builder<'a> {
                 if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(e) {
                     return self.group_leaf_place_base(e, cells[0]);
                 }
-                if self.flat_leaf_path(base, field)?.is_some() {
+                if self
+                    .flat_field_projection(base, field, true)?
+                    .is_some_and(|p| matches!(p.selection, Some((_, FieldShape::Prim))))
+                {
                     return self.lower_expr(e);
                 }
             }
@@ -1305,17 +1282,30 @@ impl<'a> Builder<'a> {
             }
             _ => {}
         }
-        let flat = self.flat_field_path(base, field)?;
-        let flat = match write {
-            Write::Assign(_) => flat.or(Some((base, field, None))),
-            Write::Update { .. } => flat.filter(|(_, _, shape)| shape.is_none()),
-        };
-        if let Some((root, path, shape)) = flat
-            && let Some(place) = self.flat_root_place(root, path)?
+        let mut flat = self.flat_field_projection(base, field, true)?;
+        if flat.is_none() && matches!(write, Write::Assign(_)) {
+            let key = if matches!(self.body.expr_arena[base], Expr::Index { .. }) {
+                self.flat_index_key(base)?
+            } else {
+                self.classify_flat_ref(base)?
+            };
+            flat = key.map(|key| FlatProjection {
+                root: base,
+                key: FlatRefKey {
+                    prefix: field,
+                    ..key
+                },
+                selection: None,
+            });
+        }
+        if let Some(flat) = flat
+            && (matches!(write, Write::Assign(_))
+                || matches!(flat.selection, Some((_, FieldShape::Prim))))
         {
+            let place = self.lower_flat_projection(flat.root, flat.key)?;
             return match write {
                 Write::Assign(value) => {
-                    self.flat_field_store(place, shape.as_ref(), value)?;
+                    self.flat_field_store(place, flat.selection, value)?;
                     Ok(None)
                 }
                 Write::Update { .. } => self.write_scalar(Place::Flat(place), None, write),

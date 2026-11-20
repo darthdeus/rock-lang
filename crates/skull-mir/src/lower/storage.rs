@@ -1,4 +1,4 @@
-use super::flat_ref::FlatRefVal;
+use super::flat_ref::{FlatProjection, FlatRefVal};
 use super::*;
 
 /// Builds root every entry [`Builder::call_spine`] may call instead of
@@ -464,7 +464,7 @@ impl<'a> Builder<'a> {
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, String)>, CompilerError> {
-        let (cur, mut segs) = self.field_chain(base, field);
+        let (cur, _) = self.field_chain(base, field).last().unwrap();
         let Expr::Index { base: ib, index } = self.body.expr_arena[cur] else {
             return Ok(None);
         };
@@ -474,12 +474,15 @@ impl<'a> Builder<'a> {
         if !self.is_leaf_addressed(elem)? {
             return Ok(None);
         }
-        let (b, _) = self.lower_index_base(ib)?;
-        let i = self.lower_expr(index)?;
+        let (b, i, _) = self.index_place(ib, index)?;
         // The bounds check belongs to the index, not the outer field access.
         let checked = self.with_site_expr(cur, |s| s.nb_checked_index(b, i))?;
-        segs.reverse();
-        let path = segs
+        let mut fields: Vec<_> = self
+            .field_chain(base, field)
+            .map(|(_, field)| field)
+            .collect();
+        fields.reverse();
+        let path = fields
             .iter()
             .map(|s| s.as_str())
             .collect::<Vec<_>>()
@@ -1171,67 +1174,58 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The chain must name one leaf: `xs[i].at.x` -> (`xs[i]`, `"at.x"`). A chain
-    /// past a reference leaf is not one; the leaf is its place base.
-    pub(crate) fn flat_leaf_path(
+    fn field_chain(
         &self,
         base: Idx<Expr>,
         field: Ustr,
-    ) -> Result<Option<(Idx<Expr>, Ustr)>, CompilerError> {
-        Ok(self
-            .flat_field_path(base, field)?
-            .and_then(|(root, path, nested)| nested.is_none().then_some((root, path))))
+    ) -> impl Iterator<Item = (Idx<Expr>, Ustr)> + '_ {
+        std::iter::successors(Some((base, field)), |&(base, _)| {
+            match self.body.expr_arena[base] {
+                Expr::FieldAccess { base, field } => Some((base, field)),
+                _ => None,
+            }
+        })
     }
 
-    fn field_chain(&self, mut root: Idx<Expr>, field: Ustr) -> (Idx<Expr>, Vec<Ustr>) {
-        let mut fields = vec![field];
-        while let Expr::FieldAccess { base, field } = self.body.expr_arena[root] {
-            fields.push(field);
-            root = base;
-        }
-        (root, fields)
-    }
-
-    /// A nullable nested field's presence column is keyed by the field's own name.
-    pub(crate) fn flat_field_path(
+    pub(super) fn flat_field_projection(
         &self,
         base: Idx<Expr>,
         field: Ustr,
-    ) -> Result<Option<(Idx<Expr>, Ustr, Option<ValueShape>)>, CompilerError> {
-        let (cur, mut segs) = self.field_chain(base, field);
-        let elem = if let Expr::Index {
-            base: container, ..
-        } = self.body.expr_arena[cur]
-        {
-            self.flat_container_elem(container)?.map(|(elem, _)| elem)
-        } else {
-            self.flat_ref_root_key(cur)?.map(|key| {
-                if !key.prefix.is_empty() {
-                    segs.extend(key.prefix.as_str().rsplit('.').map(Ustr::from));
-                }
-                key.elem
-            })
+        allow_index: bool,
+    ) -> Result<Option<FlatProjection>, CompilerError> {
+        let (root, _) = self.field_chain(base, field).last().unwrap();
+        let key = match self.body.expr_arena[root] {
+            Expr::Index { .. } if allow_index => self.flat_index_key(root)?,
+            _ => self.flat_ref_root_key(root)?,
         };
-        let Some(elem) = elem else {
+        let Some(key) = key else {
             return Ok(None);
         };
-        segs.reverse();
-        let path = crate::names::ustr(
-            &segs
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("."),
-        );
-        let shape = self.column_shape(elem)?;
+        let mut fields: Vec<_> = self
+            .field_chain(base, field)
+            .map(|(_, field)| field)
+            .collect();
+        if !key.prefix.is_empty() {
+            fields.extend(key.prefix.as_str().rsplit('.').map(Ustr::from));
+        }
+        fields.reverse();
+        let shape = self.column_shape(key.elem)?;
         Ok(self
-            .value_projection_range(&shape, &segs)
-            .map(|(_, selected)| {
-                let nested = match selected {
-                    FieldShape::Prim => None,
-                    FieldShape::Nested(shape) => Some(shape),
-                };
-                (cur, path, nested)
+            .value_projection_range(&shape, &fields)
+            .map(|selection| {
+                let path = fields
+                    .iter()
+                    .map(Ustr::as_str)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                FlatProjection {
+                    root,
+                    key: FlatRefKey {
+                        prefix: crate::names::ustr(&path),
+                        ..key
+                    },
+                    selection: Some(selection),
+                }
             }))
     }
 
@@ -1256,33 +1250,10 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Paired with `value`'s leaves in order, with `value` lowered once.
-    fn nested_field_leaves(
-        &mut self,
-        field: Ustr,
-        sub: &ValueShape,
-        value: Idx<Expr>,
-    ) -> Result<(Vec<Ustr>, Vec<Idx<Inst>>), CompilerError> {
-        let bundle = self.lower_expr_repr(value)?;
-        let leaves = self.repr_to_storage_leaves(&bundle, sub, "nested field store")?;
-        let paths: Vec<Ustr> = leaf_names(sub, &field, ".")
-            .iter()
-            .map(|p| crate::names::ustr(p))
-            .collect();
-        if leaves.len() != paths.len() {
-            return Err(gap(format!(
-                "nested field store arity mismatch for `{field}`: {} leaves vs {} keys",
-                leaves.len(),
-                paths.len()
-            )));
-        }
-        Ok((paths, leaves))
-    }
-
-    pub(crate) fn flat_field_store(
+    pub(super) fn flat_field_store(
         &mut self,
         place: FlatRefVal,
-        nested: Option<&ValueShape>,
+        selection: Option<(std::ops::Range<usize>, FieldShape)>,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let FlatRefVal { vec, slot, key } = place;
@@ -1297,44 +1268,61 @@ impl<'a> Builder<'a> {
                 elem.name
             )));
         }
-
-        let row = match storage {
-            FlatStorage::Strided => value_leaf_paths(&self.column_shape(elem)?),
-            FlatStorage::Columns => {
-                if nested.is_none() && !value_leaf_paths(&self.column_shape(elem)?).contains(&field)
-                {
-                    return Err(gap(format!(
-                        "`{field}` is not a field of column-stored `[{}]`",
-                        elem.name
-                    )));
-                }
-                Vec::new()
-            }
-        };
-        let (paths, leaves) = match nested {
-            Some(sub) => self.nested_field_leaves(field, sub, value)?,
-            None => (vec![field], vec![self.lower_expr(value)?]),
-        };
-        if storage == FlatStorage::Columns {
-            self.store_column_leaves(vec, slot, paths, leaves);
-            return Ok(());
+        let shape = self.column_shape(elem)?;
+        let range = selection
+            .as_ref()
+            .map(|(range, _)| range.clone())
+            .or_else(|| {
+                let offset = value_leaf_paths(&shape)
+                    .iter()
+                    .position(|path| *path == field)?;
+                Some(offset..offset + 1)
+            });
+        if storage == FlatStorage::Columns && range.is_none() {
+            return Err(gap(format!(
+                "`{field}` is not a field of column-stored `[{}]`",
+                elem.name
+            )));
         }
-
-        let offsets = paths
-            .iter()
-            .map(|path| row.iter().position(|p| p == path))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| {
-                gap(format!(
-                    "`{field}` does not name slots of strided `[{}]`",
-                    elem.name
-                ))
-            })?;
-        let data = self.read_field(vec, crate::names::ustr("_data"));
-        for (offset, v) in offsets.into_iter().zip(leaves) {
-            let v = self.strided_encode(elem, v);
-            let at = self.strided_slot_index(slot, row.len(), offset);
-            self.write_index(data, at, v, ContainerKind::VecStrideSlot);
+        let nested = match selection.as_ref() {
+            Some((_, FieldShape::Nested(sub))) => Some(sub),
+            _ => None,
+        };
+        let leaves = match nested {
+            Some(sub) => {
+                let bundle = self.lower_expr_repr(value)?;
+                self.repr_to_storage_leaves(&bundle, sub, "nested field store")?
+            }
+            None => vec![self.lower_expr(value)?],
+        };
+        let range = range.ok_or_else(|| {
+            gap(format!(
+                "`{field}` does not name slots of strided `[{}]`",
+                elem.name
+            ))
+        })?;
+        if leaves.len() != range.len() {
+            return Err(gap(format!(
+                "nested field store arity mismatch for `{field}`: {} leaves vs {} keys",
+                leaves.len(),
+                range.len()
+            )));
+        }
+        match storage {
+            FlatStorage::Columns => {
+                let paths =
+                    nested.map_or_else(|| vec![field], |sub| self.flat_leaf_keys(&key, sub));
+                self.store_column_leaves(vec, slot, paths, leaves);
+            }
+            FlatStorage::Strided => {
+                let data = self.read_field(vec, crate::names::ustr("_data"));
+                let stride = shape.leaf_count();
+                for (offset, value) in range.zip(leaves) {
+                    let value = self.strided_encode(elem, value);
+                    let at = self.strided_slot_index(slot, stride, offset);
+                    self.write_index(data, at, value, ContainerKind::VecStrideSlot);
+                }
+            }
         }
         Ok(())
     }

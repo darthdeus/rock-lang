@@ -331,8 +331,7 @@ impl<'a> Builder<'a> {
             let outer = self.cur_span.replace(self.body.expr_spans[root]);
             let outer_expr = self.cur_expr.replace(root);
             let leaves = (|| {
-                let (vec, _) = self.lower_index_base(base)?;
-                let index = self.lower_expr(index)?;
+                let (vec, index, _) = self.index_place(base, index)?;
                 Ok::<_, CompilerError>(self.strided_element_leaves(vec, index, elem, shape, range))
             })();
             self.cur_span = outer;
@@ -347,8 +346,7 @@ impl<'a> Builder<'a> {
                 let outer = self.cur_span.replace(self.body.expr_spans[root]);
                 let outer_expr = self.cur_expr.replace(root);
                 let slot = (|| {
-                    let (base, kind) = self.lower_index_base(base)?;
-                    let index = self.lower_expr(index)?;
+                    let (base, index, kind) = self.index_place(base, index)?;
                     Ok::<_, CompilerError>(self.read_index(base, index, kind))
                 })();
                 self.cur_span = outer;
@@ -412,8 +410,7 @@ impl<'a> Builder<'a> {
         base: Idx<Expr>,
         index: Idx<Expr>,
     ) -> Result<ValueBundle, CompilerError> {
-        let (b, kind) = self.lower_index_base(base)?;
-        let i = self.lower_expr(index)?;
+        let (b, i, kind) = self.index_place(base, index)?;
         if let Some((elem, storage)) = FlatStorage::of_vec_kind(kind) {
             return self.flat_element_repr(b, i, elem, storage);
         }

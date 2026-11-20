@@ -60,6 +60,12 @@ pub(crate) struct FlatRefVal {
     pub(crate) key: FlatRefKey,
 }
 
+pub(super) struct FlatProjection {
+    pub(super) root: Idx<Expr>,
+    pub(super) key: FlatRefKey,
+    pub(super) selection: Option<(std::ops::Range<usize>, FieldShape)>,
+}
+
 pub(crate) struct FlatCallPlan {
     inst: Instance,
     sig: FlatSig,
@@ -204,19 +210,25 @@ impl<'a> Builder<'a> {
         }
     }
 
+    pub(super) fn flat_index_key(&self, e: Idx<Expr>) -> Result<Option<FlatRefKey>, CompilerError> {
+        let Expr::Index { base, .. } = self.body.expr_arena[e] else {
+            return Ok(None);
+        };
+        Ok(self
+            .flat_container_elem(base)?
+            .map(|(elem, storage)| FlatRefKey {
+                elem,
+                storage,
+                prefix: crate::names::ustr(""),
+            }))
+    }
+
     pub(crate) fn classify_flat_ref(
         &self,
         e: Idx<Expr>,
     ) -> Result<Option<FlatRefKey>, CompilerError> {
         match self.body.expr_arena[e] {
-            Expr::Index { base, .. } => Ok(self
-                .flat_container_elem(base)?
-                .filter(|(elem, _)| !elem.nullable)
-                .map(|(elem, storage)| FlatRefKey {
-                    elem,
-                    storage,
-                    prefix: crate::names::ustr(""),
-                })),
+            Expr::Index { .. } => Ok(self.flat_index_key(e)?.filter(|key| !key.elem.nullable)),
             Expr::FieldAccess { base, field } => {
                 let Some(key) = self.classify_flat_ref(base)? else {
                     return Ok(None);
@@ -970,7 +982,7 @@ impl<'a> Builder<'a> {
     }
 
     /// In leaf order.
-    fn flat_leaf_keys(&self, key: &FlatRefKey, shape: &ValueShape) -> Vec<Ustr> {
+    pub(super) fn flat_leaf_keys(&self, key: &FlatRefKey, shape: &ValueShape) -> Vec<Ustr> {
         leaf_names(shape, key.prefix.as_str(), ".")
             .iter()
             .map(|k| crate::names::ustr(k))
@@ -1041,33 +1053,17 @@ impl<'a> Builder<'a> {
         Ok((at, data))
     }
 
-    pub(crate) fn flat_root_place(
+    pub(super) fn lower_flat_projection(
         &mut self,
         root: Idx<Expr>,
-        prefix: Ustr,
-    ) -> Result<Option<FlatRefVal>, CompilerError> {
-        if let Expr::Index { base, .. } = self.body.expr_arena[root] {
-            let Some((elem, storage)) = self.flat_container_elem(base)? else {
-                return Ok(None);
-            };
-            let key = FlatRefKey {
-                elem,
-                storage,
-                prefix,
-            };
-            return self.lower_flat_index_place(root, key).map(Some);
+        key: FlatRefKey,
+    ) -> Result<FlatRefVal, CompilerError> {
+        if matches!(self.body.expr_arena[root], Expr::Index { .. }) {
+            self.lower_flat_index_place(root, key)
+        } else {
+            let place = self.lower_flat_ref(root)?;
+            Ok(FlatRefVal { key, ..place })
         }
-        if self.classify_flat_ref(root)?.is_none() {
-            return Ok(None);
-        }
-        let place = self.lower_flat_ref(root)?;
-        Ok(Some(FlatRefVal {
-            key: FlatRefKey {
-                prefix,
-                ..place.key
-            },
-            ..place
-        }))
     }
 
     pub(crate) fn flat_ref_root_key(
@@ -1127,20 +1123,11 @@ impl<'a> Builder<'a> {
                 self.flat_group_read(val).map(Some)
             }
             Expr::FieldAccess { base, field } => {
-                let mut root = base;
-                while let Expr::FieldAccess { base: b, .. } = self.body.expr_arena[root] {
-                    root = b;
-                }
-                if self.flat_ref_root_key(root)?.is_none() {
-                    return Ok(None);
-                }
-                let Some((root, path, nested)) = self.flat_field_path(base, field)? else {
+                let Some(projection) = self.flat_field_projection(base, field, false)? else {
                     return Ok(None);
                 };
-                let Some(place) = self.flat_root_place(root, path)? else {
-                    return Err(self.gap_here("flat `ref` read has no root place"));
-                };
-                if nested.is_some() {
+                let place = self.lower_flat_projection(projection.root, projection.key)?;
+                if matches!(projection.selection, Some((_, FieldShape::Nested(_)))) {
                     return self.flat_group_read(place).map(Some);
                 }
                 let leaf = self.flat_leaf_load(place)?;
