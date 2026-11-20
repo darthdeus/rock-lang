@@ -725,7 +725,6 @@ pub(crate) fn shutdown() {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use std::time::Instant;
 
     static FLOW_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -750,37 +749,17 @@ mod tests {
     }
 
     #[test]
-    fn open_grid_routes_with_chebyshev_distances() {
-        let width = 5;
-        let height = 5;
-        let walkable = interior_snapshot(width, height);
-        let result = compute_flow(width, height, 2, 2, 64, &walkable);
-
-        assert!(!result.truncated);
-        assert_eq!(result.distances[2 + 2 * width], 0.0);
-        assert_eq!(result.distances[0], 2.0);
-        assert_eq!(result.distances[4 + 4 * width], 2.0);
-    }
-
-    #[test]
-    fn diagonal_requires_both_elbows_open() {
-        let width = 2;
-        let height = 2;
-        let mut walkable = padded_snapshot(width, height, true);
-        walkable[(width + 2) + 2] = 0;
-        let result = compute_flow(width, height, 0, 0, 64, &walkable);
-
-        assert_eq!(result.distances[1 + width], 2.0);
-    }
-
-    #[test]
-    fn diagonal_passes_elbows_whose_walls_leave_the_corner_open() {
+    fn diagonal_needs_both_elbows_open_or_their_facing_corners_open() {
         let width = 2;
         let height = 2;
         let padded_width = width + 2;
-        let mut cells = padded_snapshot(width, height, true);
         let east = padded_width + 2;
         let south = 2 * padded_width + 1;
+        let mut cells = padded_snapshot(width, height, true);
+        cells[east] = 0;
+        let result = compute_flow(width, height, 0, 0, 64, &cells);
+        assert_eq!(result.distances[1 + width], 2.0);
+
         cells[east] = open_corner(3);
         cells[south] = open_corner(1);
         let result = compute_flow(width, height, 0, 0, 64, &cells);
@@ -809,20 +788,8 @@ mod tests {
 
     #[test]
     fn cap_marks_truncation_and_keeps_reached_tiles() {
-        let width = 3;
-        let height = 1;
-        let mut walkable = padded_snapshot(width, height, true);
-        let padded_width = width + 2;
-        for y in [0, height + 1] {
-            for x in 0..padded_width {
-                walkable[y * padded_width + x] = 0;
-            }
-        }
-        for y in 0..height + 2 {
-            walkable[y * padded_width] = 0;
-            walkable[y * padded_width + width + 1] = 0;
-        }
-        let result = compute_flow(width, height, 0, 0, 1, &walkable);
+        let walkable = interior_snapshot(3, 1);
+        let result = compute_flow(3, 1, 0, 0, 1, &walkable);
 
         assert!(result.truncated);
         assert_eq!(result.distances, vec![0.0, 1.0, FLOW_UNREACHABLE]);
@@ -852,29 +819,33 @@ mod tests {
     }
 
     #[test]
-    fn medium_open_grid_matches_full_chebyshev_reference() {
-        let width = 129;
-        let height = 129;
-        let walkable = interior_snapshot(width, height);
-        let started = Instant::now();
-        let result = compute_flow(
-            width,
-            height,
-            (width / 2) as i64,
-            (height / 2) as i64,
-            64,
-            &walkable,
-        );
-        let elapsed = started.elapsed();
+    fn open_grid_at_the_cap_matches_chebyshev_distances() {
+        let size = 129;
+        let center = size / 2;
+        let walkable = interior_snapshot(size, size);
+        let result = compute_flow(size, size, center as i64, center as i64, 64, &walkable);
 
         assert!(!result.truncated);
-        for y in 0..height {
-            for x in 0..width {
-                let expected = x.abs_diff(width / 2).max(y.abs_diff(height / 2)) as f32;
-                assert_eq!(result.distances[y * width + x], expected);
+        for y in 0..size {
+            for x in 0..size {
+                let expected = x.abs_diff(center).max(y.abs_diff(center)) as f32;
+                assert_eq!(result.distances[y * size + x], expected);
             }
         }
-        eprintln!("flow 129x129 cap64 kernel: {:?}", elapsed);
+    }
+
+    fn submit(size: (usize, usize), goal: (i32, i32), walkable: &[u8]) -> u64 {
+        let handle = stone_flow_submit(
+            size.0 as i32,
+            size.1 as i32,
+            goal.0,
+            goal.1,
+            64,
+            walkable.as_ptr(),
+            walkable.len() as i64,
+        );
+        assert_ne!(handle, 0);
+        handle
     }
 
     #[test]
@@ -884,16 +855,7 @@ mod tests {
         let width = 3;
         let height = 1;
         let mut walkable = interior_snapshot(width, height);
-        let handle = stone_flow_submit(
-            width as i32,
-            height as i32,
-            0,
-            0,
-            64,
-            walkable.as_ptr(),
-            walkable.len() as i64,
-        );
-        assert_ne!(handle, 0);
+        let handle = submit((width, height), (0, 0), &walkable);
         walkable.fill(0);
         assert_eq!(stone_flow_wait(handle), 1);
         assert_eq!(stone_flow_poll(handle), 1);
@@ -911,19 +873,8 @@ mod tests {
     fn ffi_cancel_makes_pending_handle_missing_immediately() {
         let _guard = FLOW_TEST_LOCK.lock().unwrap();
         shutdown();
-        let width = 129;
-        let height = 129;
-        let walkable = interior_snapshot(width, height);
-        let handle = stone_flow_submit(
-            width as i32,
-            height as i32,
-            (width / 2) as i32,
-            (height / 2) as i32,
-            64,
-            walkable.as_ptr(),
-            walkable.len() as i64,
-        );
-        assert_ne!(handle, 0);
+        let walkable = interior_snapshot(129, 129);
+        let handle = submit((129, 129), (64, 64), &walkable);
         stone_flow_cancel(handle);
         assert_eq!(stone_flow_poll(handle), -1);
         assert_eq!(stone_flow_wait(handle), -1);
