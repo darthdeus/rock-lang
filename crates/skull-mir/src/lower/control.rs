@@ -212,6 +212,9 @@ impl<'a> Builder<'a> {
                         }));
                     }
                 }
+                if let Some(test) = self.cdata_enum_unit_eq(op, lhs, rhs)? {
+                    return Ok(test);
+                }
                 if let (Some(ln), Some(rn)) =
                     (self.nobox_value_name(lhs), self.nobox_value_name(rhs))
                 {
@@ -399,6 +402,59 @@ impl<'a> Builder<'a> {
             BinOp::Or => self.lower_short_circuit(lhs, rhs, condition, false),
             BinOp::NullCoalesce => self.lower_nullcoalesce(lhs, rhs),
         }
+    }
+
+    /// A payload-free variant's cdata has zeroed payload slots, so a value equals
+    /// it exactly when its tag does; the generic `==` would go through `__eq`.
+    fn cdata_enum_unit_eq(
+        &mut self,
+        op: BinOp,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        let unit_tag = |e: Idx<Expr>| match self.body.expr_arena[e] {
+            Expr::EnumVariant {
+                enum_name,
+                variant,
+                args: VariantArgs::Unit,
+                ..
+            } => Some((
+                enum_name,
+                EnumPlan::for_name(self.ws, enum_name)?
+                    .cdata()?
+                    .tag_of(variant)?,
+            )),
+            _ => None,
+        };
+        let (value, (enum_name, tag)) = match (unit_tag(lhs), unit_tag(rhs)) {
+            (_, Some(unit)) => (lhs, unit),
+            (Some(unit), None) => (rhs, unit),
+            (None, None) => return Ok(None),
+        };
+        let same_enum = self.concrete_expr_ty(value).is_some_and(|ty| {
+            let (inner, nullable) = ty.peel_nullable();
+            !nullable && inner.nominal() == Some(enum_name)
+        });
+        if !same_enum {
+            return Ok(None);
+        }
+        let actual = match self.lower_expr_repr(value)?.into_value() {
+            ValueRepr::Group {
+                parts,
+                present: None,
+                ..
+            } => self.pack(parts.into_iter().next().expect("cdata enum has a tag leaf"))?,
+            other => {
+                let boxed = self.pack(other)?;
+                self.read_field(boxed, crate::names::ustr("__tag"))
+            }
+        };
+        let want = self.emit_cur(Inst::Const(Lit::Int(tag)));
+        Ok(Some(self.emit_cur(if matches!(op, BinOp::Eq) {
+            Inst::Eq(actual, want)
+        } else {
+            Inst::NotEq(actual, want)
+        })))
     }
 
     fn lower_presence_test(&mut self, op: BinOp, present: Idx<Inst>, condition: bool) -> Idx<Inst> {
