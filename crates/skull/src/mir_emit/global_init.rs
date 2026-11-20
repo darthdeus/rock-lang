@@ -334,7 +334,6 @@ pub(super) fn emit_global_unit(
     let g = &ws.module(mid).globals[gid];
     let init_name = format!("__skull_ginit_{}", skull_mir::mangle::symbol_of_key(g.name));
     out.attribution.owner = format!("m{}:global{}", mid.index(), u32::from(gid.into_raw()));
-    out.attribution.source = BodySource::Global(mid, gid);
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Global {
         module: mid,

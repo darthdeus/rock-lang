@@ -12,7 +12,6 @@ pub(super) fn emit_decorator_unit(
     let d = &ws.module(mid).decorators[did];
     let deco_name = decorator_symbol(d.def_key.as_str());
     out.attribution.owner = format!("m{}:deco{}", mid.index(), u32::from(did.into_raw()));
-    out.attribution.source = BodySource::Decorator(mid, did);
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Decorator {
         module: mid,

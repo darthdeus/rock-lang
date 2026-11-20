@@ -195,7 +195,6 @@ impl UnitBody<'_> {
         out.attribution.examined = true;
         out.attribution.hir_nodes = hir_nodes_for_owner(ws, self.mid, self.owner);
         out.attribution.mir_instructions = mf.insts.len();
-        out.attribution.mir_lowered = mf.insts.len();
         out.times.lower_work = out.attribution.mir_instructions > 0;
         if let Err(e) = convert_unit_body(ws, cg, mf, self.symbol, &mut out.times) {
             out.hard_error = Some(e);

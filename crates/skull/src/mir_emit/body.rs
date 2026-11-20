@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+enum LoweredInstanceKind {
+    Ordinary,
+    Specialized,
+}
+
 fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
     for (_, inst) in mf.insts.iter() {
         match inst {
@@ -144,7 +150,6 @@ pub(super) fn emit_body_chunk(
         concrete,
         plan,
         ordinary_instance.as_ref(),
-        LoweredInstanceKind::Ordinary,
         inline_owner_key(self_ref),
         self_ref,
         inline_cache,
@@ -207,14 +212,12 @@ fn lower_body(
     concrete: &crate::concrete_body::ConcreteBodies,
     plan: &skull_mir::concrete::ConcreteBodyPlan,
     instance: Option<&Instance>,
-    kind: LoweredInstanceKind,
     owner: String,
     fref: FuncRef,
     inline_cache: &mut skull_transform::InlineCache,
 ) -> Result<(MirFunc, PhaseTimes, UnitAttribution), CompilerError> {
     let tl = Instant::now();
     let canonical_body = instance.and_then(|instance| inline_cache.canonical_body(instance));
-    let canonical_reused = canonical_body.is_some();
     let mf = match canonical_body {
         Some(body) => (*body).clone(),
         None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)?,
@@ -229,10 +232,6 @@ fn lower_body(
         examined: true,
         hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
         mir_instructions: mf.insts.len(),
-        mir_lowered: mf.insts.len(),
-        abi_plan: mf.abi_plan.clone(),
-        consumer_instance: instance.map(|instance| (instance.clone(), kind)),
-        canonical_reused,
         ..UnitAttribution::default()
     };
     Ok((mf, times, attribution))
@@ -450,7 +449,7 @@ pub(super) fn convert_unit_body(
         counted_loops: skull_transform::body_chain::CountedLoops::Skip,
         inline_hoisted: false,
     };
-    let mut work = InlineWork::default();
+    let mut work = InlineAttribution::default();
     let mut stats = ChainStats::new(times, &mut work);
     skull_transform::body_chain::convert_body(ws, mf, name, &opts, &mut stats).map_err(|e| e.error)
 }
@@ -494,7 +493,6 @@ pub(super) fn emit_spec_chunk(
         concrete,
         plan,
         Some(body),
-        LoweredInstanceKind::Specialized,
         name.to_string(),
         fref,
         inline_cache,
@@ -528,7 +526,7 @@ pub(super) fn emit_spec_chunk(
         ..skull_transform::body_chain::ChainOptions::PLAIN
     };
     let mut prepared_times = PhaseTimes::default();
-    let mut prepared_inline = InlineWork::default();
+    let mut prepared_inline = InlineAttribution::default();
     let inliner = skull_transform::body_chain::Inliner {
         scx,
         self_ref: fref,
@@ -545,7 +543,7 @@ pub(super) fn emit_spec_chunk(
     )
     .map_err(|e| CompilerError::new_with_label(f.name_span, e.error.message))?;
     times.add(&prepared_times);
-    attribution.inline.add(prepared_inline);
+    attribution.inline.add(&prepared_inline);
     finish_body_chunk(
         ws,
         cg,
@@ -601,7 +599,7 @@ pub(super) fn order_specialized_callees<'c>(
         };
         order.push_chunk(chunk);
         if let Some(unit) = &chunk.attribution {
-            attribution.add_body(unit, Some(&chunk.lua));
+            attribution.add_unit(unit);
         }
         times.add(&chunk.times);
         pending.extend(chunk.specs.iter());

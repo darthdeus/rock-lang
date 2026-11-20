@@ -481,11 +481,10 @@ fn emit_full_chunks<'a>(
                 let mut demanded = Vec::new();
                 match job {
                     FanOutJob::Body(at, self_ref, f) => {
-                        let started = attribution.then(thread_cpu_time);
                         let mut chunk =
                             emit_body_chunk(ws, cg, scx, concrete, self_ref, f, inline_cache);
                         if let Ok(chunk) = &mut chunk {
-                            chunk.finish(started);
+                            chunk.finish(attribution);
                         }
                         if let Ok(chunk) = &chunk {
                             queue.admit_all(&chunk.specs, &mut demanded);

@@ -96,8 +96,8 @@ impl Assembly {
             enabled: cache.attribution,
             ..AttributionAccumulator::default()
         };
-        for (unit, text) in &units.costs {
-            attribution.add_body_sized(unit, Some(*text));
+        for unit in &units.attribution {
+            attribution.add_unit(unit);
         }
         let mut rejections = Rejections::default();
         rejections.extend(units.rejections);
@@ -159,8 +159,7 @@ impl Assembly {
                 facts.push((key, chunk));
                 self.times.add(&chunk.times);
                 if let Some(unit) = &chunk.attribution {
-                    self.attribution
-                        .add_body(unit, emit_def.then_some(chunk.lua.as_str()));
+                    self.attribution.add_unit(unit);
                 }
                 if emit_def {
                     self.emits_main |= key.as_str() == "main";
@@ -647,7 +646,7 @@ struct UnitFacts {
     reads: UnitComptimeReads,
     rejections: Vec<CompilerError>,
     specs: Vec<skull_mir::bound::SpecDemand>,
-    costs: Vec<(UnitAttribution, (usize, usize))>,
+    attribution: Vec<UnitAttribution>,
 }
 
 impl UnitFacts {
@@ -674,8 +673,7 @@ impl UnitFacts {
             self.code_artifact.merge_body(&u.code_artifact);
             self.allocation_bodies.extend(u.allocation_bodies);
             if attribution {
-                let text = (u.lua.len(), u.lua.lines().count());
-                self.costs.push((u.attribution, text));
+                self.attribution.push(u.attribution);
             }
             self.times.add(&u.times);
         }

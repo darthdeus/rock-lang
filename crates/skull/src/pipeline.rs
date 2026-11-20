@@ -203,7 +203,7 @@ pub struct EmitTarget<'a> {
     pub renderer: RendererTarget,
     /// Emit reflection accessors for unboxed mutable globals.
     pub global_accessors: bool,
-    /// Keep per-body cost records ([`crate::mir_emit::FullEmit::with_attribution`]).
+    /// Collect body-phase attribution ([`crate::mir_emit::FullEmit::with_attribution`]).
     pub attribution: bool,
 }
 

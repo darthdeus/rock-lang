@@ -53,12 +53,9 @@ impl Chunk {
 
     // `shrink_to_fit` would not do: mimalloc keeps a block in place when it
     // shrinks by less than half.
-    pub(super) fn finish(&mut self, started: Option<std::time::Duration>) {
-        match (started, &mut self.attribution) {
-            (Some(started), Some(unit)) => {
-                unit.thread_cpu = Some(thread_cpu_time().saturating_sub(started));
-            }
-            _ => self.attribution = None,
+    pub(super) fn finish(&mut self, attribution: bool) {
+        if !attribution {
+            self.attribution = None;
         }
         if self.lua.capacity() > self.lua.len() {
             self.lua = self.lua.as_str().to_owned();
