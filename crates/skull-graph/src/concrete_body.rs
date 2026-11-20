@@ -15,8 +15,8 @@ use skull_mir::monoty::{MonoCtor, MonoInterner, MonoSubst, MonoTy, MonoTyId, Mon
 use ustr::Ustr;
 
 use crate::instance_graph::{
-    ready_body, BoundaryClass, Instance, InstanceGraph, Owner, Site, SiteDomain, SiteOp,
-    SiteOutcome,
+    ready_body, BoundaryClass, Contribution, Instance, InstanceGraph, Owner, Site, SiteDomain,
+    SiteOp, SiteOutcome,
 };
 use crate::target_projection::CpuTargetSpec;
 
@@ -124,60 +124,54 @@ impl ConcreteBodies {
         for instance in &instance_subjects {
             candidate_keys_removed.extend(self.remove_instance(instance));
         }
-        let mut targets = revisited.clone();
-        targets.extend(removed.iter().cloned());
+        let mut targets = instance_subjects;
         targets.retain(|instance| g.instances.contains(instance));
-        let results = build_instance_delta(ws, g, &targets);
-        for built in results.into_iter().flatten() {
-            let instance = built.instance.clone();
-            let candidate_refs = built.candidate_refs;
-            if let Err(reason) = &built.plan {
-                self.plan_failure_index
-                    .insert(instance.clone(), reason.clone());
-            }
-            if let Ok(plan) = built.plan {
-                candidate_keys_added
-                    .extend(self.install_candidate_refs_owned(&instance, candidate_refs));
-                Arc::get_mut(&mut self.plans)
-                    .expect("local concrete update lost its unique plan store")
-                    .insert(instance, Arc::new(plan));
-            }
-        }
-        let mut always_subjects = Vec::new();
-        for owner in revisited_owners {
-            let Owner::AlwaysEmitted(module, body_owner) = owner else {
-                continue;
-            };
-            let Some(owner) = concrete_owner_for(*module, *body_owner) else {
-                continue;
-            };
-            always_subjects.push((*module, *body_owner, owner));
-        }
-        for (_, _, owner) in &always_subjects {
-            self.always_plan_failure_index.remove(owner);
-            self.always_plans.remove(owner);
-        }
-        let always_inputs: Vec<_> = always_subjects
+        let always_subjects: Vec<_> = revisited_owners
             .iter()
-            .map(|(module, body_owner, _)| prepare_always(ws, g, *module, *body_owner))
+            .filter_map(|owner| match owner {
+                Owner::AlwaysEmitted(module, body) => {
+                    Some((owner, *module, *body, concrete_owner_for(*module, *body)?))
+                }
+                Owner::Instance(_) => None,
+            })
             .collect();
-        if !always_inputs.is_empty() {
-            let always_owners: BTreeSet<Owner> = always_inputs
-                .iter()
-                .map(|prepared| Owner::AlwaysEmitted(prepared.module, prepared.body_owner))
-                .collect();
-            let signatures = publish_signatures_local(ws, g, &targets, &always_owners);
-            let domains = collect_foreign_domains_local(g, &targets, &always_owners);
-            let published_domains = publish_foreign_domains(ws, g, domains);
-            for prepared in always_inputs {
-                self.install_always(produce_always(
-                    ws,
-                    g,
-                    prepared,
-                    &signatures,
-                    &published_domains,
-                ));
+        let mut publication = PublicationSets::default();
+        for instance in &targets {
+            publication.instances.insert(instance);
+            if let Some(contribution) = g.contributions.get(&Owner::Instance(instance.clone())) {
+                publication.add_sites(contribution, true);
             }
+        }
+        for (owner, _, _, _) in &always_subjects {
+            if let Some(contribution) = g.contributions.get(*owner) {
+                publication.add_sites(contribution, true);
+            }
+        }
+        let (signatures, domains) = publication.publish_local(ws, g);
+        for instance in targets {
+            let Some(prepared) = prepare_instance(ws, g, instance) else {
+                continue;
+            };
+            let built = produce_instance(g, prepared, &signatures, &domains);
+            match built.plan {
+                Err(reason) => {
+                    self.plan_failure_index.insert(built.instance, reason);
+                }
+                Ok(plan) => {
+                    candidate_keys_added.extend(
+                        self.install_candidate_refs_owned(&built.instance, built.candidate_refs),
+                    );
+                    Arc::get_mut(&mut self.plans)
+                        .expect("local concrete update lost its unique plan store")
+                        .insert(built.instance, Arc::new(plan));
+                }
+            }
+        }
+        for (_, module, body, owner) in always_subjects {
+            self.always_plan_failure_index.remove(&owner);
+            self.always_plans.remove(&owner);
+            let prepared = prepare_always(ws, g, module, body);
+            self.install_always(produce_always(ws, g, prepared, &signatures, &domains));
         }
         ConcreteUpdateStats {
             candidate_keys_added,
@@ -592,16 +586,11 @@ fn concrete_owner_order(left: &ConcreteOwner, right: &ConcreteOwner) -> std::cmp
 type PublishedSignatures = FxHashMap<Instance, Result<ConcreteSignatureHandle, MonoTyReason>>;
 type PublishedDomains = BTreeMap<SiteDomain, Result<ConcreteTypeTables, MonoTyReason>>;
 
-struct PublicationInputs<'g> {
-    instances: Vec<&'g Instance>,
-    domains: BTreeSet<SiteDomain>,
-}
-
-fn collect_publication_inputs(g: &InstanceGraph) -> PublicationInputs<'_> {
-    let owners: Vec<(&Owner, &crate::instance_graph::Contribution)> =
+fn collect_publication_inputs(g: &InstanceGraph) -> PublicationSets<'_> {
+    let owners: Vec<(&Owner, &Contribution)> =
         g.contributions.iter().map(|(o, c)| (o, &**c)).collect();
     #[cfg(not(feature = "sequential"))]
-    let (instances, domains) = {
+    {
         use rayon::prelude::*;
         owners
             .into_par_iter()
@@ -613,19 +602,14 @@ fn collect_publication_inputs(g: &InstanceGraph) -> PublicationInputs<'_> {
                 },
             )
             .reduce(PublicationSets::default, PublicationSets::merge)
-            .into_parts()
-    };
+    }
     #[cfg(feature = "sequential")]
-    let (instances, domains) = {
+    {
         let mut sets = PublicationSets::default();
         for (owner, contribution) in owners {
             sets.add(owner, contribution);
         }
-        sets.into_parts()
-    };
-    PublicationInputs {
-        instances: instances.into_iter().collect(),
-        domains: domains.into_iter().cloned().collect(),
+        sets
     }
 }
 
@@ -636,39 +620,30 @@ struct PublicationSets<'g> {
 }
 
 impl<'g> PublicationSets<'g> {
-    fn add(&mut self, owner: &'g Owner, contribution: &'g crate::instance_graph::Contribution) {
-        let mut domains: Vec<&'g SiteDomain> = Vec::new();
-        if let Owner::Instance(i) = owner {
-            if contribution.expanded {
-                self.instances.insert(i);
-                domains.extend(contribution.struct_default_domains.iter());
-                for (site, record) in &contribution.call_sites {
-                    if let SiteOutcome::Resolved(target) = &record.outcome {
-                        self.instances.insert(target);
-                        domains.push(&site.domain);
-                    }
-                }
+    fn add(&mut self, owner: &'g Owner, contribution: &'g Contribution) {
+        match owner {
+            Owner::Instance(instance) if contribution.expanded => {
+                self.instances.insert(instance);
+                self.add_sites(contribution, false);
             }
+            Owner::AlwaysEmitted(..) => self.add_sites(contribution, true),
+            Owner::Instance(_) => {}
         }
-        for record in contribution.always_call_sites.values() {
-            if let SiteOutcome::Resolved(target) = &record.outcome {
+    }
+
+    fn add_sites(&mut self, contribution: &'g Contribution, include_failed_domains: bool) {
+        self.domains.extend(&contribution.struct_default_domains);
+        for (site, record) in &contribution.call_sites {
+            let resolved = if let SiteOutcome::Resolved(target) = &record.outcome {
                 self.instances.insert(target);
+                true
+            } else {
+                false
+            };
+            if (resolved || include_failed_domains) && !matches!(site.domain, SiteDomain::Own) {
+                self.domains.insert(&site.domain);
             }
         }
-        if matches!(owner, Owner::AlwaysEmitted(..)) {
-            domains.extend(contribution.struct_default_domains.iter());
-            domains.extend(
-                contribution
-                    .always_call_sites
-                    .keys()
-                    .map(|site| &site.domain),
-            );
-        }
-        self.domains.extend(
-            domains
-                .into_iter()
-                .filter(|domain| !matches!(domain, SiteDomain::Own)),
-        );
     }
 
     #[cfg(not(feature = "sequential"))]
@@ -681,128 +656,49 @@ impl<'g> PublicationSets<'g> {
         self
     }
 
-    fn into_parts(self) -> (FxHashSet<&'g Instance>, FxHashSet<&'g SiteDomain>) {
-        (self.instances, self.domains)
+    fn publish_local(
+        self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+    ) -> (PublishedSignatures, PublishedDomains) {
+        let mut instances: Vec<_> = self.instances.into_iter().collect();
+        instances.sort_unstable();
+        let signatures = instances
+            .into_iter()
+            .map(|instance| signature_row(ws, g, instance))
+            .collect();
+        let domains = self.domains.into_iter().cloned().collect::<BTreeSet<_>>();
+        (signatures, publish_foreign_domains(ws, g, domains))
     }
 }
 
-fn publish_signatures(
+fn signature_row(
     ws: &Workspace,
     g: &InstanceGraph,
-    instances: Vec<&Instance>,
-) -> PublishedSignatures {
-    use bone_core::prelude::*;
-    // Keyed by instance, so the parallel derivation order is not observable.
-    instances
-        .into_par_iter()
-        .map(|instance| {
-            let result = g
-                .substitution(instance)
-                .cloned()
-                .ok_or(MonoTyReason::NoNode)
-                .and_then(|subst| concrete_signature(ws, g, instance, &subst))
-                .map(std::sync::Arc::new);
-            (instance.clone(), result)
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .collect()
+    instance: &Instance,
+) -> (Instance, Result<ConcreteSignatureHandle, MonoTyReason>) {
+    let result = g
+        .substitution(instance)
+        .ok_or(MonoTyReason::NoNode)
+        .and_then(|subst| concrete_signature(ws, g, instance, subst))
+        .map(Arc::new);
+    (instance.clone(), result)
 }
 
 fn publish(ws: &Workspace, g: &InstanceGraph) -> (PublishedSignatures, PublishedDomains) {
-    let PublicationInputs { instances, domains } = collect_publication_inputs(g);
-    let signatures = publish_signatures(ws, g, instances);
-    (signatures, publish_foreign_domains(ws, g, domains))
-}
+    use bone_core::prelude::*;
 
-fn publish_signatures_local(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    seeds: &BTreeSet<Instance>,
-    always_owners: &BTreeSet<Owner>,
-) -> PublishedSignatures {
-    let mut instances = seeds.clone();
-    for inst in seeds {
-        if let Some(sites) = g.sites_of(inst) {
-            for record in sites.values() {
-                if let SiteOutcome::Resolved(target) = &record.outcome {
-                    instances.insert(target.clone());
-                }
-            }
-        }
-    }
-    for owner in always_owners {
-        let Some(contribution) = g.contributions.get(owner) else {
-            continue;
-        };
-        for record in contribution.always_call_sites.values() {
-            if let SiteOutcome::Resolved(target) = &record.outcome {
-                instances.insert(target.clone());
-            }
-        }
-    }
-    instances
+    let PublicationSets { instances, domains } = collect_publication_inputs(g);
+    let signatures = instances
         .into_iter()
-        .map(|instance| {
-            let result = g
-                .substitution(&instance)
-                .cloned()
-                .ok_or(MonoTyReason::NoNode)
-                .and_then(|subst| concrete_signature(ws, g, &instance, &subst))
-                .map(Arc::new);
-            (instance, result)
-        })
-        .collect()
-}
-
-fn collect_foreign_domains_local(
-    g: &InstanceGraph,
-    instances: &BTreeSet<Instance>,
-    always_owners: &BTreeSet<Owner>,
-) -> BTreeSet<SiteDomain> {
-    let mut domains = BTreeSet::new();
-    for inst in instances {
-        if let Some(contribution) = g.contributions.get(&Owner::Instance(inst.clone())) {
-            domains.extend(contribution.struct_default_domains.iter().cloned());
-        }
-        if let Some(sites) = g.sites_of(inst) {
-            domains.extend(sites.keys().map(|site| site.domain.clone()));
-        }
-    }
-    for owner in always_owners {
-        let Some(contribution) = g.contributions.get(owner) else {
-            continue;
-        };
-        domains.extend(contribution.struct_default_domains.iter().cloned());
-        domains.extend(
-            contribution
-                .always_call_sites
-                .keys()
-                .map(|site| site.domain.clone()),
-        );
-    }
-    domains
-}
-
-fn build_instance_delta(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    targets: &BTreeSet<Instance>,
-) -> Vec<Option<BuiltInstance>> {
-    if targets.is_empty() {
-        return Vec::new();
-    }
-    let signatures = publish_signatures_local(ws, g, targets, &BTreeSet::new());
-    let domains = collect_foreign_domains_local(g, targets, &BTreeSet::new());
-    let published_domains = publish_foreign_domains(ws, g, domains);
-    targets
-        .iter()
-        .cloned()
-        .map(|instance| {
-            prepare_instance(ws, g, instance)
-                .map(|prepared| produce_instance(g, prepared, &signatures, &published_domains))
-        })
-        .collect()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|instance| signature_row(ws, g, instance))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect();
+    let domains = domains.into_iter().cloned().collect::<BTreeSet<_>>();
+    (signatures, publish_foreign_domains(ws, g, domains))
 }
 
 fn publish_foreign_domains(
@@ -1131,7 +1027,7 @@ fn produce_always(
             .ok_or(MonoTyReason::NoNode)?;
         let mut callees = BTreeMap::new();
         let mut failed_sites = BTreeMap::new();
-        for (site, record) in &contribution.always_call_sites {
+        for (site, record) in &contribution.call_sites {
             match &record.outcome {
                 SiteOutcome::Resolved(instance) => {
                     callees.insert(
@@ -1149,7 +1045,7 @@ fn produce_always(
         }
         let default_domains = contribution.struct_default_domains.iter().cloned();
         let site_domains = contribution
-            .always_call_sites
+            .call_sites
             .keys()
             .map(|site| site.domain.clone());
         let foreign_domains =

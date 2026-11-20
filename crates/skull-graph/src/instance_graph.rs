@@ -184,7 +184,6 @@ pub struct Contribution {
     /// Empty for an always-emitted body, whose callees are roots, not obligations.
     pub edges: Vec<Edge>,
     pub call_sites: BTreeMap<Site, SiteRecord>,
-    pub always_call_sites: BTreeMap<Site, SiteRecord>,
     pub struct_default_domains: BTreeSet<SiteDomain>,
     pub unresolved: Vec<Unresolved>,
     pub rejections: Vec<Rejection>,
@@ -220,20 +219,11 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    fn record_site(
-        &mut self,
-        from: Option<&Instance>,
-        site: Site,
-        outcome: SiteOutcome,
-        span: Span,
-    ) {
+    fn record_site(&mut self, site: Site, outcome: SiteOutcome, span: Span) {
         self.saw(span);
-        let sites = if from.is_some() {
-            &mut self.out.call_sites
-        } else {
-            &mut self.out.always_call_sites
-        };
-        sites.insert(site, SiteRecord { outcome, span });
+        self.out
+            .call_sites
+            .insert(site, SiteRecord { outcome, span });
     }
 
     fn record_caller_witness(
@@ -258,7 +248,7 @@ impl Walk<'_> {
             }
             None => SiteOutcome::Failed("caller-generic-witness-unbound"),
         };
-        self.record_site(from, site, outcome, span);
+        self.record_site(site, outcome, span);
         resolved
     }
 
@@ -593,7 +583,7 @@ pub fn build_in(
     let t_derive = t.elapsed();
     if log::log_enabled!(log::Level::Debug) {
         let intern_after = g.interner().stats();
-        let sites: usize = g.contributions.values().map(|c| c.call_sites.len()).sum();
+        let sites: usize = g.call_sites().map(|(_, sites)| sites.len()).sum();
         log::debug!(
             "graph build: seed {:?}, run {:?} ({} owner walks, {} settle rounds), \
              derive {:?}, total {:?}; {} instances, {} contributions, {} call sites, \
@@ -1735,11 +1725,7 @@ impl InstanceGraph {
                 for edge in &mut contribution.edges {
                     edit.shift_span(&mut edge.span);
                 }
-                for record in contribution
-                    .call_sites
-                    .values_mut()
-                    .chain(contribution.always_call_sites.values_mut())
-                {
+                for record in contribution.call_sites.values_mut() {
                     edit.shift_span(&mut record.span);
                 }
                 for unresolved in &mut contribution.unresolved {
@@ -1878,7 +1864,7 @@ impl InstanceGraph {
         };
         owners.iter().any(|owner| {
             self.contributions.get(owner).is_some_and(|c| {
-                c.always_call_sites.iter().any(|(site, record)| {
+                c.call_sites.iter().any(|(site, record)| {
                     site.op == SiteOp::FnValue
                         && matches!(&record.outcome, SiteOutcome::Resolved(to) if to == i)
                 })
@@ -2104,7 +2090,6 @@ fn walk_body_edges(
                 );
             } else if let Some(from) = from {
                 w.record_site(
-                    Some(from),
                     Site {
                         domain: domain.clone(),
                         expr: e,
@@ -2145,7 +2130,6 @@ fn walk_body_edges(
                 }
                 None => {
                     w.record_site(
-                        from,
                         site,
                         SiteOutcome::Failed("compiler-generated-entry-unresolved"),
                         span,
@@ -2363,7 +2347,7 @@ fn record_instantiation(
                     span,
                 }),
             }
-            w.record_site(from, site, SiteOutcome::Failed(reason), span);
+            w.record_site(site, SiteOutcome::Failed(reason), span);
             return None;
         }
     };
@@ -2376,7 +2360,7 @@ fn record_instantiation(
     } else {
         w.out.always_emitted_targets.insert(to.clone());
     }
-    w.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
+    w.record_site(site, SiteOutcome::Resolved(to.clone()), span);
     w.out.reached.push((to.clone(), subst));
     Some(to)
 }
