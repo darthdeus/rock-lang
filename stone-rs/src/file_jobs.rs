@@ -6,16 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 
-const MAX_PENDING_JOBS: usize = 128;
-const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
-const MAX_OPEN_TRANSACTIONS: usize = 32;
-const MAX_TRANSACTION_OPS: usize = 512;
-const MAX_TRANSACTION_CLEANUPS: usize = 512;
-const MAX_TRANSACTION_CLEANUP_DIRECTORIES: usize = 128;
-const MAX_TRANSACTION_KEEP_ENTRIES: usize = 4096;
-const MAX_TRANSACTION_CLEANUP_BYTES: usize = 512 * 1024;
-const MAX_TRANSACTION_FRAGMENT_BYTES: usize = 64 * 1024;
-const MAX_TRANSACTION_FRAGMENTS: usize = MAX_PENDING_BYTES / (4 * 1024);
 const MAX_PATH_BYTES: usize = 4096;
 
 struct PausePoint {
@@ -100,16 +90,16 @@ struct Limits {
 }
 
 const LIMITS: Limits = Limits {
-    max_pending_jobs: MAX_PENDING_JOBS,
-    max_pending_bytes: MAX_PENDING_BYTES,
-    max_open_transactions: MAX_OPEN_TRANSACTIONS,
-    max_transaction_ops: MAX_TRANSACTION_OPS,
-    max_transaction_cleanups: MAX_TRANSACTION_CLEANUPS,
-    max_transaction_cleanup_directories: MAX_TRANSACTION_CLEANUP_DIRECTORIES,
-    max_transaction_keep_entries: MAX_TRANSACTION_KEEP_ENTRIES,
-    max_transaction_cleanup_bytes: MAX_TRANSACTION_CLEANUP_BYTES,
-    max_transaction_fragment_bytes: MAX_TRANSACTION_FRAGMENT_BYTES,
-    max_transaction_fragments: MAX_TRANSACTION_FRAGMENTS,
+    max_pending_jobs: 128,
+    max_pending_bytes: 64 * 1024 * 1024,
+    max_open_transactions: 32,
+    max_transaction_ops: 512,
+    max_transaction_cleanups: 512,
+    max_transaction_cleanup_directories: 128,
+    max_transaction_keep_entries: 4096,
+    max_transaction_cleanup_bytes: 512 * 1024,
+    max_transaction_fragment_bytes: 64 * 1024,
+    max_transaction_fragments: 64 * 1024 * 1024 / (4 * 1024),
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1151,7 +1141,7 @@ fn transaction_write(
     let Some(path) = parse_path(path) else {
         return false;
     };
-    if data.is_null() || len > MAX_TRANSACTION_FRAGMENT_BYTES {
+    if data.is_null() || len > LIMITS.max_transaction_fragment_bytes {
         return false;
     }
     jobs()
@@ -2038,7 +2028,7 @@ mod pair_tests {
 
     #[test]
     fn paired_admission_counts_both_payloads() {
-        let half = vec![0u8; MAX_PENDING_BYTES / 2 + 1];
+        let half = vec![0u8; LIMITS.max_pending_bytes / 2 + 1];
         let first = CString::new("first").unwrap();
         let second = CString::new("second").unwrap();
         let data = half.as_ptr().cast();
