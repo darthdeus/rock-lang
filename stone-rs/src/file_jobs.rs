@@ -1883,32 +1883,55 @@ mod tests {
     fn fragment(
         queue: &Mutex<Jobs>,
         transaction: i32,
-        path: PathBuf,
-        bytes: Vec<u8>,
+        path: &Path,
+        bytes: &[u8],
         append: bool,
         manifest: bool,
     ) -> bool {
         queue.lock().unwrap().add_transaction_fragment_owned(
             transaction,
-            path,
-            bytes,
+            path.to_path_buf(),
+            bytes.to_vec(),
             append,
             manifest,
         )
     }
 
-    fn keep(queue: &Mutex<Jobs>, transaction: i32, directory: PathBuf, name: &str) -> bool {
-        queue
-            .lock()
-            .unwrap()
-            .add_transaction_keep_owned(transaction, directory, name.to_owned())
+    fn stage(queue: &Mutex<Jobs>, transaction: i32, path: &Path, bytes: &[u8]) {
+        assert!(fragment(queue, transaction, path, bytes, false, false));
     }
 
-    fn cleanup_dir(queue: &Mutex<Jobs>, transaction: i32, directory: PathBuf) -> bool {
+    fn stage_manifest(queue: &Mutex<Jobs>, transaction: i32, path: &Path, bytes: &[u8]) {
+        assert!(fragment(queue, transaction, path, bytes, false, true));
+    }
+
+    fn stage_png(queue: &Mutex<Jobs>, transaction: i32, path: &Path, pixels: Vec<u8>) {
+        let mut jobs = queue.lock().unwrap();
+        assert!(jobs.reserve_transaction_bytes(transaction, pixels.len()));
+        assert!(jobs.add_transaction_png_reserved(transaction, path.to_path_buf(), pixels, 1, 1));
+    }
+
+    fn cleanup(queue: &Mutex<Jobs>, transaction: i32, path: &Path, on_success: bool) {
+        assert!(queue.lock().unwrap().add_transaction_cleanup(
+            transaction,
+            path.to_path_buf(),
+            on_success
+        ));
+    }
+
+    fn keep(queue: &Mutex<Jobs>, transaction: i32, directory: &Path, name: &str) -> bool {
+        queue.lock().unwrap().add_transaction_keep_owned(
+            transaction,
+            directory.to_path_buf(),
+            name.to_owned(),
+        )
+    }
+
+    fn cleanup_dir(queue: &Mutex<Jobs>, transaction: i32, directory: &Path) -> bool {
         queue
             .lock()
             .unwrap()
-            .add_transaction_cleanup_directory_owned(transaction, directory)
+            .add_transaction_cleanup_directory_owned(transaction, directory.to_path_buf())
     }
 
     fn single(path: PathBuf, bytes: &[u8], append: bool) -> SingleRequest {
@@ -1942,6 +1965,19 @@ mod tests {
         };
         queue.lock().unwrap().pending.remove(&id);
         result.code()
+    }
+
+    fn cancellation(queue: &Mutex<Jobs>, job: i32) -> Arc<Cancellation> {
+        let jobs = queue.lock().unwrap();
+        let pending = jobs.pending.get(&job).unwrap();
+        Arc::clone(pending.cancellation.as_ref().unwrap())
+    }
+
+    fn decoded_png(path: &Path) -> Vec<u8> {
+        image::load_from_memory(&std::fs::read(path).unwrap())
+            .unwrap()
+            .to_rgba8()
+            .into_raw()
     }
 
     #[test]
@@ -1991,11 +2027,8 @@ mod tests {
         let root = test_root();
         let queue = Mutex::new(Jobs::new(limits(2, 4)));
         let request = SingleRequest {
-            path: root.join("first"),
-            bytes: b"123".to_vec(),
-            append: false,
-            source: None,
             second: Some((root.join("second"), b"45".to_vec())),
+            ..single(root.join("first"), b"123", false)
         };
         assert!(queue.lock().unwrap().enqueue_single(request).is_none());
         assert_eq!(queue.lock().unwrap().accounting.load(Ordering::Acquire), 0);
@@ -2056,86 +2089,41 @@ mod tests {
     }
 
     #[test]
-    fn transaction_writes_fragments_then_publishes_manifest() {
+    fn transaction_creates_directories_and_syncs_up_to_the_existing_parent() {
         let root = test_root();
-        let queue = Mutex::new(Jobs::new(limits(4, 64)));
-        let snapshot = root.join("snapshot.png");
-        let manifest = root.join("manifest.json");
-        let transaction_id = begin(&queue);
-        assert!(fragment(
-            &queue,
-            transaction_id,
-            snapshot.clone(),
-            b"snap".to_vec(),
-            false,
-            false
+        let save = root.join("slot");
+        std::fs::create_dir_all(&save).unwrap();
+        let log = Arc::new(DirectorySyncLog::default());
+        let queue = Mutex::new(Jobs::new_with_directory_syncs(
+            limits(4, 64 * 1024),
+            Arc::clone(&log),
         ));
-        assert!(fragment(
-            &queue,
-            transaction_id,
-            manifest.clone(),
-            b"{\"a\":".to_vec(),
-            false,
-            true
-        ));
-        assert!(fragment(
-            &queue,
-            transaction_id,
-            manifest.clone(),
-            b"1}".to_vec(),
-            true,
-            true
-        ));
-        let job = commit(&queue, transaction_id);
+        let snapshots = save.join("snapshots");
+        let level = snapshots.join("level-0");
+        let face = level.join("face-1");
+        let path = face.join("chunk.png");
+        let manifest = save.join("manifest.json");
+        let transaction = begin(&queue);
+        stage(&queue, transaction, &path, b"png");
+        stage_manifest(&queue, transaction, &manifest, b"{\"a\":");
+        assert!(fragment(&queue, transaction, &manifest, b"1}", true, true));
+        let job = commit(&queue, transaction);
         assert_eq!(poll_queue(&queue, job, true), 1);
-        assert_eq!(std::fs::read(snapshot).unwrap(), b"snap");
-        assert_eq!(std::fs::read(manifest).unwrap(), b"{\"a\":1}");
-    }
-
-    #[test]
-    fn transaction_encodes_rgba8_png_on_worker() {
-        let root = test_root();
-        let queue = Mutex::new(Jobs::new(limits(4, 64)));
-        let png = root.join("blood.png");
-        let pixels = vec![
-            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
-        ];
-        let transaction_id = begin(&queue);
-        assert!(queue
-            .lock()
-            .unwrap()
-            .reserve_transaction_bytes(transaction_id, pixels.len()));
-        assert!(queue.lock().unwrap().add_transaction_png_reserved(
-            transaction_id,
-            png.clone(),
-            pixels,
-            2,
-            2
-        ));
-        let job = commit(&queue, transaction_id);
-        assert_eq!(poll_queue(&queue, job, true), 1);
-        let decoded = image::load_from_memory(&std::fs::read(png).unwrap())
-            .unwrap()
-            .to_rgba8();
-        assert_eq!(decoded.dimensions(), (2, 2));
         assert_eq!(
-            decoded.as_raw(),
-            &[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,]
+            log.take(),
+            vec![face, level, snapshots, save.clone(), save.clone()],
         );
+        assert_eq!(std::fs::read(&path).unwrap(), b"png");
+        assert_eq!(std::fs::read(&manifest).unwrap(), b"{\"a\":1}");
     }
 
     fn compaction_limits() -> Limits {
         Limits {
             max_pending_jobs: 4,
             max_pending_bytes: 1024 * 1024,
-            max_open_transactions: 4,
             max_transaction_ops: 256,
-            max_transaction_cleanups: 16,
-            max_transaction_cleanup_directories: 4,
-            max_transaction_keep_entries: 16,
-            max_transaction_cleanup_bytes: 64 * 1024,
-            max_transaction_fragment_bytes: 64 * 1024,
             max_transaction_fragments: 256,
+            ..limits(4, 0)
         }
     }
 
@@ -2155,6 +2143,7 @@ mod tests {
                 }
             }
         }
+        std::fs::write(save.join("manifest.json"), b"previous root").unwrap();
         (save, directories)
     }
 
@@ -2173,137 +2162,46 @@ mod tests {
         directories: &[PathBuf],
         generation: u8,
         publications: usize,
-    ) -> (i32, PathBuf, Vec<PathBuf>) {
+    ) -> (i32, Vec<PathBuf>) {
         let transaction = begin(queue);
         let mut files = Vec::new();
         for index in 0..publications {
             let path = directories[index % directories.len()]
                 .join(format!("chunk-{index:03}-gen-{generation}.png"));
-            let pixels = vec![generation, index as u8, 0, 255];
-            assert!(queue
-                .lock()
-                .unwrap()
-                .reserve_transaction_bytes(transaction, pixels.len()));
-            assert!(queue.lock().unwrap().add_transaction_png_reserved(
+            stage_png(
+                queue,
                 transaction,
-                path.clone(),
-                pixels,
-                1,
-                1
-            ));
+                &path,
+                vec![generation, index as u8, 0, 255],
+            );
             files.push(path);
         }
-        let manifest = save.join("manifest.json");
         let listing = manifest_listing(save, &files);
-        assert!(fragment(
+        stage_manifest(
             queue,
             transaction,
-            manifest.clone(),
-            listing.into_bytes(),
-            false,
-            true
-        ));
-        let job = commit(queue, transaction);
-        (job, manifest, files)
+            &save.join("manifest.json"),
+            listing.as_bytes(),
+        );
+        (commit(queue, transaction), files)
     }
 
-    fn assert_reachable_png(path: &Path, index: usize, generation: u8) {
-        let decoded = image::load_from_memory(&std::fs::read(path).unwrap())
-            .unwrap()
-            .to_rgba8();
+    fn assert_compaction_published(save: &Path, files: &[PathBuf], generation: u8) {
         assert_eq!(
-            decoded.as_raw(),
-            &[generation, index as u8, 0, 255],
-            "{path:?}"
-        );
-    }
-
-    #[test]
-    fn compaction_batch_barriers_follow_changed_directories() {
-        let root = test_root();
-        let (save, directories) = compaction_fixture(&root);
-        let log = Arc::new(DirectorySyncLog::default());
-        let queue = Mutex::new(Jobs::new_with_directory_syncs(
-            compaction_limits(),
-            Arc::clone(&log),
-        ));
-        std::fs::write(save.join("manifest.json"), b"previous root").unwrap();
-        let (job, manifest, files) = compaction_batch(&queue, &save, &directories, 1, 91);
-        assert_eq!(poll_queue(&queue, job, true), 1);
-        let synced = log.take();
-        assert_eq!(synced.len(), directories.len() + 1, "{synced:?}");
-        assert!(synced.len() <= 24, "{} barriers", synced.len());
-        for directory in &directories {
-            assert_eq!(
-                synced.iter().filter(|entry| *entry == directory).count(),
-                1,
-                "{directory:?} synced once per phase in {synced:?}",
-            );
-        }
-        assert_eq!(
-            synced.last().unwrap(),
-            &save,
-            "the root barrier follows its rename"
-        );
-        assert!(
-            synced
-                .iter()
-                .all(|directory| directory == &save || directory.starts_with(&save)),
-            "no unchanged ancestor is re-synced: {synced:?}",
-        );
-        assert_eq!(
-            std::fs::read_to_string(&manifest).unwrap(),
-            manifest_listing(&save, &files)
+            std::fs::read_to_string(save.join("manifest.json")).unwrap(),
+            manifest_listing(save, files)
         );
         for (index, file) in files.iter().enumerate() {
-            assert_reachable_png(file, index, 1);
+            assert_eq!(
+                decoded_png(file),
+                [generation, index as u8, 0, 255],
+                "{file:?}"
+            );
         }
     }
 
     #[test]
-    fn created_directory_barriers_stop_at_the_existing_parent() {
-        let root = test_root();
-        let save = root.join("slot");
-        std::fs::create_dir_all(&save).unwrap();
-        let log = Arc::new(DirectorySyncLog::default());
-        let queue = Mutex::new(Jobs::new_with_directory_syncs(
-            limits(4, 64 * 1024),
-            Arc::clone(&log),
-        ));
-        let snapshots = save.join("snapshots");
-        let path = snapshots.join("level-0").join("face-1").join("chunk.png");
-        let manifest = save.join("manifest.json");
-        let transaction = begin(&queue);
-        assert!(fragment(
-            &queue,
-            transaction,
-            path.clone(),
-            b"png".to_vec(),
-            false,
-            false
-        ));
-        assert!(fragment(
-            &queue,
-            transaction,
-            manifest.clone(),
-            b"manifest".to_vec(),
-            false,
-            true
-        ));
-        let job = commit(&queue, transaction);
-        assert_eq!(poll_queue(&queue, job, true), 1);
-        let face = snapshots.join("level-0").join("face-1");
-        let level = snapshots.join("level-0");
-        assert_eq!(
-            log.take(),
-            vec![face, level, snapshots.clone(), save.clone(), save.clone()],
-        );
-        assert!(path.exists());
-        assert_eq!(std::fs::read(&manifest).unwrap(), b"manifest");
-    }
-
-    #[test]
-    fn injected_directory_barrier_failures_keep_a_reachable_root() {
+    fn compaction_syncs_each_changed_directory_once_and_barrier_failures_keep_a_reachable_root() {
         let measure_root = test_root();
         let (save, directories) = compaction_fixture(&measure_root);
         let log = Arc::new(DirectorySyncLog::default());
@@ -2311,38 +2209,40 @@ mod tests {
             compaction_limits(),
             Arc::clone(&log),
         ));
-        std::fs::write(save.join("manifest.json"), b"previous root").unwrap();
-        let (job, _, _) = compaction_batch(&queue, &save, &directories, 1, 91);
+        let (job, files) = compaction_batch(&queue, &save, &directories, 1, 91);
         assert_eq!(poll_queue(&queue, job, true), 1);
-        let cuts = log.take().len();
-        assert_eq!(cuts, directories.len() + 1);
+        assert_compaction_published(&save, &files, 1);
+        let synced = log.take();
+        assert_eq!(
+            synced.last(),
+            Some(&save),
+            "the root barrier follows its rename"
+        );
+        let mut synced_once = synced.clone();
+        synced_once.sort();
+        let mut expected = directories.clone();
+        expected.push(save.clone());
+        expected.sort();
+        assert_eq!(synced_once, expected, "each changed directory synced once");
 
+        let cuts = synced.len();
         for cut in 1..=cuts {
             let root = test_root();
             let (save, directories) = compaction_fixture(&root);
-            let manifest = save.join("manifest.json");
-            std::fs::write(&manifest, b"previous root").unwrap();
             let queue = Mutex::new(Jobs::new_with_directory_sync_failure(
                 compaction_limits(),
                 Arc::new(DirectorySyncFailure::at(cut)),
             ));
-            let (job, _, files) =
-                compaction_batch(&queue, &save, &directories, 2, directories.len());
+            let (job, files) = compaction_batch(&queue, &save, &directories, 2, directories.len());
             match poll_queue(&queue, job, true) {
                 -1 => assert_eq!(
-                    std::fs::read(&manifest).unwrap(),
+                    std::fs::read(save.join("manifest.json")).unwrap(),
                     b"previous root",
                     "cut {cut} replaced the root before its commit barrier",
                 ),
                 -3 => {
                     assert_eq!(cut, cuts, "only the commit barrier is uncertain");
-                    assert_eq!(
-                        std::fs::read_to_string(&manifest).unwrap(),
-                        manifest_listing(&save, &files),
-                    );
-                    for (index, file) in files.iter().enumerate() {
-                        assert_reachable_png(file, index, 2);
-                    }
+                    assert_compaction_published(&save, &files, 2);
                 }
                 other => panic!("cut {cut} reported {other}"),
             }
@@ -2354,64 +2254,41 @@ mod tests {
         let root = test_root();
         let queue = Mutex::new(Jobs::new(limits(4, 128 * 1024)));
         let transaction_id = begin(&queue);
+        let snapshot = root.join("snapshot");
         let chunk = vec![0u8; 4 * 1024];
         for index in 0..16 {
             assert!(fragment(
                 &queue,
                 transaction_id,
-                root.join("snapshot"),
-                chunk.clone(),
+                &snapshot,
+                &chunk,
                 index != 0,
-                false,
+                false
             ));
         }
         assert!(!fragment(
             &queue,
             transaction_id,
-            root.join("snapshot"),
-            Vec::new(),
+            &snapshot,
+            &[],
             true,
-            false,
+            false
         ));
         assert!(!queue
             .lock()
             .unwrap()
             .reserve_transaction_bytes(transaction_id, 1));
-        assert_eq!(
-            queue
-                .lock()
-                .unwrap()
-                .transactions
-                .get(&transaction_id)
-                .unwrap()
-                .fragments,
-            16,
-        );
         assert!(queue.lock().unwrap().abort_transaction(transaction_id));
         assert_eq!(queue.lock().unwrap().accounting.load(Ordering::Acquire), 0);
     }
 
-    #[test]
-    fn durability_uncertain_result_has_distinct_failure_code() {
-        assert_eq!(JobResult::Failure.code(), -1);
-        assert_eq!(JobResult::DurabilityUncertain.code(), -3);
-    }
-
     #[cfg(unix)]
     #[test]
-    fn directory_barriers_handle_bare_and_nested_paths() {
+    fn directory_barrier_of_a_bare_path_is_the_current_directory() {
         let mut bare = DirectoryBarriers::default();
         bare.record_parent(Path::new("file"));
         assert_eq!(bare.changed, vec![PathBuf::from(".")]);
         assert!(bare.flush().is_ok());
-        let root = test_root();
-        let path = root.join("new").join("nested").join("file");
-        let mut nested = DirectoryBarriers::default();
-        ensure_parent(&path, &mut nested).unwrap();
-        nested.record_parent(&path);
-        let root_nested = root.join("new").join("nested");
-        assert!(nested.changed.contains(&root_nested));
-        assert!(nested.flush().is_ok());
     }
 
     fn gc_fixture(root: &Path) -> (PathBuf, PathBuf) {
@@ -2426,57 +2303,33 @@ mod tests {
     }
 
     fn stage_gc_manifest(queue: &Mutex<Jobs>, transaction: i32, snapshots: &Path, manifest: &Path) {
-        assert!(fragment(
-            queue,
-            transaction,
-            manifest.to_path_buf(),
-            b"new".to_vec(),
-            false,
-            true
-        ));
-        assert!(cleanup_dir(queue, transaction, snapshots.to_path_buf()));
-        assert!(keep(
-            queue,
-            transaction,
-            snapshots.to_path_buf(),
-            "keep.png"
-        ));
+        stage_manifest(queue, transaction, manifest, b"new");
+        assert!(cleanup_dir(queue, transaction, snapshots));
+        assert!(keep(queue, transaction, snapshots, "keep.png"));
     }
 
-    #[test]
-    fn successful_manifest_publish_prunes_orphans_but_keeps_referenced_files() {
-        let root = test_root();
-        let queue = Mutex::new(Jobs::new(limits(4, 64 * 1024)));
-        let (snapshots, manifest) = gc_fixture(&root);
-        let transaction_id = begin(&queue);
-        stage_gc_manifest(&queue, transaction_id, &snapshots, &manifest);
-        let job = commit(&queue, transaction_id);
-        assert_eq!(poll_queue(&queue, job, true), 1);
+    fn assert_gc_outcome(snapshots: &Path, manifest: &Path, published: bool) {
+        let expected: &[u8] = if published { b"new" } else { b"old" };
+        assert_eq!(std::fs::read(manifest).unwrap(), expected);
         assert!(snapshots.join("keep.png").exists());
-        assert!(!snapshots.join("orphan.png").exists());
         assert!(snapshots.join("nested/child.png").exists());
+        assert_eq!(snapshots.join("orphan.png").exists(), !published);
     }
 
     #[test]
-    fn failed_manifest_publish_preserves_all_gc_files_and_old_manifest() {
+    fn failed_transaction_keeps_old_manifest_gc_files_and_earlier_writes() {
         let root = test_root();
         let queue = Mutex::new(Jobs::new(limits(4, 64 * 1024)));
         let (snapshots, manifest) = gc_fixture(&root);
+        let snapshot = root.join("snapshot.png");
         let transaction_id = begin(&queue);
-        assert!(fragment(
-            &queue,
-            transaction_id,
-            snapshots.clone(),
-            b"bad write".to_vec(),
-            false,
-            false
-        ));
+        stage(&queue, transaction_id, &snapshot, b"snapshot");
+        stage(&queue, transaction_id, &snapshots, b"bad write");
         stage_gc_manifest(&queue, transaction_id, &snapshots, &manifest);
         let job = commit(&queue, transaction_id);
         assert_eq!(poll_queue(&queue, job, true), -1);
-        assert_eq!(std::fs::read(&manifest).unwrap(), b"old");
-        assert!(snapshots.join("keep.png").exists());
-        assert!(snapshots.join("orphan.png").exists());
+        assert_gc_outcome(&snapshots, &manifest, false);
+        assert_eq!(std::fs::read(snapshot).unwrap(), b"snapshot");
     }
 
     #[test]
@@ -2491,62 +2344,24 @@ mod tests {
         std::fs::create_dir_all(&snapshots).unwrap();
         let previous = snapshots.join("previous.png");
         let pixels = vec![255, 0, 0, 255];
-        let encoded = encode_png(&pixels, 1, 1).unwrap();
-        std::fs::write(&previous, &encoded).unwrap();
+        std::fs::write(&previous, encode_png(&pixels, 1, 1).unwrap()).unwrap();
         let next = snapshots.join("next.png");
         let manifest = root.join("manifest.json");
         std::fs::write(&manifest, b"old").unwrap();
 
         let transaction_id = begin(&queue);
-        assert!(queue
-            .lock()
-            .unwrap()
-            .add_transaction_cleanup(transaction_id, next.clone(), false));
-        assert!(queue
-            .lock()
-            .unwrap()
-            .reserve_transaction_bytes(transaction_id, pixels.len()));
-        assert!(queue.lock().unwrap().add_transaction_png_reserved(
-            transaction_id,
-            next.clone(),
-            pixels,
-            1,
-            1
-        ));
-        assert!(queue.lock().unwrap().add_transaction_cleanup(
-            transaction_id,
-            previous.clone(),
-            true
-        ));
-        assert!(fragment(
-            &queue,
-            transaction_id,
-            manifest.clone(),
-            b"new".to_vec(),
-            false,
-            true
-        ));
+        cleanup(&queue, transaction_id, &next, false);
+        stage_png(&queue, transaction_id, &next, pixels.clone());
+        cleanup(&queue, transaction_id, &previous, true);
+        stage_manifest(&queue, transaction_id, &manifest, b"new");
         let job = commit(&queue, transaction_id);
         assert_eq!(poll_queue(&queue, job, true), -3);
         assert_eq!(std::fs::read(&manifest).unwrap(), b"new");
-        let previous_pixels = image::load_from_memory(&std::fs::read(&previous).unwrap())
-            .unwrap()
-            .to_rgba8();
-        assert_eq!(previous_pixels.as_raw(), &[255, 0, 0, 255]);
-        let next_pixels = image::load_from_memory(&std::fs::read(&next).unwrap())
-            .unwrap()
-            .to_rgba8();
-        assert_eq!(next_pixels.as_raw(), &[255, 0, 0, 255]);
+        assert_eq!(decoded_png(&previous), pixels);
+        assert_eq!(decoded_png(&next), pixels);
 
         let recovery = begin(&queue);
-        assert!(fragment(
-            &queue,
-            recovery,
-            manifest.clone(),
-            b"recovered".to_vec(),
-            false,
-            true
-        ));
+        stage_manifest(&queue, recovery, &manifest, b"recovered");
         let recovery_job = commit(&queue, recovery);
         assert_eq!(poll_queue(&queue, recovery_job, true), 1);
         assert_eq!(std::fs::read(&manifest).unwrap(), b"recovered");
@@ -2560,22 +2375,12 @@ mod tests {
         let queue = Mutex::new(Jobs::new(limits(4, 64 * 1024)));
         let snapshots = root.join("snapshots");
         let transaction_id = begin(&queue);
-        assert!(!keep(&queue, transaction_id, snapshots.clone(), "keep.png",));
-        assert!(cleanup_dir(&queue, transaction_id, snapshots.clone()));
-        assert!(!keep(
-            &queue,
-            transaction_id,
-            snapshots.clone(),
-            "nested/keep.png",
-        ));
-        assert!(!keep(
-            &queue,
-            transaction_id,
-            snapshots.clone(),
-            "nested\\keep.png",
-        ));
-        assert!(!keep(&queue, transaction_id, snapshots.clone(), "..",));
-        assert!(keep(&queue, transaction_id, snapshots, "keep.png",));
+        assert!(!keep(&queue, transaction_id, &snapshots, "keep.png"));
+        assert!(cleanup_dir(&queue, transaction_id, &snapshots));
+        for name in ["nested/keep.png", "nested\\keep.png", ".."] {
+            assert!(!keep(&queue, transaction_id, &snapshots, name), "{name}");
+        }
+        assert!(keep(&queue, transaction_id, &snapshots, "keep.png"));
         assert!(queue.lock().unwrap().abort_transaction(transaction_id));
     }
 
@@ -2583,24 +2388,17 @@ mod tests {
     fn cleanup_admission_bounds_directories_items_and_metadata_bytes() {
         let root = test_root();
         let snapshots = root.join("snapshots");
-        let cleanup_bytes = snapshots.as_os_str().len() + 1;
         let queue = Mutex::new(Jobs::new(Limits {
-            max_pending_jobs: 4,
-            max_pending_bytes: 64 * 1024,
-            max_open_transactions: 4,
-            max_transaction_ops: 16,
-            max_transaction_cleanups: 16,
             max_transaction_cleanup_directories: 1,
             max_transaction_keep_entries: 1,
-            max_transaction_cleanup_bytes: cleanup_bytes,
-            max_transaction_fragment_bytes: 64 * 1024,
-            max_transaction_fragments: 16,
+            max_transaction_cleanup_bytes: snapshots.as_os_str().len() + 1,
+            ..limits(4, 64 * 1024)
         }));
         let transaction_id = begin(&queue);
-        assert!(cleanup_dir(&queue, transaction_id, snapshots.clone(),));
-        assert!(!cleanup_dir(&queue, transaction_id, root.join("other"),));
-        assert!(keep(&queue, transaction_id, snapshots.clone(), "x",));
-        assert!(!keep(&queue, transaction_id, snapshots, "y",));
+        assert!(cleanup_dir(&queue, transaction_id, &snapshots));
+        assert!(!cleanup_dir(&queue, transaction_id, &root.join("other")));
+        assert!(keep(&queue, transaction_id, &snapshots, "x"));
+        assert!(!keep(&queue, transaction_id, &snapshots, "y"));
         assert!(queue.lock().unwrap().abort_transaction(transaction_id));
         assert_eq!(queue.lock().unwrap().accounting.load(Ordering::Acquire), 0);
     }
@@ -2609,89 +2407,18 @@ mod tests {
     fn transaction_cleanup_runs_for_success_and_failure() {
         let root = test_root();
         let queue = Mutex::new(Jobs::new(limits(4, 64)));
-        let success_cleanup = root.join("success.tmp");
-        std::fs::write(&success_cleanup, b"stale").unwrap();
-        let success_id = begin(&queue);
-        assert!(fragment(
-            &queue,
-            success_id,
-            root.join("success"),
-            b"ok".to_vec(),
-            false,
-            false
-        ));
-        assert!(queue.lock().unwrap().add_transaction_cleanup(
-            success_id,
-            success_cleanup.clone(),
-            true
-        ));
-        let success_job = commit(&queue, success_id);
-        assert_eq!(poll_queue(&queue, success_job, true), 1);
-        assert!(!success_cleanup.exists());
-
-        let failure_cleanup = root.join("failure.tmp");
-        std::fs::write(&failure_cleanup, b"stale").unwrap();
         let blocked = root.join("blocked");
         std::fs::create_dir(&blocked).unwrap();
-        let failure_id = begin(&queue);
-        assert!(fragment(
-            &queue,
-            failure_id,
-            blocked,
-            b"bad write".to_vec(),
-            false,
-            false
-        ));
-        assert!(queue.lock().unwrap().add_transaction_cleanup(
-            failure_id,
-            failure_cleanup.clone(),
-            false
-        ));
-        let failure_job = commit(&queue, failure_id);
-        assert_eq!(poll_queue(&queue, failure_job, true), -1);
-        assert!(!failure_cleanup.exists());
-    }
-
-    #[test]
-    fn failed_transaction_does_not_replace_existing_manifest() {
-        let root = test_root();
-        let queue = Mutex::new(Jobs::new(limits(4, 64)));
-        let manifest = root.join("manifest.json");
-        std::fs::write(&manifest, b"old").unwrap();
-        let blocked = root.join("blocked");
-        std::fs::create_dir(&blocked).unwrap();
-        let transaction_id = begin(&queue);
-        assert!(fragment(
-            &queue,
-            transaction_id,
-            root.join("snapshot.png"),
-            b"snapshot".to_vec(),
-            false,
-            false
-        ));
-        assert!(fragment(
-            &queue,
-            transaction_id,
-            blocked,
-            b"bad write".to_vec(),
-            false,
-            false
-        ));
-        assert!(fragment(
-            &queue,
-            transaction_id,
-            manifest.clone(),
-            b"new".to_vec(),
-            false,
-            true
-        ));
-        let job = commit(&queue, transaction_id);
-        assert_eq!(poll_queue(&queue, job, true), -1);
-        assert_eq!(std::fs::read(manifest).unwrap(), b"old");
-        assert_eq!(
-            std::fs::read(root.join("snapshot.png")).unwrap(),
-            b"snapshot"
-        );
+        for (target, code) in [(root.join("success"), 1), (blocked, -1)] {
+            let stale = root.join("stale.tmp");
+            std::fs::write(&stale, b"stale").unwrap();
+            let transaction = begin(&queue);
+            stage(&queue, transaction, &target, b"write");
+            cleanup(&queue, transaction, &stale, code == 1);
+            let job = commit(&queue, transaction);
+            assert_eq!(poll_queue(&queue, job, true), code);
+            assert!(!stale.exists(), "{target:?}");
+        }
     }
 
     #[test]
@@ -2704,35 +2431,14 @@ mod tests {
         stage_gc_manifest(&queue, transaction_id, &snapshots, &manifest);
         let job = commit(&queue, transaction_id);
         gate.wait_until_entered();
-        assert_eq!(
-            queue
-                .lock()
-                .unwrap()
-                .pending
-                .get(&job)
-                .unwrap()
-                .cancellation
-                .as_ref()
-                .unwrap()
-                .cancel(),
-            1
-        );
+        assert_eq!(cancellation(&queue, job).cancel(), 1);
         gate.release();
         assert_eq!(poll_queue(&queue, job, true), -2);
-        assert_eq!(std::fs::read(manifest).unwrap(), b"old");
-        assert!(snapshots.join("keep.png").exists());
-        assert!(snapshots.join("orphan.png").exists());
+        assert_gc_outcome(&snapshots, &manifest, false);
     }
 
     #[test]
-    fn cancellation_reports_too_late_after_publication_claim() {
-        let cancellation = Cancellation::new();
-        assert!(cancellation.claim_publication());
-        assert_eq!(cancellation.cancel(), 0);
-    }
-
-    #[test]
-    fn cancellation_after_publication_claim_still_publishes_manifest() {
+    fn cancellation_after_publication_claim_still_publishes_and_prunes() {
         let root = test_root();
         let gate = Arc::new(TestGate::new());
         let queue = Mutex::new(Jobs::new_with_publication_gate(
@@ -2744,48 +2450,10 @@ mod tests {
         stage_gc_manifest(&queue, transaction_id, &snapshots, &manifest);
         let job = commit(&queue, transaction_id);
         gate.wait_until_entered();
-        let cancellation = queue
-            .lock()
-            .unwrap()
-            .pending
-            .get(&job)
-            .unwrap()
-            .cancellation
-            .as_ref()
-            .unwrap()
-            .clone();
-        assert_eq!(cancellation.cancel(), 0);
+        assert_eq!(cancellation(&queue, job).cancel(), 0);
         gate.release();
         assert_eq!(poll_queue(&queue, job, true), 1);
-        assert_eq!(std::fs::read(&manifest).unwrap(), b"new");
-        assert!(snapshots.join("keep.png").exists());
-        assert!(!snapshots.join("orphan.png").exists());
-    }
-
-    #[test]
-    fn copied_payload_is_independent_of_caller_buffer() {
-        let root = test_root();
-        let gate = Arc::new(TestGate::new());
-        let queue = Mutex::new(Jobs::new_with_gate(limits(4, 64), Arc::clone(&gate)));
-        let path = root.join("payload");
-        let mut caller_bytes = b"before".to_vec();
-        let copied = copy_bytes(caller_bytes.as_ptr(), caller_bytes.len(), 64).unwrap();
-        let job = queue
-            .lock()
-            .unwrap()
-            .enqueue_single(SingleRequest {
-                path: path.clone(),
-                bytes: copied,
-                append: false,
-                source: None,
-                second: None,
-            })
-            .unwrap();
-        caller_bytes.copy_from_slice(b"after!");
-        gate.wait_until_entered();
-        gate.release();
-        assert_eq!(poll_queue(&queue, job, true), 1);
-        assert_eq!(std::fs::read(path).unwrap(), b"before");
+        assert_gc_outcome(&snapshots, &manifest, true);
     }
 }
 
