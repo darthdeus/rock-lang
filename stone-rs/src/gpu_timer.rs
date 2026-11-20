@@ -630,29 +630,8 @@ impl GpuTimer {
 }
 
 pub(crate) fn scopes_json(status: &str, aggregate: &ScopeAggregator) -> String {
-    let scopes: Vec<serde_json::Value> = if status == "on" || status == "finish" {
-        aggregate
-            .stats()
-            .into_iter()
-            .map(|s| {
-                let mut row = serde_json::json!({
-                    "name": s.name,
-                    "path": s.path,
-                    "parent": s.parent,
-                    "depth": s.depth,
-                    "calls_per_frame": s.calls_per_frame,
-                    "ms_per_frame": s.ms_per_frame,
-                    "ms": {
-                        "mean": s.mean, "stddev": s.stddev, "min": s.min, "max": s.max,
-                        "p50": s.p50, "p90": s.p90, "p95": s.p95, "p99": s.p99, "n": s.frames,
-                    },
-                });
-                if status == "finish" {
-                    row["wait_ms_per_frame"] = serde_json::json!(s.wait_ms_per_frame);
-                }
-                row
-            })
-            .collect()
+    let scopes = if status == "on" || status == "finish" {
+        aggregate.rows(status == "finish")
     } else {
         Vec::new()
     };
@@ -704,28 +683,6 @@ pub(crate) struct ScopeAggregator {
     frames: u64,
     dropped_frames: u64,
     truncated_samples: u64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ScopeStat {
-    pub name: String,
-    pub path: String,
-    pub parent: Option<String>,
-    pub depth: u32,
-    pub frames: usize,
-    pub calls_per_frame: f64,
-    pub ms_per_frame: f64,
-    pub mean: f64,
-    pub stddev: f64,
-    pub min: f64,
-    pub max: f64,
-    pub p50: f64,
-    pub p90: f64,
-    pub p95: f64,
-    pub p99: f64,
-    /// Finish mode: glFinish wait inside the scope, averaged over every
-    /// measured frame. The wall time minus it is CPU time in the scope.
-    pub wait_ms_per_frame: f64,
 }
 
 /// Samples kept per path. A bounded `rock perf` run records a few hundred
@@ -825,62 +782,58 @@ impl ScopeAggregator {
         }
     }
 
-    /// Rows in depth-first order (children after their parent, siblings in
-    /// first-seen order), skipping paths with no sample in the window.
-    pub fn stats(&self) -> Vec<ScopeStat> {
+    /// The `gpu_scopes` report rows in depth-first order (children after their
+    /// parent, siblings in first-seen order), skipping paths with no sample in the
+    /// window. `waits` adds finish mode's glFinish wait, averaged over every
+    /// measured frame; the wall time minus it is CPU time in the scope.
+    pub fn rows(&self, waits: bool) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
         for (id, info) in self.paths.iter().enumerate() {
             if info.parent.is_none() {
-                self.collect(id as PathId, &mut out);
+                self.collect(id as PathId, waits, &mut out);
             }
         }
         out
     }
 
-    fn collect(&self, id: PathId, out: &mut Vec<ScopeStat>) {
+    fn collect(&self, id: PathId, waits: bool, out: &mut Vec<serde_json::Value>) {
         let info = &self.paths[id as usize];
         let row = &self.rows[id as usize];
         if !row.frame_ms.is_empty() {
             let mut sorted = row.frame_ms.clone();
             sorted.sort_by(f64::total_cmp);
             let n = sorted.len();
-            let mean = sorted.iter().sum::<f64>() / n as f64;
+            let total = sorted.iter().sum::<f64>();
+            let mean = total / n as f64;
             let variance = sorted.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n as f64;
             let pick = |p: usize| sorted[metric_percentile_index(p, n)];
-            out.push(ScopeStat {
-                name: self.names[info.name as usize].clone(),
-                path: self.path_string(id),
-                parent: info.parent.map(|p| self.path_string(p)),
-                depth: info.depth,
-                frames: n,
-                calls_per_frame: if self.frames > 0 {
-                    row.calls as f64 / self.frames as f64
+            let per_frame = |sum: f64| {
+                if self.frames > 0 {
+                    sum / self.frames as f64
                 } else {
                     0.0
-                },
-                ms_per_frame: if self.frames > 0 {
-                    sorted.iter().sum::<f64>() / self.frames as f64
-                } else {
-                    0.0
-                },
-                mean,
-                stddev: variance.sqrt(),
-                min: sorted[0],
-                max: sorted[n - 1],
-                p50: pick(50),
-                p90: pick(90),
-                p95: pick(95),
-                p99: pick(99),
-                wait_ms_per_frame: if self.frames > 0 {
-                    row.frame_wait_ms.iter().sum::<f64>() / self.frames as f64
-                } else {
-                    0.0
+                }
+            };
+            let mut stat = serde_json::json!({
+                "name": self.names[info.name as usize],
+                "path": self.path_string(id),
+                "parent": info.parent.map(|p| self.path_string(p)),
+                "depth": info.depth,
+                "calls_per_frame": per_frame(row.calls as f64),
+                "ms_per_frame": per_frame(total),
+                "ms": {
+                    "mean": mean, "stddev": variance.sqrt(), "min": sorted[0], "max": sorted[n - 1],
+                    "p50": pick(50), "p90": pick(90), "p95": pick(95), "p99": pick(99), "n": n,
                 },
             });
+            if waits {
+                stat["wait_ms_per_frame"] = per_frame(row.frame_wait_ms.iter().sum()).into();
+            }
+            out.push(stat);
         }
         for (child, child_info) in self.paths.iter().enumerate() {
             if child_info.parent == Some(id) {
-                self.collect(child as PathId, out);
+                self.collect(child as PathId, waits, out);
             }
         }
     }
@@ -926,10 +879,10 @@ mod tests {
 
     const MS: u64 = 1_000_000;
 
-    fn stat<'a>(stats: &'a [super::ScopeStat], path: &str) -> &'a super::ScopeStat {
+    fn stat<'a>(stats: &'a [serde_json::Value], path: &str) -> &'a serde_json::Value {
         stats
             .iter()
-            .find(|s| s.path == path)
+            .find(|s| s["path"] == path)
             .unwrap_or_else(|| panic!("no scope {path} in {stats:?}"))
     }
 
@@ -947,16 +900,17 @@ mod tests {
                 sample(b, b2 * MS),
             ]);
         }
-        let stats = agg.stats();
+        let stats = agg.rows(true);
         let b = stat(&stats, "frame/a/b");
-        assert_eq!(b.frames, 2);
-        assert_eq!(b.calls_per_frame, 2.0);
-        assert_eq!(b.mean, 4.0);
-        assert_eq!((b.min, b.max), (3.0, 5.0));
-        assert_eq!(b.depth, 2);
-        assert_eq!(b.parent.as_deref(), Some("frame/a"));
-        assert_eq!(stat(&stats, "frame").mean, 11.0);
-        let order: Vec<&str> = stats.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(b["ms"]["n"], 2);
+        assert_eq!(b["calls_per_frame"], 2.0);
+        assert_eq!(b["ms"]["mean"], 4.0);
+        assert_eq!(b["ms"]["min"], 3.0);
+        assert_eq!(b["ms"]["max"], 5.0);
+        assert_eq!(b["depth"], 2);
+        assert_eq!(b["parent"], "frame/a");
+        assert_eq!(stat(&stats, "frame")["ms"]["mean"], 11.0);
+        let order: Vec<&str> = stats.iter().map(|s| s["path"].as_str().unwrap()).collect();
         assert_eq!(order, ["frame", "frame/a", "frame/a/b"]);
     }
 
@@ -967,14 +921,14 @@ mod tests {
         let bloom = agg.path(Some(frame), "bloom");
         agg.ingest_frame(&[sample(frame, 5 * MS), sample(bloom, MS)]);
         agg.ingest_frame(&[sample(frame, 5 * MS)]);
-        let stats = agg.stats();
+        let stats = agg.rows(true);
         let bloom = stat(&stats, "frame/bloom");
-        assert_eq!(bloom.frames, 1);
-        assert_eq!(bloom.calls_per_frame, 0.5);
-        assert_eq!(bloom.mean, 1.0);
-        assert_eq!(bloom.ms_per_frame, 0.5);
-        assert_eq!(stat(&stats, "frame").ms_per_frame, 5.0);
-        assert_eq!(stat(&stats, "frame").frames, 2);
+        assert_eq!(bloom["ms"]["n"], 1);
+        assert_eq!(bloom["calls_per_frame"], 0.5);
+        assert_eq!(bloom["ms"]["mean"], 1.0);
+        assert_eq!(bloom["ms_per_frame"], 0.5);
+        assert_eq!(stat(&stats, "frame")["ms_per_frame"], 5.0);
+        assert_eq!(stat(&stats, "frame")["ms"]["n"], 2);
     }
 
     #[test]
@@ -994,9 +948,15 @@ mod tests {
             sample(post, 4 * MS),
             sample(blit_post, 2 * MS),
         ]);
-        let stats = agg.stats();
-        assert_eq!(stat(&stats, "frame/scene_passes/pass:blit").mean, 1.0);
-        assert_eq!(stat(&stats, "frame/post_processing/pass:blit").mean, 2.0);
+        let stats = agg.rows(true);
+        assert_eq!(
+            stat(&stats, "frame/scene_passes/pass:blit")["ms"]["mean"],
+            1.0
+        );
+        assert_eq!(
+            stat(&stats, "frame/post_processing/pass:blit")["ms"]["mean"],
+            2.0
+        );
     }
 
     #[test]
@@ -1012,9 +972,9 @@ mod tests {
         ]);
         agg.ingest_frame(&[sample(frame, 10 * MS)]);
         agg.ingest_frame_waits(&[sample(frame, 4 * MS)]);
-        let stats = agg.stats();
-        assert_eq!(stat(&stats, "frame").wait_ms_per_frame, 5.0);
-        assert_eq!(stat(&stats, "frame/pass:x").wait_ms_per_frame, 1.5);
+        let stats = agg.rows(true);
+        assert_eq!(stat(&stats, "frame")["wait_ms_per_frame"], 5.0);
+        assert_eq!(stat(&stats, "frame/pass:x")["wait_ms_per_frame"], 1.5);
     }
 
     #[test]
@@ -1024,9 +984,10 @@ mod tests {
         for v in 1..=10u64 {
             agg.ingest_frame(&[sample(frame, v * MS)]);
         }
-        let f = agg.stats().remove(0);
-        assert_eq!((f.p50, f.p90, f.p95, f.p99), (6.0, 9.0, 10.0, 10.0));
-        assert_eq!(f.mean, 5.5);
+        let f = &agg.rows(false)[0]["ms"];
+        let percentiles = ["p50", "p90", "p95", "p99"].map(|p| f[p].as_f64().unwrap());
+        assert_eq!(percentiles, [6.0, 9.0, 10.0, 10.0]);
+        assert_eq!(f["mean"], 5.5);
     }
 
     #[test]
@@ -1037,11 +998,11 @@ mod tests {
         agg.drop_frame();
         agg.reset_stats();
         assert_eq!((agg.frames(), agg.dropped_frames()), (0, 0));
-        assert!(agg.stats().is_empty());
+        assert!(agg.rows(false).is_empty());
         assert_eq!(agg.path(None, "frame"), frame);
         agg.ingest_frame(&[sample(frame, 2 * MS)]);
         agg.drop_frame();
-        assert_eq!(agg.stats()[0].mean, 2.0);
+        assert_eq!(agg.rows(false)[0]["ms"]["mean"], 2.0);
         assert_eq!((agg.frames(), agg.dropped_frames()), (1, 1));
     }
 }
