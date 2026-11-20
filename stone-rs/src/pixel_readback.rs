@@ -1,22 +1,18 @@
 //! Async pixel readback via double-buffered Pixel Pack Buffers.
 //!
-//! A "slot" owns 2 PBOs in a ping-pong. Each `read` call:
-//!   1. Submits glReadPixels into pbos[write_idx]. With a
-//!      PBO bound as PIXEL_PACK_BUFFER this is async — the driver queues a
-//!      DMA after prior render commands and returns immediately.
-//!   2. Maps pbos[1 - write_idx] (filled by last frame's submit), copies out
-//!      the bytes, unmaps. By now the DMA is complete; the map doesn't stall.
-//!   3. Swaps write_idx.
+//! A "slot" submits glReadPixels into a PBO bound as PIXEL_PACK_BUFFER, which
+//! the driver queues as a DMA after prior render commands, and maps it frames
+//! later, when the DMA is complete and the map does not stall.
 //!
 //! `stone_pixel_readback_poll_id` is the non-blocking read. A polled slot
 //! keeps up to POLL_RING_DEPTH fenced reads in flight and a poll takes the
 //! newest one whose fence has signaled. On a GPU-bound machine the blocking
-//! map in step 2 waits for the GPU to drain the frame that wrote the PBO,
+//! map of `stone_pixel_readback_consume` waits for the GPU to drain the frame that wrote the PBO,
 //! which serializes CPU and GPU (about 40% of the frame on a Steam Deck).
 //!
 //! The PBO stores no coordinates; the slot handle is the caller's persistent
 //! identity across frames. Two call sites sharing one slot will stomp each
-//! other's in-flight reads — one slot per logical reader.
+//! other's in-flight reads -- one slot per logical reader.
 //!
 
 use std::cell::RefCell;
@@ -80,48 +76,32 @@ impl Channel {
     }
 }
 
-// Two-PBO ping-pong: staging (newest submit, DMA may still be in flight)
-// and ready (prior submit, DMA complete, awaiting consume). submit()
-// promotes staging → ready before writing a new staging, which gives
-// consume() a value at least one frame old regardless of whether submit
-// and consume happen at the same call site or are split across update
-// and draw phases.
-//
-// A 3-PBO ring did not reduce submit-time stalls in GPU-bound scenarios, where the
-// driver syncs on the source-FBO state rather than PBO back-pressure.
 // Reads a polled slot may have in flight. A GPU this many frames behind the
 // CPU still answers every frame, once per frame of lag.
 const POLL_RING_DEPTH: usize = 4;
 
-struct InFlight {
+// An unpolled slot is a two-read ping-pong: consume answers the older read only
+// once a newer submit exists, so it is at least one frame old whether submit and
+// consume share a call site or are split across update and draw. A 3-PBO ring
+// did not reduce submit-time stalls in GPU-bound scenarios, where the driver
+// syncs on the source-FBO state rather than PBO back-pressure.
+const PING_PONG_DEPTH: usize = 2;
+
+struct Read {
     idx: usize,
     fence: Option<glow::Fence>,
-    garbage: bool,
-    fmt: PixelFmt,
-    rect: ReadRect,
+    // None for a refused submit, which answers without touching its PBO.
+    // Otherwise the stored format: f32 (float canvas / depth), an RGBA8 byte
+    // pixel (color read from a downgraded non-float canvas -- the only combo
+    // GLES allows there), or i32 ids (an R32I canvas, read as RGBA_INTEGER/INT).
+    pixels: Option<(PixelFmt, ReadRect)>,
     center: (i32, i32),
 }
 
 struct Slot {
     pbos: Vec<glow::Buffer>,
-    ready_idx: usize,
-    staging_idx: usize,
-    ready_primed: bool,
-    staging_primed: bool,
-    ready_garbage: bool,
-    staging_garbage: bool,
-    // What the corresponding PBO holds: f32 (float canvas / depth), an RGBA8
-    // byte pixel (color read from a downgraded non-float canvas -- the only
-    // combo GLES allows there), or i32 ids (an R32I canvas, read as
-    // RGBA_INTEGER/INT). consume() converts to the f32 return.
-    ready_fmt: PixelFmt,
-    staging_fmt: PixelFmt,
-    ready_rect: ReadRect,
-    staging_rect: ReadRect,
-    ready_center: (i32, i32),
-    staging_center: (i32, i32),
+    reads: VecDeque<Read>,
     polled: bool,
-    inflight: VecDeque<InFlight>,
     answer_center: (i32, i32),
     channel: Channel,
     shape: ReadShape,
@@ -136,20 +116,14 @@ const CANVAS_CAPTURE_MAX_BYTES: usize = CANVAS_CAPTURE_MAX_SLOTS
     * 4;
 const CANVAS_CAPTURE_ID_BASE: u64 = 1 << 48;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CanvasCaptureState {
-    Pending,
-    Ready,
-    Failed,
-}
-
 struct CanvasCapture {
     pbo: glow::Buffer,
+    // Some while the readback is pending.
     fence: Option<glow::Fence>,
     width: i32,
     height: i32,
     bytes: usize,
-    state: CanvasCaptureState,
+    failed: bool,
 }
 
 thread_local! {
@@ -349,30 +323,8 @@ fn create_slot(channel: Channel, shape: ReadShape) -> Option<Slot> {
 
         Some(Slot {
             pbos,
-            ready_idx: 0,
-            staging_idx: 1,
-            ready_primed: false,
-            staging_primed: false,
-            ready_garbage: false,
-            staging_garbage: false,
-            ready_fmt: PixelFmt::F32,
-            staging_fmt: PixelFmt::F32,
-            ready_rect: ReadRect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            },
-            staging_rect: ReadRect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            },
-            ready_center: (0, 0),
-            staging_center: (0, 0),
+            reads: VecDeque::new(),
             polled: false,
-            inflight: VecDeque::new(),
             answer_center: (0, 0),
             channel,
             shape,
@@ -418,16 +370,24 @@ fn delete_fence(fence: Option<glow::Fence>) {
     }
 }
 
-/// Promote the staging submit to ready. The previous ready (if any and
-/// unconsumed) is dropped.
-fn promote_staging(slot: &mut Slot) {
-    std::mem::swap(&mut slot.ready_idx, &mut slot.staging_idx);
-    slot.ready_primed = true;
-    slot.ready_garbage = slot.staging_garbage;
-    slot.ready_fmt = slot.staging_fmt;
-    slot.ready_rect = slot.staging_rect;
-    slot.ready_center = slot.staging_center;
-    slot.staging_primed = false;
+/// The first poll switches a slot to fenced reads and drops its unfenced ones.
+fn begin_polling(slot: &mut Slot) -> bool {
+    if slot.polled {
+        return false;
+    }
+    slot.polled = true;
+    slot.reads.clear();
+    true
+}
+
+fn read_status(read: &Read) -> Option<u32> {
+    read.pixels.and(fence_wait_status(read.fence))
+}
+
+fn drop_reads(slot: &mut Slot) {
+    for read in slot.reads.drain(..) {
+        delete_fence(read.fence);
+    }
 }
 
 fn canvas_capture_size(width: i32, height: i32) -> Option<usize> {
@@ -488,12 +448,8 @@ unsafe fn copy_rgba_rows_top_down(src: *const u8, dst: *mut u8, width: usize, he
 }
 
 fn destroy_canvas_capture(capture: CanvasCapture) {
-    with_gl(|gl| unsafe {
-        if let Some(fence) = capture.fence {
-            gl.delete_sync(fence);
-        }
-        gl.delete_buffer(capture.pbo);
-    });
+    delete_fence(capture.fence);
+    with_gl(|gl| unsafe { gl.delete_buffer(capture.pbo) });
 }
 
 fn drain_canvas_captures() -> Vec<CanvasCapture> {
@@ -628,30 +584,19 @@ pub extern "C" fn stone_canvas_capture_begin(canvas_handle: u64) -> u64 {
     let Some((pbo, fence)) = allocated else {
         return 0;
     };
+    let capture = CanvasCapture {
+        pbo,
+        fence: Some(fence),
+        width: info.width,
+        height: info.height,
+        bytes,
+        failed: false,
+    };
     let Some(id) = next_canvas_capture_id() else {
-        destroy_canvas_capture(CanvasCapture {
-            pbo,
-            fence: Some(fence),
-            width: info.width,
-            height: info.height,
-            bytes,
-            state: CanvasCaptureState::Failed,
-        });
+        destroy_canvas_capture(capture);
         return 0;
     };
-    CANVAS_CAPTURES.with(|captures| {
-        captures.borrow_mut().insert(
-            id,
-            CanvasCapture {
-                pbo,
-                fence: Some(fence),
-                width: info.width,
-                height: info.height,
-                bytes,
-                state: CanvasCaptureState::Pending,
-            },
-        );
-    });
+    CANVAS_CAPTURES.with(|captures| captures.borrow_mut().insert(id, capture));
     id
 }
 
@@ -665,22 +610,15 @@ pub extern "C" fn stone_canvas_capture_poll(id: u64, out: *mut u8, capacity: c_i
         let Some(capture) = captures.get_mut(&id) else {
             return -1;
         };
-        if capture.state == CanvasCaptureState::Failed {
-            return -1;
-        }
-        if (capacity as usize) < capture.bytes {
+        if capture.failed || (capacity as usize) < capture.bytes {
             return -1;
         }
 
-        if capture.state == CanvasCaptureState::Pending {
-            let Some(fence) = capture.fence else {
-                capture.state = CanvasCaptureState::Failed;
-                return -1;
-            };
+        if let Some(fence) = capture.fence {
             let Some(status) = with_gl(|gl| unsafe {
                 gl.client_wait_sync(fence, glow::SYNC_FLUSH_COMMANDS_BIT, 0)
             }) else {
-                capture.state = CanvasCaptureState::Failed;
+                capture.failed = true;
                 return -1;
             };
             if status == glow::TIMEOUT_EXPIRED {
@@ -688,16 +626,14 @@ pub extern "C" fn stone_canvas_capture_poll(id: u64, out: *mut u8, capacity: c_i
             }
             if !readback_fence_ready(status) {
                 crate::log_once!("CANVAS", "canvas capture fence wait failed for id {}", id);
-                capture.state = CanvasCaptureState::Failed;
+                capture.failed = true;
                 return -1;
             }
-            if let Some(fence) = capture.fence.take() {
-                if with_gl(|gl| unsafe { gl.delete_sync(fence) }).is_none() {
-                    capture.state = CanvasCaptureState::Failed;
-                    return -1;
-                }
+            capture.fence = None;
+            if with_gl(|gl| unsafe { gl.delete_sync(fence) }).is_none() {
+                capture.failed = true;
+                return -1;
             }
-            capture.state = CanvasCaptureState::Ready;
         }
 
         let pbo = capture.pbo;
@@ -727,7 +663,7 @@ pub extern "C" fn stone_canvas_capture_poll(id: u64, out: *mut u8, capacity: c_i
             bytes as c_int
         } else {
             crate::log_once!("CANVAS", "canvas capture PBO map failed for id {}", id);
-            capture.state = CanvasCaptureState::Failed;
+            capture.failed = true;
             -1
         }
     })
@@ -797,13 +733,7 @@ pub extern "C" fn stone_pixel_readback_reset_contents(id: u64) -> bool {
         let Some(slot) = slots.get_mut(&id) else {
             return false;
         };
-        slot.ready_primed = false;
-        slot.staging_primed = false;
-        slot.ready_garbage = false;
-        slot.staging_garbage = false;
-        for read in slot.inflight.drain(..) {
-            delete_fence(read.fence);
-        }
+        drop_reads(slot);
         true
     })
 }
@@ -814,11 +744,9 @@ pub extern "C" fn stone_pixel_readback_destroy(id: u64) {
         return;
     }
     let removed = SLOTS.with(|s| s.borrow_mut().remove(&id));
-    let Some(slot) = removed else { return };
+    let Some(mut slot) = removed else { return };
     crate::handles::retire(Class::PixelReadback, id);
-    for read in slot.inflight {
-        delete_fence(read.fence);
-    }
+    drop_reads(&mut slot);
     with_gl(|gl| unsafe {
         for pbo in slot.pbos {
             gl.delete_buffer(pbo);
@@ -851,76 +779,31 @@ pub extern "C" fn stone_pixel_readback_poll_id(id: u64) -> c_int {
         let Some(slot) = slots.get_mut(&id) else {
             return -1;
         };
-        if !slot.polled {
-            slot.polled = true;
-            slot.ready_primed = false;
-            slot.staging_primed = false;
+        if begin_polling(slot) {
             return -1;
         }
-        let statuses = slot.inflight.iter().map(|read| {
-            let status = if read.garbage {
-                None
-            } else {
-                fence_wait_status(read.fence)
-            };
+        let statuses = slot.reads.iter().map(|read| {
+            let status = read_status(read);
             if matches!(status, Some(glow::WAIT_FAILED)) {
                 crate::log_once!(
                     "READBACK",
                     "pixel readback fence wait failed; reading without it"
                 );
             }
-            poll_answer_landed(read.garbage, status)
+            poll_answer_landed(read.pixels.is_none(), status)
         });
         let landed = landed_prefix(statuses);
-        if landed == 0 {
-            return -1;
-        }
         let mut newest = None;
-        for _ in 0..landed {
-            if let Some(read) = slot.inflight.pop_front() {
-                delete_fence(read.fence);
-                newest = Some(read);
-            }
+        for read in slot.reads.drain(..landed) {
+            delete_fence(read.fence);
+            newest = Some(read);
         }
         let Some(read) = newest else { return -1 };
         slot.answer_center = read.center;
-        if read.garbage {
-            return 0;
-        }
-        let (value, _) = read_pbo(
-            slot,
-            slot.pbos[read.idx],
-            read.fmt,
-            read.rect,
-            read.center,
-            None,
-        );
+        let Some(pixels) = read.pixels else { return 0 };
+        let (value, _) = read_pbo(slot, read.idx, pixels, read.center, None);
         (value as c_int).max(0)
     })
-}
-
-fn take_oldest_landed(slot: &mut Slot) -> Option<InFlight> {
-    if !slot.polled {
-        slot.polled = true;
-        slot.ready_primed = false;
-        slot.staging_primed = false;
-        return None;
-    }
-    let front = slot.inflight.front()?;
-    let status = if front.garbage {
-        None
-    } else {
-        fence_wait_status(front.fence)
-    };
-    if matches!(status, Some(glow::WAIT_FAILED)) {
-        crate::log_once!("READBACK", "pixel readback fence wait failed");
-    }
-    if !poll_answer_landed(front.garbage, status) {
-        return None;
-    }
-    let read = slot.inflight.pop_front()?;
-    delete_fence(read.fence);
-    Some(read)
 }
 
 #[no_mangle]
@@ -940,52 +823,35 @@ pub extern "C" fn stone_pixel_readback_poll_rgba(
         if !matches!(slot.channel, Channel::Color) || !matches!(slot.shape, ReadShape::Pixel) {
             return -2;
         }
-        if !slot.polled {
-            let _ = take_oldest_landed(slot);
+        if begin_polling(slot) {
             return -1;
         }
-        let Some((garbage, fence)) = slot.inflight.front().map(|read| (read.garbage, read.fence))
-        else {
+        let Some(front) = slot.reads.front() else {
             return -1;
         };
-        if garbage {
-            let Some(_read) = take_oldest_landed(slot) else {
-                return -1;
-            };
-            return 0;
-        }
-
-        let status = fence_wait_status(fence);
+        let status = read_status(front);
         if status == Some(glow::TIMEOUT_EXPIRED) {
             return -1;
         }
+        let Some(read) = slot.reads.pop_front() else {
+            return -1;
+        };
+        delete_fence(read.fence);
+        let Some(pixels) = read.pixels else { return 0 };
         if !status.is_some_and(readback_fence_ready) {
-            if status != Some(glow::WAIT_FAILED) {
+            if status == Some(glow::WAIT_FAILED) {
+                crate::log_once!("READBACK", "pixel readback fence wait failed");
+            } else {
                 crate::log_once!(
                     "READBACK",
                     "pixel RGBA readback fence missing or invalid for id {}",
                     id
                 );
             }
-            let _ = take_oldest_landed(slot);
             return -2;
         }
-
-        let Some(read) = take_oldest_landed(slot) else {
-            return -1;
-        };
-        if read.garbage {
-            return 0;
-        }
         let mut rgba = [0.0; 4];
-        let (_, mapped) = read_pbo(
-            slot,
-            slot.pbos[read.idx],
-            read.fmt,
-            read.rect,
-            read.center,
-            Some(&mut rgba),
-        );
+        let (_, mapped) = read_pbo(slot, read.idx, pixels, read.center, Some(&mut rgba));
         if !mapped {
             crate::log_once!("READBACK", "pixel RGBA readback map failed for id {}", id);
             return -2;
@@ -1002,7 +868,8 @@ pub extern "C" fn stone_pixel_readback_in_flight(id: u64) -> c_int {
         slots
             .borrow()
             .get(&id)
-            .map_or(0, |slot| slot.inflight.len() as c_int)
+            .filter(|slot| slot.polled)
+            .map_or(0, |slot| slot.reads.len() as c_int)
     })
 }
 
@@ -1028,27 +895,16 @@ pub extern "C" fn stone_pixel_readback_answer_y(id: u64) -> c_int {
 
 fn consume_ready(slot: &mut Slot) -> c_float {
     let sentinel = slot.channel.sentinel();
-
-    if !slot.ready_primed {
+    if slot.polled || slot.reads.len() < PING_PONG_DEPTH {
         return sentinel;
     }
-    slot.ready_primed = false;
-
-    if slot.ready_garbage {
-        slot.ready_garbage = false;
+    let Some(read) = slot.reads.pop_front() else {
         return sentinel;
+    };
+    match read.pixels {
+        Some(pixels) => read_pbo(slot, read.idx, pixels, read.center, None).0,
+        None => sentinel,
     }
-
-    let pbo = slot.pbos[slot.ready_idx];
-    read_pbo(
-        slot,
-        pbo,
-        slot.ready_fmt,
-        slot.ready_rect,
-        slot.ready_center,
-        None,
-    )
-    .0
 }
 
 fn pixel_component(bytes: &[u8], fmt: PixelFmt, channel: usize) -> f32 {
@@ -1073,12 +929,12 @@ fn pixel_component(bytes: &[u8], fmt: PixelFmt, channel: usize) -> f32 {
 /// value and whether mapping succeeded.
 fn read_pbo(
     slot: &Slot,
-    pbo: glow::Buffer,
-    fmt: PixelFmt,
-    rect: ReadRect,
+    idx: usize,
+    (fmt, rect): (PixelFmt, ReadRect),
     center: (i32, i32),
     rgba_out: Option<&mut [f32; 4]>,
 ) -> (c_float, bool) {
+    let pbo = slot.pbos[idx];
     let sentinel = slot.channel.sentinel();
     let mut result = sentinel;
     let mut mapped = false;
@@ -1159,83 +1015,35 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
             return;
         };
 
-        let ring_idx = if slot.polled {
-            let in_flight: Vec<usize> = slot.inflight.iter().map(|read| read.idx).collect();
-            let Some(idx) = poll_ring_free_index(&in_flight) else {
-                return;
-            };
-            Some(idx)
-        } else {
-            None
-        };
-        if slot.staging_primed && ring_idx.is_none() {
-            promote_staging(slot);
+        if !slot.polled && slot.reads.len() == PING_PONG_DEPTH {
+            slot.reads.pop_front();
         }
-
-        let staging_idx = ring_idx.unwrap_or(slot.staging_idx);
+        let in_use: Vec<usize> = slot.reads.iter().map(|read| read.idx).collect();
+        let Some(idx) = poll_ring_free_index(&in_use) else {
+            return;
+        };
         let channel = slot.channel;
 
-        let canvas = lookup_canvas(canvas_handle);
-        let side = requested_side(slot.shape, requested);
-        let rect = match (canvas, side) {
-            (Some(info), Some(1))
-                if matches!(slot.shape, ReadShape::Pixel)
-                    && x >= 0
-                    && y >= 0
-                    && x < info.active_w
-                    && y < info.active_h =>
-            {
-                Some(ReadRect {
-                    x,
-                    y,
-                    width: 1,
-                    height: 1,
-                })
-            }
-            (Some(info), Some(side)) if matches!(slot.shape, ReadShape::NearestId { .. }) => {
-                centered_read_rect(x, y, side, info.active_w, info.active_h)
-            }
-            _ => None,
-        };
-        let submit_ok = match (canvas, rect) {
-            (Some(info), Some(_)) => {
-                let channel_ok = match channel {
-                    Channel::Color => true,
-                    Channel::Depth => info.has_depth,
-                };
-                let shape_ok = match slot.shape {
-                    ReadShape::Pixel => true,
-                    ReadShape::NearestId { .. } => info.int_format,
-                };
-                channel_ok && shape_ok
-            }
-            _ => false,
-        };
-
-        if !submit_ok {
-            if ring_idx.is_some() {
-                slot.inflight.push_back(InFlight {
-                    idx: staging_idx,
-                    fence: None,
-                    garbage: true,
-                    fmt: PixelFmt::F32,
-                    rect: ReadRect {
-                        x: 0,
-                        y: 0,
-                        width: 1,
-                        height: 1,
-                    },
-                    center: (x, y),
-                });
-                return;
-            }
-            slot.staging_primed = true;
-            slot.staging_garbage = true;
+        let shape = slot.shape;
+        let target = lookup_canvas(canvas_handle)
+            .filter(|info| {
+                let channel_ok = matches!(channel, Channel::Color) || info.has_depth;
+                channel_ok && (matches!(shape, ReadShape::Pixel) || info.int_format)
+            })
+            .and_then(|info| {
+                let side = requested_side(shape, requested)?;
+                let rect = centered_read_rect(x, y, side, info.active_w, info.active_h)?;
+                Some((info, rect))
+            });
+        let Some((info, rect)) = target else {
+            slot.reads.push_back(Read {
+                idx,
+                fence: None,
+                pixels: None,
+                center: (x, y),
+            });
             return;
-        }
-
-        let info = canvas.unwrap();
-        let rect = rect.unwrap();
+        };
         // RGBA/FLOAT reads are only legal from float FBOs on GLES; a
         // downgraded (RGBA8) canvas reads back as bytes, an R32I id canvas
         // as RGBA_INTEGER/INT (its guaranteed pair).
@@ -1245,13 +1053,14 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
             Channel::Color if info.float_format => PixelFmt::F32,
             Channel::Color => PixelFmt::Bytes,
         };
+        let polled = slot.polled;
         let fence = with_gl(|gl| unsafe {
             // OpenGL origin is bottom-left; callers pass top-left coords in
             // the ACTIVE image, which is anchored at the GL origin.
             let gl_y = info.active_h - rect.y - rect.height;
             let prev_fbo = current_fbo();
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(info.fbo));
-            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.pbos[staging_idx]));
+            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.pbos[idx]));
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             let (gl_format, gl_type) = match fmt {
                 PixelFmt::Ints => (glow::RGBA_INTEGER, glow::INT),
@@ -1268,18 +1077,16 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
                 glow::PixelPackData::BufferOffset(0),
             );
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-            let fence = if ring_idx.is_some() {
-                match gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                    Ok(fence) => Some(fence),
-                    Err(error) => {
+            let fence = if polled {
+                gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0)
+                    .inspect_err(|error| {
                         crate::log_once!(
                             "READBACK",
                             "pixel readback fence creation failed: {}",
                             error
                         );
-                        None
-                    }
-                }
+                    })
+                    .ok()
             } else {
                 None
             };
@@ -1288,23 +1095,12 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
             fence
         })
         .flatten();
-
-        if ring_idx.is_some() {
-            slot.inflight.push_back(InFlight {
-                idx: staging_idx,
-                fence,
-                garbage: false,
-                fmt,
-                rect,
-                center: (x, y),
-            });
-            return;
-        }
-        slot.staging_primed = true;
-        slot.staging_garbage = false;
-        slot.staging_fmt = fmt;
-        slot.staging_rect = rect;
-        slot.staging_center = (x, y);
+        slot.reads.push_back(Read {
+            idx,
+            fence,
+            pixels: Some((fmt, rect)),
+            center: (x, y),
+        });
     });
 }
 
@@ -1313,8 +1109,8 @@ mod tests {
     use super::{
         buffer_from_name, canvas_capture_size, centered_read_rect, copy_rgba_rows_top_down,
         landed_prefix, nearest_int_id, poll_answer_landed, poll_ring_free_index,
-        readback_fence_ready, release_all, requested_side, CanvasCapture, CanvasCaptureState,
-        ReadRect, ReadShape, CANVAS_CAPTURES,
+        readback_fence_ready, release_all, requested_side, CanvasCapture, ReadRect, ReadShape,
+        CANVAS_CAPTURES,
     };
 
     #[test]
@@ -1525,7 +1321,7 @@ mod tests {
                     width: 1,
                     height: 1,
                     bytes: 4,
-                    state: CanvasCaptureState::Pending,
+                    failed: false,
                 },
             );
         });
