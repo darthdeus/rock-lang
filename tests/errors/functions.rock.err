@@ -130,7 +130,6 @@ fn main() {
 }
 
 //=== TEST CASE: expression_bodied_fn ===
-// Rock has no expression-bodied fn form; `= <expr>` is not an inline body.
 //! expect: an `= <body>` function body must be a string literal
 fn c(x: int) -> int = x + 1
 
@@ -145,7 +144,6 @@ fn f(x: int) -> int {
 }
 
 //=== TEST CASE: call_fn_wrong_arity_fail_Generic ===
-// wrong arity calling a fn value
 //! expect: Expected 1 to 1 arguments in call to value of type fn(T) -> U, but got 2
 fn apply<T, U>(f: fn(T) -> U, x: T) -> U {
     f(x, x)
@@ -259,7 +257,6 @@ fn main() {
 }
 
 //=== TEST CASE: default_param_below_floor_Generic ===
-// Below the required-arg floor: `a` has no default, so g() must be rejected.
 //! expect: Missing required argument for parameter `a`
 fn g(a: int, b: int = 5) -> int { a }
 fn h() -> int {
@@ -268,7 +265,6 @@ fn h() -> int {
 }
 
 //=== TEST CASE: default_param_too_many_Generic ===
-// Above the total param count must still be rejected.
 //! expect: Too many positional arguments, expected at most 2
 fn g(a: int, b: int = 5) -> int { a }
 fn h() -> int {
@@ -318,7 +314,6 @@ fn use_ffi_n() -> int {
 }
 
 //=== TEST CASE: named_args_unknown_rejected_Generic ===
-// Unknown param name is rejected.
 //! expect: unknown parameter `nope`
 fn g(a: int) -> int { a }
 fn f() -> int {
@@ -326,8 +321,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: unknown_named_param_fail_Generic ===
-// A named arg matching no parameter on any candidate is rejected, even when
-// the positional arity lines up.
 //! expect: No overload for `draw` with argument types (Image, int)
 struct Image { w: int }
 fn draw(image: Image) -> int { 0 }
@@ -337,7 +330,6 @@ fn caller(img: Image) -> int {
 }
 
 //=== TEST CASE: duplicate_positional_and_named_fail_Generic ===
-// The same parameter supplied both positionally and by name must be rejected.
 //! expect: No overload for `f` with argument types (int, int, int)
 fn f(a: int, b: int = 0) -> int { a }
 fn f(a: int, b: int = 0, c: int = 0) -> int { a }
@@ -359,7 +351,6 @@ fn caller(p: V2) -> int {
 
 //=== TEST CASE: spread_non_struct_operand_Generic ===
 //! expect: cannot spread `int` into call arguments: expected a nominal struct
-// The spread operand must be a nominal struct with statically known fields.
 fn takes_a(a: int) -> int { a }
 
 fn main() {
@@ -380,7 +371,6 @@ fn choose(x: string) -> int { len(x) }
 fn main() { let _ = choose(1, 2) }
 
 //=== TEST CASE: ambiguous_fail_Generic ===
-// Two candidates fit equally well -> ambiguous.
 //! expect: Ambiguous overload for `amb` with argument types (int, int)
 fn amb(x: any, y: int) -> int { 0 }
 fn amb(x: int, y: any) -> int { 1 }
@@ -405,7 +395,6 @@ fn f<T>(b: Box<T>) -> int {
 }
 
 //=== TEST CASE: ufcs_receiver_mismatch_Generic ===
-// the receiver is type-checked against the first parameter.
 //! expect: type mismatch: expected `int`, found `bool`
 fn takes_int(x: int) -> int { x }
 fn f() -> int {
@@ -416,7 +405,6 @@ fn f() -> int {
 
 //=== TEST CASE: annotated_receiver_Generic ===
 //! expect: the receiver takes its type from the path; write it without a type annotation
-// The receiver takes its type from the path; annotating it is rejected.
 struct Mob { hp: int }
 fn Mob.take_damage(m: Mob, amount: int) -> int {
     return m.hp - amount
@@ -425,7 +413,6 @@ fn main() {}
 
 //=== TEST CASE: no_receiver_param_Generic ===
 //! expect: the method form requires a receiver parameter
-// The method form requires a receiver parameter.
 struct Mob { hp: int }
 fn Mob.foo() -> int {
     return 0
@@ -434,7 +421,6 @@ fn main() {}
 
 //=== TEST CASE: macro_dform_Generic ===
 //! expect: the method form `Type.name` is for functions, not macros
-// D-form is for functions, not macros.
 macro Mob.m() {
     5
 }
@@ -442,14 +428,12 @@ fn main() {}
 
 //=== TEST CASE: extern_dform_Generic ===
 //! expect: extern functions are foreign symbols and cannot declare a receiver path
-// Extern fns are foreign symbols; they cannot declare a receiver path.
 struct Mob { hp: int }
 extern(lua) fn Mob.x(m: Mob) -> int
 fn main() {}
 
 //=== TEST CASE: dup_generic_Generic ===
 //! expect: generic `A` is declared in both the receiver path and the method generics
-// A generic declared in both the receiver path and the method list.
 struct Pair<A, B> { a: A, b: B }
 fn Pair<A, B>.dup<A>(p) -> A {
     return p.a
@@ -503,8 +487,6 @@ fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_out_of_scope_Generic ===
 //! expect: `helper` did not resolve to any definition
-// A nested fn is block-scoped (privacy is a property): calling it outside the
-// block it is declared in does not resolve.
 fn outer() -> int {
     {
         fn helper(x: int) -> int { x + 1 }
@@ -515,7 +497,6 @@ fn outer() -> int {
 fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_mutual_recursion_Generic ===
-// Nested fns are declare-before-use, so they cannot be mutually recursive.
 //! expect: `is_odd` did not resolve to any definition
 fn parity(n: int) -> bool {
     fn is_even(k: int) -> bool { if k == 0 { return true }  return is_odd(k - 1) }
@@ -526,7 +507,6 @@ fn main() { let _ = parity(4) }
 
 //=== TEST CASE: nested_fn_reads_enclosing_param_in_format_spec_Generic ===
 //! expect: nested function may not read enclosing local `digits`
-// A read in an interpolation's dynamic precision is a read like any other.
 fn outer(digits: int) -> string {
     fn show(x: float) -> string { "{x:.{digits}f}" }
     return show(1.5)
@@ -547,7 +527,6 @@ fn main() {
 }
 
 //=== TEST CASE: inline_lua_arg_typechecked_Generic ===
-// the declared signature is still enforced at the call site.
 //! expect: type mismatch: expected `int`, found `bool`
 inline(lua) fn myadd(x: int, y: int) -> int = "return x + y"
 fn f() -> int {

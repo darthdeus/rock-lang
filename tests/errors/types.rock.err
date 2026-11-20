@@ -3,7 +3,6 @@
 struct Point { x: int, y: int }
 struct Color { r: int, g: int, b: int }
 
-// Error: Point parameter cannot have Color default
 fn bad_func(p: Point = Color { r: 255, g: 0, b: 0 }) {
     print("This should not compile")
 }
@@ -16,7 +15,6 @@ fn main() {
 //! expect: type mismatch: expected `Point`, found `null?`
 struct Point { x: int, y: int }
 
-// Error: Cannot assign null to non-nullable type
 fn bad_func(p: Point = null) {
     print("This should not compile")
 }
@@ -35,7 +33,6 @@ fn dummy_string() -> string {
     return "hello"
 }
 
-// Error: Function returning string cannot be default for function returning int
 fn bad_func(f: fn() -> int = dummy_string) {
     print(f())
 }
@@ -83,7 +80,6 @@ fn main() {
 }
 
 //=== TEST CASE: heterogeneous_tuple_spread_untyped_TypeMismatch ===
-// Every spread element must share the array element type.
 //! expect: type mismatch: expected `string`, found `int`
 fn main() {
     let mixed = (1, "hello", 3.14)
@@ -91,21 +87,18 @@ fn main() {
 }
 
 //=== TEST CASE: tuple_unify_mismatch_Generic ===
-// element mismatch: (int, int) arg vs (int, bool) param fails at unify
 //! expect: type mismatch: expected `bool`, found `int`
 fn pair<T>(x: T) -> (T, T) { (x, x) }
 fn takes(p: (int, bool)) -> int { 5 }
 fn f() -> int { takes(pair(5)) }
 
 //=== TEST CASE: tuple_unify_length_mismatch_Generic ===
-// length mismatch: 2-tuple arg vs 3-tuple param fails at unify
 //! expect: Failed to unify (int, int) and (int, int, int), tuples of different length
 fn pair<T>(x: T) -> (T, T) { (x, x) }
 fn takes3(p: (int, int, int)) -> int { 5 }
 fn f() -> int { takes3(pair(5)) }
 
 //=== TEST CASE: tuple_index_oob_Generic ===
-// out-of-bounds index on a 2-tuple must error
 //! expect: tuple index 2 out of bounds (len 2)
 fn f() -> int {
     let t = (1, true)
@@ -114,7 +107,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: tuple_index_non_tuple_Generic ===
-// indexing a non-tuple must error
 //! expect: cannot index a non-tuple type int
 fn f() -> int {
     let y = 5
@@ -137,7 +129,6 @@ fn main() {
 }
 
 //=== TEST CASE: index_array_bad_index_Generic ===
-// a non-int index into an array must fail
 //! expect: type mismatch: expected `int`, found `bool`
 fn f() -> int {
     let xs = [1, 2, 3]
@@ -146,7 +137,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: index_map_bad_key_Generic ===
-// a wrong key type into a map must fail
 //! expect: type mismatch: expected `string`, found `int`
 fn f(m: Map<string, int>) -> int {
     let v = m[5]
@@ -154,7 +144,6 @@ fn f(m: Map<string, int>) -> int {
 }
 
 //=== TEST CASE: index_non_indexable_Generic ===
-// indexing a non-indexable type must fail
 //! expect: cannot index into type int
 fn f() -> int {
     let y = 5
@@ -163,7 +152,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: array_literal_heterogeneous_Generic ===
-// Array literal elements unify: int and bool do not.
 //! expect: type mismatch: expected `bool`, found `int`
 fn f() -> int {
     let xs = [1, true]
@@ -403,7 +391,6 @@ fn test() -> int {
 fn main() { let _ = test() }
 
 //=== TEST CASE: newtype_no_base_coercion_Generic ===
-// The wrapped base type does not implicitly become the newtype.
 //! expect: type mismatch: expected `UserId`, found `int`
 newtype UserId(int)
 fn f() -> int {
@@ -412,7 +399,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: newtype_construct_wrong_arg_Generic ===
-// Construction arg must match the wrapped type.
 //! expect: type mismatch: expected `int`, found `string`
 newtype UserId(int)
 fn f() -> int {

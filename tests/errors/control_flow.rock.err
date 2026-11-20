@@ -1,5 +1,4 @@
 //=== TEST CASE: if_branch_mismatch_Generic ===
-// branches disagree (int vs string)
 //! expect: type mismatch: expected `string`, found `int`
 fn f() -> int {
     let x = if true { 1 } else { "hi" }
@@ -7,7 +6,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: if_cond_not_bool_Generic ===
-// condition is int, not bool
 //! expect: type mismatch: expected `bool`, found `int`
 fn f() -> int {
     let x = if 5 { 1 } else { 2 }
@@ -15,7 +13,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: value_let_no_else_fail_Generic ===
-// value position requires an else
 //! expect: `if` without a final `else` cannot be used as a value
 fn gives_int() -> int { 42 }
 fn f() -> int {
@@ -49,7 +46,6 @@ fn f(x: int) -> int {
 }
 
 //=== TEST CASE: value_iflet_no_else_fail_Generic ===
-// value if-let requires an else
 //! expect: `if let` without an `else` cannot be used as a value
 fn f() -> int {
     let m: int? = 42
@@ -155,7 +151,6 @@ fn probe(m: Map<int, int>, w: int?, v: int?) -> int {
 fn main() {}
 
 //=== TEST CASE: while_cond_not_bool_Generic ===
-// the condition must be bool.
 //! expect: type mismatch: expected `bool`, found `int`
 fn f() -> int {
     while 5 {
@@ -165,8 +160,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: for_tuple_arity_mismatch_Generic ===
-// Pattern arity must match the element's tuple arity. A `Map<K, V>` yields a
-// 2-tuple; a 3-binding pattern must be rejected.
 //! expect: tuple pattern expected 2 elements, but got 3
 fn f(m: Map<int, string>) -> int {
     for (a, b, c) in m {
@@ -233,7 +226,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: return_unit_mismatch_Generic ===
-// bare `return` (returns unit) in an int function must be rejected.
 //! expect: type mismatch: expected `int`, found `()`
 fn f() -> int {
     let z = 1
@@ -241,7 +233,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: bare_return_value_position_rejected_Generic ===
-// A bare `return` in value position is still a unit return.
 //! expect: type mismatch: expected `int`, found `()`
 fn f() -> int {
     let x: int = return
@@ -249,7 +240,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: body_return_mismatch_Generic ===
-// The body's tail must match the declared return type.
 //! expect: type mismatch: expected `int`, found `string`
 fn f() -> int { "hi" }
 

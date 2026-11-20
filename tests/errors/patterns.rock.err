@@ -490,7 +490,6 @@ fn main() {
 }
 
 //=== TEST CASE: non_exhaustive_empty_Generic ===
-// Empty match over a non-empty enum -> rejected.
 //! expect: Non-exhaustive match expression. Missing patterns: A, B
 enum E { A, B }
 fn f(e: E) -> int {
@@ -525,7 +524,6 @@ fn f(s: Sig?) -> int {
 fn main() {}
 
 //=== TEST CASE: match_arm_mismatch_Generic ===
-// arms whose bodies disagree are rejected.
 //! expect: type mismatch: expected `int`, found `string`
 enum Color { Red, Green, Blue }
 fn f(c: Color) -> int {
@@ -544,28 +542,24 @@ fn f(e: E) -> int {
 }
 
 //=== TEST CASE: or_mixed_literal_rejected_Generic ===
-// A `string` literal alternative cannot match an `int` scrutinee.
 //! expect: type mismatch: expected `int`, found `string`
 fn f(n: int) -> string {
     match n { 1 | "two" => "x", _ => "y" }
 }
 
 //=== TEST CASE: tuple_on_non_tuple_rejected_Generic ===
-// A tuple pattern against a non-tuple scrutinee is rejected.
 //! expect: expected a tuple type in pattern, got int
 fn f(n: int) -> int {
     match n { (a, b) => a, _ => 0 }
 }
 
 //=== TEST CASE: tuple_arity_mismatch_rejected_Generic ===
-// Element-count mismatch is rejected.
 //! expect: tuple pattern expected 2 elements, but got 3
 fn f(p: (int, int)) -> int {
     match p { (a, b, c) => a, _ => 0 }
 }
 
 //=== TEST CASE: no_condition_chain_Parse ===
-// `while let` has no `&&` chains, unlike `if let`.
 //! expect: expected OpenCurly, got And
 fn main() {
     let v: int? = 1

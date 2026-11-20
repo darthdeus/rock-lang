@@ -1,12 +1,10 @@
 //=== TEST CASE: co_fn_yield_type_mismatch_Generic ===
-// yield value type must match the coroutine's yield type Y.
 //! expect: type mismatch: expected `string`, found `int`
 co fn bad() -> Coroutine<string> {
     yield 42
 }
 
 //=== TEST CASE: yield_star_type_mismatch_Generic ===
-// await over a coroutine whose yield type mismatches the outer is rejected.
 //! expect: type mismatch: expected `int`, found `string`
 co fn inner_str() -> Coroutine<string> {
     yield "a"
@@ -30,8 +28,6 @@ fn main() {
 
 //=== TEST CASE: falloff_after_conditional_return ===
 //! expect: can fall off the end of its body, but its coroutine result type is not `()`
-// One arm returns, the other falls through to the end -- the fall-off is
-// reachable, so it still rejects.
 co fn maybe(flag: bool) -> Coroutine<int, int> {
     yield 1
     if flag {
@@ -68,7 +64,6 @@ fn main() {
 }
 
 //=== TEST CASE: coroutine_cannot_receive_a_flat_element_ref ===
-// relocatable element references cannot be retained by coroutines.
 //! expect: cannot pass a reference into a relocatable Vec or Map element to `bump`: the reference is retained by a coroutine
 value Cell { w: int }
 co fn bump(c: ref Cell) -> Coroutine<int> {
@@ -150,9 +145,6 @@ fn main() {
 }
 
 //=== TEST CASE: co_fn_requires_coroutine_result_Generic ===
-// a co fn result annotation must be a Coroutine type.
-// This formerly claimed to reject the bounded call, but the invalid annotation
-// rejects first. The corrected chain runs in coroutine_bound_calls.rock.
 //! expect: Expected a Coroutine type, got int
 co fn worker(xs: [int]) -> int {
     let evens = xs.iter().filter(x => x % 2 == 0).collect()
@@ -166,7 +158,6 @@ fn main() {
 //=== TEST CASE: coroutine_return_r_mismatch_Generic ===
 // co fn `return e` checks e against R (the Coroutine's 2nd param), not the
 // whole Coroutine type. `Coroutine<int, string>` synthesizes N=(); R=string.
-// return value not matching R is rejected.
 //! expect: type mismatch: expected `string`, found `int`
 co fn g() -> Coroutine<int, string> {
     return 42

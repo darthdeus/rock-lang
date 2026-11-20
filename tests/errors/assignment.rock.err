@@ -102,7 +102,6 @@ fn main() {
 }
 
 //=== TEST CASE: compound_no_overload_Generic ===
-// no `__op_add(V2, int)` overload -- rejected.
 //! expect: No overload for `__op_add` with argument types (V2, int)
 struct V2 { x: int, y: int }
 fn __op_add(a: V2, b: V2) -> V2 { return a }
@@ -160,7 +159,6 @@ fn main() {
 }
 
 //=== TEST CASE: let_annotation_mismatch_Generic ===
-// The initializer must match the annotation.
 //! expect: type mismatch: expected `bool`, found `int`
 fn f() -> int {
     let x: bool = 5
@@ -168,7 +166,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: else_must_diverge_NonDiverging ===
-// `let ... else` rejections
 //! expect: must diverge
 fn main() {
     let v: int? = 5

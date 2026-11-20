@@ -1,5 +1,4 @@
 //=== TEST CASE: nullable_null_to_int_Generic ===
-// `null` must NOT satisfy a non-nullable slot.
 //! expect: type mismatch: expected `int`, found `null?`
 fn f() -> int {
     let x: int = null
@@ -7,7 +6,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: null_coalesce_type_mismatch_Generic ===
-// default's type must match the inner type.
 //! expect: type mismatch: expected `string`, found `int`
 fn f() -> int {
     let x: int? = null
@@ -17,7 +15,6 @@ fn f() -> int {
 
 //=== TEST CASE: nullable_field_on_struct_Generic ===
 //! expect: cannot access field `x` on non-struct type Foo?
-// Field access on nullable type must use ?. for safety
 struct Foo { x: int }
 
 fn test() {
@@ -76,7 +73,6 @@ fn f(x: S?) -> bool {
 
 //=== TEST CASE: nullable_tuple_index_write_Generic ===
 //! expect: cannot assign to this expression: it is not a variable, field, or element
-// Writing a tuple element through a nullable base is rejected.
 fn maybe_tup() -> (int, int)? { (1, 2) }
 
 fn test() {
@@ -88,7 +84,6 @@ fn main() { test() }
 
 //=== TEST CASE: nullable_tuple_index_read_Generic ===
 //! expect: cannot index a non-tuple type (int, int)?
-// Reading a tuple element off a nullable base needs `?.0`.
 fn maybe_tup() -> (int, int)? { (1, 2) }
 
 fn test() -> int {
@@ -100,7 +95,6 @@ fn main() { let _ = test() }
 
 //=== TEST CASE: let_nullable_value_call_into_non_null_Generic ===
 //! expect: type mismatch: expected `V2`, found `V2?`
-// A nullable value struct does not implicitly unwrap to non-null.
 value V2 { x: int, y: int }
 
 fn make() -> V2? { return V2 { x: 1, y: 2 } }
@@ -300,7 +294,6 @@ fn bad(x: int?) -> int {
 }
 
 //=== TEST CASE: safe_nav_missing_field_Generic ===
-// a missing field still errors through safe-nav
 //! expect: struct `Point` has no field `z`
 struct Point { x: int, y: int }
 fn f(p: Point?) -> int {

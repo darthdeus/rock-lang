@@ -125,7 +125,6 @@ struct Player {
     health: int
 }
 
-// Duplicate struct
 struct Player {
     name: string,
     score: int

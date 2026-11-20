@@ -1,12 +1,10 @@
 //=== TEST CASE: unknown_type_still_errors_Generic ===
-// a genuinely unknown type name is still rejected.
 //! expect: `Nope` did not resolve to any definition
 fn f(p: Nope) -> int {
     5
 }
 
 //=== TEST CASE: struct_literal_wrong_field_type_Generic ===
-// a field value with the wrong type is rejected.
 //! expect: type mismatch: expected `int`, found `bool`
 struct Point { x: int, y: int }
 fn f() -> int {
@@ -15,7 +13,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: struct_literal_missing_field_Generic ===
-// a missing field is rejected.
 //! expect: Missing field `y` in struct `Point` literal
 struct Point { x: int, y: int }
 fn f() -> int {
@@ -24,7 +21,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: struct_literal_unknown_field_Generic ===
-// an unknown field is rejected.
 //! expect: struct `Point` has no field named `z`
 struct Point { x: int, y: int }
 fn f() -> int {
@@ -33,7 +29,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: struct_unknown_field_access_Generic ===
-// accessing a field the struct doesn't have is rejected.
 //! expect: struct `Point` has no field `z`
 struct Point { x: int, y: int }
 fn f() -> int {
@@ -43,7 +38,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: field_access_on_non_struct_Generic ===
-// accessing a field on a non-struct is rejected.
 //! expect: cannot access field `x` on non-struct type int
 fn f() -> int {
     let n = 5
@@ -52,7 +46,6 @@ fn f() -> int {
 }
 
 //=== TEST CASE: non_default_field_required_Generic ===
-// A non-defaulted field is still required.
 //! expect: Missing field `kind` in struct `Slime` literal
 struct Slime { kind: int, health: int = 100 }
 fn f() -> int {
@@ -62,7 +55,6 @@ fn f() -> int {
 
 //=== TEST CASE: update_wrong_nominal_base_MismatchedType ===
 //! expect: type mismatch: expected `B`, found `A`
-// Rule 6: the base must have the SAME nominal type as the literal.
 struct A { x: int, y: int }
 struct B { x: int, y: int }
 
@@ -74,7 +66,6 @@ fn main() {
 
 //=== TEST CASE: update_two_bases_Generic ===
 //! expect: a functional-update literal takes at most one `..base`
-// Rule 5: two same-type bases both supply every field (collision).
 struct P { x: int, y: int }
 
 fn main() {
@@ -85,7 +76,6 @@ fn main() {
 }
 
 //=== TEST CASE: enum_payload_mismatch_Generic ===
-// wrong payload type is rejected.
 //! expect: type mismatch: expected `float`, found `bool`
 enum Shape { Circle(float), Rect(float, float) }
 fn f() -> Shape {
@@ -253,7 +243,6 @@ fn main() {
 
 //=== TEST CASE: embed_generic_param_Generic ===
 //! expect: cannot `embed` field `t`: a generic parameter has no statically known leaves to inline
-// A generic param has no statically known leaves at the declaration.
 struct Holder<T> { embed t: T }
 
 fn main() {

@@ -1,7 +1,5 @@
 //=== TEST CASE: pure_reads_global_Generic ===
 //! expect: reads global `COUNTER`
-// Reads a mutable global — not a param or local. Verification errors
-// at the specific Ident site.
 global COUNTER: int = 0
 
 @pure
@@ -11,7 +9,6 @@ fn bad_reads_global() -> int {
 
 //=== TEST CASE: pure_writes_global_Generic ===
 //! expect: performs an assignment (mutation)
-// Assigns to a mutable global — a mutation side effect.
 global COUNTER2: int = 0
 
 @pure
@@ -22,7 +19,6 @@ fn bad_writes_global() -> int {
 
 //=== TEST CASE: pure_increments_global_Generic ===
 //! expect: performs an assignment (mutation)
-// Compound/increment is a mutation.
 global COUNTER3: int = 0
 
 @pure
@@ -33,7 +29,6 @@ fn bad_increments_global() -> int {
 
 //=== TEST CASE: pure_calls_non_pure_Generic ===
 //! expect: calls `bump_tick` which is not provably pure
-// Calls a function whose body is not provably pure.
 global TICK: int = 0
 
 fn bump_tick() -> int {
@@ -70,7 +65,6 @@ fn bad_heap_struct() -> NotAValue {
 
 //=== TEST CASE: pure_array_literal_Generic ===
 //! expect: builds an array literal
-// Array literal allocates a heap table.
 @pure
 fn bad_array_literal() -> [int] {
     return [1, 2, 3]
@@ -78,7 +72,6 @@ fn bad_array_literal() -> [int] {
 
 //=== TEST CASE: pure_lambda_Generic ===
 //! expect: creates a lambda
-// Lambda construction is rejected even when it captures nothing.
 @pure
 fn bad_lambda() -> (int) -> int {
     return x => x + 1
@@ -94,7 +87,6 @@ fn bad_index(v: Vec<int>) -> int {
 
 //=== TEST CASE: pure_and_debug_impure_conflict_Generic ===
 //! expect: `@pure` and `@debug_impure` on the same function are contradictory
-// `@pure` and `@debug_impure` on one function contradict each other.
 @pure
 @debug_impure
 fn bad_both() -> int {
@@ -114,7 +106,6 @@ fn bad_calls_unannotated_pure() -> int {
 
 //=== TEST CASE: pure_reads_global_via_method_Generic ===
 //! expect: reads global `GLO`
-// A global read in method-receiver position is a global read.
 global GLO: int = 0
 @pure fn double_val(x: int) -> int { return x + x }
 @pure fn bad_reads_global_via_method() -> int { return GLO.double_val() }
@@ -144,7 +135,6 @@ fn pure_adjusts_local_value_component(res: V2) -> V2 {
 }
 
 //=== TEST CASE: pure_interpolation_reads_global_Generic ===
-// A mutable global read inside an interpolated string is still a read.
 //! expect: reads global `SHOWN`
 global SHOWN: int = 0
 
@@ -154,7 +144,6 @@ fn bad_interpolates_global() -> string {
 }
 
 //=== TEST CASE: pure_interpolation_format_spec_reads_global_Generic ===
-// So is one in a dynamic format precision.
 //! expect: reads global `DIGITS`
 global DIGITS: int = 2
 
@@ -164,7 +153,6 @@ fn bad_interpolates_precision(x: float) -> string {
 }
 
 //=== TEST CASE: pure_safe_nav_call_arg_reads_global_Generic ===
-// The arguments of a `?.` method call are checked like any call's.
 //! expect: reads global `SCALE`
 global SCALE: int = 3
 struct Holder { v: int }
@@ -176,7 +164,6 @@ fn bad_safe_nav_arg(h: Holder?) -> int? {
 }
 
 //=== TEST CASE: pure_safe_nav_let_body_reads_global_Generic ===
-// The body of a `?.let` block is checked like any block.
 //! expect: reads global `OFFSET`
 global OFFSET: int = 1
 
@@ -195,7 +182,6 @@ fn bad_calls_fn_value(f: fn(int) -> int, x: int) -> int {
 }
 
 //=== TEST CASE: concrete_v_missing_field_fail_Generic ===
-// field that doesn't exist on the struct -> rejected
 //! expect: struct `Mob` has no field `nope`
 struct Mob { health: int, attack_co: int? }
 fn poll(f: FieldRef<Mob, int?>) {}
@@ -224,7 +210,6 @@ fn main() {
 }
 
 //=== TEST CASE: bare_field_no_context_fail_Generic ===
-// A bare `.field` with no expected field reference type.
 //! expect: field reference `.attack_co` is only valid against an expected `FieldRef<T, V>` / `ReadFieldRef<T,
 struct Mob { health: int, attack_co: int? }
 fn main() {
@@ -233,7 +218,6 @@ fn main() {
 }
 
 //=== TEST CASE: generic_container_wrong_field_fail_Generic ===
-// A field missing on the `T` solved from the `Entity<T>` argument.
 //! expect: struct `Rock` has no field `attack_co`
 struct Mob { health: int, attack_co: int? }
 struct Rock { mass: int }
@@ -281,7 +265,6 @@ fn main() {
 }
 
 //=== TEST CASE: write_field_ref_arity_fail_Generic ===
-// Arity guard: the former takes exactly <Struct, FieldType>.
 //! expect: WriteFieldRef type must have exactly 2 type arguments (<Struct, FieldType>)
 struct Mob { health: int, attack_co: int? }
 fn take(f: WriteFieldRef<Mob>) {}

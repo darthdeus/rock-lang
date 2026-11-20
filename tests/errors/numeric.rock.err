@@ -129,7 +129,6 @@ fn main() {
 }
 
 //=== TEST CASE: float_to_int_param_fail_Generic ===
-// float -> int stays rejected everywhere
 //! expect: type mismatch: expected `int`, found `float`
 fn g(y: int) -> int { y }
 fn f() -> int { g(1.5) }
@@ -339,7 +338,6 @@ fn main() {
 }
 
 //=== TEST CASE: neg_bool_fail_Generic ===
-// negating a bool must fail the numeric constraint
 //! expect: operator `-` is not defined for `bool`
 fn f(b: bool) -> int {
     let x = -b
@@ -347,7 +345,6 @@ fn f(b: bool) -> int {
 }
 
 //=== TEST CASE: neg_string_fail_Generic ===
-// negating a string must fail
 //! expect: operator `-` is not defined for `string`
 fn f(s: string) -> int {
     let x = -s
@@ -355,7 +352,6 @@ fn f(s: string) -> int {
 }
 
 //=== TEST CASE: not_int_fail_Generic ===
-// negating a non-bool must fail
 //! expect: operator `!` is not defined for `int`
 fn f() -> bool {
     let b = !5
@@ -363,7 +359,6 @@ fn f() -> bool {
 }
 
 //=== TEST CASE: lt_bool_fail_Generic ===
-// ordering on bools must be rejected
 //! expect: ordering operators require numeric operands, got bool
 fn f() -> bool {
     let b = true < false
@@ -371,7 +366,6 @@ fn f() -> bool {
 }
 
 //=== TEST CASE: lt_string_fail_Generic ===
-// ordering on non-numeric operands (string) must be rejected
 //! expect: ordering operators require numeric operands, got string
 fn f() -> bool {
     "a" < "b"
@@ -398,7 +392,6 @@ fn f(x: int) -> bool {
 }
 
 //=== TEST CASE: compare_nonnull_struct_to_null_Generic ===
-// a struct value is non-nullable too.
 //! expect: Cannot compare non-nullable type 'S' with null
 struct S { v: int }
 fn f(x: S) -> bool {
