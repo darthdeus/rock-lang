@@ -61,7 +61,7 @@ pub fn json_encode_job_advance_into(job: JsonEncodeJob, budget: int,
                         let end = min(index + min(budget - spent, 256), s.len())
                         let part = if index == 0 && end == s.len() { s }
                             else { s.substring(index, end) }
-                        json_encode_job_string_part(part, parts)
+                        json_escape_into(part, parts)
                         spent += end - index
                         index = end
                     } else {
@@ -155,30 +155,6 @@ pub fn json_encode_job_take_output(job: JsonEncodeJob) -> string {
     return output
 }
 
-fn json_encode_job_string_part(s: string, parts: [string]) {
-    let start = 0
-    let index = 0
-    while index < s.len() {
-        let unit = s.unit_at(index)
-        if unit < 32 || unit == 34 || unit == 92 {
-            if start < index { parts.push(s.substring(start, index)) }
-            if unit == 34 { parts.push("\\\"") }
-            else if unit == 92 { parts.push("\\\\") }
-            else if unit == 8 { parts.push("\\b") }
-            else if unit == 9 { parts.push("\\t") }
-            else if unit == 10 { parts.push("\\n") }
-            else if unit == 12 { parts.push("\\f") }
-            else if unit == 13 { parts.push("\\r") }
-            else { parts.push("\\u" + hex4(unit)) }
-            start = index + 1
-        }
-        index += 1
-    }
-    if start == 0 {
-        if s.len() > 0 { parts.push(s) }
-    } else if start < s.len() { parts.push(s.substring(start, s.len())) }
-}
-
 // Charges the same opening/string/closing units as the general cursor path.
 fn json_encode_job_leaf(value: JsonValue, parts: [string], budget: int) -> int {
     if budget <= 0 { return 0 }
@@ -188,7 +164,7 @@ fn json_encode_job_leaf(value: JsonValue, parts: [string], budget: int) -> int {
         Str(s) => {
             if s.len() + 2 > budget || s.len() > 256 { return 0 }
             parts.push("\"")
-            json_encode_job_string_part(s, parts)
+            json_escape_into(s, parts)
             parts.push("\"")
             return s.len() + 2
         },

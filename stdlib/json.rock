@@ -239,35 +239,34 @@ fn encode_string(s: string) -> string {
         i += 1
     }
     if i == n { return "\"" + s + "\"" }
-    let parts: [string] = []
-    parts.push("\"")
-    if i > 0 { parts.push(s.substring(0, i)) }
-    while i < n {
-        let b = s.unit_at(i)
-        if b == 34 {
-            parts.push("\\\"")
-        } else if b == 92 {
-            parts.push("\\\\")
-        } else if b == 8 {
-            parts.push("\\b")
-        } else if b == 9 {
-            parts.push("\\t")
-        } else if b == 10 {
-            parts.push("\\n")
-        } else if b == 12 {
-            parts.push("\\f")
-        } else if b == 13 {
-            parts.push("\\r")
-        } else if b < 32 {
-            parts.push("\\u")
-            parts.push(hex4(b))
-        } else {
-            parts.push(s.substring(i, i + 1))
-        }
-        i = i + 1
-    }
+    let parts: [string] = ["\""]
+    json_escape_into(s, parts)
     parts.push("\"")
     return join(parts, "")
+}
+
+fn json_escape_into(s: string, parts: [string]) {
+    let start = 0
+    let index = 0
+    while index < s.len() {
+        let unit = s.unit_at(index)
+        if unit < 32 || unit == 34 || unit == 92 {
+            if start < index { parts.push(s.substring(start, index)) }
+            if unit == 34 { parts.push("\\\"") }
+            else if unit == 92 { parts.push("\\\\") }
+            else if unit == 8 { parts.push("\\b") }
+            else if unit == 9 { parts.push("\\t") }
+            else if unit == 10 { parts.push("\\n") }
+            else if unit == 12 { parts.push("\\f") }
+            else if unit == 13 { parts.push("\\r") }
+            else { parts.push("\\u" + hex4(unit)) }
+            start = index + 1
+        }
+        index += 1
+    }
+    if start == 0 {
+        if s.len() > 0 { parts.push(s) }
+    } else if start < s.len() { parts.push(s.substring(start, s.len())) }
 }
 
 fn hex4(n: int) -> string {
