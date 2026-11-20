@@ -130,6 +130,40 @@ fn emit(src: &str, fn_name: &str) -> String {
 }
 
 #[test]
+fn flat_enum_reboxing_looks_up_unit_singletons() {
+    let lua = emit_clean(
+        r#"
+enum Choice { On, Off, Level(int), Text(string, string) }
+@nomangle fn run(choice: Choice, present: bool) -> [Choice?] {
+    let selected: Choice? = if present { choice } else { null }
+    return [selected]
+}
+"#,
+        "run",
+    );
+    assert!(
+        lua.contains(r#"rawget(__ROCK_ENUM_UNITS["Choice"], "#),
+        "{lua}"
+    );
+    let driver = format!(
+        r#"
+local on, off = {{}}, {{}}
+__ROCK_ENUM_UNITS = {{ Choice = {{ On = on, Off = off }} }}
+__rock_box_mts = {{ Choice = {{}} }}
+{lua}
+assert(run({{__variant = "On"}}, true)._data[1] == on)
+assert(run({{__variant = "Off"}}, true)._data[1] == off)
+assert(run({{__variant = "On"}}, false)._data[1] == nil)
+local level = run({{__variant = "Level", 42, "inactive"}}, true)._data[1]
+assert(level.__variant == "Level" and level[1] == 42 and level[2] == nil)
+local text = run({{__variant = "Text", "a", "b"}}, true)._data[1]
+assert(text.__variant == "Text" and text[1] == "a" and text[2] == "b")
+"#
+    );
+    luajit_ok(&driver, &lua);
+}
+
+#[test]
 fn prelude_predicates_emit_without_wrapper_calls() {
     let lua = emit_inlined(
         "fn run(x: float, value: any?) -> (bool, bool, bool) { return (isnan(x), isinf(x), is_null(value)) }",

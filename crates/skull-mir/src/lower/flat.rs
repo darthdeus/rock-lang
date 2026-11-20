@@ -325,25 +325,26 @@ impl<'a> Builder<'a> {
         self.store_cell(result, absent);
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = box_bb;
-        let eid = self.ws.nominals.enum_id(shape.name).unwrap();
-        let units: Vec<_> = self.ws.modules[eid.module.index()].enums[eid.def]
-            .variants
-            .iter()
-            .filter(|v| matches!(v.payload, VariantPayload::Unit))
-            .map(|v| v.name)
-            .collect();
-        for variant in units {
-            let known_tag = self.emit_cur(Inst::Const(Lit::Str(variant)));
-            let is_unit = self.emit_cur(Inst::Eq(tag, known_tag));
-            let unit_bb = self.f.new_block();
-            let next_bb = self.f.new_block();
-            self.branch_to(is_unit, unit_bb, next_bb);
-            self.cur = unit_bb;
-            let global = crate::mangle::enum_singleton_global(self.ws, shape.name, variant);
-            let singleton = self.emit_cur(Inst::Global(global));
-            self.store_cell(result, singleton);
-            self.f.set_term(self.cur, Term::Goto(join));
-            self.cur = next_bb;
+        // Lua's dynamic box expression uses the runtime singleton table.
+        if self.scx.target() != bone_core::hir::FnBackend::Lua {
+            let eid = self.ws.nominals.enum_id(shape.name).unwrap();
+            for variant in &self.ws.modules[eid.module.index()].enums[eid.def].variants {
+                if !matches!(variant.payload, VariantPayload::Unit) {
+                    continue;
+                }
+                let known_tag = self.emit_cur(Inst::Const(Lit::Str(variant.name)));
+                let is_unit = self.emit_cur(Inst::Eq(tag, known_tag));
+                let unit_bb = self.f.new_block();
+                let next_bb = self.f.new_block();
+                self.branch_to(is_unit, unit_bb, next_bb);
+                self.cur = unit_bb;
+                let global =
+                    crate::mangle::enum_singleton_global(self.ws, shape.name, variant.name);
+                let singleton = self.emit_cur(Inst::Global(global));
+                self.store_cell(result, singleton);
+                self.f.set_term(self.cur, Term::Goto(join));
+                self.cur = next_bb;
+            }
         }
         let boxed = self.emit_cur(Inst::MakeEnumDyn {
             tag,
@@ -374,8 +375,8 @@ impl<'a> Builder<'a> {
             .copied()
             .filter(|(name, _)| fields.contains(name))
             .collect();
-        self.emit_cur(Inst::MakeEnumDyn {
-            tag: cells.tag,
+        self.emit_cur(Inst::MakeEnum {
+            tag: variant,
             ty: shape.name,
             positional: cells.positional[..width].to_vec(),
             named,

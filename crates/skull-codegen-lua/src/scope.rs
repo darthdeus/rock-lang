@@ -233,7 +233,7 @@ pub(crate) fn render_scope(
 
     let _guard = scope_guard::install(func, &loops, cell_colors, &color_scope);
     let mut em = Emitter {
-        enum_box_groups: RefCell::new(HashMap::default()),
+        enum_box_plans: RefCell::new(HashMap::default()),
         selection_preds: std::cell::OnceCell::new(),
         ws,
         ctx,

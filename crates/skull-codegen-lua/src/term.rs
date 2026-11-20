@@ -385,21 +385,19 @@ impl Emitter<'_> {
         named: &[(ustr::Ustr, Idx<Inst>)],
     ) {
         let write_tag = |out: &mut String| self.write_opnd(out, tag);
-        if matches!(self.func.insts[tag], Inst::Const(_)) {
-            self.write_enum_box(out, ty, positional, named, write_tag);
-            return;
-        }
-        let cached = self.enum_box_groups.borrow().get(&ty).cloned();
-        let groups = if let Some(groups) = cached {
-            groups
+        let cached = self.enum_box_plans.borrow().get(&ty).cloned();
+        let layout = if let Some(layout) = cached {
+            layout
         } else {
             let plan = skull_mir::lower::EnumPlan::for_name(self.ws, ty)
                 .expect("dynamic enum has a representation plan");
             let shape = plan.flat().expect("dynamic enum has a flat shape");
             let eid = self.ws.nominals.enum_id(ty).unwrap();
-            let mut groups = EnumBoxGroups::new();
+            let mut layout = EnumBoxPlan::default();
+            let groups = &mut layout.groups;
             for variant in &self.ws.modules[eid.module.index()].enums[eid.def].variants {
                 if matches!(variant.payload, bone_core::hir::VariantPayload::Unit) {
+                    layout.has_units = true;
                     continue;
                 }
                 let layout = shape.box_layout(self.ws, variant.name);
@@ -417,12 +415,21 @@ impl Emitter<'_> {
                 .expect("flat enum has payload variants");
             let last = groups.remove(common);
             groups.push(last);
-            let groups = std::rc::Rc::new(groups);
-            self.enum_box_groups.borrow_mut().insert(ty, groups.clone());
-            groups
+            let layout = std::rc::Rc::new(layout);
+            self.enum_box_plans.borrow_mut().insert(ty, layout.clone());
+            layout
         };
-        if groups.len() > 1 {
+        let groups = &layout.groups;
+        let wrapped = layout.has_units || groups.len() > 1;
+        if wrapped {
             out.push('(');
+        }
+        if layout.has_units {
+            out.push_str("rawget(__ROCK_ENUM_UNITS[");
+            write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, ty).as_str());
+            out.push_str("], ");
+            write_tag(out);
+            out.push_str(") or ");
         }
         for (i, (members, (width, fields))) in groups.iter().enumerate() {
             if i + 1 < groups.len() {
@@ -443,7 +450,7 @@ impl Emitter<'_> {
                 out.push_str(" or ");
             }
         }
-        if groups.len() > 1 {
+        if wrapped {
             out.push(')');
         }
     }
