@@ -886,55 +886,48 @@ fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
 }
 
 #[test]
-fn nominal_c_layout_is_owned_by_the_rep_plan() {
-    let ws = checked_ws_of("value Mixed { on: bool, count: int, scale: f32 }");
-    let arena = RepArena::default();
-    let (leaves, size, align) = arena
-        .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Mixed"))
-        .expect("the concrete value plan must own the validated C layout");
-    assert_eq!(
-        leaves.iter().map(|leaf| leaf.path).collect::<Vec<_>>(),
-        vec![Ustr::from("on"), Ustr::from("count"), Ustr::from("scale")]
-    );
-    assert_eq!(size, 12);
-    assert_eq!(align, 4);
-}
-
-#[test]
-fn nominal_c_layout_aligns_nested_fields_before_recurse() {
+fn nominal_c_layout_aligns_flat_and_nested_fields() {
     let ws = checked_ws_of(
-        "value V2 { x: f32, y: f32 }\n\
+        "value Mixed { on: bool, count: int, scale: f32 }\n\
+         value V2 { x: f32, y: f32 }\n\
          value V4 { x: f32, y: f32, z: f32, w: f32 }\n\
          value SpriteFragU {\
              lights: bool, unlit: bool, count: int, ambient: V4,\
-             glow: bool, normal: bool, params: V2\
+             glow: bool, normal: bool, params: V2\n\
          }",
     );
     let arena = RepArena::default();
-    let (leaves, size, align) = arena
-        .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "SpriteFragU"))
-        .expect("the nested C layout must be representable");
-    assert_eq!(
-        leaves
+    let cases: &[(&str, usize, &[(&str, usize)])] = &[
+        ("Mixed", 12, &[("on", 0), ("count", 4), ("scale", 8)]),
+        (
+            "SpriteFragU",
+            36,
+            &[
+                ("lights", 0),
+                ("unlit", 1),
+                ("count", 4),
+                ("ambient.x", 8),
+                ("ambient.y", 12),
+                ("ambient.z", 16),
+                ("ambient.w", 20),
+                ("glow", 24),
+                ("normal", 25),
+                ("params.x", 28),
+                ("params.y", 32),
+            ],
+        ),
+    ];
+    for &(name, expected_size, expected_leaves) in cases {
+        let (leaves, size, align) = arena
+            .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Lua, key(&ws, name))
+            .unwrap_or_else(|err| panic!("{name}: {err}"));
+        let offsets: Vec<_> = leaves
             .iter()
-            .map(|leaf| (leaf.path, leaf.byte_off))
-            .collect::<Vec<_>>(),
-        vec![
-            (Ustr::from("lights"), 0),
-            (Ustr::from("unlit"), 1),
-            (Ustr::from("count"), 4),
-            (Ustr::from("ambient.x"), 8),
-            (Ustr::from("ambient.y"), 12),
-            (Ustr::from("ambient.z"), 16),
-            (Ustr::from("ambient.w"), 20),
-            (Ustr::from("glow"), 24),
-            (Ustr::from("normal"), 25),
-            (Ustr::from("params.x"), 28),
-            (Ustr::from("params.y"), 32),
-        ]
-    );
-    assert_eq!(size, 36);
-    assert_eq!(align, 4);
+            .map(|leaf| (leaf.path.as_str(), leaf.byte_off))
+            .collect();
+        assert_eq!(offsets, expected_leaves, "{name}");
+        assert_eq!((size, align), (expected_size, 4), "{name}");
+    }
 }
 
 #[test]
@@ -946,86 +939,44 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
          nobox value N { x: int }\n\
          struct Holder { embed child: Child?, n: N, direct: int, coroutine: Coroutine<int, int, int> }",
     );
+    let backend = bone_core::hir::FnBackend::Lua;
     let holder = key(&ws, "Holder");
-    let child = Ustr::from("child");
-    let direct = Ustr::from("direct");
-    let plan = struct_field_plan(&ws, bone_core::hir::FnBackend::Lua, holder, child, false)
-        .expect("known struct field must have a plan");
-    assert_eq!(plan.inline_child(), Some(key(&ws, "Child")));
-    assert!(
-        plan.nullable(),
-        "the shared plan must retain field presence"
-    );
-    assert_eq!(
-        struct_field_plan(
-            &ws,
-            bone_core::hir::FnBackend::Lua,
+    let outer = key(&ws, "Outer");
+    for (parent, field, inline, direct, nullable) in [
+        (holder, "child", Some(key(&ws, "Child")), None, true),
+        (holder, "n", Some(key(&ws, "N")), None, false),
+        (holder, "direct", None, None, false),
+        (outer, "inner", None, Some(key(&ws, "Inner")), false),
+        (
             holder,
-            Ustr::from("n"),
-            false
-        )
-        .expect("known nobox field must have a plan")
-        .inline_child(),
-        Some(key(&ws, "N"))
-    );
-    let direct_plan = struct_field_plan(&ws, bone_core::hir::FnBackend::Lua, holder, direct, false)
-        .expect("known primitive field must have a plan");
-    assert!(direct_plan.is_direct());
-    assert_eq!(direct_plan.direct_child(), None);
-    let nested_plan = struct_field_plan(
-        &ws,
-        bone_core::hir::FnBackend::Lua,
-        key(&ws, "Outer"),
-        Ustr::from("inner"),
-        false,
-    )
-    .expect("known direct child must have a plan");
-    assert!(nested_plan.is_direct());
-    assert_eq!(nested_plan.direct_child(), Some(key(&ws, "Inner")));
-    assert_eq!(
-        struct_field_plan(
-            &ws,
-            bone_core::hir::FnBackend::Lua,
-            holder,
-            Ustr::from("coroutine"),
+            "coroutine",
+            None,
+            Some(Ustr::from("Coroutine")),
             false,
-        )
-        .expect("compiler-owned opaque nominal must have a direct plan")
-        .direct_child(),
-        Some(Ustr::from("Coroutine"))
-    );
+        ),
+    ] {
+        let plan = struct_field_plan(&ws, backend, parent, Ustr::from(field), false)
+            .unwrap_or_else(|err| panic!("{field}: {err}"));
+        assert_eq!(plan.inline_child(), inline, "{field}");
+        assert_eq!(plan.direct_child(), direct, "{field}");
+        assert_eq!(plan.is_direct(), inline.is_none(), "{field}");
+        assert_eq!(plan.nullable(), nullable, "{field}");
+    }
 
-    let missing_struct = struct_field_plan(
-        &ws,
-        bone_core::hir::FnBackend::Lua,
-        Ustr::from("Missing"),
-        child,
-        false,
-    )
-    .expect_err("a missing parent struct must reject");
-    assert!(
-        missing_struct.message.contains("struct `Missing`"),
-        "{missing_struct}"
-    );
-
-    let missing_field = struct_field_plan(
-        &ws,
-        bone_core::hir::FnBackend::Lua,
-        holder,
-        Ustr::from("missing"),
-        false,
-    )
-    .expect_err("a missing field must reject");
-    assert!(
-        missing_field.message.contains("field `missing`"),
-        "{missing_field}"
-    );
+    for (parent, field, expected) in [
+        (Ustr::from("Missing"), "child", "struct `Missing`"),
+        (holder, "missing", "field `missing`"),
+    ] {
+        let error = struct_field_plan(&ws, backend, parent, Ustr::from(field), false)
+            .expect_err("unknown field or parent must reject");
+        assert!(error.message.contains(expected), "{error}");
+    }
 
     let sid = ws.nominals.struct_id(holder).expect("holder declaration");
     ws.modules[sid.module.index()].structs[sid.def].fields[0].ty = bone_core::prelude::TyId::Local(
         comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from(0)),
     );
-    let unresolved = struct_field_plan(&ws, bone_core::hir::FnBackend::Lua, holder, child, false)
+    let unresolved = struct_field_plan(&ws, backend, holder, Ustr::from("child"), false)
         .expect_err("an unresolved field type must reject");
     assert!(unresolved.message.contains("resolved type"), "{unresolved}");
 }
