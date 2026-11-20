@@ -105,9 +105,7 @@ fn encode_array(items: [JsonValue], parts: [string]) {
 }
 
 fn encode_object(m: Map<string, JsonValue>, parts: [string]) {
-    // Sorted keys keep the output deterministic.
     let keys = keys(m)
-    sort(keys, k => k)
     parts.push("{{")
     let first = true
     for k in keys {
@@ -160,8 +158,8 @@ fn json_has_nested_container(v: JsonValue) -> bool {
             false
         },
         Object(m) => {
-            for k in keys(m) {
-                match m[k] {
+            for (_, child) in m {
+                match child {
                     Array(_) => return true,
                     Object(_) => return true,
                     _ => {}
@@ -196,7 +194,6 @@ fn encode_pretty_array(items: [JsonValue], parts: [string], level: int,
 fn encode_pretty_object(m: Map<string, JsonValue>, parts: [string], level: int,
                         compact_items_of: [string]) {
     let ks = keys(m)
-    sort(ks, k => k)
     parts.push("{{\n")
     let inner = json_indent(level + 1)
     let first = true

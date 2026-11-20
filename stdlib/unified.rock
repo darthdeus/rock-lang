@@ -2460,16 +2460,43 @@ const EPSILON: float = 0.0000001
 """
 
 @relocates @nomangle inline(lua) fn __sort_map_keys<K>(keys: [K]) = """
-    table.sort(keys._data, __rock_inspect_key_lt)
+    local data, n = keys._data, keys.len
+    local width = 8
+    for first = 1, n, width do
+        for i = first + 1, math.min(first + width - 1, n) do
+            local value, j = data[i], i
+            local key = tostring(value)
+            while j > first and key < tostring(data[j - 1]) do
+                data[j] = data[j - 1]
+                j = j - 1
+            end
+            data[j] = value
+        end
+    end
+    if n <= width then return end
+    local scratch = {}
+    while width < n do
+        for first = 1, n - width, 2 * width do
+            local mid = first + width - 1
+            local last = math.min(mid + width, n)
+            if tostring(data[mid + 1]) < tostring(data[mid]) then
+                for i = first, mid do scratch[i - first + 1] = data[i] end
+                local left, right = 1, mid + 1
+                for i = first, last do
+                    if left > width then break end
+                    if right <= last and tostring(data[right]) < tostring(scratch[left]) then
+                        data[i] = data[right]
+                        right = right + 1
+                    else
+                        data[i] = scratch[left]
+                        left = left + 1
+                    end
+                end
+            end
+        end
+        width = 2 * width
+    end
 """
-
-@relocates @nomangle inline(lua) fn __sort_string_map_keys<K>(keys: [K]) = """
-    table.sort(keys._data)
-"""
-
-// Lua lowering folds this to the physical key kind in each concrete Map body;
-// other targets keep the generic comparator.
-@intrinsic @pure inline(lua) fn __map_keys_are_strings<K>(keys: [K]) -> bool = "return false"
 
 @intrinsic @nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
     if type(obj) == "cdata" then
@@ -2823,11 +2850,7 @@ fn Map<K, V>.keys_into(map, result: [K]) -> [K] {
     for (k, v) in map {
         vec_push(result, k)
     }
-    if __map_keys_are_strings(result) {
-        __sort_string_map_keys(result)
-    } else {
-        __sort_map_keys(result)
-    }
+    __sort_map_keys(result)
     return result
 }
 

@@ -87,12 +87,6 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   });
 """
 
-@relocates @nomangle inline(js) fn __sort_string_map_keys<K>(keys: [K]) = """
-  keys._data.sort();
-"""
-
-@intrinsic @pure inline(js) fn __map_keys_are_strings<K>(keys: [K]) -> bool = "return false;"
-
 inline(js) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
   var order = [];
   for (var i = 0; i < n; i++) order.push(i);

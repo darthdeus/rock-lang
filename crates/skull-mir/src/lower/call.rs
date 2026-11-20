@@ -1087,25 +1087,6 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        if let Callee::Unresolved { name, .. } = callee
-            && name.as_str() == "__map_keys_are_strings"
-            && self.scx.target() == bone_core::hir::FnBackend::Lua
-            && self.resolves_to_inline_builtin(e, name)
-            && let [keys] = arg_idxs[..]
-        {
-            self.lower_expr(keys)?;
-            let string_keys = self.concrete_expr_ty(keys).is_some_and(|ty| {
-                matches!(
-                    ty,
-                    crate::monoty::MonoTy::App {
-                        ctor: crate::monoty::MonoCtor::Array,
-                        params,
-                    } if params.first().and_then(|key| self.arith_ty_of_mono(key)) == Some(ArithTy::Str)
-                )
-            });
-            let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Bool(string_keys))));
-            return self.value_bundle_for_expr(e, value);
-        }
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "native_buffer_alloc" {
                 let [n_arg] = arg_idxs[..] else {
