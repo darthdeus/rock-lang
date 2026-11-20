@@ -1052,72 +1052,70 @@ pub extern "C" fn stone_read_window_rect(x: c_int, y: c_int, w: c_int, h: c_int,
     if x < 0 || y < 0 || x + w > dw || y + h > dh {
         return;
     }
+    let out = unsafe { std::slice::from_raw_parts_mut(out, (w * h * 4) as usize) };
+    read_rows_top_down(None, dh, (x, y, w, h), glow::RGBA, glow::UNSIGNED_BYTE, out);
+}
+
+/// Read `w` x `h` texels at top-left `(x, y)` of a framebuffer whose image is
+/// `height` tall (None is the screen) into `out`, rows top-down.
+pub(crate) fn read_rows_top_down(
+    fbo: Option<glow::Framebuffer>,
+    height: i32,
+    (x, y, w, h): (i32, i32, i32, i32),
+    format: u32,
+    ty: u32,
+    out: &mut [u8],
+) -> bool {
     with_gl(|gl| unsafe {
-        let prev_fbo = CURRENT_FBO.with(|c| *c.borrow());
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(None));
+        let previous = CURRENT_FBO.with(|c| *c.borrow());
+        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(fbo));
         gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-        let len = (w * h * 4) as usize;
-        let slice = std::slice::from_raw_parts_mut(out, len);
-        // One read, bottom-up (GL origin), then flip rows to top-down in place.
-        let gl_y = dh - y - h;
         gl.read_pixels(
             x,
-            gl_y,
+            height - y - h,
             w,
             h,
-            glow::RGBA,
-            glow::UNSIGNED_BYTE,
-            glow::PixelPackData::Slice(Some(slice)),
+            format,
+            ty,
+            glow::PixelPackData::Slice(Some(&mut *out)),
         );
-        let row = (w * 4) as usize;
-        for r in 0..(h as usize / 2) {
-            let (a, b) = slice.split_at_mut(len - (r + 1) * row);
-            a[r * row..r * row + row].swap_with_slice(&mut b[..row]);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(previous));
+    })
+    .is_some_and(|()| {
+        let row = out.len() / h as usize;
+        for top in 0..h as usize / 2 {
+            let bottom = h as usize - 1 - top;
+            let (upper, lower) = out.split_at_mut(bottom * row);
+            upper[top * row..(top + 1) * row].swap_with_slice(&mut lower[..row]);
         }
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(prev_fbo));
-    });
+        true
+    })
 }
 
 /// Read the depth buffer value at (x, y) from a canvas with a depth attachment.
 /// Returns depth as a float in [0, 1]. Returns 1.0 (far plane) if no depth attachment.
 #[no_mangle]
 pub extern "C" fn stone_read_depth_pixel(handle: u64, x: c_int, y: c_int) -> c_float {
-    if handle == 0 {
+    let Some(canvas) = lookup_canvas(handle) else {
+        return 1.0;
+    };
+    if !canvas.has_depth || x < 0 || y < 0 || x >= canvas.active_w || y >= canvas.active_h {
         return 1.0;
     }
-
-    with_canvas(handle, |canvas| {
-        if canvas.depth_texture.is_none() {
-            return 1.0;
-        }
-
-        if x < 0 || y < 0 || x >= canvas.active_w || y >= canvas.active_h {
-            return 1.0;
-        }
-
-        let gl_y = canvas.active_h - 1 - y;
-
-        with_gl(|gl| unsafe {
-            let prev_fbo = CURRENT_FBO.with(|c| *c.borrow());
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(canvas.fbo));
-
-            let mut depth = [0.0f32; 1];
-            gl.read_pixels(
-                x,
-                gl_y,
-                1,
-                1,
-                glow::DEPTH_COMPONENT,
-                glow::FLOAT,
-                glow::PixelPackData::Slice(Some(bytemuck::cast_slice_mut(&mut depth))),
-            );
-
-            gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(prev_fbo));
-            depth[0]
-        })
-        .unwrap_or(1.0)
-    })
-    .unwrap_or(1.0)
+    let mut depth = [0.0f32];
+    let read = read_rows_top_down(
+        Some(canvas.fbo),
+        canvas.active_h,
+        (x, y, 1, 1),
+        glow::DEPTH_COMPONENT,
+        glow::FLOAT,
+        bytemuck::cast_slice_mut(&mut depth),
+    );
+    if read {
+        depth[0]
+    } else {
+        1.0
+    }
 }
 
 /// Read the entire color buffer of an RGBA8 canvas into a caller-supplied
@@ -1133,41 +1131,29 @@ pub extern "C" fn stone_canvas_read_rgba8(handle: u64, out: *mut u8, capacity: c
     let Some(info) = lookup_canvas(handle) else {
         return -1;
     };
-    let (fbo, w, h) = (info.fbo, info.width, info.height);
-    let needed = (w as usize) * (h as usize) * 4;
+    let needed = (info.width as usize) * (info.height as usize) * 4;
     if (capacity as usize) < needed {
         return -1;
     }
-    let pixels = with_gl(|gl| unsafe {
-        let prev_fbo = CURRENT_FBO.with(|c| *c.borrow());
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-        let mut buf = vec![0u8; needed];
-        gl.read_pixels(
-            0,
-            0,
-            w,
-            h,
-            glow::RGBA,
-            glow::UNSIGNED_BYTE,
-            glow::PixelPackData::Slice(Some(buf.as_mut_slice())),
-        );
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(prev_fbo));
-        buf
-    });
-    let pixels = match pixels {
-        Some(p) => p,
-        None => return -1,
-    };
-    let row = (w as usize) * 4;
-    let height = h as usize;
-    unsafe {
-        for y in 0..height {
-            let src = (height - 1 - y) * row;
-            let dst = y * row;
-            std::ptr::copy_nonoverlapping(pixels.as_ptr().add(src), out.add(dst), row);
-        }
+    let out = unsafe { std::slice::from_raw_parts_mut(out, needed) };
+    if read_canvas_rgba8(&info, out) {
+        needed as c_int
+    } else {
+        -1
     }
-    needed as c_int
+}
+
+/// The whole capacity, not the active image.
+fn read_canvas_rgba8(info: &CanvasInfo, out: &mut [u8]) -> bool {
+    let rect = (0, 0, info.width, info.height);
+    read_rows_top_down(
+        Some(info.fbo),
+        info.height,
+        rect,
+        glow::RGBA,
+        glow::UNSIGNED_BYTE,
+        out,
+    )
 }
 
 fn read_canvas_region_rgba32f(
@@ -1178,73 +1164,50 @@ fn read_canvas_region_rgba32f(
     h: i32,
     out: &mut [f32],
 ) -> bool {
-    with_gl(|gl| unsafe {
-        let previous = CURRENT_FBO.with(|c| *c.borrow());
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(canvas.fbo));
-        let gl_y = canvas.active_h - y - h;
-        if canvas.int_format {
-            let mut small = [0i32; 4];
-            let mut large = Vec::new();
-            let pixels = if out.len() <= small.len() {
-                &mut small[..out.len()]
-            } else {
-                large.resize(out.len(), 0);
-                large.as_mut_slice()
-            };
-            gl.read_pixels(
-                x,
-                gl_y,
-                w,
-                h,
-                glow::RGBA_INTEGER,
-                glow::INT,
-                glow::PixelPackData::Slice(Some(bytemuck::cast_slice_mut(pixels))),
-            );
-            for (dst, src) in out.iter_mut().zip(pixels.iter()) {
+    let read = |format, ty, bytes: &mut [u8]| {
+        read_rows_top_down(
+            Some(canvas.fbo),
+            canvas.active_h,
+            (x, y, w, h),
+            format,
+            ty,
+            bytes,
+        )
+    };
+    if canvas.float_format {
+        return read(glow::RGBA, glow::FLOAT, bytemuck::cast_slice_mut(out));
+    }
+    // Single-pixel reads run per frame and stay off the heap.
+    let mut small = [0i32; 4];
+    let mut large = Vec::new();
+    let texels = if out.len() <= small.len() {
+        &mut small[..out.len()]
+    } else {
+        large.resize(out.len(), 0);
+        large.as_mut_slice()
+    };
+    if canvas.int_format {
+        let read = read(
+            glow::RGBA_INTEGER,
+            glow::INT,
+            bytemuck::cast_slice_mut(texels),
+        );
+        if read {
+            for (dst, src) in out.iter_mut().zip(texels.iter()) {
                 *dst = *src as f32;
             }
-        } else if canvas.float_format {
-            gl.read_pixels(
-                x,
-                gl_y,
-                w,
-                h,
-                glow::RGBA,
-                glow::FLOAT,
-                glow::PixelPackData::Slice(Some(bytemuck::cast_slice_mut(out))),
-            );
-        } else {
-            let mut small = [0u8; 4];
-            let mut large = Vec::new();
-            let pixels = if out.len() <= small.len() {
-                &mut small[..out.len()]
-            } else {
-                large.resize(out.len(), 0);
-                large.as_mut_slice()
-            };
-            gl.read_pixels(
-                x,
-                gl_y,
-                w,
-                h,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelPackData::Slice(Some(&mut *pixels)),
-            );
-            for (dst, src) in out.iter_mut().zip(pixels.iter()) {
+        }
+        read
+    } else {
+        let bytes = &mut bytemuck::cast_slice_mut::<i32, u8>(texels)[..out.len()];
+        let read = read(glow::RGBA, glow::UNSIGNED_BYTE, bytes);
+        if read {
+            for (dst, src) in out.iter_mut().zip(bytes.iter()) {
                 *dst = *src as f32 / 255.0;
             }
         }
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(previous));
-        let row = w as usize * 4;
-        for y in 0..h as usize / 2 {
-            let opposite = h as usize - 1 - y;
-            let (top, bottom) = out.split_at_mut(opposite * row);
-            top[y * row..(y + 1) * row].swap_with_slice(&mut bottom[..row]);
-        }
-        true
-    })
-    .unwrap_or(false)
+        read
+    }
 }
 
 #[no_mangle]
@@ -1284,40 +1247,6 @@ pub extern "C" fn stone_canvas_read_region_rgba32f(
     }
 }
 
-fn read_canvas_region_i32(
-    canvas: &CanvasInfo,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    out: &mut [i32],
-) -> bool {
-    with_gl(|gl| unsafe {
-        let previous = CURRENT_FBO.with(|c| *c.borrow());
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(canvas.fbo));
-        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-        let gl_y = canvas.active_h - y - h;
-        gl.read_pixels(
-            x,
-            gl_y,
-            w,
-            h,
-            glow::RED_INTEGER,
-            glow::INT,
-            glow::PixelPackData::Slice(Some(bytemuck::cast_slice_mut(out))),
-        );
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(previous));
-        let row = w as usize;
-        for y in 0..h as usize / 2 {
-            let opposite = h as usize - 1 - y;
-            let (top, bottom) = out.split_at_mut(opposite * row);
-            top[y * row..(y + 1) * row].swap_with_slice(&mut bottom[..row]);
-        }
-        true
-    })
-    .unwrap_or(false)
-}
-
 #[no_mangle]
 pub extern "C" fn stone_canvas_read_region_i32(
     handle: u64,
@@ -1350,7 +1279,16 @@ pub extern "C" fn stone_canvas_read_region_i32(
         return -1;
     }
     let pixels = unsafe { std::slice::from_raw_parts_mut(out, needed) };
-    if read_canvas_region_i32(&canvas, x, y, w, h, pixels) {
+    let bytes = bytemuck::cast_slice_mut(pixels);
+    let rect = (x, y, w, h);
+    if read_rows_top_down(
+        Some(canvas.fbo),
+        canvas.active_h,
+        rect,
+        glow::RED_INTEGER,
+        glow::INT,
+        bytes,
+    ) {
         needed as c_int
     } else {
         -1
@@ -1473,36 +1411,16 @@ pub extern "C" fn stone_canvas_save_png(handle: u64, path: *const c_char) -> boo
         eprintln!("stone_canvas_save_png: unknown canvas handle {}", handle);
         return false;
     };
-    let (fbo, w, h) = (info.fbo, info.width, info.height);
-    let width = w as usize;
-    let height = h as usize;
-
-    let pixels = with_gl(|gl| unsafe {
-        let prev_fbo = CURRENT_FBO.with(|c| *c.borrow());
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-        let mut buf = vec![0u8; width * height * 4];
-        gl.read_pixels(
-            0,
-            0,
-            w,
-            h,
-            glow::RGBA,
-            glow::UNSIGNED_BYTE,
-            glow::PixelPackData::Slice(Some(buf.as_mut_slice())),
-        );
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(prev_fbo));
-        buf
-    });
-    let pixels = match pixels {
-        Some(p) => p,
-        None => return false,
-    };
+    let mut pixels = vec![0u8; info.width as usize * info.height as usize * 4];
+    if !read_canvas_rgba8(&info, &mut pixels) {
+        return false;
+    }
 
     match stone_capture::save_rgba_png(
         path_str,
-        w as u32,
-        h as u32,
-        stone_capture::RowOrigin::BottomUp,
+        info.width as u32,
+        info.height as u32,
+        stone_capture::RowOrigin::TopDown,
         pixels,
         0,
     ) {

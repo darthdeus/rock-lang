@@ -22,7 +22,7 @@ use std::num::NonZeroU32;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::canvas::{current_fbo, lookup_canvas};
+use crate::canvas::{current_fbo, lookup_canvas, read_rows_top_down};
 use crate::handles::Class;
 use crate::with_gl;
 
@@ -255,21 +255,18 @@ pub extern "C" fn stone_read_canvas_nearest_id(
         return 0;
     };
     let mut pixels = vec![0i32; values];
-    with_gl(|gl| unsafe {
-        let prev_fbo = current_fbo();
-        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(info.fbo));
-        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-        gl.read_pixels(
-            rect.x,
-            info.active_h - rect.y - rect.height,
-            rect.width,
-            rect.height,
-            glow::RGBA_INTEGER,
-            glow::INT,
-            glow::PixelPackData::Slice(Some(bytemuck::cast_slice_mut(&mut pixels))),
-        );
-        gl.bind_framebuffer(glow::FRAMEBUFFER, crate::canvas::resolve_target(prev_fbo));
-    });
+    let rect_tuple = (rect.x, rect.y, rect.width, rect.height);
+    let bytes = bytemuck::cast_slice_mut(&mut pixels);
+    if !read_rows_top_down(
+        Some(info.fbo),
+        info.active_h,
+        rect_tuple,
+        glow::RGBA_INTEGER,
+        glow::INT,
+        bytes,
+    ) {
+        return 0;
+    }
     nearest_int_id(
         bytemuck::cast_slice(&pixels),
         rect.width as usize,
@@ -279,7 +276,7 @@ pub extern "C" fn stone_read_canvas_nearest_id(
         rect.y,
         x,
         y,
-        true,
+        false,
     )
 }
 
