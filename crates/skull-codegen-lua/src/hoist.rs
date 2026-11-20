@@ -231,7 +231,11 @@ pub(crate) fn collect_const_hoists(
             })
             .collect();
         let Some(lits) = lits else { continue };
-        if !const_hoist_uses_are_read_only(func, id) {
+        // Nothing writes into an enum cdata after construction: a payload is not
+        // an assignable place, and storing one copies or replaces the whole value.
+        let immutable = skull_mir::lower::EnumPlan::for_name(ws, *name)
+            .is_some_and(|plan| plan.cdata().is_some());
+        if !immutable && !const_hoist_uses_are_read_only(func, id) {
             continue;
         }
         let g = match groups.iter().position(|(n, rep, ctor_form, l)| {
