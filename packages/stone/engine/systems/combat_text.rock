@@ -29,21 +29,21 @@ pub value WorldTextSample {
 }
 
 pub struct WorldTextDisplay {
-    spans: [TextSpan],
+    spans: [TextSpan] = [],
     present_spans: [TextSpan] = [],
     rows: [WorldTextRow] = [],
     row_offsets: [float] = [],
     row_layouts: [WorldTextRowLayout] = [],
-    pos: Vec2?,
+    pos: Vec2? = null,
     follow: (() -> Vec2?)? = null,
 
     offset: Vec2,
-    font_size: float,
-    style: WorldTextStyle,
-    collision_key: string,
+    font_size: float = WORLD_TEXT_SIZE,
+    style: WorldTextStyle = WorldTextStyle::Compact,
+    collision_key: string = "",
     composition_slot: int = 0,
     top_zone_slot: int = 0,
-    anchor_key: string,
+    anchor_key: string = "",
     amount: float = 0.0,
     hit_count: int = 0,
     contributions: int = 1,
@@ -61,8 +61,8 @@ pub struct WorldTextDisplay {
     pulse_span_indices: [int] = [],
     is_damage: bool = false,
 
-    lifetime_cur: float,
-    lifetime_max: float,
+    lifetime_cur: float = 0.0,
+    lifetime_max: float = 0.0,
     animation_offset: Vec2 = v(0, 0),
     opacity_cur: float = 1.0,
     drawn_screen: Vec2 = v(0, 0),
@@ -423,15 +423,7 @@ fn world_text_claim_display() -> WorldTextDisplay {
     let entity = WORLD_TEXT.reuse_retained_entity()
     if is_null(entity) {
         entity = WORLD_TEXT.insert(WorldTextDisplay {
-            spans: [],
-            pos: null,
             offset: zero(),
-            font_size: WORLD_TEXT_SIZE,
-            style: WorldTextStyle::Compact,
-            collision_key: "",
-            anchor_key: "",
-            lifetime_cur: 0.0,
-            lifetime_max: 0.0,
         })
     }
     return entity.unwrap().get().unwrap()

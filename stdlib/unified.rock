@@ -157,17 +157,17 @@ struct Metric {
     cap: int,
     ring: NativeBuffer<float>,    // insertion order (eviction + raw plot source)
     sorted: NativeBuffer<float>,  // same values, ascending (order stats)
-    head: int,
-    count: int,
-    sum: float,
-    sum_sq: float,
-    mean: float,
-    stddev: float,
-    min: float,
-    max: float,
-    p50: float,
-    p90: float,
-    p99: float,
+    head: int = 0,
+    count: int = 0,
+    sum: float = 0.0,
+    sum_sq: float = 0.0,
+    mean: float = 0.0,
+    stddev: float = 0.0,
+    min: float = 0.0,
+    max: float = 0.0,
+    p50: float = 0.0,
+    p90: float = 0.0,
+    p99: float = 0.0,
 }
 
 fn metric_new(name: string, cap: int) -> Metric {
@@ -176,17 +176,6 @@ fn metric_new(name: string, cap: int) -> Metric {
         cap: cap,
         ring: native_buffer_float(cap),
         sorted: native_buffer_float(cap),
-        head: 0,
-        count: 0,
-        sum: 0.0,
-        sum_sq: 0.0,
-        mean: 0.0,
-        stddev: 0.0,
-        min: 0.0,
-        max: 0.0,
-        p50: 0.0,
-        p90: 0.0,
-        p99: 0.0,
     }
 }
 

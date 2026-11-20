@@ -12,18 +12,18 @@ pub enum DrawDest {
 }
 
 pub struct DrawList {
-    space: DrawSpace,
-    dest: DrawDest,
-    name: string,    // diagnostic only — surfaced in debug labels later
-    default_z: int,  // applied when caller leaves `z: 0` (the sentinel)
+    space: DrawSpace = DrawSpace::World,
+    dest: DrawDest = DrawDest::Scene,
+    name: string,               // diagnostic only — surfaced in debug labels later
+    default_z: int = LAYER_UI,  // applied when caller leaves `z: 0` (the sentinel)
 
-    unlit: bool,
+    unlit: bool = false,
 
-    owns_pool: bool,
+    owns_pool: bool = false,
 
     batches: RenderBatchPool,
 
-    canvas: Canvas?,
+    canvas: Canvas? = null,
 }
 
 const WORLD_HAIRLINE: float = 1.0 / 16.0
@@ -34,47 +34,30 @@ fn resolve_z(dl: DrawList, z: int) -> int {
 }
 
 pub global world: DrawList = DrawList {
-    space: DrawSpace::World,
-    dest: DrawDest::Scene,
     name: "world",
     default_z: DEFAULT_RENDER_LAYER,
-    unlit: false,
-    owns_pool: false,
     batches: RENDER_BATCHES,
-    canvas: null,
 }
 
 pub global screen: DrawList = DrawList {
     space: DrawSpace::Target,
     dest: DrawDest::Output,
     name: "screen",
-    default_z: LAYER_UI,
-    unlit: false,
-    owns_pool: false,
     batches: UI_RENDER_BATCHES,
-    canvas: null,
 }
 
 pub global world_overlay: DrawList = DrawList {
-    space: DrawSpace::World,
     dest: DrawDest::Output,
     name: "world_overlay",
-    default_z: LAYER_UI,
-    unlit: false,
-    owns_pool: false,
     batches: UI_RENDER_BATCHES,
-    canvas: null,
 }
 
 pub global pixel_screen: DrawList = DrawList {
     space: DrawSpace::Target,
     dest: DrawDest::Composite,
     name: "pixel_screen",
-    default_z: LAYER_UI,
-    unlit: false,
     owns_pool: true,
     batches: render_batch_pool_new(),
-    canvas: null,
 }
 
 // World-space DrawList for transient debug visuals (gizmos): hitboxes,
@@ -86,14 +69,10 @@ pub global pixel_screen: DrawList = DrawList {
 // Not named `debug` — that shadows Lua's standard `debug` library, and
 // Stone's libstone loader calls `debug.getinfo(2, "S")` on startup.
 pub global gizmo: DrawList = DrawList {
-    space: DrawSpace::World,
-    dest: DrawDest::Scene,
     name: "gizmo",
     default_z: LAYER_DEBUG,
     unlit: true,
-    owns_pool: false,
     batches: RENDER_BATCHES,
-    canvas: null,
 }
 
 pub fn draw_list_new(
@@ -104,10 +83,8 @@ pub fn draw_list_new(
 ) -> DrawList {
     return DrawList {
         space: space,
-        dest: DrawDest::Scene,
         name: name,
         default_z: default_z,
-        unlit: false,
         owns_pool: true,
         batches: render_batch_pool_new(),
         canvas: canvas,

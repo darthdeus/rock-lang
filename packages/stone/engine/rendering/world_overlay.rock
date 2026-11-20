@@ -24,26 +24,26 @@ pub enum OverlayVerb {
 // flush arm reads, the rest keep the previous occupant's values.
 pub struct OverlayCmd {
     verb: OverlayVerb,
-    a: Vec2,          // world anchor, or a line's start
-    b: Vec2,          // world extent, or a line's end
-    radius: float,
-    thickness: float,
-    size: float,      // cap height or world em, selected by cap_height
+    a: Vec2 = v(0.0, 0.0),          // world anchor, or a line's start
+    b: Vec2 = v(0.0, 0.0),          // world extent, or a line's end
+    radius: float = 0.0,
+    thickness: float = 0.0,
+    size: float = 0.0,              // cap height or world em, selected by cap_height
     // Rich text only: drawn size over `size`. Layout happens at `size` and
     // the scale is applied to the glyph quads, so an animating scale reuses
     // one cached layout.
-    scale: float,
-    cap_height: bool,
-    color: Color,
-    rich_runs: [ResolvedTextRun],
-    shadow: bool,
-    align: TextAlign,
-    baseline_anchor: bool,
-    image: SampledTexture?,
-    source: IRect?,
-    pivot: Vec2,
-    draw_fn: (fn() -> ())?,
-    z: int,
+    scale: float = 1.0,
+    cap_height: bool = false,
+    color: Color = WHITE,
+    rich_runs: [ResolvedTextRun] = [],
+    shadow: bool = false,
+    align: TextAlign = TextAlign::Left,
+    baseline_anchor: bool = false,
+    image: SampledTexture? = null,
+    source: IRect? = null,
+    pivot: Vec2 = PIVOT_CENTER,
+    draw_fn: (fn() -> ())? = null,
+    z: int = 0,
 }
 
 pub global OVERLAY_CMDS: [OverlayCmd] = []
@@ -68,23 +68,6 @@ fn overlay_cmd(verb: OverlayVerb) -> OverlayCmd {
 
     let c = OverlayCmd {
         verb: verb,
-        a: v(0.0, 0.0),
-        b: v(0.0, 0.0),
-        radius: 0.0,
-        thickness: 0.0,
-        size: 0.0,
-        scale: 1.0,
-        cap_height: false,
-        color: WHITE,
-        rich_runs: [],
-        shadow: false,
-        align: TextAlign::Left,
-        baseline_anchor: false,
-        image: null,
-        source: null,
-        pivot: PIVOT_CENTER,
-        draw_fn: null,
-        z: 0,
     }
     OVERLAY_CMDS.push(c)
     OVERLAY_CMD_LEN += 1

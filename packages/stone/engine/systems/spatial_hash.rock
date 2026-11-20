@@ -8,54 +8,35 @@ const SH_CELL_STRIDE: int = 33554432
 pub struct SpatialHash<T> {
     cell_size: float,
 
-    is_circle: [bool],
-    pos_x: [float],
-    pos_y: [float],
-    w: [float],
-    h: [float],
-    layer: [int],
-    blocks_light: [bool],
-    payload: [T],
-    shape_count: int,
+    is_circle: [bool] = vec_new(),
+    pos_x: [float] = vec_new(),
+    pos_y: [float] = vec_new(),
+    w: [float] = vec_new(),
+    h: [float] = vec_new(),
+    layer: [int] = vec_new(),
+    blocks_light: [bool] = vec_new(),
+    payload: [T] = vec_new(),
+    shape_count: int = 0,
 
-    cell_of: Map<int, int>,
-    cell_count: int,
-    counts: [int],
-    starts: [int],
-    fill: [int],
-    sorted: [int],
-    sorted_count: int,
+    cell_of: Map<int, int> = map_new(),
+    cell_count: int = 0,
+    counts: [int] = vec_new(),
+    starts: [int] = vec_new(),
+    fill: [int] = vec_new(),
+    sorted: [int] = vec_new(),
+    sorted_count: int = 0,
 
     // Per-entry query stamp: a multi-cell entry is emitted once per query without
     // allocating a set.
-    stamp: [int],
-    query_id: int,
+    stamp: [int] = vec_new(),
+    query_id: int = 0,
 
-    built: bool,
+    built: bool = false,
 }
 
 pub fn spatial_hash_new<T>(cell_size: float = 8.0) -> SpatialHash<T> {
     return SpatialHash {
         cell_size: cell_size,
-        is_circle: vec_new(),
-        pos_x: vec_new(),
-        pos_y: vec_new(),
-        w: vec_new(),
-        h: vec_new(),
-        layer: vec_new(),
-        blocks_light: vec_new(),
-        payload: vec_new(),
-        shape_count: 0,
-        cell_of: map_new(),
-        cell_count: 0,
-        counts: vec_new(),
-        starts: vec_new(),
-        fill: vec_new(),
-        sorted: vec_new(),
-        sorted_count: 0,
-        stamp: vec_new(),
-        query_id: 0,
-        built: false,
     }
 }
 

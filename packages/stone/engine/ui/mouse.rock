@@ -94,25 +94,17 @@ fn ui_mouse_note_press(button: int) {
 // shimming every widget is a trap. Detector rules:
 // stone/tests/ui_id_debug_retention.rock.
 pub struct UiIdDebug {
-    enabled: bool,
-    scopes: Map<int, string>,
-    labels: Map<int, string>,
-    seen: Map<int, bool>,     // per-scan scratch
-    dupes: int,               // lifetime duplicate-registration count
-    hash_collisions: int,     // lifetime distinct-string same-hash mint count
-    last_dupe_name: string,
+    enabled: bool = false,
+    scopes: Map<int, string> = map_new(),
+    labels: Map<int, string> = map_new(),
+    seen: Map<int, bool> = map_new(),     // per-scan scratch
+    dupes: int = 0,                       // lifetime duplicate-registration count
+    hash_collisions: int = 0,             // lifetime distinct-string same-hash mint count
+    last_dupe_name: string = "",
 }
 
 fn ui_id_debug_new() -> UiIdDebug {
-    return UiIdDebug {
-        enabled: false,
-        scopes: map_new(),
-        labels: map_new(),
-        seen: map_new(),
-        dupes: 0,
-        hash_collisions: 0,
-        last_dupe_name: "",
-    }
+    return UiIdDebug {}
 }
 
 pub global UI_ID_DEBUG: UiIdDebug = ui_id_debug_new()

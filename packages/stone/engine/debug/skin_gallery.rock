@@ -8,26 +8,17 @@ pub struct SkinGalleryEntry {
 }
 
 pub struct SkinGalleryState {
-    enabled: bool,
-    initialized: bool,
-    entries: [SkinGalleryEntry],
-    idx: int,
-    scroll: int,
-    field: int,            // 0/1 corner.x/y, 2-5 pad l/t/r/b, 6 scale
-    repeat_dir: int,
-    repeat_timer: float,
+    enabled: bool = false,
+    initialized: bool = false,
+    entries: [SkinGalleryEntry] = vec_new(),
+    idx: int = 0,
+    scroll: int = 0,
+    field: int = 0,            // 0/1 corner.x/y, 2-5 pad l/t/r/b, 6 scale
+    repeat_dir: int = 0,
+    repeat_timer: float = 0.0,
 }
 
-pub global SKIN_GALLERY: SkinGalleryState = SkinGalleryState {
-    enabled: false,
-    initialized: false,
-    entries: vec_new(),
-    idx: 0,
-    scroll: 0,
-    field: 0,
-    repeat_dir: 0,
-    repeat_timer: 0.0,
-}
+pub global SKIN_GALLERY: SkinGalleryState = SkinGalleryState {}
 
 // Keyed by "<Asset>.png". Seeded skins are shared by reference, so a gallery tweak lands in
 // the game's global too.

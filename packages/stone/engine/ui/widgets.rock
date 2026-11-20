@@ -284,13 +284,13 @@ pub fn focus_tab_row(r: UiRect, key: string, labels: [string], selected: int, sk
 // text; navigation and editing keys stay on the raw scancode lane so action
 // bindings are completely suppressed while the field owns the keyboard.
 pub struct UiTextInputState {
-    active_id: int,
-    value: string,
-    cursor: int,
-    max_chars: int,
-    select_all: bool,
-    invalid: bool,
-    seen: bool,
+    active_id: int = 0,
+    value: string = "",
+    cursor: int = 0,
+    max_chars: int = 0,
+    select_all: bool = false,
+    invalid: bool = false,
+    seen: bool = false,
 }
 
 pub struct UiTextInputResult {
@@ -299,15 +299,7 @@ pub struct UiTextInputResult {
     cancel: bool,
 }
 
-pub global UI_TEXT_INPUT: UiTextInputState = UiTextInputState {
-    active_id: 0,
-    value: "",
-    cursor: 0,
-    max_chars: 0,
-    select_all: false,
-    invalid: false,
-    seen: false,
-}
+pub global UI_TEXT_INPUT: UiTextInputState = UiTextInputState {}
 
 fn ui_text_input_codepoints(text: string) -> [int] {
     let out: [int] = []

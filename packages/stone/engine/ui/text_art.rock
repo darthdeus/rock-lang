@@ -181,17 +181,17 @@ pub struct TextArt<T> {
 }
 
 pub value TextArtRasterDemand {
-    glyph_population: int,
-    target_footprint: Vec2,
-    source_footprint: Vec2,
+    glyph_population: int = 0,
+    target_footprint: Vec2 = v(),
+    source_footprint: Vec2 = v(),
     authored_cap_height: float,
     layout_to_target_scale: float,
-    physical_target_scale: float,
+    physical_target_scale: float = 1.0,
     max_pose_scale: float,
     coverage_oversampling: float,
-    target_pixel_cap_height: float,
-    required_pixel_em: float,
-    coverage_bucket: int,
+    target_pixel_cap_height: float = 0.0,
+    required_pixel_em: float = 0.0,
+    coverage_bucket: int = 0,
 }
 
 pub value TextArtAtlasInstance {
@@ -324,17 +324,10 @@ pub fn text_art_raster_demand_for(
     text_art_require_demand(authored_cap_height, layout_to_target_scale,
         max_pose_scale, coverage_oversampling)
     let data = font.data() ?? return TextArtRasterDemand {
-        glyph_population: 0,
-        target_footprint: v(),
-        source_footprint: v(),
         authored_cap_height: authored_cap_height,
         layout_to_target_scale: layout_to_target_scale,
-        physical_target_scale: 1.0,
         max_pose_scale: max_pose_scale,
         coverage_oversampling: coverage_oversampling,
-        target_pixel_cap_height: 0.0,
-        required_pixel_em: 0.0,
-        coverage_bucket: 0,
     }
     let target_layout = text_layout_build(font, text, authored_cap_height, layout_to_target_scale)
     target_layout.coverage_oversampling = coverage_oversampling
