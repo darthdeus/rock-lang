@@ -521,7 +521,7 @@ impl<'a> Builder<'a> {
         let dispatch = self.dispatch();
         let mut ty = *self.inf?.expr_types.get(base)?;
         loop {
-            match dispatch.ty_node(ty)? {
+            match dispatch.raw_ty_node(ty)? {
                 TypeExpr::Infer(var, _) => ty = self.inf?.substitutions.get(var)?,
                 TypeExpr::Nullable(inner) => ty = ty.with_idx(inner),
                 TypeExpr::App {
@@ -541,7 +541,7 @@ impl<'a> Builder<'a> {
             .and_then(|e| self.inf?.expr_types.get(e).copied())?;
         let resolved = self.resolve_tyid(ty)?;
         if matches!(
-            self.dispatch().ty_node(resolved),
+            self.dispatch().raw_ty_node(resolved),
             Some(TypeExpr::Builtin(BuiltinTy::Never | BuiltinTy::Error))
         ) {
             None
@@ -556,7 +556,7 @@ impl<'a> Builder<'a> {
             .and_then(|e| self.inf?.expr_types.get(e).copied())?;
         let resolved = self.resolve_tyid(ty)?;
         matches!(
-            self.dispatch().ty_node(resolved),
+            self.dispatch().raw_ty_node(resolved),
             Some(TypeExpr::Builtin(BuiltinTy::Unit))
         )
         .then_some(ty)
@@ -577,11 +577,11 @@ impl<'a> Builder<'a> {
                 out.push(None);
             }
             let ty = b.resolve_tyid(ty)?;
-            let ty = match b.dispatch().ty_node(ty)? {
+            let ty = match b.dispatch().raw_ty_node(ty)? {
                 TypeExpr::Nullable(inner) => ty.with_idx(inner),
                 _ => ty,
             };
-            let TypeExpr::Tuple { elements } = b.dispatch().ty_node(ty)? else {
+            let TypeExpr::Tuple { elements } = b.dispatch().raw_ty_node(ty)? else {
                 return None;
             };
             if elements.len() != shape.slots.len() {
@@ -789,7 +789,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
-        self.dispatch().ty_node(ty)
+        self.dispatch().raw_ty_node(ty)
     }
 
     /// Keeps the `TyId`, unlike `resolve_ty`, so its App params index the right arena.

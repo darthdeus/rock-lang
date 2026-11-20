@@ -178,6 +178,8 @@ impl HolePlan {
 
 impl<'a> DispatchCtx<'a> {
     /// The stored type node, without the specialization substitution.
+    /// Never fabricates a partial HIR node for a concrete generic argument; use
+    /// `concrete_ty` or `concrete_expr_ty` for resolved facts.
     pub(crate) fn raw_ty_node(&self, ty: TyId) -> Option<TypeExpr> {
         Some(match ty {
             TyId::Static(mid, idx) => self.ws.module(mid).ty_arena[idx],
@@ -202,15 +204,9 @@ impl<'a> DispatchCtx<'a> {
         Some(self.interner?.get_ref(id))
     }
 
-    /// Never fabricates a partial HIR node for a concrete generic argument; use
-    /// `concrete_ty` or `concrete_expr_ty` for resolved facts.
-    pub(crate) fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
-        self.raw_ty_node(ty)
-    }
-
     /// Chase `Infer` and peel `Nullable`.
     pub(crate) fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
-        match self.ty_node(ty)? {
+        match self.raw_ty_node(ty)? {
             TypeExpr::Infer(var, _) => self.resolve_ty(self.inf?.substitutions.get(var)?),
             TypeExpr::Nullable(inner) => self.resolve_ty(ty.with_idx(inner)),
             other => Some(other),
@@ -219,7 +215,7 @@ impl<'a> DispatchCtx<'a> {
 
     /// Chase `Infer` without peeling `Nullable`, keeping the `TyId`.
     pub(crate) fn resolve_tyid(&self, ty: TyId) -> Option<TyId> {
-        match self.ty_node(ty)? {
+        match self.raw_ty_node(ty)? {
             TypeExpr::Infer(var, _) => self.resolve_tyid(self.inf?.substitutions.get(var)?),
             _ => Some(ty),
         }
@@ -243,7 +239,7 @@ impl<'a> DispatchCtx<'a> {
                 return b.peel_nullable().1;
             }
         }
-        match self.ty_node(ty) {
+        match self.raw_ty_node(ty) {
             Some(TypeExpr::Nullable(_)) => true,
             Some(TypeExpr::Infer(var, _)) => self
                 .inf
@@ -295,27 +291,27 @@ impl<'a> DispatchCtx<'a> {
             .unwrap_or(false)
     }
 
-    pub(crate) fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
+    /// The nominal name of `e`'s type, nullable or not; without a concrete
+    /// plan, of its HIR type.
+    fn expr_nominal(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
-            return match ty.peel_nullable().0 {
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name),
-                    ..
-                } => self.is_nobox_struct(*name).then_some(*name),
-                _ => None,
-            };
+            return ty.peel_nullable().0.nominal();
         }
         if self.concrete_plan.is_some() {
             return None;
         }
-        let TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } = self.expr_ty(e)?
-        else {
-            return None;
-        };
-        self.is_nobox_struct(name).then_some(name)
+        match self.expr_ty(e)? {
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            } => Some(name),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
+        self.expr_nominal(e)
+            .filter(|name| self.is_nobox_struct(*name))
     }
 
     /// Lua/C equality reaches a value struct's `__eq` directly; JS uses the
@@ -327,54 +323,15 @@ impl<'a> DispatchCtx<'a> {
     /// Unlike [`Self::nobox_value_name`] this does not require `nobox`: every
     /// `value` struct carries a native-`==`-reachable `__eq`.
     pub(crate) fn value_struct_name(&self, e: Idx<Expr>) -> Option<Ustr> {
-        if let Some(ty) = self.concrete_expr_ty(e) {
-            let (payload, _) = ty.peel_nullable();
-            return match payload {
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name),
-                    ..
-                } => self.is_value_struct(*name).then_some(*name),
-                _ => None,
-            };
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } = self.expr_ty(e)?
-        else {
-            return None;
-        };
-        self.is_value_struct(name).then_some(name)
+        self.expr_nominal(e)
+            .filter(|name| self.is_value_struct(*name))
     }
 
     /// All-unit enum variants lower to interned singleton globals, reference-equal
     /// across uses, so `==`/`!=` is native Lua `==`/`~=`.
     pub(crate) fn is_payloadless_enum(&self, e: Idx<Expr>) -> bool {
-        if let Some(ty) = self.concrete_expr_ty(e) {
-            let (payload, _) = ty.peel_nullable();
-            let crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                ..
-            } = payload
-            else {
-                return false;
-            };
-            return is_payload_free_enum(self.ws, *name);
-        }
-        if self.concrete_plan.is_some() {
-            return false;
-        }
-        let Some(TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        }) = self.expr_ty(e)
-        else {
-            return false;
-        };
-        is_payload_free_enum(self.ws, name)
+        self.expr_nominal(e)
+            .is_some_and(|name| is_payload_free_enum(self.ws, name))
     }
 
     pub(crate) fn eq_is_scalar(&self, e: Idx<Expr>) -> bool {
@@ -405,23 +362,9 @@ impl<'a> DispatchCtx<'a> {
     }
 
     pub(crate) fn expr_is_flat_enum(&self, e: Idx<Expr>) -> bool {
-        if let Some(ty) = self.concrete_expr_ty(e) {
-            let (payload, _) = ty.peel_nullable();
-            return matches!(
-                payload,
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(n), ..
-                } if EnumPlan::for_name(self.ws, *n).is_some_and(|plan| plan.flat().is_some())
-            );
-        }
-        if self.concrete_plan.is_some() {
-            return false;
-        }
-        matches!(
-            self.expr_ty(e),
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. })
-                if EnumPlan::for_name(self.ws, n).is_some_and(|plan| plan.flat().is_some())
-        )
+        self.expr_nominal(e).is_some_and(|name| {
+            EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some())
+        })
     }
 
     /// For a value already known present: the nullable guard wraps this route, so
