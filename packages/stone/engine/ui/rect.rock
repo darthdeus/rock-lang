@@ -820,18 +820,6 @@ pub fn UiRect.text(
     return r
 }
 
-fn UiRect.rich_text_single_font(
-    r,
-    span: TextSpan,
-    font: Font,
-    font_size: float,
-    align: TextAlign,
-    shadow: bool
-) -> UiRect {
-    return r.rich_text_single_font_values(span.text, span.style.color,
-        span.style.bold, span.style.italic, font, font_size, align, shadow)
-}
-
 fn UiRect.rich_text_single_font_values(
     r,
     text: string,
@@ -977,7 +965,9 @@ pub fn UiRect.rich_text(
     if spans.len() > 0 && spans[0].text.len() > 0 {
         if let font = rich_ui_single_font(family) {
             if spans.len() == 1 {
-                return r.rich_text_single_font(spans[0], font, font_size, align, shadow)
+                let span = spans[0]
+                return r.rich_text_single_font_values(span.text, span.style.color,
+                    span.style.bold, span.style.italic, font, font_size, align, shadow)
             }
             return r.rich_text_single_font_spans(spans, font, font_size, align, shadow)
         }
