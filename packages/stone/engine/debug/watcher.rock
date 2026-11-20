@@ -31,14 +31,14 @@ global REGISTERED_SHADER_HASHES: Map<string, ShaderRegistrationKey> = map_new()
 // (before @init). Those get queued here and compiled by the @init drain
 // (load_pending_shader_sources). A reload runs with GL already up -> compiled in
 // place immediately, no queue.
-value PendingShader {
+value ShaderRegistration {
+    hash: ShaderRegistrationKey,
     src: string,
     texture_slots: [string],
     blocks: [UniformBlockDecl],
-    fullscreen_vertex: bool,
     semantic: SemanticShaderInterface,
 }
-global PENDING_SHADER_SRCS: Map<string, PendingShader> = map_new()
+global PENDING_SHADER_SRCS: Map<string, ShaderRegistration> = map_new()
 
 
 pub value SemanticShaderMember {
@@ -421,39 +421,9 @@ pub @nomangle fn __rock_shader_register(key: string, src: string, texture_slots:
                                     block_member_kinds: [int], block_member_capacities: [int],
                                     block_member_strides: [int], fullscreen_vertex: bool,
                                     semantic_wire: string) {
-    let parsed_semantic = parse_semantic_shader_wire(semantic_wire)
-    if parsed_semantic == null {
-        log_error("SHADER", "rock_shader: compiler semantic wire is invalid for {key}")
-        return
-    }
-    let semantic = parsed_semantic
-    if semantic.fullscreen != fullscreen_vertex {
-        log_error("SHADER", "rock_shader: compiler semantic geometry disagrees for {key}")
-        return
-    }
-    let blocks = __unflatten_block_decls(block_names, block_bindings, block_sizes, block_fingerprints,
-                                         block_member_counts, block_member_names, block_member_offsets,
-                                         block_member_kinds, block_member_capacities, block_member_strides)
-    let h = ShaderRegistrationKey { src_hash: __shader_src_hash(src), block_fingerprint: __blocks_fingerprint(blocks), fullscreen_vertex: fullscreen_vertex, semantic_fingerprint: semantic.fingerprint }
-    // Texture slots are published with the rest of the registration, not here:
-    // a program whose blocks are rejected must leave NO trace, and slots written
-    // ahead of validation outlived the program they described.
-    if let prev = REGISTERED_SHADER_HASHES.get(key) {
-        let p = prev
-        // unchanged source AND layout -> no-op
-        if p.src_hash == h.src_hash && p.block_fingerprint == h.block_fingerprint && p.fullscreen_vertex == h.fullscreen_vertex && p.semantic_fingerprint == h.semantic_fingerprint {
-            if WATCHER.shaders.contains(key) && !GL_SHADER_ARTIFACTS.contains(key) {
-                publish_gl_shader_semantic(key, semantic)
-            }
-            return
-        }
-    }
-    if !__stone_gl_ready() {
-        // pre-GL cold start; @init drains
-        PENDING_SHADER_SRCS.insert(key, PendingShader { src: src, texture_slots: texture_slots, blocks: blocks, fullscreen_vertex: fullscreen_vertex, semantic: semantic })
-        return
-    }
-    rock_shader_compile_now(key, src, h, texture_slots, blocks, fullscreen_vertex, semantic)
+    let _ = register_shader(key, src, null, texture_slots, block_names, block_bindings, block_sizes,
+        block_fingerprints, block_member_counts, block_member_names, block_member_offsets,
+        block_member_kinds, block_member_capacities, block_member_strides, fullscreen_vertex, semantic_wire)
 }
 
 @nomangle fn __rock_native_shader_publish(key: string, src: string, sid: ShaderId,
@@ -464,34 +434,53 @@ pub @nomangle fn __rock_shader_register(key: string, src: string, texture_slots:
                                           block_member_kinds: [int], block_member_capacities: [int],
                                           block_member_strides: [int], fullscreen_vertex: bool,
                                           semantic_wire: string) -> bool {
-    let parsed_semantic = parse_semantic_shader_wire(semantic_wire)
-    if parsed_semantic == null {
-        log_error("SHADER", "native artifact semantic wire is invalid for {key}")
+    return register_shader(key, src, sid, texture_slots, block_names, block_bindings, block_sizes,
+        block_fingerprints, block_member_counts, block_member_names, block_member_offsets,
+        block_member_kinds, block_member_capacities, block_member_strides, fullscreen_vertex, semantic_wire)
+}
+
+fn register_shader(key: string, src: string, native: ShaderId?, texture_slots: [string],
+    block_names: [string], block_bindings: [int], block_sizes: [int], block_fingerprints: [int],
+    block_member_counts: [int], block_member_names: [string], block_member_offsets: [int],
+    block_member_kinds: [int], block_member_capacities: [int], block_member_strides: [int],
+    fullscreen_vertex: bool, semantic_wire: string) -> bool {
+    let semantic = parse_semantic_shader_wire(semantic_wire) ?? {
+        if native != null { log_error("SHADER", "native artifact semantic wire is invalid for {key}") }
+        else { log_error("SHADER", "rock_shader: compiler semantic wire is invalid for {key}") }
         return false
     }
-    let semantic = parsed_semantic
     if semantic.fullscreen != fullscreen_vertex {
-        log_error("SHADER", "native artifact geometry disagrees with its semantic wire for {key}")
+        if native != null { log_error("SHADER", "native artifact geometry disagrees with its semantic wire for {key}") }
+        else { log_error("SHADER", "rock_shader: compiler semantic geometry disagrees for {key}") }
         return false
     }
     let blocks = __unflatten_block_decls(block_names, block_bindings, block_sizes, block_fingerprints,
-                                         block_member_counts, block_member_names, block_member_offsets,
-                                         block_member_kinds, block_member_capacities, block_member_strides)
-    let h = ShaderRegistrationKey { src_hash: __shader_src_hash(src), block_fingerprint: __blocks_fingerprint(blocks), fullscreen_vertex: fullscreen_vertex, semantic_fingerprint: semantic.fingerprint }
-    if let prev = REGISTERED_SHADER_HASHES.get(key) {
-        let p = prev
-        if p.src_hash == h.src_hash && p.block_fingerprint == h.block_fingerprint && p.fullscreen_vertex == h.fullscreen_vertex && p.semantic_fingerprint == h.semantic_fingerprint
-            && WATCHER.shaders.contains(key) {
-            if !GL_SHADER_ARTIFACTS.contains(key) { publish_gl_shader_semantic(key, semantic) }
-            return true
+        block_member_counts, block_member_names, block_member_offsets, block_member_kinds,
+        block_member_capacities, block_member_strides)
+    let hash = ShaderRegistrationKey {
+        src_hash: __shader_src_hash(src), block_fingerprint: __blocks_fingerprint(blocks),
+        fullscreen_vertex, semantic_fingerprint: semantic.fingerprint,
+    }
+    if let previous = REGISTERED_SHADER_HASHES.get(key) {
+        if previous == hash {
+            if WATCHER.shaders.contains(key) {
+                if !GL_SHADER_ARTIFACTS.contains(key) { publish_gl_shader_semantic(key, semantic) }
+                return true
+            }
+            if native == null { return true }
         }
     }
-    // `stone_register_native_shaders` has already compiled, bound, and
-    // driver-validated the native program's blocks before this hook runs.
-    // Publication only mirrors their compiler metadata into Rock's packer
-    // registry; binding here would create a second buffer for the same block.
-    publish_shader_registration(key, sid, h, texture_slots, fullscreen_vertex, semantic,
-                                native_uniform_blocks(blocks))
+    let registration = ShaderRegistration { hash, src, texture_slots, blocks, semantic }
+    if let sid = native {
+        // The native loader already bound and validated the driver's blocks.
+        publish_shader_registration(key, sid, registration, native_uniform_blocks(blocks))
+        return true
+    }
+    if __stone_gl_ready() {
+        rock_shader_compile_now(key, registration)
+    } else {
+        PENDING_SHADER_SRCS.insert(key, registration)
+    }
     return true
 }
 
@@ -500,15 +489,14 @@ fn load_pending_shader_sources() {
     let keys = PENDING_SHADER_SRCS.keys()
     sort(keys, x => x)
     for key in keys {
-        let p = PENDING_SHADER_SRCS.get(key) ?? continue
-        let h = ShaderRegistrationKey { src_hash: __shader_src_hash(p.src), block_fingerprint: __blocks_fingerprint(p.blocks), fullscreen_vertex: p.fullscreen_vertex, semantic_fingerprint: p.semantic.fingerprint }
-        rock_shader_compile_now(key, p.src, h, p.texture_slots, p.blocks, p.fullscreen_vertex, p.semantic)
+        let registration = PENDING_SHADER_SRCS.get(key) ?? continue
+        rock_shader_compile_now(key, registration)
     }
     PENDING_SHADER_SRCS.clear()
 }
 
-fn rock_shader_compile_now(key: string, src: string, h: ShaderRegistrationKey, texture_slots: [string], blocks: [UniformBlockDecl], fullscreen_vertex: bool, semantic: SemanticShaderInterface) {
-    let (shader, err) = new_shader_safe(src)
+fn rock_shader_compile_now(key: string, registration: ShaderRegistration) {
+    let (shader, err) = new_shader_safe(registration.src)
     if shader == null {
         // Keep the previous program; the hash stays unset so the next reload retries.
         log_error("SHADER", "rock_shader: GL compile failed for {key}: {err}")
@@ -516,39 +504,26 @@ fn rock_shader_compile_now(key: string, src: string, h: ShaderRegistrationKey, t
     }
     let sid = shader
 
-    // VALIDATE BEFORE PUBLISHING. A program that links is not yet fit to go
-    // live: its engine slot may hold a foreign block, a block may fail to bind,
-    // or the driver may disagree with the compiler's layout. Publishing first
-    // made every one of those unrecoverable -- the invalid program was current,
-    // its hash was recorded so the next reload skipped recompiling it, and its
-    // blocks had already been dropped, so the draw-time unfilled gate had
-    // nothing left to notice.
-    let live = build_uniform_blocks(key, sid, blocks)
+    let live = build_uniform_blocks(key, sid, registration.blocks)
     if live == null {
         stone_destroy_shader(transmute(sid.0))
         log_error("SHADER", "rock_shader: `{key}` not registered -- its uniform blocks were rejected (see above); the previous program stays live")
         return
     }
 
-    publish_shader_registration(key, sid, h, texture_slots, fullscreen_vertex, semantic, live)
+    publish_shader_registration(key, sid, registration, live)
 }
 
-fn publish_shader_registration(key: string, sid: ShaderId, h: ShaderRegistrationKey,
-                               texture_slots: [string], fullscreen_vertex: bool,
-                               semantic: SemanticShaderInterface, live: [ShaderUniformBlock]) {
+fn publish_shader_registration(key: string, sid: ShaderId, registration: ShaderRegistration,
+    live: [ShaderUniformBlock]) {
     let existing = WATCHER.shaders.get(key)
-    if existing != null {
-        let superseded = existing.shader
-        WATCHER.shaders.insert(key, WatcherShader { shader: sid })
-        // Destroy after the remap, so the key never names a destroyed program.
-        if superseded.0 != sid.0 {
-            stone_destroy_shader(transmute(superseded.0))
-        }
-    } else {
-        WATCHER.shaders.insert(key, WatcherShader { shader: sid })
+    WATCHER.shaders.insert(key, WatcherShader { shader: sid })
+    if existing != null && existing.shader != sid {
+        stone_destroy_shader(transmute(existing.shader.0))
     }
     gpu_label_shader(transmute(sid.0), key)
-    REGISTERED_SHADER_HASHES.insert(key, h)
+    REGISTERED_SHADER_HASHES.insert(key, registration.hash)
+    let texture_slots = registration.texture_slots
     let slots_by_name: Map<string, int> = map_new()
     for (slot, name) in enumerate(texture_slots) {
         slots_by_name.insert(name, slot)
@@ -557,10 +532,10 @@ fn publish_shader_registration(key: string, sid: ShaderId, h: ShaderRegistration
         names: texture_slots,
         by_name: slots_by_name,
     })
-    SHADER_COMPILER_FULLSCREEN_VERTEX.insert(key, fullscreen_vertex)
+    SHADER_COMPILER_FULLSCREEN_VERTEX.insert(key, registration.hash.fullscreen_vertex)
     bind_texture_slots(sid, texture_slots)
     publish_uniform_blocks(key, live)
-    publish_gl_shader_semantic(key, semantic)
+    publish_gl_shader_semantic(key, registration.semantic)
 }
 
 pub fn shader_uses_compiler_fullscreen_vertex(shader_name: string) -> bool {
