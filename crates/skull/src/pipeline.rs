@@ -41,6 +41,15 @@ pub fn semantic_pass(
     apply_closure_gate(ws)
 }
 
+/// Replace repeated stdlib checks in fixture workspaces.
+pub fn semantic_pass_reusing_stdlib(
+    modules: &mut ModuleSet,
+    aliases: &NsAliases,
+) -> Result<Workspace, CompilerError> {
+    let ws = bone_semantic::semantic_passes::semantic_pass_reusing_stdlib(modules, aliases)?;
+    apply_closure_gate(ws)
+}
+
 fn apply_closure_gate(mut ws: Workspace) -> Result<Workspace, CompilerError> {
     let timer = bone_core::prelude::Instant::now();
     bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
@@ -54,6 +63,22 @@ pub fn check_modules(
     modules: &mut ModuleSet,
     aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
 ) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
+    check_modules_impl(modules, aliases, false)
+}
+
+/// The same gates as [`check_modules`], with in-process stdlib reuse for a suite.
+pub fn check_test_modules(
+    modules: &mut ModuleSet,
+    aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
+) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
+    check_modules_impl(modules, aliases, true)
+}
+
+fn check_modules_impl(
+    modules: &mut ModuleSet,
+    aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
+    reuse_stdlib: bool,
+) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
     let gates_timer = bone_core::prelude::Instant::now();
     let syntax = syntax_errors(modules.iter());
     if !syntax.is_empty() {
@@ -61,25 +86,19 @@ pub fn check_modules(
     }
     let gates_time = gates_timer.elapsed();
     let aliases_timer = bone_core::prelude::Instant::now();
-    let aliases = match aliases(modules) {
-        Ok(aliases) => aliases,
-        Err(error) => {
-            let macro_errors = macro_gates(&modules.iter().collect::<Vec<_>>());
-            return Err(if macro_errors.is_empty() {
-                vec![error]
-            } else {
-                macro_errors
-            });
-        }
-    };
+    let aliases = aliases(modules);
     let aliases_time = aliases_timer.elapsed();
-    let ws =
-        bone_semantic::semantic_passes::semantic_pass_after_gate(modules, &aliases, &macro_gates);
-    let ws = match ws {
-        Err(bone_semantic::semantic_passes::PassFailure::Gate(errors)) => return Err(errors),
-        Err(bone_semantic::semantic_passes::PassFailure::Pass(error)) => Err(error),
-        Ok(ws) => apply_closure_gate(ws),
+    let macro_errors = skull_parser::check_macro_name_uniqueness(modules.iter());
+    if !macro_errors.is_empty() {
+        return Err(macro_errors);
+    }
+    let aliases = aliases.map_err(|error| vec![error])?;
+    let semantic = if reuse_stdlib {
+        semantic_pass_reusing_stdlib
+    } else {
+        semantic_pass
     };
+    let ws = semantic(modules, &aliases);
     // A macro that must not expand leaves the call in place and records why; that
     // reason explains the type errors it causes, so it reports first.
     let expanded_syntax = syntax_errors(modules.iter());
@@ -93,11 +112,6 @@ pub fn check_modules(
     let errs = skull_mir::verdict::body_errors(&ws);
     ws.log_time("body verdict", timer);
     Ok((ws, errs))
-}
-
-/// Runs before expansion removes the macro definitions it checks.
-fn macro_gates(modules: &[&Ast]) -> Vec<CompilerError> {
-    skull_parser::check_macro_name_uniqueness(modules.iter().copied())
 }
 
 /// Modules the lint pass treats as warm (scanned, never reported): every
@@ -134,6 +148,9 @@ pub trait CompileHost {
     fn aliases(&mut self, modules: &ModuleSet) -> Result<NsAliases, CompilerError>;
     /// A pipeline boundary was reached; hosts that measure record it.
     fn phase(&mut self, _phase: Phase<'_>) {}
+    fn reuse_checked_stdlib(&self) -> bool {
+        false
+    }
     /// The build inputs (`build_var` values, `embed_string` files), resolved
     /// once the program has type-checked.
     fn comptime_inputs(&mut self) -> Result<ComptimeInputs, CompilerError>;
@@ -265,7 +282,8 @@ pub fn compile_modules(
     target: EmitTarget<'_>,
     host: &mut dyn CompileHost,
 ) -> Result<Compiled, CompileFailure> {
-    let (mut ws, body_errors) = check_modules(&mut modules, |m| host.aliases(m))
+    let reuse_stdlib = host.reuse_checked_stdlib();
+    let (mut ws, body_errors) = check_modules_impl(&mut modules, |m| host.aliases(m), reuse_stdlib)
         .map_err(|errors| CompileFailure::at(Stage::Check, errors))?;
     if !body_errors.is_empty() {
         return Err(CompileFailure::at(Stage::Check, body_errors));

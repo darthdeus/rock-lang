@@ -132,9 +132,12 @@ fn bone_check_case(
         }
     }
     // Total parse: a recoverable syntax error returns Ok with `recovery_errors`,
-    // so the rejection is the downstream gate in `check_with_stdlib`
+    // so the rejection is the downstream gate in `check_test_modules`
     // (`skull::pipeline::syntax_errors`), not the parse `match` above.
-    crate::bone_backend::check_with_stdlib(user).map_err(|errs| error_text(&errs))
+    skull::pipeline::with_stdlib(user)
+        .map_err(|error| vec![error])
+        .and_then(crate::test_unit::check_test_modules)
+        .map_err(|errs| error_text(&errs))
 }
 
 fn error_text(errs: &[rock_core::errors::CompilerError]) -> String {

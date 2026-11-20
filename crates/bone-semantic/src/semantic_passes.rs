@@ -1011,28 +1011,13 @@ pub fn semantic_pass_without_closure_gate(
     semantic_pass_owned(modules, aliases)
 }
 
-/// A check of the un-expanded modules whose diagnostics come before any the
-/// semantic pass reports.
-pub type PreExpansionGate<'g> = &'g (dyn Fn(&[&Ast]) -> Vec<CompilerError> + Sync);
-
-#[derive(Debug)]
-pub enum PassFailure {
-    Gate(Vec<CompilerError>),
-    Pass(CompilerError),
-}
-
-/// [`semantic_pass_without_closure_gate`] behind `gate`. The gate reads the
-/// modules before expansion.
-pub fn semantic_pass_after_gate(
+/// Reuse the process stdlib for independent modules in repeated test builds.
+pub fn semantic_pass_reusing_stdlib(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
-    gate: PreExpansionGate,
-) -> Result<Workspace, PassFailure> {
-    let errors = gate(&modules.iter().collect_vec());
-    if !errors.is_empty() {
-        return Err(PassFailure::Gate(errors));
-    }
-    semantic_pass_owned(modules, aliases).map_err(PassFailure::Pass)
+) -> Result<Workspace, CompilerError> {
+    crate::stdlib_base::check_users(modules, aliases)
+        .unwrap_or_else(|| semantic_pass_owned(modules, aliases))
 }
 
 fn semantic_pass_owned(
@@ -1180,7 +1165,7 @@ pub fn build_namespaces<'a>(
 
 /// [`build_namespaces`] from each file's [`FragmentContribution`], in module
 /// order. It writes `ws.ns.packages`, `ws.defs` and `ws.fragment_scopes`,
-/// which must start empty.
+/// which can hold a disjoint checked prefix.
 pub fn assemble_namespaces(
     ws: &mut Workspace,
     contributions: &[&FragmentContribution],

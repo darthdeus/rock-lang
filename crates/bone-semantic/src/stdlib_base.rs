@@ -1,14 +1,13 @@
-//! The process stdlib checked once and reused by incremental sessions when
-//! their user modules cannot change it. One-shot semantic passes lower the
-//! complete module set.
+//! The process stdlib checked once for builds whose user modules cannot change it.
 
 use std::sync::OnceLock;
 
+use skull_parser::stdlib::ModuleSet;
 use skull_parser::{Ast, ItemKind, collect_registry, cook_one, is_hygiene_name, macro_reach};
 
 use crate::prelude::*;
 use crate::semantic_passes::{FragmentContribution, ScopeItem};
-use bone_core::modules::DefKind;
+use bone_core::modules::{DefKind, NsAliases, STD_PACKAGE_ID};
 
 /// The names through which a user file can reach the warm modules.
 #[derive(Clone, Debug, Default)]
@@ -139,6 +138,65 @@ pub fn checked_alone(warm: &std::sync::Arc<[Ast]>) -> Option<Workspace> {
         return None;
     }
     base().map(StdlibBase::workspace)
+}
+
+pub(crate) fn check_users(
+    modules: &mut ModuleSet,
+    aliases: &NsAliases,
+) -> Option<Result<Workspace, CompilerError>> {
+    if !skull_parser::stdlib::is_process_stdlib(modules.shared())
+        || aliases
+            .packages
+            .iter()
+            .any(|package| package.id == STD_PACKAGE_ID)
+        || modules.rest().iter().any(|ast| {
+            is_stdlib_module_file(ast.file.as_str())
+                || macro_names(ast).next().is_some()
+                || ast
+                    .package
+                    .as_ref()
+                    .is_some_and(|package| package.id == STD_PACKAGE_ID)
+        })
+    {
+        return None;
+    }
+    let base = base()?;
+    let registry = collect_registry(modules.iter());
+    let cooked = modules
+        .rest()
+        .par_iter()
+        .map(|raw| {
+            let mut cooked = raw.clone();
+            cook_one(&mut cooked, &registry).ok()?;
+            let contribution = crate::semantic_passes::contribute(&cooked);
+            (!defines_operator(&contribution.items)).then_some((cooked, contribution))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Option<Vec<_>>>()?;
+    let (users, contributions): (Vec<_>, Vec<_>) = cooked.into_iter().unzip();
+    let mut ws = base.workspace();
+    ws.skip_session_facts = true;
+    *modules = ModuleSet::new(modules.shared().clone(), users);
+    Some((|| {
+        crate::semantic_passes::assemble_namespaces(
+            &mut ws,
+            &contributions.iter().collect::<Vec<_>>(),
+            aliases,
+        )?;
+        crate::semantic_passes::lower_and_infer(&mut ws, modules.rest())?;
+        Ok(ws)
+    })())
+}
+
+fn defines_operator(items: &[ScopeItem]) -> bool {
+    items.iter().any(|item| match item {
+        ScopeItem::Def { name, kind, .. } => {
+            *kind == DefKind::Callable && name.as_str().starts_with("__op_")
+        }
+        ScopeItem::Module { items, .. } => defines_operator(items),
+        ScopeItem::Use(_) => false,
+    })
 }
 
 fn has_errors(ws: &Workspace) -> bool {

@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 fn skull_emit(file: &str, src: &str) -> std::result::Result<(String, bool), Vec<CompilerError>> {
-    let (emit, _) = skull_emit_full(file, src, |ws, mid, _| skull::module_tests(ws, mid))
+    let (emit, _) = skull_emit_full(file, src, false, |ws, mid, _| skull::module_tests(ws, mid))
         .map_err(EmitFullErr::into_errs)?;
     if let Err(e) = write_allocation_report(None, &emit.allocation_report) {
         log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", file, e);
@@ -44,6 +44,7 @@ struct CliCompileHost<'a> {
     comptime: CliComptime<'a>,
     prepare_timings: Vec<(&'static str, std::time::Duration)>,
     package_tests: Option<PackageTestFns>,
+    reuse_checked_stdlib: bool,
 }
 
 type PackageTestFns = Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>;
@@ -54,6 +55,10 @@ enum CliComptime<'a> {
 }
 
 impl skull::pipeline::CompileHost for CliCompileHost<'_> {
+    fn reuse_checked_stdlib(&self) -> bool {
+        self.reuse_checked_stdlib
+    }
+
     fn aliases(
         &mut self,
         modules: &skull_parser::stdlib::ModuleSet,
@@ -187,6 +192,7 @@ enum CliBuildMode<'a> {
     Source {
         file: &'a str,
         contents: &'a str,
+        reuse_checked_stdlib: bool,
     },
     ProductionProject {
         dir: &'a str,
@@ -222,10 +228,17 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
         CliBuildMode::ProductionProject { dir, .. } | CliBuildMode::PackageTests { dir } => *dir,
     };
     let source = match &mode {
-        CliBuildMode::Source { file, contents } => Some((*file, *contents)),
+        CliBuildMode::Source { file, contents, .. } => Some((*file, *contents)),
         _ => None,
     };
     let production = matches!(&mode, CliBuildMode::ProductionProject { .. });
+    let reuse_checked_stdlib = match &mode {
+        CliBuildMode::Source {
+            reuse_checked_stdlib,
+            ..
+        } => *reuse_checked_stdlib,
+        CliBuildMode::ProductionProject { .. } | CliBuildMode::PackageTests { .. } => false,
+    };
     if production {
         skull::pipeline::warm_stdlib();
     }
@@ -288,6 +301,7 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
         },
         prepare_timings: Vec::new(),
         package_tests: (!production && source.is_none()).then(Vec::new),
+        reuse_checked_stdlib,
     };
     let mut target = skull::pipeline::EmitTarget::SINGLE_SOURCE;
     target.project_root = production.then_some(path);
@@ -317,6 +331,7 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
 fn skull_emit_full(
     file: &str,
     src: &str,
+    reuse_checked_stdlib: bool,
     discover: impl FnOnce(
         &bone_semantic::inference::Workspace,
         bone_semantic::prelude::ModuleId,
@@ -326,6 +341,7 @@ fn skull_emit_full(
     let build = cli_build(CliBuildMode::Source {
         file,
         contents: src,
+        reuse_checked_stdlib,
     })
     .map_err(|failure| match failure {
         CliBuildFailure::Compile { errors, .. } => EmitFullErr::Compile(errors),
@@ -674,7 +690,7 @@ fn skull_build(
         let tests = crate::type_holes::module_tests(ws, mid, sources)?;
         Ok(tests.into_iter().map(|(_, test)| test).collect())
     };
-    let (emit, tests) = match skull_emit_full(file, src, checked_tests) {
+    let (emit, tests) = match skull_emit_full(file, src, true, checked_tests) {
         Ok(v) => v,
         Err(EmitFullErr::Compile(errs)) => {
             if let Some(tests) = all_tests_expect_compile_failure(file, src) {

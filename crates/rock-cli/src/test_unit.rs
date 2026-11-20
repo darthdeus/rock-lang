@@ -106,6 +106,19 @@ fn resolve_build_vars(ws: &mut Workspace, unit: &str) -> Result<(), UnitFailure>
     })
 }
 
+pub(crate) fn check_test_modules(
+    mut modules: skull_parser::stdlib::ModuleSet,
+) -> Result<Workspace, Vec<CompilerError>> {
+    let (ws, errors) = skull::pipeline::check_test_modules(&mut modules, |modules| {
+        crate::bone_backend::aliases_for_modules(modules.iter())
+    })?;
+    if errors.is_empty() {
+        Ok(ws)
+    } else {
+        Err(errors)
+    }
+}
+
 /// Parse and bone-check one isolated test file with the stdlib.
 pub(crate) fn check_file(file: &str, build_vars: bool) -> Result<UnitCheck, UnitFailure> {
     let src = fs_err::read_to_string(file).map_err(|e| UnitFailure::new(e.to_string(), e))?;
@@ -122,7 +135,10 @@ pub(crate) fn check_file(file: &str, build_vars: bool) -> Result<UnitCheck, Unit
         Err(e) => return rejected(&[e]),
     };
     let user_file = user.file;
-    let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
+    let mut ws = match skull::pipeline::with_stdlib([user])
+        .map_err(|error| vec![error])
+        .and_then(check_test_modules)
+    {
         Ok(ws) => ws,
         Err(errs) => return rejected(&errs),
     };

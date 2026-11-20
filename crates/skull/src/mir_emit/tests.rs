@@ -1,20 +1,15 @@
 use super::test_support::emit_incremental;
 use super::*;
 
-static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|file| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str());
-            skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
 fn workspace_of(src: &str, file: &str, stdlib: bool) -> Workspace {
-    let mut modules = if stdlib { STDLIB.clone() } else { Vec::new() };
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    let user = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
+    if stdlib {
+        let mut modules = crate::pipeline::with_stdlib([user]).expect("stdlib parse");
+        crate::pipeline::semantic_pass_reusing_stdlib(&mut modules, &Default::default())
+            .expect("semantic")
+    } else {
+        bone_semantic::semantic_passes::semantic_pass(&mut [user]).expect("semantic")
+    }
 }
 
 fn module_id(ws: &Workspace, file: &str) -> ModuleId {

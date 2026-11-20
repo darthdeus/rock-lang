@@ -139,6 +139,44 @@ fn macro_errors_are_reported_before_expansion_discards_their_source() {
 }
 
 #[test]
+fn repeated_test_checks_reuse_stdlib_only_for_independent_sources() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    for (src, reused) in [
+        ("fn main() { print([1, 2, 3].len()) }", true),
+        (
+            "macro local_answer() { 42 } fn main() { print(local_answer()) }",
+            false,
+        ),
+        (
+            "value Number { x: int }\noperator +(a: Number, b: Number) -> Number { Number { x: a.x + b.x } }\nfn main() { let _ = Number { x: 1 } + Number { x: 2 } }",
+            false,
+        ),
+    ] {
+        let file = Ustr::from("admission.rock");
+        let source = skull_parser::parse_module(src, file).unwrap();
+        let mut warm = pipeline::with_stdlib([source]).unwrap();
+        let mut cold = warm.clone();
+        let (cold, cold_errors) =
+            pipeline::check_modules(&mut cold, |_| Ok(NsAliases::default())).unwrap();
+        let (warm, warm_errors) =
+            pipeline::check_test_modules(&mut warm, |_| Ok(NsAliases::default())).unwrap();
+        assert!(cold_errors.is_empty() && warm_errors.is_empty(), "{src}");
+        let emit = |ws: &Workspace| {
+            pipeline::emit_program(ws, ws.module_ids[&file], EmitTarget::SINGLE_SOURCE)
+                .unwrap()
+                .lua
+        };
+        assert_eq!(emit(&cold), emit(&warm));
+        assert_eq!(
+            warm.reinferred_body_count.load(Relaxed) < cold.reinferred_body_count.load(Relaxed),
+            reused,
+            "{src}",
+        );
+    }
+}
+
+#[test]
 fn tokenizer_failure_stops_before_any_host_phase() {
     let mut host = RecordingHost::default();
     let failure = match pipeline::compile_source(

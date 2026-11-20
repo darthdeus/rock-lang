@@ -17,7 +17,7 @@ fn with_stdlib(src: &str, file: &str) -> ModuleSet {
 }
 
 fn semantic_pass(modules: &mut ModuleSet) -> Result<Workspace, skull_parser::CompilerError> {
-    skull::pipeline::semantic_pass(modules, &Default::default())
+    skull::pipeline::semantic_pass_reusing_stdlib(modules, &Default::default())
 }
 
 fn assert_no_bone_errors(ws: &Workspace) {
