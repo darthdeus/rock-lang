@@ -155,36 +155,10 @@ impl ReachabilityIndex {
         self.arg_paths.get(&key).map_or(&[], |slot| {
             slot.get_or_init(|| {
                 let mut paths = Vec::new();
-                let mut on_path: HashSet<Ustr> = HashSet::new();
-                on_path.insert(key);
-                enumerate_arg_paths(
-                    &self.edges,
-                    key,
-                    "",
-                    0,
-                    false,
-                    &mut on_path,
-                    &mut paths,
-                    &[],
-                    &[],
-                );
+                self.collect_arg_paths(key, &mut Vec::new(), &mut paths);
                 paths
             })
         })
-    }
-
-    /// Visibility is a property of the request site, so it is applied at read
-    /// time to the workspace-wide cache.
-    pub(crate) fn arg_paths_in_scope(
-        &self,
-        ws: &Workspace,
-        frag: &FragmentScope,
-        ty: &str,
-    ) -> Vec<&ReachPath> {
-        self.arg_paths_from(ty)
-            .iter()
-            .filter(|path| path_admitted(ws, frag, path))
-            .collect()
     }
 
     fn reachers_of(&self, want: &[Ustr]) -> Arc<FxHashSet<Ustr>> {
@@ -293,20 +267,42 @@ impl ReachabilityIndex {
     }
 
     fn path_suffix(&self, path: &[(Ustr, usize)], continuing: bool) -> String {
-        path.iter()
-            .enumerate()
-            .map(|(i, (node, edge))| {
-                let edge = &self.edges[node][*edge];
-                if matches!(edge.kind, EdgeKind::Method { .. })
-                    && (continuing || i + 1 < path.len())
-                {
-                    format!("{}()", edge.label)
-                } else {
-                    edge.label.clone()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(".")
+        let mut suffix = String::new();
+        for (i, (node, index)) in path.iter().enumerate() {
+            let edge = &self.edges[node][*index];
+            if i > 0 {
+                suffix.push('.');
+            }
+            suffix.push_str(&edge.label);
+            if edge.method.is_some() && (continuing || i + 1 < path.len()) {
+                suffix.push_str("()");
+            }
+        }
+        suffix
+    }
+
+    fn collect_arg_paths(
+        &self,
+        node: Ustr,
+        path: &mut Vec<(Ustr, usize)>,
+        out: &mut Vec<ReachPath>,
+    ) {
+        let Some(edges) = self.edges.get(&node) else {
+            return;
+        };
+        for (i, edge) in edges.iter().enumerate() {
+            if edge.target == node || path.iter().any(|(from, _)| *from == edge.target) {
+                continue;
+            }
+            path.push((node, i));
+            out.push(self.materialize_path(path));
+            if path.len() < usize::from(ARG_PATH_DEPTH)
+                && !matches!(edge.kind, EdgeKind::Method { takes_args: true })
+            {
+                self.collect_arg_paths(edge.target, path, out);
+            }
+            path.pop();
+        }
     }
 
     fn materialize_path(&self, path: &[(Ustr, usize)]) -> ReachPath {
@@ -410,84 +406,6 @@ impl ReachabilityIndex {
             }
         }
         goal.map(|(_, _, path)| path)
-    }
-}
-
-/// Unguided (records every reachable type) and depth-capped: deeper paths
-/// would explode the store.
-fn enumerate_arg_paths(
-    edges: &HashMap<Ustr, Vec<Edge>>,
-    cur: Ustr,
-    prefix: &str,
-    depth: u16,
-    prefix_call: bool,
-    on_path: &mut HashSet<Ustr>,
-    out: &mut Vec<ReachPath>,
-    method_members: &[MethodRef],
-    field_members: &[FieldRef],
-) {
-    let Some(outs) = edges.get(&cur) else { return };
-    for e in outs {
-        // Simple-path cycle guard: never re-enter a type already on this path.
-        if on_path.contains(&e.target) {
-            continue;
-        }
-        let mut next_methods = method_members.to_vec();
-        if let Some(method) = e.method {
-            next_methods.push(method);
-        }
-        let mut next_fields = field_members.to_vec();
-        if let Some(field) = &e.field {
-            next_fields.push(field.clone());
-        }
-        let leaf_suffix = if prefix.is_empty() {
-            e.label.clone()
-        } else {
-            format!("{prefix}.{}", e.label)
-        };
-        let (is_method, takes_args) = match e.kind {
-            EdgeKind::Field => (false, false),
-            EdgeKind::Method { takes_args } => (true, takes_args),
-        };
-        out.push(ReachPath {
-            suffix: leaf_suffix,
-            final_ty: e.target.to_string(),
-            is_method,
-            takes_args,
-            via_call: prefix_call || is_method,
-            dist: depth + 1,
-            method_members: next_methods.clone(),
-            field_members: next_fields.clone(),
-        });
-        // An args-taking method ends the path.
-        let traversable = matches!(
-            e.kind,
-            EdgeKind::Field | EdgeKind::Method { takes_args: false }
-        );
-        if traversable && depth + 1 < ARG_PATH_DEPTH {
-            let seg_label = match e.kind {
-                EdgeKind::Field => e.label.clone(),
-                EdgeKind::Method { .. } => format!("{}()", e.label),
-            };
-            let descend_prefix = if prefix.is_empty() {
-                seg_label
-            } else {
-                format!("{prefix}.{seg_label}")
-            };
-            on_path.insert(e.target);
-            enumerate_arg_paths(
-                edges,
-                e.target,
-                &descend_prefix,
-                depth + 1,
-                prefix_call || is_method,
-                on_path,
-                out,
-                &next_methods,
-                &next_fields,
-            );
-            on_path.remove(&e.target);
-        }
     }
 }
 

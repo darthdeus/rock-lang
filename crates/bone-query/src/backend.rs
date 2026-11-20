@@ -148,8 +148,7 @@ struct BoneProject {
     lint_cache: bone_lints::IncrementalLintCache,
     reach: Option<crate::reachability::ReachabilityIndex>,
     call_through: Option<CallThroughIndex>,
-    scoped_call_through: HashMap<Ustr, ScopedCallThroughIndex>,
-    visible_bindings: HashMap<Ustr, Vec<crate::query::VisibleBinding>>,
+    completion_scopes: HashMap<Ustr, completion::CompletionScope>,
     /// `unused_fn` is closed-world (a `lib`'s public API has no in-project
     /// caller yet isn't dead), so it runs only for `bin` projects.
     is_bin: bool,
@@ -184,8 +183,7 @@ impl BoneProject {
             lint_cache: Default::default(),
             reach: None,
             call_through: None,
-            scoped_call_through: HashMap::new(),
-            visible_bindings: HashMap::new(),
+            completion_scopes: HashMap::new(),
             is_bin: rock_host::stick::StickConfig::is_bin_at(root),
             root: root.to_path_buf(),
             module_touched: HashMap::new(),
@@ -219,8 +217,7 @@ impl BoneProject {
         self.reach = None;
         self.call_through = None;
         self.freq = None;
-        self.scoped_call_through.clear();
-        self.visible_bindings.clear();
+        self.completion_scopes.clear();
     }
 
     fn reparse_user_file(&self, path: &str, request: &'static str) -> Option<skull_parser::Ast> {
@@ -2842,8 +2839,9 @@ fn recover_missing_module(
     )?;
     users.push(parsed.clone());
     let mut modules = skull_parser::stdlib::ModuleSet::new(warm, users);
-    let checked = bone_semantic::semantic_passes::semantic_pass_without_closure_gate(
-        &mut modules,
+    let checked = bone_semantic::semantic_passes::semantic_pass_into(
+        Workspace::default(),
+        modules.make_owned(),
         &session.aliases,
     )
     .and_then(|ws| {

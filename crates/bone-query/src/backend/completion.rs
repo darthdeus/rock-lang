@@ -2,6 +2,9 @@
 
 use super::*;
 use crate::cursor_context::Record;
+use crate::modules_scope::ResolvedNames;
+use crate::query::{LocalScope, VisibleBinding};
+use crate::reachability::ReachabilityIndex;
 
 struct Request<'a> {
     path: &'a str,
@@ -34,8 +37,44 @@ struct Caches<'a> {
     reach: &'a crate::reachability::ReachabilityIndex,
     freq: &'a HashMap<Ustr, u32>,
     call_through: &'a CallThroughIndex,
-    scoped_call_through: &'a mut HashMap<Ustr, ScopedCallThroughIndex>,
-    visible_bindings: &'a mut HashMap<Ustr, Vec<crate::query::VisibleBinding>>,
+    scopes: &'a mut HashMap<Ustr, CompletionScope>,
+}
+
+pub(super) struct CompletionScope {
+    names: ResolvedNames,
+    visible: Vec<VisibleBinding>,
+    call_through: std::sync::OnceLock<ScopedCallThroughIndex>,
+}
+
+impl CompletionScope {
+    fn build(ws: &Workspace, frag: &bone_core::modules::FragmentScope) -> Self {
+        let mut names = ResolvedNames::build(ws, frag);
+        let mut global_def_files = HashMap::new();
+        for module in &ws.modules {
+            for key in module.global_by_name.keys() {
+                global_def_files.entry(*key).or_insert(module.file);
+            }
+        }
+        let mut tests = FxHashMap::default();
+        let visible = std::mem::take(&mut names.ordinary)
+            .into_iter()
+            .filter_map(|(name, key)| {
+                crate::query::resolve_visible_binding(
+                    ws,
+                    frag,
+                    name,
+                    key,
+                    global_def_files.get(&key).copied(),
+                    &mut tests,
+                )
+            })
+            .collect();
+        Self {
+            names,
+            visible,
+            call_through: Default::default(),
+        }
+    }
 }
 
 impl BoneWorkspace {
@@ -61,8 +100,7 @@ impl BoneWorkspace {
             reach,
             freq,
             call_through,
-            scoped_call_through,
-            visible_bindings,
+            completion_scopes,
             ..
         } = proj;
         let Some(src) = texts.get(path) else {
@@ -90,13 +128,12 @@ impl BoneWorkspace {
             }
             let ws = session.workspace();
             let freq = &*freq.get_or_insert_with(|| build_freq_index(ws));
-            let call_through = &*call_through.get_or_insert_with(|| build_call_through(ws, reach));
+            let call_through = &*call_through.get_or_insert_with(|| CallThroughIndex::build(ws));
             let caches = Caches {
                 reach,
                 freq,
                 call_through,
-                scoped_call_through,
-                visible_bindings,
+                scopes: completion_scopes,
             };
             general_completions(session, fallbacks, caches, &rq, &cx)
         });
@@ -332,13 +369,14 @@ struct GeneralCx<'w> {
     inf: &'w InferenceResult,
     frag: &'w bone_core::modules::FragmentScope,
     enclosing_fn: Option<Ustr>,
+    locals: LocalScope<'w>,
     pattern_pos: bool,
 }
 
 fn general_completions(
     session: &mut Session,
     fallbacks: &FallbackReports,
-    mut caches: Caches,
+    caches: Caches,
     rq: &Request,
     cx: &CompletionCx,
 ) -> Vec<CompletionItem> {
@@ -365,28 +403,41 @@ fn general_completions(
     let Some(inf) = ws.inference(mid) else {
         return Vec::new();
     };
-    let enclosing_fn = ws
-        .modules
-        .get(mid.index())
-        .and_then(|m| match m.body_at(rq.offset) {
-            Some(bone_semantic::hir::BodyOwner::Function(fid)) => Some(m.functions[fid].name),
-            _ => None,
-        });
+    let module = ws.module(mid);
+    let function = match module.body_at(rq.offset) {
+        Some(bone_semantic::hir::BodyOwner::Function(fid)) => Some(&module.functions[fid]),
+        _ => None,
+    };
+    let enclosing_fn = function.map(|f| f.name);
     let g = GeneralCx {
         ws,
         mid,
         inf,
         frag,
         enclosing_fn,
+        locals: LocalScope::at(ws, mid, Some(inf), rq.offset),
         pattern_pos,
     };
 
     let t_cands = bone_core::prelude::Instant::now();
-    let mut cands = scope_candidates(
-        &g,
-        caches.visible_bindings,
-        rq,
+    let fallback_scope = fallback_ws
+        .is_some()
+        .then(|| CompletionScope::build(ws, frag));
+    let scope = fallback_scope.as_ref().unwrap_or_else(|| {
+        caches
+            .scopes
+            .entry(ws.module(mid).file)
+            .or_insert_with(|| CompletionScope::build(ws, frag))
+    });
+    let mut cands = crate::query::completion_with_visible_bindings(
+        ws,
+        ws.module(mid).file,
+        frag,
+        &g.locals,
+        &rq.prefix,
         cx.expr_position || pattern_pos,
+        function.is_some_and(|f| f.is_coroutine),
+        &scope.visible,
     );
     if cx.expr_position {
         push_macro_candidates(session, rq, &mut cands);
@@ -422,9 +473,25 @@ fn general_completions(
     let rank_ms = t_build.elapsed().as_secs_f64() * 1000.0;
 
     let t_reach = bone_core::prelude::Instant::now();
+    let fallback_indexes = fallback_ws
+        .is_some()
+        .then(|| (ReachabilityIndex::build(ws), CallThroughIndex::build(ws)));
+    let (reach, call_through) = fallback_indexes
+        .as_ref()
+        .map_or((caches.reach, caches.call_through), |(reach, calls)| {
+            (reach, calls)
+        });
     if let Some(exp) = expected.as_ref() {
         if !exp.rendered.is_empty() && !pattern_pos {
-            push_reach_paths(&g, caches.reach, rq, &exp.rendered, &mut sink);
+            push_reach_paths(
+                &g,
+                reach,
+                call_through,
+                &scope.names,
+                rq,
+                &exp.rendered,
+                &mut sink,
+            );
         }
     }
     let reach_ms = t_reach.elapsed().as_secs_f64() * 1000.0;
@@ -433,13 +500,23 @@ fn general_completions(
     let mut ct_counts = CtCounts::default();
     // Skipping call-through at the cap can hide a better local-seeded call;
     // narrowing the prefix surfaces it.
-    if cx.expr_position && !pattern_pos && sink.len() < MAX_COMPLETION_ITEMS {
-        ct_counts = push_call_through(
-            &g,
-            &mut caches,
-            rq,
+    if cx.expr_position && !pattern_pos && rq.prefix.len() >= 2 && sink.len() < MAX_COMPLETION_ITEMS
+    {
+        let scoped = scope.call_through.get_or_init(|| {
+            ScopedCallThroughIndex::build(ws, frag, &scope.names, call_through, reach)
+        });
+        ct_counts = call_through_param_completions(
+            ws,
+            &g.locals,
+            &rq.prefix,
+            call_through,
+            frag,
+            &scope.names,
+            scoped,
+            reach,
             !has_expected,
             expected.as_mut(),
+            enclosing_fn.as_deref(),
             &mut sink,
         );
     }
@@ -458,50 +535,6 @@ fn general_completions(
         })
     });
     finish(&g, sink, rq, &import_edits)
-}
-
-fn scope_candidates(
-    g: &GeneralCx,
-    visible_bindings: &mut HashMap<Ustr, Vec<crate::query::VisibleBinding>>,
-    rq: &Request,
-    expr_position: bool,
-) -> Vec<crate::query::CompletionEntry> {
-    let ws = g.ws;
-    let file = ws.module(g.mid).file;
-    let visible = visible_bindings
-        .entry(file)
-        .or_insert_with(|| {
-            let mut global_def_files = HashMap::new();
-            for module in &ws.modules {
-                for key in module.global_by_name.keys() {
-                    global_def_files.entry(*key).or_insert(module.file);
-                }
-            }
-            let mut test_path_cache: FxHashMap<Ustr, bool> = FxHashMap::default();
-            crate::modules_scope::bound_names(ws, g.frag, |_| true)
-                .into_iter()
-                .filter_map(|(name, key)| {
-                    crate::query::resolve_visible_binding(
-                        ws,
-                        g.frag,
-                        name,
-                        key,
-                        global_def_files.get(&key).copied(),
-                        &mut test_path_cache,
-                    )
-                })
-                .collect()
-        })
-        .as_slice();
-    crate::query::completion_with_visible_bindings(
-        ws,
-        g.mid,
-        g.inf,
-        rq.offset,
-        &rq.prefix,
-        expr_position,
-        visible,
-    )
 }
 
 fn push_macro_candidates(
@@ -913,7 +946,9 @@ fn push_coroutine_synths(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &
 
 fn push_reach_paths(
     g: &GeneralCx,
-    reach: &crate::reachability::ReachabilityIndex,
+    reach: &ReachabilityIndex,
+    index: &CallThroughIndex,
+    names: &ResolvedNames,
     rq: &Request,
     expected_types: &[String],
     sink: &mut Sink,
@@ -921,52 +956,45 @@ fn push_reach_paths(
     let (ws, frag) = (g.ws, g.frag);
     let pfx = rq.prefix.as_bytes();
     let show_private = rq.prefix.starts_with('_');
-    let callable_spellings =
-        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable);
-    let type_spellings =
-        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type);
-    let body_owner = ws.module(g.mid).body_at(rq.offset);
-    let body_inference = body_owner.and_then(|owner| g.inf.per_fn.get(&owner));
-    let mut roots: Vec<(String, String, u8)> =
-        crate::query::locals_in_scope(ws, g.mid, g.inf, rq.offset)
-            .into_iter()
-            .map(|(n, _k, ty, ty_id, _decl)| {
-                let ty = ty_id.map_or(ty, |ty_id| {
-                    crate::reachability::type_key_in_body(ws, body_inference, ty_id).to_string()
-                });
-                (n.to_string(), ty, 0)
-            })
-            .collect();
-    roots.extend(
-        crate::modules_scope::visible_globals(ws, frag)
-            .into_iter()
-            .filter(|global| show_private || !global.name.as_str().starts_with('_'))
-            .map(|global| (global.name.to_string(), global.node_ty, 1)),
-    );
-    for (vname, vty, root_kind) in roots {
-        let res = reach.paths_to(&vty, expected_types, REACH_CAP, Some((ws, frag)));
+    let mut globals: Vec<_> = index
+        .globals(names)
+        .filter(|root| {
+            (show_private || !root.name.as_str().starts_with('_'))
+                && !g
+                    .locals
+                    .bindings
+                    .iter()
+                    .any(|local| local.name == root.name)
+        })
+        .collect();
+    globals.sort_by_key(|root| root.name.as_str());
+    let roots = local_roots(ws, &g.locals)
+        .map(|root| (root, 0))
+        .chain(globals.into_iter().map(|root| (root, 1)));
+    for (root, root_kind) in roots {
+        let res = reach.paths_to(
+            root.ty.as_str(),
+            expected_types,
+            REACH_CAP,
+            Some((ws, frag)),
+        );
         for p in res.paths {
             if g.enclosing_fn
                 .is_some_and(|f| reach_suffix_calls(&p.suffix, &f))
             {
                 continue;
             }
-            let Some(suffix) = crate::modules_scope::display_method_suffix_with_names(
-                &p.suffix,
-                &p.method_members,
-                &callable_spellings,
-            ) else {
+            let Some(key) = root.path_text(&p, &names.callables) else {
                 continue;
             };
-            let final_ty =
-                crate::modules_scope::display_type_with_names(ws, &p.final_ty, &type_spellings);
-            let key = format!("{vname}.{suffix}");
             if !pfx.is_empty() && !clean_match(key.as_bytes(), pfx) {
                 continue;
             }
             if !sink.admit(&key) {
                 continue;
             }
+            let final_ty =
+                crate::modules_scope::display_type_with_names(ws, &p.final_ty, &names.types);
             let (type_rank, kind) = if p.is_method { (1, 2) } else { (0, root_kind) };
             let rk = arg_rank_key(type_rank, kind, &key, pfx, p.dist, u8::from(p.is_method), 0);
             sink.push(Cand::new(
@@ -980,37 +1008,6 @@ fn push_reach_paths(
             ));
         }
     }
-}
-
-fn push_call_through(
-    g: &GeneralCx,
-    caches: &mut Caches,
-    rq: &Request,
-    score_leads: bool,
-    expected: Option<&mut ExpectedArg>,
-    sink: &mut Sink,
-) -> CtCounts {
-    let ws = g.ws;
-    let file = ws.module(g.mid).file;
-    let scoped_index = caches
-        .scoped_call_through
-        .entry(file)
-        .or_insert_with(|| build_scoped_call_through(ws, g.frag, caches.call_through));
-    call_through_param_completions(
-        ws,
-        g.mid,
-        g.inf,
-        rq.offset,
-        &rq.prefix,
-        caches.call_through,
-        g.frag,
-        scoped_index,
-        caches.reach,
-        score_leads,
-        expected,
-        g.enclosing_fn.as_deref(),
-        sink,
-    )
 }
 
 fn finish(

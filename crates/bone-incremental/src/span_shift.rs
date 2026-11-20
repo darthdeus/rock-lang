@@ -51,6 +51,14 @@ pub fn shift_module_after_edit(
             iv.stop = sh.off(iv.stop);
         }
         body.node_index_cell = Default::default();
+        if let Some(lexical) = &mut body.lexical_facts {
+            for (span, _, _) in &mut lexical.regions {
+                sh.span(span);
+            }
+            for (_, activation) in lexical.bindings.values_mut() {
+                *activation = sh.off(*activation);
+            }
+        }
 
         // Spans stored inline in HIR nodes, not in the side tables above.
         for (_, b) in body.binding_arena.iter_mut() {

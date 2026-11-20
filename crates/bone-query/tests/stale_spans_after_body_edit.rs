@@ -1,5 +1,6 @@
 //! A body edit that shifts lines in one fn must not leave other fns' navigation spans stale.
 
+use crate::completion::{assert_labels, labels_of};
 use crate::fixture::{PATH, workspace};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
@@ -89,6 +90,30 @@ fn document_highlight_tracks_line_shift_from_other_fn_edit() {
         .collect();
     starts.sort();
     assert_eq!(starts, [(6, 8), (7, 11), (7, 19)]);
+}
+
+#[test]
+fn completion_keeps_lexical_scope_when_an_earlier_body_grows() {
+    let before = "\
+fn alpha() -> int {
+    return 1
+}
+
+fn beta() -> int {
+    let count = 2
+    if true { let inner = count }
+    return count
+}
+";
+    let mut bone = workspace(before);
+    let after = lengthened(before);
+    bone.update(PATH, after.clone());
+    let pos = bone_query::offset_to_position(&after, after.rfind("return count").unwrap() + 7);
+    assert_labels(
+        "relocated block",
+        &labels_of(&bone.completion(PATH, pos)),
+        &["count", "!inner"],
+    );
 }
 
 // Navigation at every offset after an incremental edit must match a fresh check.

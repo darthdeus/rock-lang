@@ -1,12 +1,14 @@
 //! Candidates for contextual completion and whole-call synthesis.
 
+use crate::modules_scope::{ResolvedNames, Spellings};
+use crate::query::{LocalScope, VariantShape};
+use crate::reachability::{MethodRef, ReachPath, ReachabilityIndex};
+use bone_core::modules::FragmentScope;
 use std::collections::HashMap;
 
 use bone_core::type_equiv::TyRef;
 use bone_incremental::session::Session;
-use bone_semantic::prelude::{
-    Idx, InferenceResult, ModuleId, TyId, Workspace, is_field_ref_former, is_intrinsic_key,
-};
+use bone_semantic::prelude::{ModuleId, TyId, Workspace, is_field_ref_former, is_intrinsic_key};
 use ustr::Ustr;
 
 use crate::backend::{
@@ -218,14 +220,6 @@ pub(crate) struct CtCounts {
     pub(crate) survivors: usize,
 }
 
-/// Complete a prefix such as `drawr` to a call such as `draw(rect)`.
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum ArgPayload {
-    None,
-    Tuple,
-    Record,
-}
-
 pub(crate) fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
     let mut qi = k.min(q.len());
     if qi < q.len() && q[qi] == b'(' {
@@ -242,278 +236,221 @@ pub(crate) fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
     qi == q.len()
 }
 
-pub(crate) struct CtFn {
-    pub(crate) key: ustr::Ustr,
-    pub(crate) mid: ModuleId,
-    pub(crate) fid: Idx<bone_semantic::hir::Function>,
-    pub(crate) first_param_ty: String,
-    pub(crate) multiparam: bool,
+struct CtFn {
+    member: MethodRef,
+    first_param_ty: Ustr,
+    multiparam: bool,
 }
 
-#[derive(Clone)]
-pub(crate) struct ScopedCtFn {
+struct ScopedCtFn {
     index: usize,
     name: Ustr,
     name_lc: String,
 }
 
-#[derive(Clone)]
-pub(crate) struct CtArg {
-    pub(crate) text: String,
-    /// Canonical global or nominal type root, when text starts at one. v1
-    /// requests rewrite this root through the fragment's visible spellings.
-    pub(crate) root_key: Option<ustr::Ustr>,
-    pub(crate) reach_suffix: Option<String>,
-    pub(crate) reach_is_method: bool,
-    pub(crate) payload: ArgPayload,
-    pub(crate) method: bool,
-    pub(crate) method_members: Vec<crate::reachability::MethodRef>,
-    pub(crate) field_members: Vec<crate::reachability::FieldRef>,
+struct CtArg {
+    root: Option<Ustr>,
+    text: String,
+    payload: VariantShape,
+    method: bool,
 }
 
-impl CtArg {
-    pub(crate) fn direct(root_key: Option<Ustr>, text: String, payload: ArgPayload) -> Self {
+#[derive(Clone, Copy)]
+pub(crate) struct ValueRoot {
+    pub name: Ustr,
+    pub ty: Ustr,
+}
+
+impl ValueRoot {
+    fn direct(self) -> CtArg {
         CtArg {
-            text,
-            root_key,
-            reach_suffix: None,
-            reach_is_method: false,
-            payload,
+            root: Some(self.name),
+            text: self.name.to_string(),
+            payload: VariantShape::Unit,
             method: false,
-            method_members: Vec::new(),
-            field_members: Vec::new(),
         }
     }
 
-    pub(crate) fn reach(
-        root_key: Option<Ustr>,
-        root: &str,
-        p: &crate::reachability::ReachPath,
-    ) -> Self {
-        let text = if p.is_method {
-            format!("{root}.{}()", p.suffix)
-        } else {
-            format!("{root}.{}", p.suffix)
-        };
-        CtArg {
-            text,
-            root_key,
-            reach_suffix: Some(p.suffix.clone()),
-            reach_is_method: p.is_method,
-            payload: ArgPayload::None,
-            method: p.via_call,
-            method_members: p.method_members.clone(),
-            field_members: p.field_members.clone(),
-        }
+    fn arguments<'a>(
+        self,
+        reach: &'a ReachabilityIndex,
+        ws: &'a Workspace,
+        frag: &'a FragmentScope,
+        names: &'a Spellings,
+    ) -> impl Iterator<Item = (Ustr, CtArg)> + 'a {
+        reach
+            .arg_paths_from(self.ty.as_str())
+            .iter()
+            .filter_map(move |path| {
+                if path.is_method && path.takes_args
+                    || !crate::reachability::path_admitted(ws, frag, path)
+                {
+                    return None;
+                }
+                let text = self.path_text(path, names)?;
+                Some((
+                    Ustr::from(&path.final_ty),
+                    CtArg {
+                        root: Some(self.name),
+                        text: if path.is_method {
+                            format!("{text}()")
+                        } else {
+                            text
+                        },
+                        payload: VariantShape::Unit,
+                        method: path.via_call,
+                    },
+                ))
+            })
     }
+
+    pub(crate) fn path_text(self, path: &ReachPath, names: &Spellings) -> Option<String> {
+        let suffix = crate::modules_scope::display_method_suffix_with_names(
+            &path.suffix,
+            &path.method_members,
+            names,
+        )?;
+        Some(format!("{}.{suffix}", self.name))
+    }
+}
+
+pub(crate) fn local_roots<'a>(
+    ws: &'a Workspace,
+    scope: &'a LocalScope<'_>,
+) -> impl Iterator<Item = ValueRoot> + 'a {
+    scope.bindings.iter().filter_map(|binding| {
+        Some(ValueRoot {
+            name: binding.name,
+            ty: crate::reachability::type_key_in_body(ws, scope.inference, binding.ty?),
+        })
+    })
 }
 
 pub(crate) struct CallThroughIndex {
-    pub(crate) fns: Vec<CtFn>,
-    pub(crate) global_type_args: HashMap<String, Vec<CtArg>>,
+    fns: Vec<CtFn>,
+    globals: Vec<ValueRoot>,
 }
 
-pub(crate) fn build_call_through(
-    ws: &Workspace,
-    reach: &crate::reachability::ReachabilityIndex,
-) -> CallThroughIndex {
-    let mut fns: Vec<CtFn> = Vec::new();
-    for m in ws.modules.iter() {
-        for (fid, f) in m.functions.iter() {
-            if f.name.as_str().starts_with("__") {
-                continue;
-            }
-            let Some(p0) = f.param_decls.first() else {
-                continue;
-            };
-            fns.push(CtFn {
-                key: f.name,
-                mid: m.id,
-                fid,
-                first_param_ty: crate::reachability::type_key(ws, p0.ty).to_string(),
-                multiparam: f.param_decls.len() > 1,
-            });
-        }
-    }
-    let mut groots: Vec<(ustr::Ustr, String, String)> = Vec::new();
-    for m in ws.modules.iter() {
-        for (gname, gidx) in m.global_by_name.iter() {
-            groots.push((
-                *gname,
-                gname.to_string(),
-                crate::reachability::type_key(ws, m.globals[*gidx].ty).to_string(),
-            ));
-        }
-    }
-    let needed: std::collections::HashSet<&str> =
-        fns.iter().map(|c| c.first_param_ty.as_str()).collect();
-    let mut global_type_args: HashMap<String, Vec<CtArg>> = HashMap::new();
-    for t in &needed {
-        let mut vals: Vec<CtArg> = groots
+impl CallThroughIndex {
+    pub(crate) fn build(ws: &Workspace) -> Self {
+        let fns = ws
+            .modules
             .iter()
-            .filter(|(_, _, rt)| rt == t)
-            .map(|(key, n, _)| CtArg::direct(Some(*key), n.clone(), ArgPayload::None))
+            .flat_map(|m| {
+                m.functions.iter().filter_map(|(fid, f)| {
+                    let param = f.param_decls.first()?;
+                    (!f.name.as_str().starts_with("__")).then(|| CtFn {
+                        member: (f.name, m.id, fid),
+                        first_param_ty: crate::reachability::type_key(ws, param.ty),
+                        multiparam: f.param_decls.len() > 1,
+                    })
+                })
+            })
             .collect();
-        for (vname, shape) in crate::query::enum_variants_with_shape(ws, t) {
-            let payload = match shape {
-                crate::query::VariantShape::Unit => ArgPayload::None,
-                crate::query::VariantShape::Tuple => ArgPayload::Tuple,
-                crate::query::VariantShape::Record => ArgPayload::Record,
-            };
-            vals.push(CtArg::direct(
-                Some(Ustr::from(t)),
-                format!("{t}::{vname}"),
-                payload,
-            ));
-        }
-        global_type_args.insert(t.to_string(), vals);
-    }
-    for (rkey, rn, rt) in &groots {
-        for p in reach.arg_paths_from(rt) {
-            if p.is_method && p.takes_args {
-                continue; // can't park a snippet hole inside the arg
-            }
-            let Some(vals) = global_type_args.get_mut(p.final_ty.as_str()) else {
-                continue; // not a first-param type any fn needs
-            };
-            vals.push(CtArg::reach(Some(*rkey), rn, p));
-        }
-    }
-    CallThroughIndex {
-        fns,
-        global_type_args,
-    }
-}
-
-/// Namespace spellings and member visibility are scope facts: build once per
-/// fragment after an interface or scope edit.
-pub(crate) struct ScopedCallThroughIndex {
-    pub(crate) fns_by_first_char: HashMap<u8, Vec<ScopedCtFn>>,
-    pub(crate) global_type_args: HashMap<String, Vec<CtArg>>,
-    pub(crate) callable_spellings: HashMap<Ustr, Vec<Ustr>>,
-}
-
-pub(crate) fn build_scoped_call_through(
-    ws: &Workspace,
-    frag: &bone_core::modules::FragmentScope,
-    index: &CallThroughIndex,
-) -> ScopedCallThroughIndex {
-    let globals =
-        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Global);
-    let types = crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type);
-    let callable_spellings =
-        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable);
-    let global_type_args = index
-        .global_type_args
-        .iter()
-        .map(|(ty, args)| {
-            (
-                ty.clone(),
-                global_args_in_scope(args, &globals, &types, &callable_spellings),
-            )
-        })
-        .collect();
-    let mut fns_by_first_char: HashMap<u8, Vec<ScopedCtFn>> = HashMap::new();
-    for (index, cf) in index.fns.iter().enumerate() {
-        if !crate::modules_scope::callable_member_admitted(ws, frag, cf.key, cf.mid, cf.fid) {
-            continue;
-        }
-        let Some(names) = callable_spellings.get(&cf.key) else {
-            continue;
-        };
-        for &name in names {
-            let name_lc = name.as_str().to_lowercase();
-            let Some(&first) = name_lc.as_bytes().first() else {
-                continue;
-            };
-            fns_by_first_char
-                .entry(first)
-                .or_default()
-                .push(ScopedCtFn {
-                    index,
+        let globals = ws
+            .modules
+            .iter()
+            .flat_map(|m| {
+                m.global_by_name.iter().map(|(&name, &idx)| ValueRoot {
                     name,
-                    name_lc,
-                });
-        }
+                    ty: crate::reachability::type_key(ws, m.globals[idx].ty),
+                })
+            })
+            .collect();
+        Self { fns, globals }
     }
-    ScopedCallThroughIndex {
-        fns_by_first_char,
-        global_type_args,
-        callable_spellings,
+
+    pub(crate) fn globals<'a>(
+        &'a self,
+        names: &'a ResolvedNames,
+    ) -> impl Iterator<Item = ValueRoot> + 'a {
+        self.globals.iter().flat_map(|root| {
+            names
+                .globals
+                .get(&root.name)
+                .into_iter()
+                .flatten()
+                .map(|&name| ValueRoot { name, ty: root.ty })
+        })
     }
 }
 
-fn global_args_in_scope(
-    args: &[CtArg],
-    globals: &HashMap<Ustr, Vec<Ustr>>,
-    types: &HashMap<Ustr, Vec<Ustr>>,
-    callable_names: &HashMap<Ustr, Vec<Ustr>>,
-) -> Vec<CtArg> {
-    let mut out = Vec::new();
-    for arg in args {
-        let Some(key) = arg.root_key else {
-            out.push(arg.clone());
-            continue;
-        };
-        let Some(names) = globals.get(&key).or_else(|| types.get(&key)) else {
-            continue;
-        };
-        for name in names {
-            let Some(suffix) = arg.text.strip_prefix(key.as_str()) else {
+pub(crate) struct ScopedCallThroughIndex {
+    fns_by_first_char: HashMap<u8, Vec<ScopedCtFn>>,
+    global_type_args: HashMap<Ustr, Vec<CtArg>>,
+}
+
+impl ScopedCallThroughIndex {
+    pub(crate) fn build(
+        ws: &Workspace,
+        frag: &FragmentScope,
+        names: &ResolvedNames,
+        index: &CallThroughIndex,
+        reach: &ReachabilityIndex,
+    ) -> Self {
+        let mut fns_by_first_char: HashMap<u8, Vec<ScopedCtFn>> = HashMap::new();
+        let mut global_type_args: HashMap<Ustr, Vec<CtArg>> = HashMap::new();
+        for (index, cf) in index.fns.iter().enumerate() {
+            let (key, mid, fid) = cf.member;
+            let Some(spellings) = names.callables.get(&key) else {
                 continue;
             };
-            let mut rendered = arg.clone();
-            rendered.text = format!("{name}{suffix}");
-            if let Some(reach_suffix) = &arg.reach_suffix {
-                let Some(reach_suffix) = crate::modules_scope::display_method_suffix_with_names(
-                    reach_suffix,
-                    &arg.method_members,
-                    callable_names,
-                ) else {
-                    continue;
-                };
-                rendered.text = if arg.reach_is_method {
-                    format!("{name}.{reach_suffix}()")
-                } else {
-                    format!("{name}.{reach_suffix}")
-                };
+            if !crate::modules_scope::callable_member_admitted(ws, frag, key, mid, fid) {
+                continue;
             }
-            out.push(rendered);
+            global_type_args.entry(cf.first_param_ty).or_default();
+            for &name in spellings {
+                let name_lc = name.as_str().to_lowercase();
+                if let Some(&first) = name_lc.as_bytes().first() {
+                    fns_by_first_char
+                        .entry(first)
+                        .or_default()
+                        .push(ScopedCtFn {
+                            index,
+                            name,
+                            name_lc,
+                        });
+                }
+            }
+        }
+        for root in index.globals(names) {
+            if let Some(args) = global_type_args.get_mut(&root.ty) {
+                args.push(root.direct());
+            }
+        }
+        for (&ty, args) in &mut global_type_args {
+            if let Some(spellings) = names.types.get(&ty) {
+                for (variant, shape) in crate::query::enum_variants_with_shape(ws, ty.as_str()) {
+                    args.extend(spellings.iter().map(|&name| CtArg {
+                        root: None,
+                        text: format!("{name}::{variant}"),
+                        payload: shape,
+                        method: false,
+                    }));
+                }
+            }
+        }
+        for root in index.globals(names) {
+            for (ty, arg) in root.arguments(reach, ws, frag, &names.callables) {
+                if let Some(args) = global_type_args.get_mut(&ty) {
+                    args.push(arg);
+                }
+            }
+        }
+        Self {
+            fns_by_first_char,
+            global_type_args,
         }
     }
-    out
-}
-
-fn local_args_in_scope(callable_names: &HashMap<Ustr, Vec<Ustr>>, args: Vec<CtArg>) -> Vec<CtArg> {
-    args.into_iter()
-        .filter_map(|mut arg| {
-            let Some(reach_suffix) = &arg.reach_suffix else {
-                return Some(arg);
-            };
-            let reach_suffix = crate::modules_scope::display_method_suffix_with_names(
-                reach_suffix,
-                &arg.method_members,
-                callable_names,
-            )?;
-            let root = arg.text.split('.').next()?;
-            arg.text = if arg.reach_is_method {
-                format!("{root}.{reach_suffix}()")
-            } else {
-                format!("{root}.{reach_suffix}")
-            };
-            Some(arg)
-        })
-        .collect()
 }
 
 pub(crate) fn call_through_param_completions(
     ws: &Workspace,
-    mid: ModuleId,
-    inf: &InferenceResult,
-    offset: usize,
+    locals: &LocalScope<'_>,
     prefix: &str,
     index: &CallThroughIndex,
-    frag: &bone_core::modules::FragmentScope,
+    frag: &FragmentScope,
+    names: &ResolvedNames,
     scoped_index: &ScopedCallThroughIndex,
     reach: &crate::reachability::ReachabilityIndex,
     score_leads: bool,
@@ -527,103 +464,62 @@ pub(crate) fn call_through_param_completions(
         // One char only completes the fn name's first letter.
         return counts;
     }
-    let scoped_fns = scoped_index
-        .fns_by_first_char
-        .get(&q[0])
-        .cloned()
-        .unwrap_or_default();
-    let global_type_args = &scoped_index.global_type_args;
-    let callable_spellings = &scoped_index.callable_spellings;
-    let owner = ws.module(mid).body_at(offset);
-    let body_inference = owner.and_then(|owner| inf.per_fn.get(&owner));
-    let locals: Vec<(String, String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
-        .into_iter()
-        .map(|(n, _k, ty, ty_id, _decl)| {
-            let node_ty = ty_id.map_or_else(
-                || ty.clone(),
-                |ty_id| {
-                    crate::reachability::type_key_in_body(ws, body_inference, ty_id).to_string()
-                },
-            );
-            (n.to_string(), ty, node_ty)
-        })
-        .collect();
-
-    let mut passing: Vec<(usize, usize)> = Vec::new(); // (fn index, k)
-    // Fns whose name fully covers the query: eligible for unique-arg autofill below.
-    let mut committed: Vec<usize> = Vec::new();
-
-    let mut local_args: HashMap<String, Vec<CtArg>> = HashMap::new();
-    for (ln, _lt, node_ty) in &locals {
-        local_args
-            .entry(node_ty.clone())
-            .or_default()
-            .push(CtArg::direct(None, ln.clone(), ArgPayload::None));
-        let paths = reach.arg_paths_in_scope(ws, frag, node_ty);
-        for p in paths {
-            if p.is_method && p.takes_args {
-                continue;
-            }
-            local_args
-                .entry(p.final_ty.clone())
-                .or_default()
-                .push(CtArg::reach(None, ln, p));
+    let Some(scoped_fns) = scoped_index.fns_by_first_char.get(&q[0]) else {
+        return counts;
+    };
+    let shadowed = |name| locals.get(name).is_some();
+    let mut local_args: HashMap<Ustr, Vec<CtArg>> = HashMap::new();
+    for root in local_roots(ws, locals) {
+        local_args.entry(root.ty).or_default().push(root.direct());
+        for (ty, arg) in root.arguments(reach, ws, frag, &names.callables) {
+            local_args.entry(ty).or_default().push(arg);
         }
     }
-    for args in local_args.values_mut() {
-        let owned = std::mem::take(args);
-        *args = local_args_in_scope(callable_spellings, owned);
-    }
 
+    let mut match_memo: HashMap<_, Vec<(&CtArg, Vec<i32>, i32, bool)>> = HashMap::new();
+    let mut prefix_scores = Vec::new();
+    let mut cands = Vec::new();
+    let mut committed = Vec::new();
     for (si, scoped) in scoped_fns.iter().enumerate() {
         let cf = &index.fns[scoped.index];
-        // Never autofill a recursive call to the fn being defined.
-        if enclosing_fn == Some(cf.key.as_str()) {
+        if enclosing_fn == Some(cf.member.0.as_str()) || shadowed(scoped.name) {
             continue;
         }
         let k = prefix_subseq_len(q, &scoped.name_lc);
         if !clean_match(scoped.name_lc.as_bytes(), &q[..k.min(q.len())]) {
             continue;
         }
-        let local_arg_matches = || {
-            local_args
-                .get(cf.first_param_ty.as_str())
-                .is_some_and(|args| args.iter().any(|a| arg_matches_residual(q, k, &a.text)))
-        };
+        let t = cf.first_param_ty;
+        let local = local_args.get(&t).map_or(&[][..], Vec::as_slice);
         if k == q.len() {
-            committed.push(si);
-        } else if k >= q.len().div_ceil(2) {
-            counts.fns += 1;
-            passing.push((si, k));
-        } else if local_arg_matches() {
-            // Relaxed noise guard: the residual matches a local arg of its param type
-            // (`gmob` -> `give(mob)`).
-            counts.fns += 1;
-            passing.push((si, k));
-        }
-    }
-
-    let empty: Vec<CtArg> = Vec::new();
-    // Per group: (arg, suffix_scores, path_penalty, local).
-    let mut match_memo: HashMap<(&str, usize), Vec<(&CtArg, Vec<i32>, i32, bool)>> = HashMap::new();
-    let mut prefix_scores: Vec<i32> = Vec::new(); // reused across fns
-
-    let mut cands: Vec<(i32, usize, &CtArg, u8)> = Vec::new();
-    for (si, k) in passing {
-        let cf = &index.fns[scoped_fns[si].index];
-        let t = cf.first_param_ty.as_str();
-        let group = match_memo.entry((t, k)).or_insert_with(|| {
-            let gargs = global_type_args.get(t).unwrap_or(&empty);
-            let largs = local_args.get(t).unwrap_or(&empty);
-            let mut v: Vec<(&CtArg, Vec<i32>, i32, bool)> = Vec::new();
-            for (a, local) in gargs
-                .iter()
-                .map(|a| (a, false))
-                .chain(largs.iter().map(|a| (a, true)))
+            let mut confident = local.iter().filter(|a| !a.method);
+            if let Some(a) = confident.next()
+                && confident.next().is_none()
             {
-                if !arg_admitted(ws, frag, a) {
-                    continue;
-                }
+                let score = fuzzy_score(scoped.name.as_bytes(), q) + 5000;
+                committed.push((score, si, a, 0));
+            }
+            continue;
+        }
+        if k < q.len().div_ceil(2) && !local.iter().any(|a| arg_matches_residual(q, k, &a.text)) {
+            continue;
+        }
+        counts.fns += 1;
+        let group = match_memo.entry((t, k)).or_insert_with(|| {
+            let global = scoped_index
+                .global_type_args
+                .get(&t)
+                .into_iter()
+                .flatten()
+                .filter(|arg| !arg.root.is_some_and(shadowed))
+                .map(|arg| (arg, false));
+            let local = local_args
+                .get(&t)
+                .into_iter()
+                .flatten()
+                .map(|arg| (arg, true));
+            let mut v = Vec::new();
+            for (a, local) in global.chain(local) {
                 counts.arg_iters += 1;
                 if arg_matches_residual(q, k, &a.text) {
                     let mut suffix = Vec::new();
@@ -653,18 +549,7 @@ pub(crate) fn call_through_param_completions(
             cands.push((score, si, a, if local { 1 } else { 4 }));
         }
     }
-    for si in committed {
-        let cf = &index.fns[scoped_fns[si].index];
-        let t = cf.first_param_ty.as_str();
-        let confident: Vec<&CtArg> = local_args
-            .get(t)
-            .map(|v| v.iter().filter(|a| !a.method).collect())
-            .unwrap_or_default();
-        if let [a] = confident.as_slice() {
-            let score = fuzzy_score(scoped_fns[si].name.as_bytes(), q) + 5000;
-            cands.push((score, si, a, 0));
-        }
-    }
+    cands.extend(committed);
     if cands.len() > CALL_THROUGH_CAP {
         cands.select_nth_unstable_by(CALL_THROUGH_CAP, |x, y| {
             y.0.cmp(&x.0)
@@ -679,7 +564,7 @@ pub(crate) fn call_through_param_completions(
         let fname = scoped.name;
         let type_rank = match expected.as_deref_mut() {
             Some(exp) if type_rank < 4 => {
-                if exp.accepts_fn_returning(ws, cf.key.as_str()) {
+                if exp.accepts_fn_returning(ws, cf.member.0.as_str()) {
                     type_rank
                 } else {
                     4
@@ -781,12 +666,6 @@ pub(crate) fn fn_is_coroutine_in_scope(
 ) -> bool {
     let n = Ustr::from(name);
     crate::modules_scope::admitted_overloads(ws, frag, n).any(|(_, _, f)| f.is_coroutine)
-}
-
-fn arg_admitted(ws: &Workspace, frag: &bone_core::modules::FragmentScope, arg: &CtArg) -> bool {
-    arg.method_members.iter().all(|(key, mid, fid)| {
-        crate::modules_scope::callable_member_admitted(ws, frag, *key, *mid, *fid)
-    }) && crate::reachability::fields_admitted(ws, frag, &arg.field_members)
 }
 
 /// The host's `Wait` yield type is an enum, so this probes structs and enums.

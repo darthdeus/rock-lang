@@ -1248,70 +1248,99 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
     }
 }
 
-pub(crate) fn locals_in_scope(
-    ws: &Workspace,
-    mid: ModuleId,
-    inf: &InferenceResult,
-    offset: usize,
-) -> Vec<(Ustr, hir::BindingKind, String, Option<TyId>, usize)> {
-    let mut out = Vec::new();
-    let Some(module) = ws.modules.get(mid.index()) else {
-        return out;
-    };
-    let Some(owner) = module.body_at(offset) else {
-        return out;
-    };
-    let Some(body) = module.bodies.get(&owner) else {
-        return out;
-    };
-    let bi = inf.per_fn.get(&owner);
+pub(crate) struct LocalBinding {
+    pub name: Ustr,
+    pub kind: hir::BindingKind,
+    pub ty: Option<TyId>,
+    declared_ty: Option<TyId>,
+    pub decl_end: usize,
+}
 
-    // A binding is invisible inside its initializer, where an outer name may still resolve.
-    let mut init_end: std::collections::HashMap<Idx<hir::BindingInfo>, usize> = Default::default();
-    for (_, stmt) in body.statement_arena.iter() {
-        let (leaves, value) = match stmt {
-            hir::Statement::Let { pattern, value, .. } => (body.pattern_bindings(*pattern), *value),
-            _ => continue,
+#[derive(Default)]
+pub(crate) struct LocalScope<'w> {
+    pub inference: Option<&'w inference::BodyInference>,
+    pub bindings: Vec<LocalBinding>,
+}
+
+impl<'w> LocalScope<'w> {
+    pub(crate) fn at(
+        ws: &Workspace,
+        mid: ModuleId,
+        inf: Option<&'w InferenceResult>,
+        offset: usize,
+    ) -> Self {
+        let module = ws.module(mid);
+        let Some(owner) = module.body_at(offset) else {
+            return Self::default();
         };
-        if let Some(end) = body.expr_spans.get(value).map(|s| s.offset_range().1) {
-            for b in leaves {
-                init_end.insert(b, end);
+        let Some(body) = module.bodies.get(&owner) else {
+            return Self::default();
+        };
+        let Some(facts) = &body.lexical_facts else {
+            return Self::default();
+        };
+        let Some(&(_, scope, _)) = facts
+            .regions
+            .iter()
+            .filter(|(span, _, include_end)| {
+                let (start, end) = span.offset_range();
+                span.file == module.file
+                    && start <= offset
+                    && (offset < end || *include_end && offset == end)
+            })
+            .min_by_key(|(span, scope, _)| {
+                let (start, end) = span.offset_range();
+                (end - start, std::cmp::Reverse(scope.into_raw().into_u32()))
+            })
+        else {
+            return Self::default();
+        };
+
+        let mut ancestors = vec![scope];
+        while let Some(parent) = body.scope_arena[*ancestors.last().unwrap()].parent {
+            ancestors.push(parent);
+        }
+        let mut active = FxHashMap::default();
+        for (idx, &(scope, activation)) in facts.bindings.iter() {
+            if activation <= offset
+                && let Some(depth) = ancestors.iter().position(|&s| s == scope)
+            {
+                let priority = (std::cmp::Reverse(depth), idx);
+                let name = body.binding_arena[idx].name;
+                let best = active.entry(name).or_insert(priority);
+                *best = (*best).max(priority);
             }
+        }
+        let bi = inf.and_then(|inf| inf.per_fn.get(&owner));
+        let mut bindings: Vec<_> = active.into_values().map(|(_, idx)| idx).collect();
+        bindings.sort_unstable();
+        Self {
+            inference: bi,
+            bindings: bindings
+                .into_iter()
+                .map(|idx| {
+                    let binding = &body.binding_arena[idx];
+                    LocalBinding {
+                        name: binding.name,
+                        kind: binding.kind,
+                        ty: bi.and_then(|bi| bi.binding_types.get(idx).copied()),
+                        declared_ty: binding.declared_ty,
+                        decl_end: body.binding_spans[idx].offset_range().1,
+                    }
+                })
+                .collect(),
         }
     }
 
-    for (b_idx, binding) in body.binding_arena.iter() {
-        let in_scope = match binding.kind {
-            hir::BindingKind::Param => true,
-            hir::BindingKind::Let | hir::BindingKind::Static | hir::BindingKind::Fn => {
-                match init_end.get(&b_idx) {
-                    Some(end) => *end <= offset,
-                    None => body
-                        .binding_spans
-                        .get(b_idx)
-                        .is_some_and(|s| s.offset_range().1 <= offset),
-                }
-            }
-        };
-        if !in_scope {
-            continue;
-        }
-
-        // A `TyId::Local` here indexes the cursor body's arena, which an
-        // `ExpectedArg` scratch Gamma clones, so it stays resolvable there.
-        let ty_id = bi.and_then(|bi| bi.binding_types.get(b_idx).copied());
-        let ty = match (bi, ty_id) {
-            (Some(bi), Some(t)) => ws.render(Some(bi), t),
-            _ => String::new(),
-        };
-        let decl_end = body
-            .binding_spans
-            .get(b_idx)
-            .map_or(0, |s| s.offset_range().1);
-        out.push((binding.name, binding.kind, ty, ty_id, decl_end));
+    pub(crate) fn get(&self, name: Ustr) -> Option<&LocalBinding> {
+        self.bindings.iter().find(|binding| binding.name == name)
     }
 
-    out
+    pub(crate) fn render(&self, ws: &Workspace, binding: &LocalBinding) -> String {
+        binding
+            .ty
+            .map_or_else(String::new, |ty| ws.render(self.inference, ty))
+    }
 }
 
 /// A substituted field type may lack a TyId.
@@ -1446,24 +1475,17 @@ fn binding_or_global_ty<'a>(
     head: &str,
 ) -> Option<TyRef<'a>> {
     let module = ws.modules.get(mid.index())?;
-    let local = module.body_at(offset).and_then(|owner| {
-        let body = module.bodies.get(&owner)?;
-        let b = find_binding_by_name(body, head, offset)?;
-        let bi = ws.inference(mid).and_then(|i| i.per_fn.get(&owner));
-        let inferred = bi.and_then(|bi| bi.binding_types.get(b).copied());
-        // A `let` annotation is `Local` to the body's lowered types, which seed
-        // its inference arena.
-        let ty = inferred.or(body.binding_arena[b].declared_ty)?;
-        Some(TyRef::new(bi, ty))
-    });
-    local.or_else(|| {
-        let frag = crate::modules_scope::fragment(ws, module.file)?;
-        let key = bone_semantic::lower::resolve::resolve_bare(ws, frag, Ustr::from(head))
-            .ok()?
-            .key;
-        let ty = *ws.globals_by_name.get(&key)?;
-        Some(TyRef::of_static(ty))
-    })
+    let locals = LocalScope::at(ws, mid, ws.inference(mid), offset);
+    let head = Ustr::from(head);
+    if let Some(binding) = locals.get(head) {
+        let ty = binding.ty.or(binding.declared_ty)?;
+        return Some(TyRef::new(locals.inference, ty));
+    }
+    let frag = crate::modules_scope::fragment(ws, module.file)?;
+    let key = bone_semantic::lower::resolve::resolve_bare(ws, frag, head)
+        .ok()?
+        .key;
+    Some(TyRef::of_static(*ws.globals_by_name.get(&key)?))
 }
 
 fn member_ty<'a>(ws: &Workspace, recv: TyRef<'a>, seg: &str) -> Option<TyRef<'a>> {
@@ -1538,39 +1560,9 @@ pub(crate) fn binding_ty_by_name(
     offset: usize,
     name: &str,
 ) -> Option<TyId> {
-    let module = ws.modules.get(mid.index())?;
-    let owner = module.body_at(offset)?;
-    let body = module.bodies.get(&owner)?;
-    let bi = inf.per_fn.get(&owner)?;
-    let b = find_binding_by_name(body, name, offset)?;
-    bi.binding_types.get(b).copied()
-}
-
-fn find_binding_by_name(body: &Body, head: &str, offset: usize) -> Option<Idx<hir::BindingInfo>> {
-    let mut best: Option<(usize, Idx<hir::BindingInfo>)> = None;
-    for (idx, b) in body.binding_arena.iter() {
-        if b.name.as_str() != head {
-            continue;
-        }
-        let in_scope = match b.kind {
-            hir::BindingKind::Param => true,
-            hir::BindingKind::Let | hir::BindingKind::Static | hir::BindingKind::Fn => body
-                .binding_spans
-                .get(idx)
-                .is_some_and(|s| s.offset_range().1 <= offset),
-        };
-        if !in_scope {
-            continue;
-        }
-        let pos = body
-            .binding_spans
-            .get(idx)
-            .map_or(0, |s| s.offset_range().0);
-        if best.map_or(true, |(bp, _)| pos >= bp) {
-            best = Some((pos, idx));
-        }
-    }
-    best.map(|(_, idx)| idx)
+    LocalScope::at(ws, mid, Some(inf), offset)
+        .get(Ustr::from(name))?
+        .ty
 }
 
 /// One-segment record paths stay with HIR, which can distinguish a struct
@@ -1919,14 +1911,8 @@ pub(crate) fn struct_fields_fill(
 
     // Shorthand only when the innermost binding of that name also matches
     // the field's type.
-    let scope = locals_in_scope(ws, mid, inf, offset);
-    let innermost_ty = |fname: Ustr| -> Option<TyId> {
-        scope
-            .iter()
-            .filter(|(name, ..)| *name == fname)
-            .max_by_key(|(.., end)| *end)
-            .and_then(|(_, _, _, ty, _)| *ty)
-    };
+    let scope = LocalScope::at(ws, mid, Some(inf), offset);
+    let innermost_ty = |name| scope.get(name).and_then(|binding| binding.ty);
 
     let missing: Vec<String> = sdef
         .fields
@@ -2504,9 +2490,8 @@ enum VisibleBindingKind {
         takes_params: bool,
         multiple_overloads: bool,
     },
-    Struct,
+    Type(SymCat),
     Enum(Vec<VisibleEnumVariant>),
-    Newtype,
     Global,
 }
 
@@ -2563,7 +2548,10 @@ pub(crate) fn resolve_visible_binding(
             module.file,
         )
     } else if let Some(sid) = ws.nominals.struct_id(key) {
-        (VisibleBindingKind::Struct, ws.module(sid.module).file)
+        (
+            VisibleBindingKind::Type(SymCat::Struct),
+            ws.module(sid.module).file,
+        )
     } else if let Some(eid) = ws.nominals.enum_id(key) {
         let module = ws.module(eid.module);
         let variants = module.enums[eid.def]
@@ -2580,7 +2568,10 @@ pub(crate) fn resolve_visible_binding(
             .collect();
         (VisibleBindingKind::Enum(variants), module.file)
     } else if let Some(nid) = ws.nominals.newtype_id(key) {
-        (VisibleBindingKind::Newtype, ws.module(nid.module).file)
+        (
+            VisibleBindingKind::Type(SymCat::Newtype),
+            ws.module(nid.module).file,
+        )
     } else if ws.globals_by_name.contains_key(&key) {
         let def_file = global_def_file.unwrap_or_else(|| {
             ws.modules
@@ -2604,108 +2595,88 @@ pub(crate) fn resolve_visible_binding(
     })
 }
 
-/// The global type is read from the current workspace so the cache never
-/// retains a `TyId` across updates.
-fn emit_visible_binding_entries(
-    ws: &Workspace,
-    binding: &VisibleBinding,
-    frag: &bone_core::modules::FragmentScope,
-    expr_position: bool,
-    pfx: &[u8],
-    show_private: bool,
-    test_path_cache: &mut FxHashMap<Ustr, bool>,
-    out: &mut Vec<CompletionEntry>,
-) {
-    let visible = |candidate: &str| !candidate.starts_with('_') || show_private;
-    let matches = |candidate: &str| {
-        visible(candidate) && crate::completion::match_policy::admit(candidate.as_bytes(), pfx)
-    };
-    let mut def_file = binding.def_file;
-    let mut file_is_test = binding.file_is_test;
-    let mut current_takes_params = None;
-    if let VisibleBindingKind::Function {
-        takes_params,
-        multiple_overloads,
-        ..
-    } = &binding.kind
-    {
-        current_takes_params = Some(*takes_params);
-        if *multiple_overloads && expr_position && matches(binding.name.as_str()) {
-            let Some((mid, fid)) = first_callable_in_scope(ws, frag, binding.key) else {
-                return;
-            };
-            def_file = ws.module(mid).file;
-            file_is_test = *test_path_cache
-                .entry(def_file)
-                .or_insert_with(|| is_test_path(def_file.as_str()));
-            current_takes_params = Some(!ws.module(mid).functions[fid].param_decls.is_empty());
-        }
-    }
-    let entry = |name: Ustr, symbol| CompletionEntry {
-        test_scoped: file_is_test || name.as_str().starts_with("test_"),
-        ..CompletionEntry::new(name, symbol, def_file)
-    };
-    match &binding.kind {
-        VisibleBindingKind::Function { takes_params, .. } => {
-            if expr_position && matches(binding.name.as_str()) {
-                out.push(entry(
-                    binding.name,
-                    CompletionSymbol::Function {
-                        key: binding.key,
-                        takes_params: current_takes_params.unwrap_or(*takes_params),
-                    },
-                ));
-            }
-        }
-        VisibleBindingKind::Struct => {
-            if matches(binding.name.as_str()) {
-                out.push(entry(binding.name, CompletionSymbol::Type(SymCat::Struct)));
-            }
-        }
-        VisibleBindingKind::Enum(variants) => {
-            if expr_position && !binding.def_file.as_str().starts_with('<') {
-                for variant in variants {
-                    let suffix = variant.suffix.as_str();
-                    let qualified = variant.qualified.as_str();
-                    let hit = pfx.is_empty()
-                        || crate::completion::match_policy::admit(suffix.as_bytes(), pfx)
-                        || crate::completion::match_policy::admit(qualified.as_bytes(), pfx);
-                    if hit && visible(suffix) {
-                        out.push(CompletionEntry {
-                            detail: Some(binding.name.to_string()),
-                            ..entry(
-                                variant.qualified,
-                                CompletionSymbol::Variant {
-                                    enum_key: binding.key,
-                                    shape: variant.shape,
-                                },
-                            )
-                        });
-                    }
-                }
-            } else if matches(binding.name.as_str()) {
-                out.push(entry(binding.name, CompletionSymbol::Type(SymCat::Enum)));
-            }
-        }
-        VisibleBindingKind::Newtype => {
-            if matches(binding.name.as_str()) {
-                out.push(entry(binding.name, CompletionSymbol::Type(SymCat::Newtype)));
-            }
-        }
-        VisibleBindingKind::Global => {
-            if expr_position && matches(binding.name.as_str()) {
-                if let Some(&ty) = ws.globals_by_name.get(&binding.key) {
-                    out.push(entry(
-                        binding.name,
-                        CompletionSymbol::Variable {
-                            kind: SymCat::Global,
-                            ty: Some(ty),
-                            rec: 0,
-                        },
-                    ));
+impl VisibleBinding {
+    fn emit(
+        &self,
+        ws: &Workspace,
+        frag: &bone_core::modules::FragmentScope,
+        expr: bool,
+        pfx: &[u8],
+        show_private: bool,
+        test_path_cache: &mut FxHashMap<Ustr, bool>,
+        mut push: impl FnMut(CompletionEntry),
+    ) {
+        let visible = |name: Ustr| show_private || !name.as_str().starts_with('_');
+        let matches = |name: Ustr| crate::completion::match_policy::admit(name.as_bytes(), pfx);
+        let mut def_file = self.def_file;
+        let mut file_is_test = self.file_is_test;
+        if let VisibleBindingKind::Enum(variants) = &self.kind
+            && expr
+            && !def_file.as_str().starts_with('<')
+        {
+            for variant in variants {
+                if visible(variant.suffix)
+                    && (matches(variant.suffix) || matches(variant.qualified))
+                {
+                    push(CompletionEntry {
+                        detail: Some(self.name.to_string()),
+                        test_scoped: file_is_test
+                            || variant.qualified.as_str().starts_with("test_"),
+                        ..CompletionEntry::new(
+                            variant.qualified,
+                            CompletionSymbol::Variant {
+                                enum_key: self.key,
+                                shape: variant.shape,
+                            },
+                            def_file,
+                        )
+                    });
                 }
             }
+            return;
         }
+        if !visible(self.name) || !matches(self.name) {
+            return;
+        }
+        let symbol = match self.kind {
+            VisibleBindingKind::Type(kind) => CompletionSymbol::Type(kind),
+            VisibleBindingKind::Enum(_) => CompletionSymbol::Type(SymCat::Enum),
+            VisibleBindingKind::Function {
+                mut takes_params,
+                multiple_overloads,
+            } if expr => {
+                if multiple_overloads {
+                    let Some((mid, fid)) = first_callable_in_scope(ws, frag, self.key) else {
+                        return;
+                    };
+                    def_file = ws.module(mid).file;
+                    file_is_test = *test_path_cache
+                        .entry(def_file)
+                        .or_insert_with(|| is_test_path(def_file.as_str()));
+                    takes_params = !ws.module(mid).functions[fid].param_decls.is_empty();
+                }
+                CompletionSymbol::Function {
+                    key: self.key,
+                    takes_params,
+                }
+            }
+            // Arena IDs only enter the request, never the cached scope.
+            VisibleBindingKind::Global if expr => {
+                let Some(&ty) = ws.globals_by_name.get(&self.key) else {
+                    return;
+                };
+                CompletionSymbol::Variable {
+                    kind: SymCat::Global,
+                    ty: Some(ty),
+                    rec: 0,
+                }
+            }
+            _ => return,
+        };
+        push(CompletionEntry {
+            test_scoped: file_is_test || self.name.as_str().starts_with("test_"),
+            ..CompletionEntry::new(self.name, symbol, def_file)
+        });
     }
 }
 
@@ -2721,78 +2692,67 @@ pub(crate) fn key_entries_in_scope(
     test_path_cache: &mut FxHashMap<Ustr, bool>,
 ) {
     if let Some(binding) = resolve_visible_binding(ws, frag, name, key, None, test_path_cache) {
-        emit_visible_binding_entries(
+        binding.emit(
             ws,
-            &binding,
             frag,
             expr_position,
             pfx,
             show_private,
             test_path_cache,
-            out,
+            |entry| out.push(entry),
         );
     }
 }
 
 pub(crate) fn completion_with_visible_bindings(
     ws: &Workspace,
-    mid: ModuleId,
-    inf: &InferenceResult,
-    offset: usize,
+    req_file: Ustr,
+    frag: &bone_core::modules::FragmentScope,
+    locals: &LocalScope<'_>,
     prefix: &str,
     expr_position: bool,
+    is_coroutine: bool,
     visible_bindings: &[VisibleBinding],
 ) -> Vec<CompletionEntry> {
-    let mut seen: FxHashSet<ustr::Ustr> = FxHashSet::default();
+    let mut seen = FxHashSet::default();
     let mut out = Vec::new();
-
     let pfx = prefix.as_bytes();
-    // `_`-prefixed symbols are soft-private: hidden unless the prefix starts
-    // with `_`.
     let show_private = prefix.starts_with('_');
-    let matches = |name: &str| -> bool {
-        if name.starts_with('_') && !show_private {
-            return false;
-        }
-        crate::completion::match_policy::admit(name.as_bytes(), pfx)
+    let matches = |name: &str| {
+        (show_private || !name.starts_with('_'))
+            && crate::completion::match_policy::admit(name.as_bytes(), pfx)
     };
 
-    // Locals shadow globals: emit them first so `seen` suppresses a
-    // same-named global.
-    let req_file = ws
-        .modules
-        .get(mid.index())
-        .map_or_else(ustr::Ustr::default, |m| m.file);
-    let Some(frag) = crate::modules_scope::fragment(ws, req_file) else {
-        return Vec::new();
-    };
     if expr_position {
-        let locals = locals_in_scope(ws, mid, inf, offset);
         // Params carry the earliest spans, so an inner `let` beats an enclosing
         // param on ties.
-        let mut by_decl: Vec<usize> = (0..locals.len()).collect();
-        by_decl.sort_by_key(|&i| std::cmp::Reverse(locals[i].4));
-        let mut rec_of = vec![0u8; locals.len()];
+        let mut by_decl: Vec<usize> = (0..locals.bindings.len()).collect();
+        by_decl.sort_by_key(|&i| std::cmp::Reverse(locals.bindings[i].decl_end));
+        let mut rec_of = vec![0u8; locals.bindings.len()];
         for (rank, &i) in by_decl.iter().enumerate() {
             rec_of[i] = rank.min(9) as u8;
         }
-        for (i, (name, kind, ty, ty_id, _decl)) in locals.into_iter().enumerate() {
+        for (i, local) in locals.bindings.iter().enumerate() {
+            let name = local.name;
             if !matches(name.as_str()) {
                 continue;
             }
             if seen.insert(name) {
-                let kind = if kind == BindingKind::Param {
+                let kind = if local.kind == BindingKind::Param {
                     SymCat::Param
                 } else {
                     SymCat::Local
                 };
                 out.push(CompletionEntry {
-                    detail: (!ty.is_empty()).then_some(ty),
+                    detail: local
+                        .ty
+                        .map(|ty| ws.render(locals.inference, ty))
+                        .filter(|ty| !ty.is_empty()),
                     ..CompletionEntry::new(
                         name,
                         CompletionSymbol::Variable {
                             kind,
-                            ty: ty_id,
+                            ty: local.ty,
                             rec: rec_of[i],
                         },
                         req_file,
@@ -2804,7 +2764,6 @@ pub(crate) fn completion_with_visible_bindings(
 
     seen.reserve(visible_bindings.len());
     out.reserve(visible_bindings.len());
-    let mut scratch = Vec::new();
     let mut test_path_cache = FxHashMap::default();
     for binding in visible_bindings {
         let name = binding.name.as_str();
@@ -2815,17 +2774,19 @@ pub(crate) fn completion_with_visible_bindings(
         {
             continue;
         }
-        emit_visible_binding_entries(
+        binding.emit(
             ws,
-            binding,
             frag,
             expr_position,
             pfx,
             show_private,
             &mut test_path_cache,
-            &mut scratch,
+            |entry| {
+                if seen.insert(entry.name) {
+                    out.push(entry);
+                }
+            },
         );
-        out.extend(scratch.drain(..).filter(|entry| seen.insert(entry.name)));
     }
     // Vec and native buffers already come from the struct declarations.
     if !expr_position {
@@ -2841,7 +2802,7 @@ pub(crate) fn completion_with_visible_bindings(
         }
     }
 
-    if expr_position && enclosing_is_coroutine(ws, mid, offset) {
+    if expr_position && is_coroutine {
         for kw in ["yield", "await"] {
             let n = ustr::Ustr::from(kw);
             if matches(kw) && seen.insert(n) {
@@ -2870,16 +2831,6 @@ const BUILTIN_TYPE_NAMES: &[&str] = &[
     "bool",
     "any",
 ];
-
-fn enclosing_is_coroutine(ws: &Workspace, mid: ModuleId, offset: usize) -> bool {
-    let Some(module) = ws.modules.get(mid.index()) else {
-        return false;
-    };
-    matches!(
-        module.body_at(offset),
-        Some(hir::BodyOwner::Function(fid)) if module.functions[fid].is_coroutine
-    )
-}
 
 pub(crate) fn rendered_params(ws: &Workspace, params: &[hir::ParamDecl]) -> Vec<String> {
     params
@@ -3166,9 +3117,11 @@ pub fn hole_info(
 ) -> Option<HoleInfo> {
     let (kind, span) = hole_kind_at(ast, offset)?;
     let ty = type_at_offset(ws, mid, inf, offset);
-    let in_scope = locals_in_scope(ws, mid, inf, offset)
-        .into_iter()
-        .map(|(name, _kind, ty, _ty_id, _decl)| (name.to_string(), ty))
+    let scope = LocalScope::at(ws, mid, Some(inf), offset);
+    let in_scope = scope
+        .bindings
+        .iter()
+        .map(|binding| (binding.name.to_string(), scope.render(ws, binding)))
         .collect();
     Some(HoleInfo {
         kind,

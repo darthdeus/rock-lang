@@ -1890,3 +1890,57 @@ fn expected_type_values_take_the_first_type_bucket() {
         assert_eq!(sort_digit(&complete(src), label, 1), '0', "{case}");
     }
 }
+
+#[test]
+fn completion_respects_block_scope() {
+    check_labels(&[
+        (
+            "local disappears after an if block",
+            "fn f() -> int {\n  let outer = 3\n  if true {\n    let inside = 4\n    assert(inside == 4)\n  }\n  return <|>outer\n}\n",
+            &["outer", "!inside"],
+        ),
+        (
+            "sibling branches are independent",
+            "fn f(outer: int) -> int {\n  if true {\n    let inside = 4\n    inside\n  } else {\n    <|>outer\n  }\n}\n",
+            &["outer", "!inside"],
+        ),
+        (
+            "lambda parameter is confined to the lambda",
+            "fn f(outer: int) -> int {\n  let g = (inside: int) => inside\n  return <|>outer\n}\n",
+            &["outer", "!inside"],
+        ),
+        (
+            "a destructured loop binding is confined to the loop",
+            "fn f(outer: int, xs: [(int, int)]) -> int {\n  for (inside, _) in xs { assert(inside == 1) }\n  return <|>outer\n}\n",
+            &["outer", "!inside"],
+        ),
+        (
+            "reach and call-through cannot seed from an expired local",
+            "struct Grid {}\nstruct Player { grid: Grid }\nfn tile_center(g: Grid) {}\n\
+             fn f(player: Player) {\n  if true { let expired = player }\n  tilecex<|>\n}\n",
+            &["!tile_center(expired.grid)"],
+        ),
+        (
+            "expired locals do not offer fields of the expected type",
+            "struct Grid {}\nstruct Player { grid: Grid }\nfn tile_center(g: Grid) {}\n\
+             fn f(player: Player) {\n  if true { let expired = player }\n  tile_center(<|>player.grid)\n}\n",
+            &["player.grid: Grid", "!expired.grid*"],
+        ),
+    ]);
+    for (source, detail) in [
+        (
+            "fn f(value: int) {\n  let value = <|>value.to_string()\n}",
+            "int",
+        ),
+        (
+            "fn f(value: int) {\n  let value = value.to_string()\n  print(<|>value)\n}",
+            "string",
+        ),
+    ] {
+        assert_eq!(
+            item(source, "value").detail.as_deref(),
+            Some(detail),
+            "{source}"
+        );
+    }
+}

@@ -230,6 +230,7 @@ pub struct Body {
     pub generation: u64,
 
     pub scope_arena: Arena<Scope>,
+    pub lexical_facts: Option<Box<LexicalFacts>>,
 
     pub binding_arena: Arena<BindingInfo>,
     pub binding_spans: ArenaMap<Idx<BindingInfo>, Span>,
@@ -279,6 +280,13 @@ pub struct Body {
 
     /// Resolved modules-v1 path segments spelled in this body.
     pub path_segments: Vec<PathSegmentRef>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LexicalFacts {
+    pub regions: Vec<(Span, Idx<Scope>, bool)>,
+    /// Keep earlier declarations after the resolver's binding map overwrites them.
+    pub bindings: ArenaMap<Idx<BindingInfo>, (Idx<Scope>, usize)>,
 }
 
 /// One resolved path segment, stored so editor features need not re-resolve it.

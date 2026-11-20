@@ -6,7 +6,7 @@ use crate::query::{CompletionSymbol, SymCat};
 use crate::rank_key::RankKey;
 
 use super::rank::ci_cmp;
-use super::sources::ArgPayload;
+use crate::query::VariantShape;
 
 pub(crate) fn strip_call_template(items: &mut [CompletionItem]) {
     for it in items.iter_mut() {
@@ -102,7 +102,7 @@ pub(crate) enum CandShape {
     CallThrough {
         fname: ustr::Ustr,
         arg: String,
-        payload: ArgPayload,
+        payload: VariantShape,
         multiparam: bool,
     },
     Decorator {
@@ -312,18 +312,18 @@ pub(crate) fn materialize_cand(
         } => {
             // The payload uses `$1` so tab order is arg, then the trailing param's `$0`.
             let (insert_text, is_snippet) = match (payload, multiparam) {
-                (ArgPayload::None, false) => (format!("{fname}({a})"), false),
-                (ArgPayload::None, true) => (format!("{fname}({a}, $0)"), true),
-                (ArgPayload::Tuple, false) => (format!("{fname}({a}($0))"), true),
-                (ArgPayload::Tuple, true) => (format!("{fname}({a}($1), $0)"), true),
-                (ArgPayload::Record, false) => (format!("{fname}({a} {{ $0 }})"), true),
-                (ArgPayload::Record, true) => (format!("{fname}({a} {{ $1 }}, $0)"), true),
+                (VariantShape::Unit, false) => (format!("{fname}({a})"), false),
+                (VariantShape::Unit, true) => (format!("{fname}({a}, $0)"), true),
+                (VariantShape::Tuple, false) => (format!("{fname}({a}($0))"), true),
+                (VariantShape::Tuple, true) => (format!("{fname}({a}($1), $0)"), true),
+                (VariantShape::Record, false) => (format!("{fname}({a} {{ $0 }})"), true),
+                (VariantShape::Record, true) => (format!("{fname}({a} {{ $1 }}, $0)"), true),
             };
             let insert_text_format = is_snippet.then_some(InsertTextFormat::SNIPPET);
             let label = match payload {
-                ArgPayload::None => format!("{fname}({a})"),
-                ArgPayload::Tuple => format!("{fname}({a}(...))"),
-                ArgPayload::Record => format!("{fname}({a} {{ ... }})"),
+                VariantShape::Unit => format!("{fname}({a})"),
+                VariantShape::Tuple => format!("{fname}({a}(...))"),
+                VariantShape::Record => format!("{fname}({a} {{ ... }})"),
             };
             CompletionItem {
                 label,

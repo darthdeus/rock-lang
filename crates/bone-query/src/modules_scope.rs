@@ -6,6 +6,7 @@ use bone_core::modules::{AccessSite, DefKind, DefMeta, FragmentScope, NsPackage,
 use bone_semantic::lower::resolve::{self, CalleeFamily, ResolvedKind};
 use bone_semantic::prelude::*;
 use bone_semantic::semantic_passes::{FragmentContribution, ScopeItem};
+use std::collections::HashMap;
 
 /// The fragment scope of the v1 file `file`, `None` for a synthetic module.
 pub fn fragment(ws: &Workspace, file: Ustr) -> Option<&FragmentScope> {
@@ -129,93 +130,100 @@ fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
     names
 }
 
-/// Completion indexes store workspace-wide DefKeys; this maps them back to
-/// names the fragment's resolver accepts.
-pub(crate) fn spellings_by_key(
-    ws: &Workspace,
-    frag: &FragmentScope,
-    kind: DefKind,
-) -> std::collections::HashMap<Ustr, Vec<Ustr>> {
-    let mut out: std::collections::HashMap<Ustr, Vec<Ustr>> = std::collections::HashMap::new();
-    for name in tier_names(ws, frag) {
-        if kind == DefKind::Callable {
-            let Ok(family) = resolve::resolve_v1_callee(ws, frag, name) else {
-                continue;
-            };
-            match family {
-                CalleeFamily::Single(resolved) if resolved.kind == ResolvedKind::Callable => {
-                    out.entry(resolved.key).or_default().push(name);
-                }
-                CalleeFamily::Merged { members } => {
-                    for member in members {
-                        out.entry(member.key).or_default().push(name);
-                    }
-                }
-                _ => {}
-            }
-            continue;
+pub(crate) type Spellings = HashMap<Ustr, Vec<Ustr>>;
+
+#[derive(Default)]
+pub(crate) struct ResolvedNames {
+    pub ordinary: Vec<(Ustr, Ustr)>,
+    pub globals: Spellings,
+    pub types: Spellings,
+    pub callables: Spellings,
+}
+
+impl ResolvedNames {
+    pub(crate) fn build(ws: &Workspace, frag: &FragmentScope) -> Self {
+        let mut names = Self::default();
+        for name in tier_names(ws, frag) {
+            names.resolve(ws, frag, name);
         }
-        let Ok(resolved) = resolve::resolve_bare(ws, frag, name) else {
-            continue;
+        for spellings in [&mut names.globals, &mut names.types, &mut names.callables] {
+            sort_spellings(spellings);
+        }
+        names
+    }
+
+    fn resolve(&mut self, ws: &Workspace, frag: &FragmentScope, name: Ustr) {
+        let bare = resolve::resolve_bare(ws, frag, name).ok();
+        let ordinary = match bare {
+            Some(r) if r.kind == ResolvedKind::Module => return,
+            Some(r) if r.kind != ResolvedKind::Callable => {
+                let spellings = match r.kind {
+                    ResolvedKind::Global => Some(&mut self.globals),
+                    ResolvedKind::Type => Some(&mut self.types),
+                    _ => None,
+                };
+                if let Some(spellings) = spellings {
+                    spellings.entry(r.key).or_default().push(name);
+                }
+                Some(r.key)
+            }
+            _ => {
+                let family = resolve::resolve_v1_callee(ws, frag, name).ok();
+                let first = record_callable_spellings(&mut self.callables, name, family);
+                bare.map(|r| r.key).or(first)
+            }
         };
-        let matches = matches!(
-            (kind, resolved.kind),
-            (DefKind::Type, ResolvedKind::Type)
-                | (DefKind::Global, ResolvedKind::Global)
-                | (DefKind::Decorator, ResolvedKind::Decorator)
-        );
-        if matches {
-            out.entry(resolved.key).or_default().push(name);
+        self.ordinary.extend(ordinary.map(|key| (name, key)));
+    }
+}
+
+fn record_callable_spellings(
+    spellings: &mut Spellings,
+    name: Ustr,
+    family: Option<CalleeFamily>,
+) -> Option<Ustr> {
+    match family? {
+        CalleeFamily::Single(r) => {
+            if r.kind == ResolvedKind::Callable {
+                spellings.entry(r.key).or_default().push(name);
+            }
+            Some(r.key)
+        }
+        CalleeFamily::Merged { members } => {
+            for member in &members {
+                spellings.entry(member.key).or_default().push(name);
+            }
+            members.first().map(|member| member.key)
         }
     }
-    for names in out.values_mut() {
-        names.sort_by(|a, b| {
-            a.as_str()
-                .len()
-                .cmp(&b.as_str().len())
-                .then_with(|| a.as_str().cmp(b.as_str()))
-        });
+}
+
+fn sort_spellings(spellings: &mut Spellings) {
+    for names in spellings.values_mut() {
+        names.sort_unstable_by_key(|name| (name.len(), name.as_str()));
         names.dedup();
     }
-    out
 }
 
-/// `key` stays canonical for the cached reachability index.
-#[derive(Clone, Debug)]
-pub(crate) struct GlobalBinding {
-    pub name: Ustr,
-    pub key: Ustr,
-    pub node_ty: String,
-}
-
-/// Walking `Module::global_by_name` directly would leak private globals
-/// and DefKeys.
-pub(crate) fn visible_globals(ws: &Workspace, frag: &FragmentScope) -> Vec<GlobalBinding> {
-    let names = spellings_by_key(ws, frag, DefKind::Global);
-    let mut out = Vec::new();
-    for (key, spellings) in names {
-        let Some(global) = ws
-            .modules
-            .iter()
-            .find_map(|m| m.global_by_name.get(&key).map(|idx| m.globals[*idx]))
-        else {
-            continue;
-        };
-        for name in spellings {
-            out.push(GlobalBinding {
+pub(crate) fn spellings_by_key(ws: &Workspace, frag: &FragmentScope, kind: DefKind) -> Spellings {
+    let mut out = Spellings::new();
+    for name in tier_names(ws, frag) {
+        if kind == DefKind::Callable {
+            record_callable_spellings(
+                &mut out,
                 name,
-                key,
-                node_ty: crate::reachability::type_key(ws, global.ty).to_string(),
-            });
+                resolve::resolve_v1_callee(ws, frag, name).ok(),
+            );
+        } else if let Ok(r) = resolve::resolve_bare(ws, frag, name)
+            && matches!(
+                (kind, r.kind),
+                (DefKind::Type, ResolvedKind::Type) | (DefKind::Decorator, ResolvedKind::Decorator)
+            )
+        {
+            out.entry(r.key).or_default().push(name);
         }
     }
-    out.sort_by(|a, b| {
-        a.name
-            .as_str()
-            .cmp(b.name.as_str())
-            .then_with(|| a.key.as_str().cmp(b.key.as_str()))
-    });
-    out.dedup_by(|a, b| a.name == b.name && a.key == b.key);
+    sort_spellings(&mut out);
     out
 }
 
@@ -282,33 +290,6 @@ pub(crate) fn display_method_suffix_with_names(
         search_from = start + name.as_str().len();
     }
     Some(rendered)
-}
-
-/// Broken bindings are left out; a composed callable family is offered
-/// once, by its first member.
-pub(crate) fn bound_names(
-    ws: &Workspace,
-    frag: &FragmentScope,
-    admit: impl Fn(&str) -> bool,
-) -> Vec<(Ustr, Ustr)> {
-    tier_names(ws, frag)
-        .into_iter()
-        .filter(|name| admit(name.as_str()))
-        .filter_map(|name| bound_key(ws, frag, name).map(|key| (name, key)))
-        .collect()
-}
-
-fn bound_key(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Option<Ustr> {
-    match resolve::resolve_bare(ws, frag, name) {
-        Ok(r) if r.kind != ResolvedKind::Module => Some(r.key),
-        Ok(_) => None,
-        // A callable family can be composed even when bare-value resolution rejects it.
-        Err(_) => match resolve::resolve_v1_callee(ws, frag, name) {
-            Ok(CalleeFamily::Merged { members }) => members.first().map(|m| m.key),
-            Ok(CalleeFamily::Single(r)) => Some(r.key),
-            Err(_) => None,
-        },
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

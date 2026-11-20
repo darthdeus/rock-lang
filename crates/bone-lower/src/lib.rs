@@ -229,6 +229,32 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
+    fn scope_region(&mut self, scope: Idx<Scope>, span: Span, include_end: bool) {
+        if !self.workspace.skip_session_facts {
+            self.body
+                .lexical_facts
+                .get_or_insert_with(Default::default)
+                .regions
+                .push((span, scope, include_end));
+        }
+    }
+
+    fn record_binding(&mut self, scope: Idx<Scope>, binding: Idx<BindingInfo>, active_at: usize) {
+        if !self.workspace.skip_session_facts {
+            self.body
+                .lexical_facts
+                .get_or_insert_with(Default::default)
+                .bindings
+                .insert(binding, (scope, active_at));
+        }
+    }
+
+    fn bind_local(&mut self, scope: Idx<Scope>, binding: Idx<BindingInfo>, active_at: usize) {
+        let name = self.body.binding_arena[binding].name;
+        self.body.scope_arena[scope].bindings.insert(name, binding);
+        self.record_binding(scope, binding, active_at);
+    }
+
     fn take_body(&mut self) -> Body {
         std::mem::take(&mut self.body)
     }
@@ -1053,6 +1079,7 @@ fn lower_block_value(
     prelude: Option<(Statement, Span)>,
 ) -> Result<Expr, CompilerError> {
     let scope = ctx.body.alloc_child_scope(parent);
+    ctx.scope_region(scope, block.span, block.braces.is_none());
 
     let (statements, tail) = lower_statements(ctx, scope, &block.statements, prelude)?;
 
@@ -1119,7 +1146,7 @@ pub(crate) fn lower_statement_value(
                 .map(|b| lower_block(ctx, scope, b))
                 .transpose()?;
 
-            let pat = lower_pattern_value(ctx, scope, &l.pattern)?;
+            let pat = lower_pattern_value(ctx, (scope, l.span.offset_range().1), &l.pattern)?;
             let pattern = ctx.body.pattern_arena.alloc(pat);
             normalize_binding_wildcards(ctx, pattern, l.span);
 
@@ -1167,9 +1194,7 @@ pub(crate) fn lower_statement_value(
             };
 
             let binding = ctx.alloc_binding(binding, st.name.span);
-            ctx.body.scope_arena[scope]
-                .bindings
-                .insert(st.name.name, binding);
+            ctx.bind_local(scope, binding, st.span.offset_range().1);
 
             Statement::Static {
                 name: binding,
@@ -1190,9 +1215,7 @@ pub(crate) fn lower_statement_value(
                 },
                 f.name.span,
             );
-            ctx.body.scope_arena[scope]
-                .bindings
-                .insert(f.name.name, name_binding);
+            ctx.bind_local(scope, name_binding, f.name.span.offset_range().1);
 
             // Params live in a child scope whose parent is the enclosing scope,
             // so an enclosing param/local reference still resolves (then gets
@@ -1202,9 +1225,7 @@ pub(crate) fn lower_statement_value(
             for p in &f.params {
                 let ty = lower_type_expr_local(ctx, a.te(&p.ty))?;
                 let b = ctx.alloc_parameter(&p.name, Some(ty), p.span);
-                ctx.body.scope_arena[fn_scope]
-                    .bindings
-                    .insert(p.name.name, b);
+                ctx.bind_local(fn_scope, b, 0);
             }
             let params = ctx.body.binding_arena.allocated_since(first_param);
 
@@ -1231,7 +1252,7 @@ pub(crate) fn lower_statement_value(
 
             let loop_scope = ctx.body.alloc_child_scope(scope);
 
-            let pat = lower_pattern_value(ctx, loop_scope, &f.pattern)?;
+            let pat = lower_pattern_value(ctx, (loop_scope, 0), &f.pattern)?;
             let pattern = ctx.body.pattern_arena.alloc(pat);
             let names_only = normalize_binding_wildcards(ctx, pattern, f.span);
 
@@ -1292,7 +1313,7 @@ pub(crate) fn lower_statement_value(
             let body_scope = ctx.body.alloc_child_scope(scope);
 
             let value = lower_expr(ctx, body_scope, a.e(&w.value))?;
-            let pat = lower_pattern_value(ctx, body_scope, &w.pattern)?;
+            let pat = lower_pattern_value(ctx, (body_scope, 0), &w.pattern)?;
             let pattern = ctx.body.pattern_arena.alloc(pat);
             normalize_binding_wildcards(ctx, pattern, w.span);
 
@@ -1902,13 +1923,17 @@ pub(crate) fn lower_expr_value(
             for arm in arms.iter() {
                 let arm_scope = ctx.body.alloc_child_scope(scope);
 
-                let pat = lower_pattern_value(ctx, arm_scope, &arm.pattern)?;
+                let pat = lower_pattern_value(ctx, (arm_scope, 0), &arm.pattern)?;
                 let pattern = ctx.body.pattern_arena.alloc(pat);
 
                 let body_i = lower_block(ctx, arm_scope, &arm.body)?;
 
                 let guard = match &arm.guard {
-                    Some(g) => Some(lower_expr(ctx, arm_scope, a.e(g))?),
+                    Some(g) => {
+                        let guard = a.e(g);
+                        ctx.scope_region(arm_scope, guard.span, true);
+                        Some(lower_expr(ctx, arm_scope, guard)?)
+                    }
                     None => None,
                 };
 
@@ -1965,9 +1990,7 @@ pub(crate) fn lower_expr_value(
                     p.ty.map(|te| lower_type_expr_local(ctx, a.te(&te)))
                         .transpose()?;
                 let b = ctx.alloc_parameter(&p.name, declared_ty, p.span);
-                ctx.body.scope_arena[lambda_scope]
-                    .bindings
-                    .insert(p.name.name, b);
+                ctx.bind_local(lambda_scope, b, 0);
             }
             let params_range = ctx.body.binding_arena.allocated_since(first_param);
 
@@ -2028,9 +2051,7 @@ pub(crate) fn lower_expr_value(
                 binding.span,
             );
 
-            ctx.body.scope_arena[body_scope]
-                .bindings
-                .insert(binding.name, b);
+            ctx.bind_local(body_scope, b, 0);
 
             Expr::SafeNavLet {
                 receiver,
@@ -2450,7 +2471,11 @@ fn lower_param_defaults(
     let mut defaults = Vec::with_capacity(params.len());
     for param in params {
         defaults.push(match &param.default {
-            Some(expr) => Some(lower_expr(ctx, scope, a.e(expr))?),
+            Some(expr) => {
+                let expr = a.e(expr);
+                ctx.scope_region(scope, expr.span, true);
+                Some(lower_expr(ctx, scope, expr)?)
+            }
             None => None,
         });
     }
@@ -2495,6 +2520,11 @@ fn lower_fn_body_into(
     let param_defaults = defaults?;
 
     let root_scope = ctx.body.alloc_root_scope_with_bindings(bindings);
+    if !ctx.workspace.skip_session_facts {
+        for binding in range {
+            ctx.record_binding(root_scope, binding, 0);
+        }
+    }
     let mut body_failed = false;
     if let skull_parser::FunctionBody::Rock(block) = &f.body {
         let (lowered, names) = ctx.collect_name_errors(|ctx| lower_block(ctx, root_scope, block));
@@ -3089,7 +3119,7 @@ fn reject_inline_lua_if_forbidden(a: &Ast, f: &FunctionDef) -> Result<(), Compil
 /// `None` tells the caller to lower a wildcard.
 fn resolve_pattern_path<'p>(
     ctx: &mut LowerCtx,
-    scope: Idx<Scope>,
+    site: (Idx<Scope>, usize),
     path: &skull_parser::Path,
     subpats: impl IntoIterator<Item = &'p skull_parser::Pattern>,
 ) -> Result<Option<(Ustr, Ustr)>, CompilerError> {
@@ -3107,7 +3137,7 @@ fn resolve_pattern_path<'p>(
         Err(msg) => {
             ctx.recover_name(CompilerError::new_with_label(path.span(), msg))?;
             for p in subpats {
-                lower_pattern_value(ctx, scope, p)?;
+                lower_pattern_value(ctx, site, p)?;
             }
             Ok(None)
         }
@@ -3156,7 +3186,7 @@ fn normalize_binding_wildcards(ctx: &mut LowerCtx, p: Idx<Pattern>, span: Span) 
 
 fn lower_pattern_value(
     ctx: &mut LowerCtx,
-    scope: Idx<Scope>,
+    site: (Idx<Scope>, usize),
     pat: &skull_parser::Pattern,
 ) -> Result<Pattern, CompilerError> {
     let a = ctx.ast;
@@ -3173,7 +3203,7 @@ fn lower_pattern_value(
                 id.span,
             );
 
-            ctx.body.scope_arena[scope].bindings.insert(id.name, b);
+            ctx.bind_local(site.0, b, site.1);
 
             Pattern::Bind(b)
         }
@@ -3193,7 +3223,7 @@ fn lower_pattern_value(
                         segment.name
                     );
                 }
-                let sub = lower_pattern_value(ctx, scope, &subs[0])?;
+                let sub = lower_pattern_value(ctx, site, &subs[0])?;
                 let sub = ctx.body.pattern_arena.alloc(sub);
                 return Ok(Pattern::Newtype {
                     name: key,
@@ -3203,27 +3233,26 @@ fn lower_pattern_value(
             }
             // A single unrooted segment preserves shorthand enum inference;
             // longer paths resolve the enum and variant through the package.
-            let (enum_name, enum_name_span, variant, variant_span) = if path.segments.len() == 1
-                && !path.from_root
-            {
-                let segment = &path.segments[0];
-                (None, None, segment.name, segment.span)
-            } else {
-                let subpats = args.iter().flatten();
-                let Some((enum_key, variant)) = resolve_pattern_path(ctx, scope, path, subpats)?
-                else {
-                    return Ok(Pattern::Wildcard);
+            let (enum_name, enum_name_span, variant, variant_span) =
+                if path.segments.len() == 1 && !path.from_root {
+                    let segment = &path.segments[0];
+                    (None, None, segment.name, segment.span)
+                } else {
+                    let subpats = args.iter().flatten();
+                    let Some((enum_key, variant)) = resolve_pattern_path(ctx, site, path, subpats)?
+                    else {
+                        return Ok(Pattern::Wildcard);
+                    };
+                    let (enum_span, variant_span) = variant_path_spans(path);
+                    (Some(enum_key), Some(enum_span), variant, variant_span)
                 };
-                let (enum_span, variant_span) = variant_path_spans(path);
-                (Some(enum_key), Some(enum_span), variant, variant_span)
-            };
 
             let sub = match args {
                 None => IdxRange::new_empty(),
                 Some(pats) => {
                     let vals = pats
                         .iter()
-                        .map(|p| lower_pattern_value(ctx, scope, p))
+                        .map(|p| lower_pattern_value(ctx, site, p))
                         .try_vec()?;
                     alloc_contiguous(&mut ctx.body.pattern_arena, vals)
                 }
@@ -3239,33 +3268,32 @@ fn lower_pattern_value(
         skull_parser::Pattern::PathRecord { path, fields, rest } => {
             // An unqualified record name still resolves as a bare type name,
             // falling back to the written variant name when it names no struct.
-            let (enum_name, enum_name_span, name, name_span) = if path.segments.len() == 1
-                && !path.from_root
-            {
-                let segment = &path.segments[0];
-                let name = ctx
-                    .resolve_bare_key(segment.name, segment.span)
-                    .ok()
-                    .filter(|key| ctx.workspace.nominals.struct_id(*key).is_some())
-                    .unwrap_or(segment.name);
-                (None, None, Some(name), Some(segment.span))
-            } else {
-                let subpats = fields.iter().map(|(_, p)| p);
-                let Some((enum_key, variant)) = resolve_pattern_path(ctx, scope, path, subpats)?
-                else {
-                    return Ok(Pattern::Wildcard);
+            let (enum_name, enum_name_span, name, name_span) =
+                if path.segments.len() == 1 && !path.from_root {
+                    let segment = &path.segments[0];
+                    let name = ctx
+                        .resolve_bare_key(segment.name, segment.span)
+                        .ok()
+                        .filter(|key| ctx.workspace.nominals.struct_id(*key).is_some())
+                        .unwrap_or(segment.name);
+                    (None, None, Some(name), Some(segment.span))
+                } else {
+                    let subpats = fields.iter().map(|(_, p)| p);
+                    let Some((enum_key, variant)) = resolve_pattern_path(ctx, site, path, subpats)?
+                    else {
+                        return Ok(Pattern::Wildcard);
+                    };
+                    let (enum_span, variant_span) = variant_path_spans(path);
+                    (
+                        Some(enum_key),
+                        Some(enum_span),
+                        Some(variant),
+                        Some(variant_span),
+                    )
                 };
-                let (enum_span, variant_span) = variant_path_spans(path);
-                (
-                    Some(enum_key),
-                    Some(enum_span),
-                    Some(variant),
-                    Some(variant_span),
-                )
-            };
             let mut entries = Vec::with_capacity(fields.len());
             for (fname, subpat) in fields.iter() {
-                let pat = lower_pattern_value(ctx, scope, subpat)?;
+                let pat = lower_pattern_value(ctx, site, subpat)?;
                 let pat = ctx.body.pattern_arena.alloc(pat);
                 entries.push(RecordPatField {
                     name: fname.name,
@@ -3290,11 +3318,11 @@ fn lower_pattern_value(
         } => {
             let start = start
                 .as_ref()
-                .map(|e| lower_expr(ctx, scope, a.e(e)))
+                .map(|e| lower_expr(ctx, site.0, a.e(e)))
                 .transpose()?;
             let end = end
                 .as_ref()
-                .map(|e| lower_expr(ctx, scope, a.e(e)))
+                .map(|e| lower_expr(ctx, site.0, a.e(e)))
                 .transpose()?;
 
             Pattern::Range {
@@ -3305,13 +3333,13 @@ fn lower_pattern_value(
         }
 
         skull_parser::Pattern::Literal(expr) => {
-            let e = lower_expr(ctx, scope, a.e(expr))?;
+            let e = lower_expr(ctx, site.0, a.e(expr))?;
             Pattern::Literal(e)
         }
         skull_parser::Pattern::Tuple(elems) => {
             let vals = elems
                 .iter()
-                .map(|p| lower_pattern_value(ctx, scope, p))
+                .map(|p| lower_pattern_value(ctx, site, p))
                 .try_vec()?;
 
             let elements = alloc_contiguous(&mut ctx.body.pattern_arena, vals);
@@ -3322,7 +3350,7 @@ fn lower_pattern_value(
         skull_parser::Pattern::Or(alts) => {
             let vals = alts
                 .iter()
-                .map(|p| lower_pattern_value(ctx, scope, p))
+                .map(|p| lower_pattern_value(ctx, site, p))
                 .try_vec()?;
 
             let alternatives = alloc_contiguous(&mut ctx.body.pattern_arena, vals);
@@ -3371,10 +3399,18 @@ fn lower_if_let_clauses_with(
 
     let node = match clause {
         IfLetClause::Binding { pattern, value } => {
-            let value = lower_expr(ctx, scope, a.e(value))?;
+            let init = a.e(value);
+            let value = lower_expr(ctx, scope, init)?;
             let then_scope = ctx.body.alloc_child_scope(scope);
-
-            let pat = lower_pattern_value(ctx, then_scope, pattern)?;
+            let block = a.b(then_block);
+            if init.span.file == block.span.file {
+                ctx.scope_region(
+                    then_scope,
+                    init.span.merge(&block.span),
+                    block.braces.is_none(),
+                );
+            }
+            let pat = lower_pattern_value(ctx, (then_scope, init.span.offset_range().1), pattern)?;
 
             let pattern = ctx.body.pattern_arena.alloc(pat);
             let then_branch =
@@ -3530,6 +3566,12 @@ pub fn lower_decorator_def(
     bindings.insert(ustr("target"), target);
 
     let root_scope = ctx.body.alloc_root_scope_with_bindings(bindings);
+    if !ctx.workspace.skip_session_facts {
+        for binding in params_range {
+            ctx.record_binding(root_scope, binding, 0);
+        }
+        ctx.record_binding(root_scope, target, 0);
+    }
 
     // Like a function body, the defaults and body report every name they
     // cannot resolve; the body is then dropped, so inference never sees a
@@ -3974,6 +4016,8 @@ fn lower_placeholder_lambda(
         e.span,
     );
 
+    ctx.scope_region(lambda_scope, e.span, true);
+    ctx.record_binding(lambda_scope, param, 0);
     let prev = ctx.placeholder_param.replace(param);
 
     let body_val = lower_expr_value(ctx, lambda_scope, e);
