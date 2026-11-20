@@ -1,0 +1,156 @@
+fn readback_slot_fixture(body: fn(Canvas, Canvas) -> ()) {
+    gpu_test_host()
+    let saved_target = CURRENT_CANVAS_HANDLE
+    let canvases = stone_get_graphics_stats().canvases
+    let readbacks = stone_native_live_handles("pixel_readback").unwrap()
+    let color = new_canvas(4, 2, "rgba32f")
+    let ids = new_canvas(4, 4, "r32i")
+    defer {
+        destroy_canvas(color)
+        destroy_canvas(ids)
+        set_canvas_handle(saved_target)
+        assert_eq(stone_get_graphics_stats().canvases, canvases, "fixture releases its canvases")
+        assert_eq(stone_native_live_handles("pixel_readback").unwrap(), readbacks,
+            "fixture releases its slots")
+    }
+    set_canvas(color)
+    clear_screen(0.25, 0.5, 0.75, 1.0)
+    set_canvas(ids)
+    stone_clear_canvas_int(0, 7)
+    set_canvas_handle(saved_target)
+    body(color, ids)
+}
+
+fn poll_id_until_answered(slot: int) -> int {
+    let deadline = stone_get_time() + 5.0
+    let answer = stone_pixel_readback_poll_id(slot)
+    while answer == -1 && stone_get_time() < deadline {
+        answer = stone_pixel_readback_poll_id(slot)
+    }
+    return answer
+}
+
+value ConsumeStep {
+    x: int,
+    consumes: float,
+}
+
+@test
+fn pixel_readback_consume_answers_the_submit_before_the_latest() {
+    readback_slot_fixture((color, ids) => {
+        for depth in [0, 1] {
+            let slot = stone_pixel_readback_new(depth)
+            defer { stone_pixel_readback_destroy(slot) }
+            let sentinel = if depth == 0 { 0.0 } else { 1.0 }
+            let value = if depth == 0 { 0.25 } else { sentinel }
+            assert_eq(stone_pixel_readback_consume(slot), sentinel, "an unsubmitted slot answers its sentinel")
+            for step in [
+                ConsumeStep { x: 1, consumes: sentinel },
+                ConsumeStep { x: 2, consumes: value },
+                ConsumeStep { x: -1, consumes: value },
+                ConsumeStep { x: 3, consumes: sentinel },
+                ConsumeStep { x: 0, consumes: value },
+            ] {
+                stone_pixel_readback_submit(slot, color.handle.0, step.x, 0)
+                assert_eq(stone_pixel_readback_consume(slot), step.consumes,
+                    "depth={depth} submit x={step.x}")
+                assert_eq(stone_pixel_readback_consume(slot), sentinel, "a ready read is consumed once")
+            }
+            stone_pixel_readback_submit(slot, color.handle.0, 1, 0)
+            assert(stone_pixel_readback_reset_contents(slot))
+            stone_pixel_readback_submit(slot, color.handle.0, 1, 0)
+            assert_eq(stone_pixel_readback_consume(slot), sentinel, "a reset drops the earlier submit")
+            assert_eq(stone_pixel_readback_in_flight(slot), 0, "consume reads keep no fenced reads")
+        }
+    })
+}
+
+@test
+fn pixel_readback_area_poll_answers_the_nearest_id_and_its_center() {
+    readback_slot_fixture((color, ids) => {
+        let slot = stone_pixel_readback_area_new(3)
+        defer { stone_pixel_readback_destroy(slot) }
+        assert_eq(stone_pixel_readback_poll_id(slot), -1, "the first poll switches the slot to polling")
+        assert_eq(stone_pixel_readback_consume(slot), 0.0, "a polled slot has nothing to consume")
+
+        stone_pixel_readback_submit_area(slot, ids.handle.0, 1, 2, 3)
+        assert_eq(stone_pixel_readback_in_flight(slot), 1, "a submit is in flight until polled")
+        assert_eq(poll_id_until_answered(slot), 7, "the area holds id 7")
+        assert_eq(stone_pixel_readback_answer_x(slot), 1, "answer x is the submitted center")
+        assert_eq(stone_pixel_readback_answer_y(slot), 2, "answer y is the submitted center")
+        assert_eq(stone_pixel_readback_in_flight(slot), 0, "the answer retires the read")
+
+        for x in [-1, 4] {
+            stone_pixel_readback_submit_area(slot, ids.handle.0, x, 0, 3)
+            assert_eq(poll_id_until_answered(slot), 0, "center x={x} outside the canvas answers 0")
+            assert_eq(stone_pixel_readback_answer_x(slot), x, "a refused read still reports its center")
+        }
+        stone_pixel_readback_submit_area(slot, color.handle.0, 1, 1, 3)
+        assert_eq(poll_id_until_answered(slot), 0, "a non-integer canvas answers 0")
+        stone_pixel_readback_submit_area(slot, ids.handle.0, 1, 1, 4)
+        assert_eq(poll_id_until_answered(slot), 0, "a side above the slot's answers 0")
+
+        for i in 0..6 {
+            stone_pixel_readback_submit_area(slot, ids.handle.0, i % 4, 0, 1)
+        }
+        assert_eq(stone_pixel_readback_in_flight(slot), 4, "a full ring drops further submits")
+        let deadline = stone_get_time() + 5.0
+        while stone_pixel_readback_in_flight(slot) > 0 && stone_get_time() < deadline {
+            let answer = stone_pixel_readback_poll_id(slot)
+            assert(answer == -1 || answer == 7, "a ring read answers id 7")
+        }
+        assert_eq(stone_pixel_readback_in_flight(slot), 0, "every ring read lands")
+        assert_eq(stone_pixel_readback_answer_x(slot), 3, "the fourth submit is the newest kept")
+        stone_pixel_readback_submit_area(slot, ids.handle.0, 1, 1, 3)
+        assert(stone_pixel_readback_reset_contents(slot))
+        assert_eq(stone_pixel_readback_in_flight(slot), 0, "a reset drops fenced reads")
+
+        assert_eq(read_canvas_nearest_id(ids, 2, 2, 3), 7, "the synchronous read finds id 7")
+        assert_eq(read_canvas_nearest_id(ids, 4, 0, 3), 0, "a center outside the canvas reads 0")
+        assert_eq(read_canvas_nearest_id(color, 1, 1, 3), 0, "a non-integer canvas reads 0")
+    })
+}
+
+@test
+fn canvas_capture_returns_top_down_rgba8_once_its_fence_lands() {
+    gpu_test_host()
+    let saved_target = CURRENT_CANVAS_HANDLE
+    let canvas = new_canvas(3, 2, "rgba8")
+    let wide = new_canvas(129, 1, "rgba8")
+    let ids = new_canvas(2, 2, "r32i")
+    defer {
+        destroy_canvas(canvas)
+        destroy_canvas(wide)
+        destroy_canvas(ids)
+        set_canvas_handle(saved_target)
+    }
+    set_canvas(canvas)
+    clear_screen(1.0, 0.0, 0.0, 1.0)
+    set_canvas_handle(saved_target)
+    for refused in [0, wide.handle.0, ids.handle.0] {
+        assert_eq(stone_canvas_capture_begin(refused), 0, "capture refuses canvas {refused}")
+    }
+
+    let id = stone_canvas_capture_begin(canvas.handle.0)
+    assert(id != 0, "a small colour canvas can be captured")
+    let out = native_buffer_u8(24)
+    assert_eq(stone_canvas_capture_poll(id, out.ptr, 23), -1, "a short buffer is refused")
+    let deadline = stone_get_time() + 5.0
+    let result = stone_canvas_capture_poll(id, out.ptr, out.len)
+    while result == 0 && stone_get_time() < deadline {
+        result = stone_canvas_capture_poll(id, out.ptr, out.len)
+    }
+    assert_eq(result, 24, "the capture lands with every byte")
+    for i in 0..6 {
+        assert_eq(out[i * 4], 255, "pixel {i} red")
+        assert_eq(out[i * 4 + 1], 0, "pixel {i} green")
+        assert_eq(out[i * 4 + 3], 255, "pixel {i} alpha")
+    }
+    assert_eq(stone_canvas_capture_poll(id, out.ptr, out.len), 24, "a landed capture can be read again")
+    assert(stone_canvas_capture_release(id))
+    assert(!stone_canvas_capture_release(id), "a released capture is gone")
+    assert_eq(stone_canvas_capture_poll(id, out.ptr, out.len), -1, "polling a released capture fails")
+
+    let pending = stone_canvas_capture_begin(canvas.handle.0)
+    assert(stone_canvas_capture_cancel(pending), "a pending capture can be cancelled")
+}
