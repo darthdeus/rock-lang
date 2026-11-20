@@ -637,6 +637,20 @@ fn for_real_vec_loop_is_forl_zero_alloc_with_raw_reads() {
 }
 
 #[test]
+fn iterator_chain_lambdas_inline_into_the_counted_loop() {
+    let lua = emit_inlined(
+        "fn scaled_odd_sum(xs: [int], k: int) -> int {
+            return xs.iter().map(x => x * k).filter(x => x % 2 != 0).sum()
+        }",
+        "scaled_odd_sum",
+    );
+    assert_counted_zero_alloc(&lua);
+    for forbidden in ["__rock_code_slot_ref", "setmetatable", "lambda"] {
+        assert!(!lua.contains(forbidden), "unexpected {forbidden}:\n{lua}");
+    }
+}
+
+#[test]
 fn any_with_an_early_return_is_a_counted_loop() {
     let lua = emit_inlined(
         "fn has(xs: [int], k: int) -> bool { return xs.any(x => x == k) }",

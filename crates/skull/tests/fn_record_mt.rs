@@ -1,6 +1,7 @@
 use crate::common::{emit_module, run_luajit};
 
-const LAMBDA: &str = "fn main() { let f = () => 1; print(f()) }\n";
+// Called twice so the lambda stays a code slot instead of being spliced.
+const LAMBDA: &str = "fn main() { let f = () => 1; print(f() + f()) }\n";
 
 #[test]
 fn programs_without_code_refs_or_definitions_omit_their_runtime() {

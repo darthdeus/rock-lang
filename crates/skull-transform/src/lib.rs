@@ -14,6 +14,7 @@ mod forl;
 mod frame;
 mod in_bounds;
 mod inline;
+mod lambda_inline;
 mod mem2reg;
 mod nobox;
 pub mod scope;

@@ -146,6 +146,9 @@ fn convert(
     obs: &mut dyn PassObserver,
 ) -> Result<(), ChainError> {
     cleanup(ws, mf, BodyPass::Cleanup, obs)?;
+    if crate::lambda_inline::inline_lambda_calls(mf) {
+        cleanup(ws, mf, BodyPass::Cleanup, obs)?;
+    }
     obs.begin(BodyPass::Closure, mf);
     let named = mf.nested_fns.len();
     crate::convert_closures(mf, name);

@@ -95,7 +95,8 @@ value V2 { x: float, y: float }
 fn go<T>(_tag: T) -> float {
     let xs: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]
     let f = () => { let a = 0.0; for i in 0..xs.len { a = a + xs[i].x }; return a }
-    return f()
+    let first = f()
+    return f() + first - first
 }
 
 fn main() { print("{go(1)}") }

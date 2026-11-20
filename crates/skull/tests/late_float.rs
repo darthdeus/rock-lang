@@ -134,7 +134,7 @@ fn captured_snapshot() -> float {
     let x = 2.0
     let w = make(x)
     let change = () => { x = 10.0; return true }
-    if change() { return sum(w) }
+    if change() && change() { return sum(w) }
     return 0.0
 }
 fn main() {

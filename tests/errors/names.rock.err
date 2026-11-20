@@ -219,13 +219,13 @@ fn main() { print("{r2()}") }
 //=== TEST CASE: global_vs_lambda_Generic ===
 //! expect: compiler-reserved synthetic name
 global f_0__lambda0: int = 5
-fn f() { let g = () => 3 print("{g()}") }
+fn f() { let g = () => 3 print("{g()} {g()}") }
 fn main() { f() }
 
 //=== TEST CASE: nomangle_fn_vs_lambda_Generic ===
 //! expect: compiler-reserved synthetic name
 @nomangle fn f_0__lambda0() -> int { return 7 }
-fn f() { let g = () => 3 print("{g()}") }
+fn f() { let g = () => 3 print("{g()} {g()}") }
 fn main() { f() }
 
 //=== TEST CASE: nomangle_fn_vs_capturing_lambda_Generic ===
@@ -258,7 +258,11 @@ fn main() { let w = worker() }
 //! expect: compiler-reserved synthetic name
 // A specialized body names its lambdas after the instance symbol.
 @nomangle fn spec_T_spec_p_int__lambda0() -> int { return 7 }
-fn spec<T>(x: T) -> T { let g = () => x return g() }
+fn spec<T>(x: T) -> T {
+    let g = () => x
+    g()
+    return g()
+}
 fn main() { print("{spec(5)}") print("{spec_T_spec_p_int__lambda0()}") }
 
 //=== TEST CASE: distinct_signatures_collide_Generic ===
