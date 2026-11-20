@@ -7,6 +7,23 @@ pub(super) struct JsInlineBody {
     pub(super) decl: FuncRef,
 }
 
+pub(super) struct DeliveredBody<'a> {
+    pub(super) specialization: Option<Instance>,
+    pub(super) plan: &'a skull_mir::concrete::ConcreteBodyPlan,
+    pub(super) name: String,
+    pub(super) mf: MirFunc,
+}
+
+impl DeliveredBody<'_> {
+    pub(super) fn instance(&self) -> &Instance {
+        self.specialization.as_ref().unwrap_or_else(|| {
+            self.plan
+                .function_instance()
+                .expect("delivered function plan")
+        })
+    }
+}
+
 pub(super) struct WorklistState<'a> {
     pub(super) concrete: &'a skull_mir::concrete::ConcretePlans,
     pub(super) always: &'a skull_mir::concrete::ConcreteAlwaysPlans,
@@ -15,8 +32,7 @@ pub(super) struct WorklistState<'a> {
     pub(super) view: &'a ArtifactView,
     pub(super) queue: Vec<FuncRef>,
     pub(super) seen: HashSet<FuncRef>,
-    pub(super) lowered: Vec<(FuncRef, MirFunc)>,
-    pub(super) spec_lowered: Vec<(Instance, MirFunc)>,
+    pub(super) lowered: Vec<DeliveredBody<'a>>,
     pub(super) standalone_specs: Vec<Instance>,
     pub(super) standalone_seen: HashSet<Instance>,
     pub(super) graph: &'a InstanceGraph,
@@ -108,7 +124,6 @@ impl<'a> WorklistState<'a> {
             queue: Vec::new(),
             seen: HashSet::new(),
             lowered: Vec::new(),
-            spec_lowered: Vec::new(),
             inline_js: Vec::new(),
             state_index: build_state_index(ws),
             nobox_leaf_globals: build_nobox_leaf_globals(ws, scx)?,
@@ -224,42 +239,25 @@ impl<'a> WorklistState<'a> {
         drain_worklists(ws, scx, self)?;
         self.canonicalize_emission_order();
         let interner = scx.interner();
-        for mf in self
-            .lowered
-            .iter()
-            .map(|(_, mf)| mf)
-            .chain(self.spec_lowered.iter().map(|(_, mf)| mf))
-            .chain(self.ginits.iter().map(|g| &g.mf))
-            .chain(extra.iter().copied())
-        {
+        for mf in body_mirs(&self.lowered, &self.ginits).chain(extra.iter().copied()) {
             register_code_slots(ws, interner, mf, &mut self.gctx);
         }
         Ok(std::mem::take(&mut self.rejections))
     }
 
-    pub(super) fn top_bodies(&self) -> Vec<&MirFunc> {
-        self.lowered
-            .iter()
-            .map(|(_, mf)| mf)
-            .chain(self.spec_lowered.iter().map(|(_, mf)| mf))
-            .chain(self.ginits.iter().map(|g| &g.mf))
-            .collect()
+    pub(super) fn top_bodies(&self) -> impl Iterator<Item = &MirFunc> {
+        body_mirs(&self.lowered, &self.ginits)
     }
 
     pub(super) fn canonicalize_emission_order(&mut self) {
-        self.lowered
-            .sort_by_key(|(fr, _)| (fr.module.index(), u32::from(fr.func.into_raw())));
-        self.spec_lowered.sort_by(|a, b| {
+        self.lowered.sort_by_key(|body| {
+            let f = body.instance().func;
             (
-                a.0.func.module.index(),
-                u32::from(a.0.func.func.into_raw()),
-                &a.1.name,
+                body.specialization.is_some(),
+                f.module.index(),
+                u32::from(f.func.into_raw()),
+                body.mf.name,
             )
-                .cmp(&(
-                    b.0.func.module.index(),
-                    u32::from(b.0.func.func.into_raw()),
-                    &b.1.name,
-                ))
         });
         // Not by `instance.args`: interned type ids follow worker timing.
         let names = &self.names;
@@ -272,6 +270,16 @@ impl<'a> WorklistState<'a> {
         });
         self.ginits.sort_by_key(|g| g.order);
     }
+}
+
+fn body_mirs<'a>(
+    lowered: &'a [DeliveredBody<'_>],
+    ginits: &'a [GlobalInit],
+) -> impl Iterator<Item = &'a MirFunc> {
+    lowered
+        .iter()
+        .map(|body| &body.mf)
+        .chain(ginits.iter().map(|global| &global.mf))
 }
 
 pub(super) fn queue_lifecycle_dependency_initializers(

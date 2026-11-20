@@ -80,8 +80,7 @@ pub(super) fn assemble_program_core(
 
     let deco_mfs: Vec<&MirFunc> = deco_bodies.iter().map(|(_, mf)| mf).collect();
     let mut rejections = st.finish(ws, scx, &deco_mfs)?;
-    let mut bodies = st.top_bodies();
-    bodies.extend(deco_mfs);
+    let bodies = st.top_bodies().chain(deco_mfs).collect::<Vec<_>>();
     let (hoisted, tables) = check_bodies(ws, scx, &st, &bodies, &mut rejections)?;
 
     let mut out = String::new();
@@ -105,14 +104,24 @@ pub(super) fn assemble_program_core(
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
-    emit_lowered_defs(ws, scx, &st, &hoisted, &mut rejections, |js, artifact| {
-        out.push_str(&js);
-        code_artifact.merge(artifact);
-    })?;
-    for (js, artifact) in emit_spec_chunks(ws, scx.interner(), &st, &hoisted, &mut rejections) {
-        out.push_str(&js);
-        if program_mode {
-            code_artifact.merge(artifact);
+    for body in &st.lowered {
+        match emit_lowered_fn(
+            ws,
+            scx.interner(),
+            &body.mf,
+            &body.name,
+            body.plan,
+            &st.names,
+            &hoisted,
+            &st.gctx,
+        ) {
+            Ok((js, artifact)) => {
+                out.push_str(&js);
+                if program_mode || body.specialization.is_none() {
+                    code_artifact.merge(artifact);
+                }
+            }
+            Err(error) => rejections.push((body.name.clone(), error)),
         }
     }
     for body in &st.inline_js {
@@ -236,40 +245,6 @@ pub(super) fn check_bodies(
     tables.push_str(&emit_inspect_cdata_enums(ws));
     tables.push_str(&emit_col_mat(ws, registry)?);
     Ok((hoisted, tables))
-}
-
-pub(super) fn emit_lowered_defs(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    st: &WorklistState,
-    hoisted: &HashSet<ustr::Ustr>,
-    rejections: &mut Vec<(String, CompilerError)>,
-    mut each: impl FnMut(String, CodeArtifact),
-) -> Result<(), CompilerError> {
-    for (fr, mf) in &st.lowered {
-        let name = st
-            .names
-            .name_for_decl(ws, *fr)
-            .expect("emitted body has a name");
-        let plan = st
-            .concrete
-            .get(&Instance::base(*fr))
-            .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
-        match emit_lowered_fn(
-            ws,
-            scx.interner(),
-            mf,
-            name,
-            plan,
-            &st.names,
-            hoisted,
-            &st.gctx,
-        ) {
-            Ok((js, artifact)) => each(js, artifact),
-            Err(e) => rejections.push((name.clone(), e)),
-        }
-    }
-    Ok(())
 }
 
 pub(super) fn globals_open_js(

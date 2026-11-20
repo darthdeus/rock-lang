@@ -453,7 +453,7 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
 /// through its call graph; a cycle rejects.
 pub(super) fn order_global_inits(
     ginits: &[GlobalInit],
-    lowered: &[(FuncRef, MirFunc)],
+    lowered: &[DeliveredBody<'_>],
     names: &CalleeNames<'_>,
     state_slots: &HashMap<ustr::Ustr, String>,
 ) -> Result<Vec<String>, CompilerError> {
@@ -467,9 +467,9 @@ pub(super) fn order_global_inits(
         record(Ustr::from(g.init_name.as_str()), &g.mf);
     }
     // Key by the mangled emit name, which is what `direct_callees` resolves to.
-    for (fr, mf) in lowered {
-        if let Some(emit_name) = names.get(&Instance::base(*fr)) {
-            record(Ustr::from(emit_name.as_str()), mf);
+    for body in lowered.iter().filter(|body| body.specialization.is_none()) {
+        if let Some(emit_name) = names.get(body.instance()) {
+            record(Ustr::from(emit_name.as_str()), &body.mf);
         }
     }
     let reach = skull_mir::reach::transitive_global_reads(&direct_globals, &direct_calls);

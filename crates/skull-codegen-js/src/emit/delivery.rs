@@ -42,8 +42,9 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 .map(|inst| inst.args.clone())
                 .unwrap_or_default(),
         };
+        let concrete = self.st.concrete;
         let prepared = (|| {
-            let plan = self.st.concrete.get(&selected).ok_or_else(|| {
+            let plan = concrete.get(&selected).ok_or_else(|| {
                 err(match specialization {
                     Some(_) => "JS: no concrete plan for the selected retained body".to_string(),
                     None => format!("JS: no concrete plan for retained function `{}`", f.name),
@@ -73,10 +74,10 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 )?;
             }
             self.prepare_fn(fr, &mut mf, &name)?;
-            Ok(mf)
+            Ok((mf, plan.as_ref()))
         })();
-        let mut mf = match prepared {
-            Ok(mf) => mf,
+        let (mut mf, plan) = match prepared {
+            Ok(body) => body,
             Err(error) => {
                 self.st.reject(&name, error);
                 return Ok(());
@@ -96,10 +97,13 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         findings.extend(self.schedule_body(&mf)?);
         if let Some(error) = merge_findings(findings) {
             self.st.reject(&name, error);
-        } else if let Some(inst) = specialization {
-            self.st.spec_lowered.push((inst, mf));
         } else {
-            self.st.lowered.push((fr, mf));
+            self.st.lowered.push(DeliveredBody {
+                specialization,
+                plan,
+                name,
+                mf,
+            });
         }
         Ok(())
     }
@@ -314,51 +318,6 @@ pub(super) fn emit_lowered_fn(
     Ok((out, code_artifact))
 }
 
-pub(super) fn emit_spec_chunks(
-    ws: &Workspace,
-    interner: &skull_mir::monoty::MonoInterner,
-    st: &WorklistState,
-    hoisted: &HashSet<ustr::Ustr>,
-    rejections: &mut Vec<(String, CompilerError)>,
-) -> Vec<(String, CodeArtifact)> {
-    let mut chunks = Vec::new();
-    for (inst, mf) in &st.spec_lowered {
-        let name = st
-            .names
-            .get(inst)
-            .expect("a lowered specialization has a name");
-        let selected_decl = match st.selected_decl(inst) {
-            Some(decl) => decl,
-            None => {
-                rejections.push((
-                    name.clone(),
-                    err("JS: no selected declaration for specialization"),
-                ));
-                continue;
-            }
-        };
-        let selected = Instance {
-            func: selected_decl,
-            args: inst.args.clone(),
-        };
-        let plan = match st.concrete.get(&selected) {
-            Some(plan) => plan,
-            None => {
-                rejections.push((
-                    name.clone(),
-                    err("JS: no concrete plan for selected specialization"),
-                ));
-                continue;
-            }
-        };
-        match emit_lowered_fn(ws, interner, mf, name, plan, &st.names, hoisted, &st.gctx) {
-            Ok(chunk) => chunks.push(chunk),
-            Err(e) => rejections.push((name.clone(), e)),
-        }
-    }
-    chunks
-}
-
 /// Reject calls whose scalarized argument lanes a callee retaining a whole-value parameter would
 /// drop; one mismatch per body.
 pub(super) fn check_scalar_abi(
@@ -368,17 +327,15 @@ pub(super) fn check_scalar_abi(
     bodies: &[&MirFunc],
 ) -> Vec<(String, CompilerError)> {
     let concrete = st.concrete;
-    let arities: HashMap<FuncRef, usize> = st
+    let arities: HashMap<(&Instance, bool), usize> = st
         .lowered
         .iter()
-        .map(|(fr, mf)| (*fr, mf.params.len()))
-        .collect();
-    // A specialized callee takes its instantiation's scalar ABI, so a spec-bound call is measured
-    // against its own copy, not the shared body.
-    let spec_arities: HashMap<Instance, usize> = st
-        .spec_lowered
-        .iter()
-        .map(|(inst, mf)| (inst.clone(), mf.params.len()))
+        .map(|body| {
+            (
+                (body.instance(), body.specialization.is_some()),
+                body.mf.params.len(),
+            )
+        })
         .collect();
     let mut out: Vec<(String, CompilerError)> = Vec::new();
     for mf in bodies {
@@ -393,37 +350,36 @@ pub(super) fn check_scalar_abi(
                 };
                 // One admission rule over the emitted body the call targets, so the shared and
                 // specialized arms agree on the omitted-default window.
-                let (body, arity, what) = match mf.spec_bindings.get(&iid) {
-                    Some(inst) => match spec_arities.get(inst) {
-                        None => continue,
-                        Some(&arity) => (inst.clone(), arity, "specialized "),
-                    },
-                    None => match arities.get(callee) {
-                        None => continue,
-                        Some(&arity) => (Instance::base(*callee), arity, ""),
-                    },
+                let shared = Instance::base(*callee);
+                let specialization = mf.spec_bindings.get(&iid);
+                let body = specialization.unwrap_or(&shared);
+                let Some(&arity) = arities.get(&(body, specialization.is_some())) else {
+                    continue;
                 };
-                let selected = st.selected_decl(&body).map(|func| Instance {
+                let what = if specialization.is_some() {
+                    "specialized "
+                } else {
+                    ""
+                };
+                let selected = st.selected_decl(body).map(|func| Instance {
                     func,
                     args: body.args.clone(),
                 });
                 let abi = match selected.as_ref().filter(|inst| inst.func != body.func) {
-                    Some(selected) => {
-                        match concrete.get(&body).or_else(|| concrete.get(selected)) {
-                            Some(plan) => Ok(skull_mir::lower::selected_sibling_abi_plan(
-                                ws, scx, concrete, selected, plan,
-                            )),
-                            None if skull_mir::lower::requires_concrete_body_plan(ws, selected) => {
-                                findings.push(err(format!(
-                                    "JS subset: no concrete ABI signature for selected {what}`{}`",
-                                    ws.module(callee.module).functions[callee.func].name,
-                                )));
-                                continue;
-                            }
-                            None => skull_mir::lower::owner_abi_plan(ws, scx, concrete, selected),
+                    Some(selected) => match concrete.get(body).or_else(|| concrete.get(selected)) {
+                        Some(plan) => Ok(skull_mir::lower::selected_sibling_abi_plan(
+                            ws, scx, concrete, selected, plan,
+                        )),
+                        None if skull_mir::lower::requires_concrete_body_plan(ws, selected) => {
+                            findings.push(err(format!(
+                                "JS subset: no concrete ABI signature for selected {what}`{}`",
+                                ws.module(callee.module).functions[callee.func].name,
+                            )));
+                            continue;
                         }
-                    }
-                    None => skull_mir::lower::owner_abi_plan(ws, scx, concrete, &body),
+                        None => skull_mir::lower::owner_abi_plan(ws, scx, concrete, selected),
+                    },
+                    None => skull_mir::lower::owner_abi_plan(ws, scx, concrete, body),
                 };
                 let required = match abi {
                     Ok(abi) => required_arg_count(ws, &abi, arity),
