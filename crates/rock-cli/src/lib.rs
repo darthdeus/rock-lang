@@ -392,26 +392,3 @@ mod sim_environment;
 mod sim_observability;
 
 mod sdk_check;
-
-#[cfg(test)]
-mod completion_tests {
-    #[test]
-    fn shell_completions_offer_the_report_formats() {
-        let mut out = Vec::new();
-        clap_complete::generate(
-            clap_complete::Shell::Bash,
-            &mut crate::Args::command(),
-            "rock",
-            &mut out,
-        );
-        let script = String::from_utf8(out).expect("the completion script is text");
-        assert!(script.contains("fmt"));
-        assert!(script.contains("--check"));
-        let format_arm = script
-            .split("--format)")
-            .nth(1)
-            .expect("the script completes --format");
-        let values = format_arm.lines().nth(1).unwrap_or_default();
-        assert!(values.contains("pretty json"), "{values}");
-    }
-}

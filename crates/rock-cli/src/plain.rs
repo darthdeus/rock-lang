@@ -126,25 +126,6 @@ pub static COMMANDS: &[&CliCommand] = &[
         }),
     },
     &CliCommand {
-        name: "completions",
-        route: Route::Direct(|cx| {
-            let shell_name = cx.args.files.first().map(|s| s.as_str()).ok_or_else(|| {
-            anyhow::anyhow!(
-                "completions: missing shell name. Usage: rock completions <bash|zsh|fish|powershell|elvish>"
-            )
-        })?;
-            let shell: clap_complete::Shell = shell_name.parse().map_err(|_| {
-            anyhow::anyhow!(
-                "completions: unknown shell `{}`. Try one of: bash, zsh, fish, powershell, elvish",
-                shell_name
-            )
-        })?;
-            let mut cmd = rock_cli::Args::command();
-            clap_complete::generate(shell, &mut cmd, "rock", &mut std::io::stdout());
-            Ok(())
-        }),
-    },
-    &CliCommand {
         name: "lint",
         route: Route::Direct(|cx| {
             let path = cx.get_path_or_current()?;
