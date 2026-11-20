@@ -23,7 +23,6 @@ mod scope;
 mod scope_guard;
 mod structured;
 mod term;
-mod trace_frames;
 mod value;
 
 pub use binding::*;
@@ -291,7 +290,6 @@ pub struct CodegenCtx {
     /// Disabled only by boundary tests that compare our rejection with LuaJIT loadfile.
     frame_limits: bool,
     line_directives: bool,
-    trace_frames: Option<Mutex<trace_frames::Contributors>>,
 }
 
 impl Clone for CodegenCtx {
@@ -309,10 +307,6 @@ impl Clone for CodegenCtx {
             call_sccs: self.call_sccs.clone(),
             frame_limits: self.frame_limits,
             line_directives: self.line_directives,
-            trace_frames: self
-                .trace_frames
-                .as_ref()
-                .map(|rows| Mutex::new(rows.lock().expect("trace frame sink").clone())),
         }
     }
 }
@@ -585,7 +579,6 @@ impl CodegenCtx {
             call_sccs: HashMap::default(),
             frame_limits: true,
             line_directives: line_directives_mode(),
-            trace_frames: trace_frames::enabled().then(|| Mutex::new(Default::default())),
         }
     }
 
@@ -609,32 +602,6 @@ impl CodegenCtx {
 
     pub fn line_directives(&self) -> bool {
         self.line_directives
-    }
-
-    /// Opt-in trace-slot diagnostic over the final assembled Lua. The selected
-    /// LuaJIT parses the chunk without running its initializers or user code.
-    /// Diagnostic failures remain warnings and never change parse-limit checks.
-    pub fn report_trace_frames(&self, lua: &str) {
-        let Some(rows) = &self.trace_frames else {
-            return;
-        };
-        let result = trace_frames::report(lua, &rows.lock().expect("trace frame sink"));
-        match result {
-            Ok(report) => {
-                if let Some(path) = std::env::var_os("ROCK_LUA_TRACE_FRAME_REPORT") {
-                    if let Err(error) = std::fs::write(path, report) {
-                        eprintln!(
-                            "warning: cannot write LuaJIT emitted-call frame report: {error}"
-                        );
-                    }
-                } else {
-                    eprint!("{report}");
-                }
-            }
-            Err(error) => {
-                eprintln!("warning: LuaJIT emitted-call frame report unavailable: {error}")
-            }
-        }
     }
 
     /// The driver projects instance-graph SCCs onto declarations. Merging components

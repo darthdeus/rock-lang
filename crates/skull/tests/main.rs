@@ -125,7 +125,6 @@ mod shader_pipeline_register;
 mod state_global_bridge;
 mod static_hot_reload;
 mod tail_calls;
-mod trace_frames;
 mod tuple_scalarize;
 mod uniform_block_pack;
 mod unread_runtime_tables;

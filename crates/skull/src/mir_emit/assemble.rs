@@ -1163,7 +1163,6 @@ pub(super) fn assemble(
         }
         globals_bridge_end = None;
     }
-    cg.report_trace_frames(&out);
     step("assembly: finalize", &mut steps);
     phases.extend(steps);
     Ok((
