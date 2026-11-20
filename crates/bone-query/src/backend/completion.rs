@@ -199,7 +199,7 @@ fn contextual_completions(
                 (
                     Some(candidates.unwrap_or_default()),
                     rq.next_is_open_paren,
-                    in_pattern_position(rq.src, rq.offset),
+                    cx.pattern_scrutinee.is_some(),
                 )
             }
             Context::Decorator => {

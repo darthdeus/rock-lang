@@ -195,111 +195,6 @@ pub(crate) fn balance_delimiters(mut s: String) -> String {
     s
 }
 
-pub(crate) fn in_pattern_position(src: &str, offset: usize) -> bool {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-    while i < b.len() && is_ident_byte(b[i]) {
-        i += 1;
-    }
-    while i < b.len() && b[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    if i < b.len() && (b[i] == b'(' || b[i] == b'{') {
-        let (open, close) = if b[i] == b'(' {
-            (b'(', b')')
-        } else {
-            (b'{', b'}')
-        };
-        let mut depth = 0i32;
-        while i < b.len() {
-            if b[i] == open {
-                depth += 1;
-            } else if b[i] == close {
-                depth -= 1;
-                if depth == 0 {
-                    i += 1;
-                    break;
-                }
-            }
-            i += 1;
-        }
-    }
-    while i < b.len() && b[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    if i + 1 < b.len() && b[i] == b'=' && b[i + 1] == b'>' {
-        return true;
-    }
-    match_arm_scrutinee(src, offset).is_some()
-}
-
-/// The scrutinee's last byte when the cursor is in a match-arm pattern head.
-pub(crate) fn match_arm_scrutinee(src: &str, offset: usize) -> Option<usize> {
-    let b = src.as_bytes();
-    let start = skip_back(b, offset.min(b.len()), |c| is_ident_byte(c) || c == b':');
-    // Only arm separators or the match opening brace precede a pattern head.
-    let p = ws_start(b, start);
-    if p == 0 || !matches!(b[p - 1], b'{' | b',' | b'}') {
-        return None;
-    }
-    match_scrutinee_end(b, start)
-}
-
-pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut i = from;
-    let brace = loop {
-        if i == 0 {
-            return None;
-        }
-        i -= 1;
-        match b[i] {
-            b')' | b']' | b'}' => depth += 1,
-            b'(' | b'[' => {
-                if depth == 0 {
-                    return None; // inside a call / index group, not a block
-                }
-                depth -= 1;
-            }
-            b'{' => {
-                if depth == 0 {
-                    break i;
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-    };
-    let end = ws_start(b, brace);
-    if end == 0 {
-        return None;
-    }
-    let mut j = brace;
-    let mut depth = 0i32;
-    while j > 0 {
-        j -= 1;
-        match b[j] {
-            b')' | b']' => depth += 1,
-            b'(' | b'[' => {
-                if depth == 0 {
-                    return None;
-                }
-                depth -= 1;
-            }
-            b'{' | b'}' | b';' if depth == 0 => return None,
-            c if depth == 0 && is_ident_byte(c) => {
-                let word_end = j + 1;
-                j = ident_start(b, j);
-                if &b[j..word_end] == b"match" {
-                    return Some(end - 1);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
     let b = src.as_bytes();
     let (in_start, in_kw) = word_before(b, ident_start(b, offset.min(b.len())));
@@ -405,7 +300,7 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
             cx.and_then(|c| c.named_arg_slot())
         },
         coroutine_generic: cx.is_some_and(|c| c.coroutine_first_generic_arg()),
-        pattern_scrutinee: match_arm_scrutinee(src, offset),
+        pattern_scrutinee: cx.and_then(CursorAst::match_pattern_scrutinee),
         for_in: for_in_iterable_slot(src, offset),
         arg_call,
         expr_position,

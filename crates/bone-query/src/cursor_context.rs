@@ -682,6 +682,39 @@ impl CursorAst {
         None
     }
 
+    /// The scrutinee's last byte when the cursor is in a match arm's pattern,
+    /// outside any payload or record braces.
+    pub(crate) fn match_pattern_scrutinee(&self) -> Option<usize> {
+        self.ast.exprs.values().find_map(|e| {
+            let ExprKind::Match { scrutinee, arms } = &e.kind else {
+                return None;
+            };
+            let end = self.expr(*scrutinee).span.offset_range().1;
+            let mut start = end + self.text.get(end..)?.find('{')? + 1;
+            for arm in arms {
+                let body = self.ast.blocks[arm.body].span.offset_range();
+                let head = self.text.get(start..body.0)?;
+                let arrow = start + head.rfind("=>")?;
+                if (start..=arrow).contains(&self.probe) {
+                    let in_guard = arm.guard.is_some_and(|g| {
+                        let (gs, ge) = self.expr(g).span.offset_range();
+                        gs <= self.probe && self.probe <= ge
+                    });
+                    let depth = self.text[start..self.probe]
+                        .bytes()
+                        .fold(0i32, |d, c| match c {
+                            b'(' | b'{' | b'[' => d + 1,
+                            b')' | b'}' | b']' => d - 1,
+                            _ => d,
+                        });
+                    return (!in_guard && depth == 0).then(|| end - 1);
+                }
+                start = body.1;
+            }
+            None
+        })
+    }
+
     pub(crate) fn coroutine_first_generic_arg(&self) -> bool {
         use skull_parser::ast::TypeExprKind;
         self.ast.types.iter().any(|(_, t)| {

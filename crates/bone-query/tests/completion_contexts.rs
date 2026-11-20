@@ -308,6 +308,11 @@ fn literal_and_block_contexts_offer() {
             "enum E { A, B }\nfn r(e: E) {\n  match e {\n    <|>\n  }\n}\n",
             &["E::A"],
         ),
+        (
+            "or-pattern alternative",
+            "enum E { A, B, C }\nfn r(e: E) -> int {\n  match e {\n    E::A | <|>E::B => 1,\n    _ => 0\n  }\n}\n",
+            &["E::C"],
+        ),
         // A unit variant has no record fields, so the `if` brace is not a record literal.
         (
             "block after a unit-variant condition",
