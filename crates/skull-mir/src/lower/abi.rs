@@ -1294,35 +1294,7 @@ impl RepArena {
         }
     }
 
-    pub(crate) fn function_value(
-        &self,
-        ws: &Workspace,
-        target: FnBackend,
-        ty: &crate::monoty::MonoTy,
-    ) -> Result<FunctionRepPlan, RepError> {
-        self.function_value_with_mode(ws, target, ty, true)
-    }
-
-    pub(crate) fn function_value_first_class(
-        &self,
-        ws: &Workspace,
-        target: FnBackend,
-        ty: &crate::monoty::MonoTy,
-    ) -> Result<FunctionRepPlan, RepError> {
-        self.function_value_with_policy(ws, target, ty, false, true)
-    }
-
-    pub(crate) fn function_value_with_mode(
-        &self,
-        ws: &Workspace,
-        target: FnBackend,
-        ty: &crate::monoty::MonoTy,
-        nobox_only: bool,
-    ) -> Result<FunctionRepPlan, RepError> {
-        self.function_value_with_policy(ws, target, ty, nobox_only, false)
-    }
-
-    fn function_value_with_policy(
+    fn function_value(
         &self,
         ws: &Workspace,
         target: FnBackend,
@@ -1974,27 +1946,17 @@ impl BackendFnAbiPlan {
         Self::for_boundary_instance(ws, scx, &crate::instance::Instance::base(decl))
     }
 
+    /// `nobox_only` narrows a non-first-class value to `nobox` shapes, as a
+    /// function value taken by value requires.
     pub fn for_function_value(
-        ws: &Workspace,
-        scx: &ScalarCtx,
-        ty: &crate::monoty::MonoTy,
-    ) -> Result<FunctionRepPlan, RepError> {
-        if scx.values_first_class {
-            scx.rep_arena()
-                .function_value_first_class(ws, scx.target, ty)
-        } else {
-            scx.rep_arena().function_value(ws, scx.target, ty)
-        }
-    }
-
-    pub fn for_function_value_with_mode(
         ws: &Workspace,
         scx: &ScalarCtx,
         ty: &crate::monoty::MonoTy,
         nobox_only: bool,
     ) -> Result<FunctionRepPlan, RepError> {
+        let first_class = scx.values_first_class;
         scx.rep_arena()
-            .function_value_with_mode(ws, scx.target, ty, nobox_only)
+            .function_value(ws, scx.target, ty, nobox_only && !first_class, first_class)
     }
 
     fn assemble(

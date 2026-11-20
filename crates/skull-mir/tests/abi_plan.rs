@@ -320,6 +320,7 @@ fn main() {
             params: vec![leaf.clone()],
             ret: Box::new(leaf),
         },
+        true,
     )
     .expect("function type must have a total physical plan");
     assert_eq!(
@@ -357,6 +358,7 @@ fn unit_function_values_share_the_no_result_abi() {
             params: Vec::new(),
             ret: Box::new(MonoTy::Unit),
         },
+        true,
     )
     .expect("a unit function value must have a total physical plan");
 
@@ -661,6 +663,7 @@ fn function_value_plan_keeps_opaque_reference_parameters_explicit() {
             params: vec![vec_int],
             ret: Box::new(MonoTy::Int),
         },
+        true,
     )
     .expect("a function value may carry an opaque container parameter");
     assert_eq!(
@@ -682,9 +685,9 @@ fn function_value_plan_mode_is_part_of_the_owned_signature() {
         params: vec![nominal(&ws, "V2")],
         ret: Box::new(nominal(&ws, "V2")),
     };
-    let direct = BackendFnAbiPlan::for_function_value_with_mode(&ws, &scx, &ty, false)
+    let direct = BackendFnAbiPlan::for_function_value(&ws, &scx, &ty, false)
         .expect("direct nested function mode must plan");
-    let taken = BackendFnAbiPlan::for_function_value_with_mode(&ws, &scx, &ty, true)
+    let taken = BackendFnAbiPlan::for_function_value(&ws, &scx, &ty, true)
         .expect("taken nested function mode must plan");
     assert!(
         direct.uses_scalar_abi(),
@@ -720,6 +723,7 @@ fn main() { print("main") }
             params: vec![nominal(&ws, "Leaf")],
             ret: Box::new(MonoTy::Unit),
         },
+        true,
     )
     .expect("a first-class function value must have a physical plan");
     assert_eq!(

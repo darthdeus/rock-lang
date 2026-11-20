@@ -553,7 +553,7 @@ impl<'a> Builder<'a> {
         if !matches!(ty.peel_nullable().0, MonoTy::Function { .. }) {
             return Ok(None);
         }
-        BackendFnAbiPlan::for_function_value(self.ws, self.scx, ty)
+        BackendFnAbiPlan::for_function_value(self.ws, self.scx, ty, true)
             .map(Some)
             .map_err(|error| self.rep_error(error))
     }

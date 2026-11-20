@@ -243,13 +243,9 @@ impl<'a> Builder<'a> {
         if self.scx.values_first_class {
             return Ok(boxed);
         }
-        let representation = BackendFnAbiPlan::for_function_value_with_mode(
-            self.ws,
-            self.scx,
-            fn_ty,
-            taken_by_value,
-        )
-        .map_err(|error| self.rep_error(error))?;
+        let representation =
+            BackendFnAbiPlan::for_function_value(self.ws, self.scx, fn_ty, taken_by_value)
+                .map_err(|error| self.rep_error(error))?;
         let abi = NestedFn {
             hoisted,
             param_names,

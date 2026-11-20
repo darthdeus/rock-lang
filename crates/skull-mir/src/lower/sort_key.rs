@@ -100,12 +100,8 @@ impl<'a> Builder<'a> {
     }
 
     fn sort_key_plan(&self, ty: &MonoTy, leaves: bool) -> Result<FunctionRepPlan, CompilerError> {
-        if self.scx.values_first_class || !leaves {
-            BackendFnAbiPlan::for_function_value(self.ws, self.scx, ty)
-        } else {
-            BackendFnAbiPlan::for_function_value_with_mode(self.ws, self.scx, ty, false)
-        }
-        .map_err(|error| self.rep_error(error))
+        BackendFnAbiPlan::for_function_value(self.ws, self.scx, ty, !leaves)
+            .map_err(|error| self.rep_error(error))
     }
 
     fn lower_sort_key(
