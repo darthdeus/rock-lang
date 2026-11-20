@@ -44,8 +44,14 @@ pub struct ReleaseAsset {
 
 #[derive(Debug, Clone, Default)]
 pub struct AssetSelection {
-    pub assets: Vec<ReleaseAsset>,
+    pub files: BTreeMap<String, PathBuf>,
     pub missing: Vec<PathBuf>,
+}
+
+impl AssetSelection {
+    pub fn insert(&mut self, asset: ReleaseAsset) {
+        self.files.insert(asset.key, asset.source);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,15 +188,14 @@ pub fn select_assets_with_overlays(
         None => default_asset_names(),
     };
 
-    let mut by_key = BTreeMap::<String, PathBuf>::new();
-    let mut missing = Vec::new();
+    let mut selection = AssetSelection::default();
     for name in &names {
         let source = project_dir.join(name);
         if !source.exists() {
-            missing.push(source);
+            selection.missing.push(source);
             continue;
         }
-        add_path(&mut by_key, game_key, &source, project_dir, &source, false)?;
+        add_path(&mut selection.files, game_key, &source, project_dir, false)?;
     }
 
     // A game with visual bank roots admits overlay files
@@ -204,30 +209,24 @@ pub fn select_assets_with_overlays(
             if !source.exists() {
                 continue;
             }
-            add_path(&mut by_key, game_key, &source, overlay, &source, true)?;
+            add_path(&mut selection.files, game_key, &source, overlay, true)?;
         }
     }
 
     if let Some(stone_dir) = stone_dir {
         let source = stone_dir.join("engine/shaders");
         if source.exists() {
-            add_path(&mut by_key, "stone", &source, stone_dir, &source, false)?;
+            add_path(&mut selection.files, "stone", &source, stone_dir, false)?;
         } else {
-            missing.push(source);
+            selection.missing.push(source);
         }
         let assets = stone_dir.join("engine/assets");
         if assets.exists() {
-            add_path(&mut by_key, "stone", &assets, stone_dir, &assets, false)?;
+            add_path(&mut selection.files, "stone", &assets, stone_dir, false)?;
         }
     }
 
-    Ok(AssetSelection {
-        assets: by_key
-            .into_iter()
-            .map(|(key, source)| ReleaseAsset { key, source })
-            .collect(),
-        missing,
-    })
+    Ok(selection)
 }
 
 pub fn resolve_asset_with_overlays(
@@ -240,23 +239,16 @@ pub fn resolve_asset_with_overlays(
     if !logical_key.starts_with("assets/") || logical_key.contains('\\') {
         anyhow::bail!("asset key must be a canonical assets-relative key: {logical_key:?}");
     }
-    let mut candidates = Vec::with_capacity(overlays.len() + 1);
-    candidates.push(project_dir.join(logical_key));
-    candidates.extend(
-        overlays
-            .iter()
-            .rev()
-            .map(|overlay| overlay.join(logical_key)),
-    );
-    for candidate in candidates.into_iter().rev() {
-        if candidate.is_file() {
-            return Ok(Some(ReleaseAsset {
-                key: key_for(game_key, logical_key),
-                source: candidate,
-            }));
-        }
-    }
-    Ok(None)
+    Ok(overlays
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(std::iter::once(project_dir))
+        .map(|root| root.join(logical_key))
+        .find(|path| path.is_file())
+        .map(|source| ReleaseAsset {
+            key: key_for(game_key, logical_key),
+            source,
+        }))
 }
 
 pub fn resolve_worktree_asset(
@@ -264,18 +256,7 @@ pub fn resolve_worktree_asset(
     game_key: &str,
     logical_key: &str,
 ) -> Result<Option<ReleaseAsset>> {
-    validate_relative_key(logical_key, "asset key")?;
-    if !logical_key.starts_with("assets/") || logical_key.contains('\\') {
-        anyhow::bail!("asset key must be a canonical assets-relative key: {logical_key:?}");
-    }
-    let candidate = project_dir.join(logical_key);
-    if candidate.is_file() {
-        return Ok(Some(ReleaseAsset {
-            key: key_for(game_key, logical_key),
-            source: candidate,
-        }));
-    }
-    Ok(None)
+    resolve_asset_with_overlays(project_dir, game_key, &[], logical_key)
 }
 
 #[cfg(test)]
@@ -322,19 +303,6 @@ mod worktree_bank_tests {
     }
 }
 
-/// Bank inserts leave the selection unsorted; the caller sorts once after all of them.
-pub fn replace_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset) {
-    if let Some(existing) = selection
-        .assets
-        .iter_mut()
-        .find(|existing| existing.key == asset.key)
-    {
-        *existing = asset;
-    } else {
-        selection.assets.push(asset);
-    }
-}
-
 fn is_runtime_data_asset(relative: &Path) -> bool {
     let mut components = relative.components();
     matches!(
@@ -351,46 +319,41 @@ fn add_path(
     prefix: &str,
     source: &Path,
     root: &Path,
-    display_source: &Path,
     overwrite: bool,
 ) -> Result<()> {
+    let mut add_file = |path: &Path| -> Result<()> {
+        let relative = path.strip_prefix(root).map_err(|_| {
+            anyhow::anyhow!(
+                "release asset {} escaped its root {}",
+                path.display(),
+                root.display()
+            )
+        })?;
+        if !is_runtime_data_asset(relative) {
+            let key = key_for(prefix, &relative.to_string_lossy());
+            insert_asset(by_key, key, path.to_path_buf(), overwrite);
+        }
+        Ok(())
+    };
     if source.is_dir() {
         for entry in walkdir::WalkDir::new(source)
             .sort_by_file_name()
             .into_iter()
             .filter_entry(|entry| {
-                entry
-                    .path()
-                    .strip_prefix(root)
-                    .map_or(true, |relative| !is_runtime_data_asset(relative))
+                !entry.file_type().is_dir()
+                    || entry
+                        .path()
+                        .strip_prefix(root)
+                        .map_or(true, |relative| !is_runtime_data_asset(relative))
             })
         {
             let entry = entry?;
             if entry.file_type().is_file() {
-                let rel = entry.path().strip_prefix(root).map_err(|_| {
-                    anyhow::anyhow!(
-                        "release asset {} escaped its root {}",
-                        entry.path().display(),
-                        root.display()
-                    )
-                })?;
-                let key = key_for(prefix, &rel.to_string_lossy().replace('\\', "/"));
-                insert_asset(by_key, key, entry.path().to_path_buf(), overwrite);
+                add_file(entry.path())?;
             }
         }
     } else if source.is_file() {
-        let rel = source.strip_prefix(root).map_err(|_| {
-            anyhow::anyhow!(
-                "release asset {} escaped its root {}",
-                display_source.display(),
-                root.display()
-            )
-        })?;
-        if is_runtime_data_asset(rel) {
-            return Ok(());
-        }
-        let key = key_for(prefix, &rel.to_string_lossy().replace('\\', "/"));
-        insert_asset(by_key, key, source.to_path_buf(), overwrite);
+        add_file(source)?;
     }
     Ok(())
 }
@@ -401,18 +364,21 @@ fn insert_asset(
     source: PathBuf,
     overwrite: bool,
 ) {
-    if overwrite {
-        if let Some(previous) = by_key.insert(key.clone(), source.clone()) {
+    match by_key.entry(key) {
+        std::collections::btree_map::Entry::Vacant(slot) => {
+            slot.insert(source);
+        }
+        std::collections::btree_map::Entry::Occupied(mut slot) if overwrite => {
             log::info!(
                 target: "ASSETS",
                 "overlay {} replaces {} for {}",
                 source.display(),
-                previous.display(),
-                key
+                slot.get().display(),
+                slot.key()
             );
+            slot.insert(source);
         }
-    } else {
-        by_key.entry(key).or_insert(source);
+        _ => {}
     }
 }
 
@@ -455,20 +421,20 @@ pub fn stage_assets(selection: &AssetSelection, output_dir: &Path) -> Result<Sta
 }
 
 pub(crate) fn copy_assets(selection: &AssetSelection, output_dir: &Path) -> Result<StagedAssets> {
-    let mut keys = Vec::with_capacity(selection.assets.len());
-    for asset in &selection.assets {
-        let destination = output_dir.join(&asset.key);
+    let mut keys = Vec::with_capacity(selection.files.len());
+    for (key, source) in &selection.files {
+        let destination = output_dir.join(key);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(&asset.source, &destination).map_err(|e| {
+        std::fs::copy(source, &destination).map_err(|e| {
             anyhow::anyhow!(
                 "copying release asset {} to {}: {e}",
-                asset.source.display(),
+                source.display(),
                 destination.display()
             )
         })?;
-        keys.push(asset.key.clone());
+        keys.push(key.clone());
     }
     Ok(StagedAssets {
         file_count: keys.len(),
@@ -492,16 +458,17 @@ fn validate_relative_key(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn normalize_key(value: &str) -> String {
-    value.trim_start_matches("./").replace('\\', "/")
-}
-
 fn key_for(prefix: &str, relative: &str) -> String {
-    let relative = normalize_key(relative);
-    if relative == prefix || relative.starts_with(&format!("{prefix}/")) {
-        relative
+    let relative = relative.replace('\\', "/");
+    let name = relative.trim_start_matches("./");
+    if name == prefix
+        || name
+            .strip_prefix(prefix)
+            .is_some_and(|tail| tail.starts_with('/'))
+    {
+        name.to_owned()
     } else {
-        format!("{prefix}/{relative}")
+        format!("{prefix}/{name}")
     }
 }
 
@@ -538,15 +505,11 @@ mod tests {
 
         let selected =
             select_assets(&project, "games/demo", Some(&cfg), Some(engine.path())).unwrap();
-        let keys: Vec<_> = selected
-            .assets
-            .iter()
-            .map(|asset| asset.key.as_str())
-            .collect();
-        assert!(keys.contains(&"games/demo/assets/nested/a.txt"));
-        assert!(keys.contains(&"games/demo/saves/level.json"));
-        assert!(keys.contains(&"stone/engine/shaders/common/a.glsl"));
-        assert!(keys.contains(&"stone/engine/assets/fonts/default.ttf"));
+        let keys = &selected.files;
+        assert!(keys.contains_key("games/demo/assets/nested/a.txt"));
+        assert!(keys.contains_key("games/demo/saves/level.json"));
+        assert!(keys.contains_key("stone/engine/shaders/common/a.glsl"));
+        assert!(keys.contains_key("stone/engine/assets/fonts/default.ttf"));
 
         let out = root.path().join("staged");
         let staged = stage_assets(&selected, &out).unwrap();
@@ -592,14 +555,10 @@ mod tests {
             Some(&root.path().join("stone")),
         )
         .unwrap();
-        let keys: Vec<_> = selection
-            .assets
-            .iter()
-            .map(|asset| asset.key.as_str())
-            .collect();
-        assert!(keys.contains(&"demo/assets/ui/hud.png"));
-        assert!(!keys.contains(&"demo/assets/.runtime-data/boot.bin"));
-        assert!(!keys.contains(&"demo/assets/.runtime-data/explicit.bin"));
+        let keys = &selection.files;
+        assert!(keys.contains_key("demo/assets/ui/hud.png"));
+        assert!(!keys.contains_key("demo/assets/.runtime-data/boot.bin"));
+        assert!(!keys.contains_key("demo/assets/.runtime-data/explicit.bin"));
 
         let output = root.path().join("staged/assets");
         let staged = stage_assets(&selection, &output).unwrap();
@@ -631,10 +590,7 @@ mod tests {
         std::fs::create_dir_all(project.join("assets")).unwrap();
         std::fs::write(project.join("assets/a.txt"), "a").unwrap();
         let selection = AssetSelection {
-            assets: vec![ReleaseAsset {
-                key: "demo/assets/a.txt".to_string(),
-                source: project.join("assets/a.txt"),
-            }],
+            files: BTreeMap::from([("demo/assets/a.txt".into(), project.join("assets/a.txt"))]),
             missing: vec![],
         };
         let out = root.path().join("staged/assets");
@@ -758,11 +714,7 @@ mod tests {
             &[high.clone(), low.clone()],
         )
         .unwrap();
-        let by_key: BTreeMap<_, _> = selected
-            .assets
-            .iter()
-            .map(|asset| (asset.key.as_str(), asset.source.as_path()))
-            .collect();
+        let by_key = selected.files;
 
         assert_eq!(
             by_key["demo/assets/sfx/shared.ogg"],

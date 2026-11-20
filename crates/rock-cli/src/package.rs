@@ -49,16 +49,8 @@ fn package_context(project: &str) -> Result<PackageContext> {
 }
 
 pub(crate) fn sound_project_path_for(project: &str) -> Result<Option<PathBuf>> {
-    let (_, config) = project_and_config(project)?;
-    if config
-        .as_ref()
-        .and_then(|config| config.sound.as_ref())
-        .is_none()
-    {
-        return Ok(None);
-    }
-    let context = package_context(project)?;
-    rock_engine_host::release::sound_project_path(&context.project, context.config.as_ref())?
+    let (project, config) = project_and_config(project)?;
+    rock_engine_host::release::sound_project_path(&project, config.as_ref())?
         .map(|path| path.canonicalize().map_err(Into::into))
         .transpose()
 }
@@ -139,26 +131,17 @@ pub(crate) fn check_project_assets(project: &Path) -> Result<()> {
 }
 
 pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
-    let (_, config) = project_and_config(project)?;
-    if config
-        .as_ref()
-        .and_then(|config| config.sound.as_ref())
-        .is_none()
-    {
+    let (project, config) = project_and_config(project)?;
+    let Some(config) = config.filter(|config| config.sound.is_some()) else {
         return Ok(None);
-    }
-    let context = package_context(project)?;
-    let overlays = rock_engine_host::release::configured_asset_overlays_from_with_vault(
-        &context.project,
-        context.config.as_ref(),
-        std::env::var_os(rock_engine_host::release::ASSET_OVERLAYS_ENV).as_deref(),
-        &rock_engine_host::art_vault::root,
-    )?;
+    };
+    let game_key = &config.package.name;
+    let overlays = rock_engine_host::release::asset_overlay_roots(&project, Some(&config))?;
     let mut selection = rock_engine_host::release::AssetSelection::default();
     let Some(sound) = crate::asset_selection::prepare_sound(
-        &context.project,
-        &context.game_key,
-        context.config.as_ref(),
+        &project,
+        game_key,
+        Some(&config),
         &overlays,
         &mut selection,
         false,
@@ -166,8 +149,8 @@ pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
     else {
         return Ok(None);
     };
-    let sound = compile_sound_project(&context.game_key, sound)?;
-    let bank_path = context.project.join("assets/sound_bank.json");
+    let sound = compile_sound_project(game_key, sound)?;
+    let bank_path = project.join("assets/sound_bank.json");
     match std::fs::read(&bank_path) {
         Ok(existing) if existing == sound.bank_bytes => return Ok(Some(bank_path)),
         Ok(_) => {}
@@ -742,9 +725,9 @@ mod tests {
         );
         assert_eq!(
             selection
-                .assets
-                .iter()
-                .map(|asset| asset.key.as_str())
+                .files
+                .keys()
+                .map(String::as_str)
                 .collect::<Vec<_>>(),
             [
                 "game/assets/variants/take_01.wav",
@@ -856,12 +839,10 @@ mod tests {
             crate::asset_selection::prepare(fixture.path(), "fixture", None, &[overlay])
                 .expect("the project-owned bank should be selected")
                 .assets;
-        let bank = selection
-            .assets
-            .iter()
-            .find(|asset| asset.key == format!("fixture/{bank_path}"))
-            .expect("selected bank");
-        assert_eq!(bank.source, fixture.path().join(bank_path));
+        assert_eq!(
+            selection.files[&format!("fixture/{bank_path}")],
+            fixture.path().join(bank_path)
+        );
     }
 
     #[test]

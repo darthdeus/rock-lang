@@ -19,32 +19,27 @@ pub(crate) struct PreparedAssets {
 
 impl PreparedAssets {
     pub fn validate(&self) -> Result<()> {
-        let sources: BTreeMap<_, _> = self
-            .assets
-            .assets
-            .iter()
-            .map(|asset| (asset.key.as_str(), asset.source.as_path()))
-            .collect();
+        let sources = &self.assets.files;
         for bank in &self.visual {
-            bank.verify(&sources)?;
+            bank.verify(sources)?;
         }
-        for asset in &self.assets.assets {
-            if !asset.key.starts_with(&self.game_prefix)
-                || !asset.key.ends_with(".jsonl")
-                || self.visual.iter().any(|bank| bank.bank_key == asset.key)
+        for (key, source) in sources {
+            if !key.starts_with(&self.game_prefix)
+                || !key.ends_with(".jsonl")
+                || self.visual.iter().any(|bank| bank.bank_key == *key)
             {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(&asset.source) else {
+            let Ok(text) = std::fs::read_to_string(source) else {
                 continue;
             };
             let (lines, errors) = rock_visual_bank::parse_bank(&text);
             if lines.is_empty() || !errors.is_empty() {
                 continue;
             }
-            log::warn!(target: "ASSETS", "visual bank {} is not declared in [release].visual_banks; declare it to include its sheet dependencies", asset.key);
-            SelectedVisual::new(asset.key.clone(), self.game_prefix.clone(), lines, errors)?
-                .verify(&sources)?;
+            log::warn!(target: "ASSETS", "visual bank {} is not declared in [release].visual_banks; declare it to include its sheet dependencies", key);
+            SelectedVisual::new(key.clone(), self.game_prefix.clone(), lines, errors)?
+                .verify(sources)?;
         }
         Ok(())
     }
@@ -90,7 +85,7 @@ impl SelectedVisual {
         })
     }
 
-    fn verify(&self, sources: &BTreeMap<&str, &Path>) -> Result<()> {
+    fn verify(&self, sources: &BTreeMap<String, PathBuf>) -> Result<()> {
         let prefix = &self.game_prefix;
         self.lines
             .par_iter()
@@ -150,9 +145,8 @@ pub(crate) fn prepare(
     )?;
     let bank_paths = release::visual_bank_paths(project, config)?;
     if !bank_paths.is_empty() {
-        assets.assets.retain(|asset| {
-            !asset.key.contains("/assets/.eat/")
-                && !overlays.iter().any(|root| asset.source.starts_with(root))
+        assets.files.retain(|key, source| {
+            !key.contains("/assets/.eat/") && !overlays.iter().any(|root| source.starts_with(root))
         });
     }
     let sound = prepare_sound(project, game_key, config, overlays, &mut assets, true)?;
@@ -169,9 +163,6 @@ pub(crate) fn prepare(
         .map(|path| select_visual_bank(project, game_key, path, overlays, &mut assets))
         .collect::<Result<Vec<_>>>()?;
     include_declared_overlay_assets(project, game_key, config, overlays, &visual, &mut assets)?;
-    assets
-        .assets
-        .sort_by(|left, right| left.key.cmp(&right.key));
     Ok(PreparedAssets {
         assets,
         sound,
@@ -212,7 +203,7 @@ pub(crate) fn prepare_sound(
         if let Some(asset) = release::resolve_asset_with_overlays(project, game_key, overlays, key)?
         {
             sources.insert(key.clone(), asset.source.clone());
-            release::replace_release_asset(selection, asset);
+            selection.insert(asset);
         } else if require_assets {
             anyhow::bail!(
                 "sound project {}: selected source disappeared: {key}",
@@ -305,7 +296,7 @@ fn include_declared_overlay_assets(
                 "package: declared overlay asset resolves outside configured overlays: {logical_key}"
             );
         }
-        rock_engine_host::release::replace_release_asset(selection, asset);
+        selection.insert(asset);
     }
     Ok(())
 }
@@ -329,11 +320,11 @@ fn select_visual_bank(
         lines,
         errors,
     )?;
-    release::replace_release_asset(selection, bank_asset);
+    selection.insert(bank_asset);
     let mut missing = Vec::new();
     for (file, line) in release::bank_files(&bank.lines) {
         match release::resolve_asset_with_overlays(project_dir, game_key, overlays, &file)? {
-            Some(asset) => release::replace_release_asset(selection, asset),
+            Some(asset) => selection.insert(asset),
             None => missing.push(format!("{}: {file}", line.describe())),
         }
     }
@@ -421,16 +412,15 @@ mod tests {
         assert!(
             selected
                 .assets
-                .assets
-                .iter()
-                .any(|asset| asset.key == format!("game/{sheet}/material.png"))
+                .files
+                .contains_key(&format!("game/{sheet}/material.png"))
         );
         assert!(
             !selected
                 .assets
-                .assets
+                .files
                 .iter()
-                .any(|asset| asset.source == stale || asset.key.ends_with("assets/vfx/blast.png"))
+                .any(|(key, source)| *source == stale || key.ends_with("assets/vfx/blast.png"))
         );
     }
 
