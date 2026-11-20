@@ -458,7 +458,6 @@ pub struct InstanceGraph {
     pub contributions: BTreeMap<Owner, Box<Contribution>>,
     pub root_instances: BTreeSet<Instance>,
     pub instances: BTreeSet<Instance>,
-    pub run_stats: RunStats,
     last_run_owners: BTreeSet<Owner>,
     /// An always-emitted owner is not an instance, so these are what revisit the
     /// instances whose root or fn-value status moved.
@@ -588,7 +587,6 @@ pub fn build_in(
     let t_seed = t.elapsed();
     let t = Instant::now();
     let stats = g.run(ws, pending, false);
-    g.run_stats = stats;
     let t_run = t.elapsed();
     let t = Instant::now();
     g.derive(ws);
@@ -655,7 +653,6 @@ impl InstanceGraph {
     /// Release one-shot build records, keeping the shared type arena.
     pub fn take_records(&mut self) -> Self {
         let mut empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
-        empty.run_stats = self.run_stats;
         empty.revision = self.revision;
         std::mem::replace(self, empty)
     }
@@ -669,7 +666,6 @@ impl InstanceGraph {
             lost: BTreeSet::new(),
             root_instances: BTreeSet::new(),
             instances: BTreeSet::new(),
-            run_stats: RunStats::default(),
             last_run_owners: BTreeSet::new(),
             last_run_always_targets: BTreeSet::new(),
             delta_added: BTreeSet::new(),
@@ -1669,7 +1665,7 @@ impl InstanceGraph {
         affected.extend(pending_roots);
         affected.sort();
         affected.dedup();
-        self.run_stats = self.run(ws, affected.clone(), true);
+        self.run(ws, affected.clone(), true);
         let changed_decls = changed.iter().filter_map(|(module, owner)| match owner {
             BodyOwner::Function(func) => Some(skull_mir::lower::canonical_variant(
                 ws,
@@ -1968,7 +1964,7 @@ impl InstanceGraph {
 }
 
 #[derive(Default, Debug, Clone, Copy)]
-pub struct RunStats {
+struct RunStats {
     pub expanded: usize,
     pub settle_rounds: usize,
 }
