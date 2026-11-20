@@ -424,13 +424,6 @@ M.InputText = M.InputText  or function(i1, i2, i3, i4, i5, i6)
     local out = C.igInputText(i1, i2, i3, i4, i5, i6)
     return out
 end
-M.InputTextMultiline = M.InputTextMultiline  or function(i1, i2, i3, i4, i5, i6, i7)
-    jit.off(true)
-    if i4 == nil then i4 = M.ImVec2_Float(0, 0) end
-    if i5 == nil then i5 = 0 end
-    local out = C.igInputTextMultiline(i1, i2, i3, i4, i5, i6, i7)
-    return out
-end
 M.InvisibleButton = M.InvisibleButton  or function(i1, i2, i3)
     jit.off(true)
     if i3 == nil then i3 = 0 end

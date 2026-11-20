@@ -16,7 +16,6 @@ uint8_t stone_ui_probe_retire(const char *kind, uint64_t handle);
 int stone_ui_probe_consumed(void);
 int stone_ui_probe_z(int index);
 double stone_ui_probe_vertex(int index, int lane);
-uint8_t stone_ui_probe_write(const char *path);
 
 typedef struct StoneWindow StoneWindow;
 typedef struct StoneGLContext StoneGLContext;
@@ -95,7 +94,6 @@ void stone_get_global_mouse_position(int* x, int* y);
 // Cursor functions
 void stone_show_cursor(bool show);
 uint64_t stone_create_cursor(const char* path, int hot_x, int hot_y);
-uint64_t stone_create_cursor_from_image_data(uint64_t image_data_handle, int hot_x, int hot_y);
 uint64_t stone_set_system_cursor(int cursor_type);
 void stone_set_cursor(uint64_t cursor_id);
 void stone_reset_cursor(void);

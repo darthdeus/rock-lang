@@ -735,21 +735,6 @@ pub inline(lua) fn imgui_input_text(
     return changed, ffi.string(buf)
 """
 
-pub inline(lua) fn imgui_input_text_multiline(
-    label: string,
-    buffer: string,
-    max_len: int,
-    w: float,
-    h: float,
-    flags: int
-) -> (bool, string) = """
-    local buf = ffi.new("char[?]", max_len + 1)
-    ffi.copy(buf, buffer)
-    local changed = imgui.InputTextMultiline(label, buf, max_len, {w, h}, flags)
-    return changed, ffi.string(buf)
-"""
-
-
 pub extern(lua, "imgui.ClearActiveID") fn imgui_clear_active_item()
 
 pub extern(lua, "imgui.SetKeyboardFocusHere") fn imgui_set_keyboard_focus_here(offset: int)

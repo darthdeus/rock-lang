@@ -187,6 +187,7 @@ pub(crate) fn windowless() -> bool {
     })
 }
 
+#[cfg(test)]
 fn snapshot() -> Value {
     PROBE.with(|p| {
         let p = p.borrow();
@@ -545,19 +546,6 @@ pub extern "C" fn stone_ui_probe_vertex(index: c_int, lane: c_int) -> f64 {
         p.semantic.get(index as usize)?["vertices"][0]["values"][lane as usize].as_f64()
     };
     PROBE.with(|p| semantic(&p.borrow())).unwrap_or(f64::NAN)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_ui_probe_write(path: *const c_char) -> bool {
-    let result = unsafe { text(path) }.and_then(|path| {
-        let bytes = serde_json::to_vec_pretty(&snapshot()).map_err(|e| e.to_string())?;
-        std::fs::write(path, bytes).map_err(|e| e.to_string())
-    });
-    if let Err(e) = result {
-        crate::log_once!("UI_PROBE", "trace write failed: {e}");
-        return false;
-    }
-    true
 }
 
 #[cfg(test)]

@@ -53,7 +53,6 @@ ImVec4
 Image
 Indent
 InputText
-InputTextMultiline
 InvisibleButton
 IsAnyItemActive
 IsItemActivated

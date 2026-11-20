@@ -29,7 +29,6 @@ pub extern(ffi, "stone") fn stone_ui_probe_accepted() -> int
 pub extern(ffi, "stone") fn stone_ui_probe_consumed() -> int
 pub extern(ffi, "stone") fn stone_ui_probe_z(index: int) -> int
 pub extern(ffi, "stone") fn stone_ui_probe_vertex(index: int, lane: int) -> float
-pub extern(ffi, "stone") fn stone_ui_probe_write(path: string) -> bool
 pub extern(ffi, "stone") fn stone_ui_probe_retire(kind: string, handle: uint) -> bool
 pub extern(ffi, "stone") fn stone_ui_probe_resource(kind: string, handle: uint, source: string, generation: int) -> bool
 

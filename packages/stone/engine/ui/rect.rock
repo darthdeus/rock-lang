@@ -108,14 +108,6 @@ fn ui_ctx_pointer(ctx: int, ref_h: float) -> Vec2? {
 pub fn UiRect.pointer(r) -> Vec2? { return ui_ctx_pointer(r.ctx, r.ref_h) }
 fn UiRect.target_pointer(r) -> Vec2? { return ui_ctx_target_pointer(r.ctx) }
 
-pub @pure fn UiRect.on_composite(r, reference_height: float = 0.0) -> UiRect {
-    return UiRect { ..r, ctx: UI_CTX_COMPOSITE, ref_h: reference_height }
-}
-
-pub @pure fn UiRect.on_output(r) -> UiRect {
-    return UiRect { ..r, ctx: UI_CTX_OUTPUT, ref_h: 0.0 }
-}
-
 pub @pure fn UiRect.at_z(r, z: int) -> UiRect {
     return UiRect { ..r, z }
 }
@@ -131,8 +123,6 @@ pub @pure fn UiRect.at_z(r, z: int) -> UiRect {
 // reference height, X flexes) and the user's scale preference into one
 // factor. It is resolved with the rest of the frame, in FrameView.ui_scale.
 // Lifetime count of text draws whose glyphs did not fit their box. The
-// oracle a derived label size is checked against (skin_label_size);
-// the sibling log names only the first box per interval.
 pub global UI_TEXT_OVERFLOW_N: int = 0
 
 pub fn ui_text_overflow_count() -> int { return UI_TEXT_OVERFLOW_N }
@@ -357,10 +347,6 @@ pub @pure fn UiRect.skip_bottom(r, cut: float) -> UiRect {
     return UiRect { ..r, h: r.h - cut }
 }
 
-pub @pure fn UiRect.take_top_left(r, size: Vec2) -> UiRect {
-    return UiRect { ..r, w: size.x, h: size.y }
-}
-
 pub @pure fn UiRect.take_top_right(r, size: Vec2) -> UiRect {
     return UiRect { ..r, x: r.x + r.w - size.x, w: size.x, h: size.y }
 }
@@ -374,10 +360,7 @@ pub @pure fn UiRect.take_bottom_right(r, size: Vec2) -> UiRect {
 }
 
 // Edge-center cuts: take a size-sized sub-rect anchored to one edge
-// of `r`, centered along the perpendicular axis. Pairs with the
-// corner cuts above for the full 9-cell layout vocabulary.
-//   top_center    bottom_center  -> horizontally centered, hugs top/bottom
-//   left_center   right_center   -> vertically centered, hugs left/right
+// of `r`, centered along the perpendicular axis.
 pub @pure fn UiRect.take_top_center(r, size: Vec2) -> UiRect {
     return UiRect { ..r, x: r.x + (r.w - size.x) / 2, w: size.x, h: size.y }
 }
@@ -388,10 +371,6 @@ pub @pure fn UiRect.take_bottom_center(r, size: Vec2) -> UiRect {
 
 pub @pure fn UiRect.take_left_center(r, size: Vec2) -> UiRect {
     return UiRect { ..r, y: r.y + (r.h - size.y) / 2, w: size.x, h: size.y }
-}
-
-pub @pure fn UiRect.take_right_center(r, size: Vec2) -> UiRect {
-    return UiRect { ..r, x: r.x + r.w - size.x, y: r.y + (r.h - size.y) / 2, w: size.x, h: size.y }
 }
 
 pub @pure fn UiRect.take_center(r, size: Vec2) -> UiRect {
@@ -712,20 +691,6 @@ fn UiRect.nine_patch_batch(
 
     ui_ctx_pop(prev)
     return batch
-}
-
-pub @inline
-fn UiRect.split_diagonal(r, tl_color: Color, br_color: Color) -> UiRect {
-    let s = ui_to_screen(r)
-    let x1 = s.x
-    let y1 = s.y
-    let x2 = s.x + s.w
-    let y2 = s.y + s.h
-    let prev = ui_ctx_push(r)
-    px_triangle(v(x1, y1), v(x2, y1), v(x1, y2), tl_color, r.z)
-    px_triangle(v(x2, y1), v(x2, y2), v(x1, y2), br_color, r.z)
-    ui_ctx_pop(prev)
-    return r
 }
 
 pub @inline

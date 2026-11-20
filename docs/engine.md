@@ -241,9 +241,8 @@ picked, outlined, depth-sorted or lit belongs in `@draw`.
 
 The reverse trap leaves nothing to see. During draw systems the window is
 bound, and `present_composite()` later blits the scene composite over it. A
-queued batch is submitted into the composite; an immediate draw
-(`draw_sampled_texture`, a raw sprite draw) issued from `@draw` goes straight
-to the window and is overwritten, so the region reads as background.
+queued batch is submitted into the composite. An immediate draw issued from
+`@draw` goes straight to the window, where the composite overwrites it.
 
 A custom-shader sprite mesh consumes the batched `Vertex` layout and owns the
 y-sort depth remap: the vertex stage writes `position.z` from `pivot_y`

@@ -28,13 +28,6 @@ fn skin_label_line_h(font_size: float) -> float {
     return v(float(s.corner.x) * s.scale * 2.0, float(s.corner.y) * s.scale * 2.0)
 }
 
-pub fn skin_label_size(s: UiSkin, text: string, font_size: float, extra: Vec2 = v(0.0, 0.0)) -> Vec2 {
-    let floor = skin_corner_floor(s)
-    let w = measure_ui(text, font_size).x + (s.pad_l + s.pad_r) * s.scale + extra.x
-    let h = skin_label_line_h(font_size) + (s.pad_t + s.pad_b) * s.scale + extra.y
-    return v(max(w, floor.x), max(h, floor.y))
-}
-
 pub fn skin_label_rich_size(s: UiSkin, spans: [TextSpan], font_size: float, extra: Vec2 = v(0.0, 0.0)) -> Vec2 {
     let floor = skin_corner_floor(s)
     let w = measure_rich_ui(spans, font_size).x + (s.pad_l + s.pad_r) * s.scale + extra.x

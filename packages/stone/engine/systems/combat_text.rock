@@ -266,10 +266,6 @@ pub fn WorldTextDisplay.world_anchor(c) -> Vec2 {
     return c.world_pos() + c.offset + sample.offset + c.composition_offset
 }
 
-pub fn WorldTextDisplay.screen_target_in(c, view: FrameView) -> Vec2 {
-    return world_to_screen_in(view, c.world_anchor())
-}
-
 pub fn world_text_plain_text(c: WorldTextDisplay) -> string {
     let text = ""
     for span in c.spans { text = text + span.text }

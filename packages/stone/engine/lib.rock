@@ -101,7 +101,6 @@ fn stone_init_done() {
 
 fn mark_stone_initialized() { STONE_INITIALIZED = true }
 
-pub @inline inline(lua) fn stone_sdl_video_driver_name() -> string = "return ffi.string(stone.stone_sdl_video_driver())"
 pub @inline inline(lua) fn stone_gl_swap_count() -> int = "return tonumber(stone.stone_gl_swap_count())"
 
 fn stone_begin_frame() {
@@ -295,7 +294,6 @@ pub extern(ffi, "stone") fn stone_show_cursor(show: bool)
 
 pub extern(ffi, "stone") fn stone_create_cursor(path: string, hot_x: int, hot_y: int) -> int
 
-pub extern(ffi, "stone") fn stone_create_cursor_from_image_data(image_data_handle: int, hot_x: int, hot_y: int) -> int
 
 pub extern(ffi, "stone") fn stone_set_system_cursor(cursor_type: int) -> int
 

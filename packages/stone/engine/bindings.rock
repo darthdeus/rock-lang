@@ -884,13 +884,6 @@ pub extern(lua, "stone.stone_draw_fullscreen_quad") fn draw_fullscreen_quad()
 extern(lua, "stone.stone_set_fullscreen_uv_scale") fn set_fullscreen_uv_scale(sx: float, sy: float)
 
 
-pub fn draw_sampled_texture(texture: SampledTexture, x: float, y: float, w: float, h: float,
-    sampling: TextureFilter = TextureFilter::Nearest) {
-    let dims = sampled_texture_dims(texture)
-    draw_image_immediate(texture, v(x + w / 2.0, y + h / 2.0), v(w, h),
-        source: irect(0, 0, dims.x, dims.y), sampling: sampling)
-}
-
 pub fn font_scale(font: Font, display_size: float) -> float {
     let d = font.data() ?? return 0.0
     return display_size * FONT_RENDER_SCALE / (d.pixel_size as float)

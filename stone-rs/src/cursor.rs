@@ -8,7 +8,6 @@ use sdl2::pixels::PixelFormatEnum;
 use sdl2::surface::Surface;
 
 use crate::handles::Class;
-use crate::image_data::with_image_data;
 
 /// Tracks the desired cursor visibility set by the game via stone_show_cursor.
 /// ImGui's NewFrame resets SDL cursor state every frame, so we re-apply after it.
@@ -95,20 +94,6 @@ pub extern "C" fn stone_create_cursor(path: *const c_char, hot_x: c_int, hot_y: 
 
 fn decode_cursor_image(path_str: &str) -> Option<(Vec<u8>, u32, u32)> {
     crate::image_texture::decode_rgba_image(path_str)
-}
-
-/// Create a cursor from an ImageData handle. Returns cursor_id (0 = error).
-/// hot_x/hot_y is the click point relative to the top-left of the image.
-#[no_mangle]
-pub extern "C" fn stone_create_cursor_from_image_data(
-    image_data_handle: u64,
-    hot_x: c_int,
-    hot_y: c_int,
-) -> u64 {
-    with_image_data(image_data_handle, |width, height, data| {
-        create_cursor_from_rgba(data, width, height, hot_x, hot_y)
-    })
-    .unwrap_or(0)
 }
 
 #[no_mangle]

@@ -77,14 +77,6 @@ pub extern "C" fn stone_get_image_data_count() -> c_int {
     IMAGE_DATAS.with(|ids| ids.borrow().len() as c_int)
 }
 
-/// Access an ImageData's raw pixels by handle. Returns None if handle is invalid.
-pub(crate) fn with_image_data<F, R>(handle: u64, f: F) -> Option<R>
-where
-    F: FnOnce(u32, u32, &[u8]) -> R,
-{
-    get(handle, |image| f(image.width, image.height, &image.data))
-}
-
 #[no_mangle]
 pub extern "C" fn stone_create_image_data(width: c_int, height: c_int) -> u64 {
     if width <= 0 || height <= 0 {
@@ -484,8 +476,8 @@ mod tests {
     use super::*;
 
     fn contents(handle: u64) -> Option<(u32, u32, Vec<u8>)> {
-        with_image_data(handle, |width, height, bytes| {
-            (width, height, bytes.to_vec())
+        get(handle, |image| {
+            (image.width, image.height, image.data.clone())
         })
     }
 
