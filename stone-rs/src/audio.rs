@@ -2310,46 +2310,25 @@ mod tests {
     }
 
     #[test]
-    fn bare_submixer_goes_deaf_after_running_dry() {
+    fn bus_survives_going_silent_where_a_bare_submixer_goes_deaf() {
         let (parent, mut out) = rodio::mixer::mixer(ch2(), sr());
         let (child, child_src) = rodio::mixer::mixer(ch2(), sr());
         parent.add(child_src);
         child.add(blip());
-        assert!(
-            heard(&mut out, 64),
-            "control: child should be audible at first"
-        );
-
+        assert!(heard(&mut out, 64), "control: child is audible at first");
         child.add(blip());
         assert!(
             !heard(&mut out, 64),
-            "control assumption broken: a bare sub-mixer survived running dry, \
-             so bus_survives_going_silent is not testing anything"
+            "control: a bare sub-mixer that survives running dry tests nothing below"
         );
-    }
 
-    #[test]
-    fn bus_survives_going_silent() {
         let (bus, mut out) = wired();
-
+        assert_eq!(bus.samples_pulled(), 0);
         bus.mixer().add(blip());
         assert!(heard(&mut out, 64), "bus should be audible at first");
-
         bus.mixer().add(blip());
         assert!(heard(&mut out, 64), "bus went deaf after falling silent");
-    }
-
-    /// The pull counter is what lets a sim observe that a bus is live without
-    /// capturing audio.
-    #[test]
-    fn bus_counts_pulled_samples() {
-        let (bus, mut out) = wired();
-
-        assert_eq!(bus.samples_pulled(), 0);
-        for _ in 0..64 {
-            let _ = out.next();
-        }
-        assert_eq!(bus.samples_pulled(), 64, "every parent pull is a bus pull");
+        assert_eq!(bus.samples_pulled(), 128, "every parent pull is a bus pull");
     }
 
     /// Stereo Nyquist: each channel alternates +1/-1, the worst case a
@@ -2427,27 +2406,22 @@ mod tests {
     }
 
     #[test]
-    fn lowpass_open_passes_audible_highs() {
-        let level = bus_level(square(40_000, 8), |_| {});
+    fn lowpass_passes_highs_when_open_and_crushes_them_when_closed() {
+        let open = bus_level(square(40_000, 8), |_| {});
         assert!(
-            level > 0.7,
-            "wide-open lowpass should pass 5.5kHz, got {level}"
+            open > 0.7,
+            "wide-open lowpass should pass 5.5kHz, got {open}"
         );
-    }
-
-    #[test]
-    fn lowpass_attenuates_highs() {
-        let level = bus_level(square(40_000, 8), |bus| bus.set_lowpass(400.0, 0.707));
+        let closed = bus_level(square(40_000, 8), |bus| bus.set_lowpass(400.0, 0.707));
         assert!(
-            level < 0.05,
-            "400Hz lowpass should crush 5.5kHz, got {level}"
+            closed < 0.05,
+            "400Hz lowpass should crush 5.5kHz, got {closed}"
         );
-    }
-
-    #[test]
-    fn lowpass_open_still_rejects_nyquist() {
-        let level = bus_level(nyquist(40_000), |_| {});
-        assert!(level < 0.01, "Nyquist sits above max cutoff, got {level}");
+        let nyquist = bus_level(nyquist(40_000), |_| {});
+        assert!(
+            nyquist < 0.01,
+            "Nyquist sits above max cutoff, got {nyquist}"
+        );
     }
 
     /// Distortion must actually change the signal, and soft-clipping must not
@@ -2536,21 +2510,6 @@ mod tests {
     }
 
     #[test]
-    fn bus_meter_is_stable_between_reads() {
-        let (bus, mut out) = wired();
-        bus.mixer().add(dc(400_000, 1.0));
-        let _ = mean_abs(&mut out, 8192, 1);
-
-        let first = bus.meter();
-        let second = bus.meter();
-        assert!(first > 0.9, "meter should be lit, got {first}");
-        assert_eq!(first, second, "reading the meter must not consume it");
-
-        let idle = bus.meter();
-        assert_eq!(first, idle, "a poll between callbacks must not read zero");
-    }
-
-    #[test]
     fn bus_meter_falls_after_signal_stops() {
         let (bus, mut out) = wired();
         bus.mixer().add(dc(64, 1.0));
@@ -2558,6 +2517,11 @@ mod tests {
 
         let lit = bus.meter();
         assert!(lit > 0.9, "meter should catch the blip, got {lit}");
+        assert_eq!(
+            bus.meter(),
+            lit,
+            "reading the meter between callbacks must not consume it"
+        );
 
         let _ = mean_abs(&mut out, (0.25 * 44100.0) as usize * 2, 1);
         let falling = bus.meter();
@@ -2610,38 +2574,41 @@ mod tests {
     }
 
     #[test]
-    fn play_params_pass_gain_through_and_clamp_negatives() {
+    fn play_params_clamp_gain_and_bound_speed() {
         assert!((sound_play_params(0.4, 1.0).0 - 0.4).abs() < 1e-6);
         assert_eq!(sound_play_params(-0.3, 1.0).0, 0.0);
+        for speed in [0.0, -1.0, f32::MIN] {
+            let (_, ratio) = sound_play_params(1.0, speed);
+            assert!(ratio >= 0.05, "speed {speed} -> ratio {ratio}");
+        }
+        assert_eq!(sound_play_params(1.0, 500.0).1, 8.0);
+    }
+
+    fn panned(source: SamplesBuffer, pan: Option<f32>) -> Vec<f32> {
+        let pan = pan.map(|pan| Arc::new(AtomicU32::new(pan.to_bits())));
+        voice_source(source, 1.0, 0.0, pan).collect()
     }
 
     #[test]
-    fn centered_voice_source_preserves_authored_stereo() {
-        let source = SamplesBuffer::new(ch2(), sr(), vec![1.0f32, 0.25, 0.5, 0.75]);
-        let out: Vec<f32> = voice_source(source, 1.0, 0.0, None).collect();
-        assert_eq!(out, vec![1.0, 0.25, 0.5, 0.75]);
-    }
+    fn voice_panning_keeps_centered_stereo_and_downmixes_positional_voices() {
+        let stereo = SamplesBuffer::new(ch2(), sr(), vec![1.0f32, 0.25, 0.5, 0.75]);
+        assert_eq!(panned(stereo, None), vec![1.0, 0.25, 0.5, 0.75]);
 
-    #[test]
-    fn positional_voice_source_downmixes_before_panning() {
-        let source = SamplesBuffer::new(ch2(), sr(), vec![1.0f32, 0.0, 0.0, 1.0]);
-        let left: Vec<f32> = voice_source(
-            source.clone(),
-            1.0,
-            0.0,
-            Some(Arc::new(AtomicU32::new((-1.0f32).to_bits()))),
-        )
-        .collect();
-        let right: Vec<f32> = voice_source(
-            source,
-            1.0,
-            0.0,
-            Some(Arc::new(AtomicU32::new(1.0f32.to_bits()))),
-        )
-        .collect();
+        let stereo = SamplesBuffer::new(ch2(), sr(), vec![1.0f32, 0.0, 0.0, 1.0]);
+        assert_eq!(panned(stereo.clone(), Some(-1.0)), vec![0.5, 0.0, 0.5, 0.0]);
+        assert_eq!(panned(stereo, Some(1.0)), vec![0.0, 0.5, 0.0, 0.5]);
 
-        assert_eq!(left, vec![0.5, 0.0, 0.5, 0.0]);
-        assert_eq!(right, vec![0.0, 0.5, 0.0, 0.5]);
+        let mono = SamplesBuffer::new(NonZero::new(1u16).unwrap(), sr(), vec![1.0f32]);
+        let center = panned(mono, Some(0.0));
+        assert_eq!(center.len(), 2);
+        assert!(
+            (center[0] - center[1]).abs() < 1e-6,
+            "center pan must be balanced: {center:?}"
+        );
+        assert!(
+            (center[0] * center[0] + center[1] * center[1] - 1.0).abs() < 1e-6,
+            "center pan must preserve power: {center:?}"
+        );
     }
 
     #[test]
@@ -2661,55 +2628,18 @@ mod tests {
     }
 
     #[test]
-    fn positional_voice_source_uses_constant_power_center() {
-        let source = SamplesBuffer::new(NonZero::new(1u16).unwrap(), sr(), vec![1.0f32]);
-        let out: Vec<f32> = voice_source(
-            source,
-            1.0,
-            0.0,
-            Some(Arc::new(AtomicU32::new(0.0f32.to_bits()))),
-        )
-        .collect();
-        assert_eq!(out.len(), 2);
-        assert!(
-            (out[0] - out[1]).abs() < 1e-6,
-            "center pan must be balanced: {out:?}"
-        );
-        assert!(
-            (out[0] * out[0] + out[1] * out[1] - 1.0).abs() < 1e-6,
-            "center pan must preserve power: {out:?}"
-        );
-    }
-
-    #[test]
-    fn speed_ratio_is_bounded() {
-        for speed in [0.0, -1.0, f32::MIN] {
-            let (_, ratio) = sound_play_params(1.0, speed);
-            assert!(ratio >= 0.05, "speed {speed} -> ratio {ratio}");
-        }
-        assert_eq!(sound_play_params(1.0, 500.0).1, 8.0);
-    }
-
-    #[test]
-    fn decay_caps_output_length_not_source_length() {
+    fn decay_fades_to_silence_over_output_time_not_source_time() {
         use rodio::Source;
 
         let shaped = shaped_source(mono_source(vec![1.0; 1000], false), 0.25, 0.5);
         let out_rate = shaped.sample_rate().get() as f32;
         let secs = shaped.count() as f32 / out_rate;
-
         assert!(
             (secs - 0.5).abs() < 0.02,
             "expected ~0.5s of playback, got {secs}s at {out_rate} Hz"
         );
-    }
 
-    /// ... and the envelope really reaches silence, rather than cutting at
-    /// full amplitude (which is a click, and the reason this is a fade at all).
-    #[test]
-    fn decay_ramps_to_silence() {
         let out: Vec<f32> = shaped_source(mono_source(vec![1.0; 1000], false), 1.0, 0.5).collect();
-
         assert!(out[0] > 0.9, "starts at full amplitude, got {}", out[0]);
         let last = out[out.len() - 1];
         assert!(last < 0.05, "ends silent, got {last}");
@@ -2756,21 +2686,8 @@ mod tests {
         wav
     }
 
-    #[test]
-    fn stream_loop_seam_repeats_the_decoded_loop_without_a_click() {
-        const FRAMES: usize = 1000;
-        const PERIOD: usize = 100;
-        const AMPLITUDE: f32 = 0.5;
-        let wav = synthetic_loop_wav(FRAMES, PERIOD, AMPLITUDE);
-        let (decoded, _, channels) = decode_sound_bytes(wav.clone(), "synthetic-loop.wav")
-            .expect("the synthetic loop decodes");
-        assert_eq!(
-            (decoded.len(), channels),
-            (FRAMES * 2, 2),
-            "the full decode holds exactly the authored loop"
-        );
-        let stream = StreamSource::new(Arc::from(wav), true).expect("the synthetic loop streams");
-        let passes = 3;
+    fn looped_stream(bytes: Vec<u8>, decoded: &[f32], passes: usize) -> Vec<f32> {
+        let stream = StreamSource::new(Arc::from(bytes), true).expect("the fixture streams");
         let streamed: Vec<f32> = stream.take(decoded.len() * passes + 6).collect();
         assert_eq!(
             streamed.len(),
@@ -2784,6 +2701,24 @@ mod tests {
                 "streamed sample {index} matches the decoded loop it replaces"
             );
         }
+        streamed
+    }
+
+    #[test]
+    fn stream_loop_seam_repeats_the_decoded_loop_without_a_click() {
+        const FRAMES: usize = 1000;
+        const PERIOD: usize = 100;
+        const AMPLITUDE: f32 = 0.5;
+        let wav = synthetic_loop_wav(FRAMES, PERIOD, AMPLITUDE);
+        let (decoded, _, channels) = decode_sound_bytes(wav.clone(), "synthetic-loop.wav")
+            .expect("the synthetic loop decodes");
+        assert_eq!(
+            (decoded.len(), channels),
+            (FRAMES * 2, 2),
+            "the full decode holds exactly the authored loop"
+        );
+        let passes = 3;
+        let streamed = looped_stream(wav, &decoded, passes);
         let max_step = AMPLITUDE * std::f32::consts::TAU / PERIOD as f32 + 2.0 / 32768.0;
         for pass in 1..passes {
             let seam = pass * decoded.len();
@@ -2800,21 +2735,7 @@ mod tests {
         let bytes = include_bytes!("../../packages/stone/tests/fixtures/tone.ogg").to_vec();
         let (decoded, _, _) = decode_sound_bytes(bytes.clone(), "tone.ogg")
             .expect("the shipped Vorbis fixture decodes");
-        let stream =
-            StreamSource::new(Arc::from(bytes), true).expect("the shipped Vorbis fixture streams");
-        let streamed: Vec<f32> = stream.take(decoded.len() * 2 + 64).collect();
-        assert_eq!(
-            streamed.len(),
-            decoded.len() * 2 + 64,
-            "a looped Vorbis stream never ends"
-        );
-        for (index, sample) in streamed.iter().enumerate() {
-            assert_eq!(
-                *sample,
-                decoded[index % decoded.len()],
-                "streamed Vorbis sample {index} matches the decoded loop"
-            );
-        }
+        looped_stream(bytes, &decoded, 2);
     }
 
     #[test]
@@ -2878,24 +2799,21 @@ mod tests {
     /// the Rock gate agree about which processes have no listener.
     #[test]
     fn output_mute_latches_on_the_same_env_the_rock_gate_reads() {
-        assert!(
-            !output_muted_from(None, None, None),
-            "a shipped run is heard"
-        );
-        assert!(output_muted_from(Some("1"), None, None), "explicit quiet");
-        assert!(
-            output_muted_from(None, Some("1"), None),
-            "headless defaults quiet"
-        );
-        assert!(
-            !output_muted_from(Some("0"), Some("1"), None),
-            "an explicit STONE_QUIET=0 opts a headless audio test back in"
-        );
-        assert!(
-            output_muted_from(Some("0"), None, Some("some_sim")),
-            "a sim is muted even when asking for the gate open"
-        );
-        assert!(output_muted_from(None, None, Some("some_sim")));
+        let cases = [
+            (None, None, None, false),
+            (Some("1"), None, None, true),
+            (None, Some("1"), None, true),
+            (Some("0"), Some("1"), None, false),
+            (Some("0"), None, Some("some_sim"), true),
+            (None, None, Some("some_sim"), true),
+        ];
+        for (quiet, headless, run_sim, muted) in cases {
+            assert_eq!(
+                output_muted_from(quiet, headless, run_sim),
+                muted,
+                "quiet={quiet:?} headless={headless:?} sim={run_sim:?}"
+            );
+        }
     }
 
     #[test]
