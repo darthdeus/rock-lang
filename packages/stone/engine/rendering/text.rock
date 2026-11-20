@@ -226,33 +226,6 @@ fn drop_all_text_batches() {
     }
 }
 
-fn __queue_text_quad(
-    buf: NativeBuffer<Vertex>,
-    vi: int,
-    a: Vec2,
-    b: Vec2,
-    c: Vec2,
-    d: Vec2,
-    u1: float,
-    v1: float,
-    u2: float,
-    v2: float,
-    r: float,
-    g: float,
-    b_: float,
-    alpha: float
-) {
-    __vertex_check_span(buf, vi, 6)
-    let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
-    let step = __vertex_stride_unit(buf)
-    cursor = __write_vertex(cursor, step, a.x, a.y, u1, v1, r, g, b_, alpha)
-    cursor = __write_vertex(cursor, step, b.x, b.y, u2, v1, r, g, b_, alpha)
-    cursor = __write_vertex(cursor, step, c.x, c.y, u2, v2, r, g, b_, alpha)
-    cursor = __write_vertex(cursor, step, a.x, a.y, u1, v1, r, g, b_, alpha)
-    cursor = __write_vertex(cursor, step, c.x, c.y, u2, v2, r, g, b_, alpha)
-    cursor = __write_vertex(cursor, step, d.x, d.y, u1, v2, r, g, b_, alpha)
-}
-
 // The metric em the raster geometry scales by, plus the check that the layout
 // can produce geometry at all. Separate from the geometry below because it is
 // the only part that walks `Font` -> `FontData`, and that walk is loop
@@ -431,7 +404,7 @@ fn text_layout_emit_instance(
             let y0 = origin.y + cached_glyphs[base + 11] * layout_scale
             let x1 = origin.x + cached_glyphs[base + 12] * layout_scale
             let y1 = origin.y + cached_glyphs[base + 13] * layout_scale
-            __queue_text_quad(batch.verts, batch.count,
+            __write_quad(batch.verts, batch.count,
                 v(x0,y0), v(x1,y0), v(x1,y1), v(x0,y1),
                 cached_glyphs[base + 1], cached_glyphs[base + 2],
                 cached_glyphs[base + 3], cached_glyphs[base + 4],
@@ -464,7 +437,7 @@ fn text_layout_emit_instance(
         let b = text_layout_pose_corner(ink, glyph_pivot, pose, origin, 1, layout_scale)
         let c = text_layout_pose_corner(ink, glyph_pivot, pose, origin, 2, layout_scale)
         let d = text_layout_pose_corner(ink, glyph_pivot, pose, origin, 3, layout_scale)
-        __queue_text_quad(batch.verts, batch.count, a, b, c, d,
+        __write_quad(batch.verts, batch.count, a, b, c, d,
             raw.u0, raw.v0, raw.u1, raw.v1,
             color.r, color.g, color.b, color.a)
         if probe_text != "" || UI_SUBMISSION_PROBE_ON {

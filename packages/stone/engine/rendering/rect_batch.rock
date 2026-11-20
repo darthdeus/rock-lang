@@ -294,27 +294,29 @@ pub fn rect_batch_push(b: RectBatch,
     if b.count >= b.capacity * RECT_BATCH_VERTS_PER_RECT {
         __grow_rect_batch_buf(b)
     }
-    __rect_batch_push_textured_quad4(b.vbo, b.count,
+    __write_quad(b.vbo, b.count,
         v(x, y), v(x + w, y), v(x + w, y + h), v(x, y + h),
         0.5, 0.5, 0.5, 0.5, r, g, bl, a)
     b.count = b.count + RECT_BATCH_VERTS_PER_RECT
 }
 
-fn __rect_batch_push_textured_quad4(
+// Two triangles (tl, tr, br) and (tl, br, bl); UV (u1, v1) maps to tl.
+fn __write_quad(
     buf: NativeBuffer<Vertex>, vi: int,
     tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2,
     u1: float, v1: float, u2: float, v2: float,
     r: float, g: float, b: float, a: float,
+    colorize: float = 0.0,
 ) {
     __vertex_check_span(buf, vi, 6)
     let cursor = __vertex_float_view(buf, vi * vertex_stride(buf))
     let step = __vertex_stride_unit(buf)
-    cursor = __write_vertex(cursor, step, tl.x, tl.y, u1, v1, r, g, b, a)
-    cursor = __write_vertex(cursor, step, tr.x, tr.y, u2, v1, r, g, b, a)
-    cursor = __write_vertex(cursor, step, br.x, br.y, u2, v2, r, g, b, a)
-    cursor = __write_vertex(cursor, step, tl.x, tl.y, u1, v1, r, g, b, a)
-    cursor = __write_vertex(cursor, step, br.x, br.y, u2, v2, r, g, b, a)
-    cursor = __write_vertex(cursor, step, bl.x, bl.y, u1, v2, r, g, b, a)
+    cursor = __write_vertex(cursor, step, tl.x, tl.y, u1, v1, r, g, b, a, colorize: colorize)
+    cursor = __write_vertex(cursor, step, tr.x, tr.y, u2, v1, r, g, b, a, colorize: colorize)
+    cursor = __write_vertex(cursor, step, br.x, br.y, u2, v2, r, g, b, a, colorize: colorize)
+    cursor = __write_vertex(cursor, step, tl.x, tl.y, u1, v1, r, g, b, a, colorize: colorize)
+    cursor = __write_vertex(cursor, step, br.x, br.y, u2, v2, r, g, b, a, colorize: colorize)
+    cursor = __write_vertex(cursor, step, bl.x, bl.y, u1, v2, r, g, b, a, colorize: colorize)
 }
 
 // V is not flipped here; pass v1/v2 in the orientation the texture needs.
@@ -326,7 +328,7 @@ pub fn rect_batch_push_textured(b: RectBatch,
     if b.count >= b.capacity * RECT_BATCH_VERTS_PER_RECT {
         __grow_rect_batch_buf(b)
     }
-    __rect_batch_push_textured_quad4(b.vbo, b.count,
+    __write_quad(b.vbo, b.count,
         v(x, y), v(x + w, y), v(x + w, y + h), v(x, y + h),
         u1, v1, u2, v2, r, g, bl, a)
     b.count = b.count + RECT_BATCH_VERTS_PER_RECT
@@ -340,7 +342,7 @@ pub fn rect_batch_push_textured_quad4(b: RectBatch,
     if b.count >= b.capacity * RECT_BATCH_VERTS_PER_RECT {
         __grow_rect_batch_buf(b)
     }
-    __rect_batch_push_textured_quad4(b.vbo, b.count, tl, tr, br, bl,
+    __write_quad(b.vbo, b.count, tl, tr, br, bl,
         u1, v1, u2, v2, r, g, blue, a)
     b.count = b.count + RECT_BATCH_VERTS_PER_RECT
 }
@@ -389,7 +391,7 @@ pub fn rect_batch_push_line(b: RectBatch, start: Vec2, end: Vec2, width: float,
     while b.count + 6 > b.capacity * RECT_BATCH_VERTS_PER_RECT {
         __grow_rect_batch_buf(b)
     }
-    __rect_batch_push_textured_quad4(b.vbo, b.count, tl, tr, br, blv,
+    __write_quad(b.vbo, b.count, tl, tr, br, blv,
         0.5, 0.5, 0.5, 0.5, r, g, bl, a)
     b.count = b.count + 6
 }
