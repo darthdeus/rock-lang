@@ -54,7 +54,9 @@ for (const name of fs.readdirSync(fixtureDir).filter((n) => n.endsWith('.rock'))
     check(false, `${name} compiles in wasm: ${JSON.stringify(wasm.diagnostics ?? wasm)}`);
     continue;
   }
-  const native = execFileSync(rockBin, ['compile', file], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  // The wasm module has no environment, so it never emits checked builds.
+  const { ROCK_MIR_CHECKS, ...env } = process.env;
+  const native = execFileSync(rockBin, ['compile', file], { encoding: 'utf8', maxBuffer: 1 << 28, env });
   check(wasm.lua === native, `${name}: wasm Lua equals native (${wasm.lua.length} bytes, ${ms} ms)`);
 }
 
