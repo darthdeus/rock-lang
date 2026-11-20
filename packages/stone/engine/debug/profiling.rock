@@ -757,15 +757,8 @@ pub global SECTION_NAMES: [string] = vec_new()
 // the GC window.
 pub global SECTION_COUNT: int = 0
 global PROFILE_DECLARED_SECTIONS: [string] = vec_new()
-global SECTION_METRICS: Arena<Metric> = arena_new()
-pub global SECTION_TIME: [Entity<Metric>] = vec_new()
-global SECTION_FRAME_TIME: [Entity<Metric>] = vec_new()
-global SECTION_FRAME_OBSERVATION: [Entity<Metric>] = vec_new()
 global SECTION_HISTORY_CALLS: NativeBuffer<int> = native_buffer_int(0)
-pub global SECTION_REQUEST_KB: [Entity<Metric>] = vec_new()
 global SECTION_FRAME_REQUEST_KB: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES)
-pub global SECTION_WORK: [Entity<Metric>] = vec_new()
-global SECTION_OBSERVATION: [Entity<Metric>] = vec_new()
 
 struct SectionWindow {
     calls: int, seconds: float, work_units: int, work_observations: int,
@@ -775,7 +768,16 @@ struct SectionWindow {
     pending_observations: int, pending_observation_ms: float,
     frame_ms: Metric, calls_per_frame: Metric,
     work_per_frame: Metric, observations_per_frame: Metric,
+    // Per-event samples since the last reset; request KB is sampled once per frame.
+    time: Metric,
+    request_kb: Metric,
+    work: Metric,
+    observation: Metric,
+    // Per-frame history, kept only under PERF_SECTION_HISTORY with frame capture.
+    frame_time: Metric?,
+    frame_observation: Metric?,
 }
+// One row per admitted or spare section, indexed by section id.
 global SECTION_WINDOWS: [SectionWindow] = vec_new()
 global SECTION_HISTORY_DROPPED: int = 0
 // Runner frame of history sample 0.
@@ -803,8 +805,18 @@ fn section_window_new(name: string) -> SectionWindow {
         calls_per_frame: metric_new(name, MAX_FRAME_HISTORY),
         work_per_frame: metric_new(name, MAX_FRAME_HISTORY),
         observations_per_frame: metric_new(name, MAX_FRAME_HISTORY),
+        time: metric_new(name, MAX_FRAME_HISTORY),
+        request_kb: metric_new(name, MAX_FRAME_HISTORY),
+        work: metric_new(name, MAX_FRAME_HISTORY),
+        observation: metric_new(name, MAX_FRAME_HISTORY),
+        frame_time: if section_history_kept() { section_frame_history_new(name) } else { null },
+        frame_observation: if section_history_kept() {
+            section_frame_history_new(name)
+        } else { null },
     }
 }
+
+fn section_history_kept() -> bool { return PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE }
 
 fn section_window_begin_frame() {
     for id in 0..SECTION_COUNT {
@@ -835,27 +847,31 @@ fn section_window_end_frame() {
     }
     if history_active {
         if PROFILER.frame_count == 0 { SECTION_HISTORY_FIRST_FRAME = PERF_RECORDS.previous_frame }
-        for id in 0..SECTION_FRAME_TIME.len() {
-            perf_frame_history_add(SECTION_FRAME_TIME[id].get().unwrap(), SECTION_WINDOWS[id].pending_seconds)
-            perf_frame_history_add(SECTION_FRAME_OBSERVATION[id].get().unwrap(), SECTION_WINDOWS[id].pending_observation_ms)
-            nb_set(SECTION_HISTORY_CALLS, id,
-                nb_get(SECTION_HISTORY_CALLS, id) + SECTION_WINDOWS[id].pending_calls)
+        for id in 0..SECTION_WINDOWS.len() {
+            let w = SECTION_WINDOWS[id]
+            if w.frame_time == null { continue }
+            perf_frame_history_add(w.frame_time, w.pending_seconds)
+            perf_frame_history_add(w.frame_observation.unwrap(), w.pending_observation_ms)
+            nb_set(SECTION_HISTORY_CALLS, id, nb_get(SECTION_HISTORY_CALLS, id) + w.pending_calls)
         }
     }
 }
 
 
-pub fn section_time_metric(id: int) -> Metric { return SECTION_TIME[id].get().unwrap() }
-pub fn section_request_kb_metric(id: int) -> Metric { return SECTION_REQUEST_KB[id].get().unwrap() }
-pub fn section_work_metric(id: int) -> Metric { return SECTION_WORK[id].get().unwrap() }
-fn section_observation_metric(id: int) -> Metric { return SECTION_OBSERVATION[id].get().unwrap() }
+pub fn section_time_metric(id: int) -> Metric { return SECTION_WINDOWS[id].time }
+pub fn section_request_kb_metric(id: int) -> Metric { return SECTION_WINDOWS[id].request_kb }
+pub fn section_work_metric(id: int) -> Metric { return SECTION_WINDOWS[id].work }
 
 fn section_stats_reset() {
-    for metrics in [SECTION_TIME, SECTION_FRAME_TIME, SECTION_FRAME_OBSERVATION, SECTION_REQUEST_KB,
-            SECTION_WORK, SECTION_OBSERVATION] {
-        for m in metrics { metric_reset(m.get().unwrap()) }
-    }
     for w in SECTION_WINDOWS {
+        metric_reset(w.time)
+        metric_reset(w.request_kb)
+        metric_reset(w.work)
+        metric_reset(w.observation)
+        if w.frame_time != null {
+            metric_reset(w.frame_time)
+            metric_reset(w.frame_observation.unwrap())
+        }
         w.calls = 0
         w.seconds = 0.0
         w.work_units = 0
@@ -869,7 +885,7 @@ fn section_stats_reset() {
     }
     SECTION_HISTORY_FIRST_FRAME = -1
     if PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE {
-        for id in 0..SECTION_TIME.len() { nb_set(SECTION_HISTORY_CALLS, id, 0) }
+        for id in 0..SECTION_WINDOWS.len() { nb_set(SECTION_HISTORY_CALLS, id, 0) }
     }
     SECTION_HISTORY_DROPPED = 0
 }
@@ -1300,14 +1316,6 @@ fn section_spare_count() -> int { return SECTION_NAMES.len() - SECTION_COUNT }
 
 fn section_rows_push() {
     SECTION_NAMES.push(SECTION_ROW_PLACEHOLDER)
-    SECTION_TIME.push(SECTION_METRICS.insert(metric_new(SECTION_ROW_PLACEHOLDER, MAX_FRAME_HISTORY)))
-    if PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE {
-        SECTION_FRAME_TIME.push(SECTION_METRICS.insert(section_frame_history_new(SECTION_ROW_PLACEHOLDER)))
-        SECTION_FRAME_OBSERVATION.push(SECTION_METRICS.insert(section_frame_history_new(SECTION_ROW_PLACEHOLDER)))
-    }
-    SECTION_REQUEST_KB.push(SECTION_METRICS.insert(metric_new(SECTION_ROW_PLACEHOLDER, MAX_FRAME_HISTORY)))
-    SECTION_WORK.push(SECTION_METRICS.insert(metric_new(SECTION_ROW_PLACEHOLDER, MAX_FRAME_HISTORY)))
-    SECTION_OBSERVATION.push(SECTION_METRICS.insert(metric_new(SECTION_ROW_PLACEHOLDER, MAX_FRAME_HISTORY)))
     SECTION_WINDOWS.push(section_window_new(SECTION_ROW_PLACEHOLDER))
 }
 
@@ -1315,23 +1323,19 @@ fn section_rows_push() {
 // registry admit.
 fn section_row_name(id: int, name: string) {
     SECTION_NAMES[id] = name
-    if PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE {
-        SECTION_FRAME_TIME[id].get().unwrap().name = name
-        SECTION_FRAME_OBSERVATION[id].get().unwrap().name = name
-    }
     let window = SECTION_WINDOWS[id]
+    if window.frame_time != null {
+        window.frame_time.name = name
+        window.frame_observation.unwrap().name = name
+    }
     window.frame_ms.name = name
     window.calls_per_frame.name = name
     window.work_per_frame.name = name
     window.observations_per_frame.name = name
-    let time = section_time_metric(id)
-    time.name = name
-    let request = section_request_kb_metric(id)
-    request.name = name
-    let work = section_work_metric(id)
-    work.name = name
-    let observation = section_observation_metric(id)
-    observation.name = name
+    window.time.name = name
+    window.request_kb.name = name
+    window.work.name = name
+    window.observation.name = name
 }
 
 fn section_pool_reserve() {
@@ -1612,17 +1616,10 @@ fn init_profiler() {
     GC_WIN_LATE_SECTIONS = 0
     GC_WIN_LATE_POOL_CAPACITY = 0
     GC_WIN_LATE_POOL_EXHAUSTED = 0
-    SECTION_METRICS.clear()
-    SECTION_TIME = vec_new()
-    SECTION_FRAME_TIME = vec_new()
-    SECTION_FRAME_OBSERVATION = vec_new()
     SECTION_HISTORY_DROPPED = 0
     SECTION_HISTORY_FIRST_FRAME = -1
     SECTION_HISTORY_CALLS = native_buffer_int(if PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE { MAX_PROFILE_ENTRIES } else { 0 })
-    SECTION_REQUEST_KB = vec_new()
     SECTION_FRAME_REQUEST_KB = native_buffer_float(MAX_PROFILE_ENTRIES)
-    SECTION_WORK = vec_new()
-    SECTION_OBSERVATION = vec_new()
     SECTION_WINDOWS = vec_new()
     SECTION_LAST_SECONDS = native_buffer_float(MAX_PROFILE_ENTRIES)
     SECTION_LAST_OBSERVATION_MS = native_buffer_float(MAX_PROFILE_ENTRIES)
@@ -1796,18 +1793,20 @@ pub fn profile_work(name: string, units: int) {
     if !ENGINE.profiler_enabled || units < 0 { return () }
     let id = section_id(name, "profile_work")
     if id < 0 { return () }
-    metric_add(section_work_metric(id), units as float)
-    SECTION_WINDOWS[id].pending_work_units += units
-    SECTION_WINDOWS[id].pending_work_observations += 1
+    let w = SECTION_WINDOWS[id]
+    metric_add(w.work, units as float)
+    w.pending_work_units += units
+    w.pending_work_observations += 1
 }
 
 pub fn profile_observation(name: string, value_ms: float) {
     if !ENGINE.profiler_enabled || value_ms < 0.0 { return }
     let id = section_id(name, "profile_observation")
     if id < 0 { return }
-    metric_add(section_observation_metric(id), value_ms)
-    SECTION_WINDOWS[id].pending_observations += 1
-    SECTION_WINDOWS[id].pending_observation_ms += value_ms
+    let w = SECTION_WINDOWS[id]
+    metric_add(w.observation, value_ms)
+    w.pending_observations += 1
+    w.pending_observation_ms += value_ms
     nb_set(SECTION_LAST_OBSERVATION_MS, id, value_ms)
 }
 
@@ -2107,9 +2106,10 @@ fn profile_frame_end() {
         let id = nb_get(PROF_CUR.name_id, i)
         let dur = nb_get(PROF_CUR.end_t, i) - nb_get(PROF_CUR.start_t, i)
         if id >= 0 {
-            metric_add(section_time_metric(id), dur)
-            SECTION_WINDOWS[id].pending_calls += 1
-            SECTION_WINDOWS[id].pending_seconds += dur
+            let w = SECTION_WINDOWS[id]
+            metric_add(w.time, dur)
+            w.pending_calls += 1
+            w.pending_seconds += dur
         }
     }
     if section_history {
@@ -2819,7 +2819,8 @@ fn __perf_json_section_frames(mcode: string) -> string {
     let observations: [string] = vec_new()
     let complete = SECTION_HISTORY_DROPPED == 0 && PROFILER.frame_count <= MAX_PERF_FRAME_HISTORY
     for id in 0..SECTION_COUNT {
-        let m = perf_frame_history_summary(SECTION_FRAME_TIME[id].get().unwrap())
+        let w = SECTION_WINDOWS[id]
+        let m = perf_frame_history_summary(w.frame_time.unwrap())
         if m.count != PROFILER.frame_count { complete = false }
         let ms = __perf_json_stat_block(m.mean * 1000.0, m.stddev * 1000.0, m.min * 1000.0,
             m.max * 1000.0, m.p50 * 1000.0, m.p90 * 1000.0, metric_p95(m) * 1000.0, m.p99 * 1000.0, m.count)
@@ -2827,9 +2828,9 @@ fn __perf_json_section_frames(mcode: string) -> string {
         let calls = nb_get(SECTION_HISTORY_CALLS, id)
         let calls_per_frame = if m.count > 0 { (calls as float) / (m.count as float) } else { 0.0 }
         rows.push("{{\"name\":\"{name}\",\"calls\":{calls},\"calls_per_frame\":{calls_per_frame:.6f},\"ms\":{ms}}}")
-        let observation = perf_frame_history_summary(SECTION_FRAME_OBSERVATION[id].get().unwrap())
+        let observation = perf_frame_history_summary(w.frame_observation.unwrap())
         if observation.count != PROFILER.frame_count { complete = false }
-        if SECTION_WINDOWS[id].observations > 0 {
+        if w.observations > 0 {
             let values = __perf_json_metric(observation)
             observations.push("{{\"name\":\"{name}\",\"ms\":{values}}}")
         }
@@ -2856,7 +2857,7 @@ fn __perf_json_stall_sections(stats: [ProfileStats]) -> string {
         let timed: [(float, int)] = []
         if covered {
             for id in 0..SECTION_COUNT {
-                let m = SECTION_FRAME_TIME[id].get().unwrap()
+                let m = SECTION_WINDOWS[id].frame_time.unwrap()
                 if sample >= m.count { covered = false; break }
                 let ms = nb_get(m.ring, sample) * 1000.0
                 if ms > 0.0 { timed.push((ms, id)) }
@@ -3113,7 +3114,7 @@ fn __perf_json_section_windows() -> string {
 fn __perf_json_observations() -> string {
     let parts: [string] = vec_new()
     for id in 0..SECTION_COUNT {
-        let m = section_observation_metric(id)
+        let m = SECTION_WINDOWS[id].observation
         if m.count == 0 { continue }
         let name = __perf_json_escape_name(SECTION_NAMES[id])
         let values = __perf_json_metric(m)

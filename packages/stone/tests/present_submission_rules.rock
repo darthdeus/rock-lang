@@ -13,11 +13,6 @@ fn present_test_fixture(body: fn(Canvas, Canvas) -> ()) {
     let saved_count = SECTION_COUNT
     let saved_late = SECTION_LATE
     let saved_frozen_first = SECTION_FROZEN_FIRST
-    let saved_metrics = SECTION_METRICS
-    let saved_time = SECTION_TIME
-    let saved_request = SECTION_REQUEST_KB
-    let saved_work = SECTION_WORK
-    let saved_observation = SECTION_OBSERVATION
     let saved_windows = SECTION_WINDOWS
     let saved_last_seconds = SECTION_LAST_SECONDS
     let saved_profiler = PROFILER
@@ -36,11 +31,6 @@ fn present_test_fixture(body: fn(Canvas, Canvas) -> ()) {
         SECTION_COUNT = 0
         SECTION_LATE = native_buffer_int(MAX_PROFILE_ENTRIES)
         SECTION_FROZEN_FIRST = -1
-        SECTION_METRICS = arena_new()
-        SECTION_TIME = vec_new()
-        SECTION_REQUEST_KB = vec_new()
-        SECTION_WORK = vec_new()
-        SECTION_OBSERVATION = vec_new()
         SECTION_WINDOWS = vec_new()
         SECTION_LAST_SECONDS = native_buffer_float(MAX_PROFILE_ENTRIES)
         PROFILER = ProfilerData {}
@@ -61,11 +51,6 @@ fn present_test_fixture(body: fn(Canvas, Canvas) -> ()) {
         SECTION_COUNT = saved_count
         SECTION_LATE = saved_late
         SECTION_FROZEN_FIRST = saved_frozen_first
-        SECTION_METRICS = saved_metrics
-        SECTION_TIME = saved_time
-        SECTION_REQUEST_KB = saved_request
-        SECTION_WORK = saved_work
-        SECTION_OBSERVATION = saved_observation
         SECTION_WINDOWS = saved_windows
         SECTION_LAST_SECONDS = saved_last_seconds
         PROFILER = saved_profiler

@@ -109,14 +109,14 @@ fn profiler_section_history_warmup_and_clear() {
     let id = section_id("history.lifecycle")
     profiler_section_history_frame("history.lifecycle", 0.010)
     assert_eq(PROFILER.frame_count, 1)
-    assert_eq(SECTION_FRAME_TIME[id].get().unwrap().count, 1)
+    assert_eq(SECTION_WINDOWS[id].frame_time.unwrap().count, 1)
 
     perf_scenario_wait("section_history")
     perf_scenario_window("steady", 2, 2)
     perf_scenario_ready("history.lifecycle")
     perf_outer_frame_boundary(1, stone_get_time())
     profiler_section_history_frame("history.lifecycle", 0.020)
-    let during_warmup = SECTION_FRAME_TIME[id].get().unwrap()
+    let during_warmup = SECTION_WINDOWS[id].frame_time.unwrap()
     assert_eq(during_warmup.count, 1, "warmup frames do not enter section history")
     assert(abs(during_warmup.mean - 0.010) < 0.000001,
         "warmup sample does not replace or extend measured history")
@@ -125,11 +125,11 @@ fn profiler_section_history_warmup_and_clear() {
     profiler_section_history_frame("history.lifecycle", 0.020)
     assert(!PROFILER.warmup_active, "the declared warmup interval completed")
     assert_eq(PROFILER.frame_count, 0, "warmup completion excludes its own frame")
-    assert_eq(SECTION_FRAME_TIME[id].get().unwrap().count, 0,
+    assert_eq(SECTION_WINDOWS[id].frame_time.unwrap().count, 0,
         "warmup completion clears prior section samples")
     perf_outer_frame_boundary(3, stone_get_time())
     profiler_section_history_frame("history.lifecycle", 0.003)
-    let after_transition = SECTION_FRAME_TIME[id].get().unwrap()
+    let after_transition = SECTION_WINDOWS[id].frame_time.unwrap()
     assert_eq(PROFILER.frame_count, 1, "warmup transition restarts the frame count")
     assert_eq(after_transition.count, 1, "warmup transition clears prior section samples")
     assert(abs(after_transition.mean - 0.003) < 0.000001,
@@ -139,10 +139,10 @@ fn profiler_section_history_warmup_and_clear() {
 
     profiler_clear_samples()
     assert_eq(PROFILER.frame_count, 0, "clearing samples resets the frame count")
-    assert_eq(SECTION_FRAME_TIME[id].get().unwrap().count, 0,
+    assert_eq(SECTION_WINDOWS[id].frame_time.unwrap().count, 0,
         "clearing samples resets section frame history")
     profiler_section_history_frame("history.lifecycle", 0.004)
-    let after_clear = SECTION_FRAME_TIME[id].get().unwrap()
+    let after_clear = SECTION_WINDOWS[id].frame_time.unwrap()
     assert_eq(PROFILER.frame_count, 1)
     assert_eq(after_clear.count, 1, "one measured frame starts a fresh history")
     assert(abs(after_clear.mean - 0.004) < 0.000001)
