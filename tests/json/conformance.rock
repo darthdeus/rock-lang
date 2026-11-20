@@ -57,67 +57,36 @@ fn json_conf_load_manifest() -> [JsonConfCase] {
 }
 
 @test
-fn test_json_conformance_manifest_shape() {
+fn test_json_conformance_corpus() {
     let cases = json_conf_load_manifest()
     assert_eq(cases.len(), 318, "corpus size changed -- regenerate the manifest")
+    // Keep the deepest inputs in both decoder runs to catch stack overflows.
+    for name in ["n_structure_100000_opening_arrays.json", "n_structure_open_array_object.json"] {
+        let listed = cases.iter().any(c => c.name == name && c.expect == "reject")
+        assert(listed, "missing depth-limit case: {name}")
+    }
 
     let accept = 0
     let reject = 0
     let either = 0
     for c in cases {
-        if c.expect == "accept" {
-            accept = accept + 1
-        } else if c.expect == "reject" {
-            reject = reject + 1
-        } else if c.expect == "either" {
-            either = either + 1
-        } else {
-            assert(false, "unknown expectation {c.expect} for {c.name}")
-        }
-    }
-    assert_eq(accept, 95, "y_ case count")
-    assert_eq(reject, 188, "n_ case count")
-    assert_eq(either, 35, "i_ case count")
-}
-
-// The two deepest structure cases (50,000 and 100,000 levels) must reject via
-// json_max_depth() rather than overflow the stack.
-@test
-fn test_json_conformance_deep_structure_cases_reject() {
-    let deep = [
-        "n_structure_100000_opening_arrays.json",
-        "n_structure_open_array_object.json",
-    ]
-    for name in deep {
-        let src = json_conf_read_file("{json_conf_dir()}cases/{name}")
-        assert(src != null, "deep case file {name} is missing")
-        assert(json_decode(src.unwrap()) == null,
-            "{name} must reject via the depth limit, not overflow the stack")
-    }
-}
-
-@test
-fn test_json_conformance_corpus() {
-    let cases = json_conf_load_manifest()
-
-    let examined = 0
-    let either_seen = 0
-    for c in cases {
         let src = json_conf_read_file("{json_conf_dir()}cases/{c.name}")
         assert(src != null, "missing case file: {c.name}")
-        examined = examined + 1
-
         let decoded = json_decode(src.unwrap())
-        if c.expect == "either" {
-            either_seen = either_seen + 1
-            continue
+        match c.expect {
+            "accept" => { accept += 1 }
+            "reject" => { reject += 1 }
+            "either" => { either += 1; continue }
+            _ => { assert(false, "unknown expectation {c.expect} for {c.name}") }
         }
+
         let got = if decoded == null { "reject" } else { "accept" }
         assert_eq(got, c.expect, "materializing decoder conformance: {c.name}")
         let reader = json_reader_decode(src.unwrap())
         let reader_verdict = if reader == null { "reject" } else { "accept" }
         assert_eq(reader_verdict, c.expect, "source reader conformance: {c.name}")
     }
-    assert_eq(examined, 318, "examined population -- every case in the manifest")
-    assert_eq(either_seen, 35, "implementation-defined cases reached")
+    assert_eq(accept, 95, "y_ case count")
+    assert_eq(reject, 188, "n_ case count")
+    assert_eq(either, 35, "implementation-defined cases reached")
 }
