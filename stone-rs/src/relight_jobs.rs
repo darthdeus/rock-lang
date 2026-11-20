@@ -9,7 +9,8 @@ use crate::jobs::{Jobs, Refused, Taken};
 
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 
-static JOBS: Jobs<Work, ResultData> = Jobs::new("stone-relight-worker", 16, 128 * 1024 * 1024, run);
+static JOBS: Jobs<Work, ResultData> =
+    Jobs::new("stone-relight-worker", 16, 128 * 1024 * 1024, true, run);
 // Locked before `JOBS` wherever both are held.
 static SNAPSHOTS: Mutex<HashMap<i64, Arc<Vec<u8>>, BuildHasherDefault<DefaultHasher>>> =
     Mutex::new(HashMap::with_hasher(BuildHasherDefault::new()));

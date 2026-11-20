@@ -1,5 +1,7 @@
 //! A bounded set of cancellable jobs served in submission order by one worker
-//! thread, started on the first submit and joined by `shutdown`.
+//! thread, started on the first submit and joined by `shutdown`. Reserved bytes
+//! stay charged until the result is taken, or only until the job finishes when
+//! results do not hold them.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, DefaultHasher};
@@ -7,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-const MAX_HANDLE: u64 = (1 << 53) - 1;
+const MAX_HANDLE: u64 = i32::MAX as u64;
 
 pub(crate) enum Refused {
     Busy,
@@ -64,6 +66,7 @@ pub(crate) struct Jobs<W, R> {
     thread_name: &'static str,
     max_jobs: usize,
     max_bytes: usize,
+    results_hold_bytes: bool,
     run: fn(W, &AtomicBool) -> Option<R>,
     state: Mutex<State<W, R>>,
     wake: Condvar,
@@ -74,12 +77,14 @@ impl<W: Send + 'static, R: Send + 'static> Jobs<W, R> {
         thread_name: &'static str,
         max_jobs: usize,
         max_bytes: usize,
+        results_hold_bytes: bool,
         run: fn(W, &AtomicBool) -> Option<R>,
     ) -> Self {
         Self {
             thread_name,
             max_jobs,
             max_bytes,
+            results_hold_bytes,
             run,
             state: Mutex::new(State {
                 entries: HashMap::with_hasher(BuildHasherDefault::new()),
@@ -97,31 +102,54 @@ impl<W: Send + 'static, R: Send + 'static> Jobs<W, R> {
         self.state.lock().unwrap()
     }
 
-    pub(crate) fn submit(&'static self, work: W, bytes: usize) -> Result<u64, Refused> {
+    pub(crate) fn reserve(&self, bytes: usize) -> bool {
         let mut state = self.lock();
-        if state.stopping
-            || state.entries.len() >= self.max_jobs
-            || state
-                .reserved
-                .checked_add(bytes)
-                .is_none_or(|total| total > self.max_bytes)
-        {
+        let fits = (state.reserved.checked_add(bytes)).is_some_and(|total| total <= self.max_bytes);
+        if fits {
+            state.reserved += bytes;
+        }
+        fits
+    }
+
+    pub(crate) fn release(&self, bytes: usize) {
+        self.lock().reserved -= bytes;
+    }
+
+    pub(crate) fn submit(&'static self, work: W, bytes: usize) -> Result<u64, Refused> {
+        if !self.reserve(bytes) {
             return Err(Refused::Busy);
         }
+        self.submit_reserved(work, bytes).map_err(|(refused, _)| {
+            self.release(bytes);
+            refused
+        })
+    }
+
+    /// Queues work whose `bytes` an earlier `reserve` charged; a refusal hands it back.
+    pub(crate) fn submit_reserved(
+        &'static self,
+        work: W,
+        bytes: usize,
+    ) -> Result<u64, (Refused, W)> {
+        let mut state = self.lock();
+        if state.stopping || state.entries.len() >= self.max_jobs {
+            return Err((Refused::Busy, work));
+        }
         if state.next_handle > MAX_HANDLE {
-            return Err(Refused::Handles);
+            return Err((Refused::Handles, work));
         }
         if state.worker.is_none() {
-            let worker = std::thread::Builder::new()
+            match std::thread::Builder::new()
                 .name(self.thread_name.into())
                 .spawn(move || self.serve())
-                .map_err(Refused::Worker)?;
-            state.worker = Some(worker);
+            {
+                Ok(worker) => state.worker = Some(worker),
+                Err(error) => return Err((Refused::Worker(error), work)),
+            }
         }
         let handle = state.next_handle;
         state.next_handle += 1;
         let cancelled = Arc::new(AtomicBool::new(false));
-        state.reserved += bytes;
         state.entries.insert(
             handle,
             Entry {
@@ -152,12 +180,16 @@ impl<W: Send + 'static, R: Send + 'static> Jobs<W, R> {
                 (self.run)(work, &cancelled)
             };
             state = self.lock();
-            match (result, state.entries.get_mut(&handle)) {
+            let locked = &mut *state;
+            match (result, locked.entries.get_mut(&handle)) {
                 (Some(result), Some(entry)) if !cancelled.load(Ordering::Acquire) => {
                     entry.result = Some(result);
+                    if !self.results_hold_bytes {
+                        locked.reserved -= std::mem::take(&mut entry.bytes);
+                    }
                 }
                 _ => {
-                    state.remove(handle);
+                    locked.remove(handle);
                 }
             }
             self.wake.notify_all();
@@ -205,6 +237,11 @@ impl<W: Send + 'static, R: Send + 'static> Jobs<W, R> {
         self.wake.notify_all();
     }
 
+    #[cfg(test)]
+    pub(crate) fn reserved(&self) -> usize {
+        self.lock().reserved
+    }
+
     pub(crate) fn shutdown(&self) {
         let worker = {
             let mut state = self.lock();
@@ -219,9 +256,12 @@ impl<W: Send + 'static, R: Send + 'static> Jobs<W, R> {
             crate::log_once!("JOBS", "{} terminated with a panic", self.thread_name);
         }
         let mut state = self.lock();
-        state.entries.clear();
+        state.reserved -= state
+            .entries
+            .drain()
+            .map(|(_, entry)| entry.bytes)
+            .sum::<usize>();
         state.queue.clear();
-        state.reserved = 0;
         state.stopping = false;
     }
 }
@@ -231,7 +271,7 @@ mod tests {
     use super::*;
 
     static GATE: Mutex<()> = Mutex::new(());
-    static JOBS: Jobs<u32, u32> = Jobs::new("stone-test-jobs", 2, 10, |work, cancelled| {
+    static JOBS: Jobs<u32, u32> = Jobs::new("stone-test-jobs", 2, 10, true, |work, cancelled| {
         drop(GATE.lock().unwrap());
         (!cancelled.load(Ordering::Acquire)).then_some(work * 2)
     });

@@ -12,7 +12,7 @@ const MAX_FLOW_CELLS: usize = 1_000_000;
 const MAX_FLOW_BYTES: usize = 128 * 1024 * 1024;
 
 static FIELD_JOBS: Jobs<FieldWork, FlowResult> =
-    Jobs::new("stone-flow-worker", 64, MAX_FLOW_BYTES, run_field);
+    Jobs::new("stone-flow-worker", 64, MAX_FLOW_BYTES, true, run_field);
 
 #[derive(Debug, PartialEq)]
 struct FlowResult {

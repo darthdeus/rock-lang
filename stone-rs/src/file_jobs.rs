@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+
+use crate::jobs::{Refused, Taken};
 
 const MAX_PATH_BYTES: usize = 4096;
 
@@ -121,36 +123,6 @@ impl JobResult {
     }
 }
 
-struct Completion {
-    result: Mutex<Option<JobResult>>,
-    ready: Condvar,
-}
-
-impl Completion {
-    fn new() -> Self {
-        Self {
-            result: Mutex::new(None),
-            ready: Condvar::new(),
-        }
-    }
-
-    fn finish(&self, result: JobResult) {
-        let mut slot = self.result.lock().unwrap();
-        *slot = Some(result);
-        self.ready.notify_all();
-    }
-
-    fn poll(&self, wait: bool) -> Option<JobResult> {
-        let mut slot = self.result.lock().unwrap();
-        if wait {
-            while slot.is_none() {
-                slot = self.ready.wait(slot).unwrap();
-            }
-        }
-        *slot
-    }
-}
-
 const CANCEL_ACTIVE: u8 = 0;
 const CANCEL_REQUESTED: u8 = 1;
 const CANCEL_PUBLISHING: u8 = 2;
@@ -168,26 +140,14 @@ impl Cancellation {
     }
 
     fn cancel(&self) -> i32 {
-        loop {
-            match self.state.load(Ordering::Acquire) {
-                CANCEL_ACTIVE => {
-                    if self
-                        .state
-                        .compare_exchange(
-                            CANCEL_ACTIVE,
-                            CANCEL_REQUESTED,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        return 1;
-                    }
-                }
-                CANCEL_REQUESTED => return 1,
-                CANCEL_PUBLISHING | CANCEL_COMPLETE => return 0,
-                _ => return -1,
-            }
+        match self.state.compare_exchange(
+            CANCEL_ACTIVE,
+            CANCEL_REQUESTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) | Err(CANCEL_REQUESTED) => 1,
+            Err(_) => 0,
         }
     }
 
@@ -212,16 +172,9 @@ impl Cancellation {
 }
 
 struct Request {
-    id: i32,
     transaction: Transaction,
-    completion: Arc<Completion>,
     cancellation: Arc<Cancellation>,
-}
-
-#[derive(Clone)]
-struct Pending {
-    completion: Arc<Completion>,
-    cancellation: Option<Arc<Cancellation>>,
+    control: WorkerControl,
 }
 
 struct AtomicWrite {
@@ -262,7 +215,6 @@ enum Probe<'a> {
     Request,
     Publication,
     Published,
-    Completed,
     DirectorySync(&'a Path),
 }
 
@@ -469,72 +421,45 @@ impl Transaction {
     }
 }
 
+type Queue = crate::jobs::Jobs<Request, JobResult>;
+
+fn run(request: Request, _: &AtomicBool) -> Option<JobResult> {
+    WORKER_PAUSE.gate();
+    request.control.probe(Probe::Request);
+    Some(execute_transaction(
+        &request.transaction,
+        &request.cancellation,
+        &request.control,
+    ))
+}
+
 struct Jobs {
-    sender: mpsc::SyncSender<Request>,
-    pending: HashMap<i32, Pending>,
+    queue: &'static Queue,
     transactions: HashMap<i32, Transaction>,
-    next: i32,
-    accounting: Arc<AtomicUsize>,
+    cancellations: HashMap<i32, Arc<Cancellation>>,
+    next_transaction: i32,
     limits: Limits,
+    control: WorkerControl,
 }
 
 impl Jobs {
-    fn new(limits: Limits) -> Self {
-        Self::new_with_control(limits, WorkerControl::default())
-    }
-
-    fn new_with_control(limits: Limits, control: WorkerControl) -> Self {
-        let channel_capacity = limits.max_pending_jobs.max(1);
-        let (sender, receiver) = mpsc::sync_channel(channel_capacity);
-        let accounting = Arc::new(AtomicUsize::new(0));
-        let worker_accounting = Arc::clone(&accounting);
-        std::thread::Builder::new()
-            .name("stone-file-writer".into())
-            .spawn(move || {
-                worker_loop(receiver, worker_accounting, control);
-            })
-            .expect("start file writer");
+    fn new(queue: &'static Queue, limits: Limits, control: WorkerControl) -> Self {
         Self {
-            sender,
-            pending: HashMap::new(),
+            queue,
             transactions: HashMap::new(),
-            next: 1,
-            accounting,
+            cancellations: HashMap::new(),
+            next_transaction: 1,
             limits,
+            control,
         }
-    }
-
-    fn next_id(&mut self) -> Option<i32> {
-        let id = self.next;
-        self.next = self.next.checked_add(1)?;
-        Some(id)
-    }
-
-    fn reserve_bytes(&self, bytes: usize) -> bool {
-        let current = self.accounting.load(Ordering::Acquire);
-        if bytes > self.limits.max_pending_bytes || current > self.limits.max_pending_bytes - bytes
-        {
-            return false;
-        }
-        self.accounting.fetch_add(bytes, Ordering::AcqRel);
-        true
-    }
-
-    fn release_bytes(&self, bytes: usize) {
-        if bytes > 0 {
-            self.accounting.fetch_sub(bytes, Ordering::AcqRel);
-        }
-    }
-
-    fn queue_full(&self) -> bool {
-        self.pending.len() >= self.limits.max_pending_jobs
     }
 
     fn begin_transaction(&mut self) -> Option<i32> {
         if self.transactions.len() >= self.limits.max_open_transactions {
             return None;
         }
-        let id = self.next_id()?;
+        let id = self.next_transaction;
+        self.next_transaction = id.checked_add(1)?;
         self.transactions.insert(id, Transaction::default());
         Some(id)
     }
@@ -547,27 +472,27 @@ impl Jobs {
         bytes: usize,
         add: impl FnOnce(&mut Transaction, &Limits) -> bool,
     ) -> bool {
-        if !self.transactions.contains_key(&id) || !self.reserve_bytes(bytes) {
+        if !self.transactions.contains_key(&id) || !self.queue.reserve(bytes) {
             return false;
         }
         let transaction = self.transactions.get_mut(&id).unwrap();
         if !add(transaction, &self.limits) {
-            self.release_bytes(bytes);
+            self.queue.release(bytes);
             return false;
         }
         transaction.bytes += bytes;
         true
     }
 
-    /// A job outside the transaction API: not cancellable, admitted on the queue budget
-    /// alone, and built only once admitted.
+    /// A job outside the transaction API: not cancellable, and built only once its bytes
+    /// are reserved.
     fn submit(
         &mut self,
         bytes: usize,
         restore_on_failure: bool,
         operations: impl FnOnce() -> Vec<TransactionOp>,
     ) -> Option<i32> {
-        if self.queue_full() || !self.reserve_bytes(bytes) {
+        if !self.queue.reserve(bytes) {
             return None;
         }
         let transaction = Transaction {
@@ -582,48 +507,37 @@ impl Jobs {
     /// Queues `transaction`. A committed transaction is `open` under its id: it is
     /// cancellable and goes back to the open set if the queue refuses it.
     fn send(&mut self, transaction: Transaction, open: Option<i32>) -> Option<i32> {
-        let Some(id) = self.next_id() else {
-            self.refuse(transaction, open);
-            return None;
-        };
-        let completion = Arc::new(Completion::new());
+        let bytes = transaction.bytes;
         let cancellation = Arc::new(Cancellation::new());
-        let pending = Pending {
-            completion: Arc::clone(&completion),
-            cancellation: open.map(|_| Arc::clone(&cancellation)),
-        };
         let request = Request {
-            id,
             transaction,
-            completion,
-            cancellation,
+            cancellation: Arc::clone(&cancellation),
+            control: self.control.clone(),
         };
-        match self.sender.try_send(request) {
-            Ok(()) => {
-                self.pending.insert(id, pending);
-                Some(id)
+        match self.queue.submit_reserved(request, bytes) {
+            Ok(handle) => {
+                let job = handle as i32;
+                if open.is_some() {
+                    self.cancellations.insert(job, cancellation);
+                }
+                Some(job)
             }
-            Err(mpsc::TrySendError::Full(request))
-            | Err(mpsc::TrySendError::Disconnected(request)) => {
-                self.refuse(request.transaction, open);
+            Err((refused, request)) => {
+                if let Refused::Worker(error) = refused {
+                    crate::log_once!("FILE", "file writer start failed: {}", error);
+                }
+                match open {
+                    Some(id) => {
+                        self.transactions.insert(id, request.transaction);
+                    }
+                    None => self.queue.release(bytes),
+                }
                 None
             }
         }
     }
 
-    fn refuse(&mut self, transaction: Transaction, open: Option<i32>) {
-        match open {
-            Some(id) => {
-                self.transactions.insert(id, transaction);
-            }
-            None => self.release_bytes(transaction.bytes),
-        }
-    }
-
     fn commit_transaction(&mut self, id: i32) -> Option<i32> {
-        if self.queue_full() {
-            return None;
-        }
         let transaction = self.transactions.remove(&id)?;
         self.send(transaction, Some(id))
     }
@@ -632,31 +546,28 @@ impl Jobs {
         let Some(transaction) = self.transactions.remove(&id) else {
             return false;
         };
-        self.release_bytes(transaction.bytes);
+        self.queue.release(transaction.bytes);
         true
     }
 }
 
-fn worker_loop(
-    receiver: mpsc::Receiver<Request>,
-    accounting: Arc<AtomicUsize>,
-    control: WorkerControl,
-) {
-    for request in receiver {
-        WORKER_PAUSE.gate();
-        control.probe(Probe::Request);
-        let result = execute_transaction(
-            &request.transaction,
-            &request.cancellation,
-            request.id,
-            &control,
-        );
-        let owned_bytes = request.transaction.bytes;
-        // Completion admits a successor, so release this payload first.
-        drop(request.transaction);
-        accounting.fetch_sub(owned_bytes, Ordering::AcqRel);
-        request.completion.finish(result);
-        control.probe(Probe::Completed);
+/// Reports a finished job once: its result code, 0 while it runs, -1 when unknown.
+/// Waiting holds only the queue's own lock.
+fn poll(jobs: &Mutex<Jobs>, id: i32, wait: bool) -> i32 {
+    let queue = jobs.lock().unwrap().queue;
+    let Ok(handle) = u64::try_from(id) else {
+        return -1;
+    };
+    if wait {
+        queue.wait(handle);
+    }
+    match queue.take(handle, |_| true) {
+        Taken::Missing | Taken::Rejected => -1,
+        Taken::Pending => 0,
+        Taken::Ready(result) => {
+            jobs.lock().unwrap().cancellations.remove(&id);
+            result.code()
+        }
     }
 }
 
@@ -672,7 +583,6 @@ fn read_previous(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
 /// path that cannot be restored.
 fn restore_previous(
     written: &[(PathBuf, Option<Vec<u8>>)],
-    id: i32,
     first_sequence: usize,
     barriers: &mut DirectoryBarriers,
 ) {
@@ -681,7 +591,6 @@ fn restore_previous(
             Some(bytes) => write_atomic(
                 path,
                 std::slice::from_ref(bytes),
-                id,
                 first_sequence + index,
                 barriers,
             ),
@@ -698,18 +607,12 @@ fn restore_previous(
 fn write_atomic(
     path: &Path,
     fragments: &[Vec<u8>],
-    id: i32,
     sequence: usize,
     barriers: &mut DirectoryBarriers,
 ) -> std::io::Result<()> {
     ensure_parent(path, barriers)?;
     let mut temporary = path.as_os_str().to_os_string();
-    temporary.push(format!(
-        ".stone-{}-{}-{}.tmp",
-        std::process::id(),
-        id,
-        sequence
-    ));
+    temporary.push(format!(".stone-{}-{}.tmp", std::process::id(), sequence));
     let temporary = PathBuf::from(temporary);
     let result = (|| {
         let mut file = std::fs::File::create(&temporary)?;
@@ -820,10 +723,9 @@ fn ensure_parent(path: &Path, barriers: &mut DirectoryBarriers) -> std::io::Resu
 fn execute_transaction(
     transaction: &Transaction,
     cancellation: &Cancellation,
-    id: i32,
     control: &WorkerControl,
 ) -> JobResult {
-    let result = match run_transaction(transaction, cancellation, id, control) {
+    let result = match run_transaction(transaction, cancellation, control) {
         Ok(()) => {
             cleanup(&transaction.cleanup_success);
             if transaction.published {
@@ -845,7 +747,6 @@ fn execute_transaction(
 fn run_transaction(
     transaction: &Transaction,
     cancellation: &Cancellation,
-    id: i32,
     control: &WorkerControl,
 ) -> Result<(), JobResult> {
     let mut barriers = DirectoryBarriers::new(control);
@@ -867,7 +768,7 @@ fn run_transaction(
                     return Err(JobResult::Failure);
                 }
                 if let Err(error) =
-                    write_atomic(&write.path, &write.fragments, id, sequence, &mut barriers)
+                    write_atomic(&write.path, &write.fragments, sequence, &mut barriers)
                 {
                     log_io_error("publish", &write.path, &error);
                     return Err(JobResult::Failure);
@@ -891,7 +792,7 @@ fn run_transaction(
                     Ok(None)
                 };
                 let result = before.and_then(|before| {
-                    write_atomic(&write.path, &write.fragments, id, sequence, &mut barriers)?;
+                    write_atomic(&write.path, &write.fragments, sequence, &mut barriers)?;
                     if let Some(before) = before {
                         written.push((write.path.clone(), before));
                     }
@@ -909,7 +810,6 @@ fn run_transaction(
                 Ok(encoded) => write_atomic(
                     &png.path,
                     std::slice::from_ref(&encoded),
-                    id,
                     sequence,
                     &mut barriers,
                 )
@@ -919,7 +819,7 @@ fn run_transaction(
         };
         if let Err((operation, path, error)) = outcome {
             log_io_error(operation, path, &error);
-            restore_previous(&written, id, transaction.operations.len(), &mut barriers);
+            restore_previous(&written, transaction.operations.len(), &mut barriers);
             return Err(JobResult::Failure);
         }
     }
@@ -996,8 +896,15 @@ fn cleanup_directories(directories: &[CleanupDirectory]) {
 }
 
 fn jobs() -> &'static Mutex<Jobs> {
+    static QUEUE: Queue = Queue::new(
+        "stone-file-writer",
+        LIMITS.max_pending_jobs,
+        LIMITS.max_pending_bytes,
+        false,
+        run,
+    );
     static JOBS: OnceLock<Mutex<Jobs>> = OnceLock::new();
-    JOBS.get_or_init(|| Mutex::new(Jobs::new(LIMITS)))
+    JOBS.get_or_init(|| Mutex::new(Jobs::new(&QUEUE, LIMITS, WorkerControl::default())))
 }
 
 fn c_text<'a>(value: *const c_char) -> Option<&'a str> {
@@ -1025,21 +932,6 @@ fn is_plain_filename(filename: &str) -> bool {
 /// `data` is non-null and points at `len` readable bytes.
 unsafe fn copy_bytes<T>(data: *const T, len: usize) -> Vec<u8> {
     std::slice::from_raw_parts(data.cast::<u8>(), len).to_vec()
-}
-
-fn poll_job(id: i32, wait: bool) -> i32 {
-    let pending = {
-        let jobs = jobs().lock().unwrap();
-        jobs.pending.get(&id).cloned()
-    };
-    let Some(pending) = pending else {
-        return -1;
-    };
-    let Some(result) = pending.completion.poll(wait) else {
-        return 0;
-    };
-    jobs().lock().unwrap().pending.remove(&id);
-    result.code()
 }
 
 #[no_mangle]
@@ -1122,7 +1014,7 @@ pub extern "C" fn stone_file_write_pair_async(
 
 #[no_mangle]
 pub extern "C" fn stone_file_write_poll(id: i32, wait: bool) -> i32 {
-    poll_job(id, wait)
+    poll(jobs(), id, wait)
 }
 
 #[no_mangle]
@@ -1275,12 +1167,7 @@ pub extern "C" fn stone_file_transaction_abort(transaction: i32) -> bool {
 
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_cancel(job: i32) -> i32 {
-    let cancellation = {
-        let jobs = jobs().lock().unwrap();
-        jobs.pending
-            .get(&job)
-            .and_then(|pending| pending.cancellation.clone())
-    };
+    let cancellation = jobs().lock().unwrap().cancellations.get(&job).cloned();
     cancellation
         .map(|cancellation| cancellation.cancel())
         .unwrap_or(-1)
@@ -1288,7 +1175,7 @@ pub extern "C" fn stone_file_transaction_cancel(job: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_poll(job: i32, wait: bool) -> i32 {
-    poll_job(job, wait)
+    poll(jobs(), job, wait)
 }
 
 #[no_mangle]
@@ -1387,16 +1274,31 @@ mod tests {
         }
     }
 
+    fn controlled(limits: Limits, control: WorkerControl) -> Mutex<Jobs> {
+        let queue = Queue::new(
+            "stone-file-writer",
+            limits.max_pending_jobs,
+            limits.max_pending_bytes,
+            false,
+            run,
+        );
+        Mutex::new(Jobs::new(Box::leak(Box::new(queue)), limits, control))
+    }
+
+    fn queue(limits: Limits) -> Mutex<Jobs> {
+        controlled(limits, WorkerControl::default())
+    }
+
     fn probed(
         limits: Limits,
         probe: impl Fn(Probe) -> bool + Send + Sync + 'static,
     ) -> Mutex<Jobs> {
-        Mutex::new(Jobs::new_with_control(
+        controlled(
             limits,
             WorkerControl {
                 probe: Some(Arc::new(probe)),
             },
-        ))
+        )
     }
 
     fn gated(limits: Limits, gate: &Arc<TestGate>, at: fn(&Probe) -> bool) -> Mutex<Jobs> {
@@ -1524,25 +1426,12 @@ mod tests {
         submit(queue, path, bytes, false).unwrap()
     }
 
-    fn poll_queue(queue: &Mutex<Jobs>, id: i32, wait: bool) -> i32 {
-        let pending = {
-            let jobs = queue.lock().unwrap();
-            jobs.pending.get(&id).cloned()
-        };
-        let Some(pending) = pending else {
-            return -1;
-        };
-        let Some(result) = pending.completion.poll(wait) else {
-            return 0;
-        };
-        queue.lock().unwrap().pending.remove(&id);
-        result.code()
+    fn cancellation(queue: &Mutex<Jobs>, job: i32) -> Arc<Cancellation> {
+        Arc::clone(&queue.lock().unwrap().cancellations[&job])
     }
 
-    fn cancellation(queue: &Mutex<Jobs>, job: i32) -> Arc<Cancellation> {
-        let jobs = queue.lock().unwrap();
-        let pending = jobs.pending.get(&job).unwrap();
-        Arc::clone(pending.cancellation.as_ref().unwrap())
+    fn reserved(queue: &Mutex<Jobs>) -> usize {
+        queue.lock().unwrap().queue.reserved()
     }
 
     fn decoded_png(path: &Path) -> Vec<u8> {
@@ -1555,18 +1444,18 @@ mod tests {
     #[test]
     fn queued_writes_preserve_order_and_report_failures() {
         let root = test_root();
-        let queue = Mutex::new(Jobs::new(limits(8, 64)));
+        let queue = queue(limits(8, 64));
         let path = root.join("nested/data");
         let first = queued_write(&queue, path.clone(), b"first");
         let second = submit(&queue, path.clone(), b"second", true).unwrap();
-        assert_eq!(poll_queue(&queue, first, true), 1);
-        assert_eq!(poll_queue(&queue, second, true), 1);
+        assert_eq!(poll(&queue, first, true), 1);
+        assert_eq!(poll(&queue, second, true), 1);
         assert_eq!(std::fs::read(&path).unwrap(), b"firstsecond");
         let invalid = path.join("child");
         let failed = queued_write(&queue, invalid, b"bad");
-        assert_eq!(poll_queue(&queue, failed, true), -1);
+        assert_eq!(poll(&queue, failed, true), -1);
         assert_eq!(std::fs::read(&path).unwrap(), b"firstsecond");
-        assert_eq!(poll_queue(&queue, failed, false), -1);
+        assert_eq!(poll(&queue, failed, false), -1);
     }
 
     #[test]
@@ -1579,14 +1468,14 @@ mod tests {
         let first = queued_write(&queue, root.join("first"), b"one");
         assert!(gate.wait_until_entered());
         let queue_for_poll = Arc::clone(&queue);
-        let waiter = thread::spawn(move || poll_queue(&queue_for_poll, first, true));
+        let waiter = thread::spawn(move || poll(&queue_for_poll, first, true));
         thread::sleep(Duration::from_millis(5));
         let second = queued_write(&queue, root.join("second"), b"two");
         assert!(second > 0, "submit must not wait for a blocked worker");
-        assert_eq!(poll_queue(&queue, second, false), 0);
+        assert_eq!(poll(&queue, second, false), 0);
         gate.release();
         assert_eq!(waiter.join().unwrap(), 1);
-        assert_eq!(poll_queue(&queue, second, true), 1);
+        assert_eq!(poll(&queue, second, true), 1);
     }
 
     #[test]
@@ -1598,39 +1487,24 @@ mod tests {
         assert!(gate.wait_until_entered());
         assert!(submit(&queue, root.join("second"), b"x", false).is_none());
         gate.release();
-        assert_eq!(poll_queue(&queue, first, true), 1);
+        assert_eq!(poll(&queue, first, true), 1);
         let second = queued_write(&queue, root.join("second"), b"x");
-        assert_eq!(poll_queue(&queue, second, true), 1);
+        assert_eq!(poll(&queue, second, true), 1);
     }
 
     #[test]
     fn completed_job_releases_owned_bytes_before_observation() {
-        let root = tempfile::tempdir().unwrap();
-        let gate = TestGate::new();
-        let queue = gated(limits(1, 4), &gate, |probe| {
-            matches!(probe, Probe::Completed)
-        });
-        let first = queued_write(&queue, root.path().join("first"), b"1234");
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assert!(
-                gate.wait_until_entered(),
-                "worker did not publish completion"
-            );
-            assert_eq!(poll_queue(&queue, first, false), 1);
-            assert_eq!(std::fs::read(root.path().join("first")).unwrap(), b"1234");
-            assert!(
-                submit(&queue, root.path().join("second"), b"5678", false).is_some(),
-                "completed payload still consumes the byte budget"
-            );
-        }));
-        gate.release();
-        let pending: Vec<_> = queue.lock().unwrap().pending.keys().copied().collect();
-        for id in pending {
-            assert_eq!(poll_queue(&queue, id, true), 1);
-        }
-        if let Err(error) = outcome {
-            std::panic::resume_unwind(error);
-        }
+        let root = test_root();
+        let queue = queue(limits(2, 4));
+        let first = queued_write(&queue, root.join("first"), b"1234");
+        let shared = queue.lock().unwrap().queue;
+        assert_eq!(shared.wait(first as u64), 1);
+        assert_eq!(reserved(&queue), 0);
+        let second = submit(&queue, root.join("second"), b"5678", false)
+            .expect("completed payload still consumes the byte budget");
+        assert_eq!(poll(&queue, first, false), 1);
+        assert_eq!(poll(&queue, second, true), 1);
+        assert_eq!(std::fs::read(root.join("first")).unwrap(), b"1234");
     }
 
     #[test]
@@ -1649,7 +1523,7 @@ mod tests {
         stage_manifest(&queue, transaction, &manifest, b"{\"a\":");
         assert!(fragment(&queue, transaction, &manifest, b"1}", true, true));
         let job = commit(&queue, transaction);
-        assert_eq!(poll_queue(&queue, job, true), 1);
+        assert_eq!(poll(&queue, job, true), 1);
         assert_eq!(
             std::mem::take(&mut *log.lock().unwrap()),
             vec![face, level, snapshots, save.clone(), save.clone()],
@@ -1747,7 +1621,7 @@ mod tests {
         let (save, directories) = compaction_fixture(&measure_root);
         let (queue, log) = logging_syncs(compaction_limits());
         let (job, files) = compaction_batch(&queue, &save, &directories, 1, 91);
-        assert_eq!(poll_queue(&queue, job, true), 1);
+        assert_eq!(poll(&queue, job, true), 1);
         assert_compaction_published(&save, &files, 1);
         let synced = std::mem::take(&mut *log.lock().unwrap());
         assert_eq!(
@@ -1766,13 +1640,13 @@ mod tests {
         for cut in 1..=cuts {
             let root = test_root();
             let (save, directories) = compaction_fixture(&root);
-            let attempts = AtomicUsize::new(0);
+            let attempts = std::sync::atomic::AtomicUsize::new(0);
             let queue = probed(compaction_limits(), move |probe| {
                 matches!(probe, Probe::DirectorySync(_))
                     && attempts.fetch_add(1, Ordering::AcqRel) + 1 == cut
             });
             let (job, files) = compaction_batch(&queue, &save, &directories, 2, directories.len());
-            match poll_queue(&queue, job, true) {
+            match poll(&queue, job, true) {
                 -1 => assert_eq!(
                     std::fs::read(save.join("manifest.json")).unwrap(),
                     b"previous root",
@@ -1790,7 +1664,7 @@ mod tests {
     #[test]
     fn transaction_fragment_admission_bounds_retained_fragment_overhead() {
         let root = test_root();
-        let queue = Mutex::new(Jobs::new(limits(4, 128 * 1024)));
+        let queue = queue(limits(4, 128 * 1024));
         let transaction_id = begin(&queue);
         let snapshot = root.join("snapshot");
         let chunk = vec![0u8; 4 * 1024];
@@ -1821,7 +1695,7 @@ mod tests {
             false
         ));
         assert!(queue.lock().unwrap().abort_transaction(transaction_id));
-        assert_eq!(queue.lock().unwrap().accounting.load(Ordering::Acquire), 0);
+        assert_eq!(reserved(&queue), 0);
     }
 
     #[cfg(unix)]
@@ -1862,7 +1736,7 @@ mod tests {
     #[test]
     fn failed_transaction_keeps_old_manifest_gc_files_and_earlier_writes() {
         let root = test_root();
-        let queue = Mutex::new(Jobs::new(limits(4, 64 * 1024)));
+        let queue = queue(limits(4, 64 * 1024));
         let (snapshots, manifest) = gc_fixture(&root);
         let snapshot = root.join("snapshot.png");
         let transaction_id = begin(&queue);
@@ -1870,7 +1744,7 @@ mod tests {
         stage_write(&queue, transaction_id, &snapshots, b"bad write");
         stage_gc_manifest(&queue, transaction_id, &snapshots, &manifest);
         let job = commit(&queue, transaction_id);
-        assert_eq!(poll_queue(&queue, job, true), -1);
+        assert_eq!(poll(&queue, job, true), -1);
         assert_gc_outcome(&snapshots, &manifest, false);
         assert_eq!(std::fs::read(snapshot).unwrap(), b"snapshot");
     }
@@ -1897,7 +1771,7 @@ mod tests {
         cleanup(&queue, transaction_id, &previous, true);
         stage_manifest(&queue, transaction_id, &manifest, b"new");
         let job = commit(&queue, transaction_id);
-        assert_eq!(poll_queue(&queue, job, true), -3);
+        assert_eq!(poll(&queue, job, true), -3);
         assert_eq!(std::fs::read(&manifest).unwrap(), b"new");
         assert_eq!(decoded_png(&previous), pixels);
         assert_eq!(decoded_png(&next), pixels);
@@ -1905,7 +1779,7 @@ mod tests {
         let recovery = begin(&queue);
         stage_manifest(&queue, recovery, &manifest, b"recovered");
         let recovery_job = commit(&queue, recovery);
-        assert_eq!(poll_queue(&queue, recovery_job, true), 1);
+        assert_eq!(poll(&queue, recovery_job, true), 1);
         assert_eq!(std::fs::read(&manifest).unwrap(), b"recovered");
         assert!(previous.exists());
         assert!(next.exists());
@@ -1914,7 +1788,7 @@ mod tests {
     #[test]
     fn cleanup_keep_requires_plain_filenames_and_registered_directories() {
         let root = test_root();
-        let queue = Mutex::new(Jobs::new(limits(4, 64 * 1024)));
+        let queue = queue(limits(4, 64 * 1024));
         let snapshots = root.join("snapshots");
         let transaction_id = begin(&queue);
         assert!(!keep(&queue, transaction_id, &snapshots, "keep.png"));
@@ -1930,25 +1804,25 @@ mod tests {
     fn cleanup_admission_bounds_directories_items_and_metadata_bytes() {
         let root = test_root();
         let snapshots = root.join("snapshots");
-        let queue = Mutex::new(Jobs::new(Limits {
+        let queue = queue(Limits {
             max_transaction_cleanup_directories: 1,
             max_transaction_keep_entries: 1,
             max_transaction_cleanup_bytes: snapshots.as_os_str().len() + 1,
             ..limits(4, 64 * 1024)
-        }));
+        });
         let transaction_id = begin(&queue);
         assert!(cleanup_dir(&queue, transaction_id, &snapshots));
         assert!(!cleanup_dir(&queue, transaction_id, &root.join("other")));
         assert!(keep(&queue, transaction_id, &snapshots, "x"));
         assert!(!keep(&queue, transaction_id, &snapshots, "y"));
         assert!(queue.lock().unwrap().abort_transaction(transaction_id));
-        assert_eq!(queue.lock().unwrap().accounting.load(Ordering::Acquire), 0);
+        assert_eq!(reserved(&queue), 0);
     }
 
     #[test]
     fn transaction_cleanup_runs_for_success_and_failure() {
         let root = test_root();
-        let queue = Mutex::new(Jobs::new(limits(4, 64)));
+        let queue = queue(limits(4, 64));
         let blocked = root.join("blocked");
         std::fs::create_dir(&blocked).unwrap();
         for (target, code) in [(root.join("success"), 1), (blocked, -1)] {
@@ -1958,7 +1832,7 @@ mod tests {
             stage_write(&queue, transaction, &target, b"write");
             cleanup(&queue, transaction, &stale, code == 1);
             let job = commit(&queue, transaction);
-            assert_eq!(poll_queue(&queue, job, true), code);
+            assert_eq!(poll(&queue, job, true), code);
             assert!(!stale.exists(), "{target:?}");
         }
     }
@@ -1977,7 +1851,7 @@ mod tests {
         assert!(gate.wait_until_entered());
         assert_eq!(cancellation(&queue, job).cancel(), 1);
         gate.release();
-        assert_eq!(poll_queue(&queue, job, true), -2);
+        assert_eq!(poll(&queue, job, true), -2);
         assert_gc_outcome(&snapshots, &manifest, false);
     }
 
@@ -1995,7 +1869,7 @@ mod tests {
         assert!(gate.wait_until_entered());
         assert_eq!(cancellation(&queue, job).cancel(), 0);
         gate.release();
-        assert_eq!(poll_queue(&queue, job, true), 1);
+        assert_eq!(poll(&queue, job, true), 1);
         assert_gc_outcome(&snapshots, &manifest, true);
     }
 
@@ -2007,7 +1881,7 @@ mod tests {
         let blocker = root.path().join("blocker");
         std::fs::write(&level, b"old level").unwrap();
         std::fs::write(&blocker, b"blocker").unwrap();
-        let queue = Mutex::new(Jobs::new(limits(4, 64)));
+        let queue = queue(limits(4, 64));
         let job = queue.lock().unwrap().submit(0, true, || {
             vec![
                 write_op(level.clone(), b"new level"),
@@ -2015,7 +1889,7 @@ mod tests {
                 write_op(blocker.join("child"), b"bad"),
             ]
         });
-        assert_eq!(poll_queue(&queue, job.unwrap(), true), -1);
+        assert_eq!(poll(&queue, job.unwrap(), true), -1);
         assert_eq!(std::fs::read(&level).unwrap(), b"old level");
         assert!(!quest.exists());
     }
