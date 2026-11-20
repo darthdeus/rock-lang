@@ -98,15 +98,7 @@ impl<'a> Builder<'a> {
         e: Idx<Expr>,
         concrete_callee: &crate::instance::Instance,
     ) -> Result<(), CompilerError> {
-        let plan = self.concrete_plan;
-        let site = crate::site::Site {
-            domain: self.cur_domain.clone(),
-            expr: e,
-            op: self.cur_op.clone(),
-        };
-        let callee = plan.callees.get(&site).ok_or_else(|| {
-            self.gap_here("concrete callee identity disagrees with its site plan")
-        })?;
+        let callee = self.concrete_callee_entry(e, self.cur_op.clone())?;
         if &callee.instance != concrete_callee {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }

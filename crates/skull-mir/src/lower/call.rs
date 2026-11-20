@@ -656,7 +656,7 @@ impl<'a> Builder<'a> {
             .map(|callee| callee.instance.clone())
     }
 
-    fn concrete_callee_entry(
+    pub(crate) fn concrete_callee_entry(
         &self,
         e: Idx<Expr>,
         op: crate::site::SiteOp,
@@ -697,32 +697,28 @@ impl<'a> Builder<'a> {
         e: Idx<Expr>,
         inst: &crate::instance::Instance,
     ) -> Result<crate::concrete::ConcreteSignatureHandle, CompilerError> {
-        let plan = self.concrete_plan;
-        let site = crate::site::Site {
-            domain: self.cur_domain.clone(),
-            expr: e,
-            op: self.cur_op.clone(),
-        };
-        let callee = plan
-            .callees
-            .get(&site)
-            .ok_or_else(|| self.gap_here("concrete callee signature is missing for its site"))?;
+        let callee = self.concrete_callee_entry(e, self.cur_op.clone())?;
         if crate::verify::checks_enabled() && &callee.instance != inst {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
-        if callee_has_body_plan(self.ws, self.scx, inst) {
-            Ok(std::sync::Arc::clone(
-                &self
-                    .concrete_plans
-                    .get(inst)
-                    .ok_or_else(|| {
-                        self.gap_here("concrete callee body plan is missing for its site")
-                    })?
-                    .signature,
-            ))
-        } else {
-            Ok(std::sync::Arc::clone(&callee.signature))
+        self.callee_signature(inst, callee)
+            .map(std::sync::Arc::clone)
+    }
+
+    /// A callee with its own body plan answers for its signature; any other keeps
+    /// the one its site recorded.
+    fn callee_signature(
+        &self,
+        inst: &crate::instance::Instance,
+        site: &'a crate::concrete::ConcreteCallee,
+    ) -> Result<&'a crate::concrete::ConcreteSignatureHandle, CompilerError> {
+        if !callee_has_body_plan(self.ws, self.scx, inst) {
+            return Ok(&site.signature);
         }
+        self.concrete_plans
+            .get(inst)
+            .map(|plan| &plan.signature)
+            .ok_or_else(|| self.gap_here("concrete callee body plan is missing for its site"))
     }
 
     pub(crate) fn direct_call_signature(
@@ -789,16 +785,7 @@ impl<'a> Builder<'a> {
             op: crate::site::SiteOp::DirectCall,
         };
         let result = if let Some(callee) = body_plan.callees.get(&site) {
-            let owner = &callee.instance;
-            let signature = if callee_has_body_plan(self.ws, self.scx, owner) {
-                &self
-                    .concrete_plans
-                    .get(owner)
-                    .ok_or_else(|| self.gap_here("concrete coroutine callee body plan is missing"))?
-                    .signature
-            } else {
-                &callee.signature
-            };
+            let signature = self.callee_signature(&callee.instance, callee)?;
             signature.result.map(|id| self.concrete_mono(id))
         } else {
             Some(
