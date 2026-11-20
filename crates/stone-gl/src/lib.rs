@@ -201,12 +201,45 @@ impl DebugGl {
     }
 }
 
-macro_rules! checked_gl_methods {
-    ($(fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?;)*) => {
+macro_rules! gl_methods {
+    (checked; $($(#[$doc:meta])* fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?;)*) => {
         $(
             /// # Safety
             /// Requires the [OpenGL call contract](Self#safety).
+            $(#[$doc])*
             pub unsafe fn $name(&self, $($arg: $ty),*) $(-> $ret)? {
+                let result = unsafe { self.gl.$name($($arg),*) };
+                self.check_error(stringify!($name));
+                result
+            }
+        )*
+    };
+    (captured; $($(#[$doc:meta])* fn $name:ident($($arg:ident: $ty:ty),* $(,)?);)*) => {
+        $(
+            /// # Safety
+            /// Requires the [OpenGL call contract](Self#safety).
+            $(#[$doc])*
+            pub unsafe fn $name(&self, $($arg: $ty),*) {
+                self.capture(stringify!($name), &[$($arg as i64),*]);
+                unsafe { self.gl.$name($($arg),*) };
+                self.check_error(stringify!($name));
+            }
+        )*
+    };
+    (fallible; $($(#[$doc:meta])* fn $name:ident($($arg:ident: $ty:ty),* $(,)?);)*) => {
+        $(
+            /// # Safety
+            /// Requires the [OpenGL call contract](Self#safety).
+            $(#[$doc])*
+            pub unsafe fn $name(&self, $($arg: $ty),*) -> Result<(), String> {
+                unsafe { self.gl.$name($($arg),*) };
+                self.checked_error(stringify!($name))
+            }
+        )*
+    };
+    (create; $(fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+        $(
+            pub fn $name(&self, $($arg: $ty),*) -> Result<$ret, String> {
                 let result = unsafe { self.gl.$name($($arg),*) };
                 self.check_error(stringify!($name));
                 result
@@ -216,7 +249,8 @@ macro_rules! checked_gl_methods {
 }
 
 impl DebugGl {
-    checked_gl_methods! {
+    gl_methods! {
+        checked;
         fn clear_color(r: f32, g: f32, b: f32, a: f32);
         fn viewport(x: i32, y: i32, width: i32, height: i32);
         fn use_program(program: Option<glow::Program>);
@@ -370,14 +404,126 @@ impl DebugGl {
         fn get_query_parameter_u64(query: glow::Query, parameter: u32) -> u64;
         fn query_counter(query: glow::Query, target: u32);
         fn pop_debug_group();
+        /// `parameter` must select a single boolean result.
+        fn get_parameter_bool(parameter: u32) -> bool;
+        /// `out` must cover every component written by `parameter`.
+        fn get_parameter_f32_slice(parameter: u32, out: &mut [f32]);
+        /// `parameter` must select a single integer result.
+        fn get_parameter_i32(parameter: u32) -> i32;
+        /// `out` must cover every component written by `parameter`.
+        fn get_parameter_i32_slice(parameter: u32, out: &mut [i32]);
+        /// The output slice must cover every component of the selected uniform.
+        fn get_uniform_f32(program: glow::Program, location: &glow::UniformLocation, out: &mut [f32]);
+        /// The output slice must cover every component of the selected uniform.
+        fn get_uniform_i32(program: glow::Program, location: &glow::UniformLocation, out: &mut [i32]);
+        /// A vertex buffer must be bound; offset, stride and format must describe valid storage for
+        /// subsequent draws.
+        fn vertex_attrib_pointer_f32(
+            index: u32,
+            size: i32,
+            data_type: u32,
+            normalized: bool,
+            stride: i32,
+            offset: i32,
+        );
+        /// The range and access flags must be valid for the bound buffer. Check the returned pointer
+        /// before use; obey its access permissions, synchronization requirements and mapping
+        /// lifetime.
+        fn map_buffer_range(target: u32, offset: i32, length: i32, access: u32) -> *mut u8;
+        /// The bound buffer must be mapped; no access through its mapped pointer may follow this
+        /// call.
+        fn unmap_buffer(target: u32);
+        /// Desktop GL only: glGetBufferSubData does not exist in GLES.
+        fn get_buffer_sub_data(target: u32, offset: i32, dst: &mut [u8]);
+        /// Supplied pixel data must cover the transfer under the current unpack alignment, row length and skip
+        /// state. Slice data requires no unpack buffer bound; a buffer offset requires a sufficiently
+        /// sized unpack buffer.
+        #[expect(clippy::too_many_arguments, reason = "Preserve the OpenGL operation signature")]
+        fn tex_image_2d(
+            target: u32,
+            level: i32,
+            internal_format: i32,
+            width: i32,
+            height: i32,
+            border: i32,
+            format: u32,
+            ty: u32,
+            pixels: glow::PixelUnpackData,
+        );
+        /// Supplied pixel data must cover the transfer under the current unpack alignment, row length and skip
+        /// state. Slice data requires no unpack buffer bound; a buffer offset requires a sufficiently
+        /// sized unpack buffer.
+        #[expect(clippy::too_many_arguments, reason = "Preserve the OpenGL operation signature")]
+        fn tex_sub_image_2d(
+            target: u32,
+            level: i32,
+            x_offset: i32,
+            y_offset: i32,
+            width: i32,
+            height: i32,
+            format: u32,
+            ty: u32,
+            pixels: glow::PixelUnpackData,
+        );
+        /// The destination must cover the transfer under the current pack alignment, row length and
+        /// skip state. Slice data requires no pack buffer bound; a buffer offset requires a
+        /// sufficiently sized pack buffer.
+        #[expect(clippy::too_many_arguments, reason = "Preserve the OpenGL operation signature")]
+        fn read_pixels(
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            format: u32,
+            ty: u32,
+            pixels: glow::PixelPackData,
+        );
+        /// The destination must cover the full texture level under the current pack state. Slice data
+        /// requires no pack buffer bound; a buffer offset requires a sufficiently sized pack buffer.
+        fn get_tex_image(target: u32, level: i32, format: u32, ty: u32, pixels: glow::PixelPackData);
     }
 
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    pub unsafe fn clear(&self, mask: u32) {
-        self.capture("clear", &[mask as i64]);
-        self.gl.clear(mask);
-        self.check_error("clear");
+    gl_methods! {
+        captured;
+        fn clear(mask: u32);
+        /// Enabled vertex attributes must cover the requested vertex range.
+        fn draw_arrays(mode: u32, first: i32, count: i32);
+        /// Enabled vertex and instance attributes must cover the requested ranges.
+        fn draw_arrays_instanced(mode: u32, first: i32, count: i32, instance_count: i32);
+        /// The bound index buffer must cover the offset/count/type, and all referenced vertices must
+        /// be valid.
+        fn draw_elements(mode: u32, count: i32, element_type: u32, offset: i32);
+        #[expect(clippy::too_many_arguments, reason = "Preserve the OpenGL operation signature")]
+        fn blit_framebuffer(
+            src_x0: i32,
+            src_y0: i32,
+            src_x1: i32,
+            src_y1: i32,
+            dst_x0: i32,
+            dst_y0: i32,
+            dst_x1: i32,
+            dst_y1: i32,
+            mask: u32,
+            filter: u32,
+        );
+    }
+
+    gl_methods! {
+        fallible;
+        fn buffer_data_u8_slice(target: u32, data: &[u8], usage: u32);
+        fn buffer_data_size(target: u32, size: i32, usage: u32);
+        fn buffer_sub_data_u8_slice(target: u32, offset: i32, data: &[u8]);
+    }
+
+    gl_methods! {
+        create;
+        fn create_texture() -> glow::Texture;
+        fn create_framebuffer() -> glow::Framebuffer;
+        fn create_renderbuffer() -> glow::Renderbuffer;
+        fn create_vertex_array() -> glow::VertexArray;
+        fn create_buffer() -> glow::Buffer;
+        fn create_shader(shader_type: u32) -> glow::Shader;
+        fn create_program() -> glow::Program;
     }
 
     /// # Safety
@@ -403,79 +549,11 @@ impl DebugGl {
 
     /// # Safety
     /// Requires the [OpenGL call contract](Self#safety).
-    /// Enabled vertex attributes must cover the requested vertex range.
-    pub unsafe fn draw_arrays(&self, mode: u32, first: i32, count: i32) {
-        self.capture("draw_arrays", &[mode as i64, first as i64, count as i64]);
-        self.gl.draw_arrays(mode, first, count);
-        self.check_error("draw_arrays");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// Enabled vertex and instance attributes must cover the requested ranges.
-    pub unsafe fn draw_arrays_instanced(
-        &self,
-        mode: u32,
-        first: i32,
-        count: i32,
-        instance_count: i32,
-    ) {
-        self.capture(
-            "draw_arrays_instanced",
-            &[
-                mode as i64,
-                first as i64,
-                count as i64,
-                instance_count as i64,
-            ],
-        );
-        self.gl
-            .draw_arrays_instanced(mode, first, count, instance_count);
-        self.check_error("draw_arrays_instanced");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// `parameter` must select a single boolean result.
-    pub unsafe fn get_parameter_bool(&self, parameter: u32) -> bool {
-        let v = self.gl.get_parameter_bool(parameter);
-        self.check_error("get_parameter_bool");
-        v
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
     /// `N` must cover every component written by `parameter`.
     pub unsafe fn get_parameter_bool_array<const N: usize>(&self, parameter: u32) -> [bool; N] {
         let v = self.gl.get_parameter_bool_array::<N>(parameter);
         self.check_error("get_parameter_bool_array");
         v
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// `out` must cover every component written by `parameter`.
-    pub unsafe fn get_parameter_f32_slice(&self, parameter: u32, out: &mut [f32]) {
-        self.gl.get_parameter_f32_slice(parameter, out);
-        self.check_error("get_parameter_f32_slice");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// The bound index buffer must cover the offset/count/type, and all referenced vertices must
-    /// be valid.
-    pub unsafe fn draw_elements(&self, mode: u32, count: i32, element_type: u32, offset: i32) {
-        self.capture(
-            "draw_elements",
-            &[
-                mode as i64,
-                count as i64,
-                element_type as i64,
-                offset as i64,
-            ],
-        );
-        self.gl.draw_elements(mode, count, element_type, offset);
-        self.check_error("draw_elements");
     }
 
     /// # Safety
@@ -489,320 +567,6 @@ impl DebugGl {
     pub unsafe fn tex_buffer(&self, target: u32, internal_format: u32, buffer: glow::Buffer) {
         self.gl.tex_buffer(target, internal_format, Some(buffer));
         self.check_error("tex_buffer");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// The output slice must cover every component of the selected uniform.
-    pub unsafe fn get_uniform_f32(
-        &self,
-        program: glow::Program,
-        location: &glow::UniformLocation,
-        out: &mut [f32],
-    ) {
-        self.gl.get_uniform_f32(program, location, out);
-        self.check_error("get_uniform_f32");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// `parameter` must select a single integer result.
-    pub unsafe fn get_parameter_i32(&self, parameter: u32) -> i32 {
-        let result = self.gl.get_parameter_i32(parameter);
-        self.check_error("get_parameter_i32");
-        result
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// `out` must cover every component written by `parameter`.
-    pub unsafe fn get_parameter_i32_slice(&self, parameter: u32, out: &mut [i32]) {
-        self.gl.get_parameter_i32_slice(parameter, out);
-        self.check_error("get_parameter_i32_slice");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// The output slice must cover every component of the selected uniform.
-    pub unsafe fn get_uniform_i32(
-        &self,
-        program: glow::Program,
-        location: &glow::UniformLocation,
-        out: &mut [i32],
-    ) {
-        self.gl.get_uniform_i32(program, location, out);
-        self.check_error("get_uniform_i32");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// A vertex buffer must be bound; offset, stride and format must describe valid storage for
-    /// subsequent draws.
-    pub unsafe fn vertex_attrib_pointer_f32(
-        &self,
-        index: u32,
-        size: i32,
-        data_type: u32,
-        normalized: bool,
-        stride: i32,
-        offset: i32,
-    ) {
-        self.gl
-            .vertex_attrib_pointer_f32(index, size, data_type, normalized, stride, offset);
-        self.check_error("vertex_attrib_pointer_f32");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    pub unsafe fn buffer_data_u8_slice(
-        &self,
-        target: u32,
-        data: &[u8],
-        usage: u32,
-    ) -> Result<(), String> {
-        self.gl.buffer_data_u8_slice(target, data, usage);
-        self.checked_error("buffer_data_u8_slice")
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    pub unsafe fn buffer_data_size(
-        &self,
-        target: u32,
-        size: i32,
-        usage: u32,
-    ) -> Result<(), String> {
-        self.gl.buffer_data_size(target, size, usage);
-        self.checked_error("buffer_data_size")
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// The range and access flags must be valid for the bound buffer. Check the returned pointer
-    /// before use; obey its access permissions, synchronization requirements and mapping
-    /// lifetime.
-    pub unsafe fn map_buffer_range(
-        &self,
-        target: u32,
-        offset: i32,
-        length: i32,
-        access: u32,
-    ) -> *mut u8 {
-        let ptr = self.gl.map_buffer_range(target, offset, length, access);
-        self.check_error("map_buffer_range");
-        ptr
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// The bound buffer must be mapped; no access through its mapped pointer may follow this
-    /// call.
-    pub unsafe fn unmap_buffer(&self, target: u32) {
-        self.gl.unmap_buffer(target);
-        self.check_error("unmap_buffer");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    pub unsafe fn buffer_sub_data_u8_slice(
-        &self,
-        target: u32,
-        offset: i32,
-        data: &[u8],
-    ) -> Result<(), String> {
-        self.gl.buffer_sub_data_u8_slice(target, offset, data);
-        self.checked_error("buffer_sub_data_u8_slice")
-    }
-
-    // Desktop GL only: glGetBufferSubData does not exist in GLES.
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    pub unsafe fn get_buffer_sub_data(&self, target: u32, offset: i32, dst: &mut [u8]) {
-        self.gl.get_buffer_sub_data(target, offset, dst);
-        self.check_error("get_buffer_sub_data");
-    }
-
-    pub fn create_texture(&self) -> Result<glow::Texture, String> {
-        let result = unsafe { self.gl.create_texture() };
-        self.check_error("create_texture");
-        result
-    }
-
-    pub fn create_framebuffer(&self) -> Result<glow::Framebuffer, String> {
-        let result = unsafe { self.gl.create_framebuffer() };
-        self.check_error("create_framebuffer");
-        result
-    }
-
-    pub fn create_renderbuffer(&self) -> Result<glow::Renderbuffer, String> {
-        let result = unsafe { self.gl.create_renderbuffer() };
-        self.check_error("create_renderbuffer");
-        result
-    }
-
-    pub fn create_vertex_array(&self) -> Result<glow::VertexArray, String> {
-        let result = unsafe { self.gl.create_vertex_array() };
-        self.check_error("create_vertex_array");
-        result
-    }
-
-    pub fn create_buffer(&self) -> Result<glow::Buffer, String> {
-        let result = unsafe { self.gl.create_buffer() };
-        self.check_error("create_buffer");
-        result
-    }
-
-    pub fn create_shader(&self, shader_type: u32) -> Result<glow::Shader, String> {
-        let result = unsafe { self.gl.create_shader(shader_type) };
-        self.check_error("create_shader");
-        result
-    }
-
-    pub fn create_program(&self) -> Result<glow::Program, String> {
-        let result = unsafe { self.gl.create_program() };
-        self.check_error("create_program");
-        result
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// Supplied pixel data must cover the transfer under the current unpack alignment, row length and skip
-    /// state. Slice data requires no unpack buffer bound; a buffer offset requires a sufficiently
-    /// sized unpack buffer.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Preserve the OpenGL operation signature"
-    )]
-    pub unsafe fn tex_image_2d(
-        &self,
-        target: u32,
-        level: i32,
-        internal_format: i32,
-        width: i32,
-        height: i32,
-        border: i32,
-        format: u32,
-        ty: u32,
-        pixels: glow::PixelUnpackData,
-    ) {
-        self.gl.tex_image_2d(
-            target,
-            level,
-            internal_format,
-            width,
-            height,
-            border,
-            format,
-            ty,
-            pixels,
-        );
-        self.check_error("tex_image_2d");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// Supplied pixel data must cover the transfer under the current unpack alignment, row length and skip
-    /// state. Slice data requires no unpack buffer bound; a buffer offset requires a sufficiently
-    /// sized unpack buffer.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Preserve the OpenGL operation signature"
-    )]
-    pub unsafe fn tex_sub_image_2d(
-        &self,
-        target: u32,
-        level: i32,
-        x_offset: i32,
-        y_offset: i32,
-        width: i32,
-        height: i32,
-        format: u32,
-        ty: u32,
-        pixels: glow::PixelUnpackData,
-    ) {
-        self.gl.tex_sub_image_2d(
-            target, level, x_offset, y_offset, width, height, format, ty, pixels,
-        );
-        self.check_error("tex_sub_image_2d");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Preserve the OpenGL operation signature"
-    )]
-    pub unsafe fn blit_framebuffer(
-        &self,
-        src_x0: i32,
-        src_y0: i32,
-        src_x1: i32,
-        src_y1: i32,
-        dst_x0: i32,
-        dst_y0: i32,
-        dst_x1: i32,
-        dst_y1: i32,
-        mask: u32,
-        filter: u32,
-    ) {
-        self.capture(
-            "blit_framebuffer",
-            &[
-                src_x0 as i64,
-                src_y0 as i64,
-                src_x1 as i64,
-                src_y1 as i64,
-                dst_x0 as i64,
-                dst_y0 as i64,
-                dst_x1 as i64,
-                dst_y1 as i64,
-                mask as i64,
-                filter as i64,
-            ],
-        );
-        self.gl.blit_framebuffer(
-            src_x0, src_y0, src_x1, src_y1, dst_x0, dst_y0, dst_x1, dst_y1, mask, filter,
-        );
-        self.check_error("blit_framebuffer");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// The destination must cover the transfer under the current pack alignment, row length and
-    /// skip state. Slice data requires no pack buffer bound; a buffer offset requires a
-    /// sufficiently sized pack buffer.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Preserve the OpenGL operation signature"
-    )]
-    pub unsafe fn read_pixels(
-        &self,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-        format: u32,
-        ty: u32,
-        pixels: glow::PixelPackData,
-    ) {
-        self.gl.read_pixels(x, y, width, height, format, ty, pixels);
-        self.check_error("read_pixels");
-    }
-
-    /// # Safety
-    /// Requires the [OpenGL call contract](Self#safety).
-    /// The destination must cover the full texture level under the current pack state. Slice data
-    /// requires no pack buffer bound; a buffer offset requires a sufficiently sized pack buffer.
-    pub unsafe fn get_tex_image(
-        &self,
-        target: u32,
-        level: i32,
-        format: u32,
-        ty: u32,
-        pixels: glow::PixelPackData,
-    ) {
-        self.gl.get_tex_image(target, level, format, ty, pixels);
-        self.check_error("get_tex_image");
     }
 
     /// # Safety
