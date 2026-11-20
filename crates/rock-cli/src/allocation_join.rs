@@ -335,7 +335,7 @@ fn parse_activation(activation: &str) -> Result<Activation<'_>> {
         .ok_or_else(|| anyhow::anyhow!("allocation activation has no site population"))?
         .parse::<usize>()?;
     let mut seen = HashSet::new();
-    let mut hits = Vec::with_capacity(declared);
+    let mut hits = Vec::new();
     for line in lines {
         let fields = line.split('\t').collect::<Vec<_>>();
         let expected = if frame_aware { 6 } else { 2 };
@@ -355,10 +355,10 @@ fn parse_activation(activation: &str) -> Result<Activation<'_>> {
             let active_frames = fields[3].parse::<u64>()?;
             let max_frame_hits = fields[4].parse::<u64>()?;
             let outside_hits = fields[5].parse::<u64>()?;
-            if frame_hits + outside_hits != total_hits {
+            let classified = u128::from(frame_hits) + u128::from(outside_hits);
+            if classified != u128::from(total_hits) {
                 anyhow::bail!(
-                    "allocation activation site {id} has {total_hits} total hits but {} classified hits",
-                    frame_hits + outside_hits
+                    "allocation activation site {id} has {total_hits} total hits but {classified} classified hits"
                 );
             }
             if active_frames > frames {
@@ -426,7 +426,37 @@ pub(crate) fn render_joined_report_with_jit(
 ) -> Result<String> {
     let filter = RouteFilter::parse(route)?;
     let sites = parse_manifest(manifest)?;
+    join(sites, parse_activation(activation)?, filter, lua, jit_trace)
+}
+
+pub(crate) fn join_sim(
+    manifest: &str,
+    activation: &str,
+    lua: &str,
+) -> Result<(String, u64, usize)> {
     let activation = parse_activation(activation)?;
+    anyhow::ensure!(
+        activation.frame_aware,
+        "sim allocation-site activation is not frame-aware v2"
+    );
+    let (frames, active_sites) = (activation.frames, activation.hits.len());
+    let joined = join(
+        parse_manifest(manifest)?,
+        activation,
+        RouteFilter::All,
+        Some(lua),
+        None,
+    )?;
+    Ok((joined, frames, active_sites))
+}
+
+fn join(
+    sites: BTreeMap<&str, Site<'_>>,
+    activation: Activation<'_>,
+    filter: RouteFilter,
+    lua: Option<&str>,
+    jit_trace: Option<&str>,
+) -> Result<String> {
     let frames = activation.frames;
     let frame_aware = activation.frame_aware;
     let mut hits = activation.hits;
@@ -951,6 +981,23 @@ trace_generation	trace	ir	state	op	body_start	lua_line
                 .to_string()
                 .contains("absent from the allocation manifest")
         );
+    }
+
+    #[test]
+    fn join_rejects_out_of_range_activation_counts() {
+        for (valid, malformed, reason) in [
+            (
+                "aaaaaaaaaaaaaaaa\t8\t8\t4\t2\t0",
+                "aaaaaaaaaaaaaaaa\t8\t18446744073709551615\t4\t2\t9",
+                "classified hits",
+            ),
+            ("sites\t3", "sites\t9223372036854775807", "site"),
+        ] {
+            let activation = FRAME_ACTIVATION.replace(valid, malformed);
+            let error = render_joined_report(MANIFEST, &activation, None, None)
+                .expect_err("invalid activation counts");
+            assert!(error.to_string().contains(reason), "{error}");
+        }
     }
 
     #[test]

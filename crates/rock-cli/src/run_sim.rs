@@ -1859,32 +1859,6 @@ fn allocation_site_artifact_stem(index: usize, name: &str) -> String {
     format!("{index:04}-{safe}")
 }
 
-fn allocation_activation_population(text: &str) -> Result<(usize, usize)> {
-    let mut lines = text.lines();
-    if lines.next() != Some("rock.allocation-activation.v2") {
-        return Err(anyhow!(
-            "sim allocation-site activation is not frame-aware v2"
-        ));
-    }
-    let frames = lines
-        .next()
-        .and_then(|line| line.strip_prefix("frames\t"))
-        .and_then(|value| value.parse::<usize>().ok())
-        .ok_or_else(|| anyhow!("sim allocation-site activation has no frame denominator"))?;
-    let sites = lines
-        .next()
-        .and_then(|line| line.strip_prefix("sites\t"))
-        .and_then(|value| value.parse::<usize>().ok())
-        .ok_or_else(|| anyhow!("sim allocation-site activation has no site population"))?;
-    let rows = lines.count();
-    if rows != sites {
-        return Err(anyhow!(
-            "sim allocation-site activation declared {sites} sites but wrote {rows} rows"
-        ));
-    }
-    Ok((frames, sites))
-}
-
 pub(crate) fn do_run_allocation_sites(
     project: &str,
     names: &[String],
@@ -1977,14 +1951,8 @@ pub(crate) fn do_run_allocation_sites(
                         activation_path.display()
                     )
                 })?;
-                let (frames, active_sites) = allocation_activation_population(&activation)?;
-                let joined = crate::allocation_join::render_joined_report_with_jit(
-                    &manifest,
-                    &activation,
-                    Some("all"),
-                    Some(&generated_lua),
-                    None,
-                )?;
+                let (joined, frames, active_sites) =
+                    crate::allocation_join::join_sim(&manifest, &activation, &generated_lua)?;
                 fs_err::write(&joined_path, joined)?;
                 let env = registry
                     .env_by_wire
