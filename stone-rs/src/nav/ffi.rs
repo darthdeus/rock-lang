@@ -226,12 +226,6 @@ unsafe fn input<'a, T>(ptr: *const T, len: int) -> &'a [T] {
     );
     std::slice::from_raw_parts(ptr, len)
 }
-fn place(space: int, x: int, y: int) -> Place {
-    Place {
-        space: SpaceId { value: space },
-        grid: iv(x, y),
-    }
-}
 fn links(values: &[NativeNavIntWire]) -> IdxVec<NavLinkInput> {
     assert_eq!(values.len() % 8, 0, "navigation link record length");
     values
@@ -387,12 +381,7 @@ pub extern "C" fn stone_nav_edit(
             nav_graph_invalidate(
                 Arc::make_mut(&mut n.graph),
                 SpaceId { value: a },
-                IRect {
-                    x: b,
-                    y: c,
-                    w: d,
-                    h: e,
-                },
+                rect(b, c, d, e),
             );
             1
         }
@@ -489,12 +478,7 @@ pub extern "C" fn stone_nav_request(
             place(space, x, y),
             NavRegion {
                 space: SpaceId { value: goal_space },
-                rect: IRect {
-                    x: gx,
-                    y: gy,
-                    w: gw,
-                    h: gh,
-                },
+                rect: rect(gx, gy, gw, gh),
             },
             teleports,
             seed,

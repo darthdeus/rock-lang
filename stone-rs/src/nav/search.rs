@@ -81,19 +81,9 @@ pub(super) fn nav_query_attach_start(g: &NavGraph, q: &mut NavQuery, plan: &NavP
         q,
         cs,
         cs,
-        IRect {
-            x: ox + plan.from_x,
-            y: oy + plan.from_y,
-            w: 1,
-            h: 1,
-        },
+        rect(ox + plan.from_x, oy + plan.from_y, 1, 1),
         true,
-        IRect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        },
+        rect(0, 0, 0, 0),
         false,
     );
     for i in 0..nav_cluster_slot_limit(g, cs) {
@@ -199,19 +189,9 @@ pub(super) fn nav_query_attach_goal(g: &NavGraph, q: &mut NavQuery, plan: &NavPl
         q,
         c,
         c,
-        IRect {
-            x: g.space_ox[gsi] + x0,
-            y: g.space_oy[gsi] + y0,
-            w: x1 - x0,
-            h: y1 - y0,
-        },
+        rect(g.space_ox[gsi] + x0, g.space_oy[gsi] + y0, x1 - x0, y1 - y0),
         false,
-        IRect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        },
+        rect(0, 0, 0, 0),
         false,
     );
     let mut entry = NavGoalAttachment {

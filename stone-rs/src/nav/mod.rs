@@ -88,6 +88,9 @@ pub struct IRect {
     pub w: int,
     pub h: int,
 }
+fn rect(x: int, y: int, w: int, h: int) -> IRect {
+    IRect { x, y, w, h }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SpaceId {
     pub value: int,
@@ -96,6 +99,12 @@ pub struct SpaceId {
 pub struct Place {
     pub space: SpaceId,
     pub grid: IVec2,
+}
+fn place(space: int, x: int, y: int) -> Place {
+    Place {
+        space: SpaceId { value: space },
+        grid: iv(x, y),
+    }
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NavSpaceLayout {

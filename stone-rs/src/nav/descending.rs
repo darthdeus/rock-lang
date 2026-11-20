@@ -98,19 +98,9 @@ pub(super) fn nav_descend_prepare(
         q,
         ca,
         cb,
-        IRect {
-            x: tx,
-            y: ty,
-            w: 1,
-            h: 1,
-        },
+        rect(tx, ty, 1, 1),
         false,
-        IRect {
-            x: wx,
-            y: wy,
-            w: 1,
-            h: 1,
-        },
+        rect(wx, wy, 1, 1),
         true,
     );
     if q.tile_found < 0 {
@@ -140,12 +130,7 @@ pub(super) fn nav_descend_prepare(
                 continue;
             }
             candidates.push(DescendCandidate {
-                place: Place {
-                    space: SpaceId {
-                        value: g.space_id[ns],
-                    },
-                    grid: iv(nx - g.space_ox[ns], ny - g.space_oy[ns]),
-                },
+                place: nav_world_place(g, ns, nx, ny),
                 x: nx,
                 y: ny,
                 distance: q.window.dist[t],

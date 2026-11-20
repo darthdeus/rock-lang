@@ -2,12 +2,7 @@ use super::*;
 
 pub(super) fn nav_step_to(g: &NavGraph, si: int, wx: int, wy: int) -> NavStep {
     let ts = nav_world_space(g, wx, wy, si);
-    NavStep::Step(Place {
-        space: SpaceId {
-            value: g.space_id[ts],
-        },
-        grid: iv(wx - g.space_ox[ts], wy - g.space_oy[ts]),
-    })
+    NavStep::Step(nav_world_place(g, ts, wx, wy))
 }
 
 pub(super) fn nav_clusters_near(g: &NavGraph, a: int, b: int) -> bool {
@@ -40,29 +35,14 @@ pub(super) fn nav_refine(
             }
             if wx == plan.wp[w - 1].x && wy == plan.wp[w - 1].y {
                 plan.seg.clear();
-                return NavStep::Teleport(Place {
-                    space: SpaceId {
-                        value: g.space_id[si],
-                    },
-                    grid: iv(x, y),
-                });
+                return NavStep::Teleport(place(g.space_id[si], x, y));
             }
             plan.wp_next -= 1;
             continue;
         }
         let mut home = plan.final_cluster;
-        let mut target = IRect {
-            x: plan.goal_wx,
-            y: plan.goal_wy,
-            w: plan.goal_w,
-            h: plan.goal_h,
-        };
-        let seed = IRect {
-            x: wx,
-            y: wy,
-            w: 1,
-            h: 1,
-        };
+        let mut target = rect(plan.goal_wx, plan.goal_wy, plan.goal_w, plan.goal_h);
+        let seed = rect(wx, wy, 1, 1);
         let mut direct = false;
         if w < plan.wp.len() && w > plan.last_link && nav_clusters_near(g, ca, home) {
             q.refine_work += nav_tile_search(g, q, ca, home, seed, true, target, true);
@@ -74,12 +54,7 @@ pub(super) fn nav_refine(
         } else {
             if w < plan.wp.len() {
                 home = plan.wp[w].cluster;
-                target = IRect {
-                    x: plan.wp[w].x,
-                    y: plan.wp[w].y,
-                    w: 1,
-                    h: 1,
-                };
+                target = rect(plan.wp[w].x, plan.wp[w].y, 1, 1);
             }
             if !nav_clusters_near(g, ca, home) {
                 return nav_requery(g, q, plan, si, x, y);
@@ -477,19 +452,9 @@ pub(super) fn nav_reconnect(
         q,
         ca,
         cb,
-        IRect {
-            x: g.space_ox[si] + x,
-            y: g.space_oy[si] + y,
-            w: 1,
-            h: 1,
-        },
+        rect(g.space_ox[si] + x, g.space_oy[si] + y, 1, 1),
         true,
-        IRect {
-            x: plan.route[target].x,
-            y: plan.route[target].y,
-            w: 1,
-            h: 1,
-        },
+        rect(plan.route[target].x, plan.route[target].y, 1, 1),
         true,
     );
     if q.tile_found < 0 {

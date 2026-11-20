@@ -187,12 +187,7 @@ fn native_query_results_are_off_thread_and_wait_for_publication() {
     };
     let goal = NavRegion {
         space: SpaceId { value: 1 },
-        rect: IRect {
-            x: 30,
-            y: 30,
-            w: 1,
-            h: 1,
-        },
+        rect: rect(30, 30, 1, 1),
     };
     let id = nav_request(&graph, &mut query, from, goal, 0, 42);
     let job = QueryJob::submit(Arc::clone(&graph), query.plans[id.slot].clone());

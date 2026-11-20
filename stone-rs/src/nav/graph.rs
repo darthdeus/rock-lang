@@ -1576,13 +1576,16 @@ pub(super) fn nav_node_live(g: &NavGraph, n: int) -> bool {
 }
 
 pub(super) fn nav_node_place(g: &NavGraph, n: int) -> Place {
-    let si = g.cluster_space[nav_node_cluster(g, n)];
-    Place {
-        space: SpaceId {
-            value: g.space_id[si],
-        },
-        grid: iv(g.node_x[n] - g.space_ox[si], g.node_y[n] - g.space_oy[si]),
-    }
+    nav_world_place(
+        g,
+        g.cluster_space[nav_node_cluster(g, n)],
+        g.node_x[n],
+        g.node_y[n],
+    )
+}
+
+pub(super) fn nav_world_place(g: &NavGraph, si: int, wx: int, wy: int) -> Place {
+    place(g.space_id[si], wx - g.space_ox[si], wy - g.space_oy[si])
 }
 
 pub(super) fn nav_node_partner(g: &NavGraph, n: int) -> int {
