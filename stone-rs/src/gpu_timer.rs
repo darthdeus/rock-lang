@@ -44,6 +44,7 @@ enum SlotState {
     Pending,
 }
 
+/// A scope; `begin` and `end` index the slot's timestamps.
 struct Entry {
     path: PathId,
     begin: usize,
@@ -55,6 +56,9 @@ struct FrameSlot {
     /// Pooled query objects; `used` of them belong to this frame.
     queries: Vec<glow::Query>,
     used: usize,
+    /// Finish mode's timestamps instead: (ns since the frame's epoch, ns
+    /// waited in glFinish by then).
+    clock: Vec<(u64, u64)>,
     /// Entry 0 is the root `frame` scope.
     entries: Vec<Entry>,
     /// An unbalanced scope stack: the frame total stands, its scopes do not.
@@ -67,6 +71,7 @@ impl FrameSlot {
             state: SlotState::Empty,
             queries: Vec::new(),
             used: 0,
+            clock: Vec::new(),
             entries: Vec::new(),
             unbalanced: false,
         }
@@ -102,41 +107,6 @@ pub(crate) fn scope_mode_from_env(value: Option<&str>) -> Option<ScopeMode> {
     }
 }
 
-/// Open state of the finish-bracketed recorder for the current frame.
-struct FinishFrame {
-    recording: bool,
-    unbalanced: bool,
-    /// (path, start, `waited` at start) of each open scope; entry 0 is the root.
-    stack: Vec<(PathId, std::time::Instant, u64)>,
-    samples: Vec<ScopeSample>,
-    waits: Vec<ScopeSample>,
-    /// Nanoseconds blocked in glFinish so far this frame.
-    waited: u64,
-}
-
-impl FinishFrame {
-    fn finish(&mut self, gl: &DebugGl) -> std::time::Instant {
-        let start = std::time::Instant::now();
-        unsafe { gl.finish() };
-        let end = std::time::Instant::now();
-        self.waited += end.duration_since(start).as_nanos() as u64;
-        end
-    }
-
-    fn close(&mut self, gl: &DebugGl) {
-        let end = self.finish(gl);
-        let (path, start, waited) = self.stack.pop().expect("caller checked an open scope");
-        self.samples.push(ScopeSample {
-            path,
-            ns: end.duration_since(start).as_nanos() as u64,
-        });
-        self.waits.push(ScopeSample {
-            path,
-            ns: self.waited - waited,
-        });
-    }
-}
-
 pub struct GpuTimer {
     slots: [FrameSlot; RING],
     write: usize,
@@ -144,7 +114,10 @@ pub struct GpuTimer {
     /// Open entries of the recording slot (indices into its `entries`).
     stack: Vec<usize>,
     mode: ScopeMode,
-    finish: FinishFrame,
+    /// Finish mode: the frame's clock origin, when its first glFinish began.
+    epoch: std::time::Instant,
+    /// Finish mode: nanoseconds blocked in glFinish so far this frame.
+    waited: u64,
     /// GL timer queries usable on this context.
     supported: bool,
     debug_groups: bool,
@@ -183,14 +156,8 @@ impl GpuTimer {
             read: 0,
             stack: Vec::new(),
             mode: scope_mode_by_env(),
-            finish: FinishFrame {
-                recording: false,
-                unbalanced: false,
-                stack: Vec::new(),
-                samples: Vec::new(),
-                waits: Vec::new(),
-                waited: 0,
-            },
+            epoch: std::time::Instant::now(),
+            waited: 0,
             supported: true,
             debug_groups: false,
             open_groups: 0,
@@ -210,7 +177,7 @@ impl GpuTimer {
     }
 
     fn scopes_active(&self) -> bool {
-        self.mode == ScopeMode::Queries && self.supported
+        self.scopes_requested() && self.supported
     }
 
     pub fn status(&self) -> ScopeStatus {
@@ -228,16 +195,7 @@ impl GpuTimer {
             return;
         }
         self.initialized = true;
-        if self.mode == ScopeMode::Finish {
-            self.debug_groups = gl.supports_debug_groups();
-            ::log::info!(
-                target: "STONE",
-                "GPU scopes on: glFinish-bracketed wall time per scope (no timer queries), KHR_debug groups {}",
-                if self.debug_groups { "on" } else { "unsupported on this context" }
-            );
-            return;
-        }
-        if !gl.supports_timer_query() {
+        if self.mode != ScopeMode::Finish && !gl.supports_timer_query() {
             self.supported = false;
             if self.scopes_requested() {
                 ::log::warn!(
@@ -256,15 +214,35 @@ impl GpuTimer {
             self.debug_groups = gl.supports_debug_groups();
             ::log::info!(
                 target: "STONE",
-                "GPU scopes on: timestamp queries per scope, KHR_debug groups {}",
+                "GPU scopes on: {}, KHR_debug groups {}",
+                if self.mode == ScopeMode::Finish {
+                    "glFinish-bracketed wall time per scope (no timer queries)"
+                } else {
+                    "timestamp queries per scope"
+                },
                 if self.debug_groups { "on" } else { "unsupported on this context" }
             );
         }
     }
 
-    /// Next query of the recording slot, created on first use of that pool index.
-    fn take_query(&mut self, gl: &DebugGl) -> Option<usize> {
+    /// Next timestamp of the recording slot: a GL query, or in finish mode
+    /// the clock after a glFinish. Query objects are created on first use of
+    /// that pool index.
+    fn take_stamp(&mut self, gl: &DebugGl) -> Option<usize> {
         let slot = &mut self.slots[self.write];
+        if self.mode == ScopeMode::Finish {
+            let start = std::time::Instant::now();
+            if slot.clock.is_empty() {
+                self.epoch = start;
+                slot.clock.push((0, 0));
+            }
+            unsafe { gl.finish() };
+            let end = std::time::Instant::now();
+            self.waited += end.duration_since(start).as_nanos() as u64;
+            let at = end.duration_since(self.epoch).as_nanos() as u64;
+            slot.clock.push((at, self.waited));
+            return Some(slot.clock.len() - 1);
+        }
         if slot.used == slot.queries.len() {
             match unsafe { gl.create_query() } {
                 Ok(q) => slot.queries.push(q),
@@ -281,13 +259,10 @@ impl GpuTimer {
         Some(index)
     }
 
-    /// Begin the frame: the root scope.
+    /// Begin the frame: the root scope. Finish mode also records the wait
+    /// for earlier work as `before_frame`.
     pub fn begin(&mut self, gl: &DebugGl) {
         self.ensure_init(gl);
-        if self.mode == ScopeMode::Finish {
-            self.finish_begin(gl);
-            return;
-        }
         if !self.supported {
             return;
         }
@@ -303,20 +278,31 @@ impl GpuTimer {
         }
         slot.state = SlotState::Recording;
         slot.used = 0;
+        slot.clock.clear();
         slot.entries.clear();
         slot.unbalanced = false;
         self.stack.clear();
         self.open_groups = 0;
-        let Some(begin) = self.take_query(gl) else {
+        self.waited = 0;
+        let before =
+            (self.mode == ScopeMode::Finish).then(|| self.aggregate.path(None, "before_frame"));
+        let Some(begin) = self.take_stamp(gl) else {
             return;
         };
         let root = self.root;
-        let slot = &mut self.slots[self.write];
-        slot.entries.push(Entry {
+        let entries = &mut self.slots[self.write].entries;
+        entries.push(Entry {
             path: root,
             begin,
             end: None,
         });
+        if let Some(path) = before {
+            entries.push(Entry {
+                path,
+                begin: 0,
+                end: Some(begin),
+            });
+        }
         self.stack.push(0);
     }
 
@@ -325,10 +311,6 @@ impl GpuTimer {
     }
 
     pub fn scope_begin(&mut self, gl: &DebugGl, name: &str) {
-        if self.mode == ScopeMode::Finish {
-            self.finish_scope_begin(gl, name);
-            return;
-        }
         if !self.scopes_active() || !self.recording() {
             return;
         }
@@ -338,7 +320,7 @@ impl GpuTimer {
             .expect("recording frame has its root open");
         let parent = self.slots[self.write].entries[parent_entry].path;
         let path = self.aggregate.path(Some(parent), name);
-        let Some(begin) = self.take_query(gl) else {
+        let Some(begin) = self.take_stamp(gl) else {
             return;
         };
         let slot = &mut self.slots[self.write];
@@ -355,10 +337,6 @@ impl GpuTimer {
     }
 
     pub fn scope_end(&mut self, gl: &DebugGl) {
-        if self.mode == ScopeMode::Finish {
-            self.finish_scope_end(gl);
-            return;
-        }
         if !self.scopes_active() || !self.recording() {
             return;
         }
@@ -367,7 +345,7 @@ impl GpuTimer {
             return;
         }
         let entry = self.stack.pop().expect("checked above");
-        let Some(end) = self.take_query(gl) else {
+        let Some(end) = self.take_stamp(gl) else {
             return;
         };
         self.slots[self.write].entries[entry].end = Some(end);
@@ -375,7 +353,9 @@ impl GpuTimer {
         // buffer until the next flush, so GPU idle time while the CPU builds
         // later work is billed to this scope. Flushed, that idle time falls
         // between scopes: the parent minus its children.
-        unsafe { gl.flush() };
+        if self.mode == ScopeMode::Queries {
+            unsafe { gl.flush() };
+        }
         if self.debug_groups && self.open_groups > 0 {
             unsafe { gl.pop_debug_group() };
             self.open_groups -= 1;
@@ -390,12 +370,9 @@ impl GpuTimer {
         }
     }
 
-    /// End the frame's root scope and hand the slot to readback.
+    /// End the frame's root scope and hand the slot to readback, which is
+    /// immediate in finish mode.
     pub fn end(&mut self, gl: &DebugGl) {
-        if self.mode == ScopeMode::Finish {
-            self.finish_end(gl);
-            return;
-        }
         if !self.supported || !self.recording() {
             return;
         }
@@ -407,7 +384,7 @@ impl GpuTimer {
             unsafe { gl.pop_debug_group() };
             self.open_groups -= 1;
         }
-        let Some(end) = self.take_query(gl) else {
+        let Some(end) = self.take_stamp(gl) else {
             return;
         };
         let slot = &mut self.slots[self.write];
@@ -415,6 +392,9 @@ impl GpuTimer {
         slot.state = SlotState::Pending;
         self.stack.clear();
         self.write = (self.write + 1) % RING;
+        if self.mode == ScopeMode::Finish {
+            self.read_slot(gl);
+        }
     }
 
     pub fn poll_ms(&mut self, gl: &DebugGl) -> f32 {
@@ -432,117 +412,51 @@ impl GpuTimer {
         if unsafe { gl.get_query_parameter_u32(last, glow::QUERY_RESULT_AVAILABLE) } == 0 {
             return -1.0;
         }
-        let read =
-            |q: usize| unsafe { gl.get_query_parameter_u64(slot.queries[q], glow::QUERY_RESULT) };
-        let span = |e: &Entry| e.end.map(|end| read(end).saturating_sub(read(e.begin)));
-        let root = &slot.entries[0];
-        let timestamps = root.end.map(|end| (read(root.begin), read(end)));
-        let frame_ns = timestamps
-            .map(|(begin, end)| end.saturating_sub(begin))
-            .unwrap_or(0);
+        self.read_slot(gl) as f32 / 1_000_000.0
+    }
+
+    /// Ingest the oldest pending slot's scopes; returns its frame ns.
+    fn read_slot(&mut self, gl: &DebugGl) -> u64 {
+        let slot = &self.slots[self.read];
+        let finish = self.mode == ScopeMode::Finish;
+        let stamp = |i: usize| {
+            if finish {
+                slot.clock[i]
+            } else {
+                let query = slot.queries[i];
+                (
+                    unsafe { gl.get_query_parameter_u64(query, glow::QUERY_RESULT) },
+                    0,
+                )
+            }
+        };
+        let span = |e: &Entry| {
+            let ((begin, begin_wait), (end, end_wait)) = (stamp(e.begin), stamp(e.end?));
+            Some((end.saturating_sub(begin), end_wait - begin_wait))
+        };
+        let frame_ns = span(&slot.entries[0]).map_or(0, |(ns, _)| ns);
         if self.scopes_requested() {
             if slot.unbalanced {
                 self.aggregate.drop_frame();
             } else {
-                let samples: Vec<ScopeSample> = slot
+                let (samples, waits): (Vec<_>, Vec<_>) = slot
                     .entries
                     .iter()
-                    .filter_map(|e| span(e).map(|ns| ScopeSample { path: e.path, ns }))
-                    .collect();
+                    .filter_map(|e| {
+                        let (ns, wait) = span(e)?;
+                        let path = e.path;
+                        Some((ScopeSample { path, ns }, ScopeSample { path, ns: wait }))
+                    })
+                    .unzip();
                 self.aggregate.ingest_frame(&samples);
+                if finish {
+                    self.aggregate.ingest_frame_waits(&waits);
+                }
             }
         }
         self.slots[self.read].state = SlotState::Empty;
         self.read = (self.read + 1) % RING;
-        frame_ns as f32 / 1_000_000.0
-    }
-
-    fn finish_begin(&mut self, gl: &DebugGl) {
-        let before = self.aggregate.path(None, "before_frame");
-        let f = &mut self.finish;
-        f.recording = true;
-        f.unbalanced = false;
-        f.stack.clear();
-        f.samples.clear();
-        f.waits.clear();
-        f.waited = 0;
-        let start = f.finish(gl);
-        f.samples.push(ScopeSample {
-            path: before,
-            ns: f.waited,
-        });
-        f.waits.push(ScopeSample {
-            path: before,
-            ns: f.waited,
-        });
-        f.stack.push((self.root, start, f.waited));
-        self.open_groups = 0;
-    }
-
-    fn finish_scope_begin(&mut self, gl: &DebugGl, name: &str) {
-        if !self.finish.recording {
-            return;
-        }
-        let parent = self
-            .finish
-            .stack
-            .last()
-            .expect("recording frame has its root open")
-            .0;
-        let path = self.aggregate.path(Some(parent), name);
-        let start = self.finish.finish(gl);
-        let waited = self.finish.waited;
-        self.finish.stack.push((path, start, waited));
-        if self.debug_groups {
-            unsafe { gl.push_debug_group(name) };
-            self.open_groups += 1;
-        }
-    }
-
-    fn finish_scope_end(&mut self, gl: &DebugGl) {
-        if !self.finish.recording {
-            return;
-        }
-        if self.finish.stack.len() <= 1 {
-            self.finish.unbalanced = true;
-            if !self.unbalanced_logged {
-                self.unbalanced_logged = true;
-                ::log::error!(target: "STONE", "GPU scope end without a matching begin; this frame's scope samples are discarded");
-            }
-            return;
-        }
-        self.finish.close(gl);
-        if self.debug_groups && self.open_groups > 0 {
-            unsafe { gl.pop_debug_group() };
-            self.open_groups -= 1;
-        }
-    }
-
-    fn finish_end(&mut self, gl: &DebugGl) {
-        if !self.finish.recording {
-            return;
-        }
-        if self.finish.stack.len() > 1 {
-            self.finish.unbalanced = true;
-            if !self.unbalanced_logged {
-                self.unbalanced_logged = true;
-                ::log::error!(target: "STONE", "GPU scopes still open at frame end; this frame's scope samples are discarded");
-            }
-        }
-        while self.open_groups > 0 {
-            unsafe { gl.pop_debug_group() };
-            self.open_groups -= 1;
-        }
-        self.finish.stack.truncate(1);
-        self.finish.close(gl);
-        if self.finish.unbalanced {
-            self.aggregate.drop_frame();
-        } else {
-            self.aggregate.ingest_frame(&self.finish.samples);
-            self.aggregate.ingest_frame_waits(&self.finish.waits);
-        }
-        self.finish.recording = false;
-        self.finish.stack.clear();
+        frame_ns
     }
 
     pub fn reset_stats(&mut self) {
