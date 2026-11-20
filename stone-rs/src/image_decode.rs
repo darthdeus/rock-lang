@@ -31,6 +31,19 @@ pub struct Decoded {
     pub(crate) format: crate::image_texture::ImageFormat,
 }
 
+impl Decoded {
+    fn failed(id: u64, format: crate::image_texture::ImageFormat) -> Self {
+        Decoded {
+            id,
+            pixels: None,
+            width: 0,
+            height: 0,
+            stored: (0, 0),
+            format,
+        }
+    }
+}
+
 struct Queue {
     tx: Sender<Decoded>,
     rx: Mutex<Receiver<Decoded>>,
@@ -103,12 +116,7 @@ pub fn max_side() -> u32 {
     })
 }
 
-/// GL storage dimensions for a `width` x `height` image under the ambient cap.
-pub fn capped_dims(width: u32, height: u32) -> (u32, u32) {
-    capped_dims_for(max_side(), width, height)
-}
-
-/// GL storage dimensions for an image that may have declared its texels exact.
+/// GL storage dimensions for an image under the ambient cap.
 ///
 /// `exact_texels` is a load-site declaration that the file's texels are read
 /// individually rather than sampled as colour -- a lookup table, an index
@@ -122,23 +130,28 @@ pub fn storage_dims(exact_texels: bool, width: u32, height: u32) -> (u32, u32) {
     if exact_texels {
         (width, height)
     } else {
-        capped_dims(width, height)
+        capped_dims_for(max_side(), width, height)
     }
 }
 
-/// `store_at_cap` for an image that may have declared its texels exact. `Some`
-/// with the pixels unchanged when it did.
+/// Reduce freshly decoded pixels to their `storage_dims`, or hand them back
+/// unchanged when nothing is capped.
+///
+/// `None` only for a reduction `box_downsample` refused, which is a caller bug
+/// and already logged. It is reported as a failed decode rather than passed on,
+/// because the storage size is a pure function of the logical size: pixels that
+/// do not match it would be uploaded by a `tex_image_2d` reading past them.
 pub fn store_at_storage(
     exact_texels: bool,
     rgba: Vec<u8>,
     width: u32,
     height: u32,
 ) -> Option<Vec<u8>> {
-    if exact_texels {
-        Some(rgba)
-    } else {
-        store_at_cap(rgba, width, height)
+    let (sw, sh) = storage_dims(exact_texels, width, height);
+    if (sw, sh) == (width, height) {
+        return Some(rgba);
     }
+    box_downsample(&rgba, width, height, sw, sh)
 }
 
 pub fn capped_dims_for(cap: u32, width: u32, height: u32) -> (u32, u32) {
@@ -205,21 +218,6 @@ pub fn box_downsample(
         }
     }
     Some(out)
-}
-
-/// Reduce freshly decoded pixels to their GL storage size, or hand them back
-/// unchanged when nothing is capped.
-///
-/// `None` only for a reduction `box_downsample` refused, which is a caller bug
-/// and already logged. It is reported as a failed decode rather than passed on,
-/// because the storage size is a pure function of the logical size: pixels that
-/// do not match it would be uploaded by a `tex_image_2d` reading past them.
-pub fn store_at_cap(rgba: Vec<u8>, width: u32, height: u32) -> Option<Vec<u8>> {
-    let (sw, sh) = capped_dims(width, height);
-    if (sw, sh) == (width, height) {
-        return Some(rgba);
-    }
-    box_downsample(&rgba, width, height, sw, sh)
 }
 
 /// Read `width`/`height` from the container header without decoding pixels.
@@ -290,14 +288,7 @@ pub(crate) fn submit(
             Some((_, width, height)) if expected.is_some_and(|size| size != (width, height)) => {
                 crate::log_once!("IMAGE", "prefetched image {} changed dimensions after header admission: expected {:?}, got {}x{}",
                     path, expected, width, height);
-                Decoded {
-                    id,
-                    pixels: None,
-                    width: 0,
-                    height: 0,
-                    stored: (0, 0),
-                    format,
-                }
+                Decoded::failed(id, format)
             }
             // The cap reduces here, on the pool thread, so the GL thread never
             // pays a pass over the full-size pixels -- a large bank is several GB.
@@ -326,14 +317,7 @@ pub(crate) fn submit(
                     format,
                 }
             }
-            None => Decoded {
-                id,
-                pixels: None,
-                width: 0,
-                height: 0,
-                stored: (0, 0),
-                format,
-            },
+            None => Decoded::failed(id, format),
         };
         if let Err(e) = tx.send(decoded) {
             crate::log_once!("IMAGE", "decode result for {} lost: {}", path, e);
