@@ -60,11 +60,11 @@ pub fn read_jsonl(path: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Asserts the command succeeded and returns its stdout.
+/// Asserts the command succeeded and returns its stdout, without colour codes.
 #[track_caller]
 pub fn success(out: Output) -> String {
     assert!(out.status.success(), "{}", text(&out));
-    String::from_utf8(out.stdout).unwrap()
+    test_utils::strip_ansi_sgr(&String::from_utf8(out.stdout).unwrap())
 }
 
 /// Asserts the command failed and its stderr names `expected`.
