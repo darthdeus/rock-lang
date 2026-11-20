@@ -52,8 +52,7 @@ pub(super) fn nav_query_begin(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) {
     q.best = NAV_INF;
     q.best_node = -1;
     q.expansions = 0;
-    q.heap.count = 0;
-    q.cand_count = 0;
+    q.heap.clear();
     q.pad_count = 0;
     q.pad_cost = NAV_INF;
     for l in 0..g.link_cost.len() {
@@ -310,7 +309,7 @@ pub(super) fn nav_query_check(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
             q.area_target = route_hash(plan.seed, from, to) % NAV_AREA_ROUTE_LIMIT;
             if !ready && count <= q.area_target {
                 q.area_building = true;
-                nav_area_search_begin(q);
+                nav_area_search_begin(g, q, plan);
                 return area_work + 1;
             }
             if count > 0 {
@@ -326,41 +325,29 @@ pub(super) fn nav_query_check(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
         }
     }
     q.phase = NAV_Q_SEARCH;
-    q.cand_from = -1;
-    q.cand_count = 0;
     for i in 0..q.start_count {
         let node = q.start_node[i];
         let cost = q.start_cost[i];
-        nav_cand(q, node, cost, 0);
+        nav_offer(g, q, plan, -1, node, cost, 0);
     }
     q.start_count + area_work + 1
 }
 
-pub(super) fn nav_cand(q: &mut NavQuery, v: int, gv: int, via_link: int) {
-    let i = q.cand_count;
-    nav_put(&mut q.cand_v, i, v);
-    nav_put(&mut q.cand_g, i, gv);
-    nav_put(&mut q.cand_link, i, via_link);
-    q.cand_count = i + 1;
-}
-
-pub(super) fn nav_area_search_begin(q: &mut NavQuery) {
+pub(super) fn nav_area_search_begin(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) {
     if let Some(work) = q.areas.work.as_mut() {
         work.searches += 1;
     }
     nav_query_next_stamp(q);
     q.best = NAV_INF;
     q.best_node = -1;
-    q.heap.count = 0;
-    q.cand_from = -1;
-    q.cand_count = 0;
+    q.heap.clear();
     let from = q.areas.pairs[q.area_pair].from;
     let to = q.areas.pairs[q.area_pair].to;
     let goal = nav_area_anchor(q, to);
     q.area_goal = goal;
     q.goal_stamp[goal] = q.stamp;
     let start = nav_area_anchor(q, from);
-    nav_cand(q, start, 0, 0);
+    nav_offer(g, q, plan, -1, start, 0, 0);
     q.phase = NAV_Q_SEARCH;
 }
 
@@ -372,9 +359,93 @@ pub(super) fn nav_area_resume(q: &mut NavQuery) {
     }
     q.best = q.direct;
     q.best_node = -1;
-    q.heap.count = 0;
-    q.cand_count = 0;
+    q.heap.clear();
     q.phase = NAV_Q_CHECK;
+}
+
+fn nav_offer(
+    g: &NavGraph,
+    q: &mut NavQuery,
+    plan: &NavPlan,
+    from: int,
+    v: int,
+    gv: int,
+    via_link: int,
+) {
+    let stamp = q.stamp;
+    if from >= 0 && !nav_area_edge_allowed(q, from, v) {
+        return;
+    }
+    if q.node_closed[v] == stamp || (q.node_stamp[v] == stamp && gv >= q.node_g[v]) {
+        return;
+    }
+    q.node_g[v] = gv;
+    q.node_stamp[v] = stamp;
+    q.node_parent[v] = from;
+    q.node_link[v] = via_link;
+    let x = g.node_x[v];
+    let y = g.node_y[v];
+    let mut h = if q.area_building {
+        nav_octile(x - g.node_x[q.area_goal], y - g.node_y[q.area_goal])
+    } else {
+        nav_goal_octile(plan, x, y)
+    };
+    if q.pad_count > 0 {
+        if q.pad_h_stamp[v] != stamp {
+            q.pad_h[v] = min(NAV_INF, nav_nearest_pad(q, x, y)) + q.pad_cost;
+            q.pad_h_stamp[v] = stamp;
+        }
+        h = min(h, q.pad_h[v]);
+    }
+    q.heap.push(gv + h, gv, v);
+}
+
+fn nav_expand(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan, n: int, gn: int) -> int {
+    let k = g.k;
+    let mut spent = 0;
+    let c = nav_node_cluster(g, n);
+    let i = nav_node_slot(g, n);
+    let edge = |q: &mut NavQuery, v: int, cost: int, link: int| {
+        let edge_cost = nav_area_edge_cost(g, q, plan, n, v, cost);
+        nav_offer(g, q, plan, n, v, gn + edge_cost, link);
+    };
+    if i < k {
+        let partner = nav_node_partner(g, n);
+        if q.area_building || q.area_choice >= 0 {
+            spent += nav_area_ensure(g, q, nav_node_cluster(g, partner));
+        }
+        edge(q, partner, nav_node_partner_cost(g, n), 0);
+        for j in 0..k {
+            let cost = nav_intra_cost(g, c, i, j);
+            if cost < 0 || j == i {
+                continue;
+            }
+            let v = nav_cluster_node(g, c, j);
+            if v >= 0 {
+                edge(q, v, cost, 0);
+            }
+        }
+    } else if nav_node_is_pad(g, n) {
+        let l = nav_node_link(g, n);
+        if (plan.teleports & g.link_bit[l]) != 0 {
+            if q.area_building || q.area_choice >= 0 {
+                spent += nav_area_ensure(g, q, nav_node_cluster(g, n + 1));
+            }
+            edge(q, n + 1, g.link_cost[l], l + 1);
+        }
+    }
+    let first = if i < k { k } else { 0 };
+    for j in first..nav_cluster_slot_limit(g, c) {
+        if j == i {
+            continue;
+        }
+        let cost = nav_intra_cost(g, c, i, j);
+        let v = nav_cluster_node(g, c, j);
+        if cost >= 0 && !nav_node_blocked_endpoint(g, v) {
+            edge(q, v, cost, 0);
+        }
+    }
+    spent
 }
 
 pub(super) fn nav_query_search(
@@ -384,142 +455,30 @@ pub(super) fn nav_query_search(
     allowance: int,
 ) -> int {
     let stamp = q.stamp;
-    let k = g.k;
     let mut spent = 0;
-    let mut heap = std::mem::take(&mut q.heap);
-    let mut ci = 0;
-    let mut up = -1;
-    let mut up_f = 0;
-    let mut up_g = 0;
-    let mut up_n = 0;
-    let mut down = -1;
-    let mut down_f = 0;
-    let mut down_g = 0;
-    let mut down_n = 0;
-    while up >= 0 || down >= 0 || ci < q.cand_count || heap.count != 0 {
-        if up >= 0 {
-            let (hf, hg, hn) = (&mut heap.f, &mut heap.g, &mut heap.n);
-            up = nav_heap_up_step(hf, hg, hn, up, up_f, up_g, up_n);
-        } else if down >= 0 {
-            let heap_count = heap.count;
-            let (hf, hg, hn) = (&mut heap.f, &mut heap.g, &mut heap.n);
-            down = nav_heap_down_step(hf, hg, hn, heap_count, down, down_f, down_g, down_n);
-        } else if ci < q.cand_count {
-            let v = q.cand_v[ci];
-            let gv = q.cand_g[ci];
-            let via_link = q.cand_link[ci];
-            ci += 1;
-            if q.cand_from >= 0 && !nav_area_edge_allowed(q, q.cand_from, v) {
-                continue;
-            }
-            if q.node_closed[v] != stamp && (q.node_stamp[v] != stamp || gv < q.node_g[v]) {
-                q.node_g[v] = gv;
-                q.node_stamp[v] = stamp;
-                q.node_parent[v] = q.cand_from;
-                q.node_link[v] = via_link;
-                let x = g.node_x[v];
-                let y = g.node_y[v];
-                let mut h = nav_goal_octile(plan, x, y);
-                if q.area_building {
-                    h = nav_octile(x - g.node_x[q.area_goal], y - g.node_y[q.area_goal]);
-                }
-                if q.pad_count > 0 {
-                    if q.pad_h_stamp[v] != stamp {
-                        q.pad_h[v] = min(NAV_INF, nav_nearest_pad(q, x, y)) + q.pad_cost;
-                        q.pad_h_stamp[v] = stamp;
-                    }
-                    h = min(h, q.pad_h[v]);
-                }
-                nav_heap_reserve_slot(&mut heap);
-                up = heap.count;
-                up_f = gv + h;
-                up_g = gv;
-                up_n = v;
-                heap.count += 1;
-            }
-        } else {
-            q.cand_count = 0;
-            ci = 0;
-            if heap.count == 0 {
-                break;
-            }
-            if spent >= allowance {
-                q.heap = heap;
-                return spent;
-            }
-            let f = heap.f[0];
-            let gn = heap.g[0];
-            let n = heap.n[0];
-            heap.count -= 1;
-            if heap.count > 0 {
-                down = 0;
-                down_f = heap.f[heap.count];
-                down_g = heap.g[heap.count];
-                down_n = heap.n[heap.count];
-            }
-            if q.node_closed[n] != stamp && gn <= q.node_g[n] {
-                if f >= q.best {
-                    break;
-                }
-                spent += 1;
-                q.node_closed[n] = stamp;
-                q.expansions += 1;
-                if q.goal_stamp[n] == stamp {
-                    let cost = if q.area_building { 0 } else { q.goal_cost[n] };
-                    if gn + cost < q.best {
-                        q.best = gn + cost;
-                        q.best_node = n;
-                    }
-                }
-                let c = nav_node_cluster(g, n);
-                let i = nav_node_slot(g, n);
-                q.cand_from = n;
-                if i < k {
-                    let partner = nav_node_partner(g, n);
-                    if q.area_building || q.area_choice >= 0 {
-                        spent += nav_area_ensure(g, q, nav_node_cluster(g, partner));
-                    }
-                    let edge_cost =
-                        nav_area_edge_cost(g, q, plan, n, partner, nav_node_partner_cost(g, n));
-                    nav_cand(q, partner, gn + edge_cost, 0);
-                    for j in 0..k {
-                        let cost = nav_intra_cost(g, c, i, j);
-                        if cost < 0 || j == i {
-                            continue;
-                        }
-                        let v = nav_cluster_node(g, c, j);
-                        if v >= 0 {
-                            let edge_cost = nav_area_edge_cost(g, q, plan, n, v, cost);
-                            nav_cand(q, v, gn + edge_cost, 0);
-                        }
-                    }
-                } else if nav_node_is_pad(g, n) {
-                    let l = nav_node_link(g, n);
-                    if (plan.teleports & g.link_bit[l]) != 0 {
-                        if q.area_building || q.area_choice >= 0 {
-                            spent += nav_area_ensure(g, q, nav_node_cluster(g, n + 1));
-                        }
-                        let edge_cost = nav_area_edge_cost(g, q, plan, n, n + 1, g.link_cost[l]);
-                        nav_cand(q, n + 1, gn + edge_cost, l + 1);
-                    }
-                }
-                let first = if i < k { k } else { 0 };
-                for j in first..nav_cluster_slot_limit(g, c) {
-                    if j == i {
-                        continue;
-                    }
-                    let cost = nav_intra_cost(g, c, i, j);
-                    let v = nav_cluster_node(g, c, j);
-                    if cost >= 0 && !nav_node_blocked_endpoint(g, v) {
-                        let edge_cost = nav_area_edge_cost(g, q, plan, n, v, cost);
-                        nav_cand(q, v, gn + edge_cost, 0);
-                    }
-                }
+    while !q.heap.is_empty() {
+        if spent >= allowance {
+            return spent;
+        }
+        let HeapEntry { f, g: gn, n } = q.heap.pop().unwrap();
+        if q.node_closed[n] == stamp || gn > q.node_g[n] {
+            continue;
+        }
+        if f >= q.best {
+            break;
+        }
+        spent += 1;
+        q.node_closed[n] = stamp;
+        q.expansions += 1;
+        if q.goal_stamp[n] == stamp {
+            let cost = if q.area_building { 0 } else { q.goal_cost[n] };
+            if gn + cost < q.best {
+                q.best = gn + cost;
+                q.best_node = n;
             }
         }
+        spent += nav_expand(g, q, plan, n, gn);
     }
-    q.cand_count = 0;
-    q.heap = heap;
     if q.area_building {
         let more = nav_area_accept(g, q);
         let pair_index = q.area_pair;
@@ -536,7 +495,7 @@ pub(super) fn nav_query_search(
             q.area_choice = q.area_target;
             nav_area_resume(q);
         } else {
-            nav_area_search_begin(q);
+            nav_area_search_begin(g, q, plan);
         }
     } else {
         nav_query_finish(g, q, plan);
@@ -756,7 +715,7 @@ pub(super) fn nav_cert_h(q: &NavQuery, plan: &NavPlan, x: int, y: int) -> int {
 }
 
 pub(super) fn nav_cert_begin(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) {
-    q.heap.count = 0;
+    q.heap.clear();
     q.phase = NAV_Q_CERTIFY;
     let t = g.space_tile_base[plan.si] + plan.from_y * SPACE_SIZE + plan.from_x;
     if nav_cert_offer(q, plan, t, 0, -1, 0) {
@@ -766,7 +725,7 @@ pub(super) fn nav_cert_begin(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) {
             g.space_ox[plan.si] + plan.from_x,
             g.space_oy[plan.si] + plan.from_y,
         );
-        nav_heap_push(&mut q.heap, h, 0, t);
+        q.heap.push(h, 0, t);
     }
 }
 
@@ -798,121 +757,79 @@ pub(super) fn nav_cert_offer(
 }
 
 pub(super) fn nav_certify(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan, budget: int) -> int {
-    let mut spent = 0;
     let size = SPACE_SIZE;
-    let mut heap = std::mem::take(&mut q.heap);
-    let mut up = -1;
-    let mut up_f = 0;
-    let mut up_n = 0;
-    let mut down = -1;
-    let mut down_f = 0;
-    let mut down_n = 0;
-    let mut popped = false;
-    let mut f = 0;
-    let mut t = 0;
-    let mut cost = 0;
-    let mut si = 0;
-    let mut wx = 0;
-    let mut wy = 0;
-    let mut neighbour = 8;
-    let mut link = -1;
+    let mut spent = 0;
+    let offer = |q: &mut NavQuery, t: int, nt: int, offered: int, via: int| {
+        if nav_cert_offer(q, plan, nt, offered, t, via) {
+            let ns = nt / (size * size);
+            let x = g.space_ox[ns] + nt % size;
+            let y = g.space_oy[ns] + (nt / size) % size;
+            let h = nav_cert_h(q, plan, x, y);
+            q.heap.push(offered + h, 0, nt);
+        }
+    };
     loop {
-        if up >= 0 {
-            let (hf, hg, hn) = (&mut heap.f, &mut heap.g, &mut heap.n);
-            up = nav_heap_up_step(hf, hg, hn, up, up_f, 0, up_n);
-        } else if down >= 0 {
-            let heap_count = heap.count;
-            let (hf, hg, hn) = (&mut heap.f, &mut heap.g, &mut heap.n);
-            down = nav_heap_down_step(hf, hg, hn, heap_count, down, down_f, 0, down_n);
-        } else if neighbour < 8 || link >= 0 {
-            let mut nt = -1;
-            let mut offered = 0;
-            let mut via = 0;
-            if neighbour < 8 {
-                let direction = neighbour + if neighbour >= 4 { 1 } else { 0 };
-                neighbour += 1;
-                let dx = direction % 3 - 1;
-                let dy = direction / 3 - 1;
-                let nx = wx + dx;
-                let ny = wy + dy;
-                if nav_world_step_open(g, wx, wy, nx, ny, si) {
-                    let ns = nav_world_space(g, nx, ny, si);
-                    nt = g.space_tile_base[ns] + (ny - g.space_oy[ns]) * size + nx - g.space_ox[ns];
-                    let hop = if dx != 0 && dy != 0 {
-                        NAV_COST_DIAGONAL
-                    } else {
-                        NAV_COST_STRAIGHT
-                    };
-                    offered = cost + nav_edge_cost(hop, g.extra[t], g.extra[nt]);
-                }
-            } else {
-                let l = link;
-                link = g.link_next[l];
-                q.cert_link_visits += 1;
-                if (plan.teleports & g.link_bit[l]) != 0 {
-                    nt = g.link_to_tile[l];
-                    offered = cost + g.link_cost[l];
-                    via = l + 1;
-                }
+        if q.heap.is_empty() {
+            panic!("nav route certificate exhausted a reachable graph");
+        }
+        if spent >= budget {
+            return spent;
+        }
+        let HeapEntry { f, n: t, .. } = q.heap.pop().unwrap();
+        if q.cert_closed[t] == q.stamp {
+            continue;
+        }
+        let cost = q.cert_dist[t];
+        if plan.path_cost * 10 <= f * 13 {
+            nav_route_ready(g, q, plan);
+            return spent + 1;
+        }
+        q.cert_closed[t] = q.stamp;
+        spent += 1;
+        let si = t / (size * size);
+        let x = t % size;
+        let y = (t / size) % size;
+        if si == plan.goal_si
+            && x >= plan.goal_x
+            && y >= plan.goal_y
+            && x < plan.goal_x + plan.goal_w
+            && y < plan.goal_y + plan.goal_h
+        {
+            nav_cert_retain(g, q, plan, t, cost);
+            nav_route_ready(g, q, plan);
+            return spent;
+        }
+        let wx = g.space_ox[si] + x;
+        let wy = g.space_oy[si] + y;
+        for direction in [0, 1, 2, 3, 5, 6, 7, 8] {
+            let dx = direction % 3 - 1;
+            let dy = direction / 3 - 1;
+            let nx = wx + dx;
+            let ny = wy + dy;
+            if nav_world_step_open(g, wx, wy, nx, ny, si) {
+                let ns = nav_world_space(g, nx, ny, si);
+                let nt = g.space_tile_base[ns] + (ny - g.space_oy[ns]) * size + nx - g.space_ox[ns];
+                let hop = if dx != 0 && dy != 0 {
+                    NAV_COST_DIAGONAL
+                } else {
+                    NAV_COST_STRAIGHT
+                };
+                offer(
+                    q,
+                    t,
+                    nt,
+                    cost + nav_edge_cost(hop, g.extra[t], g.extra[nt]),
+                    0,
+                );
             }
-            if nt >= 0 && nav_cert_offer(q, plan, nt, offered, t, via) {
-                let ns = nt / (size * size);
-                let x = g.space_ox[ns] + nt % size;
-                let y = g.space_oy[ns] + (nt / size) % size;
-                nav_heap_reserve_slot(&mut heap);
-                up = heap.count;
-                up_f = offered + nav_cert_h(q, plan, x, y);
-                up_n = nt;
-                heap.count += 1;
+        }
+        let mut l = g.tile_link_head[t];
+        while l >= 0 {
+            q.cert_link_visits += 1;
+            if (plan.teleports & g.link_bit[l]) != 0 {
+                offer(q, t, g.link_to_tile[l], cost + g.link_cost[l], l + 1);
             }
-        } else if !popped {
-            if heap.count == 0 {
-                q.heap = heap;
-                panic!("nav route certificate exhausted a reachable graph");
-            }
-            if spent >= budget {
-                q.heap = heap;
-                return spent;
-            }
-            f = heap.f[0];
-            t = heap.n[0];
-            heap.count -= 1;
-            if heap.count > 0 {
-                down = 0;
-                down_f = heap.f[heap.count];
-                down_n = heap.n[heap.count];
-            }
-            popped = true;
-        } else {
-            popped = false;
-            if q.cert_closed[t] != q.stamp {
-                cost = q.cert_dist[t];
-                if plan.path_cost * 10 <= f * 13 {
-                    q.heap = heap;
-                    nav_route_ready(g, q, plan);
-                    return spent + 1;
-                }
-                q.cert_closed[t] = q.stamp;
-                spent += 1;
-                si = t / (size * size);
-                let x = t % size;
-                let y = (t / size) % size;
-                wx = g.space_ox[si] + x;
-                wy = g.space_oy[si] + y;
-                if si == plan.goal_si
-                    && x >= plan.goal_x
-                    && y >= plan.goal_y
-                    && x < plan.goal_x + plan.goal_w
-                    && y < plan.goal_y + plan.goal_h
-                {
-                    q.heap = heap;
-                    nav_cert_retain(g, q, plan, t, cost);
-                    nav_route_ready(g, q, plan);
-                    return spent;
-                }
-                neighbour = 0;
-                link = g.tile_link_head[t];
-            }
+            l = g.link_next[l];
         }
     }
 }

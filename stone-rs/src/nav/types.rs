@@ -264,11 +264,6 @@ nav_struct! {
         pub goal_stamp: IdxVec<int>,
         pub comp_mark: IdxVec<int>,
         pub heap: NavHeap,
-        pub cand_from: int = -1,
-        pub cand_count: int,
-        pub cand_v: IdxVec<int>,
-        pub cand_g: IdxVec<int>,
-        pub cand_link: IdxVec<int>,
         pub pad_count: int,
         pub pad_x: IdxVec<int>,
         pub pad_y: IdxVec<int>,
@@ -405,12 +400,4 @@ nav_struct! {
         pub builds: int,
         pub candidate: IdxVec<int>,
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct NavHeap {
-    pub f: IdxVec<int>,
-    pub g: IdxVec<int>,
-    pub n: IdxVec<int>,
-    pub count: int,
 }

@@ -102,9 +102,6 @@ fn reset_worker_query(query: &mut NavQuery) {
         goal_cost,
         goal_stamp,
         comp_mark,
-        cand_v,
-        cand_g,
-        cand_link,
         pad_x,
         pad_y,
         pad_h,
@@ -122,7 +119,7 @@ fn reset_worker_query(query: &mut NavQuery) {
         open_slot,
     );
     query.heap = std::mem::take(&mut previous.heap);
-    query.heap.count = 0;
+    query.heap.clear();
     query.areas.nodes = std::mem::take(&mut previous.areas.nodes);
     query.areas.index = std::mem::take(&mut previous.areas.index);
     query.areas.cluster_epoch = std::mem::take(&mut previous.areas.cluster_epoch);
