@@ -6,12 +6,16 @@
 // `__SITE__`; the 3-arg overload takes an explicit site key so calls on
 // different lines share one key.
 
+fn prepare_log_test() {
+    log_reset_dedup()
+    log_set_level(0)
+}
+
 // dedup_count reflects the number of unique sites remembered.
 // log_once also prints, so the expected output is the [DC] line plus the count.
 @test(output = "[DC] x\n1")
 fn test_log_dedup_count_one_site() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
     for _i in 0..10 {
         log_once("DC", "x")
     }
@@ -21,8 +25,7 @@ fn test_log_dedup_count_one_site() {
 // Distinct explicit sites do not dedupe each other.
 @test(output = "[A] m1\n[B] m2")
 fn test_log_once_distinct_sites() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
     log_once("A", "m1", "key-a")
     log_once("B", "m2", "key-b")
     log_once("A", "m1", "key-a")
@@ -32,8 +35,7 @@ fn test_log_once_distinct_sites() {
 // reset lets the same site fire again.
 @test(output = "[X] hi\n[X] hi")
 fn test_log_reset_refires() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
     log_once("X", "hi", "shared")
     log_reset_dedup()
     log_once("X", "hi", "shared")
@@ -42,8 +44,7 @@ fn test_log_reset_refires() {
 @test(output = "[DC] a\n[DC] b\n2\n[DC] a\n[DC] b\n[DC] c\n3")
 fn test_log_dedup_count_many_sites() {
     for count in [2, 3] {
-        log_reset_dedup()
-        log_set_level(0)
+        prepare_log_test()
         let sites = ["a", "b", "c"]
         for i in 0..count {
             log_once("DC", sites[i], sites[i])
@@ -57,8 +58,7 @@ fn test_log_dedup_count_many_sites() {
 // Two distinct sites are independent: both fire immediately, both then suppressed.
 @test(output = "[A] a\n[B] b")
 fn test_log_throttled_distinct_sites_independent() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
     log_throttled_with_now(0.0, "A", "a", 1.0, "key-a")
     log_throttled_with_now(0.0, "B", "b", 1.0, "key-b")
     log_throttled_with_now(0.5, "A", "a", 1.0, "key-a")
@@ -68,20 +68,16 @@ fn test_log_throttled_distinct_sites_independent() {
 // Fires at interval boundaries (>=, not >) and suppresses within.
 @test(output = "[T] tick\n[T] tick\n[T] tick")
 fn test_log_throttled_interval_boundaries() {
-    log_reset_dedup()
-    log_set_level(0)
-    log_throttled_with_now(0.0, "T", "tick", 1.0, "tk")
-    log_throttled_with_now(0.5, "T", "tick", 1.0, "tk")
-    log_throttled_with_now(1.0, "T", "tick", 1.0, "tk")
-    log_throttled_with_now(1.5, "T", "tick", 1.0, "tk")
-    log_throttled_with_now(2.0, "T", "tick", 1.0, "tk")
+    prepare_log_test()
+    for now in [0.0, 0.5, 1.0, 1.5, 2.0] {
+        log_throttled_with_now(now, "T", "tick", 1.0, "tk")
+    }
 }
 
 // Edge case: now < last + interval (just barely) is suppressed.
 @test(output = "[E] go")
 fn test_log_throttled_just_under_boundary_suppressed() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
     log_throttled_with_now(0.0, "E", "go", 0.5, "boundary")
     log_throttled_with_now(0.499, "E", "go", 0.5, "boundary")
 }
@@ -91,26 +87,24 @@ fn test_log_throttled_just_under_boundary_suppressed() {
 // negated rewrite would turn NaN into suppress-forever. 0.0 / 0.0 is NaN.
 @test(output = "[Z] go\n[Z] go\n[Z] go\n[N] go\n[N] go\n[N] go\n[NAN] go\n[NAN] go\n[NAN] go")
 fn test_log_throttled_degenerate_intervals_fire_every_call() {
-    log_reset_dedup()
-    log_set_level(0)
-    log_throttled_with_now(0.0, "Z", "go", 0.0, "zero-key")
-    log_throttled_with_now(0.0, "Z", "go", 0.0, "zero-key")
-    log_throttled_with_now(0.0, "Z", "go", 0.0, "zero-key")
-    log_throttled_with_now(0.0, "N", "go", -1.0, "neg-key")
-    log_throttled_with_now(0.0, "N", "go", -1.0, "neg-key")
-    log_throttled_with_now(0.0, "N", "go", -1.0, "neg-key")
+    prepare_log_test()
+    for _i in 0..3 {
+        log_throttled_with_now(0.0, "Z", "go", 0.0, "zero-key")
+    }
+    for _i in 0..3 {
+        log_throttled_with_now(0.0, "N", "go", -1.0, "neg-key")
+    }
     let nan: float = 0.0 / 0.0
-    log_throttled_with_now(0.0, "NAN", "go", nan, "nan-key")
-    log_throttled_with_now(1.0, "NAN", "go", nan, "nan-key")
-    log_throttled_with_now(2.0, "NAN", "go", nan, "nan-key")
+    for now in [0.0, 1.0, 2.0] {
+        log_throttled_with_now(now, "NAN", "go", nan, "nan-key")
+    }
 }
 
 // The log_once dedup key is the call site, not (site, message): one site
 // emitting a different message each call prints only the first.
 @test(output = "[M] i=0")
 fn test_log_once_dedup_is_site_only_not_message() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
     for i in 0..5 {
         log_once("M", "i={i}")
     }
@@ -124,8 +118,7 @@ macro forward_once(category: expr, msg: expr) {
 
 @test(output = "[F] msg")
 fn test_log_once_through_wrapper_dedupes_by_outer_site() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
     for _i in 0..10 {
         forward_once("F", "msg")
     }
@@ -136,21 +129,12 @@ fn test_log_once_through_wrapper_dedupes_by_outer_site() {
 // os.clock(). Drive it like a fake clock and confirm interval gating works.
 @test(output = "[NS] tick\n[NS] tick\n[NS] tick")
 fn test_log_throttled_uses_engine_now_source() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
 
-    log_set_now(0.0)
-    log_throttled("NS", "tick", 1.0, "ns-key")
-
-    log_set_now(0.5)
-    log_throttled("NS", "tick", 1.0, "ns-key")
-
-    log_set_now(1.0)
-    log_throttled("NS", "tick", 1.0, "ns-key")
-
-    log_set_now(2.5)
-    log_throttled("NS", "tick", 1.0, "ns-key")
-
+    for now in [0.0, 0.5, 1.0, 2.5] {
+        log_set_now(now)
+        log_throttled("NS", "tick", 1.0, "ns-key")
+    }
     log_clear_now()
 }
 
@@ -159,8 +143,7 @@ fn test_log_throttled_uses_engine_now_source() {
 // and emits at least the first line.
 @test(output = "[FB] only-once")
 fn test_log_throttled_falls_back_to_os_clock() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
     log_clear_now()
 
     log_throttled("FB", "only-once", 9999.0, "fb-key")
@@ -170,36 +153,15 @@ fn test_log_throttled_falls_back_to_os_clock() {
 }
 
 
-// log_suppression_summary / the reset contract
-// A reset clears everything a suppression is recorded in -- the dedup and
-// throttle stamps, the counts and last messages the summary reads, and the
-// once-per-process latch that stops the summary running twice. Half a reset
-// is worse than none: the summary would then report totals for sites the
-// caller believes it cleared.
-@test(output = "[A] first")
-fn test_log_reset_dedup_clears_what_the_summary_reads() {
-    log_reset_dedup()
-    log_set_level(0)
-
-    log_once("A", "first", "key-a")
-    log_once("A", "first", "key-a")
-
+@test(output = "[A] first\n[B] second\n[B] suppressed x3 at key-b: second")
+fn test_log_reset_dedup_clears_summary_state() {
+    prepare_log_test()
+    for _i in 0..2 { log_once("A", "first", "key-a") }
     log_reset_dedup()
     log_suppression_summary()
-}
 
-// The other half: the latch is cleared too, so a summary can run again after
-// a reset -- and it reports the total, which is the whole reason a suppressed
-// site is counted rather than forgotten.
-@test(output = "[B] second\n[B] suppressed x3 at key-b: second")
-fn test_log_suppression_summary_reports_a_suppressed_total() {
     log_reset_dedup()
-    log_set_level(0)
-
-    log_once("B", "second", "key-b")
-    log_once("B", "second", "key-b")
-    log_once("B", "second", "key-b")
-
+    for _i in 0..3 { log_once("B", "second", "key-b") }
     log_suppression_summary()
 }
 
@@ -217,15 +179,14 @@ fn test_log_level_filters_portable_sink() {
 
 @test(output = "[A] a\n[B] b\n[C] c\n[D] d\n[E] e\n[B] suppressed x4 at key-b: b\n[C] suppressed x3 at key-c: c\n[A] suppressed x2 at key-a: a\n[D] suppressed x2 at key-d: d\n[E] suppressed x2 at key-e: e")
 fn test_log_suppression_summary_orders_by_count_then_site() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
 
-    for _i in 0..2 { log_once("A", "a", "key-a") }
-    for _i in 0..4 { log_once("B", "b", "key-b") }
-    for _i in 0..3 { log_once("C", "c", "key-c") }
-    for _i in 0..2 { log_once("D", "d", "key-d") }
-    for _i in 0..2 { log_once("E", "e", "key-e") }
-
+    for (category, message, site, count) in [
+        ("A", "a", "key-a", 2), ("B", "b", "key-b", 4), ("C", "c", "key-c", 3),
+        ("D", "d", "key-d", 2), ("E", "e", "key-e", 2),
+    ] {
+        for _i in 0..count { log_once(category, message, site) }
+    }
     log_suppression_summary()
 }
 
@@ -234,8 +195,7 @@ fn test_log_suppression_summary_orders_by_count_then_site() {
 // error-only logging it is silent, and so is its suppression summary line.
 @test(output = "[E] kept")
 fn test_log_warn_once_is_gated_by_the_warn_level() {
-    log_reset_dedup()
-    log_set_level(0)
+    prepare_log_test()
     log_warn_once("W", "dropped", "warn-key")
     log_warn_once("W", "dropped", "warn-key")
     log_once("E", "kept", "error-key")
