@@ -28,6 +28,25 @@ thread_local! {
     static IMAGE_DATAS: RefCell<HashMap<u64, ImageData>> = RefCell::new(HashMap::new());
 }
 
+fn get<R>(handle: u64, f: impl FnOnce(&ImageData) -> R) -> Option<R> {
+    IMAGE_DATAS.with(|ids| ids.borrow().get(&handle).map(f))
+}
+
+fn get_mut<R>(handle: u64, f: impl FnOnce(&mut ImageData) -> R) -> Option<R> {
+    IMAGE_DATAS.with(|ids| ids.borrow_mut().get_mut(&handle).map(f))
+}
+
+/// The UTF-8 path behind a C string, or None for a null, invalid or empty one.
+fn c_path<'a>(path: *const c_char) -> Option<&'a str> {
+    if path.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(path) }
+        .to_str()
+        .ok()
+        .filter(|path| !path.is_empty())
+}
+
 fn store_image_data(image: ImageData) -> u64 {
     let id = crate::handles::mint(Class::ImageData);
     IMAGE_DATAS.with(|ids| {
@@ -63,11 +82,7 @@ pub(crate) fn with_image_data<F, R>(handle: u64, f: F) -> Option<R>
 where
     F: FnOnce(u32, u32, &[u8]) -> R,
 {
-    IMAGE_DATAS.with(|ids| {
-        let ids_borrow = ids.borrow();
-        let img_data = ids_borrow.get(&handle)?;
-        Some(f(img_data.width, img_data.height, &img_data.data))
-    })
+    get(handle, |image| f(image.width, image.height, &image.data))
 }
 
 #[no_mangle]
@@ -90,9 +105,7 @@ pub extern "C" fn stone_image_data_size(
     width: *mut c_int,
     height: *mut c_int,
 ) -> bool {
-    let Some((w, h)) =
-        IMAGE_DATAS.with(|ids| ids.borrow().get(&handle).map(|img| (img.width, img.height)))
-    else {
+    let Some((w, h)) = get(handle, |image| (image.width, image.height)) else {
         return false;
     };
     unsafe {
@@ -130,15 +143,11 @@ pub extern "C" fn stone_image_data_set_pixel(
     b: c_float,
     a: c_float,
 ) {
-    IMAGE_DATAS.with(|ids| {
-        let mut ids = ids.borrow_mut();
-        let Some(image) = ids.get_mut(&handle) else {
-            return;
-        };
-        let Some(offset) = image.pixel_offset(x, y) else {
-            return;
-        };
-        image.data[offset..offset + 4].copy_from_slice(&[r, g, b, a].map(|c| (c * 255.0) as u8));
+    get_mut(handle, |image| {
+        if let Some(offset) = image.pixel_offset(x, y) {
+            image.data[offset..offset + 4]
+                .copy_from_slice(&[r, g, b, a].map(|c| (c * 255.0) as u8));
+        }
     });
 }
 
@@ -147,17 +156,10 @@ pub extern "C" fn stone_image_data_fill_rgba(handle: u64, rgba: *const u8, pixel
     if rgba.is_null() || pixel_count <= 0 {
         return;
     }
-    IMAGE_DATAS.with(|ids| {
-        if let Some(img_data) = ids.borrow_mut().get_mut(&handle) {
-            let capacity = (img_data.width as usize) * (img_data.height as usize);
-            let n = pixel_count as usize;
-            if n > capacity {
-                return;
-            }
-            let bytes = n * 4;
-            unsafe {
-                std::ptr::copy_nonoverlapping(rgba, img_data.data.as_mut_ptr(), bytes);
-            }
+    get_mut(handle, |image| {
+        let n = pixel_count as usize;
+        if n * 4 <= image.data.len() {
+            unsafe { std::ptr::copy_nonoverlapping(rgba, image.data.as_mut_ptr(), n * 4) };
         }
     });
 }
@@ -171,20 +173,15 @@ pub extern "C" fn stone_image_data_read_rgba(
     if rgba.is_null() || pixel_count <= 0 {
         return false;
     }
-    IMAGE_DATAS.with(|ids| {
-        let ids = ids.borrow();
-        let Some(img_data) = ids.get(&handle) else {
-            return false;
-        };
+    get(handle, |image| {
         let n = pixel_count as usize;
-        if n > (img_data.width as usize) * (img_data.height as usize) {
-            return false;
+        let fits = n * 4 <= image.data.len();
+        if fits {
+            unsafe { std::ptr::copy_nonoverlapping(image.data.as_ptr(), rgba, n * 4) };
         }
-        unsafe {
-            std::ptr::copy_nonoverlapping(img_data.data.as_ptr(), rgba, n * 4);
-        }
-        true
+        fits
     })
+    .unwrap_or(false)
 }
 
 #[no_mangle]
@@ -197,35 +194,26 @@ pub extern "C" fn stone_image_data_get_pixel(
     b: *mut c_float,
     a: *mut c_float,
 ) {
-    IMAGE_DATAS.with(|ids| {
-        let ids = ids.borrow();
-        let rgba = ids
-            .get(&handle)
-            .and_then(|image| {
-                image
-                    .pixel_offset(x, y)
-                    .map(|offset| &image.data[offset..offset + 4])
-            })
-            .unwrap_or(&[0; 4]);
-        for (out, &channel) in [r, g, b, a].into_iter().zip(rgba) {
-            if !out.is_null() {
-                unsafe { *out = channel as f32 / 255.0 };
-            }
+    let rgba = get(handle, |image| {
+        let offset = image.pixel_offset(x, y)?;
+        Some([0, 1, 2, 3].map(|channel| image.data[offset + channel]))
+    })
+    .flatten()
+    .unwrap_or([0; 4]);
+    for (out, channel) in [r, g, b, a].into_iter().zip(rgba) {
+        if !out.is_null() {
+            unsafe { *out = channel as f32 / 255.0 };
         }
-    });
+    }
 }
 
 /// Decode a PNG (or any format `image` recognizes) from an asset path into a fresh
 /// ImageData handle. Returns 0 on failure. Pairs with stone_image_data_save_png.
 #[no_mangle]
 pub extern "C" fn stone_image_data_load_png(path: *const c_char) -> u64 {
-    if path.is_null() {
+    let Some(path_str) = c_path(path) else {
         return 0;
-    }
-    let path_str = unsafe { CStr::from_ptr(path).to_str().unwrap_or("") };
-    if path_str.is_empty() {
-        return 0;
-    }
+    };
 
     let Some((data, width, height)) = crate::image_texture::decode_rgba_image(path_str) else {
         crate::log_once!("IMAGE", "stone_image_data_load_png failed for {}", path_str);
@@ -263,28 +251,10 @@ pub unsafe extern "C" fn stone_image_data_load_png_bytes(bytes: *const u8, len: 
 
 #[no_mangle]
 pub extern "C" fn stone_image_data_save_png(handle: u64, path: *const c_char) -> bool {
-    if path.is_null() {
+    let Some(path_str) = c_path(path) else {
         return false;
-    }
-    let path_str = unsafe { CStr::from_ptr(path).to_str().unwrap_or("") };
-    if path_str.is_empty() {
-        return false;
-    }
-
-    IMAGE_DATAS.with(|ids| {
-        let ids_borrow = ids.borrow();
-        let img_data = match ids_borrow.get(&handle) {
-            Some(d) => d,
-            None => {
-                crate::log_once!(
-                    "IMAGE",
-                    "stone_image_data_save_png: invalid handle {}",
-                    handle
-                );
-                return false;
-            }
-        };
-
+    };
+    let saved = get(handle, |img_data| {
         match image::save_buffer(
             path_str,
             &img_data.data,
@@ -303,6 +273,14 @@ pub extern "C" fn stone_image_data_save_png(handle: u64, path: *const c_char) ->
                 false
             }
         }
+    });
+    saved.unwrap_or_else(|| {
+        crate::log_once!(
+            "IMAGE",
+            "stone_image_data_save_png: invalid handle {}",
+            handle
+        );
+        false
     })
 }
 
@@ -312,20 +290,7 @@ pub extern "C" fn stone_image_data_save_png(handle: u64, path: *const c_char) ->
 /// per stroke.
 #[no_mangle]
 pub extern "C" fn stone_image_update_from_data(image_handle: u64, data_handle: u64) -> bool {
-    IMAGE_DATAS.with(|ids| {
-        let ids_borrow = ids.borrow();
-        let img_data = match ids_borrow.get(&data_handle) {
-            Some(d) => d,
-            None => {
-                crate::log_once!(
-                    "IMAGE",
-                    "stone_image_update_from_data: invalid data handle {}",
-                    data_handle
-                );
-                return false;
-            }
-        };
-
+    let updated = get(data_handle, |img_data| {
         let result = with_image(image_handle, |img| {
             if img.width != img_data.width || img.height != img_data.height {
                 crate::log_once!(
@@ -393,6 +358,14 @@ pub extern "C" fn stone_image_update_from_data(image_handle: u64, data_handle: u
             crate::image_texture::refresh_image_mipmaps(image_handle, texture);
         }
         updated
+    });
+    updated.unwrap_or_else(|| {
+        crate::log_once!(
+            "IMAGE",
+            "stone_image_update_from_data: invalid data handle {}",
+            data_handle
+        );
+        false
     })
 }
 
@@ -409,20 +382,7 @@ pub extern "C" fn stone_new_image_from_data(data_handle: u64, filter_mode: i32) 
             return 0;
         }
     };
-    IMAGE_DATAS.with(|ids| {
-        let ids_borrow = ids.borrow();
-        let img_data = match ids_borrow.get(&data_handle) {
-            Some(d) => d,
-            None => {
-                crate::log_once!(
-                    "IMAGE",
-                    "stone_new_image_from_data: invalid handle {}",
-                    data_handle
-                );
-                return 0;
-            }
-        };
-
+    let image = get(data_handle, |img_data| {
         let size = (img_data.width, img_data.height);
         let texture = with_gl(|gl| unsafe {
             let texture = match create_filtered_image_texture(gl, filter_mode, gl_filter) {
@@ -453,6 +413,14 @@ pub extern "C" fn stone_new_image_from_data(data_handle: u64, filter_mode: i32) 
             }
             _ => 0,
         }
+    });
+    image.unwrap_or_else(|| {
+        crate::log_once!(
+            "IMAGE",
+            "stone_new_image_from_data: invalid handle {}",
+            data_handle
+        );
+        0
     })
 }
 
@@ -490,11 +458,7 @@ pub extern "C" fn stone_image_data_fill_rect_rgba8(
     if width < 0 || height < 0 || [r, g, b, a].iter().any(|v| !(0..=255).contains(v)) {
         return false;
     }
-    IMAGE_DATAS.with(|ids| {
-        let mut ids = ids.borrow_mut();
-        let Some(image) = ids.get_mut(&handle) else {
-            return false;
-        };
+    get_mut(handle, |image| {
         let x0 = (x as i64).clamp(0, image.width as i64) as usize;
         let x1 = (x as i64 + width as i64).clamp(0, image.width as i64) as usize;
         let y0 = (y as i64).clamp(0, image.height as i64) as usize;
@@ -512,6 +476,7 @@ pub extern "C" fn stone_image_data_fill_rect_rgba8(
         }
         true
     })
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
