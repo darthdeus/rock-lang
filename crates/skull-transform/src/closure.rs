@@ -179,11 +179,8 @@ pub fn convert_closures_framed(
                 if !f.slots.contains_key(c) {
                     return true;
                 }
-                let lambda_written = own
-                    .writing_scopes
-                    .get(c)
-                    .is_some_and(|ss| ss.iter().any(|&s| s != crate::scope::ROOT));
-                if own.loop_bindings.contains(c) && !lambda_written {
+                let lambda_written = own.written_outside(*c, crate::scope::ROOT);
+                if own.is_loop_binding(*c) && !lambda_written {
                     true
                 } else {
                     via_s = true;
@@ -191,7 +188,7 @@ pub fn convert_closures_framed(
                 }
             });
             // A frame cell used only by a detached lambda may look lambda-owned.
-            via_s |= f.slots.keys().any(|c| own.owner.get(c) == Some(&sid));
+            via_s |= f.slots.keys().any(|c| own.owner(*c) == Some(sid));
             if via_s {
                 caps.push(f.s_cell);
             }
@@ -341,7 +338,7 @@ pub fn convert_closures_framed(
         if seeded_boxes.contains_key(&c) {
             continue;
         }
-        let owner = own.owner[&c];
+        let owner = own.owner(c).expect("boxed cell has an owner");
         let entry = scope_entry(mf, tree, owner);
         let is_param = tree.scopes[owner].params.contains(&c);
         let dest = entry_prepend.entry(entry).or_default();
@@ -455,7 +452,12 @@ fn seeded_box_initializers(
     let locals: HashSet<_> = boxed
         .iter()
         .copied()
-        .filter(|c| !tree.scopes[own.owner[c]].params.contains(c) && !own.loop_bindings.contains(c))
+        .filter(|c| {
+            !tree.scopes[own.owner(*c).expect("boxed cell has an owner")]
+                .params
+                .contains(c)
+                && !own.is_loop_binding(*c)
+        })
         .collect();
     if locals.is_empty() {
         return HashMap::default();
@@ -467,7 +469,7 @@ fn seeded_box_initializers(
         };
         for (pos, &id) in block.insts.iter().enumerate() {
             let mut record = |c| {
-                if locals.contains(&c) && own.owner.get(&c) == Some(&s) {
+                if locals.contains(&c) && own.owner(c) == Some(s) {
                     accesses.entry(c).or_default().push((b, pos, id));
                 }
             };
@@ -483,7 +485,7 @@ fn seeded_box_initializers(
     let mut dominators = HashMap::default();
     let mut cyclic = HashMap::default();
     for (c, sites) in accesses {
-        let owner = own.owner[&c];
+        let owner = own.owner(c).expect("boxed cell has an owner");
         let entry = scope_entry(mf, tree, owner);
         for &(b, pos, id) in &sites {
             if !matches!(mf.insts[id], Inst::Store { cell, .. } if cell == c) {
@@ -620,7 +622,7 @@ fn slot_in_scope(
     new: &mut Vec<Idx<Inst>>,
 ) -> Idx<Inst> {
     // The synthetic state parameter is root-owned but absent from the pre-yield tree.
-    let owner = own.owner.get(&cc).copied().unwrap_or(crate::scope::ROOT);
+    let owner = own.owner(cc).unwrap_or(crate::scope::ROOT);
     if owner == s {
         let l = mf.alloc_inst(Inst::Load(cc));
         new.push(l);

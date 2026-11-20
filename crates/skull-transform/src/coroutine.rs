@@ -383,7 +383,7 @@ pub fn transform_coroutine(
     let own = tree.analyze(&step);
     let frame_cells: HashSet<Idx<Cell>> = {
         let root = crate::scope::ROOT;
-        let root_owned = |cell: &Idx<Cell>| own.owner.get(cell).is_some_and(|&owner| owner == root);
+        let root_owned = |cell: &Idx<Cell>| own.owner(*cell) == Some(root);
         let (detached_cells, detached_sites) = detached_uses(
             &step,
             step.coro_defers
