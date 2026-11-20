@@ -249,3 +249,127 @@ fn resumed_test_reads_the_current_bound() {
     assert_eq(c.resume(), 1)
     assert(c.resume() == null)
 }
+
+fn reentered_counter(n: int, reset: bool) -> int {
+    let col = 0
+    let sum = 0
+    for row in 0..3 {
+        if reset { col = 0 }
+        while col < n {
+            sum += row * 10 + col
+            col += 1
+        }
+    }
+    sum
+}
+
+fn reentered_unreset_counter(n: int) -> int {
+    let col = 0
+    let sum = 0
+    for row in 0..3 {
+        while col < n {
+            sum += row * 10 + col
+            col += 1
+        }
+    }
+    sum
+}
+
+fn reentered_reset_counter(n: int) -> int {
+    let col = 0
+    let sum = 0
+    for row in 0..3 {
+        col = 0
+        while col < n {
+            sum += row * 10 + col
+            col += 1
+        }
+    }
+    sum
+}
+
+fn locally_reset_counter(n: int) -> int {
+    let sum = 0
+    for row in 0..3 {
+        let col = 0
+        while col < n {
+            sum += row * 10 + col
+            col += 1
+        }
+    }
+    sum
+}
+
+@test
+fn reentered_counters_keep_or_reset_their_value() {
+    assert_eq(reentered_counter(3, true), 99)
+    assert_eq(reentered_counter(3, false), 3)
+    assert_eq(reentered_unreset_counter(3), 3)
+    assert_eq(reentered_reset_counter(3), 99)
+    assert_eq(locally_reset_counter(3), 99)
+    assert_eq(reentered_unreset_counter(2), 1)
+    assert_eq(reentered_reset_counter(2), 63)
+}
+
+fn increment_only(n: int, bound: Bound) -> int {
+    let from_param = 0
+    let from_field = 0
+    let backwards = n
+    while from_param < n { from_param = from_param + 1 }
+    while from_field < bound.n { from_field += 1 }
+    while backwards > 0 { backwards = backwards - 1 }
+    from_param + from_field + backwards
+}
+
+@test
+fn increment_only_loops_advance_the_counter() {
+    assert_eq(increment_only(4, Bound { n: 6 }), 10)
+    assert_eq(increment_only(0, Bound { n: 0 }), 0)
+}
+
+fn computed_bound(w: int, h: int, stop: int) -> int {
+    let i = 0
+    let total = 0
+    while i < w * h + 1 {
+        if i == stop { break }
+        total += i
+        i += 1
+    }
+    total
+}
+
+fn mutable_computed_bound(w: int, h: int) -> int {
+    let i = 0
+    let total = 0
+    while i < w * h {
+        total += i
+        w -= 1
+        i += 1
+    }
+    total
+}
+
+@test
+fn computed_bounds_track_mutations_and_zero_trips() {
+    assert_eq(computed_bound(3, 4, 99), 78)
+    assert_eq(computed_bound(3, 4, 4), 6)
+    assert_eq(computed_bound(3, -4, 99), 0)
+    assert_eq(mutable_computed_bound(5, 2), 6)
+}
+
+fn computed_bound_edge(start: int, w: int, h: int, stop: int) -> int {
+    let i = start
+    let count = 0
+    while i < w * h {
+        if i == stop { return 7 }
+        if w == h { count += 1 } else { count += 2 }
+        i += 1
+    }
+    count
+}
+
+@test
+fn computed_exclusive_bound_preserves_exact_integer_edge() {
+    let edge = -9007199254740992
+    assert_eq(computed_bound_edge(edge, -4503599627370496, 2, edge), 0)
+}

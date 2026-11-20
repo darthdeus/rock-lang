@@ -263,7 +263,7 @@ impl Emitter<'_> {
                 write_cellname(out, self.func, self.frame, self.cell_colors, *slot);
                 out.push_str(", ");
                 match hi {
-                    HiLimit::Value(v) => self.write_opnd(out, *v),
+                    HiLimit::Value(v) | HiLimit::Expr(v) => self.write_opnd(out, *v),
                     HiLimit::Cell(c) => {
                         write_cellname(out, self.func, self.frame, self.cell_colors, *c)
                     }

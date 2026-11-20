@@ -254,7 +254,7 @@ fn emit_body(
     );
     keep_reads_ordered(func, &rpo, &mut inlinable, &folded_reads, &uses);
     bound_fold_levels(func, &rpo, &mut inlinable, &folded_reads);
-    let loops = recognize_for_loops(func, &rpo, frame);
+    let loops = recognize_for_loops(func, &rpo, frame, &inlinable);
     let reads = regalloc::Reads::new(func, &rpo, &inlinable);
     if frame.is_none() {
         for id in regalloc::stable_loads(func, &rpo, &flow, &inlinable, &pinned, &loops, &reads) {

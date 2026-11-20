@@ -1439,6 +1439,9 @@ fn numeric_for_requires_an_invariant_bound_and_unit_step() {
         ("invariant_bound", 1, false),
         ("range_snapshot", 1, false),
         ("bounds_in_nested_loops", 1, true),
+        ("reentered_unreset_counter", 1, true),
+        ("reentered_reset_counter", 1, true),
+        ("locally_reset_counter", 2, false),
     ] {
         let lua = emit_clean(src, name);
         assert_eq!(lua.matches(" for c").count(), fors, "{name}: {lua}");
@@ -1466,5 +1469,23 @@ fn numeric_for_keeps_latch_work_and_respects_continue() {
         let lua = emit_clean(src, name);
         assert_eq!(lua.contains(" for c"), expected_for, "{name}: {lua}");
         assert_eq!(has_general_loop(&lua), !expected_for, "{name}: {lua}");
+    }
+}
+
+#[test]
+fn numeric_for_snapshots_only_invariant_arithmetic() {
+    let src = include_str!("../../../tests/control_flow/counted_bounds.rock");
+    let lua = emit_clean(src, "computed_bound");
+    let head = lua
+        .lines()
+        .find(|line| line.starts_with(" for c"))
+        .unwrap_or("");
+    assert!(
+        head.contains(" * ") && head.contains(" + ") && head.contains(" - 1 do"),
+        "{lua}"
+    );
+    for name in ["mutable_computed_bound", "computed_bound_edge"] {
+        let lua = emit_clean(src, name);
+        assert!(has_general_loop(&lua) && !lua.contains(" for c"), "{lua}");
     }
 }
