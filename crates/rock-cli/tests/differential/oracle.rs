@@ -267,7 +267,8 @@ fn map_of(entries: [(string, JsonValue)]) -> Map<string, JsonValue> {
 fn check_json_value(want: JsonValue, got: JsonValue) {
     match want {
         Null => assert(json_is_null(got), "JSON null oracle"),
-        Bool(value) => assert(json_as_bool(got).unwrap() == value, "JSON bool oracle"),
+        True => assert(json_as_bool(got).unwrap(), "JSON true oracle"),
+        False => assert(!json_as_bool(got).unwrap(), "JSON false oracle"),
         Int(value) => assert(json_as_int(got).unwrap() == value, "JSON int oracle"),
         Float(value) => {
             let actual = json_as_float(got).unwrap()
