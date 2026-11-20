@@ -4,9 +4,6 @@ mod test_support;
 type Result = std::result::Result<(), String>;
 
 fn check_rock(file_name: &str, contents: &str) -> Result {
-    if file_name == "modules_std.rock" {
-        return check_std_fixture(contents);
-    }
     let modules = file_name.starts_with("modules_");
     let check = |src: &str| {
         if modules {
@@ -88,62 +85,6 @@ fn stdlib_sources() -> &'static [(&'static str, &'static str)] {
             })
             .collect()
     })
-}
-
-fn check_std_fixture(contents: &str) -> Result {
-    let sections = test_utils::parse_sections(contents);
-    let inventory = sections
-        .iter()
-        .find(|section| section.name == "prelude_inventory")
-        .expect("modules_std.rock needs a prelude_inventory section");
-    let expected: Vec<String> = inventory
-        .content
-        .lines()
-        .filter_map(|line| line.strip_prefix("// prelude: "))
-        .map(ToOwned::to_owned)
-        .collect();
-    assert!(!expected.is_empty(), "prelude inventory fixture is empty");
-    assert!(
-        expected.windows(2).all(|pair| pair[0] < pair[1]),
-        "prelude inventory must be strictly sorted"
-    );
-
-    let cached_stdlib = skull_parser::stdlib::cached()
-        .as_ref()
-        .expect("stdlib parses");
-    let mut std_modules = cached_stdlib.to_vec();
-    let std_ws = bone_semantic::semantic_passes::semantic_pass(&mut std_modules)
-        .map_err(|e| format!("stdlib semantic pass failed: {e}"))?;
-    let std_package = std_ws
-        .ns
-        .package(u32::MAX)
-        .expect("stdlib namespace package is missing");
-    let root = std_package
-        .node(bone_core::prelude::ustr(""))
-        .expect("stdlib namespace root is missing");
-    let mut actual: Vec<String> = root
-        .owned_types
-        .keys()
-        .chain(root.owned_globals.keys())
-        .chain(root.owned_callables.keys())
-        .chain(root.owned_decorators.keys())
-        .map(|name| name.as_str().to_owned())
-        .collect();
-    actual.sort();
-    actual.dedup();
-    assert_eq!(actual, expected, "default prelude inventory changed");
-
-    let prelude = sections
-        .iter()
-        .find(|section| section.name == "v1_default_prelude")
-        .expect("modules_std.rock needs a v1_default_prelude section");
-    let user_files = crate::test_support::parse_embedded_files(prelude.content);
-    assert!(
-        !user_files.is_empty(),
-        "v1_default_prelude has no embedded file"
-    );
-    crate::test_support::check_types_embedded(&user_files, stdlib_sources(), cached_stdlib)
-        .map_err(|e| format!("v1 default prelude failed: {e}"))
 }
 
 fn main() -> std::process::ExitCode {

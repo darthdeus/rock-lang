@@ -105,3 +105,10 @@ fn g() -> float {
     let s = "{apply(smoothstep)}"
     x + y
 }
+
+//- v1_default_prelude
+//-- main.rock @pkg=app,1 @v1
+fn main() {
+    print("stdlib")
+    std::print("stdlib")
+}
