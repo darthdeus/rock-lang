@@ -1938,10 +1938,13 @@ impl<'a> Builder<'a> {
             Some(present) => present,
             None => self.safe_nav_absent_cond(&recv),
         };
-        let result = self
-            .f
-            .new_cell_typed(None, self.current_expr_storage_ty_id());
-        self.nil_or_join(result, cond, presence.is_some(), |s| value_arm(s, recv))
+        self.absent_or_join(
+            self.current_expr_storage_ty_id(),
+            cond,
+            presence.is_some(),
+            Lit::Nil,
+            |s| value_arm(s, recv),
+        )
     }
 
     fn safe_nav_field_plan(

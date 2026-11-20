@@ -613,11 +613,8 @@ impl<'a> Builder<'a> {
         cname: Ustr,
     ) -> Result<Idx<Inst>, CompilerError> {
         let present = self.read_field(parent, field);
-        let result = self.f.new_cell(None);
         let is_nil = self.is_nil(present);
-        self.nil_or_join(result, is_nil, false, |s| {
-            s.materialize_embed(parent, field, cname)
-        })
+        self.nil_or_join(is_nil, false, |s| s.materialize_embed(parent, field, cname))
     }
 
     pub(crate) fn pair_embed_leaves(

@@ -3,7 +3,9 @@ use crate::monoty::{MonoSubst, convert_decl};
 use bone_core::hir::VariantPayload;
 
 /// An absent nullable payload prints Rock's spelling, not the backend's.
-const NULL_TEXT: &str = "null";
+fn null_text() -> Lit {
+    Lit::Str(crate::names::ustr("null"))
+}
 
 fn source_name(name: Ustr) -> String {
     bone_core::modules::display_name(name.as_str()).to_string()
@@ -334,13 +336,13 @@ impl<'a> Builder<'a> {
                         parts,
                         present: None,
                     };
-                    self.render_present_or_null(present, true, NULL_TEXT, |s| {
+                    self.absent_or_join(None, present, true, null_text(), |s| {
                         s.render_fmt(inner, path, group)
                     })
                 }
                 ValueRepr::Scalar(v) => {
                     let is_nil = self.is_nil(v);
-                    self.render_present_or_null(is_nil, false, NULL_TEXT, |s| {
+                    self.absent_or_join(None, is_nil, false, null_text(), |s| {
                         s.render_fmt(inner, path, ValueRepr::Scalar(v))
                     })
                 }
@@ -412,36 +414,6 @@ impl<'a> Builder<'a> {
         }
         let c = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(close))));
         self.emit_cur(Inst::StringConcat(out, c))
-    }
-
-    pub(crate) fn render_present_or_null(
-        &mut self,
-        cond: Idx<Inst>,
-        cond_is_present: bool,
-        null_text: &str,
-        render: impl FnOnce(&mut Self) -> Result<Idx<Inst>, CompilerError>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
-        let value_bb = self.f.new_block();
-        let null_bb = self.f.new_block();
-        let join = self.f.new_block();
-        let (then_bb, else_bb) = if cond_is_present {
-            (value_bb, null_bb)
-        } else {
-            (null_bb, value_bb)
-        };
-        self.branch_to(cond, then_bb, else_bb);
-
-        self.cur = null_bb;
-        let null = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(null_text))));
-        self.store_and_join(result, null, join);
-
-        self.cur = value_bb;
-        let rendered = render(self)?;
-        self.store_and_join(result, rendered, join);
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
     }
 
     /// A scalarized group holds the fields in declaration order; a materialized

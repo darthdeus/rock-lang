@@ -663,14 +663,16 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// The value arm runs when `cond` equals `cond_is_presence`.
-    pub(crate) fn nil_or_join(
+    /// `absent` when `cond` differs from `cond_is_presence`, else the value arm.
+    pub(crate) fn absent_or_join(
         &mut self,
-        result: Idx<Cell>,
+        result_ty: Option<TyId>,
         cond: Idx<Inst>,
         cond_is_presence: bool,
+        absent: Lit,
         value_arm: impl FnOnce(&mut Self) -> Result<Idx<Inst>, CompilerError>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        let result = self.f.new_cell_typed(None, result_ty);
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -681,7 +683,7 @@ impl<'a> Builder<'a> {
         }
 
         self.cur = nil_bb;
-        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        let n = self.emit_cur(Inst::Const(absent));
         self.store_and_join(result, n, join);
 
         self.cur = val_bb;
@@ -690,6 +692,15 @@ impl<'a> Builder<'a> {
 
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    pub(crate) fn nil_or_join(
+        &mut self,
+        cond: Idx<Inst>,
+        cond_is_presence: bool,
+        value_arm: impl FnOnce(&mut Self) -> Result<Idx<Inst>, CompilerError>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        self.absent_or_join(None, cond, cond_is_presence, Lit::Nil, value_arm)
     }
 
     /// A diverged arm leaves the join untouched.

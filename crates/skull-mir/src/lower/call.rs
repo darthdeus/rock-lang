@@ -2333,10 +2333,7 @@ impl<'a> Builder<'a> {
             return Ok(self.flat_tuple_box(slots));
         }
         let present = slots.remove(0);
-        let result = self.f.new_cell(None);
-        self.nil_or_join(result, present, true, |s| {
-            Ok(s.emit_cur(Inst::MakeTuple(slots)))
-        })
+        self.nil_or_join(present, true, |s| Ok(s.emit_cur(Inst::MakeTuple(slots))))
     }
 
     /// Preserves absence as `nil`; nullable `nobox` groups require this explicitly.
@@ -2376,10 +2373,9 @@ impl<'a> Builder<'a> {
         let Some(present) = present else {
             return self.pack_boxed(value, kind);
         };
-        let result = self.f.new_cell(None);
         // The present arm takes the same tier dispatch: a leaf-table or flat-enum
         // payload has no declared-field ctor.
-        self.nil_or_join(result, present, true, |s| s.pack_boxed(value, kind))
+        self.nil_or_join(present, true, |s| s.pack_boxed(value, kind))
     }
 
     /// First-class targets nest children as declared fields and never take this layout.
@@ -3527,10 +3523,9 @@ impl<'a> Builder<'a> {
         name: Ustr,
         owner_ty: Option<&MonoTy>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
         let is_nil = self.is_nil(boxed);
         // The child copies made while packing are this copy's descendants.
-        self.nil_or_join(result, is_nil, false, |s| {
+        self.nil_or_join(is_nil, false, |s| {
             let shape = s.nominal_rep_shape_required(name, false)?;
             s.enter_value_copy(name)?;
             let packed = s

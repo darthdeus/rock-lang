@@ -127,7 +127,8 @@ impl<'a> Builder<'a> {
         let Some(present) = present else {
             return self.render_fmt(&tree, Vec::new(), repr);
         };
-        self.render_present_or_null(present, true, "nil", |s| {
+        let nil = Lit::Str(crate::names::ustr("nil"));
+        self.absent_or_join(None, present, true, nil, |s| {
             s.render_fmt(&tree, Vec::new(), repr)
         })
     }
@@ -170,22 +171,9 @@ impl<'a> Builder<'a> {
         v: Idx<Inst>,
         render: impl FnOnce(&mut Self) -> Result<Idx<Inst>, CompilerError>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
-        let nil_bb = self.f.new_block();
-        let val_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.branch_on_nil(v, nil_bb, val_bb);
-
-        self.cur = nil_bb;
-        let n = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr("nil"))));
-        self.store_and_join(result, n, join);
-
-        self.cur = val_bb;
-        let rendered = render(self)?;
-        self.store_and_join(result, rendered, join);
-
-        self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        let is_nil = self.is_nil(v);
+        let nil = Lit::Str(crate::names::ustr("nil"));
+        self.absent_or_join(None, is_nil, false, nil, render)
     }
 
     pub(crate) fn stringify_non_null(
