@@ -32,8 +32,8 @@ fn sound_residency_fixture(body: fn() -> ()) {
     let saved_sync_decodes = SOUND_RESIDENCY_SYNC_DECODES
     let saved_sync_decode_us = SOUND_RESIDENCY_SYNC_DECODE_US
     let saved_frame_paths = RESIDENCY_FRAME_WAIT_PATHS.clone()
-    let saved_frame_wait = RESIDENCY_FRAME_MISS_WAIT_US
-    let saved_profile_wait = RESIDENCY_PROFILE_MISS_WAIT_US
+    let saved_frame_wait = RESIDENCY_FRAME_COUNTERS.miss_wait_us
+    let saved_profile_wait = RESIDENCY_PROFILE_COUNTERS.miss_wait_us
     let saved_quiet = STONE_QUIET
     assert_eq(saved_order, 0, "the pending sound queue starts with a clean ordering sequence")
     defer {
@@ -46,8 +46,8 @@ fn sound_residency_fixture(body: fn() -> ()) {
         SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
         SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
         RESIDENCY_FRAME_WAIT_PATHS = saved_frame_paths
-        RESIDENCY_FRAME_MISS_WAIT_US = saved_frame_wait
-        RESIDENCY_PROFILE_MISS_WAIT_US = saved_profile_wait
+        RESIDENCY_FRAME_COUNTERS.miss_wait_us = saved_frame_wait
+        RESIDENCY_PROFILE_COUNTERS.miss_wait_us = saved_profile_wait
         random_set_state(saved_rng)
         presentation_random_set_state(saved_presentation_rng)
         STONE_QUIET = saved_quiet
@@ -101,11 +101,11 @@ fn sound_duration_reads_recipe_without_resident_pcm() {
 fn sound_sync_decode_wait_reaches_residency_hitch_stats() {
     sound_residency_with_sound((source, _backend_id) => {
         let paths_before = RESIDENCY_FRAME_WAIT_PATHS.len()
-        let frame_before = RESIDENCY_FRAME_MISS_WAIT_US
+        let frame_before = RESIDENCY_FRAME_COUNTERS.miss_wait_us
         let profile_before = residency_profile_stats().miss_wait_us
         let waited = sound_residency_decode_sync(source)
         assert(waited > 0, "the decoded sample has a measurable synchronous wait")
-        assert_eq(RESIDENCY_FRAME_MISS_WAIT_US - frame_before, waited,
+        assert_eq(RESIDENCY_FRAME_COUNTERS.miss_wait_us - frame_before, waited,
             "the measured decoder wait is visible in the current residency frame")
         assert_eq(residency_profile_stats().miss_wait_us - profile_before, waited,
             "the measured decoder wait is visible to residency profiling")

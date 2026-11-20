@@ -118,7 +118,7 @@ fn hitch_classify(frame_ms: float, logic_ms: float, render_ms: float,
                   aborts: int, upload_us: int, cpu_ms: float = -1.0) -> string {
     let half = frame_ms * 0.5
     if present_ms >= half { return "present" }
-    if (RESIDENCY_FRAME_MISS_WAIT_US as float) >= half * 1000.0 { return "residency" }
+    if RESIDENCY_FRAME_COUNTERS.miss_wait_us >= half * 1000.0 { return "residency" }
     if (upload_us as float) >= half * 1000.0 { return "upload" }
     if cpu_ms >= 0.0 && frame_ms - present_ms - cpu_ms >= half { return "blocked" }
     if GC_STEP_ENABLED {
@@ -225,8 +225,8 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     let decode_wait_us = image_stats.wait_us
     if measured {
         perf_record_frame(frame, t_ms, frame_ms, heap_kb, heap_delta_kb, starts, compiles, aborts, flushes, image_stats, cpu_ms)
-        if RESIDENCY_FRAME_MISS_WAIT_US > 0 {
-            perf_record_residency_wait(frame, RESIDENCY_FRAME_MISS_WAIT_US, RESIDENCY_FRAME_WAIT_PATHS)
+        if RESIDENCY_FRAME_COUNTERS.miss_wait_us > 0 {
+            perf_record_residency_wait(frame, RESIDENCY_FRAME_COUNTERS.miss_wait_us as int, RESIDENCY_FRAME_WAIT_PATHS)
         }
     }
     let slow_ms = HITCH.cur_slow_ms
@@ -254,7 +254,7 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     nb_set(HITCH.load_us, slot, load_us)
     nb_set(HITCH.upload_us, slot, upload_us)
     nb_set(HITCH.decode_wait_us, slot, decode_wait_us)
-    nb_set(HITCH.residency_us, slot, RESIDENCY_FRAME_MISS_WAIT_US)
+    nb_set(HITCH.residency_us, slot, RESIDENCY_FRAME_COUNTERS.miss_wait_us as int)
     HITCH.residency_paths[slot] = ""
     nb_set(HITCH.slow_ms, slot, slow_ms)
     HITCH.slow_name[slot] = slow_name
@@ -286,7 +286,7 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     let h = format_float(heap_kb / 1024.0, 0, 1)
     let dh = format_float(heap_delta_kb / 1024.0, 0, 2)
     let s = format_float(slow_ms, 0, 1)
-    log_info("HITCH", "frame={frame} ms={ms} cause={cause} logic={l} render={r} present={p} cpu={c} heap={h}MB dheap={dh}MB starts={starts} aborts={aborts} load_us={load_us} upload_us={upload_us} decode_wait_us={decode_wait_us} residency_us={RESIDENCY_FRAME_MISS_WAIT_US} residency_paths={hitch_residency_log_summary(residency_paths)} slowest={slow_phase}:{slow_name} {s}ms")
+    log_info("HITCH", "frame={frame} ms={ms} cause={cause} logic={l} render={r} present={p} cpu={c} heap={h}MB dheap={dh}MB starts={starts} aborts={aborts} load_us={load_us} upload_us={upload_us} decode_wait_us={decode_wait_us} residency_us={RESIDENCY_FRAME_COUNTERS.miss_wait_us as int} residency_paths={hitch_residency_log_summary(residency_paths)} slowest={slow_phase}:{slow_name} {s}ms")
 }
 
 fn hitch_window_summary() -> string {

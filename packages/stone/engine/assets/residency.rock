@@ -39,12 +39,19 @@ struct ResidencyEvictor { name: string, usage: fn() -> int, budget: fn() -> int,
     release: fn(int) -> int }
 global RESIDENCY_EVICTORS: [ResidencyEvictor] = vec_new()
 global RESIDENCY_FRAME_WAIT_PATHS: [string] = vec_new()
-global RESIDENCY_FRAME_MISS_WAIT_US: int = 0
-global RESIDENCY_PROFILE_MISS_WAIT_US: int = 0
-global RESIDENCY_FRAME_EVICTIONS: int = 0
-global RESIDENCY_PROFILE_EVICTIONS: int = 0
-global RESIDENCY_FRAME_EVICTED_BYTES: int = 0
-global RESIDENCY_PROFILE_EVICTED_BYTES: int = 0
+// Lua numbers keep full-width counters; integer value fields are 32-bit.
+nobox value ResidencyCounters {
+    miss_wait_us: float = 0.0,
+    evictions: float = 0.0,
+    evicted_bytes: float = 0.0,
+    misses: float = 0.0,
+    miss_bytes: float = 0.0,
+    cold_misses: float = 0.0,
+    cold_miss_bytes: float = 0.0,
+    decode_failed_base: float = 0.0,
+}
+global RESIDENCY_FRAME_COUNTERS: ResidencyCounters = ResidencyCounters {}
+global RESIDENCY_PROFILE_COUNTERS: ResidencyCounters = ResidencyCounters {}
 
 fn residency_cache_remove(identity: string) {
     let entry = RESIDENCY_CACHE.entries.remove(identity) ?? return
@@ -177,10 +184,10 @@ fn residency_evict_cached(key: string, entry: ResidencyCached) -> bool {
     let image = IMAGE_CACHE.get(key) ?? return false
     let _ = RESIDENCY_CACHE.touches.remove(key)
     image_asset_evict(key, image.0)
-    RESIDENCY_FRAME_EVICTIONS += 1
-    RESIDENCY_PROFILE_EVICTIONS += 1
-    RESIDENCY_FRAME_EVICTED_BYTES += entry.bytes
-    RESIDENCY_PROFILE_EVICTED_BYTES += entry.bytes
+    RESIDENCY_FRAME_COUNTERS.evictions += 1
+    RESIDENCY_PROFILE_COUNTERS.evictions += 1
+    RESIDENCY_FRAME_COUNTERS.evicted_bytes += entry.bytes
+    RESIDENCY_PROFILE_COUNTERS.evicted_bytes += entry.bytes
     return true
 }
 
@@ -190,8 +197,8 @@ pub fn residency_flush_required() {
     let t0 = stone_get_time()
     stone_flush_image_uploads()
     let waited = max(0, ((stone_get_time() - t0) * 1000000.0) as int)
-    RESIDENCY_FRAME_MISS_WAIT_US += waited
-    RESIDENCY_PROFILE_MISS_WAIT_US += waited
+    RESIDENCY_FRAME_COUNTERS.miss_wait_us += waited
+    RESIDENCY_PROFILE_COUNTERS.miss_wait_us += waited
     residency_observe_decode_failures()
 }
 
@@ -215,8 +222,8 @@ fn residency_service_uploads() -> int {
     let t0 = stone_get_time()
     let published = stone_service_image_uploads()
     let waited = max(0, ((stone_get_time() - t0) * 1000000.0) as int)
-    RESIDENCY_FRAME_MISS_WAIT_US += waited
-    RESIDENCY_PROFILE_MISS_WAIT_US += waited
+    RESIDENCY_FRAME_COUNTERS.miss_wait_us += waited
+    RESIDENCY_PROFILE_COUNTERS.miss_wait_us += waited
     residency_observe_decode_failures()
     return published
 }
@@ -245,17 +252,7 @@ pub value ResidencyRow {
     evictor_budget: int? = null,
 }
 
-global RESIDENCY_FRAME_MISSES: int = 0
-global RESIDENCY_FRAME_MISS_BYTES: int = 0
-global RESIDENCY_FRAME_COLD_MISSES: int = 0
-global RESIDENCY_FRAME_COLD_MISS_BYTES: int = 0
-global RESIDENCY_PROFILE_MISSES: int = 0
-global RESIDENCY_PROFILE_MISS_BYTES: int = 0
-global RESIDENCY_PROFILE_COLD_MISSES: int = 0
-global RESIDENCY_PROFILE_COLD_MISS_BYTES: int = 0
 global RESIDENCY_COLD_DEPTH: int = 0
-global RESIDENCY_FRAME_DECODE_FAILED_BASE: int = 0
-global RESIDENCY_PROFILE_DECODE_FAILED_BASE: int = 0
 global RESIDENCY_DECODE_FAILED_LOGGED: Map<string, bool> = map_new()
 
 fn residency_record_miss(image: Image, path: string) {
@@ -263,70 +260,49 @@ fn residency_record_miss(image: Image, path: string) {
     let bytes = residency_live_bytes(image)
     _log_once_impl(3, "RESIDENCY", "miss {path} {bytes}", "residency:{path}")
     if RESIDENCY_COLD_DEPTH > 0 || RESIDENCY_COLD_ARRIVAL_OPEN {
-        RESIDENCY_FRAME_COLD_MISSES = RESIDENCY_FRAME_COLD_MISSES + 1
-        RESIDENCY_FRAME_COLD_MISS_BYTES = RESIDENCY_FRAME_COLD_MISS_BYTES + bytes
-        RESIDENCY_PROFILE_COLD_MISSES = RESIDENCY_PROFILE_COLD_MISSES + 1
-        RESIDENCY_PROFILE_COLD_MISS_BYTES = RESIDENCY_PROFILE_COLD_MISS_BYTES + bytes
+        RESIDENCY_FRAME_COUNTERS.cold_misses += 1
+        RESIDENCY_FRAME_COUNTERS.cold_miss_bytes += bytes
+        RESIDENCY_PROFILE_COUNTERS.cold_misses += 1
+        RESIDENCY_PROFILE_COUNTERS.cold_miss_bytes += bytes
     } else {
-        RESIDENCY_FRAME_MISSES = RESIDENCY_FRAME_MISSES + 1
-        RESIDENCY_FRAME_MISS_BYTES = RESIDENCY_FRAME_MISS_BYTES + bytes
-        RESIDENCY_PROFILE_MISSES = RESIDENCY_PROFILE_MISSES + 1
-        RESIDENCY_PROFILE_MISS_BYTES = RESIDENCY_PROFILE_MISS_BYTES + bytes
+        RESIDENCY_FRAME_COUNTERS.misses += 1
+        RESIDENCY_FRAME_COUNTERS.miss_bytes += bytes
+        RESIDENCY_PROFILE_COUNTERS.misses += 1
+        RESIDENCY_PROFILE_COUNTERS.miss_bytes += bytes
     }
 }
 
 fn residency_frame_begin() {
     RESIDENCY_FRAME_WAIT_PATHS.clear()
-    RESIDENCY_FRAME_DECODE_FAILED_BASE = stone_image_decode_failed_count()
-    RESIDENCY_FRAME_MISS_WAIT_US = 0
-    RESIDENCY_FRAME_EVICTIONS = 0
-    RESIDENCY_FRAME_EVICTED_BYTES = 0
-    RESIDENCY_FRAME_MISSES = 0
-    RESIDENCY_FRAME_MISS_BYTES = 0
-    RESIDENCY_FRAME_COLD_MISSES = 0
-    RESIDENCY_FRAME_COLD_MISS_BYTES = 0
+    RESIDENCY_FRAME_COUNTERS = ResidencyCounters { decode_failed_base: stone_image_decode_failed_count() }
     asset_report_frame_tick()
 }
 
 pub fn residency_reset_profile_stats() {
-    RESIDENCY_PROFILE_DECODE_FAILED_BASE = stone_image_decode_failed_count()
-    RESIDENCY_PROFILE_MISS_WAIT_US = 0
-    RESIDENCY_PROFILE_EVICTIONS = 0
-    RESIDENCY_PROFILE_EVICTED_BYTES = 0
-    RESIDENCY_PROFILE_MISSES = 0
-    RESIDENCY_PROFILE_MISS_BYTES = 0
-    RESIDENCY_PROFILE_COLD_MISSES = 0
-    RESIDENCY_PROFILE_COLD_MISS_BYTES = 0
+    RESIDENCY_PROFILE_COUNTERS = ResidencyCounters { decode_failed_base: stone_image_decode_failed_count() }
 }
 
 pub fn residency_reset_profile_stats_to_frame() {
-    RESIDENCY_PROFILE_DECODE_FAILED_BASE = RESIDENCY_FRAME_DECODE_FAILED_BASE
-    RESIDENCY_PROFILE_MISS_WAIT_US = RESIDENCY_FRAME_MISS_WAIT_US
-    RESIDENCY_PROFILE_EVICTIONS = RESIDENCY_FRAME_EVICTIONS
-    RESIDENCY_PROFILE_EVICTED_BYTES = RESIDENCY_FRAME_EVICTED_BYTES
-    RESIDENCY_PROFILE_MISSES = RESIDENCY_FRAME_MISSES
-    RESIDENCY_PROFILE_MISS_BYTES = RESIDENCY_FRAME_MISS_BYTES
-    RESIDENCY_PROFILE_COLD_MISSES = RESIDENCY_FRAME_COLD_MISSES
-    RESIDENCY_PROFILE_COLD_MISS_BYTES = RESIDENCY_FRAME_COLD_MISS_BYTES
+    RESIDENCY_PROFILE_COUNTERS = RESIDENCY_FRAME_COUNTERS
 }
 
 pub fn residency_record_sound_decode(path: string, waited_us: int) {
     if waited_us <= 0 { return }
     RESIDENCY_FRAME_WAIT_PATHS.push("sound:{path}")
-    RESIDENCY_FRAME_MISS_WAIT_US += waited_us
-    RESIDENCY_PROFILE_MISS_WAIT_US += waited_us
+    RESIDENCY_FRAME_COUNTERS.miss_wait_us += waited_us
+    RESIDENCY_PROFILE_COUNTERS.miss_wait_us += waited_us
 }
 
 pub fn residency_profile_stats() -> ResidencyStats {
     return ResidencyStats {
-        misses: RESIDENCY_PROFILE_MISSES,
-        miss_bytes: RESIDENCY_PROFILE_MISS_BYTES,
-        cold_misses: RESIDENCY_PROFILE_COLD_MISSES,
-        cold_miss_bytes: RESIDENCY_PROFILE_COLD_MISS_BYTES,
-        miss_wait_us: RESIDENCY_PROFILE_MISS_WAIT_US,
-        decode_failures: stone_image_decode_failed_count() - RESIDENCY_PROFILE_DECODE_FAILED_BASE,
-        evictions: RESIDENCY_PROFILE_EVICTIONS,
-        evicted_bytes: RESIDENCY_PROFILE_EVICTED_BYTES,
+        misses: RESIDENCY_PROFILE_COUNTERS.misses as int,
+        miss_bytes: RESIDENCY_PROFILE_COUNTERS.miss_bytes as int,
+        cold_misses: RESIDENCY_PROFILE_COUNTERS.cold_misses as int,
+        cold_miss_bytes: RESIDENCY_PROFILE_COUNTERS.cold_miss_bytes as int,
+        miss_wait_us: RESIDENCY_PROFILE_COUNTERS.miss_wait_us as int,
+        decode_failures: stone_image_decode_failed_count() - RESIDENCY_PROFILE_COUNTERS.decode_failed_base as int,
+        evictions: RESIDENCY_PROFILE_COUNTERS.evictions as int,
+        evicted_bytes: RESIDENCY_PROFILE_COUNTERS.evicted_bytes as int,
     }
 }
 

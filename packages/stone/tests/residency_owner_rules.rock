@@ -204,7 +204,7 @@ fn residency_owner_miss_wait_classifies_at_half_frame() {
         residency_flush_required()
         let waited = residency_profile_stats().miss_wait_us
         assert(waited > 0, "the Required miss accounts its prepare wait")
-        RESIDENCY_FRAME_MISS_WAIT_US = 10000
+        RESIDENCY_FRAME_COUNTERS.miss_wait_us = 10000
         assert_eq(hitch_classify(20.0, 0.0, 1.0, 0.0,
             0.0, 0, 0, waited), "residency", "a half-frame miss wait precedes upload attribution")
         assert(RESIDENCY_FRAME_WAIT_PATHS.join(";").contains(paths[0]), "the missed path accompanies the frame")

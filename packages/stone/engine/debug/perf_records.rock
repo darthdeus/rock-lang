@@ -343,7 +343,7 @@ fn perf_record_frame(frame: int, t_ms: float, ms: float, heap: float, delta: flo
     nb_set(PERF_RECORDS.data, at + 10, aborts as float)
     nb_set(PERF_RECORDS.data, at + 11, flushes as float)
     nb_set(PERF_RECORDS.data, at + 12, images.upload_us as float)
-    nb_set(PERF_RECORDS.data, at + 13, RESIDENCY_FRAME_MISS_WAIT_US as float)
+    nb_set(PERF_RECORDS.data, at + 13, RESIDENCY_FRAME_COUNTERS.miss_wait_us)
     nb_set(PERF_RECORDS.data, at + 14, HITCH.cur_slow_ms)
     if GC_STEP_ENABLED {
         for c in 0..GC_STEP_FIELDS {
