@@ -4,8 +4,8 @@
 `target/inventory/index.html`. Track cleanup work in GitHub issues.
 
 Scripts that measure the compiler on the public corpora: how long a cold
-build takes and where its time goes, what the emitted Lua consists of, and
-which source definitions cost the most to compile. The `rock backend-stats`,
+build takes, where its time goes and what the emitted Lua consists of. The
+`rock backend-stats`,
 `rock incremental-stats` and `rock lsp-survey` subcommands measure the
 in-process phases, incremental rebuilds after an edit and the language
 server's answers.
