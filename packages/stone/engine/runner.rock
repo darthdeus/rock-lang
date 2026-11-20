@@ -417,8 +417,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
 
     engine_set_vsync(config.vsync)
 
-    display_settings_boot()
-
     native_engine_imgui_boot(window)
 
     native_engine_font_boot(config)
@@ -436,8 +434,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     // twice its live size before a cycle starts. Collecting continuously
     // while booting kept a headless sim about 340 MB smaller. The frame loop
     // keeps the default pause.
-    // STONE_BOOT_GC_PAUSE overrides the boot pause for A/B measurement.
-    let loop_gc_pause = stone_gc_set_pause(get_env_int("STONE_BOOT_GC_PAUSE", 100))
+    let loop_gc_pause = stone_gc_set_pause(100)
     log_debug("ENGINE", "Running early_init systems (asset loading)...")
     let assets_phase = perf_phase_begin("startup.assets")
     run_boot_phase("early_init")
@@ -470,9 +467,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         // "this run finished".
         perf_out_reset()
         PERF_FIXED_DT_ENABLED = true
-        if let ov = os_getenv("PERF_DT") {
-            if let parsed = ov.parse_float() { PERF_FIXED_DT = parsed }
-        }
     }
     // JIT-trace logging from startup (same as the F2 hotkey) so trace-abort
     // buckets are measurable in a headless run, not just interactively.
@@ -535,15 +529,13 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     // when FPS_LOG=1. Off by default: the overall line at exit and
     // [SLOWFRAME]/[HITCH] (which owns its own window line) still report
     // regressions.
-    // The JIT window counters (F2) share the window. FPS_INTERVAL (float
-    // seconds, default 5.0) tunes
-    // the report cadence -- bump to 60+ for long sim runs to keep logs sparse.
+    // The JIT window counters (F2) share the 5-second window.
     // The percentiles separate "uniformly slow" (vsync/JIT) from "bimodal"
     // (GC/retrace/stall) — avg alone hides both. The per-frame ms feed a
     // Metric (the shared windowed-stats type) re-created each interval so the
     // distribution covers that interval's frames; avg is the true throughput.
     let fps_log = os_getenv("FPS_LOG") == "1"
-    let fps_window_secs = get_env_float("FPS_INTERVAL", 5.0)
+    let fps_window_secs = 5.0
     let fps_window_start_time = stone_get_time()
     let fps_window_start_frame = 0
     let fps_window = metric_new("fps_window", 1024)
@@ -565,12 +557,8 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         log_info("GAME", "Will exit after {perf_seconds}s")
     }
 
-    let resize_at = get_env_int("STONE_RESIZE_AT_FRAME", -1)
-    let resize_at_2 = get_env_int("STONE_RESIZE_AT_FRAME_2", -1)
-
     while running {
         frame = frame + 1
-        let entry_frame = frame - SIM_ENTRY_FRAME_START
         if PERF_FRAME_CAPTURE && PERF_RECORDS.ready && PROFILER.warmup_active
                 && PERF_RECORDS.warmup_frames == 0
                 && (PERF_RECORDS.absolute_start_frame < 0 || frame >= PERF_RECORDS.absolute_start_frame) {
@@ -613,22 +601,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         }
         frame_pace_wait(frame_delay_ms)
 
-        if resize_at > 0 && entry_frame == resize_at {
-            let rw = get_env_int("STONE_RESIZE_W", 0)
-            let rh = get_env_int("STONE_RESIZE_H", 0)
-            if rw > 0 && rh > 0 {
-                log_info("WINDOW", "test hook: resizing to {rw}x{rh} at frame {entry_frame}")
-                stone_set_window_size(rw, rh)
-            }
-        }
-        if resize_at_2 > 0 && entry_frame == resize_at_2 {
-            let rw = get_env_int("STONE_RESIZE_W_2", 0)
-            let rh = get_env_int("STONE_RESIZE_H_2", 0)
-            if rw > 0 && rh > 0 {
-                log_info("WINDOW", "test hook: resizing to {rw}x{rh} at frame {entry_frame}")
-                stone_set_window_size(rw, rh)
-            }
-        }
 
         let frame_ms = (stone_get_time() - t_frame_start) * 1000.0
         if ok && current_tick > tick_before_frame && SIM_HANDLE != null {
@@ -999,15 +971,8 @@ fn frame_core_render_clear(config: GameConfig) {
     profile_begin("frame_bind")
     set_canvas_handle(0)
     profile_end("frame_bind")
-    static skip_clear = os_getenv("STONE_SKIP_CLEAR") == "1"
-    if !skip_clear {
-        stone_clear_canvas(
-            config.clear_color.r,
-            config.clear_color.g,
-            config.clear_color.b,
-            config.clear_color.a
-        )
-    }
+    stone_clear_canvas(config.clear_color.r, config.clear_color.g, config.clear_color.b,
+        config.clear_color.a)
     profile_gpu_end("frame_clear")
 
     // The id canvas has no pending writes yet this frame, so this ReadPixels rides
@@ -1229,7 +1194,7 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
     profile_gpu_begin("screen_draw")
     frame_core_render_late_draw()
 
-    if !PERF_FRAME_CAPTURE && PROFILER_UI_ENABLED {
+    if !PERF_FRAME_CAPTURE {
         live_allocation_exclusion_begin()
         profile_begin("screen.profiler_overlay")
         draw_profiler_overlay()
@@ -1741,7 +1706,6 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
 // bump disables it (logged) until the build identity below is updated. Native
 // penalty_pc runs BEFORE the abort event; raise only its matching slot.
 @nomangle inline(lua) fn install_jit_churn_guard() -> string = """
-    if os.getenv("STONE_JIT_CHURN_GUARD") == "0" then return "" end
     local old = _G.__stone_jit_churn_guard
     if old then return old.enabled and "enabled" or old.failure end
     local state = {enabled = false, armed = 0, blacklisted = 0, flushes = 0,

@@ -16,7 +16,6 @@ pub struct SkinGalleryState {
     field: int,            // 0/1 corner.x/y, 2-5 pad l/t/r/b, 6 scale
     repeat_dir: int,
     repeat_timer: float,
-    env_checked: bool,
 }
 
 pub global SKIN_GALLERY: SkinGalleryState = SkinGalleryState {
@@ -28,7 +27,6 @@ pub global SKIN_GALLERY: SkinGalleryState = SkinGalleryState {
     field: 0,
     repeat_dir: 0,
     repeat_timer: 0.0,
-    env_checked: false,
 }
 
 // Keyed by "<Asset>.png". Seeded skins are shared by reference, so a gallery tweak lands in
@@ -160,17 +158,6 @@ fn update_skin_gallery() {
         sg_load_entries(s)
         if s.entries.len > 0 { s.idx = min(max(idx, 0), s.entries.len - 1) }
         s.initialized = true
-    }
-
-    if !s.env_checked {
-        s.env_checked = true
-        let env = os_getenv("SKIN_GALLERY")
-        if env != null {
-            sg_set_enabled(s, true)
-            for (i, e) in enumerate(s.entries) {
-                if e.name == env { s.idx = i }
-            }
-        }
     }
 
     let ctrl = tool_ctrl_held()

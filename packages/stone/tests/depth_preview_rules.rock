@@ -1,14 +1,3 @@
-// Numeric trace for evidence runs. Off unless DEPTH_WITNESS_LOG names a file,
-// so the committed tests stay hermetic under a plain `rock test stone`.
-inline(lua) fn depth_preview_record(line: string) = """
-    local path = os.getenv("DEPTH_WITNESS_LOG")
-    if path ~= nil and path ~= "" then
-        local out = assert(io.open(path, "a"))
-        out:write(line, "\n")
-        out:close()
-    end
-"""
-
 fn depth_preview_view(size: int) -> FrameView {
     return resolve_frame_view(v(size as float, size as float), iv(size, size),
         Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
@@ -37,8 +26,6 @@ fn depth_preview_sample(label: string) -> [float] {
     let out: [float] = []
     for point in [iv(8, 8), iv(32, 32), iv(55, 55)] {
         let gray = read_canvas_pixel(preview, point.x, point.y)
-        let active = canvas_active(screen_canvas)
-        depth_preview_record("{label}: storage={screen_canvas.width}x{screen_canvas.height} active={active.x}x{active.y} gray({point.x},{point.y})={gray}")
         out.push(gray)
     }
     return out

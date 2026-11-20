@@ -461,10 +461,6 @@ fn post_processing() {
     }
 
     COMPOSITE_CANVAS = composite
-
-    profile_begin("post.nonfinite_overlay")
-    draw_nonfinite_overlay(COMPOSITE_CANVAS)
-    profile_end("post.nonfinite_overlay")
 }
 
 pub struct PresentedSceneSample {
@@ -530,38 +526,6 @@ fn present_composite(target: GpuTarget = GpuTarget::Window) {
         error("present_composite: final composite submission failed: {reason}")
     }
     COMPOSITE_CANVAS = null
-}
-
-global NONFINITE_PIPELINE: Pipeline = pipeline(nonfinite_shader)
-
-fn nonfinite_debug_canvas() -> Canvas? {
-    let name = os_getenv("STONE_NONFINITE")
-    if name == null { return null }
-
-    let n = name
-    if n == "" { return null }
-    if n == "scene" { return screen_canvas }
-
-    let i = 0
-    while i < BLOOM_LEVELS.len() {
-        if n == "bloom{i}" { return BLOOM_LEVELS[i] }
-        i += 1
-    }
-    log_error("RENDER", "STONE_NONFINITE: unknown canvas '{n}' (scene|bloom0..bloom{BLOOM_LEVELS.len() - 1})")
-    os_exit(4)
-    return null
-}
-
-fn draw_nonfinite_overlay(output: Canvas?) {
-    let src = nonfinite_debug_canvas() ?? return
-
-    run_pass(Pass {
-        pipeline: NONFINITE_PIPELINE,
-        slot_inputs: [(sampled_canvas(src), TextureFilter::Nearest)],
-        output: output,
-        clear: null,
-        blend: BlendMode::Replace,
-    })
 }
 
 global PRESENT_COMPOSITE_COMMAND: GpuPass? = null

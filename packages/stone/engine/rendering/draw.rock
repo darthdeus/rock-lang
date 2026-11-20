@@ -20,7 +20,6 @@ const color_grade_shader: string = rock_shader(color_grade_frag)  // color_grade
 
 
 const depth_visualize_shader: string = rock_shader(depth_visualize_frag)  // depth_visualize_shader.rock
-const nonfinite_shader: string = rock_shader(nonfinite_frag)  // nonfinite_shader.rock (B2)
 pub const present_shader: string = rock_shader(present_frag)  // present_shader.rock
 
 const outline_target_shader: string = rock_shader(outline_target_vert, outline_target_frag)  // outline_target_shader.rock (B3)

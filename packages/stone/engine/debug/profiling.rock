@@ -249,16 +249,9 @@ fn perf_phase_json() -> string {
     }
     return "{{\"version\":1,\"enabled\":{PERF_TIMELINE_ENABLED},\"dropped\":{PERF_PHASES.dropped},\"clock_origin\":\"first_profiler_global_in_vm\",\"columns\":[\"phase\",\"start_ms\",\"end_ms\",\"start_frame\",\"end_frame\",\"cpu_ms\",\"upload_bytes\",\"heap_delta_kb\",\"jit_starts\",\"jit_compiles\",\"jit_aborts\",\"jit_flushes\",\"upload_wait_us\",\"jit_recording_ms\",\"calls\"],\"rows\":[{rows.join(\",\")}]}}"
 }
-const PROFILE_ENTRIES_DEFAULT: int = 4096
-const PROFILE_ENTRIES_MAX: int = 65536
-fn profile_entries_capacity() -> int {
-    let requested = get_env_int("STONE_PROFILE_ENTRIES", PROFILE_ENTRIES_DEFAULT)
-    return min(max(requested, PROFILE_ENTRIES_DEFAULT), PROFILE_ENTRIES_MAX)
-}
-const MAX_PROFILE_ENTRIES: int = profile_entries_capacity()
+const MAX_PROFILE_ENTRIES: int = 4096
 const PROFILER_FONT_SIZE: float = 12.0
 const PROFILER_GRAPH_FONT_SIZE: float = 10.0
-pub global PROFILER_UI_ENABLED: bool = get_env_int("STONE_PROFILER_UI", 1) != 0
 
 // Columnar event log (one frame's worth). Every ProfileEntry field is a
 // scalar except the name, and names are a small closed set of literals, so

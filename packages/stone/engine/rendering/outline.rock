@@ -361,8 +361,8 @@ fn apply_outline_overlay() {
     // Measured on an iPhone 16: 22 of the frame's 24 ms of GPU, for no output.
     // The same flag already gates the geometry side in batch.rock.
     // STONE_OUTLINE_FORCE=1 runs the pass anyway (against blank ids) to price
-    // the fullscreen scan on contexts that skip it; STONE_OUTLINE_RADIUS caps
-    // the scan ceiling. Diagnostics for the GLES outline-restoration budget.
+    // the fullscreen scan on contexts that skip it. Diagnostics for the GLES
+    // outline-restoration budget.
     let force_scan = outline_force_scan()
     if !mrt_id_attached && !force_scan {
         log_warn_once("RENDER", "outline overlay skipped: no MRT id target, so the detect pass would scan an id buffer nothing wrote")
@@ -414,8 +414,7 @@ fn apply_outline_detect(view: FrameView, force_scan: bool) {
 
     let classify_flag = if ENGINE.debug_outline_classify { 1.0 } else { 0.0 }
 
-    static radius_override = get_env_int("STONE_OUTLINE_RADIUS", 0)
-    let ceiling = if radius_override > 0 { float(radius_override) } else { OUTLINE_RADIUS }
+    let ceiling = OUTLINE_RADIUS
     let scan_radius = if force_scan || OUTLINE_FALLBACK_SLOT_USED {
         ceiling
     } else {

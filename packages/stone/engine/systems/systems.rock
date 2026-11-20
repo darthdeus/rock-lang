@@ -299,7 +299,7 @@ fn clear_all_systems() {
 
 pub fn shutdown_stage_finished(name: string, started: float) {
     let ms = round((stone_get_time() - started) * 10000.0) / 10.0
-    if ms >= 100.0 || name == "total" || os_getenv("STONE_SHUTDOWN_TIMING") == "1" {
+    if ms >= 100.0 || name == "total" {
         log_info("SHUTDOWN", "{name}: {ms} ms")
     } else {
         log_debug("SHUTDOWN", "{name}: {ms} ms")

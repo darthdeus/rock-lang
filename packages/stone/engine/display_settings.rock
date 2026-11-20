@@ -12,18 +12,9 @@ pub struct DisplaySettings {
     frame_cap: int = 0,  // frames per second, 0 = uncapped (engine_set_frame_cap)
 }
 
-fn default_display_settings() -> DisplaySettings {
-    return DisplaySettings {
-        display: 0,
-        mode: DisplayMode::Windowed,
-        resolution: iv(0, 0),
-        vsync: true,
-        frame_cap: 0,
-    }
+global DISPLAY_SETTINGS: DisplaySettings = DisplaySettings {
+    display: 0, mode: DisplayMode::Windowed, resolution: iv(0, 0), vsync: true,
 }
-
-global DISPLAY_SETTINGS: DisplaySettings = default_display_settings()
-global DISPLAY_SETTINGS_PATH: string = "saves/display.json"
 
 fn display_mode_to_int(m: DisplayMode) -> int {
     match m {
@@ -37,53 +28,6 @@ pub fn display_mode_from_int(i: int) -> DisplayMode {
     if i == 1 { return DisplayMode::Borderless }
     if i == 2 { return DisplayMode::Exclusive }
     return DisplayMode::Windowed
-}
-
-fn display_settings_to_diff_json(s: DisplaySettings) -> JsonValue {
-    let d = default_display_settings()
-    let m: Map<string, JsonValue> = map_new()
-    if s.display != d.display { m["display"] = json_int(s.display) }
-    if display_mode_to_int(s.mode) != display_mode_to_int(d.mode) {
-        m["mode"] = json_int(display_mode_to_int(s.mode))
-    }
-    if s.resolution.x != d.resolution.x || s.resolution.y != d.resolution.y {
-        m["resolution"] = json_array([json_int(s.resolution.x), json_int(s.resolution.y)])
-    }
-    if s.vsync != d.vsync { m["vsync"] = json_bool(s.vsync) }
-    if s.frame_cap != d.frame_cap { m["frame_cap"] = json_int(s.frame_cap) }
-    return json_object(m)
-}
-
-fn display_settings_from_diff_json(root: JsonValue) -> DisplaySettings {
-    let s = default_display_settings()
-    s.display = jv_int(json_field(root, "display"), s.display)
-    s.mode = display_mode_from_int(jv_int(json_field(root, "mode"), display_mode_to_int(s.mode)))
-    let (rw, rh) = jv_int_pair(json_field(root, "resolution"), s.resolution.x, s.resolution.y)
-    s.resolution = iv(rw, rh)
-    s.vsync = jv_bool(json_field(root, "vsync"), s.vsync)
-    s.frame_cap = max(0, jv_int(json_field(root, "frame_cap"), s.frame_cap))
-    return s
-}
-
-fn save_display_settings() -> bool {
-    create_directory("saves")
-    return file_write_atomic(DISPLAY_SETTINGS_PATH, json_encode_pretty(display_settings_to_diff_json(DISPLAY_SETTINGS)) + "\n")
-}
-
-fn load_display_settings() {
-    let raw = file_read(DISPLAY_SETTINGS_PATH)
-    if raw == null {
-        apply_display_settings(DISPLAY_SETTINGS)
-        return
-    }
-    let parsed = json_decode(raw)
-    if parsed == null {
-        log_error("DISPLAY", "corrupt {DISPLAY_SETTINGS_PATH}, using defaults")
-        apply_display_settings(DISPLAY_SETTINGS)
-        return
-    }
-    DISPLAY_SETTINGS = display_settings_from_diff_json(parsed)
-    apply_display_settings(DISPLAY_SETTINGS)
 }
 
 global DISPLAY_SETTINGS_APPLY_PENDING: bool = false
@@ -143,43 +87,4 @@ fn display_settings_push(s: DisplaySettings) {
         engine_set_frame_cap(s.frame_cap)
     }
     log_info("DISPLAY", "applied: display={s.display} mode={mode_i} resolution={s.resolution.x}x{s.resolution.y} vsync={s.vsync} frame_cap={s.frame_cap}")
-}
-
-fn display_settings_boot() {
-    if os_getenv("STONE_DISPLAY_SELFTEST") == "1" {
-        display_settings_selftest()
-    }
-    let env_path = os_getenv("STONE_DISPLAY_SETTINGS")
-    if env_path == null { return }
-    DISPLAY_SETTINGS_PATH = env_path
-    log_info("DISPLAY", "STONE_DISPLAY_SETTINGS={DISPLAY_SETTINGS_PATH}: loading engine display settings")
-    load_display_settings()
-}
-
-fn display_settings_selftest() {
-    let s = DisplaySettings {
-        display: 2,
-        mode: DisplayMode::Exclusive,
-        resolution: iv(1920, 1080),
-        vsync: false,
-        frame_cap: 60,
-    }
-    let encoded = json_encode_pretty(display_settings_to_diff_json(s))
-    let decoded = json_decode(encoded)
-    if decoded == null {
-        log_error("DISPLAY", "selftest FAIL: re-decode of {encoded} was null")
-        return
-    }
-    let back = display_settings_from_diff_json(decoded)
-    let ok = back.display == s.display
-        && display_mode_to_int(back.mode) == display_mode_to_int(s.mode)
-        && back.resolution.x == s.resolution.x
-        && back.resolution.y == s.resolution.y
-        && back.vsync == s.vsync
-        && back.frame_cap == s.frame_cap
-    if ok {
-        log_info("DISPLAY", "selftest PASS: round-trip preserved {encoded}")
-    } else {
-        log_error("DISPLAY", "selftest FAIL: got display={back.display} mode={display_mode_to_int(back.mode)} res={back.resolution.x}x{back.resolution.y} vsync={back.vsync}")
-    }
 }
