@@ -168,104 +168,35 @@ fn bindings_apply_json(root: JsonValue) -> bool {
     return true
 }
 
-fn bindings_skip_json_space(raw: string, start: int) -> int {
-    let at = start
-    while at < raw.len() {
-        let b = raw.unit_at(at)
-        if b == 32 || b == 9 || b == 10 || b == 13 { at += 1 } else { break }
-    }
-    return at
-}
-
-fn bindings_raw_string_end(raw: string, start: int) -> int? {
-    if start >= raw.len() || raw.unit_at(start) != 34 { return null }
-    let at = start + 1
-    let escaped = false
-    while at < raw.len() {
-        let b = raw.unit_at(at)
-        if escaped {
-            escaped = false
-        } else if b == 92 {
-            escaped = true
-        } else if b == 34 {
-            return at + 1
-        }
-        at += 1
-    }
-    return null
-}
-
-fn bindings_raw_value_end(raw: string, start: int) -> int? {
-    if start >= raw.len() { return null }
-    let first = raw.unit_at(start)
-    if first == 34 { return bindings_raw_string_end(raw, start) }
-    if first != 91 && first != 123 {
-        let at = start
-        while at < raw.len() {
-            let b = raw.unit_at(at)
-            if b == 44 || b == 125 || b == 93 { break }
-            at += 1
-        }
-        let end = at
-        let cursor = end
-        while cursor > start {
-            let b = raw.unit_at(cursor - 1)
-            if b == 32 || b == 9 || b == 10 || b == 13 { cursor -= 1 } else { break }
-        }
-        return cursor
-    }
-    let cursor = start
-    let depth = 0
-    while cursor < raw.len() {
-        let b = raw.unit_at(cursor)
-        if b == 34 {
-            let end = bindings_raw_string_end(raw, cursor) ?? return null
-            cursor = end
-            continue
-        }
-        if b == 91 || b == 123 { depth += 1 }
-        if b == 93 || b == 125 {
-            depth -= 1
-            if depth == 0 { return cursor + 1 }
-        }
-        cursor += 1
-    }
-    return null
-}
-
 fn bindings_raw_action_members(raw: string) -> (Map<string, string>, Map<string, string>, bool) {
     let values: Map<string, string> = map_new()
     let key_bytes: Map<string, string> = map_new()
     let marker = raw.find("\"actions\"")
     if marker < 0 { return (values, key_bytes, false) }
-    let key_end = bindings_raw_string_end(raw, marker) ?? return (values, key_bytes, false)
-    let colon = bindings_skip_json_space(raw, key_end)
+    let colon = parse_skip_ws_at(raw, marker + "\"actions\"".len())
     if colon >= raw.len() || raw.unit_at(colon) != 58 { return (values, key_bytes, false) }
-    let at = bindings_skip_json_space(raw, colon + 1)
-    if at >= raw.len() || raw.unit_at(at) != 123 { return (values, key_bytes, false) }
-    at += 1
+    let open = parse_skip_ws_at(raw, colon + 1)
+    if open >= raw.len() || raw.unit_at(open) != 123 { return (values, key_bytes, false) }
+
+    let at = open + 1
     while true {
-        at = bindings_skip_json_space(raw, at)
+        let key_start = parse_skip_ws_at(raw, at)
+        if key_start >= raw.len() { return (values, key_bytes, false) }
+        if raw.unit_at(key_start) == 125 { return (values, key_bytes, true) }
+        let (decoded, key_end) = parse_string_raw_at(raw, key_start)
+        let name = decoded ?? return (values, key_bytes, false)
+        let colon = parse_skip_ws_at(raw, key_end)
+        if colon >= raw.len() || raw.unit_at(colon) != 58 { return (values, key_bytes, false) }
+        let value_start = parse_skip_ws_at(raw, colon + 1)
+        if value_start >= raw.len() { return (values, key_bytes, false) }
+        let value_end = json_reader_skip(raw, value_start)
+        values[name] = raw.substring(value_start, value_end)
+        key_bytes[name] = raw.substring(key_start, key_end)
+        at = parse_skip_ws_at(raw, value_end)
         if at >= raw.len() { return (values, key_bytes, false) }
         if raw.unit_at(at) == 125 { return (values, key_bytes, true) }
-        let raw_key_start = at
-        let raw_key_end = bindings_raw_string_end(raw, at) ?? return (values, key_bytes, false)
-        let decoded = json_decode(raw.substring(raw_key_start, raw_key_end)) ?? return (values, key_bytes, false)
-        let name = json_as_str(decoded) ?? return (values, key_bytes, false)
-        at = bindings_skip_json_space(raw, raw_key_end)
-        if at >= raw.len() || raw.unit_at(at) != 58 { return (values, key_bytes, false) }
-        let value_start = bindings_skip_json_space(raw, at + 1)
-        let value_end = bindings_raw_value_end(raw, value_start) ?? return (values, key_bytes, false)
-        values[name] = raw.substring(value_start, value_end)
-        key_bytes[name] = raw.substring(raw_key_start, raw_key_end)
-        at = bindings_skip_json_space(raw, value_end)
-        if at < raw.len() && raw.unit_at(at) == 44 {
-            at += 1
-        } else if at < raw.len() && raw.unit_at(at) == 125 {
-            return (values, key_bytes, true)
-        } else {
-            return (values, key_bytes, false)
-        }
+        if raw.unit_at(at) != 44 { return (values, key_bytes, false) }
+        at += 1
     }
     return (values, key_bytes, false)
 }
