@@ -764,12 +764,6 @@ pub fn emitted_body_name(line: &str) -> Option<&str> {
 
 type EnumBoxGroups = Vec<(Vec<ustr::Ustr>, (usize, Vec<ustr::Ustr>))>;
 
-#[derive(Default)]
-struct EnumBoxPlan {
-    groups: EnumBoxGroups,
-    has_units: bool,
-}
-
 enum SelectionValue {
     MinMax(Idx<Inst>, Idx<Inst>, &'static str),
     Clamp(Idx<Inst>, f64, f64),
@@ -816,7 +810,7 @@ fn next_symbols_epoch() -> u64 {
 
 struct Emitter<'a> {
     bound: Option<&'a CalleeBindingPlan>,
-    enum_box_plans: RefCell<HashMap<ustr::Ustr, std::rc::Rc<EnumBoxPlan>>>,
+    enum_box_groups: RefCell<HashMap<ustr::Ustr, std::rc::Rc<EnumBoxGroups>>>,
     selection_preds: std::cell::OnceCell<PredMap>,
     ws: &'a Workspace,
     ctx: &'a CodegenCtx,

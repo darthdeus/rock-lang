@@ -32,7 +32,7 @@ fn uniform_values_expands_to_canonical_leaves() {
         assert!(!body.contains(forbidden));
     }
     for variant in ["Float", "Bool", "Int", "Uint"] {
-        assert!(body.contains(&format!("__variant = \"{variant}\"")));
+        assert!(body.contains(&format!("__variant = (\"{variant}\")")));
     }
     assert_eq!(run_main(&lua), "true\n6");
 }
