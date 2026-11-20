@@ -9,8 +9,6 @@ global hot_reload_incremental_modtime: float = 0.0
 // `tmp/main.lua` is one shared slot per worktree, so a concurrent command can
 // write the file this watcher polls; chunks naming another game are refused.
 pub global hot_reload_boot_source_dir: string = ""
-pub global hot_reload_refused_count: int = 0
-pub global hot_reload_full_count: int = 0
 
 // Only `rock stone` sets STONE_HOT_RELOAD=1. Other commands must never poll or
 // dofile an overlay: a stale incremental.lua would shadow the fresh main.lua.
@@ -151,7 +149,6 @@ pub fn do_hot_reload() {
     // after it would leave a foreign chunk for the next run_loaded_chunk.
     let chunk_dir = read_chunk_source_dir(hot_reload_script_path)
     if !hot_reload_chunk_is_ours(hot_reload_boot_source_dir, chunk_dir) {
-        hot_reload_refused_count = hot_reload_refused_count + 1
         let found = if chunk_dir == "" { "a chunk with no game identity" } else { chunk_dir }
         let mine = if hot_reload_boot_source_dir == "" { "no game (this chunk has no identity either)" } else { hot_reload_boot_source_dir }
         log_error("HOT RELOAD", "refused: {hot_reload_script_path} now holds {found}, but this session is {mine}. Something else wrote the path this game was launched on; the running game is unchanged. Re-run that command with --output, or restart this session to pick up your own build.")
@@ -186,7 +183,6 @@ pub fn do_hot_reload() {
     set_global_bool("HOT_RELOAD", false)
 
     if success {
-        hot_reload_full_count = hot_reload_full_count + 1
 
         // Only additions run: old init entries already ran and may not be idempotent.
         for sys in lifecycle_systems("early_init") {
