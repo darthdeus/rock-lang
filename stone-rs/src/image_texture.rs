@@ -2,10 +2,10 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr};
-use std::sync::Arc;
 
 use crate::gl_state;
 use crate::handles::Class;
+use crate::image_publication::RequestClass;
 use crate::{asset_registry, image_decode, log_once, with_gl};
 
 #[repr(C)]
@@ -739,245 +739,216 @@ pub extern "C" fn stone_load_image(
         }
     };
     let class = if flags & LOAD_DEFERRED != 0 {
-        crate::image_publication::RequestClass::Deferred
+        RequestClass::Deferred
     } else {
-        crate::image_publication::RequestClass::Required
+        RequestClass::Required
     };
     let exact_texels = flags & LOAD_EXACT_TEXELS != 0 || format != ImageFormat::Rgba8;
 
-    load_image(
+    let load_started = std::time::Instant::now();
+    match load_image(
         path,
         filter_mode,
         exact_texels,
         format,
         class,
         declared_size,
-    )
+    ) {
+        Some((id, decoded_bytes)) => {
+            record_image_load(true, decoded_bytes, elapsed_us(load_started));
+            id
+        }
+        None => {
+            record_image_load(false, 0, elapsed_us(load_started));
+            0
+        }
+    }
 }
 
+/// Where a new image's texels come from.
+enum LoadPixels {
+    /// Headers only (`STONE_ASSET_STUB`): one white texel stands in.
+    Stub,
+    /// Probed dimensions; the decode pool publishes the texels later.
+    Decode(image_decode::DecodeSource),
+    /// The header gave no dimensions, so it was decoded here, packed at storage size.
+    Inline(Vec<u8>),
+}
+
+fn load_format(path: &str, format: ImageFormat) -> Option<ImageFormat> {
+    if path.ends_with(".bc5.dds") && matches!(format, ImageFormat::Rgba8 | ImageFormat::MaterialRg8)
+    {
+        Some(ImageFormat::Bc5)
+    } else if !path.ends_with(".dds") {
+        Some(format)
+    } else if format == ImageFormat::Rgba8 && stone_supports_bc1() {
+        Some(ImageFormat::Bc1)
+    } else {
+        log_once!("IMAGE", "unsupported BC1 DDS load for {}", path);
+        None
+    }
+}
+
+/// Read as little of the asset as the load needs: nothing for a manifest-sized
+/// deferred load, a header prefix for a stub or a deferred load the worker
+/// reads, otherwise the whole file.
+fn acquire_pixels(
+    path: &str,
+    format: ImageFormat,
+    exact_texels: bool,
+    class: RequestClass,
+    declared_size: Option<(u32, u32)>,
+) -> Option<((u32, u32), LoadPixels)> {
+    let stub = image_decode::stub_images();
+    let worker = class == RequestClass::Deferred
+        && !stub
+        && (declared_size.is_some() || !asset_registry::contains_asset(path));
+    if let (true, Some(dimensions)) = (worker, declared_size) {
+        // The worker validates these dimensions before pixels can be published.
+        let source = image_decode::DecodeSource::Asset { dimensions };
+        return Some((dimensions, LoadPixels::Decode(source)));
+    }
+    let (data, probed, worker) = if stub || worker {
+        let Some(header) = resolve_image_header(path) else {
+            log_once!("IMAGE", "Failed to load image {}: not found", path);
+            return None;
+        };
+        let worker = worker && !header.complete;
+        match header.dimensions {
+            Some(dimensions) => (header.bytes, Some(dimensions), worker),
+            None => {
+                let data = resolve_image_bytes(path)?;
+                let probed = worker
+                    .then(|| image_decode::probe_dimensions(&data))
+                    .flatten();
+                (data, probed, false)
+            }
+        }
+    } else {
+        let data = resolve_image_bytes(path)?;
+        let probed = image_decode::probe_dimensions(&data);
+        (data, probed, false)
+    };
+    match probed {
+        Some(dimensions) if stub => Some((dimensions, LoadPixels::Stub)),
+        Some(dimensions) => {
+            let source = if worker {
+                image_decode::DecodeSource::Asset { dimensions }
+            } else {
+                image_decode::DecodeSource::Bytes(data)
+            };
+            Some((dimensions, LoadPixels::Decode(source)))
+        }
+        None if format.blocks().is_some() => {
+            log_once!("IMAGE", "invalid DDS header: {}", path);
+            None
+        }
+        None => {
+            let (rgba, w, h) = image_decode::decode_rgba_bytes(&data, path)?;
+            let Some(stored) = image_decode::store_at_storage(exact_texels, rgba, w, h)
+                .and_then(|stored| format.pack_rgba8_owned(stored))
+            else {
+                log_once!(
+                    "IMAGE",
+                    "stone_load_image: could not pack {} as {:?}",
+                    path,
+                    format
+                );
+                return None;
+            };
+            Some(((w, h), LoadPixels::Inline(stored)))
+        }
+    }
+}
+
+/// The new handle and its decoded byte count.
 fn load_image(
     path: *const c_char,
     filter_mode: i32,
     exact_texels: bool,
     format: ImageFormat,
-    class: crate::image_publication::RequestClass,
+    class: RequestClass,
     declared_size: Option<(u32, u32)>,
-) -> u64 {
-    let load_started = std::time::Instant::now();
-    let gl_filter = match gl_state::gl_filter_for(filter_mode) {
-        Some(f) => f,
-        None => {
-            log_once!(
-                "IMAGE",
-                "stone_load_image: unknown filter_mode {} for {:?}",
-                filter_mode,
-                path
-            );
-            record_image_load(false, 0, elapsed_us(load_started));
-            return 0;
-        }
+) -> Option<(u64, usize)> {
+    let Some(gl_filter) = gl_state::gl_filter_for(filter_mode) else {
+        log_once!(
+            "IMAGE",
+            "stone_load_image: unknown filter_mode {} for {:?}",
+            filter_mode,
+            path
+        );
+        return None;
     };
     if path.is_null() {
-        record_image_load(false, 0, elapsed_us(load_started));
-        return 0;
+        return None;
     }
     let path_str = unsafe { CStr::from_ptr(path).to_str().unwrap_or("") };
-
-    let format = if path_str.ends_with(".bc5.dds")
-        && matches!(format, ImageFormat::Rgba8 | ImageFormat::MaterialRg8)
-    {
-        ImageFormat::Bc5
-    } else if path_str.ends_with(".dds") {
-        if format != ImageFormat::Rgba8 || !stone_supports_bc1() {
-            log_once!("IMAGE", "unsupported BC1 DDS load for {}", path_str);
-            record_image_load(false, 0, elapsed_us(load_started));
-            return 0;
-        }
-        ImageFormat::Bc1
-    } else {
-        format
-    };
+    let format = load_format(path_str, format)?;
     let exact_texels = exact_texels || format.blocks().is_some();
 
-    let uploads = publish_uploads("load");
-    if uploads.selected != 0 {
-        record_image_upload(
-            uploads.calls,
-            uploads.bytes,
-            crate::image_publication::selection_wait_us(),
-            uploads.upload_us(),
-        );
-    }
+    publish_uploads("load");
 
-    let mut read_in_worker = class == crate::image_publication::RequestClass::Deferred
-        && !image_decode::stub_images()
-        && (declared_size.is_some() || !asset_registry::contains_asset(path_str));
-    let prefix_only = image_decode::stub_images() || read_in_worker;
-    let (data, header_dimensions, complete) = if read_in_worker && declared_size.is_some() {
-        // Manifest-sized prefetch does no file I/O on the GL thread. The
-        // worker validates these dimensions before pixels can be published.
-        (Vec::new(), declared_size, false)
-    } else if prefix_only {
-        match resolve_image_header(path_str) {
-            Some(header) => (header.bytes, header.dimensions, header.complete),
-            None => {
-                log_once!("IMAGE", "Failed to load image {}: not found", path_str);
-                record_image_load(false, 0, elapsed_us(load_started));
-                return 0;
-            }
-        }
-    } else {
-        match resolve_image_bytes(path_str) {
-            Some(d) => (d, None, true),
-            None => {
-                record_image_load(false, 0, elapsed_us(load_started));
-                return 0;
-            }
-        }
-    };
-
-    if read_in_worker && complete {
-        read_in_worker = false;
-    }
-
-    let mut data = data;
-    let mut probed = if prefix_only {
-        header_dimensions
-    } else {
-        image_decode::probe_dimensions(&data)
-    };
-    if probed.is_none() && prefix_only {
-        data = match resolve_image_bytes(path_str) {
-            Some(d) => d,
-            None => {
-                record_image_load(false, 0, elapsed_us(load_started));
-                return 0;
-            }
-        };
-        if read_in_worker {
-            probed = image_decode::probe_dimensions(&data);
-            read_in_worker = false;
-        }
-    }
-    if format.blocks().is_some() && probed.is_none() {
-        log_once!("IMAGE", "invalid DDS header: {}", path_str);
-        record_image_load(false, 0, elapsed_us(load_started));
-        return 0;
-    }
-    let stubbed = image_decode::stub_images() && probed.is_some();
-    let deferred = if stubbed { None } else { probed };
-    let (pixels, width, height) = match probed {
-        Some((w, h)) => (None, w, h),
-        None => match image_decode::decode_rgba_bytes(&data, path_str) {
-            Some((rgba, w, h)) => match image_decode::store_at_storage(exact_texels, rgba, w, h)
-                .and_then(|stored| format.pack_rgba8_owned(stored))
-            {
-                Some(stored) => (Some(stored), w, h),
-                None => {
-                    log_once!(
-                        "IMAGE",
-                        "stone_load_image: could not pack {} as {:?}",
-                        path_str,
-                        format
-                    );
-                    record_image_load(false, 0, elapsed_us(load_started));
-                    return 0;
-                }
-            },
-            None => {
-                record_image_load(false, 0, elapsed_us(load_started));
-                return 0;
-            }
-        },
-    };
-    // What GL stores: one white texel for a stub, otherwise what
-    // `STONE_IMAGE_MAX_SIDE` may have reduced the file's size to. The LOGICAL
-    // size recorded below and answered by `stone_get_image_size` stays `width` x
-    // `height` either way, so no frame rect, sheet index or UV can see the
-    // difference -- which also makes it invisible to every caller, so the one
-    // place that knows says so.
-    let (storage_width, storage_height) = load_storage_dims(stubbed, exact_texels, width, height);
-    if !stubbed && (storage_width, storage_height) != (width, height) {
+    let ((width, height), pixels) =
+        acquire_pixels(path_str, format, exact_texels, class, declared_size)?;
+    let stubbed = matches!(pixels, LoadPixels::Stub);
+    // The logical size stays the file's, so no frame rect, sheet index or UV
+    // can see a capped or stubbed storage size.
+    let stored = load_storage_dims(stubbed, exact_texels, width, height);
+    if !stubbed && stored != (width, height) {
         ::log::debug!(target: "IMAGE", "{} stored {}x{} of {}x{} under the image cap",
-            path_str, storage_width, storage_height, width, height);
+            path_str, stored.0, stored.1, width, height);
     }
-
-    // Create OpenGL texture. A stub defines its one white texel here; `pixels`
-    // is None for it, and the texel is not counted as an upload below because
-    // it is not asset data -- doing so would report every stubbed load as one.
-    let upload: Option<&[u8]> = if stubbed {
-        Some(stub_texel(format))
-    } else {
-        pixels.as_deref()
+    // A stub's texel is not asset data, so it is not counted as an upload.
+    let (upload, inline_bytes) = match &pixels {
+        LoadPixels::Stub => (Some(stub_texel(format)), 0),
+        LoadPixels::Inline(bytes) => (Some(bytes.as_slice()), bytes.len()),
+        LoadPixels::Decode(_) => (None, 0),
     };
-    let inline_bytes = pixels.as_ref().map_or(0, Vec::len);
     let texture_started = std::time::Instant::now();
     let texture = with_gl(|gl| unsafe {
-        let texture = match create_filtered_image_texture(gl, filter_mode, gl_filter) {
-            Ok(t) => t,
-            Err(e) => {
+        let texture = create_filtered_image_texture(gl, filter_mode, gl_filter)
+            .inspect_err(|e| {
                 log_once!(
                     "IMAGE",
                     "stone_load_image: gl.create_texture() failed for {}: {}",
                     path_str,
                     e
                 );
-                return None;
-            }
-        };
+            })
+            .ok()?;
         // Async loads allocate and fill storage together to avoid a second pass.
         if let Some(data) = upload {
-            tex_image_for_format(gl, texture, storage_width, storage_height, format, data);
+            tex_image_for_format(gl, texture, stored.0, stored.1, format, data);
             if filter_mode == 2 {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }
         }
-
         Some(texture)
-    });
+    })
+    .flatten()?;
 
-    match texture {
-        Some(Some(tex)) => {
-            let id = crate::handles::mint(Class::Image);
-            register_loaded_image(
-                id,
-                tex,
-                (width, height),
-                (storage_width, storage_height),
-                format,
-                exact_texels,
-                filter_mode == 2,
-                stubbed.then_some(path_str),
-            );
-            if deferred.is_some() {
-                crate::image_publication::submit(id, path_str, width, height, class);
-                let source = if read_in_worker {
-                    image_decode::DecodeSource::Asset {
-                        dimensions: (width, height),
-                    }
-                } else {
-                    image_decode::DecodeSource::Bytes(data)
-                };
-                image_decode::submit(id, path_str.to_string(), source, exact_texels, format);
-            }
-            if inline_bytes > 0 {
-                record_image_upload(1, inline_bytes, 0, elapsed_us(texture_started));
-            }
-            let decoded_format = if format.blocks().is_some() {
-                format
-            } else {
-                ImageFormat::Rgba8
-            };
-            let decoded_bytes =
-                usize::try_from(decoded_format.level_bytes(width, height)).unwrap_or(usize::MAX);
-            record_image_load(true, decoded_bytes, elapsed_us(load_started));
-            id
-        }
-        _ => {
-            record_image_load(false, 0, elapsed_us(load_started));
-            0
-        }
+    let id = crate::handles::mint(Class::Image);
+    register_loaded_image(
+        id,
+        texture,
+        (width, height),
+        stored,
+        format,
+        exact_texels,
+        filter_mode == 2,
+        stubbed.then_some(path_str),
+    );
+    if let LoadPixels::Decode(source) = pixels {
+        crate::image_publication::submit(id, path_str, width, height, class);
+        image_decode::submit(id, path_str.to_string(), source, exact_texels, format);
     }
+    if inline_bytes > 0 {
+        record_image_upload(1, inline_bytes, 0, elapsed_us(texture_started));
+    }
+    let decoded_format = format.blocks().map_or(ImageFormat::Rgba8, |_| format);
+    let decoded_bytes =
+        usize::try_from(decoded_format.level_bytes(width, height)).unwrap_or(usize::MAX);
+    Some((id, decoded_bytes))
 }
 
 pub(crate) fn refresh_image_mipmaps(handle: u64, texture: glow::Texture) {
@@ -992,44 +963,33 @@ pub(crate) fn refresh_image_mipmaps(handle: u64, texture: glow::Texture) {
 
 #[no_mangle]
 pub extern "C" fn stone_flush_image_uploads() {
-    let uploads = publish_uploads("flush");
-    if uploads.selected == 0 {
-        return;
+    if let Some((calls, bytes, wait_us, upload_us)) = publish_uploads("flush") {
+        ::log::debug!(target: "IMAGE", "flush {} images {:.0}MB wait={:.1}ms upload={:.1}ms",
+            calls, bytes as f64 / 1048576.0, wait_us as f64 / 1000.0, upload_us as f64 / 1000.0);
+    }
+}
+
+/// Upload one site's publications as each is handed over, so a draining flush
+/// holds one decoded buffer at a time, and record them. Only the uploads are
+/// timed. Returns (calls, bytes, wait_us, upload_us) when any was selected.
+fn publish_uploads(site: &str) -> Option<(usize, usize, c_int, c_int)> {
+    let (mut selected, mut calls, mut bytes) = (0, 0, 0);
+    let mut upload = std::time::Duration::ZERO;
+    crate::image_publication::publish(site, |d| {
+        selected += 1;
+        let started = std::time::Instant::now();
+        let uploaded = upload_decoded(&d);
+        upload += started.elapsed();
+        calls += uploaded.is_some() as usize;
+        bytes += uploaded.unwrap_or(0);
+    });
+    if selected == 0 {
+        return None;
     }
     let wait_us = crate::image_publication::selection_wait_us();
-    let (n, bytes, upload_us) = (uploads.calls, uploads.bytes, uploads.upload_us());
-    record_image_upload(n, bytes, wait_us, upload_us);
-    ::log::debug!(target: "IMAGE", "flush {} images {:.0}MB wait={:.1}ms upload={:.1}ms",
-        n, bytes as f64 / 1048576.0, wait_us as f64 / 1000.0, upload_us as f64 / 1000.0);
-}
-
-/// One site's publications, uploaded as each is handed over so a draining
-/// flush holds one decoded buffer at a time. Only the uploads are timed.
-#[derive(Default)]
-struct PublishedUploads {
-    selected: usize,
-    calls: usize,
-    bytes: usize,
-    upload: std::time::Duration,
-}
-
-impl PublishedUploads {
-    fn upload_us(&self) -> c_int {
-        c_int::try_from(self.upload.as_micros()).unwrap_or(c_int::MAX)
-    }
-}
-
-fn publish_uploads(site: &str) -> PublishedUploads {
-    let mut uploads = PublishedUploads::default();
-    crate::image_publication::publish(site, |d| {
-        uploads.selected += 1;
-        let started = std::time::Instant::now();
-        let (calls, bytes) = upload_decoded(std::iter::once(d));
-        uploads.upload += started.elapsed();
-        uploads.calls += calls;
-        uploads.bytes += bytes;
-    });
-    uploads
+    let upload_us = c_int::try_from(upload.as_micros()).unwrap_or(c_int::MAX);
+    record_image_upload(calls, bytes, wait_us, upload_us);
+    Some((calls, bytes, wait_us, upload_us))
 }
 
 #[no_mangle]
@@ -1044,11 +1004,7 @@ pub extern "C" fn stone_image_uploads_pending() -> c_int {
 
 #[no_mangle]
 pub extern "C" fn stone_service_image_uploads() -> c_int {
-    let uploads = publish_uploads("pump");
-    let wait_us = crate::image_publication::selection_wait_us();
-    if uploads.selected != 0 {
-        let (calls, bytes, upload_us) = (uploads.calls, uploads.bytes, uploads.upload_us());
-        record_image_upload(calls, bytes, wait_us, upload_us);
+    if let Some((calls, bytes, _, upload_us)) = publish_uploads("pump") {
         ::log::debug!(target: "IMAGE", "pump {} images {:.0}MB upload={:.1}ms pending={}",
             calls, bytes as f64 / 1048576.0, upload_us as f64 / 1000.0,
             crate::image_publication::pending());
@@ -1056,66 +1012,55 @@ pub extern "C" fn stone_service_image_uploads() -> c_int {
     stone_image_uploads_pending()
 }
 
-/// Define texture storage from finished decodes. Returns (images, bytes).
-fn upload_decoded(decoded: impl IntoIterator<Item = Arc<image_decode::Decoded>>) -> (usize, usize) {
-    let (mut n, mut bytes) = (0usize, 0usize);
-    for d in decoded {
-        let Some(pixels) = d.pixels.as_ref() else {
-            mark_decode_failed(d.id);
-            continue;
-        };
-        let Some((w, h, format)) =
-            with_image(d.id, |image| (image.width, image.height, image.format))
-        else {
-            continue;
-        };
-        if format != d.format {
-            log_once!(
-                "IMAGE",
-                "deferred image {} format mismatch {:?} != {:?}; skipped",
-                d.id,
-                d.format,
-                format
-            );
-            continue;
-        }
-        if (w, h) != (d.width, d.height) {
-            log_once!(
-                "IMAGE",
-                "deferred decode size {}x{} != probed {}x{} for image {}; skipped",
-                d.width,
-                d.height,
-                w,
-                h,
-                d.id
-            );
-            mark_decode_failed(d.id);
-            continue;
-        }
-        // A length mismatch would make tex_image_2d read past the buffer.
-        let (sw, sh) = d.stored;
-        let expected = format.level_bytes(sw, sh) as usize;
-        if pixels.len() != expected {
-            log_once!(
-                "IMAGE",
-                "image {} decoded {} bytes, not the {} of its {}x{} {:?} storage; skipped",
-                d.id,
-                pixels.len(),
-                expected,
-                sw,
-                sh,
-                format
-            );
-            mark_decode_failed(d.id);
-            continue;
-        }
-        if !publish_image_pixels(d.id, (d.width, d.height), (sw, sh), format, pixels) {
-            continue;
-        }
-        n += 1;
-        bytes += pixels.len();
+/// Define texture storage from a finished decode. Returns the uploaded bytes.
+fn upload_decoded(d: &image_decode::Decoded) -> Option<usize> {
+    let Some(pixels) = d.pixels.as_ref() else {
+        mark_decode_failed(d.id);
+        return None;
+    };
+    let (w, h, format) = with_image(d.id, |image| (image.width, image.height, image.format))?;
+    if format != d.format {
+        log_once!(
+            "IMAGE",
+            "deferred image {} format mismatch {:?} != {:?}; skipped",
+            d.id,
+            d.format,
+            format
+        );
+        return None;
     }
-    (n, bytes)
+    if (w, h) != (d.width, d.height) {
+        log_once!(
+            "IMAGE",
+            "deferred decode size {}x{} != probed {}x{} for image {}; skipped",
+            d.width,
+            d.height,
+            w,
+            h,
+            d.id
+        );
+        mark_decode_failed(d.id);
+        return None;
+    }
+    // A length mismatch would make tex_image_2d read past the buffer.
+    let (sw, sh) = d.stored;
+    let expected = format.level_bytes(sw, sh) as usize;
+    if pixels.len() != expected {
+        log_once!(
+            "IMAGE",
+            "image {} decoded {} bytes, not the {} of its {}x{} {:?} storage; skipped",
+            d.id,
+            pixels.len(),
+            expected,
+            sw,
+            sh,
+            format
+        );
+        mark_decode_failed(d.id);
+        return None;
+    }
+    publish_image_pixels(d.id, (d.width, d.height), (sw, sh), format, pixels)
+        .then_some(pixels.len())
 }
 
 /// Successful decodes and failure fills publish packed texels through the
