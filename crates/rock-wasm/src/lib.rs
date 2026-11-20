@@ -35,20 +35,20 @@ use lsp_server::{ErrorCode, Message, Response};
 use rock_core::CompilerError;
 use rock_core::errors::CompilerErrorLevel;
 use serde_json::{Value, json};
-use skull::mir_emit::{RendererTarget, ShaderLanguage};
+use skull::mir_emit::ShaderLanguage;
 use skull::pipeline::{CompileHost, EmitTarget, Stage};
 
 pub fn handle(request: &str) -> Value {
     serde_json::from_str(request)
         .map_err(|e| format!("request is not JSON: {e}"))
-        .and_then(|request| dispatch(&request))
+        .and_then(dispatch)
         .unwrap_or_else(|error| json!({"ok": false, "error": error}))
 }
 
-fn dispatch(request: &Value) -> Result<Value, String> {
-    match str_field(request, "op")? {
-        "compile" => compile(request),
-        "format" => skull_fmt::try_format(str_field(request, "source")?, &Default::default())
+fn dispatch(request: Value) -> Result<Value, String> {
+    match str_field(&request, "op")? {
+        "compile" => compile(&request),
+        "format" => skull_fmt::try_format(str_field(&request, "source")?, &Default::default())
             .map(|source| json!({"ok": true, "source": source})),
         "info" => Ok(json!({"ok": true, "nesting_limit": rock_core::nesting::MAX_NESTING_DEPTH})),
         "stdlib" => {
@@ -66,10 +66,10 @@ fn dispatch(request: &Value) -> Result<Value, String> {
 fn compile(request: &Value) -> Result<Value, String> {
     let file = str_field(request, "file")?;
     let source = str_field(request, "source")?;
-    let renderer = match request.get("target").and_then(Value::as_str) {
-        None | Some("gl") => RendererTarget::Gl,
+    match request.get("target").and_then(Value::as_str) {
+        None | Some("gl") => (),
         Some(other) => return Err(format!("unknown target `{other}` (gl)")),
-    };
+    }
     let files = string_map(request, "files")?;
     let mut host = PlaygroundHost {
         file: Ustr::from(file),
@@ -77,11 +77,8 @@ fn compile(request: &Value) -> Result<Value, String> {
         embed_files: Some(EmbedFiles(Arc::new(MemoryComptimeFiles::new(files)))),
         soft: Vec::new(),
     };
-    let target = EmitTarget {
-        renderer,
-        ..EmitTarget::SINGLE_SOURCE
-    };
-    let result = skull::pipeline::compile_source(file, source, target, &mut host);
+    let result =
+        skull::pipeline::compile_source(file, source, EmitTarget::SINGLE_SOURCE, &mut host);
     let mut diagnostics: Vec<Value> = host
         .soft
         .iter()
@@ -128,9 +125,11 @@ thread_local! {
     static LSP: std::cell::RefCell<Option<rock_lsp::LspServer>> = const { std::cell::RefCell::new(None) };
 }
 
-fn lsp(request: &Value) -> Result<Value, String> {
-    let message = request.get("message").ok_or("missing field `message`")?;
-    let message: Message = serde_json::from_value(message.clone())
+fn lsp(mut request: Value) -> Result<Value, String> {
+    let message = request
+        .get_mut("message")
+        .ok_or("missing field `message`")?;
+    let message: Message = serde_json::from_value(message.take())
         .map_err(|e| format!("`message` is not JSON-RPC: {e}"))?;
     let mut out = Vec::new();
     let handled = LSP.with_borrow_mut(|server| -> anyhow::Result<()> {

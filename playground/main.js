@@ -227,11 +227,9 @@ function registerProviders() {
 
 // --- Generated code ---------------------------------------------------------
 
-const TAB_TARGET = { lua: 'gl', glsl: 'gl' };
-
 async function compile() {
   const response = await call('compile',
-    { file: 'main.rock', source: mainModel.getValue(), target: TAB_TARGET[activeTab] });
+    { file: 'main.rock', source: mainModel.getValue() });
   let text;
   if (!response.ok && !response.stage) {
     text = `-- ${response.error ?? response.panic}`;
