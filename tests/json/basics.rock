@@ -6,18 +6,15 @@
 // Non-finite floats encoding as null is pinned in number_exact.rock.
 @test
 fn test_encode_scalars() {
-    assert_eq(json_encode(json_null()), "null")
-    assert_eq(json_encode(json_bool(true)), "true")
-    assert_eq(json_encode(json_bool(false)), "false")
-    assert_eq(json_encode(json_int(0)), "0")
-    assert_eq(json_encode(json_int(42)), "42")
-    assert_eq(json_encode(json_int(-7)), "-7")
-    assert_eq(json_encode(json_float(1.0)), "1")
-    assert_eq(json_encode(json_float(-3.0)), "-3")
-    assert_eq(json_encode(json_float(1.5)), "1.5")
-    assert_eq(json_encode(json_float(-2.25)), "-2.25")
-    assert_eq(json_encode(json_str("hello")), "\"hello\"")
-    assert_eq(json_encode(json_str("")), "\"\"")
+    for (value, expected) in [
+        (json_null(), "null"), (json_bool(true), "true"), (json_bool(false), "false"),
+        (json_int(0), "0"), (json_int(42), "42"), (json_int(-7), "-7"),
+        (json_float(1.0), "1"), (json_float(-3.0), "-3"),
+        (json_float(1.5), "1.5"), (json_float(-2.25), "-2.25"),
+        (json_str("hello"), "\"hello\""), (json_str(""), "\"\""),
+    ] {
+        assert_eq(json_encode(value), expected)
+    }
 }
 
 @test
@@ -31,13 +28,12 @@ fn test_encode_string_plain_prefix() {
 
 @test
 fn test_encode_string_escapes() {
-    assert_eq(json_encode(json_str("a\"b")), "\"a\\\"b\"")
-    assert_eq(json_encode(json_str("a\\b")), "\"a\\\\b\"")
-    assert_eq(json_encode(json_str("a\nb")), "\"a\\nb\"")
-    assert_eq(json_encode(json_str("a\tb")), "\"a\\tb\"")
-    assert_eq(json_encode(json_str("a\rb")), "\"a\\rb\"")
-    // 0x01 -> \u0001
-    assert_eq(json_encode(json_str(string_char(1))), "\"\\u0001\"")
+    for (text, escaped) in [
+        ("a\"b", "a\\\"b"), ("a\\b", "a\\\\b"), ("a\nb", "a\\nb"),
+        ("a\tb", "a\\tb"), ("a\rb", "a\\rb"), (string_char(1), "\\u0001"),
+    ] {
+        assert_eq(json_encode(json_str(text)), "\"{escaped}\"")
+    }
 }
 
 fn json_decode_str(src: string) -> string {
@@ -49,12 +45,10 @@ fn json_decode_str(src: string) -> string {
 fn test_decode_string_escape_units() {
     let bs = string_char(92)
     let q = string_char(34)
-    assert_eq(json_decode_str(q + "a" + bs + "rb" + q), "a\rb")
-    assert_eq(json_decode_str(q + "a" + bs + "nb" + q), "a\nb")
-    assert_eq(json_decode_str(q + "a" + bs + "tb" + q), "a\tb")
-    assert_eq(json_decode_str(q + "a" + bs + bs + "b" + q), "a\\b")
-    assert_eq(json_decode_str(q + "a" + bs + q + "b" + q), "a\"b")
-    // The unit, not just the length: a CR and the letter `r` both give len 3.
+    for (escape, expected) in [("r", "\r"), ("n", "\n"), ("t", "\t"), (bs, "\\"), (q, "\"")] {
+        assert_eq(json_decode_str(q + "a" + bs + escape + "b" + q), "a{expected}b")
+    }
+    // CR and the letter r have the same length.
     assert_eq(json_decode_str(q + "a" + bs + "rb" + q).unit_at(1), 13)
 }
 
@@ -160,15 +154,10 @@ fn test_decode_nested() {
 
 @test
 fn test_decode_malformed_fails() {
-    assert(json_decode("") == null, "empty input fails")
-    assert(json_decode("xyz") == null, "garbage fails")
-    assert(json_decode("[1,") == null, "unterminated array fails")
-    assert(json_decode("{{\"a\":") == null, "unterminated object fails")
-    assert(json_decode("\"unterminated") == null, "unterminated string fails")
-    assert(json_decode("1 2") == null, "trailing token fails")
-    assert(json_decode("[1,2]xyz") == null, "trailing garbage after array fails")
-    assert(json_decode("\"\\u00\"") == null, "short unicode escape fails")
-    assert(json_decode("\"\\uZZZZ\"") == null, "non-hex unicode fails")
+    for raw in ["", "xyz", "[1,", "{{\"a\":", "\"unterminated", "1 2",
+        "[1,2]xyz", "\"\\u00\"", "\"\\uZZZZ\""] {
+        assert(json_decode(raw) == null, "accepted malformed input: {inspect(raw)}")
+    }
 }
 
 // Roundtrip
@@ -256,28 +245,18 @@ fn test_pretty_roundtrips() {
 // 4500 and the JS backend between 900 and 1000, and the JS figure shrinks as
 // the caller's own stack grows. Deepest JSON anywhere in this repo is 5.
 
-fn json_nested_arrays(depth: int) -> string {
-    let parts: [string] = []
-    for _i in 0..depth { parts.push("[") }
-    parts.push("1")
-    for _i in 0..depth { parts.push("]") }
-    return join(parts, "")
+fn json_nested(open: string, close: string, depth: int) -> string {
+    return open.repeat(depth) + "1" + close.repeat(depth)
 }
 
-fn json_nested_objects(depth: int) -> string {
-    let parts: [string] = []
-    for _i in 0..depth { parts.push("{{\"a\":") }
-    parts.push("1")
-    for _i in 0..depth { parts.push("}}") }
-    return join(parts, "")
-}
+fn json_nested_arrays(depth: int) -> string { json_nested("[", "]", depth) }
+fn json_nested_objects(depth: int) -> string { json_nested("{{\"a\":", "}}", depth) }
 
 @test
 fn test_json_nesting_within_limit_decodes() {
-    let v = json_decode(json_nested_arrays(200))
-    assert(v != null, "200 nested arrays must decode -- well inside the limit")
-    let o = json_decode(json_nested_objects(200))
-    assert(o != null, "200 nested objects must decode -- well inside the limit")
+    for nested in [json_nested_arrays, json_nested_objects] {
+        assert(json_decode(nested(200)) != null, "200 levels must decode")
+    }
 }
 
 // The limit must bound NESTING, not the number of containers in the document.
@@ -310,22 +289,17 @@ fn test_json_wide_shallow_document_decodes() {
 @test
 fn test_json_nesting_limit_boundary() {
     let limit = json_max_depth()
-    assert(json_decode(json_nested_arrays(limit)) != null,
-        "{limit} nested arrays is at the limit and must decode")
-    assert(json_decode(json_nested_arrays(limit + 1)) == null,
-        "{limit + 1} nested arrays is past the limit and must reject")
-    assert(json_decode(json_nested_objects(limit)) != null,
-        "{limit} nested objects is at the limit and must decode")
-    assert(json_decode(json_nested_objects(limit + 1)) == null,
-        "{limit + 1} nested objects is past the limit and must reject")
+    for nested in [json_nested_arrays, json_nested_objects] {
+        assert(json_decode(nested(limit)) != null, "{limit} levels must decode")
+        assert(json_decode(nested(limit + 1)) == null, "{limit + 1} levels must reject")
+    }
 }
 
 @test
 fn test_json_nesting_past_limit_rejects_without_crashing() {
-    assert(json_decode(json_nested_arrays(5000)) == null,
-        "5000 nested arrays must reject, not crash")
-    assert(json_decode(json_nested_objects(5000)) == null,
-        "5000 nested objects must reject, not crash")
+    for nested in [json_nested_arrays, json_nested_objects] {
+        assert(json_decode(nested(5000)) == null, "5000 levels must reject")
+    }
 }
 
 // Number grammar
@@ -337,48 +311,30 @@ fn test_json_nesting_past_limit_rejects_without_crashing() {
 
 @test
 fn test_json_number_grammar_rejects() {
-    // Leading zeros.
-    assert(json_decode("[-01]") == null, "-01: leading zero")
-    assert(json_decode("[012]") == null, "012: leading zero")
-    assert(json_decode("[-012]") == null, "-012: leading zero")
-    // Absent integer part.
-    assert(json_decode("[-.5]") == null, "-.5: no integer part")
-    assert(json_decode("[.5]") == null, ".5: no integer part")
-    // Decimal point with no digits after it.
-    assert(json_decode("[1.]") == null, "1.: no fractional digits")
-    assert(json_decode("[-2.]") == null, "-2.: no fractional digits")
-    assert(json_decode("[2.e3]") == null, "2.e3: no fractional digits")
-    assert(json_decode("[2.e+3]") == null, "2.e+3: no fractional digits")
-    assert(json_decode("[2.e-3]") == null, "2.e-3: no fractional digits")
-    assert(json_decode("[0.e1]") == null, "0.e1: no fractional digits")
-    // Exponent with no digits.
-    assert(json_decode("[1e]") == null, "1e: no exponent digits")
-    assert(json_decode("[1e+]") == null, "1e+: no exponent digits")
-    // Input that ends inside the number. The bare-sign document is the only
-    // way to reach the end-of-input guard after the sign -- in "[-]" the sign
-    // is followed by a byte, so that path is never taken and a mutation there
-    // survives the whole corpus.
-    assert(json_decode("-") == null, "bare minus is not a document")
-    assert(json_decode("[-]") == null, "minus with no digits")
-    assert(json_decode("-.") == null, "minus then point, no digits")
+    let invalid_numbers = [
+        "-01", "012", "-012",                       // Leading zeros.
+        "-.5", ".5",                                // Missing integer part.
+        "1.", "-2.", "2.e3", "2.e+3", "2.e-3", "0.e1", // Missing fraction digits.
+        "1e", "1e+",                                // Missing exponent digits.
+        "-",
+    ]
+    for number in invalid_numbers {
+        let raw = "[{number}]"
+        assert(json_decode(raw) == null, raw)
+    }
+    // A sign at the end of the input reaches a different guard from "[-]".
+    for raw in ["-", "-."] {
+        assert(json_decode(raw) == null, raw)
+    }
 }
 
-// The rejections above must not take valid numbers with them -- a narrowed
-// gate is only correct if what should pass still reaches the other side.
 @test
 fn test_json_number_grammar_admits() {
-    assert(json_decode("[0]") != null, "0")
-    assert(json_decode("[-0]") != null, "-0")
-    assert(json_decode("[0.5]") != null, "0.5")
-    assert(json_decode("[0e1]") != null, "0e1")
-    assert(json_decode("[0e+1]") != null, "0e+1")
-    assert(json_decode("[1]") != null, "1")
-    assert(json_decode("[-1]") != null, "-1")
-    assert(json_decode("[123]") != null, "123")
-    assert(json_decode("[1.5]") != null, "1.5")
-    assert(json_decode("[-1.5e-3]") != null, "-1.5e-3")
-    assert(json_decode("[1E2]") != null, "1E2 (capital exponent)")
-    assert(json_decode("[1.0e+2]") != null, "1.0e+2")
+    for number in ["0", "-0", "0.5", "0e1", "0e+1", "1", "-1", "123",
+        "1.5", "-1.5e-3", "1E2", "1.0e+2"] {
+        let raw = "[{number}]"
+        assert(json_decode(raw) != null, raw)
+    }
 
     // Values survive the stricter scan intact.
     assert_eq(jv_int(json_decode("123"), 0), 123, "123 decodes to 123")
@@ -465,19 +421,17 @@ fn test_utf8_byte_layouts() {
 
 @test
 fn test_from_codepoint_invalid_errors() {
-    assert(try_call(() => { let _x = from_codepoint(-1) }))
-    assert(try_call(() => { let _x = from_codepoint(0x110000) }))
-    assert(try_call(() => { let _x = from_codepoint(0xD800) }))
-    assert(try_call(() => { let _x = from_codepoint(0xDFFF) }))
+    for cp in [-1, 0x110000, 0xD800, 0xDFFF] {
+        assert(try_call(() => { let _x = from_codepoint(cp) }), "invalid code point: {cp}")
+    }
 }
 
-// Malformed input is data, not a programmer error: a lone surrogate escape
-// must yield a decode failure (null), never a runtime error.
+// Lone surrogates are malformed input and must decode to null.
 @test
 fn test_json_lone_surrogate_fails_soft() {
-    assert(json_decode("\"\\ud83d\"") == null)
-    assert(json_decode("\"\\ude00\"") == null)
-    assert(json_decode("\"\\ud83dx\"") == null)
+    for raw in ["\"\\ud83d\"", "\"\\ude00\"", "\"\\ud83dx\""] {
+        assert(json_decode(raw) == null, raw)
+    }
 }
 
 value PlaceJsonContext { names: [string] }

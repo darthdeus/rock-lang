@@ -65,14 +65,15 @@ fn json_record_presence_distinguishes_omitted_null_and_value() {
 fn json_record_presence_rejects_invalid_supplied_values_with_paths() {
     let errors: [JsonRecordError] = []
     let codec = JsonRecordCodec { reject_unknown_fields: true, on_error: error => errors.push(error) }
-    for bad in ["{{\"count\":null}}", "{{\"count\":1.5}}", "{{\"count\":false}}"] {
-        assert(json_record_decode<JsonPresenceEdit>(codec, json_decode(bad).unwrap()) == null)
-        assert_eq(errors[errors.len() - 1].path, "/count")
+    for (bad, path) in [
+        ("{{\"count\":null}}", "/count"), ("{{\"count\":1.5}}", "/count"),
+        ("{{\"count\":false}}", "/count"), ("{{\"items\":[1,false]}}", "/items/1"),
+        ("{{\"extra\":0}}", "/extra"),
+    ] {
+        errors.clear()
+        assert(json_record_decode<JsonPresenceEdit>(codec, json_decode(bad).unwrap()) == null, bad)
+        assert_eq(errors[errors.len() - 1].path, path, bad)
     }
-    assert(json_record_decode<JsonPresenceEdit>(codec, json_decode("{{\"items\":[1,false]}}").unwrap()) == null)
-    assert_eq(errors[errors.len() - 1].path, "/items/1")
-    assert(json_record_decode<JsonPresenceEdit>(codec, json_decode("{{\"extra\":0}}").unwrap()) == null)
-    assert_eq(errors[errors.len() - 1].path, "/extra")
 }
 
 nobox value JsonPresencePoint { x: int, y: int }

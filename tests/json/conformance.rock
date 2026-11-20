@@ -56,18 +56,6 @@ fn json_conf_load_manifest() -> [JsonConfCase] {
     return out
 }
 
-// Cases where json_decode disagrees with the corpus. Empty: the parser is
-// fully conformant on all 318.
-//
-// This is the pinning point for a divergence that cannot be fixed on the spot
-// Adding a name here makes the run green while the
-// bug exists; test_json_conformance_corpus then fails either way round --
-// "NEW conformance divergence" for a name that is missing, "stale sentinel"
-// for one that no longer diverges.
-fn json_conf_diverging_cases() -> [string] {
-    return []
-}
-
 @test
 fn test_json_conformance_manifest_shape() {
     let cases = json_conf_load_manifest()
@@ -112,46 +100,24 @@ fn test_json_conformance_deep_structure_cases_reject() {
 fn test_json_conformance_corpus() {
     let cases = json_conf_load_manifest()
 
-    let declared: Map<string, bool> = map_new()
-    for name in json_conf_diverging_cases() { declared.insert(name, true) }
-
-    let observed: Map<string, bool> = map_new()
     let examined = 0
     let either_seen = 0
-    let diverged = 0
-
     for c in cases {
         let src = json_conf_read_file("{json_conf_dir()}cases/{c.name}")
         assert(src != null, "missing case file: {c.name}")
         examined = examined + 1
 
         let decoded = json_decode(src.unwrap())
-        let got = if decoded == null { "reject" } else { "accept" }
-
         if c.expect == "either" {
             either_seen = either_seen + 1
             continue
         }
+        let got = if decoded == null { "reject" } else { "accept" }
+        assert_eq(got, c.expect, "materializing decoder conformance: {c.name}")
         let reader = json_reader_decode(src.unwrap())
         let reader_verdict = if reader == null { "reject" } else { "accept" }
         assert_eq(reader_verdict, c.expect, "source reader conformance: {c.name}")
-        if got != c.expect {
-            observed.insert(c.name, true)
-            diverged = diverged + 1
-        }
     }
-
     assert_eq(examined, 318, "examined population -- every case in the manifest")
     assert_eq(either_seen, 35, "implementation-defined cases reached")
-
-    for name in observed.keys() {
-        assert(declared.contains(name),
-            "NEW conformance divergence: {name} -- the parser changed behavior on a case it used to get right")
-    }
-    for name in json_conf_diverging_cases() {
-        assert(observed.contains(name),
-            "stale sentinel: {name} now conforms -- delete it from json_conf_diverging_cases()")
-    }
-    assert_eq(diverged, 0,
-        "every y_ case must be accepted and every n_ case rejected -- pin a name in json_conf_diverging_cases() only for a bug being deferred")
 }
