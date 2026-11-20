@@ -277,14 +277,9 @@ pub @scalar_abi inline(lua) fn imgui_dummy(size: Vec2) = """
 // Draws a filled rect into the current window's foreground draw list at
 // absolute screen coords. Used by the pixel editor's checkerboard
 // background. Color packed as 0xAABBGGRR (ImGui's ImU32 layout).
-pub @scalar_abi inline(lua) fn imgui_window_add_rect_filled(p_min: Vec2, p_max: Vec2, col_abgr: int) = """
-    local dl = imgui.GetWindowDrawList()
-    if dl == nil then return end
-    local cache = __imgui_shared_image_packet()
-    cache.u1.x, cache.u1.y = p_min__x, p_min__y
-    cache.u2.x, cache.u2.y = p_max__x, p_max__y
-    dl:AddRectFilled(cache.u1, cache.u2, col_abgr)
-"""
+pub fn imgui_window_add_rect_filled(p_min: Vec2, p_max: Vec2, col_abgr: int) {
+    imgui_add_rect_filled(false, p_min, p_max, col_abgr)
+}
 
 // Draws a filled rect into ImGui's *foreground* draw list — i.e., the
 // layer that renders ON TOP of every ImGui window. Same screen-space
@@ -299,10 +294,13 @@ pub @scalar_abi inline(lua) fn imgui_window_add_rect_filled(p_min: Vec2, p_max: 
 // Stone's own UI pool after stone_imgui_render() too, with Stone's
 // text and shapes rather than ImGui's. What lands UNDER ImGui is the
 // MAIN UI pool, which flushes before it.
-pub @scalar_abi inline(lua) fn imgui_foreground_add_rect_filled(
-    p_min: Vec2, p_max: Vec2, col_abgr: int,
-) = """
-    local dl = imgui.GetForegroundDrawList_ViewportPtr(nil)
+pub fn imgui_foreground_add_rect_filled(p_min: Vec2, p_max: Vec2, col_abgr: int) {
+    imgui_add_rect_filled(true, p_min, p_max, col_abgr)
+}
+
+@scalar_abi inline(lua) fn imgui_add_rect_filled(foreground: bool, p_min: Vec2, p_max: Vec2, col_abgr: int) = """
+    local dl
+    if foreground then dl = imgui.GetForegroundDrawList_ViewportPtr(nil) else dl = imgui.GetWindowDrawList() end
     if dl == nil then return end
     local cache = __imgui_shared_image_packet()
     cache.u1.x, cache.u1.y = p_min__x, p_min__y
@@ -332,31 +330,26 @@ pub @pure fn color_to_abgr(c: Color) -> int {
 // Filled circle on the foreground draw list — handy for cursor dots,
 // reticles, hover indicators. `num_segments=0` lets ImGui auto-pick
 // based on radius.
-pub @scalar_abi inline(lua) fn imgui_foreground_add_circle_filled(
-    center: Vec2, radius: float, col_abgr: int, num_segments: int = 0,
-) = """
-    local dl = imgui.GetForegroundDrawList_ViewportPtr(nil)
-    if dl == nil then return end
-    local cache = __imgui_shared_image_packet()
-    cache.pos.x, cache.pos.y = center__x, center__y
-    dl:AddCircleFilled(cache.pos, radius, col_abgr, num_segments)
-"""
+pub fn imgui_foreground_add_circle_filled(
+    center: Vec2,
+    radius: float,
+    col_abgr: int,
+    num_segments: int = 0
+) {
+    imgui_add_circle_filled(true, center, radius, col_abgr, num_segments)
+}
 
-pub @scalar_abi inline(lua) fn imgui_foreground_add_line(
-    p1: Vec2, p2: Vec2, col_abgr: int, thickness: float = 1.0,
-) = """
-    local dl = imgui.GetForegroundDrawList_ViewportPtr(nil)
-    if dl == nil then return end
-    local cache = __imgui_shared_image_packet()
-    cache.u1.x, cache.u1.y = p1__x, p1__y
-    cache.u2.x, cache.u2.y = p2__x, p2__y
-    dl:AddLine(cache.u1, cache.u2, col_abgr, thickness)
-"""
+pub fn imgui_foreground_add_line(p1: Vec2, p2: Vec2, col_abgr: int, thickness: float = 1.0) {
+    imgui_add_line(true, p1, p2, col_abgr, thickness)
+}
 
-pub @scalar_abi inline(lua) fn imgui_window_add_line(
-    p1: Vec2, p2: Vec2, col_abgr: int, thickness: float = 1.0,
-) = """
-    local dl = imgui.GetWindowDrawList()
+pub fn imgui_window_add_line(p1: Vec2, p2: Vec2, col_abgr: int, thickness: float = 1.0) {
+    imgui_add_line(false, p1, p2, col_abgr, thickness)
+}
+
+@scalar_abi inline(lua) fn imgui_add_line(foreground: bool, p1: Vec2, p2: Vec2, col_abgr: int, thickness: float) = """
+    local dl
+    if foreground then dl = imgui.GetForegroundDrawList_ViewportPtr(nil) else dl = imgui.GetWindowDrawList() end
     if dl == nil then return end
     local cache = __imgui_shared_image_packet()
     cache.u1.x, cache.u1.y = p1__x, p1__y
@@ -377,10 +370,19 @@ pub @scalar_abi inline(lua) fn imgui_window_add_quad_filled(
     dl:AddQuadFilled(cache.p1, cache.p2, cache.p3, cache.p4, col_abgr)
 """
 
-pub @scalar_abi inline(lua) fn imgui_window_add_circle_filled(
-    center: Vec2, radius: float, col_abgr: int, num_segments: int = 0,
-) = """
-    local dl = imgui.GetWindowDrawList()
+pub fn imgui_window_add_circle_filled(
+    center: Vec2,
+    radius: float,
+    col_abgr: int,
+    num_segments: int = 0
+) {
+    imgui_add_circle_filled(false, center, radius, col_abgr, num_segments)
+}
+
+@scalar_abi inline(lua) fn imgui_add_circle_filled(foreground: bool, center: Vec2, radius: float, col_abgr: int,
+    num_segments: int) = """
+    local dl
+    if foreground then dl = imgui.GetForegroundDrawList_ViewportPtr(nil) else dl = imgui.GetWindowDrawList() end
     if dl == nil then return end
     local cache = __imgui_shared_image_packet()
     cache.pos.x, cache.pos.y = center__x, center__y
