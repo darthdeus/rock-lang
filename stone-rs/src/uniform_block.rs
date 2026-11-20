@@ -248,9 +248,8 @@ fn program_of(handle: u64) -> Option<glow::Program> {
 pub(crate) fn bind_block_for_program(gl: &crate::DebugGl, handle: u64) {
     BLOCKS.with(|b| {
         if let Some(blocks) = b.borrow_mut().get_mut(&handle) {
-            let frame = crate::stream_buffer::frame();
             for block in blocks {
-                unsafe { bind_block(gl, block, frame) };
+                unsafe { bind_block(gl, block) };
             }
         }
     });
@@ -268,15 +267,18 @@ pub(crate) fn rebind_current_program(gl: &crate::DebugGl) {
     bind_block_for_program(gl, handle);
 }
 
-/// Bind `block`'s range at its binding, streaming its bytes again first when
-/// the range was written in an earlier frame.
-unsafe fn bind_block(gl: &crate::DebugGl, block: &mut BlockBuffer, frame: u64) {
-    let range = match block.range {
-        Some(range) if range.frame == frame => range,
-        _ => match stream_block(gl, block, None) {
-            Some(range) => range,
-            None => return,
-        },
+/// `block`'s range for draws of this frame, streaming its bytes again when the
+/// range was written in an earlier frame.
+unsafe fn frame_range(gl: &crate::DebugGl, block: &mut BlockBuffer) -> Option<StreamRange> {
+    match block.range {
+        Some(range) if range.frame == crate::stream_buffer::frame() => Some(range),
+        _ => stream_block(gl, block, None),
+    }
+}
+
+unsafe fn bind_block(gl: &crate::DebugGl, block: &mut BlockBuffer) {
+    let Some(range) = frame_range(gl, block) else {
+        return;
     };
     gl.bind_buffer_range(
         glow::UNIFORM_BUFFER,
@@ -499,19 +501,11 @@ pub extern "C" fn stone_shader_upload_uniform_block(
         // upload replaced (#883).
         let current = crate::CURRENT_SHADER.with(|c| *c.borrow()) == Some(block.program);
         let ok = with_gl(|gl| unsafe {
-            let Some(range) = stream_block(gl, block, Some(bytes)) else {
-                return false;
-            };
-            if current {
-                gl.bind_buffer_range(
-                    glow::UNIFORM_BUFFER,
-                    block.binding,
-                    Some(range.buffer),
-                    range.offset,
-                    size,
-                );
+            let streamed = stream_block(gl, block, Some(bytes)).is_some();
+            if streamed && current {
+                bind_block(gl, block);
             }
-            true
+            streamed
         })
         .unwrap_or(false);
         if ok {
@@ -548,12 +542,8 @@ pub extern "C" fn stone_shader_read_uniform_block(
 ) -> bool {
     block_bytes_into(handle, block_name, dst, size, |block, out| {
         with_gl(|gl| unsafe {
-            let range = match block.range {
-                Some(range) if range.frame == crate::stream_buffer::frame() => range,
-                _ => match stream_block(gl, block, None) {
-                    Some(range) => range,
-                    None => return false,
-                },
+            let Some(range) = frame_range(gl, block) else {
+                return false;
             };
             let previous = std::num::NonZeroU32::new(
                 gl.get_parameter_i32(glow::UNIFORM_BUFFER_BINDING) as u32,
