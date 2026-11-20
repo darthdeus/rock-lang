@@ -637,6 +637,16 @@ fn for_real_vec_loop_is_forl_zero_alloc_with_raw_reads() {
 }
 
 #[test]
+fn any_with_an_early_return_is_a_counted_loop() {
+    let lua = emit_inlined(
+        "fn has(xs: [int], k: int) -> bool { return xs.any(x => x == k) }",
+        "has",
+    );
+    assert_counted_zero_alloc(&lua);
+    assert!(!lua.contains("goto w"), "{lua}");
+}
+
+#[test]
 fn dead_locals_are_nil_killed_after_their_last_use() {
     let lua = emit_clean(
         "fn probe(a: int, b: int) -> int { let s = a * b; let t = s + s; if t + 1 > 10 { return t }; return 0 }",

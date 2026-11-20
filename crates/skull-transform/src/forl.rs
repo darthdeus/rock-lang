@@ -104,6 +104,21 @@ fn cell_written_in(func: &MirFunc, c: Idx<Cell>, blocks: &HashSet<Idx<Block>>) -
     false
 }
 
+/// The flag cell a combinator join branches on.
+fn branch_flag(func: &MirFunc, b: Idx<Block>) -> Option<Idx<Cell>> {
+    let Term::Branch { cond, .. } = func.blocks[b].term else {
+        return None;
+    };
+    let load = match func.insts[cond] {
+        Inst::Not(x) => x,
+        _ => cond,
+    };
+    match func.insts[load] {
+        Inst::Load(flag) if func.blocks[b].insts.contains(&load) => Some(flag),
+        _ => None,
+    }
+}
+
 fn fn_name(ws: &Workspace, fr: FuncRef) -> &str {
     ws.module(fr.module).functions[fr.func].name.as_str()
 }
@@ -380,8 +395,14 @@ fn try_match(
 
         let mut done_arm_chain = Vec::new();
         let dn = chase(func, done_arm, &mut done_arm_chain);
-        let deeper =
-            d_droppable(dn) && matches!(func.blocks[dn].term, Term::Goto(_)) && stores_false(dn);
+        let deeper = d_droppable(dn)
+            && match func.blocks[dn].term {
+                Term::Goto(next) => {
+                    let next = chase(func, next, &mut Vec::new());
+                    branch_flag(func, next).is_some_and(|f| flag_const(dn, f, false))
+                }
+                _ => false,
+            };
         if !deeper {
             break (cont_arm, done_arm);
         }
