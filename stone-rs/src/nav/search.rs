@@ -147,9 +147,8 @@ pub(super) fn nav_query_reuse_goal(q: &mut NavQuery, c: int, plan: &NavPlan) -> 
     if entry.teleports != plan.teleports {
         return -1;
     }
-    for i in 0..entry.nodes.len() {
-        let n = entry.nodes[i];
-        q.goal_cost[n] = entry.costs[i];
+    for &(n, d) in entry.nodes.iter() {
+        q.goal_cost[n] = d;
         q.goal_stamp[n] = q.stamp;
         q.goals.push(n);
     }
@@ -211,8 +210,7 @@ pub(super) fn nav_query_attach_goal(g: &NavGraph, q: &mut NavQuery, plan: &NavPl
         q.goal_cost[n] = d;
         q.goal_stamp[n] = q.stamp;
         q.goals.push(n);
-        entry.nodes.push(n);
-        entry.costs.push(d);
+        entry.nodes.push((n, d));
     }
     let key = nav_query_goal_key(plan);
     let is_new = q

@@ -319,8 +319,7 @@ pub struct Waypoint {
 #[derive(Clone, Debug, Default)]
 pub struct NavGoalAttachment {
     pub teleports: int,
-    pub nodes: IdxVec<int>,
-    pub costs: IdxVec<int>,
+    pub nodes: IdxVec<(int, int)>,
     pub work: int,
 }
 
