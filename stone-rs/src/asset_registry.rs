@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::{c_char, CStr};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -129,13 +130,27 @@ fn mod_root() -> &'static ModRoot {
     })
 }
 
-enum OverrideRead {
-    Missing,
-    Found(Vec<u8>),
-    Failed,
+/// `Ok(None)` when the file does not exist; other failures are logged as `Err`.
+fn read_found(path: &Path, prefix: Option<usize>, what: &str) -> Result<Option<Vec<u8>>, ()> {
+    let result = match prefix {
+        Some(n) => std::fs::File::open(path).and_then(|file| {
+            let mut bytes = Vec::with_capacity(n);
+            file.take(n as u64).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }),
+        None => std::fs::read(path),
+    };
+    match result {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            ::log::error!(target: "ASSETS", "failed to read {what} {}: {error}", path.display());
+            Err(())
+        }
+    }
 }
 
-fn read_override(root: &Path, path: &str, prefix: Option<usize>) -> OverrideRead {
+fn read_override(root: &Path, path: &str, prefix: Option<usize>) -> Result<Option<Vec<u8>>, ()> {
     let normalized = normalize_key(path);
     let rel = Path::new(&normalized);
     if rel.is_absolute()
@@ -146,25 +161,9 @@ fn read_override(root: &Path, path: &str, prefix: Option<usize>) -> OverrideRead
             )
         })
     {
-        return OverrideRead::Missing;
+        return Ok(None);
     }
-    let override_path = root.join(rel);
-    let result = match prefix {
-        Some(n) => std::fs::File::open(&override_path).and_then(|file| read_prefix(file, n)),
-        None => std::fs::read(&override_path),
-    };
-    match result {
-        Ok(bytes) => OverrideRead::Found(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => OverrideRead::Missing,
-        Err(error) => {
-            ::log::error!(
-                target: "ASSETS",
-                "failed to read asset override {}: {error}",
-                override_path.display()
-            );
-            OverrideRead::Failed
-        }
-    }
+    read_found(&root.join(rel), prefix, "asset override")
 }
 
 /// Priority: `<exe_dir>/mods/<path>`, then the embedded registry, then `<path>` on disk.
@@ -187,62 +186,19 @@ fn resolve(path: &str, prefix: Option<usize>) -> Option<Vec<u8>> {
 }
 
 fn resolve_with_root(root: Option<&Path>, path: &str, prefix: Option<usize>) -> Option<Vec<u8>> {
-    if contains_asset(path) {
-        if let Some(root) = root {
-            match read_override(root, path, prefix) {
-                OverrideRead::Found(bytes) => return Some(bytes),
-                OverrideRead::Missing => {}
-                OverrideRead::Failed => return None,
-            }
-        }
-        // The registry is immutable after boot, so a positive contains_asset means the
-        // asset resolves.
-        return with_asset(path, |bytes| {
-            bytes[..prefix.unwrap_or(bytes.len()).min(bytes.len())].to_vec()
-        });
+    if !contains_asset(path) {
+        return read_found(Path::new(path), prefix, "asset").ok()?;
     }
-    let Some(n) = prefix else {
-        return match std::fs::read(path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                ::log::error!(target: "ASSETS", "failed to read asset {path}: {error}");
-                None
-            }
-        };
-    };
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            ::log::error!(target: "ASSETS", "failed to open asset prefix {path}: {error}");
-            return None;
-        }
-    };
-    match read_prefix(file, n) {
-        Ok(bytes) => Some(bytes),
-        Err(error) => {
-            ::log::error!(target: "ASSETS", "failed to read asset prefix {path}: {error}");
-            None
+    if let Some(root) = root {
+        if let Some(bytes) = read_override(root, path, prefix).ok()? {
+            return Some(bytes);
         }
     }
-}
-
-/// A short read is the file being smaller than the prefix, not a failure.
-fn read_prefix(mut file: std::fs::File, n: usize) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
-    let mut buf = vec![0; n];
-    let mut total = 0;
-    while total < n {
-        match file.read(&mut buf[total..]) {
-            Ok(0) => break,
-            Ok(n) => total += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    buf.truncate(total);
-    Ok(buf)
+    // The registry is immutable after boot, so a positive contains_asset means the
+    // asset resolves.
+    with_asset(path, |bytes| {
+        bytes[..prefix.unwrap_or(bytes.len()).min(bytes.len())].to_vec()
+    })
 }
 
 #[cfg(test)]
@@ -342,10 +298,7 @@ mod resolve_tests {
     fn traversal_and_absolute_keys_never_escape_mods() {
         let root = fresh_root();
         for key in ["../secret", "a/../../secret", "/etc/passwd"] {
-            assert!(
-                matches!(read_override(&root, key, None), OverrideRead::Missing),
-                "{key}"
-            );
+            assert!(matches!(read_override(&root, key, None), Ok(None)), "{key}");
         }
     }
 
