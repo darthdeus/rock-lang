@@ -715,17 +715,10 @@ impl<'a> Builder<'a> {
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
             }
 
-            Expr::SafeNavCall {
-                receiver,
-                method,
-                args,
-                ..
-            } => self.lower_safe_nav_call(e, receiver, method, args),
-            Expr::SafeNavLet {
-                receiver,
-                binding,
-                body,
-            } => self.lower_safe_nav_let(receiver, binding, body),
+            Expr::SafeNavCall { .. } | Expr::SafeNavLet { .. } => {
+                let r = self.lower_expr_repr(e)?.into_value();
+                self.pack_maybe_absent(r)
+            }
 
             other => Err(gap(format!(
                 "expression form not in Phase 1: {}",
@@ -1821,17 +1814,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn pack_safe_nav_call_value(
-        &mut self,
-        e: Idx<Expr>,
-        method: Ustr,
-        args: IdxRange<Expr>,
-        recv: Idx<Inst>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let r = self.safe_nav_call_value_repr(e, method, args, recv)?;
-        self.pack_maybe_absent(r.into_value())
-    }
-
     fn lower_scalar_safe_nav_receiver(
         &mut self,
         e: Idx<Expr>,
@@ -1908,20 +1890,6 @@ impl<'a> Builder<'a> {
             SafeNavRecv::Boxed(v) => Ok(v),
             SafeNavRecv::Unboxed { repr, .. } => self.pack(repr),
         }
-    }
-
-    pub(crate) fn lower_safe_nav_call(
-        &mut self,
-        e: Idx<Expr>,
-        receiver: Idx<Expr>,
-        method: Ustr,
-        args: IdxRange<Expr>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let recv = self.lower_safe_nav_receiver(receiver)?;
-        self.safe_nav_scalar(recv, false, |s, recv| {
-            let recv_v = s.safe_nav_present_value(recv)?;
-            s.pack_safe_nav_call_value(e, method, args, recv_v)
-        })
     }
 
     fn safe_nav_scalar(
@@ -2079,27 +2047,6 @@ impl<'a> Builder<'a> {
                 }
             }
             s.value_bundle_for_expr(e, g)
-        })
-    }
-
-    pub(crate) fn lower_safe_nav_let(
-        &mut self,
-        receiver: Idx<Expr>,
-        binding: Idx<bone_core::hir::BindingInfo>,
-        body: Idx<Expr>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let recv = self.lower_safe_nav_receiver(receiver)?;
-        self.safe_nav_scalar(recv, false, |s, recv| {
-            let recv_v = s.safe_nav_present_value(recv)?;
-            let cell = s.new_binding_cell(
-                binding,
-                s.body.binding_arena[binding].name,
-                s.binding_ty(binding),
-                crate::names::ustr(""),
-            );
-            s.store_cell(cell, recv_v);
-            s.binds.insert(raw(binding), cell);
-            s.lower_expr(body)
         })
     }
 

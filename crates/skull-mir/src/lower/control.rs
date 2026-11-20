@@ -700,7 +700,10 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueRepr, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
         let is_nil = self.safe_nav_absent_cond(&recv);
-        let values = self.value_join(shape);
+        let result_ty = matches!(shape, RepLayout::Opaque)
+            .then(|| self.current_expr_storage_ty_id())
+            .flatten();
+        let values = self.value_join_typed(shape, result_ty, false);
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();

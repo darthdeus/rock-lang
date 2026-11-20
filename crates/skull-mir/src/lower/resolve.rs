@@ -541,20 +541,20 @@ impl<'a> Builder<'a> {
                 method,
                 args,
                 ..
-            } => match self.repr_join_slot(e)? {
-                Some(shape) => self.safe_nav_repr(receiver, shape, move |s, recv| {
+            } => {
+                let shape = self.repr_join_slot(e)?.unwrap_or(RepLayout::Opaque);
+                self.safe_nav_repr(receiver, shape, move |s, recv| {
                     s.safe_nav_call_value_repr(e, method, args, recv)
-                }),
-                None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
-            },
+                })
+            }
             Expr::SafeNavLet {
                 receiver,
                 binding,
                 body,
-            } => match self.repr_join_slot(e)? {
-                Some(shape) => self.safe_nav_let_repr(receiver, binding, body, shape),
-                None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
-            },
+            } => {
+                let shape = self.repr_join_slot(e)?.unwrap_or(RepLayout::Opaque);
+                self.safe_nav_let_repr(receiver, binding, body, shape)
+            }
             // A splatting tuple literal stays a `Tuple` repr, so a `nobox` element reaches
             // the return boundary as leaves instead of being packed first.
             Expr::Tuple(elems)
