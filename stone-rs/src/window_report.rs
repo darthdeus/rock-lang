@@ -5,8 +5,6 @@
 //! Units are labelled explicitly -- SDL display bounds and window size/position
 //! are POINTS on macOS (logical coords), `drawable_size` is PIXELS.
 
-use serde_json::json;
-
 #[derive(Clone, Debug)]
 pub struct DisplayReport {
     pub index: i32,
@@ -242,57 +240,9 @@ impl WindowReport {
         }
         s
     }
-
-    /// The same information as one machine-parseable JSON line.
-    pub fn render_json_line(&self) -> String {
-        let displays: Vec<_> = self
-            .displays
-            .iter()
-            .map(|d| {
-                json!({
-                    "index": d.index,
-                    "name": d.name,
-                    "bounds_pt": { "x": d.bounds.0, "y": d.bounds.1, "w": d.bounds.2, "h": d.bounds.3 },
-                    "usable_pt": { "x": d.usable.0, "y": d.usable.1, "w": d.usable.2, "h": d.usable.3 },
-                    "dpi": { "d": d.dpi.0, "h": d.dpi.1, "v": d.dpi.2 },
-                    "current_mode": d.current_mode.map(|(w, h, r)| json!({ "w": w, "h": h, "refresh": r })),
-                    "mode_count": d.mode_count,
-                    "modes": d.modes.iter().map(|(w, h, r)| json!({ "w": w, "h": h, "refresh": r })).collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-        let fit = self.fit().map(|f| {
-            json!({
-                "max_content_w_pt": f.max_content_w,
-                "max_content_h_pt": f.max_content_h,
-                "over_w_pt": f.over_w,
-                "over_h_pt": f.over_h,
-                "exceeds": f.exceeds,
-            })
-        });
-        let v = json!({
-            "kind": "window_report",
-            "phase": 1,
-            "displays": displays,
-            "requested_size_pt": { "w": self.requested_size.0, "h": self.requested_size.1 },
-            "requested_pos_pt": { "x": self.requested_pos.0, "y": self.requested_pos.1 },
-            "actual_size_pt": { "w": self.actual_size.0, "h": self.actual_size.1 },
-            "actual_pos_pt": { "x": self.actual_pos.0, "y": self.actual_pos.1 },
-            "landed_display": self.landed_display,
-            "drawable_size_px": { "w": self.drawable_size.0, "h": self.drawable_size.1 },
-            "dpi_scale": self.dpi_scale,
-            "borders_pt": {
-                "top": self.borders.top, "left": self.borders.left,
-                "bottom": self.borders.bottom, "right": self.borders.right,
-            },
-            "fit": fit,
-        });
-        v.to_string()
-    }
 }
 
-/// Compact deduped resolution summary for the human block; the full list is
-/// only emitted in JSON. Empty when the mode list is empty.
+/// Compact deduped resolution summary. Empty when the mode list is empty.
 fn render_modes_summary(modes: &[(i32, i32, i32)]) -> String {
     if modes.is_empty() {
         return String::new();
@@ -400,27 +350,6 @@ mod tests {
         r.landed_display = 5;
         assert!(r.fit().is_none());
         assert!(r.render_human().contains("cannot derive"));
-    }
-
-    #[test]
-    fn json_line_is_single_line_and_parses() {
-        let r = report(
-            (2560, 1600),
-            Borders {
-                top: 28,
-                left: 1,
-                bottom: 2,
-                right: 3,
-            },
-        );
-        let line = r.render_json_line();
-        assert!(!line.contains('\n'));
-        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(v["kind"], "window_report");
-        assert_eq!(v["borders_pt"]["top"], 28);
-        assert_eq!(v["fit"]["exceeds"], true);
-        assert_eq!(v["requested_size_pt"]["w"], 2560);
-        assert_eq!(v["displays"][0]["bounds_pt"]["w"], 1440);
     }
 
     fn display_at(

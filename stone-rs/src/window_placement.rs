@@ -147,19 +147,6 @@ pub fn merge_geometry(
     )
 }
 
-pub fn parse_env_geometry(window: Option<&str>, display: Option<&str>) -> PartialGeometry {
-    let mut out = PartialGeometry::default();
-    if let Some(w) = window {
-        out = parse_window_spec(w.trim());
-    }
-    if let Some(d) = display {
-        if let Ok(i) = d.trim().parse::<i32>() {
-            out.display = Some(i);
-        }
-    }
-    out
-}
-
 /// `WxH`, `WxH+X+Y`, or `WxH-X-Y` mixes -- the sign precedes each coordinate.
 fn parse_window_spec(spec: &str) -> PartialGeometry {
     let (head, tail) = split_at_sign(spec).unwrap_or((spec, ""));
@@ -351,11 +338,12 @@ fn read_optional(path: &Path) -> Option<String> {
     }
 }
 
-/// Read the env override partial (both vars, either may be absent/malformed).
+/// Read the `STONE_WINDOW` override partial (absent or malformed is empty).
 pub fn env_geometry() -> PartialGeometry {
     let window = std::env::var("STONE_WINDOW").ok();
-    let display = std::env::var("STONE_WINDOW_DISPLAY").ok();
-    let out = parse_env_geometry(window.as_deref(), display.as_deref());
+    let out = window
+        .as_deref()
+        .map_or_else(PartialGeometry::default, |w| parse_window_spec(w.trim()));
     if window
         .as_deref()
         .map(str::trim)
@@ -655,29 +643,17 @@ mod tests {
     }
 
     #[test]
-    fn env_parse_reads_size_position_and_display() {
+    fn env_parse_reads_size_and_position() {
         let cases = [
-            (
-                Some("1280x720+100+50"),
-                None,
-                Some((1280, 720)),
-                Some((100, 50)),
-                None,
-            ),
-            (Some("800x600"), Some("2"), Some((800, 600)), None, Some(2)),
-            (
-                Some("640x480-10-20"),
-                None,
-                Some((640, 480)),
-                Some((-10, -20)),
-                None,
-            ),
+            ("1280x720+100+50", Some((1280, 720)), Some((100, 50))),
+            ("800x600", Some((800, 600)), None),
+            ("640x480-10-20", Some((640, 480)), Some((-10, -20))),
         ];
-        for (geometry, display, size, pos, parsed_display) in cases {
-            let g = parse_env_geometry(geometry, display);
+        for (geometry, size, pos) in cases {
+            let g = parse_window_spec(geometry);
             assert_eq!(
                 (g.size, g.pos, g.display),
-                (size, pos, parsed_display),
+                (size, pos, None),
                 "{geometry:?}"
             );
         }
@@ -685,11 +661,8 @@ mod tests {
 
     #[test]
     fn env_parse_malformed_is_empty() {
-        assert_eq!(
-            parse_env_geometry(Some("garbage"), None),
-            PartialGeometry::default()
-        );
-        assert_eq!(parse_env_geometry(Some("100"), None).size, None);
+        assert_eq!(parse_window_spec("garbage"), PartialGeometry::default());
+        assert_eq!(parse_window_spec("100").size, None);
     }
 
     #[test]

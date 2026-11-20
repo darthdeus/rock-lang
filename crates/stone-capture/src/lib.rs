@@ -1,8 +1,7 @@
 //! The CPU-RGBA capture policy: one place that turns presented pixels into
 //! the PNG a screenshot means. Backends supply raw RGBA rows and say which
-//! way is up; everything else -- flip, the long-edge cap with its
-//! STONE_SCREENSHOT_MAX override, Lanczos resampling, PNG encoding and the
-//! saved/failed logging -- lives here. `FrameStream` is the recording
+//! way is up; everything else -- flip, the long-edge cap, Lanczos
+//! resampling, PNG encoding and the saved/failed logging -- lives here. `FrameStream` is the recording
 //! counterpart: the same rows, unencoded, written off the frame.
 
 mod frame_stream;
@@ -61,14 +60,11 @@ pub fn save_rgba_png(
     let mut image = image::RgbaImage::from_raw(width, height, top_down)
         .ok_or_else(|| "failed to create image from buffer".to_string())?;
 
-    let max_dim: usize = std::env::var("STONE_SCREENSHOT_MAX")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(if max_size > 0 {
-            max_size as usize
-        } else {
-            1920
-        });
+    let max_dim: usize = if max_size > 0 {
+        max_size as usize
+    } else {
+        1920
+    };
     let long_edge = width.max(height);
     if long_edge as usize > max_dim {
         let scale = max_dim as f32 / long_edge as f32;
@@ -132,9 +128,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
 
         let size = res.unwrap();
-        if std::env::var_os("STONE_SCREENSHOT_MAX").is_none() {
-            assert_eq!(size, (1, 1));
-        }
+        assert_eq!(size, (1, 1));
         let decoded = decoded.unwrap();
         assert_eq!((decoded.width(), decoded.height()), size);
     }

@@ -1479,17 +1479,6 @@ pub extern "C" fn stone_create_window_ex(
     let gl_request = context_request(gl_host);
     apply_gl_context_request(&gl_attr, gl_request);
 
-    // STONE_GL_DEBUG=1: request a debug context so the driver emits
-    // richer KHR_debug diagnostics (deprecated usage, perf warnings,
-    // undefined behavior) through the callback installed below. The
-    // flag is ignored on platforms that can't honor it (macOS/CGL),
-    // and the callback install is separately gated on the extension
-    // actually being present.
-    let gl_debug = std::env::var("STONE_GL_DEBUG").as_deref() == Ok("1");
-    if gl_debug {
-        gl_attr.set_context_flags().debug().set();
-    }
-
     let headless = std::env::var("STONE_HEADLESS").is_ok();
     let fit_enabled = window_fit_enabled(headless);
 
@@ -1594,11 +1583,8 @@ pub extern "C" fn stone_create_window_ex(
     // display but 1920x1910 on a 1.333 one -- non-reproducible across dev
     // machines and CI. Headless (sim) runs render at the logical window
     // size for deterministic, portable snapshots; real windowed runs keep
-    // high-DPI for crisp output. STONE_NO_HIGHDPI=1 forces 1x anywhere:
-    // a 3x retina drawable on a software rasterizer costs ~8x the pixels for
-    // a debugging surface.
-    let no_highdpi = std::env::var("STONE_NO_HIGHDPI").as_deref() == Ok("1");
-    if !headless && !no_highdpi {
+    // high-DPI for crisp output.
+    if !headless {
         window_builder.allow_highdpi();
     }
 
@@ -1671,7 +1657,7 @@ pub extern "C" fn stone_create_window_ex(
 
     let t_gl_context = t_boot.elapsed();
 
-    let mut gl = unsafe {
+    let gl = unsafe {
         glow::Context::from_loader_function(|s| video.gl_get_proc_address(s) as *const _)
     };
     {
@@ -1690,40 +1676,6 @@ pub extern "C" fn stone_create_window_ex(
         ms(t_sdl_init), ms(t_video - t_sdl_init), ms(t_pre_window - t_video),
         ms(t_window - t_pre_window), ms(t_gl_context - t_window),
         ms(t_boot.elapsed() - t_gl_context));
-
-    // KHR_debug driver diagnostics (STONE_GL_DEBUG=1). Runtime-gated on
-    // the extension: available on Mesa/NVIDIA even for 3.3 core
-    // contexts, never on macOS (GL caps at 4.1 there) -- absence is a
-    // logged no-op, DebugGl's per-call glGetError checks still run.
-    if gl_debug {
-        use glow::HasContext as _;
-        if gl.supported_extensions().contains("GL_KHR_debug") {
-            unsafe {
-                gl.enable(glow::DEBUG_OUTPUT);
-                gl.enable(glow::DEBUG_OUTPUT_SYNCHRONOUS);
-                gl.debug_message_callback(|source, ty, id, severity, msg| {
-                    match severity {
-                        glow::DEBUG_SEVERITY_HIGH => {
-                            ::log::error!(target: "GL", "[khr src=0x{source:X} type=0x{ty:X} id={id}] {msg}")
-                        }
-                        glow::DEBUG_SEVERITY_MEDIUM => {
-                            ::log::warn!(target: "GL", "[khr src=0x{source:X} type=0x{ty:X} id={id}] {msg}")
-                        }
-                        glow::DEBUG_SEVERITY_LOW => {
-                            ::log::info!(target: "GL", "[khr src=0x{source:X} type=0x{ty:X} id={id}] {msg}")
-                        }
-                        _ => ::log::debug!(target: "GL", "[khr id={id}] {msg}"),
-                    }
-                });
-            }
-            ::log::info!(target: "GL", "KHR_debug message callback installed (STONE_GL_DEBUG=1)");
-        } else {
-            ::log::info!(
-                target: "GL",
-                "STONE_GL_DEBUG=1 but GL_KHR_debug is unavailable on this context (e.g. macOS) -- driver diagnostics off, per-call glGetError checks still active"
-            );
-        }
-    }
 
     let debug_gl = DebugGl::new(gl);
 
@@ -1821,11 +1773,7 @@ pub extern "C" fn stone_create_window_ex(
             dpi_scale: scale,
             borders,
         };
-        if std::env::var("STONE_WINDOW_REPORT").as_deref() == Ok("json") {
-            ::log::info!(target: "STONE", "{}", report.render_json_line());
-        } else {
-            ::log::info!(target: "STONE", "{}", report.render_human());
-        }
+        ::log::info!(target: "STONE", "{}", report.render_human());
     }
 
     unsafe {
