@@ -510,7 +510,7 @@ pub fn line(dl: DrawList, a: Vec2, b: Vec2, color: Color, width: float? = null, 
 pub fn circle(dl: DrawList, center: Vec2, radius: float, color: Color, z: int = 0) {
     if dl_deferred(dl) { return overlay_circle(center, radius, color, z) }
     if dl_target_core(dl) { return in_ui_pool(dl, () => px_circle(center, radius, color, output_z(z))) }
-    in_pool(dl, () => emit_circle(center, radius, color, 0, resolve_z(dl, z), FillMode::Fill, DepthMode::Off, unlit: dl.unlit))
+    in_pool(dl, () => emit_ellipse(center, v(radius), color, 0, resolve_z(dl, z), FillMode::Fill, DepthMode::Off, unlit: dl.unlit))
 }
 
 pub fn circle_outline(
@@ -524,7 +524,7 @@ pub fn circle_outline(
     if dl_deferred(dl) { return overlay_circle_outline(center, radius, color, dl_thickness(dl, thickness), z) }
     let w = dl_thickness(dl, thickness)
     if dl_target_core(dl) { return in_ui_pool(dl, () => px_circle_outline(center, radius, color, w, output_z(z))) }
-    in_pool(dl, () => emit_circle(center, radius, color, 0, resolve_z(dl, z), FillMode::Outline, DepthMode::Off, thickness: w, unlit: dl.unlit))
+    in_pool(dl, () => emit_ellipse(center, v(radius), color, 0, resolve_z(dl, z), FillMode::Outline, DepthMode::Off, thickness: w, unlit: dl.unlit))
 }
 
 pub fn custom(dl: DrawList, draw_fn: fn() -> (), z: int = 0) {

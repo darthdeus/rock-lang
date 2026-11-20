@@ -595,7 +595,7 @@ pub fn draw_rect(
     duration: float? = null
 ) {
     if duration != null {
-        _draw_rect_dur(pos, size, color, layer, depth, duration)
+        _draw_rect_dur(pos, size, color, "fill", layer, depth, duration)
     } else {
         push_draw_rect(pos, size, color, "fill", 0, layer, depth)
     }
@@ -605,11 +605,12 @@ fn _draw_rect_dur(
     pos: Vec2,
     size: Vec2,
     color: Color,
+    mode: string,
     layer: int,
     depth: DepthMode,
     duration: float
 ) {
-    run_with_duration(duration, () => push_draw_rect(pos, size, color, "fill", 0, layer, depth))
+    run_with_duration(duration, () => push_draw_rect(pos, size, color, mode, 0, layer, depth))
 }
 
 pub fn draw_circle_outline(
@@ -622,24 +623,7 @@ pub fn draw_circle_outline(
     duration: float? = null,
     thickness: float = 1.0 / 16.0
 ) {
-    if duration != null {
-        _draw_circle_outline_dur(p, radius, color, entity_id, layer, depth, duration, thickness)
-    } else {
-        draw_circle(p, radius, color, entity_id, layer, FillMode::Outline, depth, thickness: thickness)
-    }
-}
-
-fn _draw_circle_outline_dur(
-    p: Vec2,
-    radius: float,
-    color: Color,
-    entity_id: int,
-    layer: int,
-    depth: DepthMode,
-    duration: float,
-    thickness: float
-) {
-    run_with_duration(duration, () => draw_circle(p, radius, color, entity_id, layer, FillMode::Outline, depth, thickness: thickness))
+    draw_circle(p, radius, color, entity_id, layer, FillMode::Outline, depth, duration, thickness)
 }
 
 pub fn draw_circle(
@@ -660,26 +644,8 @@ pub fn draw_circle(
     if duration != null {
         _draw_circle_dur(p, radius, color, entity_id, layer, mode, depth, duration, thickness, blend, z_off, outline, unlit)
     } else {
-        emit_circle(p, radius, color, entity_id, layer, mode, depth, thickness, blend: blend, z_off: z_off, unlit: unlit, outline: outline)
+        emit_ellipse(p, v(radius), color, entity_id, layer, mode, depth, thickness, blend: blend, z_off: z_off, unlit: unlit, outline: outline)
     }
-}
-
-fn emit_circle(
-    p: Vec2,
-    radius: float,
-    color: Color,
-    entity_id: int,
-    layer: int,
-    mode: FillMode,
-    depth: DepthMode,
-    thickness: float = 1.0 / 16.0,
-    blend: BlendMode = BlendMode::Alpha,
-    z_off: float = 0,
-    unlit: bool = false,
-    outline: Outline? = null
-) {
-    emit_ellipse(p, v(radius), color, entity_id, layer, mode, depth, thickness,
-        blend: blend, z_off: z_off, unlit: unlit, outline: outline)
 }
 
 pub fn emit_ellipse(
@@ -737,7 +703,7 @@ fn _draw_circle_dur(
     outline: Outline?,
     unlit: bool
 ) {
-    run_with_duration(duration, () => emit_circle(p, radius, color, entity_id, layer, mode, depth, thickness, blend: blend, z_off: z_off, unlit: unlit, outline: outline))
+    run_with_duration(duration, () => emit_ellipse(p, v(radius), color, entity_id, layer, mode, depth, thickness, blend: blend, z_off: z_off, unlit: unlit, outline: outline))
 }
 
 pub fn draw_rect_top_left(
@@ -759,21 +725,10 @@ pub fn draw_rect_outline(
     duration: float? = null
 ) {
     if duration != null {
-        _draw_rect_outline_dur(pos, size, color, layer, depth, duration)
+        _draw_rect_dur(pos, size, color, "line", layer, depth, duration)
     } else {
         push_draw_rect(pos, size, color, "line", 0, layer, depth)
     }
-}
-
-fn _draw_rect_outline_dur(
-    pos: Vec2,
-    size: Vec2,
-    color: Color,
-    layer: int,
-    depth: DepthMode,
-    duration: float
-) {
-    run_with_duration(duration, () => push_draw_rect(pos, size, color, "line", 0, layer, depth))
 }
 
 pub fn draw_rect_outline_top_left(
@@ -937,52 +892,13 @@ pub fn draw_text(
 ) {
     let offset = text_align_offset(align)
     let label = text_align_label(align)
-    if family != null {
-        if duration != null {
-            _draw_text_dur_family(text, pos, size, color, offset, label,
-                entity_id, layer, depth, duration, family)
-        } else {
-            push_draw_text(text, pos, size, color, offset, true, entity_id,
-                layer, depth, label, family: family)
-        }
-        return
-    }
     if duration != null {
-        _draw_text_dur(text, pos, size, color, offset, label, entity_id, layer, depth, duration)
+        _draw_text_dur(text, pos, size, color, offset, true, label, entity_id,
+            layer, depth, duration, family)
     } else {
-        push_draw_text(text, pos, size, color, offset, true, entity_id, layer, depth, label)
+        push_draw_text(text, pos, size, color, offset, true, entity_id, layer,
+            depth, label, family: family)
     }
-}
-
-fn _draw_text_dur_family(
-    text: string,
-    pos: Vec2,
-    size: float,
-    color: Color,
-    offset: Vec2,
-    label: string,
-    entity_id: int,
-    layer: int,
-    depth: DepthMode,
-    duration: float,
-    family: TextFamily
-) {
-    let regular = family.regular.handle
-    let fallback_handles: [Entity<FontData>] = []
-    for fallback in family.fallbacks {
-        fallback_handles.push(fallback.handle)
-    }
-    run_with_duration(duration, () => {
-        let captured = TextFamily {
-            regular: Font { handle: regular },
-            fallbacks: []
-        }
-        for handle in fallback_handles {
-            captured.fallbacks.push(Font { handle: handle })
-        }
-        push_draw_text(text, pos, size, color, offset, true, entity_id,
-            layer, depth, label, family: captured)
-    })
 }
 
 pub fn draw_scene_text(
@@ -1000,8 +916,8 @@ pub fn draw_scene_text(
     let label = text_align_label(align)
     if duration != null {
         let owned = text.clone_into(duration_items.storage)
-        _draw_text_dur(owned, pos, size, color, offset, label,
-            entity_id, layer, depth, duration)
+        _draw_text_dur(owned, pos, size, color, offset, true, label,
+            entity_id, layer, depth, duration, null)
     } else {
         push_draw_text(text, pos, size, color, offset, true, entity_id,
             layer, depth, label)
@@ -1032,13 +948,35 @@ fn _draw_text_dur(
     size: float,
     color: Color,
     offset: Vec2,
+    shadow: bool,
     label: string,
     entity_id: int,
     layer: int,
     depth: DepthMode,
-    duration: float
+    duration: float,
+    family: TextFamily?
 ) {
-    run_with_duration(duration, () => push_draw_text(text, pos, size, color, offset, true, entity_id, layer, depth, label))
+    if family == null {
+        run_with_duration(duration, () => push_draw_text(text, pos, size, color,
+            offset, shadow, entity_id, layer, depth, label))
+        return
+    }
+    let regular = family.regular.handle
+    let fallback_handles: [Entity<FontData>] = []
+    for fallback in family.fallbacks {
+        fallback_handles.push(fallback.handle)
+    }
+    run_with_duration(duration, () => {
+        let captured = TextFamily {
+            regular: Font { handle: regular },
+            fallbacks: []
+        }
+        for handle in fallback_handles {
+            captured.fallbacks.push(Font { handle: handle })
+        }
+        push_draw_text(text, pos, size, color, offset, shadow, entity_id,
+            layer, depth, label, family: captured)
+    })
 }
 
 pub fn draw_text_top_left(
@@ -1052,55 +990,28 @@ pub fn draw_text_top_left(
     duration: float? = null,
     family: TextFamily? = null
 ) {
-    if family != null {
-        if duration != null {
-            _draw_text_top_left_dur_family(text, pos, size, color, entity_id,
-                layer, depth, duration, family)
-        } else {
-            push_draw_text(text, pos, size, color, v(0, 0), false, entity_id,
-                layer, depth, "top_left", family: family)
-        }
-        return
-    }
     if duration != null {
-        _draw_text_top_left_dur(text, pos, size, color, entity_id, layer, depth, duration)
+        _draw_text_dur(text, pos, size, color, v(0, 0), false, "top_left",
+            entity_id, layer, depth, duration, family)
     } else {
-        push_draw_text(text, pos, size, color, v(0, 0), false, entity_id, layer, depth, "top_left")
+        push_draw_text(text, pos, size, color, v(0, 0), false, entity_id,
+            layer, depth, "top_left", family: family)
     }
 }
 
-fn _draw_text_top_left_dur(
-    text: string,
-    pos: Vec2,
-    size: float,
-    color: Color,
-    entity_id: int,
-    layer: int,
-    depth: DepthMode,
-    duration: float
-) {
-    run_with_duration(duration, () => push_draw_text(text, pos, size, color, v(0, 0), false, entity_id, layer, depth, "top_left"))
-}
-
-fn _draw_text_top_left_dur_family(text: string, pos: Vec2, size: float, color: Color, entity_id: int, layer: int, depth: DepthMode, duration: float, family: TextFamily) {
-    run_with_duration(duration, () => push_draw_text(text, pos, size, color,
-        v(0, 0), false, entity_id, layer, depth, "top_left", family: family))
+fn world_text_layout(font: Font, text: string, em_wu: float) -> TextLayout? {
+    let d = font.data() ?? return null
+    let idx = d.backend_id - 1
+    if idx < 0 || idx >= FONT_UNIT_SIZES.len || FONT_UNIT_SIZES[idx] <= 0.0 {
+        return null
+    }
+    let scale = em_wu / FONT_UNIT_SIZES[idx]
+    return text_world_layout_scaled(font, text, scale, scale)
 }
 
 fn measure_world_text_for(font: Font, text: string, em_wu: float) -> Vec2 {
-    let d = font.data() ?? return v()
-    let idx = d.backend_id - 1
-    if idx < 0 || idx >= FONT_UNIT_SIZES.len || FONT_UNIT_SIZES[idx] <= 0.0 {
-        return v()
-    }
-    let scale = em_wu / FONT_UNIT_SIZES[idx]
-    let layout = text_world_layout_scaled(font, text, scale, scale)
+    let layout = world_text_layout(font, text, em_wu) ?? return v()
     return v(layout.logical_bounds.w, layout.logical_bounds.h)
-}
-
-pub fn measure_world_text(text: string, em_wu: float) -> Vec2 {
-    let font = DEFAULT_FONT ?? return v(0.0, 0.0)
-    return measure_world_text_for(font, text, em_wu)
 }
 
 pub fn world_text_em_for(font: Font, size: float) -> float {
@@ -1139,21 +1050,10 @@ pub fn world_text_raster_for(font: Font, text: string, pos: Vec2, offset: Vec2, 
     return (em_wu, world_text_anchor(pos, dims, offset))
 }
 
-pub fn world_text_raster(text: string, pos: Vec2, offset: Vec2, size: float) -> (float, Vec2) {
-    let font = DEFAULT_FONT ?? return (0.0, pos)
-    return world_text_raster_for(font, text, pos, offset, size)
-}
-
 fn queue_world_text_at_for(font: Font, text: string, pos: Vec2, size: float, color: Color, offset: Vec2, layer: int, depth: DepthMode) {
     let d = font.data() ?? return
     if d.pixel_size <= 0 { return }
-    let idx = d.backend_id - 1
-    if idx < 0 || idx >= FONT_UNIT_SIZES.len || FONT_UNIT_SIZES[idx] <= 0.0 {
-        return
-    }
-    let em_wu = world_text_em_for(font, size)
-    let scale = em_wu / FONT_UNIT_SIZES[idx]
-    let layout = text_world_layout_scaled(font, text, scale, scale)
+    let layout = world_text_layout(font, text, world_text_em_for(font, size)) ?? return
     let dims = v(layout.logical_bounds.w, layout.logical_bounds.h)
     let anchor = world_text_anchor(pos, dims, offset)
     queue_world_text_layout(layout, anchor.x, anchor.y, color, layer, depth)
@@ -1182,14 +1082,8 @@ fn push_draw_text(text: string, pos: Vec2, size: float, color: Color, offset: Ve
         return
     }
     let font = DEFAULT_FONT ?? return
-    let d = font.data() ?? return
-    let idx = d.backend_id - 1
-    if idx < 0 || idx >= FONT_UNIT_SIZES.len || FONT_UNIT_SIZES[idx] <= 0.0 {
-        return
-    }
     let em_wu = world_text_em_for(font, size)
-    let scale = em_wu / FONT_UNIT_SIZES[idx]
-    let layout = text_world_layout_scaled(font, text, scale, scale)
+    let layout = world_text_layout(font, text, em_wu) ?? return
     let dims = v(layout.logical_bounds.w, layout.logical_bounds.h)
     let anchor = world_text_anchor(pos, dims, offset)
     let off_r = em_wu / 0.75

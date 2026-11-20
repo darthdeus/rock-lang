@@ -2820,28 +2820,6 @@ pub fn measure_plain_text_of(
     }
 }
 
-pub fn queue_world_text(
-    font: Font,
-    text: string,
-    x: float,
-    y: float,
-    sx: float,
-    sy: float,
-    color: Color,
-    z_layer: int,
-    depth: DepthMode
-) {
-    let d = font.data() ?? return
-    let idx = d.backend_id - 1
-    if idx < 0 || idx >= FONT_ATLASES.len { return }
-    if text.len() == 0 { return }
-    let unit_em = if idx < FONT_UNIT_SIZES.len { FONT_UNIT_SIZES[idx] } else { d.pixel_size as float }
-    let unit_scale_x = sx * (d.pixel_size as float) / unit_em
-    let unit_scale_y = abs(sy) * (d.pixel_size as float) / unit_em
-    let layout = text_world_layout_scaled(font, text, unit_scale_x, unit_scale_y)
-    queue_world_text_layout(layout, x, y, color, z_layer, depth)
-}
-
 fn queue_world_text_layout(
     layout: TextLayout,
     x: float,
