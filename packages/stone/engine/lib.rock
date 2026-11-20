@@ -348,7 +348,7 @@ pub @nomangle inline(lua) fn setup_stone() = """
 
         // Unified logging bridge (rock-log). __rock_log / log_once /
         // log_throttled route here so the whole game process shares
-        // one logger/level/format. StoneLogLevel is repr(C) == int.
+        // one logger/level/format.
         void stone_log(int level, const char* category, const char* msg, int wall_clock);
         int stone_log_get_level(void);
         void stone_log_set_level(int level);
@@ -678,8 +678,6 @@ pub @nomangle inline(lua) fn setup_stone() = """
         uint8_t stone_shader_bind_uniform_block(StoneShaderHandle handle, const char* shader_key, const char* block_name, int binding, int size, uint64_t fingerprint);
         uint8_t stone_shader_upload_uniform_block(StoneShaderHandle handle, const uint8_t* data, int size, uint64_t fingerprint);
         int stone_unfilled_uniform_block_count();
-        int stone_uniform_block_buffer_count();
-        int stone_block_program_count();
         uint8_t stone_shader_read_uniform_block(StoneShaderHandle handle, const char* block_name, uint8_t* dst, int size);
         const char* stone_uniform_block_binding_state_json(StoneShaderHandle handle);
         void stone_graphics_capture_begin(const char* directory, int frame);
@@ -1234,7 +1232,6 @@ pub fn stone_scancode_label(token: string) -> string {
 }
 
 pub extern(ffi, "stone") fn stone_imgui_init(window: StoneWindow) -> bool
-pub extern(ffi, "stone") fn stone_imgui_shutdown()
 extern(ffi, "stone") fn stone_imgui_new_frame()
 extern(ffi, "stone") fn stone_imgui_render()
 extern(ffi, "stone") fn stone_imgui_prepare_render() -> PtrU8
@@ -1611,8 +1608,6 @@ pub extern(ffi, "stone") fn stone_shader_bind_uniform_block(handle: int, shader_
 pub extern(ffi, "stone") fn stone_shader_upload_uniform_block(handle: int, data: PtrU8, size: int, fingerprint: int) -> bool
 
 pub extern(ffi, "stone") fn stone_unfilled_uniform_block_count() -> int
-pub extern(ffi, "stone") fn stone_uniform_block_buffer_count() -> int
-pub extern(ffi, "stone") fn stone_block_program_count() -> int
 
 // Read one block's bytes back out, by block name. Desktop GL only
 // (`glGetBufferSubData` does not exist in GLES) and the only thing on either

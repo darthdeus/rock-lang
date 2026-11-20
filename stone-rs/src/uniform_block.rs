@@ -56,23 +56,6 @@ thread_local! {
     static BLOCK_PROGRAMS: RefCell<HashMap<glow::Program, u64>> = RefCell::new(HashMap::new());
 }
 
-/// Registered blocks across every program. The leak oracle: a rejected
-/// candidate that had already bound a block must leave this where it found it.
-#[no_mangle]
-pub extern "C" fn stone_uniform_block_buffer_count() -> c_int {
-    BLOCKS.with(|b| b.borrow().values().map(|v| v.len()).sum::<usize>() as c_int)
-}
-
-/// Programs the draw-attribution map still knows about. A SECOND view, because
-/// the block count above cannot see this one: `BLOCKS` and `BLOCK_PROGRAMS` are
-/// dropped by the same call but are separate maps, and a stale entry here is not
-/// a leaked buffer -- it is a destroyed program's id still claiming draws, which
-/// misattributes as soon as GL hands that id out again.
-#[no_mangle]
-pub extern "C" fn stone_block_program_count() -> c_int {
-    BLOCK_PROGRAMS.with(|m| m.borrow().len() as c_int)
-}
-
 thread_local! {
     static BINDING_STATE_JSON: RefCell<Option<std::ffi::CString>> = const { RefCell::new(None) };
 }
