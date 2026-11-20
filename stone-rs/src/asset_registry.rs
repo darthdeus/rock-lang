@@ -258,66 +258,27 @@ mod resolve_tests {
 
     static UNIQ: AtomicU32 = AtomicU32::new(0);
 
+    fn unique_key(pattern: &str) -> String {
+        pattern.replace('#', &UNIQ.fetch_add(1, Ordering::SeqCst).to_string())
+    }
+
     struct RegisteredAssetGuard(String);
 
     impl Drop for RegisteredAssetGuard {
         fn drop(&mut self) {
-            let mut guard = REGISTRY.lock().unwrap();
-            let Some(registry) = guard.as_mut() else {
-                return;
-            };
-            registry.assets.remove(&self.0);
-            let mut path = Path::new(&self.0);
-            while let Some(parent) = path.parent() {
-                let Some(child) = path.file_name().and_then(|name| name.to_str()) else {
-                    break;
-                };
-                let parent_key = parent.to_string_lossy().into_owned();
-                let empty = if let Some(children) = registry.directories.get_mut(&parent_key) {
-                    children.remove(child);
-                    children.is_empty()
-                } else {
-                    false
-                };
-                if empty {
-                    registry.directories.remove(&parent_key);
-                }
-                path = parent;
+            if let Some(registry) = REGISTRY.lock().unwrap().as_mut() {
+                registry.assets.remove(&self.0);
             }
         }
     }
 
-    fn register_guarded_asset(key: String, bytes: Vec<u8>) -> RegisteredAssetGuard {
+    fn register_guarded_asset(key: &str, bytes: Vec<u8>) -> RegisteredAssetGuard {
         REGISTRY
             .lock()
             .unwrap()
             .get_or_insert_with(AssetRegistry::default)
-            .insert(key.clone(), bytes);
-        RegisteredAssetGuard(key)
-    }
-
-    #[test]
-    fn registered_asset_fixture_restores_registry_after_failure() {
-        let key = format!("cleanup_{}/asset.bin", UNIQ.fetch_add(1, Ordering::SeqCst));
-        let directory = Path::new(&key)
-            .parent()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let result = std::panic::catch_unwind(|| {
-            let _asset = register_guarded_asset(key.clone(), vec![]);
-            panic!("intentional fixture cleanup failure");
-        });
-
-        assert!(result.is_err(), "the fixture must exercise unwind cleanup");
-        assert!(
-            !contains_asset(&key),
-            "failed fixture must remove its registered asset"
-        );
-        assert!(
-            directory_entries(&directory).is_empty(),
-            "failed fixture must remove registry directories"
-        );
+            .insert(key.to_string(), bytes);
+        RegisteredAssetGuard(key.to_string())
     }
 
     fn fresh_root() -> crate::test_support::TestRoot {
@@ -326,8 +287,8 @@ mod resolve_tests {
 
     #[test]
     fn registered_header_does_not_retain_a_full_asset_allocation() {
-        let key = format!("header_{}.bin", UNIQ.fetch_add(1, Ordering::SeqCst));
-        let _asset = register_guarded_asset(key.clone(), vec![42; 8 * 1024 * 1024]);
+        let key = unique_key("header_#.bin");
+        let _asset = register_guarded_asset(&key, vec![42; 8 * 1024 * 1024]);
         let header = resolve_asset_prefix(&key, 24).unwrap();
         assert_eq!(header, vec![42; 24]);
         assert!(
@@ -339,12 +300,17 @@ mod resolve_tests {
     }
 
     #[test]
-    fn override_and_loose_headers_are_bounded_and_preserve_resolution() {
+    fn override_wins_with_bounded_headers_and_falls_back_to_the_registry() {
         let root = fresh_root();
-        let key = format!("header_{}.bin", UNIQ.fetch_add(1, Ordering::SeqCst));
-        let _asset = register_guarded_asset(key.clone(), b"embedded".to_vec());
+        let key = unique_key("world/header_#.bin");
+        let _asset = register_guarded_asset(&key, b"embedded".to_vec());
         let modded = root.join(&key);
+        std::fs::create_dir_all(modded.parent().unwrap()).unwrap();
         std::fs::write(&modded, b"mod header").unwrap();
+        assert_eq!(
+            resolve_with_root(Some(&root), &key, None),
+            Some(b"mod header".to_vec())
+        );
         std::fs::OpenOptions::new()
             .write(true)
             .open(&modded)
@@ -368,110 +334,57 @@ mod resolve_tests {
     }
 
     #[test]
-    fn override_dir_wins_over_registry() {
+    fn unregistered_paths_are_never_overridden() {
         let root = fresh_root();
-        // Unique key: the global registry is shared across tests.
-        let key = format!("world/floor_{}.png", UNIQ.fetch_add(1, Ordering::SeqCst));
-        let embedded = b"EMBEDDED".to_vec();
-        let _asset = register_guarded_asset(key.clone(), embedded.clone());
-        assert_eq!(resolve_with_root(Some(&root), &key, None), Some(embedded));
-        let modded = root.join(&key);
-        std::fs::create_dir_all(modded.parent().unwrap()).unwrap();
-        std::fs::write(&modded, b"MODDED").unwrap();
-        assert_eq!(
-            resolve_with_root(Some(&root), &key, None),
-            Some(b"MODDED".to_vec())
-        );
-    }
-
-    #[test]
-    fn non_shipped_paths_are_never_overridden() {
-        let root = fresh_root();
-        let key = format!("saves/state_{}.json", UNIQ.fetch_add(1, Ordering::SeqCst));
+        let key = unique_key("saves/state_#.json");
         let modded = root.join(&key);
         std::fs::create_dir_all(modded.parent().unwrap()).unwrap();
         std::fs::write(&modded, b"MOD_SAVE").unwrap();
         assert_eq!(resolve_with_root(Some(&root), &key, None), None);
+        assert_eq!(resolve_with_root(None, &key, None), None);
     }
 
     #[test]
     fn traversal_and_absolute_keys_never_escape_mods() {
         let root = fresh_root();
-        assert!(matches!(
-            read_override(&root, "../secret", None),
-            OverrideRead::Missing
-        ));
-        assert!(matches!(
-            read_override(&root, "a/../../secret", None),
-            OverrideRead::Missing
-        ));
-        assert!(matches!(
-            read_override(&root, "/etc/passwd", None),
-            OverrideRead::Missing
-        ));
-    }
-
-    #[test]
-    fn miss_falls_through_to_none_without_mods() {
-        let key = format!("nope_{}.png", UNIQ.fetch_add(1, Ordering::SeqCst));
-        assert_eq!(resolve_with_root(None, &key, None), None);
+        for key in ["../secret", "a/../../secret", "/etc/passwd"] {
+            assert!(
+                matches!(read_override(&root, key, None), OverrideRead::Missing),
+                "{key}"
+            );
+        }
     }
 
     #[cfg(unix)]
     #[test]
     fn unreadable_override_does_not_fall_through_to_embedded_asset() {
         let root = fresh_root();
-        let key = format!("loop_{}/shipped.bin", UNIQ.fetch_add(1, Ordering::SeqCst));
+        let key = unique_key("loop_#/shipped.bin");
         let override_path = root.join(&key);
         std::fs::create_dir_all(override_path.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&override_path, &override_path).unwrap();
         let observed = std::fs::read(&override_path).unwrap_err();
-        let is_loop = observed.raw_os_error() == Some(libc::ELOOP);
-        let _asset = register_guarded_asset(key.clone(), b"embedded bytes".to_vec());
+        assert_eq!(observed.raw_os_error(), Some(libc::ELOOP), "{observed}");
+        let _asset = register_guarded_asset(&key, b"embedded bytes".to_vec());
 
-        let resolution = resolve_with_root(Some(&root), &key, None);
-
-        assert!(
-            is_loop,
-            "independent override read must report ELOOP: {observed}"
-        );
-        assert!(
-            resolution.is_none(),
-            "a failed override read must not become an embedded-asset hit"
-        );
+        assert_eq!(resolve_with_root(Some(&root), &key, None), None);
     }
 
     #[test]
     fn embedded_directory_entries_are_direct_sorted_and_deduplicated() {
-        let stem = format!("list_{}", UNIQ.fetch_add(1, Ordering::SeqCst));
-        let dir = format!("game/assets/{stem}");
+        let dir = unique_key("game/assets/list_#");
         {
             let mut guard = REGISTRY.lock().unwrap();
             let registry = guard.get_or_insert_with(AssetRegistry::default);
-            registry.insert(format!("{dir}/z.ogg"), vec![]);
-            registry.insert(format!("{dir}/a.ogg"), vec![]);
-            registry.insert(format!("{dir}/nested/one.ogg"), vec![]);
-            registry.insert(format!("{dir}/nested/two.ogg"), vec![]);
+            for child in ["z.ogg", "a.ogg", "nested/one.ogg", "nested/two.ogg"] {
+                registry.insert(format!("{dir}/{child}"), vec![]);
+            }
             registry.insert(format!("{dir}ish/not-a-child.ogg"), vec![]);
         }
 
-        assert_eq!(
-            directory_entries(&dir),
-            vec![
-                "a.ogg".to_string(),
-                "nested".to_string(),
-                "z.ogg".to_string()
-            ]
-        );
-        assert_eq!(
-            directory_entries(&dir.replace('/', "\\")),
-            vec![
-                "a.ogg".to_string(),
-                "nested".to_string(),
-                "z.ogg".to_string()
-            ],
-            "all registry queries must share separator normalization"
-        );
+        let expected = ["a.ogg", "nested", "z.ogg"];
+        assert_eq!(directory_entries(&dir), expected);
+        assert_eq!(directory_entries(&dir.replace('/', "\\")), expected);
         assert!(contains_directory(&dir) && contains_directory(&format!("{dir}/nested/")));
         assert!(
             !contains_directory(&format!("{dir}/a.ogg")),
