@@ -264,11 +264,6 @@ mod worker_admission;
 
 use events::{SimEvent, parse_sim_marker};
 
-struct PreparedSims {
-    registry: SimRegistry,
-    stone: Option<crate::skull_backend::IncrementalProject>,
-}
-
 #[derive(Debug)]
 struct SimRegistry {
     wire_names: Vec<String>,
@@ -334,39 +329,12 @@ fn resolve_sim_sources(
         .collect())
 }
 
-fn prepare_sims(project_path: PathBuf, output_path: PathBuf) -> Result<PreparedSims> {
-    crate::package::check_project_assets(&project_path)?;
-    let selection = child_sim_selection()?;
-    let compiled =
-        compile_sims_with_allocation(project_path, output_path.clone(), None, &selection)?;
-    let Some(receipt) = std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).filter(|dir| !dir.is_empty())
-    else {
-        return Ok(PreparedSims {
-            registry: compiled.registry.into(),
-            stone: Some(compiled.stone),
-        });
-    };
-    drop(compiled.stone);
-    let receipt = PathBuf::from(receipt);
-    let artifact = rock_host::project::MAIN_LUA_FILENAME;
-    fs_err::copy(output_path.join(artifact), receipt.join(artifact))?;
-    fs_err::write(
-        receipt.join(SIM_REGISTRY_FILENAME),
-        serde_json::to_vec(&compiled.registry).context("serialize sim registry")?,
-    )?;
-    Ok(PreparedSims {
-        registry: compiled.registry.into(),
-        stone: None,
-    })
-}
-
 fn prepare_sims_out_of_process(
-    project_path: PathBuf,
-    output_path: PathBuf,
+    project_path: &Path,
     rock_exe: &Path,
     selection: &[String],
-) -> Result<PreparedSims> {
-    crate::package::check_project_assets(&project_path)?;
+) -> Result<(TempDir, SimRegistry)> {
+    crate::package::check_project_assets(project_path)?;
     sweep_stale_sim_receipt_roots(Path::new("tmp"));
     fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
     let receipt_prefix = format!("{SIM_RECEIPT_PREFIX}{}-", std::process::id());
@@ -374,17 +342,13 @@ fn prepare_sims_out_of_process(
         .prefix(&receipt_prefix)
         .tempdir_in("tmp")
         .context("creating sim compile receipt directory")?;
-    compile_receipt_in_child(&project_path, rock_exe, root.path(), selection)?;
+    compile_receipt_in_child(project_path, rock_exe, root.path(), selection)?;
     crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
-    let artifact = rock_host::project::MAIN_LUA_FILENAME;
-    fs_err::copy(root.path().join(artifact), output_path.join(artifact))?;
     let registry_path = root.path().join(SIM_REGISTRY_FILENAME);
     let registry: Vec<RegisteredSim> = serde_json::from_slice(&fs_err::read(&registry_path)?)
         .with_context(|| format!("parse sim registry {}", registry_path.display()))?;
-    Ok(PreparedSims {
-        registry: registry.into(),
-        stone: None,
-    })
+    fs_err::remove_file(registry_path)?;
+    Ok((root, registry.into()))
 }
 
 const SIM_RECEIPT_PREFIX: &str = "sim-receipt-";
@@ -798,11 +762,31 @@ fn any_reload_lane_selected(
 
 pub(crate) fn do_list_sims(project: &str) -> Result<()> {
     let project_path = rock_engine_host::project::resolve_project_dir(project)?;
-
-    let out_dir = sim_output_dir()?;
-    let prepared = prepare_sims(project_path, out_dir.path().to_path_buf())?;
-    for name in prepared.registry.wire_names {
-        println!("{}", name);
+    let receipt = std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).filter(|dir| !dir.is_empty());
+    let scratch;
+    let output = if let Some(receipt) = &receipt {
+        Path::new(receipt)
+    } else {
+        scratch = sim_output_dir()?;
+        scratch.path()
+    };
+    crate::package::check_project_assets(&project_path)?;
+    let CompiledSims { registry, stone } = compile_sims_with_allocation(
+        project_path,
+        output.to_path_buf(),
+        None,
+        &child_sim_selection()?,
+    )?;
+    drop(stone);
+    if receipt.is_some() {
+        fs_err::write(
+            output.join(SIM_REGISTRY_FILENAME),
+            serde_json::to_vec(&registry).context("serialize sim registry")?,
+        )?;
+    } else {
+        for entry in registry {
+            println!("{}", entry.wire_name);
+        }
     }
     Ok(())
 }
@@ -811,29 +795,27 @@ fn prepare_run(
     project: &str,
     names: &[String],
     recorder: &SimRunRecorder,
-) -> Result<(PathBuf, TempDir, PreparedSims)> {
+) -> Result<(PathBuf, TempDir, SimRegistry)> {
     let project_path = recorder.phase("resolve_project", || {
         rock_engine_host::project::resolve_project_dir(project)
     })?;
     recorder.phase("build_engine", || {
         rock_engine_host::engine_build::build_engine_libs(&project_path.to_string_lossy())
     })?;
-    let out_dir = sim_output_dir()?;
-    let prepared = recorder.phase("compile_and_discover", || {
+    let (out_dir, registry) = recorder.phase("compile_and_discover", || {
         prepare_sims_out_of_process(
-            project_path.clone(),
-            out_dir.path().to_path_buf(),
+            &project_path,
             &rock_host::process_management::current_executable_image()?,
             names,
         )
     })?;
-    Ok((project_path, out_dir, prepared))
+    Ok((project_path, out_dir, registry))
 }
 
 fn run_single_sim(
     project_path: &Path,
     output_path: &Path,
-    mut prepared: PreparedSims,
+    registry: SimRegistry,
     specs: &[String],
     quiet: bool,
     update_snapshots: bool,
@@ -842,43 +824,41 @@ fn run_single_sim(
 ) -> Result<()> {
     let sim_name = &specs[0];
     let output = output_path.to_string_lossy();
-    if prepared.stone.is_none() && entry_is_reload_lane(sim_name, &prepared.registry.env_by_wire) {
+    let (registry, mut stone) = if entry_is_reload_lane(sim_name, &registry.env_by_wire) {
         let compiled = recorder.phase("compile_reload_session", || {
             compile_sims(project_path.to_path_buf(), output_path.to_path_buf())
         })?;
-        prepared = PreparedSims {
-            registry: compiled.registry.into(),
-            stone: Some(compiled.stone),
-        };
-    }
+        (compiled.registry.into(), Some(compiled.stone))
+    } else {
+        (registry, None)
+    };
     let entry_ids = recorder.plan_entries(specs);
     recorder.configure(
         project_path,
-        &prepared.registry.wire_names,
+        &registry.wire_names,
         requested_jobs,
         1,
         None,
         1,
         update_snapshots,
-        &prepared.registry.source_files,
+        &registry.source_files,
     );
     emit_bytecode_image(Path::new(output.as_ref()));
 
-    let sim_sources = resolve_sim_sources(project_path, &prepared.registry.source_files)?;
+    let sim_sources = resolve_sim_sources(project_path, &registry.source_files)?;
     let (display_name, summary) = run_named_entry(
         sim_name,
         quiet,
         false,
         update_snapshots,
         &output,
-        prepared
-            .registry
+        registry
             .env_by_wire
             .get(sim_name)
             .cloned()
             .unwrap_or_default(),
         sim_sources.get(sim_name).cloned(),
-        prepared.stone.as_mut(),
+        stone.as_mut(),
         None,
         Some(recorder),
         entry_ids.first().copied(),
@@ -1072,19 +1052,19 @@ fn do_run_sims_recorded(
     full_asset_jobs: Option<usize>,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
-    let (project_path, out_dir, prepared) = prepare_run(project, names, recorder)?;
+    let (project_path, out_dir, registry) = prepare_run(project, names, recorder)?;
     let output_path = out_dir.path();
     let suite = names.is_empty();
     let specs = if suite {
-        Ok(prepared.registry.wire_names.clone())
+        Ok(registry.wire_names.clone())
     } else {
-        resolve_sim_specs(&prepared.registry.wire_names, names)
+        resolve_sim_specs(&registry.wire_names, names)
     };
     if names.len() == 1 {
         return run_single_sim(
             &project_path,
             output_path,
-            prepared,
+            registry,
             &specs?,
             quiet,
             update_snapshots,
@@ -1099,7 +1079,7 @@ fn do_run_sims_recorded(
         wire_names,
         env_by_wire,
         source_files,
-    } = prepared.registry;
+    } = registry;
     let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
     let specs = specs?;
     emit_bytecode_image(Path::new(output.as_ref()));
@@ -1153,7 +1133,7 @@ fn do_run_sims_recorded(
         &project_path,
         any_reload_lane_selected(&routine_specs, &env_by_wire),
         Path::new(output.as_ref()),
-        prepared.stone,
+        None,
         quiet,
     )?;
     let results = SimRun {

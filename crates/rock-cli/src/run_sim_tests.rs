@@ -123,21 +123,16 @@ fn a_fat_runner_does_not_trip_the_cap_of_a_small_child() {
 }
 
 #[test]
-fn sim_receipt_prepare_releases_session() {
+fn sim_compile_child_uses_the_runner_output_directory() {
     const HELPER: &str = "ROCK_TEST_RECEIPT_RELEASE_HELPER";
     if let Some(root) = std::env::var_os(HELPER) {
         let root = PathBuf::from(root);
-        let prepared =
-            prepare_sims(root.join("project"), root.join("output")).expect("prepare receipt");
-        assert!(
-            prepared.stone.is_none(),
-            "receipt preparation retained its compiler session"
-        );
+        do_list_sims(&root.join("project").to_string_lossy()).expect("compile sim registry");
         return;
     }
     let root = tempfile::tempdir().expect("receipt fixture");
     std::fs::create_dir(root.path().join("project")).unwrap();
-    std::fs::create_dir(root.path().join("output")).unwrap();
+    std::fs::write(root.path().join("tmp"), "no second output directory").unwrap();
     std::fs::create_dir(root.path().join("receipts")).unwrap();
     std::fs::write(
         root.path().join("project/main.rock"),
@@ -147,9 +142,10 @@ fn sim_receipt_prepare_releases_session() {
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "run_sim::tests::sim_receipt_prepare_releases_session",
+            "run_sim::tests::sim_compile_child_uses_the_runner_output_directory",
             "--nocapture",
         ])
+        .current_dir(root.path())
         .env(HELPER, root.path())
         .env(SIM_COMPILE_RECEIPT_DIR_ENV, root.path().join("receipts"))
         .output()
