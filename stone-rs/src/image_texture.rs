@@ -591,23 +591,27 @@ mod stub_storage_tests {
     }
 
     #[test]
-    fn stored_bytes_use_the_uploaded_extent_and_texel_width() {
-        assert_eq!(stored_texel_bytes(3, 2, ImageFormat::Rgba8, false), 24);
-        assert_eq!(stored_texel_bytes(3, 2, ImageFormat::DepthRg8, false), 12);
-        assert_eq!(stored_texel_bytes(3, 2, ImageFormat::R8, true), 7);
-    }
-
-    #[test]
-    fn image_formats_use_sized_gl_storage_and_matching_upload_lanes() {
-        assert_eq!(ImageFormat::Rgba8.gl_internal(), glow::RGBA8);
-        assert_eq!(ImageFormat::Rgba8.gl_external(), glow::RGBA);
-        assert_eq!(ImageFormat::Rgba8.level_bytes(1, 1), 4);
-        assert_eq!(ImageFormat::DepthRg8.gl_internal(), glow::RG8);
-        assert_eq!(ImageFormat::DepthRg8.gl_external(), glow::RG);
-        assert_eq!(ImageFormat::DepthRg8.level_bytes(1, 1), 2);
-        assert_eq!(ImageFormat::MaterialRg8.gl_internal(), glow::RG8);
-        assert_eq!(ImageFormat::MaterialRg8.gl_external(), glow::RG);
-        assert_eq!(ImageFormat::MaterialRg8.level_bytes(1, 1), 2);
+    fn formats_use_sized_gl_storage_matching_lanes_and_stored_texel_bytes() {
+        use ImageFormat::*;
+        for (format, internal, external, texel_bytes) in [
+            (Rgba8, glow::RGBA8, glow::RGBA, 4),
+            (DepthRg8, glow::RG8, glow::RG, 2),
+            (MaterialRg8, glow::RG8, glow::RG, 2),
+        ] {
+            assert_eq!(format.gl_internal(), internal, "{format:?}");
+            assert_eq!(format.gl_external(), external, "{format:?}");
+            assert_eq!(format.level_bytes(1, 1), texel_bytes, "{format:?}");
+            assert_eq!(
+                stored_texel_bytes(3, 2, format, false),
+                6 * texel_bytes,
+                "{format:?} stores its uploaded extent"
+            );
+        }
+        assert_eq!(
+            stored_texel_bytes(3, 2, R8, true),
+            7,
+            "a mip chain adds its smaller levels"
+        );
     }
 
     /// A headers-only load defines one white texel, so what GL holds is 1x1
