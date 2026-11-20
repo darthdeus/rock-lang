@@ -47,12 +47,6 @@ pub extern "C" fn stone_register_asset(path: *const c_char, data: *const u8, len
         .insert(path_str, bytes);
 }
 
-/// Look up an asset by path. Returns None if not registered.
-/// Normalizes path separators (backslash → forward slash) for cross-platform compatibility.
-pub fn get_asset(path: &str) -> Option<Vec<u8>> {
-    with_asset(path, |data| data.to_vec())
-}
-
 /// Cheap presence check without copying the bytes.
 pub fn contains_asset(path: &str) -> bool {
     with_asset(path, |_| ()).is_some()

@@ -887,8 +887,6 @@ fn move_window(window: &mut sdl2::video::Window, x: i32, y: i32) {
 pub(crate) use stone_gl::{compile_shader, link_program, DebugGl};
 use stone_gl::{context_request, GlContextRequest, GlHost, GlProfile};
 
-pub use logging::StoneLogLevel;
-
 struct PendingShow {
     pos: (i32, i32),
     map_requested: bool,
@@ -1009,13 +1007,6 @@ impl Default for StoneEvent {
             text: [0; STONE_TEXT_INPUT_BYTES],
         }
     }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct StoneString {
-    pub data: *const c_char,
-    pub len: usize,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -3687,9 +3678,6 @@ pub extern "C" fn stone_reset_frame_stats() {
         uniform_block::rebind_current_program(gl);
     });
 }
-
-pub use mesh::{stone_mesh_create, stone_mesh_draw, stone_mesh_free, stone_mesh_set_instances};
-pub use sprite::stone_draw_mesh;
 
 #[cfg(test)]
 mod tests {
