@@ -18,75 +18,6 @@ pub(super) struct GpuMemory {
 
 type Probe = std::result::Result<Option<GpuMemory>, String>;
 
-#[derive(Default)]
-struct Activity {
-    waiting: usize,
-    active: usize,
-}
-
-impl Activity {
-    fn phase(&self) -> &'static str {
-        if self.waiting > 0 && self.active == 0 {
-            "sim-admission"
-        } else {
-            "execution"
-        }
-    }
-
-    fn change(&mut self, waiting: isize, active: isize) -> Option<&'static str> {
-        let previous = self.phase();
-        self.waiting = self
-            .waiting
-            .checked_add_signed(waiting)
-            .expect("balanced waiting workers");
-        self.active = self
-            .active
-            .checked_add_signed(active)
-            .expect("balanced active workers");
-        (previous != self.phase()).then(|| self.phase())
-    }
-}
-
-static ACTIVITY: std::sync::Mutex<Activity> = std::sync::Mutex::new(Activity {
-    waiting: 0,
-    active: 0,
-});
-
-fn report_activity(waiting: isize, active: isize) {
-    let mut activity = ACTIVITY.lock().unwrap();
-    if let Some(phase) = activity.change(waiting, active) {
-        rock_host::process_management::report_spawn_phase(phase);
-    }
-}
-
-// A waiter must not pause the execution deadline of an active sibling.
-// Keep this guard through child teardown, including failed spawn/PID publication.
-pub(super) struct WorkerPhase {
-    active: bool,
-}
-
-impl WorkerPhase {
-    pub(super) fn waiting() -> Self {
-        report_activity(1, 0);
-        Self { active: false }
-    }
-
-    pub(super) fn admitted(&mut self) {
-        report_activity(-1, 1);
-        self.active = true;
-    }
-}
-
-impl Drop for WorkerPhase {
-    fn drop(&mut self) {
-        if self.active {
-            report_activity(0, -1);
-        } else {
-            report_activity(-1, 0);
-        }
-    }
-}
-
 /// Probes are shared by threads, but leases are always counted afresh under
 /// the host lock. A cached reading cannot spend the same capacity twice:
 /// a new PID absent from that reading still reserves its whole estimate.
@@ -301,16 +232,6 @@ pub(super) fn try_acquire(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn waiting_siblings_never_hide_active_execution() {
-        let mut activity = Activity::default();
-        assert_eq!(activity.change(1, 0), Some("sim-admission"));
-        assert_eq!(activity.change(-1, 1), Some("execution"));
-        assert_eq!(activity.change(1, 0), None);
-        assert_eq!(activity.change(0, -1), Some("sim-admission"));
-        assert_eq!(activity.change(-1, 0), Some("execution"));
-        assert_eq!((activity.waiting, activity.active), (0, 0));
-    }
     fn granted(result: Result<Admission>) -> std::result::Result<File, &'static str> {
         match result.unwrap() {
             Admission::Granted(file) => Ok(file),

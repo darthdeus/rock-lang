@@ -13,18 +13,6 @@ pub fn current_executable_image() -> std::io::Result<std::path::PathBuf> {
     Ok(executable)
 }
 
-/// A budgeting parent names this file for the process to report its phase in.
-pub const SPAWN_PHASE_FILE_ENV: &str = "ROCK_SPAWN_PHASE_FILE";
-
-pub fn report_spawn_phase(phase: &str) {
-    let Some(path) = std::env::var_os(SPAWN_PHASE_FILE_ENV) else {
-        return;
-    };
-    if let Err(error) = fs_err::write(&path, phase) {
-        warn!(target: "CLI", "cannot record spawn phase {phase} at {}: {error}", std::path::Path::new(&path).display());
-    }
-}
-
 /// A panicked reader or failed read is a harness failure: truncated output would let
 /// the caller judge the program on bytes it never fully saw.
 pub fn join_drained_pipe(

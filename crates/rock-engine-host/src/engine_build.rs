@@ -569,34 +569,6 @@ mod tests {
         assert_eq!(loaded.libs.len(), 1);
         validate_receipt_lib(&root_path, &loaded.libs[0]).expect("loaded identity remains valid");
     }
-
-    #[test]
-    fn an_engine_build_reports_its_phase_before_cargo_runs() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let phase = dir.path().join("phase");
-        // SAFETY: nextest runs each test in its own process. Restored below.
-        let prev = std::env::var_os(rock_host::process_management::SPAWN_PHASE_FILE_ENV);
-        unsafe { std::env::set_var(rock_host::process_management::SPAWN_PHASE_FILE_ENV, &phase) };
-        let built = cargo_build_and_stage_lib(
-            "phase probe",
-            &["--rock-phase-probe-unknown-flag"],
-            "x",
-            "phase_probe",
-        );
-        unsafe {
-            match prev {
-                Some(v) => {
-                    std::env::set_var(rock_host::process_management::SPAWN_PHASE_FILE_ENV, v)
-                }
-                None => std::env::remove_var(rock_host::process_management::SPAWN_PHASE_FILE_ENV),
-            }
-        }
-        assert!(built.is_err(), "cargo must reject the probe flag");
-        assert_eq!(
-            fs_err::read_to_string(&phase).ok().as_deref(),
-            Some("engine-build")
-        );
-    }
 }
 
 fn cargo_build_and_stage_lib(
@@ -612,7 +584,6 @@ fn cargo_build_and_stage_lib(
         return Ok(());
     }
     require_source_build()?;
-    rock_host::process_management::report_spawn_phase("engine-build");
     rock_host::timed(format!("{display_name}: cargo build"), || {
         run_cargo(cargo_args, &format!("Failed to build {}", display_name))
     })?;

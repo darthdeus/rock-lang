@@ -25,11 +25,9 @@ pub(crate) fn do_perf(
 ) -> Result<()> {
     use crate::common::ProcessManager;
 
-    rock_host::process_management::report_spawn_phase("compile");
     crate::package::check_project_assets(Path::new(path))?;
     let (_invocation, compiled) = compile_frame_invocation(path, &output)?;
     let lua_file = &compiled.lua_file;
-    rock_host::process_management::report_spawn_phase("runtime-prepare");
 
     let measured_frames = frames;
     anyhow::ensure!(
@@ -98,7 +96,6 @@ pub(crate) fn do_perf(
         Duration::from_secs_f64(wall_budget.max(30.0))
     });
 
-    rock_host::process_management::report_spawn_phase("execution");
     let launch_start = bone_core::prelude::Instant::now();
     let launched = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -260,10 +257,8 @@ pub(crate) fn do_one_frame(
 ) -> Result<()> {
     use crate::common::ProcessManager;
 
-    rock_host::process_management::report_spawn_phase("compile");
     let (_invocation, compiled) = compile_frame_invocation(path, &output)?;
     let lua_file = &compiled.lua_file;
-    rock_host::process_management::report_spawn_phase("runtime-prepare");
 
     if frames == 1 {
         info!("Running stone for one frame...");
@@ -281,7 +276,6 @@ pub(crate) fn do_one_frame(
     apply_headless_audio_env(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    rock_host::process_management::report_spawn_phase("execution");
     let mut child = crate::headless_scope::spawn_bound_child(&mut cmd, lua_file.parent().unwrap())?;
 
     let watchdog = frame_timeout_override().unwrap_or(Duration::from_secs(5));

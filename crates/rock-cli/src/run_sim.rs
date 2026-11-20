@@ -388,7 +388,6 @@ fn prepare_sims_out_of_process(
     selection: &[String],
 ) -> Result<PreparedSims> {
     crate::package::check_project_assets(&project_path)?;
-    rock_host::process_management::report_spawn_phase("compile-prepare");
     sweep_stale_sim_receipt_roots(Path::new("tmp"));
     fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
     let receipt_prefix = format!("{SIM_RECEIPT_PREFIX}{}-", std::process::id());
@@ -453,7 +452,6 @@ fn compile_receipt_in_child(
     receipt_root: &Path,
     selection: &[String],
 ) -> Result<()> {
-    rock_host::process_management::report_spawn_phase("compile");
     let mut cmd = std::process::Command::new(rock_exe);
     cmd.args(compile_child_invocation_args())
         .arg("sim")
@@ -762,7 +760,6 @@ fn compile_sims_with_allocation(
     allocation_manifest: Option<&Path>,
     selection: &[String],
 ) -> Result<CompiledSims> {
-    rock_host::process_management::report_spawn_phase("compile");
     crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
     let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
     skull_compile_game_and_collect_sims_with_allocation(
@@ -3284,9 +3281,7 @@ fn run_child(mut config: ChildConfig<'_>) -> Result<SimSummary> {
 
     let (mut cmd, lua_file) = child_command(part, output, quiet, config.census_warmup_frames);
 
-    let mut worker_phase = worker_admission::WorkerPhase::waiting();
     let (mut worker_slot, admission_ms, checks_ms, waits) = acquire_worker_slot(&part.name)?;
-    worker_phase.admitted();
     let worker_attempt = recorder
         .map(|recorder| {
             recorder.worker_spawn(part.occurrence_id, &part.name, &workload_env(&part.env))

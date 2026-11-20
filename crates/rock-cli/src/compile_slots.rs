@@ -14,7 +14,6 @@ use std::time::Duration;
 
 #[cfg(not(test))]
 const ADMISSION_ENV: &str = "ROCK_COMPILE_ADMISSION";
-use rock_host::process_management::report_spawn_phase;
 
 #[cfg(test)]
 const AUTHOR_SLOT: &str = "priority-0";
@@ -182,7 +181,6 @@ fn acquire_reserving(
     reserve_mib: u64,
     peak_key: Option<String>,
 ) -> Result<CompileSlot> {
-    report_spawn_phase("slot-wait");
     let started = Instant::now();
     fs_err::create_dir_all(&config.dir).context("creating the compile slot directory")?;
     let reserve_mib = reserve_mib.min(config.pool_mib);
@@ -208,7 +206,6 @@ fn acquire_reserving(
                     log::warn!(target: "COMPILE", "recording the holder of compile slot {preferred_slot}: {error}");
                 }
                 log::debug!(target: "COMPILE", "took compile slot {preferred_slot} for {what}");
-                report_spawn_phase("compile");
                 return Ok(CompileSlot {
                     held: Some(held(file, path, false)),
                     marks_thread: false,
@@ -251,7 +248,6 @@ fn acquire_reserving(
                 } else {
                     log::debug!(target: "COMPILE", "took compile slot {name} ({reserve_mib} MiB) for {what} in {waited:?}");
                 }
-                report_spawn_phase("compile");
                 return Ok(CompileSlot {
                     held: Some(held(file, path, true)),
                     marks_thread: false,
