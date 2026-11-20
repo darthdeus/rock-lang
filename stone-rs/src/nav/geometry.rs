@@ -33,13 +33,13 @@ pub(super) fn nav_refine(
     let wy = g.space_oy[si] + y;
     loop {
         let mut w = plan.wp_next;
-        if w < plan.wp_count && plan.wp_link[w] != 0 {
-            if wx == plan.wp_x[w] && wy == plan.wp_y[w] {
+        if w < plan.wp.len() && plan.wp[w].link != 0 {
+            if wx == plan.wp[w].x && wy == plan.wp[w].y {
                 plan.wp_next += 1;
                 continue;
             }
-            if wx == plan.wp_x[w - 1] && wy == plan.wp_y[w - 1] {
-                plan.seg_count = 0;
+            if wx == plan.wp[w - 1].x && wy == plan.wp[w - 1].y {
+                plan.seg.clear();
                 return NavStep::Teleport(Place {
                     space: SpaceId {
                         value: g.space_id[si],
@@ -64,19 +64,19 @@ pub(super) fn nav_refine(
             h: 1,
         };
         let mut direct = false;
-        if w < plan.wp_count && w > plan.last_link && nav_clusters_near(g, ca, home) {
+        if w < plan.wp.len() && w > plan.last_link && nav_clusters_near(g, ca, home) {
             q.refine_work += nav_tile_search(g, q, ca, home, seed, true, target, true);
             direct = q.tile_found >= 0;
         }
         if direct {
-            plan.wp_next = plan.wp_count;
-            w = plan.wp_count;
+            plan.wp_next = plan.wp.len();
+            w = plan.wp.len();
         } else {
-            if w < plan.wp_count {
-                home = plan.wp_cluster[w];
+            if w < plan.wp.len() {
+                home = plan.wp[w].cluster;
                 target = IRect {
-                    x: plan.wp_x[w],
-                    y: plan.wp_y[w],
+                    x: plan.wp[w].x,
+                    y: plan.wp[w].y,
                     w: 1,
                     h: 1,
                 };
@@ -92,36 +92,20 @@ pub(super) fn nav_refine(
             }
             return nav_requery(g, q, plan, si, x, y);
         }
-        let mut len = 0;
+        plan.seg.clear();
         let mut t = q.tile_found;
         while t >= 0 {
-            len += 1;
+            plan.seg.push(iv(
+                q.tile_ox + t % q.tile_stride,
+                q.tile_oy + t / q.tile_stride,
+            ));
             t = q.tile_parent[t];
         }
-        while plan.seg_x.len() < len {
-            plan.seg_x.push(0);
+        plan.seg.0.reverse();
+        if plan.seg.len() > 1 {
+            return nav_step_to(g, si, plan.seg[1].x, plan.seg[1].y);
         }
-        while plan.seg_y.len() < len {
-            plan.seg_y.push(0);
-        }
-        for i in 0..len {
-            plan.seg_x[i] = 0;
-            plan.seg_y[i] = 0;
-        }
-        t = q.tile_found;
-        let mut i = len - 1;
-        while t >= 0 {
-            plan.seg_x[i] = q.tile_ox + t % q.tile_stride;
-            plan.seg_y[i] = q.tile_oy + t / q.tile_stride;
-            i -= 1;
-            t = q.tile_parent[t];
-        }
-        plan.seg_count = len;
-        plan.seg_pos = 0;
-        if len > 1 {
-            return nav_step_to(g, si, plan.seg_x[1], plan.seg_y[1]);
-        }
-        if w >= plan.wp_count {
+        if w >= plan.wp.len() {
             return NavStep::Reached;
         }
         plan.wp_next += 1;
@@ -546,14 +530,7 @@ pub(super) fn nav_reconnect(
     y: int,
 ) -> NavStep {
     let ca = nav_tile_cluster(g, si, x, y);
-    let mut tracked = false;
-    for i in 0..plan.ver_count {
-        if plan.ver_cluster[i] == ca {
-            tracked = true;
-            break;
-        }
-    }
-    if !tracked {
+    if !plan.versions.iter().any(|&(c, _)| c == ca) {
         return nav_requery(g, q, plan, si, x, y);
     }
     let mut cb = ca;

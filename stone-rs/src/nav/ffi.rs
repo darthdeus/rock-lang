@@ -680,7 +680,7 @@ pub unsafe extern "C" fn stone_nav_route_restore(
         plan.path_pos = path_pos;
         plan.state = NAV_PLAN_READY;
         plan.epoch = n.graph.epoch;
-        plan.ver_count = 0;
+        plan.versions.clear();
         for i in (0..plan.route.len()).rev() {
             let tile = plan.route[i];
             let si = nav_world_space(&n.graph, tile.x, tile.y, plan.si);

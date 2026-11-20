@@ -88,23 +88,16 @@ pub(super) fn nav_area_anchor(q: &NavQuery, id: int) -> int {
 }
 
 pub(super) fn nav_area_pair(_g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) -> int {
-    if q.start_count == 0 || q.goal_count == 0 {
+    if q.start.len() == 0 || q.goals.len() == 0 {
         return -1;
     }
-    let from = q.areas.nodes[q.start_node[0]];
-    let to = q.areas.nodes[q.goal_node[0]];
-    if from == to {
+    let from = q.areas.nodes[q.start[0].0];
+    let to = q.areas.nodes[q.goals[0]];
+    if from == to
+        || q.start.iter().any(|&(n, _)| q.areas.nodes[n] != from)
+        || q.goals.iter().any(|&n| q.areas.nodes[n] != to)
+    {
         return -1;
-    }
-    for i in 1..q.start_count {
-        if q.areas.nodes[q.start_node[i]] != from {
-            return -1;
-        }
-    }
-    for i in 1..q.goal_count {
-        if q.areas.nodes[q.goal_node[i]] != to {
-            return -1;
-        }
     }
     let a = &mut q.areas;
     for i in 0..a.pair_count {

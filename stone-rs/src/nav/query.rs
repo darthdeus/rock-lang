@@ -100,8 +100,8 @@ pub(super) fn nav_request(
     plan.teleports = teleports;
     plan.expansions = 0;
     plan.cost = 0;
-    plan.wp_count = 0;
-    plan.ver_count = 0;
+    plan.wp.clear();
+    plan.versions.clear();
     let id = nav_requery_id(q, &mut plan, si, from.grid.x, from.grid.y);
     q.plans[slot] = plan;
     id
@@ -121,8 +121,7 @@ pub(super) fn nav_requery_id(
     plan.from_x = x;
     plan.from_y = y;
     plan.state = NAV_PLAN_QUEUED;
-    plan.seg_count = 0;
-    plan.seg_pos = 0;
+    plan.seg.clear();
     plan.queue_prev = q.tail;
     plan.queue_next = -1;
     if q.tail >= 0 {
@@ -349,10 +348,12 @@ pub(super) fn nav_next_step(
         return nav_requery(g, q, plan, si, x, y);
     }
     if plan.epoch != g.epoch {
-        for i in 0..plan.ver_count {
-            if g.cluster_version[plan.ver_cluster[i]] != plan.ver_value[i] {
-                return nav_requery(g, q, plan, si, x, y);
-            }
+        if plan
+            .versions
+            .iter()
+            .any(|&(c, v)| g.cluster_version[c] != v)
+        {
+            return nav_requery(g, q, plan, si, x, y);
         }
         plan.epoch = g.epoch;
     }

@@ -46,35 +46,23 @@ pub(super) fn nav_query_begin(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) {
     q.phase = NAV_Q_START;
     q.epoch = g.epoch;
     nav_query_next_stamp(q);
-    q.start_count = 0;
-    q.goal_count = 0;
+    q.start.clear();
+    q.goals.clear();
     q.direct = NAV_INF;
     q.best = NAV_INF;
     q.best_node = -1;
     q.expansions = 0;
     q.heap.clear();
-    q.pad_count = 0;
+    q.pads.clear();
     q.pad_cost = NAV_INF;
     for l in 0..g.link_cost.len() {
-        if (plan.teleports & g.link_bit[l]) == 0 {
-            continue;
+        if (plan.teleports & g.link_bit[l]) != 0 {
+            let pad = g.ep_base + 2 * l;
+            q.pads.push(iv(g.node_x[pad], g.node_y[pad]));
+            q.pad_cost = min(q.pad_cost, g.link_cost[l]);
         }
-        let pad = g.ep_base + 2 * l;
-        let x = g.node_x[pad];
-        let y = g.node_y[pad];
-        let mut i = q.pad_count;
-        nav_put(&mut q.pad_x, i, x);
-        nav_put(&mut q.pad_y, i, y);
-        while i > 0 && q.pad_x[i - 1] > x {
-            q.pad_x[i] = q.pad_x[i - 1];
-            q.pad_y[i] = q.pad_y[i - 1];
-            i -= 1;
-        }
-        q.pad_x[i] = x;
-        q.pad_y[i] = y;
-        q.pad_count += 1;
-        q.pad_cost = min(q.pad_cost, g.link_cost[l]);
     }
+    q.pads.0.sort_by_key(|p| p.x);
 }
 
 pub(super) fn nav_query_attach_start(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) -> int {
@@ -117,9 +105,7 @@ pub(super) fn nav_query_attach_start(g: &NavGraph, q: &mut NavQuery, plan: &NavP
         if d < 0 {
             continue;
         }
-        nav_put(&mut q.start_node, q.start_count, n);
-        nav_put(&mut q.start_cost, q.start_count, d);
-        q.start_count += 1;
+        q.start.push((n, d));
     }
     if plan.goal_si == si && plan.goal_w > 0 {
         let x0 = max(plan.goal_x, g.cluster_x[cs]);
@@ -175,8 +161,7 @@ pub(super) fn nav_query_reuse_goal(q: &mut NavQuery, c: int, plan: &NavPlan) -> 
         let n = entry.nodes[i];
         q.goal_cost[n] = entry.costs[i];
         q.goal_stamp[n] = q.stamp;
-        nav_put(&mut q.goal_node, q.goal_count, n);
-        q.goal_count += 1;
+        q.goals.push(n);
     }
     q.goal_hits += 1;
     // Cache reuse changes CPU work, never admission or answer ticks.
@@ -245,8 +230,7 @@ pub(super) fn nav_query_attach_goal(g: &NavGraph, q: &mut NavQuery, plan: &NavPl
         }
         q.goal_cost[n] = d;
         q.goal_stamp[n] = q.stamp;
-        nav_put(&mut q.goal_node, q.goal_count, n);
-        q.goal_count += 1;
+        q.goals.push(n);
         entry.nodes.push(n);
         entry.costs.push(d);
     }
@@ -265,16 +249,13 @@ pub(super) fn nav_query_attach_goal(g: &NavGraph, q: &mut NavQuery, plan: &NavPl
 
 pub(super) fn nav_query_check(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan) -> int {
     let stamp = q.stamp;
-    for i in 0..q.start_count {
-        q.comp_mark[g.component[q.start_node[i]]] = stamp;
+    for &(n, _) in q.start.iter() {
+        q.comp_mark[g.component[n]] = stamp;
     }
-    let mut joined = false;
-    for i in 0..q.goal_count {
-        if q.comp_mark[g.component[q.goal_node[i]]] == stamp {
-            joined = true;
-            break;
-        }
-    }
+    let joined = q
+        .goals
+        .iter()
+        .any(|&n| q.comp_mark[g.component[n]] == stamp);
     q.best = q.direct;
     if !joined {
         nav_query_finish(g, q, plan);
@@ -294,8 +275,8 @@ pub(super) fn nav_query_check(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
     if !q.area_prepared {
         let start_cluster = q.start_cluster;
         area_work += nav_area_ensure(g, q, start_cluster);
-        for i in 0..q.goal_count {
-            let cluster = nav_node_cluster(g, q.goal_node[i]);
+        for i in 0..q.goals.len() {
+            let cluster = nav_node_cluster(g, q.goals[i]);
             area_work += nav_area_ensure(g, q, cluster);
         }
         q.area_prepared = true;
@@ -325,12 +306,11 @@ pub(super) fn nav_query_check(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
         }
     }
     q.phase = NAV_Q_SEARCH;
-    for i in 0..q.start_count {
-        let node = q.start_node[i];
-        let cost = q.start_cost[i];
+    for i in 0..q.start.len() {
+        let (node, cost) = q.start[i];
         nav_offer(g, q, plan, -1, node, cost, 0);
     }
-    q.start_count + area_work + 1
+    q.start.len() + area_work + 1
 }
 
 pub(super) fn nav_area_search_begin(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) {
@@ -353,8 +333,7 @@ pub(super) fn nav_area_search_begin(g: &NavGraph, q: &mut NavQuery, plan: &NavPl
 
 pub(super) fn nav_area_resume(q: &mut NavQuery) {
     nav_query_next_stamp(q);
-    for i in 0..q.goal_count {
-        let n = q.goal_node[i];
+    for &n in q.goals.iter() {
         q.goal_stamp[n] = q.stamp;
     }
     q.best = q.direct;
@@ -390,7 +369,7 @@ fn nav_offer(
     } else {
         nav_goal_octile(plan, x, y)
     };
-    if q.pad_count > 0 {
+    if q.pads.len() > 0 {
         if q.pad_h_stamp[v] != stamp {
             q.pad_h[v] = min(NAV_INF, nav_nearest_pad(q, x, y)) + q.pad_cost;
             q.pad_h_stamp[v] = stamp;
@@ -526,23 +505,18 @@ pub(super) fn nav_goal_octile(plan: &NavPlan, x: int, y: int) -> int {
 }
 
 pub(super) fn nav_add_version(g: &NavGraph, plan: &mut NavPlan, c: int) {
-    let n = plan.ver_count;
-    if n > 0 && plan.ver_cluster[n - 1] == c {
-        return;
+    if plan.versions.0.last().is_none_or(|&(last, _)| last != c) {
+        plan.versions.push((c, g.cluster_version[c]));
     }
-    nav_put(&mut plan.ver_cluster, n, c);
-    nav_put(&mut plan.ver_value, n, g.cluster_version[c]);
-    plan.ver_count = n + 1;
 }
 
 pub(super) fn nav_query_finish(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan) {
     plan.expansions = q.expansions;
     plan.epoch = g.epoch;
-    plan.wp_count = 0;
+    plan.wp.clear();
     plan.wp_next = 0;
-    plan.ver_count = 0;
-    plan.seg_count = 0;
-    plan.seg_pos = 0;
+    plan.versions.clear();
+    plan.seg.clear();
     if q.best >= NAV_INF {
         nav_unlink(q, plan);
         plan.state = NAV_PLAN_UNREACHABLE;
@@ -550,58 +524,40 @@ pub(super) fn nav_query_finish(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPla
         return;
     }
     plan.cost = q.best;
-    let mut len = 0;
     let mut n = q.best_node;
     while n >= 0 {
-        len += 1;
-        n = q.node_parent[n];
-    }
-    for v in [
-        &mut plan.wp_x,
-        &mut plan.wp_y,
-        &mut plan.wp_cluster,
-        &mut plan.wp_link,
-    ] {
-        while v.len() < len {
-            v.push(0);
-        }
-        for i in 0..len {
-            v[i] = 0;
-        }
-    }
-    n = q.best_node;
-    let mut i = len - 1;
-    plan.last_link = -1;
-    while n >= 0 {
-        plan.wp_x[i] = g.node_x[n];
-        plan.wp_y[i] = g.node_y[n];
+        let mut w = Waypoint {
+            x: g.node_x[n],
+            y: g.node_y[n],
+            cluster: nav_node_cluster(g, n),
+            link: q.node_link[n],
+        };
         if n < g.corner_base {
             let partner = nav_node_partner(g, n);
             let offset = g.gap_lo[n]
                 + route_hash(plan.seed, n.min(partner), 971) % (g.gap_hi[n] - g.gap_lo[n] + 1);
-            let border = n / (2 * g.per_side);
-            if g.border_vertical[border] {
-                plan.wp_y[i] += offset;
+            if g.border_vertical[n / (2 * g.per_side)] {
+                w.y += offset;
             } else {
-                plan.wp_x[i] += offset;
+                w.x += offset;
             }
         }
-        plan.wp_cluster[i] = nav_node_cluster(g, n);
-        plan.wp_link[i] = q.node_link[n];
-        if q.node_link[n] != 0 && plan.last_link < 0 {
-            plan.last_link = i;
-        }
-        i -= 1;
+        plan.wp.push(w);
         n = q.node_parent[n];
     }
-    plan.wp_count = len;
+    plan.wp.0.reverse();
+    plan.last_link = plan
+        .wp
+        .iter()
+        .rposition(|w| w.link != 0)
+        .map_or(-1, |i| i as int);
     plan.final_cluster = q.start_cluster;
     if q.best_node >= 0 {
         plan.final_cluster = nav_node_cluster(g, q.best_node);
     }
     nav_add_version(g, plan, q.start_cluster);
-    for w in 0..len {
-        let cluster = plan.wp_cluster[w];
+    for w in 0..plan.wp.len() {
+        let cluster = plan.wp[w].cluster;
         nav_add_version(g, plan, cluster);
     }
     let final_cluster = plan.final_cluster;
@@ -636,20 +592,16 @@ pub(super) fn nav_materialize(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
     let step = nav_refine(g, q, plan, si, wx - g.space_ox[si], wy - g.space_oy[si]);
     match step {
         NavStep::Step(_) => {
-            for i in 1..plan.seg_count {
-                let x = plan.seg_x[i];
-                let y = plan.seg_y[i];
-                nav_path_push(g, plan, x, y, 0);
+            for i in 1..plan.seg.len() {
+                let p = plan.seg[i];
+                nav_path_push(g, plan, p.x, p.y, 0);
             }
             max(1, q.refine_work)
         }
         NavStep::Teleport(_) => {
-            let w = plan.wp_next;
-            let link = plan.wp_link[w];
-            let x = plan.wp_x[w];
-            let y = plan.wp_y[w];
-            nav_path_push(g, plan, x, y, link);
-            plan.path_cost += g.link_cost[link - 1];
+            let w = plan.wp[plan.wp_next];
+            nav_path_push(g, plan, w.x, w.y, w.link);
+            plan.path_cost += g.link_cost[w.link - 1];
             plan.wp_next += 1;
             1
         }
@@ -657,7 +609,7 @@ pub(super) fn nav_materialize(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
             plan.wp_next = 0;
             let start_x = g.space_ox[plan.si] + plan.from_x;
             let start_y = g.space_oy[plan.si] + plan.from_y;
-            if q.pad_count == 0
+            if q.pads.len() == 0
                 && plan.path_cost * 10 <= nav_goal_octile(plan, start_x, start_y) * 13
             {
                 nav_route_ready(g, q, plan);
@@ -672,43 +624,35 @@ pub(super) fn nav_materialize(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
 
 // Pads are sorted by x when the query begins.
 pub(super) fn nav_nearest_pad(q: &NavQuery, x: int, y: int) -> int {
-    if q.pad_count == 0 {
+    let pads = &q.pads.0;
+    if pads.is_empty() {
         return NAV_INF;
     }
-    let mut lo = 0;
-    let mut hi = q.pad_count;
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if q.pad_x[mid] < x {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    let mut left = lo - 1;
-    let mut right = lo;
-    let mut best = nav_octile(q.pad_x[0] - x, q.pad_y[0] - y);
-    while left >= 0 || right < q.pad_count {
+    let split = pads.partition_point(|p| p.x < x);
+    let (mut left, mut right) = (split, split);
+    let mut best = nav_octile(pads[0].x - x, pads[0].y - y);
+    while left > 0 || right < pads.len() {
         let from_right =
-            left < 0 || (right < q.pad_count && q.pad_x[right] - x < x - q.pad_x[left]);
-        let p = if from_right { right } else { left };
-        let dx = (q.pad_x[p] - x).abs();
+            left == 0 || (right < pads.len() && pads[right].x - x < x - pads[left - 1].x);
+        let p = if from_right {
+            right += 1;
+            pads[right - 1]
+        } else {
+            left -= 1;
+            pads[left]
+        };
+        let dx = (p.x - x).abs();
         if dx > best / NAV_COST_STRAIGHT {
             return best;
         }
-        best = min(best, nav_octile(dx, q.pad_y[p] - y));
-        if from_right {
-            right += 1;
-        } else {
-            left -= 1;
-        }
+        best = min(best, nav_octile(dx, p.y - y));
     }
     best
 }
 
 pub(super) fn nav_cert_h(q: &NavQuery, plan: &NavPlan, x: int, y: int) -> int {
     let mut h = nav_goal_octile(plan, x, y);
-    if q.pad_count > 0 {
+    if q.pads.len() > 0 {
         h = min(h, nav_nearest_pad(q, x, y) + q.pad_cost);
     }
     h
@@ -855,7 +799,7 @@ pub(super) fn nav_cert_retain(
         let _ = plan.route.pop();
     }
     plan.path_cost = cost;
-    plan.ver_count = 0;
+    plan.versions.clear();
     let size = SPACE_SIZE;
     let mut i = len - 1;
     t = last;
