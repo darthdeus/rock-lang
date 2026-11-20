@@ -129,3 +129,30 @@ fn data_image_restores_boxed_types_and_enum_singletons() {
     assert(!same_ref(restored.choice, original.choice))
     assert(same_ref(restored.empty, original.empty))
 }
+
+inline(lua) fn image_scalar_cdata_round_trip() -> bool = """
+    __stone_install_data_image()
+    local source = 9007199254740993ULL
+    local capture = { image_mode = "capture", storage = {}, storage_records = {} }
+    local stringify = tostring
+    local type_names = 0
+    _G.tostring = function(value)
+        if type(value) == "cdata" then type_names = type_names + 1 end
+        return stringify(value)
+    end
+    local ok, image = pcall(__stone_data_image, source, {}, capture)
+    _G.tostring = stringify
+    assert(ok, image)
+    assert(type_names <= 2, "scalar capture repeated the lookup after checking storage")
+    local record = image.__stone_image_scalar_cdata
+    assert(record.ctype == "uint64_t" and #record.bytes == 8)
+    local materialize = { image_mode = "materialize", storage = {} }
+    local copy = __stone_data_image(image, {}, materialize)
+    assert(type(copy) == "cdata" and copy == source)
+    return true
+"""
+
+@test
+fn data_image_captures_boxed_scalars_by_their_exact_bytes() {
+    assert(image_scalar_cdata_round_trip())
+}

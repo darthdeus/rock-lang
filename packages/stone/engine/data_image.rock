@@ -22,11 +22,7 @@
         "int8_t", "uint8_t", "int16_t", "uint16_t",
         "int32_t", "uint32_t", "int64_t", "uint64_t",
         "float", "double", "long double",
-    }) do SCALAR_CTYPE["ctype<" .. n .. ">"] = true end
-    local function is_scalar_cdata(x)
-        local ok, ct = pcall(function() return tostring(ffi.typeof(x)) end)
-        return ok and SCALAR_CTYPE[ct] == true
-    end
+    }) do SCALAR_CTYPE["ctype<" .. n .. ">"] = n end
 
     -- This table's storage fields, and the leaf VIEWS that actually exist over
     -- them: `{ field, cast, key }` per view, plus a field -> storage-key map.
@@ -161,23 +157,22 @@
                 }
             end
             local ct = tostring(ffi.typeof(x))
+            local ctype = SCALAR_CTYPE[ct]
+            if ctype then
+                local copy = ffi.new(ctype .. "[1]", x)
+                return {
+                    __stone_image_scalar_cdata = {
+                        ctype = ctype,
+                        bytes = ffi.string(copy, ffi.sizeof(x)),
+                    }
+                }
+            end
             -- A POINTER is writable -- `p[0] = v` stores through it -- and no
             -- caller can prove what it addresses, so every mode rejects it.
             if ct:find("%*") then
                 error("data image: '" .. (ctx.global or "?")
                     .. "' holds a raw " .. ct .. " pointer. A pointer is writable and "
                     .. "nothing proves what it addresses, so the walk cannot copy it.")
-            end
-            if is_scalar_cdata(x) then
-                local size = ffi.sizeof(x)
-                local ctype = ct:gsub("^ctype<", ""):gsub(">$", "")
-                local copy = ffi.new(ctype .. "[1]", x)
-                return {
-                    __stone_image_scalar_cdata = {
-                        ctype = ctype,
-                        bytes = ffi.string(copy, size),
-                    }
-                }
             end
             error("data image: '" .. (ctx.global or "?")
                 .. "' holds a " .. ct .. " cdata the walk cannot model. Only a boxed "
