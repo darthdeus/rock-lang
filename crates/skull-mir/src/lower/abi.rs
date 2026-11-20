@@ -1305,54 +1305,73 @@ impl RepArena {
                 message: "a function-value representation requires a function type".into(),
             });
         };
-        let params = fn_params
-            .iter()
-            .map(|param| {
-                let tuple_spelled =
-                    if matches!(param.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)) {
-                        let id = self.plan(
-                            ws,
-                            target,
-                            param,
-                            RepUse::Return,
-                            &RepUseFacts::default(),
-                            RepGuarantees {
-                                nobox: true,
-                                allow_opaque: true,
-                            },
-                        )?;
-                        self.get(id).splats(self)
-                    } else {
-                        false
-                    };
-                if first_class && !tuple_spelled {
-                    Ok(self.intern(target, RepUse::Parameter, RepLayout::Opaque))
-                } else {
-                    self.plan_position(
+        // A tuple parameter is spelled as one only when its Return plan splats.
+        let params = fn_params.iter().map(|param| {
+            let tuple_spelled = matches!(param.peel_nullable().0, crate::monoty::MonoTy::Tuple(_))
+                && self
+                    .get(self.plan(
                         ws,
                         target,
                         param,
-                        RepUse::Parameter,
-                        tuple_spelled,
-                        nobox_only,
-                    )
+                        RepUse::Return,
+                        &RepUseFacts::default(),
+                        RepGuarantees {
+                            nobox: true,
+                            allow_opaque: true,
+                        },
+                    )?)
+                    .splats(self);
+            Ok((Some(param), tuple_spelled))
+        });
+        let result =
+            (!matches!(ret.as_ref(), crate::monoty::MonoTy::Unit)).then_some(Some(ret.as_ref()));
+        self.function_from_signature(
+            ws,
+            target,
+            params,
+            result,
+            !first_class,
+            |_| nobox_only,
+            true,
+        )
+    }
+
+    /// Positions stay Opaque unless `plan_all` is set or they are tuple-spelled; a
+    /// result is tuple-spelled when it is a tuple. `result` is `None` for no result.
+    #[allow(clippy::too_many_arguments)]
+    fn function_from_signature<'t>(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        params: impl IntoIterator<Item = Result<(Option<&'t crate::monoty::MonoTy>, bool), RepError>>,
+        result: Option<Option<&'t crate::monoty::MonoTy>>,
+        plan_all: bool,
+        nobox: impl Fn(&crate::monoty::MonoTy) -> bool,
+        scalar_allowed: bool,
+    ) -> Result<FunctionRepPlan, RepError> {
+        let params = params
+            .into_iter()
+            .map(|param| match param? {
+                (Some(ty), tuple_spelled) if plan_all || tuple_spelled => {
+                    self.plan_position(ws, target, ty, RepUse::Parameter, tuple_spelled, nobox(ty))
                 }
+                _ => Ok(self.intern(target, RepUse::Parameter, RepLayout::Opaque)),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let result = if matches!(ret.as_ref(), crate::monoty::MonoTy::Unit) {
-            None
-        } else if first_class && !matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)) {
-            Some(self.intern(target, RepUse::Return, RepLayout::Opaque))
-        } else {
-            Some(self.plan_result(
-                ws,
-                target,
-                ret,
-                matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)),
-                nobox_only,
-            )?)
-        };
-        Ok(self.finish_function_plan(target, params, result, true))
+        let result = result
+            .map(|ty| {
+                let tuple_spelled = ty.is_some_and(|ty| {
+                    matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Tuple(_))
+                });
+                match ty {
+                    Some(ty) if plan_all || tuple_spelled => {
+                        self.plan_result(ws, target, ty, tuple_spelled, nobox(ty))
+                    }
+                    _ => Ok(self.intern(target, RepUse::Return, RepLayout::Opaque)),
+                }
+            })
+            .transpose()?;
+        Ok(self.finish_function_plan(target, params, result, scalar_allowed))
     }
 
     fn finish_function_plan(
@@ -1422,64 +1441,30 @@ impl RepArena {
         subst: &SpecSubst,
         mode: Option<AbiMode>,
     ) -> Result<FunctionRepPlan, RepError> {
-        let mut params: Vec<RepId> = Vec::with_capacity(f.param_decls.len());
-        for param in &f.param_decls {
-            let ty = declared_mono_type(ws, param.ty, subst)?;
-            let tuple_spelled = declared_tuple_spelled(ws, param.ty);
-            let id = match ty {
-                Some(ty) if mode.is_some() || tuple_spelled => {
-                    let nobox = mode.is_some_and(|mode| mode.nobox_only_for(&ty));
-                    self.plan_position(ws, target, &ty, RepUse::Parameter, tuple_spelled, nobox)?
-                }
-                _ => self.intern(target, RepUse::Parameter, RepLayout::Opaque),
-            };
-            params.push(id);
-        }
-
+        let params = f
+            .param_decls
+            .iter()
+            .map(|param| {
+                let ty = declared_mono_type(ws, param.ty, subst)?;
+                Ok((ty, declared_tuple_spelled(ws, param.ty)))
+            })
+            .collect::<Result<Vec<_>, RepError>>()?;
         let result = f
             .return_ty
-            .map(|return_ty| {
-                let ty = declared_mono_type(ws, return_ty, subst)?;
-                if ty
-                    .as_ref()
-                    .is_some_and(|ty| matches!(ty, crate::monoty::MonoTy::Unit))
-                {
-                    return Ok(None);
-                }
-                let tuple_spelled = declared_tuple_spelled(ws, return_ty);
-                let id = if let Some(ty) = ty {
-                    let is_tuple = matches!(ty, crate::monoty::MonoTy::Tuple(_));
-                    if let Some(mode) = mode {
-                        self.plan_result(
-                            ws,
-                            target,
-                            &ty,
-                            tuple_spelled || is_tuple,
-                            mode.nobox_only_for(&ty),
-                        )?
-                    } else if is_tuple {
-                        self.plan(
-                            ws,
-                            target,
-                            &ty,
-                            RepUse::Return,
-                            &RepUseFacts {
-                                tuple_spelled: true,
-                                span: None,
-                            },
-                            RepGuarantees::default(),
-                        )?
-                    } else {
-                        self.intern(target, RepUse::Return, RepLayout::Opaque)
-                    }
-                } else {
-                    self.intern(target, RepUse::Return, RepLayout::Opaque)
-                };
-                Ok(Some(id))
-            })
+            .map(|return_ty| declared_mono_type(ws, return_ty, subst))
             .transpose()?
-            .flatten();
-        Ok(self.finish_function_plan(target, params, result, mode.is_some()))
+            .filter(|ty| !matches!(ty, Some(crate::monoty::MonoTy::Unit)));
+        self.function_from_signature(
+            ws,
+            target,
+            params
+                .iter()
+                .map(|(ty, tuple_spelled)| Ok((ty.as_ref(), *tuple_spelled))),
+            result.as_ref().map(Option::as_ref),
+            mode.is_some(),
+            |ty| mode.is_some_and(|mode| mode.nobox_only_for(ty)),
+            mode.is_some(),
+        )
     }
 
     pub(crate) fn boxed_function(&self, target: FnBackend, param_count: usize) -> FunctionRepPlan {
@@ -1504,43 +1489,23 @@ impl RepArena {
         param_tuple_spelled: &[bool],
         mode: Option<AbiMode>,
     ) -> FunctionRepPlan {
-        let params: Vec<RepId> = params
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| {
-                let tuple_spelled = *param_tuple_spelled
-                    .get(index)
-                    .expect("concrete signature is missing parameter ABI provenance");
-                if mode.is_none() && !tuple_spelled {
-                    return self.intern(target, RepUse::Parameter, RepLayout::Opaque);
-                }
-                let nobox = mode.is_some_and(|mode| mode.nobox_only_for(ty));
-                self.plan_position(ws, target, ty, RepUse::Parameter, tuple_spelled, nobox)
-                    .expect("concrete ABI planner must accept a validated parameter")
-            })
-            .collect();
-        let result = result_ty.map(|ty| {
-            let tuple_spelled = match ty {
-                crate::monoty::MonoTy::Tuple(_) => true,
-                crate::monoty::MonoTy::Nullable(inner) => {
-                    matches!(inner.as_ref(), crate::monoty::MonoTy::Tuple(_))
-                }
-                _ => false,
-            };
-            if mode.is_some() || tuple_spelled {
-                self.plan_result(
-                    ws,
-                    target,
-                    ty,
-                    tuple_spelled,
-                    mode.is_some_and(|mode| mode.nobox_only_for(ty)),
-                )
-                .expect("concrete ABI planner must accept a validated result")
-            } else {
-                self.intern(target, RepUse::Return, RepLayout::Opaque)
-            }
-        });
-        self.finish_function_plan(target, params, result, mode.is_some())
+        assert!(
+            param_tuple_spelled.len() >= params.len(),
+            "concrete signature is missing parameter ABI provenance"
+        );
+        self.function_from_signature(
+            ws,
+            target,
+            params
+                .iter()
+                .zip(param_tuple_spelled)
+                .map(|(ty, tuple_spelled)| Ok((Some(ty), *tuple_spelled))),
+            result_ty.map(Some),
+            mode.is_some(),
+            |ty| mode.is_some_and(|mode| mode.nobox_only_for(ty)),
+            mode.is_some(),
+        )
+        .expect("concrete ABI planner must accept a validated signature")
     }
 }
 
