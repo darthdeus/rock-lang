@@ -399,18 +399,18 @@ pub fn snapshot_history_load_raw(raw: string, max_nodes: int, path: string, upgr
     }
     if version < 1 || version > SNAPSHOT_HISTORY_VERSION { return null }
 
-    let by_pid: Map<int, SnapshotHistoryNode> = map_new()
-    let order: [int] = []
+    let nodes: [SnapshotHistoryNode] = []
+    let index_of: Map<int, int> = map_new()
     let current_pid = -1
     let max_pid = -1
     let records = 0
-    let pending_snap = -1
+    let pending_snap = false
     let needs_checkpoint = false
     for (i, line) in enumerate(lines) {
         if line == "" { continue }
-        if pending_snap >= 0 {
-            by_pid[pending_snap].snap = line
-            pending_snap = -1
+        if pending_snap {
+            nodes[nodes.len() - 1].snap = line
+            pending_snap = false
             continue
         }
         let parsed = json_decode(line)
@@ -429,69 +429,48 @@ pub fn snapshot_history_load_raw(raw: string, max_nodes: int, path: string, upgr
             }
             continue
         }
-        let entry = nfield
-        let pid = snapshot_history_field_int(entry, "pid") ?? return null
-        let parent = snapshot_history_field_int(entry, "ppid") ?? return null
-        let label = snapshot_history_field_string(entry, "label") ?? return null
-        let p = pid
-        if p < 0 || by_pid.contains(p) { return null }
-        let metadata = snapshot_history_metadata(entry) ?? return null
-        let snap = if version >= 2 {
-            ""
-        } else {
-            (snapshot_history_field_string(entry, "snap") ?? return null)
+        let pid = snapshot_history_field_int(nfield, "pid") ?? return null
+        let parent = snapshot_history_field_int(nfield, "ppid") ?? return null
+        let label = snapshot_history_field_string(nfield, "label") ?? return null
+        if pid < 0 || index_of.contains(pid) { return null }
+        let metadata = snapshot_history_metadata(nfield) ?? return null
+        let snap = if version >= 2 { "" } else {
+            snapshot_history_field_string(nfield, "snap") ?? return null
         }
-        by_pid[p] = SnapshotHistoryNode {
-            snap,
-            label: label,
-            parent: parent,
-            children: [],
-            pid: p,
-            metadata: metadata,
-        }
-        order.push(p)
+        index_of[pid] = nodes.len()
+        nodes.push(SnapshotHistoryNode { snap, label, parent, children: [], pid, metadata })
         records += 1
-        if p > max_pid { max_pid = p }
-        if version >= 2 { pending_snap = p }
+        max_pid = max(max_pid, pid)
+        pending_snap = version >= 2
     }
     // Snapshot lines are stored unparsed, so a torn last record would survive to the
     // first undo; validate it.
-    if version >= 2 && order.len() > 0 {
-        let tail = order[order.len() - 1]
-        if json_decode(by_pid[tail].snap) == null {
+    if version >= 2 && nodes.len() > 0 {
+        let tail = nodes[nodes.len() - 1]
+        if json_decode(tail.snap) == null {
             needs_checkpoint = true
-            let _ = order.pop()
+            index_of.remove(tail.pid)
+            let _ = nodes.pop()
             records -= 1
         }
     }
-    if order.len() == 0 { return null }
+    if nodes.len() == 0 { return null }
 
-    let index_of: Map<int, int> = map_new()
-    for (i, pid) in enumerate(order) { index_of[pid] = i }
-    let nodes: [SnapshotHistoryNode] = []
-    for (i, pid) in enumerate(order) {
-        let node = by_pid[pid]
-        let parent = node.parent
-        // On disk `parent` is a pid; in memory it is the parent's index.
-        let parent_index = -1
-        if parent == -1 {
-            if i != 0 { return null }
-        } else {
-            if parent < 0 || !index_of.contains(parent) { return null }
-            parent_index = index_of[parent]
-            if parent_index >= i { return null }
-        }
-        nodes.push(node)
-        nodes[i].parent = parent_index
-    }
+    // Resolve on-disk parent IDs after dropping any incomplete tail node.
     for i in 0..nodes.len() {
         let parent = nodes[i].parent
-        if parent >= 0 { nodes[parent].children.push(i) }
+        if parent == -1 {
+            if i != 0 { return null }
+            continue
+        }
+        let parent_index = index_of.get(parent) ?? return null
+        if parent_index >= i { return null }
+        nodes[i].parent = parent_index
+        nodes[parent_index].children.push(i)
     }
-    if current_pid < 0 || !index_of.contains(current_pid) { return null }
     let history = SnapshotHistory {
         nodes,
-        current: index_of[current_pid],
+        current: index_of.get(current_pid) ?? return null,
         next_pid: max_pid + 1,
         // The records actually read: understating this hides pointer churn from
         // snapshot_history_maybe_compact.
