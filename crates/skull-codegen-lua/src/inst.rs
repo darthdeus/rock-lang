@@ -63,9 +63,11 @@ impl Emitter<'_> {
                     && suffix.bytes().all(|b| b.is_ascii_digit())
             });
         if generated_local
-            || self
-                .bound
-                .is_some_and(|plan| plan.parameters.iter().any(|p| p.as_str() == root))
+            || self.bound.is_some_and(|plan| {
+                plan.captures
+                    .iter()
+                    .any(|(_, parameter)| parameter.as_str() == root)
+            })
         {
             out.push_str("_G.");
         }

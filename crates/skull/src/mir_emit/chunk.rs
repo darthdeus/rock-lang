@@ -79,11 +79,9 @@ pub(super) fn callee_binding_pass_lua<
         let (a, b) = (a.borrow(), b.borrow());
         a.rank.cmp(&b.rank).then_with(|| a.name.cmp(&b.name))
     });
-    let mut opens = Vec::with_capacity(plans.len());
     let mut closes = Vec::with_capacity(plans.len());
     let mut names_in_scope = 0usize;
     for plan in plans.iter().map(|plan| plan.borrow()) {
-        opens.push(names_in_scope == 0);
         names_in_scope += plan.captures.len() + 2;
         let close = names_in_scope >= LUA_NAMES_PER_BIND_SCOPE;
         if close {
@@ -91,15 +89,13 @@ pub(super) fn callee_binding_pass_lua<
         }
         closes.push(close);
     }
-    if names_in_scope > 0 {
-        *closes.last_mut().expect("plans is not empty") = true;
-    }
+    *closes.last_mut().expect("plans is not empty") = true;
     let plans = &*plans;
     let starts: Vec<usize> = (0..plans.len()).step_by(PLANS_PER_JOB).collect();
     let parts = par_map(starts, |start| {
         let mut out = String::new();
         for at in start..(start + PLANS_PER_JOB).min(plans.len()) {
-            if opens[at] {
+            if at == 0 || closes[at - 1] {
                 out.push_str("do\n(function()\n");
             }
             plans[at].borrow().write_bind_line(&mut out);

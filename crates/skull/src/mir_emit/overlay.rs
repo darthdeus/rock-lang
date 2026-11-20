@@ -47,7 +47,12 @@ fn overlay_callee_bindings(
     let mut bindings = Vec::new();
     let mut bodies = FxHashSet::default();
     for (body, plan) in candidates {
-        if names.contains(&plan.name) || plan.captures.iter().any(|name| names.contains(name)) {
+        if names.contains(&plan.name)
+            || plan
+                .captures
+                .iter()
+                .any(|(global, _)| names.contains(global.as_str()))
+        {
             names.insert(plan.name.clone());
             bodies.insert(body.clone());
             bindings.push(plan.clone());

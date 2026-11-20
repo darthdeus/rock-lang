@@ -317,11 +317,11 @@ fn emit_body(
         Some(plan) => {
             debug_assert_eq!(plan.name, name);
             let _ = write!(out, "{} = function(", plan.factory);
-            for (i, capture) in plan.parameters.iter().enumerate() {
+            for (i, (_, parameter)) in plan.captures.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(capture.as_str());
+                out.push_str(parameter.as_str());
             }
             out.push_str(") return ");
             let offset = out.len();

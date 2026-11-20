@@ -6,25 +6,19 @@ use super::*;
 pub struct CalleeBindingPlan {
     pub name: String,
     pub factory: String,
-    /// The callee names to capture, sorted, deduplicated, and truncated to
-    /// [`MAX_BOUND_CALLEES`]. These are the globals read at bind time.
-    pub captures: Vec<String>,
-    /// Factory-local names in capture order.
-    pub parameters: Vec<ustr::Ustr>,
+    /// Global and factory-local names, sorted by global name.
+    pub captures: Vec<(ustr::Ustr, ustr::Ustr)>,
     /// Emission order for the binding pass: the caller's SCC number, strictly
     /// greater than every component it captures from.
     pub rank: u32,
-    /// True when this body had more bindable callees than [`MAX_BOUND_CALLEES`],
-    /// so the tail stayed global lookups.
-    pub capped: bool,
 }
 
 impl CalleeBindingPlan {
     pub(crate) fn parameter_for(&self, name: &str) -> Option<ustr::Ustr> {
         self.captures
-            .binary_search_by(|capture| capture.as_str().cmp(name))
+            .binary_search_by(|(global, _)| global.as_str().cmp(name))
             .ok()
-            .map(|i| self.parameters[i])
+            .map(|i| self.captures[i].1)
     }
 
     /// The second-pass line: `F = __rock_mk_F(a, b)`.
@@ -33,11 +27,11 @@ impl CalleeBindingPlan {
         out.push_str(" = ");
         out.push_str(&self.factory);
         out.push('(');
-        for (i, c) in self.captures.iter().enumerate() {
+        for (i, (global, _)) in self.captures.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
             }
-            out.push_str(c);
+            out.push_str(global.as_str());
         }
         out.push_str(")\n");
     }
@@ -131,19 +125,18 @@ pub fn callee_binding_plan(
     // upvalue too, against the same 60-upvalue limit the callees count toward.
     let reserved = usize::from(touches_state);
     let limit = MAX_BOUND_CALLEES - reserved;
-    let capped = captures.len() > limit;
     captures.truncate(limit);
     // Lua derives traceback names from call-site upvalues. Preserve them at
     // unwind boundaries so the captured raise-site trace names the callee.
     let preserve_names = func.registers_defer_cleanup(&blocks);
     let mut next_alias = 0;
-    let parameters = captures
-        .iter()
+    let captures = captures
+        .into_iter()
         .map(|capture| {
             // Runtime helper calls are printed directly, so their captures
             // retain the original spelling.
             if preserve_names || matches!(capture.as_str(), CHECKED_U32 | U32_SHIFT_COUNT) {
-                return *capture;
+                return (capture, capture);
             }
             loop {
                 let alias = skull_mir::names::indexed("b", "", next_alias);
@@ -151,7 +144,7 @@ pub fn callee_binding_plan(
                 if !ctx.reserved.contains_key(alias.as_str())
                     && !raw_names.contains(&alias.as_str())
                 {
-                    break alias;
+                    break (capture, alias);
                 }
             }
         })
@@ -159,12 +152,10 @@ pub fn callee_binding_plan(
     Some(CalleeBindingPlan {
         factory: ctx.mint_synthetic(format!("{CALLEE_FACTORY_PREFIX}{name}")),
         name: name.to_string(),
-        captures: captures.iter().map(|capture| capture.to_string()).collect(),
-        parameters,
+        captures,
         // Runtime validators have no body dependencies, including for a leaf
         // function absent from the call-edge inventory.
         rank: rank.unwrap_or(0),
-        capped,
     })
 }
 
