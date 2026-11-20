@@ -71,6 +71,28 @@ class RuntimePairTests(unittest.TestCase):
             plan = json.loads((Path(directory) / "run" / "summary.json").read_text())["plan"]
             self.assertEqual(plan["luajit_sha256"], hashlib.sha256(vm.read_bytes()).hexdigest())
 
+    def test_fixed_work_and_sites_use_the_same_hook_in_both_arms(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            vm = root / "luajit"
+            vm.touch()
+            vm.chmod(0o755)
+            args = ["runtime_pairs.py", ".", "base", "--out", str(root / "run"),
+                    "--luajit", str(vm), "--fixed-work", "--capture-sites", "--pairs", "6"]
+            row = {"lua_sha256": "same", "settings": {}, "work": {}, "metrics": {}}
+            with patch("sys.argv", args), patch.dict("os.environ", {}, clear=True):
+                with patch("runtime_pairs.measure", return_value=row) as measure:
+                    main()
+            hook = "\n" + Path(__file__).with_name("measurement.lua").read_text()
+            self.assertEqual(measure.call_count, 12)
+            for call in measure.call_args_list:
+                env = call.args[2]
+                self.assertEqual(env["PERF_FIXED_WORK"], "1")
+                self.assertEqual(env["ROCK_PERF_CAPTURE_SITES"], "1")
+                self.assertEqual(env["LUA_INIT"], hook)
+            plan = json.loads((root / "run/summary.json").read_text())["plan"]
+            self.assertEqual(plan["measurement_hook_sha256"], hashlib.sha256(hook[1:].encode()).hexdigest())
+
 
 if __name__ == "__main__":
     unittest.main()

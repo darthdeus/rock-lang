@@ -177,6 +177,11 @@ def measure(args, binary, env, name):
         if args.instructions:
             metrics["retired_instructions_per_frame"] = instructions_per_frame(
                 report, output / "perf-summary.json.instructions")
+        if args.fixed_work:
+            scenario = report["scenario"]
+            work.update(ready_frame=scenario["ready_frame"], start_frame=scenario["absolute_start_frame"])
+        if args.capture_sites and not (output / "perf-summary.json.sites.tsv").is_file():
+            raise ValueError("missing LuaJIT site capture")
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise ValueError(f"{output}: {error}") from error
     return {"metrics": metrics, "work": work, "settings": settings, "uptime": load,
@@ -199,6 +204,10 @@ def main():
     parser.add_argument("--instructions", action="store_true",
                         help="sample frame-window retired instructions on macOS")
     parser.add_argument("--luajit", type=Path, help="use this LuaJIT executable for both arms")
+    parser.add_argument("--fixed-work", action="store_true",
+                        help="use Stone's fixed image work and reset JIT and GC on frame three")
+    parser.add_argument("--capture-sites", action="store_true",
+                        help="capture allocator and trace sites in a separate diagnostic run")
     parser.add_argument("--var", action="append", default=[], help="common compiler build var NAME=VALUE")
     parser.add_argument("--work", action="append", default=[], help="require equal work_units for this section")
     args = parser.parse_args()
@@ -206,6 +215,10 @@ def main():
         parser.error("use at least six pairs and 101 to 65536 measured frames")
     if args.instructions and (sys.platform != "darwin" or "LUA_INIT" in os.environ):
         parser.error("--instructions requires macOS and an unset LUA_INIT")
+    if (args.fixed_work or args.capture_sites) and "LUA_INIT" in os.environ:
+        parser.error("measurement hooks require an unset LUA_INIT")
+    if args.capture_sites and not args.luajit:
+        parser.error("--capture-sites requires a site-enabled --luajit")
     if args.noise and not args.candidate:
         parser.error("--noise requires an A/B comparison")
     calibration = json.loads(args.noise.read_text()) if args.noise else None
@@ -219,6 +232,10 @@ def main():
         plan["luajit_sha256"] = sha256_file(args.luajit)
     if args.instructions:
         plan["instruction_probe_sha256"] = hashlib.sha256(INSTRUCTION_PROBE.encode()).hexdigest()
+    if args.fixed_work or args.capture_sites:
+        hook = Path(__file__).with_name("measurement.lua").read_text()
+        plan.update(fixed_work=args.fixed_work, capture_sites=args.capture_sites,
+                    measurement_hook_sha256=hashlib.sha256(hook.encode()).hexdigest())
     if calibration and (not calibration["aa"] or calibration["plan"] != plan
                         or not calibration["work_matches"]):
         parser.error("--noise requires A/A calibration with matching inputs and work")
@@ -230,6 +247,12 @@ def main():
         env["ROCK_LUAJIT"] = str(args.luajit)
     if args.instructions:
         env["LUA_INIT"] = INSTRUCTION_PROBE
+    if args.fixed_work or args.capture_sites:
+        env["LUA_INIT"] = env.get("LUA_INIT", "") + "\n" + hook
+    if args.fixed_work:
+        env["PERF_FIXED_WORK"] = "1"
+    if args.capture_sites:
+        env["ROCK_PERF_CAPTURE_SITES"] = "1"
     aa = args.candidate is None
     binaries = (args.base, args.candidate or args.base)
     references = {0: calibration["pairs"][0][0]["lua_sha256"]} if calibration else {}

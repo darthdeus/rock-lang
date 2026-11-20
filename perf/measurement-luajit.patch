@@ -64,3 +64,17 @@ index ce7814b..df073ce 100644
      ctx.fp = fopen(filename, "rb");
      if (ctx.fp == NULL) {
        L->top--;
+diff --git a/src/lj_str.c b/src/lj_str.c
+--- a/src/lj_str.c
++++ b/src/lj_str.c
+@@ -282,7 +282,9 @@
+   s->gct = ~LJ_TSTR;
+   s->len = len;
+   s->hash = hash;
+-#ifndef STRID_RESEED_INTERVAL
++#if defined(ROCK_PERF_HEAP_BASE)
++  s->sid = hash_sparse(g->str.seed, str, len);
++#elif !defined(STRID_RESEED_INTERVAL)
+   s->sid = g->str.id++;
+ #elif STRID_RESEED_INTERVAL
+   if (!g->str.idreseed--) {

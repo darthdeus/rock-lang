@@ -1,0 +1,504 @@
+diff --git a/src/lj_api.c b/src/lj_api.c
+index f972a760..d02f28ed 100644
+--- a/src/lj_api.c
++++ b/src/lj_api.c
+@@ -13,2 +13,3 @@
+ #include "lj_gc.h"
++#include "lj_rock_sites.h"
+ #include "lj_err.h"
+@@ -1299,2 +1300,5 @@ LUA_API void lua_setallocf(lua_State *L, lua_Alloc f, void *ud)
+   global_State *g = G(L);
++#if LJ_ROCK_SITES
++  if (rock_sites_mode) rock_sites_allocator(g, f);
++#endif
+   g->allocd = ud;
+diff --git a/src/lj_asm.c b/src/lj_asm.c
+index 96d732aa..52b7b388 100644
+--- a/src/lj_asm.c
++++ b/src/lj_asm.c
+@@ -28,2 +28,3 @@
+ #include "lj_asm.h"
++#include "lj_rock_sites.h"
+ #include "lj_dispatch.h"
+diff --git a/src/lj_asm_arm64.h b/src/lj_asm_arm64.h
+index d068b153..7706186d 100644
+--- a/src/lj_asm_arm64.h
++++ b/src/lj_asm_arm64.h
+@@ -442,4 +442,21 @@ static void asm_gencall(ASMState *as, const CCallInfo *ci, IRRef *args)
+   Reg gpr, fpr = REGARG_FIRSTFPR;
++#if LJ_ROCK_SITES
++  uint32_t site = 0;
++  if (rock_sites_mode && ci->func && as->curins >= REF_FIRST &&
++      as->curins < as->orignins) {
++    IROp op = IR(as->curins)->o;
++    if ((ci->flags & CCI_L) || op == IR_BUFPUT || op == IR_BUFSTR)
++      site = rock_sites_ir[as->curins];
++  }
++  int site_ofs = glofs(as, &J2G(as->J)->rock_site);
++  if (site) emit_lso(as, A64I_STRw, RID_ZERO, RID_GL, site_ofs);
++#endif
+   if (ci->func)
+     emit_call(as, ci->func);
++#if LJ_ROCK_SITES
++  if (site) {
++    emit_lso(as, A64I_STRw, RID_TMP, RID_GL, site_ofs);
++    emit_loadi(as, RID_TMP, site);
++  }
++#endif
+   for (gpr = REGARG_FIRSTGPR; gpr <= REGARG_LASTGPR; gpr++)
+diff --git a/src/lj_debug.c b/src/lj_debug.c
+index 03d86651..59877f62 100644
+--- a/src/lj_debug.c
++++ b/src/lj_debug.c
+@@ -11,2 +11,3 @@
+ #include "lj_debug.h"
++#include "lj_rock_sites.h"
+ #include "lj_buf.h"
+@@ -116,2 +117,19 @@ static BCPos debug_framepc(lua_State *L, GCfunc *fn, cTValue *nextframe)
+
++#if LJ_ROCK_SITES
++uint32_t rock_sites_caller(lua_State *L)
++{
++  int level = 0, size;
++  cTValue *frame;
++  while ((frame = lj_debug_frame(L, level++, &size)) != NULL) {
++    GCfunc *fn = frame_func(frame);
++    if (isluafunc(fn)) {
++      GCproto *pt = funcproto(fn);
++      BCPos pc = debug_framepc(L, fn, size ? frame + size : NULL);
++      return pc < pt->sizebc ? rock_sites_pc(pt, proto_bc(pt) + pc) : 0;
++    }
++  }
++  return 0;
++}
++#endif
++
+ /* -- Line numbers -------------------------------------------------------- */
+diff --git a/src/lj_err.c b/src/lj_err.c
+index d2cffb0d..1f4ee25a 100644
+--- a/src/lj_err.c
++++ b/src/lj_err.c
+@@ -770,2 +770,5 @@ LJ_NOINLINE void LJ_FASTCALL lj_err_throw(lua_State *L, int errcode)
+   global_State *g = G(L);
++#if LJ_ROCK_SITES
++  g->rock_site = 0;
++#endif
+   lj_trace_abort(g);
+diff --git a/src/lj_gc.c b/src/lj_gc.c
+index 244340c1..e326cbaf 100644
+--- a/src/lj_gc.c
++++ b/src/lj_gc.c
+@@ -13,2 +13,3 @@
+ #include "lj_gc.h"
++#include "lj_rock_sites.h"
+ #include "lj_err.h"
+@@ -872,2 +873,5 @@ void *lj_mem_realloc(lua_State *L, void *p, GCSize osz, GCSize nsz)
+   lj_assertG((osz == 0) == (p == NULL), "realloc API violation");
++#if LJ_ROCK_SITES
++  if (rock_sites_mode == 2 && nsz) rock_sites_alloc(L, nsz);
++#endif
+   p = g->allocf(g->allocd, p, osz, nsz);
+@@ -886,3 +890,7 @@ void * LJ_FASTCALL lj_mem_newgco(lua_State *L, GCSize size)
+   global_State *g = G(L);
+-  GCobj *o = (GCobj *)g->allocf(g->allocd, NULL, 0, size);
++  GCobj *o;
++#if LJ_ROCK_SITES
++  if (rock_sites_mode == 2) rock_sites_alloc(L, size);
++#endif
++  o = (GCobj *)g->allocf(g->allocd, NULL, 0, size);
+   if (o == NULL)
+diff --git a/src/lj_obj.h b/src/lj_obj.h
+index 30991a7e..281e3082 100644
+--- a/src/lj_obj.h
++++ b/src/lj_obj.h
+@@ -645,2 +645,6 @@ typedef struct global_State {
+   volatile int32_t vmstate;  /* VM state or current JIT code trace number. */
++#if LJ_TARGET_ARM64 && LJ_HASJIT && defined(ROCK_PERF_HEAP_BASE)
++#define LJ_ROCK_SITES 1
++  uint32_t rock_site;     /* Current trace allocator site, with restore bit. */
++#endif
+   GCRef mainthref;	/* Link to main thread. */
+diff --git a/src/lj_opt_loop.c b/src/lj_opt_loop.c
+index 4cb89c6f..09e8fcec 100644
+--- a/src/lj_opt_loop.c
++++ b/src/lj_opt_loop.c
+@@ -17,2 +17,3 @@
+ #include "lj_iropt.h"
++#include "lj_rock_sites.h"
+ #include "lj_trace.h"
+@@ -285,2 +286,5 @@ static void loop_unroll(LoopState *lps)
+   /* LOOP separates the pre-roll from the loop body. */
++#if LJ_ROCK_SITES
++  if (rock_sites_mode) rock_sites_ir[J->cur.nins] = 0;
++#endif
+   emitir_raw(IRTG(IR_LOOP, IRT_NIL), 0, 0);
+@@ -329,3 +333,9 @@ static void loop_unroll(LoopState *lps)
+       IRType1 t = ir->t;  /* Get this first, since emitir may invalidate ir. */
++#if LJ_ROCK_SITES
++      IRRef next = J->cur.nins;
++#endif
+       IRRef ref = tref_ref(emitir(ir->ot & ~IRT_ISPHI, op1, op2));
++#if LJ_ROCK_SITES
++      if (rock_sites_mode && ref >= next) rock_sites_ir[ref] = rock_sites_ir[ins];
++#endif
+       subst[ins] = (IRRef1)ref;
+diff --git a/src/lj_rock_sites.h b/src/lj_rock_sites.h
+new file mode 100644
+index 00000000..2e6925e9
+--- /dev/null
++++ b/src/lj_rock_sites.h
+@@ -0,0 +1,16 @@
++#ifndef _LJ_ROCK_SITES_H
++#define _LJ_ROCK_SITES_H
++
++#if LJ_ROCK_SITES
++extern int rock_sites_mode;
++extern uint32_t rock_sites_ir[65536];
++LJ_FUNC uint32_t rock_sites_pc(GCproto *pt, const BCIns *pc);
++LJ_FUNC uint32_t rock_sites_caller(lua_State *L);
++LJ_FUNC void rock_sites_alloc(lua_State *L, GCSize bytes);
++LJ_FUNC void rock_sites_allocator(global_State *g, lua_Alloc next);
++#if defined(lj_snap_c)
++LJ_FUNC uint32_t rock_sites_restore(GCtrace *trace, IRRef ref);
++#endif
++#endif
++
++#endif
+diff --git a/src/lj_rock_sites.inc b/src/lj_rock_sites.inc
+new file mode 100644
+index 00000000..c8f1a6fa
+--- /dev/null
++++ b/src/lj_rock_sites.inc
+@@ -0,0 +1,261 @@
++/* Measurement VM only. The CLI profiles one Lua universe per process. */
++#include <inttypes.h>
++#include <stdio.h>
++
++#define ROCK_SITES_MAX 65536u
++#define ROCK_COUNTS_MAX 262144u
++#define ROCK_TRACES_MAX 65536u
++#define ROCK_RESTORE 0x80000000u
++
++enum { ROCK_ALLOC, ROCK_TRACE_ALLOC, ROCK_UNSINK, ROCK_SUNK_IR,
++       ROCK_ABORT, ROCK_EXIT, ROCK_COMPILER, ROCK_COLLECTOR, ROCK_WIDE };
++
++typedef struct {
++  uint32_t first, line, pc, params, slots;
++  char chunk[96];
++} RockSite;
++
++typedef struct {
++  uint32_t site, kind, other, detail;
++  uint64_t count, bytes;
++} RockCount;
++
++typedef struct {
++  uint32_t start, parent, exitno, stack_bytes, nins, size, spills;
++  GCtrace *trace;
++  uint32_t *origins;
++} RockTrace;
++
++int rock_sites_mode;
++uint32_t rock_sites_ir[65536];
++
++static RockSite rock_sites[ROCK_SITES_MAX];
++static RockCount rock_counts[ROCK_COUNTS_MAX];
++static RockTrace rock_traces[ROCK_TRACES_MAX];
++static uint32_t rock_live[65536];
++static uint32_t rock_trace_count, rock_overflow;
++static uint32_t rock_wide[512], rock_wide_count;
++static int rock_follow_allocator;
++static lua_Alloc rock_original_allocator;
++
++void rock_sites_allocator(global_State *g, lua_Alloc next)
++{
++  if (rock_follow_allocator == 1 && next != g->allocf) {
++    rock_original_allocator = g->allocf;
++    rock_follow_allocator = 2;
++    rock_sites_mode = 2;
++  } else if (rock_follow_allocator == 2 && next == rock_original_allocator) {
++    rock_follow_allocator = 3;
++    rock_sites_mode = 1;
++  }
++}
++
++static void rock_sites_begin_trace(void)
++{
++  rock_wide_count = 0;
++  rock_sites_ir[REF_BASE] = 0;
++}
++
++static uint32_t rock_hash(uint32_t h, uint32_t n)
++{
++  return (h ^ n) * 16777619u;
++}
++
++uint32_t rock_sites_pc(GCproto *pt, const BCIns *pc)
++{
++  RockSite key = {0};
++  uint32_t i, h;
++  if (!pt || !pc || proto_bcpos(pt, pc) >= pt->sizebc) return 0;
++  key.first = pt->firstline;
++  key.pc = proto_bcpos(pt, pc);
++  key.line = lj_debug_line(pt, key.pc);
++  key.params = pt->numparams;
++  key.slots = pt->framesize;
++  lj_debug_shortname(key.chunk, proto_chunkname(pt), 0);
++  for (i = 0; key.chunk[i]; i++)
++    if (key.chunk[i] == '\t' || key.chunk[i] == '\n' || key.chunk[i] == '\r')
++      key.chunk[i] = ' ';
++  h = rock_hash(rock_hash(key.first, key.line), key.pc);
++  for (i = 0; key.chunk[i]; i++) h = rock_hash(h, (unsigned char)key.chunk[i]);
++  for (i = 0; i < ROCK_SITES_MAX - 1; i++) {
++    uint32_t id = 1 + h % (ROCK_SITES_MAX - 1);
++    RockSite *slot = &rock_sites[id];
++    if (!slot->chunk[0]) { *slot = key; return id; }
++    if (!memcmp(slot, &key, sizeof(key))) return id;
++    h++;
++  }
++  rock_overflow++;
++  return 0;
++}
++
++static void rock_add(uint32_t site, uint32_t kind, uint32_t other,
++                     uint32_t detail, uint64_t bytes)
++{
++  uint32_t h = rock_hash(rock_hash(rock_hash(site, kind), other), detail);
++  uint32_t i;
++  for (i = 0; i < ROCK_COUNTS_MAX; i++) {
++    RockCount *row = &rock_counts[(h+i) & (ROCK_COUNTS_MAX-1)];
++    if (!row->count) {
++      row->site = site; row->kind = kind; row->other = other; row->detail = detail;
++    } else if (row->site != site || row->kind != kind ||
++               row->other != other || row->detail != detail) {
++      continue;
++    }
++    row->count++;
++    row->bytes += bytes;
++    return;
++  }
++  rock_overflow++;
++}
++
++void rock_sites_alloc(lua_State *L, GCSize bytes)
++{
++  global_State *g = G(L);
++  uint32_t site = g->rock_site, kind = ROCK_ALLOC;
++  int category = luaJIT_vmcategory(L);
++  if (category == 1) {
++    kind = ROCK_COMPILER;
++    site = 0;
++  } else if (category == 2) {
++    kind = ROCK_COLLECTOR;
++    site = 0;
++  } else if (site & ROCK_RESTORE) {
++    kind = ROCK_UNSINK;
++    site &= ~ROCK_RESTORE;
++  } else if (g->vmstate >= 0) {
++    kind = ROCK_TRACE_ALLOC;
++  } else {
++    site = rock_sites_caller(L);
++  }
++  rock_add(site, kind, 0, 0, bytes);
++}
++
++static void rock_sites_record(jit_State *J, GCproto *pt, const BCIns *pc,
++                              IRRef first)
++{
++  IRRef ref;
++  uint32_t site = 0;
++  if (pt && pt->numparams >= 20) {
++    uint32_t i, wide = rock_sites_pc(pt, proto_bc(pt));
++    for (i = 0; i < rock_wide_count && rock_wide[i] != wide; i++) {}
++    if (i == rock_wide_count) {
++      if (rock_wide_count < sizeof(rock_wide)/sizeof(*rock_wide))
++        rock_wide[rock_wide_count++] = wide;
++      else
++        rock_overflow++;
++    }
++  }
++  for (ref = first; ref < J->cur.nins; ref++) {
++    switch (J->cur.ir[ref].o) {
++    case IR_TNEW: case IR_TDUP: case IR_CNEW: case IR_CNEWI: case IR_SNEW:
++    case IR_XSNEW: case IR_NEWREF: case IR_BUFPUT: case IR_BUFSTR:
++    case IR_CALLN: case IR_CALLA: case IR_CALLL: case IR_CALLS:
++      if (!site) {
++        site = rock_sites_pc(pt, pc);
++        if (!site) site = rock_sites_caller(J->L);
++      }
++      rock_sites_ir[ref] = site;
++      break;
++    default:
++      rock_sites_ir[ref] = 0;
++      break;
++    }
++  }
++}
++
++static void rock_sites_trace(jit_State *J, GCtrace *T)
++{
++  uint32_t old = rock_live[T->traceno];
++  uint32_t id, ref;
++  RockTrace *row;
++  if (old) {
++    free(rock_traces[old].origins);
++    rock_traces[old].origins = NULL;
++  }
++  rock_live[T->traceno] = 0;
++  if (rock_trace_count+1 == ROCK_TRACES_MAX) { rock_overflow++; return; }
++  id = ++rock_trace_count;
++  row = &rock_traces[id];
++  row->trace = T;
++  row->start = rock_sites_pc(&gcref(T->startpt)->pt, mref(T->startpc, const BCIns));
++  row->parent = J->parent ? rock_live[J->parent] : 0;
++  row->exitno = J->exitno;
++  row->stack_bytes = T->spadjust;
++  row->nins = T->nins - REF_FIRST;
++  row->size = T->szmcode;
++  rock_live[T->traceno] = id;
++  for (ref = 0; ref < rock_wide_count; ref++)
++    rock_add(rock_wide[ref], ROCK_WIDE, id, 0, 0);
++  for (ref = REF_FIRST; ref < T->nins; ref++) {
++    if (ra_hasspill(T->ir[ref].s)) row->spills++;
++    if (T->ir[ref].r == RID_SUNK) {
++      if (!row->origins) {
++        row->origins = calloc(row->nins, sizeof(*row->origins));
++        if (!row->origins) { rock_overflow++; return; }
++      }
++      row->origins[ref-REF_FIRST] = rock_sites_ir[ref];
++      rock_add(rock_sites_ir[ref], ROCK_SUNK_IR, 0, 0, 0);
++    }
++  }
++}
++
++uint32_t rock_sites_restore(GCtrace *trace, IRRef ref)
++{
++  RockTrace *row = &rock_traces[rock_live[trace->traceno]];
++  uint32_t site = 0;
++  if (row->trace == trace && row->origins && ref >= REF_FIRST &&
++      ref-REF_FIRST < row->nins)
++    site = row->origins[ref-REF_FIRST];
++  return site | ROCK_RESTORE;
++}
++
++static void rock_sites_abort(jit_State *J, TraceError reason)
++{
++  uint32_t start = rock_sites_pc(&gcref(J->cur.startpt)->pt,
++                                 mref(J->cur.startpc, const BCIns));
++  rock_add(rock_sites_pc(J->pt, J->pc), ROCK_ABORT, start, reason, 0);
++}
++
++static void rock_sites_exit(GCtrace *T, ExitNo exitno, lua_State *L, const BCIns *pc)
++{
++  uint32_t id = rock_live[T->traceno];
++  if (rock_traces[id].trace != T) id = 0;
++  GCfunc *fn = curr_func(L);
++  uint32_t site = isluafunc(fn) ? rock_sites_pc(funcproto(fn), pc) : 0;
++  rock_add(site, ROCK_EXIT, id, exitno, 0);
++}
++
++LUA_API int luaJIT_rock_sites(int mode, const char *path)
++{
++  uint32_t i;
++  FILE *out;
++  if (mode < 0 || mode > 3 || (mode == 2 && rock_sites_mode == 0)) return 0;
++  if (mode == 3) rock_follow_allocator = 1;
++  if (path && rock_follow_allocator && rock_follow_allocator != 3) return 0;
++  rock_sites_mode = mode == 3 ? 1 : mode;
++  if (!path) return 1;
++  out = fopen(path, "w");
++  if (!out) return 0;
++  fprintf(out, "rock-sites-v1\t%u\n", rock_overflow);
++#define TREDEF(name, message) fprintf(out, "reason\t%u\t%s\n", LJ_TRERR_##name, message);
++#include "lj_traceerr.h"
++  for (i = 1; i < ROCK_SITES_MAX; i++) {
++    const RockSite *s = &rock_sites[i];
++    if (s->chunk[0])
++      fprintf(out, "site\t%u\t%u\t%u\t%u\t%u\t%u\t%s\n",
++              i, s->first, s->line, s->pc, s->params, s->slots, s->chunk);
++  }
++  for (i = 1; i <= rock_trace_count; i++) {
++    const RockTrace *t = &rock_traces[i];
++    fprintf(out, "trace\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\n",
++            i, t->start, t->parent, t->exitno, t->stack_bytes, t->nins, t->size, t->spills);
++  }
++  for (i = 0; i < ROCK_COUNTS_MAX; i++) {
++    const RockCount *r = &rock_counts[i];
++    if (r->count)
++      fprintf(out, "count\t%u\t%u\t%u\t%u\t%" PRIu64 "\t%" PRIu64 "\n",
++              r->site, r->kind, r->other, r->detail, r->count, r->bytes);
++  }
++  if (ferror(out)) { fclose(out); return 0; }
++  return fclose(out) == 0 && !rock_overflow;
++}
+diff --git a/src/lj_snap.c b/src/lj_snap.c
+index 7611068f..82ec49ac 100644
+--- a/src/lj_snap.c
++++ b/src/lj_snap.c
+@@ -22,2 +22,3 @@
+ #include "lj_snap.h"
++#include "lj_rock_sites.h"
+ #include "lj_target.h"
+@@ -836,2 +837,7 @@ static void snap_unsink(jit_State *J, GCtrace *T, ExitState *ex,
+ {
++#if LJ_ROCK_SITES
++  uint32_t previous_site = G(J->L)->rock_site;
++  if (rock_sites_mode == 2)
++    G(J->L)->rock_site = rock_sites_restore(T, ir - T->ir);
++#endif
+   lj_assertJ(ir->o == IR_TNEW || ir->o == IR_TDUP ||
+@@ -936,2 +942,5 @@ static void snap_unsink(jit_State *J, GCtrace *T, ExitState *ex,
+   }
++#if LJ_ROCK_SITES
++  G(J->L)->rock_site = previous_site;
++#endif
+ }
+diff --git a/src/lj_trace.c b/src/lj_trace.c
+index 758b5a11..7638e6fe 100644
+--- a/src/lj_trace.c
++++ b/src/lj_trace.c
+@@ -52,2 +52,6 @@ LUA_API int luaJIT_health_coalescing(lua_State *L, uint32_t v, uint64_t first,
+ #include "lj_prng.h"
++#include "lj_rock_sites.h"
++#if LJ_ROCK_SITES
++#include "lj_rock_sites.inc"
++#endif
+
+@@ -536,2 +540,5 @@ static void trace_start(jit_State *J)
+   J->cur.traceno = traceno;
++#if LJ_ROCK_SITES
++  if (rock_sites_mode) rock_sites_begin_trace();
++#endif
+   J->cur.nins = J->cur.nk = REF_BASE;
+@@ -642,2 +649,5 @@ static void trace_stop(jit_State *J)
+   trace_save(J, T);
++#if LJ_ROCK_SITES
++  if (rock_sites_mode) rock_sites_trace(J, T);
++#endif
+
+@@ -716,2 +726,5 @@ static int trace_abort(jit_State *J)
+   if (traceno) {
++#if LJ_ROCK_SITES
++    if (rock_sites_mode == 2) rock_sites_abort(J, e);
++#endif
+     if ((uint32_t)e < LUAJIT_HEALTH_REASONS) J2GG(J)->health.aborts[e]++;
+@@ -814,3 +827,12 @@ static TValue *trace_state(lua_State *L, lua_CFunction dummy, void *ud)
+       );
+-      lj_record_ins(J);
++#if LJ_ROCK_SITES
++      if (rock_sites_mode) {
++        GCproto *pt = J->pt;
++        const BCIns *pc = J->pc;
++        IRRef first = J->cur.nins;
++        lj_record_ins(J);
++        rock_sites_record(J, pt, pc, first);
++      } else
++#endif
++        lj_record_ins(J);
+       break;
+@@ -1033,2 +1055,5 @@ int LJ_FASTCALL lj_trace_exit(jit_State *J, void *exptr)
+   pc = exd.pc;
++#if LJ_ROCK_SITES
++  if (rock_sites_mode == 2) rock_sites_exit(T, J->exitno, L, pc);
++#endif
+   cf = cframe_raw(L->cframe);

@@ -140,8 +140,48 @@ MACOSX_DEPLOYMENT_TARGET=15.0 make -C luajit \
 ```
 
 Pass `--luajit /path/to/gamelibs/luajit/src/luajit` to both runs. This build
-fixes the VM seed and Lua heap mapping addresses and gives staged `main.lua`
-chunks a constant name. It keeps the JIT and collector running. Use the
+fixes the VM seed and Lua heap mapping addresses, derives string IDs from
+content, and gives staged `main.lua` chunks a constant name. It keeps the JIT and collector running. Use the
 patched binary for trusted benchmark inputs only. Calibrate each workload
 with A/A since native work and wall-clock budgets can still change the
 allocation and trace counts.
+
+### Fixed work and site diagnostics
+
+Add `--fixed-work` to both A/A and A/B. In this mode Stone decodes images
+on the caller and schedules uploads with its existing byte quota. The
+runner boots with the JIT off, then collects the Lua heap and enables the
+JIT on frame three. Budget warmup frames after that reset. If the
+application has its own time-budgeted jobs, configure those to use work
+quotas as well. Use the scenario's work
+counters and verify A/A before interpreting changes at the scale of the
+observed noise.
+
+Build a separate diagnostic VM by applying `measurement-sites-luajit.patch`
+after `measurement-luajit.patch` and using the same build flags. Run it
+with `--capture-sites --luajit /path/to/diagnostic/luajit`. Site diagnostics
+modify trace machine code and consume CPU time. Use the ordinary measurement
+VM for CPU and frame-time comparisons.
+
+The diagnostic VM follows the first Stone allocator-counter lease. It
+records request count and requested bytes at bytecode sites, with separate
+lanes for interpreter, trace and restored allocations. Compiler and
+collector traffic has no user bytecode site. Helpers without a known PC
+appear as unattributed. Sunk IR counts describe compiled operations across
+startup and the window. Restored counts reflect allocations on actual
+exits during the window. Each exit to the VM identifies the trace generation,
+snapshot and resume PC. Trace rows also record stack adjustment and the
+number of IR values assigned spill slots.
+
+The comparison takes the emitted Lua file from each arm and its captures
+in pair order.
+
+```sh
+python3 perf/site_diff.py BASE.lua CANDIDATE.lua \
+    --base base/{01,02,03}-a/perf-summary.json.sites.tsv \
+    --candidate candidate/{01,02,03}-b/perf-summary.json.sites.tsv
+```
+
+Use `--by-prototype` when the bytecode changes
+within a function. The raw TSV retains generated line numbers, PCs,
+allocation lanes, abort reasons and trace generations.
