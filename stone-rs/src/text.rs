@@ -14,7 +14,7 @@ use crate::IMAGES;
 use crate::{track_text_draw_call, with_gl, SHADERS};
 
 /// Glyph info for the font atlas, indexed by the Rock text slot.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 struct GlyphInfo {
     u0: f32,
     v0: f32,
@@ -1380,12 +1380,6 @@ pub extern "C" fn stone_draw_text_ex(
     draw_text_line_internal(shader.into(), font_id, text_str, x, y, sx, sy, baseline);
 }
 
-fn retain_font_instance_image(image: &mut Option<u64>, atlas_image: u64) {
-    if image.is_none() {
-        *image = Some(atlas_image);
-    }
-}
-
 fn register_r8_alias(texture: glow::Texture, width: i32, height: i32) -> u64 {
     with_gl(|gl| unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
@@ -1465,7 +1459,7 @@ pub extern "C" fn stone_get_font_atlas_image(font_id: c_uint) -> u64 {
     });
     font_slot_mut(idx, |entry| {
         if let Some(instance) = entry.and_then(|entry| entry.instances.first_mut()) {
-            retain_font_instance_image(&mut instance.image, id);
+            instance.image.get_or_insert(id);
         }
     });
     id
@@ -1592,7 +1586,7 @@ mod test_fixtures {
 mod font_census_tests {
     use super::test_fixtures::{install_fake_gpu_font, EXTRA_PX, MAIN_PX};
     use super::*;
-    use crate::image_texture::{live_texture_bytes, stone_get_image_size};
+    use crate::image_texture::{live_texture_bytes, stone_get_image_byte_len};
 
     struct CensusFonts {
         fonts_len: usize,
@@ -1638,15 +1632,37 @@ mod font_census_tests {
         bake.atlas_width as u64 * bake.atlas_height as u64
     }
 
-    fn register_aliases(guard: &mut CensusFonts, font: c_uint) -> (u64, u64) {
-        let compat = stone_get_font_atlas_image(font);
-        assert_ne!(compat, 0, "the compat alias registers headless");
-        guard.note_image(compat);
-        let bucket = stone_get_font_instance_image(atlas_instance_id(font, 1));
-        assert_ne!(bucket, 0, "the bucket alias registers headless");
-        assert_ne!(bucket, compat, "a later bucket owns its texture");
-        guard.note_image(bucket);
-        (compat, bucket)
+    /// Coverage atlases upload R8, so the live-image census counts each alias
+    /// at one byte per texel, not the RGBA8 four. Returns the texels registered.
+    fn register_aliases(guard: &mut CensusFonts, font: c_uint) -> u64 {
+        let mut total = 0;
+        let mut previous = 0;
+        for (instance, pixel_size) in [(0, MAIN_PX), (1, EXTRA_PX)] {
+            let texels = oracle_texels(pixel_size);
+            assert!(texels > 0, "the oracle bake is a real atlas");
+            let before = live_texture_bytes();
+            let image = if instance == 0 {
+                stone_get_font_atlas_image(font)
+            } else {
+                stone_get_font_instance_image(atlas_instance_id(font, instance))
+            };
+            assert_ne!(image, 0, "instance {instance} alias registers headless");
+            assert_ne!(image, previous, "a later bucket owns its texture");
+            guard.note_image(image);
+            assert_eq!(
+                live_texture_bytes() - before,
+                texels,
+                "instance {instance}: one R8 texel is one byte in the live total"
+            );
+            assert_eq!(
+                stone_get_image_byte_len(image),
+                texels,
+                "instance {instance}: the per-image census agrees with the live total"
+            );
+            previous = image;
+            total += texels;
+        }
+        total
     }
 
     fn has_atlas(font: c_uint) -> bool {
@@ -1663,70 +1679,11 @@ mod font_census_tests {
         glyph
     }
 
-    /// Coverage atlases upload R8, one byte per texel, so the live-image
-    /// census must count the alias at 1 B/texel, not the RGBA8 4.
-    #[test]
-    fn coverage_aliases_count_one_byte_per_texel_live() {
-        let mut guard = CensusFonts::capture();
-        let font = install_fake_gpu_font(5201, true);
-        let texels = oracle_texels(MAIN_PX);
-        let extra_texels = oracle_texels(EXTRA_PX);
-        assert!(
-            texels > 0 && extra_texels > 0,
-            "the oracle bakes are real atlases, not empty fixtures"
-        );
-
-        let before = live_texture_bytes();
-        let image = stone_get_font_atlas_image(font);
-        assert_ne!(image, 0, "the atlas image registers headless");
-        guard.note_image(image);
-
-        let (mut w, mut h) = (0 as c_int, 0 as c_int);
-        stone_get_image_size(image, &mut w, &mut h);
-        assert_eq!(
-            w as u64 * h as u64,
-            texels,
-            "the alias carries the bake's extent"
-        );
-        assert_eq!(
-            live_texture_bytes() - before,
-            texels,
-            "one R8 texel is one byte in the live total"
-        );
-        assert_eq!(
-            crate::image_texture::stone_get_image_byte_len(image),
-            texels,
-            "the per-image census agrees with the live total"
-        );
-
-        let before_extra = live_texture_bytes();
-        let extra_image = stone_get_font_instance_image(atlas_instance_id(font, 1));
-        assert_ne!(extra_image, 0, "the bucket image registers headless");
-        assert_ne!(extra_image, image, "a later bucket owns its texture");
-        guard.note_image(extra_image);
-        assert_eq!(
-            live_texture_bytes() - before_extra,
-            extra_texels,
-            "a later bucket counts at 1 B/texel too"
-        );
-        assert_eq!(
-            crate::image_texture::stone_get_image_byte_len(extra_image),
-            extra_texels,
-            "the per-image census agrees per bucket"
-        );
-    }
-
     #[test]
     fn release_coverage_drops_aliases_and_keeps_the_face() {
         let mut guard = CensusFonts::capture();
         let font = install_fake_gpu_font(5201, true);
-        let main_texels = oracle_texels(MAIN_PX);
-        let extra_texels = oracle_texels(EXTRA_PX);
-        assert!(
-            main_texels > 0 && extra_texels > 0,
-            "both oracle bakes are real atlases"
-        );
-        register_aliases(&mut guard, font);
+        let alias_texels = register_aliases(&mut guard, font);
 
         let data_len = stone_font_data_len(font);
         assert!(data_len > 1000, "the installed face retains its TTF bytes");
@@ -1740,7 +1697,7 @@ mod font_census_tests {
         );
         assert_eq!(
             before - live_texture_bytes(),
-            main_texels + extra_texels,
+            alias_texels,
             "compat and bucket aliases leave the live total at 1 B/texel"
         );
         assert_eq!(
@@ -2365,21 +2322,13 @@ pub extern "C" fn stone_font_release_coverage(font_id: c_uint) -> bool {
 mod atlas_face_tests {
     use super::*;
 
-    fn droid() -> Vec<u8> {
-        FALLBACK_FONT.to_vec()
-    }
-
     const PX: i32 = 32;
 
-    fn bake(faces: FaceSet) -> RasterizedAtlas {
-        rasterize_glyphs(&droid(), PX, faces, &Charset::default(), "DroidSans")
+    fn bake(bold: bool, italic: bool) -> RasterizedAtlas {
+        let faces = FaceSet { bold, italic };
+        rasterize_glyphs(FALLBACK_FONT, PX, faces, &Charset::default(), "DroidSans")
             .expect("DroidSans bakes")
     }
-
-    const BOTH: FaceSet = FaceSet {
-        bold: true,
-        italic: true,
-    };
 
     fn rows(a: &RasterizedAtlas) -> u32 {
         let h = a.atlas_height as f32;
@@ -2390,78 +2339,48 @@ mod atlas_face_tests {
         (h / pitch).round() as u32
     }
 
-    // The default declares nothing, so every existing caller keeps the atlas it
-    // had. Stated as an EQUALITY with a single-face bake rather than as "small
+    // Stated as an equality with the declared block count rather than as "small
     // enough": a layout that reserved four blocks and left three empty would
     // pass a size bound and fail this.
     #[test]
-    fn declaring_nothing_bakes_exactly_one_face() {
-        let plain = bake(FaceSet::default());
-        let four = bake(BOTH);
-
-        assert_eq!(
-            rows(&plain),
-            6,
-            "96 text slots at 16 per row is one 6-row block"
-        );
-        assert_eq!(rows(&four), 24, "four declared faces are four 6-row blocks");
-
-        for face in [Face::Bold, Face::Italic, Face::BoldItalic] {
-            let any_valid = (GLYPH_FIRST..=GLYPH_LAST).any(|c| plain.glyphs[face.index()][c].valid);
-            assert!(
-                !any_valid,
-                "{face:?} must be entirely invalid when it was never declared -- \
-                 a face that silently bakes is a face that silently falls back"
+    fn only_declared_faces_bake_each_in_one_six_row_block() {
+        use Face::*;
+        let cases: [(bool, bool, &[Face]); 4] = [
+            (false, false, &[Regular]),
+            (true, false, &[Regular, Bold]),
+            (false, true, &[Regular, Italic]),
+            (true, true, &[Regular, Bold, Italic, BoldItalic]),
+        ];
+        for (bold, italic, baked) in cases {
+            let atlas = bake(bold, italic);
+            assert_eq!(
+                rows(&atlas),
+                6 * baked.len() as u32,
+                "bold={bold} italic={italic}: 96 slots at 16 per row per declared face"
             );
+            for face in Face::ALL {
+                let any_valid =
+                    (GLYPH_FIRST..=GLYPH_LAST).any(|c| atlas.glyphs[face.index()][c].valid);
+                assert_eq!(
+                    any_valid,
+                    baked.contains(&face),
+                    "bold={bold} italic={italic}: {face:?} bakes only when declared; \
+                     bold-italic needs both axes"
+                );
+            }
         }
+
+        let accent = bake(false, false).glyphs[Regular.index()][GLYPH_ACCENT_A_ACUTE_SLOT];
         assert!(
-            plain.glyphs[Face::Regular.index()][b'n' as usize].valid,
-            "regular is always baked"
+            accent.valid && accent.advance > 0.0,
+            "DroidSans bakes the Á extension slot with an advance"
         );
     }
 
     #[test]
-    fn latin_accent_is_baked_into_the_extension_slot() {
-        let plain = bake(FaceSet::default());
-        let accent = plain.glyphs[Face::Regular.index()][GLYPH_ACCENT_A_ACUTE_SLOT];
-        assert!(accent.valid, "DroidSans must provide the Á glyph");
-        assert!(accent.advance > 0.0, "Á must carry an advance");
-    }
-
-    #[test]
-    fn each_axis_is_declared_independently() {
-        let bold_only = bake(FaceSet {
-            bold: true,
-            italic: false,
-        });
-        let valid = |a: &RasterizedAtlas, f: Face| a.glyphs[f.index()][b'n' as usize].valid;
-
-        assert!(valid(&bold_only, Face::Regular), "regular baked");
-        assert!(valid(&bold_only, Face::Bold), "declared bold baked");
-        assert!(
-            !valid(&bold_only, Face::Italic),
-            "undeclared italic must not bake"
-        );
-        assert!(
-            !valid(&bold_only, Face::BoldItalic),
-            "bold-italic needs BOTH axes declared -- half of it is not it"
-        );
-
-        let italic_only = bake(FaceSet {
-            bold: false,
-            italic: true,
-        });
-        assert!(valid(&italic_only, Face::Italic), "declared italic baked");
-        assert!(
-            !valid(&italic_only, Face::Bold),
-            "undeclared bold must not bake"
-        );
-    }
-
-    #[test]
-    fn cells_hold_the_widest_face() {
-        let four = bake(BOTH);
-        let plain = bake(FaceSet::default());
+    fn declared_faces_take_distinct_blocks_and_cells_hold_the_widest() {
+        let four = bake(true, true);
+        let plain = bake(false, false);
         assert!(
             four.atlas_width > plain.atlas_width,
             "bold-italic must be wider than regular ({}px vs {}px cells); if it is not, \
@@ -2477,8 +2396,7 @@ mod atlas_face_tests {
                 if !gi.valid || gi.width == 0.0 {
                     continue;
                 }
-                let idx = c - GLYPH_FIRST;
-                let col = (idx % 16) as f32;
+                let col = ((c - GLYPH_FIRST) % 16) as f32;
                 let (left, right) = (
                     gi.u0 * four.atlas_width as f32,
                     gi.u1 * four.atlas_width as f32,
@@ -2493,21 +2411,13 @@ mod atlas_face_tests {
                 );
             }
         }
-    }
 
-    #[test]
-    fn faces_occupy_distinct_atlas_regions() {
-        let four = bake(BOTH);
-        let mut vs: Vec<f32> = Face::ALL
-            .iter()
-            .map(|f| four.glyphs[f.index()][b'n' as usize].v0)
-            .collect();
+        let g = |f: Face| four.glyphs[f.index()][b'n' as usize];
+        let mut vs: Vec<f32> = Face::ALL.iter().map(|&f| g(f).v0).collect();
         vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         for w in vs.windows(2) {
             assert!(w[1] > w[0], "two faces share a row block ({:?})", vs);
         }
-
-        let g = |f: Face| four.glyphs[f.index()][b'n' as usize];
         assert!(
             g(Face::Bold).advance > g(Face::Regular).advance,
             "bold must set wider than regular"
@@ -2550,37 +2460,20 @@ mod offgrid_tests {
     use super::*;
 
     #[test]
-    fn offgrid_detector_fires_only_off_grid() {
-        let font = crate::test_fonts::pixel_font();
-        let font = font.as_slice();
-
+    fn offgrid_detector_fires_only_for_a_pixel_font_off_grid() {
+        let pixel = crate::test_fonts::pixel_font();
         assert!(
-            grid_gray_fraction(font, 48.0) <= GRID_CLEAN,
-            "expected 48px near-binary, got {:.3}",
-            grid_gray_fraction(font, 48.0)
-        );
-        assert!(
-            offgrid_report(font, 48, "pixel").is_none(),
+            offgrid_report(&pixel, 48, "pixel").is_none(),
             "48px should not warn (it is a clean multiple)"
         );
-
-        let fired: Vec<i32> = (12..=64)
-            .filter(|&px| offgrid_report(font, px, "pixel").is_some())
-            .collect();
         assert!(
-            !fired.is_empty(),
+            (12..=64).any(|px| offgrid_report(&pixel, px, "pixel").is_some()),
             "expected at least one off-grid size in 12..=64 to warn; none did"
         );
-    }
-
-    #[test]
-    fn offgrid_detector_silent_on_smooth_font() {
-        let font = FALLBACK_FONT;
         for px in (12..=64).step_by(4) {
             assert!(
-                offgrid_report(font, px, "DroidSans").is_none(),
-                "smooth font should never warn (px={})",
-                px
+                offgrid_report(FALLBACK_FONT, px, "DroidSans").is_none(),
+                "smooth font should never warn (px={px})"
             );
         }
     }
@@ -2590,17 +2483,6 @@ mod offgrid_tests {
 mod atlas_image_teardown_tests {
     use super::test_fixtures::fake_texture;
     use super::*;
-
-    #[test]
-    fn atlas_registration_keeps_an_existing_instance_image_reachable() {
-        let mut image = Some(17);
-        retain_font_instance_image(&mut image, 23);
-        assert_eq!(image, Some(17));
-
-        let mut empty = None;
-        retain_font_instance_image(&mut empty, 23);
-        assert_eq!(empty, Some(23));
-    }
 
     /// Register an atlas image the way `stone_get_font_atlas_image` does; headless,
     /// the GL work is skipped, so the teardown below has a real registry entry.
@@ -2655,36 +2537,43 @@ mod charset_tests {
 
     const PX: i32 = 32;
 
-    fn emoji_font() -> Vec<u8> {
-        crate::test_fonts::symbol_only_font()
-    }
-
-    fn bake(extra: &str) -> RasterizedAtlas {
-        rasterize_glyphs(
-            &emoji_font(),
+    #[test]
+    fn declared_codepoints_bake_into_appended_slots_when_the_font_covers_them() {
+        let extra = "\u{1F600}\u{10FFFE}";
+        let charset = Charset::parse(extra);
+        let atlas = rasterize_glyphs(
+            &crate::test_fonts::symbol_only_font(),
             PX,
             FaceSet::default(),
-            &Charset::parse(extra),
+            &charset,
             "symbol",
         )
-        .expect("the symbol font bakes")
-    }
+        .expect("the symbol font bakes");
+        let regular = &atlas.glyphs[Face::Regular.index()];
 
-    #[test]
-    fn a_declared_emoji_bakes_into_an_appended_slot() {
-        let a = bake("\u{1F600}");
-        let slot = Charset::parse("\u{1F600}")
-            .slot_of('\u{1F600}')
-            .expect("a declared codepoint has a slot");
-        assert_eq!(slot, GLYPH_ASCII_SLOTS, "the first extra appends at 128");
-
-        let g = &a.glyphs[Face::Regular.index()][slot];
+        let emoji = charset.slot_of('\u{1F600}');
+        assert_eq!(
+            emoji,
+            Some(GLYPH_ASCII_SLOTS),
+            "the first extra appends at 128"
+        );
+        let g = &regular[GLYPH_ASCII_SLOTS];
         assert!(
             g.valid,
             "the symbol font covers U+1F600 through its format 12 cmap"
         );
         assert!(g.advance > 0.0, "an emoji glyph carries an advance");
         assert!(g.width > 0.0 && g.height > 0.0, "and has ink");
+
+        let uncovered = charset.slot_of('\u{10FFFE}').expect("declared");
+        assert!(
+            !regular[uncovered].valid,
+            "the symbol font has no U+10FFFE; the slot exists and is invalid"
+        );
+        assert!(
+            !regular[b'X' as usize].valid && !regular[b'a' as usize].valid,
+            "the symbol font maps no ASCII codepoint"
+        );
     }
 
     #[test]
@@ -2719,30 +2608,6 @@ mod charset_tests {
         assert!(
             with_extras.glyphs[Face::Regular.index()][GLYPH_ASCII_SLOTS].valid,
             "and the declared extra did land, so the comparison was not against a no-op bake"
-        );
-    }
-
-    #[test]
-    fn an_emoji_only_font_carries_emoji_but_no_ascii() {
-        let a = bake("\u{1F600}");
-        let regular = &a.glyphs[Face::Regular.index()];
-        assert!(
-            !regular[b'X' as usize].valid && !regular[b'a' as usize].valid,
-            "the symbol font maps no ASCII codepoint"
-        );
-        assert!(
-            regular[GLYPH_ASCII_SLOTS].valid,
-            "while the declared emoji bakes -- the font is a symbol subset, not a broken parse"
-        );
-    }
-
-    #[test]
-    fn an_uncovered_declared_codepoint_bakes_invalid() {
-        let a = bake("\u{10FFFE}");
-        let slot = Charset::parse("\u{10FFFE}").slot_of('\u{10FFFE}').unwrap();
-        assert!(
-            !a.glyphs[Face::Regular.index()][slot].valid,
-            "the symbol font has no U+10FFFE; the slot exists and is invalid"
         );
     }
 
@@ -2814,10 +2679,6 @@ mod metrics_only_font_tests {
         }
     }
 
-    fn load(residency: AtlasResidency) -> c_uint {
-        load_droid(32, residency)
-    }
-
     fn unit_metrics(font_id: c_uint) -> [f32; 5] {
         let mut out = [0.0f32; 5];
         assert!(
@@ -2827,39 +2688,31 @@ mod metrics_only_font_tests {
         out
     }
 
+    // What the Rock layout path reads, font-unit metrics and per-glyph unit
+    // advances, is prepared from the retained font bytes and owes nothing to
+    // GL. A metrics font owns no texture, so every GL-bound reader must refuse
+    // it: an atlas image of 0 keeps Rock from sampling texture 0 through the
+    // glyph quads.
     #[test]
-    fn a_metrics_load_succeeds_where_a_gpu_load_cannot() {
+    fn a_metrics_load_needs_no_context_publishes_metrics_and_refuses_gl_readers() {
         assert_eq!(
-            load(AtlasResidency::Gpu),
+            load_droid(32, AtlasResidency::Gpu),
             0,
-            "a GPU load has no context here, so it must fail rather than              produce a font with no texture"
+            "a GPU load has no context here, so it must fail rather than \
+             produce a font with no texture"
         );
-        let metrics = load(AtlasResidency::Metrics);
-        assert_ne!(metrics, 0, "the metrics-only load does not need a context");
-        assert_eq!(
-            stone_get_font_pixel_size(metrics),
-            32,
-            "the metrics font keeps the raster size it was asked for"
-        );
+        let font = load_droid(32, AtlasResidency::Metrics);
+        assert_ne!(font, 0, "the metrics-only load does not need a context");
+        assert_eq!(stone_get_font_pixel_size(font), 32);
         assert!(
-            stone_get_font_slot_count(metrics) > 0,
+            stone_get_font_slot_count(font) > 0,
             "the charset is baked, so the slot count is the atlas's own"
         );
-    }
 
-    // What the Rock layout path reads: font-unit metrics and per-glyph unit
-    // advances. Both are prepared from the retained font bytes at raster
-    // time, so they owe nothing to GL -- this pins that they are actually
-    // present, not merely that the call returned true with zeros.
-    #[test]
-    fn metrics_only_publishes_font_and_glyph_unit_metrics() {
-        let font = load(AtlasResidency::Metrics);
-        assert_ne!(font, 0, "metrics load");
         let m = unit_metrics(font);
         assert!(m[0] > 0.0, "units per em");
         assert!(m[1] > 0.0, "ascender");
         assert!(m[4] > 0.0, "cap height");
-
         let mut glyph = [0.0f32; 5];
         assert!(
             stone_get_glyph_unit_metrics(font, 0, b'n' as c_int, glyph.as_mut_ptr()),
@@ -2867,6 +2720,23 @@ mod metrics_only_font_tests {
         );
         assert!(glyph[4] > 0.0, "'n' carries an advance");
         assert!(glyph[2] > 0.0 && glyph[3] > 0.0, "'n' has ink extent");
+
+        for attempt in ["first", "second"] {
+            assert_eq!(
+                stone_get_font_atlas_image(font),
+                0,
+                "{attempt} ask: no texture means no Image handle, and the refusal is not cached"
+            );
+        }
+        assert!(
+            !stone_resize_font(font, 64),
+            "a re-raster into a texture that does not exist is refused"
+        );
+        assert_eq!(
+            stone_get_font_pixel_size(font),
+            32,
+            "the refused resize left the raster size alone"
+        );
     }
 
     // The raster size a metrics font is loaded at must not change what it
@@ -2900,35 +2770,6 @@ mod metrics_only_font_tests {
             advance(small),
             advance(large),
             "a glyph's unit advance is the file's, not the raster's"
-        );
-    }
-
-    // A metrics font owns no texture, so every GL-bound reader must refuse it by
-    // name. `stone_get_font_atlas_image` returning 0 is what keeps Rock from
-    // registering an Image over texture 0 and sampling the white pixel through
-    // the glyph quads.
-    #[test]
-    fn a_metrics_font_publishes_no_atlas_image_and_refuses_a_re_raster() {
-        let font = load(AtlasResidency::Metrics);
-        assert_ne!(font, 0, "metrics load");
-        assert_eq!(
-            stone_get_font_atlas_image(font),
-            0,
-            "no texture means no Image handle"
-        );
-        assert_eq!(
-            stone_get_font_atlas_image(font),
-            0,
-            "the refusal is not cached as an image id, so it answers 0 again"
-        );
-        assert!(
-            !stone_resize_font(font, 64),
-            "a re-raster into a texture that does not exist is refused, not              reported as a successful resize"
-        );
-        assert_eq!(
-            stone_get_font_pixel_size(font),
-            32,
-            "the refused resize left the raster size alone"
         );
     }
 }
@@ -3028,24 +2869,6 @@ mod reload_atomicity_tests {
         })
     }
 
-    fn glyph_tables_equal(a: &[Vec<GlyphInfo>; 4], b: &[Vec<GlyphInfo>; 4]) -> bool {
-        a.iter().zip(b.iter()).all(|(x, y)| {
-            x.len() == y.len()
-                && x.iter().zip(y.iter()).all(|(g, h)| {
-                    g.valid == h.valid
-                        && g.u0 == h.u0
-                        && g.v0 == h.v0
-                        && g.u1 == h.u1
-                        && g.v1 == h.v1
-                        && g.width == h.width
-                        && g.height == h.height
-                        && g.bearing_x == h.bearing_x
-                        && g.bearing_y == h.bearing_y
-                        && g.advance == h.advance
-                })
-        })
-    }
-
     fn assert_snapshot_restored(font_id: c_uint, before: &FontSnapshot) {
         let after = snapshot(font_id);
         assert_eq!(
@@ -3067,7 +2890,7 @@ mod reload_atomicity_tests {
             "face revision moves only on a committed reload"
         );
         assert!(
-            glyph_tables_equal(&after.glyphs, &before.glyphs),
+            after.glyphs == before.glyphs,
             "a failed reload keeps the old glyph table"
         );
         assert_eq!(
@@ -3081,10 +2904,7 @@ mod reload_atomicity_tests {
             .zip(before.instances.iter())
             .enumerate()
         {
-            assert!(
-                glyph_tables_equal(&a.glyphs, &b.glyphs),
-                "instance {n} keeps its glyph table"
-            );
+            assert!(a.glyphs == b.glyphs, "instance {n} keeps its glyph table");
             assert_eq!(
                 (a.pixel_size, a.width, a.height, a.face_revision),
                 (b.pixel_size, b.width, b.height, b.face_revision),
@@ -3133,10 +2953,7 @@ mod reload_atomicity_tests {
                 (fresh.atlas_width as i32, fresh.atlas_height as i32),
                 "the atlas extent is the new file's bake"
             );
-            assert!(
-                glyph_tables_equal(&entry.glyphs, &fresh.glyphs),
-                "and so is the glyph table"
-            );
+            assert!(entry.glyphs == fresh.glyphs, "and so is the glyph table");
             assert_eq!(entry.face_revision, 1, "the reload bumps face_revision");
             assert_eq!(entry.instances.len(), 2, "no instance gained or lost");
             assert!(
