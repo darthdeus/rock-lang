@@ -291,6 +291,12 @@ fn while_call_cond(n: int) -> int {
 @test(returns = 10)
 fn t_sum_while() -> int { return sum_while(5) }
 
+@test(returns = true)
+fn t_sum_while_boolean_branch() -> bool {
+    if sum_while(4) == 6 { return true }
+    return false
+}
+
 @test(returns = 10)
 fn t_sum_for() -> int { return sum_for(5) }
 

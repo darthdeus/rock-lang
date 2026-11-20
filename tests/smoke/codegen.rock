@@ -1,18 +1,8 @@
-// Broad code-generation smoke tests: small whole programs (loops and calls,
+// Broad code-generation smoke tests: small whole programs (calls,
 // floor division and modulo, monomorphized and value-struct calls, multi-result
 // tuples, nullables, strings, enums), interpolation, methods, closures, safe
 // navigation, casts, maps, coroutines, compound assignment, operator
 // overloading, array index writes, nested if/return shapes and enum patterns.
-
-fn sum_to(n: int) -> int {
-    let acc = 0
-    let i = 0
-    while i < n {
-        acc = acc + i
-        i = i + 1
-    }
-    return acc
-}
 
 fn identity<T>(value: T) -> T { return value }
 
@@ -31,15 +21,6 @@ fn quotient_remainder(value: int, divisor: int) -> (int, int) {
 fn maybe_pair(present: bool) -> (int, int)? {
     if present { return (4, 2) }
     return null
-}
-
-@test(returns = 10)
-fn c_loop_and_call() -> int { return sum_to(5) }
-
-@test(returns = true)
-fn c_bool_branch() -> bool {
-    if sum_to(4) == 6 { return true }
-    return false
 }
 
 @test(returns = -3)
