@@ -3,9 +3,11 @@ use stone::*
 fn world_flush_fixture(body: fn() -> ()) {
     setup_stone()
     assert(stone_gpu_host_ensure())
-    let view = resolve_frame_view(v(64.0, 64.0), iv(64, 64),
-        Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
-    let failure = world_fixture_raised(() => { with_scene_render_scope(view, body) }, world_fixture_traceback)
+    let view = resolve_frame_view(v(64.0, 64.0), iv(64, 64), Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
+    let failure = world_fixture_raised(
+        () => { with_scene_render_scope(view, body) },
+        world_fixture_traceback
+    )
     assert(failure == null, failure ?? "")
 }
 
@@ -219,9 +221,14 @@ fn shared_meshes_separate_rendering_identity_and_flush_lifetime() {
         let white = sampled_image(WHITE_PIXEL.unwrap())
         let additive = acquire_mesh(world, white, capacity: 128,
             blend: BlendMode::Additive, shared: true)
-        assert(same_ref(acquire_mesh(world, white, capacity: 128,
-            blend: BlendMode::Additive, shared: true), additive),
-            "identical shared requests reuse one pending mesh")
+        assert(
+            same_ref(
+                acquire_mesh(world, white, capacity: 128,
+                    blend: BlendMode::Additive, shared: true),
+                additive
+            ),
+            "identical shared requests reuse one pending mesh"
+        )
         assert_eq(MESH_PENDING.len(), 1)
         let alpha = acquire_mesh(world, white, capacity: 128, shared: true)
         assert(!same_ref(alpha, additive) && alpha.blend == BlendMode::Alpha,

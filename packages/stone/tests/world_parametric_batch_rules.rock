@@ -1,18 +1,28 @@
 use stone::*
 
 @shader(fragment)
-fn world_parametric_frag(vary: SpriteVary,
-    @size(128) p0: UniformArray<Vec4>, @size(128) p1: UniformArray<Vec4>,
-    @size(128) p2: UniformArray<Vec4>, @size(128) p3: UniformArray<Vec4>,
-    @size(128) p4: UniformArray<Vec4>, @size(128) p5: UniformArray<Vec4>,
-    @size(128) p6: UniformArray<Vec4>) -> Vec4 {
+fn world_parametric_frag(
+    vary: SpriteVary,
+    @size(128) p0: UniformArray<Vec4>,
+    @size(128) p1: UniformArray<Vec4>,
+    @size(128) p2: UniformArray<Vec4>,
+    @size(128) p3: UniformArray<Vec4>,
+    @size(128) p4: UniformArray<Vec4>,
+    @size(128) p5: UniformArray<Vec4>,
+    @size(128) p6: UniformArray<Vec4>
+) -> Vec4 {
     let i = vary.Colorize as int
     let sum = at(p0, i) + at(p1, i) + at(p2, i) + at(p3, i)
         + at(p4, i) + at(p5, i) + at(p6, i)
     return v(sum.xyz / 7.0, 1.0)
 }
 
-fn world_parametric_emit(image: SampledTexture, pipe: Pipeline, pos: Vec2, value: float) -> RenderBatch {
+fn world_parametric_emit(
+    image: SampledTexture,
+    pipe: Pipeline,
+    pos: Vec2,
+    value: float
+) -> RenderBatch {
     let b = parametric_sprite_batch(image, pipeline: pipe)
     let row = batch_parametric_reserve(b)
     for column in 0..7 {
