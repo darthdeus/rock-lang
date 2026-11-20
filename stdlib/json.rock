@@ -370,9 +370,9 @@ fn parse_value(p: JsonParser) -> JsonValue {
         return JsonValue::Null
     }
     let b = p.src.unit_at(p.pos)
-    if b == 110 { return parse_keyword(p, "null", JsonValue::Null) }
-    if b == 116 { return parse_keyword(p, "true", JsonValue::True) }
-    if b == 102 { return parse_keyword(p, "false", JsonValue::False) }
+    if b == 110 && parse_keyword(p, "null") { return JsonValue::Null }
+    if b == 116 && parse_keyword(p, "true") { return JsonValue::True }
+    if b == 102 && parse_keyword(p, "false") { return JsonValue::False }
     if b == 34 { return parse_string_value(p) }
     if b == 91 || b == 123 {
         p.depth = p.depth + 1
@@ -391,19 +391,15 @@ fn parse_value(p: JsonParser) -> JsonValue {
     return JsonValue::Null
 }
 
-fn parse_keyword(p: JsonParser, kw: string, value: JsonValue) -> JsonValue {
-    let klen = kw.len()
-    if p.pos + klen > p.len {
-        p.ok = false
-        return JsonValue::Null
+fn parse_keyword(p: JsonParser, kw: string) -> bool {
+    let start = p.pos
+    let end = start + kw.len()
+    if end > p.len { return false }
+    for i in 0..kw.len() {
+        if p.src.unit_at(start + i) != kw.unit_at(i) { return false }
     }
-    let slice = p.src.substring(p.pos, p.pos + klen)
-    if slice != kw {
-        p.ok = false
-        return JsonValue::Null
-    }
-    p.pos = p.pos + klen
-    return value
+    p.pos = end
+    return true
 }
 
 fn parse_string_value(p: JsonParser) -> JsonValue {
