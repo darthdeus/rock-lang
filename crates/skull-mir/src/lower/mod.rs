@@ -1056,7 +1056,6 @@ pub fn lower_instance_with_plans(
     let mut b = Builder::new(
         ws,
         scx,
-        scx,
         plan,
         concrete_plans,
         body,
@@ -1124,7 +1123,6 @@ pub fn lower_definition_factory(
     let mut b = Builder::new(
         ws,
         scx,
-        scx,
         concrete_plan,
         concrete_plans,
         body,
@@ -1142,19 +1140,6 @@ pub fn lower_definition_factory(
 pub fn lower_global_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
-    plan: &ConcreteBodyPlan,
-    concrete_plans: &ConcretePlans,
-    name: Ustr,
-) -> Result<Option<MirFunc>, CompilerError> {
-    lower_global_with_call_context(ws, scx, scx, plan, concrete_plans, name)
-}
-
-/// Native C globals keep scalarized storage while calls into ordinary C bodies
-/// use those bodies' first-class value ABI.
-pub(crate) fn lower_global_with_call_context(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    call_scx: &ScalarCtx,
     plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
     name: Ustr,
@@ -1185,7 +1170,6 @@ pub(crate) fn lower_global_with_call_context(
     let mut b = Builder::new(
         ws,
         scx,
-        call_scx,
         plan,
         concrete_plans,
         body,
@@ -1253,7 +1237,6 @@ pub fn lower_decorator_with_plans(
     f.abi_representation = Some(representation.clone());
     let mut b = Builder::new(
         ws,
-        scx,
         scx,
         plan,
         concrete_plans,
@@ -1506,7 +1489,6 @@ fn validate_concrete_type_tables(
 struct Builder<'a> {
     ws: &'a Workspace,
     scx: &'a ScalarCtx,
-    call_scx: &'a ScalarCtx,
     concrete_plan: &'a ConcreteBodyPlan,
     concrete_plans: &'a ConcretePlans,
     /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. A call's
@@ -1599,7 +1581,6 @@ impl<'a> Builder<'a> {
     fn new(
         ws: &'a Workspace,
         scx: &'a ScalarCtx,
-        call_scx: &'a ScalarCtx,
         concrete_plan: &'a ConcreteBodyPlan,
         concrete_plans: &'a ConcretePlans,
         body: &'a Body,
@@ -1613,7 +1594,6 @@ impl<'a> Builder<'a> {
         Self {
             ws,
             scx,
-            call_scx,
             concrete_plan,
             concrete_plans,
             generic_bounds: &[],
@@ -2319,13 +2299,9 @@ impl<'a> Builder<'a> {
                 ..
             } => {
                 let (module, func) = resolve_call_fn(self.ws, inf?, expr, name)?;
-                let target = backend_variant(
-                    self.ws,
-                    name,
-                    FuncRef { module, func },
-                    self.call_scx.target,
-                )
-                .ok()?;
+                let target =
+                    backend_variant(self.ws, name, FuncRef { module, func }, self.scx.target)
+                        .ok()?;
                 let module = self.ws.module(target.module);
                 let decl = &module.functions[target.func];
                 let ctor = module.bodies.get(&BodyOwner::Function(target.func))?;

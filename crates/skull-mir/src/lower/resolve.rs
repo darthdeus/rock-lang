@@ -1097,9 +1097,9 @@ impl<'a> Builder<'a> {
         name: ustr::Ustr,
         rep: FuncRef,
     ) -> Result<FuncRef, CompilerError> {
-        match backend_variant(self.ws, name, rep, self.call_scx.target) {
+        match backend_variant(self.ws, name, rep, self.scx.target) {
             Ok(f) => Ok(f),
-            Err(NoServingBinding) => self.reject_or_defer(e, name, rep, self.call_scx.target),
+            Err(NoServingBinding) => self.reject_or_defer(e, name, rep, self.scx.target),
         }
     }
 

@@ -279,7 +279,7 @@ impl<'a> Builder<'a> {
         arg_idxs: &[Idx<Expr>],
         dc: &DirectCall<'a>,
     ) -> Result<Option<PreflightPlan>, CompilerError> {
-        if self.call_scx.target() != bone_core::hir::FnBackend::Lua {
+        if self.scx.target() != bone_core::hir::FnBackend::Lua {
             return Ok(None);
         }
         let callee = &self.ws.module(func.module).functions[func.func];
@@ -824,7 +824,7 @@ impl<'a> Builder<'a> {
     ) -> Result<BackendFnAbiPlanHandle, CompilerError> {
         crate::lower::abi::callee_abi_plan_for_instance(
             self.ws,
-            self.call_scx,
+            self.scx,
             self.concrete_plans,
             inst,
         )
@@ -1601,7 +1601,7 @@ impl<'a> Builder<'a> {
             } else {
                 self.reject_nobox_opaque_value_return(e, func, &dc.callee_inst)?;
             }
-            let lua_opaque = self.call_scx.target() == bone_core::hir::FnBackend::Lua
+            let lua_opaque = self.scx.target() == bone_core::hir::FnBackend::Lua
                 && callee.inline_body.is_some()
                 && !callee.generics.is_empty()
                 && !callee

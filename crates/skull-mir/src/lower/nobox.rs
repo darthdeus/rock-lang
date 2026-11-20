@@ -38,7 +38,7 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         args: &[Idx<Expr>],
     ) -> Result<(), CompilerError> {
-        if self.call_scx.values_first_class {
+        if self.scx.values_first_class {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
@@ -283,7 +283,7 @@ impl<'a> Builder<'a> {
         func: FuncRef,
     ) -> Result<(), CompilerError> {
         let callee = &self.ws.module(func.module).functions[func.func];
-        let plan = BackendFnAbiPlan::for_boundary_declaration(self.ws, self.call_scx, func);
+        let plan = BackendFnAbiPlan::for_boundary_declaration(self.ws, self.scx, func);
         let ty = self
             .inf
             .and_then(|inf| inf.expr_types.get(e))
@@ -311,7 +311,7 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         shape: &TupleLayout,
     ) -> Result<(), CompilerError> {
-        if self.call_scx.values_first_class || !shape.splats(self.scx.rep_arena()) {
+        if self.scx.values_first_class || !shape.splats(self.scx.rep_arena()) {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
@@ -335,7 +335,7 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         inst: &crate::instance::Instance,
     ) -> Result<(), CompilerError> {
-        if self.call_scx.values_first_class {
+        if self.scx.values_first_class {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
@@ -553,7 +553,7 @@ impl<'a> Builder<'a> {
         if !matches!(ty.peel_nullable().0, MonoTy::Function { .. }) {
             return Ok(None);
         }
-        BackendFnAbiPlan::for_function_value(self.ws, self.call_scx, ty)
+        BackendFnAbiPlan::for_function_value(self.ws, self.scx, ty)
             .map(Some)
             .map_err(|error| self.rep_error(error))
     }

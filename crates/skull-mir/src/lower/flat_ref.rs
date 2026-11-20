@@ -399,7 +399,6 @@ impl<'a> Builder<'a> {
         let mut scan = Builder::new(
             self.ws,
             self.scx,
-            self.call_scx,
             plan,
             self.concrete_plans,
             body,
@@ -813,7 +812,6 @@ impl<'a> Builder<'a> {
         let mut child = Builder::new(
             self.ws,
             self.scx,
-            self.call_scx,
             concrete_plan,
             self.concrete_plans,
             body,
@@ -822,7 +820,7 @@ impl<'a> Builder<'a> {
             self.flat_variants.clone(),
         );
         child.generic_bounds = &decl.generic_bounds;
-        child.defer_mode = stmt::DeferMode::for_body(false, self.call_scx.target);
+        child.defer_mode = stmt::DeferMode::for_body(false, self.scx.target);
         child.param_plan = Some(dc.plan.clone());
         child.ret_rep = dc.plan.representation().result();
         child.fn_name_span = Some(decl.name_span);

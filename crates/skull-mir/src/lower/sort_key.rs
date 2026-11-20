@@ -101,9 +101,9 @@ impl<'a> Builder<'a> {
 
     fn sort_key_plan(&self, ty: &MonoTy, leaves: bool) -> Result<FunctionRepPlan, CompilerError> {
         if self.scx.values_first_class || !leaves {
-            BackendFnAbiPlan::for_function_value(self.ws, self.call_scx, ty)
+            BackendFnAbiPlan::for_function_value(self.ws, self.scx, ty)
         } else {
-            BackendFnAbiPlan::for_function_value_with_mode(self.ws, self.call_scx, ty, false)
+            BackendFnAbiPlan::for_function_value_with_mode(self.ws, self.scx, ty, false)
         }
         .map_err(|error| self.rep_error(error))
     }

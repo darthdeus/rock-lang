@@ -233,19 +233,19 @@ impl<'a> Builder<'a> {
             representation: self
                 .scx
                 .rep_arena()
-                .boxed_function(self.call_scx.target, param_names.len()),
+                .boxed_function(self.scx.target, param_names.len()),
         };
         let taken_by_value = self
             .body
             .expr_arena
             .iter()
             .any(|(_, e)| matches!(e, Expr::Var(b) if *b == name));
-        if self.call_scx.values_first_class {
+        if self.scx.values_first_class {
             return Ok(boxed);
         }
         let representation = BackendFnAbiPlan::for_function_value_with_mode(
             self.ws,
-            self.call_scx,
+            self.scx,
             fn_ty,
             taken_by_value,
         )
@@ -301,7 +301,6 @@ impl<'a> Builder<'a> {
         let mut child = Builder::new(
             self.ws,
             self.scx,
-            self.call_scx,
             self.concrete_plan,
             self.concrete_plans,
             self.body,
@@ -310,7 +309,7 @@ impl<'a> Builder<'a> {
             self.flat_variants.clone(),
         );
         child.generic_bounds = self.generic_bounds;
-        child.defer_mode = DeferMode::for_body(false, self.call_scx.target);
+        child.defer_mode = DeferMode::for_body(false, self.scx.target);
         child.param_reps = abi.representation.params().to_vec();
         child.ret_rep = abi.representation.result();
         child.ret_ty =

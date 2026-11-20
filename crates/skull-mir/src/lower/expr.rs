@@ -239,7 +239,7 @@ impl<'a> Builder<'a> {
             // A lambda can unwind even when created inside a coroutine.
             let saved_mode = std::mem::replace(
                 &mut self.defer_mode,
-                super::stmt::DeferMode::for_body(false, self.call_scx.target),
+                super::stmt::DeferMode::for_body(false, self.scx.target),
             );
             self.ret_rep = lam_plan.result();
             let leaves = self.return_leaves(Some(body))?;
