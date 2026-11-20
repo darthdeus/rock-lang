@@ -5,21 +5,87 @@ use std::ffi::{c_char, c_float, c_int, CStr};
 use crate::handles::Class;
 use crate::{track_canvas_switch, with_gl, with_window};
 
-struct Canvas {
-    fbo: glow::Framebuffer,
-    texture: glow::Texture,
+#[derive(Clone, Copy)]
+pub(crate) struct Canvas {
+    pub fbo: glow::Framebuffer,
+    pub texture: glow::Texture,
     // A texture, not a renderbuffer: the depth overlay samples it.
     depth_texture: Option<glow::Texture>,
-    width: i32,
-    height: i32,
+    pub width: i32,
+    pub height: i32,
     // The live rectangle inside that capacity, anchored at the GL origin.
     // Binding viewports and scissors to it, so every draw, clear and
     // projection sees the active image rather than the backing texture.
     // Equal to (width, height) unless a raster profile says otherwise.
-    active_w: i32,
-    active_h: i32,
+    pub active_w: i32,
+    pub active_h: i32,
     format: c_int,
     bound_as_target: bool,
+}
+
+impl Canvas {
+    pub fn has_depth(&self) -> bool {
+        self.depth_texture.is_some()
+    }
+
+    pub fn float_format(&self) -> bool {
+        matches!(self.format, 1 | 2)
+    }
+
+    // R32I: readbacks use RGBA_INTEGER/INT; clears use glClearBufferiv (glClear is undefined).
+    pub fn int_format(&self) -> bool {
+        self.format == 3
+    }
+
+    /// Re-specify storage at `width` x `height` (contents become creation's)
+    /// and leave the FBO bound. Attachments name the texture objects and survive.
+    unsafe fn respecify(&self, gl: &crate::DebugGl, width: i32, height: i32) -> u32 {
+        let (internal_format, pixel_format, pixel_type, _) = color_format(self.format);
+        let color = (self.texture, internal_format, pixel_format, pixel_type);
+        let depth = self.depth_texture.map(|depth| {
+            (
+                depth,
+                glow::DEPTH_COMPONENT24,
+                glow::DEPTH_COMPONENT,
+                glow::UNSIGNED_INT,
+            )
+        });
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+        for (texture, internal_format, pixel_format, pixel_type) in
+            std::iter::once(color).chain(depth)
+        {
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                internal_format as i32,
+                width,
+                height,
+                0,
+                pixel_format,
+                pixel_type,
+                glow::PixelUnpackData::Slice(None::<&[u8]>),
+            );
+        }
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+        if status == glow::FRAMEBUFFER_COMPLETE {
+            establish_blank_contents(gl, self.int_format(), self.has_depth());
+        }
+        status
+    }
+
+    unsafe fn delete(&self, gl: &crate::DebugGl) {
+        gl.delete_texture(self.texture);
+        if let Some(depth) = self.depth_texture {
+            gl.delete_texture(depth);
+        }
+        gl.delete_framebuffer(self.fbo);
+    }
+}
+
+fn rebind_current(gl: &crate::DebugGl) {
+    unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(current_fbo())) };
 }
 
 thread_local! {
@@ -251,7 +317,7 @@ pub extern "C" fn stone_set_viewport_rect(x: c_int, y: c_int, w: c_int, h: c_int
         return;
     }
     let (lw, lh) = current_target_size();
-    let (sx, sy, ph) = if CURRENT_FBO.with(|c| c.borrow().is_none()) {
+    let (sx, sy, ph) = if current_fbo().is_none() {
         crate::with_window(|win| {
             let (dw, dh) = win.window.drawable_size();
             (dw as f32 / lw.max(1.0), dh as f32 / lh.max(1.0), dh as f32)
@@ -329,38 +395,15 @@ pub extern "C" fn stone_set_canvas(handle: u64) {
     track_canvas_switch();
 }
 
-// Creation and resize must resolve formats identically, or the FBO, readback and shaders
-// disagree about the surface.
-struct TextureFormat {
-    internal_format: u32,
-    tex_format: u32,
-    data_type: u32,
-    int_format: bool,
-}
-
 // STONE_CANVAS_RGBA8 = 0, RGBA16F = 1, RGBA32F = 2, R32I = 3 (integer entity-id target).
-fn resolve_texture_format(format: c_int) -> TextureFormat {
-    let (internal_format, tex_format, data_type) = match format {
-        1 => (glow::RGBA16F, glow::RGBA, glow::HALF_FLOAT),
-        2 => (glow::RGBA32F, glow::RGBA, glow::FLOAT),
-        3 => (glow::R32I, glow::RED_INTEGER, glow::INT),
-        _ => (glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE),
-    };
-    TextureFormat {
-        internal_format,
-        tex_format,
-        data_type,
-        int_format: is_int_format(format),
+// (internal format, pixel format, pixel type, bytes per texel)
+fn color_format(format: c_int) -> (u32, u32, u32, u64) {
+    match format {
+        1 => (glow::RGBA16F, glow::RGBA, glow::HALF_FLOAT, 8),
+        2 => (glow::RGBA32F, glow::RGBA, glow::FLOAT, 16),
+        3 => (glow::R32I, glow::RED_INTEGER, glow::INT, 4),
+        _ => (glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE, 4),
     }
-}
-
-fn is_float_format(format: c_int) -> bool {
-    matches!(format, 1 | 2)
-}
-
-// R32I: readbacks use RGBA_INTEGER/INT; clears use glClearBufferiv (glClear is undefined).
-fn is_int_format(format: c_int) -> bool {
-    format == 3
 }
 
 /// Write creation's contents into the CURRENTLY BOUND framebuffer.
@@ -488,46 +531,30 @@ pub extern "C" fn stone_create_canvas(
         if depth_texture.is_some() {
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_COMPARE_MODE, glow::NONE as i32);
         }
-        let spec = resolve_texture_format(format);
-        respecify_storage(gl, &spec, texture, depth_texture, width, height);
+        let canvas = Canvas {
+            fbo,
+            texture,
+            depth_texture,
+            width,
+            height,
+            active_w: width,
+            active_h: height,
+            format,
+            bound_as_target: false,
+        };
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, depth_texture, 0);
-
-        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+        let status = canvas.respecify(gl, width, height);
         if status != glow::FRAMEBUFFER_COMPLETE {
             crate::log_once!("CANVAS", "Framebuffer not complete: 0x{:X} ({}x{})", status, width, height);
-            gl.delete_texture(texture);
-            if let Some(dt) = depth_texture {
-                gl.delete_texture(dt);
-            }
-            gl.delete_framebuffer(fbo);
+            canvas.delete(gl);
             gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(None));
             return 0;
         }
-
-        establish_blank_contents(gl, spec.int_format, depth_texture.is_some());
-
-        let current = CURRENT_FBO.with(|c| *c.borrow());
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(current));
+        rebind_current(gl);
 
         let id = crate::handles::mint(Class::Canvas);
-        CANVASES.with(|canvases| {
-            canvases.borrow_mut().insert(
-                id,
-                Canvas {
-                    fbo,
-                    texture,
-                    depth_texture,
-                    width,
-                    height,
-                    active_w: width,
-                    active_h: height,
-                    format,
-                    bound_as_target: false,
-                },
-            );
-        });
-
+        CANVASES.with(|canvases| canvases.borrow_mut().insert(id, canvas));
         id
     })
     .unwrap_or(0)
@@ -650,16 +677,7 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
         );
         return false;
     }
-    let Some((fbo, texture, depth_texture, format, old_w, old_h)) = with_canvas(handle, |c| {
-        (
-            c.fbo,
-            c.texture,
-            c.depth_texture,
-            c.format,
-            c.width,
-            c.height,
-        )
-    }) else {
+    let Some(canvas) = lookup_canvas(handle) else {
         crate::log_once!(
             "CANVAS",
             "stone_canvas_resize: unknown canvas handle {}",
@@ -667,7 +685,7 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
         );
         return false;
     };
-    if old_w == width && old_h == height {
+    if (canvas.width, canvas.height) == (width, height) {
         return true;
     }
 
@@ -675,16 +693,9 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
         if !canvas_dimensions_supported(gl, width, height) {
             return false;
         }
-        let spec = resolve_texture_format(format);
-        let previous = CURRENT_FBO.with(|c| *c.borrow());
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-        respecify_storage(gl, &spec, texture, depth_texture, width, height);
-
-        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+        let status = canvas.respecify(gl, width, height);
         let complete = status == glow::FRAMEBUFFER_COMPLETE;
-        if complete {
-            establish_blank_contents(gl, spec.int_format, depth_texture.is_some());
-        } else {
+        if !complete {
             crate::log_once!(
                 "CANVAS",
                 "stone_canvas_resize: canvas {} is incomplete at {}x{} (0x{:X}); keeping {}x{}",
@@ -692,13 +703,12 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
                 width,
                 height,
                 status,
-                old_w,
-                old_h
+                canvas.width,
+                canvas.height
             );
-            respecify_storage(gl, &spec, texture, depth_texture, old_w, old_h);
-            establish_blank_contents(gl, spec.int_format, depth_texture.is_some());
+            canvas.respecify(gl, canvas.width, canvas.height);
         }
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(previous));
+        rebind_current(gl);
         complete
     });
     let Some(complete) = resized else {
@@ -722,44 +732,6 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
     true
 }
 
-/// The caller must bind the FBO; attachments name the texture objects and survive.
-unsafe fn respecify_storage(
-    gl: &crate::DebugGl,
-    spec: &TextureFormat,
-    texture: glow::Texture,
-    depth_texture: Option<glow::Texture>,
-    width: c_int,
-    height: c_int,
-) {
-    gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-    gl.tex_image_2d(
-        glow::TEXTURE_2D,
-        0,
-        spec.internal_format as i32,
-        width,
-        height,
-        0,
-        spec.tex_format,
-        spec.data_type,
-        glow::PixelUnpackData::Slice(None::<&[u8]>),
-    );
-    if let Some(dt) = depth_texture {
-        gl.bind_texture(glow::TEXTURE_2D, Some(dt));
-        gl.tex_image_2d(
-            glow::TEXTURE_2D,
-            0,
-            glow::DEPTH_COMPONENT24 as i32,
-            width,
-            height,
-            0,
-            glow::DEPTH_COMPONENT,
-            glow::UNSIGNED_INT,
-            glow::PixelUnpackData::Slice(None),
-        );
-    }
-    gl.bind_texture(glow::TEXTURE_2D, None);
-}
-
 #[no_mangle]
 pub extern "C" fn stone_destroy_canvas(handle: u64) {
     if handle == 0 {
@@ -769,13 +741,7 @@ pub extern "C" fn stone_destroy_canvas(handle: u64) {
     CANVASES.with(|canvases| {
         if let Some(canvas) = canvases.borrow_mut().remove(&handle) {
             crate::handles::retire(Class::Canvas, handle);
-            with_gl(|gl| unsafe {
-                gl.delete_texture(canvas.texture);
-                if let Some(dt) = canvas.depth_texture {
-                    gl.delete_texture(dt);
-                }
-                gl.delete_framebuffer(canvas.fbo);
-            });
+            with_gl(|gl| unsafe { canvas.delete(gl) });
         }
     });
 }
@@ -877,30 +843,14 @@ pub extern "C" fn stone_canvas_attach_color_target(
         return false;
     }
 
-    let resolved = CANVASES.with(|canvases| {
-        let c = canvases.borrow();
-        match (c.get(&color_handle), c.get(&id_handle)) {
-            (Some(color), Some(id)) => Some((
-                color.fbo,
-                (color.width, color.height),
-                id.texture,
-                (id.width, id.height),
-            )),
-            _ => None,
-        }
-    });
-
-    let (color_fbo, color_wh, id_texture, id_wh) = match resolved {
-        Some(v) => v,
-        None => {
-            crate::log_once!(
-                "CANVAS",
-                "stone_canvas_attach_color_target: unknown handle(s) color={color_handle} id={id_handle}"
-            );
-            return false;
-        }
+    let (Some(color), Some(id)) = (lookup_canvas(color_handle), lookup_canvas(id_handle)) else {
+        crate::log_once!(
+            "CANVAS",
+            "stone_canvas_attach_color_target: unknown handle(s) color={color_handle} id={id_handle}"
+        );
+        return false;
     };
-
+    let (color_wh, id_wh) = ((color.width, color.height), (id.width, id.height));
     if color_wh != id_wh {
         crate::log_once!(
             "CANVAS",
@@ -912,14 +862,12 @@ pub extern "C" fn stone_canvas_attach_color_target(
     }
 
     with_gl(|gl| unsafe {
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(color_fbo));
-        gl.framebuffer_texture_2d(
-            glow::FRAMEBUFFER,
-            glow::COLOR_ATTACHMENT0 + slot as u32,
-            glow::TEXTURE_2D,
-            Some(id_texture),
-            0,
-        );
+        let attach = |texture| {
+            let attachment = glow::COLOR_ATTACHMENT0 + slot as u32;
+            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, attachment, glow::TEXTURE_2D, texture, 0);
+        };
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(color.fbo));
+        attach(Some(id.texture));
         let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
         let ok = status == glow::FRAMEBUFFER_COMPLETE;
         if !ok {
@@ -928,17 +876,9 @@ pub extern "C" fn stone_canvas_attach_color_target(
                 "stone_canvas_attach_color_target: FBO incomplete 0x{:X} after MRT attach",
                 status
             );
-            gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0 + slot as u32,
-                glow::TEXTURE_2D,
-                None,
-                0,
-            );
+            attach(None);
         }
-
-        let current = CURRENT_FBO.with(|c| *c.borrow());
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(current));
+        rebind_current(gl);
         ok
     })
     .unwrap_or(false)
@@ -967,7 +907,7 @@ pub extern "C" fn stone_read_canvas_pixel_channel(
         return 0.0;
     }
     let mut pixel = [0.0; 4];
-    if read_canvas_region_rgba32f(&canvas, x, y, 1, 1, &mut pixel) {
+    if read_canvas_region_rgba32f(&canvas, (x, y, 1, 1), &mut pixel) {
         pixel[channel as usize]
     } else {
         0.0
@@ -1014,7 +954,6 @@ pub(crate) fn read_rows_top_down(
     out: &mut [u8],
 ) -> bool {
     with_gl(|gl| unsafe {
-        let previous = CURRENT_FBO.with(|c| *c.borrow());
         gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(fbo));
         gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
         gl.read_pixels(
@@ -1026,7 +965,7 @@ pub(crate) fn read_rows_top_down(
             ty,
             glow::PixelPackData::Slice(Some(&mut *out)),
         );
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(previous));
+        rebind_current(gl);
     })
     .is_some_and(|()| {
         let row = out.len() / h as usize;
@@ -1046,7 +985,7 @@ pub extern "C" fn stone_read_depth_pixel(handle: u64, x: c_int, y: c_int) -> c_f
     let Some(canvas) = lookup_canvas(handle) else {
         return 1.0;
     };
-    if !canvas.has_depth || x < 0 || y < 0 || x >= canvas.active_w || y >= canvas.active_h {
+    if !canvas.has_depth() || x < 0 || y < 0 || x >= canvas.active_w || y >= canvas.active_h {
         return 1.0;
     }
     let mut depth = [0.0f32];
@@ -1091,7 +1030,7 @@ pub extern "C" fn stone_canvas_read_rgba8(handle: u64, out: *mut u8, capacity: c
 }
 
 /// The whole capacity, not the active image.
-fn read_canvas_rgba8(info: &CanvasInfo, out: &mut [u8]) -> bool {
+fn read_canvas_rgba8(info: &Canvas, out: &mut [u8]) -> bool {
     let rect = (0, 0, info.width, info.height);
     read_rows_top_down(
         Some(info.fbo),
@@ -1104,24 +1043,14 @@ fn read_canvas_rgba8(info: &CanvasInfo, out: &mut [u8]) -> bool {
 }
 
 fn read_canvas_region_rgba32f(
-    canvas: &CanvasInfo,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
+    canvas: &Canvas,
+    rect: (i32, i32, i32, i32),
     out: &mut [f32],
 ) -> bool {
     let read = |format, ty, bytes: &mut [u8]| {
-        read_rows_top_down(
-            Some(canvas.fbo),
-            canvas.active_h,
-            (x, y, w, h),
-            format,
-            ty,
-            bytes,
-        )
+        read_rows_top_down(Some(canvas.fbo), canvas.active_h, rect, format, ty, bytes)
     };
-    if canvas.float_format {
+    if canvas.float_format() {
         return read(glow::RGBA, glow::FLOAT, bytemuck::cast_slice_mut(out));
     }
     // Single-pixel reads run per frame and stay off the heap.
@@ -1133,7 +1062,7 @@ fn read_canvas_region_rgba32f(
         large.resize(out.len(), 0);
         large.as_mut_slice()
     };
-    if canvas.int_format {
+    if canvas.int_format() {
         let read = read(
             glow::RGBA_INTEGER,
             glow::INT,
@@ -1157,15 +1086,14 @@ fn read_canvas_region_rgba32f(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn stone_canvas_read_region_rgba32f(
+/// Validate a read of `channels` values per texel inside the active image
+/// against the caller's capacity; returns the value count `read` filled, or -1.
+fn read_region<T>(
     handle: u64,
-    x: c_int,
-    y: c_int,
-    w: c_int,
-    h: c_int,
-    out: *mut f32,
-    capacity: c_int,
+    (x, y, w, h): (i32, i32, i32, i32),
+    channels: usize,
+    (out, capacity): (*mut T, c_int),
+    read: impl FnOnce(&Canvas, &mut [T]) -> bool,
 ) -> c_int {
     if out.is_null() || capacity <= 0 || x < 0 || y < 0 || w <= 0 || h <= 0 {
         return -1;
@@ -1178,20 +1106,36 @@ pub extern "C" fn stone_canvas_read_region_rgba32f(
     }
     let Some(needed) = (w as usize)
         .checked_mul(h as usize)
-        .and_then(|n| n.checked_mul(4))
-        .filter(|&n| n <= c_int::MAX as usize)
+        .and_then(|n| n.checked_mul(channels))
+        .filter(|&n| n <= c_int::MAX as usize && n <= capacity as usize)
     else {
         return -1;
     };
-    if (capacity as usize) < needed {
-        return -1;
-    }
-    let pixels = unsafe { std::slice::from_raw_parts_mut(out, needed) };
-    if read_canvas_region_rgba32f(&canvas, x, y, w, h, pixels) {
+    let values = unsafe { std::slice::from_raw_parts_mut(out, needed) };
+    if read(&canvas, values) {
         needed as c_int
     } else {
         -1
     }
+}
+
+#[no_mangle]
+pub extern "C" fn stone_canvas_read_region_rgba32f(
+    handle: u64,
+    x: c_int,
+    y: c_int,
+    w: c_int,
+    h: c_int,
+    out: *mut f32,
+    capacity: c_int,
+) -> c_int {
+    read_region(
+        handle,
+        (x, y, w, h),
+        4,
+        (out, capacity),
+        |canvas, values| read_canvas_region_rgba32f(canvas, (x, y, w, h), values),
+    )
 }
 
 #[no_mangle]
@@ -1204,42 +1148,25 @@ pub extern "C" fn stone_canvas_read_region_i32(
     out: *mut i32,
     capacity: c_int,
 ) -> c_int {
-    if out.is_null() || capacity <= 0 || x < 0 || y < 0 || w <= 0 || h <= 0 {
-        return -1;
-    }
-    let Some(canvas) = lookup_canvas(handle) else {
-        return -1;
-    };
-    if !canvas.int_format {
-        return -1;
-    }
-    if x > canvas.active_w - w || y > canvas.active_h - h {
-        return -1;
-    }
-    let Some(needed) = (w as usize)
-        .checked_mul(h as usize)
-        .filter(|&n| n <= c_int::MAX as usize)
-    else {
-        return -1;
-    };
-    if (capacity as usize) < needed {
-        return -1;
-    }
-    let pixels = unsafe { std::slice::from_raw_parts_mut(out, needed) };
-    let bytes = bytemuck::cast_slice_mut(pixels);
-    let rect = (x, y, w, h);
-    if read_rows_top_down(
-        Some(canvas.fbo),
-        canvas.active_h,
-        rect,
-        glow::RED_INTEGER,
-        glow::INT,
-        bytes,
-    ) {
-        needed as c_int
-    } else {
-        -1
-    }
+    read_region(
+        handle,
+        (x, y, w, h),
+        1,
+        (out, capacity),
+        |canvas, values| {
+            let (format, ty) = (glow::RED_INTEGER, glow::INT);
+            let bytes = bytemuck::cast_slice_mut(values);
+            canvas.int_format()
+                && read_rows_top_down(
+                    Some(canvas.fbo),
+                    canvas.active_h,
+                    (x, y, w, h),
+                    format,
+                    ty,
+                    bytes,
+                )
+        },
+    )
 }
 
 /// Upload top-to-bottom RGBA8 pixels into an existing RGBA8 canvas. The
@@ -1256,7 +1183,7 @@ pub unsafe extern "C" fn stone_canvas_upload_rgba8(
     let Some(info) = lookup_canvas(handle) else {
         return false;
     };
-    if info.float_format || info.int_format {
+    if info.float_format() || info.int_format() {
         return false;
     }
     let needed = (info.width as usize)
@@ -1305,11 +1232,7 @@ pub unsafe extern "C" fn stone_canvas_upload_rgba32f(
     if pixels.is_null() || count <= 0 {
         return false;
     }
-    let valid = with_canvas(handle, |c| c.format == 2).unwrap_or(false);
-    if !valid {
-        return false;
-    }
-    let Some(info) = lookup_canvas(handle) else {
+    let Some(info) = lookup_canvas(handle).filter(|c| c.format == 2) else {
         return false;
     };
     let needed = (info.width as usize)
@@ -1392,43 +1315,16 @@ pub(crate) fn live_canvas_bytes() -> u64 {
             .borrow()
             .values()
             .map(|canvas| {
-                let color_bpp = match canvas.format {
-                    1 => 8u64,
-                    2 => 16u64,
-                    _ => 4u64,
-                };
+                let color_bytes = color_format(canvas.format).3;
                 let pixels = canvas.width.max(0) as u64 * canvas.height.max(0) as u64;
-                pixels * (color_bpp + if canvas.depth_texture.is_some() { 4 } else { 0 })
+                pixels * (color_bytes + if canvas.has_depth() { 4 } else { 0 })
             })
             .sum()
     })
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct CanvasInfo {
-    pub fbo: glow::Framebuffer,
-    pub texture: glow::Texture,
-    pub width: i32,
-    pub height: i32,
-    pub active_w: i32,
-    pub active_h: i32,
-    pub has_depth: bool,
-    pub float_format: bool,
-    pub int_format: bool,
-}
-
-pub(crate) fn lookup_canvas(handle: u64) -> Option<CanvasInfo> {
-    with_canvas(handle, |c| CanvasInfo {
-        fbo: c.fbo,
-        texture: c.texture,
-        width: c.width,
-        height: c.height,
-        active_w: c.active_w,
-        active_h: c.active_h,
-        has_depth: c.depth_texture.is_some(),
-        float_format: is_float_format(c.format),
-        int_format: is_int_format(c.format),
-    })
+pub(crate) fn lookup_canvas(handle: u64) -> Option<Canvas> {
+    with_canvas(handle, |c| *c)
 }
 
 pub(crate) fn current_fbo() -> Option<glow::Framebuffer> {
@@ -1436,11 +1332,7 @@ pub(crate) fn current_fbo() -> Option<glow::Framebuffer> {
 }
 
 pub(crate) fn capture_texture_is_owned(texture: u32) -> bool {
-    CANVASES.with(|c| {
-        c.borrow().values().any(|c| {
-            c.texture.0.get() == texture || c.depth_texture.is_some_and(|t| t.0.get() == texture)
-        })
-    })
+    !capture_texture_owner(texture).is_null()
 }
 
 pub(crate) fn capture_resources() -> serde_json::Value {

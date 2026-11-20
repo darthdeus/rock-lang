@@ -242,7 +242,7 @@ pub extern "C" fn stone_read_canvas_nearest_id(
     let Some(info) = lookup_canvas(canvas_handle) else {
         return 0;
     };
-    if !info.int_format {
+    if !info.int_format() {
         return 0;
     }
     let Some(rect) = centered_read_rect(x, y, side, info.active_w, info.active_h) else {
@@ -483,7 +483,7 @@ pub extern "C" fn stone_canvas_capture_begin(canvas_handle: u64) -> u64 {
         );
         return 0;
     };
-    if info.int_format {
+    if info.int_format() {
         crate::log_once!(
             "CANVAS",
             "canvas capture refuses integer canvas {}",
@@ -1024,8 +1024,8 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
         let shape = slot.shape;
         let target = lookup_canvas(canvas_handle)
             .filter(|info| {
-                let channel_ok = matches!(channel, Channel::Color) || info.has_depth;
-                channel_ok && (matches!(shape, ReadShape::Pixel) || info.int_format)
+                let channel_ok = matches!(channel, Channel::Color) || info.has_depth();
+                channel_ok && (matches!(shape, ReadShape::Pixel) || info.int_format())
             })
             .and_then(|info| {
                 let side = requested_side(shape, requested)?;
@@ -1046,8 +1046,8 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
         // as RGBA_INTEGER/INT (its guaranteed pair).
         let fmt = match channel {
             Channel::Depth => PixelFmt::F32,
-            Channel::Color if info.int_format => PixelFmt::Ints,
-            Channel::Color if info.float_format => PixelFmt::F32,
+            Channel::Color if info.int_format() => PixelFmt::Ints,
+            Channel::Color if info.float_format() => PixelFmt::F32,
             Channel::Color => PixelFmt::Bytes,
         };
         let polled = slot.polled;
