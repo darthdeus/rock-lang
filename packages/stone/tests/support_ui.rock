@@ -2,8 +2,8 @@
 // keyboard capture.
 fn ui_input_reset() {
     input_reset_state()
-    UI_MOUSE = ui_mouse_state_new()
-    UI_FOCUS = ui_focus_state_new()
+    UI_MOUSE = UiMouseState {}
+    UI_FOCUS = UiFocusState {}
     UI_ID_DEBUG = ui_id_debug_new()
     UI_INPUT_CAPTURE = false
     REBIND_INPUT_CONSUMED = false

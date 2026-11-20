@@ -37,50 +37,29 @@ pub nobox value UiMouseItem {
 pub struct UiMouseState {
     // Grow-only pools swapped each frame; counts track live items so steady-state frames
     // allocate nothing.
-    last: [UiMouseItem],
-    last_count: int,
-    cur: [UiMouseItem],
-    cur_count: int,
-    hot: int,        // 0 = none
-    hot_prev: int,   // last frame's hot (hover-enter edge)
-    active: int,
-    clicked: int,    // id pressed this frame (edge, one frame only)
-    was_down: bool,
+    last: [UiMouseItem] = vec_new(),
+    last_count: int = 0,
+    cur: [UiMouseItem] = vec_new(),
+    cur_count: int = 0,
+    hot: int = 0,        // 0 = none
+    hot_prev: int = 0,   // last frame's hot (hover-enter edge)
+    active: int = 0,
+    clicked: int = 0,    // id pressed this frame (edge, one frame only)
+    was_down: bool = false,
     // Set on a left press event, consumed at the next resolution: a sub-frame tap never shows
     // in the level snapshot.
-    press_event: bool,
+    press_event: bool = false,
     // Press-time drag anchor in screen px, captured because design space moves with UI_SCALE.
     // anchor_w == 0 means unset.
-    anchor_x: float,
-    anchor_y: float,
-    anchor_w: float,
-    anchor_h: float,
-    anchor_ctx: int,
-    anchor_ref_h: float,
+    anchor_x: float = 0.0,
+    anchor_y: float = 0.0,
+    anchor_w: float = 0.0,
+    anchor_h: float = 0.0,
+    anchor_ctx: int = 0,
+    anchor_ref_h: float = 0.0,
 }
 
-fn ui_mouse_state_new() -> UiMouseState {
-    return UiMouseState {
-        last: vec_new(),
-        last_count: 0,
-        cur: vec_new(),
-        cur_count: 0,
-        hot: 0,
-        hot_prev: 0,
-        active: 0,
-        clicked: 0,
-        was_down: false,
-        press_event: false,
-        anchor_x: 0.0,
-        anchor_y: 0.0,
-        anchor_w: 0.0,
-        anchor_h: 0.0,
-        anchor_ctx: 0,
-        anchor_ref_h: 0.0,
-    }
-}
-
-pub global UI_MOUSE: UiMouseState = ui_mouse_state_new()
+pub global UI_MOUSE: UiMouseState = UiMouseState {}
 
 // Captures the rect in its target units (output px, or scene texels). Call on the widget's own
 // ui_clicked edge.

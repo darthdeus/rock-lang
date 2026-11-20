@@ -6,73 +6,41 @@ pub nobox value UiFocusItem {
 
 pub struct UiFocusState {
     // Grow-only pools swapped each frame.
-    last: [UiFocusItem],
-    last_count: int,
-    cur: [UiFocusItem],
-    cur_count: int,
+    last: [UiFocusItem] = vec_new(),
+    last_count: int = 0,
+    cur: [UiFocusItem] = vec_new(),
+    cur_count: int = 0,
 
-    scope: string,
+    scope: string = "",
 
-    nav_mode: bool,
-    focused_ids: Map<string, int>,
-    focused_idx: Map<string, int>,
-    live_id: int,       // focused id this frame; 0 unless nav mode
-    confirmed_id: int,  // Confirm fired for this id this frame (edge)
+    nav_mode: bool = false,
+    focused_ids: Map<string, int> = map_new(),
+    focused_idx: Map<string, int> = map_new(),
+    live_id: int = 0,       // focused id this frame; 0 unless nav mode
+    confirmed_id: int = 0,  // Confirm fired for this id this frame (edge)
 
-    up: ActionDef?,
-    down_act: ActionDef?,
-    left: ActionDef?,
-    right: ActionDef?,
-    confirm: ActionDef?,
-    back: ActionDef?,
+    up: ActionDef? = null,
+    down_act: ActionDef? = null,
+    left: ActionDef? = null,
+    right: ActionDef? = null,
+    confirm: ActionDef? = null,
+    back: ActionDef? = null,
 
-    up_was: bool,
-    down_was: bool,
-    confirm_was: bool,
-    held_since: float,
-    last_fire: float,
-    prev_mouse: Vec2,
+    up_was: bool = false,
+    down_was: bool = false,
+    confirm_was: bool = false,
+    held_since: float = 0.0,
+    last_fire: float = 0.0,
+    prev_mouse: Vec2 = v(-1.0, -1.0),
 
-    left_was: bool,
-    right_was: bool,
-    lr_held_since: float,
-    lr_last_fire: float,
-    lr_dir: int,
+    left_was: bool = false,
+    right_was: bool = false,
+    lr_held_since: float = 0.0,
+    lr_last_fire: float = 0.0,
+    lr_dir: int = 0,
 }
 
-fn ui_focus_state_new() -> UiFocusState {
-    return UiFocusState {
-        last: vec_new(),
-        last_count: 0,
-        cur: vec_new(),
-        cur_count: 0,
-        scope: "",
-        nav_mode: false,
-        focused_ids: map_new(),
-        focused_idx: map_new(),
-        live_id: 0,
-        confirmed_id: 0,
-        up: null,
-        down_act: null,
-        left: null,
-        right: null,
-        confirm: null,
-        back: null,
-        up_was: false,
-        down_was: false,
-        confirm_was: false,
-        held_since: 0.0,
-        last_fire: 0.0,
-        prev_mouse: v(-1.0, -1.0),
-        left_was: false,
-        right_was: false,
-        lr_held_since: 0.0,
-        lr_last_fire: 0.0,
-        lr_dir: 0,
-    }
-}
-
-pub global UI_FOCUS: UiFocusState = ui_focus_state_new()
+pub global UI_FOCUS: UiFocusState = UiFocusState {}
 
 // Wire the game's six nav actions (once, at @init). Left/right/back are
 // stored for the slider/back consumers; up/down/confirm drive the MVP.
