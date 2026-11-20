@@ -1634,7 +1634,6 @@ mod relight_rg8_gl_tests {
     use std::ffi::CString;
     use std::io::Cursor;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::process::Command;
 
     const LOAD_EXACT_TEXELS: i32 = 1;
     const LOAD_DEPTH_RG8: i32 = 4;
