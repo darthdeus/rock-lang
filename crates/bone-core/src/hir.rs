@@ -148,6 +148,72 @@ pub enum TypeExpr {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TypeHead {
+    Nullable,
+    App(TypeCtor),
+    Function,
+    Tuple,
+}
+
+#[derive(Clone, Copy)]
+pub struct TypeShape {
+    pub head: TypeHead,
+    pub params: IdxRange<TypeExpr>,
+    pub tail: Option<Idx<TypeExpr>>,
+}
+
+impl TypeShape {
+    pub fn rebuild(self) -> TypeExpr {
+        let Self { head, params, tail } = self;
+        match head {
+            TypeHead::Nullable => TypeExpr::Nullable(tail.unwrap()),
+            TypeHead::App(ctor) => TypeExpr::App { ctor, params },
+            TypeHead::Function => TypeExpr::Function {
+                params,
+                ret: tail.unwrap(),
+            },
+            TypeHead::Tuple => TypeExpr::Tuple { elements: params },
+        }
+    }
+}
+
+impl TypeExpr {
+    pub fn shape(self) -> Option<TypeShape> {
+        let (head, params, tail) = match self {
+            Self::Nullable(inner) => (TypeHead::Nullable, IdxRange::default(), Some(inner)),
+            Self::App { ctor, params } => (TypeHead::App(ctor), params, None),
+            Self::Function { params, ret } => (TypeHead::Function, params, Some(ret)),
+            Self::Tuple { elements } => (TypeHead::Tuple, elements, None),
+            Self::Builtin(_) | Self::Generic(..) | Self::Infer(..) => return None,
+        };
+        Some(TypeShape { head, params, tail })
+    }
+
+    pub fn equivalent(
+        self,
+        other: Self,
+        same_variable_scope: impl FnOnce() -> bool,
+        mut same_child: impl FnMut(Idx<Self>, Idx<Self>) -> bool,
+    ) -> bool {
+        match (self, other) {
+            (Self::Builtin(a), Self::Builtin(b)) => a == b,
+            (Self::Generic(a, _), Self::Generic(b, _)) | (Self::Infer(a, _), Self::Infer(b, _)) => {
+                a == b && same_variable_scope()
+            }
+            _ => {
+                let (Some(a), Some(b)) = (self.shape(), other.shape()) else {
+                    return false;
+                };
+                a.head == b.head
+                    && a.params.len() == b.params.len()
+                    && a.tail.zip(b.tail).is_none_or(|(x, y)| same_child(x, y))
+                    && a.params.zip(b.params).all(|(x, y)| same_child(x, y))
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum BodyOwner {
     Function(Idx<Function>),

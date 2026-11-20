@@ -487,22 +487,17 @@ impl Workspace {
         if hit(expr) {
             return true;
         }
-        let any = |children: IdxRange<TypeExpr>, hit: &mut _| {
-            children
-                .into_iter()
-                .any(|child| self.type_any(body, ty.with_idx(child), hit))
-        };
-        match expr {
-            TypeExpr::Infer(var, _) => body
+        if let TypeExpr::Infer(var, _) = expr {
+            return body
                 .and_then(|b| b.substitutions.get(var))
-                .is_some_and(|next| self.type_any(body, next, hit)),
-            TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
-            TypeExpr::Nullable(inner) => self.type_any(body, ty.with_idx(inner), hit),
-            TypeExpr::App { params, .. } | TypeExpr::Tuple { elements: params } => any(params, hit),
-            TypeExpr::Function { params, ret } => {
-                any(params, hit) || self.type_any(body, ty.with_idx(ret), hit)
-            }
+                .is_some_and(|next| self.type_any(body, next, hit));
         }
+        expr.shape().is_some_and(|shape| {
+            shape
+                .params
+                .chain(shape.tail)
+                .any(|child| self.type_any(body, ty.with_idx(child), hit))
+        })
     }
 
     /// Whether `ty` holds a frame reference anywhere in its tree.

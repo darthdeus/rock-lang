@@ -1,4 +1,5 @@
 use super::*;
+use bone_core::hir::TypeHead;
 use std::convert::Infallible;
 
 pub(crate) fn contains_frame_ref(gamma: &Gamma, ty: TyId) -> bool {
@@ -92,45 +93,21 @@ fn map_structural_type<E>(
     span: Span,
     mut map: impl FnMut(&mut Gamma, TyId) -> Result<TyId, E>,
 ) -> Result<Option<TyId>, E> {
-    match texp {
-        TypeExpr::Nullable(child) => {
-            let child_ty = ty.with_idx(child);
-            let mapped_child = map(gamma, child_ty)?;
-            Ok((mapped_child != child_ty).then(|| nullable_of(gamma, mapped_child, span)))
-        }
-        TypeExpr::App { ctor, params } => {
-            let Some(params) = map_children(gamma, ty, params, span, &mut map)? else {
-                return Ok(None);
-            };
-            let idx = gamma.out.ty_arena.alloc(TypeExpr::App { ctor, params });
-            gamma.out.ty_spans.insert(idx, span);
-            Ok(Some(TyId::Local(idx)))
-        }
-        TypeExpr::Tuple { elements } => {
-            let Some(elements) = map_children(gamma, ty, elements, span, &mut map)? else {
-                return Ok(None);
-            };
-            let idx = gamma.out.ty_arena.alloc(TypeExpr::Tuple { elements });
-            gamma.out.ty_spans.insert(idx, span);
-            Ok(Some(TyId::Local(idx)))
-        }
-        TypeExpr::Function { params, ret } => {
-            let new_params = map_children(gamma, ty, params, span, &mut map)?;
-            let ret_ty = ty.with_idx(ret);
-            let mapped_ret = map(gamma, ret_ty)?;
-
-            if new_params.is_none() && mapped_ret == ret_ty {
-                Ok(None)
-            } else {
-                let params = new_params.unwrap_or_else(|| reify_range(gamma, ty, params, span));
-                let ret = reify(gamma, mapped_ret, span);
-                let idx = gamma.out.ty_arena.alloc(TypeExpr::Function { params, ret });
-                gamma.out.ty_spans.insert(idx, span);
-                Ok(Some(TyId::Local(idx)))
-            }
-        }
-        _ => unreachable!("map_structural_type called on a leaf type"),
+    let Some(mut shape) = texp.shape() else {
+        return Ok(None);
+    };
+    let params = map_children(gamma, ty, shape.params, span, &mut map)?;
+    let tail = shape.tail.map(|idx| ty.with_idx(idx));
+    let mapped_tail = tail.map(|child| map(gamma, child)).transpose()?;
+    if params.is_none() && mapped_tail == tail {
+        return Ok(None);
     }
+    if shape.head == TypeHead::Nullable {
+        return Ok(Some(nullable_of(gamma, mapped_tail.unwrap(), span)));
+    }
+    shape.params = params.unwrap_or_else(|| reify_range(gamma, ty, shape.params, span));
+    shape.tail = mapped_tail.map(|child| reify(gamma, child, span));
+    Ok(Some(TyId::Local(alloc_type(gamma, shape.rebuild(), span))))
 }
 
 pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), CompilerError> {
@@ -308,57 +285,11 @@ pub(crate) fn types_equal(gamma: &Gamma, a: TyId, b: TyId) -> bool {
         return true;
     }
 
-    match (gamma.get(a), gamma.get(b)) {
-        (TypeExpr::Builtin(x), TypeExpr::Builtin(y)) => x == y,
-        (TypeExpr::Generic(x, _), TypeExpr::Generic(y, _)) => x == y,
-        (TypeExpr::Infer(x, _), TypeExpr::Infer(y, _)) => x == y,
-        (TypeExpr::Nullable(ia), TypeExpr::Nullable(ib)) => {
-            types_equal(gamma, a.with_idx(*ia), b.with_idx(*ib))
-        }
-
-        (
-            TypeExpr::App {
-                ctor: ca,
-                params: pa,
-            },
-            TypeExpr::App {
-                ctor: cb,
-                params: pb,
-            },
-        ) => {
-            ca == cb
-                && pa.len() == pb.len()
-                && (*pa)
-                    .zip(*pb)
-                    .all(|(ea, eb)| types_equal(gamma, a.with_idx(ea), b.with_idx(eb)))
-        }
-
-        (TypeExpr::Tuple { elements: ea }, TypeExpr::Tuple { elements: eb }) => {
-            ea.len() == eb.len()
-                && (*ea)
-                    .zip(*eb)
-                    .all(|(ta, tb)| types_equal(gamma, a.with_idx(ta), b.with_idx(tb)))
-        }
-
-        (
-            TypeExpr::Function {
-                params: pa,
-                ret: ra,
-            },
-            TypeExpr::Function {
-                params: pb,
-                ret: rb,
-            },
-        ) => {
-            pa.len() == pb.len()
-                && types_equal(gamma, a.with_idx(*ra), b.with_idx(*rb))
-                && (*pa)
-                    .zip(*pb)
-                    .all(|(ea, eb)| types_equal(gamma, a.with_idx(ea), b.with_idx(eb)))
-        }
-
-        _ => false,
-    }
+    gamma.get(a).equivalent(
+        *gamma.get(b),
+        || true,
+        |x, y| types_equal(gamma, a.with_idx(x), b.with_idx(y)),
+    )
 }
 
 fn occurs_in(gamma: &Gamma, var: VarId, ty: TyId) -> bool {
@@ -651,34 +582,24 @@ pub fn join(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<TyId, Com
 
 // Reify into the local arena so copied child indices cannot point into a static arena.
 pub(crate) fn reify(gamma: &mut Gamma, ty: TyId, span: Span) -> Idx<TypeExpr> {
-    let node = match *gamma.get(ty) {
-        TypeExpr::App { ctor, params } => TypeExpr::App {
-            ctor,
-            params: reify_range(gamma, ty, params, span),
-        },
+    let expr = *gamma.get(ty);
+    let node = expr.shape().map_or(expr, |mut shape| {
+        shape.params = reify_range(gamma, ty, shape.params, span);
+        shape.tail = shape
+            .tail
+            .map(|child| reify(gamma, ty.with_idx(child), span));
+        shape.rebuild()
+    });
+    alloc_type(gamma, node, span)
+}
 
-        TypeExpr::Tuple { elements } => TypeExpr::Tuple {
-            elements: reify_range(gamma, ty, elements, span),
-        },
-
-        TypeExpr::Function { params, ret } => {
-            let params = reify_range(gamma, ty, params, span);
-            let ret = reify(gamma, ty.with_idx(ret), span);
-
-            TypeExpr::Function { params, ret }
-        }
-
-        TypeExpr::Nullable(inner) => TypeExpr::Nullable(reify(gamma, ty.with_idx(inner), span)),
-
-        leaf => leaf,
-    };
-
+fn alloc_type(gamma: &mut Gamma, node: TypeExpr, span: Span) -> Idx<TypeExpr> {
     let idx = gamma.out.ty_arena.alloc(node);
     gamma.out.ty_spans.insert(idx, span);
     idx
 }
 
-pub(crate) fn reify_range(
+fn reify_range(
     gamma: &mut Gamma,
     parent: TyId,
     range: IdxRange<TypeExpr>,
