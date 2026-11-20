@@ -181,3 +181,19 @@ fn dynamic_signed_shift_counts_mask_to_five_bits() {
     assert_eq(left, -2147483648)
     assert_eq(right, 1)
 }
+
+fn direct_uint_shifts(value: uint, count: uint) -> (int, int) {
+    return (__op_shl(value, count) as int, __op_shr(value, count) as int)
+}
+
+@test
+fn direct_uint_bit_calls_keep_signed_results_and_mask_counts() {
+    let hi: uint = 2147483648
+    let all: uint = 4294967295
+    assert_eq(__op_bitand(hi, all) as int, -2147483648)
+    assert_eq(__op_bitor(hi, 1 as uint) as int, -2147483647)
+    assert_eq(__op_bitxor(all, 1 as uint) as int, -2)
+    assert_eq(direct_uint_shifts(all, 32 as uint), (-1, -1))
+    assert_eq(direct_uint_shifts(all, 33 as uint), (-2, 2147483647))
+    assert_eq(direct_uint_shifts(all, all), (-2147483648, 1))
+}

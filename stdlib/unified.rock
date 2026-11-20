@@ -1151,16 +1151,20 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 @pure @inline operator ==(a: string, b: string) -> bool { return a == b }
 @pure @inline operator !=(a: string, b: string) -> bool { return a != b }
 
+// Direct calls to the legacy uint overloads expose a signed 32-bit result.
+@pure @inline inline(lua) fn __legacy_uint_bits(value: int) -> uint = "return value"
+@pure @inline inline(js) fn __legacy_uint_bits(value: int) -> uint = "return value | 0;"
+
 @pure @inline operator &(a: int, b: int) -> int { return a & b }
-@pure @inline operator(lua) &(a: uint, b: uint) -> uint = "return bit.band(a, b)"
+@pure @inline operator &(a: uint, b: uint) -> uint { return __legacy_uint_bits((a as int) & (b as int)) }
 @pure @inline operator |(a: int, b: int) -> int { return a | b }
-@pure @inline operator(lua) |(a: uint, b: uint) -> uint = "return bit.bor(a, b)"
+@pure @inline operator |(a: uint, b: uint) -> uint { return __legacy_uint_bits((a as int) | (b as int)) }
 @pure @inline operator ^(a: int, b: int) -> int { return a ^ b }
-@pure @inline operator(lua) ^(a: uint, b: uint) -> uint = "return bit.bxor(a, b)"
+@pure @inline operator ^(a: uint, b: uint) -> uint { return __legacy_uint_bits((a as int) ^ (b as int)) }
 @pure @inline operator <<(a: int, b: int) -> int { return a << b }
-@pure @inline operator(lua) <<(a: uint, b: uint) -> uint = "return bit.lshift(a, b)"
+@pure @inline operator <<(a: uint, b: uint) -> uint { return __legacy_uint_bits((a as int) << (b as int)) }
 @pure @inline operator >>(a: int, b: int) -> int { return a >> b }
-@pure @inline operator(lua) >>(a: uint, b: uint) -> uint = "return bit.rshift(a, b)"
+@pure @inline operator >>(a: uint, b: uint) -> uint { return __legacy_uint_bits((a as int) >> (b as int)) }
 
 // Print function
 // Use native print but with our own float formatting
