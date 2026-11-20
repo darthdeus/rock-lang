@@ -432,8 +432,19 @@ fn walk_body<'t>(
                     .expr_spans
                     .get(f.value)
                     .is_some_and(|span| span.offset_range() == f.name_span.offset_range());
+                // A struct field's label resolves up to its value, colon included.
+                let value_start = body.expr_spans.get(f.value).map(|v| v.offset_range().0);
+                let hit = match (record, value_start) {
+                    (RecordType::Struct(_), Some(start))
+                        if start > f.name_span.offset_range().1 =>
+                    {
+                        f.name_span
+                            .with_offset_range((f.name_span.offset_range().0, start))
+                    }
+                    _ => f.name_span,
+                };
                 let mut occ = Occurrence::new(RefTarget::Field(record, f.name), rank)
-                    .hit(f.name_span)
+                    .hit(hit)
                     .shorthand(
                         f.name_span,
                         shorthand.then_some(Shorthand::KeepBinding(f.name)),
@@ -472,7 +483,7 @@ fn walk_body<'t>(
                     emit(Occurrence::token(variant_span, target, 2));
                 }
                 if let (Some(name), Some(span)) = (enum_name.filter(|n| want(*n)), enum_name_span) {
-                    emit(enum_qualifier(name, span));
+                    emit(enum_qualifier(name, span, Some(variant_span)));
                 }
             }
             hir::Pattern::Record {
@@ -483,7 +494,7 @@ fn walk_body<'t>(
                 ..
             } => {
                 if let Some(span) = enum_name_span.filter(|_| want(en)) {
-                    emit(enum_qualifier(en, span));
+                    emit(enum_qualifier(en, span, name_span));
                 }
                 if let (Some(variant), Some(span)) = (name.filter(|n| want(*n)), name_span) {
                     emit(Occurrence::token(
@@ -491,6 +502,17 @@ fn walk_body<'t>(
                         RefTarget::EnumVariant(en, variant),
                         2,
                     ));
+                }
+            }
+            hir::Pattern::Record {
+                enum_name: None,
+                name_span: Some(span),
+                ..
+            } if types => {
+                if let Some((RecordType::Struct(name), _)) = RecordType::pattern(ws, body, bi, id)
+                    && want(name)
+                {
+                    emit(Occurrence::token(span, RefTarget::Struct(name), 32));
                 }
             }
             _ => {}
@@ -528,9 +550,12 @@ fn walk_body<'t>(
     }
 }
 
-fn enum_qualifier(name: Ustr, span: Span) -> Occurrence {
+/// The qualifier resolves up to its variant, `::` included.
+fn enum_qualifier(name: Ustr, span: Span, variant: Option<Span>) -> Occurrence {
+    let (start, end) = span.offset_range();
+    let end = variant.map_or(end, |v| v.offset_range().0.max(end));
     Occurrence::new(RefTarget::Enum(name), 12)
-        .hit(span)
+        .hit(span.with_offset_range((start, end)))
         .site(leading_name_span(&span, name))
 }
 
@@ -633,7 +658,26 @@ fn named_argument_sites<'t>(
 
 impl ResolvedPosition<'_> {
     pub(super) fn symbol<'t>(&self, text_of: TextOf<'_, 't>) -> Option<RefTarget> {
-        let mut found: Option<(i8, RefTarget)> = None;
+        self.resolve(text_of).map(|occ| occ.target)
+    }
+
+    /// The symbol at the cursor and the token naming it there, when there is
+    /// one.
+    pub(super) fn token<'t>(&self, text_of: TextOf<'_, 't>) -> Option<Token> {
+        let occ = self.resolve(text_of)?;
+        let span = match (occ.site, occ.hit) {
+            (Some(site), _) => site.span,
+            (None, Hit::Span(span) | Hit::SpanOnNode(span, _)) => span,
+            _ => return None,
+        };
+        Some(Token {
+            target: occ.target,
+            span,
+        })
+    }
+
+    fn resolve<'t>(&self, text_of: TextOf<'_, 't>) -> Option<Occurrence> {
+        let mut found: Option<Occurrence> = None;
         let bodies = Bodies::Only(self.owner);
         walk_module(self.ws, self.module, bodies, None, text_of, &mut |occ| {
             let on = match occ.hit {
@@ -644,11 +688,11 @@ impl ResolvedPosition<'_> {
                     self.node == Some(node) && span_contains(&span, self.offset)
                 }
             };
-            if on && found.is_none_or(|(rank, _)| occ.rank < rank) {
-                found = Some((occ.rank, occ.target));
+            if on && found.is_none_or(|found| occ.rank < found.rank) {
+                found = Some(occ);
             }
         });
-        found.map(|(_, target)| target)
+        found
     }
 }
 

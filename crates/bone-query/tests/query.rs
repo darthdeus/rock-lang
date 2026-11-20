@@ -255,6 +255,15 @@ fn create_vector() -> <|>Vector {
 }",
         ),
         (
+            "struct literal field colon",
+            r"struct P {
+    <@>x: int,
+}
+fn main() {
+    let p = P { x<|>: 1 }
+}",
+        ),
+        (
             "named argument label",
             r"fn put(<@>count: int) {}
 fn main() {

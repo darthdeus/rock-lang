@@ -954,14 +954,9 @@ impl BoneWorkspace {
             });
         }
 
-        let pat_hover = raw_ast
-            .as_ref()
-            .and_then(|ast| crate::query::enum_variant_pattern_at(ws, mid, ast, offset))
-            .and_then(|token| token.hover(ws));
         // Nodes first, so a signature's param name or type resolves to itself; the
         // signature hover only covers tokens no node does, bounded by the body brace.
-        let (contents, span) = pat_hover
-            .or_else(|| crate::query::hover_at(ws, mid, inf, offset, Some(&proj.texts)))
+        let (contents, span) = crate::query::hover_at(ws, mid, inf, offset, Some(&proj.texts))
             .or_else(|| {
                 crate::query::fn_signature_hover(ws, mid, src, offset, Some(&proj.texts))
             })?;
@@ -1048,13 +1043,8 @@ impl BoneWorkspace {
             }?;
             return location(proj, &span, None);
         }
-        let pat_def = raw
-            .as_ref()
-            .and_then(|ast| crate::query::enum_variant_pattern_at(ws, mid, ast, offset))
-            .and_then(|token| token.declaration(ws));
         let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
-        let span =
-            pat_def.or_else(|| crate::query::definition_at(ws, mid, inf, offset, &text_of))?;
+        let span = crate::query::definition_at(ws, mid, inf, offset, &text_of)?;
         location(proj, &span, None)
     }
 
