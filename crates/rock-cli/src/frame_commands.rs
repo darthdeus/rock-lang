@@ -69,14 +69,12 @@ pub(crate) fn do_perf(
         cmd.env("PERF_GC_WINDOW_MODE", gc_window_mode);
     }
     cmd.env("PERF_FORMAT", format);
-    if std::env::var_os("PERF_OUT").is_none() {
-        let name = if format == "json" {
-            "perf-summary.json"
-        } else {
-            "perf-summary.txt"
-        };
-        cmd.env("PERF_OUT", std::path::Path::new(&output).join(name));
-    }
+    let name = if format == "json" {
+        "perf-summary.json"
+    } else {
+        "perf-summary.txt"
+    };
+    cmd.env("PERF_OUT", std::path::Path::new(&output).join(name));
 
     match seconds {
         Some(secs) => info!(

@@ -41,7 +41,7 @@ fn timeout_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<Duratio
 
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
-const DEFAULT_MEMORY_CAP_MB: u64 = 8192;
+const MEMORY_CAP_MB: u64 = 8192;
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 struct AllocationCensus {
@@ -75,22 +75,6 @@ fn sim_timeout_secs() -> u64 {
             }
         },
         Err(_) => DEFAULT_TIMEOUT_SECS,
-    }
-}
-
-fn sim_memory_cap_mb() -> Option<u64> {
-    match std::env::var("ROCK_SIM_MEMORY_MB") {
-        Ok(v) => match v.parse::<u64>() {
-            Ok(0) => None,
-            Ok(n) => Some(n),
-            Err(_) => {
-                log::warn!(target: "SIM",
-                    "ROCK_SIM_MEMORY_MB=`{v}` is not a nonnegative integer; \
-                     using {DEFAULT_MEMORY_CAP_MB} MB");
-                Some(DEFAULT_MEMORY_CAP_MB)
-            }
-        },
-        Err(_) => Some(DEFAULT_MEMORY_CAP_MB),
     }
 }
 
@@ -241,15 +225,10 @@ fn resolve_sim_name(wire_names: &[String], name: &str) -> std::result::Result<St
 
 fn sim_output_dir() -> Result<TempDir> {
     fs_err::create_dir_all("tmp").context("creating tmp/ for sim output")?;
-    let mut dir = tempfile::Builder::new()
+    tempfile::Builder::new()
         .prefix("sim-")
         .tempdir_in("tmp")
-        .context("creating sim output directory")?;
-    if std::env::var_os("ROCK_SIM_KEEP_BUILD").is_some() {
-        dir.disable_cleanup(true);
-        ::log::info!(target: "SIM", "retaining sim build at {}", dir.path().display());
-    }
-    Ok(dir)
+        .context("creating sim output directory")
 }
 
 fn compile_sims(project_path: PathBuf, output_path: PathBuf) -> Result<CompiledSims> {
@@ -3096,7 +3075,6 @@ fn wait_for_child(
     channels: &ReloadChannels,
     reload: &mut ReloadState,
 ) -> Result<Waited> {
-    let memory_cap_mb = sim_memory_cap_mb();
     loop {
         if reload.drain_completions(channels) {
             return Ok(Waited {
@@ -3115,16 +3093,16 @@ fn wait_for_child(
                 ..Waited::exited(child.wait()?)
             });
         }
-        if let (Some(cap), Some(used)) = (memory_cap_mb, process_memory_mb(child.id())) {
-            if used > cap {
+        if let Some(used) = process_memory_mb(child.id()) {
+            if used > MEMORY_CAP_MB {
                 let breakdown = process_memory_breakdown(child.id());
                 let _ = child.kill();
                 return Ok(Waited {
                     runner_killed: true,
                     memory_error: Some(SiteMessage {
                         message: format!(
-                            "sim child exceeded its memory cap of {cap} MB ({used} MB resident \
-                             plus swap: {breakdown}) and was killed; override with ROCK_SIM_MEMORY_MB"
+                            "sim child exceeded its memory cap of {MEMORY_CAP_MB} MB ({used} MB \
+                             resident plus swap: {breakdown}) and was killed"
                         ),
                         site: String::new(),
                     }),
