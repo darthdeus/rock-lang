@@ -29,10 +29,8 @@ struct GlyphInfo {
 }
 
 impl GlyphInfo {
-    /// # Safety
-    /// `out` must point to 9 writable floats.
-    unsafe fn write_to(&self, out: *mut c_float) {
-        let values = [
+    fn floats(&self) -> [f32; 9] {
+        [
             self.u0,
             self.v0,
             self.u1,
@@ -42,9 +40,24 @@ impl GlyphInfo {
             self.bearing_x,
             self.bearing_y,
             self.advance,
-        ];
-        std::ptr::copy_nonoverlapping(values.as_ptr(), out, values.len());
+        ]
     }
+}
+
+fn write_floats(out: *mut c_float, values: &[f32]) -> bool {
+    if out.is_null() {
+        return false;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(values.as_ptr(), out, values.len()) };
+    true
+}
+
+/// The entry for `face` (an index into `Face::ALL`) and `slot` in a per-face table.
+fn face_slot<T: Copy>(table: &[Vec<T>; 4], face: c_int, slot: c_int) -> Option<T> {
+    let face = Face::from_index(usize::try_from(face).ok()?)?;
+    table[face.index()]
+        .get(usize::try_from(slot).ok()?)
+        .copied()
 }
 
 const GLYPH_FIRST: usize = 32; // First printable ASCII (space)
@@ -111,11 +124,8 @@ impl Charset {
     }
 
     /// Every slot that carries a codepoint, in slot order.
-    fn baked_slots(&self) -> Vec<usize> {
-        let mut slots: Vec<usize> = (GLYPH_FIRST..=GLYPH_LAST).collect();
-        slots.push(GLYPH_ACCENT_A_ACUTE_SLOT);
-        slots.extend(GLYPH_ASCII_SLOTS..self.slot_count());
-        slots
+    fn baked(&self) -> impl Iterator<Item = (usize, char)> + '_ {
+        (0..self.slot_count()).filter_map(|slot| Some((slot, self.char_at(slot)?)))
     }
 }
 
@@ -124,49 +134,95 @@ struct TextPipeline {
     vbo: glow::Buffer,
 }
 
-struct FontEntry {
-    /// `None` for a metrics-only font: `stone_load_font_metrics` rasterizes the
-    /// atlas on the CPU but uploads nothing, so there is no texture to bind.
-    /// The type carries that, rather than a flag each GL reader must remember to
-    /// check -- every one of them is a `match` the compiler pointed at.
-    atlas_texture: Option<glow::Texture>,
+/// Where a font's glyphs sit in one raster of it.
+#[derive(Clone, Default, PartialEq)]
+struct AtlasLayout {
     /// Per face, then per text slot. An undeclared face is entirely invalid;
     /// nothing substitutes `Regular` for it.
     glyphs: [Vec<GlyphInfo>; 4],
+    width: i32,
+    height: i32,
+    pixel_size: i32,
+}
+
+/// What every raster of a font is baked from.
+#[derive(Clone)]
+struct FontSource {
+    data: Rc<Vec<u8>>,
+    path: String,
     faces: FaceSet,
     charset: Charset,
+}
+
+impl FontSource {
+    fn bake(&self, pixel_size: i32) -> Option<RasterizedAtlas> {
+        rasterize_glyphs(
+            &self.data,
+            pixel_size,
+            self.faces,
+            &self.charset,
+            &self.path,
+        )
+    }
+}
+
+struct FontEntry {
+    /// `None` for a metrics-only font: `stone_load_font_metrics` rasterizes the
+    /// atlas on the CPU but uploads nothing, so there is no texture to bind.
+    /// When present, `instances[0]` is this texture with this layout.
+    atlas_texture: Option<glow::Texture>,
+    /// The compatibility atlas; its CPU raster is not retained once uploaded.
+    layout: AtlasLayout,
+    source: FontSource,
     /// Font-unit metrics, prepared once per raster from the same bytes at
     /// unit scale. `stone_get_font_unit_metrics` reads this; it never parses.
     unit_metrics: FontUnitMetrics,
     /// Per face, then per text slot: the `stone_get_glyph_unit_metrics`
-    /// answers, prepared once per raster. `None` is a hole in the charset or
-    /// a codepoint the file does not cover -- the same rejections the
-    /// per-query parse answered with. All four faces are baked, declared or
-    /// not, because the ABI never checked declaration.
+    /// answers. `None` is a hole in the charset or a codepoint the file does
+    /// not cover. All four faces are baked, declared or not, because the ABI
+    /// never checked declaration.
     glyph_unit: [Vec<Option<GlyphUnitMetrics>>; 4],
-    font_data: Rc<Vec<u8>>,
-    source_path: String,
-    font_pixel_size: i32,
-    /// The compat atlas's CPU raster is not retained once uploaded.
-    atlas_width: i32,
-    atlas_height: i32,
-    /// Independent raster products for one stable face/font-unit identity.
-    /// The first coverage instance aliases the compatibility atlas above;
-    /// later target buckets own their own GL textures.
+    /// GL raster products for one face revision; demand instances own their textures.
     instances: Vec<AtlasInstance>,
     face_revision: u64,
     /// Set once `stone_font_release_coverage` drops GL coverage this entry
     /// held. A metrics-shaped entry (no atlas, no instances: headless)
-    /// releases nothing native and leaves this false, so its size and
-    /// reload behavior are exactly what they were before the release API
-    /// existed.
+    /// releases nothing native and leaves this false.
     coverage_released: bool,
 }
 
 impl FontEntry {
+    fn new(source: FontSource, size: i32, residency: AtlasResidency) -> Option<FontEntry> {
+        let raster = source.bake(size)?;
+        let atlas_texture = match residency {
+            AtlasResidency::Metrics => None,
+            AtlasResidency::Gpu => Some(upload_atlas_texture(&raster)?),
+        };
+        // A metrics-only entry owns no instance: an instance IS a GL texture.
+        let instances = atlas_texture
+            .map(|texture| AtlasInstance {
+                texture,
+                layout: raster.layout.clone(),
+                image: None,
+                face_revision: 0,
+            })
+            .into_iter()
+            .collect();
+        Some(FontEntry {
+            atlas_texture,
+            layout: raster.layout,
+            source,
+            unit_metrics: raster.unit_metrics,
+            glyph_unit: raster.glyph_unit,
+            instances,
+            face_revision: 0,
+            coverage_released: false,
+        })
+    }
+
     fn regular_glyph(&self, ch: char) -> Option<&GlyphInfo> {
-        let slot = self.charset.slot_of(ch)?;
-        Some(&self.glyphs[Face::Regular.index()][slot])
+        let slot = self.source.charset.slot_of(ch)?;
+        Some(&self.layout.glyphs[Face::Regular.index()][slot])
     }
 
     /// The tallest valid regular-face bearing in `text`, floored at zero, or
@@ -183,44 +239,45 @@ impl FontEntry {
     fn line_height(&self) -> f32 {
         let metrics = self.unit_metrics;
         (metrics.ascender - metrics.descender + metrics.line_gap) / metrics.units_per_em
-            * self.font_pixel_size as f32
+            * self.layout.pixel_size as f32
+    }
+
+    /// The compatibility atlas image, once minted.
+    fn atlas_image(&self) -> Option<u64> {
+        self.atlas_texture?;
+        self.instances.first()?.image
     }
 }
 
 #[derive(Clone)]
 struct AtlasInstance {
     texture: glow::Texture,
-    glyphs: [Vec<GlyphInfo>; 4],
-    width: i32,
-    height: i32,
-    pixel_size: i32,
+    layout: AtlasLayout,
     image: Option<u64>,
     face_revision: u64,
 }
 
 impl AtlasInstance {
-    /// Bytes of the R8 raster its texture holds; no CPU copy is retained.
-    fn byte_len(&self) -> c_int {
-        self.width.max(0).saturating_mul(self.height.max(0))
-    }
-}
-
-fn delete_font_textures(entries: &[FontEntry]) {
-    for entry in entries {
-        delete_coverage_textures(entry.atlas_texture, &entry.instances);
-    }
-}
-
-fn delete_coverage_textures(atlas: Option<glow::Texture>, instances: &[AtlasInstance]) {
-    with_gl(|gl| unsafe {
-        if let Some(atlas) = atlas {
-            gl.delete_texture(atlas);
+    fn publish(&mut self, layout: AtlasLayout, face_revision: u64) {
+        if let Some(image) = self.image {
+            with_image_mut(image, |loaded| {
+                loaded.width = layout.width as u32;
+                loaded.height = layout.height as u32;
+            });
         }
+        self.layout = layout;
+        self.face_revision = face_revision;
+    }
+}
+
+/// Retire the instances' image aliases and delete their textures.
+fn drop_coverage(instances: &[AtlasInstance]) {
+    for id in instances.iter().filter_map(|instance| instance.image) {
+        forget_image(id);
+    }
+    with_gl(|gl| unsafe {
         for instance in instances {
-            // Instance 0 aliases the compat texture; deleting it twice would free a recycled name.
-            if Some(instance.texture) != atlas {
-                gl.delete_texture(instance.texture);
-            }
+            gl.delete_texture(instance.texture);
         }
     });
 }
@@ -229,26 +286,36 @@ thread_local! {
     static TEXT_PIPELINE: RefCell<Option<TextPipeline>> = const { RefCell::new(None) };
     // font_ids are 1-based and never reuse a slot; unloaded slots become None.
     static FONTS: RefCell<Vec<Option<FontEntry>>> = const { RefCell::new(Vec::new()) };
-    static FONT_ATLAS_IMAGES: RefCell<Vec<Option<u64>>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(crate) const FALLBACK_FONT: &[u8] =
     include_bytes!("../../packages/stone/engine/assets/fonts/DroidSans.ttf");
 
-fn font_slot<R>(idx: usize, f: impl FnOnce(Option<&FontEntry>) -> R) -> R {
-    FONTS.with(|fonts| f(fonts.borrow().get(idx).and_then(Option::as_ref)))
+/// Read one loaded font. The only precondition is that the font exists: no
+/// text pipeline, no GL, no window.
+fn font<R>(font_id: u32, f: impl FnOnce(&FontEntry) -> R) -> Option<R> {
+    let idx = (font_id as usize).checked_sub(1)?;
+    FONTS.with(|fonts| fonts.borrow().get(idx)?.as_ref().map(f))
 }
 
-fn font_slot_mut<R>(idx: usize, f: impl FnOnce(Option<&mut FontEntry>) -> R) -> R {
-    FONTS.with(|fonts| f(fonts.borrow_mut().get_mut(idx).and_then(Option::as_mut)))
+fn font_mut<R>(font_id: u32, f: impl FnOnce(&mut FontEntry) -> R) -> Option<R> {
+    let idx = (font_id as usize).checked_sub(1)?;
+    FONTS.with(|fonts| fonts.borrow_mut().get_mut(idx)?.as_mut().map(f))
 }
 
-fn font_index(font_id: u32) -> Option<usize> {
-    if font_id == 0 {
-        return None;
+fn push_font(entry: FontEntry) -> c_uint {
+    FONTS.with(|fonts| {
+        let mut fonts = fonts.borrow_mut();
+        fonts.push(Some(entry));
+        fonts.len() as c_uint
+    })
+}
+
+fn c_str<'a>(ptr: *const c_char) -> &'a str {
+    if ptr.is_null() {
+        return "";
     }
-    let idx = (font_id - 1) as usize;
-    font_slot(idx, |entry| entry.map(|_| idx))
+    unsafe { CStr::from_ptr(ptr).to_str().unwrap_or("") }
 }
 
 #[no_mangle]
@@ -318,21 +385,17 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
 }
 
 pub(crate) fn shutdown() {
-    TEXT_PIPELINE.with(|tp| {
-        if let Some(pipeline) = tp.borrow_mut().take() {
-            with_gl(|gl| unsafe {
-                gl.delete_vertex_array(pipeline.vao);
-                gl.delete_buffer(pipeline.vbo);
-            });
-        }
-    });
-    FONTS.with(|fonts| {
-        let drained: Vec<FontEntry> = fonts.borrow_mut().drain(..).flatten().collect();
-        forget_instance_images(&drained);
-        delete_font_textures(&drained);
-    });
-    forget_all_atlas_images();
-    FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut().clear());
+    if let Some(pipeline) = TEXT_PIPELINE.with(|tp| tp.borrow_mut().take()) {
+        with_gl(|gl| unsafe {
+            gl.delete_vertex_array(pipeline.vao);
+            gl.delete_buffer(pipeline.vbo);
+        });
+    }
+    let drained: Vec<FontEntry> =
+        FONTS.with(|fonts| fonts.borrow_mut().drain(..).flatten().collect());
+    for entry in &drained {
+        drop_coverage(&entry.instances);
+    }
 }
 
 const GRID_PROBE: &[u8] = b"HMoxnwgB";
@@ -382,14 +445,11 @@ fn warn_if_offgrid(font_data: &[u8], size: i32, path: &str) {
     }
 }
 
-// Build a FontEntry from font bytes. Returns None on parse failure.
-// CPU rasterization result, split from the GL upload so load (fresh texture) and
-// reload (re-upload into the existing texture) share the same glyph layout.
+/// A CPU raster: the R8 pixels to upload, their layout, and the unit metrics
+/// parsed from the same bytes.
 struct RasterizedAtlas {
-    atlas_data: Vec<u8>,
-    glyphs: [Vec<GlyphInfo>; 4],
-    atlas_width: u32,
-    atlas_height: u32,
+    pixels: Vec<u8>,
+    layout: AtlasLayout,
     unit_metrics: FontUnitMetrics,
     glyph_unit: [Vec<Option<GlyphUnitMetrics>>; 4],
 }
@@ -418,6 +478,8 @@ fn warn_if_synthesizing_a_pixel_font(font_data: &[u8], size: i32, faces: FaceSet
     }
 }
 
+const GLYPHS_PER_ROW: usize = 16;
+
 fn rasterize_glyphs(
     font_data: &[u8],
     size: i32,
@@ -437,14 +499,9 @@ fn rasterize_glyphs(
     warn_if_offgrid(font_data, size, path_for_log);
     warn_if_synthesizing_a_pixel_font(font_data, size, faces, path_for_log);
 
-    // The layout answers beside the atlas: one unit-scale parse answers every
-    // per-glyph ABI query the font will ever serve, so the queries stop
-    // re-parsing the file. `unit_metrics` never touches the scale, and
-    // `glyph_unit_metrics` divides the pixel-space synthesis back out, so
-    // parsing at 1.0 answers exactly what the old per-query
-    // `RasterFont::new(&data, 1.0)` answered -- bit-identical, including the
-    // raster-size independence the unit tests pin. All four faces are baked
-    // because the ABI serves undeclared faces rather than rejecting them.
+    // One unit-scale parse answers every per-glyph unit query the font will
+    // serve. `glyph_unit_metrics` divides the pixel-space synthesis back out,
+    // so the answers do not depend on the raster size.
     let unit_font = match RasterFont::new(font_data, 1.0) {
         Ok(f) => f,
         Err(e) => {
@@ -452,98 +509,61 @@ fn rasterize_glyphs(
             return None;
         }
     };
-    let unit_metrics = unit_font.unit_metrics();
-    let mut glyph_unit: [Vec<Option<GlyphUnitMetrics>>; 4] =
-        std::array::from_fn(|_| vec![None; charset.slot_count()]);
-    for face in Face::ALL {
-        let synth = face.synth(1.0);
-        let table = &mut glyph_unit[face.index()];
-        for (slot, entry) in table.iter_mut().enumerate() {
-            if let Some(ch) = charset.char_at(slot) {
-                *entry = unit_font.glyph_unit_metrics(ch, synth);
-            }
-        }
-    }
+    let glyph_unit = std::array::from_fn(|face| {
+        let synth = Face::ALL[face].synth(1.0);
+        (0..charset.slot_count())
+            .map(|slot| {
+                charset
+                    .char_at(slot)
+                    .and_then(|ch| unit_font.glyph_unit_metrics(ch, synth))
+            })
+            .collect()
+    });
 
-    let slots = charset.baked_slots();
-    let glyph_count = slots.len();
     let baked: Vec<Face> = faces.declared().collect();
-    let rendered: Vec<Vec<Option<glyph_raster::RasterGlyph>>> = baked
+    let rendered: Vec<Vec<(usize, usize, glyph_raster::RasterGlyph)>> = baked
         .iter()
         .map(|face| {
             let synth = face.synth(pixel_size);
-            slots
-                .iter()
-                .map(|&slot| {
-                    charset
-                        .char_at(slot)
-                        .and_then(|ch| font.rasterize(ch, synth))
-                })
+            charset
+                .baked()
+                .enumerate()
+                .filter_map(|(cell, (slot, ch))| Some((cell, slot, font.rasterize(ch, synth)?)))
                 .collect()
         })
         .collect();
 
-    let mut max_glyph_width = 0u32;
-    let mut max_glyph_height = 0u32;
-    for g in rendered.iter().flatten().flatten() {
-        max_glyph_width = max_glyph_width.max(g.width as u32);
-        max_glyph_height = max_glyph_height.max(g.height as u32);
-    }
-
-    let glyphs_per_row = 16;
-    let atlas_width = (max_glyph_width + 2) * glyphs_per_row; // +2 for padding
-    let rows_per_face = glyph_count.div_ceil(glyphs_per_row as usize);
-    let atlas_height = (max_glyph_height + 2) * (rows_per_face * baked.len()) as u32;
-
-    if !atlas_dimensions_supported(atlas_width, atlas_height) {
+    let glyph_extent = |extent: fn(&glyph_raster::RasterGlyph) -> usize| {
+        let cells = rendered.iter().flatten();
+        cells.map(|(_, _, glyph)| extent(glyph)).max().unwrap_or(0) + 2 // +2 for padding
+    };
+    let cell_width = glyph_extent(|glyph| glyph.width);
+    let cell_height = glyph_extent(|glyph| glyph.height);
+    let rows_per_face = charset.baked().count().div_ceil(GLYPHS_PER_ROW);
+    let atlas_width = cell_width * GLYPHS_PER_ROW;
+    let atlas_height = cell_height * rows_per_face * baked.len();
+    if !atlas_dimensions_supported(atlas_width as u32, atlas_height as u32) {
         return None;
     }
 
-    let mut atlas_data = vec![0u8; (atlas_width * atlas_height) as usize];
-
+    let mut pixels = vec![0u8; atlas_width * atlas_height];
     let mut glyphs: [Vec<GlyphInfo>; 4] =
         std::array::from_fn(|_| vec![GlyphInfo::default(); charset.slot_count()]);
-    let cell_width = (max_glyph_width + 2) as usize;
-    let cell_height = (max_glyph_height + 2) as usize;
-
-    for (face_slot, face) in baked.iter().enumerate() {
+    for ((block, face), cells) in baked.iter().enumerate().zip(&rendered) {
         // Faces occupy whole row-blocks in declaration order, so the layout of
         // a regular-only bake is exactly what it was before faces existed.
-        let face_row = face_slot * rows_per_face;
-        for (glyph_idx, &glyph_slot) in slots.iter().enumerate() {
-            let g = match &rendered[face_slot][glyph_idx] {
-                Some(g) => g,
-                None => continue,
-            };
-
-            let col = glyph_idx % glyphs_per_row as usize;
-            let row = face_row + glyph_idx / glyphs_per_row as usize;
-
-            let x_offset = col * cell_width + 1; // +1 for padding
-            let y_offset = row * cell_height + 1;
-
-            for gy in 0..g.height {
-                for gx in 0..g.width {
-                    let src_idx = gy * g.width + gx;
-                    let dst_x = x_offset + gx;
-                    let dst_y = y_offset + gy;
-                    let dst_idx = dst_y * atlas_width as usize + dst_x;
-                    if dst_idx < atlas_data.len() && src_idx < g.data.len() {
-                        atlas_data[dst_idx] = g.data[src_idx];
-                    }
-                }
+        for (cell, slot, g) in cells {
+            let x = cell % GLYPHS_PER_ROW * cell_width + 1;
+            let y = (block * rows_per_face + cell / GLYPHS_PER_ROW) * cell_height + 1;
+            for row in 0..g.height {
+                let dst = (y + row) * atlas_width + x;
+                pixels[dst..dst + g.width].copy_from_slice(&g.data[row * g.width..][..g.width]);
             }
-
-            let u0 = x_offset as f32 / atlas_width as f32;
-            let v0 = y_offset as f32 / atlas_height as f32;
-            let u1 = (x_offset + g.width) as f32 / atlas_width as f32;
-            let v1 = (y_offset + g.height) as f32 / atlas_height as f32;
-
-            glyphs[face.index()][glyph_slot] = GlyphInfo {
-                u0,
-                v0,
-                u1,
-                v1,
+            glyphs[face.index()][*slot] = GlyphInfo {
+                u0: x as f32 / atlas_width as f32,
+                v0: y as f32 / atlas_height as f32,
+                u1: (x + g.width) as f32 / atlas_width as f32,
+                v1: (y + g.height) as f32 / atlas_height as f32,
                 width: g.width as f32,
                 height: g.height as f32,
                 bearing_x: g.left,
@@ -555,11 +575,14 @@ fn rasterize_glyphs(
     }
 
     Some(RasterizedAtlas {
-        atlas_data,
-        glyphs,
-        atlas_width,
-        atlas_height,
-        unit_metrics,
+        pixels,
+        layout: AtlasLayout {
+            glyphs,
+            width: atlas_width as i32,
+            height: atlas_height as i32,
+            pixel_size: size,
+        },
+        unit_metrics: unit_font.unit_metrics(),
         glyph_unit,
     })
 }
@@ -588,13 +611,10 @@ fn atlas_dimensions_supported(width: u32, height: u32) -> bool {
     false
 }
 
-fn upload_atlas_texture(data: &[u8], width: u32, height: u32) -> Option<glow::Texture> {
-    if !atlas_dimensions_supported(width, height) {
-        return None;
-    }
+fn upload_atlas_texture(raster: &RasterizedAtlas) -> Option<glow::Texture> {
     with_gl(|gl| unsafe {
         let tex = gl.create_texture().ok()?;
-        define_r8_atlas(gl, tex, data, width, height);
+        define_r8_atlas(gl, tex, raster);
         for axis in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
             gl.tex_parameter_i32(glow::TEXTURE_2D, axis, glow::CLAMP_TO_EDGE as i32);
         }
@@ -606,25 +626,27 @@ fn upload_atlas_texture(data: &[u8], width: u32, height: u32) -> Option<glow::Te
     .flatten()
 }
 
-unsafe fn define_r8_atlas(
-    gl: &crate::DebugGl,
-    texture: glow::Texture,
-    data: &[u8],
-    width: u32,
-    height: u32,
-) {
+fn replace_atlas_texture(texture: glow::Texture, raster: &RasterizedAtlas) -> bool {
+    #[cfg(test)]
+    if FORCE_UPLOADS_OK.with(Cell::get) {
+        return true;
+    }
+    with_gl(|gl| unsafe { define_r8_atlas(gl, texture, raster) }).is_some()
+}
+
+unsafe fn define_r8_atlas(gl: &crate::DebugGl, texture: glow::Texture, raster: &RasterizedAtlas) {
     gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
     gl.tex_image_2d(
         glow::TEXTURE_2D,
         0,
         glow::R8 as i32,
-        width as i32,
-        height as i32,
+        raster.layout.width,
+        raster.layout.height,
         0,
         glow::RED,
         glow::UNSIGNED_BYTE,
-        glow::PixelUnpackData::Slice(Some(data)),
+        glow::PixelUnpackData::Slice(Some(&raster.pixels)),
     );
 }
 
@@ -641,62 +663,6 @@ enum AtlasResidency {
     Metrics,
 }
 
-fn rasterize_font(
-    font_data: Rc<Vec<u8>>,
-    size: i32,
-    faces: FaceSet,
-    charset: Charset,
-    path_for_log: &str,
-    residency: AtlasResidency,
-) -> Option<FontEntry> {
-    let r = rasterize_glyphs(&font_data, size, faces, &charset, path_for_log)?;
-
-    let atlas_texture = if residency == AtlasResidency::Metrics {
-        None
-    } else {
-        Some(upload_atlas_texture(
-            &r.atlas_data,
-            r.atlas_width,
-            r.atlas_height,
-        )?)
-    };
-
-    let glyphs = r.glyphs;
-    let unit_metrics = r.unit_metrics;
-    let glyph_unit = r.glyph_unit;
-    // A metrics-only entry owns no instance: an instance IS a GL texture, and
-    // the coverage/target buckets are only ever asked for by a draw.
-    let instances = match atlas_texture {
-        Some(texture) => vec![AtlasInstance {
-            texture,
-            glyphs: glyphs.clone(),
-            width: r.atlas_width as i32,
-            height: r.atlas_height as i32,
-            pixel_size: size,
-            image: None,
-            face_revision: 0,
-        }],
-        None => Vec::new(),
-    };
-
-    Some(FontEntry {
-        atlas_texture,
-        glyphs,
-        faces,
-        charset,
-        unit_metrics,
-        glyph_unit,
-        font_data,
-        source_path: path_for_log.to_owned(),
-        font_pixel_size: size,
-        atlas_width: r.atlas_width as i32,
-        atlas_height: r.atlas_height as i32,
-        instances,
-        face_revision: 0,
-        coverage_released: false,
-    })
-}
-
 #[cfg(test)]
 thread_local! {
     static FORCE_UPLOADS_OK: Cell<bool> = const { Cell::new(false) };
@@ -707,158 +673,73 @@ thread_local! {
     static FAIL_DEPENDENT_RASTER: Cell<bool> = const { Cell::new(false) };
 }
 
-#[cfg(test)]
-fn force_uploads_ok_for_test() -> bool {
-    FORCE_UPLOADS_OK.with(|f| f.get())
-}
-
-#[cfg(test)]
-fn fail_dependent_raster_for_test() -> bool {
-    FAIL_DEPENDENT_RASTER.with(|f| f.get())
-}
-
-fn apply_raster(idx: usize, pixel_size: i32, raster: RasterizedAtlas) -> bool {
-    let texture: Option<glow::Texture> = match font_slot(idx, |entry| {
-        entry.map(|e| (e.atlas_texture, e.coverage_released))
-    }) {
-        Some((Some(t), _)) => Some(t),
-        Some((None, true)) => None,
-        Some((None, false)) => {
-            ::log::error!(target: "TEXT",
-                "re-raster refused: font {} is metrics-only and owns no atlas texture",
-                idx + 1);
-            return false;
-        }
-        None => return false,
+/// Re-rasterize a font from `source` at `pixel_size` into the textures it
+/// already owns, so the font id and every image handle stay valid. A reload
+/// also rebuilds each demand instance at its own size and bumps the face
+/// revision. Nothing is published unless every bake succeeded; the uploads
+/// share one GL context, so they cannot fail piecemeal.
+fn rebake(font_id: u32, source: FontSource, pixel_size: i32, reload: bool) -> bool {
+    let Some((atlas, released, revision, demand)) = font(font_id, |entry| {
+        let compat = entry.atlas_texture.is_some() as usize;
+        let demand: Vec<(usize, glow::Texture, i32)> = (entry.instances.iter().enumerate())
+            .skip(compat)
+            .filter(|_| reload)
+            .map(|(index, instance)| (index, instance.texture, instance.layout.pixel_size))
+            .collect();
+        let revision = entry.face_revision.saturating_add(reload as u64);
+        (
+            entry.atlas_texture,
+            entry.coverage_released,
+            revision,
+            demand,
+        )
+    }) else {
+        return false;
     };
-
-    if let Some(texture) = texture {
-        if !replace_atlas_texture(
-            texture,
-            &raster.atlas_data,
-            raster.atlas_width,
-            raster.atlas_height,
-        ) {
-            return false;
-        }
-    }
-
-    font_slot_mut(idx, |entry| {
-        if let Some(entry) = entry {
-            entry.glyphs = raster.glyphs.clone();
-            entry.unit_metrics = raster.unit_metrics;
-            entry.glyph_unit = raster.glyph_unit;
-            entry.font_pixel_size = pixel_size;
-            entry.atlas_width = raster.atlas_width as i32;
-            entry.atlas_height = raster.atlas_height as i32;
-            if let Some(instance) = entry.instances.first_mut() {
-                instance.glyphs = raster.glyphs;
-                instance.width = raster.atlas_width as i32;
-                instance.height = raster.atlas_height as i32;
-                instance.pixel_size = pixel_size;
-                if let Some(image) = instance.image {
-                    with_image_mut(image, |loaded| {
-                        loaded.width = raster.atlas_width;
-                        loaded.height = raster.atlas_height;
-                    });
-                }
-            }
-        }
-    });
-
-    let cached_img = FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow().get(idx).copied().flatten());
-    if let Some(img_id) = cached_img {
-        with_image_mut(img_id, |li| {
-            li.width = raster.atlas_width;
-            li.height = raster.atlas_height;
-        });
-    }
-
-    true
-}
-
-fn replace_atlas_texture(texture: glow::Texture, data: &[u8], width: u32, height: u32) -> bool {
-    #[cfg(test)]
-    if force_uploads_ok_for_test() {
-        return true;
-    }
-    with_gl(|gl| unsafe { define_r8_atlas(gl, texture, data, width, height) }).is_some()
-}
-
-struct BuiltInstanceRaster {
-    index: usize,
-    texture: glow::Texture,
-    raster: RasterizedAtlas,
-}
-
-fn build_instance_rasters(
-    idx: usize,
-    font_data: &[u8],
-    faces: FaceSet,
-    charset: &Charset,
-    source_path: &str,
-) -> Option<Vec<BuiltInstanceRaster>> {
-    let descriptors = font_slot(idx, |entry| {
-        entry.map(|entry| {
-            entry
-                .instances
-                .iter()
-                .enumerate()
-                .skip(1)
-                .map(|(index, instance)| (index, instance.pixel_size, instance.texture))
-                .collect::<Vec<_>>()
-        })
-    });
-    let descriptors = descriptors?;
-    let mut built = Vec::with_capacity(descriptors.len());
-    for (index, pixel_size, texture) in descriptors {
-        let raster = rasterize_glyphs(font_data, pixel_size, faces, charset, source_path)?;
+    let Some(main) = source.bake(pixel_size) else {
+        return false;
+    };
+    let mut rebuilt = Vec::with_capacity(demand.len());
+    for (index, texture, size) in demand {
+        let raster = source.bake(size);
         #[cfg(test)]
-        if fail_dependent_raster_for_test() {
-            return None;
-        }
-        built.push(BuiltInstanceRaster {
-            index,
-            texture,
-            raster,
-        });
-    }
-    Some(built)
-}
-
-/// Publish rebuilt coverage instances. Runs only after every build succeeded.
-fn commit_instance_rasters(
-    idx: usize,
-    built: Vec<BuiltInstanceRaster>,
-    face_revision: u64,
-) -> bool {
-    for item in built {
-        let BuiltInstanceRaster {
-            index,
-            texture,
-            raster,
-        } = item;
-        let glyphs = raster.glyphs;
-        let width = raster.atlas_width;
-        let height = raster.atlas_height;
-        if !replace_atlas_texture(texture, &raster.atlas_data, width, height) {
+        let raster = raster.filter(|_| !FAIL_DEPENDENT_RASTER.with(Cell::get));
+        let Some(raster) = raster else {
+            ::log::warn!(target: "TEXT", "stone_reload_font: failed to refresh raster instances for '{}'", source.path);
             return false;
-        }
-        font_slot_mut(idx, |entry| {
-            if let Some(instance) = entry.and_then(|entry| entry.instances.get_mut(index)) {
-                instance.glyphs = glyphs;
-                instance.width = width as i32;
-                instance.height = height as i32;
-                instance.face_revision = face_revision;
-                if let Some(image) = instance.image {
-                    with_image_mut(image, |loaded| {
-                        loaded.width = width;
-                        loaded.height = height;
-                    });
-                }
-            }
-        });
+        };
+        rebuilt.push((index, texture, raster));
     }
+    if atlas.is_none() && !released {
+        ::log::error!(target: "TEXT",
+            "re-raster refused: font {} is metrics-only and owns no atlas texture",
+            font_id);
+        return false;
+    }
+
+    let mut uploads = (atlas.map(|texture| (texture, &main)).into_iter()).chain(
+        rebuilt
+            .iter()
+            .map(|(_, texture, raster)| (*texture, raster)),
+    );
+    if !uploads.all(|(texture, raster)| replace_atlas_texture(texture, raster)) {
+        return false;
+    }
+    font_mut(font_id, |entry| {
+        if atlas.is_some() {
+            entry.instances[0].publish(main.layout.clone(), revision);
+        }
+        for (index, _, raster) in rebuilt {
+            entry.instances[index].publish(raster.layout, revision);
+        }
+        entry.layout = main.layout;
+        entry.unit_metrics = main.unit_metrics;
+        entry.glyph_unit = main.glyph_unit;
+        entry.face_revision = revision;
+        if reload {
+            entry.source = source;
+        }
+    });
     true
 }
 
@@ -899,59 +780,24 @@ fn load_font_with_residency(
         ::log::error!(target: "TEXT", "stone_load_font: null path");
         return 0;
     }
-
-    let path_str = unsafe { CStr::from_ptr(path).to_str().unwrap_or("") };
-    if path_str.is_empty() {
+    let path = c_str(path);
+    if path.is_empty() {
         ::log::error!(target: "TEXT", "stone_load_font: empty path");
         return 0;
     }
-
-    let extra_str = if extra_chars.is_null() {
-        ""
-    } else {
-        unsafe { CStr::from_ptr(extra_chars).to_str().unwrap_or("") }
-    };
-    load_font_with_residency_str(path_str, size, face_mask, extra_str, residency)
-}
-
-fn load_font_with_residency_str(
-    path_str: &str,
-    size: c_int,
-    face_mask: c_int,
-    extra_str: &str,
-    residency: AtlasResidency,
-) -> c_uint {
-    let font_data = match crate::asset_registry::resolve_asset(path_str) {
-        Some(data) => data,
-        None => {
-            crate::log_once!("TEXT",
-                "stone_load_font: failed to read font file '{}' — using embedded fallback (DroidSans.ttf)",
-                path_str);
-            FALLBACK_FONT.to_vec()
-        }
-    };
-
-    let charset = Charset::parse(extra_str);
-
-    let entry = match rasterize_font(
-        Rc::new(font_data),
-        size,
-        FaceSet::from_mask(face_mask),
-        charset,
-        path_str,
-        residency,
-    ) {
-        Some(e) => e,
-        None => return 0,
-    };
-
-    let font_id = FONTS.with(|fonts| {
-        let mut fonts = fonts.borrow_mut();
-        fonts.push(Some(entry));
-        fonts.len() as u32
+    let data = crate::asset_registry::resolve_asset(path).unwrap_or_else(|| {
+        crate::log_once!("TEXT",
+            "stone_load_font: failed to read font file '{}' — using embedded fallback (DroidSans.ttf)",
+            path);
+        FALLBACK_FONT.to_vec()
     });
-    FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut().push(None));
-    font_id
+    let source = FontSource {
+        data: Rc::new(data),
+        path: path.to_owned(),
+        faces: FaceSet::from_mask(face_mask),
+        charset: Charset::parse(c_str(extra_chars)),
+    };
+    FontEntry::new(source, size, residency).map_or(0, push_font)
 }
 
 /// Re-rasterize `path` into the atlas texture already bound to `font_id` at
@@ -964,74 +810,20 @@ pub extern "C" fn stone_reload_font(
     path: *const c_char,
     pixel_size: c_int,
 ) -> bool {
-    if path.is_null() {
+    let path = c_str(path);
+    if pixel_size < 1 || path.is_empty() {
         return false;
     }
-    if pixel_size < 1 {
+    let Some(mut source) = font(font_id, |entry| entry.source.clone()) else {
         return false;
-    }
-    let path_str = unsafe { CStr::from_ptr(path).to_str().unwrap_or("") };
-    if path_str.is_empty() {
+    };
+    let Some(data) = crate::asset_registry::resolve_asset(path) else {
+        ::log::warn!(target: "TEXT", "stone_reload_font: failed to read '{}'", path);
         return false;
-    }
-    let idx = match font_index(font_id) {
-        Some(i) => i,
-        None => return false,
     };
-
-    let font_data = match crate::asset_registry::resolve_asset(path_str) {
-        Some(d) => Rc::new(d),
-        None => {
-            ::log::warn!(target: "TEXT", "stone_reload_font: failed to read '{}'", path_str);
-            return false;
-        }
-    };
-
-    let declared = font_slot(idx, |entry| entry.map(|e| (e.faces, e.charset.clone())));
-    let (faces, charset) = match declared {
-        Some(d) => d,
-        None => return false,
-    };
-    let next_revision = font_slot(idx, |entry| {
-        entry
-            .map(|entry| entry.face_revision.saturating_add(1))
-            .unwrap_or(1)
-    });
-    let raster = match rasterize_glyphs(&font_data, pixel_size, faces, &charset, path_str) {
-        Some(r) => r,
-        None => return false,
-    };
-    // Build every dependent product BEFORE publishing any of them: once the
-    // main atlas is committed, a failing instance rebuild would leave the new
-    // pixels over the old bytes. The uploads below share one GL context, so
-    // they cannot fail piecemeal -- a build that succeeded everywhere commits
-    // everywhere.
-    let built_instances = match build_instance_rasters(idx, &font_data, faces, &charset, path_str) {
-        Some(v) => v,
-        None => {
-            ::log::warn!(target: "TEXT", "stone_reload_font: failed to refresh raster instances for '{}'", path_str);
-            return false;
-        }
-    };
-    if !apply_raster(idx, pixel_size, raster) {
-        return false;
-    }
-    if !commit_instance_rasters(idx, built_instances, next_revision) {
-        return false;
-    }
-
-    font_slot_mut(idx, |entry| {
-        if let Some(entry) = entry {
-            entry.font_data = font_data;
-            entry.source_path = path_str.to_owned();
-            entry.face_revision = next_revision;
-            if let Some(instance) = entry.instances.first_mut() {
-                instance.face_revision = entry.face_revision;
-            }
-        }
-    });
-
-    true
+    source.data = Rc::new(data);
+    source.path = path.to_owned();
+    rebake(font_id, source, pixel_size, true)
 }
 
 /// Re-rasterize a font from its retained source bytes at a new physical em.
@@ -1041,61 +833,21 @@ pub extern "C" fn stone_resize_font(font_id: c_uint, pixel_size: c_int) -> bool 
     if pixel_size < 1 {
         return false;
     }
-    let idx = match font_index(font_id) {
-        Some(i) => i,
-        None => return false,
-    };
-    let source = font_slot(idx, |entry| {
-        entry.map(|entry| {
-            (
-                entry.font_data.clone(),
-                entry.source_path.clone(),
-                entry.faces,
-                entry.charset.clone(),
-            )
-        })
-    });
-    let (font_data, source_path, faces, charset) = match source {
-        Some(s) => s,
-        None => return false,
-    };
-    let raster = match rasterize_glyphs(&font_data, pixel_size, faces, &charset, &source_path) {
-        Some(r) => r,
-        None => return false,
-    };
-    apply_raster(idx, pixel_size, raster)
+    font(font_id, |entry| entry.source.clone())
+        .is_some_and(|source| rebake(font_id, source, pixel_size, false))
 }
 
-// Run a closure with the pipeline + a specific font entry. No-op if
-// either is missing.
-/// Read one loaded font. The only precondition is that the font EXISTS -- no
-/// text pipeline, no GL, no window.
-///
-/// Every metrics reader below used `with_font`, which also demands
-/// `TEXT_PIPELINE`. A VAO/VBO says nothing about a glyph advance, so that
-/// coupling made a perfectly loaded font answer its caller's default -- slot
-/// count 0, pixel size 0, `stone_get_glyph_info` false -- in any process that
-/// had not created a window. Silent, and indistinguishable from an unloaded
-/// font. Drawing keeps `with_font`, because a draw genuinely needs the pipeline.
-fn with_font_entry<R>(font_id: u32, default: R, f: impl FnOnce(&FontEntry) -> R) -> R {
-    let idx = match font_index(font_id) {
-        Some(i) => i,
-        None => return default,
-    };
-    font_slot(idx, |entry| {
-        f(entry.expect("font_index returned a None slot"))
-    })
-}
-
+/// Drawing needs the text pipeline as well as the font; metrics readers use `font`.
 fn with_font<R>(font_id: u32, default: R, f: impl FnOnce(&TextPipeline, &FontEntry) -> R) -> R {
-    TEXT_PIPELINE.with(|tp| {
-        let tp_ref = tp.borrow();
-        let pipeline = match tp_ref.as_ref() {
-            Some(p) => p,
-            None => return default,
-        };
-        with_font_entry(font_id, default, |entry| f(pipeline, entry))
-    })
+    TEXT_PIPELINE
+        .with(|tp| {
+            let tp = tp.borrow();
+            font(font_id, |entry| {
+                tp.as_ref().map(|pipeline| f(pipeline, entry))
+            })
+            .flatten()
+        })
+        .unwrap_or(default)
 }
 
 fn draw_text_line_internal(
@@ -1104,8 +856,8 @@ fn draw_text_line_internal(
     text: &str,
     x: f32,
     y: f32,
-    scale_x: f32,
-    scale_y: f32,
+    sx: f32,
+    sy: f32,
     baseline_override: f32,
 ) {
     with_font(font_id, (), |pipeline, entry| {
@@ -1128,6 +880,33 @@ fn draw_text_line_internal(
             );
             return;
         };
+        let abs_sy = sy.abs();
+        let max_ascent = if baseline_override >= 0.0 {
+            baseline_override
+        } else {
+            entry.max_ascent(text, abs_sy).unwrap_or(0.0)
+        };
+
+        let mut vertices: Vec<f32> = Vec::with_capacity(text.len() * 24);
+        let mut pen_x = x;
+        for gi in text.chars().filter_map(|c| entry.regular_glyph(c)) {
+            if gi.valid && gi.width != 0.0 && gi.height != 0.0 {
+                let x0 = pen_x + gi.bearing_x * sx;
+                let y0 = if sy < 0.0 {
+                    y - gi.bearing_y * sy
+                } else {
+                    y + (max_ascent - gi.bearing_y * abs_sy)
+                };
+                let (x1, y1) = (x0 + gi.width * sx, y0 + gi.height * sy);
+                let (u0, v0, u1, v1) = (gi.u0, gi.v0, gi.u1, gi.v1);
+                vertices.extend_from_slice(&[
+                    x0, y0, u0, v0, x0, y1, u0, v1, x1, y1, u1, v1, //
+                    x0, y0, u0, v0, x1, y1, u1, v1, x1, y0, u1, v0,
+                ]);
+            }
+            pen_x += gi.advance * sx;
+        }
+
         with_gl(|gl| unsafe {
             gl.use_program(Some(program));
             // Goes current without `stone_set_shader`, so it re-binds the global block indices too.
@@ -1145,107 +924,24 @@ fn draw_text_line_internal(
                 glow::ONE_MINUS_SRC_ALPHA,
             );
 
-            let sx = scale_x;
-            let sy = scale_y;
-            let abs_sy = sy.abs(); // For baseline calculations
-
-            let max_ascent = if baseline_override >= 0.0 {
-                baseline_override
-            } else {
-                entry.max_ascent(text, abs_sy).unwrap_or(0.0)
-            };
-
-            let mut all_vertices: Vec<f32> = Vec::with_capacity(text.len() * 24);
-            let mut text_x = x;
-
-            for gi in text.chars().filter_map(|c| entry.regular_glyph(c)) {
-                if !gi.valid || gi.width == 0.0 || gi.height == 0.0 {
-                    text_x += gi.advance * sx;
-                    continue;
-                }
-
-                let w = gi.width * sx;
-                let h = gi.height * sy;
-                let xpos = text_x + gi.bearing_x * sx;
-                let ypos = if sy < 0.0 {
-                    y - gi.bearing_y * sy
-                } else {
-                    y + (max_ascent - gi.bearing_y * abs_sy)
-                };
-
-                let u0 = gi.u0;
-                let v0 = gi.v0;
-                let u1 = gi.u1;
-                let v1 = gi.v1;
-
-                all_vertices.extend_from_slice(&[
-                    xpos,
-                    ypos,
-                    u0,
-                    v0,
-                    xpos,
-                    ypos + h,
-                    u0,
-                    v1,
-                    xpos + w,
-                    ypos + h,
-                    u1,
-                    v1,
-                    xpos,
-                    ypos,
-                    u0,
-                    v0,
-                    xpos + w,
-                    ypos + h,
-                    u1,
-                    v1,
-                    xpos + w,
-                    ypos,
-                    u1,
-                    v0,
-                ]);
-
-                text_x += gi.advance * sx;
-            }
-
-            if !all_vertices.is_empty() {
+            if !vertices.is_empty() {
                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(pipeline.vbo));
-                if gl
-                    .buffer_data_u8_slice(
-                        glow::ARRAY_BUFFER,
-                        bytemuck::cast_slice(&all_vertices),
-                        glow::STREAM_DRAW,
-                    )
-                    .is_err()
-                {
-                    gl.bind_buffer(glow::ARRAY_BUFFER, None);
-                    gl.bind_vertex_array(None);
-                    return;
-                }
+                let uploaded = gl.buffer_data_u8_slice(
+                    glow::ARRAY_BUFFER,
+                    bytemuck::cast_slice(&vertices),
+                    glow::STREAM_DRAW,
+                );
                 gl.bind_buffer(glow::ARRAY_BUFFER, None);
-                gl.draw_arrays(glow::TRIANGLES, 0, (all_vertices.len() / 4) as i32);
-                crate::uniform_block::mark_program_drawn(program);
-                track_text_draw_call();
+                if uploaded.is_ok() {
+                    gl.draw_arrays(glow::TRIANGLES, 0, (vertices.len() / 4) as i32);
+                    crate::uniform_block::mark_program_drawn(program);
+                    track_text_draw_call();
+                }
             }
 
             gl.bind_vertex_array(None);
         });
     });
-}
-
-fn draw_text_lines(shader: u64, font_id: u32, text: &str, x: f32, y: f32, sx: f32, sy: f32) {
-    if text.is_empty() {
-        return;
-    }
-
-    let line_height = with_font(font_id, 20.0, |_, entry| entry.line_height() * sy.abs());
-    let mut current_y = y;
-    for line in text.split('\n') {
-        if !line.is_empty() {
-            draw_text_line_internal(shader, font_id, line, x, current_y, sx, sy, -1.0);
-        }
-        current_y += line_height;
-    }
 }
 
 #[no_mangle]
@@ -1258,16 +954,18 @@ pub extern "C" fn stone_draw_text(
     sx: c_float,
     sy: c_float,
 ) {
-    if text.is_null() {
+    let text = c_str(text);
+    if text.is_empty() {
         return;
     }
-
-    let text_str = unsafe { CStr::from_ptr(text).to_str().unwrap_or("") };
-    if text_str.is_empty() {
-        return;
+    let line_height = with_font(font_id, 20.0, |_, entry| entry.line_height() * sy.abs());
+    let mut line_y = y;
+    for line in text.split('\n') {
+        if !line.is_empty() {
+            draw_text_line_internal(shader.into(), font_id, line, x, line_y, sx, sy, -1.0);
+        }
+        line_y += line_height;
     }
-
-    draw_text_lines(shader.into(), font_id, text_str, x, y, sx, sy);
 }
 
 /// Out-params, NOT struct-by-value return. LuaJIT cannot JIT-compile a
@@ -1288,48 +986,34 @@ pub extern "C" fn stone_measure_text(
     if out_width.is_null() && out_height.is_null() {
         return;
     }
-
-    let text_str = if text.is_null() {
-        ""
-    } else {
-        unsafe { CStr::from_ptr(text).to_str().unwrap_or("") }
-    };
-
-    let result = with_font_entry(font_id, (0.0f32, 0.0f32), |entry| {
-        let line_height = entry.line_height() * scale;
+    let text = c_str(text);
+    let (width, height) = font(font_id, |entry| {
         let mut max_line_width = 0.0f32;
         let mut max_glyph_height = 0.0f32;
         let mut line_count = 0;
-
-        for line in text_str.split('\n') {
+        for line in text.split('\n') {
             let mut line_width = 0.0f32;
             for gi in line.chars().filter_map(|c| entry.regular_glyph(c)) {
                 line_width += gi.advance * scale;
-                let glyph_height = gi.height * scale;
-                if glyph_height > max_glyph_height {
-                    max_glyph_height = glyph_height;
-                }
+                max_glyph_height = max_glyph_height.max(gi.height * scale);
             }
-            if line_width > max_line_width {
-                max_line_width = line_width;
-            }
+            max_line_width = max_line_width.max(line_width);
             line_count += 1;
         }
-
         let height = if line_count <= 1 {
             max_glyph_height
         } else {
-            (line_count - 1) as f32 * line_height + max_glyph_height
+            (line_count - 1) as f32 * entry.line_height() * scale + max_glyph_height
         };
         (max_line_width, height)
-    });
-
+    })
+    .unwrap_or((0.0, 0.0));
     unsafe {
         if !out_width.is_null() {
-            *out_width = result.0;
+            *out_width = width;
         }
         if !out_height.is_null() {
-            *out_height = result.1;
+            *out_height = height;
         }
     }
 }
@@ -1342,18 +1026,10 @@ pub extern "C" fn stone_get_text_baseline(
     text: *const c_char,
     scale: c_float,
 ) -> c_float {
-    if text.is_null() {
-        return -1.0;
-    }
-
-    let text_str = unsafe { CStr::from_ptr(text).to_str().unwrap_or("") };
-    if text_str.is_empty() {
-        return -1.0;
-    }
-
-    with_font_entry(font_id, -1.0, |entry| {
-        entry.max_ascent(text_str, scale.abs()).unwrap_or(-1.0)
-    })
+    let text = c_str(text);
+    font(font_id, |entry| entry.max_ascent(text, scale.abs()))
+        .flatten()
+        .unwrap_or(-1.0)
 }
 
 /// Draw text with explicit baseline for per-character rendering
@@ -1368,19 +1044,13 @@ pub extern "C" fn stone_draw_text_ex(
     sy: c_float,
     baseline: c_float,
 ) {
-    if text.is_null() {
-        return;
+    let text = c_str(text);
+    if !text.is_empty() {
+        draw_text_line_internal(shader.into(), font_id, text, x, y, sx, sy, baseline);
     }
-
-    let text_str = unsafe { CStr::from_ptr(text).to_str().unwrap_or("") };
-    if text_str.is_empty() {
-        return;
-    }
-
-    draw_text_line_internal(shader.into(), font_id, text_str, x, y, sx, sy, baseline);
 }
 
-fn register_r8_alias(texture: glow::Texture, width: i32, height: i32) -> u64 {
+fn register_r8_alias(texture: glow::Texture, layout: &AtlasLayout) -> u64 {
     with_gl(|gl| unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         for swizzle in [
@@ -1393,13 +1063,8 @@ fn register_r8_alias(texture: glow::Texture, width: i32, height: i32) -> u64 {
         }
     });
     let id = crate::handles::mint(Class::Image);
-    insert_image(
-        id,
-        texture,
-        (width as u32, height as u32),
-        ImageFormat::R8,
-        false,
-    );
+    let size = (layout.width as u32, layout.height as u32);
+    insert_image(id, texture, size, ImageFormat::R8, false);
     id
 }
 
@@ -1414,55 +1079,28 @@ fn forget_image(id: u64) {
 
 #[no_mangle]
 pub extern "C" fn stone_get_font_atlas_image(font_id: c_uint) -> u64 {
-    let idx = match font_index(font_id) {
-        Some(i) => i,
-        None => return 0,
-    };
-
-    let cached = FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow().get(idx).copied().flatten());
-    if let Some(id) = cached {
-        return id;
-    }
-
-    let (has_atlas, released) = with_font_entry(font_id, (false, false), |entry| {
+    let Some((has_atlas, released)) = font(font_id, |entry| {
         (entry.atlas_texture.is_some(), entry.coverage_released)
-    });
-    if !has_atlas {
-        if released {
-            crate::log_once!(
-                "TEXT",
-                "font {} released its coverage and has no atlas image; the caller must not ask a released font to draw coverage",
-                font_id
-            );
-        } else {
-            crate::log_once!(
-                "TEXT",
-                "font {} is metrics-only and has no atlas image; the caller must not ask a metrics font to draw",
-                font_id
-            );
-        }
+    }) else {
         return 0;
+    };
+    if has_atlas {
+        stone_get_font_instance_image(atlas_instance_id(font_id, 0))
+    } else if released {
+        crate::log_once!(
+            "TEXT",
+            "font {} released its coverage and has no atlas image; the caller must not ask a released font to draw coverage",
+            font_id
+        );
+        0
+    } else {
+        crate::log_once!(
+            "TEXT",
+            "font {} is metrics-only and has no atlas image; the caller must not ask a metrics font to draw",
+            font_id
+        );
+        0
     }
-
-    let id = with_font_entry(font_id, 0, |entry| {
-        let atlas = entry
-            .atlas_texture
-            .expect("the metrics-only refusal above proved this font owns a texture");
-        register_r8_alias(atlas, entry.atlas_width, entry.atlas_height)
-    });
-
-    FONT_ATLAS_IMAGES.with(|imgs| {
-        let mut imgs = imgs.borrow_mut();
-        if idx < imgs.len() {
-            imgs[idx] = Some(id);
-        }
-    });
-    font_slot_mut(idx, |entry| {
-        if let Some(instance) = entry.and_then(|entry| entry.instances.first_mut()) {
-            instance.image.get_or_insert(id);
-        }
-    });
-    id
 }
 
 /// Return the generated atlas extent without exposing the GL image handle.
@@ -1472,31 +1110,311 @@ pub extern "C" fn stone_get_font_atlas_size(
     width: *mut c_int,
     height: *mut c_int,
 ) -> bool {
-    let idx = match font_index(font_id) {
-        Some(i) => i,
-        None => return false,
-    };
-    font_slot(idx, |entry| {
-        let Some(entry) = entry else {
-            return false;
-        };
-        if entry.coverage_released {
+    font(font_id, |entry| {
+        let layout = &entry.layout;
+        if entry.coverage_released || layout.width <= 0 || layout.height <= 0 {
             return false;
         }
-        if entry.atlas_width <= 0 || entry.atlas_height <= 0 {
-            return false;
-        }
-        let w = entry.atlas_width;
-        let h = entry.atlas_height;
         if width.is_null() || height.is_null() {
             return false;
         }
         unsafe {
-            *width = w;
-            *height = h;
+            *width = layout.width;
+            *height = layout.height;
         }
         true
     })
+    .unwrap_or(false)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_font_slot_count(font_id: c_uint) -> c_int {
+    font(font_id, |entry| entry.source.charset.slot_count() as c_int).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_font_slot_codepoint(font_id: c_uint, slot: c_int) -> c_int {
+    let slot = usize::try_from(slot).ok();
+    font(font_id, |entry| entry.source.charset.char_at(slot?))
+        .flatten()
+        .map_or(-1, |ch| ch as c_int)
+}
+
+fn write_glyph(glyphs: &[Vec<GlyphInfo>; 4], face: c_int, slot: c_int, out: *mut c_float) -> bool {
+    face_slot(glyphs, face, slot)
+        .filter(|glyph| glyph.valid)
+        .is_some_and(|glyph| write_floats(out, &glyph.floats()))
+}
+
+/// Writes 9 floats: u0, v0, u1, v1, width, height, bearing_x, bearing_y, advance.
+/// `face` indexes Face::ALL.
+#[no_mangle]
+pub extern "C" fn stone_get_glyph_info(
+    font_id: c_uint,
+    face: c_int,
+    char_code: c_int,
+    out: *mut c_float,
+) -> bool {
+    font(font_id, |entry| {
+        write_glyph(&entry.layout.glyphs, face, char_code, out)
+    })
+    .unwrap_or(false)
+}
+
+fn atlas_instance_id(font_id: u32, index: usize) -> u64 {
+    ((font_id as u64) << 32) | (index as u64 + 1)
+}
+
+fn decode_atlas_instance_id(instance_id: u64) -> Option<(u32, usize)> {
+    let font_id = (instance_id >> 32) as u32;
+    let slot = (instance_id & 0xffff_ffff) as usize;
+    if font_id == 0 || slot == 0 {
+        return None;
+    }
+    Some((font_id, slot - 1))
+}
+
+fn instance<R>(instance_id: u64, f: impl FnOnce(&AtlasInstance) -> R) -> Option<R> {
+    let (font_id, index) = decode_atlas_instance_id(instance_id)?;
+    font(font_id, |entry| entry.instances.get(index).map(f)).flatten()
+}
+
+#[no_mangle]
+pub extern "C" fn stone_ensure_font_atlas_instance(font_id: c_uint, pixel_size: c_int) -> u64 {
+    if pixel_size < 1 {
+        return 0;
+    }
+    let found = font(font_id, |entry| {
+        let revision = entry.face_revision;
+        let matches = |instance: &AtlasInstance| {
+            instance.layout.pixel_size == pixel_size && instance.face_revision == revision
+        };
+        match entry.instances.iter().position(matches) {
+            Some(index) => Ok(index),
+            None => Err((entry.source.clone(), revision)),
+        }
+    });
+    let (source, face_revision) = match found {
+        None => return 0,
+        Some(Ok(index)) => return atlas_instance_id(font_id, index),
+        Some(Err(missing)) => missing,
+    };
+    let Some(raster) = source.bake(pixel_size) else {
+        return 0;
+    };
+    let Some(texture) = upload_atlas_texture(&raster) else {
+        return 0;
+    };
+    let instance = AtlasInstance {
+        texture,
+        layout: raster.layout,
+        image: None,
+        face_revision,
+    };
+    font_mut(font_id, |entry| {
+        entry.instances.push(instance);
+        atlas_instance_id(font_id, entry.instances.len() - 1)
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_font_atlas_instance_count(font_id: c_uint) -> c_int {
+    font(font_id, |entry| entry.instances.len() as c_int).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_font_atlas_instance_pixel_size(
+    font_id: c_uint,
+    index: c_uint,
+) -> c_int {
+    stone_get_font_instance_pixel_size(atlas_instance_id(font_id, index as usize))
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_font_atlas_image_cached(font_id: c_uint) -> u64 {
+    font(font_id, FontEntry::atlas_image).flatten().unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_font_atlas_instance_image_at(font_id: c_uint, index: c_int) -> u64 {
+    if index < 0 {
+        return 0;
+    }
+    stone_get_font_instance_image(atlas_instance_id(font_id, index as usize))
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_font_instance_size(
+    instance_id: u64,
+    width: *mut c_int,
+    height: *mut c_int,
+) -> bool {
+    if width.is_null() || height.is_null() {
+        return false;
+    }
+    instance(instance_id, |instance| unsafe {
+        *width = instance.layout.width;
+        *height = instance.layout.height;
+        instance.layout.width > 0 && instance.layout.height > 0
+    })
+    .unwrap_or(false)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_font_instance_pixel_size(instance_id: u64) -> c_int {
+    instance(instance_id, |instance| instance.layout.pixel_size).unwrap_or(0)
+}
+
+/// Bytes of the R8 raster an instance's texture holds; no CPU copy is retained.
+#[no_mangle]
+pub extern "C" fn stone_get_font_instance_byte_len(instance_id: u64) -> c_int {
+    instance(instance_id, |instance| {
+        let layout = &instance.layout;
+        layout.width.max(0).saturating_mul(layout.height.max(0))
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_font_instance_glyph_info(
+    instance_id: u64,
+    face: c_int,
+    char_code: c_int,
+    out: *mut c_float,
+) -> bool {
+    instance(instance_id, |instance| {
+        write_glyph(&instance.layout.glyphs, face, char_code, out)
+    })
+    .unwrap_or(false)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_font_instance_image(instance_id: u64) -> u64 {
+    let Some((font_id, index)) = decode_atlas_instance_id(instance_id) else {
+        return 0;
+    };
+    font_mut(font_id, |entry| {
+        let AtlasInstance {
+            texture,
+            layout,
+            image,
+            ..
+        } = entry.instances.get_mut(index)?;
+        Some(*image.get_or_insert_with(|| register_r8_alias(*texture, layout)))
+    })
+    .flatten()
+    .unwrap_or(0)
+}
+
+/// Return the font's pixel size (set during stone_load_font).
+#[no_mangle]
+pub extern "C" fn stone_get_font_pixel_size(font_id: c_uint) -> c_int {
+    font(font_id, |entry| entry.layout.pixel_size).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_font_unit_metrics(font_id: c_uint, out: *mut c_float) -> bool {
+    font(font_id, |entry| {
+        let m = entry.unit_metrics;
+        let values = [
+            m.units_per_em,
+            m.ascender,
+            m.descender,
+            m.line_gap,
+            m.cap_height,
+        ];
+        write_floats(out, &values)
+    })
+    .unwrap_or(false)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_get_glyph_unit_metrics(
+    font_id: c_uint,
+    face: c_int,
+    char_code: c_int,
+    out: *mut c_float,
+) -> bool {
+    let metrics = font(font_id, |entry| {
+        face_slot(&entry.glyph_unit, face, char_code)
+    });
+    let Some(m) = metrics.flatten().flatten() else {
+        return false;
+    };
+    write_floats(out, &[m.left, m.top, m.width, m.height, m.advance])
+}
+
+pub(crate) fn live_font_ids() -> Vec<u64> {
+    FONTS.with(|fonts| {
+        fonts
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.is_some())
+            .map(|(idx, _)| idx as u64 + 1)
+            .collect()
+    })
+}
+
+/// Bytes of TTF/OTF the font retains, for the asset report's CPU column. -1
+/// for an id that names no live font.
+#[no_mangle]
+pub extern "C" fn stone_font_data_len(font_id: c_uint) -> i64 {
+    font(font_id, |entry| entry.source.data.len() as i64).unwrap_or(-1)
+}
+
+/// Drop an `IMAGES` entry that is a font atlas alias rather than an owned
+/// texture, clearing the instance's cache slot with it. The GL texture belongs
+/// to the font and survives; the next image request mints the entry again.
+/// Returns false when `image_id` is not an atlas alias, which is how the
+/// ledger's image teardown tells an alias from an image it may delete.
+pub(crate) fn forget_atlas_image(image_id: u64) -> bool {
+    let found = FONTS.with(|fonts| {
+        let mut fonts = fonts.borrow_mut();
+        let mut instances = fonts
+            .iter_mut()
+            .flatten()
+            .flat_map(|entry| &mut entry.instances);
+        instances
+            .find(|instance| instance.image == Some(image_id))
+            .map(|instance| instance.image = None)
+            .is_some()
+    });
+    if found {
+        forget_image(image_id);
+    }
+    found
+}
+
+/// Unload a previously-loaded font. Frees the GL atlas texture and
+/// clears the slot. Subsequent ops against this font_id silently
+/// no-op. Returns false if the font_id was already unloaded or out
+/// of range — caller can ignore unless it wants to assert.
+#[no_mangle]
+pub extern "C" fn stone_unload_font(font_id: c_uint) -> bool {
+    let Some(idx) = (font_id as usize).checked_sub(1) else {
+        return false;
+    };
+    let Some(entry) = FONTS.with(|fonts| fonts.borrow_mut().get_mut(idx)?.take()) else {
+        return false;
+    };
+    drop_coverage(&entry.instances);
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn stone_font_release_coverage(font_id: c_uint) -> bool {
+    let Some(instances) = font_mut(font_id, |entry| {
+        if entry.atlas_texture.take().is_some() || !entry.instances.is_empty() {
+            entry.coverage_released = true;
+        }
+        std::mem::take(&mut entry.instances)
+    }) else {
+        return false;
+    };
+    drop_coverage(&instances);
+    true
 }
 
 #[cfg(test)]
@@ -1521,64 +1439,42 @@ mod test_fixtures {
         load_font_with_residency(path.as_ptr(), size, 0, extra.as_ptr(), residency)
     }
 
-    /// A GPU-shaped font the way `rasterize_font` lays one out, minus the GL
+    pub(super) fn droid_source() -> FontSource {
+        FontSource {
+            data: Rc::new(FALLBACK_FONT.to_vec()),
+            path: "DroidSans".to_owned(),
+            faces: FaceSet::default(),
+            charset: Charset::default(),
+        }
+    }
+
+    /// A GPU-shaped font the way `FontEntry::new` lays one out, minus the GL
     /// work: the bakes are real, the texture names are fake (`first_texture`,
     /// and one above it for the second instance), and uploads never see them.
     pub(super) fn install_fake_gpu_font(first_texture: u32, extra_instance: bool) -> c_uint {
-        let bytes = FALLBACK_FONT.to_vec();
-        let faces = FaceSet::default();
-        let charset = Charset::default();
-        let main = rasterize_glyphs(&bytes, MAIN_PX, faces, &charset, "DroidSans")
-            .expect("DroidSans bakes at 32px");
-        let extra = extra_instance.then(|| {
-            rasterize_glyphs(&bytes, EXTRA_PX, faces, &charset, "DroidSans")
-                .expect("DroidSans bakes at 48px")
-        });
-
-        let glyphs = main.glyphs;
-        let mut instances = vec![AtlasInstance {
-            texture: fake_texture(first_texture),
-            glyphs: glyphs.clone(),
-            width: main.atlas_width as i32,
-            height: main.atlas_height as i32,
-            pixel_size: MAIN_PX,
+        let source = droid_source();
+        let main = source.bake(MAIN_PX).expect("DroidSans bakes at 32px");
+        let instance = |n: u32, layout: AtlasLayout| AtlasInstance {
+            texture: fake_texture(first_texture + n),
+            layout,
             image: None,
             face_revision: 0,
-        }];
-        if let Some(extra) = extra {
-            instances.push(AtlasInstance {
-                texture: fake_texture(first_texture + 1),
-                glyphs: extra.glyphs,
-                width: extra.atlas_width as i32,
-                height: extra.atlas_height as i32,
-                pixel_size: EXTRA_PX,
-                image: None,
-                face_revision: 0,
-            });
+        };
+        let mut instances = vec![instance(0, main.layout.clone())];
+        if extra_instance {
+            let extra = source.bake(EXTRA_PX).expect("DroidSans bakes at 48px");
+            instances.push(instance(1, extra.layout));
         }
-        let entry = FontEntry {
+        push_font(FontEntry {
             atlas_texture: Some(fake_texture(first_texture)),
-            glyphs,
-            faces,
-            charset,
+            layout: main.layout,
+            source,
             unit_metrics: main.unit_metrics,
-            glyph_unit: main.glyph_unit.clone(),
-            font_data: Rc::new(bytes),
-            source_path: "DroidSans".to_owned(),
-            font_pixel_size: MAIN_PX,
-            atlas_width: main.atlas_width as i32,
-            atlas_height: main.atlas_height as i32,
+            glyph_unit: main.glyph_unit,
             instances,
             face_revision: 0,
             coverage_released: false,
-        };
-        let font_id = FONTS.with(|fonts| {
-            let mut fonts = fonts.borrow_mut();
-            fonts.push(Some(entry));
-            fonts.len() as c_uint
-        });
-        FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut().push(None));
-        font_id
+        })
     }
 }
 
@@ -1590,7 +1486,6 @@ mod font_census_tests {
 
     struct CensusFonts {
         fonts_len: usize,
-        atlas_images_len: usize,
         images: Vec<u64>,
     }
 
@@ -1598,7 +1493,6 @@ mod font_census_tests {
         fn capture() -> Self {
             CensusFonts {
                 fonts_len: FONTS.with(|f| f.borrow().len()),
-                atlas_images_len: FONT_ATLAS_IMAGES.with(|i| i.borrow().len()),
                 images: Vec::new(),
             }
         }
@@ -1614,7 +1508,6 @@ mod font_census_tests {
                 IMAGES.with(|images| images.borrow_mut().remove(image));
             }
             FONTS.with(|fonts| fonts.borrow_mut().truncate(self.fonts_len));
-            FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut().truncate(self.atlas_images_len));
         }
     }
 
@@ -1629,7 +1522,7 @@ mod font_census_tests {
             "DroidSans",
         )
         .expect("the oracle bake matches the installer");
-        bake.atlas_width as u64 * bake.atlas_height as u64
+        bake.layout.width as u64 * bake.layout.height as u64
     }
 
     /// Coverage atlases upload R8, so the live-image census counts each alias
@@ -1850,474 +1743,6 @@ mod atlas_retention_tests {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn stone_get_font_slot_count(font_id: c_uint) -> c_int {
-    with_font_entry(font_id, 0, |entry| entry.charset.slot_count() as c_int)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_font_slot_codepoint(font_id: c_uint, slot: c_int) -> c_int {
-    if slot < 0 {
-        return -1;
-    }
-    with_font_entry(font_id, -1, |entry| {
-        entry
-            .charset
-            .char_at(slot as usize)
-            .map_or(-1, |ch| ch as c_int)
-    })
-}
-
-/// Writes 9 floats: u0, v0, u1, v1, width, height, bearing_x, bearing_y, advance.
-/// `face` indexes Face::ALL.
-#[no_mangle]
-pub extern "C" fn stone_get_glyph_info(
-    font_id: c_uint,
-    face: c_int,
-    char_code: c_int,
-    out: *mut c_float,
-) -> bool {
-    if out.is_null() || char_code < 0 {
-        return false;
-    }
-    let face = match usize::try_from(face).ok().and_then(Face::from_index) {
-        Some(f) => f,
-        None => return false,
-    };
-
-    with_font_entry(font_id, false, |entry| {
-        let Some(gi) = entry.glyphs[face.index()].get(char_code as usize) else {
-            return false;
-        };
-        if !gi.valid {
-            return false;
-        }
-
-        unsafe { gi.write_to(out) };
-        true
-    })
-}
-
-fn atlas_instance_id(font_id: u32, index: usize) -> u64 {
-    ((font_id as u64) << 32) | (index as u64 + 1)
-}
-
-fn decode_atlas_instance_id(instance_id: u64) -> Option<(u32, usize)> {
-    let font_id = (instance_id >> 32) as u32;
-    let slot = (instance_id & 0xffff_ffff) as usize;
-    if font_id == 0 || slot == 0 {
-        return None;
-    }
-    Some((font_id, slot - 1))
-}
-
-fn instance_matches(instance: &AtlasInstance, pixel_size: i32, face_revision: u64) -> bool {
-    instance.pixel_size == pixel_size && instance.face_revision == face_revision
-}
-
-#[no_mangle]
-pub extern "C" fn stone_ensure_font_atlas_instance(font_id: c_uint, pixel_size: c_int) -> u64 {
-    if pixel_size < 1 {
-        return 0;
-    }
-    let idx = match font_index(font_id) {
-        Some(idx) => idx,
-        None => return 0,
-    };
-    let existing = font_slot(idx, |entry| {
-        entry.and_then(|entry| {
-            let revision = entry.face_revision;
-            entry
-                .instances
-                .iter()
-                .position(|instance| instance_matches(instance, pixel_size, revision))
-        })
-    });
-    if let Some(instance) = existing {
-        return atlas_instance_id(font_id, instance);
-    }
-
-    let source = font_slot(idx, |entry| {
-        entry.map(|entry| {
-            (
-                entry.font_data.clone(),
-                entry.faces,
-                entry.charset.clone(),
-                entry.source_path.clone(),
-                entry.face_revision,
-            )
-        })
-    });
-    let Some((font_data, faces, charset, source_path, face_revision)) = source else {
-        return 0;
-    };
-
-    let raster = match rasterize_glyphs(&font_data, pixel_size, faces, &charset, &source_path) {
-        Some(raster) => raster,
-        None => return 0,
-    };
-    let glyphs = raster.glyphs;
-    let width = raster.atlas_width;
-    let height = raster.atlas_height;
-    let texture = match upload_atlas_texture(&raster.atlas_data, width, height) {
-        Some(texture) => texture,
-        None => return 0,
-    };
-    let instance = AtlasInstance {
-        texture,
-        glyphs,
-        width: width as i32,
-        height: height as i32,
-        pixel_size,
-        image: None,
-        face_revision,
-    };
-    font_slot_mut(idx, |entry| {
-        let Some(entry) = entry else {
-            return 0;
-        };
-        entry.instances.push(instance);
-        atlas_instance_id(font_id, entry.instances.len() - 1)
-    })
-}
-
-fn with_atlas_instance<R>(instance_id: u64, default: R, f: impl FnOnce(&AtlasInstance) -> R) -> R {
-    let Some((font_id, index)) = decode_atlas_instance_id(instance_id) else {
-        return default;
-    };
-    let Some(font_idx) = font_index(font_id) else {
-        return default;
-    };
-    font_slot(font_idx, |entry| {
-        entry
-            .and_then(|entry| entry.instances.get(index))
-            .map_or(default, f)
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn stone_font_atlas_instance_count(font_id: c_uint) -> c_int {
-    let Some(idx) = font_index(font_id) else {
-        return 0;
-    };
-    font_slot(idx, |entry| {
-        entry
-            .map(|entry| entry.instances.len() as c_int)
-            .unwrap_or(0)
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_font_atlas_instance_pixel_size(
-    font_id: c_uint,
-    index: c_uint,
-) -> c_int {
-    let Some(idx) = font_index(font_id) else {
-        return 0;
-    };
-    font_slot(idx, |entry| {
-        entry
-            .and_then(|entry| entry.instances.get(index as usize))
-            .map(|instance| instance.pixel_size)
-            .unwrap_or(0)
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_font_atlas_image_cached(font_id: c_uint) -> u64 {
-    let Some(idx) = font_index(font_id) else {
-        return 0;
-    };
-    FONT_ATLAS_IMAGES.with(|images| images.borrow().get(idx).copied().flatten().unwrap_or(0))
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_font_atlas_instance_image_at(font_id: c_uint, index: c_int) -> u64 {
-    if index < 0 {
-        return 0;
-    }
-    stone_get_font_instance_image(atlas_instance_id(font_id, index as usize))
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_font_instance_size(
-    instance_id: u64,
-    width: *mut c_int,
-    height: *mut c_int,
-) -> bool {
-    if width.is_null() || height.is_null() {
-        return false;
-    }
-    with_atlas_instance(instance_id, false, |instance| unsafe {
-        *width = instance.width;
-        *height = instance.height;
-        instance.width > 0 && instance.height > 0
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_font_instance_pixel_size(instance_id: u64) -> c_int {
-    with_atlas_instance(instance_id, 0, |instance| instance.pixel_size)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_font_instance_byte_len(instance_id: u64) -> c_int {
-    with_atlas_instance(instance_id, 0, AtlasInstance::byte_len)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_font_instance_glyph_info(
-    instance_id: u64,
-    face: c_int,
-    char_code: c_int,
-    out: *mut c_float,
-) -> bool {
-    if out.is_null() || char_code < 0 {
-        return false;
-    }
-    let Some(face) = usize::try_from(face).ok().and_then(Face::from_index) else {
-        return false;
-    };
-    with_atlas_instance(instance_id, false, |instance| {
-        let Some(glyph) = instance.glyphs[face.index()].get(char_code as usize) else {
-            return false;
-        };
-        if !glyph.valid {
-            return false;
-        }
-        unsafe { glyph.write_to(out) };
-        true
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_font_instance_image(instance_id: u64) -> u64 {
-    let Some((font_id, index)) = decode_atlas_instance_id(instance_id) else {
-        return 0;
-    };
-    let Some(font_idx) = font_index(font_id) else {
-        return 0;
-    };
-    let details = font_slot(font_idx, |entry| {
-        let instance = entry?.instances.get(index)?;
-        Some((
-            instance.image,
-            instance.texture,
-            instance.width,
-            instance.height,
-        ))
-    });
-    let Some((cached, texture, width, height)) = details else {
-        return 0;
-    };
-    if let Some(image) = cached {
-        return image;
-    }
-    let image = register_r8_alias(texture, width, height);
-    font_slot_mut(font_idx, |entry| {
-        if let Some(instance) = entry.and_then(|entry| entry.instances.get_mut(index)) {
-            instance.image = Some(image);
-        }
-    });
-    image
-}
-
-/// Return the font's pixel size (set during stone_load_font).
-#[no_mangle]
-pub extern "C" fn stone_get_font_pixel_size(font_id: c_uint) -> c_int {
-    with_font_entry(font_id, 0, |entry| entry.font_pixel_size)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_font_unit_metrics(font_id: c_uint, out: *mut c_float) -> bool {
-    if out.is_null() {
-        return false;
-    }
-    let Some(idx) = font_index(font_id) else {
-        return false;
-    };
-    let metrics = font_slot(idx, |entry| entry.map(|entry| entry.unit_metrics));
-    let Some(metrics) = metrics else { return false };
-    unsafe {
-        *out.add(0) = metrics.units_per_em;
-        *out.add(1) = metrics.ascender;
-        *out.add(2) = metrics.descender;
-        *out.add(3) = metrics.line_gap;
-        *out.add(4) = metrics.cap_height;
-    }
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_glyph_unit_metrics(
-    font_id: c_uint,
-    face: c_int,
-    char_code: c_int,
-    out: *mut c_float,
-) -> bool {
-    if out.is_null() || char_code < 0 {
-        return false;
-    }
-    let Some(face) = usize::try_from(face).ok().and_then(Face::from_index) else {
-        return false;
-    };
-    let Some(idx) = font_index(font_id) else {
-        return false;
-    };
-    let metrics = font_slot(idx, |entry| {
-        entry.and_then(|entry| {
-            entry
-                .glyph_unit
-                .get(face.index())?
-                .get(char_code as usize)?
-                .as_ref()
-                .copied()
-        })
-    });
-    let Some(metrics) = metrics else {
-        return false;
-    };
-    unsafe {
-        *out.add(0) = metrics.left;
-        *out.add(1) = metrics.top;
-        *out.add(2) = metrics.width;
-        *out.add(3) = metrics.height;
-        *out.add(4) = metrics.advance;
-    }
-    true
-}
-
-pub(crate) fn live_font_ids() -> Vec<u64> {
-    FONTS.with(|fonts| {
-        fonts
-            .borrow()
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| slot.is_some())
-            .map(|(idx, _)| idx as u64 + 1)
-            .collect()
-    })
-}
-
-/// Bytes of TTF/OTF the font retains (`FontEntry::font_data`), for the asset
-/// report's CPU column. -1 for an id that names no live font.
-#[no_mangle]
-pub extern "C" fn stone_font_data_len(font_id: c_uint) -> i64 {
-    let Some(idx) = font_index(font_id) else {
-        return -1;
-    };
-    font_slot(idx, |entry| {
-        entry.map_or(-1, |entry| entry.font_data.len() as i64)
-    })
-}
-
-/// Drop an `IMAGES` entry that is a font atlas CACHE rather than an owned
-/// texture, clearing the font's cache slot with it. The GL texture belongs to
-/// the font and survives; the next `stone_get_font_atlas_image` mints the entry
-/// again. Returns false when `image_id` is not an atlas cache, which is how the
-/// ledger's image teardown tells an alias from an image it may delete.
-pub(crate) fn forget_atlas_image(image_id: u64) -> bool {
-    let idx = FONT_ATLAS_IMAGES.with(|imgs| {
-        imgs.borrow()
-            .iter()
-            .position(|slot| *slot == Some(image_id))
-    });
-    let found = if let Some(idx) = idx {
-        FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut()[idx] = None);
-        true
-    } else {
-        FONTS.with(|fonts| {
-            for entry in fonts
-                .borrow_mut()
-                .iter_mut()
-                .filter_map(|entry| entry.as_mut())
-            {
-                for instance in &mut entry.instances {
-                    if instance.image == Some(image_id) {
-                        instance.image = None;
-                        return true;
-                    }
-                }
-            }
-            false
-        })
-    };
-    if !found {
-        return false;
-    }
-    forget_image(image_id);
-    true
-}
-
-fn forget_all_atlas_images() {
-    let cached: Vec<u64> =
-        FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow().iter().filter_map(|slot| *slot).collect());
-    for image_id in cached {
-        forget_atlas_image(image_id);
-    }
-}
-
-fn forget_instance_images(entries: &[FontEntry]) {
-    for entry in entries {
-        forget_coverage_images(&entry.instances);
-    }
-}
-
-fn forget_coverage_images(instances: &[AtlasInstance]) {
-    for id in instances.iter().filter_map(|instance| instance.image) {
-        forget_image(id);
-    }
-}
-
-fn forget_cached_atlas_image(idx: usize) {
-    if let Some(id) = FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut()[idx].take()) {
-        forget_image(id);
-    }
-}
-
-/// Unload a previously-loaded font. Frees the GL atlas texture and
-/// clears the slot. Subsequent ops against this font_id silently
-/// no-op. Returns false if the font_id was already unloaded or out
-/// of range — caller can ignore unless it wants to assert.
-#[no_mangle]
-pub extern "C" fn stone_unload_font(font_id: c_uint) -> bool {
-    let idx = match font_index(font_id) {
-        Some(i) => i,
-        None => return false,
-    };
-    let entry = FONTS.with(|fonts| fonts.borrow_mut()[idx].take());
-    let entry = match entry {
-        Some(e) => e,
-        None => return false,
-    };
-    forget_cached_atlas_image(idx);
-    forget_coverage_images(&entry.instances);
-    delete_font_textures(std::slice::from_ref(&entry));
-    true
-}
-
-#[no_mangle]
-pub extern "C" fn stone_font_release_coverage(font_id: c_uint) -> bool {
-    let idx = match font_index(font_id) {
-        Some(i) => i,
-        None => return false,
-    };
-    let (atlas, instances) = font_slot_mut(idx, |entry| {
-        let entry = entry.expect("font_index returned a None slot");
-        if entry.atlas_texture.is_some() || !entry.instances.is_empty() {
-            entry.coverage_released = true;
-        }
-        (
-            entry.atlas_texture.take(),
-            std::mem::take(&mut entry.instances),
-        )
-    });
-    delete_coverage_textures(atlas, &instances);
-    forget_cached_atlas_image(idx);
-    forget_coverage_images(&instances);
-    true
-}
-
 #[cfg(test)]
 mod atlas_face_tests {
     use super::*;
@@ -2331,9 +1756,9 @@ mod atlas_face_tests {
     }
 
     fn rows(a: &RasterizedAtlas) -> u32 {
-        let h = a.atlas_height as f32;
-        let r0 = a.glyphs[Face::Regular.index()][GLYPH_FIRST].v0 * h;
-        let r1 = a.glyphs[Face::Regular.index()][GLYPH_FIRST + 16].v0 * h;
+        let h = a.layout.height as f32;
+        let r0 = a.layout.glyphs[Face::Regular.index()][GLYPH_FIRST].v0 * h;
+        let r1 = a.layout.glyphs[Face::Regular.index()][GLYPH_FIRST + 16].v0 * h;
         let pitch = r1 - r0;
         assert!(pitch > 0.0, "row pitch must be positive");
         (h / pitch).round() as u32
@@ -2360,7 +1785,7 @@ mod atlas_face_tests {
             );
             for face in Face::ALL {
                 let any_valid =
-                    (GLYPH_FIRST..=GLYPH_LAST).any(|c| atlas.glyphs[face.index()][c].valid);
+                    (GLYPH_FIRST..=GLYPH_LAST).any(|c| atlas.layout.glyphs[face.index()][c].valid);
                 assert_eq!(
                     any_valid,
                     baked.contains(&face),
@@ -2370,7 +1795,7 @@ mod atlas_face_tests {
             }
         }
 
-        let accent = bake(false, false).glyphs[Regular.index()][GLYPH_ACCENT_A_ACUTE_SLOT];
+        let accent = bake(false, false).layout.glyphs[Regular.index()][GLYPH_ACCENT_A_ACUTE_SLOT];
         assert!(
             accent.valid && accent.advance > 0.0,
             "DroidSans bakes the Á extension slot with an advance"
@@ -2382,24 +1807,24 @@ mod atlas_face_tests {
         let four = bake(true, true);
         let plain = bake(false, false);
         assert!(
-            four.atlas_width > plain.atlas_width,
+            four.layout.width > plain.layout.width,
             "bold-italic must be wider than regular ({}px vs {}px cells); if it is not, \
              the containment check below proves nothing",
-            four.atlas_width / 16,
-            plain.atlas_width / 16
+            four.layout.width / 16,
+            plain.layout.width / 16
         );
 
-        let cell_w = four.atlas_width as f32 / 16.0;
+        let cell_w = four.layout.width as f32 / 16.0;
         for face in Face::ALL {
             for c in GLYPH_FIRST..=GLYPH_LAST {
-                let gi = &four.glyphs[face.index()][c];
+                let gi = &four.layout.glyphs[face.index()][c];
                 if !gi.valid || gi.width == 0.0 {
                     continue;
                 }
                 let col = ((c - GLYPH_FIRST) % 16) as f32;
                 let (left, right) = (
-                    gi.u0 * four.atlas_width as f32,
-                    gi.u1 * four.atlas_width as f32,
+                    gi.u0 * four.layout.width as f32,
+                    gi.u1 * four.layout.width as f32,
                 );
                 assert!(
                     left >= col * cell_w && right <= (col + 1.0) * cell_w,
@@ -2412,7 +1837,7 @@ mod atlas_face_tests {
             }
         }
 
-        let g = |f: Face| four.glyphs[f.index()][b'n' as usize];
+        let g = |f: Face| four.layout.glyphs[f.index()][b'n' as usize];
         let mut vs: Vec<f32> = Face::ALL.iter().map(|&f| g(f).v0).collect();
         vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         for w in vs.windows(2) {
@@ -2481,22 +1906,8 @@ mod offgrid_tests {
 
 #[cfg(test)]
 mod atlas_image_teardown_tests {
-    use super::test_fixtures::fake_texture;
+    use super::test_fixtures::install_fake_gpu_font;
     use super::*;
-
-    /// Register an atlas image the way `stone_get_font_atlas_image` does; headless,
-    /// the GL work is skipped, so the teardown below has a real registry entry.
-    fn cache_atlas_image(slot: usize, texture: u32) -> u64 {
-        FONT_ATLAS_IMAGES.with(|imgs| {
-            let mut imgs = imgs.borrow_mut();
-            while imgs.len() <= slot {
-                imgs.push(None);
-            }
-        });
-        let id = register_r8_alias(fake_texture(texture), 8, 8);
-        FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut()[slot] = Some(id));
-        id
-    }
 
     fn live_count(ids: &[u64]) -> usize {
         IMAGES.with(|images| {
@@ -2507,26 +1918,40 @@ mod atlas_image_teardown_tests {
 
     #[test]
     fn tearing_down_the_atlas_cache_retires_its_image_handles() {
-        let first = cache_atlas_image(0, 4001);
-        let second = cache_atlas_image(1, 4002);
-        assert_ne!(first, second, "two atlas slots mint two image handles");
+        let fonts = [
+            install_fake_gpu_font(4001, false),
+            install_fake_gpu_font(4003, false),
+        ];
+        let images = fonts.map(|font| stone_get_font_atlas_image(font));
+        assert_ne!(images[0], images[1], "two fonts mint two image handles");
         assert_eq!(
-            live_count(&[first, second]),
-            2,
-            "both atlas images are live before the teardown, which is the \
-             population the assertion below is over"
+            stone_get_font_atlas_instance_image_at(fonts[0], 0),
+            images[0],
+            "instance 0 is the compatibility atlas and shares its image"
+        );
+        assert_eq!(live_count(&images), 2, "both atlas images are live");
+
+        assert!(
+            forget_atlas_image(images[0]),
+            "the ledger recognizes an atlas alias"
+        );
+        assert_eq!(
+            stone_get_font_atlas_image_cached(fonts[0]),
+            0,
+            "the cache slot is empty, so the next draw mints it again"
+        );
+        let reminted = stone_get_font_atlas_image(fonts[0]);
+        assert_ne!(reminted, 0);
+        assert!(
+            !forget_atlas_image(u64::MAX),
+            "an unknown image is not an alias"
         );
 
-        forget_all_atlas_images();
-
+        shutdown();
         assert_eq!(
-            live_count(&[first, second]),
+            live_count(&[reminted, images[1]]),
             0,
             "no atlas image may outlive the texture its font owned"
-        );
-        assert!(
-            FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow().iter().take(2).all(|s| s.is_none())),
-            "and the cache slots are empty, so the next draw mints them again"
         );
     }
 }
@@ -2549,7 +1974,7 @@ mod charset_tests {
             "symbol",
         )
         .expect("the symbol font bakes");
-        let regular = &atlas.glyphs[Face::Regular.index()];
+        let regular = &atlas.layout.glyphs[Face::Regular.index()];
 
         let emoji = charset.slot_of('\u{1F600}');
         assert_eq!(
@@ -2594,19 +2019,19 @@ mod charset_tests {
 
         let mut compared = 0;
         for slot in GLYPH_FIRST..=GLYPH_LAST {
-            let a = &plain.glyphs[Face::Regular.index()][slot];
-            let b = &with_extras.glyphs[Face::Regular.index()][slot];
+            let a = &plain.layout.glyphs[Face::Regular.index()][slot];
+            let b = &with_extras.layout.glyphs[Face::Regular.index()][slot];
             assert_eq!(a.valid, b.valid, "slot {slot} validity moved");
             assert_eq!(a.advance, b.advance, "slot {slot} advance moved");
             compared += 1;
         }
         assert_eq!(compared, 95, "the whole printable-ASCII block was compared");
         assert!(
-            plain.glyphs[Face::Regular.index()][b'X' as usize].valid,
+            plain.layout.glyphs[Face::Regular.index()][b'X' as usize].valid,
             "slot 88 is 'X' -- batch.rock reads cap height from it positionally"
         );
         assert!(
-            with_extras.glyphs[Face::Regular.index()][GLYPH_ASCII_SLOTS].valid,
+            with_extras.layout.glyphs[Face::Regular.index()][GLYPH_ASCII_SLOTS].valid,
             "and the declared extra did land, so the comparison was not against a no-op bake"
         );
     }
@@ -2625,7 +2050,7 @@ mod charset_tests {
 
 #[cfg(test)]
 mod metrics_only_font_tests {
-    use super::test_fixtures::load_droid;
+    use super::test_fixtures::{droid_source, load_droid};
     use super::*;
 
     #[test]
@@ -2639,20 +2064,14 @@ mod metrics_only_font_tests {
         ];
         for (name, bytes) in fonts {
             for size in [8, 16, 32, 48] {
-                let entry = rasterize_font(
-                    Rc::new(bytes.to_vec()),
-                    size,
-                    FaceSet::default(),
-                    Charset::default(),
-                    name,
-                    AtlasResidency::Metrics,
-                )
-                .expect("metrics font");
-                let font = FONTS.with(|fonts| {
-                    let mut fonts = fonts.borrow_mut();
-                    fonts.push(Some(entry));
-                    fonts.len() as c_uint
-                });
+                let source = FontSource {
+                    data: Rc::new(bytes.to_vec()),
+                    path: name.to_owned(),
+                    ..droid_source()
+                };
+                let entry =
+                    FontEntry::new(source, size, AtlasResidency::Metrics).expect("metrics font");
+                let font = push_font(entry);
                 let raster = RasterFont::new(bytes, size as f32).unwrap();
                 let (ascent, descent, gap) = raster.vertical_metrics();
                 let line_height = ascent - descent + gap;
@@ -2783,7 +2202,6 @@ mod reload_atomicity_tests {
     /// Preserve the caller's font state and fault settings across assertion failures.
     struct ReloadFaults {
         fonts: Vec<Option<FontEntry>>,
-        atlas_images: Vec<Option<u64>>,
         uploads_ok: bool,
         fail_dependent_raster: bool,
     }
@@ -2791,7 +2209,6 @@ mod reload_atomicity_tests {
         fn set(uploads_ok: bool, fail_dependent_raster: bool) -> Self {
             Self {
                 fonts: FONTS.with(|f| std::mem::take(&mut *f.borrow_mut())),
-                atlas_images: FONT_ATLAS_IMAGES.with(|f| std::mem::take(&mut *f.borrow_mut())),
                 uploads_ok: FORCE_UPLOADS_OK.with(|f| f.replace(uploads_ok)),
                 fail_dependent_raster: FAIL_DEPENDENT_RASTER
                     .with(|f| f.replace(fail_dependent_raster)),
@@ -2801,7 +2218,6 @@ mod reload_atomicity_tests {
     impl Drop for ReloadFaults {
         fn drop(&mut self) {
             FONTS.with(|f| *f.borrow_mut() = std::mem::take(&mut self.fonts));
-            FONT_ATLAS_IMAGES.with(|f| *f.borrow_mut() = std::mem::take(&mut self.atlas_images));
             FORCE_UPLOADS_OK.with(|f| f.set(self.uploads_ok));
             FAIL_DEPENDENT_RASTER.with(|f| f.set(self.fail_dependent_raster));
         }
@@ -2821,52 +2237,25 @@ mod reload_atomicity_tests {
         stone_reload_font(font_id, path.as_ptr(), MAIN_PX)
     }
 
-    struct InstanceSnapshot {
-        pixel_size: i32,
-        width: i32,
-        height: i32,
-        face_revision: u64,
-        glyphs: [Vec<GlyphInfo>; 4],
-    }
-
     struct FontSnapshot {
         font_data: Vec<u8>,
         source_path: String,
-        atlas_width: i32,
-        atlas_height: i32,
-        pixel_size: i32,
+        layout: AtlasLayout,
         face_revision: u64,
-        glyphs: [Vec<GlyphInfo>; 4],
-        instances: Vec<InstanceSnapshot>,
+        instances: Vec<(AtlasLayout, u64)>,
     }
 
     fn snapshot(font_id: c_uint) -> FontSnapshot {
-        FONTS.with(|fonts| {
-            let fonts = fonts.borrow();
-            let entry = fonts[(font_id - 1) as usize]
-                .as_ref()
-                .expect("snapshot reads our own font");
-            FontSnapshot {
-                font_data: entry.font_data.as_slice().to_vec(),
-                source_path: entry.source_path.clone(),
-                atlas_width: entry.atlas_width,
-                atlas_height: entry.atlas_height,
-                pixel_size: entry.font_pixel_size,
-                face_revision: entry.face_revision,
-                glyphs: entry.glyphs.clone(),
-                instances: entry
-                    .instances
-                    .iter()
-                    .map(|i| InstanceSnapshot {
-                        pixel_size: i.pixel_size,
-                        width: i.width,
-                        height: i.height,
-                        face_revision: i.face_revision,
-                        glyphs: i.glyphs.clone(),
-                    })
-                    .collect(),
-            }
+        font(font_id, |entry| FontSnapshot {
+            font_data: entry.source.data.as_slice().to_vec(),
+            source_path: entry.source.path.clone(),
+            layout: entry.layout.clone(),
+            face_revision: entry.face_revision,
+            instances: (entry.instances.iter())
+                .map(|i| (i.layout.clone(), i.face_revision))
+                .collect(),
         })
+        .expect("snapshot reads our own font")
     }
 
     fn assert_snapshot_restored(font_id: c_uint, before: &FontSnapshot) {
@@ -2879,38 +2268,18 @@ mod reload_atomicity_tests {
             after.source_path, before.source_path,
             "a failed reload keeps the old source path"
         );
-        assert_eq!(
-            (after.atlas_width, after.atlas_height),
-            (before.atlas_width, before.atlas_height),
-            "a failed reload keeps the old atlas extent"
+        assert!(
+            after.layout == before.layout,
+            "a failed reload keeps the old atlas extent, raster size and glyph table"
         );
-        assert_eq!(after.pixel_size, before.pixel_size, "raster size untouched");
         assert_eq!(
             after.face_revision, before.face_revision,
             "face revision moves only on a committed reload"
         );
         assert!(
-            after.glyphs == before.glyphs,
-            "a failed reload keeps the old glyph table"
+            after.instances == before.instances,
+            "a failed reload keeps every instance's geometry, glyphs and revision"
         );
-        assert_eq!(
-            after.instances.len(),
-            before.instances.len(),
-            "a failed reload adds no instances"
-        );
-        for (n, (a, b)) in after
-            .instances
-            .iter()
-            .zip(before.instances.iter())
-            .enumerate()
-        {
-            assert!(a.glyphs == b.glyphs, "instance {n} keeps its glyph table");
-            assert_eq!(
-                (a.pixel_size, a.width, a.height, a.face_revision),
-                (b.pixel_size, b.width, b.height, b.face_revision),
-                "instance {n} keeps its geometry and revision"
-            );
-        }
     }
 
     #[test]
@@ -2931,36 +2300,30 @@ mod reload_atomicity_tests {
         let font = install_fake_gpu_font(5101, true);
         assert!(reload(font), "an unforced reload must succeed");
         let new_bytes = std::fs::read(pixel_font_path()).expect("pixel font on disk");
-        FONTS.with(|fonts| {
-            let fonts = fonts.borrow();
-            let entry = fonts[(font - 1) as usize]
-                .as_ref()
-                .expect("control reads our own font");
+        super::font(font, |entry| {
             assert_eq!(
-                entry.font_data.as_slice(),
+                entry.source.data.as_slice(),
                 new_bytes.as_slice(),
                 "the retained bytes are the new file's"
             );
             assert_eq!(
-                entry.source_path,
+                entry.source.path,
                 pixel_font_path(),
                 "the source path follows"
             );
-            let fresh = rasterize_glyphs(&new_bytes, MAIN_PX, entry.faces, &entry.charset, "pixel")
-                .expect("the pixel font bakes");
-            assert_eq!(
-                (entry.atlas_width, entry.atlas_height),
-                (fresh.atlas_width as i32, fresh.atlas_height as i32),
-                "the atlas extent is the new file's bake"
+            let fresh = entry.source.bake(MAIN_PX).expect("the pixel font bakes");
+            assert!(
+                entry.layout == fresh.layout,
+                "the atlas extent and glyph table are the new file's bake"
             );
-            assert!(entry.glyphs == fresh.glyphs, "and so is the glyph table");
             assert_eq!(entry.face_revision, 1, "the reload bumps face_revision");
             assert_eq!(entry.instances.len(), 2, "no instance gained or lost");
             assert!(
                 entry.instances.iter().all(|i| i.face_revision == 1),
                 "every coverage instance commits the new revision"
             );
-        });
+        })
+        .expect("control reads our own font");
     }
 }
 
@@ -2987,12 +2350,12 @@ mod logo_atlas_tests {
         )
         .expect("the display-bake request bakes");
         assert!(
-            bake.atlas_width <= 2048 && bake.atlas_height <= 2048,
+            bake.layout.width <= 2048 && bake.layout.height <= 2048,
             "DroidSans at the Stone display-bake size {}px baked a {}x{} atlas ({} texels); larger text uses demand-sized instances rather than a logo-sized base atlas",
             STONE_DISPLAY_BAKE_PX,
-            bake.atlas_width,
-            bake.atlas_height,
-            bake.atlas_width as u64 * bake.atlas_height as u64,
+            bake.layout.width,
+            bake.layout.height,
+            bake.layout.width as u64 * bake.layout.height as u64,
         );
     }
 }
