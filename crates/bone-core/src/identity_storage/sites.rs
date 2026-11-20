@@ -3,7 +3,7 @@
 //! otherwise enforces the same rules for every package.
 
 use super::{
-    IDENTITY_ERASURE_ANNOTATION, IDENTITY_STORAGE_ANNOTATION, IdentityPosition, IdentityStorageVia,
+    IDENTITY_ERASURE_ANNOTATION, IDENTITY_STORAGE_ANNOTATION, IdentityPosition,
     IdentityStorageViolation, identity_body_violation, identity_root_storage_violation,
     identity_storage_exempt, identity_storage_field_violation, identity_storage_violation,
     is_identity_storage_edge, is_identity_storage_field,
@@ -20,15 +20,6 @@ use crate::workspace::BodyInference;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IdentityStorageKind {
-    /// A struct or value field holding an identity directly or nullable.
-    Field,
-    /// An identity inside a Vec, Map, tuple or stored type argument, in any
-    /// declaration position.
-    Container,
-    /// An enum payload holding an identity directly or nullable.
-    Payload,
-    /// A newtype wrapping an identity directly or nullable.
-    Newtype,
     /// In a body: a local, parameter, Vec literal or constructor whose type
     /// stores an identity (a Vec, Map or stored type argument).
     LocalStorage,
@@ -48,90 +39,6 @@ pub struct IdentityStorageSite {
     pub identity: Ustr,
     pub span: Span,
     pub message: String,
-}
-
-/// Every declaration position in `module` that stores an identity struct.
-pub(crate) fn identity_storage_sites(ws: &Workspace, module: &Module) -> Vec<IdentityStorageSite> {
-    let mut sites = Vec::new();
-    let mut push = |violation: Option<IdentityStorageViolation>,
-                    direct: IdentityStorageKind,
-                    span: Span,
-                    what: String| {
-        let Some(violation) = violation else { return };
-        let kind = match violation.via {
-            IdentityStorageVia::Direct => direct,
-            IdentityStorageVia::Container => IdentityStorageKind::Container,
-        };
-        let identity = violation.identity;
-        sites.push(IdentityStorageSite {
-            kind,
-            identity,
-            span,
-            message: storage_message(&what, identity),
-        });
-    };
-    for (_, def) in module.structs.iter() {
-        for field in &def.fields {
-            let violation = if is_identity_storage_field(field) {
-                identity_storage_field_violation(ws, field.ty)
-            } else {
-                identity_storage_violation(ws, field.ty)
-            };
-            push(
-                violation,
-                IdentityStorageKind::Field,
-                field.span,
-                format!("field `{}`", field.name),
-            );
-        }
-    }
-    for (_, def) in module.enums.iter() {
-        for variant in &def.variants {
-            match &variant.payload {
-                VariantPayload::Unit => {}
-                VariantPayload::Tuple(types) => {
-                    let violation = types
-                        .iter()
-                        .find_map(|ty| identity_storage_violation(ws, *ty));
-                    push(
-                        violation,
-                        IdentityStorageKind::Payload,
-                        variant.name_span,
-                        format!("enum variant `{}`", variant.name),
-                    );
-                }
-                VariantPayload::Record(fields) => {
-                    for field in fields {
-                        push(
-                            identity_storage_violation(ws, field.ty),
-                            IdentityStorageKind::Payload,
-                            field.span,
-                            format!("enum field `{}`", field.name),
-                        );
-                    }
-                }
-            }
-        }
-    }
-    for (_, def) in module.newtypes.iter() {
-        push(
-            identity_storage_violation(ws, def.wrapped),
-            IdentityStorageKind::Newtype,
-            def.span,
-            format!("newtype `{}`", def.name),
-        );
-    }
-    for (_, global) in module.globals.iter() {
-        // A root admits a direct or nullable identity, so what a global
-        // stores is always below a container.
-        push(
-            identity_root_storage_violation(ws, global.ty),
-            IdentityStorageKind::Container,
-            global.span,
-            format!("global `{}`", global.name),
-        );
-    }
-    sites
 }
 
 fn storage_message(what: &str, identity: Ustr) -> String {
@@ -487,23 +394,124 @@ fn capability_errors(module: &Module) -> Vec<CompilerError> {
     errs
 }
 
-pub fn check_identity_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
-    let errs: Vec<Vec<CompilerError>> = fresh
+pub fn check_declaration_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
+    let errors: Vec<_> = fresh
         .par_iter()
-        .map(|&mid| {
-            let module = ws.module(mid);
-            let mut errs: Vec<CompilerError> = capability_errors(module).into_iter().collect();
-            if !identity_storage_exempt(ws, module) {
-                errs.extend(
-                    identity_storage_sites(ws, module)
-                        .into_iter()
-                        .map(|site| CompilerError::new_with_label(site.span, site.message)),
-                );
-            }
-            errs
-        })
+        .map(|&mid| declaration_storage_errors(ws, ws.module(mid)))
         .collect();
-    for (&mid, errs) in fresh.iter().zip(errs) {
-        ws.module_mut(mid).interface_errors.extend(errs);
+    for (&mid, errors) in fresh.iter().zip(errors) {
+        ws.module_mut(mid).interface_errors.extend(errors);
     }
+}
+
+fn declaration_storage_errors(ws: &Workspace, module: &Module) -> Vec<CompilerError> {
+    let mut frame_errors = Vec::new();
+    let mut identity_errors = capability_errors(module);
+    let check_identity = !identity_storage_exempt(ws, module);
+    let mut check =
+        |what: &str,
+         name: Ustr,
+         span: Span,
+         types: &[TyId],
+         identity: fn(&Workspace, TyId) -> Option<IdentityStorageViolation>| {
+            let description = || format!("{what} `{name}`");
+            if types.iter().any(|&ty| ws.type_contains_ref(None, ty)) {
+                let advice = match what {
+                    "newtype" => "",
+                    _ => "; store an `Entity<T>` or a value instead",
+                };
+                frame_errors.push(CompilerError::new_with_label(
+                    span,
+                    format!("{} cannot store a frame reference{advice}", description()),
+                ));
+            }
+            if check_identity && let Some(violation) = types.iter().find_map(|&ty| identity(ws, ty))
+            {
+                identity_errors.push(CompilerError::new_with_label(
+                    span,
+                    storage_message(&description(), violation.identity),
+                ));
+            }
+        };
+    for def in module.structs.values() {
+        for field in &def.fields {
+            let identity = if check_identity && is_identity_storage_field(field) {
+                identity_storage_field_violation
+            } else {
+                identity_storage_violation
+            };
+            check(
+                "field",
+                field.name,
+                field.span,
+                std::slice::from_ref(&field.ty),
+                identity,
+            );
+        }
+    }
+    for def in module.enums.values() {
+        for variant in &def.variants {
+            match &variant.payload {
+                VariantPayload::Unit => {}
+                VariantPayload::Tuple(types) => {
+                    check(
+                        "enum variant",
+                        variant.name,
+                        variant.name_span,
+                        types,
+                        identity_storage_violation,
+                    );
+                }
+                VariantPayload::Record(fields) => {
+                    for field in fields {
+                        check(
+                            "enum field",
+                            field.name,
+                            field.span,
+                            std::slice::from_ref(&field.ty),
+                            identity_storage_violation,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for def in module.newtypes.values() {
+        check(
+            "newtype",
+            def.name,
+            def.span,
+            std::slice::from_ref(&def.wrapped),
+            identity_storage_violation,
+        );
+    }
+    for global in module.globals.values() {
+        check(
+            "global",
+            global.name,
+            global.span,
+            std::slice::from_ref(&global.ty),
+            identity_root_storage_violation,
+        );
+    }
+    for function in module.functions.values() {
+        if (function.is_extern || function.inline_body.is_some())
+            && function
+                .param_decls
+                .iter()
+                .map(|param| param.ty)
+                .chain(function.return_ty)
+                .any(|ty| ws.type_contains_ref(None, ty))
+        {
+            frame_errors.push(CompilerError::new_with_label(
+                function.span,
+                format!(
+                    "foreign or inline function `{}` cannot carry a frame reference across an opaque boundary",
+                    function.name
+                ),
+            ));
+        }
+    }
+    frame_errors.extend(identity_errors);
+    frame_errors
 }

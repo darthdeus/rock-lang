@@ -391,8 +391,7 @@ pub fn lower_modules_seeded(
     check_embed_site_legality(ws, &ids);
     crate::value_recursion::check_value_recursion(ws, &ids);
     ws.log_time("embed+value recursion", gap_timer);
-    check_frame_ref_storage(ws, &ids);
-    crate::identity_storage::check_identity_storage(ws, &ids);
+    crate::identity_storage::check_declaration_storage(ws, &ids);
 
     Ok(ids)
 }
@@ -476,88 +475,6 @@ fn check_duplicate_definitions(ws: &mut Workspace, fresh: &[ModuleId]) {
     }
     for (mid, e) in errs {
         ws.module_mut(mid).interface_errors.push(e);
-    }
-}
-
-fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
-    let per_module: Vec<Vec<(ModuleId, CompilerError)>> = fresh
-        .par_iter()
-        .map(|&mid| {
-            let module = ws.module(mid);
-            let mut errs = Vec::new();
-            let mut report = |span: Span, message: String| {
-                errs.push((module.id, CompilerError::new_with_label(span, message)));
-            };
-            let stored = |what: &str, name: Ustr| {
-                format!(
-                    "{what} `{name}` cannot store a frame reference; store an `Entity<T>` or a value instead"
-                )
-            };
-            for (_, def) in module.structs.iter() {
-                for field in &def.fields {
-                    if ws.type_contains_ref(None, field.ty) {
-                        report(field.span, stored("field", field.name));
-                    }
-                }
-            }
-            for (_, def) in module.enums.iter() {
-                for variant in &def.variants {
-                    match &variant.payload {
-                        VariantPayload::Unit => {}
-                        VariantPayload::Tuple(types) => {
-                            if types.iter().any(|ty| ws.type_contains_ref(None, *ty)) {
-                                report(variant.name_span, stored("enum variant", variant.name));
-                            }
-                        }
-                        VariantPayload::Record(fields) => {
-                            for field in fields {
-                                if ws.type_contains_ref(None, field.ty) {
-                                    report(field.span, stored("enum field", field.name));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            for (_, def) in module.newtypes.iter() {
-                if ws.type_contains_ref(None, def.wrapped) {
-                    report(
-                        def.span,
-                        format!("newtype `{}` cannot store a frame reference", def.name),
-                    );
-                }
-            }
-            for (_, global) in module.globals.iter() {
-                if ws.type_contains_ref(None, global.ty) {
-                    report(global.span, stored("global", global.name));
-                }
-            }
-            for (_, function) in module.functions.iter() {
-                if !function.is_extern && function.inline_body.is_none() {
-                    continue;
-                }
-                let carries_ref = function
-                    .param_decls
-                    .iter()
-                    .any(|param| ws.type_contains_ref(None, param.ty))
-                    || function
-                        .return_ty
-                        .is_some_and(|ty| ws.type_contains_ref(None, ty));
-                if carries_ref {
-                    report(
-                        function.span,
-                        format!(
-                            "foreign or inline function `{}` cannot carry a frame reference across an opaque boundary",
-                            function.name
-                        ),
-                    );
-                }
-            }
-            errs
-        })
-        .collect();
-    for (mid, err) in per_module.into_iter().flatten() {
-        ws.module_mut(mid).interface_errors.push(err);
     }
 }
 
