@@ -708,6 +708,8 @@ impl SkullEmitCache {
             cache.roots.emission_roots = current_roots;
         }
         cache.roots.shader_roots = current_shader_roots;
+        // The view's update rows must describe the graph before this update.
+        cache.lua_view.prepare_update(&cache.graph);
         let update = cache.graph.update_bodies_with_root_delta(
             ws,
             &root_added,
@@ -733,7 +735,7 @@ impl SkullEmitCache {
         }
 
         let t_artifact = Instant::now();
-        cache.lua_view = crate::artifact::realize(
+        cache.lua_view.update_local_with_root_delta(
             ws,
             &cache.graph,
             &crate::artifact::ArtifactRequest::new(
@@ -741,8 +743,14 @@ impl SkullEmitCache {
                 cache.roots.emission_roots.as_slice(),
             )
             .with_scalar_context(&cache.scx),
+            &update.revisited,
+            &update.added,
+            &update.removed,
+            &root_added,
+            &root_removed,
         );
         cache.edit.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
+
         let t_affected = Instant::now();
         let mut changed: FxHashSet<FuncRef> = reinferred
             .iter()
