@@ -187,15 +187,19 @@ pub fn check_ranked(cases: &[(&str, &str, &str)]) {
     }
 }
 
+#[track_caller]
+pub fn assert_head(case: &str, labels: &[String], head: &[&str]) {
+    assert_eq!(
+        &labels[..head.len().min(labels.len())],
+        head,
+        "{case}: {labels:?}"
+    );
+}
+
 /// Rows of (case, fixture, the labels that open the response, in order).
 pub fn check_head(cases: &[(&str, &str, &[&str])]) {
     for (case, src, head) in cases {
-        let labels = labels(src);
-        assert_eq!(
-            &labels[..head.len().min(labels.len())],
-            *head,
-            "{case}: {labels:?}"
-        );
+        assert_head(case, &labels(src), head);
     }
 }
 

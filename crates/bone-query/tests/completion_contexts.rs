@@ -673,12 +673,6 @@ fn field_refs_offer_exactly_the_fields_of_their_value_type() {
             &[".co: int?", "!.hp*"],
         ),
         (
-            "empty arg slot",
-            "struct Mob { hp: int, co: int? }\nfn poll_slot(f: FieldRef<Mob, int?>) {}\n\
-             fn r() {\n  poll_slot(<|>)\n}\n",
-            &["!.hp*", "!poll_slot"],
-        ),
-        (
             "T bound by a UFCS receiver",
             "struct Player { hp: int, cast_co: int? }\nfn stop<T>(o: T, f: FieldRef<T, int?>) {}\n\
              fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.<|>)\n}\n",
@@ -721,6 +715,21 @@ fn field_refs_offer_exactly_the_fields_of_their_value_type() {
             &[".co: int?", "!.hp*"],
         ),
     ]);
+
+    let items = complete(
+        "struct Mob { hp: int, co: int? }\nfn poll_slot(f: FieldRef<Mob, int?>) {}\n\
+             fn r() {\n  poll_slot(<|>)\n}\n",
+    );
+    assert_labels(
+        "empty FieldRef slot",
+        &labels_of(&items),
+        &["!.hp*", "!poll_slot"],
+    );
+    assert_insert(
+        "empty FieldRef slot",
+        find(&items, ".co: int?"),
+        Text(".co"),
+    );
 }
 
 #[test]
@@ -1127,11 +1136,6 @@ fn coroutine_contexts_offer() {
             &["Coroutine<>", "!Coroutine<Wait>", "!Coroutine"],
         ),
         (
-            "Coroutine snippets replace the bare name",
-            "struct Wait { wait_frame: bool }\nco fn f() -> Cor<|> {\n  yield 0\n}\n",
-            &["!Coroutine"],
-        ),
-        (
             "no return type snippet on a plain fn",
             "struct Wait { wait_frame: bool }\nfn spawn() <|>{\n}\n",
             &["!-> Coroutine*"],
@@ -1144,11 +1148,6 @@ fn entity_param_hints_offer() {
     // A param named `e` suggests `Entity`; a `_`-segment of the fn name that
     // names a struct picks the payload, leading segment first.
     check_labels(&[
-        (
-            "no payload struct",
-            "co fn render_thing(e: <|>) -> Coroutine<int> {\n  yield 1\n}\n",
-            &["!Entity<Mob>"],
-        ),
         (
             "not an entity param name",
             "struct Mob { health: int }\n\
@@ -1280,13 +1279,6 @@ fn accepting_a_member_inserts() {
              fn r(e: Entity<Mob>) {\n  e.run<|>\n}\n",
             "run_into",
             Snippet("run_into(${1|.attack_co,.cast_co|}, ${2:co})"),
-        ),
-        (
-            "FieldRef arg in an empty slot adds the dot",
-            "struct Mob { hp: int, co: int? }\nfn poll_slot(f: FieldRef<Mob, int?>) {}\n\
-             fn r() {\n  poll_slot(<|>)\n}\n",
-            ".co: int?",
-            Text(".co"),
         ),
         (
             "decorator inserts only its name",
@@ -1454,18 +1446,6 @@ fn enum_variants_template_their_payload_only_in_value_position() {
             Snippet("SpellState::Loaded($0)"),
         ),
         (
-            "tuple variant",
-            "fn r() {\n  let s = SpellState::<|>\n}\n",
-            "Loaded",
-            Snippet("Loaded($0)"),
-        ),
-        (
-            "unit variant",
-            "fn r() {\n  let s = SpellState::<|>\n}\n",
-            "Idle",
-            Label,
-        ),
-        (
             "arm pattern",
             "fn r(s: SpellState) {\n  match s {\n    SpellState::<|> => {}\n  }\n}\n",
             "Loaded",
@@ -1500,6 +1480,15 @@ fn enum_variants_template_their_payload_only_in_value_position() {
     for (case, body, label, want) in cases {
         assert_insert(case, &item(&format!("{STATE}{body}"), label), *want);
     }
+    let items = complete(&format!(
+        "{STATE}fn r() {{\n  let s = SpellState::<|>\n}}\n"
+    ));
+    assert_insert(
+        "tuple variant",
+        find(&items, "Loaded"),
+        Snippet("Loaded($0)"),
+    );
+    assert_insert("unit variant", find(&items, "Idle"), Label);
     check_inserts(&[
         (
             "record variant",
@@ -1517,39 +1506,42 @@ fn enum_variants_template_their_payload_only_in_value_position() {
 }
 
 #[test]
-fn accepting_a_type_inserts() {
-    check_inserts(&[
-        (
-            "Coroutine<Wait>",
-            "struct Wait { wait_frame: bool }\nco fn f() -> Cor<|> {\n  yield 0\n}\n",
-            "Coroutine<Wait>",
-            Text("Coroutine<Wait>"),
-        ),
-        (
-            "Coroutine<$0>",
-            "struct Wait { wait_frame: bool }\nco fn f() -> Cor<|> {\n  yield 0\n}\n",
-            "Coroutine<>",
-            Snippet("Coroutine<$0>"),
-        ),
-        (
-            "co fn return type",
-            "struct Wait { wait_frame: bool }\nco fn spawn() <|>{\n  yield 0\n}\n",
-            "-> Coroutine<Wait>",
-            Text("-> Coroutine<Wait>"),
-        ),
-        (
-            "Entity of the fn-prefix struct",
-            "struct Mob { health: int }\nco fn mob_attack_co(e: <|>) -> Coroutine<int> {\n  yield 1\n}\n",
-            "Entity<Mob>",
-            Text("Entity<Mob>"),
-        ),
-        (
-            "Entity snippet without a payload struct",
-            "co fn render_thing(e: <|>) -> Coroutine<int> {\n  yield 1\n}\n",
-            "Entity<>",
-            Snippet("Entity<$0>"),
-        ),
-    ]);
+fn contextual_type_snippets() {
+    let items = complete("struct Wait { wait_frame: bool }\nco fn f() -> Cor<|> {\n  yield 0\n}\n");
+    let labels = labels_of(&items);
+    assert_labels("Coroutine type name", &labels, &["!Coroutine"]);
+    assert_head(
+        "Coroutine type name",
+        &labels,
+        &["Coroutine<Wait>", "Coroutine<>"],
+    );
+    for (label, expected) in [
+        ("Coroutine<Wait>", Text("Coroutine<Wait>")),
+        ("Coroutine<>", Snippet("Coroutine<$0>")),
+    ] {
+        assert_insert("Coroutine type name", find(&items, label), expected);
+    }
+
+    let items = complete("struct Wait { wait_frame: bool }\nco fn spawn() <|>{\n  yield 0\n}\n");
+    let label = "-> Coroutine<Wait>";
+    assert_head("coroutine return", &labels_of(&items), &[label]);
+    assert_insert("coroutine return", find(&items, label), Text(label));
+
+    let items = complete(
+        "struct Mob { health: int }\nco fn mob_attack_co(e: <|>) -> Coroutine<int> {\n  yield 1\n}\n",
+    );
+    let label = "Entity<Mob>";
+    assert_head("named Entity payload", &labels_of(&items), &[label]);
+    assert_ranked("named Entity payload", &items, "Entity<Mob> < Entity");
+    assert_insert("named Entity payload", find(&items, label), Text(label));
+
+    let items = complete("co fn render_thing(e: <|>) -> Coroutine<int> {\n  yield 1\n}\n");
+    assert_labels("no Entity payload", &labels_of(&items), &["!Entity<Mob>"]);
+    assert_insert(
+        "no Entity payload",
+        find(&items, "Entity<>"),
+        Snippet("Entity<$0>"),
+    );
 }
 
 #[test]
@@ -1703,11 +1695,6 @@ fn contexts_order_candidates() {
             "E::NotGround < event_log",
         ),
         (
-            "concrete Entity payload above the bare Entity",
-            "struct Mob { health: int }\nco fn mob_attack_co(e: <|>) -> Coroutine<int> {\n  yield 1\n}\n",
-            "Entity<Mob> < Entity",
-        ),
-        (
             "shorter of two prefix matches first",
             "struct Mob { attack_timer: float, attacking: bool }\n\
              fn f(mob: Mob) {\n  if mob.attack<|>\n}\n",
@@ -1814,26 +1801,11 @@ fn contexts_lead_with() {
             "struct Wait { wait_frame: bool }\nco fn f() -> Coroutine<<|>> {\n  yield 0\n}\n",
             &["Wait"],
         ),
-        (
-            "Coroutine snippets for the type name",
-            "struct Wait { wait_frame: bool }\nco fn f() -> Cor<|> {\n  yield 0\n}\n",
-            &["Coroutine<Wait>", "Coroutine<>"],
-        ),
         // Hosts ship `Wait` as an enum.
         (
             "Coroutine<Wait> for an enum Wait",
             "enum Wait { Frame, Secs(float) }\nco fn f() -> Cor<|> {\n  yield 0\n}\n",
             &["Coroutine<Wait>"],
-        ),
-        (
-            "co fn return type",
-            "struct Wait { wait_frame: bool }\nco fn spawn() <|>{\n  yield 0\n}\n",
-            &["-> Coroutine<Wait>"],
-        ),
-        (
-            "Entity of the leading fn-name struct",
-            "struct Mob { health: int }\nco fn mob_attack_co(e: <|>) -> Coroutine<int> {\n  yield 1\n}\n",
-            &["Entity<Mob>"],
         ),
         (
             "Entity of a trailing fn-name struct",
