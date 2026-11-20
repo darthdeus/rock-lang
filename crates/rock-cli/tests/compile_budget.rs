@@ -7,38 +7,14 @@ fn project() -> tempfile::TempDir {
     crate::support::two_module_package("budget")
 }
 
-/// `rock compile . --output <output>` with one of the two report variables set.
-fn compile_reporting(root: &Path, variable: &str, report: &Path, output: &Path) {
-    let other = if variable == "ROCK_COMPILE_STATS" {
-        "ROCK_BODY_COSTS"
-    } else {
-        "ROCK_COMPILE_STATS"
+fn compile(root: &Path, stats: Option<&Path>, output: &Path) {
+    let mut command = rock(root);
+    command.args(["compile", ".", "--output"]).arg(output);
+    match stats {
+        Some(stats) => command.env("ROCK_COMPILE_STATS", stats),
+        None => command.env_remove("ROCK_COMPILE_STATS"),
     };
-    success(
-        rock(root)
-            .args(["compile", ".", "--output"])
-            .arg(output)
-            .env(variable, report)
-            .env_remove(other)
-            .output()
-            .expect("start rock"),
-    );
-}
-
-fn compile(root: &Path, stats: &Path, output: &Path) {
-    compile_reporting(root, "ROCK_COMPILE_STATS", stats, output);
-}
-
-fn body_costs(root: &Path, costs: &Path, output: &Path) -> Vec<serde_json::Value> {
-    compile_reporting(root, "ROCK_BODY_COSTS", costs, output);
-    read_jsonl(costs)
-}
-
-fn record_ending<'a>(records: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
-    records
-        .iter()
-        .find(|r| r["name"].as_str().unwrap_or("").ends_with(name))
-        .unwrap_or_else(|| panic!("no record for {name}: {records:?}"))
+    success(command.output().expect("start rock"));
 }
 
 fn ms(node: &serde_json::Value) -> f64 {
@@ -82,7 +58,9 @@ fn a_compile_appends_a_budget_whose_levels_sum_to_the_wall() {
     let root = project();
     let stats = root.path().join("stats.jsonl");
     let output = root.path().join("out.lua");
-    compile(root.path(), &stats, &output);
+    compile(root.path(), None, &output);
+    assert!(!stats.exists(), "no budget without ROCK_COMPILE_STATS");
+    compile(root.path(), Some(&stats), &output);
     let records = read_jsonl(&stats);
     assert_eq!(records.len(), 1, "one record per compile: {records:?}");
     let record = &records[0];
@@ -156,100 +134,6 @@ fn a_compile_appends_a_budget_whose_levels_sum_to_the_wall() {
     );
 }
 
-/// Body costs leave the output unchanged, and a compile without
-/// `ROCK_COMPILE_STATS` writes no budget.
-#[test]
-fn body_costs_name_each_body_by_its_source_definition() {
-    let root = project();
-    let attributed = root.path().join("attributed.lua");
-    let records = body_costs(root.path(), &root.path().join("costs.jsonl"), &attributed);
-    let stats = root.path().join("stats.jsonl");
-    assert!(!stats.exists());
-    let plain = root.path().join("plain.lua");
-    compile(root.path(), &stats, &plain);
-    assert_eq!(
-        std::fs::read(&plain).unwrap(),
-        std::fs::read(&attributed).unwrap()
-    );
-    let main = record_ending(&records, "main::main");
-    assert!(main["file"].as_str().unwrap().ends_with("main.rock"));
-    assert_eq!(main["kind"], "function");
-    assert_eq!(main["symbol"], "main");
-    assert_eq!(main["line"], 6);
-    assert_eq!(main["emitted"], true);
-    assert!(main["lua_bytes"].as_u64().unwrap() > 0);
-    assert!(main["lua_lines"].as_u64().unwrap() > 0);
-    assert!(main["mir_lowered"].as_u64().unwrap() > 0);
-    assert!(main["lower_ns"].as_u64().is_some());
-    assert!(main["thread_cpu_ns"].as_u64().is_some());
-    assert_eq!(main["record"], "body");
-    assert!(
-        records.iter().any(|r| r["record"] == "module"
-            && r["pass"] == "infer functions"
-            && r["file"].as_str().unwrap().ends_with("util.rock")
-            && r["elapsed_ns"].as_u64().is_some()),
-        "no inference time for util.rock"
-    );
-}
-
-const WIDE: &str = r#"
-mod main;
-
-value Pose { x: float, y: float, z: float, yaw: float, pitch: float, roll: float }
-
-fn spin(p: Pose, turns: int) -> Pose {
-    let out = p
-    for i in 0..turns {
-        out = Pose { ..out, yaw: out.yaw + out.x + float(i), pitch: out.pitch + out.y, roll: out.roll + out.z }
-    }
-    return out
-}
-
-fn main() {
-    let a = spin(Pose { x: 1.0, y: 2.0, z: 3.0, yaw: 0.0, pitch: 0.0, roll: 0.0 }, 3)
-    let b = spin(a, 4)
-    print("{b.yaw + b.pitch + b.roll}")
-}
-"#;
-
-/// A body whose signature flattens a value records, per declared parameter
-/// and then the result, its lane count and the value type it flattens, so the
-/// report can rank types by the width they add to calls.
-#[test]
-fn body_costs_record_the_value_types_a_signature_flattens() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("stick.toml"),
-        "[package]\nname = \"wide\"\n\n[language]\nmodules = \"v1\"\n",
-    )
-    .unwrap();
-    std::fs::write(root.path().join("main.rock"), WIDE).unwrap();
-    let records = body_costs(
-        root.path(),
-        &root.path().join("costs.jsonl"),
-        &root.path().join("out.lua"),
-    );
-    let spin = record_ending(&records, "main::spin");
-    let wire = spin["wire"].as_array().expect("a wire list");
-    assert_eq!(wire.len(), 3, "two parameters and a result: {wire:?}");
-    assert_eq!(wire[0]["type"], "wide::main::Pose");
-    assert_eq!(wire[0]["lanes"], 6);
-    assert_eq!(wire[0]["nobox"], false);
-    assert_eq!(wire[0]["result"], false);
-    assert!(
-        wire[0]["declared"]
-            .as_str()
-            .unwrap()
-            .ends_with("main.rock:4")
-    );
-    assert_eq!(wire[1]["type"], serde_json::Value::Null);
-    assert_eq!(wire[1]["lanes"], 1);
-    assert_eq!(wire[2]["type"], "wide::main::Pose");
-    assert_eq!(wire[2]["result"], true);
-    let main = record_ending(&records, "main::main");
-    assert!(main.get("wire").is_none(), "nothing flattened: {main}");
-}
-
 /// A project's `cmd` build vars run beside discovery, parsing and checking:
 /// the compile reads their values only after the program checks, so a slow
 /// command must not hold up the front end.
@@ -270,7 +154,7 @@ fn slow_build_var_commands_overlap_the_front_end() {
     .unwrap();
     let stats = root.path().join("stats.jsonl");
     let output = root.path().join("out.lua");
-    compile(root.path(), &stats, &output);
+    compile(root.path(), Some(&stats), &output);
     assert!(
         std::fs::read_to_string(&output)
             .unwrap()

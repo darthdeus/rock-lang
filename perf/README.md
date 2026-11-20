@@ -89,39 +89,3 @@ perf/output_census.py /tmp/stone.lua
 perf/output_census.py game.lua --engine /tmp/stone.lua --mask   # private symbols print as hashes
 ```
 
-## Source costs
-
-`ROCK_BODY_COSTS=<file>` makes a project `rock compile` write one JSON line
-per emitted body, named by the source definition it came from (function,
-generic specialization, coroutine, global initializer or decorator, with file,
-package and line): the worker's stage times (`lower_ns` ... `regalloc_ns`,
-elapsed on the worker; together they are the budget's `codegen.unit_cpu_ms`),
-the worker's thread CPU for the body (`thread_cpu_ns`, for bodies the parallel
-fan-out built), MIR size after lowering, after inlining and after cleanup, the
-body's own Lua bytes and lines, the callees spliced into it, and, for a body
-whose signature flattens a value, its wire (`wire`: per parameter and then the
-result, the Lua values it occupies and the value type it flattens). It also writes
-one line per module for the front-end passes that run module by module
-(`lower functions`, `infer functions`). Without the variable nothing is
-collected and the output is byte-identical either way.
-
-`perf/body_costs.py` turns that file, the compile stats and the Lua into one
-self-contained HTML report (offline, light and dark) and a Markdown summary:
-ranked source changes with estimated savings, concentration (share of CPU in
-the top 1/5/20% of definitions), sortable tables per definition, generic,
-file and inlined callee, and output patterns traced to source lines (wide
-signatures and calls, unread parameters, many upvalues, labels, table
-constructors in loops, failure blocks), plus the value types whose flattened
-leaves widen residual calls, ranked by the argument, parameter and result text
-they add (positions of `--wide-lanes`, default 8, or more). A type is marked
-worth changing, with advice, when a signature with two or more residual calls
-carries it in more than 16 lanes (24 for `nobox`). Every CPU number is summed over
-worker threads; wall numbers are labelled as wall.
-
-```sh
-ROCK_BODY_COSTS=/tmp/stone-costs.jsonl ROCK_COMPILE_STATS=/tmp/stone-stats.jsonl \
-  rock compile packages/stone --output /tmp/stone.lua
-perf/body_costs.py /tmp/stone-costs.jsonl --stats /tmp/stone-stats.jsonl --lua /tmp/stone.lua \
-  --html /tmp/stone-report.html --md /tmp/stone-summary.md
-perf/body_costs.py game-costs.jsonl --lua game.lua --root ../game --mask ...   # private names as hashes
-```

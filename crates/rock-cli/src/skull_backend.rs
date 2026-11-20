@@ -201,7 +201,6 @@ struct CliBuild {
     compiled: skull::pipeline::Compiled,
     package_tests: Option<PackageTestFns>,
     compile: Duration,
-    body_costs: Option<std::path::PathBuf>,
 }
 
 enum CliBuildFailure {
@@ -292,19 +291,11 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
     let mut target = skull::pipeline::EmitTarget::SINGLE_SOURCE;
     target.project_root = production.then_some(path);
     target.global_accessors = production;
-    let body_costs;
     let compiled = if let Some((file, contents)) = source {
-        body_costs = None;
         skull::pipeline::compile_source(file, contents, target, &mut host)
     } else {
         let (modules, entry) = project.expect("project modules assembled");
         skull::pipeline::CompileHost::phase(&mut host, skull::pipeline::Phase::Parsed);
-        body_costs = if production {
-            crate::body_costs::begin()
-        } else {
-            None
-        };
-        target.attribution = body_costs.is_some();
         skull::pipeline::compile_modules(modules, entry, target, &mut host)
     }
     .map_err(|failure| CliBuildFailure::Compile {
@@ -319,7 +310,6 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
         compiled,
         package_tests,
         compile,
-        body_costs,
     })
 }
 
@@ -1783,19 +1773,12 @@ fn skull_emit_project_with_inputs(
         sources,
         compiled,
         compile,
-        body_costs,
         ..
     } = build;
     let skull::pipeline::Compiled {
         ws, mut emission, ..
     } = compiled;
     crate::compile_budget::emission(&emission);
-    if let Some(path) = body_costs
-        && let Err(e) = crate::body_costs::write(&path, &ws, &emission.attribution)
-    {
-        log::error!(target: "SKULL", "cannot write body costs to {}: {:#}", path.display(), e);
-        crate::invocation_log::exit(1);
-    }
     if let Err(e) = write_allocation_report(None, &emission.allocation_report) {
         log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", dir, e);
         crate::invocation_log::exit(1);
