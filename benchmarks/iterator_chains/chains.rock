@@ -1,0 +1,131 @@
+// Each pair: chain_* vs loop_* computing the same result.
+
+fn chain_map_filter_sum(v: [int]) -> int {
+    return v.iter().map(x => x * 2).filter(x => x % 3 != 0).sum()
+}
+fn loop_map_filter_sum(v: [int]) -> int {
+    let acc = 0
+    for x in v {
+        let y = x * 2
+        if y % 3 != 0 { acc = acc + y }
+    }
+    return acc
+}
+
+fn chain_map_capture_sum(v: [int], k: int) -> int {
+    return v.iter().map(x => x * k).sum()
+}
+fn loop_map_capture_sum(v: [int], k: int) -> int {
+    let acc = 0
+    for x in v { acc = acc + x * k }
+    return acc
+}
+
+fn chain_filter_count(v: [int], k: int) -> int {
+    return v.iter().filter(x => x > k).count()
+}
+fn loop_filter_count(v: [int], k: int) -> int {
+    let n = 0
+    for x in v { if x > k { n = n + 1 } }
+    return n
+}
+
+fn chain_any(v: [int], k: int) -> bool {
+    return v.any(x => x == k)
+}
+fn loop_any(v: [int], k: int) -> bool {
+    for x in v { if x == k { return true } }
+    return false
+}
+
+fn chain_all(v: [int], k: int) -> bool {
+    return v.iter().all(x => x < k)
+}
+fn loop_all(v: [int], k: int) -> bool {
+    for x in v { if !(x < k) { return false } }
+    return true
+}
+
+fn chain_find(v: [int], k: int) -> int {
+    let r = v.iter().find(x => x == k)
+    if r == null { return -1 }
+    return r
+}
+fn loop_find(v: [int], k: int) -> int {
+    for x in v { if x == k { return x } }
+    return -1
+}
+
+fn chain_enumerate(v: [int]) -> int {
+    let acc = 0
+    for (i, x) in v.enumerate() { acc = acc + i * x }
+    return acc
+}
+fn loop_enumerate(v: [int]) -> int {
+    let acc = 0
+    let i = 0
+    for x in v {
+        acc = acc + i * x
+        i = i + 1
+    }
+    return acc
+}
+
+fn chain_zip(a: [int], b: [int]) -> int {
+    let acc = 0
+    for (x, y) in a.iter().zip(b.iter()) { acc = acc + x * y }
+    return acc
+}
+fn loop_zip(a: [int], b: [int]) -> int {
+    let acc = 0
+    let n = a.len
+    if b.len < n { n = b.len }
+    for i in 0..n { acc = acc + a[i] * b[i] }
+    return acc
+}
+
+fn chain_collect(v: [int]) -> [int] {
+    return v.iter().map(x => x + 1).collect()
+}
+fn loop_collect(v: [int]) -> [int] {
+    let out: [int] = []
+    for x in v { vec_push(out, x + 1) }
+    return out
+}
+
+fn chain_range_sum(n: int, k: int) -> int {
+    return (0..n).map(i => i * k).filter(i => i % 2 == 0).sum()
+}
+fn loop_range_sum(n: int, k: int) -> int {
+    let acc = 0
+    for i in 0..n {
+        let y = i * k
+        if y % 2 == 0 { acc = acc + y }
+    }
+    return acc
+}
+
+fn chain_reduce(v: [int]) -> int {
+    return v.iter().reduce(0, (a, x) => a + x)
+}
+fn loop_reduce(v: [int]) -> int {
+    let acc = 0
+    for x in v { acc = acc + x }
+    return acc
+}
+
+fn main() {
+    let v: [int] = []
+    for i in 0..1000 { vec_push(v, i) }
+    print(chain_map_filter_sum(v) + loop_map_filter_sum(v))
+    print(chain_map_capture_sum(v, 3) + loop_map_capture_sum(v, 3))
+    print(chain_filter_count(v, 3) + loop_filter_count(v, 3))
+    print(chain_any(v, 3) && loop_any(v, 3))
+    print(chain_all(v, 3) || loop_all(v, 3))
+    print(chain_find(v, 3) + loop_find(v, 3))
+    print(chain_enumerate(v) + loop_enumerate(v))
+    print(chain_zip(v, v) + loop_zip(v, v))
+    print(chain_collect(v).len + loop_collect(v).len)
+    print(chain_range_sum(10, 3) + loop_range_sum(10, 3))
+    print(chain_reduce(v) + loop_reduce(v))
+}
