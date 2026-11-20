@@ -44,10 +44,10 @@ fn main() { t() }
 fn value_struct_with_enum_field_has_cdef_int_not_table() {
     let lua = emit_module(SRC);
     assert!(lua.contains("Cmd_ct") && lua.contains("} Cmd;"));
-    assert!(!lua.contains("__ty = \"Cmd\""));
+    assert!(!lua.contains("__rock_box_mts[\"Cmd\"]"));
     assert!(!lua.contains("__rock_enum_BlendMode_names = {"));
     assert!(!lua.contains("__rock_enum_BlendMode_Additive ="));
-    assert!(!lua.contains("__ty = \"BlendMode\""));
+    assert!(!lua.contains("__rock_box_mts[\"BlendMode\"]"));
     assert!(!lua.contains("_by_tag"));
     assert_eq!(run_fn(&lua, "t"), "5 Add 5");
 }

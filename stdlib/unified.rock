@@ -584,16 +584,21 @@ value SceneBuilder {
     _scene_id: int,
 }
 
-// Compiler-created structs/newtypes carry a direct __ty tag. Foreign tables
-// can supply it through __index, which can mutate Rock state. A Vec is
-// untagged, so it is recognized by shape: `len` plus a `_data` array or a
-// `@vec` header, on a table that is not a closure record. cdata values reflect
-// through __ROCK_TYPE_TABLE and ffi.istype, not here.
+@nomangle inline(lua) fn __rock_table_tag(obj: any) -> string? = """
+    local own = rawget(obj, "__ty")
+    if own ~= nil then return own end
+    local mt = getmetatable(obj)
+    if type(mt) == "table" then return rawget(mt, "__ty") end
+"""
+
+// Vecs reflect by shape; cdata values reflect through the type table and ffi.istype.
 @nomangle inline(lua) fn __rock_get_type(obj: any) -> string? = """
     if type(obj) ~= "table" then
         return nil
     end
-    local ty = obj.__ty
+    local ty = __rock_table_tag(obj)
+    -- Foreign __index can supply a type and run arbitrary Lua.
+    if ty == nil then ty = obj.__ty end
     if ty ~= nil then return ty end
     if rawget(obj, "len") ~= nil
             and (rawget(obj, "_data") ~= nil or rawget(obj, "@vec") ~= nil)
@@ -933,7 +938,8 @@ deco init on_reload {
 """
 
 @nomangle inline(lua) fn __rock_field_declaration(obj: any) -> any = """
-    local name = obj.__ty
+    local name = __rock_table_tag(obj)
+    if name == nil then name = obj.__ty end
     local types = _G.__ROCK_TYPE_TABLE
     return type(name) == "string" and types and types[name] or nil
 """
@@ -1075,9 +1081,7 @@ deco init on_reload {
 inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = "rawequal(a, b)"
 
 @nomangle inline(lua) fn __rock_create_struct(typeName: string, fields: any) -> any = """
-    local obj = fields or {}
-    obj.__ty = typeName
-    return obj
+    return setmetatable(fields or {}, __rock_box_mts[typeName])
 """
 
 @intrinsic @nomangle @inline inline(lua) fn __range(start_val: int, end_val: int) -> any = """
@@ -1674,8 +1678,11 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
     if _G.__rock_code_ref_kind and _G.__rock_code_ref_kind(obj) == "slot" then
         return obj
     end
-    local unit = __rock_enum_unit(rawget(obj, "__ty"), rawget(obj, "__variant"))
-    if unit then return unit end
+    local variant = rawget(obj, "__variant")
+    if variant ~= nil then
+        local unit = __rock_enum_unit(__rock_table_tag(obj), variant)
+        if unit then return unit end
+    end
     if seen[obj] then
         return seen[obj]
     end
@@ -2030,7 +2037,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     local tag = vec._data[base + 1]
     local unit = __rock_enum_unit(h.elem, tag)
     if unit then return unit end
-    local out = { __variant = tag, __ty = h.elem }
+    local out = setmetatable({ __variant = tag }, __rock_box_mts[h.elem])
     for j = 2, h.stride do
         local value = vec._data[base + j]
         if value ~= false then out[j - 1] = value end
@@ -2301,19 +2308,21 @@ const EPSILON: float = 0.0000001
         return "Vec { " .. table.concat(parts, ", ") .. " }"
     end
 
-    -- Check if sequential array
-    local is_array = true
+    -- Only untyped tables can be sequential arrays.
+    local is_array = not type_name
     local max_index = 0
-    local count = 0
-    for k, _ in pairs(t) do
-        count = count + 1
-        if type(k) ~= "number" or k ~= math.floor(k) or k < 1 then
-            is_array = false
-            break
+    if is_array then
+        local count = 0
+        for k in pairs(t) do
+            count = count + 1
+            if type(k) ~= "number" or k ~= math.floor(k) or k < 1 then
+                is_array = false
+                break
+            end
+            max_index = math.max(max_index, k)
         end
-        max_index = math.max(max_index, k)
+        is_array = is_array and count == max_index
     end
-    is_array = is_array and count == max_index
 
     local result
     if is_array then
@@ -2428,7 +2437,7 @@ const EPSILON: float = 0.0000001
     local tag = t[prefix .. ".#"]
     if tag == nil then return nil end
     local flat = _G.__ROCK_ENUM_FLAT_LAYOUT[ty]
-    local o = { __ty = ty, __variant = tag }
+    local o = setmetatable({ __variant = tag }, __rock_box_mts[ty])
     for i = 1, flat.tuple_width do o[i] = t[prefix .. "." .. (i - 1)] end
     for i = 1, #flat.record_fields do
         local key = flat.record_fields[i]
@@ -2443,7 +2452,7 @@ const EPSILON: float = 0.0000001
     if nullable and t[prefix] == nil then return nil end
     local decl = _G.__ROCK_TYPE_TABLE[ty]
     if not decl then return nil end
-    local o = { __ty = ty }
+    local o = setmetatable({}, __rock_box_mts[ty])
     for i = 1, #decl.fields do
         local f = decl.fields[i]
         local key = prefix .. "." .. f.name

@@ -129,7 +129,7 @@ fn strided_element_reconstruction_canonicalizes_units() {
         r#"{lua}
 local unit = constant_unit()
 local vec = {{_data = {{"None", false}}, len = 1,
-    ["@vec"] = {{repr = "strided", elem = unit.__ty, stride = 2}}}}
+    ["@vec"] = {{repr = "strided", elem = __rock_get_type(unit), stride = 2}}}}
 assert(rawequal(__rock_materialize_strided_element(vec, 1), unit))
 vec._data[1], vec._data[2] = "Text", "payload"
 local a = __rock_materialize_strided_element(vec, 1)
@@ -161,8 +161,8 @@ local function measure(make)
     collectgarbage("collect")
     return bytes / n
 end
-local ty = constant_unit().__ty
-local control = measure(function() return {{__variant = "Text", __ty = ty, "payload"}} end)
+local mt = getmetatable(constant_unit())
+local control = measure(function() return setmetatable({{__variant = "Text", "payload"}}, mt) end)
 local dynamic = measure(function() return through_field(1) end)
 assert(dynamic <= control + 1, "dynamic payload reserves union slots: " .. control .. " vs " .. dynamic)
 print("ok")

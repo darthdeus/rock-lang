@@ -4,7 +4,7 @@ dofile(file)
 local N = tonumber(os.getenv("N") or 1000)
 local data = {}
 for i = 1, N do data[i] = i - 1 end
-local v = {_data = data, len = N, __ty = "Vec"}
+local v = {_data = data, len = N}
 local K = 2000 -- larger than every element: any/find/all scan the whole Vec
 local function find(prefix)
   for name, f in pairs(_G) do

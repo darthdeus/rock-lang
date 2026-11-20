@@ -456,10 +456,8 @@ impl Emitter<'_> {
         named: impl IntoIterator<Item = &'a (ustr::Ustr, Idx<Inst>)>,
         write_tag: impl FnOnce(&mut String),
     ) {
-        out.push_str("{__variant = ");
+        out.push_str("setmetatable({__variant = ");
         write_tag(out);
-        out.push_str(", __ty = ");
-        write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, ty).as_str());
         for id in positional {
             out.push_str(", ");
             self.write_opnd(out, *id);
@@ -469,6 +467,13 @@ impl Emitter<'_> {
             self.write_opnd(out, *id);
         }
         out.push('}');
+        self.write_box_metatable(out, ty);
+    }
+
+    pub(crate) fn write_box_metatable(&self, out: &mut String, ty: ustr::Ustr) {
+        out.push_str(", __rock_box_mts[");
+        write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, ty).as_str());
+        out.push_str("])");
     }
 
     /// `ids` without its trailing nil constants, keeping at least `keep`.

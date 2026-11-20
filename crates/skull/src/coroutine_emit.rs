@@ -215,7 +215,6 @@ fn emit_constructor(
         })
         .collect();
     let mut init = vec![
-        "__ty = \"Coroutine\"".to_string(),
         format!("{STATE} = 0"),
         format!("__layout = {}", lowered.frame_plan.layout_hash()),
     ];
@@ -255,10 +254,8 @@ fn emit_constructor(
     // erased consumers.
     if let Some(ch) = channel {
         let mut box_fields = format!(
-            "{{__variant = s.{tag}, __ty = {ty}",
+            "setmetatable({{__variant = s.{tag}",
             tag = skull_mir::lower::yield_slot(0),
-            ty =
-                skull_codegen_lua::lua_string(skull_mir::mangle::symbol_of_key(ch.name()).as_str()),
         );
         for i in 0..ch.tuple_width() {
             let _ = write!(box_fields, ", s.{}", skull_mir::lower::yield_slot(1 + i));
@@ -270,7 +267,12 @@ fn emit_constructor(
                 skull_mir::lower::yield_slot(1 + ch.tuple_width() + j)
             );
         }
-        box_fields.push('}');
+        let ty = skull_mir::mangle::symbol_of_key(ch.name());
+        let _ = write!(
+            box_fields,
+            "}}, __rock_box_mts[{}])",
+            skull_codegen_lua::lua_string(ty.as_str())
+        );
         // Seed every yield slot in the literal and clear it to nil, so each slot
         // has a hash node from birth and yield writes never grow or rehash the
         // frame under a trace. A frame rebuilt by a host copy has no seeded nodes.
@@ -304,7 +306,7 @@ fn emit_constructor(
              \x20 return {box_fields}\n\
              end\n\
              function {name}({paramlist})\n\
-             \x20 local {svar} = {{ {fields}, __advance = {advance_ref}, __resume = {resume_ref} }}\n\
+             \x20 local {svar} = setmetatable({{ {fields}, __advance = {advance_ref}, __resume = {resume_ref} }}, __rock_box_mts[\"Coroutine\"])\n\
              \x20{clears}\n\
              \x20 return {svar}\n\
              end\n",
@@ -326,7 +328,7 @@ fn emit_constructor(
          \x20 return {step_call}\n\
          end\n\
          function {name}({paramlist})\n\
-         \x20 local {svar} = {{ {fields}, __resume = {resume_ref} }}\n\
+         \x20 local {svar} = setmetatable({{ {fields}, __resume = {resume_ref} }}, __rock_box_mts[\"Coroutine\"])\n\
          \x20 return {svar}\n\
          end\n",
         paramlist = param_fields.join(", "),

@@ -33,7 +33,7 @@ fn plain_struct_field_reads_and_writes_dont_materialize_table() {
     for (src, ty) in [(PLAIN_FIELD_LOOP, "Props"), (PLAIN_MUTATE_LOOP, "Acc")] {
         let lua = emit_module(src);
         let hot = function_body(&lua, "hot");
-        assert!(!hot.contains(&format!("__ty = \"{ty}\"")), "{hot}");
+        assert!(!hot.contains(&format!("__rock_box_mts[\"{ty}\"]")), "{hot}");
     }
 }
 
@@ -76,6 +76,6 @@ fn main() {
 fn plain_struct_whole_use_keeps_table() {
     let lua = emit_module(PLAIN_WHOLE_USE);
     let body = function_body(&lua, "use_it");
-    assert!(body.contains("__ty = \"Box\""));
+    assert!(body.contains("__rock_box_mts[\"Box\"]"));
     assert!(body.contains(".w"));
 }

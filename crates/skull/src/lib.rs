@@ -421,6 +421,13 @@ if not _G.__rock_omitted then
   _G.__rock_omitted = setmetatable({}, { __tostring = function() return "<omitted argument>" end })
 end
 _G.__ROCK_ENUM_UNITS = {}
+_G.__rock_box_mts = _G.__rock_box_mts or setmetatable({}, {
+  __index = function(mts, ty)
+    local mt = { __ty = ty }
+    mts[ty] = mt
+    return mt
+  end,
+})
 -- Ordinary-fn `defer` unwinding (skull_mir::mir::DEFER_PUSH). Registering a
 -- defer pushes its cleanup closure and every scope-exit splice pops it, so the
 -- stack holds exactly the cleanups of scopes still open. A body that pushes
@@ -1125,7 +1132,10 @@ fn value_struct_gc_defs(
         let sym = skull_mir::mangle::type_symbol(ws, n);
         let shown = display_name(n.as_str());
         let mt = skull_codegen_lua::value_struct_metatable_name(sym.as_str());
-        out.push_str(&format!("{mt} = {mt} or {{}}\n"));
+        out.push_str(&format!(
+            "{mt} = __rock_box_mts[{sym:?}]\n",
+            sym = sym.as_str()
+        ));
         let storage = rep_arena
             .nominal_value_storage_required(ws, bone_semantic::hir::FnBackend::Lua, n)
             .map_err(|e| CompilerError::new_no_location(e.message))?;
@@ -1200,8 +1210,8 @@ fn value_struct_gc_defs(
                     "{sym}_lct = function({p})\n{r}\nend\n",
                     p = params.join(", "),
                     r = skull_codegen_lua::wrapper_return(&format!(
-                        "setmetatable({{ {b}__ty = \"{sym}\" }}, {mt})",
-                        b = assigns.concat(),
+                        "setmetatable({{ {b} }}, {mt})",
+                        b = assigns.concat().trim_end_matches(", "),
                     )),
                 ),
             ));
@@ -1278,7 +1288,8 @@ fn value_struct_gc_defs(
                 "{sym}_vt = function({p})\n{r}\nend\n",
                 p = params.join(", "),
                 r = skull_codegen_lua::wrapper_return(&format!(
-                    "setmetatable({{ {body}__ty = \"{sym}\" }}, {mt})",
+                    "setmetatable({{ {} }}, {mt})",
+                    body.trim_end_matches(", "),
                 )),
             ),
         ));
@@ -1591,7 +1602,7 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                         let sym = skull_mir::mangle::type_symbol(ws, e.name);
                         let g = skull_mir::mangle::enum_singleton_global(ws, e.name, v.name);
                         out.push_str(&format!(
-                            "{g} = {g} or {{ __variant = \"{var}\", __ty = \"{ty}\" }}\n",
+                            "{g} = {g} or setmetatable({{ __variant = \"{var}\" }}, __rock_box_mts[\"{ty}\"])\n",
                             var = v.name,
                             ty = sym,
                         ));
@@ -2283,7 +2294,8 @@ mod tests {
         // template table; see the rejected pre-sizing entry in
         // docs/luajit-performance.md before changing this to assignments.
         assert!(
-            lua.contains(r#"{ __ty = "Coroutine", __state = 0, __layout = "#),
+            lua.contains("setmetatable({ __state = 0, __layout = ")
+                && lua.contains(r#", __rock_box_mts["Coroutine"])"#),
             "expected the tagged+stamped frame table, got:\n{lua}"
         );
         assert!(

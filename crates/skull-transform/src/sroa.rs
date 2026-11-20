@@ -10,7 +10,7 @@ use skull_mir::mir::*;
 enum StructId {
     /// `MakeValueStruct` -- an immutable `value` cdata.
     Value(ustr::Ustr),
-    /// `MakeStruct` -- a mutable plain-struct table (`ty` is the `__ty` nominal,
+    /// `MakeStruct` -- a mutable plain-struct table (`ty` is the nominal type,
     /// `None` for a foreign nominal).
     Plain(Option<ustr::Ustr>),
     /// One enum family shares the union of its variants' fields.
@@ -57,16 +57,10 @@ fn ctor_fields(
             positional,
             named,
         } => {
-            let mut f = vec![
-                (
-                    skull_mir::names::ustr("__variant"),
-                    FieldSrc::ConstStr(*tag),
-                ),
-                (
-                    skull_mir::names::ustr("__ty"),
-                    FieldSrc::ConstStr(skull_mir::mangle::symbol_of_key(*ty)),
-                ),
-            ];
+            let mut f = vec![(
+                skull_mir::names::ustr("__variant"),
+                FieldSrc::ConstStr(*tag),
+            )];
             for (i, p) in positional.iter().enumerate() {
                 f.push((skull_mir::names::indexed("_", "", i), FieldSrc::Operand(*p)));
             }
@@ -81,13 +75,7 @@ fn ctor_fields(
             positional,
             named,
         } => {
-            let mut f = vec![
-                (skull_mir::names::ustr("__variant"), FieldSrc::Operand(*tag)),
-                (
-                    skull_mir::names::ustr("__ty"),
-                    FieldSrc::ConstStr(skull_mir::mangle::symbol_of_key(*ty)),
-                ),
-            ];
+            let mut f = vec![(skull_mir::names::ustr("__variant"), FieldSrc::Operand(*tag))];
             for (i, p) in positional.iter().enumerate() {
                 f.push((skull_mir::names::indexed("_", "", i), FieldSrc::Operand(*p)));
             }
@@ -99,20 +87,14 @@ fn ctor_fields(
         // A unit-variant singleton ref of the cell's enum: `__rock_enum_<E>_<V>`.
         Inst::Global(g) => {
             let e = enum_hint?;
-            // The singleton and the `__ty` leaf carry the minted type symbol, as
-            // the emitted global and every constructed box do; for a v1 enum that
-            // differs from its DefKey.
             let symbol = skull_mir::mangle::symbol_of_key(e);
             let variant = g.as_str().strip_prefix(&format!("__rock_enum_{symbol}_"))?;
             Some((
                 StructId::Enum(e),
-                vec![
-                    (
-                        skull_mir::names::ustr("__variant"),
-                        FieldSrc::ConstStr(skull_mir::names::ustr(variant)),
-                    ),
-                    (skull_mir::names::ustr("__ty"), FieldSrc::ConstStr(symbol)),
-                ],
+                vec![(
+                    skull_mir::names::ustr("__variant"),
+                    FieldSrc::ConstStr(skull_mir::names::ustr(variant)),
+                )],
             ))
         }
         _ => None,
@@ -676,9 +658,9 @@ fn rewrite_nil_tests(
         if !fam.is_cand(c) {
             continue;
         }
-        // Every enum ctor writes a nonnil `__ty`; exhaustion nils every lane.
-        let type_cell = cells.get(func, fam.to_rep(c), skull_mir::names::ustr("__ty"));
-        let present = func.alloc_inst(Inst::Load(type_cell));
+        // A live box has a variant; exhaustion clears it with the payload.
+        let tag_cell = cells.get(func, fam.to_rep(c), skull_mir::names::ustr("__variant"));
+        let present = func.alloc_inst(Inst::Load(tag_cell));
         match &mut func.insts[test] {
             Inst::Eq(a, b) => {
                 if *a == old {

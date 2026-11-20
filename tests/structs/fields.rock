@@ -149,12 +149,14 @@ fn tuple_nested_value_read_copies_and_shares_container_leaves() {
 
 struct PointZ { x: int, y: int }
 
-@nomangle inline(lua) fn __test_struct_no_mt() -> bool = """
+@nomangle inline(lua) fn __test_struct_mt() -> bool = """
     local p = __rock_create_struct("PointZ", { x = 1, y = 2 })
-    return getmetatable(p) == nil and __rock_get_type(p) == "PointZ"
+    local q = __rock_create_struct("PointZ", {})
+    return rawget(p, "__ty") == nil and getmetatable(p) == getmetatable(q)
+        and __rock_get_type(p) == "PointZ"
 """
 
 @test(output = "true", backends = "lua")
-fn struct_has_no_metatable() {
-    print(__test_struct_no_mt())
+fn struct_helper_uses_the_shared_metatable() {
+    print(__test_struct_mt())
 }

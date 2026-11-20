@@ -89,3 +89,43 @@ fn data_image_round_trips_large_storage() {
     nb_set(copy.large, 69999, 43)
     assert_eq(nb_get(holder.large, 69999), 42, "the copy owns its storage")
 }
+
+value ImageLabel { text: string }
+enum ImageChoice { Empty, Text(string) }
+struct ImageTypedGraph {
+    label: ImageLabel,
+    choice: any,
+    empty: any,
+}
+
+inline(lua) fn image_typed_round_trip(value: ImageTypedGraph) -> ImageTypedGraph = """
+    __stone_install_data_image()
+    local capture = { image_mode = "capture", global = "test", storage = {}, storage_records = {} }
+    local image = __stone_data_image(value, {}, capture)
+    local materialize = { image_mode = "materialize", global = "test", storage = {},
+        image_storage = capture.storage_records }
+    local copy = __stone_data_image(image, {}, materialize)
+    local function check(original, inert, restored)
+        local mt = getmetatable(original)
+        assert(getmetatable(inert) == nil and rawget(inert, "__ty") == mt.__ty)
+        assert(getmetatable(restored) == mt and rawget(restored, "__ty") == nil)
+    end
+    check(value, image, copy)
+    check(value.label, image.label, copy.label)
+    check(value.choice, image.choice, copy.choice)
+    check(value.empty, image.empty, copy.empty)
+    return copy
+"""
+
+@test
+fn data_image_restores_boxed_types_and_enum_singletons() {
+    let original = ImageTypedGraph {
+        label: ImageLabel { text: "image" },
+        choice: ImageChoice::Text("payload"),
+        empty: ImageChoice::Empty,
+    }
+    let restored = image_typed_round_trip(original)
+    assert(restored == original)
+    assert(!same_ref(restored.choice, original.choice))
+    assert(same_ref(restored.empty, original.empty))
+}

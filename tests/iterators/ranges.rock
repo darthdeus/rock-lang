@@ -234,7 +234,7 @@ fn test_mmr_consistency_step_one_count() {
 // Sanity check that range constructors return real Vec values with the
 // metatable attached (not bare hand-built tables). UFCS dispatch on the
 // result exercises the metatable: if `__rock_create_struct("Vec", ...)`
-// were skipped, `__ty` and the metatable would be missing.
+// were skipped, the type metatable would be missing.
 @test
 fn test_range_results_are_real_vecs() {
     // __rock_range: UFCS .len() and .push() on the result.

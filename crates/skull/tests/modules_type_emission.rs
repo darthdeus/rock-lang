@@ -194,7 +194,7 @@ fn record_codec_metadata_keeps_primitive_payloads_and_collection_elements() {
 enum Entry { Empty, Text(string), Pair(int, float), Names([string]) }
 struct Record { entries: [Entry], title: string?, weights: Map<string, float> }
 inline(lua) fn verify(value: any) = """
-    local fields = _G.__ROCK_TYPE_TABLE[value.__ty].fields
+    local fields = __rock_field_declaration(value).fields
     assert(fields[2].desc.k == 'opt' and fields[2].desc.inner.k == 'string')
     assert(fields[3].desc.key.k == 'string' and fields[3].desc.val.k == 'float')
     local variants = _G.__ROCK_TYPE_TABLE[fields[1].desc.elem.name].variant_desc
@@ -248,7 +248,7 @@ mod a;
 value JsonField { value: int }
 struct Holder { field: JsonField }
 inline(lua) fn check(value: Holder) = """
-        local desc = _G.__ROCK_TYPE_TABLE[value.__ty].fields[1].desc
+        local desc = __rock_field_declaration(value).fields[1].desc
         assert(desc.k == 'nom')
         assert(_G.__ROCK_TYPE_TABLE[desc.name].fields[1].name == 'value')
         print('ok')

@@ -246,7 +246,7 @@ fn nullable_value_binding_return_keeps_presence_and_leaves() {
     assert!(!pick.contains("Bag_ct("));
     assert_eq!(pick.matches("_data = {").count(), 1);
     assert_eq!(pick.matches('{').count(), 2);
-    assert!(!pick.contains("__ty = \"Bag\""));
+    assert!(!pick.contains("__rock_box_mts[\"Bag\"]"));
     assert_eq!(run_main(&lua), "1 1 true");
 }
 

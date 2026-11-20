@@ -17,7 +17,7 @@ inline(lua) fn stats_ratio() -> float = """
 """
 
 inline(lua) fn handle_tag(h: AbiHandle) -> string = """
-    return h.__ty
+    return __rock_get_type(h)
 """
 
 pub @nomangle fn probe() -> string {

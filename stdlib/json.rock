@@ -1315,7 +1315,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 
 @nomangle inline(lua) fn __json_record_node(tag: string, item: any) -> JsonValue = """
     if tag == 'Null' then return __rock_enum_unit('JsonValue', 'Null') end
-    return { __ty = 'JsonValue', __variant = tag, item }
+    return setmetatable({ __variant = tag, item }, __rock_box_mts.JsonValue)
 """
 
 @nomangle inline(lua) fn __json_record_vec(items: any, count: int) -> any = "return { _data = items, len = count }"
@@ -1347,7 +1347,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     local key = field.name
     if field.flat then
         if source[field.flat[1]] == nil then return nil end
-        local value = { __ty = field.type, __variant = source[field.flat[1]] }
+        local value = setmetatable({ __variant = source[field.flat[1]] }, __rock_box_mts[field.type])
         for i = 2, #field.flat do value[i - 1] = source[field.flat[i]] end
         return value
     end
@@ -1356,7 +1356,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     if _G.__ROCK_TYPE_TABLE[field.type].kind == 'c_struct' then
         return __json_record_native_get(source, field.type, key .. '.')
     end
-    local value, prefix = { __ty = field.type }, key .. '.'
+    local value, prefix = setmetatable({}, __rock_box_mts[field.type]), key .. '.'
     for name, item in pairs(source) do
         if type(name) == 'string' and name:sub(1, #prefix) == prefix then value[name:sub(#prefix + 1)] = item end
     end
@@ -1386,12 +1386,12 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     if not shape.leaves then return value[slot] end
     local flat = _G.__ROCK_ENUM_FLAT_LAYOUT[shape.name]
     if flat then
-        local result = { __ty = shape.name, __variant = value[slot] }
+        local result = setmetatable({ __variant = value[slot] }, __rock_box_mts[shape.name])
         for i = 1, flat.tuple_width do result[i] = value[slot + i] end
         return result
     end
     local decl = _G.__ROCK_TYPE_TABLE[shape.name]
-    local result = decl.kind == 'c_struct' and _G[shape.name .. '_ct']() or { __ty = shape.name }
+    local result = decl.kind == 'c_struct' and _G[shape.name .. '_ct']() or setmetatable({}, __rock_box_mts[shape.name])
     for i, path in ipairs(shape.leaves) do
         if path:find('.', 1, true) then error('json record unsupported nested value payload', 0) end
         result[path] = value[slot + i - 1]
@@ -1421,7 +1421,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         if child and child.kind == 'value_table' and not field.embed
             and (not field.nullable or row[field.name] ~= nil)
             and type(row[field.name]) ~= 'table' then
-            local value, prefix = { __ty = field.type }, field.name .. '.'
+            local value, prefix = setmetatable({}, __rock_box_mts[field.type]), field.name .. '.'
             for path, item in pairs(row) do
                 if path:sub(1, #prefix) == prefix then value[path:sub(#prefix + 1)] = item end
             end
@@ -1441,7 +1441,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         end
     elseif type(value) == 'cdata' then return value[path]
     elseif type(value) == 'table' then
-        for _, field in ipairs(_G.__ROCK_TYPE_TABLE[value.__ty].fields) do
+        for _, field in ipairs(__rock_field_declaration(value).fields) do
             if field.name == path and field.embed and field.nullable then return false end
         end
     end
@@ -1449,8 +1449,8 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 """
 
 @nomangle inline(lua) fn __json_record_failure(shape: any, value: any) -> any = """
-    return { __ty = 'JsonRecordError', path = '', expected = shape.name or shape.k,
-        actual = value == nil and 'missing' or value.__variant or type(value) }
+    return setmetatable({ path = '', expected = shape.name or shape.k,
+        actual = value == nil and 'missing' or value.__variant or type(value) }, __rock_box_mts.JsonRecordError)
 """
 
 @nomangle inline(lua) fn __json_record_error_at(failure: any, key: any) -> any = """
@@ -1470,10 +1470,10 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     local kind = shape.k
     if kind == 'field' then
         if reading then
-            if value == nil then return true, { __ty = 'JsonField', present = false } end
+            if value == nil then return true, setmetatable({ present = false }, __rock_box_mts.JsonField) end
             local ok, decoded = __json_record_visit(codec, shape.inner, value, true, seen, depth + 1)
             if not ok then return false, decoded end
-            return true, { __ty = 'JsonField', present = true, value = decoded }
+            return true, setmetatable({ present = true, value = decoded }, __rock_box_mts.JsonField)
         end
         if not value.present then error('json record absent field requires an object field', 0) end
         return __json_record_visit(codec, shape.inner, value.value, false, seen, depth + 1)
@@ -1529,7 +1529,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         for i = 1, items.len do
             local item = column_stored and __rock_materialize_column_element(items, i) or items._data[i]
             if not reading and strided then
-                item = { __ty = shape.elem.name }
+                item = setmetatable({}, __rock_box_mts[shape.elem.name])
                 for path, offset in pairs(offsets) do item[path] = items._data[(i - 1) * stride + offset] end
                 item = element.kind == 'c_struct' and __json_record_native_get(item, shape.elem.name, '')
                     or __json_record_row_object(item, shape.elem.name)
@@ -1643,7 +1643,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             if fields then
                 result = _G[name .. '_ct']()
                 result.__tag = tag
-            else result = (count == 0 and __rock_enum_unit(name, tag)) or { __ty = name, __variant = tag } end
+            else result = (count == 0 and __rock_enum_unit(name, tag)) or setmetatable({ __variant = tag }, __rock_box_mts[name]) end
         else data = {} end
         for i = 1, count do
             local item
@@ -1676,8 +1676,8 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             end
             for key in pairs(value[1]) do
                 if not names[key] then
-                    return false, __json_record_error_at({ __ty = 'JsonRecordError', path = '',
-                        expected = 'declared field', actual = 'unknown field' }, key)
+                    return false, __json_record_error_at(setmetatable({ path = '',
+                        expected = 'declared field', actual = 'unknown field' }, __rock_box_mts.JsonRecordError), key)
                 end
             end
         end
@@ -1723,7 +1723,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             end
         end
         if reading then
-            if decl.kind ~= 'c_struct' then data.__ty = name end
+            if decl.kind ~= 'c_struct' then setmetatable(data, __rock_box_mts[name]) end
             result = data
         else result = __json_record_node('Object', data) end
     else error('json record unsupported declaration: ' .. name, 0) end

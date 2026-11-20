@@ -301,7 +301,7 @@ fn main() {
 fn a_value_copy_shares_its_enum_children() {
     let lua = emit_module(ENUM_CHILD_OF_A_COPIED_VALUE);
     let body = function_body(&lua, "set_count");
-    assert_eq!(body.matches("__ty = \"QKind\"").count(), 1);
+    assert_eq!(body.matches("__rock_box_mts[\"QKind\"]").count(), 1);
     assert_eq!(run_main(&lua), "8 8 0 0 gold");
 }
 

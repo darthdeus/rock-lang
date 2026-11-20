@@ -1,0 +1,44 @@
+// The Lua tag lives on one metatable per nominal type.
+struct BoxedRow { count: int, name: string }
+value BoxedLabel { text: string }
+enum BoxedChoice { Empty, Text(string), Count { value: int } }
+co fn boxed_counter() -> Coroutine<int> { yield 1 }
+
+inline(lua) fn shared_box_type(a: any, b: any) -> bool = """
+    local mt = getmetatable(a)
+    local ty = type(mt) == "table" and rawget(mt, "__ty")
+    return rawget(a, "__ty") == nil and rawget(b, "__ty") == nil
+        and type(ty) == "string" and ty == __rock_get_type(a) and mt == getmetatable(b)
+"""
+inline(js) fn shared_box_type(a: any, b: any) -> bool = """
+    return a.__ty === b.__ty;
+"""
+
+@test
+fn boxed_types_share_their_lua_tags() {
+    let a = BoxedRow { name: "test", count: 4 }
+    let b = deepcopy(a)
+    assert(shared_box_type(a, b), "struct and copy")
+    assert(a == b, "struct equality")
+    assert_eq(inspect(a), inspect(b))
+    assert_eq(__rock_get_type(a).unwrap(), "BoxedRow")
+    let codec = JsonRecordCodec {}
+    let wire = "{{\"count\":4,\"name\":\"test\"}}"
+    assert_eq(json_encode(json_record_encode(codec, a)), wire)
+    let decoded = json_record_decode<BoxedRow>(codec, json_decode(wire).unwrap()).unwrap()
+    assert(shared_box_type(a, decoded), "JSON decode")
+    assert(a == decoded, "decoded struct equality")
+
+    let label = BoxedLabel { text: "test" }
+    assert(shared_box_type(label, deepcopy(label)), "value struct and copy")
+    assert(BoxedLabel { text: "a" } != BoxedLabel { text: "b" }, "value struct equality")
+
+    let choice = BoxedChoice::Text("test")
+    assert(shared_box_type(choice, BoxedChoice::Empty), "payload and unit variants")
+    assert(shared_box_type(choice, BoxedChoice::Count { value: 1 }), "tuple and record payloads")
+    assert(choice == deepcopy(choice), "enum equality")
+
+    let c = boxed_counter()
+    assert(shared_box_type(c, boxed_counter()), "coroutine frames")
+    assert_eq(c.resume().unwrap(), 1)
+}

@@ -147,8 +147,8 @@ fn a_resumed_v1_enum_box_carries_the_types_runtime_tag() {
             r#"
 enum Step { Go(string), Done }
 co fn steps() -> Coroutine<Step> { yield Step::Go("one") }
-inline(lua) fn erased_resume_tag(c: Coroutine<Step>) -> string = "return c.__resume(c).__ty"
-inline(lua) fn unit_tag(v: Step) -> string = "return v.__ty"
+inline(lua) fn erased_resume_tag(c: Coroutine<Step>) -> string = "return __rock_get_type(c.__resume(c))"
+inline(lua) fn unit_tag(v: Step) -> string = "return __rock_get_type(v)"
 pub fn probe() -> string {
     return "{erased_resume_tag(steps())} {unit_tag(Step::Done)}"
 }

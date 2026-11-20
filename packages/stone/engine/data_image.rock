@@ -185,36 +185,33 @@
                 .. "is imaged; a struct, union or undescribed array is writable in "
                 .. "place and would corrupt the copy.")
         end
-        if image_mode ~= "capture" then
-            local unit = __rock_enum_unit(rawget(x, "__ty"), rawget(x, "__variant"))
-            if unit then return unit end
+        local rt = __rock_table_tag(x)
+        local tagged = type(rt) == "string"
+        local mt = getmetatable(x)
+        if mt ~= nil and (not tagged or rawget(__rock_box_mts, rt) ~= mt) then
+            error("boot data cannot hold an unmodeled metatable; path=" .. tostring(last_path(ctx)), 0)
+        end
+        if image_mode == "materialize" then
+            local variant = rawget(x, "__variant")
+            if variant ~= nil then
+                local unit = __rock_enum_unit(rt, variant)
+                if unit then return unit end
+            end
         end
         local hit = seen[x]
         if hit then return hit end
         local who = ctx.global or "?"
-        local rt = x.__ty
         -- An image outlives the process that captured it, so it cannot name a
         -- live Scene, Arena or Entity.
         if image_mode == "capture" and (rt == "Scene" or rt == "Arena" or rt == "Entity") then
             error("image capture cannot hold the " .. rt .. " in '" .. who .. "'", 0)
         end
-        -- Value-table metatables are compiler-owned behavior, reconstructed by type.
-        local ti = rt and __rock_field_declaration(x)
-        local is_value_table = ti ~= nil and ti.kind == "value_table"
-        if getmetatable(x) ~= nil and not is_value_table then
-            error("boot data cannot hold an unmodeled metatable; path=" .. tostring(last_path(ctx)), 0)
-        end
-        local mt = is_value_table and getmetatable(x) or nil
-        if image_mode == "capture" then
-            mt = nil
-        elseif is_value_table and mt == nil and image_mode == "materialize" then
-            mt = rawget(_G, "__rock_vt_" .. rt)
-            if mt == nil then
-                error("image materialize: value struct '" .. tostring(rt)
-                    .. "' has no __rock_vt_ metatable; path=" .. tostring(last_path(ctx)), 0)
-            end
-        end
         local o = {}
+        -- Inert images carry the tag as data so it survives bytecode serialization.
+        if tagged then
+            if image_mode == "capture" then o.__ty = rt
+            else setmetatable(o, __rock_box_mts[rt]) end
+        end
         seen[x] = o
         -- One scan: which fields of THIS table are storage, and which fields are
         -- genuinely views over that storage.
@@ -236,7 +233,8 @@
             -- capture does not image it and materialize does not rebuild it.
             -- Anything that is not one of those views -- including a field
             -- merely SPELLED `__vf` -- is an ordinary value and is copied.
-            if __rock_field_selected(x, k, "image", view_fields) then
+            if (k ~= "__ty" or not tagged)
+                and __rock_field_selected(x, k, "image", view_fields) then
                 ctx.last_owner = who; ctx.last_key = k
                 if not plain(type(k)) then
                     o[dc(k, seen, ctx)] = dc(v, seen, ctx)
@@ -250,7 +248,6 @@
         if image_mode == "capture" and storage_keys then
             o.__stone_image_storage_shape = { keys = storage_keys, views = views }
         end
-        if mt ~= nil then setmetatable(o, mt) end
         return o
     end
     _G.__stone_data_image = function(value, seen, ctx)

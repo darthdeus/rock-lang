@@ -224,23 +224,23 @@ impl Emitter<'_> {
                 );
             }
             Inst::MakeStruct { ty, fields } => {
-                out.push('{');
-                let mut first = true;
                 // A Lua Vec is untagged; `__rock_get_type` recognizes it by shape.
-                if let Some(name) = ty.filter(|name| name.as_str() != "Vec") {
-                    out.push_str("__ty = ");
-                    write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, name).as_str());
-                    first = false;
+                let nominal = ty.filter(|name| name.as_str() != "Vec");
+                if nominal.is_some() {
+                    out.push_str("setmetatable(");
                 }
-                for (n, id) in fields {
-                    if !first {
+                out.push('{');
+                for (i, (n, id)) in fields.iter().enumerate() {
+                    if i > 0 {
                         out.push_str(", ");
                     }
-                    first = false;
                     write_table_key(out, n.as_str());
                     self.write_opnd(out, *id);
                 }
                 out.push('}');
+                if let Some(name) = nominal {
+                    self.write_box_metatable(out, name);
+                }
             }
             Inst::MakeValueStruct {
                 name,
