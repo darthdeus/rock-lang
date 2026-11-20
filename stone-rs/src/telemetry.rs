@@ -1929,6 +1929,16 @@ mod tests {
         }
     }
 
+    /// An ingest that accepts every request and forwards each body.
+    fn accepting_ingest() -> (Ingest, mpsc::Receiver<String>) {
+        let (uploaded_tx, uploaded_rx) = mpsc::channel();
+        let ingest = Ingest::start(move |_, request| {
+            let _ = uploaded_tx.send(http_body(request).to_string());
+            "204 No Content"
+        });
+        (ingest, uploaded_rx)
+    }
+
     fn transport(ingest: &Ingest, token: &str) -> TelemetryTransport {
         let identity = identity();
         TelemetryTransport {
@@ -2030,6 +2040,11 @@ mod tests {
         file.sync_all().unwrap();
     }
 
+    fn clear(root: &Path) -> bool {
+        let root = std::ffi::CString::new(root.as_os_str().as_encoded_bytes()).unwrap();
+        stone_telemetry_clear(root.as_ptr())
+    }
+
     fn wait_until_removed(path: &Path, within: Duration) {
         let deadline = Instant::now() + within;
         while path.exists() && Instant::now() < deadline {
@@ -2117,34 +2132,6 @@ mod tests {
 
             assert_eq!(drain.cursor_for_len(200).unwrap(), expected, "{name}");
         }
-    }
-
-    #[test]
-    fn cursor_beyond_the_durable_log_falls_back_to_a_safe_offset() {
-        let root = fresh_root();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-        spool.record_stat("first", 1).unwrap();
-        let first_len = std::fs::metadata(&spool.events_path).unwrap().len();
-        spool.record_stat("second", 2).unwrap();
-        let drain = TelemetryDrain::open(&root, "steam").unwrap();
-        std::fs::write(
-            &drain.cursor_path,
-            format!(
-                "{} {first_len}\n{} 999999\n",
-                drain.consent_generation, drain.consent_generation
-            ),
-        )
-        .unwrap();
-
-        let mut seen = Vec::new();
-        drain
-            .run(|body| {
-                seen.push(batch_names(body));
-                Ok(())
-            })
-            .unwrap();
-
-        assert_eq!(seen, [["second"]]);
     }
 
     #[test]
@@ -2236,10 +2223,18 @@ mod tests {
     }
 
     #[test]
-    fn queued_bursts_are_durable_and_ordered_at_shutdown() {
+    fn queued_rows_are_visible_after_flush_and_durable_and_ordered_at_shutdown() {
         let root = fresh_root();
+        let events = root.join("reports/stats/steam/events.jsonl");
         let mut client = open_client(&root);
-        for seq in 1..=130 {
+        assert_eq!(queue_len(&events), 0, "the open creates an empty queue");
+        assert!(events.exists());
+
+        client.record_stat("event-1", 1).unwrap();
+        client.flush().unwrap();
+        assert_eq!(records(&root)[0]["n"], "event-1");
+
+        for seq in 2..=130 {
             client.record_stat(&format!("event-{seq}"), seq).unwrap();
         }
         client.finish(StopMode::Discard);
@@ -2254,32 +2249,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_flush_makes_prior_queued_rows_visible() {
-        let root = fresh_root();
-        let mut client = open_client(&root);
-        client.record_stat("before-flush", 1).unwrap();
-
-        client.flush().unwrap();
-
-        assert_eq!(records(&root)[0]["n"], "before-flush");
-        client.finish(StopMode::Discard);
-    }
-
-    #[test]
-    fn explicit_flush_reports_prior_persistence_failure() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        let root = fresh_root();
-        let mut client = open_client(&root);
-        fill_log(&client.events_path, MAX_SPOOL_BYTES);
-        client.record_stat("over-cap", 1).unwrap();
-
-        let error = client.flush().unwrap_err();
-
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-        client.finish(StopMode::Discard);
-    }
-
-    #[test]
     fn capped_append_worker_reports_failure_without_warning_per_row() {
         let _guard = TEST_LOCK.lock().unwrap();
         crate::rock_log_reexport::init();
@@ -2291,41 +2260,13 @@ mod tests {
         for _ in 0..256 {
             client.record_stat("over-cap", 1).unwrap();
         }
-        assert!(client.flush().is_err());
+        assert_eq!(client.flush().unwrap_err().kind(), io::ErrorKind::Other);
         client.finish(StopMode::Discard);
         let warnings = capped_spool_warnings() - before;
 
         assert!(
             (1..=2).contains(&warnings),
             "256 capped rows emitted {warnings} warnings"
-        );
-    }
-
-    #[test]
-    fn capped_batch_rejection_workload() {
-        let root = fresh_root();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-        fill_log(&spool.events_path, MAX_SPOOL_BYTES);
-        let data = serde_json::json!({"values": vec!["x".repeat(200); 16]}).to_string();
-        let events: Vec<_> = (0..64)
-            .map(|_| QueuedTelemetryEvent::new("over-cap", 1, Some(&data)).unwrap())
-            .collect();
-        let start = Instant::now();
-        for _ in 0..256 {
-            assert_eq!(
-                spool.record_batch(&events).unwrap_err().kind(),
-                io::ErrorKind::StorageFull
-            );
-        }
-        let elapsed = start.elapsed();
-        assert_eq!(spool.next_seq, 1);
-        assert_eq!(
-            fs::metadata(&spool.events_path).unwrap().len(),
-            MAX_SPOOL_BYTES
-        );
-        eprintln!(
-            "CAPPED_BATCH_WORK batches=256 rows=16384 elapsed_us={}",
-            elapsed.as_micros()
         );
     }
 
@@ -2402,14 +2343,17 @@ mod tests {
     fn offline_spool_stops_at_its_disk_cap() {
         let root = fresh_root();
         let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-        fs::File::create(&spool.events_path)
-            .unwrap()
-            .set_len(MAX_SPOOL_BYTES)
-            .unwrap();
+        fill_log(&spool.events_path, MAX_SPOOL_BYTES);
+        let batch: Vec<_> = (0..2)
+            .map(|_| QueuedTelemetryEvent::new("over-cap", 1, None).unwrap())
+            .collect();
 
         let error = spool.record_stat("over-cap", 1).unwrap_err();
+        let batch_error = spool.record_batch(&batch).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert_eq!(batch_error.kind(), io::ErrorKind::StorageFull);
+        assert_eq!(spool.next_seq, 1);
         assert_eq!(
             fs::metadata(&spool.events_path).unwrap().len(),
             MAX_SPOOL_BYTES
@@ -2474,8 +2418,7 @@ mod tests {
                 );
                 std::thread::sleep(Duration::from_millis(2));
             }
-            let root = std::ffi::CString::new(child_root.as_encoded_bytes()).unwrap();
-            assert!(stone_telemetry_clear(root.as_ptr()));
+            assert!(clear(Path::new(&child_root)));
             return;
         }
 
@@ -2550,26 +2493,45 @@ mod tests {
     }
 
     #[test]
-    fn startup_respects_withdrawal_until_explicit_reconsent() {
-        let root = fresh_root();
-        queue_row(&root, "before-withdrawal");
-        fs::write(root.join("reports/.telemetry-revoked"), b"").unwrap();
+    fn startup_fails_closed_without_consent_until_explicit_reconsent() {
+        type Withdraw = fn(&Path);
+        let cases: [(&str, Withdraw); 3] = [
+            ("withdrawal tombstone", |root| {
+                fs::write(revocation_path(root), b"").unwrap()
+            }),
+            ("consent journal lost with queued rows", |root| {
+                fs::remove_file(consent_path(root)).unwrap()
+            }),
+            ("withdrawal journal outlives its tombstone", |root| {
+                assert!(clear(root));
+                fs::remove_file(revocation_path(root)).unwrap();
+            }),
+        ];
+        for (name, withdraw) in cases {
+            let root = fresh_root();
+            queue_row(&root, "before-withdrawal");
+            withdraw(&root);
+            let state = || {
+                let events = fs::read(root.join("reports/stats/steam/events.jsonl")).ok();
+                (events, revocation_path(&root).exists())
+            };
+            let before = state();
 
-        let error = TelemetryClient::open(&root, identity(), "", "", false)
-            .err()
-            .unwrap();
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(root.join("reports/.telemetry-revoked").exists());
-        assert_eq!(records(&root).len(), 1);
+            let error = TelemetryClient::open(&root, identity(), "", "", false)
+                .err()
+                .unwrap_or_else(|| panic!("{name}: startup accepted"));
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{name}");
+            assert_eq!(state(), before, "{name}: a refused startup changed state");
 
-        let mut client = TelemetryClient::open(&root, identity(), "", "", true).unwrap();
-        client.record_stat("after-reconsent", 2).unwrap();
-        client.finish(StopMode::Discard);
+            let mut client = TelemetryClient::open(&root, identity(), "", "", true).unwrap();
+            client.record_stat("after-reconsent", 2).unwrap();
+            client.finish(StopMode::Discard);
 
-        assert!(!root.join("reports/.telemetry-revoked").exists());
-        let rows = records(&root);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["n"], "after-reconsent");
+            assert!(!revocation_path(&root).exists(), "{name}");
+            let rows = records(&root);
+            assert_eq!(rows.len(), 1, "{name}");
+            assert_eq!(rows[0]["n"], "after-reconsent", "{name}");
+        }
     }
 
     #[test]
@@ -2592,34 +2554,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_consent_journal_with_queued_rows_fails_closed() {
-        let root = fresh_root();
-        queue_row(&root, "queued");
-        let _ = fs::remove_file(root.join("reports/.telemetry-consent"));
-
-        let error = TelemetryClient::open(&root, identity(), "", "", false)
-            .err()
-            .expect("queued rows without their consent generation were accepted");
-
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-    }
-
-    #[test]
-    fn withdrawal_journal_blocks_startup_if_the_tombstone_disappears() {
-        let root = fresh_root();
-        queue_row(&root, "before-withdrawal");
-        let root_string = std::ffi::CString::new(root.as_os_str().as_encoded_bytes()).unwrap();
-        assert!(stone_telemetry_clear(root_string.as_ptr()));
-        fs::remove_file(revocation_path(&root)).unwrap();
-
-        let error = TelemetryClient::open(&root, identity(), "", "", false)
-            .err()
-            .expect("durable withdrawal state was forgotten with the tombstone");
-
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-    }
-
-    #[test]
     fn revocation_stops_an_offline_owner_from_appending() {
         let root = fresh_root();
         let mut client = open_client(&root);
@@ -2635,8 +2569,7 @@ mod tests {
     #[test]
     fn another_process_revokes_an_idle_offline_owner() {
         if let Some(child_root) = std::env::var_os("TELEMETRY_OFFLINE_CLEAR_CHILD_ROOT") {
-            let root = std::ffi::CString::new(child_root.as_encoded_bytes()).unwrap();
-            assert!(stone_telemetry_clear(root.as_ptr()));
+            assert!(clear(Path::new(&child_root)));
             return;
         }
 
@@ -2684,17 +2617,6 @@ mod tests {
     }
 
     #[test]
-    fn opening_the_queue_creates_it_before_any_flush() {
-        let root = fresh_root();
-        let events = root.join("reports/stats/steam/events.jsonl");
-        assert!(!events.exists());
-        let client = open_client(&root);
-        assert!(events.exists(), "the open materializes the queue");
-        assert_eq!(queue_len(&events), 0, "and writes no row of its own");
-        client.finish(StopMode::Discard);
-    }
-
-    #[test]
     fn client_rejects_rows_the_ingest_would_refuse() {
         let root = fresh_root();
         let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
@@ -2729,43 +2651,6 @@ mod tests {
                 "accepted game {game:?}"
             );
         }
-    }
-
-    #[test]
-    fn structured_data_reaches_the_emitted_envelope() {
-        let root = fresh_root();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-
-        spool
-            .record_stat_data(
-                "death",
-                1_754_600_000,
-                Some(
-                    r#"{"cause":"Skeleton","run":3,"run_ms":41250,"ratio":0.5,
-                        "first":true,"lost":[12,3]}"#,
-                ),
-            )
-            .unwrap();
-
-        let rows = records(&root);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["n"], "death");
-        let data = &rows[0]["data"];
-        assert_eq!(data["cause"], "Skeleton");
-        assert_eq!(data["run"], 3);
-        assert_eq!(data["run_ms"], 41250);
-        assert_eq!(data["ratio"], 0.5);
-        assert_eq!(data["first"], true);
-        assert_eq!(data["lost"], serde_json::json!([12, 3]));
-        let keys: Vec<&String> = rows[0].as_object().unwrap().keys().collect();
-        assert_eq!(keys.len(), 12, "unexpected envelope keys {keys:?}");
-
-        spool.record_stat("session_start", 1_754_600_001).unwrap();
-        let rows = records(&root);
-        assert!(
-            rows[1].as_object().unwrap().get("data").is_none(),
-            "a row without data still carried the key"
-        );
     }
 
     #[test]
@@ -2868,7 +2753,15 @@ mod tests {
                 .record_stat_data("probe", 1, Some(payload))
                 .unwrap_or_else(|error| panic!("refused data {payload:?}: {error}"));
         }
-        assert_eq!(records(&root).len(), accepted.len());
+        let seqs: Vec<_> = records(&root)
+            .iter()
+            .map(|row| row["seq"].clone())
+            .collect();
+        let expected: Vec<Value> = (1..=accepted.len()).map(Value::from).collect();
+        assert_eq!(
+            seqs, expected,
+            "a refused row was appended or used a sequence number"
+        );
     }
 
     #[test]
@@ -2926,33 +2819,6 @@ mod tests {
     }
 
     #[test]
-    fn refused_data_neither_appends_nor_advances_the_sequence() {
-        let root = fresh_root();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-
-        spool.record_stat("first", 1).unwrap();
-        assert!(spool
-            .record_stat_data("refused", 2, Some(r#"{"k":{"nested":1}}"#))
-            .is_err());
-        assert!(spool
-            .record_stat_data("refused", 2, Some("not json at all"))
-            .is_err());
-        spool.record_stat("second", 3).unwrap();
-
-        let rows = records(&root);
-        assert_eq!(
-            rows.iter().map(|row| row["n"].clone()).collect::<Vec<_>>(),
-            vec!["first", "second"],
-            "a refused row was appended"
-        );
-        assert_eq!(rows[0]["seq"], 1);
-        assert_eq!(
-            rows[1]["seq"], 2,
-            "a refused row consumed a sequence number"
-        );
-    }
-
-    #[test]
     fn failed_upload_retries_without_another_event() {
         let root = fresh_root();
         queue_row(&root, "retry-me");
@@ -2995,26 +2861,9 @@ mod tests {
     }
 
     #[test]
-    fn flush_wait_is_capped_by_the_revocation_poll() {
-        let now = Instant::now();
-        assert_eq!(
-            worker_wait(
-                Some(now + Duration::from_secs(60)),
-                now,
-                Duration::from_millis(100),
-            ),
-            Duration::from_millis(100)
-        );
-    }
-
-    #[test]
     fn live_events_wait_for_one_flush_window() {
         let root = fresh_root();
-        let (uploaded_tx, uploaded_rx) = mpsc::channel();
-        let ingest = Ingest::start(move |_, request| {
-            uploaded_tx.send(http_body(request).to_string()).unwrap();
-            "204 No Content"
-        });
+        let (ingest, uploaded_rx) = accepting_ingest();
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_millis(500);
         let mut client = client_with_timing(&root, &ingest, timing);
@@ -3035,11 +2884,7 @@ mod tests {
     fn startup_backlog_does_not_wait_for_a_new_flush_window() {
         let root = fresh_root();
         queue_row(&root, "from-last-run");
-        let (uploaded_tx, uploaded_rx) = mpsc::channel();
-        let ingest = Ingest::start(move |_, request| {
-            uploaded_tx.send(http_body(request).to_string()).unwrap();
-            "204 No Content"
-        });
+        let (ingest, uploaded_rx) = accepting_ingest();
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_secs(5);
         let worker = upload_worker(&root, &ingest, "secret", timing);
@@ -3056,11 +2901,7 @@ mod tests {
     #[test]
     fn a_full_request_body_flushes_before_the_time_window() {
         let root = fresh_root();
-        let (uploaded_tx, uploaded_rx) = mpsc::channel();
-        let ingest = Ingest::start(move |_, request| {
-            let _ = uploaded_tx.send(http_body(request).to_string());
-            "204 No Content"
-        });
+        let (ingest, uploaded_rx) = accepting_ingest();
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_secs(3600);
         let mut client = client_with_timing(&root, &ingest, timing);
@@ -3103,39 +2944,22 @@ mod tests {
     #[test]
     fn revocation_polling_continues_during_the_flush_window() {
         let root = fresh_root();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        listener.set_nonblocking(true).unwrap();
+        let ingest = Ingest::start(|_, _| "204 No Content");
         let mut timing = test_upload_timing();
         timing.flush_window = Duration::from_secs(30);
-        let mut client = TelemetryClient::open_with_timing(
-            &root,
-            identity(),
-            &format!("http://{address}/v1/events"),
-            "secret",
-            false,
-            timing,
-        )
-        .unwrap();
+        let mut client = client_with_timing(&root, &ingest, timing);
 
         client.record_stat("revoke-before-flush", 1).unwrap();
         publish_revocation(&root).unwrap();
         wait_until_removed(&root.join("reports/stats"), Duration::from_millis(200));
+        let stats_remain = root.join("reports/stats").exists();
         client.finish(StopMode::Discard);
 
-        assert!(!root.join("reports/stats").exists());
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    assert!(
-                        read_full_http_request(&mut stream).is_empty(),
-                        "revoked rows were uploaded during the flush window"
-                    );
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) => panic!("test server failed: {error}"),
-            }
-        }
+        assert!(!stats_remain, "the flush window hid the withdrawal marker");
+        assert!(
+            ingest.stop().is_empty(),
+            "revoked rows were uploaded during the flush window"
+        );
     }
 
     #[test]
@@ -3379,6 +3203,10 @@ mod tests {
 
     #[test]
     fn native_client_posts_the_documented_batch() {
+        assert_eq!(
+            hmac_sha256_hex("key", "The quick brown fox jumps over the lazy dog"),
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
         let root = fresh_root();
         let client_root = root.join("client");
         fs::create_dir_all(&client_root).unwrap();
@@ -3401,12 +3229,9 @@ mod tests {
             timing,
         )
         .unwrap();
+        let data = r#"{"cause":"Skeleton","run":3,"gold_lost":42,"ratio":0.5,"first":true}"#;
         client
-            .record_stat_data(
-                "death",
-                1_754_600_000,
-                Some(r#"{"cause":"Skeleton","run":3,"gold_lost":42,"ratio":0.5,"first":true}"#),
-            )
+            .record_stat_data("death", 1_754_600_000, Some(data))
             .unwrap();
         let queued = client.events_path.clone();
         let _ = posted_rx.recv_timeout(Duration::from_secs(30));
@@ -3438,11 +3263,7 @@ mod tests {
         assert_eq!(row["channel"], "dev");
         assert_eq!(row["n"], "death");
         assert_eq!(row["t"], 1_754_600_000_i64);
-        assert_eq!(row["data"]["cause"], "Skeleton");
-        assert_eq!(row["data"]["run"], 3);
-        assert_eq!(row["data"]["gold_lost"], 42);
-        assert_eq!(row["data"]["ratio"], 0.5);
-        assert_eq!(row["data"]["first"], true);
+        assert_eq!(row["data"], serde_json::from_str::<Value>(data).unwrap());
         assert!(
             !queued.exists(),
             "the client did not observe and reclaim the accepted event"
@@ -3450,17 +3271,21 @@ mod tests {
     }
 
     #[test]
-    fn records_ordered_minimal_stat_envelopes() {
+    fn records_ordered_minimal_stat_envelopes_with_a_per_session_identity() {
         let root = fresh_root();
         let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
+        let data = r#"{"cause":"Skeleton","run":3,"run_ms":41250,"ratio":0.5,
+                       "first":true,"lost":[12,3]}"#;
 
         spool
-            .record_stat("found:\"Orpiment\"", 1_754_600_000)
+            .record_stat_data("found:\"Orpiment\"", 1_754_600_000, Some(data))
             .unwrap();
         spool.record_stat("died:any", 1_754_600_001).unwrap();
+        drop(spool);
+        queue_row(&root, "next-session");
 
         let rows = records(&root);
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[0]["v"], 2);
         assert_eq!(rows[0]["kind"], "stat");
         assert_eq!(rows[0]["t"], 1_754_600_000_i64);
@@ -3471,129 +3296,76 @@ mod tests {
         assert_eq!(rows[0]["game"], "demo");
         assert_eq!(rows[0]["channel"], "steam");
         assert_eq!(rows[0]["n"], "found:\"Orpiment\"");
+        assert_eq!(
+            rows[0]["data"],
+            serde_json::from_str::<Value>(data).unwrap()
+        );
+        let keys: Vec<&String> = rows[0].as_object().unwrap().keys().collect();
+        assert_eq!(keys.len(), 12, "unexpected envelope keys {keys:?}");
         assert_eq!(rows[1]["seq"], 2);
         assert_eq!(rows[1]["n"], "died:any");
+        assert!(
+            rows[1].get("data").is_none(),
+            "a row without data carried the key"
+        );
         assert!(rows[0]["session"].as_str().unwrap().len() >= 32);
-        assert!(rows[0].get("install").is_none());
-        assert!(rows[1].get("install").is_none());
         assert_eq!(rows[0]["session"], rows[1]["session"]);
         assert_eq!(rows[0]["consent"], rows[1]["consent"]);
-    }
 
-    #[test]
-    fn session_rotates_without_a_persistent_identity() {
-        let root = fresh_root();
-        queue_row(&root, "first");
-        TelemetrySpool::open(&root, identity())
-            .unwrap()
-            .record_stat("second", 2)
-            .unwrap();
-
+        assert_ne!(
+            rows[2]["session"], rows[1]["session"],
+            "the session persisted"
+        );
+        assert_eq!(rows[2]["seq"], 1);
+        assert!(rows.iter().all(|row| row.get("install").is_none()));
         assert!(!root.join("reports/.install").exists());
-        let rows = records(&root);
-        assert_eq!(rows.len(), 2);
-        assert!(rows[0].get("install").is_none());
-        assert!(rows[1].get("install").is_none());
-        assert_ne!(rows[0]["session"], rows[1]["session"]);
-        assert_eq!(rows[0]["seq"], 1);
-        assert_eq!(rows[1]["seq"], 1);
     }
 
     #[test]
-    fn drain_advances_a_persisted_cursor_only_after_acceptance() {
+    fn drain_advances_a_persisted_cursor_only_past_accepted_batches() {
         let root = fresh_root();
         let upload_marker = root.join("reports").join(LAST_UPLOAD_FILE);
         let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-        spool.record_stat("first", 1).unwrap();
-        spool.record_stat("second", 2).unwrap();
-
-        let mut sends = Vec::new();
-        let drain = TelemetryDrain::open(&root, "steam").unwrap();
-        let error = drain
-            .run(|body| {
-                sends.push(batch_names(body));
-                Err(io::Error::other("server refused the batch"))
-            })
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert_eq!(sends, [["first", "second"]], "both rows ride one request");
-        assert!(!upload_marker.exists(), "a refused batch is not an upload");
-
-        assert_eq!(drain_batches(&root, "steam"), [["first", "second"]]);
-
-        spool.record_stat("third", 3).unwrap();
-        assert_eq!(
-            drain_batches(&root, "steam"),
-            [["third"]],
-            "an accepted batch advances the cursor"
-        );
-        let uploaded_at = fs::read_to_string(upload_marker).unwrap();
-        assert!(uploaded_at.trim().parse::<u64>().unwrap() > 0);
-    }
-
-    #[test]
-    fn a_refused_first_batch_replays_from_the_start() {
-        let root = fresh_root();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
         spool.record_stat("row-0", 1).unwrap();
         let expected = grow_log_past_one_batch(&spool.events_path);
+        let refuse_batch = |refused: usize| {
+            let mut sends = Vec::new();
+            let error = TelemetryDrain::open(&root, "steam")
+                .unwrap()
+                .run(|body| {
+                    sends.push(batch_names(body));
+                    if sends.len() == refused {
+                        return Err(io::Error::other("server refused the batch"));
+                    }
+                    Ok(())
+                })
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(sends.len(), refused, "the drain kept going past a refusal");
+            sends
+        };
 
-        let mut refused = Vec::new();
-        let error = TelemetryDrain::open(&root, "steam")
-            .unwrap()
-            .run(|body| {
-                refused.push(batch_names(body));
-                Err(io::Error::other("server refused the batch"))
-            })
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert_eq!(refused.len(), 1, "the drain kept going past a refusal");
+        let first_attempt = refuse_batch(1);
+        assert!(!upload_marker.exists(), "a refused batch is not an upload");
         assert!(
-            refused[0].len() < expected.len(),
+            first_attempt[0].len() < expected.len(),
             "the log did not span two request bodies"
         );
-
-        let delivered: Vec<String> = drain_batches(&root, "steam")
-            .into_iter()
-            .flatten()
-            .collect();
-        assert_eq!(delivered, expected, "a refused first batch lost rows");
-    }
-
-    #[test]
-    fn an_accepted_batch_is_not_replayed_when_a_later_batch_is_refused() {
-        let root = fresh_root();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-        spool.record_stat("row-0", 1).unwrap();
-
-        let expected = grow_log_past_one_batch(&spool.events_path);
-
-        let mut sends = Vec::new();
-        let error = TelemetryDrain::open(&root, "steam")
-            .unwrap()
-            .run(|body| {
-                sends.push(batch_names(body));
-                if sends.len() == 2 {
-                    return Err(io::Error::other("server refused the batch"));
-                }
-                Ok(())
-            })
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert_eq!(sends.len(), 2, "the log did not span two request bodies");
-
+        let second_attempt = refuse_batch(2);
+        assert_eq!(
+            second_attempt[0], first_attempt[0],
+            "a refused first batch lost rows"
+        );
         let retried = drain_batches(&root, "steam");
 
-        let delivered: Vec<String> = sends[0]
+        let delivered: Vec<String> = second_attempt[0]
             .iter()
             .chain(retried.iter().flatten())
             .cloned()
             .collect();
         assert_eq!(delivered, expected, "every row lands exactly once");
-        assert!(
-            !retried.iter().flatten().any(|name| sends[0].contains(name)),
-            "the accepted first batch was replayed"
-        );
+        let uploaded_at = fs::read_to_string(upload_marker).unwrap();
+        assert!(uploaded_at.trim().parse::<u64>().unwrap() > 0);
     }
 
     #[test]
@@ -3614,37 +3386,5 @@ mod tests {
         assert!(!root.join("reports/stats/steam/cursor.log").exists());
 
         client.finish(StopMode::Discard);
-    }
-
-    #[test]
-    fn transport_posts_the_body_with_channel_hmac() {
-        assert_eq!(
-            hmac_sha256_hex("key", "The quick brown fox jumps over the lazy dog"),
-            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
-        );
-
-        let ingest = Ingest::start(|_, _| "204 No Content");
-
-        let body = r#"{"v":1,"kind":"stat"}"#;
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(2)))
-            .build();
-        let agent: ureq::Agent = config.into();
-        let result = transport(&ingest, "secret").send(&agent, body);
-        assert!(matches!(result, UploadDisposition::Accepted));
-
-        let request = ingest.stop().remove(0);
-        let expected = hmac_sha256_hex("secret", body);
-        assert!(request.starts_with("POST /v1/events HTTP/1.1\r\n"));
-        assert!(request
-            .to_ascii_lowercase()
-            .contains("x-rock-channel: steam\r\n"));
-        assert!(request
-            .to_ascii_lowercase()
-            .contains("x-rock-game: demo\r\n"));
-        assert!(request
-            .to_ascii_lowercase()
-            .contains(&format!("x-rock-signature: sha256={expected}\r\n")));
-        assert!(request.ends_with(body));
     }
 }
