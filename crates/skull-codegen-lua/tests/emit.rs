@@ -1318,3 +1318,20 @@ fn frame_stores_skip_temporaries_and_guard_only_nullable_values() {
         assert!(lua.contains(".c0 = "), "{lua}");
     }
 }
+
+#[test]
+fn string_interpolation_holes_concatenate_without_tostring() {
+    let lua = emit_clean(
+        r#"@nomangle fn greet(name: string, nick: string?, n: int) -> string {
+    return "hi {name} aka {nick} #{n}"
+}"#,
+        "greet",
+    );
+    assert_eq!(lua.matches("tostring(").count(), 1, "{lua}");
+    assert!(lua.contains("tostring(c2)"), "{lua}");
+    let out = luajit_ok(
+        &format!("{lua}\nio.write(greet('a', nil, 3), '|', greet('b', 'c', 4))"),
+        &lua,
+    );
+    assert_eq!(out, "hi a aka nil #3|hi b aka c #4");
+}

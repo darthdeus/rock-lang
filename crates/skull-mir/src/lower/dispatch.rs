@@ -28,6 +28,8 @@ pub struct DispatchCtx<'a> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum StringifyRoute {
     ToString,
+    /// A string hole is already its own text.
+    Verbatim,
     /// A string inside a structural rendering, quoted and escaped as a Rock literal.
     EscapedString,
     FormatFloat,
@@ -436,8 +438,8 @@ impl<'a> DispatchCtx<'a> {
             return match payload {
                 crate::monoty::MonoTy::Int
                 | crate::monoty::MonoTy::Uint
-                | crate::monoty::MonoTy::Bool
-                | crate::monoty::MonoTy::String => StringifyRoute::ToString,
+                | crate::monoty::MonoTy::Bool => StringifyRoute::ToString,
+                crate::monoty::MonoTy::String => StringifyRoute::Verbatim,
                 crate::monoty::MonoTy::Float => StringifyRoute::FormatFloat,
                 crate::monoty::MonoTy::Tuple(_)
                 | crate::monoty::MonoTy::App {
@@ -467,9 +469,10 @@ impl<'a> DispatchCtx<'a> {
             return StringifyRoute::Unsupported;
         }
         match self.expr_ty(expr) {
-            Some(TypeExpr::Builtin(
-                BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Bool | BuiltinTy::String,
-            )) => StringifyRoute::ToString,
+            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Bool)) => {
+                StringifyRoute::ToString
+            }
+            Some(TypeExpr::Builtin(BuiltinTy::String)) => StringifyRoute::Verbatim,
             Some(TypeExpr::Builtin(BuiltinTy::Float)) => StringifyRoute::FormatFloat,
             Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),

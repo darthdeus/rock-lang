@@ -206,6 +206,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         match route {
             StringifyRoute::ToString => Ok(self.emit_cur(Inst::ToString(v))),
+            StringifyRoute::Verbatim => Ok(v),
             StringifyRoute::FormatFloat => {
                 self.dispatched_call("__rock_format_float", path, vec![v])
             }
