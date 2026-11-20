@@ -550,100 +550,59 @@ fn elf_load_segments<R: std::io::Read + std::io::Seek>(
     if read < 16 || ident[..4] != *b"\x7fELF" {
         return Ok(None);
     }
-    let is64 = match ident[4] {
-        1 => false,
-        2 => true,
+    let (word, phoff_at, phentsize_at, min_phdr, flags_at, offsets) = match ident[4] {
+        1 => (4, 28, 42, 32, 24, [4, 8, 16, 20]),
+        2 => (8, 32, 54, 56, 4, [8, 16, 32, 40]),
         _ => return Ok(None),
     };
+    if ident.len() < phentsize_at + 4 {
+        return Ok(None);
+    }
     let little = match ident[5] {
         1 => true,
         2 => false,
         _ => return Ok(None),
     };
-    let u16_at = |b: &[u8], at: usize| -> Option<u64> {
-        let v = b.get(at..at + 2)?;
-        Some(if little {
-            u16::from_le_bytes([v[0], v[1]])
-        } else {
-            u16::from_be_bytes([v[0], v[1]])
-        } as u64)
+    let u16_at = |bytes: &[u8], at| {
+        let value = u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+        u64::from(if little { value } else { value.swap_bytes() })
     };
-    let u32_at = |b: &[u8], at: usize| -> Option<u64> {
-        let v = b.get(at..at + 4)?;
-        Some(if little {
-            u32::from_le_bytes([v[0], v[1], v[2], v[3]])
-        } else {
-            u32::from_be_bytes([v[0], v[1], v[2], v[3]])
-        } as u64)
+    let u32_at = |bytes: &[u8], at| {
+        let value = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        if little { value } else { value.swap_bytes() }
     };
-    let u64_at = |b: &[u8], at: usize| -> Option<u64> {
-        if is64 {
-            let v = b.get(at..at + 8)?;
-            Some(if little {
-                u64::from_le_bytes(v.try_into().ok()?)
-            } else {
-                u64::from_be_bytes(v.try_into().ok()?)
-            })
-        } else {
-            u32_at(b, at)
+    let word_at = |bytes: &[u8], at| {
+        if word == 4 {
+            return u64::from(u32_at(bytes, at));
         }
+        let value = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        if little { value } else { value.swap_bytes() }
     };
-    let (phoff, phentsize, phnum) = if is64 {
-        match (u64_at(ident, 32), u16_at(ident, 54), u16_at(ident, 56)) {
-            (Some(a), Some(b), Some(c)) => (a, b, c),
-            _ => return Ok(None),
-        }
-    } else {
-        match (u32_at(ident, 28), u16_at(ident, 42), u16_at(ident, 44)) {
-            (Some(a), Some(b), Some(c)) => (a, b, c),
-            _ => return Ok(None),
-        }
-    };
-    // PN_XNUM (0xffff) moves the count into section header 0; not expected
-    // for a compiler binary, and the whole-file fallback stays correct.
-    let min_phdr = if is64 { 56 } else { 32 };
+    let phoff = word_at(ident, phoff_at);
+    let phentsize = u16_at(ident, phentsize_at);
+    let phnum = u16_at(ident, phentsize_at + 2);
+    // PN_XNUM moves the count into section header zero. Use the whole image.
     if phnum == 0 || phnum == 0xffff || phentsize < min_phdr {
         return Ok(None);
     }
-    let Some(ph_end) = phnum
-        .checked_mul(phentsize)
-        .and_then(|span| phoff.checked_add(span))
-    else {
-        return Ok(None);
-    };
-    if ph_end > file_len {
+    if phoff
+        .checked_add(phnum * phentsize)
+        .is_none_or(|end| end > file_len)
+    {
         return Ok(None);
     }
-    let mut phdr = vec![0u8; min_phdr as usize];
+    let mut phdr = [0; 56];
+    let phdr = &mut phdr[..min_phdr as usize];
     let mut segments = Vec::new();
     for index in 0..phnum {
         image.seek(SeekFrom::Start(phoff + index * phentsize))?;
-        image.read_exact(&mut phdr)?;
-        if u32_at(&phdr, 0) != Some(1) {
-            continue; // not PT_LOAD
+        image.read_exact(phdr)?;
+        if u32_at(phdr, 0) != 1 {
+            continue; // PT_LOAD
         }
-        let fields = if is64 {
-            (
-                u32_at(&phdr, 4),
-                u64_at(&phdr, 8),
-                u64_at(&phdr, 16),
-                u64_at(&phdr, 32),
-                u64_at(&phdr, 40),
-            )
-        } else {
-            (
-                u32_at(&phdr, 24),
-                u64_at(&phdr, 4),
-                u64_at(&phdr, 8),
-                u64_at(&phdr, 16),
-                u64_at(&phdr, 20),
-            )
-        };
-        let (Some(flags), Some(offset), Some(vaddr), Some(filesz), Some(memsz)) = fields else {
-            return Ok(None);
-        };
+        let [offset, vaddr, filesz, memsz] = offsets.map(|at| word_at(phdr, at));
         let segment = ElfLoadSegment {
-            flags: flags as u32,
+            flags: u32_at(phdr, flags_at),
             vaddr,
             offset,
             filesz,
@@ -753,6 +712,20 @@ mod compiler_image_tests {
         bytes.extend_from_slice(b"CODECODE");
         bytes.extend_from_slice(b"DEBUGDEBUG");
         bytes
+    }
+
+    #[test]
+    fn elf32_big_endian_uses_the_same_identity_fields_as_elf64() {
+        let mut image = vec![0; 52];
+        image[..6].copy_from_slice(b"\x7fELF\x01\x02");
+        image[28..32].copy_from_slice(&52u32.to_be_bytes()); // e_phoff
+        image[42..44].copy_from_slice(&32u16.to_be_bytes()); // e_phentsize
+        image[44..46].copy_from_slice(&1u16.to_be_bytes()); // e_phnum
+        for field in [1u32, 84, 0x400000, 0, 8, 16, 5, 0] {
+            image.extend_from_slice(&field.to_be_bytes());
+        }
+        image.extend_from_slice(b"CODECODE");
+        assert_eq!(identity(&image), identity(&elf_image()));
     }
 
     #[test]
