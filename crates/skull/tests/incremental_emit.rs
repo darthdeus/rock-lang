@@ -5,7 +5,8 @@ use crate::common::{
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use skull::mir_emit::{MirEmit, emit_full, emit_incremental, emit_overlay as emit_overlay_result};
+use skull::mir_emit::test_support::emit_incremental;
+use skull::mir_emit::{MirEmit, emit_full, emit_overlay as emit_overlay_result};
 
 fn emit_overlay(
     ws: &Workspace,

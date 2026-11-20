@@ -50,9 +50,12 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
         "fn unused_dependency_body() -> int { return 7 }\nfn reached_dependency_body() -> int { return 9 }",
         "fn main() { print(0) }",
     );
-    let incremental =
-        skull::mir_emit::emit_incremental(&edited, &mut cache, &[body_id(&edited, "main")])
-            .expect("remove the dependency call incrementally");
+    let incremental = skull::mir_emit::test_support::emit_incremental(
+        &edited,
+        &mut cache,
+        &[body_id(&edited, "main")],
+    )
+    .expect("remove the dependency call incrementally");
     let fresh = skull::mir_emit::FullEmit::program()
         .project_root(Some("/tmp/rock-mono-project"))
         .run(&edited, mid)

@@ -111,7 +111,8 @@ fn full_and_incremental_programs_reflect_nullable_global_leaves() {
         .with_global_accessors()
         .run(&ws, mid)
         .unwrap();
-    let incremental = skull::mir_emit::emit_incremental(&ws, &mut cache, &[]).unwrap();
+    let incremental =
+        skull::mir_emit::test_support::emit_incremental(&ws, &mut cache, &[]).unwrap();
     for emit in [full, incremental] {
         let mut lua = emit.lua;
         lua.push_str(

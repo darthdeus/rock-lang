@@ -1,3 +1,4 @@
+use super::test_support::emit_incremental;
 use super::*;
 
 static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock::new(|| {

@@ -251,7 +251,7 @@ fn the_frame_limit_rejection_reaches_the_incremental_path() {
 
     let ws2 = ws_with_stdlib(&over);
     let run = body_id(&ws2, "run");
-    let err = skull::mir_emit::emit_incremental(&ws2, &mut cache, &[run])
+    let err = skull::mir_emit::test_support::emit_incremental(&ws2, &mut cache, &[run])
         .err()
         .expect("the widened body must fail the incremental re-emit");
     assert!(err.message.contains("too wide for LuaJIT"));

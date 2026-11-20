@@ -17,6 +17,7 @@ autotests = false
 # sampling profiler attributes codegen samples to one thread (clean flamegraphs).
 # Mirrors bone's `sequential`. Wired through rock-cli's `sequential` feature.
 sequential = ["skull-graph/sequential"]
+test-support = []
 
 [dependencies]
 bone-core = { workspace = true }
@@ -40,6 +41,7 @@ rustc-hash = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
+skull = { path = ".", features = ["test-support"] }
 rock-host = { workspace = true }
 rock-stdlib = { workspace = true }
 tempfile = "3.0"

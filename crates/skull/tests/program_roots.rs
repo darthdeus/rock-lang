@@ -57,9 +57,12 @@ fn an_edit_that_starts_calling_an_own_function_defines_it() {
         LIB,
         "fn own_later() -> int { return 5 }\nfn main() { print(own_later()) }",
     );
-    let incremental =
-        skull::mir_emit::emit_incremental(&edited, &mut cache, &[body_id(&edited, "main")])
-            .expect("incremental");
+    let incremental = skull::mir_emit::test_support::emit_incremental(
+        &edited,
+        &mut cache,
+        &[body_id(&edited, "main")],
+    )
+    .expect("incremental");
     assert!(defines(&incremental.lua, "own_later"));
 
     assert_eq!(run_main(&incremental.lua), "5");

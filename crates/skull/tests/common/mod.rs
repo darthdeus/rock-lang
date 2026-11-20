@@ -497,8 +497,8 @@ pub fn check_incremental(
     cache: &mut skull::mir_emit::SkullEmitCache,
     edited: &[EditedBody],
 ) -> skull::mir_emit::MirEmit {
-    let incremental =
-        skull::mir_emit::emit_incremental(ws, cache, edited).expect("incremental emit");
+    let incremental = skull::mir_emit::test_support::emit_incremental(ws, cache, edited)
+        .expect("incremental emit");
     assert_eq!(incremental.lua, full_lua(ws));
     incremental
 }

@@ -28,6 +28,8 @@ mod overlay;
 pub(crate) mod par;
 mod roots;
 mod shaders;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 mod tests;
 mod unit;
@@ -134,7 +136,7 @@ impl<'a> FullEmit<'a> {
     }
 
     /// A program that may be reloaded in place. The returned cache serves
-    /// later [`emit_incremental`] and [`emit_overlay`] builds.
+    /// later [`emit_overlay`] builds.
     pub fn program() -> Self {
         Self::new(FullBuild::Program)
     }

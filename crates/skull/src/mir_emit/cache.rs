@@ -263,12 +263,7 @@ impl SkullEmitCache {
         out.into_iter().collect()
     }
 
-    /// The authoritative instance graph this cache emits against.
-    pub fn graph(&self) -> &crate::instance_graph::InstanceGraph {
-        &self.graph
-    }
-
-    /// The Lua artifact's retained realization of [`Self::graph`].
+    #[cfg(any(test, feature = "test-support"))]
     pub fn lua_view(&self) -> &crate::artifact::ArtifactView {
         &self.lua_view
     }
@@ -469,7 +464,7 @@ impl SkullEmitCache {
         }
     }
 
-    /// A stale chunk would be reassembled by `emit_incremental` and offered to
+    /// A stale chunk would end up in the overlay offered to
     /// every later overlay, though no call reaches it.
     fn forget_instance(&mut self, gone: &Instance) {
         self.unindex_chunk(gone);
@@ -857,47 +852,4 @@ impl SkullEmitCache {
         cache.edit.repair_stats.relowering_ns = t_relow.elapsed().as_nanos() as u64;
         Ok((affected, update, added_errors, fingerprint_identities))
     }
-}
-
-pub fn emit_incremental(
-    ws: &Workspace,
-    cache: &mut SkullEmitCache,
-    reinferred: &[(ModuleId, BodyOwner)],
-) -> Result<MirEmit, CompilerError> {
-    let t_reemit = Instant::now();
-    // Shader registrations first: they are graph roots, so the cache update must
-    // see this edit's set.
-    let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (_affected, update, added_errors, _fingerprint_identities) =
-        cache.update_chunk_cache(ws, reinferred, &[])?;
-    if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
-        return Err(err);
-    }
-    if shader_changed || cache.shader_delta_affects_view(&update) {
-        cache.refresh_shader_registrations(ws)?;
-    }
-    let reemit = t_reemit.elapsed();
-
-    let t_asm = Instant::now();
-    let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (mut emit, emitted, unit_reads) = assemble(
-        ws,
-        cache,
-        &mut built_specs,
-        CacheLifetime::Retained,
-        None,
-        None,
-    )?;
-    cache.retain_assembly(ws, &emit, emitted, unit_reads, built_specs)?;
-    emit.compile_counts.chunks = cache.chunks.len();
-    let reassemble = t_asm.elapsed();
-    emit.phases.push(("incr: re-emit affected bodies", reemit));
-    emit.phases
-        .push(("incr: reassemble full output", reassemble));
-    // A codegen rejection is recorded on the shared `CodegenCtx`, so it must
-    // be drained here or it would surface at a later, unrelated emit.
-    if let Some(err) = cache.cg.take_rejection() {
-        return Err(err);
-    }
-    Ok(emit)
 }

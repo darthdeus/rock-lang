@@ -2087,6 +2087,7 @@ dependencies = [
  "rock-host",
  "rock-stdlib",
  "rustc-hash",
+ "skull",
  "skull-codegen-glsl",
  "skull-codegen-lua",
  "skull-graph",
