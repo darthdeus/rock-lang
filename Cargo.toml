@@ -129,7 +129,7 @@ rustc-hash = "2.1.1"
 smallvec = "1.15.0"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 ustr = "1.0.0"
-clap = { version = "4.5.20", default-features = false, features = ["std", "help", "usage", "error-context"] }
+clap = { version = "4.5.20", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
 log = "0.4.22"
 rayon = "1.10"
 serde = { version = "1.0.219", default-features = false, features = ["std"] }

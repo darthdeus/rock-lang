@@ -398,11 +398,7 @@ fn invalid_commands_and_options_report_their_exit_status_and_argument() {
             2,
             "unrecognized subcommand 'hole-info'",
         ),
-        (
-            &["fix", "missing.rock"],
-            1,
-            "command `fix` is unavailable in this build",
-        ),
+        (&["fix", "missing.rock"], 2, "unrecognized subcommand 'fix'"),
         (
             &["run", "--timeout", "5"],
             2,
@@ -724,17 +720,10 @@ fn main() {
 #[test]
 fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
     let parse = |argv: &[&str]| {
-        rock_cli::Args::from_matches(
-            rock_cli::Args::command()
-                .try_get_matches_from(argv)
-                .unwrap(),
-        )
+        rock_cli::Args::from_matches(rock_cli::Args::cli().try_get_matches_from(argv).unwrap())
     };
-    let frame = parse(&["rock", "frame", "game"]);
-    assert_eq!(frame.frames, 1);
     let perf = parse(&["rock", "perf", "game"]);
-    assert_eq!(perf.frames, 1200);
-    assert_eq!(perf.warmup, usize::MAX);
+    assert_eq!((perf.frames, perf.warmup_frames), (None, None));
     let perf = parse(&[
         "rock",
         "perf",
@@ -753,9 +742,9 @@ fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
         "running",
         "--jv",
     ]);
-    assert_eq!(perf.frames, 7);
+    assert_eq!(perf.frames, Some(7));
     assert_eq!(perf.seconds, Some(2.5));
-    assert_eq!(perf.warmup, 0);
+    assert_eq!(perf.warmup_frames, Some(0));
     assert_eq!((perf.gc_window, perf.gc_window_start), (3, 2));
     assert_eq!(perf.gc_window_mode, "running");
     assert!(perf.jv);

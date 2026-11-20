@@ -1,10 +1,42 @@
 //! Stone runtime preparation for the public compiler.
 
-use crate::registry::{ProgramHost, ProgramKind, RuntimeFailure, TestUnit};
 use crate::skull_backend::{GameProgram, write_full_main};
 use anyhow::Result;
 use rock_engine_host::project::configured_stone_dir;
 use std::path::{Path, PathBuf};
+
+/// Checked native FFI libraries, independent of package names and aliases.
+pub struct TestProgramFacts {
+    pub ffi_libraries: Vec<String>,
+}
+
+pub enum TestUnit<'a> {
+    File(&'a std::path::Path),
+    Package {
+        dir: &'a str,
+        facts: &'a TestProgramFacts,
+    },
+}
+
+/// Runtime text surrounding the emitted definitions. Native staging is done
+/// by `program_host` before resolving the preamble, preserving failure order.
+pub struct ProgramHost {
+    pub preamble: String,
+    pub setup: &'static str,
+}
+
+#[derive(Debug)]
+pub struct RuntimeFailure {
+    pub reason: &'static str,
+    pub rendered: String,
+}
+
+/// Ordinary compile omits runtime globals for non-games. Game-only builders
+/// (frame, sim and watch) always retain them, including their cache identity.
+pub enum ProgramKind {
+    Project,
+    Game,
+}
 
 pub(crate) fn prepare_unit(path: &str) -> anyhow::Result<()> {
     if let Some(project) = rock_host::project::find_project_root(std::path::Path::new(path)) {

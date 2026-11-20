@@ -7,8 +7,7 @@ use anyhow::Result;
 type AllocationCommand = fn(&str, &[String], &str, Option<usize>) -> Result<()>;
 
 /// `rock sim`: list, allocation diagnostics, or a run. Only skull serves sims.
-pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
-    let args = &cx.args;
+pub(crate) fn handle_sim(args: &crate::Args) -> Result<()> {
     let diagnostic: Option<(_, _, _, AllocationCommand)> = match (
         args.allocation_census.as_deref(),
         args.allocation_sites.as_deref(),

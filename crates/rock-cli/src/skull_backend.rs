@@ -2,7 +2,7 @@
 
 use crate::Result;
 use crate::bone_backend::categorize;
-use crate::registry::ProgramKind;
+use crate::stone_runtime::ProgramKind;
 use crate::test_unit::UnitFailure;
 use bone_core::prelude::Instant;
 use colored::Colorize;
@@ -708,7 +708,7 @@ fn skull_build(
         }
     };
 
-    let host = crate::stone_runtime::program_host(crate::registry::TestUnit::File(
+    let host = crate::stone_runtime::program_host(crate::stone_runtime::TestUnit::File(
         std::path::Path::new(file),
     ))
     .map_err(UnitFailure::from)?;
@@ -1291,7 +1291,7 @@ fn skull_build_package_with_limit(
     drop((ws, sources));
     crate::allocator::release_freed_memory();
     drop(slot);
-    let host = crate::stone_runtime::program_host(crate::registry::TestUnit::Package {
+    let host = crate::stone_runtime::program_host(crate::stone_runtime::TestUnit::Package {
         dir,
         facts: &facts,
     })
@@ -1355,7 +1355,7 @@ mod test_shard_policy;
 
 fn test_program_facts(
     ws: &bone_semantic::inference::Workspace,
-) -> crate::registry::TestProgramFacts {
+) -> crate::stone_runtime::TestProgramFacts {
     let ffi_libraries = ws
         .modules
         .iter()
@@ -1368,7 +1368,7 @@ fn test_program_facts(
             })
         })
         .collect();
-    crate::registry::TestProgramFacts { ffi_libraries }
+    crate::stone_runtime::TestProgramFacts { ffi_libraries }
 }
 
 pub(crate) fn collect_package_test_fns(

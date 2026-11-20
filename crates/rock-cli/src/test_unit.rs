@@ -44,8 +44,8 @@ impl UnitFailure {
     }
 }
 
-impl From<crate::registry::RuntimeFailure> for UnitFailure {
-    fn from(error: crate::registry::RuntimeFailure) -> Self {
+impl From<crate::stone_runtime::RuntimeFailure> for UnitFailure {
+    fn from(error: crate::stone_runtime::RuntimeFailure) -> Self {
         Self {
             reason: format!("{}: {}", error.reason, error.rendered),
             rendered: error.rendered,

@@ -42,25 +42,21 @@ struct Pending {
 
 static STATE: Mutex<Option<Pending>> = Mutex::new(None);
 
-pub(crate) fn is_loop_command(name: &str) -> bool {
-    crate::registry::CliCommand::named(name).is_some_and(crate::plain::logs_invocation)
-}
-
 pub fn log_path() -> Option<PathBuf> {
     std::env::var_os(LOG_ENV)
         .filter(|value| !value.is_empty() && value != "off")
         .map(PathBuf::from)
 }
 
-static COMMAND: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+static COMMAND: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub(crate) fn command() -> &'static str {
-    COMMAND.get().copied().unwrap_or("other")
+    COMMAND.get().map_or("other", String::as_str)
 }
 
-pub fn begin(command: &'static str, backend: &str) {
-    let _ = COMMAND.set(command);
-    if !is_loop_command(command) {
+pub fn begin(command: crate::Command, backend: &str) {
+    let _ = COMMAND.set(command.name());
+    if !command.logs_invocation() {
         return;
     }
     let Some(path) = log_path() else { return };
@@ -78,7 +74,7 @@ pub fn begin(command: &'static str, backend: &str) {
 
     let mut record = Map::new();
     record.insert("schema".into(), json!(SCHEMA));
-    record.insert("kind".into(), json!(command));
+    record.insert("kind".into(), json!(command.name()));
     record.insert("backend".into(), json!(backend));
     record.insert("argv".into(), json!(redact_var_values(std::env::args())));
     record.insert("exe".into(), json!(std::env::current_exe().ok()));

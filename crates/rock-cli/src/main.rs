@@ -63,13 +63,13 @@ mod allocator_tests {
 
     #[test]
     fn compiler_process_kinds() {
-        let named = |name| { rock_cli::CliCommand::named(name) }.expect("registered command");
-        for command in ["check", "compile", "test"] {
-            assert!(rock_cli::compiler_process(named(command), false));
+        use rock_cli::Command::*;
+        for command in [Check, Compile, Test] {
+            assert!(command.compiler_process(false));
         }
-        assert!(rock_cli::compiler_process(named("sim"), true));
-        for command in ["sim", "run", "stone", "frame", "perf"] {
-            assert!(!rock_cli::compiler_process(named(command), false));
+        assert!(Sim.compiler_process(true));
+        for command in [Sim, Run, Stone, Frame, Perf] {
+            assert!(!command.compiler_process(false));
         }
     }
 

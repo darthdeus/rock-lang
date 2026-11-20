@@ -49,7 +49,7 @@ fn run_process() {
         crate::allocator::keep_freed_pages_for_reuse();
         #[cfg(not(feature = "sequential"))]
         install_compiler_pool(None);
-        std::process::exit(crate::plain::run_lsp(raw));
+        std::process::exit(crate::cli::run_lsp(raw));
     }
 
     // Install the one logger before anything can log. Idempotent; reads
@@ -62,13 +62,6 @@ fn run_process() {
     skull_mir::verify::set_checks(Some(verify));
     skull_mir::verify::set_scope_checks(scope);
 
-    if let Some(name) = std::env::args().nth(1) {
-        if !name.starts_with('-') && CliCommand::named(&name).is_none() {
-            eprintln!("Error: command `{name}` is unavailable in this build");
-            std::process::exit(1);
-        }
-    }
-
     let args = Args::parse();
 
     // Same shape and exit code as clap rejecting an argument.
@@ -77,7 +70,7 @@ fn run_process() {
         std::process::exit(2);
     }
 
-    if compiler_process(args.command, args.list) {
+    if args.command.compiler_process(args.list) {
         if let Err(error) = rock_host::compiler_thp::enter_compiler_process() {
             log::error!(target: "CLI", "cannot start compiler with its THP default: {error}");
             std::process::exit(1);
@@ -115,10 +108,7 @@ fn run_process() {
 
     // After the env setup above and before rayon: begin() exports the parent
     // marker for nested `rock` runs and starts the delayed status-probe thread.
-    rock_cli::invocation_log::begin(
-        args.command.name,
-        &format!("{:?}", args.backend).to_lowercase(),
-    );
+    rock_cli::invocation_log::begin(args.command, &format!("{:?}", args.backend).to_lowercase());
 
     // On many-core hosts a larger default pool adds compiler contention. Sequential builds skip the pool.
     #[cfg(not(feature = "sequential"))]
@@ -132,9 +122,7 @@ fn run_process() {
         install_compiler_pool(Some(cap_threads));
     }
 
-    let context = CommandContext::new(args);
-    let outcome = context.run();
-    if let Err(e) = outcome {
+    if let Err(e) = args.run() {
         log::error!(target: "CLI", "{}", e);
         rock_cli::invocation_log::exit(1);
     }

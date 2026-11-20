@@ -360,31 +360,31 @@ fn perf_stderr_lines(stderr: &str, child_failed: bool) -> Vec<&str> {
         })
         .collect()
 }
-pub(crate) fn handle_frame(cx: &CommandContext) -> Result<()> {
-    let file = get_game_file(cx)?;
-    let output = cx.args.output.clone().unwrap_or_else(|| "tmp".into());
-    do_one_frame(&file, output, cx.args.frames, &cx.args.app_args)
+pub(crate) fn handle_frame(args: &Args) -> Result<()> {
+    let file = get_game_file(args)?;
+    let output = args.output.clone().unwrap_or_else(|| "tmp".into());
+    do_one_frame(&file, output, args.frames.unwrap_or(1), &args.app_args)
 }
 
-pub(crate) fn handle_perf(cx: &CommandContext) -> Result<()> {
-    let file = get_game_file(cx)?;
-    let output = cx.args.output.clone().unwrap_or_else(|| "tmp".into());
+pub(crate) fn handle_perf(args: &Args) -> Result<()> {
+    let file = get_game_file(args)?;
+    let output = args.output.clone().unwrap_or_else(|| "tmp".into());
     do_perf(
         &file,
         output,
-        cx.args.frames,
-        cx.args.seconds,
-        (cx.args.warmup != usize::MAX).then_some(cx.args.warmup),
-        cx.args.gc_window,
-        cx.args.gc_window_start,
-        &cx.args.gc_window_mode,
-        &cx.args.perf_format,
-        &cx.args.app_args,
+        args.frames.unwrap_or(1200),
+        args.seconds,
+        args.warmup_frames,
+        args.gc_window,
+        args.gc_window_start,
+        &args.gc_window_mode,
+        &args.perf_format,
+        &args.app_args,
     )
 }
 
-fn get_game_file(cx: &CommandContext) -> Result<String> {
-    let Some(arg) = cx.args.files.first() else {
+fn get_game_file(args: &Args) -> Result<String> {
+    let Some(arg) = args.files.first() else {
         let path = "game".to_string();
         if !std::path::Path::new(&path).exists() {
             suggest_available_directories(&path);
