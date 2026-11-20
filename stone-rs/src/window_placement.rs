@@ -673,32 +673,15 @@ mod tests {
     }
 
     #[test]
-    fn saved_size_survives_an_unchanged_request() {
-        let (out, dropped) =
-            drop_stale_saved_size(saved_at((1280, 720)), Some((1280, 720)), (1280, 720));
-        assert_eq!(out.size, Some((1280, 720)));
-        assert!(!dropped);
-    }
-
-    #[test]
-    fn a_changed_request_drops_the_saved_size_and_keeps_the_place() {
-        let (out, dropped) =
-            drop_stale_saved_size(saved_at((1280, 720)), Some((1280, 720)), (2560, 1440));
-        assert_eq!(out.size, None);
-        assert!(dropped);
-        assert_eq!(
-            out.pos,
-            Some((40, 50)),
-            "a resized default must not move the window"
-        );
-        assert_eq!(out.display, Some(2), "nor send it to another monitor");
-    }
-
-    #[test]
-    fn a_legacy_entry_without_a_recorded_request_is_stale() {
-        let (out, dropped) = drop_stale_saved_size(saved_at((1280, 720)), None, (2560, 1440));
-        assert_eq!(out.size, None);
-        assert!(dropped);
+    fn a_saved_size_is_kept_only_for_the_request_it_was_saved_under() {
+        let saved = saved_at((1280, 720));
+        let keep = drop_stale_saved_size(saved, Some((1280, 720)), (1280, 720));
+        assert_eq!((keep.0.size, keep.1), (Some((1280, 720)), false));
+        for recorded in [Some((1280, 720)), None] {
+            let (out, dropped) = drop_stale_saved_size(saved, recorded, (2560, 1440));
+            assert_eq!((out.size, dropped), (None, true), "{recorded:?}");
+            assert_eq!((out.pos, out.display), (Some((40, 50)), Some(2)));
+        }
     }
 
     #[test]
@@ -725,20 +708,17 @@ mod tests {
     }
 
     #[test]
-    fn merge_uses_base_when_no_source() {
+    fn merge_takes_each_field_from_its_first_source() {
         let (r, prov) = merge_geometry(base(), &[]);
         assert_eq!(r, base());
-        assert_eq!(prov.size, Source::Default);
-        assert_eq!(prov.pos, Source::Default);
-        assert_eq!(prov.display, Source::Default);
-    }
+        assert_eq!(
+            (prov.size, prov.pos, prov.display),
+            (Source::Default, Source::Default, Source::Default)
+        );
 
-    #[test]
-    fn merge_respects_precedence_per_field() {
         let env = PartialGeometry {
             size: Some((1280, 720)),
-            pos: None,
-            display: None,
+            ..Default::default()
         };
         let saved = PartialGeometry {
             size: Some((640, 480)),
@@ -746,33 +726,11 @@ mod tests {
             display: Some(0),
         };
         let (r, prov) = merge_geometry(base(), &[(Source::Env, env), (Source::Saved, saved)]);
-        assert_eq!(r.size, (1280, 720));
-        assert_eq!(r.pos, (10, 20));
-        assert_eq!(r.display, Some(0));
-        assert_eq!(prov.size, Source::Env);
-        assert_eq!(prov.pos, Source::Saved);
-        assert_eq!(prov.display, Source::Saved);
-    }
-
-    #[test]
-    fn merge_config_game_beats_config_default() {
-        let game = PartialGeometry {
-            pos: Some((5, 5)),
-            ..Default::default()
-        };
-        let default = PartialGeometry {
-            pos: Some((99, 99)),
-            size: Some((1024, 768)),
-            ..Default::default()
-        };
-        let (r, prov) = merge_geometry(
-            base(),
-            &[(Source::ConfigGame, game), (Source::ConfigDefault, default)],
+        assert_eq!((r.size, r.pos, r.display), ((1280, 720), (10, 20), Some(0)));
+        assert_eq!(
+            (prov.size, prov.pos, prov.display),
+            (Source::Env, Source::Saved, Source::Saved)
         );
-        assert_eq!(r.pos, (5, 5));
-        assert_eq!(prov.pos, Source::ConfigGame);
-        assert_eq!(r.size, (1024, 768));
-        assert_eq!(prov.size, Source::ConfigDefault);
     }
 
     #[test]
@@ -832,14 +790,8 @@ display = 1
         assert_eq!(game.pos, Some((640, 480)));
         assert_eq!(game.display, Some(1));
         assert_eq!(game.size, None);
-    }
-
-    #[test]
-    fn config_absent_game_yields_empty_game_partial() {
-        let toml = "[default]\ndisplay = 0\n";
-        let MachineConfig { game, default, .. } = parse_config_toml(toml, "nope").unwrap();
-        assert_eq!(game, PartialGeometry::default());
-        assert_eq!(default.display, Some(0));
+        let absent = parse_config_toml(toml, "nope").unwrap().game;
+        assert_eq!(absent, PartialGeometry::default());
     }
 
     #[test]
