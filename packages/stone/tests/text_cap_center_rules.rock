@@ -4,7 +4,7 @@ fn cap_center_test_font() -> Font {
 
 fn cap_center_cap_px(font: Font, size: float) -> float {
     let idx = font.data().unwrap().backend_id - 1
-    let cap = FONT_UNIT_CAP_HEIGHTS[idx]
+    let cap = FONT_LINE_UNITS[idx].cap_height
     assert(cap > 0.0, "cap-center: the font publishes a cap height")
     return cap * size * 1.0 / font_size_divisor(font)
 }

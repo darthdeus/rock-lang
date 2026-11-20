@@ -266,11 +266,11 @@ fn text_art_require_demand(
 fn text_art_font_cap_height_ratio(font: Font) -> float {
     let data = font.data() ?? return 1.0
     let idx = data.backend_id - 1
-    if idx < 0 || idx >= FONT_UNIT_SIZES.len || idx >= FONT_UNIT_CAP_HEIGHTS.len {
+    if idx < 0 || idx >= FONT_UNIT_SIZES.len || idx >= FONT_LINE_UNITS.len {
         error("TextArt font {data.backend_id} has no unit cap-height metrics")
     }
     let em = FONT_UNIT_SIZES[idx]
-    let cap = FONT_UNIT_CAP_HEIGHTS[idx]
+    let cap = FONT_LINE_UNITS[idx].cap_height
     if em <= 0.0 || cap <= 0.0 || text_art_nonfinite(em) || text_art_nonfinite(cap) {
         error("TextArt font {data.backend_id} has invalid unit cap-height metrics")
     }

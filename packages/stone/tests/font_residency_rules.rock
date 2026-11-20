@@ -70,14 +70,16 @@ fn font_release_coverage_drops_the_atlas_and_keeps_the_face() {
 @test
 fn font_reload_after_release_refreshes_without_pages() {
     font_residency_fixture((loaded, baseline) => {
-        let backend = loaded.data().unwrap().backend_id
+        let data = loaded.data().unwrap()
+        let backend = data.backend_id
+        let cap_height = data.cap_height
         let idx = backend - 1
         let advance = font_residency_advance_of(backend)
         font_release_coverage(loaded)
         assert_eq(font_residency_live_bytes(), baseline, "the release drops the fixture bytes")
-        FONT_PIXEL_SIZES[idx] = 0
+        data.cap_height = 0.0
         reload_font(loaded, FONT_RESIDENCY_PATH)
-        assert_eq(FONT_PIXEL_SIZES[idx], 24,
+        assert_eq(data.cap_height, cap_height,
             "the reload commits its re-raster instead of refusing")
         assert(FONT_ATLASES[idx] == Image(0),
             "a reload keeps the released atlas down")

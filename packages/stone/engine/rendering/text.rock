@@ -10,13 +10,15 @@
 
 // Per-font slots are indexed by `font_id - 1` (stone-rs font ids are 1-based).
 pub global FONT_ATLASES: [Image] = []
-global FONT_PIXEL_SIZES: [int] = []
-global FONT_CAP_HEIGHTS: [float] = []     // legacy per-font 'X' coverage height in atlas px
 pub global FONT_UNIT_SIZES: [float] = []      // units_per_em; layout authority, never raster-rounded
-pub global FONT_UNIT_CAP_HEIGHTS: [float] = []
-pub global FONT_UNIT_ASCENTS: [float] = []
-pub global FONT_UNIT_DESCENTS: [float] = []
-pub global FONT_UNIT_LINE_GAPS: [float] = []
+nobox value FontLineUnits {
+    ascent: float = 0.0,
+    descent: float = 0.0,
+    gap: float = 0.0,
+    cap_height: float = 0.0,
+}
+
+global FONT_LINE_UNITS: [FontLineUnits] = []
 pub global GLYPH_CACHES: [[[GlyphData]]] = []
 pub global GLYPH_UNIT_CACHES: [[[GlyphUnitData]]] = []
 pub global FONT_CP_SLOTS: [Map<int, int>] = []
@@ -47,9 +49,7 @@ value TextLineMetrics {
 }
 
 fn text_line_metrics(font_idx: int, scale_y: float) -> TextLineMetrics {
-    if font_idx < 0 || font_idx >= FONT_UNIT_ASCENTS.len
-        || font_idx >= FONT_UNIT_DESCENTS.len
-        || font_idx >= FONT_UNIT_LINE_GAPS.len {
+    if font_idx < 0 || font_idx >= FONT_LINE_UNITS.len {
         return TextLineMetrics {
             ascent: 0.0,
             descent: 0.0,
@@ -57,10 +57,11 @@ fn text_line_metrics(font_idx: int, scale_y: float) -> TextLineMetrics {
             line_height: 0.0,
         }
     }
+    let units = FONT_LINE_UNITS[font_idx]
     let scale = abs(scale_y)
-    let ascent = FONT_UNIT_ASCENTS[font_idx] * scale
-    let descent = -FONT_UNIT_DESCENTS[font_idx] * scale
-    let line_gap = FONT_UNIT_LINE_GAPS[font_idx] * scale
+    let ascent = units.ascent * scale
+    let descent = -units.descent * scale
+    let line_gap = units.gap * scale
     return TextLineMetrics {
         ascent: ascent,
         descent: descent,
@@ -85,13 +86,8 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
 
     while FONT_ATLASES.len <= idx {
         FONT_ATLASES.push(Image(0))
-        FONT_PIXEL_SIZES.push(0)
-        FONT_CAP_HEIGHTS.push(0.0)
         FONT_UNIT_SIZES.push(0.0)
-        FONT_UNIT_CAP_HEIGHTS.push(0.0)
-        FONT_UNIT_ASCENTS.push(0.0)
-        FONT_UNIT_DESCENTS.push(0.0)
-        FONT_UNIT_LINE_GAPS.push(0.0)
+        FONT_LINE_UNITS.push(FontLineUnits {})
         GLYPH_CACHES.push([])
         GLYPH_UNIT_CACHES.push([])
         FONT_CP_SLOTS.push(map_new())
@@ -101,21 +97,15 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
         FONT_ATLASES[idx] = register_image(stone_get_font_atlas_image_for(d.backend_id), d.sampling)
     }
     d.pixel_size = stone_get_font_pixel_size_for(d.backend_id)
-    FONT_PIXEL_SIZES[idx] = d.pixel_size
 
-    let font_units = native_buffer_float(5)
-    if stone_get_font_unit_metrics(d.backend_id, font_units.ptr) {
-        FONT_UNIT_SIZES[idx] = font_units[0]
-        FONT_UNIT_ASCENTS[idx] = font_units[1]
-        FONT_UNIT_DESCENTS[idx] = font_units[2]
-        FONT_UNIT_LINE_GAPS[idx] = font_units[3]
-        FONT_UNIT_CAP_HEIGHTS[idx] = font_units[4]
+    let out = native_buffer_float(9)
+    FONT_LINE_UNITS[idx] = if stone_get_font_unit_metrics(d.backend_id, out.ptr) {
+        FONT_UNIT_SIZES[idx] = out[0]
+        FontLineUnits { ascent: out[1], descent: out[2], gap: out[3], cap_height: out[4] }
     } else {
-        FONT_UNIT_SIZES[idx] = FONT_PIXEL_SIZES[idx] as float
-        FONT_UNIT_CAP_HEIGHTS[idx] = FONT_PIXEL_SIZES[idx] as float
-        FONT_UNIT_ASCENTS[idx] = FONT_PIXEL_SIZES[idx] as float
-        FONT_UNIT_DESCENTS[idx] = 0.0
-        FONT_UNIT_LINE_GAPS[idx] = 0.0
+        let size = d.pixel_size as float
+        FONT_UNIT_SIZES[idx] = size
+        FontLineUnits { ascent: size, cap_height: size }
     }
 
     let slot_count = stone_get_font_slot_count(d.backend_id)
@@ -130,14 +120,13 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
     FONT_CP_SLOTS[idx] = cp_slots
 
     let faces: [[GlyphData]] = []
-    let face = 0
-    while face < 4 {
+    let unit_faces: [[GlyphUnitData]] = []
+    for face in 0..4 {
         let glyphs: [GlyphData] = []
+        let units: [GlyphUnitData] = []
         if faces_declare(d.faces, face) {
-            let i = 0
-            while i < slot_count {
-                let out = native_buffer_float(9)
-                let g = if stone_get_glyph_info_for(d.backend_id, face, i, out.ptr) {
+            for i in 0..slot_count {
+                glyphs.push(if stone_get_glyph_info_for(d.backend_id, face, i, out.ptr) {
                     GlyphData {
                         u0: out[0], v0: out[1], u1: out[2], v1: out[3],
                         width: out[4], height: out[5],
@@ -147,70 +136,40 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
                 } else {
                     GlyphData {
                         u0: 0.0, v0: 0.0, u1: 0.0, v1: 0.0,
-                        width: 0.0, height: 0.0, bearing_x: 0.0, bearing_y: 0.0,
-                        advance: 0.0, valid: false
+                        width: 0.0, height: 0.0,
+                        bearing_x: 0.0, bearing_y: 0.0,
+                        advance: 0.0, valid: false,
                     }
-                }
-                glyphs.push(g)
-                i = i + 1
+                })
+                units.push(if stone_get_glyph_unit_metrics(d.backend_id, face, i, out.ptr) {
+                    GlyphUnitData {
+                        left: out[0], top: out[1], width: out[2], height: out[3],
+                        advance: out[4], valid: true,
+                    }
+                } else {
+                    GlyphUnitData {
+                        left: 0.0, top: 0.0, width: 0.0, height: 0.0,
+                        advance: 0.0, valid: false,
+                    }
+                })
             }
         }
         faces.push(glyphs)
-        face = face + 1
+        unit_faces.push(units)
     }
     GLYPH_CACHES[idx] = faces
-    let unit_faces: [[GlyphUnitData]] = []
-    let unit_face = 0
-    while unit_face < 4 {
-        let units: [GlyphUnitData] = []
-        if faces_declare(d.faces, unit_face) {
-            let i = 0
-            while i < slot_count {
-                let out = native_buffer_float(5)
-                let valid = stone_get_glyph_unit_metrics(d.backend_id, unit_face, i, out.ptr)
-                units.push(
-                    if valid {
-                        GlyphUnitData {
-                            left: out[0], top: out[1], width: out[2], height: out[3],
-                            advance: out[4], valid: true,
-                        }
-                    } else {
-                        GlyphUnitData {
-                            left: 0.0, top: 0.0, width: 0.0, height: 0.0,
-                            advance: 0.0, valid: false,
-                        }
-                    }
-                )
-                i = i + 1
-            }
-        }
-        unit_faces.push(units)
-        unit_face = unit_face + 1
-    }
     GLYPH_UNIT_CACHES[idx] = unit_faces
     text_layout_cache_clear()
     text_prepare_cache_clear()
-    let glyphs = faces[FACE_REGULAR]
-
-    let cap = glyphs[88].height
-    if !glyphs[88].valid || cap <= 0.0 {
-        cap = d.pixel_size as float
-    }
-    FONT_CAP_HEIGHTS[idx] = cap
-    d.cap_height = FONT_UNIT_CAP_HEIGHTS[idx]
+    d.cap_height = FONT_LINE_UNITS[idx].cap_height
 }
 
 fn drop_text_batch_for(backend_id: int) {
     let idx = backend_id - 1
     if idx < 0 || idx >= FONT_ATLASES.len { return }
     FONT_ATLASES[idx] = Image(0)
-    FONT_PIXEL_SIZES[idx] = 0
-    FONT_CAP_HEIGHTS[idx] = 0.0
     FONT_UNIT_SIZES[idx] = 0.0
-    FONT_UNIT_CAP_HEIGHTS[idx] = 0.0
-    FONT_UNIT_ASCENTS[idx] = 0.0
-    FONT_UNIT_DESCENTS[idx] = 0.0
-    FONT_UNIT_LINE_GAPS[idx] = 0.0
+    FONT_LINE_UNITS[idx] = FontLineUnits {}
     GLYPH_CACHES[idx] = []
     GLYPH_UNIT_CACHES[idx] = []
     FONT_CP_SLOTS[idx] = map_new()
@@ -746,7 +705,7 @@ fn world_text_scene_density() -> float {
 
 pub fn font_size_divisor(idx: int) -> float {
     if idx < 0 || idx >= FONT_UNIT_SIZES.len { return 0.0 }
-    return if CAP_HEIGHT_FONTS { FONT_UNIT_CAP_HEIGHTS[idx] } else { FONT_UNIT_SIZES[idx] }
+    return if CAP_HEIGHT_FONTS { FONT_LINE_UNITS[idx].cap_height } else { FONT_UNIT_SIZES[idx] }
 }
 
 pub fn font_size_divisor(font: Font) -> float {
@@ -757,8 +716,8 @@ pub fn font_size_divisor(font: Font) -> float {
 fn text_layout_raster_cap_for_scale(font: Font, scale_y: float) -> float {
     let d = font.data() ?? return abs(scale_y)
     let idx = d.backend_id - 1
-    if idx >= 0 && idx < FONT_UNIT_CAP_HEIGHTS.len {
-        let cap = FONT_UNIT_CAP_HEIGHTS[idx]
+    if idx >= 0 && idx < FONT_LINE_UNITS.len {
+        let cap = FONT_LINE_UNITS[idx].cap_height
         if cap > 0.0 { return abs(scale_y) * cap }
     }
     return abs(scale_y)
@@ -1168,10 +1127,10 @@ pub fn text_anchored_y(anchor_y: float, frac_y: float, text_h: float, ascent: fl
 pub fn text_font_cap_height(font: Font, size: float, render_scale: float) -> float {
     let d = font.data() ?? return 0.0
     let idx = d.backend_id - 1
-    if idx < 0 || idx >= FONT_UNIT_CAP_HEIGHTS.len { return 0.0 }
+    if idx < 0 || idx >= FONT_LINE_UNITS.len { return 0.0 }
     let divisor = font_size_divisor(idx)
-    if divisor <= 0.0 || FONT_UNIT_CAP_HEIGHTS[idx] <= 0.0 { return 0.0 }
-    return FONT_UNIT_CAP_HEIGHTS[idx] * size * render_scale / divisor
+    if divisor <= 0.0 || FONT_LINE_UNITS[idx].cap_height <= 0.0 { return 0.0 }
+    return FONT_LINE_UNITS[idx].cap_height * size * render_scale / divisor
 }
 
 pub fn resolved_runs_cap_height(runs: [ResolvedTextRun]) -> float {
@@ -1179,8 +1138,8 @@ pub fn resolved_runs_cap_height(runs: [ResolvedTextRun]) -> float {
     for run in runs {
         let d = run.font.data() ?? continue
         let idx = d.backend_id - 1
-        if idx < 0 || idx >= FONT_UNIT_CAP_HEIGHTS.len { continue }
-        let c = FONT_UNIT_CAP_HEIGHTS[idx] * resolved_run_scale(run) * run.draw_scale
+        if idx < 0 || idx >= FONT_LINE_UNITS.len { continue }
+        let c = FONT_LINE_UNITS[idx].cap_height * resolved_run_scale(run) * run.draw_scale
         if c > cap { cap = c }
     }
     return cap
@@ -1241,7 +1200,7 @@ pub fn text_layout_build_scaled(
     layout.raster_target_cap_height = 0.0
 
     if idx >= 0 && idx < FONT_UNIT_SIZES.len
-        && idx < FONT_UNIT_CAP_HEIGHTS.len {
+        && idx < FONT_LINE_UNITS.len {
         layout.raster_authored_cap_height = text_layout_raster_cap_for_scale(font, scale_y)
         layout.raster_target_cap_height = layout.raster_authored_cap_height
             * layout.raster_layout_to_target_scale
@@ -1391,11 +1350,11 @@ pub fn text_layout_build_scaled(
     layout.alignment_offset = frac * -1.0
         * v(layout.logical_bounds.w, layout.logical_bounds.h)
     if frac.y == 0.5 && layout.logical_bounds.h > 0.0
-        && idx >= 0 && idx < FONT_UNIT_CAP_HEIGHTS.len
-        && FONT_UNIT_CAP_HEIGHTS[idx] > 0.0 {
+        && idx >= 0 && idx < FONT_LINE_UNITS.len
+        && FONT_LINE_UNITS[idx].cap_height > 0.0 {
         let trailing = (layout.line_count - 1) as float * metrics.line_height
         layout.alignment_offset.y = -text_cap_center_from_top(
-            layout.ascent, FONT_UNIT_CAP_HEIGHTS[idx] * abs_sy, trailing)
+            layout.ascent, FONT_LINE_UNITS[idx].cap_height * abs_sy, trailing)
     }
     return layout
 }
