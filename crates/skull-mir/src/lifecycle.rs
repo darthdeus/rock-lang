@@ -200,29 +200,18 @@ fn int_expr(body: &bone_core::hir::Body, e: Idx<bone_core::hir::Expr>) -> Option
     }
 }
 
-fn global_identity(
-    ws: &Workspace,
-    module: ModuleId,
-    global: Idx<bone_core::hir::GlobalDef>,
-) -> CodeIdentity {
-    CodeIdentity::Artifact(CodeOwner::Artifact {
-        kind: CodeOwnerKind::Global,
-        module: ws.module(module).file,
-        name: ws.module(module).globals[global].name,
-    })
-}
+type GlobalLocation = (ModuleId, Idx<bone_core::hir::GlobalDef>);
 
-fn global_locations(ws: &Workspace, name: Ustr) -> Vec<(ModuleId, Idx<bone_core::hir::GlobalDef>)> {
-    ws.modules
+fn global_location(ws: &Workspace, name: Ustr) -> Result<Option<GlobalLocation>, ()> {
+    let mut locations = ws
+        .modules
         .iter()
-        .filter_map(|module| {
-            module
-                .global_by_name
-                .get(&name)
-                .copied()
-                .map(|gid| (module.id, gid))
-        })
-        .collect()
+        .filter_map(|module| module.global_by_name.get(&name).map(|&id| (module.id, id)));
+    let first = locations.next();
+    if locations.next().is_some() {
+        return Err(());
+    }
+    Ok(first)
 }
 
 fn user_function_named(ws: &Workspace, name: Ustr) -> bool {
@@ -231,35 +220,14 @@ fn user_function_named(ws: &Workspace, name: Ustr) -> bool {
         .is_some_and(|functions| functions.iter().any(|(module, _)| !module.is_builtin()))
 }
 
-fn ordered_global_locations(
-    ws: &Workspace,
-    names: impl IntoIterator<Item = Ustr>,
-) -> Result<Vec<(Ustr, ModuleId, Idx<bone_core::hir::GlobalDef>)>, CompilerError> {
-    let mut out = Vec::new();
-    for name in names {
-        let locations = global_locations(ws, name);
-        match locations.as_slice() {
-            [] => continue,
-            [(module, global)] => out.push((name, *module, *global)),
-            _ => {
-                return Err(CompilerError::new_no_location(format!(
-                    "@wire dependency `{name}` has an ambiguous global identity"
-                )));
-            }
-        }
-    }
-    out.sort_by_key(|(_, module, global)| (module.index(), u32::from(global.into_raw())));
-    Ok(out)
-}
-
-fn wire_dependency_identities(
+fn wire_dependency_roots(
     ws: &Workspace,
     names: &[skull_parser::Ident],
     resolved_names: Option<&[Ustr]>,
     span: bone_core::prelude::Span,
-) -> Result<Vec<CodeIdentity>, CompilerError> {
+) -> Result<Vec<GlobalLocation>, CompilerError> {
     let mut seen = std::collections::HashSet::new();
-    let mut identities = Vec::with_capacity(names.len());
+    let mut roots = Vec::with_capacity(names.len());
     for (index, name) in names.iter().enumerate() {
         let key = resolved_names
             .and_then(|resolved| resolved.get(index).copied())
@@ -270,30 +238,20 @@ fn wire_dependency_identities(
                 format!("@wire(onchange=...) repeats dependency `{}`", name.name),
             ));
         }
-        let locations = global_locations(ws, key);
-        if !locations.is_empty() && user_function_named(ws, key) {
-            return Err(CompilerError::new_with_label(
-                name.span,
-                format!("@wire dependency `{}` has an ambiguous identity", name.name),
-            ));
-        }
-        let (module, global) = match locations.as_slice() {
-            [] => {
-                if user_function_named(ws, key) {
-                    return Err(CompilerError::new_with_label(
-                        name.span,
-                        format!(
-                            "@wire dependency `{}` names a function; expected a top-level const",
-                            name.name
-                        ),
-                    ));
-                }
-                return Err(CompilerError::new_with_label(
-                    name.span,
-                    format!("@wire dependency `{}` is unknown", name.name),
-                ));
+        let user_function = user_function_named(ws, key);
+        let (module, global) = match global_location(ws, key) {
+            Ok(Some(location)) if !user_function => location,
+            Ok(None) => {
+                let message = if user_function {
+                    format!(
+                        "@wire dependency `{}` names a function; expected a top-level const",
+                        name.name
+                    )
+                } else {
+                    format!("@wire dependency `{}` is unknown", name.name)
+                };
+                return Err(CompilerError::new_with_label(name.span, message));
             }
-            [(module, global)] => (*module, *global),
             _ => {
                 return Err(CompilerError::new_with_label(
                     name.span,
@@ -310,22 +268,21 @@ fn wire_dependency_identities(
                 ),
             ));
         }
-        identities.push(global_identity(ws, module, global));
+        roots.push((module, global));
     }
-    if identities.is_empty() {
+    if roots.is_empty() {
         return Err(CompilerError::new_with_label(
             span,
             "@wire(onchange=...) requires a non-empty dependency list".to_string(),
         ));
     }
-    Ok(identities)
+    Ok(roots)
 }
 
-fn dependency_names_for_const(
+fn dependencies_of_const(
     ws: &Workspace,
-    module: ModuleId,
-    global: Idx<bone_core::hir::GlobalDef>,
-) -> Result<Vec<(Ustr, ModuleId, Idx<bone_core::hir::GlobalDef>)>, CompilerError> {
+    (module, global): GlobalLocation,
+) -> Result<Vec<GlobalLocation>, CompilerError> {
     let Some(inference) = ws
         .inference(module)
         .and_then(|inference| inference.per_fn.get(&BodyOwner::Global(global)))
@@ -335,25 +292,36 @@ fn dependency_names_for_const(
             ws.module(module).globals[global].name
         )));
     };
-    let dependencies = ordered_global_locations(ws, inference.deps.iter().copied())?;
-    for (name, dependency_module, dependency_global) in &dependencies {
-        if !ws.module(*dependency_module).globals[*dependency_global].is_const {
+    let mut resolved = Vec::with_capacity(inference.deps.len());
+    let mut dependencies = Vec::new();
+    for &name in &inference.deps {
+        let location = global_location(ws, name).map_err(|()| {
+            CompilerError::new_no_location(format!(
+                "@wire dependency `{name}` has an ambiguous global identity"
+            ))
+        })?;
+        resolved.push((name, location.is_some()));
+        dependencies.extend(location.map(|(module, global)| (name, module, global)));
+    }
+    dependencies.sort_by_key(|(_, module, global)| (module.index(), u32::from(global.into_raw())));
+    for &(name, dependency_module, dependency_global) in &dependencies {
+        let dependency = &ws.module(dependency_module).globals[dependency_global];
+        if !dependency.is_const {
             return Err(CompilerError::new_no_location(format!(
                 "@wire const closure for `{}` reaches mutable global `{name}`",
-                ws.module(module).globals[global].name
+                ws.module(module).globals[global].name,
             )));
         }
     }
-    for name in inference.deps.iter().copied() {
-        let locations = global_locations(ws, name);
+    for (name, has_global) in resolved {
         let user_function = user_function_named(ws, name);
-        if !locations.is_empty() && user_function {
+        if has_global && user_function {
             return Err(CompilerError::new_no_location(format!(
                 "@wire const closure for `{}` reaches ambiguous identity `{name}`",
                 ws.module(module).globals[global].name
             )));
         }
-        if locations.is_empty()
+        if !has_global
             && user_function
             && ws.functions_by_name.get(&name).is_some_and(|functions| {
                 functions.iter().any(|(module, function)| {
@@ -374,46 +342,33 @@ fn dependency_names_for_const(
             )));
         }
     }
-    Ok(dependencies)
+    Ok(dependencies
+        .into_iter()
+        .map(|(_, module, global)| (module, global))
+        .collect())
 }
 
 fn dependency_closure(
     ws: &Workspace,
-    identities: &[CodeIdentity],
-) -> Result<Vec<CodeIdentity>, CompilerError> {
-    let mut locations = std::collections::HashMap::new();
-    for module in ws.modules.iter() {
-        for (global, definition) in module.globals.iter() {
-            if definition.is_const {
-                locations.insert(definition.name, (module.id, global));
-            }
-        }
-    }
+    roots: Vec<GlobalLocation>,
+) -> Result<Vec<LifecycleDependency>, CompilerError> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let mut pending = std::collections::VecDeque::from(identities.to_vec());
-    while let Some(identity) = pending.pop_front() {
-        if !seen.insert(identity.clone()) {
+    let mut pending = std::collections::VecDeque::from(roots);
+    while let Some((module, global)) = pending.pop_front() {
+        if !seen.insert((module, global)) {
             continue;
         }
-        out.push(identity.clone());
-        let CodeIdentity::Artifact(CodeOwner::Artifact {
-            kind: CodeOwnerKind::Global,
-            name,
-            ..
-        }) = identity
-        else {
-            continue;
-        };
-        let Some(&(module, global)) = locations.get(&name) else {
-            return Err(CompilerError::new_no_location(format!(
-                "@wire dependency `{name}` has no compiler-owned const declaration"
-            )));
-        };
-        let dependencies = dependency_names_for_const(ws, module, global)?;
-        for (_, dependency_module, dependency_global) in dependencies {
-            pending.push_back(global_identity(ws, dependency_module, dependency_global));
-        }
+        let module_data = ws.module(module);
+        out.push(LifecycleDependency {
+            identity: CodeIdentity::Artifact(CodeOwner::Artifact {
+                kind: CodeOwnerKind::Global,
+                module: module_data.file,
+                name: module_data.globals[global].name,
+            }),
+            fingerprint: 0,
+        });
+        pending.extend(dependencies_of_const(ws, (module, global))?);
     }
     Ok(out)
 }
@@ -452,15 +407,8 @@ fn wire_qualification(
             ));
         }
     };
-    let declared =
-        wire_dependency_identities(ws, names, app.resolved_ident_list.as_deref(), app.span)?;
-    let dependencies = dependency_closure(ws, &declared)?
-        .into_iter()
-        .map(|identity| LifecycleDependency {
-            identity,
-            fingerprint: 0,
-        })
-        .collect();
+    let roots = wire_dependency_roots(ws, names, app.resolved_ident_list.as_deref(), app.span)?;
+    let dependencies = dependency_closure(ws, roots)?;
     Ok(LifecycleQualification::OnChange { dependencies })
 }
 
