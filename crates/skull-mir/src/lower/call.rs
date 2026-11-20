@@ -438,8 +438,7 @@ impl<'a> Builder<'a> {
             func: *tail_id,
         };
         let tail_instance = self
-            .concrete_callee_for_site_op(e, crate::site::SiteOp::Synthesized("preflight_tail"))?
-            .ok_or_else(|| self.gap_here("@preflight tail has no concrete call site"))?;
+            .concrete_callee_for_site_op(e, crate::site::SiteOp::Synthesized("preflight_tail"))?;
         if tail_instance.func != tail_ref {
             return Err(self.gap_here("@preflight concrete tail differs from annotation"));
         }
@@ -509,9 +508,7 @@ impl<'a> Builder<'a> {
             .expect("direct-call scope")
             .extend(reads);
         let op = crate::site::SiteOp::Synthesized("preflight");
-        let instance = self
-            .concrete_callee_for_site_op(e, op.clone())?
-            .ok_or_else(|| self.gap_here("@preflight helper has no concrete call site"))?;
+        let instance = self.concrete_callee_for_site_op(e, op.clone())?;
         if instance.func != plan.helper {
             return Err(self.gap_here("@preflight concrete helper differs from annotation"));
         }
@@ -537,9 +534,7 @@ impl<'a> Builder<'a> {
         args: Vec<Idx<Inst>>,
     ) -> Result<ValueRepr, CompilerError> {
         let op = crate::site::SiteOp::Synthesized("preflight_tail");
-        let instance = self
-            .concrete_callee_for_site_op(e, op.clone())?
-            .ok_or_else(|| self.gap_here("@preflight tail has no concrete call site"))?;
+        let instance = self.concrete_callee_for_site_op(e, op.clone())?;
         if instance.func != tail {
             return Err(self.gap_here("@preflight concrete tail differs from annotation"));
         }
@@ -588,9 +583,7 @@ impl<'a> Builder<'a> {
         {
             return Ok(None);
         }
-        let inst = self
-            .concrete_callee_for_site(e)?
-            .ok_or_else(|| self.gap_here("field_get has no concrete callee"))?;
+        let inst = self.concrete_callee_for_site(e)?;
         let Some(ret) = self.concrete_callee_return_ty(e, &inst)? else {
             return Ok(None);
         };
@@ -650,7 +643,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn concrete_callee_for_site(
         &self,
         e: Idx<Expr>,
-    ) -> Result<Option<crate::instance::Instance>, CompilerError> {
+    ) -> Result<crate::instance::Instance, CompilerError> {
         self.concrete_callee_for_site_op(e, self.cur_op.clone())
     }
 
@@ -658,9 +651,9 @@ impl<'a> Builder<'a> {
         &self,
         e: Idx<Expr>,
         op: crate::site::SiteOp,
-    ) -> Result<Option<crate::instance::Instance>, CompilerError> {
+    ) -> Result<crate::instance::Instance, CompilerError> {
         self.concrete_callee_entry(e, op)
-            .map(|callee| Some(callee.instance.clone()))
+            .map(|callee| callee.instance.clone())
     }
 
     fn concrete_callee_entry(
@@ -1569,9 +1562,7 @@ impl<'a> Builder<'a> {
         &self,
         e: Idx<Expr>,
     ) -> Result<Option<TupleLayout>, CompilerError> {
-        let owner = self
-            .concrete_callee_for_site(e)?
-            .ok_or_else(|| self.gap_here("tuple-return call has no concrete callee identity"))?;
+        let owner = self.concrete_callee_for_site(e)?;
         let abi = self.callee_abi_plan_for_instance(&owner)?;
         Ok(abi.ret_tuple().cloned())
     }
@@ -1755,9 +1746,10 @@ impl<'a> Builder<'a> {
             return Ok(args);
         }
         if let Some(preflight) = preflight {
-            let tail_instance = self
-                .concrete_callee_for_site_op(e, crate::site::SiteOp::Synthesized("preflight_tail"))?
-                .ok_or_else(|| self.gap_here("@preflight tail has no concrete call site"))?;
+            let tail_instance = self.concrete_callee_for_site_op(
+                e,
+                crate::site::SiteOp::Synthesized("preflight_tail"),
+            )?;
             if tail_instance.func != preflight.tail {
                 return Err(self.gap_here("@preflight concrete tail differs from annotation"));
             }

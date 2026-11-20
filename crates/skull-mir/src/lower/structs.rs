@@ -709,9 +709,7 @@ impl<'a> Builder<'a> {
                 format!("`@scene_type_key` fn `{fname}` takes no arguments"),
             ));
         };
-        let instance = self
-            .concrete_callee_for_site(call)?
-            .ok_or_else(|| self.gap_here("Scene type-key expansion has no concrete callee"))?;
+        let instance = self.concrete_callee_for_site(call)?;
         let arg_types = instance.arg_types(self.scx.interner());
         let [ty] = arg_types.as_slice() else {
             return Err(CompilerError::new_with_label(

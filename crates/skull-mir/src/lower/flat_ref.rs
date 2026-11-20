@@ -299,9 +299,7 @@ impl<'a> Builder<'a> {
         if flat_args.is_empty() && !returns_ref {
             return Ok(None);
         }
-        let inst = self
-            .concrete_callee_for_site_op(e, crate::site::SiteOp::DirectCall)?
-            .ok_or_else(|| self.gap_here("flat `ref` call has no concrete callee identity"))?;
+        let inst = self.concrete_callee_for_site_op(e, crate::site::SiteOp::DirectCall)?;
         let ret = if returns_ref {
             self.flat_return_of(&inst, &sig)?
         } else {

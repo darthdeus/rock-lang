@@ -163,11 +163,9 @@ impl<'a> Builder<'a> {
             let outer_expr = self.cur_expr.replace(e);
             // Resolve the instance first: arguments splat against the target body's
             // ABI, not the declaration's.
-            let witness = self
-                .with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
-                    b.concrete_callee_for_site(e)
-                })?
-                .ok_or_else(|| gap("implicit iterator has no concrete callee"))?;
+            let witness = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
+                b.concrete_callee_for_site(e)
+            })?;
             let ty = self.concrete_expr_ty(e).ok_or_else(|| {
                 self.gap_here("implicit iterator expression has no concrete type")
             })?;
@@ -376,17 +374,14 @@ impl<'a> Builder<'a> {
                 });
                 // Record identity before lowering erases the source name.
                 self.f.fn_value_symbols.insert(id, fref);
-                if let Some(instance) =
-                    self.concrete_callee_for_site_op(e, crate::site::SiteOp::FnValue)?
-                {
-                    self.reject_flat_return_outside_direct_call(e, &instance)?;
-                    // Only a compiler-owned Rock body gets a logical CodeIdentity; foreign,
-                    // inline and intrinsic values stay backend boundaries.
-                    if crate::lower::requires_concrete_body_plan(self.ws, &instance) {
-                        self.f
-                            .code_value_identities
-                            .insert(id, crate::code_identity::CodeIdentity::Named(instance));
-                    }
+                let instance = self.concrete_callee_for_site_op(e, crate::site::SiteOp::FnValue)?;
+                self.reject_flat_return_outside_direct_call(e, &instance)?;
+                // Only a compiler-owned Rock body gets a logical CodeIdentity; foreign,
+                // inline and intrinsic values stay backend boundaries.
+                if crate::lower::requires_concrete_body_plan(self.ws, &instance) {
+                    self.f
+                        .code_value_identities
+                        .insert(id, crate::code_identity::CodeIdentity::Named(instance));
                 }
                 Ok(id)
             }

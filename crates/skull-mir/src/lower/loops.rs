@@ -197,14 +197,9 @@ impl<'a> Builder<'a> {
                 let bundle = self.lower_expr_repr(iter_expr)?;
                 // Resolved before the arguments are shaped: the splat must match the body
                 // the call targets.
-                let witness = if info.iter.is_some() {
-                    self.with_site_op(crate::site::SiteOp::ForIter, |b| {
-                        b.concrete_callee_for_site(iter_expr)
-                    })?
-                    .ok_or_else(|| gap("for-iter has no concrete callee"))?
-                } else {
-                    crate::instance::Instance::base(iter_ref)
-                };
+                let witness = self.with_site_op(crate::site::SiteOp::ForIter, |b| {
+                    b.concrete_callee_for_site(iter_expr)
+                })?;
                 let args = self.iter_witness_args(&witness, bundle)?;
                 // The head's `iter` witness and the head expression's own call share one
                 // span; the site operation keeps them distinguishable.
@@ -249,7 +244,6 @@ impl<'a> Builder<'a> {
             self.with_site_op(crate::site::SiteOp::ForNext(Box::default()), |b| {
                 b.concrete_callee_for_site(iter_expr)
             })?
-            .ok_or_else(|| gap("for-next has no concrete callee"))?
             .into()
         } else {
             None
