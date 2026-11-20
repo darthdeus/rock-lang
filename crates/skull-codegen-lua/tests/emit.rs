@@ -1489,3 +1489,17 @@ fn numeric_for_snapshots_only_invariant_arithmetic() {
         assert!(has_general_loop(&lua) && !lua.contains(" for c"), "{lua}");
     }
 }
+
+#[test]
+fn json_digit_scans_use_numeric_for() {
+    let lua = emit_inlined(
+        r#"
+fn scan_json_number(src: string, at: int) -> (int, bool, bool) {
+    return parse_number_scan_at(src, at)
+}
+"#,
+        "scan_json_number",
+    );
+    assert_eq!(lua.matches(" for c").count(), 3, "{lua}");
+    assert!(!lua.contains("goto w"), "{lua}");
+}
