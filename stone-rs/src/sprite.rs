@@ -4,21 +4,14 @@ use std::ffi::{c_float, c_int};
 use crate::{track_draw_call, with_gl, DebugGl, CURRENT_SHADER};
 
 struct SpriteState {
-    vao: glow::VertexArray,
-    vbo: glow::Buffer,
     // Mesh VAO for stone_draw_mesh. Attribs are configured per draw from the
     // layout the caller passes, pointing into the vertex stream's range for
     // that draw (stream_buffer.rs); this VAO holds none of its own.
     mesh_vao: glow::VertexArray,
     triangle_indices: Vec<u32>,
-    // present: NDC top -> v=0, the one flip onto the bottom-up window. identity: NDC top ->
-    // v=1, so canvas-to-canvas hops preserve content.
-    fs_quad_present_vao: glow::VertexArray,
-    fs_quad_present_vbo: glow::Buffer,
-    fs_quad_identity_vao: glow::VertexArray,
-    fs_quad_identity_vbo: glow::Buffer,
-    fs_quad_scaled_vao: glow::VertexArray,
-    fs_quad_scaled_vbo: glow::Buffer,
+    // Fullscreen rectangle, pos(2)+uv(2), six vertices streamed per draw.
+    quad_vao: glow::VertexArray,
+    quad_vbo: glow::Buffer,
 }
 
 thread_local! {
@@ -89,13 +82,8 @@ pub(crate) fn initialized() -> bool {
     SPRITE_STATE.with(|state| state.borrow().is_some())
 }
 
-// Upload one static fullscreen quad (pos(2)+uv(2), 6 verts) and return its
-// VAO/VBO. The two callers differ only in the UV column (present vs identity).
 // None on GL failure, with the error logged; a panic here would abort across FFI.
-unsafe fn upload_fs_quad(
-    gl: &DebugGl,
-    data: &[f32; 24],
-) -> Option<(glow::VertexArray, glow::Buffer)> {
+unsafe fn create_quad(gl: &DebugGl) -> Option<(glow::VertexArray, glow::Buffer)> {
     let vao = match gl.create_vertex_array() {
         Ok(vao) => vao,
         Err(e) => {
@@ -113,31 +101,13 @@ unsafe fn upload_fs_quad(
     };
     gl.bind_vertex_array(Some(vao));
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-    if gl
-        .buffer_data_u8_slice(
-            glow::ARRAY_BUFFER,
-            bytemuck::cast_slice(data),
-            glow::STATIC_DRAW,
-        )
-        .is_err()
-    {
+    if stream_vertices(gl, bytemuck::cast_slice(&fs_rect_data(0.0, 0.0, 1.0, 1.0))).is_err() {
         gl.bind_vertex_array(None);
         gl.delete_buffer(vbo);
         gl.delete_vertex_array(vao);
         return None;
     }
-    let stride = 4 * std::mem::size_of::<f32>() as i32;
-    gl.enable_vertex_attrib_array(0);
-    gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
-    gl.enable_vertex_attrib_array(1);
-    gl.vertex_attrib_pointer_f32(
-        1,
-        2,
-        glow::FLOAT,
-        false,
-        stride,
-        2 * std::mem::size_of::<f32>() as i32,
-    );
+    crate::mesh::setup_attribs(gl, 0, &[2, 2], 4, 0, 0);
     gl.bind_vertex_array(None);
     Some((vao, vbo))
 }
@@ -156,122 +126,24 @@ pub extern "C" fn stone_sprite_init() -> bool {
 }
 
 unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
-    let vao = match gl.create_vertex_array() {
-        Ok(vao) => vao,
-        Err(e) => {
-            ::log::error!(target: "STONE", "stone_sprite_init: failed to create VAO: {e}");
-            return false;
-        }
-    };
-    let vbo = match gl.create_buffer() {
-        Ok(vbo) => vbo,
-        Err(e) => {
-            ::log::error!(target: "STONE", "stone_sprite_init: failed to create VBO: {e}");
-            gl.delete_vertex_array(vao);
-            return false;
-        }
-    };
-
-    gl.bind_vertex_array(Some(vao));
-    gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-
-    let empty_data: [f32; 48] = [0.0; 48];
-    if gl
-        .buffer_data_u8_slice(
-            glow::ARRAY_BUFFER,
-            bytemuck::cast_slice(&empty_data),
-            glow::DYNAMIC_DRAW,
-        )
-        .is_err()
-    {
-        gl.bind_vertex_array(None);
-        gl.delete_buffer(vbo);
-        gl.delete_vertex_array(vao);
-        return false;
-    }
-
-    let stride = 8 * std::mem::size_of::<f32>() as i32;
-
-    gl.enable_vertex_attrib_array(0);
-    gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
-
-    gl.enable_vertex_attrib_array(1);
-    gl.vertex_attrib_pointer_f32(
-        1,
-        2,
-        glow::FLOAT,
-        false,
-        stride,
-        2 * std::mem::size_of::<f32>() as i32,
-    );
-
-    gl.enable_vertex_attrib_array(2);
-    gl.vertex_attrib_pointer_f32(
-        2,
-        4,
-        glow::FLOAT,
-        false,
-        stride,
-        4 * std::mem::size_of::<f32>() as i32,
-    );
-
-    gl.bind_vertex_array(None);
-
-    // Mesh VAO for stone_draw_mesh. No attrib state is configured here:
-    // the draw sets pointers AND enables from the layout the caller passes,
-    // so a VAO pre-shaped to one layout would be a second, stale statement.
     let mesh_vao = match gl.create_vertex_array() {
         Ok(vao) => vao,
         Err(e) => {
             ::log::error!(target: "STONE", "stone_sprite_init: failed to create mesh VAO: {e}");
-            gl.delete_vertex_array(vao);
-            gl.delete_buffer(vbo);
             return false;
         }
     };
-    let Some((fs_quad_present_vao, fs_quad_present_vbo)) =
-        upload_fs_quad(gl, &fs_quad_data(true, 1.0, 1.0))
-    else {
-        gl.delete_vertex_array(vao);
-        gl.delete_buffer(vbo);
+    let Some((quad_vao, quad_vbo)) = create_quad(gl) else {
         gl.delete_vertex_array(mesh_vao);
-        return false;
-    };
-    let Some((fs_quad_identity_vao, fs_quad_identity_vbo)) =
-        upload_fs_quad(gl, &fs_quad_data(false, 1.0, 1.0))
-    else {
-        gl.delete_vertex_array(vao);
-        gl.delete_buffer(vbo);
-        gl.delete_vertex_array(mesh_vao);
-        gl.delete_vertex_array(fs_quad_present_vao);
-        gl.delete_buffer(fs_quad_present_vbo);
-        return false;
-    };
-    let Some((fs_quad_scaled_vao, fs_quad_scaled_vbo)) =
-        upload_fs_quad(gl, &fs_quad_data(false, 1.0, 1.0))
-    else {
-        gl.delete_vertex_array(vao);
-        gl.delete_buffer(vbo);
-        gl.delete_vertex_array(mesh_vao);
-        gl.delete_vertex_array(fs_quad_present_vao);
-        gl.delete_buffer(fs_quad_present_vbo);
-        gl.delete_vertex_array(fs_quad_identity_vao);
-        gl.delete_buffer(fs_quad_identity_vbo);
         return false;
     };
 
     SPRITE_STATE.with(|s| {
         *s.borrow_mut() = Some(SpriteState {
-            vao,
-            vbo,
             mesh_vao,
             triangle_indices: Vec::new(),
-            fs_quad_present_vao,
-            fs_quad_present_vbo,
-            fs_quad_scaled_vao,
-            fs_quad_scaled_vbo,
-            fs_quad_identity_vao,
-            fs_quad_identity_vbo,
+            quad_vao,
+            quad_vbo,
         });
     });
 
@@ -287,15 +159,9 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
 }
 
 unsafe fn destroy_geometry(gl: &DebugGl, state: SpriteState) {
-    gl.delete_vertex_array(state.vao);
-    gl.delete_buffer(state.vbo);
     gl.delete_vertex_array(state.mesh_vao);
-    gl.delete_vertex_array(state.fs_quad_present_vao);
-    gl.delete_buffer(state.fs_quad_present_vbo);
-    gl.delete_vertex_array(state.fs_quad_scaled_vao);
-    gl.delete_buffer(state.fs_quad_scaled_vbo);
-    gl.delete_vertex_array(state.fs_quad_identity_vao);
-    gl.delete_buffer(state.fs_quad_identity_vbo);
+    gl.delete_vertex_array(state.quad_vao);
+    gl.delete_buffer(state.quad_vbo);
 }
 
 pub(crate) fn shutdown() {
@@ -324,36 +190,39 @@ pub extern "C" fn stone_set_fullscreen_uv_scale(sx: c_float, sy: c_float) {
     FS_QUAD_UV_SCALE.with(|c| *c.borrow_mut() = (sx.max(0.0), sy.max(0.0)));
 }
 
-const FS_QUAD_PRESENT: [f32; 24] = [
-    -1.0, 1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 0.0, 1.0, -1.0, 1.0, 0.0, 0.0, 1.0, 1.0,
-    1.0, 0.0, 1.0, -1.0, 1.0, 1.0,
-];
-const FS_QUAD_IDENTITY: [f32; 24] = [
-    -1.0, 1.0, 0.0, 1.0, 1.0, -1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 0.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0,
-    1.0, 1.0, 1.0, -1.0, 1.0, 0.0,
-];
-
-fn fs_quad_data(to_window: bool, sx: f32, sy: f32) -> [f32; 24] {
-    let mut data = if to_window {
-        FS_QUAD_PRESENT
-    } else {
-        FS_QUAD_IDENTITY
-    };
-    let mut i = 0;
-    while i < 24 {
-        data[i + 2] *= sx;
-        data[i + 3] *= sy;
-        i += 4;
-    }
-    data
-}
-
 /// `(u0, v0)` maps to NDC (-1,-1) and `(u1, v1)` to (+1,+1).
 fn fs_rect_data(u0: f32, v0: f32, u1: f32, v1: f32) -> [f32; 24] {
     [
         -1.0, 1.0, u0, v1, 1.0, -1.0, u1, v0, -1.0, -1.0, u0, v0, -1.0, 1.0, u0, v1, 1.0, 1.0, u1,
         v1, 1.0, -1.0, u1, v0,
     ]
+}
+
+/// Draw one fullscreen rectangle under the current program; false when nothing was drawn.
+fn draw_rect(u0: f32, v0: f32, u1: f32, v1: f32, before_draw: impl FnOnce(&DebugGl)) -> bool {
+    SPRITE_STATE.with(|s| {
+        let Some(ref state) = *s.borrow() else {
+            return false;
+        };
+        with_gl(|gl| unsafe {
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(state.quad_vbo));
+            let data = fs_rect_data(u0, v0, u1, v1);
+            if stream_vertices(gl, bytemuck::cast_slice(&data)).is_err() {
+                gl.bind_vertex_array(None);
+                return false;
+            }
+            before_draw(gl);
+            gl.bind_vertex_array(Some(state.quad_vao));
+            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+            if let Some(p) = CURRENT_SHADER.with(|c| *c.borrow()) {
+                crate::uniform_block::mark_program_drawn(p);
+            }
+            track_draw_call();
+            gl.bind_vertex_array(None);
+            true
+        })
+        .unwrap_or(false)
+    })
 }
 
 /// Issue one fullscreen rectangle with an EXPLICIT corner UV mapping.
@@ -368,71 +237,35 @@ fn fs_rect_data(u0: f32, v0: f32, u1: f32, v1: f32) -> [f32; 24] {
 /// draw states, not a property of GL's default that nothing re-establishes.
 #[no_mangle]
 pub extern "C" fn stone_draw_fullscreen_rect(u0: c_float, v0: c_float, u1: c_float, v1: c_float) {
+    let uv = [u0 as f64, v0 as f64, u1 as f64, v1 as f64];
     if crate::ui_submission_probe::windowless() {
-        crate::ui_submission_probe::fullscreen_consumed([
-            u0 as f64, v0 as f64, u1 as f64, v1 as f64,
-        ]);
+        crate::ui_submission_probe::fullscreen_consumed(uv);
         return;
     }
-    SPRITE_STATE.with(|s| {
-        if let Some(ref state) = *s.borrow() {
-            with_gl(|gl| unsafe {
-                let data = fs_rect_data(u0, v0, u1, v1);
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(state.fs_quad_scaled_vbo));
-                if stream_vertices(gl, bytemuck::cast_slice(&data)).is_err() {
-                    gl.bind_vertex_array(None);
-                    return;
-                }
-                gl.disable(glow::CULL_FACE);
-                gl.bind_vertex_array(Some(state.fs_quad_scaled_vao));
-                gl.draw_arrays(glow::TRIANGLES, 0, 6);
-                crate::ui_submission_probe::fullscreen_consumed([
-                    u0 as f64, v0 as f64, u1 as f64, v1 as f64,
-                ]);
-                crate::ui_submission_probe::device_state(gl);
-                if let Some(p) = CURRENT_SHADER.with(|c| *c.borrow()) {
-                    crate::uniform_block::mark_program_drawn(p);
-                }
-                track_draw_call();
-                gl.bind_vertex_array(None);
-            });
-        }
-    });
+    if draw_rect(u0, v0, u1, v1, |gl| unsafe { gl.disable(glow::CULL_FACE) }) {
+        crate::ui_submission_probe::fullscreen_consumed(uv);
+        with_gl(crate::ui_submission_probe::device_state);
+    }
 }
 
+/// The present mapping puts NDC top at v=0, the one flip onto the bottom-up
+/// window; onto a canvas NDC top is v=1, so canvas-to-canvas hops preserve
+/// content.
 #[no_mangle]
 pub extern "C" fn stone_draw_fullscreen_quad() {
-    SPRITE_STATE.with(|s| {
-        if let Some(ref state) = *s.borrow() {
-            with_gl(|gl| unsafe {
-                let to_window = crate::canvas::current_fbo().is_none();
-                let (sx, sy) = FS_QUAD_UV_SCALE.with(|c| *c.borrow());
-                let vao = if (sx - 1.0).abs() < 1e-9 && (sy - 1.0).abs() < 1e-9 {
-                    if to_window {
-                        state.fs_quad_present_vao
-                    } else {
-                        state.fs_quad_identity_vao
-                    }
-                } else {
-                    let data = fs_quad_data(to_window, sx, sy);
-                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(state.fs_quad_scaled_vbo));
-                    if stream_vertices(gl, bytemuck::cast_slice(&data)).is_err() {
-                        gl.bind_vertex_array(None);
-                        return;
-                    }
-                    state.fs_quad_scaled_vao
-                };
-                gl.bind_vertex_array(Some(vao));
-                gl.draw_arrays(glow::TRIANGLES, 0, 6);
-                if let Some(p) = CURRENT_SHADER.with(|c| *c.borrow()) {
-                    crate::uniform_block::mark_program_drawn(p);
-                }
-                track_draw_call();
-                gl.bind_vertex_array(None);
-            });
-        }
-    });
+    let (sx, sy) = FS_QUAD_UV_SCALE.with(|c| *c.borrow());
+    let [u0, v0, u1, v1] = fs_quad_uv(crate::canvas::current_fbo().is_none(), sx, sy);
+    draw_rect(u0, v0, u1, v1, |_| {});
 }
+
+fn fs_quad_uv(to_window: bool, sx: f32, sy: f32) -> [f32; 4] {
+    if to_window {
+        [0.0, sy, sx, 0.0]
+    } else {
+        [0.0, 0.0, sx, sy]
+    }
+}
+
 /// The vertex layout is the CALLER's, passed per draw as component counts in
 /// location order (`attr_sizes`) -- the same contract `stone_mesh_create` /
 /// `stone_mesh_set_instances` take, sharing their validator and their attrib
@@ -770,18 +603,24 @@ pub(crate) mod tests {
 
     #[test]
     fn required_sprite_allocations_fail_without_publishing_or_leaking() {
-        for fail_at in 1..=4 {
-            let gl = failing_driver(fail_at);
-            let result = std::panic::catch_unwind(|| {
-                assert!(!unsafe { super::init_geometry(&gl) });
-                assert!(!super::initialized());
-                assert_no_driver_objects();
-            });
-            if let Some(state) = super::SPRITE_STATE.with(|state| state.borrow_mut().take()) {
-                unsafe { super::destroy_geometry(&gl, state) };
-            }
-            if let Err(error) = result {
-                std::panic::resume_unwind(error);
+        let gl = failing_driver(1);
+        assert!(!unsafe { super::init_geometry(&gl) });
+        assert!(!super::initialized());
+        assert_no_driver_objects();
+    }
+
+    #[test]
+    fn fullscreen_quad_flips_v_onto_the_window_and_scales_both_mappings() {
+        let present = [0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0];
+        let identity = [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0];
+        for (to_window, uv) in [(true, present), (false, identity)] {
+            for (sx, sy) in [(1.0, 1.0), (0.5, 0.25)] {
+                let [u0, v0, u1, v1] = super::fs_quad_uv(to_window, sx, sy);
+                let data = super::fs_rect_data(u0, v0, u1, v1);
+                for (vertex, expected) in data.as_chunks::<4>().0.iter().zip(uv.as_chunks::<2>().0)
+                {
+                    assert_eq!([vertex[2], vertex[3]], [expected[0] * sx, expected[1] * sy]);
+                }
             }
         }
     }
