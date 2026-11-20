@@ -748,7 +748,7 @@ fn body_fingerprint(mf: &MirFunc, volatile_vars: &FxHashSet<Ustr>) -> u64 {
                 .inst_spans
                 .get(*inst_id)
                 .is_some_and(|span| volatile_comptime_spans.contains(span));
-            hasher.inst_with_volatile(&mf.insts[*inst_id], &mf.nested_fn_identities, volatile);
+            hasher.inst(&mf.insts[*inst_id], &mf.nested_fn_identities, volatile);
         }
         hasher.tag(2);
         hasher.term(&mf.blocks[block].term);
@@ -757,7 +757,7 @@ fn body_fingerprint(mf: &MirFunc, volatile_vars: &FxHashSet<Ustr>) -> u64 {
 }
 
 struct BodyHasher {
-    hash: Fnv64,
+    hash: WordHash,
     inst_ids: CanonicalIds,
     cell_ids: CanonicalIds,
     block_ids: CanonicalIds,
@@ -805,7 +805,7 @@ impl CanonicalIds {
 impl Default for BodyHasher {
     fn default() -> Self {
         Self {
-            hash: Fnv64::new(),
+            hash: WordHash::new(),
             inst_ids: CanonicalIds::default(),
             cell_ids: CanonicalIds::default(),
             block_ids: CanonicalIds::default(),
@@ -817,7 +817,7 @@ impl Default for BodyHasher {
 impl BodyHasher {
     fn for_body(mf: &MirFunc) -> Self {
         Self {
-            hash: Fnv64::new(),
+            hash: WordHash::new(),
             inst_ids: CanonicalIds::sized(mf.insts.len()),
             cell_ids: CanonicalIds::sized(mf.cells.len()),
             block_ids: CanonicalIds::sized(mf.blocks.len()),
@@ -844,17 +844,17 @@ impl BodyHasher {
 
     fn inst_idx(&mut self, idx: Idx<Inst>) {
         let id = self.inst_ids.index(idx.into_raw().into_u32());
-        self.hash.write_usize(id);
+        self.hash.write_u32(id as u32);
     }
 
     fn cell_idx(&mut self, idx: Idx<crate::mir::Cell>) {
         let id = self.cell_ids.index(idx.into_raw().into_u32());
-        self.hash.write_usize(id);
+        self.hash.write_u32(id as u32);
     }
 
     fn block_idx(&mut self, idx: Idx<crate::mir::Block>) {
         let id = self.block_ids.index(idx.into_raw().into_u32());
-        self.hash.write_usize(id);
+        self.hash.write_u32(id as u32);
     }
 
     fn rep_id(&mut self, id: crate::lower::RepId) {
@@ -885,24 +885,6 @@ impl BodyHasher {
         for value in values {
             self.inst_idx(*value);
         }
-    }
-
-    fn cell_list(&mut self, values: &[Idx<crate::mir::Cell>]) {
-        self.hash.write_usize(values.len());
-        for value in values {
-            self.cell_idx(*value);
-        }
-    }
-
-    fn unary(&mut self, tag: u8, value: Idx<Inst>) {
-        self.tag(tag);
-        self.inst_idx(value);
-    }
-
-    fn binary(&mut self, tag: u8, left: Idx<Inst>, right: Idx<Inst>) {
-        self.tag(tag);
-        self.inst_idx(left);
-        self.inst_idx(right);
     }
 
     fn option_artifact_name(&mut self, value: Option<Ustr>) {
@@ -1005,298 +987,100 @@ impl BodyHasher {
         });
     }
 
-    fn inst_with_volatile(
-        &mut self,
-        inst: &Inst,
-        aliases: &FxHashMap<Ustr, CodeIdentity>,
-        volatile_comptime: bool,
-    ) {
+    /// Operands go through the IR's own visitors, so only payload that is not an
+    /// instruction or cell index is listed per variant.
+    fn inst(&mut self, inst: &Inst, aliases: &FxHashMap<Ustr, CodeIdentity>, volatile: bool) {
+        use std::hash::Hash;
+        std::mem::discriminant(inst).hash(&mut self.hash);
+        let mut uses = 0;
+        inst.uses_each(&mut |_| uses += 1);
+        self.hash.write_usize(uses);
+        inst.uses_each(&mut |value| self.inst_idx(value));
+        let mut cells = 0;
+        inst.cells_each(&mut |_| cells += 1);
+        self.hash.write_usize(cells);
+        inst.cells_each(&mut |cell| self.cell_idx(cell));
         match inst {
-            Inst::Const(lit) => {
-                self.tag(0);
-                self.lit(lit, volatile_comptime);
-            }
-            Inst::Global(name) => {
-                self.tag(1);
-                self.aliased_name(*name, aliases);
-            }
-            Inst::Load(cell) => {
-                self.tag(2);
-                self.cell_idx(*cell);
-            }
-            Inst::IntAdd(a, b) => self.binary(3, *a, *b),
-            Inst::IntSub(a, b) => self.binary(4, *a, *b),
-            Inst::IntMul(a, b) => self.binary(5, *a, *b),
-            Inst::IntDiv(a, b) => self.binary(6, *a, *b),
-            Inst::IntMod(a, b) => self.binary(7, *a, *b),
-            Inst::UintAdd(a, b) => self.binary(8, *a, *b),
-            Inst::UintSub(a, b) => self.binary(9, *a, *b),
-            Inst::UintMul(a, b) => self.binary(10, *a, *b),
-            Inst::UintDiv(a, b) => self.binary(11, *a, *b),
-            Inst::UintMod(a, b) => self.binary(12, *a, *b),
-            Inst::FloatAdd(a, b) => self.binary(13, *a, *b),
-            Inst::FloatSub(a, b) => self.binary(14, *a, *b),
-            Inst::FloatMul(a, b) => self.binary(15, *a, *b),
-            Inst::FloatDiv(a, b) => self.binary(16, *a, *b),
-            Inst::FloatMod(a, b) => self.binary(17, *a, *b),
-            Inst::StringConcat(a, b) => self.binary(18, *a, *b),
-            Inst::ToString(value) => self.unary(19, *value),
-            Inst::Format { value, fmt } => {
-                self.tag(20);
-                self.inst_idx(*value);
-                self.string(fmt.as_str());
-            }
-            Inst::FormatDyn { value, fmt } => {
-                self.tag(21);
-                self.inst_idx(*value);
-                self.inst_idx(*fmt);
-            }
-            Inst::IntLt(a, b) => self.binary(22, *a, *b),
-            Inst::IntLeq(a, b) => self.binary(23, *a, *b),
-            Inst::IntGt(a, b) => self.binary(24, *a, *b),
-            Inst::IntGeq(a, b) => self.binary(25, *a, *b),
-            Inst::UintLt(a, b) => self.binary(26, *a, *b),
-            Inst::UintLeq(a, b) => self.binary(27, *a, *b),
-            Inst::UintGt(a, b) => self.binary(28, *a, *b),
-            Inst::UintGeq(a, b) => self.binary(29, *a, *b),
-            Inst::FloatLt(a, b) => self.binary(30, *a, *b),
-            Inst::FloatLeq(a, b) => self.binary(31, *a, *b),
-            Inst::FloatGt(a, b) => self.binary(32, *a, *b),
-            Inst::FloatGeq(a, b) => self.binary(33, *a, *b),
-            Inst::Eq(a, b) => self.binary(34, *a, *b),
-            Inst::NotEq(a, b) => self.binary(35, *a, *b),
-            Inst::FloatToInt(value) => self.unary(36, *value),
-            Inst::IntToFloat(value) => self.unary(37, *value),
-            Inst::UintToFloat(value) => self.unary(38, *value),
-            Inst::FloatToF32(value) => self.unary(93, *value),
-            Inst::IntToUint(value) => self.unary(39, *value),
-            Inst::UintToInt(value) => self.unary(40, *value),
-            Inst::FloatToUint(value) => self.unary(41, *value),
-            Inst::UintBitcastInt(value) => self.unary(42, *value),
-            Inst::IntBitcastUint(value) => self.unary(43, *value),
-            Inst::Neg(value) => self.unary(44, *value),
-            Inst::Not(value) => self.unary(45, *value),
-            Inst::BitNot(value) => self.unary(46, *value),
-            Inst::UintBitNot(value) => self.unary(47, *value),
-            Inst::BitAnd(a, b) => self.binary(48, *a, *b),
-            Inst::BitOr(a, b) => self.binary(49, *a, *b),
-            Inst::BitXor(a, b) => self.binary(50, *a, *b),
-            Inst::Shl(a, b) => self.binary(51, *a, *b),
-            Inst::Shr(a, b) => self.binary(52, *a, *b),
-            Inst::UintBitAnd(a, b) => self.binary(53, *a, *b),
-            Inst::UintBitOr(a, b) => self.binary(54, *a, *b),
-            Inst::UintBitXor(a, b) => self.binary(55, *a, *b),
-            Inst::UintShl(a, b) => self.binary(56, *a, *b),
-            Inst::UintShr(a, b) => self.binary(57, *a, *b),
-            Inst::Call { func, args } => {
-                self.tag(58);
-                self.func_ref(*func);
-                self.inst_list(args);
-            }
-            Inst::CallMulti { dests, func, args } => {
-                self.tag(59);
-                self.cell_list(dests);
-                self.func_ref(*func);
-                self.inst_list(args);
-            }
-            Inst::CallValue { callee, args } => {
-                self.tag(60);
-                self.inst_idx(*callee);
-                self.inst_list(args);
-            }
-            Inst::CallValueMulti {
-                dests,
-                callee,
-                args,
-            } => {
-                self.tag(61);
-                self.cell_list(dests);
-                self.inst_idx(*callee);
-                self.inst_list(args);
-            }
-            Inst::CallBoundMulti {
-                dests,
-                generic_idx,
-                args,
-            } => {
-                self.tag(62);
-                self.cell_list(dests);
-                self.hash.write_u32(*generic_idx);
-                self.inst_list(args);
-            }
-            Inst::Lambda { params, entry } => {
-                self.tag(63);
-                self.cell_list(params);
-                self.block_idx(*entry);
-            }
-            Inst::MakeTuple(values) => {
-                self.tag(64);
-                self.inst_list(values);
-            }
-            Inst::MakeVec(values) => {
-                self.tag(65);
-                self.inst_list(values);
-            }
+            Inst::Const(lit) => self.lit(lit, volatile),
+            Inst::Global(name) => self.aliased_name(*name, aliases),
+            Inst::Format { fmt, .. } => self.string(fmt.as_str()),
+            Inst::Call { func, .. } | Inst::CallMulti { func, .. } => self.func_ref(*func),
+            Inst::CallBoundMulti { generic_idx, .. } => self.hash.write_u32(*generic_idx),
+            Inst::Lambda { entry, .. } => self.block_idx(*entry),
             Inst::MakeVecColumns {
                 elem,
                 representation,
                 nobox,
                 columns,
                 len,
-                capacity,
+                ..
             } => {
-                self.tag(66);
-                self.artifact_name(elem.as_str());
-                self.rep_id(*representation);
-                self.boolean(*nobox);
-                self.hash.write_usize(columns.len());
+                self.vec_header(*elem, *representation, *nobox);
                 for (name, values) in columns {
                     self.string(name.as_str());
-                    self.inst_list(values);
+                    self.hash.write_usize(values.len());
                 }
                 self.hash.write_usize(*len);
-                self.inst_idx(*capacity);
             }
             Inst::MakeVecColumnHeader {
                 elem,
                 representation,
                 nobox,
-                capacity,
-            } => {
-                self.tag(67);
-                self.artifact_name(elem.as_str());
-                self.rep_id(*representation);
-                self.boolean(*nobox);
-                self.inst_idx(*capacity);
-            }
+                ..
+            } => self.vec_header(*elem, *representation, *nobox),
             Inst::MakeVecStrided {
                 elem,
                 representation,
                 nobox,
                 stride,
-                values,
                 len,
-                capacity,
+                ..
             } => {
-                self.tag(89);
-                self.artifact_name(elem.as_str());
-                self.rep_id(*representation);
-                self.boolean(*nobox);
+                self.vec_header(*elem, *representation, *nobox);
                 self.hash.write_usize(*stride);
-                self.inst_list(values);
                 self.hash.write_usize(*len);
-                self.inst_idx(*capacity);
             }
             Inst::MakeVecStridedHeader {
                 elem,
                 representation,
                 nobox,
                 stride,
-                capacity,
+                ..
             } => {
-                self.tag(90);
-                self.artifact_name(elem.as_str());
-                self.rep_id(*representation);
-                self.boolean(*nobox);
+                self.vec_header(*elem, *representation, *nobox);
                 self.hash.write_usize(*stride);
-                self.inst_idx(*capacity);
-            }
-            Inst::VecStrideNilToFalse(value) => {
-                self.tag(91);
-                self.inst_idx(*value);
-            }
-            Inst::VecStrideFalseToNil(value) => {
-                self.tag(92);
-                self.inst_idx(*value);
-            }
-            Inst::VecIndexSlot(index) => {
-                self.tag(95);
-                self.inst_idx(*index);
-            }
-            Inst::NbIndexSlot(index) => {
-                self.tag(94);
-                self.inst_idx(*index);
             }
             Inst::MakeStruct { ty, fields } => {
-                self.tag(68);
                 self.option_artifact_name(*ty);
-                self.hash.write_usize(fields.len());
-                for (name, value) in fields {
-                    self.string(name.as_str());
-                    self.inst_idx(*value);
-                }
+                self.field_names(fields);
             }
             Inst::MakeValueStruct {
                 name,
                 representation,
                 form,
                 fields,
-            } => {
-                self.tag(69);
-                self.artifact_name(name.as_str());
-                self.rep_id(*representation);
-                self.value_ctor_form(*form);
-                self.hash.write_usize(fields.len());
-                for (field, value) in fields {
-                    self.string(field.as_str());
-                    self.inst_idx(*value);
-                }
             }
-            Inst::MaterializeValueStruct {
+            | Inst::MaterializeValueStruct {
                 name,
                 representation,
                 form,
                 fields,
             } => {
-                self.tag(70);
                 self.artifact_name(name.as_str());
                 self.rep_id(*representation);
                 self.value_ctor_form(*form);
-                self.hash.write_usize(fields.len());
-                for (field, value) in fields {
-                    self.string(field.as_str());
-                    self.inst_idx(*value);
-                }
+                self.field_names(fields);
             }
-            Inst::MakeNullableValue { present, value } => {
-                self.tag(96);
-                self.inst_idx(*present);
-                self.inst_idx(*value);
-            }
-            Inst::MakeEnum {
-                tag,
-                ty,
-                positional,
-                named,
-            } => {
-                self.tag(71);
+            Inst::MakeEnum { tag, ty, named, .. } => {
                 self.string(tag.as_str());
                 self.artifact_name(ty.as_str());
-                self.inst_list(positional);
-                self.hash.write_usize(named.len());
-                for (name, value) in named {
-                    self.string(name.as_str());
-                    self.inst_idx(*value);
-                }
+                self.field_names(named);
             }
-            Inst::MakeEnumDyn {
-                tag,
-                ty,
-                positional,
-                named,
-            } => {
-                self.tag(72);
-                self.inst_idx(*tag);
+            Inst::MakeEnumDyn { ty, named, .. } => {
                 self.artifact_name(ty.as_str());
-                self.inst_list(positional);
-                self.hash.write_usize(named.len());
-                for (name, value) in named {
-                    self.string(name.as_str());
-                    self.inst_idx(*value);
-                }
+                self.field_names(named);
             }
             Inst::MakeEnv { fn_ref, fields } => {
-                self.tag(73);
                 match fn_ref {
                     Some(name) => {
                         self.boolean(true);
@@ -1304,108 +1088,45 @@ impl BodyHasher {
                     }
                     None => self.boolean(false),
                 }
-                self.hash.write_usize(fields.len());
-                for (name, value) in fields {
-                    self.string(name.as_str());
-                    self.inst_idx(*value);
-                }
+                self.field_names(fields);
             }
             Inst::FfiNewArray {
                 ctype,
-                count,
                 representation,
+                ..
             } => {
-                self.tag(74);
                 self.artifact_name(ctype.as_str());
-                self.inst_idx(*count);
                 self.option_rep_id(*representation);
             }
-            Inst::FfiViewCast { cty, ptr } => {
-                self.tag(75);
-                self.string(cty.as_str());
-                self.inst_idx(*ptr);
-            }
+            Inst::FfiViewCast { cty, .. } => self.string(cty.as_str()),
             Inst::Field {
-                base,
-                field,
-                nonthrowing,
+                field, nonthrowing, ..
             } => {
-                self.tag(76);
-                self.hash.write_u8(u8::from(*nonthrowing));
-                self.inst_idx(*base);
+                self.boolean(*nonthrowing);
                 self.string(field.as_str());
             }
-            Inst::TupleIndex { base, index } => {
-                self.tag(77);
-                self.inst_idx(*base);
-                self.hash.write_usize(*index);
-            }
-            Inst::Index { base, index, kind } => {
-                self.tag(78);
-                self.inst_idx(*base);
-                self.inst_idx(*index);
-                self.container(*kind);
-            }
-            Inst::VecCheckedIndex { vec, index } => {
-                self.tag(79);
-                self.inst_idx(*vec);
-                self.inst_idx(*index);
-            }
-            Inst::Len { base, kind } => {
-                self.tag(80);
-                self.inst_idx(*base);
-                self.container(*kind);
-            }
-            Inst::Store { cell, value } => {
-                self.tag(81);
-                self.cell_idx(*cell);
-                self.inst_idx(*value);
-            }
-            Inst::StoreField { base, field, value } => {
-                self.tag(82);
-                self.inst_idx(*base);
-                self.string(field.as_str());
-                self.inst_idx(*value);
-            }
-            Inst::StoreIndex {
-                base,
-                index,
-                value,
-                kind,
-            } => {
-                self.tag(83);
-                self.inst_idx(*base);
-                self.inst_idx(*index);
-                self.inst_idx(*value);
-                self.container(*kind);
-            }
-            Inst::StoreGlobal { name, value } => {
-                self.tag(84);
-                self.artifact_name(name.as_str());
-                self.inst_idx(*value);
-            }
-            Inst::ArrayPush { arr, value, kind } => {
-                self.tag(85);
-                self.inst_idx(*arr);
-                self.inst_idx(*value);
-                self.container(*kind);
-            }
-            Inst::CoroSetInner(value) => self.unary(86, *value),
-            Inst::CoroHook { kind, lambda } => {
-                self.tag(87);
-                self.coro_hook(*kind);
-                self.inst_idx(*lambda);
-            }
-            Inst::MapNext {
-                key_cell,
-                val_cell,
-                table,
-            } => {
-                self.tag(88);
-                self.cell_idx(*key_cell);
-                self.cell_idx(*val_cell);
-                self.inst_idx(*table);
-            }
+            Inst::TupleIndex { index, .. } => self.hash.write_usize(*index),
+            Inst::Index { kind, .. }
+            | Inst::Len { kind, .. }
+            | Inst::StoreIndex { kind, .. }
+            | Inst::ArrayPush { kind, .. } => self.container(*kind),
+            Inst::StoreField { field, .. } => self.string(field.as_str()),
+            Inst::StoreGlobal { name, .. } => self.artifact_name(name.as_str()),
+            Inst::CoroHook { kind, .. } => self.coro_hook(*kind),
+            _ => {}
+        }
+    }
+
+    fn vec_header(&mut self, elem: Ustr, representation: crate::lower::RepId, nobox: bool) {
+        self.artifact_name(elem.as_str());
+        self.rep_id(representation);
+        self.boolean(nobox);
+    }
+
+    fn field_names(&mut self, fields: &[(Ustr, Idx<Inst>)]) {
+        self.hash.write_usize(fields.len());
+        for (name, _) in fields {
+            self.string(name.as_str());
         }
     }
 
@@ -1454,14 +1175,6 @@ impl Fnv64 {
         self.0 = crate::fnv1a(self.0, bytes);
     }
 
-    fn write_u8(&mut self, byte: u8) {
-        self.write(&[byte]);
-    }
-
-    fn write_u32(&mut self, value: u32) {
-        self.write(&value.to_le_bytes());
-    }
-
     fn write_u64(&mut self, value: u64) {
         self.write(&value.to_le_bytes());
     }
@@ -1476,6 +1189,56 @@ impl Fnv64 {
     }
 
     fn finish(self) -> u64 {
+        self.0
+    }
+}
+
+/// A body fingerprint only witnesses equality, so one multiply per word is
+/// enough. Each step is a bijection of the state, so a single differing word
+/// always changes the result.
+struct WordHash(u64);
+
+impl WordHash {
+    fn new() -> Self {
+        Self(crate::FNV_OFFSET)
+    }
+
+    fn write_u64(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.write_u64(value.into());
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.write_u64(value.into());
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+
+    fn write_str(&mut self, value: &str) {
+        self.write_usize(value.len());
+        std::hash::Hasher::write(self, value.as_bytes());
+    }
+
+    fn finish(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::hash::Hasher for WordHash {
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.write_u64(u64::from_le_bytes(word));
+        }
+    }
+
+    fn finish(&self) -> u64 {
         self.0
     }
 }
@@ -1635,14 +1398,14 @@ mod tests {
             let aliases = FxHashMap::default();
             let cell_idx = || Idx::from_raw(RawIdx::from_u32(cell_raw));
             let inst_idx = |raw| Idx::from_raw(RawIdx::from_u32(raw));
-            hasher.inst_with_volatile(&Inst::Load(cell_idx()), &aliases, false);
-            hasher.inst_with_volatile(
+            hasher.inst(&Inst::Load(cell_idx()), &aliases, false);
+            hasher.inst(
                 &Inst::IntAdd(inst_idx(inst_left), inst_idx(inst_right)),
                 &aliases,
                 false,
             );
             if extra {
-                hasher.inst_with_volatile(&Inst::Const(Lit::Int(1)), &aliases, false);
+                hasher.inst(&Inst::Const(Lit::Int(1)), &aliases, false);
             }
             hasher.finish()
         };
@@ -1657,7 +1420,7 @@ mod tests {
 
         let string_fingerprint = |value: &str| {
             let mut hasher = BodyHasher::default();
-            hasher.inst_with_volatile(
+            hasher.inst(
                 &Inst::Const(Lit::Str(Ustr::from(value))),
                 &FxHashMap::default(),
                 false,
@@ -1675,7 +1438,7 @@ mod tests {
         );
         let instruction_fingerprint = |inst: Inst| {
             let mut hasher = BodyHasher::default();
-            hasher.inst_with_volatile(&inst, &FxHashMap::default(), false);
+            hasher.inst(&inst, &FxHashMap::default(), false);
             hasher.finish()
         };
         let value = Idx::from_raw(RawIdx::from_u32(3));
