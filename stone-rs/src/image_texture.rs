@@ -5,7 +5,7 @@ use std::ffi::{c_char, c_int, CStr};
 
 use crate::gl_state;
 use crate::handles::Class;
-use crate::image_publication::RequestClass;
+use crate::image_publication::{PublicationSite, RequestClass};
 use crate::{asset_registry, image_decode, log_once, with_gl};
 
 #[repr(C)]
@@ -886,7 +886,7 @@ fn load_image(
     let format = load_format(path_str, format)?;
     let exact_texels = exact_texels || format.blocks().is_some();
 
-    publish_uploads("load");
+    publish_uploads(PublicationSite::Load);
 
     let ((width, height), pixels) =
         acquire_pixels(path_str, format, exact_texels, class, declared_size)?;
@@ -939,7 +939,7 @@ fn load_image(
         stubbed.then_some(path_str),
     );
     if let LoadPixels::Decode(source) = pixels {
-        crate::image_publication::submit(id, path_str, width, height, class);
+        crate::image_publication::submit(id, width, height, class);
         image_decode::submit(id, path_str.to_string(), source, exact_texels, format);
     }
     if inline_bytes > 0 {
@@ -963,7 +963,7 @@ pub(crate) fn refresh_image_mipmaps(handle: u64, texture: glow::Texture) {
 
 #[no_mangle]
 pub extern "C" fn stone_flush_image_uploads() {
-    if let Some((calls, bytes, wait_us, upload_us)) = publish_uploads("flush") {
+    if let Some((calls, bytes, wait_us, upload_us)) = publish_uploads(PublicationSite::Flush) {
         ::log::debug!(target: "IMAGE", "flush {} images {:.0}MB wait={:.1}ms upload={:.1}ms",
             calls, bytes as f64 / 1048576.0, wait_us as f64 / 1000.0, upload_us as f64 / 1000.0);
     }
@@ -972,7 +972,7 @@ pub extern "C" fn stone_flush_image_uploads() {
 /// Upload one site's publications as each is handed over, so a draining flush
 /// holds one decoded buffer at a time, and record them. Only the uploads are
 /// timed. Returns (calls, bytes, wait_us, upload_us) when any was selected.
-fn publish_uploads(site: &str) -> Option<(usize, usize, c_int, c_int)> {
+fn publish_uploads(site: PublicationSite) -> Option<(usize, usize, c_int, c_int)> {
     let (mut selected, mut calls, mut bytes) = (0, 0, 0);
     let mut upload = std::time::Duration::ZERO;
     crate::image_publication::publish(site, |d| {
@@ -1004,7 +1004,7 @@ pub extern "C" fn stone_image_uploads_pending() -> c_int {
 
 #[no_mangle]
 pub extern "C" fn stone_service_image_uploads() -> c_int {
-    if let Some((calls, bytes, _, upload_us)) = publish_uploads("pump") {
+    if let Some((calls, bytes, _, upload_us)) = publish_uploads(PublicationSite::Pump) {
         ::log::debug!(target: "IMAGE", "pump {} images {:.0}MB upload={:.1}ms pending={}",
             calls, bytes as f64 / 1048576.0, upload_us as f64 / 1000.0,
             crate::image_publication::pending());
