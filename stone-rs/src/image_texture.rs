@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr};
 use std::sync::Arc;
 
@@ -258,26 +258,31 @@ pub(crate) struct LoadedImage {
     pub(crate) format: ImageFormat,
     /// A bound sampler overrides texture wrap, so draws must choose one that agrees.
     pub(crate) repeat: bool,
-    pub(crate) stub: bool,
+    /// The asset path of a headers-only image (`STONE_ASSET_STUB`).
+    stub_path: Option<String>,
+    /// What GL stores when `STONE_IMAGE_MAX_SIDE` reduced it below the logical size.
+    capped: Option<(u32, u32)>,
+    /// The load declared its texels exact; reloads and deferred uploads honor it.
+    exact_texels: bool,
+    mipmapped: bool,
+    decode_failed: bool,
+}
+
+impl LoadedImage {
+    fn stored_size(&self) -> (u32, u32) {
+        self.capped.unwrap_or((self.width, self.height))
+    }
+
+    fn set_storage(&mut self, logical: (u32, u32), stored: (u32, u32)) {
+        (self.width, self.height) = logical;
+        self.capped = (stored != logical).then_some(stored);
+        self.stub_path = None;
+    }
 }
 
 thread_local! {
     pub(crate) static IMAGES: RefCell<HashMap<u64, LoadedImage>> = RefCell::new(HashMap::new());
     pub(crate) static WHITE_IMAGE: RefCell<Option<u64>> = const { RefCell::new(None) };
-    /// Images whose GL storage is SMALLER than their logical size, which only
-    /// `STONE_IMAGE_MAX_SIDE` produces. Empty in every production process.
-    ///
-    /// A side table rather than a field on `LoadedImage` because the cap reaches
-    /// asset uploads and nothing else: `text.rs` registers font atlases in
-    /// `IMAGES` and `image_data.rs` builds images from CPU buffers, both at full
-    /// size and neither able to answer for a reduction that never applies to it.
-    /// Asking GL per write was the alternative and was measured: a
-    /// `glGetTexLevelParameteriv` on this driver's GL-on-Metal path flushes, and
-    /// one per image write put recurring 55 ms frames into every rendering sim.
-    static CAPPED_STORAGE: RefCell<HashMap<u64, (u32, u32)>> = RefCell::new(HashMap::new());
-    static EXACT_TEXELS: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
-    static MIPMAPPED_IMAGES: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
-    static FAILED_DECODE: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
     /// Cumulative failed deferred decodes, for the residency counters.
     static FAILED_DECODE_COUNT: RefCell<u64> = const { RefCell::new(0) };
 }
@@ -299,48 +304,33 @@ pub(crate) fn insert_image(
     texture: glow::Texture,
     size: (u32, u32),
     format: ImageFormat,
-    stub: bool,
+    mipmapped: bool,
 ) {
-    IMAGES.with(|images| {
-        images.borrow_mut().insert(
-            id,
-            LoadedImage {
-                texture,
-                width: size.0,
-                height: size.1,
-                format,
-                repeat: false,
-                stub,
-            },
-        );
-    });
-}
-
-pub(crate) fn register_mipmapped_image(handle: u64) {
-    MIPMAPPED_IMAGES.with(|m| {
-        m.borrow_mut().insert(handle);
-    });
-}
-
-/// Whether `handle` declared its texels exact at load. A hot reload and a
-/// deferred upload both have to answer this the same way the first load did.
-fn exact_texels(handle: u64) -> bool {
-    EXACT_TEXELS.with(|e| e.borrow().contains(&handle))
+    let image = LoadedImage {
+        texture,
+        width: size.0,
+        height: size.1,
+        format,
+        repeat: false,
+        stub_path: None,
+        capped: None,
+        exact_texels: false,
+        mipmapped,
+        decode_failed: false,
+    };
+    IMAGES.with(|images| images.borrow_mut().insert(id, image));
 }
 
 /// Whether `handle`'s deferred decode failed. False for unknown handles.
 pub(crate) fn image_decode_failed(handle: u64) -> bool {
-    FAILED_DECODE.with(|f| f.borrow().contains(&handle))
+    with_image(handle, |img| img.decode_failed).unwrap_or(false)
 }
 
 /// Mark a live handle's decode failed, once. A result for an unloaded handle
 /// is a dropped unload race, not a failure.
 fn mark_decode_failed(id: u64) {
-    if !image_exists(id) {
-        return;
-    }
-    let fresh = FAILED_DECODE.with(|f| f.borrow_mut().insert(id));
-    if fresh {
+    let fresh = with_image_mut(id, |img| !std::mem::replace(&mut img.decode_failed, true));
+    if fresh == Some(true) {
         FAILED_DECODE_COUNT.with(|c| *c.borrow_mut() += 1);
         upload_decode_placeholder(id);
     }
@@ -351,10 +341,11 @@ const DECODE_FAILED_BRIGHT: [u8; 4] = [255, 0, 204, 255];
 const DECODE_FAILED_DARK: [u8; 4] = [25, 0, 25, 255];
 
 fn upload_decode_placeholder(id: u64) {
-    let Some((w, h, format)) = with_image(id, |i| (i.width, i.height, i.format)) else {
+    let Some(((w, h), (sw, sh), format)) =
+        with_image(id, |i| ((i.width, i.height), i.stored_size(), i.format))
+    else {
         return;
     };
-    let (sw, sh) = stored_size(id, (w, h));
     if format == ImageFormat::Bc1 {
         let block = [0x19, 0xf8, 0x03, 0x18, 0x50, 0x50, 0x05, 0x05];
         let blocks = block.repeat((format.level_bytes(sw, sh) / 8) as usize);
@@ -391,24 +382,6 @@ fn upload_decode_placeholder(id: u64) {
         return;
     };
     publish_image_pixels(id, (w, h), (sw, sh), format, &pixels);
-}
-
-/// What GL stores for `handle`: its logical size unless the cap reduced it.
-fn stored_size(handle: u64, logical: (u32, u32)) -> (u32, u32) {
-    CAPPED_STORAGE
-        .with(|c| c.borrow().get(&handle).copied())
-        .unwrap_or(logical)
-}
-
-fn record_storage(handle: u64, logical: (u32, u32), stored: (u32, u32)) {
-    CAPPED_STORAGE.with(|c| {
-        let mut capped = c.borrow_mut();
-        if stored == logical {
-            capped.remove(&handle);
-        } else {
-            capped.insert(handle, stored);
-        }
-    });
 }
 
 /// What GL stores for a headers-only image: one texel.
@@ -545,10 +518,9 @@ fn stored_texel_bytes(
     bytes
 }
 
-fn image_byte_len(handle: u64, image: &LoadedImage) -> u64 {
-    let stored = stored_size(handle, (image.width, image.height));
-    let mipmapped = MIPMAPPED_IMAGES.with(|m| m.borrow().contains(&handle));
-    stored_texel_bytes(stored.0, stored.1, image.format, mipmapped)
+fn image_byte_len(image: &LoadedImage) -> u64 {
+    let stored = image.stored_size();
+    stored_texel_bytes(stored.0, stored.1, image.format, image.mipmapped)
 }
 
 /// Publish a finished load: the image, its exactness declaration, what GL now
@@ -565,21 +537,15 @@ fn register_loaded_image(
     stored: (u32, u32),
     format: ImageFormat,
     exact_texels: bool,
-    stubbed: bool,
-    path: &str,
+    mipmapped: bool,
+    stub_path: Option<&str>,
 ) {
-    insert_image(id, texture, logical, format, stubbed);
-    EXACT_TEXELS.with(|e| {
-        if exact_texels {
-            e.borrow_mut().insert(id);
-        } else {
-            e.borrow_mut().remove(&id);
-        }
+    insert_image(id, texture, logical, format, mipmapped);
+    with_image_mut(id, |img| {
+        img.set_storage(logical, stored);
+        img.exact_texels = exact_texels;
+        img.stub_path = stub_path.map(str::to_string);
     });
-    record_storage(id, logical, stored);
-    if stubbed {
-        STUB_PATHS.with(|p| p.borrow_mut().insert(id, path.to_string()));
-    }
 }
 
 #[cfg(test)]
@@ -631,8 +597,8 @@ mod stub_storage_tests {
             stored,
             ImageFormat::Rgba8,
             false,
-            true,
-            "sheet.png",
+            false,
+            Some("sheet.png"),
         );
 
         let (mut w, mut h) = (0 as c_int, 0 as c_int);
@@ -650,11 +616,9 @@ mod stub_storage_tests {
             (1024, 512),
             "the logical size stays the file's own"
         );
-        assert_eq!(stub_path(handle).as_deref(), Some("sheet.png"));
+        assert!(stone_image_is_stub(handle));
 
         IMAGES.with(|images| images.borrow_mut().remove(&handle));
-        CAPPED_STORAGE.with(|c| c.borrow_mut().remove(&handle));
-        STUB_PATHS.with(|p| p.borrow_mut().remove(&handle));
     }
 }
 
@@ -982,12 +946,9 @@ fn load_image(
                 (storage_width, storage_height),
                 format,
                 exact_texels,
-                stubbed,
-                path_str,
+                filter_mode == 2,
+                stubbed.then_some(path_str),
             );
-            if filter_mode == 2 {
-                register_mipmapped_image(id);
-            }
             if deferred.is_some() {
                 crate::image_publication::submit(id, path_str, width, height, class);
                 let source = if read_in_worker {
@@ -1020,7 +981,7 @@ fn load_image(
 }
 
 pub(crate) fn refresh_image_mipmaps(handle: u64, texture: glow::Texture) {
-    if !MIPMAPPED_IMAGES.with(|m| m.borrow().contains(&handle)) {
+    if !with_image(handle, |img| img.mipmapped).unwrap_or(false) {
         return;
     }
     with_gl(|gl| unsafe {
@@ -1184,7 +1145,7 @@ fn publish_image_pixels(
 
 #[no_mangle]
 pub extern "C" fn stone_image_is_stub(handle: u64) -> bool {
-    with_image(handle, |image| image.stub).unwrap_or(false)
+    with_image(handle, |image| image.stub_path.is_some()).unwrap_or(false)
 }
 
 /// What GL actually holds for `handle`: one texel for a stub, otherwise the
@@ -1197,8 +1158,7 @@ pub extern "C" fn stone_image_is_stub(handle: u64) -> bool {
 /// happened at all.
 #[no_mangle]
 pub extern "C" fn stone_image_storage_size(handle: u64, width: *mut c_int, height: *mut c_int) {
-    let stored = with_image(handle, |img| stored_size(handle, (img.width, img.height)));
-    let (w, h) = stored.unwrap_or((0, 0));
+    let (w, h) = with_image(handle, LoadedImage::stored_size).unwrap_or((0, 0));
     unsafe {
         if !width.is_null() {
             *width = w as c_int;
@@ -1301,7 +1261,7 @@ pub(crate) fn image_write_target_stored(
     // the cap left, which GL refuses and drops. So a write that does not match
     // what GL holds is completed here, at the size this one names, and the
     // caller skips its own upload.
-    if stored_size(handle, logical) != stored {
+    if with_image(handle, LoadedImage::stored_size) != Some(stored) {
         return define_image_storage(handle, current, logical, stored, data)
             .map(|texture| (texture, true));
     }
@@ -1324,12 +1284,7 @@ fn define_image_storage(
     with_gl(|gl| unsafe {
         tex_image_for_format(gl, texture, stored.0, stored.1, format, data);
     })?;
-    with_image_mut(handle, |img| {
-        img.width = logical.0;
-        img.height = logical.1;
-        img.stub = false;
-    });
-    record_storage(handle, logical, stored);
+    with_image_mut(handle, |img| img.set_storage(logical, stored));
     Some(texture)
 }
 
@@ -1341,7 +1296,8 @@ fn define_image_storage(
 /// unknown or the coordinate is outside it.
 #[no_mangle]
 pub extern "C" fn stone_image_read_texel(handle: u64, x: c_int, y: c_int) -> i64 {
-    let Some((texture, logical)) = with_image(handle, |img| (img.texture, (img.width, img.height)))
+    let Some((texture, (width, height))) =
+        with_image(handle, |img| (img.texture, img.stored_size()))
     else {
         return -1;
     };
@@ -1349,7 +1305,6 @@ pub extern "C" fn stone_image_read_texel(handle: u64, x: c_int, y: c_int) -> i64
     // from what GL stores, never from the image's logical size: under
     // `STONE_IMAGE_MAX_SIDE` the two differ and a logical-sized stride would
     // read the wrong texel out of a short buffer.
-    let (width, height) = stored_size(handle, logical);
     if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
         return -1;
     }
@@ -1451,28 +1406,17 @@ pub(crate) fn sample_image_texture(handle: u64) -> Option<u32> {
         // `@sim_env("STONE_ASSET_STUB", "0")`. Reported per IMAGE, not per call
         // site: one `log_once` keyed on the site would name the first image and
         // swallow the rest.
-        if img.stub
-            && crate::rock_log_reexport::once_should_emit_for(
+        if let Some(path) = &img.stub_path {
+            if crate::rock_log_reexport::once_should_emit_for(
                 concat!(file!(), ":", line!()),
                 handle,
-            )
-        {
-            ::log::debug!(target: "IMAGE",
-                "image {} is headers-only (STONE_ASSET_STUB=1); sampling it reads white",
-                stub_path(handle).unwrap_or_else(|| format!("handle {handle}")));
+            ) {
+                ::log::debug!(target: "IMAGE",
+                    "image {path} is headers-only (STONE_ASSET_STUB=1); sampling it reads white");
+            }
         }
         img.texture.0.get()
     })
-}
-
-thread_local! {
-    /// Paths of headers-only images, so the report above can name the asset.
-    /// Only populated under `STONE_ASSET_STUB`.
-    static STUB_PATHS: RefCell<HashMap<u64, String>> = RefCell::new(HashMap::new());
-}
-
-fn stub_path(handle: u64) -> Option<String> {
-    STUB_PATHS.with(|p| p.borrow().get(&handle).cloned())
 }
 
 /// Free a previously stone_load_image'd handle and its GL texture.
@@ -1480,10 +1424,6 @@ fn stub_path(handle: u64) -> Option<String> {
 pub extern "C" fn stone_unload_image(handle: u64) {
     crate::image_publication::retire(handle);
     let removed = IMAGES.with(|images| images.borrow_mut().remove(&handle));
-    FAILED_DECODE.with(|f| f.borrow_mut().remove(&handle));
-    CAPPED_STORAGE.with(|c| c.borrow_mut().remove(&handle));
-    EXACT_TEXELS.with(|e| e.borrow_mut().remove(&handle));
-    MIPMAPPED_IMAGES.with(|m| m.borrow_mut().remove(&handle));
     if let Some(img) = removed {
         crate::handles::retire(Class::Image, handle);
         with_gl(|gl| unsafe {
@@ -1531,11 +1471,10 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
             return false;
         }
         with_image_mut(handle, |img| {
-            img.width = size.0;
-            img.height = size.1;
-            img.stub = false;
+            (img.width, img.height) = size;
+            img.stub_path = None;
+            img.decode_failed = false;
         });
-        FAILED_DECODE.with(|f| f.borrow_mut().remove(&handle));
         return true;
     }
     let (data, width, height) = match decode_rgba_image(path_str) {
@@ -1543,7 +1482,8 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
         None => return false,
     };
 
-    let exact = exact_texels(handle) || format != ImageFormat::Rgba8;
+    let exact =
+        with_image(handle, |img| img.exact_texels).unwrap_or(false) || format != ImageFormat::Rgba8;
     let (storage_width, storage_height) = image_decode::storage_dims(exact, width, height);
     let Some(data) = image_decode::store_at_storage(exact, data, width, height)
         .and_then(|stored| format.pack_rgba8_owned(stored))
@@ -1574,7 +1514,7 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     };
     if fresh {
         refresh_image_mipmaps(handle, texture);
-        FAILED_DECODE.with(|f| f.borrow_mut().remove(&handle));
+        with_image_mut(handle, |img| img.decode_failed = false);
         return true;
     }
 
@@ -1586,14 +1526,12 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     }
     refresh_image_mipmaps(handle, texture);
 
-    IMAGES.with(|images| {
-        if let Some(img) = images.borrow_mut().get_mut(&handle) {
-            img.width = width;
-            img.height = height;
-        }
+    with_image_mut(handle, |img| {
+        let stub_path = img.stub_path.take();
+        img.set_storage((width, height), (storage_width, storage_height));
+        img.stub_path = stub_path;
+        img.decode_failed = false;
     });
-    record_storage(handle, (width, height), (storage_width, storage_height));
-    FAILED_DECODE.with(|f| f.borrow_mut().remove(&handle));
     true
 }
 
@@ -1640,9 +1578,9 @@ pub(crate) fn live_image_bytes() -> u64 {
     IMAGES.with(|images| {
         images
             .borrow()
-            .iter()
-            .map(|(handle, img)| {
-                let (width, height) = stored_size(*handle, (img.width, img.height));
+            .values()
+            .map(|img| {
+                let (width, height) = img.stored_size();
                 img.format.level_bytes(width, height)
             })
             .sum()
@@ -1650,21 +1588,14 @@ pub(crate) fn live_image_bytes() -> u64 {
 }
 
 pub(crate) fn live_mip_bytes() -> u64 {
-    IMAGES.with(|images| {
-        images
-            .borrow()
-            .iter()
-            .map(|(handle, image)| mip_chain_bytes(*handle, image))
-            .sum()
-    })
+    IMAGES.with(|images| images.borrow().values().map(mip_chain_bytes).sum())
 }
 
-fn mip_chain_bytes(handle: u64, image: &LoadedImage) -> u64 {
-    let mipmapped = MIPMAPPED_IMAGES.with(|m| m.borrow().contains(&handle));
-    if !mipmapped || image.stub {
+fn mip_chain_bytes(image: &LoadedImage) -> u64 {
+    if !image.mipmapped || image.stub_path.is_some() {
         return 0;
     }
-    let (mut width, mut height) = stored_size(handle, (image.width, image.height));
+    let (mut width, mut height) = image.stored_size();
     let mut bytes = 0u64;
     while width > 1 || height > 1 {
         width = (width / 2).max(1);
@@ -1684,7 +1615,7 @@ pub(crate) fn live_texture_bytes() -> u64 {
 /// an unknown handle.
 #[no_mangle]
 pub extern "C" fn stone_get_image_byte_len(handle: u64) -> u64 {
-    with_image(handle, |img| image_byte_len(handle, img)).unwrap_or(0)
+    with_image(handle, image_byte_len).unwrap_or(0)
 }
 
 #[no_mangle]
@@ -2439,7 +2370,7 @@ pub(crate) fn capture_resources() -> serde_json::Value {
     IMAGES.with(|images| {
         images.borrow().iter().map(|(handle, image)| serde_json::json!({
         "handle": handle, "texture": image.texture.0.get(), "width": image.width,
-        "height": image.height, "format": image.format.report_code(), "stub": image.stub,
+        "height": image.height, "format": image.format.report_code(), "stub": image.stub_path.is_some(),
     })).collect()
     })
 }

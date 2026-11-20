@@ -448,10 +448,7 @@ pub extern "C" fn stone_new_image_from_data(data_handle: u64, filter_mode: i32) 
         match texture {
             Some(Some(tex)) => {
                 let id = crate::handles::mint(Class::Image);
-                insert_image(id, tex, size, ImageFormat::Rgba8, false);
-                if filter_mode == 2 {
-                    crate::image_texture::register_mipmapped_image(id);
-                }
+                insert_image(id, tex, size, ImageFormat::Rgba8, filter_mode == 2);
                 id
             }
             _ => 0,
