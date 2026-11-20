@@ -199,12 +199,25 @@ value MapWalkCell {
     tag: int,
 }
 
+fn three_entries<V>(a: V, b: V, c: V) -> Map<string, V> {
+    let m: Map<string, V> = map_new()
+    m["a"] = a
+    m["b"] = b
+    m["c"] = c
+    return m
+}
+
+fn three_cells() -> Map<string, MapWalkCell> {
+    return three_entries(
+        MapWalkCell { n: 1, tag: 10 },
+        MapWalkCell { n: 2, tag: 20 },
+        MapWalkCell { n: 3, tag: 30 }
+    )
+}
+
 @test(output = "3 60 true")
 fn scalar_map_remove_current_during_iteration() {
-    let m: Map<string, int> = map_new()
-    m["a"] = 10
-    m["b"] = 20
-    m["c"] = 30
+    let m = three_entries(10, 20, 30)
     let seen = 0
     let sum = 0
     for (k, v) in m {
@@ -217,10 +230,7 @@ fn scalar_map_remove_current_during_iteration() {
 
 @test(output = "3 6 true")
 fn column_map_remove_current_during_iteration() {
-    let m: Map<string, MapWalkCell> = map_new()
-    m["a"] = MapWalkCell { n: 1, tag: 10 }
-    m["b"] = MapWalkCell { n: 2, tag: 20 }
-    m["c"] = MapWalkCell { n: 3, tag: 30 }
+    let m = three_cells()
     let seen = 0
     let sum = 0
     for (k, v) in m {
@@ -231,60 +241,31 @@ fn column_map_remove_current_during_iteration() {
     print("{seen} {sum} {m.is_empty()}")
 }
 
-@test(output = "2 2")
-fn scalar_map_remove_pending_key_during_iteration() {
-    let m: Map<string, int> = map_new()
-    m["a"] = 1
-    m["b"] = 2
-    m["c"] = 3
+fn remove_pending_key<V>(m: Map<string, V>) {
     let seen = 0
-    let removed = ""
     for (k, _) in m {
         if seen == 0 {
-            if k == "a" {
-                removed = "b"
-            } else if k == "b" {
-                removed = "c"
-            } else {
-                removed = "a"
-            }
+            let removed = if k == "a" { "b" } else if k == "b" { "c" } else { "a" }
             m.remove(removed)
         }
         seen += 1
     }
     print("{seen} {m.len()}")
+}
+
+@test(output = "2 2")
+fn scalar_map_remove_pending_key_during_iteration() {
+    remove_pending_key(three_entries(1, 2, 3))
 }
 
 @test(output = "2 2")
 fn column_map_remove_pending_key_during_iteration() {
-    let m: Map<string, MapWalkCell> = map_new()
-    m["a"] = MapWalkCell { n: 1, tag: 10 }
-    m["b"] = MapWalkCell { n: 2, tag: 20 }
-    m["c"] = MapWalkCell { n: 3, tag: 30 }
-    let seen = 0
-    let removed = ""
-    for (k, _) in m {
-        if seen == 0 {
-            if k == "a" {
-                removed = "b"
-            } else if k == "b" {
-                removed = "c"
-            } else {
-                removed = "a"
-            }
-            m.remove(removed)
-        }
-        seen += 1
-    }
-    print("{seen} {m.len()}")
+    remove_pending_key(three_cells())
 }
 
 @test(output = "3 260")
 fn scalar_map_updated_pending_values_are_visible() {
-    let m: Map<string, int> = map_new()
-    m["a"] = 10
-    m["b"] = 20
-    m["c"] = 30
+    let m = three_entries(10, 20, 30)
     let seen = 0
     let sum = 0
     for (k, v) in m {
@@ -301,10 +282,11 @@ fn scalar_map_updated_pending_values_are_visible() {
 
 @test(output = "3 260")
 fn column_map_updated_pending_values_are_visible() {
-    let m: Map<string, MapWalkCell> = map_new()
-    m["a"] = MapWalkCell { n: 10, tag: 1 }
-    m["b"] = MapWalkCell { n: 20, tag: 2 }
-    m["c"] = MapWalkCell { n: 30, tag: 3 }
+    let m = three_entries(
+        MapWalkCell { n: 10, tag: 1 },
+        MapWalkCell { n: 20, tag: 2 },
+        MapWalkCell { n: 30, tag: 3 }
+    )
     let seen = 0
     let sum = 0
     for (k, v) in m {

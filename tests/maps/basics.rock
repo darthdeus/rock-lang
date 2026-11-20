@@ -154,13 +154,12 @@ fn test_map_operations_with_newtype_keys() {
     assert_eq(m.len(), 2)
 }
 
-@test
-fn test_map_is_empty_boxed() {
-    let m: Map<string, int> = map_new()
+fn assert_empty_transitions<V>(a: V, b: V) {
+    let m: Map<string, V> = map_new()
     assert(m.is_empty(), "a fresh map is empty")
-    m["a"] = 1
+    m["a"] = a
     assert(!m.is_empty(), "a map with one entry is not empty")
-    m["b"] = 2
+    m["b"] = b
     assert(!m.is_empty(), "a map with two entries is not empty")
     assert(m.is_empty() == (m.len() == 0), "is_empty agrees with len on a nonempty map")
     m.remove("a")
@@ -169,19 +168,14 @@ fn test_map_is_empty_boxed() {
     assert(m.is_empty() == (m.len() == 0), "is_empty agrees with len on a drained map")
 }
 
+@test
+fn test_map_is_empty_boxed() {
+    assert_empty_transitions(1, 2)
+}
+
 value IsEmptySlot { a: int, b: int }
 
 @test
 fn test_map_is_empty_column() {
-    let m: Map<string, IsEmptySlot> = map_new()
-    assert(m.is_empty(), "a fresh column map is empty")
-    m["a"] = IsEmptySlot { a: 1, b: 2 }
-    assert(!m.is_empty(), "a column map with one entry is not empty")
-    m["b"] = IsEmptySlot { a: 3, b: 4 }
-    assert(!m.is_empty(), "a column map with two entries is not empty")
-    assert(m.is_empty() == (m.len() == 0), "is_empty agrees with len on a nonempty column map")
-    m.remove("a")
-    m.remove("b")
-    assert(m.is_empty(), "a drained column map is empty again")
-    assert(m.is_empty() == (m.len() == 0), "is_empty agrees with len on a drained column map")
+    assert_empty_transitions(IsEmptySlot { a: 1, b: 2 }, IsEmptySlot { a: 3, b: 4 })
 }
