@@ -30,11 +30,5 @@ test-utils = { path = "../test-utils" }
 name = "bone_semantic_tests"
 path = "tests/main.rs"
 
-# One test per fixture file, from its own small harness in tests/fixture_harness.rs.
-[[test]]
-name = "fixtures"
-path = "tests/fixtures.rs"
-harness = false
-
 [lints]
 workspace = true

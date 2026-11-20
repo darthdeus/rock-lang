@@ -1,7 +1,40 @@
-mod fixture_harness;
-mod test_support;
+use bone_core::prelude::*;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 type Result = std::result::Result<(), String>;
+
+/// Every file in `tests/fixtures`; `FIXTURE=<substring>` runs the matching ones.
+#[test]
+fn fixtures_type_check_as_annotated() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let filter = std::env::var("FIXTURE").unwrap_or_default();
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .expect("fixture directory")
+        .map(|entry| entry.expect("fixture entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rock"))
+        .filter(|path| path.to_string_lossy().contains(&filter))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no fixture matches `{filter}`");
+    let failures: Vec<String> = files
+        .par_iter()
+        .filter_map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            let contents = std::fs::read_to_string(path).expect("fixture contents");
+            catch_unwind(AssertUnwindSafe(|| check_rock(&name, &contents)))
+                .unwrap_or_else(|_| Err("panicked (message above)".to_string()))
+                .err()
+                .map(|e| format!("---- {name} ----\n{e}"))
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "{} of {} fixture files failed:\n\n{}",
+        failures.len(),
+        files.len(),
+        failures.join("\n\n")
+    );
+}
 
 fn check_rock(file_name: &str, contents: &str) -> Result {
     let modules = file_name.starts_with("modules_");
@@ -20,19 +53,17 @@ fn check_rock(file_name: &str, contents: &str) -> Result {
     };
     let sections = test_utils::parse_sections(contents);
     if sections.is_empty() {
-        if let Err(e) = check(contents) {
-            panic!("{e}");
-        }
-        return Ok(());
+        return check(contents);
     }
     let failures: Vec<String> = sections
         .iter()
         .filter_map(|section| section_failure(section.name, check(section.content)))
         .collect();
-    if !failures.is_empty() {
-        panic!("{}", failures.join("\n\n"));
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n\n"))
     }
-    Ok(())
 }
 
 /// `@fail` expects a rejection, `@fail=<text>` one containing `<text>`, and a
@@ -85,8 +116,4 @@ fn stdlib_sources() -> &'static [(&'static str, &'static str)] {
             })
             .collect()
     })
-}
-
-fn main() -> std::process::ExitCode {
-    fixture_harness::run("check_rock", "tests/fixtures", check_rock)
 }
