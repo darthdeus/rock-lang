@@ -440,14 +440,14 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     let loop_gc_pause = stone_gc_set_pause(get_env_int("STONE_BOOT_GC_PAUSE", 100))
     log_debug("ENGINE", "Running early_init systems (asset loading)...")
     let assets_phase = perf_phase_begin("startup.assets")
-    run_early_init_systems()
+    run_boot_phase("early_init")
 
     log_debug("ENGINE", "Running init systems...")
-    run_init_systems()
+    run_boot_phase("init")
     perf_phase_end(assets_phase)
 
     log_debug("ENGINE", "Running late_init systems...")
-    run_late_init_systems()
+    run_boot_phase("late_init")
 
     log_debug("ENGINE", "Running wire systems...")
     run_wire_systems()
@@ -928,8 +928,8 @@ fn frame_core_pre_update() {
 @shadow_root
 fn frame_core_update(ticking: bool) {
     if ticking {
-        run_update_systems()
-        run_late_update_systems()
+        run_frame_phase("update")
+        run_frame_phase("late_update")
     }
     profile_mark_logic_end()
 }
@@ -957,7 +957,7 @@ fn frame_core_resolve_view() {
 // a draw would otherwise drop those passes with its commands.
 fn frame_core_prepare() {
     profile_gpu_begin("prepare_systems")
-    run_prepare_systems()
+    run_frame_phase("prepare")
     if !SIM_SKIP_SUBMIT { run_world_prepare_passes() }
     profile_gpu_end("prepare_systems")
 }
@@ -1027,7 +1027,7 @@ fn frame_core_render_world() {
 
     profile_begin("world_draw")
     profile_gpu_begin("draw_systems")
-    if !fx_disabled("draw") { run_draw_systems() }
+    if !fx_disabled("draw") { run_frame_phase("draw") }
     profile_gpu_end("draw_systems")
 
     if SIM_SKIP_SUBMIT {
@@ -1072,7 +1072,7 @@ fn frame_core_render_world() {
 fn frame_core_render_late_draw() {
     if !fx_disabled("ui") {
         profile_gpu_begin("screen.late_systems")
-        run_late_draw_systems()
+        run_frame_phase("late_draw")
         profile_gpu_end("screen.late_systems")
     }
 }
@@ -1132,7 +1132,7 @@ fn frame_core_render_overlay() {
     with_ui_pool(
         OVERLAY_RENDER_BATCHES,
         () => {
-            run_post_imgui_draw_systems()
+            run_frame_phase("post_imgui_draw")
         }
     )
     frame_core_flush_overlay()

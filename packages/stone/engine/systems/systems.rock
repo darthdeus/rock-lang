@@ -11,14 +11,14 @@
 //   phases above, re-runs after EVERY hot reload so wired state tracks edits
 //
 // Per-frame (runs every frame):
-// - @update: Game logic, called via run_update_systems()
-// - @late_update: After all updates, called via run_late_update_systems()
+// - @update: Game logic, called via run_frame_phase("update")
+// - @late_update: After all updates, called via run_frame_phase("late_update")
 // - @prepare: Presentation state derived from this frame's logic, after the
-//   view is frozen and before @draw, called via run_prepare_systems(). Runs on
+//   view is frozen and before @draw, called via run_frame_phase("prepare"). Runs on
 //   every frame the runner would draw, including frozen frames and a rendered
 //   sim's frames that skip their draw.
-// - @draw: Rendering to screen_canvas, called via run_draw_systems()
-// - @late_draw: Screen-space UI after post-processing, called via run_late_draw_systems()
+// - @draw: Rendering to screen_canvas, called via run_frame_phase("draw")
+// - @late_draw: Screen-space UI after post-processing, called via run_frame_phase("late_draw")
 // - @post_imgui_draw: Final screen-space UI, after ImGui where present
 //
 // Other:
@@ -123,7 +123,7 @@ deco init late_init {}
 pub @lifecycle(phase="wire", owner="process")
 deco init wire {}
 
-/// @late_update - Register a function to be called after run_update_systems()
+/// @late_update - Register a function to be called after run_frame_phase("update")
 /// Usage: @late_update fn my_late_update() { ... }
 ///        @late_update(stage=10) fn my_early_late_update() { ... }
 pub @lifecycle(phase="late_update", owner="process", stage_param="stage")
@@ -197,23 +197,8 @@ fn run_boot_phase(phase: string) {
     log_debug("SYSTEMS", "{phase} complete")
 }
 
-/// Call all registered early_init systems (loads assets)
-fn run_early_init_systems() {
-    run_boot_phase("early_init")
-}
-
-/// Call all registered init systems (main initialization)
-fn run_init_systems() {
-    run_boot_phase("init")
-}
-
-/// Call all registered late_init systems
-/// Use @late_init for systems that depend on game state being initialized
-fn run_late_init_systems() {
-    run_boot_phase("late_init")
-}
-
-fn run_wire_phase() {
+/// Run hooks selected by the last successful artifact publication.
+fn run_wire_systems() {
     let systems = lifecycle_systems("wire")
     let count = systems.len()
     if count == 0 { return }
@@ -225,139 +210,21 @@ fn run_wire_phase() {
     log_debug("SYSTEMS", "wire complete")
 }
 
-/// Run hooks selected by the last successful artifact publication.
-fn run_wire_systems() {
-    run_wire_phase()
-}
-
-
-pub fn run_update_systems() {
-    let systems = lifecycle_systems("update")
-    let count = systems.len()
-    if count == 0 {
-        return
-    }
-
-    if !lifecycle_phase_has_scene("update") {
-        if ENGINE.systems_profiling_enabled {
-            for system in systems {
-                profile_begin(system.name)
-                run_process_system_timed(system, "update")
-                profile_end(system.name)
-            }
+/// Call a per-frame phase's systems in stage order.
+fn run_frame_phase(phase: string) {
+    let systems = lifecycle_systems(phase)
+    if systems.len() == 0 { return }
+    let scene = lifecycle_phase_has_scene(phase)
+    if scene { __scene_begin_update_phase() }
+    let profiling = ENGINE.systems_profiling_enabled
+    for system in systems {
+        if profiling { profile_begin(system.name) }
+        if scene {
+            run_scene_system_timed(system, phase)
         } else {
-            for system in systems { run_process_system_timed(system, "update") }
+            run_process_system_timed(system, phase)
         }
-        return
-    }
-    __scene_begin_update_phase()
-    if ENGINE.systems_profiling_enabled {
-        for system in systems {
-            profile_begin(system.name)
-            run_scene_system_timed(system, "update")
-            profile_end(system.name)
-        }
-    } else {
-        for system in systems {
-            run_scene_system_timed(system, "update")
-        }
-    }
-}
-
-/// Call all registered late_update systems in stage order
-/// Runs after run_update_systems()
-fn run_late_update_systems() {
-    let systems = lifecycle_systems("late_update")
-    let count = systems.len()
-    if count == 0 {
-        return
-    }
-
-    if ENGINE.systems_profiling_enabled {
-        for system in systems {
-            profile_begin(system.name)
-            run_process_system_timed(system, "late_update")
-            profile_end(system.name)
-        }
-    } else {
-        for system in systems {
-            run_process_system_timed(system, "late_update")
-        }
-    }
-}
-
-/// Call all registered prepare systems in stage order
-fn run_prepare_systems() {
-    let systems = lifecycle_systems("prepare")
-    if systems.len() == 0 { return }
-    if ENGINE.systems_profiling_enabled {
-        for system in systems {
-            profile_begin(system.name)
-            run_process_system_timed(system, "prepare")
-            profile_end(system.name)
-        }
-    } else {
-        for system in systems {
-            run_process_system_timed(system, "prepare")
-        }
-    }
-}
-
-/// Call all registered draw systems in stage order
-fn run_draw_systems() {
-    let systems = lifecycle_systems("draw")
-    let count = systems.len()
-    if count == 0 {
-        return
-    }
-
-    if ENGINE.systems_profiling_enabled {
-        for system in systems {
-            profile_begin(system.name)
-            run_process_system_timed(system, "draw")
-            profile_end(system.name)
-        }
-    } else {
-        for system in systems {
-            run_process_system_timed(system, "draw")
-        }
-    }
-}
-
-fn run_late_draw_systems() {
-    let systems = lifecycle_systems("late_draw")
-    let count = systems.len()
-    if count == 0 {
-        return
-    }
-
-    if ENGINE.systems_profiling_enabled {
-        for system in systems {
-            profile_begin(system.name)
-            run_process_system_timed(system, "late_draw")
-            profile_end(system.name)
-        }
-    } else {
-        for system in systems {
-            run_process_system_timed(system, "late_draw")
-        }
-    }
-}
-
-
-fn run_post_imgui_draw_systems() {
-    let systems = lifecycle_systems("post_imgui_draw")
-    if systems.len() == 0 { return }
-    if ENGINE.systems_profiling_enabled {
-        for system in systems {
-            profile_begin(system.name)
-            run_process_system_timed(system, "post_imgui_draw")
-            profile_end(system.name)
-        }
-    } else {
-        for system in systems {
-            run_process_system_timed(system, "post_imgui_draw")
-        }
+        if profiling { profile_end(system.name) }
     }
 }
 
