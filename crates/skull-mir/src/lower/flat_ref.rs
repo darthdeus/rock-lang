@@ -740,7 +740,6 @@ impl<'a> Builder<'a> {
             (name, identity)
         };
         let mf = self.lower_flat_variant(hoisted, &identity, plan, dc)?;
-        self.f.lower_attribution.add_assign(&mf.lower_attribution);
         self.flat_variants.borrow_mut().funcs.push(mf);
         Ok(hoisted)
     }
@@ -841,7 +840,6 @@ impl<'a> Builder<'a> {
                     None,
                     crate::names::ustr("slot"),
                 );
-                child.f.cells[cell].producer = crate::mir::CellProducer::Param;
                 child.f.params.push(cell);
                 slot_cells.push(cell);
             }
@@ -857,7 +855,6 @@ impl<'a> Builder<'a> {
                         None,
                         crate::names::ustr("vec"),
                     );
-                    child.f.cells[vec].producer = crate::mir::CellProducer::Param;
                     child.f.params.push(vec);
                     let slot = slot_cells.next().expect("one slot cell per flat parameter");
                     child.flat_ref_binds.insert(raw(pb), key);
@@ -876,7 +873,7 @@ impl<'a> Builder<'a> {
         for cell in &mut child.f.statics {
             cell.owner = Some(crate::code_identity::CodeIdentity::Named(inst.clone()));
         }
-        Ok(finish_lower_attribution(child.f))
+        Ok(child.f)
     }
 
     pub(crate) fn capture_flat_ref_arg(

@@ -303,7 +303,7 @@ fn cpu_artifact_lane(
         ),
         CompilerError,
     >,
-    SetupLaneWindow,
+    Duration,
 ) {
     let started = Instant::now();
     let lua_view = crate::artifact::realize(
@@ -315,20 +315,11 @@ fn cpu_artifact_lane(
         )
         .with_scalar_context(&scx),
     );
-    let population = lua_view.instances.len() + lua_view.boundaries.len();
     let cg = cg.map(|mut cg| {
         cg.set_call_sccs(call_sccs(graph));
         cg
     });
-    let finished = Instant::now();
-    (
-        cg.map(|cg| (lua_view, scx, cg)),
-        SetupLaneWindow {
-            started,
-            finished,
-            population,
-        },
-    )
+    (cg.map(|cg| (lua_view, scx, cg)), started.elapsed())
 }
 
 fn shader_lane(
@@ -345,7 +336,7 @@ fn shader_lane(
         ),
         CompilerError,
     >,
-    SetupLaneWindow,
+    Duration,
 ) {
     let started = Instant::now();
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
@@ -353,32 +344,17 @@ fn shader_lane(
     let result = (|| {
         let shader_view =
             realize_shader_view(ws, graph, shader_programs, &shader_scx, shader_plans)?;
-        let population =
-            shader_view.roots.len() + shader_view.helpers.len() + shader_view.builtins.len();
         let shader_registrations =
             shader_registration_lines(ws, &shader_scx, shader_collection, &shader_view)?;
-        Ok::<_, CompilerError>((shader_view, shader_registrations, population))
+        Ok::<_, CompilerError>((shader_view, shader_registrations))
     })();
-    let population = result
-        .as_ref()
-        .map(|(_, _, population)| *population)
-        .unwrap_or(0);
-    let finished = Instant::now();
-    (
-        result.map(|(view, registrations, _)| (view, registrations)),
-        SetupLaneWindow {
-            started,
-            finished,
-            population,
-        },
-    )
+    (result, started.elapsed())
 }
 
 struct SetupLanes {
     lua_view: crate::artifact::ArtifactView,
     scx: skull_mir::lower::ScalarCtx,
     cg: CodegenCtx,
-    attribution: SetupLaneAttribution,
     windows: [(&'static str, Duration); 2],
 }
 
@@ -389,7 +365,6 @@ fn run_setup_lanes(
     emission_roots: &[FuncRef],
     early: EarlyContexts,
 ) -> Result<(crate::concrete_body::ConcreteBodies, SetupLanes), CompilerError> {
-    let mono_before_lanes = graph.interner().stats();
     let (scx, cg) = early;
     assert!(
         std::sync::Arc::ptr_eq(&scx.interner_handle(), graph.interner()),
@@ -397,62 +372,24 @@ fn run_setup_lanes(
     );
     // Stays on this thread: its build counter is a thread-local the
     // incremental repair statistics read back.
-    let (cpu_result, (plans_result, plans_lane)) = join_in_place(
+    let ((cpu_result, cpu_elapsed), (plans_result, plans_elapsed)) = join_in_place(
         || cpu_artifact_lane(ws, graph, emission_roots, scx, cg),
         || {
             let started = Instant::now();
-            let concrete = build_plans();
-            let finished = Instant::now();
-            let population = concrete
-                .as_ref()
-                .map(|concrete| concrete.plans.len() + concrete.always_plans.len())
-                .unwrap_or(0);
-            (
-                concrete,
-                SetupLaneWindow {
-                    started,
-                    finished,
-                    population,
-                },
-            )
+            (build_plans(), started.elapsed())
         },
     );
     let concrete = plans_result?;
-    let mono_after_lanes = graph.interner().stats();
-    let (cpu_result, cpu_lane) = cpu_result;
     let (lua_view, scx, cg) = cpu_result?;
-    let attribution = SetupLaneAttribution {
-        cpu_population: cpu_lane.population,
-        plans_population: plans_lane.population,
-        shader_population: 0,
-        cpu_plans_overlap: setup_lanes_overlap(cpu_lane, plans_lane),
-        first_started_lane: Some(first_setup_lane(cpu_lane, plans_lane)),
-        mono_write_acqs_during_join: mono_after_lanes
-            .write_acqs
-            .saturating_sub(mono_before_lanes.write_acqs),
-        mono_intern_attempts_during_join: mono_after_lanes
-            .intern_attempts
-            .saturating_sub(mono_before_lanes.intern_attempts),
-        mono_intern_new_during_join: mono_after_lanes
-            .intern_new
-            .saturating_sub(mono_before_lanes.intern_new),
-    };
     Ok((
         concrete,
         SetupLanes {
             lua_view,
             scx,
             cg,
-            attribution,
             windows: [
-                (
-                    "join: concrete plans branch",
-                    plans_lane.finished - plans_lane.started,
-                ),
-                (
-                    "join: cpu artifact branch",
-                    cpu_lane.finished - cpu_lane.started,
-                ),
+                ("join: concrete plans branch", plans_elapsed),
+                ("join: cpu artifact branch", cpu_elapsed),
             ],
         },
     ))
@@ -648,7 +585,6 @@ pub(super) fn emit_full_build(
         lua_view,
         scx,
         cg,
-        attribution: mut setup_lanes,
         windows,
     } = lanes;
     setup_phases.0.extend(windows);
@@ -656,10 +592,9 @@ pub(super) fn emit_full_build(
         reject_abi_param_collisions(ws, &scx, &cg)
     });
 
-    let setup_traffic = (scx.rep_arena_stats(), scx.interner().stats());
     let graph_records = (build.lifetime() == CacheLifetime::OneShot).then(|| graph.take_records());
     let spec_queue = SpecQueue::new(ws, &scx, graph_records.as_ref().unwrap_or(&graph), None);
-    let (chunks, ((early, early_window), (shader_result, shader_lane))) = parallel_join(
+    let (chunks, ((early, early_window), (shader_result, shader_window))) = parallel_join(
         || {
             emit_full_chunks(
                 ws,
@@ -722,14 +657,10 @@ pub(super) fn emit_full_build(
             spec_queue.finish()
         },
     );
-    setup_lanes.shader_population = shader_lane.population;
     setup_phases
         .0
         .push(("window: early assembly", early_window));
-    setup_phases.0.push((
-        "window: shader view",
-        shader_lane.finished - shader_lane.started,
-    ));
+    setup_phases.0.push(("window: shader view", shader_window));
     let (dependents, dependency_edges) = if build.lifetime() == CacheLifetime::Retained {
         index_dependents(&chunks)
     } else {
@@ -758,7 +689,6 @@ pub(super) fn emit_full_build(
         body_edit_rollback: None,
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let graph_census = cache.graph.run_stats;
     let assembly_started = Instant::now();
     let (mut emit, emitted, unit_reads) = assemble(
         ws,
@@ -769,18 +699,10 @@ pub(super) fn emit_full_build(
         Some(specs),
     )?;
     let assembly_window = assembly_started.elapsed();
-    emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases.0;
     phases.extend(emit.phases);
     phases.push(("window: assembly", assembly_window));
     emit.phases = phases;
-    emit.arena_traffic = ArenaTraffic {
-        rep_setup: setup_traffic.0,
-        rep_final: cache.scx.rep_arena_stats(),
-        mono_setup: setup_traffic.1,
-        mono_final: cache.scx.interner().stats(),
-    };
-    emit.graph_census = graph_census;
     if build.lifetime() == CacheLifetime::Retained {
         let spec_edges = cache.retain_assembly(ws, &emit, emitted, unit_reads, built_specs)?;
         cache.retain_static_cells(ws)?;

@@ -1123,7 +1123,6 @@ impl<'a> Builder<'a> {
                     for (sub, v) in subs.iter().zip(vs) {
                         self.bind_for_pattern(sub, v)?;
                     }
-                    self.mark_destructured(vars);
                     return Ok(());
                 }
                 for (i, sub) in subs.iter().enumerate() {
@@ -1144,43 +1143,9 @@ impl<'a> Builder<'a> {
                     };
                     self.bind_for_pattern(sub, elem)?;
                 }
-                self.mark_destructured(vars);
             }
         }
         Ok(())
-    }
-
-    /// Charge every cell a destructuring pattern bound to the destructure, for
-    /// the cleanup Load/Store census ([`crate::mir::CellProducer`]).
-    fn mark_destructured(&mut self, vars: &BindingPattern) {
-        match vars {
-            BindingPattern::Leaf(b) => {
-                let key = raw(*b);
-                let single = self.binds.get(&key).copied();
-                let group = self.group_binds.get(&key).map(|(leaves, _)| {
-                    leaves
-                        .iter()
-                        .filter_map(|leaf| match leaf {
-                            GroupLeaf::Cell(cell) => Some(*cell),
-                            GroupLeaf::Value(_) => None,
-                        })
-                        .collect::<Vec<_>>()
-                });
-                let tuple = self.tuple_binds.get(&key).map(|(cells, _)| cells.clone());
-                for cell in single
-                    .into_iter()
-                    .chain(group.into_iter().flatten())
-                    .chain(tuple.into_iter().flatten())
-                {
-                    self.f.cells[cell].producer = crate::mir::CellProducer::Destructure;
-                }
-            }
-            BindingPattern::Tuple(subs) => {
-                for sub in subs {
-                    self.mark_destructured(sub);
-                }
-            }
-        }
     }
 
     pub(crate) fn bind_pattern_slot(
@@ -1344,7 +1309,6 @@ impl<'a> Builder<'a> {
                     None,
                     crate::names::ustr(si.to_string().as_str()),
                 );
-                self.f.cells[c].producer = crate::mir::CellProducer::TupleSlot;
                 self.store_cell(c, value);
                 c
             })
@@ -1372,7 +1336,6 @@ impl<'a> Builder<'a> {
                         &mut idx,
                     )?;
                 }
-                self.mark_destructured(vars);
             }
             BindingPattern::Leaf(b) if !shape.nullable => {
                 self.bind_tuple_slots(*b, &values, shape.clone());

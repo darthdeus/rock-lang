@@ -14,7 +14,6 @@ mod forl;
 mod frame;
 mod in_bounds;
 mod inline;
-mod load_store_census;
 mod mem2reg;
 mod nobox;
 pub mod scope;
@@ -36,11 +35,8 @@ pub use frame::materialize_frame;
 pub use in_bounds::elide_bounds_checks_for_target;
 use inline::inline_functions_with_plans;
 pub use inline::{
-    InlineCache, InlineCandidateTable, InlineCandidateWarm, InlineOffGuard, InlineScanStats,
-    SpliceRecord, inline_mode_guard, inline_off_active, inline_off_guard,
-    validate_no_residual_bound_calls,
+    InlineCache, InlineCandidateTable, InlineCandidateWarm, InlineOffGuard, SpliceRecord,
+    inline_mode_guard, inline_off_active, inline_off_guard, validate_no_residual_bound_calls,
 };
-pub use load_store_census::LoadStoreCensus;
-use load_store_census::cleanup_with_nobox_census;
 pub use nobox::{cleanup_with_nobox, nobox_materialization_violations};
 pub(crate) use visit::top_level_blocks;

@@ -1,5 +1,4 @@
 use bone_core::hir::TyId;
-use bone_core::prelude::Instant;
 use bone_core::prelude::Span;
 use comfy_la_arena::{Arena, Idx};
 use std::sync::Arc;
@@ -758,54 +757,6 @@ pub struct Cell {
     pub borrowed: bool,
     pub native_ty: Option<crate::monoty::MonoTyId>,
     pub native_flat_slot: Option<NativeFlatSlot>,
-    /// Provenance for the cleanup census only: no pass may read it to decide
-    /// anything.
-    pub producer: CellProducer,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum CellProducer {
-    #[default]
-    Temp,
-    Binding,
-    Param,
-    LoopBinding,
-    AggregateLeaf,
-    TupleSlot,
-    Destructure,
-    InlineParam,
-    InlineResult,
-    Sroa,
-}
-
-impl CellProducer {
-    pub const ALL: [Self; 10] = [
-        Self::Temp,
-        Self::Binding,
-        Self::Param,
-        Self::LoopBinding,
-        Self::AggregateLeaf,
-        Self::TupleSlot,
-        Self::Destructure,
-        Self::InlineParam,
-        Self::InlineResult,
-        Self::Sroa,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Temp => "temp",
-            Self::Binding => "binding",
-            Self::Param => "param",
-            Self::LoopBinding => "loop-binding",
-            Self::AggregateLeaf => "aggregate-leaf",
-            Self::TupleSlot => "tuple-slot",
-            Self::Destructure => "destructure",
-            Self::InlineParam => "inline-param",
-            Self::InlineResult => "inline-result",
-            Self::Sroa => "sroa-field",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -969,8 +920,6 @@ pub struct MirFunc {
     /// bounds the same expansion.
     pub value_lets: usize,
     pub value_leaves: usize,
-    pub lower_timing_enabled: bool,
-    pub lower_attribution: crate::lower::LowerAttribution,
     pub abi_plan: Option<crate::lower::BackendFnAbiPlanHandle>,
     pub abi_representation: Option<crate::lower::FunctionRepPlan>,
     pub abi_logical_type: Option<crate::monoty::MonoTy>,
@@ -1089,8 +1038,6 @@ impl MirFunc {
             param_default_values: Default::default(),
             value_lets: 0,
             value_leaves: 0,
-            lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),
-            lower_attribution: Default::default(),
             abi_plan: None,
             abi_representation: None,
             abi_logical_type: None,
@@ -1139,8 +1086,6 @@ impl MirFunc {
     }
 
     pub(crate) fn new_cell_typed(&mut self, name: Option<Ustr>, ty: Option<TyId>) -> Idx<Cell> {
-        let capacity = self.cells.capacity();
-        let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.cells.alloc(Cell {
             name,
             capture_identity: None,
@@ -1152,15 +1097,8 @@ impl MirFunc {
             borrowed: false,
             native_ty: None,
             native_flat_slot: None,
-            producer: CellProducer::Temp,
         });
         self.record_new_cell();
-        if self.cells.capacity() != capacity {
-            self.lower_attribution.mir_cell_reallocations += 1;
-            self.lower_attribution.mir_cell_reallocation_ns += start
-                .map(|start| start.elapsed().as_nanos() as u64)
-                .unwrap_or_default();
-        }
         id
     }
 
@@ -1176,11 +1114,7 @@ impl MirFunc {
     }
 
     pub fn mark_loop_binding(&mut self, cell: Idx<Cell>) {
-        let cell = &mut self.cells[cell];
-        cell.loop_binding = true;
-        if matches!(cell.producer, CellProducer::Temp | CellProducer::Binding) {
-            cell.producer = CellProducer::LoopBinding;
-        }
+        self.cells[cell].loop_binding = true;
     }
 
     pub(crate) fn mark_default_param(&mut self, cell: Idx<Cell>) {
@@ -1196,30 +1130,14 @@ impl MirFunc {
     }
 
     pub fn new_block(&mut self) -> Idx<Block> {
-        let capacity = self.blocks.capacity();
-        let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.blocks.alloc(Block::new());
         self.record_new_block();
-        if self.blocks.capacity() != capacity {
-            self.lower_attribution.mir_block_reallocations += 1;
-            self.lower_attribution.mir_block_reallocation_ns += start
-                .map(|start| start.elapsed().as_nanos() as u64)
-                .unwrap_or_default();
-        }
         id
     }
 
     pub fn emit(&mut self, block: Idx<Block>, inst: Inst) -> Idx<Inst> {
-        let capacity = self.insts.capacity();
-        let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.insts.alloc(inst);
         self.record_new_inst();
-        if self.insts.capacity() != capacity {
-            self.lower_attribution.mir_instruction_reallocations += 1;
-            self.lower_attribution.mir_instruction_reallocation_ns += start
-                .map(|start| start.elapsed().as_nanos() as u64)
-                .unwrap_or_default();
-        }
         self.blocks[block].insts.push(id);
         id
     }

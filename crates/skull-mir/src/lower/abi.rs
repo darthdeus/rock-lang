@@ -412,37 +412,6 @@ pub enum AbiQuestion {
     Owner,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct AbiPlanMemoStats {
-    pub owner_hits: u64,
-    pub owner_misses: u64,
-    pub callee_hits: u64,
-    pub callee_misses: u64,
-    pub stores: u64,
-    pub duplicate_cold_stores: u64,
-    pub unique_keys: u64,
-}
-
-impl AbiPlanMemoStats {
-    pub fn requests(&self) -> u64 {
-        self.owner_hits + self.owner_misses + self.callee_hits + self.callee_misses
-    }
-
-    pub fn hits(&self) -> u64 {
-        self.owner_hits + self.callee_hits
-    }
-
-    pub fn merge(&mut self, other: &Self) {
-        self.owner_hits += other.owner_hits;
-        self.owner_misses += other.owner_misses;
-        self.callee_hits += other.callee_hits;
-        self.callee_misses += other.callee_misses;
-        self.stores += other.stores;
-        self.duplicate_cold_stores += other.duplicate_cold_stores;
-        self.unique_keys += other.unique_keys;
-    }
-}
-
 #[derive(Clone, Default)]
 struct AbiSlots {
     owner: OnceLock<BackendFnAbiPlanHandle>,
@@ -458,53 +427,16 @@ impl AbiSlots {
     }
 }
 
-#[derive(Default)]
-struct AbiCounters {
-    owner_hits: std::sync::atomic::AtomicU64,
-    owner_misses: std::sync::atomic::AtomicU64,
-    callee_hits: std::sync::atomic::AtomicU64,
-    callee_misses: std::sync::atomic::AtomicU64,
-    stores: std::sync::atomic::AtomicU64,
-    duplicate_cold_stores: std::sync::atomic::AtomicU64,
-}
-
 /// Only successful plans are cached, so failures keep their source spans.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct AbiPlanCache {
     ids: Arc<crate::instance::InstanceIndex>,
     slots: crate::append_vec::SlotTable<AbiSlots>,
-    unique_keys: std::sync::atomic::AtomicU64,
-    counters: crate::striped::Striped<AbiCounters>,
 }
 
 impl std::fmt::Debug for AbiPlanCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AbiPlanCache")
-            .field("stats", &self.stats())
-            .finish()
-    }
-}
-
-impl Clone for AbiPlanCache {
-    fn clone(&self) -> Self {
-        use std::sync::atomic::Ordering::Relaxed;
-        let copy = Self {
-            ids: Arc::clone(&self.ids),
-            slots: self.slots.clone(),
-            unique_keys: self.unique_keys.load(Relaxed).into(),
-            ..Self::default()
-        };
-        let stats = self.stats();
-        let counters = copy.counters.local();
-        counters.owner_hits.store(stats.owner_hits, Relaxed);
-        counters.owner_misses.store(stats.owner_misses, Relaxed);
-        counters.callee_hits.store(stats.callee_hits, Relaxed);
-        counters.callee_misses.store(stats.callee_misses, Relaxed);
-        counters.stores.store(stats.stores, Relaxed);
-        counters
-            .duplicate_cold_stores
-            .store(stats.duplicate_cold_stores, Relaxed);
-        copy
+        f.write_str("AbiPlanCache")
     }
 }
 
@@ -519,17 +451,7 @@ impl AbiPlanCache {
         question: AbiQuestion,
         inst: &crate::instance::Instance,
     ) -> Option<BackendFnAbiPlanHandle> {
-        use std::sync::atomic::Ordering::Relaxed;
-        let found = self.slots(inst).slot(question).get().map(Arc::clone);
-        let counters = self.counters.local();
-        let counter = match (question, found.is_some()) {
-            (AbiQuestion::Owner, true) => &counters.owner_hits,
-            (AbiQuestion::Owner, false) => &counters.owner_misses,
-            (AbiQuestion::Callee, true) => &counters.callee_hits,
-            (AbiQuestion::Callee, false) => &counters.callee_misses,
-        };
-        counter.fetch_add(1, Relaxed);
-        found
+        self.slots(inst).slot(question).get().map(Arc::clone)
     }
 
     pub(super) fn store(
@@ -538,39 +460,11 @@ impl AbiPlanCache {
         inst: &crate::instance::Instance,
         plan: &BackendFnAbiPlanHandle,
     ) {
-        use std::sync::atomic::Ordering::Relaxed;
-        let counters = self.counters.local();
-        counters.stores.fetch_add(1, Relaxed);
-        match self.slots(inst).slot(question).set(Arc::clone(plan)) {
-            Ok(()) => {
-                self.unique_keys.fetch_add(1, Relaxed);
-            }
-            Err(_) => {
-                counters.duplicate_cold_stores.fetch_add(1, Relaxed);
-            }
-        }
+        let _ = self.slots(inst).slot(question).set(Arc::clone(plan));
     }
 
     pub(super) fn clear(&mut self) {
         self.slots = Default::default();
-        *self.unique_keys.get_mut() = 0;
-    }
-
-    pub(super) fn stats(&self) -> AbiPlanMemoStats {
-        use std::sync::atomic::Ordering::Relaxed;
-        let mut total = AbiPlanMemoStats {
-            unique_keys: self.unique_keys.load(Relaxed),
-            ..Default::default()
-        };
-        for counters in self.counters.iter() {
-            total.owner_hits += counters.owner_hits.load(Relaxed);
-            total.owner_misses += counters.owner_misses.load(Relaxed);
-            total.callee_hits += counters.callee_hits.load(Relaxed);
-            total.callee_misses += counters.callee_misses.load(Relaxed);
-            total.stores += counters.stores.load(Relaxed);
-            total.duplicate_cold_stores += counters.duplicate_cold_stores.load(Relaxed);
-        }
-        total
     }
 }
 
@@ -691,11 +585,6 @@ impl RepReadCache {
 thread_local! {
     static REP_READ_CACHE: std::cell::RefCell<RepReadCache> =
         std::cell::RefCell::new(RepReadCache::default());
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RepArenaStats {
-    pub plans: u64,
 }
 
 impl PartialEq for RepArena {
@@ -992,12 +881,6 @@ impl RepArena {
         self.plans
             .get(id.index as usize)
             .expect("RepId must belong to its build arena")
-    }
-
-    pub fn stats(&self) -> RepArenaStats {
-        RepArenaStats {
-            plans: self.plans.len() as u64,
-        }
     }
 
     pub fn try_get(&self, id: RepId) -> Option<&RepPlan> {

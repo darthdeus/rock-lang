@@ -366,7 +366,6 @@ pub(super) fn emit_global_unit(
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(Some(mut mf)) => {
-            let plan = concrete_plan.expect("a lowered global has a concrete plan");
             let unit = UnitBody {
                 mid,
                 owner: BodyOwner::Global(gid),
@@ -375,7 +374,7 @@ pub(super) fn emit_global_unit(
                 source_name: g.name.as_str(),
                 span: g.name_span,
             };
-            let Some(mut lua) = unit.emit(ws, scx, cg, plan, &mut mf, &mut out) else {
+            let Some(mut lua) = unit.emit(ws, scx, cg, &mut mf, &mut out) else {
                 return out;
             };
             let key = Ustr::from(&init_name);

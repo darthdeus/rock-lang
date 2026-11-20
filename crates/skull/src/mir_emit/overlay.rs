@@ -410,11 +410,7 @@ fn assemble_overlay(
                 ("  overlay fingerprint", d_fingerprint),
                 ("  overlay fingerprint code rows", d_fingerprint_rows),
             ],
-            abi_plan_stats: cache.scx.abi_plan_stats(),
             attribution: EmitAttribution::default(),
-            arena_traffic: ArenaTraffic::default(),
-            setup_lanes: SetupLaneAttribution::default(),
-            graph_census: crate::instance_graph::RunStats::default(),
             // `main.lua` already installed the entry point.
             emits_main: false,
             shaders: std::sync::Arc::clone(&cache.shader_registrations.sources),

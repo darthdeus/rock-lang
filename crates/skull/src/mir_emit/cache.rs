@@ -812,7 +812,6 @@ impl SkullEmitCache {
             &cache.concrete,
             previous_candidate_table.as_ref(),
             warm_keys,
-            &concrete_update.candidate_keys_added,
             &concrete_update.candidate_keys_removed,
         )?;
         // A residual call embeds no callee body, so its caller keeps the chunk when

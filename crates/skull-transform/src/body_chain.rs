@@ -9,7 +9,7 @@ use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{FuncRef, MirFunc};
 use skull_mir::verify::Stage;
 
-use crate::{InlineCache, InlineScanStats, LoadStoreCensus, SpliceRecord};
+use crate::{InlineCache, SpliceRecord};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BodyPass {
@@ -25,13 +25,8 @@ pub enum BodyPass {
 pub trait PassObserver {
     fn begin(&mut self, _pass: BodyPass, _mf: &MirFunc) {}
     fn end(&mut self, _pass: BodyPass, _mf: &MirFunc) {}
-    fn inlined(&mut self, _pass: BodyPass, _records: &[SpliceRecord], _scan: InlineScanStats) {}
+    fn inlined(&mut self, _pass: BodyPass, _records: &[SpliceRecord]) {}
     fn bounds_elided(&mut self, _count: usize) {}
-    /// Where a post-inline cleanup charges the Load/Store traffic it unlinks,
-    /// when the inline census is enabled.
-    fn load_store(&mut self) -> Option<&mut LoadStoreCensus> {
-        None
-    }
 }
 
 impl PassObserver for () {}
@@ -83,7 +78,7 @@ impl Inliner<'_> {
         obs: &mut dyn PassObserver,
     ) -> Result<HashSet<FuncRef>, ChainError> {
         obs.begin(pass, mf);
-        let (callees, records, scan) = crate::inline_functions_with_plans(
+        let (callees, records) = crate::inline_functions_with_plans(
             ws,
             self.scx,
             self.self_ref,
@@ -92,7 +87,7 @@ impl Inliner<'_> {
             self.plans,
         )
         .map_err(|error| ChainError { pass, error })?;
-        obs.inlined(pass, &records, scan);
+        obs.inlined(pass, &records);
         obs.end(pass, mf);
         verify_after(mf, stage, pass);
         Ok(callees)
@@ -124,9 +119,8 @@ pub fn prepare_body(
     obs: &mut dyn PassObserver,
 ) -> Result<HashSet<FuncRef>, ChainError> {
     debug_verify(mf, Stage::LOWERED, &"lowering");
-    let floor = inliner.cache.census_enabled().then_some(mf.insts.len());
     let mut spliced = inliner.run(ws, mf, BodyPass::Inline, Stage::LOWERED, obs)?;
-    convert(ws, mf, name, opts, obs, floor)?;
+    convert(ws, mf, name, opts, obs)?;
     if opts.inline_hoisted {
         inline_hoisted(ws, &mut inliner, &mut mf.nested_fns, &mut spliced, obs)?;
     }
@@ -141,7 +135,7 @@ pub fn convert_body(
     obs: &mut dyn PassObserver,
 ) -> Result<(), ChainError> {
     debug_verify(mf, Stage::LOWERED, &"lowering");
-    convert(ws, mf, name, opts, obs, None)
+    convert(ws, mf, name, opts, obs)
 }
 
 fn convert(
@@ -150,9 +144,8 @@ fn convert(
     name: &str,
     opts: &ChainOptions<'_>,
     obs: &mut dyn PassObserver,
-    census_floor: Option<usize>,
 ) -> Result<(), ChainError> {
-    cleanup(ws, mf, BodyPass::Cleanup, obs, census_floor)?;
+    cleanup(ws, mf, BodyPass::Cleanup, obs)?;
     obs.begin(BodyPass::Closure, mf);
     let named = mf.nested_fns.len();
     crate::convert_closures(mf, name);
@@ -195,14 +188,9 @@ fn cleanup(
     mf: &mut MirFunc,
     pass: BodyPass,
     obs: &mut dyn PassObserver,
-    census_floor: Option<usize>,
 ) -> Result<(), ChainError> {
     obs.begin(BodyPass::Cleanup, mf);
-    let result = match census_floor {
-        Some(floor) => crate::cleanup_with_nobox_census(ws, mf, floor, obs.load_store()),
-        None => crate::cleanup_with_nobox(ws, mf),
-    };
-    result.map_err(|error| ChainError { pass, error })?;
+    crate::cleanup_with_nobox(ws, mf).map_err(|error| ChainError { pass, error })?;
     obs.end(BodyPass::Cleanup, mf);
     // A hoisted body's cleanup runs after closure conversion.
     let stage = match pass {
@@ -226,9 +214,8 @@ fn inline_hoisted(
             spliced.insert(source);
         }
         let pass = BodyPass::HoistedInline;
-        let floor = inliner.cache.census_enabled().then_some(nf.insts.len());
         spliced.extend(inliner.run(ws, nf, pass, Stage::CONVERTED, obs)?);
-        cleanup(ws, nf, pass, obs, floor)?;
+        cleanup(ws, nf, pass, obs)?;
         inline_hoisted(ws, inliner, &mut nf.nested_fns, spliced, obs)?;
     }
     Ok(())

@@ -35,7 +35,6 @@ pub(super) fn emit_decorator_unit(
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(mut mf) => {
-            let plan = concrete_plan.expect("a lowered decorator has a concrete plan");
             let unit = UnitBody {
                 mid,
                 owner: BodyOwner::Decorator(did),
@@ -44,7 +43,7 @@ pub(super) fn emit_decorator_unit(
                 source_name: d.name.as_str(),
                 span: d.span,
             };
-            let Some(lua) = unit.emit(ws, scx, cg, plan, &mut mf, &mut out) else {
+            let Some(lua) = unit.emit(ws, scx, cg, &mut mf, &mut out) else {
                 return out;
             };
             emit_lowered(

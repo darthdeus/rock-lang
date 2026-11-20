@@ -1,6 +1,5 @@
 // One harness avoids linking the compiler into a separate binary per test file.
 
-mod backend_stats_summary;
 mod broken_stdlib;
 mod compile_budget;
 mod deep_programs;

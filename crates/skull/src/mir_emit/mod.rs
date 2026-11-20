@@ -75,11 +75,7 @@ pub struct MirEmit {
     /// `None` when built with [`FullEmit::without_fingerprint`].
     pub artifact_fingerprint: Option<String>,
     pub phases: Vec<(&'static str, std::time::Duration)>,
-    pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
     pub attribution: EmitAttribution,
-    pub arena_traffic: ArenaTraffic,
-    pub setup_lanes: SetupLaneAttribution,
-    pub graph_census: crate::instance_graph::RunStats,
     /// Whether the host should append the generated main call.
     pub emits_main: bool,
     /// Every registered shader, in registration order.

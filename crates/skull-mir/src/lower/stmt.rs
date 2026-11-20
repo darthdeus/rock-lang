@@ -311,7 +311,6 @@ impl<'a> Builder<'a> {
             mf,
             self.flat_variants.clone(),
         );
-        child.f.lower_attribution.abi_param_copy_volume = abi.representation.params().len();
         child.generic_bounds = self.generic_bounds;
         child.defer_mode = DeferMode::for_body(false, self.call_scx.target);
         child.param_reps = abi.representation.params().to_vec();
@@ -361,11 +360,7 @@ impl<'a> Builder<'a> {
         }
         child.defers.pop();
 
-        let child_f = super::finish_lower_attribution(child.f);
-        self.f
-            .lower_attribution
-            .add_assign(&child_f.lower_attribution);
-        self.f.nested_fns.push(child_f);
+        self.f.nested_fns.push(child.f);
         Ok(())
     }
 

@@ -189,7 +189,6 @@ impl UnitBody<'_> {
         ws: &Workspace,
         scx: &skull_mir::lower::ScalarCtx,
         cg: &CodegenCtx,
-        plan: &skull_mir::concrete::ConcreteBodyPlan,
         mf: &mut MirFunc,
         out: &mut UnitOut,
     ) -> Option<String> {
@@ -197,16 +196,11 @@ impl UnitBody<'_> {
         out.attribution.hir_nodes = hir_nodes_for_owner(ws, self.mid, self.owner);
         out.attribution.mir_instructions = mf.insts.len();
         out.attribution.mir_lowered = mf.insts.len();
-        out.attribution.lower_facts = mf.lower_attribution.clone();
         out.times.lower_work = out.attribution.mir_instructions > 0;
         if let Err(e) = convert_unit_body(ws, cg, mf, self.symbol, &mut out.times) {
             out.hard_error = Some(e);
             return None;
         }
-        out.attribution.always_lowered = true;
-        out.attribution
-            .always_callee_keys
-            .extend(plan.callees.values().map(|callee| callee.instance.clone()));
         let tv = Instant::now();
         let check =
             check_unit_spec_bindings(ws, self.mid, self.check_name, mf, self.span, &mut out.specs);

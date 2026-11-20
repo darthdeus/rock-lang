@@ -159,8 +159,6 @@ pub(super) fn emit_body_chunk(
     }
     let name = mangle_fn(ws, f);
     let mut stats = ChainStats::new(&mut times, &mut attribution.inline);
-    stats.ordinary = true;
-    stats.ordinary_key = ordinary_instance;
     let inliner = skull_transform::body_chain::Inliner {
         scx,
         self_ref,
@@ -232,12 +230,8 @@ fn lower_body(
         hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
         mir_instructions: mf.insts.len(),
         mir_lowered: mf.insts.len(),
-        lower_facts: mf.lower_attribution.clone(),
         abi_plan: mf.abi_plan.clone(),
         consumer_instance: instance.map(|instance| (instance.clone(), kind)),
-        lowered_instance: instance
-            .filter(|_| !canonical_reused)
-            .map(|instance| (instance.clone(), kind)),
         canonical_reused,
         ..UnitAttribution::default()
     };
@@ -635,8 +629,6 @@ pub(super) fn emit_spec_chunk(
     )
     .map_err(|e| CompilerError::new_with_label(f.name_span, e.error.message))?;
     times.add(&prepared_times);
-    prepared_inline.specialized_splices = prepared_inline.accepted_splices;
-    prepared_inline.census.ordinary_keys.push(body.clone());
     attribution.inline.add(prepared_inline);
     finish_body_chunk(
         ws,

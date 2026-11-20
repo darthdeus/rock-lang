@@ -92,10 +92,9 @@ struct Assembly {
 
 impl Assembly {
     fn new(cache: &SkullEmitCache, units: UnitFacts) -> Self {
-        let mut attribution = if cache.attribution {
-            candidate_setup_attribution(cache)
-        } else {
-            AttributionAccumulator::default()
+        let mut attribution = AttributionAccumulator {
+            enabled: cache.attribution,
+            ..AttributionAccumulator::default()
         };
         for (unit, text) in &units.costs {
             attribution.add_body_sized(unit, Some(*text));
@@ -253,63 +252,6 @@ impl Assembly {
             ("scaffold+callgraph+order", self.t_scaffold),
         ]
     }
-}
-
-fn candidate_setup_attribution(cache: &SkullEmitCache) -> AttributionAccumulator {
-    let mut attribution = AttributionAccumulator {
-        enabled: true,
-        census_enabled: cache.inline_cache.census_enabled(),
-        ..AttributionAccumulator::default()
-    };
-    if let Some(table) = cache.inline_cache.candidate_table() {
-        let stats = table.stats();
-        let inline = &mut attribution.result.inline;
-        inline.candidate_setup_keys = stats.keys;
-        inline.candidate_setup_warmed = stats.warmed;
-        inline.candidate_setup_reused = stats.reused;
-        inline.candidate_setup_eligible = stats.eligible;
-        inline.candidate_setup_rejected = stats.rejected;
-        inline.candidate_setup_lower_ns = stats.lower_ns;
-        inline.candidate_setup_cleanup_ns = stats.cleanup_ns;
-        inline.candidate_setup_eligibility_ns = stats.eligibility_ns;
-        inline.candidate_setup_worker_derivations = stats.worker_derivations.clone();
-        inline.candidate_setup_rejection_reasons = stats.rejection_reasons.clone();
-        if attribution.census_enabled {
-            attribution.candidate_published_keys.extend(table.keys());
-            let population = &mut inline.population;
-            for (key, profile) in &stats.profiles {
-                population.candidate_lower_attempted += usize::from(profile.lower_attempted);
-                population.candidate_lowered_keys += usize::from(profile.lowered);
-                if profile.eligible {
-                    attribution.candidate_eligible_keys.insert(key.clone());
-                }
-                population.candidate_rejected_before_lower +=
-                    usize::from(profile.rejected_before_lower);
-                population.candidate_full_clone_ns += profile.full_clone_ns;
-                population.candidate_compact_ns += profile.compact_ns;
-                population.candidate_raw_instructions += profile.raw_instructions;
-                population.candidate_raw_cells += profile.raw_cells;
-                population.candidate_raw_blocks += profile.raw_blocks;
-                population.candidate_cleaned_instructions += profile.cleaned_instructions;
-                population.candidate_cleaned_cells += profile.cleaned_cells;
-                population.candidate_cleaned_blocks += profile.cleaned_blocks;
-                population.candidate_full_clone_capacity.0 += profile.full_clone_inst_capacity;
-                population.candidate_full_clone_capacity.1 += profile.full_clone_cell_capacity;
-                population.candidate_full_clone_capacity.2 += profile.full_clone_block_capacity;
-                population.candidate_compact_capacity.0 += profile.compact_inst_capacity;
-                population.candidate_compact_capacity.1 += profile.compact_cell_capacity;
-                population.candidate_compact_capacity.2 += profile.compact_block_capacity;
-            }
-            for (key, lower_ns) in &stats.lower_ns_by_key {
-                attribution
-                    .candidate_lower_ns_by_key
-                    .entry(key.clone())
-                    .or_default()
-                    .push(*lower_ns);
-            }
-        }
-    }
-    attribution
 }
 
 fn collect_needed_foreign(
@@ -1236,11 +1178,7 @@ pub(super) fn assemble(
             definition_plan,
             artifact_fingerprint,
             phases,
-            abi_plan_stats: scx.abi_plan_stats(),
             attribution: attribution.finish(),
-            arena_traffic: ArenaTraffic::default(),
-            setup_lanes: SetupLaneAttribution::default(),
-            graph_census: crate::instance_graph::RunStats::default(),
             emits_main,
             shaders: std::sync::Arc::clone(&cache.shader_registrations.sources),
         },

@@ -354,11 +354,7 @@ pub(crate) struct SkullPhaseTimes {
     pub setup_failed: bool,
     pub emit_failed: bool,
     pub emit_phases: Vec<(&'static str, Duration)>,
-    pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
-    pub arena_traffic: skull::mir_emit::ArenaTraffic,
     pub attribution: skull::mir_emit::EmitAttribution,
-    pub setup_lanes: skull::mir_emit::SetupLaneAttribution,
-    pub graph_census: skull::instance_graph::RunStats,
 }
 
 pub(crate) fn skull_emit_timed(
@@ -391,11 +387,7 @@ pub(crate) fn skull_emit_timed(
     let emit_ok = match emit {
         Ok(e) => {
             times.emit_phases = e.phases;
-            times.abi_plan_stats = e.abi_plan_stats;
-            times.arena_traffic = e.arena_traffic;
             times.attribution = e.attribution;
-            times.setup_lanes = e.setup_lanes;
-            times.graph_census = e.graph_census;
             true
         }
         Err(e) => {

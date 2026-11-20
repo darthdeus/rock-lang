@@ -38,59 +38,6 @@ fn gap(msg: impl std::fmt::Display) -> CompilerError {
     CompilerError::new_no_location(format!("skull-mir: lowering gap: {msg}"))
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LowerAttribution {
-    pub abi_param_copy_volume: usize,
-    pub abi_param_shared_views: usize,
-    pub mir_instruction_allocations: usize,
-    pub mir_instruction_reallocations: usize,
-    pub mir_instruction_reallocation_ns: u64,
-    pub mir_instruction_capacity: usize,
-    pub mir_cell_allocations: usize,
-    pub mir_cell_reallocations: usize,
-    pub mir_cell_reallocation_ns: u64,
-    pub mir_cell_capacity: usize,
-    pub mir_block_allocations: usize,
-    pub mir_block_reallocations: usize,
-    pub mir_block_reallocation_ns: u64,
-    pub mir_block_capacity: usize,
-}
-
-impl LowerAttribution {
-    pub(crate) fn add_assign(&mut self, other: &Self) {
-        self.abi_param_copy_volume += other.abi_param_copy_volume;
-        self.abi_param_shared_views += other.abi_param_shared_views;
-        self.mir_instruction_allocations += other.mir_instruction_allocations;
-        self.mir_instruction_reallocations += other.mir_instruction_reallocations;
-        self.mir_instruction_reallocation_ns += other.mir_instruction_reallocation_ns;
-        self.mir_instruction_capacity += other.mir_instruction_capacity;
-        self.mir_cell_allocations += other.mir_cell_allocations;
-        self.mir_cell_reallocations += other.mir_cell_reallocations;
-        self.mir_cell_reallocation_ns += other.mir_cell_reallocation_ns;
-        self.mir_cell_capacity += other.mir_cell_capacity;
-        self.mir_block_allocations += other.mir_block_allocations;
-        self.mir_block_reallocations += other.mir_block_reallocations;
-        self.mir_block_reallocation_ns += other.mir_block_reallocation_ns;
-        self.mir_block_capacity += other.mir_block_capacity;
-    }
-}
-
-pub(crate) fn lower_attribution_timing_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ROCK_LOG").is_ok_and(|value| value == "debug"))
-}
-
-fn finish_lower_attribution(mut f: MirFunc) -> MirFunc {
-    let stats = &mut f.lower_attribution;
-    stats.mir_instruction_allocations += f.insts.len();
-    stats.mir_instruction_capacity += f.insts.capacity();
-    stats.mir_cell_allocations += f.cells.len();
-    stats.mir_cell_capacity += f.cells.capacity();
-    stats.mir_block_allocations += f.blocks.len();
-    stats.mir_block_capacity += f.blocks.capacity();
-    f
-}
-
 pub(crate) fn required_wire_slot<T>(
     slots: &[T],
     index: usize,
@@ -127,12 +74,11 @@ pub use shape::*;
 /// calls cannot reach it from two places.
 mod abi;
 pub use abi::{
-    AbiPlanMemoStats, AbiQuestion, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass,
-    FunctionRepPlan, GlobalPlan, RepArena, RepArenaStats, RepError, RepGuarantees, RepId,
-    RepLayout, RepPlan, RepUse, RepUseFacts, SIGNATURE_SCALAR_LANE_BUDGET, TupleLayout,
-    WIDE_VALUE_PAYLOAD_LEAF_CUT, WirePosition, boundary_requires_boxed_representation,
-    declared_boundary_class, owner_abi_plan, owner_abi_plan_for_body, requires_concrete_body_plan,
-    selected_sibling_abi_plan,
+    AbiQuestion, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass, FunctionRepPlan,
+    GlobalPlan, RepArena, RepError, RepGuarantees, RepId, RepLayout, RepPlan, RepUse, RepUseFacts,
+    SIGNATURE_SCALAR_LANE_BUDGET, TupleLayout, WIDE_VALUE_PAYLOAD_LEAF_CUT, WirePosition,
+    boundary_requires_boxed_representation, declared_boundary_class, owner_abi_plan,
+    owner_abi_plan_for_body, requires_concrete_body_plan, selected_sibling_abi_plan,
 };
 
 mod struct_plan;
@@ -420,14 +366,6 @@ impl ScalarCtx {
         plan: &BackendFnAbiPlanHandle,
     ) {
         self.abi_plans.store(question, inst, plan);
-    }
-
-    pub fn abi_plan_stats(&self) -> AbiPlanMemoStats {
-        self.abi_plans.stats()
-    }
-
-    pub fn rep_arena_stats(&self) -> abi::RepArenaStats {
-        self.rep_arena.stats()
     }
 
     pub fn target(&self) -> bone_core::hir::FnBackend {
@@ -1133,8 +1071,6 @@ pub fn lower_instance_with_plans(
         f,
         FlatVariants::for_root(inst.clone()),
     );
-    b.f.lower_attribution.abi_param_shared_views =
-        usize::from(!abi.representation().params().is_empty());
     b.generic_bounds = &func.generic_bounds;
     b.defer_mode = stmt::DeferMode::for_body(func.is_coroutine, scx.target);
     b.ret_rep = abi.representation().result();
@@ -1154,7 +1090,7 @@ pub fn lower_instance_with_plans(
     b.lower_root().map_err(|e| at_decl(b.located(e)))?;
     let variants = b.flat_variants.borrow_mut().take_funcs();
     b.f.nested_fns.extend(variants);
-    Ok(finish_lower_attribution(b.f))
+    Ok(b.f)
 }
 
 /// Reject a specialized bounded body whose witness tree was lost before any
@@ -1191,7 +1127,6 @@ pub fn lower_definition_factory(
     let mut f = MirFunc::new(crate::names::ustr("__rock_definition_materialize"));
     f.rep_arena = Some(scx.rep_arena().clone());
     let parameter = f.new_cell(Some(crate::names::ustr("factory")));
-    f.cells[parameter].producer = crate::mir::CellProducer::Param;
     f.params.push(parameter);
     let mut b = Builder::new(
         ws,
@@ -1279,7 +1214,7 @@ pub(crate) fn lower_global_with_call_context(
     b.f.global_plan = Some(global_plan);
     b.lower_root()
         .map_err(|e| b.located(e).or_at(def.name_span))?;
-    Ok(Some(finish_lower_attribution(b.f)))
+    Ok(Some(b.f))
 }
 
 pub fn lower_decorator_with_plans(
@@ -1347,7 +1282,7 @@ pub fn lower_decorator_with_plans(
         .map_err(at_decl)?;
     b.lower_params().map_err(at_decl)?;
     b.lower_root().map_err(|e| at_decl(b.located(e)))?;
-    Ok(finish_lower_attribution(b.f))
+    Ok(b.f)
 }
 
 fn artifact_mir(
@@ -1763,11 +1698,6 @@ impl<'a> Builder<'a> {
         if let Some(concrete) = ty.and_then(|ty| self.concrete_ty_id(ty)) {
             self.f.cells[cell].never_nil = crate::nilness::monoty_never_nil(self.ws, concrete);
         }
-        self.f.cells[cell].producer = if projection.is_empty() {
-            crate::mir::CellProducer::Binding
-        } else {
-            crate::mir::CellProducer::AggregateLeaf
-        };
         self.f.cells[cell].capture_identity =
             crate::code_identity::LambdaSiteId::from_span(self.body.binding_arena[binding].span)
                 .map(|site| crate::code_identity::CaptureIdentity::Binding { site, projection });
@@ -2300,7 +2230,6 @@ impl<'a> Builder<'a> {
         if !slot.splats() {
             let cty = self.binding_ty(pb);
             let cell = self.new_binding_cell(pb, name, cty, crate::names::ustr(""));
-            self.f.cells[cell].producer = crate::mir::CellProducer::Param;
             self.f.params.push(cell);
             self.binds.insert(raw(pb), cell);
             return Ok(());
@@ -2349,9 +2278,6 @@ impl<'a> Builder<'a> {
                 cells.len(),
                 slot.slot_count(self.scx.rep_arena())
             )));
-        }
-        for &cell in &cells {
-            self.f.cells[cell].producer = crate::mir::CellProducer::Param;
         }
         self.f.params.extend(cells.iter().copied());
         match slot {

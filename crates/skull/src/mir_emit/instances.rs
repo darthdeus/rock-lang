@@ -83,7 +83,6 @@ pub(super) fn update_inline_candidate_table(
     concrete: &crate::concrete_body::ConcreteBodies,
     base: Option<&std::sync::Arc<skull_transform::InlineCandidateTable>>,
     warm_keys: Vec<Instance>,
-    added: &BTreeSet<Instance>,
     removed: &BTreeSet<Instance>,
 ) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
     let warms = warm_candidates(ws, scx, concrete, warm_keys)?;
@@ -91,7 +90,6 @@ pub(super) fn update_inline_candidate_table(
         Some(base) => skull_transform::InlineCandidateTable::from_warms_incremental(
             std::sync::Arc::clone(base),
             warms,
-            &added.iter().cloned().collect::<Vec<_>>(),
             &removed.iter().cloned().collect::<Vec<_>>(),
         ),
         None => {
