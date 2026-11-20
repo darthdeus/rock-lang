@@ -327,33 +327,25 @@ fn render_batch_growth_check_views(batch: RenderBatch) {
 }
 
 @test
-fn render_batch_growth_single_overflow_preserves_vertices_and_views() {
-    for capacity in [1, 2, 3] {
+fn render_batch_growth_copies_once_and_preserves_vertices_and_views() {
+    let cases: [(int, int?)] = [(1, null), (2, null), (3, null), (2, 1), (2, 9), (2, 65), (2, 1025)]
+    for (capacity, reserve) in cases {
         let batch = render_batch_growth_tiny(capacity)
         render_batch_growth_fill(batch)
         let before = __sprite_mesh_growth_prefix(batch.verts, batch.count)
-        let meter = __sprite_mesh_growth_copy_meter(() => { __grow_vertex_buf(batch) })
-        assert_eq(batch.capacity, capacity * 2, "single overflow doubles capacity")
+        let meter = __sprite_mesh_growth_copy_meter(() => {
+            if let additional = reserve { reserve_vertices(batch, additional) }
+            else { __grow_vertex_buf(batch) }
+        })
+        if let additional = reserve {
+            let requested = capacity + additional
+            assert(batch.capacity >= requested && batch.capacity < requested * 2,
+                "geometric capacity covers the complete request without excessive slack")
+        } else {
+            assert_eq(batch.capacity, capacity * 2, "single overflow doubles capacity")
+        }
         assert_eq(batch.verts.len, batch.capacity, "the buffer exposes its full capacity")
         assert_eq(batch.count, capacity, "growth keeps the live vertex count")
-        sprite_mesh_growth_assert_one_copy(meter, before,
-            __sprite_mesh_growth_prefix(batch.verts, batch.count))
-        render_batch_growth_check_views(batch)
-    }
-}
-
-@test
-fn render_batch_growth_bulk_jump_copies_once_and_preserves_vertices_and_views() {
-    for additional in [1, 9, 65, 1025] {
-        let batch = render_batch_growth_tiny(2)
-        render_batch_growth_fill(batch)
-        let before = __sprite_mesh_growth_prefix(batch.verts, batch.count)
-        let requested = batch.count + additional
-        let meter = __sprite_mesh_growth_copy_meter(() => { reserve_vertices(batch, additional) })
-        assert(batch.capacity >= requested && batch.capacity < requested * 2,
-            "geometric capacity covers the complete request without excessive slack")
-        assert_eq(batch.verts.len, batch.capacity, "the buffer exposes its full capacity")
-        assert_eq(batch.count, 2, "reserving keeps the live vertex count")
         sprite_mesh_growth_assert_one_copy(meter, before,
             __sprite_mesh_growth_prefix(batch.verts, batch.count))
         render_batch_growth_check_views(batch)

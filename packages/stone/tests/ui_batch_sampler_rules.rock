@@ -242,11 +242,6 @@ fn ui_batch_sampler_fixture(fail_after_draw: bool) {
 }
 
 @test
-fn ui_batch_stored_normal_filtering_reaches_pixels() {
-    ui_batch_sampler_fixture(false)
-}
-
-@test
 fn ui_batch_secondary_samplers_released_after_draw() {
     ui_batch_sampler_guarded((white) => {
         let normal_img = ui_batch_sampler_solid(v(0.23, 0.31, 0.42, 1.0))
@@ -335,7 +330,7 @@ fn ui_batch_secondary_samplers_released_after_draw() {
 }
 
 @test
-fn ui_batch_sampler_fixture_restores_after_failure() {
+fn ui_batch_sampler_filters_pixels_and_restores_after_failure() {
     // A passing run first, so the baseline includes the GPU host and the
     // process-lifetime images the first draw mints.
     ui_batch_sampler_fixture(false)
