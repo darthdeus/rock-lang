@@ -73,13 +73,21 @@ newtype Label(string)
 "#;
 
 #[test]
-fn empty_snapshots_allocate_only_the_returned_list() {
+fn empty_snapshots_only_allocate_fresh_results_and_skip_sorting() {
     let lua = emit_module(SOURCE);
     let output = run_luajit(&format!(
         r#"{lua}
 jit.off()
 jit.flush()
 local boxed, column = empty_boxed_map(), empty_column_map()
+local cases = {{
+    {{boxed_keys, empty_keys, boxed, 'boxed keys'}},
+    {{column_keys, empty_keys, column, 'column keys'}},
+    {{boxed_values, empty_boxed_values, boxed, 'boxed values'}},
+    {{column_values, empty_column_values, column, 'column values'}},
+    {{boxed_pairs, empty_boxed_pairs, boxed, 'boxed pairs'}},
+    {{column_pairs, empty_column_pairs, column, 'column pairs'}}
+}}
 local sink
 local function growth(f, map)
     for i = 1, 32 do sink = f(map) end
@@ -91,38 +99,29 @@ local function growth(f, map)
     collectgarbage('restart')
     return bytes
 end
-for _, case in ipairs({{
-    {{boxed_keys, empty_keys, boxed, 'boxed keys'}},
-    {{column_keys, empty_keys, column, 'column keys'}},
-    {{boxed_values, empty_boxed_values, boxed, 'boxed values'}},
-    {{column_values, empty_column_values, column, 'column values'}},
-    {{boxed_pairs, empty_boxed_pairs, boxed, 'boxed pairs'}},
-    {{column_pairs, empty_column_pairs, column, 'column pairs'}}
-}}) do
+for _, case in ipairs(cases) do
     local baseline = growth(case[2], case[3])
     local actual = growth(case[1], case[3])
     assert(actual <= baseline + 1024,
         case[4] .. ' allocated beyond its result: ' .. (actual - baseline) .. ' bytes')
 end
-print('ok')
-"#
-    ));
-    assert_eq!(output, "ok");
-}
-
-#[test]
-fn empty_snapshots_skip_sorting_and_keys_into_clears_its_result() {
-    let lua = emit_module(SOURCE);
-    let output = run_luajit(&format!(
-        r#"{lua}
-local boxed, column = empty_boxed_map(), empty_column_map()
-table.sort = function() error('empty snapshot sorted') end
-for _, case in ipairs({{
-    {{boxed_keys, boxed}}, {{column_keys, column}},
-    {{boxed_values, boxed}}, {{column_values, column}},
-    {{boxed_pairs, boxed}}, {{column_pairs, column}}
-}}) do
-    assert(case[1](case[2]).len == 0)
+jit.on()
+local sorters = {{}}
+for name, f in pairs(_G) do
+    if name:match('^__sort_map_keys') then sorters[f] = true end
+end
+assert(next(sorters), 'map key sorter was not emitted')
+sorters[table.sort] = true
+debug.sethook(function()
+    assert(not sorters[debug.getinfo(2, 'f').func], 'empty snapshot sorted')
+end, 'c')
+for _, case in ipairs(cases) do
+    local first, second = case[1](case[3]), case[1](case[3])
+    assert(first.len == 0 and second.len == 0, case[4])
+    assert(not rawequal(first, second), 'snapshot result was shared')
+    if first._data then
+        assert(not rawequal(first._data, second._data), 'snapshot storage was shared')
+    end
 end
 for _, case in ipairs({{{{boxed_keys_into, boxed}}, {{column_keys_into, column}}}}) do
     local out = empty_keys()
@@ -130,43 +129,11 @@ for _, case in ipairs({{{{boxed_keys_into, boxed}}, {{column_keys_into, column}}
     assert(rawequal(case[1](case[2], out), out))
     assert(out.len == 0 and out._data[1] == nil)
 end
+debug.sethook()
 print('ok')
 "#
     ));
     assert_eq!(output, "ok");
-}
-
-#[test]
-fn empty_snapshots_return_fresh_lists() {
-    let lua = emit_module(SOURCE);
-    let output = run_luajit(&format!(
-        r#"{lua}
-local boxed, column = empty_boxed_map(), empty_column_map()
-for _, case in ipairs({{
-    {{boxed_keys, boxed}}, {{column_keys, column}},
-    {{boxed_values, boxed}}, {{column_values, column}},
-    {{boxed_pairs, boxed}}, {{column_pairs, column}}
-}}) do
-    local first, second = case[1](case[2]), case[1](case[2])
-    assert(first.len == 0 and second.len == 0)
-    assert(not rawequal(first, second), 'snapshot result was shared')
-    if first._data then
-        assert(not rawequal(first._data, second._data), 'snapshot storage was shared')
-    end
-end
-print('ok')
-"#
-    ));
-    assert_eq!(output, "ok");
-}
-
-#[test]
-fn nonempty_snapshots_stay_sorted_and_survive_map_mutation() {
-    let lua = emit_module(SOURCE);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nsorted_snapshots()\nprint('ok')")),
-        "ok"
-    );
 }
 
 #[test]
@@ -174,6 +141,7 @@ fn snapshot_keys_sort_by_text_and_keep_ties_in_traversal_order() {
     let lua = emit_module(SOURCE);
     let output = run_luajit(&format!(
         r#"{lua}
+sorted_snapshots()
 local boxed, column = empty_boxed_map(), empty_column_map()
 boxed['10'], boxed['2'] = {{ id = 10 }}, {{ id = 2 }}
 column.spine['10'], column.spine['2'] = 1, 2
@@ -188,7 +156,6 @@ for key in pairs(mixed) do
 end
 local a, b, c = boxed_keys(boxed), column_keys(column), label_keys(labels)
 assert(a._data[1] == '10' and b._data[1] == '10' and c._data[1] == '10')
-sorted_snapshots()
 local d, e = number_keys(numbers), mixed_keys(mixed)
 assert(d._data[1] == 10 and d._data[2] == 2, 'numeric keys keep tostring order')
 assert(e.len == 3 and e._data[3] == '2', 'mixed keys keep tostring order')
