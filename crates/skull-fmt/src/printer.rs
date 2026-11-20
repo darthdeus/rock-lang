@@ -1754,7 +1754,8 @@ impl<'a> Printer<'a> {
         let docs: Vec<Doc> = args.iter().map(render_arg).collect();
         let renders_multiline = docs.iter().any(Doc::has_hard_line);
         let source_multiline = span.line_range().0 != span.line_range().1 || renders_multiline;
-        if source_multiline && self.hugs_trailing_arg(args, span) {
+        let hugs_trailing_arg = self.hugs_trailing_arg(args, span);
+        if source_multiline && hugs_trailing_arg {
             return inline_comma_list("(", ")", docs);
         }
         if !has_comments && source_multiline && !renders_multiline {
@@ -1771,10 +1772,17 @@ impl<'a> Printer<'a> {
             };
             return self.comma_block_before(entries, body, "(", ")", call_end);
         }
-        if args[..args.len() - 1].iter().any(|arg| {
-            matches!(&self.ast.e(&arg.value).kind, ExprKind::Lambda { body, .. }
-                if self.block_has_braces(*body))
-        }) {
+        let unwrapped_args = if hugs_trailing_arg {
+            &docs[..docs.len() - 1]
+        } else {
+            &docs
+        };
+        if unwrapped_args.iter().any(Doc::can_wrap)
+            || args[..args.len() - 1].iter().any(|arg| {
+                matches!(&self.ast.e(&arg.value).kind, ExprKind::Lambda { body, .. }
+                    if self.block_has_braces(*body))
+            })
+        {
             return wrap_parens(docs);
         }
         inline_comma_list("(", ")", docs)
@@ -2139,7 +2147,7 @@ impl<'a> Printer<'a> {
                 }
             }
             TypeExprKind::Ident(id) => Doc::text(kw(id.name)),
-            TypeExprKind::Path(_) | TypeExprKind::AppPath { .. } => self.raw(data.span),
+            TypeExprKind::Path(_) | TypeExprKind::AppPath { .. } => return self.raw(data.span),
             TypeExprKind::Array(el) => Doc::surround("[", self.type_expr(*el), "]"),
             TypeExprKind::App { ctor, args } => Doc::concat([
                 Doc::text(kw(ctor.name)),

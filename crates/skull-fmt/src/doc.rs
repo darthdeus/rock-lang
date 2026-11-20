@@ -56,6 +56,15 @@ impl Doc {
             Doc::Indent(d) | Doc::Group(d) => d.has_hard_line(),
         }
     }
+
+    pub(crate) fn can_wrap(&self) -> bool {
+        match self {
+            Doc::Group(_) => true,
+            Doc::Concat(ds) => ds.iter().any(Doc::can_wrap),
+            Doc::Indent(d) => d.can_wrap(),
+            Doc::Nil | Doc::Text(_) | Doc::Line(_) => false,
+        }
+    }
 }
 
 /// Convenience line-break constructors.

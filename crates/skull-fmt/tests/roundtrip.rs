@@ -48,3 +48,38 @@ fn closure_followed_by_another_argument_reaches_a_fixed_point() {
         }
     }
 }
+
+#[test]
+fn nullable_qualified_types_preserve_their_source_spelling() {
+    let cfg = skull_fmt::FormatConfig::default();
+    for ty in ["ns::T?", "::T?", "ns::Box<int>?", "(ns::T)?", "(ns::T?)"] {
+        let source = format!("fn f(x: {ty}) {{ x }}\n");
+        let once = skull_fmt::try_format(&source, &cfg).expect("format nullable path");
+        let twice = skull_fmt::try_format(&once, &cfg).expect("reparse nullable path");
+        assert_eq!(once, source);
+        assert_eq!(twice, once);
+    }
+}
+
+#[test]
+fn calls_wrap_when_a_nested_closure_breaks() {
+    let config = skull_fmt::FormatConfig {
+        max_line_length: 40,
+        ..Default::default()
+    };
+    let source = "fn f() {\n    check(probe(() => { work(one, two, three) }) != null)\n}\n";
+    let once = skull_fmt::try_format(source, &config).expect("format nested closure");
+    let twice = skull_fmt::try_format(&once, &config).expect("reparse nested closure");
+    assert_eq!(once, twice);
+    assert_eq!(
+        once,
+        "fn f() {
+    check(
+        probe(() => {
+            work(one, two, three)
+        }) != null
+    )
+}
+"
+    );
+}
