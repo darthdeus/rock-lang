@@ -1,8 +1,11 @@
 //! Seeded typed-program generation and differential reduction; see docs/testing.md.
 #![cfg(feature = "backend-js")]
 
+mod areas;
 mod generator;
+mod mutations;
 mod oracle;
+mod reload;
 mod runner;
 
 use crate::support::require_node;
@@ -39,18 +42,64 @@ fn smoke() {
     }
 }
 
-#[test]
-#[ignore = "long differential campaign; set ROCK_DIFF_SEEDS and ROCK_DIFF_START"]
-fn campaign() {
-    assert!(require_node(), "a campaign requires node");
+fn seeds() -> impl Iterator<Item = u64> {
     let setting =
         |name, default| std::env::var(name).map_or(default, |s| s.parse::<u64>().unwrap());
     let start = setting("ROCK_DIFF_START", 0);
     let count = setting("ROCK_DIFF_SEEDS", 100);
     assert!(count > 0);
-    for offset in 0..count {
-        let seed = start.wrapping_add(offset);
+    (0..count).map(move |offset| start.wrapping_add(offset))
+}
+
+#[test]
+#[ignore = "long differential campaign; set ROCK_DIFF_SEEDS and ROCK_DIFF_START"]
+fn campaign() {
+    assert!(require_node(), "a campaign requires node");
+    for seed in seeds() {
         compare(seed);
         eprintln!("differential seed {seed} passed");
+    }
+}
+
+#[test]
+fn reload_smoke() {
+    if let Err(finding) = reload::check(2) {
+        panic!("reload seed 2: {finding}");
+    }
+}
+
+#[test]
+#[ignore = "long reload campaign; set ROCK_DIFF_SEEDS and ROCK_DIFF_START"]
+fn reload_campaign() {
+    for seed in seeds() {
+        if let Err(finding) = reload::check(seed) {
+            let last = reload::steps(seed)
+                .last()
+                .map(|step| step.1)
+                .unwrap_or_default();
+            let source = generator::revised(seed, &last);
+            panic!("reload seed {seed}: {finding}\nfinal source:\n{source}");
+        }
+        eprintln!("reload seed {seed} passed");
+    }
+}
+
+fn mutations(seed: u64, count: usize) {
+    if let Err(finding) = mutations::check(seed, count) {
+        panic!("mutation seed {seed}: {finding}");
+    }
+}
+
+#[test]
+fn mutation_smoke() {
+    mutations(2, 12);
+}
+
+#[test]
+#[ignore = "long mutation campaign; set ROCK_DIFF_SEEDS and ROCK_DIFF_START"]
+fn mutation_campaign() {
+    for seed in seeds() {
+        mutations(seed, 200);
+        eprintln!("mutation seed {seed} passed");
     }
 }

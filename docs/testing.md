@@ -53,8 +53,10 @@ A typed environment tracks locals through nested blocks, so declarations,
 assignments and expressions are well-typed by construction. Random statements
 cover value copies and refs, mutable captures, bounded loops, enums with generated payload schemas,
 collections, interpolation, coroutines, overloads and generic calls. Each program
-prints a deterministic trace frequently. The runner compares LuaJIT and Node
-stdout with MIR checks both off and on, and treats compile failures, runtime errors and hangs as failures.
+prints a deterministic trace frequently. The runner compares Node with LuaJIT
+three ways: the JIT on, the JIT off, and traces forced hot by low hotloop and
+hotexit thresholds. MIR checks run on one Lua and one Node pass. Compile failures,
+runtime errors and hangs are failures.
 Programs repeat their probes with the JIT enabled to exercise hot code too.
 Map lookups use a fixed order. Numeric traces normalize signed zero, which differs
 between LuaJIT platforms; signed bitwise inputs stay below the documented
@@ -65,14 +67,30 @@ Each program also asserts results computed in Rust for fixed shapes that
 random statements rarely reach: counted while loops whose bound or counter is
 written in the body, by a closure or by a callee, re-entered inner loops, and
 JSON trees decoded from text and round-tripped through both encoders.
+A second family of Rust-modelled checks runs 80 rounds over random inputs:
+integer and float edge values (overflow past 2^53, floor division, modulo,
+signed zero, NaN, infinities, denormals), string functions with pattern
+characters, nested enum matches with guards and nullable payloads, Vec and Map
+operation sequences including mutation while iterating, closure captures
+mutated after capture, and coroutine await chains with defers and kills.
+
+Two more harnesses reuse the generator. The reload differential applies a
+seeded sequence of helper-body edits through the incremental compiler and
+compares the baseline plus overlay with a fresh build of the final source; an
+edit the compiler refuses for a safe restart restarts the baseline. The
+mutation harness deletes, inserts, replaces and swaps tokens in generated
+programs (even seeds) and corpus files (odd seeds), then runs a fresh check and
+compile, a live edit and the editor queries; any panic fails.
 
 ```sh
 cargo test --locked -p rock-cli --test rock_cli_tests differential::smoke
 ROCK_DIFF_SEEDS=5000 cargo test --locked -p rock-cli --test rock_cli_tests differential::campaign -- --ignored --nocapture
 ROCK_DIFF_START=81 ROCK_DIFF_SEEDS=1 cargo test --locked -p rock-cli --test rock_cli_tests differential::campaign -- --ignored --nocapture
+ROCK_DIFF_SEEDS=200 cargo test --locked -p rock-cli --test rock_cli_tests differential::reload_campaign -- --ignored --nocapture
+ROCK_DIFF_SEEDS=200 cargo test --locked -p rock-cli --test rock_cli_tests differential::mutation_campaign -- --ignored --nocapture
 ```
 
-The ordinary cargo test run covers a fixed smoke seed set. Campaigns start at
+The ordinary cargo test run covers one smoke seed per harness. Campaigns start at
 seed zero by default. A failure reports the seed, source and first differing
 trace line; set `ROCK_DIFF_OUTPUT` to a scratch directory to keep the generated
 `.rock` files for replay with `rock run`. On failure the runner repeatedly drops

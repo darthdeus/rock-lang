@@ -87,6 +87,10 @@ impl Generator {
         choices[(n % choices.len() as u64) as usize]
     }
 
+    pub(super) fn below(&mut self, n: usize) -> usize {
+        self.pick(&(0..n).collect::<Vec<_>>())
+    }
+
     fn fresh(&mut self) -> String {
         self.serial += 1;
         format!("v{}", self.serial)
@@ -619,6 +623,11 @@ impl Generator {
 }
 
 pub(super) fn program(seed: u64) -> String {
+    revised(seed, &[])
+}
+
+/// `program(seed)` with helper `i` drawn from revision `revisions[i]`.
+pub(super) fn revised(seed: u64, revisions: &[u64]) -> String {
     let mut g = Generator {
         random: seed,
         serial: 0,
@@ -681,6 +690,13 @@ pub(super) fn program(seed: u64) -> String {
             Ty::Value,
             Ty::Flat,
         ]);
+        let inline = g.pick(&["", "@inline "]);
+        // A helper body draws from its own stream, so a revision rewrites that
+        // body alone and leaves the rest of the program byte-identical.
+        let saved = (g.random, g.serial);
+        let revision = revisions.get(i).copied().unwrap_or(0);
+        g.random = seed ^ (i as u64 + 1).wrapping_mul(0x517c_c1b7_2722_0a95) ^ (revision << 32);
+        g.serial = 100_000 * (i + 1);
         let mut env = vec![Variable {
             name: "input".into(),
             ty: Ty::Int,
@@ -689,10 +705,10 @@ pub(super) fn program(seed: u64) -> String {
         let mut body = String::new();
         g.body(&mut body, &mut env, &mut 6, 0, false, false);
         let result = g.expr(&env, ty, 2);
+        (g.random, g.serial) = saved;
         writeln!(
             out,
-            "{}fn helper{i}(input: int) -> {} {{\n{body}\nreturn {result}\n}}",
-            g.pick(&["", "@inline "]),
+            "{inline}fn helper{i}(input: int) -> {} {{\n{body}\nreturn {result}\n}}",
             ty.rock()
         )
         .unwrap();
@@ -756,14 +772,15 @@ pub(super) fn program(seed: u64) -> String {
     for v in &env {
         g.trace_variable(&mut body, v);
     }
-    writeln!(out, "fn probe(input: int) {{\n{body}\nlet c = stream(input)\nfor step in 0..128 {{\nif let e = c.resume() {{ observe(step, e) }} else {{ break }}\n}}\n}}\nfn main() {{\nassert(jit_enabled())\ncheck_generated_loops()\ncheck_generated_json()\nfor round in 0..64 {{ probe(round) }}\n}}").unwrap();
+    writeln!(out, "fn probe(input: int) {{\n{body}\nlet c = stream(input)\nfor step in 0..128 {{\nif let e = c.resume() {{ observe(step, e) }} else {{ break }}\n}}\n}}\nfn main() {{\nassert(jit_enabled())\ncheck_generated_loops()\ncheck_generated_json()\nfor round in 0..64 {{ probe(round) }}\nfor round in 0..80 {{ check_areas() }}\n}}").unwrap();
     super::oracle::loops(&mut g, &mut out);
     super::oracle::json(&mut g, &mut out);
+    super::areas::areas(&mut g, &mut out);
     out
 }
 
 const RUNTIME: &str = r#"
-@nomangle inline(lua) fn jit_enabled() -> bool = """return jit.status()"""
+@nomangle inline(lua) fn jit_enabled() -> bool = """return jit.status() or os.getenv("ROCK_DIFF_JIT") == 'off'"""
 @nomangle inline(js) fn jit_enabled() -> bool = """return true;"""
 fn label(x: int) -> string { let n = if x == 0 { 0 } else { x }; return "{n}" }
 fn label(x: uint) -> string { return "{x}" }

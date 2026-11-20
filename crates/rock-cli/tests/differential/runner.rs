@@ -9,7 +9,7 @@ use wait_timeout::ChildExt;
 
 #[derive(Debug)]
 pub(super) struct Finding {
-    mode: (&'static str, bool),
+    mode: Mode,
     signature: String,
     detail: String,
 }
@@ -18,8 +18,8 @@ impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "backend {}, MIR checks {}: {}\n{}",
-            self.mode.0, self.mode.1, self.signature, self.detail
+            "backend {}, MIR checks {}, JIT {}: {}\n{}",
+            self.mode.0, self.mode.1, self.mode.2, self.signature, self.detail
         )
     }
 }
@@ -30,10 +30,11 @@ pub(super) fn check(source: &str) -> Result<(), Finding> {
     std::fs::write(&file, source).expect("write differential program");
     let mut reference: Option<Vec<u8>> = None;
     for mode in [
-        ("skull", false),
-        ("js", false),
-        ("skull", true),
-        ("js", true),
+        ("skull", false, "on"),
+        ("js", false, "on"),
+        ("skull", true, "off"),
+        ("skull", false, "hot"),
+        ("js", true, "on"),
     ] {
         let output = run(&file, mode).map_err(|(signature, detail)| Finding {
             mode,
@@ -76,7 +77,11 @@ pub(super) fn check(source: &str) -> Result<(), Finding> {
     Ok(())
 }
 
-fn run(source: &Path, mode: (&str, bool)) -> Result<Vec<u8>, (String, String)> {
+/// Backend, MIR checks, and LuaJIT compiler: default, off, or recording traces
+/// at the first repetition.
+type Mode = (&'static str, bool, &'static str);
+
+fn run(source: &Path, mode: Mode) -> Result<Vec<u8>, (String, String)> {
     let io_error = |e: std::io::Error| (format!("process I/O: {:?}", e.kind()), e.to_string());
     let stdout = tempfile::tempfile().map_err(io_error)?;
     let stderr = tempfile::tempfile().map_err(io_error)?;
@@ -85,6 +90,19 @@ fn run(source: &Path, mode: (&str, bool)) -> Result<Vec<u8>, (String, String)> {
         .args(["run", "--backend", mode.0])
         .arg(source)
         .env("ROCK_MIR_CHECKS", if mode.1 { "1" } else { "0" })
+        .env("ROCK_DIFF_JIT", mode.2);
+    match mode.2 {
+        "off" => {
+            command.env("LUA_INIT", "jit.off()");
+        }
+        "hot" => {
+            command
+                .env("ROCK_JIT_HOTLOOP", "1")
+                .env("ROCK_JIT_HOTEXIT", "1");
+        }
+        _ => {}
+    }
+    command
         .stdout(Stdio::from(stdout.try_clone().map_err(io_error)?))
         .stderr(Stdio::from(stderr.try_clone().map_err(io_error)?));
     #[cfg(unix)]
