@@ -339,13 +339,18 @@ headers and native library with the vendored cimgui-love generator. Its
 generator's decisions.
 
 Add the Lua export name or `Type.Method` to
-`packages/stone/prebuilt/cimgui/wrappers.txt`, then run
-`python3 scripts/stone_imgui_wrappers.py` from the repository root. The script
-reads the pinned release's `wrap.lua`, follows references to wrapper helpers,
-and writes the embedded subset. Commit the list and generated file together.
-Run the same command with `--check` to verify the output. Include names used
-through computed wrapper lookups in the list. The full C namespace (`imgui.C`)
-and all enum names are available independently of the list.
+`packages/stone/prebuilt/cimgui/roots.txt`. For direct FFI uses, list the C
+function or type name with a `C.` prefix. Include names reached through
+computed wrapper or C lookups. An `opaque.Type` entry keeps a struct
+forward-declared for callers that only pass pointers to it. Remove the
+entry before reading fields or using the type by value.
+
+Run `python3 scripts/stone_imgui_wrappers.py` from the repository root.
+The script follows wrapper helpers and C declaration dependencies in the
+pinned release, preserving the source order and the layouts it selects. Run with
+`--check` to verify the generated files. Commit the list and generated
+changes together. The enum table is complete so tool input can resolve
+key names at runtime.
 
 ## Audio
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Select Stone's wrappers from the pinned gamelibs Lua bindings."""
+"""Select Stone's wrappers and C declarations from the pinned gamelibs bindings."""
 import argparse
+from collections import defaultdict
 import re
 
 import gamelibs
@@ -23,6 +24,10 @@ CONSTRUCTOR = re.compile(
     r'^local mt = getmetatable\([^\n]+\) or \{\}\n.*?^setmetatable\([^\n]+\)\n', re.M | re.S,
 )
 MODULE_REF = re.compile(rf'\bM\.({NAME})')
+C_REF = re.compile(rf'\bC\.({NAME})')
+IDENTIFIER = re.compile(NAME)
+CDEF_HEADER = 'require("ffi").cdef[[\n'
+CDEF_FOOTER = '\n]]'
 
 
 def wrapper_name(match):
@@ -68,26 +73,95 @@ def select(source, roots):
     return METATYPE.sub(keep_type, source)
 
 
+def declarations(source):
+    # The pinned generator emits plain declarations, with semicolons inside aggregates.
+    if not source.startswith(CDEF_HEADER) or not source.rstrip().endswith(CDEF_FOOTER):
+        raise ValueError('unexpected cimgui cdef module')
+    body = source.rstrip()[len(CDEF_HEADER):-len(CDEF_FOOTER)]
+    start = depth = 0
+    for match in re.finditer(r'[{};]', body):
+        token = match[0]
+        if token == '{':
+            depth += 1
+        elif token == '}':
+            depth -= 1
+        elif depth == 0:
+            yield body[start:match.end()].strip()
+            start = match.end()
+    if depth or body[start:].strip():
+        raise ValueError('unterminated cimgui declaration')
+
+
+def declaration_names(decl):
+    if match := re.fullmatch(rf'typedef enum\s*\{{(.*)\}}\s*({NAME});', decl, re.S):
+        return [match[2], *re.findall(rf'(?:^|,)\s*({NAME})', match[1])]
+    for pattern in (
+        rf'extern [^(;]*\b({NAME})(?:\s*\(.*\))?;',
+        rf'struct ({NAME})(?:\s*\{{.*\}})?;',
+        rf'typedef [^{{;]*\(\*({NAME})\)\(.*\);',
+        rf'typedef (?:[^{{;]+|[^{{;]*\{{.*\}}\s*)\b({NAME});',
+    ):
+        if match := re.fullmatch(pattern, decl, re.S):
+            return [match[1]]
+    raise ValueError(f'unrecognized cimgui declaration: {decl}')
+
+
+def select_cdef(source, wrapper, roots, opaque=()):
+    entries = list(declarations(source))
+    definitions = defaultdict(list)
+    omitted_layouts = set()
+    for index, decl in enumerate(entries):
+        names = declaration_names(decl)
+        if decl.startswith('struct ') and '{' in decl and names[0] in opaque:
+            omitted_layouts.add(names[0])
+            continue
+        for name in names:
+            definitions[name].append(index)
+
+    if missing := set(opaque) - omitted_layouts:
+        raise ValueError(f'unknown cimgui opaque structs: {", ".join(sorted(missing))}')
+    required = set(roots) | set(opaque) | set(C_REF.findall(wrapper))
+    if missing := required - definitions.keys():
+        raise ValueError(f'unknown cimgui C declarations: {", ".join(sorted(missing))}')
+
+    pending = required | (set(IDENTIFIER.findall(wrapper)) & definitions.keys())
+    seen = set()
+    kept = set()
+    while pending:
+        name = pending.pop()
+        seen.add(name)
+        for index in definitions[name]:
+            if index not in kept:
+                kept.add(index)
+                pending.update((set(IDENTIFIER.findall(entries[index])) & definitions.keys()) - seen)
+    selected = ''.join(decl + '\n' for index, decl in enumerate(entries) if index in kept)
+    return CDEF_HEADER + selected + CDEF_FOOTER
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true', help='check the committed output')
     args = parser.parse_args()
     gamelibs.sync(('lua-bindings',))
     upstream = gamelibs.gamelibs_root() / 'lua-bindings/cimgui'
-    for name in ('cdef.lua', 'enums.lua'):
-        if (upstream / name).read_text() != (BINDINGS / name).read_text():
-            parser.error(f'{name} differs from the pinned gamelibs Lua bindings')
-    roots = (BINDINGS / 'wrappers.txt').read_text().split()
+    if (upstream / 'enums.lua').read_bytes() != (BINDINGS / 'enums.lua').read_bytes():
+        parser.error('enums.lua differs from the pinned gamelibs Lua bindings')
+    roots = (BINDINGS / 'roots.txt').read_text().split()
+    wrapper_roots = [name for name in roots if not name.startswith(('C.', 'opaque.'))]
+    cdef_roots = [name.removeprefix('C.') for name in roots if name.startswith('C.')]
+    opaque = {name.removeprefix('opaque.') for name in roots if name.startswith('opaque.')}
     try:
-        output = select((upstream / 'wrap.lua').read_text(), roots)
+        wrapper = select((upstream / 'wrap.lua').read_text(), wrapper_roots)
+        cdef = select_cdef((upstream / 'cdef.lua').read_text(), wrapper, cdef_roots, opaque)
     except ValueError as error:
         parser.error(str(error))
-    path = BINDINGS / 'wrap.lua'
-    if args.check:
-        if path.read_text() != output:
-            parser.error('wrap.lua is stale. Run scripts/stone_imgui_wrappers.py to regenerate it.')
-    else:
-        path.write_bytes(output.encode())
+    for name, output in (('wrap.lua', wrapper), ('cdef.lua', cdef)):
+        path = BINDINGS / name
+        if args.check:
+            if path.read_bytes() != output.encode():
+                parser.error(f'{name} is stale. Run scripts/stone_imgui_wrappers.py to regenerate it.')
+        else:
+            path.write_bytes(output.encode())
 
 
 if __name__ == '__main__':
