@@ -642,7 +642,7 @@ impl<'a> Builder<'a> {
             let non_null = self
                 .concrete_expr_ty(e)
                 .is_some_and(|ty| !matches!(*ty, MonoTy::Nullable(_)));
-            if !self.scx.native_flat_enums && non_null {
+            if non_null {
                 return Ok(Some(RepLayout::Leaves(shape)));
             }
         }

@@ -109,8 +109,7 @@ impl<'a> Builder<'a> {
             {
                 return self.lower_for_vec(&vars, iter, body, false);
             }
-            if !self.scx.row_value_containers && self.scx.target() == bone_core::hir::FnBackend::Lua
-            {
+            if self.scx.target() == bone_core::hir::FnBackend::Lua {
                 if let Some(collection) = enumerated_collection.filter(|&c| self.iter_is_arena(c)) {
                     return self.lower_for_arena(&vars, collection, body, true);
                 }
@@ -1197,8 +1196,7 @@ impl<'a> Builder<'a> {
         shape: ValueShape,
     ) -> Result<(), CompilerError> {
         let bname = self.body.binding_arena[b].name;
-        let owner = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
-        if let Some(cells) = self.new_flat_enum_cells(b, bname, &shape, owner)? {
+        if let Some(cells) = self.new_flat_enum_cells(b, bname, &shape)? {
             if cells.len() != leaves.len() {
                 return Err(self.gap_here(format!(
                     "flat enum {} has {} binding cells for {} leaves",
@@ -1221,11 +1219,6 @@ impl<'a> Builder<'a> {
             self.group_binds.insert(raw(b), (values, shape));
             return Ok(());
         }
-        let leaf_tys = self.value_shape_leaf_monos(&shape).map(|tys| {
-            tys.into_iter()
-                .map(|ty| self.scx.interner().intern(ty))
-                .collect::<Vec<_>>()
-        });
         let cells: Vec<GroupLeaf> = leaves
             .iter()
             .enumerate()
@@ -1236,7 +1229,6 @@ impl<'a> Builder<'a> {
                     None,
                     crate::names::ustr(li.to_string().as_str()),
                 );
-                self.f.cells[c].native_ty = leaf_tys.as_ref().and_then(|tys| tys.get(li).copied());
                 self.store_cell(c, value);
                 GroupLeaf::Cell(c)
             })

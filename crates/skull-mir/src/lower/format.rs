@@ -13,7 +13,6 @@ fn source_name(name: Ustr) -> String {
 pub enum FmtNode {
     Leaf {
         route: StringifyRoute,
-        ty: MonoTy,
     },
     Nullable(Box<FmtNode>),
     Enum {
@@ -53,7 +52,7 @@ impl FmtNode {
     /// Keyed by the path lowering passes to `dispatched_call` for each call.
     pub fn obligations(&self, path: &mut Vec<u32>, out: &mut Vec<(Vec<u32>, &'static str)>) {
         match self {
-            Self::Leaf { route, .. } => {
+            Self::Leaf { route } => {
                 out.extend(route.synthesized_callee().map(|n| (path.clone(), n)))
             }
             Self::Nullable(inner) => inner.obligations(path, out),
@@ -183,15 +182,12 @@ fn format_tree_in(
     Ok(match ty {
         MonoTy::Int | MonoTy::Uint | MonoTy::Bool => FmtNode::Leaf {
             route: StringifyRoute::ToString,
-            ty: ty.clone(),
         },
         MonoTy::Float => FmtNode::Leaf {
             route: StringifyRoute::FormatFloat,
-            ty: ty.clone(),
         },
         MonoTy::String => FmtNode::Leaf {
             route: StringifyRoute::EscapedString,
-            ty: ty.clone(),
         },
         MonoTy::Nullable(inner) => {
             FmtNode::Nullable(Box::new(format_tree_in(ws, inner, visiting)?))
@@ -265,13 +261,8 @@ fn nominal_tree(
     }
     if let Some(eid) = ws.enums_by_name.get(&name) {
         if is_payload_free_enum(ws, name) {
-            let ty = MonoTy::App {
-                ctor: MonoCtor::Nominal(name),
-                params: params.to_vec(),
-            };
             return Ok(FmtNode::Leaf {
                 route: StringifyRoute::EnumNames(name),
-                ty,
             });
         }
         let def = &ws.module(eid.module).enums[eid.def];
@@ -328,9 +319,8 @@ impl<'a> Builder<'a> {
         repr: ValueRepr,
     ) -> Result<Idx<Inst>, CompilerError> {
         match node {
-            FmtNode::Leaf { route, ty } => {
+            FmtNode::Leaf { route } => {
                 let v = self.pack(repr)?;
-                let v = self.native_leaf(v, ty);
                 self.render_stringify(route, path, v)
             }
             FmtNode::Nullable(inner) => match repr {
@@ -386,7 +376,6 @@ impl<'a> Builder<'a> {
                 let mut pieces = Vec::with_capacity(fields.len());
                 for ((l, _), part) in fields.iter().zip(parts) {
                     let v = self.pack(part)?;
-                    let v = self.native_leaf(v, &MonoTy::Int);
                     let rendered = self.emit_cur(Inst::ToString(v));
                     pieces.push((format!("{l}="), rendered));
                 }
@@ -404,18 +393,6 @@ impl<'a> Builder<'a> {
                 ))
             }
         }
-    }
-
-    /// A payload read off flat-enum union storage names no single member; on a
-    /// native backend, a local of the leaf's type selects it.
-    fn native_leaf(&mut self, v: Idx<Inst>, ty: &MonoTy) -> Idx<Inst> {
-        if !self.scx.native_flat_enums || matches!(self.f.insts[v], Inst::Const(_)) {
-            return v;
-        }
-        let ty = self.scx.interner().intern(ty.clone());
-        let cell = self.f.new_cell_native_typed(None, None, Some(ty));
-        self.store_cell(cell, v);
-        self.emit_cur(Inst::Load(cell))
     }
 
     fn join_pieces(
@@ -582,13 +559,9 @@ impl<'a> Builder<'a> {
                                 let shape = flat_shape.as_ref().ok_or_else(|| {
                                     gap("flat enum payload lost its compiler-owned shape")
                                 })?;
-                                if let Some(mut inner) =
+                                if let Some(inner) =
                                     self.nested_flat_enum_scrut(scrut, slot, &vs)?
                                 {
-                                    // The nested tag shares its slot with other variants' payloads.
-                                    if let Scrut::Cells { cells, .. } = &mut inner {
-                                        cells.tag = self.native_leaf(cells.tag, &MonoTy::String);
-                                    }
                                     self.render_enum(child, vs.name, child_path, &inner)?
                                 } else {
                                     let leaves = self.scrut_payload_leaves(scrut, i, &vs, shape);

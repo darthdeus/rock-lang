@@ -226,8 +226,6 @@ pub struct ScalarCtx {
     global_read_checks: OnceLock<HashMap<Ustr, crate::global_storage::GlobalReadCheck>>,
     value_references: std::sync::Arc<ValueReferences>,
     values_first_class: bool,
-    native_flat_enums: bool,
-    row_value_containers: bool,
     /// Drives backend-variant selection at every resolved call; `Any` disables it
     /// (GLSL and tests).
     target: bone_core::hir::FnBackend,
@@ -244,8 +242,6 @@ impl Clone for ScalarCtx {
             global_read_checks: OnceLock::new(),
             value_references: std::sync::Arc::clone(&self.value_references),
             values_first_class: self.values_first_class,
-            native_flat_enums: self.native_flat_enums,
-            row_value_containers: self.row_value_containers,
             target: self.target,
             interner: std::sync::Arc::clone(&self.interner),
             rep_arena: std::sync::Arc::clone(&self.rep_arena),
@@ -303,8 +299,6 @@ impl ScalarCtx {
             global_read_checks: OnceLock::new(),
             value_references: std::sync::Arc::new(value_references),
             values_first_class,
-            native_flat_enums: false,
-            row_value_containers: false,
             target: if values_first_class {
                 bone_core::hir::FnBackend::Any
             } else {
@@ -2236,8 +2230,7 @@ impl<'a> Builder<'a> {
         }
         let cells = match slot {
             RepLayout::Leaves(shape) => {
-                let owner = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
-                match self.new_flat_enum_cells(pb, name, shape, owner)? {
+                match self.new_flat_enum_cells(pb, name, shape)? {
                     Some(cells) => cells,
                     None => {
                         // Refuses nullable nesting, so every slot is a data leaf of the type it

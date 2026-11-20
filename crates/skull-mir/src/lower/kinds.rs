@@ -58,13 +58,6 @@ impl<'a> Builder<'a> {
         family: ContainerFamily,
     ) -> Result<ContainerPlan, CompilerError> {
         ContainerPlan::for_type(self.ws, self.scx.target, self.scx.rep_arena(), family, ty)
-            .map(|plan| {
-                if self.scx.row_value_containers {
-                    plan.into_row_storage()
-                } else {
-                    plan
-                }
-            })
             .map_err(|error| self.rep_error(error))
     }
 

@@ -5,7 +5,6 @@ impl<'a> Builder<'a> {
         binding: Idx<BindingInfo>,
         name: Ustr,
         shape: &ValueShape,
-        owner: Option<&MonoTy>,
     ) -> Result<Option<Vec<Idx<Cell>>>, CompilerError> {
         let Some(flat) =
             EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned())
@@ -18,62 +17,11 @@ impl<'a> Builder<'a> {
                 shape.name
             )));
         }
-        let owner = owner
-            .map(|owner| match owner {
-                MonoTy::Nullable(inner) => inner.as_ref(),
-                owner => owner,
-            })
-            .filter(|owner| {
-                matches!(
-                    owner,
-                    MonoTy::App {
-                        ctor: MonoCtor::Nominal(name),
-                        ..
-                    } if *name == flat.name
-                )
-            })
-            .ok_or_else(|| {
-                self.gap_here(format!(
-                    "flat enum {} has no concrete owner type for native slots",
-                    flat.name
-                ))
-            })?;
-        let owner = self.scx.interner().intern(owner.clone());
-        let tag_ty = self
-            .scx
-            .native_flat_enums
-            .then(|| self.scx.interner().intern(MonoTy::String));
-        let tuple_width = flat.tuple_width();
-        let mut native_slot_fields = vec![None; tuple_width];
-        let mut offset = 0;
-        for shapes in &flat.positions {
-            let width = flat_position_width(shapes);
-            if self.scx.native_flat_enums || !shapes.is_empty() {
-                for (relative, field) in native_slot_fields[offset..offset + width]
-                    .iter_mut()
-                    .enumerate()
-                {
-                    let index = offset + relative;
-                    *field = Some(crate::names::indexed("", "", index));
-                }
-            }
-            offset += width;
-        }
         let cells = (0..flat.leaf_count())
             .map(|index| {
                 let cell_name = crate::names::indexed(name.as_str(), "__", index);
                 let projection = crate::names::indexed("", "", index);
-                let cell = self.new_binding_cell(binding, cell_name, None, projection);
-                if index == 0 {
-                    self.f.cells[cell].native_ty = tag_ty;
-                    return cell;
-                }
-                let slot = index - 1;
-                if let Some(field) = native_slot_fields.get(slot).and_then(|field| *field) {
-                    self.f.cells[cell].native_flat_slot =
-                        Some(crate::mir::NativeFlatSlot { owner, field });
-                }
-                cell
+                self.new_binding_cell(binding, cell_name, None, projection)
             })
             .collect();
         Ok(Some(cells))
@@ -363,14 +311,6 @@ impl<'a> Builder<'a> {
         cells: FlatCells,
     ) -> Idx<Inst> {
         let tag = cells.tag;
-        if self.scx.native_flat_enums {
-            return self.emit_cur(Inst::MakeEnumDyn {
-                tag,
-                ty: shape.name,
-                positional: cells.positional,
-                named: cells.named,
-            });
-        }
         if let Inst::Const(Lit::Str(variant)) = self.f.insts[tag] {
             return self.box_flat_variant(shape, &cells, variant);
         }

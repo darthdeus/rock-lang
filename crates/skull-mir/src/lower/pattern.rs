@@ -133,9 +133,7 @@ impl<'a> Builder<'a> {
                 // that the join or first payload read unpacks again.
                 if let Scrut::Cells { cells, shape } = scrut {
                     let whole = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
-                    if !self.scx.native_flat_enums
-                        && whole.is_some_and(|ty| ty.nominal() == Some(shape.name))
-                    {
+                    if whole.is_some_and(|ty| ty.nominal() == Some(shape.name)) {
                         let leaves: Vec<_> = cells.slots().collect();
                         self.bind_leaves(b, &leaves, shape.value_shape())?;
                         return Ok(());

@@ -504,10 +504,8 @@ impl<'a> Builder<'a> {
                             threaded = true;
                         } else if let Some((shape, leaves)) = threaded_leaves {
                             let bname = self.body.binding_arena[name].name;
-                            let owner =
-                                self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
                             let cells = self
-                                .new_flat_enum_cells(name, bname, &shape, owner)?
+                                .new_flat_enum_cells(name, bname, &shape)?
                                 .unwrap_or_else(|| {
                                     (0..leaves.len())
                                         .map(|li| {

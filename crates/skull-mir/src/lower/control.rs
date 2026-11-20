@@ -325,7 +325,6 @@ impl<'a> Builder<'a> {
                 ) {
                     if lhs_shape.name == rhs_shape.name
                         && lhs_shape.fields == rhs_shape.fields
-                        && !self.scx.native_flat_enums
                         && flat_enum_equality_is_leafwise(self.ws, lhs_shape.name)
                     {
                         let lhs_repr = self.lower_expr_repr(lhs)?;

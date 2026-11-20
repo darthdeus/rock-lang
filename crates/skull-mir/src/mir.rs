@@ -755,14 +755,6 @@ pub struct Cell {
     /// A write through the `ref` alias is invisible to transforms, so SROA must not
     /// split this cell and copy-prop must not forward its loads.
     pub borrowed: bool,
-    pub native_ty: Option<crate::monoty::MonoTyId>,
-    pub native_flat_slot: Option<NativeFlatSlot>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeFlatSlot {
-    pub owner: crate::monoty::MonoTyId,
-    pub field: ustr::Ustr,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1095,21 +1087,8 @@ impl MirFunc {
             default_param: false,
             never_nil: false,
             borrowed: false,
-            native_ty: None,
-            native_flat_slot: None,
         });
         self.record_new_cell();
-        id
-    }
-
-    pub(crate) fn new_cell_native_typed(
-        &mut self,
-        name: Option<Ustr>,
-        ty: Option<TyId>,
-        native_ty: Option<crate::monoty::MonoTyId>,
-    ) -> Idx<Cell> {
-        let id = self.new_cell_typed(name, ty);
-        self.cells[id].native_ty = native_ty;
         id
     }
 
