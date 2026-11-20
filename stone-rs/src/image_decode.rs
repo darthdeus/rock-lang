@@ -528,17 +528,7 @@ mod cap_tests {
     /// Deterministic under any encoder layout, unlike a blind truncation.
     #[test]
     fn idat_corruption_probes_but_does_not_decode() {
-        use image::ImageEncoder;
-        let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png)
-            .write_image(
-                &[0u8, 255, 0, 255].repeat(8),
-                4,
-                2,
-                image::ExtendedColorType::Rgba8,
-            )
-            .unwrap();
-        let mut cut = png.clone();
+        let mut cut = crate::image_data::encode_test_png(4, 2, &[0, 255, 0, 255]);
         let mut off = 8;
         loop {
             let len = u32::from_be_bytes(cut[off..off + 4].try_into().unwrap()) as usize;
