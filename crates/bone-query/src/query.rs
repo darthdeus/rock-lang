@@ -7,6 +7,8 @@ use skull_parser::Ast;
 
 use crate::types;
 
+mod occurrences;
+
 pub(crate) fn source_ident(name: Ustr) -> &'static str {
     name.as_str().rsplit("::").next().unwrap_or(name.as_str())
 }
@@ -22,7 +24,6 @@ enum NodePolicy {
 
 struct ResolvedPosition<'a> {
     ws: &'a Workspace,
-    mid: ModuleId,
     module: &'a hir::Module,
     offset: usize,
     owner: Option<hir::BodyOwner>,
@@ -63,7 +64,6 @@ impl<'a> ResolvedPosition<'a> {
         });
         Some(Self {
             ws,
-            mid,
             module,
             offset,
             owner,
@@ -72,10 +72,6 @@ impl<'a> ResolvedPosition<'a> {
             node,
             policy,
         })
-    }
-
-    fn binding(&self) -> Option<Idx<hir::BindingInfo>> {
-        binding_of_node(self.body?, self.node?)
     }
 
     fn literal_field(&self, expr: Idx<hir::Expr>) -> Option<Token> {
@@ -895,10 +891,10 @@ pub enum FnRefScope {
     AllOverloads,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum RefTarget {
-    Binding(hir::BodyOwner, Idx<hir::BindingInfo>),
-    GenericParam(ModuleId, Idx<hir::TypeExpr>),
+    Binding(ModuleId, hir::BodyOwner, Idx<hir::BindingInfo>),
+    GenericParam(ModuleId, hir::VarId),
     EnumVariant(Ustr, Ustr),
     Enum(Ustr),
     Newtype(Ustr),
@@ -938,232 +934,6 @@ impl ResolvedPosition<'_> {
             _ => None,
         }
     }
-
-    fn symbol<'t>(&self, text_of: TextOf<'_, 't>) -> Option<RefTarget> {
-        let Self {
-            ws,
-            mid,
-            module,
-            offset,
-            ..
-        } = *self;
-        if let Some(binding) = self
-            .binding()
-            .filter(|&b| self.body.is_some_and(|body| body.deco_target != Some(b)))
-        {
-            return Some(RefTarget::Binding(self.owner?, binding));
-        }
-        if let Some((mid, idx)) = self.generic() {
-            return Some(RefTarget::GenericParam(mid, idx));
-        }
-        // Equal ranks keep the first occurrence, including ambiguous variants.
-        let mut found = None;
-        let mut offer = |rank, target| {
-            if found.as_ref().is_none_or(|(best, _)| rank < *best) {
-                found = Some((rank, target));
-            }
-        };
-        for en in module.enums.values() {
-            if in_leading_name(offset, &en.name_span, en.name) {
-                offer(10, RefTarget::Enum(en.name));
-            }
-            for variant in &en.variants {
-                if span_contains(&variant.name_span, offset) {
-                    offer(0, RefTarget::EnumVariant(en.name, variant.name));
-                }
-                if let hir::VariantPayload::Record(fields) = &variant.payload {
-                    for field in fields {
-                        if span_contains(&field.span, offset) {
-                            offer(
-                                50,
-                                RefTarget::Field(
-                                    RecordType::Variant(en.name, variant.name),
-                                    field.name,
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        for nt in module.newtypes.values() {
-            if span_contains(&nt.name_span, offset) {
-                offer(20, RefTarget::Newtype(nt.name));
-            }
-        }
-        for record in module.structs.values() {
-            if in_leading_name(offset, &record.name_span, record.name) {
-                offer(30, RefTarget::Struct(record.name));
-            }
-            for field in &record.fields {
-                if span_contains(&field.span, offset) {
-                    offer(
-                        40,
-                        RefTarget::Field(RecordType::Struct(record.name), field.name),
-                    );
-                }
-            }
-        }
-        for (fid, function) in module.functions.iter() {
-            if !source_ident(function.name).starts_with("__")
-                && span_contains(&function.name_span, offset)
-            {
-                offer(61, RefTarget::Function(mid, fid));
-            }
-            for annotation in &function.annotations {
-                let key = annotation.resolved_name.unwrap_or(annotation.name.name);
-                if span_contains(&annotation.name.span, offset) && decorator_declared(ws, key) {
-                    offer(81, RefTarget::Decorator(key));
-                }
-            }
-        }
-        for global in module.globals.values() {
-            if span_contains(&global.name_span, offset) {
-                offer(70, RefTarget::Global(global.name));
-            }
-        }
-        for decorator in module.decorators.values() {
-            if decorator_name_span(decorator, text_of)
-                .is_some_and(|span| span_contains(&span, offset))
-            {
-                offer(80, RefTarget::Decorator(decorator.def_key));
-            }
-        }
-        if let Some(body) = self.body {
-            let selected = self.node;
-            let nominal = match selected {
-                Some(NodeRef::StaticTy { mid, idx }) => {
-                    let module = ws.modules.get(mid.index())?;
-                    ctor_name_if_on(&module.ty_arena[idx], module.ty_spans.get(idx), offset)
-                }
-                Some(NodeRef::LocalTy(idx)) => ctor_name_if_on(
-                    &body.lowered_tys[idx],
-                    body.lowered_ty_spans.get(idx),
-                    offset,
-                ),
-                _ => None,
-            };
-            if let Some(name) = nominal {
-                offer(31, RefTarget::nominal(ws, name));
-            }
-            for (expr, node) in body.expr_arena.iter() {
-                let selected = selected == Some(NodeRef::Expr(expr));
-                match node {
-                    hir::Expr::EnumVariant { .. } => {
-                        if let Some(token) = self
-                            .enum_variant_token(expr)
-                            .filter(|token| span_contains(&token.span, offset))
-                        {
-                            let rank = match token.target {
-                                RefTarget::EnumVariant(..) => 1,
-                                RefTarget::Enum(_) => 11,
-                                _ => 51,
-                            };
-                            offer(rank, token.target);
-                        }
-                    }
-                    hir::Expr::StructLiteral { name, .. } if selected => {
-                        if body
-                            .expr_spans
-                            .get(expr)
-                            .is_some_and(|span| in_leading_name(offset, span, *name))
-                        {
-                            offer(31, RefTarget::nominal(ws, *name));
-                        }
-                        if let Some(field) = self.literal_field(expr) {
-                            offer(41, field.target);
-                        }
-                    }
-                    hir::Expr::FieldAccess { base, field } if selected => {
-                        if body
-                            .expr_spans
-                            .get(expr)
-                            .is_some_and(|span| offset + field.len() >= span.offset_range().1)
-                        {
-                            if let Some(name) = self.bi.and_then(|bi| {
-                                types::nominal_name(ws, Some(bi), *bi.expr_types.get(*base)?)
-                            }) {
-                                offer(41, RefTarget::Field(RecordType::Struct(name), *field));
-                            }
-                        }
-                    }
-                    hir::Expr::Global(name) if selected => {
-                        if !name.as_str().starts_with("__") {
-                            if let Some(&(mid, fid)) = ws
-                                .modules
-                                .iter()
-                                .find_map(|m| m.functions_by_name.get(name).and_then(|f| f.first()))
-                            {
-                                offer(60, RefTarget::Function(mid, fid));
-                            }
-                        }
-                        if ws
-                            .modules
-                            .iter()
-                            .any(|m| m.global_by_name.contains_key(name))
-                        {
-                            offer(71, RefTarget::Global(*name));
-                        }
-                    }
-                    _ => {}
-                }
-                if selected {
-                    if let Some(&(mid, fid)) =
-                        self.bi.and_then(|bi| bi.resolved_overload_calls.get(&expr))
-                    {
-                        offer(59, RefTarget::Function(mid, fid));
-                    }
-                }
-            }
-            for (id, pattern) in body.pattern_arena.iter() {
-                match pattern {
-                    hir::Pattern::EnumVariant {
-                        enum_name,
-                        enum_name_span,
-                        variant,
-                        variant_span,
-                        ..
-                    } => {
-                        if span_contains(variant_span, offset) {
-                            if let Some(en) = enum_def_for_variant(ws, *enum_name, *variant) {
-                                offer(2, RefTarget::EnumVariant(en.name, *variant));
-                            }
-                        }
-                        if let (Some(name), Some(span)) = (enum_name, enum_name_span) {
-                            if span_contains(span, offset) {
-                                offer(12, RefTarget::Enum(*name));
-                            }
-                        }
-                    }
-                    hir::Pattern::Record {
-                        enum_name: Some(en),
-                        enum_name_span,
-                        name,
-                        name_span,
-                        ..
-                    } => {
-                        if enum_name_span.is_some_and(|span| span_contains(&span, offset)) {
-                            offer(12, RefTarget::Enum(*en));
-                        }
-                        if let Some(variant) = name {
-                            if name_span.is_some_and(|span| span_contains(&span, offset)) {
-                                offer(2, RefTarget::EnumVariant(*en, *variant));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                if let Some(field) = self.pattern_field(id) {
-                    let rank = match field.target {
-                        RefTarget::Field(RecordType::Struct(_), _) => 42,
-                        _ => 52,
-                    };
-                    offer(rank, field.target);
-                }
-            }
-        }
-        found.map(|(_, target)| target)
-    }
 }
 
 fn decorator_name_span<'t>(def: &hir::DecoratorDef, text_of: TextOf<'_, 't>) -> Option<Span> {
@@ -1186,14 +956,9 @@ pub fn references<'t>(
     text_of: TextOf<'_, 't>,
     fn_scope: FnRefScope,
 ) -> Vec<RefSite> {
-    let mut sites = ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)
+    ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)
         .and_then(|at| at.symbol(text_of))
-        .map_or_else(Vec::new, |symbol| symbol.sites(ws, mid, text_of, fn_scope));
-    // Walks may meet one token twice (a declaration that is also a use);
-    // the first sighting wins.
-    let mut seen = std::collections::HashSet::new();
-    sites.retain(|s| seen.insert((s.span.file, s.span.offset_range())));
-    sites
+        .map_or_else(Vec::new, |symbol| symbol.sites(ws, text_of, fn_scope))
 }
 
 /// Rename uses it to decide which names opaque code (an `inline(lua)` body,
@@ -1237,317 +1002,6 @@ pub(crate) fn rename_subject<'t>(
     }
 }
 
-impl RefTarget {
-    fn sites<'t>(
-        self,
-        ws: &Workspace,
-        mid: ModuleId,
-        text_of: TextOf<'_, 't>,
-        scope: FnRefScope,
-    ) -> Vec<RefSite> {
-        let mut sites = Vec::new();
-        let mut plain = |span| sites.push(RefSite::plain(span));
-        match self {
-            Self::Binding(owner, binding) => {
-                let body = &ws.module(mid).bodies[&owner];
-                let mut sites = local_references(body, binding);
-                if let hir::BodyOwner::Function(fid) = owner
-                    && body.binding_arena[binding].kind == hir::BindingKind::Param
-                    && body.param_bindings.into_iter().any(|p| p == binding)
-                {
-                    append_param_named_arg_sites(
-                        ws,
-                        (mid, fid),
-                        body.binding_arena[binding].name,
-                        text_of,
-                        &mut sites,
-                    );
-                }
-                return sites;
-            }
-            Self::Function(mid, fid) => {
-                let (target, owned_only) = match scope {
-                    FnRefScope::ThisOverload => (Some((mid, fid)), false),
-                    FnRefScope::AllOverloads => {
-                        (None, !is_read_only_source(ws.module(mid).file.as_str()))
-                    }
-                };
-                return function_references_by_name(
-                    ws,
-                    ws.module(mid).functions[fid].name,
-                    target,
-                    owned_only,
-                    text_of,
-                )
-                .into_iter()
-                .map(RefSite::plain)
-                .collect();
-            }
-            Self::GenericParam(mid, idx) => {
-                let Some(module) = ws.modules.get(mid.index()) else {
-                    return sites;
-                };
-                let hir::TypeExpr::Generic(_, name) = module.ty_arena[idx] else {
-                    return sites;
-                };
-                if let Some(span) = generic_decl_span(ws, mid, idx) {
-                    plain(leading_name_span(&span, name));
-                }
-            }
-            _ => {}
-        }
-        for module in &ws.modules {
-            let decl = match self {
-                Self::Struct(name) => module
-                    .struct_by_name
-                    .get(&name)
-                    .map(|idx| leading_name_span(&module.structs[*idx].name_span, name)),
-                Self::Enum(name) => module
-                    .enums_by_name
-                    .get(&name)
-                    .map(|idx| leading_name_span(&module.enums[*idx].name_span, name)),
-                Self::Newtype(name) => module
-                    .newtypes_by_name
-                    .get(&name)
-                    .map(|idx| module.newtypes[*idx].name_span),
-                Self::EnumVariant(en, variant) => module
-                    .enums_by_name
-                    .get(&en)
-                    .and_then(|idx| {
-                        module.enums[*idx]
-                            .variants
-                            .iter()
-                            .find(|v| v.name == variant)
-                    })
-                    .map(|v| v.name_span),
-                Self::Global(name) => module
-                    .global_by_name
-                    .get(&name)
-                    .map(|idx| module.globals[*idx].name_span),
-                Self::Field(record, field) => record
-                    .fields(module)
-                    .and_then(|fields| fields.iter().find(|f| f.name == field))
-                    .map(|f| f.span),
-                _ => None,
-            };
-            if let Some(span) = decl {
-                sites.push(RefSite::plain(span));
-            }
-            if let Self::Decorator(name) = self {
-                for def in module.decorators.values().filter(|d| d.def_key == name) {
-                    if let Some(span) = decorator_name_span(def, text_of) {
-                        sites.push(RefSite::plain(span));
-                    }
-                }
-                for function in module.functions.values() {
-                    for annotation in &function.annotations {
-                        if annotation.resolved_name.unwrap_or(annotation.name.name) == name {
-                            sites.push(RefSite::plain(annotation.name.span));
-                        }
-                    }
-                }
-                continue;
-            }
-            for (owner, body) in &module.bodies {
-                let bi = ws
-                    .inference(module.id)
-                    .and_then(|inf| inf.per_fn.get(owner));
-                match self {
-                    Self::Struct(name) | Self::Enum(name) | Self::Newtype(name) => {
-                        for_each_nominal_annotation(ws, module.file, body, name, &mut |span| {
-                            let span = leading_name_span(span, name);
-                            if !matches!(self, Self::Newtype(_))
-                                || text_of(module.file.as_str()).is_none_or(|text| {
-                                    span_text(text, &span) == Some(source_ident(name))
-                                })
-                            {
-                                sites.push(RefSite::plain(span));
-                            }
-                        });
-                    }
-                    Self::GenericParam(mid, idx) => {
-                        if mid != module.id {
-                            continue;
-                        }
-                        let hir::TypeExpr::Generic(var, name) = module.ty_arena[idx] else {
-                            continue;
-                        };
-                        let is_param = |idx| matches!(module.ty_arena[idx], hir::TypeExpr::Generic(v, _) if v == var);
-                        for iv in body.node_index().iter() {
-                            if let NodeRef::StaticTy { mid: ty_mid, idx } = iv.val {
-                                if ty_mid == mid
-                                    && (is_param(idx)
-                                        || matches!(module.ty_arena[idx], hir::TypeExpr::Nullable(inner) if is_param(inner)))
-                                {
-                                    sites.push(RefSite::plain(leading_name_span(
-                                        &Span::new(
-                                            module.file,
-                                            (0, 0),
-                                            (0, 0),
-                                            (iv.start, iv.stop),
-                                        ),
-                                        name,
-                                    )));
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    _ => {}
-                }
-                for (expr, node) in body.expr_arena.iter() {
-                    let span = body.expr_spans.get(expr);
-                    match (self, node) {
-                        (
-                            Self::Newtype(name),
-                            hir::Expr::Call {
-                                callee:
-                                    hir::Callee::Unresolved {
-                                        name: called,
-                                        name_span,
-                                    },
-                                ..
-                            },
-                        ) if name == *called => {
-                            sites.push(RefSite::plain(body.name_spans[*name_span]))
-                        }
-                        (Self::Struct(name), hir::Expr::StructLiteral { name: head, .. })
-                            if name == *head =>
-                        {
-                            if let Some(span) = span {
-                                sites.push(RefSite::plain(leading_name_span(span, name)));
-                            }
-                        }
-                        (
-                            Self::Enum(name),
-                            hir::Expr::EnumVariant {
-                                enum_name,
-                                enum_name_span,
-                                ..
-                            },
-                        ) if name == *enum_name => sites.push(RefSite::plain(leading_name_span(
-                            &body.name_spans[*enum_name_span],
-                            name,
-                        ))),
-                        (
-                            Self::EnumVariant(en, variant),
-                            hir::Expr::EnumVariant {
-                                enum_name,
-                                variant: name,
-                                variant_span,
-                                ..
-                            },
-                        ) if en == *enum_name && variant == *name => {
-                            sites.push(RefSite::plain(body.name_spans[*variant_span]))
-                        }
-                        (Self::Global(name), hir::Expr::Global(key)) if name == *key => {
-                            if let Some(span) = span {
-                                let end = span.offset_range().1;
-                                sites.push(RefSite::plain(
-                                    span.with_offset_range((end - source_ident(name).len(), end)),
-                                ));
-                            }
-                        }
-                        (Self::Field(record, field), _) => {
-                            if let Some((_, fields)) =
-                                RecordType::literal(node).filter(|(owner, _)| *owner == record)
-                            {
-                                for idx in fields {
-                                    let f = &body.struct_lit_field_arena[idx];
-                                    if f.name == field {
-                                        let shorthand =
-                                            body.expr_spans.get(f.value).is_some_and(|span| {
-                                                span.offset_range() == f.name_span.offset_range()
-                                            });
-                                        sites.push(RefSite {
-                                            span: f.name_span,
-                                            shorthand: shorthand
-                                                .then_some(Shorthand::KeepBinding(field)),
-                                        });
-                                    }
-                                }
-                            } else if let RecordType::Struct(name) = record {
-                                if field_access_matches(
-                                    ws, module, *owner, bi, expr, node, name, field,
-                                ) {
-                                    if let Some(span) = span {
-                                        let end = span.offset_range().1;
-                                        sites.push(RefSite::plain(
-                                            span.with_offset_range((end - field.len(), end)),
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                for (id, pattern) in body.pattern_arena.iter() {
-                    match (self, pattern) {
-                        (
-                            Self::Enum(name),
-                            hir::Pattern::EnumVariant {
-                                enum_name: Some(en),
-                                enum_name_span: Some(span),
-                                ..
-                            }
-                            | hir::Pattern::Record {
-                                enum_name: Some(en),
-                                enum_name_span: Some(span),
-                                ..
-                            },
-                        ) if name == *en => {
-                            sites.push(RefSite::plain(leading_name_span(span, name)))
-                        }
-                        (
-                            Self::EnumVariant(en, variant),
-                            hir::Pattern::EnumVariant {
-                                enum_name,
-                                variant: name,
-                                variant_span,
-                                ..
-                            },
-                        ) if variant == *name
-                            && enum_def_for_variant(ws, *enum_name, *name)
-                                .is_some_and(|def| def.name == en) =>
-                        {
-                            sites.push(RefSite::plain(*variant_span))
-                        }
-                        (
-                            Self::EnumVariant(en, variant),
-                            hir::Pattern::Record {
-                                enum_name: Some(name),
-                                name: Some(v),
-                                name_span: Some(span),
-                                ..
-                            },
-                        ) if en == *name && variant == *v => sites.push(RefSite::plain(*span)),
-                        (Self::Field(record, field), _) => {
-                            let Some((_, fields)) = RecordType::pattern(ws, body, bi, id)
-                                .filter(|(owner, _)| *owner == record)
-                            else {
-                                continue;
-                            };
-                            for idx in fields {
-                                let f = &body.record_pat_field_arena[idx];
-                                if f.name == field {
-                                    sites.push(RefSite {
-                                        span: f.name_span,
-                                        shorthand: pattern_field_is_shorthand(body, f)
-                                            .then_some(Shorthand::KeepBinding(field)),
-                                    });
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        sites
-    }
-}
-
 fn decorator_declared(ws: &Workspace, name: Ustr) -> bool {
     ws.modules
         .iter()
@@ -1565,19 +1019,6 @@ fn in_leading_name(offset: usize, span: &Span, name: Ustr) -> bool {
 fn leading_name_span(span: &Span, name: Ustr) -> Span {
     let start = span.offset_range().0;
     span.with_offset_range((start, start + source_ident(name).len()))
-}
-
-fn ctor_name_if_on(te: &hir::TypeExpr, span: Option<&Span>, offset: usize) -> Option<Ustr> {
-    if let hir::TypeExpr::App {
-        ctor: hir::TypeCtor::Nominal(name),
-        ..
-    } = te
-    {
-        if in_leading_name(offset, span?, *name) {
-            return Some(*name);
-        }
-    }
-    None
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1726,57 +1167,6 @@ fn pattern_field_is_shorthand(body: &Body, field: &hir::RecordPatField) -> bool 
     }
 }
 
-fn field_access_matches(
-    ws: &Workspace,
-    module: &hir::Module,
-    owner: hir::BodyOwner,
-    bi: Option<&BodyInference>,
-    e: Idx<hir::Expr>,
-    expr: &hir::Expr,
-    name: Ustr,
-    field: Ustr,
-) -> bool {
-    match expr {
-        hir::Expr::FieldAccess { base, field: fname }
-        | hir::Expr::SafeNav { base, field: fname }
-            if *fname == field =>
-        {
-            bi.and_then(|bi| types::nominal_name(ws, Some(bi), *bi.expr_types.get(*base)?))
-                == Some(name)
-        }
-        hir::Expr::SiblingRef(n) if *n == field => match owner {
-            hir::BodyOwner::StructDefaults(sidx) => module.structs[sidx].name == name,
-            _ => bi.and_then(|bi| field_ref_struct(ws, bi, *bi.expr_types.get(e)?)) == Some(name),
-        },
-        _ => false,
-    }
-}
-
-/// Walks `node_index`, not `ty_arena`: `ty_spans` skips bare `Ident`-kind
-/// types, so arena iteration misses a `p: Point` annotation.
-fn for_each_nominal_annotation(
-    ws: &Workspace,
-    file: Ustr,
-    body: &hir::Body,
-    name: Ustr,
-    f: &mut impl FnMut(&Span),
-) {
-    for iv in body.node_index().iter() {
-        let nominal = match iv.val {
-            NodeRef::StaticTy { mid, idx } => ws
-                .modules
-                .get(mid.index())
-                .and_then(|module| types::annotation_nominal(&module.ty_arena, idx)),
-            NodeRef::LocalTy(idx) => types::annotation_nominal(&body.lowered_tys, idx),
-            _ => None,
-        };
-        let hit = nominal == Some(name);
-        if hit {
-            f(&Span::new(file, (0, 0), (0, 0), (iv.start, iv.stop)));
-        }
-    }
-}
-
 pub(crate) fn span_contains(span: &Span, offset: usize) -> bool {
     let (s, e) = span.offset_range();
     s <= offset && offset < e
@@ -1820,66 +1210,6 @@ pub(crate) fn generic_param_def(ws: &Workspace, mid: ModuleId, offset: usize) ->
     generic_decl_span(ws, gmid, gidx)
 }
 
-fn local_references(body: &Body, b: Idx<hir::BindingInfo>) -> Vec<RefSite> {
-    let name = body.binding_arena[b].name;
-    let name_len = source_ident(name).len();
-
-    // Shorthand iff a same-named field's name token is this site's token;
-    // explicit `x: x` has the field name on a different token.
-    let shorthand_at = |sp: &Span| -> Option<Shorthand> {
-        let lit = body
-            .struct_lit_field_arena
-            .values()
-            .any(|f| f.name == name && f.name_span.offset_range() == sp.offset_range());
-        let pat = body
-            .record_pat_field_arena
-            .values()
-            .any(|f| f.name == name && f.name_span.offset_range() == sp.offset_range());
-        (lit || pat).then_some(Shorthand::KeepField(name))
-    };
-
-    let mut out = Vec::new();
-
-    if let Some(s) = body.binding_spans.get(b) {
-        // A param's binding span covers `name: type`; clip to the name.
-        let start = s.offset_range().0;
-        let span = s.with_offset_range((start, start + name_len));
-        out.push(RefSite {
-            span,
-            shorthand: shorthand_at(&span),
-        });
-    }
-
-    for (e, expr) in body.expr_arena.iter() {
-        match expr {
-            hir::Expr::Var(x) if *x == b => {
-                if let Some(s) = body.expr_spans.get(e) {
-                    out.push(RefSite {
-                        span: *s,
-                        shorthand: shorthand_at(s),
-                    });
-                }
-            }
-
-            hir::Expr::Call {
-                callee: hir::Callee::Local(x),
-                ..
-            } if *x == b => {
-                if let Some(s) = body.expr_spans.get(e) {
-                    let start = s.offset_range().0;
-                    out.push(RefSite::plain(
-                        s.with_offset_range((start, start + name_len)),
-                    ));
-                }
-            }
-
-            _ => {}
-        }
-    }
-
-    out
-}
-
 fn named_arguments(body: &Body, call: Idx<hir::Expr>) -> impl Iterator<Item = (Ustr, &Span)> {
     let args = match body.expr_arena[call] {
         hir::Expr::Call { args, .. } | hir::Expr::SafeNavCall { args, .. } => Some(args),
@@ -1898,64 +1228,6 @@ fn named_argument_span(text_of: TextOf<'_, '_>, label: Ustr, value: &Span) -> Op
         label.as_str(),
         value,
     )
-}
-
-fn append_param_named_arg_sites(
-    ws: &Workspace,
-    target: (ModuleId, Idx<Function>),
-    name: Ustr,
-    text_of: TextOf<'_, '_>,
-    out: &mut Vec<RefSite>,
-) {
-    for (mid, inf) in ws.inferences_iter() {
-        let Some(module) = ws.modules.get(mid.index()) else {
-            continue;
-        };
-        for (owner, bi) in inf.per_fn.iter() {
-            let Some(body) = module.bodies.get(owner) else {
-                continue;
-            };
-            for (&call, &resolved) in &bi.resolved_overload_calls {
-                if resolved == target {
-                    out.extend(
-                        named_arguments(body, call)
-                            .filter(|&(label, _)| label == name)
-                            .filter_map(|(label, value)| named_argument_span(text_of, label, value))
-                            .map(RefSite::plain),
-                    );
-                }
-            }
-        }
-    }
-}
-
-pub(crate) fn named_arg_param_at(
-    ws: &Workspace,
-    mid: ModuleId,
-    inf: &InferenceResult,
-    offset: usize,
-    text_of: TextOf<'_, '_>,
-) -> Option<Span> {
-    let module = ws.modules.get(mid.index())?;
-    let owner = module.body_at(offset)?;
-    let body = module.bodies.get(&owner)?;
-    let bi = inf.per_fn.get(&owner)?;
-    for (&call, &(mid, fid)) in &bi.resolved_overload_calls {
-        let Some((label, _)) = named_arguments(body, call).find(|&(label, value)| {
-            named_argument_span(text_of, label, value)
-                .is_some_and(|span| span_contains(&span, offset))
-        }) else {
-            continue;
-        };
-        let target = ws.modules.get(mid.index())?;
-        let body = target.bodies.get(&hir::BodyOwner::Function(fid))?;
-        let param = body
-            .param_bindings
-            .into_iter()
-            .find(|p| body.binding_arena[*p].name == label)?;
-        return Some(leading_name_span(body.binding_spans.get(param)?, label));
-    }
-    None
 }
 
 fn node_at(body: &hir::Body, offset: usize) -> Option<NodeRef> {
@@ -2054,100 +1326,6 @@ fn ident_span_where(
         from = abs + 1;
     }
     None
-}
-
-fn function_references_by_name<'t>(
-    ws: &Workspace,
-    name: Ustr,
-    target: Option<(ModuleId, Idx<hir::Function>)>,
-    owned_only: bool,
-    text_of: TextOf<'_, 't>,
-) -> Vec<Span> {
-    let mut out = Vec::new();
-    let excluded = |m: &hir::Module| owned_only && is_read_only_source(m.file.as_str());
-
-    for m in ws.modules.iter() {
-        if let Some(fns) = m.functions_by_name.get(&name) {
-            for (fmid, fid) in fns.iter() {
-                if target.is_some_and(|t| t != (*fmid, *fid)) {
-                    continue;
-                }
-                if let Some(fm) = ws.modules.get(fmid.index()).filter(|fm| !excluded(fm)) {
-                    out.push(fm.functions[*fid].name_span);
-                }
-            }
-        }
-    }
-
-    for (m, inf) in ws.inferences_iter() {
-        let Some(module) = ws.modules.get(m.index()) else {
-            continue;
-        };
-
-        for (owner, bi) in inf.per_fn.iter() {
-            let Some(body) = module.bodies.get(owner) else {
-                continue;
-            };
-
-            for (call_idx, (cmid, cfid)) in bi.resolved_overload_calls.iter() {
-                let matches = match target {
-                    Some(t) => (*cmid, *cfid) == t,
-                    None => ws
-                        .modules
-                        .get(cmid.index())
-                        .is_some_and(|cm| cm.functions[*cfid].name == name && !excluded(cm)),
-                };
-                if matches {
-                    match &body.expr_arena[*call_idx] {
-                        hir::Expr::Call {
-                            callee: hir::Callee::Unresolved { name_span, .. },
-                            ..
-                        } => out.push(body.name_spans[*name_span]),
-                        // HIR keeps no method-token span for `recv?.method()`; find `name` in
-                        // source after the receiver.
-                        hir::Expr::SafeNavCall { receiver, .. } => {
-                            let (Some(sp), Some(rsp)) = (
-                                body.expr_spans.get(*call_idx),
-                                body.expr_spans.get(*receiver),
-                            ) else {
-                                continue;
-                            };
-                            let Some(text) = text_of(sp.file.as_str()) else {
-                                continue;
-                            };
-                            if let Some(span) = ident_span_in(
-                                text,
-                                rsp.offset_range().1,
-                                sp.offset_range().1,
-                                source_ident(name),
-                                sp,
-                            ) {
-                                out.push(span);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // A bare top-level name used as a value has no argument list to pick an
-            // overload, so both scopes match it by name.
-            if excluded(module) {
-                continue;
-            }
-            for (e, expr) in body.expr_arena.iter() {
-                if let hir::Expr::Global(gname) = expr {
-                    if *gname == name {
-                        if let Some(sp) = body.expr_spans.get(e) {
-                            out.push(*sp);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    out
 }
 
 pub(crate) fn inferred_let_bindings(

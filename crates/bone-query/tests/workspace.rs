@@ -490,6 +490,17 @@ fn references_on_an_overload_are_specific_to_that_overload() {
 }
 
 #[test]
+fn references_come_back_in_source_order() {
+    let src = "struct P {}\nfn main() {\n  let p = P {}\n  let q: P = p\n}\n";
+    let starts: Vec<(u32, u32)> = workspace(src)
+        .references(PATH, Position::new(0, 7))
+        .iter()
+        .map(|l| (l.range.start.line, l.range.start.character))
+        .collect();
+    assert_eq!(starts, [(0, 7), (2, 10), (3, 9)]);
+}
+
+#[test]
 fn references_from_a_named_arg_label_find_the_resolved_overloads_param() {
     let src = "fn put(count: int) {\n  print(count)\n}\nfn put(count: string) {\n  print(count)\n}\nfn main() {\n  put(count: 1)\n  put(count: \"a\")\n}\n";
     let bone = workspace(src);
@@ -716,4 +727,20 @@ fn unknown_file_degrades_to_empty() {
             .is_none()
     );
     assert!(bone.diagnostics_for("/tmp/never_opened.rock").is_empty());
+}
+
+// A returned value's index interval starts at `return`, so the keyword
+// resolves to the returned name.
+#[test]
+fn references_from_return_resolve_the_returned_name() {
+    let src = "fn f(s: int) -> int {\n    return s\n}\nfn g() -> int {\n    return f(1)\n}\n";
+    let bone = workspace(src);
+    assert_eq!(
+        reference_starts(&bone, Position::new(1, 4)),
+        [(0, 5), (1, 11)]
+    );
+    assert_eq!(
+        reference_starts(&bone, Position::new(4, 4)),
+        [(0, 3), (4, 11)]
+    );
 }

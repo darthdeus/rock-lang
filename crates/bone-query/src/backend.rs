@@ -1262,16 +1262,6 @@ impl BoneWorkspace {
             return Vec::new();
         };
         let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
-        // A named-arg label names the resolved overload's parameter, not the callee.
-        if let Some(param) = crate::query::named_arg_param_at(ws, mid, inf, offset, &text_of) {
-            return self.all_reference_spans(
-                proj,
-                param.file.as_str(),
-                param.offset_range().0,
-                fn_scope,
-                request,
-            );
-        }
         crate::query::references(ws, mid, inf, offset, &text_of, fn_scope)
     }
 
@@ -1454,24 +1444,16 @@ impl BoneWorkspace {
         let text_of = |file: &str| proj.texts.get(file).map(String::as_str);
         let mid = user_module_for_path(ws, path);
         let inferred = mid.and_then(|mid| Some((mid, ws.inference(mid)?)));
-        let named_param = inferred.and_then(|(mid, inf)| {
-            crate::query::named_arg_param_at(ws, mid, inf, offset, &text_of)
+        let subject = inferred.map_or(RenameSubject::Other, |(mid, inf)| {
+            crate::query::rename_subject(ws, mid, inf, offset, &text_of)
         });
-
+        // A local or a parameter (from a named-argument label too) is never a
+        // module-level definition.
         let sites = mid
-            .filter(|_| named_param.is_none())
+            .filter(|_| subject != RenameSubject::Binding)
             .and_then(|mid| self.v1_rename_sites(proj, path, mid, offset))
             .or_else(|| macro_parameter_sites(ast.as_ref(), offset))
             .unwrap_or_else(|| {
-                if let Some(param) = named_param {
-                    return self.all_reference_spans(
-                        proj,
-                        param.file.as_str(),
-                        param.offset_range().0,
-                        FnRefScope::AllOverloads,
-                        "rename",
-                    );
-                }
                 inferred.map_or_else(Vec::new, |(mid, inf)| {
                     crate::query::references(
                         ws,
@@ -1491,12 +1473,6 @@ impl BoneWorkspace {
             return Ok(sites);
         };
         rename_guard::check_spellings(&sites, old, &text_of)?;
-        let subject = match named_param {
-            Some(_) => RenameSubject::Binding,
-            None => inferred.map_or(RenameSubject::Other, |(mid, inf)| {
-                crate::query::rename_subject(ws, mid, inf, offset, &text_of)
-            }),
-        };
         rename_guard::check_unpinned(ws, subject, old, &text_of)?;
         rename_guard::check_read_only(&sites, old, &text_of)?;
         rename_guard::check_opaque(ws, subject, &sites, old, &text_of)?;
