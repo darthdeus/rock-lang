@@ -1,10 +1,10 @@
 # Formatter fixtures
 
-The formatter corpus uses `.rock.fmt` files. Each case has input followed by
-expected output, or `NO CHANGE` when the input is already formatted:
+The formatter corpus uses `.rock.fmt` files. Start each case with `//- ` and
+its name. Omit the expected block when the input should stay unchanged.
 
 ```text
-//=== TEST CASE: indentation ===
+//- indentation
 fn example() {
 return 42
 }
@@ -13,9 +13,8 @@ fn example() {
     return 42
 }
 
-//=== TEST CASE: unchanged ===
+//- unchanged
 fn example() { return 42 }
-//=== NO CHANGE ===
 ```
 
 Run the corpus from the repository root:
