@@ -672,13 +672,7 @@ macro batch_block(b: expr, shader_name: expr, u: expr) {
 }
 
 macro mesh_block(m: expr, shader_name: expr, u: expr) {
-    let mb = owned_block_for(m.block, shader_name, uniform_block_id(u), __SITE__)
-    if mb != null {
-        let packed = mb
-        pack_uniform_block(packed.fv, packed.iv, u)
-        m.block = mb
-        m.block_frame = RENDER_FRAME
-    }
+    batch_block(m, shader_name, u)
 }
 
 // The packing lane the public wrappers share: pack `u` into an ALREADY
