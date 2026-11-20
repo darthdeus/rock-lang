@@ -423,11 +423,26 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
 
 // ----------------------------------------------------------------------------
 // Sized buffers read as int and retain distinct pointer types for FFI.
-value NativeBufferU8  { ptr: PtrU8,  len: int }
-value NativeBufferI8  { ptr: PtrI8,  len: int }
-value NativeBufferU16 { ptr: PtrU16, len: int }
-value NativeBufferI16 { ptr: PtrI16, len: int }
-value NativeBufferU32 { ptr: PtrU32, len: int }
+macro __sized_native_buffer(Buf: ident, Pointer: ty, New: ident, Allocate: ident) {
+    value Buf { ptr: Pointer, len: int }
+
+    @inline fn New(n: int) -> Buf { return Buf { ptr: Allocate(n), len: n } }
+
+    @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: Buf, i: int) -> int = "return b.ptr[i]"
+    @writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: Buf, i: int, v: int) = "b.ptr[i] = v"
+
+    @nowrite @intrinsic @native_required inline(lua) fn get(b: Buf, i: int) -> int? = """
+    if i < 0 or i >= b.len then return nil end; return b.ptr[i]
+"""
+
+    fn enumerate(collection: Buf) -> [(int, int)] {
+        let out: [(int, int)] = vec_new()
+        for i in 0..collection.len {
+            out.push((i, collection[i]))
+        }
+        return out
+    }
+}
 
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'return __rock_nb_alloc("uint8_t", n)'
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'return __rock_nb_alloc("int8_t", n)'
@@ -438,34 +453,11 @@ value NativeBufferU32 { ptr: PtrU32, len: int }
 // Off-heap storage, which `collectgarbage("count")` does not include.
 @nomangle inline(lua) fn native_buffer_offheap_bytes() -> int = "return __ROCK_NB_OFFHEAP_STATS.live_bytes"
 
-@inline fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
-@inline fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
-@inline fn native_buffer_u16(n: int) -> NativeBufferU16 { return NativeBufferU16 { ptr: __nb_alloc_u16(n), len: n } }
-@inline fn native_buffer_i16(n: int) -> NativeBufferI16 { return NativeBufferI16 { ptr: __nb_alloc_i16(n), len: n } }
-@inline fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: __nb_alloc_u32(n), len: n } }
-
-macro __sized_buffer_access(Buffer: ty) {
-    @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: Buffer, i: int) -> int = "return b.ptr[i]"
-    @writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: Buffer, i: int, v: int) = "b.ptr[i] = v"
-}
-
-__sized_buffer_access(NativeBufferU8)
-__sized_buffer_access(NativeBufferI8)
-__sized_buffer_access(NativeBufferU16)
-__sized_buffer_access(NativeBufferI16)
-__sized_buffer_access(NativeBufferU32)
-
-macro __sized_buffer_get(Buffer: ty) {
-    @nowrite @intrinsic @native_required inline(lua) fn get(b: Buffer, i: int) -> int? = """
-    if i < 0 or i >= b.len then return nil end; return b.ptr[i]
-"""
-}
-
-__sized_buffer_get(NativeBufferU8)
-__sized_buffer_get(NativeBufferI8)
-__sized_buffer_get(NativeBufferU16)
-__sized_buffer_get(NativeBufferI16)
-__sized_buffer_get(NativeBufferU32)
+__sized_native_buffer(NativeBufferU8, PtrU8, native_buffer_u8, __nb_alloc_u8)
+__sized_native_buffer(NativeBufferI8, PtrI8, native_buffer_i8, __nb_alloc_i8)
+__sized_native_buffer(NativeBufferU16, PtrU16, native_buffer_u16, __nb_alloc_u16)
+__sized_native_buffer(NativeBufferI16, PtrI16, native_buffer_i16, __nb_alloc_i16)
+__sized_native_buffer(NativeBufferU32, PtrU32, native_buffer_u32, __nb_alloc_u32)
 
 @nowrite @nomangle inline(lua) fn __nb_checked_get(buf: any, i: int) -> any = """
     if i < 0 or i >= buf.len then
@@ -1425,22 +1417,6 @@ fn enumerate<T>(collection: NativeBuffer<T>) -> [(int, T)] {
     }
     return out
 }
-
-macro __sized_buffer_enumerate(Buffer: ty) {
-    fn enumerate(collection: Buffer) -> [(int, int)] {
-        let out: [(int, int)] = vec_new()
-        for i in 0..collection.len {
-            out.push((i, collection[i]))
-        }
-        return out
-    }
-}
-
-__sized_buffer_enumerate(NativeBufferU8)
-__sized_buffer_enumerate(NativeBufferI8)
-__sized_buffer_enumerate(NativeBufferU16)
-__sized_buffer_enumerate(NativeBufferI16)
-__sized_buffer_enumerate(NativeBufferU32)
 
 fn Vec<T>.rev(collection) -> [T] {
     let out: [T] = []
