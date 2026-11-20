@@ -36,8 +36,8 @@ pub use frame::materialize_frame;
 pub use in_bounds::elide_bounds_checks_for_target;
 use inline::inline_functions_with_plans;
 pub use inline::{
-    InlineCache, InlineCandidateTable, InlineCandidateWarm, InlineOffGuard, SpliceRecord,
-    inline_mode_guard, inline_off_active, inline_off_guard, validate_no_residual_bound_calls,
+    InlineCache, InlineCandidateTable, InlineCandidateWarm, InlineOffGuard, inline_mode_guard,
+    inline_off_active, inline_off_guard, validate_no_residual_bound_calls,
 };
 pub use nobox::{cleanup_with_nobox, nobox_materialization_violations};
 pub(crate) use visit::top_level_blocks;

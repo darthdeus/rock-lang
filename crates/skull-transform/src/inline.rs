@@ -15,7 +15,7 @@ use skull_mir::lower::{BackendFnAbiPlanHandle, ScalarCtx};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
-use crate::top_level_blocks;
+use crate::{top_level_blocks, visit::raw};
 
 const MAX_INLINES_PER_FN: usize = 1000;
 /// Bound expansion even when register allocation can coalesce most cells.
@@ -85,11 +85,6 @@ impl CalleeBody {
     fn budget_cells(&self) -> usize {
         self.source_cells + self.func.value_lets
     }
-}
-
-pub struct SpliceRecord {
-    pub callee: FuncRef,
-    pub callee_insts: usize,
 }
 
 /// Cache one result per concrete instantiation, including rejected candidates.
@@ -1025,16 +1020,15 @@ struct Site {
     args: Vec<Idx<Inst>>,
     dests: Option<Vec<Idx<Cell>>>,
     inst: Instance,
-    abi: BackendFnAbiPlanHandle,
 }
 
 /// The delivery record must agree with the concrete owner already on the call.
-fn call_target(
-    func: &MirFunc,
+fn call_target<'a>(
+    func: &'a MirFunc,
     call_id: Idx<Inst>,
     fref: FuncRef,
     ws: &Workspace,
-) -> Result<Option<(Instance, BackendFnAbiPlanHandle)>, CompilerError> {
+) -> Result<Option<(&'a Instance, &'a BackendFnAbiPlanHandle)>, CompilerError> {
     let Some(owner) = func.callee_instances.get(&call_id) else {
         return Ok(None);
     };
@@ -1059,22 +1053,21 @@ fn call_target(
     } else if owner.args.is_empty() {
         return Ok(None);
     }
-    let inst = owner.clone();
     if let Some(delivery) = func.spec_bindings.get(&call_id) {
-        if delivery != &inst {
+        if delivery != owner {
             return Err(CompilerError::new_no_location(format!(
                 "internal: delivery instance for `{}` disagrees with its concrete call owner",
                 declaration.name,
             )));
         }
     }
-    let abi = func.call_abi_plans.get(&call_id).cloned().ok_or_else(|| {
+    let abi = func.call_abi_plans.get(&call_id).ok_or_else(|| {
         CompilerError::new_no_location(format!(
             "internal: concrete call to `{}` has no lowered ABI plan",
             declaration.name,
         ))
     })?;
-    Ok(Some((inst, abi)))
+    Ok(Some((owner, abi)))
 }
 
 /// Resume at the last splice: it only inserts calls at or after that position.
@@ -1085,29 +1078,23 @@ fn find_site(
     scx: &ScalarCtx,
     cache: &mut InlineCache,
     self_ref: FuncRef,
-    top: &HashSet<Idx<Block>>,
+    top: &[bool],
     resume: Option<(Idx<Block>, usize)>,
     cell_budget: usize,
     pinned: &HashSet<Idx<Cell>>,
     concrete_plans: &ConcretePlans,
 ) -> Result<Option<Site>, CompilerError> {
-    let mut started = resume.is_none();
-    for (bid, _) in func.blocks.iter() {
-        if !top.contains(&bid) {
+    let (first_block, first_inst) = resume.map_or((0, 0), |(block, index)| (raw(block), index));
+    for (bid, block) in func.blocks.iter().skip(first_block) {
+        if !top[raw(bid)] {
             continue;
         }
-        let start = match resume {
-            Some((rb, ri)) if !started => {
-                if bid != rb {
-                    continue; // haven't reached the resume block yet
-                }
-                started = true;
-                ri
-            }
-            _ => 0,
+        let start = if raw(bid) == first_block {
+            first_inst
+        } else {
+            0
         };
-        let insts = &func.blocks[bid].insts;
-        for (idx, &iid) in insts.iter().enumerate().skip(start) {
+        for (idx, &iid) in block.insts.iter().enumerate().skip(start) {
             let (fref, args, dests) = match &func.insts[iid] {
                 Inst::Call { func, args } => (*func, args, None),
                 Inst::CallMulti { func, args, dests } => (*func, args, Some(dests)),
@@ -1119,46 +1106,35 @@ fn find_site(
             let Some((inst, abi)) = call_target(func, iid, fref, ws)? else {
                 continue;
             };
-            let site = Site {
-                pos: (bid, idx),
+            let Some(cand) = get(cache, ws, scx, inst, concrete_plans)? else {
+                continue;
+            };
+            if &cand.subject != inst
+                || cand.abi.as_ref() != abi.as_ref()
+                || cand.func.params.len() != args.len()
+                || dests.map_or(cand.ret_arity > 1, |dests| cand.ret_arity != dests.len())
+            {
+                continue;
+            }
+            // A coalesced argument already occupies a counted caller cell.
+            let cost = cell_budget + cand.budget_cells() + cand.func.params.len();
+            let pos = (bid, idx);
+            if inst.args.is_empty()
+                && cost > CELL_BUDGET
+                && cost - for_each_coalesced(func, cand, args, pos, pinned, |_, _| {}) > CELL_BUDGET
+            {
+                continue;
+            }
+            return Ok(Some(Site {
+                pos,
                 call_id: iid,
                 args: args.clone(),
                 dests: dests.cloned(),
-                inst,
-                abi,
-            };
-            let candidate = get(cache, ws, scx, &site.inst, concrete_plans)?;
-            let Some(cand) = candidate else {
-                continue;
-            };
-            let mismatched = cand.subject != site.inst
-                || cand.abi.as_ref() != site.abi.as_ref()
-                || cand.func.params.len() != site.args.len()
-                || site
-                    .dests
-                    .as_ref()
-                    .map_or(cand.ret_arity > 1, |dests| cand.ret_arity != dests.len());
-            // A coalesced argument already occupies a counted caller cell.
-            let over_budget = site.inst.args.is_empty()
-                && cell_budget + cand.budget_cells() + cand.func.params.len() > CELL_BUDGET
-                && cell_budget + cand.budget_cells() + cand.func.params.len()
-                    - site_coalesced_cells(func, cand, &site, pinned)
-                    > CELL_BUDGET;
-            if !mismatched && !over_budget {
-                return Ok(Some(site));
-            }
+                inst: inst.clone(),
+            }));
         }
     }
     Ok(None)
-}
-
-fn site_coalesced_cells(
-    func: &MirFunc,
-    cand: &CalleeBody,
-    site: &Site,
-    pinned: &HashSet<Idx<Cell>>,
-) -> usize {
-    for_each_coalesced(func, cand, &site.args, site.pos, pinned, |_, _| {})
 }
 
 // Allocate every clone before remapping its operands.
@@ -1411,14 +1387,9 @@ fn snapshot_holds(
     found
 }
 
-fn pin_cells(
-    func: &MirFunc,
-    top: &HashSet<Idx<Block>>,
-    blocks_from: usize,
-    pinned: &mut HashSet<Idx<Cell>>,
-) {
+fn pin_cells(func: &MirFunc, top: &[bool], blocks_from: usize, pinned: &mut HashSet<Idx<Cell>>) {
     for (bid, block) in func.blocks.iter().skip(blocks_from) {
-        if top.contains(&bid) {
+        if top[raw(bid)] {
             continue;
         }
         for &iid in &block.insts {
@@ -1915,19 +1886,22 @@ pub(crate) fn inline_functions_with_plans(
     func: &mut MirFunc,
     cache: &mut InlineCache,
     concrete_plans: &ConcretePlans,
-) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
+) -> Result<(HashSet<FuncRef>, usize, usize), CompilerError> {
     let mut spliced = HashSet::default();
-    let mut records: Vec<SpliceRecord> = Vec::new();
     if inline_off_active() {
-        return Ok((spliced, records));
+        return Ok((spliced, 0, 0));
     }
-    let mut top: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
+    let mut top = vec![false; func.blocks.len()];
+    for block in top_level_blocks(func) {
+        top[raw(block)] = true;
+    }
     let mut pinned: HashSet<Idx<Cell>> = HashSet::default();
     pin_cells(func, &top, 0, &mut pinned);
     let mut uses: Option<UseIndex> = None;
     let mut resume: Option<(Idx<Block>, usize)> = None;
     let mut cell_budget = func.cells.len() + func.value_leaves;
     let mut budget = MAX_INLINES_PER_FN;
+    let mut copied_instructions = 0;
     while budget > 0 {
         let Some(site) = find_site(
             func,
@@ -1964,12 +1938,12 @@ pub(crate) fn inline_functions_with_plans(
             scratch,
             uses,
         )?;
-        top.extend(scratch.added_blocks.drain(..));
+        top.resize(func.blocks.len(), false);
+        for block in scratch.added_blocks.drain(..) {
+            top[raw(block)] = true;
+        }
         pin_cells(func, &top, blocks_before, &mut pinned);
-        records.push(SpliceRecord {
-            callee: fref,
-            callee_insts: cand.insts,
-        });
+        copied_instructions += cand.insts;
         // The caller must import cells referenced by the spliced body.
         func.statics.extend(cand.func.statics.iter().cloned());
         func.comptime_reads
@@ -1991,7 +1965,7 @@ pub(crate) fn inline_functions_with_plans(
     if let Some(uses) = &uses {
         uses.record_drift(func);
     }
-    Ok((spliced, records))
+    Ok((spliced, MAX_INLINES_PER_FN - budget, copied_instructions))
 }
 
 fn fn_has_bounds(f: &bone_core::hir::Function) -> bool {

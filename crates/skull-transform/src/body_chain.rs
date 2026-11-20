@@ -9,7 +9,7 @@ use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{FuncRef, MirFunc};
 use skull_mir::verify::Stage;
 
-use crate::{InlineCache, SpliceRecord};
+use crate::InlineCache;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BodyPass {
@@ -25,7 +25,7 @@ pub enum BodyPass {
 pub trait PassObserver {
     fn begin(&mut self, _pass: BodyPass, _mf: &MirFunc) {}
     fn end(&mut self, _pass: BodyPass, _mf: &MirFunc) {}
-    fn inlined(&mut self, _pass: BodyPass, _records: &[SpliceRecord]) {}
+    fn inlined(&mut self, _pass: BodyPass, _splices: usize, _copied_instructions: usize) {}
     fn bounds_elided(&mut self, _count: usize) {}
 }
 
@@ -78,7 +78,7 @@ impl Inliner<'_> {
         obs: &mut dyn PassObserver,
     ) -> Result<HashSet<FuncRef>, ChainError> {
         obs.begin(pass, mf);
-        let (callees, records) = crate::inline_functions_with_plans(
+        let (callees, splices, copied_instructions) = crate::inline_functions_with_plans(
             ws,
             self.scx,
             self.self_ref,
@@ -87,7 +87,7 @@ impl Inliner<'_> {
             self.plans,
         )
         .map_err(|error| ChainError { pass, error })?;
-        obs.inlined(pass, &records);
+        obs.inlined(pass, splices, copied_instructions);
         obs.end(pass, mf);
         verify_after(mf, stage, pass);
         Ok(callees)

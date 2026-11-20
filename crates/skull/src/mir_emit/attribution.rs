@@ -95,14 +95,6 @@ impl PhaseTimes {
 }
 
 impl InlineAttribution {
-    fn add_records(&mut self, records: &[skull_transform::SpliceRecord]) {
-        self.accepted_splices += records.len();
-        self.copied_instructions += records
-            .iter()
-            .map(|record| record.callee_insts)
-            .sum::<usize>();
-    }
-
     pub(super) fn add(&mut self, other: &Self) {
         self.accepted_splices += other.accepted_splices;
         self.copied_instructions += other.copied_instructions;
@@ -197,14 +189,16 @@ impl skull_transform::body_chain::PassObserver for ChainStats<'_> {
     fn inlined(
         &mut self,
         pass: skull_transform::body_chain::BodyPass,
-        records: &[skull_transform::SpliceRecord],
+        splices: usize,
+        copied_instructions: usize,
     ) {
         use skull_transform::body_chain::BodyPass;
-        self.work.add_records(records);
+        self.work.accepted_splices += splices;
+        self.work.copied_instructions += copied_instructions;
         if pass == BodyPass::HoistedInline {
-            self.times.hoisted_inline_work |= !records.is_empty();
+            self.times.hoisted_inline_work |= splices > 0;
         } else {
-            self.times.inline_work |= !records.is_empty();
+            self.times.inline_work |= splices > 0;
         }
     }
 
