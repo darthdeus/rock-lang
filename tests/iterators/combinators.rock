@@ -37,13 +37,17 @@ fn sum_it<I: Iterator<int>>(it: I) -> int {
     return total
 }
 
+fn assert_sequence<T>(actual: [T], expected: [T]) {
+    assert_eq(actual.len, expected.len)
+    for i in 0..expected.len {
+        assert_eq(actual[i], expected[i], "sequence element {i}")
+    }
+}
+
 @test
 fn materialized_unsigned_range_is_a_vec() {
     let r = (1 as uint)..(4 as uint)
-    assert_eq(r.len, 3)
-    assert_eq(r[0], 1 as uint)
-    assert_eq(r[1], 2 as uint)
-    assert_eq(r[2], 3 as uint)
+    assert_sequence(r, [1 as uint, 2 as uint, 3 as uint])
 }
 
 @test
@@ -53,10 +57,7 @@ fn map_then_filter_chain() {
     for x in v.iter().map(x => x * 3).filter(x => x % 2 == 1) {
         out.push(x)
     }
-    assert_eq(out.len, 3)
-    assert_eq(out[0], 3)
-    assert_eq(out[1], 9)
-    assert_eq(out[2], 15)
+    assert_sequence(out, [3, 9, 15])
 }
 
 @test
@@ -66,9 +67,7 @@ fn filter_then_map_chain() {
     for x in v.iter().filter(x => x > 2).map(x => x + 100) {
         out.push(x)
     }
-    assert_eq(out.len, 2)
-    assert_eq(out[0], 103)
-    assert_eq(out[1], 104)
+    assert_sequence(out, [103, 104])
 }
 
 @test
@@ -80,13 +79,7 @@ fn laziness_interleaves_not_phases() {
     for x in v.iter().map(x => { trace.push("m{x}"); x }).filter(x => { trace.push("f{x}"); true }) {
         trace.push("b{x}")
     }
-    assert_eq(trace.len, 6)
-    assert_eq(trace[0], "m1")
-    assert_eq(trace[1], "f1")
-    assert_eq(trace[2], "b1")
-    assert_eq(trace[3], "m2")
-    assert_eq(trace[4], "f2")
-    assert_eq(trace[5], "b2")
+    assert_sequence(trace, ["m1", "f1", "b1", "m2", "f2", "b2"])
 }
 
 @test
@@ -152,9 +145,7 @@ fn filter_skips_leading_run() {
     for x in v.iter().filter(x => x > 1) {
         out.push(x)
     }
-    assert_eq(out.len, 2)
-    assert_eq(out[0], 2)
-    assert_eq(out[1], 3)
+    assert_sequence(out, [2, 3])
 }
 
 @test
@@ -184,9 +175,7 @@ fn enumerate_after_filter_counts_yielded() {
     for (i, x) in v.iter().filter(x => x % 10 == 0).enumerate() {
         out.push("{i}={x}")
     }
-    assert_eq(out.len, 2)
-    assert_eq(out[0], "0=10")
-    assert_eq(out[1], "1=20")
+    assert_sequence(out, ["0=10", "1=20"])
 }
 
 @test
@@ -197,9 +186,7 @@ fn zip_length_is_min() {
     for (x, y) in zip(a.iter(), b.iter()) {
         out.push(x + y)
     }
-    assert_eq(out.len, 2)
-    assert_eq(out[0], 11)
-    assert_eq(out[1], 22)
+    assert_sequence(out, [11, 22])
 }
 
 @test
@@ -220,10 +207,7 @@ fn take_while_stops_at_first_reject() {
     for x in v.iter().take_while(x => x < 5) {
         out.push(x)
     }
-    assert_eq(out.len, 3)
-    assert_eq(out[0], 1)
-    assert_eq(out[1], 2)
-    assert_eq(out[2], 3)
+    assert_sequence(out, [1, 2, 3])
 }
 
 @test
@@ -233,9 +217,7 @@ fn combinators_over_user_iterator() {
     for x in (Countdown { from: 5 }).iter().filter(x => x % 2 == 0).map(x => x * x) {
         out.push(x)
     }
-    assert_eq(out.len, 2)
-    assert_eq(out[0], 16)
-    assert_eq(out[1], 4)
+    assert_sequence(out, [16, 4])
 }
 
 @test
@@ -279,9 +261,7 @@ fn nested_map_chain() {
     for x in v.iter().map(x => x + 1).map(x => x * 10).map(x => x - 5) {
         out.push(x)
     }
-    assert_eq(out.len, 2)
-    assert_eq(out[0], 15)
-    assert_eq(out[1], 25)
+    assert_sequence(out, [15, 25])
 }
 
 // enumerate/zip yield tuple ELEMENTS (`(bool, (int, T))` / `(bool, (A, B))`),
@@ -292,9 +272,7 @@ fn nested_map_chain() {
 fn enumerate_chains_into_combinators() {
     let v = [10, 20, 30]
     let r = v.iter().enumerate().filter(p => p.0 > 0).map(p => p.1).collect()
-    assert_eq(r.len, 2)
-    assert_eq(r[0], 20)
-    assert_eq(r[1], 30)
+    assert_sequence(r, [20, 30])
 }
 
 @test
