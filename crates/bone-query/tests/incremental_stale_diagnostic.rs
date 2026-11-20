@@ -115,6 +115,13 @@ fn body_edit_with_shifted_prefix_matches_fresh_check() {
             "fn a(x: int) { a(x) }\nenum E {\nfn o(x: E) {\n}\nfn b() { print} (1) }\n".to_string(),
             "fn a(x: int) { a(1) }\nenum E {\nfn o(x: E) {\n}\nfn b() { }\n".to_string(),
         ],
+        // Recovery ends the first body early, so fixing it lengthens that
+        // function's span while the text after it stays in place.
+        vec![
+            "fn a(n: int) {\n    i while < n {\n        t = t + 1\n}\n}\nfn b(x: int) {\n}\nfn c(x: float) {\n}\n".to_string(),
+            "fn a(n: int) {\n    while i < n {\n        t = t + 1\n}\n}\nfn b(x: int) {\n}\nfn c(x: float) {\n}\n".to_string(),
+            "fn a(n: int) {\n    while i < n {\n        t = t + 1\n}\n}\nfn b(x: int) {\n}\nfn c(x: float) {\nlet w = x\n}\n".to_string(),
+        ],
     ];
     for states in cases {
         let mut bone = BoneWorkspace::new();

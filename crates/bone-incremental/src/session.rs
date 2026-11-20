@@ -827,7 +827,8 @@ impl Session {
         // outside that body (comments, recovered junk) must be unchanged.
         let body_edit = old.and_then(|old| {
             let (start, end, _) = byte_diff(&old.text, text);
-            locate_body_edit(&old.item_prints, start, end)
+            let idx = locate_body_edit(&old.item_prints, start, end)?;
+            Some((idx, text_edit_delta(path, &old.text, text)))
         });
         let next = UserFile {
             text_hash: hash,
@@ -842,8 +843,9 @@ impl Session {
         };
         self.apply_file(path, Some(next), |s| match diff {
             Some(FileDiff::BodiesOnly(changed)) => match changed.as_slice() {
-                [idx] if body_edit == Some(*idx) => {
-                    s.rebuild_body_incremental(path, module, *idx, false)
+                [idx] if body_edit.as_ref().is_some_and(|(at, _)| at == idx) => {
+                    let (_, edit) = body_edit.expect("located body edit");
+                    s.rebuild_body_incremental(path, module, *idx, false, &edit)
                 }
                 _ => s.rebuild_module(path, module, &changed),
             },
@@ -1517,7 +1519,7 @@ impl Session {
             contribution: old.contribution.clone(),
         };
         self.apply_file(path, Some(next), |s| {
-            s.rebuild_body_incremental(path, mini, idx, true)
+            s.rebuild_body_incremental(path, mini, idx, true, &item_shift)
         })
         .map(Some)
     }
@@ -1528,6 +1530,7 @@ impl Session {
         ast: Ast,
         changed_idx: usize,
         cooked: bool,
+        edit: &TextEditDelta,
     ) -> Result<UpdateResult, CompilerError> {
         let file = ast.file;
         let mid = self.ws.module_ids[&file];
@@ -1545,20 +1548,6 @@ impl Session {
         };
 
         let old_fn_span = self.ws.module(mid).functions[fid].span;
-
-        // Owned so the borrow ends before the fallback moves `ast`.
-        let new_fn_span_opt = ast
-            .items
-            .iter()
-            .find(|it| it.span.offset_range().0 == new_start)
-            .and_then(|it| match &it.kind {
-                ItemKind::Function(nf) => Some(nf.span),
-                _ => None,
-            });
-        let new_fn_span = match new_fn_span_opt {
-            Some(s) => s,
-            None => return self.rebuild_module(path, ast, &[changed_idx]),
-        };
 
         let mut edited = ast;
         let t_cook = Instant::now();
@@ -1585,9 +1574,11 @@ impl Session {
             .map(|b| b.generation)
             .unwrap_or(0);
 
+        // The text after the edited body moves by the edit's size, not by the
+        // change in the function's span: recovery may have ended the old
+        // function early.
         let at = old_fn_span.offset_range().1;
-        let byte_delta = new_fn_span.offset_range().1 as isize - at as isize;
-        let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
+        let (byte_delta, line_delta) = (edit.byte_delta, edit.line_delta);
 
         let old_inf = self.take_inference(mid);
         self.ws.phase_timings.clear();
