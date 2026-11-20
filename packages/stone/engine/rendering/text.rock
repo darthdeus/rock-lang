@@ -387,15 +387,17 @@ fn text_layout_emit_instance(
     probe_admitted_count: int = -1,
     probe_layout_glyph_count: int = -1,
     probe_layout_ink_bounds: Rect = rect(0.0, 0.0, 0.0, 0.0),
-    layout_scale: float = 1.0
+    layout_scale: float = 1.0,
+    world: bool = false
 ) -> bool {
     profile_begin("text.emit.glyphs")
+    let probing = !world && (probe_text != "" || UI_SUBMISSION_PROBE_ON)
     let before = batch.count
     let emitted_count = 0
     let emitted_bounds = rect(0.0, 0.0, 0.0, 0.0)
     text_layout_instance_glyph_cache_prepare(layout, instance_id)
     let cached_glyphs = layout.instance_glyph_data.unwrap()
-    if poses == null && probe_text == "" && !UI_SUBMISSION_PROBE_ON {
+    if poses == null && !probing && !world {
         for i in 0..layout.glyphs.len {
             let base = i * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE
             if cached_glyphs[base] == 0.0 { continue }
@@ -425,6 +427,7 @@ fn text_layout_emit_instance(
         let data = cached_glyphs
         if data[i * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE] == 0.0 { continue }
         let raw = text_layout_instance_glyph_cached(data, i)
+        if world && raw.height <= 0.0 { continue }
         let pose = text_layout_pose_at(layout, i, poses)
         if !unit_size_ready {
             unit_size = text_layout_metric_unit_size(layout, source_pixel_size)
@@ -432,6 +435,12 @@ fn text_layout_emit_instance(
         }
         let ink = text_layout_raster_rect_at(unit_size, layout, glyph_origin,
             raw, source_pixel_size)
+        if world {
+            text_world_glyph_quad(batch, ink, glyph_origin.y - layout.ascent, layout.ascent,
+                glyph_pivot, pose, origin, raw, color)
+            batch.count += 6
+            continue
+        }
         let a = text_layout_pose_corner(ink, glyph_pivot, pose, origin, 0, layout_scale)
         let b = text_layout_pose_corner(ink, glyph_pivot, pose, origin, 1, layout_scale)
         let c = text_layout_pose_corner(ink, glyph_pivot, pose, origin, 2, layout_scale)
@@ -439,7 +448,7 @@ fn text_layout_emit_instance(
         __write_quad(batch.verts, batch.count, a, b, c, d,
             raw.u0, raw.v0, raw.u1, raw.v1,
             color.r, color.g, color.b, color.a)
-        if probe_text != "" || UI_SUBMISSION_PROBE_ON {
+        if probing {
             let observed = batch.verts[batch.count].pos.to_f64()
             let lo = observed
             let hi = observed
@@ -458,7 +467,7 @@ fn text_layout_emit_instance(
         }
         batch.count += 6
     }
-    if probe_text != "" || UI_SUBMISSION_PROBE_ON {
+    if probing {
         let probe_demand = text_layout_raster_demand(layout, null, layout_scale)
         let source_cap_height = 0.0
         if layout.font != null {
@@ -565,18 +574,22 @@ pub fn text_layout_emit(
     poses: [GlyphPose]? = null,
     consumer_key: string = "",
     layout_scale: float = 1.0,
-    shadow: bool = false
+    shadow: bool = false,
+    placement: TextPlacement = TextPlacement::Output,
+    depth: DepthMode = DepthMode::Off
 ) -> bool {
-    TEXT_LAYOUT_EMIT_CALLS += 1
+    let output = placement == TextPlacement::Output
+    if output { TEXT_LAYOUT_EMIT_CALLS += 1 }
     let font = layout.font ?? return false
     let fd = font.data() ?? return false
+    if !output && (fd.backend_id < 1 || fd.backend_id > FONT_ATLASES.len) { return false }
     if layout.glyphs.len == 0 { return false }
     if poses != null { text_layout_validate_poses(layout, poses) }
-    let probe_text = text_layout_probe_text(layout)
+    let probe_text = if output { text_layout_probe_text(layout) } else { "" }
     let probe_admitted_count = layout.admitted_count
     let probe_layout_glyph_count = layout.glyphs.len
     let probe_layout_ink_bounds = layout.ink_bounds
-    let cache_instance = poses == null && consumer_key == "" && layout_scale == 1.0
+    let cache_instance = output && poses == null && consumer_key == "" && layout_scale == 1.0
     let instance_id = 0
     let image = 0
     if cache_instance && layout.instance_cached_id > 0 {
@@ -602,16 +615,24 @@ pub fn text_layout_emit(
             layout.instance_cached_image = image
         }
     }
-    TEXT_ART_COVERAGE_EMIT_CALLS = TEXT_ART_COVERAGE_EMIT_CALLS + 1
+    if output { TEXT_ART_COVERAGE_EMIT_CALLS = TEXT_ART_COVERAGE_EMIT_CALLS + 1 }
     if image == 0 { error("TextLayout atlas instance {instance_id} has no GL image") }
     profile_begin("text.batch.lookup")
-    let batch = ensure_ui_batch(sampled_image(Image(image)), RenderProps {
-        z_layer: z_layer,
-        depth: DepthMode::Off,
-        sampling: fd.sampling,
-        pipeline: null,
-        text_batch: true,
-    })
+    // Target text (canvas bakes) shares the layout and Y-down quads of output
+    // text and only drains into the render pool.
+    let batch = if output {
+        ensure_ui_batch(sampled_image(Image(image)), RenderProps {
+            z_layer: z_layer,
+            depth: DepthMode::Off,
+            sampling: fd.sampling,
+            pipeline: null,
+            text_batch: true,
+        })
+    } else {
+        ensure_world_sprite_batch(sampled_image(Image(image)), z_layer, BlendMode::Alpha, false,
+            depth, unlit: true, sampling: fd.sampling,
+            text_batch: placement == TextPlacement::World)
+    }
     profile_end("text.batch.lookup")
     reserve_vertices(batch, layout.glyphs.len * if shadow { 12 } else { 6 })
     if shadow {
@@ -628,99 +649,47 @@ pub fn text_layout_emit(
         probe_admitted_count: probe_admitted_count,
         probe_layout_glyph_count: probe_layout_glyph_count,
         probe_layout_ink_bounds: probe_layout_ink_bounds,
-        layout_scale: layout_scale)
+        layout_scale: layout_scale, world: placement == TextPlacement::World)
 }
 
 
-fn text_layout_emit_world_instance(
+// World text is Y-up: each glyph is mirrored about its line, and the vertices
+// carry the baseline as their pivot.
+fn text_world_glyph_quad(
     batch: RenderBatch,
-    layout: TextLayout,
+    ink: Rect,
+    line_y: float,
+    ascent: float,
+    glyph_pivot: Vec2,
+    pose: GlyphPose?,
     baseline: Vec2,
-    color: Color,
-    instance_id: int,
-    poses: [GlyphPose]?
-) -> bool {
-    let before = batch.count
-    let unit_size = 0.0
-    let unit_size_ready = false
-    for i in 0..layout.glyphs.len {
-        let glyph_face = layout.glyphs[i].face
-        let glyph_id = layout.glyphs[i].glyph
-        let glyph_origin = layout.glyphs[i].origin
-        let glyph_pivot = layout.glyphs[i].pivot
-        if !text_layout_instance_glyph(instance_id, glyph_face, glyph_id) { continue }
-        let raw = text_layout_instance_glyph_data()
-        if raw.height <= 0.0 { continue }
-        let pose = text_layout_pose_at(layout, i, poses)
-        let line_y = glyph_origin.y - layout.ascent
-        let source_pixel_size = stone_get_font_instance_pixel_size_ffi(instance_id)
-        if !unit_size_ready {
-            unit_size = text_layout_metric_unit_size(layout, source_pixel_size)
-            unit_size_ready = true
-        }
-        let ink = text_layout_raster_rect_at(unit_size, layout, glyph_origin,
-            raw, source_pixel_size)
-        let a0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 0)
-        let b0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 1)
-        let c0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 2)
-        let d0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 3)
-        let a = v(baseline.x + a0.x,
-            baseline.y + 2.0 * line_y + layout.ascent - a0.y)
-        let b = v(baseline.x + b0.x,
-            baseline.y + 2.0 * line_y + layout.ascent - b0.y)
-        let c = v(baseline.x + c0.x,
-            baseline.y + 2.0 * line_y + layout.ascent - c0.y)
-        let d = v(baseline.x + d0.x,
-            baseline.y + 2.0 * line_y + layout.ascent - d0.y)
-        batch.verts[batch.count + 0] = make_world_text_vertex(
-            a.x, a.y, raw.u0, raw.v0, color, baseline.y)
-        batch.verts[batch.count + 1] = make_world_text_vertex(
-            d.x, d.y, raw.u0, raw.v1, color, baseline.y)
-        batch.verts[batch.count + 2] = make_world_text_vertex(
-            c.x, c.y, raw.u1, raw.v1, color, baseline.y)
-        batch.verts[batch.count + 3] = make_world_text_vertex(
-            a.x, a.y, raw.u0, raw.v0, color, baseline.y)
-        batch.verts[batch.count + 4] = make_world_text_vertex(
-            c.x, c.y, raw.u1, raw.v1, color, baseline.y)
-        batch.verts[batch.count + 5] = make_world_text_vertex(
-            b.x, b.y, raw.u1, raw.v0, color, baseline.y)
-        batch.count += 6
-    }
-    return batch.count > before
-}
-
-fn text_layout_emit_world(
-    layout: TextLayout,
-    baseline: Vec2,
-    z_layer: int,
-    depth: DepthMode,
-    color: Color,
-    poses: [GlyphPose]? = null
-) -> bool {
-    let data = layout.font ?? return false
-    let fd = data.data() ?? return false
-    let idx = fd.backend_id - 1
-    if idx < 0 || idx >= FONT_ATLASES.len || layout.glyphs.len == 0 { return false }
-    if poses != null { text_layout_validate_poses(layout, poses) }
-    profile_begin("text.layout.raster_demand")
-    let demand = text_layout_raster_demand(layout, poses)
-    profile_end("text.layout.raster_demand")
-    profile_begin("text.art.atlas_lookup")
-    let instance = text_art_atlas_instance_for(data, demand)
-    profile_end("text.art.atlas_lookup")
-    let image = stone_get_font_instance_image_ffi((instance.instance_id as int))
-    if image == 0 { error("world text atlas instance {(instance.instance_id as int)} has no GL image") }
-    profile_begin("text.batch.lookup")
-    let batch = ensure_world_sprite_batch(
-        sampled_image(Image(image)), z_layer, BlendMode::Alpha, false,
-        depth, unlit: true, sampling: fd.sampling, text_batch: true)
-    profile_end("text.batch.lookup")
-    reserve_vertices(batch, layout.glyphs.len * 6)
-    profile_begin("text.emit.glyphs")
-    let emitted = text_layout_emit_world_instance(
-        batch, layout, baseline, color, (instance.instance_id as int), poses)
-    profile_end("text.emit.glyphs")
-    return emitted
+    raw: GlyphData,
+    color: Color
+) {
+    let a0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 0)
+    let b0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 1)
+    let c0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 2)
+    let d0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 3)
+    let a = v(baseline.x + a0.x,
+        baseline.y + 2.0 * line_y + ascent - a0.y)
+    let b = v(baseline.x + b0.x,
+        baseline.y + 2.0 * line_y + ascent - b0.y)
+    let c = v(baseline.x + c0.x,
+        baseline.y + 2.0 * line_y + ascent - c0.y)
+    let d = v(baseline.x + d0.x,
+        baseline.y + 2.0 * line_y + ascent - d0.y)
+    batch.verts[batch.count + 0] = make_world_text_vertex(
+        a.x, a.y, raw.u0, raw.v0, color, baseline.y)
+    batch.verts[batch.count + 1] = make_world_text_vertex(
+        d.x, d.y, raw.u0, raw.v1, color, baseline.y)
+    batch.verts[batch.count + 2] = make_world_text_vertex(
+        c.x, c.y, raw.u1, raw.v1, color, baseline.y)
+    batch.verts[batch.count + 3] = make_world_text_vertex(
+        a.x, a.y, raw.u0, raw.v0, color, baseline.y)
+    batch.verts[batch.count + 4] = make_world_text_vertex(
+        c.x, c.y, raw.u1, raw.v1, color, baseline.y)
+    batch.verts[batch.count + 5] = make_world_text_vertex(
+        b.x, b.y, raw.u1, raw.v0, color, baseline.y)
 }
 
 pub fn queue_ui_text(
@@ -2546,10 +2515,11 @@ pub fn emit_resolved_runs(
             TextPlacement::Output => text_layout_emit(layout,
                 v(pen, start.y + max_ascent - layout.ascent * k), color, z_layer,
                 consumer_key: consumer_key, layout_scale: k),
-            TextPlacement::Target => emit_target_layout_in_render_pool(layout,
-                v(pen, start.y + max_ascent - layout.ascent * k), z_layer, color),
-            TextPlacement::World => text_layout_emit_world(layout,
-                v(pen, start.y), z_layer, depth, color),
+            TextPlacement::Target => text_layout_emit(layout,
+                v(pen, start.y + max_ascent - layout.ascent * k), color, z_layer,
+                placement: placement),
+            TextPlacement::World => text_layout_emit(layout, v(pen, start.y), color, z_layer,
+                placement: placement, depth: depth),
         }
         pen += layout.logical_bounds.w * k
     }
@@ -2569,36 +2539,6 @@ pub fn emit_plain_text_layout(
             layout.ascent, z_layer, tint, depth)
         line_y += layout.line_height
     }
-}
-
-// The canvas-bake destination shares its layout oracle and its Y-down glyph
-// geometry with every other target list; only the pool it drains into differs,
-// so it selects the same coverage instance rather than deriving quads from the
-// raw atlas pages, whose metrics are in raster pixels and not font units.
-fn emit_target_layout_in_render_pool(
-    layout: TextLayout,
-    origin: Vec2,
-    z_layer: int,
-    color: Color
-) -> bool {
-    let font = layout.font ?? return false
-    let fd = font.data() ?? return false
-    let idx = fd.backend_id - 1
-    if idx < 0 || idx >= FONT_ATLASES.len || layout.glyphs.len == 0 {
-        return false
-    }
-    let demand = text_layout_raster_demand(layout, null)
-    let instance = text_art_atlas_instance_for(font, demand)
-    let image = stone_get_font_instance_image_ffi((instance.instance_id as int))
-    if image == 0 {
-        error("target canvas text atlas instance {(instance.instance_id as int)} has no GL image")
-    }
-    let batch = ensure_world_sprite_batch(
-        sampled_image(Image(image)), z_layer, BlendMode::Alpha, false,
-        DepthMode::Off, unlit: true, sampling: fd.sampling)
-    reserve_vertices(batch, layout.glyphs.len * 6)
-    return text_layout_emit_instance(batch, layout, origin, color,
-        (instance.instance_id as int), null)
 }
 
 pub fn measure_rich_text_of(
@@ -2717,7 +2657,8 @@ fn queue_world_text_layout(
     z_layer: int,
     depth: DepthMode
 ) {
-    let _ = text_layout_emit_world(layout, v(x, y), z_layer, depth, color)
+    let _ = text_layout_emit(layout, v(x, y), color, z_layer, placement: TextPlacement::World,
+        depth: depth)
 }
 
 pub fn measure_text(text: string, font_size: float, family: TextFamily? = null,
