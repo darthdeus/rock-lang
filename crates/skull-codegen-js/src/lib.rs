@@ -1105,8 +1105,7 @@ function log_dedup_count() { return Object.keys(__rock_log_dedup).length; }
 /// is `[min,max)` exclusive (`r=max-min`, `r<=0 -> min`), single draw for
 /// `r<=2^32` else two draws composed into 53 bits then `% r` (range coverage is
 /// a semantic, not a nicety).
-pub const JS_RNG_RUNTIME: &str = r#"
-var __rock_rng_state = 0;
+const JS_RNG_STREAM: &str = r#"var __rock_rng_state = 0;
 function __rock_rng_current() { return __rock_rng_state; }
 function __rock_rng_store(s) { __rock_rng_state = s | 0; }
 function __rock_rng_seed(s) { __rock_rng_store(s); }
@@ -1126,28 +1125,6 @@ function __rock_random_int(min, max) {
   if (r <= 0) return min;
   if (r <= 4294967296) return min + (__rock_rng_next32() % r);
   var hi = __rock_rng_next32(), lo = __rock_rng_next32();
-  return min + ((hi * 2097152 + (lo >>> 11)) % r);
-}
-var __rock_presentation_rng_state = 0;
-function __rock_presentation_rng_current() { return __rock_presentation_rng_state; }
-function __rock_presentation_rng_store(s) { __rock_presentation_rng_state = s | 0; }
-function __rock_presentation_rng_seed(s) { __rock_presentation_rng_store(s); }
-function __rock_presentation_rng_state_get() { return __rock_presentation_rng_current(); }
-function __rock_presentation_rng_state_set(s) { __rock_presentation_rng_store(s); }
-function __rock_presentation_rng_next32() {
-  var state = (__rock_presentation_rng_current() + 0x9E3779B9) | 0;
-  state = (state ^ (state << 13)) | 0;
-  state = (state ^ (state >>> 17)) | 0;
-  state = (state ^ (state << 5)) | 0;
-  __rock_presentation_rng_store(state);
-  return (state ^ (state >>> 16)) >>> 0;
-}
-function __rock_presentation_random() { return __rock_presentation_rng_next32() / 4294967296; }
-function __rock_presentation_random_int(min, max) {
-  var r = max - min;
-  if (r <= 0) return min;
-  if (r <= 4294967296) return min + (__rock_presentation_rng_next32() % r);
-  var hi = __rock_presentation_rng_next32(), lo = __rock_presentation_rng_next32();
   return min + ((hi * 2097152 + (lo >>> 11)) % r);
 }
 "#;
@@ -1716,7 +1693,13 @@ pub fn assemble_prelude(
     p.push_str(JS_INSPECT_RUNTIME);
     p.push_str(JS_DEEPCOPY_RUNTIME);
     p.push_str(JS_LOG_RUNTIME);
-    p.push_str(JS_RNG_RUNTIME);
+    static RNG_RUNTIME: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "\n{JS_RNG_STREAM}{}",
+            JS_RNG_STREAM.replace("__rock_", "__rock_presentation_")
+        )
+    });
+    p.push_str(&RNG_RUNTIME);
     for block in extra_runtime {
         p.push_str(block);
     }

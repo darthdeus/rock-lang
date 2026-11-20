@@ -361,8 +361,18 @@ fn runtime_prelude() -> &'static str {
     // holds the full budget. Higher exit and trace limits reduce repeated recording
     // and global trace flushes. The environment overrides support tuning.
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let rng_streams = format!(
+            "{}\n{}\n",
+            LUA_RNG_STREAM.replace(
+                "{STATE_COMMENT}",
+                "  -- Whole RNG state is this one counter, a plain 32-bit number.\n",
+            ),
+            LUA_RNG_STREAM
+                .replace("rng_", "presentation_rng_")
+                .replace("{STATE_COMMENT}", ""),
+        );
         let out = PRELUDE_TEMPLATE
-            .replace("{FN_MT}", "")
+            .replace("{RNG_STREAMS}", &rng_streams)
             .replace("{UINT_CHECK}", skull_codegen_lua::UINT_CHECK_PRELUDE)
             .replace("{NB_ALLOC}", skull_codegen_lua::NB_ALLOC_PRELUDE)
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
@@ -739,18 +749,28 @@ end
 -- Shared metatable of capturing-lambda env records:
 -- a record { __slot = <CodeRef>, <captures> } is callable as f(...) via __call.
 -- Preserved across reload so pre- and post-reload records share metatable identity.
-{FN_MT}
+
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
-  local __rock_rng_state = 0
+{RNG_STREAMS}  local __seed = tonumber(os.getenv("ROCK_TEST_SEED"))
+  if __seed then
+    _G.__rock_rng_seed(__seed)
+    _G.__rock_presentation_rng_seed(__seed + 10007)
+  else
+    _G.__rock_rng_seed(os.time())
+    _G.__rock_presentation_rng_seed(os.time() + 10007)
+  end
+end
+"#;
+
+const LUA_RNG_STREAM: &str = r#"  local __rock_rng_state = 0
   local function active_rng_state() return __rock_rng_state end
   local function store_rng_state(state) __rock_rng_state = state end
   _G.__rock_rng_seed = function(s)
     local state = __rock_bit.tobit(tonumber(s))
     store_rng_state(state)
   end
-  -- Whole RNG state is this one counter, a plain 32-bit number.
-  _G.__rock_rng_state_get = function() return active_rng_state() end
+{STATE_COMMENT}  _G.__rock_rng_state_get = function() return active_rng_state() end
   _G.__rock_rng_state_set = function(s)
     local state = __rock_bit.tobit(tonumber(s))
     store_rng_state(state)
@@ -765,39 +785,6 @@ if not _G.__rock_rng_next then
     if output < 0 then return output + 4294967296 end
     return output
   end
-
-  local __rock_presentation_rng_state = 0
-  local function active_presentation_rng_state() return __rock_presentation_rng_state end
-  local function store_presentation_rng_state(state) __rock_presentation_rng_state = state end
-  _G.__rock_presentation_rng_seed = function(s)
-    local state = __rock_bit.tobit(tonumber(s))
-    store_presentation_rng_state(state)
-  end
-  _G.__rock_presentation_rng_state_get = function() return active_presentation_rng_state() end
-  _G.__rock_presentation_rng_state_set = function(s)
-    local state = __rock_bit.tobit(tonumber(s))
-    store_presentation_rng_state(state)
-  end
-  _G.__rock_presentation_rng_next = function()
-    local state = __rock_bit.tobit(active_presentation_rng_state() + 0x9E3779B9)
-    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 13))
-    state = __rock_bit.bxor(state, __rock_bit.rshift(state, 17))
-    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 5))
-    store_presentation_rng_state(state)
-    local output = __rock_bit.bxor(state, __rock_bit.rshift(state, 16))
-    if output < 0 then return output + 4294967296 end
-    return output
-  end
-
-  local __seed = tonumber(os.getenv("ROCK_TEST_SEED"))
-  if __seed then
-    _G.__rock_rng_seed(__seed)
-    _G.__rock_presentation_rng_seed(__seed + 10007)
-  else
-    _G.__rock_rng_seed(os.time())
-    _G.__rock_presentation_rng_seed(os.time() + 10007)
-  end
-end
 "#;
 
 fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
