@@ -1367,3 +1367,18 @@ fn vec_literal_carries_no_type_tag() {
     assert!(lua.contains("{_data = {c0, (2)}, len = 2}"), "{lua}");
     assert!(!lua.contains("__ty"), "{lua}");
 }
+
+#[test]
+fn nullable_value_lookup_branch_uses_presence_without_boxing() {
+    let lua = emit_clean(
+        r#"
+value Entry { key: int, refs: [int] }
+@nomangle fn lookup(m: Map<int, Entry>, k: int) -> int {
+    if m.get(k) != null { return 7 }
+    return 3
+}
+"#,
+        "lookup",
+    );
+    assert!(!lua.contains("Entry_vt("), "{lua}");
+}

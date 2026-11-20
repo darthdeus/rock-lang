@@ -168,6 +168,15 @@ impl<'a> Builder<'a> {
                             ValueRepr::Group { present: None, .. } => {
                                 self.emit_cur(Inst::Const(Lit::Bool(true)))
                             }
+                            ValueRepr::Scalar(value) => {
+                                // Packing a borrowed call result can copy its payload.
+                                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                                return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
+                                    Inst::Eq(value, nil)
+                                } else {
+                                    Inst::NotEq(value, nil)
+                                }));
+                            }
                             other => {
                                 let value = self.pack(other)?;
                                 let nil = self.emit_cur(Inst::Const(Lit::Nil));

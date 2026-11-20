@@ -59,3 +59,37 @@ fn retained_value_children_are_snapshots() {
         print(saved.child?.x ?? -1)
     }
 }
+
+@inline fn overwrite_child(record: Record) -> int {
+    if record.child != null { record.child.x = 40 }
+    return record.child?.x ?? -1
+}
+
+co fn observe_lookup_after_yield(records: Map<int, Record>) -> Coroutine<int> {
+    let saved = records.get(0) ?? return
+    yield 0
+    yield saved.child?.x ?? -1
+}
+
+@test
+fn lookup_presence_and_retained_payload() {
+    let records: Map<int, Record> = map_new()
+    let alias = records
+    records[0] = Record { child: Point { x: 7, y: 8 }, refs: [] }
+    if records.get(0) == null || records.get(1) != null { assert(false) }
+    assert_eq(overwrite_child(records.get(0).unwrap()), 40)
+    assert_eq(records[0].child?.x ?? -1, 7)
+
+    let saved = records.get(0).unwrap()
+    let read_saved = () => saved.child?.x ?? -1
+    let write_source = () => {
+        alias[0].child = Point { x: 99, y: 8 }
+        return
+    }
+    let task = observe_lookup_after_yield(records)
+    assert_eq(task.resume() ?? -1, 0)
+    write_source()
+    assert_eq(records[0].child?.x ?? -1, 99)
+    assert_eq(read_saved(), 7)
+    assert_eq(task.resume() ?? -1, 7)
+}
