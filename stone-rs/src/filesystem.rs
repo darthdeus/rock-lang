@@ -27,46 +27,41 @@ pub(crate) unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
     CStr::from_ptr(p).to_str().ok()
 }
 
-#[no_mangle]
-pub extern "C" fn stone_get_working_directory() -> *const c_char {
-    WORKING_DIR.with(|wd| {
-        let mut wd_ref = wd.borrow_mut();
-        if wd_ref.is_none() {
-            if let Ok(cwd) = std::env::current_dir() {
-                if let Some(s) = cwd.to_str() {
-                    if let Ok(cs) = CString::new(s) {
-                        *wd_ref = Some(cs);
-                    }
-                }
-            }
-            if wd_ref.is_none() {
-                *wd_ref = Some(CString::new(".").unwrap());
-            }
-        }
-        wd_ref.as_ref().map(|s| s.as_ptr()).unwrap_or(c".".as_ptr())
+fn cached(
+    slot: &'static std::thread::LocalKey<RefCell<Option<CString>>>,
+    init: impl FnOnce() -> Option<String>,
+    fallback: &str,
+) -> *const c_char {
+    slot.with(|slot| {
+        slot.borrow_mut()
+            .get_or_insert_with(|| {
+                init()
+                    .and_then(|value| CString::new(value).ok())
+                    .unwrap_or_else(|| CString::new(fallback).unwrap())
+            })
+            .as_ptr()
     })
 }
 
 #[no_mangle]
+pub extern "C" fn stone_get_working_directory() -> *const c_char {
+    cached(
+        &WORKING_DIR,
+        || std::env::current_dir().ok()?.to_str().map(str::to_owned),
+        ".",
+    )
+}
+
+#[no_mangle]
 pub extern "C" fn stone_get_executable_path() -> *const c_char {
-    EXECUTABLE_PATH.with(|ep| {
-        let mut ep_ref = ep.borrow_mut();
-        if ep_ref.is_none() {
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(parent) = exe.parent() {
-                    if let Some(s) = parent.to_str() {
-                        if let Ok(cs) = CString::new(s) {
-                            *ep_ref = Some(cs);
-                        }
-                    }
-                }
-            }
-            if ep_ref.is_none() {
-                *ep_ref = Some(CString::new(".").unwrap());
-            }
-        }
-        ep_ref.as_ref().map(|s| s.as_ptr()).unwrap_or(c".".as_ptr())
-    })
+    cached(
+        &EXECUTABLE_PATH,
+        || {
+            let exe = std::env::current_exe().ok()?;
+            exe.parent()?.to_str().map(str::to_owned)
+        },
+        ".",
+    )
 }
 
 #[no_mangle]
@@ -74,13 +69,9 @@ pub extern "C" fn stone_get_pref_path(
     organization: *const c_char,
     application: *const c_char,
 ) -> *const c_char {
-    if organization.is_null() || application.is_null() {
-        return ptr::null();
-    }
-    let Ok(organization) = unsafe { CStr::from_ptr(organization) }.to_str() else {
-        return ptr::null();
-    };
-    let Ok(application) = unsafe { CStr::from_ptr(application) }.to_str() else {
+    let (Some(organization), Some(application)) =
+        (unsafe { (cstr(organization), cstr(application)) })
+    else {
         return ptr::null();
     };
     let Ok(path) = sdl2::filesystem::pref_path(organization, application) else {
@@ -89,13 +80,7 @@ pub extern "C" fn stone_get_pref_path(
     let Ok(path) = CString::new(path) else {
         return ptr::null();
     };
-
-    PREF_PATH.with(|slot| {
-        *slot.borrow_mut() = Some(path);
-        slot.borrow()
-            .as_ref()
-            .map_or(ptr::null(), |path| path.as_ptr())
-    })
+    PREF_PATH.with(|slot| slot.borrow_mut().insert(path).as_ptr())
 }
 
 /// Get file modification time as Unix timestamp (seconds since epoch)
@@ -122,51 +107,48 @@ pub extern "C" fn stone_file_modtime(path: *const c_char) -> f64 {
     }
 }
 
-/// Write data to a file (creates parent directories if needed)
-/// Returns true on success
-#[no_mangle]
-pub extern "C" fn stone_file_write(path: *const c_char, data: *const c_char, len: usize) -> bool {
-    if path.is_null() || data.is_null() {
+fn write_file(
+    path: *const c_char,
+    data: *const c_char,
+    len: usize,
+    options: &mut fs::OpenOptions,
+) -> bool {
+    if data.is_null() {
         return false;
     }
     let Some(path_str) = (unsafe { cstr(path) }) else {
         return false;
     };
-
     if let Some(parent) = Path::new(path_str).parent() {
-        if !parent.as_os_str().is_empty() && fs::create_dir_all(parent).is_err() {}
+        if !parent.as_os_str().is_empty() {
+            let _ = fs::create_dir_all(parent);
+        }
     }
-
     let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, len) };
-    match fs::File::create(path_str) {
-        Ok(mut file) => file.write_all(bytes).is_ok(),
-        Err(_) => false,
-    }
+    options
+        .open(path_str)
+        .and_then(|mut file| file.write_all(bytes))
+        .is_ok()
+}
+
+/// Write data to a file (creates parent directories if needed)
+/// Returns true on success
+#[no_mangle]
+pub extern "C" fn stone_file_write(path: *const c_char, data: *const c_char, len: usize) -> bool {
+    let mut options = fs::OpenOptions::new();
+    write_file(
+        path,
+        data,
+        len,
+        options.write(true).create(true).truncate(true),
+    )
 }
 
 /// One O_APPEND write, so concurrent writers never interleave bytes within a record.
 #[no_mangle]
 pub extern "C" fn stone_file_append(path: *const c_char, data: *const c_char, len: usize) -> bool {
-    if path.is_null() || data.is_null() {
-        return false;
-    }
-    let Some(path_str) = (unsafe { cstr(path) }) else {
-        return false;
-    };
-
-    if let Some(parent) = Path::new(path_str).parent() {
-        if !parent.as_os_str().is_empty() && fs::create_dir_all(parent).is_err() {}
-    }
-
-    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, len) };
-    match fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path_str)
-    {
-        Ok(mut file) => file.write_all(bytes).is_ok(),
-        Err(_) => false,
-    }
+    let mut options = fs::OpenOptions::new();
+    write_file(path, data, len, options.create(true).append(true))
 }
 
 /// Delete a single file. Returns true on success, false if the path is
@@ -247,13 +229,7 @@ pub extern "C" fn stone_free(ptr: *mut std::ffi::c_void) {
 /// The returned pointer is owned by Stone -- do not free.
 #[no_mangle]
 pub extern "C" fn stone_get_hostname() -> *const c_char {
-    HOSTNAME.with(|h| {
-        let mut h_ref = h.borrow_mut();
-        if h_ref.is_none() {
-            *h_ref = Some(CString::new(read_hostname()).unwrap_or_default());
-        }
-        h_ref.as_ref().map(|s| s.as_ptr()).unwrap_or(c"".as_ptr())
-    })
+    cached(&HOSTNAME, || Some(read_hostname()), "")
 }
 
 // libc::gethostname is POSIX-only; on Windows the hostname is COMPUTERNAME.
@@ -277,33 +253,37 @@ fn read_hostname() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 
-#[no_mangle]
-pub extern "C" fn stone_file_exists_status(path: *const c_char) -> i32 {
+fn path_status(
+    path: *const c_char,
+    embedded: fn(&str) -> bool,
+    kind: &str,
+    matches: fn(&std::fs::Metadata) -> bool,
+) -> i32 {
     let Some(path_str) = (unsafe { cstr(path) }) else {
         return -1;
     };
-    if crate::asset_registry::contains_asset(path_str) {
+    if embedded(path_str) {
         return 1;
     }
-    match path_exists(Path::new(path_str)) {
-        Ok(exists) => i32::from(exists),
+    match std::fs::metadata(path_str) {
+        Ok(metadata) => i32::from(matches(&metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) if is_not_a_directory(&error) => 0,
         Err(error) => {
             ::log::error!(
                 target: "FILESYSTEM",
-                "failed to inspect path {path_str}: {error}"
+                "failed to inspect {kind} {path_str}: {error}"
             );
             -1
         }
     }
 }
 
-fn path_exists(path: &Path) -> Result<bool, std::io::Error> {
-    match std::fs::metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) if is_not_a_directory(&error) => Ok(false),
-        Err(error) => Err(error),
-    }
+#[no_mangle]
+pub extern "C" fn stone_file_exists_status(path: *const c_char) -> i32 {
+    path_status(path, crate::asset_registry::contains_asset, "path", |_| {
+        true
+    })
 }
 
 /// A path routed through a non-directory cannot name anything: ENOTDIR is
@@ -323,31 +303,12 @@ fn is_not_a_directory(_error: &std::io::Error) -> bool {
 /// directory and 1 is a directory. Embedded directories count as present.
 #[no_mangle]
 pub extern "C" fn stone_is_directory_status(path: *const c_char) -> i32 {
-    let Some(path_str) = (unsafe { cstr(path) }) else {
-        return -1;
-    };
-    if crate::asset_registry::contains_directory(path_str) {
-        return 1;
-    }
-    match path_is_directory(Path::new(path_str)) {
-        Ok(is_directory) => i32::from(is_directory),
-        Err(error) => {
-            ::log::error!(
-                target: "FILESYSTEM",
-                "failed to inspect directory path {path_str}: {error}"
-            );
-            -1
-        }
-    }
-}
-
-fn path_is_directory(path: &Path) -> Result<bool, std::io::Error> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.is_dir()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) if is_not_a_directory(&error) => Ok(false),
-        Err(error) => Err(error),
-    }
+    path_status(
+        path,
+        crate::asset_registry::contains_directory,
+        "directory path",
+        std::fs::Metadata::is_dir,
+    )
 }
 
 /// File size in bytes. Returns -1 on error / nonexistent.
@@ -479,37 +440,21 @@ pub extern "C" fn stone_list_directory(
         return true;
     }
 
+    // Zeroed, so a partial array frees cleanly through stone_free_string_array.
     let arr =
-        unsafe { libc::malloc(count * std::mem::size_of::<*mut c_char>()) as *mut *mut c_char };
+        unsafe { libc::calloc(count, std::mem::size_of::<*mut c_char>()) as *mut *mut c_char };
     if arr.is_null() {
         return false;
     }
-
     for (i, name) in entries.iter().enumerate() {
-        match CString::new(name.as_str()) {
-            Ok(cstr) => {
-                let bytes = cstr.as_bytes_with_nul();
-                let str_ptr = unsafe { libc::malloc(bytes.len()) as *mut c_char };
-                if str_ptr.is_null() {
-                    for j in 0..i {
-                        unsafe { libc::free(*arr.add(j) as *mut std::ffi::c_void) };
-                    }
-                    unsafe { libc::free(arr as *mut std::ffi::c_void) };
-                    return false;
-                }
-                unsafe {
-                    ptr::copy_nonoverlapping(bytes.as_ptr(), str_ptr as *mut u8, bytes.len());
-                    *arr.add(i) = str_ptr;
-                }
-            }
-            Err(_) => {
-                for j in 0..i {
-                    unsafe { libc::free(*arr.add(j) as *mut std::ffi::c_void) };
-                }
-                unsafe { libc::free(arr as *mut std::ffi::c_void) };
-                return false;
-            }
+        let copy = CString::new(name.as_str()).map_or(ptr::null_mut(), |name| unsafe {
+            libc::strdup(name.as_ptr())
+        });
+        if copy.is_null() {
+            stone_free_string_array(arr, count as c_int);
+            return false;
         }
+        unsafe { *arr.add(i) = copy };
     }
 
     unsafe {
