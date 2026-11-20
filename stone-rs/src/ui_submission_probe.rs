@@ -677,6 +677,63 @@ mod tests {
     }
 
     #[test]
+    fn ui_trace_resource_lifetimes_and_population_counts() {
+        let c = |s: &str| std::ffi::CString::new(s).unwrap();
+        let (image, a, b) = (c("image"), c("a.png"), c("b.png"));
+        let resource = |handle, source: &std::ffi::CString, generation| {
+            stone_ui_probe_resource(image.as_ptr(), handle, source.as_ptr(), generation)
+        };
+        stone_ui_probe_begin(true);
+        assert!(resource(7, &a, 0));
+        assert!(
+            resource(7, &a, 0),
+            "restating a live lifetime is idempotent"
+        );
+        assert!(stone_ui_probe_observe(
+            c("semantic_pass").as_ptr(),
+            c("{}").as_ptr()
+        ));
+        assert!(stone_ui_probe_refuse(
+            c("present").as_ptr(),
+            c("{}").as_ptr()
+        ));
+        assert!(stone_ui_probe_check_population(0, 1, 1));
+        assert!(!stone_ui_probe_check_population(0, 0, 1));
+        assert!(stone_ui_probe_retire(image.as_ptr(), 7));
+        assert!(
+            !resource(7, &a, 0),
+            "a retired source generation is never reborn"
+        );
+        assert!(resource(7, &a, 1));
+        assert!(!resource(7, &b, 0), "a live handle maps to one source");
+        assert!(!stone_ui_probe_retire(image.as_ptr(), 8));
+        assert!(
+            !stone_ui_probe_check_population(0, 1, 1),
+            "rejections fail the population"
+        );
+        let trace = snapshot();
+        assert_eq!(trace["resources"][5]["retired"], 4);
+        assert_eq!(trace["resources"][6]["born"], 5);
+        assert_eq!(trace["rejected"].as_array().unwrap().len(), 3);
+        stone_ui_probe_stop();
+    }
+
+    #[test]
+    fn ui_trace_checks_fullscreen_uv_and_nested_consumption_order() {
+        for (consumed_v0, ok) in [(0.5, true), (0.25, false)] {
+            stone_ui_probe_begin(true);
+            accept("custom", "outer", json!({}));
+            accept("fullscreen", "inner", json!({"uv": [0, 0.5, 1, 1]}));
+            fullscreen_consumed([0.0, consumed_v0, 1.0, 1.0]);
+            stone_ui_probe_end_operation();
+            stone_ui_probe_custom_consumed();
+            stone_ui_probe_end_operation();
+            assert_eq!(stone_ui_probe_check(2), ok);
+        }
+        stone_ui_probe_stop();
+    }
+
+    #[test]
     fn ui_trace_detects_dropped_host_draw() {
         stone_ui_probe_begin(true);
         accept("batch", "key", json!({"z": 0}));
