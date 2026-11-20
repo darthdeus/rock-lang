@@ -1,15 +1,22 @@
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
+use skull_parser::{PackageTag, parse_module_clean, stdlib::ModuleSet};
 use ustr::Ustr;
 
-fn with_stdlib(src: &str, file: &str) -> skull_parser::stdlib::ModuleSet {
-    let user = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
-    skull_parser::stdlib::ModuleSet::with_stdlib([user]).expect("stdlib parses")
+fn parse_files(files: &[(&str, &str)], package: Option<PackageTag>) -> ModuleSet {
+    let modules = files.iter().map(|&(file, src)| {
+        let mut module = parse_module_clean(src, Ustr::from(file)).expect("parse");
+        module.package = package.clone();
+        module
+    });
+    ModuleSet::with_stdlib(modules).expect("stdlib parses")
 }
 
-fn semantic_pass(
-    modules: &mut skull_parser::stdlib::ModuleSet,
-) -> Result<Workspace, skull_parser::CompilerError> {
+fn with_stdlib(src: &str, file: &str) -> ModuleSet {
+    parse_files(&[(file, src)], None)
+}
+
+fn semantic_pass(modules: &mut ModuleSet) -> Result<Workspace, skull_parser::CompilerError> {
     skull::pipeline::semantic_pass(modules, &Default::default())
 }
 
@@ -52,18 +59,12 @@ pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
     emit_at(&checked_workspace(src, "<test>"), "<test>").expect("emit")
 }
 
-fn emit_with_inputs(
-    src: &str,
-    file: &str,
-    inputs: bone_semantic::inference::ComptimeInputs,
-) -> Result<skull::mir_emit::MirEmit, skull_parser::CompilerError> {
-    let mut ws = checked_workspace(src, file);
-    ws.comptime_inputs = inputs;
-    emit_at(&ws, file)
+fn checked_workspace(src: &str, file: &str) -> Workspace {
+    checked_modules(with_stdlib(src, file))
 }
 
-fn checked_workspace(src: &str, file: &str) -> Workspace {
-    let ws = semantic_pass(&mut with_stdlib(src, file)).expect("semantic_pass");
+fn checked_modules(mut modules: ModuleSet) -> Workspace {
+    let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws
 }
@@ -81,21 +82,8 @@ pub fn ws_with_stdlib(src: &str) -> Workspace {
 }
 
 pub fn ws_of_files(files: &[(&str, &str)]) -> Workspace {
-    semantic_pass(&mut parse_files(files).expect("parse")).expect("semantic_pass")
-}
-
-fn parse_files(
-    files: &[(&str, &str)],
-) -> Result<skull_parser::stdlib::ModuleSet, skull_parser::CompilerError> {
-    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
-    for (file, src) in files {
-        let mut ast = skull_parser::parse_module_clean(src, Ustr::from(file))?;
-        if files.len() > 1 {
-            ast.package = Some(shared_test_package());
-        }
-        modules.push(ast);
-    }
-    Ok(modules)
+    let package = (files.len() > 1).then(shared_test_package);
+    semantic_pass(&mut parse_files(files, package)).expect("semantic_pass")
 }
 
 pub fn emit_module(src: &str) -> String {
@@ -103,38 +91,30 @@ pub fn emit_module(src: &str) -> String {
 }
 
 pub fn ws_v1_package(package: &str, fragments: &[(&str, &str)]) -> Workspace {
-    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
-    for &(file, src) in fragments {
-        let mut module = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
-        module.package = Some(skull_parser::PackageTag {
-            id: 0,
-            self_name: package.to_string(),
-            identity_storage: Default::default(),
-            root: String::new(),
-        });
-        modules.push(module);
-    }
-    let ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
-    ws
+    checked_modules(parse_files(
+        fragments,
+        Some(test_package(package.to_string())),
+    ))
 }
 
-fn shared_test_package() -> skull_parser::PackageTag {
-    skull_parser::PackageTag {
+fn test_package(self_name: String) -> PackageTag {
+    PackageTag {
         id: 0,
-        self_name: format!(
-            "{}<shared-test>",
-            bone_core::modules::STANDALONE_PACKAGE_PREFIX
-        ),
+        self_name,
         identity_storage: Default::default(),
         root: String::new(),
     }
 }
 
+fn shared_test_package() -> PackageTag {
+    test_package(format!(
+        "{}<shared-test>",
+        bone_core::modules::STANDALONE_PACKAGE_PREFIX
+    ))
+}
+
 pub fn emit_v1_package(package: &str, fragments: &[(&str, &str)]) -> skull::mir_emit::MirEmit {
-    let ws = ws_v1_package(package, fragments);
-    let mid = module_id(&ws, fragments[0].0);
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
+    emit_at(&ws_v1_package(package, fragments), fragments[0].0).expect("emit")
 }
 
 pub fn try_emit_module_with(
@@ -149,7 +129,9 @@ pub fn try_emit_module_with_file(
     file: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<String, skull_parser::CompilerError> {
-    emit_with_inputs(src, file, inputs).map(|e| e.lua)
+    let mut ws = checked_workspace(src, file);
+    ws.comptime_inputs = inputs;
+    emit_at(&ws, file).map(|e| e.lua)
 }
 
 pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError> {
@@ -395,37 +377,16 @@ pub fn try_emit_with_stdlib_module(
 }
 
 pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
-    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
-    modules.push(
-        skull_parser::parse_module_clean(
-            lib,
-            Ustr::from(rock_stdlib::stdlib_file_id("probe").as_str()),
-        )
-        .expect("parse lib"),
-    );
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
-    ws
+    let probe = rock_stdlib::stdlib_file_id("probe");
+    checked_modules(parse_files(&[(&probe, lib), ("<test>", src)], None))
 }
 
 pub fn ws_with_dependency_module(lib: &str, src: &str) -> Workspace {
-    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
-    let mut library = skull_parser::parse_module_clean(
-        lib,
-        Ustr::from("/tmp/rock-mono-project-library/engine.rock"),
-    )
-    .expect("parse lib");
-    library.package = Some(shared_test_package());
-    modules.push(library);
-    let mut main =
-        skull_parser::parse_module_clean(src, Ustr::from("/tmp/rock-mono-project/main.rock"))
-            .expect("parse");
-    main.package = Some(shared_test_package());
-    modules.push(main);
-    let ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
-    ws
+    let files = [
+        ("/tmp/rock-mono-project-library/engine.rock", lib),
+        ("/tmp/rock-mono-project/main.rock", src),
+    ];
+    checked_modules(parse_files(&files, Some(shared_test_package())))
 }
 
 pub fn module_id(ws: &Workspace, file: &str) -> bone_semantic::prelude::ModuleId {
