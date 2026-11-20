@@ -309,6 +309,7 @@ pub mod asset_registry;
 mod asset_watcher;
 mod audio;
 mod cursor;
+mod ffi_array;
 mod file_jobs;
 mod filesystem;
 mod flow_jobs;

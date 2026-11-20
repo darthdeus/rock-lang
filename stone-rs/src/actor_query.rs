@@ -1,26 +1,6 @@
-use std::mem::{align_of, size_of};
+use crate::ffi_array::{slice, slice_mut, Span};
 
 const LANES_PER_RECORD: usize = 5;
-
-fn pointer_range<T>(pointer: *const T, len: usize) -> Option<(usize, usize)> {
-    if len == 0 {
-        let address = pointer as usize;
-        return Some((address, address));
-    }
-    if pointer.is_null() || !(pointer as usize).is_multiple_of(align_of::<T>()) {
-        return None;
-    }
-    let bytes = len.checked_mul(size_of::<T>())?;
-    if bytes > isize::MAX as usize {
-        return None;
-    }
-    let start = pointer as usize;
-    Some((start, start.checked_add(bytes)?))
-}
-
-fn ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
-    a.0 < b.1 && b.0 < a.1
-}
 
 /// `records` has five i32 lanes per slot: `[active, x, y, generation, installed]`.
 /// `output` receives `[matched_count, examined_count, matching_slot...]`, slots ascending.
@@ -38,94 +18,57 @@ pub extern "C" fn stone_actor_query_rect(
     output: *mut i32,
     output_len: i64,
 ) -> bool {
-    if len < 0 || candidate_len < 0 || output_len < 0 {
-        return false;
-    }
-    if len % LANES_PER_RECORD as i64 != 0 {
-        return false;
-    }
-
-    let Ok(record_lanes) = usize::try_from(len) else {
+    let (Ok(record_lanes), Ok(candidate_count), Ok(output_capacity)) = (
+        usize::try_from(len),
+        usize::try_from(candidate_len),
+        usize::try_from(output_len),
+    ) else {
         return false;
     };
     let slot_count = record_lanes / LANES_PER_RECORD;
-    if slot_count > i32::MAX as usize {
-        return false;
-    }
-    let Ok(candidate_count) = usize::try_from(candidate_len) else {
-        return false;
-    };
-    if candidate_count > slot_count {
-        return false;
-    }
-    let Some(required_output) = candidate_count.checked_add(2) else {
-        return false;
-    };
-    let Ok(output_capacity) = usize::try_from(output_len) else {
-        return false;
-    };
-    if output_capacity < required_output {
-        return false;
-    }
-
-    // Read-only inputs may alias each other; the full output capacity must be disjoint from both.
-    let Some(records_range) = pointer_range(records, record_lanes) else {
-        return false;
-    };
-    let Some(candidates_range) = pointer_range(candidates, candidate_count) else {
-        return false;
-    };
-    let Some(output_range) = pointer_range(output as *const i32, output_capacity) else {
-        return false;
-    };
-    if ranges_overlap(records_range, output_range) || ranges_overlap(candidates_range, output_range)
+    if !record_lanes.is_multiple_of(LANES_PER_RECORD)
+        || slot_count > i32::MAX as usize
+        || candidate_count > slot_count
+        || output_capacity < candidate_count + 2
     {
         return false;
     }
 
-    let record_data: &[i32] = if record_lanes == 0 {
-        &[]
-    } else {
-        // SAFETY: range, alignment, and length were validated above; the
-        // caller guarantees that this range points to readable data.
-        unsafe { std::slice::from_raw_parts(records, record_lanes) }
+    // Read-only inputs may alias each other; the full output capacity must be disjoint from both.
+    let (Some(records_span), Some(candidates_span), Some(output_span)) = (
+        Span::of(records, record_lanes),
+        Span::of(candidates, candidate_count),
+        Span::of(output.cast_const(), output_capacity),
+    ) else {
+        return false;
     };
-    let candidate_data: &[i32] = if candidate_count == 0 {
-        &[]
-    } else {
-        // SAFETY: range, alignment, and length were validated above; the
-        // caller guarantees that this range points to readable data.
-        unsafe { std::slice::from_raw_parts(candidates, candidate_count) }
+    if records_span.overlaps(output_span) || candidates_span.overlaps(output_span) {
+        return false;
+    }
+    let (records, candidates) = unsafe {
+        (
+            slice(records, record_lanes),
+            slice(candidates, candidate_count),
+        )
     };
-
-    // Validate every slot before creating the mutable output slice, so malformed candidates
-    // leave output untouched.
-    for &slot in candidate_data {
-        if slot < 0 || slot as usize >= slot_count {
-            return false;
-        }
+    // Malformed candidates leave output untouched.
+    if candidates
+        .iter()
+        .any(|&slot| slot < 0 || slot as usize >= slot_count)
+    {
+        return false;
     }
 
-    // SAFETY: range, alignment, capacity, and disjointness from both inputs
-    // were validated above; the caller guarantees writable output memory.
-    let result = unsafe { std::slice::from_raw_parts_mut(output, required_output) };
+    let result = unsafe { slice_mut(output, candidate_count + 2) };
     let mut matched_count = 0usize;
     let mut examined_count = 0usize;
-
-    for &slot in candidate_data {
-        let slot_index = slot as usize;
-        let base = slot_index * LANES_PER_RECORD;
-        if record_data[base] == 0 {
+    for &slot in candidates {
+        let record = &records[slot as usize * LANES_PER_RECORD..][..LANES_PER_RECORD];
+        if record[0] == 0 || (!include_uninstalled && record[4] == 0) {
             continue;
         }
-        let installed = record_data[base + 4] != 0;
-        if !include_uninstalled && !installed {
-            continue;
-        }
-
         examined_count += 1;
-        let x = record_data[base + 1];
-        let y = record_data[base + 2];
+        let (x, y) = (record[1], record[2]);
         if x >= min_x && x <= max_x && y >= min_y && y <= max_y {
             result[2 + matched_count] = slot;
             matched_count += 1;

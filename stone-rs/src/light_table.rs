@@ -1,4 +1,6 @@
-use std::mem::{align_of, size_of};
+use std::ops::Range;
+
+use crate::ffi_array::{slice, slice_mut, Span};
 
 const MAX_EXACT_FLOAT_TEXELS: usize = 1 << 24;
 const LIGHT_ROW_TEXELS: usize = 2;
@@ -7,7 +9,6 @@ const LANES_PER_TEXEL: usize = 4;
 #[derive(Clone, Copy)]
 struct TableShape {
     columns: usize,
-    rows: usize,
     cells: usize,
     sources: usize,
     source_values: usize,
@@ -16,128 +17,101 @@ struct TableShape {
     cell_size: f64,
 }
 
-#[derive(Clone, Copy)]
-struct SourceGeometry {
+/// A source's position and radius in cell units and the cells its bounds cover.
+struct Reach {
     x: f64,
     z: f64,
     radius: f64,
-    min_col: usize,
-    end_col: usize,
-    min_row: usize,
-    end_row: usize,
+    cols: Range<usize>,
+    rows: Range<usize>,
 }
 
 fn table_shape(size: i32, cell_size: i32, epsilon: f64, count: i32) -> Option<TableShape> {
     if size <= 0 || cell_size <= 0 || count < 0 || !epsilon.is_finite() || epsilon < 0.0 {
         return None;
     }
-
-    let size = usize::try_from(size).ok()?;
-    let cell_size_usize = usize::try_from(cell_size).ok()?;
-    let sources = usize::try_from(count).ok()?;
-    let columns = size.checked_add(cell_size_usize.checked_sub(1)?)? / cell_size_usize;
-    let rows = columns;
-    let cells = columns.checked_mul(rows)?;
-    let source_values = sources.checked_mul(LANES_PER_TEXEL)?;
-    let source_texels = sources.checked_mul(LIGHT_ROW_TEXELS)?;
-    let header_texels = cells.checked_add(source_texels)?;
-
+    let (size, cell_size_usize, sources) = (size as usize, cell_size as usize, count as usize);
+    let columns = size.div_ceil(cell_size_usize);
+    let cells = columns * columns;
+    let header_texels = cells + sources * LIGHT_ROW_TEXELS;
     // Every index stored in the rgba32f table must stay an exact f32 integer.
     if cells >= MAX_EXACT_FLOAT_TEXELS || header_texels >= MAX_EXACT_FLOAT_TEXELS {
         return None;
     }
-
     Some(TableShape {
         columns,
-        rows,
         cells,
         sources,
-        source_values,
+        source_values: sources * LANES_PER_TEXEL,
         header_texels,
         epsilon,
         cell_size: cell_size as f64,
     })
 }
 
-fn pointer_range<T>(pointer: *const T, len: usize) -> Option<(usize, usize)> {
-    if len == 0 {
-        return Some((0, 0));
-    }
-    if pointer.is_null() || !(pointer as usize).is_multiple_of(align_of::<T>()) {
+fn texel(data: &mut [f32], index: usize) -> &mut [f32] {
+    &mut data[index * LANES_PER_TEXEL..][..LANES_PER_TEXEL]
+}
+
+fn clamped_cell(value: f64, limit: usize) -> usize {
+    (value.max(0.0) as usize).min(limit)
+}
+
+fn reach(shape: TableShape, position: &[f32; LANES_PER_TEXEL]) -> Option<Reach> {
+    let x = position[0] as f64 / shape.cell_size;
+    let z = position[2] as f64 / shape.cell_size;
+    let radius = position[3] as f64 / shape.cell_size;
+    if !x.is_finite()
+        || !position[1].is_finite()
+        || !z.is_finite()
+        || !radius.is_finite()
+        || radius < 0.0
+    {
         return None;
     }
-    let bytes = len.checked_mul(size_of::<T>())?;
-    let start = pointer as usize;
-    Some((start, start.checked_add(bytes)?))
-}
-
-fn ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
-    a.0 < b.1 && b.0 < a.1
-}
-
-fn floor_clamped(value: f64, limit: usize) -> usize {
-    let value = value.floor();
-    if value <= 0.0 {
-        0
-    } else if value >= limit as f64 {
-        limit
-    } else {
-        value as usize
-    }
-}
-
-fn floor_plus_one_clamped(value: f64, limit: usize) -> usize {
-    let end = value.floor() + 1.0;
-    if end <= 0.0 {
-        0
-    } else if end >= limit as f64 {
-        limit
-    } else {
-        end as usize
-    }
-}
-
-fn source_geometry(
-    shape: TableShape,
-    positions: *const f32,
-    source: usize,
-) -> Option<SourceGeometry> {
-    let start = source.checked_mul(LANES_PER_TEXEL)?;
-    let x = unsafe { *positions.add(start) } as f64 / shape.cell_size;
-    let y = unsafe { *positions.add(start + 1) } as f64;
-    let z = unsafe { *positions.add(start + 2) } as f64 / shape.cell_size;
-    let radius = unsafe { *positions.add(start + 3) } as f64 / shape.cell_size;
-    if !x.is_finite() || !y.is_finite() || !z.is_finite() || !radius.is_finite() || radius < 0.0 {
-        return None;
-    }
-
-    Some(SourceGeometry {
+    let extent = radius + shape.epsilon;
+    let span = |center: f64| {
+        clamped_cell((center - extent).floor(), shape.columns)
+            ..clamped_cell((center + extent).floor() + 1.0, shape.columns)
+    };
+    Some(Reach {
         x,
         z,
         radius,
-        min_col: floor_clamped(x - radius - shape.epsilon, shape.columns),
-        end_col: floor_plus_one_clamped(x + radius + shape.epsilon, shape.columns),
-        min_row: floor_clamped(z - radius - shape.epsilon, shape.rows),
-        end_row: floor_plus_one_clamped(z + radius + shape.epsilon, shape.rows),
+        cols: span(x),
+        rows: span(z),
     })
 }
 
-fn source_reaches_cell(source: SourceGeometry, col: usize, row: usize, epsilon: f64) -> bool {
-    let radius = source.radius + epsilon;
-    let col = col as f64;
-    let row = row as f64;
-    let dx = (col - source.x).max(source.x - (col + 1.0)).max(0.0);
-    let dz = (row - source.z).max(source.z - (row + 1.0)).max(0.0);
-    dx * dx + dz * dz <= radius * radius
+fn reaches(shape: TableShape, positions: &[f32]) -> Option<Vec<Reach>> {
+    positions
+        .as_chunks::<LANES_PER_TEXEL>()
+        .0
+        .iter()
+        .map(|position| reach(shape, position))
+        .collect()
 }
 
-fn validate_positions(shape: TableShape, positions: *const f32) -> bool {
-    if shape.sources > 0 && pointer_range(positions, shape.source_values).is_none() {
-        return false;
-    }
-    for source in 0..shape.sources {
-        if source_geometry(shape, positions, source).is_none() {
-            return false;
+/// Visits every (source, cell) link in source order, rows then columns,
+/// until `visit` returns false; returns whether the walk completed.
+fn for_each_link(
+    shape: TableShape,
+    reaches: &[Reach],
+    mut visit: impl FnMut(usize, usize) -> bool,
+) -> bool {
+    for (source, reach) in reaches.iter().enumerate() {
+        let radius = reach.radius + shape.epsilon;
+        for row in reach.rows.clone() {
+            let row_f = row as f64;
+            let dz = (row_f - reach.z).max(reach.z - (row_f + 1.0)).max(0.0);
+            for col in reach.cols.clone() {
+                let col_f = col as f64;
+                let dx = (col_f - reach.x).max(reach.x - (col_f + 1.0)).max(0.0);
+                if dx * dx + dz * dz <= radius * radius && !visit(source, row * shape.columns + col)
+                {
+                    return false;
+                }
+            }
         }
     }
     true
@@ -155,51 +129,36 @@ pub extern "C" fn stone_light_table_measure(
     let Some(shape) = table_shape(size, cell_size, epsilon, count) else {
         return -1;
     };
-    let Some(counts_range) = pointer_range(counts.cast_const(), shape.cells) else {
+    let (Some(counts_span), Some(positions_span)) = (
+        Span::of(counts.cast_const(), shape.cells),
+        Span::of(positions, shape.source_values),
+    ) else {
         return -1;
     };
-    let Some(positions_range) = pointer_range(positions, shape.source_values) else {
+    if counts_span.overlaps(positions_span) {
+        return -1;
+    }
+    let Some(reaches) = reaches(shape, unsafe { slice(positions, shape.source_values) }) else {
         return -1;
     };
-    if ranges_overlap(counts_range, positions_range) || !validate_positions(shape, positions) {
-        return -1;
-    }
-
-    for cell in 0..shape.cells {
-        unsafe {
-            *counts.add(cell) = 0;
-        }
-    }
+    let counts = unsafe { slice_mut(counts, shape.cells) };
+    counts.fill(0);
 
     let max_links = MAX_EXACT_FLOAT_TEXELS - 1 - shape.header_texels;
     let mut links = 0usize;
-    for source_index in 0..shape.sources {
-        let Some(source) = source_geometry(shape, positions, source_index) else {
-            return -1;
+    let measured = for_each_link(shape, &reaches, |_, cell| {
+        let Some(next) = counts[cell].checked_add(1) else {
+            return false;
         };
-        for row in source.min_row..source.end_row {
-            for col in source.min_col..source.end_col {
-                if !source_reaches_cell(source, col, row, shape.epsilon) {
-                    continue;
-                }
-                let cell = row * shape.columns + col;
-                let count_ptr = unsafe { counts.add(cell) };
-                let previous = unsafe { *count_ptr };
-                let Some(next) = previous.checked_add(1) else {
-                    return -1;
-                };
-                links = match links.checked_add(1) {
-                    Some(links) if links <= max_links => links,
-                    _ => return -1,
-                };
-                unsafe {
-                    *count_ptr = next;
-                }
-            }
-        }
+        counts[cell] = next;
+        links += 1;
+        links <= max_links
+    });
+    if measured {
+        links as i64
+    } else {
+        -1
     }
-
-    i64::try_from(links).unwrap_or(-1)
 }
 
 #[no_mangle]
@@ -221,152 +180,104 @@ pub extern "C" fn stone_light_table_pack(
     let Some(shape) = table_shape(size, cell_size, epsilon, count) else {
         return false;
     };
-    if data_len < 0 {
-        return false;
-    }
-
-    let Some(positions_range) = pointer_range(positions, shape.source_values) else {
-        return false;
-    };
-    let Some(colors_range) = pointer_range(colors, shape.source_values) else {
-        return false;
-    };
-    let Some(owners_range) = pointer_range(owners, shape.sources) else {
-        return false;
-    };
-    let Some(source_rows_range) = pointer_range(source_rows, shape.sources) else {
-        return false;
-    };
-    let Some(source_slots_range) = pointer_range(source_slots, shape.sources) else {
-        return false;
-    };
-    let Some(counts_range) = pointer_range(counts, shape.cells) else {
-        return false;
-    };
-    let Some(offsets_range) = pointer_range(offsets.cast_const(), shape.cells) else {
-        return false;
-    };
-
-    let mut links = 0usize;
-    for cell in 0..shape.cells {
-        let cell_count = unsafe { *counts.add(cell) };
-        if cell_count < 0 {
-            return false;
-        }
-        let Some(total) = links.checked_add(cell_count as usize) else {
-            return false;
-        };
-        links = total;
-    }
-    let Some(texels) = shape.header_texels.checked_add(links) else {
-        return false;
-    };
-    if texels >= MAX_EXACT_FLOAT_TEXELS {
-        return false;
-    }
-    let Some(required_floats) = texels.checked_mul(LANES_PER_TEXEL) else {
-        return false;
-    };
     let Ok(data_capacity) = usize::try_from(data_len) else {
         return false;
     };
-    if data_capacity < required_floats {
-        return false;
-    }
-    let Some(data_range) = pointer_range(data, required_floats) else {
+    let (sources, values, cells) = (shape.sources, shape.source_values, shape.cells);
+    let inputs = [
+        Span::of(positions, values),
+        Span::of(colors, values),
+        Span::of(owners, sources),
+        Span::of(source_rows, sources),
+        Span::of(source_slots, sources),
+        Span::of(counts, cells),
+    ];
+    let Some(inputs) = inputs.into_iter().collect::<Option<Vec<_>>>() else {
         return false;
     };
-    if !validate_positions(shape, positions) {
+    let Some(offsets_span) = Span::of(offsets.cast_const(), cells) else {
+        return false;
+    };
+    let counts = unsafe { slice(counts, cells) };
+    if counts.iter().any(|&count| count < 0) {
         return false;
     }
-
+    let texels = shape.header_texels + counts.iter().map(|&count| count as usize).sum::<usize>();
+    let required_floats = texels * LANES_PER_TEXEL;
+    if texels >= MAX_EXACT_FLOAT_TEXELS || data_capacity < required_floats {
+        return false;
+    }
+    let Some(data_span) = Span::of(data.cast_const(), required_floats) else {
+        return false;
+    };
+    let positions = unsafe { slice(positions, values) };
+    let Some(reaches) = reaches(shape, positions) else {
+        return false;
+    };
     // Outputs must be disjoint from all inputs and each other; read-only inputs may overlap.
-    let inputs = [
-        positions_range,
-        colors_range,
-        owners_range,
-        source_rows_range,
-        source_slots_range,
-        counts_range,
-    ];
-    for input in inputs {
-        if ranges_overlap(input, offsets_range) || ranges_overlap(input, data_range) {
-            return false;
-        }
-    }
-    if ranges_overlap(offsets_range, data_range) {
+    if offsets_span.overlaps(data_span)
+        || inputs
+            .iter()
+            .any(|input| input.overlaps(offsets_span) || input.overlaps(data_span))
+    {
         return false;
     }
+    let (colors, owners, source_rows, source_slots) = unsafe {
+        (
+            slice(colors, values),
+            slice(owners, sources),
+            slice(source_rows, sources),
+            slice(source_slots, sources),
+        )
+    };
+    let offsets = unsafe { slice_mut(offsets, cells) };
+    let data = unsafe { slice_mut(data, required_floats) };
 
     let mut cursor = shape.header_texels;
-    for cell in 0..shape.cells {
-        let cell_count = unsafe { *counts.add(cell) as usize };
-        unsafe {
-            *offsets.add(cell) = cursor as i32;
-            *data.add(cell * LANES_PER_TEXEL) = cursor as f32;
-            *data.add(cell * LANES_PER_TEXEL + 1) = cell_count as f32;
-        }
-        cursor += cell_count;
+    for (cell, &count) in counts.iter().enumerate() {
+        offsets[cell] = cursor as i32;
+        texel(data, cell)[..2].copy_from_slice(&[cursor as f32, count as f32]);
+        cursor += count as usize;
     }
 
-    for source_index in 0..shape.sources {
-        let start = source_index * LANES_PER_TEXEL;
-        let texel = shape.cells + source_index * LIGHT_ROW_TEXELS;
-        let row = unsafe { *source_rows.add(source_index) };
+    for (source, position) in positions
+        .as_chunks::<LANES_PER_TEXEL>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        let row_texel = cells + source * LIGHT_ROW_TEXELS;
+        let row = source_rows[source];
         if row >= 0 {
-            unsafe {
-                *data.add(texel * LANES_PER_TEXEL) = *owners.add(source_index) as f32;
-                *data.add(texel * LANES_PER_TEXEL + 1) = row as f32;
-                *data.add(texel * LANES_PER_TEXEL + 2) = *source_slots.add(source_index) as f32;
-                *data.add(texel * LANES_PER_TEXEL + 3) = *positions.add(start + 3);
-            }
+            texel(data, row_texel).copy_from_slice(&[
+                owners[source] as f32,
+                row as f32,
+                source_slots[source] as f32,
+                position[3],
+            ]);
         } else {
-            for lane in 0..LANES_PER_TEXEL {
-                unsafe {
-                    *data.add(texel * LANES_PER_TEXEL + lane) = *positions.add(start + lane);
-                }
-            }
+            texel(data, row_texel).copy_from_slice(position);
         }
-        for lane in 0..LANES_PER_TEXEL {
-            unsafe {
-                *data.add((texel + 1) * LANES_PER_TEXEL + lane) = *colors.add(start + lane);
-            }
-        }
+        texel(data, row_texel + 1)
+            .copy_from_slice(&colors[source * LANES_PER_TEXEL..][..LANES_PER_TEXEL]);
     }
 
-    for source_index in 0..shape.sources {
-        let Some(source) = source_geometry(shape, positions, source_index) else {
+    let packed = for_each_link(shape, &reaches, |source, cell| {
+        let write = offsets[cell];
+        if write < 0 || write as usize >= texels {
             return false;
-        };
-        let source_texel = shape.cells + source_index * LIGHT_ROW_TEXELS;
-        for row in source.min_row..source.end_row {
-            for col in source.min_col..source.end_col {
-                if !source_reaches_cell(source, col, row, shape.epsilon) {
-                    continue;
-                }
-                let cell = row * shape.columns + col;
-                let cursor_ptr = unsafe { offsets.add(cell) };
-                let write_texel = unsafe { *cursor_ptr };
-                if write_texel < 0 || write_texel as usize >= texels {
-                    return false;
-                }
-                unsafe {
-                    *data.add(write_texel as usize * LANES_PER_TEXEL) = source_texel as f32;
-                    *cursor_ptr = write_texel + 1;
-                }
-            }
         }
-    }
+        data[write as usize * LANES_PER_TEXEL] = (cells + source * LIGHT_ROW_TEXELS) as f32;
+        offsets[cell] = write + 1;
+        true
+    });
 
     cursor = shape.header_texels;
-    for cell in 0..shape.cells {
-        cursor += unsafe { *counts.add(cell) as usize };
-        if unsafe { *offsets.add(cell) as usize } != cursor {
-            return false;
-        }
-    }
-
-    true
+    packed
+        && counts.iter().zip(offsets.iter()).all(|(&count, &offset)| {
+            cursor += count as usize;
+            offset as usize == cursor
+        })
 }
 
 #[cfg(test)]
