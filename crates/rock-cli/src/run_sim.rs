@@ -4,7 +4,6 @@ use crate::sim_observability::{FrameTiming, SimRunRecorder};
 use crate::skull_backend::{IncrementalProject, collect_sim_descriptors};
 use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -257,10 +256,12 @@ fn compile_sims(project_path: PathBuf, output_path: PathBuf) -> Result<CompiledS
     compile_sims_with_allocation(project_path, output_path, None, &[])
 }
 
+/// Set on the `rock sim --list` child that compiles for a sim run: the child
+/// writes `main.lua` and the sim registry there and exits, so the runner keeps
+/// no compiler memory while sims run.
 const SIM_COMPILE_RECEIPT_DIR_ENV: &str = "ROCK_SIM_COMPILE_RECEIPT_DIR";
-const SIM_COMPILE_RECEIPT_PREPARE_ENV: &str = "ROCK_SIM_COMPILE_RECEIPT_PREPARE";
-const SIM_COMPILE_RECEIPT_VERSION: u64 = 4;
 const SIM_COMPILE_SELECTION_ENV: &str = "ROCK_SIM_COMPILE_SELECTION";
+const SIM_REGISTRY_FILENAME: &str = "registry.json";
 
 fn normalized_sim_selection(specs: &[String]) -> Vec<String> {
     let mut names = specs.to_vec();
@@ -284,13 +285,6 @@ mod worker_admission;
 
 use events::{SimEvent, parse_sim_marker};
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct SimReceiptInput {
-    kind: String,
-    path: String,
-    sha256: String,
-}
-
 struct PreparedSims {
     registry: SimRegistry,
     stone: Option<crate::skull_backend::IncrementalProject>,
@@ -307,7 +301,6 @@ struct SimRegistry {
 struct RegisteredSim {
     wire_name: String,
     env: Vec<(String, String)>,
-    #[serde(default)]
     source_file: String,
 }
 
@@ -346,10 +339,9 @@ impl From<Vec<RegisteredSim>> for SimRegistry {
 struct CompiledSims {
     registry: Vec<RegisteredSim>,
     stone: crate::skull_backend::IncrementalProject,
-    selection_is_full: bool,
 }
 
-/// Resolve the receipt's workspace-relative sim sources against this
+/// Resolve the registry's workspace-relative sim sources against this
 /// invocation's source root for baseline lookup. Timings keep the relative
 /// keys (stable across machines); the runner needs on-disk paths.
 fn resolve_sim_sources(
@@ -363,321 +355,28 @@ fn resolve_sim_sources(
         .collect())
 }
 
-fn sha256_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-fn sim_receipt_project_dir(root: &Path, project: &Path) -> PathBuf {
-    root.join(sha256_bytes(project.to_string_lossy().as_bytes()))
-}
-
-fn canonical_string(path: &Path) -> Result<String> {
-    Ok(path
-        .canonicalize()
-        .with_context(|| format!("canonicalize {}", path.display()))?
-        .to_string_lossy()
-        .into_owned())
-}
-
-fn nearest_manifest(path: &Path) -> Option<PathBuf> {
-    let mut dir = if path.is_dir() { path } else { path.parent()? };
-    loop {
-        let candidate = dir.join("stick.toml");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        dir = dir.parent()?;
-    }
-}
-
-fn receipt_source_inputs(
-    project: &Path,
-    sources: &rock_core::SourceFiles,
-) -> Result<Vec<SimReceiptInput>> {
-    let mut inputs = Vec::new();
-    let mut manifests = std::collections::BTreeSet::new();
-    manifests.extend(nearest_manifest(project));
-    for source in &sources.files {
-        let source = source.borrow();
-        let path = PathBuf::from(source.file.to_id_path());
-        inputs.push(SimReceiptInput {
-            kind: "source".into(),
-            path: canonical_string(&path)?,
-            sha256: sha256_bytes(source.contents.as_bytes()),
-        });
-        manifests.extend(nearest_manifest(&path));
-    }
-    for path in manifests {
-        inputs.push(SimReceiptInput {
-            kind: "manifest".into(),
-            path: canonical_string(&path)?,
-            sha256: hash_file(&path)?,
-        });
-    }
-    Ok(inputs)
-}
-
-fn hash_file(path: &Path) -> Result<String> {
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut fs_err::File::open(path)?, &mut hasher)
-        .with_context(|| format!("hash {}", path.display()))?;
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn receipt_inputs_from_stone(
-    project: &Path,
-    stone: &crate::skull_backend::IncrementalProject,
-) -> Result<Vec<SimReceiptInput>> {
-    let mut inputs = receipt_source_inputs(project, stone.sources())?;
-    for (path, _) in stone.comptime_watch_files_with_hashes() {
-        inputs.push(SimReceiptInput {
-            kind: "embedded".into(),
-            path: canonical_string(&path)?,
-            sha256: hash_file(&path)?,
-        });
-    }
-    inputs.sort_by(|a, b| (&a.kind, &a.path).cmp(&(&b.kind, &b.path)));
-    Ok(inputs)
-}
-
-fn sim_receipt_context(project: &Path) -> Result<serde_json::Value> {
-    const ENV_KEYS: &[&str] = &[
-        "ROCK_ASSET_OVERLAYS",
-        "ROCK_CONTEXT_ROOT",
-        "ROCK_SOURCE_REVISION",
-        "ROCK_STDLIB_DIR",
-        "ROCK_SKULL_LINE_DIRECTIVES",
-    ];
-    let env = ENV_KEYS
-        .iter()
-        .map(|key| {
-            (
-                (*key).to_string(),
-                std::env::var_os(key).map(|value| value.to_string_lossy().into_owned()),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    Ok(serde_json::json!({
-        "project": canonical_string(project)?,
-        "environment": env,
-    }))
-}
-
-fn receipt_rows<T: serde::de::DeserializeOwned>(
-    value: &serde_json::Value,
-    field: &str,
-) -> Result<Vec<T>> {
-    let rows = value
-        .as_array()
-        .with_context(|| format!("sim compile receipt {field} is not an array"))?;
-    rows.iter()
-        .enumerate()
-        .map(|(index, row)| {
-            anyhow::ensure!(
-                row.is_object(),
-                "sim compile receipt {field}[{index}] is not an object"
-            );
-            serde_path_to_error::deserialize(row)
-                .with_context(|| format!("invalid sim compile receipt {field}[{index}]"))
-        })
-        .collect()
-}
-
-fn parse_registry(value: &serde_json::Value) -> Result<SimRegistry> {
-    let entries = receipt_rows::<RegisteredSim>(value, "registry")?;
-    for entry in &entries {
-        anyhow::ensure!(
-            !entry.source_file.is_empty(),
-            "sim compile receipt source file for `{}` is missing or invalid",
-            entry.wire_name
-        );
-    }
-    Ok(entries.into())
-}
-
-fn publish_sim_receipt(
-    root: &Path,
-    receipt_dir: &Path,
-    project: &Path,
-    output: &Path,
-    registry: &[RegisteredSim],
-    inputs: &[SimReceiptInput],
-    selection: &[String],
-) -> Result<()> {
-    std::fs::create_dir_all(root)
-        .with_context(|| format!("create sim compile receipt root {}", root.display()))?;
-    let staged = tempfile::Builder::new()
-        .prefix(".sim-receipt-")
-        .tempdir_in(root)
-        .with_context(|| format!("stage sim compile receipt under {}", root.display()))?;
-    let artifact = rock_host::project::MAIN_LUA_FILENAME;
-    let staged_main = staged.path().join(artifact);
-    fs_err::copy(output.join(artifact), &staged_main)?;
-    let manifest = serde_json::json!({
-        "schema_version": SIM_COMPILE_RECEIPT_VERSION,
-        "context": sim_receipt_context(project)?,
-        "selection": selection,
-        "main_sha256": hash_file(&staged_main)?,
-        "inputs": inputs,
-        "registry": registry,
-    });
-    let mut manifest_bytes =
-        serde_json::to_vec_pretty(&manifest).context("serialize sim compile receipt")?;
-    manifest_bytes.push(b'\n');
-    std::fs::write(staged.path().join("receipt.json"), manifest_bytes)
-        .context("write staged sim compile receipt manifest")?;
-    let staged_path = staged.keep();
-    std::fs::rename(&staged_path, receipt_dir).with_context(|| {
-        format!(
-            "publish sim compile receipt {} -> {}",
-            staged_path.display(),
-            receipt_dir.display()
-        )
-    })?;
-    Ok(())
-}
-
-fn load_sim_receipt(receipt_dir: &Path, project: &Path, output: &Path) -> Result<SimRegistry> {
-    let manifest_path = receipt_dir.join("receipt.json");
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .with_context(|| format!("read sim compile receipt {}", manifest_path.display()))?;
-    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
-        .with_context(|| format!("parse sim compile receipt {}", manifest_path.display()))?;
-    let version = manifest
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| anyhow!("sim compile receipt has no numeric schema version"))?;
-    if version != SIM_COMPILE_RECEIPT_VERSION {
-        return Err(anyhow!(
-            "sim compile receipt schema version {version} is not supported (expected {SIM_COMPILE_RECEIPT_VERSION})"
-        ));
-    }
-    let expected_context = manifest
-        .get("context")
-        .ok_or_else(|| anyhow!("sim compile receipt has no context"))?;
-    let current_context = sim_receipt_context(project)?;
-    let mut current_inputs = receipt_source_inputs(
-        project,
-        &rock_host::compilation_units::load_sources_for_project(project)?,
-    )?;
-    if expected_context != &current_context {
-        return Err(anyhow!(
-            "sim compile receipt context changed; prepare a new receipt for this test lane"
-        ));
-    }
-
-    let expected_inputs = receipt_rows::<SimReceiptInput>(
-        manifest
-            .get("inputs")
-            .ok_or_else(|| anyhow!("sim compile receipt has no inputs"))?,
-        "inputs",
-    )?;
-    for expected in expected_inputs
-        .iter()
-        .filter(|input| input.kind == "embedded")
-    {
-        current_inputs.push(SimReceiptInput {
-            kind: expected.kind.clone(),
-            path: expected.path.clone(),
-            sha256: hash_file(Path::new(&expected.path))?,
-        });
-    }
-    current_inputs.sort_by(|a, b| (&a.kind, &a.path).cmp(&(&b.kind, &b.path)));
-    if expected_inputs != current_inputs {
-        return Err(anyhow!(
-            "sim compile receipt inputs changed; prepare a new receipt for this test lane"
-        ));
-    }
-
-    let main_path = receipt_dir.join(rock_host::project::MAIN_LUA_FILENAME);
-    let expected_main_hash = manifest
-        .get("main_sha256")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| anyhow!("sim compile receipt has no main artifact hash"))?;
-    let materialized = output.join(rock_host::project::MAIN_LUA_FILENAME);
-    fs_err::copy(main_path, &materialized)?;
-    if hash_file(&materialized)? != expected_main_hash {
-        return Err(anyhow!(
-            "sim compile receipt main.lua hash does not match its manifest"
-        ));
-    }
-    let incremental = output.join("incremental.lua");
-    if incremental.exists() {
-        std::fs::remove_file(&incremental)
-            .with_context(|| format!("remove stale sim overlay {}", incremental.display()))?;
-    }
-    parse_registry(
-        manifest
-            .get("registry")
-            .ok_or_else(|| anyhow!("sim compile receipt has no registry"))?,
-    )
-}
-
 fn prepare_sims(project_path: PathBuf, output_path: PathBuf) -> Result<PreparedSims> {
     crate::package::check_project_assets(&project_path)?;
     let selection = child_sim_selection()?;
-    let Some(root) = std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    let compiled =
+        compile_sims_with_allocation(project_path, output_path.clone(), None, &selection)?;
+    let Some(receipt) = std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).filter(|dir| !dir.is_empty())
     else {
-        let compiled = compile_sims_with_allocation(project_path, output_path, None, &selection)?;
         return Ok(PreparedSims {
             registry: compiled.registry.into(),
             stone: Some(compiled.stone),
         });
     };
-    let project_path = project_path.canonicalize().with_context(|| {
-        format!(
-            "canonicalize sim receipt project {}",
-            project_path.display()
-        )
-    })?;
-    let receipt_dir = sim_receipt_project_dir(&root, &project_path);
-    if receipt_dir.is_dir() {
-        return consume_sim_receipt(&receipt_dir, &project_path, &output_path);
-    }
-    if std::env::var_os(SIM_COMPILE_RECEIPT_PREPARE_ENV).as_deref()
-        != Some(std::ffi::OsStr::new("1"))
-    {
-        return Err(anyhow!(
-            "no sim compile receipt for `{}` under {}; prepare this test lane first",
-            project_path.display(),
-            root.display()
-        ));
-    }
-    let compiled =
-        compile_sims_with_allocation(project_path.clone(), output_path.clone(), None, &selection)?;
-    let inputs = receipt_inputs_from_stone(&project_path, &compiled.stone)?;
-    let receipt_selection = if compiled.selection_is_full {
-        Vec::new()
-    } else {
-        selection
-    };
     drop(compiled.stone);
-    publish_sim_receipt(
-        &root,
-        &receipt_dir,
-        &project_path,
-        &output_path,
-        &compiled.registry,
-        &inputs,
-        &receipt_selection,
+    let receipt = PathBuf::from(receipt);
+    let artifact = rock_host::project::MAIN_LUA_FILENAME;
+    fs_err::copy(output_path.join(artifact), receipt.join(artifact))?;
+    fs_err::write(
+        receipt.join(SIM_REGISTRY_FILENAME),
+        serde_json::to_vec(&compiled.registry).context("serialize sim registry")?,
     )?;
     Ok(PreparedSims {
         registry: compiled.registry.into(),
-        stone: None,
-    })
-}
-
-fn consume_sim_receipt(
-    receipt_dir: &Path,
-    project_path: &Path,
-    output_path: &Path,
-) -> Result<PreparedSims> {
-    crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
-    let registry = load_sim_receipt(receipt_dir, project_path, output_path)?;
-    Ok(PreparedSims {
-        registry,
         stone: None,
     })
 }
@@ -690,13 +389,7 @@ fn prepare_sims_out_of_process(
 ) -> Result<PreparedSims> {
     crate::package::check_project_assets(&project_path)?;
     rock_host::process_management::report_spawn_phase("compile-prepare");
-    if std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).is_some_and(|value| !value.is_empty()) {
-        return prepare_sims(project_path, output_path);
-    }
     sweep_stale_sim_receipt_roots(Path::new("tmp"));
-    let project_path = project_path
-        .canonicalize()
-        .with_context(|| format!("canonicalize sim project {}", project_path.display()))?;
     fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
     let receipt_prefix = format!("{SIM_RECEIPT_PREFIX}{}-", std::process::id());
     let root = tempfile::Builder::new()
@@ -704,11 +397,16 @@ fn prepare_sims_out_of_process(
         .tempdir_in("tmp")
         .context("creating sim compile receipt directory")?;
     compile_receipt_in_child(&project_path, rock_exe, root.path(), selection)?;
-    consume_sim_receipt(
-        &sim_receipt_project_dir(root.path(), &project_path),
-        &project_path,
-        &output_path,
-    )
+    crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
+    let artifact = rock_host::project::MAIN_LUA_FILENAME;
+    fs_err::copy(root.path().join(artifact), output_path.join(artifact))?;
+    let registry_path = root.path().join(SIM_REGISTRY_FILENAME);
+    let registry: Vec<RegisteredSim> = serde_json::from_slice(&fs_err::read(&registry_path)?)
+        .with_context(|| format!("parse sim registry {}", registry_path.display()))?;
+    Ok(PreparedSims {
+        registry: registry.into(),
+        stone: None,
+    })
 }
 
 const SIM_RECEIPT_PREFIX: &str = "sim-receipt-";
@@ -764,7 +462,6 @@ fn compile_receipt_in_child(
         .arg("skull")
         .arg(project_path)
         .env(SIM_COMPILE_RECEIPT_DIR_ENV, receipt_root)
-        .env(SIM_COMPILE_RECEIPT_PREPARE_ENV, "1")
         .env(
             SIM_COMPILE_SELECTION_ENV,
             serde_json::to_string(&normalized_sim_selection(selection))?,
@@ -945,11 +642,7 @@ fn skull_compile_game_and_collect_sims_with_allocation(
             env: sim.env_pairs,
         });
     }
-    Ok(CompiledSims {
-        registry,
-        stone,
-        selection_is_full,
-    })
+    Ok(CompiledSims { registry, stone })
 }
 
 #[cfg(test)]

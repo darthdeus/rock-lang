@@ -138,6 +138,7 @@ fn sim_receipt_prepare_releases_session() {
     let root = tempfile::tempdir().expect("receipt fixture");
     std::fs::create_dir(root.path().join("project")).unwrap();
     std::fs::create_dir(root.path().join("output")).unwrap();
+    std::fs::create_dir(root.path().join("receipts")).unwrap();
     std::fs::write(
         root.path().join("project/main.rock"),
         "@nomangle fn answer() -> int { 41 }\n",
@@ -151,7 +152,6 @@ fn sim_receipt_prepare_releases_session() {
         ])
         .env(HELPER, root.path())
         .env(SIM_COMPILE_RECEIPT_DIR_ENV, root.path().join("receipts"))
-        .env(SIM_COMPILE_RECEIPT_PREPARE_ENV, "1")
         .output()
         .expect("receipt test child");
     assert!(
@@ -160,35 +160,14 @@ fn sim_receipt_prepare_releases_session() {
         String::from_utf8_lossy(&child.stdout),
         String::from_utf8_lossy(&child.stderr)
     );
-}
-
-#[test]
-fn sim_receipt_registry_round_trips_v4_entries_and_requires_source_files() {
-    let row = serde_json::json!({
-        "wire_name": "probe",
-        "env": [["MODE", "first"], ["MODE", "second"]],
-        "source_file": "src/probe.rock"
-    });
-    let entries = vec![serde_json::from_value::<RegisteredSim>(row.clone()).unwrap()];
-    let encoded = serde_json::to_value(entries).unwrap();
-    assert_eq!(encoded, serde_json::json!([row]));
-    let registry = parse_registry(&encoded).unwrap();
-    assert_eq!(registry.wire_names, ["probe"]);
-    assert_eq!(registry.source_files["probe"], "src/probe.rock");
-    assert_eq!(
-        registry.env_by_wire["probe"],
-        [
-            ("MODE".into(), "first".into()),
-            ("MODE".into(), "second".into())
-        ]
-    );
-
-    let malformed = serde_json::json!([{"wire_name":"probe", "env":[]}]);
+    let registry = std::fs::read(root.path().join("receipts").join(SIM_REGISTRY_FILENAME))
+        .expect("the child writes the sim registry");
+    assert!(serde_json::from_slice::<Vec<RegisteredSim>>(&registry).is_ok());
     assert!(
-        parse_registry(&malformed)
-            .unwrap_err()
-            .to_string()
-            .contains("source file for `probe` is missing or invalid")
+        root.path()
+            .join("receipts")
+            .join(rock_host::project::MAIN_LUA_FILENAME)
+            .is_file()
     );
 }
 
