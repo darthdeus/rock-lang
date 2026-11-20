@@ -83,11 +83,9 @@ pub(crate) fn run_compile_watch_loop(
             log::info!(target: "WATCH", "the stdlib is built in; watching without a stdlib directory");
         }
     }
-    let (tx, rx) = channel::<FileChangeEvent>();
-    let _watcher = FileWatcher::default_for_rock_sources().watch(watch_paths, tx)?;
+    let mut watch = FileWatcher::default_for_rock_sources().watch(watch_paths)?;
     log::info!(target: "WATCH", "{}", watching_msg);
-    for event in rx {
-        on_event(&event);
+    loop {
+        on_event(&watch.wait());
     }
-    Ok(())
 }

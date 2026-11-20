@@ -124,70 +124,27 @@ fn retain_production_changes(
     });
 }
 
-struct StoneWatcher {
-    handle: Option<crate::file_watcher::WatchHandle>,
-    paths: Vec<PathBuf>,
-    inputs: std::collections::HashSet<PathBuf>,
-    extra_files: crate::file_watcher::SharedWatchSet,
-    restart_files: Vec<PathBuf>,
-    tx: std::sync::mpsc::Sender<FileChangeEvent>,
+fn stone_file_watcher(restart_files: Vec<PathBuf>, extra: Vec<(PathBuf, u64)>) -> FileWatcher {
+    FileWatcher::default_for_rock_sources()
+        .with_restart_suffix(PathBuf::from("tmp/restart.txt"))
+        .with_restart_files(restart_files)
+        .with_extensions(["rock", "rs", "c", "h", "toml"].map(String::from).to_vec())
+        .with_extra_files(extra)
 }
 
-impl StoneWatcher {
-    fn new(
-        extra_files: crate::file_watcher::SharedWatchSet,
-        restart_files: Vec<PathBuf>,
-        tx: std::sync::mpsc::Sender<FileChangeEvent>,
-    ) -> Self {
-        Self {
-            handle: None,
-            paths: Vec::new(),
-            inputs: Default::default(),
-            extra_files,
-            restart_files,
-            tx,
-        }
-    }
-
-    fn refresh(
-        &mut self,
-        paths: Vec<PathBuf>,
-        inputs: &std::collections::HashSet<PathBuf>,
-    ) -> Result<()> {
-        if self.handle.is_some() && self.paths == paths && self.inputs == *inputs {
-            return Ok(());
-        }
-        let handle = FileWatcher::default_for_rock_sources()
-            .with_restart_suffix(PathBuf::from("tmp/restart.txt"))
-            .with_restart_files(self.restart_files.clone())
-            .with_extensions(vec![
-                "rock".to_string(),
-                "rs".to_string(),
-                "c".to_string(),
-                "h".to_string(),
-                "toml".to_string(),
-            ])
-            .with_shared_extra_files(self.extra_files.clone())
-            .watch(paths.clone(), self.tx.clone())?;
-        self.handle = Some(handle);
-        self.paths = paths;
-        self.inputs = inputs.clone();
-        Ok(())
-    }
-}
-
-fn watch_all_files<'a>(
-    paths: impl IntoIterator<Item = &'a PathBuf>,
-    tx: &std::sync::mpsc::Sender<FileChangeEvent>,
-) -> Result<Option<crate::file_watcher::WatchHandle>> {
-    let paths: Vec<PathBuf> = paths.into_iter().cloned().collect();
-    if paths.is_empty() {
-        return Ok(None);
-    }
-    let watch = FileWatcher::default_for_rock_sources()
-        .with_all_files()
-        .watch(paths, tx.clone())?;
-    Ok(Some(watch))
+fn all_file_roots(
+    sound: &crate::package::SoundWatchInputs,
+    native: &rock_engine_host::native_libraries::NativeInputs,
+) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = sound
+        .directories
+        .iter()
+        .chain(&native.paths)
+        .cloned()
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 fn declaration_hash(path: &std::path::Path) -> u64 {
@@ -196,20 +153,17 @@ fn declaration_hash(path: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn reseed_comptime_watch(
-    compiler: &crate::game_runtime::GameCompiler,
+fn declared_inputs(
+    compiler: Option<&crate::game_runtime::GameCompiler>,
     sound_paths: &std::collections::HashSet<PathBuf>,
-    watched: &mut std::collections::HashSet<PathBuf>,
-    comptime_watch: &crate::file_watcher::SharedWatchSet,
-) {
-    let mut hashed = compiler.comptime_watch_files_with_hashes();
+) -> Vec<(PathBuf, u64)> {
+    let mut hashed = compiler.map_or_else(Vec::new, |c| c.comptime_watch_files_with_hashes());
     hashed.extend(
         sound_paths
             .iter()
             .map(|path| (path.clone(), declaration_hash(path))),
     );
-    *watched = hashed.iter().map(|(path, _)| path.clone()).collect();
-    comptime_watch.replace_with_hashes(hashed);
+    hashed
 }
 
 fn wait_for_reload_resume(control: &std::path::Path) -> Result<()> {
@@ -270,29 +224,21 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     );
     let mut changed_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
-    let comptime_watch: crate::file_watcher::SharedWatchSet = Default::default();
     let mut sound_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     if let Some(sound_project) = crate::package::sound_project_path_for(path)? {
-        sound_paths.insert(sound_project.clone());
-        let hash = declaration_hash(&sound_project);
-        comptime_watch.insert_with_hash(sound_project, hash);
+        sound_paths.insert(sound_project);
     }
     let mut sound_inputs = crate::package::sound_watch_inputs(path).unwrap_or_else(|error| {
         log::error!(target: "SOUND", "cannot watch sound inputs: {error}; watching the project declaration for repair");
         Default::default()
     });
-    let mut watched: std::collections::HashSet<PathBuf> = sound_paths.clone();
-
     let initial_compilation_success = crate::frame_runtime::beside(
         || build_all_for_game(path),
         || {
             let result = crate::package::prepare_sound_bank(path)
                 .and_then(|_| compiler.compile(&std::collections::HashSet::new(), false));
             Ok(match result {
-                Ok(_) => {
-                    reseed_comptime_watch(&compiler, &sound_paths, &mut watched, &comptime_watch);
-                    true
-                }
+                Ok(_) => true,
                 Err(error) => {
                     log::error!(target: "STONE", "Initial compilation failed: {error}");
                     log::info!(target: "STONE", "watching for changes; game will start when compilation succeeds");
@@ -301,6 +247,13 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
             })
         },
     )?;
+
+    let declared = declared_inputs(
+        initial_compilation_success.then_some(&compiler),
+        &sound_paths,
+    );
+    let mut watched: std::collections::HashSet<PathBuf> =
+        declared.iter().map(|(path, _)| path.clone()).collect();
 
     let mut game_process = if initial_compilation_success {
         Some(start_game_process(&output_path, app_args)?)
@@ -322,19 +275,22 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     let mut native_inputs = rock_engine_host::native_libraries::native_watch_inputs(
         &rock_engine_host::engine_build::game_engine_libs(path)?,
     )?;
-    let mut watch_paths = stone_source_watch_paths(path, &compiler);
-    watch_paths.extend(engine_watch_paths.iter().cloned());
-
-    let (change_tx, change_rx) = channel::<FileChangeEvent>();
+    let source_paths = |compiler: &crate::game_runtime::GameCompiler| {
+        let mut paths = stone_source_watch_paths(path, compiler);
+        paths.extend(engine_watch_paths.iter().cloned());
+        paths
+    };
+    let mut watch_paths = source_paths(&compiler);
 
     let restart_files = vec![
         rock_root.join("tmp/restart.txt"),
         PathBuf::from("tmp/restart.txt"),
     ];
-    let mut sound_watch = watch_all_files(&sound_inputs.directories, &change_tx)?;
-    let mut native_watcher = watch_all_files(&native_inputs.paths, &change_tx)?;
-    let mut watcher = StoneWatcher::new(comptime_watch.clone(), restart_files, change_tx.clone());
-    watcher.refresh(watch_paths, &watched)?;
+    let mut watch = stone_file_watcher(restart_files, declared).watch(Vec::new())?;
+    watch.set_roots(
+        watch_paths.clone(),
+        all_file_roots(&sound_inputs, &native_inputs),
+    )?;
 
     info!("Watching for changes...");
 
@@ -344,13 +300,11 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     let reload_control = output_path.with_file_name("reload.hold");
     loop {
         wait_for_reload_resume(&reload_control)?;
-        let event = match change_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(event) => event,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-        };
+        let event = watch.tick();
+        if event.paths.is_empty() {
+            continue;
+        }
         wait_for_reload_resume(&reload_control)?;
-        let _keep_native_watch = &native_watcher;
         if event.is_restart_trigger {
             info!("Manual restart triggered (tmp/restart.txt detected)");
         }
@@ -390,9 +344,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
         if changes.needs_native_rebuild {
             let rebuilt = (|| -> Result<_> {
                 let libs = rock_engine_host::engine_build::game_engine_libs(path)?;
-                let inputs = rock_engine_host::native_libraries::native_watch_inputs(&libs)?;
-                native_watcher = watch_all_files(&inputs.paths, &change_tx)?;
-                native_inputs = inputs;
+                native_inputs = rock_engine_host::native_libraries::native_watch_inputs(&libs)?;
                 for lib in &libs {
                     rock_engine_host::engine_build::build_optional_engine_lib(lib)?;
                 }
@@ -441,12 +393,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
 
         if sound_dirty {
             match crate::package::sound_watch_inputs(path) {
-                Ok(inputs) => {
-                    if inputs.directories != sound_inputs.directories || sound_watch.is_none() {
-                        sound_watch = watch_all_files(&inputs.directories, &change_tx)?;
-                    }
-                    sound_inputs = inputs;
-                }
+                Ok(inputs) => sound_inputs = inputs,
                 Err(error) => {
                     log::error!(target: "SOUND", "cannot update sound watches: {error}; retaining previous watches")
                 }
@@ -461,6 +408,11 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
                 Err(e) => log::error!(target: "STONE", "Error compiling sound project: {e}"),
             }
         }
+
+        watch.set_roots(
+            watch_paths.clone(),
+            all_file_roots(&sound_inputs, &native_inputs),
+        )?;
 
         // This process still has the previous compiler mapped.
         if compiler_rebuilt {
@@ -480,10 +432,14 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
                     force_game_compile = false;
                     compilation_succeeded = true;
 
-                    reseed_comptime_watch(&compiler, &sound_paths, &mut watched, &comptime_watch);
-                    let mut next_paths = stone_source_watch_paths(path, &compiler);
-                    next_paths.extend(engine_watch_paths.iter().cloned());
-                    watcher.refresh(next_paths, &watched)?;
+                    let declared = declared_inputs(Some(&compiler), &sound_paths);
+                    watched = declared.iter().map(|(path, _)| path.clone()).collect();
+                    watch.set_extra_files(declared);
+                    watch_paths = source_paths(&compiler);
+                    watch.set_roots(
+                        watch_paths.clone(),
+                        all_file_roots(&sound_inputs, &native_inputs),
+                    )?;
                     if !outcome.restart_reasons.is_empty() {
                         info!(
                             "live reload requires a process restart ({})",
@@ -530,8 +486,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
             debug!("Game will hot reload automatically");
         }
     }
-
-    Ok(())
 }
 
 fn build_all_for_game(game_path: &str) -> Result<()> {
@@ -776,15 +730,14 @@ mod tests {
 #[cfg(test)]
 mod watch_reload_tests {
     use super::{
-        StoneChanges, StoneWatcher, categorize_stone_changes, retain_production_changes,
+        StoneChanges, categorize_stone_changes, retain_production_changes, stone_file_watcher,
         stone_source_watch_paths,
     };
-    use crate::FileChangeEvent;
+    use crate::file_watcher::Watch;
     use crate::game_runtime::GameCompiler;
-    use bone_core::prelude::{Duration, Instant};
+    use crate::{FileChangeEvent, FileWatcher};
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::mpsc::{Receiver, channel};
     use test_utils::HANG_BACKSTOP;
 
     fn run_lua(code: &str) -> anyhow::Result<rock_host::lua_runner::LuaRun> {
@@ -865,16 +818,14 @@ mod watch_reload_tests {
             }
         }
 
-        fn watch(&self, restart: Vec<PathBuf>) -> (StoneWatcher, Receiver<FileChangeEvent>) {
-            let (tx, rx) = channel();
-            let mut watcher = StoneWatcher::new(Default::default(), restart, tx);
-            watcher
-                .refresh(
-                    stone_source_watch_paths(self.root.to_str().unwrap(), &self.compiler),
-                    &Default::default(),
-                )
-                .unwrap();
-            (watcher, rx)
+        fn watch(&self, restart: Vec<PathBuf>) -> Watch {
+            stone_file_watcher(restart, Vec::new())
+                .watch(self.source_paths())
+                .unwrap()
+        }
+
+        fn source_paths(&self) -> Vec<PathBuf> {
+            stone_source_watch_paths(self.root.to_str().unwrap(), &self.compiler)
         }
 
         fn retain(&self, changes: &mut HashSet<PathBuf>, inputs: &HashSet<PathBuf>) {
@@ -888,7 +839,7 @@ mod watch_reload_tests {
 
         fn assert_reload(mut self, atomic: bool) {
             let before = std::fs::read_to_string(&self.main).unwrap();
-            let (_watcher, rx) = self.watch(Vec::new());
+            let mut watch = self.watch(Vec::new());
             let text = std::fs::read_to_string(&self.edited)
                 .unwrap()
                 .replace("a + 1", "a + 10");
@@ -899,7 +850,7 @@ mod watch_reload_tests {
             } else {
                 std::fs::write(&self.edited, text).unwrap();
             }
-            let event = receive_path(&rx, &self.edited);
+            let event = receive_path(&mut watch, &self.edited);
             let mut changes = categorize(&event);
             self.retain(&mut changes.changed_paths, &Default::default());
             assert!(
@@ -934,44 +885,14 @@ mod watch_reload_tests {
         }
     }
 
-    fn receive_path(rx: &Receiver<FileChangeEvent>, expected: &PathBuf) -> FileChangeEvent {
-        let deadline = Instant::now() + HANG_BACKSTOP;
-        while let Ok(event) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            if event.paths.contains(expected) {
-                return event;
-            }
-        }
-        panic!("watcher never reported {}", expected.display());
-    }
-
-    // FSEvents can miss a write made shortly after `refresh` returns, and can
-    // deliver the fixture's own setup writes, batched, after the stream starts;
-    // both happen arbitrarily late under load. Rewrite `path` until it is
-    // reported, so the wait covers a lost first write.
-    fn write_until_reported(
-        rx: &Receiver<FileChangeEvent>,
-        path: &PathBuf,
-        text: &str,
-    ) -> FileChangeEvent {
-        let deadline = Instant::now() + HANG_BACKSTOP;
-        while Instant::now() < deadline {
-            std::fs::write(path, text).unwrap();
-            let attempt_end = Instant::now() + Duration::from_millis(1500);
-            while let Ok(event) =
-                rx.recv_timeout(attempt_end.saturating_duration_since(Instant::now()))
-            {
-                if event.paths.contains(path) {
-                    return event;
-                }
-            }
-        }
-        panic!("watcher never reported {}", path.display());
-    }
-
-    fn drain_setup_events(rx: &Receiver<FileChangeEvent>, dir: &std::path::Path) -> PathBuf {
-        let barrier = dir.join("barrier.rock");
-        write_until_reported(rx, &barrier, "fn barrier() {}\n");
-        barrier
+    fn receive_path(watch: &mut Watch, expected: &PathBuf) -> FileChangeEvent {
+        let event = watch.poll().unwrap();
+        assert!(
+            event.paths.contains(expected),
+            "watcher did not report {}: {event:?}",
+            expected.display()
+        );
+        event
     }
 
     #[test]
@@ -997,18 +918,9 @@ mod watch_reload_tests {
         let sim = sims.join("probe.rock");
         std::fs::write(&sim, "fn probe() {}\n").unwrap();
         let before = std::fs::read(&fixture.main).unwrap();
-        let (_watcher, rx) = fixture.watch(Vec::new());
-        let barrier = drain_setup_events(&rx, &sims);
-
-        let event = write_until_reported(&rx, &sim, "fn probe( {\n");
-        let mut changes = categorize(&event);
-        for setup in [
-            &barrier,
-            &fixture.root.join("main.rock"),
-            &fixture.root.join("stick.toml"),
-        ] {
-            changes.changed_paths.remove(setup);
-        }
+        let mut watch = fixture.watch(Vec::new());
+        std::fs::write(&sim, "fn probe( {\n").unwrap();
+        let mut changes = categorize(&watch.poll().unwrap());
         assert_eq!(changes.changed_paths, HashSet::from([sim.clone()]));
         fixture.retain(&mut changes.changed_paths, &Default::default());
         assert!(
@@ -1043,30 +955,20 @@ mod watch_reload_tests {
         let restart_dir = fixture.root.parent().unwrap().join("tmp");
         std::fs::create_dir_all(&restart_dir).unwrap();
         let restart = restart_dir.join("restart.txt");
-        let (_watcher, rx) = fixture.watch(vec![restart.clone()]);
+        let mut watch = fixture.watch(vec![restart.clone()]);
         std::fs::write(&scratch, "fn scratch() {}\n").unwrap();
         std::fs::write(restart_dir.join("unrelated.rock"), "fn unrelated() {}\n").unwrap();
-        // Force create and write into separate batches: both may legitimately
-        // report restart.txt, regardless of how quickly the OS coalesces them.
         std::fs::File::create(&restart).unwrap();
-        let deadline = Instant::now() + HANG_BACKSTOP;
-        let mut event = rx
-            .recv_timeout(HANG_BACKSTOP)
-            .expect("watcher never reported restart");
-        std::fs::write(&restart, "restart").unwrap();
-        loop {
+        for edit in ["", "restart"] {
+            if !edit.is_empty() {
+                std::fs::write(&restart, edit).unwrap();
+            }
+            let event = watch.poll().unwrap();
             assert!(event.is_restart_trigger, "unexpected event: {event:?}");
             assert_eq!(event.paths, HashSet::from([restart.clone()]));
-            let changes = categorize(&event);
-            assert!(changes.changed_paths.is_empty());
-
-            assert!(Instant::now() < deadline, "watcher never became quiet");
-            match rx.recv_timeout(Duration::from_millis(300)) {
-                Ok(next) => event = next,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-                Err(error) => panic!("watcher disconnected: {error}"),
-            }
+            assert!(categorize(&event).changed_paths.is_empty());
         }
+        assert!(watch.poll().unwrap().paths.is_empty());
     }
 
     #[test]
@@ -1086,22 +988,20 @@ mod watch_reload_tests {
         let inputs = crate::package::sound_watch_inputs(root.to_str().unwrap()).unwrap();
         assert!(!inputs.contains(&variants.join("preview.wav")));
         assert!(!inputs.contains(&root.join("main.rock")));
-        let (tx, rx) = channel();
-        let _watch = super::watch_all_files(&inputs.directories, &tx).unwrap();
+        let mut watch = FileWatcher::default_for_rock_sources()
+            .watch(Vec::new())
+            .unwrap();
+        watch
+            .set_roots(Vec::new(), inputs.directories.iter().cloned().collect())
+            .unwrap();
         let added = variants.join("take_new.wav");
         std::fs::write(&added, b"new").unwrap();
         for path in [&added, &removed] {
             if path == &removed {
                 std::fs::remove_file(path).unwrap();
             }
-            let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
-            loop {
-                let event = rx
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .unwrap();
-                if !event.paths.contains(path) {
-                    continue;
-                }
+            {
+                let event = receive_path(&mut watch, path);
                 let changes = categorize_stone_changes(
                     &event,
                     &Default::default(),
@@ -1112,7 +1012,6 @@ mod watch_reload_tests {
                 assert!(changes.sound_dirty);
                 assert!(changes.changed_paths.is_empty());
                 assert!(changes.changed_compiler.is_empty() && changes.changed_libstone.is_empty());
-                break;
             }
         }
     }
@@ -1150,21 +1049,17 @@ mod watch_reload_tests {
             package.join("tmp/incremental.lua"),
         );
         compiler.compile(&HashSet::new(), false).unwrap();
-        let extra: crate::file_watcher::SharedWatchSet = Default::default();
         let declared = compiler.comptime_watch_files_with_hashes();
-        extra.replace_with_hashes(declared.clone());
         let mut watched: HashSet<PathBuf> = declared.iter().map(|(path, _)| path.clone()).collect();
         assert!(watched.contains(&input));
-        let (tx, rx) = channel();
-        let mut watcher = StoneWatcher::new(extra.clone(), Vec::new(), tx);
-        watcher
-            .refresh(
-                stone_source_watch_paths(source_root.to_str().unwrap(), &compiler),
-                &watched,
-            )
+        let source_paths = |compiler: &GameCompiler| {
+            stone_source_watch_paths(source_root.to_str().unwrap(), compiler)
+        };
+        let mut watch = stone_file_watcher(Vec::new(), declared)
+            .watch(source_paths(&compiler))
             .unwrap();
         std::fs::write(package.join("data/unrelated.rock"), "fn unrelated() {}\n").unwrap();
-        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+        assert!(watch.poll().unwrap().paths.is_empty());
 
         for (text, atomic) in [("watch-direct", false), ("watch-atomic", true)] {
             if atomic {
@@ -1174,7 +1069,7 @@ mod watch_reload_tests {
             } else {
                 std::fs::write(&input, text).unwrap();
             }
-            let event = receive_path(&rx, &input);
+            let event = receive_path(&mut watch, &input);
             let changes = categorize_stone_changes(
                 &event,
                 &Default::default(),
@@ -1195,7 +1090,7 @@ mod watch_reload_tests {
             "@nomangle fn banner() -> string { embed_string(\"other/value.txt\") }\n",
         )
         .unwrap();
-        let event = receive_path(&rx, &source);
+        let event = receive_path(&mut watch, &source);
         let changes = categorize_stone_changes(
             &event,
             &Default::default(),
@@ -1206,31 +1101,22 @@ mod watch_reload_tests {
         compiler.compile(&changes.changed_paths, false).unwrap();
         compiler.canonicalize_for_restart().unwrap();
         let declared = compiler.comptime_watch_files_with_hashes();
-        extra.replace_with_hashes(declared.clone());
         watched = declared.iter().map(|(path, _)| path.clone()).collect();
         assert!(!watched.contains(&input));
         assert!(watched.contains(&next_input));
-        watcher
-            .refresh(
-                stone_source_watch_paths(source_root.to_str().unwrap(), &compiler),
-                &watched,
-            )
+        watch.set_extra_files(declared);
+        watch
+            .set_roots(source_paths(&compiler), Vec::new())
             .unwrap();
-        rx.try_iter().for_each(drop);
+        watch.poll().unwrap();
         std::fs::write(&input, "unused input").unwrap();
-        let deadline = Instant::now() + Duration::from_millis(300);
-        loop {
-            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(event) => assert!(
-                    !event.paths.contains(&input),
-                    "unwatched input reported: {event:?}"
-                ),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-                Err(error) => panic!("watcher disconnected: {error}"),
-            }
-        }
+        let event = watch.poll().unwrap();
+        assert!(
+            !event.paths.contains(&input),
+            "unwatched input reported: {event:?}"
+        );
         std::fs::write(&next_input, "watch-refreshed").unwrap();
-        let event = receive_path(&rx, &next_input);
+        let event = receive_path(&mut watch, &next_input);
         let changes = categorize_stone_changes(
             &event,
             &Default::default(),
@@ -1262,25 +1148,20 @@ mod watch_reload_tests {
         .unwrap();
         let source = helper.join("lib.rock");
         std::fs::write(&source, "@nomangle fn library_banner() -> int { 7 }\n").unwrap();
-        let (mut watcher, rx) = fixture.watch(Vec::new());
+        let mut watch = fixture.watch(Vec::new());
         let manifest = fixture.root.join("stick.toml");
         std::fs::write(&manifest, "[package]\nname = \"watch-game\"\n[dependencies]\nhelper = { path = \"../new-helper\" }\n").unwrap();
-        let event = receive_path(&rx, &manifest);
+        let event = receive_path(&mut watch, &manifest);
         let changes = categorize(&event);
         fixture
             .compiler
             .compile(&changes.changed_paths, false)
             .unwrap();
         fixture.compiler.canonicalize_for_restart().unwrap();
-        watcher
-            .refresh(
-                stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler),
-                &Default::default(),
-            )
-            .unwrap();
+        watch.set_roots(fixture.source_paths(), Vec::new()).unwrap();
         let before = std::fs::read_to_string(&fixture.main).unwrap();
         std::fs::write(&source, "@nomangle fn library_banner() -> int { 8 }\n").unwrap();
-        let event = receive_path(&rx, &source);
+        let event = receive_path(&mut watch, &source);
         let changes = categorize(&event);
         let outcome = fixture
             .compiler

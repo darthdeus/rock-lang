@@ -1,58 +1,16 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 
-pub(crate) use state::WatchHandle;
-
-fn is_tmp_scratch_file(path: &Path, roots: &[PathBuf]) -> bool {
-    match roots.iter().find_map(|r| path.strip_prefix(r).ok()) {
-        Some(rel) => rel
-            .components()
-            .any(|c| c.as_os_str().to_str() == Some("tmp")),
-        None => false,
-    }
-}
+pub(crate) use state::Watch;
 
 pub struct FileWatcher {
     debounce_ms: u64,
     restart_suffix: Option<PathBuf>,
     restart_files: Vec<PathBuf>,
     watch_extensions: Vec<String>,
-    watch_all_files: bool,
-    extra_files: Option<SharedWatchSet>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SharedWatchSet {
-    paths: std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>,
-    compiled: std::sync::Arc<parking_lot::Mutex<HashMap<PathBuf, u64>>>,
-}
-
-impl SharedWatchSet {
-    fn paths(&self) -> parking_lot::MutexGuard<'_, HashSet<PathBuf>> {
-        self.paths.lock()
-    }
-    pub(crate) fn set_compiled_hash(&self, path: PathBuf, hash: u64) {
-        self.compiled.lock().insert(path, hash);
-    }
-    pub(crate) fn compiled_hash(&self, path: &Path) -> Option<u64> {
-        self.compiled.lock().get(path).copied()
-    }
-    pub(crate) fn insert_with_hash(&self, path: PathBuf, hash: u64) {
-        self.paths().insert(path.clone());
-        self.set_compiled_hash(path, hash);
-    }
-    pub(crate) fn replace_with_hashes(&self, files: Vec<(PathBuf, u64)>) {
-        let mut paths = self.paths();
-        let mut compiled = self.compiled.lock();
-        paths.clear();
-        compiled.clear();
-        for (path, hash) in files {
-            paths.insert(path.clone());
-            compiled.insert(path, hash);
-        }
-    }
+    /// Declared inputs, with the hash of the text the last compile saw.
+    extra_files: HashMap<PathBuf, Option<u64>>,
 }
 
 impl FileWatcher {
@@ -76,8 +34,7 @@ impl FileWatcher {
             restart_suffix: None,
             restart_files: Vec::new(),
             watch_extensions: vec!["rock".to_string()],
-            watch_all_files: false,
-            extra_files: None,
+            extra_files: HashMap::new(),
         }
     }
 
@@ -103,38 +60,15 @@ impl FileWatcher {
         self
     }
 
-    pub(crate) fn with_all_files(mut self) -> Self {
-        self.watch_all_files = true;
+    pub(crate) fn with_extra_files(mut self, files: Vec<(PathBuf, u64)>) -> Self {
+        self.extra_files = files.into_iter().map(|(p, h)| (p, Some(h))).collect();
         self
     }
 
-    pub(crate) fn with_shared_extra_files(mut self, files: SharedWatchSet) -> Self {
-        self.extra_files = Some(files);
-        self
-    }
-
-    pub fn watch(
-        self,
-        paths: Vec<PathBuf>,
-        change_tx: Sender<FileChangeEvent>,
-    ) -> Result<WatchHandle> {
-        state::start(self, paths, change_tx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shared_watch_set_survives_a_writer_panic() {
-        let set: SharedWatchSet = Default::default();
-        let writer = set.clone();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            writer.paths().insert(PathBuf::from("held"));
-            panic!("poison probe");
-        }));
-        assert!(set.paths().contains(&PathBuf::from("held")));
+    /// Observes `paths` now; later edits are reported by [`Watch::poll`].
+    pub(crate) fn watch(mut self, paths: Vec<PathBuf>) -> Result<Watch> {
+        self.restart_files = state::canonical_paths(std::mem::take(&mut self.restart_files))?;
+        Watch::new(self, state::canonical_paths(paths)?)
     }
 }
 
@@ -146,7 +80,6 @@ mod state {
     use std::collections::HashMap;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
-    use std::sync::mpsc::{RecvTimeoutError, channel};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[derive(Clone, PartialEq, Eq)]
@@ -239,29 +172,129 @@ mod state {
         children: Vec<PathBuf>,
         verified_at: SystemTime,
     }
-    struct Observation {
+    pub(crate) struct Watch {
         config: FileWatcher,
         roots: Vec<PathBuf>,
+        /// Roots whose every file is watched, whatever its extension.
+        all_file_roots: Vec<PathBuf>,
+        pending: Option<FileChangeEvent>,
         directories: HashMap<PathBuf, Directory>,
         files: HashMap<PathBuf, FileState>,
         started: SystemTime,
         #[cfg(test)]
         directory_reads: u64,
     }
-    impl Observation {
+    pub(crate) fn canonical_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        paths.into_iter().map(canonical).collect()
+    }
+    fn canonical(path: PathBuf) -> Result<PathBuf> {
+        let absolute = std::path::absolute(&path)
+            .map_err(|error| path_error(error, "resolve watch path", &path))?;
+        let existing = absolute
+            .ancestors()
+            .find(|ancestor| ancestor.exists())
+            .ok_or_else(|| {
+                anyhow::anyhow!("no ancestor of watch path {} exists", path.display())
+            })?;
+        let rest = absolute
+            .strip_prefix(existing)
+            .expect("an ancestor prefixes its descendant");
+        let mut resolved = existing
+            .canonicalize()
+            .map_err(|error| path_error(error, "canonicalize watch path", existing))?;
+        // `join("")` would append a separator, turning a file into a directory path.
+        resolved.extend(rest.components());
+        Ok(resolved)
+    }
+    impl Watch {
+        pub(super) fn new(config: FileWatcher, roots: Vec<PathBuf>) -> Result<Self> {
+            let mut watch = Watch {
+                config,
+                roots,
+                all_file_roots: Vec::new(),
+                pending: None,
+                directories: HashMap::new(),
+                files: HashMap::new(),
+                started: SystemTime::now(),
+                #[cfg(test)]
+                directory_reads: 0,
+            };
+            watch.scan(true)?;
+            Ok(watch)
+        }
+        /// Changes since the last poll.
+        pub(crate) fn poll(&mut self) -> Result<FileChangeEvent> {
+            let mut event = self.scan(false)?;
+            if let Some(pending) = self.pending.take() {
+                event.paths.extend(pending.paths);
+                event.is_restart_trigger |= pending.is_restart_trigger;
+            }
+            Ok(event)
+        }
+        /// Waits one poll interval, then polls; a failed scan is logged and
+        /// reports no change.
+        pub(crate) fn tick(&mut self) -> FileChangeEvent {
+            std::thread::sleep(Duration::from_millis(self.config.debounce_ms.max(1)));
+            self.poll().unwrap_or_else(|error| {
+                log::error!(target: "WATCH", "file watcher scan failed: {error:#}");
+                FileChangeEvent {
+                    paths: HashSet::new(),
+                    is_restart_trigger: false,
+                }
+            })
+        }
+        pub(crate) fn wait(&mut self) -> FileChangeEvent {
+            loop {
+                let event = self.tick();
+                if !event.paths.is_empty() {
+                    return event;
+                }
+            }
+        }
+        /// Edits under the old roots stay pending; files that only the new
+        /// roots reach are observed without being reported.
+        pub(crate) fn set_roots(
+            &mut self,
+            roots: Vec<PathBuf>,
+            all_file_roots: Vec<PathBuf>,
+        ) -> Result<()> {
+            let roots = canonical_paths(roots)?;
+            let all_file_roots = canonical_paths(all_file_roots)?;
+            if roots == self.roots && all_file_roots == self.all_file_roots {
+                return Ok(());
+            }
+            self.pending = Some(self.poll()?);
+            self.roots = roots;
+            self.all_file_roots = all_file_roots;
+            self.scan(true)?;
+            Ok(())
+        }
+        pub(crate) fn set_extra_files(&mut self, files: Vec<(PathBuf, u64)>) {
+            self.config.extra_files = files.into_iter().map(|(p, h)| (p, Some(h))).collect();
+        }
+        fn scratch(&self, path: &Path) -> bool {
+            self.roots
+                .iter()
+                .chain(&self.all_file_roots)
+                .filter_map(|root| path.strip_prefix(root).ok())
+                .min_by_key(|rel| rel.components().count())
+                .is_some_and(|rel| {
+                    rel.components()
+                        .any(|c| c.as_os_str().to_str() == Some("tmp"))
+                })
+        }
         fn admitted(&self, path: &Path) -> bool {
-            if (!self.restart(path) && is_tmp_scratch_file(path, &self.roots))
+            if (!self.restart(path) && self.scratch(path))
                 || path.as_os_str().to_string_lossy().ends_with('~')
             {
                 return false;
             }
             self.restart(path)
-                || self.config.watch_all_files
                 || self
-                    .config
-                    .extra_files
-                    .as_ref()
-                    .is_some_and(|extra| extra.paths().contains(path))
+                    .all_file_roots
+                    .iter()
+                    .any(|root| path.starts_with(root))
+                || self.config.extra_files.contains_key(path)
                 || path
                     .extension()
                     .and_then(|ext| ext.to_str())
@@ -277,7 +310,7 @@ mod state {
                 || self.config.matches_restart_suffix(path)
         }
         fn descend(&self, path: &Path) -> bool {
-            !is_tmp_scratch_file(path, &self.roots)
+            !self.scratch(path)
                 && !path
                     .file_name()
                     .is_some_and(|name| name == ".git" || name == "target")
@@ -375,7 +408,13 @@ mod state {
             let now = SystemTime::now();
             let mut candidates = HashSet::new();
             let mut visited = HashSet::new();
-            for root in self.roots.clone() {
+            let roots: Vec<PathBuf> = self
+                .roots
+                .iter()
+                .chain(&self.all_file_roots)
+                .cloned()
+                .collect();
+            for root in roots {
                 match std::fs::metadata(&root) {
                     Ok(meta) if meta.is_dir() => self.collect(
                         &root,
@@ -393,10 +432,13 @@ mod state {
                 }
             }
             self.directories.retain(|path, _| visited.contains(path));
-            if let Some(extra) = &self.config.extra_files {
-                let inputs = extra.paths().clone();
-                candidates.extend(inputs.into_iter().filter(|path| self.admitted(path)));
-            }
+            candidates.extend(
+                self.config
+                    .extra_files
+                    .keys()
+                    .filter(|path| self.admitted(path))
+                    .cloned(),
+            );
             candidates.extend(
                 self.config
                     .restart_files
@@ -459,30 +501,21 @@ mod state {
                         && UNIX_EPOCH
                             + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32)
                             > self.started;
-                    let declared = self
-                        .config
-                        .extra_files
-                        .as_ref()
-                        .is_some_and(|extra| extra.paths().contains(path));
                     let declared_seed = old.is_none()
-                        && declared
-                        && match self
-                            .config
-                            .extra_files
-                            .as_ref()
-                            .and_then(|extra| extra.compiled_hash(path))
-                        {
-                            Some(compiled) => match std::fs::read_to_string(path)
+                        && match self.config.extra_files.get(path) {
+                            None => false,
+                            Some(None) => !changed_after_start,
+                            Some(Some(compiled)) => match std::fs::read_to_string(path)
                                 .map(|text| skull_mir::mir::comptime_value_hash(&text))
                             {
-                                Ok(current) => current == compiled,
+                                Ok(current) => current == *compiled,
                                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                                     continue;
                                 }
                                 Err(_) => false,
                             },
-                            None => !changed_after_start,
                         };
+
                     !declared_seed
                 };
                 updates.push((
@@ -510,109 +543,11 @@ mod state {
             Ok(event)
         }
     }
-    pub struct WatchHandle {
-        stop: Sender<()>,
-        thread: Option<std::thread::JoinHandle<()>>,
-    }
-    impl Drop for WatchHandle {
-        fn drop(&mut self) {
-            if self.stop.send(()).is_err() {
-                log::debug!(target: "WATCH", "file watcher worker already stopped");
-            }
-            if self
-                .thread
-                .take()
-                .is_some_and(|thread| thread.join().is_err())
-            {
-                log::error!(target: "WATCH", "file watcher worker panicked");
-            }
-        }
-    }
-    pub fn start(
-        mut config: FileWatcher,
-        paths: Vec<PathBuf>,
-        change_tx: Sender<FileChangeEvent>,
-    ) -> Result<WatchHandle> {
-        let canonical = |path: PathBuf| -> Result<PathBuf> {
-            let absolute = std::path::absolute(&path)
-                .map_err(|error| path_error(error, "resolve watch path", &path))?;
-            let existing = absolute
-                .ancestors()
-                .find(|ancestor| ancestor.exists())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("no ancestor of watch path {} exists", path.display())
-                })?;
-            let rest = absolute
-                .strip_prefix(existing)
-                .expect("an ancestor prefixes its descendant");
-            let mut resolved = existing
-                .canonicalize()
-                .map_err(|error| path_error(error, "canonicalize watch path", existing))?;
-            // `join("")` would append a separator, turning a file into a directory path.
-            resolved.extend(rest.components());
-            Ok(resolved)
-        };
-        let roots = paths
-            .into_iter()
-            .map(canonical)
-            .collect::<Result<Vec<_>>>()?;
-        config.restart_files = config
-            .restart_files
-            .into_iter()
-            .map(canonical)
-            .collect::<Result<Vec<_>>>()?;
-        let interval = Duration::from_millis(config.debounce_ms.max(1));
-        let mut observation = Observation {
-            config,
-            roots,
-            directories: HashMap::new(),
-            files: HashMap::new(),
-            started: SystemTime::now(),
-            #[cfg(test)]
-            directory_reads: 0,
-        };
-        observation.scan(true)?;
-        let (stop, stopped) = channel();
-        let thread = std::thread::Builder::new()
-            .name("rock file state watcher".into())
-            .spawn(move || {
-                loop {
-                    match stopped.recv_timeout(interval) {
-                        Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                        Err(RecvTimeoutError::Timeout) => {}
-                    }
-                    match observation.scan(false) {
-                        Ok(event) if !event.paths.is_empty() => {
-                            if change_tx.send(event).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            log::error!(target: "WATCH", "file watcher scan failed: {error:#}")
-                        }
-                    }
-                }
-            })?;
-        Ok(WatchHandle {
-            stop,
-            thread: Some(thread),
-        })
-    }
     #[cfg(all(test, unix))]
     mod tests {
         use super::*;
-        fn observation(root: PathBuf, config: FileWatcher) -> Observation {
-            let mut observation = Observation {
-                config,
-                roots: vec![root],
-                directories: HashMap::new(),
-                files: HashMap::new(),
-                started: SystemTime::now(),
-                directory_reads: 0,
-            };
-            observation.scan(true).unwrap();
-            observation
+        fn observation(root: PathBuf, config: FileWatcher) -> Watch {
+            Watch::new(config, vec![root]).unwrap()
         }
         fn stamp_ctime(stamp: &Stamp) -> SystemTime {
             UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32)
@@ -651,10 +586,8 @@ mod state {
             std::fs::write(&source, "before").unwrap();
             std::fs::write(root.join("stick.toml"), "manifest seed").unwrap();
             std::fs::write(&input, "input seed").unwrap();
-            let extra: SharedWatchSet = Default::default();
             let config = FileWatcher {
                 watch_extensions: vec!["rock".into(), "toml".into()],
-                extra_files: Some(extra.clone()),
                 ..FileWatcher::new()
             };
             let mut observation = observation(root, config);
@@ -664,7 +597,7 @@ mod state {
                 observation.scan(false).unwrap().paths,
                 HashSet::from([source])
             );
-            extra.paths().insert(input.clone());
+            observation.config.extra_files.insert(input.clone(), None);
             assert!(
                 observation.scan(false).unwrap().paths.is_empty(),
                 "declaring an unchanged input must not manufacture a reload"
@@ -680,7 +613,7 @@ mod state {
             observation.started = UNIX_EPOCH
                 + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32)
                 - Duration::from_nanos(1);
-            extra.paths().insert(pending.clone());
+            observation.config.extra_files.insert(pending.clone(), None);
             assert_eq!(
                 observation.scan(false).unwrap().paths,
                 HashSet::from([pending])
@@ -827,19 +760,15 @@ mod state {
             let restart = root.join("sdk/tmp/restart.txt");
             let manifest = root.join("Cargo.lock");
             std::fs::write(&manifest, "").unwrap();
-            let (tx, rx) = channel();
-            let _handle = start(
-                FileWatcher {
-                    restart_files: vec![restart.clone()],
-                    ..FileWatcher::new()
-                },
-                vec![root.join("game"), manifest],
-                tx,
-            )
+            let mut watch = FileWatcher {
+                restart_files: vec![restart.clone()],
+                ..FileWatcher::new()
+            }
+            .watch(vec![root.join("game"), manifest])
             .unwrap();
             std::fs::create_dir_all(restart.parent().unwrap()).unwrap();
             std::fs::write(&restart, "trigger").unwrap();
-            let event = rx.recv_timeout(test_utils::HANG_BACKSTOP).unwrap();
+            let event = watch.poll().unwrap();
             assert_eq!(event.paths, HashSet::from([restart]));
             assert!(event.is_restart_trigger);
         }
@@ -876,13 +805,10 @@ mod state {
             std::fs::write(external.path().join("data.txt"), "before").unwrap();
             std::os::unix::fs::symlink(external.path(), root.join("linked")).unwrap();
             std::os::unix::fs::symlink(&root, external.path().join("cycle")).unwrap();
-            let mut observation = observation(
-                root.clone(),
-                FileWatcher {
-                    watch_all_files: true,
-                    ..FileWatcher::new()
-                },
-            );
+            let mut observation = observation(root.clone(), FileWatcher::new());
+            observation
+                .set_roots(Vec::new(), vec![root.clone()])
+                .unwrap();
             std::fs::write(external.path().join("data.txt"), "after").unwrap();
             assert_eq!(
                 observation.scan(false).unwrap().paths,
@@ -937,16 +863,11 @@ mod state {
             std::fs::write(&input, "seedseed").unwrap();
             let compiled =
                 skull_mir::mir::comptime_value_hash(&std::fs::read_to_string(&input).unwrap());
-            let extra: SharedWatchSet = Default::default();
-            let config = FileWatcher {
-                extra_files: Some(extra.clone()),
-                ..FileWatcher::new()
-            };
-            let mut observation = observation(root.clone(), config);
+            let mut observation = observation(root.clone(), FileWatcher::new());
             std::fs::write(&input, "edited!!").unwrap();
             let stamp = Stamp::read(&input).unwrap();
             observation.started = stamp_ctime(&stamp);
-            extra.insert_with_hash(input.clone(), compiled);
+            observation.set_extra_files(vec![(input.clone(), compiled)]);
             assert_eq!(
                 observation.scan(false).unwrap().paths,
                 HashSet::from([input])
