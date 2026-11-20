@@ -411,77 +411,75 @@ fn parse_string_value(p: JsonParser) -> JsonValue {
 fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (string?, int) {
     let pos = at
     let len = src.len()
-    if src.unit_at(pos) != 34 {
-        return (null, pos)
-    }
-    pos = pos + 1
+    if src.unit_at(pos) != 34 { return (null, pos) }
+    pos += 1
 
-    // `parts` stays null until the literal carries an escape, so escape-free
-    // strings return one substring without allocating the array or the join.
-    let body_start = pos
     let segment_start = pos
-    let parts: [string]? = null
+    let first_end = pos
+    let first_escape: string? = null
+    let parts: StringBuilder? = null
     while pos < len {
         let b = src.unit_at(pos)
         if b == 34 {
             if !materialize { return ("", pos + 1) }
-            if parts == null {
-                let plain = src.substring(body_start, pos)
-                pos = pos + 1
-                return (plain, pos)
+            let tail = src.substring(segment_start, pos)
+            if parts != null {
+                sb_push(parts, tail)
+                return (sb_build(parts), pos + 1)
             }
-            if pos > segment_start { parts.push(src.substring(segment_start, pos)) }
-            pos = pos + 1
-            return (join(parts, ""), pos)
+            if first_escape == null { return (tail, pos + 1) }
+            return (src.substring(at + 1, first_end) + first_escape + tail, pos + 1)
         }
         if b == 92 {
-            if materialize && parts == null {
-                let fresh: [string] = []
-                if pos > body_start { fresh.push(src.substring(body_start, pos)) }
-                parts = fresh
-            } else if parts != null && pos > segment_start {
-                parts.push(src.substring(segment_start, pos))
-            }
-            pos = pos + 1
-            if pos >= len {
-                return (null, pos)
-            }
+            let segment_end = pos
+            pos += 1
+            if pos >= len { return (null, pos) }
             let esc = src.unit_at(pos)
-            pos = pos + 1
-            if esc == 34 { if materialize { parts.unwrap().push("\"") } }
-            else if esc == 92 { if materialize { parts.unwrap().push("\\") } }
-            else if esc == 47 { if materialize { parts.unwrap().push("/") } }
-            else if esc == 110 { if materialize { parts.unwrap().push("\n") } }
-            else if esc == 114 { if materialize { parts.unwrap().push("\r") } }
-            else if esc == 116 { if materialize { parts.unwrap().push("\t") } }
-            else if esc == 98 { if materialize { parts.unwrap().push(string_char(8)) } }
-            else if esc == 102 { if materialize { parts.unwrap().push(string_char(12)) } }
-            else if esc == 117 {
-                if pos + 4 > len {
-                    return (null, pos)
-                }
-                let hi = parse_hex4_at(src, pos)
-                pos = pos + 4
-                if hi == null {
-                    return (null, pos)
-                }
-                let cp = hi
-                if cp >= 0xD800 && cp <= 0xDBFF {
-                    if pos + 6 > len || src.unit_at(pos) != 92 || src.unit_at(pos + 1) != 117 {
+            pos += 1
+            let text = match esc {
+                34 => "\"",
+                92 => "\\",
+                47 => "/",
+                110 => "\n",
+                114 => "\r",
+                116 => "\t",
+                98 => "\u{8}",
+                102 => "\u{c}",
+                117 => {
+                    if pos + 4 > len { return (null, pos) }
+                    let cp = parse_hex4_at(src, pos) ?? return (null, pos + 4)
+                    pos += 4
+                    if cp >= 0xD800 && cp <= 0xDBFF {
+                        if pos + 6 > len || src.unit_at(pos) != 92 || src.unit_at(pos + 1) != 117 {
+                            return (null, pos)
+                        }
+                        let lo = parse_hex4_at(src, pos + 2) ?? return (null, pos)
+                        if lo < 0xDC00 || lo > 0xDFFF { return (null, pos) }
+                        pos += 6
+                        cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
+                    } else if cp >= 0xDC00 && cp <= 0xDFFF {
                         return (null, pos)
                     }
-                    let lo = parse_hex4_at(src, pos + 2)
-                    if lo == null || lo < 0xDC00 || lo > 0xDFFF {
-                        return (null, pos)
-                    }
-                    pos = pos + 6
-                    cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
-                } else if cp >= 0xDC00 && cp <= 0xDFFF {
-                    return (null, pos)
+                    if materialize { from_codepoint(cp) } else { "" }
                 }
-                if materialize { parts.unwrap().push(from_codepoint(cp)) }
-            } else {
-                return (null, pos)
+                _ => null,
+            }
+            if text == null { return (null, pos) }
+            if materialize {
+                if first_escape == null {
+                    first_end = segment_end
+                    first_escape = text
+                } else {
+                    let buffer = if parts != null { parts } else {
+                        let fresh = sb_new()
+                        sb_push(fresh, src.substring(at + 1, first_end))
+                        sb_push(fresh, first_escape)
+                        parts = fresh
+                        fresh
+                    }
+                    if segment_end > segment_start { sb_push(buffer, src.substring(segment_start, segment_end)) }
+                    sb_push(buffer, text)
+                }
             }
             segment_start = pos
         } else if b < 32 {
