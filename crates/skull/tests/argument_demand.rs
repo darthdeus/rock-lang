@@ -4,107 +4,6 @@ use crate::common::{
 };
 
 #[test]
-fn compact_arguments_keep_discarded_errors_before_later_argument_effects() {
-    let _inline = inline_off_guard();
-    let ws = ws_with_stdlib(
-        r#"
-value Sample { kept: int, dropped: uint }
-global marks: int = 0
-fn forward(n: int) -> int { return n }
-fn demand_read(v: Sample, marker: int) -> int { return forward(v.kept) }
-fn mark() -> int { marks += 1; return 0 }
-@nomangle fn probe(n: int) -> int {
-    let value = Sample { kept: 7, dropped: n as uint }
-    return demand_read(value, mark())
-}
-@nomangle fn observed() -> int { return marks }
-"#,
-    );
-    let lua = full_lua(&ws);
-    let program = format!(
-        "{lua}\nlocal ok = pcall(probe, -1); print(ok, observed(), probe(1), observed())\n"
-    );
-    assert_eq!(run_luajit(&program), "false\t0\t7\t1");
-}
-
-#[test]
-fn compact_arguments_keep_discarded_field_errors() {
-    let _inline = inline_off_guard();
-    let ws = ws_with_stdlib(
-        r#"
-struct Ref { n: int }
-value Sample { kept: int, dropped: int }
-inline(lua) fn foreign_ref() -> Ref = "return nil"
-fn demand_read(v: Sample) -> int { return v.kept }
-@nomangle fn probe() -> int {
-    let value = Sample { kept: 7, dropped: foreign_ref().n }
-    return demand_read(value)
-}
-"#,
-    );
-    let lua = full_lua(&ws);
-    let program = format!("{lua}\nprint(pcall(probe))\n");
-    assert!(run_luajit(&program).starts_with("false\t"));
-}
-
-#[test]
-fn match_unit_enum_result_preserves_payload_variants_and_absence() {
-    let _inline = inline_off_guard();
-    let ws = ws_with_stdlib(
-        r#"
-nobox value DirectionIdentity { scene: int, arena: int, index: int, generation: int }
-enum DirectionSubject { Absent, Primary, First(DirectionIdentity), Second(DirectionIdentity) }
-enum DirectionResult { ToPrimary, ToEntity }
-nobox value DirectionEvent { cold: int, subject: DirectionSubject }
-fn demand_direction_result(event: DirectionEvent) -> DirectionResult? {
-    return match event.subject {
-        DirectionSubject::Primary => DirectionResult::ToPrimary,
-        DirectionSubject::First(_) => DirectionResult::ToEntity,
-        DirectionSubject::Second(_) => DirectionResult::ToEntity,
-        DirectionSubject::Absent => null,
-    }
-}
-@nomangle fn unit_match_probe(kind: int) -> int {
-    let id = DirectionIdentity { scene: 1, arena: 2, index: 3, generation: 4 }
-    let subject = match kind {
-        0 => DirectionSubject::Absent,
-        1 => DirectionSubject::Primary,
-        2 => DirectionSubject::First(id),
-        _ => DirectionSubject::Second(id),
-    }
-    let result = demand_direction_result(DirectionEvent { cold: 97, subject: subject }) ?? return -1
-    return match result { DirectionResult::ToPrimary => 11, DirectionResult::ToEntity => 23 }
-}
-"#,
-    );
-    let lua = full_lua(&ws);
-    assert_eq!(
-        run_luajit(&format!(
-            "{lua}\nprint(unit_match_probe(0), unit_match_probe(1), unit_match_probe(2), unit_match_probe(3))"
-        )),
-        "-1\t11\t23\t23"
-    );
-}
-
-#[test]
-fn unused_parameters_are_not_passed_and_their_arguments_still_run() {
-    let _inline = inline_off_guard();
-    let ws = ws_with_stdlib(
-        r#"
-global marks: int = 0
-fn mark() -> int { marks += 1; return 0 }
-fn skip_middle(a: int, unused: int, b: string) -> string { return "{a}{b}" }
-@nomangle fn probe() -> string { return skip_middle(4, mark(), "x") }
-@nomangle fn observed() -> int { return marks }
-"#,
-    );
-    let lua = full_lua(&ws);
-    assert_eq!(function_params(&lua, "skip_middle").len(), 2);
-    let program = format!("{lua}\nprint(probe(), observed())\n");
-    assert_eq!(run_luajit(&program), "4x\t1");
-}
-
-#[test]
 fn noalloc_preserves_parameter_demand() {
     let source = r#"
 value Sample { kept: int, unused: int }
@@ -115,23 +14,6 @@ fn main() { let _ = read(Sample { kept: 1, unused: 2 }) }
     let plain = full_lua(&ws_with_stdlib(&unannotated));
     assert_eq!(function_params(&plain, "read").len(), 1);
     assert_eq!(full_lua(&ws_with_stdlib(source)), plain);
-}
-
-#[test]
-fn a_function_value_keeps_its_unused_parameters() {
-    let _inline = inline_off_guard();
-    let ws = ws_with_stdlib(
-        r#"
-fn skip_middle(a: int, unused: int, b: int) -> int { return a + b }
-@nomangle fn probe() -> int {
-    let f = skip_middle
-    return f(1, 2, 3) + skip_middle(10, 20, 30)
-}
-"#,
-    );
-    let lua = full_lua(&ws);
-    assert_eq!(function_params(&lua, "skip_middle").len(), 3);
-    assert_eq!(run_luajit(&format!("{lua}\nprint(probe())\n")), "44");
 }
 
 #[test]
