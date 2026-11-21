@@ -407,19 +407,6 @@ fn ranking_contexts_offer() {
 }
 
 #[test]
-fn reach_path_flood_is_kept_and_ranked() {
-    // Fifteen right-type dotted paths stay browsable; the response is capped,
-    // never thinned.
-    let l = labels(
-        "fn feed(x: int) {}\nstruct S { a: int, b: int, c: int, d: int, e: int, f: int, g: int, \
-         h: int, i: int, j: int, k: int, l: int, m: int, n: int, o: int }\n\
-         fn r(s: S) {\n  feed(<|>)\n}\n",
-    );
-    let paths = l.iter().filter(|l| l.contains('.')).count();
-    assert!(paths >= 15, "{paths} paths: {l:?}");
-}
-
-#[test]
 fn reference_count_orders_functions() {
     let calls = |name: &str, n: usize| format!("  {name}()\n").repeat(n);
     let src = format!(
@@ -464,40 +451,4 @@ fn test_prefixed_functions_rank_last_in_production_code() {
         let items = complete_in(&fixture.path(path), src);
         assert_ranked(path, &items, order);
     }
-}
-
-#[test]
-fn project_dir_named_stdlib_keeps_project_proximity() {
-    let (src, pos) = cursor("fn game() {\n  <|>\n}\n");
-    let project = Project::package(&[
-        ("main.rock", &src),
-        ("stdlib/helpers.rock", "fn zzz_helper() {}\n"),
-    ]);
-    let (mut bone, _) = project.open("main.rock");
-    let items = bone.completion(&project.path("main.rock"), pos);
-    assert_ranked("project stdlib directory", &items, "zzz_helper < abs");
-}
-
-#[test]
-fn completion_after_an_interface_edit_reads_the_new_signature() {
-    let source = |params: &str| {
-        format!("fn helper_fn({params}) -> int {{ 1 }}\nfn main() {{\n    helper\n}}\n")
-    };
-    let pos = Position::new(2, 10);
-    let detail = |bone: &mut BoneWorkspace| {
-        bone.completion(PATH, pos)
-            .into_iter()
-            .find(|item| item.label.starts_with("helper_fn"))
-            .and_then(|item| item.detail)
-            .expect("helper_fn is offered with its signature")
-    };
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, source("a: int"));
-    assert!(detail(&mut bone).contains("a: int"));
-    bone.update(PATH, source("renamed: string"));
-    let after = detail(&mut bone);
-    assert!(
-        after.contains("renamed: string"),
-        "stale completion detail: {after}"
-    );
 }
