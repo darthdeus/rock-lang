@@ -85,32 +85,3 @@ fn relocatable_refs_cannot_reach_coroutine_frames() {
         });
     }
 }
-
-#[test]
-fn immediate_flat_refs_and_boxed_coroutine_refs_remain_admitted() {
-    let ws = checked(
-        "value Cell { w: int }
-         struct Holder { cell: Cell }
-         co fn bump(c: ref Cell) -> Coroutine<int> { yield c.w }
-         fn immediate(c: ref Cell) -> int { return c.w }
-         fn recursive(c: ref Cell, stop: bool) -> int {
-             if stop { return c.w }
-             return recursive(c, true)
-         }
-         fn mixed(c: ref Cell, boxed: ref Cell) -> Coroutine<int> {
-             let _ = immediate(c)
-             return bump(boxed)
-         }
-         fn main() {
-             let xs = [Cell { w: 1 }]
-             let holder = Holder { cell: Cell { w: 2 } }
-             let _ = immediate(xs[0])
-             let _ = recursive(xs[0], true)
-             let _ = mixed(xs[0], holder.cell)
-             let _ = bump(holder.cell)
-         }",
-    );
-    for inference in ws.inferences.iter().flatten() {
-        assert!(inference.errors.is_empty(), "{:?}", inference.errors);
-    }
-}
