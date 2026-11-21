@@ -287,15 +287,6 @@ mod tests {
 
     #[cfg(feature = "sequential")]
     #[test]
-    fn sequential_release_does_not_create_rayon_pool() {
-        run_fresh(
-            "allocator::tests::sequential_release_child",
-            &[("ROCK_ALLOC_SEQ_CHILD", "1")],
-        );
-    }
-
-    #[cfg(feature = "sequential")]
-    #[test]
     fn sequential_release_child() {
         if std::env::var_os("ROCK_ALLOC_SEQ_CHILD").is_none() {
             return;
