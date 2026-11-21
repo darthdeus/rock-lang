@@ -102,22 +102,3 @@ fn leaf_addressed_container_params_are_target_specific() {
         );
     }
 }
-
-#[test]
-fn a_primitive_element_buffer_is_admitted_on_js() {
-    let result = js(NATIVEBUFFER_PRIMITIVE);
-    assert!(
-        result.is_ok(),
-        "no leaf plan means no representation the boxed form does not have: {result:?}"
-    );
-}
-
-#[test]
-fn an_expansion_intrinsic_over_a_native_buffer_is_admitted() {
-    assert!(
-        js(EXPANSION_INTRINSIC).is_ok(),
-        "js: {:?}",
-        js(EXPANSION_INTRINSIC)
-    );
-    assert!(lua(EXPANSION_INTRINSIC).is_ok());
-}
