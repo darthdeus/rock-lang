@@ -35,11 +35,7 @@
 
 use std::time::Duration;
 
-/// Hang backstop for a test that waits on an event, a condition or a child.
-/// A test fails only for a defect or a hang, never because its host is busy:
-/// the wait ends on the event, and this bound only catches a hang on a loaded
-/// host. It sits inside nextest's 15-minute kill for the rock-cli binaries
-/// and the full profile.
+/// A hang backstop, inside nextest's process timeout, for event-driven waits.
 pub const HANG_BACKSTOP: Duration = Duration::from_secs(300);
 
 pub fn extract_annotations(text: &str) -> Vec<((usize, usize), String)> {
@@ -270,18 +266,9 @@ pub fn strip_ansi_sgr(text: &str) -> String {
     ANSI_SGR.replace_all(text, "").into_owned()
 }
 
-/// Create an executable script for a test to spawn, replacing any file at
-/// `path`.
-///
-/// On Linux, exec fails with ETXTBSY while any process holds the file open
-/// for writing. Test binaries spawn from many threads, and a child forked by
-/// another thread inherits every descriptor open at that moment and keeps it
-/// until it reaches exec; O_CLOEXEC closes it no earlier. A script written
-/// with `std::fs::write` in the test process can therefore still be open for
-/// writing in an unrelated child when the test runs it. Here the write
-/// happens in a short-lived `/bin/sh` that has exited before this returns, so
-/// the test process never holds a write descriptor that a fork could copy.
-/// The rename replaces an existing file instead of truncating it in place.
+/// Replace `path` with an executable script. Linux rejects exec with ETXTBSY
+/// while a writer is open. A subprocess writes and exits before return, so
+/// concurrent forks cannot inherit the writer. Rename replaces the file atomically.
 #[cfg(unix)]
 pub fn write_executable(path: &std::path::Path, contents: &str) {
     use std::io::Write;
