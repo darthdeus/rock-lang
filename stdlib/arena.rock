@@ -33,11 +33,7 @@ global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
     live_count: 0, retired_since_compact: 0,
 }
 
-// The registry holds each store erased, since one map spans every row type. An
-// `ArenaStore<T>` is an identity, and identities never coerce to ordinary
-// `any`; this is the Arena's only erasure (`@identity_erasure`).
-// `cast` recovers the type; neither side
-// does anything at runtime.
+// The heterogeneous registry requires identity erasure; casts recover the type.
 @identity_erasure @inline
 fn __arena_store_erased<T>(store: ArenaStore<T>) -> any { return store }
 
@@ -158,19 +154,8 @@ fn __entity_arena<T>(entity: Entity<T>) -> Arena<T> {
     return Arena { _scene_id: entity._scene_id, _arena_id: entity._arena_id }
 }
 
-// Resolved here rather than through `get(__entity_arena(entity), entity)`.
-// The arena that walk builds is the entity's OWN, so `__arena_owns` compares a
-// pair of fields with themselves and `__arena_store`'s cast is already a
-// runtime no-op: four inlined frames whose only job is to be true. Dropping
-// them leaves the two oracles that decide the answer -- the registry lookup
-// and the generation test -- reached from one frame instead of five.
-//
-// It is not spelled this way for elegance. LuaJIT charges a trace two IR
-// constants per distinct global name plus one per inlined function object, and
-// `Entity.get` is inlined into every trace that reads an entity; the four
-// frames cost 12 of the 500-constant budget and one of the 15 tail-call unroll
-// slots there. Text traces reach their glyph loop with both nearly spent
-//
+// Going through the entity's own Arena adds redundant checks and inlined
+// frames, consuming LuaJIT's trace constant and tail-call unroll budgets.
 fn Entity<T>.get(entity) -> T? {
     let boxed = __arena_store_any(entity._scene_id, entity._arena_id) ?? return null
     let store: ArenaStore<T> = cast(boxed)
@@ -198,15 +183,8 @@ fn entity_key<T>(entity: Entity<T>) -> string {
     return "{entity._scene_id}:{entity._arena_id}:{entity._slot}:{entity._generation}"
 }
 
-// Whether `slot` names a live row matching `generation`. The single liveness
-// test every op shares, inlined into every trace that reads a row, so it
-// carries no guard the answer does not need (ledger B2a, ENTITY READ TRACE
-// COST): a vacant slot's complemented generation never equals an issued one, so
-// occupancy needs no load of its own. There is no range check: the columns only
-// grow one slot at a time through `__slot_alloc` and `clear` replaces them, so
-// they hold no element outside `[0, len)` and an out-of-range slot reads as
-// absent (nil), which equals no generation. The three columns always have one
-// length, so a live slot is in range for `data` too.
+// Vacant generations are complemented, and out-of-range reads are nil; neither
+// can match an issued generation. All columns have the same length.
 @inline
 fn arena_slot_live<T>(store: ArenaStore<T>, slot: int, generation: int) -> bool {
     let current: int = cast(__vec_data_get(store.generations, slot))
@@ -349,27 +327,11 @@ fn Arena<T>.random(arena) -> (Entity<T>, T)? {
     return null
 }
 
-// Arena iteration -- two modes, both `Iterator<..>`-conformant so they compose
-// with the combinators + terminals. `values()` yields `T`; `pairs()` yields a
-// `(Entity<T>, T)` tuple ELEMENT (2-tuple `next`, not multi-value -- a bound
-// cannot wrap an unknown-arity splat). Bare `for (e, v) in arena` desugars
-// through `iter(arena)` = pairs mode; the per-iteration pair tuple (and the
-// Entity, when unused) scalarizes away at codegen (tuple SROA,
-// `crates/skull/tests/tuple_scalarize.rs`). Both keep the FETCH-OUTSIDE skip-loop
-// shape (one candidate fetched before the while; the loop body runs only on a
-// dead slot) -- the naive fetch-inside shape blacklists to the interpreter at
-// light fragmentation. entries/len snapshot once per loop (mutation mid-iteration beyond
-//
-// removing the current element is recorded UB).
-//
-// Backing resolves ONCE, at construction: Scene ownership must not put a
-// registry lookup in front of every row. A retired handle yields an iterator
-// over an empty column rather than an error, matching `len() == 0`.
-//
-// Each iterator snapshots only the columns it yields from: `values()` never
-// touches generations, `keys()` never touches data. The `data` snapshot is
-// the store's own row column, so it is an `@identity_storage` edge like
-// `ArenaStore.data`.
+// `pairs()` yields a tuple element: iterator bounds cannot wrap an unknown-arity
+// splat. Fetch outside the skip loop to avoid LuaJIT blacklisting on sparse data.
+// Iterators snapshot backing and length; only removing the current element is
+// supported during iteration. A retired handle yields an empty iterator.
+// The data snapshot aliases the store's row column (`@identity_storage`).
 
 @consume struct ArenaValIter<T> {
     occupied: [bool],
