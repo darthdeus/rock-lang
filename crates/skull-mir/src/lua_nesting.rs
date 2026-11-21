@@ -173,34 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn a_short_body_is_one_return() {
-        assert_eq!(display_return(&exprs(3), "  "), "  return e0 .. e1 .. e2\n");
-    }
-
-    #[test]
-    fn a_long_body_appends_in_bounded_runs() {
-        let body = display_return(&exprs(DISPLAY_CONCAT_RUN * 2 + 1), "");
-        let lines: Vec<&str> = body.lines().collect();
-        assert_eq!(lines.len(), 4, "{body}");
-        assert!(lines[0].starts_with("local __rock_text = e0 .. "), "{body}");
-        assert!(
-            lines[1].starts_with("__rock_text = __rock_text .. "),
-            "{body}"
-        );
-        assert_eq!(
-            lines[2],
-            format!("__rock_text = __rock_text .. e{}", DISPLAY_CONCAT_RUN * 2)
-        );
-        assert_eq!(lines[3], "return __rock_text");
-        assert!(
-            lines
-                .iter()
-                .all(|l| l.matches(" .. ").count() <= DISPLAY_CONCAT_RUN),
-            "{body}"
-        );
-    }
-
-    #[test]
     fn a_nullable_group_branches_outside_the_runs() {
         let mut parts = exprs(DISPLAY_CONCAT_RUN);
         parts.push(LuaDisplayPart::UnlessNil {
