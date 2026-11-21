@@ -86,6 +86,10 @@ fn ui_blit_test_refusal_and_retry() {
         UI_SUBMISSION_PROBE_REFUSAL_HOOK = (_kind, reason) => { refusal = reason; refusals += 1 }
         let draws_before = stone_get_graphics_stats().draw_calls
         let failure = world_fixture_raised(() => { composite_scaled_ui(GpuTarget::Canvas(out)) }, world_fixture_traceback)
+        let expected_log = "[RENDER] submission NOT EXECUTED: viewport 0x8 has no pixels"
+        for record in logged_error_records() {
+            if record == expected_log { assert(take_logged_error(record)) }
+        }
         assert_eq(refusals, 1, "production admission refuses the invalid viewport once")
         assert_eq(executed, 0, "a refusal never reaches a draw")
         assert_eq(stone_get_graphics_stats().draw_calls, draws_before)
