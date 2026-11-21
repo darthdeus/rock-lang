@@ -248,3 +248,7 @@ fn main() {
 fn wrap<T>(x: T) -> [T] { [x] }
 fn takes(p: [bool]) -> int { 5 }
 fn f() -> int { takes(wrap(5)) }
+
+//=== TEST CASE: removed_struct_expand_annotation ===
+//! expect: unknown annotation `@struct_expand`
+@struct_expand fn removed() {}

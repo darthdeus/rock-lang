@@ -138,10 +138,6 @@ cases! { reject_entry:
 
 }
 
-// `pass_uniforms` returns `[(string, <enum>)]` --
-// a CPU-side value, not a GPU-expressible type. The GLSL profile rejects it as
-// non-tier-0 before any expansion, so the intrinsic can never leak into shader
-// source (its `@struct_expand` annotation is inert here).
 #[test]
 fn unconstrained_entry_call_reports_profile_lowering_context() {
     let source = "fn make<T>() -> [T] { return [] } @shader(fragment) fn root(tc: Vec2) -> Vec4 { let xs = make(); let n = xs.len(); return v(n as float, 0.0, 0.0, 1.0) }";

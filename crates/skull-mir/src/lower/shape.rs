@@ -1,7 +1,6 @@
 use super::*;
 
 use bone_core::hir::{BuiltinTy, EnumDef, FnBackend, TyId, TypeCtor, TypeExpr, VariantPayload};
-use bone_core::type_equiv::TyRef;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use ustr::Ustr;
@@ -914,42 +913,6 @@ pub fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
         .collect()
 }
 
-/// `@struct_expand` picks each field's variant structurally (the unique variant
-/// whose single payload type equals the field type), never by an engine name.
-pub(crate) fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
-    let TypeExpr::App {
-        ctor: TypeCtor::Array,
-        params,
-    } = static_ty(ws, ret)?
-    else {
-        return None;
-    };
-    let elem = ret.with_idx(params.into_iter().next()?);
-    let TypeExpr::Tuple { elements } = static_ty(ws, elem)? else {
-        return None;
-    };
-    let mut it = elements.into_iter();
-    let (a, b) = (it.next()?, it.next()?);
-    if it.next().is_some() {
-        return None;
-    }
-    if !matches!(
-        static_ty(ws, elem.with_idx(a))?,
-        TypeExpr::Builtin(BuiltinTy::String)
-    ) {
-        return None;
-    }
-    let TypeExpr::App {
-        ctor: TypeCtor::Nominal(name),
-        ..
-    } = static_ty(ws, elem.with_idx(b))?
-    else {
-        return None;
-    };
-    ws.nominals.enum_id(name)?;
-    Some(name)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VertexExpandRet {
     /// `-> int`: the element stride in floats.
@@ -1190,48 +1153,6 @@ pub(crate) fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(
         return None;
     }
     Some(sd.fields.iter().map(|f| (f.name, f.ty)).collect())
-}
-
-pub(crate) fn variants_for_payload(ws: &Workspace, enum_name: Ustr, want: TyId) -> Vec<Ustr> {
-    let Some(eid) = ws.nominals.enum_id(enum_name) else {
-        return Vec::new();
-    };
-    let ed = &ws.modules[eid.module.index()].enums[eid.def];
-    ed.variants
-        .iter()
-        .filter(|v| match &v.payload {
-            VariantPayload::Tuple(tys) if tys.len() == 1 => {
-                ws.types_equivalent(TyRef::of_static(tys[0]), TyRef::of_static(want))
-            }
-            _ => false,
-        })
-        .map(|v| v.name)
-        .collect()
-}
-
-pub(crate) fn struct_expand_variants(
-    ws: &Workspace,
-    enum_name: Ustr,
-    field_tys: &[(Ustr, TyId)],
-) -> Result<Vec<Ustr>, String> {
-    let mut out = Vec::with_capacity(field_tys.len());
-    for (field, fty) in field_tys {
-        let want = ws.render(None, *fty);
-        match variants_for_payload(ws, enum_name, *fty).as_slice() {
-            [v] => out.push(*v),
-            [] => {
-                return Err(format!(
-                    "field `{field}: {want}` has no variant of `{enum_name}` carrying that payload type"
-                ));
-            }
-            _ => {
-                return Err(format!(
-                    "field `{field}: {want}` matches more than one variant of `{enum_name}` (ambiguous payload type)"
-                ));
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// A flat enum encodes absence in its tag, so only structs gain a presence lane.

@@ -833,7 +833,6 @@ fn is_implementation_anno(name: &str) -> bool {
             | "native_required"
             | "gpu_only"
             | "scalar_abi"
-            | "struct_expand"
             | "shader_expand"
             | "build_var_expand"
             | "embed_expand"

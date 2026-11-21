@@ -729,57 +729,6 @@ impl<'a> Builder<'a> {
         self.pack_maybe_absent_boxed(repr, BoxKind::Explicit)
     }
 
-    pub(crate) fn expand_struct_pairs(
-        &mut self,
-        call: Idx<Expr>,
-        func: FuncRef,
-        arg_idxs: &[Idx<Expr>],
-    ) -> Result<ValueRepr, CompilerError> {
-        let f = &self.ws.module(func.module).functions[func.func];
-        let fname = f.name;
-        let reject = CompilerError::new_with_label;
-        let (arg, enum_name) =
-            struct_pairs_signature(self.ws, self.body.expr_spans[call], f, arg_idxs, false)?;
-        let arg_span = self.body.expr_spans[arg];
-
-        // The argument must be a value struct: its Group's parts are the field values
-        // in declaration order, each lowered exactly once.
-        let repr = self.lower_expr_repr(arg)?.into_value();
-        let ValueRepr::Group {
-            name: struct_name,
-            parts,
-            ..
-        } = repr
-        else {
-            return Err(reject(
-                arg_span,
-                format!("`@struct_expand` fn `{fname}` argument must be a value struct"),
-            ));
-        };
-        let Some(fields) = value_struct_field_tys(self.ws, struct_name) else {
-            return Err(reject(
-                arg_span,
-                format!(
-                    "`@struct_expand` fn `{fname}` argument must be a value struct, got `{struct_name}`"
-                ),
-            ));
-        };
-        // Validation already gated this program, so a failure here is unreachable;
-        // surface it rather than skip.
-        let variants = struct_expand_variants(self.ws, enum_name, &fields)
-            .map_err(|msg| reject(arg_span, format!("`@struct_expand`: {msg}")))?;
-
-        let mut tuples = Vec::with_capacity(fields.len());
-        for (i, ((field, _), variant)) in fields.iter().zip(variants).enumerate() {
-            let variant_v =
-                self.make_single_payload_variant(enum_name, variant, parts[i].clone())?;
-            let key = self.emit_cur(Inst::Const(Lit::Str(*field)));
-            let tup = self.emit_cur(Inst::MakeTuple(vec![key, variant_v]));
-            tuples.push(tup);
-        }
-        Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeVec(tuples))))
-    }
-
     /// Produces only the `"<vert>+<frag>"` pipeline key; the driver emits the
     /// matching `__rock_shader_register`, so skull-mir stays free of GLSL.
     pub(crate) fn expand_shader_pipeline(
@@ -1134,7 +1083,7 @@ impl<'a> Builder<'a> {
         {
             let tag = shape
                 .tag_of(variant)
-                .ok_or_else(|| gap("struct_expand: variant not in cdata enum shape"))?;
+                .ok_or_else(|| gap("variant not in cdata enum shape"))?;
             let tag_inst = self.emit_cur(Inst::Const(Lit::Int(tag)));
             let mut parts = vec![ValueRepr::Scalar(tag_inst)];
             for (nm, c) in &shape.slots {

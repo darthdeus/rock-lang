@@ -1,22 +1,5 @@
 use crate::common::{run_main, try_emit_module};
 
-const STRUCT_VALID: &str = r#"
-enum E { F(float), I(int) }
-value S { x: float }
-
-@struct_expand inline(lua) fn pairs<T>(u: T) -> [(string, E)] = """
-    error("pairs must be compiler-expanded")
-"""
-
-fn wrapped<T>(u: T) -> int {
-    return pairs(u).len()
-}
-
-fn main() {
-    print(wrapped(S { x: 1.0 }))
-}
-"#;
-
 const VERTEX_VALID: &str = r#"
 value V { pos: Vec2f, rot: f32 }
 
@@ -83,28 +66,17 @@ fn main() {
 #[test]
 fn concrete_expansion_uses_reached_generic_instances() {
     for (source, expected) in [
-        (STRUCT_VALID, "1"),
         (VERTEX_VALID, "3"),
         (UNIFORM_VALID, "true\ntrue"),
         (UNIFORM_VALUES_VALID, "true\n6"),
     ] {
         assert_eq!(run_main(&try_emit_module(source).unwrap()), expected);
     }
-    let unreachable = STRUCT_VALID
-        .replace("print(wrapped(S { x: 1.0 }))", "print(1)")
-        .replace("x: float", "flag: bool");
-    assert_eq!(run_main(&try_emit_module(&unreachable).unwrap()), "1");
 }
 
 #[test]
 fn concrete_expansion_preserves_diagnostics() {
     for (source, messages) in [
-        (
-            STRUCT_VALID
-                .replace("x: float", "flag: bool")
-                .replace("x: 1.0", "flag: true"),
-            &["no variant", "flag: bool"] as &[_],
-        ),
         (
             VERTEX_VALID.replace("rot: f32", "id: int"),
             &["integer attribute", "id"],

@@ -1285,15 +1285,10 @@ impl<'a> Builder<'a> {
             }
             // Mangling is codegen's job, not baked into the IR.
             Callee::Unresolved { name, .. } => match self.resolve_funcref(e, name) {
-                // `@struct_expand` is recognized through the intrinsic registry, so no
-                // user fn is hijacked by name.
                 Ok(func) => {
                     let value = match self.fn_expand_kind(func) {
                         Some(ExpandKind::SceneTypeKey) => {
                             self.expand_scene_type_key(e, func, &arg_idxs)
-                        }
-                        Some(ExpandKind::StructPairs) => {
-                            self.expand_struct_pairs(e, func, &arg_idxs)
                         }
                         Some(ExpandKind::Materialize) => self.expand_materialize(e, &arg_idxs),
                         Some(ExpandKind::SortKeyWide) => self.expand_sort_key_wide(&arg_idxs),

@@ -26,7 +26,6 @@ pub enum ExpandKind {
     SceneTypeKey,
     /// Makes a value aggregate's runtime box explicit at this source position.
     Materialize,
-    StructPairs,
     /// The pipeline key const `"<vert>+<frag>"`; the driver emits one top-level
     /// `__rock_shader_register(key, glsl)` per distinct pair.
     ShaderPipeline,
@@ -60,9 +59,6 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
     }
     if has_anno(f, "materialize") {
         return Some(ExpandKind::Materialize);
-    }
-    if has_anno(f, "struct_expand") {
-        return Some(ExpandKind::StructPairs);
     }
     if has_anno(f, "shader_expand") {
         return Some(ExpandKind::ShaderPipeline);

@@ -211,72 +211,6 @@ fn main() {
     let _ = rock_shader(vtx, frg, frg)
 }
 
-//=== TEST CASE: arg_not_value_struct_Generic ===
-//! expect: `@struct_expand` fn `epairs` argument must be a value struct
-enum E { F(float), I(int) }
-
-@struct_expand inline(lua) fn epairs<T>(u: T) -> [(string, E)] = """
-    error("compiler-expanded")
-"""
-
-fn main() {
-    let _ = epairs(3)
-}
-
-//=== TEST CASE: field_type_no_matching_variant_Generic ===
-//! expect: `@struct_expand`: field `flag: bool` has no variant of `E` carrying that payload type
-enum E { F(float), I(int) }
-value S { flag: bool }
-
-@struct_expand inline(lua) fn epairs<T>(u: T) -> [(string, E)] = """
-    error("compiler-expanded")
-"""
-
-fn main() {
-    let _ = epairs(S { flag: true })
-}
-
-//=== TEST CASE: ambiguous_variant_payload_Generic ===
-//! expect: `@struct_expand`: field `x: float` matches more than one variant of `Dup`
-enum Dup { A(float), B(float) }
-value S { x: float }
-
-@struct_expand inline(lua) fn dpairs<T>(u: T) -> [(string, Dup)] = """
-    error("compiler-expanded")
-"""
-
-fn main() {
-    let _ = dpairs(S { x: 1.0 })
-}
-
-//=== TEST CASE: return_type_not_pairs_Generic ===
-//! expect: `@struct_expand` fn `bad` must return `[(string, <enum>)]`, got `int`
-value S { x: float }
-
-@struct_expand inline(lua) fn bad<T>(u: T) -> int = """
-    error("compiler-expanded")
-"""
-
-fn main() {
-    let _ = bad(S { x: 1.0 })
-}
-
-//=== TEST CASE: nominal_field_vs_same_named_generic_payload_Generic ===
-//! expect: `@struct_expand`: field `t: T` has no variant of `E` carrying that payload type
-// `A(T)` carries E's generic parameter, not the struct `T`; the two only
-// render alike.
-value T { x: float }
-enum E<T> { A(T), I(int) }
-value S { t: T, n: int }
-
-@struct_expand inline(lua) fn epairs<P>(u: P) -> [(string, E<float>)] = """
-    error("compiler-expanded")
-"""
-
-fn main() {
-    let _ = epairs(S { t: T { x: 2.5 }, n: 3 })
-}
-
 //=== TEST CASE: intrinsic_declared_with_wrong_arity ===
 // The one-argument fingerprint form returns `int`; a one-argument packer
 // returning unit is malformed.
@@ -365,19 +299,6 @@ value WithId { pos: Vec2, id: int }
 fn main() {
     let xs: FlatVec<WithId> = flat_vec_new()
     let _ = vsizes(xs)
-}
-
-//=== TEST CASE: struct_expand_with_two_parameters ===
-//! expect: `@struct_expand` fn `epairs` takes exactly one argument
-enum E { F(float), I(int) }
-value S { x: float }
-
-@struct_expand inline(lua) fn epairs<T>(u: T, extra: int) -> [(string, E)] = """
-    error("compiler-expanded")
-"""
-
-fn main() {
-    let _ = epairs(S { x: 1.0 }, 2)
 }
 
 //=== TEST CASE: vertex_expand_with_two_parameters ===

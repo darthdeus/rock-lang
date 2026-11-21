@@ -3155,36 +3155,6 @@ pub fn is_shader_pipeline_call(
     })
 }
 
-fn struct_pairs_signature(
-    ws: &Workspace,
-    span: Span,
-    f: &Function,
-    args: &[Idx<Expr>],
-    report_missing_return: bool,
-) -> Result<(Idx<Expr>, Ustr), CompilerError> {
-    let fname = f.name;
-    let [arg] = args else {
-        return Err(CompilerError::new_with_label(
-            span,
-            format!("`@struct_expand` fn `{fname}` takes exactly one argument"),
-        ));
-    };
-    let name = f
-        .return_ty
-        .and_then(|ret| pairs_return_enum(ws, ret))
-        .ok_or_else(|| {
-            let mut msg = format!("`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`");
-            if let Some(ret) = f.return_ty {
-                use std::fmt::Write as _;
-                let _ = write!(msg, ", got `{}`", ws.render(None, ret));
-            } else if report_missing_return {
-                msg.push_str(", got `()`");
-            }
-            CompilerError::new_with_label(span, msg)
-        })?;
-    Ok((*arg, name))
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShaderPair {
     pub key: String,
@@ -3536,7 +3506,6 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
         };
         for (e, f, args, kind) in expansion_calls(ws, body, Some(inf)) {
             let priority = match kind {
-                ExpandKind::StructPairs => 0,
                 ExpandKind::ShaderPipeline => 1,
                 ExpandKind::VertexLayout => 2,
                 ExpandKind::UniformBlock => 3,
@@ -3549,7 +3518,6 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
             let args: Vec<_> = args.into_iter().collect();
             let span = body.expr_spans[e];
             let rejection = match kind {
-                ExpandKind::StructPairs => struct_pairs_signature(ws, span, f, &args, true).err(),
                 ExpandKind::ShaderPipeline => resolve_shader_pair(ws, body, e, &args).err(),
                 ExpandKind::VertexLayout => vertex_expand_signature(ws, span, f, &args).err(),
                 ExpandKind::UniformBlock => uniform_expand_signature(ws, span, f, &args).err(),
