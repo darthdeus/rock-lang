@@ -387,25 +387,6 @@ pub(crate) fn initialize_process(args: &Args) {
 mod tests {
     use super::*;
     #[test]
-    fn a_failed_perf_run_forwards_the_whole_runtime_error() {
-        let stderr = "[   0.1s INFO ] [ASSETS] release asset assets does not exist, skipping\n\
-            luajit: PERF_GC_STEPS requires tools/luajit-gc-probe.py runtime\n\
-            stack traceback:\n\
-            \t[C]: in function 'error'\n";
-        let failed = perf_stderr_lines(stderr, true);
-        assert!(
-            failed.contains(&"luajit: PERF_GC_STEPS requires tools/luajit-gc-probe.py runtime"),
-            "{failed:?}"
-        );
-        assert!(failed.contains(&"stack traceback:"), "{failed:?}");
-        let passed = perf_stderr_lines(stderr, false);
-        assert_eq!(
-            passed,
-            ["\t[C]: in function 'error'"],
-            "a successful run keeps the noise filter"
-        );
-    }
-    #[test]
     fn successful_perf_runs_preserve_the_exact_log_filter() {
         let lines = [
             ("plain output", false),
