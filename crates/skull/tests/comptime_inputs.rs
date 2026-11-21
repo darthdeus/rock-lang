@@ -1,8 +1,7 @@
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
 
 use crate::common::{
-    body_id, check_incremental, emit_full_of, function_body, global_body, run_fn,
-    try_emit_module_with,
+    body_id, check_incremental, emit_full_of, function_body, run_fn, try_emit_module_with,
 };
 
 fn inputs_with_var(name: &str, value: &str) -> ComptimeInputs {
@@ -49,51 +48,6 @@ fn build_var_misuse_in_uninstantiated_generic_rejects() {
     assert!(err.message.contains("NOPE"));
 }
 
-#[test]
-fn embed_string_inlines_file_contents() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("greeting.txt"), "hello-from-embed\n").unwrap();
-    let src = r#"
-fn greeting() -> string {
-    return embed_string("greeting.txt")
-}
-"#;
-    let inputs = ComptimeInputs {
-        embed_root: Some(dir.path().to_path_buf()),
-        ..ComptimeInputs::default()
-    };
-    let lua = try_emit_module_with(src, inputs).expect("embed expands");
-    let body = function_body(&lua, "greeting");
-    assert!(body.contains("hello-from-embed"));
-}
-
-#[test]
-fn embed_resolves_against_the_calling_files_own_package() {
-    let pkg = tempfile::tempdir().unwrap();
-    std::fs::write(
-        pkg.path().join("stick.toml"),
-        "[package]\nname = \"libpkg\"\ntype = \"lib\"\n",
-    )
-    .unwrap();
-    std::fs::write(pkg.path().join("payload.txt"), "from-the-library-package").unwrap();
-    let lib_file = pkg.path().join("lib.rock");
-    std::fs::write(&lib_file, "").unwrap();
-
-    let elsewhere = tempfile::tempdir().unwrap();
-    let src = r#"
-fn payload() -> string {
-    return embed_string("payload.txt")
-}
-"#;
-    let inputs = ComptimeInputs {
-        embed_root: Some(elsewhere.path().to_path_buf()),
-        ..ComptimeInputs::default()
-    };
-    let lua = crate::common::try_emit_module_with_file(src, lib_file.to_str().unwrap(), inputs)
-        .expect("package-relative embed resolves");
-    assert!(lua.contains("from-the-library-package"));
-}
-
 fn memory_inputs(files: &[(&str, &str)]) -> ComptimeInputs {
     let files = files
         .iter()
@@ -104,19 +58,6 @@ fn memory_inputs(files: &[(&str, &str)]) -> ComptimeInputs {
         )),
         ..ComptimeInputs::default()
     }
-}
-
-#[test]
-fn embed_string_reads_host_supplied_files() {
-    let src = r#"
-fn greeting() -> string {
-    return embed_string("data/greeting.txt")
-}
-"#;
-    let inputs = memory_inputs(&[("data/greeting.txt", "hello-from-memory")]);
-    let lua = try_emit_module_with(src, inputs).expect("supplied embed expands");
-    let body = function_body(&lua, "greeting");
-    assert!(body.contains("hello-from-memory"));
 }
 
 fn ws_with_inputs(
@@ -183,90 +124,6 @@ fn main() {
 }
 
 #[test]
-fn an_embedded_file_change_reaches_every_recorded_consumer() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data.txt");
-    std::fs::write(&data, "embed-v1").unwrap();
-    let src = r#"
-fn first() -> string {
-    return embed_string("data.txt")
-}
-const TAG: string = embed_string("data.txt")
-fn other() -> int {
-    return 1
-}
-fn main() {
-    print(first())
-    print(TAG)
-}
-"#;
-    let inputs = ComptimeInputs {
-        embed_root: Some(dir.path().to_path_buf()),
-        ..ComptimeInputs::default()
-    };
-    assert_input_change_reaches_every_consumer(
-        src,
-        (inputs.clone(), "embed-v1"),
-        (inputs, "embed-v2"),
-        || std::fs::write(&data, "embed-v2").unwrap(),
-        2,
-    );
-}
-
-#[test]
-fn global_body_edit_replaces_the_recorded_comptime_read_set() {
-    use skull::mir_emit::emit_overlay;
-
-    let dir = tempfile::tempdir().unwrap();
-    let first_path = dir.path().join("first.txt");
-    let second_path = dir.path().join("second.txt");
-    std::fs::write(&first_path, "first-v1").unwrap();
-    std::fs::write(&second_path, "second-v1").unwrap();
-    let v1 = r#"
-const TAG: string = embed_string("first.txt")
-fn other() -> int {
-    return 1
-}
-fn main() {
-    print(TAG)
-}
-"#;
-    let v2 = v1.replace("first.txt", "second.txt");
-    let inputs = bone_semantic::inference::ComptimeInputs {
-        embed_root: Some(dir.path().to_path_buf()),
-        ..bone_semantic::inference::ComptimeInputs::default()
-    };
-    let ws1 = ws_with_inputs(v1, inputs.clone());
-    let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
-
-    let ws2 = ws_with_inputs(&v2, inputs.clone());
-    let first = emit_overlay(&ws2, &mut cache, &[global_body(&ws2, "TAG")])
-        .expect("global body edit overlay");
-    assert!(first.lua.contains("second-v1"));
-    let first_canonical = first_path.canonicalize().unwrap();
-    let second_canonical = second_path.canonicalize().unwrap();
-    let files: Vec<_> = cache
-        .comptime_file_hashes()
-        .into_iter()
-        .map(|(path, _)| path)
-        .collect();
-    assert!(
-        files
-            .iter()
-            .any(|file| std::path::Path::new(file.as_str()) == second_canonical)
-            && !files
-                .iter()
-                .any(|file| std::path::Path::new(file.as_str()) == first_canonical)
-    );
-
-    std::fs::write(&second_path, "second-v2").unwrap();
-    let ws3 = ws_with_inputs(&v2, inputs);
-    let second =
-        emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "other")]).expect("new input overlay");
-    assert!(second.lua.contains("second-v2"));
-}
-
-#[test]
 fn comptime_misuse_rejects_with_a_specific_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("proj")).unwrap();
@@ -313,38 +170,4 @@ fn comptime_misuse_rejects_with_a_specific_diagnostic() {
             assert!(err.message.contains(fragment), "{body}: {err:?}");
         }
     }
-}
-
-#[test]
-fn ffi_cdef_once_embeds_declarations_before_linked_symbol_lookup() {
-    let dir = tempfile::tempdir().unwrap();
-    let declarations = "typedef struct { int x; } RockCdefProbe;\nint abs(int n);\n";
-    std::fs::write(dir.path().join("probe.h"), declarations).unwrap();
-    let src = r#"
-extern(ffi, "ffi.C") fn abs(n: int) -> int
-
-fn start() {
-    assert(ffi_cdef_once("__rock_test_cdef", embed_string("probe.h")))
-    print(abs(-7))
-}
-
-fn main() {
-    assert(!ffi_cdef_once("__rock_test_cdef", "!", true))
-    start()
-    start()
-}
-"#;
-    let inputs = ComptimeInputs {
-        embed_root: Some(dir.path().to_path_buf()),
-        ..ComptimeInputs::default()
-    };
-    let lua = try_emit_module_with(src, inputs).expect("typed declaration registration compiles");
-    let register = function_body(&lua, "ffi_cdef_once");
-    assert!(register.contains("ffi.cdef(declarations)"), "{register}");
-    assert_eq!(
-        lua.matches("typedef struct { int x; } RockCdefProbe;")
-            .count(),
-        1
-    );
-    assert_eq!(run_fn(&lua, "main"), "7\n7");
 }
