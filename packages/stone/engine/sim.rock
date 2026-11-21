@@ -704,78 +704,58 @@ fn sim_check_expected_error_logs() {
     SIM_EXPECTED_ERROR_LOGS = vec_new()
 }
 
-pub fn _sim_eq_float_impl(actual: float, expected: float, message: string, site: string) {
-    if actual == expected {
+macro sim_compare(ok: expr, actual_text: expr, expected_text: expr, message: expr, site: expr) {
+    if ok {
         sim_emit_ok(message, site)
     } else {
-        sim_emit_fail(message, to_string(actual), to_string(expected), site)
+        sim_emit_fail(message, actual_text, expected_text, site)
     }
+}
+
+pub fn _sim_eq_float_impl(actual: float, expected: float, message: string, site: string) {
+    sim_compare(actual == expected, to_string(actual), to_string(expected), message, site)
 }
 macro sim_eq_float(actual: expr, expected: expr, message: expr) {
     _sim_eq_float_impl(actual, expected, message, __SITE__)
 }
 
 pub fn _sim_eq_int_impl(actual: int, expected: int, message: string, site: string) {
-    if actual == expected {
-        sim_emit_ok(message, site)
-    } else {
-        sim_emit_fail(message, to_string(actual), to_string(expected), site)
-    }
+    sim_compare(actual == expected, to_string(actual), to_string(expected), message, site)
 }
 macro sim_eq_int(actual: expr, expected: expr, message: expr) {
     _sim_eq_int_impl(actual, expected, message, __SITE__)
 }
 
 pub fn _sim_eq_bool_impl(actual: bool, expected: bool, message: string, site: string) {
-    if actual == expected {
-        sim_emit_ok(message, site)
-    } else {
-        sim_emit_fail(message, to_string(actual), to_string(expected), site)
-    }
+    sim_compare(actual == expected, to_string(actual), to_string(expected), message, site)
 }
 macro sim_eq_bool(actual: expr, expected: expr, message: expr) {
     _sim_eq_bool_impl(actual, expected, message, __SITE__)
 }
 
 pub fn _sim_eq_str_impl(actual: string, expected: string, message: string, site: string) {
-    if actual == expected {
-        sim_emit_ok(message, site)
-    } else {
-        sim_emit_fail(message, actual, expected, site)
-    }
+    sim_compare(actual == expected, actual, expected, message, site)
 }
 macro sim_eq_str(actual: expr, expected: expr, message: expr) {
     _sim_eq_str_impl(actual, expected, message, __SITE__)
 }
 
 pub fn _sim_gt_float_impl(actual: float, threshold: float, message: string, site: string) {
-    if actual > threshold {
-        sim_emit_ok(message, site)
-    } else {
-        sim_emit_fail(message, to_string(actual), "> " + to_string(threshold), site)
-    }
+    sim_compare(actual > threshold, to_string(actual), "> " + to_string(threshold), message, site)
 }
 macro sim_gt_float(actual: expr, threshold: expr, message: expr) {
     _sim_gt_float_impl(actual, threshold, message, __SITE__)
 }
 
 pub fn _sim_lt_float_impl(actual: float, threshold: float, message: string, site: string) {
-    if actual < threshold {
-        sim_emit_ok(message, site)
-    } else {
-        sim_emit_fail(message, to_string(actual), "< " + to_string(threshold), site)
-    }
+    sim_compare(actual < threshold, to_string(actual), "< " + to_string(threshold), message, site)
 }
 macro sim_lt_float(actual: expr, threshold: expr, message: expr) {
     _sim_lt_float_impl(actual, threshold, message, __SITE__)
 }
 
 pub fn _sim_le_float_impl(actual: float, threshold: float, message: string, site: string) {
-    if actual <= threshold {
-        sim_emit_ok(message, site)
-    } else {
-        sim_emit_fail(message, to_string(actual), "<= " + to_string(threshold), site)
-    }
+    sim_compare(actual <= threshold, to_string(actual), "<= " + to_string(threshold), message, site)
 }
 macro sim_le_float(actual: expr, threshold: expr, message: expr) {
     _sim_le_float_impl(actual, threshold, message, __SITE__)
