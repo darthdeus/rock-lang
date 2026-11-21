@@ -1,14 +1,6 @@
 //! Headless GL executor for `rock test --backend glsl`.
 //!
-//! A dumb GL harness: it knows nothing about Rock, bone, or the test
-//! discovery. rock-cli emits the vertex+fragment GLSL for each
-//! `@test(returns = ...)` value test (via `skull-codegen-glsl::emit_value_test`)
-//! and feeds this process a JSON job array on stdin; the runner compiles each
-//! pair, draws a fullscreen triangle into a 1x1 offscreen target (R32I for
-//! int/bool, R32F for float), reads the single pixel back, and writes one
-//! `__SKULL__` line per test to stdout. rock-cli parses those lines through the
-//! same shared parser + `compare_value` the luajit and node executors use --
-//! this is a transport for `__SKULL__` lines, nothing more (the seam contract).
+//! Value jobs draw to a 1x1 target: R32I for int/bool, R32F for float.
 //!
 //! Protocol:
 //!   argv:  --profile 330core
@@ -18,11 +10,8 @@
 //!     __SKULL__\tVALUE\t<name>\t<serialized>   -- the read-back scalar
 //!     __SKULL__\tFAIL\t<name>: <detail>         -- a GL compile/link/render error
 //!
-//! `ret: "compile"` is the compile-only kind: compile + link under the
-//! profile's REAL driver, no draw or readback
-//! (render shaders have arbitrary attr/uniform interfaces the 1x1 harness
-//! cannot feed). Success is `VALUE\t<name>\tcompiled`; a compile/link error is
-//! the usual FAIL line carrying the driver log.
+//! `ret: "compile"` links without drawing and reports `VALUE\t<name>\tcompiled`;
+//! a failure reports the driver log.
 //!
 //! Exit codes: 0 = jobs ran (individual FAILs are on stdout, still 0); 2 = no
 //! GL context could be created; the caller treats this as an error unless
