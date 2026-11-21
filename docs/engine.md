@@ -345,12 +345,14 @@ computed wrapper or C lookups. An `opaque.Type` entry keeps a struct
 forward-declared for callers that only pass pointers to it. Remove the
 entry before reading fields or using the type by value.
 
+Use `enum.Name` for a Lua enum lookup, or `enum.Prefix_*` when the suffix
+is computed at runtime. Tool input uses the full `ImGuiKey_` family.
+
 Run `python3 scripts/stone_imgui_wrappers.py` from the repository root.
 The script follows wrapper helpers and C declaration dependencies in the
 pinned release, preserving the source order and the layouts it selects. Run with
 `--check` to verify the generated files. Commit the list and generated
-changes together. The enum table is complete so tool input can resolve
-key names at runtime.
+changes together.
 
 ## Audio
 

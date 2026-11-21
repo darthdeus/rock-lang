@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select Stone's wrappers and C declarations from the pinned gamelibs bindings."""
+"""Select Stone's wrappers, C declarations and enums from the pinned gamelibs bindings."""
 import argparse
 from collections import defaultdict
 import re
@@ -28,6 +28,7 @@ C_REF = re.compile(rf'\bC\.({NAME})')
 IDENTIFIER = re.compile(NAME)
 CDEF_HEADER = 'require("ffi").cdef[[\n'
 CDEF_FOOTER = '\n]]'
+ENUM = re.compile(rf'^M\.({NAME}) = ')
 
 
 def wrapper_name(match):
@@ -138,24 +139,39 @@ def select_cdef(source, wrapper, roots, opaque=()):
     return CDEF_HEADER + selected + CDEF_FOOTER
 
 
+def select_enums(source, roots):
+    lines = source.splitlines(keepends=True)
+    names = {match[1] for line in lines if (match := ENUM.match(line))}
+    keep = set()
+    for root in roots:
+        if root.endswith('*'):
+            matches = {name for name in names if name.startswith(root[:-1])}
+        else:
+            matches = {root} & names
+        if not matches:
+            raise ValueError(f'unknown cimgui enum: {root}')
+        keep.update(matches)
+    return ''.join(line for line in lines if not (match := ENUM.match(line)) or match[1] in keep)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true', help='check the committed output')
     args = parser.parse_args()
     gamelibs.sync(('lua-bindings',))
     upstream = gamelibs.gamelibs_root() / 'lua-bindings/cimgui'
-    if (upstream / 'enums.lua').read_bytes() != (BINDINGS / 'enums.lua').read_bytes():
-        parser.error('enums.lua differs from the pinned gamelibs Lua bindings')
     roots = (BINDINGS / 'roots.txt').read_text().split()
-    wrapper_roots = [name for name in roots if not name.startswith(('C.', 'opaque.'))]
+    wrapper_roots = [name for name in roots if not name.startswith(('C.', 'opaque.', 'enum.'))]
     cdef_roots = [name.removeprefix('C.') for name in roots if name.startswith('C.')]
     opaque = {name.removeprefix('opaque.') for name in roots if name.startswith('opaque.')}
+    enum_roots = [name.removeprefix('enum.') for name in roots if name.startswith('enum.')]
     try:
         wrapper = select((upstream / 'wrap.lua').read_text(), wrapper_roots)
         cdef = select_cdef((upstream / 'cdef.lua').read_text(), wrapper, cdef_roots, opaque)
+        enums = select_enums((upstream / 'enums.lua').read_text(), enum_roots)
     except ValueError as error:
         parser.error(str(error))
-    for name, output in (('wrap.lua', wrapper), ('cdef.lua', cdef)):
+    for name, output in (('wrap.lua', wrapper), ('cdef.lua', cdef), ('enums.lua', enums)):
         path = BINDINGS / name
         if args.check:
             if path.read_bytes() != output.encode():

@@ -124,4 +124,17 @@ TreeNode_Str
 TreePop
 Unindent
 VSliderFloat
+enum.ImGuiBackendFlags_RendererHasTextures
+enum.ImGuiChildFlags_AutoResizeY
+enum.ImGuiCol_Button
+enum.ImGuiCond_Always
+enum.ImGuiCond_FirstUseEver
+enum.ImGuiConfigFlags_DockingEnable
+enum.ImGuiDockNodeFlags_DockSpace
+enum.ImGuiHoveredFlags_AllowWhenDisabled
+enum.ImGuiHoveredFlags_AnyWindow
+enum.ImGuiKey_*
+enum.ImGuiTableColumnFlags_WidthFixed
+enum.ImGuiTableColumnFlags_WidthStretch
+enum.ImGuiTreeNodeFlags_DefaultOpen
 opaque.ImGuiContext

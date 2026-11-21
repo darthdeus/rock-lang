@@ -1,16 +1,15 @@
-inline(lua) fn cimgui_failure_set_enum_src(src: string) = """
-    _G.__cimgui_failure_enum_src = src
-"""
-
 inline(lua) fn cimgui_failure_sweep_stub_enums() -> (int, int, string) = """
     local stub = _G.imgui
+    local live = _G.__cimgui_failure_saved.imgui
     local violations, swept = 0, 0
     local first = ""
-    for name in _G.__cimgui_failure_enum_src:gmatch("M%.([A-Za-z0-9_]+)%s*=") do
-        swept = swept + 1
-        if type(stub[name]) == "function" then
-            violations = violations + 1
-            if first == "" then first = name end
+    for name, value in pairs(live) do
+        if type(value) == "number" then
+            swept = swept + 1
+            if type(stub[name]) == "function" then
+                violations = violations + 1
+                if first == "" then first = name end
+            end
         end
     end
     return violations, swept, first
@@ -44,10 +43,9 @@ fn cimgui_failure_sweep_under_forced_stub() -> (int, int, string) {
 
 @test
 fn cimgui_failure_stub_answers_no_enum_with_a_function() {
-    let enums_src = embed_string("prebuilt/cimgui/enums.lua")
-    cimgui_failure_set_enum_src(enums_src)
+    assert(cimgui_failure_has_native_binding(), "the live bindings supply the enum names")
     let (violations, swept, first) = cimgui_failure_sweep_under_forced_stub()
-    assert(swept > 500, "swept {swept} production enum names (vacuous if ~0)")
+    assert(swept > 0, "the production table contains enums")
     assert_eq(violations, 0,
         "stub answers {violations} enum lookups with functions, first: {first}")
 }
@@ -108,19 +106,17 @@ inline(lua) fn cimgui_failure_c_touch_names() -> string = """
     return table.concat(_G.__cimgui_failure_c_touches, ",")
 """
 
-inline(lua) fn cimgui_failure_ambient_number_count() -> int = """
-    local n = 0
-    for _, v in pairs(_G.imgui) do
-        if type(v) == "number" then n = n + 1 end
-    end
-    return n
+inline(lua) fn cimgui_failure_has_native_binding() -> bool = """
+    local imgui = _G.imgui
+    return type(imgui) == "table" and not rawget(imgui, "__stone_stub")
+        and type(imgui.C.igGetIO_Nil) == "cdata" and type(imgui.ImGuiKey_A) == "number"
 """
 
 @test
 fn cimgui_failure_frame_path_quiet_when_unready() {
     assert(!IMGUI_READY, "package tests never boot the imgui backend")
     assert(!stone_imgui_initialized(), "no live imgui context in package tests")
-    assert(cimgui_failure_ambient_number_count() > 500,
+    assert(cimgui_failure_has_native_binding(),
         "ambient _G.imgui is the real table, so the spy observes live-C call sites")
 
     cimgui_failure_install_c_spy()

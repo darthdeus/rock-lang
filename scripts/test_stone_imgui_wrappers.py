@@ -6,6 +6,18 @@ import stone_imgui_wrappers
 
 
 class BindingTests(unittest.TestCase):
+    def test_enums_keep_exact_names_and_computed_families_in_source_order(self):
+        source = '''local M = require("master")
+M.Key_A = 4
+M.Flag_Used = 16
+M.Flag_Unused = 32
+M.Key_B = 259
+'''
+        self.assertEqual(stone_imgui_wrappers.select_enums(source, ['Flag_Used', 'Key_*']),
+                         source.replace('M.Flag_Unused = 32\n', ''))
+        with self.assertRaisesRegex(ValueError, 'unknown cimgui enum: Keypad'):
+            stone_imgui_wrappers.select_enums(source, ['Keypad_*'])
+
     def test_cdef_follows_wrapper_and_raw_references_in_source_order(self):
         cdef = '''require("ffi").cdef[[
 typedef struct Draw Draw;
