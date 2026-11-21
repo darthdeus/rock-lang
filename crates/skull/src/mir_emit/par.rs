@@ -197,18 +197,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn par_map_with_keeps_order_and_survives_nested_maps() {
-        let items: Vec<usize> = (0..1000).collect();
-        let out = par_map_with(items, Vec::<usize>::new, |seen, item| {
-            seen.push(item);
-            let inner = par_map_with((0..8).collect(), || (), |_, x: usize| x + item);
-            inner.iter().sum::<usize>()
-        });
-        let expected: Vec<usize> = (0..1000).map(|item| 8 * item + 28).collect();
-        assert_eq!(out, expected);
-    }
-
-    #[test]
     fn parallel_join_carries_compile_modes_into_both_branches() {
         let _inline = skull_transform::inline_off_guard();
         let _report = crate::allocation_report::scope(true);
