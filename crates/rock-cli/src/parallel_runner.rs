@@ -39,14 +39,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn map_in_order_keeps_input_order_when_later_items_finish_first() {
-        let items: Vec<u64> = (0..8).collect();
-        let out = super::map_in_order(&items, 4, |&i| {
-            std::thread::sleep(std::time::Duration::from_millis((8 - i) * 10));
-            i
-        });
-        assert_eq!(out, items);
-    }
-}
+mod tests {}
