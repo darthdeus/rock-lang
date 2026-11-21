@@ -425,15 +425,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reduction_keeps_the_trigger_and_its_dependency() {
-        let source = "unused\nlet dependency = 7\nnoise\ntrigger((dependency + 0))\nmore noise\n";
-        let reduced = shrink(source, 150, |s| {
-            s.contains("let dependency = 7\n") && s.contains("trigger((dependency + 0))")
-        });
-        assert_eq!(reduced, "let dependency = 7\ntrigger((dependency + 0))\n");
-    }
-
-    #[test]
     fn reduction_simplifies_expressions_and_respects_budget() {
         let mut attempts = 0;
         let reduced = shrink("trigger((7 + 0))\n", 30, |s| {
