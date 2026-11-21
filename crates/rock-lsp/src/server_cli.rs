@@ -1,6 +1,3 @@
-//! `rock lsp <subcommand>`: the server, and one-shot JSON queries over the same
-//! workspace it uses. Invoked from `rock-cli` after it strips `lsp`.
-
 use anyhow::{Result, anyhow};
 use bone_query::{BoneWorkspace, FileUriExt};
 use clap::{Arg, ArgAction, ArgMatches, Command};
@@ -245,7 +242,6 @@ fn position_query(name: &str, m: &ArgMatches) -> Result<Value> {
             ("completions", serde_json::to_value(&items)?)
         }
         "signature-help" => {
-            // Printed from the struct to keep its field order.
             if let Some(help) = bone.signature_help(&file, pos) {
                 println!("{}", serde_json::to_string_pretty(&help)?);
                 return Ok(Value::Null);
@@ -276,7 +272,6 @@ fn hover_json(bone: &BoneWorkspace, file: &str, pos: Position) -> Value {
         }
     };
     let Some(hover) = bone.hover(file, pos) else {
-        // If the file does not type-check, surface that as the hover body.
         let diags = bone.diagnostics_for(file);
         let contents = if diags.is_empty() {
             String::new()
