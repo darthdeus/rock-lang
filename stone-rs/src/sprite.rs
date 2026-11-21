@@ -4,12 +4,10 @@ use std::ffi::{c_float, c_int};
 use crate::{track_draw_call, with_gl, DebugGl, CURRENT_SHADER};
 
 struct SpriteState {
-    // Mesh VAO for stone_draw_mesh. Attribs are configured per draw from the
-    // layout the caller passes, pointing into the vertex stream's range for
-    // that draw (stream_buffer.rs); this VAO holds none of its own.
+    // Attributes point into the caller-described vertex stream for each draw.
     mesh_vao: glow::VertexArray,
     triangle_indices: Vec<u32>,
-    // Fullscreen rectangle, pos(2)+uv(2), six vertices streamed per draw.
+    // Fullscreen vertices use pos(2)+uv(2).
     quad_vao: glow::VertexArray,
     quad_vbo: glow::Buffer,
 }
@@ -273,16 +271,8 @@ fn draw_rect(u0: f32, v0: f32, u1: f32, v1: f32, before_draw: impl FnOnce(&Debug
     })
 }
 
-/// Issue one fullscreen rectangle with an EXPLICIT corner UV mapping.
-///
-/// The semantic submission's geometry verb (`submission.rock`). Unlike
-/// `stone_draw_fullscreen_quad` it infers nothing from the bound target: the
-/// caller resolved the mapping and this draws exactly it, so recording and
-/// execution consume one value rather than two computations that agree.
-///
-/// Culling is disabled HERE rather than assumed: the two tiers wind their
-/// triangles opposite ways, so "no culling" has to be part of the state this
-/// draw states, not a property of GL's default that nothing re-establishes.
+/// Draw the caller-resolved corner UV mapping. Culling must be disabled because
+/// backends wind their triangles in opposite directions.
 #[no_mangle]
 pub extern "C" fn stone_draw_fullscreen_rect(u0: c_float, v0: c_float, u1: c_float, v1: c_float) {
     let uv = [u0 as f64, v0 as f64, u1 as f64, v1 as f64];
@@ -314,14 +304,8 @@ fn fs_quad_uv(to_window: bool, sx: f32, sy: f32) -> [f32; 4] {
     }
 }
 
-/// The vertex layout is the CALLER's, passed per draw as component counts in
-/// location order (`attr_sizes`) -- the same contract `stone_mesh_create` /
-/// `stone_mesh_set_instances` take, sharing their validator and their attrib
-/// setup. Nothing here knows what the sprite vertex looks like: the Rock
-/// `Vertex` value struct owns that, and its consumers derive both numbers from
-/// it via `@vertex_expand`.
-/// Returns -1 when no draw was submitted, 0 when the draw had no resolved
-/// texture, and 1 when the texture was bound.
+/// `attr_sizes` supplies component counts in location order. Returns -1 when no
+/// draw was submitted, 0 without a resolved texture, and 1 when texture was bound.
 #[no_mangle]
 pub extern "C" fn stone_draw_mesh(
     data: *const c_float,
@@ -467,11 +451,7 @@ fn draw_mesh(
                         None => return -1,
                     }
                 };
-                // Unit 0 only. Which sampler reads it is the program's own
-                // business: a `@textures` group's slot 0 was pointed here once at
-                // link (`bind_texture_slots`), and hand-authored GLSL either binds
-                // by name through `Pass.inputs` or takes GL's link-time default of
-                // unit 0. Nothing here names a uniform.
+                // Slot 0 was assigned at link time; this bind does not name a uniform.
                 if tex_id != 0 {
                     gl.active_texture(glow::TEXTURE0);
                     if let Some(native_tex) = std::num::NonZeroU32::new(tex_id) {
