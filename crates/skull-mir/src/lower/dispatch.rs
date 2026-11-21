@@ -87,32 +87,6 @@ impl EqRoute {
     }
 }
 
-/// Resolution is target-neutral: backend selection happens when the concrete
-/// call plan is built, and JS may supply a body for an `inline(lua)` declaration.
-pub fn dispatched_callee_decls(ws: &Workspace, name: &str) -> Vec<crate::mir::FuncRef> {
-    let mut resolved = Vec::new();
-    for (key, decls) in &ws.functions_by_name {
-        if crate::mangle::declared_name(key.as_str()) != name {
-            continue;
-        }
-        resolved.extend(decls.iter().filter_map(|&(module, func)| {
-            (crate::mangle::mangle_fn(ws, &ws.module(module).functions[func]) == name)
-                .then_some(crate::mir::FuncRef { module, func })
-        }));
-    }
-    resolved.sort_by_key(|r| (r.module.index(), r.func.into_raw()));
-    resolved.dedup();
-    resolved
-}
-
-pub fn dispatched_callee_decl(ws: &Workspace, name: &str) -> Option<crate::mir::FuncRef> {
-    let mut reps = dispatched_callee_decls(ws, name)
-        .into_iter()
-        .map(|r| super::canonical_variant(ws, r));
-    let first = reps.next()?;
-    reps.all(|r| r == first).then_some(first)
-}
-
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum StructuralRender {
     Formatted,

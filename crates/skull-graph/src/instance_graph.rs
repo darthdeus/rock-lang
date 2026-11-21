@@ -202,6 +202,25 @@ struct RecursionFinding {
 struct WalkScratch {
     rep_arena: RepArena,
     identity_verdicts: std::cell::RefCell<crate::identity_storage::IdentityVerdicts>,
+    dispatched_callees: std::cell::RefCell<FxHashMap<&'static str, Option<FuncRef>>>,
+}
+
+impl WalkScratch {
+    fn dispatched_callee(&self, ws: &Workspace, name: &'static str) -> Option<FuncRef> {
+        let mut callees = self.dispatched_callees.borrow_mut();
+        *callees.entry(name).or_insert_with(|| {
+            let candidates = ws
+                .functions_by_name
+                .iter()
+                .filter(|(key, _)| skull_mir::mangle::declared_name(key.as_str()) == name)
+                .flat_map(|(_, declarations)| declarations)
+                .filter_map(|&(module, func)| {
+                    let f = &ws.module(module).functions[func];
+                    (mangle_fn(ws, f) == name).then_some(FuncRef { module, func })
+                });
+            unique_canonical_callee(ws, candidates)
+        })
+    }
 }
 
 struct Walk<'a> {
@@ -2108,7 +2127,7 @@ fn walk_body_edges(
                 .get(e)
                 .copied()
                 .unwrap_or_else(Span::unknown);
-            match skull_mir::lower::dispatched_callee_decl(ws, name) {
+            match w.scratch.dispatched_callee(ws, name) {
                 Some(callee) => {
                     record_call(w, ws, inf, from, subst, callee, None, span, site);
                 }
@@ -3057,9 +3076,17 @@ fn dispatched_sites(
 /// Resolve a bare runtime entry to its target-neutral declaration.
 fn stdlib_entry_representative(ws: &Workspace, name: &str) -> Option<FuncRef> {
     let decls = ws.functions_by_name.get(&ustr::Ustr::from(name))?;
-    let mut reps = decls
-        .iter()
-        .map(|&(m, f)| skull_mir::lower::canonical_variant(ws, FuncRef { module: m, func: f }));
+    unique_canonical_callee(
+        ws,
+        decls.iter().map(|&(module, func)| FuncRef { module, func }),
+    )
+}
+
+fn unique_canonical_callee(
+    ws: &Workspace,
+    candidates: impl Iterator<Item = FuncRef>,
+) -> Option<FuncRef> {
+    let mut reps = candidates.map(|candidate| skull_mir::lower::canonical_variant(ws, candidate));
     let first = reps.next()?;
     reps.all(|r| r == first).then_some(first)
 }

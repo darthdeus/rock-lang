@@ -95,10 +95,7 @@ mod container;
 pub use container::{ContainerFamily, ContainerPlan, ContainerStorage};
 mod control;
 mod dispatch;
-pub use dispatch::{
-    DispatchCtx, EqRoute, FormatPlan, HolePlan, StringifyRoute, StructuralRender,
-    dispatched_callee_decl, dispatched_callee_decls,
-};
+pub use dispatch::{DispatchCtx, EqRoute, FormatPlan, HolePlan, StringifyRoute, StructuralRender};
 mod embed;
 mod expr;
 mod flat;
