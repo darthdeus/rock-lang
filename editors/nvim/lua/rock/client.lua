@@ -1,10 +1,3 @@
--- LSP client lifecycle, RPC traffic capture, and crash surfacing.
---
--- The `cmd` field in the server config is a function. When nvim wants to
--- start the server it calls our function, which spins up vim.lsp.rpc with
--- dispatchers that feed state.record_event for incoming traffic. We then
--- wrap the returned client's request/notify methods to capture outgoing
--- traffic. No TCP, no proxy, no server change.
 
 local state = require('rock.state')
 local binary = require('rock.binary')
@@ -14,9 +7,7 @@ local M = {}
 local SERVER_NAME = 'rock'
 local crash_ns = vim.api.nvim_create_namespace('rock.nvim.crash')
 
--- Bounded JSON summary for the event ring. Full payload is retained for the
--- panel's expand-event feature but everything is capped to avoid dragging a
--- multi-megabyte completion response around.
+-- Cap summaries without discarding the expandable payload.
 local function summarize(v, depth)
   depth = depth or 0
   if depth > 3 then return '<...>' end
@@ -66,26 +57,15 @@ end
 
 local opts_cache = nil
 
--- Set of absolute `.rock.tags` paths, one per stick.toml package the user has
--- opened a buffer in. rock-lsp writes tags per-package, so tag jumps (`<C-]>`)
--- from any rock buffer should search the UNION of every open package's tags --
--- editing a file in one package must still resolve a symbol defined in another
--- when both are open. Grows as buffers attach; never shrinks within a session.
+-- Open packages share a tag union across buffers.
 local rock_tag_dirs = {}
 
--- Escape a path for inclusion in the comma-separated `tags` option (spaces and
--- commas are the only metacharacters there).
+-- Commas and spaces need escaping in the tags option.
 local function esc_tag_path(p)
   return (p:gsub('[, ]', '\\%0'))
 end
 
--- The stick.toml package root whose `.rock.tags` `bufnr` should search, or nil.
--- The one gate for rock tag handling: any real file-backed buffer under a stick
--- root is "in a rock project" and gets the `.rock.tags` union regardless of
--- filetype. Scratch/unnamed buffers are excluded -- `vim.fs.root` resolves them
--- against cwd, so a `[No Name]` buffer opened with cwd inside a package would
--- otherwise have its `tags` clobbered; help/terminal/quickfix (`buftype`) have
--- no business with tags either.
+-- Exclude scratch and special buffers: their resolved cwd can look like a project.
 local function tags_root(bufnr)
   if vim.bo[bufnr].buftype ~= '' then
     return nil
@@ -96,19 +76,12 @@ local function tags_root(bufnr)
   return vim.fs.root(bufnr, 'stick.toml')
 end
 
--- Rebuild `bufnr`'s buffer-local `tags`: the buffer's own pre-rock base, then
--- every open package's `.rock.tags` (absolute, so they resolve from any cwd),
--- then the configured upward-search fallback (`opts.tags`, covers the file's own
--- package even before it's been recorded). Recomputed from the snapshotted base
--- so it never grows unboundedly across rebuilds.
+-- Rebuild from the saved base so repeated updates do not accumulate paths.
 local function rebuild_buffer_tags(bufnr)
   if type(opts_cache.tags) ~= 'string' or opts_cache.tags == '' then
     return
   end
-  -- The buffer's `tags` before rock first touched it -- its buffer-local value
-  -- if an ftplugin / gutentags set one, else the global default. Snapshotted
-  -- once so a foreign buffer-local `tags` survives (we append to it, not replace
-  -- it) and repeated rebuilds don't stack rock's own dirs onto themselves.
+  -- Preserve the buffer-local tags that existed before attachment.
   local base = vim.b[bufnr].rock_tags_base
   if base == nil then
     base = vim.api.nvim_get_option_value('tags', { buf = bufnr })
@@ -125,11 +98,7 @@ local function rebuild_buffer_tags(bufnr)
   vim.bo[bufnr].tags = table.concat(parts, ',')
 end
 
--- Record `bufnr`'s package (the nearest stick.toml ancestor) in the union. If
--- that package is NEW, refresh tags on EVERY open buffer that sits under a
--- stick root so an already-open buffer in another package immediately sees the
--- newcomer; otherwise refresh just this buffer. Filetype-agnostic: a `.glsl`
--- (or any) buffer under a package resolves rock tags the same as a `.rock` one.
+-- A new package must refresh every already-open project buffer.
 local function note_package_tags(bufnr, root)
   if type(opts_cache.tags) ~= 'string' or opts_cache.tags == '' then
     return
@@ -154,13 +123,7 @@ local function note_package_tags(bufnr, root)
   end
 end
 
--- Move `sort_text` to just before `score` in a comparator list. The rock LSP
--- emits `sortText` to rank call-argument completions by type (a variable of the
--- expected type first, then a function returning it); nvim-cmp's default order
--- puts fuzzy `score` BEFORE `sort_text`, so that ranking only broke ties. Pulling
--- `sort_text` ahead of `score` makes the server's type ranking authoritative.
--- Pure (no cmp dependency) so it's unit-testable; `sort_text`/`score` are the
--- comparator function refs to match by identity.
+-- Server type ranking must precede nvim-cmp fuzzy scoring.
 local function reorder_sort_text_before_score(comparators, sort_text, score)
   local without = {}
   for _, c in ipairs(comparators) do
@@ -184,9 +147,7 @@ local function reorder_sort_text_before_score(comparators, sort_text, score)
 end
 M._reorder_sort_text_before_score = reorder_sort_text_before_score
 
--- Reorder nvim-cmp's comparators for `bufnr` so the LSP's `sortText` wins over
--- fuzzy score (see above). Buffer-local (`cmp.setup.buffer`), preserving the
--- user's existing comparator list. No-op when nvim-cmp isn't installed.
+-- Preserve the user's comparators; skip when nvim-cmp is absent.
 local function apply_cmp_type_priority(bufnr)
   local ok, cmp = pcall(require, 'cmp')
   if not ok then
@@ -205,17 +166,12 @@ local function apply_cmp_type_priority(bufnr)
   end)
 end
 
--- Returning nil from cmd() leaves `client.rpc == nil` in the registry, and
--- erroring lets nvim's pcall in create_and_init_client abort cleanly without
--- inserting a half-built Client into `vim.lsp.client._all`.
+-- A nil RPC leaves a half-built client in Neovim; error before registration.
 local function fail_start(reason)
   error(reason, 0)
 end
 
--- Tracks the last bin_path we surfaced a missing-binary notification for,
--- so we don't spam the user once per buffer attach. Cleared by restart()
--- and on a successful start so a real "binary disappeared" event later
--- in the session is still reported.
+-- Deduplicate missing-binary notices until restart or a successful start.
 local missing_binary_reported = nil
 
 local function build_cmd(bin_path)
@@ -226,10 +182,7 @@ local function build_cmd(bin_path)
     if not bin_path or not (vim.uv or vim.loop).fs_stat(bin_path) then
       state.set_client({ state = 'crashed', last_exit = { code = -1, signal = 0, at = os.time() } })
       state.record_event('local', 'server/binary_missing', { path = bin_path })
-      -- Disable autoattach for this session so further FileType events
-      -- don't keep retriggering cmd() (each retry surfaces nvim's own
-      -- "Client quit" + "cmd failed" notifications). Re-enabled by
-      -- restart() once the user fixes the binary.
+      -- Avoid a notification storm until restart re-enables autoattach.
       pcall(vim.lsp.enable, SERVER_NAME, false)
       if missing_binary_reported ~= bin_path then
         missing_binary_reported = bin_path
@@ -246,10 +199,7 @@ local function build_cmd(bin_path)
 
     wrapped.notification = function(method, params)
       state.record_event('<-notif', method, summarize(params))
-      -- Silent-error capture: window/logMessage and window/showMessage
-      -- both use MessageType { 1=Error, 2=Warning, 3=Info, 4=Log }. We
-      -- route Error+Warning into a dedicated ring so they surface in
-      -- the panel even when nobody is tailing :LspLog.
+      -- Keep warnings and errors visible even without an LSP log tail.
       if (method == 'window/logMessage' or method == 'window/showMessage')
           and type(params) == 'table' then
         local sev = params.type
@@ -283,8 +233,6 @@ local function build_cmd(bin_path)
       if dispatchers.on_exit then dispatchers.on_exit(code, signal) end
     end
 
-    -- `rock lsp serve` is the LSP server (no separate rock-lsp binary); bone
-    -- is the only typechecker backend.
     local rpc = vim.lsp.rpc.start({ bin_path, 'lsp', 'serve' }, wrapped)
     if not rpc then
       state.set_client({ state = 'crashed' })
@@ -292,19 +240,13 @@ local function build_cmd(bin_path)
       fail_start('rock failed to start: ' .. tostring(bin_path))
     end
 
-    -- Wrap outgoing. vim.lsp.rpc clients expose request(method, params, cb) and notify(method, params).
     local orig_request = rpc.request
     local orig_notify = rpc.notify
     rpc.request = function(method, params, cb, notify_reply)
       local is_completion = method == 'textDocument/completion'
-      -- Always time; per-method latency histograms want every request.
       local sent_hr = (vim.uv or vim.loop).hrtime()
       local ev_id
-      -- rpc callback signature is (err, result, message_id) — see
-      -- nvim's runtime/lua/vim/lsp/rpc.lua. The Client layer wraps this
-      -- to build its ctx.request_id; dropping the third arg here breaks
-      -- semantic tokens (handler treats every response as stale because
-      -- ctx.request_id arrives nil).
+      -- Preserve message_id: Neovim uses it to reject stale semantic tokens.
       local success, req_id = orig_request(method, params, function(err, result, message_id)
         local elapsed_ms = ((vim.uv or vim.loop).hrtime() - sent_hr) / 1e6
         state.record_request_timing(method, elapsed_ms)
@@ -316,8 +258,7 @@ local function build_cmd(bin_path)
         if is_completion then
           local items = (result and result.items) or result or {}
           if type(items) ~= 'table' then items = {} end
-          -- Cap stored items to keep memory bounded; full picture already
-          -- available via event expand on the original response payload.
+          -- Cap stored items; the original event retains the full payload.
           local capped = items
           if #items > 500 then capped = vim.list_slice(items, 1, 500) end
           local ctx = (params and params.context) or {}
@@ -354,10 +295,7 @@ local function build_cmd(bin_path)
 end
 
 function M.make_config(opts)
-  -- Specs (and any caller bypassing rock.setup) call us directly with
-  -- a partial opts table; merge in the static defaults so completion
-  -- ergonomics (completeopt/complete) apply without setup() running.
-  -- `keep` preserves caller-provided values.
+  -- Direct callers may pass partial options; keep their values over defaults.
   local defaults = require('rock').defaults or {}
   opts_cache = vim.tbl_extend('keep', opts or {}, defaults)
   binary.refresh(opts_cache.binary)
@@ -374,29 +312,18 @@ function M.make_config(opts)
         name = vim.api.nvim_buf_get_name(bufnr),
         client_id = client.id,
       })
-      -- By the time on_attach fires the rpc client's pid is populated
-      -- (server has responded to initialize). Capture it now.
       state.set_client({
         id = client.id,
         pid = client.rpc and client.rpc.pid or nil,
         capabilities = client.server_capabilities or {},
       })
-      -- Apply buffer-local completion ergonomics. Scoped to the .rock
-      -- buffer so other filetypes are untouched. See M.defaults in
-      -- init.lua for rationale.
       if type(opts_cache.completeopt) == 'string' and opts_cache.completeopt ~= '' then
         vim.bo[bufnr].completeopt = opts_cache.completeopt
       end
       if type(opts_cache.complete) == 'string' then
         vim.bo[bufnr].complete = opts_cache.complete
       end
-      -- Point tag jumps at the per-package `.rock.tags` files rock-lsp writes
-      -- to each stick.toml root, searching the UNION across every open package
-      -- (so a jump from one package resolves symbols defined in another). See
-      -- M.defaults.tags and `note_package_tags`.
       note_package_tags(bufnr)
-      -- Make the server's type-directed `sortText` ranking authoritative in
-      -- nvim-cmp for this buffer (it orders `score` before `sort_text` by default).
       if opts_cache.cmp_type_priority then
         apply_cmp_type_priority(bufnr)
       end
@@ -405,9 +332,7 @@ function M.make_config(opts)
   }
 end
 
--- Drop any "zombie" rock clients (rpc==nil) lingering in the registry from a
--- prior failed start. These are invisible to get_clients() but still iterated
--- by reuse_client_default and crash on `is_stopped`.
+-- Failed starts can leave rpc-less clients that break Neovim client reuse.
 local function purge_zombies()
   local all = vim.lsp.client and vim.lsp.client._all
   if type(all) ~= 'table' then return end
@@ -444,12 +369,9 @@ function M.restart()
   state.inc_restart()
   state.record_event('local', 'client/restart', { buffers = #rock_bufs })
 
-  -- Refresh binary info so the panel shows the new hash immediately.
   binary.refresh(opts_cache and opts_cache.binary)
 
-  -- Mirror setup()'s gate: don't re-enable autoattach if the binary is
-  -- still missing -- we'd just retrigger the cmd() failure path on every
-  -- buffer's FileType, producing a notification storm.
+  -- Do not re-enable autoattach while the binary is missing.
   local bin_info = state.get().binary
   if not bin_info.exists then
     vim.notify(
@@ -458,8 +380,6 @@ function M.restart()
       vim.log.levels.ERROR, { title = 'rock.nvim' })
     return
   end
-  -- Binary is back; clear the dedup flag so a future disappearance is
-  -- reported again.
   missing_binary_reported = nil
 
   vim.defer_fn(function()

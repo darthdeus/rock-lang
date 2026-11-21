@@ -1,18 +1,4 @@
--- Dump Neovim's cached LSP semantic tokens for a range.
---
--- The tokens come from vim.lsp.semantic_tokens.get_at_pos(), which reads
--- the client's decoded token cache populated by actual LSP responses.
--- This is the ground truth for "what tokens did the server send?" — not
--- what the CLI produces, not what the syntax file matches, but what
--- Neovim itself received and is using for highlighting.
---
--- Commands:
---   :RockSemTokens         -- current line
---   :'<,'>RockSemTokens    -- visual range
---   :RockSemTokensAll      -- whole buffer (may be large)
---
--- Output is a floating scratch buffer with plain text formatted for
--- pasting back into a conversation.
+-- Inspect the tokens Neovim received, rather than a separate CLI result.
 
 local ui = require('rock.ui')
 local M = {}
@@ -22,8 +8,7 @@ local function client_for(bufnr)
   return clients[1]
 end
 
--- Resolve what highlight group is actually applied at (row, col) in bufnr.
--- Uses get_captures_at_pos() which reports every source (syntax/treesitter/LSP/extmarks).
+-- get_captures_at_pos includes syntax, treesitter, LSP and extmarks.
 local function captures_at(bufnr, row, col)
   local ok, caps = pcall(vim.inspect_pos, bufnr, row, col)
   if not ok or not caps then return {} end
@@ -44,10 +29,7 @@ local function captures_at(bufnr, row, col)
   return out
 end
 
--- Read the decoded tokens Neovim has cached for this buffer, filter to
--- the rock client and the requested row range. This is the ground truth
--- for "what tokens did the server send?" — one entry per server token,
--- no run merging, no column scanning artefacts.
+-- Read Neovim's decoded cache without merging or scanning columns.
 local function collect_tokens(bufnr, start_row, end_row)
   local client = client_for(bufnr)
   if not client then
@@ -71,7 +53,6 @@ local function collect_tokens(bufnr, start_row, end_row)
         end_col = hl.end_col,
         type = hl.type,
         modifiers = (function()
-          -- hl.modifiers is a map { name = true }; flatten to list.
           local list = {}
           for k, v in pairs(hl.modifiers or {}) do
             if v then table.insert(list, k) end
@@ -116,7 +97,6 @@ local function format_tokens(bufnr, tokens, start_row, end_row)
   end
   table.insert(lines, '')
   table.insert(lines, '## positions without any rock LSP semantic token')
-  -- Scan gaps — positions where highlight comes from syntax/treesitter only.
   for i = start_row, end_row do
     local text = vim.api.nvim_buf_get_lines(bufnr, i, i + 1, false)[1] or ''
     local col = 0
@@ -187,11 +167,7 @@ function M.dump(start_row, end_row)
   open_float(lines)
 end
 
--- Probe Neovim's internal semantic-tokens highlighter state for the
--- current buffer. Answers: is the highlighter attached? how many
--- decoded highlights are in the cache? This exists because
--- get_at_pos() returning empty doesn't distinguish "no highlighter"
--- from "highlighter attached but empty result."
+-- An empty token result does not distinguish a missing highlighter from an empty cache.
 function M.debug()
   local bufnr = vim.api.nvim_get_current_buf()
   local lines = {
@@ -237,7 +213,6 @@ function M.debug()
         if cs.current_result and cs.current_result.err then
           table.insert(lines, '  err detail: ' .. vim.inspect(cs.current_result.err))
         end
-        -- If highlights exist, sample first 5.
         if type(hl_count) == 'number' and hl_count > 0 then
           table.insert(lines, '  first highlights:')
           for i = 1, math.min(5, hl_count) do
@@ -252,7 +227,6 @@ function M.debug()
   table.insert(lines, '')
   table.insert(lines, 'forcing refresh; results will update in 1s...')
 
-  -- Fire refresh then re-probe.
   pcall(vim.lsp.semantic_tokens.force_refresh, bufnr)
   vim.defer_fn(function()
     local h2 = vim.lsp.semantic_tokens.__STHighlighter
@@ -270,15 +244,12 @@ function M.debug()
       for cid, cs in pairs(entry.client_state or {}) do
         table.insert(lines, ('  client id=%d  cs keys: %s'):format(
           cid, table.concat(vim.tbl_keys(cs), ',')))
-        -- Deep-dump cs with truncation to keep the float sane.
         local dump = vim.inspect(cs, { depth = 4 })
         if #dump > 4000 then dump = dump:sub(1, 4000) .. '\n...(truncated)' end
         for l in dump:gmatch('[^\n]+') do
           table.insert(lines, '    ' .. l)
         end
       end
-      -- Also sample any extmarks in the LSP semantic tokens namespace(s)
-      -- to see if highlights got applied even without a populated cache.
       local namespaces = vim.api.nvim_get_namespaces()
       for ns_name, ns_id in pairs(namespaces) do
         if ns_name:match('semantic') or ns_name:match('lsp') then
@@ -298,7 +269,6 @@ function M.debug()
   end, 1200)
 end
 
--- Hook tracing buffer. Tail this with :RockSemTokensTrace.
 M._trace = {}
 local TRACE_CAP = 500
 local TRACE_SLACK = 128
@@ -313,10 +283,7 @@ local function trc(msg)
   end
 end
 
--- Monkey-patch Neovim's semantic tokens internals so we can tell whether
--- process_response is even being called, and whether tokens_to_ranges is
--- returning. This lets us distinguish "response never processed" from
--- "coroutine abandoned mid-decode" from "decode completes but cache reset".
+-- Trace processing and cache state to distinguish missing responses from abandoned decoding.
 function M.install_hooks()
   local st = vim.lsp.semantic_tokens
   local STH = st.__STHighlighter

@@ -1,56 +1,8 @@
--- Rock-specific LSP highlight links.
---
--- The rock-lsp server emits these distinguishable identifier kinds:
---
---   parameter                  -- function parameters (decl + refs)
---   variable                   -- local let bindings (decl + refs)
---   variable + readonly        -- `const` declarations (decl + refs)
---   variable + static          -- mutable `global`s (decl + refs)
---
--- (Enum members, macros, decorators, and type parameters emit their standard
--- LSP token types -- @lsp.type.enumMember/macro/decorator/typeParameter --
--- which colorschemes style on their own, so no links are set here.)
---
--- Neovim's LSP highlight groups and precedence:
---
---   @lsp.typemod.variable.readonly.rock   (most specific; consts here)
---   @lsp.typemod.variable.static.rock     (mutable globals)
---   @lsp.type.variable.rock               (locals, Rock only)
---   @lsp.type.variable                    (locals, cross-language)
---   @lsp.type.parameter.rock              (params, Rock only)
---   @lsp.type.parameter                   (params, cross-language)
---
--- We set links only on the `.rock` variants so we don't step on other
--- languages. If a link is left unset, Neovim falls through to the
--- non-suffixed group (usually driven by your colorscheme).
---
--- To customize, pass a `highlights = { ... }` table to require('rock').setup(),
--- keyed by the short names below. Any key you omit keeps its default.
+-- Use only .rock groups so other languages retain their colorscheme links.
 
 local M = {}
 
--- Default links. Chosen to give a three-tier visual:
---   params  -> distinct accent so reading a fn body shows what's bound
---   locals  -> plain text color (common case)
---   globals -> strong accent so HOT_RELOAD / config constants pop
---
--- CONTRIBUTION WELCOME:
--- These defaults are conservative fallbacks to well-known Tree-sitter
--- capture groups that most colorschemes style. If you want a different
--- palette (e.g. bold for globals, italic for params, a dedicated color
--- for readonly), edit this table. Keep it to 3-6 lines; the goal is a
--- clear tier, not a rainbow.
--- Each value: a highlight-group name (string) or an hl spec table.
--- Spec tables accept { fg, bg, italic, bold, underline, ... } — see :h nvim_set_hl.
---
--- Rose-pine palette (substitute your own if you use a different theme):
---   iris   = '#c4a7e7'  -- params
---   gold   = '#f6c177'  -- globals (readonly)
---   text   = '#e0def4'  -- locals / default
---   foam   = '#9ccfd8'  -- properties / types
---   rose   = '#ebbcba'
---   love   = '#eb6f92'
---   pine   = '#31748f'
+-- Values are highlight links or nvim_set_hl specs.
 M.defaults = {
   parameter = { fg = '#c4a7e7' },                  -- iris
   variable  = '@variable',                         -- falls through to theme default
@@ -62,10 +14,7 @@ M.defaults = {
   nullable  = { fg = '#ebbcba', italic = true },
 }
 
--- Apply the highlight table. Each value can be:
---   * a string: treated as a link to another highlight group
---   * a table : passed straight to nvim_set_hl (e.g. { fg = '#ebbcba', italic = true })
--- Re-applied on ColorScheme so theme swaps don't wipe us out.
+-- Reapply on ColorScheme so theme changes do not erase the links.
 local function apply(overrides)
   local hl = vim.tbl_extend('force', M.defaults, overrides or {})
   local set = function(group, spec)
@@ -78,18 +27,13 @@ local function apply(overrides)
       vim.api.nvim_set_hl(0, group, copy)
     end
   end
-  -- Globals — most specific wins. `const` emits readonly, a mutable
-  -- `global` emits static; both get the same bold tier signal.
+  -- Mutable globals use static; constants use readonly.
   set('@lsp.typemod.variable.readonly.rock', hl.global)
   set('@lsp.typemod.variable.static.rock', hl.global)
-  -- Locals.
   set('@lsp.type.variable.rock', hl.variable)
-  -- Parameters.
   set('@lsp.type.parameter.rock', hl.parameter)
-  -- Properties (struct fields, map keys rendered via field access).
   set('@lsp.type.property.rock', hl.property)
-  -- Nullable types — modifier-based group catches every type variant
-  -- (struct, enum, interface, plain type) when the `?` suffix is present.
+  -- The modifier covers each nullable type kind.
   set('@lsp.mod.nullable.rock', hl.nullable)
 end
 

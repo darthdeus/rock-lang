@@ -1,7 +1,3 @@
--- Right-side sidebar that shows live rock.nvim state.
---
--- Auto-opens on first .rock buffer. Refreshes whenever state changes
--- (via subscription) plus a 1000ms timer for uptime/relative-time.
 
 local state = require('rock.state')
 local client = require('rock.client')
@@ -127,11 +123,6 @@ local function collect_lines()
     ))
   end
 
-  -- ERRORS: silent server errors captured from window/logMessage and
-  -- window/showMessage notifications with Error/Warning severity. Shown
-  -- prominently above everything else except BINARY/CLIENT because a
-  -- silent error is usually the load-bearing signal for "why is it
-  -- broken". 'E' in panel clears.
   if s.errors and #s.errors > 0 then
     section((' ERRORS (%d, newest first)  [E] clear'):format(#s.errors))
     local shown = math.min(#s.errors, 8)
@@ -147,8 +138,6 @@ local function collect_lines()
     if #s.errors > shown then push(('    (+%d older)'):format(#s.errors - shown)) end
   end
 
-  -- DOCTOR summary: counts + worst-severity rows. Non-PASS rows render
-  -- in full so the bad thing is visible at a glance; PASS rows roll up.
   if s.doctor then
     local counts = { PASS = 0, WARN = 0, FAIL = 0 }
     for _, r in ipairs(s.doctor) do counts[r.status] = (counts[r.status] or 0) + 1 end
@@ -171,8 +160,6 @@ local function collect_lines()
     push(('  %s %-3d %s'):format(marker, bufnr, name))
   end
 
-  -- CAPTURES: bug-diagnosis snapshots from <C-g>c. Newest first, most
-  -- recent ~5 shown. Format is tmux-copy-friendly: each line stands alone.
   if s.captures and #s.captures > 0 then
     section((' CAPTURES (%d, newest first)'):format(#s.captures))
     local shown = math.min(#s.captures, 5)
@@ -194,7 +181,6 @@ local function collect_lines()
     if #s.captures > shown then push(('    (+%d more)'):format(#s.captures - shown)) end
   end
 
-  -- PERF: compact per-method latency. Full detail: <leader>rt / :RockPerf.
   do
     local perf = require('rock.perf')
     local list = {}
@@ -217,9 +203,6 @@ local function collect_lines()
     end
   end
 
-  -- MODULES: per-client, per-context counts. Each rock-lsp process
-  -- has its own workspace so they render as separate sub-sections.
-  -- Full detail: <leader>rm / :RockModules.
   local module_client_ids = {}
   for cid in pairs(s.modules or {}) do table.insert(module_client_ids, cid) end
   table.sort(module_client_ids)
@@ -250,8 +233,6 @@ local function collect_lines()
     end
   end
 
-  -- STATS: same fan-out — one block per client. Each rock-lsp's
-  -- compile counters, RSS, etc. show separately.
   local stats_client_ids = {}
   for cid in pairs(s.stats or {}) do table.insert(stats_client_ids, cid) end
   table.sort(stats_client_ids)
@@ -321,11 +302,7 @@ local function collect_lines()
     end
     return true
   end
-  -- Walk events newest -> oldest. We still visit every entry to compute
-  -- total_passing for the section header, so this is O(n) in the ring
-  -- size, same as before. The win: we skip the `table.insert` into kept[]
-  -- for all but the 40 most recent passing events, which removes the
-  -- allocation/GC pressure that dominated on $/progress bursts.
+  -- Visit all events for the total, but retain only 40 passing entries.
   local DISPLAY = 40
   local kept = {}
   local total_passing = 0
@@ -371,9 +348,7 @@ local function render()
   vim.api.nvim_buf_clear_namespace(PANEL_BUF, HL_NS, 0, -1)
   for _, h in ipairs(hl) do
     local line_idx, group, cs, ce = h[1], h[2], h[3], h[4]
-    -- nvim_buf_set_extmark replaces the deprecated buf_add_highlight.
-    -- ce == -1 means "to end of line"; extmark takes that as end_col = nil
-    -- with end_line = line_idx + 1 start-of-line.
+    -- end_col=nil and the next line represent the old end-of-line sentinel.
     local extmark_opts = { hl_group = group }
     if ce == -1 then
       extmark_opts.end_line = line_idx + 1
@@ -455,7 +430,6 @@ end
 
 function M.open()
   if M.is_open() then return end
-  -- Place the panel away from the current window.
   local cur_col = vim.api.nvim_win_get_position(vim.api.nvim_get_current_win())[2]
   SIDE = cur_col < math.floor(vim.o.columns / 2) and 'right' or 'left'
   if not PANEL_BUF or not vim.api.nvim_buf_is_valid(PANEL_BUF) then
@@ -470,9 +444,7 @@ function M.open()
   vim.api.nvim_set_option_value('signcolumn', 'no', { win = PANEL_WIN })
 
   if not UNSUB then
-    -- Hot LSP streams ($/progress, incremental completion) can fire notify()
-    -- hundreds of times per tick. Coalesce into one render per vim tick via
-    -- a dirty flag instead of queueing a scheduled render per event.
+    -- Coalesce event bursts into one render per Neovim tick.
     UNSUB = state.subscribe(function()
       if RENDER_PENDING then return end
       RENDER_PENDING = true
@@ -533,10 +505,7 @@ end
 
 function M.setup_autoopen()
   local g = vim.api.nvim_create_augroup('rock.nvim.panel', { clear = true })
-  -- Fire once: auto-open on the first .rock buffer, then stop watching.
-  -- Without `once`, every FileType event (including ones triggered by :vs
-  -- creating a new window over a .rock buffer) can reopen the panel after
-  -- PANEL_WIN was externally invalidated.
+  -- FileType can fire when another window opens; auto-open only once.
   vim.api.nvim_create_autocmd('FileType', {
     group = g,
     pattern = 'rock',
@@ -545,8 +514,6 @@ function M.setup_autoopen()
       if not M.is_open() then vim.schedule(M.open) end
     end,
   })
-  -- Reposition the float when the cursor moves to a different window so the
-  -- panel always opens away from the active editing area.
   vim.api.nvim_create_autocmd('WinEnter', {
     group = g,
     callback = function()
@@ -561,7 +528,6 @@ function M.setup_autoopen()
       end
     end,
   })
-  -- Refit the float when the terminal is resized.
   vim.api.nvim_create_autocmd('VimResized', {
     group = g,
     callback = function()
@@ -570,7 +536,6 @@ function M.setup_autoopen()
       end
     end,
   })
-  -- Track external closure so M.is_open() stays accurate.
   vim.api.nvim_create_autocmd('WinClosed', {
     group = g,
     callback = function(args)
