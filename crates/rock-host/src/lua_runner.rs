@@ -1,8 +1,4 @@
-//! In-memory luajit eval: pipe Rock-compiled Lua into luajit's stdin, capture
-//! combined stdout/stderr. Used by the Rust test suite and the `@test`-runner —
-//! callers that compile a snippet and want its output as a String. NOT for
-//! interactive program execution (those exec the compiled `.lua` file with inherited
-//! stdio so interactive apps reach the tty).
+//! In-memory evaluation captures output; interactive execution needs inherited stdio.
 
 use crate::process_management::{register_child_process, unregister_child_process};
 use rock_core::CompilerError;
@@ -63,16 +59,12 @@ pub fn run_lua_code_with_command(
     let pid = child.id();
     register_child_process(pid);
 
-    // Drain both pipes on threads BEFORE waiting. Waiting first deadlocks as
-    // soon as the child fills a pipe buffer, which is the ~50k-line-script hang
-    // that can otherwise block a child before its pipes are drained.
+    // Drain both pipes before waiting or a full pipe can deadlock the child.
     let mut stdin = child.stdin.take().expect("stdin piped");
     let stdout_thread = drain_pipe(child.stdout.take().expect("stdout piped"));
     let stderr_thread = drain_pipe(child.stderr.take().expect("stderr piped"));
 
-    // LuaJIT can report a load error and exit before the whole script has been
-    // written. Keep that write error until the child status and stderr are
-    // available so it cannot mask the load diagnostic.
+    // A premature exit can break stdin; preserve the child diagnostic first.
     let write_error = stdin.write_all(code.as_bytes()).err();
     drop(stdin);
 
@@ -119,9 +111,7 @@ pub fn run_lua_code_with_command(
     let stdout = drained(stdout_thread, "stdout")?;
     let stderr = drained(stderr_thread, "stderr")?;
 
-    // A child load/runtime failure is the useful result even when it
-    // closed stdin before the host finished writing. A successful child
-    // has no load/runtime failure that can replace the write failure.
+    // A child failure takes precedence over the resulting stdin error.
     if let Some(error) = write_error.filter(|_| status.success()) {
         return Err(CompilerError::new_no_location(format!(
             "Failed to write test code to luajit process: {error}."

@@ -123,18 +123,8 @@ pub const MAIN_LUA_FILENAME: &str = "main.lua";
 
 pub const MAIN_BYTECODE_FILENAME: &str = "main.ljbc";
 
-/// Build a `Command` that dumps `lua_file` to LuaJIT bytecode at
-/// `bytecode_file`.
-///
-/// `-g` keeps debug info, which is not optional: the dumped chunk carries the
-/// SOURCE file's chunkname and line table, so a runtime error raised from the
-/// bytecode image renders the same `main.lua:1234:` text a source run renders.
-/// LuaJIT's `-b` default is `-s` (strip), which would renumber every traceback
-/// a sim or a game can print.
-///
-/// `-b` must come before the script, which every other LuaJIT command puts
-/// first. `LUA_PATH` is required rather than incidental: `-b` is implemented by
-/// `jit/bcsave.lua` under `<prefix>/share/luajit-2.1/`.
+/// LuaJIT defaults to stripped bytecode; `-g` preserves source tracebacks.
+/// `-b` precedes the script and needs `LUA_PATH` to find `jit/bcsave.lua`.
 pub fn build_luajit_bytecode_command(
     lua_file: &Path,
     bytecode_file: &Path,
@@ -166,8 +156,7 @@ pub fn write_atomic_streamed(
     };
     fs_err::create_dir_all(parent)?;
 
-    // Same directory so the rename is atomic: a hot-reload poller must never read a truncated file.
-    // Same directory keeps `persist` an atomic same-filesystem rename.
+    // Same-directory rename prevents readers from seeing a partial file.
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     write(tmp.as_file_mut())?;
     tmp.persist(path).map(|_| ()).map_err(|e| e.error)
@@ -207,12 +196,7 @@ pub fn walk_rock_files(source_dir: impl AsRef<Path>) -> Result<Vec<WalkedRockFil
 
     let mut files = Vec::new();
 
-    // Sort each directory's entries by name so discovery order is independent of
-    // the filesystem's `read_dir` order (which is stable per working-tree state
-    // but shifts when files are rewritten -- e.g. a `git checkout` between builds).
-    // Module order flows into `ws.modules` and function-chunk emission order, so
-    // an unsorted walk makes the emitted `.lua` non-reproducible across builds
-    // (unfuck-backlog #58).
+    // Filesystem iteration order must not change emitted module order.
     for entry in WalkDir::new(&canonical_base).sort_by_file_name() {
         let entry = match entry {
             Ok(e) => e,

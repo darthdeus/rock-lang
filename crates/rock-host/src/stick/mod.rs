@@ -10,7 +10,7 @@ pub mod graph;
 /// key accepts only the explicit value `"v1"`. Legacy manifests must migrate.
 ///
 /// `globals` declares whether the package may own mutable global storage.
-/// Absent = `"any"`; `"none"` is the simulation-package boundary from R5.
+/// Absent = `"any"`; `"none"` prohibits mutable package globals.
 ///
 /// `identity_storage` declares the package's identity-storage migration
 /// state: absent or `"enforced"`, `"exempt"` for an unmigrated package, or
