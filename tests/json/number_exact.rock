@@ -1,19 +1,5 @@
-// Every number `json_decode` produces must equal what the host number parser
-// produces for the same literal, BIT FOR BIT. The oracle is `parse_float` /
-// `parse_int` on that literal, compared by equality rather than a tolerance.
-//
-// The float arms are a REAL comparison: `parse_number` reaches C `strtod_l`
-// through `parse_float_at` and does not call `parse_float`, so the two
-// sides are two different parsers and equality is a claim about both. The int
-// arms still share the oracle. (`json_as_int` on a float literal would coerce,
-// so the float arms go through `json_as_float`, which returns null for an Int
-// and would fail the assert rather than silently compare a truncation.)
-//
-// It is also the admission gate for any fast path that computes the value
-// arithmetically: `int` is double-backed on luajit, so such a path is exact only
-// up to the 15 digits that 2^53 allows. The corpus straddles the bounds such a
-// path needs -- 15 significant digits, 22 fractional digits, exponents --
-// rather than sampling typical values.
+// Float decoding and the host parser use different implementations; integer decoding shares the oracle.
+// The fast path is bounded by double precision and the fractional scale.
 
 fn decoded_float(lit: string) -> float {
     let v = json_decode(lit)
@@ -27,12 +13,9 @@ fn assert_matches_host(lit: string) {
     let host = lit.parse_float()
     assert(host != null, "host parser rejected the literal: {lit}")
     let got = decoded_float(lit)
-    // Equality, not a tolerance: a fast path that is merely close is wrong.
     assert(got == host.unwrap(), "{lit}: decoded {got}, host parser gives {host.unwrap()}")
 }
 
-// Literals the accumulator handles itself: no exponent, <= 15 significant
-// digits, <= 22 fractional digits.
 @test
 fn test_json_float_fast_path_matches_host_parser() {
     let cases = [
@@ -46,9 +29,6 @@ fn test_json_float_fast_path_matches_host_parser() {
     assert_eq(cases.len(), 22)
 }
 
-// 0.1 + 0.2 famously is not 0.3 in binary. That is a property of the VALUES,
-// so the decoder must reproduce it exactly -- if this arm ever passes as
-// "equal", the decoder has rounded somewhere the host parser does not.
 @test
 fn test_json_float_reproduces_binary_representation_exactly() {
     assert(decoded_float("0.1") + decoded_float("0.2") != decoded_float("0.3"),
@@ -56,8 +36,6 @@ fn test_json_float_reproduces_binary_representation_exactly() {
     assert_eq(decoded_float("0.1") + decoded_float("0.2"), 0.1 + 0.2)
 }
 
-// Past either bound the accumulator must stand aside. These are the inputs
-// that would be silently wrong if the admission test were widened.
 @test
 fn test_json_float_beyond_the_fast_path_bounds_still_matches_host() {
     let cases = [
@@ -71,11 +49,7 @@ fn test_json_float_beyond_the_fast_path_bounds_still_matches_host() {
     assert_eq(cases.len(), 12)
 }
 
-// The ends of the double range, where two different parsers most easily
-// disagree: overflow has to saturate to the same infinity, underflow to the
-// same zero, and the denormals in between have to round identically. `strtod`
-// signals these through ERANGE and a host scanner does not, so "it returned a
-// number" is not enough -- these must be equal to the oracle's own answer.
+// `strtod` reports overflow and underflow through ERANGE; the scanner does not.
 @test
 fn test_json_float_range_boundaries_match_host() {
     let cases = [
@@ -90,17 +64,13 @@ fn test_json_float_range_boundaries_match_host() {
     assert_eq(cases.len(), 8)
 }
 
-// Integers run through the same accumulator and the same 15-digit bound; past
-// it the literal is the authority.
 @test
 fn test_json_int_accumulator_matches_host_parser() {
     let cases = [
         "0", "1", "-1", "42", "-42", "1000000",
         "999999999999999",
         "-999999999999999",
-        // Past the bound. `int` is double-backed on luajit, so an 18-digit
-        // bound decoded this as 1e+18; the fallback to the literal is what
-        // keeps it exact.
+        // LuaJIT integers are double-backed and cannot exactly represent every 18-digit integer.
         "999999999999999999",
         "1234567890123456789",
     ]
@@ -117,8 +87,6 @@ fn test_json_int_accumulator_matches_host_parser() {
     assert_eq(cases.len(), 10)
 }
 
-// A number nested in a container takes the same path as a bare one; this is
-// the shape every real payload actually has.
 @test
 fn test_json_nested_numbers_match_host_parser() {
     let v = json_decode("{{\"a\":[-65.613033,43.416419],\"b\":1.5}}")
@@ -131,8 +99,6 @@ fn test_json_nested_numbers_match_host_parser() {
     assert_eq(json_as_float(items[1]).unwrap(), "43.416419".parse_float().unwrap())
 }
 
-// Encoding then decoding recovers the exact float, compact or pretty, at the
-// top level or nested; non-finite values encode as null.
 @test
 fn test_json_float_encode_round_trips_exactly() {
     assert_eq(format_float_roundtrip(1.25), "1.25")

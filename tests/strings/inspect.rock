@@ -195,9 +195,6 @@ struct Holder { cb: fn() -> int, tag: int }
 fn make_capfree() -> fn() -> int { return () => 42 }
 fn make_capturing(x: int) -> fn() -> int { return () => x + 1 }
 
-// Both a capture-free (raw function) and a capturing (record) lambda inspect to
-// the `function: ...` form -- the record is rendered via its CodeRef, not walked,
-// so no capture internals leak.
 @test(output = "true\ntrue\nfalse")
 fn test_inspect_record_renders_as_function() {
     print(inspect(make_capfree()).starts_with("function: "))
@@ -205,9 +202,6 @@ fn test_inspect_record_renders_as_function() {
     print(inspect(make_capturing(10)).contains("__slot"))
 }
 
-// A struct holding a capturing lambda renders the field as a function, same as
-// one holding a capture-free lambda -- the record does not leak through the walk,
-// nor through interpolation, which routes a composite through inspect.
 @test(output = "true\ntrue\nfalse\nfalse")
 fn test_inspect_composite_with_record() {
     let hf = Holder { cb: make_capfree(), tag: 1 }
@@ -219,7 +213,6 @@ fn test_inspect_composite_with_record() {
     print(s.contains("__slot"))
 }
 
-// --- Interpolation routes composite values through inspect() ---
 
 enum Status {
     Ok,
@@ -278,7 +271,6 @@ struct EmptyRef {}
 
 value EmptyValue {}
 
-// Byte-exact renders, through `assert_eq` so braces can be escaped.
 @test
 fn exact_struct_renders() {
     assert_eq(inspect(EmptyRef {}), "EmptyRef {{  }}")
@@ -287,8 +279,6 @@ fn exact_struct_renders() {
     assert_eq(inspect([10, 20, 30]), "Vec {{ 10, 20, 30 }}")
 }
 
-// GC-free value structs use the same sorted equals-format as table-backed
-// structs. Wide nested values follow the generic multiline indentation too.
 value V2 { y: int, x: int }
 
 value IV { x: int, y: int }
