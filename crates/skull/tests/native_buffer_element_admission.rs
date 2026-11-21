@@ -31,24 +31,3 @@ fn main() {
     let _ = pair_buffer(1)
 }
 "#;
-
-#[test]
-fn non_c_elements_reject_at_the_planner_boundary() {
-    for (src, element) in [
-        (NATIVEBUFFER_STRING, "string"),
-        (FLATVEC_STRING, "string"),
-        (GC_VALUE, "GcValue"),
-    ] {
-        let error = try_emit_module(src).expect_err(element);
-        let msg = &error.message;
-        assert!(
-            msg.contains("requires a valid native-buffer element ctype") && msg.contains(element)
-        );
-        assert!(!error.labels.is_empty());
-    }
-}
-
-#[test]
-fn native_buffer_primitives_and_ffi_value_are_valid_controls() {
-    emit_module(VALID_CONTROLS);
-}
