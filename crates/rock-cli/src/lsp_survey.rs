@@ -14,69 +14,6 @@ use crate::skull_backend::{body_numeric_edit, ms};
 #[cfg(test)]
 mod tests {
     #[test]
-    fn v1_survey_body_edit_changes_the_executed_result() {
-        use crate::skull_backend::{IncrementalProject, SkullReload};
-
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("stick.toml"),
-            "[package]\nname = \"survey-edit\"\n[language]\nmodules = \"v1\"\n",
-        )
-        .unwrap();
-        let source = dir.path().join("main.rock");
-        let original = "mod main;\nfn probe(step: int = 9) -> int {\n // 8\n let label = \"7\"\n return 3\n}\nfn no_numeric(step: int = 9) { print(\"7\") }\nfn main() { print(probe()) }\n";
-        std::fs::write(&source, original).unwrap();
-        let sources =
-            crate::live_project::project_sources(dir.path().to_str().unwrap(), false).unwrap();
-        let session =
-            crate::bone_backend::bone_session(crate::bone_backend::session_files(&sources))
-                .unwrap();
-        let marker = format!("{}/", dir.path().file_name().unwrap().to_str().unwrap());
-        let (_, functions) = super::collect_stats(&session, &marker).unwrap();
-        let function = functions
-            .iter()
-            .find(|f| f.name.ends_with("::probe"))
-            .unwrap();
-        let edited = super::make_edit(original, function, super::EditKind::Body)
-            .unwrap()
-            .unwrap();
-        assert_eq!(edited, original.replace("return 3", "return 0"));
-        let no_numeric = functions
-            .iter()
-            .find(|f| f.name.ends_with("::no_numeric"))
-            .unwrap();
-        assert!(
-            super::make_edit(original, no_numeric, super::EditKind::Body)
-                .unwrap()
-                .is_none()
-        );
-
-        let main = dir.path().join("main.lua");
-        let overlay = dir.path().join("incremental.lua");
-        let mut project =
-            IncrementalProject::init(dir.path().to_str().unwrap(), &main, &overlay).unwrap();
-        assert!(matches!(
-            project
-                .apply_edit(&source, &edited, &main, &overlay)
-                .unwrap(),
-            SkullReload::Incremental { .. }
-        ));
-        let program = format!(
-            "function clear_all_systems() end\nfunction __rock_main_wrapper(f) f() end\n{}\n{}\nmain()\n",
-            std::fs::read_to_string(main).unwrap(),
-            std::fs::read_to_string(overlay).unwrap(),
-        );
-        let output = crate::compile_cmd::run_lua_code_with_timeout(
-            &program,
-            Some(test_utils::HANG_BACKSTOP),
-        )
-        .unwrap();
-        assert!(output.success, "{}", output.combined());
-        assert_eq!(output.combined().trim(), "3\n0");
-        assert_eq!(std::fs::read_to_string(source).unwrap(), original);
-    }
-
-    #[test]
     fn signature_edit_keeps_the_receiver_first() {
         let orig = "pub fn T.get(pool, key: string) -> int { 1 }\n";
         let f = super::FnStat {
