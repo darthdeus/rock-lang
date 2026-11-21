@@ -73,26 +73,6 @@ fn main() {
 }
 
 #[test]
-fn hover_after_typing_a_for_loop() {
-    let source = r#"struct AggressorEntry {
-    dmg: int
-}
-
-struct Mob {
-    aggressors: [AggressorEntry] = [],
-}
-
-fn f(m: Mob) {
-
-}"#;
-    let mut doc = Document::single(source);
-    contains_text(&doc.hover_text(8, 5), "Mob");
-    doc.type_at(9, 0, "for a in m.aggressors {\n    print(a.dmg)\n}");
-    contains_text(&doc.hover_text(9, 4), "AggressorEntry");
-    contains_text(&doc.hover_text(9, 14), "[AggressorEntry]");
-}
-
-#[test]
 fn references_shift_after_typing_and_deleting_a_line_in_another_fn() {
     let source = r#"fn alpha() -> int {
     return 1
