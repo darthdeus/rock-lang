@@ -1,5 +1,3 @@
-// Rock syntax for Monaco: a small Monarch grammar plus brackets and comments.
-// Keywords follow crates/rock-tokenizer (keyword_or_identifier).
 
 export const rockLanguageConfiguration = {
   comments: { lineComment: '//', blockComment: ['/*', '*/'] },
@@ -53,7 +51,6 @@ export const rockMonarch = {
       [/\*\//, 'comment', '@pop'],
       [/[/*]/, 'comment'],
     ],
-    // "text {expr} text": interpolations are highlighted as code.
     string: [
       [/[^\\"{]+/, 'string'],
       [/\\./, 'string.escape'],

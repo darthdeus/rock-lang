@@ -1,10 +1,4 @@
-// The playground's compiler Worker: loads dist/rock_wasm.wasm (the stdlib is
-// the copy embedded in the module) and answers one request at a time.
-//
-// The page posts {id, op, ...} with the rock-wasm ops (compile, format, lsp,
-// stdlib; see crates/rock-wasm/src/lib.rs) and gets {id, response} back. A
-// compiler panic traps the module; the Worker then starts a fresh instance and
-// answers {id, response, restarted: true} so the page re-sends its LSP session.
+// A compiler panic traps the module; restart it and signal the page to resend its LSP session.
 
 let wasmModule = null;
 let exports = null;

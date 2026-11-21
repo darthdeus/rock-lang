@@ -1,5 +1,3 @@
-// The playground page: a Monaco editor wired to rock-lsp and the compiler,
-// both running in worker.js. Monaco comes from the CDN loaded in index.html.
 import { rockLanguageConfiguration, rockMonarch } from './rock-language.js';
 
 const MAIN_URI = 'file:///playground/main.rock';
@@ -33,7 +31,6 @@ fn main() {
 const $ = (id) => document.getElementById(id);
 const setStatus = (text) => { $('status').textContent = text; };
 
-// --- Worker calls -----------------------------------------------------------
 
 const worker = new Worker('worker.js');
 const pending = new Map();
@@ -57,7 +54,6 @@ function call(op, body = {}) {
   });
 }
 
-// --- Language server client -------------------------------------------------
 
 let nextLspId = 1;
 let documentVersion = 1;
@@ -117,7 +113,6 @@ function toMarker(d) {
   };
 }
 
-// --- Editor -----------------------------------------------------------------
 
 let editor;
 let output;
@@ -225,7 +220,6 @@ function registerProviders() {
   });
 }
 
-// --- Generated code ---------------------------------------------------------
 
 async function compile() {
   const response = await call('compile',
@@ -256,7 +250,6 @@ function selectTab(tab) {
   compile();
 }
 
-// --- Startup ----------------------------------------------------------------
 
 async function main() {
   await window.monacoReady;
