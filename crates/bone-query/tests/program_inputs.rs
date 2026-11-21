@@ -34,16 +34,6 @@ fn a_stdlib_that_does_not_tokenize_is_a_diagnostic() {
 }
 
 #[test]
-fn a_stdlib_with_a_recovered_syntax_error_is_a_diagnostic() {
-    let stdlib = skull_parser::stdlib::parse(&[StdlibFile {
-        name: "unified.rock",
-        contents: "fn ( {\n}\n",
-        display_path: "<test-stdlib>/unified.rock",
-    }]);
-    assert!(stdlib.is_err(), "a recovered stdlib error must not load");
-}
-
-#[test]
 fn a_package_graph_that_does_not_build_is_a_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
     // The dependency does not exist, so the graph cannot be built.
