@@ -34,6 +34,7 @@
 --   ...
 --   child:stop()
 
+local project = dofile('tests/_lib/project.lua')
 local M = {}
 
 local Child = {}
@@ -78,6 +79,25 @@ function M.start(opts)
   end
 
   return self
+end
+
+function M.open_completion(name, source, autotrigger)
+  local binary = project.binary()
+  local root = project.create(name, { ['main.rock'] = source })
+  local child = M.start({ rtp = { vim.fn.getcwd() } })
+  child:exec_lua([[
+    local binary, autotrigger = ...
+    dofile('tests/_lib/project.lua').setup(binary)
+    vim.api.nvim_create_autocmd('LspAttach', { callback = function(args)
+      local c = vim.lsp.get_client_by_id(args.data.client_id)
+      if c and c.name == 'rock' then
+        vim.lsp.completion.enable(true, c.id, args.buf, { autotrigger = autotrigger })
+      end
+    end })
+  ]], { binary, autotrigger })
+  child:cmd('edit ' .. vim.fn.fnameescape(root .. '/main.rock'))
+  child:wait_for_lsp_attach('rock')
+  return child
 end
 
 --- Raw RPC request to the child.
@@ -126,6 +146,16 @@ function Child:wait_for(predicate, timeout_ms, interval_ms)
     vim.wait(interval_ms)
   end
   return false
+end
+
+function Child:popup_words(timeout_ms)
+  if not self:wait_for(function() return self:call('pumvisible') == 1 end, timeout_ms) then
+    return nil, 'popup did not appear; mode=' .. vim.inspect(self:rpc('nvim_get_mode'))
+      .. '\nstderr=' .. table.concat(self.stderr, '\n')
+  end
+  local items = self:call('complete_info', { { 'items' } }).items
+  assert(items and #items > 0, 'visible popup has no items')
+  return vim.tbl_map(function(item) return item.word end, items)
 end
 
 --- Wait until a client named `client_name` is attached in the child.

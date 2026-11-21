@@ -16,27 +16,8 @@ local function fail(msg)
   os.exit(1)
 end
 
-local bin = vim.env.ROCK_LSP_BIN
-if not bin or bin == '' then
-  print('SKIP: $ROCK_LSP_BIN not set')
-  os.exit(0)
-end
-if not (vim.uv or vim.loop).fs_stat(bin) then
-  fail('$ROCK_LSP_BIN points at non-existent file: ' .. bin)
-end
-
-vim.notify = function(_, _, _) end
-vim.notify_once = vim.notify
-vim.filetype.add({ extension = { rock = 'rock' } })
-
-local root = vim.fn.tempname()
-vim.fn.mkdir(root, 'p')
-local stick = assert(io.open(root .. '/stick.toml', 'w'))
-stick:write('[package]\nname = "code_action_clear"\nversion = "0.1.0"\n')
-stick:close()
-local rock_path = root .. '/main.rock'
-local f = assert(io.open(rock_path, 'w'))
-f:write([[
+local project = dofile('tests/_lib/project.lua')
+local buf, client_obj = project.open('code_action_clear', { ['main.rock'] = [[
 enum Color { Red, Green, Blue }
 
 fn f(c: Color) -> int {
@@ -45,28 +26,7 @@ fn f(c: Color) -> int {
     }
     return 0
 }
-]])
-f:close()
-
-local client = require('rock.client')
-local cfg = client.make_config({ binary = bin })
-vim.lsp.config('rock', cfg)
-client.setup_autocmds()
-vim.lsp.enable('rock')
-
-vim.cmd('edit ' .. vim.fn.fnameescape(rock_path))
-local buf = vim.api.nvim_get_current_buf()
-
-local attached_id = nil
-vim.api.nvim_create_autocmd('LspAttach', {
-  callback = function(args)
-    local c = vim.lsp.get_client_by_id(args.data.client_id)
-    if c and c.name == 'rock' then attached_id = args.data.client_id end
-  end,
-})
-if not vim.wait(5000, function() return attached_id ~= nil end, 50) then
-  fail('LspAttach did not fire within 5s')
-end
+]] })
 
 local function has_nonexhaustive_diag(diags)
   for _, d in ipairs(diags or {}) do
@@ -108,7 +68,6 @@ local text_edits = { {
   newText = '\n        Color::Green => {}\n        Color::Blue => {}',
 } }
 
-local client_obj = vim.lsp.get_client_by_id(attached_id)
 local enc = client_obj and client_obj.offset_encoding or 'utf-16'
 vim.lsp.util.apply_text_edits(text_edits, buf, enc)
 

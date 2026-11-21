@@ -13,31 +13,11 @@ local function fail(msg)
   os.exit(1)
 end
 
-local bin = vim.env.ROCK_LSP_BIN
-if not bin or bin == '' then
-  print('SKIP: $ROCK_LSP_BIN not set')
-  os.exit(0)
-end
-
-vim.notify = function() end
-vim.notify_once = function() end
-vim.filetype.add({ extension = { rock = 'rock' } })
-
-local root = vim.fn.tempname()
-vim.fn.mkdir(root, 'p')
-do
-  local f = assert(io.open(root .. '/stick.toml', 'w'))
-  f:write('[package]\nname = "semtok_restart"\nversion = "0.1.0"\n'); f:close()
-  f = assert(io.open(root .. '/main.rock', 'w'))
-  f:write('fn main() {\n    let x = 42\n}\n'); f:close()
-end
+local project = dofile('tests/_lib/project.lua')
+local buf, attached = project.open('semtok_restart', { ['main.rock'] = 'fn main() {\n    let x = 42\n}\n' })
 
 local client = require('rock.client')
 local state = require('rock.state')
-vim.lsp.config('rock', client.make_config({ binary = bin }))
-client.setup_autocmds()
-vim.lsp.enable('rock')
-vim.cmd('edit ' .. vim.fn.fnameescape(root .. '/main.rock'))
 
 local function semtok_keys()
   local rt = state.get().request_timings
@@ -56,31 +36,13 @@ local function semtok_total()
   return n
 end
 
--- Phase 1: wait for the initial attach + first semanticTokens.
-local attached_id
-vim.api.nvim_create_autocmd('LspAttach', {
-  callback = function(args)
-    local c = vim.lsp.get_client_by_id(args.data.client_id)
-    if c and c.name == 'rock' then attached_id = args.data.client_id end
-  end,
-})
-if not vim.wait(5000, function() return attached_id ~= nil end, 50) then
-  fail('initial LspAttach did not fire')
-end
 if not vim.wait(4000, function() return semtok_total() > 0 end, 50) then
   fail('initial semanticTokens request never captured before restart')
 end
 local pre_restart = semtok_total()
-local first_id = attached_id
-
--- Phase 2: restart. attached_id will be reset by the next LspAttach.
-attached_id = nil
+local first_id = attached.id
 client.restart()
-if not vim.wait(8000, function()
-  return attached_id ~= nil and attached_id ~= first_id
-end, 50) then
-  fail('post-restart LspAttach did not fire with a fresh client id')
-end
+local attached_id = project.attached(buf, first_id).id
 
 -- Phase 3: assert at least one ADDITIONAL semanticTokens request
 -- fires after the restart. client.lua:328 force_refreshes 300ms

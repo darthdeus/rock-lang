@@ -9,52 +9,13 @@ local function fail(msg)
   os.exit(1)
 end
 
-local bin = vim.env.ROCK_LSP_BIN
-if not bin or bin == '' then
-  print('SKIP: $ROCK_LSP_BIN not set')
-  os.exit(0)
-end
-if not (vim.uv or vim.loop).fs_stat(bin) then
-  fail('$ROCK_LSP_BIN points at non-existent file: ' .. bin)
-end
-
-vim.notify = function(_, _, _) end
-vim.notify_once = vim.notify
-
-vim.filetype.add({ extension = { rock = 'rock' } })
-
-local root = vim.fn.tempname()
-vim.fn.mkdir(root, 'p')
-local stick = assert(io.open(root .. '/stick.toml', 'w'))
-stick:write('[package]\nname = "float_div_hint"\nversion = "0.1.0"\n')
-stick:close()
-local rock_path = root .. '/main.rock'
-local f = assert(io.open(rock_path, 'w'))
--- `h` is float (via `/`); using it in an int hole one line later is the
--- mismatch. Hint points at the `/` (line 1) and the use (line 2), 0-based.
-f:write('fn main() {\n  let h = 8 / 3\n  let x: int = 2 * h\n}\n')
-f:close()
-
-local client = require('rock.client')
-local cfg = client.make_config({ binary = bin })
-vim.lsp.config('rock', cfg)
-client.setup_autocmds()
-vim.lsp.enable('rock')
-
-vim.cmd('edit ' .. vim.fn.fnameescape(rock_path))
-local buf = vim.api.nvim_get_current_buf()
-
-local attached_id = nil
-vim.api.nvim_create_autocmd('LspAttach', {
-  callback = function(args)
-    local c = vim.lsp.get_client_by_id(args.data.client_id)
-    if c and c.name == 'rock' then attached_id = args.data.client_id end
-  end,
-})
-
-if not vim.wait(5000, function() return attached_id ~= nil end, 50) then
-  fail('LspAttach did not fire within 5s')
-end
+local project = dofile('tests/_lib/project.lua')
+local buf = project.open('float_div_hint', { ['main.rock'] = [[
+fn main() {
+  let h = 8 / 3
+  let x: int = 2 * h
+}
+]] })
 
 local diags = nil
 local ok = vim.wait(8000, function()

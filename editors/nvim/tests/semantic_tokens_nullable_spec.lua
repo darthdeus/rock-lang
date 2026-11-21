@@ -10,26 +10,8 @@ local function fail(msg)
   os.exit(1)
 end
 
-local bin = vim.env.ROCK_LSP_BIN
-if not bin or bin == '' then
-  print('SKIP: $ROCK_LSP_BIN not set')
-  os.exit(0)
-end
-
-vim.notify = function() end
-vim.notify_once = function() end
-vim.filetype.add({ extension = { rock = 'rock' } })
-
-local root = vim.fn.tempname()
-vim.fn.mkdir(root, 'p')
-do
-  local f = assert(io.open(root .. '/stick.toml', 'w'))
-  f:write('[package]\nname = "tokmods"\nversion = "0.1.0"\n'); f:close()
-  -- `x` declared `int?`, narrowed inside `if x != null { ... }`.
-  -- Decl + condition read carry `nullable`; then-branch read carries
-  -- `refined`. `y` is `int` and carries neither.
-  f = assert(io.open(root .. '/main.rock', 'w'))
-  f:write([[
+local project = dofile('tests/_lib/project.lua')
+local bufnr, client_obj = project.open('tokmods', { ['main.rock'] = [[
 fn foo() {
     let x: int? = null
     let y: int = 1
@@ -37,28 +19,8 @@ fn foo() {
         print(x)
     }
 }
-]]); f:close()
-end
+]] })
 
-local client = require('rock.client')
-vim.lsp.config('rock', client.make_config({ binary = bin }))
-client.setup_autocmds()
-vim.lsp.enable('rock')
-
-vim.cmd('edit ' .. vim.fn.fnameescape(root .. '/main.rock'))
-local attached_id
-vim.api.nvim_create_autocmd('LspAttach', {
-  callback = function(args)
-    local c = vim.lsp.get_client_by_id(args.data.client_id)
-    if c and c.name == 'rock' then attached_id = args.data.client_id end
-  end,
-})
-if not vim.wait(5000, function() return attached_id ~= nil end, 50) then
-  fail('LspAttach did not fire')
-end
-vim.wait(500, function() return false end)
-
-local client_obj = vim.lsp.get_client_by_id(attached_id)
 local legend = client_obj.server_capabilities.semanticTokensProvider.legend
 -- LuaJIT bit ops — `<<` shift syntax isn't available in nvim's Lua dialect.
 local bit = require('bit')
@@ -74,15 +36,7 @@ local nullable_bit = modifier_bit('nullable')
 local refined_bit = modifier_bit('refined')
 
 -- Request semantic tokens for the buffer.
-local bufnr = vim.api.nvim_get_current_buf()
-local response, err
-vim.lsp.buf_request(bufnr, 'textDocument/semanticTokens/full', {
-  textDocument = { uri = vim.uri_from_bufnr(bufnr) },
-}, function(e, result) err = e; response = result end)
-if not vim.wait(3000, function() return response ~= nil or err ~= nil end, 25) then
-  fail('semantic tokens did not respond within 3s')
-end
-if err then fail('semantic tokens error: ' .. vim.inspect(err)) end
+local response = project.request(bufnr, 'textDocument/semanticTokens/full')
 if not response or not response.data then
   fail('expected response.data, got: ' .. vim.inspect(response))
 end

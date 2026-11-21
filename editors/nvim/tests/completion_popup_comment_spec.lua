@@ -13,19 +13,7 @@ local function fail(msg)
   os.exit(1)
 end
 
-local bin = vim.env.ROCK_LSP_BIN
-if not bin or bin == '' then
-  print('SKIP: $ROCK_LSP_BIN not set')
-  os.exit(0)
-end
-
-local root = vim.fn.tempname()
-vim.fn.mkdir(root, 'p')
-do
-  local f = assert(io.open(root .. '/stick.toml', 'w'))
-  f:write('[package]\nname = "commentpop"\nversion = "0.1.0"\n'); f:close()
-  f = assert(io.open(root .. '/main.rock', 'w'))
-  f:write([[
+local child = NvimChild.open_completion('commentpop', [[
 struct Config {
     volume: float,
 }
@@ -37,28 +25,7 @@ fn foo() {
     print("text cfg")
     print("{cfg}")
 }
-]])
-  f:close()
-end
-
-local child = NvimChild.start({ rtp = { vim.fn.getcwd() } })
-
-child:exec_lua([[
-  vim.filetype.add({ extension = { rock = 'rock' } })
-  local client = require('rock.client')
-  vim.lsp.config('rock', client.make_config({ binary = ... }))
-  client.setup_autocmds()
-  vim.lsp.enable('rock')
-  vim.api.nvim_create_autocmd('LspAttach', { callback = function(args)
-    local c = vim.lsp.get_client_by_id(args.data.client_id)
-    if c and c.name == 'rock' then
-      vim.lsp.completion.enable(true, c.id, args.buf, { autotrigger = true })
-    end
-  end })
-]], { bin })
-
-child:cmd('edit ' .. vim.fn.fnameescape(root .. '/main.rock'))
-child:wait_for_lsp_attach('rock', 5000)
+]], true)
 
 -- Type `.` after the `cfg` on the given line so the member-access trigger char
 -- fires at that position, then report whether the popup came up.
@@ -69,19 +36,11 @@ local function popup_after_dot(line)
   local col = at + 1 -- 1-based find start -> 0-based index of the trailing `g`
   child:rpc('nvim_win_set_cursor', 0, { line, col })
   child:input('a.')
-  local appeared = child:wait_for(function()
-    return child:call('pumvisible', {}) == 1
-  end, 2000)
-  local words = {}
-  if appeared then
-    for _, it in ipairs(child:call('complete_info', { { 'items' } }).items or {}) do
-      table.insert(words, it.word)
-    end
-  end
+  local words = child:popup_words(2000)
   -- Undo the typed `.` so the next probe starts from the original buffer.
   child:input('<Esc>')
   child:cmd('undo')
-  return appeared, words
+  return words ~= nil, words
 end
 
 -- `    // cfg` (line 8, 1-based).

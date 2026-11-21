@@ -13,49 +13,11 @@ local function fail(msg)
   os.exit(1)
 end
 
-local bin = vim.env.ROCK_LSP_BIN
-if not bin or bin == '' then
-  print('SKIP: $ROCK_LSP_BIN not set')
-  os.exit(0)
-end
+local project = dofile('tests/_lib/project.lua')
 
-vim.notify = function() end
-vim.notify_once = function() end
-vim.filetype.add({ extension = { rock = 'rock' } })
-
-local root = vim.fn.tempname()
-vim.fn.mkdir(root, 'p')
-do
-  local f = assert(io.open(root .. '/stick.toml', 'w'))
-  f:write('[package]\nname = "co"\nversion = "0.1.0"\n'); f:close()
-  f = assert(io.open(root .. '/main.rock', 'w'))
-  f:write('fn main() {\n    let x = 0\n}\n'); f:close()
-end
-
--- Pollute the global defaults so we can prove the plugin overrode
--- them buffer-locally rather than just inheriting.
 vim.opt.completeopt = 'menu'
 vim.go.complete = '.,w,b,u,t'
-
-local client = require('rock.client')
-vim.lsp.config('rock', client.make_config({ binary = bin }))
-client.setup_autocmds()
-vim.lsp.enable('rock')
-
-vim.cmd('edit ' .. vim.fn.fnameescape(root .. '/main.rock'))
-local attached_id
-vim.api.nvim_create_autocmd('LspAttach', {
-  callback = function(args)
-    local c = vim.lsp.get_client_by_id(args.data.client_id)
-    if c and c.name == 'rock' then attached_id = args.data.client_id end
-  end,
-})
-if not vim.wait(5000, function() return attached_id ~= nil end, 50) then
-  fail('LspAttach did not fire')
-end
-vim.wait(200, function() return false end)
-
-local bufnr = vim.api.nvim_get_current_buf()
+local bufnr = project.open('co', { ['main.rock'] = 'fn main() {\n    let x = 0\n}\n' })
 
 local got_co = vim.bo[bufnr].completeopt
 if got_co ~= 'menuone,noinsert,fuzzy' then
