@@ -1,8 +1,4 @@
-// Value structs at call and expression shapes where a multi-value return
-// could be truncated to its first leaf or a pack could be skipped:
-// non-last arguments, Lua parentheses (which keep only the first value),
-// variadic surplus arguments, `inline(lua)` splices, compound assignment
-// through a user operator, and declaration defaults.
+// Lua parentheses and non-last arguments can truncate multi-value returns.
 
 value V2 { x: float, y: float }
 
@@ -99,10 +95,7 @@ fn compound_assign_and_defaults() {
     print("{y.x}, {y.y}")
 }
 
-// A direct UFCS call through safe navigation on a `value` receiver keeps its
-// instantiation. Each control holds one factor fixed: a boxed receiver, and
-// the same value receiver reached through a refinement. Every receiver type
-// is distinct so one call's instantiation cannot supply another's.
+// Distinct receiver types prevent one call from supplying another's instantiation.
 
 value VHandle<T> { slot: int, payload: T }
 
@@ -160,7 +153,6 @@ value ScalarPair { x: int, y: int }
 fn make_scalar_pair(x: int, y: int) -> ScalarPair { ScalarPair { x: x, y: y } }
 struct NBox { p: ScalarPair? }
 
-// The default-arg path would receive nil and return -1.
 fn consume_or_default(dest: ScalarPair? = null) -> int {
     if dest == null {
         return -1

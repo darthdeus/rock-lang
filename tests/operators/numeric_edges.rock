@@ -1,12 +1,5 @@
-// Numeric edge cases where a backend can silently disagree with LuaJIT, the
-// reference: floored division and remainder with negative operands and zero
-// divisors, uint division by zero, shift counts outside 0..31, and bitwise
-// operands above 2^31. Operands pass through `id` so no stage can fold them.
-//
-// Results that LuaJIT itself does not agree on across platforms are not pinned
-// here: a zero produced by floating-point arithmetic (`0.0 * -1.0`,
-// `0 ./ -5`) prints as `-0` on x64 but `0` on arm64, whose LuaJIT keeps
-// small integers as integers.
+// Keep operands opaque to constant folding. LuaJIT can print arithmetic zero
+// as -0 on x64 and 0 on arm64, so those results are not pinned here.
 
 fn id(x: int) -> int { return x }
 fn idu(x: uint) -> uint { return x }

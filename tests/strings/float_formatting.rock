@@ -1,7 +1,4 @@
-// Float text both ways: rendering by print and by interpolation without a
-// format spec (trailing zeros dropped, scientific notation for very small and
-// large magnitudes, at most 14 significant digits) and parse_float, which
-// follows LuaJIT's tonumber.
+// Float text follows LuaJIT formatting and tonumber.
 
 @test(output = "1\n2\n1.5\n3.14159\n0.1\n0.3\n1000000\n1e-06\n2\n4\n0.5\n1.5\n2.5\n3\n3.5\n4\n4.5\ntrue\ntrue\nfalse\ntrue")
 fn float_print_values() {
@@ -51,7 +48,6 @@ fn test_float_interpolation_smart_formatting() {
     assert_eq("{same_float(-12.30001)}", "-12.3")
     assert_eq("{same_float(0.1 + 0.2)}", "0.3")
 
-    // Explicit format specifiers work as expected
     assert_eq("{pi:.2f}", "3.14")
     assert_eq("{whole:.1f}", "5.0")
     assert_eq("{large:.0f}", "123457")
@@ -167,7 +163,6 @@ fn seventeen_digits_just_below_a_power_of_ten() {
     assert_eq("{value:.17g}", "9.9999999999999996e+30")
 }
 
-// parse_float, rendered back through tostring; "nil" when it rejects.
 fn show(s: string) -> string {
     let r = s.parse_float()
     if r == null { "nil" } else { tostring(r) }
@@ -183,7 +178,6 @@ fn test_basic_forms() {
     }
 }
 
-// A parsed value flows through arithmetic (it is a real float).
 @test(output = "7")
 fn test_arith() {
     let a = "3.5".parse_float() ?? 0.0

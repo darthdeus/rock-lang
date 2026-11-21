@@ -1,11 +1,4 @@
-// `same_ref` answers identity; `==` answers structure. They disagree, and the
-// disagreement is the point: every reference type in Rock compares STRUCTURALLY
-// under `==` (`__op_eq` walks fields), so a caller that means "is this the same
-// object" cannot spell it with `==`.
-//
-// Cross-backend on purpose -- luajit maps it to `rawequal`, JS to `===`, and a
-// backend with no mapping must reject rather than fall back to a structural
-// walk that silently answers the other question (`@native_required`).
+// Reference equality is structural; identity uses Lua rawequal or JS ===.
 
 struct Node { v: int }
 
@@ -19,10 +12,7 @@ fn eq_is_structural_and_same_ref_is_identity_on_reference_structs() {
     assert(!same_ref(a, b), "distinct-but-equal-looking structs are NOT the same instance")
 }
 
-// The shape that motivated the primitive: a struct holding a coroutine. Two
-// freshly-created coroutines walk equal field-for-field, so `==` reports two
-// unrelated holders as equal -- which is why the engine's task/pool identity
-// checks cannot use it.
+// Distinct coroutines can compare structurally equal.
 co fn ticker() -> Coroutine<int, ()> {
     yield 1
 }
@@ -50,8 +40,6 @@ fn column_entity_arrays_compare_backing_identity() {
     assert(!same_ref(first, other))
 }
 
-// Reference structs alias: writes through a local, an indexed element or a
-// safe-navigation chain reach the owning struct or vector.
 
 struct AliasLifecycle { kill_count: int = 0 }
 struct AliasSpawner { lifecycle: AliasLifecycle = AliasLifecycle {} }
