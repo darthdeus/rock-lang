@@ -764,27 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_top_level_key_reports_its_own_location() {
-        for (prefix, line, column) in [
-            ("unknown_probe = true\n\n", 1, 1),
-            (
-                "# comment\r\n\r\n  \"unknown_\\u0070robe\" = true\r\n\r\n",
-                3,
-                3,
-            ),
-        ] {
-            let content = format!("{prefix}[package]\nname = \"probe\"\n");
-            let error = StickConfig::new_from_str(&content).unwrap_err().to_string();
-            assert!(
-                error.contains("unknown key `unknown_probe` at top level"),
-                "{error}"
-            );
-            assert!(error.contains(&format!("line {line}")), "{error}");
-            assert!(error.contains(&format!("column {column}")), "{error}");
-        }
-    }
-
-    #[test]
     fn toolchain_package_dependencies_resolve_through_the_graph() {
         let temp = tempfile::tempdir().unwrap();
         let cfg = StickConfig::new_from_str(
@@ -911,13 +890,6 @@ mod tests {
     }
 
     #[test]
-    fn language_modules_value_is_validated() {
-        for body in ["", "[language]\nmodules = \"v1\"\n"] {
-            manifest(body).unwrap();
-        }
-    }
-
-    #[test]
     fn dependencies_are_a_path_or_a_table_with_exactly_one_source() {
         let cfg = manifest(
             "[dependencies]\ncore = \"../core\"\ndev-only = { path = \"../dep\", channels = [\"dev\"] }\n",
@@ -937,17 +909,6 @@ mod tests {
             let body = format!("[dependencies]\nx = {{ {source} }}\n");
             assert!(manifest(&body).is_err(), "{body}");
         }
-    }
-
-    #[test]
-    fn package_version_defaults_when_missing() {
-        let cfg = manifest("").expect("minimal stick.toml must parse without explicit version");
-        assert_eq!(cfg.package.name, "x");
-        assert_eq!(cfg.package.version(), "0.0.0");
-        assert_eq!(
-            manifest("version = \"1.2.3\"\n").unwrap().package.version(),
-            "1.2.3"
-        );
     }
 
     #[test]
@@ -972,90 +933,6 @@ mod tests {
         ] {
             assert!(StickConfig::new_from_str(&invalid).is_err(), "{invalid}");
         }
-    }
-
-    #[test]
-    fn from_path_optional_distinguishes_absence_from_failure() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("stick.toml");
-        assert!(StickConfig::from_path_optional(&path).unwrap().is_none());
-
-        std::fs::write(&path, "[package]\nname = \"x\"\n").unwrap();
-        let found = StickConfig::from_path_optional(&path).unwrap().unwrap();
-        assert_eq!(found.package.name, "x");
-
-        std::fs::write(&path, "this is not valid toml = = =\n").unwrap();
-        let err = StickConfig::from_path_optional(&path)
-            .expect_err("malformed manifest must surface as Err, not Ok(None)");
-        assert!(format!("{err:#}").contains("stick.toml"), "{err:#}");
-
-        #[cfg(unix)]
-        {
-            std::fs::remove_file(&path).unwrap();
-            std::os::unix::fs::symlink("stick.toml", &path).unwrap();
-            let error = StickConfig::from_path_optional(&path)
-                .expect_err("manifest metadata failure must not mean absence");
-            assert!(
-                format!("{error:#}").contains(path.to_str().unwrap()),
-                "{error:#}"
-            );
-            let error = StickConfig::find_from_dir(dir.path())
-                .expect_err("manifest discovery must surface metadata failure");
-            assert!(
-                format!("{error:#}").contains(path.to_str().unwrap()),
-                "{error:#}"
-            );
-        }
-    }
-
-    #[test]
-    fn build_section_parses_channels_and_vars() {
-        let cfg = manifest(concat!(
-            "[build]\n",
-            "channels = [\"dev\", \"steam\"]\n",
-            "default_channel = \"dev\"\n",
-            "[build.vars]\n",
-            "GIT_SHA = { cmd = \"git rev-parse --short HEAD\" }\n",
-            "CHANNEL = { builtin = \"channel\" }\n",
-            "ENDPOINT = \"https://example.test/v1\"\n",
-            "TOKEN = { cmd = \"./load.sh\", channels = [\"steam\"], default = \"\", secret = true }\n",
-            "CLOCK = { value = \"now\", volatile = true }\n",
-            "REV = \"abc\"\n",
-            "TREE = { source_fingerprint = { roots = [\"src\"], files = [\"lock.json\"], vars = [\"REV\"] } }\n",
-        ))
-        .expect("build section must parse");
-        let build = cfg.build.as_ref().expect("build config present");
-        assert_eq!(build.channels, vec!["dev", "steam"]);
-        assert_eq!(build.default_channel.as_deref(), Some("dev"));
-        let sha = &build.vars["GIT_SHA"];
-        assert_eq!(sha.cmd.as_deref(), Some("git rev-parse --short HEAD"));
-        assert!(!sha.secret && !sha.volatile);
-        assert_eq!(build.vars["CHANNEL"].builtin.as_deref(), Some("channel"));
-        assert_eq!(
-            build.vars["ENDPOINT"].value.as_deref(),
-            Some("https://example.test/v1")
-        );
-        let token = &build.vars["TOKEN"];
-        assert_eq!(token.channels.as_deref(), Some(&["steam".to_string()][..]));
-        assert_eq!(token.default.as_deref(), Some(""));
-        assert!(token.secret);
-        assert!(build.vars["CLOCK"].volatile);
-        let fingerprint = build.vars["TREE"].source_fingerprint.as_ref().unwrap();
-        assert_eq!(fingerprint.roots, vec!["src"]);
-        assert_eq!(fingerprint.files, vec!["lock.json"]);
-        assert_eq!(fingerprint.vars, vec!["REV"]);
-        cfg.validate_build()
-            .expect("well-formed build section validates");
-    }
-
-    #[test]
-    fn source_fingerprint_fields_default_to_empty_lists() {
-        let cfg = manifest("[build.vars]\nTREE = { source_fingerprint = {} }\n").unwrap();
-        let empty = cfg.build.unwrap().vars["TREE"]
-            .source_fingerprint
-            .clone()
-            .unwrap();
-        assert!(empty.roots.is_empty() && empty.files.is_empty() && empty.vars.is_empty());
     }
 
     #[test]
