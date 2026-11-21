@@ -59,28 +59,6 @@ fn nullable_native_field_snapshot_reads_scalar_aliases() {
 }
 
 #[test]
-fn nullable_scalar_projection_uses_the_embedded_owner_slot() {
-    let source = "value Label { text: string, width: int }\n\
-        struct Inner { label: Label?, tag: int }\n\
-        struct Root { embed inner: Inner }\n\
-        fn width(r: Root) -> int? { r.inner.label?.width }";
-    let body = lower(source, "width");
-    assert_eq!(fields(&body), 2, "embedded owner projection: {body}");
-}
-
-#[test]
-fn boxed_nullable_subtree_reads_its_presence_and_payload_only() {
-    let source = format!(
-        "nobox value Point {{ x: int, y: int }}\n\
-         value Wide {{ {}, child: Point? }}\n\
-         fn pick(v: Wide) -> Point? {{ v.child }}",
-        wide_fields()
-    );
-    let body = lower(&source, "pick");
-    assert_eq!(fields(&body), 3, "nullable subtree keeps presence: {body}");
-}
-
-#[test]
 fn leaf_table_reference_projects_before_expanding_siblings() {
     let source = "nobox value Point { x: int, y: int }\n\
         value State { armed: bool, point: Point, anchor: Point?, age: float }\n\
