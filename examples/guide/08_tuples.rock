@@ -1,5 +1,3 @@
-// Tuples group a fixed mix of values. Destructure them with `let`,
-// or index from zero with `.0`, `.1` and so on.
 fn divmod(a: int, b: int) -> (int, int) {
     return (a ./ b, a % b)
 }

@@ -1,6 +1,3 @@
-// `if` is an expression, and chains with `else if`. Loops are `while`,
-// `loop` (with `break`/`continue`) and `for .. in` over ranges,
-// vectors and other collections.
 fn sign_name(n: int) -> string {
     if n > 0 {
         return "pos"

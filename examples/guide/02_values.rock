@@ -1,5 +1,3 @@
-// Numbers, bools and strings. Rock's primitives are
-// int, uint, float, bool and string (plus any, the escape hatch).
 fn main() {
     print(7 / 2) // `/` always divides: 3.5, even for ints
     print(7 ./ 2) // `./` is integer division: 3
