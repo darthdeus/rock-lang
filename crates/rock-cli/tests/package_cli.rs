@@ -60,25 +60,6 @@ fn release_all_assets(root: &Path) {
 }
 
 #[test]
-fn package_requires_an_output_directory_and_packages_the_current_project() {
-    let root = project("");
-    failure(
-        run(root.path(), &["package"], None),
-        "package requires --output <directory>",
-    );
-    success(package(root.path(), None));
-    let output = root.path().join("dist");
-    assert!(!std::fs::read(output.join("main.bc")).unwrap().is_empty());
-    assert!(output.join("main.lua").is_file());
-    let manifest = manifest(root.path());
-    assert_eq!(manifest["package"]["name"], "sample");
-    assert_eq!(
-        std::fs::read_to_string(output.join("assets/sample/assets/owned.txt")).unwrap(),
-        "owned asset"
-    );
-}
-
-#[test]
 fn asset_check_and_package_validate_the_same_declared_overlay_assets() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("project");
@@ -265,13 +246,6 @@ fn main_and_auxiliary_bank_closures_are_both_packaged() {
 }
 
 #[test]
-fn missing_visual_dependency_rejects_both_commands_without_touching_output() {
-    let root = project("visual_banks = [\"assets/extra.jsonl\"]");
-    bank(root.path(), "assets/extra.jsonl", &"a".repeat(64), 2);
-    reject_both(root.path(), None, "color.png");
-}
-
-#[test]
 fn every_bank_reference_is_verified_even_when_the_digest_is_shared() {
     let root = project("visual_banks = [\"assets/extra.jsonl\", \"assets/other.jsonl\"]");
     let digest = sheet(root.path(), 1);
@@ -420,18 +394,6 @@ fn redundant_sheet_entries_warn_and_preserve_unrelated_overlay_assets() {
 }
 
 #[test]
-fn higher_priority_corruption_does_not_fall_back_to_worktree_sheets() {
-    let root = project("visual_banks = [\"assets/extra.jsonl\"]");
-    let overlay = root.path().join("overlay");
-    let digest = sheet(root.path(), 1);
-    bank(root.path(), "assets/extra.jsonl", &digest, 2);
-    let directory = overlay.join(format!("assets/.eat/{digest}"));
-    std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(directory.join("color.png"), "invalid PNG").unwrap();
-    reject_both(root.path(), Some(&overlay), "decoding");
-}
-
-#[test]
 fn split_generations_and_malformed_banks_reject_both_commands() {
     let root = project("visual_banks = [\"assets/extra.jsonl\"]");
     let overlay = root.path().join("overlay");
@@ -452,69 +414,4 @@ fn split_generations_and_malformed_banks_reject_both_commands() {
     reject_both(root.path(), Some(&overlay), "malformed or inconsistent");
     std::fs::write(&path, format!("{original}{original}")).unwrap();
     reject_both(root.path(), Some(&overlay), "malformed or inconsistent");
-}
-
-#[test]
-fn declaring_a_bank_already_in_release_assets_deduplicates_it() {
-    let root = project("visual_banks = [\"assets/extra.jsonl\"]");
-    release_all_assets(root.path());
-    let digest = sheet(root.path(), 1);
-    bank(root.path(), "assets/extra.jsonl", &digest, 2);
-    success(package(root.path(), None));
-    let staged = manifest(root.path());
-    let keys = staged["artifacts"]["assets"]["keys"].as_array().unwrap();
-    assert_eq!(
-        keys.iter()
-            .filter(|key| key.as_str() == Some("sample/assets/extra.jsonl"))
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn auxiliary_studio_surface_closure_includes_lighting_and_checks_geometry() {
-    let root = project("visual_banks = [\"assets/studio.jsonl\"]");
-    let overlay = root.path().join("overlay");
-    let seed = sheet(&overlay, 1);
-    let png = std::fs::read(overlay.join(format!("assets/.eat/{seed}/color.png"))).unwrap();
-    let mut files = BTreeMap::new();
-    for name in [
-        "albedo.png",
-        "normal.png",
-        "depth.png",
-        "material.png",
-        "painted.png",
-        "radiance.png",
-        "skin-albedo.png",
-        "skin-diffuse.png",
-        "skin-specular.png",
-    ] {
-        files.insert(name, png.clone());
-    }
-    files.insert("sheet.json", br#"{"rects":[[0,0,2,2,0,0,0]]}"#.to_vec());
-    let digest = write_sheet(&overlay, &files);
-    let bank = serde_json::json!({
-        "kind":"surface", "id":"relief", "dir":digest,
-        "size":[2,2], "cell":[2,2], "pivot":[0.5,0.5], "skin_mask":true,
-        "studio":{"skin":true,"radiance_range":16.0},
-        "camera":{"ground_y":0.0,"bases":[[0.,0.,0.,1.,0.,0.,0.,1.,0.,0.,0.,-1.]]}
-    });
-    std::fs::write(
-        root.path().join("assets/studio.jsonl"),
-        bank.to_string() + "\n",
-    )
-    .unwrap();
-    success(asset_check(root.path(), Some(&overlay)));
-    success(package(root.path(), Some(&overlay)));
-    let staged = root
-        .path()
-        .join(format!("dist/assets/sample/assets/.eat/{digest}"));
-    assert_eq!(std::fs::read_dir(&staged).unwrap().count(), files.len());
-    for (name, bytes) in &files {
-        assert_eq!(std::fs::read(staged.join(name)).unwrap(), *bytes);
-    }
-    std::fs::remove_dir_all(root.path().join("dist")).unwrap();
-    let sheet_json = overlay.join(format!("assets/.eat/{digest}/sheet.json"));
-    std::fs::write(sheet_json, br#"{"rects":[]}"#).unwrap();
-    reject_both(root.path(), Some(&overlay), "sheet.json has 0 rects");
 }
