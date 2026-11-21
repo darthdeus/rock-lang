@@ -192,12 +192,6 @@
         local has_storage, view_fields
         if image_mode == "capture" then
             has_storage, view_fields = storage_fields(x)
-        else
-            local shape = rawget(x, "__stone_image_storage_shape")
-            if shape and shape.views then
-                view_fields = {}
-                for _, view in ipairs(shape.views) do view_fields[view.field] = view.key end
-            end
         end
         for k, v in pairs(x) do
             -- A real leaf view is DERIVED from the storage beside it, so a

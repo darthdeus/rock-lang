@@ -45,13 +45,6 @@ inline(lua) fn image_leaf_views_are_omitted(buffer: NativeBuffer<ImageLeafViews>
     local restored = __stone_data_image(user_field, {}, materialize)
     assert(restored.__vf == 17 and rawequal(restored.ptr, copy.ptr),
         "a user field can have the same name as a view")
-
-    user_field.__stone_image_storage_shape = { keys = { "ptr" }, views = {
-        { field = "__vf", cast = "float*", key = "ptr" },
-    } }
-    restored = __stone_data_image(user_field, {}, materialize)
-    assert(restored.__vf == nil and rawequal(restored.ptr, copy.ptr),
-        "a serialized legacy shape still suppresses its view field")
     return true
 """
 
