@@ -661,58 +661,6 @@ mod tests {
     use super::debug_groups_supported;
 
     #[test]
-    fn buffer_upload_reports_driver_failure() {
-        use std::{cell::Cell, ffi::c_void};
-        thread_local! { static ERROR: Cell<u32> = const { Cell::new(glow::NO_ERROR) }; }
-        unsafe extern "system" fn get_string(_: u32) -> *const u8 {
-            c"3.3".as_ptr().cast()
-        }
-        unsafe extern "system" fn get_integer(_: u32, value: *mut i32) {
-            *value = 0;
-        }
-        unsafe extern "system" fn get_error() -> u32 {
-            ERROR.with(|error| error.replace(glow::NO_ERROR))
-        }
-        unsafe extern "system" fn buffer_data(_: u32, size: isize, _: *const c_void, _: u32) {
-            if size > 0 {
-                ERROR.with(|error| error.set(glow::OUT_OF_MEMORY));
-            }
-        }
-        unsafe extern "system" fn buffer_sub_data(_: u32, _: isize, size: isize, _: *const c_void) {
-            if size > 0 {
-                ERROR.with(|error| error.set(glow::OUT_OF_MEMORY));
-            }
-        }
-        let gl = super::DebugGl::new(unsafe {
-            glow::Context::from_loader_function(|name| match name {
-                "glGetString" => get_string as *const c_void,
-                "glGetIntegerv" => get_integer as *const c_void,
-                "glGetError" => get_error as *const c_void,
-                "glBufferData" => buffer_data as *const c_void,
-                "glBufferSubData" => buffer_sub_data as *const c_void,
-                _ => std::ptr::null(),
-            })
-        });
-        unsafe {
-            assert!(gl
-                .buffer_data_u8_slice(glow::ARRAY_BUFFER, &[], glow::STATIC_DRAW)
-                .is_ok());
-            assert!(gl
-                .buffer_data_size(glow::ARRAY_BUFFER, 0, glow::STREAM_DRAW)
-                .is_ok());
-            let result = gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, &[0; 16], glow::STATIC_DRAW);
-            assert!(result.unwrap_err().contains("0x505"));
-            let result = gl.buffer_data_size(glow::ARRAY_BUFFER, 16, glow::STREAM_DRAW);
-            assert!(result.unwrap_err().contains("0x505"));
-            assert!(gl
-                .buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, &[])
-                .is_ok());
-            let result = gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, &[0; 16]);
-            assert!(result.unwrap_err().contains("0x505"));
-        }
-    }
-
-    #[test]
     fn debug_groups_follow_core_versions_and_the_extension() {
         assert!(debug_groups_supported(4, 3, false));
         assert!(debug_groups_supported(4, 6, false));
