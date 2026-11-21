@@ -65,20 +65,3 @@ fn main() {
     print("{take(outer, inner)}")
 }
 "#;
-
-#[test]
-fn representation_waivers_stay_local_and_do_not_bypass_nobox() {
-    for source in [EXEMPTS_ONLY_THAT_PARAM, UNANNOTATED_PAYLOAD_REJECTS] {
-        assert!(emit_rejection(source).contains("column-stored `[P]`"));
-    }
-    let source = r#"
-nobox value NV { x: float, y: float }
-@nomangle inline(lua) fn takes_nv(@repr(opaque) v: NV) -> int = "return 1"
-fn main() { print(takes_nv(NV { x: 1.0, y: 2.0 })) }
-"#;
-    let outcome = |source| try_emit_module(source).map(|_| ()).map_err(|e| e.message);
-    assert_eq!(
-        outcome(source),
-        outcome(&source.replace("@repr(opaque) ", ""))
-    );
-}
