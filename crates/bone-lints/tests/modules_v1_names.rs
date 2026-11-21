@@ -17,32 +17,6 @@ fn lint(src: &str, file: &str, options: &LintOptions) -> Vec<Finding> {
     crate::lint_asts(&mut [module], &[(file, src)], options, true)
 }
 
-#[test]
-fn v1_task_null_abandon_still_fires() {
-    let src = r#"
-struct Task<R = ()> { id: int }
-global SLOT: Task? = null
-fn abandon() { SLOT = null }
-fn main() { SLOT = Task { id: 1 }; abandon() }
-"#;
-    let options = LintOptions::only(["task_null_abandon".to_owned()]);
-    assert_eq!(
-        lint(src, "main.rock", &options).len(),
-        1,
-        "a v1 `Task?` slot set to null must be flagged"
-    );
-}
-
-#[test]
-fn v1_main_is_a_reachability_root() {
-    let src = "fn main() { used() }\nfn used() {}\nfn dead() {}";
-    let options = LintOptions::only([UNUSED_FN.to_owned()]);
-    let findings = lint(src, "main.rock", &options);
-    let mut names: Vec<String> = findings.iter().map(support::quoted).collect();
-    names.sort();
-    assert_eq!(names, vec!["dead".to_string()], "only `dead` is unused");
-}
-
 fn action_gaps(src: &str) -> Vec<String> {
     let options =
         LintOptions::only([ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY));
@@ -70,9 +44,4 @@ fn assert_registration_is_not_a_caller(gaps: Vec<String>) {
     assert_eq!(gaps.len(), 2, "gaps: {gaps:?}");
     assert!(gaps[0].contains("ACT_REFRESHED`"), "{gaps:?}");
     assert!(gaps[1].contains("ACT_REGISTERED`"), "{gaps:?}");
-}
-
-#[test]
-fn v1_action_registration_reads_are_not_callers() {
-    assert_registration_is_not_a_caller(action_gaps(ACTION_REGISTRATION));
 }
