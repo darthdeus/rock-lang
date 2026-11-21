@@ -1,12 +1,4 @@
--- After LspAttach on a .rock buffer, the plugin should set buffer-local
--- `completeopt` and `complete` to the opinionated defaults that
--- suppress text-keyword pollution and surface the menu predictably.
---
--- Bug shape this guards against: typing `let x = 0` previously had the
--- popup mix in `0.5` and other tokens scraped from elsewhere in the
--- file (default `complete=.,w,b,u,t`). Restricting `complete=''` plus
--- `completeopt=menuone,noinsert,fuzzy` keeps the popup LSP-only and
--- editor-side fuzzy matching aligned with the server's ranking.
+-- Restrict completion sources to LSP; fuzzy mode preserves server ranking.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')

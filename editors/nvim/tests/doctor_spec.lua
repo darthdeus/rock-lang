@@ -1,12 +1,4 @@
--- doctor.lua coverage. The :RockLspDoctor command is the user-facing
--- "is everything OK?" check. We drive M.run() directly (skipping the
--- floating-window UI) and assert the synchronous probes return
--- structured results without erroring.
---
--- The async probes (rock/stats, rock/modules, rock/consistency)
--- require a real LSP. With no client attached, the consistency probe
--- short-circuits via the "no rock client" branch — we accept that and
--- only assert on the sync portion of the result list.
+-- Async probes need a real LSP; this fixture checks the synchronous probes.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')

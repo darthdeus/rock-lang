@@ -1,9 +1,4 @@
--- Insert-mode popup ranking. Mirrors completion_ranking_spec.lua
--- (response level) but asserts on `complete_info().items` order so
--- we catch the editor ignoring the server's `sortText`. nvim's
--- built-in completion respects sortText only when `completeopt`
--- includes `fuzzy` (the editor re-sorts otherwise) — this spec is
--- the regression check on that interaction.
+-- Neovim respects sortText only with fuzzy completion enabled.
 
 package.path = package.path .. ';' .. vim.fn.getcwd() .. '/tests/?.lua'
 local NvimChild = require('_lib.nvim_child')

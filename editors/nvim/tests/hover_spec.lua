@@ -1,19 +1,4 @@
--- Hover round-trip against a real rock-lsp.
---
--- Builds on real_lsp_smoke_spec but goes one step further: after
--- attach, send a `textDocument/hover` request through the standard
--- vim.lsp client API and assert a response comes back without error.
--- This proves the full request->response loop through client.lua's
--- wrapped rpc.request dispatcher (which the panel's event ring,
--- per-method timing histograms, and crash detection all rely on).
---
--- We intentionally do NOT assert a specific hover content shape —
--- rock-lsp's hover response format is its own contract, and pinning
--- it from this harness would just produce a brittle test that fails
--- whenever the language server polishes wording. We only require:
---   * the request reached the server (no error)
---   * the response surfaced via the per-method timing ring (proves
---     client.lua's outgoing-request wrapper instrumented it)
+-- Hover wording is owned by the server; this test checks the request and instrumentation.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')

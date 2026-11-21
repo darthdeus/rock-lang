@@ -1,16 +1,3 @@
--- textDocument/definition round-trip against a real rock-lsp.
---
--- The CLI editor tests cover source-level definition queries. This spec
--- drives the live LSP protocol used by `vim.lsp.buf.definition()`.
---
--- Asserts:
---   * the request reaches the server (no error)
---   * the response is a Location/Location[] pointing at the
---     declaration in a different file
---   * URI is a `file://` path inside the test project
---
--- See `references_spec.lua` for the sibling pattern.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

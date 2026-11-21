@@ -1,11 +1,3 @@
--- Insert-mode popup at `Hello::|`. The CLI / response-level path
--- already has coverage in completion_scope_resolution_spec.lua; this
--- one drives a real `:` keystroke through the child-nvim harness so
--- the autotrigger registration (server's `completion_provider.
--- triggerCharacters` + nvim's built-in completion module) is
--- exercised end-to-end. If `:` ever falls out of trigger_characters
--- again, this spec catches it where the response-level one wouldn't.
-
 package.path = package.path .. ';' .. vim.fn.getcwd() .. '/tests/?.lua'
 local NvimChild = require('_lib.nvim_child')
 

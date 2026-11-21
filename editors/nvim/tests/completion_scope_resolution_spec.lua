@@ -1,13 +1,3 @@
--- Live-LSP enum-variant completion at `Hello::|` with no prefix.
---
--- The CLI path (`rock-lsp completion file:line:col` → in-process
--- `do_completion`) returns Alpha/Beta/LongThing here. Reproducing
--- through the docker-spec harness because the live server has drifted
--- from the CLI before (CLAUDE.md "LSP bugs: reproduce through nvim,
--- not the CLI"), and because completion trigger registration
--- (`completion_provider.trigger_characters`) is only exercised
--- end-to-end through the editor.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)
