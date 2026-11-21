@@ -133,11 +133,6 @@ impl Document {
         self.request(method, json!({"position": position, "context": context}))
     }
 
-    fn hover_text(&mut self, line: u32, character: u32) -> String {
-        let reply = self.at("textDocument/hover", line, character);
-        string(&reply["contents"]["value"]).to_owned()
-    }
-
     fn tokens(&mut self) -> Value {
         self.request("textDocument/semanticTokens/full", json!({}))["data"].take()
     }
