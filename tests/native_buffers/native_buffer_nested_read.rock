@@ -1,0 +1,22 @@
+value V2 { x: float, y: float }
+value Vert { pos: V2, uv: V2, id: int, w: float }
+
+@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
+fn nb_vert(n: int) -> NativeBuffer<Vert> { return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n } }
+
+@noalloc fn total(buf: NativeBuffer<Vert>, n: int) -> float {
+    let acc = 0.0
+    for i in 0..n {
+        acc = acc + buf[i].pos.x + buf[i].w
+    }
+    return acc
+}
+
+
+@test(backends = "lua")
+fn nested_buffer_reads_allocate_no_slot_view() {
+    let b = nb_vert(4)
+    b[0] = Vert { pos: V2 { x: 2.0, y: 7.0 }, uv: V2 { x: 80.0, y: 30.0 }, id: 11, w: 0.5 }
+    b[1] = Vert { pos: V2 { x: 4.0, y: 31.0 }, uv: V2 { x: 60.0, y: 70.0 }, id: 5, w: 2.75 }
+    assert(total(b, 2) == 9.25)
+}

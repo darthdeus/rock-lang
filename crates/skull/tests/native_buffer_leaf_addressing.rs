@@ -20,27 +20,6 @@ fn main() {
 }
 "#;
 
-const NESTED_READ: &str = r#"
-value V2 { x: float, y: float }
-value Vert { pos: V2, uv: V2, id: int, w: float }
-
-@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
-fn nb_vert(n: int) -> NativeBuffer<Vert> { return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n } }
-
-fn total(buf: NativeBuffer<Vert>, n: int) -> float {
-    let acc = 0.0
-    for i in 0..n {
-        acc = acc + buf[i].pos.x + buf[i].w
-    }
-    return acc
-}
-
-fn main() {
-    let buf = nb_vert(4)
-    print("{total(buf, 4)}")
-}
-"#;
-
 #[test]
 fn a_whole_element_store_bounds_checks_once_without_ctor_or_slot_reference() {
     let lua = emit_module(NESTED_STORE);
@@ -56,13 +35,6 @@ fn a_whole_element_store_bounds_checks_once_without_ctor_or_slot_reference() {
         .find(".__v")
         .unwrap_or_else(|| panic!("a typed-view use, so the ordering below is checked:\n{body}"));
     assert!(check_at < first_view_use);
-}
-
-#[test]
-fn nested_value_read_takes_no_slot_reference() {
-    let lua = emit_module(NESTED_READ);
-    let body = function_body(&lua, "total");
-    assert!(!body.contains("__nb_checked_get("));
 }
 
 const SINGLE_FIELD_READ: &str = r#"

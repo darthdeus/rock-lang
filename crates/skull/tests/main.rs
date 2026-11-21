@@ -129,7 +129,6 @@ mod return_kills;
 
 mod argument_demand;
 
-mod covered_field_reads;
 mod fresh_struct_projection;
 
 mod leaf_table_projection;

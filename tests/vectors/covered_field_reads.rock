@@ -1,6 +1,3 @@
-use crate::common::{emit_module, function_body};
-
-const SOURCE: &str = r#"
 value Layer { volume: float, speed: float, offset: float, name: string }
 struct Step { layers: Vec<Layer> }
 global marks: int = 0
@@ -19,20 +16,23 @@ fn mark() -> int { marks += 1; return 1 }
     }
     return n
 }
-fn main() {
+@test(backends = "lua", output = "5 7 2")
+fn copied_layer_keeps_its_name_after_call() {
     let step = Step { layers: [
         Layer { volume: 1.0, speed: 2.0, offset: 3.0, name: "ab" },
         Layer { volume: 4.0, speed: 5.0, offset: 6.0, name: "cde" },
     ] }
     print("{name_total(step)} {read_after_call(step)} {marks}")
 }
-"#;
 
-#[test]
-fn unused_field_reads_before_a_read_of_the_same_base_are_dropped() {
-    let lua = emit_module(SOURCE);
-    let body = function_body(&lua, "name_total");
-    for field in ["volume", "speed", "offset"] {
-        assert!(!body.contains(&format!(".{field}")));
-    }
-}
+inline(lua) fn read_with_poisoned_siblings() -> int = """
+    local function make(name)
+        return setmetatable({name = name}, {
+            __index = function(_, key) error("unused field was read: " .. key) end,
+        })
+    end
+    return name_total({layers = {_data = {make("ab"), make("cde")}, len = 2}})
+"""
+
+@test(backends = "lua")
+fn name_reads_leave_sibling_fields_unobserved() { assert(read_with_poisoned_siblings() == 5) }
