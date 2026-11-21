@@ -1,9 +1,3 @@
-// Integer ranges `a..b` (exclusive upper bound) in for loops: variables,
-// expressions, empty and negative ranges, nesting, operator precedence of the
-// bounds and bounds that are function calls with commas. Then
-// __rock_range(min, max, step) for default, positive, zero and negative steps
-// (the positive step lowers to a numeric `for i = min, max - 1, step`), and
-// the float `linspace` and `float_range` constructors.
 
 @test(output = "5\n6")
 fn range_with_variables() {
@@ -54,7 +48,6 @@ fn nested_ranges() {
     }
 }
 
-// -- Precedence: `..` binds less tightly than arithmetic --
 
 @test(output = "0 1 2 3 4 5 6 | 7 8 9 | 6 7 8 9 10 11 12 13 14 15 16 17 18 19")
 fn test_range_arithmetic_precedence() {
@@ -76,7 +69,6 @@ fn test_range_arithmetic_precedence() {
     print(out.trim())
 }
 
-// -- Bounds that are function calls with commas --
 
 fn helper_min(a: int, b: int) -> int {
     if a < b { return a }
@@ -90,7 +82,6 @@ fn helper_max(a: int, b: int) -> int {
 
 fn identity(x: int) -> int { return x }
 
-// Function calls with commas on BOTH sides
 @test
 fn test_range_with_function_calls_both_sides() {
     let nums = vec_new()
@@ -100,7 +91,6 @@ fn test_range_with_function_calls_both_sides() {
     assert_eq(nums, [3, 4, 5, 6])
 }
 
-// Deeply nested: function calls inside function calls on both sides
 @test
 fn test_range_deeply_nested_both_sides() {
     let nums = vec_new()
@@ -110,7 +100,6 @@ fn test_range_deeply_nested_both_sides() {
     assert_eq(nums, [2, 3, 4, 5])
 }
 
-// Nested range loops where both use function call bounds
 @test
 fn test_nested_ranges_with_function_bounds() {
     let sum = 0
@@ -149,7 +138,6 @@ fn test_mmr_min_gt_max_positive_step() {
 
 @test
 fn test_mmr_step_jumps_past_max() {
-    // step bigger than range -> single iteration with min.
     check_range(__rock_range(0, 10, 100), [0], "0..10 step 100")
     check_range(__rock_range(3, 7, 50), [3], "3..7 step 50")
     check_range(__rock_range(-5, 5, 1000), [-5], "-5..5 step 1000")
@@ -157,8 +145,6 @@ fn test_mmr_step_jumps_past_max() {
 
 @test
 fn test_mmr_step_exactly_hits_max() {
-    // The classic exclusive-upper-bound trap. With max-1 limit
-    // these must still NOT include `max`.
     check_range(__rock_range(0, 10, 10), [0], "0..10 step 10 (next=10 excluded)")
     check_range(__rock_range(0, 10, 5), [0, 5], "0..10 step 5 (next=10 excluded)")
     check_range(__rock_range(0, 11, 5), [0, 5, 10], "0..11 step 5 (10<11 included)")
@@ -206,21 +192,18 @@ fn test_mmr_negative_step_untouched() {
     let r2 = __rock_range(5, 5, -1)
     assert_eq(r2.len, 0, "5..5 step -1")
 
-    // step exactly hits max for negative direction
     check_range(__rock_range(10, 0, -5), [10, 5], "10..0 step -5 (next=0 excluded)")
     check_range(__rock_range(10, 0, -10), [10], "10..0 step -10 (next=0 excluded)")
 }
 
 @test
 fn test_mmr_negative_step_min_lt_max() {
-    // wrong direction: min < max with negative step -> []
     let r = __rock_range(0, 5, -1)
     assert_eq(r.len, 0, "0..5 step -1 (wrong dir)")
 }
 
 @test
 fn test_mmr_consistency_step_one_count() {
-    // For step=1 across many ranges, count must equal max - min (or 0 when min >= max).
     for n in 0..20 {
         let r = __rock_range(0, n, 1)
         assert_eq(r.len, n, "0..n step 1 len == n")
@@ -231,20 +214,15 @@ fn test_mmr_consistency_step_one_count() {
     }
 }
 
-// Sanity check that range constructors return real Vec values with the
-// metatable attached (not bare hand-built tables). UFCS dispatch on the
-// result exercises the metatable: if `__rock_create_struct("Vec", ...)`
-// were skipped, the type metatable would be missing.
+// UFCS dispatch needs the Vec metatable on range results.
 @test
 fn test_range_results_are_real_vecs() {
-    // __rock_range: UFCS .len() and .push() on the result.
     let zr = __rock_range(0, 4)
     assert_eq(zr.len(), 4)
     zr.push(99)
     assert_eq(zr.len(), 5)
     assert_eq(vec_get(zr, 4).unwrap(), 99)
 
-    // linspace: float Vec.
     let sb = linspace(0.0, 1.0, 5)
     assert_eq(sb.len(), 5)
     sb.push(2.0)
@@ -253,7 +231,6 @@ fn test_range_results_are_real_vecs() {
 
 @test
 fn test_linspace() {
-    // Evenly spaced from start to end inclusive.
     assert_eq(linspace(0.0, 1.0, 5), [0.0, 0.25, 0.5, 0.75, 1.0])
     assert_eq(linspace(0.0, 1.0, 2), [0.0, 1.0])
     assert_eq(linspace(0.0, 1.0, 1), [0.0])
@@ -263,12 +240,10 @@ fn test_linspace() {
 
 @test
 fn test_float_range() {
-    // The end is excluded.
     assert_eq(float_range(0.0, 1.0, 0.25), [0.0, 0.25, 0.5, 0.75])
     assert_eq(float_range(0.0, 1.0, 0.5), [0.0, 0.5])
     assert_eq(float_range(0.0, 1.0, 2.0), [0.0])
     assert_eq(float_range(10.0, 0.0, -3.0), [10.0, 7.0, 4.0, 1.0])
-    // Empty: start == end, zero step, step pointing away from the end.
     assert_eq(float_range(0.0, 0.0, 0.1).len, 0)
     assert_eq(float_range(0.0, 1.0, 0.0).len, 0)
     assert_eq(float_range(0.0, 1.0, -0.5).len, 0)

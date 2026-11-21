@@ -1,6 +1,3 @@
-// String interpolation format specifiers: float, integer, string and
-// composite formatting, grouping, doubled braces, and precision applied to
-// struct and array fields.
 
 struct FixVec2 { x: float, y: float }
 struct Pair { a: int, b: int }
@@ -20,7 +17,6 @@ fn float_formatting_cases() {
     let t = 3.14
     assert_eq("{t:08.2f}", "00003.14")
     let neg = -1.5
-    // Sign stays leftmost while zero padding fills between sign and digits.
     assert_eq("{neg:08.2f}", "-0001.50")
     let nt = -3.14
     assert_eq("{t:+.2f}", "+3.14")
@@ -42,7 +38,6 @@ fn float_formatting_cases() {
     assert_eq("{n:8.2f}", "   42.00")
 
     v = 0.25
-    // Percent formatting emits the scaled value and one literal percent.
     assert_eq("{v:.1%}", "25.0%")
     let v2 = 0.5
     assert_eq("{v2:.0%}", "50%")
@@ -161,7 +156,6 @@ fn string_formatting_cases() {
     let s = "hi"
     assert_eq("[{s:10s}]", "[        hi]")
     assert_eq("[{s:>10s}]", "[        hi]")
-    // Untyped width and left alignment on a string.
     assert_eq("[{s:>10}]", "[        hi]")
     assert_eq("[{s:<10}]", "[hi        ]")
     assert_eq("[{s:<10s}]", "[hi        ]")
@@ -211,7 +205,6 @@ fn string_formatting_cases() {
 
 @test
 fn composite_formatting_cases() {
-    // Composite formatting must still take the structural rendering path.
     let v = FixVec2 { x: 3.14159, y: 2.71828 }
     assert_eq("{v.x:.2f}", "3.14")
     assert_eq("{v.y:.3f}", "2.718")
@@ -235,7 +228,6 @@ fn composite_formatting_cases() {
     let xs = [1, 2]
     assert_eq(len("[{xs:>20}]"), 22)
 
-    // Precision is applied before width padding.
     v = FixVec2 { x: 1.2345, y: 6.7890 }
     rendered = "{v:.2}"
     assert_eq("[{v:>40.2}]", "[{rendered.pad_left(40)}]")
@@ -315,15 +307,12 @@ fn test_grouping_comma() {
     assert_eq("{x:,.2f}", "1,234.50")
     let neg = -1000000
     assert_eq("{neg:,d}", "-1,000,000")
-    // Values under 1000 get no separator.
     let small = 42
     assert_eq("{small:,d}", "42")
     let edge = 999
     assert_eq("{edge:,d}", "999")
     let thousand = 1000
     assert_eq("{thousand:,d}", "1,000")
-    // Grouping is applied before padding; the resulting "1,000" has
-    // length 5, padded to 10 with leading spaces.
     assert_eq("[{thousand:10,d}]", "[     1,000]")
 }
 
@@ -366,23 +355,19 @@ struct Mixed {
 fn test_struct_float_formatting() {
     let pos = FixVec2 { x: 5.123123, y: 43240.432432 }
 
-    // Without format spec - full precision
     let full = "{pos}"
     assert(full.contains("5.123123"))
     assert(full.contains("43240.432432"))
 
-    // With .1 precision - rounds to 1 decimal place
     let one_decimal = "{pos:.1}"
     assert(one_decimal.contains("5.1"))
     assert(one_decimal.contains("43240.4"))
     assert(!one_decimal.contains("5.123"))
 
-    // With .3 precision - rounds to 3 decimal places
     let three_decimal = "{pos:.3}"
     assert(three_decimal.contains("5.123"))
     assert(three_decimal.contains("43240.432"))
 
-    // With .0 precision - rounds to whole numbers
     let whole = "{pos:.0}"
     assert(whole.contains("x = 5"))
     assert(whole.contains("y = 43240"))
@@ -392,7 +377,6 @@ fn test_struct_float_formatting() {
 fn test_mixed_struct_formatting() {
     let data = Mixed { name: "test", value: 3.14159, count: 42 }
 
-    // With precision - only affects float fields
     let formatted = "{data:.2}"
     assert(formatted.contains("name = \"test\""))
     assert(formatted.contains("value = 3.14"))
@@ -411,7 +395,6 @@ fn test_nested_struct_formatting() {
         label: "object"
     }
 
-    // Precision applies to nested structs too
     let formatted = "{obj:.1}"
     assert(formatted.contains("x = 1.2"))
     assert(formatted.contains("y = 9.9"))
@@ -422,7 +405,6 @@ fn test_nested_struct_formatting() {
 fn test_array_of_floats_formatting() {
     let values = [1.111, 2.222, 3.333]
 
-    // Precision applies to array elements within the Vec structure
     let formatted = "{values:.1}"
     assert(formatted.contains("1.1, 2.2, 3.3"))
     assert(!formatted.contains("1.111"))
@@ -434,7 +416,6 @@ fn test_array_of_floats_formatting() {
 fn test_individual_field_formatting_still_works() {
     let pos = FixVec2 { x: 5.123123, y: 43240.432432 }
 
-    // Individual field formatting should continue to work
     assert("{pos.x:.1}" == "5.1")
     assert("{pos.y:.2}" == "43240.43")
 }
@@ -448,7 +429,6 @@ struct Point {
     y: int
 }
 
-// Width, zero-pad and sign without a type letter on an int.
 @test(output = "042\n7\n07\n00007\n+42\n-17\n100\n0100")
 fn integer_width_sign_and_octal() {
     let x = 42
