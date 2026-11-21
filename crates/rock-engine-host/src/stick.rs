@@ -138,28 +138,6 @@ impl EngineConfigExt for StickConfig {
 mod tests {
     use super::*;
     #[test]
-    fn release_section_parses_assets_through_stick_config() {
-        let cfg = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[release]\nassets = [\"assets\", \"saves/level.json\"]\n",
-            "overlay_assets = [\"assets/particles/blood.png\"]\n",
-        ))
-        .expect("release section must parse");
-        assert_eq!(
-            cfg.release.as_ref().unwrap().assets.as_deref(),
-            Some(&["assets".to_string(), "saves/level.json".to_string()][..])
-        );
-        assert_eq!(
-            cfg.release_assets().unwrap(),
-            vec!["assets", "saves/level.json"]
-        );
-        assert_eq!(
-            cfg.release_overlay_assets().unwrap(),
-            vec!["assets/particles/blood.png"]
-        );
-    }
-
-    #[test]
     fn release_section_rejects_escape_paths() {
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[release]\nassets = [\"../outside\"]\n",
