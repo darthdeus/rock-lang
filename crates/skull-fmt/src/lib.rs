@@ -69,14 +69,18 @@ pub fn try_format_named(
     let tokens = rock_tokenizer::Tokenizer::new(&out, file)
         .tokenize()
         .map_err(|e| format!("{e:?}"))?;
-    let after = comments(&out, &tokens);
+    check_comments(&before, &comments(&out, &tokens))?;
+    Ok(out)
+}
+
+fn check_comments(before: &[String], after: &[String]) -> Result<(), String> {
     if before != after {
         let lost: Vec<&String> = before.iter().filter(|c| !after.contains(c)).collect();
         return Err(format!(
             "formatting would not keep every comment (lost {lost:?}); file left unformatted"
         ));
     }
-    Ok(out)
+    Ok(())
 }
 
 fn comments(src: &str, tokens: &[rock_tokenizer::Token]) -> Vec<String> {
@@ -96,14 +100,12 @@ fn comments(src: &str, tokens: &[rock_tokenizer::Token]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FormatConfig, format_code, try_format};
+    use super::{FormatConfig, check_comments, try_format};
 
     #[test]
-    fn a_comment_the_printer_would_drop_fails_the_format() {
-        let source = "fn f() {\n    let v = (\n        a,\n        // c\n        b\n    )\n}\n";
-        let err = try_format(source, &FormatConfig::default()).expect_err("comment dropped");
+    fn a_missing_comment_fails_the_format() {
+        let err = check_comments(&["// c".into()], &[]).expect_err("comment dropped");
         assert!(err.contains("// c"), "{err}");
-        assert_eq!(format_code(source), source);
     }
 
     #[test]

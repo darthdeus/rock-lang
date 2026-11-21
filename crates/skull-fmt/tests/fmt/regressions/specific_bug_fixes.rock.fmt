@@ -43,11 +43,6 @@ fn filter_loop() {
 fn test() { // Function comment
     process_data()
 }
-//=== EXPECTED ===
-fn test() {
-    // Function comment
-    process_data()
-}
 
 //- identical_trailing_comments_preserved
 fn process() {

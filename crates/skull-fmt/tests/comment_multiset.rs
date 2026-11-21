@@ -80,3 +80,32 @@ fn repository_sources_keep_every_comment() {
     assert!(checked > 100, "only {checked} sources formatted");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn comments_stay_on_their_side_of_the_module_header() {
+    for header in ["mod example;", "mod example; // module note"] {
+        let source = format!("// file overview\n\n{header}\n\nfn main() {{ work() }}\n");
+        assert_eq!(
+            skull_fmt::try_format(&source, &Default::default()).unwrap(),
+            source
+        );
+    }
+}
+
+#[test]
+fn tuple_comments_stay_between_their_elements() {
+    let source = "fn f() {\n    let values = (\n        a,\n        // second element\n        b\n    )\n}\n";
+    assert_eq!(
+        skull_fmt::try_format(source, &Default::default()).unwrap(),
+        source
+    );
+}
+
+#[test]
+fn a_comment_on_the_opening_brace_stays_on_the_header() {
+    let source = "fn f() {\n    if ready { // condition note\n        work()\n    }\n}\n";
+    assert_eq!(
+        skull_fmt::try_format(source, &Default::default()).unwrap(),
+        source
+    );
+}

@@ -83,3 +83,50 @@ fn calls_wrap_when_a_nested_closure_breaks() {
 "
     );
 }
+
+#[test]
+fn formatting_keeps_surface_tree_structure() {
+    let config = skull_fmt::FormatConfig::default();
+    let tree = |source: &str| {
+        let ast = skull_parser::parse_module_clean(source, "<roundtrip>".into()).unwrap();
+        format!("{ast:#?}")
+    };
+    let mut failures = Vec::new();
+    for source in [
+        "fn ns::Type.method<T>(self, extra:T) { extra }\n",
+        "fn ns::Type<T>.method<U>(self, extra:U) { extra }\n",
+        "fn f() {\n    profile @ {\n        action()\n    }\n}\n",
+        "fn f(callback: fn(int)?) { callback }\n",
+        "fn f(callback: fn(int) -> bool? ?) { callback }\n",
+        "fn f(value: (int,)) { value }\n",
+        "fn f() {\n    match x {\n        0 => break,\n        1 => continue,\n        _ => return\n    }\n}\n",
+    ] {
+        let formatted = skull_fmt::try_format(source, &config).expect("format source");
+        if tree(source) != tree(&formatted) {
+            failures.push(format!("{source:?} became {formatted:?}"));
+        }
+        let twice = skull_fmt::try_format(&formatted, &config).unwrap();
+        if twice != formatted {
+            failures.push(format!("{formatted:?} became {twice:?} on the second pass"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn nested_calls_keep_an_existing_hanging_layout() {
+    let config = skull_fmt::FormatConfig::default();
+    let source =
+        "fn f() {\n    check(materialize(read(\n        first,\n        second\n    )))\n}\n";
+    assert_eq!(skull_fmt::try_format(source, &config).unwrap(), source);
+}
+
+#[test]
+fn authored_expression_continuations_stay_broken() {
+    let config = skull_fmt::FormatConfig {
+        max_line_length: 45,
+        ..Default::default()
+    };
+    let source = "global current: int =\n    compute(next, configuration)\n\nfn f() {\n    static total: int =\n        compute(current, configuration)\n    result =\n        compute(current, configuration)\n    let (width, height) =\n        measure(current, configuration)\n    match result {\n        Mode::Primary =>\n            handle(current, configuration),\n        _ => fallback(),\n    }\n}\n";
+    assert_eq!(skull_fmt::try_format(source, &config).unwrap(), source);
+}

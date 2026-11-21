@@ -90,16 +90,6 @@ fn test() {
         update_state()
     }
 }
-//=== EXPECTED ===
-fn test() {
-    profile("conditional") @ if should_process {
-        process_data()
-    } else {
-        skip_processing()
-    }
-
-    timing("loop") @ update_state()
-}
 
 //- at_operator_with_array_and_struct_literals
 fn test() {

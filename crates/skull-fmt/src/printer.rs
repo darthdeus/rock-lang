@@ -90,6 +90,18 @@ impl<'a> Printer<'a> {
         crate::trivia::source_slice(self.src, b0, b1)
     }
 
+    fn continued_rhs(&self, operator: &'static str, span: Span, value: Doc) -> Doc {
+        let prefix = &self.src[..span.offset_range().0];
+        let trimmed = prefix.trim_end();
+        let value =
+            if trimmed.ends_with(operator.trim_start()) && prefix[trimmed.len()..].contains('\n') {
+                Doc::indent(Doc::concat([hardline(), value]))
+            } else {
+                Doc::concat([Doc::text(" "), value])
+            };
+        Doc::concat([Doc::text(operator), value])
+    }
+
     fn source_trailing_comma(&self, last: Span) -> bool {
         let bytes = self.src.as_bytes();
         let mut i = last.offset_range().1.min(bytes.len());
@@ -109,11 +121,12 @@ impl<'a> Printer<'a> {
     }
 
     pub fn module(&self) -> Doc {
-        let header = self
-            .ast
-            .module_header
-            .as_ref()
-            .map(|h| Doc::concat([self.raw(h.span), Doc::text(";")]));
+        let header = self.ast.module_header.as_ref();
+        let header_index = header.map(|header| {
+            self.ast
+                .items
+                .partition_point(|item| item.span.offset_range().0 < header.span.offset_range().0)
+        });
         let item_spans: Vec<Span> = self.ast.items.iter().map(|it| it.span).collect();
         let item_eligible: Vec<bool> = self
             .ast
@@ -146,16 +159,27 @@ impl<'a> Printer<'a> {
         }
 
         let mut parts = Vec::new();
-        if let Some(h) = header {
-            // The file header leads the output with one blank line after it.
-            parts.push(h);
-            parts.push(hardline());
-            parts.push(hardline());
-        }
         let mut prev_end: Option<usize> = None;
         let mut prev_was_comment = false;
         let mut prev_multiline = false;
-        for (idx, item) in self.ast.items.iter().enumerate() {
+        let rows = self.ast.items.iter().zip(item_docs).map(Some).chain([None]);
+        for (idx, row) in rows.enumerate() {
+            if let Some(header) = header.filter(|_| header_index == Some(idx)) {
+                let (start, end) = header.span.line_range();
+                if let Some(prev) = prev_end {
+                    for _ in 0..=self.trivia.blank_count_between(prev, start) {
+                        parts.push(hardline());
+                    }
+                }
+                let declaration = Doc::concat([self.raw(header.span), Doc::text(";")]);
+                parts.push(self.with_trailing_comment(declaration, header.span, 'N'));
+                prev_end = Some(end);
+                prev_was_comment = false;
+                prev_multiline = true;
+            }
+            let Some((item, item_doc)) = row else {
+                break;
+            };
             // At the top level the parser captures a trailing comment as its own
             // `Comment` item; trivia already re-emits it as a trailing comment on
             // the preceding item, so skip it here to avoid double output.
@@ -164,7 +188,6 @@ impl<'a> Printer<'a> {
             {
                 continue;
             }
-            let item_doc = item_docs[idx].clone();
             let cur_multiline = self.item_forces_blank(item, &item_doc);
             if let Some(prev) = prev_end {
                 parts.push(hardline());
@@ -376,8 +399,16 @@ impl<'a> Printer<'a> {
         let coroutine = if f.is_coroutine { "co " } else { "" };
         let mut sig = vec![Doc::text(format!("{coroutine}{keyword} "))];
         if let Some((ty_ident, k)) = &f.receiver_surface {
-            let k = *k;
-            sig.push(Doc::text(kw(ty_ident.name)));
+            let receiver_ty = self.ast.te(&f.params[0].ty);
+            let k = if matches!(receiver_ty.kind, TypeExprKind::Path(_)) {
+                sig.push(self.raw(receiver_ty.span));
+                let method_start = f.name.span.offset_range().0;
+                f.generics
+                    .partition_point(|g| g.name.span.offset_range().0 < method_start)
+            } else {
+                sig.push(Doc::text(kw(ty_ident.name)));
+                *k
+            };
             sig.push(self.generics(&f.generics[..k]));
             sig.push(Doc::text("."));
             sig.push(Doc::text(kw(f.name.name)));
@@ -415,8 +446,7 @@ impl<'a> Printer<'a> {
             parts.push(self.type_expr(ty));
         }
         if let Some(v) = g.value {
-            parts.push(Doc::text(" = "));
-            parts.push(self.expr(v));
+            parts.push(self.continued_rhs(" =", self.ast.e(&v).span, self.expr(v)));
         }
         Doc::concat(parts)
     }
@@ -701,7 +731,7 @@ impl<'a> Printer<'a> {
             let s = self.stmt(stmts[0]);
             return Doc::group(indented_body("{", Doc::concat([line(), s]), line(), "}"));
         }
-        self.expanded_block(stmts)
+        self.expanded_block(block)
     }
 
     fn flow_block(&self, block_idx: Idx<BlockData>) -> Doc {
@@ -717,16 +747,27 @@ impl<'a> Printer<'a> {
                 Doc::concat([Doc::text("{"), hardline(), Doc::text("}")])
             };
         }
-        self.expanded_block(stmts)
+        self.expanded_block(block)
     }
 
-    fn expanded_block(&self, stmts: &[Idx<StatementData>]) -> Doc {
-        indented_body(
-            "{",
-            Doc::concat([hardline(), self.stmt_seq(stmts)]),
-            hardline(),
-            "}",
-        )
+    fn expanded_block(&self, block: &BlockData) -> Doc {
+        let mut stmts = block.statements.as_slice();
+        let mut parts = vec![Doc::text("{")];
+        if let (Some((brace, _)), [first, rest @ ..]) = (block.braces, stmts) {
+            let stmt = self.ast.s(first);
+            if matches!(stmt.kind, StatementKind::Comment(_))
+                && stmt.span.line_range().0 == brace.line_range().0
+                && let Some(text) = self.slice(stmt.span).trim_end().strip_prefix("//")
+            {
+                parts.push(self.sentinel(text, stmt.span.col_range().0, 'N'));
+                stmts = rest;
+            }
+        }
+        if !stmts.is_empty() {
+            parts.push(Doc::indent(Doc::concat([hardline(), self.stmt_seq(stmts)])));
+        }
+        parts.extend([hardline(), Doc::text("}")]);
+        Doc::concat(parts)
     }
 
     fn inline_single_line_block(&self, block_idx: Idx<BlockData>) -> Option<Doc> {
@@ -1203,8 +1244,7 @@ impl<'a> Printer<'a> {
             parts.push(self.type_expr(ty));
         }
         if let Some(v) = l.value {
-            parts.push(Doc::text(" = "));
-            parts.push(self.expr(v));
+            parts.push(self.continued_rhs(" =", self.ast.e(&v).span, self.expr(v)));
         }
         if let Some(b) = l.else_block {
             parts.push(Doc::text(" else "));
@@ -1242,8 +1282,7 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(": "));
             parts.push(self.type_expr(ty));
         }
-        parts.push(Doc::text(" = "));
-        parts.push(self.expr(st.value));
+        parts.push(self.continued_rhs(" =", self.ast.e(&st.value).span, self.expr(st.value)));
         Doc::concat(parts)
     }
 
@@ -1439,9 +1478,10 @@ impl<'a> Printer<'a> {
                 None => Doc::text("yield"),
             },
 
-            ExprKind::Assign { target, value } => {
-                Doc::concat([self.expr(*target), Doc::text(" = "), self.expr(*value)])
-            }
+            ExprKind::Assign { target, value } => Doc::concat([
+                self.expr(*target),
+                self.continued_rhs(" =", self.ast.e(value).span, self.expr(*value)),
+            ]),
 
             ExprKind::Match { scrutinee, arms } => self.match_expr(*scrutinee, arms, data.span),
 
@@ -1577,32 +1617,15 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(" if "));
             parts.push(self.expr(g));
         }
-        parts.push(Doc::text(" => "));
-        // Arm body: `=> expr` if the author wrote no braces, else a block that
-        // PRESERVES the author's layout -- a single-line `=> { stmt }` stays
-        // inline, a multi-line block stays expanded.
-        if !self.block_has_braces(arm.body) {
-            let stmts = &self.ast.b(&arm.body).statements;
-            if stmts.len() == 1 {
-                match &self.ast.s(&stmts[0]).kind {
-                    StatementKind::Expression(e) => {
-                        parts.push(self.expr(*e));
-                        return Doc::concat(parts);
-                    }
-                    StatementKind::Return { value: Some(e), .. } => {
-                        let stmt_start = self.ast.s(&stmts[0]).span.offset_range().0;
-                        let val_start = self.ast.e(e).span.offset_range().0;
-                        if stmt_start < val_start {
-                            parts.push(Doc::text("return "));
-                        }
-                        parts.push(self.expr(*e));
-                        return Doc::concat(parts);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        parts.push(self.flow_block(arm.body));
+        let body = self.ast.b(&arm.body);
+        let value = if !self.block_has_braces(arm.body)
+            && let [statement] = body.statements.as_slice()
+        {
+            self.stmt(*statement)
+        } else {
+            self.flow_block(arm.body)
+        };
+        parts.push(self.continued_rhs(" =>", body.span, value));
         Doc::concat(parts)
     }
 
@@ -1680,16 +1703,10 @@ impl<'a> Printer<'a> {
             _ if others.is_empty() => self.expr(func),
             _ => self.call(func, others, head_span),
         };
-        let stmts = &self.ast.b(&body).statements;
-        let rhs_expr = if !self.block_has_braces(body) {
-            self.arrow_body_expr(body)
-        } else if stmts.len() == 1 {
-            match &self.ast.s(&stmts[0]).kind {
-                StatementKind::Expression(e) => Some(*e),
-                _ => None,
-            }
-        } else {
+        let rhs_expr = if self.block_has_braces(body) {
             None
+        } else {
+            self.arrow_body_expr(body)
         };
         let rhs = rhs_expr
             .map(|e| self.expr(e))
@@ -1755,7 +1772,9 @@ impl<'a> Printer<'a> {
         let renders_multiline = docs.iter().any(Doc::has_hard_line);
         let source_multiline = span.line_range().0 != span.line_range().1 || renders_multiline;
         let hugs_trailing_arg = self.hugs_trailing_arg(args, span);
-        if source_multiline && hugs_trailing_arg {
+        if source_multiline
+            && (hugs_trailing_arg || !has_comments && self.hugs_nested_call(args, span))
+        {
             return inline_comma_list("(", ")", docs);
         }
         if !has_comments && source_multiline && !renders_multiline {
@@ -1871,6 +1890,25 @@ impl<'a> Printer<'a> {
         )
     }
 
+    fn hugs_nested_call(&self, args: &[FunctionCallArg], span: Span) -> bool {
+        let [arg] = args else {
+            return false;
+        };
+        let inner = self.ast.e(&arg.value);
+        let lines = span.line_range();
+        arg.name.is_none()
+            && !arg.is_splat
+            && !arg.is_spread
+            && lines.0 != lines.1
+            && lines == inner.span.line_range()
+            && matches!(inner.kind, ExprKind::FunctionCall { .. })
+            && self
+                .slice_range(span.offset_range().0, inner.span.offset_range().0)
+                .trim_end()
+                .ends_with('(')
+            && !self.source_trailing_comma(inner.span)
+    }
+
     fn hugs_trailing_arg(&self, args: &[FunctionCallArg], span: Span) -> bool {
         let Some(last) = args.last() else {
             return false;
@@ -1943,6 +1981,10 @@ impl<'a> Printer<'a> {
     }
 
     fn tuple(&self, items: &[Idx<ExprData>], span: Span) -> Doc {
+        let (lo, hi) = span.offset_range();
+        if self.trivia.has_block_comment_in(lo, hi) || self.trivia.has_line_comment_in(lo, hi) {
+            return self.raw(span);
+        }
         // A singleton tuple needs a comma to distinguish it from grouping.
         let trailing = if items.len() == 1 { "," } else { "" };
         let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
@@ -2154,12 +2196,16 @@ impl<'a> Printer<'a> {
                 inline_comma_list("<", ">", args.iter().map(|a| self.type_expr(*a))),
             ]),
             TypeExprKind::Tuple(tys) => {
-                inline_comma_list("(", ")", tys.iter().map(|t| self.type_expr(*t)))
+                let close = if tys.len() == 1 { ",)" } else { ")" };
+                inline_comma_list("(", close, tys.iter().map(|t| self.type_expr(*t)))
             }
             TypeExprKind::Function { params, ret } => {
                 let source = self.slice(data.span).trim_start();
                 let starts_fn =
                     source.starts_with("fn") && source[2..].trim_start().starts_with('(');
+                if starts_fn && data.is_nullable {
+                    return self.raw(data.span);
+                }
                 let starts_parenthesized_fn =
                     source.starts_with('(') && source[1..].trim_start().starts_with("fn") && {
                         let inner = source[1..].trim_start();

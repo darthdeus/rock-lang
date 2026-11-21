@@ -75,16 +75,3 @@ fn test() {
         show_error_message()
     }
 }
-//=== EXPECTED ===
-fn test() {
-    if state == State::Loading {
-        // Still initializing
-        show_spinner()
-    } else if state == State::Ready {
-        // Ready for user input
-        enable_controls()
-    } else {
-        // Error state
-        show_error_message()
-    }
-}

@@ -75,16 +75,3 @@ fn test() {
         default_action()
     }
 }
-//=== EXPECTED ===
-fn test() {
-    if condition_a {
-        // Comment A
-        action_a()
-    } else if condition_b {
-        // Comment B
-        action_b()
-    } else {
-        // Comment C
-        default_action()
-    }
-}
