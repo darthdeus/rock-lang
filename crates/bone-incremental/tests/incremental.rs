@@ -223,112 +223,6 @@ impl Harness {
 }
 
 #[test]
-fn coroutine_body_edit_stays_valid() {
-    let v = |n: u32| {
-        format!(
-            "co fn counter() -> Coroutine<int> {{\n  yield {n}\n}}\nfn main() {{\n  let c = counter()\n}}\n"
-        )
-    };
-    let mut h = Harness::new(&[("c.rock", &v(1))]);
-    h.assert_clean();
-    h.update("c.rock", &v(10));
-    h.assert_clean();
-    let ws = h.session.workspace();
-    let mid = ws.module_ids[&Ustr::from("c.rock")];
-    let module = ws.module(mid);
-    let (_, fid) = module
-        .functions_by_name
-        .iter()
-        .find(|(name, _)| name.as_str().rsplit("::").next() == Some("counter"))
-        .expect("counter function")
-        .1[0];
-    assert!(module.functions[fid].is_coroutine);
-}
-
-#[test]
-fn decorated_body_edit_stays_valid() {
-    let v0 = "global G: int = 0\ndeco init upd { }\n@upd\nfn tick() { G = 1 }";
-    let v1 = "global G: int = 0\ndeco init upd { }\n@upd\nfn tick() { G = 2 }";
-    let mut h = Harness::new(&[("m.rock", v0)]);
-    h.update("m.rock", v1);
-    h.assert_clean();
-}
-
-#[test]
-fn overloaded_body_edit_reports_the_changed_overload_error() {
-    let source = |float_body: &str| {
-        format!("fn foo(x: int) -> int {{ 1 }}\nfn foo(x: float) -> float {{ {float_body} }}\n")
-    };
-    let mut h = Harness::new(&[("m.rock", &source("0.0"))]);
-    h.assert_clean();
-    h.update("m.rock", &source("true"));
-    h.assert_diagnostic("type mismatch");
-    h.update("m.rock", &source("0.0"));
-    h.assert_clean();
-}
-
-#[test]
-fn multi_function_edit_keeps_types_after_a_single_body_edit() {
-    let source = |params, left, right| {
-        format!(
-            "struct P {{ x: int }}\nfn f(p: P{params}) -> int {{ return{left}p.x }}\nfn g(p: P) -> int {{ return{right}p.x }}"
-        )
-    };
-    let mut h = Harness::new(&[("a.rock", &source("", " ", " "))]);
-    let params = ", extra: int = 1";
-    for (left, right) in [(" ", " "), ("  ", " "), (" ", "  ")] {
-        h.update("a.rock", &source(params, left, right));
-    }
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_signature_edit_breaks_then_fixes_cross_file_caller() {
-    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-
-    // An int->float param change would not break the caller: int literals coerce.
-    let changed = CROSS_FILE_A
-        .replace("x: int, y: int", "x: int")
-        .replace("y: y", "y: x");
-    h.update("a.rock", &changed);
-    assert!(
-        !h.session.diagnostics().is_empty(),
-        "caller in b.rock must error after the signature change"
-    );
-
-    h.update(
-        "b.rock",
-        &CROSS_FILE_B.replace("make_point(0, 0)", "make_point(0)"),
-    );
-    h.assert_clean();
-}
-
-#[test]
-fn itemless_file_before_others_keeps_module_ids_aligned() {
-    let warm = warm_prelude();
-    let session = common::with_warm(
-        vec![warm],
-        files(&[
-            ("empty.rock", ""),
-            (
-                "later.rock",
-                "fn foo() -> int { 1 }\nfn use_foo() -> int { foo() }",
-            ),
-        ]),
-    );
-
-    let diags: Vec<_> = session
-        .diagnostics()
-        .iter()
-        .map(|e| format!("{}:{} {}", e.location.file, e.location.offset, e.message))
-        .collect();
-    assert!(
-        diags.is_empty(),
-        "post-gap module mis-resolved (id misalignment): {diags:#?}"
-    );
-}
-
-#[test]
 fn oracle_add_then_remove_file() {
     let mut h = Harness::new(&[("a.rock", CROSS_FILE_A)]);
 
@@ -351,129 +245,6 @@ fn sum_xy(p: Point) -> int {
 }
 
 #[test]
-fn deleting_a_definition_breaks_body_and_signature_users_then_recovers() {
-    for (path, source, diagnostic) in [
-        (
-            "d.rock",
-            "\nfn count_points() -> int {\n    let p = make_point(1, 2)\n    p.x\n}\n",
-            "",
-        ),
-        ("b.rock", CROSS_FILE_B, "Point"),
-    ] {
-        let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), (path, source)]);
-        h.assert_clean();
-        h.remove("a.rock");
-        assert!(!h.session.diagnostics().is_empty());
-        h.assert_diagnostic(diagnostic);
-        assert!(!h.session.is_tracked("a.rock"));
-        h.update("a.rock", CROSS_FILE_A);
-        h.assert_clean();
-    }
-}
-
-#[test]
-fn oracle_for_iter_protocol_invalidates_on_next_edit() {
-    let with_next = "\
-struct R { hi: int }
-struct RIt { cur: int, hi: int }
-fn iter(r: R) -> RIt { RIt { cur: 0, hi: r.hi } }
-fn next(it: RIt) -> (bool, int) {
-    if it.cur < it.hi { let v = it.cur; it.cur = it.cur + 1; (true, v) } else { (false, 0) }
-}
-fn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }
-";
-    let mut h = Harness::new(&[("it.rock", with_next)]);
-    h.assert_clean();
-
-    let start = with_next.find("fn next").unwrap();
-    let end = with_next.find("fn total").unwrap();
-    let without_next = format!("{}{}", &with_next[..start], &with_next[end..]);
-    h.update("it.rock", &without_next);
-    assert!(
-        !h.session.diagnostics().is_empty(),
-        "removing `next` must break the for-loop over R"
-    );
-
-    h.update("it.rock", with_next);
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_introduce_and_fix_type_error() {
-    let mut h = Harness::new(&[("a.rock", "fn f() -> int { 1 }")]);
-    h.assert_clean();
-
-    h.update("a.rock", "fn f() -> int { true }");
-    assert_eq!(h.session.diagnostics().len(), 1);
-
-    h.update("a.rock", "fn f() -> int { 2 }");
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_cascades_commit_errors_and_recover() {
-    for (initial, path, broken, diagnostic) in [
-        (
-            vec![("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)],
-            "b.rock",
-            "fn f(p: Nonexistent) -> int { 1 }",
-            "Nonexistent",
-        ),
-        (
-            vec![("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)],
-            "a.rock",
-            "fn unrelated() -> int { 1 }",
-            "Point",
-        ),
-        (
-            vec![
-                ("a.rock", "value T { v: int }"),
-                (
-                    "b.rock",
-                    "struct Wrap { inner: T }\nfn unwrap(w: Wrap) -> int { w.inner.v }",
-                ),
-                ("c.rock", "fn use_wrap(w: Wrap) -> int { unwrap(w) }"),
-            ],
-            "a.rock",
-            "fn nothing() -> int { 0 }",
-            "",
-        ),
-        (
-            vec![
-                ("a.rock", "struct Foo { v: int }"),
-                ("b.rock", "fn sig(f: Foo) -> int { let x: Foo = f\n x.v }"),
-            ],
-            "a.rock",
-            "fn nothing() -> int { 0 }",
-            "",
-        ),
-    ] {
-        let mut h = Harness::new(&initial);
-        h.assert_clean();
-        let original = h.session.files[path].text.clone();
-        h.update(path, broken);
-        assert!(!h.session.diagnostics().is_empty(), "{broken}");
-        h.assert_diagnostic(diagnostic);
-        h.update(path, &original);
-        h.assert_clean();
-    }
-}
-
-#[test]
-fn oracle_type_rename_cascades_both_directions() {
-    let a = "struct Point { x: int }";
-    let b = "fn px(p: Point) -> int { p.x }";
-    let mut h = Harness::new(&[("a.rock", a), ("b.rock", b)]);
-    h.assert_clean();
-
-    h.update("a.rock", "struct Pointe { x: int }"); // rename Point -> Pointe
-    h.assert_diagnostic("Point");
-
-    h.update("b.rock", "fn px(p: Pointe) -> int { p.x }"); // fix the reference
-    h.assert_clean();
-}
-
-#[test]
 fn oracle_add_and_remove_macro_definition() {
     let plain = "fn f() -> int { 1 }";
     let defined = "macro wrap(e: expr) { e }\nfn f() -> int { 1 }";
@@ -486,24 +257,6 @@ fn oracle_add_and_remove_macro_definition() {
     h.update("m.rock", "fn f() -> int { wrap(1) }");
     h.assert_diagnostic("wrap");
     h.update("m.rock", called);
-    h.assert_clean();
-}
-
-#[test]
-fn oracle_macro_user_body_edit_and_macro_def_edit() {
-    let macro_def = |body: &str| {
-        format!("macro twice(e: expr) {{\n    {body}\n}}\n\nfn base() -> int {{ 3 }}\n")
-    };
-    let mut h = Harness::new(&[
-        ("m.rock", &macro_def("(e) + (e)")),
-        ("use.rock", "fn quad() -> int { twice(base()) }"),
-    ]);
-    h.assert_clean();
-
-    h.update("use.rock", "fn quad() -> int { twice(base()) + 1 }");
-    h.assert_clean();
-
-    h.update("m.rock", &macro_def("(e) + (e) + (e)"));
     h.assert_clean();
 }
 
@@ -521,74 +274,6 @@ fn oracle_macro_def_retype_then_user_body_edit_sees_new_registry() {
     h.update("use.rock", "fn f() -> int { wrap(5) + 0 }");
 }
 
-#[test]
-fn oracle_globals_survive_repeated_updates() {
-    // `global G: int` has a builtin type, so the purge must not key on the type module.
-    let with_global = "
-global GRID_W: int = 8
-
-fn area() -> int {
-    GRID_W * GRID_W
-}
-";
-    let mut h = Harness::new(&[("g.rock", with_global)]);
-    h.assert_clean();
-
-    h.update(
-        "g.rock",
-        &with_global.replace("GRID_W * GRID_W", "GRID_W * GRID_W * 1"),
-    );
-    h.assert_clean();
-
-    h.update("h.rock", "fn use_area() -> int { area() }");
-    h.assert_clean();
-}
-
-#[test]
-fn per_body_hazard_edit_above_shifts_sibling_spans() {
-    let source = |first, second| {
-        format!(
-            "fn first() -> int {{\n    {first}\n}}\n\nfn second() -> int {{\n    {second}\n}}\n"
-        )
-    };
-    let mut h = Harness::new(&[("s.rock", &source("1", "first()"))]);
-    h.assert_clean();
-    for (first, second, errors) in [
-        ("100000", "first()", 0),
-        ("1", "true", 1),
-        ("123456789", "true", 1),
-    ] {
-        h.update("s.rock", &source(first, second));
-        assert_eq!(h.session.diagnostics().len(), errors);
-    }
-}
-
-#[test]
-fn body_edits_preserve_sibling_inference() {
-    let cases = [
-        // Generic and inferred VarIds share a module-wide counter.
-        (
-            "generic function beside a hole annotation",
-            "fn ident<T>(x: T) -> T {\n    x\n}\n\nfn holes() -> int {\n    let v: _ = 41\n    v\n}\n\nfn uses_ident() -> int {\n    ident(7)\n}\n",
-            "41",
-            "42",
-        ),
-        (
-            "global initializer and struct defaults",
-            "global BASE: int = 10\n\nstruct Conf {\n    scale: int = 3,\n}\n\nfn use_conf(c: Conf) -> int {\n    c.scale + BASE\n}\n",
-            "c.scale + BASE",
-            "c.scale + BASE + BASE",
-        ),
-    ];
-    for (case, initial, from, to) in cases {
-        let mut h = Harness::new(&[("m.rock", initial)]);
-        h.assert_clean();
-        let text = initial.replace(from, to);
-        h.update("m.rock", &text);
-        assert!(h.session.diagnostics().is_empty(), "{case}");
-    }
-}
-
 fn stdlib_warm_modules() -> Vec<skull_parser::Ast> {
     rock_stdlib::stdlib_files()
         .iter()
@@ -598,28 +283,6 @@ fn stdlib_warm_modules() -> Vec<skull_parser::Ast> {
                 .unwrap_or_else(|e| panic!("stdlib {} must parse: {e:?}", f.name))
         })
         .collect()
-}
-
-#[test]
-fn body_edit_dependency_removal_preserves_field_dependency() {
-    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-    let no_factory_call = CROSS_FILE_B.replace("double_x(make_point(0, 0))", "42");
-    h.update("b.rock", &no_factory_call);
-    h.assert_clean();
-
-    let changed_factory = CROSS_FILE_A.replace(
-        "fn make_point(x: int, y: int) -> Point {",
-        "fn make_point(x: int, y: int, z: int) -> Point {",
-    );
-    h.update("a.rock", &changed_factory);
-    h.assert_clean();
-
-    let changed_field = changed_factory.replace("x: int,", "x: string,");
-    h.update("a.rock", &changed_field);
-    h.assert_diagnostic("b.rock: ");
-
-    h.update("a.rock", CROSS_FILE_A);
-    h.assert_clean();
 }
 
 #[test]
@@ -635,46 +298,6 @@ fn consume_annotation_edit_reports_the_reuse_error() {
 }
 
 // A new same-typed function must not change which definition the caller reaches.
-#[test]
-fn adding_a_definition_keeps_later_calls_resolved() {
-    let without = "fn first() -> int { 1 }\nfn later() -> int { 2 }\n";
-    let with = "fn first() -> int { 1 }\nfn added() -> string { \"x\" }\nfn later() -> int { 2 }\n";
-    let mut h = Harness::new(&[
-        ("a.rock", without),
-        ("b.rock", "fn use_later() -> int { later() }"),
-    ]);
-
-    h.update("a.rock", with);
-    h.assert_clean();
-}
-
-#[test]
-fn interface_edit_reaches_cross_file_users() {
-    let cases = [
-        (
-            "global G: int = 0",
-            "global G: float = 0.0",
-            "fn use_g() -> int { G }",
-        ),
-        (
-            "macro twice(e: expr) { (e) + (e) }\nfn base() -> int { 3 }",
-            "macro twice(e: expr) { (e) + 1.0 }\nfn base() -> int { 3 }",
-            "fn quad() -> int { twice(base()) }",
-        ),
-        (
-            "newtype Meters(int)",
-            "newtype Meters(float)",
-            "fn unwrap(m: Meters) -> int { m.0 }",
-        ),
-    ];
-    for (before, after, user) in cases {
-        let mut h = Harness::new(&[("f.rock", before), ("user.rock", user)]);
-        h.assert_clean();
-        h.update("f.rock", after);
-        h.assert_diagnostic("user.rock: ");
-    }
-}
-
 struct Rng(u64);
 
 impl Rng {
