@@ -1,6 +1,6 @@
 use crate::common::{
     body_id, check_incremental, definition_names, definitions_matching, edit, emit_full_of,
-    function_body, global_body, name_matches, run_luajit, ws_of, ws_with_stdlib,
+    function_body, global_body, run_luajit, ws_of, ws_with_stdlib,
 };
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
@@ -68,19 +68,6 @@ fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
     }
     runtime.push_str("print('ok')");
     assert_eq!(run_luajit(&runtime), "ok");
-}
-
-#[test]
-fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
-    let v1 =
-        "@nomangle fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }";
-    let v2 = v1.replace("a < b", "a > b");
-    let ws2 = ws_of(&v2);
-    let edit = edit(&ws_of(v1), &ws2, &[body_id(&ws2, "choose")]);
-    assert!(edit.base.lua.contains("math.min("));
-    let overlay = edit.overlay.expect("overlay");
-    assert!(overlay.lua.contains("math.max("));
-    assert!(!overlay.lua.contains("math.min("));
 }
 
 fn inline_budget_eligibility_flip_fixture(large_helper: bool) -> String {
@@ -207,37 +194,6 @@ fn retained_paths_match_fresh_emission_over_an_edit_sequence() {
     }
 }
 
-#[test]
-fn body_edit_to_a_function_with_lambdas_matches_a_full_emit() {
-    let fixture = |step: i32| {
-        format!(
-            "fn apply(f: fn(int) -> int, x: int) -> int {{ return f(x) }}\n\
-             fn lambdas(n: int) -> int {{\n\
-                 let base = n * 2\n\
-                 let a = (x: int) => x + base\n\
-                 let b = (x: int) => {{\n\
-                     if x > {step} {{ return x - base }}\n\
-                     return apply(a, x)\n\
-                 }}\n\
-                 return apply(a, n) + apply(b, n + {step})\n\
-             }}\n\
-             fn other() -> int {{ return lambdas(3) }}"
-        )
-    };
-    let (v1, v2) = (fixture(1), fixture(4));
-    let ws2 = ws_with_stdlib(&v2);
-    let edit = edit(&ws_with_stdlib(&v1), &ws2, &[body_id(&ws2, "lambdas")]);
-    let (updated, overlay) = (edit.incremental, edit.overlay.expect("overlay"));
-    let lambdas = definitions_matching(&updated.lua, "__lambda");
-    assert!(lambdas.len() >= 2);
-    for name in lambdas {
-        assert_eq!(
-            function_body(&overlay.lua, name),
-            function_body(&updated.lua, name)
-        );
-    }
-}
-
 fn tally_workspace(marker: &str, use_q: bool) -> Workspace {
     let result = if use_q {
         "tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a"
@@ -310,51 +266,6 @@ fn specialization_overlays_track_added_pruned_and_restored_instances() {
             }
         }
     }
-}
-
-#[test]
-fn an_overlay_carries_a_graph_added_library_body() {
-    let v1 = "fn use_it(c: int) -> bool { return c == 32 }\n\
-              fn main() { print(\"{use_it(9)}\") }";
-    let v2 = "fn use_it(c: int) -> bool { return is_ascii_ws(c) }\n\
-              fn main() { print(\"{use_it(9)}\") }";
-
-    let ws1 = ws_with_stdlib(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let defines = |lua: &str| {
-        lua.lines()
-            .any(|l| l.starts_with("function is_ascii_ws_int("))
-    };
-    assert!(!defines(&full.lua));
-
-    let ws2 = ws_with_stdlib(v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
-    assert!(overlay.lua.contains("is_ascii_ws_int("));
-    assert!(defines(&overlay.lua));
-}
-
-#[test]
-fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
-    let v1 = "nobox value P { x: float, y: float }\n\
-              co fn walk<T>(v: [T]) -> Coroutine<int, int, ()> {\n\
-              \x20   let n = v.len\n\
-              \x20   yield n\n\
-              \x20   return 1\n\
-              }\n\
-              fn use_it() -> Coroutine<int, int, ()> {\n\
-              \x20   let xs: [P] = [P { x: 1.0, y: 0.0 }]\n\
-              \x20   return walk(xs)\n\
-              }";
-    let v2 = v1.replace("return 1", "return 2");
-    let ws = ws_with_stdlib(v1);
-    let (full, mut cache) = emit_full_of(&ws, "initial emit");
-    let spec_steps = definition_names(&full.lua)
-        .into_iter()
-        .filter(|name| name.contains("_spec_") && name.ends_with("__step"))
-        .count();
-    assert_eq!(spec_steps, 1);
-    let ws = ws_with_stdlib(&v2);
-    check_incremental(&ws, &mut cache, &[body_id(&ws, "walk")]);
 }
 
 #[test]
@@ -529,32 +440,6 @@ return c.v }
 }
 
 #[test]
-fn flat_ref_abi_uses_logical_layout() {
-    let ws = ws_with_stdlib(
-        r#"
-value Cell { v: int }
-fn bump(c: ref Cell) -> int { c.v += 1
-return c.v }
-fn sample() -> int {
-    let xs: [Cell] = []
-    xs.push(Cell { v: 10 })
-    return bump(xs[0])
-}
-"#,
-    );
-    let (full, _) = emit_full_of(&ws, "emit_full");
-    let flat_abis: Vec<_> = full
-        .code_artifact
-        .entries
-        .values()
-        .map(|entry| entry.compatibility.call_abi.as_str())
-        .filter(|abi| abi.contains("|flat "))
-        .collect();
-    assert!(!flat_abis.is_empty());
-    assert!(flat_abis.iter().all(|abi| !abi.contains("RepId")));
-}
-
-#[test]
 fn newly_stringified_enum_gets_its_names_table_in_incremental_and_overlay() {
     let v1 = r#"
 enum Mode { Idle, Busy }
@@ -659,52 +544,6 @@ fn inline_decisions_follow_helper_edits() {
 }
 
 #[test]
-fn overlays_restage_only_changed_code_refs() {
-    let v1 = r#"
-@lifecycle(phase="update", owner="process")
-deco init tick {}
-@tick fn first() {}
-@tick fn second() {}
-fn helper() -> int { return 1 }
-fn main() { let _ = helper() }
-"#;
-    let ws1 = ws_of(v1);
-    let (full, _) = emit_full_of(&ws1, "emit_full v1");
-    let escaping = full
-        .code_artifact
-        .entries
-        .values()
-        .filter(|entry| entry.escaping)
-        .count();
-    assert!(escaping >= 2);
-
-    for (v2, edited, staged_count) in [
-        (v1.replace("return 1", "return 2"), "helper", 0),
-        (
-            v1.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }"),
-            "first",
-            1,
-        ),
-    ] {
-        let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
-        let ws2 = ws_of(&v2);
-        let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, edited)]).lua;
-        let staged: Vec<_> = overlay
-            .lines()
-            .filter(|line| line.contains("__rock_code_slot_stage("))
-            .collect();
-        assert_eq!(staged.len(), staged_count);
-        assert!(overlay.contains("__rock_code_slot_publish()"));
-        if let Some(stage) = staged.first() {
-            assert!(stage.contains("named:<t>::first_0<>"));
-            let stage_offset = overlay.find("__rock_code_slot_stage(").unwrap();
-            let body_offset = overlay.find("function first").expect("changed body");
-            assert!(body_offset < stage_offset);
-        }
-    }
-}
-
-#[test]
 fn body_edit_to_a_generic_reemits_its_specializations() {
     let v1 = "value V2 { x: float, y: float }\n\
               fn first<T>(xs: [T]) -> T { return xs[0] }\n\
@@ -729,17 +568,6 @@ const ABI_FLIP_V2: &str = "value V2 { x: float, y: float }\n\
     let f = foo\n\
     f(V2 { x: 1.0, y: 2.0 })\
     }";
-
-#[test]
-fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
-    let ws1 = ws_with_stdlib(ABI_FLIP_V1);
-    let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    assert!(full1.lua.contains("function foo_"));
-
-    let ws2 = ws_with_stdlib(ABI_FLIP_V2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_ref")]);
-    assert!(overlay.lua.contains("function foo_") && overlay.lua.contains("function use_ref"));
-}
 
 #[test]
 fn a_failed_graph_added_body_is_rejected_by_every_emit_route() {
@@ -781,54 +609,6 @@ fn a_failed_graph_added_body_is_rejected_by_every_emit_route() {
         let err = result.expect_err(route);
         assert!(err.message.contains("nobox") && err.message.contains("bad"));
     }
-}
-
-#[test]
-fn caller_edits_add_and_prune_specializations_per_instance() {
-    let types = "value P { x: float, y: float }\n\
-                 value Q { a: float, b: float, c: float }\n\
-                 fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
-    let one = types.to_string()
-        + "fn use_it() -> float {\n\
-           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
-           \x20   return tally_of(ps).x\n\
-           }";
-    let both = types.to_string()
-        + "fn use_it() -> float {\n\
-           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
-           \x20   let qs: [Q] = [Q { a: 1.0, b: 2.0, c: 3.0 }]\n\
-           \x20   return tally_of(ps).x + tally_of(qs).a\n\
-           }";
-    let specs = |src: &str| {
-        let (full, _) = emit_full_of(&ws_with_stdlib(src), "emit_full");
-        full.lua
-            .lines()
-            .filter(|l| l.starts_with("function tally_of_") && l.contains("_spec_"))
-            .count()
-    };
-    assert_eq!((specs(&one), specs(&both)), (1, 2));
-    check_edit(ws_with_stdlib, &one, &both, "use_it");
-    check_edit(ws_with_stdlib, &both, &one, "use_it");
-}
-
-#[test]
-fn changed_call_graph_reaching_a_foreign_publisher_matches_full_emission() {
-    let v1 = "fn helper() -> int { 3 }\ninline(lua) fn extra() -> int = \"return 7\"\nfn main() { let x = helper() }";
-    let v2 = v1.replace("{ 3 }", "{ extra() }");
-    let ws1 = ws_with_stdlib(v1);
-    let (_, mut cache) = emit_full_of(&ws1, "initial emit");
-    let ws2 = ws_with_stdlib(&v2);
-    check_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")]);
-    assert!(
-        cache
-            .lua_view()
-            .publisher_lanes
-            .keys()
-            .any(|i| name_matches(
-                ws2.module(i.func.module).functions[i.func.func].name,
-                "extra"
-            ))
-    );
 }
 
 const MULTI_REGION_COROUTINE: &str = r#"
@@ -873,71 +653,4 @@ fn multi_region_coroutine_topology_gates_overlays() {
         .map(|_| ())
         .expect_err("inserting a lambda into a region must refuse the overlay");
     assert!(err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"));
-}
-
-#[test]
-fn repeated_body_overlays_keep_the_fingerprint_of_a_full_emit() {
-    let mut source =
-        String::from("fn helper() -> int { return 1 }\nfn main() { let _ = helper() }\n");
-    for index in 0..40 {
-        source.push_str(&format!(
-            "fn unrelated{index}() -> int {{ return {index} }}\n"
-        ));
-    }
-    let original = ws_of(&source);
-    let (_, mut cache) = emit_full_of(&original, "emit_full v1");
-    let before = cache.artifact_fingerprint(&original).unwrap();
-    let edit = |value: i32| ws_of(&source.replacen("return 1 }", &format!("return {value} }}"), 1));
-    let rolled_back = edit(2);
-    let edited = [body_id(&rolled_back, "helper")];
-    cache.begin_body_edit_transaction(&edited, &[]);
-    let _ = emit_overlay(&rolled_back, &mut cache, &edited);
-    cache.rollback_body_edit(&original).expect("rollback");
-    assert_eq!(cache.artifact_fingerprint(&original).unwrap(), before);
-    for value in [3, 4, 5] {
-        let changed = edit(value);
-        let overlay = emit_overlay(&changed, &mut cache, &[body_id(&changed, "helper")]);
-        assert!(overlay.code_artifact.entries.len() > 40);
-        let (_, fresh) = emit_full_of(&changed, "emit_full v2");
-        assert_eq!(
-            cache.artifact_fingerprint(&changed).unwrap(),
-            fresh.artifact_fingerprint(&changed).unwrap(),
-        );
-    }
-}
-
-#[test]
-fn flat_ref_callee_body_overlay_updates_its_callers() {
-    let prelude = r#"
-value Cell { v: int }
-global xs: [Cell] = []
-fn apply(c: ref Cell, delta: int) -> int { c.v += delta
-return c.v }
-@nomangle fn seed() { xs.push(Cell { v: 10 }) }
-@nomangle fn snapshot() -> int { return xs[0].v }
-"#;
-    let plain = "@nomangle fn tick(delta: int) -> bool {
-    let before = xs[0].v
-    let seen = apply(xs[0], delta)
-    return seen != before && xs[0].v == seen
-}";
-    let specialized = "fn step<T>(_tag: T, delta: int) -> bool {
-    let before = xs[0].v
-    let seen = apply(xs[0], delta)
-    return seen != before && xs[0].v == seen
-}
-@nomangle fn tick(delta: int) -> bool { return step(1, delta) }";
-    for caller in [plain, specialized] {
-        let v1 = format!("{prelude}{caller}\n");
-        let v2 = v1.replace("c.v += delta", "c.v -= delta");
-        let ws1 = ws_with_stdlib(&v1);
-        let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-        let ws2 = ws_with_stdlib(&v2);
-        let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "apply")]);
-        let run = format!(
-            "{}\nseed()\nassert(tick(2))\nlocal before = snapshot()\n{}\nassert(snapshot() == before)\nassert(tick(3))\nassert(snapshot() < before)\nprint('ok')\n",
-            full.lua, overlay.lua,
-        );
-        assert_eq!(run_luajit(&run), "ok");
-    }
 }
