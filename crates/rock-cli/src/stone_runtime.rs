@@ -149,8 +149,7 @@ fn stone_root_preamble(stone_dir: &std::path::Path) -> String {
 
 /// Resolve ordinary project and game-only builder preambles in one place.
 pub fn program_preamble(dir: &str, kind: ProgramKind) -> Result<String> {
-    // Preserve ordinary compile's empty non-game preamble. Game-only builders
-    // historically inject the globals even for plain fixtures, as do their keys.
+    // Project compilation omits game globals for non-game projects.
     if matches!(kind, ProgramKind::Project)
         && !rock_engine_host::project::is_game_project(std::path::Path::new(dir)).unwrap_or(false)
     {

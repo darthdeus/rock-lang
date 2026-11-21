@@ -31,8 +31,6 @@ pub(crate) fn run_program(program: &str) -> Result<()> {
             if !run.stderr.is_empty() {
                 eprint!("{}", run.stderr);
             }
-            // The program's own exit status is the answer. Printing a crash and
-            // returning Ok is how `rock run` used to exit 0 on a dead program.
             if !run.success {
                 log::error!(target: "SKULL", "program exited with a runtime error");
                 crate::invocation_log::exit(1);

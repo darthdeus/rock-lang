@@ -92,7 +92,7 @@ pub(crate) fn handle_perf(args: &Args) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs_f64();
     cmd.env("PERF_LAUNCH_UNIX_S", launched.to_string());
-    // With an explicit cap the non-Unix launcher historically uses only that budget.
+    // With an explicit cap, non-Unix launchers use only that budget.
     let phase_limits = cfg!(unix) || seconds_cap.is_none();
     let process_result = wait_for_frames(
         cmd,
