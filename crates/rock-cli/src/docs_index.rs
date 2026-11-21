@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use skull_parser::{Ast, EnumVariantKind, FunctionDef, Generic, Item, ItemKind, Param};
 use std::collections::BTreeSet;
@@ -7,67 +7,44 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-struct SourceInput {
-    display_path: String,
-    raw: Vec<u8>,
-    ast: Ast,
-}
-
+#[derive(serde::Serialize)]
 struct Declaration {
     kind: &'static str,
+    line: usize,
     name: String,
     signature: String,
     source: String,
-    line: usize,
 }
 
 pub fn run(inputs: &[String], output: Option<&str>) -> Result<()> {
-    if inputs.is_empty() {
-        anyhow::bail!("usage: rock docs-index <dir|file>... --output <file>");
-    }
-    let output = output
-        .ok_or_else(|| anyhow::anyhow!("usage: rock docs-index <dir|file>... --output <file>"))?;
-
+    const USAGE: &str = "usage: rock docs-index <dir|file>... --output <file>";
+    anyhow::ensure!(!inputs.is_empty(), USAGE);
+    let output = output.context(USAGE)?;
     let cwd = fs::canonicalize(std::env::current_dir()?)
         .context("resolve declaration-index working directory")?;
-    let paths = collect_sources(inputs, &cwd)?;
-    let mut sources = Vec::with_capacity(paths.len());
-    for path in paths {
-        let raw = fs::read(&path).with_context(|| format!("read '{}'", path.display()))?;
-        let text = std::str::from_utf8(&raw)
-            .with_context(|| format!("declaration source is not UTF-8: '{}'", path.display()))?;
-        let file_id = ustr::Ustr::from(path.to_string_lossy().as_ref());
-        rock_host::source_files::source_file_new_with_context(&path)?;
-        let ast = skull_parser::parse_module_clean(text, file_id)
-            .map_err(|error| anyhow::anyhow!("parse '{}': {error}", path.display()))?;
-        let display_path = display_path(&path, &cwd)?;
-        sources.push(SourceInput {
-            display_path,
-            raw,
-            ast,
-        });
-    }
-    sources.sort_by(|a, b| a.display_path.cmp(&b.display_path));
-
+    let sources = collect_sources_with_stdlib(inputs, &cwd, &rock_stdlib::stdlib_origin())?;
     let mut identity = Sha256::new();
     let mut source_values = Vec::with_capacity(sources.len());
     let mut declarations = Vec::new();
-    for source in &sources {
-        let file_hash = digest(&source.raw);
-        identity.update(source.display_path.as_bytes());
+    for (display_path, path) in sources {
+        let source = rock_host::source_files::source_file_new_with_context(&path)?;
+        let file_id = ustr::Ustr::from(source.file.to_id_path().as_str());
+        let text = source.contents;
+        let ast = skull_parser::parse_module_clean(&text, file_id)
+            .map_err(|error| anyhow::anyhow!("parse '{}': {error}", path.display()))?;
+        let file_hash = digest(text.as_bytes());
+        identity.update(display_path.as_bytes());
         identity.update([0]);
         identity.update(file_hash.as_bytes());
         identity.update(*b"\n");
         source_values.push(json!({
-            "path": source.display_path,
+            "path": display_path,
             "sha256": file_hash,
-            "bytes": source.raw.len(),
-            "lines": line_count(&source.raw),
+            "bytes": text.len(),
+            "lines": line_count(text.as_bytes()),
         }));
-        let text = std::str::from_utf8(&source.raw)
-            .with_context(|| format!("read declaration source '{}'", source.display_path))?;
-        for item in &source.ast.items {
-            if let Some(declaration) = declaration(&source.ast, item, &source.display_path, text)? {
+        for item in &ast.items {
+            if let Some(declaration) = declaration(&ast, item, &display_path, &text)? {
                 declarations.push(declaration);
             }
         }
@@ -82,26 +59,13 @@ pub fn run(inputs: &[String], output: Option<&str>) -> Result<()> {
         ))
     });
 
-    let mut document = std::collections::BTreeMap::new();
-    document.insert(
-        "declarations",
-        json!(
-            declarations
-                .iter()
-                .map(declaration_value)
-                .collect::<Vec<_>>()
-        ),
-    );
-    document.insert(
-        "repository_revision",
-        repository_revision(&cwd).map_or(Value::Null, Value::String),
-    );
-    document.insert("schema", json!(1));
-    document.insert(
-        "source_identity",
-        json!(format!("sha256:{:x}", identity.finalize())),
-    );
-    document.insert("sources", json!(source_values));
+    let document = json!({
+        "declarations": declarations,
+        "repository_revision": repository_revision(&cwd),
+        "schema": 1,
+        "source_identity": format!("sha256:{:x}", identity.finalize()),
+        "sources": source_values,
+    });
     let mut encoded = serde_json::to_vec_pretty(&document)?;
     encoded.push(b'\n');
     rock_host::project::write_atomic(output, encoded)
@@ -109,15 +73,11 @@ pub fn run(inputs: &[String], output: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn collect_sources(inputs: &[String], cwd: &Path) -> Result<Vec<PathBuf>> {
-    collect_sources_with_stdlib(inputs, cwd, &rock_stdlib::stdlib_origin())
-}
-
 fn collect_sources_with_stdlib(
     inputs: &[String],
     cwd: &Path,
     stdlib: &rock_stdlib::StdlibSource,
-) -> Result<Vec<PathBuf>> {
+) -> Result<Vec<(String, PathBuf)>> {
     let mut paths = BTreeSet::new();
     for input in inputs {
         let candidate = Path::new(input);
@@ -160,18 +120,15 @@ fn collect_sources_with_stdlib(
         rock_stdlib::StdlibSource::Dir(dir) => Some(fs::canonicalize(dir)?),
         rock_stdlib::StdlibSource::Embedded => None,
     };
-    for path in &paths {
-        let under_stdlib = stdlib_canonical
-            .as_ref()
-            .is_some_and(|s| path.starts_with(s));
-        if !path.starts_with(cwd) && !under_stdlib {
-            anyhow::bail!(
-                "declaration input escapes the working directory: '{}'",
-                path.display()
-            );
-        }
-    }
-    Ok(paths.into_iter().collect())
+    let mut entries = paths
+        .into_iter()
+        .map(|path| {
+            let display = display_path(&path, cwd, stdlib_canonical.as_deref())?;
+            Ok((display, path))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    entries.sort_unstable();
+    Ok(entries)
 }
 
 fn ensure_rock_file(path: &Path) -> Result<()> {
@@ -184,24 +141,23 @@ fn ensure_rock_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn display_path(path: &Path, cwd: &Path) -> Result<String> {
-    if let rock_stdlib::StdlibSource::Dir(dir) = rock_stdlib::stdlib_origin() {
-        if let Ok(stdlib) = fs::canonicalize(dir) {
-            if let Ok(relative) = path.strip_prefix(&stdlib) {
-                return Ok(format!(
-                    "stdlib/{}",
-                    relative.to_string_lossy().replace('\\', "/")
-                ));
-            }
-        }
-    }
-    let relative = path.strip_prefix(cwd).map_err(|_| {
-        anyhow::anyhow!(
-            "declaration input escapes the working directory: '{}'",
-            path.display()
-        )
-    })?;
-    Ok(relative.to_string_lossy().replace('\\', "/"))
+fn display_path(path: &Path, cwd: &Path, stdlib: Option<&Path>) -> Result<String> {
+    let (prefix, relative) = match stdlib.and_then(|root| path.strip_prefix(root).ok()) {
+        Some(relative) => ("stdlib/", relative),
+        None => (
+            "",
+            path.strip_prefix(cwd).with_context(|| {
+                format!(
+                    "declaration input escapes the working directory: '{}'",
+                    path.display()
+                )
+            })?,
+        ),
+    };
+    Ok(format!(
+        "{prefix}{}",
+        relative.to_string_lossy().replace('\\', "/")
+    ))
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -287,16 +243,6 @@ fn declaration(ast: &Ast, item: &Item, source: &str, text: &str) -> Result<Optio
         source: source.to_string(),
         line,
     }))
-}
-
-fn declaration_value(declaration: &Declaration) -> Value {
-    json!({
-        "kind": declaration.kind,
-        "line": declaration.line,
-        "name": declaration.name,
-        "signature": declaration.signature,
-        "source": declaration.source,
-    })
 }
 
 fn function_name(function: &FunctionDef) -> String {
