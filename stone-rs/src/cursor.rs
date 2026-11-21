@@ -44,7 +44,6 @@ fn store_cursor(cursor: Cursor) -> u64 {
     id
 }
 
-/// Show or hide the OS cursor.
 #[no_mangle]
 pub extern "C" fn stone_show_cursor(show: bool) {
     CURSOR_VISIBLE.store(show, Ordering::SeqCst);
@@ -126,7 +125,6 @@ pub extern "C" fn stone_set_system_cursor(cursor_type: c_int) -> u64 {
     }
 }
 
-/// Activate a previously created cursor by id.
 #[no_mangle]
 pub extern "C" fn stone_set_cursor(cursor_id: u64) {
     CURSORS.with(|c| {
@@ -139,7 +137,6 @@ pub extern "C" fn stone_set_cursor(cursor_id: u64) {
     });
 }
 
-/// Reset to the default OS cursor.
 #[no_mangle]
 pub extern "C" fn stone_reset_cursor() {
     set_default_cursor();
@@ -151,30 +148,20 @@ pub(crate) fn live_cursor_ids() -> Vec<u64> {
     CURSORS.with(|c| c.borrow().keys().copied().collect())
 }
 
-/// Free a cursor, resetting to the default first when SDL is still pointing at
-/// it. The doc comment claimed that reset for a long time and the code did not
-/// do it; dropping the `Cursor` calls `SDL_FreeCursor` on a cursor SDL still
-/// holds. `store_cursor` ACTIVATES what it creates, so every freshly created
-/// cursor is in exactly that state.
+/// Reset the active cursor before freeing it: SDL may still hold its pointer.
 #[no_mangle]
 pub extern "C" fn stone_free_cursor(cursor_id: u64) {
     if DESIRED_CURSOR.load(Ordering::SeqCst) == cursor_id {
         stone_reset_cursor();
     }
     CURSORS.with(|c| {
-        // Drop the Cursor, which calls SDL_FreeCursor
         if c.borrow_mut().remove(&cursor_id).is_some() {
             crate::handles::retire(Class::Cursor, cursor_id);
         }
     });
 }
 
-/// Free every live cursor and return the ambient cursor state to the process
-/// default. Called where the SDL context is about to be dropped
-/// (`stone_teardown`), while SDL is still up.
-///
-/// An `SDL_Cursor` has to be freed before `SDL_Quit`, and the ordering belongs
-/// to whoever owns SDL, so the free runs once, at window destruction.
+/// Free cursors and restore defaults before SDL_Quit.
 pub(crate) fn free_all_cursors() {
     // `stone_free_cursor` resets the pointer when it frees the active cursor
     // and retires the handle, so the ledger and SDL stay in step.
@@ -182,10 +169,7 @@ pub(crate) fn free_all_cursors() {
         stone_free_cursor(id);
     }
 
-    // The mirrors of the two ambient values, returned to what this module
-    // starts a process with. SDL's own cursor state dies with the context
-    // being dropped, so only the mirrors are written here -- reaching for
-    // SDL_ShowCursor would be driving a subsystem on its way out.
+    // Only reset mirrors; SDL is being torn down.
     CURSOR_VISIBLE.store(true, Ordering::SeqCst);
     set_desired_cursor(0);
 }

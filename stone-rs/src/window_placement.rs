@@ -17,8 +17,6 @@
 //! The machine config also carries `imgui_scale` (game section over default)
 //! for a display that misreports its density; `STONE_IMGUI_SCALE` outranks it.
 //!
-//! The precedence merge + parsers are pure and unit-tested; the file/dir I/O is
-//! a thin layer on top.
 
 use std::path::{Path, PathBuf};
 
@@ -35,7 +33,6 @@ pub struct PartialGeometry {
     pub display: Option<i32>,
 }
 
-/// The concrete geometry request handed to window creation (before the fit).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolvedGeometry {
     pub size: (i32, i32),
@@ -43,7 +40,6 @@ pub struct ResolvedGeometry {
     pub display: Option<i32>,
 }
 
-/// Window display mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowMode {
     Windowed,

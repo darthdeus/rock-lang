@@ -1,7 +1,5 @@
 //! Window and display measurement report.
 //!
-//! Pure data assembly: the SDL queries live in `lib.rs`, everything here is
-//! side-effect-free so the FIT derivation and JSON assembly are unit-testable.
 //! Units are labelled explicitly -- SDL display bounds and window size/position
 //! are POINTS on macOS (logical coords), `drawable_size` is PIXELS.
 
@@ -46,8 +44,6 @@ pub struct WindowReport {
     pub borders: Borders,
 }
 
-/// A window the engine is about to place. Pure input to
-/// `resolve_window_placement` -- no SDL types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowRequest {
     /// requested content size in points.
@@ -67,10 +63,7 @@ pub struct WindowPlacement {
     pub display: i32,
 }
 
-/// Pure fit: pick a display, clamp size to `usable - borders`, clamp position
-/// so the whole frame (content + borders) lies inside `usable_bounds`. No SDL,
-/// no I/O -- unit-tested below. Empty `displays` returns the request untouched
-/// (nothing to clamp against).
+/// Fit the whole frame inside usable bounds; an empty display list leaves the request untouched.
 pub fn resolve_window_placement(
     req: WindowRequest,
     displays: &[DisplayReport],

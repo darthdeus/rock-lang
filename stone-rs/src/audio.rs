@@ -2156,7 +2156,6 @@ mod tests {
         sum / n as f32
     }
 
-    /// Steady-state level of `source` through a bus configured by `configure`.
     fn bus_level(source: SamplesBuffer, configure: impl FnOnce(&Bus)) -> f32 {
         let (bus, mut out) = wired();
         bus.mixer.add(source);
@@ -2183,8 +2182,6 @@ mod tests {
         );
     }
 
-    /// Distortion must actually change the signal, and soft-clipping must not
-    /// let it run away above unity.
     #[test]
     fn distortion_clips_without_exploding() {
         let level = bus_level(dc(40_000, 0.25), |bus| bus.set_distortion(8.0, 1.0));
@@ -2218,8 +2215,6 @@ mod tests {
         );
     }
 
-    /// Reverb lives on the bus, not per voice, so it must ring on after its
-    /// input has stopped; without it the bus decays to silence.
     #[test]
     fn bus_reverb_rings_after_input_stops() {
         let tail = |reverb: bool| {
