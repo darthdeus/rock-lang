@@ -206,24 +206,18 @@ fn element_survives_a_lambda_map_to_itself() -> int {
     return (px(b[0]) * 10.0 + px(b[1]) + px(b[2])) as int
 }
 
-// --- tuple elements: the pair carries a presence leaf on one side ---
 
-// A wrapper BEHIND the zip, so the pair element crosses the placeholder splice
-// inside `SkipIter.next` and is then read whole. Each side contributes a
-// different value, so a swapped or dropped leaf moves the answer.
+// Both tuple elements cross the placeholder splice in SkipIter.next.
 @test(returns = 54)
 fn zip_carries_a_nullable_element_whole() -> int {
     let a: [Vec2?] = [Vec2 { x: 1.0, y: 3.0 }, null, Vec2 { x: 2.0, y: 4.0 }]
     let b: [int] = [10, 20, 30]
     let t = 0
-    // rows 1 and 2: (null, 20) contributes 0 + 20, (y=4, 30) contributes 4 + 30.
     for (p, q) in a.zip(b).skip(1) { t = t + py(p) as int + q }
     return t
 }
 
-// The pair the other way round, so the presence leaf is the SECOND slot rather
-// than the first -- a rebuild that pairs leaves positionally from the left
-// cannot get both orders right by accident.
+// Presence is in the second slot here.
 @test(returns = 54)
 fn zip_with_the_nullable_side_second() -> int {
     let a: [Vec2?] = [Vec2 { x: 1.0, y: 3.0 }, null, Vec2 { x: 2.0, y: 4.0 }]
@@ -241,7 +235,6 @@ fn enumerate_chain_over_a_nullable_column() -> int {
     return t as int
 }
 
-// --- the rest of the surface, enumerated rather than assumed ---
 
 fn pair_of_opt(v: Vec2?) -> VecIter<Vec2?> { return [v, v].iter() }
 
