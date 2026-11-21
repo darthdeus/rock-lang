@@ -1,0 +1,40 @@
+struct Props { a: int, b: int, c: int }
+
+@inline fn mk(x: int) -> Props { return Props { a: x, b: x * 2, c: x * 3 } }
+
+@noalloc fn read_fields(w: int, h: int) -> int {
+    let acc = 0
+    for gy in 0..h {
+        for gx in 0..w {
+            let p = mk(gx + gy)
+            let kind = ((gx * 7) + (gy * 13)) % 3
+            if kind == 0 {
+                acc = (acc + (p.a * 2)) - p.b
+            } else if kind == 1 {
+                acc = (acc - p.b) + p.c
+            } else {
+                acc = (acc + p.a) + p.c
+            }
+        }
+    }
+    return acc
+}
+
+struct Acc { sum: int, n: int }
+
+@noalloc fn write_fields(w: int) -> int {
+    let total = 0
+    for i in 0..w {
+        let a = Acc { sum: 0, n: 0 }
+        a.sum = i * 2
+        a.n = i
+        total = total + (a.sum + a.n)
+    }
+    return total
+}
+
+@test
+fn scalarize_struct_fields_in_loops() {
+    assert(read_fields(2, 2) == 10)
+    assert(write_fields(4) == 18)
+}

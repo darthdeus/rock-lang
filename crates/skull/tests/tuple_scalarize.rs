@@ -1,88 +1,5 @@
 use crate::common::{emit_module, function_body, run_main};
 
-const PAIR_ITER_LOOP: &str = r#"
-struct PairIter { cur: int, limit: int }
-
-@inline
-fn next(it: PairIter) -> (bool, (int, int)) {
-    if it.cur >= it.limit { return (false, phantom()) }
-    let v = it.cur
-    it.cur = it.cur + 1
-    return (true, (v, v * 2))
-}
-
-fn hot(n: int) -> int {
-    let total = 0
-    let it = PairIter { cur: 0, limit: n }
-    for (a, b) in it {
-        total += a + b
-    }
-    return total
-}
-
-fn main() {
-    let _ = hot(4)
-}
-"#;
-
-const SKIP_PAIR_ITER_LOOP: &str = r#"
-struct SkipShapeIter { cur: int, limit: int }
-
-@inline
-fn next(it: SkipShapeIter) -> (bool, (int, int)) {
-    let i = it.cur
-    if i >= it.limit { return (false, phantom()) }
-    while i % 3 == 0 {
-        i = i + 1
-        if i >= it.limit { it.cur = i; return (false, phantom()) }
-    }
-    it.cur = i + 1
-    return (true, (i, i * 2))
-}
-
-fn hot(n: int) -> int {
-    let total = 0
-    let it = SkipShapeIter { cur: 0, limit: n }
-    for (a, b) in it {
-        total += a + b
-    }
-    return total
-}
-
-fn main() {
-    let _ = hot(10)
-}
-"#;
-
-#[test]
-fn pair_iterator_tuples_scalarize() {
-    for src in [PAIR_ITER_LOOP, SKIP_PAIR_ITER_LOOP] {
-        let lua = emit_module(src);
-        assert!(!function_body(&lua, "hot").contains("{"));
-    }
-}
-
-const TUPLE_WHOLE_USE: &str = r#"
-fn second(p: (int, int)) -> int { return p.1 }
-
-fn use_it() -> int {
-    let p = (3, 4)
-    let direct = p.0
-    return second(p) + direct
-}
-
-fn main() {
-    let _ = use_it()
-}
-"#;
-
-#[test]
-fn tuple_whole_use_keeps_table() {
-    let lua = emit_module(TUPLE_WHOLE_USE);
-    let body = function_body(&lua, "use_it");
-    assert!(body.contains("{"));
-}
-
 const ARENA_BARE_LOOP_UNUSED_ENTITY: &str = r#"
 struct Mob { health: int }
 
@@ -248,28 +165,6 @@ fn nullable_value_binding_return_keeps_presence_and_leaves() {
     assert_eq!(pick.matches('{').count(), 2);
     assert!(!pick.contains("__rock_box_mts[\"Bag\"]"));
     assert_eq!(run_main(&lua), "1 1 true");
-}
-
-#[test]
-fn tuple_helpers_keep_fresh_pairs_scalar() {
-    let lua = emit_module(
-        r#"
-fn sum_pairs(n: int) -> int {
-    let total = 0
-    for i in 0..n {
-        let pair = (i * 2, i + 1)
-        total += tuple_first(pair) + tuple_second(pair)
-    }
-    return total
-}
-
-fn main() { print(sum_pairs(4)) }
-"#,
-    );
-    let body = function_body(&lua, "sum_pairs");
-    assert!(!body.contains("tuple_first") && !body.contains("tuple_second"));
-    assert!(!body.contains("{"));
-    assert_eq!(run_main(&lua), "22");
 }
 
 #[test]

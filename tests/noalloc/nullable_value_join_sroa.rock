@@ -1,0 +1,56 @@
+value Ent { a: int, b: int }
+value Tk { co: string, st: Ent }
+struct Holder { t: Tk? = null, polls: int = 0 }
+
+@noalloc fn use_tk(t: Tk) -> bool { return t.st.a > 0 }
+
+fn poll_in(h: Holder) {
+    if let t = h.t {
+        h.polls += 1
+        if !use_tk(t) { h.t = null }
+    }
+}
+
+@noalloc fn reads_st(h: Holder, xs: [int]) -> bool {
+    let t = h.t ?? return false
+    for x in xs {
+        if t.st.a == x { return true }
+    }
+    return false
+}
+
+@noalloc fn first_match(h: Holder, xs: [int]) -> Tk? {
+    let t = h.t ?? return null
+    for x in xs {
+        if t.st.a == x { return t }
+    }
+    return t
+}
+
+@noalloc fn held(h: Holder) -> bool { return h.t != null }
+
+@noalloc fn first_a(h: Holder) -> int {
+    if !held(h) { return -1 }
+    return h.t.unwrap().st.a + h.t.unwrap().st.b
+}
+
+@test(output = "3 true 3 true false\n4 true -1 false")
+fn nullable_field_reads_keep_only_leaves() {
+    let h = Holder { t: Tk { co: "x", st: Ent { a: 1, b: 2 } } }
+    for _ in 0..3 { poll_in(h) }
+    print("{h.polls} {held(h)} {first_a(h)} {reads_st(h, [0, 1])} {reads_st(h, [2])}")
+    h.t = Tk { co: "y", st: Ent { a: 0, b: 5 } }
+    poll_in(h)
+    poll_in(h)
+    print("{h.polls} {!held(h)} {first_a(h)} {reads_st(h, [0])}")
+}
+
+@test(output = "held 7 9 true\ntrue")
+fn check_nullable_escape() {
+    let h = Holder { t: Tk { co: "held", st: Ent { a: 7, b: 9 } } }
+    let hit = first_match(h, [7]).unwrap()
+    let miss = first_match(h, [0]).unwrap()
+    print("{hit.co} {hit.st.a} {hit.st.b} {miss == hit}")
+    h.t = null
+    print("{first_match(h, [7]) == null}")
+}

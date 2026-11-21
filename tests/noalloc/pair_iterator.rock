@@ -1,0 +1,47 @@
+struct PairIter { cur: int, limit: int }
+
+@inline
+fn next(it: PairIter) -> (bool, (int, int)) {
+    if it.cur >= it.limit { return (false, phantom()) }
+    let v = it.cur
+    it.cur = it.cur + 1
+    return (true, (v, v * 2))
+}
+
+@noalloc fn sum_pairs_from_iter(n: int) -> int {
+    let total = 0
+    let it = PairIter { cur: 0, limit: n }
+    for (a, b) in it {
+        total += a + b
+    }
+    return total
+}
+
+struct SkipShapeIter { cur: int, limit: int }
+
+@inline
+fn next(it: SkipShapeIter) -> (bool, (int, int)) {
+    let i = it.cur
+    if i >= it.limit { return (false, phantom()) }
+    while i % 3 == 0 {
+        i = i + 1
+        if i >= it.limit { it.cur = i; return (false, phantom()) }
+    }
+    it.cur = i + 1
+    return (true, (i, i * 2))
+}
+
+@noalloc fn sum_pairs_with_skips(n: int) -> int {
+    let total = 0
+    let it = SkipShapeIter { cur: 0, limit: n }
+    for (a, b) in it {
+        total += a + b
+    }
+    return total
+}
+
+@test
+fn scalarize_pair_iterators() {
+    assert(sum_pairs_from_iter(4) == 18)
+    assert(sum_pairs_with_skips(10) == 81)
+}

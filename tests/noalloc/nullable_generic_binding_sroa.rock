@@ -1,0 +1,9 @@
+value BV2 { x: float, y: float }
+
+@noalloc fn thru<T>(a: [T], i: int) -> T { let v = a[i]  return v }
+
+@test(output = "3")
+fn nonnullable_generic_binding_stays_scalar() {
+    let b: [BV2] = [BV2 { x: 1.0, y: 2.0 }, BV2 { x: 3.0, y: 4.0 }]
+    print("{thru(b, 1).x}")
+}

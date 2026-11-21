@@ -1,0 +1,17 @@
+enum Payload { Damage(float), Text(string) }
+
+nobox value Event {
+    payload: Payload,
+    label: string,
+}
+
+fn retain_payload(event: Event) -> [Payload] { return [event.payload] }
+
+@test(output = "8")
+fn escape_enum_field_into_vec() {
+    let retained = retain_payload(Event { payload: Payload::Damage(8.0), label: "hit" })
+    print(match retained[0] {
+        Payload::Damage(value) => value as int,
+        Payload::Text(text) => text.len(),
+    })
+}

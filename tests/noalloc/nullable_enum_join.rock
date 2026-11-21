@@ -1,0 +1,11 @@
+enum Resource { Image(int), Named(string), Empty }
+@noalloc fn select_resource(input: Resource?) -> int {
+    let selected = input ?? Resource::Image(17)
+    return match selected {
+        Resource::Image(n) => n,
+        Resource::Named(_) => 29,
+        Resource::Empty => 31,
+    }
+}
+@test(output = "17")
+fn nullable_enum_join_stays_scalar() { print(select_resource(null)) }

@@ -1,0 +1,25 @@
+enum Binding {
+    Key { scan: string, ctrl: bool },
+    Mouse(int),
+}
+
+struct Slot { binding: Binding }
+
+fn copy(slots: [Slot]) -> [Binding] {
+    let out: [Binding] = []
+    for slot in slots { out.push(slot.binding) }
+    return out
+}
+
+@test(output = "2 Mouse")
+fn escape_enum_into_vec() {
+    let copied = copy([
+        Slot { binding: Binding::Key { scan: "AB", ctrl: true } },
+        Slot { binding: Binding::Mouse(7) },
+    ])
+    let name = match copied[1] {
+        Binding::Key { .. } => "Key",
+        Binding::Mouse(_) => "Mouse",
+    }
+    print("{copied.len()} {name}")
+}

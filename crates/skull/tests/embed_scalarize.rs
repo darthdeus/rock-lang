@@ -80,33 +80,6 @@ fn nested_embed_composes_the_whole_path() {
     assert!(read.contains(r#"["a.b.c"]"#));
 }
 
-const EMBED_HOT_LOOP: &str = r#"
-struct Pt { x: int, y: int }
-struct Holder { embed p: Pt, tag: int }
-
-@inline fn mk(s: int) -> Holder { return Holder { p: Pt { x: s, y: s * 2 }, tag: s } }
-
-fn hot(n: int) -> int {
-    let acc = 0
-    for i in 0..n {
-        let h = mk(i)
-        h.p.x = h.p.x + 1
-        acc = acc + h.p.x + h.p.y + h.tag
-    }
-    return acc
-}
-
-fn main() { let _ = hot(4) }
-"#;
-
-#[test]
-fn embed_parent_still_scalarizes() {
-    let lua = emit_module(EMBED_HOT_LOOP);
-    let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("{"));
-    assert!(!hot.contains(r#"["p."#));
-}
-
 const EMBED_VALUE_PARENT: &str = r#"
 value V2 { x: float, y: float }
 value ValueParent { embed v: V2, w: float }

@@ -1,0 +1,66 @@
+//=== TEST CASE: whole_struct_escape_Generic ===
+//! expect: boxes `Box`
+struct Box { w: int, h: int }
+
+@noalloc fn area(b: Box) -> int { return b.w * b.h }
+
+@noalloc fn use_it() -> int {
+    let b = Box { w: 3, h: 4 }
+    let direct = b.w
+    return area(b) + direct
+}
+
+fn main() {
+    let _ = use_it()
+}
+
+//=== TEST CASE: whole_tuple_escape_Generic ===
+//! expect: constructs a tuple table
+@noalloc fn second(p: (int, int)) -> int { return p.1 }
+
+@noalloc fn use_it() -> int {
+    let p = (3, 4)
+    let direct = p.0
+    return second(p) + direct
+}
+
+fn main() {
+    let _ = use_it()
+}
+
+//=== TEST CASE: escape_enum_field_into_vec_Generic ===
+//! expect: boxes `Payload`
+enum Payload { Damage(float), Text(string) }
+
+nobox value Event {
+    payload: Payload,
+    label: string,
+}
+
+@noalloc fn retain_payload(event: Event) -> [Payload] { return [event.payload] }
+
+//=== TEST CASE: escape_enum_into_vec_Generic ===
+//! expect: boxes `Binding`
+enum Binding {
+    Key { scan: string, ctrl: bool },
+    Mouse(int),
+}
+
+struct Slot { binding: Binding }
+
+@noalloc fn copy(slots: [Slot]) -> [Binding] {
+    let out: [Binding] = []
+    for slot in slots { out.push(slot.binding) }
+    return out
+}
+
+//=== TEST CASE: match_enum_pair_Generic ===
+//! expect: boxes `Binding`
+enum Binding {
+    Key { scan: string, ctrl: bool },
+    Mouse(int),
+}
+
+@noalloc fn retain_first(a: Binding, b: Binding) -> [Binding] {
+    return match (a, b) { (first, _) => [first] }
+}

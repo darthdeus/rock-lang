@@ -1,0 +1,50 @@
+struct EqTag { n: int }
+
+@noalloc fn entity_matches(xs: [Entity<EqTag>], target: Entity<EqTag>) -> int {
+    let matches = 0
+    for e in xs {
+        if e == target { matches += 1 }
+        if e != target { matches += 2 }
+    }
+    return matches
+}
+
+value V2 { x: float, y: float }
+value Handle<T> { slot: int, generation: int }
+
+@noalloc fn eq_v2(a: V2, b: V2) -> bool { return a == b }
+@noalloc fn ne_v2(a: V2, b: V2) -> bool { return a != b }
+@noalloc fn eq_handle(a: Handle<int>, b: Handle<int>) -> bool { return a == b }
+@noalloc fn ne_handle(a: Handle<int>, b: Handle<int>) -> bool { return a != b }
+
+value Tagged { tag: int, handle: Handle<int> }
+struct Slot { last: Tagged? = null }
+
+@noalloc fn stored_matches(slot: Slot, x: Handle<int>) -> bool {
+    if let last = slot.last { return last.handle == x }
+    return false
+}
+
+@test
+fn compare_scalar_leaves_without_boxing() {
+    let pos = V2 { x: 2.0, y: 4.0 }
+    let other_pos = V2 { x: 2.0, y: 5.0 }
+    assert(eq_v2(pos, pos) && !eq_v2(pos, other_pos))
+    assert(!ne_v2(pos, pos) && ne_v2(pos, other_pos))
+    let handle: Handle<int> = Handle { slot: 2, generation: 3 }
+    let other: Handle<int> = Handle { slot: 2, generation: 4 }
+    assert(eq_handle(handle, handle) && !eq_handle(handle, other))
+    assert(!ne_handle(handle, handle) && ne_handle(handle, other))
+    let slot = Slot {}
+    assert(!stored_matches(slot, handle))
+    slot.last = Tagged { tag: 1, handle }
+    assert(stored_matches(slot, handle) && !stored_matches(slot, other))
+}
+
+@test
+fn compare_entity_handles_without_carriers() {
+    let arena: Arena<EqTag> = arena_new()
+    let first = insert(arena, EqTag { n: 0 })
+    let second = insert(arena, EqTag { n: 1 })
+    assert(entity_matches([first, first, second], first) == 4)
+}

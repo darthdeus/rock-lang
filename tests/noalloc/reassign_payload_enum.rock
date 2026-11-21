@@ -1,0 +1,18 @@
+enum Shape { Circle(int), Named(string) }
+
+@noalloc fn classify(n: int) -> int {
+    let s = Shape::Circle(n)
+    if n % 2 == 1 {
+        s = Shape::Named("x")
+    }
+    let w = match s {
+        Shape::Circle(rad) => rad + 1,
+        Shape::Named(_) => 99,
+    }
+    return w
+}
+
+@test(output = "1 99 3")
+fn reassign_payload_enum() {
+    print("{classify(0)} {classify(1)} {classify(2)}")
+}

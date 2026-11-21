@@ -1,0 +1,11 @@
+@noalloc fn sum_pairs(n: int) -> int {
+    let total = 0
+    for i in 0..n {
+        let pair = (i * 2, i + 1)
+        total += tuple_first(pair) + tuple_second(pair)
+    }
+    return total
+}
+
+@test(output = "22")
+fn scalarize_tuple_helpers() { print(sum_pairs(4)) }

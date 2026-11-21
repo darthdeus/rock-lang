@@ -1,0 +1,29 @@
+enum Binding {
+    Key { scan: string, ctrl: bool },
+    Mouse(int),
+}
+
+@noalloc fn same(a: Binding, b: Binding) -> bool {
+    return match (a, b) {
+        (Binding::Key { scan: ax, ctrl: ac }, Binding::Key { scan: bx, ctrl: bc }) =>
+            ax == bx && ac == bc,
+        (Binding::Mouse(ax), Binding::Mouse(bx)) => ax == bx,
+        _ => false,
+    }
+}
+
+fn retain_first(a: Binding, b: Binding) -> [Binding] {
+    return match (a, b) { (first, _) => [first] }
+}
+
+@test(output = "true false true false 1 Key")
+fn match_enum_pair() {
+    let key = Binding::Key { scan: "A", ctrl: true }
+    let other = Binding::Key { scan: "B", ctrl: true }
+    let kept = retain_first(key, Binding::Mouse(3))
+    let name = match kept[0] {
+        Binding::Key { .. } => "Key",
+        Binding::Mouse(_) => "Mouse",
+    }
+    print("{same(key, key)} {same(key, other)} {same(Binding::Mouse(3), Binding::Mouse(3))} {same(key, Binding::Mouse(3))} {kept.len()} {name}")
+}

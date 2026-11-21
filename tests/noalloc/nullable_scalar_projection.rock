@@ -1,24 +1,22 @@
-use crate::common::{emit_module, function_body, run_main};
-
-const SOURCE: &str = r#"
 value ProjectionPoint { x: int, y: int }
 value ProjectionLabel { text: string, point: ProjectionPoint, width: int, enabled: bool, maybe: int? }
 struct ProjectionOwner { label: ProjectionLabel? = null, point: ProjectionPoint? = null }
 struct ProjectionCounter { calls: int = 0 }
-@nomangle fn next_owner(h: ProjectionOwner, c: ProjectionCounter) -> ProjectionOwner {
+@noalloc @nomangle fn next_owner(h: ProjectionOwner, c: ProjectionCounter) -> ProjectionOwner {
     c.calls += 1
     return h
 }
-@nomangle fn selected_width(h: ProjectionOwner, c: ProjectionCounter) -> int {
+@noalloc @nomangle fn selected_width(h: ProjectionOwner, c: ProjectionCounter) -> int {
     return next_owner(h, c).label?.width ?? -1
 }
-@nomangle fn selected_x(h: ProjectionOwner) -> int { return h.point?.x ?? -1 }
+@noalloc @nomangle fn selected_x(h: ProjectionOwner) -> int { return h.point?.x ?? -1 }
 fn mutate_label(h: ProjectionOwner) -> int {
     if h.label != null { h.label.width = 99; h.label.point.x = 101 }
     return 0
 }
 fn first(a: int, b: int) -> int { return a }
-fn main() {
+@test(output = "-1 -1 1\n11 13 2\nold false -1\n11 99 11 7\n7")
+fn nullable_projection_preserves_receiver_and_snapshots() {
     let h = ProjectionOwner {}
     let c = ProjectionCounter {}
     print("{selected_width(h, c)} {selected_x(h)} {c.calls}")
@@ -35,40 +33,15 @@ fn main() {
     print("{before} {h.label?.width ?? -1} {whole?.width ?? -1} {point?.x ?? -1}")
     if whole != null { print("{whole.point.x}") }
 }
-"#;
 
-#[test]
-fn nullable_scalar_projection_emits_one_receiver_and_no_sibling_reads() {
-    let lua = emit_module(SOURCE);
-    let body = function_body(&lua, "selected_width");
-    assert_eq!(body.matches("next_owner(").count(), 1);
-    for field in [".text", ".point", ".enabled", ".maybe"] {
-        assert!(!body.contains(field));
-    }
-    let point = function_body(&lua, "selected_x");
-    assert!(!point.contains(".y"));
-    assert_eq!(
-        run_main(&lua),
-        "-1 -1 1\n11 13 2\nold false -1\n11 99 11 7\n7"
-    );
-}
-
-#[test]
-fn nullable_scalar_projection_reads_an_embedded_owner_without_materializing_it() {
-    let source = r#"
 value EmbeddedLabel { text: string, width: int }
 struct EmbeddedOwner { label: EmbeddedLabel? = null, tag: int = 5 }
 struct EmbeddedRoot { embed inner: EmbeddedOwner }
-@nomangle fn embedded_width(r: EmbeddedRoot) -> int { r.inner.label?.width ?? -1 }
-fn main() {
+@noalloc @nomangle fn embedded_width(r: EmbeddedRoot) -> int { r.inner.label?.width ?? -1 }
+@test(output = "-1\n23 5")
+fn nullable_projection_through_embed() {
     let r = EmbeddedRoot { inner: EmbeddedOwner {} }
     print("{embedded_width(r)}")
     r.inner.label = EmbeddedLabel { text: "row", width: 23 }
     print("{embedded_width(r)} {r.inner.tag}")
-}
-"#;
-    let lua = emit_module(source);
-    let body = function_body(&lua, "embedded_width");
-    assert!(!body.contains("inner.tag"));
-    assert_eq!(run_main(&lua), "-1\n23 5");
 }

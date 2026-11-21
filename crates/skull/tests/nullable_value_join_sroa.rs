@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, run_luajit, run_main};
+use crate::common::{emit_module, function_body, run_main};
 
 #[test]
 fn nullable_map_coalesce_keeps_only_the_insert_box() {
@@ -86,88 +86,13 @@ fn main() {
     assert_eq!(run_main(&lua), "empty world true true empty ui false false");
 }
 
-const JOIN: &str = r#"
-value Ent { a: int, b: int }
-value Tk { co: string, st: Ent }
-struct Holder { t: Tk? = null, polls: int = 0 }
-
-fn use_tk(t: Tk) -> bool { return t.st.a > 0 }
-
-fn poll_in(h: Holder) {
-    if let t = h.t {
-        h.polls += 1
-        if !use_tk(t) { h.t = null }
-    }
-}
-
-fn reads_st(h: Holder, xs: [int]) -> bool {
-    let t = h.t ?? return false
-    for x in xs {
-        if t.st.a == x { return true }
-    }
-    return false
-}
-
-fn first_match(h: Holder, xs: [int]) -> Tk? {
-    let t = h.t ?? return null
-    for x in xs {
-        if t.st.a == x { return t }
-    }
-    return t
-}
-
-fn held(h: Holder) -> bool { return h.t != null }
-
-fn first_a(h: Holder) -> int {
-    if !held(h) { return -1 }
-    return h.t.unwrap().st.a + h.t.unwrap().st.b
-}
-
-@nomangle inline(lua) fn __out(s: string) = "io.write(s, ' ')"
-
-fn main() {
-    let h = Holder { t: Tk { co: "x", st: Ent { a: 1, b: 2 } } }
-    for _ in 0..3 { poll_in(h) }
-    __out("{h.polls} {held(h)} {first_a(h)} {reads_st(h, [0, 1])} {reads_st(h, [2])}")
-    h.t = Tk { co: "y", st: Ent { a: 0, b: 5 } }
-    poll_in(h)
-    poll_in(h)
-    __out("{h.polls} {!held(h)} {first_a(h)} {reads_st(h, [0])}")
-}
-"#;
-
 #[test]
-fn if_let_unwrap_and_coalesce_of_a_nullable_value_field_build_no_box() {
-    let lua = emit_module(JOIN);
-    for name in ["poll_in", "first_a", "reads_st"] {
-        let body = function_body(&lua, name);
-        for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
-            assert!(!body.contains(ctor), "{name}: {body}");
-        }
-    }
-    assert_eq!(run_main(&lua), "3 true 3 true false 4 true -1 false");
-}
-
-#[test]
-fn escaping_coalesce_binding_returns_leaves_without_copying() {
-    let checks = r#"
-@nomangle fn check_nullable_escape() {
-    let h = Holder { t: Tk { co: "held", st: Ent { a: 7, b: 9 } } }
-    let hit = first_match(h, [7]).unwrap()
-    let miss = first_match(h, [0]).unwrap()
-    __out("{hit.co} {hit.st.a} {hit.st.b} {miss == hit}")
-    h.t = null
-    __out("{first_match(h, [7]) == null}")
-}
-"#;
-    let lua = emit_module(&format!("{JOIN}\n{checks}"));
-    let body = function_body(&lua, "first_match");
+fn nullable_field_emptying_does_not_rebox_the_value() {
+    let lua = emit_module(include_str!(
+        "../../../tests/noalloc/nullable_value_join_sroa.rock"
+    ));
+    let body = function_body(&lua, "poll_in");
     for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
-        assert!(!body.contains(ctor));
+        assert!(!body.contains(ctor), "{body}");
     }
-    assert!(!body.contains('{'));
-    assert_eq!(
-        run_luajit(&format!("{lua}\ncheck_nullable_escape()\n")),
-        "held 7 9 true true"
-    );
 }

@@ -1,0 +1,25 @@
+@noalloc extern(lua, "string.len") fn scalar_strlen(s: string) -> int
+
+enum Binding {
+    Key { scan: string, ctrl: bool },
+    Mouse(int),
+}
+
+@noalloc fn score(binding: Binding) -> int {
+    return match binding {
+        Binding::Key { scan, ctrl } => if ctrl { scalar_strlen(scan) } else { 0 },
+        Binding::Mouse(button) => button,
+    }
+}
+
+@noalloc fn hot(bindings: [Binding]) -> int {
+    let total = 0
+    for binding in bindings { total += score(binding) }
+    return total
+}
+
+@test(backends = "lua", output = "9")
+fn consume_enum_in_loop() {
+    let bindings = [Binding::Key { scan: "AB", ctrl: true }, Binding::Mouse(7)]
+    print(hot(bindings))
+}

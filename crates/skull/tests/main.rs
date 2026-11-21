@@ -107,10 +107,8 @@ mod nobox_nested_ctor;
 mod nobox_values;
 mod nobox_wide_strided;
 mod nullable_embed_clear;
-mod nullable_generic_binding_sroa;
 mod nullable_value_join_sroa;
 mod optional_value_wire;
-mod plain_struct_scalarize;
 mod preflight;
 mod program_roots;
 mod removed_global_markers;
@@ -144,6 +142,5 @@ mod fresh_struct_projection;
 mod leaf_table_projection;
 
 mod lua_syntax_level_budget;
-mod nullable_scalar_projection;
 
 mod json_default_factories;

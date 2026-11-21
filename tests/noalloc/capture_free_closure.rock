@@ -1,0 +1,41 @@
+@nomangle inline(lua) fn sink(a: int) = "_G.__sink = a"
+@noalloc fn mk() -> fn() { return () => { sink(1) } }
+@test(backends = "lua")
+fn capture_free_closure_does_not_allocate() {
+    let f = mk()
+    f()
+}
+
+extern(lua, "rawequal") fn same_callback(a: fn(), b: fn()) -> bool
+
+@test(backends = "lua")
+fn capture_free_closure_is_shared() {
+    assert(same_callback(mk(), mk()))
+}
+
+fn free_loop() -> [fn()] {
+    let fns: [fn()] = []
+    for i in 0..3 {
+        fns.push(() => { sink(42) })
+    }
+    return fns
+}
+
+fn capturing_loop() -> [fn() -> int] {
+    let fns: [fn() -> int] = []
+    for i in 0..3 {
+        let x = i
+        fns.push(() => x)
+    }
+    return fns
+}
+
+@test(backends = "lua")
+fn loop_hoists_only_the_capture_free_callback() {
+    let free = free_loop()
+    assert(free.len == 3)
+    assert(same_callback(free[0], free[1]) && same_callback(free[1], free[2]))
+    let captured = capturing_loop()
+    assert(captured.len == 3)
+    assert(captured[0]() == 0 && captured[1]() == 1 && captured[2]() == 2)
+}

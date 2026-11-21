@@ -1,0 +1,15 @@
+enum Shape { Circle(int), Named(string), Point }
+
+@noalloc fn classify(n: int) -> int {
+    let s = Shape::Circle(n)
+    if n % 3 == 1 { s = Shape::Named("x") }
+    if n % 3 == 2 { s = Shape::Point }
+    return match s {
+        Shape::Circle(rad) => rad + 1,
+        Shape::Named(_) => 99,
+        Shape::Point => 7,
+    }
+}
+
+@test(output = "1 99 7 4")
+fn reassign_mixed_enum() { print("{classify(0)} {classify(1)} {classify(2)} {classify(3)}") }

@@ -1,0 +1,17 @@
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+@inline fn mk(s: int) -> Holder { return Holder { p: Pt { x: s, y: s * 2 }, tag: s } }
+
+@noalloc fn hot(n: int) -> int {
+    let acc = 0
+    for i in 0..n {
+        let h = mk(i)
+        h.p.x = h.p.x + 1
+        acc = acc + h.p.x + h.p.y + h.tag
+    }
+    return acc
+}
+
+@test(output = "28")
+fn scalarize_an_embedded_parent() { print(hot(4)) }

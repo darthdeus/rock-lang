@@ -63,53 +63,6 @@ fn main() {}
     assert_eq!(run_luajit(&format!("{lua}\npcall({choose})\n")), "second");
 }
 
-const FIXTURE: &str = r#"
-@nomangle inline(lua) fn sink(a: int) = "_G.__sink = a"
-
-fn free_loop() -> [fn()] {
-    let fns: [fn()] = []
-    for i in 0..3 {
-        fns.push(() => { sink(42) })
-    }
-    return fns
-}
-
-fn capturing_loop() -> [fn() -> int] {
-    let fns: [fn() -> int] = []
-    for i in 0..3 {
-        let x = i
-        fns.push(() => x)
-    }
-    return fns
-}
-
-fn main() { let _ = free_loop() let _ = capturing_loop() }
-"#;
-
-#[test]
-fn capture_free_lambda_hoists_to_named_toplevel() {
-    let lua = emit_module(FIXTURE);
-    let lam = format!("{}__lambda0", mangled_name(&lua, "free_loop"));
-    assert!(lua.contains(&format!("function {lam}(")));
-    let body = function_body(&lua, "free_loop");
-    assert!(body.contains("__rock_code_slot_ref("));
-    // Only an anonymous closure renders `function(` without a space.
-    assert!(!body.contains("function("));
-}
-
-#[test]
-fn hoisted_lambda_shared_across_creations() {
-    let src = r#"
-@nomangle inline(lua) fn sink(a: int) = "_G.__sink = a"
-fn mk() -> fn() { return () => { sink(1) } }
-fn main() { let _ = mk() }
-"#;
-    let lua = emit_module(src);
-    let mk = mangled_name(&lua, "mk");
-    let driver = format!("\nlocal a = {mk}()\nlocal b = {mk}()\nprint(rawequal(a, b))\n");
-    assert_eq!(run_luajit(&format!("{lua}{driver}")), "true");
-}
-
 #[test]
 fn hoisted_body_declares_own_cells_no_global_leak() {
     let src = r#"
