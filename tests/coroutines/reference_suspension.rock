@@ -136,3 +136,32 @@ fn fresh_entity_borrow_observes_removal_between_resumes() {
     assert_eq(task.resume() ?? -2, -1)
     assert_eq(task.resume(), null)
 }
+
+value FramePair { x: int, y: int }
+
+fn pair_sum(p: FramePair) -> int { p.x + p.y }
+
+co fn value_fields_across_suspension(a: FramePair, middle: int, b: FramePair) -> Coroutine<int> {
+    let local = FramePair { x: 1, y: 10 }
+    yield local.x
+    yield local.y
+    let local = FramePair { x: 100, y: 1000 }
+    yield local.x + local.y
+    yield a.x + b.x
+    yield middle
+    yield a.y * b.y
+    let alias = a
+    yield alias.x
+    yield alias.y
+    yield pair_sum(b)
+    yield pair_sum(b) * 2
+    for i in 0..3 { yield b.x + i }
+}
+
+@test
+fn value_fields_survive_multiple_resumes() {
+    let c = value_fields_across_suspension(FramePair { x: 1, y: 2 }, 7, FramePair { x: 3, y: 30 })
+    for expected in [1, 10, 1100, 4, 7, 60, 1, 2, 33, 66, 3, 4, 5] {
+        assert_eq(c.resume() ?? -1, expected)
+    }
+}
