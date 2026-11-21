@@ -91,13 +91,6 @@ fn execute(lua: &str, driver: &str) {
     );
 }
 
-const MUTABLE_LOCAL: &str = "fn f(input: int, replacement: int) -> fn() -> int {\n\
-    let n = input\n\
-    let read = () => n\n\
-    n = replacement\n\
-    return read\n\
-}";
-
 #[test]
 fn branch_dependent_initialization_retains_the_entry_box() {
     let (mf, lua) = converted(
