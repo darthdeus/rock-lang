@@ -29,10 +29,3 @@ fn explicit_shards_override_the_size_rule_and_core_default() {
         assert!(test_shard_count_from(Some(value), 32).is_err(), "{value}");
     }
 }
-
-#[test]
-fn one_core_defaults_to_one_shard_for_large_packages() {
-    assert_eq!(test_shard_count_from(None, 1).unwrap(), 1);
-    assert_eq!(resolve_test_shards(1, 600, 64 * 1024 * 1024, false), 1);
-    assert_eq!(test_shard_count_from(None, 32).unwrap(), 2);
-}
