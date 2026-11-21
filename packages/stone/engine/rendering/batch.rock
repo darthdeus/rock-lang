@@ -1871,9 +1871,6 @@ pub fn render_silhouette_mask(
     return drawn
 }
 
-// --- UI Batch System ---
-// Separate batch queue for screen-space UI (used during @late_draw).
-// Same vertex format as world batches, rendered with identity camera.
 
 pub fn ui_pool_vert_count(pool: RenderBatchPool) -> int {
     let n = 0
@@ -1958,10 +1955,7 @@ pub fn ui_draw_sprite_topleft(
     return batch
 }
 
-// Batched screen-space textured-sprite push for an arbitrary affine quad.
-// Unlike the world sprite path, UI corners are Y-down and UVs are not flipped:
-// the first corner samples the source's top-left texel. This is the retained
-// UI counterpart to draw_sprite_quad, for maps and other sheared UI art.
+// UI corners are Y-down and UVs are not flipped.
 fn ui_draw_sprite_quad(
     image: SampledTexture,
     tl: Vec2,
@@ -2062,17 +2056,8 @@ fn __ui_sprite_push_rotated(
     batch.count += 6
 }
 
-// Writes 6 vertices for a screen-space (Y-down) textured quad. No UV
-// flip — TL(x,y) samples atlas TL (u0,v0), BR samples atlas BR (u1,v1).
-//
-// Only pos / uv / color slots are written. The remaining 2 Vertex
-// fields (pivot_y, entity_id) are left untouched. Fresh `ffi.new("Vertex[n]")` zero-
-// initializes, and after a grow `ffi.copy` brings over previously-
-// written quads (which also only wrote 0 to these slots via the same
-// convention). Net effect: those fields are guaranteed zero in every
-// vertex emitted through this path, which is what the UI sprite
-// shader expects. Breaking this invariant would require reworking
-// every caller, not just this function.
+// UI coordinates are Y-down and UVs are not flipped. The UI shader expects
+// untouched pivot_y and entity_id fields to remain zero across allocation and growth.
 fn __ui_sprite_push(
     batch: RenderBatch,
     x: float,
@@ -2095,12 +2080,7 @@ fn __ui_sprite_push(
     batch.count += 6
 }
 
-// This frame's UI-pass uniforms for one program: pixel-space ortho
-// projection + identity view, lights off. Called at flush entry and
-// again on every batch.pipeline program switch (uniforms are
-// per-program GL state -- the UI-pass analogue of
-// setup_world_pass_shader). `setup_draw_list_shader` in draw_list.rock
-// installs the same frame globals for the offscreen surface.
+// Uniforms are per-program GL state and must be set on each program switch.
 pub fn setup_ui_pass_shader(
     shader: string,
     projection_extent: Vec2? = null,
@@ -2219,9 +2199,7 @@ pub fn render_ui_batches(
     }
     text_render_order_ui_flush()
 
-    // SIM_DRAW=commands: the pool was built by the draw phase and is
-    // counted and recycled exactly as after a real flush; only the GL is
-    // skipped (so `screen.custom()` closures do not run either).
+    // Command-only simulation still counts and recycles; custom draws do not run.
     if UI_SUBMISSION_PROBE_WINDOWLESS || !SIM_SKIP_SUBMIT { render_ui_batches_gl(pool, projection_extent, convention) }
     profile_begin("screen.ui_flush.render_batches.clear")
     clear_ui_batches(pool)
