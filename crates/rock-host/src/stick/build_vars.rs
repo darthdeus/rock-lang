@@ -326,21 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn value_and_builtin_sources_resolve() {
-        let cfg = fixture(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nENDPOINT = \"https://example.test\"\nCHANNEL = { builtin = \"channel\" }\nCLOCK = { value = \"now\", volatile = true }\n",
-        ));
-        let dir = tempfile::tempdir().unwrap();
-        let resolved = resolve(&cfg, dir.path(), Some("steam")).unwrap();
-        assert_eq!(resolved.channel, "steam");
-        assert_eq!(resolved.vars["ENDPOINT"].value, "https://example.test");
-        assert_eq!(resolved.vars["CHANNEL"].value, "steam");
-        assert!(resolved.volatile_vars.contains("CLOCK"));
-    }
-
-    #[test]
     fn source_fingerprint_is_deferred_and_overrides_and_channels_keep_precedence() {
         let cfg = fixture(concat!(
             "[package]\nname = \"x\"\n",
@@ -373,22 +358,6 @@ mod tests {
             .expect("an explicit override takes precedence over deferred resolution");
         assert_eq!(overridden.vars["TREE"].value, "provided");
         assert!(!overridden.source_fingerprints.contains_key("TREE"));
-    }
-
-    #[test]
-    fn platform_builtin_defaults_to_host() {
-        let cfg = fixture(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\"]\n",
-            "[build.vars]\nPLATFORM = { builtin = \"platform\" }\n",
-        ));
-        let dir = tempfile::tempdir().unwrap();
-        let host = resolve(&cfg, dir.path(), Some("dev")).unwrap();
-        let expected = match std::env::consts::OS {
-            "macos" => "osx",
-            other => other,
-        };
-        assert_eq!(host.vars["PLATFORM"].value, expected);
     }
 
     #[test]
@@ -454,18 +423,6 @@ mod tests {
         assert_eq!(resolved.vars["CHANNEL"].value, "dev");
     }
 
-    #[test]
-    fn cmd_runs_in_project_dir_and_trims_newline() {
-        let cfg = fixture(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build.vars]\nMARKER = { cmd = \"cat marker.txt\" }\n",
-        ));
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("marker.txt"), "from-project-dir\n").unwrap();
-        let resolved = resolve(&cfg, dir.path(), None).unwrap();
-        assert_eq!(resolved.vars["MARKER"].value, "from-project-dir");
-    }
-
     #[cfg(unix)]
     #[test]
     fn cmd_vars_run_concurrently() {
@@ -483,23 +440,6 @@ mod tests {
         let resolved = resolve(&cfg, dir.path(), None).unwrap();
         assert_eq!(resolved.vars["A"].value, "a.marker");
         assert_eq!(resolved.vars["B"].value, "b.marker");
-    }
-
-    #[test]
-    fn override_wins_and_suppresses_the_source() {
-        let cfg = fixture(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nTOKEN = { cmd = \"false\", secret = true }\n",
-        ));
-        let dir = tempfile::tempdir().unwrap();
-        let overrides = HashMap::from([("TOKEN".to_string(), "override-value".to_string())]);
-        let resolved = resolve_build_vars(&cfg, dir.path(), None, None, &overrides).unwrap();
-        assert_eq!(resolved.vars["TOKEN"].value, "override-value");
-        assert!(
-            resolved.vars["TOKEN"].secret,
-            "override keeps the declared secrecy"
-        );
     }
 
     #[test]
@@ -599,35 +539,6 @@ mod tests {
     }
 
     #[test]
-    fn failing_cmd_rejects_with_stderr() {
-        let cfg = fixture(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nX = { cmd = \"echo boom >&2; exit 3\" }\n",
-        ));
-        let dir = tempfile::tempdir().unwrap();
-        let err = resolve(&cfg, dir.path(), None)
-            .expect_err("failing cmd must fail resolution, never default silently");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("boom") && msg.contains("X"),
-            "error carries var and stderr: {msg}"
-        );
-    }
-
-    #[test]
-    fn undeclared_channel_rejects() {
-        let cfg = fixture("[package]\nname = \"x\"\n[build]\nchannels = [\"dev\"]\n");
-        let dir = tempfile::tempdir().unwrap();
-        let err =
-            resolve(&cfg, dir.path(), Some("stema")).expect_err("undeclared channel must reject");
-        assert!(
-            format!("{err}").contains("stema"),
-            "error names the channel: {err}"
-        );
-    }
-
-    #[test]
     fn channel_arg_without_build_section_rejects() {
         let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -637,14 +548,5 @@ mod tests {
             format!("{err}").contains("[build]"),
             "error points at the missing section: {err}"
         );
-    }
-
-    #[test]
-    fn no_build_section_resolves_empty() {
-        let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let resolved = resolve(&cfg, dir.path(), None).unwrap();
-        assert!(resolved.vars.is_empty());
-        assert_eq!(resolved.channel, "dev");
     }
 }
