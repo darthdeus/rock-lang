@@ -84,37 +84,25 @@ fn pair_sum(pair: (Entity<Row>, Row)) -> int { return pair.0._generation + pair.
 "#;
 
 #[test]
-fn unused_arena_entities_do_not_read_generations() {
+fn iterators_read_only_live_leaves_but_keep_bounds_and_removals() {
     let lua = emit_module(SOURCE);
     for name in ["unused_entity", "unused_pair_entity", "unused_enum"] {
         let body = function_body(&lua, name);
         assert!(!body.contains(".generations"));
     }
     assert!(function_body(&lua, "used_entity").contains(".generations"));
-}
 
-#[test]
-fn unused_arena_rows_do_not_read_data() {
-    let lua = emit_module(SOURCE);
     for name in ["unused_column", "unused_enum"] {
         let body = function_body(&lua, name);
         assert!(!body.contains(".data"));
         assert!(body.contains(".occupied"));
     }
-}
 
-#[test]
-fn unused_bindings_preserve_live_slots_and_removal_during_the_walk() {
-    let lua = emit_module(SOURCE);
     assert_eq!(
         run_luajit(&format!("{lua}\ncheck_walks()\nprint('ok')")),
         "ok"
     );
-}
 
-#[test]
-fn vector_leaves_are_already_dead_but_the_element_index_stays() {
-    let lua = emit_module(SOURCE);
     let column = function_body(&lua, "column_field");
     assert!(!column.contains(".y"));
     assert!(column.contains(".x)[(c"));

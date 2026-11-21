@@ -50,9 +50,18 @@ fn lua_long_string(s: &str) -> String {
 }
 
 #[test]
-fn every_backward_jump_carries_a_loop_instruction() {
+fn loop_bytecode_preserves_backedges_and_results() {
     let lua = emit_module(FIXTURE);
     assert_eq!(uncovered_backward_jumps(&lua), "");
+
+    let name = definition_names(&lua)
+        .into_iter()
+        .find(|n| n.starts_with("sum_then_yield") && n.ends_with("__step"))
+        .expect("step of `sum_then_yield`");
+    let step = function_body(&lua, name);
+    assert!(!step.contains("::bb"));
+
+    assert_eq!(run_main(&lua), "153\n52\n4315\n4316\n-1\n16\n42");
 }
 
 #[test]
@@ -61,21 +70,4 @@ fn the_check_sees_a_nested_backward_goto() {
     assert_eq!(uncovered_backward_jumps(nested), "0:6");
     let level = "local i = 0\n::w1::\ni = i + 1\nif i >= 9 then return end\ngoto w1\n";
     assert_eq!(uncovered_backward_jumps(level), "");
-}
-
-#[test]
-fn a_step_loop_that_does_not_cross_a_yield_prints_structured() {
-    let lua = emit_module(FIXTURE);
-    let name = definition_names(&lua)
-        .into_iter()
-        .find(|n| n.starts_with("sum_then_yield") && n.ends_with("__step"))
-        .expect("step of `sum_then_yield`");
-    let step = function_body(&lua, name);
-    assert!(!step.contains("::bb"));
-}
-
-#[test]
-fn loops_keep_their_results() {
-    let lua = emit_module(FIXTURE);
-    assert_eq!(run_main(&lua), "153\n52\n4315\n4316\n-1\n16\n42");
 }

@@ -73,7 +73,7 @@ newtype Label(string)
 "#;
 
 #[test]
-fn empty_snapshots_only_allocate_fresh_results_and_skip_sorting() {
+fn map_snapshots_skip_empty_work_and_preserve_sort_order() {
     let lua = emit_module(SOURCE);
     let output = run_luajit(&format!(
         r#"{lua}
@@ -134,11 +134,7 @@ print('ok')
 "#
     ));
     assert_eq!(output, "ok");
-}
 
-#[test]
-fn snapshot_keys_sort_by_text_and_keep_ties_in_traversal_order() {
-    let lua = emit_module(SOURCE);
     let output = run_luajit(&format!(
         r#"{lua}
 sorted_snapshots()

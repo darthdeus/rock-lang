@@ -40,12 +40,14 @@ struct MaybeHolder { item: Choice? }
 "#;
 
 #[test]
-fn dynamic_mixed_units_share_identity_across_boxing_boundaries() {
+fn mixed_enum_boxes_preserve_identity_and_payload_layout() {
     let lua = emit_module(SRC);
-    let out = run_luajit(&format!(
-        r#"{lua}
+    for (case, probe) in [
+        (
+            "unit identity across boxing boundaries",
+            r#"
 local unit = constant_unit()
-for _, make in ipairs({{boxed, through_vec, through_field, through_nullable, copied}}) do
+for _, make in ipairs({boxed, through_vec, through_field, through_nullable, copied}) do
     assert(rawequal(make(0), unit))
     local a, b = make(1), make(1)
     assert(not rawequal(a, b))
@@ -55,21 +57,16 @@ end
 assert(through_nullable(-1) == nil)
 assert(not rawequal(unit, other_unit()))
 assert(unit_equal(0) and not unit_equal(1))
-local keys = {{[unit] = true, [boxed(0)] = true}}
+local keys = {[unit] = true, [boxed(0)] = true}
 local count = 0
 for _ in pairs(keys) do count = count + 1 end
 assert(count == 1)
 print("ok")
-"#
-    ));
-    assert_eq!(out, "ok");
-}
-
-#[test]
-fn dynamic_mixed_unit_boxing_allocates_no_per_value_tables() {
-    let lua = emit_module(SRC);
-    let out = run_luajit(&format!(
-        r#"{lua}
+"#,
+        ),
+        (
+            "unit boxing does not allocate a table per value",
+            r#"
 jit.off(); jit.flush()
 local n = 20000
 local slots = require("table.new")(n, 0)
@@ -82,9 +79,50 @@ local bytes = collectgarbage("count") * 1024 - before
 assert(bytes < n, tostring(bytes / n) .. " bytes per unit")
 assert(rawequal(slots[1], slots[n]))
 print("ok")
-"#
-    ));
-    assert_eq!(out, "ok");
+"#,
+        ),
+        (
+            "strided reconstruction uses the canonical unit",
+            r#"
+local unit = constant_unit()
+local vec = {_data = {"None", false}, len = 1,
+    ["@vec"] = {repr = "strided", elem = __rock_get_type(unit), stride = 2}}
+assert(rawequal(__rock_materialize_strided_element(vec, 1), unit))
+vec._data[1], vec._data[2] = "Text", "payload"
+local a = __rock_materialize_strided_element(vec, 1)
+local b = __rock_materialize_strided_element(vec, 1)
+a[1] = "changed"
+assert(b[1] == "payload")
+print("ok")
+"#,
+        ),
+        (
+            "payload capacity follows the variant",
+            r#"
+jit.off(); jit.flush()
+local n = 20000
+local slots = require("table.new")(n, 0)
+for i = 1, n do slots[i] = false end
+local function measure(make)
+    collectgarbage("collect")
+    local before = collectgarbage("count") * 1024
+    for i = 1, n do slots[i] = make() end
+    collectgarbage("collect")
+    local bytes = collectgarbage("count") * 1024 - before
+    for i = 1, n do slots[i] = false end
+    collectgarbage("collect")
+    return bytes / n
+end
+local mt = getmetatable(constant_unit())
+local control = measure(function() return setmetatable({__variant = "Text", "payload"}, mt) end)
+local dynamic = measure(function() return through_field(1) end)
+assert(dynamic <= control + 1, "dynamic payload reserves union slots: " .. control .. " vs " .. dynamic)
+print("ok")
+"#,
+        ),
+    ] {
+        assert_eq!(run_luajit(&format!("{lua}{probe}")), "ok", "{case}");
+    }
 }
 
 #[test]
@@ -118,55 +156,6 @@ assert(rawequal(before, copied(0)))
 print("ok")
 "#,
         full.lua, overlay.lua, fresh.lua
-    ));
-    assert_eq!(out, "ok");
-}
-
-#[test]
-fn strided_element_reconstruction_canonicalizes_units() {
-    let lua = emit_module(SRC);
-    let out = run_luajit(&format!(
-        r#"{lua}
-local unit = constant_unit()
-local vec = {{_data = {{"None", false}}, len = 1,
-    ["@vec"] = {{repr = "strided", elem = __rock_get_type(unit), stride = 2}}}}
-assert(rawequal(__rock_materialize_strided_element(vec, 1), unit))
-vec._data[1], vec._data[2] = "Text", "payload"
-local a = __rock_materialize_strided_element(vec, 1)
-local b = __rock_materialize_strided_element(vec, 1)
-a[1] = "changed"
-assert(b[1] == "payload")
-print("ok")
-"#
-    ));
-    assert_eq!(out, "ok");
-}
-
-#[test]
-fn dynamic_payload_boxes_reserve_only_the_variants_payload() {
-    let lua = emit_module(SRC);
-    let out = run_luajit(&format!(
-        r#"{lua}
-jit.off(); jit.flush()
-local n = 20000
-local slots = require("table.new")(n, 0)
-for i = 1, n do slots[i] = false end
-local function measure(make)
-    collectgarbage("collect")
-    local before = collectgarbage("count") * 1024
-    for i = 1, n do slots[i] = make() end
-    collectgarbage("collect")
-    local bytes = collectgarbage("count") * 1024 - before
-    for i = 1, n do slots[i] = false end
-    collectgarbage("collect")
-    return bytes / n
-end
-local mt = getmetatable(constant_unit())
-local control = measure(function() return setmetatable({{__variant = "Text", "payload"}}, mt) end)
-local dynamic = measure(function() return through_field(1) end)
-assert(dynamic <= control + 1, "dynamic payload reserves union slots: " .. control .. " vs " .. dynamic)
-print("ok")
-"#
     ));
     assert_eq!(out, "ok");
 }

@@ -52,7 +52,7 @@ fn main() {
 "#;
 
 #[test]
-fn nullable_embed_clear_writes_record_slots_without_materializing() {
+fn nullable_embed_clear_writes_leaves_and_preserves_other_record_slots() {
     let lua = emit_module(SRC);
     for name in ["clear", "clear_nested", "assign"] {
         let body = function_body(&lua, name);
@@ -67,11 +67,7 @@ fn nullable_embed_clear_writes_record_slots_without_materializing() {
         }
     }
     assert_eq!(run_main(&lua), "10\n-1 true\n4\n-1 true");
-}
 
-#[test]
-fn absent_nullable_embed_clear_preserves_each_record_store() {
-    let lua = emit_module(SRC);
     let driver = r#"
 local writes = 0
 local h = setmetatable({}, {__newindex = function(t, k, v)

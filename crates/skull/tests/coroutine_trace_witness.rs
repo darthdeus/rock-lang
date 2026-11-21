@@ -3,7 +3,7 @@ use crate::common::{definition_names, emit_module, function_body, mangled_name, 
 const FIXTURE: &str = include_str!("fixtures/nested_coroutine_trace.rock");
 
 #[test]
-fn each_resume_calls_its_step_directly() {
+fn nested_resumes_call_steps_directly_without_trace_aborts() {
     let lua = emit_module(FIXTURE);
     for co in ["leaf", "mid", "top"] {
         let resume = definition_names(&lua)
@@ -11,16 +11,10 @@ fn each_resume_calls_its_step_directly() {
             .find(|name| name.starts_with(co) && name.ends_with("__resume"))
             .unwrap_or_else(|| panic!("no `{co}` resume in:\n{lua}"));
         let step = resume.replace("__resume", "__step");
-        assert!(
-            function_body(&lua, resume).contains(&format!("{step}(s, arg)"))
-                && !function_body(&lua, resume).contains("pcall(")
-        );
+        let body = function_body(&lua, resume);
+        assert!(body.contains(&format!("{step}(s, arg)")) && !body.contains("pcall("));
     }
-}
 
-#[test]
-fn nested_resumes_do_not_abort_with_return_to_lower_frame() {
-    let lua = emit_module(FIXTURE);
     let bench = mangled_name(&lua, "bench");
     let driver = format!(
         r#"

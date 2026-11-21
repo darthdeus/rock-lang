@@ -73,22 +73,14 @@ nobox value Column { x: int, y: int }
 "#;
 
 #[test]
-fn map_loops_use_lua_generic_for() {
+fn map_loops_use_generic_for_and_preserve_mutation_and_control_flow() {
     let lua = emit_module(SOURCE);
     let body = function_body(&lua, "scalar_sum");
     assert!(body.contains(" in next, "));
-}
 
-#[test]
-fn key_only_column_loop_does_not_read_values() {
-    let lua = emit_module(SOURCE);
     let body = function_body(&lua, "column_count");
     assert!(!body.contains(".data"));
-}
 
-#[test]
-fn map_mutation_lengths_and_loop_control_are_preserved() {
-    let lua = emit_module(SOURCE);
     assert_eq!(
         run_luajit(&format!(
             "{lua}\nmutation_and_lengths()\nassert(scalar_sum({{[1]=10,[2]=20,[3]=30}}) == 40)\nprint('ok')"

@@ -80,7 +80,7 @@ global OUT: [string] = []
 "#;
 
 #[test]
-fn clone_into_is_the_argument_for_values_without_mutable_storage() {
+fn clone_into_preserves_values_and_copies_only_live_mutable_storage() {
     let lua = emit_module(SRC);
     for name in ["clone_string", "clone_int", "clone_maybe", "clone_tag"] {
         let body = function_body(&lua, name);
@@ -90,30 +90,19 @@ fn clone_into_is_the_argument_for_values_without_mutable_storage() {
         let body = function_body(&lua, name);
         assert!(body.contains("clone_into"));
     }
-}
 
-#[test]
-fn clone_into_keeps_values_and_deep_copies_mutable_storage() {
-    let mut lua = emit_module(SRC);
-    lua.push_str(
-        "\nprint(clone_string(\"s\"), clone_int(7), clone_maybe(nil), clone_maybe(\"m\"), \
-         clone_tag(\"t\", 4), clone_list(), clone_bag())\n",
+    let probe = "\nprint(clone_string(\"s\"), clone_int(7), clone_maybe(nil), clone_maybe(\"m\"), \
+         clone_tag(\"t\", 4), clone_list(), clone_bag())\n";
+    assert_eq!(
+        run_luajit(&format!("{lua}{probe}")),
+        "s\t7\tnil\tm\tt 4 1.5 true 4 -\t3 2\t2 1"
     );
-    assert_eq!(run_luajit(&lua), "s\t7\tnil\tm\tt 4 1.5 true 4 -\t3 2\t2 1");
-}
 
-#[test]
-fn clone_into_strided_copies_only_live_rows() {
-    let lua = emit_module(SRC);
     assert_eq!(
         run_luajit(&format!("{lua}\nprint(clone_wide())\n")),
         "4995 0 7 1 1000"
     );
-}
 
-#[test]
-fn clone_into_strided_edges_and_mutable_fallback() {
-    let lua = emit_module(SRC);
     assert!(function_body(&lua, "copy_wide").contains("__rock_stride_copy"));
     assert!(function_body(&lua, "copy_mixed").contains("__rock_stride_copy"));
     assert!(function_body(&lua, "clone_mutable_wide").contains("clone_into"));

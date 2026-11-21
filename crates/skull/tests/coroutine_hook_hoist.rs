@@ -19,18 +19,14 @@ fn main() {
 "#;
 
 #[test]
-fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
+fn on_killed_hook_is_hoisted_shared_and_callable() {
     let lua = emit_module(ON_KILLED);
-    let hook = format!("{}__on_killed", mangled_name(&lua, "worker"));
+    let w = mangled_name(&lua, "worker");
+    let hook = format!("{w}__on_killed");
     assert!(lua.contains(&format!("function {hook}(")));
     assert!(lua.contains("__on_killed = __rock_code_slot_ref("));
     assert!(!lua.contains("__on_killed = function"));
-}
 
-#[test]
-fn hook_fn_shared_across_constructions_and_still_fires() {
-    let lua = emit_module(ON_KILLED);
-    let w = mangled_name(&lua, "worker");
     let driver = format!(
         "\n\
         local h1 = {w}(5)\n\

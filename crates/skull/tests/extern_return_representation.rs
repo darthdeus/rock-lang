@@ -75,7 +75,7 @@ fn main() { print("x") }
 }
 
 #[test]
-fn an_int_representation_is_coerced_through_every_alias_shape() {
+fn extern_results_use_the_underlying_primitive_representation() {
     let lua = emit_module(SRC);
 
     for name in [
@@ -103,11 +103,6 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
 
     let w = wrapper(&lua, "ret_void");
     assert!(!w.contains("return"));
-}
-
-#[test]
-fn a_bool_representation_is_compared_to_the_byte_the_cdef_returns() {
-    let lua = emit_module(SRC);
 
     for name in ["ret_bool", "ret_flag"] {
         let w = wrapper(&lua, name);

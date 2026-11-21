@@ -49,7 +49,7 @@ print(first ~= second and second ~= third
 }
 
 #[test]
-fn the_program_opens_sized_storage_before_initializing() {
+fn globals_open_with_sized_storage_and_keep_it_across_reload() {
     let lua = emit_module(FIXTURE);
     let open = lua
         .lines()
@@ -72,11 +72,7 @@ fn the_program_opens_sized_storage_before_initializing() {
         .expect("initialize call");
     assert!(open_at < init);
     assert!(lua.contains("__rock_table_new(narr, nhash)"));
-}
 
-#[test]
-fn a_reloaded_program_keeps_live_globals_and_its_storage_table() {
-    let lua = emit_module(FIXTURE);
     let bump = mangled_name(&lua, "bump");
     let program = format!(
         "{lua}
