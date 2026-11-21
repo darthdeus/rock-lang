@@ -1,21 +1,5 @@
-// Pass + Pipeline: one declarative rendering step.
-//
-//     run_pass(Pass {
-//         pipeline: BLUR_PIPELINE,
-//         slot_inputs: [(sampled_canvas(src), TextureFilter::Nearest)],  // @textures slot 0
-//         block: pass_block(BLUR_PIPELINE.shader_name, BloomBlurU { ... }),
-//         output: bloom_blur_canvas_1,
-//         clear: color(0, 0, 0, 0),
-//     })
-//
-// A shader's inputs are its compiler-owned `@textures` slots and `@uniform`
-// block. `run_passes([...])` runs a sequence in order; intermediate canvases
-// stay valid between passes so a pass can read what a prior pass wrote.
-//
-// * The Pipeline is a newtype over the shader-name string: shaders are looked
-//   up by name in the registry, which is what keeps hot reload working.
-// * `output: Canvas?` -- null draws into whatever is currently bound.
-// * `clear: Color?` -- null does not clear.
+// Pass inputs follow compiler-owned texture slots and uniform blocks.
+// Passes execute in order; null output keeps the bound target and null clear skips clearing.
 
 pub nobox value Pipeline {
     shader_name: string,
@@ -42,44 +26,20 @@ pub fn parametric_quad_pipeline(shader_name: string) -> Pipeline {
 
 pub struct Pass {
     pipeline: Pipeline,
-    // Index N is the shader's `@textures` slot N, so the COMPILER owns the
-    // number and the caller owns only the order. Cardinality must be EXACT -- a
-    // short list leaves a slot reading whatever was last bound there.
-    //
-    // Sampling is explicit per input and bound on that input's own unit:
-    // reconstruction is a property of what the pass is DOING with the texture,
-    // not of how the canvas happened to be created. Linear where a kernel
-    // magnifies or interpolates (the pyramid levels, the present blit); Nearest
-    // for a 1:1 canvas-to-canvas hop, where the two agree anyway.
+    // Inputs follow compiler-owned slot order exactly; missing slots retain old bindings.
+    // Sampling is specified independently for each input.
     slot_inputs: [(SampledTexture, TextureFilter)] = [],
     // The shader's `@uniform` block, packed at construction (`pass_block`) and
     // uploaded against this pass's own draw.
     block: OwnedUniformBlock? = null,
-    // The fragment stage's ARRAY block payload, in the shader's `@size(N)` param
-    // order. Unlike `block`, this is packed at RUN time rather than at
-    // construction: the buffers belong to the caller and keep being written
-    // between building a pass and running it (the outline system rewrites its
-    // slot buffers every frame into a pass it built once), so a pack at
-    // construction would upload whichever frame happened to build it.
-    //
-    // Empty for a pass whose shader declares no arrays. A pass that supplies a
-    // payload its shader does not want, or omits one it does, is refused by the
-    // writer rather than partially uploaded.
+    // Array inputs are packed when run, not when constructed: caller buffers can change.
+    // Missing or unexpected payloads are rejected rather than partially uploaded.
     array_payload: [PassArrayMember] = [],
     geometry: SpriteMesh? = null,
     output: Canvas? = null,
     clear: Color? = null,
-    // Confine the draw (and the clear) to this rectangle of `output`, in that
-    // canvas's own pixels with GL's bottom-left origin -- the convention
-    // `stone_set_scissor` takes, and the one a canvas's own inactive-margin
-    // scissor is already stated in. Null covers the whole bound target, which
-    // is what every pass but the outline detect wants.
-    //
-    // Requires an output: `stone_set_canvas` re-establishes the bound target's
-    // scissor on every bind, so the output bind is both the only place this can
-    // be applied and the only path that resets it. Clip the rect to the
-    // output's ACTIVE rectangle -- a rect larger than the active area would
-    // widen the margin scissor the bind just set, not narrow it.
+    // The rect uses bottom-left output pixels. An output is required; intersect its
+    // active area so the canvas margin scissor cannot be widened.
     scissor: IRect? = null,
     blend: BlendMode? = null,
     timed: int = -1,
@@ -300,15 +260,8 @@ pub fn run_passes(passes: [Pass]) {
     }
 }
 
-// ─────────────── game-injectable scene passes ───────────────
-//
-// The one defined injection point for game-owned post passes: queued
-// passes run after `render_batches` lands the lit world composite in
-// `screen_canvas` and BEFORE the engine post chain (bloom threshold
-// reads `screen_canvas`, so the engine chain sees their output).
-// Queue from any @update/@draw system; the pool clears every frame
-// like LIGHTS. For passes over the final TONEMAPPED image (color
-// grading, CRT) use queue_final_pass below instead.
+// Scene passes run after world composition and before the engine post chain.
+// Queue them each frame; use final passes for the tonemapped image.
 pub global SCENE_PASSES: [Pass] = []
 
 pub global WORLD_PREPARE_PASSES: [Pass] = []
@@ -337,36 +290,9 @@ fn scene_pass_reads_output(p: Pass) -> bool {
     return false
 }
 
-// Runner-called at the injection point. Runs + clears.
-//
-// Contract (mirrors FINAL_PASSES):
-//   * screen_canvas holds the lit world composite on entry, and the
-//     engine post chain reads screen_canvas after this returns.
-//   * A pass that does NOT sample the current scene (vignette-style
-//     procedural blend) writes the CURRENT scene canvas.
-//   * A pass that SAMPLES the current scene must write the OTHER
-//     member of the screen_canvas / screen_canvas_2 pair -- reading
-//     and writing one canvas is a GL feedback loop (logged + skipped;
-//     running it is GPU-undefined). Each such hop moves which member
-//     holds the scene.
-//   * If a chain ends with the scene in screen_canvas_2, the engine
-//     blits it back. Canvas->canvas hops preserve content (identity
-//     fullscreen quad), so the blit is a plain copy -- no orientation
-//     to correct. Pinned by a downstream scene pass ping-pong sim's
-//     north/south probe.
-// Both queues name canvases from the scene target set, and both are filled
-// during `@update` while the set is rebuilt between update and render
-// (`frame_core_resolve_view` -> `ensure_scene_capacity`). A resize or a raster-
-// profile change in the same frame therefore leaves every queued pass naming a
-// destroyed attachment.
-//
-// DROPPED, not retargeted: a pass was authored against a raster that no longer
-// exists, so its output size, its uv transforms and its blend intent are all
-// stated in the old one. The same rule a skipped render already follows -- a
-// pass belongs to the frame that queued it.
-// How many passes the rule above has dropped. A sim asserting the queues came
-// out empty cannot tell "the drop ran" from "nothing was ever queued"; this is
-// the population that separates them.
+// Sampling the current scene must write the other canvas: GL feedback is undefined.
+// If the target set changes after queueing, drop passes authored for the old raster.
+// The engine copies the last scene back when needed.
 pub global PASSES_DROPPED_ON_REBUILD: int = 0
 
 fn drop_queued_passes_on_target_rebuild() {
@@ -449,30 +375,9 @@ pub fn run_scene_passes() {
     SCENE_PASSES.clear()
 }
 
-// ─────────────── game-injectable FINAL passes ───────────────
-//
-// Passes over the final TONEMAPPED (LDR) image: color grading, CRT,
-// screen-wide flashes. When any are queued, tonemap writes to
-// `final_canvas` instead of the default framebuffer and the queued
-// passes run in order right after it, with the present viewport
-// still bound.
-//
-// Contract:
-//   * First pass reads `final_canvas`; later passes read the previous
-//     pass's output canvas. Every pass OUTPUTS A CANVAS -- never null,
-//     and never its own input (GL feedback loop). `final_canvas_2` is
-//     the engine-provided partner: a single grade pass reads
-//     final_canvas, writes final_canvas_2; longer chains ping-pong
-//     between the two.
-//   * The ENGINE presents: after the queued passes run, post_processing
-//     blits the last pass's output to the default framebuffer with the
-//     hop-parity V-flip computed from the pass count (the fullscreen
-//     quad flips content every pass -- tonemapping.glsl bloom_tex
-//     comment). Game shaders never reason about flip parity.
-//   * A pass with `output: null` is logged and skipped from the blit
-//     (it would double-present).
-//
-// Queue every frame like SCENE_PASSES/LIGHTS; cleared after run.
+// Final passes run after tonemapping. Each must output a canvas other than its
+// input; later passes read the preceding output. The engine presents the last
+// output with the required flip parity. Queue each frame; the queue is cleared.
 pub global FINAL_PASSES: [Pass] = []
 
 pub fn queue_final_pass(p: Pass) {

@@ -1,36 +1,8 @@
-// Decorator-Based System Registration
-//
-// Provides decorators for automatic system registration.
-// Systems are functions that get called at specific lifecycle points:
-//
-// Initialization (runs once at startup, in this order):
-// - @early_init: Load assets (images, sounds, fonts)
-// - @init: Main initialization (can use loaded assets)
-// - @late_init: Things that depend on game state being initialized
-// - @wire: Idempotent wiring (install callbacks, derive config) -- unlike the
-//   phases above, re-runs after EVERY hot reload so wired state tracks edits
-//
-// Per-frame (runs every frame):
-// - @update: Game logic, called via run_frame_phase("update")
-// - @late_update: After all updates, called via run_frame_phase("late_update")
-// - @prepare: Presentation state derived from this frame's logic, after the
-//   view is frozen and before @draw, called via run_frame_phase("prepare"). Runs on
-//   every frame the runner would draw, including frozen frames and a rendered
-//   sim's frames that skip their draw.
-// - @draw: Rendering to screen_canvas, called via run_frame_phase("draw")
-// - @late_draw: Screen-space UI after post-processing, called via run_frame_phase("late_draw")
-// - @post_imgui_draw: Final screen-space UI, after ImGui where present
-//
-// Other:
-// - @reset: Called when resetting game state via run_reset_systems()
-// - @window_resized: Called once a resized window is the presented one, and
-//   when a sim entry sizes its window, via run_window_resized_systems()
-//
-// Stage-based ordering (lower stages run first):
-//   @update           -> default stage 100
-//   @update(stage=10) -> explicit stage 10
-//   @draw             -> default stage 100
-//   @draw(stage=10)   -> explicit stage 10
+// Init order: early_init, init, late_init, wire. Wire reruns after reload.
+// Frame order: update, late_update, prepare, draw, late_draw, post_imgui_draw.
+// Prepare also runs on frozen or skipped-draw frames; late_draw is screen-space
+// after post-processing, and post_imgui_draw follows ImGui. Lower stages run first.
+// Window resize hooks run after the resized window is presented, and on sim entry.
 
 pub value LifecycleDependency {
     key: string,
@@ -84,32 +56,21 @@ fn run_frame_lifecycle_system(system: LifecycleSystem) {
     }
 }
 
-/// @early_init - Register a function to load assets early
-/// Runs before @init, use for loading images, sounds, fonts
-/// Usage: @early_init fn load_assets() { ... }
+/// Runs before @init.
 pub @lifecycle(phase="early_init", owner="process")
 deco init early_init {}
 
-/// @init - Register a function to be called during initialization
-/// Runs after @early_init, can use loaded assets
-/// Usage: @init fn my_init() { ... }
 pub @lifecycle(phase="init", owner="process")
 deco init init {}
 
-/// @update - Register a function to be called during update
-/// Usage: @update fn my_update(dt: float) { ... }
-///        @update(stage=10) fn my_early_update(dt: float) { ... }
 pub @lifecycle(phase="update", owner="process", stage_param="stage")
 deco init update(stage: int = 100) {}
 
 /// Runs once for every live Scene whose root has the target method's type.
-/// Usage: @scene_update fn LevelState.update(level) { ... }
 pub @lifecycle(phase="update", owner="scene", stage_param="stage")
 deco init scene_update(stage: int = 100) {}
 
-/// @late_init - Register a function to be called after game_load()
-/// Use for systems that depend on assets loaded in game_load()
-/// Usage: @late_init fn my_late_init() { ... }
+/// Runs after game_load().
 pub @lifecycle(phase="late_init", owner="process")
 deco init late_init {}
 
@@ -118,64 +79,37 @@ deco init late_init {}
 /// wires also run for fresh process startup, then only when their body
 /// or compiler-owned const closure changes. Contract: cheap + idempotent;
 /// assign, don't accumulate. Expensive one-time work stays in @init.
-/// Usage: @wire fn install_ui_feel() { ... }
 pub @lifecycle(phase="wire", owner="process")
 deco init wire {}
 
-/// @late_update - Register a function to be called after run_frame_phase("update")
-/// Usage: @late_update fn my_late_update() { ... }
-///        @late_update(stage=10) fn my_early_late_update() { ... }
+/// Runs after update.
 pub @lifecycle(phase="late_update", owner="process", stage_param="stage")
 deco init late_update(stage: int = 100) {}
 
-/// @prepare - Register a function that prepares presentation state: GPU
-/// caches and builds the draw reads, after the render view is frozen and
-/// before @draw. Unlike @draw it also runs on frames that skip drawing, so
-/// work paced per frame keeps pace with the logic. World preparation passes
-/// it queues run at the end of the stage.
-/// Usage: @prepare fn my_prepare() { ... }
-///        @prepare(stage=10) fn my_early_prepare() { ... }
+/// Runs after the view is frozen and before draw, including skipped-draw frames.
+/// Queued world preparation passes run at the end of this stage.
 pub @lifecycle(phase="prepare", owner="process", stage_param="stage")
 deco init prepare(stage: int = 100) {}
 
-/// @draw - Register a function to be called during rendering
-/// Runs after updates, use for all rendering code
-/// Usage: @draw fn my_draw() { ... }
-///        @draw(stage=10) fn my_early_draw() { ... }
 pub @lifecycle(phase="draw", owner="process", stage_param="stage")
 deco init draw(stage: int = 100) {}
 
-/// @late_draw - Register a function to draw after post-processing
-/// Draws to screen (canvas 0) in screen-space coordinates.
-/// Usage: @late_draw fn draw_ui() { ... }
-///        @late_draw(stage=10) fn draw_early_ui() { ... }
-///        @late_draw(stage=10) fn update_ui_state() { ... }
+/// Draws in screen-space to canvas 0 after post-processing.
 pub @lifecycle(phase="late_draw", owner="process", stage_param="stage")
 deco init late_draw(stage: int = 100) {}
 
-/// @post_imgui_draw - Register final screen-space UI, drawn after ImGui where present
-/// Usage: @post_imgui_draw fn draw_overlay() { ... }
+/// Draws screen-space UI after ImGui where present.
 pub @lifecycle(phase="post_imgui_draw", owner="process", stage_param="stage")
 deco init post_imgui_draw(stage: int = 100) {}
 
-/// @reset - Register a function to be called during reset
-/// Usage: @reset fn my_reset() { ... }
 pub @lifecycle(phase="reset", owner="process")
 deco init reset {}
 
-/// @window_resized - Register a function that re-derives state resolved from the
-/// window size. Runs after the first present at a new size, when screen and
-/// design-space conversions already describe the new window, so boot-time
-/// derivations can follow the window instead of being fixed at the size the
-/// process booted at.
-/// Usage: @window_resized fn my_layout_follow() { ... }
+/// Runs after the first present at a new size, with updated coordinate conversions.
 pub @lifecycle(phase="window_resized", owner="process")
 deco init window_resized {}
 
-/// @shutdown - Register a function to be called before the GL context is destroyed.
-/// Use this to release GPU resources (e.g. video handles, custom FBOs).
-/// Usage: @shutdown fn my_cleanup() { ... }
-///        @shutdown(stage=900) fn close_last() { ... }
+/// Runs before the GL context is destroyed.
 pub @lifecycle(phase="shutdown", owner="process", stage_param="stage")
 deco init shutdown(stage: int = 100) {}
 
@@ -242,14 +176,12 @@ pub fn run_shutdown_systems() {
     }
 }
 
-/// Call all registered window_resized systems
 fn run_window_resized_systems() {
     for system in lifecycle_systems("window_resized") {
         system.func(0)
     }
 }
 
-/// Call all registered reset systems
 pub fn run_reset_systems() {
     let systems = lifecycle_systems("reset")
     let count = systems.len()
@@ -262,7 +194,7 @@ pub fn run_reset_systems() {
     }
 }
 
-/// Print all registered systems (only when ROCK_LOG=debug or higher)
+/// Emits output only at debug log level or higher.
 fn print_registered_systems() {
     if log_get_level() < 3 { return }
 
