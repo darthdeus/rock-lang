@@ -1,5 +1,3 @@
-//! Recursive-descent and Pratt parser producing the arena AST.
-
 use crate::ast::*;
 use rock_core::nesting::MAX_NESTING_DEPTH;
 use rock_core::{CompilerError, Span};
@@ -1307,7 +1305,6 @@ impl<'a> Parser<'a> {
                         self.advance();
                         s
                     }
-                    // Expression-bodied functions are not supported.
                     _ => {
                         return Err(self.err(
                             "an `= <body>` function body must be a string literal (an inline \
@@ -1317,7 +1314,6 @@ impl<'a> Parser<'a> {
                 };
                 FunctionBody::Inline(backend, src)
             } else {
-                // Only `extern fn` may omit the body.
                 let Some(eb) = extern_body else {
                     return Err(self.err(
                         "this function has no body: expected a block `{ .. }` or an inline \

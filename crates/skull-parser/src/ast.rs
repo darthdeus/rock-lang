@@ -371,7 +371,6 @@ pub struct Static {
     pub value: Idx<ExprData>,
 }
 
-/// A named block-bodied function declared in another function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NestedFn {
     pub span: Span,
@@ -778,7 +777,6 @@ pub struct Ast {
     /// The module's source-file identity, as passed to `parse_module`. The id
     /// for the whole module -- independent of item spans (which macro expansion
     /// can retag) and defined even for an item-less module.
-    /// Independent of item spans, which macro expansion can retag.
     pub file: Ustr,
     /// The owning package (set by the loader from the package graph; `None`
     /// for standalone/editor sources). Package loaders stamp graph facts here.
