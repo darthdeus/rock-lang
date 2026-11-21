@@ -35,7 +35,6 @@ mod defer_unwind;
 mod descriptor_value_repr;
 mod embed_scalarize;
 mod enum_cdata;
-mod enum_payload_sroa;
 mod enum_scalarize;
 mod expansion_admission;
 mod extern_return_representation;
@@ -127,8 +126,6 @@ mod return_kills;
 mod argument_demand;
 
 mod fresh_struct_projection;
-
-mod leaf_table_projection;
 
 mod lua_syntax_level_budget;
 
