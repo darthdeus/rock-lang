@@ -1,4 +1,4 @@
-use crate::common::{bone_rejections, emit_rejection, try_emit_module};
+use crate::common::bone_rejections;
 
 #[test]
 fn invalid_representation_annotations_preserve_diagnostics() {
@@ -36,32 +36,3 @@ fn invalid_representation_annotations_preserve_diagnostics() {
         assert!(errors.iter().any(|e| e.contains(message)), "{errors:?}");
     }
 }
-
-const EXEMPTS_ONLY_THAT_PARAM: &str = r#"
-value P { x: float, y: float }
-
-@nomangle inline(lua) fn take<T>(sink: [T], @repr(opaque) item: T) -> int = """
-    sink._data[1] = item
-    return 1
-"""
-
-fn main() {
-    let xs: [P] = [P { x: 1.0, y: 2.0 }]
-    print("{take(xs, P { x: 3.0, y: 4.0 })}")
-}
-"#;
-
-const UNANNOTATED_PAYLOAD_REJECTS: &str = r#"
-value P { x: float, y: float }
-
-@nomangle inline(lua) fn take<T>(sink: [T], item: T) -> int = """
-    sink._data[1] = item
-    return 1
-"""
-
-fn main() {
-    let outer: [[P]] = []
-    let inner: [P] = [P { x: 1.0, y: 2.0 }]
-    print("{take(outer, inner)}")
-}
-"#;

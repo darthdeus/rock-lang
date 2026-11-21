@@ -1,4 +1,4 @@
-use crate::common::{bone_rejections, emit_module, run_fn};
+use crate::common::bone_rejections;
 
 #[test]
 fn record_variant_pattern_must_name_the_scrutinee_enum() {
@@ -20,25 +20,3 @@ fn main() { print(read()) }
         ["pattern for enum `Other` cannot match a value of type `Choice`"]
     );
 }
-
-const SRC: &str = r#"
-enum BlendMode { Alpha, Additive, Multiply }
-value Cmd { z: int, blend: BlendMode }
-
-@nomangle inline(lua) fn __probe(s: int) = "_G.__sink = s"
-
-fn area(c: Cmd) -> int { return c.z }
-
-@test(output = "5 Add 5")
-fn t() {
-    let c = Cmd { z: 5, blend: BlendMode::Additive }
-    let s = match c.blend {
-        BlendMode::Alpha => "A"
-        BlendMode::Additive => "Add"
-        BlendMode::Multiply => "M"
-    }
-    print("{c.z} {s} {area(c)}")
-}
-
-fn main() { t() }
-"#;
