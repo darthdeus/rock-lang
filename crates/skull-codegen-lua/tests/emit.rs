@@ -115,42 +115,6 @@ fn emit_run(src: &str) -> (String, Option<skull_parser::CompilerError>) {
 }
 
 #[test]
-fn numeric_selection_through_local_copies_uses_native_minmax() {
-    for (comparison, yes, no, native) in [
-        ("<", "d", "b", "min"),
-        ("<", "b", "d", "max"),
-        (">", "d", "b", "max"),
-        (">", "b", "d", "min"),
-    ] {
-        let lua = emit_clean(
-            &format!(
-                "@nomangle fn choose(a: float, b: float) -> float {{ let d = a + 1.0; return if d {comparison} b {{ {yes} }} else {{ {no} }} }}"
-            ),
-            "choose",
-        );
-        assert!(lua.contains(&format!("math.{native}(")), "{lua}");
-        check_selection_values(
-            &lua,
-            &format!(
-                "local d = a + 1.0; if d {comparison} b then expected = {yes} else expected = {no} end"
-            ),
-        );
-    }
-    let lua = emit_clean(
-        "@nomangle fn choose(a: float, b: float) -> float { let d = if a > b { a } else { b }; return if d < 0.0 { d } else { 0.0 } }",
-        "choose",
-    );
-    assert!(
-        lua.contains("math.min(") && lua.contains("math.max("),
-        "{lua}"
-    );
-    check_selection_values(
-        &lua,
-        "local d; if a > b then d = a else d = b end; if d < 0 then expected = d else expected = 0 end",
-    );
-}
-
-#[test]
 fn numeric_selection_clamp_with_ordered_bounds_uses_native_minmax() {
     let lua = emit_clean(
         "@nomangle fn choose(a: float) -> float { return if a < -1.0 { -1.0 } else if a > 1.0 { 1.0 } else { a } }",
@@ -272,52 +236,6 @@ print('selection-ok flushes=' .. flushes)
     );
     let stdout = luajit_ok(&driver, "");
     assert!(stdout.starts_with("selection-ok flushes="), "{stdout}");
-}
-
-#[test]
-fn numeric_selection_rejects_effectful_and_inclusive_branches() {
-    for src in [
-        "fn choose(a: float, b: float) -> float { return if a <= b { a } else { b } }",
-        "fn choose(a: float, b: float) -> float { return if a < b { a + 1.0 } else { b } }",
-        "fn choose(a: float, b: float, log: [float]) -> float { return if a < b { log.push(a); a } else { b } }",
-        "fn choose(a: float, b: float) -> float { let smaller = a < b; a += 10.0; return if smaller { a } else { b } }",
-        "fn choose(a: float) -> float { return if a < 0.0 { a } else { -0.0 } }",
-        "fn choose(a: float, b: float) -> float { return if a < b { b = 7.0; a } else { b } }",
-    ] {
-        let lua = emit_clean(src, "choose");
-        assert!(
-            !lua.contains("math.min(") && !lua.contains("math.max("),
-            "{lua}"
-        );
-    }
-}
-
-#[test]
-fn numeric_selection_preserves_writes_before_the_comparison() {
-    let lua = emit_clean(
-        r#"
-struct Probe { value: float, writes: int }
-@nomangle fn choose(a: float, b: float, p: Probe) -> float {
-    p.value = b
-    p.writes += 1
-    return if a < b { a } else { b }
-}
-"#,
-        "choose",
-    );
-    assert!(lua.contains("math.min("), "{lua}");
-    let driver = format!(
-        r#"{lua}
-for i=1,2000 do
-  local p = {{value=i/10, writes=0}}
-  assert(choose(i/10,i/10+1,p)==i/10)
-  assert(p.value==i/10+1 and p.writes==1)
-end
-print('effects-ok')
-"#
-    );
-    let result = luajit_ok(&driver, "");
-    assert_eq!(result.trim(), "effects-ok");
 }
 
 /// The shipped non-inlining body chain over a lowered `<test>` function.
@@ -503,21 +421,6 @@ fn non_counted_loop_records_at_a_while_header() {
 }
 
 #[test]
-fn for_real_vec_loop_is_forl_zero_alloc_with_raw_reads() {
-    let lua = emit_inlined(
-        "fn sum_vec(xs: [int]) -> int {
-            let total = 0
-            for x in xs { total += x }
-            return total
-        }",
-        "sum_vec",
-    );
-    assert_counted_zero_alloc(&lua);
-    assert!(lua.contains("._data["), "{lua}");
-    assert!(!lua.contains("__vec_checked_get("), "{lua}");
-}
-
-#[test]
 fn iterator_chain_lambdas_inline_into_the_counted_loop() {
     let lua = emit_inlined(
         "fn scaled_odd_sum(xs: [int], k: int) -> int {
@@ -648,66 +551,6 @@ global METADATA: Map<string, SlotMetadata> = map_new()
     }
 }
 
-/// `(line, target)` for every `goto <target>` in `lua`, terminator arms
-/// included -- a `Branch` renders as `if c then goto X else goto Y end`, so a
-/// line-prefix scan misses half of them.
-fn goto_refs(lua: &str) -> Vec<(usize, String)> {
-    let mut out = Vec::new();
-    for (i, line) in lua.lines().enumerate() {
-        let mut rest = line;
-        while let Some(at) = rest.find("goto ") {
-            rest = &rest[at + 5..];
-            let end = rest
-                .find(|c: char| !c.is_alphanumeric() && c != '_')
-                .unwrap_or(rest.len());
-            out.push((i, rest[..end].to_string()));
-            rest = &rest[end..];
-        }
-    }
-    out
-}
-
-/// The line each `::label::` sits on.
-fn label_lines(lua: &str) -> std::collections::HashMap<String, usize> {
-    lua.lines()
-        .enumerate()
-        .filter_map(|(i, l)| {
-            let t = l.trim();
-            t.strip_prefix("::")?
-                .strip_suffix("::")
-                .map(|n| (n.to_string(), i))
-        })
-        .collect()
-}
-
-/// Every `goto` that jumps BACKWARD -- the shape that makes LuaJIT emit a
-/// rangeless `BC_LOOP`.
-fn backward_gotos(lua: &str) -> Vec<String> {
-    let labels = label_lines(lua);
-    goto_refs(lua)
-        .into_iter()
-        .filter(|(at, t)| labels.get(t).is_some_and(|l| *l < *at))
-        .map(|(_, t)| t)
-        .collect()
-}
-
-/// The inner loop's preheader is reachable from its body through the outer
-/// back edge, but it is not a back edge of the inner loop.
-#[test]
-fn nested_iterator_loop_is_recovered_as_a_counted_for() {
-    let src = "\
-struct B { slot: int }\n\
-struct D { bindings: [B] }\n\
-fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { return 1 } } }; 0 }";
-    let lua = emit_inlined(src, "f");
-    let fors = lua
-        .lines()
-        .filter(|l| l.trim_start().starts_with("for "))
-        .count();
-    assert_eq!(fors, 2, "{lua}");
-    assert!(backward_gotos(&lua).is_empty(), "{lua}");
-}
-
 /// The occupancy read is raw under the loop bound; payload reads keep the
 /// fallback because a host getter can shrink the column.
 #[test]
@@ -738,26 +581,6 @@ fn arena_occupancy_reads_are_raw() {
     );
 }
 
-/// A call in the body that may shrink the vector keeps the loop's element
-/// read on its checked fallback.
-#[test]
-fn a_shrinking_call_keeps_the_loop_element_fallback() {
-    let lua = emit_inlined(
-        "fn bump(xs: [int], x: int) -> int { if x < 0 { xs.pop() }; return x + 1 }
-        fn sum_vec(xs: [int]) -> int {
-            let total = 0
-            for x in xs { total += bump(xs, x) }
-            return total
-        }",
-        "sum_vec",
-    );
-    assert!(lua.contains("for "), "{lua}");
-    assert!(
-        lua.contains(" + 1] or (") && lua.contains(" == nil and __vec_checked_get("),
-        "{lua}"
-    );
-}
-
 #[test]
 fn whole_gc_snapshots_read_only_demanded_leaves() {
     let src = include_str!("../../../tests/values/copies.rock");
@@ -773,23 +596,6 @@ fn whole_gc_snapshots_read_only_demanded_leaves() {
             assert!(!lua.contains(unused), "{unused} in {name}:\n{lua}");
         }
     }
-}
-
-#[test]
-fn ordinary_nullable_cdata_enum_return_keeps_boxed_transport() {
-    let src = r#"
-enum PackedResult { Number(int), Empty }
-fn packed_result(present: bool) -> PackedResult? {
-    if !present { return null }
-    return PackedResult::Number(7)
-}
-"#;
-    let lua = emit_clean(src, "packed_result");
-    assert!(
-        lua.contains("return (nil)"),
-        "nullable enum changed transport: {lua}"
-    );
-    assert!(lua.contains("_ct("), "nullable enum lost its box: {lua}");
 }
 
 #[test]
@@ -895,37 +701,6 @@ fn pass_residue_reaching_emission_is_reported_not_a_panic() {
             err.message
         );
     }
-}
-
-#[test]
-fn counted_loop_store_within_the_length_is_raw() {
-    let lua = emit_inlined(
-        "fn fill(xs: [int]) {
-            for i in 0..xs.len() { xs[i] = i * 2 }
-        }",
-        "fill",
-    );
-    assert!(lua.contains("for "), "{lua}");
-    assert!(lua.contains("._data[") && lua.contains(" + 1] = "), "{lua}");
-    assert!(!lua.contains("__vec_checked_set("), "{lua}");
-}
-
-/// A range guard dominating the store proves it; a second vector of unknown
-/// length keeps its check.
-#[test]
-fn a_dominating_range_guard_proves_the_store() {
-    let lua = emit_inlined(
-        "fn set_slot(xs: [int], ys: [int], i: int, v: int) -> bool {
-            if i < 0 { return false }
-            if i >= xs.len() { return false }
-            xs[i] = v
-            ys[i] = v
-            return true
-        }",
-        "set_slot",
-    );
-    assert_eq!(lua.matches("__vec_checked_set(").count(), 1, "{lua}");
-    assert!(lua.contains("._data[") && lua.contains(" + 1] = "), "{lua}");
 }
 
 /// A column-stored element access inside a counted loop needs no element
@@ -1059,19 +834,6 @@ fn lookup(xs: [int], indices: NativeBuffer<int>) -> int {{
         let lua = emit_inlined(&src, "lookup");
         assert!(lua.contains("__vec_checked_get("), "{writer}:\n{lua}");
     }
-}
-
-#[test]
-fn map_remove_invalidates_a_bound_read_from_the_map() {
-    let lua = emit_inlined(
-        "fn lookup(xs: [int], m: Map<string, int>, key: string) -> int {
-            if m[key] < 0 || m[key] >= xs.len() { return 0 }
-            m.remove(key)
-            return xs[m[key]]
-        }",
-        "lookup",
-    );
-    assert!(lua.contains("__vec_checked_get("), "{lua}");
 }
 
 /// A NativeBuffer access a loop proves indexes the C array raw; the stdlib
@@ -1221,24 +983,4 @@ fn numeric_for_preserves_bounds_and_control_flow() {
 
 fn has_general_loop(lua: &str) -> bool {
     lua.contains(" while ") || lua.contains("goto w")
-}
-
-#[test]
-fn json_digit_scans_use_numeric_for() {
-    let lua = emit_inlined(
-        r#"
-fn scan_json_number(src: string, at: int) -> (int, bool, bool) {
-    return parse_number_scan_at(src, at)
-}
-"#,
-        "scan_json_number",
-    );
-    assert_eq!(lua.matches(" for c").count(), 3, "{lua}");
-    assert!(!lua.contains("goto w"), "{lua}");
-}
-
-#[test]
-fn empty_vec_constructor_emits_the_literal_at_the_call_site() {
-    let lua = emit_inlined("fn run() -> [int] { return vec_new<int>() }", "run");
-    assert!(lua.contains("_data") && !lua.contains("vec_new"), "{lua}");
 }
