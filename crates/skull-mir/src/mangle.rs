@@ -268,79 +268,23 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
     }
 }
 
-/// Kind-tagged so no two type structures share a key; `\x1f`/`\x1e` never
-/// appear in a Rock identifier. Only decides same overload versus collision.
-fn sig_key(ws: &Workspace, f: &Function) -> String {
-    let mut s = String::new();
-    s.push_str(f.name.as_str());
-    for pd in &f.param_decls {
-        s.push('\x1f');
-        ty_key(ws, pd.ty, &mut s);
-    }
-    s.push_str("\x1f#ret#\x1f");
-    match f.return_ty {
-        Some(ty) => ty_key(ws, ty, &mut s),
-        None => s.push('u'),
-    }
-    s
-}
-
-fn ty_key(ws: &Workspace, ty: TyId, out: &mut String) {
-    let te = match ty {
-        TyId::Static(m, idx) => ws.module(m).ty_arena[idx],
-        TyId::Local(_) => {
-            out.push('L');
-            return;
-        }
+fn same_declared_type(ws: &Workspace, a: TyId, b: TyId) -> bool {
+    let (TyId::Static(am, ai), TyId::Static(bm, bi)) = (a, b) else {
+        return matches!((a, b), (TyId::Local(_), TyId::Local(_)));
     };
-    match te {
-        TypeExpr::Builtin(b) => {
-            out.push_str("b:");
-            out.push_str(&format!("{b:?}"));
-        }
-        TypeExpr::Generic(_, name) | TypeExpr::Infer(_, name) => {
-            out.push_str("g:");
-            out.push_str(name.as_str());
-        }
-        TypeExpr::Nullable(inner) => {
-            out.push_str("opt(");
-            ty_key(ws, ty.with_idx(inner), out);
-            out.push(')');
-        }
-        TypeExpr::App { ctor, params } => {
-            match ctor {
-                hir::TypeCtor::Array => out.push_str("arr("),
-                hir::TypeCtor::Map => out.push_str("map("),
-                hir::TypeCtor::Ref => out.push_str("ref("),
-                hir::TypeCtor::Nominal(name) => {
-                    out.push_str("nom:");
-                    out.push_str(name.as_str());
-                    out.push('(');
-                }
-            }
-            for p in params {
-                ty_key(ws, ty.with_idx(p), out);
-                out.push('\x1e');
-            }
-            out.push(')');
-        }
-        TypeExpr::Function { params, ret } => {
-            out.push_str("fn(");
-            for p in params {
-                ty_key(ws, ty.with_idx(p), out);
-                out.push('\x1e');
-            }
-            out.push_str(")->");
-            ty_key(ws, ty.with_idx(ret), out);
-        }
-        TypeExpr::Tuple { elements } => {
-            out.push_str("tup(");
-            for e in elements {
-                ty_key(ws, ty.with_idx(e), out);
-                out.push('\x1e');
-            }
-            out.push(')');
-        }
+    let at = ws.module(am).ty_arena[ai];
+    let bt = ws.module(bm).ty_arena[bi];
+    match (at, bt) {
+        // Backend variants may declare the same parameter name in different arenas.
+        (
+            TypeExpr::Generic(_, a) | TypeExpr::Infer(_, a),
+            TypeExpr::Generic(_, b) | TypeExpr::Infer(_, b),
+        ) => a == b,
+        _ => at.equivalent(
+            bt,
+            || false,
+            |x, y| same_declared_type(ws, a.with_idx(x), b.with_idx(y)),
+        ),
     }
 }
 
@@ -349,12 +293,23 @@ fn function_collision_error(
     name: &str,
     prev: &Function,
     f: &Function,
-) -> CompilerError {
-    let prev_signature = sig_key(ws, prev);
-    let signature = sig_key(ws, f);
-    let msg = if prev_signature.split("\x1f#ret#\x1f").next()
-        == signature.split("\x1f#ret#\x1f").next()
-    {
+) -> Option<CompilerError> {
+    let same_parameters = prev.name == f.name
+        && prev.param_decls.len() == f.param_decls.len()
+        && prev
+            .param_decls
+            .iter()
+            .zip(&f.param_decls)
+            .all(|(a, b)| same_declared_type(ws, a.ty, b.ty));
+    let msg = if same_parameters {
+        let same_return = match (prev.return_ty, f.return_ty) {
+            (Some(a), Some(b)) => same_declared_type(ws, a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if same_return {
+            return None;
+        }
         format!(
             "functions `{}` and `{}` differ only in return type; both would emit as \
              `{name}` -- rename one of the functions (return types do not distinguish overloads)",
@@ -367,10 +322,10 @@ fn function_collision_error(
              overloads (mangling is keyed on name + declared parameter types)"
         )
     };
-    CompilerError::new_with_label(f.name_span, msg).with_label(
+    Some(CompilerError::new_with_label(f.name_span, msg).with_label(
         prev.name_span,
         format!("other declaration of `{}`", prev.name),
-    )
+    ))
 }
 
 /// Rejects two distinct signatures with one emitted name, in deterministic order.
@@ -379,7 +334,7 @@ pub fn collision_errors_of<'a>(
     names: impl IntoIterator<Item = (&'a Function, &'a str)>,
 ) -> Vec<(String, CompilerError)> {
     use rustc_hash::FxHashMap as HashMap;
-    let mut seen: HashMap<&str, (&Function, Span)> = HashMap::default();
+    let mut seen: HashMap<&str, &Function> = HashMap::default();
     let mut exempt_names: HashMap<&str, Vec<&Function>> = HashMap::default();
     let mut out: Vec<(String, CompilerError)> = Vec::new();
 
@@ -390,17 +345,12 @@ pub fn collision_errors_of<'a>(
             exempt_names.entry(name).or_default().push(f);
             continue;
         }
-        match seen.get(name) {
-            Some((prev, _)) if sig_key(ws, prev) != sig_key(ws, f) => {
-                out.push((
-                    name.to_string(),
-                    function_collision_error(ws, name, prev, f),
-                ));
+        if let Some(prev) = seen.get(name) {
+            if let Some(error) = function_collision_error(ws, name, prev, f) {
+                out.push((name.to_string(), error));
             }
-            Some(_) => {} // same overload (backend variant / re-decl): fine.
-            None => {
-                seen.insert(name, (f, f.name_span));
-            }
+        } else {
+            seen.insert(name, f);
         }
     }
 
@@ -466,16 +416,13 @@ pub fn collision_errors_of<'a>(
         }
     }
 
-    for (name, (f, _)) in &seen {
+    for (name, f) in &seen {
         if let Some(exempt) = exempt_names.get(name) {
             for prev in exempt {
                 // Backend variants of one signature remain one logical function, even when
                 // the extern variant keeps a bare name.
-                if sig_key(ws, prev) != sig_key(ws, f) {
-                    out.push((
-                        name.to_string(),
-                        function_collision_error(ws, name, prev, f),
-                    ));
+                if let Some(error) = function_collision_error(ws, name, prev, f) {
+                    out.push((name.to_string(), error));
                 }
             }
         }
