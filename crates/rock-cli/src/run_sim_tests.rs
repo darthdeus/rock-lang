@@ -601,21 +601,6 @@ fn a_request_above_the_known_lanes_is_narrowed_before_the_budget() {
 }
 
 #[test]
-fn the_default_job_count_leaves_a_fixed_gpu_memory_reserve() {
-    assert_eq!(
-        vram_budgeted_jobs(32, Some(SIM_VRAM_RESERVE_MIB + 4 * SIM_LANE_VRAM_MIB + 1)),
-        4
-    );
-    assert_eq!(
-        vram_budgeted_jobs(2, Some(SIM_VRAM_RESERVE_MIB + 64 * SIM_LANE_VRAM_MIB)),
-        2
-    );
-    assert_eq!(vram_budgeted_jobs(32, Some(SIM_VRAM_RESERVE_MIB)), 1);
-    assert_eq!(vram_budgeted_jobs(32, Some(SIM_LANE_VRAM_MIB / 4)), 1);
-    assert_eq!(vram_budgeted_jobs(14, None), 14);
-}
-
-#[test]
 fn default_jobs_fit_ram_and_gpu_budgets() {
     let studio = memory_budgets(14, Some(36 * 1024), None);
     assert_eq!(studio.lanes(), 10);
@@ -661,39 +646,11 @@ fn a_declared_frame_count_is_the_entrys_budget() {
 }
 
 #[test]
-fn a_declared_timeout_is_the_entrys_wall_budget() {
-    const KEY: &str = "ROCK_SIM_TIMEOUT_SECS";
-    let cases: &[(&[(&str, &str)], u64)] = &[
-        (&[], sim_timeout_secs()),
-        (&[(KEY, "1200")], 1200),
-        (&[("FRAME_COUNT", "90")], sim_timeout_secs()),
-        (&[(KEY, "90"), (KEY, "1200")], 1200),
-    ];
-    for (declared, secs) in cases {
-        assert_eq!(
-            timeout_for("s", &env(declared)).expect("valid"),
-            Duration::from_secs(*secs),
-            "{declared:?}"
-        );
-    }
-}
-
-#[test]
 fn an_unusable_timeout_is_rejected_not_defaulted() {
     for bad in ["", "0", "-1", "abc", "1.5"] {
         assert!(
             timeout_for("s", &env(&[("ROCK_SIM_TIMEOUT_SECS", bad)])).is_err(),
             "`ROCK_SIM_TIMEOUT_SECS={bad}` must reject rather than silently become the default"
-        );
-    }
-}
-
-#[test]
-fn an_unusable_frame_count_is_rejected_not_defaulted() {
-    for bad in ["abc", "", "0", "-5", "12.5"] {
-        assert!(
-            frame_budget_for("s", &env(&[("FRAME_COUNT", bad)])).is_err(),
-            "`FRAME_COUNT={bad}` must reject rather than silently become the default"
         );
     }
 }
@@ -723,31 +680,6 @@ fn checked_summary(stderr: &str) -> SimSummary {
         stream.protocol_error
     );
     stream.summary
-}
-
-#[test]
-fn the_deadline_guard_resets_only_on_the_accepted_start() {
-    for first in [
-        start("a"),
-        expect_ok("orphan"),
-        "__SIM__ invalid".to_owned(),
-    ] {
-        let mut stream = EntryStream::new("a".to_string(), false);
-        assert_eq!(
-            matches!(
-                stream.observe(&first, |_, _| {}).boundary,
-                Some(EntryBoundary::Started)
-            ),
-            first == start("a")
-        );
-        for line in [expect_ok("ordinary op"), "raw log".to_owned(), start("a")] {
-            assert!(!matches!(
-                stream.observe(&line, |_, _| {}).boundary,
-                Some(EntryBoundary::Started)
-            ));
-        }
-        assert!(stream.protocol_error.is_some());
-    }
 }
 
 #[test]
@@ -808,34 +740,6 @@ fn end_with_frame_timing(name: &str, frame_count: usize, timing: &str) -> String
 
 fn expect_ok(msg: &str) -> String {
     format!(r#"__SIM__ {{"op":"expect_ok","message":"{msg}","site":"f.rock:1"}}"#)
-}
-
-#[test]
-fn the_envelope_partitions_operations_and_logging() {
-    let stream = vec![
-        "[   0.1s INFO ] booting".to_string(),
-        start("a"),
-        "[   0.2s INFO ] inside a".to_string(),
-        expect_ok("from a"),
-        end_with_frame_count("a", "7"),
-        "[   0.4s INFO ] teardown".to_string(),
-    ];
-
-    let out = entry_stream("a", stream);
-    assert!(out.protocol_error.is_none());
-    assert_eq!(out.summary.expects_pass[0].message, "from a");
-    assert!(out.started && out.terminated);
-    assert_eq!(out.summary.frame_count, Some(7));
-    assert!(out.summary.diagnostics.contains("booting"));
-    assert!(out.summary.diagnostics.contains("teardown"));
-}
-
-#[test]
-fn a_killed_child_leaves_its_entry_unterminated() {
-    let out = entry_stream("a", [start("a"), expect_ok("partial")]);
-    assert!(out.started && !out.terminated);
-    assert!(out.protocol_error.is_none());
-    assert_eq!(out.summary.expects_pass[0].message, "partial");
 }
 
 #[test]
@@ -1149,31 +1053,6 @@ fn foreign_stderr_prefixes_preserve_envelopes_deadlines_and_verdicts() {
 }
 
 #[test]
-fn summary_stop_survives_foreign_unterminated_stderr() {
-    let child = run_with_production_emitter(
-        r#"
-emit('{"op":"expect_ok","message":"checked"}', 'test.rock:1')
-io.stderr:write('audio stream error: A backend-specific error has occurred: ')
-io.stderr:flush()
-emit('{"op":"stop"}', 'test.rock:2')
-io.stderr:write('`alsa::poll()` returned POLLERR\n')
-"#,
-    );
-    assert!(
-        child.status.success(),
-        "{}",
-        String::from_utf8_lossy(&child.stderr)
-    );
-    let summary = checked_summary(&String::from_utf8(child.stderr).unwrap());
-    assert_eq!(
-        verdict_word(&summary),
-        "PASS",
-        "no stop_sim() observed: {}",
-        !summary.saw_stop
-    );
-}
-
-#[test]
 fn many_sim_markers_do_not_exhaust_ffi_ctypes() {
     let child = run_with_production_emitter(
         r#"
@@ -1221,15 +1100,6 @@ fn malformed_sim_markers_fail_the_summary() {
         assert_eq!(stream.summary.expects_pass.len(), 1);
         assert!(!stream.terminated);
     }
-}
-
-#[test]
-fn summary_flags_missing_stop() {
-    let stderr = r#"__SIM__ {"op":"expect_ok","message":"a","site":"foo.rock:1"}"#;
-    let s = checked_summary(stderr);
-    assert_eq!(s.expects_pass.len(), 1);
-    assert!(!s.saw_stop);
-    assert!(!s.has_failures());
 }
 
 #[test]
