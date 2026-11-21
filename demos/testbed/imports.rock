@@ -1,4 +1,3 @@
-// Dependency names every file of this package sees (spec 8.7). Narrow them
-// as the package is subdivided.
+// Dependencies apply to every file in this package.
 pub(package) use stone::*;
 pub(package) use stone_core::*;
