@@ -76,16 +76,6 @@ fn make_point(x: int, y: int) -> Point {
 }
 ";
 
-const CROSS_FILE_B: &str = "
-fn double_x(p: Point) -> int {
-    p.x * 2
-}
-
-fn origin_doubled() -> int {
-    double_x(make_point(0, 0))
-}
-";
-
 const WARM_PRELUDE_PATH: &str = "<warm-prelude>";
 const WARM_PRELUDE: &str = "
 fn __op_add(a: int, b: int) -> int { 0 }
