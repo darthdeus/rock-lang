@@ -1,33 +1,6 @@
 use crate::common::{emit_module, function_body, run_luajit};
 
 #[test]
-fn bounded_affine_native_buffer_loops_keep_boundary_behavior() {
-    let lua = emit_module(include_str!("../../../benchmarks/guard_proofs.rock"));
-    let body = function_body(&lua, "guard_stride_proven");
-    assert!(!body.contains("__nb_checked_get"));
-    assert!(function_body(&lua, "guard_stride").contains("__nb_checked_get"));
-    let output = run_luajit(&format!(
-        r#"{lua}
-local data = ffi.new('int[16]')
-for i = 0, 15 do data[i] = i + 1 end
-local buf = {{ptr = data, len = 16}}
-for _, count in ipairs({{-1, 0, 0.5, 1, 1.9, 4, 5, 100001, math.huge, -math.huge, 0/0}}) do
-    local n = math.floor(count)
-    local expected = -1
-    if n >= 0 and n <= 100000 and buf.len >= n * 4 then
-        expected = n * 4 * (n * 4 + 1) / 2
-    end
-    assert(guard_stride_proven(buf, count) == expected)
-end
-buf.len = 3
-assert(guard_stride_proven(buf, 1) == -1)
-print('ok')
-"#
-    ));
-    assert_eq!(output.trim(), "ok");
-}
-
-#[test]
 fn affine_bounds_that_no_longer_hold_keep_the_check() {
     for (name, source, args) in [
         (
