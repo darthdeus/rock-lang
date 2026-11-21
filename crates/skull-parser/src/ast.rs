@@ -692,34 +692,61 @@ pub struct ModuleHeader {
     pub span: Span,
 }
 
-/// `use` declarations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UseDecl {
     pub span: Span,
     pub vis: Option<Visibility>,
-    pub tree: UseTree,
+    pub from_root: bool,
+    pub(crate) paths: std::sync::Arc<[UsePath]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UseTree {
-    Path {
-        from_root: bool,
-        segments: Vec<Ident>,
-        kind: UseSuffix,
-    },
+pub struct UsePath {
+    /// Index of the enclosing path group in declaration order.
+    pub parent: Option<usize>,
+    pub segments: Vec<Ident>,
+    pub suffix: UseSuffix,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UseSuffix {
-    Bind,
-    BindAs(Ident),
-    /// Immediate accessible members.
+    Bind(Option<Ident>),
+    Operator(Option<Ident>),
     Glob,
-    Operator {
-        op: Ident,
-        alias: Option<Ident>,
-    },
-    Nested(Vec<UseTree>),
+    Group,
+}
+
+#[derive(Clone, Copy)]
+pub enum UsePathForm {
+    Written,
+    Target,
+}
+
+impl UseDecl {
+    pub fn paths(&self) -> &[UsePath] {
+        &self.paths
+    }
+
+    pub fn visit_paths(&self, form: UsePathForm, mut visit: impl FnMut(&UsePath, &[Ustr])) {
+        let mut full = smallvec::SmallVec::<[Ustr; 8]>::new();
+        let mut lengths = smallvec::SmallVec::<[usize; 8]>::new();
+        for path in self.paths() {
+            full.truncate(path.parent.map_or(0, |i| lengths[i]));
+            let mut segments = path.segments.as_slice();
+            // `p::m::{self}` and `p::m::{self as n}` name the parent path.
+            let operator = usize::from(matches!(path.suffix, UseSuffix::Operator(_)));
+            if matches!(form, UsePathForm::Target)
+                && !full.is_empty()
+                && segments.len() == 1 + operator
+                && segments[0].name.as_str() == "self"
+            {
+                segments = &segments[1..];
+            }
+            full.extend(segments.iter().map(|s| s.name));
+            lengths.push(full.len());
+            visit(path, &full);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

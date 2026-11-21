@@ -51,7 +51,7 @@ fn record_use_items(
     for item in items {
         match &item.kind {
             skull_parser::ItemKind::Use(decl) => {
-                ctx.use_tree_refs(&frag, &decl.tree, &[], false, out);
+                ctx.use_path_refs(&frag, decl, out);
             }
             skull_parser::ItemKind::Module(module) => {
                 let mut child = module_path.to_vec();
@@ -331,69 +331,36 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
-    fn use_tree_refs(
+    fn use_path_refs(
         &self,
         frag: &bone_core::modules::FragmentScope,
-        tree: &skull_parser::UseTree,
-        prefix: &[Ustr],
-        from_root: bool,
+        decl: &skull_parser::UseDecl,
         out: &mut Vec<hir::PathSegmentRef>,
     ) {
-        let skull_parser::UseTree::Path {
-            from_root: tree_root,
-            segments,
-            kind,
-        } = tree;
-        let root = if prefix.is_empty() {
-            *tree_root
-        } else {
-            from_root
-        };
-        let mut full = prefix.to_vec();
-        full.extend(segments.iter().map(|s| s.name));
-        let binds_item = matches!(
-            kind,
-            skull_parser::UseSuffix::Bind | skull_parser::UseSuffix::BindAs(_)
-        );
-        for (i, ident) in segments.iter().enumerate() {
-            let upto = prefix.len() + i + 1;
-            let target = if binds_item && upto == full.len() {
-                self.use_leaf_target(frag, root, &full)
-            } else {
-                self.module_segment(frag, root, &full[..upto])
+        use skull_parser::UseSuffix;
+        decl.visit_paths(skull_parser::UsePathForm::Written, |path, full| {
+            let from_root =
+                decl.from_root && (path.parent.is_none() || !decl.paths()[0].segments.is_empty());
+            let binding = match &path.suffix {
+                UseSuffix::Bind(alias) | UseSuffix::Operator(alias) => Some(alias.as_ref()),
+                UseSuffix::Glob | UseSuffix::Group => None,
             };
-            if let Some(target) = target {
-                out.push(hir::PathSegmentRef {
-                    span: ident.span,
-                    target,
-                    alias: false,
-                });
-            }
-        }
-        match kind {
-            skull_parser::UseSuffix::BindAs(alias) => {
-                if let Some(target) = self.use_leaf_target(frag, root, &full) {
+            let prefix_len = full.len() - path.segments.len();
+            for (i, ident) in path.segments.iter().enumerate() {
+                let upto = prefix_len + i + 1;
+                let leaf = binding.filter(|_| upto == full.len());
+                let target = if leaf.is_some() {
+                    self.use_leaf_target(frag, from_root, full)
+                } else {
+                    self.module_segment(frag, from_root, &full[..upto])
+                };
+                if let Some(target) = target {
                     out.push(hir::PathSegmentRef {
-                        span: alias.span,
-                        target,
-                        alias: true,
-                    });
-                }
-            }
-            skull_parser::UseSuffix::Nested(children) => {
-                for child in children {
-                    self.use_tree_refs(frag, child, &full, root, out);
-                }
-            }
-            skull_parser::UseSuffix::Operator { op, alias } => {
-                full.push(op.name);
-                if let Some(target) = self.use_leaf_target(frag, root, &full) {
-                    out.push(hir::PathSegmentRef {
-                        span: op.span,
+                        span: ident.span,
                         target,
                         alias: false,
                     });
-                    if let Some(alias) = alias {
+                    if let Some(alias) = leaf.flatten() {
                         out.push(hir::PathSegmentRef {
                             span: alias.span,
                             target,
@@ -402,8 +369,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
                     }
                 }
             }
-            skull_parser::UseSuffix::Bind | skull_parser::UseSuffix::Glob => {}
-        }
+        });
     }
 
     fn use_leaf_target(

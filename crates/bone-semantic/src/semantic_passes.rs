@@ -1276,9 +1276,7 @@ fn validate_use_items(
                 validate_use_items(ws, frag, &child, items)?;
             }
             ScopeItem::Use(decl) => {
-                let mut leaves = Vec::new();
-                collect_use_leaves(&decl.tree, &[], false, &mut leaves);
-                for (local, target) in leaves {
+                for (local, target) in use_leaves(decl) {
                     let glob = local.is_none();
                     let checked = if decl.vis.is_some() {
                         bone_lower::resolve::check_export_target(
@@ -1376,52 +1374,33 @@ fn register_stdlib_items(
     Ok(())
 }
 
-fn collect_use_leaves(
-    tree: &skull_parser::UseTree,
-    prefix: &[ustr::Ustr],
-    from_root: bool,
-    out: &mut Vec<(Option<ustr::Ustr>, UsePathRef)>,
-) {
-    let skull_parser::UseTree::Path {
-        from_root: tree_root,
-        segments,
-        kind,
-    } = tree;
-    // Nested use paths inherit the declaration's root anchor.
-    let path_root = *tree_root || from_root;
-    let mut full = prefix.to_vec();
-    full.extend(segments.iter().map(|segment| segment.name));
-    // `p::m::{self}` / `{self as n}` binds the module `p::m` itself.
-    let self_leaf =
-        !prefix.is_empty() && segments.len() == 1 && segments[0].name.as_str() == "self";
-    if self_leaf {
-        full.pop();
-    }
-    let local = match kind {
-        skull_parser::UseSuffix::Bind => {
-            let Some(&local) = full.last() else { return };
-            Some(local)
-        }
-        skull_parser::UseSuffix::BindAs(alias) => Some(alias.name),
-        skull_parser::UseSuffix::Operator { op, alias } => {
-            full.push(op.name);
-            Some(alias.as_ref().map_or(op.name, |a| a.name))
-        }
-        skull_parser::UseSuffix::Glob => None,
-        skull_parser::UseSuffix::Nested(children) => {
-            for child in children {
-                collect_use_leaves(child, &full, path_root, out);
+fn use_leaves(decl: &skull_parser::UseDecl) -> Vec<(Option<Ustr>, UsePathRef)> {
+    use skull_parser::UseSuffix;
+    let mut leaves = Vec::new();
+    decl.visit_paths(skull_parser::UsePathForm::Target, |path, full| {
+        let local = match &path.suffix {
+            UseSuffix::Bind(alias) | UseSuffix::Operator(alias) => {
+                let Some(name) = alias
+                    .as_ref()
+                    .map(|a| a.name)
+                    .or_else(|| full.last().copied())
+                else {
+                    return;
+                };
+                Some(name)
             }
-            return;
-        }
-    };
-    out.push((
-        local,
-        UsePathRef {
-            from_root: path_root,
-            segments: full,
-        },
-    ));
+            UseSuffix::Glob => None,
+            UseSuffix::Group => return,
+        };
+        leaves.push((
+            local,
+            UsePathRef {
+                from_root: decl.from_root,
+                segments: full.to_vec(),
+            },
+        ));
+    });
+    leaves
 }
 
 fn source_module_context(scope: &FragmentScope, path: &[ustr::Ustr]) -> String {
@@ -1607,9 +1586,7 @@ fn flatten_use_decl(
     decl: &skull_parser::UseDecl,
     errs: &mut Vec<CompilerError>,
 ) {
-    let mut leaves = Vec::new();
-    collect_use_leaves(&decl.tree, &[], false, &mut leaves);
-    for (local, target) in leaves {
+    for (local, target) in use_leaves(decl) {
         match (local, decl.vis.is_some()) {
             (local, true) => share_export(ws, pkg_id, path, local, target, decl, errs),
             (Some(local), false) => scope.named.entry(local).or_default().push(target),

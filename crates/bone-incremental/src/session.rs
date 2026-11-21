@@ -358,7 +358,7 @@ fn scope_items(
             ScopeItem::Use(decl) => {
                 (depth, "use").hash(h);
                 hash_visibility(decl.vis.as_ref(), h);
-                hash_use_tree(&decl.tree, h);
+                hash_use_paths(decl, h);
             }
             ScopeItem::Def {
                 name, kind, vis, ..
@@ -370,42 +370,23 @@ fn scope_items(
     }
 }
 
-fn hash_use_tree(tree: &skull_parser::UseTree, h: &mut rustc_hash::FxHasher) {
-    use skull_parser::{UseSuffix, UseTree};
+fn hash_use_paths(decl: &skull_parser::UseDecl, h: &mut rustc_hash::FxHasher) {
+    use skull_parser::UseSuffix;
     use std::hash::Hash;
 
-    match tree {
-        UseTree::Path {
-            from_root,
-            segments,
-            kind,
-        } => {
-            from_root.hash(h);
-            segments
-                .iter()
-                .map(|ident| ident.name.as_str())
-                .collect::<Vec<_>>()
-                .hash(h);
-            match kind {
-                UseSuffix::Bind => 0u8.hash(h),
-                UseSuffix::BindAs(alias) => {
-                    1u8.hash(h);
-                    alias.name.as_str().hash(h);
-                }
-                UseSuffix::Glob => 2u8.hash(h),
-                UseSuffix::Operator { op, alias } => {
-                    3u8.hash(h);
-                    op.name.as_str().hash(h);
-                    alias.as_ref().map(|ident| ident.name.as_str()).hash(h);
-                }
-                UseSuffix::Nested(children) => {
-                    4u8.hash(h);
-                    children.len().hash(h);
-                    for child in children {
-                        hash_use_tree(child, h);
-                    }
-                }
-            }
+    (decl.from_root, decl.paths().len()).hash(h);
+    for path in decl.paths() {
+        (
+            path.parent,
+            path.segments.len(),
+            std::mem::discriminant(&path.suffix),
+        )
+            .hash(h);
+        for part in &path.segments {
+            part.name.as_str().hash(h);
+        }
+        if let UseSuffix::Bind(alias) | UseSuffix::Operator(alias) = &path.suffix {
+            alias.as_ref().map(|a| a.name.as_str()).hash(h);
         }
     }
 }

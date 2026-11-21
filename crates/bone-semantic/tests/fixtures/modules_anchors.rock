@@ -96,6 +96,18 @@ fn f() -> string {
     d
 }
 
+//- a_grouped_self_prefix_names_the_parent_module
+//-- lib.rock @pkg=chess,1 @v1
+use ::{inner::{self as imported, self::{ply as depth}}};
+
+fn f() -> int {
+    let n = depth()
+            //^ int
+    imported::ply() + n
+}
+
+//-- =public_inner_ply
+
 //- a_use_and_a_glob_through_a_module_alias
 //-- lib.rock @pkg=chess,1 @v1
 use inner as r;

@@ -625,18 +625,21 @@ impl<'a> Parser<'a> {
     fn parse_use_decl(&mut self, start: Span, vis: Option<Visibility>) -> PResult<UseDecl> {
         debug_assert!(matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "use"));
         self.advance(); // `use`
-        let tree = self.parse_use_tree(true)?;
+        self.skip_comments();
+        let from_root = self.eat(TokenKind::DoubleColon);
+        let mut paths = Vec::new();
+        self.parse_use_path(None, &mut paths)?;
         self.eat(TokenKind::Semicolon);
         let span = self.span_from(start);
-        Ok(UseDecl { span, vis, tree })
+        Ok(UseDecl {
+            span,
+            vis,
+            from_root,
+            paths: paths.into(),
+        })
     }
 
-    fn parse_use_tree(&mut self, allow_root: bool) -> PResult<UseTree> {
-        self.skip_comments();
-        let from_root = allow_root && self.kind() == TokenKind::DoubleColon;
-        if from_root {
-            self.advance();
-        }
+    fn parse_use_path(&mut self, parent: Option<usize>, paths: &mut Vec<UsePath>) -> PResult<()> {
         let mut segments = Vec::new();
         loop {
             if self.kind() == TokenKind::OpenCurly
@@ -651,14 +654,18 @@ impl<'a> Parser<'a> {
             }
             self.advance(); // `::`
         }
-        let kind = if self.kind() == TokenKind::OpenCurly {
-            self.advance();
-            let trees =
-                self.parse_comma_list(TokenKind::CloseCurly, |p| p.parse_use_tree(false))?;
+        if self.eat(TokenKind::OpenCurly) {
+            let group = Some(paths.len());
+            paths.push(UsePath {
+                parent,
+                segments,
+                suffix: UseSuffix::Group,
+            });
+            self.parse_comma_list(TokenKind::CloseCurly, |p| p.parse_use_path(group, paths))?;
             self.expect(TokenKind::CloseCurly)?;
-            UseSuffix::Nested(trees)
-        } else if self.kind() == TokenKind::Mul {
-            self.advance();
+            return Ok(());
+        }
+        let suffix = if self.eat(TokenKind::Mul) {
             UseSuffix::Glob
         } else if self.suffix_is_operator_selector() {
             // `geo::operator(+);` — the leading segments name the module and
@@ -683,26 +690,26 @@ impl<'a> Parser<'a> {
                         glyph
                     ))
                 })?;
-            let op = Ident {
+            segments.push(Ident {
                 span: glyph_span,
                 name: Ustr::from(op_fn),
-            };
-            let alias = if self.kind() == TokenKind::As {
-                Some(self.parse_use_alias()?)
-            } else {
-                None
-            };
-            UseSuffix::Operator { op, alias }
-        } else if self.kind() == TokenKind::As {
-            UseSuffix::BindAs(self.parse_use_alias()?)
+            });
+            UseSuffix::Operator(self.eat_use_alias()?)
         } else {
-            UseSuffix::Bind
+            UseSuffix::Bind(self.eat_use_alias()?)
         };
-        Ok(UseTree::Path {
-            from_root,
+        paths.push(UsePath {
+            parent,
             segments,
-            kind,
-        })
+            suffix,
+        });
+        Ok(())
+    }
+
+    fn eat_use_alias(&mut self) -> PResult<Option<Ident>> {
+        (self.kind() == TokenKind::As)
+            .then(|| self.parse_use_alias())
+            .transpose()
     }
 
     fn parse_use_alias(&mut self) -> PResult<Ident> {
