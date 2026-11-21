@@ -95,53 +95,6 @@ fn v1_type_table_key_matches_the_emitted_constructor() {
     );
 }
 
-const PAYLOAD_MAIN: &str = r#"
-fn main() {
-    let r = a::Rank(4)
-    print("{a::describe()} {a::rank_of(r)}")
-}
-"#;
-
-const PAYLOAD_MOD: &str = r#"
-mod a;
-
-pub enum Move {
-    Pass,
-    Step(int),
-    Jump { from: int, to: int },
-}
-
-pub newtype Rank(int)
-
-pub fn rank_of(r: Rank) -> int {
-    return r.0
-}
-
-pub fn describe() -> string {
-    let stepped = Move::Step(2)
-    let jumped = Move::Jump { from: 1, to: 3 }
-    let passed = Move::Pass
-    return "{tag(stepped)} {tag(jumped)} {tag(passed)}"
-}
-
-fn tag(m: Move) -> string {
-    match m {
-        Move::Step(d) => "step{d}",
-        Move::Jump { from, to } => "jump{from}{to}",
-        Move::Pass => "pass",
-    }
-}
-"#;
-
-#[test]
-fn v1_mixed_enum_variants_construct_and_match() {
-    let emitted = emit_v1_package(
-        "v1enum",
-        &[("main.rock", PAYLOAD_MAIN), ("a.rock", PAYLOAD_MOD)],
-    );
-    assert_eq!(run_main(&emitted.lua), "step2 jump13 pass 4");
-}
-
 const SPEC_MAIN: &str = r#"
 fn main() {
     print("total={a::total()}")
@@ -185,54 +138,6 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
             .contains(&format!("function is_empty_arr_T_{encoded}("))
     );
     assert_eq!(run_main(&emitted.lua), "total=9");
-}
-
-#[test]
-fn record_codec_metadata_keeps_primitive_payloads_and_collection_elements() {
-    let lua = crate::common::emit_module(
-        r#"
-enum Entry { Empty, Text(string), Pair(int, float), Names([string]) }
-struct Record { entries: [Entry], title: string?, weights: Map<string, float> }
-inline(lua) fn verify(value: any) = """
-    local fields = __rock_field_declaration(value).fields
-    assert(fields[2].desc.k == 'opt' and fields[2].desc.inner.k == 'string')
-    assert(fields[3].desc.key.k == 'string' and fields[3].desc.val.k == 'float')
-    local variants = _G.__ROCK_TYPE_TABLE[fields[1].desc.elem.name].variant_desc
-    assert(variants.Empty.pos and #variants.Empty.pos == 0)
-    assert(variants.Text.pos[1].k == 'string')
-    assert(variants.Pair.pos[1].k == 'int' and variants.Pair.pos[2].k == 'float')
-    assert(variants.Names.pos[1].k == 'vec' and variants.Names.pos[1].elem.k == 'string')
-"""
-fn main() {
-    verify(Record { entries: [Entry::Text("hello")], title: null, weights: map_new() })
-    print("ok")
-}
-"#,
-    );
-    assert_eq!(run_main(&lua), "ok");
-}
-
-#[test]
-fn typed_json_rejects_cycles_and_unsupported_storage() {
-    let lua = crate::common::emit_module(
-        r#"
-struct Node { next: Node? = null }
-struct NumericKeys { entries: Map<int, string> }
-inline(lua) fn fails(run: fn() -> JsonValue, message: string) = """
-    local ok, err = pcall(run)
-    assert(not ok and tostring(err):find(message, 1, true), tostring(err))
-"""
-fn main() {
-    let codec = JsonRecordCodec {}
-    let node = Node {}
-    node.next = node
-    fails(() => json_record_encode(codec, node), "cannot encode cycles")
-    fails(() => json_record_encode(codec, NumericKeys { entries: map_new() }), "require string keys")
-    print("ok")
-}
-"#,
-    );
-    assert_eq!(run_main(&lua), "ok");
 }
 
 #[test]

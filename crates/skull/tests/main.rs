@@ -40,7 +40,6 @@ mod descriptor_value_repr;
 mod embed_scalarize;
 mod enum_cdata;
 mod enum_flat_equality;
-mod enum_format_packages;
 mod enum_payload_sroa;
 mod enum_scalarize;
 mod env_record_hoist;

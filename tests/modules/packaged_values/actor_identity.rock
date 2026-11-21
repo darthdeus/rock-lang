@@ -1,0 +1,3 @@
+mod actor_identity;
+
+pub value MobId { scene_id: int, arena_id: int, slot: int, generation: int }

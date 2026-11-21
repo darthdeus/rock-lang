@@ -1,0 +1,8 @@
+mod status;
+
+pub enum PoisonLevel { Rotting }
+
+pub enum StatusEffect<Source> {
+    Paralyzed { remaining: float, duration: float },
+    Poisoned { source: Source },
+}

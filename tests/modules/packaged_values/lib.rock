@@ -1,0 +1,48 @@
+use sequence::{Sequence, iter, next};
+
+enum MobKind { Skeleton, Zombie }
+
+enum ScenarioMoveAdmission {
+    Movement(movement::MovementStepAdmission),
+    Finished,
+}
+
+enum DamageSource { Mob(actor_identity::MobId), Environment }
+
+struct FormatRow { v: int }
+
+fn format_paralyzed() -> status::StatusEffect<DamageSource> {
+    return status::StatusEffect::Paralyzed { remaining: 1.5, duration: 2.0 }
+}
+
+fn mob_id() -> actor_identity::MobId {
+    return actor_identity::MobId { scene_id: 11, arena_id: 23, slot: 4, generation: 7 }
+}
+
+@test(backends = "lua")
+fn packaged_types_print_their_paths() {
+    assert_eq("{MobKind::Skeleton}", "pkgenum::MobKind::Skeleton")
+    assert_eq("{status::PoisonLevel::Rotting}", "pkgenum::status::PoisonLevel::Rotting")
+    let ad = ScenarioMoveAdmission::Movement(movement::MovementStepAdmission::Blocked)
+    assert_eq("{ad}", "pkgenum::ScenarioMoveAdmission::Movement(pkgenum::movement::MovementStepAdmission::Blocked)")
+    let source = DamageSource::Mob(mob_id())
+    let id = "pkgenum::actor_identity::MobId {{ scene_id: 11, arena_id: 23, slot: 4, generation: 7 }}"
+    assert_eq("{source}", "pkgenum::DamageSource::Mob({id})")
+    assert_eq("{mob_id()}", id)
+    assert_eq("{format_paralyzed()}", "pkgenum::status::StatusEffect::Paralyzed {{ remaining: 1.5, duration: 2 }}")
+    let rows: Arena<FormatRow> = arena_new()
+    let e = rows.insert(FormatRow { v: 1 })
+    assert("{e}".starts_with("Entity<pkgenum::"))
+}
+
+@test(output = "step2 jump13 pass 4")
+fn packaged_payload_variants_and_newtype_match() {
+    let r = moves::Rank(4)
+    print("{moves::describe()} {moves::rank_of(r)}")
+}
+
+@test(output = "10")
+fn packaged_generic_iterator_yields_tuple() {
+    let values = Sequence { item: 7 }
+    for (index, item) in values { print(index + item) }
+}

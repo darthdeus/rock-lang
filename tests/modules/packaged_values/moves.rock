@@ -1,0 +1,28 @@
+mod moves;
+
+pub enum Move {
+    Pass,
+    Step(int),
+    Jump { from: int, to: int },
+}
+
+pub newtype Rank(int)
+
+pub fn rank_of(r: Rank) -> int {
+    return r.0
+}
+
+pub fn describe() -> string {
+    let stepped = Move::Step(2)
+    let jumped = Move::Jump { from: 1, to: 3 }
+    let passed = Move::Pass
+    return "{tag(stepped)} {tag(jumped)} {tag(passed)}"
+}
+
+fn tag(m: Move) -> string {
+    match m {
+        Move::Step(d) => "step{d}",
+        Move::Jump { from, to } => "jump{from}{to}",
+        Move::Pass => "pass",
+    }
+}
