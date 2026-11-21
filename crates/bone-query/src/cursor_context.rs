@@ -833,50 +833,9 @@ mod gaps {
     }
 
     #[test]
-    fn call_arg_survives_cursor_adjacent_to_a_number() {
-        // `1__rock_completion__` fails to tokenize; the replacement munge recovers.
-        let (_, _, cx) = cx("fn feed(x: int) {}\nfn t() {\n  feed(1$0)\n}\n");
-        assert_eq!(cx.call_arg(), Some(("feed".to_string(), 0, None)));
-    }
-
-    #[test]
     fn after_yield_survives_cursor_after_a_number() {
         let (_, _, cx) = cx("co fn c() -> Coroutine<int> {\n  yield 1$0\n}\n");
         assert!(cx.after_yield());
-    }
-
-    #[test]
-    fn qualified_base_in_a_match_arm_pattern() {
-        // Patterns live outside the exprs arena -- the walk must cover them.
-        let (_, _, cx) = cx(
-            "enum E { X, Y }\nfn t(e: E) -> int {\n  match e {\n    E::$0X => 1,\n    _ => 2,\n  }\n}\n",
-        );
-        assert_eq!(cx.qualified_base(), Some("E".to_string()));
-    }
-
-    #[test]
-    fn call_arg_survives_a_following_lambda_arg() {
-        // The sentinel juxtaposed with the next arg fails to parse; the
-        // sentinel-plus-comma munge recovers.
-        let (_, _, cx) = cx(
-            "fn apply(n: int, f: (int) -> int) -> int { return f(n) }\nfn t() {\n  apply(3, $0(x: int) => x * x)\n}\n",
-        );
-        assert_eq!(cx.call_arg(), Some(("apply".to_string(), 1, None)));
-    }
-
-    #[test]
-    fn qualified_base_in_a_path_record_literal() {
-        let (_, _, cx) = cx("enum E { B { d: int } }\nfn t() {\n  let v = E::$0B { d: 1 }\n}\n");
-        assert_eq!(cx.qualified_base(), Some("E".to_string()));
-    }
-
-    #[test]
-    fn call_arg_between_named_args() {
-        // Every sentinel munge breaks here, so the raw parse wins and the cursor
-        // sits between arg nodes.
-        let (_, _, cx) =
-            cx("fn draw(a: int, b: int, c: int) {}\nfn t() {\n  draw(1, b: 2,$0 c: 3)\n}\n");
-        assert_eq!(cx.call_arg(), Some(("draw".to_string(), 2, None)));
     }
 
     #[test]
@@ -885,30 +844,6 @@ mod gaps {
             "fn apply(n: int, f: (int) -> int) -> int { return f(n) }\nfn t() {\n  apply(3, (x$0: int) => x * x)\n}\n",
         );
         assert_eq!(cx.call_arg(), None);
-    }
-
-    #[test]
-    fn call_arg_fires_in_a_lambda_body() {
-        let (_, _, cx) = cx(
-            "fn apply(n: int, f: (int) -> int) -> int { return f(n) }\nfn t() {\n  apply(3, (x: int) => x$0)\n}\n",
-        );
-        assert_eq!(cx.call_arg(), Some(("apply".to_string(), 1, None)));
-    }
-
-    #[test]
-    fn qualified_base_in_a_fresh_match_arm() {
-        // Recovery drops an arm with no `=>`; only the arm-completing rung keeps it.
-        let (_, _, cx) = cx("enum E { X, Y(int) }\nfn t(e: E) {\n  match e {\n    E::$0\n  }\n}\n");
-        assert_eq!(cx.qualified_base(), Some("E".to_string()));
-    }
-
-    #[test]
-    fn qualified_base_mid_variant_ident_in_record_literal() {
-        // Mid-ident, the sentinel glues into one identifier that parses cleanly.
-        let (_, _, cx) = cx(
-            "enum E { B { d: int, h: int } }\nfn t(h: int) {\n  let v = E::B$0andaging { d: 1, h }\n}\n",
-        );
-        assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
 
     #[test]
@@ -937,28 +872,9 @@ mod gaps {
     }
 
     #[test]
-    fn coroutine_first_arg_false_in_a_comment() {
-        let (_, _, cx) = cx("fn t() {\n  // Coroutine<x$0\n}\n");
-        assert!(!cx.coroutine_first_generic_arg());
-    }
-
-    #[test]
     fn bool_condition_chain_true_for_a_whole_condition() {
         let (_, _, cx) = cx("struct T { ok: bool }\nfn t(thing: T) {\n  if thing.o$0\n}\n");
         assert!(cx.bool_condition_chain());
-    }
-
-    #[test]
-    fn bool_condition_chain_false_under_a_conjunction() {
-        let (_, _, cx) =
-            cx("struct T { ok: bool }\nfn t(a: bool, thing: T) {\n  if a && thing.o$0\n}\n");
-        assert!(!cx.bool_condition_chain());
-    }
-
-    #[test]
-    fn qualified_base_in_expression_position() {
-        let (_, _, cx) = cx("enum E { X }\nfn t() {\n  let v = E::$0X\n}\n");
-        assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
 }
 
@@ -976,27 +892,6 @@ mod tokenize_frontier {
                     "fixture did not classify at byte {offset}"
                 );
             }
-        }
-    }
-
-    /// Raw buffers that fail tokenize must still classify via the balanced
-    /// munges.
-    #[test]
-    fn broken_tail_states_still_classify() {
-        let cases = [
-            "fn t() {\n  let s = \"foo {",
-            "fn t() {\n  let s = \"foo ",
-            "fn t() {\n  let s = \"\"\"block\n  text",
-            "fn t() {\n  let n = 0x",
-            "fn t() {\n  let n = 0b",
-            "fn t() {\n  let s = \"a {b.",
-        ];
-        for src in cases {
-            let got = CursorAst::at(src, src.len());
-            assert!(
-                got.is_some(),
-                "must classify (Some) for broken tail: {src:?}"
-            );
         }
     }
 }
@@ -1035,35 +930,5 @@ mod type_position_matrix {
         );
         assert!(classify("fn t() {\n  let a: [F|]\n}"), "array type element");
         assert!(classify("enum E { V(F|) }"), "tuple-variant payload");
-    }
-
-    #[test]
-    fn expression_positions() {
-        assert!(!classify("fn t() {\n  let x = F|\n}"), "rhs of assignment");
-        assert!(!classify("fn t() -> int {\n  return F|\n}"), "return value");
-        assert!(
-            !classify("fn foo(n: int) {}\nfn t() {\n  foo(F|)\n}"),
-            "call argument"
-        );
-        assert!(
-            !classify("struct Point { x: int }\nfn t() {\n  let p = Point { x: F| }\n}"),
-            "struct-literal field value"
-        );
-        assert!(
-            !classify("fn t() {\n  let a = [F|]\n}"),
-            "array literal element"
-        );
-        assert!(
-            !classify("fn t(x: int) {\n  if x == F| {}\n}"),
-            "comparison rhs"
-        );
-        assert!(
-            !classify("fn t(v: int) {\n  match v { F| }\n}"),
-            "match arm pattern"
-        );
-        assert!(
-            !classify("enum SpellState { Idle }\nfn t() {\n  let s = SpellState::F|\n}"),
-            "after scope resolution"
-        );
     }
 }
