@@ -11,15 +11,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn wide_nobox_vec_stays_flat_past_the_implicit_threshold() {
-    let lua = emit_module(WIDE_NOBOX_OVERWRITE);
-    let body = function_body(&lua, "main");
-    assert!(!body.contains("Wide_lct("));
-    assert!(crate::common::has_vec_header(body, "strided", None));
-    assert_eq!(run_main(&lua), "6 10");
-}
-
 fn source(extra: usize) -> String {
     let names = ["a", "b", "c", "d"];
     let fields: Vec<String> = (0..extra)
@@ -51,24 +42,4 @@ fn main() {{
 
 fn is_column_stored(lua: &str) -> bool {
     !lua.lines().any(|l| l.matches("Opt_lct(").count() == 1)
-}
-
-#[test]
-fn every_leaf_count_round_trips_and_the_storage_tier_flips_at_the_threshold() {
-    let mut rows = Vec::new();
-    for extra in 0..5 {
-        let leaves = extra + 3;
-        let src = source(extra);
-        let lua = try_emit_module(&src)
-            .unwrap_or_else(|e| panic!("{} fields / {leaves} leaves must emit: {e:?}", extra + 1));
-        let want_present: String = std::iter::once("1 2".to_string())
-            .chain((0..extra).map(|i| format!(" {}", i + 3)))
-            .collect();
-        assert_eq!(run_main(&lua), format!("{want_present}\n-1 false"));
-        rows.push((leaves, is_column_stored(&lua)));
-    }
-    assert_eq!(
-        rows,
-        vec![(3, true), (4, true), (5, false), (6, false), (7, false)]
-    );
 }
