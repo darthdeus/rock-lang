@@ -554,7 +554,7 @@ impl Reads {
                 }
                 let start = reads.leaves.len() as u32;
                 let inst = &func.insts[id];
-                cell_uses(inst, &mut |c| reads.leaves.push(raw(c) as u32 | CELL_LEAF));
+                inst.cell_reads_each(&mut |c| reads.leaves.push(raw(c) as u32 | CELL_LEAF));
                 inst.uses_each(&mut |u| operand(func, inline, u, &mut reads.leaves));
                 reads.stmt[raw(id)] = (start, reads.leaves.len() as u32);
             }
@@ -877,15 +877,6 @@ pub(crate) fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
     // Residual bound-call destinations are placeholders, not emitted locals.
     if !matches!(inst, Inst::CallBoundMulti { .. }) {
         inst.cell_writes_each(push);
-    }
-}
-
-/// `MapNext` reads its key cell (the cursor) before writing it.
-pub(crate) fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
-    match inst {
-        Inst::Load(c) => push(*c),
-        Inst::MapNext { key_cell, .. } => push(*key_cell),
-        _ => {}
     }
 }
 
@@ -1346,7 +1337,7 @@ pub(crate) fn pinned_cells(func: &MirFunc, flow: &Flow) -> Vec<bool> {
         }
         for &id in &b.insts {
             cell_defs(&func.insts[id], &mut |c| pinned[raw(c)] = true);
-            cell_uses(&func.insts[id], &mut |c| pinned[raw(c)] = true);
+            func.insts[id].cell_reads_each(&mut |c| pinned[raw(c)] = true);
         }
     }
     if let Some(ids) = func.emit_ids.as_ref() {

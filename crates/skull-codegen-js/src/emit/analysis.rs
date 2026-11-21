@@ -1,4 +1,4 @@
-//! Body analyses: operand walks, inlinability, cross-block temps and reachability.
+//! Body analyses for JavaScript emission.
 
 use super::*;
 
@@ -15,103 +15,30 @@ pub(super) fn is_native_buffer(name: &str) -> bool {
     )
 }
 
-/// `Inst::uses_each`, but a `CoroHook`'s lambda also counts as a use here, so
-/// the JS use counts and cross-block checks still see the hooked closure.
-pub(super) fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
-    inst.uses_each(f);
-    if let Inst::CoroHook { lambda, .. } = inst {
-        f(*lambda);
-    }
-}
-
-/// An expression candidate for folding into its single use; excludes impure or cell-order-sensitive
-/// values (`Load`/`Call`/`Index`/`Field`/`Len`).
-pub(super) fn always_inlinable(inst: &Inst) -> bool {
-    matches!(inst, Inst::MakeEnv { .. }) || skull_mir::sinking::always_inlinable(inst)
-}
-
-pub(super) fn compute_inlinable(mf: &MirFunc, blocks: &[Idx<Block>]) -> (Vec<u32>, Vec<bool>) {
-    const NONE: u32 = u32::MAX;
-    let ni = mf.insts.len();
-    let mut use_count = vec![0u32; ni];
-    let mut use_block = vec![NONE; ni];
-    let mut def_block = vec![NONE; ni];
-    for &b in blocks {
-        let br = raw(b);
-        for &id in &mf.blocks[b].insts {
-            if mf.insts[id].produces_value() {
-                def_block[raw(id) as usize] = br;
-            }
-            for_each_operand(&mf.insts[id], &mut |u| {
-                let k = raw(u) as usize;
-                use_count[k] += 1;
-                use_block[k] = br;
-            });
-        }
-        mf.blocks[b].term.uses_each(&mut |u| {
-            let k = raw(u) as usize;
-            use_count[k] += 1;
-            use_block[k] = br;
-        });
-    }
-    let mut inl = vec![false; ni];
-    for &b in blocks {
-        for &id in &mf.blocks[b].insts {
-            let k = raw(id) as usize;
-            if use_count[k] == 1
-                && def_block[k] != NONE
-                && def_block[k] == use_block[k]
-                && always_inlinable(&mf.insts[id])
-            {
-                inl[k] = true;
-            }
-        }
-    }
-    inline_loads_before_branch(mf, blocks, &use_count, &use_block, &mut inl);
-    skull_mir::sinking::preserve_effect_order(mf, blocks, &mut inl);
-    cap_inline_depth(mf, blocks, &mut inl);
-    (use_count, inl)
-}
-
-/// Fold the cell reads of an `else if` link into its condition. A link holding
-/// only reads and pure values has no statement of its own once they fold, so it
-/// can follow `else` directly; nothing in it can write the cell it reads.
-fn inline_loads_before_branch(
-    mf: &MirFunc,
+/// A condition block without writes or calls can keep its loads in the
+/// condition, so a long branch chain can emit as a flat JS else-if ladder.
+pub(super) fn fold_branch_loads(
+    func: &MirFunc,
     blocks: &[Idx<Block>],
-    use_count: &[u32],
-    use_block: &[u32],
-    inl: &mut [bool],
+    uses: &skull_mir::sinking::ScopeUses,
+    inlinable: &mut [bool],
 ) {
-    let mut else_arms = vec![false; mf.blocks.len()];
-    for &b in blocks {
-        if let Term::Branch { else_bb, .. } = mf.blocks[b].term {
-            let mut arm = else_bb;
-            // Bounded by the block count: a cycle of empty blocks must not hang.
-            for _ in 0..mf.blocks.len() {
-                else_arms[raw(arm) as usize] = true;
-                match mf.blocks[arm].term {
-                    Term::Goto(next) if mf.blocks[arm].insts.is_empty() => arm = next,
-                    _ => break,
-                }
-            }
-        }
-    }
-    for &b in blocks {
-        let insts = &mf.blocks[b].insts;
-        if !else_arms[raw(b) as usize]
-            || !matches!(mf.blocks[b].term, Term::Branch { .. })
-            || !insts
-                .iter()
-                .all(|&id| matches!(mf.insts[id], Inst::Load(_)) || always_inlinable(&mf.insts[id]))
+    for &block in blocks {
+        let body = &func.blocks[block];
+        if matches!(body.term, Term::Branch { .. })
+            && body.insts.iter().all(|&id| {
+                let inst = &func.insts[id];
+                matches!(inst, Inst::Load(_)) || skull_mir::sinking::always_inlinable(inst)
+            })
         {
-            continue;
-        }
-        for &id in insts {
-            let k = raw(id) as usize;
-            if matches!(mf.insts[id], Inst::Load(_)) && use_count[k] == 1 && use_block[k] == raw(b)
-            {
-                inl[k] = true;
+            for &id in &body.insts {
+                let i = raw(id) as usize;
+                if matches!(func.insts[id], Inst::Load(_))
+                    && uses.count[i] == 1
+                    && uses.block[i] == raw(block)
+                {
+                    inlinable[i] = true;
+                }
             }
         }
     }
@@ -125,7 +52,7 @@ const MAX_INLINE_DEPTH: u32 = 64;
 
 /// Materialize a value wherever folding it would nest deeper than
 /// [`MAX_INLINE_DEPTH`]; its consumers then start over at depth one.
-fn cap_inline_depth(mf: &MirFunc, blocks: &[Idx<Block>], inl: &mut [bool]) {
+pub(super) fn cap_inline_depth(mf: &MirFunc, blocks: &[Idx<Block>], inl: &mut [bool]) {
     let mut depth = vec![0u32; mf.insts.len()];
     for &b in blocks {
         for &id in &mf.blocks[b].insts {
@@ -134,7 +61,7 @@ fn cap_inline_depth(mf: &MirFunc, blocks: &[Idx<Block>], inl: &mut [bool]) {
                 continue;
             }
             let mut d = 0;
-            for_each_operand(&mf.insts[id], &mut |u| {
+            mf.insts[id].uses_each(&mut |u| {
                 let j = raw(u) as usize;
                 if inl[j] {
                     d = d.max(depth[j]);
@@ -178,7 +105,7 @@ pub(super) fn cross_block_temps(
             }
         };
         for &iid in &mf.blocks[b].insts {
-            for_each_operand(&mf.insts[iid], &mut check);
+            mf.insts[iid].uses_each(&mut check);
         }
         mf.blocks[b].term.uses_each(&mut check);
     }

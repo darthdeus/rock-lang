@@ -211,7 +211,8 @@ fn emit_body(
     let flow = regalloc::Flow::new(func, &rpo);
     let pinned = regalloc::pinned_cells(func, &flow);
     REGALLOC_TIME.with(|c| c.set(c.get() + t_cells.elapsed()));
-    let (mut inlinable, repeatable, uses) = compute_inlinable(func, &rpo, params, &pinned);
+    let (mut inlinable, repeatable, uses) =
+        compute_inlinable(func, &rpo, |cell| pinned[raw(cell) as usize]);
     for tail in tail_forwards.iter().flatten() {
         for &id in &tail[1..] {
             inlinable[raw(id) as usize] = true;

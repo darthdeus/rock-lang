@@ -201,6 +201,38 @@ fn main() {
 }
 
 #[test]
+fn immutable_parameter_loads_fold_but_written_parameters_keep_their_snapshot() {
+    use skull_codegen_js::emit::emit_fn;
+    use skull_mir::mir::{Inst, Lit, MirFunc, Term};
+
+    let ws = bone_core::workspace::Workspace::new();
+    let mut mf = MirFunc::new(Ustr::from("probe"));
+    let stable = mf.new_cell(None);
+    let mutable = mf.new_cell(None);
+    mf.params = vec![stable, mutable];
+    let entry = mf.entry;
+    let stable_value = mf.emit(entry, Inst::Load(stable));
+    let snapshot = mf.emit(entry, Inst::Load(mutable));
+    let replacement = mf.emit(entry, Inst::Const(Lit::Int(100)));
+    mf.emit(
+        entry,
+        Inst::Store {
+            cell: mutable,
+            value: replacement,
+        },
+    );
+    let sum = mf.emit(entry, Inst::IntAdd(stable_value, snapshot));
+    let result = mf.emit(entry, Inst::IntAdd(sum, stable_value));
+    mf.set_term(entry, Term::Return(vec![result]));
+
+    let js = emit_fn(&ws, &mf, "probe").expect("MIR emits");
+    assert!(!js.contains(" = c0;"), "{js}");
+    run_node(&format!(
+        "{js}\nif (probe(7, 3) !== 17) throw new Error('wrong snapshot');"
+    ));
+}
+
+#[test]
 fn irreducible_mir_uses_a_trampoline_that_executes_the_return_path() {
     use skull_codegen_js::emit::emit_fn;
     use skull_mir::mir::{Inst, Lit, MirFunc, Term};

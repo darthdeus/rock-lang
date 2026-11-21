@@ -2,192 +2,7 @@ use super::*;
 
 pub(crate) use skull_mir::sinking::always_inlinable;
 
-pub(crate) struct ScopeUses {
-    pub(crate) count: Vec<u32>,
-    block: Vec<u32>,
-    /// `NONE` when the last reader is a terminator.
-    user: Vec<u32>,
-    operand: Vec<u8>,
-}
-
-const NONE: u32 = u32::MAX;
-/// The operands of a push, which writes the length before it evaluates the
-/// pushed value, and a callee that would open its statement.
-const PINNED: u8 = 1;
-/// A store base opens its statement: folded, it renders parenthesized, and a
-/// statement opening with `(` is ambiguous Lua after a line that ends in an
-/// expression.
-const STORE_BASE: u8 = 2;
-
-#[derive(Clone, Copy, Default)]
-struct CellWrites {
-    count: u32,
-    by: u32,
-    block: u32,
-    pos: u32,
-}
-
-/// Cells written exactly once in `scope`, as a multi-return destination, and
-/// read only after that call in the same block: a load of one is the call's
-/// result local itself, since the one write dominates every read.
-fn single_receive_cells(
-    func: &MirFunc,
-    scope: &[Idx<Block>],
-    pinned: &[bool],
-    writes: &[CellWrites],
-) -> Vec<bool> {
-    let captured = |cell: Idx<Cell>| {
-        func.closure_env_plans
-            .values()
-            .any(|plan| plan.captures_cell(cell) || plan.env_cell() == Some(cell))
-    };
-    let mut out = vec![false; func.cells.len()];
-    let mut any = false;
-    for (cell, _) in func.cells.iter() {
-        let w = writes[raw(cell) as usize];
-        // A bound call's destinations are placeholders the bound substitution
-        // replaces; never a receive.
-        if w.count == 1
-            && matches!(
-                func.insts[Idx::from_raw(w.by.into())],
-                Inst::CallMulti { .. } | Inst::CallValueMulti { .. }
-            )
-            && !pinned[raw(cell) as usize]
-            && !captured(cell)
-        {
-            out[raw(cell) as usize] = true;
-            any = true;
-        }
-    }
-    if !any {
-        return out;
-    }
-    for &b in scope {
-        for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
-            regalloc::cell_uses(&func.insts[id], &mut |cell| {
-                if !out[raw(cell) as usize] {
-                    return;
-                }
-                let w = writes[raw(cell) as usize];
-                if w.block != raw(b)
-                    || w.pos as usize >= pos
-                    || !matches!(func.insts[id], Inst::Load(_))
-                {
-                    out[raw(cell) as usize] = false;
-                }
-            });
-        }
-    }
-    out
-}
-
-/// Returns the folded values, the folded loads that may render at any number
-/// of use sites, and how `scope` reads its values.
-pub(crate) fn compute_inlinable(
-    func: &MirFunc,
-    scope: &[Idx<Block>],
-    params: &[Idx<Cell>],
-    pinned: &[bool],
-) -> (Vec<bool>, Vec<bool>, ScopeUses) {
-    // Insts outside `scope` (other closures share the arena) stay unset and
-    // never qualify.
-    let ni = func.insts.len();
-    let mut uses = ScopeUses {
-        count: vec![0u32; ni],
-        block: vec![NONE; ni],
-        user: vec![NONE; ni],
-        operand: vec![0u8; ni],
-    };
-    let mut def_block = vec![NONE; ni];
-    let mut writes = vec![CellWrites::default(); func.cells.len()];
-    // Selected-layout emission may read a dynamic tag more than once.
-    let mut reread: Vec<Idx<Inst>> = Vec::new();
-    for &b in scope {
-        let br = raw(b);
-        for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
-            let inst = &func.insts[id];
-            inst.cell_writes_each(&mut |cell| {
-                let w = &mut writes[raw(cell) as usize];
-                w.count += 1;
-                *w = CellWrites {
-                    count: w.count,
-                    by: raw(id),
-                    block: br,
-                    pos: pos as u32,
-                };
-            });
-            if inst.produces_value() {
-                def_block[raw(id) as usize] = br;
-            }
-            inst.uses_each(&mut |u| {
-                let k = raw(u) as usize;
-                uses.count[k] += 1;
-                uses.block[k] = br;
-                uses.user[k] = raw(id);
-            });
-            match inst {
-                Inst::StoreField { base, .. } | Inst::StoreIndex { base, .. } => {
-                    uses.operand[raw(*base) as usize] |= PINNED | STORE_BASE;
-                }
-                Inst::CallValueMulti { dests, callee, .. } if dests.is_empty() => {
-                    uses.operand[raw(*callee) as usize] |= PINNED;
-                }
-                Inst::ArrayPush { arr, value, .. } => {
-                    uses.operand[raw(*arr) as usize] |= PINNED;
-                    uses.operand[raw(*value) as usize] |= PINNED;
-                }
-                Inst::MakeEnumDyn { tag, .. } if !matches!(func.insts[*tag], Inst::Const(_)) => {
-                    reread.push(*tag);
-                }
-                _ => {}
-            }
-        }
-        func.blocks[b].term.uses_each(&mut |u| {
-            let k = raw(u) as usize;
-            uses.count[k] += 1;
-            uses.block[k] = br;
-            uses.user[k] = NONE;
-        });
-    }
-    let mut immutable_params = vec![false; func.cells.len()];
-    for &cell in params {
-        immutable_params[raw(cell) as usize] = writes[raw(cell) as usize].count == 0;
-    }
-    let received = single_receive_cells(func, scope, pinned, &writes);
-    let mut inl = vec![false; ni];
-    let mut repeatable = vec![false; ni];
-    for &tag in &reread {
-        uses.count[raw(tag) as usize] += 1;
-    }
-    for &b in scope {
-        for &id in &func.blocks[b].insts {
-            let k = raw(id) as usize;
-            let parameter_load = matches!(
-                &func.insts[id],
-                Inst::Load(cell)
-                    if immutable_params[raw(*cell) as usize] || received[raw(*cell) as usize]
-            );
-            let nil = matches!(func.insts[id], Inst::Const(Lit::Nil));
-            repeatable[k] = parameter_load || nil;
-            // A store base other than a plain local keeps its own register.
-            if parameter_load
-                || nil
-                || (uses.count[k] == 1
-                    && def_block[k] != NONE
-                    && def_block[k] == uses.block[k]
-                    && always_inlinable(&func.insts[id])
-                    && (uses.operand[k] & STORE_BASE == 0
-                        || matches!(func.insts[id], Inst::Load(_))))
-            {
-                inl[k] = true;
-            }
-        }
-    }
-    for &tag in &reread {
-        uses.count[raw(tag) as usize] -= 1;
-    }
-    (inl, repeatable, uses)
-}
+pub(crate) use skull_mir::sinking::{ScopeUses, compute_inlinable};
 
 /// Whether `consumer` renders each of its operands exactly once, so a folded
 /// call among them still runs once. Shapes that spell an operand several
@@ -281,7 +96,7 @@ pub(crate) fn fold_single_use_reads(
                         if func_of(ws, *f).inline_body.is_some());
                     !splices
                         && match user[k] {
-                            NONE => {
+                            u32::MAX => {
                                 matches!(func.blocks[b].term, Term::Return(_) | Term::Branch { .. })
                             }
                             u => spells_operands_once(&func.insts[Idx::from_raw(u.into())]),
@@ -297,7 +112,7 @@ pub(crate) fn fold_single_use_reads(
                     nested |= frame_limits::folded_call_within(func, inlinable, v);
                 });
             }
-            let misplaced = line_marked && user[k] != NONE && !same_line(id, user[k]);
+            let misplaced = line_marked && user[k] != u32::MAX && !same_line(id, user[k]);
             if ok && !nested && !misplaced {
                 inlinable[k] = true;
                 newly[k] = true;

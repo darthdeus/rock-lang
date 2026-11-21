@@ -102,7 +102,12 @@ impl<'a> FnFrame<'a> {
         pack_multi_return: bool,
     ) -> (Self, bool) {
         let region = reachable_from(mf, entry);
-        let (use_count, inlinable) = compute_inlinable(mf, &region);
+        let (mut inlinable, _, uses) =
+            skull_mir::sinking::compute_inlinable(mf, &region, |_| false);
+        fold_branch_loads(mf, &region, &uses, &mut inlinable);
+        skull_mir::sinking::preserve_effect_order(mf, &region, &mut inlinable);
+        cap_inline_depth(mf, &region, &mut inlinable);
+        let use_count = uses.count;
         let hoisted_temps = cross_block_temps(mf, &region, &use_count, &inlinable);
         let unwind = mf.registers_defer_cleanup(&region);
         let emitter = Emitter {

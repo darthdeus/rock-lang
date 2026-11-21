@@ -687,6 +687,15 @@ impl Inst {
         }
     }
 
+    /// `MapNext` reads its key cell (the cursor) before writing it.
+    pub fn cell_reads_each(&self, push: &mut impl FnMut(Idx<Cell>)) {
+        match self {
+            Inst::Load(c) => push(*c),
+            Inst::MapNext { key_cell, .. } => push(*key_cell),
+            _ => {}
+        }
+    }
+
     pub fn cell_writes_each(&self, push: &mut impl FnMut(Idx<Cell>)) {
         match self {
             Inst::Store { cell, .. } => push(*cell),
