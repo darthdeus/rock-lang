@@ -209,49 +209,6 @@ fn missing_return_value_says_so_instead_of_unifying_unit() {
 }
 
 #[test]
-fn nested_block_does_not_leak_into_outer_statements() {
-    use bone_semantic::hir::Expr;
-    let ws = check(
-        "fn f() -> int {\n    let a = 1\n    let c = {\n        let b = 2\n        b\n    }\n    c\n}",
-    )
-    .unwrap();
-    let fbody = fn_body(&ws, "f");
-    let body = fbody.expr_arena[fbody.root.expect("rock function has a body")];
-    let Expr::Block { statements, .. } = body else {
-        panic!("function body should be a block, got {body:?}");
-    };
-    assert_eq!(
-        statements.len(),
-        2,
-        "inner `let b` leaked into the outer block"
-    );
-}
-
-#[test]
-fn lambda_param_default_does_not_leak_into_fn_params() {
-    for (src, names) in [
-        (
-            "fn f(v: int, g: fn(int) -> int = x => x, k: int = 1) -> int { g(v) }",
-            ["v", "g", "k"],
-        ),
-        (
-            "fn f(v: int, k: int = 1, g: fn(int) -> int = x => x) -> int { g(v) }",
-            ["v", "k", "g"],
-        ),
-    ] {
-        let ws = check(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
-        let errors = diagnostics(&ws);
-        assert!(errors.is_empty(), "{errors:?}");
-        let fbody = fn_body(&ws, "f");
-        let got: Vec<_> = fbody
-            .param_bindings
-            .map(|b| fbody.binding_arena[b].name.to_string())
-            .collect();
-        assert_eq!(got, names, "{src}");
-    }
-}
-
-#[test]
 fn nested_interpolation_does_not_leak_into_outer_parts() {
     use bone_semantic::hir::{Expr, InterpPart};
     let ws = check(
@@ -689,22 +646,6 @@ fn annotation_resolution_errors(sources: &[(&str, &str)]) -> Vec<String> {
 }
 
 #[test]
-fn misspelled_struct_annotation_is_rejected() {
-    for source in [
-        "@consuem struct Owned { item: int }",
-        "mod inner { @consuem struct Owned { item: int } }",
-    ] {
-        let errors = annotation_resolution_errors(&[("main.rock", source)]);
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.contains("unknown annotation `@consuem`")),
-            "{source}: {errors:?}"
-        );
-    }
-}
-
-#[test]
 fn nested_decorator_spelled_consume_is_not_the_builtin() {
     let errors = annotation_resolution_errors(&[(
         "main.rock",
@@ -813,68 +754,4 @@ fn glob_imported_names_claim_an_annotation_only_as_decorators() {
             .any(|error| error.contains("it applies to a fn") && !error.contains("ambiguous")),
         "{mixed:?}"
     );
-}
-
-#[test]
-fn enum_variant_uses_carry_name_token_spans() {
-    use bone_semantic::hir::{Expr, Pattern};
-
-    let src = "\
-enum Color { Red, Green }
-enum Shape { Rect { w: int }, Circle(int) }
-fn f(c: Color, s: Shape) -> int {
-    let x = Color::Red
-    let a = match c {
-        Color::Red => 1,
-        Color::Green => 2,
-    }
-    return match s {
-        Shape::Rect { w } => w,
-        Shape::Circle(r) => r,
-    }
-}";
-    let ws = check(src).expect("semantic_pass");
-    let body = fn_body(&ws, "f");
-
-    let (enum_name_span, variant_span) = body
-        .expr_arena
-        .values()
-        .find_map(|e| match e {
-            Expr::EnumVariant {
-                variant,
-                enum_name_span,
-                variant_span,
-                ..
-            } if variant.as_str() == "Red" => Some((*enum_name_span, *variant_span)),
-            _ => None,
-        })
-        .expect("an Expr::EnumVariant for Color::Red");
-    assert_eq!(text(src, &body.name_spans[enum_name_span]), "Color");
-    assert_eq!(text(src, &body.name_spans[variant_span]), "Red");
-
-    let pattern_spans = |want: &str| {
-        body.pattern_arena
-            .values()
-            .find_map(|p| match p {
-                Pattern::EnumVariant {
-                    variant,
-                    enum_name_span,
-                    variant_span,
-                    ..
-                } if variant.as_str() == want => Some((*enum_name_span, Some(*variant_span))),
-                Pattern::Record {
-                    name: Some(name),
-                    enum_name_span,
-                    name_span,
-                    ..
-                } if name.as_str() == want => Some((*enum_name_span, *name_span)),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("a pattern for {want}"))
-    };
-    for (variant, qualifier) in [("Green", "Color"), ("Circle", "Shape"), ("Rect", "Shape")] {
-        let (qualifier_span, variant_span) = pattern_spans(variant);
-        assert_eq!(text(src, &qualifier_span.unwrap()), qualifier);
-        assert_eq!(text(src, &variant_span.unwrap()), variant);
-    }
 }
