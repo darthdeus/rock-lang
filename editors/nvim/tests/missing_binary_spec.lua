@@ -52,16 +52,9 @@ end
 -- Drain scheduled callbacks (notify is dispatched via vim.schedule).
 vim.wait(300, function() return false end)
 
--- Step 2: simulate :RockRestart with binary still missing. This should
--- bail with one ERROR rather than re-enabling LSP and looping again.
 client.restart()
 vim.wait(400, function() return false end)
 
--- Expectations after both phases:
---   * Exactly 1 cmd-path notification ("rock-lsp binary not found: ...")
---   * Exactly 1 restart-path notification ("not restarting LSP")
---   * NO nvim-framework "Client ... quit" notifications
---   * NO "Press ENTER" / hit-enter prompt indicators in :messages
 local cmd_notifs, restart_notifs, framework_notifs = 0, 0, 0
 for _, n in ipairs(notifications) do
   if n.msg:find('binary not found:', 1, true) then
@@ -102,32 +95,22 @@ if hist:find('cmd failed', 1, true) then
   dump(); fail(':messages shows "cmd failed" -- prompt-loop bug is back')
 end
 
--- Step 3: recovery. After binary "appears", restart() should re-enable
--- and the dedup flag should reset so a future disappearance is reported
--- again. Touch the file to make fs_stat succeed.
 local f = io.open(missing, 'w')
 if f then f:close() end
 require('rock.binary').refresh(missing)
 
--- Re-stub notify counter for the recovery probe.
 local recovery_notifs = {}
 vim.notify = function(msg, level, opts)
   table.insert(recovery_notifs, { msg = tostring(msg), level = level })
   table.insert(notifications, { msg = tostring(msg), level = level, opts = opts })
 end
 
--- restart() will try to enable + start. The "binary" is an empty file
--- and rpc.start will fail. That's fine — what we're verifying is that
--- restart() DID NOT bail at the gate (it should not, binary exists), and
--- that a SECOND disappearance later would re-notify (dedup flag reset).
+-- The empty executable can fail to start, but it must pass the existence gate.
 client.restart()
 vim.wait(300, function() return false end)
 os.remove(missing)
 
--- We don't strictly assert on recovery_notifs count (rpc start failure
--- mode varies by nvim version), but we do verify the gate passed: the
--- "not restarting" message should NOT appear, since the binary existed
--- at restart time.
+-- RPC start failures vary by nvim version.
 local gate_blocked_recovery = false
 for _, n in ipairs(recovery_notifs) do
   if n.msg:find('not restarting LSP', 1, true) then

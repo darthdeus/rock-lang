@@ -1,17 +1,3 @@
--- Inverse of missing_binary_spec: with a fake-but-existing rock-lsp,
--- the cmd() path should NOT short-circuit at the missing-binary gate.
---
--- The fake binary is a script that exits 0 immediately (see
--- tests/_lib/fake_server.lua). That means: (a) the missing-binary branch in cmd()
--- is NOT taken; (b) vim.lsp.rpc.start spawns it; (c) the on_exit
--- dispatcher fires with code=0 and we end in state='detached', NOT
--- state='crashed'. Crucially, we should NOT get the "binary not found"
--- notification, and `vim.lsp.enable(SERVER_NAME, false)` should NOT be
--- invoked from the cmd() path.
---
--- This pins the recovery path: a user who fixes their build should
--- never see the missing-binary error after the fix.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)
@@ -30,8 +16,6 @@ vim.notify_once = vim.notify
 local client = require('rock.client')
 local state = require('rock.state')
 
--- Track whether anyone called vim.lsp.enable(name, false) from cmd().
--- The missing-binary branch does this; the present branch must not.
 local disable_calls = 0
 local orig_enable = vim.lsp.enable
 vim.lsp.enable = function(name, enable_flag)
@@ -43,7 +27,6 @@ end
 
 local cfg = client.make_config({ binary = fake_bin })
 
--- Sanity: state should report binary exists.
 local bin_info = state.get().binary
 if not bin_info.exists then
   fail('test setup wrong: fake_bin not seen as existing: ' .. tostring(fake_bin))
@@ -54,19 +37,16 @@ cfg.cmd({ on_exit = function() exited = true end })
 vim.wait(5000, function() return exited end)
 if not exited then fail('fake server did not exit') end
 
--- Assertion 1: no missing-binary notification.
 for _, n in ipairs(notifications) do
   if n.msg:find('binary not found', 1, true) then
     fail('missing-binary notification fired despite binary existing: ' .. n.msg)
   end
 end
 
--- Assertion 2: cmd() did NOT disable autoattach.
 if disable_calls ~= 0 then
   fail('vim.lsp.enable(name, false) was called ' .. disable_calls .. ' times from present-binary path')
 end
 
--- Assertion 3: client transitioned starting -> detached (true exits 0).
 local final_state = state.get().client.state
 if final_state ~= 'detached' then
   -- Some nvim versions classify a server that exits before initialize
@@ -78,9 +58,6 @@ if final_state ~= 'detached' then
   end
 end
 
--- Assertion 4: binary watch was set up. It's an internal handle but we
--- can check stop_watch is callable without errors (proxy for "watch
--- was started").
 require('rock.binary').stop_watch()
 
 print(('OK: present-binary path runs cmd() without error notifications (final state=%s)')
