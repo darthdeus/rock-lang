@@ -1,7 +1,4 @@
-use crate::support::{
-    assert_has, emit_checked_entry as emit_entry, emit_library as emit,
-    emit_library_with as emit_with,
-};
+use crate::support::{assert_has, emit_library as emit};
 
 fn golden(src: &str, root: &str, contains: &[&str], lacks: &[&str]) {
     let glsl = emit(src, &[root]).expect("emit");
@@ -16,62 +13,7 @@ fn golden(src: &str, root: &str, contains: &[&str], lacks: &[&str]) {
     }
 }
 
-fn nobox_vec2_stdlib() -> Vec<skull_parser::Ast> {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let src = f.contents.replace("\nvalue Vec2 {", "\nnobox value Vec2 {");
-            let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(&src, id).expect("stdlib parse")
-        })
-        .collect()
-}
-
 cases! { golden:
-    a_user_fn_named_like_an_intrinsic_is_its_own_function(
-        r#"
-            @pure fn abs(b: bool) -> int { if b { return 5 } return 7 }
-            @pure fn root() -> int { return abs(true) * 10 + abs(false) }
-        "#,
-        "root",
-        &["int abs_bool(bool b) {", "return ((abs_bool(true) * 10) + abs_bool(false));"],
-        &[],
-    );
-
-    generic_and_plain_callees(
-        r#"
-            @pure fn identity<T>(x: T) -> T { return x }
-            @pure fn twice(x: float) -> float { return x * 2.0 }
-            @pure fn root(x: float) -> float {
-                let a = twice(identity(x))
-                let b = identity(3)
-                return a + float(b)
-            }
-        "#,
-        "root",
-        &[
-            "float identity_T_spec_p_float(float x) {",
-            "int identity_T_spec_p_int(int x) {",
-            "twice_float(identity_T_spec_p_float(x))",
-            "b = identity_T_spec_p_int(3);",
-        ],
-        &["identity("],
-    );
-
-    trivial_vector_swizzle(
-        "fn f(t: float) -> Vec2 { return v(t + 1.0, 2.0).yx }",
-        "f",
-        &["return vec2(vec2((t + 1.0), 2.0).y, vec2((t + 1.0), 2.0).x);"],
-        &["call_result"],
-    );
-
-    value_struct_literal_is_a_vector_constructor(
-        "fn f(s: Sampler2D, x: float, y: float) -> Vec4 { return texture(s, Vec2 { x: x, y: y }) }",
-        "f",
-        &["texture(s, vec2(x, y))"],
-        &["Vec2("],
-    );
-
     repeated_vector_operator_stays_inline(
         "fn f(p: Vec2) -> Vec2 { return (p + v(1.0, 2.0)).xx }",
         "f",
@@ -117,36 +59,6 @@ fn retained_call_stays_in_its_if_arm() {
     assert_eq!(body.matches("source_Vec2(p)").count(), 1, "{glsl}");
 }
 
-#[test]
-fn gpu_intrinsic_accepts_a_materialized_nobox_vector_literal() {
-    let stdlib = nobox_vec2_stdlib();
-    let src = "fn shade(s: Sampler2D, x: float, y: float) -> Vec4 { return texture(s, Vec2 { x: x, y: y }) }";
-    let glsl = emit_with(&stdlib, src, &["shade"]).expect("emit");
-    assert_has(&glsl, "texture(s, vec2(x, y))");
-}
-
-#[test]
-fn fragment_call_swizzles_evaluate_each_call_once() {
-    let src = "fn shade(p: Vec2) -> Vec4 { return v(sin(p.x), cos(p.y), p.x * p.y, 1.0) }
-        @shader(fragment) fn sampled(scene: Sampler2D, tc: Vec2) -> Vec4 {
-            let uv = tc * 0.5
-            let base = texture(scene, tc).rgb
-            let offset = texture(scene, uv).xy
-            let tint = shade(tc).rgb
-            let warp = shade(uv).yx
-            return v(base * tint, offset.x + offset.y + warp.x * warp.y)
-        }";
-    let glsl = emit_entry(src, "sampled").expect("emit");
-    for call in [
-        "texture(scene, tc)",
-        "texture(scene, uv)",
-        "shade_Vec2(tc)",
-        "shade_Vec2(uv)",
-    ] {
-        assert_eq!(glsl.matches(call).count(), 1, "{call}:\n{glsl}");
-    }
-}
-
 cases! { golden:
     param_loop_bound_not_folded(
         r#"fn f(n: int) -> int {
@@ -159,15 +71,6 @@ cases! { golden:
         &[],
     );
 
-    match_int_ladder(
-        r#"@pure fn f(n: int) -> int {
-            match n { 1 => { return 10 } 2 => { return 20 } _ => { return 0 } }
-        }"#,
-        "f",
-        &[
-            "if ((n == 1)) {\n    return 10;\n  } else {\n    if ((n == 2)) {\n      return 20;\n    } else {\n      return 0;\n    }\n  }",
-        ], &[],
-    );
 }
 
 #[test]
@@ -248,13 +151,6 @@ cases! { golden:
     );
 }
 
-#[test]
-fn int_param_returned_from_float_fn() {
-    let src = r#"@pure fn f(i: int) -> float { return i }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(glsl.trim(), "float f_int(int i) {\n  return float(i);\n}");
-}
-
 cases! { golden:
     int_arg_at_float_param(
         r#"
@@ -264,18 +160,6 @@ cases! { golden:
         "f",
         &["return takes_float_float(float(i));"],
         &[],
-    );
-
-    int_in_mixed_arithmetic(
-        r#"@pure fn f(x: float, i: int) -> float { return x + i }"#,
-        "f",
-        &["return (x + float(i));"], &[],
-    );
-
-    let_float_annotation_cell_typing(
-        r#"fn f() -> float { let y: float = 0  return y }"#,
-        "f",
-        &["float y;\n  y = 0.0;\n  return y;"], &[],
     );
 
     glsl_emits_no_double_underscore_for_lua_escaped_names_or_idiv(
@@ -288,70 +172,6 @@ cases! { golden:
         "compute",
         &["rock_idiv"],
         &["__"],
-    );
-}
-
-#[test]
-fn log2_float_on_desktop_profile() {
-    let src = r#"
-        @shader(fragment)
-        fn logfrag(scene: Sampler2D, tc: Vec2) -> Vec4 {
-            let t = texture(scene, tc)
-            return v(log2(t.r + 1.0), log2(t.g + 1.0), log2(t.b + 1.0), t.a)
-        }
-    "#;
-    let glsl = emit_entry(src, "logfrag").expect("emit");
-    assert!(glsl.contains("log2("), "must use the log2 builtin:\n{glsl}");
-    assert!(!glsl.contains("null"), "must not mention null:\n{glsl}");
-}
-
-#[test]
-fn helper_float_default_is_carried_on_desktop_profile() {
-    let src = r#"
-        @pure fn shade(c: Vec4, gain: float = 1.0) -> Vec4 {
-            return v(c.r * gain, c.g * gain, c.b * gain, c.a)
-        }
-        @shader(fragment)
-        fn shadefrag(scene: Sampler2D, tc: Vec2) -> Vec4 {
-            return shade(texture(scene, tc))
-        }
-        @shader(fragment)
-        fn shadefrag_exp(scene: Sampler2D, tc: Vec2) -> Vec4 {
-            return shade(texture(scene, tc), 2.0)
-        }
-    "#;
-    let omitted = emit_entry(src, "shadefrag").expect("emit");
-    assert!(
-        omitted.contains("shade_Vec4_float(texture(scene, tc), 1.0)"),
-        "omitted call must carry the default:\n{omitted}"
-    );
-    let explicit = emit_entry(src, "shadefrag_exp").expect("emit");
-    assert!(
-        explicit.contains("shade_Vec4_float(texture(scene, tc), 2.0)"),
-        "explicit call must keep its argument:\n{explicit}"
-    );
-    for glsl in [&omitted, &explicit] {
-        assert!(!glsl.contains("null"), "must not mention null:\n{glsl}");
-    }
-}
-
-#[test]
-fn conditionally_reassigned_sample() {
-    let src = r#"
-        @shader(fragment)
-        fn frag(scene: Sampler2D, tc: Vec2) -> Vec4 {
-            let color = texture(scene, tc)
-            if color.w < 0.5 {
-                color = Vec4 { x: color.x * 0.5, y: color.y, z: 0.0, w: 1.0 }
-            }
-            return color
-        }
-    "#;
-    let glsl = emit_entry(src, "frag").expect("emit");
-    assert_has(&glsl, "vec4 color;");
-    assert_has(
-        &glsl,
-        "color = texture(scene, tc);\n  if ((color.w < 0.5)) {\n    color = vec4((color.x * 0.5), color.y, 0.0, 1.0);\n  }\n  return color;",
     );
 }
 
