@@ -40,13 +40,18 @@ pub fn try_format_named(
     file_name: &str,
 ) -> Result<String, String> {
     let file: Ustr = file_name.into();
-    let ast = skull_parser::parse_module(input, file).map_err(|e| e.one_line())?;
+    let (ast, (trivia, before)) = skull_parser::parse_module_with_tokens(input, file, |tokens| {
+        (
+            trivia::Trivia::harvest(input, tokens),
+            comments(input, tokens),
+        )
+    })
+    .map_err(|e| e.one_line())?;
     if !ast.recovery_errors.is_empty() {
         let lines: Vec<String> = ast.recovery_errors.iter().map(|e| e.one_line()).collect();
         return Err(lines.join("\n"));
     }
 
-    let trivia = trivia::Trivia::harvest(input, file)?;
     let printer = printer::Printer::new(&ast, input, cfg, &trivia);
     let document = printer.module();
     let rendered = doc::render(&document, cfg.max_line_length, cfg.indent_size);
@@ -61,7 +66,10 @@ pub fn try_format_named(
     out.push('\n');
     // The printer places comments by position and can miss one; never hand
     // back output that lost or duplicated a comment.
-    let (before, after) = (comments(input, file)?, comments(&out, file)?);
+    let tokens = rock_tokenizer::Tokenizer::new(&out, file)
+        .tokenize()
+        .map_err(|e| format!("{e:?}"))?;
+    let after = comments(&out, &tokens);
     if before != after {
         let lost: Vec<&String> = before.iter().filter(|c| !after.contains(c)).collect();
         return Err(format!(
@@ -71,10 +79,7 @@ pub fn try_format_named(
     Ok(out)
 }
 
-fn comments(src: &str, file: Ustr) -> Result<Vec<String>, String> {
-    let tokens = rock_tokenizer::Tokenizer::new(src, file)
-        .tokenize()
-        .map_err(|e| format!("{e:?}"))?;
+fn comments(src: &str, tokens: &[rock_tokenizer::Token]) -> Vec<String> {
     let mut out: Vec<String> = tokens
         .iter()
         .filter_map(|t| match t.kind {
@@ -86,7 +91,7 @@ fn comments(src: &str, file: Ustr) -> Result<Vec<String>, String> {
         })
         .collect();
     out.sort_unstable();
-    Ok(out)
+    out
 }
 
 #[cfg(test)]

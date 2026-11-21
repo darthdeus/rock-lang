@@ -1,121 +1,120 @@
 use rock_core::Span;
-use rock_tokenizer::{TokenKind, Tokenizer};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ops::Bound;
+use rock_tokenizer::{Token, TokenKind};
 use ustr::Ustr;
 
 pub(crate) struct Trivia {
-    trailing: HashMap<usize, (String, usize, usize)>,
-    standalone: BTreeMap<usize, String>,
+    comments: Vec<Comment>,
     blank: Vec<bool>,
-    /// Block comments (`/* ... */`) keyed by start byte offset: the FULL source
-    /// slice (delimiters included) and the 0-based line it starts on. Collected
-    /// separately from `//` -- a block comment can sit inline anywhere and MUST
-    /// round-trip verbatim in place (never converted to a `//` line comment, and
-    /// never dropped). The formatter treats a construct that carries one as a
-    /// "preserve verbatim" trigger.
-    block: BTreeMap<usize, BlockComment>,
-    code: BTreeMap<usize, Option<(usize, usize)>>,
-    line_comments: BTreeSet<usize>,
+    code: Vec<(usize, Option<Span>)>,
 }
 
-struct BlockComment {
-    end: usize,
-    line: usize,
-    own_line: bool,
+struct Comment {
+    span: Span,
+    text: Ustr,
+    kind: CommentKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommentKind {
+    Trailing,
+    Standalone,
+    InlineBlock,
+    StandaloneBlock,
+}
+
+impl CommentKind {
+    fn block(self) -> bool {
+        matches!(self, Self::InlineBlock | Self::StandaloneBlock)
+    }
 }
 
 impl Trivia {
-    pub(crate) fn harvest(src: &str, file: Ustr) -> Result<Trivia, String> {
-        let tokens = Tokenizer::new(src, file)
-            .tokenize()
-            .map_err(|e| format!("{e:?}"))?;
-
-        let lines = src.lines().collect::<Vec<_>>();
-
-        let mut trailing = HashMap::new();
-        let mut standalone = BTreeMap::new();
-        let mut block = BTreeMap::new();
-        let mut code = BTreeMap::new();
-        let mut line_comments = BTreeSet::new();
-        // Track the last line on which we saw a non-comment token, so a comment
-        // sharing that line is classified as trailing.
-        let mut code_on_line: Option<usize> = None;
-        for tok in &tokens {
+    pub(crate) fn harvest(src: &str, tokens: &[Token]) -> Trivia {
+        use CommentKind::*;
+        let lines: Vec<_> = src.lines().map(str::trim).collect();
+        let mut comments = Vec::new();
+        let mut code = Vec::new();
+        let mut code_on_line = None;
+        for tok in tokens {
             let line = tok.span.line_range().0;
-            if !matches!(
-                tok.kind,
-                TokenKind::Comment(_) | TokenKind::Comma | TokenKind::Newline
-            ) {
-                let close = (tok.kind == TokenKind::CloseParen)
-                    .then_some((tok.span.offset_range().1, tok.span.line_range().1));
-                code.insert(tok.span.offset_range().0, close);
-            }
-            match &tok.kind {
+            let (lo, hi) = tok.span.offset_range();
+            match tok.kind {
                 TokenKind::Comment(text) => {
-                    let (lo, hi) = tok.span.offset_range();
-                    // A `/* */` block comment shares the `Comment` kind but must
-                    // NOT enter the `//` trailing/standalone maps -- those render
-                    // as `// text`, silently rewriting `/* text */` and dropping
-                    // its in-place position. Record it verbatim, by offset.
-                    if src.as_bytes().get(lo) == Some(&b'/')
-                        && src.as_bytes().get(lo + 1) == Some(&b'*')
-                    {
-                        let full = source_slice(src, lo, hi);
-                        let own_line = lines.get(line).is_some_and(|l| l.trim() == full);
-                        block.insert(
-                            lo,
-                            BlockComment {
-                                end: hi,
-                                line,
-                                own_line,
-                            },
-                        );
+                    let source = source_slice(src, lo, hi);
+                    let kind = if source.starts_with("/*") {
+                        if lines.get(line) == Some(&source) {
+                            StandaloneBlock
+                        } else {
+                            InlineBlock
+                        }
                     } else if code_on_line == Some(line) {
-                        line_comments.insert(lo);
-                        trailing.insert(
-                            line,
-                            (text.as_str().to_string(), tok.span.col_range().0, lo),
-                        );
-                    } else if lines
-                        .get(line)
-                        .is_some_and(|l| l.trim_start().starts_with("//"))
-                    {
-                        line_comments.insert(lo);
-                        standalone.insert(line, text.as_str().to_string());
+                        Trailing
+                    } else if lines.get(line).is_some_and(|line| line.starts_with("//")) {
+                        Standalone
+                    } else {
+                        continue;
+                    };
+                    comments.push(Comment {
+                        span: tok.span,
+                        text,
+                        kind,
+                    });
+                }
+                kind => {
+                    code_on_line = Some(line);
+                    if !matches!(kind, TokenKind::Comma | TokenKind::Newline) {
+                        let close = (kind == TokenKind::CloseParen).then_some(tok.span);
+                        code.push((lo, close));
                     }
                 }
-                _ => code_on_line = Some(line),
             }
         }
-
-        let blank = lines
-            .iter()
-            .map(|l| l.trim().is_empty())
-            .collect::<Vec<_>>();
-
-        Ok(Trivia {
-            trailing,
-            standalone,
-            blank,
-            block,
+        Self {
+            comments,
+            blank: lines.iter().map(|line| line.is_empty()).collect(),
             code,
-            line_comments,
-        })
+        }
+    }
+
+    fn comments_in(&self, lo: usize, hi: usize) -> &[Comment] {
+        let start = self
+            .comments
+            .partition_point(|c| c.span.offset_range().0 < lo);
+        let end = self
+            .comments
+            .partition_point(|c| c.span.offset_range().0 < hi);
+        &self.comments[start..end]
+    }
+
+    fn comments_after(&self, line: usize) -> &[Comment] {
+        &self.comments[self
+            .comments
+            .partition_point(|c| c.span.line_range().0 <= line)..]
     }
 
     pub(crate) fn trailing_comment(&self, line: usize) -> Option<(&str, usize, usize)> {
-        self.trailing
-            .get(&line)
-            .map(|(t, c, o)| (t.as_str(), *c, *o))
+        let end = self
+            .comments
+            .partition_point(|c| c.span.line_range().0 <= line);
+        self.comments[..end]
+            .iter()
+            .rev()
+            .take_while(|c| c.span.line_range().0 == line)
+            .find(|c| c.kind == CommentKind::Trailing)
+            .map(|c| {
+                (
+                    c.text.as_str(),
+                    c.span.col_range().0,
+                    c.span.offset_range().0,
+                )
+            })
     }
 
     pub(crate) fn close_paren_after(&self, offset: usize) -> Option<(usize, usize)> {
         let (_, close) = self
             .code
-            .range((Bound::Included(offset), Bound::Unbounded))
-            .next()?;
-        *close
+            .get(self.code.partition_point(|(at, _)| *at < offset))?;
+        close.map(|span| (span.offset_range().1, span.line_range().1))
     }
 
     pub(crate) fn standalone_comments_between(
@@ -123,9 +122,11 @@ impl Trivia {
         after: usize,
         before: usize,
     ) -> impl Iterator<Item = (usize, &str)> {
-        self.standalone
-            .range((after + 1).min(before)..before)
-            .map(|(line, text)| (*line, text.as_str()))
+        self.comments_after(after)
+            .iter()
+            .take_while(move |c| c.span.line_range().0 < before)
+            .filter(|c| c.kind == CommentKind::Standalone)
+            .map(|c| (c.span.line_range().0, c.text.as_str()))
     }
 
     pub(crate) fn has_list_comments(&self, span: Span) -> bool {
@@ -138,48 +139,44 @@ impl Trivia {
     }
 
     pub(crate) fn inline_block_starting_after(&self, offset: usize) -> Option<(usize, usize)> {
-        self.block
-            .range((Bound::Included(offset), Bound::Unbounded))
-            .find(|(_, b)| !b.own_line)
-            .map(|(start, b)| (*start, b.end))
+        self.comments_in(offset, usize::MAX)
+            .iter()
+            .find(|c| c.kind == CommentKind::InlineBlock)
+            .map(|c| c.span.offset_range())
     }
 
     pub(crate) fn has_block_comment_in(&self, lo: usize, hi: usize) -> bool {
-        self.block
-            .range((Bound::Included(lo), Bound::Excluded(hi)))
-            .next()
-            .is_some()
+        self.comments_in(lo, hi).iter().any(|c| c.kind.block())
     }
 
     pub(crate) fn has_inline_block_comment_in(&self, lo: usize, hi: usize) -> bool {
-        self.block
-            .range((Bound::Included(lo), Bound::Excluded(hi)))
-            .any(|(_, b)| !b.own_line)
+        self.comments_in(lo, hi)
+            .iter()
+            .any(|c| c.kind == CommentKind::InlineBlock)
     }
 
     pub(crate) fn has_line_comment_in(&self, lo: usize, hi: usize) -> bool {
-        self.line_comments
-            .range((Bound::Included(lo), Bound::Excluded(hi)))
-            .next()
-            .is_some()
+        self.comments_in(lo, hi).iter().any(|c| !c.kind.block())
     }
 
     pub(crate) fn has_own_line_comment_between(&self, after: usize, before: usize) -> bool {
-        self.standalone_comments_between(after, before)
-            .next()
-            .is_some()
-            || self
-                .own_line_block_comments_between(after, before)
-                .next()
-                .is_some()
+        self.comments_after(after)
+            .iter()
+            .take_while(|c| c.span.line_range().0 < before)
+            .any(|c| {
+                matches!(
+                    c.kind,
+                    CommentKind::Standalone | CommentKind::StandaloneBlock
+                )
+            })
     }
 
     pub(crate) fn block_comment_ending_before(&self, offset: usize) -> Option<(usize, usize)> {
-        self.block
-            .range((Bound::Unbounded, Bound::Included(offset)))
+        self.comments_in(0, offset)
+            .iter()
             .rev()
-            .map(|(start, b)| (*start, b.end))
-            .find(|(_, end)| *end <= offset)
+            .find(|c| c.kind.block() && c.span.offset_range().1 <= offset)
+            .map(|c| c.span.offset_range())
     }
 
     pub(crate) fn own_line_block_comments_between(
@@ -187,24 +184,21 @@ impl Trivia {
         after: usize,
         before: usize,
     ) -> impl Iterator<Item = (usize, usize, usize)> {
-        (after + 1 < before)
-            .then_some(&self.block)
-            .into_iter()
-            .flatten()
-            .filter(move |(_, b)| b.own_line && b.line > after && b.line < before)
-            .map(|(start, b)| (*start, b.end, b.line))
+        self.comments_after(after)
+            .iter()
+            .take_while(move |c| c.span.line_range().0 < before)
+            .filter(|c| c.kind == CommentKind::StandaloneBlock)
+            .map(|c| {
+                let (start, end) = c.span.offset_range();
+                (start, end, c.span.line_range().0)
+            })
     }
 
-    /// Number of fully blank lines strictly between two 0-based line numbers,
-    /// capped at 2 (the formatter never emits more than two consecutive blanks).
     pub(crate) fn blank_count_between(&self, end_line: usize, start_line: usize) -> usize {
-        if start_line <= end_line + 1 {
-            return 0;
-        }
-        let n = ((end_line + 1)..start_line)
+        ((end_line + 1)..start_line)
             .filter(|l| self.blank.get(*l).copied().unwrap_or(false))
-            .count();
-        n.min(2)
+            .take(2)
+            .count()
     }
 }
 
