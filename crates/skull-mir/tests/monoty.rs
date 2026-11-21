@@ -1,5 +1,3 @@
-//! Totality and identity of the logical type `MonoTy`.
-
 use crate::common::{STDLIB, key};
 use std::collections::BTreeSet;
 
@@ -166,7 +164,6 @@ fn function(params: impl Into<Vec<MonoTy>>, ret: MonoTy) -> MonoTy {
     }
 }
 
-/// Equal structure shares an id; every axis that should separate types does.
 #[test]
 fn structural_equality_is_the_identity() {
     let a = MonoInterner::new();
@@ -193,7 +190,6 @@ fn structural_equality_is_the_identity() {
     assert_ne!(a.render(all[9]), a.render(all[10]));
 }
 
-/// Pairs of distinct types whose display spellings are easy to confuse.
 #[test]
 fn distinct_types_cannot_share_a_cross_process_identity() {
     let a = MonoInterner::new();

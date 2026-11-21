@@ -257,8 +257,6 @@ pub struct BlockMember {
     pub matrix_stride: Option<u32>,
 }
 
-/// The single authority for the block's byte layout: the GLSL declaration, the
-/// CPU packer and the link-time driver assertion all read it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UniformBlockPlan {
     pub struct_name: Ustr,
@@ -320,7 +318,6 @@ fn round_up(v: u32, align: u32) -> u32 {
     v.div_ceil(align) * align
 }
 
-/// A `UniformArray<T>` element is classified here too, so there is one layout authority.
 pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some(WireKind::F32),
@@ -430,7 +427,6 @@ pub fn uniform_group_members(
     Ok(members)
 }
 
-/// A pure function of `members`; it never reads the Workspace.
 pub fn std140_block(
     struct_name: Ustr,
     members: &[(Ustr, WireKind)],
@@ -668,7 +664,6 @@ fn attr_kind(ws: &Workspace, ty: TyId) -> Option<AttrKind> {
     }
 }
 
-/// Field order is attribute order is location order.
 pub fn vertex_attrs(ws: &Workspace, struct_name: Ustr) -> Result<VertexAttrs, CompilerError> {
     let Some(sid) = ws.nominals.struct_id(struct_name) else {
         return Err(CompilerError::new_no_location(format!(

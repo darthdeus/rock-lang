@@ -1,4 +1,3 @@
-//! Workspace builders shared by this harness's tests.
 use std::sync::{Arc, LazyLock};
 
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature};
@@ -20,14 +19,12 @@ pub static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Run the semantic pass over the stdlib plus `src`.
 pub fn ws_of(src: &str) -> bone_core::workspace::Workspace {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
 
-/// [`ws_of`] for fixtures that must also type-check cleanly.
 pub fn checked_ws_of(src: &str) -> bone_core::workspace::Workspace {
     let ws = ws_of(src);
     let errs = skull_mir::verdict::body_errors(&ws);

@@ -152,7 +152,6 @@ impl NominalType {
     }
 }
 
-/// No offsets: a member's place is the target's answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalUniformGroup {
     pub role: UniformRole,
@@ -160,7 +159,6 @@ pub struct LogicalUniformGroup {
     pub members: Vec<(Ustr, WireKind)>,
 }
 
-/// Physical offsets, padding, bindings and block size are deliberately absent.
 pub fn semantic_uniform_group_fingerprint(struct_name: Ustr, members: &[(Ustr, WireKind)]) -> u64 {
     let name = bone_core::modules::artifact_name(struct_name.as_str());
     let mut hash = crate::fnv1a(0xa5a5_5a5a_c3c3_3c3c, name.as_bytes());
@@ -223,7 +221,6 @@ pub enum VertexRate {
     PerInstance,
 }
 
-/// The location each attribute takes is the target's answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalVertexInput {
     pub struct_name: NominalType,

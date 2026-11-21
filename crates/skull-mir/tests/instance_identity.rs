@@ -1,5 +1,3 @@
-//! [`Instance`] identity over the shared [`MonoInterner`].
-
 use crate::common::{decl, key, ws_of};
 use skull_mir::instance::Instance;
 use skull_mir::monoty::{MonoCtor, MonoInterner, MonoTy};
@@ -101,7 +99,6 @@ fn distinct_arguments_are_distinct_instances_with_distinct_symbols() {
     );
 }
 
-/// Guards the tests above against an encoder that suffixes every symbol.
 #[test]
 fn a_non_generic_instance_is_the_declarations_own_symbol() {
     let ws = ws_of(SRC);

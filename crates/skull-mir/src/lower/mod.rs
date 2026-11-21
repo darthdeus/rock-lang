@@ -1,7 +1,5 @@
 //! Lower resolved HIR into MIR blocks, cells and typed instructions.
 
-// Fx hashing: per-body scratch maps keyed by small ids, where SipHash was a
-// measurable share of lowering.
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -555,7 +553,6 @@ fn fmt_pieces(
     Some(pieces)
 }
 
-// The corpus coverage lens buckets lowering gaps on this tag.
 fn expr_tag(e: &Expr) -> &'static str {
     match e {
         Expr::As { .. } => "As",
@@ -1097,7 +1094,6 @@ pub fn validate_concrete_bound_plan(
     Ok(())
 }
 
-/// Call a catalog factory through its owner ABI and pack its complete result.
 pub fn lower_definition_factory(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1939,8 +1935,6 @@ impl<'a> Builder<'a> {
         self.cur = next;
     }
 
-    /// `DispatchCtx` is the one implementation, so the instance walk cannot get a
-    /// second answer.
     pub(crate) fn dispatch(&self) -> dispatch::DispatchCtx<'_> {
         dispatch::DispatchCtx {
             ws: self.ws,

@@ -1,5 +1,3 @@
-//! Operand traversal and value classification for hand-built MIR.
-
 use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 use ustr::ustr;

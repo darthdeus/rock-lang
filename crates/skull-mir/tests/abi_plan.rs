@@ -190,7 +190,6 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
     assert_eq!(written_abi.param_leaf_widths(), Some(vec![3]));
 }
 
-/// Transport choices for scalar, nested, tuple, nullable and boxed signatures.
 #[test]
 fn owned_signature_shapes_have_the_expected_transport() {
     let ws = checked_ws_of(

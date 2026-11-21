@@ -328,8 +328,6 @@ pub struct CodeArtifact {
     pub census: CodeIdentityCensus,
 }
 
-/// Kept in identity order; a `BTreeMap` would allocate a whole node, about
-/// 2.5 KB, for a body's one or two entries.
 #[derive(Clone, Debug, Default)]
 pub struct BodyCodeArtifact {
     entries: Box<[CodeEntry]>,
@@ -486,7 +484,6 @@ impl CodeArtifact {
         }
     }
 
-    /// The logical keys remain unchanged.
     pub fn set_body_names(&mut self, root: &MirFunc, root_name: &str) {
         fn visit(artifact: &mut CodeArtifact, mf: &MirFunc, body_name: &str) {
             if let Some(identity) = &mf.code_identity {

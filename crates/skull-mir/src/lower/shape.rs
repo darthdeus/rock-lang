@@ -20,9 +20,7 @@ pub(crate) fn is_value_struct(ws: &Workspace, name: Ustr) -> bool {
         .is_some_and(|sid| has_value_plan(&ws.modules[sid.module.index()].structs[sid.def]))
 }
 
-/// Above this many leaves, column writes hit a measured cliff (about 9x on
-/// LuaJIT and V8 at K=16), so an unmarked wider value stays boxed.
-/// An explicit `nobox` bypasses this, because boxing is not a legal fallback.
+/// Explicit `nobox` bypasses the leaf budget because boxing is forbidden.
 pub(crate) const MAX_COLUMN_LEAVES: usize = 4;
 
 pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
@@ -241,7 +239,6 @@ pub fn nb_prim_storage_lua() -> String {
         .collect()
 }
 
-/// Takes the already-validated leaves and size rather than re-walking the layout.
 pub fn nb_value_storage_lua(
     ws: &Workspace,
     elem: Ustr,
@@ -1212,8 +1209,6 @@ pub(crate) fn variants_for_payload(ws: &Workspace, enum_name: Ustr, want: TyId) 
         .collect()
 }
 
-/// The single source of the field-to-variant rule, shared by the emit-time
-/// validator and the lowering expander.
 pub(crate) fn struct_expand_variants(
     ws: &Workspace,
     enum_name: Ustr,
@@ -1934,7 +1929,7 @@ pub(crate) fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Optio
     EnumPlan::for_name(ws, *yield_name).and_then(|plan| plan.flat().cloned())
 }
 
-/// Frame slot `__y{i}`: tag at 0, then positional, then record leaves.
+/// The tag precedes positional and record leaves.
 pub fn yield_slot(i: usize) -> Ustr {
     crate::names::ustr(format!("__y{i}").as_str())
 }
