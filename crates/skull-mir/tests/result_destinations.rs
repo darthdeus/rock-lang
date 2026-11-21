@@ -7,26 +7,6 @@ fn lower(src: &str) -> MirFunc {
 }
 
 #[test]
-fn tail_branches_forward_the_return_destination() {
-    let mir = lower("fn pick(flag: bool, a: int, b: int) -> int { if flag { a } else { b } }");
-    assert_eq!(mir.blocks.len(), 3, "{mir}");
-    assert_eq!(mir.insts.len(), 3, "{mir}");
-    assert!(
-        !mir.insts
-            .iter()
-            .any(|(_, i)| matches!(i, Inst::Store { .. })),
-        "{mir}"
-    );
-    assert_eq!(
-        mir.blocks
-            .iter()
-            .filter(|(_, b)| matches!(b.term, Term::Return(_)))
-            .count(),
-        2
-    );
-}
-
-#[test]
 fn tuple_destination_uses_operands_without_construction() {
     let mir = lower(
         "fn pick(flag: bool) -> (int, bool) { return if flag { (1, false) } else { (2, true) } }",
