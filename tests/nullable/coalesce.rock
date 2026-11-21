@@ -1,4 +1,3 @@
-// Coalescing nullable values: map values and value struct literal fields.
 
 @test(output = "5\n0\n0\n42\nhello\n\n3.14\nfalse\ntrue\ntrue")
 fn coalesce_keeps_present_values_including_falsy_ones() {
@@ -79,7 +78,6 @@ fn coalesce_in_expression_positions() {
     print(arr[0])
 }
 
-// Controls for the nullable coalesce join: scalar and boxed value payloads
 value BoxedPair { x: int, y: int }
 
 fn maybe_int(present: bool) -> int? {
@@ -108,10 +106,7 @@ fn boxed_value_payload_control() {
     }
 }
 
-// Precedence: `??` binds tighter than every assignment form, so `x = a ?? b`
-// is `x = (a ?? b)`.
-// The guards at the bottom pin the other side, so raising the level cannot
-// silently drag `??` above the operators it must stay below.
+// `??` binds tighter than assignment but below arithmetic and equality.
 
 global CO_G: int = 0
 
@@ -156,13 +151,10 @@ fn coalesce_chain_over_assign() {
     assert_eq(CO_G, 9)
 }
 
-// --- Guards: the level must not go too far the other way. ---
 
 @test
 fn coalesce_stays_below_arithmetic() {
-    // `a ?? 1 + 2` is `a ?? (1 + 2)`, not `(a ?? 1) + 2`. Both would read 3
-    // when a is null, so the discriminating case is a NON-null left: if the
-    // grouping were wrong this would be 7.
+    // A null left operand would not distinguish the two groupings.
     CO_G = co_some() ?? 1 + 2
     assert_eq(CO_G, 5)
 }
@@ -171,10 +163,7 @@ fn co_none_b() -> bool? { return null }
 
 @test
 fn coalesce_stays_below_comparison() {
-    // `a ?? 1 == 2` groups as `a ?? (1 == 2)` -- C# semantics, `??` sits
-    // below `==`. This only typechecks under that grouping: the tighter
-    // reading would be `(bool? ?? 1) == 2`, a bool-vs-int mismatch, so the
-    // test cannot pass for the wrong reason.
+    // Only `a ?? (1 == 2)` typechecks; the other grouping mixes bool and int.
     let miss = co_none_b() ?? 1 == 2
     assert_eq(miss, false)
 

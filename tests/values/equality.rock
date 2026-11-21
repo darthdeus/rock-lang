@@ -1,6 +1,4 @@
-// Equality on value structs, enums and enum payloads.
 
-// Payload enums retain their own structural equality inside a value struct.
 struct EqTile { x: int, y: int }
 
 enum EqMarch { None, Tile(EqTile), Landmark(int) }
@@ -17,7 +15,6 @@ fn eq_landmark(n: int) -> EqMarch { EqMarch::Landmark(n) }
 
 fn eq_spec(m: EqMarch) -> EqSpec { EqSpec { march: m, label: "same" } }
 
-// The inline child reaches enum slots through an inline child of a GC value box.
 nobox value EqInline { march: EqMarch }
 
 value EqEmbedded { child: EqInline, label: string }
@@ -200,7 +197,6 @@ fn stored_float_ne(r: float, g: float) -> bool {
     return differ_tint(h, Tint { r: r, g: g, n: 3 })
 }
 
-// The last line: a stored single-precision float value equals a fresh operand.
 @test(output = "true false true false true true\ntrue false false false true\ntrue false true")
 fn leaf_wise_equality_compares_every_field() {
     print("{eq_scalar(1.0, 2.0, 1.0, 2.0)} {eq_scalar(1.0, 2.0, 1.0, 3.0)} {ne_scalar(1.0, 2.0, 1.0, 3.0)} {ne_scalar(1.0, 2.0, 1.0, 2.0)} {eq_gc_same_ref(5)} {ne_gc_different_tag(5, 6)}")
