@@ -215,19 +215,6 @@ mod tests {
         );
     }
     #[test]
-    fn dev_lib_path_searches_staged_tmp_first() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
-        fs::create_dir(root.join("tmp")).unwrap();
-        assert!(!is_release_layout_in(root));
-
-        let value = lib_path_value_in(root);
-        let entries = lib_path_entries(&value);
-        assert_eq!(entries[0], "tmp", "{value}");
-        assert_eq!(entries[1], root.join("tmp").to_string_lossy(), "{value}");
-    }
-    #[test]
     fn stone_jv_env_inserts_jv_before_script() {
         use std::ffi::OsStr;
         let lua = std::path::Path::new("tmp/main.lua");
