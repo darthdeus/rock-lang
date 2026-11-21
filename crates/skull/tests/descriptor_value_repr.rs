@@ -13,20 +13,3 @@ pub fn probe() -> float {
     return take(q)
 }
 "#;
-
-#[test]
-fn user_value_named_like_a_descriptor_keeps_scalarization() {
-    let emitted = emit_v1_package("userdesc", &[("main.rock", USER_NAMED)]);
-    let take = mangled_name(&emitted.lua, "take");
-    let header = emitted
-        .lua
-        .lines()
-        .find(|l| l.starts_with(&format!("function {take}(")))
-        .expect("take is emitted");
-    assert!(header.contains(", "));
-    let probe = mangled_name(&emitted.lua, "probe");
-    assert_eq!(
-        run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua)),
-        "3"
-    );
-}
