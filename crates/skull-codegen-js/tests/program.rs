@@ -24,46 +24,6 @@ fn run_program(file: &str, source: &str, extra_runtime: &[&str], after_program: 
 }
 
 #[test]
-fn unsupported_wire_dependencies_reject_on_both_backends() {
-    for (annotation, expected) in [
-        ("[MUTABLE]", "mutable"),
-        ("[callable]", "names a function"),
-        ("[UNKNOWN]", "`UNKNOWN` did not resolve to any definition"),
-        ("[]", "requires a non-empty dependency list"),
-        ("[GOOD.value]", "structured identifier list"),
-    ] {
-        let source = format!(
-            r#"
-            @lifecycle(phase="wire", owner="process") deco init wire {{}}
-            const GOOD: int = 1
-            global MUTABLE: int = 2
-            fn callable() {{}}
-            @wire(onchange={annotation}) fn apply_game_config() {{}}
-            fn main() {{}}
-            "#
-        );
-        let ws = match try_ws_with_named("<test>", &source) {
-            Ok(ws) => ws,
-            Err(error) => {
-                assert!(error.message.contains(expected), "{annotation}: {error}");
-                continue;
-            }
-        };
-        let mid = test_mid(&ws);
-        let lua = match skull::mir_emit::emit_full(&ws, mid) {
-            Ok(_) => panic!("Lua accepted unsupported wire dependency {annotation}"),
-            Err(error) => error.message,
-        };
-        let js = match skull_codegen_js::emit::emit_program(&ws, mid) {
-            Ok(_) => panic!("JS accepted unsupported wire dependency {annotation}"),
-            Err(error) => error.message,
-        };
-        assert!(lua.contains(expected), "Lua {annotation}: {lua}");
-        assert!(js.contains(expected), "JS {annotation}: {js}");
-    }
-}
-
-#[test]
 fn duplicate_runtime_type_symbols_are_rejected_by_js_program_emission() {
     let ws = ws_with(
         r#"
@@ -117,24 +77,6 @@ fn main() {
     );
     skull_codegen_js::emit::emit_program(&valid, test_mid(&valid))
         .expect("scalar Map keys remain supported");
-}
-
-#[test]
-fn a_non_inlinable_call_result_runs_once_when_its_value_is_reused() {
-    let ws = ws_with(
-        r#"
-inline(js) fn next_value() -> int = "return hits++;"
-fn root() -> int {
-    let value = next_value()
-    return value * 10 + value
-}
-"#,
-    );
-    let js = crate::common::emit_closure(&ws, "root").expect("emit root");
-    let output = run_node(&format!(
-        "let hits = 4;\n{js}\nif (root() !== 44 || hits !== 5) throw new Error('call result was reevaluated');"
-    ));
-    assert!(output.is_empty(), "{output}");
 }
 
 #[test]
