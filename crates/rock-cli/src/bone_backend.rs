@@ -498,12 +498,6 @@ pub(crate) fn short_path(path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn rejected(src: &str) -> bool {
-        let module =
-            skull_parser::parse_module(src, ustr::Ustr::from("<verdict_test>")).expect("parse");
-        check_with_stdlib([module]).is_err()
-    }
-
     #[test]
     fn a_diagnostic_spanned_into_stdlib_renders_its_snippet() {
         const NEEDLE: &str = "fn Vec<T>.push(";

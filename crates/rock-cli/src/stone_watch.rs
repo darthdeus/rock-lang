@@ -754,7 +754,6 @@ mod watch_reload_tests {
     struct Fixture {
         _dir: tempfile::TempDir,
         root: PathBuf,
-        edited: PathBuf,
         main: PathBuf,
         compiler: GameCompiler,
     }
@@ -808,7 +807,6 @@ mod watch_reload_tests {
             Self {
                 _dir: dir,
                 root,
-                edited,
                 main,
                 compiler,
             }
@@ -830,53 +828,6 @@ mod watch_reload_tests {
                 self.root.to_str().unwrap(),
                 self.compiler.package_roots(),
                 inputs,
-            );
-        }
-
-        fn assert_reload(mut self, atomic: bool) {
-            let before = std::fs::read_to_string(&self.main).unwrap();
-            let mut watch = self.watch(Vec::new());
-            let text = std::fs::read_to_string(&self.edited)
-                .unwrap()
-                .replace("a + 1", "a + 10");
-            if atomic {
-                let temporary = self.edited.with_extension("saving");
-                std::fs::write(&temporary, text).unwrap();
-                std::fs::rename(temporary, &self.edited).unwrap();
-            } else {
-                std::fs::write(&self.edited, text).unwrap();
-            }
-            let event = receive_path(&mut watch, &self.edited);
-            let mut changes = categorize(&event);
-            self.retain(&mut changes.changed_paths, &Default::default());
-            assert!(
-                changes.changed_paths.contains(&self.edited),
-                "Stone dropped source edit: {:?}",
-                event.paths
-            );
-            assert!(changes.changed_compiler.is_empty() && changes.changed_libstone.is_empty());
-            let outcome = self
-                .compiler
-                .compile(&changes.changed_paths, false)
-                .expect("reload compile");
-            assert!(
-                outcome.restart_reasons.is_empty(),
-                "body edit must preserve live state"
-            );
-            assert!(
-                before == std::fs::read_to_string(&self.main).unwrap(),
-                "body edit must preserve main.lua"
-            );
-            let after = std::fs::read_to_string(self.main.with_file_name("incremental.lua"))
-                .expect("body-edit overlay");
-            let script = format!(
-                "HOT_RELOAD = false\n{before}\nbump()\nHOT_RELOAD = true\n{after}\nHOT_RELOAD = false\nbump()\nassert(SCORE == 11, tostring(SCORE))\nprint('WATCH_RELOAD_PASS')\n"
-            );
-            let output = run_lua(&script).expect("run reloaded Lua");
-            assert!(
-                output.stdout.contains("WATCH_RELOAD_PASS"),
-                "{}",
-                output.combined()
             );
         }
     }

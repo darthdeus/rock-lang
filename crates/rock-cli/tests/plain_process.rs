@@ -1,6 +1,5 @@
 //! The public CLI runs outside the monorepo with only a LuaJIT installation.
 use crate::support::{assert_mentions, read_jsonl, rock, text, write_files};
-use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -313,29 +312,6 @@ fn plain_identity_storage_follows_the_manifest_declaration() {
     );
 }
 
-/// `app/` printing 42 through its path dependency `lib/`.
-fn app_with_library(root: &Path) {
-    write_files(
-        root,
-        &[
-            (
-                "lib/stick.toml",
-                "[package]\nname = \"lib\"\ntype = \"lib\"\n[language]\nmodules = \"v1\"\n",
-            ),
-            ("lib/lib.rock", "pub fn answer() -> int { 42 }\n"),
-            (
-                "app/stick.toml",
-                "[package]\nname = \"app\"\ntype = \"bin\"\n[language]\nmodules = \"v1\"\n\
-                 [dependencies]\nlib = { path = \"../lib\" }\n",
-            ),
-            (
-                "app/main.rock",
-                "use lib::answer;\nfn main() { print(answer()) }\n",
-            ),
-        ],
-    );
-}
-
 #[test]
 fn plain_scan_assigns_no_archive_semantics() {
     let root = tempfile::tempdir().unwrap();
@@ -368,46 +344,6 @@ fn plain_scan_assigns_no_archive_semantics() {
             rock_cli::lint_union::bin_projects_under(root.path()).unwrap(),
             expected
         );
-    }
-}
-
-/// Publishes the built binary at `exe` without opening it for writing where a
-/// hard link works, so a sibling test's forked child cannot hold a write
-/// descriptor that makes exec fail with ETXTBSY (see
-/// `test_utils::write_executable`). The copy fallback stages under a temporary
-/// name so `exe` never holds a partial file.
-fn relocate(from: &str, exe: &Path) {
-    if std::fs::hard_link(from, exe).is_ok() {
-        return;
-    }
-    let staging = exe.with_extension("staging");
-    std::fs::copy(from, &staging).expect("copy the built binary");
-    std::fs::rename(&staging, exe).expect("publish the relocated binary");
-}
-
-/// Starts the relocated binary, retrying while the copy fallback's write
-/// descriptor is still held by a sibling test's forked child (see `relocate`).
-fn start_relocated(exe: &Path, root: &Path, args: &[&str]) -> Output {
-    use bone_core::prelude::{Duration, Instant};
-    let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
-    loop {
-        let started = Command::new(exe)
-            .current_dir(root)
-            .args(args)
-            .env("ROCK_DIR", root)
-            .env("ROCK_INVOCATION_LOG", "off")
-            .env_remove("ROCK_STDLIB_DIR")
-            .env_remove("LUA_PATH")
-            .env_remove("LUA_CPATH")
-            .output();
-        match started {
-            Err(error)
-                if error.kind() == ErrorKind::ExecutableFileBusy && Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            other => return other.expect("start relocated rock"),
-        }
     }
 }
 
