@@ -1,5 +1,3 @@
-//! Run build lints and apply the invocation's reporting policy.
-
 use bone_core::prelude::{FxHashMap, FxHashSet, Ustr};
 use bone_semantic::inference::Workspace;
 use rock_core::{CompilerError, SourceFiles};
@@ -114,8 +112,7 @@ fn present_soft(
     match mode {
         LintReport::Off => {}
         LintReport::Full => {
-            // One batch render: the ariadne source cache copies every file in
-            // the project, so a per-finding render is ~1.6ms EACH on a game.
+            // A render builds a source cache, so batch the findings.
             let errs: Vec<CompilerError> = soft.iter().map(|f| f.error.clone()).collect();
             eprintln!("{}", rock_core::errors::render_all(&errs, sources));
         }
@@ -176,12 +173,8 @@ pub fn findings_with(
     with_source_texts(sources, |texts| {
         let warm = skull::pipeline::warm_module_ids(ws, texts);
         let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
-        // The REPORT set: this project's own files. A `stick.toml` DEPENDENCY
-        // (`engine/engine` under a game) is scanned but never reported on -- its code
-        // is not the author's to fix here, and a consumer must not fail a build on a
-        // dependency's findings. Scanned rather than warm: an engine body calling
-        // into game code is a real reachability edge, and dropping it would
-        // false-flag the game's callbacks as dead.
+        // Dependencies can call project callbacks; scan them for reachability
+        // but report only project findings.
         let owned = owned_files(texts, root);
         let report: FxHashMap<Ustr, &str> = texts
             .iter()

@@ -1,5 +1,3 @@
-//! Emit JS test units, run them under Node, and report failures and skips.
-
 use crate::Result;
 use crate::test_protocol::parse_skull_markers;
 use crate::test_unit::{UnitCheck, UnitFailure, UnitRun};
@@ -134,7 +132,6 @@ fn emit_test_program(
     }
 }
 
-/// Run JS-eligible tests in one Node batch.
 fn js_run_tests(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
@@ -164,7 +161,6 @@ fn js_run_tests(
         });
     }
 
-    // (display name, root JS name, expected output, value test?) per runnable test.
     let meta: Vec<(String, String, Option<String>, bool)> = run_idxs
         .iter()
         .map(|&i| {

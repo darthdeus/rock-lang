@@ -31,12 +31,7 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 pub struct ProcessManager;
 
 impl ProcessManager {
-    /// Wait for a child process with timeout, returning output and timeout status.
-    ///
-    /// Pipe outputs (stdout/stderr) are drained by background threads throughout
-    /// the child's lifetime. Without this, a child that writes more than the OS
-    /// pipe buffer (~64KB on macOS/Linux) blocks on write(), the parent's
-    /// try_wait() never sees an exit, and the process appears to hang until timeout.
+    /// Drain pipes while waiting so a full pipe cannot block the child.
     pub fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<ProcessResult> {
         Self::wait_with_policy(
             child,
@@ -496,7 +491,6 @@ fn child_process_cpu_time(_pid: u32) -> Option<Duration> {
     None
 }
 
-/// Result of waiting for a child process with timeout
 #[derive(Debug)]
 pub struct ProcessResult<P = ()> {
     pub output: std::process::Output,

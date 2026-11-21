@@ -1,8 +1,6 @@
-//! The `rock` process lifecycle.
 use crate as rock_cli;
 use crate::*;
 
-/// Run the `rock` process, including parsing, logging and cleanup.
 /// Call once, before spawning application threads.
 pub fn main() {
     crate::compile_budget::mark_process_start();
@@ -36,8 +34,7 @@ fn install_compiler_pool(threads: Option<usize>) {
 }
 
 fn run_process() {
-    // `rock lsp` runs before the allocator default, the logger and clap: it
-    // installs its own process state.
+    // LSP installs its own process state before the ordinary CLI setup.
     let mut raw = std::env::args().skip(1);
     if raw.next().as_deref() == Some("lsp") {
         // `rock lsp` typechecks whole projects, in the server and in its
@@ -64,7 +61,6 @@ fn run_process() {
 
     let args = Args::parse();
 
-    // Same shape and exit code as clap rejecting an argument.
     if let Err(error) = rock_cli::common::thread_count_request() {
         eprintln!("error: {error}");
         std::process::exit(2);
@@ -127,10 +123,7 @@ fn run_process() {
     exit_without_teardown();
 }
 
-/// End a successful command without process teardown. The kernel reclaims
-/// the address space in one pass at exit; letting `exit` run would first have
-/// the allocator hand every page back with one `madvise` per span (about 75 ms
-/// after a large compile) and each thread release its heap.
+/// Avoid allocator teardown; the kernel reclaims the address space at exit.
 fn exit_without_teardown() -> ! {
     use std::io::Write;
     let _ = std::io::stdout().flush();
@@ -147,10 +140,7 @@ fn exit_without_teardown() -> ! {
     unsafe { libc::_exit(0) }
 }
 
-/// Whether the MIR verifier and the printer's scope guard run. Both catch
-/// only compiler bugs. An ordinary compile skips both; `rock test` keeps the
-/// guard, which is nearly free, but not the verifier, which costs a large
-/// test build over a tenth of its compile. `ROCK_MIR_CHECKS` sets both.
+/// `rock test` enables the scope guard; `ROCK_MIR_CHECKS` sets both checks.
 fn mir_checks(command: Option<&str>, setting: Option<&str>) -> (bool, bool) {
     match skull_mir::verify::checks_requested(setting) {
         Some(on) => (on, on),
@@ -162,9 +152,6 @@ fn mir_checks(command: Option<&str>, setting: Option<&str>) -> (bool, bool) {
 mod tests {
     use super::mir_checks;
 
-    /// `(verifier, scope guard)`: `rock test` keeps the cheap printer guard
-    /// but not the MIR verifier, which costs a large program's test build
-    /// over a tenth of its compile.
     #[test]
     fn rock_test_keeps_only_the_scope_guard_unless_asked() {
         assert_eq!(mir_checks(Some("test"), None), (false, true));

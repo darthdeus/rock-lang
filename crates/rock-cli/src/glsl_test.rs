@@ -1,5 +1,4 @@
-//! Run value tests on the GPU using the external GLSL runner, which owns the GL context.
-//! Only the runner's no-context exit can be skipped with --skip-gpu.
+//! Only the GLSL runner's no-context exit can be skipped with --skip-gpu.
 
 use crate::Result;
 use crate::test_protocol::{compare_value, parse_skull_markers};
@@ -78,7 +77,6 @@ fn run_tests(
     gl_available: bool,
 ) -> UnitRun {
     let mut run = UnitRun::default();
-    // (name, expected, shaders) for the tests that emitted.
     let mut runnable: Vec<(String, ValueExpect, ValueTestShaders)> = Vec::new();
     for (fr, t) in tests {
         let Some(expect) = t
@@ -143,8 +141,6 @@ fn run_tests(
     run
 }
 
-/// Spawn the runner for one unit+profile, feed the shaders as a JSON job array,
-/// parse the `__SKULL__` lines back.
 fn run_batch(
     runner: &std::path::Path,
     profile: &str,
@@ -169,7 +165,6 @@ fn run_batch(
     }
 }
 
-/// Serialize the runnable shaders to the runner's JSON job protocol.
 fn jobs_json(runnable: &[(String, ValueExpect, ValueTestShaders)]) -> String {
     let items: Vec<serde_json::Value> = runnable
         .iter()
@@ -385,11 +380,7 @@ pub(crate) fn validate_workspace(dir: &str) -> Result<bone_semantic::inference::
     Ok(ws)
 }
 
-/// Split a single-file `#ifdef VERTEX` / `#ifdef PIXEL` shader into the two
-/// stage sources EXACTLY the way the engine loader does
-/// (`engine-rs/src/shader.rs`): inject `#define VERTEX` / `#define PIXEL` on the
-/// line after `#version`. Validating anything else would validate a shader the
-/// engine never compiles.
+/// Match the engine loader: inject the stage define after `#version`.
 fn split_stages(combined: &str) -> (String, String) {
     let insert_point = combined
         .find("#version")
