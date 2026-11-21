@@ -1,16 +1,6 @@
 //! GLSL local bindings must not shadow builtin calls.
 
-use crate::support::{checked_workspace, emit_library};
-use skull_codegen_glsl::{GlslProfile, ShaderEmission};
-
-/// No binding of the bare `name` anywhere in the GLSL: neither a hoisted
-/// declaration (`float cos;`), nor a param (`float cos,` / `float cos)`).
-/// A builtin call (`cos(angle)`) never matches these shapes, so every
-/// remaining `name(` is the builtin.
-fn emit_entry(src: &str, root: &str) -> ShaderEmission {
-    let (ws, mid) = checked_workspace(src);
-    crate::support::emit_program(&ws, mid, None, root, GlslProfile::Core330).expect("emit")
-}
+use crate::support::emit_library;
 
 fn assert_no_bare_binding(glsl: &str, name: &str) {
     for pat in [

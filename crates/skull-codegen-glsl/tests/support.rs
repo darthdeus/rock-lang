@@ -28,15 +28,6 @@ fn body_errors(ws: &Workspace) -> Result<(), String> {
         .join("; "))
 }
 
-/// [`workspace`], panicking on a fixture the real pipeline would reject.
-pub fn checked_workspace(src: &str) -> (Workspace, ModuleId) {
-    let (ws, mid) = workspace(src);
-    if let Err(errs) = body_errors(&ws) {
-        panic!("fixture has body errors: {errs}");
-    }
-    (ws, mid)
-}
-
 fn library(ws: &Workspace, mid: ModuleId, roots: &[&str]) -> Result<String, String> {
     let root_refs = roots
         .iter()

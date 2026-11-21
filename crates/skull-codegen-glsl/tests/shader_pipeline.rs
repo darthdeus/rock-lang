@@ -1,19 +1,4 @@
-use crate::support::{assert_has, assert_lacks, emit_entry, emit_pipeline, workspace};
-use skull_codegen_glsl::GlslProfile;
-
-fn derivative_maps(rock: &str, glsl_call: &str) {
-    let src = format!(
-        r#"
-        @shader(fragment)
-        fn f(tc: Vec2) -> Vec4 {{
-            let w = {rock}(tc.x)
-            return Vec4 {{ x: w, y: 0.0, z: 0.0, w: 1.0 }}
-        }}
-    "#
-    );
-    let glsl = emit_entry(&src, "f").expect("emit");
-    assert_has(&glsl, &format!("{glsl_call}(tc.x)"));
-}
+use crate::support::{assert_has, assert_lacks, emit_entry, emit_pipeline};
 
 cases! { derivative_maps:
 }
@@ -122,21 +107,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
     "#, "vt", "fr", "bool");
 }
-
-const MRT_SRC: &str = r#"
-    value QV   { aPos: Vec2, aEntityId: float }
-    value Vary { position: Vec4, TexCoord: Vec2, @flat EntityId: float }
-    value SpriteOut { FragColor: Vec4, FragId: Vec4 }
-    @shader(vertex)
-    fn vt(@attr a: QV) -> Vary {
-        return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos, EntityId: a.aEntityId }
-    }
-    @shader(fragment)
-    fn fr(vary: Vary, uTexture: Sampler2D) -> SpriteOut {
-        let c = texture(uTexture, vary.TexCoord)
-        return SpriteOut { FragColor: c, FragId: Vec4 { x: vary.EntityId, y: 0.0, z: 0.0, w: 1.0 } }
-    }
-"#;
 
 cases! { reject_pipeline:
     reject_mrt_non_vec4_field(r#"
@@ -354,37 +324,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary) -> Vec4 { return vary.position }
     "#, "vt", "fr", "bvec3");
 }
-
-const INT_MRT_SRC: &str = r#"
-    value QV   { aPos: Vec2, aEntityId: float }
-    value Vary { position: Vec4, TexCoord: Vec2, @flat EntityId: float }
-    value IdOut { FragColor: Vec4, FragId: int }
-    @shader(vertex)
-    fn vt(@attr a: QV) -> Vary {
-        return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos, EntityId: a.aEntityId }
-    }
-    @shader(fragment)
-    fn fr(vary: Vary, uTexture: Sampler2D) -> IdOut {
-        let c = texture(uTexture, vary.TexCoord)
-        return IdOut { FragColor: c, FragId: vary.EntityId as int }
-    }
-"#;
-
-const ISAMPLER_SRC: &str = r#"
-    value QV   { aPos: Vec2 }
-    value Vary { position: Vec4, TexCoord: Vec2 }
-    @shader(vertex)
-    fn vt(@attr a: QV) -> Vary {
-        return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos }
-    }
-    @shader(fragment)
-    fn fr(vary: Vary, ids: ISampler2D) -> Vec4 {
-        let id = texture_id(ids, vary.TexCoord)
-        let ts = texture_size(ids)
-        if id <= 0 { discard() }
-        return Vec4 { x: 1.0, y: ts.x, z: 0.0, w: 1.0 }
-    }
-"#;
 
 const OPAQUE_PRELUDE: &str = r#"
     struct Tex { a: Sampler2D, b: Sampler2D }
