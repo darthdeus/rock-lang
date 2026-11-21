@@ -18,18 +18,18 @@ pub(super) struct Shape {
 }
 
 impl Shape {
-    pub(super) fn analyze(em: &Emitter<'_>, entry: Idx<Block>) -> Option<Self> {
+    pub(super) fn analyze(em: &Emitter<'_>, rpo: &[Idx<Block>]) -> Option<Self> {
         let func = em.mf;
-        let rpo = skull_mir::cfg::reverse_postorder(func, entry);
+        let entry = rpo[0];
         let mut counted = CountedLoops::default();
-        for &header in &rpo {
+        for &header in rpo {
             if let Some(loop_info) =
                 cfg_structure::counted_loop(func, header, CountedBound::InlineOnly)
             {
                 counted.insert(header, loop_info);
             }
         }
-        let forward = walk::thread_forwarders(func, &rpo, |b| {
+        let forward = walk::thread_forwarders(func, rpo, |b| {
             !counted.contains_key(&b) && !em.block_has_statement(b)
         });
 

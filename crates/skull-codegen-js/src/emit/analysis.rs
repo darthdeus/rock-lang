@@ -111,17 +111,3 @@ pub(super) fn cross_block_temps(
     }
     cross
 }
-
-pub(super) fn reachable_from(mf: &MirFunc, root: Idx<Block>) -> Vec<Idx<Block>> {
-    let mut reachable = Vec::new();
-    let mut seen = HashSet::new();
-    let mut stack = vec![root];
-    while let Some(b) = stack.pop() {
-        if !seen.insert(b) {
-            continue;
-        }
-        reachable.push(b);
-        skull_mir::cfg::successors(&mf.blocks[b].term, |s| stack.push(s));
-    }
-    reachable
-}

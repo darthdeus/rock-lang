@@ -28,7 +28,7 @@ pub(super) fn emit_fn_with_callees(
         return Err(err("JS subset: coroutine fn not supported"));
     }
     let (mut frame, unwind) = FnFrame::new(ws, mf, callees, hoisted, globals, mf.entry, false);
-    let Some(shape) = placement::Shape::analyze(&frame.emitter, mf.entry) else {
+    let Some(shape) = placement::Shape::analyze(&frame.emitter, &frame.region) else {
         return emit_fn_trampoline(
             ws, mf, js_name, callees, hoisted, globals, mf.entry, &mf.params, true,
         );
@@ -101,7 +101,7 @@ impl<'a> FnFrame<'a> {
         entry: Idx<Block>,
         pack_multi_return: bool,
     ) -> (Self, bool) {
-        let region = reachable_from(mf, entry);
+        let region = skull_mir::cfg::reverse_postorder(mf, entry);
         let (mut inlinable, _, uses) =
             skull_mir::sinking::compute_inlinable(mf, &region, |_| false);
         fold_branch_loads(mf, &region, &uses, &mut inlinable);
