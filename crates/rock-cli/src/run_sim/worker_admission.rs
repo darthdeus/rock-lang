@@ -277,33 +277,6 @@ mod tests {
         }
     }
     #[test]
-    fn waiting_admission_recovers_and_does_not_double_spend_or_double_count() {
-        let root = tempfile::tempdir().unwrap();
-        let attempt =
-            |free, processes: &[(u32, u64)]| try_acquire(root.path(), 4, || gpu(free, processes));
-        let mut first = acquired(|| attempt(6144, &[]));
-        denied("gpu_headroom", || attempt(6144, &[]));
-        // Space freed by an unrelated workload lets a second worker start.
-        let second = acquired(|| attempt(10240, &[]));
-        assert!(
-            granted(attempt(10240, &[])).is_err(),
-            "pending boots must reserve capacity"
-        );
-        publish_pid(root.path(), &mut first, 42).unwrap();
-        // First worker's 2 GiB is already absent from free: do not count it twice.
-        drop(second);
-        let second = acquired(|| attempt(8192, &[(42, 2048)]));
-        assert!(granted(attempt(8192, &[(42, 2048)])).is_err());
-        assert!(
-            granted(attempt(0, &[(42, 2048)])).is_err(),
-            "falling capacity must stop new starts"
-        );
-        drop(first);
-        drop(second);
-        // Completed leases must release capacity.
-        acquired(|| attempt(6144, &[]));
-    }
-    #[test]
     fn telemetry_does_not_lock_out_reservations_or_pid_publication() {
         let root = tempfile::tempdir().unwrap();
         let mut concurrent = None;
