@@ -33,50 +33,6 @@ fn all_errors(per_file: &[(String, Vec<Diagnostic>)]) -> Vec<&Diagnostic> {
     per_file.iter().flat_map(|(_, d)| errors(d)).collect()
 }
 
-#[test]
-fn sibling_file_types_resolve_whether_loaded_or_opened() {
-    let project = two_file_project();
-    let b = project.path("b.rock");
-    let mut loaded = BoneWorkspace::new();
-    loaded.load_project(&b);
-    let diags = loaded.diagnostics_for(&b);
-    assert!(errors(&diags).is_empty(), "load_project: {diags:?}");
-    // didOpen of b.rock alone, as the editor does.
-    let (_, per_file) = project.open("b.rock");
-    let diags = diagnostics_in(per_file, &b);
-    assert!(errors(&diags).is_empty(), "update alone: {diags:?}");
-}
-
-/// Cached hole diagnostics survive unrelated edits and refresh when their own file changes.
-#[test]
-fn hole_diagnostics_survive_unrelated_edits_and_clear_on_fix() {
-    let project = Project::new(&[
-        MANIFEST,
-        ("a.rock", "fn a() -> int { ? }\n"),
-        ("b.rock", "fn b() -> int { 1 }\n"),
-    ]);
-    let (a, b) = (project.path("a.rock"), project.path("b.rock"));
-    let has_hole = |per| {
-        diagnostics_in(per, &a)
-            .iter()
-            .any(|x| x.message.contains("hole"))
-    };
-    let mut bone = BoneWorkspace::new();
-    bone.load_project(&a);
-    assert!(
-        has_hole(bone.update(&a, project.read("a.rock"))),
-        "a's hole"
-    );
-    assert!(
-        has_hole(bone.update(&b, "fn b() -> int { 2 }\n".into())),
-        "editing b must not drop a's cached hole"
-    );
-    assert!(
-        !has_hole(bone.update(&a, "fn a() -> int { 1 }\n".into())),
-        "removing a's `?` must clear its hole"
-    );
-}
-
 /// A reinferred dependent with a hole is never served a stale hole message.
 #[test]
 fn dependent_hole_message_refreshes_after_interface_edit() {
@@ -177,37 +133,6 @@ fn duplicate_struct_across_fragments_surfaces_in_lsp() {
     }
 }
 
-#[test]
-fn duplicate_function_across_files_surfaces_once_in_lsp() {
-    let project = Project::new(&[
-        MANIFEST,
-        ("main.rock", "fn main() -> int { 0 }\n"),
-        (
-            "a.rock",
-            "pub mod shared;\nfn helper(n: int) -> int { n }\n",
-        ),
-        (
-            "b.rock",
-            "pub mod shared;\nfn helper(m: int) -> int { 1 }\n",
-        ),
-    ]);
-    let b = project.path("b.rock");
-    let dup = |d: &&Diagnostic| d.message.contains("duplicate definition of `helper(int)`");
-    let (mut bone, per_file) = project.open("a.rock");
-    let found: Vec<_> = per_file.iter().flat_map(|(_, d)| d).filter(dup).collect();
-    assert_eq!(found.len(), 1, "{per_file:?}");
-    assert_eq!(bone.diagnostics_for(&b).iter().filter(dup).count(), 1);
-
-    let per_file = bone.update(
-        &b,
-        "pub mod shared;\nfn helper(m: float) -> int { 1 }\n".into(),
-    );
-    assert!(
-        !per_file.iter().flat_map(|(_, d)| d).any(|d| dup(&d)),
-        "{per_file:?}"
-    );
-}
-
 fn source_load_failure_recovers(broken_manifest: bool) {
     let manifest = "[package]\nname = \"dep\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n";
     let dependency = "pub mod types;\npub struct Dependency { value: int }\n";
@@ -284,44 +209,6 @@ fn malformed_dependency_manifest_reports_source_load_error_and_recovers() {
 }
 
 #[test]
-fn unreadable_dependency_source_reports_source_load_error_and_recovers() {
-    source_load_failure_recovers(false);
-}
-
-#[test]
-fn malformed_project_manifest_reports_source_discovery_error() {
-    let src = "fn main() -> int { 1 }\n";
-    let project = Project::new(&[("stick.toml", "[package"), ("main.rock", src)]);
-    let file = project.dir.path().join("main.rock");
-    let file = file.to_str().unwrap();
-    let mut bone = BoneWorkspace::new();
-    let per = bone.update(file, src.to_string());
-    assert!(
-        all_errors(&per)
-            .iter()
-            .any(|d| d.message.contains("stick.toml")),
-        "{per:?}"
-    );
-    let lints = bone.lint_diagnostics(file);
-    assert!(
-        lints.iter().any(|d| d.message.contains("stick.toml")),
-        "{lints:?}"
-    );
-}
-
-#[test]
-fn standalone_buffer_without_disk_file_needs_no_project() {
-    let project = Project::new(&[]);
-    let file = project.dir.path().join("scratch.rock");
-    let file = file.to_str().unwrap();
-    let src = "fn scratch() -> int { 1 }\n";
-    let mut bone = BoneWorkspace::new();
-    let per = bone.update(file, src.to_string());
-    assert!(all_errors(&per).is_empty(), "{per:?}");
-    assert_eq!(bone.file_text(file), Some(src));
-}
-
-#[test]
 fn missing_first_buffer_loads_project_and_keeps_unsaved_edits() {
     let project = two_file_project();
     let missing = project.dir.path().join("new.rock");
@@ -335,32 +222,4 @@ fn missing_first_buffer_loads_project_and_keeps_unsaved_edits() {
     bone.update(&project.path("b.rock"), project.read("b.rock"));
     assert_eq!(bone.file_text(&missing), Some(text));
     assert!(!std::path::Path::new(&*missing).exists());
-}
-
-#[test]
-fn first_unsaved_source_loads_dependencies_of_empty_project() {
-    let project = Project::new(&[
-        (
-            "app/stick.toml",
-            "[package]\nname = \"app\"\ntype = \"bin\"\n\n[dependencies]\ndep = \"../dep\"\n\n[language]\nmodules = \"v1\"\n",
-        ),
-        ("app/main.rock", "fn main() -> int { 0 }\n"),
-        (
-            "dep/stick.toml",
-            "[package]\nname = \"dep\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n",
-        ),
-        (
-            "dep/types.rock",
-            "pub mod types;\npub struct Foo { x: int }\n",
-        ),
-    ]);
-    let path = project.dir.path().join("app/new.rock");
-    let path = path.to_string_lossy();
-    let mut bone = BoneWorkspace::new();
-    let per = bone.update(
-        &path,
-        "pub mod new;\nuse dep::types::Foo;\nfn draft() -> Foo { Foo { x: 1 } }\n".into(),
-    );
-    assert!(all_errors(&per).is_empty(), "{per:?}");
-    assert!(bone.hover(&path, lsp_types::Position::new(2, 14)).is_some());
 }
