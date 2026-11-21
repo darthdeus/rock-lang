@@ -1,9 +1,4 @@
-use bone_lints::{KNOWN_LINTS, lint_workspace};
-use bone_semantic::prelude::*;
-use rock_core::errors::CompilerErrorLevel;
-
 const FILE: &str = "<catalog>";
-const PROGRAM: &str = "fn dead() -> int { 1 }\nfn main() {\n    let unread = 5\n}";
 
 #[test]
 fn catalog_suppression() {

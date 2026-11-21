@@ -1,5 +1,4 @@
 use bone_lints::LintOptions;
-use rock_core::errors::CompilerErrorLevel;
 
 fn findings(src: &str) -> Vec<bone_lints::Finding> {
     crate::support::checked_lint(
