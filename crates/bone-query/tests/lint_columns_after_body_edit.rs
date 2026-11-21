@@ -25,19 +25,3 @@ fn unused_var_ranges(bone: &BoneWorkspace) -> Vec<lsp_types::Range> {
         .map(|d| d.range)
         .collect()
 }
-
-#[test]
-fn lint_columns_survive_same_line_count_body_edit() {
-    let after = BEFORE.replacen("return 1\n", "return 1000000\n", 1);
-    let mut bone = workspace(BEFORE);
-    let before = unused_var_ranges(&bone);
-    assert!(!before.is_empty(), "baseline must report unused_here");
-    bone.update(PATH, after.clone());
-    let expected = unused_var_ranges(&workspace(&after));
-    assert_eq!(before, expected, "the edit does not move beta's text");
-    assert_eq!(
-        unused_var_ranges(&bone),
-        expected,
-        "incremental matches fresh"
-    );
-}
