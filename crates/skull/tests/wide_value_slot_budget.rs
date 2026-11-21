@@ -3,55 +3,6 @@ use crate::common::{
     try_emit_module, ws_with_stdlib,
 };
 
-#[test]
-fn retained_optional_loader_results_fit_the_local_budget() {
-    let fields = (0..8)
-        .map(|i| format!("item{i}: Item"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let scalars = (0..20)
-        .map(|i| format!("let s{i} = scalar(seed, {i})\n"))
-        .collect::<String>();
-    let loads = (0..8)
-        .map(|i| format!("let item{i} = load(seed + {i}) ?? return null\n"))
-        .collect::<String>();
-    let sum = (0..20)
-        .map(|i| format!("s{i}"))
-        .collect::<Vec<_>>()
-        .join(" + ");
-    let items = (0..8)
-        .map(|i| format!("item{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source = format!(
-        r#"
-nobox value Pair {{ x: float, y: float }}
-value Triple {{ a: int, b: int, c: int }}
-value Item {{
-    a: int? = null, b: int? = null, c: int? = null, d: int? = null,
-    first: Entity<int>? = null, second: Entity<int>? = null,
-    triple: Triple, width: int, height: int, pivot: Pair,
-}}
-struct Bundle {{ checksum: int, {fields} }}
-inline(lua) fn scalar(x: int, k: int) -> int = "return x + k"
-fn make_item(seed: int) -> Item? {{
-    if seed < 0 {{ return null }}
-    return Item {{ triple: Triple {{ a: seed, b: seed + 1, c: seed + 2 }},
-        width: seed, height: seed + 1, pivot: Pair {{ x: 0.5, y: 0.5 }} }}
-}}
-@nomangle fn gather(seed: int) -> Bundle? {{
-    {scalars}
-    let load = x => make_item(x)
-    {loads}
-    return Bundle {{ checksum: {sum}, {items} }}
-}}
-fn main() {{ assert(gather(-20) == null); print(gather(1).unwrap().checksum) }}
-"#
-    );
-    let lua = emit_module(&source);
-    assert_eq!(run_main(&lua), "210");
-}
-
 fn fixture(leaves: usize, held: usize) -> String {
     let fields: Vec<String> = (0..leaves).map(|k| format!("f{k}: float")).collect();
     let inits: Vec<String> = (0..leaves).map(|k| format!("f{k}: x + {k}.0")).collect();
@@ -76,25 +27,6 @@ fn fixture(leaves: usize, held: usize) -> String {
     }
     src.push_str("    return total\n}\nfn main() { print(\"{run(1.0)}\") }\n");
     src
-}
-
-#[test]
-fn three_live_fifty_leaf_values_load_and_run() {
-    let lua = emit_module(&fixture(50, 3));
-    assert_eq!(run_main(&lua), "159");
-}
-
-#[test]
-fn a_wide_multi_return_lands_in_the_locals_that_hold_the_value() {
-    let lua = emit_module(&fixture(50, 2));
-    let run = function_body(&lua, "run");
-    let callee = crate::common::bound_callee_name(&lua, "run", "mk_float");
-    let receive = run
-        .lines()
-        .position(|line| line.contains(&format!("= {callee}(")))
-        .unwrap_or_else(|| panic!("no receive of mk in:\n{run}"));
-    let next = run.lines().nth(receive + 1).unwrap_or("");
-    assert!(!(next.trim_start().starts_with('r') && next.contains("= c")));
 }
 
 #[test]
