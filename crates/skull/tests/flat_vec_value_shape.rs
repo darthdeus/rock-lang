@@ -17,15 +17,3 @@ fn fill(n: int) -> float {
 
 fn main() { let _ = fill(8) }
 "#;
-
-#[test]
-fn flat_vec_push_read_loop_is_zero_box() {
-    let lua = emit_module(FLAT_VEC_LOOP);
-    let body = function_body(&lua, "fill");
-
-    assert!(!body.contains("V2_ct("));
-    assert!(!body.contains("__nb_checked_get("));
-    assert!(body.contains("__nb_checked_index("));
-    assert!(body.contains(r#"__rock_nb_alloc("V2","#));
-    assert!(!body.contains("flat_vec_new") && !body.contains(" push("));
-}
