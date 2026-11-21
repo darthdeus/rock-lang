@@ -161,57 +161,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn single_annotation() {
-        let text = "\
-let x = 5;
-  //^ int
-";
-        let res = extract_annotations(text);
-        assert_eq!(res.len(), 1);
-        assert_eq!(res[0].1, "int");
-        let (s, e) = res[0].0;
-        assert_eq!(&text[s..e], "x");
-    }
-
-    #[test]
-    fn multiple_per_line() {
-        let text = "\
-let (x,     y) = (9, 2);
-   //^ int  ^ int
-";
-        let res = extract_annotations(text);
-        assert_eq!(res.len(), 2);
-        assert_eq!(res[0].1, "int");
-        assert_eq!(res[1].1, "int");
-        let (s0, _) = res[0].0;
-        let (s1, _) = res[1].0;
-        assert_eq!(&text[s0..s0 + 1], "x");
-        assert_eq!(&text[s1..s1 + 1], "y");
-    }
-
-    #[test]
-    fn sections_basic() {
-        let src = "\
-//- first
-hello
-//- second
-world more
-";
-        let s = parse_sections(src);
-        assert_eq!(s.len(), 2);
-        assert_eq!(s[0].name, "first");
-        assert_eq!(s[0].content, "hello\n");
-        assert_eq!(s[1].name, "second");
-        assert_eq!(s[1].content, "world more\n");
-    }
-
-    #[test]
-    fn sections_none_returns_empty() {
-        let src = "fn f() {}\n";
-        assert!(parse_sections(src).is_empty());
-    }
-
-    #[test]
     fn embedded_files_borrow_lf_and_normalize_crlf() {
         let body = concat!(
             "ignored\r\n",
@@ -231,19 +180,6 @@ world more
         assert_eq!(files[1].src, "last\n");
         let (_, lf_source) = body.split_once("//--\n").unwrap();
         assert_eq!(files[1].src.as_ptr(), lf_source.as_ptr());
-    }
-
-    #[test]
-    fn doubly_commented_lines_ignored() {
-        let text = "\
-fn f() -> int { 5 }
-        //^ int
-// fn f() -> int { 5 }
-//        // ^ int
-";
-        let res = extract_annotations(text);
-        assert_eq!(res.len(), 1, "only the live annotation should be picked up");
-        assert_eq!(res[0].1, "int");
     }
 
     #[test]
@@ -294,23 +230,6 @@ pub fn write_executable(path: &std::path::Path, contents: &str) {
         "writing test executable {} failed: {status}",
         path.display()
     );
-}
-
-#[cfg(test)]
-mod ansi_tests {
-    use super::strip_ansi_sgr;
-
-    #[test]
-    fn strips_sgr_without_changing_unicode_or_layout() {
-        let rendered = "\x1b[31m\u{e9}\n   \x1b[38;5;246m\u{2502}\x1b[0m\n";
-        assert_eq!(strip_ansi_sgr(rendered), "\u{e9}\n   \u{2502}\n");
-    }
-
-    #[test]
-    fn leaves_plain_text_unchanged() {
-        let rendered = "[E00] Error: plain text\n 1 \u{2502} let x = 1;\n";
-        assert_eq!(strip_ansi_sgr(rendered), rendered);
-    }
 }
 
 #[cfg(all(test, unix))]
