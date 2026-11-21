@@ -1,26 +1,15 @@
-// The global GL state machine: the state every draw path mutates and none owns.
-// Split from `lib.rs`, which keeps context bring-up (SDL attributes, context
-// creation, the glow loader, swap and swap interval) -- a second graphics
-// backend needs both halves, and they sit on opposite sides of the seam.
-
 use std::cell::RefCell;
 use std::ffi::{c_char, c_float, c_int, CStr};
 
 use crate::{log_once, with_gl, DebugGl, IMAGES};
 
-/// Block until all issued GL commands complete (glFinish). Used right after
-/// the swap to pull the vsync stall to a known point so the frame-timing
-/// spans measure real CPU work, not the driver's vblank busy-wait.
+/// After swap, pull the driver's vblank wait out of CPU timing spans.
 #[no_mangle]
 pub extern "C" fn stone_gl_finish() {
     with_gl(|gl| unsafe { gl.finish() });
 }
 
-/// Submit all issued GL commands without waiting for them to complete
-/// (glFlush). Paired with `stone_gl_finish` this separates two costs that both
-/// surface at the next frame's first GL call: driver-side command submission
-/// (flush pays it, finish also pays it) and waiting for the GPU or the display
-/// (only finish pays that). See `STONE_PRESENT_SYNC`.
+/// Flush submits without waiting; finish also waits for GPU or display work.
 #[no_mangle]
 pub extern "C" fn stone_gl_flush() {
     with_gl(|gl| unsafe { gl.flush() });
@@ -186,8 +175,6 @@ pub extern "C" fn stone_set_blend_mode_i(mode: i32) {
     });
 }
 
-/// The GL blend state as one value: what `stone_set_blend_mode_i` writes, and
-/// the whole of what a successor entry inherits.
 #[derive(Clone, Copy)]
 pub(crate) struct BlendGlState {
     enabled: bool,
@@ -219,8 +206,7 @@ impl BlendGlState {
     }
 }
 
-// Pass scopes are LIFO, including a pass submitted while another executes. Snapshots
-// allocate neither per draw nor once the stack is warm.
+// Pass scopes are LIFO, including nested submissions.
 #[derive(Clone, Copy)]
 struct PassGlState {
     blend: BlendGlState,
@@ -263,8 +249,7 @@ pub extern "C" fn stone_gl_pass_state_begin() -> u32 {
     })
 }
 
-/// Restore the matching scope. A mismatch is a caller error, not permission to
-/// consume another transaction's snapshot. The Rock owner surfaces refusal.
+/// A mismatched scope must not consume another transaction's snapshot.
 #[no_mangle]
 pub extern "C" fn stone_gl_pass_state_end(scope: u32) -> bool {
     PASS_GL_STATES.with(|states| {
@@ -300,9 +285,8 @@ pub extern "C" fn stone_gl_pass_state_end(scope: u32) -> bool {
     })
 }
 
-/// GL's current write state as `mask=RGBA clear=r,g,b,a scissor=on/off x,y,w,h`,
-/// with a masked-off channel shown as `-`. The fixture's oracle, and GL's own
-/// answer rather than a mirror.
+/// GL write state as `mask=RGBA clear=r,g,b,a scissor=on/off x,y,w,h`;
+/// masked channels are `-`.
 #[no_mangle]
 pub extern "C" fn stone_gl_write_state() -> *const c_char {
     let read = with_gl(|gl| unsafe {
@@ -353,12 +337,8 @@ fn reply(
     slot.with(|b| b.borrow_mut().insert(c).as_ptr())
 }
 
-/// The blend state as GL currently has it, `on/off eq=<e> src=<s> dst=<d>` with
-/// raw GL enum numbers. A diagnostic reader beside `stone_gl_depth_write_enabled`.
-///
-/// GL's own answer, not the Rock-side `CURRENT_BLEND` shadow -- the two
-/// disagreeing is the whole subject, so a reader that consulted the shadow could
-/// not see the case it exists for.
+/// GL's blend state as `on/off eq=<e> src=<s> dst=<d>`, with raw enum values.
+/// Read GL itself so disagreements with the Rock-side shadow remain visible.
 #[no_mangle]
 pub extern "C" fn stone_gl_blend_state() -> *const c_char {
     let s = with_gl(|gl| unsafe {
@@ -435,9 +415,7 @@ pub(crate) unsafe fn clear_depth_unmasked(gl: &DebugGl, depth: f32) {
     gl.clear(glow::DEPTH_BUFFER_BIT);
 }
 
-/// DEPTH_WRITEMASK as GL currently has it. A diagnostic reader: a clear through
-/// a closed mask is a no-op, so code that opens it to do its own clearing has to
-/// be able to prove it put it back.
+/// Read GL's depth write mask; a depth clear through a closed mask is a no-op.
 #[no_mangle]
 pub extern "C" fn stone_gl_depth_write_enabled() -> bool {
     with_gl(|gl| unsafe { gl.get_parameter_bool(glow::DEPTH_WRITEMASK) }).unwrap_or(false)
@@ -457,10 +435,6 @@ pub extern "C" fn stone_set_color_mask(r: bool, g: bool, b: bool, a: bool) {
     });
 }
 
-/// Set GL's clear colour. The other two thirds of the `gl_write_state` ambient
-/// row already have setters (`stone_set_color_mask`, and the scissor below);
-/// this completes the trio so a fixture can move each independently and show
-/// the reader responds to all three rather than to one of them.
 #[no_mangle]
 pub extern "C" fn stone_set_clear_color(r: c_float, g: c_float, b: c_float, a: c_float) {
     with_gl(|gl| unsafe {
@@ -468,11 +442,7 @@ pub extern "C" fn stone_set_clear_color(r: c_float, g: c_float, b: c_float, a: c
     });
 }
 
-/// Set GL's scissor rect, and enable or disable the test.
-///
-/// One call for both halves because they cross together: a rect with the test
-/// off changes nothing a successor can see, and the test on with a stale rect
-/// is the case that silently confines every later clear.
+/// Set the scissor rectangle and test together; a stale rect confines later clears.
 #[no_mangle]
 pub extern "C" fn stone_set_scissor(enabled: bool, x: c_int, y: c_int, w: c_int, h: c_int) {
     with_gl(|gl| unsafe {
@@ -481,14 +451,7 @@ pub extern "C" fn stone_set_scissor(enabled: bool, x: c_int, y: c_int, w: c_int,
     });
 }
 
-/// Set the viewport in the bound target's own pixels, bottom-left origin --
-/// GL's convention, with no logical/backing scaling and no Y flip.
-///
-/// Distinct from `stone_set_viewport_rect`, which takes a top-left LOGICAL rect
-/// and scales it by the drawable's density: this one is the semantic
-/// submission's `GpuRect`, which is already stated in bottom-left drawable
-/// pixels (the same convention `scene_output_viewport` is in), so converting it
-/// would be undoing the caller's own arithmetic.
+/// Viewport coordinates are bottom-left target pixels, without scaling or Y flip.
 #[no_mangle]
 pub extern "C" fn stone_set_gl_viewport(x: c_int, y: c_int, w: c_int, h: c_int) {
     with_gl(|gl| unsafe {
