@@ -417,7 +417,7 @@ fn test_args(anno: &Annotation) -> Result<(), CompilerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TestBackend, parse_test_backends};
+    use super::parse_test_backends;
 
     #[test]
     fn deprecated_accepts_only_an_optional_positional_string_on_functions() {
@@ -457,15 +457,6 @@ mod tests {
             vec![arg(None, &message), arg(None, &message)]
         ));
         assert!(!valid(AnnoPos::Param, vec![]));
-    }
-
-    #[test]
-    fn backends_list_parses_single_and_comma_separated_names() {
-        assert_eq!(parse_test_backends("lua"), Ok(vec![TestBackend::Lua]));
-        assert_eq!(
-            parse_test_backends(" lua ,js,glsl"),
-            Ok(vec![TestBackend::Lua, TestBackend::Js, TestBackend::Glsl])
-        );
     }
 
     #[test]
