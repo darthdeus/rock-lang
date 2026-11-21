@@ -236,3 +236,25 @@ fn reordered_named_numeric_arguments_coerce_for_boxed_and_scalar_calls() {
     print(named_boxed_numeric(narrow: nine, wide: seven))
     print(named_scalar_numeric(narrow: nine, tag: NamedNumericTag { code: 1, weight: nine }, wide: seven))
 }
+
+struct CallSpread { a: int, b: int }
+
+global ORDER: string = ""
+
+fn tick(tag: string, val: int) -> int {
+    ORDER = "{ORDER}{tag}"
+    val
+}
+
+fn use2(a: int, b: int) -> string { "{a},{b}" }
+
+// Fields written out of declared order still evaluate in SOURCE order.
+@test(output = "10,20 order=ab\n10,20 order=ba")
+fn test_spread_literal_eval_order() {
+    ORDER = ""
+    let r = use2(..CallSpread { a: tick("a", 10), b: tick("b", 20) })
+    print("{r} order={ORDER}")
+    ORDER = ""
+    let s = use2(..CallSpread { b: tick("b", 20), a: tick("a", 10) })
+    print("{s} order={ORDER}")
+}

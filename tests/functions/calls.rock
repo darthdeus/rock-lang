@@ -217,3 +217,29 @@ fn absent_optional_value_returns_read_as_null() {
     assert_eq((r ?? Pair { a: 0, b: 0 }).a, 1)
     assert_eq(label2 ?? "", "small")
 }
+
+struct InitVec2 { x: float, y: float }
+struct InitIVec2 { x: int, y: int }
+
+// The wrong overload comes first in declaration order.
+fn init_fixv(x: int, y: int) -> InitVec2 {
+    return InitVec2 { x: 5.0, y: 9.0 }
+}
+
+fn init_fixv(iv: InitIVec2) -> InitVec2 {
+    return InitVec2 { x: 1.0, y: 2.0 }
+}
+
+// Global variable initialization - this is where the bug occurred
+// The compiler should select init_fixv(int, int) not init_fixv(InitIVec2) based on argument types
+global CAMERA_POS: InitVec2 = init_fixv(5, 9)
+
+@test
+fn test_global_overload_resolution() {
+    assert_eq(CAMERA_POS.x, 5.0)
+    assert_eq(CAMERA_POS.y, 9.0)
+    let iv = InitIVec2 { x: 1, y: 2 }
+    let other = init_fixv(iv)
+    assert_eq(other.x, 1.0)
+    assert_eq(other.y, 2.0)
+}
