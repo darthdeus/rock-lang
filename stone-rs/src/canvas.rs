@@ -13,10 +13,7 @@ pub(crate) struct Canvas {
     depth_texture: Option<glow::Texture>,
     pub width: i32,
     pub height: i32,
-    // The live rectangle inside that capacity, anchored at the GL origin.
-    // Binding viewports and scissors to it, so every draw, clear and
-    // projection sees the active image rather than the backing texture.
-    // Equal to (width, height) unless a raster profile says otherwise.
+    // Active image within the allocation, anchored at the GL origin.
     pub active_w: i32,
     pub active_h: i32,
     format: c_int,
@@ -92,13 +89,8 @@ thread_local! {
     static CANVASES: RefCell<HashMap<u64, Canvas>> = RefCell::new(HashMap::new());
     static CURRENT_FBO: RefCell<Option<glow::Framebuffer>> = const { RefCell::new(None) };
     static CURRENT_TARGET_SIZE: RefCell<(f32, f32)> = const { RefCell::new((0.0, 0.0)) };
-    // Integer-scale letterbox present: while set, binding the default
-    // framebuffer confines the viewport to this rect instead of the full
-    // drawable, so the fullscreen composite quads land the centered
-    // sub-rect and the remainder stays the cleared black bars. Stored as
-    // (x, y, w, h) in LOGICAL window px with a TOP-LEFT origin (the
-    // coordinate system all Rock-side math uses); converted to GL
-    // bottom-origin drawable px at bind time.
+    // Letterbox rectangle in logical window pixels with a top-left origin;
+    // the GL viewport uses bottom-origin drawable pixels.
     static PRESENT_VIEWPORT: RefCell<Option<(i32, i32, i32, i32)>> = const { RefCell::new(None) };
     static DEFAULT_FBO: RefCell<Option<glow::Framebuffer>> = const { RefCell::new(None) };
 }
@@ -116,18 +108,13 @@ pub(crate) fn set_default_framebuffer(fbo: Option<glow::Framebuffer>) {
     DEFAULT_FBO.with(|d| *d.borrow_mut() = fbo);
 }
 
-/// Map a CURRENT_FBO-style value (None == screen) to the framebuffer to
-/// actually bind for it.
+/// None denotes the screen framebuffer.
 pub(crate) fn resolve_target(fbo: Option<glow::Framebuffer>) -> Option<glow::Framebuffer> {
     fbo.or_else(|| DEFAULT_FBO.with(|d| *d.borrow()))
 }
 
-/// The screen of a headless window: a framebuffer this crate owns, sized to the
-/// drawable. A headless window is never mapped, and a never-mapped X11 window's
-/// default framebuffer keeps its CREATION size through a resize (NVIDIA,
-/// measured): a sim worker that grew its window for an entry drew and read back
-/// nothing past boot's size. Colour and depth match the window's own default
-/// framebuffer (RGB8, no alpha, depth 24).
+/// Never-mapped X11 windows can retain the default framebuffer's creation size
+/// after resize. Own a drawable-sized RGB8/depth-24 framebuffer instead.
 struct HeadlessScreen {
     present_fbo: Option<glow::Framebuffer>,
     color: glow::Renderbuffer,
@@ -269,10 +256,8 @@ pub(crate) fn current_target_size() -> (f32, f32) {
     .unwrap_or((800.0, 600.0))
 }
 
-// Rock builds the camera matrices and owns EngineU's bytes, but the ortho is
-// derived from whatever target is bound AT THE MOMENT OF USE, and that is
-// tracked here (the canvas bind updates it). Two scalar getters rather than a
-// Vec2 return: an FFI struct-by-value return can abort a trace.
+// Derive the ortho from the currently bound target. An FFI struct-by-value
+// return can abort a LuaJIT trace, so expose two scalar getters.
 #[no_mangle]
 pub extern "C" fn stone_current_target_width() -> c_float {
     current_target_size().0
@@ -565,8 +550,7 @@ pub extern "C" fn stone_canvas_active_is_creation(handle: u64) -> bool {
     with_canvas(handle, |c| c.active_w == c.width && c.active_h == c.height).unwrap_or(false)
 }
 
-/// The canvas's active width, or -1 for an unknown handle. The fixture's
-/// oracle; the engine reads the field directly.
+/// Active width, or -1 for an unknown handle.
 #[no_mangle]
 pub extern "C" fn stone_canvas_active_w(handle: u64) -> c_int {
     with_canvas(handle, |c| c.active_w).unwrap_or(-1)
@@ -876,8 +860,7 @@ pub extern "C" fn stone_read_canvas_pixel_channel(
     }
 }
 
-/// Read the red channel from a canvas at (x, y) in screen coordinates.
-/// For the entity_id canvas (RGBA32F), this is the entity ID.
+/// Read the red channel at top-left screen coordinates.
 #[no_mangle]
 pub extern "C" fn stone_read_canvas_pixel(handle: u64, x: c_int, y: c_int) -> c_float {
     stone_read_canvas_pixel_channel(handle, x, y, 0)
