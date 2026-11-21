@@ -268,7 +268,6 @@ def main():
             return name
         return "private:" + hashlib.sha1(name.encode()).hexdigest()[:8]
 
-    # --- (1) classes --------------------------------------------------------
     for d in defs:
         d["bytes"] = body_bytes(lines, d["start"], d["end"])
         d["lines"] = d["end"] - d["start"]
@@ -317,7 +316,6 @@ def main():
     print("\nglue bytes by line kind")
     print(table([[k, fmt_bytes(v), f"{100 * v / total_bytes:.1f}%"] for k, v in glue_kinds.most_common()], ["kind", "bytes", "share"]))
 
-    # --- (2) duplicates -----------------------------------------------------
     print("\n(2) duplicate bodies")
     dup_rows = []
     dup_json = {}
@@ -361,7 +359,6 @@ def main():
     hist = Counter(len(ds) for ds in origins.values())
     print("\nspecializations per generic (histogram): " + ", ".join(f"{k}x{v}" for k, v in sorted(hist.items())))
 
-    # --- (4) boilerplate and largest bodies ---------------------------------
     print("\n(4) structural boilerplate inside bodies")
     boiler = Counter()
     for d in defs:

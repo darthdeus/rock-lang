@@ -71,7 +71,6 @@ def collect(root):
 
 def workspace(root):
     config = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]
-    # Expand member globs so adding a crate does not require editing this script.
     members = sorted({p.relative_to(root).as_posix() for pattern in config["members"]
                       for p in root.glob(pattern)} - set(config.get("exclude", [])))
     defaults = sorted({p.relative_to(root).as_posix() for pattern in config.get("default-members", members)
