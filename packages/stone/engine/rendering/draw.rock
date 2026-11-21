@@ -1170,7 +1170,6 @@ fn submit_immediate_shape(batch: RenderBatch) {
     end_immediate_shader(shader_state)
 }
 
-// TODO: Remove mode
 pub fn draw_rect_immediate(pos: Vec2, size: Vec2, color: Color, mode: string = "fill") {
     if mode == "fill" {
         let b = immediate_shape_batch()

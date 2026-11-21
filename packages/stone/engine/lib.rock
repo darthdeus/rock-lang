@@ -1486,12 +1486,7 @@ inline(lua) fn stone_measure_text_into(font_id: int, text: string, scale: float,
     return w[0], h[0]
 """
 
-// `tonumber` because the C return is `uint64_t`, which LuaJIT boxes as cdata,
-// and an `inline(lua)` body is OPAQUE to the compiler -- it gets none of the
-// coercion a declared `extern(ffi) -> int` return gets. Left
-// raw, `FONT_ATLASES` held cdata behind an `Image` newtype: keyed by IDENTITY in
-// any table, and unequal to the same handle arriving by another route. The
-// sibling readers here return `uint32_t`/`int`, which are plain numbers.
+// LuaJIT boxes uint64_t as cdata; convert to a number so equal handles key equally.
 pub @inline inline(lua) fn stone_get_font_atlas_image_for(font_id: int) -> int = "tonumber(stone.stone_get_font_atlas_image(font_id))"
 @inline inline(lua) fn stone_get_font_atlas_image_cached_ffi(font_id: int) -> int = "tonumber(stone.stone_get_font_atlas_image_cached(font_id))"
 
@@ -1530,12 +1525,10 @@ pub value GlyphData {
     valid: bool,
 }
 
-// Convert SDL keycode to key string
 fn sdl_keycode_to_string(keycode: int) -> string {
     if keycode >= 48 && keycode <= 57 { return ascii_char(keycode) }
     if keycode >= 97 && keycode <= 122 { return ascii_char(keycode) }
 
-    // Special keys (SDL uses SDLK_ constants)
     if keycode == 32 { return "space" }
     if keycode == 27 { return "escape" }
     if keycode == 13 { return "return" }
@@ -1543,7 +1536,6 @@ fn sdl_keycode_to_string(keycode: int) -> string {
     if keycode == 8 { return "backspace" }
     if keycode == 127 { return "delete" }
 
-    // SDL modifier keys (from SDL_keycode.h)
     if keycode == 1073742049 { return "lshift" }  // SDLK_LSHIFT
     if keycode == 1073742053 { return "rshift" }  // SDLK_RSHIFT
     if keycode == 1073742048 { return "lctrl" }   // SDLK_LCTRL
