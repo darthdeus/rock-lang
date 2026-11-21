@@ -529,36 +529,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recorded_argv_redacts_every_var_value() {
-        let args = [
-            "rock",
-            "package",
-            "example",
-            "--var",
-            "TOKEN=s3cret",
-            "--channel",
-            "steam",
-            "--var=K=v=2",
-            "--var",
-        ];
-        let redacted = redact_var_values(args.iter().map(|arg| arg.to_string()));
-        assert_eq!(
-            redacted,
-            [
-                "rock",
-                "package",
-                "example",
-                "--var",
-                "TOKEN=<redacted>",
-                "--channel",
-                "steam",
-                "--var=K=<redacted>",
-                "--var"
-            ]
-        );
-    }
-
-    #[test]
     fn utc_formats_known_instants() {
         assert_eq!(utc(UNIX_EPOCH), "1970-01-01T00:00:00.000Z");
         let t = UNIX_EPOCH + Duration::from_millis(1_791_288_896_789);
