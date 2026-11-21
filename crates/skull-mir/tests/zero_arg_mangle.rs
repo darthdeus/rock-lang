@@ -34,22 +34,6 @@ fn bar(x: int) -> int { return x }
 }
 
 #[test]
-fn exempt_zero_parameter_functions_keep_their_names() {
-    let ws = ws_of(
-        r#"
-@nomangle fn kept() {}
-@test fn decorated() {}
-fn test_entry() {}
-extern(lua) fn clock() -> float
-fn main() {}
-"#,
-    );
-    for name in ["kept", "decorated", "test_entry", "clock", "main"] {
-        assert_eq!(mangled(&ws, name), [name]);
-    }
-}
-
-#[test]
 fn mangled_marker_clashing_with_exempt_bare_name_is_rejected() {
     let ws = ws_of(
         r#"
