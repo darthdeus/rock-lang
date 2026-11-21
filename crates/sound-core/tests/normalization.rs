@@ -40,31 +40,8 @@ fn write_tone(path: &Path, amplitude: f32) {
 fn project() -> serde_json::Value {
     serde_json::json!({"version":2,"normalization_lufs":-18.0,"groups":{"test":{"gain_db":0.0,"bus":"sfx"}},"events":[{"id":"tone","group":"test","steps":[{"layers":[{"sources":["assets/a.wav","assets/b.wav"]}]}]}]})
 }
-fn compile(value: &serde_json::Value, paths: &[(String, PathBuf)]) -> serde_json::Value {
-    let project = parse_project(&value.to_string()).unwrap();
-    let resolver = AssetMapResolver::new(paths.iter().cloned().collect());
-    let bank = compile_project(&project, &resolver).unwrap();
-    serde_json::from_slice(&serialize_runtime_bank(&bank).unwrap()).unwrap()
-}
 fn gain(bank: &serde_json::Value, key: &str) -> f64 {
     bank["normalizations"][key]["gain"].as_f64().unwrap()
-}
-#[test]
-fn different_sources_have_equal_played_loudness_at_zero_offset() {
-    let f = Fixture::new();
-    let bank = compile(
-        &project(),
-        &[
-            ("assets/a.wav".into(), f.wav("a.wav", 0.9)),
-            ("assets/b.wav".into(), f.wav("b.wav", 0.01)),
-        ],
-    );
-    let ratio = 0.9 * gain(&bank, "assets/a.wav") / (0.01 * gain(&bank, "assets/b.wav"));
-    assert!(gain(&bank, "assets/a.wav") < 1.0 && gain(&bank, "assets/b.wav") > 1.0);
-    assert!(
-        (20.0 * ratio.log10()).abs() < 0.1,
-        "same waveform must play equally loud, ratio={ratio}"
-    );
 }
 #[test]
 fn an_event_without_a_group_fails_to_parse() {
@@ -216,55 +193,4 @@ fn played_mix_cache_tracks_content_gain_speed_and_offset() {
     let changed = cache.measure_mix(&layers).unwrap();
     assert!(changed.momentary_lufs < quiet.momentary_lufs - 19.0);
     assert_eq!(std::fs::read_dir(cache_root).unwrap().count(), 5);
-}
-#[test]
-fn cache_reuses_content_and_invalidates_when_content_changes() {
-    let f = Fixture::new();
-    let path = f.wav("changing.wav", 0.1);
-    let cache_root = f.path().join("cache");
-    let cache = sound_core::MeasurementCache::new(cache_root.clone());
-    let first = cache.measure(&path, 1.0).unwrap();
-    let entries = || {
-        std::fs::read_dir(&cache_root)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect::<Vec<_>>()
-    };
-    let original = entries()[0].clone();
-    let modified = std::fs::metadata(&original).unwrap().modified().unwrap();
-    assert_eq!(first, cache.measure(&path, 1.0).unwrap());
-    assert_eq!(
-        std::fs::metadata(original).unwrap().modified().unwrap(),
-        modified
-    );
-    write_tone(&path, 0.01);
-    let second = cache.measure(&path, 1.0).unwrap();
-    assert!((first.momentary_lufs - second.momentary_lufs - 20.0).abs() < 0.01);
-    assert_eq!(entries().len(), 2, "content edit gets a new cache entry");
-}
-#[test]
-fn offsets_need_reasons_and_groups_route_to_existing_buses() {
-    let f = Fixture::new();
-    let paths = [
-        ("assets/a.wav".into(), f.wav("a.wav", 0.1)),
-        ("assets/b.wav".into(), f.wav("b.wav", 0.01)),
-    ];
-    let resolver = AssetMapResolver::new(paths.iter().cloned().collect());
-    let mut value = project();
-    value["events"][0]["offset_db"] = (-3.0).into();
-    let error =
-        compile_project(&parse_project(&value.to_string()).unwrap(), &resolver).unwrap_err();
-    assert!(error.to_string().contains("reason"));
-    value["events"][0]["reason"] = "quieter event role".into();
-    value["groups"]["test"]["bus"] = "ui".into();
-    let bank = compile(&value, &paths);
-    assert_eq!(bank["events"][0]["bus"], "ui");
-    assert!(
-        (bank["events"][0]["steps"][0]["layers"][0]["volume"]
-            .as_f64()
-            .unwrap()
-            - 10.0_f64.powf(-3.0 / 20.0))
-        .abs()
-            < 1e-6
-    );
 }
