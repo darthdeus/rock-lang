@@ -1,12 +1,4 @@
-// match3-core: the board model + the generic match-3 primitives (match
-// detection, gravity/settle). Pure over an explicit M3Board -- the core
-// never reads a game global and never draws, so any game (or a level
-// generator, or a test) drives it the same way. Gem *types* are opaque
-// non-negative ints; the game assigns them meaning. M3_EMPTY marks a hole.
-//
-// Every symbol is m3_-prefixed: Rock has one flat namespace across all
-// packages, so the prefix keeps the core from colliding with a consumer's
-// own board_/grid_ helpers during migration.
+// Gem types are opaque non-negative integers; M3_EMPTY marks a hole.
 
 pub global M3_EMPTY: int = -1
 
@@ -24,7 +16,6 @@ pub fn m3_set(b: M3Board, x: int, y: int, t: int) {
     b.cells[y * b.w + x] = t
 }
 
-// A board of all-empty cells, ready to fill.
 pub fn m3_empty_board(w: int, h: int) -> M3Board {
     let cells: [int] = []
     let i = 0
@@ -43,9 +34,7 @@ pub fn m3_swap(b: M3Board, ax: int, ay: int, bx: int, by: int) {
     b.cells[ib] = t
 }
 
-// ─── Match detection ─────────────────────────────────────────────────────────
-// Every cell that is part of a horizontal or vertical run of length >= 3.
-// Two linear passes, O(w*h).
+// Find horizontal or vertical runs of length >= 3 in O(w*h).
 pub fn m3_find_matches(b: M3Board) -> [(int, int)] {
     let marked: [bool] = []
     let i = 0
@@ -119,7 +108,6 @@ pub fn m3_has_matches(b: M3Board) -> bool {
     return m3_find_matches(b).len() > 0
 }
 
-// ─── Run length through a cell ──────────────────────────────────────────────
 
 fn m3_run_h(b: M3Board, x: int, y: int) -> int {
     let t = m3_at(b, x, y)
@@ -159,9 +147,6 @@ fn m3_best_run(b: M3Board, x: int, y: int) -> int {
     return max(m3_run_h(b, x, y), m3_run_v(b, x, y))
 }
 
-// ─── Collapse (clear + gravity + refill) ────────────────────────────────────
-// The recorded geometry of one collapse step, replayed by the game's
-// journal to animate falls and spawns.
 
 pub value M3Fall {
     col: int,
