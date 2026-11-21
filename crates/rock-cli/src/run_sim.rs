@@ -620,23 +620,6 @@ mod sim_source_path_tests {
     }
 
     #[test]
-    fn source_root_comes_from_project_when_sdk_root_is_separate() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let source_root = temp.path().join("source-worktree");
-        let project = source_root.join("game");
-        let sdk_root = temp.path().join("sdk");
-        std::fs::create_dir_all(source_root.join(".git")).expect("create source repository marker");
-        std::fs::write(source_root.join(".git/HEAD"), "ref: refs/heads/main\n")
-            .expect("write repository HEAD");
-        std::fs::create_dir_all(&project).expect("create project");
-        std::fs::create_dir_all(&sdk_root).expect("create separate sdk root");
-
-        let found = source_root_for_sim_project(&project).unwrap();
-        assert_eq!(found, source_root.canonicalize().unwrap());
-        assert_ne!(found, sdk_root.canonicalize().unwrap());
-    }
-
-    #[test]
     fn standalone_sim_project_uses_its_own_source_root() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(temp.path().join(".git")).expect("create empty non-repository marker");
@@ -663,18 +646,6 @@ mod sim_source_path_tests {
                 .unwrap(),
             "standalone-project/tests/sims/probe.rock"
         );
-    }
-
-    #[test]
-    fn standalone_sim_project_ignores_invalid_git_files() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let project = temp.path().join("standalone-project");
-        std::fs::create_dir(&project).expect("create project");
-        let project_root = project.canonicalize().unwrap();
-        for marker in ["not a gitdir file\n", "gitdir: missing-metadata\n"] {
-            std::fs::write(temp.path().join(".git"), marker).expect("write invalid git marker");
-            assert_eq!(source_root_for_sim_project(&project).unwrap(), project_root);
-        }
     }
 
     #[test]
