@@ -1,6 +1,4 @@
--- Driver for stackargs.c. Usage: luajit [-joff|-jv] run.lua <libpath>
--- Verifies every argument round-trips; a mismatch prints the arg index,
--- expected value, and received value (hex, to spot half-a-double garbage).
+-- Usage: luajit [-joff|-jv] run.lua <libpath>
 local ffi = require("ffi")
 
 ffi.cdef[[
@@ -49,10 +47,7 @@ local function check(name, iter, got, expected)
     return true
 end
 
--- Hot-loop each shape so the FFI call gets trace-compiled when jit is
--- on (hotloop threshold is 56; 400 iters is plenty). Verify EVERY
--- iteration -- interpreter and JIT-compiled calls take different
--- argument-setup paths (lj_ccall.c vs lj_asm_<arch>.h) and both matter.
+-- Interpreter and JIT-compiled calls use different argument-setup paths.
 local ITERS = 400
 
 local function shape_i32()
@@ -63,8 +58,7 @@ local function shape_i32()
             909, 1010, 1111, 1212)
         if not check("capture_i32", i, out, exp) then return end
     end
-    -- Tight phase: nothing but the FFI call in the loop body, so the
-    -- call itself is guaranteed onto a compiled trace when jit is on.
+    -- Keep the call on a compiled trace.
     for _ = 1, ITERS do
         lib.capture_i32(out, 101, 202, 303, 404, 505, 606, 707, 808,
             909, 1010, 1111, 1212)
@@ -112,8 +106,6 @@ local function shape_u8()
 end
 
 local function shape_exact()
-    -- Values from the real rect_batch call site of the era (stride-14
-    -- layout: pos 0, uv 2, color 4, py 8, eff 9, os 10, oc 11, eid 13).
     local data = ffi.new("float[1]", 5)
     local expected = 4 * 3 + 14 * 9 + 0 * 27 + 2 * 81 + 4 * 243
         + 8 * 729 + 9 * 2187 + 10 * 6561 + 11 * 19683 + 13 * 59049
@@ -144,12 +136,8 @@ local function shape_exact()
     end
 end
 
--- Shape 5: a direct FFI call is not what Rock emits. Every `inline(lua)`
--- shim wraps the call in a Lua function and consumes the result in the
--- same expression, and that is the shape that corrupts -- hoisting the
--- `~= 0` out to the caller is clean. Needs ~100k iterations and live
--- values across the call; corruption first appears near iteration 84k
--- and affects a window of calls rather than all of them.
+-- A Lua wrapper that consumes the FFI result can corrupt arguments; keep
+-- values live across the call and run long enough to exercise the trace.
 local WRAPPED_ITERS = 200000
 
 local function shape_wrapped()
@@ -180,9 +168,7 @@ local function shape_wrapped()
     end
 end
 
--- Affected LuaJIT versions raise "NYI: cannot call this C function"
--- for some of these shapes (issue #888) -- report that as a finding,
--- not a crash.
+-- LuaJIT may reject these call shapes with "NYI: cannot call this C function".
 for _, s in ipairs({ { "capture_i32", shape_i32 },
                      { "capture_mesh_shape", shape_mesh },
                      { "capture_u8", shape_u8 },

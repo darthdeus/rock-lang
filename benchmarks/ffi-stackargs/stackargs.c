@@ -1,7 +1,4 @@
-// FFI stack-argument repro for the LuaJIT arm64 trace argument corruption
-// Each fn takes enough args to spill past the 8 GPRs and
-// writes what it RECEIVED into out-params, so the Lua side can name the
-// exact argument that arrived wrong.
+// LuaJIT arm64 stack-argument trace corruption requires arguments beyond the 8 GPRs.
 #include <stdint.h>
 
 #define EXPORT __attribute__((visibility("default")))
@@ -33,7 +30,7 @@ EXPORT void capture_mesh_shape(int32_t *out, uint64_t *out_tex,
     *out_tex = tex;
 }
 
-// Shape 3: LuaJIT issue #888 shape -- out ptr + 10 x uint8_t.
+// Out pointer plus 10 uint8_t arguments.
 // stack = b8..b10, byte-packed on Apple.
 EXPORT void capture_u8(uint8_t *out,
     uint8_t b1, uint8_t b2, uint8_t b3, uint8_t b4, uint8_t b5,
@@ -42,11 +39,8 @@ EXPORT void capture_u8(uint8_t *out,
     out[5] = b6; out[6] = b7; out[7] = b8; out[8] = b9; out[9] = b10;
 }
 
-// Shape 4: EXACT stone_draw_mesh signature -- same
-// register/stack split as the incident (x0 = data, x1..x7 = first 7
-// ints, stack = 3 x int32 + u64 tail). Weighted checksum so any
-// garbled arg changes the result; weights are powers of 3 so no two
-// arg-swaps collide.
+// x0 = data, x1..x7 = first 7 ints; the stack holds 3 int32s and a u64.
+// Weighted checksums distinguish argument swaps.
 EXPORT uint64_t mesh_exact(const float *data,
     int32_t count, int32_t stride, int32_t pos_offset, int32_t uv_offset,
     int32_t color_offset, int32_t pivot_y_offset, int32_t effects_offset,
