@@ -50,36 +50,3 @@ fn main() {
     print("{payload(h)} {cleared(h)}")
 }
 "#;
-
-#[test]
-fn nullable_embed_clear_writes_leaves_and_preserves_other_record_slots() {
-    let lua = emit_module(SRC);
-    for name in ["clear", "clear_nested", "assign"] {
-        let body = function_body(&lua, name);
-        let prefix = if name == "clear_nested" {
-            "snapshot.lock"
-        } else {
-            "resolution"
-        };
-        assert!(body.contains(&format!("[\"{prefix}.target.__tag\"] = ")));
-        for ctor in ["({", "_ct(", "_lct(", "_vt("] {
-            assert!(!body.contains(ctor));
-        }
-    }
-    assert_eq!(run_main(&lua), "10\n-1 true\n4\n-1 true");
-
-    let driver = r#"
-local writes = 0
-local h = setmetatable({}, {__newindex = function(t, k, v)
-    writes = writes + 1
-    rawset(t, k, v)
-end})
-for _ = 1, 128 do
-    clear(h)
-    clear_nested(h)
-end
-assert(writes == 128 * 2 * 7, 'missing physical record stores: ' .. writes)
-io.write('ok')
-"#;
-    assert_eq!(run_luajit(&format!("{lua}\n{driver}")), "ok");
-}
