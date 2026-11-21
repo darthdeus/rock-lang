@@ -1084,10 +1084,7 @@ fn frame_core_present(window: StoneWindow) {
     }
     profile_mark_pre_swap()
     stone_swap_window(window)
-    // Pull the stall to a known point: the driver busy-waits for the back
-    // buffer at the next frame's first GL call (which can land in an
-    // @update system, polluting logic_cpu). Syncing here forces that wait
-    // into present_ms so effective_cpu measures real CPU work.
+    // Force the driver back-buffer wait into present_ms, not logic_cpu.
     present_sync()
     profile_mark_post_swap()
 }
@@ -1129,8 +1126,6 @@ fn sim_demand_draw() {
     frame_core_render_frame(window, config)
 }
 
-// One frame's world, screen, debug-UI and ImGui draw and its present: the
-// ordinary draw after update, and a rendered sim's on-demand draw.
 fn input_imgui_new_frame() {
     stone_imgui_new_frame()
     if IMGUI_READY {
@@ -1206,10 +1201,7 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
         toggle_jit_enabled()
     }
 
-    // Game-speed ladder: [ slower, ] faster, \ back to real time. Handled
-    // here rather than in an @update system so the scale can be dialed
-    // while paused (an @update is skipped on a frozen frame). Gated on
-    // text input so typing a bracket in an editor field stays typing.
+    // Handle speed changes while paused; text input must retain the keys.
     if debug_keys_enabled() && !imgui_wants_text_input() {
         if tool_key_pressed(KEY_DEBUG_TIME_SLOWER) { time_scale_step(-1) }
         if tool_key_pressed(KEY_DEBUG_TIME_FASTER) { time_scale_step(1) }
@@ -1217,23 +1209,15 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
     }
 
     if SIM_SKIP_SUBMIT {
-        // Close imgui's frame (igRender, CPU) so NewFrame stays paired
-        // and the semantic-target bookkeeping is complete; the draw data
-        // is dropped instead of handed to the GL backend.
+        // Pair NewFrame even when the draw data will be discarded.
         let _ = stone_imgui_prepare_render()
     } else {
-        // GL state contract: FBO 0 must be bound here (everything above
-        // this point uses with_canvas / unset_canvas pairs that restore
-        // it). imgui's backend saves and restores everything else
-        // around its draw.
+        // Canvas scopes restore FBO 0; ImGui restores the remaining GL state.
         stone_imgui_render()
     }
     IMGUI_FRAME_OPEN = false
 
-    // The post-imgui pass: same UI primitives and the same flush as the
-    // pool above, drawn after imgui instead of before it, so its contents
-    // sit over every panel. imgui's backend restores GL state around its
-    // own draw, so FBO 0 is still bound here.
+    // Post-ImGui UI draws above all panels; the backend restores FBO 0.
     frame_core_render_overlay()
 
     if ENGINE.screenshot_capture_imgui {
@@ -1248,9 +1232,7 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
     residency_cold_arrival_render_end()
 }
 
-// Native runner frame body: the frame core wrapped in the full dev tooling.
-// Wraps run_one_frame in xpcall (see xpcall_run_one_frame) so runtime errors
-// produce full stack traces. Returns (should_exit_running, new_time).
+// xpcall preserves the traceback and returns the exit flag and time.
 @nomangle
 fn run_one_frame(
     _frame: int,
@@ -1280,9 +1262,7 @@ fn run_one_frame(
 
     let ticking = timeline_should_tick() && !sim_reload_pending()
 
-    // Select the one effective game-input authority after SDL input is
-    // ready and before any game consumer runs. Tool input remains live ImGui
-    // input, outside this projection.
+    // Select input after SDL polling and before any game consumer runs.
     input_select_game_authority()
 
     let running = if config.esc_quits && is_key_pressed("escape") {
@@ -1305,8 +1285,7 @@ fn run_one_frame(
 
     if running && !SIM_SKIP_RENDER { frame_core_prepare_once() }
 
-    // Sims skip rendering unless SIM_DRAW requests it, including on-demand draws.
-    // After quit, headless teardown may have removed the window ImGui needs.
+    // Headless teardown may have removed the window ImGui needs.
     let skip_draw = sim_frame_skips_draw()
     let rendered_world = running && !skip_draw
     if running && !skip_draw {
@@ -1325,15 +1304,6 @@ fn run_one_frame(
     (running, last_time)
 }
 
-// ============================================================================
-// Perf diagnostics (always-on)
-// ----------------------------------------------------------------------------
-// One-shot startup banner + per-window frame-time percentiles +
-// throttled outlier log. Together they let a "100 FPS sometimes, 6 FPS
-// other times" run be diagnosed from logs alone, without re-running
-// under the visual profiler. JIT trace counter is opt-in via F2 hotkey
-// (see KEY_DEBUG_JIT_TRACE) for chasing LuaJIT bailout.
-// ============================================================================
 
 pub @nomangle fn jit_status_string() -> string {
     if !luajit_available() { return "off (no LuaJIT)" }
@@ -1352,9 +1322,7 @@ fn print_environment_banner(config: GameConfig) {
     let os_name = get_os()
     let jit_v = jit_version_string()
     let jit_s = jit_status_string()
-    // Window size reflects the actual SDL window after the usable-bounds
-    // clamp in stone_init_video (macOS dock / Windows taskbar can shrink
-    // the requested size). Config size is the request, often differs.
+    // SDL may clamp the requested size to usable display bounds.
     let actual = screen_size()
     let actual_w = actual.x as int
     let actual_h = actual.y as int
@@ -1368,11 +1336,7 @@ fn print_environment_banner(config: GameConfig) {
     log_info("ENV", "PERF_MODE={perf_mode} FRAME_COUNT={frame_count} PERF_SECONDS={perf_seconds} SLOW_FRAME_MS={slow_ms_env}")
 }
 
-// JIT trace counter — opt-in via F2 hotkey.
-// `jit.attach(cb, "trace")` fires with what="start"|"stop"|"abort"|"flush".
-// The callbacks tick a process-wide host table so the FPS-window emitter can
-// diff it. Install is idempotent and only happens on first toggle-on, so
-// disabled-state cost is zero.
+// LuaJIT trace callbacks share process-wide counts; attach only once.
 
 pub global JIT_TRACE_LOG_ENABLED: bool = false
 pub global JIT_TRACE_INSTALLED: bool = false
@@ -1381,16 +1345,10 @@ pub global JIT_COUNTER_INSTALLED: bool = false
 pub fn jit_trace_counts_available() -> bool {
     return JIT_TRACE_INSTALLED || JIT_COUNTER_INSTALLED
 }
-// Baselines for the FPS-window deltas of the process-wide trace counts.
-// Always-on with the hitch ledger, hence `stone_dump_nonreproducible_json`.
 global JIT_TRACE_LAST_STARTS: int = 0
 global JIT_TRACE_LAST_ABORTS: int = 0
 
-// Trace events counted since the process started. LuaJIT raises them
-// asynchronously, so the callbacks count into one fixed host table and run no
-// Rock code. `kind` is "starts", "compiles", "aborts" or
-// "flushes"; a flush is the mcode arena filling (every live trace discarded,
-// one very expensive frame).
+// LuaJIT trace callbacks run asynchronously and update a fixed host table.
 pub @nowrite @nomangle inline(lua) fn jit_trace_count_of(kind: string) -> int = """
     local counts = _G.__stone_jit_trace_counts
     if counts == nil then return 0 end
@@ -1449,9 +1407,7 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
     return key
 """
 
-// Numeric site rows {af, apc, r, x, sf, spc, n}: abort func/pc, traceerr
-// index, its first `oex`, start func/pc and count. One walk serves both the
-// window snapshot and the export, so they count the same sites.
+// Site rows carry abort/start function and PC, reason, extra and count.
 @nomangle inline(lua) fn __stone_jit_abort_site_rows_of(st: any) -> any = """
     local rows = {}
     if st == nil then return rows end
@@ -1476,10 +1432,8 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
     return rows
 """
 
-// The native health ABI reserves 64 trace-error codes. Keep every numeric
-// slot (including an absent code) present before callbacks enter the window.
-// Two retained tables let a frozen report survive subsequent recorder events
-// without allocating another histogram inside the remaining timing frames.
+// The health ABI reserves 64 error codes; retained tables avoid allocation
+// during the remaining timing frames.
 @nomangle inline(lua) fn __stone_jit_abort_sites_new() -> any = """
     local reasons = _G.__stone_jit_abort_reason_counts
     if reasons == nil then
@@ -1515,8 +1469,7 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
     return sum, era
 """
 
-// Takes the rows before the export samples the process counters, so the total
-// can only be larger than the listed sites.
+// Process counters sampled later can exceed these rows.
 @nomangle inline(lua) fn __stone_jit_abort_sites_export() = """
     if _G.__stone_jit_abort_site_report ~= nil then return end
     local st = _G.__stone_jit_abort_sites
@@ -1578,19 +1531,9 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
     st.pending = true
 """
 
-// Abort sites use numeric keys because this callback runs inside every timing
-// capture. `ids[abort func][pc]` gives each code site a small id, `starts[tr]`
-// holds the id of that trace's start, and `sites[id][reason][start id]` counts.
-// `reason` is `jit.vmdef.traceerr`'s index; `reason_extra[id][reason]` keeps
-// the first `oex` so export can name NYI bytecode and FastFunc aborts. Only a
-// first sight of an id, reason or start allocates a table.
-//
-// The measured-window boundary is resolved here, in the callback, because
-// aborts can fire between Lua statements. `pending` asks the next event to
-// clear the era and count itself into it, keeping `era_aborts` and `sites` on
-// one interval. A flush clears trace starts before trace numbers can be reused.
-// The same callback serves the always-on hitch ledger and full-census attach;
-// export resolves source locations after measurement.
+// Callbacks use numeric site IDs to limit allocations. Abort events can occur
+// between Lua statements, so the next event starts a pending window; flush
+// clears trace starts before trace numbers can be reused.
 @nomangle inline(lua) fn __stone_jit_count_event(counts: any, what: string, tr: any,
                                                func: any, pc: any, otr: any, oex: any) = """
     __stone_jit_trace_timing(counts, what)
@@ -1816,8 +1759,7 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
     return "enabled"
 """
 
-// Export after the perf window closes; no location formatting or I/O on the
-// trace event path. Confirmed means the VM actually patched the bytecode.
+// Resolve locations after the window to avoid I/O on the trace event path.
 @nomangle inline(lua) fn jit_churn_guard_report() -> string = """
     local s = _G.__stone_jit_churn_guard
     if not s then return "" end
@@ -1825,8 +1767,6 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
         s.armed, s.blacklisted, s.root_starts, s.side_starts, s.root_aborts, s.side_aborts, s.flushes)
 """
 
-// One line per armed site, in generated-Lua coordinates; debug level because
-// only a JIT investigation maps them back to source.
 @nomangle inline(lua) fn jit_churn_guard_sites() -> string = """
     local s = _G.__stone_jit_churn_guard
     if not s then return "" end
@@ -1848,19 +1788,9 @@ const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init
     return true
 """
 
-// One definition of trace naming, shared by the full census and the perf
-// export: the census names a bucket per abort, the export names the top
-// window sites once. Each consumer builds the closures once at its own entry
-// point, so neither the per-abort path nor the per-event counter allocates one.
-// `jit.util` is a C module preloaded by LuaJIT itself — never on
-// disk, nil until required; capture the return value directly (it
-// does NOT set the global `jit.util`, same as v.lua does).
-// `jit.vmdef` resolves via LUA_PATH from the bundled luajit's own
-// matching share/luajit-2.1 dir in dev runs; packaged Fire preloads
-// the copy from the gamelibs prefix it links (crates/fire/build.rs).
-// The file asserts its LuaJIT version, so it matches this binary.
-// Require failures mean broken packaging; surface them instead of degrading
-// trace locations to "(?)" buckets.
+// Build naming closures once, not on the trace event path. LuaJIT preloads
+// `jit.util` without setting the global; `jit.vmdef` must match the VM.
+// Require failures indicate broken packaging and must be surfaced.
 @nomangle inline(lua) fn __stone_jit_make_loc_of() -> any = """
     local jutil = require("jit.util")
     local vmdef = require("jit.vmdef")
@@ -2002,10 +1932,7 @@ pub @nomangle inline(lua) fn drain_jit_abort_top(n: int) -> string = """
     return table.concat(out, " | ")
 """
 
-// Runtime `jit.off()` / `jit.on()` flip. On disable we also flush all
-// existing traces so we're not just freezing the broken state — the next
-// hot loop will re-enter the interpreter cleanly. Returns the new state
-// as a string so the hotkey handler can log it without re-querying.
+// Flush when disabling JIT so re-enabling starts without stale traces.
 pub @nomangle fn jit_set_enabled(enabled: bool) -> string {
     if !luajit_available() { return "no-luajit" }
     if enabled {
