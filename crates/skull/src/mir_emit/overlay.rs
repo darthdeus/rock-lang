@@ -39,7 +39,7 @@ fn overlay_callee_bindings(
     let mut candidates: Vec<_> = cache
         .chunks
         .iter()
-        .filter(|(body, _)| cache.lua_view.instances.contains(*body))
+        .filter(|(body, _)| cache.lua_view.retains_rock_body(body))
         .filter_map(|(body, chunk)| chunk.as_ref().ok().map(|chunk| (body, chunk)))
         .flat_map(|(body, chunk)| chunk.binds.iter().map(move |plan| (body, plan)))
         .collect();

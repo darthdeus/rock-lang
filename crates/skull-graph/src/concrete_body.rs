@@ -13,19 +13,8 @@ use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoSubst, MonoTyReason, TyEnv};
 
 use crate::instance_graph::{
-    ready_body, BoundaryClass, Contribution, Instance, InstanceGraph, Owner, Site, SiteDomain,
-    SiteOp, SiteOutcome,
+    ready_body, Contribution, Instance, InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome,
 };
-use crate::target_projection::CpuTargetSpec;
-
-/// A callee whose body skull does not lower.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct BoundaryId {
-    pub declaration: FuncRef,
-    pub class: BoundaryClass,
-    pub target: CpuTargetSpec,
-    pub symbol: String,
-}
 
 #[derive(Clone, Default)]
 pub struct ConcreteBodies {

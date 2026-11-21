@@ -30,6 +30,7 @@ pub(super) struct WorklistState<'a> {
     pub(super) cache: skull_transform::InlineCache,
     pub(super) names: CalleeNames<'a>,
     pub(super) view: &'a ArtifactView,
+    opaque_roots: &'a super::session::OpaqueRoots,
     pub(super) queue: Vec<FuncRef>,
     pub(super) seen: HashSet<FuncRef>,
     pub(super) lowered: Vec<DeliveredBody<'a>>,
@@ -90,6 +91,7 @@ impl<'a> WorklistState<'a> {
             graph,
             view,
             concrete,
+            opaque_roots,
         } = session;
         let mut names = CalleeNames {
             session: Some(session),
@@ -119,6 +121,7 @@ impl<'a> WorklistState<'a> {
             standalone_seen: HashSet::new(),
             view,
             graph,
+            opaque_roots,
             cache: skull_transform::InlineCache::default(),
             names,
             queue: Vec::new(),
@@ -191,8 +194,7 @@ impl<'a> WorklistState<'a> {
         let factories = self.json_types.add_body(ws, decl, &instance.args)?;
         self.inline_js.push(JsInlineBody { instance, decl });
         let mut targets: Vec<FuncRef> = self
-            .view
-            .opaque_boundary_roots
+            .opaque_roots
             .get(&skull_graph::instance_graph::DeclKey(decl))
             .map(|targets| targets.iter().copied().collect())
             .unwrap_or_default();

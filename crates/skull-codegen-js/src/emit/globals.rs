@@ -187,7 +187,7 @@ pub(super) fn queue_standalone(
     if js_supply(ws, &ws.module(selected.module).functions[selected.func]).is_some() {
         return;
     }
-    if !st.view.instances.contains(&inst) {
+    if !st.view.retains_rock_body(&inst) {
         let f = &ws.module(inst.func.module).functions[inst.func.func];
         findings.push(CompilerError::new_with_label(
             f.name_span,

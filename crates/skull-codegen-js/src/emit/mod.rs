@@ -30,6 +30,7 @@ mod delivery;
 mod effects;
 mod function;
 mod globals;
+mod inline_js;
 mod inst;
 mod json_types;
 mod lanes;

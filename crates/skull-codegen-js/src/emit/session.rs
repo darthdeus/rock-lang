@@ -1,6 +1,7 @@
 //! Root plans and the instance-graph session behind a program emission.
 
 use super::*;
+use skull_mir::instance::DeclKey;
 
 /// One lowering context supplies the interner for the graph, view and emitter.
 pub(super) fn js_scx(ws: &Workspace) -> skull_mir::lower::ScalarCtx {
@@ -12,9 +13,12 @@ struct JsRootPlan {
     refs: Vec<FuncRef>,
 }
 
+pub(super) type OpaqueRoots = BTreeMap<DeclKey, rustc_hash::FxHashSet<FuncRef>>;
+
 pub(super) struct JsSession {
     pub(super) graph: InstanceGraph,
     pub(super) view: ArtifactView,
+    pub(super) opaque_roots: OpaqueRoots,
     pub(super) concrete: skull_graph::concrete_body::ConcreteBodies,
 }
 
@@ -98,18 +102,49 @@ fn push_synthesized_entry_roots(
     }
 }
 
-/// Graph roots only: the worklist emits an opaque body's `@nomangle` targets
-/// once it emits the body that names them.
-fn extend_root_plan_from_inline_view(plan: &mut JsRootPlan, view: &ArtifactView) -> bool {
-    let mut seen: HashSet<FuncRef> = plan.refs.iter().copied().collect();
-    let mut added = false;
-    for &target in view.opaque_boundary_roots.values().flatten() {
-        if seen.insert(target) {
-            plan.refs.push(target);
-            added = true;
+/// An inline JS body can call a published name without a MIR call site.
+fn opaque_roots(ws: &Workspace, view: &ArtifactView) -> OpaqueRoots {
+    let bodies: BTreeMap<_, _> = view
+        .realization
+        .values()
+        .filter_map(|row| {
+            let f = &ws.module(row.decl.module).functions[row.decl.func];
+            match f.inline_body {
+                Some((bone_core::hir::FnBackend::Js, body)) => Some((DeclKey(row.decl), body)),
+                _ => None,
+            }
+        })
+        .collect();
+    if bodies.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut publications: rustc_hash::FxHashMap<&str, Vec<FuncRef>> = Default::default();
+    for module in &ws.modules {
+        for (func, function) in module.functions.iter() {
+            if function
+                .annotations
+                .iter()
+                .any(|annotation| annotation.is_builtin("nomangle"))
+            {
+                let name = skull_mir::mangle::declared_name(function.name.as_str());
+                publications.entry(name).or_default().push(FuncRef {
+                    module: module.id,
+                    func,
+                });
+            }
         }
     }
-    added
+    bodies
+        .into_iter()
+        .map(|(decl, body)| {
+            let targets = super::inline_js::bare_names(body.as_str())
+                .filter_map(|name| publications.get(name))
+                .flatten()
+                .copied()
+                .collect();
+            (decl, targets)
+        })
+        .collect()
 }
 
 fn js_artifact_request(roots: &[FuncRef]) -> artifact::ArtifactRequest<'_> {
@@ -184,14 +219,24 @@ fn build_program_session(
             scx.interner_handle(),
         );
         let view = artifact::realize(ws, &graph, &js_artifact_request(&root_plan.refs));
-        let concrete = skull_graph::concrete_body::build(ws, &graph);
-        if extend_root_plan_from_inline_view(&mut root_plan, &view) {
+        let opaque_roots = opaque_roots(ws, &view);
+        let mut seen: HashSet<FuncRef> = root_plan.refs.iter().copied().collect();
+        let old_count = root_plan.refs.len();
+        root_plan.refs.extend(
+            opaque_roots
+                .values()
+                .flatten()
+                .copied()
+                .filter(|target| seen.insert(*target)),
+        );
+        if root_plan.refs.len() != old_count {
             continue;
         }
         let session = JsSession {
+            concrete: skull_graph::concrete_body::build(ws, &graph),
             graph,
             view,
-            concrete,
+            opaque_roots,
         };
         return assemble_program_core(ws, scx, &root_plan.named, &session, program_mode);
     }

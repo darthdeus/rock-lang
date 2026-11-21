@@ -17,12 +17,6 @@ pub use skull_mir::instance::{DeclKey, Instance};
 
 pub use skull_mir::lower::BoundaryClass;
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct Boundary {
-    pub class: BoundaryClass,
-    pub symbol: String,
-}
-
 #[derive(Clone, Debug)]
 pub struct Edge {
     pub to: Instance,
@@ -455,8 +449,6 @@ pub struct InstanceGraph {
     recursion_by_decl: BTreeMap<DeclKey, BTreeSet<Instance>>,
     recursion_positions: BTreeMap<Instance, usize>,
     coroutine_positions: BTreeMap<Instance, usize>,
-    pub boundaries: BTreeMap<String, Boundary>,
-    pub inline_body_nomangle_roots: BTreeMap<DeclKey, FxHashSet<FuncRef>>,
     lost: BTreeSet<Instance>,
     pub index: Indices,
 }
@@ -660,8 +652,6 @@ impl InstanceGraph {
             recursion_by_decl: BTreeMap::new(),
             recursion_positions: BTreeMap::new(),
             coroutine_positions: BTreeMap::new(),
-            boundaries: BTreeMap::new(),
-            inline_body_nomangle_roots: BTreeMap::new(),
         }
     }
 
@@ -1473,9 +1463,6 @@ impl InstanceGraph {
             .filter_map(Owner::instance)
             .cloned()
             .collect();
-        // Owner order keeps a declaration's instances adjacent, so dedup suffices.
-        let mut decls: Vec<DeclKey> = self.instances.iter().map(|i| DeclKey(i.func)).collect();
-        decls.dedup();
         let coroutines: Vec<Instance> = self
             .instances
             .iter()
@@ -1484,19 +1471,9 @@ impl InstanceGraph {
             .collect();
         self.clear_graph_postpass_rejections();
 
-        let (nomangle_roots, recursion_findings) = {
-            use bone_core::prelude::par_join;
-            let graph = &*self;
-            par_join(
-                || opaque_boundary_roots_for_decls(ws, decls.iter().map(|decl| decl.0)),
-                || detect_changing_instance_recursion(graph, ws),
-            )
-        };
-        self.inline_body_nomangle_roots.extend(nomangle_roots);
-        for finding in recursion_findings {
+        for finding in detect_changing_instance_recursion(self, ws) {
             self.install_recursion_finding(finding);
         }
-        classify_boundaries(self, ws, &decls);
         record_coroutine_rejections(self, ws, &coroutines);
     }
 
@@ -1524,34 +1501,6 @@ impl InstanceGraph {
         let mut touched_decls: BTreeSet<DeclKey> = changed_decls.iter().cloned().collect();
         touched_decls.extend(entered.iter().map(|i| DeclKey(i.func)));
         touched_decls.extend(left.iter().map(|i| DeclKey(i.func)));
-        let mut active_decls: BTreeSet<DeclKey> = changed_decls
-            .iter()
-            .cloned()
-            .chain(entered.iter().map(|i| DeclKey(i.func)))
-            .collect();
-        active_decls.extend(
-            touched_decls
-                .iter()
-                .filter(|decl| self.index.decls.contains_key(&decl.0))
-                .cloned(),
-        );
-
-        for decl in &touched_decls {
-            for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
-                let member = DeclKey(member);
-                self.inline_body_nomangle_roots.remove(&member);
-                let f = &ws.module(member.0.module).functions[member.0.func];
-                let name = mangle_fn(ws, f);
-                self.boundaries.remove(&name);
-            }
-        }
-        let active_decl_vec: Vec<DeclKey> = active_decls.iter().cloned().collect();
-        self.inline_body_nomangle_roots
-            .extend(opaque_boundary_roots_for_decls(
-                ws,
-                active_decl_vec.iter().map(|decl| decl.0),
-            ));
-        classify_boundaries(self, ws, &active_decl_vec);
         self.refresh_coroutine_rejections(ws, touched_instances.iter().cloned());
 
         let mut previous_recursion_starts =
@@ -3128,103 +3077,6 @@ pub fn synthesized_entry_roots(ws: &Workspace) -> Vec<FuncRef> {
 pub fn serves(decl: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend) -> bool {
     use bone_core::hir::FnBackend;
     decl == FnBackend::Any || target == FnBackend::Any || decl == target
-}
-
-/// The boundary class of one declaration, or `None` if it has a Rock body.
-/// An `@intrinsic` with a Rock body is expanded; an expansion intrinsic, a
-/// `@native_required` one and one without a body stay foreign.
-fn boundary_class_for(f: &Function) -> Option<BoundaryClass> {
-    if is_erased_runtime_entry(f) {
-        return Some(BoundaryClass::ErasedRuntimeEntry);
-    }
-    skull_mir::lower::declared_boundary_class(f)
-}
-
-/// Resolve bare `@nomangle` names in JS opaque bodies into root declarations.
-/// The body stays opaque to MIR; this is only the publication obligation.
-pub fn opaque_boundary_roots_for_decls(
-    ws: &Workspace,
-    decls: impl IntoIterator<Item = FuncRef>,
-) -> BTreeMap<DeclKey, FxHashSet<FuncRef>> {
-    let decls: Vec<FuncRef> = decls.into_iter().collect();
-    let mut nomangle_roots: FxHashMap<ustr::Ustr, Vec<FuncRef>> = FxHashMap::default();
-    for module in &ws.modules {
-        for (func, function) in module.functions.iter() {
-            if function
-                .annotations
-                .iter()
-                .any(|annotation| annotation.is_builtin("nomangle"))
-            {
-                let name =
-                    ustr::Ustr::from(skull_mir::mangle::declared_name(function.name.as_str()));
-                nomangle_roots.entry(name).or_default().push(FuncRef {
-                    module: module.id,
-                    func,
-                });
-            }
-        }
-    }
-    let found: Vec<(DeclKey, FxHashSet<FuncRef>)> = {
-        use bone_core::prelude::*;
-        decls
-            .par_iter()
-            .map(|decl| {
-                skull_mir::lower::backend_variant_group(ws, *decl)
-                    .into_iter()
-                    .filter_map(|member| {
-                        opaque_js_nomangle_targets(ws, member, &nomangle_roots)
-                            .map(|t| (DeclKey(member), t))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flatten()
-            .collect()
-    };
-    let mut roots: BTreeMap<DeclKey, FxHashSet<FuncRef>> = BTreeMap::new();
-    for (owner, targets) in found {
-        roots.entry(owner).or_default().extend(targets);
-    }
-    roots
-}
-
-fn opaque_js_nomangle_targets(
-    ws: &Workspace,
-    member: FuncRef,
-    nomangle_roots: &FxHashMap<ustr::Ustr, Vec<FuncRef>>,
-) -> Option<FxHashSet<FuncRef>> {
-    let f = &ws.module(member.module).functions[member.func];
-    let Some((bone_core::hir::FnBackend::Js, body)) = f.inline_body else {
-        return None;
-    };
-    let mut targets = FxHashSet::default();
-    for name in crate::inline_js::bare_names(body.as_str()) {
-        if let Some(candidates) = nomangle_roots.get(&ustr::Ustr::from(name)) {
-            targets.extend(candidates.iter().copied());
-        }
-    }
-    Some(targets)
-}
-
-fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey]) {
-    let found: Vec<Boundary> = {
-        use bone_core::prelude::*;
-        decls
-            .par_iter()
-            .filter_map(|decl| {
-                let f = &ws.module(decl.0.module).functions[decl.0.func];
-                let class = boundary_class_for(f)?;
-                Some(Boundary {
-                    class,
-                    symbol: mangle_fn(ws, f),
-                })
-            })
-            .collect()
-    };
-    for boundary in found {
-        g.boundaries.insert(boundary.symbol.clone(), boundary);
-    }
 }
 
 fn record_coroutine_rejections(g: &mut InstanceGraph, ws: &Workspace, added: &[Instance]) {

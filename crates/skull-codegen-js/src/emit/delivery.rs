@@ -109,7 +109,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
     }
 
     fn lower_standalone(&mut self, inst: Instance) -> Result<(), CompilerError> {
-        if !self.st.view.instances.contains(&inst) {
+        if !self.st.view.retains_rock_body(&inst) {
             self.st.reject(
                 &format!("instance:{:?}", inst.func),
                 err("JS: a residual specialization is absent from the artifact view"),
