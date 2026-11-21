@@ -214,8 +214,7 @@ impl Assembly {
                 lifecycle_declarations,
             ));
         }
-        // Anything appended after this line runs outside it.
-        // Closes the block the runtime prelude opens.
+        // Close the block opened by the runtime prelude.
         out.push_str("end\n");
         self.t_scaffold += ts.elapsed();
         Ok(())
@@ -422,8 +421,7 @@ struct InitOrdering {
     static_resets: Result<String, CompilerError>,
 }
 
-/// Only the bodies the initializers reach are walked. That changes the order
-/// of each dependency list but not its set, and init ordering reads it as a set.
+/// Initializer ordering uses the dependency set, not traversal order.
 fn transitive_global_reads(
     inits: &[(Ustr, Ustr, String)],
     units: &[(Ustr, Vec<Ustr>, Vec<Ustr>)],
@@ -557,8 +555,7 @@ fn place_function<'c>(
         let Some(lib) = f.ffi_lib else {
             return Placement::None;
         };
-        // Every extern is checked; only the write is gated, since pruning may change
-        // which definitions are emitted and nothing else.
+        // Pruning gates emission, not extern validation.
         return match ffi_extern_wrapper(ws, self_ref, f, lib, allocation_mode) {
             Ok(definition) if emit_def => Placement::Text(Ok(definition)),
             Ok(_) => Placement::None,
@@ -887,8 +884,7 @@ pub(super) fn assemble(
     let mut asm = Assembly::new(cache, unit_facts);
     let (scaffold, value_ctors) = scaffold?;
     asm.out = scaffold;
-    // Value ctors are spliced in here, ahead of any load-time caller, once the
-    // emitted text shows which ones are called.
+    // Load-time callers must follow their value constructors.
     let value_ctors_at = asm.out.len();
     asm.t_scaffold += scaffold_time;
     asm.out.push_str(&decorator_lua);
@@ -1042,8 +1038,7 @@ pub(super) fn assemble(
     drop(spec_chunks);
     step("assembly: definitions", &mut steps);
 
-    // Every definition has been visited, so body rejections report before any
-    // scaffolding error below.
+    // Report body rejections before scaffolding errors.
     std::mem::take(&mut asm.rejections).into_result()?;
     let cg = &cache.cg;
     let scx = &cache.scx;

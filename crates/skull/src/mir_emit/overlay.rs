@@ -1,7 +1,6 @@
 use super::*;
 
-/// A declaration's own body sorts ahead of its specializations, which sort by
-/// their instantiation's canonical spelling, an injective key.
+/// Canonical instantiation spellings are injective.
 fn overlay_order_key(
     scx: &skull_mir::lower::ScalarCtx,
     body: &Instance,
@@ -86,9 +85,7 @@ fn transactional_overlay(lua: &str, mut globals: BTreeSet<String>) -> String {
     out
 }
 
-/// Loaded after `main.lua`, whose scaffold and globals a body edit cannot
-/// change. Carries every body changed since the full build, so an earlier
-/// edit is not reverted to `main.lua`'s copy.
+/// Include every edit since the full build so later overlays do not revert earlier ones.
 fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
@@ -198,9 +195,7 @@ fn assemble_overlay(
     let d_static_resets = t_static_resets.elapsed();
 
     let t_const_inits = Instant::now();
-    // Re-emits the changed consts and every const whose initializer transitively
-    // reads one; a dependent can embed an upstream literal. Overloads merge under
-    // one name, which can only add a const. Mutable globals are never re-emitted.
+    // Dependent consts may embed a changed literal; mutable globals stay live.
     if !cache.edit.changed_consts_since_full.is_empty() {
         let deps = skull_mir::reach::symbol_references(ws);
 

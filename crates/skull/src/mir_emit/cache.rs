@@ -223,9 +223,8 @@ impl SkullEmitCache {
         result
     }
 
-    /// Every `embed_string` input baked into the program, with the hash of
-    /// Covers the always-emitted units too, which hold most production embeds.
-    /// the baked bytes: the files a watcher must treat as sources.
+    /// Embedded inputs and their hashes, including always-emitted units.
+    /// Watchers must treat these files as sources.
     pub fn comptime_file_hashes(&self) -> Vec<(Ustr, u64)> {
         let mut out: FxHashMap<Ustr, u64> = FxHashMap::default();
         let chunk_reads = self
@@ -269,7 +268,6 @@ impl SkullEmitCache {
             .and_then(|snapshot| snapshot.baseline.lifecycle_plan.as_deref())
     }
 
-    /// Compute the canonical identity of the retained artifact on request.
     pub fn artifact_fingerprint(&self, ws: &Workspace) -> Result<String, CompilerError> {
         let edit = &self.edit;
         let (Some(lifecycle), Some(definitions), Some(layout)) = (
@@ -305,7 +303,6 @@ impl SkullEmitCache {
             .keys_match(pairs.iter().map(|pair| pair.key.as_str())))
     }
 
-    /// Check the registration keys over only the re-inferred bodies.
     pub fn shader_registration_keys_changed_for_bodies(
         &self,
         ws: &Workspace,
@@ -817,11 +814,9 @@ impl SkullEmitCache {
 
         let t_relow = Instant::now();
         for body in &affected {
-            // `affected` holds every lowered body that can have changed.
             cache.inline_cache.invalidate(body.func);
         }
         for body in &affected {
-            // Re-emission can change the deps, or drop the chunk entirely.
             cache.unindex_chunk(body);
             let fref = body.func;
             let f = &ws.module(fref.module).functions[fref.func];
