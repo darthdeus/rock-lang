@@ -20,26 +20,15 @@ fn mangled(ws: &bone_core::workspace::Workspace, name: &str) -> Vec<String> {
 }
 
 #[test]
-fn zero_parameter_symbol_does_not_collide_with_restore_lookup_name() {
-    let ws = ws_of("fn hidden_callback() {}");
-    let mid = ws.module_ids[&Ustr::from("<test>")];
-    let (_, callback) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| has_name_tail(f.name, "hidden_callback"))
-        .expect("restore callback declaration");
-    assert_ne!(mangle_fn(&ws, callback), callback.name.as_str());
-}
-
-#[test]
 fn zero_parameter_function_gets_the_arity_marker() {
     let ws = ws_of(
         r#"
+fn hidden_callback() {}
 fn foo() -> int { return 1 }
 fn bar(x: int) -> int { return x }
 "#,
     );
+    assert_eq!(mangled(&ws, "hidden_callback"), ["hidden_callback_0"]);
     assert_eq!(mangled(&ws, "foo"), ["foo_0"]);
     assert_eq!(mangled(&ws, "bar"), ["bar_int"]);
 }
