@@ -93,23 +93,40 @@ perf/output_census.py game.lua --engine /tmp/stone.lua --mask   # private symbol
 ## Comparing JIT-on runtime
 
 Run `runtime_pairs.py` from the project directory with the same scenario,
-settings, assets, and display size for both arms. Supply absolute paths to
-the binaries or launcher scripts. Keep workload arguments and profiling
-options fixed. Pin volatile build variables with `--var NAME=VALUE`.
-`--work SECTION` checks a scenario's work counter, such as its simulation
-checksum, across all runs. Repeat it for additional counters.
+settings, assets and display size for both arms. Supply absolute paths to
+the binaries or launcher scripts. Pin volatile build variables with
+`--var NAME=VALUE`. Repeat `--work SECTION` for each workload counter or
+simulation checksum the runner should match across all runs.
+
+The default run compares allocation requests, bytes, JIT aborts and flushes
+using the deterministic VM described below. It enables Stone's fixed image
+work and uses a fixed GC schedule. Set `ROCK_PERF_LUAJIT` or supply
+`--luajit` to select that executable. Add `--capture-sites` for per-site
+allocation and abort tables. Counter runs disable the optional Lua
+trace observer that copies emitted machine code into Lua strings.
 
 ```sh
+export ROCK_PERF_LUAJIT=/path/to/counter-vm/bin/luajit
 /path/to/rock-lang/perf/runtime_pairs.py . /path/to/base/rock --out /tmp/runtime-aa
 /path/to/rock-lang/perf/runtime_pairs.py . /path/to/base/rock /path/to/tip/rock \
     --noise /tmp/runtime-aa/summary.json --out /tmp/runtime-ab
 ```
 
-The runner alternates pair order, checks emitted Lua within each arm, and
-checks the A/B baseline against the A/A Lua. It uses Stone's fixed-step perf
-mode, pins the random seed, disables post-present sync, and records the
-GC-running allocation window and per-run frame and thread CPU percentiles.
-Raw reports and load readings stay in
+Use `--timing` with the ordinary measurement VM for frame and thread CPU
+timing. Add `--fixed-work` to choose the same image-work policy for its A/A
+and A/B runs. Its Lua collector uses the ordinary incremental policy.
+The counter VM uses a synthetic profiling clock and can make identity-key
+probes more expensive. Site diagnostics also modify trace machine code.
+
+```sh
+/path/to/rock-lang/perf/runtime_pairs.py . /path/to/base/rock /path/to/tip/rock \
+    --timing --fixed-work --instructions --luajit /path/to/timing-vm/bin/luajit \
+    --out /tmp/runtime-timing
+```
+
+The runner alternates pair order, checks emitted Lua within each arm and
+checks the A/B baseline against the A/A Lua. It pins the random seed,
+disables post-present sync, and keeps raw reports and load readings in
 `--out`. Run A/A on the same host and under comparable load to A/B.
 
 Each metric gets a distribution-free 95% interval for the median paired
@@ -121,47 +138,62 @@ unresolved. Work-counter mismatches make the comparison inconclusive.
 On macOS, `--instructions` samples process-wide retired instructions at frame
 boundaries. It reports the mean over complete intervals between measured
 frame entries, starting after the opening frame and ending at the last frame
-entry. The probe adds a syscall per frame. Use it on both A/A and A/B for
-that comparison. Repeat any instruction calibration recorded before the
-probe moved into inline `LUA_INIT`.
+entry. The probe adds a syscall per frame. Use the same options on both
+A/A and A/B.
 
-`--luajit /path/to/luajit` selects the same VM for both arms through
-`ROCK_LUAJIT` and records its executable digest in the calibration.
+### Building the measurement VMs
 
-For repeatability experiments on Apple Silicon, build a separate LuaJIT
-from the gamelibs tag in `gamelibs.version`. In a fresh gamelibs checkout
-with its LuaJIT submodule initialized, run:
+Use a fresh Apple Silicon checkout of the gamelibs tag in `gamelibs.version`
+with its LuaJIT submodule initialized. Set `rock_lang`, `timing_vm` and
+`counter_vm` to absolute paths.
 
 ```sh
 ./apply-luajit-patches.sh
-git -C luajit apply /path/to/rock-lang/perf/measurement-luajit.patch
-MACOSX_DEPLOYMENT_TARGET=15.0 make -C luajit \
-    XCFLAGS='-DLUAJIT_SECURITY_PRNG=0 -DROCK_PERF_HEAP_BASE=0x7400000000ULL'
+git -C luajit apply "$rock_lang/perf/measurement-luajit.patch"
+export MACOSX_DEPLOYMENT_TARGET=15.0
+flags='-DLUAJIT_SECURITY_PRNG=0 -DROCK_PERF_HEAP_BASE=0x7400000000ULL'
+make -C luajit XCFLAGS="$flags" PREFIX="$timing_vm" install
+
+make -C luajit clean
+git -C luajit apply "$rock_lang/perf/measurement-sites-luajit.patch"
+git -C luajit apply "$rock_lang/perf/measurement-deterministic-luajit.patch"
+make -C luajit XCFLAGS="$flags -DROCK_PERF_DETERMINISTIC" PREFIX="$counter_vm" install
 ```
 
-Pass `--luajit /path/to/gamelibs/luajit/src/luajit` to both runs. This build
-fixes the VM seed and Lua heap mapping addresses, derives string IDs from
-content, and gives staged `main.lua` chunks a constant name. It keeps the JIT and collector running. Use the
-patched binary for trusted benchmark inputs only. Calibrate each workload
-with A/A since native work and wall-clock budgets can still change the
-allocation and trace counts.
+Use these VMs for trusted benchmark inputs. Both fix the VM seed and Lua
+heap mapping addresses, derive string table key hashes from content, and
+give staged `main.lua` chunks a constant name. The counter VM gives each
+prototype a counter and a retry sequence per bytecode instruction. Side
+exits already have per-snapshot counters. The executable code area starts
+at a fixed address and the VM fails if the mapping is unavailable. FFI type
+names and upvalue alias hints use name content and stack slots respectively.
+Table identity keys keep pointer equality and share a hash bucket per type.
+The VM advertises a different build ID so Stone's stock hot-counter
+offsets cannot tune its retries.
 
-### Fixed work and site diagnostics
+The fixed-work hook boots with the JIT off, collects the Lua heap and
+enables the JIT on frame three. For counter comparisons it keeps automatic
+GC paused and collects every 32 frames, so the size of the loaded program
+cannot move the collector into or out of a trace on an arbitrary frame.
+It also replaces the Lua FFI binding of `stone_get_time` with a virtual
+monotonic clock. The clock advances to the 1/64-second frame boundary when it is ahead
+of the current tick. Each read advances the clock by 2^-20 seconds. Profiling and time-budget
+branches see the same inputs when the same work runs. The launch watchdog
+continues to use wall time. Read frame and CPU timings from a separate
+`--timing` run.
 
-Add `--fixed-work` to both A/A and A/B. In this mode Stone decodes images
-on the caller and schedules uploads with its existing byte quota. The
-runner boots with the JIT off, then collects the Lua heap and enables the
-JIT on frame three. Budget warmup frames after that reset. If the
-application has its own time-budgeted jobs, configure those to use work
-quotas as well. Use the scenario's work
-counters and verify A/A before interpreting changes at the scale of the
-observed noise.
+Give the workload enough warmup after the reset and match its asset cache
+state across arms. Cache hits and rebuilds can leave different runtime
+state at the start of measurement. Use work quotas for native jobs that
+would otherwise be time-budgeted, and calibrate each workload with repeated
+unpadded and inert-padding runs. Native scheduling, system clock reads and
+graphics still depend on the workload.
 
-Build a separate diagnostic VM by applying `measurement-sites-luajit.patch`
-after `measurement-luajit.patch` and using the same build flags. Run it
-with `--capture-sites --luajit /path/to/diagnostic/luajit`. Site diagnostics
-modify trace machine code and consume CPU time. Use the ordinary measurement
-VM for CPU and frame-time comparisons.
+Linux/x64 would need an x64 interpreter hot-counter path and reserved,
+non-overwriting heap and executable mappings. The patches here target
+Apple Silicon.
+
+### Site diagnostics
 
 The diagnostic VM follows the first Stone allocator-counter lease. It
 records request count and requested bytes at bytecode sites, with separate
@@ -182,6 +214,6 @@ python3 perf/site_diff.py BASE.lua CANDIDATE.lua \
     --candidate candidate/{01,02,03}-b/perf-summary.json.sites.tsv
 ```
 
-Use `--by-prototype` when the bytecode changes
-within a function. The raw TSV retains generated line numbers, PCs,
-allocation lanes, abort reasons and trace generations.
+Use `--by-prototype` when the bytecode changes within a function. Compare
+the normalized rows for allocation and abort counts. The raw TSV also
+retains generated PCs, trace generations and machine-code sizes.

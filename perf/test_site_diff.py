@@ -71,6 +71,15 @@ class SiteDiffTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "overflowed"):
                 read_capture(path)
 
+    @unittest.skipUnless(os.getenv("ROCK_TEST_DETERMINISTIC_LUAJIT"), "requires deterministic VM")
+    def test_uncalled_prototypes_do_not_change_hot_sites(self):
+        vm = os.environ["ROCK_TEST_DETERMINISTIC_LUAJIT"]
+        fixture = Path(__file__).with_name("test_measurement_hot.lua")
+        rows = [subprocess.check_output([vm, fixture, str(pad)]) for pad in (0, 7, 41)]
+        self.assertIn(b":start:", rows[0])
+        self.assertEqual(rows[0], rows[1])
+        self.assertEqual(rows[0], rows[2])
+
     @unittest.skipUnless(os.getenv("ROCK_TEST_MEASUREMENT_LUAJIT"), "requires measurement VM")
     def test_vm_distinguishes_lua_allocations_sinks_materialization_and_traces(self):
         with TemporaryDirectory() as directory:

@@ -45,9 +45,10 @@ class RuntimePairTests(unittest.TestCase):
 
     def test_candidate_lua_must_match_its_first_run(self):
         with TemporaryDirectory() as directory:
-            args = ["runtime_pairs.py", ".", "base", "candidate", "--out", str(Path(directory) / "run")]
+            args = ["runtime_pairs.py", ".", "base", "candidate", "--timing", "--out", str(Path(directory) / "run")]
             with patch("sys.argv", args), patch("runtime_pairs.measure", side_effect=[
-                {"lua_sha256": "base"}, {"lua_sha256": "candidate"}, {"lua_sha256": "different"},
+                {"lua_sha256": "base", "metrics": {}}, {"lua_sha256": "candidate", "metrics": {}},
+                {"lua_sha256": "different", "metrics": {}},
             ]):
                 with self.assertRaisesRegex(ValueError, "02-b:.*Lua differs"):
                     main()
@@ -58,7 +59,7 @@ class RuntimePairTests(unittest.TestCase):
             vm.write_bytes(b"test runtime")
             vm.chmod(0o755)
             args = ["runtime_pairs.py", ".", "base", "--out", str(Path(directory) / "run"),
-                    "--luajit", str(vm), "--instructions", "--pairs", "6"]
+                    "--luajit", str(vm), "--timing", "--instructions", "--pairs", "6"]
             row = {"lua_sha256": "same", "settings": {}, "work": {}, "metrics": {}}
             with patch("sys.argv", args), patch("sys.platform", "darwin"), patch.dict("os.environ", {}, clear=True):
                 with patch("runtime_pairs.measure", return_value=row) as measure:
@@ -70,6 +71,28 @@ class RuntimePairTests(unittest.TestCase):
                 self.assertEqual(env["LUA_INIT"], INSTRUCTION_PROBE)
             plan = json.loads((Path(directory) / "run" / "summary.json").read_text())["plan"]
             self.assertEqual(plan["luajit_sha256"], hashlib.sha256(vm.read_bytes()).hexdigest())
+
+    def test_counters_default_to_the_deterministic_vm_and_fixed_work(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            vm = root / "luajit"
+            vm.touch()
+            vm.chmod(0o755)
+            args = ["runtime_pairs.py", ".", "base", "--out", str(root / "run"), "--pairs", "6"]
+            row = {"lua_sha256": "same", "settings": {}, "work": {},
+                   "metrics": {"alloc_requests": 2, "jit_aborts": 1, "frame_ms_p99": 10}}
+            env = {"ROCK_PERF_LUAJIT": str(vm), "PERF_JIT_HEALTH": "1"}
+            with patch("sys.argv", args), patch.dict("os.environ", env, clear=True):
+                with patch("runtime_pairs.measure", side_effect=lambda *_: dict(row)) as measure:
+                    main()
+            for call in measure.call_args_list:
+                run_env = call.args[2]
+                self.assertEqual(run_env["ROCK_LUAJIT"], str(vm.resolve()))
+                self.assertEqual(run_env["ROCK_PERF_DETERMINISTIC"], "1")
+                self.assertEqual(run_env["PERF_FIXED_WORK"], "1")
+                self.assertEqual(run_env["PERF_JIT_HEALTH"], "0")
+            summary = json.loads((root / "run" / "summary.json").read_text())
+            self.assertEqual(set(summary["metrics"]), {"alloc_requests", "jit_aborts"})
 
     def test_fixed_work_and_sites_use_the_same_hook_in_both_arms(self):
         with TemporaryDirectory() as directory:

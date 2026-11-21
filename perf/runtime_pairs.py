@@ -14,6 +14,7 @@ from compare import median_interval
 
 
 ALLOC_START = 100
+COUNTER_PREFIXES = ("alloc_", "jit_", "mutator_")
 INSTRUCTION_PROBE = r'''
 local frames = tonumber(os.getenv("PERF_DEFAULT_MEASURE_FRAMES"))
 if not frames then return end
@@ -174,6 +175,11 @@ def measure(args, binary, env, name):
     try:
         report = json.loads((output / "perf-summary.json").read_text())
         metrics, work, settings = samples(report, args.frames, args.work)
+        if env.get("ROCK_PERF_DETERMINISTIC") == "1":
+            if not settings["exact_alloc_bytes"]:
+                raise ValueError("deterministic comparisons require exact allocation bytes")
+            if report["memory"]["gc_window"]["collector_running_at_start"]:
+                raise ValueError("automatic GC was running in the fixed collection window")
         if args.instructions:
             metrics["retired_instructions_per_frame"] = instructions_per_frame(
                 report, output / "perf-summary.json.instructions")
@@ -204,6 +210,8 @@ def main():
     parser.add_argument("--instructions", action="store_true",
                         help="sample frame-window retired instructions on macOS")
     parser.add_argument("--luajit", type=Path, help="use this LuaJIT executable for both arms")
+    parser.add_argument("--timing", action="store_true",
+                        help="compare timing with the ordinary VM (default: deterministic counters)")
     parser.add_argument("--fixed-work", action="store_true",
                         help="use Stone's fixed image work and reset JIT and GC on frame three")
     parser.add_argument("--capture-sites", action="store_true",
@@ -213,6 +221,13 @@ def main():
     args = parser.parse_args()
     if args.pairs < 6 or not ALLOC_START < args.frames <= 65536:
         parser.error("use at least six pairs and 101 to 65536 measured frames")
+    if not args.timing:
+        args.fixed_work = True
+        if not args.luajit:
+            configured_vm = os.environ.get("ROCK_PERF_LUAJIT")
+            if not configured_vm:
+                parser.error("counter comparisons require a deterministic --luajit or ROCK_PERF_LUAJIT")
+            args.luajit = Path(configured_vm)
     if args.instructions and (sys.platform != "darwin" or "LUA_INIT" in os.environ):
         parser.error("--instructions requires macOS and an unset LUA_INIT")
     if (args.fixed_work or args.capture_sites) and "LUA_INIT" in os.environ:
@@ -224,6 +239,7 @@ def main():
     calibration = json.loads(args.noise.read_text()) if args.noise else None
     plan = {"frames": args.frames, "warmup_frames": args.warmup_frames, "seed": args.seed,
             "project": args.project, "work": args.work, "instructions": args.instructions,
+            "mode": "timing" if args.timing else "counters",
             "vars_sha256": hashlib.sha256(json.dumps(args.var).encode()).hexdigest()}
     if args.luajit:
         args.luajit = args.luajit.resolve()
@@ -242,17 +258,17 @@ def main():
     args.out = args.out.resolve()
     args.out.mkdir(parents=True)
     env = dict(os.environ, ROCK_TEST_SEED=args.seed, PERF_NO_SECTIONS="1", STONE_PRESENT_SYNC="none",
-               PERF_GC_WINDOW_AFTER_WARMUP="0")
+               PERF_GC_WINDOW_AFTER_WARMUP="0",
+               ROCK_PERF_DETERMINISTIC="0" if args.timing else "1",
+               PERF_FIXED_WORK=str(int(args.fixed_work)), ROCK_PERF_CAPTURE_SITES=str(int(args.capture_sites)))
+    if not args.timing:
+        env["PERF_JIT_HEALTH"] = "0"
     if args.luajit:
         env["ROCK_LUAJIT"] = str(args.luajit)
     if args.instructions:
         env["LUA_INIT"] = INSTRUCTION_PROBE
     if args.fixed_work or args.capture_sites:
         env["LUA_INIT"] = env.get("LUA_INIT", "") + "\n" + hook
-    if args.fixed_work:
-        env["PERF_FIXED_WORK"] = "1"
-    if args.capture_sites:
-        env["ROCK_PERF_CAPTURE_SITES"] = "1"
     aa = args.candidate is None
     binaries = (args.base, args.candidate or args.base)
     references = {0: calibration["pairs"][0][0]["lua_sha256"]} if calibration else {}
@@ -266,6 +282,12 @@ def main():
             source_arm = 0 if aa else arm
             if digest != references.setdefault(source_arm, digest):
                 raise ValueError(f"{name}: Lua differs from its reference; freeze sources and build variables")
+            metrics = rows[arm]["metrics"]
+            rows[arm]["metrics"] = {
+                key: value for key, value in metrics.items()
+                if (key.startswith(COUNTER_PREFIXES) != args.timing
+                    or key.startswith(("last_frame_", "retired_instructions_")))
+            }
         pairs.append(rows)
 
     result = summarize(pairs, aa, calibration)

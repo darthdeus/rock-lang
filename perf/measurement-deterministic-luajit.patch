@@ -1,0 +1,406 @@
+diff --git a/src/Makefile b/src/Makefile
+index 0b8c04f7..1d78c7cf 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -408,2 +408,6 @@ DASM_ARCH= $(TARGET_LJARCH)
+
++ifneq (,$(findstring ROCK_PERF_DETERMINISTIC ,$(TARGET_TESTARCH)))
++  DASM_AFLAGS+= -D ROCK_PERF_DETERMINISTIC
++endif
++
+ ifneq (,$(findstring LJ_LE 1,$(TARGET_TESTARCH)))
+diff --git a/src/lj_arch.h b/src/lj_arch.h
+index 59452b4a..aee201c2 100644
+--- a/src/lj_arch.h
++++ b/src/lj_arch.h
+@@ -767,2 +767,7 @@ extern void *lj_win_loadlib(const char *path);
+
++#if defined(ROCK_PERF_DETERMINISTIC) && \
++    !(LJ_TARGET_OSX && LJ_TARGET_ARM64 && LJ_HASJIT && defined(ROCK_PERF_HEAP_BASE) && LUAJIT_SECURITY_PRNG == 0)
++#error "ROCK_PERF_DETERMINISTIC requires the Apple Silicon measurement VM"
++#endif
++
+ #define LJ_SECURITY_MODE \
+diff --git a/src/lj_asm.c b/src/lj_asm.c
+index 52b7b388..db1c11d3 100644
+--- a/src/lj_asm.c
++++ b/src/lj_asm.c
+@@ -1126,2 +1126,5 @@ static uint32_t ir_khash(ASMState *as, IRIns *ir)
+   } else {
++#ifdef ROCK_PERF_DETERMINISTIC
++    return hashidentity(irt_toitype(ir->t));
++#else
+     lj_assertA(irt_isgcv(ir->t), "hash of bad IR type %d", irt_type(ir->t));
+@@ -1132,2 +1135,3 @@ static uint32_t ir_khash(ASMState *as, IRIns *ir)
+     hi = lo + HASH_BIAS;
++#endif
+ #endif
+diff --git a/src/lj_asm_arm64.h b/src/lj_asm_arm64.h
+index 7706186d..630ad130 100644
+--- a/src/lj_asm_arm64.h
++++ b/src/lj_asm_arm64.h
+@@ -829,2 +829,3 @@ static void asm_href(ASMState *as, IRIns *ir, IROp merge)
+   uint32_t khash;
++  int fixedhash = isk;
+   MCLabel l_end, l_loop;
+@@ -893,2 +894,8 @@ static void asm_href(ASMState *as, IRIns *ir, IROp merge)
+   khash = isk ? ir_khash(as, irkey) : 1;
++#ifdef ROCK_PERF_DETERMINISTIC
++  if (!isk && irt_isaddr(kt) && !irt_isstr(kt)) {
++    khash = hashidentity(irt_toitype(kt));
++    fixedhash = 1;
++  }
++#endif
+   if (khash == 0) {
+@@ -899,3 +906,3 @@ static void asm_href(ASMState *as, IRIns *ir, IROp merge)
+     emit_lso(as, A64I_LDRx, tmp, tab, offsetof(GCtab, node));
+-    if (isk) {
++    if (fixedhash) {
+       Reg tmphash = ra_allock(as, khash, allow);
+diff --git a/src/lj_bcread.c b/src/lj_bcread.c
+index c8e884a8..197a4f2c 100644
+--- a/src/lj_bcread.c
++++ b/src/lj_bcread.c
+@@ -24,2 +24,5 @@
+ #include "lj_strfmt.h"
++#ifdef ROCK_PERF_DETERMINISTIC
++#include "lj_dispatch.h"
++#endif
+
+@@ -340,3 +343,3 @@ GCproto *lj_bcread_proto(LexState *ls)
+   sizept = (MSize)sizeof(GCproto) +
+-	   sizebc*(MSize)sizeof(BCIns) +
++	   (MSize)proto_bcsize(sizebc) +
+ 	   sizekgc*(MSize)sizeof(GCRef);
+@@ -368,2 +371,5 @@ GCproto *lj_bcread_proto(LexState *ls)
+   bcread_bytecode(ls, pt, sizebc);
++#ifdef ROCK_PERF_DETERMINISTIC
++  lj_dispatch_init_proto(G(ls->L), pt);
++#endif
+   bcread_uv(ls, pt, sizeuv);
+diff --git a/src/lj_clib.c b/src/lj_clib.c
+index 283b6e42..590ee307 100644
+--- a/src/lj_clib.c
++++ b/src/lj_clib.c
+@@ -310,2 +310,21 @@ static void *clib_getsym(CLibrary *cl, const char *name)
+
++#ifdef ROCK_PERF_DETERMINISTIC
++/* Binary fractions keep frame deltas exact. The wall clock still bounds the run. */
++static uint64_t rock_clock_ticks;
++static int rock_clock_enabled;
++
++LUA_API void luaJIT_rock_clock_frame(uint32_t frame)
++{
++  uint64_t start = (uint64_t)frame << 14;
++  rock_clock_enabled = 1;
++  if (rock_clock_ticks < start)
++    rock_clock_ticks = start;
++}
++
++static double rock_clock_next(void)
++{
++  return (double)++rock_clock_ticks * (1.0 / 1048576.0);
++}
++#endif
++
+ /* -- C library indexing -------------------------------------------------- */
+@@ -385,2 +404,6 @@ TValue *lj_clib_index(lua_State *L, CLibrary *cl, GCstr *name)
+       SetLastError(oldwerr);
++#endif
++#ifdef ROCK_PERF_DETERMINISTIC
++      if (rock_clock_enabled && strcmp(sym, "stone_get_time") == 0)
++        p = (void *)rock_clock_next;
+ #endif
+diff --git a/src/lj_ctype.c b/src/lj_ctype.c
+index 89bb1865..dd1ee131 100644
+--- a/src/lj_ctype.c
++++ b/src/lj_ctype.c
+@@ -150,4 +150,8 @@ CTKWDEF(CTKWNAMEDEF)
+ #define ct_hashtype(info, size)	(hashrot(info, size) & CTHASH_MASK)
++#ifdef ROCK_PERF_DETERMINISTIC
++#define ct_hashname(name) (((GCstr *)(name))->sid & CTHASH_MASK)
++#else
+ #define ct_hashname(name) \
+   (hashrot(u32ptr(name), u32ptr(name) + HASH_BIAS) & CTHASH_MASK)
++#endif
+
+diff --git a/src/lj_dispatch.c b/src/lj_dispatch.c
+index 9879a95b..2fb8bb9d 100644
+--- a/src/lj_dispatch.c
++++ b/src/lj_dispatch.c
+@@ -84,2 +84,25 @@ void lj_dispatch_init(GG_State *GG)
+ #if LJ_HASJIT
++#ifdef ROCK_PERF_DETERMINISTIC
++void lj_dispatch_init_proto(global_State *g, GCproto *pt)
++{
++  HotCount start = (HotCount)(G2J(g)->param[JIT_P_hotloop]*HOTCOUNT_LOOP - 1);
++  MSize i;
++  for (i = 0; i < pt->sizebc; i++)
++    proto_hot(pt)[i] = (PerfHotCount){ start, 0 };
++}
++
++void lj_dispatch_clear_penalties(global_State *g)
++{
++  GCobj *o;
++  for (o = gcref(g->gc.root); o; o = gcnext(o)) {
++    if (o->gch.gct == ~LJ_TPROTO) {
++      GCproto *pt = gco2pt(o);
++      MSize i;
++      for (i = 0; i < pt->sizebc; i++)
++        proto_hot(pt)[i].penalty = 0;
++    }
++  }
++}
++#endif
++
+ /* Initialize hotcount table. */
+@@ -87,2 +110,8 @@ void lj_dispatch_init_hotcount(global_State *g)
+ {
++#ifdef ROCK_PERF_DETERMINISTIC
++  GCobj *o;
++  for (o = gcref(g->gc.root); o; o = gcnext(o))
++    if (o->gch.gct == ~LJ_TPROTO)
++      lj_dispatch_init_proto(g, gco2pt(o));
++#else
+   int32_t hotloop = G2J(g)->param[JIT_P_hotloop];
+@@ -93,2 +122,3 @@ void lj_dispatch_init_hotcount(global_State *g)
+     hotcount[i] = start;
++#endif
+ }
+diff --git a/src/lj_dispatch.h b/src/lj_dispatch.h
+index bd22a2d3..2ffce7dd 100644
+--- a/src/lj_dispatch.h
++++ b/src/lj_dispatch.h
+@@ -132,6 +132,10 @@ typedef struct GG_State {
+
+-#define hotcount_get(gg, pc) \
++#ifdef ROCK_PERF_DETERMINISTIC
++#define hotcount_get(gg, pt, pc) (proto_hot(pt)[proto_bcpos((pt), (pc))-1].count)
++#else
++#define hotcount_get(gg, pt, pc) \
+   (gg)->hotcount[(u32ptr(pc)>>2) & (HOTCOUNT_SIZE-1)]
+-#define hotcount_set(gg, pc, val) \
+-  (hotcount_get((gg), (pc)) = (HotCount)(val))
++#endif
++#define hotcount_set(gg, pt, pc, val) \
++  (hotcount_get((gg), (pt), (pc)) = (HotCount)(val))
+
+@@ -141,2 +145,6 @@ LJ_FUNC void lj_dispatch_init(GG_State *GG);
+ LJ_FUNC void lj_dispatch_init_hotcount(global_State *g);
++#ifdef ROCK_PERF_DETERMINISTIC
++LJ_FUNC void lj_dispatch_init_proto(global_State *g, GCproto *pt);
++LJ_FUNC void lj_dispatch_clear_penalties(global_State *g);
++#endif
+ #endif
+diff --git a/src/lj_func.c b/src/lj_func.c
+index e9dd36d8..249ee5d3 100644
+--- a/src/lj_func.c
++++ b/src/lj_func.c
+@@ -148,3 +148,7 @@ GCfunc *lj_func_newL_empty(lua_State *L, GCproto *pt, GCtab *env)
+     uv->immutable = ((v / PROTO_UV_IMMUTABLE) & 1);
++#ifdef ROCK_PERF_DETERMINISTIC
++    uv->dhash = (uint32_t)v & 0xff;
++#else
+     uv->dhash = (uint32_t)(uintptr_t)pt ^ (v << 24);
++#endif
+     setgcref(fn->l.uvptr[i], obj2gco(uv));
+@@ -174,3 +178,7 @@ GCfunc *lj_func_newL_gc(lua_State *L, GCproto *pt, GCfuncL *parent)
+       uv->immutable = ((v / PROTO_UV_IMMUTABLE) & 1);
++#ifdef ROCK_PERF_DETERMINISTIC
++      uv->dhash = v & 0xff;
++#else
+       uv->dhash = (uint32_t)(uintptr_t)mref(parent->pc, char) ^ (v << 24);
++#endif
+     } else {
+diff --git a/src/lj_mcode.c b/src/lj_mcode.c
+index 209bd745..6714e07a 100644
+--- a/src/lj_mcode.c
++++ b/src/lj_mcode.c
+@@ -110,2 +110,6 @@ static void mcode_setprot(jit_State *J, void *p, size_t sz, DWORD prot)
+ #include <sys/mman.h>
++#ifdef ROCK_PERF_DETERMINISTIC
++#include <stdio.h>
++#include <stdlib.h>
++#endif
+
+@@ -296,2 +300,20 @@ static void *mcode_alloc(jit_State *J, size_t sz)
+ {
++#ifdef ROCK_PERF_DETERMINISTIC
++  const uintptr_t base = 0x7500000000ULL;
++  size_t mapped = (sz + LJ_PAGESIZE - 1) & ~(size_t)(LJ_PAGESIZE - 1);
++  size_t previous = (J->szmcarea + LJ_PAGESIZE - 1) & ~(size_t)(LJ_PAGESIZE - 1);
++  uintptr_t address = J->mcarea ? (uintptr_t)J->mcarea + previous : base;
++  void *p;
++  if (!J->mcarea) mcode_setrange(J, base + (MCODE_RANGE64 >> 1));
++  if (!mcode_inrange(J, address, mapped)) {
++    fputs("LuaJIT measurement mcode range exhausted\n", stderr);
++    abort();
++  }
++  p = mcode_alloc_at(address, mapped, MCPROT_GEN);
++  if ((uintptr_t)p != address) {
++    fprintf(stderr, "LuaJIT measurement mcode address unavailable: %p\n", (void *)address);
++    abort();
++  }
++  return p;
++#else
+   uintptr_t hint;
+@@ -346,2 +368,3 @@ fail:
+   return NULL;
++#endif
+ }
+diff --git a/src/lj_obj.h b/src/lj_obj.h
+index 281e3082..981c56e0 100644
+--- a/src/lj_obj.h
++++ b/src/lj_obj.h
+@@ -421,2 +421,14 @@ typedef struct GCproto {
+ #define proto_bc(pt)		((BCIns *)((char *)(pt) + sizeof(GCproto)))
++#ifdef ROCK_PERF_DETERMINISTIC
++/* A word per bytecode instruction, immediately after the bytecode. */
++typedef struct PerfHotCount {
++  uint16_t count;
++  uint16_t penalty;
++} PerfHotCount;
++LJ_STATIC_ASSERT(sizeof(PerfHotCount) == sizeof(BCIns));
++#define proto_hot(pt) ((PerfHotCount *)(proto_bc(pt) + (pt)->sizebc))
++#define proto_bcsize(n) ((n)*(sizeof(BCIns) + sizeof(PerfHotCount)))
++#else
++#define proto_bcsize(n) ((n)*sizeof(BCIns))
++#endif
+ #define proto_bcpos(pt, pc)	((BCPos)((pc) - proto_bc(pt)))
+diff --git a/src/lj_parse.c b/src/lj_parse.c
+index 2de6edad..31e9f166 100644
+--- a/src/lj_parse.c
++++ b/src/lj_parse.c
+@@ -29,2 +29,5 @@
+ #include "lj_vmevent.h"
++#ifdef ROCK_PERF_DETERMINISTIC
++#include "lj_dispatch.h"
++#endif
+
+@@ -1718,3 +1721,3 @@ static GCproto *fs_finish(LexState *ls)
+   /* Calculate total size of prototype including all colocated arrays. */
+-  sizept = sizeof(GCproto) + fs->pc*sizeof(BCIns) + fs->nkgc*sizeof(GCRef);
++  sizept = sizeof(GCproto) + proto_bcsize(fs->pc) + fs->nkgc*sizeof(GCRef);
+   sizept = (sizept + sizeof(TValue)-1) & ~(sizeof(TValue)-1);
+@@ -1738,2 +1741,5 @@ static GCproto *fs_finish(LexState *ls)
+   fs_fixup_bc(fs, pt, (BCIns *)((char *)pt + sizeof(GCproto)), fs->pc);
++#ifdef ROCK_PERF_DETERMINISTIC
++  lj_dispatch_init_proto(G(L), pt);
++#endif
+   fs_fixup_k(fs, pt, (void *)((char *)pt + ofsk));
+diff --git a/src/lj_record.c b/src/lj_record.c
+index 34fb2a92..4a6e6cc2 100644
+--- a/src/lj_record.c
++++ b/src/lj_record.c
+@@ -1895,4 +1895,8 @@ static void check_call_unroll(jit_State *J, TraceNo lnk)
+ 	lj_trace_flush(J, lnk);  /* Flush trace that only returns. */
+-	/* Set a small, pseudo-random hotcount for a quick retry of JFUNC*. */
+-	hotcount_set(J2GG(J), J->pc+1, lj_prng_u64(&J2G(J)->prng) & 15u);
++	/* Set a small hotcount for a quick retry of JFUNC*. */
++#ifdef ROCK_PERF_DETERMINISTIC
++	hotcount_set(J2GG(J), J->pt, J->pc+1, 7);
++#else
++	hotcount_set(J2GG(J), J->pt, J->pc+1, lj_prng_u64(&J2G(J)->prng) & 15u);
++#endif
+       }
+diff --git a/src/lj_tab.h b/src/lj_tab.h
+index 9822c326..42e75f96 100644
+--- a/src/lj_tab.h
++++ b/src/lj_tab.h
+@@ -45,3 +45,7 @@ static LJ_AINLINE Node *hashmask(const GCtab *t, uint32_t hash)
+ #define hashnum(t, o)		hashlohi((t), (o)->u32.lo, ((o)->u32.hi << 1))
+-#if LJ_GC64
++#ifdef ROCK_PERF_DETERMINISTIC
++/* Identity equality stays pointer-based. Use a stable bucket per key type. */
++#define hashidentity(type) ((uint32_t)~(type) & 0x1ffffu)
++#define hashgcref(t, r) hashmask((t), hashidentity(gcrefu(r) >> 47))
++#elif LJ_GC64
+ #define hashgcref(t, r) \
+diff --git a/src/lj_trace.c b/src/lj_trace.c
+index 7638e6fe..5949268d 100644
+--- a/src/lj_trace.c
++++ b/src/lj_trace.c
+@@ -77,2 +77,8 @@ LUA_API int luaJIT_health_read(lua_State *L, uint32_t version, void *out, size_t
+ {
++#ifdef ROCK_PERF_DETERMINISTIC
++  /* The stock penalty/hotcount offsets cannot tune this VM. */
++  static const char build_id[] = "a4c064539ea931274d407e1249b4bb575424a0f4+rock-measure-1";
++#else
++  static const char build_id[] = "a4c064539ea931274d407e1249b4bb575424a0f4+rock-health-1";
++#endif
+   jit_State *J;
+@@ -85,3 +91,3 @@ LUA_API int luaJIT_health_read(lua_State *L, uint32_t version, void *out, size_t
+   h->capabilities = LUAJIT_HEALTH_COUNTERS | LUAJIT_HEALTH_COALESCING | LUAJIT_HEALTH_VMCATEGORY;
+-  memcpy(h->build_id, "a4c064539ea931274d407e1249b4bb575424a0f4+rock-health-1", sizeof("a4c064539ea931274d407e1249b4bb575424a0f4+rock-health-1"));
++  memcpy(h->build_id, build_id, sizeof(build_id));
+   gap = J->mcarea ? (uint64_t)((char *)J->mctop - (char *)J->mcbot) : 0;
+@@ -377,3 +383,7 @@ int lj_trace_flushall(lua_State *L)
+   /* Clear penalty cache. */
++#ifdef ROCK_PERF_DETERMINISTIC
++  lj_dispatch_clear_penalties(J2G(J));
++#else
+   memset(J->penalty, 0, sizeof(J->penalty));
++#endif
+   /* Free the whole machine code and invalidate all exit stub groups. */
+@@ -461,2 +471,9 @@ void lj_trace_freestate(global_State *g)
+
++#ifdef ROCK_PERF_DETERMINISTIC
++LUA_API int luaJIT_rock_deterministic(void)
++{
++  return 1;
++}
++#endif
++
+ /* -- Penalties and blacklisting ------------------------------------------ */
+@@ -478,2 +495,14 @@ static void penalty_pc(jit_State *J, GCproto *pt, BCIns *pc, TraceError e)
+ {
++#ifdef ROCK_PERF_DETERMINISTIC
++  PerfHotCount *slot = &proto_hot(pt)[proto_bcpos(pt, pc)];
++  uint32_t previous = slot->penalty;
++  uint32_t jitter = (previous * 0x9e3779b9u) >> (32-PENALTY_RNDBITS);
++  uint32_t val = previous ? 2*previous + jitter : PENALTY_MIN;
++  UNUSED(e);
++  if (val > PENALTY_MAX) {
++    blacklist_pc(pt, pc);
++    return;
++  }
++  slot->penalty = (uint16_t)val;
++#else
+   uint32_t i, val = PENALTY_MIN;
+@@ -497,3 +526,4 @@ setpenalty:
+   J->penalty[i].reason = e;
+-  hotcount_set(J2GG(J), pc+1, val);
++#endif
++  hotcount_set(J2GG(J), pt, pc+1, val);
+ }
+@@ -700,3 +730,3 @@ static int trace_abort(jit_State *J)
+       if (e == LJ_TRERR_RETRY)
+-	hotcount_set(J2GG(J), startpc+1, 1);  /* Immediate retry. */
++	hotcount_set(J2GG(J), gco2pt(gcref(J->cur.startpt)), startpc+1, 1);  /* Immediate retry. */
+       else
+@@ -905,3 +935,3 @@ void LJ_FASTCALL lj_trace_hot(jit_State *J, const BCIns *pc)
+   /* Reset hotcount. */
+-  hotcount_set(J2GG(J), pc, J->param[JIT_P_hotloop]*HOTCOUNT_LOOP);
++  hotcount_set(J2GG(J), curr_proto(J->L), pc, J->param[JIT_P_hotloop]*HOTCOUNT_LOOP);
+   /* Only start a new trace if not recording or inside __gc call or vmevent. */
+diff --git a/src/vm_arm64.dasc b/src/vm_arm64.dasc
+index 83111e53..678b2a69 100644
+--- a/src/vm_arm64.dasc
++++ b/src/vm_arm64.dasc
+@@ -321,2 +321,12 @@
+ |.macro hotcheck, delta
++|.if ROCK_PERF_DETERMINISTIC
++|  ldr LFUNC:CARG1, [BASE, FRAME_FUNC]
++|  and LFUNC:CARG1, CARG1, #LJ_GCVMASK
++|  ldr CARG1, LFUNC:CARG1->pc
++|  ldr CARG2w, [CARG1, #PC2PROTO(sizebc)]
++|  add CARG1, PC, CARG2, lsl #2
++|  ldrh CARG2w, [CARG1, #-4]
++|  subs CARG2, CARG2, #delta
++|  strh CARG2w, [CARG1, #-4]
++|.else
+ |  lsr CARG1, PC, #1
+@@ -327,2 +337,3 @@
+ |  strh CARG2w, [GL, CARG1]
++|.endif
+ |.endmacro
