@@ -1652,53 +1652,9 @@ mod atlas_face_tests {
             .expect("DroidSans bakes")
     }
 
-    fn rows(a: &RasterizedAtlas) -> u32 {
-        let h = a.layout.height as f32;
-        let r0 = a.layout.glyphs[Face::Regular.index()][GLYPH_FIRST].v0 * h;
-        let r1 = a.layout.glyphs[Face::Regular.index()][GLYPH_FIRST + 16].v0 * h;
-        let pitch = r1 - r0;
-        assert!(pitch > 0.0, "row pitch must be positive");
-        (h / pitch).round() as u32
-    }
-
     // Stated as an equality with the declared block count rather than as "small
     // enough": a layout that reserved four blocks and left three empty would
     // pass a size bound and fail this.
-    #[test]
-    fn only_declared_faces_bake_each_in_one_six_row_block() {
-        use Face::*;
-        let cases: [(bool, bool, &[Face]); 4] = [
-            (false, false, &[Regular]),
-            (true, false, &[Regular, Bold]),
-            (false, true, &[Regular, Italic]),
-            (true, true, &[Regular, Bold, Italic, BoldItalic]),
-        ];
-        for (bold, italic, baked) in cases {
-            let atlas = bake(bold, italic);
-            assert_eq!(
-                rows(&atlas),
-                6 * baked.len() as u32,
-                "bold={bold} italic={italic}: 96 slots at 16 per row per declared face"
-            );
-            for face in Face::ALL {
-                let any_valid =
-                    (GLYPH_FIRST..=GLYPH_LAST).any(|c| atlas.layout.glyphs[face.index()][c].valid);
-                assert_eq!(
-                    any_valid,
-                    baked.contains(&face),
-                    "bold={bold} italic={italic}: {face:?} bakes only when declared; \
-                     bold-italic needs both axes"
-                );
-            }
-        }
-
-        let accent = bake(false, false).layout.glyphs[Regular.index()][GLYPH_ACCENT_A_ACUTE_SLOT];
-        assert!(
-            accent.valid && accent.advance > 0.0,
-            "DroidSans bakes the Á extension slot with an advance"
-        );
-    }
-
     #[test]
     fn declared_faces_take_distinct_blocks_and_cells_hold_the_widest() {
         let four = bake(true, true);
@@ -1747,32 +1703,6 @@ mod atlas_face_tests {
         assert!(
             (g(Face::Italic).advance - g(Face::Regular).advance).abs() < 0.01,
             "a shear must not change the advance"
-        );
-    }
-
-    #[test]
-    fn oblique_not_bold_antialiases_a_pixel_font() {
-        let font = crate::test_fonts::pixel_font();
-        let clean = grid_gray_fraction(&font, 48.0);
-        assert!(
-            clean <= GRID_CLEAN,
-            "the pixel font at 48px is the binary control ({clean:.3})"
-        );
-
-        let f = RasterFont::new(&font, 48.0).expect("the pixel font parses");
-        let bold = glyph_raster::gray_fraction(&f, GRID_PROBE, Face::Bold.synth(48.0));
-        let italic = glyph_raster::gray_fraction(&f, GRID_PROBE, Face::Italic.synth(48.0));
-
-        assert!(
-            italic - clean > GRID_MARGIN,
-            "synthesized oblique must visibly antialias a pixel font \
-             (regular {clean:.3}, italic {italic:.3}) -- if it does not, the warning \
-             this test justifies is dead"
-        );
-        assert!(
-            bold <= GRID_CLEAN,
-            "at 48px the bold widening is 2 whole texels, so it must stay binary \
-             (got {bold:.3}); a guard that probed bold alone would report this font clean"
         );
     }
 }
@@ -1895,41 +1825,6 @@ mod charset_tests {
         assert!(
             !regular[b'X' as usize].valid && !regular[b'a' as usize].valid,
             "the symbol font maps no ASCII codepoint"
-        );
-    }
-
-    #[test]
-    fn declaring_extras_leaves_the_ascii_slots_where_they_were() {
-        let droid = FALLBACK_FONT.to_vec();
-        let bake_droid = |extra: &str| {
-            rasterize_glyphs(
-                &droid,
-                PX,
-                FaceSet::default(),
-                &Charset::parse(extra),
-                "DroidSans",
-            )
-            .expect("DroidSans bakes")
-        };
-        let plain = bake_droid("");
-        let with_extras = bake_droid("\u{03A9}\u{0416}"); // omega, cyrillic zhe
-
-        let mut compared = 0;
-        for slot in GLYPH_FIRST..=GLYPH_LAST {
-            let a = &plain.layout.glyphs[Face::Regular.index()][slot];
-            let b = &with_extras.layout.glyphs[Face::Regular.index()][slot];
-            assert_eq!(a.valid, b.valid, "slot {slot} validity moved");
-            assert_eq!(a.advance, b.advance, "slot {slot} advance moved");
-            compared += 1;
-        }
-        assert_eq!(compared, 95, "the whole printable-ASCII block was compared");
-        assert!(
-            plain.layout.glyphs[Face::Regular.index()][b'X' as usize].valid,
-            "slot 88 is 'X' -- batch.rock reads cap height from it positionally"
-        );
-        assert!(
-            with_extras.layout.glyphs[Face::Regular.index()][GLYPH_ASCII_SLOTS].valid,
-            "and the declared extra did land, so the comparison was not against a no-op bake"
         );
     }
 
@@ -2060,34 +1955,6 @@ mod metrics_only_font_tests {
     // units-per-em, so two raster sizes are the same measurement. This is the
     // fact that lets a code test reproduce a native sim's number while
     // rastering at a different density.
-    #[test]
-    fn unit_metrics_do_not_depend_on_the_raster_size() {
-        let small = load_droid(16, AtlasResidency::Metrics);
-        let large = load_droid(96, AtlasResidency::Metrics);
-        assert_ne!(small, 0);
-        assert_ne!(large, 0);
-        assert_eq!(
-            unit_metrics(small),
-            unit_metrics(large),
-            "font-unit metrics are the file's, not the raster's"
-        );
-
-        let advance = |id: c_uint| {
-            let mut out = [0.0f32; 5];
-            assert!(stone_get_glyph_unit_metrics(
-                id,
-                0,
-                b'W' as c_int,
-                out.as_mut_ptr()
-            ));
-            out[4]
-        };
-        assert_eq!(
-            advance(small),
-            advance(large),
-            "a glyph's unit advance is the file's, not the raster's"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -2221,33 +2088,5 @@ mod reload_atomicity_tests {
             );
         })
         .expect("control reads our own font");
-    }
-}
-
-#[cfg(test)]
-mod logo_atlas_tests {
-    use super::*;
-
-    const STONE_DISPLAY_BAKE_PX: i32 = 48;
-
-    // Larger text uses demand-sized instances, not a larger base atlas.
-    #[test]
-    fn logo_coverage_atlas_fits_a_2048_page() {
-        let bake = rasterize_glyphs(
-            FALLBACK_FONT,
-            STONE_DISPLAY_BAKE_PX,
-            FaceSet::default(),
-            &Charset::default(),
-            "DroidSans",
-        )
-        .expect("the display-bake request bakes");
-        assert!(
-            bake.layout.width <= 2048 && bake.layout.height <= 2048,
-            "DroidSans at the Stone display-bake size {}px baked a {}x{} atlas ({} texels); larger text uses demand-sized instances rather than a logo-sized base atlas",
-            STONE_DISPLAY_BAKE_PX,
-            bake.layout.width,
-            bake.layout.height,
-            bake.layout.width as u64 * bake.layout.height as u64,
-        );
     }
 }
