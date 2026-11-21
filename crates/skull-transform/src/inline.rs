@@ -593,7 +593,7 @@ fn compact_live_template(
 ) -> (MirFunc, HashMap<Idx<Block>, Idx<Block>>) {
     let nested = std::mem::take(&mut source.nested_fns);
     let facts = ArenaFacts::of(&source);
-    compact_region(&source, &source, &facts, nested, live, &[])
+    compact_region(&source, &source, &facts, nested, live, &[], false)
 }
 
 fn compact_region(
@@ -603,6 +603,7 @@ fn compact_region(
     nested: Vec<MirFunc>,
     live: &LiveClosure,
     extra_cleanup_loads: &[Idx<Cell>],
+    split_for_emission: bool,
 ) -> (MirFunc, HashMap<Idx<Block>, Idx<Block>>) {
     let source_inst_span = arena.emit_inst_span();
     let source_cell_span = arena.emit_cell_span();
@@ -712,22 +713,14 @@ fn compact_region(
 
     copy_inst_metadata(&mut template, arena, &inst_map);
     copy_projection_metadata(&mut template, arena, &inst_map);
-    copy_inst_tables!(
-        template,
-        arena,
-        inst_map,
-        bound_trees,
-        resolved_bound_trees,
-        param_default_guards,
-    );
-    for (param, values) in &arena.param_default_values {
-        let values = values
-            .iter()
-            .filter_map(|value| inst_map.get(value).copied())
-            .collect::<Vec<_>>();
-        if !values.is_empty() {
-            template.param_default_values.insert(*param, values);
-        }
+    copy_inst_tables!(template, arena, inst_map, bound_trees, resolved_bound_trees);
+    if split_for_emission {
+        template.materialized_default_guards.extend(
+            arena
+                .materialized_default_guards
+                .iter()
+                .filter_map(|id| inst_map.get(id)),
+        );
     }
     for (old_id, plan) in &arena.closure_env_plans {
         let Some(&new_id) = inst_map.get(old_id) else {
@@ -765,16 +758,16 @@ fn compact_region(
 
 pub(crate) fn compact_split_body(header: &MirFunc, arena: &MirFunc, facts: &ArenaFacts) -> MirFunc {
     let live = live_closure_at(header, arena);
-    let (mut compact, _) = compact_region(
+    compact_region(
         header,
         arena,
         facts,
         Vec::new(),
         &live,
         &arena.inline_cleanup_load_cells,
-    );
-    compact.param_default_materialized = arena.param_default_materialized.clone();
-    compact
+        true,
+    )
+    .0
 }
 
 fn map_forced_cells(

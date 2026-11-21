@@ -90,12 +90,7 @@ impl StructuredEmit for FnEmit<'_> {
         cond: Idx<Inst>,
         else_bb: Idx<Block>,
     ) -> Option<Option<Idx<Block>>> {
-        let materialized_default = self
-            .f
-            .param_default_guards
-            .get(&cond)
-            .is_some_and(|index| self.f.param_default_materialized.contains(index));
-        if materialized_default {
+        if self.f.materialized_default_guards.contains(&cond) {
             return Some(Some(else_bb));
         }
         self.folded_block

@@ -2339,12 +2339,9 @@ impl<'a> Builder<'a> {
             let ty = self.body.binding_arena[pb]
                 .declared_ty
                 .or_else(|| self.binding_ty(pb));
-            if self
+            let materialized = self
                 .constant_param_default(self.body, self.inf, *def, ty)
-                .is_some()
-            {
-                self.f.param_default_materialized.insert(i);
-            }
+                .is_some();
             let (slot, cells, marker) = if let Some((leaves, _)) = self.group_binds.get(&raw(pb)) {
                 (
                     self.param_slot(i)?,
@@ -2369,7 +2366,8 @@ impl<'a> Builder<'a> {
             for &cell in &cells {
                 self.f.mark_default_param(cell);
             }
-            let (default, join) = self.branch_for_parameter_default(i, slot, &cells, marker);
+            let (default, join) =
+                self.branch_for_parameter_default(materialized, slot, &cells, marker);
             self.cur = default;
             let values = match slot {
                 RepLayout::Opaque => {
@@ -2385,10 +2383,9 @@ impl<'a> Builder<'a> {
                     self.tuple_repr_to_slots(value, shape)?
                 }
             };
-            for (&cell, &value) in cells.iter().zip(&values) {
+            for (&cell, value) in cells.iter().zip(values) {
                 self.store_cell(cell, value);
             }
-            self.f.param_default_values.insert(i, values);
             if matches!(slot, RepLayout::Opaque) {
                 self.f.set_term(self.cur, Term::Goto(join));
             } else {
@@ -2401,7 +2398,7 @@ impl<'a> Builder<'a> {
 
     fn branch_for_parameter_default(
         &mut self,
-        param: usize,
+        materialized: bool,
         slot: &RepLayout,
         cells: &[Idx<Cell>],
         marker: Lit,
@@ -2410,7 +2407,9 @@ impl<'a> Builder<'a> {
             let cur = s.emit_cur(Inst::Load(cell));
             let marker = s.emit_cur(Inst::Const(marker));
             let missing = s.emit_cur(Inst::Eq(cur, marker));
-            s.f.param_default_guards.insert(missing, param);
+            if materialized {
+                s.f.materialized_default_guards.insert(missing);
+            }
             missing
         };
         if matches!(slot, RepLayout::Tuple(_)) {
