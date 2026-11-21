@@ -1,5 +1,3 @@
-//! MIR preparation shared by Lua and JS emission.
-
 use rustc_hash::FxHashSet as HashSet;
 
 use bone_core::prelude::CompilerError;

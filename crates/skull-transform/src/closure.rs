@@ -1,5 +1,3 @@
-//! Hoist lambda bodies and replace their implicit captures with environment fields.
-
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::scope::{Ownership, ScopeId, ScopeTree, non_dominating_by_value_captures};

@@ -1,5 +1,3 @@
-//! Resolve bounded iterator calls and adapt their concrete return layout.
-
 use bone_core::prelude::CompilerError;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
