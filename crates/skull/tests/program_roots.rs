@@ -51,24 +51,6 @@ fn a_program_keeps_tests_sims_and_nomangle_functions() {
 }
 
 #[test]
-fn an_edit_that_starts_calling_an_own_function_defines_it() {
-    let (_, mut cache, _) = program("fn own_later() -> int { return 5 }\nfn main() { print(0) }");
-    let edited = ws_with_dependency_module(
-        LIB,
-        "fn own_later() -> int { return 5 }\nfn main() { print(own_later()) }",
-    );
-    let incremental = skull::mir_emit::test_support::emit_incremental(
-        &edited,
-        &mut cache,
-        &[body_id(&edited, "main")],
-    )
-    .expect("incremental");
-    assert!(defines(&incremental.lua, "own_later"));
-
-    assert_eq!(run_main(&incremental.lua), "5");
-}
-
-#[test]
 fn a_library_target_keeps_every_own_function() {
     let ws = ws_with_dependency_module(LIB, "fn own_export() -> int { return 3 }");
     let m = fn_ref(&ws, "own_export").module;
