@@ -1,0 +1,7 @@
+//=== TEST CASE: foreign_map_get_Generic ===
+//! expect: calls non-@noalloc `get`
+@noalloc fn lookup(map: Map<int, int>, key: int) -> int? { return map.get(key) }
+
+//=== TEST CASE: arbitrary_descriptor_Generic ===
+//! expect: calls non-@noalloc `__nb_checked_index`
+@noalloc fn lookup(buf: any, i: int) -> int { return __nb_checked_index(buf, i) }

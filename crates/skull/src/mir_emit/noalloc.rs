@@ -16,26 +16,74 @@ pub fn required(ws: &Workspace) -> bool {
     })
 }
 
-fn scalar_intrinsic(file: &str, f: &Function) -> bool {
-    is_stdlib_module_file(file)
-        && f.annotations.iter().any(|a| a.is_builtin("intrinsic"))
-        && f.inline_body.is_some_and(|(backend, body)| {
-            backend == FnBackend::Lua
-                && matches!(
-                    body.as_str(),
-                    "math.abs(x)"
-                        | "math.sin(x)"
-                        | "math.cos(x)"
-                        | "math.tan(x)"
-                        | "math.sqrt(x)"
-                        | "math.exp(x)"
-                        | "math.log(x)"
-                        | "math.ceil(x)"
-                        | "math.atan2(y, x)"
-                        | "math.pow(a, b)"
-                        | "(x == 0 and x or math.floor(x))"
-                )
-        })
+fn scalar_intrinsic(
+    ws: &Workspace,
+    file: &str,
+    f: &Function,
+    mf: &MirFunc,
+    call: Idx<Inst>,
+    args: &[Idx<Inst>],
+) -> bool {
+    let Some((FnBackend::Lua, body)) = f.inline_body else {
+        return false;
+    };
+    if !is_stdlib_module_file(file) {
+        return false;
+    }
+    if matches!(
+        mf.call_sites.get(&call).map(|site| &site.site.op),
+        Some(skull_mir::site::SiteOp::Synthesized("__nb_checked_index"))
+    ) && f.name.as_str() == "__nb_checked_index"
+    {
+        // Only lowering's own NativeBuffer descriptor is known to have a raw len field.
+        const BOUNDS_CHECK: &str = r#"if i < 0 or i >= buf.len then
+error("NativeBuffer index out of bounds: index " .. tostring(i) ..
+" is outside [0, " .. tostring(buf.len) .. ")")
+end
+return i"#;
+        return body
+            .as_str()
+            .trim()
+            .lines()
+            .map(str::trim)
+            .eq(BOUNDS_CHECK.lines());
+    }
+    if !f.annotations.iter().any(|a| a.is_builtin("intrinsic")) {
+        return false;
+    }
+    match body.as_str().trim() {
+        "math.abs(x)"
+        | "math.sin(x)"
+        | "math.cos(x)"
+        | "math.tan(x)"
+        | "math.sqrt(x)"
+        | "math.exp(x)"
+        | "math.log(x)"
+        | "math.ceil(x)"
+        | "math.atan2(y, x)"
+        | "math.pow(a, b)"
+        | "(x == 0 and x or math.floor(x))"
+        | "string.len(s)"
+        | "return value" => true,
+        // The arena registry only stores plain maps allocated by the stdlib.
+        // General Maps can have a foreign __index metamethod.
+        "return map[key]" => {
+            let owner = mf
+                .call_sites
+                .get(&call)
+                .and_then(|site| mf.site_owners.get(site.owner.0 as usize));
+            owner.is_some_and(|owner| {
+                let module = ws.module(owner.func.module);
+                module.file.as_str() == "<stdlib>/arena.rock"
+                    && module.functions[owner.func.func].name.as_str() == "__arena_store_any"
+            }) && args.first().is_some_and(|&map| matches!(
+                mf.field_projection(map),
+                Some((base, field)) if field.as_str() == "stores"
+                    && matches!(mf.insts[base], Inst::Global(name) if name.as_str() == "__ARENA_REGISTRY")
+            ))
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn validate(
@@ -97,10 +145,12 @@ pub(super) fn validate(
             continue;
         }
         let reason = match mf.insts[id] {
-            Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
+            Inst::Call { func, ref args } | Inst::CallMulti { func, ref args, .. } => {
                 let module = ws.module(func.module);
                 let callee = &module.functions[func.func];
-                if marked(callee) || scalar_intrinsic(module.file.as_str(), callee) {
+                if marked(callee)
+                    || scalar_intrinsic(ws, module.file.as_str(), callee, mf, id, args)
+                {
                     continue;
                 }
                 format!(

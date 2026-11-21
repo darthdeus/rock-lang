@@ -34,12 +34,12 @@ global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
 }
 
 // The heterogeneous registry requires identity erasure; casts recover the type.
-@identity_erasure @inline
+@noalloc @identity_erasure @inline
 fn __arena_store_erased<T>(store: ArenaStore<T>) -> any { return store }
 
 // Non-generic so a synthesized `Inst::Call` and `inline(lua)` walkers can
 // target it; the typed wrapper below recovers the element type.
-@inline @nomangle fn __arena_store_any(scene_id: int, arena_id: int) -> any? {
+@noalloc @inline @nomangle fn __arena_store_any(scene_id: int, arena_id: int) -> any? {
     let store = __ARENA_REGISTRY.stores.get(arena_id) ?? return null
     let owner: ArenaStore<int> = cast(store)
     if owner._owner_scene_id != scene_id { return null }
@@ -81,7 +81,7 @@ fn __arena_store_or_dead<T>(arena: Arena<T>) -> ArenaStore<T> {
 }
 
 // Non-generic for the `enumerate(arena)` lowering's synthesized call.
-@nomangle fn __arena_store_or_empty(scene_id: int, arena_id: int) -> any {
+@noalloc @nomangle fn __arena_store_or_empty(scene_id: int, arena_id: int) -> any {
     let boxed = __arena_store_any(scene_id, arena_id)
     if is_null(boxed) { return __arena_store_erased(__ARENA_DEAD_STORE) }
     return boxed.unwrap()

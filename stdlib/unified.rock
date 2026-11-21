@@ -1431,7 +1431,7 @@ fn __op_null_coalesce<T>(a: T?, b: T) -> T { return a ?? b }
 
 fn __op_null_coalesce<T>(a: T?, b: T?) -> T? { return a ?? b }
 
-@nowrite @intrinsic @nomangle @inline fn is_null(value: any) -> bool { return value == null }
+@noalloc @nowrite @intrinsic @nomangle @inline fn is_null(value: any) -> bool { return value == null }
 
 // Out of line, so a failing site is one call. Level 2 is the function that
 // unwrapped, for both the error position and the traceback.
@@ -1439,7 +1439,7 @@ fn __op_null_coalesce<T>(a: T?, b: T?) -> T? { return a ?? b }
     error(message .. "\n" .. debug.traceback("", 2), 2)
 """
 
-@inline fn unwrap<T>(@unwraps value: T?) -> T {
+@noalloc @inline fn unwrap<T>(@unwraps value: T?) -> T {
     if value != null { return value }
     __unwrap_failed("unwrap() called on null value")
     return phantom()

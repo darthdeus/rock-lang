@@ -1,0 +1,20 @@
+value V2 { x: float, y: float }
+value Vert { pos: V2, uv: V2, w: float }
+
+@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
+fn nb_vert(n: int) -> NativeBuffer<Vert> { return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n } }
+
+@noalloc @pure fn mk(x: float) -> Vert { return Vert { pos: V2 { x: x, y: x }, uv: V2 { x: x, y: x }, w: x } }
+
+@noalloc fn fill(buf: NativeBuffer<Vert>, n: int) {
+    for i in 0..n {
+        buf[i] = mk(i as float)
+    }
+}
+
+@test(backends = "lua", output = "3 3 3")
+fn native_buffer_writes_nested_leaves() {
+    let buf = nb_vert(4)
+    fill(buf, 4)
+    print("{buf[3].pos.x} {buf[3].uv.y} {buf[3].w}")
+}

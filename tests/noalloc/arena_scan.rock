@@ -1,0 +1,23 @@
+struct Mob { health: int, tag: int }
+struct Found { entity: Entity<Mob>? }
+global STORED: Found? = null
+
+@noalloc fn scan_return_hit(mobs: Arena<Mob>, want: int) -> Entity<Mob>? {
+    for (e, m) in mobs {
+        if m.tag == want { return e }
+    }
+    return null
+}
+
+@test(output = "true 2 true\ntrue true")
+fn scan_returning_an_entity() {
+    let mobs: Arena<Mob> = arena_new()
+    insert(mobs, Mob { health: 10, tag: 1 })
+    insert(mobs, Mob { health: 20, tag: 2 })
+    let hit = scan_return_hit(mobs, 2).unwrap()
+    let again = scan_return_hit(mobs, 2)
+    STORED = Found { entity: scan_return_hit(mobs, 2) }
+    let empty: Arena<Mob> = arena_new()
+    print("{scan_return_hit(mobs, 2) == again} {get(hit).unwrap().tag} {STORED.unwrap().entity == again}")
+    print("{scan_return_hit(mobs, 3) == null} {scan_return_hit(empty, 1) == null}")
+}
