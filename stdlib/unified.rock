@@ -1914,23 +1914,7 @@ const TAU: float = 6.283185307179586
 const PHI: float = 1.618033988749895
 const EPSILON: float = 0.0000001
 
-// Inspect function for debugging — pretty-prints any value.
-// cycle_detect=true (default) tracks visited tables to detect cycles.
-// precision=-1 (default) means no float precision formatting.
-// Positional leaf index -> declared field name for a flat-enum box, or nil
-// when the layout is anything but an exact walk. A value payload widens into
-// the box's positional slots, so leaf naming walks the variant's DECLARED
-// positions: a `nom` slot whose type is a flat leaf-record (a value tier with
-// no nominal-typed field) expands to that record's fields, every other slot
-// consumes exactly one leaf. Nested values, GC structs (one nested table, not
-// widened), duplicate names, and leaf-count mismatches all fall back to the
-// established `[i]` rendering rather than risk a mislabeled field.
-// Module-level recursive helper. Hoisted out of `inspect` so each call
-// doesn't allocate a fresh pair of upvalue-capturing closures
-// (`_itbl` / `format_value`) — that closure construction tripped
-// LuaJIT's FNEW abort on every table-shaped inspect call. State that
-// the old closures captured (`visited`, `precision`) is now passed
-// explicitly.
+// Ambiguous flat-enum layouts fall back to positional names to avoid mislabeling.
 @nomangle inline(lua) fn __rock_enum_payload_names(keys: any, pos: any) -> any = """
     local types = _G.__ROCK_TYPE_TABLE
     local n = 0
@@ -1985,6 +1969,7 @@ const EPSILON: float = 0.0000001
     if next(names) == nil then return nil end
     return names
 """
+// Hoisted recursion avoids per-call closures and LuaJIT FNEW aborts.
 @nomangle inline(lua) fn __rock_inspect_value(v: any, indent: string, path: string, visited: any, precision: int) -> string = """
     local vt = type(v)
     if vt == "cdata" then
@@ -2292,11 +2277,7 @@ const EPSILON: float = 0.0000001
     return "\"" + escaped + "\"";
 """
 
-// Smart float formatting for `"{x}"` interpolation: scientific for
-// very small/large magnitudes; up to 4 decimals otherwise, trailing
-// zeros and trailing decimal point trimmed. Module-level (not an
-// IIFE per interpolation) so LuaJIT can trace per-frame string
-// building without an FNEW abort.
+// Module-level formatting avoids a per-interpolation closure and LuaJIT FNEW abort.
 @intrinsic @nomangle inline(lua) fn __rock_format_float(v: float) -> string = """
     local av = math.abs(v)
     if av ~= 0 and (av < 0.0001 or av >= 1000000) then
@@ -2437,39 +2418,9 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     v
 }
 
-// --- Column-stored Map: the V-INDEPENDENT half -------------------------------
-//
-// A `Map<K, V>` at a column-eligible V (a `nobox` value struct) is not a bare
-// table but `{ spine, data, free_indices, occupied_count }` -- a hash spine of
-// slot indices over the same column storage `[V]` already uses. Arena's
-// bookkeeping-SoA vocabulary deliberately: the two are one structure and are
-// meant to collapse. The stored representation follows the value layout.
-//
-//
-// These helpers touch the SPINE and the free list only -- never a leaf -- which
-// is what lets them be plain scalar bodies. The V-dependent half is the existing
-// `column_element_repr`/`column_element_store`, which lowering applies to
-// `data` at the slot these return. Non-generic on purpose: `Inst::Call` carries
-// no generic arguments, so a synthesized call can only target a fn like these.
-
-// --- the shared slot core -----------------------------------------------------
-//
-// The free-list discipline `Arena<T>` and column `Map<K,V>` both run: a released
-// slot is reused before the high-water mark grows, and a freed slot keeps its
-// stale leaves rather than being nil'd (nothing reads a free slot, and a nil
-// would punch a hole in a dense numeric column).
-//
-// `m` supplies `free_indices` and `occupied_count`, whose names the two already
-// share; `hw` is whichever column's length IS the high-water mark -- `data` for
-// a column Map, the occupancy column for an Arena. PRESENCE stays with each
-// collection, because a hash spine and an occupancy-plus-generation column
-// answer different questions and unifying them would need a variant tag.
-//
-// Non-generic on purpose: `Inst::Call` carries no generic arguments, so a
-// synthesized call can only target a fn like this one. That the element type
-// never appears is what makes one core serve both.
-//
-// `free_indices` is always an ordinary `[int]` with no column or stride header.
+// Column maps and arenas reuse free slots before growing. Freed leaves remain
+// untouched: nil would create holes in dense columns. `free_indices` is [int].
+// The slot helpers are non-generic because synthesized calls lack type arguments.
 @nomangle inline(lua) fn __slot_alloc(m: any, hw: any) -> int = """
     local fi = m.free_indices
     local s
@@ -2722,19 +2673,9 @@ fn VecIter<T>.next(it) -> (bool, T) {
     return (true, v)
 }
 
-// Iterator combinators -- lazy wrapper iterators over any `I: Iterator<T>`
-// (structural: any type with `next(I) -> (bool, T)`). All `@inline`: a chain
-// like `v.iter().map(f).filter(p)` fully inlines at its `for` loop, SROA peels
-// every cursor, and the FORL-recovery pass (`skull-transform/src/forl.rs`)
-// rewrites the whole chain into a native counted `for` -- the chain IS the
-// hand-written loop.
-// Shapes are load-bearing for that matcher: map/enumerate are straight-line;
-// filter fetches INSIDE its skip loop and take_while separates its two stop
-// causes, so each layer contributes either a plain ok-flag join, a skip edge
-// back to the fetch head, or a stop edge to a done block -- the shapes
-// forl.rs peels. The fetch-outside rule (the 8.8x standalone-`next()` trace
-// cliff) does NOT apply here: bounded combinators are always fully inlined
-// (residual bound calls are compile errors), so no callable `next()` exists.
+// FORL recovery relies on these shapes: map/enumerate are straight-line,
+// filter fetches inside its skip loop, and take_while keeps separate stop edges.
+// Bounded combinators inline completely; residual bound calls are errors.
 
 @consume struct MapIter<I, T, U> {
     __inner: I,
