@@ -118,10 +118,7 @@ fn Vec2.to_array(v) -> [float] {
     return [v.x, v.y]
 }
 
-// Vec2 constructors. The IVec2 overload stays engine-side (IVec2 is
-// engine-defined). @inline only where each param is used once -- the one-arg
-// v(x) reuses x, so V0 leaves it non-inline (would double-eval args like
-// v(off / 32)); V1 will bind to a local and make it inline-safe too.
+// The one-argument constructor uses x twice; inlining could evaluate it twice.
 @intrinsic @inline @pure fn zero() -> Vec2 { return Vec2 { x: 0, y: 0 } }
 @intrinsic @inline @pure fn v() -> Vec2 { return Vec2 { x: 0, y: 0 } }
 @intrinsic @pure fn v(x: float) -> Vec2 { return Vec2 { x: x, y: x } }
