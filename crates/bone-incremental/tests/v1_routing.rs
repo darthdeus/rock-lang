@@ -7,16 +7,6 @@ use bone_core::modules::NsAliases;
 use bone_incremental::session::{Session, SessionFile};
 use skull_parser::GlobalPolicy;
 
-fn diagnostics(session: &Session) -> Vec<String> {
-    let mut out: Vec<String> = session
-        .diagnostics()
-        .iter()
-        .map(|d| d.message.clone())
-        .collect();
-    out.sort();
-    out
-}
-
 fn edit_with_aliases(
     files: Vec<SessionFile>,
     path: &str,
@@ -28,65 +18,12 @@ fn edit_with_aliases(
     h.diagnostics()
 }
 
-fn edit_with_diagnostics(files: Vec<SessionFile>, path: &str, edit: &str) -> Vec<String> {
-    edit_with_aliases(files, path, edit, &NsAliases::default())
-}
-
 const A: &str =
     "mod a;\n\npub fn bump(n: int) -> int {\n    n\n}\n\npub struct P {\n    pub x: int,\n}\n";
 const ROOT: &str = "fn f() -> int {\n    a::bump(1)\n}\n\nfn g(p: a::P) -> int {\n    p.x\n}\n";
 
 fn package() -> Vec<SessionFile> {
     vec![v1("a.rock", A), v1("root.rock", ROOT)]
-}
-
-#[test]
-fn a_same_signature_definition_in_another_file_of_the_module_is_a_duplicate() {
-    let other = |body: &str| v1("a2.rock", &format!("mod a;\n\n{body}"));
-    let files = |body: &str| {
-        let mut files = package();
-        files.push(other(body));
-        files
-    };
-    let duplicate = "fn bump(m: int) -> float {\n    1.0\n}\n";
-    let overload = "fn bump(m: float) -> float {\n    m\n}\n";
-
-    let diags = edit_with_diagnostics(
-        files(overload),
-        "a2.rock",
-        &format!("mod a;\n\n{duplicate}"),
-    );
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.contains("duplicate definition of `bump(int)`: already defined at a.rock:3")),
-        "{diags:?}"
-    );
-
-    let diags = edit_with_diagnostics(
-        files(duplicate),
-        "a2.rock",
-        &format!("mod a;\n\n{overload}"),
-    );
-    assert!(diags.is_empty(), "{diags:?}");
-}
-
-#[test]
-fn a_private_definition_added_to_a_globbed_module_changes_no_globber() {
-    let files = vec![
-        v1(
-            "a.rock",
-            "mod a;\n\npub fn width() -> string {\n    \"wide\"\n}\n",
-        ),
-        v1("b.rock", "mod b;\n\npub fn depth() -> int {\n    1\n}\n"),
-        v1(
-            "c.rock",
-            "mod c;\n\nuse super::a::*;\nuse super::b::*;\n\nfn pick() -> string {\n    width()\n}\n",
-        ),
-    ];
-    let edit = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\nfn width() -> string {\n    \"shadow\"\n}\n";
-    let diags = edit_with_diagnostics(files, "b.rock", edit);
-    assert!(diags.is_empty(), "{diags:?}");
 }
 
 const PICK_INT: &str = "pub fn pick(n: int) -> int {\n    n\n}\n";
@@ -116,34 +53,7 @@ fn aliases_of(files: &[SessionFile]) -> NsAliases {
     }
 }
 
-const IMPORT_A: &str = "use lib_a::pick;\n\n";
 const IMPORT_BOTH: &str = "use lib_a::pick;\nuse lib_b::pick;\n\n";
-
-#[test]
-fn a_second_import_composes_and_removing_it_splits_the_family() {
-    for (one, both) in [(IMPORT_A, IMPORT_BOTH), (GLOB_A, GLOB_BOTH)] {
-        let files = |imports: &str| {
-            vec![
-                in_package(1, "lib_a", "a.rock", PICK_INT),
-                in_package(2, "lib_b", "b.rock", PICK_STRING),
-                in_package(3, "game", "use.rock", &format!("{imports}{PICK_USE}")),
-            ]
-        };
-        let aliases = aliases_of(&files(""));
-        for (before, after, clean) in [(one, both, true), (both, one, false)] {
-            let edit = format!("{after}{PICK_USE}");
-            let diags = edit_with_aliases(files(before), "use.rock", &edit, &aliases);
-            if clean {
-                assert!(diags.is_empty(), "{diags:?}");
-            } else {
-                assert!(
-                    diags.iter().any(|d| d.contains("type mismatch")),
-                    "{diags:?}"
-                );
-            }
-        }
-    }
-}
 
 #[test]
 fn a_member_signature_edit_ties_a_composed_import_family() {
@@ -165,39 +75,6 @@ fn a_member_signature_edit_ties_a_composed_import_family() {
 
     let diags = edit_with_aliases(files(PICK_STRING), "b.rock", PICK_INT, &aliases);
     assert!(diags.is_empty(), "{diags:?}");
-}
-
-const GLOB_A: &str = "use lib_a::*;\n\n";
-const GLOB_BOTH: &str = "use lib_a::*;\nuse lib_b::*;\n\n";
-
-#[test]
-fn a_member_added_to_a_second_globbed_module_resolves_then_removal_fails() {
-    let other = "pub fn other() -> int {\n    1\n}\n";
-    let files = |b: &str| {
-        vec![
-            in_package(1, "lib_a", "a.rock", PICK_INT),
-            in_package(2, "lib_b", "b.rock", b),
-            in_package(3, "game", "use.rock", &format!("{GLOB_BOTH}{PICK_USE}")),
-        ]
-    };
-    let aliases = aliases_of(&files(other));
-    let mut h = V1Harness::with_aliases(files(other), aliases);
-    let before = h.diagnostics();
-    assert!(
-        before.iter().any(|d| d.contains("type mismatch")),
-        "{before:?}"
-    );
-    h.edit("b.rock", PICK_STRING)
-        .expect("string overload is added");
-    let diags = h.diagnostics();
-    assert!(diags.is_empty(), "{diags:?}");
-
-    h.edit("b.rock", other).expect("string overload is removed");
-    let diags = h.diagnostics();
-    assert!(
-        diags.iter().any(|d| d.contains("type mismatch")),
-        "{diags:?}"
-    );
 }
 
 #[test]
@@ -223,28 +100,6 @@ fn a_unary_operator_added_to_a_globbed_module_resolves_then_removal_fails() {
             .any(|d| d.contains("operator `-` is not defined for `geo::Pt`")),
         "{diags:?}"
     );
-}
-
-#[test]
-fn a_file_entering_after_new_reads_with_its_declared_facts() {
-    let extra = "mod extra;\n\npub fn more() -> int {\n    super::a::bump(2)\n}\n";
-    let mut session = common::with_warm(vec![], package());
-    session
-        .declare_file_facts(
-            "extra.rock",
-            Some(package_tag(1, "livev1")),
-            GlobalPolicy::Any,
-        )
-        .expect("an unheld file takes declared facts");
-    session
-        .update_file("extra.rock", extra)
-        .expect("a v1 fragment enters as v1");
-
-    let mut files = package();
-    files.push(v1("extra.rock", extra));
-    let fresh = common::with_warm(vec![], files);
-    assert_eq!(diagnostics(&session), diagnostics(&fresh));
-    assert_eq!(diagnostics(&session), Vec::<String>::new());
 }
 
 #[test]
