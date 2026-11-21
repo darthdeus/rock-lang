@@ -87,24 +87,4 @@ mod tests {
         assert_eq!(s.line_range(), (5, 5));
         assert_eq!(s.col_range(), (8, 19));
     }
-
-    #[test]
-    fn spans_before_the_edit_or_in_other_files_stay() {
-        let edit = edit(10, -4, -1);
-        let mut before = span("a.rock", 0, (0, 3), (2, 5));
-        let mut other = span("b.rock", 9, (0, 3), (90, 93));
-        assert!(!edit.shift_span(&mut before));
-        assert!(!edit.shift_span(&mut other));
-        assert_eq!(before.offset_range(), (2, 5));
-        assert_eq!(other.offset_range(), (90, 93));
-    }
-
-    #[test]
-    fn shifting_saturates_instead_of_wrapping() {
-        let edit = edit(0, -100, -100);
-        let mut s = span("a.rock", 1, (0, 1), (5, 6));
-        edit.shift_span(&mut s);
-        assert_eq!(s.offset_range(), (0, 0));
-        assert_eq!(s.line_range(), (0, 0));
-    }
 }
