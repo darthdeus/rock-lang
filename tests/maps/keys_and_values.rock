@@ -240,3 +240,91 @@ fn map_key_sort_preserves_equal_renderings() {
         assert_eq(keys[i + 10], 2000000000000000 + 2 * i)
     }
 }
+
+@test
+fn map_write_helpers_distinguish_missing_and_existing_keys() {
+    let m: Map<string, int> = map_new()
+    assert_eq(m.get_or_insert("kept", 3), 3)
+    assert_eq(m.get_or_insert("kept", 9), 3)
+    assert_eq(m.update("kept", 5), 3)
+    assert_eq(m["kept"], 5)
+    assert(m.update("absent", 2) == null)
+    assert(!m.contains("absent"))
+    assert(m.upsert("absent", 2) == null)
+    assert_eq(m.upsert("absent", 9), 2)
+    assert_eq(m["absent"], 9)
+    assert_eq(m.len(), 2)
+}
+
+newtype SnapshotLabel(string)
+
+@test
+fn map_snapshots_order_keys_and_keep_their_values() {
+    let words: Map<string, int> = map_new()
+    let labels: Map<SnapshotLabel, int> = map_new()
+    let numbers: Map<int, int> = map_new()
+    for (word, number) in [("2", 2), ("10", 10)] {
+        words[word] = number
+        labels[SnapshotLabel(word)] = number
+        numbers[number] = number
+    }
+    assert_eq(words.keys(), ["10", "2"])
+    assert_eq(words.values(), [10, 2])
+    assert_eq(words.to_array(), [("10", 10), ("2", 2)])
+    assert_eq(labels.keys()[0].0, "10")
+    assert_eq(numbers.keys()[0], 10)
+}
+
+value WalkCell { n: int, tag: int }
+
+fn walking_map<T>(make: (int) -> T) -> Map<string, T> {
+    let m: Map<string, T> = map_new()
+    m["a"] = make(10)
+    m["b"] = make(20)
+    m["c"] = make(30)
+    return m
+}
+
+fn check_map_walk<T>(make: (int) -> T, read: (T) -> int) {
+    let m = walking_map(make)
+    for _ in m { break }
+    let pairs = 0
+    for _ in m { for _ in m { pairs += 1 } }
+    assert_eq(pairs, 9)
+
+    let total = 0
+    for (key, value) in m {
+        m.remove(key)
+        total += read(value)
+    }
+    assert_eq(total, 60)
+    assert(m.is_empty())
+
+    let pending = walking_map(make)
+    let seen = 0
+    for (key, _) in pending {
+        if seen == 0 { pending.remove(if key == "a" { "b" } else { "a" }) }
+        seen += 1
+    }
+    assert_eq((seen, pending.len()), (2, 2))
+
+    let updated = walking_map(make)
+    let sum = 0
+    let count = 0
+    for (key, value) in updated {
+        if count == 0 {
+            for (pending_key, n) in [("a", 110), ("b", 120), ("c", 130)] {
+                if pending_key != key { updated[pending_key] = make(n) }
+            }
+        }
+        sum += read(value)
+        count += 1
+    }
+    assert_eq((count, sum), (3, 260))
+}
+
+@test
+fn map_walks_observe_live_removals_and_updates() {
+    check_map_walk((n: int) => n, (n: int) => n)
+    check_map_walk((n: int) => WalkCell { n, tag: 0 }, (cell: WalkCell) => cell.n)
+}
