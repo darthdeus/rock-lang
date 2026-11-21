@@ -97,7 +97,7 @@ struct JitEvidence<'a> {
 
 fn parse_jit_trace<'a>(
     trace: &'a str,
-    lua: &str,
+    lua_lines: &[&str],
 ) -> Result<BTreeMap<(String, u32), JitEvidence<'a>>> {
     let mut lines = trace.lines();
     if lines.next() != Some("rock.jit-allocation-trace.v2") {
@@ -114,7 +114,6 @@ fn parse_jit_trace<'a>(
         anyhow::bail!("JIT allocation trace has the wrong column header");
     }
 
-    let lua_lines = lua.lines().collect::<Vec<_>>();
     let emitted_starts = lua_lines
         .iter()
         .enumerate()
@@ -206,54 +205,25 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
         if route.is_none() {
             let fields = trimmed.split('\t').collect::<Vec<_>>();
             if matches!(fields.len(), 4 | 5 | 6 | 10) && site_id(fields[0]) {
-                let lua_body_line = fields
-                    .get(4)
-                    .map(|line| line.parse::<u32>())
-                    .transpose()
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "allocation manifest site {} has invalid Lua body line: {error}",
-                            fields[0]
-                        )
-                    })?;
-                if lua_body_line == Some(0) {
-                    anyhow::bail!(
-                        "allocation manifest site {} has zero Lua body line",
-                        fields[0]
-                    );
-                }
-                let local_loop_depth = fields
-                    .get(5)
-                    .map(|depth| depth.parse::<u32>())
-                    .transpose()
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "allocation manifest site {} has invalid local loop depth: {error}",
-                            fields[0]
-                        )
-                    })?
-                    .unwrap_or(0);
-                let result_use = fields.get(6).copied().unwrap_or("unknown");
-                let result_uses = fields
-                    .get(7)
-                    .map(|uses| uses.parse::<u32>())
-                    .transpose()
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "allocation manifest site {} has invalid result use count: {error}",
-                            fields[0]
-                        )
-                    })?
-                    .unwrap_or(0);
-                let aggregate_type = fields.get(8).copied().unwrap_or("-");
-                let aggregate_fields = fields
-                    .get(9)
-                    .map(|count| count.parse::<u32>())
-                    .transpose()
-                    .map_err(|error| anyhow::anyhow!(
-                        "allocation manifest site {} has invalid aggregate field count: {error}", fields[0]
-                    ))?
-                    .unwrap_or(0);
+                let number = |column: usize, name: &str| -> Result<Option<u32>> {
+                    fields
+                        .get(column)
+                        .map(|text: &&str| text.parse::<u32>())
+                        .transpose()
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "allocation manifest site {} has invalid {name}: {error}",
+                                fields[0]
+                            )
+                        })
+                };
+                let lua_body_line = number(4, "Lua body line")?;
+                anyhow::ensure!(
+                    lua_body_line != Some(0),
+                    "allocation manifest site {} has zero Lua body line",
+                    fields[0]
+                );
+                let local_loop_depth = number(5, "local loop depth")?.unwrap_or(0);
                 if sites
                     .insert(
                         fields[0],
@@ -261,10 +231,10 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                             kind: fields[1],
                             source: fields[2],
                             body: fields[3],
-                            result_use,
-                            result_uses,
-                            aggregate_type,
-                            aggregate_fields,
+                            result_use: fields.get(6).copied().unwrap_or("unknown"),
+                            result_uses: number(7, "result use count")?.unwrap_or(0),
+                            aggregate_type: fields.get(8).copied().unwrap_or("-"),
+                            aggregate_fields: number(9, "aggregate field count")?.unwrap_or(0),
                             lua_body_line,
                             routes: [None; 3],
                             local_loop_depth,
@@ -425,38 +395,61 @@ pub(crate) fn render_joined_report_with_jit(
     jit_trace: Option<&str>,
 ) -> Result<String> {
     let filter = RouteFilter::parse(route)?;
-    let sites = parse_manifest(manifest)?;
-    join(sites, parse_activation(activation)?, filter, lua, jit_trace)
+    join(
+        &AllocationSites::new(manifest, lua)?,
+        parse_activation(activation)?,
+        filter,
+        jit_trace,
+    )
 }
 
-pub(crate) fn join_sim(
-    manifest: &str,
-    activation: &str,
-    lua: &str,
-) -> Result<(String, u64, usize)> {
-    let activation = parse_activation(activation)?;
-    anyhow::ensure!(
-        activation.frame_aware,
-        "sim allocation-site activation is not frame-aware v2"
-    );
-    let (frames, active_sites) = (activation.frames, activation.hits.len());
-    let joined = join(
-        parse_manifest(manifest)?,
-        activation,
-        RouteFilter::All,
-        Some(lua),
-        None,
-    )?;
-    Ok((joined, frames, active_sites))
+pub(crate) struct AllocationSites<'a> {
+    sites: BTreeMap<&'a str, Site<'a>>,
+    lua: Option<LuaSource<'a>>,
+}
+
+struct LuaSource<'a> {
+    lines: Vec<&'a str>,
+    starts: BTreeMap<&'a str, u32>,
+}
+
+impl<'a> AllocationSites<'a> {
+    pub(crate) fn new(manifest: &'a str, lua: Option<&'a str>) -> Result<Self> {
+        let sites = parse_manifest(manifest)?;
+        let lua = lua.map(|source| {
+            let lines: Vec<_> = source.lines().collect();
+            let starts = lines
+                .iter()
+                .enumerate()
+                .filter_map(|(index, line)| Some((emitted_body_name(line)?, index as u32 + 1)))
+                .collect();
+            LuaSource { lines, starts }
+        });
+        Ok(Self { sites, lua })
+    }
+
+    pub(crate) fn join_sim(&self, activation: &str) -> Result<(String, u64, usize)> {
+        let activation = parse_activation(activation)?;
+        anyhow::ensure!(
+            activation.frame_aware,
+            "sim allocation-site activation is not frame-aware v2"
+        );
+        let (frames, active_sites) = (activation.frames, activation.hits.len());
+        Ok((
+            join(self, activation, RouteFilter::All, None)?,
+            frames,
+            active_sites,
+        ))
+    }
 }
 
 fn join(
-    sites: BTreeMap<&str, Site<'_>>,
+    report: &AllocationSites<'_>,
     activation: Activation<'_>,
     filter: RouteFilter,
-    lua: Option<&str>,
     jit_trace: Option<&str>,
 ) -> Result<String> {
+    let sites = &report.sites;
     let frames = activation.frames;
     let frame_aware = activation.frame_aware;
     let mut hits = activation.hits;
@@ -480,17 +473,8 @@ fn join(
     });
     hits.sort_by(|a, b| b.frame_hits.cmp(&a.frame_hits).then_with(|| a.id.cmp(b.id)));
 
-    let mut body_starts = BTreeMap::new();
-    let lua_lines = lua.map(|text| text.lines().collect::<Vec<_>>());
-    if let Some(lines) = &lua_lines {
-        for (index, line) in lines.iter().enumerate() {
-            if let Some(name) = emitted_body_name(line) {
-                body_starts.insert(name, index as u32 + 1);
-            }
-        }
-    }
-    let jit = match (jit_trace, lua) {
-        (Some(trace), Some(lua)) => Some(parse_jit_trace(trace, lua)?),
+    let jit = match (jit_trace, &report.lua) {
+        (Some(trace), Some(lua)) => Some(parse_jit_trace(trace, &lua.lines)?),
         (Some(_), None) => anyhow::bail!("JIT allocation trace requires generated Lua"),
         (None, _) => None,
     };
@@ -516,19 +500,15 @@ fn join(
 
     writeln!(out, "filter\t{}", filter.as_str())?;
     writeln!(out, "active_sites\t{}", hits.len())?;
-    let base_header = if frame_aware {
-        "hits/frame\thits\tframe_hits\tactive_frames\tframe_coverage\thits/active_frame\tmax_hits/frame\toutside_hits\troute\tstructural_loop_depth\tkind\tresult_use\tresult_uses\taggregate_type\taggregate_fields\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid"
-    } else {
-        "hits/frame\thits\troute\tstructural_loop_depth\tkind\tresult_use\tresult_uses\taggregate_type\taggregate_fields\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid"
-    };
-    if jit.is_some() {
-        writeln!(
-            out,
-            "{base_header}\tjit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops"
-        )?;
-    } else {
-        writeln!(out, "{base_header}")?;
+    out.push_str("hits/frame\thits");
+    if frame_aware {
+        out.push_str("\tframe_hits\tactive_frames\tframe_coverage\thits/active_frame\tmax_hits/frame\toutside_hits");
     }
+    out.push_str("\troute\tstructural_loop_depth\tkind\tresult_use\tresult_uses\taggregate_type\taggregate_fields\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid");
+    if jit.is_some() {
+        out.push_str("\tjit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops");
+    }
+    out.push('\n');
     for hit in hits {
         let id = hit.id;
         let site = &sites[id];
@@ -571,13 +551,13 @@ fn join(
             .fold(site.local_loop_depth, |depth, route| {
                 depth.max(route.loop_depth)
             });
-        let artifact_line = match (site.lua_body_line, lua_lines.as_ref()) {
-            (Some(body_line), Some(lines)) => {
-                let body_start = body_starts.get(site.body).ok_or_else(|| {
+        let artifact_line = match (site.lua_body_line, &report.lua) {
+            (Some(body_line), Some(lua)) => {
+                let body_start = lua.starts.get(site.body).ok_or_else(|| {
                     anyhow::anyhow!("generated Lua has no emitted body `{}`", site.body)
                 })?;
                 let artifact_line = body_start + body_line - 1;
-                let emitted = lines.get(artifact_line as usize - 1).ok_or_else(|| {
+                let emitted = lua.lines.get(artifact_line as usize - 1).ok_or_else(|| {
                     anyhow::anyhow!(
                         "allocation site {id} points past generated Lua at line {artifact_line}"
                     )
@@ -591,6 +571,12 @@ fn join(
             }
             _ => "?".to_string(),
         };
+        write!(
+            out,
+            "{:.4}\t{}\t",
+            hit.frame_hits as f64 / frames as f64,
+            hit.total_hits
+        )?;
         if frame_aware {
             let active_frames = hit.active_frames.unwrap_or(0);
             let coverage = active_frames as f64 / frames as f64;
@@ -601,22 +587,13 @@ fn join(
             };
             write!(
                 out,
-                "{:.4}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t",
-                hit.frame_hits as f64 / frames as f64,
-                hit.total_hits,
+                "{}\t{}\t{:.4}\t{:.4}\t{}\t{}\t",
                 hit.frame_hits,
                 active_frames,
                 coverage,
                 per_active,
                 hit.max_frame_hits.unwrap_or(0),
                 hit.outside_hits.unwrap_or(0),
-            )?;
-        } else {
-            write!(
-                out,
-                "{:.4}\t{}\t",
-                hit.frame_hits as f64 / frames as f64,
-                hit.total_hits
             )?;
         }
         write!(

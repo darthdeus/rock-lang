@@ -1819,6 +1819,7 @@ pub(crate) fn do_run_allocation_sites(
     )?;
     let manifest = fs_err::read_to_string(&manifest_path)?;
     let generated_lua = fs_err::read_to_string(&generated_lua_path)?;
+    let mut joined_sites: Option<crate::allocation_join::AllocationSites<'_>> = None;
 
     let selected = registry.select(&project_path, names)?;
     for name in &selected {
@@ -1871,8 +1872,14 @@ pub(crate) fn do_run_allocation_sites(
                         activation_path.display()
                     )
                 })?;
-                let (joined, frames, active_sites) =
-                    crate::allocation_join::join_sim(&manifest, &activation, &generated_lua)?;
+                let (joined, frames, active_sites) = match &mut joined_sites {
+                    Some(sites) => sites,
+                    slot @ None => slot.insert(crate::allocation_join::AllocationSites::new(
+                        &manifest,
+                        Some(&generated_lua),
+                    )?),
+                }
+                .join_sim(&activation)?;
                 fs_err::write(&joined_path, joined)?;
                 let env = registry.env(name);
                 records.push(serde_json::json!({
