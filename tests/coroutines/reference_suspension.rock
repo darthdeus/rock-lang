@@ -165,3 +165,55 @@ fn value_fields_survive_multiple_resumes() {
         assert_eq(c.resume() ?? -1, expected)
     }
 }
+
+co fn yield_mid_iteration(n: int) -> Coroutine<int> {
+    let s = 0
+    let i = 0
+    while i < n {
+        i = i + 1
+        if i % 3 == 0 { continue }
+        s = s + i
+        if i % 4 == 0 { yield s }
+        if s > 60 { break }
+        s = s + 1
+    }
+    yield -s
+}
+
+@test(output = "9\n32\n-69")
+fn test_yield_mid_iteration() {
+    let c = yield_mid_iteration(100)
+    let v: int? = c.resume()
+    while v != null {
+        print(v)
+        v = c.resume()
+    }
+}
+
+// An outer `continue` from an inner loop that yields.
+co fn outer_continue(rows: int) -> Coroutine<int> {
+    let r = 0
+    while r < rows {
+        r = r + 1
+        let c = 0
+        while c < 4 {
+            c = c + 1
+            if c == r { continue }
+            if c > r {
+                yield r * 10 + c
+                continue
+            }
+            if (r + c) % 3 == 0 { break }
+        }
+    }
+}
+
+@test(output = "12\n13\n14\n34")
+fn test_outer_continue_with_yield() {
+    let c = outer_continue(4)
+    let v: int? = c.resume()
+    while v != null {
+        print(v)
+        v = c.resume()
+    }
+}

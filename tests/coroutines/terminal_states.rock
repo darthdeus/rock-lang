@@ -217,3 +217,34 @@ fn test_empty_on_killed_hook_kills_cleanly() {
     let st = status(c)
     print("first={first} status={st}")
 }
+
+co fn watched() -> Coroutine<int> {
+    on_killed(() => { print("killed!") })
+    on_resume(() => { print("pumped") })
+    defer { print("cleanup ran") }
+    yield 1
+    yield 2
+}
+
+@test(output = "pumped\n1\npumped\n2\ncleanup ran\nkilled!")
+fn hooks_fire_on_kill() {
+    let c = watched()
+    print(c.resume())
+    print(c.resume())
+    c.kill()
+}
+
+co fn deferred() -> Coroutine<int, int> {
+    defer { print("d1") }
+    defer { print("d2") }
+    yield 1
+    return 99
+}
+
+@test(output = "1\nd2\nd1\nnil\n99")
+fn defers_lifo_on_terminal() {
+    let c = deferred()
+    print(c.resume())
+    print(c.resume())
+    print(c.result())
+}
