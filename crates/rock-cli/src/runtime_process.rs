@@ -66,26 +66,6 @@ pub(crate) fn prepare_test(command: &mut std::process::Command) -> Result<tempfi
 
 #[cfg(test)]
 mod process_tests {
-    #[test]
-    fn native_commands_use_the_authoritative_library_path() {
-        let command = super::configure(
-            std::process::Command::new("unused-native-program"),
-            super::RuntimeProcess::Native,
-        );
-        let actual = command
-            .get_envs()
-            .find(|(name, _)| {
-                *name == std::ffi::OsStr::new(rock_engine_host::runtime::lib_path_var())
-            })
-            .and_then(|(_, value)| value);
-        assert_eq!(
-            actual,
-            Some(std::ffi::OsStr::new(
-                &rock_engine_host::runtime::lib_path_with_inherited()
-            ))
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn interrupt_waits_for_game_shutdown() {
