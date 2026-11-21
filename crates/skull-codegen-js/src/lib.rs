@@ -215,12 +215,7 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("map_new", 0, "new Map()"),
 ];
 
-/// JS bodies for the debug-mode bounds-checked NativeBuffer access the
-/// emitter's `Index`/`StoreIndex` lowering calls (`__nb_checked_get` /
-/// `__nb_checked_set`) -- the JS analog of the stdlib inline(lua) helpers
-/// (`stdlib/unified.rock`) that back the same calls on luajit. Prepend to any emitted JS
-/// program that indexes a buffer. The NaN-into-integer-buffer rejection is the
-/// pinned store-edge debug check; it is unconditional here -- the JS harness has no release mode.
+/// Prepend for NativeBuffer indexing; JS always enables the NaN-to-integer check.
 pub const JS_NB_CHECK_SHIMS: &str = "\
 function __nb_checked_get(buf, i) {
   if (i < 0 || i >= buf.len) {
@@ -304,17 +299,8 @@ function __table_len(t) {
 }
 "#;
 
-/// Map iteration (`Inst::MapNext`, the Lua `k, v = next(t, k)` protocol). JS has
-/// no stateless `next`, so `__map_next(m, k)` walks the native Map's keys in
-/// INSERTION order (Map order is backend-defined by doctrine -- Lua hash order vs
-/// JS insertion order), returning the next key after `k` (null at exhaustion).
-/// Backed by a per-map cursor cache (`WeakMap<Map, {it, lastKey}>`): `k === null`
-/// starts a fresh `m.keys()` iterator (a NEW loop over the map restarts); `k ===
-/// lastKey` is the O(1) common advance; any mismatch (nested / interleaved
-/// iteration over the same map, or a cache lost to GC) rescans from a fresh
-/// iterator to `k` then advances. Deletion/insertion mid-iteration follows the
-/// live JS keys iterator. The value side is read separately (`m.get(k)`), so no
-/// per-step pair is allocated.
+/// JS lacks stateless `next`: iteration uses insertion order and rescans on
+/// interleaved cursors. Null starts a new iteration; mutations follow JS iterators.
 pub const JS_MAP_ITER_RUNTIME: &str = r#"
 var __map_cursor = new WeakMap();
 function __map_next(m, k) {
@@ -564,19 +550,8 @@ function __try_call(f) {
 }
 "#;
 
-/// The `__op_eq` runtime: deep structural equality matching Rock's stdlib
-/// `__op_eq` (verified on luajit: reference structs, value structs, tuples,
-/// enums, newtypes all compare BY CONTENTS; primitives by value). Lua `nil` maps
-/// to both JS `null` and `undefined` (an absent arg / an array hole), so both
-/// count as nil. A Vec compares its live logical storage, not reserved capacity
-/// or representation metadata, so a drained tail slot is invisible.
-/// Structs are `{__ty, ...}` plain objects (the
-/// `__rock_create_struct` shape: a `__ty` string tag, no metatable), so a
-/// key-walk that includes `__ty` covers the type check for free. A capturing
-/// lambda is a CodeRef env record `{ __slot, .. }` (`convert_closures`): a callable
-/// value, so -- like a raw foreign fn -- it compares by IDENTITY, never by walking its
-/// captures (matching luajit's `__rock_fn_mt` identity-leaf rule and pre-arc
-/// arrow `===`).
+/// Match Lua equality: null and undefined are nil, Vecs use live storage,
+/// and callable values compare by identity.
 pub const JS_STRUCTURAL_EQ: &str = r#"
 // Per-type equality for GC-carrying value structs (`build_vt_eq_defs` fills it):
 // GC-ref fields by reference, scalar/nested-value fields structural. An entry is
@@ -934,16 +909,7 @@ function inspect(obj, cycle_detect, precision) {
 function inspect_formatted(obj, precision) { return inspect(obj, true, precision); }
 "#;
 
-/// `deepcopy`: the recursive `__rock_deepcopy_value` clone (stdlib/unified.rock).
-/// A `seen` Map (object identity) preserves the graph -- a shared reference copies
-/// ONCE, a cycle terminates. Primitives and bare functions pass through by identity;
-/// a TypedArray (NativeBuffer `.ptr` or a leaf view) is rebuilt over a copy of its
-/// `ArrayBuffer`, copied once per buffer, so a value-struct buffer's leaf views
-/// alias the copy's `.ptr` as they alias the original's; a `Map` and an array (a Vec's
-/// `_data`) copy element-wise; every other object (a struct `{__ty,...}`, a CodeRef
-/// env record `{__slot,...}`, a box) copies own keys. A copied env record keeps its
-/// logical slot and copies its captures, so calls remain fresh while mutable boxes
-/// do not alias the source.
+/// Preserve cycles, sharing and TypedArray buffer aliases in the copy.
 pub const JS_DEEPCOPY_RUNTIME: &str = r#"
 function __rock_deepcopy_value(obj, seen) {
   if (obj === null || obj === undefined) return obj;
@@ -980,20 +946,8 @@ function __rock_deepcopy_value(obj, seen) {
 function deepcopy(obj) { return __rock_deepcopy_value(obj, new Map()); }
 "#;
 
-/// The logging runtime: JS ports of the `inline(lua)` dedup/throttle
-/// impls in `stdlib/logging.rock`. Rendered by their original names
-/// (`is_host_log_fn`), so `log_once`/`log_throttled` (macros -> `_log_once_impl`
-/// / `_log_throttled_*_impl`) route here. `__rock_log_emit` hands records to
-/// `__G.__rock_log_sink` when one is installed (the JS face of Lua's
-/// `_G.__rock_log_sink` seam); its no-sink fallback is `print("[cat] msg")`,
-/// so lines land in the same per-test buffer as `print`.
-/// The one Rock global (`__rock_log_level`) lives in `__G` (unified with the
-/// module-globals path); dedup/throttle/counts/sites/now are bare vars (never
-/// Rock globals). `_log_once_impl` COUNTS rather than flagging, and the throttle
-/// impl records its own counts, because `log_suppression_summary` reports the
-/// totals -- a boolean dedup cannot answer "this site fired 38k times".
-/// `__rock_log_now` uses `Date.now()` as the os.clock() analog (the fallback
-/// test uses a huge interval, so the absolute value never matters).
+/// The log sink is `__G.__rock_log_sink`; without it, records go to print.
+/// Deduplication and throttling count suppressions for the summary.
 pub const JS_LOG_RUNTIME: &str = r#"
 function __rock_log_init() {
   if (__G.__rock_log_level == null || __G.__rock_log_level < 0) __G.__rock_log_level = 2;
@@ -1223,14 +1177,7 @@ function __rock_globals_install_bridge() {
 }
 "#;
 
-/// The coroutine runtime: JS ports of the stdlib `__rock_coroutine_kill` /
-/// `__rock_coroutine_run_defers` inline(lua) bodies (`stdlib/unified.rock`),
-/// plus the `error` global backing the transform's `Inst::Global("error")` +
-/// `CallValue` raise shape (layout-stamp check, `await` re-raise). Defer
-/// failures go through `__rock_log` (error level, `CO` tag) exactly as the
-/// Lua body does, so an installed log sink sees them. Nil checks are truthiness (`!c.__defers`, `if
-/// (c.__inner)`) so
-/// `undefined` and `null` both count as nil, matching the subset's loose rule.
+/// Coroutine defer failures reach the log sink; null and undefined both mean nil.
 pub const JS_CORO_RUNTIME: &str = r#"
 function error(m) { throw new Error(m); }
 function __rock_coroutine_run_defers(c) {
@@ -1273,14 +1220,7 @@ function __rock_coroutine_kill(c) {
 }
 "#;
 
-/// Ordinary-fn `defer` unwinding (`skull_mir::mir::DEFER_PUSH`), the JS port of
-/// the Lua prelude's cleanup stack (`skull::PRELUDE_TEMPLATE`). Registering a
-/// defer pushes its cleanup closure and every scope-exit splice pops it, so the
-/// stack holds exactly the cleanups of scopes still open. A body that pushes
-/// catches what escapes it and calls `__rock_defer_unwind` with the depth it was
-/// entered at. The original error wins: an `Error` (what `error` throws, the
-/// Lua string error) or a string carries the cleanup's message; any other value
-/// is rethrown unchanged and the message goes to the log.
+/// Defer unwinding preserves the original error when a cleanup also fails.
 pub const JS_DEFER_RUNTIME: &str = r#"
 var __rock_defer_stack = [];
 var __rock_defer_top = 0;
@@ -1322,14 +1262,8 @@ function __rock_defer_unwind(base, err) {
 }
 "#;
 
-/// JS runtime preamble for the string subset (T2): `lua_tostring` reproduces
-/// Lua's `tostring`/`..` number formatting (`%.14g`), and `__rock_format_float`
-/// ports the stdlib `@nomangle inline(lua)` helper (`stdlib/unified.rock`,
-/// `%.2g` for tiny/huge magnitudes else `%.4f` trailing-zero-trimmed) that
-/// backs the default float `{x}` interpolation hole. `__c_g` is C `printf`
-/// `%.Pg`, reconstructed from a properly-rounded `toExponential` digit string
-/// (no double-rounding). Prepend to any emitted program that touches strings;
-/// the harness's `print` uses `lua_tostring` for the same parity.
+/// Match Lua number formatting; C-style significant digits require correct
+/// rounding without double-rounding.
 pub const JS_STRING_RUNTIME: &str = r##"
 // P significant decimal digits of a positive finite double, rounded
 // half-to-EVEN like C printf (JS toExponential rounds half-UP -- diverges on
