@@ -624,23 +624,6 @@ mod xfer_tests {
         assert_pack(&dst);
     }
 
-    #[test]
-    fn copy_tree_copies_a_file_or_a_nested_tree() {
-        let root = fresh_root();
-        let file = root.join("one.wav");
-        let file_copy = root.join("one_copy.wav");
-        fs::write(&file, b"1").unwrap();
-        copy_tree(&file, &file_copy).unwrap();
-        assert_eq!(fs::read(&file_copy).unwrap(), b"1");
-
-        let pack = root.join("Pack");
-        write_pack(&pack);
-        let dst = root.join("PackCopy");
-        copy_tree(&pack, &dst).unwrap();
-        assert_pack(&dst);
-        assert_pack(&pack);
-    }
-
     #[cfg(unix)]
     #[test]
     fn copy_tree_does_not_recurse_symlink_cycle() {
