@@ -540,7 +540,6 @@ fn area() -> int {
     );
     h.assert_clean();
 
-    // Third rebuild, through the file-add path.
     h.update("h.rock", "fn use_area() -> int { area() }");
     h.assert_clean();
 }
@@ -958,7 +957,6 @@ fn fuzz_session_fixture_package_graph() {
         return;
     }
 
-    // Only root-package files are mutated, as in a real project edit.
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/incremental_package/app");
     let graph =

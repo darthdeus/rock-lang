@@ -18,12 +18,10 @@ use crate::span_shift;
 
 pub use bone_core::modules::NsAliases;
 
-/// Unique identifier of a Body across all modules.
 pub type BodyId = (ModuleId, BodyOwner);
 
 pub use bone_core::text_edit::TextEditDelta;
 
-/// The broadest rebuild needed after an edit.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum UpdateTier {
     #[default]
@@ -216,7 +214,6 @@ pub struct Session {
     declared_facts: FxHashMap<String, (Option<PackageTag>, GlobalPolicy)>,
 }
 
-/// A file entering a session, carrying the facts its package supplies.
 #[derive(Clone, Debug)]
 pub struct SessionFile {
     pub path: String,
@@ -268,7 +265,7 @@ pub struct MacroParam {
     pub ty: String,
 }
 
-/// A macro definition recovered at parse time, before expansion drops it.
+/// Expansion drops macro definitions, so retain their parsed signatures.
 #[derive(Clone, Debug)]
 pub struct MacroDef {
     pub name: Ustr,
@@ -670,7 +667,6 @@ impl Session {
         Ok(session)
     }
 
-    /// Every user file re-parsed from stored text, after the warm modules, unexpanded.
     pub fn combined_unexpanded(&self) -> Result<ModuleSet, CompilerError> {
         let users = self
             .paths
@@ -691,7 +687,6 @@ impl Session {
         }
     }
 
-    /// Parse `text` as a buffer of `path`, with the package facts its stored copy carries.
     pub fn parse_buffer(&self, path: &str, text: &str) -> Result<Ast, CompilerError> {
         let (package, global_policy) = self.facts_of(path);
         parse_with_facts(text, ustr(path), package, global_policy)
@@ -749,7 +744,6 @@ impl Session {
     }
 
     pub fn update_file(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
-        // Callers read these counters as this update's work.
         self.ws
             .reinferred_body_count
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -1053,7 +1047,6 @@ impl Session {
             }
         }
 
-        // Lower the closure with the edited module so references between them resolve.
         let mut edited = module;
         cook_one(&mut edited, &self.registry)?;
         let mut asts: Vec<Ast> = Vec::with_capacity(to_relower.len() + 1);
@@ -1106,7 +1099,7 @@ impl Session {
             reinfer_names.extend(module.global_by_name.keys().copied());
         }
 
-        // Re-lowered modules cannot reuse inference: their arena shifted.
+        // Re-lowering shifts the arena, invalidating cached inference.
         let mut to_reinfer: FxHashSet<ModuleId> = reinfer_names
             .iter()
             .flat_map(|n| self.dependents.get(n).into_iter().flatten().copied())
@@ -1238,7 +1231,6 @@ impl Session {
         let registry = collect_registry(unexpanded.iter());
         reject_macro_name_collisions(&unexpanded)?;
         let (mut ws, user_mids) = self.build(unexpanded, &registry)?;
-        // Build variables are set once at session creation; nothing re-derives them.
         ws.comptime_inputs = self.ws.comptime_inputs.clone();
 
         // Commit -- past this point nothing fails, so `self.ws` never observes a
@@ -1804,7 +1796,6 @@ fn only_functions_changed(old: &[ItemPrint], new: &[ItemPrint]) -> bool {
         })
 }
 
-/// Every definition a cached caller can address by arena index, in index order.
 fn item_names(module: &Module) -> Vec<Ustr> {
     let mut names = Vec::new();
     names.extend(module.functions.values().map(|f| f.name));
@@ -1856,7 +1847,6 @@ fn fingerprint(value: impl std::hash::Hash) -> u64 {
     h.finish()
 }
 
-/// Nominal definitions whose users must see a re-lowered interface.
 fn exported_type_names(module: &Module) -> impl Iterator<Item = Ustr> + '_ {
     module.nominals.keys().copied()
 }
