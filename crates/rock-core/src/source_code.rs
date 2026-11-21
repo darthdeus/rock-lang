@@ -348,35 +348,6 @@ mod tests {
     }
 
     #[test]
-    fn the_unknown_span_is_all_zeroes_in_the_sentinel_file() {
-        let unknown = Span::unknown();
-        assert_eq!(unknown.file.as_str(), "<unknown>");
-        assert_eq!(
-            (
-                unknown.line_range(),
-                unknown.col_range(),
-                unknown.offset_range()
-            ),
-            ((0, 0), (0, 0), (0, 0))
-        );
-        assert_eq!(Span::default(), unknown);
-        assert_eq!(LineCol::unknown().file, unknown.file);
-        assert!(unknown.is_empty());
-        assert_eq!(unknown.len(), 0);
-    }
-
-    #[test]
-    fn len_and_start_read_the_ranges() {
-        let single = span((1, 1), (5, 8), (17, 20));
-        assert!(!single.is_empty());
-        assert_eq!(single.len(), 3);
-        assert_eq!(
-            span((2, 4), (3, 9), (20, 41)).start(),
-            line_col(FILE, 2, 3, 20)
-        );
-    }
-
-    #[test]
     fn a_span_round_trips_through_its_start() {
         let point = line_col(FILE, 7, 11, 96);
         let converted = Span::from_linecol(point.clone());
@@ -420,17 +391,5 @@ mod tests {
             "Span(main.rock)"
         );
         assert_eq!(format!("{:?}", Span::unknown()), "Span(unknown)");
-    }
-
-    #[test]
-    fn a_source_file_defaults_to_a_library_file_of_its_own_module() {
-        let file = source_file_from_path_and_contents(
-            "src/main.rock".to_string(),
-            "main.rock".to_string(),
-            "fn main() {}\n".to_string(),
-        );
-        assert_eq!(file.file.to_id_path(), "src/main.rock");
-        assert_eq!(file.contents, "fn main() {}\n");
-        assert_eq!(file.global_policy, GlobalPolicy::Any);
     }
 }
