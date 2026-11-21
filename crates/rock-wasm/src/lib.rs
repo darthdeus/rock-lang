@@ -1,10 +1,5 @@
 //! The Rock compiler as a WebAssembly module, for a browser Worker.
 //!
-//! A raw `cdylib` with a JSON-over-linear-memory ABI rather than
-//! wasm-bindgen: the Worker needs strings in and strings out, and this keeps
-//! the build to `cargo build --target wasm32-unknown-unknown` with no
-//! generated JS glue or CLI version to keep in lockstep with the crate.
-//!
 //! ABI: the host writes a UTF-8 JSON request into memory from
 //! [`rock_alloc`], calls [`rock_request`] (which takes ownership of that
 //! buffer), and reads the JSON response at [`rock_output_ptr`] /
