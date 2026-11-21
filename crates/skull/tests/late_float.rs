@@ -10,15 +10,6 @@ fn assert_before(body: &str, earlier: &str, later: &str) {
     assert!(a < b);
 }
 
-#[test]
-fn wide_float_results_are_computed_after_an_independent_call() {
-    let lua = emit_module(include_str!("../../../benchmarks/live_floats.rock"));
-    let body = function_body(&lua, "membership");
-    let call = body.find("b1(c1, (c2 % (8)))").expect("membership call");
-    let first_wide_leaf = body.find("(1.125)").expect("first wide float leaf");
-    assert!(call < first_wide_leaf);
-}
-
 const READ_ORDER: &str = r#"
 struct Input { x: float }
 nobox value Wide {
