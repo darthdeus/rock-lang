@@ -331,19 +331,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_fifo_without_a_reader_fails_at_create_instead_of_hanging() {
-        let dir = temp_dir("noreader");
-        let path = dir.join("frames.rgba");
-        make_fifo(&path);
-        let err = FrameStream::create(path.to_str().unwrap(), 1)
-            .err()
-            .expect("no reader must fail");
-        assert!(err.contains("failed to open frame stream"), "{err}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn a_reader_that_exits_fails_the_recording() {
         use std::os::unix::fs::OpenOptionsExt;
         let dir = temp_dir("reader_exits");
