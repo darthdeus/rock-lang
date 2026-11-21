@@ -97,3 +97,84 @@ fn test_write_field_ref_with_overload_set() {
     write_through(m, .attack_co, 3)
     print("{field_get(m, .attack_co)}")
 }
+
+fn default_none<T>() -> T? { null }
+
+global default_calls: int = 0
+
+fn default_tick() -> int { default_calls += 1; 7 }
+
+struct DefaultBox<T> {
+    option: T? = default_none(),
+    count: int = default_tick(),
+}
+
+struct NestedDefaults {
+    item: DefaultBox<int> = DefaultBox {},
+    tag: string = "{if default_tick() > 0 { "x" } else { "y" }}",
+    parts: (int, [int]) = (default_tick(), [default_tick()]),
+    selected: int = match default_tick() { 7 => 1, _ => 0 },
+}
+
+@test
+fn default_fields_evaluate_only_when_omitted() {
+    default_calls = 0
+    let init = NestedDefaults {}
+    let other: DefaultBox<string> = DefaultBox {}
+    let set: DefaultBox<int> = DefaultBox { count: 9 }
+    assert_eq(default_calls, 6)
+    assert_eq((init.item.count, init.parts.0, init.parts.1[0]), (7, 7, 7))
+    assert_eq((init.tag, init.selected), ("x", 1))
+    assert_eq((other.count, set.count), (7, 9))
+    assert(init.item.option == null && other.option == null)
+    init.item.option = 3
+    other.option = "ok"
+    assert_eq((init.item.option, other.option), (3, "ok"))
+}
+
+struct CompareNode { n: int, tag: string?, children: [int] }
+struct CompareRoot { node: CompareNode }
+
+fn compare_root(n: int, tag: string?) -> CompareRoot {
+    CompareRoot { node: CompareNode { n, tag, children: [2, 3] } }
+}
+
+@test
+fn structural_equality_follows_nested_fields_and_mutation() {
+    let a = compare_root(1, null)
+    let b = compare_root(1, null)
+    assert(a == b && a != compare_root(1, "a") && a != compare_root(2, null))
+    b.node.tag = "a"
+    assert(a != b)
+    a.node.tag = "a"
+    assert(a == b)
+    a.node.children[1] = 9
+    assert(a != b)
+}
+
+struct GroupedPair<T> { a: T, b: T, label: int }
+
+enum RecordInit { Four { a: int, b: int, c: int, d: int } }
+
+@test
+fn field_groups_evaluate_once_and_share_references() {
+    let calls = 0
+    let label = 8
+    let pair: GroupedPair<[int]> = GroupedPair { a + b: {
+        calls += 1
+        [1, 2]
+    }, label }
+    pair.a.push(3)
+    assert_eq(calls, 1, "one evaluation for the vector group")
+    assert_eq(pair.b[2], 3)
+    assert_eq(pair.label, 8)
+
+    let a = 1
+    let value = RecordInit::Four { a, b + c: 2, d: 4 }
+    match value {
+        Four { a, b, c, d } => assert_eq((a, b, c, d), (1, 2, 2, 4)),
+    }
+
+    let callbacks: GroupedPair<() -> int> = GroupedPair { a + b: () => label, label }
+    assert_eq((callbacks.a(), callbacks.b()), (8, 8))
+}

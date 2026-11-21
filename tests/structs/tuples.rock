@@ -215,3 +215,38 @@ fn safe_nav_call_tuple() {
         assert_eq(r.1, 42)
     }
 }
+
+value FieldText { label: string, count: int }
+value FieldFloat { x: float }
+value FieldNested { text: FieldText, items: [int] }
+
+fn field_text() -> FieldText { FieldText { label: "x", count: 1 } }
+
+@test(type_holes = [[0, "FieldText"], [1, "string"], [2, "int"]])
+fn update_evaluates_a_base_and_keeps_its_other_fields() {
+    let calls = 0
+    let p: ? = FieldText { ..{ calls += 1; field_text() }, count: 9 }
+    let label: ? = p.label
+    let count: ? = p.count
+    assert_eq((calls, label, count), (1, "x", 9))
+}
+
+@test
+fn copying_tuple_value_fields_preserves_the_original_value() {
+    let rows = [(0, FieldNested { text: field_text(), items: [1] })]
+    let copies = [rows[0].1]
+    copies[0].text.count = 9
+    copies[0].items.push(2)
+    assert_eq((rows[0].1.text.count, copies[0].text.count, rows[0].1.items.len()), (1, 9, 2))
+
+    let floats = [(0, FieldFloat { x: 1.0 })]
+    let float_copies = [floats[0].1]
+    float_copies[0].x = 9.0
+    assert_eq((floats[0].1.x, float_copies[0].x), (1.0, 9.0))
+
+    let maybe: [(int, FieldText?)] = [(0, field_text()), (1, null)]
+    let maybe_copies = [maybe[0].1]
+    maybe_copies[0]?.count = 9
+    assert_eq((maybe[0].1.unwrap().count, maybe_copies[0].unwrap().count), (1, 9))
+    assert(maybe[1].1 == null)
+}
