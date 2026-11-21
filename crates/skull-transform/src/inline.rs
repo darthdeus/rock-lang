@@ -1,5 +1,4 @@
-//! Splice eligible direct calls and record the concrete bodies embedded in each caller.
-//! Annotation gating limits the number of chunks a body edit invalidates.
+//! Annotation gating bounds how many chunks a body edit invalidates.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
@@ -66,7 +65,6 @@ struct CalleeBody {
     abi: BackendFnAbiPlanHandle,
     kind: Kind,
     ret_arity: usize,
-    /// Blocks the CFG splice adds to the caller's reachable set.
     reachable: Vec<Idx<Block>>,
     insts: usize,
     source_cells: usize,
@@ -75,7 +73,6 @@ struct CalleeBody {
     coalescable_params: Vec<bool>,
     /// A lambda sub-CFG reads captured cells, so its body cannot forward these reads.
     forwardable_reads: Vec<(usize, Idx<Inst>)>,
-    /// Whether `forwardable_reads` covers every read of a coalescable parameter.
     forwards_reads: bool,
 }
 
@@ -87,7 +84,7 @@ impl CalleeBody {
     }
 }
 
-/// Cache one result per concrete instantiation, including rejected candidates.
+/// Rejected candidates are cached too.
 type CacheKey = Instance;
 
 pub struct InlineCandidateTable {
@@ -418,12 +415,10 @@ struct LiveClosure {
 
 /// Share these tables when compacting several regions from one body.
 pub(crate) struct ArenaFacts {
-    /// `(emit cell, emit block)` of every lambda parameter, sorted.
     lambda_params: Vec<(u32, u32)>,
     /// `(emit cell, emit block, block)` of every cell an instruction names,
     /// sorted and unique by the emit pair.
     uses: Vec<(u32, u32, Idx<Block>)>,
-    /// `(block, cell)` of every `Load`.
     loads: Vec<(Idx<Block>, Idx<Cell>)>,
 }
 
@@ -830,7 +825,6 @@ fn classify(
     let mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)?;
     let canonical = Arc::new(mf);
     let mut mf = (*canonical).clone();
-    // Apply the splice budget to the cleaned candidate.
     crate::cleanup(&mut mf)?;
     let mut has_lambda = false;
     for (_, inst) in mf.insts.iter() {
@@ -1810,7 +1804,6 @@ fn splice_general(
     func.blocks[cont].term = orig_term;
     uses.add_term(func, cont);
 
-    // Reuse the call ID for a load from the result cell.
     let result_cell = match &site.dests {
         None => {
             let call_id = site.call_id;
@@ -1936,7 +1929,6 @@ pub(crate) fn inline_functions_with_plans(
         }
         pin_cells(func, &top, blocks_before, &mut pinned);
         copied_instructions += cand.insts;
-        // The caller must import cells referenced by the spliced body.
         func.statics.extend(cand.func.statics.iter().cloned());
         func.comptime_reads
             .extend(cand.func.comptime_reads.iter().cloned());
@@ -2018,16 +2010,7 @@ mod tests {
     use super::*;
     use ustr::Ustr;
 
-    /// `bound::repack_bound_next_element` allocates the element's
-    /// leaf loads, its rebuilt aggregate and the store into the element cell
-    /// AFTER the splice cloned the callee. The splice's `UseIndex` must cover
-    /// those users like every other instruction it adds.
-    ///
-    /// Consistent plans never reach the repack on this path: the lowering sees
-    /// the same element shape as the witness and splits the element itself.
-    /// The witness result is therefore perturbed to `(bool, Pair)` under an
-    /// `Iterator<int>` body, the same disagreement the standalone rewrite's
-    /// plan test uses, so the production splice has to rebuild a `Pair`.
+    /// The splice's use index must include users added by bound repacking.
     #[test]
     fn use_index_covers_bound_element_repack_after_splice() {
         let src = r#"
