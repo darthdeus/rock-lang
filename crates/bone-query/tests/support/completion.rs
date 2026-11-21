@@ -141,13 +141,6 @@ pub fn assert_insert(case: &str, it: &CompletionItem, want: Insert) {
     );
 }
 
-/// The `idx`th sort-text digit of `label`.
-#[track_caller]
-pub fn sort_digit(items: &[CompletionItem], label: &str, idx: usize) -> char {
-    let st = find(items, label).sort_text.as_deref().expect("sort_text");
-    st.as_bytes()[idx] as char
-}
-
 /// Each pattern must match an offered label; a `!`-prefixed one must match
 /// none.
 #[track_caller]

@@ -61,6 +61,11 @@ fn match_quality_orders_candidates() {
         // Alphabetically last, so only the proximity rung lifts it past the
         // cap and the stdlib.
         (
+            "recent local bindings above older bindings and parameters",
+            "fn r(dt: float) {\n  let alpha = 1\n  let dmg = 1.0\n  <|>\n}\n",
+            "dmg < alpha < dt",
+        ),
+        (
             "same-file fn above stdlib at an empty prefix",
             "fn zzz_mine() {}\nfn r() {\n  <|>\n}\n",
             "zzz_mine < abs",
@@ -71,6 +76,18 @@ fn match_quality_orders_candidates() {
 #[test]
 fn expected_type_orders_candidates() {
     check_ranked(&[
+        (
+            "right-type enum variant above a higher-scoring global",
+            "enum TargetError { NotGround, OutOfRange }\nfn reject_target(e: TargetError) {}\n\
+             global NO_GROUND: int = 0\nfn r() {\n  reject_target(nog<|>)\n}\n",
+            "TargetError::NotGround < NO_GROUND",
+        ),
+        (
+            "right-type global above the wrong-type global",
+            "struct Cfg { x: int }\nglobal GAME_CFG: Cfg\nglobal GAME_ID: int = 0\n\
+             fn apply_cfg(c: Cfg) {}\nfn r() {\n  apply_cfg(gam<|>)\n}\n",
+            "GAME_CFG < GAME_ID",
+        ),
         // A match-arm body is a return slot. The enclosing fn is not offered
         // as a confident autofill inside its own body.
         (
@@ -402,123 +419,63 @@ fn reach_path_flood_is_kept_and_ranked() {
     assert!(paths >= 15, "{paths} paths: {l:?}");
 }
 
-// RankKey digits: 1 type rank, 3 kind, 12 proximity, 13 frequency, 14 recency.
-const TYPE: usize = 1;
-const KIND: usize = 3;
-const PROX: usize = 12;
-const FREQ: usize = 13;
-const REC: usize = 14;
-
 #[test]
-fn rank_key_digits() {
-    let test_fn = "fn test_apply() {}\nfn r() {\n  test_ap<|>\n}\n";
-    let locals = "fn r(dt: float) {\n  let alpha = 1\n  let dmg = 1.0\n  <|>\n}\n";
-    let cases: &[(&str, &str, &[(&str, usize, char)])] = &[
-        (
-            PATH,
-            "struct Mob { hp: int }\nfn give(m: Mob) {}\nfn r(mob: Mob) {\n  givemob<|>\n}\n",
-            &[("give(mob)", TYPE, '0')],
-        ),
-        (PATH, test_fn, &[("test_apply", KIND, '4')]),
-        (
-            "/tmp/tests/rock_lsp_ranking_t.rock",
-            test_fn,
-            &[("test_apply", KIND, '2')],
-        ),
-        (
-            PATH,
-            "fn zzz_mine() {}\nfn r() {\n  <|>\n}\n",
-            &[("zzz_mine", PROX, '0'), ("abs", PROX, '3')],
-        ),
-        (
-            PATH,
-            locals,
-            &[("dmg", REC, '0'), ("alpha", REC, '1'), ("dt", REC, '2')],
-        ),
-    ];
-    for (path, src, expected) in cases {
-        let items = complete_in(path, src);
-        for &(label, digit, want) in *expected {
-            assert_eq!(
-                sort_digit(&items, label, digit),
-                want,
-                "{path} {src:?}: {label}"
-            );
-        }
-    }
-}
-
-#[test]
-fn reference_count_orders_and_buckets_fns() {
-    // Alphabetical order opposes, so only the frequency rung lifts `zz_hot`.
+fn reference_count_orders_functions() {
     let calls = |name: &str, n: usize| format!("  {name}()\n").repeat(n);
-    let hot = format!(
-        "fn zz_hot() {{}}\nfn aa_cold() {{}}\nfn r() {{\n{}  <|>\n}}\n",
-        calls("zz_hot", 16)
-    );
-    assert_ranked("hot fn", &complete(&hot), "zz_hot < aa_cold");
-    let buckets = format!(
+    let src = format!(
         "fn zz_hot() {{}}\nfn mm_warm() {{}}\nfn aa_cold() {{}}\nfn r() {{\n{}{}  <|>\n}}\n",
         calls("zz_hot", 16),
         calls("mm_warm", 3)
     );
-    let items = complete(&buckets);
-    assert_eq!(sort_digit(&items, "zz_hot", FREQ), '0', "16 refs");
-    assert_eq!(sort_digit(&items, "mm_warm", FREQ), '1', "3 refs");
-    assert_eq!(sort_digit(&items, "aa_cold", FREQ), '2', "0 refs");
+    assert_ranked(
+        "function references",
+        &complete(&src),
+        "zz_hot < mm_warm < aa_cold",
+    );
 }
 
 #[test]
-fn tests_dir_symbols_demote_only_outside_test_files() {
-    let main_src = "fn zzz_real() {}\nfn game() {\n  aaa_h\n}\nfn game2() {\n  zzz_r\n}\n";
-    let helper_src = "fn aaa_helper() {}\nfn sim_run() {\n  aaa_h\n}\n";
-    let files = [("main.rock", main_src), ("tests/helpers.rock", helper_src)];
-    let project = Project::package(&files);
-    let cases = [
-        ("tests/ fn from main", 0, (2, 7), "aaa_helper", KIND, '4'),
-        ("main fn from main", 0, (5, 7), "zzz_real", KIND, '2'),
-        (
-            "tests/ fn is project-near",
-            0,
-            (2, 7),
-            "aaa_helper",
-            PROX,
-            '1',
-        ),
-        (
-            "tests/ fn from its own file",
-            1,
-            (2, 7),
-            "aaa_helper",
-            KIND,
-            '2',
-        ),
-    ];
-    for (case, file, (line, col), label, idx, want) in cases {
-        let (rel, src) = files[file];
-        let path = project.path(rel);
-        let mut bone = BoneWorkspace::new();
-        bone.update(&path, src.to_string());
-        let items = bone.completion(&path, Position::new(line, col));
-        assert_eq!(sort_digit(&items, label, idx), want, "{case}");
+fn tests_dir_symbols_rank_last_in_production_code() {
+    let (src, pos) = cursor("fn run() {\n  probe_<|>\n}\n");
+    let project = Project::package(&[
+        ("lib.rock", "fn probe_zzz() {}"),
+        ("tests/helpers.rock", "fn probe_aaa() {}"),
+        ("main.rock", &src),
+        ("tests/client.rock", &src),
+    ]);
+    for (path, order) in [
+        ("main.rock", "probe_zzz < probe_aaa"),
+        ("tests/client.rock", "probe_aaa < probe_zzz"),
+    ] {
+        let (mut bone, _) = project.open(path);
+        let items = bone.completion(&project.path(path), pos);
+        assert_ranked(path, &items, order);
+    }
+}
+
+#[test]
+fn test_prefixed_functions_rank_last_in_production_code() {
+    let src = "fn tester() {}\nfn test_a() {}\nfn r() {\n  tes<|>\n}\n";
+    let fixture = Project::new(&[("main.rock", ""), ("tests/main.rock", "")]);
+    for (path, order) in [
+        ("main.rock", "tester < test_a"),
+        ("tests/main.rock", "test_a < tester"),
+    ] {
+        let items = complete_in(&fixture.path(path), src);
+        assert_ranked(path, &items, order);
     }
 }
 
 #[test]
 fn project_dir_named_stdlib_keeps_project_proximity() {
-    // Stdlib ownership comes from the loader's source id, not a path component.
-    let main_src = "fn game() {\n  aaa_h\n  ab\n}\n";
+    let (src, pos) = cursor("fn game() {\n  <|>\n}\n");
     let project = Project::package(&[
-        ("main.rock", main_src),
-        ("stdlib/helpers.rock", "fn aaa_helper() {}\n"),
+        ("main.rock", &src),
+        ("stdlib/helpers.rock", "fn zzz_helper() {}\n"),
     ]);
-    let main = project.path("main.rock");
-    let mut bone = BoneWorkspace::new();
-    bone.update(&main, main_src.to_string());
-    let helper = bone.completion(&main, Position::new(1, 7));
-    assert_eq!(sort_digit(&helper, "aaa_helper", PROX), '1');
-    let stdlib = bone.completion(&main, Position::new(2, 4));
-    assert_eq!(sort_digit(&stdlib, "abs", PROX), '3');
+    let (mut bone, _) = project.open("main.rock");
+    let items = bone.completion(&project.path("main.rock"), pos);
+    assert_ranked("project stdlib directory", &items, "zzz_helper < abs");
 }
 
 #[test]

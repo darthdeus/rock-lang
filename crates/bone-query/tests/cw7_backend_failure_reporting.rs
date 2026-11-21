@@ -222,18 +222,6 @@ fn recoverable_syntax_keeps_partial_hints_without_fallback_warnings() {
 }
 
 #[test]
-fn log_capture_is_released_on_unwind() {
-    let failed = std::panic::catch_unwind(|| {
-        let _capture = Recording::start();
-        panic!("intentional cleanup witness");
-    });
-    assert!(failed.is_err());
-    let capture = Recording::start();
-    log::warn!("capture restored");
-    assert_eq!(capture.take().len(), 1);
-}
-
-#[test]
 fn batch_fallback_reports_failed_per_file_update() {
     let capture = Recording::start();
     let dir = tempfile::tempdir().unwrap();

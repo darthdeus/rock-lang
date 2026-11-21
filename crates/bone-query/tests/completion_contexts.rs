@@ -1842,28 +1842,6 @@ fn right_type_local_in_top_three_of_typed_slot() {
 }
 
 #[test]
-fn expected_type_values_take_the_first_type_bucket() {
-    // RankKey digit 1 is the type rank in an arg slot.
-    let cases = [
-        (
-            "enum variant",
-            "enum TargetError { NotGround, OutOfRange }\nfn reject_target(e: TargetError) {}\n\
-             fn r() {\n  reject_target(nog<|>)\n}\n",
-            "TargetError::NotGround",
-        ),
-        (
-            "global",
-            "struct Cfg { x: int }\nglobal GAME_CFG: Cfg\nfn apply_cfg(c: Cfg) {}\n\
-             fn r() {\n  apply_cfg(gam<|>)\n}\n",
-            "GAME_CFG",
-        ),
-    ];
-    for (case, src, label) in cases {
-        assert_eq!(sort_digit(&complete(src), label, 1), '0', "{case}");
-    }
-}
-
-#[test]
 fn completion_respects_block_scope() {
     check_labels(&[
         (
