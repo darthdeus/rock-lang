@@ -1,17 +1,7 @@
-// A `@gpu_only` intrinsic takes a `nobox` value without an explicit
-// materialization. Boxing is a Lua-representation concept: these fns compile to
-// GLSL, where a `vec2` is a native value, and their Lua bodies only `error(...)`.
-// A CPU caller is separately rejected by `gpu_only_call_rejection`, so the only
-// callers that reach here are GPU contexts.
-//
-// The box is AUTHORIZED at the boundary (emitted as an explicit materialization),
-// NOT by exempting the calling body -- see `tests/errors/nobox.rock.err`
-// for the CPU-side box inside a `@shader` fn that must still reject.
+// Only the GPU call boundary authorizes materialization; the body is still checked.
 
 nobox value NV2 { x: float, y: float }
 
-// Declared here rather than using stdlib `texture`, whose param is `Vec2`:
-// reproducing through it would need stdlib's `Vec2` marked nobox.
 @intrinsic @gpu_only inline(lua) fn sample_nv2(s: Sampler2D, uv: NV2) -> Vec4 = """
     error("sample_nv2() is GPU-only (shader fns are not CPU-callable)")
 """
@@ -23,21 +13,14 @@ fn nobox_sampler_frag(uTexture: Sampler2D, tc: NV2) -> Vec4 {
 
 @test(output = "ok")
 fn gpu_shaders_in_this_file_emit() {
-    // Emitting every shader entry in this file is the assertion.
     print("ok")
 }
 
-// `sample_nv2` above has no GLSL intrinsic-table mapping, so it exercises the
-// Lua rung only. `texture` IS mapped, so this one is the GPU-side proof: the
-// shader below is what actually has to survive `rock shader-validate`.
 @shader(fragment)
 fn mapped_intrinsic_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
     return texture(uTexture, tc)
 }
 
-// A conditionally reassigned sampled vector: the binding's first value is the
-// intrinsic's return and one branch overwrites it with a literal, which must
-// not pack into an implicit `Vec4` box.
 @shader(fragment)
 fn reassigned_sample_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
     let color = texture(uTexture, tc)
@@ -47,8 +30,6 @@ fn reassigned_sample_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
     return color
 }
 
-// The control spelling: the sampled vector stays immutable and only a separate
-// color is updated.
 @shader(fragment)
 fn separate_color_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
     let sampled = texture(uTexture, tc)
