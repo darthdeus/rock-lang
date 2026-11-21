@@ -20,12 +20,6 @@ fn reject_messages(src: &str) -> Vec<String> {
         .collect()
 }
 
-const TWO_UNMAPPED_DEFINITIONS: &str = "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
-     inline(lua) fn lua_two(x: int) -> int = \"\"\" return x \"\"\"\n\
-     fn a(x: int) -> int { let v = lua_one(x); v + 1 }\n\
-     fn b(x: int) -> int { let v = lua_two(x); v + 2 }\n\
-     fn root(y: int) -> int { a(y) + b(y) }\n";
-
 /// Each `nobox` rejection names the body it was emitting. Without it an
 /// accumulated list of sinks across several bodies reads as one site repeated,
 /// which is exactly the misreading the accumulation exists to prevent.

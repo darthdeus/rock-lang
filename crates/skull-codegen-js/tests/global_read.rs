@@ -1,14 +1,5 @@
 use crate::common::{run_node, test_mid, ws_with};
 
-const SOURCE: &str = r#"global LATE: int
-global MAYBE: int?
-@nomangle fn read() -> int { LATE }
-@nomangle fn assign() { LATE = 42 }
-@nomangle fn optional() -> int? { MAYBE }
-@nomangle fn callback() -> fn() -> int { () => LATE }
-fn main() { read(); assign(); optional(); callback() }
-"#;
-
 fn programs(source: &str) -> (String, String) {
     let ws = ws_with(source);
     emit_programs(&ws, test_mid(&ws))

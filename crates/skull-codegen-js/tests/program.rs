@@ -1,4 +1,4 @@
-use crate::common::{run_node, test_mid, try_ws_with_named, ws_with, ws_with_named};
+use crate::common::{run_node, test_mid, ws_with, ws_with_named};
 use ustr::Ustr;
 
 fn run_program(file: &str, source: &str, extra_runtime: &[&str], after_program: &str) -> String {

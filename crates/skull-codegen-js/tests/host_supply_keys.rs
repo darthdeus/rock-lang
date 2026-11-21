@@ -1,7 +1,7 @@
 //! Declaration checks and production consumers of the JS host supply table.
 
 use crate::common::{stdlib_ws, ws_with};
-use skull_codegen_js::{JsIntrinsics, emit::js_supply};
+use skull_codegen_js::JsIntrinsics;
 use skull_mir::intrinsics::{declared_intrinsics, unbacked_entries};
 use ustr::Ustr;
 

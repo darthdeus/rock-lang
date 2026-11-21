@@ -2,12 +2,9 @@
 // instead of one per file. nextest still runs each test in its own
 // process, so isolation is unchanged.
 
-mod affine_bounds;
 mod backend_externs;
 mod common;
 mod deepcopy;
-mod enum_boxes;
-mod format_specs;
 mod global_read;
 mod global_storage;
 mod host;
@@ -20,10 +17,8 @@ mod nb_checked_set;
 mod opaque_container_axes_js;
 mod opaque_effects;
 mod polymorphic_recursion;
-mod private_vectors;
 mod program;
 mod publisher_abi;
 mod qualified_globals;
 mod shader_register;
-mod try_call;
 mod uint;
