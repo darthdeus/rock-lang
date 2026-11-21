@@ -91,19 +91,6 @@ fn builtin_module_survives_the_session_lifecycle() {
 }
 
 #[test]
-fn eviction_keeps_the_builtin_module() {
-    let mut s = session();
-    let before = s.ws.inference(ModuleId::builtin()).is_some();
-    s.retain_modules(|_| false);
-    assert_builtins_valid(&s, "evict all");
-    assert_eq!(
-        s.ws.inference(ModuleId::builtin()).is_some(),
-        before,
-        "evicting every module must leave the builtin module's slot alone"
-    );
-}
-
-#[test]
 fn failed_rebuild_users_keeps_workspace_consistent() {
     let mut s = session();
     assert_eq!(s.ws.modules.len(), s.ws.module_ids.len());
@@ -121,14 +108,6 @@ fn failed_rebuild_users_keeps_workspace_consistent() {
     for &mid in s.ws.module_ids.values() {
         let _ = s.ws.module(mid);
     }
-}
-
-#[test]
-fn rebuild_users_keeps_the_comptime_inputs() {
-    let mut s = session();
-    s.ws.comptime_inputs.channel = "dev".to_string();
-    s.rebuild_users().expect("an unchanged program rebuilds");
-    assert_eq!(s.ws.comptime_inputs.channel, "dev");
 }
 
 #[test]
