@@ -1,0 +1,46 @@
+value Token { a: int, b: int, c: int, d: int }
+nobox value Membership { token: Token?, rows: [int], selected: [int] }
+struct Owner { membership: Membership? }
+@noalloc fn first(value: Membership) -> int { return value.token?.a ?? -1 }
+@noalloc fn read(value: Membership, offset: int = 0) -> int { return first(value) + offset }
+
+fn make_owner() -> Owner {
+    return Owner { membership: Membership { token: Token { a: 1, b: 2, c: 3, d: 4 }, rows: [3], selected: [4] } }
+}
+@noalloc fn compare_defaults(owner: Owner) -> int {
+    let membership = owner.membership ?? return -1
+    return read(membership) + read(membership, 1) - 2
+}
+
+@noalloc fn shared(first: Membership, second: Membership) -> bool {
+    return same_ref(first.rows, second.rows) && same_ref(first.selected, second.selected)
+}
+
+@noalloc fn compare_membership(owner: Owner) -> bool {
+    let membership = owner.membership ?? return false
+    return shared(membership, owner.membership.unwrap())
+}
+
+@noalloc fn read_across_call(value: Membership) -> int {
+    let membership = value
+    return membership.token?.a ?? -1
+}
+
+@noalloc fn compare_read(owner: Owner) -> int {
+    let membership = owner.membership ?? return -1
+    return read_across_call(membership)
+}
+
+@test(backends = "lua")
+fn nullable_child_is_reused_across_calls() {
+    let owner = make_owner()
+    assert(compare_membership(owner))
+    assert(compare_read(owner) == 1)
+    assert(compare_defaults(owner) == 1)
+    let empty = Membership { token: null, rows: [], selected: [] }
+    assert(read(empty) == -1)
+    assert(read(offset: 2, value: empty) == 1)
+    let missing = Owner { membership: null }
+    assert(!compare_membership(missing))
+    assert(compare_read(missing) == -1 && compare_defaults(missing) == -1)
+}

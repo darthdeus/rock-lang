@@ -1,0 +1,47 @@
+value Task<R = ()> { coroutine: Coroutine<int, R>, state: Entity<int> }
+struct Owner { slot: Task? = null }
+struct Entry { fetch: (() -> Task?)? = null, task: Task? = null, last: Task? = null }
+fn Entry.live_task(entry) -> Task? {
+    if let fetch = entry.fetch { return fetch() }
+    return entry.task
+}
+co fn idle() -> Coroutine<int> { while true { yield 0 } }
+fn attach<T>(owner: Entity<T>, field: FieldRef<T, Task?>) -> Entry {
+    return Entry { fetch: () => if let row = owner.get() { field_get(row, field) } else { null } }
+}
+@nomangle fn make_entry() -> Entry {
+    let owners: Arena<Owner> = arena_new()
+    let states: Arena<int> = arena_new()
+    let owner = owners.insert(Owner { slot: Task { coroutine: idle(), state: states.insert(1) } })
+    return attach(owner, .slot)
+}
+@nomangle fn update(entry: Entry) -> int {
+    if let task = entry.live_task() {
+        if let last = entry.last {
+            if last.state != task.state { entry.last = task }
+        } else { entry.last = task }
+        let _ = resume(task.coroutine)
+        return task.state._slot
+    }
+    return -1
+}
+
+inline(lua) fn checks_slot_update_budget() -> bool = """
+local was_jit = jit.status()
+jit.off(); jit.flush()
+local entry = make_entry()
+for i = 1, 4 do update(entry) end
+collectgarbage('collect'); collectgarbage('stop')
+local before = collectgarbage('count')
+local total = 0
+for i = 1, 2000 do total = total + update(entry) end
+local bytes = (collectgarbage('count') - before) * 1024 / 2000
+collectgarbage('restart')
+if was_jit then jit.on() end
+assert(total >= 0)
+assert(bytes < 1.0, bytes .. " bytes per slot update")
+return total >= 0
+"""
+
+@test(backends = "lua")
+fn coroutine_slot_updates_do_not_allocate() { assert(checks_slot_update_budget()) }

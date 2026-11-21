@@ -114,12 +114,6 @@ fn emit_run(src: &str) -> (String, Option<skull_parser::CompilerError>) {
     emit_module(stdlib_with(src), "run")
 }
 
-/// Stdlib-free: literals, vars, `let`, builtin comparisons, control flow.
-fn emit(src: &str, fn_name: &str) -> String {
-    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    emit_module(vec![ast], fn_name).0
-}
-
 #[test]
 fn numeric_selection_through_local_copies_uses_native_minmax() {
     for (comparison, yes, no, native) in [

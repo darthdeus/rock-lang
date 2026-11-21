@@ -48,10 +48,15 @@ return i"#;
             .map(str::trim)
             .eq(BOUNDS_CHECK.lines());
     }
+    let body = body.as_str().trim();
+    if f.name.as_str() == "same_ref" && file == "<stdlib>/unified.rock" && body == "rawequal(a, b)"
+    {
+        return true;
+    }
     if !f.annotations.iter().any(|a| a.is_builtin("intrinsic")) {
         return false;
     }
-    match body.as_str().trim() {
+    match body {
         "math.abs(x)"
         | "math.sin(x)"
         | "math.cos(x)"

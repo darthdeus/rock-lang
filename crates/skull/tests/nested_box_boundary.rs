@@ -1,4 +1,4 @@
-use crate::common::{activation_scope, compile_and_run, emit_mir, emit_module, run_luajit};
+use crate::common::{activation_scope, emit_mir, emit_module, run_luajit};
 
 #[test]
 fn a_read_only_snapshot_does_not_rebox_its_nullable_child() {
@@ -25,58 +25,6 @@ fn make_wide(seed: int) -> Wide {{ Wide {{ f0: seed }} }}
     let body = crate::common::function_body(&lua, "read_only");
     assert!(!body.contains("Wide_ct("));
     assert_eq!(run_luajit(&format!("{lua}\nprint(read_only(7))")), "14");
-}
-
-#[test]
-fn coroutine_slot_updates_do_not_allocate() {
-    let source = r#"
-value Task<R = ()> { coroutine: Coroutine<int, R>, state: Entity<int> }
-struct Owner { slot: Task? = null }
-struct Entry { fetch: (() -> Task?)? = null, task: Task? = null, last: Task? = null }
-fn Entry.live_task(entry) -> Task? {
-    if let fetch = entry.fetch { return fetch() }
-    return entry.task
-}
-co fn idle() -> Coroutine<int> { while true { yield 0 } }
-fn attach<T>(owner: Entity<T>, field: FieldRef<T, Task?>) -> Entry {
-    return Entry { fetch: () => if let row = owner.get() { field_get(row, field) } else { null } }
-}
-@nomangle fn make_entry() -> Entry {
-    let owners: Arena<Owner> = arena_new()
-    let states: Arena<int> = arena_new()
-    let owner = owners.insert(Owner { slot: Task { coroutine: idle(), state: states.insert(1) } })
-    return attach(owner, .slot)
-}
-@nomangle fn update(entry: Entry) -> int {
-    if let task = entry.live_task() {
-        if let last = entry.last {
-            if last.state != task.state { entry.last = task }
-        } else { entry.last = task }
-        let _ = resume(task.coroutine)
-        return task.state._slot
-    }
-    return -1
-}
-fn main() { let _ = update(make_entry()) }
-"#;
-    let lua = emit_module(source);
-    let out = run_luajit(&format!(
-        r#"{lua}
-jit.off(); jit.flush()
-local entry = make_entry()
-for i = 1, 4 do update(entry) end
-collectgarbage('collect'); collectgarbage('stop')
-local before = collectgarbage('count')
-local total = 0
-for i = 1, 2000 do total = total + update(entry) end
-local bytes = (collectgarbage('count') - before) * 1024 / 2000
-collectgarbage('restart')
-assert(total >= 0)
-print(bytes)
-"#
-    ));
-    let bytes: f64 = out.parse().expect("bytes per slot update");
-    assert!(bytes < 1.0);
 }
 
 const SOURCE: &str = r#"
@@ -209,96 +157,4 @@ print(tables, cdata, rawequal(handle, result))
     ] {
         assert_eq!(run_luajit(&format!("{lua}{probe}")), expected, "{case}");
     }
-}
-
-fn assert_allocation_free_compare(source: &str, predicate: &str) {
-    let lua = emit_module(source);
-    let output = run_luajit(&format!(
-        r#"{lua}
-jit.off(); jit.flush()
-local owner = make_owner()
-for i = 1, 10 do assert({predicate}) end
-collectgarbage('collect'); collectgarbage('stop')
-local before = collectgarbage('count')
-for i = 1, 1000 do assert({predicate}) end
-local bytes = (collectgarbage('count') - before) * 1024
-collectgarbage('restart')
-assert(bytes < 1024, 'nullable comparison allocated ' .. bytes .. ' bytes')
-print('ok')
-"#
-    ));
-    assert_eq!(output, "ok");
-}
-
-#[test]
-fn unused_nullable_child_is_not_copied_for_membership_comparison() {
-    let source = r#"
-value Token { a: int, b: int, c: int, d: int }
-nobox value Membership { token: Token?, rows: [int], selected: [int] }
-struct Owner { membership: Membership? }
-fn shared(first: Membership, second: Membership) -> bool {
-    return same_ref(first.rows, second.rows) && same_ref(first.selected, second.selected)
-}
-@nomangle fn make_owner() -> Owner {
-    return Owner { membership: Membership { token: Token { a: 1, b: 2, c: 3, d: 4 }, rows: [3], selected: [4] } }
-}
-@nomangle fn compare(owner: Owner) -> bool {
-    let membership = owner.membership ?? return false
-    return shared(membership, owner.membership.unwrap())
-}
-fn main() { let _ = compare(make_owner()) }
-"#;
-    assert_allocation_free_compare(source, "compare(owner)");
-}
-
-#[test]
-fn nullable_child_read_crosses_a_value_call_without_reboxing() {
-    let source = r#"
-value Token { a: int, b: int, c: int, d: int }
-nobox value Membership { token: Token?, rows: [int], selected: [int] }
-struct Owner { membership: Membership? }
-fn read(value: Membership) -> int {
-    let membership = value
-    return membership.token?.a ?? -1
-}
-
-@nomangle fn make_owner() -> Owner {
-    return Owner { membership: Membership { token: Token { a: 1, b: 2, c: 3, d: 4 }, rows: [3], selected: [4] } }
-}
-@nomangle fn compare(owner: Owner) -> int {
-    let membership = owner.membership ?? return -1
-    return read(membership)
-}
-fn main() { let _ = compare(make_owner()) }
-"#;
-    assert_allocation_free_compare(source, "compare(owner) == 1");
-}
-
-#[test]
-fn nullable_child_crosses_a_call_with_an_omitted_default_without_reboxing() {
-    let source = r#"
-value Token { a: int, b: int, c: int, d: int }
-nobox value Membership { token: Token?, rows: [int], selected: [int] }
-struct Owner { membership: Membership? }
-fn first(value: Membership) -> int { return value.token?.a ?? -1 }
-fn read(value: Membership, offset: int = 0) -> int { return first(value) + offset }
-
-@nomangle fn make_owner() -> Owner {
-    return Owner { membership: Membership { token: Token { a: 1, b: 2, c: 3, d: 4 }, rows: [3], selected: [4] } }
-}
-@nomangle fn compare(owner: Owner) -> int {
-    let membership = owner.membership ?? return -1
-    return read(membership) + read(membership, 1) - 2
-}
-fn main() {
-    let owner = make_owner()
-    assert_eq(compare(owner), 1)
-    let empty = Membership { token: null, rows: [], selected: [] }
-    assert_eq(read(empty), -1)
-    assert_eq(read(offset: 2, value: empty), 1)
-    print("ok")
-}
-"#;
-    assert_allocation_free_compare(source, "compare(owner) == 1");
-    assert_eq!(compile_and_run(source), "ok");
 }
