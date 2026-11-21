@@ -42,7 +42,6 @@ mod enum_cdata;
 mod enum_flat_equality;
 mod enum_payload_sroa;
 mod enum_scalarize;
-mod env_record_hoist;
 mod expansion_admission;
 mod extern_return_representation;
 mod extern_value_return_ownership;

@@ -1,0 +1,142 @@
+@nomangle inline(lua) fn capture_sink(n: int) = "_G.__capture_sink = n"
+@nomangle inline(lua) fn capture_pair(a: int, b: int) = "_G.__capture_sink = a + b"
+inline(lua) fn last_capture() -> int = "return _G.__capture_sink"
+
+inline(lua) fn check_capture_record(callback: any, count_expected: int, cell: bool = false, enum_box: bool = false) = """
+    assert(type(callback) == 'table' and callback.__slot ~= nil)
+    local count = 0
+    for key, item in pairs(callback) do
+        if key ~= '__slot' then
+            count = count + 1
+            if cell then
+                assert(type(item) == 'table' and item.v == 5)
+            else
+                local kind = type(item)
+                assert(kind == 'number' or kind == 'string' or kind == 'boolean'
+                    or (enum_box and kind == 'table' and item.v == nil), kind)
+            end
+        end
+    end
+    assert(count == count_expected, count)
+"""
+
+fn submit(x: int) -> fn() {
+    let a = x + 1
+    let b = x + 2
+    return () => { capture_pair(a, b) }
+}
+
+fn submit_loop(n: int) -> [fn() -> int] {
+    let fns: [fn() -> int] = []
+    for i in 0..n {
+        let a = i + 1
+        fns.push(() => a)
+    }
+    return fns
+}
+
+fn capture_box() -> fn() {
+    let n = 0
+    let g = () => { capture_sink(n) }
+    n = 5
+    return g
+}
+
+@test(backends = "lua")
+fn scalar_captures_share_code_and_keep_their_own_values() {
+    let a = submit(3)
+    let b = submit(10)
+    check_capture_record(a, 2)
+    check_capture_record(b, 2)
+    a()
+    assert(last_capture() == 9)
+    b()
+    assert(last_capture() == 23)
+    let mutated = capture_box()
+    check_capture_record(mutated, 1, true)
+    mutated()
+    assert(last_capture() == 5)
+    let callbacks = submit_loop(3)
+    for i in 0..3 {
+        check_capture_record(callbacks[i], 1)
+        assert(callbacks[i]() == i + 1)
+    }
+}
+
+value Pt2 { x: float, y: float }
+
+@test(backends = "lua")
+fn each_value_capture_stores_scalar_leaves() {
+    let pts = [Pt2 { x: 1.0, y: 2.0 }, Pt2 { x: 2.0, y: 3.0 }, Pt2 { x: 3.0, y: 4.0 }]
+    let fns: [fn() -> float] = []
+    for p in pts { fns.push(() => p.x + p.y) }
+    for i in 0..3 {
+        check_capture_record(fns[i], 2)
+        assert(fns[i]() == (3 + 2 * i) as float)
+    }
+}
+
+enum InnerChoice { Number(int) }
+enum Choice { Pick(InnerChoice), Other(InnerChoice) }
+
+fn capture_choices(choices: [Choice]) -> [fn() -> int] {
+    let fns: [fn() -> int] = []
+    for choice in choices {
+        fns.push(() => match choice {
+            Choice::Pick(InnerChoice::Number(n)) => n,
+            Choice::Other(InnerChoice::Number(n)) => n,
+        })
+    }
+    return fns
+}
+
+@test(backends = "lua")
+fn each_enum_capture_keeps_its_iteration_value() {
+    let fns = capture_choices([
+        Choice::Pick(InnerChoice::Number(1)),
+        Choice::Other(InnerChoice::Number(2)),
+        Choice::Pick(InnerChoice::Number(3)),
+    ])
+    for i in 0..3 {
+        check_capture_record(fns[i], 1, enum_box: true)
+        assert(fns[i]() == i + 1)
+    }
+}
+
+fn mk_snap(x: int) -> fn() -> int { return () => x }
+
+inline(lua) fn same_code(a: any, b: any) -> bool = "return rawequal(a.__slot, b.__slot)"
+
+@test(backends = "lua")
+fn closure_records_share_their_code_slot() {
+    let a = mk_snap(1)
+    let b = mk_snap(2)
+    check_capture_record(a, 1)
+    assert(same_code(a, b))
+    assert(a() == 1 && b() == 2)
+}
+
+struct Holder { cb: fn() -> int }
+struct Pair { get: fn() -> int, bump: fn() -> int }
+
+fn make_pair() -> Pair {
+    let n = 10
+    return Pair { get: () => n, bump: () => { n = n + 1 return n } }
+}
+
+inline(lua) fn call_copied_callback(copy: Holder) -> bool = """
+    local ok, result = pcall(function() return copy.cb() end)
+    return ok and result == 42
+"""
+
+@test(backends = "lua")
+fn deep_copies_keep_callbacks_and_separate_their_captured_cells() {
+    let n = 41
+    let holder = Holder { cb: () => n + 1 }
+    assert(call_copied_callback(deepcopy(holder)))
+    let orig = make_pair()
+    let copy = deepcopy(orig)
+    let _ = orig.bump()
+    let _ = orig.bump()
+    assert(orig.get() == 12 && copy.get() == 10)
+}
