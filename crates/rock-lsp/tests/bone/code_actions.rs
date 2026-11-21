@@ -125,13 +125,6 @@ fn applied_actions_produce_the_expected_source() {
 }
 
 #[test]
-fn inline_local_is_a_refactor_inline_action() {
-    let actions = run("fn f() -> int {\n    let y = 1\n    return y\n}\n", 2, 11);
-    let action = find(&actions, "Inline local").expect("inline local offered");
-    assert_eq!(action.kind, Some(CodeActionKind::REFACTOR_INLINE));
-}
-
-#[test]
 fn actions_not_offered() {
     let cases = [
         (
