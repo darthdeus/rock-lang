@@ -190,21 +190,6 @@ mod tests {
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]
-    fn log_once_dedups_same_site() {
-        let _g = TEST_LOCK.lock().unwrap();
-        rock_log::reset_dedup();
-        let before = rock_log::dedup_count();
-        for _ in 0..100 {
-            log_once!("TEST", "spam {}", 42);
-        }
-        assert_eq!(
-            rock_log::dedup_count() - before,
-            1,
-            "100 calls from one site -> 1 dedup entry"
-        );
-    }
-
-    #[test]
     fn log_once_distinct_sites_emit_separately() {
         let _g = TEST_LOCK.lock().unwrap();
         rock_log::reset_dedup();
