@@ -1,0 +1,59 @@
+@nomangle fn format_then_mark(w: int, mark: fn()) -> string {
+    let x = 3.25
+    let s = "{x:{w}.2f}"
+    let result = s
+    mark()
+    return result
+}
+
+@nomangle fn bracket_then_mark(w: int, mark: fn()) -> string {
+    let x = 3.25
+    let s = "{x:{w}.2f}"
+    let result = "[{s}]"
+    mark()
+    return result
+}
+
+@nomangle fn cast_then_mark(x: float, mark: fn()) -> uint {
+    let v = x as uint
+    let result = v + (1 as uint)
+    mark()
+    return result
+}
+
+@nomangle fn shift_then_mark(x: uint, mark: fn()) -> uint {
+    let v = (1 as uint) << x
+    let result = v + (1 as uint)
+    mark()
+    return result
+}
+
+inline(lua) fn check_lua_error_order() = """
+    for _, wrap in ipairs({false, true}) do
+        local compute = wrap and bracket_then_mark or format_then_mark
+        for _, width in ipairs({8, 1000, 1000000000}) do
+            local actual_marks, expected_marks = 0, 0
+            local ok, value = pcall(compute, width, function() actual_marks = actual_marks + 1 end)
+            local expected_ok, expected = pcall(function()
+                local s = string.format('%' .. width .. '.2f', 3.25)
+                local result = wrap and '[' .. s .. ']' or s
+                expected_marks = expected_marks + 1
+                return result
+            end)
+            assert(ok == expected_ok and actual_marks == expected_marks)
+            if ok then assert(value == expected) else assert(actual_marks == 0) end
+        end
+    end
+    for _, row in ipairs({{cast_then_mark, -1}, {shift_then_mark, 32}}) do
+        for _, input in ipairs({2, row[2]}) do
+            local marks = 0
+            local ok = pcall(row[1], input, function() marks = marks + 1 end)
+            assert(ok == (input == 2) and marks == (ok and 1 or 0))
+        end
+    end
+"""
+
+@test(backends = "lua")
+fn checks_and_dynamic_format_trap_before_the_later_call() {
+    check_lua_error_order()
+}

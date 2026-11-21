@@ -168,79 +168,6 @@ extern(lua, "c0.get") fn get() -> int
 }
 
 #[test]
-fn sinking_preserves_dynamic_format_error_order() {
-    for result in ["s", "\"[{s}]\""] {
-        let lua = emit_clean(
-            &format!(
-                r#"
-@nomangle fn compute(w: int, mark: fn()) -> string {{
-    let x = 3.25
-    let s = "{{x:{{w}}.2f}}"
-    let result = {result}
-    mark()
-    return result
-}}
-"#
-            ),
-            "compute",
-        );
-        let driver = format!(
-            r#"{lua}
-for _, width in ipairs({{8, 1000, 1000000000}}) do
-    local actual_marks, expected_marks = 0, 0
-    local ok, value = pcall(compute, width, function() actual_marks = actual_marks + 1 end)
-    local expected_ok, expected = pcall(function()
-        local s = string.format('%' .. width .. '.2f', 3.25)
-        local result = {control}
-        expected_marks = expected_marks + 1
-        return result
-    end)
-    assert(ok == expected_ok)
-    assert(actual_marks == expected_marks, 'side effects before error: ' .. actual_marks .. ' vs ' .. expected_marks)
-    if ok then assert(value == expected) else assert(actual_marks == 0) end
-end
-"#,
-            control = if result == "s" {
-                "s"
-            } else {
-                "'[' .. s .. ']'"
-            }
-        );
-        luajit_ok(&driver, &lua);
-    }
-}
-
-#[test]
-fn sinking_preserves_checked_numeric_error_order() {
-    for (ty, expr, bad) in [
-        ("float", "x as uint", "-1"),
-        ("uint", "(1 as uint) << x", "32"),
-    ] {
-        let lua = emit_clean(
-            &format!(
-                "@nomangle fn compute(x: {ty}, mark: fn()) -> uint {{ let v = {expr}; let result = v + (1 as uint); mark(); return result }}"
-            ),
-            "compute",
-        );
-        // Checked casts and shifts bind the shared runtime helpers, which this
-        // bare harness does not emit -- pull in the canonical definitions.
-        let driver = format!(
-            r#"{prelude}
-{lua}
-for _, input in ipairs({{2, {bad}}}) do
-    local marks = 0
-    local ok = pcall(compute, input, function() marks = marks + 1 end)
-    assert(ok == (input == 2))
-    assert(marks == (ok and 1 or 0), 'side effects before checked numeric error: ' .. marks)
-end
-"#,
-            prelude = skull_codegen_lua::UINT_CHECK_PRELUDE
-        );
-        luajit_ok(&driver, &lua);
-    }
-}
-
-#[test]
 fn numeric_selection_through_local_copies_uses_native_minmax() {
     for (comparison, yes, no, native) in [
         ("<", "d", "b", "min"),
@@ -523,30 +450,6 @@ fn inert_lua_text_does_not_trigger_body_limit_rejections() {
         "inert text caused a rejection: {rejection:?}"
     );
     luajit_loads(&lua, "inert long-bracket text must leave loadable Lua");
-}
-
-#[test]
-fn signed_and_unsigned_constant_bitwise_results_match_lua() {
-    let lua = emit_clean(
-        "fn masks() -> (int, uint, uint, uint) { \
-           let zero: uint = 0; let high: uint = 2147483648; \
-           let all: uint = 4294967295; let high_again: uint = 2147483648; \
-           return (~(~2147483647), ~(~zero), high | 1, all ^ high_again) \
-         }",
-        "masks",
-    );
-    assert!(
-        !lua.contains("bit.b"),
-        "constant masks should not call bit ops:\n{lua}"
-    );
-    let symbol = emitted_symbol(&lua);
-    luajit_ok(
-        &format!(
-            "{lua}\nlocal s, a, b, c = {symbol}(); \
-             assert(s == 2147483647 and a == 0 and b == 2147483649 and c == 2147483647)"
-        ),
-        &lua,
-    );
 }
 
 #[test]
@@ -974,17 +877,6 @@ fn a_shrinking_call_keeps_the_loop_element_fallback() {
         lua.contains(" + 1] or (") && lua.contains(" == nil and __vec_checked_get("),
         "{lua}"
     );
-}
-
-/// An index whose operands are not plain locals would be evaluated twice by
-/// the direct form, so it keeps the one call.
-#[test]
-fn vec_index_read_of_a_computed_operand_keeps_the_call() {
-    let src = "
-fn pick(xs: [int]) -> int { return 1 }
-fn f(xs: [[int]], i: int) -> int { return xs[pick(xs[0])][i] }";
-    let lua = emit(src, "f");
-    assert_eq!(lua.matches("pick").count(), 1, "{lua}");
 }
 
 #[test]

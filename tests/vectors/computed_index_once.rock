@@ -1,0 +1,15 @@
+global picks: int = 0
+
+fn pick(xs: [int]) -> int {
+    picks += 1
+    return 1
+}
+
+fn f(xs: [[int]], i: int) -> int { return xs[pick(xs[0])][i] }
+
+@test
+fn a_computed_nested_vec_index_runs_once() {
+    picks = 0
+    assert(f([[13, 17], [23, 29]], 1) == 29)
+    assert(picks == 1)
+}
