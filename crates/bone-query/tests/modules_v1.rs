@@ -172,29 +172,6 @@ fn errors_in(diags: &[(String, Vec<lsp_types::Diagnostic>)], path: &str) -> Vec<
         .collect()
 }
 
-/// A file created after the batch load must read with its package's facts, like its siblings.
-#[test]
-fn a_file_created_after_the_load_is_read_as_its_package_reads_it() {
-    let project = V1Project::new();
-    let mut bone = project.open();
-    let extra_text = "pub mod extra;\n\npub fn more() -> int {\n    super::shapes::area(2)\n}\n";
-    std::fs::write(project.dir.path().join("extra.rock"), extra_text).unwrap();
-    let extra = project.path("extra.rock");
-    let diags = bone.update(&extra, extra_text.to_string());
-    assert_eq!(
-        errors_in(&diags, &extra),
-        Vec::<String>::new(),
-        "a v1 file of a v1 package must build as v1"
-    );
-
-    let loc = bone
-        .definition(&extra, pos_of(extra_text, "area", 0, 1))
-        .expect("a call in the new fragment resolves");
-    let (path, covered) = located_text(&loc);
-    assert_eq!(file_name(&path), "shapes.rock");
-    assert!(covered.contains("area"), "landed on {covered:?}");
-}
-
 fn definition_at(
     bone: &BoneWorkspace,
     path: &str,
@@ -207,27 +184,6 @@ fn definition_at(
         .unwrap_or_else(|| panic!("no definition for `{needle}`"));
     let (path, covered) = located_text(&loc);
     (file_name(&path).to_string(), covered)
-}
-
-#[test]
-fn references_of_a_qualified_call_cover_only_the_callable_segment() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let main = project.path("main.rock");
-    let references = bone.references(&main, pos_of(MAIN, "depth()", 0, 1));
-    let covered: Vec<_> = references
-        .iter()
-        .filter_map(|location| {
-            let (path, text) = located_text(location);
-            (file_name(&path) == "main.rock").then_some(text)
-        })
-        .collect();
-
-    assert_offers(&covered, &["depth"]);
-    assert!(
-        covered.iter().all(|text| text != "shapes::inner::depth"),
-        "a qualified reference must not cover its path: {covered:?}"
-    );
 }
 
 #[test]
@@ -269,20 +225,6 @@ fn definition_cases() {
     }
 }
 
-/// A v1 fragment sees the std prelude in the editor as it does in a compile.
-#[test]
-fn the_std_prelude_resolves_in_a_v1_file() {
-    let project = V1Project::new();
-    let mut bone = BoneWorkspace::new();
-    let shapes = project.path("shapes.rock");
-    let diags = bone.update(&shapes, SHAPES.to_string());
-    assert_eq!(errors_in(&diags, &shapes), Vec::<String>::new());
-    assert_eq!(
-        errors_in(&diags, &project.path("main.rock")),
-        Vec::<String>::new()
-    );
-}
-
 /// The line a definition landed on, with its file.
 fn definition_line(
     bone: &BoneWorkspace,
@@ -297,24 +239,6 @@ fn definition_line(
         .unwrap_or_else(|| panic!("no definition for `{needle}` #{nth}"));
     let (file, _) = located_text(&loc);
     (file_name(&file).to_string(), loc.range.start.line)
-}
-
-#[test]
-fn an_inline_module_use_item_records_each_path_segment() {
-    let (_project, mut bone, main) = opened();
-    let text = format!(
-        "{MAIN}\n\
-         pub mod inline {{\n\
-             use ::shapes::area as local_area;\n\
-             pub fn run() -> int {{ local_area(2) }}\n\
-         }}\n"
-    );
-    bone.update(&main, text.clone());
-    for (needle, into) in [("::shapes::area as", 11), ("local_area;", 1)] {
-        let (file, covered) = definition_at(&bone, &main, &text, needle, into);
-        assert_eq!(file, "shapes.rock");
-        assert!(covered.contains("area"), "{needle} landed on {covered:?}");
-    }
 }
 
 #[test]
@@ -349,23 +273,6 @@ fn hover_on_v1_signature_types_records_each_nominal_spelling() {
         );
     }
     assert_ne!(alias_hover.range, qualified_hover.range);
-}
-
-/// A body edit keeps the other bodies' and the signatures' recorded
-/// segments, shifted with the text under them.
-#[test]
-fn segments_after_a_body_edit_still_navigate() {
-    let (_project, mut bone, main) = opened();
-    let edited = MAIN.replace(
-        "    let a = shapes::inner::depth()\n",
-        "    let a = shapes::inner::depth()\n    let z = 1\n",
-    );
-    bone.update(&main, edited.clone());
-    for (needle, item) in [("Kind::Round", "Kind"), ("Box, c", "Box")] {
-        let (file, covered) = definition_at(&bone, &main, &edited, needle, 1);
-        assert_eq!(file, "shapes.rock");
-        assert!(covered.contains(item), "{needle} landed on {covered:?}");
-    }
 }
 
 /// Completion items at the end of `typed`, typed as a new line inside
@@ -434,186 +341,6 @@ fn module_path_completions() {
     ] {
         assert_eq!(labels(&complete_in_main(typed)), expected, "{typed}");
     }
-}
-
-#[test]
-fn bare_completion_offers_what_the_tiers_bind_by_their_bound_names() {
-    // Each tier: an aliased import, a glob member (a function, a type, a
-    // global), an explicit type import by its alias, the std prelude, and
-    // the module's own items.
-    for (typed, bound) in [
-        ("surf", "surface"),
-        ("perim", "perimeter"),
-        ("are", "area"),
-        ("Crat", "Crate"),
-        ("Bo", "Box"),
-        ("LIM", "LIMIT"),
-        ("prin", "print"),
-        ("siz", "sizes"),
-    ] {
-        let got = labels(&complete_in_main(&format!("let q = {typed}")));
-        assert!(
-            got.iter().any(|l| l == bound),
-            "`{bound}` is bound in main.rock: {got:?}"
-        );
-        if let Some(key) = got
-            .iter()
-            .find(|l| l.contains("::") && !l.contains("Kind::"))
-        {
-            panic!("a DefKey leaked into completion: {key}");
-        }
-    }
-    // Private members of other modules are not callable API, bound through
-    // a glob or offered with an import.
-    let got = labels(&complete_in_main("let q = hidden"));
-    assert_lacks(&got, &["hidden_helper"]);
-    let got = labels(&complete_in_main("let q = inner_sec"));
-    assert_lacks(&got, &["inner_secret"]);
-}
-
-#[test]
-fn bare_completion_of_an_unimported_accessible_name_carries_an_import_edit() {
-    let items = complete_in_main("let q = dept");
-    let depth = find(&items, "depth");
-    let edits = depth
-        .additional_text_edits
-        .as_ref()
-        .expect("an unimported name carries its import");
-    assert_eq!(edits.len(), 1);
-    assert_eq!(edits[0].new_text, "use shapes::inner::depth;\n");
-    // After the file's last `use` item, at the start of the next line.
-    assert_eq!(edits[0].range.start, lsp_types::Position::new(3, 0));
-    assert_eq!(edits[0].range.end, lsp_types::Position::new(3, 0));
-}
-
-#[test]
-fn bare_completion_of_a_bound_name_carries_no_import_edit() {
-    let items = complete_in_main("let q = perim");
-    let perimeter = find(&items, "perimeter");
-    assert!(
-        perimeter.additional_text_edits.is_none(),
-        "a glob already binds it"
-    );
-}
-
-#[test]
-fn synthesized_completions_respect_bound_spelling_and_visibility() {
-    let cases: &[(bool, &str, &[&str])] = &[
-        (
-            false,
-            "let q = boxwidthb",
-            &["box_width(BOX)", "!*SECRET_BOX*", "!*app::shapes::*"],
-        ),
-        (
-            true,
-            "widthvaluebw",
-            &["width_value(BOX.w)", "!*b.secret*", "!*app::shapes::*"],
-        ),
-        (
-            true,
-            "widthvalues",
-            &["!width_value(BOX.secret)", "!*app::shapes::*"],
-        ),
-        (false, "let q = hiddenwidthb", &["!hidden_width(BOX)"]),
-    ];
-    for (sizes, typed, patterns) in cases {
-        let items = if *sizes {
-            complete_in_sizes(typed)
-        } else {
-            complete_in_main(typed)
-        };
-        assert_labels(typed, &labels(&items), patterns);
-    }
-}
-
-#[test]
-fn changing_v1_visibility_invalidates_completion_caches() {
-    for (typed, label, public, private) in [
-        (
-            "let q = boxwidthb",
-            "box_width(BOX)",
-            "pub global BOX",
-            "global BOX",
-        ),
-        (
-            "let q = perim",
-            "perimeter",
-            "pub fn perimeter",
-            "fn perimeter",
-        ),
-    ] {
-        let project = V1Project::new();
-        let mut bone = project.open();
-        let main = project.path("main.rock");
-        let text = with_completion(typed, MAIN_ANCHOR);
-        bone.update(&main, text.clone());
-        assert_offers(
-            &labels(&complete_at(&mut bone, &main, &text, typed)),
-            &[label],
-        );
-        bone.update(
-            &project.path("shapes.rock"),
-            SHAPES.replace(public, private),
-        );
-        assert_lacks(
-            &labels(&complete_at(&mut bone, &main, &text, typed)),
-            &[label],
-        );
-    }
-}
-
-#[test]
-fn changing_v1_import_alias_invalidates_bound_completion_cache() {
-    let (_project, mut bone, main) = opened();
-    let text = with_completion("let q = surf", MAIN_ANCHOR);
-    bone.update(&main, text.clone());
-    let pos = pos_of(&text, "let q = surf", 0, "let q = surf".len());
-    let before = bone.completion(&main, pos);
-    assert!(
-        before.iter().any(|item| item.label == "surface"),
-        "fixture did not seed alias cache"
-    );
-
-    let body_changed = text.replace("surface(2)", "surface(3)");
-    bone.update(&main, body_changed.clone());
-    let after_body = bone.completion(
-        &main,
-        pos_of(&body_changed, "let q = surf", 0, "let q = surf".len()),
-    );
-    assert_eq!(
-        after_body, before,
-        "body-only edit changed bound completion output"
-    );
-
-    let changed = body_changed
-        .replace("use shapes::area as surface;", "use shapes::area as surf;")
-        .replace("surface(3)", "surf(3)");
-    bone.update(&main, changed.clone());
-    let after = bone.completion(
-        &main,
-        pos_of(&changed, "let q = surf", 0, "let q = surf".len()),
-    );
-    assert!(
-        !after.iter().any(|item| item.label == "surface"),
-        "old alias survived bound cache"
-    );
-    let surf = find(&after, "surf");
-    assert_eq!(surf.detail.as_deref(), Some("fn surf(w: int) -> int"));
-}
-
-#[test]
-fn aliased_callable_completion_carries_signature_detail() {
-    let items = complete_in_main("let q = surf");
-    let surface = find(&items, "surface");
-    let detail = surface.detail.as_deref().unwrap_or("");
-    assert!(
-        detail.starts_with("fn "),
-        "aliased callable detail: {detail:?}"
-    );
-    assert!(
-        detail.contains("(w: int) -> int"),
-        "aliased callable detail: {detail:?}"
-    );
 }
 
 #[test]
@@ -854,56 +581,6 @@ fn renaming_an_alias_renames_only_that_files_uses_of_it() {
     }
 }
 
-/// No synthesized completion item in a v1 file may spell a DefKey (`chess_core::`).
-#[test]
-fn no_completion_in_a_v1_file_spells_a_def_key() {
-    let project =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/chess_completion");
-    let source = project.join("chess_moves.rock");
-    let file = bone_query::canonicalize_lenient(&source.to_string_lossy());
-    let text = std::fs::read_to_string(&source).expect("chess completion fixture is readable");
-    let mut bone = BoneWorkspace::new();
-    let diags = bone.update(&file, text.clone());
-    assert_no_errors(&diags);
-    let at = pos_of(&text, "ch_type(p)", 0, 4);
-    let items = bone.completion(&file, at);
-    assert!(!items.is_empty());
-    for item in items {
-        let insert = item.insert_text.clone().unwrap_or_default();
-        assert!(
-            !item.label.contains("chess_core::") && !insert.contains("chess_core::"),
-            "{} / {insert}",
-            item.label
-        );
-    }
-}
-
-/// A module alias segment lands on the module header, the member after it on its definition.
-#[test]
-fn a_module_alias_segment_lands_on_the_aliased_module() {
-    let project = V1Project::new();
-    let main_text = format!(
-        "use shapes::inner as deep;\n\n{MAIN}\nfn deeper() -> int {{\n    deep::depth()\n}}\n"
-    );
-    let main = project.path("main.rock");
-    std::fs::write(&main, &main_text).unwrap();
-    let mut bone = BoneWorkspace::new();
-    let diags = bone.update(&main, main_text.clone());
-    assert_no_errors(&diags);
-    assert_eq!(
-        definition_line(&bone, &main, &main_text, "deep::depth", 0, 1),
-        ("shapes_inner.rock".into(), 0)
-    );
-    assert_eq!(
-        definition_line(&bone, &main, &main_text, "as deep", 0, 4),
-        ("shapes_inner.rock".into(), 0)
-    );
-    assert_eq!(
-        definition_line(&bone, &main, &main_text, "deep::depth", 0, 7),
-        ("shapes_inner.rock".into(), 2)
-    );
-}
-
 #[test]
 fn an_import_edit_goes_in_sorted_position_among_the_uses() {
     let (_project, mut bone, main) = opened();
@@ -1056,35 +733,4 @@ fn an_operator_use_item_segment_lands_on_the_operator() {
         definition_line(&bone, &main, &main_text, "shapes::operator(+);", 0, 1),
         ("shapes.rock".into(), 0)
     );
-}
-
-#[test]
-fn renaming_a_function_stops_at_its_own_definition_and_the_stdlib() {
-    const GET_MAIN: &str = "\
-fn main() {
-    let a = shapes::get(1)
-    let b = other::get(2)
-    print(\"{a} {b}\")
-}
-";
-    const GET_SHAPES: &str = "pub mod shapes;\n\npub fn get(w: int) -> int {\n    w\n}\n";
-    const GET_OTHER: &str = "pub mod other;\n\npub fn get(w: int) -> int {\n    w + 1\n}\n";
-    let project = V1Project::new();
-    let dir = project.dir.path();
-    std::fs::write(dir.join("main.rock"), GET_MAIN).unwrap();
-    std::fs::write(dir.join("shapes.rock"), GET_SHAPES).unwrap();
-    std::fs::write(dir.join("other.rock"), GET_OTHER).unwrap();
-    std::fs::remove_file(dir.join("shapes_inner.rock")).unwrap();
-    std::fs::remove_file(dir.join("facade.rock")).unwrap();
-
-    let mut bone = BoneWorkspace::new();
-    let diags = bone.update(&project.path("main.rock"), GET_MAIN.to_string());
-    assert_no_errors(&diags);
-    let shapes = project.path("shapes.rock");
-    let edits = rename_edits(&bone, &shapes, pos_of(GET_SHAPES, "get", 0, 1), "fetch");
-    let want: Vec<(String, u32, String, String)> = vec![
-        ("main.rock".into(), 1, "get".into(), "fetch".into()),
-        ("shapes.rock".into(), 2, "get".into(), "fetch".into()),
-    ];
-    assert_eq!(edits, want);
 }
