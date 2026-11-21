@@ -42,7 +42,6 @@ pub struct EngineState {
     fps_overlay_origin: Vec2 = FPS_TEXT_ORIGIN,
     systems_profiling_enabled: bool = true,
     show_pipeline_inspector: bool = false,
-    show_sfx_browser: bool = false,
     exposure: float = 1.0,
     exposure_weight: Canvas? = null,
     exposure_weighted: float = 1.0,

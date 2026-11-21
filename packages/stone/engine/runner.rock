@@ -1196,11 +1196,6 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
     }
     draw_pipeline_inspector()
 
-    if tool_key_pressed(ToolKey::F6) && tool_ctrl_held() {
-        ENGINE.show_sfx_browser = !ENGINE.show_sfx_browser
-    }
-    draw_sfx_browser()
-
     uniform_block_dump_key()
 
     if tool_key_pressed_dynamic(KEY_DEBUG_JIT_TRACE) {

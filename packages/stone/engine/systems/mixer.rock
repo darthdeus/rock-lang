@@ -83,3 +83,17 @@ pub fn mixer_clear_solo() {
 }
 
 const MIXER_GAIN_MAX: float = 2.0
+
+const MIXER_FLOOR_DB: float = -60.0
+
+// dB scale, not clamped at 1.0: above unity is the clip.
+pub @pure fn mixer_meter_norm(amp: float) -> float {
+    if amp <= 0.0 { return 0.0 }
+    let db = 8.685889638065035 * log(amp)   // 20*log10(amp)
+    if db <= MIXER_FLOOR_DB { return 0.0 }
+    return 1.0 - db / MIXER_FLOOR_DB
+}
+
+pub @pure fn mixer_meter_db(norm: float) -> float {
+    return MIXER_FLOOR_DB * (1.0 - norm)
+}

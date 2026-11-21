@@ -119,16 +119,6 @@ pub fn sfx_log_len() -> int {
     return SFX_LOG.len()
 }
 
-fn sfx_log_span() -> float {
-    let n = SFX_LOG.len()
-    if n < 2 { return 0.0 }
-
-    let newest = sfx_log_recent(0)
-    let oldest = sfx_log_recent(n - 1)
-    if newest == null || oldest == null { return 0.0 }
-    return newest.at - oldest.at
-}
-
 pub fn sfx_log_recent(i: int) -> SfxEvent? {
     let n = SFX_LOG.len()
     if i < 0 || i >= n { return null }
