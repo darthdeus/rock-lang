@@ -1,5 +1,3 @@
-//! Completion contexts: what each cursor context offers, how items edit, how they rank.
-
 use crate::completion::Insert::{Label, Plain, Snippet, Text};
 use crate::completion::*;
 use bone_query::BoneWorkspace;
@@ -53,7 +51,6 @@ fn member_access_offers() {
              fn r() {\n  let c = Counter { n: 3 }\n  c.<|>\n  let _x = 0\n}\n",
             &["next", "enumerate", "map"],
         ),
-        // An iterable reaches a combinator through the implicit `iter(recv)`.
         (
             "iterator combinators on a vec",
             "fn r(names: [int]) {\n  names.<|>\n  let _n = 0\n}\n",
@@ -75,7 +72,6 @@ fn member_access_offers() {
             "struct Plain { a: int }\nfn r() {\n  let p = Plain { a: 1 }\n  p.<|>\n  let _n = 0\n}\n",
             &["a: int", "!enumerate", "!map", "!collect"],
         ),
-        // The `-> Result {` body brace is not a `Result { }` literal.
         (
             "member in a fn returning a struct",
             "struct Result { value: int, ok: bool }\nfn c() -> Result {\n  \
@@ -292,7 +288,6 @@ fn literal_and_block_contexts_offer() {
             "enum E { A, B, C }\nfn r(e: E) -> int {\n  match e {\n    E::A | <|>E::B => 1,\n    _ => 0\n  }\n}\n",
             &["E::C"],
         ),
-        // A unit variant has no record fields, so the `if` brace is not a record literal.
         (
             "block after a unit-variant condition",
             "enum SpellKind { Fire, Dispel }\nfn spell_clear() {}\n\
@@ -310,7 +305,6 @@ fn literal_and_block_contexts_offer() {
             "enum SpellKind { Fire, Harm }\nstruct SpellDef {\n  kind: SpellKind = h<|>ar\n}\n",
             &["*Harm*"],
         ),
-        // Candidates come from `deco` declarations, not the fn namespace.
         (
             "decorators",
             "deco init late_update {}\ndeco init late_draw {}\ndeco init update {}\n\
@@ -339,7 +333,6 @@ fn bool_is_offered_as_a_type_in_a_type_slot() {
 #[test]
 fn value_slots_offer() {
     check_labels(&[
-        // Structs share the function bucket, so the item cap keeps them.
         (
             "struct types at an empty prefix",
             "struct Point { x: float, y: float }\n\
@@ -499,9 +492,7 @@ fn comments_strings_and_numbers_offer_nothing() {
         (MOB, "    print(r\"raw hel<|>\")\n}\n"),
         (MOB, "    print(r\"raw {hel<|>}\")\n}\n"),
         (MOB, "    let t = \"\"\"triple hel<|>\"\"\"\n}\n"),
-        // The closing quote is not typed yet.
         (MOB, "    print(\"some hel<|>\n}\n"),
-        // A literal nested in a hole is still text.
         (MOB, "    print(\"{join(v, \"hel<|>\")}\")\n}\n"),
     ];
     for (head, body) in bodies {
@@ -527,7 +518,6 @@ fn comments_strings_and_numbers_offer_nothing() {
             "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\nfn frame() {}\n\
              fn t() {\n  // yield fr<|>\n}\n",
         ),
-        // Identifiers cannot start with a digit.
         (
             "numeric literal",
             "fn remap_to_01(value: float, min1: float, max1: float) -> float {\n  value\n}\n\
@@ -618,7 +608,6 @@ fn field_refs_offer_exactly_the_fields_of_their_value_type() {
              fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.<|>)\n}\n",
             &[".cast_co: int?", "!.hp*", "!stop", "!Player"],
         ),
-        // Every overload is consulted for the FieldRef slot.
         (
             "second overload supplies the slot",
             "struct Player { hp: int, cast_co: int? }\nfn stop(t: int) {}\n\
@@ -634,7 +623,6 @@ fn field_refs_offer_exactly_the_fields_of_their_value_type() {
              fn r() {\n  let e: Entity<Glyph> = Entity { i: 0 }\n  e.run_into(.<|>)\n}\n",
             &[".co: int?", "!.life*", "!run_into"],
         ),
-        // A generic-receiver FieldRef method is callable only with a field to pass.
         (
             "FieldRef method absent without a matching field",
             "struct Mob { health: int, name: string }\n\
@@ -1064,7 +1052,6 @@ fn coroutine_contexts_offer() {
             "fn f() -> int {\n  yi<|>\n}\n",
             &["!yield", "!await"],
         ),
-        // The `Wait` ergonomics need a `Wait` type.
         (
             "no Wait without the type",
             "co fn f() -> Coroutine<<|>> {\n  yield 0\n}\n",
@@ -1264,7 +1251,6 @@ fn accepting_a_value_inserts() {
             "tick",
             Plain("tick()"),
         ),
-        // Reach paths to the expected arg type; the label carries the type.
         (
             "field path",
             "struct SpellDef { kind: SpellKind }\nenum SpellKind { Fire, Ice }\n\
@@ -1298,7 +1284,6 @@ fn accepting_a_value_inserts() {
             "player.movable.to_ivec() -> IVec2",
             Text("player.movable.to_ivec()"),
         ),
-        // A reach path typed over an existing `.rect()` tail drops that tail.
         (
             "reach path does not duplicate a member tail",
             "struct UiRect {}\nstruct Panel {}\nfn rect(self: Panel) -> UiRect { UiRect {} }\n\
@@ -1357,7 +1342,6 @@ fn accepting_a_value_inserts() {
             "tile_center(player.movable.grid)",
             Text("tile_center(player.movable.grid)"),
         ),
-        // Lifecycle hooks are also stdlib fns, but complete as a block.
         (
             "lifecycle hook on_killed",
             "co fn f() -> Coroutine<int> {\n  on_kil<|>\n  yield 1\n}\n",
@@ -1391,7 +1375,6 @@ fn enum_variants_template_their_payload_only_in_value_position() {
             "Loaded",
             Label,
         ),
-        // No `=>` yet: the enclosing `match` still makes it a pattern.
         (
             "fresh arm pattern",
             "fn r(s: SpellState) {\n  match s {\n    SpellState::<|>\n  }\n}\n",
@@ -1562,8 +1545,6 @@ fn contexts_order_candidates() {
              fn r() {\n  let spell: SpellDef = SpellDef { kind: 0 }\n  use_spell(spe<|>)\n}\n",
             "spell < spell_make < spell_dps",
         ),
-        // Without an expected type candidates rank by kind; enum-member variants
-        // come last.
         (
             "untyped slot: variables, functions and structs, then variants",
             "enum AggressorRef { PlayerRef, NpcRef }\nenum ClickTarget { Player, Ground }\n\
@@ -1573,7 +1554,6 @@ fn contexts_order_candidates() {
             "player < player_dead < play_sound < AggressorRef::PlayerRef; \
              player_dead < Player < AggressorRef::PlayerRef; player < ClickTarget::Player",
         ),
-        // Match quality dominates path length, and case only breaks ties.
         (
             "prefix-matching reach path above a scattered one",
             "struct IVec2 { x: int }\nstruct Movable { grid: IVec2 }\n\
@@ -1595,7 +1575,6 @@ fn contexts_order_candidates() {
              fn f(mob: Mob) {\n  if mob.attack<|>\n}\n",
             "attacking* < attack_timer*",
         ),
-        // No match to be tighter about, so no length tiebreak.
         (
             "empty prefix is alphabetical",
             "struct S { aaa_long: int, z: int }\nfn f(s: S) {\n  s.<|>\n}\n",
@@ -1634,7 +1613,6 @@ fn contexts_order_candidates() {
              fn tick(s: AiState) {\n  match s {\n    co<|>\n  }\n}\n",
             "AiState::Combat < count",
         ),
-        // The arm-completing munge must still resolve the scrutinee.
         (
             "arm head with unclosed braces at EOF",
             "enum AiState { Idle, Combat, Flee }\nglobal count: int = 0\n\
@@ -1647,7 +1625,6 @@ fn contexts_order_candidates() {
              fn tick(s: AiState) {\n  match s {\n    AiState::Idle => co<|>\n  }\n}\n",
             "count < AiState::Combat",
         ),
-        // `apples` sorts first, so only the iterable rung can flip these.
         (
             "for-in tuple pattern: Map local first",
             "fn r() {\n  let scores: Map<string, int> = map_new()\n  let apples = 0\n  for (k, v) in <|>\n}\n",
@@ -1696,7 +1673,6 @@ fn contexts_lead_with() {
             "struct Wait { wait_frame: bool }\nco fn f() -> Coroutine<<|>> {\n  yield 0\n}\n",
             &["Wait"],
         ),
-        // Hosts ship `Wait` as an enum.
         (
             "Coroutine<Wait> for an enum Wait",
             "enum Wait { Frame, Secs(float) }\nco fn f() -> Cor<|> {\n  yield 0\n}\n",
