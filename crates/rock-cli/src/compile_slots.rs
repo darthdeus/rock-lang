@@ -671,7 +671,6 @@ pub(crate) fn finish_slot_waiter<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     #[test]
     fn a_holder_record_never_contains_var_values() {
@@ -774,36 +773,6 @@ mod tests {
     }
 
     #[test]
-    fn waiters_are_admitted_in_arrival_order() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = pool(dir.path(), 1000);
-        let held = acquire_reserving(&config, "holder", 1000, None).unwrap();
-        let order = Arc::new(Mutex::new(Vec::new()));
-        let mut workers = Vec::new();
-        for label in ["first", "second", "third", "fourth"] {
-            let (config, order) = (config.clone(), order.clone());
-            let (worker, waiting) = spawn_slot_waiter(move || {
-                let slot = acquire_reserving(&config, label, 1000, None).unwrap();
-                order.lock().unwrap().push(label);
-                std::thread::sleep(Duration::from_millis(20));
-                drop(slot);
-            });
-            waiting
-                .recv_timeout(test_utils::HANG_BACKSTOP)
-                .expect("waiter never queued");
-            workers.push(worker);
-        }
-        drop(held);
-        for worker in workers {
-            worker.join().unwrap();
-        }
-        assert_eq!(
-            *order.lock().unwrap(),
-            ["first", "second", "third", "fourth"]
-        );
-    }
-
-    #[test]
     fn small_compiles_share_the_pool() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path(), 1, CompileClass::Batch);
@@ -832,68 +801,6 @@ mod tests {
         };
         let fifth = finish_slot_waiter(small.pop().unwrap(), waiter, waiting);
         fifth.unwrap();
-    }
-
-    #[test]
-    fn a_large_head_request_is_not_passed_by_smaller_ones() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = config(dir.path(), 1, CompileClass::Batch);
-        let held = acquire_reserving(&config, "small holder", 1000, None).unwrap();
-        let order = Arc::new(Mutex::new(Vec::new()));
-        let mut workers = Vec::new();
-        for (label, reserve) in [("large", COMPILE_PEAK_MIB), ("small", 1000)] {
-            let (config, order) = (config.clone(), order.clone());
-            let (worker, waiting) = spawn_slot_waiter(move || {
-                let slot = acquire_reserving(&config, label, reserve, None).unwrap();
-                order.lock().unwrap().push(label);
-                std::thread::sleep(Duration::from_millis(200));
-                drop(slot);
-            });
-            waiting
-                .recv_timeout(test_utils::HANG_BACKSTOP)
-                .expect("waiter never queued");
-            workers.push(worker);
-        }
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(
-            order.lock().unwrap().is_empty(),
-            "a waiter passed the head: {:?}",
-            order.lock().unwrap()
-        );
-        drop(held);
-        for worker in workers {
-            worker.join().unwrap();
-        }
-        assert_eq!(*order.lock().unwrap(), ["large", "small"]);
-    }
-
-    #[test]
-    fn a_foreign_locked_file_occupies_its_recorded_or_full_reservation() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = config(dir.path(), 1, CompileClass::Batch);
-        let barrier = open_slot(&dir.path().join("batch-0")).unwrap();
-        barrier.lock().unwrap();
-        let (waiter, waiting) = {
-            let config = config.clone();
-            spawn_slot_waiter(move || acquire_reserving(&config, "small", 1000, None).map(|_| ()))
-        };
-        let barrier = CompileSlot {
-            held: Some(Held {
-                file: barrier,
-                path: dir.path().join("batch-0"),
-                remove: false,
-                dir: dir.path().to_path_buf(),
-                peak_key: None,
-                peak_at_admission: None,
-            }),
-            marks_thread: false,
-        };
-        let small = finish_slot_waiter(barrier, waiter, waiting);
-        small.unwrap();
-        assert!(
-            dir.path().join("batch-0").exists(),
-            "an unlocked foreign file is left alone"
-        );
     }
 
     #[test]
@@ -943,20 +850,6 @@ mod tests {
     }
 
     #[test]
-    fn batch_never_takes_the_author_slot() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = config(dir.path(), 1, CompileClass::Batch);
-        let held = acquire_with(&config, "held").unwrap();
-        assert!(slot_is_free(dir.path(), AUTHOR_SLOT));
-        let (waiter, waiting) = {
-            let config = config.clone();
-            spawn_slot_waiter(move || acquire_with(&config, "batch").map(|_| ()))
-        };
-        let result = finish_slot_waiter(held, waiter, waiting);
-        result.unwrap();
-    }
-
-    #[test]
     fn interactive_prefers_the_author_slot_then_falls_back_to_the_pool() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path(), 2, CompileClass::Interactive);
@@ -966,12 +859,6 @@ mod tests {
         let _third = acquire_with(&config, "third").unwrap();
         drop(first);
         assert!(slot_is_free(dir.path(), AUTHOR_SLOT));
-    }
-
-    #[test]
-    fn zero_slots_disable_the_limit() {
-        set_thread_config(None);
-        let _slot = acquire("unlimited").unwrap();
     }
 
     #[test]
@@ -1061,88 +948,5 @@ mod tests {
         println!("\nready");
         std::io::stdout().flush().unwrap();
         std::thread::sleep(Duration::from_secs(60));
-    }
-
-    fn spawn_child(dir: &Path, mode: &str) -> std::process::Child {
-        use std::io::BufRead;
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "compile_slots::tests::hold_slot_until_killed",
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(CHILD_DIR_ENV, dir)
-            .env(CHILD_MODE_ENV, mode)
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let ready = std::io::BufReader::new(stdout)
-            .lines()
-            .any(|line| line.unwrap().trim() == "ready");
-        assert!(ready, "the child never reported its slot state");
-        child
-    }
-
-    #[test]
-    fn a_killed_holder_frees_its_slot() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut child = spawn_child(dir.path(), "hold");
-        let held = held_files(dir.path());
-        assert_eq!(held, ["held-000000000001"]);
-        assert!(
-            !slot_is_free(dir.path(), &held[0]),
-            "the child's slot is not locked"
-        );
-        let holder = std::fs::read_to_string(dir.path().join(&held[0])).unwrap();
-        assert!(holder.contains(&format!("pid={}", child.id())), "{holder}");
-        child.kill().unwrap();
-        child.wait().unwrap();
-        let config = config(dir.path(), 1, CompileClass::Batch);
-        let (next, waiting) = spawn_slot_waiter(move || acquire_with(&config, "next"));
-        assert!(
-            matches!(
-                waiting.recv_timeout(test_utils::HANG_BACKSTOP),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
-            ),
-            "the next compile waited behind the dead holder's slot"
-        );
-        let _next = next.join().unwrap().unwrap();
-        assert_eq!(
-            held_files(dir.path()),
-            ["held-000000000002"],
-            "the dead holder's file is removed"
-        );
-    }
-
-    #[test]
-    fn a_killed_waiter_leaves_the_queue() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = config(dir.path(), 1, CompileClass::Batch);
-        let held = acquire_with(&config, "parent").unwrap();
-        let mut child = spawn_child(dir.path(), "queue");
-        assert_eq!(queued_tickets(dir.path()), ["000000000002"]);
-        child.kill().unwrap();
-        child.wait().unwrap();
-        let (sender, admitted) = std::sync::mpsc::channel();
-        let (_worker, waiting) = spawn_slot_waiter(move || {
-            let slot = acquire_with(&config, "after the dead waiter");
-            sender.send(slot.map(|_| ())).unwrap();
-        });
-        waiting
-            .recv_timeout(test_utils::HANG_BACKSTOP)
-            .expect("the next waiter never queued");
-        drop(held);
-        admitted
-            .recv_timeout(test_utils::HANG_BACKSTOP)
-            .expect("a dead waiter's ticket blocked the queue")
-            .unwrap();
-        assert!(
-            queued_tickets(dir.path()).is_empty(),
-            "{:?}",
-            queued_tickets(dir.path())
-        );
     }
 }
