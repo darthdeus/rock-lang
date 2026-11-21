@@ -1,7 +1,4 @@
-// Nullable struct fields holding values, structs, enums and newtypes:
-// narrowing, clearing, aliasing and reflection.
 
-// --- Clearing a nullable field through an alias invalidates the narrowed field. ---
 
 value RoutePlace { x: int }
 struct RouteRow { goal: RoutePlace? = null }
@@ -16,7 +13,6 @@ fn nullable_field_assignment_is_invalidated_through_an_alias() {
     assert(row.goal == null)
 }
 
-// --- A narrowed nullable value field compares equal to a value. ---
 
 nobox value NarrowedPlace { x: int }
 struct NarrowedRow { goal: NarrowedPlace? = null }
@@ -29,7 +25,6 @@ fn narrowed_nullable_value_field_compares_with_a_value() {
     assert(row.goal == goal)
 }
 
-// --- Narrowing survives read-only collection calls on the field. ---
 
 struct ReadonlyRoute { path: [int]? }
 @test
@@ -43,7 +38,6 @@ fn nullable_field_survives_verified_collection_reads() {
     } else { assert(false) }
 }
 
-// --- Unwrapping a nullable struct field yields the owner's object, not a copy. ---
 
 struct NullablePlaceCounter { n: int = 0 }
 
@@ -63,7 +57,6 @@ fn nullable_identity_field_unwrap_mutates_the_owner() {
     assert(counter.n == 2, "both bumps reach the held counter")
 }
 
-// --- Present and absent stores into a nullable value field of an arena row. ---
 
 nobox value NullableStoreTile { x: int, y: int }
 
@@ -85,7 +78,6 @@ fn nullable_value_field_accepts_present_and_absent_stores_through_an_arena_row()
     assert(tile.x == 8 && tile.y == 9)
 }
 
-// --- Clearing a nullable enum field whose payload is a wide value. ---
 
 value FlatClearId { scene_id: int, arena_id: int, slot: int, generation: int }
 enum FlatClearTarget { Player(FlatClearId), Mob(FlatClearId) }
@@ -103,7 +95,6 @@ fn nullable_wide_payload_enum_field_clears() {
     assert(state.target == null, "nullable wide payload enum field clears")
 }
 
-// --- field_get on nullable value fields: one owner evaluation, copied payloads. ---
 
 nobox value ReflectedPlace { area: int, x: int, y: int }
 struct ReflectedOwner { place: ReflectedPlace?, other: ReflectedPlace? }
@@ -162,7 +153,6 @@ fn field_get_nullable_value_reads_payload() {
     assert(reread.area == 17 && reread.x == 19 && reread.y == 23)
 }
 
-// --- Nullable newtype fields project their integer lane. ---
 
 newtype LaneImage(int)
 newtype LaneCanvasId(int)

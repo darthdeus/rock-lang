@@ -1,9 +1,5 @@
-// Column-stored maps: `Map<K, V>` stores an all-scalar V (at most four
-// leaves) in columns whether or not V is marked `nobox`, and looks a key up as
-// a slot into that storage. A miss is decided by the spine, never by the
-// leaves: the absent arm has nil leaves and a freed slot keeps stale ones, so
-// packing the leaves before the null check would fault. A generic userland map
-// composes scalar slot indices with column-stored values the same way.
+// A map miss is decided by the spine: absent leaves are nil and freed slots
+// retain stale values, so packing leaves before the null check would fault.
 
 value GetCell { a: int, b: int }
 value GetCellF { x: float, y: float }
@@ -36,7 +32,6 @@ value GetCellF { x: float, y: float }
     assert_eq(m.len(), 0)
 }
 
-// The present control: the same shapes must still read real leaves.
 @test fn map_column_get_present_control() {
     let m: Map<string, GetCell> = map_new()
     m["a"] = GetCell { a: 1, b: 2 }
@@ -65,7 +60,6 @@ value GetCellF { x: float, y: float }
     assert_eq(seen, 1)
 }
 
-// A miss reaching the other nil-observable consumers.
 @test fn map_column_get_miss_through_coalesce() {
     let m: Map<string, GetCell> = map_new()
     m["a"] = GetCell { a: 1, b: 2 }
@@ -82,7 +76,6 @@ value GetCellF { x: float, y: float }
     assert(m.get("a")?.a == 1)
 }
 
-// Float leaves take the same path -- the fault is the pack, not the leaf type.
 @test fn map_column_get_miss_float_leaves() {
     let m: Map<string, GetCellF> = map_new()
     m["a"] = GetCellF { x: 1.0, y: 2.0 }
@@ -93,7 +86,6 @@ value GetCellF { x: float, y: float }
     assert_eq(g.unwrap().x, 1.0)
 }
 
-// contains / index / remove must be unaffected by any fix here.
 @test fn map_column_get_miss_does_not_disturb_the_neighbours() {
     let m: Map<string, GetCell> = map_new()
     m["a"] = GetCell { a: 1, b: 2 }

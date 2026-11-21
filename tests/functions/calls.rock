@@ -1,7 +1,3 @@
-// Calls: overloads chosen by arity under named and positional args, generic
-// recursion, per-overload static cells, every fn-type spelling, missing
-// trailing arguments and return values reading as null, and a call through a
-// receiver preferring a function-typed field over a same-named UFCS fn.
 
 fn foo(a: int) -> string {
     return "one"
@@ -63,7 +59,6 @@ fn identity(s: string) -> string {
     s
 }
 
-// fn() shorthand (defaults to fn() -> ())
 fn call_fn_shorthand(f: fn()) {
     f()
 }
@@ -92,7 +87,6 @@ fn call_paren_with_params(f: (string) -> string) -> string {
     f("test")
 }
 
-// T -> U bare syntax (no parentheses around a single parameter)
 fn call_bare_syntax(f: string -> string) -> string {
     f("test")
 }
@@ -124,7 +118,6 @@ struct SentinelOther {
     n: int,
 }
 
-// Records whether the unrelated UFCS function ran.
 global SENTINEL_UFCS_HIT: bool = false
 
 fn sentinel_lit(self: SentinelOther) -> bool {
@@ -145,16 +138,13 @@ fn a_fn_field_wins_over_a_same_named_ufcs_free_fn() {
     SENTINEL_UFCS_HIT = false
     let h = SentinelHolder { sentinel_lit: sentinel_says_false }
 
-    // The field returns false. The free fn returns true and sets the flag.
     let got = h.sentinel_lit()
 
     assert(!got, "h.sentinel_lit() must call the function-typed field")
     assert(!SENTINEL_UFCS_HIT, "a mismatched UFCS function must not run")
 }
 
-// The control: with no same-named free function in scope, a closure field is
-// called correctly. Without this, the sentinel above could be pinning "closure
-// fields never work" rather than "UFCS shadows them".
+// The control distinguishes UFCS shadowing from a general closure-field failure.
 @test
 fn a_closure_field_with_no_shadow_is_called_normally() {
     let h = SentinelHolder { sentinel_lit: sentinel_says_false }
@@ -221,7 +211,6 @@ fn absent_optional_value_returns_read_as_null() {
 struct InitVec2 { x: float, y: float }
 struct InitIVec2 { x: int, y: int }
 
-// The wrong overload comes first in declaration order.
 fn init_fixv(x: int, y: int) -> InitVec2 {
     return InitVec2 { x: 5.0, y: 9.0 }
 }
@@ -230,8 +219,6 @@ fn init_fixv(iv: InitIVec2) -> InitVec2 {
     return InitVec2 { x: 1.0, y: 2.0 }
 }
 
-// Global variable initialization - this is where the bug occurred
-// The compiler should select init_fixv(int, int) not init_fixv(InitIVec2) based on argument types
 global CAMERA_POS: InitVec2 = init_fixv(5, 9)
 
 @test

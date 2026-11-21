@@ -1,6 +1,3 @@
-// Named and default arguments: argument ordering and reordering, mixing
-// positional and named args, skipping middle defaults, many-parameter and
-// nested calls, and named args on method calls.
 
 fn simple_default(x: int, y: int = 10) -> int {
     x + y
@@ -58,8 +55,6 @@ fn test_named_reordering() {
     print(string_func(name: "Rock", suffix: "?", prefix: "Hi"))
 }
 
-// First args positional, rest named in any order; skipped middle params get
-// their defaults.
 @test(output = "55\n55\n85\n75\n65\n45\n35\n100\n101")
 fn test_mixed_positional_and_named() {
     print(multi_default(5, c: 10, d: 20))
@@ -119,7 +114,6 @@ fn test_nested_named_calls() {
     print(outer_func(20))
 }
 
-// Locals with the same names as parameters do not affect named args.
 @test(output = "15\n35")
 fn test_named_args_with_shadowing() {
     let y = 100
@@ -165,13 +159,11 @@ fn test_method_call_with_multiple_named_args() {
 fn test_method_call_with_mixed_positional_and_named() {
     let s = Shape { x: 0.0, y: 0.0, width: 10.0, height: 10.0 }
 
-    // Mix positional and named arguments
     let green = color(0.0, 1.0, 0.0, 1.0)
     let result = s.shape_draw(green, border: 3.0)
     assert(result == "tint.r=0, border=3", "Expected green color and border=3, got: {result}")
 }
 
-// Test with more complex default expressions
 fn complex_default() -> Color {
     return color(0.25, 0.25, 0.25, 0.75)
 }
@@ -184,7 +176,6 @@ fn shape_draw_complex(shape: Shape, effect: Color = complex_default(), intensity
 fn test_method_with_complex_default_expression() {
     let s = Shape { x: 5.0, y: 5.0, width: 15.0, height: 15.0 }
 
-    // Skip complex default, set only radius
     let result = s.shape_draw_complex(radius: 7.5)
     assert(result == "effect.a=0.75, intensity=1, radius=7.5", "Expected default effect and intensity, custom radius, got: {result}")
 
