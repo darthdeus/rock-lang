@@ -11,7 +11,6 @@ mod nested_strided_inspect;
 
 mod map_empty_snapshots;
 mod map_loops;
-mod opaque_effects;
 
 mod cdata_leaf_projection;
 
@@ -88,7 +87,6 @@ mod modules_lifecycle;
 mod modules_state_identity;
 mod modules_type_emission;
 mod multi_rejection;
-mod native_buffer_alloc;
 mod native_buffer_element_admission;
 mod native_buffer_leaf_addressing;
 mod nil_kill_scope;

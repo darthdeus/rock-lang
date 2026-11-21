@@ -1,0 +1,26 @@
+value V2 { x: float, y: float }
+
+@nomangle fn native_buffer_v2(n: int) -> NativeBuffer<V2> { return native_buffer_alloc(n) }
+@nomangle fn native_buffer_i(n: int) -> NativeBuffer<int> { return native_buffer_alloc(n) }
+@nomangle fn native_buffer_f(n: int) -> NativeBuffer<float> { return native_buffer_alloc(n) }
+fn generic_native_buffer<T>(cap: int) -> NativeBuffer<T> { return native_buffer_alloc(cap) }
+@nomangle fn generic_int_buffer() -> NativeBuffer<int> { return generic_native_buffer(8) }
+
+inline(lua) fn check_buffer_wires() -> bool = """
+    local ffi = require("ffi")
+    local v = native_buffer_v2(4)
+    assert(v.len == 4 and getmetatable(v) == __rock_box_mts.NativeBuffer)
+    assert(ffi.istype("V2", v.ptr[0]))
+    local i = native_buffer_i(2)
+    local f = native_buffer_f(2)
+    local gi = generic_int_buffer()
+    assert(i.len == 2 and f.len == 2 and gi.len == 8)
+    assert(ffi.istype("int[?]", i.ptr) and ffi.istype("int[?]", gi.ptr))
+    assert(ffi.istype("float[?]", f.ptr))
+    i.ptr[0], f.ptr[0] = 7, 7.5
+    assert(i.ptr[0] == 7 and f.ptr[0] == 7.5)
+    return true
+"""
+
+@test(backends = "lua")
+fn construct_native_descriptors_with_concrete_ctypes() { assert(check_buffer_wires()) }
