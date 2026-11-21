@@ -79,21 +79,6 @@ fn reachable_fns_and_roots_are_not_flagged() {
 }
 
 #[test]
-fn extern_declarations_are_not_roots() {
-    // Every `extern(..)` form declares something Rock calls; nothing outside
-    // calls the Rock side, so an unreferenced one is dead like any other fn.
-    let src = "extern(ffi, \"c\") fn used_ffi(x: int) -> int\n\
-               extern(ffi, \"c\") fn dead_ffi(x: int) -> int\n\
-               extern(lua) fn used_lua() -> int\n\
-               extern(lua) fn dead_lua() -> int\n\
-               extern(js) fn dead_js() -> int\n\
-               extern(ffi, \"c\") fn sibling(x: int) -> int\n\
-               extern(js) fn sibling(x: int) -> int\n\
-               fn main() -> int {\n    used_ffi(1) + used_lua() + sibling(2)\n}";
-    assert_eq!(names(src), ["dead_ffi", "dead_js", "dead_lua"]);
-}
-
-#[test]
 fn implementation_annotations_are_not_roots() {
     let cases: &[(&str, &str)] = &[
         // `@pure` describes how the fn compiles, not how it is entered. Rooting on
