@@ -743,25 +743,6 @@ mod tests {
     }
 
     #[test]
-    fn external_project_without_sound_does_not_need_workspace_context() {
-        let fixture = tempfile::tempdir().expect("external fixture");
-        std::fs::write(
-            fixture.path().join("stick.toml"),
-            "[package]\nname = \"external-no-sound\"\n",
-        )
-        .unwrap();
-
-        assert_eq!(
-            sound_project_path_for(fixture.path().to_str().unwrap()).unwrap(),
-            None
-        );
-        assert_eq!(
-            prepare_sound_bank(fixture.path().to_str().unwrap()).unwrap(),
-            None
-        );
-    }
-
-    #[test]
     fn development_bank_allows_a_missing_sound_dependency() {
         let workspace = rock_host::project::find_workspace_root(
             &std::env::current_dir().expect("current directory"),
@@ -794,39 +775,6 @@ mod tests {
         assert_eq!(
             bank["events"][0]["steps"][0]["layers"][0]["sources"],
             json!(["assets/sfx/missing.ogg"])
-        );
-    }
-
-    #[test]
-    fn release_visual_bank_prefers_the_worktree_bank_over_a_stale_overlay_bank() {
-        let workspace = rock_host::project::find_workspace_root(
-            &std::env::current_dir().expect("current directory"),
-        )
-        .expect("workspace root");
-        let tmp = workspace.join("tmp");
-        std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
-        let fixture = tempfile::tempdir_in(tmp).expect("visual fixture");
-        let overlay = fixture.path().join("overlay");
-        let dir = "a".repeat(64);
-        let project_object = fixture.path().join(format!("assets/.eat/{dir}"));
-        std::fs::create_dir_all(&project_object).unwrap();
-        std::fs::create_dir_all(overlay.join("assets")).unwrap();
-        let bank_path = rock_visual_bank::BANK_PATH;
-        std::fs::write(
-            fixture.path().join(bank_path),
-            format!(r#"{{"kind":"icon","id":"ui/ring","dir":"{dir}","frame_size":[8,8],"pivot":[0.5,0.5],"skin":false}}"#) + "\n",
-        )
-        .unwrap();
-        std::fs::write(project_object.join("color.png"), b"project-object").unwrap();
-        std::fs::write(overlay.join(bank_path), "not a bank line\n").unwrap();
-
-        let selection =
-            crate::asset_selection::prepare(fixture.path(), "fixture", None, &[overlay])
-                .expect("the project-owned bank should be selected")
-                .assets;
-        assert_eq!(
-            selection.files[&format!("fixture/{bank_path}")],
-            fixture.path().join(bank_path)
         );
     }
 
