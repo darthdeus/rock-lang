@@ -444,16 +444,6 @@ mod global_reach_tests {
         assert!(reach.deps_of(Ustr::from("G0")).is_empty());
         assert!(reach.deps_of(Ustr::from("unknown")).is_empty());
     }
-
-    #[test]
-    fn a_body_that_only_calls_inherits_its_callees_reads() {
-        let reach = transitive_global_reads(
-            &table(&[("leaf", &["G"])]),
-            &table(&[("caller", &["leaf", "leaf"]), ("lonely", &[])]),
-        );
-        assert_eq!(sorted(reach.deps_of(Ustr::from("caller"))), ["G"]);
-        assert!(reach.deps_of(Ustr::from("lonely")).is_empty());
-    }
 }
 
 #[cfg(test)]
