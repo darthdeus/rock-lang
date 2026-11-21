@@ -1,25 +1,7 @@
-//! GPU timing from `GL_TIMESTAMP` query pairs. The frame is the root scope,
-//! recorded whenever timer queries work (`frame_ms.gpu`, the settings timing
-//! row). With `STONE_GPU_SCOPES=1`, named scopes nest under it -- runner stages
-//! and every fullscreen pass -- and each also opens a `KHR_debug` group of the
-//! same name so RenderDoc and Nsight show the frame as named passes.
-//!
-//! Timestamps rather than `GL_TIME_ELAPSED`: elapsed queries of one target
-//! cannot nest. Results lag a few frames; a ring of frame slots is read back
-//! without blocking, because waiting on a query stalls the pipeline and
-//! destroys the measurement. A slot still unread when the ring wraps is
-//! dropped and counted.
-//!
-//! Platform support is one question with one answer,
-//! `DebugGl::supports_timer_query` (absent on Apple's desktop driver).
-//! Unsupported reports `-2.0` -> `n/a`
-//! and scope status `unsupported`, never a fake 0.
-//!
-//! `STONE_GPU_SCOPES=finish` records the same scope tree without queries, on
-//! any context: every scope boundary calls `glFinish` and reads the CPU clock,
-//! so a scope's time is its CPU submission plus its GPU execution, serialized.
-//! It perturbs the frame it measures and reports no `frame_ms.gpu`; it exists
-//! for contexts with no timer (macOS) where the alternative is ablation.
+//! Timestamp queries can nest; `GL_TIME_ELAPSED` queries cannot. Readback must
+//! not block or it stalls the pipeline. Timer queries are unavailable on Apple's
+//! desktop driver and report -2.0; `finish` mode serializes CPU and GPU work
+//! with `glFinish`.
 
 use crate::DebugGl;
 use std::collections::{HashMap, VecDeque};
@@ -30,7 +12,6 @@ const RING: usize = 4;
 /// is not timed; its caller simply gets no sample for it.
 const TIMED_PASSES: usize = 16;
 
-/// One timed pass: a timestamp pair and the caller's tag for it.
 struct TimedPass {
     tag: u32,
     begin: glow::Query,
@@ -44,7 +25,6 @@ enum SlotState {
     Pending,
 }
 
-/// A scope; `begin` and `end` index the slot's timestamps.
 struct Entry {
     path: PathId,
     begin: usize,
@@ -86,7 +66,6 @@ pub enum ScopeStatus {
     Finish,
 }
 
-/// What `STONE_GPU_SCOPES` asked for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ScopeMode {
     Off,
@@ -118,7 +97,6 @@ pub struct GpuTimer {
     epoch: std::time::Instant,
     /// Finish mode: nanoseconds blocked in glFinish so far this frame.
     waited: u64,
-    /// GL timer queries usable on this context.
     supported: bool,
     debug_groups: bool,
     /// Debug groups pushed and not yet popped in the recording frame.
@@ -127,7 +105,6 @@ pub struct GpuTimer {
     root: PathId,
     aggregate: ScopeAggregator,
     unbalanced_logged: bool,
-    /// Timed passes in submission order, oldest first.
     timed: VecDeque<TimedPass>,
     timed_open: Option<glow::Query>,
     timed_free: Vec<glow::Query>,
@@ -563,7 +540,6 @@ pub(crate) fn scopes_json(status: &str, aggregate: &ScopeAggregator) -> String {
 /// (parent path, name), so a pass that runs under two parents is two rows.
 pub(crate) type PathId = u32;
 
-/// One closed scope from a completed frame, in begin order.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ScopeSample {
     pub path: PathId,

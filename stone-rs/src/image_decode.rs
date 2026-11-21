@@ -1,12 +1,4 @@
-//! Background image decode.
-//!
-//! Booting a large game loads hundreds of images and 89% of that wall time is CPU-side PNG
-//! decode, not GL upload. File reads and decode can run on workers; uploads
-//! must stay on the GL thread. `stone_load_image` probes dimensions immediately
-//! so the caller gets a valid handle; prefetched payloads are read on the pool,
-//! while Required loads hand their already-read bytes to it. The decoded
-//! pixels come back through the completion queue for upload on the GL thread.
-//! The requested storage format is applied after any declared reduction.
+//! Image decoding runs on workers; uploads must stay on the GL thread.
 
 use std::io::Cursor;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -106,34 +98,15 @@ fn queue() -> &'static Queue {
     })
 }
 
-/// `STONE_ASSET_STUB=1` loads images HEADERS-ONLY: dimensions come from the
-/// container header and the texture is defined as ONE WHITE TEXEL, but the
-/// file's pixels are never decoded or uploaded. Everything that asks an image
-/// its size keeps working -- which is most game code, since sheet/frame math is
-/// all derived from `image_dims` -- and sampling reads white.
-///
-/// The sim runner turns this on for EVERY sim child, rendering included: a sim
-/// asserts layout, silhouettes and gameplay, not texel colour. One whose
-/// assertion genuinely reads the file's own texels declares
-/// `@sim_env("STONE_ASSET_STUB", "0")`, which turns it off for that process.
+/// Stub images retain logical dimensions but sample as one white texel.
+/// Simulations requiring source texels can disable `STONE_ASSET_STUB`.
 pub fn stub_images() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("STONE_ASSET_STUB").as_deref() == Ok("1"))
 }
 
-/// `STONE_IMAGE_MAX_SIDE=<n>` caps the GL STORAGE of every image loaded from an
-/// asset at `n` texels on its longer side. The image's LOGICAL size is
-/// untouched: `stone_get_image_size` still answers the file's own dimensions, so
-/// every sheet frame, pixel rect and UV derived from them is unchanged and only
-/// sampling resolution drops. 0 or unset is no cap.
-///
-/// The sim runner publishes 256 to every child. A rendering game worker holds
-/// 3.2 GB of RGBA8 texture pixels, which is what stops a second suite from
-/// fitting in 36 GB of unified memory; a sim asserts layout
-/// and silhouettes, not texel detail. Production boots (`rock run`, `rock
-/// frame`, `rock perf`, `rock stone`) publish nothing and keep full resolution.
-/// A sim that genuinely needs the file's own texels declares
-/// `@sim_env("STONE_IMAGE_MAX_SIDE", "0")`.
+/// `STONE_IMAGE_MAX_SIDE` caps texture storage, not logical dimensions.
+/// Zero or unset leaves storage uncapped.
 pub fn max_side() -> u32 {
     static N: OnceLock<u32> = OnceLock::new();
     *N.get_or_init(|| {
@@ -158,16 +131,7 @@ pub fn max_side() -> u32 {
     })
 }
 
-/// GL storage dimensions for an image under the ambient cap.
-///
-/// `exact_texels` is a load-site declaration that the file's texels are read
-/// individually rather than sampled as colour -- a lookup table, an index
-/// structure, anything where texel N means something on its own. Averaging
-/// those is not a loss of detail, it is a different value, so the cap is
-/// withheld entirely rather than softened. relight caster bakes are the
-/// standing case: they pack a bounding-volume hierarchy whose per-node escape
-/// index, once averaged, sends the traversal back to a node it already visited
-/// and hangs the GPU.
+/// Exact texels cannot be averaged: they may encode indices or other data.
 pub fn storage_dims(exact_texels: bool, width: u32, height: u32) -> (u32, u32) {
     if exact_texels {
         (width, height)
@@ -176,13 +140,8 @@ pub fn storage_dims(exact_texels: bool, width: u32, height: u32) -> (u32, u32) {
     }
 }
 
-/// Reduce freshly decoded pixels to their `storage_dims`, or hand them back
-/// unchanged when nothing is capped.
-///
-/// `None` only for a reduction `box_downsample` refused, which is a caller bug
-/// and already logged. It is reported as a failed decode rather than passed on,
-/// because the storage size is a pure function of the logical size: pixels that
-/// do not match it would be uploaded by a `tex_image_2d` reading past them.
+/// Refuse a failed reduction: uploading pixels smaller than the declared storage
+/// dimensions would read past the buffer.
 pub fn store_at_storage(
     exact_texels: bool,
     rgba: Vec<u8>,
