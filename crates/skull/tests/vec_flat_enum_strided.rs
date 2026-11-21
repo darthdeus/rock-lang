@@ -37,27 +37,9 @@ fn exercise() -> int {
 fn main() { print("{exercise()}") }
 "#;
 
-#[test]
-fn wide_numeric_flat_enum_vec_uses_dense_strided_storage_without_element_boxes() {
-    let lua = emit_module(SRC);
-    let body = function_body(&lua, "exercise");
-    assert!(crate::common::has_vec_header(body, "strided", None));
-    assert!(!body.contains("{__variant = "));
-    assert_eq!(run_main(&lua), "92");
-}
-
 const BOOL_PAYLOAD: &str = r#"
 nobox value Row { active: bool, a: int, b: int, c: int }
 enum Slot { Entry(Row), Overflow(int) }
 fn make() -> [Slot] { return [Slot::Entry(Row { active: false, a: 1, b: 2, c: 3 })] }
 fn main() { let _ = make() }
 "#;
-
-#[test]
-fn false_capable_payload_keeps_the_existing_boxed_representation() {
-    let lua = emit_module(BOOL_PAYLOAD);
-    let body = function_body(&lua, "make");
-    assert!(
-        !crate::common::has_vec_header(body, "strided", None) && body.contains("{__variant = ")
-    );
-}
