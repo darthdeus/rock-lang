@@ -86,13 +86,10 @@ impl BoundRoot {
     }
 }
 
-/// A construction the model refuses, as opposed to one it could not complete ([`Unresolved`]).
-/// `ChangingInstanceRecursion` recurs at a different instantiation, which
-/// demand-driven instantiation does not terminate on. `GenericFnValue` has no
-/// call site to key an instantiation. `ConcreteTypeUnavailable` is a compiler
-/// invariant break. `UnconstrainedTypeVar` is a type argument no constraint
-/// reaches (a generic read in a shared body is [`Unresolved`] data instead).
-/// `IdentityInOrdinaryStorage` is fatal for the instantiating package.
+/// Refused constructions differ from [`Unresolved`] data. Changing-instance
+/// recursion does not terminate, and generic function values have no call-site key.
+/// An unavailable concrete type signals an invariant break; an unconstrained
+/// variable is a type argument no constraint reaches.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum RejectionKind {
     ChangingInstanceRecursion,
@@ -448,7 +445,6 @@ fn assert_subst(
 pub struct InstanceGraph {
     incremental_indexes: bool,
     interner: std::sync::Arc<MonoInterner>,
-    /// The primary records; every derived field is computed from these and `root_instances`.
     pub contributions: BTreeMap<Owner, Box<Contribution>>,
     pub root_instances: BTreeSet<Instance>,
     pub instances: BTreeSet<Instance>,
@@ -459,7 +455,6 @@ pub struct InstanceGraph {
     delta_added: BTreeSet<Instance>,
     delta_removed: BTreeSet<Instance>,
     replaced_sites: Option<FxHashMap<Instance, BTreeMap<Site, SiteRecord>>>,
-    /// Whole-graph findings with no single owner, from the recursion search.
     pub graph_rejections: Vec<Rejection>,
     recursion_findings: BTreeMap<Instance, RecursionFinding>,
     recursion_by_subject: BTreeMap<Instance, BTreeSet<Instance>>,
@@ -518,7 +513,6 @@ pub enum Concreteness {
 }
 
 impl InstanceGraph {
-    /// The one substitution oracle, shared by publisher lanes and the GLSL passes.
     pub fn concreteness(&self, i: &Instance) -> Concreteness {
         match self.substitution(i) {
             None => Concreteness::Missing,
@@ -642,7 +636,6 @@ fn canonical_roots(ws: &Workspace, roots: Vec<FuncRef>) -> Vec<FuncRef> {
 }
 
 impl InstanceGraph {
-    /// Every LIVE instance of one declaration.
     pub fn instances_of(&self, fref: FuncRef) -> Box<dyn Iterator<Item = &Instance> + '_> {
         if !self.incremental_indexes {
             return Box::new(
@@ -666,7 +659,7 @@ impl InstanceGraph {
         &self.interner
     }
 
-    /// Release one-shot build records, keeping the shared type arena.
+    /// Take the build records while retaining the shared type arena.
     pub fn take_records(&mut self) -> Self {
         let empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
         std::mem::replace(self, empty)
@@ -744,7 +737,7 @@ impl InstanceGraph {
             while !pending.is_empty() {
                 let wave: Vec<_> = std::mem::take(&mut pending).into_iter().rev().collect();
                 // Capture every walk's inputs before installing any result.
-                // Rayon keeps this order, so each result installs beside its snapshot's owner.
+                // Rayon keeps each result beside its snapshot's owner.
                 let walks = {
                     let run = |owner: &Owner| {
                         let inputs = self.walk_inputs(owner);
@@ -773,7 +766,6 @@ impl InstanceGraph {
                         if self.substitution(i).is_none() {
                             continue;
                         }
-                        // An earlier install in this wave restored the substitution.
                         if prepared_c.is_none() {
                             used_tree = Some(self.bound_tree(i).cloned().unwrap_or_default());
                             prepared_c = Some(expand(
@@ -828,8 +820,7 @@ impl InstanceGraph {
         stats
     }
 
-    /// `expand` is the only producer of a contribution, so a full build and an
-    /// incremental re-walk cannot record different facts.
+    /// One producer keeps full builds and incremental re-walks consistent.
     fn walk_inputs(&self, owner: &Owner) -> WalkInputs {
         match owner {
             Owner::Instance(i) => WalkInputs {
@@ -962,7 +953,6 @@ impl InstanceGraph {
                     }
                     shard.insert(to.clone(), Agreed::unowned(subst.clone()));
                     drop(shard);
-                    // Roots are already in the first wave.
                     if !self.root_instances.contains(to) {
                         share.demanded.push(OwnerWalk {
                             owner: Owner::Instance(to.clone()),
@@ -998,7 +988,6 @@ impl InstanceGraph {
                     installed.par_sort_unstable_by(|a, b| a.0.cmp(&b.0));
                 }
                 let mut decls = FxHashMap::default();
-                // Owner order keeps a declaration's instances adjacent.
                 for decl in installed.chunk_by(|a, b| {
                     a.0.instance().map(|i| i.func) == b.0.instance().map(|i| i.func)
                 }) {
@@ -1608,7 +1597,6 @@ impl InstanceGraph {
         out
     }
 
-    /// Update changed bodies and apply the root declarations that changed with them.
     pub fn update_bodies_with_root_delta(
         &mut self,
         ws: &Workspace,
@@ -3094,7 +3082,6 @@ fn dispatched_sites(
     out
 }
 
-/// Resolve a bare runtime entry to its target-neutral declaration.
 fn stdlib_entry_representative(ws: &Workspace, name: &str) -> Option<FuncRef> {
     let decls = ws.functions_by_name.get(&ustr::Ustr::from(name))?;
     unique_canonical_callee(
@@ -3112,7 +3099,6 @@ fn unique_canonical_callee(
     reps.all(|r| r == first).then_some(first)
 }
 
-/// Representatives of every entry lowering may synthesize a call to.
 pub fn synthesized_entry_roots(ws: &Workspace) -> Vec<FuncRef> {
     skull_mir::lower::SYNTHESIZED_ENTRIES
         .iter()

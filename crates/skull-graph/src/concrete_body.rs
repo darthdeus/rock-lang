@@ -22,7 +22,6 @@ pub struct ConcreteBodies {
     pub always_plans: ConcreteAlwaysPlans,
     plan_failure_index: BTreeMap<Instance, MonoTyReason>,
     always_plan_failure_index: FxHashMap<ConcreteOwner, MonoTyReason>,
-    // Count every callee site of a successful function plan.
     candidate_counts: BTreeMap<Instance, usize>,
 }
 
@@ -625,9 +624,7 @@ where
     items.into_par_iter().map(f).collect()
 }
 
-/// Build a concrete lowering plan for every instance the walk expanded.
-/// The tables intern into the graph's arena: a second arena would hand out ids
-/// that mean nothing beside `Instance::args`.
+/// Plans must use the graph's arena so their ids agree with `Instance::args`.
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let expanded: Vec<Instance> = g.expanded().cloned().collect();
     // Both collects keep input order, so the published tables do not depend on the schedule.
