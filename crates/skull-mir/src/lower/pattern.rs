@@ -134,8 +134,7 @@ impl<'a> Builder<'a> {
                 if let Scrut::Cells { cells, shape } = scrut {
                     let whole = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
                     if whole.is_some_and(|ty| ty.nominal() == Some(shape.name)) {
-                        let leaves: Vec<_> = cells.slots().collect();
-                        self.bind_leaves(b, &leaves, shape.value_shape())?;
+                        self.bind_leaves(b, &cells.slots, shape.value_shape())?;
                         return Ok(());
                     }
                 }
@@ -195,18 +194,17 @@ impl<'a> Builder<'a> {
                         ty.and_then(|ty| self.member_ty(ty, variant, Member::Position(i)));
                     // A position widened to a `nobox` value's leaves binds the leaves; rebuilding
                     // a box here is the allocation the widening exists to avoid.
-                    if let Some(vs) = self.flat_payload_leaf_shape(en, variant, i) {
+                    if let Some(vs) =
+                        flat_shape.and_then(|shape| shape.payload_shape(self.ws, variant, i))
+                    {
                         if let Pattern::Bind(b) = self.body.pattern_arena[sp] {
-                            let Some(shape) = flat_shape else {
-                                return Err(gap("flat enum payload lost its compiler-owned shape"));
-                            };
-                            let leaves = self.scrut_payload_leaves(scrut, i, &vs, shape);
-                            self.bind_leaves(b, &leaves, vs)?;
+                            let leaves = self.scrut_payload_leaves(scrut, slot, vs);
+                            self.bind_leaves(b, &leaves, vs.clone())?;
                             continue;
                         }
                         // A position widened for a nested flat enum holds that enum's cells, not a
                         // value: test its tag slot and read its payload slots.
-                        if let Some(inner) = self.nested_flat_enum_scrut(scrut, slot, &vs)? {
+                        if let Some(inner) = self.nested_flat_enum_scrut(scrut, slot, vs)? {
                             self.match_pattern(
                                 &inner,
                                 sp,
@@ -433,7 +431,7 @@ impl<'a> Builder<'a> {
         variant: Ustr,
         i: usize,
     ) -> Option<Ustr> {
-        let ty = self.variant_tuple_payload_type(enum_name, variant, i)?;
+        let ty = shape::enum_position_ty(self.ws, enum_name, variant, i)?;
         match static_ty(self.ws, ty)? {
             TypeExpr::App {
                 ctor: TypeCtor::Nominal(n),
@@ -544,45 +542,14 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub(crate) fn flat_payload_leaf_shape(
-        &self,
-        enum_name: Option<Ustr>,
-        variant: Ustr,
-        i: usize,
-    ) -> Option<ValueShape> {
-        let en = enum_name?;
-        let plan = EnumPlan::for_name(self.ws, en)?;
-        let shape = plan.flat()?;
-        let ty = self.variant_tuple_payload_type(en, variant, i)?;
-        let TypeExpr::App {
-            ctor: TypeCtor::Nominal(n),
-            ..
-        } = static_ty(self.ws, ty)?
-        else {
-            return None;
-        };
-        shape.position_shape(i, Some(n)).cloned()
-    }
-
-    fn variant_tuple_payload_type(&self, en: Ustr, variant: Ustr, i: usize) -> Option<TyId> {
-        let ed = shape::enum_definition(self.ws, en)?;
-        let v = ed.variants.iter().find(|v| v.name == variant)?;
-        match &v.payload {
-            VariantPayload::Tuple(tys) => tys.get(i).copied(),
-            _ => None,
-        }
-    }
-
     pub(crate) fn scrut_payload_leaves(
         &mut self,
         scrut: &Scrut,
-        i: usize,
-        vs: &ValueShape,
-        shape: &EnumFlatShape,
+        offset: usize,
+        shape: &ValueShape,
     ) -> Vec<Idx<Inst>> {
-        let off = shape.slot_offset(i);
-        (0..vs.leaf_count())
-            .map(|k| self.scrut_payload(scrut, off + k, false))
+        (offset..offset + shape.leaf_count())
+            .map(|slot| self.scrut_payload(scrut, slot, false))
             .collect()
     }
 
@@ -621,7 +588,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn scrut_payload(&mut self, scrut: &Scrut, i: usize, cdata: bool) -> Idx<Inst> {
         match scrut {
             Scrut::Repr { boxed, .. } => self.scrut_payload(&Scrut::Val(*boxed), i, cdata),
-            Scrut::Cells { cells, .. } => cells.positional[i],
+            Scrut::Cells { cells, .. } => cells.positional()[i],
             Scrut::Flat { parent, prefix, .. } => {
                 self.read_field(*parent, flat_payload_slot(*prefix, i))
             }
@@ -649,10 +616,9 @@ impl<'a> Builder<'a> {
         match scrut {
             Scrut::Repr { boxed, .. } => self.scrut_named(&Scrut::Val(*boxed), field, cdata),
             Scrut::Cells { cells, shape } => cells
-                .named
-                .iter()
+                .named()
                 .find(|(n, _)| *n == field)
-                .map(|(_, v)| *v)
+                .map(|(_, v)| v)
                 .ok_or_else(|| {
                     gap(format!(
                         "record field `{field}` is absent from flat enum `{}`",
@@ -691,7 +657,7 @@ impl<'a> Builder<'a> {
             Scrut::Flat { parent, prefix, .. } => {
                 Some(self.read_field(*parent, flat_tag_slot(*prefix)))
             }
-            Scrut::Cells { cells, .. } => Some(cells.tag),
+            Scrut::Cells { cells, .. } => Some(cells.tag()),
             Scrut::Val(_) | Scrut::Tuple(_) | Scrut::Repr { .. } => None,
         };
         let (tag, literal) = if let Some(tag) = flat_tag {

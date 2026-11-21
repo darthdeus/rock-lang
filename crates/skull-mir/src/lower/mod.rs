@@ -141,45 +141,53 @@ fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
     crate::names::ustr(format!("{field}.{rec_field}").as_str())
 }
 
-/// A flat-enum field is multi-slot: a walk over a struct's physical leaves
-/// must expand it rather than treat the field name as one leaf.
-fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
-    let mut out = vec![flat_tag_slot(field)];
-    for i in 0..shape.tuple_width() {
-        out.push(flat_payload_slot(field, i));
-    }
-    for rf in &shape.record_fields {
-        out.push(flat_named_slot(field, *rf));
-    }
-    out
+fn flat_keys(prefix: Ustr, width: usize, fields: &[Ustr]) -> impl Iterator<Item = Ustr> + '_ {
+    std::iter::once(flat_tag_slot(prefix))
+        .chain((0..width).map(move |i| flat_payload_slot(prefix, i)))
+        .chain(
+            fields
+                .iter()
+                .map(move |&name| flat_named_slot(prefix, name)),
+        )
 }
 
+fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
+    flat_keys(field, shape.tuple_width(), shape.record_fields()).collect()
+}
+
+/// Tag, positional lanes, then record lanes.
 #[derive(Clone)]
 struct FlatCells {
-    tag: Idx<Inst>,
-    positional: Vec<Idx<Inst>>,
-    named: Vec<(Ustr, Idx<Inst>)>,
+    slots: Vec<Idx<Inst>>,
+    fields: std::sync::Arc<[Ustr]>,
 }
 
 impl FlatCells {
     fn from_slots(shape: &EnumFlatShape, slots: &[Idx<Inst>]) -> Self {
-        let named_start = 1 + shape.tuple_width();
         Self {
-            tag: slots[0],
-            positional: slots[1..named_start].to_vec(),
-            named: shape
-                .record_fields()
-                .iter()
-                .enumerate()
-                .map(|(i, &field)| (field, slots[named_start + i]))
-                .collect(),
+            slots: slots[..shape.leaf_count()].to_vec(),
+            fields: shape.record_fields.clone(),
         }
     }
 
+    fn tag(&self) -> Idx<Inst> {
+        self.slots[0]
+    }
+
+    fn positional(&self) -> &[Idx<Inst>] {
+        &self.slots[1..self.slots.len() - self.fields.len()]
+    }
+
+    fn named(&self) -> impl Iterator<Item = (Ustr, Idx<Inst>)> + '_ {
+        self.fields.iter().copied().zip(
+            self.slots[self.slots.len() - self.fields.len()..]
+                .iter()
+                .copied(),
+        )
+    }
+
     fn slots(&self) -> impl Iterator<Item = Idx<Inst>> + '_ {
-        std::iter::once(self.tag)
-            .chain(self.positional.iter().copied())
-            .chain(self.named.iter().map(|(_, value)| *value))
+        self.slots.iter().copied()
     }
 }
 

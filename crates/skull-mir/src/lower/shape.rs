@@ -1550,13 +1550,30 @@ pub fn gc_field_eq(ws: &Workspace, ty: TyId) -> GcFieldEq {
 pub struct EnumFlatShape {
     pub(crate) name: Ustr,
     // Variant shapes share leading slots at each position. An empty list needs one opaque slot.
-    pub(crate) positions: Vec<Vec<ValueShape>>,
+    positions: Vec<EnumPosition>,
+    width: usize,
     /// Named payload slots `f__<name>`.
-    pub(crate) record_fields: Vec<Ustr>,
+    pub(crate) record_fields: std::sync::Arc<[Ustr]>,
 }
 
-pub(crate) fn flat_position_width(shapes: &[ValueShape]) -> usize {
-    shapes.iter().map(ValueShape::leaf_count).max().unwrap_or(1)
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnumPosition {
+    offset: usize,
+    shapes: Vec<ValueShape>,
+}
+
+pub(super) fn enum_position_ty(
+    ws: &Workspace,
+    name: Ustr,
+    variant: Ustr,
+    i: usize,
+) -> Option<TyId> {
+    let ed = enum_definition(ws, name)?;
+    let VariantPayload::Tuple(types) = &ed.variants.iter().find(|v| v.name == variant)?.payload
+    else {
+        return None;
+    };
+    types.get(i).copied()
 }
 
 impl EnumFlatShape {
@@ -1571,17 +1588,13 @@ impl EnumFlatShape {
     /// Total positional slots `_0 .. _{tuple_width-1}`.
     /// Distinct from the position count: a `nobox` position spans several slots.
     pub fn tuple_width(&self) -> usize {
-        self.slot_offset(self.positions.len())
+        self.width
     }
 
     /// Positions past the end answer the total width, so a narrower variant has
     /// nothing to write.
     pub fn slot_offset(&self, pos: usize) -> usize {
-        self.positions
-            .iter()
-            .take(pos)
-            .map(|shapes| flat_position_width(shapes))
-            .sum()
+        self.positions.get(pos).map_or(self.width, |p| p.offset)
     }
 
     /// The oracle for both the ctor's placement and a match arm's read, so a write
@@ -1590,8 +1603,22 @@ impl EnumFlatShape {
         let name = name?;
         self.positions
             .get(pos)?
+            .shapes
             .iter()
             .find(|shape| shape.name == name)
+    }
+
+    pub(super) fn payload_shape(
+        &self,
+        ws: &Workspace,
+        variant: Ustr,
+        pos: usize,
+    ) -> Option<&ValueShape> {
+        self.position_shape(
+            pos,
+            nominal_name_from_ty(ws, enum_position_ty(ws, self.name, variant, pos)?)
+                .and_then(|(name, nullable)| (!nullable).then_some(name)),
+        )
     }
 
     pub fn position_leaf_paths(&self, pos: usize, name: Ustr) -> Option<Vec<Ustr>> {
@@ -1608,7 +1635,7 @@ impl EnumFlatShape {
         for i in 0..self.tuple_width() {
             fields.push((crate::names::indexed("_", "", i), FieldShape::Prim));
         }
-        for rf in &self.record_fields {
+        for rf in self.record_fields.iter() {
             fields.push((*rf, FieldShape::Prim));
         }
         ValueShape {
@@ -1651,10 +1678,20 @@ fn build_flat_enum_shape(ws: &Workspace, ed: &EnumDef, visiting: &mut Vec<Ustr>)
         }
     }
     visiting.pop();
+    let mut width = 0;
+    let positions = positions
+        .into_iter()
+        .map(|shapes| {
+            let offset = width;
+            width += shapes.iter().map(ValueShape::leaf_count).max().unwrap_or(1);
+            EnumPosition { offset, shapes }
+        })
+        .collect();
     EnumFlatShape {
         name: ed.name,
         positions,
-        record_fields,
+        width,
+        record_fields: record_fields.into(),
     }
 }
 

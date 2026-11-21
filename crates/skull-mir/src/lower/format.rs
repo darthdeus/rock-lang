@@ -497,11 +497,11 @@ impl<'a> Builder<'a> {
             ))
         })?;
         let cdata = plan.cdata().is_some();
-        let flat_shape = plan.flat().cloned();
+        let flat_shape = plan.flat();
         // A value constructed in place has a constant tag. Only its arm is reachable;
         // the others would read slots holding nil or another variant's payload.
         let known = match scrut {
-            Scrut::Cells { cells, .. } => match self.f.insts[cells.tag] {
+            Scrut::Cells { cells, .. } => match self.f.insts[cells.tag()] {
                 Inst::Const(Lit::Str(variant)) => Some(variant),
                 _ => None,
             },
@@ -525,19 +525,15 @@ impl<'a> Builder<'a> {
                     for (i, child) in nodes.iter().enumerate() {
                         let child_path = [path.as_slice(), &[vi as u32, i as u32]].concat();
                         let slot = flat_shape.as_ref().map_or(i, |s| s.slot_offset(i));
-                        let piece = match self.flat_payload_leaf_shape(Some(name), variant.name, i)
+                        let piece = match flat_shape
+                            .and_then(|shape| shape.payload_shape(self.ws, variant.name, i))
                         {
                             Some(vs) => {
-                                let shape = flat_shape.as_ref().ok_or_else(|| {
-                                    gap("flat enum payload lost its compiler-owned shape")
-                                })?;
-                                if let Some(inner) =
-                                    self.nested_flat_enum_scrut(scrut, slot, &vs)?
-                                {
+                                if let Some(inner) = self.nested_flat_enum_scrut(scrut, slot, vs)? {
                                     self.render_enum(child, vs.name, child_path, &inner)?
                                 } else {
-                                    let leaves = self.scrut_payload_leaves(scrut, i, &vs, shape);
-                                    let repr = leaves_to_repr(&vs, &mut leaves.into_iter())?;
+                                    let leaves = self.scrut_payload_leaves(scrut, slot, vs);
+                                    let repr = leaves_to_repr(vs, &mut leaves.into_iter())?;
                                     self.render_fmt(child, child_path, repr)?
                                 }
                             }

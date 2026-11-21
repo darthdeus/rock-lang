@@ -79,7 +79,7 @@ impl<'a> Builder<'a> {
         for (pos, arg) in positional.into_iter().enumerate() {
             let off = shape.slot_offset(pos);
             // Use this variant's payload width and leave the remaining slots inactive.
-            match self.flat_payload_leaf_shape(Some(shape.name), variant, pos) {
+            match shape.payload_shape(self.ws, variant, pos) {
                 Some(vs) => {
                     // The enum is immutable and outlives its operands, so its payload owns its
                     // value children from the start.
@@ -90,11 +90,11 @@ impl<'a> Builder<'a> {
                                 r.representation(),
                                 self.owned_value_children(r.into_value())?,
                             );
-                            self.repr_to_storage_leaves(&r, &vs, "flat enum payload")?
+                            self.repr_to_storage_leaves(&r, vs, "flat enum payload")?
                         }
                         FlatPayload::Repr(r) => {
                             let r = self.owned_value_children(r)?;
-                            self.repr_to_leaves_shape(&r, &vs)?
+                            self.repr_to_leaves_shape(&r, vs)?
                         }
                     };
                     for (k, lv) in leaves.into_iter().enumerate() {
@@ -121,29 +121,23 @@ impl<'a> Builder<'a> {
             rec_vals.push((name, self.lower_expr(value)?));
         }
         let nil = || Inst::Const(Lit::Nil);
-        let positional = slots
-            .into_iter()
-            .map(|s| match s {
-                Some(v) => v,
-                None => self.emit_cur(nil()),
-            })
-            .collect();
-        let named = shape
-            .record_fields
-            .iter()
-            .map(|rf| {
-                let v = rec_vals
-                    .iter()
-                    .find(|(n, _)| n == rf)
-                    .map(|(_, v)| *v)
-                    .unwrap_or_else(|| self.emit_cur(nil()));
-                (*rf, v)
-            })
-            .collect();
+        let mut cells = Vec::with_capacity(shape.leaf_count());
+        cells.push(tag);
+        cells.extend(
+            slots
+                .into_iter()
+                .map(|slot| slot.unwrap_or_else(|| self.emit_cur(nil()))),
+        );
+        cells.extend(shape.record_fields().iter().map(|field| {
+            rec_vals
+                .iter()
+                .find(|(name, _)| name == field)
+                .map(|(_, value)| *value)
+                .unwrap_or_else(|| self.emit_cur(nil()))
+        }));
         Ok(FlatCells {
-            tag,
-            positional,
-            named,
+            slots: cells,
+            fields: shape.record_fields.clone(),
         })
     }
 
@@ -236,11 +230,16 @@ impl<'a> Builder<'a> {
         shape: &EnumFlatShape,
         parts: Vec<ValueRepr>,
     ) -> Result<FlatCells, CompilerError> {
-        let packed: Vec<Idx<Inst>> = parts
+        let mut slots = parts
             .into_iter()
-            .map(|p| self.pack(p))
+            .map(|part| self.pack(part))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(FlatCells::from_slots(shape, &packed))
+        assert!(slots.len() >= shape.leaf_count());
+        slots.truncate(shape.leaf_count());
+        Ok(FlatCells {
+            slots,
+            fields: shape.record_fields.clone(),
+        })
     }
 
     /// Cells as a `Group` in `[tag, _0.., <rec>..]` leaf order.
@@ -258,20 +257,21 @@ impl<'a> Builder<'a> {
         bv: Idx<Inst>,
         shape: &EnumFlatShape,
     ) -> FlatCells {
-        let tag = self.read_field(bv, crate::names::ustr("__variant"));
-        let positional = (0..shape.tuple_width())
-            .map(|i| self.emit_cur(Inst::TupleIndex { base: bv, index: i }))
-            .collect();
-        let named = shape
-            .record_fields
-            .clone()
-            .into_iter()
-            .map(|rf| (rf, self.read_field(bv, rf)))
-            .collect();
+        let mut slots = Vec::with_capacity(shape.leaf_count());
+        slots.push(self.read_field(bv, crate::names::ustr("__variant")));
+        slots.extend(
+            (0..shape.tuple_width())
+                .map(|index| self.emit_cur(Inst::TupleIndex { base: bv, index })),
+        );
+        slots.extend(
+            shape
+                .record_fields()
+                .iter()
+                .map(|&field| self.read_field(bv, field)),
+        );
         FlatCells {
-            tag,
-            positional,
-            named,
+            slots,
+            fields: shape.record_fields.clone(),
         }
     }
 
@@ -281,20 +281,12 @@ impl<'a> Builder<'a> {
         prefix: Ustr,
         shape: &EnumFlatShape,
     ) -> FlatCells {
-        let tag = self.read_field(parent, flat_tag_slot(prefix));
-        let positional = (0..shape.tuple_width())
-            .map(|i| self.read_field(parent, flat_payload_slot(prefix, i)))
-            .collect();
-        let named = shape
-            .record_fields
-            .clone()
-            .into_iter()
-            .map(|rf| (rf, self.read_field(parent, flat_named_slot(prefix, rf))))
+        let slots = flat_keys(prefix, shape.tuple_width(), shape.record_fields())
+            .map(|key| self.read_field(parent, key))
             .collect();
         FlatCells {
-            tag,
-            positional,
-            named,
+            slots,
+            fields: shape.record_fields.clone(),
         }
     }
 
@@ -303,7 +295,7 @@ impl<'a> Builder<'a> {
         shape: &EnumFlatShape,
         cells: FlatCells,
     ) -> Idx<Inst> {
-        let tag = cells.tag;
+        let tag = cells.tag();
         if let Inst::Const(Lit::Str(variant)) = self.f.insts[tag] {
             return self.box_flat_variant(shape, &cells, variant);
         }
@@ -341,8 +333,8 @@ impl<'a> Builder<'a> {
         let boxed = self.emit_cur(Inst::MakeEnumDyn {
             tag,
             ty: shape.name,
-            positional: cells.positional,
-            named: cells.named,
+            positional: cells.positional().to_vec(),
+            named: cells.named().collect(),
         });
         self.store_cell(result, boxed);
         self.f.set_term(self.cur, Term::Goto(join));
@@ -362,15 +354,13 @@ impl<'a> Builder<'a> {
         }
         let (width, fields) = shape.box_layout(self.ws, variant);
         let named = cells
-            .named
-            .iter()
-            .copied()
+            .named()
             .filter(|(name, _)| fields.contains(name))
             .collect();
         self.emit_cur(Inst::MakeEnumDyn {
-            tag: cells.tag,
+            tag: cells.tag(),
             ty: shape.name,
-            positional: cells.positional[..width].to_vec(),
+            positional: cells.positional()[..width].to_vec(),
             named,
         })
     }
@@ -387,29 +377,21 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn store_flat_cells(&mut self, parent: Idx<Inst>, prefix: Ustr, cells: FlatCells) {
-        self.write_field(parent, flat_tag_slot(prefix), cells.tag);
-        for (i, p) in cells.positional.into_iter().enumerate() {
-            self.write_field(parent, flat_payload_slot(prefix, i), p);
-        }
-        for (rf, v) in cells.named {
-            self.write_field(parent, flat_named_slot(prefix, rf), v);
+        for (key, value) in
+            flat_keys(prefix, cells.positional().len(), &cells.fields).zip(cells.slots)
+        {
+            self.write_field(parent, key, value);
         }
     }
 
     pub(crate) fn flat_literal_slots(
         &self,
-        field: Ustr,
+        prefix: Ustr,
         cells: FlatCells,
     ) -> Vec<(Ustr, Idx<Inst>)> {
-        let mut out = Vec::with_capacity(1 + cells.positional.len() + cells.named.len());
-        out.push((flat_tag_slot(field), cells.tag));
-        for (i, p) in cells.positional.into_iter().enumerate() {
-            out.push((flat_payload_slot(field, i), p));
-        }
-        for (rf, v) in cells.named {
-            out.push((flat_named_slot(field, rf), v));
-        }
-        out
+        flat_keys(prefix, cells.positional().len(), &cells.fields)
+            .zip(cells.slots)
+            .collect()
     }
 }
 
@@ -428,13 +410,7 @@ impl EnumFlatShape {
                     .len()
                     .checked_sub(1)
                     .map(|last| {
-                        let child = match static_ty(ws, types[last]) {
-                            Some(TypeExpr::App {
-                                ctor: TypeCtor::Nominal(name),
-                                ..
-                            }) => self.position_shape(last, Some(name)),
-                            _ => None,
-                        };
+                        let child = self.payload_shape(ws, variant, last);
                         self.slot_offset(last) + child.map_or(1, |vs| vs.leaf_count())
                     })
                     .unwrap_or(0);
