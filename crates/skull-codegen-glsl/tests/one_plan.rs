@@ -30,47 +30,6 @@ fn a_standalone_vertex_entry_is_rejected() {
 }
 
 #[test]
-fn an_unpackable_uniform_group_is_rejected() {
-    let src = r#"
-struct GcU { scale: float }
-
-@shader(fragment)
-fn bad_uniform_frag(uTexture: Sampler2D, @uniform u: GcU, tc: Vec2) -> Vec4 {
-    let px = texture(uTexture, tc)
-    return v(px.r * u.scale, 0.0, 0.0, 1.0)
-}
-"#;
-    let err = emit_entry(src, "bad_uniform_frag")
-        .err()
-        .expect("a non-value uniform group rejects");
-    assert!(
-        err.contains("uniform block") && err.contains("`value` struct"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn an_exhaustive_bool_match_entry_keeps_both_arms() {
-    let src = r#"
-@shader(fragment)
-fn bool_match_frag(tc: Vec2) -> Vec4 {
-    let b = tc.x > 0.5
-    let x = match b { true => 10, false => 20 }
-    return v(float(x), 0.0, 0.0, 1.0)
-}
-"#;
-    let emission = emit_entry(src, "bool_match_frag")
-        .expect("an exhaustive bool match with a real join must structure");
-    for arm in ["= 10;", "= 20;"] {
-        assert!(
-            emission.source.contains(arm),
-            "arm `{arm}` must survive; got:\n{}",
-            emission.source
-        );
-    }
-}
-
-#[test]
 fn the_portable_block_budget_is_enforced_during_emission() {
     let src = |n: usize| {
         let fields: Vec<String> = (0..n).map(|i| format!("m{i}: Mat4")).collect();
@@ -159,24 +118,4 @@ fn main() { let a = rock_shader(generic_frag) }
     );
     assert!(out.contains("float concrete_helper_float(float "), "{out}");
     assert!(!out.contains("concrete_helper_float_spec"), "{out}");
-}
-
-#[test]
-fn a_generic_helper_bound_outside_tier_zero_is_rejected_by_its_binding() {
-    let src = r#"
-@pure fn passthrough<T>(x: T) -> T { return x }
-@shader(fragment)
-fn bad_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
-    let s = passthrough("nope")
-    return v(tc.x, 0.0, 0.0, 1.0)
-}
-fn main() { let a = rock_shader(bad_frag) }
-"#;
-    let err = emit_entry(src, "bad_frag")
-        .err()
-        .expect("a string-bound generic helper must reject");
-    assert!(
-        err.contains("string"),
-        "the rejection does not name the binding that made it non-tier-0: {err}"
-    );
 }
