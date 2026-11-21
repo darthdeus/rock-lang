@@ -246,3 +246,70 @@ fn test_lambda_with_struct_field_access() {
     let result = process((d) => d.value, Data { value: 42, name: "" })
     assert(result == 42)
 }
+
+struct LambdaAssignmentTarget {
+    value: int? = null,
+    flag: bool = false,
+    name: string = "",
+    count: int = 0,
+    next: LambdaAssignmentTarget? = null,
+}
+
+@test
+fn expression_lambdas_store_and_return_unit() {
+    let child = LambdaAssignmentTarget {}
+    let obj = LambdaAssignmentTarget { next: child }
+    let sets: [fn(int) -> ()] = [(v: int) => obj.value = v,
+        (v: int) => obj.next.unwrap().value = v]
+    for (i, set) in enumerate(sets) {
+        let unit: () = set(i + 1)
+    }
+    assert_eq(obj.value ?? -1, 1)
+    assert_eq(child.value ?? -1, 2)
+
+    let clear = () => obj.value = null
+    let set_tuple = (t: (int, bool)) => obj.value = t.0
+    let set_flag = (f: bool) => obj.flag = f
+    let set_name = (s: string) => obj.name = s
+    clear()
+    assert(obj.value == null)
+    set_tuple((99, true))
+    set_flag(true)
+    set_name("updated")
+    assert_eq(obj.value ?? -1, 99)
+    assert(obj.flag)
+    assert_eq(obj.name, "updated")
+
+    let add = (n: int) => obj.count += n
+    let multiply = (n: int) => obj.count *= n
+    let subtract = (n: int) => obj.count -= n
+    add(5)
+    multiply(3)
+    subtract(2)
+    assert_eq(obj.count, 13)
+    let divide = (n: int) => obj.count = obj.count ./ n
+    divide(2)
+    assert_eq(obj.count, 6)
+
+    let update = (flag: bool, n: int) =>
+        if flag { obj.count = n } else { child.count = n }
+    update(true, 10)
+    update(false, 20)
+    assert_eq(obj.count, 10)
+    assert_eq(child.count, 20)
+}
+
+@test
+fn expression_lambda_store_evaluates_indexes_and_rhs_once() {
+    let matrix = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+    let index_calls = 0
+    let value_calls = 0
+    let index = () => { index_calls += 1; return 1 }
+    let value = () => { value_calls += 1; return 99 }
+    let assign = () => matrix[index()][0][1] = value()
+    assign()
+    assert_eq(matrix[1][0][1], 99)
+    assert_eq(matrix[0][0][1], 2)
+    assert_eq(index_calls, 1)
+    assert_eq(value_calls, 1)
+}
