@@ -1,19 +1,5 @@
-//! Async pixel readback via double-buffered Pixel Pack Buffers.
-//!
-//! A "slot" submits glReadPixels into a PBO bound as PIXEL_PACK_BUFFER, which
-//! the driver queues as a DMA after prior render commands, and maps it frames
-//! later, when the DMA is complete and the map does not stall.
-//!
-//! `stone_pixel_readback_poll_id` is the non-blocking read. A polled slot
-//! keeps up to POLL_RING_DEPTH fenced reads in flight and a poll takes the
-//! newest one whose fence has signaled. On a GPU-bound machine the blocking
-//! map of `stone_pixel_readback_consume` waits for the GPU to drain the frame that wrote the PBO,
-//! which serializes CPU and GPU (about 40% of the frame on a Steam Deck).
-//!
-//! The PBO stores no coordinates; the slot handle is the caller's persistent
-//! identity across frames. Two call sites sharing one slot will stomp each
-//! other's in-flight reads -- one slot per logical reader.
-//!
+//! A polled readback uses fenced PBOs to avoid blocking the CPU on the GPU.
+//! Use one slot per logical reader: slots retain in-flight reads, not coordinates.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -80,11 +66,8 @@ impl Channel {
 // CPU still answers every frame, once per frame of lag.
 const POLL_RING_DEPTH: usize = 4;
 
-// An unpolled slot is a two-read ping-pong: consume answers the older read only
-// once a newer submit exists, so it is at least one frame old whether submit and
-// consume share a call site or are split across update and draw. A 3-PBO ring
-// did not reduce submit-time stalls in GPU-bound scenarios, where the driver
-// syncs on the source-FBO state rather than PBO back-pressure.
+// An unpolled slot needs two PBOs so consume reads an older submission.
+// Drivers can synchronize on source-FBO state, regardless of PBO ring size.
 const PING_PONG_DEPTH: usize = 2;
 
 struct Read {
@@ -118,7 +101,6 @@ const CANVAS_CAPTURE_ID_BASE: u64 = 1 << 48;
 
 struct CanvasCapture {
     pbo: glow::Buffer,
-    // Some while the readback is pending.
     fence: Option<glow::Fence>,
     width: i32,
     height: i32,
@@ -922,8 +904,7 @@ fn pixel_component(bytes: &[u8], fmt: PixelFmt, channel: usize) -> f32 {
     }
 }
 
-/// Map `pbo` and decode the read it holds for this slot's shape. Returns the
-/// value and whether mapping succeeded.
+/// Returns the decoded value and whether mapping succeeded.
 fn read_pbo(
     slot: &Slot,
     idx: usize,
@@ -974,17 +955,9 @@ fn read_pbo(
     (result, mapped)
 }
 
-/// Submit an async glReadPixels into this slot's staging PBO. A normal slot
-/// reads one pixel at `(x, y)`; an area slot reads its configured square
-/// centered there. The
-/// previous staging (if any) is promoted to "ready" first so consume() can
-/// pick it up — guarantees at least one frame of distance between the submit
-/// call and the consume that reads it, regardless of whether the two calls
-/// happen in the same frame or split across update/draw phases.
-///
-/// Call when `canvas_handle` is quiescent (no pending writes) to avoid an
-/// implicit pipeline flush — otherwise the driver serializes on pending
-/// writes and the "async" submit stalls.
+/// Submit a pixel or configured area read. The previous staging buffer becomes
+/// ready first, keeping consume at least one frame behind.
+/// Call when the canvas has no pending writes to avoid a pipeline flush.
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int) {
     pixel_readback_submit(id, canvas_handle, x, y, None);

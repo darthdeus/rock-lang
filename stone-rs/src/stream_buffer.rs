@@ -1,21 +1,7 @@
-//! Per-frame streaming storage for data a draw reads once: mesh vertices and
-//! indices, and uniform block bytes. One stream per kind of data, each one
-//! buffer object split into `REGIONS` equal regions; frame N writes region
-//! N % REGIONS, appending every upload at a fresh (aligned) offset. So every
-//! upload has its own range, and no draw re-specifies storage another draw of
-//! the frame reads: the binding names the bytes.
-//!
-//! Re-specifying one buffer per draw (`glBufferData`) left telling a frame's
-//! storages apart to the driver; NVIDIA 595.104 intermittently served a draw
-//! the storage its own upload had replaced (#883).
-//!
-//! A region is written again only once the fence that closed its frame has
-//! signaled. The check never waits: a blocking wait caps frames in flight
-//! below the driver's own queue, so a GPU pause the driver would absorb became
-//! a 100-200 ms CPU stall. A stream whose next region the GPU still
-//! reads, or that outgrows its region mid-frame, moves to a new buffer object;
-//! the old one is never written again and is deleted once a fence covering its
-//! last draw signals.
+//! Each upload has a distinct range: re-specifying storage per draw can expose
+//! replaced data to the GPU on NVIDIA drivers. Reuse a region only after its
+//! fence signals; if it is busy or outgrown, retire the buffer without waiting.
+//! Blocking waits can limit frames in flight below the driver queue.
 
 use std::cell::RefCell;
 
@@ -23,7 +9,6 @@ use crate::DebugGl;
 
 const REGIONS: usize = 3;
 
-/// The kinds of streamed data, one stream each.
 #[derive(Clone, Copy)]
 pub(crate) enum Stream {
     Vertex = 0,
@@ -38,15 +23,13 @@ pub(crate) struct StreamRange {
     pub buffer: glow::Buffer,
     pub offset: i32,
     pub frame: u64,
-    /// Whether this upload needed new storage.
     pub replaced: bool,
 }
 
 #[derive(Default)]
 struct FrameStream {
     buffer: Option<glow::Buffer>,
-    /// Bytes per region; kept when the buffer is retired so the next one
-    /// starts at the size the stream has grown to.
+    /// Preserve the grown region size across buffer retirement.
     capacity: usize,
     cursor: usize,
     /// Upload offset alignment; resolved on first use.
@@ -89,7 +72,6 @@ pub(crate) fn frame() -> u64 {
     STREAMS.with(|s| s.borrow().frame)
 }
 
-/// Called once per frame from `stone_reset_frame_stats`.
 pub(crate) fn begin_frame(gl: &DebugGl) {
     STREAMS.with(|s| unsafe { s.borrow_mut().begin_frame(gl) });
 }
@@ -100,7 +82,7 @@ pub(crate) fn upload(gl: &DebugGl, stream: Stream, data: &[u8]) -> Result<Stream
     STREAMS.with(|s| unsafe { s.borrow_mut().upload(gl, stream, data) })
 }
 
-/// Delete every stream buffer and fence. Called at GL teardown.
+/// Delete stream buffers and fences while the GL context is current.
 pub(crate) fn release_all(gl: &DebugGl) {
     STREAMS.with(|s| unsafe {
         let mut s = s.borrow_mut();
