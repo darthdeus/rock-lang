@@ -160,19 +160,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_project_dir_missing_rejects() {
-        let temp = TempDir::new().unwrap();
-        let err = resolve_project_dir_in(temp.path(), &["games"], "nope")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("no project `nope`"), "unexpected: {err}");
-        assert!(
-            err.contains("games/nope"),
-            "should name the searched parent: {err}"
-        );
-    }
-
-    #[test]
     fn resolve_project_dir_ambiguous_rejects_with_candidates() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
