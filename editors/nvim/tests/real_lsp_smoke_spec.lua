@@ -1,14 +1,4 @@
--- Smoke test against a real rock-lsp binary.
---
--- Requires an executable rock binary in $ROCK_LSP_BIN.
---
--- What we assert:
---   1. setup() does not bail at the missing-binary gate.
---   2. Opening a `.rock` buffer in a project root (one with
---      stick.toml) triggers LspAttach within a generous timeout.
---   3. The attached client reports server_capabilities — proves
---      initialize completed end-to-end (not just spawn).
---   4. No crash notification fired during the run.
+-- Requires an executable server in ROCK_LSP_BIN.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
@@ -32,13 +22,10 @@ vim.notify_once = vim.notify
 
 vim.filetype.add({ extension = { rock = 'rock' } })
 
--- Minimal rock project on disk so root_markers fires (client.lua sets
--- root_markers = { 'stick.toml', 'project.toml', '.git' }).
 local root = vim.fn.tempname()
 vim.fn.mkdir(root, 'p')
 local f = assert(io.open(root .. '/stick.toml', 'w'))
--- version is required: rock-lsp crashes on initialize without it.
--- Tracked in rock_lsp_minimal_project_sentinel_spec.lua.
+-- A manifest version is required for initialization.
 f:write('[package]\nname = "smoke"\nversion = "0.1.0"\n')
 f:close()
 local rock_path = root .. '/main.rock'
@@ -51,7 +38,6 @@ local cfg = client.make_config({ binary = bin })
 vim.lsp.config('rock', cfg)
 client.setup_autocmds()
 
--- setup-style gate check: with a real binary, exists must be true.
 if not require('rock.state').get().binary.exists then
   fail('binary marked non-existent despite $ROCK_LSP_BIN being valid')
 end
@@ -60,7 +46,6 @@ vim.lsp.enable('rock')
 
 vim.cmd('edit ' .. vim.fn.fnameescape(rock_path))
 
--- Wait for attach. rock-lsp's initialize takes a moment; allow up to 5s.
 local attached_id = nil
 vim.api.nvim_create_autocmd('LspAttach', {
   callback = function(args)
@@ -83,18 +68,13 @@ if not ok then
   fail('LspAttach did not fire within 5s for rock-lsp')
 end
 
--- Verify the client speaks LSP -- server_capabilities populated means
--- initialize completed.
 local c = vim.lsp.get_client_by_id(attached_id)
 if not c then fail('attached client vanished from registry') end
 if type(c.server_capabilities) ~= 'table' or vim.tbl_isempty(c.server_capabilities) then
   fail('attached client has no server_capabilities (initialize did not complete)')
 end
 
--- Liveness check: a server that crashes post-initialize is silently
--- broken (capabilities look fine, but every request hangs). Wait a
--- short settle window and confirm the client is still in the
--- registry and not stopped.
+-- Initialization alone does not prove the server stayed alive.
 vim.wait(500, function() return false end)
 local still = vim.lsp.get_client_by_id(attached_id)
 if not still or still:is_stopped() then
@@ -104,7 +84,6 @@ if not still or still:is_stopped() then
       vim.inspect(require('rock.state').get().client.last_exit)))
 end
 
--- Crash notifications must not have fired.
 for _, n in ipairs(notifications) do
   if n.msg:find('crashed', 1, true) then
     fail('rock-lsp crashed notification fired during smoke run: ' .. n.msg)
