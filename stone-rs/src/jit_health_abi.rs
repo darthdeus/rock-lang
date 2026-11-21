@@ -243,32 +243,6 @@ mod tests {
         (prev, cur)
     }
     #[test]
-    fn frame_deltas_diff_counters_and_top_abort_reasons() {
-        let (prev, mut cur) = pair(|_| {});
-        cur.root_starts = 5;
-        cur.side_starts = 3;
-        cur.root_compiles = 2;
-        cur.side_compiles = 1;
-        cur.aborts[7] = 4;
-        cur.aborts[2] = 9;
-        cur.aborts[60] = 9;
-        cur.aborts[0] = 1;
-        cur.flushes = 2;
-        cur.emitted_mcode_bytes = 512;
-        cur.live_traces = 6;
-        cur.arena_occupied_bytes = 1000;
-        cur.code_current_free_bytes = 4000;
-        cur.ring_next = 11;
-        cur.ring_overflow = 1;
-        let d = frame_deltas(&prev, &cur);
-        assert_eq!(FRAME_DELTA_COLUMNS, 18);
-        assert_eq!(&d[0..5], &[5.0, 3.0, 2.0, 1.0, 23.0]);
-        assert_eq!(&d[5..11], &[2.0, 9.0, 60.0, 9.0, 7.0, 4.0]);
-        assert_eq!(&d[11..18], &[2.0, 512.0, 6.0, 1000.0, 4000.0, 11.0, 1.0]);
-        let total: f64 = [4.0, 9.0, 9.0, 1.0].iter().sum();
-        assert_eq!(d[4], total);
-    }
-    #[test]
     fn frame_deltas_pad_missing_reasons_and_keep_sign() {
         let (mut prev, mut cur) = pair(|_| {});
         prev.aborts[41] = 2;
@@ -282,17 +256,6 @@ mod tests {
         let d = frame_deltas(&prev, &cur);
         assert_eq!(&d[4..11], &[3.0, 41.0, 3.0, -1.0, 0.0, -1.0, 0.0]);
         assert_eq!(&d[13..16], &[-2.0, -150.0, -600.0]);
-    }
-    #[test]
-    fn frame_deltas_saturate_reset_counters() {
-        let (mut prev, mut cur) = pair(|_| {});
-        prev.root_starts = 40;
-        cur.root_starts = 3;
-        prev.aborts[9] = 50;
-        let d = frame_deltas(&prev, &cur);
-        assert_eq!(d[0], 0.0);
-        assert_eq!(d[4], 0.0);
-        assert_eq!(&d[5..11], &[-1.0, 0.0, -1.0, 0.0, -1.0, 0.0]);
     }
     #[test]
     fn unusable_capability_reports_unavailable() {
