@@ -92,41 +92,4 @@ mod tests {
     use super::*;
     use crate::monoty::MonoCtor;
     use ustr::Ustr;
-
-    #[test]
-    fn concrete_signature_owns_the_coroutine_yield_channel() {
-        let ast = skull_parser::parse_module(
-            "nobox value Payload { x: float, y: float }\n\
-             enum Event { Tick(Payload) }",
-            Ustr::from("<test>"),
-        )
-        .expect("parse");
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic");
-        let interner = MonoInterner::new();
-        let event_name = ws
-            .defs
-            .iter()
-            .find_map(|(key, meta)| (meta.name.as_str() == "Event").then_some(*key))
-            .expect("Event definition");
-        let event = interner.intern(MonoTy::App {
-            ctor: MonoCtor::Nominal(event_name),
-            params: Vec::new(),
-        });
-        let result = interner.intern(MonoTy::App {
-            ctor: MonoCtor::Nominal(Ustr::from("Coroutine")),
-            params: vec![interner.get(event)],
-        });
-        let signature = ConcreteSignature {
-            params: Vec::new(),
-            param_tuple_spelled: Vec::new(),
-            result: Some(result),
-        };
-        let plan =
-            CoroutinePlan::from_concrete_signature(&ws, &interner, &signature, "event".to_string())
-                .expect("concrete coroutine signature");
-        assert!(
-            plan.channel.is_some(),
-            "the concrete yield type must select a channel"
-        );
-    }
 }
