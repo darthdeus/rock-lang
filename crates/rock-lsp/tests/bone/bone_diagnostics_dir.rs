@@ -1,18 +1,7 @@
 //! `rock lsp diagnostics <dir>` and `rock lsp lint <dir>` over every `.rock`
 //! file under a directory.
 
-use crate::fixture::Project;
 use rock_lsp::server_cli::{diagnostics_report, lint_report, print_report};
-
-fn messages(report: &serde_json::Value) -> Vec<String> {
-    report["files"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|f| f["diagnostics"].as_array().unwrap())
-        .map(|d| d["message"].as_str().unwrap().to_string())
-        .collect()
-}
 
 // The LSP reads a package's identity-storage state from its own manifest, in
 // the one-shot report and in the server workspace alike.

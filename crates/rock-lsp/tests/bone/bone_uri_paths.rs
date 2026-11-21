@@ -7,7 +7,7 @@ use crate::common::bone_ws;
 use bone_query::FileUriExt;
 use lsp_types::*;
 use rock_lsp::semantic_tokens::compute_semantic_tokens_workspace;
-use rock_lsp::{LspWorkspace, do_document_symbols_workspace, do_workspace_symbols_workspace};
+use rock_lsp::{LspWorkspace, do_document_symbols_workspace};
 use std::str::FromStr;
 
 const SRC: &str = "fn heal_all(x: int) -> int {\n    return x + 1\n}\n\nfn main() {\n    let y = heal_all(2)\n}\n";
