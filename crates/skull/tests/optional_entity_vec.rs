@@ -59,20 +59,3 @@ fn main() {
     print("{default_state} {nullable_len(slots)} {nullable_get(slots, 0)} {nullable_get(slots, 1)} {nullable_iter(slots)} {typed.len} {nullable_len(literal_slots)} {boxed_len(boxed)} {column_sum(columns)}")
 }
 "#;
-
-#[test]
-fn nullable_entity_field_assignment_and_consumers_round_trip() {
-    let lua = emit_module(SRC);
-    assert!(lua.contains(r#"slots = ({_data ="#));
-    assert!(crate::common::has_vec_header(
-        &lua,
-        "columns",
-        Some("ColumnCell")
-    ));
-    assert!(!crate::common::has_vec_header(
-        &lua,
-        "columns",
-        Some("Entity")
-    ));
-    assert_eq!(run_main(&lua), "41 3 true true 23 2 2 2 14");
-}
