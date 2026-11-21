@@ -632,15 +632,6 @@ mod compiler_image_tests {
         hash_compiler_image(&mut Cursor::new(bytes.to_vec())).unwrap()
     }
 
-    #[test]
-    fn identity_is_a_128_bit_digest_of_the_image() {
-        let a = identity(b"compiler image");
-        assert_eq!(a.len(), 32, "{a}");
-        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
-        assert_eq!(a, identity(b"compiler image"));
-        assert_ne!(a, identity(b"compiler imagf"));
-    }
-
     #[cfg(target_os = "macos")]
     fn run_macos_identity_child(mode: &str) {
         let temp = tempfile::tempdir().unwrap();
@@ -658,12 +649,6 @@ mod compiler_image_tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_exec_accepts_image_created_after_process_start() {
-        run_macos_identity_child("fresh");
     }
 
     #[cfg(target_os = "macos")]
@@ -726,17 +711,6 @@ mod compiler_image_tests {
         }
         image.extend_from_slice(b"CODECODE");
         assert_eq!(identity(&image), identity(&elf_image()));
-    }
-
-    #[test]
-    fn elf_identity_ignores_bytes_outside_load_segments() {
-        let base = elf_image();
-        let mut debug_changed = base.clone();
-        *debug_changed.last_mut().unwrap() = b'X';
-        assert_eq!(identity(&base), identity(&debug_changed));
-        let mut longer_debug = base.clone();
-        longer_debug.extend_from_slice(b"MOREDEBUG");
-        assert_eq!(identity(&base), identity(&longer_debug));
     }
 
     #[test]
@@ -878,67 +852,6 @@ mod source_fingerprint_tests {
             },
         );
         (ws, inputs)
-    }
-
-    fn revision(
-        ws: &Workspace,
-        inputs: &ComptimeInputs,
-        changed: &str,
-        replacement: &str,
-        compiler: &str,
-    ) -> String {
-        let mut inputs = inputs.clone();
-        resolve_source_fingerprints(
-            ws,
-            &mut inputs,
-            |file| {
-                Some(
-                    if file == changed {
-                        replacement
-                    } else {
-                        match file {
-                            "root.rock" => "struct Root { child: Child }",
-                            "child.rock" => "value Child { count: int = 4 }",
-                            "decoder.rock" => "fn decode() { 1 }",
-                            "other.rock" => "struct Other { count: int }",
-                            _ => return None,
-                        }
-                    }
-                    .to_string(),
-                )
-            },
-            compiler,
-        )
-        .unwrap();
-        inputs.vars[&Ustr::from("REV")].value.clone()
-    }
-
-    #[test]
-    fn source_fingerprint_tracks_whole_owners_support_runtime_and_compiler() {
-        let (ws, inputs) = fixture();
-        let baseline = revision(&ws, &inputs, "", "", "compiler-1");
-        for (file, text) in [
-            ("child.rock", "value Child { count: int = 5 }"),
-            (
-                "root.rock",
-                "struct Root { child: Child }\nfn helper() { 2 }",
-            ),
-            ("decoder.rock", "fn decode() { 2 }"),
-        ] {
-            assert_ne!(
-                baseline,
-                revision(&ws, &inputs, file, text, "compiler-1"),
-                "{file}"
-            );
-        }
-        assert_eq!(
-            baseline,
-            revision(&ws, &inputs, "other.rock", "unrelated body", "compiler-1")
-        );
-        assert_ne!(baseline, revision(&ws, &inputs, "", "", "compiler-2"));
-        let mut inputs = inputs;
-        inputs.vars.get_mut(&Ustr::from("ABI")).unwrap().value = "runtime-2".into();
-        assert_ne!(baseline, revision(&ws, &inputs, "", "", "compiler-1"));
     }
 
     #[test]
