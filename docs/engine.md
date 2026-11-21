@@ -334,9 +334,9 @@ be a pointer event, virtual action or text input.
 
 Stone embeds the cimgui Lua bindings from the release pinned by
 `gamelibs.version`. The release's `build_imgui_bindings.py` pairs the cimgui
-headers and native library with the vendored cimgui-love generator. Its
-`overloads.txt`, `ignored_defaults.txt` and `ignored_out_arg.txt` describe the
-generator's decisions.
+headers and native library with the vendored cimgui-love generator. The release's
+Lua bindings archive includes `overloads.txt`, `ignored_defaults.txt` and
+`ignored_out_arg.txt` with the generator's decisions.
 
 Add the Lua export name or `Type.Method` to
 `packages/stone/prebuilt/cimgui/roots.txt`. For direct FFI uses, list the C
