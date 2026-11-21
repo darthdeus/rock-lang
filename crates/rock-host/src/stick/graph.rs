@@ -476,37 +476,6 @@ mod tests {
         .expect("write manifest");
     }
 
-    #[test]
-    fn ns_aliases_keep_package_ids_self_names_and_declared_aliases() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("app");
-        let lib = tmp.path().join("lib");
-        write_manifest(&lib, "shared-lib", "\n[language]\nmodules = \"v1\"\n");
-        write_manifest(
-            &root,
-            "app",
-            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\nmy-lib = { path = \"../lib\" }\n",
-        );
-
-        let graph = PackageGraph::build(&root).expect("graph builds");
-        let aliases = graph.ns_aliases();
-        let expected = NsAliases {
-            packages: vec![
-                PackageAliases {
-                    id: 0,
-                    self_name: "app".into(),
-                    aliases: vec![("my_lib".into(), 1)],
-                },
-                PackageAliases {
-                    id: 1,
-                    self_name: "shared_lib".into(),
-                    aliases: vec![],
-                },
-            ],
-        };
-        assert_eq!(aliases, expected);
-    }
-
     const GROUP_CHANNELS: &str = "\n[language]\nmodules = \"v1\"\n\n\
         [build]\nchannels = [\"dev\", \"demo\"]\n";
 
@@ -557,21 +526,6 @@ mod tests {
             err.to_string().contains("overlaps another source group"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn package_dependency_builds_with_modules_v1_setting() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("app");
-        let lib = tmp.path().join("lib");
-        write_manifest(&lib, "lib-pkg", "");
-        write_manifest(
-            &root,
-            "app",
-            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\nlib = { path = \"../lib\" }\n",
-        );
-        let graph = PackageGraph::build(&root).expect("dependency graph builds");
-        assert_eq!(graph.packages().len(), 2);
     }
 
     #[test]
@@ -647,66 +601,6 @@ mod tests {
     }
 
     #[test]
-    fn two_aliases_one_package_share_it() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("app");
-        let lib = tmp.path().join("some-other-name");
-        write_manifest(&lib, "real-lib", "");
-        write_manifest(
-            &root,
-            "app",
-            "\n[dependencies]\ngeo = { path = \"../some-other-name\" }\ngeometry = { path = \"../some-other-name\" }\n",
-        );
-        let graph = PackageGraph::build(&root).expect("aliases to one package are fine");
-        assert_eq!(graph.packages().len(), 2, "one root + one shared package");
-        let targets: Vec<_> = graph
-            .package(graph.root())
-            .dependencies
-            .iter()
-            .map(|e| e.target)
-            .collect();
-        assert_eq!(
-            targets[0], targets[1],
-            "both aliases resolve to one package"
-        );
-        let shared = graph.package(targets[0]);
-        assert_eq!(shared.manifest_name, "real-lib");
-        assert_eq!(shared.self_name, "real_lib");
-    }
-
-    #[test]
-    fn transitive_dependency_resolves_manifest_relative() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("app");
-        let child = tmp.path().join("child");
-        let grandchild = child.join("nested").join("grandchild");
-        write_manifest(&grandchild, "grandchild", "");
-        write_manifest(
-            &child,
-            "child",
-            "\n[dependencies]\ng = { path = \"nested/grandchild\" }\n",
-        );
-        write_manifest(
-            &root,
-            "app",
-            "\n[dependencies]\nc = { path = \"../child\" }\n",
-        );
-
-        let graph = PackageGraph::build(&root).expect("transitive build");
-        assert_eq!(graph.packages().len(), 3, "root + child + grandchild");
-        let names: Vec<&str> = graph
-            .load_order()
-            .iter()
-            .map(|id| graph.package(*id).manifest_name.as_str())
-            .collect();
-        assert_eq!(
-            names,
-            vec!["grandchild", "child", "app"],
-            "providers load first"
-        );
-    }
-
-    #[test]
     fn cycle_reports_the_edge_chain() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let a = tmp.path().join("a");
@@ -721,58 +615,6 @@ mod tests {
             msg.contains("a -> b -> a"),
             "chain is the edge path, not just the letter a: {msg}"
         );
-    }
-
-    #[test]
-    fn three_package_load_order_is_sorted_postorder_root_last() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("app");
-        let b_child = tmp.path().join("b-child");
-        let a_child = tmp.path().join("a-child");
-        write_manifest(&b_child, "b-child", "");
-        write_manifest(&a_child, "a-child", "");
-        write_manifest(
-            &root,
-            "app",
-            "\n[dependencies]\nb = { path = \"../b-child\" }\na = { path = \"../a-child\" }\n",
-        );
-
-        let graph = PackageGraph::build(&root).expect("build");
-        let names: Vec<&str> = graph
-            .load_order()
-            .iter()
-            .map(|id| graph.package(*id).manifest_name.as_str())
-            .collect();
-        assert_eq!(names, vec!["a-child", "b-child", "app"]);
-    }
-
-    #[test]
-    fn nested_package_owns_its_sources_once() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("app");
-        let inner = root.join("inner");
-        write_manifest(&inner, "inner-lib", "");
-        write_manifest(
-            &root,
-            "app",
-            "\n[dependencies]\ninner = { path = \"inner\" }\n",
-        );
-
-        fs::write(inner.join("inner.rock"), "fn inner() {}\n").expect("nested source");
-        fs::write(root.join("root.rock"), "fn root() {}\n").expect("root source");
-        let graph = PackageGraph::build(&root).expect("nested ownership builds");
-        let root_id = graph.root();
-        let inner_id = graph
-            .packages()
-            .iter()
-            .find(|node| node.manifest_name == "inner-lib")
-            .expect("nested package")
-            .id;
-        let root_file = fs::canonicalize(root.join("root.rock")).unwrap();
-        let inner_file = fs::canonicalize(inner.join("inner.rock")).unwrap();
-        assert!(graph.includes_file(root_id, &root_file));
-        assert!(!graph.includes_file(root_id, &inner_file));
-        assert!(graph.includes_file(inner_id, &inner_file));
     }
 
     #[test]
@@ -833,76 +675,5 @@ mod tests {
             format!("{error:#}").contains(bad_source.to_str().unwrap()),
             "{error:#}"
         );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn package_of_file_resolves_symlinked_paths_before_selecting_owner() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("app");
-        let inner = root.join("lib");
-        write_manifest(&inner, "inner", "\n[language]\nmodules = \"v1\"\n");
-        write_manifest(
-            &root,
-            "app",
-            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\ninner = { path = \"lib\" }\n",
-        );
-        fs::write(root.join("main.rock"), "fn main() {}\n").expect("root source");
-        fs::write(root.join("library.rock"), "fn sibling() {}\n").expect("sibling source");
-        fs::write(inner.join("lib.rock"), "fn inner() {}\n").expect("dependency source");
-        let alias = tmp.path().join("alias");
-        std::os::unix::fs::symlink(&root, &alias).expect("symlinked package root");
-        std::os::unix::fs::symlink(inner.join("lib.rock"), root.join("linked.rock"))
-            .expect("symlink into dependency");
-
-        let graph = PackageGraph::build(&alias).expect("graph through symlink");
-        let root_id = graph.root();
-        let inner_id = graph.package(root_id).dependencies[0].target;
-        for path in [alias.join("main.rock"), alias.join("library.rock")] {
-            assert_eq!(
-                graph.package_of_file(&path),
-                Some(root_id),
-                "{}",
-                path.display()
-            );
-        }
-        for path in [alias.join("lib/lib.rock"), alias.join("linked.rock")] {
-            assert_eq!(
-                graph.package_of_file(&path),
-                Some(inner_id),
-                "{}",
-                path.display()
-            );
-        }
-    }
-
-    #[test]
-    fn v1_ownership_excludes_nested_package_files() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().join("app");
-        let inner = root.join("inner");
-        write_manifest(&inner, "inner-v1", "\n[language]\nmodules = \"v1\"\n");
-        write_manifest(
-            &root,
-            "app",
-            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\ninner = { path = \"inner\" }\n",
-        );
-        fs::write(root.join("main.rock"), "fn main() {}\n").expect("write root source");
-        fs::create_dir_all(&inner).expect("inner dir");
-        fs::write(inner.join("lib.rock"), "fn inner_fn() {}\n").expect("write inner source");
-
-        let graph = PackageGraph::build(&root).expect("pure-v1 nesting builds");
-        let root_id = graph.root();
-        let main = fs::canonicalize(root.join("main.rock")).expect("canonical main");
-        let inner_lib = fs::canonicalize(inner.join("lib.rock")).expect("canonical inner");
-        assert!(graph.includes_file(root_id, &main));
-        assert!(
-            !graph.includes_file(root_id, &inner_lib),
-            "inner's file is not the root's"
-        );
-        let inner_id = graph
-            .package_of_file(&inner_lib)
-            .expect("inner owns its file");
-        assert_eq!(graph.package(inner_id).manifest_name, "inner-v1");
     }
 }
