@@ -329,3 +329,15 @@ fn test_present_nominals_still_render() {
     let z = full_box()
     print("{z.n} {z.c}")
 }
+
+@test
+fn raw_literals_preserve_braces_and_backslashes() {
+    assert_eq([r"{x:02d}", r"\n", r"C:\path\to\file", r""],
+              ["{{x:02d}}", "\\n", "C:\\path\\to\\file", ""])
+    let pattern = r"\d+"
+    assert_eq("regex: {pattern}", "regex: \\d+")
+    let source = r"""
+{ literal }
+"""
+    assert_eq(source, "\n{{ literal }}\n")
+}
