@@ -344,7 +344,7 @@ int stone_draw_mesh(
 int stone_draw_mesh_fans(
     const float* vertex_data, int vertex_count, int vertex_stride,
     const int* attr_sizes, int attr_count, int texture_kind, uint64_t texture,
-    const int* fan_ranges, int fan_count
+    const int* fan_ranges, int64_t fan_count
 );
 
 // Retained mesh objects (instancing optional). Float attribs at

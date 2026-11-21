@@ -26,7 +26,7 @@ void stone_relight_diff_cancel(uint64_t handle);
 void stone_relight_snapshot_drop(int64_t snapshot);
 int64_t stone_light_table_measure(int size, int cell_size, double epsilon, int count, const float* positions, int* counts);
 uint8_t stone_light_table_pack(int size, int cell_size, double epsilon, int count, const float* positions, const float* colors, const int* owners, const int* source_rows, const int* source_slots, const int* counts, int* offsets, float* data, int64_t data_len);
-uint8_t stone_image_data_fill_rect_rgba8(uint64_t handle, int x, int y, int width, int height, int r, int g, int b, int a);
+uint8_t stone_image_data_fill_rect_rgba8(uint64_t handle, int x, int y, int width, int height, int64_t r, int64_t g, int64_t b, int64_t a);
 typedef NativeNavInt NativeNavIntWire;
 int64_t stone_nav_create(const NativeNavIntWire* layout, int64_t layout_len, const uint8_t* blocked, const NativeNavIntWire* corners, const NativeNavIntWire* extra, int64_t tiles, const NativeNavIntWire* links, int64_t link_len, int64_t cluster_size);
 int64_t stone_nav_fork(int64_t handle);

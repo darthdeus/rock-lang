@@ -442,10 +442,10 @@ pub extern "C" fn stone_image_data_fill_rect_rgba8(
     y: i32,
     width: i32,
     height: i32,
-    r: i32,
-    g: i32,
-    b: i32,
-    a: i32,
+    r: i64,
+    g: i64,
+    b: i64,
+    a: i64,
 ) -> bool {
     if width < 0 || height < 0 || [r, g, b, a].iter().any(|v| !(0..=255).contains(v)) {
         return false;

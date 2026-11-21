@@ -340,9 +340,9 @@ pub extern "C" fn stone_draw_mesh_fans(
     tex_kind: c_int,
     tex: u64,
     fan_ranges: *const c_int,
-    fan_count: c_int,
+    fan_count: i64,
 ) -> c_int {
-    if fan_count <= 0 || count <= 0 || fan_count > count / 2 || fan_ranges.is_null() {
+    if fan_count <= 0 || count <= 0 || fan_count > i64::from(count / 2) || fan_ranges.is_null() {
         crate::log_once!("SPRITE", "stone_draw_mesh_fans: invalid fan range payload");
         return -1;
     }

@@ -621,3 +621,36 @@ fn stone_event_cdef_layout_matches_rust() {
     .collect::<Vec<_>>();
     assert_eq!(luajit, rust);
 }
+
+/// On macOS arm64 the ninth and later integer-class arguments go on the stack,
+/// packed to their natural size. LuaJIT's JIT sizes those stack slots from the
+/// IR type including its guard bit, so a guarded 32-bit value (a checked
+/// parameter or table load) is stored at a garbage offset and the callee reads
+/// whatever was there. A 64-bit argument is converted by an unguarded `CONV`
+/// first, and a Lua boolean is recorded as a constant, so both are safe.
+#[test]
+fn no_narrow_integer_arguments_on_the_stack() {
+    const ARGUMENT_REGISTERS: usize = 8;
+    let cdef = read_cdefs();
+    let mut problems = Vec::new();
+    for (name, decls) in &cdef.functions {
+        for Prototype { params, file, .. } in decls {
+            let mut gpr = 0;
+            for spelling in params {
+                if spelling == "..." {
+                    break;
+                }
+                let ty = c_type(spelling, &cdef.typedefs, true);
+                if matches!(ty, Ty::Float(_)) {
+                    continue;
+                }
+                if gpr >= ARGUMENT_REGISTERS && matches!(ty, Ty::Int { bits: ..64, .. } | Ty::Char)
+                {
+                    problems.push(format!("{name} in {file}: stack argument `{spelling}`"));
+                }
+                gpr += 1;
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
