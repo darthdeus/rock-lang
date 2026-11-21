@@ -1,0 +1,85 @@
+value Column { a: int, b: int }
+@nomangle fn column_make(n: int) -> [Column] { return [Column { a: n, b: 2 }] }
+@nomangle fn column_read(xs: [Column], i: int) -> int { return xs[i].a }
+@nomangle fn column_store(xs: [Column], i: int, n: int) { xs[i] = Column { a: n, b: 2 } }
+@nomangle fn column_walk(xs: [Column], mode: int) -> int {
+    let sum = 0
+    for x in xs {
+        sum += x.a
+        if mode == 0 { xs.push(Column { a: 7, b: 2 }) }
+        if mode == 1 { xs.pop() }
+        if mode == 2 { xs.clear() }
+        if mode == 3 { xs.remove_at(0) }
+        if mode == 4 { xs[1].a = 9 }
+        if mode == 5 { xs = column_make(99) }
+    }
+    return sum
+}
+
+nobox value Row { a: int, b: int, c: int, d: int, e: int }
+@nomangle fn strided_make(n: int) -> [Row] { return [Row { a: n, b: 2, c: 3, d: 4, e: 5 }] }
+@nomangle fn strided_read(xs: [Row], i: int) -> int { return xs[i].a }
+@nomangle fn strided_store(xs: [Row], i: int, n: int) { xs[i] = Row { a: n, b: 2, c: 3, d: 4, e: 5 } }
+@nomangle fn strided_walk(xs: [Row], mode: int) -> int {
+    let sum = 0
+    for x in xs {
+        sum += x.a
+        if mode == 0 { xs.push(Row { a: 7, b: 2, c: 3, d: 4, e: 5 }) }
+        if mode == 1 { xs.pop() }
+        if mode == 2 { xs.clear() }
+        if mode == 3 { xs.remove_at(0) }
+        if mode == 4 { xs[1].a = 9 }
+        if mode == 5 { xs = strided_make(99) }
+    }
+    return sum
+}
+
+inline(lua) fn bounds_probes() -> bool = """
+local function probe(repr, make, read, store, walk)
+    local checks = 0
+    local checked = __vec_checked_index
+    __vec_checked_index = function(v, i) checks = checks + 1; return checked(v, i) end
+    local function oob(f, i, n)
+      local ok, err = pcall(f)
+      assert(not ok and tostring(err):find("Vec index out of bounds: index " .. i .. " is outside [0, " .. n .. ")", 1, true), tostring(err))
+    end
+    local xs = make(1)
+    assert(rawget(xs, "@vec").repr == repr)
+    assert(read(xs, 0) == 1)
+    store(xs, 0, 8)
+    assert(read(xs, 0) == 8)
+    assert(checks == 0, "in-bounds flat accesses called the helper " .. checks .. " times")
+    oob(function() read(xs, -1) end, -1, 1)
+    oob(function() read(xs, 1) end, 1, 1)
+    oob(function() store(xs, -1, 9) end, -1, 1)
+    oob(function() store(xs, 1, 9) end, 1, 1)
+    assert(read(xs, 0) == 8 and xs.len == 1)
+    -- The live length remains authoritative even if physical storage is stale.
+    xs.len = 0
+    oob(function() read(xs, 0) end, 0, 0)
+    oob(function() store(xs, 0, 9) end, 0, 0)
+    for mode = 0, 5 do
+      xs = make(1)
+      store(xs, 0, 2)
+      -- Append a second element without depending on the storage layout.
+      assert(walk(xs, 0) == 2 and xs.len == 2)
+      if mode >= 1 and mode <= 3 then
+        oob(function() walk(xs, mode) end, 1, mode == 2 and 0 or 1)
+      else
+        assert(walk(xs, mode) == (mode == 4 and 11 or 9))
+      end
+    end
+end
+local checked = __vec_checked_index
+local ok, err = pcall(function()
+    probe("columns", column_make, column_read, column_store, column_walk)
+    __vec_checked_index = checked
+    probe("strided", strided_make, strided_read, strided_store, strided_walk)
+end)
+__vec_checked_index = checked
+assert(ok, err)
+return true
+"""
+
+@test(backends = "lua")
+fn flat_vec_bounds_fallback_only_runs_after_a_miss() { assert(bounds_probes()) }

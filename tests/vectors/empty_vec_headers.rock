@@ -1,0 +1,27 @@
+value V2 { x: float, y: float }
+nobox value Wide { a: float, b: float, c: float, d: float, e: float, f: float }
+
+@nomangle fn empty_columns() -> [V2] { return [] }
+@nomangle fn empty_strided() -> [Wide] { return [] }
+@nomangle fn reserved_strided() -> [Wide] { return vec_new_with_capacity(4) }
+@nomangle fn fill(xs: [V2], ws: [Wide]) -> float {
+    xs.push(V2 { x: 1.0, y: 2.0 })
+    ws.push(Wide { a: 1.0, b: 2.0, c: 3.0, d: 4.0, e: 5.0, f: 6.0 })
+    return xs[0].y + ws[0].f + xs.len + ws.len
+}
+
+inline(lua) fn check_header_sharing() -> bool = """
+local a, b = empty_columns(), empty_columns()
+assert(rawget(a, "@vec") == rawget(b, "@vec"))
+local s, t = empty_strided(), empty_strided()
+assert(rawget(s, "@vec") == rawget(t, "@vec"))
+assert(rawget(s, "@vec").repr == "strided" and rawget(a, "@vec").repr == "columns")
+local r = reserved_strided()
+assert(rawget(r, "@vec") ~= rawget(s, "@vec"))
+assert(fill(a, s) == 10 and fill(b, r) == 10 and fill(a, t) == 11)
+assert(rawget(s, "@vec").cap == 0 and not rawget(s, "@vec").reserved)
+return true
+"""
+
+@test(backends = "lua")
+fn empty_flat_vecs_share_their_headers() { assert(check_header_sharing()) }
