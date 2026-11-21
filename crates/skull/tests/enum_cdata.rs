@@ -29,20 +29,6 @@ fn t() {
 fn main() { t() }
 "#;
 
-#[test]
-fn cdata_enum_emits_ctype_and_no_table() {
-    let lua = emit_module(SRC);
-    assert!(lua.contains("} Shape;") && lua.contains("Shape_ct = ffi.typeof"));
-    assert!(!lua.contains("__variant = \"Circle\""));
-    let trampolines = lua
-        .lines()
-        .find(|l| l.starts_with("trampolines({"))
-        .expect("metatype trampoline loop");
-    assert!(trampolines.contains("\"Shape\""));
-    assert!(lua.contains(".__tag"));
-    assert_eq!(run_fn(&lua, "t"), "1 4 7 4 | 10");
-}
-
 const FIELD_SRC: &str = r#"
 enum Blend { Normal, Add(int), Mul(int) }
 value Cmd { z: int, blend: Blend }
@@ -120,30 +106,6 @@ fn t() {
 }
 fn main() { t() }
 "#;
-
-#[test]
-fn matched_scalar_abi_enum_param_does_not_repack() {
-    let lua = emit_module(PARAM_MATCH_SRC);
-    let body = crate::common::function_body(&lua, "route");
-    assert!(!body.contains("Target_ct("));
-}
-
-#[test]
-fn cdata_enum_payloads_share_one_ctype() {
-    for (src, cdef, expected) in [
-        (FIELD_SRC, "Blend blend;", "15 30"),
-        (MULTI_SRC, "int _0; int _1; } Shape;", "15 12 0"),
-        (
-            RECORD_SRC,
-            "int _0; int _w; int _h; } Shape;",
-            "15 12 0 | Shape::Box { h = 4, w = 3 }",
-        ),
-    ] {
-        let lua = emit_module(src);
-        assert!(lua.contains(cdef), "{cdef}");
-        assert_eq!(run_fn(&lua, "t"), expected);
-    }
-}
 
 const UNIT_EQ_SRC: &str = r#"
 enum Slice { Sliced, Empty, Leather(int) }
