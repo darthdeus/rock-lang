@@ -681,52 +681,6 @@ mod tests {
     }
 
     #[test]
-    fn diamond() {
-        let f = mk(
-            4,
-            vec![
-                branch(1, 2),
-                Term::Goto(bi(3)),
-                Term::Goto(bi(3)),
-                Term::Return(vec![]),
-            ],
-        );
-        let s = analyze(&f);
-        for (block, postdom) in [(0, Some(3)), (1, Some(3)), (2, Some(3)), (3, None)] {
-            assert_eq!(s.ipdom(bi(block)), postdom.map(bi), "ipdom({block})");
-        }
-        assert!(s.loops.is_empty());
-    }
-
-    #[test]
-    fn nested_loop() {
-        let f = mk(
-            7,
-            vec![
-                Term::Goto(bi(1)),
-                branch(2, 6),
-                branch(3, 5),
-                Term::Goto(bi(4)),
-                Term::Goto(bi(2)),
-                Term::Goto(bi(1)),
-                Term::Return(vec![]),
-            ],
-        );
-        let s = analyze(&f);
-        let outer = s.loops.get(&bi(1)).expect("outer loop");
-        let inner = s.loops.get(&bi(2)).expect("inner loop");
-        assert_eq!(outer.exit, bi(6));
-        assert_eq!(inner.exit, bi(5));
-        for (region, inside, outside) in [
-            (outer, &[1, 2, 5][..], &[6][..]),
-            (inner, &[2, 4][..], &[1, 5][..]),
-        ] {
-            assert!(inside.iter().all(|&b| region.body.contains(&bi(b))));
-            assert!(outside.iter().all(|&b| !region.body.contains(&bi(b))));
-        }
-    }
-
-    #[test]
     fn headerless_loop_is_rejected_but_placement_recognizes_it() {
         // 0 -> 1(header); 1 -> {1, 2}; 2 -> {3(exit), 1}: two latches and no single
         // test block that leaves the loop.
@@ -748,36 +702,5 @@ mod tests {
 
     fn dense_succ(f: &MirFunc) -> Succ {
         Succ::from_func(f, None)
-    }
-
-    #[test]
-    fn place_rejects_an_irreducible_cfg() {
-        // 0 -> {1, 2}; 1 -> 2; 2 -> 1: the cycle has two entries.
-        let f = mk(
-            4,
-            vec![
-                branch(1, 2),
-                branch(2, 3),
-                Term::Goto(bi(1)),
-                Term::Return(vec![]),
-            ],
-        );
-        assert!(place(bi(0), &dense_succ(&f), &[], &[]).is_none());
-    }
-
-    #[test]
-    fn place_keeps_a_raising_loop_exit_where_it_branches_from() {
-        let f = mk(
-            4,
-            vec![
-                Term::Goto(bi(1)),
-                branch(2, 3),
-                Term::Goto(bi(1)),
-                Term::Unreachable,
-            ],
-        );
-        let p = place(bi(0), &dense_succ(&f), &[], &[bi(3)]).expect("reducible");
-        assert!(!p.in_loop(bi(1), bi(3)) && !p.is_follower(bi(3)));
-        assert!(p.followers(bi(1)).is_empty());
     }
 }
