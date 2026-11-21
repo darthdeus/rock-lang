@@ -9,7 +9,8 @@ use ustr::Ustr;
 
 use crate::instance::Instance;
 use crate::mir::{
-    ColumnElem, ContainerKind, CoroHookKind, FuncRef, Inst, Lit, MirFunc, Term, ValueCtorForm,
+    ColumnElem, ContainerKind, CoroHookKind, FlatVecContents, FuncRef, Inst, Lit, MirFunc, Term,
+    ValueCtorForm,
 };
 use crate::monoty::MonoInterner;
 
@@ -985,7 +986,17 @@ impl BodyHasher {
     /// instruction or cell index is listed per variant.
     fn inst(&mut self, inst: &Inst, aliases: &FxHashMap<Ustr, CodeIdentity>, volatile: bool) {
         use std::hash::Hash;
-        std::mem::discriminant(inst).hash(&mut self.hash);
+        if let Inst::MakeFlatVec(vec) = inst {
+            let opcode: isize = match vec.contents {
+                FlatVecContents::Columns { .. } => 67,
+                FlatVecContents::Header(None) => 68,
+                FlatVecContents::Rows { .. } => 69,
+                FlatVecContents::Header(Some(_)) => 70,
+            };
+            std::hash::Hasher::write(&mut self.hash, &opcode.to_ne_bytes());
+        } else {
+            std::mem::discriminant(inst).hash(&mut self.hash);
+        }
         let mut uses = 0;
         inst.uses_each(&mut |_| uses += 1);
         self.hash.write_usize(uses);
@@ -1001,48 +1012,30 @@ impl BodyHasher {
             Inst::Call { func, .. } | Inst::CallMulti { func, .. } => self.func_ref(*func),
             Inst::CallBoundMulti { generic_idx, .. } => self.hash.write_u32(*generic_idx),
             Inst::Lambda { entry, .. } => self.block_idx(*entry),
-            Inst::MakeVecColumns {
-                elem,
-                representation,
-                nobox,
-                columns,
-                len,
-                ..
-            } => {
-                self.vec_header(*elem, *representation, *nobox);
-                for (name, values) in columns {
-                    self.string(name.as_str());
-                    self.hash.write_usize(values.len());
+            Inst::MakeFlatVec(vec) => {
+                self.vec_header(
+                    vec.elem.name,
+                    vec.elem.representation(),
+                    vec.elem.is_nobox(),
+                );
+                match &vec.contents {
+                    FlatVecContents::Header(stride) => {
+                        if let Some(stride) = stride {
+                            self.hash.write_usize(*stride);
+                        }
+                    }
+                    FlatVecContents::Columns { columns, len } => {
+                        for (name, values) in columns {
+                            self.string(name.as_str());
+                            self.hash.write_usize(values.len());
+                        }
+                        self.hash.write_usize(*len);
+                    }
+                    FlatVecContents::Rows { stride, len, .. } => {
+                        self.hash.write_usize(*stride);
+                        self.hash.write_usize(*len);
+                    }
                 }
-                self.hash.write_usize(*len);
-            }
-            Inst::MakeVecColumnHeader {
-                elem,
-                representation,
-                nobox,
-                ..
-            } => self.vec_header(*elem, *representation, *nobox),
-            Inst::MakeVecStrided {
-                elem,
-                representation,
-                nobox,
-                stride,
-                len,
-                ..
-            } => {
-                self.vec_header(*elem, *representation, *nobox);
-                self.hash.write_usize(*stride);
-                self.hash.write_usize(*len);
-            }
-            Inst::MakeVecStridedHeader {
-                elem,
-                representation,
-                nobox,
-                stride,
-                ..
-            } => {
-                self.vec_header(*elem, *representation, *nobox);
-                self.hash.write_usize(*stride);
             }
             Inst::MakeStruct { ty, fields } => {
                 self.option_artifact_name(*ty);
@@ -1224,6 +1217,12 @@ impl WordHash {
 }
 
 impl std::hash::Hasher for WordHash {
+    fn write_isize(&mut self, opcode: isize) {
+        // The four former flat Vec opcodes are still part of the hash encoding.
+        let opcode = if opcode >= 68 { opcode + 3 } else { opcode };
+        self.write(&opcode.to_ne_bytes());
+    }
+
     fn write(&mut self, bytes: &[u8]) {
         for chunk in bytes.chunks(8) {
             let mut word = [0; 8];

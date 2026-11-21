@@ -101,10 +101,7 @@ pub fn inst_never_nil_with(
         | Inst::Lambda { .. }
         | Inst::MakeTuple(..)
         | Inst::MakeVec(..)
-        | Inst::MakeVecColumns { .. }
-        | Inst::MakeVecColumnHeader { .. }
-        | Inst::MakeVecStrided { .. }
-        | Inst::MakeVecStridedHeader { .. }
+        | Inst::MakeFlatVec(_)
         | Inst::VecStrideNilToFalse(..)
         | Inst::MakeStruct { .. }
         | Inst::MakeValueStruct { .. }

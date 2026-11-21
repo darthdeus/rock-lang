@@ -1,8 +1,49 @@
 //! Instruction expressions, value-struct forms and calls.
 
 use super::*;
+use skull_mir::mir::{FlatVecContents, FlatVecCtor, VEC_COLUMN_HEADER_FIELD};
 
 impl Emitter<'_> {
+    fn render_flat_vec(&self, vec: &FlatVecCtor) -> Result<String, CompilerError> {
+        let header = || {
+            let stride = vec
+                .contents
+                .stride()
+                .map_or_else(String::new, |stride| format!(", stride: {stride}"));
+            Ok::<_, CompilerError>(format!(
+                "{{repr: {}, elem: {}{stride}, cap: {}}}",
+                js_string_lit(vec.contents.repr_name()),
+                js_string_lit(skull_mir::mangle::type_symbol(self.ws, vec.elem.name).as_str()),
+                self.render_val(vec.capacity)?,
+            ))
+        };
+        let render_values = |values: &[Idx<Inst>]| {
+            values
+                .iter()
+                .map(|&value| self.render_val(value))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let key = || js_string_lit(VEC_COLUMN_HEADER_FIELD);
+        Ok(match &vec.contents {
+            FlatVecContents::Header(_) => header()?,
+            FlatVecContents::Columns { columns, len } => {
+                let mut out = format!("{{{}: {}", key(), header()?);
+                for (name, values) in columns {
+                    let values = render_values(values)?.join(", ");
+                    write!(out, ", {}: [{values}]", js_string_lit(name.as_str())).unwrap();
+                }
+                write!(out, ", len: {len}, __ty: \"Vec\"}}").unwrap();
+                out
+            }
+            FlatVecContents::Rows { values, len, .. } => format!(
+                "{{_data: [{}], len: {len}, __ty: \"Vec\", {}: {}}}",
+                render_values(values)?.join(", "),
+                key(),
+                header()?,
+            ),
+        })
+    }
+
     /// Render an inst's own JS expression; JS is untyped, so int/float collapse to one operator.
     pub(super) fn render_inst_expr(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
         let bin =
@@ -483,74 +524,7 @@ impl Emitter<'_> {
                     self.render_val(*value)?
                 )
             }
-            // Plain arrays, not TypedArrays: V8's packed-double arrays beat `Float64Array` for
-            // strided reads. Nested leaf paths are dotted (`min.x`), so keys are quoted.
-            Inst::MakeVecColumns {
-                elem,
-                columns,
-                len,
-                capacity,
-                ..
-            } => {
-                let mut s = format!(
-                    "{{{}: {{repr: {}, elem: {}, cap: {}}}",
-                    js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD),
-                    js_string_lit(skull_mir::mir::VEC_COLUMN_REPR),
-                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str()),
-                    self.render_val(*capacity)?,
-                );
-                for (name, vs) in columns {
-                    let vals = vs
-                        .iter()
-                        .map(|v| self.render_val(*v))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    s.push_str(&format!(
-                        ", {}: [{}]",
-                        js_string_lit(name.as_str()),
-                        vals.join(", ")
-                    ));
-                }
-                s.push_str(&format!(", len: {len}, __ty: \"Vec\"}}"));
-                s
-            }
-            Inst::MakeVecColumnHeader { elem, capacity, .. } => format!(
-                "{{repr: {}, elem: {}, cap: {}}}",
-                js_string_lit(skull_mir::mir::VEC_COLUMN_REPR),
-                js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str()),
-                self.render_val(*capacity)?,
-            ),
-            Inst::MakeVecStrided {
-                elem,
-                stride,
-                values,
-                len,
-                capacity,
-                ..
-            } => {
-                let values = values
-                    .iter()
-                    .map(|value| self.render_val(*value))
-                    .collect::<Result<Vec<_>, _>>()?;
-                format!(
-                    "{{_data: [{}], len: {len}, __ty: \"Vec\", {}: {{repr: {}, elem: {}, stride: {stride}, cap: {}}}}}",
-                    values.join(", "),
-                    js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD),
-                    js_string_lit(skull_mir::mir::VEC_STRIDED_REPR),
-                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str()),
-                    self.render_val(*capacity)?,
-                )
-            }
-            Inst::MakeVecStridedHeader {
-                elem,
-                stride,
-                capacity,
-                ..
-            } => format!(
-                "{{repr: {}, elem: {}, stride: {stride}, cap: {}}}",
-                js_string_lit(skull_mir::mir::VEC_STRIDED_REPR),
-                js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str()),
-                self.render_val(*capacity)?,
-            ),
+            Inst::MakeFlatVec(vec) => self.render_flat_vec(vec)?,
             Inst::VecCheckedIndex { vec, index } => format!(
                 "__vec_checked_index({}, {})",
                 self.render_val(*vec)?,

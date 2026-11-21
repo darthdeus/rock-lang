@@ -26,22 +26,13 @@ pub fn column_elem_rep_plans(
     out: &mut std::collections::BTreeMap<Ustr, (bool, crate::lower::RepId)>,
 ) {
     for inst in mf.insts.values() {
-        match inst {
-            Inst::MakeVecColumns {
-                elem,
-                nobox,
-                representation,
-                ..
-            }
-            | Inst::MakeVecColumnHeader {
-                elem,
-                nobox,
-                representation,
-                ..
-            } => {
-                out.insert(*elem, (*nobox, *representation));
-            }
-            _ => {}
+        if let Inst::MakeFlatVec(vec) = inst
+            && vec.contents.stride().is_none()
+        {
+            out.insert(
+                vec.elem.name,
+                (vec.elem.is_nobox(), vec.elem.representation()),
+            );
         }
     }
     for nf in &mf.nested_fns {
@@ -219,6 +210,55 @@ impl CoroHookKind {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct FlatVecCtor {
+    pub elem: ColumnElem,
+    pub capacity: Idx<Inst>,
+    pub contents: FlatVecContents,
+}
+
+impl PartialEq for FlatVecCtor {
+    fn eq(&self, other: &Self) -> bool {
+        self.elem.name == other.elem.name
+            && self.elem.representation() == other.elem.representation()
+            && self.elem.is_nobox() == other.elem.is_nobox()
+            && self.capacity == other.capacity
+            && self.contents == other.contents
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FlatVecContents {
+    Header(Option<usize>),
+    Columns {
+        columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
+        len: usize,
+    },
+    Rows {
+        stride: usize,
+        values: Vec<Idx<Inst>>,
+        len: usize,
+    },
+}
+
+impl FlatVecContents {
+    pub fn stride(&self) -> Option<usize> {
+        match self {
+            Self::Header(stride) => *stride,
+            Self::Columns { .. } => None,
+            Self::Rows { stride, .. } => Some(*stride),
+        }
+    }
+
+    pub fn repr_name(&self) -> &'static str {
+        if self.stride().is_some() {
+            VEC_STRIDED_REPR
+        } else {
+            VEC_COLUMN_REPR
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Inst {
     Const(Lit),
@@ -340,38 +380,7 @@ pub enum Inst {
     MakeTuple(Vec<Idx<Inst>>),
     /// `{ data = {v0, ...}, len = N }`.
     MakeVec(Vec<Idx<Inst>>),
-    MakeVecColumns {
-        elem: Ustr,
-        representation: crate::lower::RepId,
-        nobox: bool,
-        /// One (leaf path, values) pair per leaf, each of length `len`, in the
-        /// element's declaration order.
-        columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
-        len: usize,
-        capacity: Idx<Inst>,
-    },
-    MakeVecColumnHeader {
-        elem: Ustr,
-        representation: crate::lower::RepId,
-        nobox: bool,
-        capacity: Idx<Inst>,
-    },
-    MakeVecStrided {
-        elem: Ustr,
-        representation: crate::lower::RepId,
-        nobox: bool,
-        stride: usize,
-        values: Vec<Idx<Inst>>,
-        len: usize,
-        capacity: Idx<Inst>,
-    },
-    MakeVecStridedHeader {
-        elem: Ustr,
-        representation: crate::lower::RepId,
-        nobox: bool,
-        stride: usize,
-        capacity: Idx<Inst>,
-    },
+    MakeFlatVec(Box<FlatVecCtor>),
     /// Physical strided rows cannot contain nil without punching a Lua array
     /// hole, so false is the inactive-lane sentinel.
     VecStrideNilToFalse(Idx<Inst>),
@@ -513,7 +522,7 @@ pub enum Inst {
 }
 
 macro_rules! each_value_operand {
-    ($inst:expr, $iter:ident, $visit:ident) => {
+    ($inst:expr, $iter:ident, $visit:ident, $($mut:tt)?) => {
         match $inst {
             Inst::Const(_) | Inst::Global(_) | Inst::Load(_) => {}
             Inst::FfiViewCast { ptr, .. } => $visit(ptr),
@@ -591,23 +600,16 @@ macro_rules! each_value_operand {
                 args.$iter().for_each(&mut $visit);
             }
             Inst::Lambda { .. } => {}
-            Inst::MakeVecColumns {
-                columns, capacity, ..
-            } => {
-                $visit(capacity);
-                columns
-                    .$iter()
-                    .flat_map(|(_, values)| values)
-                    .for_each(&mut $visit);
+            Inst::MakeFlatVec(vec) => {
+                $visit(& $($mut)? vec.capacity);
+                match & $($mut)? vec.contents {
+                    FlatVecContents::Columns { columns, .. } => columns.$iter()
+                        .flat_map(|(_, values)| values.$iter())
+                        .for_each(&mut $visit),
+                    FlatVecContents::Rows { values, .. } => values.$iter().for_each(&mut $visit),
+                    FlatVecContents::Header(_) => {}
+                }
             }
-            Inst::MakeVecColumnHeader { capacity, .. } => $visit(capacity),
-            Inst::MakeVecStrided {
-                values, capacity, ..
-            } => {
-                $visit(capacity);
-                values.$iter().for_each(&mut $visit);
-            }
-            Inst::MakeVecStridedHeader { capacity, .. } => $visit(capacity),
             Inst::MakeTuple(values) | Inst::MakeVec(values) => {
                 values.$iter().for_each(&mut $visit);
             }
@@ -716,12 +718,12 @@ impl Inst {
 
     pub fn uses_each(&self, push: &mut impl FnMut(Idx<Inst>)) {
         let mut visit = |value: &Idx<Inst>| push(*value);
-        each_value_operand!(self, iter, visit)
+        each_value_operand!(self, iter, visit,)
     }
 
     pub fn remap_uses(&mut self, map: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         let mut visit = |value: &mut Idx<Inst>| *value = map(*value);
-        each_value_operand!(self, iter_mut, visit)
+        each_value_operand!(self, iter_mut, visit, mut)
     }
 
     pub fn produces_value(&self) -> bool {

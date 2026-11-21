@@ -170,70 +170,7 @@ impl Emitter<'_> {
                 self.write_csv(out, vs);
                 let _ = write!(out, "}}, len = {}}}", vs.len());
             }
-            // A nested leaf path is dotted (`min.x`), not a bare Lua identifier,
-            // so keys are bracketed.
-            Inst::MakeVecColumns {
-                elem,
-                columns,
-                len,
-                capacity,
-                ..
-            } => {
-                out.push_str("{[");
-                write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
-                out.push_str("] = ");
-                self.write_vec_header(out, skull_mir::mir::VEC_COLUMN_REPR, *elem, None, *capacity);
-                out.push_str(", ");
-                for (name, vs) in columns {
-                    out.push('[');
-                    write_lua_string(out, name.as_str());
-                    out.push_str("] = {");
-                    self.write_csv(out, vs);
-                    out.push_str("}, ");
-                }
-                let _ = write!(out, "len = {len}}}");
-            }
-            Inst::MakeVecColumnHeader { elem, capacity, .. } => {
-                self.write_vec_header(out, skull_mir::mir::VEC_COLUMN_REPR, *elem, None, *capacity);
-            }
-            Inst::MakeVecStrided {
-                elem,
-                stride,
-                values,
-                len,
-                capacity,
-                ..
-            } => {
-                out.push_str("{_data = {");
-                self.write_csv(out, values);
-                out.push_str("}, len = ");
-                let _ = write!(out, "{len}");
-                out.push_str(", [");
-                write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
-                out.push_str("] = ");
-                self.write_vec_header(
-                    out,
-                    skull_mir::mir::VEC_STRIDED_REPR,
-                    *elem,
-                    Some(*stride),
-                    *capacity,
-                );
-                out.push('}');
-            }
-            Inst::MakeVecStridedHeader {
-                elem,
-                stride,
-                capacity,
-                ..
-            } => {
-                self.write_vec_header(
-                    out,
-                    skull_mir::mir::VEC_STRIDED_REPR,
-                    *elem,
-                    Some(*stride),
-                    *capacity,
-                );
-            }
+            Inst::MakeFlatVec(vec) => self.write_flat_vec(out, vec),
             Inst::MakeStruct { ty, fields } => {
                 // A Lua Vec is untagged; `__rock_get_type` recognizes it by shape.
                 let nominal = ty.filter(|name| name.as_str() != "Vec");
@@ -644,6 +581,46 @@ impl Emitter<'_> {
         out.push('[');
         self.write_opnd(out, index);
         out.push(']');
+    }
+
+    fn write_flat_vec(&self, out: &mut String, vec: &FlatVecCtor) {
+        let header = |out: &mut String| {
+            self.write_vec_header(
+                out,
+                vec.contents.repr_name(),
+                vec.elem.name,
+                vec.contents.stride(),
+                vec.capacity,
+            );
+        };
+        let header_key = |out: &mut String| {
+            out.push('[');
+            write_lua_string(out, VEC_COLUMN_HEADER_FIELD);
+            out.push_str("] = ");
+            header(out);
+        };
+        match &vec.contents {
+            FlatVecContents::Header(_) => header(out),
+            FlatVecContents::Columns { columns, len } => {
+                out.push('{');
+                header_key(out);
+                for (name, values) in columns {
+                    out.push_str(", [");
+                    write_lua_string(out, name.as_str());
+                    out.push_str("] = {");
+                    self.write_csv(out, values);
+                    out.push('}');
+                }
+                let _ = write!(out, ", len = {len}}}");
+            }
+            FlatVecContents::Rows { values, len, .. } => {
+                out.push_str("{_data = {");
+                self.write_csv(out, values);
+                let _ = write!(out, "}}, len = {len}, ");
+                header_key(out);
+                out.push('}');
+            }
+        }
     }
 
     /// A flat Vec's header. Only a reservation (`cap > 0`) ever writes one, so

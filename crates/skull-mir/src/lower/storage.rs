@@ -239,28 +239,15 @@ impl<'a> Builder<'a> {
             }
         }
         let capacity = capacity.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Int(len as i64))));
-        let elem = row.elem.name;
-        let representation = row.elem.representation();
-        let nobox = row.elem.is_nobox();
-        Ok(self.emit_cur(match columns {
-            Some(columns) => Inst::MakeVecColumns {
-                elem,
-                representation,
-                nobox,
-                columns,
-                len,
-                capacity,
-            },
-            None => Inst::MakeVecStrided {
-                elem,
-                representation,
-                nobox,
+        let contents = match columns {
+            Some(columns) => FlatVecContents::Columns { columns, len },
+            None => FlatVecContents::Rows {
                 stride: row.width,
                 values,
                 len,
-                capacity,
             },
-        }))
+        };
+        Ok(self.emit_flat_vec(row.elem, capacity, contents))
     }
 
     pub(crate) fn clone_flat_data(
@@ -292,10 +279,8 @@ impl<'a> Builder<'a> {
         };
         let old_header = self.column_header(vec);
         let capacity = self.read_field(old_header, crate::names::ustr("cap"));
-        let header = match storage {
-            FlatStorage::Columns => self.make_column_header(elem, capacity),
-            FlatStorage::Strided => self.make_strided_header(elem, stride, capacity),
-        };
+        let stride = (storage == FlatStorage::Strided).then_some(stride);
+        let header = self.emit_flat_vec(elem, capacity, FlatVecContents::Header(stride));
         fields.push((crate::names::ustr("len"), len));
         fields.push((crate::names::ustr(VEC_COLUMN_HEADER_FIELD), header));
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
@@ -416,21 +401,6 @@ impl<'a> Builder<'a> {
             let offset = self.emit_cur(Inst::Const(Lit::Int(physical as i64)));
             self.emit_cur(Inst::IntAdd(base, offset))
         }
-    }
-
-    fn make_strided_header(
-        &mut self,
-        elem: ColumnElem,
-        stride: usize,
-        capacity: Idx<Inst>,
-    ) -> Idx<Inst> {
-        self.emit_cur(Inst::MakeVecStridedHeader {
-            elem: elem.name,
-            representation: elem.representation(),
-            nobox: elem.is_nobox(),
-            stride,
-            capacity,
-        })
     }
 
     pub(crate) fn flat_vec_from_raw_array(
@@ -1044,17 +1014,17 @@ impl<'a> Builder<'a> {
         self.value_bundle_for_expr(e, value).map(Some)
     }
 
-    pub(crate) fn make_column_header(
+    fn emit_flat_vec(
         &mut self,
         elem: ColumnElem,
         capacity: Idx<Inst>,
+        contents: FlatVecContents,
     ) -> Idx<Inst> {
-        self.emit_cur(Inst::MakeVecColumnHeader {
-            elem: elem.name,
-            representation: elem.representation(),
-            nobox: elem.is_nobox(),
+        self.emit_cur(Inst::MakeFlatVec(Box::new(FlatVecCtor {
+            elem,
             capacity,
-        })
+            contents,
+        })))
     }
 
     pub(crate) fn column_header(&mut self, vec: Idx<Inst>) -> Idx<Inst> {
@@ -1062,7 +1032,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The `data` columns must exist before the first store.
-    /// Hence a zero-length `MakeVecColumns`, not an empty table. The field names
+    /// Even an empty flat Vec has one column per leaf. The field names
     /// match Arena's bookkeeping SoA: the two are one structure.
     pub(crate) fn empty_column_map(
         &mut self,

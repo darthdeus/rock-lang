@@ -529,10 +529,14 @@ fn allocation_aggregate(inst: &Inst) -> (Option<String>, u32) {
         ),
         Inst::MakeTuple(values) => (Some("<tuple>".to_string()), values.len() as u32),
         Inst::MakeVec(values) => (Some("<vec>".to_string()), values.len() as u32),
-        Inst::MakeVecColumns { elem, columns, .. } => {
-            (Some(format!("Vec<{elem}>")), columns.len() as u32)
+        Inst::MakeFlatVec(vec) => {
+            let count = match &vec.contents {
+                skull_mir::mir::FlatVecContents::Columns { columns, .. } => columns.len() as u32,
+                skull_mir::mir::FlatVecContents::Header(None) => 0,
+                _ => return (None, 0),
+            };
+            (Some(format!("Vec<{}>", vec.elem.name)), count)
         }
-        Inst::MakeVecColumnHeader { elem, .. } => (Some(format!("Vec<{elem}>")), 0),
         Inst::MakeEnv { fields, .. } => (
             Some("<closure-environment>".to_string()),
             fields.len() as u32,
