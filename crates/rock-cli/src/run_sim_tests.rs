@@ -337,9 +337,13 @@ fn reload_lane_is_opt_in_via_stone_hot_reload() {
     for (declared, lane, why) in cases {
         let declared = env(declared);
         assert_eq!(is_reload_lane(&declared), *lane, "{why}");
-        let by_wire = HashMap::from([("probe".to_string(), declared)]);
-        assert_eq!(entry_is_reload_lane("probe", &by_wire), *lane, "{why}");
-        assert!(!entry_is_reload_lane("unknown", &by_wire));
+        let registry = SimRegistry::from(vec![RegisteredSim {
+            wire_name: "probe".into(),
+            env: declared,
+            source_file: "probe.rock".into(),
+        }]);
+        assert_eq!(registry.reloads("probe"), *lane, "{why}");
+        assert!(!registry.reloads("unknown"));
     }
 }
 
@@ -1324,22 +1328,27 @@ fn resolve_sim_sources_keeps_same_named_sims_in_their_own_files() {
         "mod b;\n@sim\nco fn only() -> Coroutine<Wait> {\n}\n",
     )
     .unwrap();
-    let relative: HashMap<String, String> = [
-        (
-            "game::only".to_string(),
-            "proj/tests/sims/a.rock".to_string(),
-        ),
-        (
-            "game::b::only".to_string(),
-            "proj/tests/sims/b.rock".to_string(),
-        ),
-    ]
-    .into_iter()
-    .collect();
-    let resolved = resolve_sim_sources(&proj, &relative).unwrap();
-    let canonical = |name: &str| sims.join(name).canonicalize().unwrap();
-    assert_eq!(resolved["game::only"], canonical("a.rock"));
-    assert_eq!(resolved["game::b::only"], canonical("b.rock"));
+    let registry = SimRegistry::from(Vec::from(
+        [
+            ("game::only", "proj/tests/sims/a.rock"),
+            ("game::b::only", "proj/tests/sims/b.rock"),
+        ]
+        .map(|(name, source)| RegisteredSim {
+            wire_name: name.into(),
+            env: Vec::new(),
+            source_file: source.into(),
+        }),
+    ));
+    let root = source_root_for_sim_project(&proj).unwrap();
+    let resolved = |name| registry.source_for(name, &root).unwrap();
+    assert_eq!(
+        resolved("game::only"),
+        sims.join("a.rock").canonicalize().unwrap()
+    );
+    assert_eq!(
+        resolved("game::b::only"),
+        sims.join("b.rock").canonicalize().unwrap()
+    );
 }
 
 #[test]

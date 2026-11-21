@@ -264,11 +264,9 @@ mod worker_admission;
 
 use events::{SimEvent, parse_sim_marker};
 
-#[derive(Debug)]
 struct SimRegistry {
+    entries: HashMap<String, RegisteredSim>,
     wire_names: Vec<String>,
-    env_by_wire: HashMap<String, Vec<(String, String)>>,
-    source_files: HashMap<String, String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -279,33 +277,53 @@ struct RegisteredSim {
 }
 
 impl SimRegistry {
-    fn select(&self, project: &str, names: &[String]) -> Result<Vec<String>> {
+    fn select(&self, project: &Path, names: &[String]) -> Result<Vec<String>> {
         let selected = if names.is_empty() {
             self.wire_names.clone()
         } else {
             resolve_sim_specs(&self.wire_names, names)?
         };
-        if selected.is_empty() {
-            return Err(anyhow!("no @sim coroutines found in project `{project}`"));
-        }
+        anyhow::ensure!(
+            !selected.is_empty(),
+            "no @sim coroutines found in project `{}`",
+            project.display()
+        );
         Ok(selected)
+    }
+
+    fn sources(&self) -> HashMap<String, String> {
+        self.entries
+            .iter()
+            .map(|(wire, entry)| (wire.clone(), entry.source_file.clone()))
+            .collect()
+    }
+
+    fn env(&self, name: &str) -> &[(String, String)] {
+        self.entries.get(name).map_or(&[], |entry| &entry.env)
+    }
+
+    fn source_for(&self, name: &str, root: &Path) -> Option<PathBuf> {
+        Some(root.join(&self.entries.get(name)?.source_file))
+    }
+
+    fn reloads(&self, name: &str) -> bool {
+        is_reload_lane(self.env(name))
     }
 }
 
 impl From<Vec<RegisteredSim>> for SimRegistry {
     fn from(entries: Vec<RegisteredSim>) -> Self {
-        let mut wire_names = Vec::with_capacity(entries.len());
-        let mut env_by_wire = HashMap::with_capacity(entries.len());
-        let mut source_files = HashMap::with_capacity(entries.len());
-        for entry in entries {
-            env_by_wire.insert(entry.wire_name.clone(), entry.env);
-            source_files.insert(entry.wire_name.clone(), entry.source_file);
-            wire_names.push(entry.wire_name);
-        }
+        let wire_names = entries
+            .iter()
+            .map(|entry| entry.wire_name.clone())
+            .collect();
+        let entries = entries
+            .into_iter()
+            .map(|entry| (entry.wire_name.clone(), entry))
+            .collect();
         Self {
+            entries,
             wire_names,
-            env_by_wire,
-            source_files,
         }
     }
 }
@@ -315,26 +333,11 @@ struct CompiledSims {
     stone: crate::skull_backend::IncrementalProject,
 }
 
-/// Resolve the registry's workspace-relative sim sources against this
-/// invocation's source root for baseline lookup. Timings keep the relative
-/// keys (stable across machines); the runner needs on-disk paths.
-fn resolve_sim_sources(
-    project_path: &Path,
-    relative: &HashMap<String, String>,
-) -> Result<HashMap<String, PathBuf>> {
-    let root = source_root_for_sim_project(project_path)?;
-    Ok(relative
-        .iter()
-        .map(|(wire, rel)| (wire.clone(), root.join(rel)))
-        .collect())
-}
-
 fn prepare_sims_out_of_process(
     project_path: &Path,
     rock_exe: &Path,
     selection: &[String],
 ) -> Result<(TempDir, SimRegistry)> {
-    crate::package::check_project_assets(project_path)?;
     sweep_stale_sim_receipt_roots(Path::new("tmp"));
     fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
     let receipt_prefix = format!("{SIM_RECEIPT_PREFIX}{}-", std::process::id());
@@ -751,15 +754,6 @@ fn reload_lane_session(
     }))
 }
 
-fn any_reload_lane_selected(
-    specs: &[String],
-    env_by_wire: &HashMap<String, Vec<(String, String)>>,
-) -> bool {
-    specs
-        .iter()
-        .any(|spec| entry_is_reload_lane(spec, env_by_wire))
-}
-
 pub(crate) fn do_list_sims(project: &str) -> Result<()> {
     let project_path = rock_engine_host::project::resolve_project_dir(project)?;
     let receipt = std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).filter(|dir| !dir.is_empty());
@@ -810,66 +804,6 @@ fn prepare_run(
         )
     })?;
     Ok((project_path, out_dir, registry))
-}
-
-fn run_single_sim(
-    project_path: &Path,
-    output_path: &Path,
-    registry: SimRegistry,
-    specs: &[String],
-    quiet: bool,
-    update_snapshots: bool,
-    requested_jobs: Option<usize>,
-    recorder: &SimRunRecorder,
-) -> Result<()> {
-    let sim_name = &specs[0];
-    let output = output_path.to_string_lossy();
-    let (registry, mut stone) = if entry_is_reload_lane(sim_name, &registry.env_by_wire) {
-        let compiled = recorder.phase("compile_reload_session", || {
-            compile_sims(project_path.to_path_buf(), output_path.to_path_buf())
-        })?;
-        (compiled.registry.into(), Some(compiled.stone))
-    } else {
-        (registry, None)
-    };
-    let entry_ids = recorder.plan_entries(specs);
-    recorder.configure(
-        project_path,
-        &registry.wire_names,
-        requested_jobs,
-        1,
-        None,
-        1,
-        update_snapshots,
-        &registry.source_files,
-    );
-    emit_bytecode_image(Path::new(output.as_ref()));
-
-    let sim_sources = resolve_sim_sources(project_path, &registry.source_files)?;
-    let (display_name, summary) = run_named_entry(
-        sim_name,
-        quiet,
-        false,
-        update_snapshots,
-        &output,
-        registry
-            .env_by_wire
-            .get(sim_name)
-            .cloned()
-            .unwrap_or_default(),
-        sim_sources.get(sim_name).cloned(),
-        stone.as_mut(),
-        None,
-        Some(recorder),
-        entry_ids.first().copied(),
-    )?;
-    let sim_name = display_name.as_str();
-
-    if !quiet {
-        summary.print(sim_name, true);
-    }
-
-    sim_outcome(&summary, sim_name)
 }
 
 fn sim_outcome(summary: &SimSummary, sim_name: &str) -> Result<()> {
@@ -1052,42 +986,21 @@ fn do_run_sims_recorded(
     full_asset_jobs: Option<usize>,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
-    let (project_path, out_dir, registry) = prepare_run(project, names, recorder)?;
-    let output_path = out_dir.path();
+    let (project_path, out_dir, mut registry) = prepare_run(project, names, recorder)?;
     let suite = names.is_empty();
-    let specs = if suite {
-        Ok(registry.wire_names.clone())
+    let single = names.len() == 1;
+    let specs = registry.select(&project_path, names)?;
+    let stone = if single && registry.reloads(&specs[0]) {
+        let compiled = recorder.phase("compile_reload_session", || {
+            compile_sims(project_path.clone(), out_dir.path().to_path_buf())
+        })?;
+        registry = compiled.registry.into();
+        Some(compiled.stone)
     } else {
-        resolve_sim_specs(&registry.wire_names, names)
+        None
     };
-    if names.len() == 1 {
-        return run_single_sim(
-            &project_path,
-            output_path,
-            registry,
-            &specs?,
-            quiet,
-            update_snapshots,
-            jobs,
-            recorder,
-        );
-    }
-
-    let project = project_path.to_string_lossy();
-    let output = output_path.to_string_lossy();
-    let SimRegistry {
-        wire_names,
-        env_by_wire,
-        source_files,
-    } = registry;
-    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
-    let specs = specs?;
-    emit_bytecode_image(Path::new(output.as_ref()));
-    if specs.is_empty() {
-        return Err(anyhow!("no @sim coroutines found in project `{project}`"));
-    }
     let entry_ids = recorder.plan_entries(&specs);
-    if !suite && !quiet {
+    if !suite && !single && !quiet {
         if let Some(events) = recorder.events_path() {
             println!(
                 "[sim] {} sims: records print when all are done; live entry_start/entry_end in {}",
@@ -1097,63 +1010,64 @@ fn do_run_sims_recorded(
         }
     }
 
-    let lanes = (!suite).then_some(specs.len());
-    let effective_jobs = resolve_pool_jobs(jobs, lanes, update_snapshots)?;
-    let requested_full_asset_jobs = full_asset_jobs;
-    let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
+    let effective_jobs = if single {
+        1
+    } else {
+        resolve_pool_jobs(jobs, (!suite).then_some(specs.len()), update_snapshots)?
+    };
+    let requested_full_asset_jobs = if single { None } else { full_asset_jobs };
+    let full_asset_jobs = resolve_full_asset_jobs(requested_full_asset_jobs, effective_jobs);
     recorder.configure(
         &project_path,
-        &wire_names,
+        &registry.wire_names,
         jobs,
         effective_jobs,
         requested_full_asset_jobs,
         full_asset_jobs,
         update_snapshots,
-        &source_files,
+        &registry.sources(),
     );
     let selected = specs.len();
-    let mut routine_specs = Vec::new();
-    let mut routine_ids = Vec::new();
-    for (name, id) in specs.into_iter().zip(entry_ids) {
-        if suite && manual_sim(env_by_wire.get(&name).map_or(&[][..], |v| v))? {
+    let mut occurrences = Vec::with_capacity(selected);
+    for (name, id) in specs.iter().zip(entry_ids) {
+        if suite && manual_sim(registry.env(name))? {
             record_excluded_entry(Some(recorder), Some(id));
             SimSummary {
                 excluded: Some("manual; run by name".to_string()),
                 saw_stop: true,
                 ..SimSummary::default()
             }
-            .print(&name, false);
+            .print(name, false);
         } else {
-            routine_specs.push(name);
-            routine_ids.push(id);
+            occurrences.push((name.as_str(), Some(id)));
         }
     }
-    let manual_excluded = selected - routine_specs.len();
-    let mut reload_lane = reload_lane_session(
-        &project_path,
-        any_reload_lane_selected(&routine_specs, &env_by_wire),
-        Path::new(output.as_ref()),
-        None,
-        quiet,
-    )?;
+    let manual_excluded = selected - occurrences.len();
     let results = SimRun {
-        output: &output,
-        env_by_wire: &env_by_wire,
-        specs: &routine_specs,
-        source_files: &sim_sources,
+        project: &project_path,
+        output: out_dir.path(),
+        registry: &registry,
+        entries: &occurrences,
         jobs: effective_jobs,
-        reload_lane: reload_lane.as_mut(),
     }
-    .execute(SimMode::Standard {
-        quiet,
-        streaming: suite && effective_jobs == 1 && !quiet,
-        update_snapshots,
-        full_asset_jobs,
-        recorder,
-        entry_ids: &routine_ids,
-    })?
+    .execute(
+        SimMode::Standard {
+            quiet,
+            single,
+            streaming: suite && effective_jobs == 1 && !quiet,
+            update_snapshots,
+            full_asset_jobs,
+            recorder,
+        },
+        stone,
+    )?
     .into_iter()
     .collect::<Result<Vec<_>>>()?;
+    if single {
+        let (name, summary) = &results[0];
+        return sim_outcome(summary, name);
+    }
+    let project = project_path.display();
     let (passed, excluded, failed) = tally_entries(&results);
     let excluded = excluded + manual_excluded;
 
@@ -1201,23 +1115,22 @@ fn tally_entries(results: &[(String, SimSummary)]) -> (usize, usize, Vec<String>
 }
 
 struct SimRun<'a> {
-    output: &'a str,
-    env_by_wire: &'a HashMap<String, Vec<(String, String)>>,
-    specs: &'a [String],
-    source_files: &'a HashMap<String, PathBuf>,
+    project: &'a Path,
+    output: &'a Path,
+    registry: &'a SimRegistry,
+    entries: &'a [(&'a str, Option<u64>)],
     jobs: usize,
-    reload_lane: Option<&'a mut ReloadLaneSession>,
 }
 
 #[derive(Clone, Copy)]
 enum SimMode<'a> {
     Standard {
         quiet: bool,
+        single: bool,
         streaming: bool,
         update_snapshots: bool,
         full_asset_jobs: usize,
         recorder: &'a SimRunRecorder,
-        entry_ids: &'a [u64],
     },
     Census,
     Sites(&'a Path),
@@ -1226,17 +1139,37 @@ enum SimMode<'a> {
 type SimResult = Result<(String, SimSummary)>;
 
 impl SimRun<'_> {
-    fn execute(self, mode: SimMode<'_>) -> Result<Vec<SimResult>> {
+    fn execute(
+        self,
+        mode: SimMode<'_>,
+        mut stone: Option<crate::skull_backend::IncrementalProject>,
+    ) -> Result<Vec<SimResult>> {
         let Self {
+            project,
             output,
-            env_by_wire,
-            specs,
-            source_files,
+            registry,
+            entries,
             jobs,
-            reload_lane,
         } = self;
+        let source_root = source_root_for_sim_project(project)?;
+        let output_arg = output.to_string_lossy();
         let (reload_idx, mut dispatch): (Vec<usize>, Vec<usize>) =
-            (0..specs.len()).partition(|&i| entry_is_reload_lane(&specs[i], env_by_wire));
+            (0..entries.len()).partition(|&i| registry.reloads(entries[i].0));
+        let single = matches!(mode, SimMode::Standard { single: true, .. });
+        let mut reload_lane = if single || matches!(mode, SimMode::Sites(_)) {
+            None
+        } else {
+            reload_lane_session(
+                project,
+                !reload_idx.is_empty(),
+                output,
+                stone.take(),
+                matches!(mode, SimMode::Standard { quiet: true, .. }),
+            )?
+        };
+        if !matches!(mode, SimMode::Sites(_)) {
+            emit_bytecode_image(output);
+        }
 
         let mut asset_cap = jobs;
         let mut full_assets = Vec::new();
@@ -1250,7 +1183,7 @@ impl SimRun<'_> {
             if jobs > 1 {
                 let estimates: Vec<_> = dispatch
                     .iter()
-                    .map(|&i| recorder.recorded_duration_ms(&specs[i]))
+                    .map(|&i| recorder.recorded_duration_ms(entries[i].0))
                     .collect();
                 if !quiet {
                     let history = estimates.iter().filter(|ms| ms.is_some()).count();
@@ -1270,12 +1203,7 @@ impl SimRun<'_> {
             asset_cap = full_asset_jobs;
             full_assets = dispatch
                 .iter()
-                .map(|&i| {
-                    entry_full_assets(
-                        env_by_wire.get(&specs[i]).map_or(&[][..], Vec::as_slice),
-                        default_stub,
-                    )
-                })
+                .map(|&i| entry_full_assets(registry.env(entries[i].0), default_stub))
                 .collect();
             let full = full_assets.iter().filter(|f| **f).count();
             if !quiet && asset_cap < jobs && full > 0 {
@@ -1288,28 +1216,21 @@ impl SimRun<'_> {
         let run_at = |i: usize,
                       lane: Option<(&mut crate::skull_backend::IncrementalProject, &str)>|
          -> SimResult {
-            let name = &specs[i];
+            let (name, occurrence_id) = entries[i];
             let (stone, entry_output) = match lane {
                 Some((stone, out)) => (Some(stone), out),
-                None => (None, output),
+                None => (None, output_arg.as_ref()),
             };
-            let mut env = env_by_wire.get(name).cloned().unwrap_or_default();
-            let (quiet, streaming, update_snapshots, recorder, occurrence_id) = match mode {
+            let mut env = registry.env(name).to_vec();
+            let (quiet, streaming, update_snapshots, recorder) = match mode {
                 SimMode::Standard {
                     quiet,
                     streaming,
                     update_snapshots,
                     recorder,
-                    entry_ids,
                     ..
-                } => (
-                    quiet,
-                    streaming,
-                    update_snapshots,
-                    Some(recorder),
-                    Some(entry_ids[i]),
-                ),
-                SimMode::Census => (true, false, false, None, None),
+                } => (quiet, streaming, update_snapshots, Some(recorder)),
+                SimMode::Census => (true, false, false, None),
                 SimMode::Sites(artifact_dir) => {
                     let stem = allocation_site_artifact_stem(i, name);
                     let activation = artifact_dir.join(format!("{stem}.activation.tsv"));
@@ -1321,28 +1242,38 @@ impl SimRun<'_> {
                         ("STONE_TEXT_LAYOUT_SIM_PROBES".into(), "0".into()),
                         ("STONE_IMGUI_SIM_PROBES".into(), "0".into()),
                     ]);
-                    (true, false, false, None, None)
+                    (true, false, false, None)
                 }
             };
             let (display_name, summary) = run_named_entry(
                 name,
                 quiet,
-                !streaming,
+                !streaming && !single,
                 update_snapshots,
                 entry_output,
                 env,
-                source_files.get(name).cloned(),
+                registry.source_for(name, &source_root),
                 stone,
                 matches!(mode, SimMode::Census).then_some(DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES),
                 recorder,
                 occurrence_id,
             )?;
-            if streaming && !quiet {
-                print_record(&display_name, &summary, true);
+            if !quiet {
+                if single {
+                    summary.print(&display_name, true);
+                } else if streaming {
+                    print_record(&display_name, &summary, true);
+                }
             }
             Ok((display_name, summary))
         };
 
+        if single {
+            return Ok(vec![run_at(
+                0,
+                stone.as_mut().map(|stone| (stone, output_arg.as_ref())),
+            )]);
+        }
         let pool = SimPool::new(
             jobs,
             dispatch.len(),
@@ -1352,17 +1283,21 @@ impl SimRun<'_> {
         );
         let (completed, lane) = pool.beside_reload(
             |k| run_at(dispatch[k], None),
-            || run_reload_lane_serially(reload_lane, &reload_idx, |i, lane| run_at(i, Some(lane))),
+            || {
+                run_reload_lane_serially(reload_lane.as_mut(), &reload_idx, |i, lane| {
+                    run_at(i, Some(lane))
+                })
+            },
         );
         let mut results: HashMap<_, _> = completed
             .into_iter()
             .map(|(k, result)| (dispatch[k], result))
             .collect();
         results.extend(lane);
-        let ordered: Vec<_> = specs
+        let ordered: Vec<_> = entries
             .iter()
             .enumerate()
-            .map(|(i, name)| {
+            .map(|(i, (name, _))| {
                 results
                     .remove(&i)
                     .ok_or_else(|| anyhow!("sim `{name}` was never scheduled"))
@@ -1710,31 +1645,18 @@ pub(crate) fn do_run_allocation_census(
             .with_context(|| format!("removing stale census artifact `{}`", path.display()))?;
     }
     let (project_path, out_dir, compiled) = compile_sim_diagnostic(project, None)?;
-    let project = project_path.to_string_lossy().into_owned();
-    let output = out_dir.path().to_string_lossy().into_owned();
     let registry = SimRegistry::from(compiled.registry);
-    let sim_sources = resolve_sim_sources(&project_path, &registry.source_files)?;
-    let stone = compiled.stone;
-    emit_bytecode_image(Path::new(&output));
-
-    let selected = registry.select(&project, names)?;
-    let jobs = resolve_pool_jobs(jobs, None, false)?;
-    let mut reload_lane = reload_lane_session(
-        &project_path,
-        any_reload_lane_selected(&selected, &registry.env_by_wire),
-        Path::new(&output),
-        Some(stone),
-        false,
-    )?;
+    let selected = registry.select(&project_path, names)?;
+    let occurrences: Vec<_> = selected.iter().map(|name| (name.as_str(), None)).collect();
     let results = SimRun {
-        output: &output,
-        env_by_wire: &registry.env_by_wire,
-        specs: &selected,
-        source_files: &sim_sources,
-        jobs,
-        reload_lane: reload_lane.as_mut(),
+        project: &project_path,
+        output: out_dir.path(),
+        registry: &registry,
+        entries: &occurrences,
+        jobs: resolve_pool_jobs(jobs, None, false)?,
     }
-    .execute(SimMode::Census)?;
+    .execute(SimMode::Census, Some(compiled.stone))?;
+    let project = project_path.to_string_lossy();
 
     let mut records = Vec::with_capacity(selected.len());
     let mut ranked = Vec::new();
@@ -1886,38 +1808,36 @@ pub(crate) fn do_run_allocation_sites(
     let manifest_path = artifact_dir.join("manifest.txt");
 
     let (project_path, out_dir, compiled) = compile_sim_diagnostic(project, Some(&manifest_path))?;
-    let project = project_path.to_string_lossy().into_owned();
-    let output = out_dir.path().to_string_lossy().into_owned();
+    let project = project_path.to_string_lossy();
     let registry = SimRegistry::from(compiled.registry);
-    let sim_sources = resolve_sim_sources(&project_path, &registry.source_files)?;
     let artifact_fingerprint = compiled.stone.artifact_fingerprint()?;
     drop(compiled.stone);
     let generated_lua_path = artifact_dir.join("main.lua");
     fs_err::copy(
-        Path::new(&output).join(rock_host::project::MAIN_LUA_FILENAME),
+        out_dir.path().join(rock_host::project::MAIN_LUA_FILENAME),
         &generated_lua_path,
     )?;
     let manifest = fs_err::read_to_string(&manifest_path)?;
     let generated_lua = fs_err::read_to_string(&generated_lua_path)?;
 
-    let selected = registry.select(&project, names)?;
+    let selected = registry.select(&project_path, names)?;
     for name in &selected {
-        if entry_is_reload_lane(name, &registry.env_by_wire) {
+        if registry.reloads(name) {
             return Err(anyhow!(
                 "allocation-site diagnostics do not support reload sim `{name}` because its emitted site IDs can change after the initial manifest"
             ));
         }
     }
 
+    let occurrences: Vec<_> = selected.iter().map(|name| (name.as_str(), None)).collect();
     let results = SimRun {
-        output: &output,
-        env_by_wire: &registry.env_by_wire,
-        specs: &selected,
-        source_files: &sim_sources,
+        project: &project_path,
+        output: out_dir.path(),
+        registry: &registry,
+        entries: &occurrences,
         jobs: resolve_pool_jobs(jobs, None, false)?,
-        reload_lane: None,
     }
-    .execute(SimMode::Sites(&artifact_dir))?;
+    .execute(SimMode::Sites(&artifact_dir), None)?;
 
     let mut records = Vec::with_capacity(selected.len());
     let mut failed = Vec::new();
@@ -1954,10 +1874,7 @@ pub(crate) fn do_run_allocation_sites(
                 let (joined, frames, active_sites) =
                     crate::allocation_join::join_sim(&manifest, &activation, &generated_lua)?;
                 fs_err::write(&joined_path, joined)?;
-                let env = registry
-                    .env_by_wire
-                    .get(name)
-                    .map_or(&[][..], Vec::as_slice);
+                let env = registry.env(name);
                 records.push(serde_json::json!({
                     "sim_name": display_name,
                     "status": status,
@@ -2204,10 +2121,6 @@ fn revert_reload_edits(
         stone.apply_edit(Path::new(&file), &text, &main_path, &incremental_path)?;
     }
     crate::skull_backend::wipe_overlay(&incremental_path)
-}
-
-fn entry_is_reload_lane(spec: &str, env_by_wire: &HashMap<String, Vec<(String, String)>>) -> bool {
-    env_by_wire.get(spec).is_some_and(|e| is_reload_lane(e))
 }
 
 fn sim_cpu_count() -> usize {
