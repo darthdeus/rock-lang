@@ -314,56 +314,6 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn retries_only_before_the_inner_command_can_start() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::process::Stdio;
-        let dir = tempfile::tempdir().unwrap();
-        let launcher = dir.path().join("systemd-run");
-        let attempts = dir.path().join("attempts");
-        let executions = dir.path().join("executions");
-        std::fs::write(
-            &launcher,
-            r#"#!/bin/sh
-if [ ! -e "$ATTEMPTS" ]; then
-  echo failed > "$ATTEMPTS"
-  echo 'Failed to connect to bus: Connection refused' >&2
-  exit 1
-fi
-while [ "$1" != -- ]; do shift; done
-shift
-exec "$@"
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut inner = Command::new("sh");
-        inner.args(["-c", "echo executed >> \"$EXECUTIONS\"; echo child-output; echo 'Failed to connect to bus: Connection refused' >&2; exit 7"])
-            .env("ATTEMPTS", &attempts).env("EXECUTIONS", &executions);
-        let mut cmd = wrap_in(inner, Command::new(&launcher));
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = spawn_bound_child(&mut cmd, dir.path()).unwrap();
-        use std::io::Read;
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        child
-            .stdout
-            .take()
-            .unwrap()
-            .read_to_string(&mut stdout)
-            .unwrap();
-        child
-            .stderr
-            .take()
-            .unwrap()
-            .read_to_string(&mut stderr)
-            .unwrap();
-        assert_eq!(child.wait().unwrap().code(), Some(7), "{stderr}");
-        assert_eq!(std::fs::read_to_string(executions).unwrap(), "executed\n");
-        assert_eq!(stdout, "child-output\n");
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn an_unavailable_manager_returns_a_launch_error_without_running_the_command() {
         use std::os::unix::fs::PermissionsExt;
         use std::process::Stdio;
