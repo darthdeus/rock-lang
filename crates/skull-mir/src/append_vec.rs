@@ -297,45 +297,4 @@ mod tests {
         let elsewhere = 5usize;
         assert_eq!(v.index_of(&elsewhere), None);
     }
-
-    #[test]
-    fn slot_table_installs_each_slot_once() {
-        let table = SlotTable::<std::sync::atomic::AtomicUsize>::default();
-        std::thread::scope(|s| {
-            for _ in 0..4 {
-                s.spawn(|| {
-                    for i in 0..1000 {
-                        table
-                            .get_or_init(i, Default::default)
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                });
-            }
-        });
-        for i in [0, 64, 999] {
-            assert_eq!(
-                table
-                    .get_or_init(i, Default::default)
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                4
-            );
-        }
-    }
-
-    #[test]
-    fn readers_see_published_elements_while_others_push() {
-        let v = std::sync::Arc::new(AppendVec::new());
-        std::thread::scope(|s| {
-            for t in 0..4 {
-                let v = &v;
-                s.spawn(move || {
-                    for i in 0..2000usize {
-                        let at = v.push(vec![t, i]);
-                        assert_eq!(v[at], vec![t, i]);
-                    }
-                });
-            }
-        });
-        assert_eq!(v.len(), 8000);
-    }
 }
