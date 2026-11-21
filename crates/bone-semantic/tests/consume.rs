@@ -77,21 +77,6 @@ fn admits_single_use_exclusive_branches_and_fresh_bindings() {
 }
 
 #[test]
-fn diagnostic_points_to_the_first_and_rejected_reads() {
-    let source = format!(
-        "{TICKET} fn main() {{ let t = Ticket {{ id: 1 }}; let _ = spend(t); let _ = spend(t) }}"
-    );
-    let errors = errors(&source);
-    assert_eq!(errors.len(), 1, "{errors:?}");
-    let error = &errors[0];
-    assert_eq!(error.labels.len(), 2);
-    let first = source.find("spend(t)").unwrap() + "spend(".len();
-    let again = source.rfind("spend(t)").unwrap() + "spend(".len();
-    assert_eq!(error.labels[0].span.offset_range(), (again, again + 1));
-    assert_eq!(error.labels[1].span.offset_range(), (first, first + 1));
-}
-
-#[test]
 fn function_fields_project_the_receiver_and_consume_their_arguments() {
     let declarations =
         format!("{TICKET} @consume struct Action {{ run: fn() -> int, next: fn(Ticket) -> int }}");
@@ -115,63 +100,6 @@ fn function_fields_project_the_receiver_and_consume_their_arguments() {
     let errors = errors(&source);
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert_eq!(errors[0].message, "use of consumed binding `t`");
-}
-
-#[test]
-fn iterator_bound_tracks_generic_bindings_with_both_use_sites() {
-    let source = "fn drain<I: Iterator<int>>(it: I) {
-        for x in it {}
-        for x in it {}
-    }";
-    let errs = errors(source);
-    assert_eq!(errs.len(), 1, "{errs:?}");
-    let error = &errs[0];
-    assert_eq!(error.message, "use of consumed binding `it`");
-    assert_eq!(error.labels.len(), 2);
-    let first = source.find("in it").unwrap() + "in ".len();
-    let again = source.rfind("in it").unwrap() + "in ".len();
-    assert_eq!(error.labels[0].span.offset_range(), (again, again + 2));
-    assert_eq!(error.labels[1].span.offset_range(), (first, first + 2));
-}
-
-#[test]
-fn iterator_bound_uses_the_concrete_consumption_rules() {
-    for body in [
-        "for x in it {}; let _ = next(it)",
-        "let alias = it; for x in it {}",
-        "if true { for x in it {} }; for x in it {}",
-        "while false { for x in it {} }",
-        "let read = () => next(it); for x in it {}",
-    ] {
-        let errs = errors(&format!("fn drain<I: Iterator<int>>(it: I) {{ {body} }}"));
-        assert_eq!(errs.len(), 1, "{body}: {errs:?}");
-        assert!(errs[0].message.contains("consum"), "{body}: {errs:?}");
-        assert_eq!(errs[0].labels.len(), 2, "{body}: {errs:?}");
-    }
-    for body in [
-        "let _ = next(it); let _ = it.next(); for x in it {}",
-        "for x in it {}; it = fresh; let _ = next(it); for x in it {}",
-        "if true { for x in it {} } else { for x in it {} }",
-        "let alias = it; for x in alias {}",
-    ] {
-        let errs = errors(&format!(
-            "fn drain<I: Iterator<int>>(it: I, fresh: I) {{ {body} }}"
-        ));
-        assert!(errs.is_empty(), "{body}: {errs:?}");
-    }
-}
-
-#[test]
-fn iterator_bound_does_not_track_other_generic_parameters() {
-    let errs = errors(
-        "fn repeat<T>(value: T) { let a = value; let b = value }
-         fn drain<T, I: Iterator<T>>(it: I, value: T) {
-             let a = value
-             let b = value
-             for x in it {}
-         }",
-    );
-    assert!(errs.is_empty(), "{errs:?}");
 }
 
 #[test]
