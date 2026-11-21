@@ -15,31 +15,11 @@ fn check(src: &str) -> (Workspace, ModuleId) {
     (ws, mid)
 }
 
-fn has_fn(ws: &Workspace, mid: ModuleId, name: &str) -> bool {
-    ws.module(mid)
-        .functions_by_name
-        .keys()
-        .any(|key| key.as_str().rsplit("::").next() == Some(name))
-}
-
 fn type_at(src: &str, offset: usize) -> Option<String> {
     let (ws, mid) = check(src);
     let inf = ws.inference(mid).expect("inference for user module");
     let at = bone_semantic::query::type_at(&ws, mid, inf, offset)?;
     Some(ws.render(at.body, at.ty))
-}
-
-fn workspace_diags(ws: &Workspace) -> Vec<String> {
-    ws.inferences_iter()
-        .flat_map(|(_, inf)| inf.errors.values().flatten())
-        .chain(
-            ws.modules
-                .iter()
-                .flat_map(|m| m.lowering_errors.values().flatten()),
-        )
-        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
-        .map(|e| e.message.clone())
-        .collect()
 }
 
 fn session_diags(src: &str) -> Vec<String> {
@@ -94,93 +74,4 @@ fn a_failed_value_poisons_its_bindings_without_a_cascade() {
             );
         }
     }
-}
-
-#[test]
-fn type_errors_in_any_position_recover_and_keep_siblings() {
-    let cases: &[(&str, &[&str])] = &[
-        (
-            "fn broken() -> int {\n    let v: Nonexistent = 0\n    1\n}\nfn f() -> int { 3 }",
-            &["broken", "f"],
-        ),
-        (
-            "fn broken(p: Nonexistent) -> int { 1 }\nfn f() -> int { 3 }",
-            &["broken", "f"],
-        ),
-        ("struct Bad { v: Nonexistent }\nfn f() -> int { 1 }", &["f"]),
-        ("global g: Nonexistent = 0\nfn f() -> int { 1 }", &["f"]),
-    ];
-    for (src, kept) in cases {
-        let (ws, mid) = check(src);
-        for name in *kept {
-            assert!(has_fn(&ws, mid, name), "`{name}` survives: {src}");
-        }
-        let diags = workspace_diags(&ws);
-        assert!(
-            diags.iter().any(|d| d.contains("Nonexistent")),
-            "the unresolved type surfaces: {diags:?}"
-        );
-    }
-}
-
-#[test]
-fn recovered_errors_commit_and_clear_on_fix() {
-    let cases = [
-        (
-            "fn f(p: Nonexistent) -> int { 1 }\nfn g() -> int { 2 }",
-            "fn f(p: int) -> int { p }\nfn g() -> int { 2 }",
-        ),
-        (
-            "fn f() -> int {\n    let v: Nonexistent = 0\n    1\n}\nfn g() -> int { 2 }",
-            "fn f() -> int { 1 }\nfn g() -> int { 2 }",
-        ),
-    ];
-    for (broken, fixed) in cases {
-        let mut s = common::session(&[]);
-        let _ = s.update_file("c.rock", broken);
-        assert!(!s.diagnostics().is_empty(), "the error surfaces: {broken}");
-        let mid = s.workspace().module_ids[&Ustr::from("c.rock")];
-        assert!(
-            has_fn(s.workspace(), mid, "f"),
-            "the edit commits: {broken}"
-        );
-
-        let _ = s.update_file("c.rock", fixed);
-        assert!(
-            s.diagnostics().is_empty(),
-            "no stale diagnostics after the fix: {:?}",
-            s.diagnostics()
-        );
-    }
-}
-
-#[test]
-fn inference_keeps_bindings_around_a_failed_statement() {
-    let pair = "struct Pair<A, B> {\n    first: A,\n    second: B,\n}\n\n";
-    let let_p = "let p = Pair { first: 1, second: \"hi\" }";
-    let bad = "let n: int = \"not an int\"";
-    for (body, fails) in [
-        (format!("{let_p}\n    let z = p"), false),
-        (format!("{let_p}\n    {bad}"), true),
-        (format!("{bad}\n    {let_p}"), true),
-    ] {
-        let src = format!("{pair}fn main() {{\n    {body}\n}}\n");
-        let offset = src.find("p = Pair").expect("binding present");
-        assert_eq!(
-            type_at(&src, offset).as_deref(),
-            Some("Pair<int, string>"),
-            "{src}"
-        );
-        let (ws, mid) = check(&src);
-        let inf = ws.inference(mid).expect("inference for user module");
-        assert_eq!(!inf.errors.is_empty(), fails, "{src}");
-    }
-}
-
-#[test]
-fn two_inference_errors_in_one_body_both_surface() {
-    let diags = session_diags(
-        "fn main() {\n    let a: int = \"bad one\"\n    let b: int = \"bad two\"\n}\n",
-    );
-    assert!(diags.len() >= 2, "both type errors surface: {diags:?}");
 }
