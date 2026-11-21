@@ -373,3 +373,85 @@ fn computed_exclusive_bound_preserves_exact_integer_edge() {
     let edge = -9007199254740992
     assert_eq(computed_bound_edge(edge, -4503599627370496, 2, edge), 0)
 }
+
+@test(type_holes = [[0, "int"]])
+fn vec_iteration_keeps_the_inferred_element_type() {
+    let sum = 0
+    for element in [1, 2, 3] { let inferred: ? = element; sum += element }
+    assert_eq(sum, 6)
+}
+
+@test(type_holes = [[1, "int"]])
+fn map_iteration_keeps_the_inferred_value_type() {
+    let values = map_new()
+    insert(values, "a", 1)
+    insert(values, "b", 2)
+    insert(values, "c", 3)
+    let sum = 0
+    for (key, value) in values { let inferred: ? = value; sum += value }
+    assert_eq(sum, 6)
+}
+
+@test(type_holes = [[2, "int"]])
+fn arena_iteration_keeps_the_inferred_row_type() {
+    let rows = arena_new()
+    for value in [10, 20, 30] { insert(rows, value) }
+    let sum = 0
+    for (entity, row) in rows { let inferred: ? = row; sum += row }
+    assert_eq(sum, 60)
+}
+
+struct LoopProbe { count: int = 0, checks: int = 0 }
+
+fn still_below(probe: LoopProbe, budget: int) -> bool {
+    probe.checks += 1
+    return probe.count < budget
+}
+
+fn scan_twice(probe: LoopProbe, capacity: int, budget: int) {
+    for _ in 0..2 {
+        let slot = 0
+        while slot < capacity && still_below(probe, budget) {
+            probe.count += 1
+            slot += 1
+        }
+    }
+}
+
+@test
+fn compound_while_conditions_short_circuit_on_each_iteration() {
+    let probe = LoopProbe {}
+    scan_twice(probe, 0, 9)
+    assert_eq(probe.count, 0)
+    assert_eq(probe.checks, 0)
+    scan_twice(probe, 4, 2)
+    assert_eq(probe.count, 2)
+    assert_eq(probe.checks, 4)
+    let slot = 0
+    while slot < 3 || still_below(probe, 6) {
+        probe.count += 1
+        slot += 1
+    }
+    assert_eq(probe.count, 6)
+    assert_eq(probe.checks, 6)
+}
+
+fn run_loop_callback(draw: fn() -> ()) { draw() }
+
+@test
+fn nested_loops_in_callbacks_keep_each_index_and_skip_only_the_inner_body() {
+    let sum = 0
+    let grid = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+    run_loop_callback(() => {
+        for y in 0..3 {
+            for x in 0..3 {
+                grid[y][x] = y * 3 + x
+                if x == 1 { continue }
+                for n in 0..2 { sum += grid[y][x] + n }
+            }
+        }
+    })
+    assert_eq(grid[1][1], 4)
+    assert_eq(grid[2][2], 8)
+    assert_eq(sum, 54)
+}
