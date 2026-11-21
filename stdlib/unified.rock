@@ -278,8 +278,7 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
     return FlatVec { buf: native_buffer_alloc(cap), len: 0 }
 }
 
-// Grow to 2x (>= 4) capacity via a fresh alloc + a scalar element-copy loop; the
-// copy JIT-compiles at these sizes.
+// Scalar element copies trace under LuaJIT.
 @inline fn FlatVec<T>.grow(fv) {
     let old = fv.buf
     let cap = old.len
@@ -384,18 +383,8 @@ __sized_native_buffer(NativeBufferU32, PtrU32, native_buffer_u32, __nb_alloc_u32
     return buf.ptr[i]
 """
 
-// Refresh a NativeBuffer's leaf VIEWS after its `ptr` has been reseated.
-//
-// The views (`__vf`/`__vi`/`__vb`) are `ffi.cast` pointers over the element
-// storage, made once at construction. `ffi.cast` does NOT anchor its target, so
-// any code that reassigns `buf.ptr` -- a hand-written `inline(lua)` grow/realloc
-// -- leaves every view pointing at the OLD array, which is then collected: the
-// views dangle and reads return garbage from reused memory.
-//
-// The compiler cannot see into an `inline(lua)` body, so this is an UNCHECKED
-// CONTRACT of the same family as `@nomangle`: reseat `buf.ptr` by hand and you
-// must call this. A regular Rock reallocation (`native_buffer_alloc`) builds a
-// fresh buffer with fresh views and needs nothing.
+// After reseating buf.ptr in inline Lua, refresh its leaf views: ffi.cast
+// does not keep the old allocation alive and the compiler cannot see the write.
 @nomangle inline(lua) fn __nb_refresh_views(buf: any) = """
     for field, cast_ty in pairs(_G.__ROCK_LEAF_VIEWS) do
         if buf[field] ~= nil then buf[field] = ffi.cast(cast_ty, buf.ptr) end
@@ -933,15 +922,7 @@ deco init on_reload {
     return not __op_eq(a, b)
 """
 
-// Reference identity -- "are these the same object", which `==` cannot answer.
-// `__op_eq` above is STRUCTURAL for every reference type: it walks fields, so
-// two independently-created structs (including two distinct coroutines) with
-// equal contents compare equal. Callers that mean identity -- "is this still
-// the same task the slot held", "is this the same batch pool" -- need this.
-//
-// `@native_required`: identity is not expressible as a portable Rock body, so a
-// backend with no mapping must fail loudly rather than silently fall back to a
-// structural walk that answers a different question.
+// Equality is structural; reference identity requires a native backend mapping.
 @intrinsic @native_required @pure @inline
 inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = "rawequal(a, b)"
 
@@ -1033,13 +1014,8 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 @pure @inline operator >>(a: int, b: int) -> int { return a >> b }
 @pure @inline operator >>(a: uint, b: uint) -> uint { return __legacy_uint_bits((a as int) >> (b as int)) }
 
-// Print function
-// Use native print but with our own float formatting
-// `@debug_impure`: observable side effect, but debug-only. `@pure`
-// functions that transitively call `print` get demoted with a warning
-// (rather than a hard error) so a `print(x)` dropped into a pure
-// helper for debugging doesn't force stripping the annotation.
-// Foreign values can run __tostring callbacks while being printed.
+// Foreign values can run mutating __tostring callbacks while being printed.
+// Debug-only impurity demotes pure callers with a warning.
 @debug_impure
 @intrinsic extern(lua) fn print(args: ...any)
 
@@ -1390,14 +1366,8 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
 
-// The one answer to "which compiler-minted value cdata is this": the
-// `__ROCK_C_STRUCT` row whose ctype `x` (a cdata) has, or nil. The registry is
-// keyed by NAME, so the honest question is a linear `ffi.istype` scan over
-// every row (a linear scan over registered rows); the sim boundary restore asked it
-// ~1,300 times per crossing. The answer is a function of the ctype alone, so
-// it is memoized per CTypeID, negatives included (`false`; most asks are
-// negatives -- storage arrays and boxed scalars). The registry emitter resets
-// the memo whenever it (re)emits rows, so an entry never outlives its row.
+// The name-keyed registry requires an ffi.istype scan. Cache by CTypeID,
+// including misses, and reset the cache whenever registry rows are re-emitted.
 @nomangle inline(lua) fn __rock_c_struct_of(x: any) -> any = """
     local reg = _G.__ROCK_C_STRUCT
     if not reg then return nil end
@@ -1426,13 +1396,8 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
     return variants and variants[variant] or nil
 """
 
-// Aliasing-preserving, cycle-safe deep copy. `seen` maps each already-copied
-// source table to its copy; recording `seen[obj] = copy` BEFORE recursing
-// children makes two references to one table (or one shared capture box) copy
-// to ONE table, and lets a cyclic table copy without recursing forever. One
-// seen table per top-level `deepcopy` call. Hoisted (like __rock_inspect_value)
-// so the wrapper doesn't allocate a fresh closure per copy; @nomangle because
-// it recurses by name and is called from deepcopy's body.
+// Record each copy before recursing to preserve aliases and cycles.
+// Hoisting avoids a closure allocation; opaque Lua calls this by name.
 @intrinsic @nomangle inline(lua) fn __rock_deepcopy_value(obj: any, seen: any) -> any = """
     -- Opaque resource hooks clone ownership; the shared memo preserves aliases.
     if type(obj) == "userdata" then
@@ -1537,9 +1502,7 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
     return value
 }
 
-// Both cast<T> and transmute<A,B> are no-ops at runtime — they just reshape
-// the Rock type, no Lua work needed. `@expand("$1")` substitutes the arg
-// at each call site with zero overhead.
+// Casts only reshape the Rock type; their runtime representation is unchanged.
 @intrinsic @inline inline(lua) fn cast<T>(value: any) -> T = "return value"
 @nowrite @intrinsic @inline inline(lua) fn transmute<A, B>(x: A) -> B = "return x"
 
