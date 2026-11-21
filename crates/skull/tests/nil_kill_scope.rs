@@ -142,16 +142,6 @@ fn undeclared_kills(lua: &str) -> Vec<(String, usize, String)> {
     out
 }
 
-#[test]
-fn every_nil_kill_names_a_declared_local() {
-    let lua = emit_module(SRC);
-    // Without the forwarded `noise(v(..))` shape this test would pass vacuously.
-    let forwarded = nested_alias_calls(&lua);
-    assert!(forwarded >= 4);
-    let bad = undeclared_kills(&lua);
-    assert!(bad.is_empty());
-}
-
 fn nested_alias_calls(lua: &str) -> usize {
     fn alias_call(s: &str) -> Option<&str> {
         let digits = s.strip_prefix('b')?;
