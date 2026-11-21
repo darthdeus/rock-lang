@@ -258,3 +258,111 @@ fn nested_nobox_copy_across_branch() {
     assert_eq(whole.child.x, 7)
     assert_eq(copy.child.x, 3)
 }
+
+value WideInteger { x: int }
+struct IntegerCell { v: WideInteger }
+
+fn show_integer_cell(c: IntegerCell) { print(c.v.x) }
+
+// https://github.com/darthdeus/rock-lang/issues/399
+@test(output = "2147483647\n-2147483648")
+fn integer_leaves_keep_signed_32_bit_boundaries() {
+    show_integer_cell(IntegerCell { v: WideInteger { x: 2147483647 } })
+    let local = WideInteger { x: 0 }
+    local.x = -2147483648
+    show_integer_cell(IntegerCell { v: local })
+    let s = WideInteger { x: -2147483648 }
+    assert(s.x == -2147483648)
+    s.x = 2147483647
+    assert(s.x == 2147483647)
+    // Ordinary int arithmetic retains its wider range.
+    assert(s.x + 1 == 2147483648)
+}
+
+// Value-semantics decision points, each pinned to the chosen rule.
+
+struct RefPt { x: int }
+
+// A local reassigned after capture is captured by cell, the same rule for
+// values, ints and reference structs; without reassignment it reads the value.
+@test(output = "9 9 9 1")
+fn capture_then_reassign_is_by_cell_for_every_type() {
+    let p = Pt { x: 1, y: 2 }
+    let fp = () => p.x
+    p = Pt { x: 9, y: 9 }
+    let i = 1
+    let fi = () => i
+    i = 9
+    let r = RefPt { x: 1 }
+    let fr = () => r.x
+    r = RefPt { x: 9 }
+    let q = Pt { x: 1, y: 2 }
+    let fq = () => q.x
+    print("{fp()} {fi()} {fr()} {fq()}")
+}
+
+// A boxed inline(lua) argument is a fresh shallow pack at every caller shape and
+// tier: a scalar-leaf write is lost, a write through a reference leaf aliases.
+value GcM { m: Map<int, int>, n: int }
+struct C3Own { p: Pt }
+struct C3GcOwn { g: GcM }
+
+@nomangle inline(lua) fn c3_read_x(p: Pt) -> int = "return p.x"
+@nomangle inline(lua) fn c3_poke(p: Pt) = "p.x = 999"
+@nomangle inline(lua) fn c3_poke_gc(g: GcM) = "g.n = 999"
+@nomangle inline(lua) fn c3_poke_map(g: GcM) = "g.m[1] = 777"
+
+fn c3_mk(a: int) -> Pt { return Pt { x: a, y: 0 } }
+
+global C3_G: Pt = Pt { x: 5, y: 0 }
+
+@test(output = "5 5 5 5 5\n5 5\n777 777", backends = "lua")
+fn inline_lua_boxed_argument_is_a_shallow_copy() {
+    let a = c3_mk(5)
+    c3_poke(a)
+    let o = C3Own { p: c3_mk(5) }
+    c3_poke(o.p)
+    c3_poke(C3_G)
+    let xs = [c3_mk(5)]
+    c3_poke(xs[0])
+    let b: NativeBuffer<Pt> = native_buffer_alloc(2)
+    b[0] = c3_mk(5)
+    c3_poke(b[0])
+    print("{c3_read_x(a)} {o.p.x} {C3_G.x} {xs[0].x} {b[0].x}")
+
+    let g = GcM { m: map_new(), n: 5 }
+    c3_poke_gc(g)
+    let og = C3GcOwn { g: GcM { m: map_new(), n: 5 } }
+    c3_poke_gc(og.g)
+    print("{g.n} {og.g.n}")
+
+    let gm = GcM { m: map_new(), n: 5 }
+    gm.m[1] = 1
+    c3_poke_map(gm)
+    let ogm = C3GcOwn { g: GcM { m: map_new(), n: 5 } }
+    ogm.g.m[1] = 1
+    c3_poke_map(ogm.g)
+    print("{gm.m[1]} {ogm.g.m[1]}")
+}
+
+struct ConstOwner { p: Pt }
+value ConstOther { x: int, y: int }
+struct OtherConstOwner { p: ConstOther }
+
+fn const_owner() -> ConstOwner { ConstOwner { p: Pt { x: 1, y: 1 } } }
+fn other_const_owner() -> OtherConstOwner { OtherConstOwner { p: ConstOther { x: 1, y: 1 } } }
+@nomangle fn const_sum(v: Pt) -> int { v.x + v.y }
+
+global CONST_OWNER: ConstOwner = const_owner()
+
+@test
+fn identical_constant_value_constructors_do_not_alias_on_write() {
+    let first = const_owner()
+    let second = const_owner()
+    let other = other_const_owner()
+    first.p.x = 5
+    assert_eq((first.p.x, second.p.x, CONST_OWNER.p.x, other.p.x), (5, 1, 1, 1))
+    assert_eq(const_sum(Pt { x: 10, y: 11 }), 21)
+    assert_eq(const_sum(Pt { x: 20, y: 22 }), 42)
+    assert_eq(const_sum(Pt { x: first.p.x, y: 3 }), 8)
+}

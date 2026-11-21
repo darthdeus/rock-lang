@@ -297,3 +297,39 @@ fn embedded_child_flat_enum_uses_one_encoding() {
     assert_eq(raw_subslot_tag(fresh), "Secs")
     assert_eq(raw_composed_key_absent(fresh), true)
 }
+
+// A discarded value still runs its effects, and an optional aggregate return
+// never projects leaves out of a placeholder nil.
+
+@nomangle inline(lua) fn raises(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+fn probe(n: int) -> int { let unused = n as uint; return 7 }
+
+// The JS backend does not raise on a negative uint conversion.
+@test(output = "true 7", backends = "lua")
+fn unused_throwing_conversion_preserves_runtime_error() {
+    print("{raises(() => { let _ = probe(-1) })} {probe(1)}")
+}
+
+fn normalize_optional_value(x: float, y: float) -> Vec2? {
+    let delta = v(x, y)
+    if delta.length() <= 0.001 { return null }
+    return delta.normalize()
+}
+fn normalize_tail_value(x: float, y: float) -> Vec2? { v(x, y).normalize() }
+fn normalize_optional_probe(x: float, y: float) -> float {
+    let p = normalize_optional_value(x, y) ?? return -1
+    return p.x + p.y
+}
+fn normalize_tail_probe(x: float, y: float) -> float {
+    let p = normalize_tail_value(x, y) ?? return -1
+    p.x + p.y
+}
+
+@test(output = "1.4 -1 1.4 0")
+fn aggregate_return_materialization_does_not_project_placeholder_nil() {
+    print("{normalize_optional_probe(3, 4)} {normalize_optional_probe(0, 0)} {normalize_tail_probe(3, 4)} {normalize_tail_probe(0, 0)}")
+}
