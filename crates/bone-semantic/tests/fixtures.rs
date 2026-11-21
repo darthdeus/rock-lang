@@ -40,26 +40,42 @@ fn fixtures_type_check_as_annotated() {
 fn check_rock(file_name: &str, contents: &str) -> Result {
     let modules = file_name.starts_with("modules_");
     let mut shared = FxHashMap::default();
-    let mut check = |src| {
-        if modules {
-            crate::test_support::check_types_embedded(
-                &fixture_files(src, &mut shared),
-                stdlib_sources(),
-                skull_parser::stdlib::cached()
-                    .as_ref()
-                    .expect("stdlib parses"),
-            )
-        } else {
-            crate::test_support::check_types(src)
-        }
+    let mut check_modules = |src| {
+        crate::test_support::check_types_embedded(
+            &fixture_files(src, &mut shared),
+            stdlib_sources(),
+            skull_parser::stdlib::cached()
+                .as_ref()
+                .expect("stdlib parses"),
+        )
     };
     let sections = test_utils::parse_sections(contents);
     if sections.is_empty() {
-        return check(contents);
+        return if modules {
+            check_modules(contents)
+        } else {
+            crate::test_support::check_types(contents)
+        };
     }
+    // Single-file sections share the source above the first section header.
+    let prelude_len = contents
+        .split_inclusive('\n')
+        .take_while(|line| !line.trim_end().starts_with("//- "))
+        .map(str::len)
+        .sum();
+    let prelude = &contents[..prelude_len];
     let failures: Vec<String> = sections
         .iter()
-        .filter_map(|section| section_failure(section.name, check(section.content)))
+        .filter_map(|section| {
+            let outcome = if modules {
+                check_modules(section.content)
+            } else if prelude.is_empty() {
+                crate::test_support::check_types(section.content)
+            } else {
+                crate::test_support::check_types(&format!("{prelude}{}", section.content))
+            };
+            section_failure(section.name, outcome)
+        })
         .collect();
     if failures.is_empty() {
         Ok(())

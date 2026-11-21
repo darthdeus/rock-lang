@@ -1,5 +1,5 @@
-//- generic_struct_field_int
 struct Box<T> { value: T }
+//- generic_struct_field_int
 fn f(b: Box<int>) -> int {
     let v = b.value
       //^ int
@@ -7,7 +7,6 @@ fn f(b: Box<int>) -> int {
 }
 
 //- generic_struct_field_string
-struct Box<T> { value: T }
 fn f(b: Box<string>) -> string {
     let v = b.value
       //^ string
@@ -15,14 +14,12 @@ fn f(b: Box<string>) -> string {
 }
 
 //- generic_struct_type_renders
-struct Box<T> { value: T }
 fn f(b: Box<int>) -> int {
    //^ Box<int>
     5
 }
 
 //- generic_struct_literal_int
-struct Box<T> { value: T }
 fn f() -> int {
     let b = Box { value: 5 }
       //^ Box<int>
@@ -30,7 +27,6 @@ fn f() -> int {
 }
 
 //- generic_struct_literal_string
-struct Box<T> { value: T }
 fn f() -> int {
     let b = Box { value: "hi" }
       //^ Box<string>

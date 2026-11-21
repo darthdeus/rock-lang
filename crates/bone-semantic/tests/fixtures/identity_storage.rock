@@ -1,74 +1,38 @@
 //- identity_struct_field @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 struct Room { boss: Mob }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_nullable_field @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 struct Room { boss: Mob? }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_field_of_value @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 value Slot { mob: Mob }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_vec_element @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 struct Room { mobs: [Mob] }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_map_value @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 struct Room { by_id: Map<int, Mob> }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_tuple_element @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 value Pair { both: (Mob, int) }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_enum_tuple_payload @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 enum Event { Spawned(Mob), Cleared }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_enum_record_payload @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 enum Event { Spawned { mob: Mob }, Cleared }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_newtype @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 newtype Boss(Mob)
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_nullable_root_global
 struct Mob { hp: int }
@@ -82,63 +46,35 @@ fn f() -> int {
 struct Mob { hp: int }
 struct Bag<T> { items: [T] }
 global BAG: Bag<Mob>? = null
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_nullable_global_in_tuple @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 global PAIR: (Mob?, int) = (null, 0)
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_vec_global @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 global MOBS: [Mob] = []
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_user_generic_argument @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 value Holder<T> { item: T }
 struct Room { held: Holder<Mob> }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_transitive_generic_argument @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 value Holder<T> { items: [T] }
 value Outer<U> { inner: Holder<U> }
 struct Room { held: Outer<Mob> }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_generic_argument_nullable_storage @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 value Maybe<T> { item: T? }
 global LAST: Maybe<Mob> = Maybe { item: nil }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_storage_capability_is_reserved @fail=`@identity_storage` is reserved
 struct Store<T> {
     @identity_storage
     rows: [T],
-}
-fn f() -> int {
-    5
-  //^ int
 }
 
 //- values_store_anywhere
@@ -176,10 +112,6 @@ fn f() -> int {
 struct Mob { hp: int }
 struct Bag<T> { items: [T] }
 global BAG: Bag<Mob> = Bag { items: [] }
-fn f() -> int {
-    5
-  //^ int
-}
 
 //- identity_params_and_function_types
 struct Mob { hp: int }

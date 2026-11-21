@@ -1,6 +1,6 @@
-//- sub_int_float_widens
 operator(lua) -(a: int, b: int) -> int = "return a - b"
 operator(lua) -(a: float, b: float) -> float = "return a - b"
+//- sub_int_float_widens
 fn f(x: float) -> float {
     let r = 1 - x
       //^ float
@@ -8,8 +8,6 @@ fn f(x: float) -> float {
 }
 
 //- sub_int_int_stays_int
-operator(lua) -(a: int, b: int) -> int = "return a - b"
-operator(lua) -(a: float, b: float) -> float = "return a - b"
 fn f() -> int {
     let r = 1 - 2
       //^ int
@@ -17,8 +15,6 @@ fn f() -> int {
 }
 
 //- sub_float_float
-operator(lua) -(a: int, b: int) -> int = "return a - b"
-operator(lua) -(a: float, b: float) -> float = "return a - b"
 fn f(a: float, b: float) -> float {
     let r = a - b
       //^ float
@@ -26,8 +22,6 @@ fn f(a: float, b: float) -> float {
 }
 
 //- sub_float_int_widens
-operator(lua) -(a: int, b: int) -> int = "return a - b"
-operator(lua) -(a: float, b: float) -> float = "return a - b"
 fn f(x: float) -> float {
     let r = x - 1
       //^ float

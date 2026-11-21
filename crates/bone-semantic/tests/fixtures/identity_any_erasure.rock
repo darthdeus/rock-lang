@@ -1,59 +1,34 @@
-//- any_erasure_call_arg @fail=cannot erase identity struct `Mob` to `any`
 struct Mob { hp: int }
+//- any_erasure_call_arg @fail=cannot erase identity struct `Mob` to `any`
 fn keep(x: any) -> int { return 0 }
 fn f(mob: Mob) -> int {
     keep(mob)
 }
-fn marker() -> int {
-    5
-  //^ int
-}
 
 //- any_erasure_let @fail=cannot erase identity struct `Mob` to `any`
-struct Mob { hp: int }
 fn f(mob: Mob) -> int {
     let erased: any = mob
     0
 }
-fn marker() -> int {
-    5
-  //^ int
-}
 
 //- any_erasure_nullable @fail=cannot erase identity struct `Mob` to `any`
-struct Mob { hp: int }
 fn keep(x: any?) -> int { return 0 }
 fn f(mob: Mob?) -> int {
     keep(mob)
 }
-fn marker() -> int {
-    5
-  //^ int
-}
 
 //- any_erasure_cast @fail=cannot erase identity struct `Mob` to `any`
-struct Mob { hp: int }
 fn f(mob: Mob) -> int {
     let erased = mob as any
     0
 }
-fn marker() -> int {
-    5
-  //^ int
-}
 
 //- any_erasure_return @fail=cannot erase identity struct `Mob` to `any`
-struct Mob { hp: int }
 fn f(mob: Mob) -> any {
     return mob
 }
-fn marker() -> int {
-    5
-  //^ int
-}
 
 //- any_erasure_of_handle_and_value
-struct Mob { hp: int }
 value Entity<T> { idx: int }
 value Point { x: int }
 fn keep(x: any) -> int { return 0 }
@@ -64,12 +39,7 @@ fn f(e: Entity<Mob>, p: Point) -> int {
 }
 
 //- identity_erasure_capability_is_reserved @fail=`@identity_erasure` is reserved
-struct Mob { hp: int }
 @identity_erasure
 fn erase(mob: Mob) -> any {
     return mob
-}
-fn f() -> int {
-    5
-  //^ int
 }

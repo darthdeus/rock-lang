@@ -1,6 +1,6 @@
-//- lambda_param_inferred
 struct Box { value: int }
 fn apply(f: fn(Box) -> int, b: Box) -> int { f(b) }
+//- lambda_param_inferred
 fn g() -> int {
     let r = apply(x => x.value, Box { value: 5 })
       //^ int
@@ -8,8 +8,6 @@ fn g() -> int {
 }
 
 //- placeholder_lambda_inferred
-struct Box { value: int }
-fn apply(f: fn(Box) -> int, b: Box) -> int { f(b) }
 fn g() -> int {
     let r = apply(_.value, Box { value: 5 })
       //^ int

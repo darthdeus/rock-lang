@@ -1,9 +1,9 @@
-//- arena_iter_destructure
 value Entity<T> { idx: int }
 value Arena<T> { count: int }
 struct AIter<T> { a: Arena<T> }
 fn iter<T>(a: Arena<T>) -> AIter<T> { return AIter { a: a } }
 fn next<T>(it: AIter<T>) -> (bool, Entity<T>, T) { return next(it) }
+//- arena_iter_destructure
 fn f<T>(arena: Arena<T>) -> int {
     for (e, item) in arena {
         let x = item
@@ -15,11 +15,6 @@ fn f<T>(arena: Arena<T>) -> int {
 }
 
 //- arena_iter_single
-value Entity<T> { idx: int }
-value Arena<T> { count: int }
-struct AIter<T> { a: Arena<T> }
-fn iter<T>(a: Arena<T>) -> AIter<T> { return AIter { a: a } }
-fn next<T>(it: AIter<T>) -> (bool, Entity<T>, T) { return next(it) }
 fn f<T>(arena: Arena<T>) -> int {
     for pair in arena {
         let p = pair

@@ -1,5 +1,5 @@
-//- struct_record_shorthand
 value Point { x: int, y: int }
+//- struct_record_shorthand
 fn f(p: Point) -> int {
     let r = match p {
         Point { x, y } => x,
@@ -9,7 +9,6 @@ fn f(p: Point) -> int {
 }
 
 //- struct_record_explicit
-value Point { x: int, y: int }
 fn f(p: Point) -> int {
     let r = match p {
         Point { x: a, y: b } => a,
@@ -19,7 +18,6 @@ fn f(p: Point) -> int {
 }
 
 //- struct_record_rest
-value Point { x: int, y: int }
 fn f(p: Point) -> int {
     let r = match p {
         Point { x, .. } => x,
@@ -29,7 +27,6 @@ fn f(p: Point) -> int {
 }
 
 //- struct_record_nested
-value Point { x: int, y: int }
 struct Wrapper { inner: Point, tag: int }
 fn f(w: Wrapper) -> int {
     let r = match w {

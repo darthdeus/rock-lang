@@ -1,25 +1,21 @@
-//- generic_identity_body
 fn id<T>(x: T) -> T { x }
+//- generic_identity_body
        //^ T
 //                ^ T
 //                    ^ T
 
 //- generic_identity_return
-fn id<T>(x: T) -> T { x }
 //                ^ T
 
 //- generic_call_int
-fn id<T>(x: T) -> T { x }
 fn f() -> int { id(5) }
               //^ int
 
 //- generic_call_bool
-fn id<T>(x: T) -> T { x }
 fn f() -> bool { id(true) }
                //^ bool
 
 //- generic_call_var_arg
-fn id<T>(x: T) -> T { x }
 fn f() -> int {
     let n = 5
     id(n)

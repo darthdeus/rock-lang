@@ -1,5 +1,5 @@
-//- enum_record_qualified
 enum Shape { Circle { r: int }, Square { side: int } }
+//- enum_record_qualified
 fn f(s: Shape) -> int {
     let v = match s {
         Shape::Circle { r } => r,
@@ -10,7 +10,6 @@ fn f(s: Shape) -> int {
 }
 
 //- enum_record_unqualified
-enum Shape { Circle { r: int }, Square { side: int } }
 fn f(s: Shape) -> int {
     let v = match s {
         Circle { r } => r,

@@ -1,5 +1,5 @@
-//- exhaustive_all_variants
 enum E { A, B, C }
+//- exhaustive_all_variants
 fn f(e: E) -> int {
     match e {
         E::A => {}
@@ -12,7 +12,6 @@ fn f(e: E) -> int {
 }
 
 //- exhaustive_wildcard
-enum E { A, B, C }
 fn f(e: E) -> int {
     match e {
         E::A => {}
@@ -24,7 +23,6 @@ fn f(e: E) -> int {
 }
 
 //- exhaustive_binding
-enum E { A, B, C }
 fn f(e: E) -> int {
     match e {
         E::A => {}
