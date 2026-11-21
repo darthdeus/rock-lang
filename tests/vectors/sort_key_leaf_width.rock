@@ -305,3 +305,18 @@ fn mixed_and_spread_sort_arguments_use_the_leaf_callback_abi() {
     overridden.sort(..ValueSortKey { key_fn: p => p }, key_fn: p => p)
     assert_tied_points_sorted(overridden)
 }
+
+@test
+fn scalar_sort_keys_cover_order_ties_and_empty_input() {
+    let ints = [3, 2, 3, 1]
+    sort(ints, n => n)
+    assert_eq(ints, [1, 2, 3, 3])
+    ints.sort(n => -n)
+    assert_eq(ints, [3, 3, 2, 1])
+    let names = ["dddd", "a", "ccc", "bb"]
+    names.sort(s => s.len())
+    assert_eq(names, ["a", "bb", "ccc", "dddd"])
+    let empty: [int] = []
+    empty.sort(n => n)
+    assert_eq(empty.len, 0)
+}
