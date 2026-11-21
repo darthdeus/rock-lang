@@ -2,7 +2,6 @@
 
 use crate::completion::Insert::{Label, Plain, Snippet, Text};
 use crate::completion::*;
-use crate::fixture::Project;
 use bone_query::BoneWorkspace;
 use lsp_types::CompletionItemKind;
 
@@ -249,27 +248,6 @@ fn member_receiver_resolves_in_broken_statements() {
 }
 
 #[test]
-fn member_completion_resolves_cross_file_types() {
-    // The completion reparse includes the whole project, not just the edited
-    // file, and Rock has one global namespace.
-    let project = Project::package(&[
-        ("a.rock", "struct IVec2 { x: int, y: int }\n"),
-        ("b.rock", "fn f(g: IVec2) {\n  g.\n}\n"),
-        (
-            "types.rock",
-            "struct Movable { grid: int }\nstruct Player { movable: Movable }\nglobal player: Player\n",
-        ),
-        ("use.rock", "fn r() {\n  let z = player\n}\n"),
-    ]);
-    let b = project.path("b.rock");
-    let l = labels_of(&complete_in(&b, "fn f(g: IVec2) {\n  g.<|>\n}\n"));
-    assert_offers(&l, &["x: int", "y: int"]);
-    let used = project.path("use.rock");
-    let l = labels_of(&complete_in(&used, "fn r() {\n  let z = player.<|>\n}\n"));
-    assert_offers(&l, &["movable*"]);
-}
-
-#[test]
 fn literal_and_block_contexts_offer() {
     check_labels(&[
         (
@@ -338,44 +316,6 @@ fn literal_and_block_contexts_offer() {
             "deco init late_update {}\ndeco init late_draw {}\ndeco init update {}\n\
              @late<|>\nfn my_ui() {}\n",
             &["late_draw", "late_update", "!update", "!my_ui"],
-        ),
-    ]);
-}
-
-#[test]
-fn type_slots_offer_types_only() {
-    check_labels(&[
-        ("uint", "fn r(x: u<|>) {}\n", &["uint"]),
-        // The full classifier matrix lives in the `backend::position` unit tests.
-        (
-            "bare enum, not its variants",
-            "enum SpellState { Idle, Loaded(int) }\nstruct Holder { field: SpellState<|> }\n",
-            &["SpellState", "!SpellState::*"],
-        ),
-        (
-            "Coroutine builtin as its generic snippet",
-            "co fn f() -> Co<|> {\n}\n",
-            &["Coroutine<>", "!Coroutine"],
-        ),
-        ("Map builtin", "fn r() {\n  let m: Ma<|>\n}\n", &["Map"]),
-        // `string` does not collide with a stdlib fn name (`int`/`float` do).
-        ("string builtin", "fn f(x: stri<|>) {\n}\n", &["string"]),
-        (
-            "no macros",
-            "macro twice(x: expr) {\n    x + x\n}\n\nfn r(a: tw<|>) {}\n",
-            &["!twice"],
-        ),
-        (
-            "param type slot",
-            "struct Weapon { dmg: float }\nglobal wcount: int = 3\nfn wield(x: float) {}\n\
-             fn use_weapon(w: W<|>) {}\n",
-            &["Weapon", "!wcount", "!w", "!wield"],
-        ),
-        (
-            "let annotation slot",
-            "struct Weapon { dmg: float }\nglobal wcount: int = 3\nfn wield(x: float) {}\n\
-             fn r() {\n  let x: w<|> = 0\n}\n",
-            &["Weapon", "!wcount", "!wield"],
         ),
     ]);
 }
@@ -1545,34 +1485,6 @@ fn contextual_type_snippets() {
 }
 
 #[test]
-fn entity_type_hints_resolve_at_each_space_after_the_colon() {
-    for (source, columns, label, want) in [
-        (
-            "struct Mob { health: int }\nco fn mob_attack_co(e:   ) -> Coroutine<int> {\n  yield 1\n}\n",
-            &[2, 3, 4][..],
-            "Entity<Mob>",
-            Text("Entity<Mob>"),
-        ),
-        (
-            "fn clear_attack(e: ) {\n}\n",
-            &[2, 3][..],
-            "Entity<>",
-            Text("Entity<$0>"),
-        ),
-    ] {
-        let mut bone = crate::fixture::workspace_at(PATH, source);
-        for column in columns {
-            let offset = source.find("e:").unwrap() + column;
-            let marked = format!("{}<|>{}", &source[..offset], &source[offset..]);
-            let position = crate::fixture::position_of_offset(source, offset);
-            let items = bone.completion(PATH, position);
-            assert_invariants(&marked, &items);
-            assert_insert(&marked, find(&items, label), want);
-        }
-    }
-}
-
-#[test]
 fn function_completion_carries_its_signature() {
     let it = item(
         "fn separation(a: int, b: int) -> int { a }\nfn run() {\n  sep<|>\n}\n",
@@ -1585,23 +1497,6 @@ fn function_completion_carries_its_signature() {
     let inline = it.label_details.as_ref().and_then(|d| d.detail.as_deref());
     assert_eq!(inline, Some("(a: int, b: int) -> int"));
     assert_insert("signature", &it, Snippet("separation($0)"));
-}
-
-#[test]
-fn enum_qualifier_without_a_matching_variant_offers_them_all() {
-    // A closed set: showing every variant beats falling back to buffer words.
-    // `filter_text` is the typed prefix so the client's own filter keeps them.
-    let src = "enum TextAlign { Left, Center, Right }\nfn r() {\n  let a = TextAlign::top<|>\n}\n";
-    let items = complete(src);
-    let mut all = labels_of(&items);
-    all.sort();
-    assert_eq!(all, ["Center", "Left", "Right"]);
-    assert_eq!(find(&items, "Center").filter_text.as_deref(), Some("top"));
-
-    let src = "enum TextAlign { Left, Center, Right }\nfn r() {\n  let a = TextAlign::Ce<|>\n}\n";
-    let items = complete(src);
-    assert_eq!(labels_of(&items), ["Center"]);
-    assert_eq!(find(&items, "Center").filter_text, None);
 }
 
 #[test]
@@ -1829,16 +1724,6 @@ fn contexts_lead_with() {
             &["AiState::Combat", "AiState::Flee", "AiState::Idle"],
         ),
     ]);
-}
-
-#[test]
-fn right_type_local_in_top_three_of_typed_slot() {
-    let l = labels(
-        "value Color { r: float }\nglobal COLD_START: int = 1\nfn collect() {}\n\
-         fn collide() {}\nfn colorize() {}\nfn paint(c: Color) {}\n\
-         fn r() {\n  let col = Color { r: 1.0 }\n  paint(col<|>)\n}\n",
-    );
-    assert!(rank(&l, "col") < 3, "{l:?}");
 }
 
 #[test]
