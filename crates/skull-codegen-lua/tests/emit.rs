@@ -856,25 +856,6 @@ value Pair { x: int, y: int }
     );
 }
 
-#[test]
-fn unreachable_block_traps_instead_of_returning() {
-    let lua = emit_clean(
-        "enum Dir { Up, Down } fn pick(d: Dir) -> int { match d { Dir::Up => { return 1 } Dir::Down => { return 2 } } }",
-        "pick",
-    );
-    let symbol = emitted_symbol(&lua);
-    // A value outside the enum reaches the arm chain's dead end; it must not
-    // read as an early return of nil.
-    let driver = format!(
-        r#"{lua}
-local ok, err = pcall({symbol}, "Sideways")
-assert(not ok, "an unreachable block returned")
-assert(tostring(err):find("unreachable", 1, true), tostring(err))
-"#
-    );
-    luajit_ok(&driver, &lua);
-}
-
 /// A body that still carries what an earlier pass should have removed is a
 /// compiler bug. The MIR verifier catches it in debug builds; in release the
 /// emitter must report it as a diagnostic, not abort the process.

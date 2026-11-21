@@ -1,0 +1,269 @@
+inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
+
+@nomangle fn fill_int(count: int) -> int {
+    let buf = native_buffer_int(count)
+    for i in 0..count { buf[i] = i }
+    return buf.len
+}
+
+@nomangle fn fill_u8(count: int) -> int {
+    let buf = native_buffer_u8(count)
+    for i in 0..count { buf[i] = i }
+    return buf.len
+}
+
+@nomangle fn fill_alias(count: int) -> int {
+    let original = native_buffer_int(count); let buf = original
+    for i in 0..count { buf[i] = i }
+    return original.len
+}
+
+@nomangle fn changed_alias(count: int) -> int {
+    let buf = native_buffer_int(count)
+    let alias = buf; shrink(alias)
+    for i in 0..count { buf[i] = i }
+    return 1
+}
+
+@nomangle fn changed_shrink(count: int) -> int {
+    let buf = native_buffer_int(count)
+    shrink(buf)
+    for i in 0..count { buf[i] = i }
+    return 1
+}
+
+@nomangle fn changed_count(count: int) -> int {
+    let buf = native_buffer_int(count)
+    count += 1
+    for i in 0..count { buf[i] = i }
+    return 1
+}
+
+@nomangle fn changed_length(count: int) -> int {
+    let buf = native_buffer_int(count)
+    if count > 0 { buf = native_buffer_int(0) }
+    for i in 0..count { buf[i] = i }
+    return 1
+}
+
+struct Size { width: int }
+inline(lua) fn grow(size: Size) = "size.width = size.width + 1"
+@nomangle fn changed_size(size: Size) -> int {
+    let buf = native_buffer_int(size.width)
+    grow(size)
+    for i in 0..size.width { buf[i] = i }
+    return 1
+}
+
+@nomangle fn old_buffer() -> int {
+    let buf = native_buffer_int(1)
+    for count in 1..3 {
+        let old = buf
+        buf = native_buffer_int(count)
+        for i in 0..count { old[i] = i }
+    }
+    return 1
+}
+
+@nomangle fn fill_product(width: int, height: int) -> NativeBufferU8 {
+    let buf = native_buffer_u8(width * height)
+    for i in 0..width * height { buf[i] = i % 256 }
+    return buf
+}
+
+@nomangle fn product_width(width: int, height: int) -> int {
+    let buf = native_buffer_int(width * height)
+    width += 1
+    for i in 0..width * height { buf[i] = i }
+    return 1
+}
+
+@nomangle fn product_height(width: int, height: int) -> int {
+    let buf = native_buffer_int(width * height)
+    height += 1
+    for i in 0..width * height { buf[i] = i }
+    return 1
+}
+
+@nomangle fn product_conditional(width: int, height: int) -> int {
+    let buf = native_buffer_int(width * height)
+    if width > 0 { width += 1 }
+    for i in 0..width * height { buf[i] = i }
+    return 1
+}
+
+@nomangle fn product_shrink(width: int, height: int) -> int {
+    let buf = native_buffer_int(width * height)
+    shrink(buf)
+    for i in 0..width * height { buf[i] = i }
+    return 1
+}
+
+@nomangle fn old_product(height: int) -> int {
+    let buf = native_buffer_int(height)
+    for width in 1..3 {
+        let old = buf
+        buf = native_buffer_int(width * height)
+        for i in 0..width * height { old[i] = i }
+    }
+    return 1
+}
+
+struct Mask { width: int, pixels: NativeBufferU8 }
+@nomangle fn copy_mask(mask: Mask, height: int) -> NativeBufferU8 {
+    let buf = native_buffer_u8(mask.width * height)
+    for i in 0..mask.width * height { buf[i] = mask.pixels[i] }
+    return buf
+}
+
+@nomangle fn reuse_buffer(old: NativeBuffer<int>, count: int) -> NativeBuffer<int> {
+    let buf = if old.len == count { old } else { native_buffer_int(count) }
+    for i in 0..count { buf[i] = i }
+    return buf
+}
+
+@nomangle fn reuse_reversed(old: NativeBuffer<int>, count: int) -> NativeBuffer<int> {
+    let buf = if count == old.len { old } else { native_buffer_int(count) }
+    for i in 0..count { buf[i] = i }
+    return buf
+}
+
+@nomangle fn reuse_unequal(old: NativeBuffer<int>, count: int) -> NativeBuffer<int> {
+    let buf = if old.len != count { native_buffer_int(count) } else { old }
+    for i in 0..count { buf[i] = i }
+    return buf
+}
+
+@nomangle fn reuse_negated(old: NativeBuffer<int>, count: int) -> NativeBuffer<int> {
+    let buf = if !(old.len == count) { native_buffer_int(count) } else { old }
+    for i in 0..count { buf[i] = i }
+    return buf
+}
+
+@nomangle fn reuse_wrong_condition(old: NativeBuffer<int>, count: int) -> int {
+    let buf = if old.len != count { old } else { native_buffer_int(count) }
+    for i in 0..count { buf[i] = i }
+    return 1
+}
+
+@nomangle fn reuse_wrong_capacity(old: NativeBuffer<int>, count: int) -> int {
+    let buf = if old.len == count { old } else { native_buffer_int(count - 1) }
+    for i in 0..count { buf[i] = i }
+    return 1
+}
+
+@nomangle fn reuse_shrunk(old: NativeBuffer<int>, count: int) -> int {
+    let buf = if old.len == count { old } else { native_buffer_int(count) }
+    shrink(buf)
+    for i in 0..count { buf[i] = i }
+    return 1
+}
+
+@nomangle fn reuse_longer_loop(old: NativeBuffer<int>, count: int) -> int {
+    let buf = if old.len == count { old } else { native_buffer_int(count) }
+    count += 1
+    for i in 0..count { buf[i] = i }
+    return 1
+}
+
+global reuse_fetches: int = 0
+fn record_fetch() { reuse_fetches += 1 }
+@nomangle fn reuse_rows(old: NativeBuffer<float>, count: float) -> NativeBuffer<float> {
+    let rows = count as int
+    if rows >= 0 && rows <= 100000 {
+        let expected = rows * 10
+        let buf = if old.len == expected { old } else { native_buffer_float(expected) }
+        for row in 0..rows {
+            record_fetch()
+            for lane in 0..10 { buf[row * 10 + lane] = (row + lane) as float }
+        }
+        return buf
+    }
+    return old
+}
+
+@nomangle fn stale_reuse(old: NativeBuffer<int>, count: int) -> int {
+    let previous = old.len
+    shrink(old)
+    let buf = if previous == count { old } else { native_buffer_int(count) }
+    for i in 0..count { buf[i] = i }
+    return 1
+}
+
+inline(lua) fn check_constructor_bounds() -> bool = """
+local ffi = require("ffi")
+local function expect_bounds_error(f, ...)
+    local ok, err = pcall(f, ...)
+    assert(not ok and tostring(err):find("out of bounds"))
+end
+assert(fill_int(0) == 0 and fill_int(17) == 17)
+assert(fill_u8(0) == 0 and fill_u8(17) == 17)
+assert(fill_alias(0) == 0 and fill_alias(17) == 17)
+expect_bounds_error(changed_alias, 4)
+expect_bounds_error(changed_shrink, 4)
+expect_bounds_error(changed_count, 4)
+expect_bounds_error(changed_length, 4)
+expect_bounds_error(changed_size, {width=4})
+expect_bounds_error(old_buffer)
+do
+    for _, dims in ipairs({{0, 3}, {1, 1}, {1.5, 2}, {7, 11}, {64, 64}}) do
+        local buf = fill_product(dims[1], dims[2])
+        assert(buf.len == dims[1] * dims[2])
+        for i = 0, buf.len - 1 do assert(buf.ptr[i] == i % 256) end
+    end
+end
+expect_bounds_error(product_width, 2, 3)
+expect_bounds_error(product_height, 2, 3)
+expect_bounds_error(product_conditional, 2, 3)
+expect_bounds_error(product_shrink, 2, 3)
+expect_bounds_error(old_product, 3)
+do
+    local reads = 0
+    local mask = setmetatable({pixels = {ptr=ffi.new('uint8_t[24]'), len=24}}, {
+        __index = function(_, key)
+            assert(key == 'width')
+            reads = reads + 1
+            return reads == 1 and 2 or 3
+        end
+    })
+    expect_bounds_error(copy_mask, mask, 3)
+    assert(reads >= 2)
+end
+do
+    for _, size in ipairs({-1, 0, 3, 7, math.huge, 0/0}) do
+        local old = {ptr=ffi.new('int[7]'), len=size}
+        local buf = reuse_buffer(old, 7)
+        assert(buf.len == 7)
+        assert((buf.ptr == old.ptr) == (size == 7))
+        for i=0,6 do assert(buf.ptr[i] == i) end
+    end
+end
+assert(reuse_reversed({ptr=ffi.new("int[7]"), len=7}, 7).ptr[6] == 6)
+assert(reuse_unequal({ptr=ffi.new("int[7]"), len=7}, 7).ptr[6] == 6)
+assert(reuse_negated({ptr=ffi.new("int[7]"), len=7}, 7).ptr[6] == 6)
+expect_bounds_error(reuse_wrong_condition, {ptr=ffi.new("int[16]"), len=3}, 7)
+expect_bounds_error(reuse_wrong_capacity, {ptr=ffi.new("int[16]"), len=3}, 7)
+expect_bounds_error(reuse_shrunk, {ptr=ffi.new("int[16]"), len=3}, 7)
+expect_bounds_error(reuse_longer_loop, {ptr=ffi.new("int[16]"), len=3}, 7)
+do
+    for _, size in ipairs({0, 20, 30}) do
+        local old = {ptr=ffi.new('float[30]'), len=size}
+        local buf = reuse_rows(old, 3)
+        assert(buf.len == 30 and ((buf.ptr == old.ptr) == (size == 30)))
+        for row=0,2 do for lane=0,9 do assert(buf.ptr[row*10+lane] == row+lane) end end
+    end
+    local old = {ptr=ffi.new('float[1]'), len=1}
+    for _, count in ipairs({-1, 100001, math.huge, -math.huge, 0/0}) do
+        assert(reuse_rows(old, count).ptr == old.ptr)
+    end
+end
+do
+    local old = {ptr=ffi.new('int[7]'), len=7}
+    expect_bounds_error(stale_reuse, old, 7)
+end
+
+return true
+"""
+
+@test(backends = "lua")
+fn native_buffer_bounds_survive_constructor_joins_and_mutation() { assert(check_constructor_bounds()) }

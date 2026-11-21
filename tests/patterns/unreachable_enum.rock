@@ -1,0 +1,14 @@
+enum Dir { Up, Down }
+@nomangle fn pick(d: Dir) -> int {
+    match d { Dir::Up => { return 1 } Dir::Down => { return 2 } }
+}
+
+inline(lua) fn invalid_enum_traps() -> bool = """
+    local ok, err = pcall(pick, "Sideways")
+    return not ok and tostring(err):find("unreachable", 1, true) ~= nil
+"""
+
+@test(backends = "lua")
+fn out_of_range_enum_reaches_the_unreachable_trap() {
+    assert(pick(Dir::Up) == 1 && pick(Dir::Down) == 2 && invalid_enum_traps())
+}

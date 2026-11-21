@@ -46,7 +46,6 @@ mod flat_enum_match_passthrough;
 mod flat_vec_value_shape;
 mod fn_record_mt;
 mod frame_lambda_hoist;
-mod hole_runtime_error;
 mod incremental_emit;
 mod lua_definition_scopes;
 mod lua_driver_execution;

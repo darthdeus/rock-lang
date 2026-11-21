@@ -1,0 +1,25 @@
+struct P { x: int, y: int }
+@nomangle fn record_hole() -> int {
+    let p = P { x: 1, y: ? }
+    return p.y
+}
+@nomangle fn local_hole() {
+    let x: int = ?
+    print("{x}")
+}
+@nomangle fn named_hole() -> int { return ?width }
+
+inline(lua) fn check_holes() -> bool = """
+    for _, case in ipairs({
+        {record_hole, "unfilled hole"},
+        {local_hole, "unfilled hole"},
+        {named_hole, "?width"},
+    }) do
+        local ok, message = pcall(case[1])
+        assert(not ok and tostring(message):find(case[2], 1, true), tostring(message))
+    end
+    return true
+"""
+
+@test(backends = "lua")
+fn reaches_each_hole_as_a_runtime_error() { assert(check_holes()) }
