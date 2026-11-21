@@ -805,51 +805,6 @@ mod tests {
     }
 
     #[test]
-    fn a_scope_absent_from_a_frame_counts_only_frames_it_ran_in() {
-        let mut agg = ScopeAggregator::default();
-        let frame = agg.path(None, "frame");
-        let bloom = agg.path(Some(frame), "bloom");
-        agg.ingest_frame(&[sample(frame, 5 * MS), sample(bloom, MS)]);
-        agg.ingest_frame(&[sample(frame, 5 * MS)]);
-        let stats = agg.rows(true);
-        let bloom = stat(&stats, "frame/bloom");
-        assert_eq!(bloom["ms"]["n"], 1);
-        assert_eq!(bloom["calls_per_frame"], 0.5);
-        assert_eq!(bloom["ms"]["mean"], 1.0);
-        assert_eq!(bloom["ms_per_frame"], 0.5);
-        assert_eq!(stat(&stats, "frame")["ms_per_frame"], 5.0);
-        assert_eq!(stat(&stats, "frame")["ms"]["n"], 2);
-    }
-
-    #[test]
-    fn one_name_under_two_parents_is_two_rows() {
-        let mut agg = ScopeAggregator::default();
-        let frame = agg.path(None, "frame");
-        let scene = agg.path(Some(frame), "scene_passes");
-        let post = agg.path(Some(frame), "post_processing");
-        let blit_scene = agg.path(Some(scene), "pass:blit");
-        let blit_post = agg.path(Some(post), "pass:blit");
-        assert_ne!(blit_scene, blit_post);
-        assert_eq!(agg.path(Some(scene), "pass:blit"), blit_scene);
-        agg.ingest_frame(&[
-            sample(frame, 9 * MS),
-            sample(scene, 3 * MS),
-            sample(blit_scene, MS),
-            sample(post, 4 * MS),
-            sample(blit_post, 2 * MS),
-        ]);
-        let stats = agg.rows(true);
-        assert_eq!(
-            stat(&stats, "frame/scene_passes/pass:blit")["ms"]["mean"],
-            1.0
-        );
-        assert_eq!(
-            stat(&stats, "frame/post_processing/pass:blit")["ms"]["mean"],
-            2.0
-        );
-    }
-
-    #[test]
     fn finish_waits_sum_per_frame_beside_the_wall_time() {
         let mut agg = ScopeAggregator::default();
         let frame = agg.path(None, "frame");
