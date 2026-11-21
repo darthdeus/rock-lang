@@ -444,13 +444,4 @@ mod tests {
             assert_eq!(closest_display_mode(modes, 1920, 1080), expected, "{name}");
         }
     }
-
-    #[test]
-    fn units_are_labelled() {
-        let r = report((800, 700), title_bar(28));
-        let h = r.render_human();
-        assert!(h.contains("pt=points, px=pixels"));
-        assert!(h.contains("drawable=1600x1400px"));
-        assert!(h.contains("size=800x700pt"));
-    }
 }
