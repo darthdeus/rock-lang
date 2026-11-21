@@ -2,8 +2,7 @@
 //! Expected physical layouts stay explicit so internally consistent but
 //! incorrect representation choices still fail.
 
-use crate::common::{checked_ws_of, key, signature_plan};
-use std::sync::Arc;
+use crate::common::{MirFixture, checked_ws_of, key, signature_plan};
 
 use skull_mir::concrete::ConcreteSignature;
 use skull_mir::instance::Instance;
@@ -35,31 +34,6 @@ fn nominal(ws: &bone_core::workspace::Workspace, name: &str) -> MonoTy {
     }
 }
 
-fn lower_test_roots(
-    ws: &bone_core::workspace::Workspace,
-    roots: &[FuncRef],
-) -> (ScalarCtx, skull_graph::concrete_body::ConcreteBodies) {
-    let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(ws, roots.to_vec(), Arc::clone(&interner));
-    let bodies = skull_graph::concrete_body::build(ws, &graph);
-    let scx = ScalarCtx::new(ws).sharing(interner);
-    (scx, bodies)
-}
-
-fn lower_test_root(
-    ws: &bone_core::workspace::Workspace,
-    scx: &ScalarCtx,
-    bodies: &skull_graph::concrete_body::ConcreteBodies,
-    fref: FuncRef,
-) -> skull_mir::mir::MirFunc {
-    let plan = bodies
-        .plans
-        .get(&Instance::base(fref))
-        .expect("concrete test plan");
-    skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans)
-        .unwrap_or_else(|e| panic!("lower concrete test root: {}", e.message))
-}
-
 /// A generic whose value instantiation splats, plus a non-generic control that
 /// carries the same ABI unconditionally.
 const SRC: &str = "\
@@ -87,20 +61,21 @@ fn concrete_and_base_bodies_state_their_owned_abi() {
     let ws = checked_ws_of(SRC);
     let ident = func_ref(&ws, "ident");
     let main = func_ref(&ws, "main");
-    let (scx, bodies) = lower_test_roots(&ws, &[main]);
-    let (_, concrete) = bodies
+    let fixture = MirFixture::new(&ws, &[main]);
+    let (_, concrete) = fixture
+        .bodies
         .plans
         .iter()
         .find(|(instance, _)| instance.func == ident && !instance.args.is_empty())
         .expect("the graph must retain ident<V2>");
-    let spec = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, concrete);
+    let spec = BackendFnAbiPlan::for_concrete_plan(&ws, &fixture.scx, concrete);
     assert_eq!(
         spec.param_leaf_widths(),
         Some(vec![2]),
         "`ident<V2>` takes V2's two float leaves"
     );
     assert_eq!(spec.result_lanes(), 2, "and returns them on two lanes");
-    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    let caller = fixture.lower(main).expect("lower test root");
     let concrete_instance = concrete
         .function_instance()
         .expect("function concrete owner");
@@ -115,11 +90,12 @@ fn concrete_and_base_bodies_state_their_owned_abi() {
         "the generic call must consume ident<V2>'s owned plan"
     );
     let shift = func_ref(&ws, "shift");
-    let concrete = bodies
+    let concrete = fixture
+        .bodies
         .plans
         .get(&Instance::base(shift))
         .expect("the graph must retain shift's concrete body");
-    let plan = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, concrete);
+    let plan = BackendFnAbiPlan::for_concrete_plan(&ws, &fixture.scx, concrete);
     assert_eq!(plan.param_leaf_widths(), Some(vec![2]));
     assert_eq!(plan.result_lanes(), 2);
 }
@@ -242,8 +218,8 @@ fn main() {
 "#,
     );
     let main = func_ref(&ws, "main");
-    let (scx, bodies) = lower_test_roots(&ws, &[main]);
-    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    let fixture = MirFixture::new(&ws, &[main]);
+    let caller = fixture.lower(main).expect("lower test root");
     for (name, parameter_width, result_lanes) in [
         ("scalar", None, 1),
         ("nested", Some(3), 3),
@@ -252,9 +228,9 @@ fn main() {
         ("boxed", None, 1),
     ] {
         let subject = Instance::base(func_ref(&ws, name));
-        let concrete = bodies.plans.get(&subject).expect("concrete body");
-        let owned = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, concrete);
-        let entry = lower_test_root(&ws, &scx, &bodies, subject.func);
+        let concrete = fixture.bodies.plans.get(&subject).expect("concrete body");
+        let owned = BackendFnAbiPlan::for_concrete_plan(&ws, &fixture.scx, concrete);
+        let entry = fixture.lower(subject.func).expect("lower test root");
         let call = caller
             .call_abi_plans
             .values()
@@ -305,17 +281,18 @@ fn main() {
     );
     let apply = func_ref(&ws, "apply");
     let nested_func = func_ref(&ws, "nested");
-    let (scx, bodies) = lower_test_roots(&ws, &[apply, nested_func]);
+    let fixture = MirFixture::new(&ws, &[apply, nested_func]);
     let nested_instance = Instance::base(nested_func);
-    let nested_plan = bodies
+    let nested_plan = fixture
+        .bodies
         .plans
         .get(&nested_instance)
         .expect("nested concrete plan");
-    let nested = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, nested_plan);
+    let nested = BackendFnAbiPlan::for_concrete_plan(&ws, &fixture.scx, nested_plan);
     let leaf = nominal(&ws, "Leaf");
     let fn_value = BackendFnAbiPlan::for_function_value(
         &ws,
-        &scx,
+        &fixture.scx,
         &MonoTy::Function {
             params: vec![leaf.clone()],
             ret: Box::new(leaf),
@@ -333,7 +310,7 @@ fn main() {
         nested.representation().result(),
         "an indirect caller must use the callee's result RepId"
     );
-    let lowered = lower_test_root(&ws, &scx, &bodies, apply);
+    let lowered = fixture.lower(apply).expect("lower test root");
     let call = lowered.insts.iter().find_map(|(_, inst)| match inst {
         skull_mir::mir::Inst::CallValueMulti { args, .. } => Some(args.len()),
         _ => None,
@@ -807,8 +784,8 @@ fn main() {
 "#,
     );
     let main = func_ref(&ws, "main");
-    let (scx, bodies) = lower_test_roots(&ws, &[main]);
-    let mir = lower_test_root(&ws, &scx, &bodies, main);
+    let fixture = MirFixture::new(&ws, &[main]);
+    let mir = fixture.lower(main).expect("lower test root");
     let mut plans = std::collections::BTreeMap::new();
     skull_mir::mir::column_elem_rep_plans(&mir, &mut plans);
     assert_eq!(plans.get(&key(&ws, "V2")).map(|p| p.0), Some(false));
@@ -992,9 +969,9 @@ fn main() -> float { return selected(Sample { x: 1.0, y: 2.0, z: 3.0 }) }
     );
     let selected = func_ref(&ws, "selected");
     let main = func_ref(&ws, "main");
-    let (scx, bodies) = lower_test_roots(&ws, &[main]);
-    let caller = lower_test_root(&ws, &scx, &bodies, main);
-    let entry = lower_test_root(&ws, &scx, &bodies, selected);
+    let fixture = MirFixture::new(&ws, &[main]);
+    let caller = fixture.lower(main).expect("lower test root");
+    let entry = fixture.lower(selected).expect("lower test root");
     assert_eq!(
         entry.params.len(),
         1,
@@ -1026,8 +1003,8 @@ fn main(v: Outer) -> float { return selected(v) }
     );
     let selected = func_ref(&ws, "selected");
     let main = func_ref(&ws, "main");
-    let (scx, bodies) = lower_test_roots(&ws, &[main]);
-    let entry = lower_test_root(&ws, &scx, &bodies, selected);
+    let fixture = MirFixture::new(&ws, &[main]);
+    let entry = fixture.lower(selected).expect("lower test root");
     assert_eq!(
         entry.params.len(),
         2,
@@ -1057,9 +1034,9 @@ fn main(v: Sample) -> float { return mutate(identity(v)) }
     let identity = func_ref(&ws, "identity");
     let mutate = func_ref(&ws, "mutate");
     let captured = func_ref(&ws, "captured");
-    let (scx, bodies) = lower_test_roots(&ws, &[main, captured]);
+    let fixture = MirFixture::new(&ws, &[main, captured]);
     for f in [identity, mutate, captured] {
-        assert_eq!(lower_test_root(&ws, &scx, &bodies, f).params.len(), 2);
+        assert_eq!(fixture.lower(f).expect("lower test root").params.len(), 2);
     }
 }
 
@@ -1074,12 +1051,16 @@ fn main() -> float { return selected(Sample { x: 1.0, y: 2.0 }) }
     );
     let selected = func_ref(&ws, "selected");
     let main = func_ref(&ws, "main");
-    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    let fixture = MirFixture::new(&ws, &[main]);
     assert_eq!(
-        lower_test_root(&ws, &scx, &bodies, selected).params.len(),
+        fixture
+            .lower(selected)
+            .expect("lower test root")
+            .params
+            .len(),
         0
     );
-    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    let caller = fixture.lower(main).expect("lower test root");
     assert!(caller.insts.iter().any(|(_, inst)| matches!(inst, skull_mir::mir::Inst::Call { func, args } if *func == selected && args.is_empty())));
 }
 
@@ -1098,11 +1079,14 @@ fn demand_nullable(v: Sample?) -> Sample? { return v }
         func_ref(&ws, "demand_default"),
         func_ref(&ws, "demand_nullable"),
     ];
-    let (scx, bodies) = lower_test_roots(&ws, &roots);
+    let fixture = MirFixture::new(&ws, &roots);
     // Fixed-name boundaries use the existing boxed ABI; defaulted and nullable
     // internal parameters retain their complete declared leaf layouts.
     for (f, width) in roots.into_iter().zip([1, 2, 3]) {
-        assert_eq!(lower_test_root(&ws, &scx, &bodies, f).params.len(), width);
+        assert_eq!(
+            fixture.lower(f).expect("lower test root").params.len(),
+            width
+        );
     }
 }
 
@@ -1117,12 +1101,16 @@ fn main(v: Sample?) -> float { return v?.demand_method() ?? 0.0 }
     );
     let selected = func_ref(&ws, "demand_method");
     let main = func_ref(&ws, "main");
-    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    let fixture = MirFixture::new(&ws, &[main]);
     assert_eq!(
-        lower_test_root(&ws, &scx, &bodies, selected).params.len(),
+        fixture
+            .lower(selected)
+            .expect("lower test root")
+            .params
+            .len(),
         1
     );
-    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    let caller = fixture.lower(main).expect("lower test root");
     assert!(caller.insts.iter().any(|(_, inst)| matches!(inst, skull_mir::mir::Inst::Call { func, args } if *func == selected && args.len() == 1)));
 }
 
@@ -1169,9 +1157,9 @@ fn demand_match_call(event: DemandEvent) -> int {
         "demand_match_nested_pattern",
     ]
     .map(|name| func_ref(&ws, name));
-    let (scx, bodies) = lower_test_roots(&ws, &roots);
+    let fixture = MirFixture::new(&ws, &roots);
     for (root, expected) in roots.into_iter().zip([5, 6, 5, 5]) {
-        let mir = lower_test_root(&ws, &scx, &bodies, root);
+        let mir = fixture.lower(root).expect("lower test root");
         assert_eq!(mir.params.len(), expected, "{}", mir.name);
     }
 }
@@ -1204,9 +1192,9 @@ fn demand_unit_match_caller(event: UnitMatchEvent) -> UnitMatchDirection? {{
     let ws = checked_ws_of(&src);
     let caller = func_ref(&ws, "demand_unit_match_caller");
     let selected = func_ref(&ws, "demand_unit_match_direction");
-    let (scx, bodies) = lower_test_roots(&ws, &[caller]);
-    let entry = lower_test_root(&ws, &scx, &bodies, selected);
-    let caller = lower_test_root(&ws, &scx, &bodies, caller);
+    let fixture = MirFixture::new(&ws, &[caller]);
+    let entry = fixture.lower(selected).expect("lower test root");
+    let caller = fixture.lower(caller).expect("lower test root");
     assert_eq!(
         caller.params.len(),
         68,
@@ -1237,8 +1225,8 @@ fn consume(value: Many) -> int {{ let whole = value; return whole.child0?.a ?? -
 "#
     ));
     let root = func_ref(&ws, "consume");
-    let (scx, bodies) = lower_test_roots(&ws, &[root]);
-    let mir = lower_test_root(&ws, &scx, &bodies, root);
+    let fixture = MirFixture::new(&ws, &[root]);
+    let mir = fixture.lower(root).expect("lower test root");
     assert_eq!(
         mir.params.len(),
         count,

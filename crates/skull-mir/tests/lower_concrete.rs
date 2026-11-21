@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use crate::common::key;
+use crate::common::{MirFixture, decl, key};
 use comfy_la_arena::Idx;
 use skull_graph::instance_graph;
 use skull_mir::instance::Instance;
 use skull_mir::lower::{
     RepArena, RepGuarantees, RepId, RepUse, RepUseFacts, ScalarCtx, lower_instance_with_plans,
 };
-use skull_mir::mir::{ContainerKind, Inst, Lit, MirFunc, Term, ValueCtorForm};
+use skull_mir::mir::{ContainerKind, FuncRef, Inst, Lit, MirFunc, Term, ValueCtorForm};
 use skull_mir::monoty::{MonoInterner, MonoTy};
 
 #[test]
@@ -20,24 +20,15 @@ fn coroutine_flat_refs_keep_a_defensive_lowering_diagnostic() {
              fn relay(c: ref Cell) -> Coroutine<int> {{ return bump(c) }}\n\
              fn main() {{ let xs: [Cell] = [Cell {{ w: 1 }}]; let c = {call} }}"
         ));
-        let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-        let (fid, _) = ws
-            .module(mid)
-            .functions
-            .iter()
-            .find(|(_, f)| f.name == key(&ws, "main"))
-            .unwrap();
+        let root = decl(&ws, "main");
         for backend in [
             bone_core::hir::FnBackend::Lua,
             bone_core::hir::FnBackend::Js,
         ] {
-            let err = lower_test_root_with_context(
-                &ws,
-                mid,
-                fid,
-                ScalarCtx::new(&ws).with_target(backend),
-            )
-            .expect_err("flat coroutine arguments must reject");
+            let err =
+                MirFixture::with_context(&ws, &[root], ScalarCtx::new(&ws).with_target(backend))
+                    .lower(root)
+                    .expect_err("flat coroutine arguments must reject");
             assert!(
                 err.message.contains(
                     "cannot pass a reference to a flat-stored container element to coroutine `bump`"
@@ -90,7 +81,13 @@ fn checked_compound_assignments_only_keep_safe_navigation_targets() {
             .iter()
             .all(|target| matches!(body.expr_arena[*target], Expr::SafeNav { .. }))
     );
-    lower_test_root(&ws, mid, fid).expect("safe-navigation assignments lower");
+    let root = FuncRef {
+        module: mid,
+        func: fid,
+    };
+    MirFixture::new(&ws, &[root])
+        .lower(root)
+        .expect("safe-navigation assignments lower");
 
     for target in ["b?.next.x", "b?.xs[0]"] {
         let ws = crate::common::ws_of(&format!(
@@ -104,39 +101,10 @@ fn checked_compound_assignments_only_keep_safe_navigation_targets() {
     }
 }
 
-fn lower_test_root(
-    ws: &bone_core::workspace::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    fid: comfy_la_arena::Idx<bone_core::hir::Function>,
-) -> Result<skull_mir::mir::MirFunc, skull_parser::CompilerError> {
-    lower_test_root_with_context(ws, mid, fid, ScalarCtx::new(ws))
-}
-
-fn lower_test_root_with_context(
-    ws: &bone_core::workspace::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    fid: comfy_la_arena::Idx<bone_core::hir::Function>,
-    scx: ScalarCtx,
-) -> Result<skull_mir::mir::MirFunc, skull_parser::CompilerError> {
-    let root = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let interner = Arc::new(MonoInterner::new());
-    let graph = instance_graph::build_in(ws, vec![root], Arc::clone(&interner));
-    let concrete = skull_graph::concrete_body::build(ws, &graph);
-    let scx = scx.sharing(interner);
-    let plan = concrete.plans.get(&Instance::base(root)).ok_or_else(|| {
-        skull_parser::CompilerError::new_no_location("no concrete plan for test root")
-    })?;
-    lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
-}
-
 #[test]
 #[cfg(debug_assertions)]
 fn checked_lowering_rejects_incomplete_and_stale_type_tables() {
     use bone_core::hir::BodyOwner;
-    use skull_mir::mir::FuncRef;
 
     let mut ws = crate::common::checked_ws_of(
         "struct Boxed { n: int = 7 }\n\
@@ -194,14 +162,9 @@ fn nested_first_class_field_updates_rebuild_every_parent() {
          value Outer { inner: Inner, z: int }\n\
          fn update(p: Outer) -> int { let old = p.inner.x++; return old + p.inner.x }",
     );
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name == key(&ws, "update"))
-        .unwrap();
-    let mir = lower_test_root_with_context(&ws, mid, fid, ScalarCtx::new_values_first_class(&ws))
+    let root = decl(&ws, "update");
+    let mir = MirFixture::with_context(&ws, &[root], ScalarCtx::new_values_first_class(&ws))
+        .lower(root)
         .expect("nested first-class update lowers before the shader profile gate");
     for name in ["Inner", "Outer"] {
         value_constructor(&mir, name);
@@ -226,18 +189,6 @@ fn value_constructor(mir: &MirFunc, name: &str) -> Idx<Inst> {
             _ => None,
         })
         .unwrap_or_else(|| panic!("missing `{name}` value constructor"))
-}
-
-fn lower_fixture(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> MirFunc {
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some(fn_name))
-        .expect("function by name");
-    lower_test_root(&ws, mid, fid).unwrap_or_else(|e| panic!("lower failed: {}", e.message))
 }
 
 #[test]
@@ -289,7 +240,11 @@ fn value_constructors_carry_the_owned_representation() {
         .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some("make"))
         .map(|(fid, _)| fid)
         .expect("make function");
-    let mut mir = lower_test_root(&ws, mid, fid).expect("lower");
+    let root = FuncRef {
+        module: mid,
+        func: fid,
+    };
+    let mut mir = MirFixture::new(&ws, &[root]).lower(root).expect("lower");
 
     let outer = value_constructor(&mir, "Outer");
     let inner = value_constructor(&mir, "Inner");
@@ -447,28 +402,11 @@ fn value_constructors_carry_the_owned_representation() {
     );
 }
 
-/// Stdlib-free: enough for literals, vars, `let`, and builtin operators.
-fn mir(src: &str, fn_name: &str) -> MirFunc {
-    let ast = skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse");
-    lower_fixture(vec![ast], fn_name)
-}
+use crate::common::lower as mir;
 
-/// Stdlib-loaded: needed for `__op_*` arithmetic overloads. The stdlib is
-/// parsed once (cached) and re-checked per call alongside the snippet.
-fn mir_std(src: &str, fn_name: &str) -> MirFunc {
-    use std::sync::LazyLock;
-    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_stdlib::stdlib_files()
-            .iter()
-            .map(|f| {
-                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-                skull_parser::parse_module(f.contents, id).expect("stdlib parse")
-            })
-            .collect()
-    });
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
-    lower_fixture(modules, fn_name)
+fn mir_std(src: &str, name: &str) -> MirFunc {
+    let ws = crate::common::ws_of(src);
+    MirFixture::new(&ws, &[decl(&ws, name)]).named(name)
 }
 
 fn instruction_ids(mir: &MirFunc) -> impl Iterator<Item = Idx<Inst>> + '_ {

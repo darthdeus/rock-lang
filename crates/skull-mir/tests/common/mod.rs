@@ -97,16 +97,51 @@ pub fn has_name_tail(name: Ustr, declared: &str) -> bool {
     name.as_str().rsplit("::").next() == Some(declared)
 }
 
+pub struct MirFixture<'a> {
+    ws: &'a bone_core::workspace::Workspace,
+    pub scx: ScalarCtx,
+    pub bodies: skull_graph::concrete_body::ConcreteBodies,
+}
+
+impl<'a> MirFixture<'a> {
+    pub fn new(ws: &'a bone_core::workspace::Workspace, roots: &[FuncRef]) -> Self {
+        Self::with_context(ws, roots, ScalarCtx::new(ws))
+    }
+
+    pub fn with_context(
+        ws: &'a bone_core::workspace::Workspace,
+        roots: &[FuncRef],
+        scx: ScalarCtx,
+    ) -> Self {
+        let interner = Arc::new(MonoInterner::new());
+        let graph =
+            skull_graph::instance_graph::build_in(ws, roots.to_vec(), Arc::clone(&interner));
+        Self {
+            ws,
+            scx: scx.sharing(interner),
+            bodies: skull_graph::concrete_body::build(ws, &graph),
+        }
+    }
+
+    pub fn lower(&self, root: FuncRef) -> Result<MirFunc, skull_parser::CompilerError> {
+        let plan = self
+            .bodies
+            .plans
+            .get(&Instance::base(root))
+            .expect("concrete test plan");
+        lower_instance_with_plans(self.ws, &self.scx, plan, &self.bodies.plans)
+    }
+
+    pub fn named(&self, name: &str) -> MirFunc {
+        self.lower(decl(self.ws, name))
+            .unwrap_or_else(|error| panic!("lower {name}: {}", error.message))
+    }
+}
+
 pub fn lower(source: &str, name: &str) -> MirFunc {
-    let ast = skull_parser::parse_module_clean(source, ustr::Ustr::from("<test>")).expect("parse");
+    let ast = skull_parser::parse_module_clean(source, Ustr::from("<test>")).expect("parse");
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic pass");
-    let root = decl(&ws, name);
-    let interner = Arc::new(MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(&ws, vec![root], Arc::clone(&interner));
-    let concrete = skull_graph::concrete_body::build(&ws, &graph);
-    let scx = ScalarCtx::new(&ws).sharing(interner);
-    let plan = &concrete.plans[&Instance::base(root)];
-    lower_instance_with_plans(&ws, &scx, plan, &concrete.plans).expect("lower")
+    MirFixture::new(&ws, &[decl(&ws, name)]).named(name)
 }
 
 pub fn signature_plan(instance: Instance, signature: ConcreteSignature) -> ConcreteBodyPlan {
