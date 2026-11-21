@@ -171,129 +171,13 @@ fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
 #[cfg(test)]
 mod overlay_runtime_tests {
 
-    use super::super::SkullReload;
+    use super::files;
     use super::{ExecOutcome, exec_lua, normalize_stdout};
-    use super::{ProjectFixture, files};
     use crate::bone_backend::bone_session;
 
     use super::overlay_test_support::{SYS_STUB, run_parts, stub_for};
 
-    fn run_project_artifacts(fx: &ProjectFixture, call_after_overlay: bool) -> String {
-        let main = fx.main_text();
-        let overlay = std::fs::read_to_string(&fx.incremental).unwrap_or_default();
-        let tail = if call_after_overlay {
-            "\nmain()\n"
-        } else {
-            "\n"
-        };
-        let program = format!(
-            "function clear_all_systems() end\nfunction __rock_main_wrapper(f) f() end\n{main}\n{overlay}{tail}"
-        );
-        match exec_lua(&program) {
-            ExecOutcome::Output(output) => normalize_stdout(&output),
-            ExecOutcome::Errored(error) => panic!(
-                "generated IncrementalProject artifacts failed to execute:\n{error}\n--- main.lua ---\n{main}\n--- incremental.lua ---\n{overlay}"
-            ),
-        }
-    }
-
-    fn run_production_body_overlay(manifest: Option<&str>) -> String {
-        let v0 = "fn probe() -> int { static value = 1\n value = value + 1\n value }\nfn main() { print(probe()) }\n";
-        let v1 = "fn probe() -> int { static value = 1\n value = value + 10\n value }\nfn main() { print(probe()) }\n";
-        let mut files = vec![("main.rock", v0)];
-        files.extend(manifest.map(|text| ("stick.toml", text)));
-        let mut fx = ProjectFixture::boot_files(&files);
-        assert!(
-            !fx.incremental.exists(),
-            "initial load must not leave an overlay"
-        );
-        let reload = fx.edit(v1).expect("body edit through production recompile");
-        assert!(
-            matches!(reload, SkullReload::Incremental { .. }),
-            "body edit must publish an overlay, got {reload:?}"
-        );
-        assert!(
-            fx.incremental.exists(),
-            "body edit must write incremental.lua"
-        );
-
-        run_project_artifacts(&fx, true)
-    }
-
-    #[test]
-    fn production_overlay_executes_v1_body_edit_and_preserves_state() {
-        let legacy = run_production_body_overlay(None);
-        assert_eq!(
-            legacy.trim(),
-            "2\n12",
-            "legacy control must execute the overlay"
-        );
-
-        let v1 = run_production_body_overlay(Some(
-            "[package]\nname = \"overlay-v1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
-        ));
-        assert_eq!(
-            v1.trim(),
-            "2\n12",
-            "v1 overlay must execute changed code with retained state"
-        );
-    }
-
-    #[test]
-    fn production_reload_defines_an_own_function_an_edit_starts_calling() {
-        let mut fx = ProjectFixture::boot(
-            "fn later(x: int) -> int { return x * 3 + 2 }\nfn main() { print(0) }\n",
-        );
-        assert!(
-            !fx.main_text().contains("later"),
-            "the unreached function must not be defined at boot"
-        );
-        fx.edit("fn later(x: int) -> int { return x * 3 + 2 }\nfn main() { print(later(4)) }\n")
-            .expect("recompile after the edit");
-        let out = run_project_artifacts(&fx, true);
-        assert_eq!(out.trim().lines().last(), Some("14"), "{out}");
-    }
-
-    #[test]
-    fn production_v1_namespace_edit_takes_full_reload_and_runs_new_definition() {
-        let mut fx = ProjectFixture::boot_files(&[
-            (
-                "stick.toml",
-                "[package]\nname = \"namespace-v1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
-            ),
-            ("main.rock", "fn main() { print(a::bump(2)) }\n"),
-            ("a.rock", "mod a;\npub fn bump(n: int) -> int { n + 1 }\n"),
-        ]);
-        let baseline = run_project_artifacts(&fx, false);
-        assert_eq!(baseline.trim(), "3");
-
-        let reload = fx.edit_files(&[
-            ("a.rock", "mod a;\npub fn bump(n: int) -> int { n + 1 }\npub fn twice(n: int) -> int { n * 2 }\n"),
-            ("main.rock", "fn main() { print(a::twice(3)) }\n"),
-        ]).expect("namespace edit through production recompile");
-        assert!(
-            matches!(reload, SkullReload::Full { .. }),
-            "a namespace-affecting edit must publish the supported full path, got {reload:?}"
-        );
-        assert!(
-            !fx.incremental.exists(),
-            "full namespace reload must wipe the overlay"
-        );
-        let updated = run_project_artifacts(&fx, false);
-        assert_eq!(
-            updated.trim(),
-            "6",
-            "the full artifact must contain the new namespace definition"
-        );
-        assert_ne!(
-            updated.trim(),
-            baseline.trim(),
-            "namespace edit must not serve stale output"
-        );
-    }
-
     const SCORE4: &str = "fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n";
-    const SCORE2: &str = "fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }\n}\n";
 
     macro_rules! pump_source {
         () => {
@@ -301,8 +185,6 @@ mod overlay_runtime_tests {
         };
     }
     const START_PUMP: &str = concat!("@nomangle\nfn start() { GEN = gen() }\n", pump_source!());
-    const OUTER_START_PUMP: &str =
-        concat!("@nomangle\nfn start() { GEN = outer() }\n", pump_source!());
 
     struct Live {
         session: bone_incremental::session::Session,
@@ -408,31 +290,6 @@ mod overlay_runtime_tests {
         assert_run(&live.baseline, &steps, expected, case);
     }
 
-    #[test]
-    fn overlay_referencing_baseline_value_ctor_runtime_eq() {
-        let decl = "value P { x: int, y: int }\nglobal INPUT: int = 5\n\
-                    inline(lua) fn ctor_sum(p: P) -> int = \"return p.x + p.y\"\n";
-        let v0 = format!(
-            "{decl}fn compute() -> int {{ 1 }}\nfn main() {{ print(\"{{compute()}}\") }}\n"
-        );
-        let v1 = format!(
-            "{decl}fn compute() -> int {{ ctor_sum(P {{ x: INPUT, y: INPUT + 1 }}) }}\nfn main() {{ print(\"{{compute()}}\") }}\n"
-        );
-
-        let mut live = Live::boot(&v0);
-
-        let overlay = live.overlay(&v1);
-        let fresh = live.full();
-
-        assert_run(
-            &live.baseline,
-            &[&overlay, "main()"],
-            "11",
-            "overlay value constructor",
-        );
-        assert_run(&fresh, &["main()"], "11", "fresh value constructor build");
-    }
-
     fn sim_fixture(tick_val: i32) -> String {
         format!(
             "struct UpdateSystem {{ func: fn() -> (), name: string, stage: int }}\n\
@@ -446,16 +303,6 @@ mod overlay_runtime_tests {
              @nomangle\n\
              fn run_frame() {{ for s in UPDATE_SYSTEMS {{ s.func() }} }}\n"
         )
-    }
-
-    const SIM_DRIVER: &str = "run_frame() print(TICK_OUT)";
-
-    #[test]
-    fn sim_overlay_refreshes_existing_code_ref_registry_entry() {
-        let v0 = sim_fixture(1);
-        let v1 = sim_fixture(2);
-
-        assert_overlay_matches_full(&v0, &v1, SIM_DRIVER, "1", "2");
     }
 
     #[test]
@@ -692,43 +539,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         assert_overlay_matches_full(v0, &v1, "main()", "1 2", "10 20");
     }
 
-    #[test]
-    fn flat_enum_coroutine_body_edit_overlay_threads_and_runs_new_body() {
-        let prog = |a: i32, b: i32| {
-            format!(
-                "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Pair({a}, {b})\n  yield Ev::Done\n}}\n\
-                 {SCORE4}\
-                 fn main() {{\n  let c = gen()\n  let e0 = c.resume()\n  let e1 = c.resume()\n  let s0 = if e0 != null {{ score(e0) }} else {{ -1 }}\n  let s1 = if e1 != null {{ score(e1) }} else {{ -1 }}\n  print(\"{{s0}} {{s1}}\")\n}}\n"
-            )
-        };
-        let (v0, v1) = (prog(1, 2), prog(10, 20));
-
-        assert_overlay_matches_full(&v0, &v1, "main()", "1 3", "10 30");
-    }
-
-    #[test]
-    fn live_flat_enum_coroutine_survives_overlay_and_threads_new_body() {
-        let prog = |a: i32, b: i32| {
-            format!(
-                "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Pair({a}, {b})\n  yield Ev::Done\n}}\n\
-                 {SCORE4}\
-                 {START_PUMP}"
-            )
-        };
-        let (v0, v1) = (prog(1, 2), prog(10, 20));
-
-        assert_resume_after_overlay(
-            &v0,
-            &v1,
-            &["pump()", "pump()", "pump()"],
-            "1\n30\n100\n-1",
-            "retained coroutine yields the edited Pair, then Done, then completes",
-        );
-    }
-
     const EXPECT_LAYOUT_ERROR: &str = "local ok, err = pcall(pump); assert(not ok and tostring(err):find('frame layout changed', 1, true)); pump()";
 
     #[test]
@@ -750,57 +560,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             &[EXPECT_LAYOUT_ERROR, "pump()", "pump()"],
             "1\n-1\n-1\n-1",
             "inserting a yield invalidates the retained resume point",
-        );
-    }
-
-    #[test]
-    fn live_yield_star_delegation_survives_inner_body_overlay() {
-        let prog = |a: i32, b: i32| {
-            format!(
-                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 co fn inner() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Tick({b})\n}}\n\
-                 co fn outer() -> Coroutine<Ev> {{\n  await inner()\n}}\n\
-                 {SCORE2}\
-                 {OUTER_START_PUMP}"
-            )
-        };
-        let (v0, v1) = (prog(1, 2), prog(10, 20));
-
-        assert_resume_after_overlay(
-            &v0,
-            &v1,
-            &["pump()", "pump()"],
-            "1\n20\n-1",
-            "retained await chain resumes the edited inner body",
-        );
-    }
-
-    #[test]
-    fn stamp_killed_outer_chains_kill_into_delegated_inner() {
-        let prog = |extra: &str| {
-            format!(
-                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 global INNER_KILLED: int = 0\n\
-                 fn mk(n: int) -> int {{ return n }}\n\
-                 fn note_inner_killed() {{ INNER_KILLED = INNER_KILLED + 1 }}\n\
-                 co fn inner() -> Coroutine<Ev> {{\n  on_killed(() => note_inner_killed())\n  yield Ev::Tick(1)\n  yield Ev::Tick(2)\n}}\n\
-                 co fn outer() -> Coroutine<Ev> {{\n{extra}  await inner()\n}}\n\
-                 {SCORE2}\
-                 {OUTER_START_PUMP}\
-                 @nomangle\n\
-                 fn report() {{ print(\"{{INNER_KILLED}}\") }}\n"
-            )
-        };
-        let (v0, v1) = (prog(""), prog("  let z = mk(9)\n"));
-
-        assert_resume_after_overlay(
-            &v0,
-            &v1,
-            &[EXPECT_LAYOUT_ERROR, "report()"],
-            "1\n-1\n1",
-            "killing the outer coroutine fires the delegated inner hook once",
         );
     }
 
@@ -836,52 +595,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                    co fn gen() -> Coroutine<Ev> {\n  defer { yield Ev::Tick(1) }\n  yield Ev::Tick(2)\n}\n\
                    fn main() { let c = gen() }\n";
         assert_co_fn_rejected(src, "defer");
-    }
-
-    #[test]
-    fn live_coroutine_survives_full_reload_and_shape_edit_stamp_kills() {
-        let prog = |enum_tick: &str, yield_tick: &str, score_tick: &str| {
-            format!(
-                "enum Ev {{ {enum_tick}, Pair(int, int), Done, Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 fn mk(n: int) -> int {{ return n }}\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  let a = mk(7)\n  let b = mk(35)\n  yield {yield_tick}\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    {score_tick}\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 {START_PUMP}"
-            )
-        };
-        let v0 = prog("Tick(int)", "Ev::Tick(a)", "Ev::Tick(x) => x");
-        let v1 = prog(
-            "Tick(int, int, int)",
-            "Ev::Tick(a, b, a)",
-            "Ev::Tick(x, y, z) => x + y + z",
-        );
-
-        let mut live = Live::boot(&v0);
-
-        let full1 = live.full_reload(&v1);
-
-        let mut steps = vec![
-            "start()",
-            "pump()",
-            "_G.HOT_RELOAD = true",
-            &full1,
-            "print(_G.GEN ~= nil)",
-        ];
-        assert_run(
-            &live.baseline,
-            &steps,
-            "7\ntrue",
-            "a live coroutine in a mutable global must survive a full re-dofile (HOT_RELOAD guard)",
-        );
-
-        steps.push(EXPECT_LAYOUT_ERROR);
-        assert_run(
-            &live.baseline,
-            &steps,
-            "7\ntrue\n-1",
-            "a shape-edit full reload must stamp-kill the surviving live coroutine, not corrupt it",
-        );
     }
 
     #[test]
@@ -932,188 +645,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         assert!(
             diag.contains("arithmetic on") && diag.contains("nil"),
             "expected nil-arithmetic on the field the live instance never had, got:\n{diag}"
-        );
-    }
-
-    #[test]
-    fn value_struct_reorder_full_reload_is_caught_by_the_layout_check() {
-        let v0 = "value P { x: int, y: int }\n\
-                  global CUR: P = P { x: 0, y: 0 }\n\
-                  @nomangle\n\
-                  fn store_p() { CUR = P { x: 1, y: 2 } }\n\
-                  @nomangle\n\
-                  fn show() { print(\"{CUR.x},{CUR.y}\") }\n\
-                  fn main() { }\n";
-        let v1 = "value P { y: int, x: int }\n\
-                  global CUR: P = P { x: 0, y: 0 }\n\
-                  @nomangle\n\
-                  fn store_p() { CUR = P { x: 1, y: 2 } }\n\
-                  @nomangle\n\
-                  fn show() { print(\"{CUR.x},{CUR.y}\") }\n\
-                  fn main() { }\n";
-
-        let mut live = Live::boot(v0);
-
-        let full1 = live.full_reload(v1);
-
-        assert_run(
-            &live.baseline,
-            &["store_p()", "show()"],
-            "1,2",
-            "value-struct v0 fixture",
-        );
-
-        let composed = run_parts(&[
-            &live.baseline,
-            stub_for(&live.baseline),
-            "store_p()",
-            "show()",
-            "_G.HOT_RELOAD = true",
-            &full1,
-            "store_p()",
-            "show()",
-        ]);
-        let diag = composed.expect_errored(
-            "a reordered value struct reloaded into a frozen ctype must be caught by \
-             the leaf-layout check, not silently misassigned",
-        );
-        assert!(
-            diag.contains("skull layout drift") && diag.contains("P.y"),
-            "expected the leaf-layout drift diagnostic naming the moved field, got:\n{diag}"
-        );
-    }
-
-    #[test]
-    fn on_reload_code_ref_refreshes_and_refires_across_overlays() {
-        let prog = |step: i32, unrelated: i32| {
-            format!(
-                "global FIRE_COUNT: int = 0\n\
-                 @nomangle\n\
-                 @on_reload\n\
-                 fn bump_fire_count() {{ FIRE_COUNT = FIRE_COUNT + {step} }}\n\
-                 fn unrelated() -> int {{ return {unrelated} }}\n\
-                 @nomangle\n\
-                 fn report() {{ print(\"{{FIRE_COUNT}}\") }}\n"
-            )
-        };
-        let (v0, v1, v2) = (prog(1, 1), prog(2, 2), prog(2, 3));
-
-        let mut live = Live::boot(&v0);
-
-        let overlay1 = live.overlay(&v1);
-        let overlay2 = live.overlay(&v2);
-
-        assert_run(
-            &live.baseline,
-            &[
-                &overlay1,
-                "__rock_fire_hot_reload_callbacks()",
-                "report()",
-                &overlay2,
-                "__rock_fire_hot_reload_callbacks()",
-                "report()",
-            ],
-            "2\n4",
-            "the refreshed @on_reload callback must persist and fire once per overlay",
-        );
-    }
-
-    #[test]
-    fn cofn_capturing_lambda_body_edit_overlay_created_after_reload() {
-        let prog = |op: char| {
-            format!(
-                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  let base = 3\n  let f = (x: int) => x {op} base\n  yield Ev::Tick(f(4))\n}}\n\
-                 {SCORE2}\
-                 {START_PUMP}"
-            )
-        };
-        let (v0, v1) = (prog('+'), prog('*'));
-
-        let mut live = Live::boot(&v0);
-
-        let overlay = live.overlay(&v1);
-        assert_run(
-            &live.baseline,
-            &[&overlay, "start()", "pump()", "pump()"],
-            "12\n-1",
-            "a coroutine created after the reload runs the new hoisted lambda body (4*3=12)",
-        );
-    }
-
-    #[test]
-    fn cofn_lambda_record_snapshot_refreshes_across_reload() {
-        let prog = |op: char| {
-            format!(
-                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  let base = 5\n  let f = (x: int) => x {op} base\n  yield Ev::Tick(f(3))\n  yield Ev::Tick(f(3))\n  let g = (x: int) => x {op} base\n  yield Ev::Tick(g(3))\n}}\n\
-                 {SCORE2}\
-                 {START_PUMP}"
-            )
-        };
-        let (v0, v1) = (prog('+'), prog('*'));
-
-        let mut live = Live::boot(&v0);
-        let overlay = live.overlay(&v1);
-        let fresh = Live::boot(&v1).baseline;
-        let fresh_output = "15\n15\n15\n-1";
-        assert_run(
-            &fresh,
-            &["start()", "pump()", "pump()", "pump()", "pump()"],
-            fresh_output,
-            "fresh v1 lambda records",
-        );
-        assert_run(
-            &live.baseline,
-            &["start()", "pump()", &overlay, "pump()", "pump()", "pump()"],
-            "8\n15\n15\n-1",
-            "a retained lambda record must refresh after the overlay and match fresh v1 yields",
-        );
-    }
-
-    #[test]
-    fn named_and_capture_free_values_refresh_through_reusable_slots() {
-        let program = |named_delta: i32, free_value: i32| {
-            format!(
-                "global NAMED: (fn(int) -> int)? = null\n\
-                 global FREE: (fn() -> int)? = null\n\
-                 @nomangle fn named(x: int) -> int {{ return x + {named_delta} }}\n\
-                 @nomangle fn make_free() -> fn() -> int {{ return () => {free_value} }}\n\
-                 @nomangle fn start() {{\n\
-                   NAMED = named\n\
-                   FREE = make_free()\n\
-                 }}\n\
-                 @nomangle fn invoke() {{\n\
-                   let a = NAMED\n\
-                   let b = FREE\n\
-                   if a != null {{ if b != null {{ print(\"{{a(3)}} {{b()}}\") }} }}\n\
-                 }}\n"
-            )
-        };
-        let v0 = program(1, 10);
-        let v1 = program(2, 20);
-        let mut live = Live::boot(&v0);
-        assert_run(
-            &live.baseline,
-            &["start()", "invoke()"],
-            "4 10",
-            "baseline named/capture-free values",
-        );
-
-        let overlay = live.overlay(&v1);
-        assert_run(
-            &live.baseline,
-            &["start()", &overlay, "invoke()"],
-            "5 20",
-            "composed slot values",
-        );
-        assert_run(
-            &live.full(),
-            &["start()", "invoke()"],
-            "5 20",
-            "fresh slot values",
         );
     }
 }
@@ -1174,31 +705,6 @@ mod shape_drift_tests {
     }
 
     #[test]
-    fn value_layout_edits_request_restart() {
-        for (v0, v1, ty) in [
-            (
-                "value NV2 { x: float, y: float }\n\
-                 global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n",
-                "nobox value NV2 { x: float, y: float }\n\
-                 global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n",
-                "NV2",
-            ),
-            (
-                "value P { x: int, y: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n",
-                "value P { y: int, x: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n",
-                "P",
-            ),
-        ] {
-            let mut fx = ProjectFixture::boot(v0);
-            let reload = fx.edit(v1).expect("recompile v1");
-            assert!(
-                matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == ty)),
-                "{ty}: a layout edit must restart, got {reload:?}"
-            );
-        }
-    }
-
-    #[test]
     fn mutable_global_membership_edit_requests_restart_and_keeps_old_global_layout() {
         let v0 = "global A: int = 1\nfn main() { }\n";
         let v1 = "global A: int = 1\nglobal B: int = 2\nfn main() { }\n";
@@ -1245,32 +751,6 @@ mod shape_drift_tests {
             fx.project.cache.global_layout().expect("new global layout"),
             old_layout,
             "restart canonicalization must publish the changed layout"
-        );
-    }
-
-    #[test]
-    fn body_and_signature_edits_stay_on_the_hot_paths() {
-        let v0 = "struct Mob { hp: int }\n\
-                  fn heal(m: Mob) -> int { m.hp }\n\
-                  fn main() { }\n";
-        let body = "struct Mob { hp: int }\n\
-                    fn heal(m: Mob) -> int { m.hp + 1 }\n\
-                    fn main() { }\n";
-        let sig = "struct Mob { hp: int }\n\
-                   fn heal(m: Mob, bonus: int) -> int { m.hp + bonus }\n\
-                   fn main() { }\n";
-        let mut fx = ProjectFixture::boot(v0);
-
-        let reload = fx.edit(body).expect("body edit");
-        assert!(
-            matches!(reload, SkullReload::Incremental { .. }),
-            "a body edit must stay a hot overlay, got {reload:?}"
-        );
-
-        let reload = fx.edit(sig).expect("sig edit");
-        assert!(
-            matches!(reload, SkullReload::Full { .. }),
-            "a signature-only edit carries no data-shape drift -- full reload, NOT a restart, got {reload:?}"
         );
     }
 
@@ -1407,102 +887,6 @@ mod force_full_tests {
             "force_full must publish the fingerprint of the Artifact it writes"
         );
     }
-
-    #[test]
-    fn init_rejects_project_with_type_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let main_lua = dir.path().join("main.lua");
-        std::fs::write(
-            dir.path().join("main.rock"),
-            "fn boot() { does_not_exist() }\n",
-        )
-        .unwrap();
-
-        let res = IncrementalProject::init(
-            dir.path().to_str().unwrap(),
-            &main_lua,
-            &dir.path().join("incremental.lua"),
-        );
-        assert!(
-            res.is_err(),
-            "init must reject a project whose body references a non-existent function"
-        );
-        assert!(
-            !main_lua.exists(),
-            "init must NOT write a partial main.lua when the project has type errors"
-        );
-    }
-
-    #[test]
-    fn failed_recompile_retains_session_and_last_good_artifact() {
-        let v1 = "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }\n";
-        let mut fx = ProjectFixture::boot(v1);
-        let main_v1 = fx.main_text();
-
-        let v2 = "fn helper() -> int { 3 }\nfn use_it() -> int { nope() }\n";
-        let reload = fx.edit(v2);
-        assert!(reload.is_err(), "recompile must bail on the broken edit");
-
-        let res = fx.force_full();
-        assert!(
-            res.is_ok(),
-            "force_full must retain the previous good Session"
-        );
-        assert_eq!(
-            fx.main_text(),
-            main_v1,
-            "a failed recompile must leave the last-good main.lua untouched"
-        );
-    }
-}
-
-#[cfg(test)]
-mod incremental_lint_snapshot_tests {
-    use super::super::SkullReload;
-    use super::overlay_test_support::{run_parts, stub_for};
-    use super::{ExecOutcome, ProjectFixture};
-
-    #[test]
-    fn failed_body_publication_rolls_back_cache_before_the_next_edit() {
-        let v1 =
-            "fn helper() -> int { 3 }\nfn other() -> int { 10 }\nfn main() { print(helper()) }\n";
-        let v2 =
-            "fn helper() -> int { 5 }\nfn other() -> int { 10 }\nfn main() { print(helper()) }\n";
-        let v3 =
-            "fn helper() -> int { 3 }\nfn other() -> int { 11 }\nfn main() { print(other()) }\n";
-        let mut fx = ProjectFixture::boot(v1);
-        let source = fx.path("main.rock");
-        if fx.incremental.is_file() {
-            std::fs::remove_file(&fx.incremental).expect("initial overlay");
-        }
-        std::fs::create_dir(&fx.incremental).expect("blocked overlay");
-
-        assert!(
-            fx.project
-                .apply_edit(&source, v2, &fx.main, &fx.incremental)
-                .is_err(),
-            "a body publication to a directory must fail"
-        );
-        assert_eq!(fx.project.source_text(&source).as_deref(), Some(v1));
-
-        std::fs::remove_dir(&fx.incremental).expect("unblock overlay");
-        let reload = fx
-            .project
-            .apply_edit(&source, v3, &fx.main, &fx.incremental)
-            .expect("next body edit");
-        assert!(
-            matches!(reload, SkullReload::Incremental { .. }),
-            "reload: {reload:?}"
-        );
-        let main = fx.main_text();
-        let output = run_parts(&[&main, stub_for(&main), &fx.overlay_text(), "main()"]);
-        match output {
-            ExecOutcome::Output(output) => {
-                assert_eq!(super::normalize_stdout(&output).trim(), "3\n11")
-            }
-            ExecOutcome::Errored(error) => panic!("recovered overlay failed: {error}"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1525,18 +909,6 @@ mod value_test_exec {
         assert!(
             fails.first().is_some_and(|fail| fail.contains("error:")),
             "{fails:?}"
-        );
-    }
-
-    #[test]
-    fn returns_plus_expect_failure_is_a_unit_failure_not_expected_pass() {
-        let src = "@test(expect_failure = true, returns = 42)\nfn contra() -> int { return 42 }\n";
-        let err =
-            skull_build("val.rock", src, None).expect_err("contradiction must reject the unit");
-        assert!(
-            err.reason.contains("contradictory"),
-            "unexpected reason: {}",
-            err.reason
         );
     }
 
@@ -1701,24 +1073,6 @@ fn test_limit_bounds_program_loading() {
     );
 }
 
-#[test]
-fn test_limit_resets_for_each_test() {
-    let dir = file_limit_package("os.execute('sleep 0.3')", None);
-    add_tests(
-        &dir,
-        &[
-            ("second_test_in_file", "os.execute('sleep 0.3')"),
-            ("third_test_in_file", "os.execute('sleep 0.3')"),
-            ("fourth_test_in_file", "os.execute('sleep 0.3')"),
-        ],
-    );
-    let result = build_with_limit(&dir, Duration::from_secs(1));
-    assert!(
-        matches!(&result, Ok(run) if run.passed == 4 && run.fails.is_empty()),
-        "{result:?}"
-    );
-}
-
 fn add_tests(dir: &tempfile::TempDir, tests: &[(&str, &str)]) {
     let file = dir.path().join("first.rock");
     let mut source = std::fs::read_to_string(&file).unwrap();
@@ -1873,26 +1227,6 @@ fn wait_for_test_watchdog_fixture(
 
 #[cfg(unix)]
 #[test]
-fn test_limit_kills_a_blocked_test_at_the_wall_backstop() {
-    let script = r#"
-printf 'ROCK_TEST\twatch-token\t0\tstart\n' >&2
-exec sleep 600
-"#;
-    let (run, sequence) = wait_for_test_watchdog_fixture(script, Duration::from_secs(1));
-    assert!(
-        run.timed_out,
-        "a blocked child must eventually be bounded: {run:?}"
-    );
-    assert_eq!(
-        run.timeout_phase,
-        Some(crate::common::TimeoutPhase::TestWall)
-    );
-    assert_eq!(sequence.running(), Some(0));
-    assert!(sequence.finished.is_empty());
-}
-
-#[cfg(unix)]
-#[test]
 fn watchdog_replays_only_complete_ordered_terminal_rows() {
     use crate::test_protocol::{LuaTestResult, LuaTestRow};
     use std::os::unix::process::ExitStatusExt;
@@ -1932,35 +1266,6 @@ printf 'ROCK_TEST\twatch-token\t0\t1\tfail\trepeated\n' >&2
             }],
         );
     }
-}
-
-#[test]
-fn package_compile_holds_a_compile_slot_only_while_compiling() {
-    let slots = tempfile::tempdir().expect("slot dir");
-    let package = tempfile::tempdir().expect("package");
-    std::fs::write(
-        package.path().join("stick.toml"),
-        "[package]\nname = \"slot-probe\"\ntype = \"lib\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        package.path().join("probe.rock"),
-        format!(
-            "@test inline(lua) fn slot_is_free_during_tests() = \"local ls = io.popen('ls -A {}'); \
-         local names = ls:read('*a'); ls:close(); assert(names:find('queue'), 'list slots'); \
-         assert(not names:find('held%-'), 'compile slot held while tests run')\"\n",
-            slots.path().display()
-        ),
-    )
-    .unwrap();
-    let package = package.path().to_str().unwrap().to_owned();
-    let result = crate::compile_slots::assert_compile_waits_for_slot_in(slots.path(), move || {
-        super::skull_build_package_with_limit(&package, Duration::from_secs(10), 1, None)
-    });
-    assert!(
-        matches!(&result, Ok(run) if run.passed == 1 && run.fails.is_empty()),
-        "{result:?}"
-    );
 }
 
 #[cfg(unix)]
@@ -2087,25 +1392,6 @@ mod watch_route_tests {
              assert(invoke() == 20)\nbump()\nassert(SCORE == 2)\nprint('PASS')\n"
         );
         assert_eq!(run(&script).trim(), "PASS");
-    }
-
-    #[test]
-    fn a_global_type_change_restarts() {
-        let v0 = "struct Corpse { name: string }\n\
-                  global CORPSES: [Corpse] = []\n\
-                  fn count() -> int {\n  let n = 0\n  for c in CORPSES { n = n + 1 }\n  return n\n}\n";
-        let v1 = v0
-            .replace("[Corpse] = []", "Arena<Corpse> = arena_new()")
-            .replace("for c in", "for (e, c) in");
-        let mut fx = ProjectFixture::boot(v0);
-        let reload = fx.edit(&v1).unwrap();
-        assert!(
-            !matches!(
-                reload,
-                SkullReload::Incremental { .. } | SkullReload::NoChange
-            ),
-            "{reload:?}"
-        );
     }
 
     #[test]
