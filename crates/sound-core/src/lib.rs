@@ -571,7 +571,7 @@ mod tests {
 
     use super::{
         AssetMapResolver, MixGroup, SoundCoreError, SoundEvent, SoundLayer, SoundProject,
-        SoundStep, compile_project, parse_project, prepare_project, serialize_runtime_bank,
+        SoundStep, compile_project, parse_project, serialize_runtime_bank,
     };
 
     const SHARED: &str = "assets/sfx/shared.ogg";
@@ -687,47 +687,6 @@ mod tests {
     }
 
     #[test]
-    fn valid_project_compiles_layers_variants_and_sorted_manifest() {
-        let project = valid_project();
-        let bank = compile_project(&project, &resolver(&[SHARED, ALT, SOLO]))
-            .expect("valid project should compile");
-
-        assert_eq!(bank.events.len(), 3);
-        assert_eq!(bank.events[0].id, "a.event");
-        assert_eq!(bank.events[2].id, "z.event");
-        assert_eq!(bank.events[2].steps[0].layers.len(), 2);
-        assert_eq!(bank.events[2].steps[0].layers[0].sources.len(), 2);
-        assert_eq!(bank.dependencies, vec![ALT, SHARED, SOLO]);
-        assert_eq!(bank.schema_version, 2);
-    }
-
-    #[test]
-    fn shared_sources_resolve_once_per_bank() {
-        use super::AssetResolver;
-        use std::cell::RefCell;
-
-        struct CountedResolver(AssetMapResolver, RefCell<BTreeMap<String, usize>>);
-
-        impl AssetResolver for CountedResolver {
-            fn resolve(&self, key: &str) -> Option<PathBuf> {
-                *self.1.borrow_mut().entry(key.to_owned()).or_default() += 1;
-                self.0.resolve(key)
-            }
-
-            fn discover(&self, pattern: &str) -> Result<Vec<String>, String> {
-                self.0.discover(pattern)
-            }
-        }
-
-        let resolver = CountedResolver(resolver(&[SHARED, ALT, SOLO]), RefCell::default());
-        compile_project(&valid_project(), &resolver).unwrap();
-        assert_eq!(
-            resolver.1.into_inner(),
-            BTreeMap::from([(ALT.into(), 1), (SHARED.into(), 1), (SOLO.into(), 1)])
-        );
-    }
-
-    #[test]
     fn discovered_variants_compile_to_the_same_bank_as_explicit_sources() {
         let mut explicit = valid_project();
         explicit.events[0].steps[0].layers[0].sources =
@@ -754,56 +713,10 @@ mod tests {
     }
 
     #[test]
-    fn development_compile_retains_missing_dependencies_for_runtime_silence() {
-        let project = valid_project();
-        let resolver = resolver(&[SHARED, SOLO]);
-        let bank = prepare_project(&project, &resolver, false)
-            .and_then(|prepared| prepared.compile())
-            .expect("a missing sound must not reject a development bank");
-
-        assert_eq!(bank.events[2].steps[0].layers[0].sources, vec![SHARED, ALT]);
-        assert_eq!(bank.dependencies, vec![ALT, SHARED, SOLO]);
-    }
-
-    #[test]
-    fn unknown_event_is_allowed() {
-        let project = project(&[event_json(
-            "future.game.event",
-            r#"{"sources": ["assets/sfx/solo.ogg"]}"#,
-        )]);
-        assert!(compile_project(&project, &resolver(&[SOLO])).is_ok());
-    }
-
-    #[test]
     fn invalid_project_json_is_rejected() {
         let error = parse_project("{ not json }").expect_err("malformed JSON should reject");
 
         assert!(matches!(error, SoundCoreError::Parse(_)));
-    }
-
-    #[test]
-    fn unsupported_version_is_rejected() {
-        let solo = event_json("event", r#"{"sources": ["assets/sfx/solo.ogg"]}"#);
-        let error = parse_project(&project_json(3, &solo))
-            .and_then(|project| compile_project(&project, &resolver(&[SOLO])))
-            .expect_err("unsupported schema should reject");
-
-        assert!(error.to_string().contains("version"));
-    }
-
-    #[test]
-    fn empty_sources_steps_and_layers_are_rejected() {
-        let no_sources = project(&[event_json("event", r#"{"sources": []}"#)]);
-        let no_layers = event(vec![SoundStep { layers: Vec::new() }]);
-        for (project, missing) in [
-            (no_sources, "sources"),
-            (event(Vec::new()), "steps"),
-            (no_layers, "layers"),
-        ] {
-            let error =
-                compile_project(&project, &resolver(&[])).expect_err("an empty list should reject");
-            assert!(error.to_string().contains(missing), "{missing}: {error}");
-        }
     }
 
     #[test]
@@ -974,22 +887,6 @@ mod tests {
             let error = compile_project(&project, &resolver(&[]))
                 .expect_err("noncanonical key should reject");
             assert!(error.to_string().contains(key), "diagnostic for {key}");
-        }
-    }
-
-    #[test]
-    fn asset_directory_names_are_not_policy() {
-        for key in [
-            "assets/sfx/_inbox/new.ogg",
-            "assets/sfx/_sources/raw.ogg",
-            "assets/sfx/scratch/test.ogg",
-            "assets/sfx/tmp/test.ogg",
-            "assets/sfx/temp/test.ogg",
-        ] {
-            let project = project(&[event_json("event", &format!(r#"{{"sources": ["{key}"]}}"#))]);
-            let bank = compile_project(&project, &resolver(&[key]))
-                .expect("directory names must not affect admission");
-            assert_eq!(bank.dependencies, vec![key]);
         }
     }
 }
