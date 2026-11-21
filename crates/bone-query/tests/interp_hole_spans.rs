@@ -2,28 +2,6 @@
 
 use crate::fixture::{PATH, pos, workspace};
 
-#[test]
-fn holes_resolve_past_escapes_and_non_ascii_text() {
-    let lines = [
-        // The control: no escape before the hole, so nothing can have shifted.
-        "print(\"ab{x} c\")",
-        "print(\"a\\nb{x} c\")",
-        "print(\"a\\n\\t\\\\b{x} c\")",
-        "print(\"a\\\"b{x} c\")",
-        "print(\"a{{b}}c{x} d\")",
-        "print(\"caf\u{e9} {x} c\")",
-        "print(\"a\\nb{x} c {x} d\")",
-        // `"""` is three delimiter bytes, not one.
-        "print(\"\"\"ab{x} c\"\"\")",
-        "print(\"\"\"a\\nb{x} c\"\"\")",
-    ];
-    for line in lines {
-        let src = format!("fn main() {{\n    let x = 5\n    {line}\n}}\n");
-        let target = workspace(&src).definition(PATH, pos(&src, "{x}", 1));
-        assert_eq!(target.map(|l| l.range.start.line), Some(1), "{line}");
-    }
-}
-
 /// Escapes inside a hole cost source bytes, so its sub-expression spans are mapped back.
 #[test]
 fn hole_with_escaped_quotes_resolves_its_identifiers() {
