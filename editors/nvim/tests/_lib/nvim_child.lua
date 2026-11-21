@@ -1,38 +1,5 @@
--- Child-nvim harness for tests that need a real event loop, real
--- mode transitions, and a real popup menu.
---
--- WHY THIS EXISTS
---
--- `nvim --headless -l script.lua` runs the script on the main thread
--- and never enters a key-driven event loop. `feedkeys('a','tx')`,
--- `nvim_input('a')`, `startinsert!` — none of them switch `mode()`
--- to `i`. `complete()` (the API the LSP omnifunc ultimately calls)
--- is a no-op outside insert mode, so the popup never populates and
--- `complete_info()` returns an empty table. Response-level specs
--- (`buf_request -> assert payload`) work fine in that environment;
--- popup-level specs do not.
---
--- This module spawns a child nvim with `--embed` over jobstart RPC.
--- The host script becomes the UI, the child has its own event loop
--- and processes input the way a normal terminal nvim would. Mode
--- transitions are real, autotriggers fire, `complete_info()` returns
--- the popup the user would actually see.
---
--- Geometry note: `nvim_ui_attach` is required. Without an attached
--- UI the child will buffer everything and never run the loop.
---
--- Usage:
---
---   local NvimChild = require('_lib.nvim_child')
---   local child = NvimChild.start()
---   child:exec_lua([[ ... set up rock client ... ]], { rock_lsp_bin })
---   child:cmd('edit ' .. path)
---   child:wait_for_lsp_attach('rock', 5000)
---   child:input('a<C-x><C-o>')
---   child:wait_for(function() return child:eval('pumvisible()') == 1 end, 3000)
---   local items = child:call('complete_info', { { 'items' } }).items
---   ...
---   child:stop()
+-- Headless `-l` scripts do not enter a key-driven loop, so completion needs
+-- an embedded child with an attached UI and its own event loop.
 
 local project = dofile('tests/_lib/project.lua')
 local M = {}
@@ -48,9 +15,7 @@ function M.start(opts)
   local self = setmetatable({}, Child)
 
   self.stderr = {}
-  -- `_argv` (not `cmd`) so the field doesn't shadow `Child:cmd` —
-  -- `self:cmd(...)` resolves through the instance first, and a list
-  -- there means `attempt to call method 'cmd' (a table value)`.
+  -- `cmd` would shadow the Child:cmd method.
   self._argv = vim.list_extend({ vim.v.progpath, '--embed', '--headless', '--clean' },
     opts.args or {})
 
@@ -70,7 +35,6 @@ function M.start(opts)
   self:rpc('nvim_ui_attach', size[1], size[2],
     { rgb = false, ext_popupmenu = false })
 
-  -- Quiet noisy notifications so they don't pollute test output.
   self:cmd('lua vim.notify = function() end')
   self:cmd('lua vim.notify_once = function() end')
 
@@ -100,7 +64,6 @@ function M.open_completion(name, source, autotrigger)
   return child
 end
 
---- Raw RPC request to the child.
 function Child:rpc(method, ...)
   return vim.rpcrequest(self.jobid, method, ...)
 end
@@ -112,17 +75,14 @@ function Child:input(keys)
   return self:rpc('nvim_input', keys)
 end
 
---- Run an Ex command in the child.
 function Child:cmd(cmd)
   return self:rpc('nvim_command', cmd)
 end
 
---- Evaluate a vimscript expression. Useful for `pumvisible()`, etc.
 function Child:eval(expr)
   return self:rpc('nvim_eval', expr)
 end
 
---- Call a vimscript function with args (a list).
 function Child:call(fn, args)
   return self:rpc('nvim_call_function', fn, args or {})
 end
@@ -158,15 +118,9 @@ function Child:popup_words(timeout_ms)
   return vim.tbl_map(function(item) return item.word end, items)
 end
 
---- Wait until a client named `client_name` is attached in the child.
---- Returns the client id on success, raises on timeout.
----
---- Polls `vim.lsp.get_clients()` directly rather than relying on an
---- LspAttach autocmd: the docker harness can race past LspAttach
---- before this function runs (sub-250ms attach), and a freshly-
---- registered autocmd never sees past events. Also: `nvim_exec_lua`
---- returns Lua `nil` as `vim.NIL` (userdata), and `vim.NIL ~= nil`
---- is true — so a naive `~= nil` predicate succeeds vacuously.
+--- Poll clients: an LspAttach event may already have fired. RPC nil becomes
+--- truthy `vim.NIL`, so it must not count as a client id. Returns the id or
+--- raises on timeout.
 function Child:wait_for_lsp_attach(client_name, timeout_ms)
   timeout_ms = timeout_ms or 5000
   local cid

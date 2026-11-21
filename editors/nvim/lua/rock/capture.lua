@@ -1,27 +1,5 @@
--- Insert-mode bug-capture snapshot.
---
--- When something looks wrong in the completion list or inlay hints and
--- you don't want to break your typing context to diagnose, press the
--- configured hotkey (default <C-g>c in insert mode) and we'll:
---
---   * Stat the current buffer + cursor WITHOUT leaving insert mode.
---   * Pair it with the most recent textDocument/completion response
---     already captured in state (usually <100ms old).
---   * Write a self-contained capture directory to /tmp so it survives
---     across sessions and tmux detach.
---   * Push a summary into state.captures so the side panel renders it
---     (tmux-selectable).
---
--- Shape of the on-disk capture:
---   /tmp/rock-nvim-captures/<ts>-<basename>/
---     buffer.rock              full source at capture time
---     info.txt                 human summary (cursor, typed prefix,
---                              client state, binary id, last completion)
---     last_completion.json     most recent textDocument/completion resp
---     REPRO.sh                 runs `rock lsp completion PATH:L:C`
---
--- The REPRO.sh takes the binary path from state so branch/worktree
--- mismatch is automatically reflected.
+-- Capture writes buffer.rock, info.txt, last_completion.json and REPRO.sh;
+-- the reproduction uses the attached binary path.
 
 local state = require('rock.state')
 local uv = vim.uv or vim.loop
@@ -31,7 +9,6 @@ local M = {}
 local BASE_DIR = '/tmp/rock-nvim-captures'
 
 local function mkdir_p(path)
-  -- Equivalent to `mkdir -p`. Walks segments, creates each if missing.
   local parts = vim.split(path, '/', { plain = true, trimempty = true })
   local acc = (path:sub(1, 1) == '/') and '' or '.'
   for _, p in ipairs(parts) do
@@ -59,21 +36,15 @@ local function sanitize(name)
   return (name:gsub('[/\\:]', '_'))
 end
 
--- Main entry point. Safe to call from insert-mode mappings (works
--- entirely off nvim_buf_* which do not alter the mode, and schedules
--- I/O so the keystroke returns immediately).
--- opts.note: free-text tag stored in the summary + info.txt ("bad:
--- suggested T? where T expected") -- how a mis-ranked completion gets
--- flagged for later corpus work. opts.base_dir overrides BASE_DIR.
+-- Safe in insert mode: buffer APIs preserve mode and I/O is scheduled.
+-- opts.note tags the capture; opts.base_dir overrides the destination.
 function M.capture(opts)
   opts = opts or {}
   local bufnr = vim.api.nvim_get_current_buf()
   local buf_name = vim.api.nvim_buf_get_name(bufnr)
   local basename = buf_name ~= '' and vim.fn.fnamemodify(buf_name, ':t') or ('buf-' .. bufnr)
 
-  -- Capture everything we need synchronously before yielding -- the
-  -- user is in the middle of typing; don't risk the buffer mutating
-  -- between the snapshot and its use.
+  -- Snapshot before yielding so later typing cannot change it.
   local cursor = vim.api.nvim_win_get_cursor(0)
   local row, col = cursor[1], cursor[2]  -- 1-indexed row, 0-indexed col
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
@@ -106,12 +77,8 @@ function M.capture(opts)
     binary_id = s.binary.sha8,
   }
 
-  -- Push to in-memory ring NOW so the panel updates immediately even
-  -- before disk I/O completes.
   state.add_capture(summary)
 
-  -- The disk write can happen off the keystroke's critical path. We
-  -- already captured all the data needed into locals.
   vim.schedule(function()
     if not mkdir_p(dir) then
       vim.notify('rock.nvim: failed to create ' .. dir, vim.log.levels.ERROR,
