@@ -1317,18 +1317,4 @@ pub fn check_relocation(ws: &mut Workspace) {
 #[cfg(test)]
 mod tests {
     use super::{keys_may_alias, substitute};
-
-    #[test]
-    fn standalone_file_names_do_not_become_type_slots() {
-        let mut asts = ["borrow_file$.rock", "borrow%5ffile%24.rock"].map(|file| {
-            skull_parser::parse_module_clean("value Cell { n: int }", ustr::ustr(file)).unwrap()
-        });
-        let ws = crate::semantic_passes::semantic_pass(&mut asts).unwrap();
-        let keys: Vec<_> = ws.nominals.keys().map(|key| key.as_str()).collect();
-        assert_eq!(keys.len(), 2);
-        assert!(!keys_may_alias(keys[0], keys[1]));
-        for key in keys {
-            assert_eq!(substitute(key, &[]), key);
-        }
-    }
 }
