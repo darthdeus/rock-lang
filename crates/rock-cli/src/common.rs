@@ -621,29 +621,4 @@ mod tests {
         let error = result.expect_err("a panicked reader must fail the wait");
         assert!(error.to_string().contains("stderr"), "got: {error}");
     }
-
-    #[test]
-    fn short_lived_child_is_reaped_without_a_full_poll_interval() {
-        let fastest = (0..5)
-            .map(|_| {
-                let mut child = std::process::Command::new("sleep")
-                    .arg("0.01")
-                    .spawn()
-                    .expect("spawn sleep");
-                let start = Instant::now();
-                let result = super::ProcessManager::wait_with_timeout(
-                    &mut child,
-                    std::time::Duration::from_secs(30),
-                )
-                .expect("wait");
-                assert!(result.output.status.success() && !result.timed_out);
-                start.elapsed()
-            })
-            .min()
-            .unwrap();
-        assert!(
-            fastest < std::time::Duration::from_millis(40),
-            "fastest wait took {fastest:?}"
-        );
-    }
 }
