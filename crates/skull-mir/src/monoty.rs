@@ -370,32 +370,29 @@ impl std::fmt::Display for NewtypeResolutionError {
     }
 }
 
-/// Interned instantiations are the cycle key. Generic arguments convert in
+/// Concrete instantiations are the cycle key. Generic arguments convert in
 /// their current environment before binding into the next declaration.
 pub fn resolve_newtype_chain(ws: &Workspace, ty: MonoTy) -> Result<MonoTy, NewtypeResolutionError> {
     use bone_core::hir::TypeExpr;
 
     const MAX_STEPS: usize = 256;
 
-    let mut arena = MonoArena::new();
-    let mut current = arena.intern(ty);
-    let mut visited: Vec<MonoTyId> = Vec::new();
-
+    let mut current = ty;
+    let mut visited = Vec::new();
     for _ in 0..MAX_STEPS {
-        let (name, params) = match arena.get(current) {
-            MonoTy::App {
-                ctor: MonoCtor::Nominal(name),
-                params,
-            } => (*name, params.clone()),
-            _ => return Ok(arena.get(current).clone()),
+        let MonoTy::App {
+            ctor: MonoCtor::Nominal(name),
+            ref params,
+        } = current
+        else {
+            return Ok(current);
         };
         let Some(nid) = ws.nominals.newtype_id(name) else {
-            return Ok(arena.get(current).clone());
+            return Ok(current);
         };
         if visited.contains(&current) {
             return Err(NewtypeResolutionError::Cycle(name));
         }
-        visited.push(current);
 
         let owner = ws
             .modules
@@ -419,11 +416,12 @@ pub fn resolve_newtype_chain(ws: &Workspace, ty: MonoTy) -> Result<MonoTy, Newty
             else {
                 return Err(NewtypeResolutionError::InvalidGeneric(name));
             };
-            subst.insert(var, arg);
+            subst.insert(var, arg.clone());
         }
-        current = arena
-            .convert_decl(ws, def.wrapped, &subst)
-            .map_err(NewtypeResolutionError::Conversion)?;
+        let next =
+            convert_decl(ws, def.wrapped, &subst).map_err(NewtypeResolutionError::Conversion)?;
+        visited.push(current);
+        current = next;
     }
 
     Err(NewtypeResolutionError::StepLimit)
@@ -494,101 +492,6 @@ pub(crate) fn infer_var_of(inf: &BodyInference, ty: TyId) -> Option<VarId> {
     match inf.ty_arena[idx] {
         TypeExpr::Infer(var, _) => Some(var),
         _ => None,
-    }
-}
-
-/// Structural equality is the interning key, so ids are equal iff types are.
-#[derive(Default, Debug)]
-pub struct MonoArena {
-    tys: Vec<MonoTy>,
-    interned: FxHashMap<MonoTy, MonoTyId>,
-}
-
-impl MonoArena {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn len(&self) -> usize {
-        self.tys.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.tys.is_empty()
-    }
-
-    pub fn get(&self, id: MonoTyId) -> &MonoTy {
-        &self.tys[id.index()]
-    }
-
-    pub fn lookup(&self, ty: &MonoTy) -> Option<MonoTyId> {
-        self.interned.get(ty).copied()
-    }
-
-    pub fn intern(&mut self, ty: MonoTy) -> MonoTyId {
-        if let Some(id) = self.interned.get(&ty) {
-            return *id;
-        }
-        let id = MonoTyId(self.tys.len() as u32);
-        self.tys.push(ty.clone());
-        self.interned.insert(ty, id);
-        id
-    }
-
-    /// Not an identity; see [`MonoTy::render`].
-    pub fn render(&self, id: MonoTyId) -> String {
-        self.get(id).render()
-    }
-
-    pub fn canonical(&self, id: MonoTyId) -> String {
-        self.get(id).canonical()
-    }
-
-    pub fn nullable(&mut self, inner: MonoTyId) -> MonoTyId {
-        let inner = self.get(inner).clone();
-        self.intern(MonoTy::nullable(inner))
-    }
-
-    pub fn tuple(&mut self, parts: &[MonoTyId]) -> MonoTyId {
-        let parts = self.cloned(parts);
-        self.intern(MonoTy::Tuple(parts))
-    }
-
-    pub fn app(&mut self, ctor: MonoCtor, params: &[MonoTyId]) -> MonoTyId {
-        let params = self.cloned(params);
-        self.intern(MonoTy::App { ctor, params })
-    }
-
-    pub fn function(&mut self, params: &[MonoTyId], ret: MonoTyId) -> MonoTyId {
-        let params = self.cloned(params);
-        let ret = self.get(ret).clone();
-        self.intern(MonoTy::Function {
-            params,
-            ret: Box::new(ret),
-        })
-    }
-
-    fn cloned(&self, ids: &[MonoTyId]) -> Vec<MonoTy> {
-        ids.iter().map(|id| self.get(*id).clone()).collect()
-    }
-
-    pub fn convert(
-        &mut self,
-        ws: &Workspace,
-        inf: &BodyInference,
-        ty: TyId,
-        subst: &MonoSubst,
-    ) -> Result<MonoTyId, MonoTyReason> {
-        Ok(self.intern(convert(ws, inf, ty, subst)?))
-    }
-
-    pub fn convert_decl(
-        &mut self,
-        ws: &Workspace,
-        ty: TyId,
-        subst: &MonoSubst,
-    ) -> Result<MonoTyId, MonoTyReason> {
-        Ok(self.intern(convert_decl(ws, ty, subst)?))
     }
 }
 

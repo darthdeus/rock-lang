@@ -1,5 +1,5 @@
 //! An [`Instance`]'s `args` are ids in the instance graph's
-//! [`crate::monoty::MonoArena`] and have no meaning without it.
+//! [`crate::monoty::MonoInterner`] and have no meaning without it.
 use bone_core::workspace::Workspace;
 
 use crate::mir::FuncRef;
