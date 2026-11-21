@@ -1,7 +1,4 @@
-//! The Rock stdlib source files: their names, load order, ids and where they
-//! come from at runtime. A native process reads them from a directory when one
-//! resolves ([`stdlib_origin`]) and otherwise serves the copy compiled into
-//! the binary; without a filesystem only the embedded copy exists.
+//! A native process reads the stdlib from disk when available, else the embedded copy.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -16,10 +13,7 @@ static FILES: OnceLock<&'static [StdlibFile]> = OnceLock::new();
 
 macro_rules! define_stdlib_files {
     ($($name:literal),+ $(,)?) => {
-        /// The stdlib files, in load order. `unified.rock` is the core stdlib;
-        /// `strings.rock` (portable string algorithms) and `json.rock` build on it.
-        /// `js.rock` holds JS-backend bodies for stdlib fns defined in the others, and
-        /// is LAST so adding one shifts no `__SITE__` line in a lua-emitting file.
+        /// `js.rock` is last so additions do not shift Lua `__SITE__` lines.
         pub const STDLIB_NAMES: &[&str] = &[$($name),+];
 
         /// The stdlib compiled into the binary: what [`stdlib_files`] serves when no
