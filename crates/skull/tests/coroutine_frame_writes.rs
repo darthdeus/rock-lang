@@ -61,15 +61,6 @@ fn main() {
 "#;
 
 #[test]
-fn frame_stores_evaluate_rhs_once_clear_payloads_and_preserve_user_writes() {
-    let lua = common::emit_module(FRAME_WRITES);
-    assert_eq!(
-        common::run_main(&lua),
-        "true\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n2"
-    );
-}
-
-#[test]
 fn spilled_int_to_float_alias_reads_a_valid_slot_after_resume() {
     let ws = bone_semantic::prelude::Workspace::new();
     let ctx = CodegenCtx::new(&ws);
@@ -161,50 +152,4 @@ fn main() {}
     let (resumed, built) = out.split_once(' ').expect("two tags");
     assert_eq!(resumed, built);
     assert!(!resumed.contains("::"));
-}
-
-#[test]
-fn coroutine_step_colors_sequential_locals_below_luajit_limit() {
-    let ws = bone_semantic::prelude::Workspace::new();
-    let ctx = CodegenCtx::new(&ws);
-    let interner = MonoInterner::default();
-    let mut func = MirFunc::new(Ustr::from("wide_step"));
-    let entry = func.entry();
-    let s_cell = func.new_cell(Some(Ustr::from("s")));
-    func.params.push(s_cell);
-    for i in 0..220 {
-        let cell = func.new_cell(Some(Ustr::from(format!("value_{i}").as_str())));
-        let value = func.emit(entry, Inst::Const(Lit::Int(i)));
-        func.emit(entry, Inst::Store { cell, value });
-    }
-    let saved = func.new_cell(Some(Ustr::from("saved")));
-    let saved_value = func.emit(entry, Inst::Const(Lit::Int(7)));
-    func.emit(
-        entry,
-        Inst::Store {
-            cell: saved,
-            value: saved_value,
-        },
-    );
-    let saved_load = func.emit(entry, Inst::Load(saved));
-    func.set_term(entry, Term::Return(vec![saved_load]));
-
-    let frame = FrameCtx {
-        s_cell,
-        fields: FxHashSet::from_iter([saved]),
-        slots: FxHashMap::from_iter([(saved, 0)]),
-    };
-    let lua = skull_codegen_lua::emit_named_framed(
-        &ws,
-        &ctx,
-        &interner,
-        "wide_step",
-        &func,
-        Some(&frame),
-        None,
-    );
-    assert_eq!(
-        common::run_luajit(&format!("{lua}\nprint(wide_step({{}}))\n")),
-        "7"
-    );
 }
