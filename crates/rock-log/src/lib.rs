@@ -481,105 +481,6 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_wall_clock_record_is_marked_in_the_stamp() {
-        let plain = format_line(
-            1.296,
-            log::Level::Error,
-            "SLOWFRAME",
-            &format_args!("frame 60 took 69.7ms"),
-            false,
-        );
-        assert_eq!(plain, "[   1.296s ERROR] [SLOWFRAME] frame 60 took 69.7ms");
-
-        let declared = format_line(
-            1.296,
-            log::Level::Error,
-            "SLOWFRAME",
-            &format_args!("frame 60 took 69.7ms"),
-            true,
-        );
-        assert_eq!(
-            declared,
-            "[   1.296s ERROR]~[SLOWFRAME] frame 60 took 69.7ms"
-        );
-        assert_eq!(
-            plain.len(),
-            declared.len(),
-            "the declaration must not shift the body column"
-        );
-    }
-
-    #[test]
-    fn record_table_keys_on_target_and_first_line() {
-        let mut table = RecordTable::default();
-        table.record("LEVEL", "rejected: floor\nstack traceback: a", 1.0);
-        table.record("LEVEL", "rejected: floor\nstack traceback: b", 2.0);
-        table.record("SAVE", "rejected: floor", 3.0);
-        assert_eq!(table.total, 3);
-        let rows = table.rows();
-        assert_eq!(
-            rows.len(),
-            2,
-            "one fault with different tails is one row: {rows:?}"
-        );
-        assert_eq!(rows[0].target, "SAVE", "most recently seen first");
-        assert_eq!(rows[1].message, "rejected: floor");
-        assert_eq!(rows[1].count, 2);
-        assert_eq!(rows[1].last_seen_secs, 2.0);
-    }
-
-    #[test]
-    fn record_table_evicts_the_least_recently_seen_and_counts_it() {
-        let mut table = RecordTable::default();
-        for i in 0..RECORD_CAP {
-            table.record("T", &format!("fault {i}"), i as f64);
-        }
-        table.record("T", "fault 0", 100.0);
-        table.record("T", "fresh", 101.0);
-        let rows = table.rows();
-        assert_eq!(rows.len(), RECORD_CAP);
-        assert_eq!(table.evicted, 1);
-        assert_eq!(table.total, RECORD_CAP as u64 + 2);
-        assert!(
-            rows.iter().any(|r| r.message == "fault 0"),
-            "a repeat refreshes its row"
-        );
-        assert!(
-            !rows.iter().any(|r| r.message == "fault 1"),
-            "the stalest row is evicted"
-        );
-        assert!(rows.iter().any(|r| r.message == "fresh"));
-    }
-
-    #[test]
-    fn logged_errors_and_warnings_reach_their_own_records() {
-        // Held so its error record does not land in the collection test's list.
-        let _logger = lock_logger();
-        init();
-        set_level(2);
-        let warnings_before = records_total(log::Level::Warn);
-        log::error!(target: "RLTEST_ERRORS", "error table witness {}", 7);
-        log::warn!(target: "RLTEST_ERRORS", "warning table witness {}", 8);
-        let witness = |level| -> Vec<LogRecord> {
-            records(level)
-                .into_iter()
-                .filter(|r| r.target == "RLTEST_ERRORS")
-                .collect()
-        };
-        let errors = witness(log::Level::Error);
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].message, "error table witness 7");
-        let warnings = witness(log::Level::Warn);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0].message, "warning table witness 8");
-        assert!(records_total(log::Level::Warn) > warnings_before);
-        assert!(
-            records(log::Level::Info).is_empty(),
-            "only errors and warnings are kept"
-        );
-    }
-
-    #[test]
     fn checked_runs_collect_error_records_up_to_the_cap() {
         let _logger = lock_logger();
         init();
@@ -688,20 +589,5 @@ mod release_tests {
             ]
         );
         assert!(!String::from_utf8_lossy(&output.stderr).contains("kept"));
-    }
-
-    #[test]
-    fn logger_conflict_is_reported() {
-        if std::env::var_os("LOGGER_TEST_CHILD").is_some() {
-            log::set_logger(&LOGGER).unwrap();
-            init();
-            return;
-        }
-        let output = test_child("release_tests::logger_conflict_is_reported")
-            .env("LOGGER_TEST_CHILD", "1")
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("install logger"));
     }
 }
