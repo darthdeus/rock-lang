@@ -1,0 +1,43 @@
+@nomangle fn held(xs: [int], indices: [int], m: Map<string, [int]>) -> int {
+    if indices[0] < 0 || indices[0] >= xs.len() { return -1 }
+    m.remove("held")
+    return xs[indices[0]]
+}
+
+@nomangle fn removed(xs: [int], m: Map<string, int>) -> int {
+    if m["key"] < 0 || m["key"] >= xs.len() { return -1 }
+    m.remove("key")
+    return xs[m["key"]]
+}
+@nomangle fn shrunk(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    m.remove("missing")
+    return xs[0]
+}
+
+inline(lua) fn probe() = """
+local xs = { len = 2, _data = { 11, 22 } }
+                local indices = { len = 1, _data = { 1 } }
+                local m = { held = indices }
+                assert(held(xs, indices, m) == 22 and m.held == nil)
+                local ok, err = pcall(removed, xs, { key = 1 })
+                assert(not ok and tostring(err):find("attempt to compare nil", 1, true), tostring(err))
+                local changed = { len = 1, _data = { 1 } }
+                local foreign = setmetatable({}, { __index = function()
+                    changed._data[1] = 99
+                    return nil
+                end })
+                ok, err = pcall(held, xs, changed, foreign)
+                assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+                local target = { len = 1, _data = { 7 } }
+                local shrinking = setmetatable({}, { __index = function()
+                    target.len = 0
+                    target._data[1] = nil
+                    return nil
+                end })
+                ok, err = pcall(shrunk, target, shrinking)
+                assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
+"""
+
+@test(backends = "lua")
+fn map_remove_can_mutate_a_vector_index_through_lua_metatable() { probe() }

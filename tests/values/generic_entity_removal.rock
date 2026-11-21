@@ -1,0 +1,19 @@
+struct Item { number: int }
+fn remove_first<T>(items: [T], swap: bool) -> T? {
+    if swap { return items.swap_remove(0) }
+    return items.remove_at(0)
+}
+fn check_remove(swap: bool) {
+    let arena: Arena<Item> = arena_new()
+    let first = arena.insert(Item { number: 7 })
+    let second = arena.insert(Item { number: 9 })
+    let items: [Entity<Item>] = [first, second]
+    let removed = remove_first(items, swap).unwrap()
+    assert(removed.get().unwrap().number == 7 && items[0].get().unwrap().number == 9 && items.len == 1)
+}
+
+@test
+fn generic_removal_round_trips_a_concrete_entity() {
+    check_remove(false)
+    check_remove(true)
+}

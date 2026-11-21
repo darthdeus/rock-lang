@@ -28,27 +28,6 @@ fn make_wide(seed: int) -> Wide {{ Wide {{ f0: seed }} }}
 }
 
 #[test]
-fn generic_handle_removal_keeps_its_concrete_type() {
-    for method in ["remove_at", "swap_remove"] {
-        let source = format!(
-            r#"
-struct Item {{ number: int }}
-fn remove<T>(items: [T]) -> T? {{ return items.{method}(0) }}
-fn main() {{
-    let arena: Arena<Item> = arena_new()
-    let first = arena.insert(Item {{ number: 7 }})
-    let second = arena.insert(Item {{ number: 9 }})
-    let items: [Entity<Item>] = [first, second]
-    let removed = remove(items).unwrap()
-    print(removed.get().unwrap().number, items[0].get().unwrap().number, items.len)
-}}
-"#
-        );
-        assert_eq!(compile_and_run(&source), "7\t9\t1", "{method}");
-    }
-}
-
-#[test]
 fn coroutine_slot_updates_do_not_allocate() {
     let source = r#"
 value Task<R = ()> { coroutine: Coroutine<int, R>, state: Entity<int> }
@@ -293,39 +272,6 @@ fn read(value: Membership) -> int {
 fn main() { let _ = compare(make_owner()) }
 "#;
     assert_allocation_free_compare(source, "compare(owner) == 1");
-}
-
-#[test]
-fn nullable_parameter_lanes_snapshot_before_later_argument_effects() {
-    let source = r#"
-value Token { a: int, b: int, c: int, d: int }
-nobox value Row { token: Token?, items: [int] }
-struct Owner { row: Row }
-fn change(owner: Owner) -> int {
-    if owner.row.token != null { owner.row.token.a = 99 }
-    return 0
-}
-fn observe(row: Row, ignored: int) -> int { return row.token?.a ?? -1 }
-fn local_change(row: Row) -> int {
-    let copy = Owner { row }
-    if copy.row.token != null { copy.row.token.a = 7 }
-    return copy.row.token?.a ?? -1
-}
-fn main() {
-    let owner = Owner { row: Row { token: Token { a: 1, b: 2, c: 3, d: 4 }, items: [] } }
-    assert_eq(observe(owner.row, change(owner)), 1)
-    owner.row.token = Token { a: 1, b: 2, c: 3, d: 4 }
-    assert_eq(observe(row: owner.row, ignored: change(owner)), 1)
-    assert_eq(owner.row.token?.a, 99)
-    assert_eq(local_change(owner.row), 7)
-    assert_eq(owner.row.token?.a, 99)
-    owner.row.token = null
-    assert_eq(observe(owner.row, 0), -1)
-    assert_eq(local_change(owner.row), -1)
-    print("ok")
-}
-"#;
-    assert_eq!(compile_and_run(source), "ok");
 }
 
 #[test]

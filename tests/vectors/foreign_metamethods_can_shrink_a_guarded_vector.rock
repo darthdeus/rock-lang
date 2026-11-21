@@ -1,0 +1,144 @@
+@nomangle fn after_get(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    let old = m.get("missing")
+    if old != null { return old }
+    return xs[0]
+}
+@nomangle fn after_table_set(xs: [int], t: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    table_set(t, "missing", 1)
+    return xs[0]
+}
+@nomangle fn after_table_unset(xs: [int], t: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    table_unset(t, "missing")
+    return xs[0]
+}
+@nomangle fn after_vec_data_set(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    __vec_data_set(ys, 0, 1)
+    return xs[0]
+}
+@nomangle fn after_vec_data_unset(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    __vec_data_unset(ys, 0)
+    return xs[0]
+}
+@nomangle fn after_table_get(xs: [int], t: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value: int = cast(table_get(t, "missing"))
+    return xs[0] + value
+}
+@nomangle fn after_vec_data_get(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value: int = cast(__vec_data_get(ys, 0))
+    return xs[0] + value
+}
+@nomangle fn map_read(m: Map<string, int>) -> int { return m["missing"] }
+@nomangle fn after_map_read(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = m["missing"]
+    return xs[0] + value
+}
+@nomangle fn after_nested_map_read(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = map_read(m)
+    return xs[0] + value
+}
+@nomangle fn after_map_write(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    m["missing"] = 1
+    return xs[0]
+}
+@nomangle fn after_repeated_map_read(xs: [int], m: Map<string, int>) -> int {
+    if xs.len() <= 0 { return -1 }
+    let first = xs[0]
+    let value = m["missing"]
+    return xs[0] + first + value
+}
+@nomangle fn read_nullable(ys: [int?]) -> int? { return ys[0] }
+@nomangle fn write_nullable(ys: [int?]) { ys[0] = 1 }
+@nomangle fn after_nullable_read(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = ys[0]
+    if value != null { return -2 }
+    return xs[0]
+}
+@nomangle fn after_nested_nullable_read(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    let value = read_nullable(ys)
+    if value != null { return -2 }
+    return xs[0]
+}
+@nomangle fn after_nullable_write(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    ys[0] = 1
+    return xs[0]
+}
+@nomangle fn after_nested_nullable_write(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 { return -1 }
+    write_nullable(ys)
+    return xs[0]
+}
+@nomangle fn after_discarded_nullable_read(xs: [int], ys: [int?]) -> int {
+    if xs.len() <= 0 || ys.len() <= 0 { return -1 }
+    ys[0]
+    return xs[0]
+}
+@nomangle fn after_push(xs: [int], ys: [int]) -> int {
+    if xs.len() <= 0 { return -1 }
+    ys.push(1)
+    return xs[0]
+}
+@nomangle fn after_vec_push(xs: [int], ys: [int]) -> int {
+    if xs.len() <= 0 { return -1 }
+    vec_push(ys, 1)
+    return xs[0]
+}
+@nomangle fn external_equal(a: any, b: any) -> bool { return a == b }
+@nomangle fn after_equal(xs: [int], a: any, b: any) -> int {
+    if xs.len() <= 0 { return -1 }
+    let equal = external_equal(a, b)
+    if equal { return xs[0] }
+    return -2
+}
+
+inline(lua) fn probe() = """
+__op_eq = function(a, b) return a == b end
+            local function table(mt) return setmetatable({}, mt) end
+            local function vec(mt) return { len = 1, _data = setmetatable({}, mt) } end
+            local function empty_vec(mt) return { len = 0, _data = setmetatable({}, mt) } end
+            local function pair(mt) return setmetatable({}, mt), setmetatable({}, mt) end
+            local function check(name, f, wrap, key, result)
+                local xs = { len = 1, _data = { 7 } }
+                local mt = { [key] = function()
+                    xs.len = 0
+                    xs._data[1] = nil
+                    return result
+                end }
+                local ok, err = pcall(f, xs, wrap(mt))
+                assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), name .. ": " .. tostring(err))
+            end
+            check("get", after_get, table, "__index", nil)
+            check("table_set", after_table_set, table, "__newindex")
+            check("table_unset", after_table_unset, table, "__newindex")
+            check("vec_data_set", after_vec_data_set, vec, "__newindex")
+            check("vec_data_unset", after_vec_data_unset, vec, "__newindex")
+            check("table_get", after_table_get, table, "__index", 1)
+            check("vec_data_get", after_vec_data_get, vec, "__index", 1)
+            check("map_read", after_map_read, table, "__index", 1)
+            check("nested_map_read", after_nested_map_read, table, "__index", 1)
+            check("map_write", after_map_write, table, "__newindex", 1)
+            check("repeated_map_read", after_repeated_map_read, table, "__index", 1)
+            check("nullable_read", after_nullable_read, vec, "__index", nil)
+            check("nested_nullable_read", after_nested_nullable_read, vec, "__index", nil)
+            check("nullable_write", after_nullable_write, vec, "__newindex", nil)
+            check("nested_nullable_write", after_nested_nullable_write, vec, "__newindex", nil)
+            check("discarded_nullable_read", after_discarded_nullable_read, vec, "__index", nil)
+            check("push", after_push, empty_vec, "__newindex")
+            check("vec_push", after_vec_push, empty_vec, "__newindex")
+            check("equal", after_equal, pair, "__eq", true)
+"""
+
+@test(backends = "lua")
+fn foreign_metamethods_can_shrink_a_guarded_vector() { probe() }

@@ -1,0 +1,20 @@
+struct SnapshotState { i: int }
+inline(lua) fn snapshot_build(state: SnapshotState) -> any = """
+return setmetatable({}, {
+  __index = function()
+    state.i = 2
+    return {11, 22}
+  end,
+})
+"""
+@inline inline(lua) fn snapshot_pick(t: any, i: int) -> int = "return t.values[i]"
+fn snapshot_run() -> int {
+    let state = SnapshotState {i: 1}
+    let t = snapshot_build(state)
+    snapshot_pick(t, state.i)
+}
+
+@test(backends = "lua")
+fn spliced_inline_lua_keeps_argument_snapshot() {
+    assert(snapshot_run() == 11)
+}
