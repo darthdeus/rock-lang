@@ -1,21 +1,10 @@
--- Regression: opening N rock buffers with the binary missing must surface
--- exactly one user-facing notification (no "Press ENTER" prompt loop, no
--- nvim "Client quit / cmd failed" floods, no "RockRestart" loop).
---
--- This spec drives the *real* attach path: vim.lsp.enable + FileType
--- autocmd → cmd() → failure. That's where the bug lived. We do NOT call
--- init.lua's setup(), because setup() has its own pre-enable gate; if we
--- relied on that gate the cmd() failure path would never run and the test
--- would be silently passing for the wrong reason (review note #3).
+-- Exercise cmd() directly: setup() would stop before the missing-binary path.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)
 end
 
--- Capture every vim.notify call. nvim's framework emits "Client quit" /
--- "cmd failed" through vim.notify in 0.11+, so a clean run should have
--- exactly one entry from us and zero from the framework.
 local notifications = {}
 local orig_notify = vim.notify
 vim.notify = function(msg, level, opts)
@@ -28,10 +17,7 @@ vim.notify_once = function(msg, level, opts)
   table.insert(notifications, { msg = tostring(msg), level = level, opts = opts })
 end
 
--- Also capture :echomsg / nvim_echo so a future regression that switches
--- from notify to echo (which can ALSO trigger "Press ENTER") is caught.
--- We snapshot :messages history at the end and assert no error-class
--- echoes leaked.
+-- Echoed errors can also prompt for input; inspect message history.
 local function messages_history()
   local ok, out = pcall(vim.api.nvim_exec2, 'messages', { output = true })
   if not ok then return '' end
@@ -49,18 +35,11 @@ local cfg = client.make_config({ binary = missing })
 vim.lsp.config('rock', cfg)
 client.setup_autocmds()
 
--- Sanity: the binary should NOT exist.
 local bin_info = require('rock.state').get().binary
 if bin_info.exists then
   fail('test setup wrong: binary is reported as existing: ' .. tostring(bin_info.path))
 end
 
--- Step 1: drive the actual bug path. Enable LSP with a missing binary,
--- then create rock buffers and fire FileType so cmd() runs for each.
--- Pre-fix: each buffer's cmd() failure produces (a) our notify (b)
--- nvim's framework "cmd failed" notify (c) "Client quit" notify.
--- Post-fix: first cmd() disables autoattach; subsequent buffers don't
--- trigger cmd(); only one of our notifications surfaces.
 vim.lsp.enable('rock')
 
 local bufs = {}

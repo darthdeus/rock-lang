@@ -1,18 +1,4 @@
--- Crash-and-recover loop.
---
--- Pinned behavior:
---   1. Spawning a binary that exits non-zero drives
---      cmd() past the missing-binary gate, into vim.lsp.rpc.start, and
---      the on_exit dispatcher fires with code != 0. State should
---      transition to 'crashed' and last_exit.code should be 1.
---   2. The crash notification fires.
---   3. mark_buffers_crashed sets a diagnostic in the rock.nvim.crash
---      namespace on every rock buffer that was tracked.
---   4. After client.restart() with a working binary (exits 0),
---      crash diagnostics are cleared on the rock buffer.
---
--- We do NOT need a real LSP for this spec — a fake server that exits 0 or 1
--- is enough to drive the spawn-and-exit machinery (tests/_lib/fake_server.lua).
+-- A fake server suffices to exercise process crash and recovery.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
@@ -44,8 +30,6 @@ local buf = vim.api.nvim_create_buf(true, false)
 vim.api.nvim_buf_set_name(buf, '/tmp/crash-recovery-spec.rock')
 vim.api.nvim_set_option_value('filetype', 'rock', { buf = buf })
 
--- Wait for spawn + on_exit. The fake exits 1 immediately, so
--- the on_exit dispatcher should fire and set state.client.state.
 vim.wait(1500, function()
   local s = state.get().client.state
   return s == 'crashed' or s == 'detached'
@@ -89,24 +73,16 @@ if not crash_notif_seen then
   fail('crash notification did not fire')
 end
 
--- Sanity: missing-binary notification must NOT have fired (binary exists).
 for _, n in ipairs(notifications) do
   if n.msg:find('binary not found', 1, true) then
     fail('missing-binary path was taken on a present binary: ' .. n.msg)
   end
 end
 
--- Phase 2: recovery. Swap the configured binary to one that exits 0 and
--- restart. The "not restarting" gate must NOT fire (binary exists),
--- and after restart state should reset to 'starting' or 'detached'
--- (true exits 0).
 notifications = {}
 vim.lsp.config('rock', client.make_config({ binary = true_bin }))
 client.restart()
--- restart() defers 100ms, then waits up to 2s for old clients to
--- drain, then re-enables + doautocmd FileType. The new spawn's
--- on_exit (true exits 0) is the moment last_exit.code resets to 0.
--- Wait long enough for the whole chain.
+-- Wait for the old client to drain and the replacement to exit.
 vim.wait(4000, function()
   local last = state.get().client.last_exit
   return last and last.code == 0
@@ -118,9 +94,6 @@ for _, n in ipairs(notifications) do
   end
 end
 
--- After recovery the state should not still be reporting code=1.
--- Either it's still spinning up ('starting') or true exited cleanly
--- ('detached' with code=0).
 local s2 = state.get().client
 if s2.last_exit and s2.last_exit.code == 1 then
   fail('post-recovery still has code=1 last_exit; restart() did not actually re-spawn')

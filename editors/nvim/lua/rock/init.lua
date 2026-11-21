@@ -1,8 +1,3 @@
--- rock.nvim - editor integration for the Rock language server.
---
--- Usage (lazy.nvim, pointing at this directory):
---   { dir = '~/projects/rock-lang/editors/nvim', name = 'rock.nvim', dev = true,
---     ft = 'rock', config = function() require('rock').setup({}) end }
 
 local M = {}
 
@@ -32,52 +27,24 @@ M.defaults = {
   panel_side = 'right',
   -- Panel width in columns.
   panel_width = 50,
-  -- Insert-mode hotkey for bug-capture snapshot. Stays in insert mode.
-  -- Set to nil to disable. Default <C-g>c -- <C-g> is unused in insert
-  -- mode and doesn't collide with nvim-cmp keybindings.
+  -- Capture key; nil disables it.
   capture_key = '<C-g>c',
   -- Highlight-link overrides for Rock identifier tiers. See
   -- editors/nvim/lua/rock/highlights.lua for the keys. nil keeps defaults.
   highlights = nil,
-  -- Buffer-local `completeopt` applied to .rock buffers on LspAttach.
-  -- Default surfaces the menu even for one match (`menuone`), doesn't
-  -- auto-insert (`noinsert`, leaves the user driving), and uses nvim's
-  -- built-in fuzzy matching so editor-side filtering matches the
-  -- server's relevance ranking. Set to `false` (or empty string) to
-  -- skip the override and inherit whatever the user has globally.
+  -- Set false or empty to inherit the global completeopt.
   completeopt = 'menuone,noinsert,fuzzy',
-  -- Buffer-local `complete` (keyword-completion sources) for .rock
-  -- buffers. Default `'.'` keeps current-buffer keyword scraping —
-  -- so `<C-n>` / `<C-p>` still surface local identifiers — but drops
-  -- the noisier sources (other windows, loaded/unloaded buffers,
-  -- tags) from the default `.,w,b,u,t`. Set to `''` to suppress
-  -- keyword completion entirely, or `false` to leave the global
-  -- value untouched.
+  -- Empty disables keyword completion; false inherits the global value.
   complete = '.',
-  -- Buffer-local `tags` for .rock buffers. rock-lsp writes a `.rock.tags` to
-  -- each stick.toml package root (covering that package + its deps). The plugin
-  -- tracks every package you open a buffer in and points all rock buffers at
-  -- the UNION of their tags (absolute paths), so a tag jump from a file in one
-  -- package still resolves a symbol defined in another while both are open.
-  -- This value is the upward-search fallback (the `;` climbs from the file's
-  -- dir) appended
-  -- after the union, covering the current file's own package. Set to '' or
-  -- false to disable rock tag handling entirely.
+  -- Tags combine open package roots and this upward-search fallback; false or '' disables them.
   tags = './.rock.tags;',
-  -- Reorder nvim-cmp's comparators for .rock buffers so the LSP's `sortText`
-  -- wins over fuzzy `score`. The server ranks call-argument completions by type
-  -- (a variable of the expected param type first, a function returning it next)
-  -- via `sortText`; cmp's default order scores fuzzily first, so that ranking
-  -- otherwise only breaks ties. Buffer-local, preserves the rest of your
-  -- comparator list. Set false to leave cmp untouched (no-op without nvim-cmp).
+  -- Type ranking precedes fuzzy score; false leaves nvim-cmp untouched.
   cmp_type_priority = true,
 }
 
 M.opts = nil
 
--- Minimum supported Neovim version. Bumped in lockstep with the version
--- the rock-lsp client surface targets — older nvim has gaps in the LSP
--- API we rely on (semantic tokens re-request, vim.lsp.config, etc.).
+-- The LSP client requires Neovim APIs introduced in this version.
 M.min_nvim = { 0, 12, 2 }
 
 function M.setup(user)
@@ -99,15 +66,9 @@ function M.setup(user)
   local panel = require('rock.panel')
 
   local cfg = client.make_config(M.opts)
-  -- Register with nvim 0.11's native API. If the user placed our
-  -- editors/nvim dir on runtimepath, lsp/rock.lua is auto-discovered and
-  -- this call merges into that config. Either way, the final config wins.
   vim.lsp.config('rock', cfg)
 
-  -- Only enable if the binary exists. Enabling with a missing binary
-  -- leaves a half-initialized client in nvim's registry; the next
-  -- FileType event trips client:is_stopped() on a nil rpc field
-  -- ("attempt to index field 'rpc' (a nil value)").
+  -- A missing binary leaves a client with nil RPC in Neovim's registry.
   local bin_info = require('rock.state').get().binary
   if bin_info.exists then
     vim.lsp.enable('rock')
@@ -133,8 +94,7 @@ function M.setup(user)
   require('rock.semtok').setup()
   require('rock.highlights').setup(M.opts.highlights)
 
-  -- Pass the client id into log.lua once the server attaches so its
-  -- relevance filter can match log lines tagged with our client id.
+  -- Log filtering needs the attached client id.
   vim.api.nvim_create_autocmd('LspAttach', {
     group = vim.api.nvim_create_augroup('rock.nvim.log', { clear = true }),
     callback = function(args)
@@ -170,9 +130,7 @@ function M.setup(user)
       { silent = true, desc = 'rock.nvim: color pick under cursor' })
   end
   if M.opts.capture_key then
-    -- Mode-global. Preserves whatever mode you're in (insert, visual,
-    -- normal, select) so pressing the chord the moment something looks
-    -- wrong doesn't disturb context.
+    -- Capture must not change the current mode.
     vim.keymap.set({ 'n', 'i', 'v', 'x', 's' }, M.opts.capture_key,
       function() require('rock.capture').capture() end,
       { silent = true, desc = 'rock.nvim: capture bug snapshot' })

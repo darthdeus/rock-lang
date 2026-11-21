@@ -1,13 +1,4 @@
--- Verifies rock.binary.resolve()'s precedence rules and shell-script peek.
---
--- Resolution order: opts.binary > $ROCK_LSP_DIR > cwd-walk find of
--- crates/rock-cli/Cargo.toml > the rock-lang checkout's debug build >
--- `rock` on PATH. We exercise each branch in isolation by manipulating
--- the relevant input and clearing the others.
---
--- The shell-script peek lets the user point `binary` at a wrapper; resolve()
--- should read the script's first 4 KiB and pull out the embedded
--- `*/target/*/rock` path so fs-watch tracks the real binary, not the script.
+-- Wrapper resolution must watch the embedded binary, not the script.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
@@ -27,7 +18,6 @@ local function write_file(path, contents, mode)
   uv.fs_close(fd)
 end
 
--- Save + restore env / cwd around the test.
 local orig_env_dir = vim.env.ROCK_LSP_DIR
 local orig_env_home = vim.env.HOME
 local orig_cwd = vim.fn.getcwd()
@@ -38,13 +28,11 @@ local function restore()
   vim.cmd('cd ' .. vim.fn.fnameescape(orig_cwd))
 end
 
--- Move to a directory with no crates/rock-cli/Cargo.toml above it so the
--- cwd-walk branch is dormant by default.
+-- Avoid finding a checkout through the current directory.
 local neutral_cwd = tmp_root .. '/neutral'
 vim.fn.mkdir(neutral_cwd, 'p')
 vim.cmd('cd ' .. vim.fn.fnameescape(neutral_cwd))
 
--- Phase 1: explicit opts.binary wins over everything else.
 do
   vim.env.ROCK_LSP_DIR = tmp_root .. '/env'
   local explicit = tmp_root .. '/explicit/rock'
@@ -58,7 +46,6 @@ do
   end
 end
 
--- Phase 2: $ROCK_LSP_DIR fallback when no opts.binary.
 do
   vim.env.ROCK_LSP_DIR = tmp_root .. '/envroot'
   local expected = vim.env.ROCK_LSP_DIR .. '/target/debug/rock'
@@ -68,29 +55,21 @@ do
   end
 end
 
--- Phase 3: cwd-walk finds crates/rock-cli/Cargo.toml above the cwd (the
--- post-reorg layout). Force this by removing $ROCK_LSP_DIR and putting the
--- marker dir above us.
 do
   vim.env.ROCK_LSP_DIR = nil
   local fake_repo = tmp_root .. '/repo'
   vim.fn.mkdir(fake_repo .. '/crates/rock-cli', 'p')
   write_file(fake_repo .. '/crates/rock-cli/Cargo.toml', '[package]\nname = "rock-cli"\n', 420)
-  -- The local_bin only wins if it exists; create one.
   write_file(fake_repo .. '/target/debug/rock', 'fake', 493)
   vim.cmd('cd ' .. vim.fn.fnameescape(fake_repo .. '/crates/rock-cli'))
   local resolved, configured = binary.resolve(nil)
-  -- Normalize via resolve(): on macOS, tempname() returns /var/... but
-  -- getcwd() reports /private/var/... after symlink resolution, so
-  -- find_up's result picks up the /private prefix.
+  -- macOS can resolve /var through /private/var.
   if vim.fn.resolve(configured) ~= vim.fn.resolve(fake_repo .. '/target/debug/rock') then
     restore(); fail('cwd-walk did not pick local target: ' .. tostring(configured))
   end
 end
 
--- Phase 4: checkout and PATH fallbacks when nothing else matches. PATH is
--- swapped per assertion so a `rock` installed on the host can't decide the
--- result.
+-- Isolate PATH so an installed binary cannot affect the assertions.
 do
   vim.cmd('cd ' .. vim.fn.fnameescape(neutral_cwd))
   vim.env.ROCK_LSP_DIR = nil
@@ -108,7 +87,6 @@ do
     vim.env.PATH = orig_path
   end
 
-  -- 4a: no checkout build, no PATH rock -> report the checkout path.
   with_path(empty_dir, function()
     local _, configured = binary.resolve(nil)
     if configured ~= checkout then
@@ -116,7 +94,6 @@ do
     end
   end)
 
-  -- 4b: PATH rock wins when the checkout has no build.
   with_path(bin_dir, function()
     local _, configured = binary.resolve(nil)
     if vim.fn.resolve(configured) ~= vim.fn.resolve(bin_dir .. '/rock') then
@@ -124,7 +101,6 @@ do
     end
   end)
 
-  -- 4c: the checkout's own build beats an installed rock.
   write_file(checkout, 'fake-elf', 493)
   with_path(bin_dir, function()
     local _, configured = binary.resolve(nil)
@@ -134,12 +110,10 @@ do
   end)
 end
 
--- Phase 5: shell-script peek extracts the embedded binary path.
 do
   local script_path = tmp_root .. '/rock-debug.sh'
   local real_bin = tmp_root .. '/realtree/target/release/rock'
   write_file(real_bin, 'fake-elf', 493)
-  -- Use $HOME expansion to also exercise the gsub.
   vim.env.HOME = tmp_root
   local script = '#!/usr/bin/env bash\nexec $HOME/realtree/target/release/rock lsp serve "$@"\n'
   write_file(script_path, script, 493)
@@ -155,7 +129,6 @@ do
   end
 end
 
--- Phase 6: refresh() sets state.binary.exists correctly for present + missing.
 do
   local present = tmp_root .. '/present/rock'
   write_file(present, 'x', 493)
