@@ -500,7 +500,7 @@ fn process_name(pid: libc::pid_t) -> Option<String> {
 }
 
 /// Command-line arguments with every `--var NAME=VALUE` value replaced:
-/// build variables carry secrets such as TELEMETRY_TOKEN, and recorded
+/// build variables carry secrets such as BUILD_SECRET, and recorded
 /// command lines reach logs and other processes' diagnostics.
 pub(crate) fn redact_var_values(args: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut out = Vec::new();

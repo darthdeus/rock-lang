@@ -156,13 +156,6 @@ uint8_t stone_create_directory(const char* path);
 uint8_t stone_copy_file(const char* src, const char* dst);
 uint8_t stone_rename(const char* src, const char* dst);
 
-bool stone_telemetry_configure(const char* root, const char* game, const char* build, const char* platform, const char* channel, const char* endpoint, const char* token, bool explicit_reconsent);
-bool stone_telemetry_record(const char* name, int64_t timestamp, const char* data);
-bool stone_telemetry_validate(const char* name, int64_t timestamp, const char* data);
-void stone_telemetry_close(void);
-bool stone_telemetry_clear(const char* root);
-bool stone_telemetry_withdrawn(const char* root);
-
 // Unified logging bridge (rock-log). __rock_log / log_once /
 // log_throttled route here so the whole game process shares
 // one logger/level/format.

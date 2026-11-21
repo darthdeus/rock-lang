@@ -320,7 +320,6 @@ fn stone_get_executable_path() -> string {
 }
 
 pub extern(ffi, "stone") fn stone_file_modtime(path: string) -> float
-extern(ffi, "stone") fn stone_telemetry_close()
 
 pub extern(ffi, "stone") fn stone_native_destroy(class: string, handle: int) -> bool
 pub extern(ffi, "stone") fn stone_native_handle_state(class: string, handle: int) -> int

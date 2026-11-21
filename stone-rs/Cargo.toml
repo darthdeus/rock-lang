@@ -57,10 +57,6 @@ freeverb = "0.2"
 # Rock side can decode via stdlib/json.rock without a TOML parser of its own.
 toml = "0.8"
 serde_json = "1"
-uuid = { workspace = true }
-ureq = "3.3"
-hmac = "0.12"
-sha2 = "0.10"
 
 [dev-dependencies]
 gamelibs = { workspace = true }

@@ -684,7 +684,7 @@ mod tests {
             "package",
             "example",
             "--var",
-            "TELEMETRY_TOKEN=holder-secret-1",
+            "BUILD_SECRET=holder-secret-1",
             "--var=OTHER=holder-secret-2",
         ];
         write_holder(
@@ -700,7 +700,7 @@ mod tests {
             "holder record leaked a --var value: {record}"
         );
         assert!(
-            record.contains("TELEMETRY_TOKEN") && record.contains("OTHER"),
+            record.contains("BUILD_SECRET") && record.contains("OTHER"),
             "holder record keeps the names: {record}"
         );
         std::fs::create_dir(dir.path().join(QUEUE_DIR)).unwrap();

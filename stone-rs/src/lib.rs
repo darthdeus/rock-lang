@@ -340,7 +340,6 @@ mod shader;
 mod sprite;
 mod stream_buffer;
 mod system_report;
-mod telemetry;
 mod text;
 mod ui_submission_probe;
 mod uniform_block;
