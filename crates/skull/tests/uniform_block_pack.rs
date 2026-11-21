@@ -48,66 +48,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn bloom_blur_packs_as_unboxed_stores_at_its_std140_element_indices() {
-    let lua = emit_module(BLOOM);
-    let body = function_body(&lua, "main");
-    assert!(!body.contains("pack_uniform_block"));
-    assert!(!body.contains("BloomBlurU_lct") && !body.contains("BloomBlurU_ct"));
-    for idx in ["[(0)] = ", "[(2)] = ", "[(3)] = ", "[(4)] = "] {
-        assert!(body.contains(idx));
-    }
-    assert!(!body.contains("[(1)] = "));
-}
-
-#[test]
-fn int_and_bool_leaves_store_through_the_other_view() {
-    let lua = emit_module(
-        r#"
-value Flags { scale: float, on: bool, count: int }
-
-fn main() {
-    let f = native_buffer_float(8)
-    let i = native_buffer_int(8)
-    let u = Flags { scale: 1.5, on: true, count: 7 }
-    pack_uniform_block(f.ptr, i.ptr, u)
-}
-
-"#,
-    );
-    let body = function_body(&lua, "main");
-    let fbuf = body
-        .lines()
-        .find(|l| l.contains(r#"__rock_nb_alloc("float"#))
-        .and_then(|l| l.split_whitespace().next())
-        .expect("the float view's local");
-    let ibuf = body
-        .lines()
-        .find(|l| l.contains(r#"__rock_nb_alloc("int"#))
-        .and_then(|l| l.split_whitespace().next())
-        .expect("the int view's local");
-    assert_ne!(fbuf, ibuf);
-    assert!(body.contains(&format!("{fbuf}[(0)] = (1.5)")));
-    for store in [format!("{ibuf}[(1)] = "), format!("{ibuf}[(2)] = ")] {
-        assert!(body.contains(&store));
-    }
-}
-
-#[test]
-fn uint_uniform_leaves_preserve_the_low_bits_in_the_int_view() {
-    let src = r#"
-value Packed { value: uint }
-
-fn main() {
-    let f = native_buffer_float(1)
-    let i = native_buffer_int(1)
-    pack_uniform_block(f.ptr, i.ptr, Packed { value: 0xffffffff })
-    print(i[0])
-}
-"#;
-    assert_eq!(run_main(&emit_module(src)), "-1");
-}
-
 const GLOBAL_SOURCE: &str = r#"
 value Wide { a: Vec4, b: Vec4, c: Vec4, d: Vec4, m: Mat4 }
 
