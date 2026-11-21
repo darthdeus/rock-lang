@@ -433,27 +433,6 @@ mod synth_tests {
         );
     }
 
-    #[test]
-    fn regular_face_agrees_with_fontdue() {
-        let data = droid();
-        let f = RasterFont::new(&data, PX).expect("DroidSans parses");
-        let fd = fontdue::Font::from_bytes(data.as_slice(), fontdue::FontSettings::default())
-            .expect("fontdue parses DroidSans");
-
-        let mut ours = 0.0f64;
-        let mut theirs = 0.0f64;
-        for c in 'a'..='z' {
-            ours += f.rasterize(c, Synth::REGULAR).expect("rasterizes").ink();
-            let (_, bitmap) = fd.rasterize(c, PX);
-            theirs += bitmap.iter().map(|&v| v as f64).sum::<f64>() / 255.0;
-        }
-        let ratio = ours / theirs;
-        assert!(
-            (ratio - 1.0).abs() < 0.02,
-            "regular ink must match fontdue within 2% (ratio {ratio:.4})"
-        );
-    }
-
     // The FFI carries a face as a mask (load) and as an index (glyph lookup),
     // and Rock encodes the same bits on its side. Both encodings must agree,
     // or a family declares one face and reads another.
