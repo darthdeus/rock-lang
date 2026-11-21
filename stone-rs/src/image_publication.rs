@@ -276,11 +276,13 @@ mod tests {
     fn result(id: u64, bytes: usize) -> Decoded {
         Decoded {
             id,
-            pixels: Some(vec![0; bytes]),
-            width: bytes as u32,
-            height: 1,
-            stored: (bytes as u32, 1),
-            format: crate::image_texture::ImageFormat::Rgba8,
+            pixels: Some(image_decode::PackedPixels {
+                logical: (bytes as u32, 1),
+                stored: (bytes as u32, 1),
+                format: crate::image_texture::ImageFormat::Rgba8,
+                data: vec![0; bytes],
+                offset: 0,
+            }),
         }
     }
 
@@ -646,7 +648,7 @@ mod tests {
         let sizes = |selected: Vec<Decoded>| {
             selected
                 .iter()
-                .map(|d| d.pixels.as_ref().unwrap().len())
+                .map(|d| d.pixels.as_ref().unwrap().bytes().len())
                 .collect::<Vec<_>>()
         };
         assert_eq!(

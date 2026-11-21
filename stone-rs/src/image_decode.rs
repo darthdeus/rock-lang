@@ -5,43 +5,85 @@
 //! must stay on the GL thread. `stone_load_image` probes dimensions immediately
 //! so the caller gets a valid handle; prefetched payloads are read on the pool,
 //! while Required loads hand their already-read bytes to it. The decoded
-//! pixels come back through `drain_with` for upload at the next flush point.
+//! pixels come back through the completion queue for upload on the GL thread.
 //! The requested storage format is applied after any declared reduction.
 
 use std::io::Cursor;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Mutex, OnceLock};
 
+use crate::image_texture::ImageFormat;
+
 pub struct Decoded {
     pub id: u64,
-    /// `None` when decode failed; the reason is already logged. Failures still
-    /// come back as a job so a drain counting outstanding work cannot hang.
-    ///
-    /// These are the pixels as they will be STORED, which is `capped_dims` of
-    /// `width` x `height` -- the reduction runs on the pool thread that decoded
-    /// them, not on the GL thread that uploads them.
-    pub pixels: Option<Vec<u8>>,
-    /// The image's LOGICAL size, always the file's own, cap or no cap.
-    pub width: u32,
-    pub height: u32,
-    /// What the pool actually stored, which is `storage_dims` of `width` x
-    /// `height`. Carried rather than recomputed on the GL thread because only
-    /// the submitting load knows whether the image declared exact texels.
-    pub stored: (u32, u32),
-    pub(crate) format: crate::image_texture::ImageFormat,
+    pub(crate) pixels: Option<PackedPixels>,
 }
 
-impl Decoded {
-    fn failed(id: u64, format: crate::image_texture::ImageFormat) -> Self {
-        Decoded {
-            id,
-            pixels: None,
-            width: 0,
-            height: 0,
-            stored: (0, 0),
-            format,
-        }
+pub(crate) struct PackedPixels {
+    pub(crate) logical: (u32, u32),
+    pub(crate) stored: (u32, u32),
+    pub(crate) format: ImageFormat,
+    pub(crate) data: Vec<u8>,
+    pub(crate) offset: usize,
+}
+
+impl PackedPixels {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.data[self.offset..]
     }
+}
+
+pub(crate) fn prepare_pixels(
+    data: Vec<u8>,
+    path: &str,
+    format: ImageFormat,
+    exact_texels: bool,
+    expected: Option<(u32, u32)>,
+) -> Option<PackedPixels> {
+    let (logical, pixels, offset) = if let Some(block_format) = format.blocks() {
+        let Some((size, blocks)) = block_format.blocks(&data) else {
+            crate::log_once!("IMAGE", "invalid DDS block payload: {}", path);
+            return None;
+        };
+        let offset = data.len() - blocks.len();
+        (size, data, offset)
+    } else {
+        let (rgba, width, height) = decode_rgba_bytes(&data, path)?;
+        drop(data);
+        ((width, height), rgba, 0)
+    };
+    if expected.is_some_and(|size| size != logical) {
+        crate::log_once!(
+            "IMAGE",
+            "prefetched image {} changed dimensions after header admission: expected {:?}, got {}x{}",
+            path, expected, logical.0, logical.1
+        );
+        return None;
+    }
+    let (w, h) = logical;
+    let stored = storage_dims(exact_texels, w, h);
+    let data = if format.blocks().is_some() {
+        pixels
+    } else if let Some(packed) =
+        pack_at_storage(pixels, logical, stored).and_then(|bytes| format.pack_rgba8_owned(bytes))
+    {
+        packed
+    } else {
+        crate::log_once!(
+            "IMAGE",
+            "decoded image {} could not be packed as {:?}",
+            path,
+            format
+        );
+        return None;
+    };
+    Some(PackedPixels {
+        logical,
+        stored,
+        format,
+        data,
+        offset,
+    })
 }
 
 struct Queue {
@@ -147,11 +189,19 @@ pub fn store_at_storage(
     width: u32,
     height: u32,
 ) -> Option<Vec<u8>> {
-    let (sw, sh) = storage_dims(exact_texels, width, height);
-    if (sw, sh) == (width, height) {
-        return Some(rgba);
+    pack_at_storage(
+        rgba,
+        (width, height),
+        storage_dims(exact_texels, width, height),
+    )
+}
+
+fn pack_at_storage(rgba: Vec<u8>, logical: (u32, u32), stored: (u32, u32)) -> Option<Vec<u8>> {
+    if logical == stored {
+        Some(rgba)
+    } else {
+        box_downsample(&rgba, logical.0, logical.1, stored.0, stored.1)
     }
-    box_downsample(&rgba, width, height, sw, sh)
 }
 
 pub fn capped_dims_for(cap: u32, width: u32, height: u32) -> (u32, u32) {
@@ -265,7 +315,7 @@ pub(crate) fn submit(
     path: String,
     source: DecodeSource,
     exact_texels: bool,
-    format: crate::image_texture::ImageFormat,
+    format: ImageFormat,
 ) {
     let q = queue();
     *q.outstanding.lock().expect("outstanding poisoned") += 1;
@@ -281,52 +331,9 @@ pub(crate) fn submit(
                 (data, Some(dimensions))
             }
         };
-        let pixels = data.and_then(|mut data| {
-            let Some(block_format) = format.blocks() else {
-                return decode_rgba_bytes(&data, &path);
-            };
-            let Some(((w, h), _)) = block_format.blocks(&data) else {
-                crate::log_once!("IMAGE", "invalid DDS block payload: {}", path);
-                return None;
-            };
-            data.drain(..stone_texture::HEADER_LEN);
-            Some((data, w, h))
-        });
-        let decoded = match pixels {
-            Some((_, width, height)) if expected.is_some_and(|size| size != (width, height)) => {
-                crate::log_once!("IMAGE", "prefetched image {} changed dimensions after header admission: expected {:?}, got {}x{}",
-                    path, expected, width, height);
-                Decoded::failed(id, format)
-            }
-            // The cap reduces here, on the pool thread, so the GL thread never
-            // pays a pass over the full-size pixels -- a large bank is several GB.
-            Some((rgba, width, height)) => {
-                let stored = storage_dims(exact_texels, width, height);
-                let pixels = if format.blocks().is_some() {
-                    Some(rgba)
-                } else {
-                    store_at_storage(exact_texels, rgba, width, height)
-                        .and_then(|stored| format.pack_rgba8_owned(stored))
-                };
-                if pixels.is_none() {
-                    crate::log_once!(
-                        "IMAGE",
-                        "decoded image {} could not be packed as {:?}",
-                        path,
-                        format
-                    );
-                }
-                Decoded {
-                    id,
-                    pixels,
-                    width,
-                    height,
-                    stored,
-                    format,
-                }
-            }
-            None => Decoded::failed(id, format),
-        };
+        let pixels =
+            data.and_then(|data| prepare_pixels(data, &path, format, exact_texels, expected));
+        let decoded = Decoded { id, pixels };
         if let Err(e) = tx.send(decoded) {
             crate::log_once!("IMAGE", "decode result for {} lost: {}", path, e);
         }
@@ -427,6 +434,26 @@ pub(crate) fn test_completions(count: usize) -> Sender<Decoded> {
 
 #[cfg(test)]
 mod cap_tests {
+    #[test]
+    fn compressed_storage_contains_the_blocks_without_the_container_header() {
+        use super::{prepare_pixels, ImageFormat};
+
+        let size = (5, 3);
+        for (format, header, bytes) in [
+            (ImageFormat::Bc1, stone_texture::bc1_header(5, 3), 16),
+            (ImageFormat::Bc5, stone_texture::bc5_header(5, 3), 32),
+        ] {
+            let mut source = header.unwrap().to_vec();
+            let payload: Vec<_> = (0..bytes).collect();
+            source.extend_from_slice(&payload);
+            let decoded =
+                prepare_pixels(source.clone(), "fixture.dds", format, true, Some(size)).unwrap();
+            assert_eq!(decoded.logical, size);
+            assert_eq!(decoded.stored, size);
+            assert_eq!(decoded.bytes(), payload);
+            assert!(prepare_pixels(source, "fixture.dds", format, true, Some((4, 3))).is_none());
+        }
+    }
     use super::{box_downsample, capped_dims_for, decode_rgba_bytes, probe_dimensions};
 
     fn quad_4x4() -> Vec<u8> {
@@ -636,11 +663,12 @@ mod queue_tests {
 
         for ((id, want, dimensions, stored), decoded) in expected.iter().zip(got.iter()) {
             assert_eq!(decoded.id, *id);
-            assert_eq!((decoded.width, decoded.height), *dimensions);
-            assert_eq!(decoded.stored, *stored);
+            let packed = decoded.pixels.as_ref().unwrap();
+            assert_eq!(packed.logical, *dimensions);
+            assert_eq!(packed.stored, *stored);
             assert_eq!(
-                decoded.pixels.as_ref(),
-                Some(want),
+                packed.bytes(),
+                want.as_slice(),
                 "parallel decode of job {id} must match serial stored pixels"
             );
         }

@@ -29,7 +29,10 @@ thread_local! {
 }
 
 pub(crate) fn decoded_upload_bytes(decoded: &image_decode::Decoded) -> usize {
-    decoded.pixels.as_ref().map_or(0, Vec::len)
+    decoded
+        .pixels
+        .as_ref()
+        .map_or(0, |pixels| pixels.bytes().len())
 }
 
 fn elapsed_us(start: std::time::Instant) -> c_int {
@@ -772,7 +775,7 @@ enum LoadPixels {
     /// Probed dimensions; the decode pool publishes the texels later.
     Decode(image_decode::DecodeSource),
     /// The header gave no dimensions, so it was decoded here, packed at storage size.
-    Inline(Vec<u8>),
+    Inline(image_decode::PackedPixels),
 }
 
 fn load_format(path: &str, format: ImageFormat) -> Option<ImageFormat> {
@@ -844,19 +847,8 @@ fn acquire_pixels(
             None
         }
         None => {
-            let (rgba, w, h) = image_decode::decode_rgba_bytes(&data, path)?;
-            let Some(stored) = image_decode::store_at_storage(exact_texels, rgba, w, h)
-                .and_then(|stored| format.pack_rgba8_owned(stored))
-            else {
-                log_once!(
-                    "IMAGE",
-                    "stone_load_image: could not pack {} as {:?}",
-                    path,
-                    format
-                );
-                return None;
-            };
-            Some(((w, h), LoadPixels::Inline(stored)))
+            let pixels = image_decode::prepare_pixels(data, path, format, exact_texels, None)?;
+            Some((pixels.logical, LoadPixels::Inline(pixels)))
         }
     }
 }
@@ -893,7 +885,10 @@ fn load_image(
     let stubbed = matches!(pixels, LoadPixels::Stub);
     // The logical size stays the file's, so no frame rect, sheet index or UV
     // can see a capped or stubbed storage size.
-    let stored = load_storage_dims(stubbed, exact_texels, width, height);
+    let stored = match &pixels {
+        LoadPixels::Inline(pixels) => pixels.stored,
+        _ => load_storage_dims(stubbed, exact_texels, width, height),
+    };
     if !stubbed && stored != (width, height) {
         ::log::debug!(target: "IMAGE", "{} stored {}x{} of {}x{} under the image cap",
             path_str, stored.0, stored.1, width, height);
@@ -901,7 +896,7 @@ fn load_image(
     // A stub's texel is not asset data, so it is not counted as an upload.
     let (upload, inline_bytes) = match &pixels {
         LoadPixels::Stub => (Some(stub_texel(format)), 0),
-        LoadPixels::Inline(bytes) => (Some(bytes.as_slice()), bytes.len()),
+        LoadPixels::Inline(pixels) => (Some(pixels.bytes()), pixels.bytes().len()),
         LoadPixels::Decode(_) => (None, 0),
     };
     let texture_started = std::time::Instant::now();
@@ -1014,27 +1009,28 @@ pub extern "C" fn stone_service_image_uploads() -> c_int {
 
 /// Define texture storage from a finished decode. Returns the uploaded bytes.
 fn upload_decoded(d: &image_decode::Decoded) -> Option<usize> {
-    let Some(pixels) = d.pixels.as_ref() else {
+    let Some(packed) = &d.pixels else {
         mark_decode_failed(d.id);
         return None;
     };
     let (w, h, format) = with_image(d.id, |image| (image.width, image.height, image.format))?;
-    if format != d.format {
+    if format != packed.format {
         log_once!(
             "IMAGE",
             "deferred image {} format mismatch {:?} != {:?}; skipped",
             d.id,
-            d.format,
+            packed.format,
             format
         );
         return None;
     }
-    if (w, h) != (d.width, d.height) {
+    let (width, height) = packed.logical;
+    if (w, h) != packed.logical {
         log_once!(
             "IMAGE",
             "deferred decode size {}x{} != probed {}x{} for image {}; skipped",
-            d.width,
-            d.height,
+            width,
+            height,
             w,
             h,
             d.id
@@ -1042,8 +1038,8 @@ fn upload_decoded(d: &image_decode::Decoded) -> Option<usize> {
         mark_decode_failed(d.id);
         return None;
     }
-    // A length mismatch would make tex_image_2d read past the buffer.
-    let (sw, sh) = d.stored;
+    let pixels = packed.bytes();
+    let (sw, sh) = packed.stored;
     let expected = format.level_bytes(sw, sh) as usize;
     if pixels.len() != expected {
         log_once!(
@@ -1059,8 +1055,7 @@ fn upload_decoded(d: &image_decode::Decoded) -> Option<usize> {
         mark_decode_failed(d.id);
         return None;
     }
-    publish_image_pixels(d.id, (d.width, d.height), (sw, sh), format, pixels)
-        .then_some(pixels.len())
+    publish_image_pixels(d.id, packed.logical, packed.stored, format, pixels).map(|_| pixels.len())
 }
 
 /// Successful decodes and failure fills publish packed texels through the
@@ -1071,10 +1066,8 @@ fn publish_image_pixels(
     stored: (u32, u32),
     format: ImageFormat,
     pixels: &[u8],
-) -> bool {
-    let Some((target, fresh)) = image_write_target_stored(id, logical, stored, pixels) else {
-        return false;
-    };
+) -> Option<bool> {
+    let (target, fresh) = image_write_target_stored(id, logical, stored, pixels)?;
     if !fresh
         && with_gl(|gl| unsafe {
             tex_image_for_format(gl, target, stored.0, stored.1, format, pixels);
@@ -1082,10 +1075,10 @@ fn publish_image_pixels(
         .is_none()
     {
         ::log::error!(target: "IMAGE", "image {id}: no GL context for pixel publication");
-        return false;
+        return None;
     }
     refresh_image_mipmaps(id, target);
-    true
+    Some(fresh)
 }
 
 #[no_mangle]
@@ -1104,14 +1097,8 @@ pub extern "C" fn stone_image_is_stub(handle: u64) -> bool {
 #[no_mangle]
 pub extern "C" fn stone_image_storage_size(handle: u64, width: *mut c_int, height: *mut c_int) {
     let (w, h) = with_image(handle, LoadedImage::stored_size).unwrap_or((0, 0));
-    unsafe {
-        if !width.is_null() {
-            *width = w as c_int;
-        }
-        if !height.is_null() {
-            *height = h as c_int;
-        }
-    }
+    crate::write_out(width, w as c_int);
+    crate::write_out(height, h as c_int);
 }
 
 #[no_mangle]
@@ -1120,36 +1107,20 @@ pub extern "C" fn stone_probe_image_size(
     width: *mut c_int,
     height: *mut c_int,
 ) -> bool {
-    let size = if path.is_null() {
-        None
-    } else {
-        unsafe { CStr::from_ptr(path) }
-            .to_str()
-            .ok()
-            .and_then(resolve_image_header)
-            .and_then(|header| header.dimensions)
-    };
+    let size = unsafe { crate::filesystem::cstr(path) }
+        .and_then(resolve_image_header)
+        .and_then(|header| header.dimensions);
     let (w, h) = size.unwrap_or((0, 0));
-    unsafe {
-        if !width.is_null() {
-            *width = w as c_int;
-        }
-        if !height.is_null() {
-            *height = h as c_int;
-        }
-    }
+    crate::write_out(width, w as c_int);
+    crate::write_out(height, h as c_int);
     size.is_some()
 }
 
 #[no_mangle]
 pub extern "C" fn stone_get_image_size(handle: u64, width: *mut c_int, height: *mut c_int) {
-    with_image(handle, |img| unsafe {
-        if !width.is_null() {
-            *width = img.width as c_int;
-        }
-        if !height.is_null() {
-            *height = img.height as c_int;
-        }
+    with_image(handle, |img| {
+        crate::write_out(width, img.width as c_int);
+        crate::write_out(height, img.height as c_int);
     });
 }
 
@@ -1201,36 +1172,17 @@ pub(crate) fn image_write_target_stored(
     stored: (u32, u32),
     data: &[u8],
 ) -> Option<(glow::Texture, bool)> {
-    let current = with_image(handle, |img| img.texture)?;
-    // A writer's own upload can be a `tex_sub_image_2d` wider than the storage
-    // the cap left, which GL refuses and drops. So a write that does not match
-    // what GL holds is completed here, at the size this one names, and the
-    // caller skips its own upload.
-    if with_image(handle, LoadedImage::stored_size) != Some(stored) {
-        return define_image_storage(handle, current, logical, stored, data)
-            .map(|texture| (texture, true));
+    let (texture, current, format) =
+        with_image(handle, |img| (img.texture, img.stored_size(), img.format))?;
+    if current == stored {
+        return Some((texture, false));
     }
-    Some((current, false))
-}
-
-/// Define level 0 of `texture` as `stored` texels of `data`, and record both the
-/// image's `logical` size and what GL now holds. `None` with no GL context.
-///
-/// The two sizes are the whole point: `logical` is what every Rock caller reads
-/// back through `stone_get_image_size`, `stored` is only what GL holds.
-fn define_image_storage(
-    handle: u64,
-    texture: glow::Texture,
-    logical: (u32, u32),
-    stored: (u32, u32),
-    data: &[u8],
-) -> Option<glow::Texture> {
-    let format = with_image(handle, |img| img.format)?;
+    // A subimage write cannot exceed existing GL storage. Define it here when it changes.
     with_gl(|gl| unsafe {
         tex_image_for_format(gl, texture, stored.0, stored.1, format, data);
     })?;
     with_image_mut(handle, |img| img.set_storage(logical, stored));
-    Some(texture)
+    Some((texture, true))
 }
 
 /// Read one texel straight out of an image's texture, as 0xRRGGBBAA.
@@ -1401,53 +1353,25 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     // A pending upload would land after the reload and restore the old pixels.
     stone_flush_image_uploads();
 
-    let Some(format) = with_image(handle, |img| img.format) else {
+    let Some((format, exact)) = with_image(handle, |img| {
+        (
+            img.format,
+            img.exact_texels || img.format != ImageFormat::Rgba8,
+        )
+    }) else {
         return false;
     };
-    if let Some(block_format) = format.blocks() {
-        let Some(data) = resolve_image_bytes(path_str) else {
-            return false;
-        };
-        let Some((size, blocks)) = block_format.blocks(&data) else {
-            log_once!("IMAGE", "invalid DDS on reload: {}", path_str);
-            return false;
-        };
-        if !publish_image_pixels(handle, size, size, format, blocks) {
-            return false;
-        }
-        with_image_mut(handle, |img| {
-            (img.width, img.height) = size;
-            img.stub_path = None;
-            img.decode_failed = false;
-        });
-        return true;
-    }
-    let (data, width, height) = match decode_rgba_image(path_str) {
-        Some(t) => t,
-        None => return false,
-    };
-
-    let exact =
-        with_image(handle, |img| img.exact_texels).unwrap_or(false) || format != ImageFormat::Rgba8;
-    let (storage_width, storage_height) = image_decode::storage_dims(exact, width, height);
-    let Some(data) = image_decode::store_at_storage(exact, data, width, height)
-        .and_then(|stored| format.pack_rgba8_owned(stored))
+    let Some(packed) = resolve_image_bytes(path_str)
+        .and_then(|data| image_decode::prepare_pixels(data, path_str, format, exact, None))
     else {
-        log_once!(
-            "IMAGE",
-            "stone_reload_image: cannot store {} at {}x{}",
-            path_str,
-            storage_width,
-            storage_height
-        );
         return false;
     };
-
-    let Some((texture, fresh)) = image_write_target_stored(
+    let Some(fresh) = publish_image_pixels(
         handle,
-        (width, height),
-        (storage_width, storage_height),
-        &data,
+        packed.logical,
+        packed.stored,
+        format,
+        packed.bytes(),
     ) else {
         log_once!(
             "IMAGE",
@@ -1457,24 +1381,14 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
         );
         return false;
     };
-    if fresh {
-        refresh_image_mipmaps(handle, texture);
-        with_image_mut(handle, |img| img.decode_failed = false);
-        return true;
-    }
-
-    let uploaded = with_gl(|gl| unsafe {
-        tex_image_for_format(gl, texture, storage_width, storage_height, format, &data);
-    });
-    if uploaded.is_none() {
-        return false;
-    }
-    refresh_image_mipmaps(handle, texture);
-
     with_image_mut(handle, |img| {
-        let stub_path = img.stub_path.take();
-        img.set_storage((width, height), (storage_width, storage_height));
-        img.stub_path = stub_path;
+        if !fresh {
+            let stub = img.stub_path.take();
+            img.set_storage(packed.logical, packed.stored);
+            if format.blocks().is_none() {
+                img.stub_path = stub;
+            }
+        }
         img.decode_failed = false;
     });
     true
