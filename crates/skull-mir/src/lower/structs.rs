@@ -735,36 +735,12 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
-        let call_span = self.body.expr_spans[call];
-        let fname = self.ws.module(func.module).functions[func.func].name;
-        let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
-
-        let [arg] = arg_idxs else {
-            return Err(reject(
-                call_span,
-                format!("`@struct_expand` fn `{fname}` takes exactly one argument"),
-            ));
-        };
-        let arg = *arg;
+        let f = &self.ws.module(func.module).functions[func.func];
+        let fname = f.name;
+        let reject = CompilerError::new_with_label;
+        let (arg, enum_name) =
+            struct_pairs_signature(self.ws, self.body.expr_spans[call], f, arg_idxs, false)?;
         let arg_span = self.body.expr_spans[arg];
-
-        let ret = self.ws.module(func.module).functions[func.func]
-            .return_ty
-            .ok_or_else(|| {
-                reject(
-                    call_span,
-                    format!("`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`"),
-                )
-            })?;
-        let enum_name = pairs_return_enum(self.ws, ret).ok_or_else(|| {
-            reject(
-                call_span,
-                format!(
-                    "`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`, got `{}`",
-                    self.ws.render(None, ret)
-                ),
-            )
-        })?;
 
         // The argument must be a value struct: its Group's parts are the field values
         // in declaration order, each lowered exactly once.
@@ -851,38 +827,23 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
-        let call_span = self.body.expr_spans[call];
-        let fname = self.ws.module(func.module).functions[func.func].name;
-        let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
-
-        // The one-argument form yields the std140 plan's fingerprint, which names
-        // the block a call site means; it must declare `-> int`.
-        let (fv_e, iv_e, u_e) = match arg_idxs {
-            [u_e] => {
-                let returns_int = self.ws.module(func.module).functions[func.func]
-                    .return_ty
-                    .map(|rt| {
-                        matches!(
-                            shape::static_ty(self.ws, rt),
-                            Some(TypeExpr::Builtin(BuiltinTy::Int))
-                        )
-                    })
-                    .unwrap_or(false);
-                if !returns_int {
-                    return Err(reject(call_span, uniform_expand_arity_msg(fname)));
+        let f = &self.ws.module(func.module).functions[func.func];
+        let fname = f.name;
+        let reject = CompilerError::new_with_label;
+        let (fv_e, iv_e, u_e) =
+            match uniform_expand_signature(self.ws, self.body.expr_spans[call], f, arg_idxs)? {
+                UniformExpansion::Fingerprint(u_e) => {
+                    let u_span = self.body.expr_spans[u_e];
+                    let Some(struct_name) = self.value_struct_name_of(u_e) else {
+                        return Err(reject(u_span, uniform_expand_arg_msg(fname)));
+                    };
+                    let plan = uniform_block_checked(self.ws, struct_name)
+                        .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
+                    let fp = self.emit_cur(Inst::Const(Lit::Int(plan.fingerprint() as i64)));
+                    return Ok(ValueRepr::Scalar(fp));
                 }
-                let u_span = self.body.expr_spans[*u_e];
-                let Some(struct_name) = self.value_struct_name_of(*u_e) else {
-                    return Err(reject(u_span, uniform_expand_arg_msg(fname)));
-                };
-                let plan = uniform_block_checked(self.ws, struct_name)
-                    .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
-                let fp = self.emit_cur(Inst::Const(Lit::Int(plan.fingerprint() as i64)));
-                return Ok(ValueRepr::Scalar(fp));
-            }
-            [fv_e, iv_e, u_e] => (*fv_e, *iv_e, *u_e),
-            _ => return Err(reject(call_span, uniform_expand_arity_msg(fname))),
-        };
+                UniformExpansion::Write(fv_e, iv_e, u_e) => (fv_e, iv_e, u_e),
+            };
         let u_span = self.body.expr_spans[u_e];
 
         let fv = self.lower_expr(fv_e)?;
@@ -1112,26 +1073,12 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
-        let call_span = self.body.expr_spans[call];
         let f = &self.ws.module(func.module).functions[func.func];
-        let (fname, ret) = (f.name, f.return_ty);
-        let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
-
-        let [arg] = arg_idxs else {
-            return Err(reject(
-                call_span,
-                format!("`@vertex_expand` fn `{fname}` takes exactly one argument"),
-            ));
-        };
-        let arg = *arg;
+        let reject = CompilerError::new_with_label;
+        let (arg, kind) =
+            vertex_expand_signature(self.ws, self.body.expr_spans[call], f, arg_idxs)?;
+        let fname = f.name;
         let arg_span = self.body.expr_spans[arg];
-
-        let Some(kind) = ret.and_then(|r| vertex_expand_return(self.ws, r)) else {
-            return Err(reject(
-                call_span,
-                vertex_expand_ret_msg(self.ws, fname, ret),
-            ));
-        };
         let Some(elem) = self.nb_type_value_elem(arg)? else {
             return Err(reject(arg_span, vertex_expand_arg_msg(fname)));
         };

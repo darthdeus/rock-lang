@@ -3130,6 +3130,29 @@ fn unique_fn(ws: &Workspace, name: Ustr) -> Option<(ModuleId, Idx<Function>)> {
     }
 }
 
+fn expansion_calls<'a>(
+    ws: &'a Workspace,
+    body: &'a Body,
+    inf: Option<&'a BodyInference>,
+) -> impl Iterator<Item = (Idx<Expr>, &'a Function, IdxRange<Expr>, ExpandKind)> {
+    body.expr_arena.iter().filter_map(move |(e, expr)| {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            args,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        let (fmod, fid) = match inf {
+            Some(inf) => resolve_call_fn(ws, inf, e, *name),
+            None => unique_fn(ws, *name),
+        }?;
+        let f = &ws.module(fmod).functions[fid];
+        Some((e, f, *args, crate::intrinsics::expand_kind(f)?))
+    })
+}
+
 /// Whether call `e` to `name` is a `rock_shader` expansion. Its arguments name
 /// stage entries for GLSL; the call collapses to a key, so they are no values.
 pub fn is_shader_pipeline_call(
@@ -3144,39 +3167,34 @@ pub fn is_shader_pipeline_call(
     })
 }
 
-fn struct_expand_rejection_for_call(
+fn struct_pairs_signature(
     ws: &Workspace,
-    body: &Body,
-    call: Idx<Expr>,
+    span: Span,
     f: &Function,
     args: &[Idx<Expr>],
-) -> Option<CompilerError> {
+    report_missing_return: bool,
+) -> Result<(Idx<Expr>, Ustr), CompilerError> {
     let fname = f.name;
-    let call_span = body.expr_spans[call];
-    let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
-
-    let [_arg] = args else {
-        return reject(
-            call_span,
+    let [arg] = args else {
+        return Err(CompilerError::new_with_label(
+            span,
             format!("`@struct_expand` fn `{fname}` takes exactly one argument"),
-        );
+        ));
     };
-
-    if f.return_ty
+    let name = f
+        .return_ty
         .and_then(|ret| pairs_return_enum(ws, ret))
-        .is_none()
-    {
-        return reject(
-            call_span,
-            format!(
-                "`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`, got `{}`",
-                f.return_ty
-                    .map(|r| ws.render(None, r))
-                    .unwrap_or_else(|| "()".to_string())
-            ),
-        );
-    }
-    None
+        .ok_or_else(|| {
+            let mut msg = format!("`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`");
+            if let Some(ret) = f.return_ty {
+                use std::fmt::Write as _;
+                let _ = write!(msg, ", got `{}`", ws.render(None, ret));
+            } else if report_missing_return {
+                msg.push_str(", got `()`");
+            }
+            CompilerError::new_with_label(span, msg)
+        })?;
+    Ok((*arg, name))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3283,44 +3301,31 @@ pub(crate) fn resolve_shader_pair(
     }
 }
 
-fn shader_expand_rejection_for_call(
-    ws: &Workspace,
-    body: &Body,
-    call: Idx<Expr>,
-    args: &[Idx<Expr>],
-) -> Option<CompilerError> {
-    resolve_shader_pair(ws, body, call, args).err()
+enum UniformExpansion {
+    Fingerprint(Idx<Expr>),
+    Write(Idx<Expr>, Idx<Expr>, Idx<Expr>),
 }
 
-fn uniform_expand_rejection_for_call(
+fn uniform_expand_signature(
     ws: &Workspace,
-    body: &Body,
-    call: Idx<Expr>,
+    span: Span,
     f: &Function,
     args: &[Idx<Expr>],
-) -> Option<CompilerError> {
-    let fname = f.name;
-    let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
-
-    match args {
-        [_u] => {
-            let returns_int = f
-                .return_ty
-                .map(|rt| {
-                    matches!(
-                        shape::static_ty(ws, rt),
-                        Some(TypeExpr::Builtin(BuiltinTy::Int))
-                    )
-                })
-                .unwrap_or(false);
-            if !returns_int {
-                return reject(body.expr_spans[call], uniform_expand_arity_msg(fname));
-            }
+) -> Result<UniformExpansion, CompilerError> {
+    Ok(match args {
+        [u] if f.return_ty.and_then(|ret| static_ty(ws, ret))
+            == Some(TypeExpr::Builtin(BuiltinTy::Int)) =>
+        {
+            UniformExpansion::Fingerprint(*u)
         }
-        [_, _, _] => {}
-        _ => return reject(body.expr_spans[call], uniform_expand_arity_msg(fname)),
-    }
-    None
+        [fv, iv, u] => UniformExpansion::Write(*fv, *iv, *u),
+        _ => {
+            return Err(CompilerError::new_with_label(
+                span,
+                uniform_expand_arity_msg(f.name),
+            ));
+        }
+    })
 }
 
 fn uniform_values_rejection_for_call(
@@ -3497,22 +3502,10 @@ pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
         let Some(inf) = ir.per_fn.get(owner) else {
             continue;
         };
-        for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call {
-                callee: Callee::Unresolved { name, .. },
-                args,
-                ..
-            } = expr
-            else {
+        for (e, _, args, kind) in expansion_calls(ws, body, Some(inf)) {
+            if !matches!(kind, ExpandKind::BuildVar | ExpandKind::EmbedString) {
                 continue;
-            };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
-                continue;
-            };
-            let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
-            let Some(kind @ (ExpandKind::BuildVar | ExpandKind::EmbedString)) = kind else {
-                continue;
-            };
+            }
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
             if let Err(err) = resolve_comptime_value(ws, body, e, &arg_idxs, kind) {
                 return Some(err);
@@ -3522,124 +3515,67 @@ pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
     None
 }
 
-fn vertex_expand_rejection_for_call(
+fn vertex_expand_signature(
     ws: &Workspace,
-    body: &Body,
-    call: Idx<Expr>,
+    span: Span,
     f: &Function,
     args: &[Idx<Expr>],
-) -> Option<CompilerError> {
+) -> Result<(Idx<Expr>, VertexExpandRet), CompilerError> {
     let fname = f.name;
-    let call_span = body.expr_spans[call];
-    let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
-
-    let [_arg] = args else {
-        return reject(
-            call_span,
+    let [arg] = args else {
+        return Err(CompilerError::new_with_label(
+            span,
             format!("`@vertex_expand` fn `{fname}` takes exactly one argument"),
-        );
+        ));
     };
-    if f.return_ty
-        .and_then(|r| vertex_expand_return(ws, r))
-        .is_none()
-    {
-        return reject(call_span, vertex_expand_ret_msg(ws, fname, f.return_ty));
-    }
-    None
+    let kind = f
+        .return_ty
+        .and_then(|ret| vertex_expand_return(ws, ret))
+        .ok_or_else(|| {
+            CompilerError::new_with_label(span, vertex_expand_ret_msg(ws, fname, f.return_ty))
+        })?;
+    Ok((*arg, kind))
 }
 
-struct ExpansionRejections {
-    struct_pairs: Option<CompilerError>,
-    shader_pipeline: Option<CompilerError>,
-    vertex_layout: Option<CompilerError>,
-    uniform_block: Option<CompilerError>,
-    uniform_values: Option<CompilerError>,
-}
-
-impl ExpansionRejections {
-    fn record(&mut self, kind: ExpandKind, rejection: Option<CompilerError>) {
-        let Some(rejection) = rejection else { return };
-        let slot = match kind {
-            ExpandKind::StructPairs => &mut self.struct_pairs,
-            ExpandKind::ShaderPipeline => &mut self.shader_pipeline,
-            ExpandKind::VertexLayout => &mut self.vertex_layout,
-            ExpandKind::UniformBlock => &mut self.uniform_block,
-            ExpandKind::UniformValues => &mut self.uniform_values,
-            ExpandKind::SceneTypeKey => return,
-            ExpandKind::BuildVar | ExpandKind::EmbedString => return,
-            ExpandKind::Materialize | ExpandKind::SortKeyWide | ExpandKind::SortKeyLt => return,
-        };
-        if slot.is_none() {
-            *slot = Some(rejection);
-        }
-    }
-
-    fn finish(self) -> Option<CompilerError> {
-        self.struct_pairs
-            .or(self.shader_pipeline)
-            .or(self.vertex_layout)
-            .or(self.uniform_block)
-            .or(self.uniform_values)
-    }
-}
-
-/// Scan module `mid` once for every direct expansion call; the first rejection
-/// per category wins, categories applied in fixed priority order.
+/// Scan module `mid` once for every direct expansion call. Within a category
+/// the first rejection wins, and categories keep their fixed priority.
 pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
-    let module = ws.module(mid);
     let ir = ws.inference(mid)?;
-    let mut rejections = ExpansionRejections {
-        struct_pairs: None,
-        shader_pipeline: None,
-        vertex_layout: None,
-        uniform_block: None,
-        uniform_values: None,
-    };
-    for (owner, body) in module.bodies.iter() {
+    let mut first = None::<(usize, CompilerError)>;
+    for (owner, body) in ws.module(mid).bodies.iter() {
         let Some(inf) = ir.per_fn.get(owner) else {
             continue;
         };
-        for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call {
-                callee: Callee::Unresolved { name, .. },
-                args,
-                ..
-            } = expr
-            else {
-                continue;
+        for (e, f, args, kind) in expansion_calls(ws, body, Some(inf)) {
+            let priority = match kind {
+                ExpandKind::StructPairs => 0,
+                ExpandKind::ShaderPipeline => 1,
+                ExpandKind::VertexLayout => 2,
+                ExpandKind::UniformBlock => 3,
+                ExpandKind::UniformValues => 4,
+                _ => continue,
             };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+            if first.as_ref().is_some_and(|(rank, _)| *rank <= priority) {
                 continue;
-            };
-            let f = &ws.module(fmod).functions[fid];
-            let Some(kind) = crate::intrinsics::expand_kind(f) else {
-                continue;
-            };
-            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            }
+            let args: Vec<_> = args.into_iter().collect();
+            let span = body.expr_spans[e];
             let rejection = match kind {
-                ExpandKind::StructPairs => {
-                    struct_expand_rejection_for_call(ws, body, e, f, &arg_idxs)
-                }
-                ExpandKind::ShaderPipeline => {
-                    shader_expand_rejection_for_call(ws, body, e, &arg_idxs)
-                }
-                ExpandKind::VertexLayout => {
-                    vertex_expand_rejection_for_call(ws, body, e, f, &arg_idxs)
-                }
-                ExpandKind::UniformBlock => {
-                    uniform_expand_rejection_for_call(ws, body, e, f, &arg_idxs)
-                }
+                ExpandKind::StructPairs => struct_pairs_signature(ws, span, f, &args, true).err(),
+                ExpandKind::ShaderPipeline => resolve_shader_pair(ws, body, e, &args).err(),
+                ExpandKind::VertexLayout => vertex_expand_signature(ws, span, f, &args).err(),
+                ExpandKind::UniformBlock => uniform_expand_signature(ws, span, f, &args).err(),
                 ExpandKind::UniformValues => {
-                    uniform_values_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
+                    uniform_values_rejection_for_call(ws, inf, body, e, f, &args)
                 }
-                ExpandKind::SceneTypeKey => None,
-                ExpandKind::BuildVar | ExpandKind::EmbedString => None,
-                ExpandKind::Materialize | ExpandKind::SortKeyWide | ExpandKind::SortKeyLt => None,
+                _ => unreachable!("only ranked expansions have a preflight check"),
             };
-            rejections.record(kind, rejection);
+            if let Some(error) = rejection {
+                first = Some((priority, error));
+            }
         }
     }
-    rejections.finish()
+    first.map(|(_, error)| error)
 }
 
 /// Every distinct `rock_shader` pair, deduped and sorted by key for
@@ -3654,25 +3590,7 @@ pub fn body_has_shader_pipeline_call(ws: &Workspace, mid: ModuleId, owner: BodyO
         return false;
     };
     let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
-    body.expr_arena.iter().any(|(e, expr)| {
-        let Expr::Call {
-            callee: Callee::Unresolved { name, .. },
-            ..
-        } = expr
-        else {
-            return false;
-        };
-        let resolved = match inf {
-            Some(inf) => resolve_call_fn(ws, inf, e, *name),
-            None => unique_fn(ws, *name),
-        };
-        resolved.is_some_and(|(fmod, fid)| {
-            matches!(
-                crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
-                Some(ExpandKind::ShaderPipeline)
-            )
-        })
-    })
+    expansion_calls(ws, body, inf).any(|(_, _, _, kind)| kind == ExpandKind::ShaderPipeline)
 }
 
 pub fn collect_shader_body(
@@ -3687,26 +3605,8 @@ pub fn collect_shader_body(
     let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
     let mut by_key = BTreeMap::new();
     let mut callsite = false;
-    for (e, expr) in body.expr_arena.iter() {
-        let Expr::Call {
-            callee: Callee::Unresolved { name, .. },
-            args,
-            ..
-        } = expr
-        else {
-            continue;
-        };
-        let resolved = match inf {
-            Some(inf) => resolve_call_fn(ws, inf, e, *name),
-            None => unique_fn(ws, *name),
-        };
-        let Some((fmod, fid)) = resolved else {
-            continue;
-        };
-        if !matches!(
-            crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
-            Some(ExpandKind::ShaderPipeline)
-        ) {
+    for (e, _, args, kind) in expansion_calls(ws, body, inf) {
+        if kind != ExpandKind::ShaderPipeline {
             continue;
         }
         callsite = true;
@@ -3772,27 +3672,10 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
         if caller_is_gpu {
             continue;
         }
-        let mut shader_expansion_args = HashSet::default();
-        for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call {
-                callee: Callee::Unresolved { name, .. },
-                args,
-                ..
-            } = expr
-            else {
-                continue;
-            };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
-                continue;
-            };
-            let f = &ws.module(fmod).functions[fid];
-            if matches!(
-                crate::intrinsics::expand_kind(f),
-                Some(ExpandKind::ShaderPipeline)
-            ) {
-                shader_expansion_args.extend(*args);
-            }
-        }
+        let shader_expansion_args: HashSet<_> = expansion_calls(ws, body, Some(inf))
+            .filter(|(_, _, _, kind)| *kind == ExpandKind::ShaderPipeline)
+            .flat_map(|(_, _, args, _)| args)
+            .collect();
         for (e, expr) in body.expr_arena.iter() {
             match expr {
                 Expr::Call {
