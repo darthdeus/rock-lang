@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Preserve the ordinary corpus run while retaining the intermittent #291 failure.
 vm=${ROCK_CI_REAL_LUAJIT:?missing real LuaJIT path}
 program=
 for arg in "$@"; do

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Build the host Rock/Stone runtime archive. Honors CARGO_TARGET_DIR.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-$root/target}
