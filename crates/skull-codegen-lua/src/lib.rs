@@ -568,7 +568,7 @@ impl CodegenCtx {
         ));
         let scalar_constants = scalar_constants(ws);
         let unread_constants = unread_constants(ws, &scalar_constants);
-        CodegenCtx {
+        let ctx = CodegenCtx {
             reserved,
             rejections: Mutex::new(collisions),
             mangled: std::sync::RwLock::default(),
@@ -579,7 +579,11 @@ impl CodegenCtx {
             call_sccs: HashMap::default(),
             frame_limits: true,
             line_directives: line_directives_mode(),
+        };
+        if skull_mir::verify::checks_enabled() {
+            ctx.mint_synthetic(skull_mir::mir::VALUE_INTEGER_CHECK.to_string());
         }
+        ctx
     }
 
     pub fn state_table(&self) -> &'static str {

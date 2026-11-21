@@ -1,0 +1,21 @@
+value CheckedPair { x: int, y: uint }
+
+@noalloc fn sum_checked_pair(x: int, y: uint) -> int {
+    let pair = CheckedPair { x, y }
+    return pair.x + (pair.y as int)
+}
+
+@test(mir_checks = true)
+fn checked_integer_fields_stay_allocation_free() {
+    assert(sum_checked_pair(-9, 14) == 5)
+}
+
+inline(lua) fn fails_integer_field_check(f: fn(int, uint) -> int) -> bool = """
+    local ok, message = pcall(f, 2147483648, 0)
+    return not ok and tostring(message):find("value struct integer field out of range", 1, true) ~= nil
+"""
+
+@test(backends = "lua", mir_checks = true)
+fn checked_integer_fields_still_trap_on_overflow() {
+    assert(fails_integer_field_check(sum_checked_pair))
+}
