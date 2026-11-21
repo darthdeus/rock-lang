@@ -1,11 +1,6 @@
 -- Smoke test against a real rock-lsp binary.
 --
--- Requires $ROCK_LSP_BIN to point at an executable rock-lsp; supplied
--- by tests/docker-run.sh after tests/build-rock-lsp.sh produces a
--- cached binary. When unset, the spec exits 0 with a "skipped"
--- message so the broader suite still runs (e.g. when
--- ROCK_LSP_SKIP=1 was passed to docker-run.sh, or when running
--- run.sh standalone outside the docker harness).
+-- Requires an executable rock binary in $ROCK_LSP_BIN.
 --
 -- What we assert:
 --   1. setup() does not bail at the missing-binary gate.

@@ -84,11 +84,6 @@ Specs that need a real server key off `$ROCK_LSP_BIN` and print `SKIP`
 ROCK_LSP_BIN=~/projects/rock-lang/target/debug/rock tests/run.sh
 ```
 
-`tests/docker-run.sh` is the clean-room variant: it builds
-`Dockerfile` (nvim pinned to the version in `M.min_nvim`), builds or
-reuses a cached `rock` via `tests/build-rock-lsp.sh`, and runs the same
-runner inside the container.
-
 `scripts/semtok_caps.lua` answers capability questions by observation: it
 drives a real server through the plugin and prints what nvim declares for
 semantic tokens and which request kinds it actually sent:

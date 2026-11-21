@@ -1,12 +1,6 @@
 -- End-to-end smoke test that the server serves document symbols.
 --
--- Requires $ROCK_LSP_BIN to point at an executable rock binary (supplied by
--- tests/docker-run.sh); skips with exit 0 when unset, like
--- real_lsp_smoke_spec.lua.
---
--- Drives the real spawn + attach + `textDocument/documentSymbol` path: bone
--- walks the module arenas, so a NON-EMPTY response proves the server compiled
--- the unit and answered a structural query, not just that it launched.
+-- Requires $ROCK_LSP_BIN and skips when unset.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
