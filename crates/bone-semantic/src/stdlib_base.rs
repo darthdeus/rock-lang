@@ -1,5 +1,3 @@
-//! The process stdlib checked once for builds whose user modules cannot change it.
-
 use std::sync::OnceLock;
 
 use skull_parser::stdlib::ModuleSet;
@@ -75,7 +73,6 @@ pub fn apart_from(warm: &WarmNames, ast: &Ast, contribution: &FragmentContributi
         })
 }
 
-/// The names of the macros `ast` defines (the items the registry collects).
 fn macro_names(ast: &Ast) -> impl Iterator<Item = Ustr> + '_ {
     ast.items.iter().filter_map(|item| match &item.kind {
         ItemKind::Function(f) if f.is_macro => Some(f.name.name),

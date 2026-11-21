@@ -1,20 +1,10 @@
-//! Recursive value layouts are rejected where they are defined.
-//!
-//! A `value` is stored inline wherever it is held, so a value that contains
-//! itself by value -- directly, through other values, newtypes, tuples or a
-//! stored type argument -- has no finite layout. A nullable link does not
-//! help: `T?` holds the whole `T` plus a presence bit. The rule is about the
-//! declaration, not the use, so it holds on every backend and in the LSP.
-//!
-//! Vec, Map, `ref`, functions, `any`, enums and identity structs hold what
-//! they name by reference, and a phantom type argument (`Entity<T>`) holds
-//! nothing, so recursion through any of them is admitted.
+//! A recursive by-value layout is infinite. Nullable values still contain the
+//! whole value; references and phantom parameters break the cycle.
 
 use crate::hir::{TypeCtor, TypeExpr, VarId};
 use crate::prelude::Nominal as Def;
 use crate::prelude::*;
 
-/// A by-value nominal: a `value` struct or a newtype.
 struct Nominal {
     module: ModuleId,
     display: Ustr,

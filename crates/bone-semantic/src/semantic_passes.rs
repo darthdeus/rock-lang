@@ -51,7 +51,6 @@ fn map_key(scope: &FragmentScope, path: &[ustr::Ustr], name: ustr::Ustr) -> ustr
     bone_core::modules::def_key(scope.package_name.as_ref(), path, name.as_str())
 }
 
-/// Declaration facts available before lowering the bodies.
 struct ModuleNominalFacts {
     /// Each nominal type's key and facts, in declaration order.
     types: Vec<(ustr::Ustr, NominalFacts)>,
@@ -97,7 +96,6 @@ pub enum NominalFlavor {
     Newtype,
 }
 
-/// Declaration facts that affect lowering at use sites.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NominalFacts {
     pub flavor: NominalFlavor,
@@ -130,7 +128,6 @@ pub(crate) fn lower_modules(
     lower_modules_seeded(ws, rock_modules, FxHashMap::default())
 }
 
-/// Type-arena entries a module's next lowering starts from.
 #[derive(Debug)]
 pub struct TypeArenaSeed {
     pub arena: Arena<TypeExpr>,
@@ -737,7 +734,6 @@ fn is_type_publicly_accessible(
     false
 }
 
-/// One inaccessible type an exported definition's interface names.
 struct ClosureRequirement {
     required: Ustr,
     reason: &'static str,
@@ -747,7 +743,6 @@ struct ClosureRequirement {
 type ExportReachability =
     FxHashMap<bone_core::modules::PackageId, (FxHashSet<Ustr>, FxHashSet<Ustr>)>;
 
-/// Each package's modules and definitions reachable from its root.
 fn export_reachability(ws: &Workspace) -> ExportReachability {
     let packages: Vec<bone_core::modules::PackageId> = ws.ns.packages.keys().copied().collect();
     packages

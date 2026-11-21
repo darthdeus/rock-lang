@@ -1,9 +1,5 @@
-//! A live Vec or Map element reference forbids structural changes that can move it.
-//! Check the receiving call and later arguments, propagating callee effects by
-//! element type. Opaque calls can change any collection.
-//!
-//! Structural writes include Map index assignment, Vec length writes, and
-//! stdlib primitives marked `@relocates` on their first argument.
+//! Structural changes can invalidate live Vec or Map element references.
+//! Opaque calls can change any collection.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -107,7 +103,6 @@ struct Arg {
     element: Option<String>,
 }
 
-/// A resolved call, with what substituting the callee's summary needs.
 struct Edge {
     callee: FnKey,
     /// The callee's generics, as keys in the caller.
@@ -116,7 +111,6 @@ struct Edge {
     args: Vec<Option<Arg>>,
 }
 
-/// The collection an element reference points into.
 #[derive(Clone)]
 struct Root {
     key: String,
@@ -357,7 +351,6 @@ impl<'a> BodyCtx<'a> {
         }
     }
 
-    /// A structural write to the collection `target`.
     fn write(&self, effect: &mut Effect, target: Idx<Expr>, at: Span) {
         let arg = self.arg(target);
         if let Some(local) = arg.fresh {
@@ -642,7 +635,6 @@ pub(crate) fn strip_ref(
     }
 }
 
-/// The element type of a Vec, or the value type of a Map.
 fn collection_element(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<TyId> {
     match strip_ref(ws, bi, ty)? {
         (
@@ -746,7 +738,6 @@ fn shown(key: &str) -> String {
     key.replace(ANY_KEY, "_").replace(GENERIC, "$")
 }
 
-/// The callee's summary as seen from one call.
 fn map_edge(edge: &Edge, callee: &Effect, at: Span) -> Effect {
     let mut mapped = Effect::default();
     for (&p, &witness) in &callee.retained {

@@ -1,16 +1,6 @@
-//! FN IDENTITY THROUGH GENERICS: `==`/`!=` on fn values is rejected at the
-//! comparison when the operands are statically fn-typed (bone-inference's Eq
-//! arm). A generic body erases that type: `fn same<T>(a: T, b: T) { a == b }`
-//! type-checks, and `same(f, g)` compares fn identity, which is not meaningful
-//! (a capture-free lambda is one shared fn, a capturing lambda a fresh record
-//! per creation).
-//!
-//! Every generic function gets a summary: the indices of its generics whose
-//! values it may compare. A generic is compared when an `==`/`!=` operand's
-//! inferred type is that generic (or its nullable/ref), however the operand
-//! got there, or when the function instantiates a callee's compared generic
-//! with it. The summaries are a whole-program fixpoint, and a call that
-//! instantiates a compared generic with a fn type is rejected.
+//! Generic comparisons can hide function identity until instantiation. The
+//! transitive summary rejects calls that instantiate a compared generic with
+//! a function type.
 
 use bone_core::workspace::BodyInference;
 
@@ -24,7 +14,6 @@ const REJECTION_PREFIX: &str = "Cannot compare fn values: `";
 
 type FnKey = (ModuleId, Idx<Function>);
 
-/// A generic function's own comparisons and generic-to-generic forwards.
 struct Facts {
     compared: FxHashSet<usize>,
     /// `(callee, callee generic index, own generic index)`: a call that
@@ -112,7 +101,6 @@ fn module_bodies<'a>(
     })
 }
 
-/// Compared generic indices per generic function, at the fixpoint.
 fn summaries(ws: &Workspace) -> FxHashMap<FnKey, FxHashSet<usize>> {
     // Every body's expressions are read once; the modules are independent.
     let per_module: Vec<Vec<(FnKey, Facts)>> = ws
