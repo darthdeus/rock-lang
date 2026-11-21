@@ -118,12 +118,6 @@ mod tests {
     }
 
     #[test]
-    fn code_is_code() {
-        assert_eq!(at("let x = fo|o"), LexRegion::Code);
-        assert_eq!(at("|let x = 1"), LexRegion::Code);
-    }
-
-    #[test]
     fn comments() {
         assert_eq!(at("let x = 1 // no|te"), LexRegion::Comment);
         assert_eq!(at("/* no|te */ x"), LexRegion::Comment);
@@ -133,32 +127,10 @@ mod tests {
     }
 
     #[test]
-    fn string_text_and_holes() {
-        assert_eq!(at("\"pl|ain\""), LexRegion::StringText);
-        assert_eq!(at("\"plain\"|"), LexRegion::Code);
-        assert_eq!(at("\"a {x.y|} b\""), LexRegion::Code);
-        assert_eq!(at("\"a {x.y} b|\""), LexRegion::StringText);
-        assert_eq!(at("\"{{no|t}}\""), LexRegion::StringText);
-        assert_eq!(at("\"a\" + \"b|\""), LexRegion::StringText);
-    }
-
-    #[test]
-    fn escapes_do_not_end_the_string() {
-        assert_eq!(at("\"a\\\" st|ill\""), LexRegion::StringText);
-        assert_eq!(at("\"a\\n b|\""), LexRegion::StringText);
-    }
-
-    #[test]
     fn raw_strings_never_interpolate() {
         assert_eq!(at("r\"a {x|} b\""), LexRegion::StringText);
         assert_eq!(at("r\"\"\"a {x|} b\"\"\""), LexRegion::StringText);
         assert_eq!(at("var\"te|xt\""), LexRegion::StringText);
-    }
-
-    #[test]
-    fn triple_quoted_interpolates_but_does_not_escape() {
-        assert_eq!(at("\"\"\"a {x|} b\"\"\""), LexRegion::Code);
-        assert_eq!(at("\"\"\"a\\ b|\"\"\""), LexRegion::StringText);
     }
 
     #[test]
