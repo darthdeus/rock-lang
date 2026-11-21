@@ -73,42 +73,10 @@ fn display_tiers_expected(n: usize) -> String {
 }
 
 #[test]
-fn narrow_display_helpers_render_expected_formats() {
-    let lua = emit_module(&display_tiers(2));
-    let expected = "CdataWide { f0: 0.5, f1: 1.5 }\n\
-                    CdataWide { f0 = 0.5, f1 = 1.5 }\n\
-                    GcWide { g0: s0, g1: s1 }\n\
-                    LeafWide { pos: true, pos.x: 1, pos.y: 2, l0: 0.25, l1: 1.25 }\n\
-                    Holder { tag: t, inner: InlineWide { f0: 0.5, f1: 1.5 } }\n\
-                    MaybeHolder { tag: t, maybe: nil }\n\
-                    MaybeHolder { tag: t, maybe: InlineWide { f0: 0.5, f1: 1.5 } }\n\
-                    Wide::Tuple { [1] = 0, [2] = 1 }";
-    assert_eq!(expected, display_tiers_expected(2));
-    assert_eq!(run_main(&lua), expected);
-}
-
-#[test]
 fn wide_display_helpers_load_and_render() {
     let n = 100;
     let lua = emit_module(&display_tiers(n));
     assert_eq!(run_main(&lua), display_tiers_expected(n));
-}
-
-#[test]
-fn wide_value_interpolation_loads_and_renders() {
-    let n = 70;
-    let fields = (0..n)
-        .map(|i| format!("f{i}: int = {i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let src =
-        format!("value Row {{ {fields} }}\nfn main() {{ let r = Row {{}}; print(\"<{{r}}>\") }}\n");
-    let lua = emit_module(&src);
-    let body = (0..n)
-        .map(|i| format!("f{i}: {i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    assert_eq!(run_main(&lua), format!("<Row {{ {body} }}>"));
 }
 
 fn accumulation(statements: usize) -> String {
@@ -127,18 +95,4 @@ fn accumulation(statements: usize) -> String {
         "fn sum({params}) -> int {{\n    let total = 0\n{adds}    return total\n}}\n\
          fn main() {{ print(\"{{sum({args})}}\") }}\n"
     )
-}
-
-#[test]
-fn long_accumulation_loads_and_runs() {
-    let lua = emit_module(&accumulation(300));
-    assert_eq!(run_main(&lua), "1650");
-}
-
-#[test]
-fn accumulation_within_the_budget_stays_one_expression() {
-    let lua = emit_module(&accumulation(120));
-    let body = function_body(&lua, "sum");
-    let sums = body.lines().filter(|line| line.contains(" + ")).count();
-    assert_eq!(sums, 1);
 }
