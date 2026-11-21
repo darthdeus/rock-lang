@@ -41,13 +41,11 @@ pub(crate) struct Parser<'a> {
     /// Set by `parse_operator` so `parse_item` can replicate rock's implicit
     /// `@inline` on block-bodied operator overloads (the `@_transparent` model).
     last_was_operator: bool,
-    /// Shared counter for expression and type holes.
     hole_counter: u32,
     /// Depth of paren groups whose head is currently parsing. While > 0 the
     /// Pratt loop breaks at `:` so the paren arm owns the `(expr : Type)`
     /// ascription form instead of `:` binding as a binop.
     paren_head: u32,
-    /// Expression and block levels enclosing the current parse position.
     nesting: u32,
     /// Height, in nesting levels, of the deepest expression or block completed
     /// within the innermost level still open; see [`Parser::nesting_level`].
@@ -154,8 +152,6 @@ impl<'a> Parser<'a> {
         id
     }
 
-    /// Run `f` with struct-literal parsing forced on/off (condition heads
-    /// turn it off; delimited contexts turn it back on), restoring after.
     fn with_allow_literals<T>(&mut self, allow: bool, f: impl FnOnce(&mut Self) -> T) -> T {
         let saved = std::mem::replace(&mut self.allow_literals, allow);
         let out = f(self);
@@ -173,7 +169,7 @@ impl<'a> Parser<'a> {
         out
     }
 
-    /// Parse items and collect recoverable syntax errors in the AST.
+    /// Recoverable syntax errors are collected in the AST.
     pub fn parse_module(mut self) -> PResult<Ast> {
         let mut seen_item = false;
         loop {
@@ -361,9 +357,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Full-extent span from a node's first token (`start`) through the last
-    /// token consumed so far. The canonical way to span a node: capture
-    /// `let start = self.span();` before consuming, build, then `span_from(start)`.
     fn span_from(&self, start: Span) -> Span {
         self.merge_spans(start, self.prev_span())
     }
@@ -486,9 +479,7 @@ impl<'a> Parser<'a> {
         self.eat(TokenKind::Comma)
     }
 
-    /// Parse a comma-separated list, leaving its closing token for the caller.
-    /// `list_item_follows` and `list_continues` keep comments and split `>>`
-    /// closes consistent across the list forms that share this grammar.
+    /// Leave the closing token for the caller.
     fn parse_comma_list<T>(
         &mut self,
         close: TokenKind,
@@ -520,16 +511,9 @@ impl<'a> Parser<'a> {
         Ok(items)
     }
 
-    // ---- items ------------------------------------------------------------
-
-    /// Parse leading visibility modifiers (v1): any sequence of `pub`,
-    /// `pub(super)`, `pub(package)`, `pub(in a::b)`, `private`, `private(set)`
-    /// in either order. All words are contextual: `private: bool` is still a
-    /// field named `private` because `parse_vis_mods` only commits when the
-    /// modifier is followed by something item-like.
+    /// Visibility is contextual: `private: bool` remains a field.
     fn parse_vis_mods(&mut self) -> PResult<VisMods> {
         let mut mods = VisMods::default();
-        // Peek two tokens ahead: `pub(package)` / `private(set)` put a `(` between.
         let peek2 = |p: &Self| {
             p.tokens
                 .get(p.pos + 2)
@@ -668,10 +652,7 @@ impl<'a> Parser<'a> {
         let suffix = if self.eat(TokenKind::Mul) {
             UseSuffix::Glob
         } else if self.suffix_is_operator_selector() {
-            // `geo::operator(+);` — the leading segments name the module and
-            // the trailing `operator(<glyph>)` is the selector. The glyph is
-            // an operator token (`+`, `*` is glob here so no clash, `-`, ..):
-            // take its spelling from the source.
+            // The operator selector's glyph is a token, not an identifier.
             self.advance(); // `operator`
             self.expect(TokenKind::OpenParen)?;
             let glyph_span = self.span();
@@ -946,10 +927,8 @@ impl<'a> Parser<'a> {
         if !sigil {
             return self.with_allow_literals(true, |p| p.parse_expr(0));
         }
-        // Cursor-backtracking (rock parity): try the type-shaped parse; accept
-        // it ONLY if it lands cleanly at an arg boundary. Otherwise reset and
-        // parse an ordinary expression — so `(a < b)` (a comparison) isn't
-        // mis-read as the generic `a<b>`.
+        // A type-shaped parse must end at an argument boundary; otherwise
+        // `(a < b)` can be mistaken for a generic.
         let saved = self.pos;
         if let Ok(e) = self.parse_sigil_type_arg() {
             if matches!(
@@ -1328,9 +1307,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                         s
                     }
-                    // Rock has no expression-bodied fn form. Parsing past this and
-                    // keeping an empty source emitted `function f(x) return end` --
-                    // a fn that type-checks and answers nil.
+                    // Expression-bodied functions are not supported.
                     _ => {
                         return Err(self.err(
                             "an `= <body>` function body must be a string literal (an inline \
@@ -1340,10 +1317,7 @@ impl<'a> Parser<'a> {
                 };
                 FunctionBody::Inline(backend, src)
             } else {
-                // Only `extern fn` declares a body-less foreign symbol. Every other
-                // form reaching here is missing its body, and defaulting to an
-                // extern made it a call to a Lua global that does not exist --
-                // accepted by the compiler, fatal at runtime.
+                // Only `extern fn` may omit the body.
                 let Some(eb) = extern_body else {
                     return Err(self.err(
                         "this function has no body: expected a block `{ .. }` or an inline \
@@ -1356,9 +1330,7 @@ impl<'a> Parser<'a> {
             (body, Vec::new())
         };
         let span = self.span_from(start);
-        // Record this macro's parameter reference spans (decl + template uses)
-        // while we still hold the definition with its source spans -- expansion
-        // would only see retagged clones. The IDE reads `Ast.macro_param_refs`.
+        // Expansion retags clones, so record parameter spans before it runs.
         if is_macro {
             let refs = crate::macro_expand::index_macro_param_refs(
                 &self.ast,
@@ -1561,9 +1533,6 @@ impl<'a> Parser<'a> {
             if self.kind() == TokenKind::CloseCurly || self.at_end() {
                 break;
             }
-            // v1 visibility modifiers on fields: `pub`, `private`,
-            // `private(set)`, `pub(package) private(set)`, ...
-            // `vis`/`set_private` are contextual words, never reserved.
             let mods = self.parse_vis_mods()?;
             let (vis, set_private) = (mods.vis, mods.set_private);
             let annotations = self.parse_item_annotations()?;
@@ -1983,10 +1952,7 @@ impl<'a> Parser<'a> {
                     return Err(e);
                 }
                 Err(e) => {
-                    // Statement-level recovery: a broken statement (e.g. a `let`
-                    // with an empty RHS mid-edit) drops just that statement, not
-                    // the whole `fn` body -- the lets before and after it survive
-                    // so scope-based LSP features keep working on broken code.
+                    // Recover this statement without losing the surrounding scope.
                     self.ast.recovery_errors.push(e);
                     // Guarantee forward progress: if the failed parse consumed
                     // nothing, drop one token so recovery can't spin.
@@ -2106,8 +2072,6 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                // `let pat = value else { .. }`. `parse_expr` never consumes a
-                // bare `else`, so this is unambiguous.
                 let else_block = if value.is_some() && self.kind() == TokenKind::Else {
                     self.advance();
                     Some(self.parse_block()?)
@@ -2223,7 +2187,6 @@ impl<'a> Parser<'a> {
                 ))
             }
             TokenKind::Loop => {
-                // `loop { .. }` is `while true { .. }` (rock lowers it the same).
                 self.advance();
                 let condition = self.ast.expr(start, ExprKind::Bool(true));
                 let body = self.parse_block()?;
@@ -2868,7 +2831,6 @@ impl<'a> Parser<'a> {
                 self.delimiter_depth += 1;
                 if self.eat(TokenKind::CloseParen) {
                     self.delimiter_depth -= 1;
-                    // Span the whole `()`, not just the open paren.
                     return Ok(self.ast.expr(self.span_from(start), ExprKind::Unit));
                 }
                 // The paren head stops Pratt parsing at the ascription colon.
