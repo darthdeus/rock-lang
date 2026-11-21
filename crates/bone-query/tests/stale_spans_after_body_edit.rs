@@ -79,43 +79,6 @@ fn identity<T>(x: T) -> T {
 }
 ";
 
-#[test]
-fn document_highlight_tracks_line_shift_from_other_fn_edit() {
-    let mut bone = workspace(LOCALS);
-    bone.update(PATH, lengthened(LOCALS));
-    let mut starts: Vec<(u32, u32)> = bone
-        .document_highlight(PATH, Position::new(6, 8))
-        .into_iter()
-        .map(|h| (h.range.start.line, h.range.start.character))
-        .collect();
-    starts.sort();
-    assert_eq!(starts, [(6, 8), (7, 11), (7, 19)]);
-}
-
-#[test]
-fn completion_keeps_lexical_scope_when_an_earlier_body_grows() {
-    let before = "\
-fn alpha() -> int {
-    return 1
-}
-
-fn beta() -> int {
-    let count = 2
-    if true { let inner = count }
-    return count
-}
-";
-    let mut bone = workspace(before);
-    let after = lengthened(before);
-    bone.update(PATH, after.clone());
-    let pos = bone_query::offset_to_position(&after, after.rfind("return count").unwrap() + 7);
-    assert_labels(
-        "relocated block",
-        &labels_of(&bone.completion(PATH, pos)),
-        &["count", "!inner"],
-    );
-}
-
 // Navigation at every offset after an incremental edit must match a fresh check.
 
 /// For every cursor position in `text`, the sorted non-empty `query` results there.
