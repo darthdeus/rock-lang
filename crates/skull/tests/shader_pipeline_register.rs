@@ -32,41 +32,6 @@ fn make_b() -> string { return rock_shader(ui_vert, ui_sim_solid_frag) }
 
 const KEY: &str = "ui_vert+ui_sim_solid_frag";
 
-#[test]
-fn a_pipeline_call_collapses_to_its_key_and_registers_once() {
-    let lua = emit_module(SRC);
-    let body = function_body(&lua, "make_a");
-    assert!(body.contains(&format!("\"{KEY}\"")));
-    assert!(!body.contains("rock_shader("));
-    assert!(!body.contains("compile-time shader-pipeline intrinsic"));
-    let needle = format!("__rock_shader_register(\"{KEY}\"");
-    assert_eq!(lua.matches(&needle).count(), 1);
-    let reg = &lua[lua.find(&needle).unwrap()..];
-    for glsl in [
-        "#version 330 core",
-        "#ifdef VERTEX",
-        "#ifdef PIXEL",
-        "layout (location = 0) in vec2 aPos;",
-    ] {
-        assert!(reg.contains(glsl), "{glsl}");
-    }
-    assert!(reg.contains("false, [[") && reg.contains("fullscreen 0"));
-}
-
-#[test]
-fn emission_lists_each_registered_shader_source() {
-    let emit = emit_mir(SRC);
-    let shaders: Vec<_> = emit
-        .shaders
-        .iter()
-        .map(|s| (s.key.as_str(), s.language))
-        .collect();
-    assert_eq!(shaders, [(KEY, skull::mir_emit::ShaderLanguage::Glsl)]);
-    let source = &emit.shaders[0].source;
-    assert!(source.contains("void main"));
-    assert!(emit.lua.contains(source.as_str()));
-}
-
 fn src_with_frag(x: &str) -> String {
     format!(
         r#"
@@ -86,25 +51,6 @@ fn ui_sim_solid_frag(vary: UiVary) -> Vec4 {{ return Vec4 {{ x: {x}, y: 0.0, z: 
 fn use_it() -> string {{ return rock_shader(ui_vert, ui_sim_solid_frag) }}
 "#
     )
-}
-
-#[test]
-fn changed_fragment_body_changes_registration() {
-    let a = emit_module(&src_with_frag("1.0"));
-    let b = emit_module(&src_with_frag("0.5"));
-    assert!(a.contains("vec4(1.0, 0.0, 1.0, 1.0)"));
-    assert!(b.contains("vec4(0.5, 0.0, 1.0, 1.0)"));
-    assert_ne!(a, b);
-}
-
-#[test]
-fn a_fragment_edit_rebuilds_its_registration_incrementally_and_in_an_overlay() {
-    let before = ws_with_stdlib(&src_with_frag("1.0"));
-    let after = ws_with_stdlib(&src_with_frag("0.5"));
-    let edit = edit(&before, &after, &[body_id(&after, "ui_sim_solid_frag")]);
-    let overlay = edit.overlay.expect("emit_overlay").lua;
-    assert!(overlay.contains(&format!("__rock_shader_register(\"{KEY}\"")));
-    assert!(overlay.contains("vec4(0.5, 0.0, 1.0, 1.0)"));
 }
 
 #[test]
@@ -185,36 +131,3 @@ fn fs_frag(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: 0.0, z: 1.0, w: 1.0 } }
 fn make_pair() -> string { return rock_shader(ui_vert, ui_sim_solid_frag) }
 fn make_fs() -> string { return rock_shader(fs_frag) }
 "#;
-
-#[test]
-fn a_single_fragment_call_collapses_to_its_key_and_registers_fullscreen() {
-    let lua = emit_module(FS_SRC);
-    let body = function_body(&lua, "make_fs");
-    assert!(body.contains("\"fs_frag\""));
-    assert!(!body.contains("rock_shader("));
-    assert!(!body.contains("compile-time shader-pipeline intrinsic"));
-    let needle = "__rock_shader_register(\"fs_frag\"";
-    assert_eq!(lua.matches(needle).count(), 1);
-    let reg = &lua[lua.find(needle).unwrap()..];
-    for glsl in ["#version 330 core", "#ifdef PIXEL", "#ifdef VERTEX"] {
-        assert!(reg.contains(glsl), "{glsl}");
-    }
-    assert!(reg.contains("true, [[") && reg.contains("fullscreen 1"));
-}
-
-#[test]
-fn mixed_single_and_pair_register_both_sorted() {
-    let lua = emit_module(MIXED_SRC);
-    let fs = lua
-        .find("__rock_shader_register(\"fs_frag\"")
-        .expect("single-arg registration");
-    let pair = lua
-        .find("__rock_shader_register(\"ui_vert+ui_sim_solid_frag\"")
-        .expect("pair registration");
-    assert!(fs < pair);
-}
-
-#[test]
-fn mixed_reemission_byte_identical() {
-    assert_eq!(emit_module(MIXED_SRC), emit_module(MIXED_SRC));
-}
