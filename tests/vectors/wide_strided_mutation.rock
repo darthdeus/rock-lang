@@ -1,0 +1,118 @@
+nobox value P2 { x: float, y: float }
+nobox value Id { value: int }
+
+enum Pay {
+    Nothing,
+    Dmg(float),
+    Door(P2, int, bool),
+    Text(string),
+}
+
+enum Who { Nobody, Named(string) }
+
+nobox value Ev {
+    kind: int,
+    pay: Pay,
+    who: Who,
+    label: string = "",
+    lethal: bool = false,
+    at: P2 = P2 { x: 0.0, y: 0.0 },
+    follow: (() -> float)? = null,
+    space: Id? = null,
+    t: float,
+}
+
+struct World { evs: [Ev] }
+
+fn emit(w: World, e: Ev) {
+    w.evs.push(e)
+}
+
+fn pay_score(p: Pay) -> string {
+    return match p {
+        Pay::Nothing => "n",
+        Pay::Dmg(v) => "d{v}",
+        Pay::Door(at, id, keyed) => "o{at.x},{at.y},{id},{keyed}",
+        Pay::Text(s) => "t{s}",
+    }
+}
+
+fn who_score(w: Who) -> string {
+    return match w {
+        Who::Nobody => "-",
+        Who::Named(s) => s,
+    }
+}
+
+fn describe(e: Ev) -> string {
+    let follow = "nf"
+    if let f = e.follow { follow = "f{f()}" }
+    let space = "ns"
+    if let s = e.space { space = "s{s.value}" }
+    return "{e.kind}:{pay_score(e.pay)}:{who_score(e.who)}:{e.label}:{e.lethal}:{e.at.x}:{follow}:{space}:{e.t}"
+}
+
+fn ev(kind: int, pay: Pay) -> Ev {
+    return Ev { kind, pay, who: Who::Nobody, t: 0.5 }
+}
+
+inline(lua) fn is_strided(v: any) -> bool = "return v['@vec'].repr == 'strided'"
+
+fn kinds(xs: [Ev]) -> string {
+    let out = ""
+    for e in xs { out = out + "{e.kind}" }
+    return out
+}
+
+@test(backends = "lua", output = "5:o3,4,1,true:-::false:0:nf:ns:0.5|1:d1:-:set:true:0:nf:ns:0.5|6|973|3978|true,false|4:tafter:-::false:0:nf:ns:0.5|1")
+fn wide_rows_keep_the_mutating_surface() {
+    let xs: [Ev] = [ev(1, Pay::Dmg(1.0)), ev(2, Pay::Text("b")), ev(3, Pay::Nothing)]
+    assert(is_strided(xs))
+    xs[1] = ev(5, Pay::Door(P2 { x: 3.0, y: 4.0 }, 1, true))
+    xs[0].lethal = true
+    xs[0].label = "set"
+    xs.insert_at(1, ev(9, Pay::Text("ins")))
+    let removed = xs.remove_at(2).unwrap()
+    let swapped = xs.swap_remove(0).unwrap()
+    xs.push(ev(6, Pay::Nothing))
+    let popped = xs.pop().unwrap()
+    let copy = xs.clone()
+    copy.push(ev(7, Pay::Dmg(2.0)))
+    let spread: [Ev] = [...copy, ev(8, Pay::Nothing)]
+    copy.sort((e: Ev) => -e.kind)
+    let same = xs == xs.clone()
+    let differ = xs == copy
+    xs.clear()
+    xs.push(ev(4, Pay::Text("after")))
+    print("{describe(removed)}|{describe(swapped)}|{popped.kind}|{kinds(copy)}|{kinds(spread)}|{same},{differ}|{describe(xs[0])}|{xs.len()}")
+}
+
+fn edges_strided() -> string {
+    let xs: [Ev] = []
+    assert(is_strided(xs))
+    let a = xs.pop() == null
+    xs.push(ev(1, Pay::Nothing))
+    let b = xs.pop().unwrap().kind
+    let c = xs.pop() == null
+    let d = xs.remove_at(0) == null
+    let e = xs.swap_remove(0) == null
+    xs.push(ev(2, Pay::Text("again")))
+    return "{a},{b},{c},{d},{e},{xs.len()},{xs[0].kind}"
+}
+
+fn edges_boxed() -> string {
+    let xs: [int] = []
+    let a = xs.pop() == null
+    xs.push(1)
+    let b = xs.pop().unwrap()
+    let c = xs.pop() == null
+    let d = xs.remove_at(0) == null
+    let e = xs.swap_remove(0) == null
+    xs.push(2)
+    return "{a},{b},{c},{d},{e},{xs.len()},{xs[0]}"
+}
+
+@test(backends = "lua", output = "true,1,true,true,true,1,2|true,1,true,true,true,1,2")
+fn empty_strided_and_boxed_vectors_agree() {
+    print("{edges_strided()}|{edges_boxed()}")
+}

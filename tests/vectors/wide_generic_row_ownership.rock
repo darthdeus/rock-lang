@@ -1,0 +1,32 @@
+nobox value Wide<T> { a: int, item: T, c: int, d: int, flag: bool }
+value Pair { x: int, y: int }
+global STORAGE: [int] = []
+fn append<T>(xs: [Wide<T>], item: T) {
+    xs.push(Wide { a: 1, item, c: 3, d: 4, flag: false })
+}
+
+fn copy_rows() -> string {
+    let xs: [Wide<[int]>] = []
+    append(xs, [21])
+    let shallow = xs.clone()
+    let owned = xs.clone_into(STORAGE.storage)
+    xs[0].item.push(22)
+    let before = "{xs[0].item.len()} {shallow[0].item.len()} {owned[0].item.len()}"
+    xs[0] = Wide { a: 9, item: [99], c: 8, d: 7, flag: true }
+    return "{before} {shallow[0].a} {owned[0].item[0]} {xs[0].item[0]}"
+}
+
+fn pop_value() -> string {
+    let xs: [Wide<Pair>] = []
+    append(xs, Pair { x: 11, y: 12 })
+    let shared = xs.clone()
+    let row = xs.pop().unwrap()
+    shared[0].item.x = 99
+    return "{xs.len()} {row.item.x} {shared[0].item.x}"
+}
+
+@test(backends = "lua")
+fn cloned_and_popped_rows_keep_owned_leaves() {
+    assert(copy_rows() == "2 2 1 1 21 99")
+    assert(pop_value() == "0 11 99")
+}

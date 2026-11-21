@@ -1,0 +1,35 @@
+inline(lua) fn first() = "print('first')"
+inline(lua) fn second() = "print('second')"
+@nomangle fn choose() {
+    let cleanup = first
+    defer { cleanup() }
+    cleanup = second
+    error("fail")
+}
+
+inline(lua) fn invoke_choice() = "pcall(choose)"
+
+@test(backends = "lua", output = "second")
+fn deferred_cleanup_reads_the_late_binding() { invoke_choice() }
+
+fn split_probe() -> fn() -> int {
+    return () => {
+        let a = 1
+        let b = 2
+        let c = a + b
+        return c
+    }
+}
+
+inline(lua) fn has_no_leaked_cells() -> bool = """
+    for k in pairs(_G) do
+        if type(k) == "string" and k:match("^c%d+$") then return false end
+    end
+    return true
+"""
+
+@test(backends = "lua")
+fn hoisted_closure_keeps_its_cells_local() {
+    let f = split_probe()
+    assert(f() == 3 && has_no_leaked_cells())
+}

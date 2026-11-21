@@ -231,89 +231,6 @@ assert(ok, err)
     assert_eq!(run_luajit(&failing), "reserved");
 }
 
-const SURFACE_MAIN: &str = r#"
-fn kinds(xs: [Ev]) -> string {
-    let out = ""
-    for e in xs { out = out + "{e.kind}" }
-    return out
-}
-
-fn main() {
-    let xs: [Ev] = [ev(1, Pay::Dmg(1.0)), ev(2, Pay::Text("b")), ev(3, Pay::Nothing)]
-    xs[1] = ev(5, Pay::Door(P2 { x: 3.0, y: 4.0 }, 1, true))
-    xs[0].lethal = true
-    xs[0].label = "set"
-    xs.insert_at(1, ev(9, Pay::Text("ins")))
-    let removed = xs.remove_at(2).unwrap()
-    let swapped = xs.swap_remove(0).unwrap()
-    xs.push(ev(6, Pay::Nothing))
-    let popped = xs.pop().unwrap()
-    let copy = xs.clone()
-    copy.push(ev(7, Pay::Dmg(2.0)))
-    let spread: [Ev] = [...copy, ev(8, Pay::Nothing)]
-    copy.sort((e: Ev) => -e.kind)
-    let same = xs == xs.clone()
-    let differ = xs == copy
-    xs.clear()
-    xs.push(ev(4, Pay::Text("after")))
-    print("{describe(removed)}|{describe(swapped)}|{popped.kind}|{kinds(copy)}|{kinds(spread)}|{same},{differ}|{describe(xs[0])}|{xs.len()}")
-}
-"#;
-
-#[test]
-fn wide_nobox_strided_vec_keeps_the_mutating_surface() {
-    let lua = emit_module(&program(SURFACE_MAIN));
-    assert!(crate::common::has_vec_header(&lua, "strided", None));
-    assert_eq!(
-        run_main(&lua),
-        "5:o3,4,1,true:-::false:0:nf:ns:0.5|\
-         1:d1:-:set:true:0:nf:ns:0.5|\
-         6|973|3978|true,false|\
-         4:tafter:-::false:0:nf:ns:0.5|1"
-    );
-}
-
-const RELEASE_MAIN: &str = r#"
-nobox value Holder { items: [int]?, a: int, b: int, c: int, d: int }
-
-inline(lua) fn watch(items: [int]) = """
-_G.__wide_strided_weak = setmetatable({items}, {__mode = 'v'})
-"""
-
-inline(lua) fn released() -> bool = """
-collectgarbage('collect')
-collectgarbage('collect')
-return _G.__wide_strided_weak[1] == nil
-"""
-
-fn seed(values: [Holder]) {
-    let items = [7]
-    watch(items)
-    values.push(Holder { items, a: 1, b: 2, c: 3, d: 4 })
-}
-
-fn discard(values: [Holder]) { let _ = values.pop() }
-
-fn main() {
-    let values: [Holder] = vec_new_with_capacity(4)
-    seed(values)
-    let held = !released()
-    discard(values)
-    let after_pop = released()
-    seed(values)
-    values.clear()
-    let after_clear = released()
-    print("{held},{after_pop},{after_clear}")
-}
-"#;
-
-#[test]
-fn wide_nobox_strided_vec_releases_removed_references() {
-    let lua = emit_module(RELEASE_MAIN);
-    assert!(crate::common::has_vec_header(&lua, "strided", None));
-    assert_eq!(run_main(&lua), "true,true,true");
-}
-
 #[test]
 fn inspecting_a_wide_nobox_vec_still_rejects_implicit_materialization() {
     let src = program(
@@ -372,50 +289,6 @@ fn wide_generic_rows_keep_one_slot_per_type_argument() {
 }
 
 #[test]
-fn wide_generic_rows_clone_owned_leaves_and_release_removed_references() {
-    let extra = r#"
-@nomangle fn copy_rows() -> string {
-    let xs: [Wide<[int]>] = []
-    append(xs, [21])
-    let shallow = xs.clone()
-    let owned = xs.clone_into(STORAGE.storage)
-    xs[0].item.push(22)
-    let before = "{xs[0].item.len()} {shallow[0].item.len()} {owned[0].item.len()}"
-    xs[0] = Wide { a: 9, item: [99], c: 8, d: 7, flag: true }
-    return "{before} {shallow[0].a} {owned[0].item[0]} {xs[0].item[0]}"
-}
-"#;
-    let lua = emit_module(&format!("{GENERIC_WIDE}\n{extra}"));
-    assert_eq!(
-        run_luajit(&format!("{lua}\nprint(copy_rows())\n")),
-        "2 2 1 1 21 99",
-    );
-
-    let popped = r#"
-@nomangle fn pop_value() -> string {
-    let xs: [Wide<Pair>] = []
-    append(xs, Pair { x: 11, y: 12 })
-    let shared = xs.clone()
-    let row = xs.pop().unwrap()
-    shared[0].item.x = 99
-    return "{xs.len()} {row.item.x} {shared[0].item.x}"
-}
-"#;
-    let lua = emit_module(&format!("{GENERIC_WIDE}\n{popped}"));
-    assert_eq!(
-        run_luajit(&format!("{lua}\nprint(pop_value())\n")),
-        "0 11 99",
-    );
-
-    let release = RELEASE_MAIN
-        .replace("value Holder { items: [int]?", "value Holder<T> { items: T")
-        .replace("[Holder]", "[Holder<[int]?>]");
-    let lua = emit_module(&release);
-    assert!(crate::common::has_vec_header(&lua, "strided", None));
-    assert_eq!(run_main(&lua), "true,true,true",);
-}
-
-#[test]
 fn a_nobox_element_at_the_threshold_keeps_columns() {
     let lua = emit_module(NARROW);
     let main = function_body(&lua, "main");
@@ -459,46 +332,6 @@ fn a_nested_leaf_of_a_flat_stored_element_is_one_slot_write() {
             && crate::common::has_vec_header(&lua, "columns", None)
     );
     assert_eq!(run_main(&lua), "1,1,2.5,3|6,70,8,11|1,20|50");
-}
-
-const EMPTY_EDGES_MAIN: &str = r#"
-fn edges_strided() -> string {
-    let xs: [Ev] = []
-    let a = xs.pop() == null
-    xs.push(ev(1, Pay::Nothing))
-    let b = xs.pop().unwrap().kind
-    let c = xs.pop() == null
-    let d = xs.remove_at(0) == null
-    let e = xs.swap_remove(0) == null
-    xs.push(ev(2, Pay::Text("again")))
-    return "{a},{b},{c},{d},{e},{xs.len()},{xs[0].kind}"
-}
-
-fn edges_boxed() -> string {
-    let xs: [int] = []
-    let a = xs.pop() == null
-    xs.push(1)
-    let b = xs.pop().unwrap()
-    let c = xs.pop() == null
-    let d = xs.remove_at(0) == null
-    let e = xs.swap_remove(0) == null
-    xs.push(2)
-    return "{a},{b},{c},{d},{e},{xs.len()},{xs[0]}"
-}
-
-fn main() {
-    print("{edges_strided()}|{edges_boxed()}")
-}
-"#;
-
-#[test]
-fn an_emptied_strided_vec_answers_like_a_boxed_one() {
-    let lua = emit_module(&program(EMPTY_EDGES_MAIN));
-    assert!(crate::common::has_vec_header(&lua, "strided", None));
-    assert_eq!(
-        run_main(&lua),
-        "true,1,true,true,true,1,2|true,1,true,true,true,1,2"
-    );
 }
 
 #[test]

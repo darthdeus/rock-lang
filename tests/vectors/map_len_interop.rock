@@ -1,18 +1,10 @@
-use crate::common::{emit_module, run_luajit};
-
-const SOURCE: &str = r#"
 @nomangle fn new_map() -> Map<string, bool> { return map_new() }
 @nomangle fn map_size(m: Map<string, bool>) -> int { return m.len() }
 @nomangle fn put(m: Map<string, bool>, key: string, value: bool) { m[key] = value }
 @nomangle fn interop_map_remove(m: Map<string, bool>, key: string) { m.remove(key) }
 @nomangle fn interop_map_clear(m: Map<string, bool>) { m.clear() }
-"#;
 
-#[test]
-fn map_length_observes_lua_mutations_and_external_tables() {
-    let lua = emit_module(SOURCE);
-    let output = run_luajit(&format!(
-        r#"{lua}
+inline(lua) fn check_interop() -> bool = """
 jit.on()
 local function check(m, expected)
     local n = 0
@@ -20,7 +12,7 @@ local function check(m, expected)
     assert(n == expected)
     assert(map_size(m) == expected)
 end
-for _, m in ipairs({{new_map(), {{}}}}) do
+for _, m in ipairs({new_map(), {}}) do
     local alias = m
     check(m, 0)
     put(m, 'first', false)
@@ -53,8 +45,8 @@ for _, m in ipairs({{new_map(), {{}}}}) do
         check(m, 0)
     end
 end
-print('ok')
-"#
-    ));
-    assert_eq!(output, "ok");
-}
+return true
+"""
+
+@test(backends = "lua")
+fn map_length_observes_lua_mutations() { assert(check_interop()) }

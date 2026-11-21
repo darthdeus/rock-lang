@@ -1,0 +1,35 @@
+inline(lua) fn is_strided(v: any) -> bool = "return v['@vec'].repr == 'strided'"
+
+nobox value Holder<T> { items: T, a: int, b: int, c: int, d: int }
+
+inline(lua) fn watch(items: [int]) = """
+_G.__wide_strided_weak = setmetatable({items}, {__mode = 'v'})
+"""
+
+inline(lua) fn released() -> bool = """
+collectgarbage('collect')
+collectgarbage('collect')
+return _G.__wide_strided_weak[1] == nil
+"""
+
+fn seed(values: [Holder<[int]?>]) {
+    let items = [7]
+    watch(items)
+    values.push(Holder { items, a: 1, b: 2, c: 3, d: 4 })
+}
+
+fn discard(values: [Holder<[int]?>]) { let _ = values.pop() }
+
+@test(backends = "lua", output = "true,true,true")
+fn popped_and_cleared_rows_release_references() {
+    let values: [Holder<[int]?>] = vec_new_with_capacity(4)
+    assert(is_strided(values))
+    seed(values)
+    let held = !released()
+    discard(values)
+    let after_pop = released()
+    seed(values)
+    values.clear()
+    let after_clear = released()
+    print("{held},{after_pop},{after_clear}")
+}

@@ -1,0 +1,13 @@
+value Cell { v: int }
+fn bump(c: ref Cell) { c.v += 1 }
+@nomangle fn use_missing_key() {
+    let m: Map<string, Cell> = map_new()
+    m["a"] = Cell { v: 1 }
+    bump(m["b"])
+    print("unreachable")
+}
+
+inline(lua) fn missing_key_traps() -> bool = "local ok, err = pcall(use_missing_key); return not ok and err ~= nil"
+
+@test(backends = "lua")
+fn reject_missing_map_references() { assert(missing_key_traps()) }

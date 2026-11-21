@@ -1,26 +1,4 @@
-use crate::common::{emit_module, run_luajit, try_emit_module};
-
-#[test]
-fn ref_to_a_missing_map_key_raises_on_lua() {
-    let lua = emit_module(
-        r#"
-value Cell { v: int }
-fn bump(c: ref Cell) { c.v += 1 }
-fn main() {
-    let m: Map<string, Cell> = map_new()
-    m["a"] = Cell { v: 1 }
-    bump(m["b"])
-    print("unreachable")
-}
-"#,
-    );
-    assert_eq!(
-        run_luajit(&format!(
-            "{lua}\nlocal ok, err = pcall(main)\nprint(ok, err ~= nil)\n"
-        )),
-        "false\ttrue"
-    );
-}
+use crate::common::try_emit_module;
 
 #[test]
 fn recursive_ref_return_of_differently_stored_ref_rejects() {
