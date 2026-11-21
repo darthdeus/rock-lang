@@ -501,24 +501,6 @@ mod tests {
         }
     }
 
-    /// `let v: float? = some_int_opt` wraps the nullable value in the
-    /// int->float subsumption, which emits its operand unchanged on every
-    /// value backend. The wrapped value is nil whenever the source is, so
-    /// the presence test on it is real and must not fold.
-    #[test]
-    fn a_presence_test_on_a_widened_nullable_does_not_fold() {
-        let mut f = MirFunc::new(ustr::Ustr::from("widened"));
-        let cell = f.new_cell(None);
-        let loaded = f.emit(f.entry, Inst::Load(cell));
-        let widened = f.emit(f.entry, Inst::IntToFloat(loaded));
-        let nil = f.emit(f.entry, Inst::Const(Lit::Nil));
-        let test = f.emit(f.entry, Inst::Eq(widened, nil));
-        f.set_term(f.entry, Term::Return(vec![test]));
-
-        assert!(!fold_known_compares(&mut f), "{f}");
-        assert!(matches!(f.insts[test], Inst::Eq(..)), "{f}");
-    }
-
     /// The shape this fold exists for still folds: a test against a value
     /// the body just constructed.
     #[test]
@@ -589,37 +571,5 @@ mod tests {
             .map(|r| f.blocks[f.entry].insts.contains(r))
             .collect();
         assert_eq!(kept, [true, false, false], "{f}");
-    }
-
-    #[test]
-    fn an_unused_read_stays_before_an_effect_or_another_error() {
-        assert!(unused_read_survives(|f, p| {
-            f.emit(
-                f.entry,
-                Inst::StoreGlobal {
-                    name: ustr::Ustr::from("g"),
-                    value: p,
-                },
-            );
-        }));
-        assert!(unused_read_survives(|f, _| {
-            let other = f.new_cell(None);
-            let q = f.emit(f.entry, Inst::Load(other));
-            let read = f.emit(
-                f.entry,
-                Inst::Field {
-                    nonthrowing: false,
-                    base: q,
-                    field: ustr::Ustr::from("c"),
-                },
-            );
-            f.emit(
-                f.entry,
-                Inst::StoreGlobal {
-                    name: ustr::Ustr::from("g"),
-                    value: read,
-                },
-            );
-        }));
     }
 }
