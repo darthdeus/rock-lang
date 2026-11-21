@@ -133,27 +133,9 @@ fn tool_key_id(key: ToolKey) -> int {
     end
 """
 
-// --- per-frame snapshot ----------------------------------------------------
-//
-// Every tool key is sampled ONCE per frame, right after ImGui's NewFrame (see
-// `input_imgui_new_frame`), and the typed queries below read that sample
-// instead of asking ImGui. Two reasons, and the second is the one that made
-// this worth doing:
-//
-//   * the debug/editor surface polls a dozen of these per frame from as many
-//     render-phase sites, and each poll used to re-resolve a name and cross
-//     the binding; and
-//   * a poll from a hot site is a trace hazard. See `__tool_imgui_key_id`
-//     and the live queries above.
-//
-// The sample is EXACT, not an approximation. ImGui's KeysData changes only
-// inside NewFrame, and `__tool_imgui_inject_key_id` queues events that are
-// consumed there too, so between two NewFrames a live query and the sample
-// taken at the earlier one cannot disagree -- including the edge that
-// `IsKeyPressed` reports, which is true for exactly one NewFrame either way.
-// Every tool-key consumer runs in the render phase below
-// `input_imgui_new_frame`, so each reads its own frame's sample.
-//
+// Sample after ImGui NewFrame: key state and queued events do not change until
+// the next NewFrame. Render-phase consumers see that same sample, including
+// one-frame press edges, without making trace-hostile live queries.
 @nomangle inline(lua) fn __tool_snapshot_begin(ctrl_down: bool) = """
     local snap = _G.__stone_tool_keys
     if not snap then
