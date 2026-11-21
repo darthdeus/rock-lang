@@ -1,5 +1,3 @@
-//! Build formatter documents from the raw AST and source trivia.
-
 use std::collections::HashSet;
 
 use crate::FormatConfig;
@@ -10,9 +8,7 @@ use rock_tokenizer::{TokenKind, Tokenizer};
 use skull_parser::ast::*;
 use ustr::Ustr;
 
-/// Identifier spelling for output. The tokenizer escapes Lua keywords used as
-/// Rock identifiers (`end` is stored as `__rock_end`); undo that so the source
-/// name is emitted. A non-keyword name passes through unchanged.
+/// Undo tokenizer escapes for Lua keywords used as Rock identifiers.
 fn kw(name: Ustr) -> String {
     Tokenizer::unescape_lua_keyword(name.as_str()).to_string()
 }
@@ -61,9 +57,7 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// The separator for an infix operator. The range operator `..` is set
-    /// tight (`a..b`) unless an operand edge is a `.`, which would fuse into
-    /// `...`; everything else gets one space on each side.
+    /// Keep `..` tight unless an operand would fuse it into `...`.
     fn binop_sep(&self, op: &TokenKind, left: Idx<ExprData>, right: Idx<ExprData>) -> Doc {
         match op {
             TokenKind::DoubleDot
@@ -139,9 +133,7 @@ impl<'a> Printer<'a> {
                     && !matches!(it.kind, ItemKind::Comment(_))
             })
             .collect();
-        // A trailing-comment `Comment` item (re-emitted as a trailing comment on
-        // the preceding item) is transparent: it mustn't break an aligned run of
-        // globals that carry trailing comments (`global X: T = ..  // note`).
+        // Trailing comments must not break an aligned run of globals.
         let item_skip: Vec<bool> = self
             .ast
             .items
@@ -180,9 +172,7 @@ impl<'a> Printer<'a> {
             let Some((item, item_doc)) = row else {
                 break;
             };
-            // At the top level the parser captures a trailing comment as its own
-            // `Comment` item; trivia already re-emits it as a trailing comment on
-            // the preceding item, so skip it here to avoid double output.
+            // Trivia already prints top-level trailing comments on the preceding item.
             if matches!(item.kind, ItemKind::Comment(_))
                 && prev_end == Some(item.span.line_range().0)
             {
@@ -380,10 +370,7 @@ impl<'a> Printer<'a> {
             return Doc::concat([sig, self.block(block)]);
         }
 
-        // A macro body's item declarations (`macro m() { fn f() {..} }`) are
-        // parked in `macro_items`, outside the block's statement list, so
-        // printing the block alone DELETED them. Keep such a body verbatim
-        // until the printer can interleave items with statements.
+        // Macro items live outside the statement list; printing only the block loses them.
         if f.is_macro && !f.macro_items.is_empty() {
             let sig_start = f.keyword_span.unwrap_or(f.span);
             let block_span = self.ast.b(&block).span;
@@ -924,10 +911,7 @@ impl<'a> Printer<'a> {
             if prev_end.is_some() {
                 body.push(hardline());
             }
-            // Preserve the author's layout in the gap: blank lines (only BETWEEN
-            // entries, never right after the opening `{`) then the standalone
-            // comment block, in source order -- the comment does not absorb the
-            // blank that precedes it.
+            // Standalone comments must not absorb preceding blank lines.
             if let Some(prev) = prev_end {
                 let upto = comments.first().map_or(start, |(l, _)| *l);
                 for _ in 0..self.trivia.blank_count_between(prev, upto) {
@@ -1207,9 +1191,7 @@ impl<'a> Printer<'a> {
                 .verbatim_header(stmt.span, f.body)
                 .unwrap_or_else(|| self.for_stmt(f)),
             StatementKind::While(w) => {
-                // `loop { .. }` parses as `while true { .. }` (same AST). Render
-                // an always-true condition back as `loop`, normalizing the
-                // literal `while true` spelling to it too (corpus rule).
+                // `loop` and `while true` share an AST; normalize both to `loop`.
                 let is_loop = matches!(self.ast.e(&w.condition).kind, ExprKind::Bool(true));
                 self.verbatim_header(stmt.span, w.body).unwrap_or_else(|| {
                     if is_loop {
@@ -2056,10 +2038,7 @@ impl<'a> Printer<'a> {
             return Doc::text(format!("{name} {{}}"));
         }
         let field_doc = |names: &[Ident], value: &Idx<ExprData>| -> Doc {
-            // Shorthand `{ x }` parses as ([x], Ident(x)) where the value shares
-            // the key's source span; `{ x: x }` parses the same but with the
-            // value at a distinct span. Only collapse the former (preserve an
-            // explicit `x: x` the author wrote).
+            // Only shorthand shares the key's span; preserve explicit `x: x`.
             if names.len() == 1 {
                 if let ExprKind::Ident(id) = &self.ast.e(value).kind {
                     if id.name == names[0].name
