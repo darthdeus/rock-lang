@@ -1,4 +1,3 @@
--- A fake server suffices to exercise process crash and recovery.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
@@ -38,21 +37,7 @@ end)
 -- notification via vim.schedule; drain so the notification lands.
 vim.wait(200, function() return false end)
 
--- The state.set_buffer call in on_attach never fires (no attach
--- happens because the server exited before initialize). But we
--- track buffers via state when we do bookkeeping, and the crash
--- diagnostics use whatever buffers are in state.get().buffers. That
--- means mark_buffers_crashed is a no-op when the client never
--- attached. That's a real-world limitation — a server that crashes
--- before initialize won't get crash diagnostics on buffers either.
---
--- What we CAN reliably assert here:
---   (a) state.client.state transitioned to 'crashed'
---   (b) last_exit.code == 1
---   (c) crash notification fired
---   (d) the missing-binary disable-autoattach path was NOT taken
---       (binary exists; the failure is in the spawned process, not
---       the spawn itself)
+-- A server that exits before initialize never attaches a buffer.
 
 local s = state.get().client
 if s.state ~= 'crashed' then
@@ -82,7 +67,6 @@ end
 notifications = {}
 vim.lsp.config('rock', client.make_config({ binary = true_bin }))
 client.restart()
--- Wait for the old client to drain and the replacement to exit.
 vim.wait(4000, function()
   local last = state.get().client.last_exit
   return last and last.code == 0

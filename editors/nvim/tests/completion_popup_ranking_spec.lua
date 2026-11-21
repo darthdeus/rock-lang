@@ -17,16 +17,11 @@ fn main() {
 }
 ]], false)
 
--- Replace `let x = 0` with `let x = LOOTPA`, cursor at end of
--- prefix, fire omnifunc.
 child:rpc('nvim_win_set_cursor', 0, { 4, 4 })
--- The line is "    let x = 0" — `cc` clears, retype with prefix.
 child:input('cc    let x = LOOTPA<C-x><C-o>')
 
 local words = assert(child:popup_words())
 
--- LOOT_PANEL must be present and ranked before
--- LATER_OUT_OF_TOWN_PERSON_ASTEROID.
 local panel_idx, later_idx
 for i, w in ipairs(words) do
   if w == 'LOOT_PANEL' then panel_idx = i end
@@ -43,9 +38,6 @@ if later_idx and panel_idx > later_idx then
     :format(panel_idx, later_idx, vim.inspect(words)))
 end
 
--- Top item should be LOOT_PANEL — the user-visible win we ship the
--- ranking for. If this flips, completeopt likely lost `fuzzy` (nvim
--- re-sorts) or sort_text encoding drifted.
 if panel_idx ~= 1 then
   fail(('LOOT_PANEL must be the top popup item; got order %s'):format(
     vim.inspect(words)))

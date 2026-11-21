@@ -18,10 +18,6 @@ fn foo() {
 }
 ]], true)
 
--- Sanity: server advertises `:` as a trigger char. If this ever
--- regresses to just `.`, the autotrigger below silently no-ops and
--- the failure mode is "no popup" — the assertion below would still
--- catch it, but failing here gives a clearer signal.
 local triggers = child:exec_lua([[
   local cs = vim.lsp.get_clients({ name = 'rock' })
   if #cs == 0 then return nil end
@@ -35,12 +31,7 @@ do
   end
 end
 
--- Cursor at end of "    let x: Hello = Hello:" on line 8 (1-based).
--- That line's char count is 25 (`    let x: Hello = Hello:` is 25
--- bytes incl. leading 4 spaces).
 child:rpc('nvim_win_set_cursor', 0, { 8, 25 })
--- Enter insert mode at end of line, then type the second `:` to
--- form `::` and let the trigger char fire autocompletion.
 child:input('a:')
 
 local words = assert(child:popup_words())
@@ -52,9 +43,6 @@ for _, want in ipairs({ 'Alpha', 'Beta', 'LongThing' }) do
   end
 end
 
--- Scope resolution must not leak general identifiers into the popup.
--- If `Hello` (the type itself) or `foo` show up, scope detection
--- fell through to identifier completion at the popup layer.
 for _, leak in ipairs({ 'Hello', 'foo' }) do
   if vim.tbl_contains(words, leak) then
     fail('popup leaked identifier ' .. leak .. '; got ' .. vim.inspect(words))
