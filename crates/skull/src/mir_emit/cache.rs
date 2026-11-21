@@ -223,10 +223,6 @@ impl SkullEmitCache {
         result
     }
 
-    pub(super) fn candidate_index_by_func(&self) -> &FxHashMap<FuncRef, FxHashSet<Instance>> {
-        self.concrete.candidate_keys_by_func()
-    }
-
     /// Every `embed_string` input baked into the program, with the hash of
     /// Covers the always-emitted units too, which hold most production embeds.
     /// the baked bytes: the files a watcher must treat as sources.
@@ -727,10 +723,8 @@ impl SkullEmitCache {
         invalidated_candidate_frefs.extend(update.added.iter().map(|instance| instance.func));
         invalidated_candidate_frefs.extend(update.removed.iter().map(|instance| instance.func));
         let mut warm_keys = concrete_update.candidate_keys_added.clone();
-        for fref in &invalidated_candidate_frefs {
-            if let Some(keys) = cache.candidate_index_by_func().get(fref) {
-                warm_keys.extend(keys.iter().cloned());
-            }
+        for fref in invalidated_candidate_frefs {
+            warm_keys.extend(cache.concrete.candidate_keys_for(fref).cloned());
         }
         let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
         let t_candidate = Instant::now();
@@ -762,14 +756,11 @@ impl SkullEmitCache {
                 {
                     continue;
                 }
-                if let Some(keys) = cache.candidate_index_by_func().get(fref) {
-                    if !keys.is_empty()
-                        && keys
-                            .iter()
-                            .all(|key| previous.residual_eligibility_matches(&candidate_table, key))
-                    {
-                        stable_residual_frefs.insert(*fref);
-                    }
+                let mut keys = cache.concrete.candidate_keys_for(*fref).peekable();
+                if keys.peek().is_some()
+                    && keys.all(|key| previous.residual_eligibility_matches(&candidate_table, key))
+                {
+                    stable_residual_frefs.insert(*fref);
                 }
             }
         }

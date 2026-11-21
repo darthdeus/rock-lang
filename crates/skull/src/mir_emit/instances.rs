@@ -20,7 +20,7 @@ pub(super) fn build_inline_candidate_table(
     scx: &skull_mir::lower::ScalarCtx,
     concrete: &crate::concrete_body::ConcreteBodies,
 ) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
-    let keys: Vec<Instance> = concrete.candidate_keys().iter().cloned().collect();
+    let keys: Vec<Instance> = concrete.candidate_keys().cloned().collect();
     let warms = warm_candidates(ws, scx, concrete, keys.clone())?;
     Ok(std::sync::Arc::new(
         skull_transform::InlineCandidateTable::from_warms_with_base(None, keys, warms),

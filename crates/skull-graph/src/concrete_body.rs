@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bone_core::hir::{BodyOwner, TypeExpr};
 use bone_core::prelude::TyId;
 use bone_core::workspace::Workspace;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use skull_mir::concrete::{
     ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteCallee, ConcreteOwner, ConcretePlans,
     ConcreteSignature, ConcreteSignatureHandle, ConcreteTypeTables,
@@ -13,7 +13,7 @@ use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoSubst, MonoTyReason, TyEnv};
 
 use crate::instance_graph::{
-    ready_body, Contribution, Instance, InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome,
+    ready_body, Instance, InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome,
 };
 
 #[derive(Clone, Default)]
@@ -22,15 +22,8 @@ pub struct ConcreteBodies {
     pub always_plans: ConcreteAlwaysPlans,
     plan_failure_index: BTreeMap<Instance, MonoTyReason>,
     always_plan_failure_index: FxHashMap<ConcreteOwner, MonoTyReason>,
-    candidate_keys: BTreeSet<Instance>,
-    owner_candidates: FxHashMap<Instance, FxHashSet<Instance>>,
-    candidate_index: std::sync::OnceLock<CandidateIndex>,
-}
-
-#[derive(Clone, Default)]
-struct CandidateIndex {
-    by_func: FxHashMap<FuncRef, FxHashSet<Instance>>,
-    users: FxHashMap<Instance, FxHashSet<Instance>>,
+    // Count every callee site of a successful function plan.
+    candidate_counts: BTreeMap<Instance, usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -55,33 +48,15 @@ impl ConcreteBodies {
         }
     }
 
-    pub fn candidate_keys(&self) -> &BTreeSet<Instance> {
-        &self.candidate_keys
+    pub fn candidate_keys(&self) -> impl Iterator<Item = &Instance> {
+        self.candidate_counts.keys()
     }
 
-    pub fn candidate_keys_by_func(&self) -> &FxHashMap<FuncRef, FxHashSet<Instance>> {
-        &self.derived_candidate_index().by_func
-    }
-
-    fn derived_candidate_index(&self) -> &CandidateIndex {
-        self.candidate_index.get_or_init(|| {
-            let mut index = CandidateIndex::default();
-            for (owner, candidates) in &self.owner_candidates {
-                for candidate in candidates {
-                    index
-                        .users
-                        .entry(candidate.clone())
-                        .or_default()
-                        .insert(owner.clone());
-                    index
-                        .by_func
-                        .entry(candidate.func)
-                        .or_default()
-                        .insert(candidate.clone());
-                }
-            }
-            index
-        })
+    pub fn candidate_keys_for(&self, func: FuncRef) -> impl Iterator<Item = &Instance> {
+        self.candidate_counts
+            .range(Instance::base(func)..)
+            .map(|(instance, _)| instance)
+            .take_while(move |instance| instance.func == func)
     }
 
     pub fn first_plan_failure(&self) -> Option<(&Instance, &MonoTyReason)> {
@@ -115,48 +90,39 @@ impl ConcreteBodies {
             .iter()
             .filter_map(|owner| match owner {
                 Owner::AlwaysEmitted(module, body) => {
-                    Some((owner, *module, *body, concrete_owner_for(*module, *body)?))
+                    Some((*module, *body, concrete_owner_for(*module, *body)?))
                 }
                 Owner::Instance(_) => None,
             })
             .collect();
-        let mut publication = PublicationSets::default();
-        for instance in &targets {
-            publication.instances.insert(instance);
-            if let Some(contribution) = g.contributions.get(&Owner::Instance(instance.clone())) {
-                publication.add_sites(contribution, true);
-            }
-        }
-        for (owner, _, _, _) in &always_subjects {
-            if let Some(contribution) = g.contributions.get(*owner) {
-                publication.add_sites(contribution, true);
-            }
-        }
-        let (signatures, domains) = publication.publish_local(ws, g);
+        let publication = Publication::new(ws, g, 1);
         for instance in targets {
-            let Some(prepared) = prepare_instance(ws, g, instance) else {
+            let Some(built) = plan_instance(&publication, instance) else {
                 continue;
             };
-            let built = produce_instance(g, prepared, &signatures, &domains);
             match built.plan {
                 Err(reason) => {
                     self.plan_failure_index.insert(built.instance, reason);
                 }
                 Ok(plan) => {
-                    candidate_keys_added.extend(
-                        self.install_candidate_refs_owned(&built.instance, built.candidate_refs),
-                    );
+                    for callee in plan.callees.values() {
+                        let instance = &callee.instance;
+                        let count = self.candidate_counts.entry(instance.clone()).or_default();
+                        if *count == 0 {
+                            candidate_keys_added.insert(instance.clone());
+                        }
+                        *count += 1;
+                    }
                     Arc::get_mut(&mut self.plans)
                         .expect("local concrete update lost its unique plan store")
                         .insert(built.instance, Arc::new(plan));
                 }
             }
         }
-        for (_, module, body, owner) in always_subjects {
+        for (module, body, owner) in always_subjects {
             self.always_plan_failure_index.remove(&owner);
             self.always_plans.remove(&owner);
-            let prepared = prepare_always(ws, g, module, body);
-            self.install_always(produce_always(ws, g, prepared, &signatures, &domains));
+            self.install_always(plan_always(&publication, module, body));
         }
         ConcreteUpdateStats {
             candidate_keys_added,
@@ -180,69 +146,25 @@ impl ConcreteBodies {
 
     fn remove_instance(&mut self, instance: &Instance) -> BTreeSet<Instance> {
         let mut removed = BTreeSet::new();
-        self.derived_candidate_index();
-        if let Some(candidates) = self.owner_candidates.remove(instance) {
-            let index = self
-                .candidate_index
-                .get_mut()
-                .expect("the candidate index was derived above");
-            for candidate in candidates {
-                let Some(users) = index.users.get_mut(&candidate) else {
-                    continue;
-                };
-                users.remove(instance);
-                if users.is_empty() {
-                    index.users.remove(&candidate);
-                    self.candidate_keys.remove(&candidate);
-                    if let Some(keys) = index.by_func.get_mut(&candidate.func) {
-                        keys.remove(&candidate);
-                        if keys.is_empty() {
-                            index.by_func.remove(&candidate.func);
-                        }
-                    }
-                    removed.insert(candidate);
-                }
-            }
-        }
         self.plan_failure_index.remove(instance);
-        Arc::get_mut(&mut self.plans)
+        if let Some(plan) = Arc::get_mut(&mut self.plans)
             .expect("local concrete update lost its unique plan store")
-            .remove(instance);
-        removed
-    }
-
-    fn install_candidate_refs_owned(
-        &mut self,
-        owner: &Instance,
-        refs: FxHashSet<Instance>,
-    ) -> BTreeSet<Instance> {
-        let mut added = BTreeSet::new();
-        self.derived_candidate_index();
-        let index = self
-            .candidate_index
-            .get_mut()
-            .expect("the candidate index was derived above");
-        for candidate in &refs {
-            match index.users.entry(candidate.clone()) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    self.candidate_keys.insert(candidate.clone());
-                    index
-                        .by_func
-                        .entry(candidate.func)
-                        .or_default()
-                        .insert(candidate.clone());
-                    added.insert(candidate.clone());
-                    let mut users = FxHashSet::default();
-                    users.insert(owner.clone());
-                    entry.insert(users);
-                }
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().insert(owner.clone());
+            .remove(instance)
+        {
+            for callee in plan.callees.values() {
+                let instance = &callee.instance;
+                let count = self
+                    .candidate_counts
+                    .get_mut(instance)
+                    .expect("published callee");
+                *count -= 1;
+                if *count == 0 {
+                    self.candidate_counts.remove(instance);
+                    removed.insert(instance.clone());
                 }
             }
         }
-        self.owner_candidates.insert(owner.clone(), refs);
-        added
+        removed
     }
 }
 
@@ -304,7 +226,6 @@ pub(crate) fn concrete_signature_for_instance(
 struct BuiltInstance {
     instance: Instance,
     plan: Result<ConcreteBodyPlan, MonoTyReason>,
-    candidate_refs: FxHashSet<Instance>,
 }
 
 fn concrete_owner_order(left: &ConcreteOwner, right: &ConcreteOwner) -> std::cmp::Ordering {
@@ -345,181 +266,102 @@ fn concrete_owner_order(left: &ConcreteOwner, right: &ConcreteOwner) -> std::cmp
         })
 }
 
-type PublishedSignatures = FxHashMap<Instance, Result<ConcreteSignatureHandle, MonoTyReason>>;
-type PublishedDomains = BTreeMap<SiteDomain, Result<ConcreteTypeTables, MonoTyReason>>;
+type Rows<K, V> = parking_lot::RwLock<FxHashMap<K, Result<V, MonoTyReason>>>;
 
-fn collect_publication_inputs(g: &InstanceGraph) -> PublicationSets<'_> {
-    let owners: Vec<(&Owner, &Contribution)> =
-        g.contributions.iter().map(|(o, c)| (o, &**c)).collect();
-    #[cfg(not(feature = "sequential"))]
-    {
-        use rayon::prelude::*;
-        owners
-            .into_par_iter()
-            .fold(
-                PublicationSets::default,
-                |mut sets, (owner, contribution)| {
-                    sets.add(owner, contribution);
-                    sets
-                },
-            )
-            .reduce(PublicationSets::default, PublicationSets::merge)
+struct Memo<K, V>(Vec<Rows<K, V>>);
+
+impl<K: Clone + Eq + std::hash::Hash, V: Clone> Memo<K, V> {
+    fn new(shards: usize) -> Self {
+        debug_assert!(shards.is_power_of_two());
+        Self((0..shards).map(|_| Rows::default()).collect())
     }
-    #[cfg(feature = "sequential")]
-    {
-        let mut sets = PublicationSets::default();
-        for (owner, contribution) in owners {
-            sets.add(owner, contribution);
+
+    fn get(
+        &self,
+        key: &K,
+        build: impl FnOnce() -> Result<V, MonoTyReason>,
+    ) -> Result<V, MonoTyReason> {
+        use std::hash::BuildHasher;
+        let hash = rustc_hash::FxBuildHasher.hash_one(key);
+        let index = (hash >> 32) as usize & (self.0.len() - 1);
+        let rows = &self.0[index];
+        if let Some(row) = rows.read().get(key) {
+            return row.clone();
         }
-        sets
+        rows.write()
+            .entry(key.clone())
+            .or_insert_with(build)
+            .clone()
     }
 }
 
-#[derive(Default)]
-struct PublicationSets<'g> {
-    instances: FxHashSet<&'g Instance>,
-    domains: FxHashSet<&'g SiteDomain>,
+struct Publication<'a> {
+    ws: &'a Workspace,
+    graph: &'a InstanceGraph,
+    signatures: Memo<Instance, ConcreteSignatureHandle>,
+    domains: Memo<SiteDomain, ConcreteTypeTables>,
 }
 
-impl<'g> PublicationSets<'g> {
-    fn add(&mut self, owner: &'g Owner, contribution: &'g Contribution) {
-        match owner {
-            Owner::Instance(instance) if contribution.expanded => {
-                self.instances.insert(instance);
-                self.add_sites(contribution, false);
-            }
-            Owner::AlwaysEmitted(..) => self.add_sites(contribution, true),
-            Owner::Instance(_) => {}
+impl<'a> Publication<'a> {
+    fn new(ws: &'a Workspace, graph: &'a InstanceGraph, shards: usize) -> Self {
+        Self {
+            ws,
+            graph,
+            signatures: Memo::new(shards),
+            domains: Memo::new(shards),
         }
     }
 
-    fn add_sites(&mut self, contribution: &'g Contribution, include_failed_domains: bool) {
-        self.domains.extend(&contribution.struct_default_domains);
-        for (site, record) in &contribution.call_sites {
-            let resolved = if let SiteOutcome::Resolved(target) = &record.outcome {
-                self.instances.insert(target);
-                true
-            } else {
-                false
+    fn signature(&self, instance: &Instance) -> Result<ConcreteSignatureHandle, MonoTyReason> {
+        self.signatures.get(instance, || {
+            concrete_signature_for_instance(self.ws, self.graph, instance).map(Arc::new)
+        })
+    }
+
+    fn foreign_domains(
+        &self,
+        domains: impl IntoIterator<Item = SiteDomain>,
+    ) -> Result<BTreeMap<SiteDomain, ConcreteTypeTables>, MonoTyReason> {
+        let mut out = BTreeMap::new();
+        for domain in domains {
+            let SiteDomain::StructDefaults(defaults) = &domain else {
+                continue;
             };
-            if (resolved || include_failed_domains) && !matches!(site.domain, SiteDomain::Own) {
-                self.domains.insert(&site.domain);
+            if out.contains_key(&domain) {
+                continue;
             }
+            let (module, def, args) = (defaults.module, defaults.def, &defaults.args);
+            let tables = self.domains.get(&domain, || {
+                let owner = BodyOwner::StructDefaults(def);
+                let body = self
+                    .ws
+                    .module(module)
+                    .bodies
+                    .get(&owner)
+                    .ok_or(MonoTyReason::NoNode)?;
+                let inf = self
+                    .ws
+                    .inference(module)
+                    .and_then(|ir| ir.per_fn.get(&owner))
+                    .ok_or(MonoTyReason::NoNode)?;
+                let subst = skull_mir::struct_defaults::slot_subst(Some(inf), args);
+                ConcreteTypeTables::publish(
+                    self.ws,
+                    self.graph.interner(),
+                    (module, owner),
+                    (inf, body),
+                    &subst,
+                    std::iter::empty(),
+                )
+            })?;
+            out.insert(domain, tables);
         }
-    }
-
-    #[cfg(not(feature = "sequential"))]
-    fn merge(mut self, mut other: Self) -> Self {
-        if self.instances.len() < other.instances.len() {
-            std::mem::swap(&mut self.instances, &mut other.instances);
-        }
-        self.instances.extend(other.instances);
-        self.domains.extend(other.domains);
-        self
-    }
-
-    fn publish_local(
-        self,
-        ws: &Workspace,
-        g: &InstanceGraph,
-    ) -> (PublishedSignatures, PublishedDomains) {
-        let mut instances: Vec<_> = self.instances.into_iter().collect();
-        instances.sort_unstable();
-        let signatures = instances
-            .into_iter()
-            .map(|instance| signature_row(ws, g, instance))
-            .collect();
-        let domains = self.domains.into_iter().cloned().collect::<BTreeSet<_>>();
-        (signatures, publish_foreign_domains(ws, g, domains))
+        Ok(out)
     }
 }
 
-fn signature_row(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    instance: &Instance,
-) -> (Instance, Result<ConcreteSignatureHandle, MonoTyReason>) {
-    let result = g
-        .substitution(instance)
-        .ok_or(MonoTyReason::NoNode)
-        .and_then(|subst| concrete_signature(ws, g, instance, subst))
-        .map(Arc::new);
-    (instance.clone(), result)
-}
-
-fn publish(ws: &Workspace, g: &InstanceGraph) -> (PublishedSignatures, PublishedDomains) {
-    use bone_core::prelude::*;
-
-    let PublicationSets { instances, domains } = collect_publication_inputs(g);
-    let signatures = instances
-        .into_iter()
-        .collect::<Vec<_>>()
-        .into_par_iter()
-        .map(|instance| signature_row(ws, g, instance))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .collect();
-    let domains = domains.into_iter().cloned().collect::<BTreeSet<_>>();
-    (signatures, publish_foreign_domains(ws, g, domains))
-}
-
-fn publish_foreign_domains(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    domains: impl IntoIterator<Item = SiteDomain>,
-) -> PublishedDomains {
-    let domains: Vec<SiteDomain> = domains
-        .into_iter()
-        .filter(|domain| !matches!(domain, SiteDomain::Own))
-        .collect();
-    // Keyed by domain, so the parallel conversion order is not observable.
-    let published: Vec<(SiteDomain, Result<ConcreteTypeTables, MonoTyReason>)> = {
-        use bone_core::prelude::*;
-        domains
-            .into_par_iter()
-            .map(|domain| {
-                let result = match &domain {
-                    SiteDomain::Own => unreachable!("own domains are filtered above"),
-                    SiteDomain::StructDefaults(defaults) => {
-                        let (module, def, args) = (&defaults.module, &defaults.def, &defaults.args);
-                        let owner = BodyOwner::StructDefaults(*def);
-                        ws.module(*module)
-                            .bodies
-                            .get(&owner)
-                            .ok_or(MonoTyReason::NoNode)
-                            .and_then(|defaults_body| {
-                                let defaults_inf = ws
-                                    .inference(*module)
-                                    .and_then(|ir| ir.per_fn.get(&owner))
-                                    .ok_or(MonoTyReason::NoNode)?;
-                                let defaults_subst = skull_mir::struct_defaults::slot_subst(
-                                    Some(defaults_inf),
-                                    args,
-                                );
-                                ConcreteTypeTables::publish(
-                                    ws,
-                                    g.interner(),
-                                    (*module, owner),
-                                    (defaults_inf, defaults_body),
-                                    &defaults_subst,
-                                    std::iter::empty(),
-                                )
-                            })
-                    }
-                };
-                (domain, result)
-            })
-            .collect()
-    };
-    published.into_iter().collect()
-}
-
-struct PreparedInstance {
-    instance: Instance,
-    types: Result<ConcreteTypeTables, MonoTyReason>,
-}
-
-fn prepare_instance(ws: &Workspace, g: &InstanceGraph, inst: Instance) -> Option<PreparedInstance> {
+fn plan_instance(publication: &Publication<'_>, inst: Instance) -> Option<BuiltInstance> {
+    let (ws, g) = (publication.ws, publication.graph);
     if g.has_bound_tree_disagreement(&inst) {
         return None;
     }
@@ -540,16 +382,10 @@ fn prepare_instance(ws: &Workspace, g: &InstanceGraph, inst: Instance) -> Option
         &subst,
         declared_types,
     );
-    Some(PreparedInstance {
+    Some(BuiltInstance {
+        plan: concrete_plan_from_sites(publication, &inst, types),
         instance: inst,
-        types,
     })
-}
-
-struct PreparedAlways {
-    module: bone_core::prelude::ModuleId,
-    body_owner: BodyOwner,
-    types: Result<Option<ConcreteTypeTables>, MonoTyReason>,
 }
 
 fn concrete_owner_for(
@@ -572,85 +408,52 @@ fn concrete_owner_for(
     }
 }
 
-fn prepare_always(
+fn always_types(
     ws: &Workspace,
     g: &InstanceGraph,
     module: bone_core::prelude::ModuleId,
     body_owner: BodyOwner,
-) -> PreparedAlways {
-    let types = (|| {
-        let module_data = ws.module(module);
-        let body = module_data
-            .bodies
-            .get(&body_owner)
-            .ok_or(MonoTyReason::NoNode)?;
-        if matches!(body_owner, BodyOwner::Global(_)) && body.root.is_none() {
-            return Ok(None);
-        }
-        let inf = ws
-            .inference(module)
-            .and_then(|ir| ir.per_fn.get(&body_owner))
-            .ok_or(MonoTyReason::NoNode)?;
-        let (global_ty, params) = match body_owner {
-            BodyOwner::Global(index) => (Some(module_data.globals[index].ty), &[][..]),
-            BodyOwner::Decorator(index) => (None, &module_data.decorators[index].param_decls[..]),
-            _ => (None, &[][..]),
-        };
-        ConcreteTypeTables::publish(
-            ws,
-            g.interner(),
-            (module, body_owner),
-            (inf, body),
-            &MonoSubst::default(),
-            global_ty
-                .into_iter()
-                .chain(params.iter().map(|param| param.ty)),
-        )
-        .map(Some)
-    })();
-    PreparedAlways {
-        module,
-        body_owner,
-        types,
+) -> Result<Option<ConcreteTypeTables>, MonoTyReason> {
+    let module_data = ws.module(module);
+    let body = module_data
+        .bodies
+        .get(&body_owner)
+        .ok_or(MonoTyReason::NoNode)?;
+    if matches!(body_owner, BodyOwner::Global(_)) && body.root.is_none() {
+        return Ok(None);
     }
-}
-
-fn foreign_domains_from_publication<I>(
-    domains: I,
-    published: &PublishedDomains,
-) -> Result<BTreeMap<SiteDomain, ConcreteTypeTables>, MonoTyReason>
-where
-    I: IntoIterator<Item = SiteDomain>,
-{
-    let mut out = BTreeMap::new();
-    for domain in domains {
-        let SiteDomain::StructDefaults(..) = domain else {
-            continue;
-        };
-        if out.contains_key(&domain) {
-            continue;
-        }
-        let tables = published
-            .get(&domain)
-            .ok_or(MonoTyReason::NoNode)?
-            .clone()?;
-        out.insert(domain, tables);
-    }
-    Ok(out)
+    let inf = ws
+        .inference(module)
+        .and_then(|ir| ir.per_fn.get(&body_owner))
+        .ok_or(MonoTyReason::NoNode)?;
+    let (global_ty, params) = match body_owner {
+        BodyOwner::Global(index) => (Some(module_data.globals[index].ty), &[][..]),
+        BodyOwner::Decorator(index) => (None, &module_data.decorators[index].param_decls[..]),
+        _ => (None, &[][..]),
+    };
+    ConcreteTypeTables::publish(
+        ws,
+        g.interner(),
+        (module, body_owner),
+        (inf, body),
+        &MonoSubst::default(),
+        global_ty
+            .into_iter()
+            .chain(params.iter().map(|param| param.ty)),
+    )
+    .map(Some)
 }
 
 fn concrete_plan_from_sites(
-    g: &InstanceGraph,
+    publication: &Publication<'_>,
     inst: &Instance,
     types: Result<ConcreteTypeTables, MonoTyReason>,
-    signatures: &PublishedSignatures,
-    domains: &PublishedDomains,
-) -> Result<(ConcreteBodyPlan, FxHashSet<Instance>), MonoTyReason> {
+) -> Result<ConcreteBodyPlan, MonoTyReason> {
     let mut callees = BTreeMap::new();
-    let mut candidate_refs = FxHashSet::default();
     let mut failed_sites = Vec::new();
     let mut site_domains = Vec::new();
     let mut callee_signature_error: Option<(u8, Site, MonoTyReason)> = None;
+    let g = publication.graph;
     if let Some(sites) = g.sites_of(inst) {
         for (site, record) in sites {
             match &record.outcome {
@@ -659,8 +462,7 @@ fn concrete_plan_from_sites(
                 }
                 SiteOutcome::Resolved(target) => {
                     let callee_instance = target.clone();
-                    candidate_refs.insert(target.clone());
-                    match published_signature(signatures, target) {
+                    match publication.signature(target) {
                         Ok(signature) => {
                             callees.insert(
                                 site.clone(),
@@ -687,7 +489,7 @@ fn concrete_plan_from_sites(
         }
     }
 
-    let owner_signature = published_signature(signatures, inst);
+    let owner_signature = publication.signature(inst);
     if let Some((_, _, reason)) = callee_signature_error {
         return Err(reason);
     }
@@ -699,33 +501,19 @@ fn concrete_plan_from_sites(
         .get(&Owner::Instance(inst.clone()))
         .into_iter()
         .flat_map(|contribution| contribution.struct_default_domains.iter().cloned());
-    let foreign_domains =
-        foreign_domains_from_publication(default_domains.chain(site_domains), domains)?;
-    Ok((
-        ConcreteBodyPlan {
-            owner: ConcreteOwner::Function(inst.clone()),
-            code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(inst.clone())),
-            types,
-            foreign_domains,
-            signature,
-            callees,
-            failed_sites: failed_sites.into_iter().collect(),
-            bound_tree: g
-                .bound_tree(inst)
-                .map_or_else(Default::default, |tree| tree.to_resolved()),
-        },
-        candidate_refs,
-    ))
-}
-
-fn published_signature(
-    signatures: &PublishedSignatures,
-    instance: &Instance,
-) -> Result<ConcreteSignatureHandle, MonoTyReason> {
-    signatures
-        .get(instance)
-        .cloned()
-        .ok_or(MonoTyReason::NoNode)?
+    let foreign_domains = publication.foreign_domains(default_domains.chain(site_domains))?;
+    Ok(ConcreteBodyPlan {
+        owner: ConcreteOwner::Function(inst.clone()),
+        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(inst.clone())),
+        types,
+        foreign_domains,
+        signature,
+        callees,
+        failed_sites: failed_sites.into_iter().collect(),
+        bound_tree: g
+            .bound_tree(inst)
+            .map_or_else(Default::default, |tree| tree.to_resolved()),
+    })
 }
 
 /// Preserve diagnostic precedence when several callee signatures fail.
@@ -738,51 +526,24 @@ fn callee_table_rank(site: &Site) -> u8 {
     }
 }
 
-fn produce_instance(
-    g: &InstanceGraph,
-    prepared: PreparedInstance,
-    signatures: &PublishedSignatures,
-    domains: &PublishedDomains,
-) -> BuiltInstance {
-    let PreparedInstance {
-        instance: inst,
-        types,
-    } = prepared;
-    let (plan, candidate_refs) =
-        match concrete_plan_from_sites(g, &inst, types, signatures, domains) {
-            Ok((plan, candidate_refs)) => (Ok(plan), candidate_refs),
-            Err(reason) => (Err(reason), FxHashSet::default()),
-        };
-    BuiltInstance {
-        instance: inst,
-        plan,
-        candidate_refs,
-    }
-}
-
 struct BuiltAlways {
     owner: Option<ConcreteOwner>,
     plan: Result<Option<ConcreteBodyPlan>, MonoTyReason>,
 }
 
-fn produce_always(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    prepared: PreparedAlways,
-    signatures: &PublishedSignatures,
-    domains: &PublishedDomains,
+fn plan_always(
+    publication: &Publication<'_>,
+    module: bone_core::prelude::ModuleId,
+    body_owner: BodyOwner,
 ) -> BuiltAlways {
-    let PreparedAlways {
-        module,
-        body_owner,
-        types,
-    } = prepared;
     let owner = concrete_owner_for(module, body_owner);
     let plan = (|| {
-        let Some(types) = types? else {
+        let Some(types) = always_types(publication.ws, publication.graph, module, body_owner)?
+        else {
             return Ok(None);
         };
-        let contribution = g
+        let contribution = publication
+            .graph
             .contributions
             .get(&Owner::AlwaysEmitted(module, body_owner))
             .ok_or(MonoTyReason::NoNode)?;
@@ -795,7 +556,7 @@ fn produce_always(
                         site.clone(),
                         ConcreteCallee {
                             instance: instance.clone(),
-                            signature: published_signature(signatures, instance)?,
+                            signature: publication.signature(instance)?,
                         },
                     );
                 }
@@ -809,9 +570,8 @@ fn produce_always(
             .call_sites
             .keys()
             .map(|site| site.domain.clone());
-        let foreign_domains =
-            foreign_domains_from_publication(default_domains.chain(site_domains), domains)?;
-        let module_data = ws.module(module);
+        let foreign_domains = publication.foreign_domains(default_domains.chain(site_domains))?;
+        let module_data = publication.ws.module(module);
         let (params, result) = match body_owner {
             BodyOwner::Global(gid) => {
                 let ty = module_data.globals[gid].ty;
@@ -865,17 +625,6 @@ where
     items.into_par_iter().map(f).collect()
 }
 
-fn produce_instances(
-    g: &InstanceGraph,
-    prepared: Vec<Option<PreparedInstance>>,
-    signatures: &PublishedSignatures,
-    domains: &PublishedDomains,
-) -> Vec<Option<BuiltInstance>> {
-    concrete_map(prepared, |prepared| {
-        prepared.map(|instance| produce_instance(g, instance, signatures, domains))
-    })
-}
-
 /// Build a concrete lowering plan for every instance the walk expanded.
 /// The tables intern into the graph's arena: a second arena would hand out ids
 /// that mean nothing beside `Instance::args`.
@@ -890,69 +639,35 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             Owner::Instance(_) => None,
         })
         .collect::<Vec<_>>();
-    let ((signatures, published_domains), (prepared, always_inputs)) =
-        bone_core::prelude::join_in_place(
-            || publish(ws, g),
-            || {
-                use bone_core::prelude::*;
-                let prepared = expanded
-                    .into_par_iter()
-                    .map(|instance| prepare_instance(ws, g, instance))
-                    .collect::<Vec<_>>();
-                let always_inputs = always_owners
-                    .into_par_iter()
-                    .map(|(module, body_owner)| prepare_always(ws, g, module, body_owner))
-                    .collect::<Vec<_>>();
-                (prepared, always_inputs)
-            },
-        );
-
-    let mut results = produce_instances(g, prepared, &signatures, &published_domains);
-    results.sort_by(|left, right| {
-        left.as_ref()
-            .map(|b| &b.instance)
-            .cmp(&right.as_ref().map(|b| &b.instance))
-    });
+    let publication = Publication::new(ws, g, 64);
+    let (results, always_results) = bone_core::prelude::join_in_place(
+        || concrete_map(expanded, |instance| plan_instance(&publication, instance)),
+        || {
+            concrete_map(always_owners, |(module, owner)| {
+                plan_always(&publication, module, owner)
+            })
+        },
+    );
 
     let mut out = ConcreteBodies::default();
-    let mut owner_candidates: FxHashMap<Instance, FxHashSet<Instance>> = FxHashMap::default();
-    owner_candidates.reserve(results.len());
-    for built in results.iter_mut().flatten() {
-        if built.plan.is_ok() {
-            owner_candidates.insert(
-                built.instance.clone(),
-                std::mem::take(&mut built.candidate_refs),
-            );
-        }
-    }
-    let collect_candidate_keys = || {
-        let mut keys: Vec<&Instance> = owner_candidates
-            .values()
-            .flatten()
-            .collect::<FxHashSet<_>>()
-            .into_iter()
-            .collect();
-        keys.sort();
-        keys.into_iter().cloned().collect::<BTreeSet<Instance>>()
-    };
-    let mut plan_rows: Vec<(Instance, Arc<skull_mir::concrete::ConcreteBodyPlan>)> = Vec::new();
-    let (candidate_keys, ()) = bone_core::prelude::join_in_place(collect_candidate_keys, || {
-        for built in results.into_iter().flatten() {
-            match built.plan {
-                Ok(plan) => plan_rows.push((built.instance, Arc::new(plan))),
-                Err(reason) => {
-                    out.plan_failure_index.insert(built.instance, reason);
+    let mut plan_rows = Vec::new();
+    let mut counts: FxHashMap<Instance, usize> = FxHashMap::default();
+    for built in results.into_iter().flatten() {
+        match built.plan {
+            Ok(plan) => {
+                for callee in plan.callees.values() {
+                    *counts.entry(callee.instance.clone()).or_default() += 1;
                 }
+                plan_rows.push((built.instance, Arc::new(plan)));
+            }
+            Err(reason) => {
+                out.plan_failure_index.insert(built.instance, reason);
             }
         }
-    });
-    out.candidate_keys = candidate_keys;
-    out.owner_candidates = owner_candidates;
-    let plans: skull_mir::concrete::ConcretePlans = plan_rows.into_iter().collect();
+    }
+    out.candidate_counts = counts.into_iter().collect();
+    let plans = plan_rows.into_iter().collect();
 
-    let always_results = concrete_map(always_inputs, |prepared| {
-        produce_always(ws, g, prepared, &signatures, &published_domains)
-    });
     for result in always_results {
         out.install_always(result);
     }
