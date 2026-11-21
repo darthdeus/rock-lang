@@ -1,7 +1,7 @@
 // Safe navigation `?.`: fields, methods, `?.let`, tuple and newtype
 // projections, value and struct receivers, enum fields through generic
 // holders, and `?.` in argument, array, arithmetic and interpolation
-// positions. Assignment through `?.` is in safe_nav_assign.rock.
+// positions, and assignment through a nullable chain.
 
 struct Inner { value: int }
 
@@ -566,4 +566,48 @@ fn test_nullable_method_chaining() {
     let default_tween = result2 ?? Tween { value: 0.0, completed: false }
     print(default_tween.value)
     print(default_tween.completed)
+}
+
+struct AssignLeaf { number: int, text: string }
+struct AssignMiddle { leaf: AssignLeaf? }
+struct AssignOuter { middle: AssignMiddle? }
+struct AssignRoot { outer: AssignOuter? }
+
+global safe_assign_calls: int = 0
+
+fn safe_assign_rhs() -> int {
+    safe_assign_calls += 1
+    return 9
+}
+
+@test
+fn safe_navigation_stores_skip_the_rhs_at_every_null_link() {
+    let missing: [AssignRoot?] = [null, AssignRoot { outer: null },
+        AssignRoot { outer: AssignOuter { middle: null } },
+        AssignRoot { outer: AssignOuter { middle: AssignMiddle { leaf: null } } }]
+    safe_assign_calls = 0
+    for root in missing {
+        root?.outer?.middle?.leaf?.number = safe_assign_rhs()
+        root?.outer?.middle?.leaf?.number += safe_assign_rhs()
+        root?.outer?.middle?.leaf?.text = "unused"
+        assert(root?.outer?.middle?.leaf?.number == null)
+        assert(root?.outer?.middle?.leaf?.text == null)
+    }
+    assert_eq(safe_assign_calls, 0)
+
+    let root: AssignRoot? = AssignRoot { outer: AssignOuter { middle: AssignMiddle { leaf: null } } }
+    root?.outer?.middle?.leaf = AssignLeaf { number: 1, text: "old" }
+    assert_eq(root?.outer?.middle?.leaf?.number ?? -1, 1)
+    root?.outer?.middle?.leaf?.number = safe_assign_rhs()
+    assert_eq(safe_assign_calls, 1)
+    assert_eq(root?.outer?.middle?.leaf?.number ?? -1, 9)
+    root?.outer?.middle?.leaf?.number += 5
+    assert_eq(root?.outer?.middle?.leaf?.number ?? -1, 14)
+    root?.outer?.middle?.leaf?.number -= 2
+    assert_eq(root?.outer?.middle?.leaf?.number ?? -1, 12)
+    root?.outer?.middle?.leaf?.text = "updated"
+    assert_eq(root?.outer?.middle?.leaf?.text ?? "missing", "updated")
+    let absent: AssignRoot? = null
+    root?.outer?.middle?.leaf?.number = absent?.outer?.middle?.leaf?.number ?? 0
+    assert_eq(root?.outer?.middle?.leaf?.number ?? -1, 0)
 }
