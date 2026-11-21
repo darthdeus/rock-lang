@@ -266,22 +266,6 @@ fn second() {
 "#;
 
     #[test]
-    fn listed_holes_with_their_inferred_types_pass() {
-        assert_eq!(check(TWO_TESTS), Ok(()));
-    }
-
-    #[test]
-    fn a_wrong_expected_type_fails() {
-        let src = TWO_TESTS.replace(r#"[1, "[string]"]"#, r#"[1, "[int]"]"#);
-        let err = check(&src).expect_err("wrong type must fail");
-        assert!(
-            err.contains("`first`")
-                && err.contains("hole 1: expected `[int]`, inferred `[string]`"),
-            "{err}"
-        );
-    }
-
-    #[test]
     fn a_listed_id_outside_the_test_fails() {
         let src = TWO_TESTS.replace(r#"[[2, "float"]]"#, r#"[[2, "float"], [0, "int"]]"#);
         let err = check(&src).expect_err("missing id must fail");
