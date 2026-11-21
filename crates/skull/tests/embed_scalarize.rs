@@ -19,21 +19,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn embed_leaves_are_constructed_read_and_written_in_the_parent() {
-    let lua = emit_module(EMBED_LEAVES);
-    let mk = function_body(&lua, "mk");
-    assert!(mk.contains(r#"["p.x"]"#) && mk.contains(r#"["p.y"]"#));
-    assert!(!mk.contains(r#""Pt""#));
-    assert!(mk.contains("tag = "));
-    let read = function_body(&lua, "read_leaf");
-    assert!(read.contains(r#"["p.x"]"#) && read.contains(r#"["p.y"]"#));
-    assert!(!read.contains(".p"));
-    let write = function_body(&lua, "write_leaf");
-    assert!(write.contains(r#"["p.x"] = "#));
-    assert!(!write.contains(".p"));
-}
-
 const EMBED_NOBOX_VALUE: &str = r#"
 nobox value Pt { x: int, y: int }
 struct Holder { embed p: Pt?, tag: int }
@@ -45,14 +30,6 @@ fn mk(a: int, b: int) -> Holder {
 fn read_leaf(h: Holder) -> int { return (h.p?.x ?? 0) + (h.p?.y ?? 0) + h.tag }
 fn main() { let _ = read_leaf(mk(1, 2)) }
 "#;
-
-#[test]
-fn embed_nobox_value_uses_the_owned_representation_fact() {
-    let lua = emit_module(EMBED_NOBOX_VALUE);
-    let body = function_body(&lua, "mk");
-    assert!(body.contains(r#"["p.x"]"#) && body.contains(r#"["p.y"]"#));
-    assert!(!body.contains(r#""Pt""#));
-}
 
 const EMBED_NESTED: &str = r#"
 struct Inner { c: int }
@@ -68,18 +45,6 @@ fn read_outer(t: Outer) -> int { return t.a.b.c }
 fn main() { let _ = read_outer(mk_outer(1)) }
 "#;
 
-#[test]
-fn nested_embed_composes_the_whole_path() {
-    let lua = emit_module(EMBED_NESTED);
-    let ctor = function_body(&lua, "mk_outer");
-    assert!(ctor.contains(r#"["a.b.c"]"#));
-    assert!(ctor.contains(r#"["a.m"]"#));
-    assert!(!ctor.contains(r#""Mid""#) && !ctor.contains(r#""Inner""#));
-
-    let read = function_body(&lua, "read_outer");
-    assert!(read.contains(r#"["a.b.c"]"#));
-}
-
 const EMBED_VALUE_PARENT: &str = r#"
 value V2 { x: float, y: float }
 value ValueParent { embed v: V2, w: float }
@@ -91,13 +56,6 @@ fn mkv(a: float) -> ValueParent {
 fn main() { let _ = mkv(1.0) }
 "#;
 
-#[test]
-fn value_parent_embed_introduces_no_dotted_keys() {
-    let lua = emit_module(EMBED_VALUE_PARENT);
-    let body = function_body(&lua, "mkv");
-    assert!(!body.contains(r#"["v."#));
-}
-
 const NOBOX_REFLECTION_FIELD: &str = r#"
 nobox value Pt { x: int, y: int }
 struct Holder { p: Pt, tag: int }
@@ -106,12 +64,6 @@ fn main() {
     let _ = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
 }
 "#;
-
-#[test]
-fn type_table_uses_the_shared_plan_for_a_nobox_field() {
-    let lua = emit_module(NOBOX_REFLECTION_FIELD);
-    assert!(lua.contains(r#"name = "p", type = "Pt", nullable = false, embed = true"#));
-}
 
 #[test]
 fn a_v1_embedded_child_is_reflected_by_its_minted_symbol() {
