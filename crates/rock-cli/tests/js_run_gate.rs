@@ -50,15 +50,6 @@ fn main() {
 
 const EXPECTED: &str = "derived=20\nalpha stage=5\nalpha\nbeta stage=100\nbeta\n1\n2\n";
 
-const PROJECT_FILES: &[(&str, &str)] = &[
-    ("stick.toml", "[package]\nname = \"proj\"\n"),
-    ("math.rock", "fn square(x: int) -> int { return x * x }\n"),
-    (
-        "main.rock",
-        "fn main() {\n  let t = 0\n  for i in 0..5 { t = t + square(i) }\n  print(\"sum={t}\")\n}\n",
-    ),
-];
-
 // A modules-v1 package names its functions by qualified DefKey
 // (`<package>::main`), so the entry must be found by its declared name.
 const MODULES_V1_FILES: &[(&str, &str)] = &[
