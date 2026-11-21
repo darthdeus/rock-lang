@@ -1,5 +1,11 @@
 //! Stone sim environment policy.
 
+use bone_core::hir::{BodyOwner, Callee, Expr, Function};
+use bone_core::prelude::{Idx, ModuleId};
+use bone_core::workspace::BoundNext;
+use bone_semantic::inference::Workspace;
+use rustc_hash::{FxHashMap, FxHashSet};
+
 /// Use a 16:9 window for sims that do not measure pixels.
 pub(crate) const SIM_SMALL_WINDOW: &str = "320x180";
 
@@ -58,182 +64,122 @@ pub(crate) static SIM_PIXEL_ROOTS: &[&str] = &[
 /// The number and capacity of scene buffers also depend on the window size.
 pub(crate) static SIM_CAPACITY_GLOBALS: &[&str] = &["BLOOM_LEVELS", "SCENE_CAPACITY"];
 
-type FnKey = (
-    bone_core::prelude::ModuleId,
-    bone_core::prelude::Idx<bone_core::hir::Function>,
-);
-type NameMap = std::collections::HashMap<ustr::Ustr, Vec<FnKey>>;
+type FnKey = (ModuleId, Idx<Function>);
+struct WindowDependencies<'a> {
+    ws: &'a Workspace,
+    known: FxHashMap<FnKey, bool>,
+    visited: FxHashSet<FnKey>,
+    pending: Vec<FnKey>,
+}
 
-/// Callee edges of one body: resolved calls and protocol dispatch from its
-/// inference, plus function-valued references from a body scan (a named fn
-/// passed as a value lowers to `Expr::Global`, never a call). Mirrors
-/// `bone_lints`' edge walk; bodies without inference (extern decls, opaque
-/// bodies) are leaves, matched by name at their callers instead.
-fn sim_callee_edges(
-    ws: &bone_semantic::inference::Workspace,
-    (mid, fid): FnKey,
-    name_map: &NameMap,
-) -> Vec<FnKey> {
-    use bone_core::hir::{BodyOwner, Callee, Expr};
-    let owner = BodyOwner::Function(fid);
-    let mut out = Vec::new();
-    if let Some(bi) = ws.inference(mid).and_then(|inf| inf.per_fn.get(&owner)) {
-        out.extend(bi.resolved_overload_calls.values().copied());
-        out.extend(bi.implicit_iter_args.values().map(|w| w.func));
-        for info in bi.for_iter_protocol.values() {
-            if let Some(w) = &info.iter {
-                out.push(w.func);
-            }
-            sim_collect_bound_next(&info.next, &mut out);
-        }
-        for tree in bi.bound_call_trees.values() {
-            for bn in tree.next.values() {
-                sim_collect_bound_next(bn, &mut out);
-            }
+impl<'a> WindowDependencies<'a> {
+    fn new(ws: &'a Workspace) -> Self {
+        Self {
+            ws,
+            known: FxHashMap::default(),
+            visited: FxHashSet::default(),
+            pending: Vec::new(),
         }
     }
-    if let Some(body) = ws.module(mid).bodies.get(&owner) {
-        for (_, expr) in body.expr_arena.iter() {
-            let name = match expr {
-                Expr::Global(n) | Expr::SiblingRef(n) => Some(n),
-                Expr::Call {
-                    callee: Callee::Unresolved { name, .. },
-                    ..
-                } => Some(name),
-                _ => None,
+
+    fn needs_game_window(&mut self, root: FnKey) -> bool {
+        self.pending.push(root);
+        while let Some(key) = self.pending.pop() {
+            let found = match self.known.get(&key) {
+                Some(&known) => known,
+                None if self.visited.insert(key) => self.scan(key),
+                None => continue,
             };
-            if let Some(fns) = name.and_then(|n| name_map.get(n)) {
-                out.extend(fns.iter().copied());
+            if found {
+                self.known.insert(root, true);
+                self.visited.clear();
+                self.pending.clear();
+                return true;
             }
         }
+        // A cycle can reach a match via another pending branch.
+        self.known
+            .extend(self.visited.drain().map(|key| (key, false)));
+        false
     }
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|key| seen.insert(*key));
-    out
-}
 
-fn sim_collect_bound_next(bn: &bone_core::workspace::BoundNext, out: &mut Vec<FnKey>) {
-    if let bone_core::workspace::BoundNext::Concrete { func, sub, .. } = bn {
-        out.push(*func);
-        for bn in sub.next.values() {
-            sim_collect_bound_next(bn, out);
+    fn scan(&mut self, (mid, fid): FnKey) -> bool {
+        let module = self.ws.module(mid);
+        let name = module.functions[fid].name;
+        if sim_name_reads_pixels(skull_mir::mangle::declared_name(name.as_str())) {
+            return true;
         }
-    }
-}
-
-/// True when `matches` holds for `key` or any of its transitive callees.
-/// Negative results are memoized only after the whole search is exhausted.
-fn sim_reaches(
-    ws: &bone_semantic::inference::Workspace,
-    key: FnKey,
-    matches: &dyn Fn(FnKey) -> bool,
-    memo: &mut std::collections::HashMap<FnKey, bool>,
-    visited: &mut std::collections::HashSet<FnKey>,
-    name_map: &NameMap,
-) -> bool {
-    if let Some(&known) = memo.get(&key) {
-        return known;
-    }
-    let mut pending = vec![key];
-    while let Some(callee) = pending.pop() {
-        if !visited.insert(callee) {
-            continue;
-        }
-        match memo.get(&callee) {
-            Some(true) => {}
-            Some(false) => continue,
-            None if matches(callee) => {}
-            None => {
-                pending.extend(sim_callee_edges(ws, callee, name_map).into_iter().rev());
-                continue;
+        let owner = BodyOwner::Function(fid);
+        let edges = self.pending.len();
+        if let Some(inferred) = self.ws.inference(mid).and_then(|i| i.per_fn.get(&owner)) {
+            self.pending
+                .extend(inferred.resolved_overload_calls.values().copied());
+            self.pending
+                .extend(inferred.implicit_iter_args.values().map(|w| w.func));
+            for info in inferred.for_iter_protocol.values() {
+                self.pending.extend(info.iter.iter().map(|w| w.func));
+                collect_bound_next(&info.next, &mut self.pending);
+            }
+            for tree in inferred.bound_call_trees.values() {
+                for next in tree.next.values() {
+                    collect_bound_next(next, &mut self.pending);
+                }
             }
         }
-        memo.insert(key, true);
-        visited.clear();
-        return true;
-    }
-    memo.extend(visited.drain().map(|key| (key, false)));
-    false
-}
-
-fn names_pixel_reader(ws: &bone_semantic::inference::Workspace, (mid, fid): FnKey) -> bool {
-    let callee = &ws.module(mid).functions[fid];
-    sim_name_reads_pixels(skull_mir::mangle::declared_name(callee.name.as_str()))
-}
-
-/// True when the body references a scene capacity global, one of
-/// [`SIM_CAPACITY_GLOBALS`]. Data globals lower to `Expr::Global` exactly
-/// like function-valued references; a name that resolves to no function is a
-/// data reference and is matched by declared (bare) name.
-fn references_capacity(
-    ws: &bone_semantic::inference::Workspace,
-    (mid, fid): FnKey,
-    name_map: &NameMap,
-) -> bool {
-    use bone_core::hir::{BodyOwner, Expr};
-    let Some(body) = ws.module(mid).bodies.get(&BodyOwner::Function(fid)) else {
-        return false;
-    };
-    body.expr_arena.iter().any(|(_, expr)| {
-        let (Expr::Global(name) | Expr::SiblingRef(name)) = expr else {
-            return false;
-        };
-        let declared = name.as_str().rsplit("::").next().unwrap_or(name.as_str());
-        !name_map.contains_key(name) && SIM_CAPACITY_GLOBALS.contains(&declared)
-    })
-}
-
-pub(crate) fn apply(
-    ws: &bone_semantic::inference::Workspace,
-    sims: &mut [crate::skull_backend::SimDescriptor],
-) {
-    use bone_core::prelude::ModuleId;
-    let mut name_map = NameMap::new();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
+        if let Some(body) = module.bodies.get(&owner) {
+            for (_, expr) in body.expr_arena.iter() {
+                let name = match expr {
+                    Expr::Global(name) | Expr::SiblingRef(name) => name,
+                    Expr::Call {
+                        callee: Callee::Unresolved { name, .. },
+                        ..
+                    } => name,
+                    _ => continue,
+                };
+                let before = self.pending.len();
+                self.pending.extend(
+                    self.ws
+                        .functions_by_name
+                        .get(name)
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .filter(|(mid, _)| *mid != ModuleId::builtin()),
+                );
+                if self.pending.len() == before
+                    && matches!(expr, Expr::Global(_) | Expr::SiblingRef(_))
+                    && SIM_CAPACITY_GLOBALS.contains(&name.as_str().rsplit("::").next().unwrap())
+                {
+                    return true;
+                }
+            }
         }
-        for (fid, f) in module.functions.iter() {
-            name_map.entry(f.name).or_default().push((module.id, fid));
+        self.pending[edges..].reverse();
+        false
+    }
+}
+
+fn collect_bound_next(next: &BoundNext, pending: &mut Vec<FnKey>) {
+    if let BoundNext::Concrete { func, sub, .. } = next {
+        pending.push(*func);
+        for next in sub.next.values() {
+            collect_bound_next(next, pending);
         }
     }
-    let reads_pixels = |key| names_pixel_reader(ws, key);
-    let reads_capacity = |key| references_capacity(ws, key, &name_map);
-    let mut pixel_memo = std::collections::HashMap::new();
-    let mut capacity_memo = std::collections::HashMap::new();
-    let mut visited = std::collections::HashSet::new();
+}
+
+pub(crate) fn apply(ws: &Workspace, sims: &mut [crate::skull_backend::SimDescriptor]) {
+    let mut dependencies = WindowDependencies::new(ws);
     for sim in sims {
         if sim.render {
             sim.env_pairs
-                .insert(0, ("SIM_DRAW".to_string(), "on_demand".to_string()));
+                .insert(0, ("SIM_DRAW".into(), "on_demand".into()));
         }
-        // Skipped when the sim declares any `STONE_WINDOW` (an explicit
-        // empty keeps the game's own size); prepended so the pair order
-        // reads default-first.
-        let key = (sim.module, sim.function);
-        let explicit_window = sim.env_pairs.iter().any(|(k, _)| k == "STONE_WINDOW");
-        if !explicit_window
-            && !sim_reaches(
-                ws,
-                key,
-                &reads_pixels,
-                &mut pixel_memo,
-                &mut visited,
-                &name_map,
-            )
-            && !sim_reaches(
-                ws,
-                key,
-                &reads_capacity,
-                &mut capacity_memo,
-                &mut visited,
-                &name_map,
-            )
+        if !sim.env_pairs.iter().any(|(k, _)| k == "STONE_WINDOW")
+            && !dependencies.needs_game_window((sim.module, sim.function))
         {
-            sim.env_pairs.insert(
-                0,
-                ("STONE_WINDOW".to_string(), SIM_SMALL_WINDOW.to_string()),
-            );
+            sim.env_pairs
+                .insert(0, ("STONE_WINDOW".into(), SIM_SMALL_WINDOW.into()));
         }
     }
 }
