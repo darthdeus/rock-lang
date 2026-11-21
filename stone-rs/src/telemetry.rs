@@ -5,7 +5,7 @@ use std::ffi::{c_char, CStr};
 use std::fs::{self, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -29,9 +29,6 @@ const ENVELOPE_VERSION: i64 = 2;
 const REVOCATION_FILE: &str = ".telemetry-revoked";
 const CONSENT_FILE: &str = ".telemetry-consent";
 const LAST_UPLOAD_FILE: &str = ".telemetry-last-upload";
-const WORKER_RUNNING: u8 = 0;
-const WORKER_DRAINING: u8 = 1;
-const WORKER_DISCARDING: u8 = 2;
 
 struct TelemetryIdentity {
     game: String,
@@ -95,7 +92,7 @@ enum UploadCommand {
 
 struct UploadWorker {
     tx: SyncSender<UploadCommand>,
-    control: Arc<AtomicU8>,
+    stopping: Arc<AtomicBool>,
     shutdown_budget: Duration,
     handle: JoinHandle<()>,
 }
@@ -103,7 +100,7 @@ struct UploadWorker {
 #[derive(Clone)]
 struct UploadWaker {
     tx: SyncSender<UploadCommand>,
-    control: Arc<AtomicU8>,
+    stopping: Arc<AtomicBool>,
 }
 
 struct QueuedTelemetryEvent {
@@ -187,30 +184,25 @@ impl std::error::Error for SpoolAtCapacity {}
 impl TelemetrySpool {
     #[cfg(test)]
     fn open(root: &Path, identity: TelemetryIdentity) -> io::Result<Self> {
-        let consent_generation = load_or_create_consent_generation(root)?;
-        Self::open_with_io_lock(root, identity, consent_generation, Arc::new(Mutex::new(())))
+        let drain = TelemetryDrain::open(root, &identity.channel)?;
+        Self::create(root, identity, &drain)
     }
 
-    fn open_with_io_lock(
+    fn create(
         root: &Path,
         identity: TelemetryIdentity,
-        consent_generation: Uuid,
-        io_lock: Arc<Mutex<()>>,
+        drain: &TelemetryDrain,
     ) -> io::Result<Self> {
         identity.validate()?;
-        let stats_dir = prepare_channel_stats_dir(root, &identity.channel)?;
-
-        let events_path = stats_dir.join("events.jsonl");
-        truncate_torn_tail(&events_path)?;
-        create_empty_queue(&events_path)?;
+        create_empty_queue(&drain.events_path)?;
         Ok(Self {
             root: root.into(),
             identity,
             session: Uuid::new_v4(),
-            consent_generation,
+            consent_generation: drain.consent_generation,
             next_seq: 1,
-            events_path,
-            io_lock,
+            events_path: drain.events_path.clone(),
+            io_lock: Arc::clone(&drain.io_lock),
             writable: true,
         })
     }
@@ -312,27 +304,6 @@ impl TelemetrySpool {
         }
         self.next_seq += events.len() as u64;
         Ok(())
-    }
-
-    fn discard_legacy_events(&self) -> io::Result<()> {
-        let _guard = lock_io(&self.io_lock)?;
-        let raw = match fs::read_to_string(&self.events_path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        let has_legacy = raw.lines().any(|line| {
-            serde_json::from_str::<Value>(line)
-                .ok()
-                .and_then(|event| event.get("v").and_then(Value::as_i64))
-                != Some(ENVELOPE_VERSION)
-        });
-        if !has_legacy {
-            return Ok(());
-        }
-        remove_if_present(&self.events_path)?;
-        remove_if_present(&self.events_path.with_file_name("cursor.log"))?;
-        sync_parent(&self.events_path)
     }
 }
 
@@ -758,27 +729,42 @@ fn sync_parent(_path: &Path) -> io::Result<()> {
 impl TelemetryDrain {
     #[cfg(test)]
     fn open(root: &Path, channel: &str) -> io::Result<Self> {
-        let consent_generation = load_or_create_consent_generation(root)?;
-        Self::open_with_io_lock(root, channel, consent_generation, Arc::new(Mutex::new(())))
+        Self::recover(root, channel, load_or_create_consent_generation(root)?)
     }
 
-    fn open_with_io_lock(
-        root: &Path,
-        channel: &str,
-        consent_generation: Uuid,
-        io_lock: Arc<Mutex<()>>,
-    ) -> io::Result<Self> {
+    fn recover(root: &Path, channel: &str, consent_generation: Uuid) -> io::Result<Self> {
         let stats_dir = prepare_channel_stats_dir(root, channel)?;
-        let drain = Self {
-            events_path: stats_dir.join("events.jsonl"),
+        let events_path = stats_dir.join("events.jsonl");
+        truncate_torn_tail(&events_path)?;
+        Ok(Self {
+            events_path,
             cursor_path: stats_dir.join("cursor.log"),
             quarantine_path: stats_dir.join("quarantine.jsonl"),
             last_upload_path: root.join("reports").join(LAST_UPLOAD_FILE),
             consent_generation,
-            io_lock,
+            io_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    fn discard_legacy_events(&self) -> io::Result<()> {
+        let _guard = lock_io(&self.io_lock)?;
+        let raw = match fs::read_to_string(&self.events_path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
         };
-        truncate_torn_tail(&drain.events_path)?;
-        Ok(drain)
+        let has_legacy = raw.lines().any(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|event| event.get("v").and_then(Value::as_i64))
+                != Some(ENVELOPE_VERSION)
+        });
+        if !has_legacy {
+            return Ok(());
+        }
+        remove_if_present(&self.events_path)?;
+        remove_if_present(&self.cursor_path)?;
+        sync_parent(&self.events_path)
     }
 
     fn cursor_for_len(&self, event_len: u64) -> io::Result<u64> {
@@ -1008,19 +994,41 @@ fn event_consent_generation(body: &str) -> Option<Uuid> {
         })
 }
 
-fn schedule_flush(deadline: &mut Option<Instant>, now: Instant, window: Duration, flush_now: bool) {
-    if flush_now {
-        *deadline = Some(now);
-    } else if deadline.is_none() {
-        *deadline = Some(now + window);
-    }
+#[derive(Clone, Copy)]
+enum UploadSchedule {
+    Idle,
+    Flush(Instant),
+    Retry { at: Instant, next_delay: Duration },
+    Blocked,
 }
 
-fn worker_wait(upload_at: Option<Instant>, now: Instant, revocation_poll: Duration) -> Duration {
-    upload_at
-        .map(|deadline| deadline.saturating_duration_since(now))
-        .unwrap_or(revocation_poll)
-        .min(revocation_poll)
+impl UploadSchedule {
+    fn deadline(self) -> Option<Instant> {
+        match self {
+            Self::Flush(at) | Self::Retry { at, .. } => Some(at),
+            Self::Idle | Self::Blocked => None,
+        }
+    }
+
+    fn wake(&mut self, first_pending_at: Instant, window: Duration, pending: u64) {
+        if pending >= MAX_BODY_BYTES as u64 {
+            *self = Self::Flush(first_pending_at);
+        } else if matches!(self, Self::Idle) {
+            *self = Self::Flush(first_pending_at + window);
+        }
+    }
+
+    fn pause(&mut self, timing: UploadTiming, error: io::Error) {
+        log::warn!(target: "TELEMETRY", "upload paused: {error}");
+        let delay = match *self {
+            Self::Retry { next_delay, .. } => next_delay,
+            _ => timing.retry_initial,
+        };
+        *self = Self::Retry {
+            at: Instant::now() + delay,
+            next_delay: delay.saturating_mul(2).min(timing.retry_max),
+        };
+    }
 }
 
 fn hmac_sha256_hex(token: &str, body: &str) -> String {
@@ -1117,198 +1125,129 @@ fn finish_upload(
 }
 
 impl UploadWorker {
-    #[cfg(test)]
-    fn start_with_timing(
+    fn start(
         root: &Path,
-        transport: TelemetryTransport,
+        drain: TelemetryDrain,
+        transport: Option<TelemetryTransport>,
         timing: UploadTiming,
     ) -> io::Result<Self> {
-        let consent_generation = load_or_create_consent_generation(root)?;
-        Self::start_with_io_lock(
-            root,
-            transport,
-            timing,
-            consent_generation,
-            Arc::new(Mutex::new(())),
-        )
-    }
-
-    fn start_with_io_lock(
-        root: &Path,
-        transport: TelemetryTransport,
-        timing: UploadTiming,
-        consent_generation: Uuid,
-        io_lock: Arc<Mutex<()>>,
-    ) -> io::Result<Self> {
-        let drain = TelemetryDrain::open_with_io_lock(
-            root,
-            &transport.channel,
-            consent_generation,
-            Arc::clone(&io_lock),
-        )?;
-        let startup_pending = drain.pending_bytes()? > 0;
+        let mut schedule = if transport.is_some() && drain.pending_bytes()? > 0 {
+            UploadSchedule::Flush(Instant::now())
+        } else {
+            UploadSchedule::Idle
+        };
         let (tx, rx) = mpsc::sync_channel(1);
-        let control = Arc::new(AtomicU8::new(WORKER_RUNNING));
-        let worker_control = Arc::clone(&control);
-        let worker_root = root.to_path_buf();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = Arc::clone(&stopping);
+        let root = root.to_owned();
         let handle = std::thread::spawn(move || {
-            let config = ureq::Agent::config_builder()
-                .timeout_global(Some(timing.request_timeout))
-                .build();
-            let agent: ureq::Agent = config.into();
-            let mut retry_at: Option<Instant> = None;
-            let mut flush_at = startup_pending.then(Instant::now);
-            let mut retry_delay = timing.retry_initial;
-            let mut upload_blocked = false;
+            let online = transport.map(|transport| {
+                let agent = ureq::Agent::config_builder()
+                    .timeout_global(Some(timing.request_timeout))
+                    .build()
+                    .into();
+                (transport, agent)
+            });
+            let revoked = || {
+                if telemetry_revoked(&root) {
+                    let _ = discard_stats_with_io_lock(&root, &drain.io_lock);
+                    return true;
+                }
+                false
+            };
             loop {
-                let upload_at = retry_at.or(flush_at);
-                let command = match rx.recv_timeout(worker_wait(
-                    upload_at,
-                    Instant::now(),
-                    timing.revocation_poll,
-                )) {
+                let wait = schedule
+                    .deadline()
+                    .map(|at| {
+                        at.saturating_duration_since(Instant::now())
+                            .min(timing.revocation_poll)
+                    })
+                    .unwrap_or(timing.revocation_poll);
+                let command = match rx.recv_timeout(wait) {
                     Ok(command) => Some(command),
                     Err(RecvTimeoutError::Timeout) => None,
                     Err(RecvTimeoutError::Disconnected) => return,
                 };
-                if telemetry_revoked(&worker_root) {
-                    let _ = discard_stats_with_io_lock(&worker_root, &io_lock);
+                if revoked() {
                     return;
                 }
-                match command {
-                    Some(UploadCommand::Finish { mode, deadline }) => {
+                if let Some(UploadCommand::Finish { mode, deadline }) = command {
+                    if let Some((transport, _)) = &online {
                         finish_upload(
-                            &worker_root,
+                            &root,
                             mode,
                             deadline,
                             &drain,
-                            &transport,
+                            transport,
                             timing.shutdown_request_timeout,
-                            upload_blocked,
+                            matches!(schedule, UploadSchedule::Blocked),
                         );
-                        return;
                     }
-                    Some(UploadCommand::Wake(_)) if retry_at.is_some() || upload_blocked => {
-                        continue
-                    }
-                    Some(UploadCommand::Wake(first_pending_at)) => {
-                        let pending = match drain.pending_bytes() {
-                            Ok(pending) => pending,
-                            Err(error) => {
-                                log::warn!(target: "TELEMETRY", "upload paused: {error}");
-                                flush_at = None;
-                                retry_at = Some(Instant::now() + retry_delay);
-                                retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max);
-                                continue;
-                            }
-                        };
-                        if pending == 0 {
-                            continue;
-                        }
-                        schedule_flush(
-                            &mut flush_at,
-                            first_pending_at,
-                            timing.flush_window,
-                            pending >= MAX_BODY_BYTES as u64,
-                        );
-                        if flush_at.is_some_and(|deadline| Instant::now() < deadline) {
-                            continue;
-                        }
-                    }
-                    None if upload_at.is_none_or(|deadline| Instant::now() < deadline) => continue,
-                    None => {}
+                    return;
                 }
-
-                match drain.run_while_reclaiming(
-                    || {
-                        worker_control.load(Ordering::SeqCst) == WORKER_RUNNING
-                            && !telemetry_revoked(&worker_root)
-                    },
-                    |body| send_if_consented(&worker_root, &transport, &agent, body),
-                ) {
-                    Ok(DrainOutcome::Complete) => {
-                        retry_at = None;
-                        flush_at = None;
-                        retry_delay = timing.retry_initial;
+                let Some((transport, agent)) = &online else {
+                    continue;
+                };
+                if let Some(UploadCommand::Wake(first_pending_at)) = command {
+                    if !matches!(schedule, UploadSchedule::Idle | UploadSchedule::Flush(_)) {
+                        continue;
                     }
+                    match drain.pending_bytes() {
+                        Ok(0) => continue,
+                        Ok(pending) => {
+                            schedule.wake(first_pending_at, timing.flush_window, pending)
+                        }
+                        Err(error) => {
+                            schedule.pause(timing, error);
+                            continue;
+                        }
+                    }
+                }
+                if schedule.deadline().is_none_or(|at| Instant::now() < at) {
+                    continue;
+                }
+                match drain.run_while_reclaiming(
+                    || !worker_stopping.load(Ordering::SeqCst) && !telemetry_revoked(&root),
+                    |body| send_if_consented(&root, transport, agent, body),
+                ) {
+                    Ok(DrainOutcome::Complete) => schedule = UploadSchedule::Idle,
                     Ok(DrainOutcome::Blocked(error)) => {
-                        if telemetry_revoked(&worker_root) {
-                            let _ = discard_stats_with_io_lock(&worker_root, &io_lock);
+                        if revoked() {
                             return;
                         }
                         log::warn!(target: "TELEMETRY", "upload blocked: {error}");
-                        retry_at = None;
-                        flush_at = None;
-                        upload_blocked = true;
+                        schedule = UploadSchedule::Blocked;
                     }
                     Ok(DrainOutcome::Cancelled) => {}
                     Ok(DrainOutcome::Retry(error)) | Err(error) => {
-                        if telemetry_revoked(&worker_root) {
-                            let _ = discard_stats_with_io_lock(&worker_root, &io_lock);
+                        if revoked() {
                             return;
                         }
-                        if worker_control.load(Ordering::SeqCst) != WORKER_RUNNING {
-                            continue;
+                        if !worker_stopping.load(Ordering::SeqCst) {
+                            schedule.pause(timing, error);
                         }
-                        log::warn!(target: "TELEMETRY", "upload paused: {error}");
-                        flush_at = None;
-                        retry_at = Some(Instant::now() + retry_delay);
-                        retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max);
                     }
                 }
             }
         });
-        let worker = Self {
+        Ok(Self {
             tx,
-            control,
+            stopping,
             shutdown_budget: timing.shutdown_budget,
             handle,
-        };
-        Ok(worker)
-    }
-
-    fn start_offline(root: &Path, io_lock: Arc<Mutex<()>>) -> Self {
-        let timing = UploadTiming::default();
-        let (tx, rx) = mpsc::sync_channel(1);
-        let control = Arc::new(AtomicU8::new(WORKER_RUNNING));
-        let worker_root = root.to_path_buf();
-        let handle = std::thread::spawn(move || loop {
-            let command = match rx.recv_timeout(timing.revocation_poll) {
-                Ok(command) => Some(command),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => return,
-            };
-            if telemetry_revoked(&worker_root) {
-                let _ = discard_stats_with_io_lock(&worker_root, &io_lock);
-                return;
-            }
-            if matches!(command, Some(UploadCommand::Finish { .. })) {
-                return;
-            }
-        });
-        Self {
-            tx,
-            control,
-            shutdown_budget: timing.shutdown_budget,
-            handle,
-        }
+        })
     }
 
     fn waker(&self) -> UploadWaker {
         UploadWaker {
             tx: self.tx.clone(),
-            control: Arc::clone(&self.control),
+            stopping: Arc::clone(&self.stopping),
         }
     }
 
     fn finish(self, mode: StopMode) {
-        let state = if mode == StopMode::Drain {
-            WORKER_DRAINING
-        } else {
-            WORKER_DISCARDING
-        };
         let deadline = Instant::now() + self.shutdown_budget;
-        self.control.store(state, Ordering::SeqCst);
+        self.stopping.store(true, Ordering::SeqCst);
         let _ = self.tx.send(UploadCommand::Finish { mode, deadline });
         let _ = self.handle.join();
     }
@@ -1316,7 +1255,7 @@ impl UploadWorker {
 
 impl UploadWaker {
     fn wake(&self) {
-        if self.control.load(Ordering::SeqCst) == WORKER_RUNNING {
+        if !self.stopping.load(Ordering::SeqCst) {
             let _ = self.tx.try_send(UploadCommand::Wake(Instant::now()));
         }
     }
@@ -1490,43 +1429,21 @@ impl TelemetryClient {
         } else {
             load_or_create_consent_generation(root)?
         };
-        let channel = identity.channel.clone();
-        let game = identity.game.clone();
-        let io_lock = Arc::new(Mutex::new(()));
-        TelemetryDrain::open_with_io_lock(
-            root,
-            &channel,
-            consent_generation,
-            Arc::clone(&io_lock),
-        )?
-        .reclaim_if_fully_acknowledged()?;
-        let spool = TelemetrySpool::open_with_io_lock(
-            root,
-            identity,
-            consent_generation,
-            Arc::clone(&io_lock),
-        )?;
-        spool.discard_legacy_events()?;
+        let transport = (!endpoint.is_empty() && !token.is_empty()).then(|| TelemetryTransport {
+            endpoint: endpoint.into(),
+            token: token.into(),
+            game: identity.game.clone(),
+            channel: identity.channel.clone(),
+        });
+        let drain = TelemetryDrain::recover(root, &identity.channel, consent_generation)?;
+        drain.reclaim_if_fully_acknowledged()?;
+        let spool = TelemetrySpool::create(root, identity, &drain)?;
+        drain.discard_legacy_events()?;
         #[cfg(test)]
-        let events_path = spool.events_path.clone();
+        let events_path = drain.events_path.clone();
         #[cfg(test)]
-        let client_io_lock = Arc::clone(&io_lock);
-        let upload_worker = if endpoint.is_empty() || token.is_empty() {
-            UploadWorker::start_offline(root, Arc::clone(&io_lock))
-        } else {
-            UploadWorker::start_with_io_lock(
-                root,
-                TelemetryTransport {
-                    endpoint: endpoint.into(),
-                    token: token.into(),
-                    game,
-                    channel,
-                },
-                timing,
-                consent_generation,
-                Arc::clone(&io_lock),
-            )?
-        };
+        let io_lock = Arc::clone(&drain.io_lock);
+        let upload_worker = UploadWorker::start(root, drain, transport, timing)?;
         let append_worker = AppendWorker::start(spool, upload_worker.waker());
         Ok(Self {
             append_worker,
@@ -1534,7 +1451,7 @@ impl TelemetryClient {
             #[cfg(test)]
             events_path,
             #[cfg(test)]
-            io_lock: client_io_lock,
+            io_lock,
             _root_lock: root_lock,
         })
     }
@@ -2001,7 +1918,9 @@ mod tests {
         token: &str,
         timing: UploadTiming,
     ) -> UploadWorker {
-        UploadWorker::start_with_timing(root, transport(ingest, token), timing).unwrap()
+        let transport = transport(ingest, token);
+        let drain = TelemetryDrain::open(root, &transport.channel).unwrap();
+        UploadWorker::start(root, drain, Some(transport), timing).unwrap()
     }
 
     fn client_with_timing(root: &Path, ingest: &Ingest, timing: UploadTiming) -> TelemetryClient {
@@ -2284,19 +2203,10 @@ mod tests {
     #[test]
     fn draining_a_capped_spool_allows_an_append_without_reopening() {
         let root = fresh_root();
-        let io_lock = Arc::new(Mutex::new(()));
-        let consent_generation = load_or_create_consent_generation(&root).unwrap();
-        let mut spool = TelemetrySpool::open_with_io_lock(
-            &root,
-            identity(),
-            consent_generation,
-            Arc::clone(&io_lock),
-        )
-        .unwrap();
+        let drain = TelemetryDrain::open(&root, "steam").unwrap();
+        let mut spool = TelemetrySpool::create(&root, identity(), &drain).unwrap();
         spool.record_stat("before-cap", 1).unwrap();
         fill_log(&spool.events_path, MAX_SPOOL_BYTES);
-        let drain =
-            TelemetryDrain::open_with_io_lock(&root, "steam", consent_generation, io_lock).unwrap();
 
         drain.run_reclaiming(|_| Ok(())).unwrap();
         spool.record_stat("after-drain", 2).unwrap();
@@ -2768,17 +2678,12 @@ mod tests {
     fn repeated_wakes_keep_the_first_flush_deadline() {
         let first = Instant::now();
         let window = Duration::from_secs(60);
-        let mut deadline = None;
+        let mut schedule = UploadSchedule::Idle;
 
-        schedule_flush(&mut deadline, first, window, false);
-        schedule_flush(
-            &mut deadline,
-            first + Duration::from_secs(45),
-            window,
-            false,
-        );
+        schedule.wake(first, window, 1);
+        schedule.wake(first + Duration::from_secs(45), window, 2);
 
-        assert_eq!(deadline, Some(first + window));
+        assert_eq!(schedule.deadline(), Some(first + window));
     }
 
     #[test]
@@ -2957,14 +2862,19 @@ mod tests {
         let ingest = Ingest::start(move |request, _| {
             if request == 1 {
                 received_tx.send(()).unwrap();
-                release_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             }
             "401 Unauthorized"
         });
-        let worker = upload_worker(&root, &ingest, "wrong", test_upload_timing());
+        let mut timing = test_upload_timing();
+        timing.request_timeout = Duration::from_secs(5);
+        let mut client = client_with_timing(&root, &ingest, timing);
 
         received_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        let finisher = std::thread::spawn(move || worker.finish(StopMode::Drain));
+        client.record_stat("append-during-upload", 2).unwrap();
+        client.flush().unwrap();
+        assert_eq!(records(&root)[1]["n"], "append-during-upload");
+        let finisher = std::thread::spawn(move || client.finish(StopMode::Drain));
         release_tx.send(()).unwrap();
         finisher.join().unwrap();
 
