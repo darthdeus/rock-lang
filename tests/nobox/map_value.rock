@@ -11,7 +11,6 @@
     assert_eq(m["b"].y, 4.0)
 }
 
-// The update path: overwriting a present key must reuse its slot, not leak one.
 @test fn map_nobox_update_in_place() {
     let m: Map<string, Vec2> = map_new()
     m["a"] = Vec2 { x: 1.0, y: 2.0 }
@@ -21,7 +20,6 @@
     assert_eq(m.len(), 1)
 }
 
-// The spine IS the presence structure -- a miss never reads the columns.
 @test fn map_nobox_miss_is_null() {
     let m: Map<string, Vec2> = map_new()
     m["a"] = Vec2 { x: 1.0, y: 2.0 }
@@ -31,7 +29,6 @@
     assert(m.contains("a"))
 }
 
-// A miss must stay null even though the freed slot still holds stale leaves.
 @test fn map_nobox_miss_after_remove_is_null() {
     let m: Map<string, Vec2> = map_new()
     m["a"] = Vec2 { x: 7.0, y: 7.0 }
@@ -50,7 +47,6 @@
     assert_eq(old.unwrap().y, 6.0)
 }
 
-// A freed slot must be reusable without corrupting a live neighbour.
 @test fn map_nobox_slot_reuse_after_remove() {
     let m: Map<string, Vec2> = map_new()
     m["a"] = Vec2 { x: 1.0, y: 1.0 }
@@ -97,7 +93,6 @@
     assert_eq(sum, 10.0)
 }
 
-// clear() retains column capacity; the map must still behave as empty.
 @test fn map_nobox_clear_then_rebuild() {
     let m: Map<string, Vec2> = map_new()
     m["a"] = Vec2 { x: 1.0, y: 1.0 }
@@ -164,7 +159,6 @@
     assert_eq(m.len(), 0)
 }
 
-// A nobox Map as a struct field, built in a global initializer.
 struct MapHolder {
     grid: Map<string, Vec2>,
 }
@@ -181,7 +175,6 @@ global MAP_HOLDER: MapHolder = MapHolder { grid: map_new() }
     assert_eq(f.unwrap().y, 2.0)
 }
 
-// An int-keyed map: the spine must not assume string keys.
 @test fn map_nobox_int_keys() {
     let m: Map<int, Vec2> = map_new()
     m[7] = Vec2 { x: 1.0, y: 2.0 }
@@ -206,8 +199,6 @@ global MAP_HOLDER: MapHolder = MapHolder { grid: map_new() }
     assert_eq(m.len(), 4)
 }
 
-// A field write THROUGH the map index: the place base is a slot in `data`, not
-// a whole element. At an UNMARKED value on purpose -- column eligibility is the same rule Vec uses, so this is not a nobox-only path.
 value MapCellP { a: int, b: int }
 
 @test fn map_column_compound_field_write() {
@@ -227,11 +218,7 @@ value MapCellP { a: int, b: int }
     assert_eq(m["k"].a, 50)
 }
 
-// A column-stored Map (nobox value) with INT keys. The spine is what iteration
-// walks, so its representation decides the type the loop hands back: a plain JS
-// object coerces every key to a string, and `sum` would then be a concatenation
-// rather than an addition. luajit's table keys are typed already, so this is the
-// arm that pins the JS spine to a native Map.
+// The JS spine must preserve key types; object keys would become strings.
 @test fn a_column_map_iterates_int_keys_as_ints() {
     let m: Map<int, Vec2> = map_new()
     m[1] = Vec2 { x: 1.0, y: 0.0 }
@@ -247,12 +234,6 @@ value MapCellP { a: int, b: int }
     assert_eq(sum, 43)
 }
 
-// -- Unmarked outer value with a nullable nobox field --
-//
-// The OTHER Map shape that rejects with the same diagnostic sentence: an
-// UNMARKED (GC-tier `_vt`) value outer carrying a NULLABLE nobox field, stored
-// in a Map. It is not the Map mechanism -- the `_vt` ctor has no
-// presence-carrying leaf form -- so this pins which of the two it is.
 
 nobox value NV2 { x: float, y: float }
 value Opt { pos: NV2? }

@@ -1,10 +1,4 @@
-// A `nobox` global's storage is its LEAVES (`__nbg_<name>_<i>`), not one boxed
-// name. The initializer therefore has to land through the multi-value return
-// ABI -- leaf 0 as the ordinary return, 1..N through the bank -- exactly as a
-// multi-leaf call does at any other site.
-//
-// Both backends, luajit as the oracle: luajit has native multi-return and no
-// bank, so a divergence here is the JS init line and nothing else.
+// Nobox globals initialize their leaf storage through the multi-value ABI.
 
 nobox value P { x: int, y: int }
 
@@ -20,8 +14,6 @@ nobox value Q { a: int, b: int, c: int, d: int }
     assert_eq(G_CALL.y, 7)
 }
 
-// Past two leaves the bank carries 1..N, so a width the emitter sizes wrong
-// shows up here and not in the pair cases.
 @test fn nobox_global_wider_than_the_first_bank_slot() {
     assert_eq(G_WIDE.a, 1)
     assert_eq(G_WIDE.b, 2)
@@ -29,11 +21,7 @@ nobox value Q { a: int, b: int, c: int, d: int }
     assert_eq(G_WIDE.d, 4)
 }
 
-// Init ORDER is the second half of the same rule. A ginit reading another nobox
-// global reads its LEAF names, and those are synthesized -- so a dependency scan
-// keyed on base names does not see the edge, emits this init first, and reads
-// undefined leaves. Declared before its dependency on purpose; source order is
-// what the ordering has to override.
+// Initialization dependencies must resolve leaf reads back to their owner.
 global DERIVED: P = BASE
 global BASE: P = P { x: 3, y: 4 }
 
@@ -42,9 +30,7 @@ global BASE: P = P { x: 3, y: 4 }
     assert_eq(DERIVED.y, 4)
 }
 
-// The same edge one call away: the leaf reads sit in a callee, so only the
-// transitive global-read closure sees them, and it reports LEAF names that
-// still have to resolve back to the owning global.
+// The same dependency can be reached through a call.
 fn later_sum() -> int { return LATER.x + LATER.y }
 
 global VIA_CALL: int = later_sum()
@@ -54,8 +40,6 @@ global LATER: P = P { x: 5, y: 6 }
     assert_eq(VIA_CALL, 11)
 }
 
-// A write through the global has to reach the same leaves the initializer set,
-// or the init could be correct and every later read still wrong.
 @test fn nobox_global_reassigned_after_init() {
     G_CALL = mk(11, 13)
     assert_eq(G_CALL.x, 11)

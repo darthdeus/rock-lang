@@ -1,10 +1,4 @@
-// A multi-leaf value as an enum PAYLOAD. A flat enum threads as `[tag, _0..]`,
-// one slot per payload position, widened to the payload's leaf count so a
-// scalarizable value's leaves ARE the slots; width is keyed on the declared
-// payload type, so every variant agrees on the layout. Covers positions after
-// a widened one, payloads of different shapes and widths sharing a position,
-// enums as fields of a nobox value, nullable enums, and enum elements of
-// containers. `nobox` additionally forbids an escaping materialization.
+// Flat enum payload positions widen to the declared payload leaf count.
 
 nobox value P { x: float, y: float }
 
@@ -45,8 +39,6 @@ fn a_mixed_enum_keeps_its_other_variants() -> int {
     }
 }
 
-// Control: an UNMARKED value payload uses the same scalar enum representation.
-// The mark decides whether a later genuine escape may materialize a box.
 enum BU { V2(BP), F(float) }
 
 @test(returns = 3)
@@ -58,9 +50,7 @@ fn unmarked_value_payload_answers_the_same() -> int {
     }
 }
 
-// A sibling variant whose payload sits AFTER a widened position: `V2(P)` spans
-// two slots, so `Pair`'s second element starts at slot 2, not at its position
-// index.
+// A later payload starts after the widest preceding position.
 enum Multi { V2(P), Pair(int, int) }
 
 @test(returns = 9)
@@ -81,8 +71,6 @@ fn the_widened_position_still_reads_in_the_same_enum() -> int {
     }
 }
 
-// Enums as FIELDS of a nobox value cross the wire and materialize only at an
-// escape.
 enum Payload { Damage(float), Text(string) }
 enum Subject { None, Mob(int) }
 enum Source { Player, Named(string) }
@@ -133,9 +121,6 @@ fn retain_payload(event: Event) -> [Payload] { return [event.payload] }
     }, 8)
 }
 
-// A NULLABLE enum whose variant carries a nobox payload: absence, the widened
-// variant and the scalar sibling all come back through one `E?` return. The
-// unmarked twin answers the same.
 fn maybe_u(k: int) -> U? {
     if k < 0 { return null }
     if k == 0 { return U::F(5.0) }
@@ -175,7 +160,6 @@ fn a_nullable_enum_with_a_nobox_payload_keeps_absence() {
     print("{a} {b} {c} / {d} {e} {f}")
 }
 
-// -- Payloads of different shapes and widths at one position --
 
 nobox value P2 { x: float, y: float }
 nobox value P4 { x: float, y: float, z: float, w: float }
@@ -196,8 +180,6 @@ fn render(s: Slot) -> string {
     }
 }
 
-// The sibling with an ORDINARY payload at the same position must still find it
-// in the first slot -- it may not read the widened value's leaves.
 @test(output = "two(1,2)\nfour(1,2,3,4)\ncount(9)\nnone")
 fn every_variant_at_a_widened_position() {
     print("{render(Slot::Two(P2 { x: 1, y: 2 }))}")
@@ -206,8 +188,6 @@ fn every_variant_at_a_widened_position() {
     print("{render(Slot::None)}")
 }
 
-// Round-trip through a struct field, which is where the flat encoding is the
-// whole point: the payload lives in the parent's dotted slots.
 struct Holder { id: int, slot: Slot }
 
 @test(output = "5 two(6,7) 8 four(1,2,3,4)")
@@ -217,8 +197,7 @@ fn flat_field_round_trips_both_widths() {
     print("{a.id} {render(a.slot)} {b.id} {render(b.slot)}")
 }
 
-// A reassignment from the wide variant to the narrow one must clear the slots
-// the wide one filled, else the narrow arm reads a stale leaf.
+// Replacing a wide variant must clear its unused lanes.
 @test(output = "four(1,2,3,4) two(6,7)")
 fn a_narrow_write_clears_the_wide_slots() {
     let h = Holder { id: 0, slot: Slot::Four(P4 { x: 1, y: 2, z: 3, w: 4 }) }
@@ -227,8 +206,6 @@ fn a_narrow_write_clears_the_wide_slots() {
     print("{before} {render(h.slot)}")
 }
 
-// Two DISTINCT `nobox` shapes of the SAME width at one position share one
-// positional layout.
 
 nobox value Uv { u: float, v: float }
 
@@ -249,8 +226,6 @@ fn same_width_shapes_share_one_position() {
     print("{render_pair(Pair::Point(P2 { x: 1, y: 2 }))} {render_pair(Pair::Texel(Uv { u: 3, v: 4 }))}")
 }
 
-// A widened position must not shift a LATER position's slot: the sibling's
-// trailing payload has to survive the widest variant's width.
 enum Tagged {
     Wide(P4, int),
     Narrow(P2, int),
@@ -272,10 +247,6 @@ fn a_trailing_position_survives_the_widening() {
     print("{w} {n} {render_tagged(Tagged::Plain(7, 12))}")
 }
 
-// The trailing position is itself a `nobox` value, so its LEAVES start at the
-// widened position's offset rather than at its position index. `Tagged` above
-// only ever puts an ordinary payload after the widening, which reads through a
-// different consumer than the leaf-binding one.
 enum Trailer {
     WideThen(P4, P2),
     NarrowThen(P2, P2),
@@ -297,9 +268,7 @@ fn a_trailing_nobox_position_reads_its_own_leaves() {
     print("{w} {n} {render_trailer(Trailer::PlainThen(7, P2 { x: 40, y: 41 }))}")
 }
 
-// -- An enum ELEMENT of a container stores its payload splat
-// (`{__variant, x, y}`), as it does inside a tuple element. The containers are
-// globals so the vec escapes; a local one is scalarized away. --
+// Globals force the vector to escape so its element layout is exercised.
 
 enum ElementPayload {
     V2(Vec2),
@@ -343,7 +312,6 @@ fn an_enum_inside_a_tuple_element_agrees_with_the_bare_one() {
     }
 }
 
-// An inline ctor in the push takes the same route as a param-fed value.
 @test
 fn an_inline_ctor_in_the_push_takes_the_same_route() {
     BOXED.push(ElementPayload::V2(Vec2 { x: 7.0, y: 8.0 }))

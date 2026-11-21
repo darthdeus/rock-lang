@@ -1,10 +1,4 @@
-// `??` at nullable `nobox` values and nullable tuples carrying them.
-//
-// -- Diverging right-hand side --
-//
-// `??` whose RHS DIVERGES: the absent arm has no value to store, so neither
-// coalesce arm may splat leaves into its result cells (reading `(nil).x` before
-// the `return` would fault).
+// A diverging RHS has no value to store; reading absent leaves would fault.
 
 fn maybe_v2() -> Vec2? { return null }
 
@@ -28,8 +22,6 @@ fn coalesce_tuple_return() -> float {
     assert(coalesce_tuple_return() == -1.0)
 }
 
-// The PRESENT arm still has to reach its leaves -- a guard that skipped the
-// stores unconditionally would pass the tests above and break this one.
 fn some_v2() -> Vec2? { return v(3.0, 4.0) }
 
 fn coalesce_present() -> float {
@@ -41,8 +33,6 @@ fn coalesce_present() -> float {
     assert(coalesce_present() == 7.0)
 }
 
-// -- An if-let or if expression as the right-hand side, with and without a
-// type annotation on the binding --
 
 nobox value Place { x: int, y: int }
 
@@ -85,8 +75,6 @@ fn coalesce_if_rhs_keeps_present_value_unannotated() {
     }
 }
 
-// -- A nullable tuple destructure feeding a nobox value join, both as a
-// coalesce RHS and as a plain let value. --
 
 fn tuple_maybe_pair(present: bool) -> (int, int)? {
     if present { return (4, 6) }
@@ -113,8 +101,6 @@ fn tuple_iflet_plain_let_keeps_else() {
     if place == null { print("null") } else { print("{place.x} {place.y}") }
 }
 
-// -- The bound and the result are different nobox values, and the taken arm
-// calls a constructor --
 
 nobox value IVec2 { x: int, y: int }
 fn call_maybe_grid(present: bool) -> IVec2? {
@@ -136,7 +122,6 @@ fn coalesce_iflet_call_changes_nobox_type() {
     if place == null { print("missing") } else { print("{place.x} {place.y}") }
 }
 
-// -- A nested if-let join whose else arm may itself be null --
 
 nobox value SpaceId { value: int }
 nobox value JoinPlace { space: SpaceId, grid: IVec2 }
@@ -174,7 +159,6 @@ fn coalesce_nested_iflet_preserves_presence_and_payload() {
     check_placement(false, false, false)
 }
 
-// -- Chained `a ?? b ?? c`, with and without a diverging tail --
 
 fn maybe_space(present: bool) -> SpaceId? {
     if present { return SpaceId { value: 7 } }
