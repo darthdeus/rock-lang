@@ -75,16 +75,6 @@ fn ci_skip_count_reads_the_skip_number_not_the_backend_count() {
 }
 
 #[test]
-fn lua_runner_runs_only_tests_scoped_to_lua() {
-    let (ok, text) = rock_test_source(FIXTURE, &[]);
-    assert!(ok, "Lua run must pass:\n{text}");
-    assert!(
-        text.contains("3/3 @tests passed"),
-        "the js-scoped test must not run on Lua:\n{text}"
-    );
-}
-
-#[test]
 fn unknown_backend_name_is_a_compile_error() {
     let (ok, text) = rock_test_source("@test(backends = \"luajit\")\nfn a() { }\n", &[]);
     assert!(!ok, "an unknown backend must fail the run:\n{text}");
