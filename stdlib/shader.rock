@@ -1,7 +1,4 @@
-// GPU-only shader surface. Sampler2D is a phantom
-// param type for @shader entry fns -- never constructed CPU-side. texture()
-// maps to the GLSL builtin; reaching it on the CPU is a hard error, never a
-// silent stub.
+// Sampler2D is a shader-only phantom; CPU texture calls fail.
 
 value Sampler2D {
     __handle: int,
@@ -92,29 +89,18 @@ value Bvec3 { x: bool, y: bool, z: bool }
     return v(x, y, z)
 }
 
-// In-game shader compilation. A call
-// `rock_shader(vert, frag)` (two direct references to top-level @shader fns)
-// is expanded at MIR lowering to the pipeline key const "<vert>+<frag>" that
-// pipeline() looks up; the driver emits one __rock_shader_register(key, glsl)
-// per distinct pair at chunk top level. Annotation-keyed (not name-keyed) so a
-// user fn named rock_shader can't hijack it. The CPU body only fires if the fn
-// is taken as a value (never a silent stub); a real call is always expanded.
+// The compiler expands direct shader references to a pipeline key and
+// registers each distinct pair. Calls are matched by annotation, not name.
 @shader_expand inline(lua) fn rock_shader<V, F>(vert: V, frag: F) -> string = """
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """
 
-// Single-arg fullscreen form: a direct
-// reference to a top-level @shader(fragment) fn. Expands to the bare frag-name
-// key (never contains '+', so it cannot collide with a pair key); the driver
-// routes it to the A1 single-entry emitter (PIXEL body + fullscreen VERTEX
-// passthrough). Same @shader_expand, so resolution stays annotation-keyed.
+// The fullscreen fragment key contains no '+', so it cannot collide with a pair key.
 @shader_expand inline(lua) fn rock_shader<F>(frag: F) -> string = """
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """
 
-// The one compiler-owned logical value packet for shader inputs.
-// Its leaves contain values and kinds only; physical offsets and padding belong
-// to each backend's ABI projection.
+// Physical offsets and padding belong to each backend's ABI projection.
 enum CanonicalUniformLeaf {
     Float(float),
     Int(int),
@@ -131,24 +117,12 @@ struct SemanticUniformBlock {
     error("uniform_values is compiler-expanded")
 """
 
-// Pack `u` into a std140 uniform block: one direct typed store per primitive
-// leaf, at that leaf's std140 element index, through the two views the caller
-// passes. Never a per-leaf helper call and never a pack -- the leaves go from
-// registers into the views.
-//
-// The layout comes from `u`'s CONCRETE type. A generic source wrapper is
-// admitted; its retained concrete instance supplies that type to the expander.
+// The concrete type supplies the std140 layout, even through a generic wrapper.
 @uniform_expand inline(lua) fn pack_uniform_block<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
     error("pack_uniform_block is compiler-expanded")
 """
 
-// The std140 layout identity of `u`'s CONCRETE type, as a compile-time
-// constant. Same annotation as the packer because it answers the same question
-// -- what is `T`'s plan -- and the arity picks the shape.
-//
-// This is how a call site says WHICH of a program's blocks it means: an A2
-// pipeline has one block per stage, so the shader name no longer identifies
-// one and the value's type is what does.
+// The concrete value type identifies the block; a pipeline can have one per stage.
 @uniform_expand inline(lua) fn uniform_block_id<T>(u: T) -> int = """
     error("uniform_block_id is compiler-expanded")
 """
