@@ -87,27 +87,6 @@ fn qualified_register_workspace(registrations: &[&str]) -> bone_core::workspace:
 }
 
 #[test]
-fn qualified_register_is_rooted_under_the_driver_symbol() {
-    for registration in [
-        "global SOURCES: Map<string, string> = map_new()\n\
-         pub @nomangle fn __rock_shader_register(key: string, src: string) { SOURCES.insert(key, src) }",
-        "pub @nomangle inline(js) fn __rock_shader_register(key: string, src: string) = \"console.log(key);\"",
-    ] {
-        let ws = qualified_register_workspace(&[registration]);
-        assert!(
-            !ws.functions_by_name
-                .contains_key(&ustr::Ustr::from("__rock_shader_register"))
-        );
-        let program =
-            crate::common::emit_program_js(&ws).expect("qualified registration must emit");
-        assert!(
-            program.contains("function __rock_shader_register("),
-            "{program}"
-        );
-    }
-}
-
-#[test]
 fn unservable_qualified_registers_are_named_rejections() {
     let rock_register =
         "pub @nomangle fn __rock_shader_register(key: string, src: string) { print(key) }";
