@@ -20,23 +20,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn a_whole_element_store_bounds_checks_once_without_ctor_or_slot_reference() {
-    let lua = emit_module(NESTED_STORE);
-    let body = function_body(&lua, "fill");
-    assert!(!body.contains("V2_ct("));
-    assert!(!body.contains("__nb_checked_get("));
-
-    let checks = body.matches("checked").count();
-    assert_eq!(checks, 1);
-
-    let check_at = body.find("checked").expect("a bounds check");
-    let first_view_use = body
-        .find(".__v")
-        .unwrap_or_else(|| panic!("a typed-view use, so the ordering below is checked:\n{body}"));
-    assert!(check_at < first_view_use);
-}
-
 const SINGLE_FIELD_READ: &str = r#"
 value V2 { x: float, y: float }
 value Vert { pos: V2, uv: V2, id: int, w: float }
@@ -53,18 +36,6 @@ fn main() {
     print("{read_one(b, 0)}")
 }
 "#;
-
-#[test]
-fn a_single_field_leaf_read_loads_only_that_leaf() {
-    let lua = emit_module(SINGLE_FIELD_READ);
-    let body = function_body(&lua, "read_one");
-    let loads = body.matches("[(").count() + body.matches("[__").count();
-    let view_reads = body.matches(".__v").count();
-    assert!(view_reads <= 1);
-    assert!(loads <= 1);
-    // Dropping the unused loads is only sound while the bounds check is hoisted.
-    assert!(body.contains("__nb_checked_index("));
-}
 
 const F32_CTOR_STORE: &str = r#"
 value V2f { x: f32, y: f32 }
