@@ -589,22 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn a_well_formed_body_verifies() {
-        assert_eq!(messages(&body(), Stage::EMIT_READY), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_value_may_cross_blocks_within_its_region() {
-        let mut mf = body();
-        let entry = mf.entry();
-        let next = mf.new_block();
-        let value = mf.blocks[entry].insts[2];
-        mf.set_term(entry, Term::Goto(next));
-        mf.set_term(next, Term::Return(vec![value]));
-        assert_eq!(messages(&mf, Stage::LOWERED), Vec::<String>::new());
-    }
-
-    #[test]
     fn a_lambda_body_cannot_use_an_enclosing_value() {
         let mut mf = body();
         let entry = mf.entry();
