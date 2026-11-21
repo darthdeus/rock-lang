@@ -343,3 +343,19 @@ fn nullable_equality_evaluates_effects_once_and_compares_cleared_tags() {
     local = null
     assert(holder.item != NullableLabel::Blank && labels[0] != NullableLabel::Counted(1) && local != NullableLabel::Blank)
 }
+
+@test
+fn vector_presence_and_nullable_element_control_flow_are_independent() {
+    let none: [int]? = null
+    let values: [int]? = [1, 2, 3]
+    assert_eq(none?.len() ?? 0, 0)
+    assert_eq(values?.len() ?? 0, 3)
+    assert_eq(values.unwrap()[0], 1)
+    let items: [int?] = [1, null, 3]
+    let sum = 0
+    for item in items { sum += item ?? continue }
+    assert_eq(sum, 4)
+    let prefix = 0
+    for item in items { prefix += item ?? break }
+    assert_eq(prefix, 1)
+}
