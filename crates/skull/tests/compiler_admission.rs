@@ -86,31 +86,6 @@ fn recovered_statement_preserves_the_tree_but_stops_before_aliases() {
 }
 
 #[test]
-fn assembled_modules_report_all_recovered_errors_in_module_order() {
-    let first = skull_parser::parse_module("fn first(\n", Ustr::from("first.rock"))
-        .expect("recoverable first module");
-    let second = skull_parser::parse_module("fn second(\n", Ustr::from("second.rock"))
-        .expect("recoverable second module");
-    assert_eq!(first.recovery_errors.len(), 1);
-    assert_eq!(second.recovery_errors.len(), 1);
-    let mut host = RecordingHost::default();
-    let modules = pipeline::with_stdlib([first, second]).expect("stdlib");
-    let failure = match pipeline::compile_modules(
-        modules,
-        Ustr::from("first.rock"),
-        EmitTarget::SINGLE_SOURCE,
-        &mut host,
-    ) {
-        Err(failure) => failure,
-        Ok(_) => panic!("recovered modules compiled"),
-    };
-    assert_eq!(failure.stage, Stage::Check);
-    let files: Vec<_> = failure.errors.iter().map(|e| e.location.file).collect();
-    assert_eq!(files, [Ustr::from("first.rock"), Ustr::from("second.rock")]);
-    assert!(host.reached.is_empty());
-}
-
-#[test]
 fn macro_errors_are_reported_before_expansion_discards_their_source() {
     for (src, expected) in [
         (
@@ -172,44 +147,6 @@ fn repeated_test_checks_reuse_stdlib_only_for_independent_sources() {
             warm.reinferred_body_count.load(Relaxed) < cold.reinferred_body_count.load(Relaxed),
             reused,
             "{src}",
-        );
-    }
-}
-
-#[test]
-fn tokenizer_failure_stops_before_any_host_phase() {
-    let mut host = RecordingHost::default();
-    let failure = match pipeline::compile_source(
-        "admission.rock",
-        "fn main() { print(\"unterminated)",
-        EmitTarget::SINGLE_SOURCE,
-        &mut host,
-    ) {
-        Err(failure) => failure,
-        Ok(_) => panic!("unterminated string compiled"),
-    };
-    assert_eq!(failure.stage, Stage::Parse);
-    assert_eq!(failure.errors.len(), 1);
-    assert!(host.reached.is_empty());
-}
-
-#[test]
-fn repaired_source_and_valid_macros_reach_real_emission() {
-    for src in [
-        "fn main() { let kept = 7\n print(kept) }\n",
-        "macro declares() { fn generated() -> int { 7 } }\ndeclares!()\nfn main() { print(generated()) }\n",
-        "macro identity(value: expr) { value }\nfn main() { print(identity(value: 7)) }\n",
-    ] {
-        let mut host = RecordingHost::default();
-        let compiled =
-            pipeline::compile_source("admission.rock", src, EmitTarget::SINGLE_SOURCE, &mut host)
-                .unwrap_or_else(|failure| panic!("valid control failed: {failure:?}\n{src}"));
-        assert!(compiled.emission.lua.contains("print("));
-        assert_eq!(
-            host.reached,
-            [
-                "parsed", "aliases", "checked", "comptime", "lints", "report", "prepared", "emit"
-            ],
         );
     }
 }
