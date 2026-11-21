@@ -1,0 +1,62 @@
+@noalloc fn predicates(x: float, value: any?) -> (bool, bool, bool) {
+    return (isnan(x), isinf(x), is_null(value))
+}
+
+@test(backends = "lua")
+fn predicates_preserve_nan_infinity_and_null() {
+    let (nan, inf, empty) = predicates(0.0 / 0.0, null)
+    assert(nan && !inf && empty)
+    let (nan2, inf2, empty2) = predicates(-1.0 / 0.0, 1)
+    assert(!nan2 && inf2 && !empty2)
+    let (nan3, inf3, empty3) = predicates(3.0, false)
+    assert(!nan3 && !inf3 && !empty3)
+}
+
+@nomangle fn greet(name: string, nick: string?, n: int) -> string {
+    return "hi {name} aka {nick} #{n}"
+}
+
+inline(lua) fn checks_interpolation() -> bool = """
+    local original = tostring
+    local conversions = {}
+    tostring = function(value)
+        conversions[#conversions + 1] = value == nil and "nil" or type(value)
+        return original(value)
+    end
+    local ok, a, b = pcall(function() return greet('a', nil, 3), greet('b', 'c', 4) end)
+    tostring = original
+    assert(ok, a)
+    assert(a == "hi a aka nil #3" and b == "hi b aka c #4")
+    assert(table.concat(conversions, ",") == "number,number")
+    return true
+"""
+
+@test(backends = "lua")
+fn interpolation_converts_only_non_strings() { assert(checks_interpolation()) }
+
+@nomangle fn int_vec(x: int) -> [int] { return [x, 2] }
+@nomangle fn vec_read(xs: [int], i: int) -> int { return xs[i] }
+@nomangle fn vec_first(xs: [int]) -> int { return xs[0] }
+@nomangle fn bool_first(xs: [bool], i: int) -> bool { return xs[i] }
+
+inline(lua) fn check_boxed_vectors() -> bool = """
+    local checked = __vec_checked_get
+    local calls = 0
+    __vec_checked_get = function(v, i) calls = calls + 1; return checked(v, i) end
+    local ok, err = pcall(function()
+        local a = int_vec(7)
+        assert(a.len == 2 and a._data[1] == 7 and a._data[2] == 2)
+        assert(rawget(a, "__ty") == nil)
+        assert(vec_read(a, 1) == 2 and vec_first(a) == 7)
+        assert(bool_first({_data = {false}, len = 1}, 0) == false)
+        assert(calls == 0)
+        assert(not pcall(vec_read, a, 2))
+        assert(calls == 1)
+    end)
+    __vec_checked_get = checked
+    assert(ok, err)
+    return true
+"""
+
+@test(backends = "lua")
+fn boxed_vector_wire_and_miss_only_reads() { assert(check_boxed_vectors()) }

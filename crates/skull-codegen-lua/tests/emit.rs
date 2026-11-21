@@ -86,15 +86,6 @@ fn luajit_loads(lua: &str, context: &str) {
     );
 }
 
-fn emitted_symbol(lua: &str) -> &str {
-    lua.lines()
-        .find_map(|line| line.strip_prefix("function "))
-        .expect("function definition")
-        .split('(')
-        .next()
-        .unwrap()
-}
-
 fn emit_module(
     mut modules: Vec<skull_parser::Ast>,
     fn_name: &str,
@@ -127,19 +118,6 @@ fn emit_run(src: &str) -> (String, Option<skull_parser::CompilerError>) {
 fn emit(src: &str, fn_name: &str) -> String {
     let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
     emit_module(vec![ast], fn_name).0
-}
-
-#[test]
-fn prelude_predicates_emit_without_wrapper_calls() {
-    let lua = emit_inlined(
-        "fn run(x: float, value: any?) -> (bool, bool, bool) { return (isnan(x), isinf(x), is_null(value)) }",
-        "run",
-    );
-    for name in ["isnan_", "isinf_", "is_null("] {
-        assert!(!lua.contains(name), "{lua}");
-    }
-    assert!(lua.contains(" ~= ") && lua.contains("math.abs("), "{lua}");
-    assert!(lua.contains(" == (nil)"), "{lua}");
 }
 
 #[test]
@@ -736,26 +714,6 @@ fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { retur
     assert!(backward_gotos(&lua).is_empty(), "{lua}");
 }
 
-/// A `[T]` element read is the backing read itself. Only a slot that reads
-/// nil goes on to the checked helper, which raises when the index is out of
-/// bounds and otherwise returns that nil; a `false` slot is the element, so a
-/// `[bool]` of mostly `false` makes no call per element.
-#[test]
-fn vec_index_read_is_direct_with_a_checked_fallback() {
-    let lua = emit("fn f(xs: [int], i: int) -> int { return xs[i] }", "f");
-    assert!(
-        lua.contains("._data[c1 + 1] or (c0._data[c1 + 1] == nil and __vec_checked_get(c0, c1))"),
-        "{lua}"
-    );
-    let lua = emit("fn first(xs: [int]) -> int { return xs[0] }", "first");
-    assert!(
-        lua.contains("._data[1] or (c0._data[1] == nil and __vec_checked_get("),
-        "{lua}"
-    );
-    let lua = emit("fn f(xs: [bool], i: int) -> bool { return xs[i] }", "f");
-    assert!(lua.contains(" == nil and __vec_checked_get("), "{lua}");
-}
-
 /// The occupancy read is raw under the loop bound; payload reads keep the
 /// fallback because a host getter can shrink the column.
 #[test]
@@ -1203,31 +1161,6 @@ fn frame_stores_skip_temporaries_and_guard_only_nullable_values() {
         assert_eq!(lua.contains(guard), guarded, "{lua}");
         assert!(lua.contains(".c0 = "), "{lua}");
     }
-}
-
-#[test]
-fn string_interpolation_holes_concatenate_without_tostring() {
-    let lua = emit_clean(
-        r#"@nomangle fn greet(name: string, nick: string?, n: int) -> string {
-    return "hi {name} aka {nick} #{n}"
-}"#,
-        "greet",
-    );
-    assert_eq!(lua.matches("tostring(").count(), 1, "{lua}");
-    assert!(lua.contains("tostring(c2)"), "{lua}");
-    let out = luajit_ok(
-        &format!("{lua}\nio.write(greet('a', nil, 3), '|', greet('b', 'c', 4))"),
-        &lua,
-    );
-    assert_eq!(out, "hi a aka nil #3|hi b aka c #4");
-}
-
-#[test]
-fn vec_literal_carries_no_type_tag() {
-    let (lua, rejection) = emit_run("fn run(x: int) -> [int] {\n    [x, 2]\n}\n");
-    assert!(rejection.is_none(), "{rejection:?}");
-    assert!(lua.contains("{_data = {c0, (2)}, len = 2}"), "{lua}");
-    assert!(!lua.contains("__ty"), "{lua}");
 }
 
 #[test]
