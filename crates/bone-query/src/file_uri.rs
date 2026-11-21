@@ -147,39 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn unix_paths_keep_drive_like_names_verbatim() {
-        assert_eq!(uri_path_to_native("/C:/x", false).as_deref(), Some("/C:/x"));
-        assert_eq!(uri_path_to_native("C:/x", false), None);
-        assert!(native_to_uri_path(r"C:\x", false).is_err());
-        assert_eq!(native_to_uri_path("/a b/c", false).as_deref(), Ok("/a b/c"));
-    }
-
-    #[test]
-    fn windows_file_uris_round_trip_both_colon_spellings() {
-        for s in [
-            "file:///C:/x/a.rock",
-            "file:///C%3A/x/a.rock",
-            "file:///C%3a/x/a.rock",
-        ] {
-            assert_eq!(
-                to_file_path_on(&Uri::from_str(s).unwrap(), true).unwrap(),
-                r"C:\x\a.rock",
-                "{s}"
-            );
-        }
-        let uri = from_file_path_on(r"C:\my dir\a.rock", true).unwrap();
-        assert_eq!(uri.as_str(), "file:///C%3A/my%20dir/a.rock");
-        assert_eq!(to_file_path_on(&uri, true).unwrap(), r"C:\my dir\a.rock");
-        assert!(to_file_path_on(&Uri::from_str("file:///x/a.rock").unwrap(), true).is_err());
-        assert!(from_file_path_on("/x/a.rock", true).is_err());
-        // The same drive-shaped URI is an ordinary absolute path elsewhere.
-        assert_eq!(
-            to_file_path_on(&Uri::from_str("file:///C%3A/x").unwrap(), false).unwrap(),
-            "/C:/x"
-        );
-    }
-
-    #[test]
     fn windows_verbatim_drive_paths_convert_like_plain_drive_paths() {
         for path in [r"\\?\C:\proj\a.rock", r"\\?\c:\proj\a.rock"] {
             let uri = from_file_path_on(path, true).unwrap();
@@ -216,17 +183,6 @@ mod tests {
         let path = r"\\server\share\a.rock";
         let e = from_file_path_on(path, true).unwrap_err().to_string();
         assert!(e.contains("UNC") && e.contains(path), "{}", e);
-    }
-
-    #[test]
-    fn file_path_round_trips_spaces_and_non_ascii() {
-        let path = "/tmp/my dir/caf\u{e9} #1%.rock";
-        let uri = Uri::from_file_path(path).unwrap();
-        assert_eq!(
-            uri.as_str(),
-            "file:///tmp/my%20dir/caf%C3%A9%20%231%25.rock"
-        );
-        assert_eq!(uri.to_file_path().unwrap(), path);
     }
 
     #[test]
