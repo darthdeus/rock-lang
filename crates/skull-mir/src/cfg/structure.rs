@@ -1,4 +1,4 @@
-use super::dense::{bi, bx, collect_loop_body, dominates, idoms, pred_list, rpo, succ_list};
+use super::dense::{NO_BLOCK, bi, block_idoms, bx, collect_loop_body, dominates, solve_idoms};
 use crate::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -33,64 +33,48 @@ impl Structure {
 }
 
 pub fn analyze(f: &MirFunc) -> Structure {
-    let n = f.blocks.len();
-    let succ = succ_list(f);
-    let preds = pred_list(n, &succ);
+    let exit = f.blocks.len() as u32;
+    let succ = Succ::from_func(f, Some(exit));
+    let preds = Succ::transpose(exit as usize + 1, |edge| {
+        for b in 0..exit {
+            for &to in succ.of(b as usize) {
+                edge(b, to);
+            }
+        }
+    });
+    let mut stack = Vec::new();
+    let mut order = vec![NO_BLOCK; exit as usize + 1];
+    let mut blocks = Vec::new();
+    succ.postorder(raw_of(f.entry), &mut stack, &mut order, &mut blocks);
+    let idom = block_idoms(order.len(), blocks.iter().rev().copied(), &preds);
+    let loops = natural_loops(exit, &succ, &preds, &idom);
 
-    let fwd_rpo = rpo(n, bx(f.entry), &succ);
-    let idom = idoms(n, bx(f.entry), &preds, &fwd_rpo);
-
-    let ipdom = post_idoms(f, n, &succ);
-    let loops = natural_loops(f, n, &succ, &preds, &idom);
-
+    // Only returns enter the virtual exit. Treating Unreachable as an exit
+    // would hide the real join of an exhaustive match.
+    order.fill(NO_BLOCK);
+    blocks.clear();
+    preds.postorder(exit, &mut stack, &mut order, &mut blocks);
+    let ipdom = block_idoms(order.len(), blocks.iter().rev().copied(), &succ)
+        .into_iter()
+        .take(exit as usize)
+        .map(|b| (b < exit).then(|| bi(b as usize)))
+        .collect();
     Structure { ipdom, loops }
 }
 
-/// `Unreachable` blocks do not flow into the virtual exit: counting them would
-/// defeat post-dominance of the real join of an exhaustive `match`.
-fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Block>>> {
-    let exit = n;
-    let nn = n + 1;
-    let mut rev_adj = vec![Vec::new(); nn];
-    let mut rev_preds = vec![Vec::new(); nn];
-    for b in 0..n {
-        for &s in &succ[b] {
-            rev_adj[s].push(b);
-        }
-        rev_preds[b].extend_from_slice(&succ[b]);
-        if matches!(f.blocks[bi(b)].term, Term::Return(_)) {
-            rev_adj[exit].push(b);
-            rev_preds[b].push(exit);
-        }
-    }
-
-    let rev_rpo = rpo(nn, exit, &rev_adj);
-    let pidom = idoms(nn, exit, &rev_preds, &rev_rpo);
-
-    let mut out = vec![None; n];
-    for b in 0..n {
-        out[b] = match pidom[b] {
-            Some(x) if x != exit => Some(bi(x)),
-            _ => None,
-        };
-    }
-    out
-}
-
 fn natural_loops(
-    f: &MirFunc,
-    n: usize,
-    succ: &[Vec<usize>],
-    preds: &[Vec<usize>],
-    idom: &[Option<usize>],
+    exit: u32,
+    succ: &Succ,
+    preds: &Succ,
+    idom: &[u32],
 ) -> HashMap<Idx<Block>, LoopRegion> {
-    let mut latches: HashMap<usize, Vec<usize>> = HashMap::default();
-    for latch in 0..n {
-        if idom[latch].is_none() && latch != bx(f.entry) {
-            continue; // unreachable
+    let mut latches: HashMap<u32, Vec<u32>> = HashMap::default();
+    for latch in 0..exit {
+        if idom[latch as usize] == NO_BLOCK {
+            continue;
         }
-        for &h in &succ[latch] {
-            if dominates(idom, h, latch) {
+        for &h in succ.of(latch as usize) {
+            if h != exit && dominates(idom, h, latch) {
                 latches.entry(h).or_default().push(latch);
             }
         }
@@ -98,17 +82,19 @@ fn natural_loops(
 
     let mut out = HashMap::default();
     for (h, hlatches) in latches {
-        let mut body: HashSet<usize> = HashSet::default();
+        let mut body: HashSet<u32> = HashSet::default();
         for &l in &hlatches {
             collect_loop_body(h, l, preds, &mut body);
         }
         // The exit is the out-of-loop successor of the shallowest body block that
         // dominates every latch; early `return`/`break` blocks fail that test.
-        let mut candidates: Vec<usize> = body
+        let mut candidates: Vec<u32> = body
             .iter()
             .copied()
             .filter(|&b| {
-                succ[b].iter().any(|s| !body.contains(s))
+                succ.of(b as usize)
+                    .iter()
+                    .any(|s| *s != exit && !body.contains(s))
                     && hlatches.iter().all(|&l| dominates(idom, b, l))
             })
             .collect();
@@ -118,7 +104,11 @@ fn natural_loops(
             .copied()
             .find(|&c| candidates.iter().all(|&c2| dominates(idom, c, c2)))
             .and_then(|test| {
-                let mut exits = succ[test].iter().copied().filter(|s| !body.contains(s));
+                let mut exits = succ
+                    .of(test as usize)
+                    .iter()
+                    .copied()
+                    .filter(|s| *s != exit && !body.contains(s));
                 let e = exits.next()?;
                 exits.next().is_none().then_some((test, e))
             });
@@ -126,11 +116,11 @@ fn natural_loops(
             continue; // the GLSL walker rejects untested loops
         };
         out.insert(
-            bi(h),
+            bi(h as usize),
             LoopRegion {
-                header: bi(h),
-                body: body.iter().map(|&x| bi(x)).collect(),
-                exit: bi(exit),
+                header: bi(h as usize),
+                body: body.iter().map(|&x| bi(x as usize)).collect(),
+                exit: bi(exit as usize),
             },
         );
     }
@@ -245,8 +235,82 @@ pub struct Succ {
 }
 
 impl Succ {
-    fn of(&self, b: usize) -> &[u32] {
+    pub(super) fn of(&self, b: usize) -> &[u32] {
         &self.targets[self.offsets[b] as usize..self.offsets[b + 1] as usize]
+    }
+
+    fn from_func(f: &MirFunc, exit: Option<u32>) -> Self {
+        let mut graph = Self::default();
+        graph.offsets.push(0);
+        for (_, block) in f.blocks.iter() {
+            if let Some(exit) = exit
+                && matches!(block.term, Term::Return(_))
+            {
+                graph.targets.push(exit);
+            } else {
+                super::successors(&block.term, |to| graph.targets.push(raw_of(to)));
+            }
+            graph.offsets.push(graph.targets.len() as u32);
+        }
+        if exit.is_some() {
+            graph.offsets.push(graph.targets.len() as u32);
+        }
+        graph
+    }
+
+    pub(super) fn transpose(n: usize, each_edge: impl Fn(&mut dyn FnMut(u32, u32))) -> Self {
+        let mut graph = Self::default();
+        let mut fill = Vec::new();
+        graph.store_predecessors(n, &mut fill, each_edge);
+        graph
+    }
+
+    fn store_predecessors(
+        &mut self,
+        n: usize,
+        fill: &mut Vec<u32>,
+        each_edge: impl Fn(&mut dyn FnMut(u32, u32)),
+    ) {
+        reset(&mut self.offsets, n + 1, 0);
+        each_edge(&mut |_, to| self.offsets[to as usize + 1] += 1);
+        for i in 0..n {
+            self.offsets[i + 1] += self.offsets[i];
+        }
+        reset(&mut self.targets, self.offsets[n] as usize, 0);
+        fill.clear();
+        fill.extend_from_slice(&self.offsets);
+        each_edge(&mut |from, to| {
+            let at = &mut fill[to as usize];
+            self.targets[*at as usize] = from;
+            *at += 1;
+        });
+    }
+
+    fn postorder(
+        &self,
+        entry: u32,
+        stack: &mut Vec<(u32, u32)>,
+        order: &mut [u32],
+        blocks: &mut Vec<u32>,
+    ) {
+        stack.push((entry, 0));
+        order[entry as usize] = 0;
+        while let Some(top) = stack.last_mut() {
+            let (b, i) = *top;
+            match self.of(b as usize).get(i as usize) {
+                Some(&to) => {
+                    top.1 += 1;
+                    if order[to as usize] == NO_BLOCK {
+                        order[to as usize] = 0;
+                        stack.push((to, 0));
+                    }
+                }
+                None => {
+                    blocks.push(b);
+                    stack.pop();
+                }
+            }
+        }
     }
 }
 
@@ -276,7 +340,6 @@ struct Pos {
     flags: u8,
 }
 
-const NO_BLOCK: u32 = u32::MAX;
 const HEADER: u8 = 1;
 const FOLLOWER: u8 = 2;
 const UNPLACED: u8 = 4;
@@ -353,8 +416,7 @@ fn in_loop(pos: &[Pos], h: u32, b: u32) -> bool {
 #[derive(Default)]
 struct Scratch {
     stack: Vec<(u32, u32)>,
-    pred_start: Vec<u32>,
-    preds: Vec<u32>,
+    preds: Succ,
     fill: Vec<u32>,
     idom: Vec<u32>,
     forward_in: Vec<u32>,
@@ -394,25 +456,7 @@ fn place_in(
     let n = succ.offsets.len() - 1;
     let mut order = vec![NO_BLOCK; n];
     let mut blocks: Vec<u32> = Vec::with_capacity(n);
-    s.stack.clear();
-    s.stack.push((raw_of(entry), 0));
-    order[bx(entry)] = 0;
-    while let Some(top) = s.stack.last_mut() {
-        let (b, i) = *top;
-        match succ.of(b as usize).get(i as usize) {
-            Some(&t) => {
-                top.1 += 1;
-                if order[t as usize] == NO_BLOCK {
-                    order[t as usize] = 0;
-                    s.stack.push((t, 0));
-                }
-            }
-            None => {
-                blocks.push(b);
-                s.stack.pop();
-            }
-        }
-    }
+    succ.postorder(raw_of(entry), &mut s.stack, &mut order, &mut blocks);
     blocks.reverse();
     let k = blocks.len();
     for (p, &b) in blocks.iter().enumerate() {
@@ -452,67 +496,16 @@ fn place_in(
             });
         }
     }
-    // Every successor of a reachable block is reachable, so these are all the edges.
-    reset(&mut s.pred_start, k + 1, 0);
-    for &b in &blocks {
-        for &t in succ.of(b as usize) {
-            s.pred_start[order[t as usize] as usize + 1] += 1;
+    s.preds.store_predecessors(k, &mut s.fill, |edge| {
+        for (p, &block) in blocks.iter().enumerate() {
+            for &to in succ.of(block as usize) {
+                edge(p as u32, order[to as usize]);
+            }
         }
-    }
-    for p in 0..k {
-        s.pred_start[p + 1] += s.pred_start[p];
-    }
-    reset(&mut s.preds, s.pred_start[k] as usize, 0);
-    s.fill.clear();
-    s.fill.extend_from_slice(&s.pred_start);
-    for (p, &b) in blocks.iter().enumerate() {
-        for &t in succ.of(b as usize) {
-            let q = order[t as usize] as usize;
-            s.preds[s.fill[q] as usize] = p as u32;
-            s.fill[q] += 1;
-        }
-    }
-    let (pred_start, preds) = (&s.pred_start, &s.preds);
-    let preds_of = |p: usize| &preds[pred_start[p] as usize..pred_start[p + 1] as usize];
-    // In position space a dominator always has the smaller position.
+    });
+    let preds_of = |p| s.preds.of(p);
     let idom = &mut s.idom;
-    reset(idom, k, NO_BLOCK);
-    idom[0] = 0;
-    let mut retreating = false;
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for p in 1..k {
-            let mut new = NO_BLOCK;
-            for &q in preds_of(p) {
-                retreating |= q as usize >= p;
-                if idom[q as usize] == NO_BLOCK {
-                    continue;
-                }
-                new = if new == NO_BLOCK {
-                    q
-                } else {
-                    let (mut a, mut b) = (q, new);
-                    while a != b {
-                        while a > b {
-                            a = idom[a as usize];
-                        }
-                        while b > a {
-                            b = idom[b as usize];
-                        }
-                    }
-                    a
-                };
-            }
-            if idom[p] != new {
-                idom[p] = new;
-                changed = true;
-            }
-        }
-        // Without a retreating edge every predecessor was final when its successor was
-        // visited, so the first pass settled them all.
-        changed &= retreating;
-    }
+    solve_idoms(idom, k, 0..k as u32, preds_of, |p| p as u32);
     reset(&mut s.forward_in, k, 0);
     let mut latches: Vec<(u32, u32)> = Vec::new();
     for (p, &b) in blocks.iter().enumerate() {
@@ -754,13 +747,7 @@ mod tests {
     }
 
     fn dense_succ(f: &MirFunc) -> Succ {
-        let mut s = Succ::default();
-        s.offsets.push(0);
-        for list in super::super::dense::succ_list(f) {
-            s.targets.extend(list.iter().map(|&t| t as u32));
-            s.offsets.push(s.targets.len() as u32);
-        }
-        s
+        Succ::from_func(f, None)
     }
 
     #[test]

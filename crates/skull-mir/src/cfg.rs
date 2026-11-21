@@ -150,109 +150,64 @@ pub fn predecessors(func: &MirFunc, rpo: &[Idx<Block>]) -> (PredMap, PredMap) {
 /// The entry maps to itself; an unreachable block has no entry.
 #[derive(Clone, Debug)]
 pub struct Dominators {
-    idom: Vec<Option<Idx<Block>>>,
+    idom: Vec<u32>,
 }
 
 impl Dominators {
     pub fn idom(&self, b: Idx<Block>) -> Option<Idx<Block>> {
-        self.idom.get(dense::bx(b)).copied().flatten()
+        let &d = self.idom.get(dense::bx(b))?;
+        (d != dense::NO_BLOCK).then(|| dense::bi(d as usize))
     }
 
     pub fn dominates(&self, a: Idx<Block>, b: Idx<Block>) -> bool {
-        let mut x = b;
-        loop {
-            if x == a {
-                return true;
+        dense::dominates(&self.idom, dense::bx(a) as u32, dense::bx(b) as u32)
+    }
+
+    pub fn intervals(&self) -> DomIntervals {
+        let n = self.idom.len();
+        let tree = structure::Succ::transpose(n, |edge| {
+            for (child, &parent) in self.idom.iter().enumerate() {
+                let child = child as u32;
+                if parent != dense::NO_BLOCK && parent != child {
+                    edge(child, parent);
+                }
             }
-            let Some(p) = self.idom(x) else { return false };
-            if p == x {
-                return false; // reached the entry without hitting `a`
+        });
+        let mut span = vec![(u32::MAX, 0u32); n];
+        let root = (0..n)
+            .find(|&b| self.idom[b] == b as u32)
+            .expect("dominator root");
+        let mut clock = 1;
+        let mut stack = vec![(root, 0)];
+        span[root].0 = 0;
+        while let Some((node, next)) = stack.last_mut() {
+            if let Some(&child) = tree.of(*node).get(*next) {
+                *next += 1;
+                let child = child as usize;
+                span[child].0 = clock;
+                clock += 1;
+                stack.push((child, 0));
+            } else {
+                span[*node].1 = clock;
+                stack.pop();
             }
-            x = p;
         }
+        DomIntervals { span }
     }
 }
 
 pub fn dominators(func: &MirFunc, entry: Idx<Block>) -> Dominators {
     let n = func.blocks.len();
-    let rpo: Vec<usize> = reverse_postorder(func, entry)
-        .into_iter()
-        .map(dense::bx)
-        .collect();
-    let mut pred_n = vec![0usize; n + 1];
-    for &b in &rpo {
-        successors(&func.blocks[dense::bi(b)].term, |s| {
-            pred_n[dense::bx(s) + 1] += 1
-        });
-    }
-    for i in 0..n {
-        pred_n[i + 1] += pred_n[i];
-    }
-    let mut preds = vec![0usize; pred_n[n]];
-    let mut fill = pred_n.clone();
-    for &b in &rpo {
-        successors(&func.blocks[dense::bi(b)].term, |s| {
-            let k = dense::bx(s);
-            preds[fill[k]] = b;
-            fill[k] += 1;
-        });
-    }
-    let idom = dense::chk_idoms(n, &rpo, |b| &preds[pred_n[b]..pred_n[b + 1]]);
+    let rpo = reverse_postorder(func, entry);
+    let pred = structure::Succ::transpose(n, |edge| {
+        for &block in &rpo {
+            successors(&func.blocks[block].term, |to| {
+                edge(dense::bx(block) as u32, dense::bx(to) as u32)
+            });
+        }
+    });
     Dominators {
-        idom: idom.into_iter().map(|d| d.map(dense::bi)).collect(),
-    }
-}
-
-impl Dominators {
-    pub fn intervals(&self) -> DomIntervals {
-        let n = self.idom.len();
-        let mut child_n = vec![0u32; n + 1];
-        for (b, d) in self.idom.iter().enumerate() {
-            if let Some(d) = d
-                && dense::bx(*d) != b
-            {
-                child_n[dense::bx(*d) + 1] += 1;
-            }
-        }
-        for i in 0..n {
-            child_n[i + 1] += child_n[i];
-        }
-        let mut fill = child_n.clone();
-        let mut children = vec![0u32; child_n[n] as usize];
-        let mut roots = Vec::new();
-        for (b, d) in self.idom.iter().enumerate() {
-            match d {
-                Some(d) if dense::bx(*d) != b => {
-                    let p = dense::bx(*d);
-                    children[fill[p] as usize] = b as u32;
-                    fill[p] += 1;
-                }
-                Some(_) => roots.push(b as u32),
-                None => {}
-            }
-        }
-        let mut span = vec![(u32::MAX, 0u32); n];
-        let mut clock = 0u32;
-        let mut stack: Vec<(u32, u32)> = Vec::new();
-        for root in roots {
-            stack.push((root, child_n[root as usize]));
-            span[root as usize].0 = clock;
-            clock += 1;
-            while let Some(top) = stack.last_mut() {
-                let node = top.0 as usize;
-                if top.1 < child_n[node + 1] {
-                    let child = children[top.1 as usize];
-                    top.1 += 1;
-                    span[child as usize].0 = clock;
-                    clock += 1;
-                    stack.push((child, child_n[child as usize]));
-                } else {
-                    span[node].1 = clock;
-                    stack.pop();
-                }
-            }
-        }
-        DomIntervals { span }
+        idom: dense::block_idoms(n, rpo.iter().map(|&block| dense::bx(block) as u32), &pred),
     }
 }
 
@@ -285,8 +240,7 @@ pub mod relooper;
 pub mod structure;
 
 pub mod dense {
-    use super::successors;
-    use crate::mir::{Block, MirFunc};
+    use crate::mir::Block;
     use comfy_la_arena::{Idx, RawIdx};
     use rustc_hash::FxHashSet as HashSet;
 
@@ -298,132 +252,96 @@ pub mod dense {
         Idx::from_raw(RawIdx::from_u32(n as u32))
     }
 
-    pub(crate) fn succ_list(f: &MirFunc) -> Vec<Vec<usize>> {
-        let mut s = vec![Vec::new(); f.blocks.len()];
-        for (b, blk) in f.blocks.iter() {
-            let i = bx(b);
-            successors(&blk.term, |t| s[i].push(bx(t)));
-        }
-        s
-    }
+    pub(super) const NO_BLOCK: u32 = u32::MAX;
 
-    pub fn pred_list(n: usize, succ: &[Vec<usize>]) -> Vec<Vec<usize>> {
-        let mut p = vec![Vec::new(); n];
-        for (b, ss) in succ.iter().enumerate() {
-            for &s in ss {
-                p[s].push(b);
-            }
-        }
-        p
-    }
-
-    pub fn rpo(n: usize, entry: usize, adj: &[Vec<usize>]) -> Vec<usize> {
-        let mut visited = vec![false; n];
-        let mut post = Vec::new();
-        let mut stack = vec![(entry, 0usize)];
-        visited[entry] = true;
-        while let Some(&(node, i)) = stack.last() {
-            if i < adj[node].len() {
-                stack.last_mut().unwrap().1 += 1;
-                let s = adj[node][i];
-                if !visited[s] {
-                    visited[s] = true;
-                    stack.push((s, 0));
-                }
-            } else {
-                post.push(node);
-                stack.pop();
-            }
-        }
-        post.reverse();
-        post
-    }
-
-    /// The entry maps to `None`.
-    pub fn idoms(
+    pub(super) fn block_idoms(
         n: usize,
-        entry: usize,
-        preds: &[Vec<usize>],
-        rpo_order: &[usize],
-    ) -> Vec<Option<usize>> {
-        let mut idom = chk_idoms(n, rpo_order, |b| &preds[b]);
-        idom[entry] = None;
+        rpo: impl Iterator<Item = u32> + Clone,
+        preds: &super::structure::Succ,
+    ) -> Vec<u32> {
+        let mut order = vec![NO_BLOCK; n];
+        for (i, block) in rpo.clone().enumerate() {
+            order[block as usize] = i as u32;
+        }
+        let mut idom = Vec::new();
+        solve_idoms(&mut idom, n, rpo, |b| preds.of(b), |b| order[b]);
         idom
     }
 
-    /// The entry maps to itself and a node missing from `rpo` to `None`.
-    pub(crate) fn chk_idoms<'p>(
-        n: usize,
-        rpo: &[usize],
-        preds: impl Fn(usize) -> &'p [usize],
-    ) -> Vec<Option<usize>> {
-        let mut order = vec![usize::MAX; n];
-        for (i, &b) in rpo.iter().enumerate() {
-            order[b] = i;
-        }
-        let mut idom = vec![None; n];
-        let Some(&entry) = rpo.first() else {
-            return idom;
+    pub(super) fn solve_idoms<'p>(
+        idom: &mut Vec<u32>,
+        len: usize,
+        mut rpo: impl Iterator<Item = u32> + Clone,
+        preds: impl Fn(usize) -> &'p [u32],
+        rank: impl Fn(usize) -> u32,
+    ) {
+        idom.clear();
+        idom.resize(len, NO_BLOCK);
+        let Some(entry) = rpo.next() else {
+            return;
         };
-        idom[entry] = Some(entry);
-        let intersect = |idom: &[Option<usize>], mut a: usize, mut b: usize| {
-            while a != b {
-                while order[a] > order[b] {
-                    a = idom[a].expect("a processed block has an idom");
-                }
-                while order[b] > order[a] {
-                    b = idom[b].expect("a processed block has an idom");
-                }
-            }
-            a
-        };
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for &b in &rpo[1..] {
-                let mut new_idom: Option<usize> = None;
+        idom[entry as usize] = entry;
+        let mut retreating = false;
+        loop {
+            let mut changed = false;
+            for b in rpo.clone() {
+                let b = b as usize;
+                let mut parent = NO_BLOCK;
                 for &p in preds(b) {
-                    if idom[p].is_some() {
-                        new_idom = Some(match new_idom {
-                            None => p,
-                            Some(cur) => intersect(&idom, p, cur),
-                        });
+                    let p_rank = rank(p as usize);
+                    retreating |= p_rank != NO_BLOCK && p_rank >= rank(b);
+                    if idom[p as usize] == NO_BLOCK {
+                        continue;
+                    }
+                    if parent == NO_BLOCK {
+                        parent = p;
+                        continue;
+                    }
+                    let mut other = p;
+                    while parent != other {
+                        while rank(parent as usize) > rank(other as usize) {
+                            parent = idom[parent as usize];
+                        }
+                        while rank(other as usize) > rank(parent as usize) {
+                            other = idom[other as usize];
+                        }
                     }
                 }
-                if new_idom.is_some() && idom[b] != new_idom {
-                    idom[b] = new_idom;
-                    changed = true;
-                }
+                changed |= idom[b] != parent;
+                idom[b] = parent;
+            }
+            // Without a retreating edge every predecessor was final on the first pass.
+            if !changed || !retreating {
+                break;
             }
         }
-        idom
     }
 
-    pub fn dominates(idom: &[Option<usize>], a: usize, b: usize) -> bool {
-        let mut cur = b;
-        loop {
-            if cur == a {
-                return true;
+    pub(super) fn dominates(idom: &[u32], a: u32, mut b: u32) -> bool {
+        while b != a {
+            let Some(&parent) = idom.get(b as usize) else {
+                return false;
+            };
+            if parent == NO_BLOCK || parent == b {
+                return false;
             }
-            match idom[cur] {
-                Some(p) => cur = p,
-                None => return false,
-            }
+            b = parent;
         }
+        true
     }
 
     /// Every node that reaches `latch` without passing through `header`.
     pub(crate) fn collect_loop_body(
-        header: usize,
-        latch: usize,
-        preds: &[Vec<usize>],
-        body: &mut HashSet<usize>,
+        header: u32,
+        latch: u32,
+        preds: &super::structure::Succ,
+        body: &mut HashSet<u32>,
     ) {
         body.insert(header);
         if body.insert(latch) {
             let mut stack = vec![latch];
             while let Some(x) = stack.pop() {
-                for &p in &preds[x] {
+                for &p in preds.of(x as usize) {
                     if p != header && body.insert(p) {
                         stack.push(p);
                     }
