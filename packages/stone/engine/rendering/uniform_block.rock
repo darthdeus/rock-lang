@@ -1,28 +1,12 @@
-// A shader's std140 `@uniform` block, as the compiler laid it out.
-//
-// The compiler owns the layout; this file owns the memory. Registration binds
-// the block to a binding point, verifies the driver agrees with the plan, and
-// allocates ONE scratch buffer with its two typed views. Thereafter
-// `set_uniform_block` packs the caller's value straight into those views and
-// uploads the whole block.
-//
-// Names are a GL-only concept -- the block's members are resolved by name once,
-// at link time, and never again.
+// Layout is compiler-owned and binding indices are global GL state.
 
-// A block binds at the index its param ROLE gives it -- `@engine` 0, the vertex
-// group 1, the fragment group 2 -- shipped explicitly by the compiler, so a
-// program without an `@engine` group leaves slot 0 empty rather than sliding its
-// own block into it. `glBindBufferBase` binds to a GLOBAL index, so these are
-// re-bound per program switch in `stone_set_shader` -- two programs may both use
-// index 0.
+// Compiler role fixes the global binding: engine 0, vertex 1, fragment 2.
 
 // Cast typed views once at registration. Keep scratch alive in this struct:
 // ffi.cast pointers do not anchor their target allocation.
 pub struct ShaderUniformBlock {
     block: string,
-    // Where it actually bound. Kept rather than recomputed from list position:
-    // slot 0 is reserved for `@engine`, so position and binding are no longer
-    // the same number.
+    // Slot 0 is reserved, so list position need not equal the binding.
     binding: int,
     size: int,
     fingerprint: int,
@@ -36,16 +20,11 @@ pub struct ShaderUniformBlock {
     fv: Ptr<float>,
     iv: Ptr<int>,
     uploads: int,
-    // Which screen-space engine block this scratch holds, or 0 for "packed by
-    // something else". `set_engine_uniforms` stamps it and is the only reader;
-    // every other packer clears it in `__upload_resolved_block`, so a block
-    // type that shares EngineU's layout cannot leave a stale stamp behind.
+    // Other packers clear the stamp, even when their layout matches EngineU.
     engine_stamp: int = 0,
 }
 
-// The binding index reserved for the `@engine` block, mirroring the compiler's
-// `UNIFORM_BLOCK_BINDING_ENGINE`. Reserved whether or not a program has one, so
-// a block arriving here is either the engine's or a mistake.
+// Slot 0 remains reserved when a program has no engine block.
 const UNIFORM_BLOCK_BINDING_ENGINE: int = 0
 
 const UNIFORM_BLOCK_BINDING_VERTEX: int = 1
@@ -53,17 +32,11 @@ pub const UNIFORM_BLOCK_BINDING_FRAGMENT: int = 2
 pub const UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS: int = 3
 pub const UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS: int = 4
 
-// `EngineU`'s layout identity, as the compiler computed it. Derived from the
-// type itself rather than written down, so a member added to `EngineU` moves
-// this with it.
 pub fn engine_block_fingerprint() -> int {
     return uniform_block_id(engine_uniforms(v(0.0, 0.0)))
 }
 
-// The slot-0 policy, as a predicate rather than an inline condition: every other
-// way a registration can fail (a driver bind that rejects, a layout that does
-// not match the plan) also drops the entry, so "the program has no blocks" is
-// NOT a discriminant for this rule.
+// A missing block does not prove the slot-0 policy was satisfied.
 pub fn engine_binding_is_foreign(binding: int, fingerprint: int) -> bool {
     return binding == UNIFORM_BLOCK_BINDING_ENGINE && fingerprint != engine_block_fingerprint()
 }
@@ -76,17 +49,10 @@ pub struct ShaderUniformBlocks {
     member_names: Map<string, bool>,
 }
 
-// Per shader key -> its blocks and lookup indexes. Assigned UNCONDITIONALLY at
-// registration (including the empty case, which REMOVES) -- a reloaded chunk
-// inherits whatever it does not assign, so a build that dropped a group would
-// otherwise keep the previous build's buffer, sized and fingerprinted for a
-// layout that no longer exists.
+// Reload must replace even an empty registry to discard stale layouts.
 pub global SHADER_UNIFORM_BLOCKS: Map<string, ShaderUniformBlocks> = map_new()
 
-// Which block a packed value belongs to. With one block per program the shader
-// name was enough; with one per STAGE it is not, and the value's TYPE is what
-// distinguishes them -- so the caller's expansion supplies its layout
-// fingerprint and the lookup matches on that.
+// The type fingerprint distinguishes the program's stage blocks.
 pub fn shader_block_by_fingerprint(shader_name: string, fingerprint: int) -> ShaderUniformBlock? {
     // `if let` emits one nil guard; check-then-unwrap emits two, and the
     // second is a trace exit on a value already proven non-null.
@@ -212,10 +178,7 @@ fn new_owned_semantic_block(
     return out
 }
 
-// Native C shader registration has already bound and driver-validated these
-// blocks before the generated publication hook runs. The Rock-side registry
-// still needs scratch storage for its packers, but must not bind a second GL
-// buffer for the same program.
+// Native registration already bound the blocks; allocate only Rock scratch.
 fn native_uniform_blocks(decls: [UniformBlockDecl]) -> [ShaderUniformBlock] {
     let live: [ShaderUniformBlock] = vec_new()
     for d in decls {
@@ -255,19 +218,7 @@ pub inline(lua) fn __ub_write_float(p: Ptr<float>, i: int, v: float) = "p[i] = v
 inline(lua) fn __ub_read_int(p: Ptr<int>, i: int) -> int = "return p[i]"
 inline(lua) fn __ub_write_int(p: Ptr<int>, i: int, v: int) = "p[i] = v"
 
-// Ask the driver where it actually put each member, and compare against the
-// plan. A PARTIAL oracle by construction: GL may optimize an inactive member
-// away and report no index, and those are skipped rather than failed, so full
-// coverage needs a shader that reads every field.
-//
-// This is what makes hot-reload layout drift loud instead of silent garbage.
-//
-// An ARRAY member is queried as `name[0]`, not `name`. GL enumerates a block's
-// array member under its zeroth element, and the bare spelling is accepted only
-// on some drivers -- where it is not, the lookup misses, the member is treated
-// as optimized-out and SKIPPED, and the check silently verifies nothing. For an
-// array block that is every member, which is the one case where the skip is not
-// partial coverage but a dead oracle.
+// GL may omit inactive members; query array members as `name[0]`.
 fn check_uniform_block_layout(sid: ShaderId, block: string, members: [string], offsets: [int],
                               capacities: [int], size: int) -> bool {
     let query: [string] = vec_new()
@@ -284,23 +235,11 @@ fn check_uniform_block_layout(sid: ShaderId, block: string, members: [string], o
     )
 }
 
-// Bind a CANDIDATE program's blocks and allocate their scratch, WITHOUT
-// touching any live registration. Returns null if the program is not fit to go
-// live -- a foreign block at the engine slot, a block the driver will not bind,
-// or a layout the driver disagrees with.
+// Build without publishing; reject foreign engine slots or invalid layouts.
 fn build_uniform_blocks(key: string, sid: ShaderId, decls: [UniformBlockDecl]) -> [ShaderUniformBlock]? {
     let live: [ShaderUniformBlock] = vec_new()
     for d in decls {
-        // Slot 0 is the ENGINE's, and this is the check that makes "@engine is
-        // fixed and engine-owned" real rather than a comment. The COMPILER
-        // deliberately does not know `EngineU` by name -- that would be engine
-        // policy inside the language -- so it reserves the slot and ships a
-        // fingerprint, and the answer to "is it the engine's own?" is decided
-        // here, at registration.
-        //
-        // At registration and not at the draw-time unfilled-block gate: that
-        // gate only fires AFTER a program draws, and never at all for a program
-        // that registers and is never drawn.
+        // Slot 0 is engine-owned even when the program is never drawn.
         if engine_binding_is_foreign(d.binding, d.fingerprint as int) {
             log_error("SHADER", "uniform block: `{key}` declares `{d.name}` at the engine binding, but its layout is not the engine's `EngineU` -- @engine is fixed and engine-owned, so nothing would ever fill it")
             return null
@@ -333,10 +272,7 @@ fn build_uniform_blocks(key: string, sid: ShaderId, decls: [UniformBlockDecl]) -
     return live
 }
 
-// Publish a validated program's blocks. Assigned UNCONDITIONALLY, including the
-// empty case (which REMOVES) -- a reloaded chunk inherits whatever it does not
-// assign, so a build that dropped a group would otherwise keep the previous
-// build's buffer, sized and fingerprinted for a layout that no longer exists.
+// Empty reloads must also discard previously registered blocks.
 fn publish_uniform_blocks(key: string, live: [ShaderUniformBlock]) {
     SHADER_UNIFORM_BLOCKS.remove(key)
     if live.len() > 0 {
@@ -389,26 +325,14 @@ fn wire_kind_components(kind: int) -> int {
     return 0
 }
 
-// Find `shader_name`'s array block at `binding`.
-//
-// Null when the program declares no such block -- a normal state for a shader
-// with no `@size(N)` params, and the caller's own business, so this does not
-// log. The callers that MUST find one assert it.
+// A program without this array block returns null without logging.
 pub fn array_block_find(shader_name: string, binding: int) -> ShaderUniformBlock? {
     let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
     if entry == null { return null }
     return entry.by_binding.get(binding)
 }
 
-// The shared body of the typed pushes: bounds-check against the compiler's
-// declared capacity and kind, then scatter `count` elements into std140's
-// strided slots.
-//
-// A strided scatter and not a memcpy, because std140 gives EVERY array element
-// a 16-byte slot whatever it holds: a `float[16]` is 16 floats spaced four
-// floats apart, not 16 contiguous ones. Only a `Vec4` array happens to be
-// contiguous, which is exactly why a `Vec4`-only fixture cannot catch a stride
-// bug (backlog 21).
+// std140 arrays use 16-byte element strides, including scalar arrays.
 pub fn __array_push(shader_name: string, b: ShaderUniformBlock, cursor: int,
                 want_kind: int, src_f: Ptr<float>?, src_i: Ptr<int>?,
                 count: int, site: string) -> int {
@@ -529,16 +453,7 @@ pub fn shader_block_uploads(shader_name: string, binding: int) -> int {
     return block.uploads
 }
 
-// A block packed by a DESCRIPTION of a draw, uploaded when that draw happens.
-//
-// A `Pass` (the bloom pyramid builds a list and runs it later) and a
-// `RenderBatch` (queued during update, flushed at render) are both descriptions,
-// while a uniform block is immediate GL state. Several of them drive ONE shader
-// with different values -- every pyramid level, every sdf_bar on screen -- so
-// they cannot share that shader's single scratch: the last pack would win for
-// all of them. Each owner therefore holds its own packed bytes, uploaded against
-// its own draw. Allocated once per owner (the bloom chain is cached, batches are
-// pooled), so this is not per-frame.
+// Queued draws need their own bytes; shared scratch would retain only the last pack.
 pub struct OwnedUniformBlock {
     size: int,
     fingerprint: int,
@@ -571,10 +486,6 @@ fn upload_owned_block(shader_name: string, b: OwnedUniformBlock) {
         log_once("SHADER", "owned block: `{shader_name}` upload rejected")
         return
     }
-    // Counted against the REGISTERED block even though the bytes are the
-    // owner's: the counter answers "how often does this binding get rewritten",
-    // and an upload path it cannot see is a hole that makes it lie later. The
-    // lookup is a scan of the program's handful of blocks, next to a GL upload.
     let entry = shader_block_by_fingerprint(shader_name, b.fingerprint)
     if entry != null {
         entry.uploads += 1
@@ -646,11 +557,7 @@ macro gpu_draw_uniform_payload(draw: expr, shader_name: expr, u: expr) {
     }
 }
 
-// Reuse bytes the owner already holds if they match this layout, else allocate.
-// Batches and meshes are POOLED and a slot serves whatever draw lands on it, so
-// the fingerprint -- not the slot -- decides whether the held bytes fit. Reusing
-// them is why a steady-state frame packs into an allocation it already had,
-// which is the same reason the flat setters exist on this lane.
+// Pooled slots must match the layout fingerprint before reusing bytes.
 pub fn owned_block_for(held: OwnedUniformBlock?, shader_name: string, fingerprint: int, site: string) -> OwnedUniformBlock? {
     if held != null && held.fingerprint == fingerprint { return held }
     return new_owned_block(shader_name, fingerprint, site)
@@ -672,16 +579,7 @@ macro mesh_block(m: expr, shader_name: expr, u: expr) {
     batch_block(m, shader_name, u)
 }
 
-// The packing lane the public wrappers share: pack `u` into an ALREADY
-// RESOLVED block entry and upload it. They differ only in what they do when the
-// lookup misses, so this is everything after it.
-//
-// Takes `site` explicitly so macro callers can preserve their caller location.
-//
-// Takes the block by value, not as an optional: both callers have already
-// proven it non-null, and unwrapping it again here is the second nil guard the
-// notes on `shader_block_by_fingerprint` warn about -- a trace exit on the hot
-// per-block upload path, on a value nothing can have made null since.
+// Keep `site` from the caller and avoid a second nullable guard on this hot path.
 fn __upload_resolved_block<T>(
     shader_name: string,
     entry: ShaderUniformBlock,
@@ -689,11 +587,7 @@ fn __upload_resolved_block<T>(
     site: string
 ) {
     pack_uniform_block(entry.fv, entry.iv, u)
-    // The scratch now holds whatever `u` was. `set_engine_uniforms` stamps it
-    // again on the way out when that was the engine block; clearing here is
-    // what keeps the stamp honest for every other packer, including one whose
-    // block type happens to share the engine block's layout and so resolves to
-    // this same entry.
+    // Any non-engine pack invalidates a prior engine stamp.
     entry.engine_stamp = 0
     __upload_uniform_block(shader_name, entry, site)
 }
