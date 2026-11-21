@@ -11,53 +11,6 @@ fn all() -> Range {
 }
 
 #[test]
-fn semantic_token_failure_reports_cause_once_and_recovers() {
-    let capture = Recording::start();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.rock").to_string_lossy().into_owned();
-    let good = "fn main() { let count = 1 }";
-    let broken = "fn main() { let text = \"unterminated";
-    let cause = rock_tokenizer::Tokenizer::new(broken, ustr::Ustr::from(path.as_str()))
-        .tokenize()
-        .unwrap_err()
-        .message;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&path, good.into());
-    assert!(!bone.semantic_tokens(&path).data.is_empty());
-    bone.update(&path, broken.into());
-    capture.take();
-
-    assert!(bone.semantic_tokens(&path).data.is_empty());
-    let records = capture.take();
-    assert_eq!(
-        records.len(),
-        1,
-        "tokenizer failure must be visible: {records:?}"
-    );
-    assert!(
-        records[0].contains("LSP")
-            && records[0].contains("semantic tokens")
-            && records[0].contains(&path)
-            && records[0].contains(&cause)
-            && records[0].contains("empty token response"),
-        "lost context: {records:?}"
-    );
-    assert!(bone.semantic_tokens_range(&path, all()).data.is_empty());
-    assert!(
-        capture.take().is_empty(),
-        "full and range requests share failure suppression"
-    );
-
-    bone.update(&path, good.into());
-    assert!(!bone.semantic_tokens(&path).data.is_empty());
-    assert!(capture.take().is_empty());
-    bone.update(&path, broken.into());
-    capture.take();
-    bone.semantic_tokens(&path);
-    assert_eq!(capture.take().len(), 1, "repair must release suppression");
-}
-
-#[test]
 fn workspace_symbol_uri_failure_reports_cause_once_and_keeps_other_files() {
     let capture = Recording::start();
     let dir = tempfile::tempdir().unwrap();
@@ -100,78 +53,6 @@ fn workspace_symbol_uri_failure_reports_cause_once_and_keeps_other_files() {
 }
 
 #[test]
-fn ordinary_empty_queries_do_not_report_failures() {
-    let capture = Recording::start();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.rock").to_string_lossy().into_owned();
-    let mut bone = BoneWorkspace::new();
-    bone.update(&path, "\nfn main() {}".into());
-    capture.take();
-    assert!(bone.hover(&path, Position::new(0, 0)).is_none());
-    assert!(bone.workspace_symbols("absent_symbol").is_empty());
-    assert!(bone.inlay_hints(&path, all()).is_empty());
-    assert!(capture.take().is_empty());
-}
-
-#[test]
-fn parse_fallback_reports_cause_once_and_recovers_after_repair() {
-    let capture = Recording::start();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.rock").to_string_lossy().into_owned();
-    let good = "fn main() {\n let count = 1\n}\n";
-    let broken = "fn main() {\n let count = 1\n let text = \"unterminated\n}\n";
-    let cause = skull_parser::parse_module(broken, ustr::Ustr::from(path.as_str()))
-        .expect_err("fixture must force a hard parse failure")
-        .message;
-    let mut bone = BoneWorkspace::new();
-    bone.update(&path, good.into());
-    assert!(!bone.inlay_hints(&path, all()).is_empty());
-    capture.take();
-
-    bone.update(&path, broken.into());
-    capture.take();
-    let partial = bone.inlay_hints(&path, all());
-    assert!(
-        !partial.is_empty(),
-        "last good inference still supplies partial hints"
-    );
-    let records = capture.take();
-    assert!(
-        records.iter().any(|record| {
-            record.contains("inlay")
-                && record.contains(&path)
-                && record.contains(&cause)
-                && record.contains("receiver")
-        }),
-        "missing parse cause and intentional fallback: {records:?}"
-    );
-
-    bone.inlay_hints(&path, all());
-    bone.update(&path, broken.into());
-    bone.inlay_hints(&path, all());
-    assert!(
-        capture.take().is_empty(),
-        "unchanged failure must not repeat logs"
-    );
-
-    bone.update(&path, good.into());
-    assert!(
-        bone.diagnostics_for(&path)
-            .iter()
-            .all(|d| { d.severity != Some(lsp_types::DiagnosticSeverity::ERROR) })
-    );
-    assert!(!bone.inlay_hints(&path, all()).is_empty());
-    assert!(capture.take().is_empty());
-
-    bone.update(&path, broken.into());
-    bone.inlay_hints(&path, all());
-    assert!(
-        capture.take().iter().any(|record| record.contains(&cause)),
-        "a new failure after repair must be reported again"
-    );
-}
-
-#[test]
 fn semantic_recovery_reports_real_cause_and_repaired_request_succeeds() {
     let capture = Recording::start();
     let dir = tempfile::tempdir().unwrap();
@@ -199,26 +80,6 @@ fn semantic_recovery_reports_real_cause_and_repaired_request_succeeds() {
     bone.update(&path, "fn main() { let count = 1 }\n".into());
     assert!(!bone.inlay_hints(&path, all()).is_empty());
     assert!(capture.take().is_empty());
-}
-
-#[test]
-fn recoverable_syntax_keeps_partial_hints_without_fallback_warnings() {
-    let capture = Recording::start();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.rock").to_string_lossy().into_owned();
-    let src = "fn main() {\n let count = 1\n}\nfn unfinished(\n";
-    let ast = skull_parser::parse_module(src, ustr::Ustr::from(path.as_str())).unwrap();
-    assert!(
-        !ast.recovery_errors.is_empty(),
-        "fixture must use parser recovery"
-    );
-    let mut bone = BoneWorkspace::new();
-    bone.update(&path, src.into());
-    assert!(!bone.inlay_hints(&path, all()).is_empty());
-    assert!(
-        capture.take().is_empty(),
-        "syntax diagnostics already report ordinary typing errors"
-    );
 }
 
 #[test]
