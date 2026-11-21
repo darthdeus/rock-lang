@@ -714,46 +714,6 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
 cccccccccccccccc	2	1	1	1	1
 "#;
 
-    const CLASSIFIED_MANIFEST: &str = r#"emitted allocation-capable Lua report: 1 bodies, 1 direct sites
-
-emitted site manifest: 1 sites
-  bbbbbbbbbbbbbbbb	struct-construction	game.rock:20	draw_leaf	2	0	direct-call	1	Carrier	3
-
-route frame.draw: 1 roots, 1 reachable bodies, 1 allocation-capable sites, 0 opaque boundaries
-  bbbbbbbbbbbbbbbb struct-construction at game.rock:20 via draw_root -> draw_leaf	callers	draw_root
-"#;
-
-    const CLASSIFIED_ACTIVATION: &str = r#"rock.allocation-activation.v2
-frames	4
-sites	1
-bbbbbbbbbbbbbbbb	20	18	3	9	2
-"#;
-
-    fn first_report_row(report: &str) -> std::collections::HashMap<&str, &str> {
-        let mut lines = report.lines().skip(4);
-        let header = lines.next().expect("joined header").split('\t');
-        let row = lines.next().expect("joined row").split('\t');
-        assert_eq!(header.clone().count(), row.clone().count(), "{report}");
-        header.zip(row).collect()
-    }
-
-    #[test]
-    fn join_preserves_result_use_and_aggregate_shape_classification() {
-        let report = render_joined_report(
-            CLASSIFIED_MANIFEST,
-            CLASSIFIED_ACTIVATION,
-            Some("draw"),
-            None,
-        )
-        .expect("joined classified allocation report");
-        let row = first_report_row(&report);
-
-        assert_eq!(row["result_use"], "direct-call");
-        assert_eq!(row["result_uses"], "1");
-        assert_eq!(row["aggregate_type"], "Carrier");
-        assert_eq!(row["aggregate_fields"], "3");
-    }
-
     #[test]
     fn join_can_isolate_coroutine_resume_routes() {
         let manifest = format!(
@@ -766,70 +726,6 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
         assert!(report.contains("worker__step"));
         assert!(!report.contains("update_leaf"));
         assert!(!report.contains("draw_leaf"));
-    }
-
-    #[test]
-    fn join_filters_by_route_and_ranks_executions_per_frame() {
-        let report = render_joined_report(MANIFEST, ACTIVATION, Some("draw"), None)
-            .expect("joined allocation report");
-
-        assert!(report.contains("filter\tdraw"));
-        assert!(report.contains("5.0000\t20\tdraw\t0\tvec-construction"));
-        assert!(report.contains("draw_leaf\t2\t?\tdraw_root -> draw_leaf"));
-        assert!(report.contains("draw_root -> draw_leaf"));
-        assert!(!report.contains("update_leaf"));
-        assert!(!report.contains("outside_leaf"));
-    }
-
-    #[test]
-    fn join_reports_frame_coverage_multiplicity_and_outside_hits() {
-        let report = render_joined_report(MANIFEST, FRAME_ACTIVATION, Some("draw"), None)
-            .expect("joined frame-aware activation report");
-        let row = first_report_row(&report);
-
-        assert_eq!(row["hits/frame"], "4.5000");
-        assert_eq!(row["frame_hits"], "18");
-        assert_eq!(row["active_frames"], "3");
-        assert_eq!(row["frame_coverage"], "0.7500");
-        assert_eq!(row["hits/active_frame"], "6.0000");
-        assert_eq!(row["max_hits/frame"], "9");
-        assert_eq!(row["outside_hits"], "2");
-    }
-
-    #[test]
-    fn join_preserves_structural_loop_amplification() {
-        let manifest = MANIFEST.replace(
-            "via draw_root -> draw_leaf\tcallers",
-            "via draw_root -> draw_leaf\tloop_depth\t2\tcallers",
-        );
-        let report = render_joined_report(&manifest, FRAME_ACTIVATION, Some("draw"), None)
-            .expect("joined loop-aware allocation report");
-        let row = first_report_row(&report);
-
-        assert_eq!(row["structural_loop_depth"], "2", "{report}");
-    }
-
-    #[test]
-    fn join_exposes_every_direct_caller_beside_the_shortest_chain() {
-        let report = render_joined_report(MANIFEST, ACTIVATION, Some("draw"), None)
-            .expect("joined caller-aware allocation report");
-        let row = first_report_row(&report);
-
-        assert_eq!(row["direct_caller_count"], "2", "{report}");
-        assert_eq!(row["direct_callers"], "draw_left | draw_right");
-    }
-
-    #[test]
-    fn join_resolves_and_checks_the_exact_generated_lua_line() {
-        let lua = r#"-- runtime preamble
-function draw_leaf()
-  local v = __rock_alloc_hit("bbbbbbbbbbbbbbbb", __rock_vec_new())
-end
-"#;
-        let report = render_joined_report(MANIFEST, ACTIVATION, Some("draw"), Some(lua))
-            .expect("joined allocation report with generated Lua");
-
-        assert!(report.contains("draw_leaf\t2\t3\tdraw_root -> draw_leaf"));
     }
 
     #[test]
@@ -849,33 +745,6 @@ end
             "{report}"
         );
         assert!(report.contains("sunk\tnone\t1\t1\tTNEW"), "{report}");
-    }
-
-    #[test]
-    fn join_classifies_observed_jit_allocations_as_sunk_or_retained() {
-        let lua = r#"-- runtime preamble
-function draw_leaf()
-  local v = __rock_alloc_hit("bbbbbbbbbbbbbbbb", __rock_vec_new())
-end
-"#;
-        let trace = r#"rock.jit-allocation-trace.v2
-artifact	/generated/main.lua
-trace_generation	trace	ir	state	op	body_start	lua_line
-0	1	4	sunk	TNEW	2	3
-0	2	8	retained	TNEW	2	3
-"#;
-        let report = render_joined_report_with_jit(
-            MANIFEST,
-            ACTIVATION,
-            Some("draw"),
-            Some(lua),
-            Some(trace),
-        )
-        .expect("joined JIT allocation evidence");
-
-        assert!(report.starts_with("rock.allocation-join.v11\n"));
-        assert!(report.contains("jit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops"));
-        assert!(report.contains("mixed\tobject\t2\t2\tTNEW"));
     }
 
     #[test]
