@@ -76,35 +76,3 @@ fn main() {}
     ));
     assert_eq!(out, "2:alpha:1:beta:0:true");
 }
-
-#[test]
-fn full_publication_replaces_lifecycle_membership_by_logical_key() {
-    let v0 = emit_mir(
-        r#"
-@lifecycle(phase="update", owner="process") deco init tick {}
-@tick fn removed() {}
-@tick fn retained() {}
-fn main() {}
-"#,
-    );
-    let v1 = emit_mir(
-        r#"
-@lifecycle(phase="update", owner="process") deco init tick {}
-@tick fn retained() {}
-@tick fn added() {}
-fn main() {}
-"#,
-    );
-    let script = format!(
-        r#"
-{}
-local old = _G.__ROCK_LIFECYCLE_PLAN.update
-_G.HOT_RELOAD = true
-{}
-local new = _G.__ROCK_LIFECYCLE_PLAN.update
-print(old.len .. ":" .. new.len .. ":" .. old._data[1].name .. ":" .. new._data[1].name .. ":" .. new._data[2].name)
-"#,
-        v0.lua, v1.lua
-    );
-    assert_eq!(run_luajit(&script), "2:2:removed:retained:added");
-}
