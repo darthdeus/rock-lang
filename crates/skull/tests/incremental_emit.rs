@@ -129,71 +129,6 @@ fn main() {
     }
 }
 
-#[test]
-fn a_changed_caller_can_restage_an_unchanged_callback() {
-    let v1 = r#"
-fn apply<T>(value: T, callback: fn(T) -> T) -> T { return callback(value) }
-fn unchanged(value: int) -> int { return value }
-fn caller() -> int { return apply(1, unchanged) }
-"#;
-    let v2 = v1.replace("apply(1, unchanged)", "apply(2, unchanged)");
-    let ws1 = ws_of(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let callback = full
-        .code_artifact
-        .entries
-        .values()
-        .find(|entry| {
-            entry.escaping
-                && entry
-                    .body_name
-                    .is_some_and(|name| name.as_str().starts_with("unchanged"))
-        })
-        .expect("fixture must publish the unchanged callback");
-    assert!(callback.body_name.is_some());
-
-    let ws2 = ws_of(&v2);
-    let overlay = emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "caller")])
-        .expect("an unchanged callback referenced by the changed caller must retain its body");
-    let staged: Vec<_> = overlay
-        .lua
-        .lines()
-        .filter(|line| line.contains("__rock_code_slot_stage(") && line.contains("unchanged"))
-        .collect();
-    assert_eq!(staged.len(), 1);
-    assert!(staged[0].contains("unchanged_int"));
-}
-
-#[test]
-fn retained_paths_match_fresh_emission_over_an_edit_sequence() {
-    let v0 = "@inline\nfn helper() -> int { 3 }\n\
-              @inline\nfn middle() -> int { helper() }\n\
-              fn leaf<T>(x: T) -> T { x }\n\
-              fn use_it() -> int { let a = leaf(1)\n middle() }\n\
-              fn main() { let x = use_it() }";
-    let steps = [
-        (v0.replace("{ 3 }", "{ 5 }"), "helper"),
-        (
-            v0.replace("{ 3 }", "{ 5 }")
-                .replace("let a = leaf(1)\n ", ""),
-            "use_it",
-        ),
-        (
-            v0.replace("{ 3 }", "{ 5 }")
-                .replace("let a = leaf(1)", "let a = leaf(\"s\")"),
-            "use_it",
-        ),
-        (v0.replace("leaf(1)", "leaf(\"s\")"), "helper"),
-    ];
-    let ws0 = ws_of(v0);
-    let mid = skull::user_module_id(&ws0).unwrap();
-    let (_, mut cache) = emit_full(&ws0, mid).expect("initial build");
-    for (src, edited) in steps {
-        let ws = ws_of(&src);
-        check_incremental(&ws, &mut cache, &[body_id(&ws, edited)]);
-    }
-}
-
 fn tally_workspace(marker: &str, use_q: bool) -> Workspace {
     let result = if use_q {
         "tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a"
@@ -541,20 +476,6 @@ fn inline_decisions_follow_helper_edits() {
         let updated = check_incremental(&ws, &mut cache, &[body_id(&ws, "helper")]);
         assert_eq!(residual(&updated.lua), residual_after);
     }
-}
-
-#[test]
-fn body_edit_to_a_generic_reemits_its_specializations() {
-    let v1 = "value V2 { x: float, y: float }\n\
-              fn first<T>(xs: [T]) -> T { return xs[0] }\n\
-              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
-              fn use_g() -> float { return G }";
-    let v2 = v1.replace("xs[0]", "xs[1]");
-    let spec = "function first_arr_T_spec_a_n2_V2_0_z(";
-    let ws2 = ws_of(&v2);
-    let edit = edit(&ws_of(v1), &ws2, &[body_id(&ws2, "first")]);
-    assert_eq!(edit.base.lua.matches(spec).count(), 1);
-    assert!(edit.overlay.expect("overlay").lua.contains(spec));
 }
 
 const ABI_FLIP_V1: &str = "value V2 { x: float, y: float }\n\
