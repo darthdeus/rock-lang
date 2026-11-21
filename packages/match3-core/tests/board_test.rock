@@ -8,42 +8,30 @@ fn board(w: int, h: int, cells: [int]) -> M3Board {
 }
 
 @test
-fn find_matches_horizontal_run() {
-    // Row 0 is three 0s; the other rows are match-free.
-    let b = board(3, 3, [0, 0, 0,
-                         1, 2, 1,
-                         2, 1, 2])
-    assert(m3_find_matches(b).len() == 3, "a row of three equal gems is one 3-cell match")
-    assert(m3_has_matches(b), "has_matches agrees")
-}
-
-@test
-fn find_matches_dedups_intersection() {
-    // A plus: column 1 (rows 0,1,2) AND row 1 (cols 0,1,2) are both runs of 0.
-    // The shared centre (1,1) must be counted ONCE, not once per axis.
-    let b = board(3, 3, [1, 0, 1,
-                         0, 0, 0,
-                         1, 0, 1])
-    assert(m3_find_matches(b).len() == 5, "5 distinct matched cells (centre deduped)")
-}
-
-@test
-fn no_match_board_is_clean() {
-    let b = board(3, 3, [0, 1, 2,
-                         1, 2, 0,
-                         2, 0, 1])
-    assert(!m3_has_matches(b), "diagonal-shifted board has no run of 3")
-    assert(m3_find_matches(b).len() == 0, "and no matched cells")
+fn find_matches_returns_distinct_cells_in_row_order() {
+    let cases: [(M3Board, [(int, int)])] = [
+        (board(3, 3, [0, 0, 0, 1, 2, 1, 2, 1, 2]), [(0, 0), (1, 0), (2, 0)]),
+        (board(3, 3, [1, 0, 1, 0, 0, 0, 1, 0, 1]), [(1, 0), (0, 1), (1, 1), (2, 1), (1, 2)]),
+        (board(3, 3, [0, 1, 2, 1, 2, 0, 2, 0, 1]), []),
+        (board(4, 3, [-1, -1, -1, 4, 2, 3, 2, 4, 2, 2, 2, 4]),
+            [(3, 0), (3, 1), (0, 2), (1, 2), (2, 2), (3, 2)]),
+    ]
+    for (b, expected) in cases {
+        assert_eq(m3_find_matches(b), expected)
+        assert_eq(m3_has_matches(b), expected.len() > 0)
+    }
 }
 
 @test
 fn first_move_finds_a_swap() {
-    // Swapping (0,2)<->(1,2) makes column 0 a vertical triple of 0s.
+    // The first legal swap fills the middle row with 1s.
     let b = board(3, 3, [0, 1, 1,
                          0, 1, 1,
                          1, 0, 1])
-    let mv = m3_first_move(b)
-    assert(mv != null, "a one-swap-to-match board yields a move")
+    let before = b.cells.clone()
+    let mv = m3_first_move(b).unwrap()
+    assert_eq((mv.ax, mv.ay, mv.bx, mv.by), (0, 1, 0, 2))
+    assert_eq(b.cells, before)
 }
 
 @test
