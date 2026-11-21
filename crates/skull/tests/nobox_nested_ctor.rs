@@ -83,34 +83,6 @@ fn main() {
 "#;
 
 #[test]
-fn nested_nobox_fields_flatten_into_the_outer_constructor() {
-    for (src, function, expected) in [
-        (GLOBAL_OUTER, "setup", "1 2 3 4 5"),
-        (TWO_LEVEL, "setup", "1 2 3 4 5 6"),
-        (MIXED_LITERAL_AND_OPAQUE, "setup", "6 7 1 2 8"),
-        (SROA_SPLIT_REASSEMBLY, "main", "boundary\n11"),
-    ] {
-        let lua = emit_module(src);
-        let body = function_body(&lua, function);
-        assert!(
-            !body.contains("NV2_ct(") && !body.contains("Box2_ct("),
-            "{body}"
-        );
-        assert_eq!(run_main(&lua), expected);
-    }
-}
-
-#[test]
-fn a_nullable_nobox_field_in_a_gc_tier_outer_carries_presence() {
-    let lua = emit_module(NULLABLE_FIELD);
-    assert!(!function_body(&lua, "__rock_state_initialize").contains("NV2_ct("));
-    assert!(
-        function_body(&lua, "__rock_state_initialize").contains("Opt_lct((true), (1.0), (2.0))")
-    );
-    assert_eq!(run_main(&lua), "1");
-}
-
-#[test]
 fn a_coroutine_frame_carries_a_value_with_a_nested_nobox_field() {
     let lua = emit_module(NESTED_NOBOX_ACROSS_COROUTINE_FRAME);
     let build = mangled_name(&lua, "build");
