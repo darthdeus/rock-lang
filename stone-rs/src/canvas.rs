@@ -406,20 +406,8 @@ fn color_format(format: c_int) -> (u32, u32, u32, u64) {
     }
 }
 
-/// Write creation's contents into the CURRENTLY BOUND framebuffer.
-///
-/// `tex_image_2d(.., None)` allocates without specifying contents, so "a new
-/// canvas reads zero" was a property of this driver rather than of the engine.
-/// Clearing is what makes creation's state defined, on every driver.
-///
-/// Shared by creation and by a resize, which re-specifies the same texture and
-/// therefore leaves contents unspecified in exactly the same way. One function
-/// so the state a resized canvas starts from is the state a fresh one does.
-///
-/// Every state the clear needs is SAVED AND RESTORED, because either caller can
-/// run MID-RENDER -- a lazily allocated target, a pyramid rebuilt on a resize --
-/// and leaving the masks open or the scissor off would silently reconfigure
-/// whatever was drawing.
+/// Texture allocation leaves contents unspecified. Clear them, restoring GL
+/// state because creation and resize can run during a render.
 unsafe fn establish_blank_contents(gl: &crate::DebugGl, int_format: bool, has_depth: bool) {
     let saved_scissor = gl.is_enabled(glow::SCISSOR_TEST);
     let saved_color_mask = gl.get_parameter_bool_array::<4>(glow::COLOR_WRITEMASK);
@@ -641,30 +629,9 @@ pub extern "C" fn stone_canvas_report(handle: u64, width: *mut c_int, height: *m
     format
 }
 
-/// Re-specify one canvas's storage at `width` x `height`, keeping its handle,
-/// its FBO, its texture objects and its format.
-///
-/// The scene target set is sized for a raster profile and a drawable, and both
-/// move at runtime: a window resize, a render-resolution tier, a PixelPerfect
-/// profile. Rebuilding the set for that destroyed nineteen canvases and minted
-/// nineteen new handles -- `handles::mint` is monotonic, so a recreated canvas
-/// is a DIFFERENT id, and every holder of the old one is left with a dead handle.
-///
-/// Re-specifying keeps the identity. `glTexImage2D` on an already-attached
-/// texture replaces its storage in place; the framebuffer attachment names the
-/// texture OBJECT, so it survives, as does every extra colour attachment bound
-/// onto this FBO (`stone_canvas_attach_color_target`). Contents do not: the new
-/// storage is unspecified until `establish_blank_contents` writes creation's.
-///
-/// Returns false, having logged, for an unknown handle, a non-positive extent,
-/// or a re-specified FBO the driver reports incomplete -- and in that last case
-/// the OLD storage is put back, so a refused resize leaves a canvas its caller
-/// can still render through rather than a broken one.
-///
-/// `bound_as_target` is deliberately untouched. It answers "are this canvas's
-/// contents still provably creation's", the boundary reads it only at BOOT
-/// capture, and clearing it here would launder a paint that happened before the
-/// resize.
+/// Re-specify storage while retaining the handle, framebuffer and textures.
+/// Invalid requests fail; an incomplete framebuffer restores old storage.
+/// `bound_as_target` remains set if the canvas was ever painted.
 #[no_mangle]
 pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) -> bool {
     if handle == 0 || width < 1 || height < 1 {
@@ -753,12 +720,7 @@ pub(crate) fn destroy_all() {
     }
 }
 
-/// Bind a canvas's colour attachment to a texture unit, resolved here from the
-/// handle. The rendering path binds through this rather than fetching the
-/// texture name and handing it back (`stone_bind_texture_to_unit`): a GL name
-/// is the one thing about a canvas that cannot survive a change of graphics
-/// backend, and the registry lookup was already happening on this side of the
-/// ABI.
+/// Bind a canvas texture by handle without exposing the backend GL name.
 #[no_mangle]
 pub extern "C" fn stone_bind_canvas_texture_to_unit(handle: u64, unit: c_int) -> bool {
     if handle == 0 {

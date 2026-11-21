@@ -16,11 +16,7 @@ pub fn stub_audio() -> bool {
     *ON.get_or_init(|| std::env::var("STONE_AUDIO_STUB").as_deref() == Ok("1"))
 }
 
-/// Whether this process opens no output device. Automated runs never open one,
-/// including packaged games and direct LuaJIT probes that bypass the CLI, but
-/// they still decode, so package tests keep real sound contracts. An explicit
-/// `STONE_AUDIO_STUB` selection wins: "1" is the stub, "0" a live device.
-/// Windowed interactive runs keep device audio without setting anything.
+/// Explicit `STONE_AUDIO_STUB` overrides the automatic headless choice.
 fn audio_device_disabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -66,9 +62,7 @@ pub extern "C" fn stone_audio_quiet_env() -> bool {
     output_muted()
 }
 
-/// The format a stubbed run's bus graph mixes in. Nothing drains it, so these
-/// decide an internal buffer layout and nothing audible; they match the shape a
-/// commodity sink negotiates so the stubbed graph is not a different one.
+/// Keep the stub bus graph in a typical output format.
 const STUB_CHANNELS: rodio::ChannelCount = rodio::nz!(2);
 const STUB_SAMPLE_RATE: rodio::SampleRate = rodio::nz!(48_000);
 
@@ -1342,12 +1336,7 @@ pub extern "C" fn stone_music_byte_len(handle: u64) -> i64 {
     with_audio(|audio| audio.music.get(&handle).map(|bytes| bytes.len() as i64)).unwrap_or(-1)
 }
 
-/// Live PLAYING voices (`native_ledger`).
-///
-/// `STONE_QUIET` makes the ordinary `play` path return the never-started
-/// `Voice(0)` sentinel, but that is a property of that path and not of the map:
-/// a sim reaching the raw FFI still mints a real voice, so the class is
-/// observable and is inventoried rather than assumed empty.
+/// Raw FFI can create voices even when the ordinary play path is muted.
 pub(crate) fn live_voice_ids() -> Vec<u64> {
     with_audio(|audio| Some(audio.voices.keys().copied().collect())).unwrap_or_default()
 }
@@ -1606,17 +1595,8 @@ pub extern "C" fn stone_get_sound_duration(handle: u64) -> c_float {
     with_sound(handle, SoundData::duration_seconds).unwrap_or(0.0)
 }
 
-/// Peak-amplitude envelope of resident PCM: `buckets` evenly-spaced spans of
-/// sample data, each reduced to the largest absolute sample in it. The Rock
-/// adapter requests admission and returns empty while an unresident sound loads.
-///
-/// PEAK, not mean: a mean flattens a percussive attack into the same bar as a
-/// pad, which is exactly the distinction the shape is being drawn to show.
-/// Channels are folded together -- this is a shape, not a stereo image.
-///
-/// Writes through an out-pointer rather than returning a buffer: an FFI struct
-/// return is a JIT-abort trap, and the caller
-/// already owns a NativeBuffer to hand over.
+/// Peak absolute sample per bucket, folding channels together. Out-pointers
+/// avoid LuaJIT aborts on FFI struct returns.
 ///
 /// # Safety
 /// `out` must point to at least `buckets` writable `f32`s.

@@ -588,10 +588,7 @@ unsafe fn define_r8_atlas(gl: &crate::DebugGl, texture: glow::Texture, raster: &
     );
 }
 
-/// What a load asks the rasterizer to produce. The CPU raster and the unit
-/// metrics are identical either way -- `Metrics` differs only in owning no GL
-/// texture and no atlas instance, which is what makes a font loadable in a
-/// process that has no window (the `rock test <game>` luajit process).
+/// Metrics-only loads retain the CPU raster but own no GL texture or atlas.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AtlasResidency {
     /// Upload the atlas and keep the compatibility instance. Drawing works.
@@ -691,12 +688,8 @@ pub extern "C" fn stone_load_font(
     load_font_with_residency(path, size, face_mask, extra_chars, AtlasResidency::Gpu)
 }
 
-/// Load a font for MEASUREMENT ONLY: same file, same charset, same CPU raster
-/// and the same font-unit metrics as `stone_load_font`, but no GL texture and no
-/// atlas instance. This is the only font load that succeeds in a process with no
-/// window, which is what lets `rock test <game>` -- a bare luajit that never
-/// creates a context -- measure and lay out text. Drawing with the returned id
-/// is refused by name, not silently.
+/// Load matching font metrics without a GL context or drawable atlas.
+/// Drawing with the returned id is refused.
 #[no_mangle]
 pub extern "C" fn stone_load_font_metrics(
     path: *const c_char,
@@ -896,13 +889,7 @@ pub extern "C" fn stone_stream_text(
     });
 }
 
-/// Out-params, NOT struct-by-value return. LuaJIT cannot JIT-compile a
-/// call to a C function that returns a struct by value ("NYI:
-/// unsupported C function type") -- it aborts the enclosing trace and
-/// runs interpreted (~127x; the returned struct cdata also allocates).
-/// Pointer out-params ARE JIT-able; the Lua wrapper reuses two
-/// file-scope scratch buffers so there is zero per-call allocation
-/// either.
+/// LuaJIT cannot trace C struct-by-value returns; use reusable out-pointers.
 #[no_mangle]
 pub extern "C" fn stone_measure_text(
     font_id: c_uint,
@@ -2243,12 +2230,7 @@ mod logo_atlas_tests {
 
     const STONE_DISPLAY_BAKE_PX: i32 = 48;
 
-    // The logo's coverage draws are 48px splash lines; larger coverage comes
-    // from demand-bucket instances, so the
-    // base atlas has no business near the GL size limit. A logo-sized (768px)
-    // bake of a display face ran to roughly 16k x 6k texels; the 2048 page
-    // below still allows a 2x linear overshoot of the 48px need and turns red
-    // on any return to a logo-sized bake.
+    // Larger text uses demand-sized instances, not a larger base atlas.
     #[test]
     fn logo_coverage_atlas_fits_a_2048_page() {
         let bake = rasterize_glyphs(
