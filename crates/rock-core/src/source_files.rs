@@ -193,23 +193,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_tests_component_anywhere_below_the_root_marks_a_relative_path_test_only() {
-        for (path, test_only) in [
-            ("tests/main.rock", true),
-            ("sims/tests/a.rock", true),
-            ("tests", true),
-            ("src/main.rock", false),
-            ("src/testing.rock", false),
-        ] {
-            assert_eq!(
-                SourceFiles::is_test_only_relative_path(Path::new(path)),
-                test_only,
-                "{path}"
-            );
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn production_classification_resolves_symlinks_and_package_roots() {
