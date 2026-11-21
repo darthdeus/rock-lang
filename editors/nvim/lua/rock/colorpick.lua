@@ -1,19 +1,4 @@
--- :RockColorPick — show all highlight groups active under the cursor with
--- their resolved fg/bg hex codes. Built for tuning the palette in
--- highlights.lua: hover the token, see what hl group is winning, yank the
--- hex value, edit the default.
---
--- Sources collected (in priority order, most-specific first):
---   1. semantic tokens (LSP)  -- @lsp.type.* / @lsp.typemod.*
---   2. treesitter captures    -- @variable, @function, ...
---   3. syntax (legacy)
---   4. extmarks (virt_text/sign hl)
---
--- Keymaps in the float:
---   q       close
---   y       yank hex under cursor (or first hex on the line)
---   <CR>    yank the highlight group name on the current line
---   r       refresh (re-sample at the original cursor position)
+-- Highlight sources are ordered most-specific first.
 
 local ui = require('rock.ui')
 
@@ -21,9 +6,6 @@ local M = {}
 
 local FLOAT_NAME = 'rock://colorpick'
 
--- Resolve a highlight group through links to its concrete definition.
--- Returns a table with fg/bg/style keys (any may be nil) and the final
--- group name we resolved to (so we can show "foo -> bar" if linked).
 local function resolve(group)
   local seen = {}
   local cur = group
@@ -46,7 +28,6 @@ local function hex(n)
   return string.format('#%06x', n)
 end
 
--- Collect (group_name, kind) pairs from vim.inspect_pos in priority order.
 local function collect_groups(buf, row, col)
   local info = vim.inspect_pos(buf, row, col)
   local out = {}
@@ -121,14 +102,10 @@ local function build_lines(buf, row, col)
   return lines, meta
 end
 
--- Apply per-hex color swatches as virtual text on each row. Tiny squares
--- on the right of each hex code so you can eyeball-confirm the value.
 local function apply_swatches(buf, lines)
   local ns = vim.api.nvim_create_namespace('rock.colorpick.swatch')
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for i, line in ipairs(lines) do
-    -- Find any '#rrggbb' on the line; create a unique hl group per color
-    -- and attach an extmark virt_text overlay at that column.
     local start = 1
     while true do
       local s, e, hx = string.find(line, '(#%x%x%x%x%x%x)', start)

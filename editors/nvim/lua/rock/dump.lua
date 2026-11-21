@@ -1,15 +1,3 @@
--- :RockDump -- write a JSON snapshot of current state to /tmp.
---
--- Useful for bug reports and session diffs. Includes:
---   - binary info (path/id/mtime/mismatch)
---   - client info (state/uptime/restarts/capabilities)
---   - buffers map
---   - stats and modules (last polled values)
---   - per-method latency samples (raw + summary)
---   - full event ring (summarized payloads)
---   - log tail
---
--- Written to /tmp/rock-nvim-<unix-ts>.json; path + size toasted on success.
 
 local state = require('rock.state')
 
@@ -24,13 +12,7 @@ local function summarize_timing(samples)
   return perf.summarize(samples)
 end
 
--- buffers/stats/modules are keyed by bufnr / client_id. After a long
--- session those integers get large while only one or two entries
--- exist, so vim.json.encode sees an "excessively sparse array" and
--- the whole snapshot fails to encode (field report: ":RockDump …
--- Cannot serialise table: excessively sparse array"). Stringify the
--- keys so the encoder emits a JSON object instead of attempting an
--- array. A map keyed by handle is semantically an object anyway.
+-- String keys prevent vim.json.encode treating sparse handles as an array.
 local function stringify_keys(t)
   if type(t) ~= 'table' then return t end
   local out = {}
@@ -49,8 +31,6 @@ local function build_snapshot()
       summary = summarize_timing(t.samples),
     }
   end
-  -- Strip the sorted copy from each summary; JSON doesn't need it and
-  -- it's just a duplicate of samples.
   for _, v in pairs(timings) do
     if v.summary then v.summary.sorted = nil end
   end

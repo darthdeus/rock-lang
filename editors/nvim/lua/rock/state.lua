@@ -1,7 +1,3 @@
--- Central observable store for rock.nvim.
--- Holds binary info, client info, per-buffer state, and ring buffers for
--- events and log lines. Subscribers (the panel, statusline) register
--- callbacks via M.subscribe() and receive M.get() snapshots on change.
 
 local M = {}
 
@@ -10,10 +6,7 @@ local LOG_RING_CAP = 500
 local TIMING_SAMPLES_PER_METHOD = 500
 local ERRORS_RING_CAP = 50
 
--- Bounded arrays use slack-compaction: we let the array overshoot its cap
--- by `SLACK` entries, then drop the oldest SLACK in one shot. This is
--- amortized O(1) per insert instead of the O(n) cost of `table.remove(t, 1)`
--- on every overflow. `$/progress` bursts used to thrash this path.
+-- Drop old entries in batches to amortize the cost of shifting the array.
 local RING_SLACK = 256
 
 local function push_bounded(arr, v, cap)
@@ -26,10 +19,7 @@ local function push_bounded(arr, v, cap)
   end
 end
 
--- Newest-first variant: we prepend, then trim from the tail when oversized.
--- Trim from the tail is always O(k) in the number trimmed, regardless of
--- array size, so no slack trick is needed — but `table.insert(t, 1, v)` is
--- itself O(n). We accept that for small caps (captures=10, errors=50).
+-- Tail trimming is proportional to the number removed; these caps are small.
 local function prepend_bounded(arr, v, cap)
   table.insert(arr, 1, v)
   while #arr > cap do arr[#arr] = nil end
@@ -61,25 +51,12 @@ local state = {
   events_idx = 0,           -- monotonic counter for stable IDs
   log = {},                 -- ring of log lines
   last_completion = nil,    -- { at, pos, trigger, items, latency_ms }
-  -- rock/stats and rock/modules are polled per-client and keyed by
-  -- client_id. A single-client session has one entry; multi-client
-  -- sessions (e.g. two packages each rooted at their own stick.toml)
-  -- previously hid one client's data because only clients[1] was
-  -- polled — see /tmp/rock-nvim-1778674707.json for the dump that
-  -- surfaced this. Consumers (panel, dump, modules floater) iterate
-  -- the map.
+  -- Per-client entries keep multiple workspaces visible.
   stats = {},               -- { [client_id] = rock/stats response }
   modules = {},             -- { [client_id] = rock/modules response }
-  -- Client-observed per-method request latencies. Keyed by method ->
-  -- { samples = { ms1, ms2, ... } }.
   request_timings = {},
-  -- Insert-mode captures (bug-diagnosis snapshots). Bounded ring.
   captures = {},
-  -- Silent server errors: window/logMessage / window/showMessage with
-  -- Error or Warning severity. Prominent in panel so they never pass
-  -- unnoticed. Bounded ring; 'E' in panel clears.
   errors = {},
-  -- Last rock.nvim doctor result list (see rock.doctor). nil if not run yet.
   doctor = nil,
   doctor_at = nil,
 }
@@ -169,9 +146,7 @@ function M.set_modules(client_id, m)
   notify()
 end
 
--- Drop stats/modules for a client that's no longer attached. Called
--- on LspDetach so the dump doesn't accumulate dead-client entries
--- across long sessions.
+-- Remove detached clients so snapshots do not accumulate stale entries.
 function M.forget_client(client_id)
   state.stats[client_id] = nil
   state.modules[client_id] = nil
@@ -205,9 +180,7 @@ function M.set_doctor(results)
   notify()
 end
 
--- Record a server-reported error/warning. Severity follows the LSP
--- MessageType enum: 1=Error, 2=Warning, 3=Info, 4=Log. We only record
--- 1 and 2 here; 3 and 4 stay in the general event ring.
+-- LSP MessageType 1 and 2 are errors and warnings.
 function M.record_error(severity, method, message)
   prepend_bounded(state.errors, {
     at = os.time(),

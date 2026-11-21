@@ -1,8 +1,3 @@
--- Resolve, inspect, and watch the `rock` binary (the LSP runs as
--- `rock lsp serve`; there is no separate rock-lsp binary).
--- Detects the worktree mismatch that bites when a shared hardcoded path
--- (like an editor config pointing at $HOME/projects/rock-lang/... ) is used
--- from a different rock checkout.
 
 local state = require('rock.state')
 local uv = vim.uv or vim.loop
@@ -15,7 +10,6 @@ local function exists(p)
   return st ~= nil and st.type == 'file'
 end
 
--- Walk up from `start` looking for a directory that contains `marker`.
 local function find_up(start, marker)
   local dir = start
   for _ = 1, 32 do
@@ -27,15 +21,11 @@ local function find_up(start, marker)
   return nil
 end
 
--- Find the rock worktree root above `start`. The marker moved to `crates/`
--- in the crate reorg; this is the path that identifies a rock checkout root
--- (the dir holding `target/`).
 local WORKTREE_MARKER = 'crates/rock-cli/Cargo.toml'
 local function find_worktree(start)
   return find_up(start, WORKTREE_MARKER)
 end
 
--- Extract workspace root from a binary path of the form <root>/target/*/rock
 local function workspace_from_bin(bin)
   if not bin then return nil end
   local m = bin:match('^(.*)/target/[^/]+/rock$')
@@ -47,26 +37,17 @@ local function short_id(mtime, size)
   return vim.fn.sha256(tostring(mtime) .. ':' .. tostring(size)):sub(1, 8)
 end
 
--- Resolve the configured cmd spec into a concrete binary path.
--- Accepts:
---   - absolute path to a binary
---   - a shell script (e.g. a wrapper that re-execs a debug build) -- we
---     try to extract the binary inside it by looking for a line matching
---     */target/*/rock
+-- Wrapper scripts may contain the binary path to watch.
 function M.resolve(configured)
   if not configured then
     if vim.env.ROCK_LSP_DIR and vim.env.ROCK_LSP_DIR ~= '' then
       configured = vim.env.ROCK_LSP_DIR .. '/target/debug/rock'
     else
-      -- Prefer a binary built inside the current worktree (matches what you're editing).
       local wt = find_worktree(vim.fn.getcwd())
       local local_bin = wt and (wt .. '/target/debug/rock') or nil
       if local_bin and uv.fs_stat(local_bin) then
         configured = local_bin
       else
-        -- Then the dev checkout's debug build, then whatever `rock` is
-        -- installed on PATH. The checkout path is also what the
-        -- missing-binary warning names when nothing exists at all.
         configured = vim.env.HOME .. '/projects/rock-lang/target/debug/rock'
         if not uv.fs_stat(configured) then
           local on_path = vim.fn.exepath('rock')
@@ -79,15 +60,12 @@ function M.resolve(configured)
   local resolved = configured
   local st = uv.fs_stat(configured)
   if st and st.type == 'file' then
-    -- If it's a shell script (not an ELF/Mach-O), peek inside for a bin path.
     local fd = uv.fs_open(configured, 'r', 438)
     if fd then
       local data = uv.fs_read(fd, 4096, 0)
       uv.fs_close(fd)
       if data and data:sub(1, 2) == '#!' then
-        -- Frontier pattern: `/rock` followed by a non-word, non-dash char
-        -- (space / EOL), so we extract the `rock` binary and never the
-        -- `rock-lsp` / `rock-fmt` sibling names.
+        -- A word or dash after /rock would name a different executable.
         local bin = data:match('([%w%._/%-%$%{%}]+/target/[^/]+/rock)%f[^%w%-]')
         if bin then
           bin = bin:gsub('%$HOME', vim.env.HOME)
@@ -100,7 +78,6 @@ function M.resolve(configured)
   return vim.fn.resolve(resolved), configured
 end
 
--- Build the info snapshot and push it into state.
 function M.refresh(configured)
   local resolved, cfg = M.resolve(configured)
   local st = uv.fs_stat(resolved)
@@ -115,9 +92,7 @@ function M.refresh(configured)
   state.set_binary({
     path = resolved,
     configured_path = cfg,
-    -- Match the local exists() helper: only regular files count.
-    -- /dev/null and other non-file paths must not be treated as a
-    -- usable binary (would mislead the cmd() gate).
+    -- Devices and other non-files are not usable binaries.
     exists = st ~= nil and st.type == 'file',
     mtime = st and st.mtime.sec or nil,
     size = st and st.size or nil,
