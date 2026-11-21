@@ -65,42 +65,84 @@ pub use value_test::*;
 
 /// A program's planned GLSL, kept from the profile check so that emission
 /// renders the same plan instead of planning the program a second time.
-pub struct ShaderPlan(ShaderPlanKind);
-
-enum ShaderPlanKind {
-    Pipeline(Box<pipeline::PipelinePlan>),
-    Entry(Box<entry::EntryPlan>),
+pub struct ShaderPlan {
+    interface: ShaderInterfacePlan,
+    abi: ShaderAbiPlan,
+    concrete_plans: Arc<ConcretePlans>,
+    interner: Arc<MonoInterner>,
+    vertex: Option<VertexStage>,
+    fragment: (StagePlan, StageResources),
 }
 
-/// Plan a program view: the profile check's whole work, whose result is
-/// what [`render_shader_plan`] emits.
+struct VertexStage {
+    plan: StagePlan,
+    attr_params: Vec<usize>,
+    resources: StageResources,
+}
+
 pub fn plan_shader_with_view(
     ws: &Workspace,
     scx: &ScalarCtx,
     view: &ShaderProgramView,
 ) -> Result<ShaderPlan, CompilerError> {
-    let kind = match view.program.vert {
-        Some(_) => ShaderPlanKind::Pipeline(Box::new(pipeline::plan_shader_pipeline_from_view(
-            ws, scx, view,
-        )?)),
-        None => ShaderPlanKind::Entry(Box::new(entry::plan_shader_entry_program(ws, scx, view)?)),
-    };
-    Ok(ShaderPlan(kind))
+    if view.program.vert.is_some() {
+        plan_shader_pipeline_from_view(ws, scx, view)
+    } else {
+        plan_shader_entry_program(ws, scx, view)
+    }
 }
 
-/// Render a kept plan against the interner it was planned with.
 pub fn render_shader_plan(
     ws: &Workspace,
     interner: &MonoInterner,
     plan: &ShaderPlan,
     profile: GlslProfile,
 ) -> Result<ShaderEmission, CompilerError> {
-    match &plan.0 {
-        ShaderPlanKind::Pipeline(plan) => {
-            pipeline::render_shader_pipeline(ws, interner, plan, profile)
-        }
-        ShaderPlanKind::Entry(plan) => entry::render_shader_entry(ws, interner, plan, profile),
-    }
+    let (frag, _) = &plan.fragment;
+    let vertex = plan
+        .vertex
+        .as_ref()
+        .map(|stage| emit_vertex_stage(ws, interner, plan, stage))
+        .transpose()?;
+    let pixel = emit_fragment_stage(ws, interner, plan)?;
+    let version = profile_header(profile);
+    let source = match vertex {
+        Some(vertex) => format!(
+            "{version}\n\n#ifdef VERTEX\n\n{vertex}\n#endif\n\n#ifdef PIXEL\n\n{pixel}\n#endif\n"
+        ),
+        None => format!(
+            "{version}\n\n#ifdef PIXEL\n\n{pixel}\n#endif\n\n#ifdef VERTEX\n\n{FULLSCREEN_VERTEX}\n#endif\n"
+        ),
+    };
+    let dependencies = plan.vertex.as_ref().map_or_else(
+        || frag.dependencies.clone(),
+        |vert| {
+            vert.plan
+                .dependencies
+                .iter()
+                .chain(&frag.dependencies)
+                .copied()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect()
+        },
+    );
+    let stages = plan
+        .vertex
+        .iter()
+        .map(|vert| vert.plan.ir.clone())
+        .chain([frag.ir.clone()])
+        .collect();
+    Ok(ShaderEmission {
+        source,
+        dependencies,
+        interface: plan.interface.clone(),
+        abi: plan.abi.clone(),
+        ir: ShaderIR {
+            interner: Arc::clone(&plan.interner),
+            stages,
+        },
+    })
 }
 
 pub fn emit_shader_with_view(

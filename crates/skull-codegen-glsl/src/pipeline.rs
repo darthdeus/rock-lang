@@ -13,20 +13,19 @@ fn emit_varyings(out: &mut String, iface: &ShaderInterfacePlan, dir: &str) {
     }
 }
 
-fn emit_vertex_stage(
+pub(crate) fn emit_vertex_stage(
     ws: &Workspace,
     interner: &MonoInterner,
-    stage: &StagePlan,
-    v: &VertexShape,
-    iface: &ShaderInterfacePlan,
-    abi: &ShaderAbiPlan,
+    plan: &ShaderPlan,
+    v: &VertexStage,
 ) -> Result<String, CompilerError> {
+    let iface = &plan.interface;
     let shape = EntryShape {
         global_params: v
             .attr_params
             .iter()
             .copied()
-            .chain(v.res.global_params())
+            .chain(v.resources.global_params())
             .collect(),
         uniform_fields: iface
             .vertex_inputs
@@ -34,8 +33,8 @@ fn emit_vertex_stage(
             .flat_map(|i| i.attrs.iter().map(|(n, k)| (*n, attr_glsl_ty(*k))))
             .chain(stage_uniform_fields(iface, IrStage::Vertex))
             .collect(),
-        sampler_params: v.res.sampler_params().collect(),
-        arrays: v.res.arrays.iter().map(|a| a.param).collect(),
+        sampler_params: v.resources.sampler_params().collect(),
+        arrays: v.resources.arrays.iter().map(|a| a.param).collect(),
         main_out: Some(MainOut {
             fields: iface
                 .varyings
@@ -60,26 +59,28 @@ fn emit_vertex_stage(
         ));
     }
     out.push('\n');
-    emit_stage_resources(&mut out, iface, abi, IrStage::Vertex);
+    emit_stage_resources(&mut out, iface, &plan.abi, IrStage::Vertex);
     emit_varyings(&mut out, iface, "out");
     out.push('\n');
-    stage.render(&mut out, ws, interner, &shape)?;
+    v.plan
+        .render(&mut out, ws, interner, &plan.concrete_plans, &shape)?;
     Ok(out)
 }
 
-fn emit_fragment_stage(
+pub(crate) fn emit_fragment_stage(
     ws: &Workspace,
     interner: &MonoInterner,
-    stage: &StagePlan,
-    fs: &FragShape,
-    iface: &ShaderInterfacePlan,
-    abi: &ShaderAbiPlan,
+    plan: &ShaderPlan,
 ) -> Result<String, CompilerError> {
+    let (stage, res) = &plan.fragment;
+    let iface = &plan.interface;
     let mut out = String::new();
-    emit_varyings(&mut out, iface, "in");
-    // MRT: the entry is emitted as `void main()` destructuring its returned
-    // output struct into the `layout(location=N) out` globals (like the vertex
-    // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
+    let fullscreen = plan.vertex.is_none();
+    if fullscreen {
+        out.push_str("in vec2 TexCoord;\n");
+    } else {
+        emit_varyings(&mut out, iface, "in");
+    }
     let main_out = match &iface.fragment_output {
         FragmentOutput::Single(kind) => {
             out.push_str(&format!("out {} FragColor;\n\n", wire_glsl(*kind).name()));
@@ -106,8 +107,10 @@ fn emit_fragment_stage(
         FragmentOutput::None => unreachable!("a planned fragment stage has an output"),
     };
     let shape = EntryShape {
-        global_params: std::iter::once(VARYINGS_PARAM)
-            .chain(fs.res.global_params())
+        global_params: (!fullscreen)
+            .then_some(VARYINGS_PARAM)
+            .into_iter()
+            .chain(res.global_params())
             .collect(),
         uniform_fields: iface
             .varyings
@@ -115,19 +118,20 @@ fn emit_fragment_stage(
             .map(|v| (v.name, wire_glsl(v.kind)))
             .chain(stage_uniform_fields(iface, IrStage::Fragment))
             .collect(),
-        sampler_params: fs.res.sampler_params().collect(),
-        arrays: fs.res.arrays.iter().map(|a| a.param).collect(),
+        sampler_params: res.sampler_params().collect(),
+        arrays: res.arrays.iter().map(|a| a.param).collect(),
         main_out,
         reserved: entry_reserved_names(iface),
     };
 
-    emit_stage_resources(&mut out, iface, abi, IrStage::Fragment);
-    stage.render(&mut out, ws, interner, &shape)?;
+    emit_stage_resources(&mut out, iface, &plan.abi, IrStage::Fragment);
+    stage.render(&mut out, ws, interner, &plan.concrete_plans, &shape)?;
     if shape.main_out.is_none() {
         let fref = stage.ir.entry.fref();
         let entry_f = &ws.module(fref.module).functions[fref.func];
+        let args = if fullscreen { "TexCoord" } else { "" };
         out.push_str(&format!(
-            "\nvoid main() {{\n  FragColor = {}();\n}}\n",
+            "\nvoid main() {{\n  FragColor = {}({args});\n}}\n",
             symbol_of_key(entry_f.name)
         ));
     }
@@ -239,22 +243,11 @@ fn check_block_name_collisions<'a>(
     Ok(())
 }
 
-pub(crate) struct PipelinePlan {
-    vshape: VertexShape,
-    fshape: FragShape,
-    vert: StagePlan,
-    frag: StagePlan,
-    /// What the program's interface MEANS -- roles, names, order, neutral
-    /// kinds. Target-neutral, and the sole input to `abi`.
-    pub(crate) interface: ShaderInterfacePlan,
-    abi: ShaderAbiPlan,
-}
-
 pub(crate) fn plan_shader_pipeline_from_view(
     ws: &Workspace,
     scx: &ScalarCtx,
     view: &ShaderProgramView,
-) -> Result<PipelinePlan, CompilerError> {
+) -> Result<ShaderPlan, CompilerError> {
     let vertex = program_stage(view, ShaderStage::Vertex, "a pipeline")?;
     let fragment = program_stage(view, ShaderStage::Fragment, "a pipeline")?;
     let (vfref, ffref) = (vertex.entry.func, fragment.entry.func);
@@ -329,9 +322,9 @@ pub(crate) fn plan_shader_pipeline_from_view(
     // census, the ABI plan and every emitted declaration -- reads this.
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Vertex, IrStage::Fragment],
-        vertex_inputs: vshape.inputs.clone(),
+        vertex_inputs: vshape.inputs,
         varyings,
-        fragment_output: fshape.output.clone(),
+        fragment_output: fshape.output,
         frag_depth: fshape.frag_depth,
         bare_samplers,
         uniform_groups: engine_logical
@@ -365,60 +358,16 @@ pub(crate) fn plan_shader_pipeline_from_view(
         ff.name_span,
     )?;
 
-    Ok(PipelinePlan {
-        vshape,
-        fshape,
-        vert,
-        frag,
+    Ok(ShaderPlan {
         interface,
         abi,
-    })
-}
-
-pub(crate) fn render_shader_pipeline(
-    ws: &Workspace,
-    interner: &MonoInterner,
-    plan: &PipelinePlan,
-    profile: GlslProfile,
-) -> Result<ShaderEmission, CompilerError> {
-    let vertex_block = emit_vertex_stage(
-        ws,
-        interner,
-        &plan.vert,
-        &plan.vshape,
-        &plan.interface,
-        &plan.abi,
-    )?;
-    let pixel_block = emit_fragment_stage(
-        ws,
-        interner,
-        &plan.frag,
-        &plan.fshape,
-        &plan.interface,
-        &plan.abi,
-    )?;
-
-    let version = profile_header(profile);
-    let source = format!(
-        "{version}\n\n#ifdef VERTEX\n\n{vertex_block}\n#endif\n\n#ifdef PIXEL\n\n{pixel_block}\n#endif\n"
-    );
-    let dependencies = plan
-        .vert
-        .dependencies
-        .iter()
-        .chain(&plan.frag.dependencies)
-        .copied()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    Ok(ShaderEmission {
-        source,
-        dependencies,
-        interface: plan.interface.clone(),
-        abi: plan.abi.clone(),
-        ir: ShaderIR {
-            interner: std::sync::Arc::clone(&plan.vert.concrete_interner),
-            stages: vec![plan.vert.ir.clone(), plan.frag.ir.clone()],
-        },
+        concrete_plans: Arc::clone(concrete_plans),
+        interner: scx.interner_handle(),
+        vertex: Some(VertexStage {
+            plan: vert,
+            attr_params: vshape.attr_params,
+            resources: vshape.res,
+        }),
+        fragment: (frag, fshape.res),
     })
 }
