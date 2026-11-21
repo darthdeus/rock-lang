@@ -2200,12 +2200,14 @@ const EPSILON: float = 0.0000001
         end
     end
     if n <= width then return end
-    local scratch = {}
+    local scratch = __rock_map_sort_scratch
+    __rock_map_sort_scratch = nil
     while width < n do
         for first = 1, n - width, 2 * width do
             local mid = first + width - 1
             local last = math.min(mid + width, n)
             if tostring(data[mid + 1]) < tostring(data[mid]) then
+                if not scratch then scratch = {} end
                 for i = first, mid do scratch[i - first + 1] = data[i] end
                 local left, right = 1, mid + 1
                 for i = first, last do
@@ -2221,6 +2223,10 @@ const EPSILON: float = 0.0000001
             end
         end
         width = 2 * width
+    end
+    if scratch and n <= 256 then
+        __rock_table_clear(scratch)
+        __rock_map_sort_scratch = scratch
     end
 """
 

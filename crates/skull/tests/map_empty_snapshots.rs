@@ -162,3 +162,51 @@ print('ok')
     ));
     assert_eq!(output, "ok");
 }
+
+#[test]
+fn map_sort_reuses_scratch_and_releases_keys() {
+    let lua = emit_module(SOURCE);
+    let output = run_luajit(&format!(
+        r#"{lua}
+jit.off()
+local sort = assert(__sort_map_keys)
+local keys = {{ [0] = 32 }}
+local source = {{}}
+for i = 1, keys[0] do source[i] = ("%02d"):format(keys[0] + 1 - i) end
+local function sweep()
+    for i = 1, keys[0] do keys[i] = source[i] end
+    sort(keys)
+    assert(keys[1] == "01" and keys[32] == "32")
+end
+for i = 1, 10 do sweep() end
+collectgarbage("collect")
+collectgarbage("stop")
+local before = collectgarbage("count") * 1024
+for i = 1, 64 do sweep() end
+local growth = collectgarbage("count") * 1024 - before
+collectgarbage("restart")
+assert(growth <= 1024, ("repeated stable merge requested new scratch, %.0f heap bytes"):format(growth))
+
+local inner = {{ [0] = 17 }}
+local outer = {{ [0] = 17 }}
+local nested = 0
+local key = setmetatable({{}}, {{ __tostring = function()
+    for i = 1, inner[0] do inner[i] = ("%02d"):format(inner[0] + 1 - i) end
+    sort(inner)
+    assert(inner[1] == "01" and inner[17] == "17")
+    nested = nested + 1
+    return "09"
+end }})
+local weak = setmetatable({{ key }}, {{ __mode = "v" }})
+for i = 1, outer[0] do outer[i] = ("%02d"):format(outer[0] + 1 - i) end
+outer[9] = key
+sort(outer)
+assert(nested > 0 and outer[9] == key)
+outer, key = nil, nil
+collectgarbage("collect")
+assert(weak[1] == nil, "sort keeps caller keys alive")
+print("ok")
+"#
+    ));
+    assert_eq!(output, "ok");
+}

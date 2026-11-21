@@ -431,6 +431,8 @@ function __rock_vec_header(repr, elem, stride)
   return h
 end
 local __rock_table_new = require("table.new")
+local __rock_map_sort_scratch
+local __rock_table_clear = require("table.clear")
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
