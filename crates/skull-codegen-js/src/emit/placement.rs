@@ -1,5 +1,3 @@
-//! Placement-based structuring for JavaScript bodies.
-
 use super::*;
 use skull_mir::cfg::placement::{self as walk, BlockFlow, NativeLoop, PlacementEmit};
 use skull_mir::cfg::structure::{self as cfg_structure, CountedBound, CountedLoop, Placement};

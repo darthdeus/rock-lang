@@ -1,5 +1,3 @@
-//! Runtime type tables: enum singletons, equality, inspect and column matrices.
-
 use super::*;
 
 pub(super) fn emit_enum_singletons(

@@ -1,5 +1,3 @@
-//! Instruction expressions, value-struct forms and calls.
-
 use super::*;
 use skull_mir::mir::{FlatVecContents, FlatVecCtor, VEC_COLUMN_HEADER_FIELD};
 

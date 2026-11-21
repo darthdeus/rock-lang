@@ -1,5 +1,3 @@
-//! Root plans and the instance-graph session behind a program emission.
-
 use super::*;
 use skull_mir::instance::DeclKey;
 

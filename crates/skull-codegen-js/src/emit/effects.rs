@@ -1,5 +1,3 @@
-//! Block statements, returns and trampoline terminators.
-
 use super::*;
 
 /// A value inst that still runs as a statement when unused: calls, bounds-checking or host-getter

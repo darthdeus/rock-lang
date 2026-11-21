@@ -1,5 +1,3 @@
-//! Whole-program assembly and the program types it produces.
-
 use super::*;
 
 pub(super) fn assemble_program_core(

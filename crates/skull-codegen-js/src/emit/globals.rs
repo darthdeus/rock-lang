@@ -1,5 +1,3 @@
-//! Decorator applications and global initializer scheduling.
-
 use super::*;
 
 /// A JS literal for a `@deco` annotation arg; `None` for a non-literal.
@@ -16,7 +14,6 @@ pub(crate) fn annotation_value_js(v: &bone_core::hir::AnnoValue) -> Option<Strin
     })
 }
 
-/// Render the shared decorator argument plan for JavaScript.
 fn decorator_call_args_js(
     ws: &Workspace,
     module: bone_core::prelude::ModuleId,

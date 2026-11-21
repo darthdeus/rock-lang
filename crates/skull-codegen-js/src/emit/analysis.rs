@@ -1,5 +1,3 @@
-//! Body analyses for JavaScript emission.
-
 use super::*;
 
 pub(super) fn is_native_buffer(name: &str) -> bool {

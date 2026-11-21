@@ -1,5 +1,3 @@
-//! JavaScript-specific statements used by the placement walker.
-
 use super::*;
 use skull_mir::cfg::structure::CountedLoop;
 

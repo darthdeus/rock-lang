@@ -1,5 +1,3 @@
-//! JavaScript emission, intrinsic mappings and runtime support.
-
 use bone_core::hir::Function;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 

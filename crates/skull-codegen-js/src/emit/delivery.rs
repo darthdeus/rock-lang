@@ -1,5 +1,3 @@
-//! Delivering discovered bodies as JS chunks, and the scalar ABI check.
-
 use super::*;
 
 /// The backend-local delivery scheduler: lowers retained declarations, follows post-inline residual

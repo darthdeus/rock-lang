@@ -1,5 +1,3 @@
-//! Coroutine bodies and the JS coroutine constructor.
-
 use super::*;
 
 /// The code identities of `mf` and its nested bodies. Volatile build values

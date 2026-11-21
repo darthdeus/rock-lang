@@ -1,5 +1,3 @@
-//! Multi-value lanes: publisher temps, return slots and the publisher rewrite.
-
 use super::*;
 
 /// The compiler-owned temp holding publisher argument `i` while later arguments evaluate.

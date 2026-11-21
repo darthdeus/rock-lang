@@ -1,5 +1,3 @@
-//! Code-slot registration and the definition and lifecycle plan stages.
-
 use super::*;
 
 /// Program-wide hoisted closure-body names -- the only globals a capture-free

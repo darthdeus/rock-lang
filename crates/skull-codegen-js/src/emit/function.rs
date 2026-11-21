@@ -1,5 +1,3 @@
-//! Single-function entry points: plain, trampolined and closure-carrying bodies.
-
 use super::*;
 
 pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, CompilerError> {

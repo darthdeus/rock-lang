@@ -1,5 +1,3 @@
-//! The worklist that discovers inline, standalone and spec bodies.
-
 use super::*;
 
 pub(super) struct JsInlineBody {
