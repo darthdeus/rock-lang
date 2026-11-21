@@ -1,6 +1,3 @@
-// for-in loops over arrays, vectors, maps, arenas and ranges: element and
-// tuple bindings, control flow, nesting, `rev`, and the implicit `iter()` the
-// loop head inserts for collections.
 
 @test(output = "45\n3", type_holes = [[0, "int"]])
 fn array_literal_iter_without_i() {
@@ -51,7 +48,6 @@ fn rev_of_enumerate() {
     }
 }
 
-// -- Collection types and binding patterns --
 
 struct PlayerStats {
     health: int,
@@ -78,7 +74,6 @@ fn test_map_struct_values() {
         total_levels = total_levels + stats.level
         count = count + 1
 
-        // Validate struct access
         assert stats.health > 0
         assert stats.mana >= 0
         assert stats.level > 0
@@ -146,10 +141,8 @@ fn test_for_in_type_inference() {
     let value_sum = 0
 
     for (key, value) in mixed_map {
-        // key should be inferred as string
         key_lengths = key_lengths + key.len()
 
-        // value should be inferred as int
         value_sum = value_sum + value * 2
     }
 
@@ -157,7 +150,6 @@ fn test_for_in_type_inference() {
     assert value_sum == 282
 }
 
-// -- The loop head inserts `iter()` for collections automatically --
 
 @test
 fn test_simple_identifier_gets_iter() {
@@ -167,7 +159,6 @@ fn test_simple_identifier_gets_iter() {
 
     let count = 0
 
-    // This should automatically get `iter()` inserted: for item in arena
     for item in arena {
         count += 1
     }
@@ -183,7 +174,6 @@ fn test_map_iteration_with_auto_iter() {
 
     let count = 0
 
-    // This should automatically get `iter()` inserted: for item in map
     for item in map {
         count += 1
     }
@@ -191,9 +181,7 @@ fn test_map_iteration_with_auto_iter() {
     assert_eq(count, 2)
 }
 
-// -- Iterating `rev(...)`, which materializes a reversed vector --
 
-// -- Element types: nullable and struct --
 
 struct Item {
     name: string,

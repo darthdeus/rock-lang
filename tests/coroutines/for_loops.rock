@@ -1,7 +1,4 @@
-// `for` loops in co fn bodies over vecs, ranges, arenas, maps and
-// enumerate, with break and continue.
 
-// Resumes until exhaustion, printing each yield and then "null".
 fn drain(c: Coroutine<int>) {
     loop {
         let r = c.resume()
@@ -13,7 +10,6 @@ fn drain(c: Coroutine<int>) {
     }
 }
 
-// ---- Break inside for ----
 co fn yield_until_five(items: [int]) -> Coroutine<int> {
     for v in items {
         if v >= 5 { break }
@@ -27,7 +23,6 @@ fn break_and_continue_do_not_yield_skipped_elements() {
     drain(yield_range_skip_even(0, 4))
 }
 
-// ---- Range with continue ----
 co fn yield_range_skip_even(lo: int, hi: int) -> Coroutine<int> {
     for i in lo..hi {
         if i % 2 == 0 { continue }
@@ -35,7 +30,6 @@ co fn yield_range_skip_even(lo: int, hi: int) -> Coroutine<int> {
     }
 }
 
-// ---- Empty vec and empty range: zero iterations ----
 co fn yield_each_empty(items: [int]) -> Coroutine<int> {
     for v in items {
         yield v
@@ -54,7 +48,6 @@ fn test_for_empty() {
     drain(yield_range_empty())
 }
 
-// ---- Arena iteration (yields {entity, data}) ----
 struct Mob { name: string, hp: int }
 global ARENA: Arena<Mob> = arena_new()
 
@@ -73,7 +66,6 @@ fn test_for_arena() {
     drain(c)
 }
 
-// ---- Vec<T?> with nullable elements: numeric-indexed iteration ----
 co fn yield_with_nullable(items: [int?]) -> Coroutine<int> {
     for v in items {
         if v == null {
@@ -91,7 +83,6 @@ fn test_for_vec_nullable() {
     drain(c)
 }
 
-// ---- Vec enumerated with tuple binding ----
 co fn yield_indexed(items: [int]) -> Coroutine<int> {
     for (i, v) in enumerate(items) {
         yield i * 100 + v
@@ -105,10 +96,7 @@ fn enumerating_vec_yields_the_same_indices_and_elements_with_either_binding() {
     drain(yield_indexed_single(items))
 }
 
-// ---- Map with tuple binding ----
-// Map iteration order is unspecified by Lua (pairs is unordered), so we
-// yield the *running total* instead of individual values and check only
-// the end state, so the test doesn't depend on hash order.
+// Lua map iteration order is unspecified.
 global COLORS: Map<string, int> = map_new()
 
 co fn yield_color_total() -> Coroutine<int> {
@@ -128,14 +116,12 @@ fn test_for_map() {
     print(c.resume() ?? -99)
 }
 
-// ---- Vec enumerated with single binding (yields tuple {idx, val}) ----
 co fn yield_indexed_single(items: [int]) -> Coroutine<int> {
     for pair in enumerate(items) {
         yield pair.0 * 100 + pair.1
     }
 }
 
-// ---- Arena enumerated with tuple binding ----
 struct MobE { id: int }
 global ARENA_E: Arena<MobE> = arena_new()
 

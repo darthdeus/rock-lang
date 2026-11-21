@@ -1,9 +1,6 @@
-// enumerate() over arrays, vectors, maps, arenas and ranges, in for loops and
-// as a value; tuple elements destructure by default without enumerate().
 
 struct Mob { name: string, health: int }
 
-// === Arrays ===
 
 @test(output = "0:a\n1:b\n2:c")
 fn enumerate_array() {
@@ -36,9 +33,7 @@ fn enumerate_empty_collections() {
     print("done")
 }
 
-// === Vectors ===
 
-// === Arenas ===
 
 @test(output = "0:A\n1:B")
 fn enumerate_arena_basic() {
@@ -61,7 +56,6 @@ fn enumerate_arena_with_removal() {
     }
 }
 
-// === Vec of tuples: destructuring vs enumerate ===
 
 @test(output = "1:a\n2:b")
 fn vec_tuple_destructure_default() {
@@ -71,7 +65,6 @@ fn vec_tuple_destructure_default() {
     }
 }
 
-// === Single binding ===
 
 @test(output = "(1,a)")
 fn vec_tuple_single_binding() {
@@ -81,7 +74,6 @@ fn vec_tuple_single_binding() {
     }
 }
 
-// === Nested tuple destructuring ===
 
 @test(output = "1-2:a\n3-4:b")
 fn nested_tuple_destructure() {
@@ -99,9 +91,7 @@ fn nested_tuple_enumerate() {
     }
 }
 
-// === Deep nesting ===
 
-// === Maps ===
 
 @test(output = "2\ntrue\ntrue")
 fn enumerate_map_basic() {
@@ -121,7 +111,6 @@ fn enumerate_map_basic() {
     print(found_b)
 }
 
-// === Arena without enumerate (normal iteration) ===
 
 @test(output = "A:10\nB:20")
 fn arena_normal_iteration() {
@@ -133,11 +122,7 @@ fn arena_normal_iteration() {
     }
 }
 
-// === Non-for uses ===
-//
-// On a vector `enumerate` is a lazy `EnumIter`, so a caller that wants the
-// materialized `[(int, T)]` calls `.collect()`. Arena and Map keep eager
-// overloads; see the `enumerate` declarations in `stdlib/unified.rock`.
+// Vector enumerate is lazy; Arena and Map enumerate eagerly.
 
 @test(output = "acc=63 len=3")
 fn nonfor_enumerate_vec() {
@@ -162,7 +147,6 @@ fn nonfor_enumerate_arena() {
     }
 }
 
-// === Nested tuple elements bound whole ===
 
 @test(output = "1-2\n4-5\n7-8")
 fn nested_tuple_first_element() {
@@ -171,7 +155,6 @@ fn nested_tuple_first_element() {
     vec_push(items, ((4, 5), "b"))
     vec_push(items, ((7, 8), "c"))
 
-    // Destructure to get the pair and string
     for (pair, _) in items {
         print("{pair.0}-{pair.1}")
     }
@@ -183,7 +166,6 @@ fn enumerate_nested_tuple_structures() {
     vec_push(items, ((1, 2), "a"))
     vec_push(items, ((4, 5), "b"))
 
-    // Enumerate gives index and whole tuple
     for (i, tuple) in enumerate(items) {
         let pair = tuple.0
         print("{i}: ({pair.0},{pair.1})")
