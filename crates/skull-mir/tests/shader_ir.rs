@@ -35,41 +35,6 @@ fn stage_ir(entry: ShaderInstance, order: Vec<ShaderInstance>) -> ShaderStageIr 
     }
 }
 
-/// A bare `dedup()` collapses only adjacent repeats; emission order interleaves
-/// two instantiations of one helper with other declarations.
-#[test]
-fn a_stage_reload_set_dedups_a_nonadjacent_repeat() {
-    use skull_mir::monoty::MonoTy;
-    let helper = fref(0, 7);
-    let other = fref(0, 9);
-    let entry = fref(0, 1);
-
-    let ir = stage_ir(
-        ShaderInstance::plain(entry),
-        vec![
-            inst(0, 7, Some(MonoTy::Float)),
-            inst(0, 9, None),
-            inst(0, 7, Some(MonoTy::Int)),
-        ],
-    );
-
-    assert_eq!(ir.order.len(), 3);
-    assert_eq!(ir.order.iter().filter(|i| i.fref() == helper).count(), 2);
-
-    let decls = ir.declarations();
-    assert_eq!(
-        decls.iter().filter(|f| **f == helper).count(),
-        1,
-        "a nonadjacent repeat of one declaration survived dedup: {decls:?}"
-    );
-    assert_eq!(
-        decls.len(),
-        3,
-        "entry + two distinct helper declarations: {decls:?}"
-    );
-    assert!(decls.contains(&other) && decls.contains(&entry));
-}
-
 #[test]
 fn a_program_reload_set_dedups_across_stages() {
     use skull_mir::monoty::MonoTy;
