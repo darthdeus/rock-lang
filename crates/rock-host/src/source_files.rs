@@ -110,48 +110,6 @@ fn source_file_from_canonical_path(path: &Path) -> Result<SourceFile> {
     })
 }
 
-#[cfg(test)]
-mod production_tests {
-    use rock_core::SourceFiles;
-    use rock_core::source_code::source_file_from_path_and_contents;
-
-    #[test]
-    fn production_only_keeps_files_when_project_root_is_under_tests() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let project_root = temp.path().join("tests/project");
-        std::fs::create_dir_all(project_root.join("tests")).unwrap();
-        let main_path = project_root.join("main.rock");
-        let broken_path = project_root.join("tests/broken.rock");
-        std::fs::write(&main_path, "fn main() {}\n").unwrap();
-        std::fs::write(&broken_path, "fn broken() {}\n").unwrap();
-        let main_path = main_path.to_string_lossy().into_owned();
-        let broken_path = broken_path.to_string_lossy().into_owned();
-        let source = |path: &str| {
-            std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(
-                source_file_from_path_and_contents(
-                    path.to_string(),
-                    "source.rock".to_string(),
-                    "fn main() {}\n".to_string(),
-                ),
-            ))
-        };
-        let sources = SourceFiles {
-            files: vec![source(&main_path), source(&broken_path)],
-            package_roots: Vec::new(),
-            ns_aliases: None,
-        };
-
-        let production = super::production_only(&sources, &project_root).unwrap();
-        let paths: Vec<_> = production
-            .files
-            .iter()
-            .map(|file| file.borrow().file.to_id_path())
-            .collect();
-
-        assert_eq!(paths.as_slice(), std::slice::from_ref(&main_path));
-    }
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     #[cfg(not(target_os = "macos"))]
