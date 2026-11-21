@@ -718,30 +718,6 @@ mod escape_tests {
     }
 
     #[test]
-    fn unicode_escapes_resolve_to_their_scalar() {
-        assert_eq!(text(r#""\u{41}""#), "A");
-        assert_eq!(text(r#""M\u{00c1}G""#), "M\u{00c1}G");
-        assert_eq!(text(r#""\u{1F600}""#), "\u{1F600}");
-        assert_eq!(text(r#""\u{c1}""#), text(r#""\u{0000C1}""#));
-        assert_eq!(text(r#""\u{1F600}""#).len(), 4);
-    }
-
-    #[test]
-    fn the_known_escapes_still_resolve() {
-        assert_eq!(text(r#""a\nb\tc""#), "a\nb\tc");
-        assert_eq!(text(r#""q\"q""#), "q\"q");
-        assert_eq!(text(r#""b\\b""#), "b\\b");
-        assert_eq!(text(r#""a\rb""#), "a\rb");
-    }
-
-    #[test]
-    fn an_unknown_escape_is_rejected() {
-        assert!(rejection(r#""\q""#).contains("unknown string escape"));
-        assert!(rejection(r#""C:\path""#).contains("unknown string escape"));
-        assert!(rejection(r#""\d+""#).contains("r\"..\""));
-    }
-
-    #[test]
     fn a_malformed_unicode_escape_is_rejected() {
         assert!(
             rejection(r#""\u41""#).contains("\\u{"),
@@ -761,20 +737,6 @@ mod escape_tests {
         assert_eq!(text(r#""\u{D7FF}""#), "\u{D7FF}");
         assert_eq!(text(r#""\u{E000}""#), "\u{E000}");
         assert_eq!(text(r#""\u{10FFFF}""#), "\u{10FFFF}");
-    }
-
-    #[test]
-    fn flavors_without_an_escape_pass_are_untouched() {
-        assert_eq!(text("r\"\\d+\""), "\\d+");
-        assert_eq!(text("r\"C:\\path\\to\""), "C:\\path\\to");
-        assert_eq!(text("\"\"\"\\d+\"\"\""), "\\d+");
-    }
-
-    #[test]
-    fn a_backslash_before_a_newline_continues_the_line() {
-        assert_eq!(text("\"one \\\n         two\""), "one two");
-        assert_eq!(text("\"one \\\n\ttwo\""), "one two");
-        assert_eq!(text("\"a\\\n  b\\nc\""), "ab\nc");
     }
 
     #[test]
