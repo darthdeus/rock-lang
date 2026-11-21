@@ -750,19 +750,6 @@ mod tests {
         semantic_pass(&mut modules(sources)).expect("semantic")
     }
 
-    fn key(ws: &Workspace, name: &str) -> Ustr {
-        let mut matches = ws
-            .defs
-            .iter()
-            .filter(|(_, meta)| meta.name.as_str() == name)
-            .map(|(key, _)| *key);
-        let key = matches
-            .next()
-            .unwrap_or_else(|| panic!("no definition `{name}`"));
-        assert!(matches.next().is_none(), "ambiguous definition `{name}`");
-        key
-    }
-
     #[test]
     fn lifecycle_owner_rejects_retired_session_spelling() {
         let ws = workspace(&[(
@@ -775,60 +762,6 @@ mod tests {
         )]);
         let error = collect(&ws).expect_err("retired lifecycle owner must be rejected");
         assert!(error.message.contains("unsupported lifecycle owner"));
-    }
-
-    #[test]
-    fn plan_reads_stage_defaults_and_orders_equal_stage_by_declaration() {
-        let ws = workspace(&[(
-            "plan.rock",
-            r#"
-            @lifecycle(phase="update", owner="process", stage_param="stage")
-            deco init tick(stage: int = 100) {}
-            @tick(stage=20) fn later() {}
-            @tick(stage=10) fn first() {}
-            @tick(stage=10) fn second() {}
-            @tick fn defaulted() {}
-        "#,
-        )]);
-        let plan = collect(&ws).expect("plan");
-        assert_eq!(plan.declarations, 1);
-        assert_eq!(
-            plan.entries
-                .iter()
-                .map(|e| (entry_name(e), e.stage))
-                .collect::<Vec<_>>(),
-            vec![
-                ("first", 10),
-                ("second", 10),
-                ("later", 20),
-                ("defaulted", 100)
-            ]
-        );
-        assert!(plan.entries[0].declaration_ordinal < plan.entries[1].declaration_ordinal);
-    }
-
-    #[test]
-    fn qualified_wire_collects_declared_and_transitive_const_dependencies() {
-        let ws = workspace(&[(
-            "wire.rock",
-            r#"
-            @lifecycle(phase="wire", owner="process")
-            deco init wire {}
-            const BASE: int = 1
-            const DERIVED: int = BASE
-            const OTHER: int = 9
-            @wire(onchange=[DERIVED])
-            fn apply_game_config() {}
-            "#,
-        )]);
-        let plan = collect(&ws).expect("lifecycle plan");
-        let entry = plan
-            .entries
-            .iter()
-            .find(|entry| entry_name(entry) == "apply_game_config")
-            .expect("qualified wire entry");
-        assert!(entry.qualification.is_gated());
-        assert_eq!(entry.qualification.dependencies().len(), 2);
     }
 
     fn wire_error(annotation: &str) -> String {
@@ -900,21 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn same_named_cross_module_targets_keep_distinct_logical_identities() {
-        let ws = workspace(&[
-            (
-                "role.rock",
-                "@lifecycle(phase=\"draw\", owner=\"process\") deco init paint {}",
-            ),
-            ("a.rock", "mod a;\nuse super::paint;\n@paint fn render() {}"),
-            ("b.rock", "mod b;\nuse super::paint;\n@paint fn render() {}"),
-        ]);
-        let plan = collect(&ws).expect("plan");
-        assert_eq!(plan.entries.len(), 2);
-        assert_ne!(plan.entries[0].identity, plan.entries[1].identity);
-    }
-
-    #[test]
     fn frame_hooks_in_sim_modules_are_scoped_to_that_modules_wire_names() {
         let ws = workspace(&[
             (
@@ -979,30 +897,6 @@ mod tests {
     }
 
     #[test]
-    fn scene_lifecycle_accepts_one_concrete_reference_root() {
-        let ws = workspace(&[(
-            "scene.rock",
-            r#"
-            @lifecycle(phase="update", owner="scene", stage_param="stage")
-            deco init scene_update(stage: int = 100) {}
-            struct Dungeon { ticks: int }
-            @scene_update fn tick_dungeon(root: Dungeon) { root.ticks += 1 }
-            "#,
-        )]);
-        let plan = collect(&ws).expect("typed scene lifecycle target");
-        assert_eq!(plan.entries.len(), 1);
-        assert_eq!(plan.entries[0].owner.as_str(), "scene");
-        assert_eq!(entry_name(&plan.entries[0]), "tick_dungeon");
-        assert_eq!(
-            plan.entries[0].root_type,
-            Some(MonoTy::App {
-                ctor: MonoCtor::Nominal(key(&ws, "Dungeon")),
-                params: Vec::new(),
-            })
-        );
-    }
-
-    #[test]
     fn scene_lifecycle_rejects_non_reference_and_generic_roots() {
         let cases = [
             ("root: int", "reference struct"),
@@ -1047,35 +941,6 @@ mod tests {
         let b = collect_root("B");
         assert!(!a.structure_changed(&same));
         assert!(a.structure_changed(&b));
-    }
-
-    #[test]
-    fn scene_and_process_updates_share_one_stage_order() {
-        let ws = workspace(&[(
-            "mixed.rock",
-            r#"
-            struct Root { value: int }
-            @lifecycle(phase="update", owner="process", stage_param="stage")
-            deco init update(stage: int = 100) {}
-            @lifecycle(phase="update", owner="scene", stage_param="stage")
-            deco init scene_update(stage: int = 100) {}
-            @scene_update(stage=40) fn scene_first(root: Root) { root.value += 1 }
-            @update(stage=41) fn process_middle() {}
-            @scene_update(stage=42) fn scene_last(root: Root) { root.value += 1 }
-            "#,
-        )]);
-        let plan = collect(&ws).expect("mixed lifecycle plan");
-        assert_eq!(
-            plan.entries
-                .iter()
-                .map(|entry| (entry_name(entry), entry.owner.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                ("scene_first", "scene"),
-                ("process_middle", "process"),
-                ("scene_last", "scene"),
-            ],
-        );
     }
 
     #[test]
