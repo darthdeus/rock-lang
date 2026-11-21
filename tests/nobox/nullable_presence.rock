@@ -424,3 +424,32 @@ fn boxed_absent_presence_control() {
     assert_eq(row.present, false)
     check_presence(state.id == null, true)
 }
+
+nobox value Waypoint { x: int, y: int }
+value WaypointRow { position: Waypoint }
+struct OptionalWaypoint { p: Waypoint? = null }
+
+@test
+fn field_read_sets_nullable_presence_after_the_first_turn() {
+    let points = [
+        WaypointRow { position: Waypoint { x: 3, y: 4 } },
+        WaypointRow { position: Waypoint { x: 4, y: 7 } },
+        WaypointRow { position: Waypoint { x: 1, y: 2 } },
+    ]
+    let prev: Waypoint? = null
+    let turns = 0
+    let diff = 0
+    for point in points {
+        if let p = prev {
+            turns += 1
+            diff += point.position.x - p.x
+        }
+        prev = point.position
+    }
+    assert_eq((turns, diff, prev.unwrap().y), (2, -2, 2))
+
+    let empty = OptionalWaypoint {}
+    let full = OptionalWaypoint { p: points[0].position }
+    assert(empty.p == null)
+    assert_eq(full.p.unwrap().y, 4)
+}

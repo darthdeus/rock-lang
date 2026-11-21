@@ -320,3 +320,34 @@ fn an_inline_ctor_in_the_push_takes_the_same_route() {
         ElementPayload::FloatArray(a) => assert_eq(a.len, -1),
     }
 }
+
+nobox value SuspendedPair { x: int, y: int }
+
+enum SuspendedPayload { Pair(SuspendedPair), Int(int) }
+
+fn payload_score(e: SuspendedPayload?) -> int {
+    if e == null { return -1 }
+    return match e {
+        Pair(p) => 10 * p.x + p.y,
+        Int(n) => n,
+    }
+}
+
+co fn echo_payload(e: SuspendedPayload) -> Coroutine<SuspendedPayload, SuspendedPayload> {
+    yield e
+    let p = match e {
+        Pair(p) => SuspendedPair { x: p.x + 1, y: p.y },
+        Int(n) => SuspendedPair { x: n, y: n },
+    }
+    yield SuspendedPayload::Int(7)
+    return SuspendedPayload::Pair(p)
+}
+
+@test
+fn nobox_payload_survives_yield_and_result_channels() {
+    let c = echo_payload(SuspendedPayload::Pair(SuspendedPair { x: 3, y: 4 }))
+    assert_eq(payload_score(c.resume()), 34)
+    assert_eq(payload_score(c.resume()), 7)
+    assert_eq(payload_score(c.resume()), -1)
+    assert_eq(payload_score(c.result()), 44)
+}

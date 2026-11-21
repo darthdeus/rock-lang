@@ -46,3 +46,23 @@ global LATER: P = P { x: 5, y: 6 }
     assert_eq(G_CALL.y, 13)
     G_CALL = mk(5, 7)
 }
+
+nobox value TrustV2 { x: float, y: float }
+
+struct TrustHolder { p: TrustV2, tag: int }
+
+global TRUST_HOLDER: TrustHolder = TrustHolder { p: TrustV2 { x: 1.0, y: 1.0 }, tag: 1 }
+
+@nomangle inline(lua) fn trust_poke_field_and_sibling() = """
+    TRUST_HOLDER.p = TrustV2_ct(9.0, 9.0)
+    TRUST_HOLDER.tag = 99
+"""
+
+// The opaque write misses the flattened leaves. Keep both sides visible:
+// the neighboring scalar updates, and the value field keeps its old value.
+@test(backends = "lua")
+fn opaque_nobox_write_misses_the_leaves() {
+    trust_poke_field_and_sibling()
+    assert_eq(TRUST_HOLDER.p.x, 1.0)
+    assert_eq(TRUST_HOLDER.tag, 99)
+}
