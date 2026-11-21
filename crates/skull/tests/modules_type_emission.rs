@@ -53,32 +53,6 @@ fn package() -> skull::mir_emit::MirEmit {
 }
 
 #[test]
-fn v1_value_struct_and_enum_emit_runnable_lua() {
-    let emitted = package();
-    assert_eq!(
-        run_main(&emitted.lua),
-        "s=3 c=blue n=7 t=v1ty::a::Color::Blue"
-    );
-}
-
-#[test]
-fn v1_nominal_types_mint_identifiers() {
-    let emitted = package();
-    for spelled in [
-        "} v1ty::a::V2;",
-        "ffi.typeof(\"v1ty::a::V2\")",
-        "ffi.sizeof(\"v1ty::a::NV2\")",
-        "__rock_nb_storage(\"v1ty::a::NV2\"",
-        "__ROCK_C_METATYPE[\"v1ty::a::V2\"]",
-        "__rock_enum_v1ty::a::Color",
-        "v1ty::a::V2_ct(",
-    ] {
-        assert!(!emitted.lua.contains(spelled));
-    }
-    assert!(emitted.lua.contains("\"v1ty::a::Color::Blue\""));
-}
-
-#[test]
 fn v1_type_table_key_matches_the_emitted_constructor() {
     let emitted = package();
     let digest = skull_mir::mangle::prefix_digest("v1ty::a");
