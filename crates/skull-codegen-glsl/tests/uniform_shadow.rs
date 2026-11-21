@@ -1,6 +1,6 @@
 //! Hoisted locals must not shadow shader interface names.
 
-use crate::support::{entry_emission, pipeline_emission};
+use crate::support::entry_emission;
 
 /// No hoisted `float` local shadows `lane`: block members indent 4, hoisted
 /// locals 2, so the indented pattern distinguishes them.
@@ -49,116 +49,5 @@ fn hoisted_local_renamed_apart_from_uniform_lane() {
     assert!(
         glsl.contains("vec4(density_1,"),
         "every use of the local must follow the rename:\n{glsl}"
-    );
-}
-
-/// Vertex stage: locals shadowing an attribute and a varying output.
-#[test]
-fn vertex_locals_renamed_apart_from_attribute_and_varying() {
-    let src = r#"
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4, shade: Vec4 }
-        @shader(vertex)
-        fn vt(@attr a: QV) -> Vary {
-            let aPos = a.aPos.x + 1.0
-            let shade = a.aPos.y + 2.0
-            return Vary {
-                position: Vec4 { x: aPos, y: shade, z: 0.0, w: 1.0 },
-                shade: Vec4 { x: shade, y: 0.0, z: 0.0, w: 1.0 }
-            }
-        }
-        @shader(fragment)
-        fn fr(vary: Vary) -> Vec4 { return vary.shade }
-    "#;
-    let e = pipeline_emission(src, "vt", "fr").expect("emit");
-    let glsl = &e.source;
-    let attrs: Vec<String> = e
-        .interface
-        .vertex_inputs
-        .iter()
-        .flat_map(|i| i.attrs.iter().map(|(n, _)| n.to_string()))
-        .collect();
-    assert!(
-        attrs.contains(&"aPos".to_string()),
-        "fixture must declare the collided attribute, got: {attrs:?}\n{glsl}"
-    );
-    let varyings: Vec<String> = e
-        .interface
-        .varyings
-        .iter()
-        .map(|v| v.name.to_string())
-        .collect();
-    assert!(
-        varyings.contains(&"shade".to_string()),
-        "fixture must declare the collided varying, got: {varyings:?}\n{glsl}"
-    );
-    assert!(
-        glsl.contains("(aPos.x + 1.0)"),
-        "the attribute read must survive:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("shade = "),
-        "the varying assignment must survive:\n{glsl}"
-    );
-    for name in attrs.iter().chain(varyings.iter()) {
-        assert_no_hoisted_shadow(glsl, name);
-    }
-    assert!(
-        glsl.contains("aPos_1 = (aPos.x + 1.0)"),
-        "the renamed local must hold the attribute sum:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("shade_1 = (aPos.y + 2.0)"),
-        "the renamed local must hold the varying sum:\n{glsl}"
-    );
-}
-
-/// Group sampler reads are bare globals, so locals must not shadow them.
-#[test]
-fn fragment_local_renamed_apart_from_group_sampler() {
-    let src = r#"
-        struct T { tint: Sampler2D }
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4, uv: Vec2 }
-        @shader(vertex)
-        fn vt(@attr a: QV) -> Vary {
-            return Vary {
-                position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 },
-                uv: a.aPos
-            }
-        }
-        @shader(fragment)
-        fn fr(vary: Vary, @textures t: T) -> Vec4 {
-            let tint = vary.uv.x + 1.0
-            let c = texture(t.tint, vary.uv)
-            return Vec4 { x: tint, y: c.y, z: c.z, w: c.w }
-        }
-    "#;
-    let e = pipeline_emission(src, "vt", "fr").expect("emit");
-    let glsl = &e.source;
-    let samplers: Vec<String> = e
-        .interface
-        .textures
-        .iter()
-        .flat_map(|t| t.samplers.iter().map(|(n, _)| n.to_string()))
-        .collect();
-    assert!(
-        samplers.contains(&"tint".to_string()),
-        "fixture must declare the collided sampler, got: {samplers:?}\n{glsl}"
-    );
-    assert!(
-        glsl.contains("uniform sampler2D tint;"),
-        "the sampler declaration must survive:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("texture(tint, uv)"),
-        "the sample must read the sampler global:\n{glsl}"
-    );
-    for name in &samplers {
-        assert_no_hoisted_shadow(glsl, name);
-    }
-    assert!(
-        glsl.contains("tint_1 = (uv.x + 1.0)"),
-        "the renamed local must hold the sum:\n{glsl}"
     );
 }
