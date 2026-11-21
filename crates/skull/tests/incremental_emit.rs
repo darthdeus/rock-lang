@@ -238,96 +238,78 @@ fn body_edit_to_a_function_with_lambdas_matches_a_full_emit() {
     }
 }
 
-#[test]
-fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
-    let types = "value P { x: float, y: float }\n\
-                 value Q { a: float, b: float, c: float }\n";
-    let generic = |marker: &str| {
-        format!("fn tally_of<T>(xs: [T]) -> T {{ print(\"{marker}\") return xs[0] }}\n")
+fn tally_workspace(marker: &str, use_q: bool) -> Workspace {
+    let result = if use_q {
+        "tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a"
+    } else {
+        "G1"
     };
-    let v1 = types.to_string()
-        + &generic("MARK1")
-        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
-           fn use_it() -> float { return G1 }";
-    let v2 = types.to_string()
-        + &generic("MARK1")
-        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
-           fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
-    let v3 = types.to_string()
-        + &generic("MARK2")
-        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
-           fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
-
-    let ws1 = ws_with_stdlib(&v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let defines = |lua: &str, ty: &str| {
-        lua.lines()
-            .any(|l| l.starts_with("function tally_of_") && l.contains(ty))
-    };
-    let defines_q = |lua: &str| defines(lua, "Q");
-    assert!(defines(&full.lua, "P") && !defines_q(&full.lua));
-
-    let ws2 = ws_with_stdlib(&v2);
-    let o1 = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
-    assert!(defines_q(&o1.lua));
-
-    let ws3 = ws_with_stdlib(&v3);
-    let o2 = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
-    let bodies: Vec<&str> = o2
-        .lua
-        .lines()
-        .filter(|l| l.starts_with("function tally_of_"))
-        .collect();
-    assert_eq!(bodies.len(), 2);
-    assert_eq!(o2.lua.matches("MARK2").count(), 2);
+    ws_with_stdlib(&format!(
+        r#"
+value P {{ x: float, y: float }}
+value Q {{ a: float, b: float, c: float }}
+fn tally_of<T>(xs: [T]) -> T {{ print("{marker}") return xs[0] }}
+global G1: float = tally_of([P {{ x: 1.0, y: 0.0 }}]).x
+fn use_it() -> float {{ return {result} }}
+"#
+    ))
 }
 
 #[test]
-fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
-    let types = "value P { x: float, y: float }\n\
-                 value Q { a: float, b: float, c: float }\n";
-    let generic = |marker: &str| {
-        format!("fn tally_of<T>(xs: [T]) -> T {{ print(\"{marker}\") return xs[0] }}\n")
-    };
-    let keep_alive = "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n";
-    let calls_q = "fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
-    let no_q = "fn use_it() -> float { return G1 }";
-
-    let v1 = types.to_string() + &generic("MARK1") + keep_alive + calls_q;
-    let v2 = types.to_string() + &generic("MARK1") + keep_alive + no_q;
-    let v3 = types.to_string() + &generic("MARK2") + keep_alive + no_q;
-    let v4 = types.to_string() + &generic("MARK2") + keep_alive + calls_q;
-
-    let ws1 = ws_with_stdlib(&v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    let q_bodies = |lua: &str| -> Vec<String> {
-        lua.lines()
-            .filter(|l| l.starts_with("function tally_of_") && l.contains("Q"))
-            .map(str::to_string)
-            .collect()
-    };
-    assert_eq!(q_bodies(&full.lua).len(), 1);
-
-    let ws2 = ws_with_stdlib(&v2);
-    let removal = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
-    assert_eq!(q_bodies(&removal.lua).len(), 0);
-    let ws3 = ws_with_stdlib(&v3);
-    let _ = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
-
-    let ws4 = ws_with_stdlib(&v4);
-    let back = emit_overlay(&ws4, &mut cache, &[body_id(&ws4, "use_it")]);
-    assert_eq!(q_bodies(&back.lua).len(), 1);
-    let text = &back.lua;
-    let start = text
-        .find("function tally_of_")
-        .map(|i| &text[i..])
-        .unwrap_or(text);
-    let q_start = text
-        .find(q_bodies(text)[0].as_str())
-        .map(|i| &text[i..])
-        .unwrap_or(start);
-    let q_body: String = q_start.lines().take_while(|l| *l != "end").collect();
-    assert!(q_body.contains("MARK2"));
+fn specialization_overlays_track_added_pruned_and_restored_instances() {
+    for (starts_with_q, edits) in [
+        (
+            false,
+            &[
+                (true, "MARK1", "use_it", None, true),
+                (true, "MARK2", "tally_of", Some(2), true),
+            ][..],
+        ),
+        (
+            true,
+            &[
+                (false, "MARK1", "use_it", None, false),
+                (false, "MARK2", "tally_of", None, false),
+                (true, "MARK2", "use_it", None, true),
+            ][..],
+        ),
+    ] {
+        let (full, mut cache) =
+            emit_full_of(&tally_workspace("MARK1", starts_with_q), "initial emit");
+        let tallies = |lua: &str| {
+            definition_names(lua)
+                .into_iter()
+                .filter(|name| name.starts_with("tally_of_"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let initial = tallies(&full.lua);
+        assert!(initial.iter().any(|name| name.contains("P")));
+        assert_eq!(
+            initial.iter().filter(|name| name.contains("Q")).count(),
+            usize::from(starts_with_q)
+        );
+        for &(use_q, marker, edited, count, emits_q) in edits {
+            let ws = tally_workspace(marker, use_q);
+            let overlay = emit_overlay(&ws, &mut cache, &[body_id(&ws, edited)]);
+            let bodies = tallies(&overlay.lua);
+            if let Some(count) = count {
+                assert_eq!(bodies.len(), count, "{edited}, use_q={use_q}");
+            }
+            assert_eq!(
+                bodies.iter().filter(|name| name.contains("Q")).count(),
+                usize::from(emits_q)
+            );
+            for body in bodies {
+                if count.is_some() || body.contains("Q") {
+                    assert!(
+                        function_body(&overlay.lua, &body).contains(marker),
+                        "{body}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
