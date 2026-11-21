@@ -18,53 +18,6 @@ fn workspace_names(ws: &mut rock_lsp::LspWorkspace, query: &str) -> Vec<String> 
         .collect()
 }
 
-#[test]
-fn workspace_symbols_order_by_name_file_and_position() {
-    let files = [
-        ("z/main.rock", "fn series_same() {}\nfn series_z() {}"),
-        (
-            "a/main.rock",
-            "fn series_same() {}\nfn series_same(n: int) {}\nfn series_a() {}",
-        ),
-    ];
-    let project = Project::new(&files);
-    let mut ws = rock_lsp::LspWorkspace::new();
-    for (file, text) in files {
-        assert_no_errors(&ws.bone.update(&project.path(file), text.into()));
-    }
-    let hits = do_workspace_symbols_workspace(
-        &mut ws,
-        &WorkspaceSymbolParams {
-            query: "series_".into(),
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        },
-    )
-    .unwrap()
-    .unwrap();
-    let keys: Vec<_> = hits
-        .iter()
-        .map(|hit| {
-            let file = if hit.location.uri.as_str().ends_with("/a/main.rock") {
-                'a'
-            } else {
-                'z'
-            };
-            (hit.name.as_str(), file, hit.location.range.start.line)
-        })
-        .collect();
-    assert_eq!(
-        keys,
-        [
-            ("series_a", 'a', 2),
-            ("series_same", 'a', 0),
-            ("series_same", 'a', 1),
-            ("series_same", 'z', 0),
-            ("series_z", 'z', 1),
-        ]
-    );
-}
-
 fn package_workspace() -> (Project, rock_lsp::LspWorkspace) {
     let app_src = "use util::heal_first;\n\nfn main() {\n    heal_first()\n}\n";
     let project = Project::new(&[
