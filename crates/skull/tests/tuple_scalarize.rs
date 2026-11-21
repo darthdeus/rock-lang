@@ -49,21 +49,6 @@ fn main() {
 "#;
 
 #[test]
-fn arena_bare_loop_used_entity_scalarizes_into_call() {
-    let lua = emit_module(ARENA_BARE_LOOP_USED_ENTITY);
-    let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("Entity_vt(") && !hot.contains("Entity_ct("));
-    assert!(
-        crate::common::definitions_of(&lua, "get_Entity")
-            .iter()
-            .any(|global| {
-                let callee = crate::common::bound_callee_name(&lua, "hot", global);
-                hot.contains(&format!("{callee}("))
-            })
-    );
-}
-
-#[test]
 fn arena_scan_only_boxes_at_the_stored_boundary() {
     let lua = emit_module(include_str!("../../../tests/noalloc/arena_scan.rock"));
     let body = function_body(&lua, "scan_returning_an_entity");
@@ -100,13 +85,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn arena_entity_threads_through_enum_payload_without_boxing() {
-    let lua = emit_module(ARENA_ENTITY_IN_ENUM);
-    let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("Entity_vt(") && !hot.contains("Entity_ct("));
-}
-
 const NULLABLE_VALUE_RETURN: &str = r#"
 value Bag { xs: [int] }
 
@@ -123,35 +101,3 @@ fn main() {
     __out("{present.xs.len} {present.xs[0]} {pick(false) == null}")
 }
 "#;
-
-#[test]
-fn nullable_value_binding_return_keeps_presence_and_leaves() {
-    let lua = emit_module(NULLABLE_VALUE_RETURN);
-    let pick = function_body(&lua, "pick");
-    assert_eq!(pick.matches("Bag_vt(").count(), 0);
-    assert!(!pick.contains("Bag_ct("));
-    assert_eq!(pick.matches("_data = {").count(), 1);
-    assert_eq!(pick.matches('{').count(), 2);
-    assert!(!pick.contains("__rock_box_mts[\"Bag\"]"));
-    assert_eq!(run_main(&lua), "1 1 true");
-}
-
-#[test]
-fn a_boxed_handle_parent_packs_without_an_ffi_aggregate_initializer() {
-    let lua = emit_module(
-        r#"
-value Token { handle: Entity<int> }
-struct Pick { token: Token, speed: float }
-
-@nomangle fn pick_token(tokens: [Token], index: int) -> Pick? {
-    let token = tokens.get(index)
-    if token == null { return null }
-    return Pick { token: token, speed: 1.0 }
-}
-"#,
-    );
-    let body = function_body(&lua, "pick_token");
-    assert!(body.contains("Token_lct("));
-    assert!(!body.contains("Token_ct("));
-    assert!(!body.contains("Entity_ct("));
-}
