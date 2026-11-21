@@ -1,5 +1,3 @@
-//! Lower resolved HIR into MIR blocks, cells and typed instructions.
-
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -153,7 +151,6 @@ fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
     flat_keys(field, shape.tuple_width(), shape.record_fields()).collect()
 }
 
-/// Tag, positional lanes, then record lanes.
 #[derive(Clone)]
 struct FlatCells {
     slots: Vec<Idx<Inst>>,
@@ -189,7 +186,7 @@ impl FlatCells {
     }
 }
 
-/// A source argument is lowered in place so it keeps its evaluation order.
+/// Lower in place to preserve evaluation order.
 enum FlatPayload {
     Expr(Idx<Expr>),
     Repr(ValueRepr),
@@ -321,14 +318,13 @@ impl ScalarCtx {
             .get_or_init(|| crate::global_storage::global_read_checks(ws, self))
     }
 
-    /// The build's one type arena; every `Instance` is minted against it.
+    /// Every `Instance` is minted against this arena.
     pub fn interner(&self) -> &crate::monoty::MonoInterner {
         &self.interner
     }
 
     pub fn sharing(mut self, interner: std::sync::Arc<crate::monoty::MonoInterner>) -> Self {
-        // The representation arena indexes its type facts by this arena's ids,
-        // so it follows the handle; nothing may have been planned yet.
+        // Representation facts use these arena IDs; nothing may be planned yet.
         assert!(
             self.rep_arena.is_empty(),
             "a context must share its type arena before planning any representation"
@@ -338,8 +334,7 @@ impl ScalarCtx {
         self
     }
 
-    /// The shared handle, for a consumer that must mint against the SAME arena
-    /// later -- an `InstanceGraph` built on demand rather than up front.
+    /// Later consumers must mint against the same arena.
     pub fn interner_handle(&self) -> std::sync::Arc<crate::monoty::MonoInterner> {
         std::sync::Arc::clone(&self.interner)
     }
@@ -374,8 +369,7 @@ impl ScalarCtx {
         self
     }
 
-    /// Like [`new`](Self::new) but value structs stay first-class values: a GLSL
-    /// `vecN` is not scalar leaves.
+    /// GLSL `vecN` values stay first-class, not scalar leaves.
     pub fn new_values_first_class(ws: &Workspace) -> Self {
         Self::new_with_value_mode(ws, true)
     }
@@ -629,8 +623,7 @@ fn arith_inst(
     })
 }
 
-/// Generic instances use their canonical concrete symbol so their cells stay
-/// distinct.
+/// Concrete symbols keep generic instances' cells distinct.
 fn static_owner_tag(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1375,15 +1368,12 @@ struct Builder<'a> {
     fn_name_span: Option<Span>,
     cur_span: Option<Span>,
     cur_expr: Option<Idx<Expr>>,
-    /// Which expression arena [`Self::cur_expr`] indexes: a struct-default
-    /// initializer lowers from its struct's `StructDefaults` body while `site_owner`
-    /// still names the enclosing function.
+    /// Struct defaults use their own expression arena, not `site_owner`'s.
     cur_domain: crate::site::SiteDomain,
     site_owner: Option<crate::instance::Instance>,
     cur_op: crate::site::SiteOp,
     group_binds: HashMap<u32, (Vec<GroupLeaf>, ValueShape)>,
-    /// A reassignment copies a box it did not build, so every store stays a ctor and
-    /// SROA can scalarize the binding.
+    /// Copy reassigned boxes so SROA sees a constructor at every store.
     owned_value_binds: HashSet<u32>,
     ref_borrowed_binds: std::cell::OnceCell<(HashSet<u32>, HashSet<u32>)>,
     body_facts: std::cell::OnceCell<BodyFacts>,
@@ -1413,11 +1403,9 @@ struct Builder<'a> {
     /// The shape is non-nullable: the branch that bound it consumed the presence.
     tuple_binds: HashMap<u32, (Vec<Idx<Cell>>, TupleLayout)>,
     static_cells: HashMap<u32, Ustr>,
-    /// Owner tag baked into a static's cell name: stable across body edits and
-    /// distinct per overload. `mir_emit` reads it back verbatim.
+    /// Stable across body edits and distinct per overload; emitted verbatim.
     static_owner: Ustr,
-    /// So shadowing duplicates get distinct cells and adding a static never renames
-    /// its siblings.
+    /// Shadowing duplicates need distinct cells without renaming siblings.
     static_counters: HashMap<Ustr, u32>,
     nested_fn_globals: HashMap<u32, NestedFn>,
     nested_fn_counters: HashMap<Ustr, u32>,
@@ -1564,8 +1552,7 @@ impl<'a> Builder<'a> {
     /// Nothing writes, captures or borrows it after its binding, so it can be held
     /// as values with no cell.
     pub(crate) fn binding_stays_unwritten(&self, name: Idx<BindingInfo>) -> bool {
-        // Shader lowering keeps the cell: the GLSL emitter names a local only
-        // for a cell, and writes a value out at every use.
+        // GLSL names locals only for cells; otherwise each use rewrites the value.
         !(self.scx.values_first_class
             || self.f.is_coroutine
             || self.body.binding_arena[name].kind != bone_core::hir::BindingKind::Let
@@ -1587,8 +1574,8 @@ impl<'a> Builder<'a> {
         if !self.binding_stays_unwritten(name) {
             return false;
         }
-        // Scalar replacement splits an aggregate only through a cell, and an
-        // inlined call can leave a constructor behind any aggregate value.
+        // Inlining can leave a constructor behind any aggregate; scalar
+        // replacement splits only through cells.
         let holds_aggregate = self
             .binding_ty(name)
             .and_then(|ty| self.concrete_ty_id(ty))
@@ -1854,8 +1841,7 @@ impl<'a> Builder<'a> {
                 );
             }
         }
-        // Code after a raising call lowers into a block nothing reaches, which
-        // cleanup drops.
+        // Cleanup drops the unreachable continuation after a raising call.
         if let Inst::Call { func, .. } = self.f.insts[id]
             && crate::intrinsics::never_returns(&self.ws.module(func.module).functions[func.func])
         {
@@ -1968,8 +1954,7 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Scoped, not global: a `for` head carries several operations at one
-    /// expression.
+    /// A `for` head carries several operations at one expression.
     fn with_site_op<T>(&mut self, op: crate::site::SiteOp, f: impl FnOnce(&mut Self) -> T) -> T {
         let outer = std::mem::replace(&mut self.cur_op, op);
         let out = f(self);
@@ -2092,8 +2077,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// One admission rule for call-site constants and callee default guards; `null`
-    /// stays omitted.
+    /// `null` stays omitted for call-site constants and callee default guards.
     fn constant_param_default(
         &self,
         body: &Body,
@@ -2438,8 +2422,7 @@ impl<'a> Builder<'a> {
                 self.defers.pop();
                 return Ok(());
             }
-            // bone discards a co fn's body tail without coercing it, so any reachable
-            // body end is a fall-off.
+            // Coroutine tails are discarded, so a reachable end is fall-off.
             if self.f.is_coroutine {
                 self.reject_nonunit_coroutine_falloff()?;
             }
@@ -2824,8 +2807,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Every calling convention routes through this: a short argument list is
-    /// nil-filled silently, so caller and callee must agree on arity.
+    /// Short argument lists are nil-filled; caller and callee must agree on arity.
     pub(crate) fn arg_values_for_slot(
         &mut self,
         slot: &RepLayout,
