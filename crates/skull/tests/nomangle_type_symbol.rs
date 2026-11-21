@@ -1,4 +1,4 @@
-use crate::common::{emit_v1_package, module_id, run_luajit, ws_v1_package};
+use crate::common::{module_id, ws_v1_package};
 
 #[test]
 fn a_nomangle_type_cannot_take_a_legacy_types_symbol() {

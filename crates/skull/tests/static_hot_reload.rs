@@ -1,14 +1,4 @@
-use crate::common::{body_id, emit_full_of, emit_without_stdlib, run_luajit};
-
-const STRING_STATIC: &str = "\
-global RESULT: string = \"\"
-fn probe() -> string {
-    static label = \"hello\"
-    static n = -1
-    return label
-}
-fn main() { RESULT = probe() }
-";
+use crate::common::{emit_without_stdlib, run_luajit};
 
 const PROBE: &str = "\
 global RESULT: int = 0
@@ -52,56 +42,3 @@ fn static_reload_preserves_unless_the_initializer_changed() {
         assert_eq!(result_after_reload(&before, &after), expected);
     }
 }
-
-const COUNTER: &str = "\
-global TOTAL: int = 0
-@nomangle fn bump() -> int {
-    TOTAL = TOTAL + 1
-    return TOTAL
-}
-fn main() {}
-";
-
-const COUNTER_WITH_STATIC: &str = "\
-global TOTAL: int = 0
-@nomangle fn bump() -> int {
-    static step = 10
-    TOTAL = TOTAL + step
-    step = step + 1
-    return TOTAL
-}
-fn main() {}
-";
-
-fn overlay_run(before: &str, after: &str, script: impl Fn(&str, &str) -> String) -> String {
-    overlay_run_editing("bump", before, after, script)
-}
-
-fn overlay_run_editing(
-    edited: &str,
-    before: &str,
-    after: &str,
-    script: impl Fn(&str, &str) -> String,
-) -> String {
-    let ws1 = crate::common::ws_with_stdlib(before);
-    let (full, mut cache) = emit_full_of(&ws1, "full emit");
-    let ws2 = crate::common::ws_with_stdlib(after);
-    let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[body_id(&ws2, edited)])
-        .expect("a body edit that adds or removes a static must overlay");
-    crate::common::run_luajit(&script(&full.lua, &overlay.lua))
-}
-
-const SPECIALIZED: &str = "\
-value V2 { x: float, y: float }
-global TOTAL: float = 0.0
-fn tagged<T>(v: T) -> T {
-    static seen = 0
-    seen = seen + 1
-    return v
-}
-@nomangle fn bump() -> float {
-    TOTAL = TOTAL + tagged(V2 { x: 1.0, y: 2.0 }).x
-    return TOTAL
-}
-fn main() {}
-";

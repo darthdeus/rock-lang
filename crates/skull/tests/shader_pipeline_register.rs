@@ -1,6 +1,4 @@
-use crate::common::{
-    body_id, edit, emit_full_of, emit_mir, emit_module, function_body, ws_with_stdlib,
-};
+use crate::common::{body_id, emit_full_of, ws_with_stdlib};
 
 fn overlay_lua(before: &str, after: &str, edited: &str) -> String {
     let (_, mut cache) = emit_full_of(&ws_with_stdlib(before), "base emit");
@@ -9,26 +7,6 @@ fn overlay_lua(before: &str, after: &str, edited: &str) -> String {
         .expect("emit_overlay")
         .lua
 }
-
-const SRC: &str = r#"
-value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
-value UiVertU  { uProjection: Mat4, uView: Mat4, uTransform: Mat4 }
-value UiVary   { position: Vec4, TexCoord: Vec2 }
-
-@shader(vertex)
-fn ui_vert(@attr a: QuadVert, @uniform u: UiVertU) -> UiVary {
-    let clip = u.uProjection * u.uView * u.uTransform * Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }
-    return UiVary { position: clip, TexCoord: a.aTexCoord }
-}
-
-@shader(fragment)
-fn ui_sim_solid_frag(vary: UiVary) -> Vec4 {
-    return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 }
-}
-
-fn make_a() -> string { return rock_shader(ui_vert, ui_sim_solid_frag) }
-fn make_b() -> string { return rock_shader(ui_vert, ui_sim_solid_frag) }
-"#;
 
 const KEY: &str = "ui_vert+ui_sim_solid_frag";
 
@@ -101,15 +79,6 @@ fn overlays_that_reach_a_pipeline_carry_its_registration() {
     let single = overlay_lua(MIXED_SRC, MIXED_SRC, "fs_frag");
     assert!(single.contains("__rock_shader_register(\"fs_frag\""));
 }
-
-const FS_SRC: &str = r#"
-@shader(fragment)
-fn fs_frag(tc: Vec2) -> Vec4 {
-    return Vec4 { x: tc.x, y: 0.0, z: 1.0, w: 1.0 }
-}
-
-fn make_fs() -> string { return rock_shader(fs_frag) }
-"#;
 
 const MIXED_SRC: &str = r#"
 value QuadVert { aPos: Vec2, aTexCoord: Vec2 }

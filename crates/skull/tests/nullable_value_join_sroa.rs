@@ -36,14 +36,6 @@ fn main() {{ print(round_trip(7)) }}
     }
 }
 
-const PIPELINE: &str = r#"
-nobox value Pipeline {
-    shader_name: string,
-    parametric_quads: bool = false,
-    after_scene: bool = false,
-}
-"#;
-
 #[test]
 fn nullable_field_emptying_does_not_rebox_the_value() {
     let lua = emit_module(include_str!(

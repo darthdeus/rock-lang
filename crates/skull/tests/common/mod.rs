@@ -208,19 +208,6 @@ pub fn luajit_loads(prog: &str) -> Result<(), String> {
     Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
-pub fn global_slots(lua: &str, identity: &str) -> Vec<u32> {
-    lua.split(&format!("identity=\"{identity}\""))
-        .nth(1)
-        .unwrap_or_else(|| panic!("missing global directory entry for {identity}"))
-        .split("slots={")
-        .nth(1)
-        .and_then(|rest| rest.split('}').next())
-        .expect("global directory entry has slots")
-        .split(',')
-        .map(|slot| slot.parse::<u32>().expect("Lua global slot is numeric"))
-        .collect()
-}
-
 pub fn function_params<'a>(lua: &'a str, name: &str) -> Vec<&'a str> {
     let body = function_body(lua, name);
     let open = body.find('(').expect("a parameter list");
@@ -594,16 +581,6 @@ fn luajit_output(prog: &str) -> std::process::Output {
         .expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
     out
-}
-
-pub fn run_luajit_capturing(prog: &str) -> (bool, String) {
-    let out = luajit_output(prog);
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    (out.status.success(), combined)
 }
 
 pub fn run_luajit(prog: &str) -> String {

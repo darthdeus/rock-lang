@@ -1,4 +1,4 @@
-use crate::common::{emit_v1_package, module_id, run_luajit, run_main, ws_v1_package};
+use crate::common::{emit_v1_package, module_id, run_luajit, ws_v1_package};
 
 const MAIN: &str = r#"
 use facade::tick as first;

@@ -1,6 +1,6 @@
 use skull_mir::lower::{SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT};
 
-use crate::common::{definition_names, emit_module, function_body, function_params, run_main};
+use crate::common::{emit_module, function_body, function_params, run_main};
 
 fn float_fields(leaves: usize) -> String {
     (0..leaves)
@@ -241,51 +241,6 @@ fn over_cut_value() -> String {
         .join(", ");
     format!("value W {{ {fields} }}\nfn mkw(x: float) -> W {{ return W {{ {inits} }} }}\n")
 }
-
-const CALL_KINDS_BODY: &str = r#"
-fn bump(w: W) -> W { return W { ..w, a0: w.a0 + 1.0 } }
-fn head(w: W) -> float { return w.a0 }
-
-fn head_method(w: W) -> float { return w.a0 * 10.0 }
-
-fn thru_generic<T>(t: T) -> T { return t }
-
-fn apply(f: fn(W) -> W, w: W) -> W { return f(w) }
-
-fn via_closure(w: W) -> W {
-    let step = (v: W) => bump(v)
-    return step(w)
-}
-
-co fn pipeline(w: W) -> Coroutine<W, float> {
-    let a = bump(w)
-    yield a
-    let b = bump(a)
-    return head(b)
-}
-
-fn two_wide(w: W) -> (W, W) { return (bump(w), bump(bump(w))) }
-
-fn tail_forward(w: W) -> W { return bump(w) }
-
-fn main() {
-    let w = mkw(0.0)
-    let direct = head(bump(w))
-    let indirect = head(apply(bump, w))
-    let closed = head(via_closure(w))
-    let generic = head(thru_generic(bump(w)))
-    let method = w.head_method()
-    let tailed = head(tail_forward(w))
-    let (p, q) = two_wide(w)
-    let multi = head(p) + head(q)
-    let co = pipeline(w)
-    let first = co.resume()
-    let yielded = if first == null { -1.0 } else { head(first) }
-    let _ = co.resume()
-    let finished = co.result() ?? -1.0
-    print("{direct} {indirect} {closed} {generic} {method} {tailed} {multi} {yielded} {finished}")
-}
-"#;
 
 #[test]
 fn a_forwarding_callee_lends_the_box_until_a_mutable_store() {

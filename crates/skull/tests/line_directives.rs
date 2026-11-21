@@ -3,30 +3,6 @@ use skull::mir_emit::ShapeOverrides;
 
 const FILE: &str = "/src/game.rock";
 
-const SRC: &str = "fn fail(n: int) -> int {
-    let a = n * 2
-    if a > 4 {
-        error(\"boom\")
-    }
-    return a + 1
-}
-
-fn main() {
-    print(fail(1))
-}
-";
-
-fn numbered() -> String {
-    common::emit_module_shaped(
-        SRC,
-        FILE,
-        ShapeOverrides {
-            line_directives: Some(true),
-            ..Default::default()
-        },
-    )
-}
-
 #[test]
 fn a_call_keeps_its_own_numbered_statement() {
     let src = "fn twice(n: int) -> int { return n * 2 }

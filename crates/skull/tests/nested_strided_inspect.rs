@@ -1,14 +1,5 @@
 use crate::common::{body_id, edit, run_luajit, ws_with_stdlib};
 
-const STRUCT_ROWS: &str = r#"
-nobox value Row { a: int, flag: bool, c: int, d: int, e: int }
-struct Holder { rows: [Row] }
-@nomangle fn inspect_rows() -> string {
-    let holder = Holder { rows: [Row { a: 1, flag: false, c: 3, d: 4, e: 5 }] }
-    return inspect(holder)
-}
-"#;
-
 fn full_and_overlay_programs(source: &str, name: &str) -> [String; 2] {
     let before = ws_with_stdlib(&source.replace("return inspect(holder)", "return \"before\""));
     let after = ws_with_stdlib(source);

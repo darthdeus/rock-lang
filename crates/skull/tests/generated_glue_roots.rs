@@ -1,6 +1,6 @@
 use crate::common::{
-    self, body_id, definition_symbols, emit_v1_package, module_id, ws_v1_package,
-    ws_with_dependency_module, ws_with_stdlib_module,
+    self, definition_symbols, module_id, ws_v1_package, ws_with_dependency_module,
+    ws_with_stdlib_module,
 };
 use skull::mir_emit::emit_full;
 

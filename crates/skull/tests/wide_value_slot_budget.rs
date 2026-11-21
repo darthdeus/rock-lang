@@ -1,6 +1,5 @@
 use crate::common::{
-    body_id, emit_module, emit_module_without_frame_limits, function_body, luajit_loads, run_main,
-    try_emit_module, ws_with_stdlib,
+    body_id, emit_module_without_frame_limits, luajit_loads, try_emit_module, ws_with_stdlib,
 };
 
 fn fixture(leaves: usize, held: usize) -> String {

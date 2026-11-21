@@ -1,42 +1,5 @@
 use crate::common::{emit_module, function_body};
 
-const NESTED_STORE: &str = r#"
-value V2 { x: float, y: float }
-value Vert { pos: V2, uv: V2, id: int, w: float }
-
-@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
-fn nb_vert(n: int) -> NativeBuffer<Vert> { return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n } }
-
-fn fill(buf: NativeBuffer<Vert>, n: int) {
-    for i in 0..n {
-        let f = i as float
-        buf[i] = Vert { pos: V2 { x: f, y: f }, uv: V2 { x: f, y: f }, id: i, w: 1.0 }
-    }
-}
-
-fn main() {
-    let buf = nb_vert(4)
-    fill(buf, 4)
-}
-"#;
-
-const SINGLE_FIELD_READ: &str = r#"
-value V2 { x: float, y: float }
-value Vert { pos: V2, uv: V2, id: int, w: float }
-
-@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
-fn nb_vert(n: int) -> NativeBuffer<Vert> { return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n } }
-
-fn read_one(buf: NativeBuffer<Vert>, i: int) -> float {
-    return buf[i].pos.x
-}
-
-fn main() {
-    let b = nb_vert(2)
-    print("{read_one(b, 0)}")
-}
-"#;
-
 const F32_CTOR_STORE: &str = r#"
 value V2f { x: f32, y: f32 }
 value FVert { pos: V2f, w: f32, id: int, py: f32 }

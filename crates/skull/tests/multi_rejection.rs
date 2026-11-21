@@ -6,26 +6,6 @@ fn messages(err: &skull_parser::CompilerError) -> Vec<&str> {
         .collect()
 }
 
-fn messages_owned(src: &str) -> Vec<String> {
-    let err = try_emit_module(src).expect_err("must reject");
-    messages(&err).iter().map(|m| m.to_string()).collect()
-}
-
-const THREE_SINKS: &str = r#"
-nobox value NV2 { x: float, y: float }
-global XS: [NV2] = []
-
-fn sink_one() { let t = (XS[0], 1.0) print("{t}") }
-fn sink_two() { let t = (XS[1], 2.0) print("{t}") }
-fn sink_three() { let t = (XS[2], 3.0) print("{t}") }
-
-fn main() {
-    sink_one()
-    sink_two()
-    sink_three()
-}
-"#;
-
 const TWO_FAILING_SPECIALIZATIONS: &str = r#"
 nobox value NV2 { x: float, y: float }
 global XS: [NV2] = []

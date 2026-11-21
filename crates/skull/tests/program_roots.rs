@@ -1,4 +1,4 @@
-use crate::common::{body_id, definition_symbols, fn_ref, run_main, ws_with_dependency_module};
+use crate::common::{definition_symbols, fn_ref, run_main, ws_with_dependency_module};
 use skull_mir::instance::Instance;
 
 const LIB: &str = "fn engine_body() -> int { return 1 }";

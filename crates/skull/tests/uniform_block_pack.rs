@@ -37,17 +37,6 @@ fn uniform_values_expands_to_canonical_leaves() {
     assert_eq!(run_main(&lua), "true\n6");
 }
 
-const BLOOM: &str = r#"
-value BloomBlurU { radius: float, direction: Vec2, resolution: float }
-
-fn main() {
-    let f = native_buffer_float(8)
-    let i = native_buffer_int(8)
-    let u = BloomBlurU { radius: 1.0, direction: v(2.0, 3.0), resolution: 4.0 }
-    pack_uniform_block(f.ptr, i.ptr, u)
-}
-"#;
-
 const GLOBAL_SOURCE: &str = r#"
 value Wide { a: Vec4, b: Vec4, c: Vec4, d: Vec4, m: Mat4 }
 

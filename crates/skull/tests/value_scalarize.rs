@@ -1,37 +1,5 @@
 use crate::common::{emit_module, function_body, run_main};
 
-const VALUE_FIELD_AND_WHOLE_USE: &str = r#"
-value Color { r: float, g: float, b: float, a: float }
-value FixVec3 { x: float, y: float, z: float }
-@nomangle inline(lua) fn __same(a: Color, b: Color) -> bool = "return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a"
-
-fn coexist(k: float) -> float {
-    let c = Color { r: k, g: 0.5, b: 0.0, a: 1.0 }
-    let v = FixVec3 { x: k, y: 20.0, z: 30.0 }
-    let r = c.r
-    let z = v.z
-    let c2 = Color { r: k, g: 0.5, b: 0.0, a: 1.0 }
-    let eq = if __same(c, c2) { 1.0 } else { 0.0 }
-    return (r + z) + eq
-}
-
-@nomangle inline(lua) fn __out(x: float) = "io.write(tostring(x))"
-fn main() {
-    __out(coexist(2.0))
-}
-"#;
-
-const NESTED_SCALAR_ABI: &str = r#"
-value V2 { x: float, y: float }
-value Rect { tl: V2, br: V2 }
-
-@scalar_abi inline(lua) fn nested_leaves(r: Rect) -> float = """
-    return r__tl__x + r__br__y
-"""
-
-fn main() { let _ = nested_leaves(Rect { tl: V2 { x: 1.0, y: 2.0 }, br: V2 { x: 4.0, y: 8.0 } }) }
-"#;
-
 const UNDERSCORE_FIELD_NO_COLLISION: &str = r#"
 nobox value V2 { x: float, y: float }
 nobox value Ok { tl__z: float, tl: V2 }
@@ -46,41 +14,6 @@ fn apply(f: (Ok) -> float, r: Ok) -> float { return f(r) }
 fn main() {
     let r = Ok { tl__z: 7.0, tl: V2 { x: 1.0, y: 2.0 } }
     __out(apply(fine, r))
-}
-"#;
-
-const UNMARKED_VALUE_VIA_NULLABLE_FN_VALUE: &str = r#"
-value V2 { x: float, y: float }
-value Box2 { tl: V2, w: float }
-
-@scalar_abi inline(lua) fn probe(r: Box2) -> float = """
-    return r__tl__x + r__tl__y * 10.0 + r__w * 100.0
-"""
-
-fn apply(f: ((Box2) -> float)?, r: Box2) -> float {
-    if f != null { return f(r) }
-    return -1.0
-}
-
-fn main() {
-    let r = Box2 { tl: V2 { x: 1.0, y: 2.0 }, w: 3.0 }
-    print("{apply(probe, r)}")
-}
-"#;
-
-const UNMARKED_VALUE_VIA_FN_VALUE: &str = r#"
-value V2 { x: float, y: float }
-value Box2 { tl: V2, w: float }
-
-@scalar_abi inline(lua) fn probe(r: Box2) -> float = """
-    return r__tl__x + r__tl__y * 10.0 + r__w * 100.0
-"""
-
-fn apply(f: (Box2) -> float, r: Box2) -> float { return f(r) }
-
-fn main() {
-    let r = Box2 { tl: V2 { x: 1.0, y: 2.0 }, w: 3.0 }
-    print("{apply(probe, r)}")
 }
 "#;
 

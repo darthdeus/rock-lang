@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, run_main};
+use crate::common::{emit_module, run_main};
 
 fn display_tiers(n: usize) -> String {
     let list = |f: &dyn Fn(usize) -> String| (0..n).map(f).collect::<Vec<_>>().join(", ");
@@ -77,22 +77,4 @@ fn wide_display_helpers_load_and_render() {
     let n = 100;
     let lua = emit_module(&display_tiers(n));
     assert_eq!(run_main(&lua), display_tiers_expected(n));
-}
-
-fn accumulation(statements: usize) -> String {
-    let params = (0..10)
-        .map(|i| format!("p{i}: int"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let adds = (0..statements)
-        .map(|i| format!("    total += p{}\n", i % 10))
-        .collect::<String>();
-    let args = (1..=10)
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "fn sum({params}) -> int {{\n    let total = 0\n{adds}    return total\n}}\n\
-         fn main() {{ print(\"{{sum({args})}}\") }}\n"
-    )
 }

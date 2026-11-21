@@ -16,26 +16,6 @@ fn register_moves(body: &str) -> Vec<&str> {
         .collect()
 }
 
-const YIELD_ACROSS: &str = r#"
-global seed: int = 3
-
-co fn scaled(n: int) -> Coroutine<float> {
-    let x = seed * n
-    let y = x as float
-    yield y * y + y
-    seed = 100
-    yield y * 2.0 + y
-    yield (x + 1) as float
-}
-
-fn main() {
-    let c = scaled(2)
-    print(c.resume())
-    print(c.resume())
-    print(c.resume())
-}
-"#;
-
 const SELECTION: &str = r#"
 fn min_param(x: int, b: float) -> float {
     let a = x as float
