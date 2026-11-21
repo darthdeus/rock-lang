@@ -24,18 +24,20 @@ pub(crate) struct LiveProjectSnapshot {
     comptime_inputs: bone_semantic::inference::ComptimeInputs,
     aliases: bone_incremental::session::NsAliases,
     sources: SourceFiles,
-    entry_path: String,
-    include_tests: bool,
-    previous_contents: Vec<(String, String)>,
+    previous_contents: Vec<(usize, String)>,
+}
+
+struct Edit {
+    index: usize,
+    id: String,
+    text: String,
 }
 
 pub struct LiveProject {
     session: bone_incremental::session::Session,
     dir: String,
     sources: SourceFiles,
-    entry_path: String,
     include_tests: bool,
-    lint_scope: Scope,
     lint_cache: bone_lints::IncrementalLintCache,
 }
 
@@ -60,76 +62,45 @@ impl LiveProject {
         include_tests: bool,
         sources: SourceFiles,
     ) -> Result<Self> {
-        let scope = if include_tests {
-            Scope::WholeProject
-        } else {
-            Scope::ProductionOnly
-        };
-        Self::checked(dir, include_tests, sources, scope)
-    }
-
-    fn checked(
-        dir: &str,
-        include_tests: bool,
-        sources: SourceFiles,
-        lint_scope: Scope,
-    ) -> Result<Self> {
         let mut project = Self {
-            entry_path: entry_path(&sources)?,
             session: new_session(dir, &sources)?,
             dir: dir.to_string(),
             sources,
             include_tests,
-            lint_scope,
             lint_cache: Default::default(),
         };
         project.verdict("in initial build")?;
         Ok(project)
     }
 
-    fn snapshot(&mut self, changed: &[PathBuf]) -> LiveProjectSnapshot {
-        let mut previous_contents = Vec::new();
-        for path in changed {
-            let Ok(canonical) = std::fs::canonicalize(path) else {
-                continue;
-            };
-            let id = canonical.to_string_lossy().into_owned();
-            let Some(source) = self
-                .sources
-                .files
-                .iter()
-                .find(|source| source.borrow().file.to_id_path() == id)
-            else {
-                continue;
-            };
-            if previous_contents.iter().any(|(old_id, _)| old_id == &id) {
-                continue;
-            }
-            previous_contents.push((id, source.borrow().contents.clone()));
-        }
+    fn source_index(&self, id: &str) -> Option<usize> {
+        self.sources
+            .files
+            .iter()
+            .position(|source| source.borrow().file.to_id_path() == id)
+    }
+
+    fn snapshot(&self, edits: &[Edit]) -> LiveProjectSnapshot {
         LiveProjectSnapshot {
             comptime_inputs: self.session.ws.comptime_inputs.clone(),
             aliases: self.session.aliases.clone(),
             sources: self.sources.clone(),
-            entry_path: self.entry_path.clone(),
-            include_tests: self.include_tests,
-            previous_contents,
+            previous_contents: edits
+                .iter()
+                .map(|edit| {
+                    (
+                        edit.index,
+                        self.sources.files[edit.index].borrow().contents.clone(),
+                    )
+                })
+                .collect(),
         }
     }
 
     fn restore(&mut self, snapshot: LiveProjectSnapshot) -> Result<()> {
         self.sources = snapshot.sources;
-        self.entry_path = snapshot.entry_path;
-        self.include_tests = snapshot.include_tests;
-        for (id, contents) in snapshot.previous_contents {
-            if let Some(source) = self
-                .sources
-                .files
-                .iter()
-                .find(|source| source.borrow().file.to_id_path() == id)
-            {
-                source.borrow_mut().contents = contents;
-            }
+        for (index, contents) in snapshot.previous_contents {
+            self.sources.files[index].borrow_mut().contents = contents;
         }
         // Rollback uses the package facts of the last good build: the current
         // manifest may be the input that made the candidate fail.
@@ -183,67 +154,44 @@ impl LiveProject {
         &mut self,
         changed: &[PathBuf],
     ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
-        self.transaction(changed, "compile error", |project| {
-            project.recompile_inner(changed)
+        let started = Instant::now();
+        let edits: Option<Vec<_>> = changed
+            .iter()
+            .map(|path| {
+                let path = fs_err::canonicalize(path).ok()?;
+                let id = path.to_string_lossy().into_owned();
+                let index = self.source_index(&id)?;
+                let text = fs_err::read_to_string(&path).ok()?;
+                Some(Edit { index, id, text })
+            })
+            .collect();
+        if let Some(edits) = edits.filter(|edits| !edits.is_empty()) {
+            return self.transaction(edits, "compile error", |project, edits| {
+                project.update(edits, started)
+            });
+        }
+        let sources = project_sources(&self.dir, self.include_tests)?;
+        self.transaction(Vec::new(), "compile error", |project, _| {
+            project.rebuild(sources, started)
         })
     }
 
-    /// Run `change` against a snapshot of `touched`, restoring the snapshot
-    /// when it fails.
     fn transaction(
         &mut self,
-        touched: &[PathBuf],
+        edits: Vec<Edit>,
         failure: &str,
-        change: impl FnOnce(&mut Self) -> Result<LiveUpdate>,
+        change: impl FnOnce(&mut Self, Vec<Edit>) -> Result<LiveUpdate>,
     ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
-        let snapshot = self.snapshot(touched);
-        let result = change(self);
-        let error = match result {
-            Ok(update) => return Ok((update, snapshot)),
-            Err(error) => error,
-        };
-        let restored = self.restore(snapshot);
-        match restored {
-            Ok(()) => Err(error),
-            Err(restore) => Err(anyhow::anyhow!(
-                "live project rollback failed after {failure}: {restore}; original error: {error}"
-            )),
-        }
-    }
-
-    fn recompile_inner(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
-        let started = Instant::now();
-        let mut need_full = changed.is_empty();
-        let mut feed = Vec::new();
-        if !need_full {
-            for path in changed {
-                let Ok(canonical) = std::fs::canonicalize(path) else {
-                    need_full = true;
-                    break;
-                };
-                let id = canonical.to_string_lossy().into_owned();
-                let Some(source) = self
-                    .sources
-                    .files
-                    .iter()
-                    .find(|source| source.borrow().file.to_id_path() == id)
-                else {
-                    need_full = true;
-                    break;
-                };
-                let Ok(text) = fs_err::read_to_string(&canonical) else {
-                    need_full = true;
-                    break;
-                };
-                source.borrow_mut().contents = text.clone();
-                feed.push((id, text));
+        let snapshot = self.snapshot(&edits);
+        match change(self, edits) {
+            Ok(update) => Ok((update, snapshot)),
+            Err(error) => {
+                self.restore(snapshot).map_err(|restore| anyhow::anyhow!(
+                    "live project rollback failed after {failure}: {restore}; original error: {error}"
+                ))?;
+                Err(error)
             }
         }
-        if need_full {
-            let sources = project_sources(&self.dir, self.include_tests)?;
-            return self.rebuild(sources, started);
-        }
-        self.update(&feed, started)
     }
 
     #[cfg(test)]
@@ -257,42 +205,31 @@ impl LiveProject {
         path: &Path,
         new_text: &str,
     ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
-        self.transaction(&[path.to_path_buf()], "in-memory edit error", |project| {
-            project.apply_edit_inner(path, new_text)
-        })
-    }
-
-    fn apply_edit_inner(&mut self, path: &Path, new_text: &str) -> Result<LiveUpdate> {
         let started = Instant::now();
         let canonical = std::fs::canonicalize(path).map_err(|e| {
             anyhow::anyhow!("apply_edit: cannot canonicalize `{}`: {e}", path.display())
         })?;
         let id = canonical.to_string_lossy().into_owned();
-        let Some(source) = self
-            .sources
-            .files
-            .iter()
-            .find(|source| source.borrow().file.to_id_path() == id)
-        else {
-            anyhow::bail!(
+        let index = self.source_index(&id).ok_or_else(|| {
+            anyhow::anyhow!(
                 "apply_edit: `{id}` is not a discovered source of `{}`",
                 self.dir
-            );
+            )
+        })?;
+        let edit = Edit {
+            index,
+            id,
+            text: new_text.to_string(),
         };
-        source.borrow_mut().contents = new_text.to_string();
-        self.update(&[(id, new_text.to_string())], started)
+        self.transaction(vec![edit], "in-memory edit error", |project, edits| {
+            project.update(edits, started)
+        })
     }
 
     pub(crate) fn source_text(&self, path: &Path) -> Option<String> {
-        let id = std::fs::canonicalize(path)
-            .ok()?
-            .to_string_lossy()
-            .into_owned();
-        self.sources
-            .files
-            .iter()
-            .find(|source| source.borrow().file.to_id_path() == id)
-            .map(|source| source.borrow().contents.clone())
+        let canonical = std::fs::canonicalize(path).ok()?;
+        let index = self.source_index(&canonical.to_string_lossy())?;
+        Some(self.sources.files[index].borrow().contents.clone())
     }
 
     pub fn workspace(&self) -> &Workspace {
@@ -323,7 +260,11 @@ impl LiveProject {
                 self.session.workspace(),
                 &self.sources,
                 Path::new(&self.dir),
-                self.lint_scope,
+                if self.include_tests {
+                    Scope::WholeProject
+                } else {
+                    Scope::ProductionOnly
+                },
                 change,
             );
             "lint"
@@ -343,7 +284,6 @@ impl LiveProject {
     }
 
     fn rebuild(&mut self, sources: SourceFiles, started: Instant) -> Result<LiveUpdate> {
-        self.entry_path = entry_path(&sources)?;
         self.sources = sources;
         self.lint_cache.clear();
         self.session = new_session(&self.dir, &self.sources)?;
@@ -353,15 +293,16 @@ impl LiveProject {
         })
     }
 
-    fn update(&mut self, feed: &[(String, String)], started: Instant) -> Result<LiveUpdate> {
+    fn update(&mut self, edits: Vec<Edit>, started: Instant) -> Result<LiveUpdate> {
         use bone_incremental::session::UpdateTier;
         let mut reinferred = Vec::new();
         let mut span_edits = Vec::new();
         let mut lint_changed_files = Vec::new();
         let mut full = false;
         let mut changed = false;
-        for (path, text) in feed {
-            let update = self.session.update_file(path, text).map_err(|error| {
+        for Edit { index, id, text } in edits {
+            self.sources.files[index].borrow_mut().contents = text.clone();
+            let update = self.session.update_file(&id, &text).map_err(|error| {
                 anyhow::anyhow!(
                     "{}",
                     crate::skull_backend::render_project_err(&self.sources, &error)
@@ -371,7 +312,7 @@ impl LiveProject {
             match update.tier {
                 UpdateTier::NoChange => continue,
                 UpdateTier::BodyOnly => {
-                    lint_changed_files.push(ustr::Ustr::from(path.as_str()));
+                    lint_changed_files.push(ustr::Ustr::from(id.as_str()));
                     span_edits.extend(update.text_edit);
                 }
                 UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser => full = true,
@@ -433,6 +374,10 @@ impl LiveProject {
 }
 
 fn new_session(dir: &str, sources: &SourceFiles) -> Result<bone_incremental::session::Session> {
+    anyhow::ensure!(
+        !sources.files.is_empty(),
+        "bone: project has no .rock files"
+    );
     crate::bone_backend::bone_session_for_emission(
         crate::bone_backend::session_files(sources),
         Path::new(dir),
@@ -443,21 +388,6 @@ fn new_session(dir: &str, sources: &SourceFiles) -> Result<bone_incremental::ses
             crate::skull_backend::render_project_err(sources, &error)
         )
     })
-}
-
-/// A change to file membership or package facts requires a new session.
-fn entry_path(sources: &SourceFiles) -> Result<String> {
-    let mut first = None;
-    let mut main = None;
-    for source in &sources.files {
-        let path = source.borrow().file.to_id_path();
-        first.get_or_insert_with(|| path.clone());
-        if path.ends_with("/main.rock") || path.ends_with("\\main.rock") || path == "main.rock" {
-            main = Some(path);
-        }
-    }
-    main.or(first)
-        .ok_or_else(|| anyhow::anyhow!("bone: project has no .rock files"))
 }
 
 #[cfg(test)]

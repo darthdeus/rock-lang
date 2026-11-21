@@ -2242,7 +2242,6 @@ pub enum SkullReload {
 pub struct IncrementalProject {
     project: crate::live_project::LiveProject,
     cache: skull::mir_emit::SkullEmitCache,
-    preamble: String,
     shape_hashes: skull::ShapeHashes,
 }
 
@@ -2343,7 +2342,6 @@ impl IncrementalProject {
         Ok(IncrementalProject {
             project,
             cache,
-            preamble,
             shape_hashes,
         })
     }
@@ -2531,18 +2529,12 @@ impl IncrementalProject {
                 let lua = GameProgram::new(emit.lua, ws);
                 ((lua, emits_main), c)
             };
-            self.preamble =
+            let preamble =
                 crate::stone_runtime::program_preamble(self.project.dir(), ProgramKind::Game)?;
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             let ((lua, emits_main), staged_cache) = lua;
-            let bytes = write_full_main(
-                &self.preamble,
-                &lua,
-                emits_main,
-                main_path,
-                incremental_path,
-            )?;
+            let bytes = write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
             self.cache = staged_cache;
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Full {
@@ -2631,15 +2623,9 @@ impl IncrementalProject {
             let lua = GameProgram::new(emit.lua, ws);
             (lua, c, emits_main)
         };
-        self.preamble =
+        let preamble =
             crate::stone_runtime::program_preamble(self.project.dir(), ProgramKind::Game)?;
-        write_full_main(
-            &self.preamble,
-            &lua,
-            emits_main,
-            main_path,
-            incremental_path,
-        )?;
+        write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
         self.cache = cache; // resets changed_since_full -- the overlay is now folded in
         self.shape_hashes = skull::type_shape_hashes(self.project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
