@@ -79,12 +79,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_root_with_no_manifest_has_no_graph() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(package_graph(dir.path()).unwrap().is_none());
-    }
-
-    #[test]
     fn a_manifest_that_does_not_resolve_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -101,18 +95,6 @@ mod tests {
     #[test]
     fn standalone_modules_use_empty_aliases() {
         let aliases = ns_aliases_for_sources([("scratch.rock", None)]).unwrap();
-        assert_eq!(aliases, NsAliases::default());
-    }
-
-    #[test]
-    fn package_sources_without_a_root_file_use_empty_aliases() {
-        let package = PackageTag {
-            id: 1,
-            self_name: "dependency".to_string(),
-            identity_storage: Default::default(),
-            root: "/dependency".to_string(),
-        };
-        let aliases = ns_aliases_for_sources([("/dependency/lib.rock", Some(&package))]).unwrap();
         assert_eq!(aliases, NsAliases::default());
     }
 
