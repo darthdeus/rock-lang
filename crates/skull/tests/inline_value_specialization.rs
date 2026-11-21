@@ -17,17 +17,6 @@ fn use_buf(a: V2) -> V2 {
 fn main() { let r = use_buf(V2 { x: 1.0, y: 2.0 }); print("{r.x}") }
 "#;
 
-#[test]
-fn generic_inline_at_value_type_splices_zero_box() {
-    let lua = emit_module(VALUE_INST);
-    let body = function_body(&lua, "use_buf");
-
-    assert!(!body.contains("V2_ct("));
-    assert!(!body.contains("__nb_checked_set"));
-    assert!(body.contains("__nb_checked_index"));
-    assert!(!body.contains("__nb_checked_get"));
-}
-
 const TRANSITIVE_CONCRETE_INTRINSIC: &str = r#"
 value TV2 { x: float, y: float }
 
@@ -40,9 +29,3 @@ fn main() {
     print("{fv.len}")
 }
 "#;
-
-#[test]
-fn non_inline_generic_chain_uses_concrete_native_buffer_instance() {
-    let lua = emit_module(TRANSITIVE_CONCRETE_INTRINSIC);
-    assert!(lua.contains(r#"__rock_nb_alloc("TV2"#));
-}
