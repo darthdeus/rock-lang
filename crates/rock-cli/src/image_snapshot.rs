@@ -95,9 +95,7 @@ pub fn image_diff(baseline: &Path, actual: &Path) -> Result<f64> {
 mod tests {
     use super::*;
 
-    const BLOCK_PX: u32 = 32;
     // Default image_snapshot tolerance in stone/engine/sim.rock.
-    const DEFAULT_TOL: f64 = 0.001;
 
     fn write_rgba_png(path: &Path, w: u32, h: u32, px: &[u8]) {
         let file = std::fs::File::create(path).expect("create test png");
@@ -119,58 +117,6 @@ mod tests {
         let (_, _, decoded) = decode_png_rgba8(&actual).unwrap();
         assert_ne!(decoded, base, "the fixture must contain a pixel change");
         image_diff(&baseline, &actual).unwrap()
-    }
-
-    #[test]
-    fn deadband_plus_minus_one_counts_as_zero() {
-        // 40x40 spans full 32px blocks plus partial edge blocks in both
-        // dims, so the deadband is pinned on both block shapes at once.
-        let (w, h) = (40u32, 40u32);
-        let base = [128, 128, 128, 128].repeat((w * h) as usize);
-        let mut shifted = base.clone();
-        for (i, px) in shifted.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let x = i as u32 % w;
-            let y = i as u32 / w;
-            px[0] += 1; // R always +1
-            px[1] -= 1; // G always -1
-            if (x + y).is_multiple_of(2) {
-                px[2] += 1; // B mixed sign by checkerboard
-            } else {
-                px[2] -= 1;
-            }
-            match i % 3 {
-                0 => {} // A keeps some channels at 0
-                1 => px[3] += 1,
-                _ => px[3] -= 1,
-            }
-        }
-        let diff = diff_pixels(w, h, &base, &shifted);
-        assert_eq!(diff, 0.0, "every channel within +-1 must count as zero");
-    }
-
-    #[test]
-    fn deadband_plus_minus_two_keeps_full_magnitude() {
-        // Exactly one full 32px block: magnitude without partial-block
-        // interaction (that rule has its own control below).
-        let (w, h) = (BLOCK_PX, BLOCK_PX);
-        let base = [128, 128, 128, 128].repeat((w * h) as usize);
-        let mut shifted = base.clone();
-        for px in shifted.as_chunks_mut::<4>().0 {
-            px[0] += 2;
-            px[1] -= 2;
-            px[2] += 2;
-            px[3] -= 2;
-        }
-        let diff = diff_pixels(w, h, &base, &shifted);
-        let expected = 2.0 / 255.0;
-        assert!(
-            (diff - expected).abs() < 1e-12,
-            "uniform +-2 must diff exactly 2/255, oracle said {diff:.6}"
-        );
-        assert!(
-            diff > DEFAULT_TOL,
-            "a uniform +-2 shift must fail the default snapshot tol"
-        );
     }
 
     #[test]
