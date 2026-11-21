@@ -1204,54 +1204,53 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Bind `b` to a value's leaves: one cell per leaf, registered in
-    /// `group_binds`.
     pub(crate) fn bind_leaves(
         &mut self,
         b: Idx<BindingInfo>,
         leaves: &[Idx<Inst>],
         shape: ValueShape,
     ) -> Result<(), CompilerError> {
-        let bname = self.body.binding_arena[b].name;
-        if let Some(cells) = self.new_flat_enum_cells(b, bname, &shape)? {
-            if cells.len() != leaves.len() {
+        self.bind_leaf_slots(b, leaves, shape, "binding")
+    }
+
+    pub(super) fn bind_leaf_slots(
+        &mut self,
+        b: Idx<BindingInfo>,
+        leaves: &[Idx<Inst>],
+        shape: ValueShape,
+        reason: &str,
+    ) -> Result<(), CompilerError> {
+        if let Some(width) = self.flat_binding_width(&shape)? {
+            if width != leaves.len() {
                 return Err(self.gap_here(format!(
-                    "flat enum {} has {} binding cells for {} leaves",
+                    "flat enum {} has {width} {reason} cells for {} leaves",
                     shape.name,
-                    cells.len(),
                     leaves.len()
                 )));
             }
-            for (cell, &value) in cells.iter().zip(leaves) {
-                self.store_cell(*cell, value);
-            }
-            let cells = cells.into_iter().map(GroupLeaf::Cell).collect();
-            self.group_binds.insert(raw(b), (cells, shape));
+        } else if self.binding_stays_unwritten(b) {
+            self.bind_value_leaves(b, leaves, shape);
             return Ok(());
         }
-        if self.binding_stays_unwritten(b) {
-            self.f.value_lets += leaves.len();
-            self.f.value_leaves += leaves.len();
-            let values = leaves.iter().map(|&v| GroupLeaf::Value(v)).collect();
-            self.group_binds.insert(raw(b), (values, shape));
-            return Ok(());
-        }
-        let cells: Vec<GroupLeaf> = leaves
-            .iter()
-            .enumerate()
-            .map(|(li, &value)| {
-                let c = self.new_binding_cell(
-                    b,
-                    crate::names::indexed(bname.as_str(), "__", li),
-                    None,
-                    crate::names::ustr(li.to_string().as_str()),
-                );
-                self.store_cell(c, value);
-                GroupLeaf::Cell(c)
-            })
+        let cells = self
+            .store_binding_slots(b, leaves)
+            .into_iter()
+            .map(GroupLeaf::Cell)
             .collect();
         self.group_binds.insert(raw(b), (cells, shape));
         Ok(())
+    }
+
+    pub(super) fn bind_value_leaves(
+        &mut self,
+        binding: Idx<BindingInfo>,
+        leaves: &[Idx<Inst>],
+        shape: ValueShape,
+    ) {
+        self.f.value_lets += leaves.len();
+        self.f.value_leaves += leaves.len();
+        let values = leaves.iter().copied().map(GroupLeaf::Value).collect();
+        self.group_binds.insert(raw(binding), (values, shape));
     }
 
     pub(crate) fn value_shape_leaf_monos(&self, shape: &ValueShape) -> Option<Vec<MonoTy>> {
@@ -1307,21 +1306,7 @@ impl<'a> Builder<'a> {
         {
             self.tuple_bind_boxes.insert(raw(b), boxed);
         }
-        let bname = self.body.binding_arena[b].name;
-        let cells: Vec<Idx<Cell>> = slots
-            .iter()
-            .enumerate()
-            .map(|(si, &value)| {
-                let c = self.new_binding_cell(
-                    b,
-                    crate::names::indexed(bname.as_str(), "__", si),
-                    None,
-                    crate::names::ustr(si.to_string().as_str()),
-                );
-                self.store_cell(c, value);
-                c
-            })
-            .collect();
+        let cells = self.store_binding_slots(b, slots);
         self.tuple_binds.insert(raw(b), (cells, shape));
     }
 

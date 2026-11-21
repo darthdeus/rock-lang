@@ -1,30 +1,23 @@
 use super::*;
 impl<'a> Builder<'a> {
-    pub(crate) fn new_flat_enum_cells(
-        &mut self,
-        binding: Idx<BindingInfo>,
-        name: Ustr,
+    pub(super) fn flat_binding_width(
+        &self,
         shape: &ValueShape,
-    ) -> Result<Option<Vec<Idx<Cell>>>, CompilerError> {
-        let Some(flat) =
-            EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned())
-        else {
+    ) -> Result<Option<usize>, CompilerError> {
+        let Some(plan) = EnumPlan::for_name(self.ws, shape.name) else {
             return Ok(None);
         };
-        if flat.name != shape.name || shape.leaf_count() != flat.leaf_count() {
+        let Some(flat) = plan.flat() else {
+            return Ok(None);
+        };
+        let width = flat.leaf_count();
+        if shape.name != flat.name || shape.leaf_count() != width {
             return Err(self.gap_here(format!(
                 "flat enum {} has a cell shape that differs from its compiler-owned layout",
                 shape.name
             )));
         }
-        let cells = (0..flat.leaf_count())
-            .map(|index| {
-                let cell_name = crate::names::indexed(name.as_str(), "__", index);
-                let projection = crate::names::indexed("", "", index);
-                self.new_binding_cell(binding, cell_name, None, projection)
-            })
-            .collect();
-        Ok(Some(cells))
+        Ok(Some(width))
     }
 
     pub(crate) fn lower_flat_value(

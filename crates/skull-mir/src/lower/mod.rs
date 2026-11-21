@@ -1527,6 +1527,32 @@ impl<'a> Builder<'a> {
         cell
     }
 
+    fn new_binding_slots(&mut self, binding: Idx<BindingInfo>, width: usize) -> Vec<Idx<Cell>> {
+        let name = self.body.binding_arena[binding].name;
+        (0..width)
+            .map(|i| {
+                self.new_binding_cell(
+                    binding,
+                    crate::names::indexed(name.as_str(), "__", i),
+                    None,
+                    crate::names::indexed("", "", i),
+                )
+            })
+            .collect()
+    }
+
+    fn store_binding_slots(
+        &mut self,
+        binding: Idx<BindingInfo>,
+        slots: &[Idx<Inst>],
+    ) -> Vec<Idx<Cell>> {
+        let cells = self.new_binding_slots(binding, slots.len());
+        for (&cell, &value) in cells.iter().zip(slots) {
+            self.store_cell(cell, value);
+        }
+        cells
+    }
+
     fn body_facts(&self) -> &BodyFacts {
         self.body_facts.get_or_init(|| BodyFacts::of(self.body))
     }
@@ -2034,49 +2060,16 @@ impl<'a> Builder<'a> {
             self.binds.insert(raw(pb), cell);
             return Ok(());
         }
-        let cells = match slot {
-            RepLayout::Leaves(shape) => {
-                match self.new_flat_enum_cells(pb, name, shape)? {
-                    Some(cells) => cells,
-                    None => {
-                        // Refuses nullable nesting, so every slot is a data leaf of the type it
-                        // names.
-                        let leaf_tys = self.value_shape_leaf_monos(shape);
-                        (0..slot.slot_count(self.scx.rep_arena()))
-                            .map(|li| {
-                                let cell = self.new_binding_cell(
-                                    pb,
-                                    crate::names::indexed(name.as_str(), "__", li),
-                                    None,
-                                    crate::names::indexed("", "", li),
-                                );
-                                if let Some(ty) = leaf_tys.as_ref().and_then(|tys| tys.get(li)) {
-                                    self.f.cells[cell].never_nil =
-                                        crate::nilness::monoty_never_nil(self.ws, ty);
-                                }
-                                cell
-                            })
-                            .collect()
-                    }
-                }
+        let width = slot.slot_count(self.scx.rep_arena());
+        let leaf_tys = match slot {
+            RepLayout::Leaves(shape) if self.flat_binding_width(shape)?.is_none() => {
+                self.value_shape_leaf_monos(shape)
             }
-            RepLayout::Tuple(_) | RepLayout::Opaque => (0..slot.slot_count(self.scx.rep_arena()))
-                .map(|li| {
-                    self.new_binding_cell(
-                        pb,
-                        crate::names::indexed(name.as_str(), "__", li),
-                        None,
-                        crate::names::indexed("", "", li),
-                    )
-                })
-                .collect(),
+            _ => None,
         };
-        if cells.len() != slot.slot_count(self.scx.rep_arena()) {
-            return Err(self.gap_here(format!(
-                "parameter {name} has {} cells for {} ABI slots",
-                cells.len(),
-                slot.slot_count(self.scx.rep_arena())
-            )));
+        let cells = self.new_binding_slots(pb, width);
+        for (&cell, ty) in cells.iter().zip(leaf_tys.iter().flatten()) {
+            self.f.cells[cell].never_nil = crate::nilness::monoty_never_nil(self.ws, ty);
         }
         self.f.params.extend(cells.iter().copied());
         match slot {
@@ -2344,84 +2337,92 @@ impl<'a> Builder<'a> {
             {
                 self.f.param_default_materialized.insert(i);
             }
-            // An omitted scalarized value arg arrives as N nils; the first leaf is the guard.
-            if let Some((leaves, shape)) = self.group_binds.get(&raw(pb)).cloned() {
-                let cells: Vec<Idx<Cell>> = leaves.iter().map(|l| l.cell()).collect();
-                for &cell in &cells {
-                    self.f.mark_default_param(cell);
-                }
-                let cur = self.emit_cur(Inst::Load(cells[0]));
-                let is_nil = self.is_nil(cur);
-                self.f.param_default_guards.insert(is_nil, i);
-                let then_bb = self.f.new_block();
-                let join = self.f.new_block();
-                self.branch_to(is_nil, then_bb, join);
-                self.cur = then_bb;
-                let r = self.lower_expr_repr(*def)?;
-                let leaves = self.repr_to_storage_leaves(&r, &shape, "struct default")?;
-                self.f.param_default_values.insert(i, leaves.clone());
-                for (c, v) in cells.iter().zip(leaves) {
-                    self.store_cell(*c, v);
-                }
-                self.goto_if_open(join);
-                self.cur = join;
-                continue;
-            }
-            // A splatting tuple param's omitted arg arrives as nil in EVERY slot;
-            // any one slot can be a legitimately nil element, so all are tested.
-            if let Some((cells, shape)) = self.tuple_binds.get(&raw(pb)).cloned() {
-                for &cell in &cells {
-                    self.f.mark_default_param(cell);
-                }
-                let then_bb = self.f.new_block();
-                let join = self.f.new_block();
-                for &cell in &cells {
-                    let cur = self.emit_cur(Inst::Load(cell));
-                    let is_nil = self.is_nil(cur);
-                    self.f.param_default_guards.insert(is_nil, i);
-                    let next = self.f.new_block();
-                    self.branch_to(is_nil, next, join);
-                    self.cur = next;
-                }
-                self.f.set_term(self.cur, Term::Goto(then_bb));
-                self.cur = then_bb;
-                let r = self.lower_expr_repr(*def)?.into_value();
-                let slots = self.tuple_repr_to_slots(r, &shape)?;
-                self.f.param_default_values.insert(i, slots.clone());
-                for (&c, v) in cells.iter().zip(slots) {
-                    self.store_cell(c, v);
-                }
-                self.goto_if_open(join);
-                self.cur = join;
-                continue;
-            }
-            let Some(&cell) = self.binds.get(&raw(pb)) else {
+            let (slot, cells, marker) = if let Some((leaves, _)) = self.group_binds.get(&raw(pb)) {
+                (
+                    self.param_slot(i)?,
+                    leaves.iter().map(|leaf| leaf.cell()).collect(),
+                    Lit::Nil,
+                )
+            } else if let Some((cells, _)) = self.tuple_binds.get(&raw(pb)) {
+                (self.param_slot(i)?, cells.clone(), Lit::Nil)
+            } else if let Some(&cell) = self.binds.get(&raw(pb))
+                && !matches!(self.body.expr_arena[*def], Expr::Null)
+            {
+                let marker = match self.body.binding_arena[pb].declared_ty {
+                    Some(ty) if param_null_overrides_default(self.ws, self.body, i, ty) => {
+                        Lit::Omitted
+                    }
+                    _ => Lit::Nil,
+                };
+                (&RepLayout::Opaque, vec![cell], marker)
+            } else {
                 continue;
             };
-            if matches!(self.body.expr_arena[*def], Expr::Null) {
-                continue;
+            for &cell in &cells {
+                self.f.mark_default_param(cell);
             }
-            let omitted = match self.body.binding_arena[pb].declared_ty {
-                Some(ty) if param_null_overrides_default(self.ws, self.body, i, ty) => Lit::Omitted,
-                _ => Lit::Nil,
+            let (default, join) = self.branch_for_parameter_default(i, slot, &cells, marker);
+            self.cur = default;
+            let values = match slot {
+                RepLayout::Opaque => {
+                    let expected = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
+                    vec![self.lower_expr_with_expected(*def, expected)?]
+                }
+                RepLayout::Leaves(shape) => {
+                    let value = self.lower_expr_repr(*def)?;
+                    self.repr_to_storage_leaves(&value, shape, "struct default")?
+                }
+                RepLayout::Tuple(shape) => {
+                    let value = self.lower_expr_repr(*def)?.into_value();
+                    self.tuple_repr_to_slots(value, shape)?
+                }
             };
-            self.f.mark_default_param(cell);
-            let cur = self.emit_cur(Inst::Load(cell));
-            let marker = self.emit_cur(Inst::Const(omitted));
-            let is_omitted = self.emit_cur(Inst::Eq(cur, marker));
-            self.f.param_default_guards.insert(is_omitted, i);
-            let then_bb = self.f.new_block();
-            let join = self.f.new_block();
-            self.branch_to(is_omitted, then_bb, join);
-            self.cur = then_bb;
-            let expected = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
-            let dv = self.lower_expr_with_expected(*def, expected)?;
-            self.f.param_default_values.insert(i, vec![dv]);
-            self.store_cell(cell, dv);
-            self.f.set_term(self.cur, Term::Goto(join));
+            for (&cell, &value) in cells.iter().zip(&values) {
+                self.store_cell(cell, value);
+            }
+            self.f.param_default_values.insert(i, values);
+            if matches!(slot, RepLayout::Opaque) {
+                self.f.set_term(self.cur, Term::Goto(join));
+            } else {
+                self.goto_if_open(join);
+            }
             self.cur = join;
         }
         Ok(())
+    }
+
+    fn branch_for_parameter_default(
+        &mut self,
+        param: usize,
+        slot: &RepLayout,
+        cells: &[Idx<Cell>],
+        marker: Lit,
+    ) -> (Idx<Block>, Idx<Block>) {
+        let test = |s: &mut Self, cell, marker| {
+            let cur = s.emit_cur(Inst::Load(cell));
+            let marker = s.emit_cur(Inst::Const(marker));
+            let missing = s.emit_cur(Inst::Eq(cur, marker));
+            s.f.param_default_guards.insert(missing, param);
+            missing
+        };
+        if matches!(slot, RepLayout::Tuple(_)) {
+            // Every tuple lane must be nil. Individual supplied elements may be nil.
+            let default = self.f.new_block();
+            let join = self.f.new_block();
+            for &cell in cells {
+                let missing = test(self, cell, Lit::Nil);
+                let next = self.f.new_block();
+                self.branch_to(missing, next, join);
+                self.cur = next;
+            }
+            self.f.set_term(self.cur, Term::Goto(default));
+            return (default, join);
+        }
+        let missing = test(self, cells[0], marker);
+        let default = self.f.new_block();
+        let join = self.f.new_block();
+        self.branch_to(missing, default, join);
+        (default, join)
     }
 
     fn lower_root(&mut self) -> Result<(), CompilerError> {

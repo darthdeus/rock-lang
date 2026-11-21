@@ -124,25 +124,18 @@ impl<'a> Builder<'a> {
         self.mark_borrowed_value_children(&selected, &repr, self.concrete_expr_ty(value))?;
         let repr = self.own_opaque_parameter_children(repr, &selected)?;
         let leaves = self.repr_to_leaves_shape(&repr, &selected)?;
-        let unwritten = self.binding_stays_unwritten(name);
-        let mut stored = Vec::with_capacity(leaves.len());
-        for (i, value) in leaves.into_iter().enumerate() {
-            if unwritten {
-                stored.push(GroupLeaf::Value(value));
-            } else {
-                let cell = self.new_binding_cell(
-                    name,
-                    crate::names::ustr(&format!("{}__{i}", self.body.binding_arena[name].name)),
-                    None,
-                    crate::names::ustr(&i.to_string()),
-                );
-                self.store_cell(cell, value);
-                stored.push(GroupLeaf::Cell(cell));
-            }
+        if self.binding_stays_unwritten(name) {
+            self.bind_value_leaves(name, &leaves, selected);
+        } else {
+            self.f.value_lets += leaves.len();
+            self.f.value_leaves += leaves.len();
+            let cells = self
+                .store_binding_slots(name, &leaves)
+                .into_iter()
+                .map(GroupLeaf::Cell)
+                .collect();
+            self.group_binds.insert(raw(name), (cells, selected));
         }
-        self.f.value_lets += stored.len();
-        self.f.value_leaves += stored.len();
-        self.group_binds.insert(raw(name), (stored, selected));
         Ok(true)
     }
 
@@ -482,49 +475,8 @@ impl<'a> Builder<'a> {
                             }
                             None => None,
                         };
-                        if let Some((shape, leaves)) =
-                            threaded_leaves.as_ref().filter(|(shape, _)| {
-                                self.binding_stays_unwritten(name)
-                                    && !EnumPlan::for_name(self.ws, shape.name)
-                                        .is_some_and(|plan| plan.flat().is_some())
-                            })
-                        {
-                            self.f.value_lets += leaves.len();
-                            self.f.value_leaves += leaves.len();
-                            let values = leaves.iter().map(|&v| GroupLeaf::Value(v)).collect();
-                            self.group_binds.insert(raw(name), (values, shape.clone()));
-                            threaded = true;
-                        } else if let Some((shape, leaves)) = threaded_leaves {
-                            let bname = self.body.binding_arena[name].name;
-                            let cells = self
-                                .new_flat_enum_cells(name, bname, &shape)?
-                                .unwrap_or_else(|| {
-                                    (0..leaves.len())
-                                        .map(|li| {
-                                            self.new_binding_cell(
-                                                name,
-                                                crate::names::ustr(
-                                                    format!("{bname}__{li}").as_str(),
-                                                ),
-                                                None,
-                                                crate::names::ustr(li.to_string().as_str()),
-                                            )
-                                        })
-                                        .collect()
-                                });
-                            if cells.len() != leaves.len() {
-                                return Err(self.gap_here(format!(
-                                    "flat enum {} has {} call-binding cells for {} leaves",
-                                    shape.name,
-                                    cells.len(),
-                                    leaves.len()
-                                )));
-                            }
-                            for (cell, value) in cells.iter().copied().zip(leaves) {
-                                self.store_cell(cell, value);
-                            }
-                            let cells = cells.into_iter().map(GroupLeaf::Cell).collect();
-                            self.group_binds.insert(raw(name), (cells, shape));
+                        if let Some((shape, leaves)) = threaded_leaves {
+                            self.bind_leaf_slots(name, &leaves, shape, "call-binding")?;
                             threaded = true;
                         } else {
                             opaque_repr = Some(r);
@@ -602,10 +554,7 @@ impl<'a> Builder<'a> {
                                 })?,
                             };
                             if let Some((shape, leaves)) = snapshot_leaves {
-                                self.f.value_lets += leaves.len();
-                                self.f.value_leaves += leaves.len();
-                                let leaves = leaves.into_iter().map(GroupLeaf::Value).collect();
-                                self.group_binds.insert(raw(name), (leaves, shape));
+                                self.bind_value_leaves(name, &leaves, shape);
                                 continue;
                             }
                             let v = self.coerced_to_binding(v, value, name);
