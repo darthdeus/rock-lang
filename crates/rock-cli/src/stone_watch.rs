@@ -1,6 +1,7 @@
 const SESSION_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
 use crate::compiler_watch::is_compiler_source;
+use crate::file_watcher::{FileChangeEvent, FileWatcher};
 use crate::headless_scope::BoundChild;
 use crate::*;
 use std::process::Stdio;
@@ -122,14 +123,6 @@ fn retain_production_changes(
         };
         !crate::SourceFiles::is_test_only_relative_path(relative)
     });
-}
-
-fn stone_file_watcher(restart_files: Vec<PathBuf>, extra: Vec<(PathBuf, u64)>) -> FileWatcher {
-    FileWatcher::default_for_rock_sources()
-        .with_restart_suffix(PathBuf::from("tmp/restart.txt"))
-        .with_restart_files(restart_files)
-        .with_extensions(["rock", "rs", "c", "h", "toml"].map(String::from).to_vec())
-        .with_extra_files(extra)
 }
 
 fn all_file_roots(
@@ -291,7 +284,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
         rock_root.join("tmp/restart.txt"),
         PathBuf::from("tmp/restart.txt"),
     ];
-    let mut watch = stone_file_watcher(restart_files, declared).watch(Vec::new())?;
+    let mut watch = FileWatcher::for_stone(restart_files, declared).watch(Vec::new())?;
     watch.set_roots(
         watch_paths.clone(),
         all_file_roots(&sound_inputs, &native_inputs),
@@ -735,12 +728,10 @@ mod tests {
 #[cfg(test)]
 mod watch_reload_tests {
     use super::{
-        StoneChanges, categorize_stone_changes, retain_production_changes, stone_file_watcher,
-        stone_source_watch_paths,
+        StoneChanges, categorize_stone_changes, retain_production_changes, stone_source_watch_paths,
     };
-    use crate::file_watcher::Watch;
+    use crate::file_watcher::{FileChangeEvent, FileWatcher, Watch};
     use crate::game_runtime::GameCompiler;
-    use crate::{FileChangeEvent, FileWatcher};
     use std::collections::HashSet;
     use std::path::PathBuf;
     use test_utils::HANG_BACKSTOP;
@@ -824,7 +815,7 @@ mod watch_reload_tests {
         }
 
         fn watch(&self, restart: Vec<PathBuf>) -> Watch {
-            stone_file_watcher(restart, Vec::new())
+            FileWatcher::for_stone(restart, Vec::new())
                 .watch(self.source_paths())
                 .unwrap()
         }
@@ -993,7 +984,7 @@ mod watch_reload_tests {
         let inputs = crate::package::sound_watch_inputs(root.to_str().unwrap()).unwrap();
         assert!(!inputs.contains(&variants.join("preview.wav")));
         assert!(!inputs.contains(&root.join("main.rock")));
-        let mut watch = FileWatcher::default_for_rock_sources()
+        let mut watch = FileWatcher::for_stone(Vec::new(), Vec::new())
             .watch(Vec::new())
             .unwrap();
         watch
@@ -1060,7 +1051,7 @@ mod watch_reload_tests {
         let source_paths = |compiler: &GameCompiler| {
             stone_source_watch_paths(source_root.to_str().unwrap(), compiler)
         };
-        let mut watch = stone_file_watcher(Vec::new(), declared)
+        let mut watch = FileWatcher::for_stone(Vec::new(), declared)
             .watch(source_paths(&compiler))
             .unwrap();
         std::fs::write(package.join("data/unrelated.rock"), "fn unrelated() {}\n").unwrap();

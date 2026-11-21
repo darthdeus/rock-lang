@@ -4,65 +4,41 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use state::Watch;
 
-pub struct FileWatcher {
+pub(crate) struct FileWatcher {
     debounce_ms: u64,
     restart_suffix: Option<PathBuf>,
     restart_files: Vec<PathBuf>,
-    watch_extensions: Vec<String>,
+    watch_extensions: &'static [&'static str],
     /// Declared inputs, with the hash of the text the last compile saw.
-    extra_files: HashMap<PathBuf, Option<u64>>,
+    extra_files: HashMap<PathBuf, u64>,
 }
 
-impl FileWatcher {
-    fn matches_restart_suffix(&self, path: &Path) -> bool {
-        self.restart_suffix
-            .as_ref()
-            .is_some_and(|suffix| path.ends_with(suffix))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct FileChangeEvent {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FileChangeEvent {
     pub paths: HashSet<PathBuf>,
     pub is_restart_trigger: bool,
 }
 
 impl FileWatcher {
-    pub fn new() -> Self {
+    #[cfg(test)]
+    fn new() -> Self {
         Self {
             debounce_ms: 5,
             restart_suffix: None,
             restart_files: Vec::new(),
-            watch_extensions: vec!["rock".to_string()],
+            watch_extensions: &["rock"],
             extra_files: HashMap::new(),
         }
     }
 
-    pub(crate) fn default_for_rock_sources() -> Self {
+    pub(crate) fn for_stone(restart_files: Vec<PathBuf>, extra_files: Vec<(PathBuf, u64)>) -> Self {
         Self {
             debounce_ms: 100,
-            ..Self::new()
+            restart_suffix: Some("tmp/restart.txt".into()),
+            restart_files,
+            watch_extensions: &["rock", "rs", "c", "h", "toml"],
+            extra_files: extra_files.into_iter().collect(),
         }
-    }
-
-    pub fn with_restart_suffix(mut self, suffix: PathBuf) -> Self {
-        self.restart_suffix = Some(suffix);
-        self
-    }
-
-    pub(crate) fn with_restart_files(mut self, files: Vec<PathBuf>) -> Self {
-        self.restart_files = files;
-        self
-    }
-
-    pub(crate) fn with_extensions(mut self, extensions: Vec<String>) -> Self {
-        self.watch_extensions = extensions;
-        self
-    }
-
-    pub(crate) fn with_extra_files(mut self, files: Vec<(PathBuf, u64)>) -> Self {
-        self.extra_files = files.into_iter().map(|(p, h)| (p, Some(h))).collect();
-        self
     }
 
     /// Observes `paths` now; later edits are reported by [`Watch::poll`].
@@ -90,9 +66,12 @@ mod state {
         changed: (i64, i64),
     }
     impl Stamp {
-        #[cfg(unix)]
         fn read(path: &Path) -> std::io::Result<Self> {
-            let meta = std::fs::metadata(path)?;
+            Self::from_metadata(&std::fs::metadata(path)?)
+        }
+
+        #[cfg(unix)]
+        fn from_metadata(meta: &std::fs::Metadata) -> std::io::Result<Self> {
             Ok(Self {
                 inode: meta.ino(),
                 size: meta.len(),
@@ -101,8 +80,7 @@ mod state {
             })
         }
         #[cfg(not(unix))]
-        fn read(path: &Path) -> std::io::Result<Self> {
-            let meta = std::fs::metadata(path)?;
+        fn from_metadata(meta: &std::fs::Metadata) -> std::io::Result<Self> {
             let modified = meta
                 .modified()?
                 .duration_since(UNIX_EPOCH)
@@ -180,7 +158,6 @@ mod state {
         pending: Option<FileChangeEvent>,
         directories: HashMap<PathBuf, Directory>,
         files: HashMap<PathBuf, FileState>,
-        started: SystemTime,
         #[cfg(test)]
         directory_reads: u64,
     }
@@ -215,7 +192,6 @@ mod state {
                 pending: None,
                 directories: HashMap::new(),
                 files: HashMap::new(),
-                started: SystemTime::now(),
                 #[cfg(test)]
                 directory_reads: 0,
             };
@@ -237,10 +213,7 @@ mod state {
             std::thread::sleep(Duration::from_millis(self.config.debounce_ms.max(1)));
             self.poll().unwrap_or_else(|error| {
                 log::error!(target: "WATCH", "file watcher scan failed: {error:#}");
-                FileChangeEvent {
-                    paths: HashSet::new(),
-                    is_restart_trigger: false,
-                }
+                FileChangeEvent::default()
             })
         }
         /// Edits under the old roots stay pending; files that only the new
@@ -262,7 +235,7 @@ mod state {
             Ok(())
         }
         pub(crate) fn set_extra_files(&mut self, files: Vec<(PathBuf, u64)>) {
-            self.config.extra_files = files.into_iter().map(|(p, h)| (p, Some(h))).collect();
+            self.config.extra_files = files.into_iter().collect();
         }
         fn scratch(&self, path: &Path) -> bool {
             self.roots
@@ -290,16 +263,15 @@ mod state {
                 || path
                     .extension()
                     .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| {
-                        self.config
-                            .watch_extensions
-                            .iter()
-                            .any(|wanted| wanted == ext)
-                    })
+                    .is_some_and(|ext| self.config.watch_extensions.contains(&ext))
         }
         fn restart(&self, path: &Path) -> bool {
             self.config.restart_files.iter().any(|file| file == path)
-                || self.config.matches_restart_suffix(path)
+                || self
+                    .config
+                    .restart_suffix
+                    .as_ref()
+                    .is_some_and(|suffix| path.ends_with(suffix))
         }
         fn descend(&self, path: &Path) -> bool {
             !self.scratch(path)
@@ -310,29 +282,18 @@ mod state {
         fn collect(
             &mut self,
             root: &Path,
+            metadata: std::fs::Metadata,
             candidates: &mut HashSet<PathBuf>,
             visited: &mut HashSet<PathBuf>,
             ancestors: &mut HashSet<(u64, u64)>,
             now: SystemTime,
         ) -> Result<()> {
-            let metadata = match std::fs::metadata(root) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(error) => return Err(stat_error(error, root)),
-            };
             let identity = directory_identity(&metadata, root);
             if !ancestors.insert(identity) {
                 return Ok(());
             }
             visited.insert(root.to_path_buf());
-            let stamp = match Stamp::read(root) {
-                Ok(stamp) => stamp,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    self.directories.remove(root);
-                    return Ok(());
-                }
-                Err(error) => return Err(stat_error(error, root)),
-            };
+            let stamp = Stamp::from_metadata(&metadata).map_err(|error| stat_error(error, root))?;
             let reread = match self.directories.get(root) {
                 None => true,
                 Some(directory) if directory.stamp != stamp => true,
@@ -391,7 +352,11 @@ mod state {
             );
             let children = directory.children.clone();
             for child in children {
-                self.collect(&child, candidates, visited, ancestors, now)?;
+                match std::fs::metadata(&child) {
+                    Ok(meta) => self.collect(&child, meta, candidates, visited, ancestors, now)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(stat_error(error, &child)),
+                }
             }
             ancestors.remove(&identity);
             Ok(())
@@ -410,6 +375,7 @@ mod state {
                 match std::fs::metadata(&root) {
                     Ok(meta) if meta.is_dir() => self.collect(
                         &root,
+                        meta,
                         &mut candidates,
                         &mut visited,
                         &mut HashSet::new(),
@@ -428,19 +394,8 @@ mod state {
                 self.config
                     .extra_files
                     .keys()
-                    .filter(|path| self.admitted(path))
-                    .cloned(),
-            );
-            candidates.extend(
-                self.config
-                    .restart_files
-                    .iter()
-                    .filter(|path| self.admitted(path))
-                    .cloned(),
-            );
-            candidates.extend(
-                self.files
-                    .keys()
+                    .chain(&self.config.restart_files)
+                    .chain(self.files.keys())
                     .filter(|path| self.admitted(path))
                     .cloned(),
             );
@@ -452,10 +407,7 @@ mod state {
             now: SystemTime,
             initial: bool,
         ) -> Result<FileChangeEvent> {
-            let mut event = FileChangeEvent {
-                paths: HashSet::new(),
-                is_restart_trigger: false,
-            };
+            let mut event = FileChangeEvent::default();
             let mut updates = Vec::new();
             for path in &candidates {
                 let stamp = match Stamp::read(path) {
@@ -486,29 +438,14 @@ mod state {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(stat_error(error, path)),
                 };
-                let relevant = if stamps_equal {
-                    old.is_some_and(|old| old.hash != hash)
-                } else {
-                    let changed_after_start = stamp.changed.0 >= 0
-                        && UNIX_EPOCH
-                            + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32)
-                            > self.started;
-                    let declared_seed = old.is_none()
-                        && match self.config.extra_files.get(path) {
-                            None => false,
-                            Some(None) => !changed_after_start,
-                            Some(Some(compiled)) => match std::fs::read_to_string(path)
-                                .map(|text| skull_mir::mir::comptime_value_hash(&text))
-                            {
-                                Ok(current) => current == *compiled,
-                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                    continue;
-                                }
-                                Err(_) => false,
-                            },
-                        };
-
-                    !declared_seed
+                let relevant = match (old, self.config.extra_files.get(path)) {
+                    (Some(old), _) => !stamps_equal || old.hash != hash,
+                    (None, Some(compiled)) => match std::fs::read_to_string(path) {
+                        Ok(text) => skull_mir::mir::comptime_value_hash(&text) != *compiled,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(_) => true,
+                    },
+                    (None, None) => true,
                 };
                 updates.push((
                     path.clone(),
@@ -540,9 +477,6 @@ mod state {
         use super::*;
         fn observation(root: PathBuf, config: FileWatcher) -> Watch {
             Watch::new(config, vec![root]).unwrap()
-        }
-        fn stamp_ctime(stamp: &Stamp) -> SystemTime {
-            UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32)
         }
         fn set_mtime(path: &Path, time: SystemTime) {
             let duration = time
@@ -579,7 +513,7 @@ mod state {
             std::fs::write(root.join("stick.toml"), "manifest seed").unwrap();
             std::fs::write(&input, "input seed").unwrap();
             let config = FileWatcher {
-                watch_extensions: vec!["rock".into(), "toml".into()],
+                watch_extensions: &["rock", "toml"],
                 ..FileWatcher::new()
             };
             let mut observation = observation(root, config);
@@ -589,7 +523,10 @@ mod state {
                 observation.scan(false).unwrap().paths,
                 HashSet::from([source])
             );
-            observation.config.extra_files.insert(input.clone(), None);
+            observation.set_extra_files(vec![(
+                input.clone(),
+                skull_mir::mir::comptime_value_hash("input seed"),
+            )]);
             assert!(
                 observation.scan(false).unwrap().paths.is_empty(),
                 "declaring an unchanged input must not manufacture a reload"
@@ -601,11 +538,10 @@ mod state {
             );
             let pending = dir.path().canonicalize().unwrap().join("pending.txt");
             std::fs::write(&pending, "changed before first admission scan").unwrap();
-            let stamp = Stamp::read(&pending).unwrap();
-            observation.started = UNIX_EPOCH
-                + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32)
-                - Duration::from_nanos(1);
-            observation.config.extra_files.insert(pending.clone(), None);
+            observation.set_extra_files(vec![(
+                pending.clone(),
+                skull_mir::mir::comptime_value_hash("before discovery"),
+            )]);
             assert_eq!(
                 observation.scan(false).unwrap().paths,
                 HashSet::from([pending])
@@ -711,9 +647,6 @@ mod state {
             );
             let added = root.join("assets/source.rock");
             std::fs::write(&added, "new source").unwrap();
-            let stamp = Stamp::read(&added).unwrap();
-            observation.started =
-                UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32);
             assert_eq!(
                 observation.scan(false).unwrap().paths,
                 HashSet::from([added]),
@@ -856,9 +789,9 @@ mod state {
             let compiled =
                 skull_mir::mir::comptime_value_hash(&std::fs::read_to_string(&input).unwrap());
             let mut observation = observation(root.clone(), FileWatcher::new());
+            let modified = std::fs::metadata(&input).unwrap().modified().unwrap();
             std::fs::write(&input, "edited!!").unwrap();
-            let stamp = Stamp::read(&input).unwrap();
-            observation.started = stamp_ctime(&stamp);
+            set_mtime(&input, modified);
             observation.set_extra_files(vec![(input.clone(), compiled)]);
             assert_eq!(
                 observation.scan(false).unwrap().paths,

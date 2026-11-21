@@ -36,7 +36,7 @@ pub(crate) mod compile_slots;
 pub mod comptime;
 pub(crate) mod docs_index;
 mod error_test;
-pub mod file_watcher;
+mod file_watcher;
 mod formatting;
 pub mod glsl_test;
 pub mod image_snapshot;
@@ -68,7 +68,6 @@ pub use process::main;
 
 pub use cli::{Args, Backend, Command};
 pub use common::*;
-pub use file_watcher::*;
 pub(crate) use formatting::*;
 
 /// Language fixtures from the same source revision as this compiler.
