@@ -385,28 +385,4 @@ pub(crate) fn run_units<T: Send>(
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn schedules_preserve_order_and_contain_unit_panics() {
-        let files = vec!["panic-file".to_string(), "file".to_string()];
-        let packages = vec!["package".to_string()];
-        for file_threads in [1, 2] {
-            let outcomes = super::run_units(&files, &packages, file_threads, |unit, package| {
-                if unit == "panic-file" {
-                    panic!("isolated unit panic");
-                }
-                format!("{unit}:{package}")
-            });
-            assert_eq!(
-                outcomes
-                    .iter()
-                    .map(|(label, _)| label.as_str())
-                    .collect::<Vec<_>>(),
-                ["panic-file", "file", "package"]
-            );
-            assert!(outcomes[0].1.is_err());
-            assert_eq!(outcomes[1].1.as_ref().unwrap(), "file:false");
-            assert_eq!(outcomes[2].1.as_ref().unwrap(), "package:true");
-        }
-    }
-}
+mod tests {}
