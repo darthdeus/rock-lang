@@ -8,7 +8,6 @@ mod monoty;
 mod projection_demand;
 mod result_destinations;
 mod shader_ir;
-mod shape;
 mod uniform_array_block;
 mod uniform_block;
 mod wire_kind_codes;

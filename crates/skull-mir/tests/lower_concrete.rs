@@ -518,10 +518,6 @@ fn assert_xy_fields(mir: &MirFunc, name: &str) {
     ));
 }
 
-fn field(inst: &Inst, owner: Idx<Inst>, key: &str) -> bool {
-    matches!(inst, Inst::Field { base, field, .. } if *base == owner && *field == key)
-}
-
 #[test]
 fn nullable_nobox_presence_normalizes_escaped_boolean() {
     let src = "nobox value Id { n: int } struct State { id: Id? = null }

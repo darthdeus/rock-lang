@@ -86,10 +86,3 @@ impl CoroutinePlan {
         format!("{}{slot}", self.base)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::monoty::MonoCtor;
-    use ustr::Ustr;
-}

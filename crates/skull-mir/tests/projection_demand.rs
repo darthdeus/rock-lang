@@ -18,13 +18,6 @@ fn fields(body: &MirFunc) -> usize {
         .count()
 }
 
-fn wide_fields() -> String {
-    (0..50)
-        .map(|i| format!("f{i}: int"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[test]
 fn nullable_native_field_snapshot_reads_scalar_aliases() {
     let source = "value Point { x: int, y: int }\n\
