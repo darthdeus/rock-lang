@@ -2448,86 +2448,65 @@ mod tests {
     }
 
     #[test]
-    fn client_rejects_rows_the_ingest_would_refuse() {
+    fn client_rejects_invalid_identity() {
         let root = fresh_root();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-
-        assert_eq!(
-            spool.record_stat(&"x".repeat(129), 1).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert_eq!(
-            spool.record_stat("valid", -1).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert_eq!(queue_len(&spool.events_path), 0);
+        let check = |identity| {
+            assert_eq!(
+                TelemetrySpool::open(&root, identity).err().unwrap().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        };
         let mut bad_identity = identity();
         bad_identity.channel = "playtest/other".into();
-        assert_eq!(
-            TelemetrySpool::open(&root, bad_identity)
-                .err()
-                .unwrap()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
+        check(bad_identity);
         for game in ["", ".", "..", "DEMO", "demo/other", "-demo"] {
             let mut bad_identity = identity();
             bad_identity.game = game.into();
-            assert_eq!(
-                TelemetrySpool::open(&root, bad_identity)
-                    .err()
-                    .unwrap()
-                    .kind(),
-                io::ErrorKind::InvalidInput,
-                "accepted game {game:?}"
-            );
+            check(bad_identity);
         }
     }
 
     #[test]
-    fn ffi_validation_is_the_clients_admission() {
+    fn ffi_and_spool_enforce_event_admission() {
         let root = fresh_root();
         let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-        let cases: [(&str, i64, &str); 6] = [
-            ("probe", 1, ""),
-            ("probe", 1, r#"{"k":[1,"a"]}"#),
-            ("probe", -1, ""),
-            (&"x".repeat(129), 1, ""),
-            ("probe", 1, r#"{"k":{"nested":1}}"#),
-            ("probe", 1, "not json"),
-        ];
-        for (name, timestamp, data) in cases {
+        let events_path = spool.events_path.clone();
+        let mut check = |name: &str, time, data: &str, accepted: bool| {
             let c_name = std::ffi::CString::new(name).unwrap();
             let c_data = std::ffi::CString::new(data).unwrap();
-            let validated = stone_telemetry_validate(c_name.as_ptr(), timestamp, c_data.as_ptr());
+            let validated = stone_telemetry_validate(c_name.as_ptr(), time, c_data.as_ptr());
+            assert_eq!(validated, accepted, "{name:?} {time} {data:?}");
             let payload = Some(data).filter(|data| !data.is_empty());
-            let recorded = spool.record_stat_data(name, timestamp, payload).is_ok();
-            assert_eq!(validated, recorded, "{name:?} {timestamp} {data:?}");
-        }
-    }
+            let recorded = spool.record_stat_data(name, time, payload);
+            assert_eq!(
+                recorded.err().map(|error| error.kind()),
+                (!accepted).then_some(io::ErrorKind::InvalidInput),
+                "{name:?} {time} {data:?}",
+            );
+        };
 
-    #[test]
-    fn client_rejects_data_the_ingest_would_refuse() {
-        let root = fresh_root();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
-
-        let long_key = format!(r#"{{"{}":1}}"#, "k".repeat(65));
-        let long_string = format!(r#"{{"s":"{}"}}"#, "v".repeat(257));
-        let many_keys = format!(
-            "{{{}}}",
-            (0..33)
-                .map(|index| format!(r#""k{index}":1"#))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let long_array = format!(
-            r#"{{"a":[{}]}}"#,
-            (0..33).map(|_| "1").collect::<Vec<_>>().join(",")
-        );
-        let refused: Vec<&str> = vec![
+        check(&"x".repeat(129), 1, "", false);
+        check("probe", -1, "", false);
+        let boundaries = |offset: usize| {
+            [
+                format!(r#"{{"{}":1}}"#, "k".repeat(64 + offset)),
+                format!(r#"{{"s":"{}"}}"#, "v".repeat(256 + offset)),
+                format!(
+                    "{{{}}}",
+                    (0..32 + offset)
+                        .map(|index| format!(r#""k{index}":1"#))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                format!(r#"{{"a":[{}1]}}"#, "1,".repeat(31 + offset)),
+            ]
+        };
+        let above_limit = boundaries(1);
+        for data in [
+            "not json",
             "not json at all",
             "[1,2,3]",
-            "\"a string\"",
+            r#""a string""#,
             "12",
             "null",
             r#"{"k":null}"#,
@@ -2537,62 +2516,39 @@ mod tests {
             r#"{"k":[null]}"#,
             r#"{"":1}"#,
             r#"{"k":18446744073709551615}"#,
-            &long_key,
-            &long_string,
-            &many_keys,
-            &long_array,
-        ];
-        for payload in &refused {
-            assert_eq!(
-                spool
-                    .record_stat_data("probe", 1, Some(payload))
-                    .unwrap_err()
-                    .kind(),
-                io::ErrorKind::InvalidInput,
-                "accepted data {payload:?}"
-            );
+        ]
+        .into_iter()
+        .chain(above_limit.iter().map(String::as_str))
+        {
+            check("probe", 1, data, false);
         }
+        assert_eq!(queue_len(&events_path), 0);
 
-        let max_key = format!(r#"{{"{}":1}}"#, "k".repeat(64));
-        let max_string = format!(r#"{{"s":"{}"}}"#, "v".repeat(256));
-        let max_keys = format!(
-            "{{{}}}",
-            (0..32)
-                .map(|index| format!(r#""k{index}":1"#))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-        let max_array = format!(
-            r#"{{"a":[{}]}}"#,
-            (0..32).map(|_| "1").collect::<Vec<_>>().join(",")
-        );
-        let accepted: Vec<&str> = vec![
+        let at_limit = boundaries(0);
+        let accepted = [
+            "",
             "{}",
+            r#"{"k":[1,"a"]}"#,
             r#"{"k":-9223372036854775808}"#,
             r#"{"k":9223372036854775807}"#,
             r#"{"k":false}"#,
             r#"{"k":-1.5}"#,
             r#"{"k":["a",1,true,2.5]}"#,
             r#"{"k":[]}"#,
-            &max_key,
-            &max_string,
-            &max_keys,
-            &max_array,
         ];
-        for payload in &accepted {
-            spool
-                .record_stat_data("probe", 1, Some(payload))
-                .unwrap_or_else(|error| panic!("refused data {payload:?}: {error}"));
+        let count = accepted.len() + at_limit.len();
+        for data in accepted
+            .into_iter()
+            .chain(at_limit.iter().map(String::as_str))
+        {
+            check("probe", 1, data, true);
         }
         let seqs: Vec<_> = records(&root)
-            .iter()
+            .into_iter()
             .map(|row| row["seq"].clone())
             .collect();
-        let expected: Vec<Value> = (1..=accepted.len()).map(Value::from).collect();
-        assert_eq!(
-            seqs, expected,
-            "a refused row was appended or used a sequence number"
-        );
+        let expected: Vec<_> = (1..=count).map(Value::from).collect();
+        assert_eq!(seqs, expected, "a refused row used a sequence number");
     }
 
     #[test]
