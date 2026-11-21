@@ -1,4 +1,3 @@
-// Match-3 board with animated swaps and cascades.
 
 const GRID_W: int = 8
 const GRID_H: int = 8
@@ -6,13 +5,11 @@ const TILE_SIZE: float = 64.0
 const TILE_GAP: float = 4.0
 const NUM_TILE_TYPES: int = 6
 
-// Reuse the spawn distribution across collapses.
 fn tile_types() -> M3Types {
     static t: M3Types = m3_uniform(NUM_TILE_TYPES)
     return t
 }
 
-// Board origin (top-left corner of the grid in screen space)
 const BOARD_X: float = 100.0
 const BOARD_Y: float = 100.0
 
@@ -31,7 +28,6 @@ global TILE_LABELS: [string] = ["R", "B", "G", "Y", "P", "O"]
 // Access with: grid[y * GRID_W + x]
 global grid: [int] = []
 
-// Selected tile for swapping (null = nothing selected)
 global selected: IVec2? = null
 
 global score: int = 0
@@ -71,7 +67,6 @@ global flash_mask: [bool] = []       // true = this cell is about to be cleared
 global queued_sel: IVec2 = IVec2 { x: -1, y: -1 }    // first tile of queued move
 global queued_swap_b: IVec2 = IVec2 { x: -1, y: -1 } // second tile (-1 = only partial)
 
-// Auto-play
 global auto_play: bool = false
 
 fn grid_get(x: int, y: int) -> int {
@@ -88,13 +83,11 @@ fn grid_board() -> M3Board {
     return M3Board { w: GRID_W, h: GRID_H, cells: grid }
 }
 
-// Convert grid coordinates to screen position (top-left of tile)
 fn grid_to_screen(gx: int, gy: int) -> Vec2 {
     let cell = TILE_SIZE + TILE_GAP
     return v(BOARD_X + gx * cell, BOARD_Y + gy * cell)
 }
 
-// Convert screen position to grid coordinates (-1,-1 if outside)
 fn screen_to_grid(pos: Vec2) -> IVec2 {
     let cell = TILE_SIZE + TILE_GAP
     let gx = floor((pos.x - BOARD_X) / cell)
@@ -102,7 +95,6 @@ fn screen_to_grid(pos: Vec2) -> IVec2 {
     if gx < 0 || gx >= GRID_W || gy < 0 || gy >= GRID_H {
         return IVec2 { x: -1, y: -1 }
     }
-    // Check we're not in the gap
     let local_x = (pos.x - BOARD_X) - gx * cell
     let local_y = (pos.y - BOARD_Y) - gy * cell
     if local_x > TILE_SIZE || local_y > TILE_SIZE {
@@ -155,7 +147,6 @@ fn apply_collapse_offsets(cx: M3Collapse) {
     }
 }
 
-// Lerp between two colors
 @pure fn lerp_color(a: Color, b: Color, t: float) -> Color {
     return color(
         a.r + (b.r - a.r) * t,
@@ -165,8 +156,6 @@ fn apply_collapse_offsets(cx: M3Collapse) {
     )
 }
 
-// Find matches and start the flash timer. duration controls how long tiles highlight.
-// Use FLASH_DURATION for initial player match, FLASH_DURATION_CASCADE for cascade matches.
 fn find_and_flash(duration: float) {
     let matches = m3_find_matches(grid_board())
     if matches.len() == 0 { return }
@@ -200,8 +189,7 @@ fn has_fall_anim() -> bool {
     return false
 }
 
-// True if this tile is currently in motion (falling or being swapped).
-// Queued clicks on animating tiles are rejected -- their position is ambiguous.
+// Reject queued clicks on animating tiles because their position is ambiguous.
 fn is_tile_animating(x: int, y: int) -> bool {
     if fall_offsets[y * GRID_W + x] != 0.0 || fall_velocities[y * GRID_W + x] != 0.0 { return true }
     if anim_swap_t < 1.0 {
@@ -256,7 +244,6 @@ fn main() {
 fn init_game() {
     fill_board()
 
-    // Initialize per-cell animation arrays
     fall_offsets = []
     fall_velocities = []
     flash_mask = []
@@ -277,21 +264,17 @@ fn update_game() {
         let is_animating = anim_swap_t < 1.0 || flash_t > 0.0 || has_fall_anim()
         if gp.x >= 0 && gp.y >= 0 && is_animating && !is_tile_animating(gp.x, gp.y) {
             if queued_sel.x < 0 {
-                // No queued selection yet: start one
                 queued_sel = gp
                 queued_swap_b = IVec2 { x: -1, y: -1 }
             } else if is_adjacent(queued_sel, gp) {
-                // Adjacent to queued selection: complete the swap pair
                 queued_swap_b = gp
             } else {
-                // Not adjacent: replace the first selection, clear swap
                 queued_sel = gp
                 queued_swap_b = IVec2 { x: -1, y: -1 }
             }
         }
     }
 
-    // Swap animation -> flash (valid) or reject bounce-back (invalid)
     if anim_swap_t < 1.0 {
         anim_swap_t = anim_swap_t + dt / SWAP_DURATION
         if anim_swap_t >= 1.0 {
@@ -305,7 +288,6 @@ fn update_game() {
         return
     }
 
-    // Flash phase: matched tiles highlighted, waiting to be cleared
     if flash_t > 0.0 {
         flash_t = flash_t - dt
         if flash_t <= 0.0 {
@@ -315,7 +297,6 @@ fn update_game() {
         return
     }
 
-    // Fall animation -> cascade check via flash (short duration: cascade feels snappy)
     if has_fall_anim() {
         advance_fall_offsets()
         if !has_fall_anim() {
@@ -333,14 +314,11 @@ fn update_game() {
         queued_swap_b = IVec2 { x: -1, y: -1 }
         selected = null
         if start_swap(a, b) { return }
-        // No match created (board changed during cascade): silently discard
     } else if queued_sel.x >= 0 {
-        // Partial queue (first tile only): surface it as the active selection
         selected = queued_sel
         queued_sel = IVec2 { x: -1, y: -1 }
     }
 
-    // Toggle auto-play with A
     if is_key_pressed("a") {
         auto_play = !auto_play
         selected = null
@@ -348,7 +326,6 @@ fn update_game() {
         queued_swap_b = IVec2 { x: -1, y: -1 }
     }
 
-    // R = reset to fresh random board
     if is_key_pressed("r") {
         fill_board()
         score = 0
@@ -366,7 +343,6 @@ fn update_game() {
         }
     }
 
-    // Auto-play: immediately start next move when idle
     if auto_play {
         if let mv = m3_first_move(grid_board()) {
             let _ = start_swap(IVec2 { x: mv.ax, y: mv.ay }, IVec2 { x: mv.bx, y: mv.by })
@@ -376,7 +352,6 @@ fn update_game() {
         return
     }
 
-    // Manual input (idle, no queue pending)
     if is_mouse_pressed(1) {
         let mpos = mouse_screen()
         let gpos = screen_to_grid(mpos)
@@ -398,14 +373,12 @@ fn update_game() {
     }
 }
 
-// Helper: draw a filled rect from top-left position (screen space)
 fn fill_rect(pos: Vec2, size: Vec2, c: Color) {
     stone_screen_rect(pos, size, c)
 }
 
 @late_draw
 fn draw_game() {
-    // Draw board background
     let cell = TILE_SIZE + TILE_GAP
     let board_w = GRID_W * cell - TILE_GAP
     let board_h = GRID_H * cell - TILE_GAP
@@ -415,7 +388,6 @@ fn draw_game() {
         color(0.15, 0.15, 0.2),
     )
 
-    // Draw tiles
     let pa = grid_to_screen(anim_swap_a.x, anim_swap_a.y)
     let pb = grid_to_screen(anim_swap_b.x, anim_swap_b.y)
     let t = anim_swap_t
@@ -425,7 +397,6 @@ fn draw_game() {
             if tile >= 0 && tile < NUM_TILE_TYPES {
                 let pos = grid_to_screen(x, y)
 
-                // Swap animation: slide tiles toward their destinations
                 if anim_swap_t < 1.0 {
                     if anim_swap_invalid {
                         // Probe: tiles slide toward each other then bounce back
@@ -445,13 +416,11 @@ fn draw_game() {
                     }
                 }
 
-                // Fall animation: offset tiles above their logical row
                 pos = v(pos.x, pos.y + fall_offsets[y * GRID_W + x])
 
                 let c = TILE_COLORS[tile]
                 let is_flashing = flash_mask[y * GRID_W + x]
 
-                // Highlight selected tile (white = active selection)
                 if selected != null {
                     let sel = selected
                     if sel.x == x && sel.y == y {
@@ -459,7 +428,6 @@ fn draw_game() {
                     }
                 }
 
-                // Queued swap: amber border on first tile, brighter on second
                 if queued_sel.x == x && queued_sel.y == y {
                     fill_rect(pos - v(3, 3), v(TILE_SIZE + 6, TILE_SIZE + 6), color(1.0, 0.65, 0.0))
                 }
@@ -467,10 +435,8 @@ fn draw_game() {
                     fill_rect(pos - v(3, 3), v(TILE_SIZE + 6, TILE_SIZE + 6), color(1.0, 0.85, 0.2))
                 }
 
-                // Flash matched tiles: bright border + pulsing bright tile color
                 if is_flashing {
                     let phase = flash_t / FLASH_DURATION
-                    // pulse 3 times over the flash duration
                     let blink = (phase * 6.0) - floor(phase * 6.0)
                     let bright = if blink < 0.5 { 1.0 } else { 0.0 }
                     fill_rect(pos - v(4, 4), v(TILE_SIZE + 8, TILE_SIZE + 8), color(1.0, 0.95, 0.1))
@@ -484,7 +450,6 @@ fn draw_game() {
         }
     }
 
-    // Draw title and stats
     screen.text("Match 3", v(BOARD_X, 30), 48.0, WHITE)
     let auto_label = if auto_play { "  [AUTO]" } else { "" }
     screen.text("Score: {score}   Moves: {moves}{auto_label}", v(BOARD_X + 220, 42), 28.0, WHITE)

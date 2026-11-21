@@ -1,4 +1,3 @@
-// The animated swap must advance score and settle the refilled board.
 @sim
 co fn animated_swap() -> Coroutine<Wait> {
     start_game "match3"
@@ -22,7 +21,6 @@ co fn animated_swap() -> Coroutine<Wait> {
 
     sim_expect(score > 0, "animated collapse advanced score")
     sim_expect(moves == 1, "one move counted")
-    // Every cell refilled -- a -1 hole would mean the collapse left a gap.
     sim_expect(!has_matches(), "board settled with no pending matches")
 
     stop_sim()
