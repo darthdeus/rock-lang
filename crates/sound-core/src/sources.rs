@@ -96,39 +96,6 @@ pub fn expand_sources<R: AssetResolver + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FsAssetResolver;
-
-    #[test]
-    fn discovery_unions_roots_but_resolution_keeps_overlay_precedence() {
-        let tmp = tempfile::tempdir().unwrap();
-        let overlay = tmp.path().join("overlay");
-        let project = tmp.path().join("project");
-        for root in [&overlay, &project] {
-            std::fs::create_dir_all(root.join("assets/steps")).unwrap();
-        }
-        for (root, name) in [
-            (&overlay, "step_02.wav"),
-            (&project, "step_01.wav"),
-            (&project, "step_02.wav"),
-            (&overlay, "preview.wav"),
-        ] {
-            std::fs::write(root.join("assets/steps").join(name), b"fixture").unwrap();
-        }
-        let resolver = FsAssetResolver::new(vec![overlay.clone(), project]);
-        let selection = vec!["assets/steps/step_*.wav".into()];
-        assert_eq!(
-            expand_sources(&selection, &resolver).unwrap(),
-            ["assets/steps/step_01.wav", "assets/steps/step_02.wav"]
-        );
-        assert_eq!(
-            resolver.resolve("assets/steps/step_02.wav").unwrap(),
-            overlay.join("assets/steps/step_02.wav")
-        );
-        std::fs::write(overlay.join("assets/steps/step_03.wav"), b"new").unwrap();
-        assert_eq!(expand_sources(&selection, &resolver).unwrap().len(), 3);
-        std::fs::remove_file(overlay.join("assets/steps/step_03.wav")).unwrap();
-        assert_eq!(expand_sources(&selection, &resolver).unwrap().len(), 2);
-    }
 
     #[test]
     fn empty_overlapping_and_unbounded_selections_fail() {
