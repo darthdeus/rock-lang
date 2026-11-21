@@ -1,9 +1,4 @@
-//! A shader local named like a GLSL builtin callable must not shadow it: the
-//! emitter hoists every local to function scope, so `let cos` beside a
-//! `cos(...)` call used to emit `float cos; cos = cos(angle)`, which native
-//! GLSL rejects. The hoisted local is renamed apart; the builtin call survives.
-//! (Backlog: "GLSL locals can shadow builtin functions"; the live instance is
-//! `Vec2.rotate`'s `cos`/`sin` locals in `stdlib/vec.rock`.)
+//! GLSL local bindings must not shadow builtin calls.
 
 use crate::support::{checked_workspace, emit_library};
 use skull_codegen_glsl::{GlslProfile, ShaderEmission};

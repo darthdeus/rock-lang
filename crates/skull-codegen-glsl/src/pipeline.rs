@@ -183,14 +183,8 @@ pub(crate) fn entry_reserved_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
         .collect()
 }
 
-/// Reject two interface names that would land in GLSL's ONE cross-stage
-/// namespace.
-///
-/// An unnamed-instance block's members are bare globals, so the `@engine`
-/// block's members sit in that namespace too, and a missed pair is a raw driver
-/// error with no Rock span. The census is the INTERFACE (see
-/// `interface_global_names`), so the engine block, declared in both stages but
-/// ONE block, is listed once.
+/// Unnamed block members share the cross-stage GLSL global namespace; the
+/// engine block is declared in both stages but counted only once.
 fn check_pipeline_collisions(iface: &ShaderInterfacePlan, span: Span) -> Result<(), CompilerError> {
     let mut seen: HashSet<Ustr> = [Ustr::from("gl_Position")].into_iter().collect();
     if !matches!(iface.fragment_output, FragmentOutput::Mrt(_)) {
@@ -209,16 +203,8 @@ fn check_pipeline_collisions(iface: &ShaderInterfacePlan, span: Span) -> Result<
     Ok(())
 }
 
-/// Reject two blocks of one program sharing a BLOCK name.
-///
-/// Block names are their own GLSL namespace -- distinct from the member names
-/// `check_pipeline_collisions` censuses, which is why this is a second check and
-/// not a line in that one. It matters because an array block's name is MINTED
-/// (`<entry>_Arrays`) rather than written by the author: a user struct that
-/// happens to spell it would otherwise produce two `layout(std140) uniform
-/// <same>` declarations, which is a link error carrying no Rock span. Minting a
-/// different name instead is the fallback this repo does not take -- the
-/// compiler's job is to refuse the program.
+/// Block names have a separate GLSL namespace. Generated array block names
+/// must not collide with user-defined block names.
 fn check_block_name_collisions<'a>(
     scalar: impl Iterator<Item = &'a GlslUniformBlock>,
     arrays: impl Iterator<Item = &'a UniformArrayBlockPlan>,
@@ -318,8 +304,6 @@ pub(crate) fn plan_shader_pipeline_from_view(
         vf.name_span,
     )?;
 
-    // THE program's logical interface. Everything downstream -- the name
-    // census, the ABI plan and every emitted declaration -- reads this.
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Vertex, IrStage::Fragment],
         vertex_inputs: vshape.inputs,

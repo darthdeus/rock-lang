@@ -1,7 +1,4 @@
-//! A shader local named like an emitted global must not shadow it: the GLSL
-//! emitter hoists every local to function scope, so `let density` beside a
-//! `density` uniform lane used to make every `u.density` read the local.
-//! The hoisted local is renamed apart; the global read survives.
+//! Hoisted locals must not shadow shader interface names.
 
 use crate::support::{entry_emission, pipeline_emission};
 
@@ -116,9 +113,7 @@ fn vertex_locals_renamed_apart_from_attribute_and_varying() {
     );
 }
 
-/// Fragment stage: a local shadowing a `@textures` group sampler. The group
-/// field read renders as a bare global, so the local must move (the m1-arrival
-/// `index` instance).
+/// Group sampler reads are bare globals, so locals must not shadow them.
 #[test]
 fn fragment_local_renamed_apart_from_group_sampler() {
     let src = r#"
