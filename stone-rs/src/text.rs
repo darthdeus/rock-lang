@@ -86,8 +86,7 @@ struct Charset {
 }
 
 impl Charset {
-    /// Extras arrive as UTF-8 text rather than an array: a codepoint list IS a
-    /// string, and it crosses the FFI without marshalling.
+    /// Extras cross the FFI as UTF-8.
     fn parse(extra: &str) -> Charset {
         let mut set = Charset::default();
         for ch in extra.chars() {
@@ -129,7 +128,6 @@ impl Charset {
     }
 }
 
-/// Where a font's glyphs sit in one raster of it.
 #[derive(Clone, Default, PartialEq)]
 struct AtlasLayout {
     /// Per face, then per text slot. An undeclared face is entirely invalid;
@@ -140,7 +138,6 @@ struct AtlasLayout {
     pixel_size: i32,
 }
 
-/// What every raster of a font is baked from.
 #[derive(Clone)]
 struct FontSource {
     data: Rc<Vec<u8>>,
@@ -169,20 +166,15 @@ struct FontEntry {
     /// The compatibility atlas; its CPU raster is not retained once uploaded.
     layout: AtlasLayout,
     source: FontSource,
-    /// Font-unit metrics, prepared once per raster from the same bytes at
-    /// unit scale. `stone_get_font_unit_metrics` reads this; it never parses.
+    /// Unit metrics come from the same bytes as the raster.
     unit_metrics: FontUnitMetrics,
-    /// Per face, then per text slot: the `stone_get_glyph_unit_metrics`
-    /// answers. `None` is a hole in the charset or a codepoint the file does
-    /// not cover. All four faces are baked, declared or not, because the ABI
-    /// never checked declaration.
+    /// Per face and text slot; None marks a charset hole or missing codepoint.
+    /// The ABI permits querying undeclared faces, so all four are baked.
     glyph_unit: [Vec<Option<GlyphUnitMetrics>>; 4],
     /// GL raster products for one face revision; demand instances own their textures.
     instances: Vec<AtlasInstance>,
     face_revision: u64,
-    /// Set once `stone_font_release_coverage` drops GL coverage this entry
-    /// held. A metrics-shaped entry (no atlas, no instances: headless)
-    /// releases nothing native and leaves this false.
+    /// Metrics-only entries have no GL coverage to release.
     coverage_released: bool,
 }
 
@@ -193,7 +185,6 @@ impl FontEntry {
             AtlasResidency::Metrics => None,
             AtlasResidency::Gpu => Some(upload_atlas_texture(&raster)?),
         };
-        // A metrics-only entry owns no instance: an instance IS a GL texture.
         let instances = atlas_texture
             .map(|texture| AtlasInstance {
                 texture,
@@ -237,7 +228,6 @@ impl FontEntry {
             * self.layout.pixel_size as f32
     }
 
-    /// The compatibility atlas image, once minted.
     fn atlas_image(&self) -> Option<u64> {
         self.atlas_texture?;
         self.instances.first()?.image
@@ -488,8 +478,7 @@ fn rasterize_glyphs(
     let mut glyphs: [Vec<GlyphInfo>; 4] =
         std::array::from_fn(|_| vec![GlyphInfo::default(); charset.slot_count()]);
     for ((block, face), cells) in baked.iter().enumerate().zip(&rendered) {
-        // Faces occupy whole row-blocks in declaration order, so the layout of
-        // a regular-only bake is exactly what it was before faces existed.
+        // Each face occupies whole row-blocks in declaration order.
         for (cell, slot, g) in cells {
             let x = cell % GLYPHS_PER_ROW * cell_width + 1;
             let y = (block * rows_per_face + cell / GLYPHS_PER_ROW) * cell_height + 1;
@@ -601,10 +590,7 @@ enum AtlasResidency {
 #[cfg(test)]
 thread_local! {
     static FORCE_UPLOADS_OK: Cell<bool> = const { Cell::new(false) };
-    /// Forced dependent-atlas rebuild failure. Headless, a dependent rasterize
-    /// cannot fail once the main bake succeeded (no GL size limit), so the
-    /// reload-atomicity tests force it, standing in for a per-size failure
-    /// such as an instance atlas exceeding MAX_TEXTURE_SIZE.
+    /// Headless tests force a dependent rebuild failure to cover reload atomicity.
     static FAIL_DEPENDENT_RASTER: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -1204,7 +1190,6 @@ pub extern "C" fn stone_get_font_instance_image(instance_id: u64) -> u64 {
     .unwrap_or(0)
 }
 
-/// Return the font's pixel size (set during stone_load_font).
 #[no_mangle]
 pub extern "C" fn stone_get_font_pixel_size(font_id: c_uint) -> c_int {
     font(font_id, |entry| entry.layout.pixel_size).unwrap_or(0)
@@ -1284,10 +1269,7 @@ pub(crate) fn forget_atlas_image(image_id: u64) -> bool {
     found
 }
 
-/// Unload a previously-loaded font. Frees the GL atlas texture and
-/// clears the slot. Subsequent ops against this font_id silently
-/// no-op. Returns false if the font_id was already unloaded or out
-/// of range — caller can ignore unless it wants to assert.
+/// Release the atlas. Later operations on this id no-op; returns false for an invalid id.
 #[no_mangle]
 pub extern "C" fn stone_unload_font(font_id: c_uint) -> bool {
     let Some(idx) = (font_id as usize).checked_sub(1) else {
@@ -1345,9 +1327,7 @@ mod test_fixtures {
         }
     }
 
-    /// A GPU-shaped font the way `FontEntry::new` lays one out, minus the GL
-    /// work: the bakes are real, the texture names are fake (`first_texture`,
-    /// and one above it for the second instance), and uploads never see them.
+    /// Real bakes with fake texture names, without GL uploads.
     pub(super) fn install_fake_gpu_font(first_texture: u32, extra_instance: bool) -> c_uint {
         let source = droid_source();
         let main = source.bake(MAIN_PX).expect("DroidSans bakes at 32px");
@@ -1408,8 +1388,7 @@ mod font_census_tests {
         }
     }
 
-    /// Expected texel counts, re-baked in the test body so the oracle is the
-    /// rasterizer's answer, not the fixture's.
+    /// Re-bake so the rasterizer, not the fixture, supplies the expected texel counts.
     fn oracle_texels(pixel_size: i32) -> u64 {
         let bake = rasterize_glyphs(
             FALLBACK_FONT,
@@ -1521,8 +1500,7 @@ mod font_census_tests {
         );
     }
 
-    /// S10: a hot reload after the release refreshes the retained products
-    /// (bytes, metrics) without re-uploading the coverage it dropped.
+    /// Reload after release must not re-upload coverage.
     #[test]
     fn reload_after_release_refreshes_metrics_and_keeps_coverage_down() {
         let mut guard = CensusFonts::capture();
@@ -1950,11 +1928,7 @@ mod metrics_only_font_tests {
         );
     }
 
-    // The raster size a metrics font is loaded at must not change what it
-    // MEASURES: the Rock layout divides every unit advance by the font's own
-    // units-per-em, so two raster sizes are the same measurement. This is the
-    // fact that lets a code test reproduce a native sim's number while
-    // rastering at a different density.
+    // Unit advances are independent of raster size.
 }
 
 #[cfg(test)]
