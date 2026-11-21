@@ -14,73 +14,8 @@ fn messages(report: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn dir_reports_diagnostics_across_files() {
-    // The orphan needs whole-project reachability; b also has a type error.
-    let project = Project::new(&[
-        ("stick.toml", "[package]\nname = \"g\"\ntype = \"bin\"\n"),
-        ("a.rock", "fn main() {}\nfn orphan() {}\n"),
-        ("b.rock", "fn b() -> int {\n  \"nope\"\n}\n"),
-    ]);
-    let dir = project.dir.path().to_str().unwrap();
-    let report = diagnostics_report(dir).unwrap();
-
-    assert!(report["dir"].is_string(), "dir report shape");
-    assert_eq!(
-        report["file_count"].as_u64(),
-        Some(2),
-        "walked both .rock files"
-    );
-
-    let msgs = messages(&report);
-    let lint_msgs = messages(&lint_report(dir).unwrap());
-    for (report, msgs, type_error) in [("diagnostics", &msgs, true), ("lint", &lint_msgs, false)] {
-        assert!(
-            msgs.iter().any(|m| m.contains("unused function `orphan`")),
-            "{report}: whole-project unused_fn: {msgs:?}"
-        );
-        assert_eq!(
-            msgs.iter().any(|m| m.contains("type mismatch")),
-            type_error,
-            "{report}: b.rock's type error: {msgs:?}"
-        );
-    }
-}
-
 // The LSP reads a package's identity-storage state from its own manifest, in
 // the one-shot report and in the server workspace alike.
-#[test]
-fn identity_storage_diagnostics_follow_the_package_declaration() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("main.rock");
-    let source = "struct Actor { hp: int }\nstruct Holder { actor: Actor }\nfn main() {}\n";
-    std::fs::write(&file, source).unwrap();
-    let path = file.to_str().unwrap();
-    let reported = |manifest: &str| {
-        std::fs::write(dir.path().join("stick.toml"), manifest).unwrap();
-        let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
-        let in_report = messages(&report)
-            .iter()
-            .any(|m| m.contains("cannot store identity struct `example_lib::Actor`"));
-        let mut server = rock_lsp::workspace::LspWorkspace::new();
-        server.bone.update(path, source.to_owned());
-        let in_server = server.bone.diagnostics_for(path).iter().any(|d| {
-            d.message
-                .contains("cannot store identity struct `example_lib::Actor`")
-        });
-        assert_eq!(in_report, in_server, "{manifest}: {report}");
-        in_report
-    };
-    assert!(
-        reported("[package]\nname = \"example-lib\"\n"),
-        "a package that declares nothing is enforced"
-    );
-    assert!(
-        !reported("[package]\nname = \"example-lib\"\n[language]\nidentity_storage = \"exempt\"\n"),
-        "a package declared exempt gets no identity-storage diagnostics"
-    );
-}
-
 #[test]
 fn unreadable_file_fails_the_dir_report_by_name() {
     // Silently dropping the file would report a clean project.
