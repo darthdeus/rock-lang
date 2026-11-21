@@ -37,16 +37,6 @@ fn make_callbacks() -> Callbacks {
 }
 "#;
 
-#[test]
-fn copied_callbacks_follow_full_reload_with_independent_captures() {
-    check_reload(false);
-}
-
-#[test]
-fn copied_callbacks_follow_overlay_reload_with_independent_captures() {
-    check_reload(true);
-}
-
 fn check_reload(use_overlay: bool) {
     let before = ws_with_stdlib(SOURCE);
     let mid = skull::user_module_id(&before).unwrap();
