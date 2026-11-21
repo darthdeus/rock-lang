@@ -466,22 +466,31 @@ fn convert(
 
 fn emit_clean(src: &str, fn_name: &str) -> String {
     let (ws, mid) = stdlib_workspace(src);
-    let fid = test_fn(&ws, mid, fn_name);
-    let (mut func, interner, _) = common::lower_test_ref_with_graph(&ws, mid, fid)
+    emit_converted(&ws, mid, fn_name, false)
+}
+
+fn emit_converted(ws: &Workspace, mid: ModuleId, fn_name: &str, bind: bool) -> String {
+    let fid = test_fn(ws, mid, fn_name);
+    let function = FuncRef {
+        module: mid,
+        func: fid,
+    };
+    let (mut func, interner, graph) = common::lower_test_ref_with_graph(ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
-    convert(&ws, mid, fid, &mut func);
-    let ctx = CodegenCtx::new(&ws);
-    emit_function(
-        &ws,
-        &ctx,
-        &interner,
-        FuncRef {
-            module: mid,
-            func: fid,
-        },
-        &func,
-        None,
-    )
+    convert(ws, mid, fid, &mut func);
+    let mut ctx = CodegenCtx::new(ws);
+    let plan = if bind {
+        ctx.set_call_sccs(common::call_sccs(&graph));
+        let name = skull_codegen_lua::mangle_fn(ws, &ws.module(mid).functions[fid]);
+        skull_codegen_lua::callee_binding_plan(ws, &ctx, &interner, &name, function, &func)
+    } else {
+        None
+    };
+    let mut lua = emit_function(ws, &ctx, &interner, function, &func, plan.as_ref());
+    if let Some(plan) = plan {
+        plan.write_bind_line(&mut lua);
+    }
+    lua
 }
 
 #[test]
@@ -607,10 +616,14 @@ fn tuple_return_and_destructure_use_multiple_values_without_tables() {
 /// The shipped body chain with inlining, which `emit_clean` skips.
 fn emit_inlined(src: &str, fn_name: &str) -> String {
     let (ws, mid) = stdlib_workspace(src);
-    let fid = test_fn(&ws, mid, fn_name);
+    emit_inlined_in(&ws, mid, fn_name)
+}
+
+fn emit_inlined_in(ws: &Workspace, mid: ModuleId, fn_name: &str) -> String {
+    let fid = test_fn(ws, mid, fn_name);
     let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
     let graph = skull_graph::instance_graph::build_in(
-        &ws,
+        ws,
         ws.module(mid)
             .functions
             .iter()
@@ -621,18 +634,18 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
             .collect(),
         interner.clone(),
     );
-    let bodies = skull_graph::concrete_body::build(&ws, &graph);
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
+    let bodies = skull_graph::concrete_body::build(ws, &graph);
+    let scx = skull_mir::lower::ScalarCtx::new(ws).sharing(interner);
     let self_ref = FuncRef {
         module: mid,
         func: fid,
     };
     let self_inst = skull_mir::instance::Instance::base(self_ref);
     let plan = bodies.plans.get(&self_inst).expect("concrete self plan");
-    let mut func = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
+    let mut func = skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let mut cache = skull_transform::InlineCache::default();
-    let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
+    let name = skull_codegen_lua::mangle_fn(ws, &ws.module(mid).functions[fid]);
     let inliner = skull_transform::body_chain::Inliner {
         scx: &scx,
         self_ref,
@@ -640,7 +653,7 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
         plans: &bodies.plans,
     };
     skull_transform::body_chain::prepare_body(
-        &ws,
+        ws,
         inliner,
         &mut func,
         &name,
@@ -648,8 +661,8 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
         &mut (),
     )
     .unwrap_or_else(|e| panic!("{:?} failed: {}", e.pass, e.error.message));
-    let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, scx.interner(), self_ref, &func, None)
+    let ctx = CodegenCtx::new(ws);
+    emit_function(ws, &ctx, scx.interner(), self_ref, &func, None)
 }
 
 fn assert_counted_zero_alloc(lua: &str) {
@@ -793,24 +806,7 @@ fn loop_scoped_registers_are_never_killed_outside_their_loop() {
 /// [`emit_clean`] with its callee binding plan.
 fn emit_clean_bound(src: &str, fn_name: &str) -> String {
     let (ws, mid) = stdlib_workspace(src);
-    let fid = test_fn(&ws, mid, fn_name);
-    let self_ref = FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let (mut func, interner, graph) = common::lower_test_ref_with_graph(&ws, mid, fid)
-        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
-    convert(&ws, mid, fid, &mut func);
-    let mut ctx = CodegenCtx::new(&ws);
-    ctx.set_call_sccs(common::call_sccs(&graph));
-    let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
-    let plan = skull_codegen_lua::callee_binding_plan(&ws, &ctx, &interner, &name, self_ref, &func);
-    let mut lua =
-        skull_codegen_lua::emit_function(&ws, &ctx, &interner, self_ref, &func, plan.as_ref());
-    if let Some(plan) = plan {
-        plan.write_bind_line(&mut lua);
-    }
-    lua
+    emit_converted(&ws, mid, fn_name, true)
 }
 
 #[test]
@@ -1450,9 +1446,12 @@ value Entry { key: int, refs: [int] }
 }
 
 #[test]
-fn numeric_for_requires_an_invariant_bound_and_unit_step() {
-    let src = include_str!("../../../tests/control_flow/counted_bounds.rock");
-    for (name, fors, general) in [
+fn numeric_for_preserves_bounds_and_control_flow() {
+    let (ws, mid) = stdlib_workspace(include_str!(
+        "../../../tests/control_flow/counted_bounds.rock"
+    ));
+    let emit = |name| emit_converted(&ws, mid, name, false);
+    for (name, counted, general) in [
         ("local_bound", 0, true),
         ("vec_bound", 0, true),
         ("field_bound", 0, true),
@@ -1467,40 +1466,22 @@ fn numeric_for_requires_an_invariant_bound_and_unit_step() {
         ("reentered_unreset_counter", 1, true),
         ("reentered_reset_counter", 1, true),
         ("locally_reset_counter", 2, false),
+        ("fused_latch", 1, false),
+        ("straight_latch", 1, false),
+        ("continue_skips_latch", 0, true),
+        ("mutable_computed_bound", 0, true),
+        ("computed_bound_edge", 0, true),
     ] {
-        let lua = emit_clean(src, name);
-        assert_eq!(lua.matches(" for c").count(), fors, "{name}: {lua}");
+        let lua = emit(name);
+        assert_eq!(lua.matches(" for c").count(), counted, "{name}: {lua}");
         assert_eq!(has_general_loop(&lua), general, "{name}: {lua}");
     }
     for name in ["iter_field_bound", "iterator_reads_vec_length_each_turn"] {
-        let lua = emit_inlined(src, name);
+        let lua = emit_inlined_in(&ws, mid, name);
         assert!(!lua.contains(" for c"), "{name}: {lua}");
         assert!(has_general_loop(&lua), "{name}: {lua}");
     }
-}
-
-fn has_general_loop(lua: &str) -> bool {
-    lua.contains(" while ") || lua.contains("goto w")
-}
-
-#[test]
-fn numeric_for_keeps_latch_work_and_respects_continue() {
-    let src = include_str!("../../../tests/control_flow/counted_bounds.rock");
-    for (name, expected_for) in [
-        ("fused_latch", true),
-        ("straight_latch", true),
-        ("continue_skips_latch", false),
-    ] {
-        let lua = emit_clean(src, name);
-        assert_eq!(lua.contains(" for c"), expected_for, "{name}: {lua}");
-        assert_eq!(has_general_loop(&lua), !expected_for, "{name}: {lua}");
-    }
-}
-
-#[test]
-fn numeric_for_snapshots_only_invariant_arithmetic() {
-    let src = include_str!("../../../tests/control_flow/counted_bounds.rock");
-    let lua = emit_clean(src, "computed_bound");
+    let lua = emit("computed_bound");
     let head = lua
         .lines()
         .find(|line| line.starts_with(" for c"))
@@ -1509,10 +1490,10 @@ fn numeric_for_snapshots_only_invariant_arithmetic() {
         head.contains(" * ") && head.contains(" + ") && head.contains(" - 1 do"),
         "{lua}"
     );
-    for name in ["mutable_computed_bound", "computed_bound_edge"] {
-        let lua = emit_clean(src, name);
-        assert!(has_general_loop(&lua) && !lua.contains(" for c"), "{lua}");
-    }
+}
+
+fn has_general_loop(lua: &str) -> bool {
+    lua.contains(" while ") || lua.contains("goto w")
 }
 
 #[test]
