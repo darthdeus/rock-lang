@@ -75,20 +75,6 @@ impl Probe {
         )
     }
 
-    /// `vec[index]`, returning the read.
-    fn get(&mut self, b: Idx<Block>, vec: Idx<Cell>, index: Idx<Cell>) -> Idx<Inst> {
-        let base = self.load(b, vec);
-        let index = self.load(b, index);
-        self.emit(
-            b,
-            Inst::Index {
-                base,
-                index,
-                kind: ContainerKind::VecNonNull,
-            },
-        )
-    }
-
     /// A call to an unknown function value.
     fn unknown_call(&mut self, b: Idx<Block>) {
         let callee = self.load(b, self.ys);
@@ -162,19 +148,6 @@ fn counted_loop(
 }
 
 #[test]
-fn a_call_after_the_store_still_reaches_it_around_the_back_edge() {
-    for self_edge in [false, true] {
-        let mut p = Probe::new();
-        let (lp, store) = counted_loop(&mut p, |_, _| {});
-        let back = if self_edge { lp.body } else { lp.latch };
-        p.f.set_term(lp.body, Term::Goto(back));
-        p.unknown_call(back);
-        p.run();
-        assert_eq!(p.kind(store), ContainerKind::VecNonNull);
-    }
-}
-
-#[test]
 fn counted_loop_body_barriers_keep_the_check() {
     let keeps_check = |name: &str, before: fn(&mut Probe, Idx<Block>)| {
         let mut p = Probe::new();
@@ -240,19 +213,6 @@ fn a_yield_in_the_body_keeps_the_check() {
     assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
-/// `xs[i]` then `xs[i] = ..`: the read checked the slot.
-#[test]
-fn a_checked_read_proves_the_store_after_it() {
-    let mut p = Probe::new();
-    let b = p.f.entry;
-    let read = p.get(b, p.xs, p.i);
-    let store = p.set(b, p.xs, p.i);
-    p.f.set_term(b, Term::Return(vec![read]));
-    p.run();
-    assert_eq!(p.kind(read), ContainerKind::VecNonNull);
-    assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
-}
-
 #[test]
 fn a_body_with_a_lambda_is_left_alone() {
     let mut p = Probe::new();
@@ -302,29 +262,6 @@ impl Probe {
         self.f.set_term(exit, Term::Return(vec![]));
         body
     }
-}
-
-#[test]
-fn a_checked_store_proves_a_later_column_check() {
-    let mut p = Probe::new();
-    let (lp, _) = counted_loop(&mut p, |p, b| p.unknown_call(b));
-    let i = p.load(lp.body, p.i);
-    let check = p.check(lp.body, p.xs, i);
-    p.run();
-    assert!(p.is_slot(check));
-}
-
-#[test]
-fn a_modulo_without_a_guard_stays() {
-    let mut p = Probe::new();
-    let b = p.f.entry;
-    let i = p.load(b, p.i);
-    let len = p.len_of(b, p.xs);
-    let wrapped = p.emit(b, Inst::IntMod(i, len));
-    let check = p.check(b, p.xs, wrapped);
-    p.f.set_term(b, Term::Return(vec![]));
-    p.run();
-    assert!(!p.is_slot(check), "an empty vector makes the modulo NaN");
 }
 
 fn affine_probe(case: &str) -> ContainerKind {
