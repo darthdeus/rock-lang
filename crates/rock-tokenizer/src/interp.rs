@@ -1,5 +1,3 @@
-/// The delimiter style of a string literal, which decides its escape and
-/// interpolation rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flavor {
     Quoted,
@@ -62,7 +60,6 @@ impl Flavor {
     }
 }
 
-/// One lexical piece of a literal's body, in `src` coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Piece {
     /// `text` has escapes resolved; `{{`/`}}` stay doubled, the parser collapses them.
@@ -83,11 +80,10 @@ impl Piece {
     }
 }
 
-/// A scanned string literal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scan {
     pub flavor: Flavor,
-    /// Body pieces in source order. Empty-text literal pieces are not emitted.
+    /// Empty-text literal pieces are not emitted.
     pub pieces: Vec<Piece>,
     /// Byte index just past the closing delimiter, or `src.len()` when
     /// unterminated.
@@ -99,9 +95,8 @@ pub struct Scan {
 }
 
 impl Scan {
-    /// A hole's source for the sub-parser plus `map[k]` = the `src` offset of output byte
-    /// `k` (with a trailing end entry). The enclosing literal's escape pass runs here, so
-    /// `"{f(\"a\")}"` reaches the parser as `f("a")` with offsets still on real source.
+    /// Escapes are decoded, but `map[k]` still gives the source offset of byte
+    /// `k`, with a trailing end entry.
     pub fn hole_source(&self, src: &str, expr: (usize, usize)) -> (String, Vec<usize>) {
         let raw = &src[expr.0..expr.1];
         let mut out = String::with_capacity(raw.len());

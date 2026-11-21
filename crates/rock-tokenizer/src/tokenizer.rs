@@ -53,9 +53,7 @@ pub(crate) fn directive(src: &str) -> Option<(TokenKind, usize)> {
     Some((kind, len))
 }
 
-/// Spans hold positions as `u32`, so a source whose last byte offset does
-/// not fit is refused before any span is made from it. Lines and columns
-/// never exceed the byte offset, so this one check covers them too.
+/// Lines and columns cannot exceed the byte offset, so one `u32` check covers all spans.
 pub fn source_fits_spans(file: Ustr, start_offset: usize, len: usize) -> Result<(), CompilerError> {
     match start_offset.checked_add(len) {
         Some(end) if end <= u32::MAX as usize => Ok(()),
