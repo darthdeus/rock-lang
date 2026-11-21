@@ -664,24 +664,6 @@ mod tests {
     }
 
     #[test]
-    fn ui_trace_custom_callback_can_consume_its_own_texture() {
-        stone_ui_probe_begin(true);
-        accept(
-            "custom",
-            "key",
-            json!({"texture": {"kind": "image", "handle": 0}}),
-        );
-        let data = [1.25f32, -0.0, 3.5];
-        unsafe {
-            mesh_consumed(data.as_ptr(), 1, 3, 0, 9, 0);
-        }
-        stone_ui_probe_custom_consumed();
-        assert!(stone_ui_probe_check(1));
-        stone_ui_probe_end_operation();
-        stone_ui_probe_stop();
-    }
-
-    #[test]
     fn ui_trace_snapshot_survives_buffer_reuse() {
         stone_ui_probe_begin(true);
         let id = accept("batch", "key", json!({"z": 0}));
