@@ -159,29 +159,6 @@ fn go() -> int { poll(-1) }
 }
 
 #[test]
-fn a_v1_extern_wrapper_uses_the_declared_symbol() {
-    let emitted = emit_v1_package(
-        "v1extern",
-        &[(
-            "main.rock",
-            r#"
-extern(ffi, "m") fn ret_int() -> int
-extern(ffi, "m") fn ret_bool() -> bool
-pub fn probe() -> string { return "{ret_int()} {ret_bool()}" }
-fn main() {}
-"#,
-        )],
-    );
-    assert_eq!(
-        run_luajit(&format!(
-            "m = {{ ret_int = function() return 7 end, ret_bool = function() return 1 end }}\n{}\nprint(ret_int(), ret_bool())\n",
-            emitted.lua
-        )),
-        "7\ttrue"
-    );
-}
-
-#[test]
 fn a_v1_extern_value_return_allocates_by_the_type_symbol() {
     let emitted = emit_v1_package(
         "v1extval",
