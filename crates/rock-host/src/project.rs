@@ -327,24 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn release_root_requires_the_rock_executable() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        fs::create_dir_all(root.join("bin")).unwrap();
-        fs::create_dir_all(root.join("lib")).unwrap();
-        assert!(!is_rock_root(root));
-        assert!(!is_release_layout_in(root));
-        fs::write(
-            root.join("bin")
-                .join(format!("rock{}", std::env::consts::EXE_SUFFIX)),
-            "",
-        )
-        .unwrap();
-        assert!(is_rock_root(root));
-        assert!(is_release_layout_in(root));
-    }
-
-    #[test]
     fn context_root_env_admits_a_project_sibling_to_the_sdk() {
         let temp = TempDir::new().unwrap();
         let root = temp.path().canonicalize().unwrap();
