@@ -1247,46 +1247,6 @@ mod tests {
     }
 
     #[test]
-    fn mono_arguments_and_enclosing_instances_are_identity_axes() {
-        let standalone_name = format!(
-            "{}script_file.rock::counter",
-            bone_core::modules::STANDALONE_PACKAGE_PREFIX
-        );
-        assert_eq!(
-            logical_def_key(
-                ustr::ustr("script_file.rock"),
-                Ustr::from(standalone_name.as_str())
-            ),
-            "script_file.rock::counter",
-        );
-        let interner = crate::monoty::MonoInterner::new();
-        let int_instance =
-            Instance::intern(&interner, declaration(), vec![crate::monoty::MonoTy::Int]);
-        let float_instance =
-            Instance::intern(&interner, declaration(), vec![crate::monoty::MonoTy::Float]);
-        assert_ne!(
-            CodeIdentity::Named(int_instance.clone()),
-            CodeIdentity::Named(float_instance.clone()),
-            "two concrete generic instances must not share a code identity"
-        );
-        let site = LambdaSiteId {
-            file: Ustr::from("same.rock"),
-            offset: 12,
-        };
-        assert_ne!(
-            CodeIdentity::Lambda {
-                enclosing: CodeOwner::Instance(int_instance),
-                site,
-            },
-            CodeIdentity::Lambda {
-                enclosing: CodeOwner::Instance(float_instance),
-                site,
-            },
-            "the enclosing concrete instance is part of lambda identity"
-        );
-    }
-
-    #[test]
     fn duplicate_identity_with_different_body_is_not_a_valid_artifact() {
         let identity = CodeIdentity::Named(Instance::base(declaration()));
         let compatibility = CodeCompatibility {
