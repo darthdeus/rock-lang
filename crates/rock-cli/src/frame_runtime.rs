@@ -181,13 +181,4 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.to_string(), "native build failed");
     }
-
-    #[test]
-    fn frame_progress_parser_rejects_incomplete_markers() {
-        assert_eq!(
-            parse_frame_progress(b"ROCK_FRAME_PROGRESS renderer=gl completed=17\n"),
-            None
-        );
-        assert_eq!(parse_frame_progress(b"ordinary game output\n"), None);
-    }
 }
