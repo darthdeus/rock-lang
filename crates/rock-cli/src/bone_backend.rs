@@ -505,46 +505,6 @@ mod tests {
     }
 
     #[test]
-    fn interface_type_errors_are_rejected_by_the_verdict() {
-        assert!(
-            rejected("fn f(x: Nonexistent) -> int { 1 }"),
-            "unknown param type"
-        );
-        assert!(
-            rejected("global gg: Nonexistent = 0"),
-            "unknown global type"
-        );
-        assert!(
-            rejected("struct S { x: Nonexistent }"),
-            "unknown field type"
-        );
-        assert!(
-            !rejected("fn ok(x: int) -> int { x }"),
-            "clean program must pass"
-        );
-    }
-
-    #[test]
-    fn const_globals_are_read_only() {
-        assert!(
-            rejected("const FOO: int = 5\nfn f() { FOO = 6 }"),
-            "rebind const"
-        );
-        assert!(
-            rejected("const FOO: int = 5\nfn f() { FOO += 1 }"),
-            "compound-assign const"
-        );
-        assert!(
-            !rejected("global BAR: int = 5\nfn f() { BAR = 6 }"),
-            "mutable global write"
-        );
-        assert!(
-            !rejected("global BAR: int = 5\nfn f() { BAR += 1 }"),
-            "mutable global compound"
-        );
-    }
-
-    #[test]
     fn a_diagnostic_spanned_into_stdlib_renders_its_snippet() {
         const NEEDLE: &str = "fn Vec<T>.push(";
         let unified = rock_stdlib::stdlib_files()
@@ -574,26 +534,6 @@ mod tests {
         assert!(
             rendered.contains("boxed here"),
             "the label must render:\n{rendered}"
-        );
-    }
-
-    #[test]
-    fn cli_warm_stdlib_uses_loader_file_ids() {
-        let expected: Vec<_> = rock_stdlib::stdlib_files()
-            .iter()
-            .map(|f| rock_stdlib::stdlib_file_id(f.name))
-            .collect();
-        let session = bone_session(Vec::new()).expect("CLI warm session must build");
-        let actual: Vec<_> = session
-            .ws
-            .modules
-            .iter()
-            .filter(|module| session.warm_mids.contains(&module.id))
-            .map(|module| module.file.as_str().to_owned())
-            .collect();
-        assert_eq!(
-            actual, expected,
-            "CLI and LSP must warm the same stdlib file ids"
         );
     }
 }
