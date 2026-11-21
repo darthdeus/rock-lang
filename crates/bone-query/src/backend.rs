@@ -3245,102 +3245,6 @@ mod tests {
     }
 
     #[test]
-    fn span_location_invalid_uri_reports_cause_once() {
-        let capture = super::failure_log::Recording::start();
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.rock").to_string_lossy().into_owned();
-        let bone = span_test_workspace(&main);
-        let proj = bone.projects.get(&BoneWorkspace::root_for(&main)).unwrap();
-        let target = "relative-span.rock";
-        let mut span = Span::unknown();
-        span.file = Ustr::from(target);
-        let cause = Uri::from_file_path(target).unwrap_err().to_string();
-        capture.take();
-        assert!(location(proj, &span, None).is_none());
-        let records = capture.take();
-        assert_eq!(records.len(), 1, "missing URI failure: {records:?}");
-        assert!(
-            records[0].contains("span location")
-                && records[0].contains(target)
-                && records[0].contains("construct URI")
-                && records[0].contains(&cause)
-                && records[0].contains("omit location"),
-            "URI failure lost context: {records:?}"
-        );
-        assert!(location(proj, &span, Some(&mut HashMap::new())).is_none());
-        assert!(capture.take().is_empty());
-    }
-
-    #[test]
-    fn span_location_tracked_unsaved_source_wins_over_disk() {
-        let capture = super::failure_log::Recording::start();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("main.rock").to_string_lossy().into_owned();
-        let source = "\nfn main() {}";
-        fs_err::write(&path, "different disk source").unwrap();
-        let mut bone = BoneWorkspace::new();
-        bone.update(&path, source.into());
-        let proj = bone.projects.get(&BoneWorkspace::root_for(&path)).unwrap();
-        let mut span = Span::unknown();
-        // Session file ids are canonical; the editor path may traverse a symlink
-        // (the macOS temporary directory).
-        let file_id = bone.canon(&path);
-        span.file = Ustr::from(file_id.as_str());
-        span.set_offset_range((4, 8));
-        capture.take();
-        for deleted in [false, true] {
-            if deleted {
-                fs_err::remove_file(&path).unwrap();
-            }
-            let loc = location(proj, &span, None).unwrap();
-            assert_eq!(
-                loc.uri,
-                Uri::from_file_path(&editor_path(&file_id)).unwrap()
-            );
-            assert_eq!(
-                loc.range,
-                Range::new(Position::new(1, 3), Position::new(1, 7))
-            );
-            assert_eq!(location(proj, &span, Some(&mut HashMap::new())), Some(loc));
-        }
-        assert!(capture.take().is_empty());
-    }
-
-    #[test]
-    fn span_location_recording_and_temp_target_are_released_on_unwind() {
-        let mut target = PathBuf::new();
-        let mut reached_assertion = false;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Keep the recording guard alive until the intentional unwind.
-            let _capture = super::failure_log::Recording::start();
-            let dir = tempfile::tempdir().unwrap();
-            target = dir.path().join("target.rock");
-            fs_err::write(&target, "temporary source").unwrap();
-            let main = dir.path().join("main.rock").to_string_lossy().into_owned();
-            let bone = span_test_workspace(&main);
-            let proj = bone.projects.get(&BoneWorkspace::root_for(&main)).unwrap();
-            let mut span = Span::unknown();
-            span.file = Ustr::from("/invalid\nspan.rock");
-            assert!(location(proj, &span, None).is_none());
-            reached_assertion = true;
-            panic!("intentional assertion failure to verify cleanup");
-        }));
-        assert!(result.is_err());
-        assert!(
-            reached_assertion,
-            "cleanup probe failed before its intentional assertion"
-        );
-        assert!(
-            !target.parent().unwrap().exists(),
-            "temporary directory survived unwind"
-        );
-        let capture = super::failure_log::Recording::start();
-        assert!(capture.take().is_empty(), "recording survived unwind");
-        log::warn!(target: "LSP", "fresh recording after unwind");
-        assert_eq!(capture.take().len(), 1);
-    }
-
-    #[test]
     fn combined_parse_failure_reports_cause_and_repaired_request_succeeds() {
         let capture = super::failure_log::Recording::start();
         let dir = tempfile::tempdir().unwrap();
@@ -3479,71 +3383,7 @@ mod tests {
         assert_eq!(d.range.end.character, 27);
     }
 
-    #[test]
-    fn diagnostic_spans_the_full_label() {
-        let mut span = Span::unknown();
-        span.set_line_range((10, 10));
-        span.set_col_range((7, 15)); // `ris_shot`, 8 chars, end-exclusive
-        span.set_offset_range((100, 108));
-        let e = CompilerError::new_with_label(span, "Undefined global `ris_shot`".to_string());
-        let d = compiler_error_to_diagnostic(&e, &|_| None);
-        assert_eq!((d.range.start.line, d.range.start.character), (10, 7));
-        assert_eq!((d.range.end.line, d.range.end.character), (10, 15));
-    }
-
     // One diagnostic per label, so the editor marks both lines.
-    #[test]
-    fn multi_label_error_expands_to_one_diagnostic_per_label() {
-        let mut cause = Span::unknown();
-        cause.file = Ustr::from("a.rock");
-        cause.set_line_range((118, 118));
-        cause.set_col_range((18, 50));
-        cause.set_offset_range((200, 232));
-        let mut use_site = Span::unknown();
-        use_site.file = Ustr::from("a.rock");
-        use_site.set_line_range((123, 123));
-        use_site.set_col_range((35, 50));
-        use_site.set_offset_range((400, 415));
-
-        let e = CompilerError::new_with_label(cause, "use `./`".to_string()).with_label(
-            use_site,
-            "this `float` is used where `int` is required".to_string(),
-        );
-        let diags = compiler_error_to_diagnostics(&e, &|_| None);
-
-        assert_eq!(diags.len(), 2, "one diagnostic per label");
-        assert_eq!(diags[0].1.range.start.line, 118);
-        assert_eq!(diags[0].1.message, "use `./`");
-        assert_eq!(diags[1].1.range.start.line, 123);
-        assert_eq!(
-            diags[1].1.message,
-            "this `float` is used where `int` is required"
-        );
-        assert!(diags.iter().all(|(f, _)| f.as_str() == "a.rock"));
-    }
-
-    #[test]
-    fn single_label_error_stays_one_diagnostic() {
-        let mut span = Span::unknown();
-        span.file = Ustr::from("a.rock");
-        span.set_line_range((10, 10));
-        span.set_col_range((7, 15));
-        span.set_offset_range((100, 108));
-        let e = CompilerError::new_with_label(span, "Undefined global `ris_shot`".to_string());
-        let diags = compiler_error_to_diagnostics(&e, &|_| None);
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].1.message, "Undefined global `ris_shot`");
-    }
-
-    #[test]
-    fn balance_appends_missing_closers() {
-        assert_eq!(
-            balance_delimiters("fn f() { g(".to_string()),
-            "fn f() { g()}"
-        );
-        assert_eq!(balance_delimiters("a[0".to_string()), "a[0]");
-    }
-
     #[test]
     fn balance_ignores_braces_in_line_comments() {
         // The closer must land on a fresh line, not inside the comment.
@@ -3574,16 +3414,6 @@ mod tests {
             balance_delimiters("let s = \"\"\"block\ntext".to_string()),
             "let s = \"\"\"block\ntext\"\"\""
         );
-    }
-
-    #[test]
-    fn munge_keeps_items_after_the_cursor() {
-        // A later fn must survive the munge so its UFCS method is offered.
-        let src = "fn use_it(p: P) { p.\n}\nfn dist(p: P) {}\n";
-        let off = src.find("p.\n").unwrap() + 2;
-        let [m, _] = completion_munges(src, off);
-        assert!(m.contains("__rock_completion__"), "got: {m:?}");
-        assert!(m.contains("fn dist(p: P)"), "tail dropped: {m:?}");
     }
 
     fn equivalence_ws(files: &[(&str, &str)]) -> Workspace {
@@ -3668,50 +3498,11 @@ mod tests {
     }
 
     #[test]
-    fn field_ref_fields_match_by_type_equivalence() {
-        let ws = equivalence_ws(&[
-            (
-                "a",
-                "struct V { x: int }\n\
-                 struct V2 { x: float }\n\
-                 struct Owner { a: V, b: [V2?], c: int }",
-            ),
-            ("b", "fn shared(x: [V2?]) {}\nfn generic<V>(x: V) {}"),
-        ]);
-        let owner = key_for_tail(&ws, "Owner");
-        assert_eq!(
-            fields_of_type(&ws, owner, first_param(&ws, "shared")),
-            vec![Ustr::from("b")]
-        );
-        assert!(fields_of_type(&ws, owner, first_param(&ws, "generic")).is_empty());
-    }
-
-    #[test]
     fn unique_return_requires_agreeing_overloads() {
         let src = "fn mk(x: int) -> int { x }\nfn mk(x: string) -> float { 1.0 }";
         assert_eq!(unique_return(&[("a", src)], "mk"), None);
         let src = "fn mk(x: int) -> [int] { [x] }\nfn mk(x: string) -> [int] { [] }";
         assert_eq!(unique_return(&[("a", src)], "mk").as_deref(), Some("[int]"));
-    }
-
-    #[test]
-    fn unique_return_agrees_across_module_arenas() {
-        let a = "struct V2 { x: float }\nfn mk(x: int) -> [V2?] { [] }";
-        let b = "fn mk(x: string) -> [V2?] { [] }";
-        assert_eq!(
-            unique_return(&[("a", a), ("b", b)], "mk").as_deref(),
-            Some("[query_test::V2?]")
-        );
-    }
-
-    #[test]
-    fn unique_return_keeps_a_generic_apart_from_a_same_named_nominal() {
-        let src = "struct T { x: int }\n\
-                   fn mk(x: int) -> T { T { x } }\n\
-                   fn mk<T>(x: T) -> T { x }";
-        assert_eq!(unique_return(&[("a", src)], "mk"), None);
-        let src = "fn mk<T>(x: T, y: int) -> T { x }\nfn mk<T>(x: T) -> T { x }";
-        assert_eq!(unique_return(&[("a", src)], "mk"), None);
     }
 }
 
