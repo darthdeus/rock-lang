@@ -474,12 +474,7 @@ fn sorting_by_a_scalar_key() {
     for (v, n) in xs { print("{v.x as int} {n}") }
 }
 
-// ======== materialize ========
-//
-// Inside Rock code `materialize` of a tuple is the tuple itself: it is stored,
-// passed and matched like any other. A body the compiler cannot see into is
-// handed the tuple as the user wrote it, one boxed value per element, and an
-// implicit splatting tuple is rejected there (tests/errors/nobox.rock.err).
+// Opaque bodies receive materialized tuples, one boxed value per element.
 
 fn lid<T>(v: T) -> T { return v }
 

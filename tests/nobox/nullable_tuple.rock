@@ -435,9 +435,7 @@ fn the_same_through_a_lambda() {
     assert_eq(apply(t => if t == null { -1.0 } else { t.0.y + t.1 }, param_maybe(false)), -1.0)
 }
 
-// The control that scopes the mechanism: the UNMARKED twin always compiled and
-// must keep its single boxed slot -- only a `nobox` element splats, so this
-// asserts the ABI did NOT move underneath it.
+// Unmarked values retain their boxed tuple ABI.
 fn u_maybe(b: bool) -> (UNV, float)? {
     if b { return (UNV { x: 1.0, y: 3.0 }, 10.0) }
     return null
@@ -454,14 +452,7 @@ fn an_unmarked_nullable_tuple_param_still_works() {
     assert_eq(u_describe(u_maybe(false)), -1.0)
 }
 
-// ======== Stored in a CONTAINER ========
-//
-// A container element that is a splatting tuple stores the WIRE in a table
-// (`tuple_box_shape`): leaves flat, no per-element boxes. Reading it back out
-// crosses two paths that must agree with that layout: the stdlib `get`/`pop`
-// instances return the stored box through the splatting return ABI (tested
-// and unpacked at runtime), and a direct map/arena read hands the box to the
-// pattern machinery, which rebuilds the parts from the flat slots.
+// Container tuple boxes store nobox leaves flat.
 
 nobox value CNV { x: float, y: float }
 
@@ -537,7 +528,6 @@ fn arena_get_splatting_element() {
     print("{v.x as int} {f as int}")
 }
 
-// A missing element coalesces to a whole fallback tuple.
 @test(output = "40")
 fn a_missing_element_coalesces() {
     let empty: [(CNV, float)] = []

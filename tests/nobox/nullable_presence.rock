@@ -264,7 +264,6 @@ fn returned_lambda_without_a_merge_keeps_its_arity() -> int {
     return (got + if g(null) == null { 1.0 } else { 0.0 }) as int
 }
 
-// No merge at all.
 fn absent_without_merge() -> CP? {
     let v: CP? = null
     return v
@@ -275,7 +274,6 @@ fn no_merge_is_correct() -> int {
     return if absent_without_merge() == null { 1 } else { 0 }
 }
 
-// A branch, but the arms RETURN rather than producing a merged value.
 fn pick_by_return(present: bool) -> CP? {
     if present { return CP { x: 5.0, y: 6.0 } }
     return null
@@ -286,7 +284,6 @@ fn statement_position_returns_do_not_merge() -> int {
     return if pick_by_return(true) != null && pick_by_return(false) == null { 1 } else { 0 }
 }
 
-// A value-position merge on a marked but NON-nullable value: no presence leaf.
 fn pick_present(a: bool) -> CP {
     let v: CP = if a { CP { x: 5.0, y: 6.0 } } else { CP { x: 1.0, y: 2.0 } }
     return v
@@ -297,7 +294,6 @@ fn merge_of_two_present_arms() -> int {
     return (pick_present(true).x + pick_present(false).x) as int
 }
 
-// A value-position merge on a nullable but UNMARKED value: no leaf realization.
 fn pick_unmarked(present: bool) -> CQ? {
     let v: CQ? = if present { CQ { x: 5.0, y: 6.0 } } else { null }
     return v
@@ -308,9 +304,6 @@ fn unmarked_nullable_merge() -> int {
     return if pick_unmarked(true) != null && pick_unmarked(false) == null { 1 } else { 0 }
 }
 
-// -- `== null` / `!= null` on a nullable nobox field consumed as a boolean in
-// every position: struct field, local, argument, return, equality operand,
-// short circuit and condition. --
 
 nobox value PresenceId { scene: int, arena: int, slot: int, generation: int }
 value BoxedPresenceId { scene: int, arena: int, slot: int, generation: int }
@@ -329,7 +322,6 @@ fn presence_tuple(present: bool) -> (PresenceId, int)? {
     return null
 }
 
-// Each position is checked for an absent state `a` and a present state `p`.
 
 @test
 fn nobox_presence_field() {

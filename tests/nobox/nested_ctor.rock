@@ -136,10 +136,7 @@ fn a_flattenable_ctor_inside_a_coroutine_lambda() {
     print("{out[0]} {out[1]} {out[2]}")
 }
 
-// A REFERENCE struct field holding a `nobox` whose own field is `nobox`. The
-// nobox field is spliced into the parent's table as dotted leaves, so the
-// nested value has no cdata to live inside and must contribute its own leaves
-// too. `mk` takes a param so the ctor cannot fold away before it is lowered.
+// A reference parent stores nested nobox leaves in its own table.
 nobox value RNV { x: int, y: int }
 nobox value RMid { v: RNV }
 struct RefOuter { m: RMid, tag: int }
@@ -161,8 +158,7 @@ fn a_nested_nobox_field_binds_to_a_local() {
     print("{m.v.x} {m.v.y}")
 }
 
-// A leaf-table box read back out of a container: the declared field name holds
-// only the presence tag, so a read keyed off it would see `nil` leaves.
+// The declared field holds presence, not the value leaves.
 value OptPos { pos: NV2?, a: float }
 
 global OPT_MAP: Map<string, OptPos> = map_new()
@@ -180,7 +176,6 @@ fn an_explicit_materialize_stays_legal() {
     print("{m.x} {m.y}")
 }
 
-// An explicit box as a nested operand of a global's ctor is left whole.
 global MATERIALIZED_E5: E5
 
 fn setup_materialized_e5() {

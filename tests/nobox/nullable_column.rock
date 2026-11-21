@@ -170,13 +170,7 @@ fn test_enumerate_binds_presence() {
     }
 }
 
-// --- the leaf budget, on both sides ---
-//
-// The presence column SPENDS from `MAX_COLUMN_LEAVES` (4), because it is a
-// column like any other. That budget is the storage heuristic for UNMARKED
-// values only: a `nobox` element cannot fall back to a box, so it stays
-// column-stored past it. `[NP3?]` is 4 columns, at
-// the budget; `[NP4?]` is 5, past it, and still columns.
+// Presence uses a column; nobox elements remain column-stored past the budget.
 
 nobox value NP3 { a: float, b: float, c: float }
 
@@ -198,12 +192,7 @@ fn test_four_leaf_payload_is_past_the_budget_and_still_columns() {
     print("{v[1] == null}")
 }
 
-// --- top-level presence composed with a NESTED one ---
-//
-// The two presence columns are the SAME encoding at two levels, not two
-// schemes: `column_leaf_paths` prepends the one key that has no field name to
-// key on, and leaves `leaf_paths_rec`'s nested keys (the field's own undotted
-// name) exactly as they were. Both appear in one table, hence the key sweep.
+// Top-level and nested nullable values have separate presence columns.
 
 nobox value NV2c { x: float, y: float }
 nobox value Optc { pos: NV2c? }
@@ -224,8 +213,6 @@ fn test_read_through_both_presence_levels() {
     print("{a[1] == null}")
 }
 
-// The CHAINED read through both presence levels. Both rows, so the absent one
-// exercises the top-level presence column rather than the nested one.
 @test(output = "1\n-1")
 fn test_chained_safe_nav_through_both_presence_levels() {
     let a: [Optc?] = [Optc { pos: NV2c { x: 1.0, y: 2.0 } }, null]
