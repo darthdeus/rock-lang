@@ -1,19 +1,5 @@
-//! Memory effects of a call, inferred over the whole program: which places a
-//! callee may write, so an optimization that holds a fact about a place can
-//! keep it across calls that provably leave the place alone.
-//!
-//! The effect is a conservative upper bound over the callee and everything it
-//! can reach: a Rock body's own field, element and global writes joined with
-//! the effects of its calls. Anything whose body cannot be read (`inline(lua)`,
-//! `extern`, `operator(lua)`, a call through a function value, a yield, an
-//! unresolved call) writes everything, except opaque bodies marked `@pure` or
-//! `@nowrite`. A `for` statement joins the protocol functions it desugars to.
-//!
-//! `@pure` is otherwise not consulted: a `@pure` Rock body is simply walked
-//! and found to write nothing on its own (see `docs/purity.md`).
-//!
-//! The table is the least fixpoint over the call graph, computed once per
-//! workspace and dropped whenever a module's inference is replaced.
+//! Effects conservatively bound writes through a call and its callees. Rock
+//! bodies are always walked, including those annotated `@pure`.
 
 use crate::hir::{
     BinOp, BodyOwner, BuiltinTy, Callee, Expr, Function, Statement, TyId, TypeCtor, TypeExpr,
@@ -86,7 +72,6 @@ impl MemEffect {
     }
 }
 
-/// Per-function memory effects for a workspace.
 #[derive(Clone, Debug, Default)]
 pub struct EffectTable {
     by_module: Vec<Vec<MemEffect>>,
@@ -215,7 +200,6 @@ fn is_fn_typed(ws: &Workspace, ty: TyId) -> bool {
     }
 }
 
-/// A struct, enum or newtype name used as a call: a constructor.
 fn is_constructor(ws: &Workspace, name: Ustr) -> bool {
     let bare = name.as_str().rsplit("::").next().unwrap_or_default();
     let bare = Ustr::from(bare);

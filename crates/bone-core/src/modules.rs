@@ -1,12 +1,5 @@
-//! Modules-v1 namespace data.
-//! The namespace tree is the scope map the semantic pass builds from v1
-//! fragment headers, inline mod blocks and use declarations; resolution lives
-//! in `bone-lower/src/resolve.rs`. User items register under canonical DefKeys
-//! (`<package>::<module path>::<name>`), compiler-owned items under bare names.
-
 use crate::prelude::*;
 
-/// Dense package id from the host's package graph.
 pub type PackageId = u32;
 
 /// Reserved package id for the compiler-owned virtual standard library.
@@ -16,7 +9,6 @@ pub const STD_PACKAGE_NAME: &str = "std";
 
 pub use rock_core::source_code::{STANDALONE_PACKAGE_PREFIX, artifact_name, display_name};
 
-/// How a compiler-known type former is admitted and resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntrinsicType {
     /// Members of the std export view, so they resolve only while the stdlib is
@@ -61,7 +53,6 @@ pub fn vec_swizzle_components_of(struct_name: Ustr, field: &str) -> Option<Vec<u
     idxs.iter().all(|&i| i < arity).then_some(idxs)
 }
 
-/// The component count of a swizzlable vector type.
 pub fn vec_swizzle_arity(struct_name: Ustr) -> Option<usize> {
     ["Vec2", "Vec3", "Vec4"]
         .iter()
@@ -69,7 +60,6 @@ pub fn vec_swizzle_arity(struct_name: Ustr) -> Option<usize> {
         .map(|i| i + 2)
 }
 
-/// The intrinsic type former whose canonical key is `key`, if any.
 pub fn intrinsic_type(key: Ustr) -> Option<IntrinsicType> {
     STD_INTRINSIC_TYPES
         .iter()
@@ -81,7 +71,6 @@ pub fn is_field_ref_former(key: Ustr) -> bool {
     intrinsic_type(key) == Some(IntrinsicType::FieldRef)
 }
 
-/// The intrinsic formers the std export view owns.
 pub fn std_exported_intrinsic_types() -> impl Iterator<Item = &'static str> {
     STD_INTRINSIC_TYPES
         .iter()
@@ -119,7 +108,6 @@ pub fn is_intrinsic_key_in(key: Ustr, spellings: &[&str]) -> bool {
 /// Package-root-relative module path (`combat::casting`).
 pub(crate) type ModulePath = Vec<Ustr>;
 
-/// The source site performing an access check.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccessSite<'a> {
     pub package: Option<PackageId>,
@@ -135,7 +123,6 @@ impl<'a> AccessSite<'a> {
     }
 }
 
-/// Visibility of a namespace node or export binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NsVisibility {
     /// Defining module and its descendants (the default).
@@ -164,8 +151,6 @@ impl NsVisibility {
     }
 }
 
-/// Whether a restricted setter audience (`write_vis`) is strictly within (a proper subset of)
-/// the getter audience (`read_vis`).
 pub fn is_setter_audience_within_getter(write_vis: &NsVisibility, read_vis: &NsVisibility) -> bool {
     *write_vis == NsVisibility::Private && *read_vis != NsVisibility::Private
 }
@@ -186,17 +171,12 @@ pub struct NsNode {
     /// `::`-joined module path ("" for the package root).
     pub path_key: Ustr,
     pub segments: ModulePath,
-    /// Explicit visibility declarations (`pub mod x;` headers / blocks).
-    /// Conflicting declarations are a build error at tree construction.
     pub vis: Option<NsVisibility>,
     /// Ancestor node keys, root first.
     pub ancestors: Vec<Ustr>,
-    /// Types owned here: bare name -> DefKey.
+    /// Bare name to canonical DefKey.
     pub owned_types: FxHashMap<Ustr, Ustr>,
-    /// Globals/constants owned here: bare name -> DefKey.
     pub owned_globals: FxHashMap<Ustr, Ustr>,
-    /// Callable families owned here: bare name -> family DefKey, shared by
-    /// overloads.
     pub owned_callables: FxHashMap<Ustr, Ustr>,
     /// The declarations of each callable family, in source order: the
     /// per-member visibility table (`DefMeta::vis` is meaningless for
@@ -270,8 +250,6 @@ pub struct DefMeta {
     pub span: crate::prelude::Span,
 }
 
-/// Which package and module a v1 file contributes to, and its fragment-local
-/// imports.
 #[derive(Clone, Debug, Default)]
 pub struct FragmentScope {
     pub package: PackageId,
@@ -280,7 +258,7 @@ pub struct FragmentScope {
     /// Fragment-local `use` bindings: local name -> every unresolved path bound
     /// under it, in source order. Resolved lazily at use.
     pub named: FxHashMap<Ustr, Vec<UsePathRef>>,
-    /// Module scopes this fragment globs (`use a::b::*;`), unresolved.
+    /// Unresolved module scopes this fragment globs.
     pub globs: Vec<UsePathRef>,
 }
 
@@ -349,7 +327,6 @@ pub struct NsPackage {
     pub id: PackageId,
     pub self_name: Ustr,
     pub nodes: FxHashMap<Ustr, NsNode>,
-    /// Dependency aliases: alias -> target package id.
     pub aliases: FxHashMap<Ustr, PackageId>,
 }
 
@@ -381,8 +358,6 @@ impl NsTree {
         self.std_root()?.owned(name)
     }
 
-    /// Whether `vis` on a node in `owner_pkg` admits access from `from_path` in
-    /// `from_pkg`.
     pub fn can_access(
         &self,
         vis: &NsVisibility,

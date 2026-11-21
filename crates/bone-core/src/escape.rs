@@ -1,12 +1,5 @@
-//! Proven-nonescaping closures: a closure may capture an identity borrow only
-//! when it cannot outlive the call that receives it. Anything this analysis
-//! cannot prove is treated as escaping.
-//!
-//! A lambda is nonescaping when it is called in place, or passed as an
-//! argument to a parameter that its callee only calls or forwards to another
-//! nonescaping parameter. Callee bodies are read from HIR alone (their calls
-//! resolve by a unique name), so the answer does not depend on which bodies
-//! were inferred first.
+//! Unproven closures escape. An identity borrow may only be captured by a
+//! closure that cannot outlive the call receiving it.
 
 use crate::hir::{Callee, Expr, Function};
 use crate::prelude::*;

@@ -1,6 +1,3 @@
-//! The bone typechecker's data layer: HIR, ids, `Workspace` and inference
-//! results, with no dependency on lowering or the inference algorithm.
-
 #[macro_use]
 pub mod prelude;
 pub mod annotations;

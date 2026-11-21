@@ -278,7 +278,6 @@ pub struct Body {
 
     pub node_intervals: Vec<Interval<usize, NodeRef>>,
 
-    /// Resolved modules-v1 path segments spelled in this body.
     pub path_segments: Vec<PathSegmentRef>,
 }
 
@@ -392,11 +391,9 @@ pub struct Module {
     pub lower_var_floor: u32,
 
     pub file: Ustr,
-    /// Owning package's manifest name, if any.
     pub package: Option<Ustr>,
     /// Package-relative path used in generated code.
     pub logical_file: Ustr,
-    /// Package identity-storage migration state.
     pub identity_storage: skull_parser::IdentityStorage,
 
     pub functions: Arena<Function>,
@@ -834,7 +831,6 @@ pub enum FamilyTier {
     Std,
 }
 
-/// Overload family selected during name resolution.
 #[derive(Copy, Clone, Debug)]
 pub enum CallFamily {
     /// The definition the tiers bind, by canonical DefKey.
@@ -845,7 +841,6 @@ pub enum CallFamily {
 }
 
 impl CallFamily {
-    /// The family's lookup spelling.
     pub fn key(&self) -> Ustr {
         match self {
             CallFamily::Resolved(key) => *key,
@@ -900,7 +895,6 @@ pub const OPERATOR_FNS: &[(&str, &str, bool)] = &[
     ("__op_index", "[]", false),
 ];
 
-/// Function names selected by the unary forms of `-` and `!`.
 pub const UNARY_OPERATOR_FNS: &[(&str, &str)] = &[("__unm", "-"), ("__not", "!")];
 
 pub fn operator_entry(name: &str) -> Option<(&'static str, bool)> {

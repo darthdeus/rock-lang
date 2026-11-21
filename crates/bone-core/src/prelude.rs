@@ -197,8 +197,6 @@ pub struct NewtypeDef {
     pub wrapped: TyId,
 }
 
-// The `sequential` feature swaps rayon onto std iterators for single-threaded
-// profiling.
 #[cfg(not(feature = "sequential"))]
 pub use rayon::iter::{
     IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
@@ -235,7 +233,6 @@ pub fn join_in_place<A, B>(spawned: impl FnOnce() -> A, here: impl FnOnce() -> B
     (spawned(), here())
 }
 
-/// Free `value` on the pool instead of the calling thread.
 #[cfg(not(any(feature = "sequential", target_arch = "wasm32")))]
 pub fn drop_in_background<T: Send + 'static>(value: T) {
     rayon::spawn(move || drop(value));

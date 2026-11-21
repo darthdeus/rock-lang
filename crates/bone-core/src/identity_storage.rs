@@ -22,7 +22,6 @@ pub(crate) const IDENTITY_STORAGE_ANNOTATION: &str = "identity_storage";
 /// body may erase an identity to `any`.
 pub(crate) const IDENTITY_ERASURE_ANNOTATION: &str = "identity_erasure";
 
-/// How an identity reached the storage position that rejects it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IdentityStorageVia {
     /// Directly, or under a nullable wrapper.
@@ -97,7 +96,6 @@ pub enum IdentityNode<T, C: Iterator<Item = T>> {
     Nominal(Ustr, C),
 }
 
-/// A type representation the predicate can walk.
 pub trait IdentityTypes: Copy {
     type Ty: Copy;
     type Children: Iterator<Item = Self::Ty>;
@@ -119,7 +117,6 @@ pub enum IdentityPosition {
     Row,
 }
 
-/// The predicate over any [`IdentityTypes`] representation.
 pub fn identity_violation_in<V: IdentityTypes>(
     ws: &Workspace,
     types: V,
@@ -179,7 +176,6 @@ pub(crate) fn is_identity_storage_edge(
     is_identity_storage_struct_field(ws, name, field)
 }
 
-/// Whether `field` of the struct `name` is an `@identity_storage` edge.
 pub(crate) fn is_identity_storage_struct_field(ws: &Workspace, name: Ustr, field: Ustr) -> bool {
     ws.nominals.struct_id(name).is_some_and(|sid| {
         ws.module(sid.module).structs[sid.def]
@@ -511,7 +507,6 @@ pub(crate) const RUST_EMBEDDED_PACKAGES: &[&str] = &[
     "v1spec",
 ];
 
-/// Whether a module's identity storage is exempt from diagnostics.
 pub fn identity_storage_exempt(ws: &Workspace, module: &Module) -> bool {
     match identity_storage_package(module) {
         STDLIB_PACKAGE => return true,
@@ -540,7 +535,6 @@ fn module_path_under(path: &[Ustr], prefix: &str) -> bool {
             .all(|(segment, want)| segment.as_str() == *want)
 }
 
-/// The census label of the package that owns `module`.
 pub(crate) fn identity_storage_package(module: &Module) -> &str {
     if crate::modules::is_stdlib_module_file(module.file.as_str()) {
         STDLIB_PACKAGE

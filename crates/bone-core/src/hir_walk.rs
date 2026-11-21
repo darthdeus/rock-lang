@@ -1,20 +1,11 @@
-//! The one enumeration of a HIR node's direct children.
-//!
-//! Every match here is exhaustive with no wildcard arm, so a new `Expr`,
-//! `Statement` or `Pattern` variant fails to compile here instead of being
-//! silently skipped by the analyses that walk a body. A walker that must not
-//! descend into some child (a lambda body, a nested fn, a pattern) matches
-//! that node itself before delegating the rest here.
-//!
-//! Children come in evaluation order: an `if let` yields its value before its
-//! pattern, and a match arm yields its pattern, then its guard, then its body.
+//! Children are visited in evaluation order. Exhaustive matches prevent new
+//! HIR variants from being silently skipped by analyses.
 
 use std::convert::Infallible;
 
 use crate::hir::{Body, Callee, Expr, InterpPart, Pattern, Statement, VariantArgs};
 use crate::prelude::Idx;
 
-/// A direct child of a HIR node.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum HirChild {
     Expr(Idx<Expr>),

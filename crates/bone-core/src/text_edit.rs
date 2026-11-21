@@ -1,11 +1,3 @@
-//! The coordinate change one incremental text edit makes, and the one policy
-//! for moving stored spans past it.
-//!
-//! Every cache that keeps spans across a body edit (the session's HIR, the lint
-//! cache, the instance graph) consumes the same delta and shifts with
-//! [`TextEditDelta::shift_span`], so they cannot disagree about where a kept
-//! node now sits.
-
 use rock_core::{LineCol, Span};
 use ustr::Ustr;
 
@@ -20,12 +12,10 @@ pub struct TextEditDelta {
 }
 
 impl TextEditDelta {
-    /// Whether a span in this edit's file starts at or after the edit point.
     pub fn moves(&self, span: &Span) -> bool {
         span.file == self.file && span.offset_range().0 >= self.at
     }
 
-    /// A stored byte offset, moved iff it sits at or after the edit point.
     pub fn shift_offset(&self, offset: usize) -> usize {
         if offset >= self.at {
             add(offset, self.byte_delta)

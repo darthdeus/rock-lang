@@ -1,7 +1,3 @@
-//! Identity-storage checks for declarations and function bodies.
-//! A package's manifest declares its migration exemption; the compiler
-//! otherwise enforces the same rules for every package.
-
 use super::{
     IDENTITY_ERASURE_ANNOTATION, IDENTITY_STORAGE_ANNOTATION, IdentityPosition,
     IdentityStorageViolation, identity_body_violation, identity_root_storage_violation,
@@ -120,7 +116,6 @@ pub fn identity_body_sites(
     identity_body_sites_with(ws, function, body, bi, &InferredSlotTypes { ws, bi })
 }
 
-/// [`identity_body_sites`] reading slot types through `types`.
 pub fn identity_body_sites_with(
     ws: &Workspace,
     function: &Function,

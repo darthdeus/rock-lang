@@ -1,9 +1,6 @@
-//! Compilation storage shared by lowering and inference, plus the inference result data.
-
 use crate::hir::*;
 use crate::prelude::*;
 
-/// Generic parameters read by lowering before nominal definitions are available.
 #[derive(Clone, Debug)]
 pub struct TypeGenerics {
     pub owner: ModuleId,
@@ -266,7 +263,6 @@ impl Workspace {
         }
     }
 
-    /// Whether a lowered callable member is public in its defining namespace.
     pub fn callable_member_is_public(&self, key: Ustr, mid: ModuleId, fid: Idx<Function>) -> bool {
         match self.callable_family_members(key) {
             Some(members) => self
@@ -294,7 +290,6 @@ impl Workspace {
         self.vec_effects = Default::default();
     }
 
-    /// The memory effects of every function, over the current inferences.
     pub fn effects(&self) -> &crate::effects::EffectTable {
         self.vec_effects
             .get_or_init(|| crate::effects::EffectTable::compute(self))
@@ -324,7 +319,6 @@ impl Workspace {
         id
     }
 
-    /// [`Self::insert_module`] for every module of a pass at once.
     pub fn insert_modules(&mut self, modules: impl IntoIterator<Item = Module>) -> Vec<ModuleId> {
         let mut modules = modules.into_iter();
         let mut ids = Vec::with_capacity(modules.size_hint().0);
@@ -381,7 +375,6 @@ impl Workspace {
         }
     }
 
-    /// Re-index one function whose signature was replaced in place.
     pub fn index_param_signature(&mut self, mid: ModuleId, fid: Idx<Function>) {
         let signature = self.render_param_signature(mid, fid);
         self.param_signatures[mid.index()].insert(fid, signature);
@@ -397,7 +390,6 @@ impl Workspace {
         )
     }
 
-    /// Group backend variants by callable name and declared parameter types.
     pub fn backend_variant_key(&self, mid: ModuleId, fid: Idx<Function>) -> (Ustr, Ustr) {
         (
             self.module(mid).functions[fid].name,
@@ -433,12 +425,10 @@ impl Workspace {
         self.source_modules().filter(move |m| !warm.contains(&m.id))
     }
 
-    /// Whether `mid` is a user module given the session's `warm` set.
     pub fn is_user_module(mid: ModuleId, warm: &FxHashSet<ModuleId>) -> bool {
         !mid.is_builtin() && !warm.contains(&mid)
     }
 
-    /// Whether `name` is a nominal identity type: a `struct`, not a `value`.
     pub fn is_identity_struct(&self, name: Ustr) -> bool {
         self.nominals
             .struct_id(name)
@@ -500,7 +490,6 @@ impl Workspace {
         })
     }
 
-    /// Whether `ty` holds a frame reference anywhere in its tree.
     pub fn type_contains_ref(&self, body: Option<&BodyInference>, ty: TyId) -> bool {
         self.type_any(body, ty, &mut |node| {
             matches!(
@@ -658,7 +647,6 @@ pub struct BodyInference {
     /// Instantiated generics in declaration order. Resolve them through
     /// `substitutions` before use.
     pub call_generic_bindings: FxHashMap<Idx<Expr>, Vec<TyId>>,
-    /// Iterator protocol witnesses, keyed by the loop's iter expression.
     pub for_iter_protocol: FxHashMap<Idx<Expr>, ForIterInfo>,
     /// `next(x)` calls where `x: I` for a bound `I: Iterator<E>`, mapped to the generic's index in
     /// the enclosing function. Skull lowers them as placeholder callees resolved at inline time.
@@ -675,7 +663,6 @@ pub struct BodyInference {
     /// Arguments implicitly coerced from iterable to iterator at an `Iterator`-bounded parameter,
     /// with the resolved `iter` witness skull wraps them in.
     pub implicit_iter_args: FxHashMap<Idx<Expr>, IterWitness>,
-    /// Inferred variables for the declared generics in a struct default body.
     pub struct_default_generic_slots: Vec<TyId>,
 
     pub ty_arena: Arena<TypeExpr>,
@@ -692,7 +679,6 @@ pub struct BodyInference {
     pub deps: FxHashSet<Ustr>,
 }
 
-/// What [`BodyInference::rollback_to`] restores.
 #[derive(Copy, Clone, Debug)]
 pub struct BodyCheckpoint {
     trail: usize,
