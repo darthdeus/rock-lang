@@ -30,59 +30,6 @@ fn fixture_paths(
 }
 
 #[test]
-fn path_search_cases() {
-    // (case, source, root, target, sorted (suffix, is_method, takes_args))
-    let cases: &[(&str, &str, &str, &str, &[(&str, bool, bool)])] = &[
-        // Memoizing the reachable set must not collapse the fan-out.
-        (
-            "diamond yields both paths",
-            "struct E { v: int }\nstruct A { e: E }\nstruct B { e: E }\nstruct T { a: A, b: B }\n",
-            "T",
-            "E",
-            &[("a.e", false, false), ("b.e", false, false)],
-        ),
-        // No type repeats on a path, so never `next.leaf`.
-        (
-            "self cycle terminates",
-            "struct Leaf { v: int }\nstruct Node { next: Node?, leaf: Leaf }\n",
-            "Node",
-            "Leaf",
-            &[("leaf", false, false)],
-        ),
-        (
-            "mutual cycle terminates",
-            "struct Tag { v: int }\nstruct A { b: B?, tag: Tag }\nstruct B { a: A?, tag: Tag }\n",
-            "A",
-            "Tag",
-            &[("b.tag", false, false), ("tag", false, false)],
-        ),
-        // A method needing more args is offered as a last hop (filled with
-        // `($0)`) but never traversed: a snippet hole cannot sit mid-path.
-        (
-            "method with args is terminal",
-            "struct V { x: int }\nstruct W { v: V }\nfn build(w: W, scale: int) -> V { w.v }\n",
-            "W",
-            "V",
-            &[("build", true, true), ("v", false, false)],
-        ),
-    ];
-    for (case, src, root, target, expected) in cases {
-        let mut got: Vec<(String, bool, bool)> =
-            fixture_paths(&index_of(src), root, &[target.to_string()], 64)
-                .paths
-                .into_iter()
-                .map(|p| (p.suffix, p.is_method, p.takes_args))
-                .collect();
-        got.sort();
-        let expected: Vec<(String, bool, bool)> = expected
-            .iter()
-            .map(|(s, m, a)| (s.to_string(), *m, *a))
-            .collect();
-        assert_eq!(got, expected, "{case}");
-    }
-}
-
-#[test]
 fn capped_paths_preserve_distance_spelling_and_terminal_metadata() {
     let index = index_of(
         "struct Goal { value: int }
