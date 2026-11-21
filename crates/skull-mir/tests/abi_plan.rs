@@ -9,8 +9,8 @@ use skull_mir::instance::Instance;
 use skull_mir::lower::{
     BackendFnAbiPlan, BoundaryClass, ContainerFamily, ContainerPlan, ContainerStorage, EnumLayout,
     EnumPlan, GlobalPlan, RepArena, RepGuarantees, RepLayout, RepUse, RepUseFacts, ScalarCtx,
-    ValueStorage, bound_next_shape_from_concrete, boundary_requires_boxed_representation,
-    declared_boundary_class, struct_field_plan,
+    ValueStorage, boundary_requires_boxed_representation, declared_boundary_class,
+    struct_field_plan,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -456,9 +456,10 @@ fn container_storage_uses_the_owned_element_representation() {
 fn missing_bound_result_plan_is_an_explicit_error() {
     let ws = checked_ws_of("fn main() { print(\"ok\") }\n");
     let scx = ScalarCtx::new(&ws);
-    let interner = skull_mir::monoty::MonoInterner::new();
-    let result =
-        bound_next_shape_from_concrete(&ws, &scx, &interner, &ConcreteSignature::default());
+    let signature = ConcreteSignature::default();
+    let owner = Instance::base(func_ref(&ws, "main"));
+    let abi = BackendFnAbiPlan::for_concrete_signature(&ws, &scx, &owner, &signature);
+    let result = abi.bound_next_layout(signature.result);
     assert!(
         result.is_err(),
         "a missing concrete bound result must not become a no-op"

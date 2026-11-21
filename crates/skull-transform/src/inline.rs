@@ -1493,7 +1493,6 @@ fn resolve_cloned_bound_calls(
             &leaf,
             scx,
             ws,
-            scx.interner(),
             concrete_plans,
             "at this splice site",
         )?;
@@ -2046,6 +2045,9 @@ fn next(c: Counter) -> (bool, int) {
     c.n = c.n + 1
     return (true, c.n)
 }
+fn wide_next(c: Counter) -> (bool, Pair) {
+    return (true, Pair { x: c.n, y: c.n })
+}
 fn sum_all<I: Iterator<int>>(it: I) -> int {
     let s = 0
     for x in it { s = s + 1 }
@@ -2068,74 +2070,43 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
             .module_ids
             .get(&Ustr::from("<repack-index>"))
             .expect("module");
-        let (fid, _) = ws
-            .module(mid)
-            .functions
-            .iter()
-            .find(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == "top")
-            .expect("top");
-        let top = FuncRef {
+        let find = |name| FuncRef {
             module: mid,
-            func: fid,
+            func: ws
+                .module(mid)
+                .functions
+                .iter()
+                .find(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == name)
+                .expect("fixture function")
+                .0,
         };
+        let (top, wide) = (find("top"), find("wide_next"));
         let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
-        let graph =
-            skull_graph::instance_graph::build_in(&ws, vec![top], std::sync::Arc::clone(&interner));
+        let graph = skull_graph::instance_graph::build_in(
+            &ws,
+            vec![top, wide],
+            std::sync::Arc::clone(&interner),
+        );
         let concrete = skull_graph::concrete_body::build(&ws, &graph);
-        let scx = ScalarCtx::new(&ws).sharing(std::sync::Arc::clone(&interner));
-
-        let witness = concrete
-            .plans
-            .values()
-            .flat_map(|plan| plan.bound_tree.next.values())
-            .find_map(|next| match next {
-                skull_mir::bound::ResolvedBoundNext::Concrete { instance, .. } => {
-                    Some(instance.clone())
-                }
-                skull_mir::bound::ResolvedBoundNext::CallerGeneric(_) => None,
-            })
-            .expect("fixture has no concrete bound witness");
-        // A context plans each callee ABI once. Lowering the bounded body from
-        // the intact plans settles the witness ABI the lowering sizes the
-        // element from, so only the repack's own signature read sees the
-        // perturbation below.
-        for plan in concrete.plans.values() {
-            if !plan.bound_tree.is_empty() {
-                skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
-                    .expect("intact bounded body");
-            }
-        }
-        let pair = skull_mir::monoty::MonoTy::App {
-            ctor: skull_mir::monoty::MonoCtor::Nominal(
-                *ws.nominals
-                    .keys()
-                    .find(|name| skull_mir::mangle::declared_name(name.as_str()) == "Pair")
-                    .expect("Pair definition"),
-            ),
-            params: Vec::new(),
-        };
-        let wrong_result = interner.intern(skull_mir::monoty::MonoTy::Tuple(vec![
-            skull_mir::monoty::MonoTy::Bool,
-            pair,
-        ]));
-        let mut plans = (*concrete.plans).clone();
-        for (inst, plan) in plans.iter_mut() {
-            let plan = std::sync::Arc::make_mut(plan);
-            if *inst == witness {
-                std::sync::Arc::make_mut(&mut plan.signature).result = Some(wrong_result);
-            }
-            for callee in plan.callees.values_mut() {
-                if callee.instance == witness {
-                    std::sync::Arc::make_mut(&mut callee.signature).result = Some(wrong_result);
-                }
-            }
-        }
-
+        let scx = ScalarCtx::new(&ws).sharing(interner);
+        let plans = &concrete.plans;
         let plan = plans.get(&Instance::base(top)).expect("top plan");
-        let mut func = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &plans)
-            .expect("lower top");
+        let mut func =
+            skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, plans).expect("lower top");
+        // Give the splice a witness with a wider result than the body planned for.
+        let witness = func
+            .resolved_bound_trees
+            .values_mut()
+            .find_map(|tree| tree.next.get_mut(&0))
+            .expect("site witness");
+        let skull_mir::bound::ResolvedBoundNext::Concrete { instance, .. } = witness else {
+            panic!("site witness must be concrete");
+        };
+        assert_eq!(*instance, Instance::base(find("next")));
+        *instance = Instance::base(wide);
+
         let mut cache = InlineCache::default();
-        inline_functions_with_plans(&ws, &scx, top, &mut func, &mut cache, &plans)
+        inline_functions_with_plans(&ws, &scx, top, &mut func, &mut cache, plans)
             .expect("inline top");
 
         let rebuilt = func.blocks.iter().any(|(_, block)| {

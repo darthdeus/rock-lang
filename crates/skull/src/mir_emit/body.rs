@@ -170,7 +170,6 @@ pub(super) fn emit_body_chunk(
         skull_transform::bound::resolve_standalone_bound_calls(
             ws,
             scx,
-            scx.interner(),
             &mut mf,
             &plan.bound_tree,
             &concrete.plans,

@@ -67,7 +67,6 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 skull_transform::bound::resolve_standalone_bound_calls(
                     self.ws,
                     self.scx,
-                    self.scx.interner(),
                     &mut mf,
                     &plan.bound_tree,
                     self.st.concrete,

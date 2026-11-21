@@ -125,7 +125,7 @@ pub struct TupleLayout {
 }
 
 impl TupleLayout {
-    pub(super) fn slot_count(&self, arena: &RepArena) -> usize {
+    pub fn slot_count(&self, arena: &RepArena) -> usize {
         self.slots
             .iter()
             .map(|&id| arena.get(id).lanes(arena))
@@ -216,6 +216,19 @@ impl RepPlan {
         self.boxable
     }
 
+    /// A direct, nonnullable value can rebuild its leaf ctor from these fields.
+    pub fn plain_leaf_fields(&self) -> Option<(Ustr, impl ExactSizeIterator<Item = Ustr> + '_)> {
+        let RepLayout::Leaves(shape) = self.layout() else {
+            return None;
+        };
+        (!shape.nullable
+            && shape
+                .fields
+                .iter()
+                .all(|(_, field)| matches!(field, FieldShape::Prim)))
+        .then(|| (shape.name, shape.fields.iter().map(|&(name, _)| name)))
+    }
+
     pub fn leaf_paths(&self) -> Option<Vec<Ustr>> {
         match self.layout() {
             RepLayout::Leaves(shape) => Some(crate::lower::value_leaf_paths(shape)),
@@ -234,7 +247,7 @@ impl RepPlan {
         self.layout().slot_count(arena)
     }
 
-    pub(crate) fn splats(&self, arena: &RepArena) -> bool {
+    pub fn splats(&self, arena: &RepArena) -> bool {
         match self.layout() {
             RepLayout::Leaves(_) => true,
             RepLayout::Tuple(TupleLayout { slots, .. }) => {
@@ -2149,6 +2162,33 @@ impl BackendFnAbiPlan {
         self.representation
             .result()
             .and_then(|id| self.arena.tuple_shape(id))
+    }
+
+    pub fn bound_next_layout(
+        &self,
+        result: Option<crate::monoty::MonoTyId>,
+    ) -> Result<&TupleLayout, RepError> {
+        let reject = |message| RepError {
+            span: None,
+            message,
+        };
+        let result =
+            result.ok_or_else(|| reject("a concrete bound witness has no result type".into()))?;
+        let shape = self.ret_tuple().ok_or_else(|| {
+            reject(format!(
+                "bound witness result `{}` has no tuple return plan",
+                self.arena.interner.get_ref(result).render()
+            ))
+        })?;
+        match shape.slots.len() {
+            0 => Err(reject(
+                "bound witness return plan has no success flag and element slots".into(),
+            )),
+            1 => Err(reject(
+                "bound witness return plan has no element slot".into(),
+            )),
+            _ => Ok(shape),
+        }
     }
 
     /// Physical result lanes. JS transports lanes after the first through its

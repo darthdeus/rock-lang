@@ -5,15 +5,12 @@ use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::bound::ResolvedBoundNext;
 use skull_mir::concrete::ConcretePlans;
-use skull_mir::instance::Instance;
-use skull_mir::lower::{BoundNextElem, ElemRebuild, bound_next_shape_from_concrete};
+use skull_mir::lower::{RepArena, RepId, RepLayout, TupleLayout};
 use skull_mir::mir::*;
-use skull_mir::monoty::MonoInterner;
 
 pub fn resolve_standalone_bound_calls(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-    interner: &MonoInterner,
     mf: &mut MirFunc,
     incoming: &skull_mir::bound::ResolvedBoundTree,
     concrete_plans: &ConcretePlans,
@@ -34,9 +31,9 @@ pub fn resolve_standalone_bound_calls(
                 mf.name
             )));
         };
-        let (split, leaf) = (mf.bound_next_split.contains(&id), leaf.clone());
+        let split = mf.bound_next_split.contains(&id);
         // A bounded witness's own demand needs its subtree.
-        if let ResolvedBoundNext::Concrete { sub, .. } = &leaf {
+        if let ResolvedBoundNext::Concrete { sub, .. } = leaf {
             if !sub.is_empty() {
                 mf.resolved_bound_trees.insert(id, sub.clone());
             }
@@ -45,16 +42,15 @@ pub fn resolve_standalone_bound_calls(
             mf,
             id,
             split,
-            &leaf,
+            leaf,
             scx,
             ws,
-            interner,
             concrete_plans,
             "in this instantiation",
         )?;
     }
     for nf in &mut mf.nested_fns {
-        resolve_standalone_bound_calls(ws, scx, interner, nf, incoming, concrete_plans)?;
+        resolve_standalone_bound_calls(ws, scx, nf, incoming, concrete_plans)?;
     }
     Ok(())
 }
@@ -68,7 +64,6 @@ pub(crate) fn substitute_bound_call(
     leaf: &ResolvedBoundNext,
     scx: &skull_mir::lower::ScalarCtx,
     ws: &Workspace,
-    interner: &MonoInterner,
     concrete_plans: &ConcretePlans,
     what: &str,
 ) -> Result<(), CompilerError> {
@@ -92,117 +87,113 @@ pub(crate) fn substitute_bound_call(
     };
     skull_mir::site::record_call_owner(func, call, &owner);
     let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, &owner)?;
-    func.call_abi_plans.insert(call, abi);
-    if !owner.args.is_empty() {
-        func.spec_bindings.insert(call, owner.clone());
-    }
-    // Repack a split result for a body that expects the whole iterator element.
-    let inst = owner;
-    if already_split {
-        check_bound_next_split(func, call, scx, ws, interner, &inst, concrete_plans)
-    } else {
-        repack_bound_next_element(func, call, scx, ws, interner, &inst, concrete_plans)
-    }
-}
-
-fn bound_next_shape_for_instance(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    interner: &MonoInterner,
-    inst: &Instance,
-    concrete_plans: &ConcretePlans,
-) -> Result<skull_mir::lower::BoundNextShape, CompilerError> {
-    if !skull_mir::lower::requires_concrete_body_plan(ws, inst) {
+    if !skull_mir::lower::requires_concrete_body_plan(ws, &owner) {
         return Err(CompilerError::new_no_location(
             "internal: a bound witness resolved to an opaque boundary without a concrete result shape",
         ));
     }
-    let plan = concrete_plans.get(inst).ok_or_else(|| {
-        CompilerError::new_no_location(format!(
-            "internal: concrete body plan is missing for bound witness `{}`",
-            inst.func.func.into_raw().into_u32()
-        ))
-    })?;
-    bound_next_shape_from_concrete(ws, scx, interner, &plan.signature)
-        .map_err(|error| CompilerError::new_no_location(error.message))
-}
-
-fn check_bound_next_split(
-    func: &MirFunc,
-    call: Idx<Inst>,
-    scx: &skull_mir::lower::ScalarCtx,
-    ws: &Workspace,
-    interner: &MonoInterner,
-    inst: &Instance,
-    concrete_plans: &ConcretePlans,
-) -> Result<(), CompilerError> {
-    let shape = bound_next_shape_for_instance(ws, scx, interner, inst, concrete_plans)?;
-    let Inst::CallMulti { dests, .. } = &func.insts[call] else {
-        return Ok(());
-    };
-    if dests.len() == shape.slot_count {
-        return Ok(());
+    let signature = &concrete_plans
+        .get(&owner)
+        .ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "internal: concrete body plan is missing for bound witness `{}`",
+                owner.func.func.into_raw().into_u32()
+            ))
+        })?
+        .signature;
+    let shape = abi
+        .bound_next_layout(signature.result)
+        .map_err(|error| CompilerError::new_no_location(error.message))?;
+    if !owner.args.is_empty() {
+        func.spec_bindings.insert(call, owner);
     }
-    Err(CompilerError::new_no_location(format!(
-        "`{}`: the loop element was split into {} destinations but `next` returns \
-         {} values at this specialization -- the two read the same instantiation \
-         and must agree, or a leaf's value lands in another leaf's cell",
-        func.name,
-        dests.len(),
-        shape.slot_count
-    )))
+    adapt_bound_next_result(func, call, already_split, scx.rep_arena(), shape)?;
+    func.call_abi_plans.insert(call, abi);
+    Ok(())
 }
 
-fn repack_bound_next_element(
+fn can_rebuild(arena: &RepArena, slot: RepId) -> bool {
+    let plan = arena.get(slot);
+    match plan.layout() {
+        RepLayout::Opaque => true,
+        RepLayout::Leaves(_) => plan.plain_leaf_fields().is_some(),
+        RepLayout::Tuple(tuple) => {
+            !tuple.nullable && tuple.slots.iter().all(|&slot| can_rebuild(arena, slot))
+        }
+    }
+}
+
+fn adapt_bound_next_result(
     func: &mut MirFunc,
     call: Idx<Inst>,
-    scx: &skull_mir::lower::ScalarCtx,
-    ws: &Workspace,
-    interner: &MonoInterner,
-    inst: &Instance,
-    concrete_plans: &ConcretePlans,
+    already_split: bool,
+    arena: &RepArena,
+    shape: &TupleLayout,
 ) -> Result<(), CompilerError> {
-    let shape = bound_next_shape_for_instance(ws, scx, interner, inst, concrete_plans)?;
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
         return Ok(());
     };
-    let dests = dests.clone();
-    // A one-leaf element has the same arity before and after splitting.
-    let plan = match &shape.elem {
-        BoundNextElem::Opaque => return Ok(()),
-        BoundNextElem::Rebuild(plan) => plan,
-        BoundNextElem::Unsupported => {
-            return Err(CompilerError::new_no_location(format!(
-                "`{}` returns {} values at this specialization but its element \
-                 cannot be rebuilt from leaves (a nullable `nobox` element, whose \
-                 presence leaf pairs with no field).",
-                func.name, shape.slot_count
-            )));
+    let slot_count = shape.slot_count(arena);
+    if already_split {
+        if dests.len() == slot_count {
+            return Ok(());
         }
-    };
-    let elem_cell = dests[1];
-    let leaf_count = plan.leaf_count();
-    if leaf_count + 1 != shape.slot_count {
+        return Err(CompilerError::new_no_location(format!(
+            "`{}`: the loop element was split into {} destinations but `next` returns \
+             {slot_count} values at this specialization -- the two read the same instantiation \
+             and must agree, or a leaf's value lands in another leaf's cell",
+            func.name,
+            dests.len()
+        )));
+    }
+    // A one-leaf element has the same arity before and after splitting.
+    let element = &shape.slots[1..];
+    if !element.iter().any(|&slot| arena.get(slot).splats(arena)) {
+        return Ok(());
+    }
+    if !element.iter().all(|&slot| can_rebuild(arena, slot)) {
+        return Err(CompilerError::new_no_location(format!(
+            "`{}` returns {slot_count} values at this specialization but its element \
+             cannot be rebuilt from leaves (a nullable `nobox` element, whose \
+             presence leaf pairs with no field).",
+            func.name
+        )));
+    }
+    let leaf_count: usize = element
+        .iter()
+        .map(|&slot| arena.get(slot).lanes(arena))
+        .sum();
+    let (ok_cell, elem_cell) = (dests[0], dests[1]);
+    if leaf_count + 1 != slot_count {
         return Err(CompilerError::new_no_location(format!(
             "`{}`: `next` returns {} values but its element has {} leaves -- the \
              rebuild is positional over those leaves, so repacking a mismatched \
              pair would write one leaf's value into another field",
-            func.name, shape.slot_count, leaf_count
+            func.name, slot_count, leaf_count
         )));
     }
 
     // The call keeps `ok` and gains one fresh cell per leaf; the element cell is
     // no longer a destination, it is what the repack stores into.
     let leaf_cells: Vec<Idx<Cell>> = (0..leaf_count).map(|_| func.new_cell(None)).collect();
-    let mut new_dests = vec![dests[0]];
+    let mut new_dests = vec![ok_cell];
     new_dests.extend(leaf_cells.iter().copied());
     if let Inst::CallMulti { dests, .. } = &mut func.insts[call] {
         *dests = new_dests;
     }
 
     let mut tail: Vec<Idx<Inst>> = Vec::new();
-    let mut taken = 0usize;
-    let packed = emit_elem_rebuild(func, plan, &leaf_cells, &mut taken, &mut tail)?;
+    let mut cells = leaf_cells.into_iter();
+    let mut repack = Repack {
+        func,
+        arena,
+        cells: &mut cells,
+        tail: &mut tail,
+    };
+    let packed = match element {
+        [slot] => repack.slot(*slot)?,
+        slots => repack.tuple(slots)?,
+    };
     let store = func.alloc_inst(Inst::Store {
         cell: elem_cell,
         value: packed,
@@ -223,55 +214,58 @@ fn repack_bound_next_element(
     )))
 }
 
-fn emit_elem_rebuild(
-    func: &mut MirFunc,
-    plan: &ElemRebuild,
-    cells: &[Idx<Cell>],
-    taken: &mut usize,
-    tail: &mut Vec<Idx<Inst>>,
-) -> Result<Idx<Inst>, CompilerError> {
-    match plan {
-        ElemRebuild::Passthrough => {
-            let l = func.alloc_inst(Inst::Load(cells[*taken]));
-            *taken += 1;
-            tail.push(l);
-            Ok(l)
-        }
-        ElemRebuild::Value(name, representation, fields) => {
-            let mut fs = Vec::with_capacity(fields.len());
-            for f in fields {
-                let l = func.alloc_inst(Inst::Load(cells[*taken]));
-                *taken += 1;
-                tail.push(l);
-                fs.push((*f, l));
+struct Repack<'a> {
+    func: &'a mut MirFunc,
+    arena: &'a RepArena,
+    cells: &'a mut std::vec::IntoIter<Idx<Cell>>,
+    tail: &'a mut Vec<Idx<Inst>>,
+}
+
+impl Repack<'_> {
+    fn emit(&mut self, inst: Inst) -> Idx<Inst> {
+        let id = self.func.alloc_inst(inst);
+        self.tail.push(id);
+        id
+    }
+
+    fn leaf(&mut self) -> Idx<Inst> {
+        let cell = self.cells.next().expect("checked repack lane count");
+        self.emit(Inst::Load(cell))
+    }
+
+    fn tuple(&mut self, slots: &[RepId]) -> Result<Idx<Inst>, CompilerError> {
+        let values = slots
+            .iter()
+            .map(|&slot| self.slot(slot))
+            .collect::<Result<_, _>>()?;
+        Ok(self.emit(Inst::MakeTuple(values)))
+    }
+
+    fn slot(&mut self, slot: RepId) -> Result<Idx<Inst>, CompilerError> {
+        let plan = self.arena.get(slot);
+        match plan.layout() {
+            RepLayout::Opaque => Ok(self.leaf()),
+            RepLayout::Tuple(tuple) => self.tuple(&tuple.slots),
+            RepLayout::Leaves(_) => {
+                let (name, fields) = plan.plain_leaf_fields().expect("checked repack shape");
+                let fields = fields.map(|name| (name, self.leaf())).collect();
+                let arena = self.func.rep_arena.as_ref().ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "bound element `{name}` has no owned representation arena"
+                    ))
+                })?;
+                if arena.try_get(slot).is_none() {
+                    return Err(CompilerError::new_no_location(format!(
+                        "bound element `{name}` carries a foreign value representation plan"
+                    )));
+                }
+                Ok(self.emit(Inst::MakeValueStruct {
+                    name,
+                    representation: slot,
+                    form: ValueCtorForm::Leaves,
+                    fields,
+                }))
             }
-            let arena = func.rep_arena.as_ref().ok_or_else(|| {
-                CompilerError::new_no_location(format!(
-                    "bound element `{name}` has no owned representation arena"
-                ))
-            })?;
-            if arena.try_get(*representation).is_none() {
-                return Err(CompilerError::new_no_location(format!(
-                    "bound element `{name}` carries a foreign value representation plan"
-                )));
-            }
-            let packed = func.alloc_inst(Inst::MakeValueStruct {
-                name: *name,
-                representation: *representation,
-                form: ValueCtorForm::Leaves,
-                fields: fs,
-            });
-            tail.push(packed);
-            Ok(packed)
-        }
-        ElemRebuild::Tuple(parts) => {
-            let mut vs = Vec::with_capacity(parts.len());
-            for p in parts {
-                vs.push(emit_elem_rebuild(func, p, cells, taken, tail)?);
-            }
-            let packed = func.alloc_inst(Inst::MakeTuple(vs));
-            tail.push(packed);
-            Ok(packed)
         }
     }
 }
