@@ -127,3 +127,63 @@ fn f64_defaults_use_float_semantics() {
     let w: FloatWrapped = FloatWrapped(0.125)
     assert_eq(read_float_defaults(h, c, w), 3.875)
 }
+
+enum Inner<Source> { Empty, From { source: Source, label: string } }
+
+enum Outer { Empty, Wrapped(Inner<string>) }
+
+global DEST: [Outer] = []
+
+@test
+fn nested_generic_enum_clone_uses_concrete_source() {
+    let source = Outer::Wrapped(Inner::From { source: "origin", label: "label" })
+    DEST.push(source.clone_into(DEST.storage))
+    assert(DEST.len() == 1, "cloned event stored")
+    let copied = match DEST[0] {
+        Outer::Wrapped(inner) => match inner {
+            Inner::From { source, label } => source == "origin" && label == "label",
+            _ => false,
+        },
+        _ => false,
+    }
+    assert(copied, "cloned nested record retains both strings")
+}
+
+value SpecPoint { x: float, y: float }
+
+@inline
+fn generic_second<P, S>(p: P, s: S) -> S {
+    return s
+}
+
+@inline
+fn hold<P, S>(p: P, s: S) -> [S] {
+    let out: [S] = []
+    out.push(s)
+    return out
+}
+
+@test
+fn a_generic_string_binding_survives_calls_and_storage() {
+    let point = SpecPoint { x: 1.0, y: 2.0 }
+    assert_eq(generic_second(point, "hi"), "hi")
+    assert_eq(hold(point, "hi")[0], "hi")
+}
+
+
+// An invariant container around an under-determined nested generic: `mk`'s
+// K and V are fixed only by pushing the expected NestedTypeHolder<Duo<int, string>> back
+// through the invariant NestedTypeHolder into Duo, so unification must recurse into a
+// nested application that contains unsolved variables.
+struct Duo<K, V> { k: K, v: V }
+struct NestedTypeHolder<T> { items: [T] }
+
+fn mk<K, V>() -> NestedTypeHolder<Duo<K, V>> {
+    return NestedTypeHolder { items: vec_new() }
+}
+
+@test(output = "ok")
+fn test_invariant_nested_generic_infers() {
+    let _h: NestedTypeHolder<Duo<int, string>> = mk()
+    print("ok")
+}

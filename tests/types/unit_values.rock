@@ -50,3 +50,124 @@ fn c_unit_coroutine_completion_and_result() {
     assert(coroutine.completed())
     take_unit(coroutine)
 }
+
+struct ExitPair { a: int, b: int }
+enum ExitValue { Some(int), None }
+
+fn add_after_branch(n: int) -> int { n + 1 }
+
+fn nested_returns(arm: int, enter: bool) -> int {
+    let selection: int? = if enter { 42 } else { null }
+    let option = if enter { ExitValue::Some(42) } else { ExitValue::None }
+    return match arm {
+        0 => { let n = selection ?? return -1; n },
+        1 => { let n = if enter { 5 } else { return -1 }; n },
+        2 => 1 + if enter { 5 } else { return -1 },
+        3 => (if enter { 5 } else { return -1 }) + 1,
+        4 => (if enter { 2 } else { return -1 }) + (if enter { 3 } else { return -1 }),
+        5 => { let values = [1, if enter { 2 } else { return -1 }, 3]; values[1] },
+        6 => { let fields = (1, if enter { 2 } else { return -1 }, 3); fields.0 + fields.1 + fields.2 },
+        7 => [10, 20, 30][if enter { 1 } else { return -1 }],
+        8 => add_after_branch(if enter { 41 } else { return -1 }),
+        9 => add_after_branch(add_after_branch(if enter { 41 } else { return -1 })),
+        10 => { let p = ExitPair { a: 1, b: if enter { 7 } else { return -1 } }; p.a + p.b },
+        11 => 1 + add_after_branch(if enter { 41 } else { return -1 }),
+        12 => match option { ExitValue::Some(x) => x, ExitValue::None => { return -1 } },
+        13 => 1 + match option { ExitValue::Some(x) => x, ExitValue::None => { return -1 } },
+        14 => { let n = if let x = selection { x } else { return -1 }; n },
+        15 => 42 + if let x = selection { x } else { return -1 },
+        16 => { let n = if let x = selection && x > 0 { x } else { return -1 }; n },
+        17 => {
+            let non_positive: int? = if enter { 42 } else { 0 }
+            42 + if let x = non_positive && x > 0 { x } else { return -1 }
+        },
+        _ => 0,
+    }
+}
+
+@test
+fn a_return_escapes_every_nested_expression() {
+    for (arm, expected) in enumerate([42, 5, 6, 6, 5, 2, 6, 20, 42, 43, 8, 43, 42, 43, 42, 84, 42, 84]) {
+        assert_eq(nested_returns(arm, true), expected)
+        assert_eq(nested_returns(arm, false), -1)
+    }
+}
+
+@test
+fn coalesced_break_exits_and_coalesced_continue_skips() {
+    let visited = 0
+    let result = 0
+    for n in [1, 0, 2] {
+        visited += 1
+        let opt: int? = if n != 0 { n } else { null }
+        result += opt ?? break
+    }
+    assert_eq((visited, result), (2, 1))
+    visited = 0
+    result = 0
+    for n in [1, 0, 2] {
+        visited += 1
+        let opt: int? = if n != 0 { n } else { null }
+        result += opt ?? continue
+    }
+    assert_eq((visited, result), (3, 3))
+}
+
+struct InferencePoint { x: int, y: int }
+struct InferenceBox<T> { value: T }
+fn infer_identity<T>(x: T) -> T { return x }
+fn greeting(name: string) -> string { "Hello, {name}!" }
+
+@test(type_holes = [[0, "int"], [1, "string"], [2, "float"], [3, "InferencePoint"], [4, "int"], [5, "int"], [6, "bool"]])
+fn inference_solves_literals_field_reads_and_operators() {
+    let i: ? = 42
+    let s: ? = "hello"
+    let f: ? = 3.14
+    let p: ? = InferencePoint { x: 10, y: 20 }
+    let x: ? = p.x
+    let y: ? = p.y
+    let greater: ? = x > y
+    assert_eq((i, s, f, x, y, greater), (42, "hello", 3.14, 10, 20, false))
+}
+
+@test(type_holes = [[7, "[[int]]"], [8, "[int]"], [9, "int"], [10, "[string]"], [11, "InferenceBox<int>"], [12, "InferenceBox<string>"]])
+fn inference_follows_nested_arrays_and_generic_calls() {
+    let matrix: ? = [[1, 2], [3, 4]]
+    let row: ? = matrix[0]
+    let elem: ? = infer_identity(row[1])
+    let names: ? = ["a", "b"]
+    let n: ? = InferenceBox { value: elem }
+    let name: ? = InferenceBox { value: names[0] }
+    assert_eq((n.value, name.value), (2, "a"))
+}
+
+@test(type_holes = [[13, "string"], [14, "int"], [15, "int"], [16, "int"], [17, "int"], [18, "()"]])
+fn inference_solves_calls_coalescing_and_branches() {
+    let s: ? = greeting("World")
+    let length: ? = len(s)
+    let maybe_value: int? = 42
+    let unwrapped: ? = maybe_value ?? 0
+    let selection: ? = if unwrapped > 0 { 1 } else { 0 }
+    let total: ? = (length + selection)
+    let unit: ? = unit_result()
+    if true { () }
+    assert_eq((s, unwrapped, total, unit), ("Hello, World!", 42, 14, ()))
+}
+
+@test(type_holes = [[19, "InferencePoint"]])
+fn inference_keeps_an_explicit_return_type() -> InferencePoint {
+    let p: ? = InferencePoint { x: 10, y: 20 }
+    return p
+}
+
+@test(type_holes = [[20, "int"], [21, "int"]])
+fn inference_follows_local_assignments_in_a_loop() {
+    let index: int = 0
+    let initial: ? = index
+    while index < 5 {
+        index += 1
+        let current: ? = index
+        assert(current > initial)
+    }
+    assert_eq(index, 5)
+}
