@@ -1,10 +1,4 @@
-//! Projection-only enforcement for `embed` fields.
-//!
-//! Embedded leaves live in the parent, so the field has no aggregate value to
-//! bind, return, capture, erase, or materialize.
-//!
-//! An allow-list pass marks legal projections before another pass rejects
-//! unmarked accesses. New expression forms are rejected until explicitly allowed.
+//! Embedded fields have no aggregate value; only explicitly allowed projections are legal.
 
 use super::*;
 

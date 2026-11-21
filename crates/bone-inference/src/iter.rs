@@ -216,8 +216,7 @@ pub(crate) fn infer_for_elem(
     }
 }
 
-/// Resolve and record a `for` iterator. Try a caller bound, then `iter(coll)`,
-/// then identity `next(coll)` so combinator chains need no blanket `iter<I>`.
+/// Try `next(coll)` as identity after a caller bound and `iter(coll)`.
 pub(crate) fn resolve_for_iter_protocol(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -337,9 +336,7 @@ fn concrete_next(
     })
 }
 
-/// Check each iterator bound structurally and record its `next` witness.
-/// Bounded calls are retried after each argument so later lambdas see inferred
-/// element types; `finalize` reports bounds that remain unresolved.
+/// Retry after each argument so later lambdas see inferred element types.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_iterator_bounds(
     c: BodyCtx,

@@ -64,9 +64,7 @@ fn member_overloads(gamma: &Gamma, key: Ustr) -> Callees {
     out
 }
 
-/// The nearest lookup tier among the members of a merged v1 family that
-/// contribute the overload `(mid, fid)`; `None` outside a merged
-/// family, where no tier orders the candidates.
+/// Outside a merged family, lookup tiers do not order candidates.
 fn candidate_tier(
     gamma: &Gamma,
     members: &[hir::FamilyMember],
@@ -113,8 +111,7 @@ fn ty_has_generic_hole(gamma: &Gamma, ty: TyId) -> bool {
         })
 }
 
-/// Grade specificity before unification binds variables. A bare hole costs 2,
-/// a type containing a hole costs 1, and a concrete type costs 0.
+/// Grade specificity before unification binds variables.
 fn param_genericity(gamma: &mut Gamma, param: TyId, span: Span) -> usize {
     let p = resolve(gamma, param, span);
     if matches!(*gamma.get(p), TypeExpr::Infer(..) | TypeExpr::Generic(..)) {
@@ -467,10 +464,7 @@ pub(crate) fn select_overload(
     }
 }
 
-/// A `help:` line for a call no overload in scope fits, when the module that
-/// declares the first argument's nominal type has an accessible function of
-/// the same name that would fit. Importing a type does not import its
-/// functions, so this is the common near-miss after `use m::Type;`.
+/// Importing a type does not import its module's functions.
 fn home_module_hint(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -1006,9 +1000,7 @@ fn spread_struct_fields(
     }
 }
 
-/// A rejection by `reorder_call_args`: its message is built only when `report`
-/// is set, since overload scoring discards the rejections of the candidates it
-/// tries.
+/// Overload scoring discards candidate rejections, so build messages only when requested.
 macro_rules! slot_fail {
     ($report:expr, $span:expr, $($arg:tt)*) => {{
         if !$report {
