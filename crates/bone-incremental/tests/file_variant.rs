@@ -1,6 +1,6 @@
 // `Session::with_file_variant`: analyze a text variant of one tracked file, then restore.
 
-use bone_incremental::session::{Session, UpdateTier};
+use bone_incremental::session::Session;
 use bone_semantic::prelude::*;
 
 use crate::common;

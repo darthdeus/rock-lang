@@ -115,10 +115,6 @@ fn call_key(expr: &Expr) -> Option<Ustr> {
     }
 }
 
-fn fresh(files: &[SessionFile]) -> Outcome {
-    fresh_with(files, &NsAliases::default())
-}
-
 fn fresh_with(files: &[SessionFile], aliases: &NsAliases) -> Outcome {
     let warm = warm();
     let session = Session::new(warm.clone(), files.to_vec(), aliases);
@@ -229,18 +225,6 @@ impl V1Harness {
             .map(|d| d.message.clone())
             .collect()
     }
-
-    fn selected(&self, path: &str) -> Vec<String> {
-        snapshot(self.session.workspace(), &self.files)
-            .selected_calls
-            .into_iter()
-            .filter(|r| r.0 == path)
-            .map(|r| {
-                let (_, rest) = r.3.split_once("::").expect("file::name@offset");
-                rest.split('@').next().expect("name").to_string()
-            })
-            .collect()
-    }
 }
 
 fn key(path: &str) -> String {
@@ -300,20 +284,6 @@ fn overload_member_visibility_edit_rechecks_external_callers() {
 
     h.edit("a.rock", a1).expect("visibility edit is accepted");
     h.assert_diagnostic("not accessible");
-}
-
-fn selected_files(h: &V1Harness, path: &str) -> Vec<String> {
-    snapshot(h.session.workspace(), &h.files)
-        .selected_calls
-        .into_iter()
-        .filter(|r| r.0 == path)
-        .map(|r| {
-            r.3.split_once("::")
-                .expect("file::name@offset")
-                .0
-                .to_string()
-        })
-        .collect()
 }
 
 #[test]
