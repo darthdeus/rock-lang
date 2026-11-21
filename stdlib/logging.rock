@@ -1,9 +1,4 @@
-// ============================================================================
-// Logging System
-// ============================================================================
-// Log levels: 0=error, 1=warn, 2=info, 3=debug, 4=trace
-// Control via ROCK_LOG env var: error|warn|info|debug|trace (or 0-4)
-// Default is info level
+// ROCK_LOG sets error, warn, info, debug or trace (0-4); default is info.
 
 global __rock_log_level: int = -1
 
@@ -18,15 +13,8 @@ global __rock_log_level: int = -1
     end
 """
 
-// Single emit point, a platform SEAM. The host installs `_G.__rock_log_sink`
-// (routing to the one rock-log sink) via the host logging module. With no
-// sink installed (rock test / rock run, or early global-init before the
-// install) fall back to a portable print() so logs still surface.
-// `wall_clock` DECLARES that the record's content is a wall-clock measurement
-// -- a duration, a frame counter, or the fact that something was slow enough
-// to report at all. The sink marks it so a differential harness can drop the
-// record by declaration instead of sniffing its text
-// (`rock_log::WALL_CLOCK_MARK`); the print() fallback has no stamp to mark.
+// A host sink marks wall-clock records for differential filtering; without a
+// sink, logging falls back to print without a marker.
 @intrinsic @nomangle inline(lua) fn __rock_log_emit(level: int, category: string, msg: string, wall_clock: bool) = """
     local errors = level == 0 and _G.__rock_logged_errors
     if errors and errors.add then
@@ -77,10 +65,7 @@ fn log_get_level() -> int { __rock_log_init(); return __rock_log_level }
 // ignore the level gate; the warn variants obey it. Both count every
 // occurrence for `log_suppression_summary`, not just the ones they emit.
 
-// @nomangle is ABI: raw Lua calls this by its bare name. The Stone engine's
-// inline(lua) bodies do (stone_file_read and stone_list_directory in
-// packages/stone/engine/lib.rock, the frame-error handler in runner.rock), and a
-// mangled name would turn those into calls to nil.
+// Opaque Lua calls this by its bare name.
 @intrinsic @nomangle inline(lua) fn _log_once_impl(level: int, category: string, msg: string, site: string) = """
     __rock_log_init()
     -- Level 0 is never gated (the minimum level is 0), which is what keeps
@@ -150,8 +135,7 @@ macro log_warn_once(category: expr, msg: expr, site: expr) {
     _log_once_impl(1, category, msg, site)
 }
 
-// Mockable-now seam used by log_throttled and exposed for deterministic tests.
-// @nomangle is ABI: _log_throttled_impl's Lua body calls it by its bare name.
+// Opaque Lua calls this mockable clock by its bare name.
 @intrinsic @nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
     __rock_log_init()
     -- Same gate as _log_once_impl: level 0 always fires.
@@ -226,8 +210,7 @@ macro log_wall_clock_throttled(category: expr, msg: expr, interval_sec: expr) {
     _log_throttled_impl(1, category, msg, interval_sec, __SITE__, true)
 }
 
-// Clears every suppression record, including the summary latch: a partial
-// reset reports stale totals or silences the summary.
+// Reset the summary latch too, or totals become stale or silent.
 @intrinsic @nomangle inline(lua) fn log_reset_dedup() = """
     __rock_log_dedup = {}
     __rock_log_throttle = {}
