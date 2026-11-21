@@ -224,7 +224,6 @@ fn test_slot_write_in_lambda() {
     print("x={r.x}\ny={r.y}")
 }
 
-// -- Evaluation order and side effects --
 
 global REC: string = ""
 
@@ -285,7 +284,6 @@ fn test_multi_field_group_evaluates_once() {
     print("x={v.x}\ny={v.y}\ncount={GROUP_ID}")
 }
 
-// -- Field defaults --
 
 value Holder {
     a: V2 = V2 { x: 11.0, y: 22.0 },
@@ -360,15 +358,12 @@ fn test_nested_default_side_effect() {
     print("n={v.n}\npx={v.pos.x}\npy={v.pos.y}\ntick={TICK}")
 }
 
-// -- Storing a value-struct local copies the cdata once, without re-packing it
-// field by field --
 
 @test(output = "3 7\n3 7")
 fn test_native_buffer_cdata_local_write() {
     let buf = nb_v2(2)
     let v = make_v2(3.0, 7.0)
 
-    // Both writes should emit the bare cdata local without re-packing.
     buf[0] = v
     buf[1] = v
 
@@ -379,15 +374,8 @@ fn test_native_buffer_cdata_local_write() {
     print("{b.x.floor()} {b.y.floor()}")
 }
 
-// -- Nested value element --
 
-// NativeBuffer<T> where T is a NESTED value struct (fields are themselves
-// value structs, like the engine's `Vertex`). skull scalarizes the element
-// store field-wise through the buffer reference (`buf.ptr[i].tl.x = ...`),
-// never materializing a `Rect_ct`/`V2_ct`, which would abort the trace.
-// Exercises both a literal RHS and a scalar-ABI fn-returning-Rect RHS, then
-// reads nested fields back. Sibling flat cases: test_native_buffer_value_scalar_rhs
-// and test_source_order in this file.
+// Materializing a nested value during a buffer store would abort the LuaJIT trace.
 
 value Rect {
     tl: V2,
@@ -405,9 +393,7 @@ fn make_rect(a: float, b: float, c: float, d: float) -> Rect {
 @test(output = "1 2 3 4\n5 6 7 8")
 fn test_native_buffer_nested_value() {
     let buf = native_buffer_rect(2)
-    // Literal RHS (nested value literal).
     buf[0] = Rect { tl: V2 { x: 1.0, y: 2.0 }, br: V2 { x: 3.0, y: 4.0 } }
-    // Scalar-ABI fn RHS (Rect comes back as flattened leaves).
     buf[1] = make_rect(5.0, 6.0, 7.0, 8.0)
 
     let a = buf[0]
@@ -417,7 +403,6 @@ fn test_native_buffer_nested_value() {
     print("{b.tl.x.floor()} {b.tl.y.floor()} {b.br.x.floor()} {b.br.y.floor()}")
 }
 
-// -- A function-returned value written into a nested element field --
 
 value BPair { x: int, y: int }
 value BOuter { p: BPair, z: int }
