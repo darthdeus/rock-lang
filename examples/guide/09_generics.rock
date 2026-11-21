@@ -1,3 +1,5 @@
+// Functions and structs take type parameters in angle brackets.
+// Each use is checked (and compiled) at its concrete types.
 fn first<T>(items: [T]) -> T? {
     if items.len() == 0 {
         return null

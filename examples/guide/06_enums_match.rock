@@ -1,3 +1,5 @@
+// Enums list the variants a value can be; `match` dispatches on them.
+// Variants can carry data as a tuple or as named fields.
 enum Shape {
     Point,
     Circle(float),
