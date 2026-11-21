@@ -76,15 +76,6 @@ pub fn item(marked: &str, label: &str) -> CompletionItem {
     find(&complete(marked), label).clone()
 }
 
-/// Position of the first label matching `pattern`.
-#[track_caller]
-pub fn rank(labels: &[String], pattern: &str) -> usize {
-    labels
-        .iter()
-        .position(|l| label_matches(l, pattern))
-        .unwrap_or_else(|| panic!("no completion `{pattern}` in {labels:?}"))
-}
-
 /// `order` is one or more `; `-separated chains `a < b < c` of label
 /// patterns; each must rank strictly above the next, by response position and
 /// by sort text. A `?`-prefixed pattern may be absent.
