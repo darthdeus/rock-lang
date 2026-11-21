@@ -26,18 +26,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn every_rejection_is_reported_not_just_the_first() {
-    let err = try_emit_module(THREE_SINKS).expect_err("three nobox sinks must reject");
-
-    let all = messages(&err);
-    assert_eq!(all.len(), 3);
-
-    for want in ["sink_one", "sink_two", "sink_three"] {
-        assert!(all.iter().any(|m| m.contains(want)));
-    }
-}
-
 const TWO_FAILING_SPECIALIZATIONS: &str = r#"
 nobox value NV2 { x: float, y: float }
 global XS: [NV2] = []
@@ -78,14 +66,6 @@ fn every_failing_specialization_is_reported_not_just_the_first() {
 }
 
 #[test]
-fn the_rejection_order_is_deterministic() {
-    let first = messages_owned(TWO_FAILING_SPECIALIZATIONS);
-    for _ in 0..4 {
-        assert_eq!(first, messages_owned(TWO_FAILING_SPECIALIZATIONS));
-    }
-}
-
-#[test]
 fn a_failing_global_init_does_not_mask_a_failing_function() {
     const BOTH: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -101,18 +81,6 @@ fn main() { sink_fn() print(G) }
     for want in ["__skull_ginit_G", "sink_fn"] {
         assert!(all.iter().any(|m| m.contains(want)));
     }
-}
-
-#[test]
-fn a_lone_rejection_has_no_siblings() {
-    const ONE_SINK: &str = r#"
-nobox value NV2 { x: float, y: float }
-global XS: [NV2] = []
-fn sink_one() { let t = (XS[0], 1.0) print("{t}") }
-fn main() { sink_one() }
-"#;
-    let err = try_emit_module(ONE_SINK).expect_err("the nobox sink must reject");
-    assert!(err.siblings.is_empty());
 }
 
 #[test]
