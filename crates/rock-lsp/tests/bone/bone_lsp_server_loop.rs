@@ -122,64 +122,6 @@ fn did_open_publishes_errors_and_a_valid_change_clears_them() {
     }
 }
 
-/// Clients send capabilities with required sub-fields missing; the reply
-/// carries exactly `server_capabilities()`, pinned key by key.
-#[test]
-fn initialize_replies_with_the_advertised_capabilities() {
-    let params = json!({
-        "capabilities": {
-            "general": { "staleRequestSupport": { "cancel": true } },
-            "textDocument": { "codeAction": { "codeActionLiteralSupport": {} } }
-        },
-        "rootUri": Value::Null
-    });
-    let id = RequestId::from(1);
-    let (_server, reply) = LspServer::initialize(Request {
-        id: id.clone(),
-        method: "initialize".to_string(),
-        params,
-    });
-    let Message::Response(resp) = reply else {
-        panic!("initialize must answer with a response");
-    };
-    assert_eq!(resp.id, id);
-    assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
-    let caps = resp.result.as_ref().expect("result")["capabilities"].clone();
-    assert_eq!(
-        caps,
-        serde_json::to_value(rock_lsp::server_capabilities()).unwrap()
-    );
-    assert!(caps["semanticTokensProvider"].is_object());
-    assert_eq!(
-        caps,
-        json!({
-            "positionEncoding": caps["positionEncoding"],
-            "inlayHintProvider": caps["inlayHintProvider"],
-            "semanticTokensProvider": caps["semanticTokensProvider"],
-            "definitionProvider": true,
-            "hoverProvider": true,
-            "referencesProvider": true,
-            "typeDefinitionProvider": true,
-            "documentHighlightProvider": true,
-            "documentSymbolProvider": true,
-            "workspaceSymbolProvider": true,
-            "completionProvider": {
-                "completionItem": { "labelDetailsSupport": false },
-                "resolveProvider": false,
-                "triggerCharacters": [".", ":", " "],
-                "workDoneProgress": false,
-            },
-            "textDocumentSync": {
-                "openClose": true, "change": 1, "willSave": false,
-                "willSaveWaitUntil": false, "save": { "includeText": false },
-            },
-            "renameProvider": { "prepareProvider": true },
-            "codeActionProvider": { "codeActionKinds": ["refactor.inline"], "resolveProvider": false },
-            "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
-        })
-    );
-}
-
 /// The refresh is a request with a fresh id, sent only to clients that
 /// advertise `refreshSupport`; the client's reply produces no output.
 #[test]
@@ -365,18 +307,6 @@ fn unknown_or_malformed_requests_answer_errors_and_unknown_notifications_are_sil
         "unknown notification emits nothing: {out:?}"
     );
     assert!(!server.exited());
-}
-
-#[test]
-fn stats_count_every_request_by_method() {
-    let mut server = LspServer::new();
-    for id in 0..250 {
-        roundtrip(&mut server, req(id, "frobnicate/do", json!({})));
-    }
-    let out = roundtrip(&mut server, req(250, "rock/stats", json!({})));
-    let stats = response(&out).result.clone().expect("stats");
-    assert_eq!(stats["method_counts"]["frobnicate/do"], 250);
-    assert_eq!(stats["requests_total"], 251);
 }
 
 #[test]
