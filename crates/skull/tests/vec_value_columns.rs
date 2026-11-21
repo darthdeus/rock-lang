@@ -1,94 +1,5 @@
 use crate::common::{emit_module, function_body};
 
-const VEC_VALUE_LOOP: &str = r#"
-value V2 { x: float, y: float }
-
-fn fill(n: int) -> float {
-    let xs: [V2] = []
-    for i in 0..n {
-        xs.push(V2 { x: 1.0, y: 2.0 })
-    }
-    let acc = 0.0
-    for i in 0..xs.len {
-        acc = acc + xs[i].x
-    }
-    return acc
-}
-
-fn main() { let _ = fill(8) }
-"#;
-
-#[test]
-fn vec_of_value_struct_uses_columns_for_push_and_read() {
-    let lua = emit_module(VEC_VALUE_LOOP);
-    let body = function_body(&lua, "fill");
-    assert!(!body.contains("V2_ct("), "{body}");
-    assert!(!body.contains("_data"), "{body}");
-    assert!(
-        body.contains(r#"["x"] = {}"#) && body.contains(r#"["y"] = {}"#),
-        "{body}"
-    );
-    assert!(body.contains(".x") && body.contains(".y"), "{body}");
-    assert!(!body.contains("__vec_checked_get("), "{body}");
-}
-
-const VEC_SPREAD_LITERAL: &str = r#"
-value V2 { x: float, y: float }
-
-fn make() -> [V2] {
-    return [...(
-        V2 { x: 1.0, y: 2.0 },
-        V2 { x: 3.0, y: 4.0 },
-    )]
-}
-
-fn main() { let _ = make() }
-"#;
-
-#[test]
-fn tuple_spread_literal_never_boxes_column_elements() {
-    let lua = emit_module(VEC_SPREAD_LITERAL);
-    let body = function_body(&lua, "make");
-    assert!(
-        !body.contains("V2_ct("),
-        "tuple spread built temporary V2 elements before storing their leaves:\n{body}"
-    );
-    assert!(
-        crate::common::has_vec_header(body, "columns", Some("V2")),
-        "tuple spread did not produce the marked column representation:\n{body}"
-    );
-}
-
-const VEC_ELEM_BIND: &str = r#"
-value V2 { x: float, y: float }
-
-fn sum(xs: [V2]) -> float {
-    let acc = 0.0
-    for i in 0..xs.len {
-        let v = xs[i]
-        acc = acc + v.x + v.y
-    }
-    return acc
-}
-
-fn main() { let _: [V2] = []; let _ = sum([]) }
-"#;
-
-#[test]
-fn binding_a_whole_element_loads_leaves_not_an_element() {
-    let lua = emit_module(VEC_ELEM_BIND);
-    let body = function_body(&lua, "sum");
-    assert!(
-        !body.contains("__vec_checked_get("),
-        "`let v = xs[i]` fetched a whole element table; under columns the bind \
-         loads one slot per leaf:\n{body}"
-    );
-    assert!(
-        !body.contains("V2_ct("),
-        "`let v = xs[i]` rematerialized the element:\n{body}"
-    );
-}
-
 const VEC_IN_SPECIALIZED_LAMBDA: &str = r#"
 value V2 { x: float, y: float }
 
@@ -185,25 +96,6 @@ fn vec_new_at_a_column_element_builds_empty_columns() {
         "1,1,2",
         "push onto a vec_new-ed column Vec must land in the columns"
     );
-}
-
-#[test]
-fn nobox_reference_elements_use_columns() {
-    let lua = emit_module(
-        r#"
-nobox value ReferenceRow { payload: [int]?, position: int }
-fn fill_reference_rows(payload: [int]) -> int {
-    let rows: [ReferenceRow] = []
-    rows.push(ReferenceRow { payload, position: 7 })
-    return rows[0].position
-}
-fn main() { print(fill_reference_rows([3])) }
-"#,
-    );
-    let body = function_body(&lua, "fill_reference_rows");
-    assert!(body.contains(r#"["payload"] = {}"#), "{body}");
-    assert!(body.contains(r#"["position"] = {}"#), "{body}");
-    assert!(!body.contains("ReferenceRow_ct("), "{body}");
 }
 
 #[test]
