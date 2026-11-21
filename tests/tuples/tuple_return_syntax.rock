@@ -1,0 +1,11 @@
+@noalloc fn explicit() -> (bool, int) { return (true, 42) }
+@noalloc fn implicit() -> (bool, int) { (true, 42) }
+
+@noalloc fn both() -> int {
+    let (ok, n) = explicit()
+    let (yes, m) = implicit()
+    return if ok && yes { n + m } else { 0 }
+}
+
+@test
+fn both_tuple_return_syntaxes_use_unboxed_values() { assert(both() == 84) }

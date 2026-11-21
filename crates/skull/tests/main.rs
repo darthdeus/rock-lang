@@ -11,7 +11,6 @@ mod nested_strided_inspect;
 
 mod map_empty_snapshots;
 mod map_loops;
-mod map_remove_absent;
 mod opaque_effects;
 
 mod cdata_leaf_projection;
@@ -69,7 +68,6 @@ mod inline_body_column_map_param;
 
 mod inline_lua_column_container_param_sentinel;
 mod inline_value_specialization;
-mod live_call_conversion;
 
 mod generated_glue_roots;
 

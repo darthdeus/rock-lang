@@ -54,17 +54,3 @@ fn value_struct_with_enum_field_has_cdef_int_not_table() {
     assert!(!lua.contains("_by_tag"));
     assert_eq!(run_fn(&lua, "t"), "5 Add 5");
 }
-
-#[test]
-fn payload_free_enum_inspects_as_its_ordinal() {
-    const SRC: &str = r#"
-enum BlendMode { Normal, Additive, Multiply }
-@test
-fn t() {
-    let b = BlendMode::Additive
-    print(inspect(b))
-}
-fn main() { t() }
-"#;
-    assert_eq!(run_fn(&emit_module(SRC), "t"), "1");
-}

@@ -143,31 +143,6 @@ fn prelude_predicates_emit_without_wrapper_calls() {
 }
 
 #[test]
-fn qualified_lua_extern_calls_and_function_values_use_the_host_path() {
-    let lua = emit_clean(
-        r#"
-extern(lua, "host.C.add") fn add(n: int) -> int
-extern(lua, "c0.get") fn get() -> int
-
-@nomangle fn run(n: int) -> int {
-    let f: fn(int) -> int = add
-    return add(n) + f(n) + get()
-}
-"#,
-        "run",
-    );
-    assert!(lua.contains("host.C.add(c0)"), "{lua}");
-    assert!(lua.contains(" = host.C.add\n"), "{lua}");
-    assert!(lua.contains("_G.c0.get()"), "{lua}");
-    let driver = format!(
-        "host = {{C = {{add = function(n) return n + 1 end}}}}\n\
-         c0 = {{get = function() return 5 end}}\n\
-         {lua}\nassert(run(10) == 27)"
-    );
-    luajit_ok(&driver, &lua);
-}
-
-#[test]
 fn numeric_selection_through_local_copies_uses_native_minmax() {
     for (comparison, yes, no, native) in [
         ("<", "d", "b", "min"),
@@ -453,33 +428,6 @@ fn inert_lua_text_does_not_trigger_body_limit_rejections() {
 }
 
 #[test]
-fn direct_calls_pass_literal_scalar_defaults_explicitly() {
-    let src = "
-fn f(a: int, b: int = 7, c: float = 0.5, d: string = \"x\", e: bool = true) -> int { a + b }
-fn go() -> int { f(1) }
-fn go_named() -> int { f(1, d: \"y\") }";
-    let lua = emit_clean(src, "go");
-    assert!(lua.contains("((1), (7), (0.5), (\"x\"), (true))"), "{lua}");
-    let lua = emit_clean(src, "go_named");
-    assert!(lua.contains("((1), (7), (0.5), (\"y\"), (true))"), "{lua}");
-}
-
-#[test]
-fn a_non_literal_default_stays_callee_filled() {
-    let src = "
-global K: int = 3
-fn h(a: int, b: int = K) -> int { a + b }
-fn go() -> int { h(1) }";
-    let lua = emit_clean(src, "go");
-    assert!(lua.contains("((1))"), "{lua}");
-    let callee = emit_clean(src, "h");
-    assert!(
-        callee.contains("(nil)"),
-        "the callee prologue must remain:\n{callee}"
-    );
-}
-
-#[test]
 fn uint_checks_bind_shared_helpers_as_upvalues() {
     let lua = emit_clean_bound(
         "fn checked(value: float, count: uint) -> uint { (value as uint) << count }",
@@ -492,27 +440,6 @@ fn uint_checks_bind_shared_helpers_as_upvalues() {
     assert_eq!(
         skull_codegen_lua::emitted_body_name(lua.lines().next().unwrap()),
         Some("checked_float_uint")
-    );
-}
-
-#[test]
-fn tuple_return_and_destructure_use_multiple_values_without_tables() {
-    for expr in ["return (true, 42)", "(true, 42)"] {
-        let src = format!("fn pair() -> (bool, int) {{ {expr} }}");
-        let body = emit_clean(&src, "pair");
-        assert!(!body.contains('{'), "{body}");
-        assert!(body.contains("do return (true), (42) end"), "{body}");
-    }
-    let body = emit_clean(
-        "fn pair() -> (bool, int) { (true, 42) } \
-         fn use_it() -> int { let (ok, n) = pair(); if ok { n } else { 0 } }",
-        "use_it",
-    );
-    assert!(!body.contains('{'), "{body}");
-    assert!(
-        body.lines()
-            .any(|l| l.contains(", ") && l.contains("= pair_0(")),
-        "expected a multi-assign call line `a, b = pair_0(...)`:\n{body}"
     );
 }
 

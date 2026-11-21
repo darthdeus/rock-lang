@@ -1,0 +1,4 @@
+enum BlendMode { Normal, Additive, Multiply }
+
+@test(backends = "lua", output = "1")
+fn a_unit_enum_inspects_as_ordinal() { print(inspect(BlendMode::Additive)) }

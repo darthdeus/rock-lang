@@ -1,0 +1,36 @@
+struct Box { values: [int] }
+
+fn apply_temp_field(strip: Box, insertion: int) -> int {
+    let length = strip.values.len()
+    let safe = clamp(insertion, 0, length) as int
+    return safe
+}
+
+@nomangle fn apply_direct_field(strip: Box, insertion: int) -> int {
+    let safe = clamp(insertion, 0, strip.values.len()) as int
+    return safe
+}
+
+@test(output = "0\n0")
+fn convert_field_length_in_calls() {
+    let strip = Box { values: [7] }
+    print(apply_temp_field(strip, 0))
+    print(apply_direct_field(strip, 0))
+    assert(apply_direct_field(strip, 9) == 1)
+}
+
+inline(lua) fn count_length_reads() -> int = """
+    local reads = 0
+    local values = setmetatable({_data = {7}}, {
+        __index = function(_, k)
+            assert(k == 'len')
+            reads = reads + 1
+            return 1
+        end,
+    })
+    assert(apply_direct_field({values = values}, 9) == 1)
+    return reads
+"""
+
+@test(backends = "lua")
+fn clamp_reads_the_foreign_vector_length_once() { assert(count_length_reads() == 1) }

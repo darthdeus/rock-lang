@@ -1,0 +1,17 @@
+@nomangle fn f(a: int, b: int = 7, c: float = 0.5, d: string = "x", e: bool = true) -> string {
+    return "{a + b}/{c}/{d}/{e}"
+}
+
+global K: int = 3
+@nomangle fn h(a: int, b: int = K) -> int { a + b }
+
+inline(lua) fn check_foreign_callee_defaults() -> int = "return h(1)"
+
+@test(backends = "lua")
+fn default_arguments_survive_direct_named_and_foreign_calls() {
+    assert(f(1) == "8/0.5/x/true")
+    assert(f(1, d: "y") == "8/0.5/y/true")
+    assert(h(1) == 4)
+    K = 8
+    assert(h(1) == 9 && check_foreign_callee_defaults() == 9)
+}

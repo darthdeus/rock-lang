@@ -1,0 +1,44 @@
+struct Item { id: int }
+nobox value Column { a: int, b: int }
+
+@nomangle fn boxed_map(n: int) -> Map<string, Item> {
+    let m: Map<string, Item> = map_new()
+    for i in 0..n { m["k{i}"] = Item { id: i } }
+    return m
+}
+@nomangle fn column_map(n: int) -> Map<string, Column> {
+    let m: Map<string, Column> = map_new()
+    for i in 0..n { m["k{i}"] = Column { a: i, b: i } }
+    return m
+}
+@nomangle fn int_map(n: int) -> Map<string, int> {
+    let m: Map<string, int> = map_new()
+    for i in 0..n { m["k{i}"] = i }
+    return m
+}
+@nomangle fn boxed_remove(m: Map<string, Item>, key: string) -> bool { return m.remove(key) != null }
+@nomangle fn column_remove(m: Map<string, Column>, key: string) -> bool { return m.remove(key) != null }
+@nomangle fn int_remove(m: Map<string, int>, key: string) -> bool { return m.remove(key) != null }
+
+inline(lua) fn check_absent_stores() -> bool = """
+    for _, case in ipairs({
+        {boxed_map, boxed_remove, false},
+        {int_map, int_remove, false},
+        {column_map, column_remove, true},
+    }) do
+        local make, remove, column = unpack(case)
+        local m = make(511)
+        local stores = 0
+        setmetatable(column and m.spine or m, { __newindex = function(t, k, v)
+            stores = stores + 1
+            rawset(t, k, v)
+        end })
+        for i = 1, 100 do assert(not remove(m, "absent" .. i)) end
+        assert(remove(m, "k0") and not remove(m, "k0"))
+        assert(remove(m, "k1") and stores == 0)
+    end
+    return true
+"""
+
+@test(backends = "lua")
+fn removing_an_absent_entry_does_not_write() { assert(check_absent_stores()) }

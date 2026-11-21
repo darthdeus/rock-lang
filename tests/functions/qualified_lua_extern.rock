@@ -1,0 +1,16 @@
+extern(lua, "host.C.add") fn add(n: int) -> int
+extern(lua, "c0.get") fn get() -> int
+
+@nomangle fn run(n: int) -> int {
+    let f: fn(int) -> int = add
+    return add(n) + f(n) + get()
+}
+
+inline(lua) fn check_extern_load() -> int = """
+    host = { C = { add = function(n) return n + 1 end } }
+    c0 = { get = function() return 5 end }
+    return run(10)
+"""
+
+@test(backends = "lua")
+fn qualified_host_calls_resolve_past_locals() { assert(check_extern_load() == 27) }
