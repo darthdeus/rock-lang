@@ -57,7 +57,7 @@ function M.attached(buf, except_id)
   return client
 end
 
-function M.request(buf, method, params)
+function M.request(buf, method, params, timeout)
   params = params or {}
   params.textDocument = { uri = vim.uri_from_bufnr(buf) }
   local done, failure, result
@@ -65,7 +65,7 @@ function M.request(buf, method, params)
     failure, result, done = err, reply, true
   end)
   assert(requests and next(requests), 'no client accepted ' .. method)
-  assert(vim.wait(5000, function() return done end, 25), method .. ' did not reply')
+  assert(vim.wait(timeout or 5000, function() return done end, 25), method .. ' did not reply')
   assert(not failure, method .. ': ' .. vim.inspect(failure))
   return result
 end
