@@ -1,9 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use bone_semantic::inference::Workspace;
 use skull_codegen_glsl::GlslProfile;
-use skull_mir::mir::FuncRef;
 use skull_mir::shader_ir::ShaderStage;
 use skull_parser::Span;
 
@@ -101,79 +100,60 @@ pub(crate) fn realize_shader_with_context_and_plans(
         .cloned()
         .collect();
 
-    let mut helpers: BTreeSet<Instance> = BTreeSet::new();
-    let mut builtins: BTreeSet<Instance> = BTreeSet::new();
-    let mut seen: BTreeSet<Instance> = roots.clone();
-    let mut queue: VecDeque<Instance> = roots.iter().cloned().collect();
-    let mut edges: BTreeMap<Instance, Vec<(Instance, Span)>> = BTreeMap::new();
-    while let Some(caller) = queue.pop_front() {
-        let Some(sites) = g.sites_of(&caller) else {
-            continue;
-        };
-        for rec in sites.values() {
-            let SiteOutcome::Resolved(callee) = &rec.outcome else {
-                continue;
-            };
-            let f = &ws.module(callee.func.module).functions[callee.func.func];
-            if skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner()) {
-                builtins.insert(callee.clone());
-                continue;
-            }
-            if skull_codegen_glsl::is_lowered_native_operator(ws, f, callee, g.interner()) {
-                continue;
-            }
-            edges
-                .entry(caller.clone())
-                .or_default()
-                .push((callee.clone(), rec.span));
-            if seen.insert(callee.clone()) {
-                helpers.insert(callee.clone());
-                queue.push_back(callee.clone());
-            }
-        }
+    let projections: Vec<_> = {
+        use bone_core::prelude::*;
+        roots
+            .iter()
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|entry| (entry, StageProjection::new(ws, g, entry)))
+            .collect()
+    };
+    let mut helpers = BTreeSet::new();
+    let mut builtins = BTreeSet::new();
+    let mut by_decl = BTreeMap::new();
+    for (entry, projection) in &projections {
+        by_decl.entry(DeclKey(entry.func)).or_insert(projection);
+        helpers.extend(
+            projection
+                .order
+                .iter()
+                .filter(|i| !roots.contains(*i))
+                .cloned(),
+        );
+        builtins.extend(projection.builtins.iter().cloned());
     }
-
     let all_concrete_plans =
         plans.unwrap_or_else(|| skull_graph::concrete_body::build(ws, g).plans);
-    let entry_of = |r: FuncRef| -> Option<&Instance> {
-        let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
-        roots.iter().find(|i| DeclKey(i.func) == key)
+    let stage_of = |root, stage| {
+        let key = DeclKey(skull_mir::lower::canonical_variant(ws, root));
+        Some(by_decl.get(&key)?.view(stage))
     };
-    // Programs are independent, so they fan out and fold in program order.
-    let program_views: Vec<ShaderProgramView> = {
+
+    let (program_views, checks): (Vec<_>, Vec<_>) = {
         use bone_core::prelude::*;
         req.programs
             .par_iter()
             .map(|program| {
-                let mut stages = Vec::new();
-                if let Some(vertex) = program.vert.and_then(entry_of) {
-                    stages.push(stage_view(ws, g, &edges, vertex, ShaderStage::Vertex));
-                }
-                if let Some(fragment) = entry_of(program.frag) {
-                    stages.push(stage_view(ws, g, &edges, fragment, ShaderStage::Fragment));
-                }
+                let stages: Vec<_> = program
+                    .vert
+                    .and_then(|entry| stage_of(entry, ShaderStage::Vertex))
+                    .into_iter()
+                    .chain(stage_of(program.frag, ShaderStage::Fragment))
+                    .collect();
                 let concrete_plans = Arc::new(skull_mir::concrete::select_concrete_plan_closure(
                     &all_concrete_plans,
                     stages.iter().flat_map(|stage| stage.retained.iter()),
                 ));
-                ShaderProgramView {
+                let program_view = ShaderProgramView {
                     program: *program,
                     stages,
                     concrete_plans,
-                }
+                };
+                let check = check_program(ws, g, scx, &program_view);
+                (program_view, check)
             })
-            .collect()
-    };
-    let programs: Vec<(&ShaderProgram, &ShaderProgramView)> =
-        req.programs.iter().zip(&program_views).collect();
-    let checks: Vec<_> = {
-        use bone_core::prelude::*;
-        programs
-            .par_iter()
-            .map(|(program, program_view)| {
-                check_program(ws, g, scx, &roots, &edges, program, program_view)
-            })
-            .collect()
+            .unzip()
     };
     let mut rejections = Vec::new();
     let mut program_plans = Vec::with_capacity(program_views.len());
@@ -203,35 +183,21 @@ fn check_program(
     ws: &Workspace,
     g: &InstanceGraph,
     scx: &skull_mir::lower::ScalarCtx,
-    roots: &BTreeSet<Instance>,
-    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
-    program: &ShaderProgram,
-    program_view: &ShaderProgramView,
+    view: &ShaderProgramView,
 ) -> Option<Result<skull_codegen_glsl::ShaderPlan, ShaderRejection>> {
-    let entry_of = |r: FuncRef| -> Option<&Instance> {
-        let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
-        roots.iter().find(|i| DeclKey(i.func) == key)
-    };
-    let root = entry_of(program.frag)?;
-    let mut program_roots: Vec<Instance> = vec![root.clone()];
-    if let Some(v) = program.vert {
-        match entry_of(v) {
-            // A registered vertex stage with no graph instance is not checked around.
-            Some(i) => program_roots.push(i.clone()),
-            None => {
-                return None;
-            }
-        }
-    }
-
-    if reachable_from(&program_roots, edges)
-        .iter()
-        .any(|i| g.concreteness(i) == Concreteness::Missing)
+    let expected_stages = 1 + usize::from(view.program.vert.is_some());
+    if view.stages.len() != expected_stages
+        || view
+            .stages
+            .iter()
+            .flat_map(|stage| &stage.retained)
+            .any(|i| g.concreteness(i) == Concreteness::Missing)
     {
         return None;
     }
+    let root = &view.stages.last()?.entry;
     Some(
-        skull_codegen_glsl::plan_shader_with_view(ws, scx, program_view).map_err(|error| {
+        skull_codegen_glsl::plan_shader_with_view(ws, scx, view).map_err(|error| {
             let f = &ws.module(root.func.module).functions[root.func.func];
             ShaderRejection {
                 instance: root.clone(),
@@ -246,98 +212,67 @@ fn check_program(
     )
 }
 
-fn stage_view(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
-    entry: &Instance,
-    stage: ShaderStage,
-) -> ShaderStageView {
-    let retained = reachable_from(std::slice::from_ref(entry), edges);
-    let helpers: BTreeSet<Instance> = retained.iter().filter(|i| *i != entry).cloned().collect();
-    let mut builtins = BTreeSet::new();
-    for caller in &retained {
-        let Some(sites) = g.sites_of(caller) else {
-            continue;
-        };
-        for rec in sites.values() {
+#[derive(Default)]
+struct StageProjection {
+    retained: BTreeSet<Instance>,
+    builtins: BTreeSet<Instance>,
+    order: Vec<Instance>,
+}
+
+impl StageProjection {
+    fn new(ws: &Workspace, graph: &InstanceGraph, entry: &Instance) -> Self {
+        let mut projection = Self::default();
+        projection.visit(ws, graph, entry);
+        projection
+    }
+
+    fn visit(&mut self, ws: &Workspace, graph: &InstanceGraph, caller: &Instance) {
+        if !self.retained.insert(caller.clone()) {
+            return;
+        }
+        for rec in graph
+            .sites_of(caller)
+            .into_iter()
+            .flat_map(|sites| sites.values())
+        {
             let SiteOutcome::Resolved(callee) = &rec.outcome else {
                 continue;
             };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
-            if skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner()) {
-                builtins.insert(callee.clone());
-            }
-            if skull_codegen_glsl::is_lowered_native_operator(ws, f, callee, g.interner()) {
-                continue;
+            if skull_codegen_glsl::renders_inline_instance(ws, f, callee, graph.interner()) {
+                self.builtins.insert(callee.clone());
+            } else if !skull_codegen_glsl::is_lowered_native_operator(
+                ws,
+                f,
+                callee,
+                graph.interner(),
+            ) {
+                self.visit(ws, graph, callee);
             }
         }
+        self.order.push(caller.clone());
     }
-    let mut order = Vec::new();
-    let mut active = BTreeSet::new();
-    let mut done = BTreeSet::new();
-    postorder(entry, edges, &retained, &mut active, &mut done, &mut order);
-    order.retain(|i| i != entry);
-    let mut dependencies = Vec::new();
-    let mut seen = BTreeSet::new();
-    for instance in order.iter().chain(std::iter::once(entry)) {
-        let key = (
-            instance.func.module.raw(),
-            instance.func.func.into_raw().into_u32(),
-        );
-        if seen.insert(key) {
-            dependencies.push(instance.func);
-        }
-    }
-    ShaderStageView {
-        stage,
-        entry: entry.clone(),
-        retained,
-        helpers,
-        builtins,
-        order,
-        dependencies,
-    }
-}
 
-fn postorder(
-    node: &Instance,
-    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
-    retained: &BTreeSet<Instance>,
-    active: &mut BTreeSet<Instance>,
-    done: &mut BTreeSet<Instance>,
-    order: &mut Vec<Instance>,
-) {
-    if done.contains(node) || !active.insert(node.clone()) {
-        return;
-    }
-    for (callee, _) in edges.get(node).into_iter().flatten() {
-        if retained.contains(callee) {
-            postorder(callee, edges, retained, active, done, order);
+    fn view(&self, stage: ShaderStage) -> ShaderStageView {
+        let (entry, helpers) = self
+            .order
+            .split_last()
+            .expect("stage always retains its entry");
+        let mut seen = BTreeSet::new();
+        let dependencies = self
+            .order
+            .iter()
+            .filter(|instance| seen.insert(DeclKey(instance.func)))
+            .map(|instance| instance.func)
+            .collect();
+        ShaderStageView {
+            stage,
+            entry: entry.clone(),
+            retained: self.retained.clone(),
+            helpers: helpers.iter().cloned().collect(),
+            builtins: self.builtins.clone(),
+            order: helpers.to_vec(),
+            dependencies,
         }
     }
-    active.remove(node);
-    done.insert(node.clone());
-    if !order.contains(node) {
-        order.push(node.clone());
-    }
-}
-
-/// The instances reachable from `roots` over the retained shader call relation.
-/// Roots are included: an entry's own substitution governs the pass like a
-/// helper's.
-fn reachable_from(
-    roots: &[Instance],
-    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
-) -> BTreeSet<Instance> {
-    let mut seen: BTreeSet<Instance> = roots.iter().cloned().collect();
-    let mut queue: VecDeque<Instance> = roots.iter().cloned().collect();
-    while let Some(n) = queue.pop_front() {
-        for (callee, _) in edges.get(&n).into_iter().flatten() {
-            if seen.insert(callee.clone()) {
-                queue.push_back(callee.clone());
-            }
-        }
-    }
-    seen
 }
