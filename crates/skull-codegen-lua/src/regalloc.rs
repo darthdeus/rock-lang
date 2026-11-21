@@ -31,7 +31,6 @@ impl BitSet {
     }
 }
 
-/// `rows` bit sets of one width in one allocation.
 #[derive(Default)]
 struct BitRows {
     width: usize,
@@ -88,8 +87,6 @@ fn for_each_bit(words: &[u64], mut f: impl FnMut(usize)) {
     }
 }
 
-/// The blocks one body emits, in emit order, with the edges between them as
-/// indices into that order.
 pub(crate) struct Flow {
     /// `raw(block) -> index in the order`; `u32::MAX` for a block outside it.
     pos: Vec<u32>,
@@ -216,7 +213,6 @@ impl Flow {
     }
 }
 
-/// Symmetric adjacency: each input edge is stored in both directions.
 struct Csr {
     off: Vec<u32>,
     adj: Vec<u32>,
@@ -329,7 +325,6 @@ fn raw<T>(i: Idx<T>) -> usize {
     u32::from(i.into_raw()) as usize
 }
 
-/// The registers operand `v` reads, seeing through folded operands.
 fn register_reads(func: &MirFunc, inline: &[bool], v: Idx<Inst>, push: &mut impl FnMut(Idx<Inst>)) {
     if inline[raw(v)] {
         func.insts[v].uses_each(&mut |u| register_reads(func, inline, u, push));
@@ -338,8 +333,6 @@ fn register_reads(func: &MirFunc, inline: &[bool], v: Idx<Inst>, push: &mut impl
     }
 }
 
-/// The cells operand `v` reads, seeing through folded operands and counting
-/// a value computed in a cell.
 fn cell_reads(
     func: &MirFunc,
     inline: &[bool],
@@ -357,7 +350,6 @@ fn cell_reads(
     }
 }
 
-/// A counted loop the emitter renders as a Lua `for` block.
 pub(crate) struct LoopScope {
     pub header: Idx<Block>,
     pub region: Vec<Idx<Block>>,
@@ -399,11 +391,8 @@ impl Chains {
 /// backward liveness they imply.
 struct Entries {
     bits: Vec<u32>,
-    /// Per entry: where its defs start and where its uses start.
     marks: Vec<(u32, u32)>,
-    /// Per block: its first entry; its last is the terminator's.
     first: Vec<u32>,
-    /// Per block: upward-exposed uses, defs, and the bits live on entry.
     use_set: BitRows,
     def_set: BitRows,
     live_in: BitRows,
@@ -577,7 +566,6 @@ impl Reads {
         &self.leaves[start as usize..end as usize]
     }
 
-    /// The registers `leaves` read under `inline`.
     fn values(func: &MirFunc, inline: &[bool], leaves: &[u32], mut push: impl FnMut(Idx<Inst>)) {
         for &leaf in leaves {
             if leaf & CELL_LEAF == 0 {
@@ -591,8 +579,6 @@ impl Reads {
         }
     }
 
-    /// The cells `leaves` read under `inline`, counting a value computed in a
-    /// cell.
     fn cells(
         func: &MirFunc,
         inline: &[bool],
@@ -681,9 +667,8 @@ pub(crate) fn stable_loads(
     // A statement writes its cells after it reads its operands, so a write
     // conflicts with a load that is still live after the statement.
     let mut conflict = vec![false; loads.len()];
-    // A counted loop's counter is a fresh Lua local inside the `for`; outside
-    // it the cell's name is the outer local, so a load still live after an
-    // early exit must stay in a register.
+    // A loop counter is a fresh Lua local; a load surviving an early exit
+    // must stay in a register.
     for (&header, cl) in loops {
         let ForControl::Numeric { slot, .. } = cl.control else {
             continue;
@@ -733,7 +718,6 @@ pub(crate) fn store_targets(
     reads: &Reads,
     eligible: impl Fn(Idx<Inst>, Idx<Cell>) -> bool,
 ) -> Vec<Option<Idx<Cell>>> {
-    // Candidate k: value `vals[k]` into cell `cells[k]`.
     let mut vi = vec![u32::MAX; func.insts.len()];
     let mut vals: Vec<Idx<Inst>> = Vec::new();
     let mut cells: Vec<Idx<Cell>> = Vec::new();
@@ -761,7 +745,6 @@ pub(crate) fn store_targets(
         return Vec::new();
     }
     let k_count = vals.len();
-    // Bits: the candidate values in `0..k_count`, then their cells.
     let mut ci = vec![u32::MAX; func.cells.len()];
     let mut c_count = 0u32;
     for &c in &cells {
@@ -863,13 +846,8 @@ fn result_discarded(func: &MirFunc, inline: &[bool], readers: &[u32], id: Idx<In
 pub(crate) struct ValueAlloc {
     /// Dense `raw(inst) -> color` (`u32::MAX` = uncolored: inlined or non-value).
     pub colors: Vec<u32>,
-    /// `color -> owning loop header`. A `Some(h)` color's `local r<c>` is
-    /// declared inside loop `h`'s `for ... do` block, not at function top:
-    /// LuaJIT's snapshot liveness (`snap_usedef`) prunes slots above a jump's
-    /// free-slot watermark, so body-scoped temps disappear from loop-exit
-    /// snapshots instead of pinning their values into every side trace — past
-    /// ~16 inherited FP values `asm_head_side` aborts the side trace with
-    /// "NYI: register coalescing too complex" and the trace tree blacklists.
+    /// Loop-local colors let LuaJIT prune temps from exit snapshots; inherited
+    /// floating-point values can otherwise abort side-trace register coalescing.
     pub color_scope: Vec<Option<Idx<Block>>>,
 }
 
@@ -906,13 +884,11 @@ pub(crate) struct Locals<'a> {
     scope: &'a [Idx<Block>],
     flow: &'a Flow,
     inline: &'a [bool],
-    /// Registers in emit-id order, the order they take colors in.
     values: Vec<Idx<Inst>>,
     /// Logical cell index -> cell. A compact inline template leaves holes in
     /// the logical source arena; they stay as zero-edge virtual cells so
     /// removing them does not renumber later colors.
     cells: Vec<Option<Idx<Cell>>>,
-    /// Dense physical cell -> logical index.
     ci: Vec<u32>,
     /// Words of a bit row that hold registers; cells follow.
     v_words: usize,
@@ -941,9 +917,7 @@ impl<'a> Locals<'a> {
         mut readers: Vec<u32>,
     ) -> Self {
         let n = scope.len();
-        // Only placed instructions count as readers: a transform can leave a
-        // dropped instruction allocated in the arena, still naming its
-        // operands. A block outside the scope is still placed.
+        // Dropped instructions are not readers; out-of-scope blocks are still placed.
         if func.blocks.len() != n {
             for (b, block) in func.blocks.iter() {
                 if flow.index(b).is_none() {
@@ -977,7 +951,6 @@ impl<'a> Locals<'a> {
         let v_words = v_count.div_ceil(64);
         let cell_base = (v_words * 64) as u32;
 
-        // Every cell of the function takes a color, in logical order.
         let c_count = func.emit_cell_span() as usize;
         let mut cells: Vec<Option<Idx<Cell>>> = vec![None; c_count];
         let mut ci = vec![u32::MAX; func.cells.len()];
@@ -1106,11 +1079,8 @@ impl<'a> Locals<'a> {
             for_each_bit(&rows.row(bi)[..self.v_words], f)
         };
 
-        // Partition id: 0 = function top; k+1 = loops[k]. A block's partition is the
-        // innermost loop whose region holds it; a value's partition is the loop-nest
-        // LCA of every block it's defined or effectively used in. Values live into a
-        // loop header (back-edge liveness: cross-iteration values a body-scoped Lua
-        // `local` would re-nil each iteration) are hoisted above that loop.
+        // Values live across a loop back-edge cannot use a body local, which
+        // Lua would reinitialize on every iteration.
         let mut block_part = vec![0u32; func.blocks.len()];
         for (k, ls) in loops.iter().enumerate() {
             for &b in &ls.region {
