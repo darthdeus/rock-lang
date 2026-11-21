@@ -41,36 +41,6 @@ fn main() {
 }
 "#;
 
-const NATIVEBUFFER_PRIMITIVE: &str = r#"
-@nomangle inline(lua) fn probe(b: NativeBuffer<float>) -> int = """
-    return b.len
-"""
-@nomangle inline(js) fn probe(b: NativeBuffer<float>) -> int = """
-    return b.len;
-"""
-
-fn main() {
-    let b: NativeBuffer<float> = native_buffer_alloc(2)
-    print("{probe(b)}")
-}
-"#;
-
-const EXPANSION_INTRINSIC: &str = r#"
-value G { x: f32, y: f32 }
-
-@vertex_expand inline(lua) fn probe_stride(buf: NativeBuffer<G>) -> int = """
-    error("probe_stride is compiler-expanded")
-"""
-@vertex_expand inline(js) fn probe_stride(buf: NativeBuffer<G>) -> int = """
-    throw new Error("probe_stride is compiler-expanded");
-"""
-
-fn main() {
-    let b: NativeBuffer<G> = native_buffer_alloc(2)
-    print("{probe_stride(b)}")
-}
-"#;
-
 /// Emit the `main` closure for the JS target.
 fn js(src: &str) -> Result<(), String> {
     crate::common::emit_closure(&crate::common::ws_with(src), "main").map(|_| ())

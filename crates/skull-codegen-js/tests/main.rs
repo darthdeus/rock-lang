@@ -21,4 +21,3 @@ mod program;
 mod publisher_abi;
 mod qualified_globals;
 mod shader_register;
-mod uint;

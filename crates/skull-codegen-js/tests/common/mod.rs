@@ -1,13 +1,7 @@
 //! Shared test helpers: build the stdlib workspace and emit an intrinsic's
 //! scalar Rock-fallback body to JS.
 
-use std::sync::Arc;
-
-use skull_graph::instance_graph;
-use skull_mir::instance::Instance;
-use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
-use skull_mir::mir::{FuncRef, MirFunc};
-use skull_mir::monoty::MonoInterner;
+use skull_mir::mir::FuncRef;
 
 /// Every `node` spawn in this crate's tests goes through here.
 ///
@@ -160,43 +154,4 @@ pub fn ws_of_modules(users: Vec<skull_parser::Ast>) -> bone_core::workspace::Wor
         .collect();
     assert!(errors.is_empty(), "{errors:?}");
     ws
-}
-
-/// Lower one test root through the graph-owned concrete plan. Keeping this
-/// helper here makes every JS MIR fixture exercise the same entry as the
-/// production emitter, including the callee table and shared type arena.
-fn lower_test_ref(
-    ws: &bone_core::workspace::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    fid: comfy_la_arena::Idx<bone_core::hir::Function>,
-) -> MirFunc {
-    let root = FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let interner = Arc::new(MonoInterner::new());
-    let graph = instance_graph::build_in(ws, vec![root], Arc::clone(&interner));
-    let scx = ScalarCtx::new(ws).sharing(interner);
-    let concrete = skull_graph::concrete_body::build(ws, &graph);
-    let plan = concrete
-        .plans
-        .get(&Instance::base(root))
-        .unwrap_or_else(|| panic!("no concrete plan for <test> function {fid:?}"));
-    lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
-        .unwrap_or_else(|e| panic!("lower concrete test root: {}", e.message))
-}
-
-/// Lower the fn named `name` in the `<test>` module (must be unique there).
-pub fn lower_test_fn(ws: &bone_core::workspace::Workspace, name: &str) -> skull_mir::mir::MirFunc {
-    let fr = test_fn_ref(ws, name);
-    lower_test_ref(ws, fr.module, fr.func)
-}
-
-/// Lower the fn named `name` in the `<test>` module and emit it to JS under its
-/// own name. Panics if the fn is missing or emit rejects (the reject message is
-/// surfaced so a red test records it).
-pub fn emit_user(ws: &bone_core::workspace::Workspace, name: &str) -> String {
-    let mf = lower_test_fn(ws, name);
-    skull_codegen_js::emit::emit_fn(ws, &mf, name)
-        .unwrap_or_else(|e| panic!("emit `{name}`: {}", e.message))
 }
