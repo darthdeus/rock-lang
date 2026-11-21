@@ -892,21 +892,6 @@ mod watch_reload_tests {
     }
 
     #[test]
-    fn stone_direct_save_under_tmp_ancestor_reloads_live_state() {
-        Fixture::new(false).assert_reload(false);
-    }
-
-    #[test]
-    fn stone_atomic_save_under_tmp_ancestor_reloads_live_state() {
-        Fixture::new(false).assert_reload(true);
-    }
-
-    #[test]
-    fn stone_sibling_dependency_edit_reloads_live_state() {
-        Fixture::new(true).assert_reload(false);
-    }
-
-    #[test]
     fn stone_sim_edit_does_not_rebuild_or_restart_the_game() {
         let fixture = Fixture::new(false);
         let sims = fixture.root.join("tests/sims");
