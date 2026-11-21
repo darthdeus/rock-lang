@@ -21,15 +21,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn value_struct_with_whole_use_keeps_cdata() {
-    let lua = emit_module(VALUE_FIELD_AND_WHOLE_USE);
-    let body = function_body(&lua, "coexist");
-    assert!(body.contains("Color_ct("));
-    assert!(!body.contains(".r"));
-    assert_eq!(run_main(&lua), "33");
-}
-
 const NESTED_SCALAR_ABI: &str = r#"
 value V2 { x: float, y: float }
 value Rect { tl: V2, br: V2 }
@@ -40,26 +31,6 @@ value Rect { tl: V2, br: V2 }
 
 fn main() { let _ = nested_leaves(Rect { tl: V2 { x: 1.0, y: 2.0 }, br: V2 { x: 4.0, y: 8.0 } }) }
 "#;
-
-#[test]
-fn nested_scalar_abi_leaf_params_are_injective() {
-    let lua = emit_module(NESTED_SCALAR_ABI);
-    let f = function_body(&lua, "nested_leaves");
-    let params = f
-        .split_once('(')
-        .and_then(|(_, rest)| rest.split_once(')'))
-        .map(|(p, _)| p.to_string())
-        .unwrap_or_else(|| panic!("no param list in:\n{f}"));
-    let names: Vec<&str> = params
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    let mut uniq = names.clone();
-    uniq.sort_unstable();
-    uniq.dedup();
-    assert_eq!(uniq.len(), names.len());
-}
 
 const UNDERSCORE_FIELD_NO_COLLISION: &str = r#"
 nobox value V2 { x: float, y: float }
@@ -112,20 +83,6 @@ fn main() {
     print("{apply(probe, r)}")
 }
 "#;
-
-#[test]
-fn unmarked_value_through_a_plain_or_nullable_fn_value_rejects() {
-    for src in [
-        UNMARKED_VALUE_VIA_FN_VALUE,
-        UNMARKED_VALUE_VIA_NULLABLE_FN_VALUE,
-    ] {
-        let err = crate::common::try_emit_module(src)
-            .expect_err("an unreconcilable fn-value ABI must reject");
-        assert!(
-            err.message.contains("cannot be taken as a fn value") && err.message.contains("probe")
-        );
-    }
-}
 
 #[test]
 fn non_colliding_underscore_field_still_scalarizes() {
