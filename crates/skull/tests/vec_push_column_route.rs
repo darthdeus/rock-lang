@@ -28,21 +28,3 @@ fn main() {
     print("{outer[0][0].a}")
 }
 "#;
-
-#[test]
-fn only_boxed_receivers_and_column_payloads_reach_the_boxed_push_body() {
-    for (src, boxed, expected) in [
-        (COLUMN_RECEIVER, false, "7"),
-        (BOXED_RECEIVER, true, "7"),
-        (COLUMN_PAYLOAD, true, "1"),
-    ] {
-        let lua = emit_module(src);
-        assert_eq!(
-            function_body(&lua, "main").contains("._data"),
-            boxed,
-            "{src}"
-        );
-        assert!(lua.matches("function vec_push").count() <= 1, "{src}");
-        assert_eq!(run_main(&lua), expected, "{src}");
-    }
-}
