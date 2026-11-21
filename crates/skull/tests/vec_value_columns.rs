@@ -245,4 +245,3 @@ fn two_leaves_of_one_element_check_once() {
         }
     }
 }
-

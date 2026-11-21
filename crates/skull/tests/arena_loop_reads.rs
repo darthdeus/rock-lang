@@ -2,7 +2,9 @@ use crate::common::{emit_module, function_body};
 
 #[test]
 fn iterators_load_only_live_leaves_and_keep_required_checks() {
-    let lua = emit_module(include_str!("../../../tests/arenas/arena_iterator_leaves.rock"));
+    let lua = emit_module(include_str!(
+        "../../../tests/arenas/arena_iterator_leaves.rock"
+    ));
     for name in ["unused_entity", "unused_pair_entity", "unused_enum"] {
         let body = function_body(&lua, name);
         assert!(!body.contains(".generations"));
