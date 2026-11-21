@@ -331,16 +331,12 @@ operator *(a: RV, b: RV) -> RV {
     return RV { x: f(a.x) + b.x, y: f(a.y) + b.y }
 }
 
-// The linearization hazard in operator form: the inner `+` publishes to the bank
-// and the outer `+` must not capture ITS leaves.
 @test fn nested_operator_calls_do_not_clobber() {
     let r = (RV { x: 1, y: 2 } + RV { x: 10, y: 20 }) + RV { x: 100, y: 200 }
     assert_eq(r.x, 7111)
     assert_eq(r.y, 222)
 }
 
-// Two operator results live at once -- the shape that breaks if a capture were
-// ever split from its call.
 @test fn two_operator_results_coexist() {
     let a = RV { x: 1, y: 2 } + RV { x: 10, y: 20 }
     let b = RV { x: 3000, y: 4000 } * RV { x: 5, y: 6 }
@@ -350,10 +346,7 @@ operator *(a: RV, b: RV) -> RV {
     assert_eq(b.y, 8006)
 }
 
-// The ENGINE's actual shape: an ordinary (inlinable) operator called from inside
-// a `co fn`, which the inliner will not enter. This is what a game's Vec2
-// operator call sites are; the two cases above reach the same ABI only through
-// exclusions a game does not normally hit.
+// A coroutine keeps this operator call out of the inliner.
 nobox value IV { x: int, y: int }
 
 operator +(a: IV, b: IV) -> IV { return IV { x: a.x + b.x, y: a.y + b.y } }
@@ -371,26 +364,15 @@ co fn op_in_coroutine(seed: IV) -> Coroutine<int> {
     assert_eq(c.resume(), 888)
 }
 
-// CONTROL, not coverage: the SAME operator at an ordinary call site inlines to
-// bare arithmetic, so it reaches none of the ABI and stays green under every
-// bank mutation. It is the control that makes the coroutine case's redness
-// attributable to the call, not to the operator or the value type.
+// This ordinary call inlines and does not exercise the return ABI.
 @test fn operator_body_is_inlined_control() {
     let r = IV { x: 700, y: 800 } + IV { x: 7, y: 8 }
     assert_eq(r.x, 707)
     assert_eq(r.y, 808)
 }
 
-// --- an OPAQUE body's publisher rides the same wire ---------------------------
-//
-// A `@scalar_abi inline(js)` boundary returning a multi-lane result publishes
-// through the compiler-owned `__rock_publish(..)`, whose arity comes from the
-// concrete result ABI, so the caller's `c0 = f(); c1 = __rock_ret1;` capture
-// reads this call's leaves.
+// An opaque JS body publishes the remaining leaves through the same ABI.
 
-// The luajit sibling returns its leaves natively; the JS one publishes them.
-// Both are the same boundary, which is the whole point -- the two transports
-// realize one concrete result bundle.
 @scalar_abi inline(lua) fn published_pair(a: int, b: int) -> NV = """
     return a, b
 """
@@ -407,12 +389,7 @@ co fn op_in_coroutine(seed: IV) -> Coroutine<int> {
     assert_eq(v.y, 37)
 }
 
-// --- the publisher does not reorder its arguments -----------------------------
-//
-// `__rock_publish(f(), g())` is an ordinary JS call expression: `f` runs first.
-// Lowering it to `__rock_ret1 = g(); return f();` would swap them -- a visible
-// change of effects, and a lane written before `f` could throw. The trace below
-// reads "12" only if the arguments evaluate in source order.
+// Publishing must preserve argument evaluation order and exceptions.
 
 global ORDER_TRACE: string = ""
 
@@ -436,17 +413,11 @@ global ORDER_TRACE: string = ""
     assert_eq(ORDER_TRACE, "12")
 }
 
-// --- bound calls, nullable phis, changed widths and shared-tail captures ------
-//
-// Each case below goes RED under the capture-before-call mutation. Asserted
-// values are distinct from every other wire in this file.
 
 nobox value W4 { a: int, b: int, c: int, d: int }
 
 fn mk_wide(a: int) -> W4 { return W4 { a: a, b: a + 1, c: a + 2, d: a + 3 } }
 
-// A user iterator whose `next` returns a nobox element, reached through an
-// `I: Iterator<NV>` bound and through a `for` loop rather than a direct call.
 struct NvGen { cur: int, hi: int }
 
 fn NvGen.next(it) -> (bool, NV) {
@@ -468,7 +439,6 @@ fn bound_total<I: Iterator<NV>>(it: I) -> int {
 }
 
 @test fn iterator_bound_next_captures_its_own_leaves() {
-    // rows (0,0) (3,5) (6,10)
     assert_eq(bound_total(NvGen { cur: 0, hi: 3 }), 915)
 }
 
@@ -481,8 +451,6 @@ fn bound_total<I: Iterator<NV>>(it: I) -> int {
     assert_eq(t, 915)
 }
 
-// Two nullable call results joined through `if` values: the hit arm's leaves
-// and the miss arm's absence must both come from their own call.
 fn maybe_phi(a: int) -> NV? {
     if a > 0 { return NV { x: a, y: a * 7 } }
     return null
@@ -498,8 +466,7 @@ fn maybe_phi(a: int) -> NV? {
     assert_eq(seed.d, 8003)
 }
 
-// A four-leaf publish, a two-leaf one, then four again: a capture that read the
-// bank late would see a neighbour's leftover high slots.
+// A late capture could read a neighbor's leftover high slots.
 @test fn changed_width_captures_are_independent() {
     let w = mk_wide(7100)
     let n = mk(7200)
@@ -510,8 +477,6 @@ fn maybe_phi(a: int) -> NV? {
     assert_eq(w2.c, 7302)
 }
 
-// A nested loop in a shared or-pattern arm: one capture happens before the
-// arm and is read after it, the other inside the arm.
 fn shared_tail_caller(sel: int) -> int {
     let v = mk(6400 + sel)
     let out = match sel {

@@ -1,7 +1,4 @@
-// `?.` producing a `nobox` value. A nobox value is leaves plus a presence tag,
-// so all three safe-nav forms (field, call, `?.let`) join their nil and value
-// arms per slot, as `if`/`match` values do, instead of packing a box. Chaining
-// a second `?.` onto the result is covered at the bottom of this file.
+// A nullable nobox value joins its presence tag and leaves separately.
 
 nobox value NV { x: int, y: int }
 
@@ -11,7 +8,6 @@ struct Holder { v: NV, n: int }
 
 fn Holder.wire(h) -> NV { return h.v }
 
-// --- the three forms ---
 
 @test(returns = 9)
 fn safe_nav_field_yields_a_nobox_value() -> int {
@@ -34,7 +30,6 @@ fn safe_nav_let_yields_a_nobox_value() -> int {
     return (a?.x ?? -1) + (a?.y ?? -1)
 }
 
-// --- the ABSENT arm, which is what a single result cell got wrong ---
 
 fn none() -> Holder? { return null }
 
@@ -47,8 +42,6 @@ fn every_safe_nav_form_on_null_is_absent() -> int {
     return (if a == null { 1 } else { 0 }) + (if b == null { 1 } else { 0 }) + (if c == null { 1 } else { 0 })
 }
 
-// Both arms reached from ONE call site, so a join that only ever saw the present
-// arm cannot pass: the two answers must differ.
 fn pick(present: bool) -> Holder? {
     if present { return Holder { v: NV { x: 4, y: 7 }, n: 1 } }
     return null
@@ -61,7 +54,6 @@ fn both_arms_of_one_join() -> int {
     return (hit?.x ?? 0) + (hit?.y ?? 0) + (miss?.x ?? 0) + (miss?.y ?? 0)
 }
 
-// --- controls: the discriminant is `nobox` x `?.`, nothing else ---
 
 struct BHolder { v: BV }
 
@@ -72,8 +64,6 @@ fn an_unmarked_value_through_safe_nav_still_works() -> int {
     return (a?.x ?? -1) + (a?.y ?? -1)
 }
 
-// A DECLARED nullable return has always worked -- it is the shape safe-nav
-// synthesizes, reached the other way.
 fn maybe(present: bool) -> NV? {
     if present { return NV { x: 3, y: 6 } }
     return null
@@ -90,25 +80,12 @@ fn safe_nav_to_a_plain_field_still_works() -> int {
     return h?.n ?? -1
 }
 
-// The control that scoped the chained-`?.` gap while it was open, and still
-// bounds a fix to `nobox`: the same chain on an UNMARKED value.
 @test(returns = 3)
 fn an_unmarked_value_chains_through_two_safe_navs() -> int {
     let h: BHolder? = BHolder { v: BV { x: 3, y: 6 } }
     return h?.v?.x ?? -1
 }
 
-// --- chaining a second `?.` straight onto a nobox result ---
-//
-// The outer `?.` asked
-// `repr_join_slot` about ITS OWN type -- `int?`, no leaves -- and rightly
-// declined the per-slot join, but that decision is about the RESULT while the
-// materialization was the BASE's: `lower_expr` on the base took the scalar arm,
-// whose embed read rebuilt the box. Asking the BASE the same question routes it
-// through the per-slot join, and its presence tag replaces the `== nil` test --
-// once the value is leaves there is no box to compare.
-//
-// The producing form does not matter, which is why one fix closed all three.
 
 @test(returns = 36)
 fn a_nobox_value_chains_through_two_safe_navs() -> int {
@@ -116,8 +93,6 @@ fn a_nobox_value_chains_through_two_safe_navs() -> int {
     return (h?.v?.x ?? -1) * 10 + (h?.v?.y ?? -1)
 }
 
-// The absent arm: the fallback must fire rather than the chain reading leaves
-// off a row that is not there.
 @test(returns = -1)
 fn the_chain_takes_the_absent_arm_when_the_base_is_null() -> int {
     let h: Holder? = null
@@ -136,10 +111,6 @@ fn the_chain_works_through_a_let() -> int {
     return h?.let { h.v }?.x ?? -1
 }
 
-// `?.` yielding a nobox whose own field is nobox. Safe-nav was never the
-// variable here: the same shape rejected with no `?.` anywhere, because a
-// reference struct field splices its nobox child's leaves and the nested value
-// was falling to one boxed leaf. Storage coverage: `tests/nobox/nested_ctor.rock`.
 nobox value SNN { x: int, y: int }
 nobox value SNMid { v: SNN }
 struct SNOuter { m: SNMid }
