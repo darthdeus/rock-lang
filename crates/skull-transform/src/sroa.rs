@@ -107,22 +107,16 @@ pub(crate) fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, Co
     fam.split_copy_aliases(func);
     let uses = fam.scan_load_uses(func);
     fam.settle_disqualification(&uses.escape_loads, &uses.chained_roots);
-    fam.add_presence_leaves(&uses.value_nil_tests);
+    fam.add_presence_leaves(&uses.nil_tests[NilTest::Value as usize]);
     if !fam.any_candidate() {
         return Ok(false);
     }
 
     let mut cells = FieldCells::default();
-    rewrite_nil_tests(
-        func,
-        &fam,
-        &mut cells,
-        uses.enum_nil_tests,
-        uses.value_nil_tests,
-    );
-    rewrite_projections(func, &fam, &mut cells, &uses.load_cell);
+    rewrite_nil_tests(func, &fam, &mut cells, uses.nil_tests);
+    rewrite_projections(func, &fam, &mut cells, uses.projections);
     let store_expansions = plan_store_expansions(func, &fam)?;
-    let mut replacement = alias_deletions(func, &fam);
+    let mut replacement = HashMap::default();
     expand_stores(func, &mut cells, store_expansions, &mut replacement);
     rematerialize_escapes(func, &fam, &mut cells, uses.escape_loads, &mut replacement);
     splice_replacements(func, &replacement);
@@ -174,16 +168,35 @@ struct Families {
     presence_roots: HashSet<usize>,
 }
 
-/// How every candidate load is consumed, gathered by [`Families::scan_load_uses`].
+#[derive(Clone, Copy)]
+enum NilTest {
+    Enum,
+    Value,
+}
+
+#[derive(Clone, Copy)]
+enum ProjectionKind {
+    Field,
+    Tuple,
+    Store,
+}
+
+#[derive(Clone, Copy)]
+struct Projection {
+    site: Idx<Inst>,
+    cell: Idx<Cell>,
+    field: ustr::Ustr,
+    assigned: Option<Idx<Inst>>,
+}
+
+type NilTests = [Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)>; 2];
+
+#[derive(Default)]
 struct LoadUses {
-    load_cell: HashMap<Idx<Inst>, Idx<Cell>>,
+    // Explicit fields, tuple fields, then writes, in cell allocation order.
+    projections: [Vec<Projection>; 3],
     escape_loads: Vec<(Idx<Inst>, Idx<Cell>)>,
-    enum_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)>,
-    // A nullable value cell (a `V?` read joined with `nil`, as `if let` and an
-    // inlined `unwrap()` produce) is tested against nil before its fields are
-    // read. The split cell answers that test from a presence leaf.
-    value_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)>,
-    // Roots of families that split only because a copy of a copy is accepted.
+    nil_tests: NilTests,
     chained_roots: HashSet<usize>,
 }
 
@@ -390,7 +403,7 @@ impl Families {
             copy_alias,
             ..
         } = self;
-        let mut escape_loads: Vec<(Idx<Inst>, Idx<Cell>)> = Vec::new();
+        let mut uses = LoadUses::default();
         let mut load_cell: HashMap<Idx<Inst>, Idx<Cell>> = HashMap::default();
         for (_, b) in func.blocks.iter() {
             for &i in &b.insts {
@@ -402,9 +415,6 @@ impl Families {
                 }
             }
         }
-        let mut enum_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)> = Vec::new();
-        let mut value_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)> = Vec::new();
-        let mut chained_roots: HashSet<usize> = HashSet::default();
         for (_, b) in func.blocks.iter() {
             for &i in &b.insts {
                 func.insts[i].uses_each(&mut |op| {
@@ -414,51 +424,56 @@ impl Families {
                                 .as_ref()
                                 .is_some_and(|s| s.contains(f))
                         };
+                        let project = |field, assigned| Projection {
+                            site: i,
+                            cell: c,
+                            field,
+                            assigned,
+                        };
                         let ok = match &func.insts[i] {
                             Inst::Field { .. }
                             | Inst::Index {
                                 kind: ContainerKind::Record,
                                 ..
-                            } => field_read(func, i, op).is_some_and(|(_, field)| known(&field)),
+                            } => field_read(func, i, op).is_some_and(|(_, field)| {
+                                uses.projections[ProjectionKind::Field as usize]
+                                    .push(project(field, None));
+                                known(&field)
+                            }),
+                            Inst::TupleIndex { base, index } if *base == op => {
+                                let field = skull_mir::names::indexed("_", "", *index);
+                                uses.projections[ProjectionKind::Tuple as usize]
+                                    .push(project(field, None));
+                                known(&field)
+                            }
                             Inst::StoreField { .. }
                             | Inst::StoreIndex {
                                 kind: ContainerKind::Record,
                                 ..
-                            } => {
-                                field_store(func, i, op).is_some_and(|(_, field, _)| known(&field))
-                            }
-                            // An enum positional payload read: `v[index+1]`, named `_<index>`.
-                            Inst::TupleIndex { base, index } => {
-                                *base == op && known(&skull_mir::names::indexed("_", "", *index))
-                            }
-                            Inst::Eq(a, b) | Inst::NotEq(a, b)
-                                if matches!(cand[rep[raw(c)]], Some(StructId::Value(_))) =>
-                            {
+                            } => field_store(func, i, op).is_some_and(|(_, field, value)| {
+                                uses.projections[ProjectionKind::Store as usize]
+                                    .push(project(field, Some(value)));
+                                known(&field)
+                            }),
+                            Inst::Eq(a, b) | Inst::NotEq(a, b) => {
+                                let kind = match cand[rep[raw(c)]] {
+                                    Some(StructId::Value(_)) => Some(NilTest::Value),
+                                    Some(StructId::Enum(_))
+                                        if matches!(func.insts[i], Inst::Eq(..)) =>
+                                    {
+                                        Some(NilTest::Enum)
+                                    }
+                                    _ => None,
+                                };
                                 let other = if *a == op { *b } else { *a };
                                 let is_nil = (*a == op) != (*b == op)
                                     && matches!(func.insts[other], Inst::Const(Lit::Nil));
-                                if is_nil {
-                                    value_nil_tests.push((i, op, c));
-                                }
-                                is_nil
-                            }
-                            Inst::Eq(a, b)
-                                if matches!(cand[rep[raw(c)]], Some(StructId::Enum(_))) =>
-                            {
-                                let other = if *a == op {
-                                    Some(*b)
-                                } else if *b == op {
-                                    Some(*a)
+                                if let Some(kind) = kind.filter(|_| is_nil) {
+                                    uses.nil_tests[kind as usize].push((i, op, c));
+                                    true
                                 } else {
-                                    None
-                                };
-                                let is_nil = other.is_some_and(|v| {
-                                    matches!(func.insts[v], Inst::Const(Lit::Nil))
-                                });
-                                if is_nil {
-                                    enum_nil_tests.push((i, op, c));
+                                    false
                                 }
-                                is_nil
                             }
                             Inst::Store { cell, value } => {
                                 let yk = raw(*cell);
@@ -468,7 +483,7 @@ impl Families {
                                     && (rep[yk] == rep[raw(c)]
                                         || (copy_alias[yk].is_some() && alias[yk] == Some(c)));
                                 if accepted && copy_alias[yk].is_some_and(|r| r != c) {
-                                    chained_roots.insert(raw(copy_alias[yk].unwrap()));
+                                    uses.chained_roots.insert(raw(copy_alias[yk].unwrap()));
                                 }
                                 accepted
                             }
@@ -478,7 +493,7 @@ impl Families {
                             // A flagged (non-null value-struct) binding rebuilds at the
                             // use instead of pinning the family as an escaping aggregate.
                             if func.cells[c].nonnull_value_struct {
-                                escape_loads.push((op, c));
+                                uses.escape_loads.push((op, c));
                             } else {
                                 disq[raw(c)] = true;
                             }
@@ -489,20 +504,14 @@ impl Families {
             b.term.uses_each(&mut |op| {
                 if let Some(&c) = load_cell.get(&op) {
                     if func.cells[c].nonnull_value_struct {
-                        escape_loads.push((op, c)); // rebuild at the terminator use
+                        uses.escape_loads.push((op, c)); // rebuild at the terminator use
                     } else {
                         disq[raw(c)] = true; // a load used by a terminator escapes
                     }
                 }
             });
         }
-        LoadUses {
-            load_cell,
-            escape_loads,
-            enum_nil_tests,
-            value_nil_tests,
-            chained_roots,
-        }
+        uses
     }
 
     /// The family root a cell's leaves live under: its copy source, else its
@@ -650,61 +659,37 @@ fn rewrite_nil_tests(
     func: &mut MirFunc,
     fam: &Families,
     cells: &mut FieldCells,
-    enum_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)>,
-    value_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)>,
+    nil_tests: NilTests,
 ) {
-    let mut nil_test_loads: HashMap<Idx<Inst>, Idx<Inst>> = HashMap::default();
-    for (test, old, c) in enum_nil_tests {
-        if !fam.is_cand(c) {
-            continue;
-        }
-        // A live box has a variant; exhaustion clears it with the payload.
-        let tag_cell = cells.get(func, fam.to_rep(c), skull_mir::names::ustr("__variant"));
-        let present = func.alloc_inst(Inst::Load(tag_cell));
-        match &mut func.insts[test] {
-            Inst::Eq(a, b) => {
-                if *a == old {
-                    *a = present;
-                } else if *b == old {
-                    *b = present;
-                }
-            }
-            _ => unreachable!("recorded enum nil test changed instruction kind"),
-        }
-        nil_test_loads.insert(test, present);
-    }
-    for (test, old, c) in value_nil_tests {
-        if !fam.is_cand(c) {
-            continue;
-        }
-        let present_cell = cells.get(func, fam.to_rep(c), present_field());
-        let present = func.alloc_inst(Inst::Load(present_cell));
-        match &mut func.insts[test] {
-            Inst::Eq(a, b) | Inst::NotEq(a, b) => {
-                if *a == old {
-                    *a = present;
-                } else if *b == old {
-                    *b = present;
-                }
-            }
-            _ => unreachable!("recorded value nil test changed instruction kind"),
-        }
-        nil_test_loads.insert(test, present);
-    }
-    if !nil_test_loads.is_empty() {
-        for (_, block) in func.blocks.iter_mut() {
-            if !block.insts.iter().any(|i| nil_test_loads.contains_key(i)) {
+    let mut loads = HashMap::default();
+    for (tests, field) in nil_tests
+        .into_iter()
+        .zip([skull_mir::names::ustr("__variant"), present_field()])
+    {
+        for (test, old, cell) in tests {
+            if !fam.is_cand(cell) {
                 continue;
             }
-            let old = std::mem::take(&mut block.insts);
-            let mut new = Vec::with_capacity(old.len() + nil_test_loads.len());
-            for i in old {
-                if let Some(&load) = nil_test_loads.get(&i) {
-                    new.push(load);
-                }
-                new.push(i);
+            let cell = cells.get(func, fam.to_rep(cell), field);
+            let load = func.alloc_inst(Inst::Load(cell));
+            let (Inst::Eq(a, b) | Inst::NotEq(a, b)) = &mut func.insts[test] else {
+                unreachable!("recorded nil test changed instruction kind");
+            };
+            if *a == old {
+                *a = load;
+            } else {
+                debug_assert_eq!(*b, old);
+                *b = load;
             }
-            block.insts = new;
+            loads.insert(test, load);
+        }
+    }
+    for (_, block) in func.blocks.iter_mut() {
+        if block.insts.iter().any(|i| loads.contains_key(i)) {
+            block.insts = std::mem::take(&mut block.insts)
+                .into_iter()
+                .flat_map(|i| loads.get(&i).copied().into_iter().chain([i]))
+                .collect();
         }
     }
 }
@@ -752,66 +737,30 @@ fn uses_once(func: &MirFunc, i: Idx<Inst>, value: Idx<Inst>) -> bool {
     count == 1
 }
 
-/// Only declared fields can get field cells. A dotted leaf layout may have
-/// no cell for a whole nested member; let its escaping load rebuild the value.
 fn rewrite_projections(
     func: &mut MirFunc,
     fam: &Families,
     cells: &mut FieldCells,
-    load_cell: &HashMap<Idx<Inst>, Idx<Cell>>,
+    projections: [Vec<Projection>; 3],
 ) {
-    let mut fields = Vec::new();
-    let mut tuples = Vec::new();
-    let mut stores = Vec::new();
-    for (_, block) in func.blocks.iter() {
-        for &i in &block.insts {
-            match func.insts[i] {
-                Inst::Field { base, .. }
-                | Inst::Index {
-                    base,
-                    kind: ContainerKind::Record,
-                    ..
-                } => {
-                    if let Some(&c) = load_cell.get(&base)
-                        && fam.is_cand(c)
-                        && let Some((_, field)) = field_read(func, i, base)
-                        && fam.provides(c, &field)
-                    {
-                        fields.push((i, c, field));
-                    }
-                }
-                Inst::TupleIndex { base, index } => {
-                    if let Some(&c) = load_cell.get(&base)
-                        && fam.is_cand(c)
-                    {
-                        tuples.push((i, c, skull_mir::names::indexed("_", "", index)));
-                    }
-                }
-                Inst::StoreField { base, .. }
-                | Inst::StoreIndex {
-                    base,
-                    kind: ContainerKind::Record,
-                    ..
-                } => {
-                    if let Some(&c) = load_cell.get(&base)
-                        && fam.is_cand(c)
-                        && let Some((_, field, value)) = field_store(func, i, base)
-                    {
-                        stores.push((i, c, field, value));
-                    }
-                }
-                _ => {}
+    for (class, group) in projections.into_iter().enumerate() {
+        for Projection {
+            site,
+            cell,
+            field,
+            assigned,
+        } in group
+        {
+            if fam.is_cand(cell)
+                && (class != ProjectionKind::Field as usize || fam.provides(cell, &field))
+            {
+                let cell = cells.get(func, fam.to_rep(cell), field);
+                func.insts[site] = match assigned {
+                    Some(value) => Inst::Store { cell, value },
+                    None => Inst::Load(cell),
+                };
             }
         }
-    }
-    // Keep field-cell numbering stable across the three projection classes.
-    for (i, c, field) in fields.into_iter().chain(tuples) {
-        let cell = cells.get(func, fam.to_rep(c), field);
-        func.insts[i] = Inst::Load(cell);
-    }
-    for (i, c, field, value) in stores {
-        let cell = cells.get(func, fam.to_rep(c), field);
-        func.insts[i] = Inst::Store { cell, value };
     }
 }
 
@@ -836,9 +785,13 @@ fn plan_store_expansions(
         }
         let src = match func.insts[value] {
             Inst::Const(Lit::Nil) => Some(FieldSrc::Operand(value)),
-            Inst::Load(src) if fam.copy_alias[raw(cell)].is_some() => {
-                Some(FieldSrc::CellLoad(fam.to_rep(src)))
-            }
+            Inst::Load(src) => match fam.copy_alias[raw(cell)] {
+                Some(_) => Some(FieldSrc::CellLoad(fam.to_rep(src))),
+                None => {
+                    expansions.push((i, cell, Vec::new()));
+                    continue;
+                }
+            },
             _ => None,
         };
         let fields = if let Some(src) = src {
@@ -863,25 +816,6 @@ fn plan_store_expansions(
         expansions.push((i, cell, fields));
     }
     Ok(expansions)
-}
-
-fn alias_deletions(func: &MirFunc, fam: &Families) -> HashMap<Idx<Inst>, Vec<Idx<Inst>>> {
-    func.blocks
-        .values()
-        .flat_map(|block| block.insts.iter().copied())
-        .filter_map(|i| {
-            let Inst::Store { cell, value } = func.insts[i] else {
-                return None;
-            };
-            let c = raw(cell);
-            (c < fam.nc
-                && fam.alias[c].is_some()
-                && fam.copy_alias[c].is_none()
-                && !fam.disq[c]
-                && matches!(func.insts[value], Inst::Load(_)))
-            .then_some((i, Vec::new()))
-        })
-        .collect()
 }
 
 fn expand_stores(
