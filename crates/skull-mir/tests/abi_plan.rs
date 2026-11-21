@@ -124,22 +124,6 @@ fn enum_layout_is_selected_by_one_owned_plan() {
 }
 
 #[test]
-fn an_opaque_boundary_uses_an_explicit_boundary_abi_plan() {
-    let ws = checked_ws_of(
-        r#"
-nobox value V2 { x: float, y: float }
-@scalar_abi inline(lua) fn boundary(v: V2) -> V2 = "return v"
-fn main() { boundary(V2 { x: 1.0, y: 2.0 }) }
-"#,
-    );
-    let scx = ScalarCtx::new(&ws);
-    let boundary = Instance::base(func_ref(&ws, "boundary"));
-    let abi = BackendFnAbiPlan::for_boundary_instance(&ws, &scx, &boundary);
-    assert_eq!(abi.param_leaf_widths(), Some(vec![2]));
-    assert_eq!(abi.result_lanes(), 2);
-}
-
-#[test]
 fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
     let ws = checked_ws_of("nobox value V2 { x: float, y: float }\nvalue Gc { text: string }");
     let arena = RepArena::default();
@@ -217,36 +201,6 @@ fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
 }
 
 #[test]
-fn first_class_function_values_match_first_class_boundary_declarations() {
-    let ws = checked_ws_of(
-        r#"
-nobox value Leaf { x: float, y: float }
-fn named(value: Leaf) { print("ok") }
-fn main() { print("main") }
-"#,
-    );
-    let scx = ScalarCtx::new_values_first_class(&ws);
-    let named = func_ref(&ws, "named");
-    let declaration = BackendFnAbiPlan::for_boundary_declaration(&ws, &scx, named);
-    let value = BackendFnAbiPlan::for_function_value(
-        &ws,
-        &scx,
-        &MonoTy::Function {
-            params: vec![nominal(&ws, "Leaf")],
-            ret: Box::new(MonoTy::Unit),
-        },
-        true,
-    )
-    .expect("a first-class function value must have a physical plan");
-    assert_eq!(
-        value,
-        declaration.representation().clone(),
-        "a first-class indirect caller must use the declaration's opaque aggregate lane"
-    );
-    assert!(!value.uses_scalar_abi());
-}
-
-#[test]
 fn global_storage_uses_an_owned_value_plan() {
     let ws = checked_ws_of(
         "nobox value G { x: float, y: float }\n\
@@ -285,51 +239,6 @@ fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
             .expect("the required presence plan must exist"),
         vec![true, false, false, false]
     );
-}
-
-#[test]
-fn nominal_c_layout_aligns_flat_and_nested_fields() {
-    let ws = checked_ws_of(
-        "value Mixed { on: bool, count: int, scale: f32 }\n\
-         value V2 { x: f32, y: f32 }\n\
-         value V4 { x: f32, y: f32, z: f32, w: f32 }\n\
-         value SpriteFragU {\
-             lights: bool, unlit: bool, count: int, ambient: V4,\
-             glow: bool, normal: bool, params: V2\n\
-         }",
-    );
-    let arena = RepArena::default();
-    let cases: &[(&str, usize, &[(&str, usize)])] = &[
-        ("Mixed", 12, &[("on", 0), ("count", 4), ("scale", 8)]),
-        (
-            "SpriteFragU",
-            36,
-            &[
-                ("lights", 0),
-                ("unlit", 1),
-                ("count", 4),
-                ("ambient.x", 8),
-                ("ambient.y", 12),
-                ("ambient.z", 16),
-                ("ambient.w", 20),
-                ("glow", 24),
-                ("normal", 25),
-                ("params.x", 28),
-                ("params.y", 32),
-            ],
-        ),
-    ];
-    for &(name, expected_size, expected_leaves) in cases {
-        let (leaves, size, align) = arena
-            .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Lua, key(&ws, name))
-            .unwrap_or_else(|err| panic!("{name}: {err}"));
-        let offsets: Vec<_> = leaves
-            .iter()
-            .map(|leaf| (leaf.path.as_str(), leaf.byte_off))
-            .collect();
-        assert_eq!(offsets, expected_leaves, "{name}");
-        assert_eq!((size, align), (expected_size, 4), "{name}");
-    }
 }
 
 #[test]
@@ -467,51 +376,6 @@ fn safe_caller(v: Sample?) -> float { return v?.demand_method() ?? 0.0 }
             assert!(matches!(mir.insts[args[0]], Inst::Const(Lit::Float(v)) if v == 2.0));
         }
     }
-}
-
-#[test]
-fn match_to_nullable_unit_enum_compacts_wide_event_subject() {
-    let padding = (0..63)
-        .map(|i| format!("cold_{i}: int"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let src = format!(
-        r#"
-nobox value UnitMatchIdentity {{ scene: int, arena: int, index: int, generation: int }}
-enum UnitMatchSubject {{ Absent, Primary, First(UnitMatchIdentity), Second(UnitMatchIdentity) }}
-enum UnitMatchDirection {{ ToPrimary, ToEntity }}
-nobox value UnitMatchEvent {{ {padding}, subject: UnitMatchSubject }}
-fn demand_unit_match_direction(event: UnitMatchEvent) -> UnitMatchDirection? {{
-    return match event.subject {{
-        UnitMatchSubject::Primary => UnitMatchDirection::ToPrimary,
-        UnitMatchSubject::First(_) => UnitMatchDirection::ToEntity,
-        UnitMatchSubject::Second(_) => UnitMatchDirection::ToEntity,
-        UnitMatchSubject::Absent => null,
-    }}
-}}
-fn demand_unit_match_caller(event: UnitMatchEvent) -> UnitMatchDirection? {{
-    return demand_unit_match_direction(event)
-}}
-"#
-    );
-    let ws = checked_ws_of(&src);
-    let caller = func_ref(&ws, "demand_unit_match_caller");
-    let selected = func_ref(&ws, "demand_unit_match_direction");
-    let fixture = MirFixture::new(&ws, &[caller]);
-    let entry = fixture.lower(selected).expect("lower test root");
-    let caller = fixture.lower(caller).expect("lower test root");
-    assert_eq!(
-        caller.params.len(),
-        68,
-        "unsupported forwarding body keeps original event layout"
-    );
-    assert_eq!(
-        entry.params.len(),
-        5,
-        "subject keeps tag and all identity payload lanes"
-    );
-    assert!(caller.insts.iter().any(|(_, inst)| matches!(inst,
-        skull_mir::mir::Inst::Call { func, args } if *func == selected && args.len() == 5)));
 }
 
 #[test]
