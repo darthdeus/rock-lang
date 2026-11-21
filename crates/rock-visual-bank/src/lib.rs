@@ -1,8 +1,5 @@
-//! The visual bank's line schema: one compact JSON line per character,
-//! animation, prop, icon, texture and architectural set. Eat builds and
-//! publishes these lines; packaging and `eat verify-bank` read them back
-//! through `parse_bank` and check them against each other with `resolve`. Every line that owns a sheet names its directory
-//! `assets/.eat/<dir>/`, whose files have fixed names per kind (`sheet_files`).
+//! A bank has one JSON line per asset. Sheet directories are
+//! `assets/.eat/<dir>/` with fixed filenames per kind.
 
 mod verify;
 pub use stone_texture::{bc1_header, bc5_header};
@@ -363,7 +360,6 @@ impl Line {
         }
     }
 
-    /// Return the mutable sheet directory, when this line owns one.
     pub fn dir_mut(&mut self) -> Option<&mut String> {
         match self {
             Line::Character(_) => None,
