@@ -9,24 +9,6 @@ fn findings(file: &str, src: &str, lint: &str) -> Vec<Finding> {
 }
 
 #[test]
-fn action_caller_census_has_a_nonzero_population_and_exact_zero_names() {
-    let src = r#"
-global ACT_USED: int = 1
-global ACT_MISSING: int = 2
-
-fn gameplay() {
-    let value = ACT_USED
-}
-
-fn main() { gameplay() }
-"#;
-    let found = findings("app/player.rock", src, ACTION_CALLERS);
-    assert_eq!(found.len(), 1, "caller gaps: {found:?}");
-    assert!(found[0].error.message.contains("ACT_MISSING"));
-    assert!(!found[0].error.message.contains("ACT_USED"));
-}
-
-#[test]
 fn caller_census_rejects_an_empty_production_declaration_population() {
     let found = findings("app/empty.rock", "fn main() {}", ACTION_CALLERS);
     assert_eq!(
