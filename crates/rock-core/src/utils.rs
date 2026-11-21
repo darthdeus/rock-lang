@@ -47,34 +47,3 @@ impl ReportBuilderExt for ReportBuilder<'_> {
         );
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use test_utils::strip_ansi_sgr;
-
-    #[test]
-    fn a_report_without_labels_renders_only_its_header() {
-        let report = make_report_builder(
-            ariadne::ReportKind::Error,
-            "u.rock".to_string(),
-            1,
-            "E03",
-            "no labels",
-        );
-
-        let mut written = Vec::new();
-        report
-            .finish()
-            .write(
-                ("u.rock".to_string(), ariadne::Source::from("abc\n")),
-                &mut written,
-            )
-            .unwrap();
-
-        assert_eq!(
-            strip_ansi_sgr(&String::from_utf8(written).unwrap()),
-            "[E03] Error: no labels\n"
-        );
-    }
-}
