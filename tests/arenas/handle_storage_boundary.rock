@@ -1,0 +1,23 @@
+struct RawItem { count: int }
+struct RawHandleRow { handle: Entity<RawItem> }
+
+inline(lua) fn raw_handle_field(row: any) -> any = """
+    local handle = rawget(row, "handle")
+    assert(type(handle) == "cdata")
+    return handle
+"""
+
+inline(lua) fn raw_handle_is_same(a: any, b: any) -> bool = "return rawequal(a, b)"
+
+fn erase_handle_row<T>(row: T) -> any { return row }
+
+@test(backends = "lua") fn erased_row_retains_raw_handle_identity_between_writes() {
+    let handle: Entity<RawItem> = Entity { _scene_id: 1, _arena_id: 2, _slot: 3, _generation: 4 }
+    let row = RawHandleRow { handle }
+    let erased = erase_handle_row(row)
+    let first = raw_handle_field(erased)
+    assert(raw_handle_is_same(first, raw_handle_field(erased)))
+    row.handle = handle
+    assert(!raw_handle_is_same(first, raw_handle_field(erased)))
+    assert(row.handle == handle)
+}

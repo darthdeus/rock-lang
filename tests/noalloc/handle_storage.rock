@@ -1,0 +1,15 @@
+struct ExplicitItem { count: int }
+struct ExplicitRow { embed item: Entity<ExplicitItem> }
+
+@noalloc fn store_inline_handle(row: ExplicitRow, item: Entity<ExplicitItem>) {
+    row.item = item
+}
+
+@test fn store_inline_handle_updates_the_aliased_row() {
+    let initial: Entity<ExplicitItem> = Entity { _scene_id: 1, _arena_id: 2, _slot: 3, _generation: 4 }
+    let replacement: Entity<ExplicitItem> = Entity { _scene_id: 5, _arena_id: 6, _slot: 7, _generation: 8 }
+    let row = ExplicitRow { item: initial }
+    let alias = row
+    store_inline_handle(alias, replacement)
+    assert(row.item == replacement)
+}

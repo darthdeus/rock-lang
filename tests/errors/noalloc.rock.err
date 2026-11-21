@@ -106,6 +106,14 @@ fn main() { let _ = box_value(1) }
 struct OptionalField { value: int? = null }
 @noalloc fn fill_field(record: OptionalField, n: int) { record.value = n }
 
+//=== TEST CASE: nullable_embed_growth_Generic ===
+//! expect: may grow a container table
+struct EmbeddedItem { count: int }
+struct OptionalHandle { embed item: Entity<EmbeddedItem>? = null }
+@noalloc fn fill_embedded_handle(row: OptionalHandle, item: Entity<EmbeddedItem>) {
+    row.item = item
+}
+
 //=== TEST CASE: map_growth_Generic ===
 //! expect: may grow a container table
 @noalloc fn put(m: Map<int, int>, key: int) { m[key] = 1 }

@@ -77,27 +77,29 @@ impl Emitter<'_> {
                 .field_projection(base)
                 .and_then(|(base, field)| self.field_type(base, field)),
         };
-        let TyId::Static(module, index) = ty? else {
-            return None;
-        };
-        let arena = &self.ws.module(module).ty_arena;
-        let mut index = index;
+        let mut ty = ty?;
+        let mut parts = field.as_str().split('.').peekable();
         loop {
-            match arena[index] {
+            let (resolved, node) = self.ws.resolve_ty(None, ty)?;
+            match node {
                 TypeExpr::App {
                     ctor: TypeCtor::Ref,
                     params,
-                } => index = params.into_iter().next()?,
+                } => ty = resolved.with_idx(params.into_iter().next()?),
                 TypeExpr::App {
                     ctor: TypeCtor::Nominal(name),
                     ..
                 } => {
                     let owner = self.ws.nominals.struct_id(name)?;
-                    return self.ws.module(owner.module).structs[owner.def]
+                    let field = parts.next()?;
+                    ty = self.ws.module(owner.module).structs[owner.def]
                         .fields
                         .iter()
-                        .find(|f| f.name == field)
-                        .map(|f| f.storage_ty);
+                        .find(|f| f.name.as_str() == field)?
+                        .storage_ty;
+                    if parts.peek().is_none() {
+                        return Some(ty);
+                    }
                 }
                 _ => return None,
             }
