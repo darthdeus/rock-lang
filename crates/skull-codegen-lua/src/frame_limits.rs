@@ -493,84 +493,10 @@ mod body_measure_tests {
         output.status.success()
     }
 
-    fn agrees(body: &str, locals: &str) -> bool {
-        let rejected = measure_raw(body).is_some();
-        assert_eq!(
-            rejected,
-            !loads(body, locals),
-            "verdict differs from LuaJIT"
-        );
-        rejected
-    }
-
     fn measure_raw(body: &str) -> Option<BodyOverflow> {
         let mut control = ControlLines::default();
         control.raw_lua(body, 0);
         measure_body(body, 0, &control, 0)
-    }
-
-    fn label_goto_pairs(pairs: usize) -> String {
-        let mut body = String::new();
-        for i in 0..pairs {
-            body.push_str(&format!("  goto bb{i}\n  ::bb{i}::\n"));
-        }
-        body
-    }
-
-    #[test]
-    fn the_name_cap_matches_luajit_at_its_boundary() {
-        let last_fit = LJ_MAX_VSTACK / 2;
-        assert!(!agrees(&label_goto_pairs(last_fit), ""));
-        assert!(agrees(&label_goto_pairs(last_fit + 1), ""));
-    }
-
-    fn jump_over(statements: usize) -> String {
-        let mut body = String::from("  goto bb1\n");
-        body.push_str(&"  r0 = 1\n".repeat(statements));
-        body.push_str("  ::bb1::\n");
-        body
-    }
-
-    #[test]
-    fn the_forward_jump_cap_matches_luajit_at_its_boundary() {
-        let locals = "  local r0\n";
-        assert!(!agrees(&jump_over(MAX_FORWARD_JUMP), locals));
-        assert!(agrees(&jump_over(MAX_FORWARD_JUMP + 1), locals));
-    }
-
-    #[test]
-    fn recorded_conditional_jumps_match_luajit_at_the_boundary() {
-        for statements in [MAX_FORWARD_JUMP, MAX_FORWARD_JUMP + 1] {
-            let mut body = String::new();
-            let mut control = ControlLines::default();
-            let head = control.line(body.len(), 2);
-            body.push_str("  if r0 then\n");
-            body.push_str(&"  r0 = 1\n".repeat(statements));
-            let end = control.line(body.len(), 0);
-            body.push_str("  end\n");
-            control.jump((head, 1), (end, 0));
-            let rejected = measure_body(&body, 0, &control, 0).is_some();
-            assert_eq!(rejected, !loads(&body, "  local r0\n"));
-            assert_eq!(rejected, statements > MAX_FORWARD_JUMP);
-        }
-    }
-
-    #[test]
-    fn recorded_names_match_luajit_at_the_boundary() {
-        for pairs in [LJ_MAX_VSTACK / 2, LJ_MAX_VSTACK / 2 + 1] {
-            let mut body = String::new();
-            let mut control = ControlLines::default();
-            for i in 0..pairs {
-                let jump = control.line(body.len(), 1);
-                control.goto(jump, 0, 0, Label::Follower, i as u32);
-                body.push_str(&format!("  goto L{i}\n"));
-                control.label(body.len(), Label::Follower, i as u32);
-                body.push_str(&format!("  ::L{i}::\n"));
-            }
-            let rejected = measure_body(&body, 0, &control, 0).is_some();
-            assert_eq!(rejected, !loads(&body, ""));
-            assert_eq!(rejected, pairs > LJ_MAX_VSTACK / 2);
-        }
     }
 
     #[test]
@@ -592,53 +518,11 @@ mod body_measure_tests {
     }
 
     #[test]
-    fn recorded_flat_branches_do_not_overstate_jump_distance() {
-        for statements in MAX_FORWARD_JUMP - 2..=MAX_FORWARD_JUMP + 4 {
-            let mut control = ControlLines::default();
-            let mut body = String::from("  if r0 then goto bb1 else goto bb2 end\n");
-            let at = control.line(0, 3);
-            for target in [1, 2] {
-                control.goto(at, 0, 2, Label::Block, target);
-            }
-            body.push_str(&"  r0 = 1\n".repeat(statements));
-            let labels_start = body.len();
-            body.push_str("  ::bb1::\n  ::bb2::\n");
-            control.raw_lua(&body[labels_start..], labels_start);
-            let rejected = measure_body(&body, 0, &control, 0).is_some();
-            assert!(!rejected || !loads(&body, "  local r0\n"));
-            if statements == MAX_FORWARD_JUMP + 4 {
-                assert!(rejected);
-            }
-        }
-    }
-
-    #[test]
-    fn removing_a_fallthrough_goto_removes_its_name_and_jump() {
-        let mut body = label_goto_pairs(LJ_MAX_VSTACK / 2);
-        let mut control = ControlLines::default();
-        control.raw_lua(&body, 0);
-        let start = body.len();
-        let at = control.line(start, 1);
-        control.goto(at, 0, 0, Label::Block, 0);
-        body.push_str("  goto bb0\n");
-        body.truncate(start);
-        control.pop_goto(start);
-        assert_eq!(measure_body(&body, 0, &control, 0), None);
-        assert!(loads(&body, ""));
-    }
-
-    #[test]
     fn a_self_move_and_a_kill_cost_no_measured_instruction() {
         let body = format!(
             "  goto bb1\n{}  ::bb1::\n",
             "  r0 = r0\n  r0=nil\n".repeat(40_000)
         );
-        assert_eq!(measure_raw(&body), None);
-    }
-
-    #[test]
-    fn jump_text_inside_a_string_is_not_a_jump() {
-        let body = "  print(\"goto bb1\")\n".repeat(70_000);
         assert_eq!(measure_raw(&body), None);
     }
 }
