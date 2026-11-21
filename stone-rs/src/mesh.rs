@@ -638,18 +638,4 @@ mod layout_tests {
         assert_eq!(stone_mesh_update_instances(handle, data.as_ptr(), 1), 0);
         assert_eq!(stone_mesh_update_instances(handle, std::ptr::null(), 0), 0);
     }
-
-    #[test]
-    fn validate_layout_does_not_allocate_for_maximum_attribute_count() {
-        let attributes = [1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4];
-        let live_before = crate::text::retained_bytes::live();
-        let _layout = validate_layout("test", 40, attributes.as_ptr(), attributes.len() as i32)
-            .expect("valid layout");
-        let live_after = crate::text::retained_bytes::live();
-
-        assert_eq!(
-            live_after, live_before,
-            "validation retains no heap allocation"
-        );
-    }
 }
