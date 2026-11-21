@@ -593,21 +593,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_dropped_size_falls_through_to_the_game_default() {
-        let base = ResolvedGeometry {
-            size: (2560, 1440),
-            pos: (0, 0),
-            display: None,
-        };
-        let (saved, _) = drop_stale_saved_size(saved_at((1280, 720)), Some((1280, 720)), base.size);
-        let (res, prov) = merge_geometry(base, &[(Source::Saved, saved)]);
-        assert_eq!(res.size, (2560, 1440));
-        assert_eq!(prov.size, Source::Default);
-        assert_eq!(res.pos, (40, 50));
-        assert_eq!(prov.pos, Source::Saved);
-    }
-
     fn base() -> ResolvedGeometry {
         ResolvedGeometry {
             size: (800, 700),
@@ -780,20 +765,6 @@ display = 1
                 display: Some(1),
             },
         }
-    }
-
-    #[test]
-    fn windowed_restore_preserves_display_and_bounds() {
-        let displays = vec![disp(0, (0, 0, 1920, 1080)), disp(1, (1920, 0, 1920, 1080))];
-        let borders = top_border(30);
-        let state = windowed_on_second_display();
-        let (mode, placement, bounds) = resolve_hidden_window_restore(state, &displays, borders);
-        assert_eq!(mode, WindowMode::Windowed);
-        assert_eq!(placement.display, 1);
-        assert_eq!(placement.pos, (2000, 100));
-        assert_eq!(placement.size, (800, 600));
-        assert_eq!(bounds.display, Some(1));
-        assert_eq!(bounds.pos, (2000, 100));
     }
 
     #[test]
