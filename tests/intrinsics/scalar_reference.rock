@@ -1,21 +1,10 @@
-// Scalar intrinsic reference semantics: portable Rock fallback bodies and
-// backend native mappings must agree. Output tests cover multiple results;
-// scalar returns are also checked by the GLSL runner (exact int/bool values,
-// float results within the host runner's tolerance).
-//
-// `tan` and `log` have no portable fallback, so their tests assert
-// identities that pin the base against the host's own math (tolerance 1e-9:
-// wide enough for libm last-bit drift, far tighter than a wrong base). The
-// tuple projections and `__range` pin their JS index and runtime-helper
-// mappings, and a user fn sharing an intrinsic's name does not take its
-// native template.
+// The 1e-9 tolerance admits libm last-bit drift while distinguishing log bases.
 
 @test(output = "0 5 3")
 fn clamp_below_above_inside() {
     print("{clamp(-2.0, 0.0, 5.0)} {clamp(9.0, 0.0, 5.0)} {clamp(3.0, 0.0, 5.0)}")
 }
 
-// smoothstep is 0 below edge0, 1 above edge1, and 0.5 at the midpoint.
 @test(output = "0 1 0.5")
 fn smoothstep_endpoints_and_mid() {
     print("{smoothstep(0.0, 1.0, -1.0)} {smoothstep(0.0, 1.0, 2.0)} {smoothstep(0.0, 1.0, 0.5)}")
@@ -56,7 +45,6 @@ fn v_smoothstep_mid() -> float {
     return smoothstep(0.0, 1.0, 0.5)
 }
 
-// round pins floor(x + 0.5): half-way rounds toward +inf, so -2.5 -> -2.
 @test(returns = 3.0)
 fn v_round_half_up() -> float {
     return round(2.5)
@@ -72,7 +60,6 @@ fn v_sign_negative() -> int {
     return sign(-4)
 }
 
-// fract = x - floor(x), in [0, 1) even for negatives.
 @test(returns = 0.75)
 fn v_fract_negative() -> float {
     return fract(-0.25)
@@ -88,8 +75,6 @@ fn v_clamp_is_idempotent() -> bool {
     return clamp(3.0, 0.0, 5.0) == clamp(clamp(3.0, 0.0, 5.0), 0.0, 5.0)
 }
 
-// Swizzle reads: component select, rgba alias, repetition, and a swizzle result
-// consumed by tier-0 vec math.
 @test(returns = 3.0)
 fn v_swizzle_chain_component() -> float {
     let p = v(1.0, 2.0, 3.0)
@@ -115,8 +100,6 @@ fn v_swizzle_repeat_sum() -> float {
     return q.x + q.y + q.z + q.w
 }
 
-// Componentwise vec math + mixed ctors (stdlib/vec.rock): shared tier-0
-// bodies, so these pin CPU/GPU agreement for the whole family.
 @test(returns = 6.0)
 fn v_vec_clamp_scalar_bounds() -> float {
     let l = v(2.0, 9.5, 7.0)
@@ -131,7 +114,6 @@ fn v_vec_min_max() -> float {
     return a.min(b).x + a.max(b).y - 3.0
 }
 
-// fract(1.25) = 0.25; fract(-0.25) = 0.75 (floor-based, in [0,1) for negatives).
 @test(returns = 1.0)
 fn v_vec_fract() -> float {
     let p = v(1.25, -0.25)
@@ -156,7 +138,6 @@ fn v_mixed_ctor_vec3_from_vec2() -> float {
     return v(p, 7.0).z
 }
 
-// Scalar-broadcast subtraction, mirroring the scalar `+` overload set.
 @test(returns = 1.0)
 fn v_vec2_scalar_sub() -> float {
     return (v(3.0, 4.0) - 2.0).x
@@ -177,7 +158,6 @@ fn v_exp_one() -> float {
     return exp(1.0)
 }
 
-// Componentwise division, completing the Vec3/Vec4 `*` mirror (Vec2 had it).
 @test(returns = 3.0)
 fn v_vec3_div_vec3() -> float {
     return (v(4.0, 9.0, 16.0) / v(2.0, 3.0, 4.0)).y
@@ -188,9 +168,6 @@ fn v_vec4_div_vec4() -> float {
     return (v(2.0, 4.0, 6.0, 8.0) / v(1.0, 2.0, 3.0, 4.0)).w
 }
 
-// --- bool-vector tier: isnan/isinf/bvec3/any/greater_than/
-// to_vec3. Cross-backend by construction; on GLSL these force the emitter's
-// Bvec3 machinery (nominal type, ctor, field->Bool typing, the vec3(bvec) cast).
 
 @test(returns = false)
 fn v_isnan_finite() -> bool {
@@ -214,8 +191,7 @@ fn ieee_predicates_distinguish_nan_and_infinity() {
     }
 }
 
-// Bvec3 construction + a direct component read: the read must type as Bool, not
-// the "Vec component" Float fallback (the easy-to-miss ty_of Field site).
+// Bvec3 component reads must have Bool type.
 @test(returns = true)
 fn v_bvec_field_or() -> bool {
     let b = bvec3(false, true, false)
@@ -242,7 +218,6 @@ fn v_greater_than_none() -> bool {
     return any(greater_than(v(1.0, 2.0, 3.0), v(9.0, 9.0, 9.0)))
 }
 
-// bool->float cast: to_vec3(bvec) selects 1.0/0.0 per channel (GLSL vec3(bvec)).
 @test(returns = 1.0)
 fn v_to_vec3_true_channel() -> float {
     return to_vec3(bvec3(true, false, false)).x
@@ -263,16 +238,12 @@ fn near(a: float, b: float) -> bool {
 }
 
 @test fn log_is_the_natural_log() {
-    // exp(1) rather than a literal: pins the base against the host's own exp.
     assert(near(log(exp(1.0)), 1.0), "log(e) == 1")
     assert(near(log(1.0), 0.0), "log(1) == 0")
-    // A base-10 mapping would answer 0.9030.. here; a base-2 one 3.0.
     assert(near(log(8.0), 2.0794415416798357), "log(8)")
 }
 
 @test fn log2_is_base_two() {
-    // 8 and 1024 are exact powers of two, so a correct base-2 mapping lands on
-    // a whole number and a natural-log one does not.
     assert(near(log2(8.0), 3.0), "log2(8) == 3")
     assert(near(log2(1024.0), 10.0), "log2(1024) == 10")
     assert(near(log2(0.25), -2.0), "log2(0.25) == -2")
@@ -286,13 +257,11 @@ fn test_tuple_projections() {
     print("{tuple_first(t)} {tuple_second(t)}")
 }
 
-// tuple_first on a fresh tuple literal (not stored).
 @test(returns = 7)
 fn test_tuple_first_literal() -> int {
     tuple_first((7, 99))
 }
 
-// A materialized range iterates its elements in order.
 @test(returns = 10)
 fn test_range_collect_sum() -> int {
     let r = (0..5).collect()
@@ -307,8 +276,7 @@ fn test_range_len() -> int {
     r.len
 }
 
-// A user fn sharing an intrinsic's name and arity is its own function: the
-// `Math.abs` template belongs to the stdlib declaration only.
+// Native templates belong to stdlib declarations, not user functions with the same name.
 fn abs(b: bool) -> int {
     if b { 5 } else { 7 }
 }
