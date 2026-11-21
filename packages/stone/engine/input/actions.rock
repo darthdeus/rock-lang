@@ -75,7 +75,7 @@ pub global UI_TEXT_INPUT_CAPTURE: bool = false
 pub global ACTION_REPEAT_DELAY: float = 0.35
 pub global ACTION_REPEAT_RATE: float = 0.05
 
-pub fn ui_wants_input() -> bool { return UI_INPUT_CAPTURE || UI_TEXT_INPUT_CAPTURE }
+pub @noalloc fn ui_wants_input() -> bool { return UI_INPUT_CAPTURE || UI_TEXT_INPUT_CAPTURE }
 
 pub fn action_claims_begin_frame() {
     ACTION_CLAIMED_SCANCODES.clear()

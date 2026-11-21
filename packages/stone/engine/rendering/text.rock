@@ -204,8 +204,8 @@ fn text_layout_metric_unit_size(layout: TextLayout, source_pixel_size: float) ->
     return FONT_UNIT_SIZES[idx]
 }
 
-// The ink rect, given the metric em the layout's font already resolved to.
-fn text_layout_raster_rect_at(
+// Ink rect for the metric em already resolved by the layout font.
+@noalloc fn text_layout_raster_rect_at(
     unit_size: float,
     layout: TextLayout,
     glyph_origin: Vec2,
@@ -1409,7 +1409,7 @@ pub fn text_layout_cache_clear() {
     TEXT_LAYOUT_CACHE_CLOCK = 0
 }
 
-fn text_align_ordinal(align: TextAlign) -> int {
+@noalloc fn text_align_ordinal(align: TextAlign) -> int {
     match align {
         TextAlign::TopLeft => 0, TextAlign::TopCenter => 1, TextAlign::TopRight => 2,
         TextAlign::Left => 3, TextAlign::Center => 4, TextAlign::Right => 5,
@@ -1419,14 +1419,14 @@ fn text_align_ordinal(align: TextAlign) -> int {
 }
 
 @inline
-fn text_layout_quantize(value: float, scale: float, modulus: int) -> int {
+@noalloc fn text_layout_quantize(value: float, scale: float, modulus: int) -> int {
     let q = floor(value * scale) as int
     return ((q % modulus) + modulus) % modulus
 }
 
 // Packed into 50 bits so it stays an exact integer in a Lua number. A hash, not
 // an identity: lookups confirm the exact fields.
-fn text_layout_variant_key(world_raster: bool, font_id: int, face: int,
+@noalloc fn text_layout_variant_key(world_raster: bool, font_id: int, face: int,
                            align: TextAlign, cap_height: bool,
                            a: float, b: float, c: float) -> int {
     let key = if world_raster { 1 } else { 0 }
@@ -1940,7 +1940,7 @@ fn text_prepare_cache_store(set_key: int, text: string, prepared: string) {
     TEXT_PREPARE_CACHE_ENTRIES += 1
 }
 
-pub @pure fn text_missing_glyph_policy_for_run(sim: bool, max_frames: int,
+pub @pure @noalloc fn text_missing_glyph_policy_for_run(sim: bool, max_frames: int,
                                             perf_seconds: float) -> TextMissingGlyphPolicy {
     if sim || max_frames > 0 || perf_seconds > 0.0 {
         return TextMissingGlyphPolicy::Reject

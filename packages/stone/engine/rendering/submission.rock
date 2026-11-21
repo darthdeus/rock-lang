@@ -187,7 +187,7 @@ pub fn gpu_trace_take() -> [GpuTracedPass] {
 
 // These observers may retain a command after execution returns; callers may
 // reuse unpublished commands only when this is false.
-pub fn gpu_submission_retains_commands() -> bool {
+pub @noalloc fn gpu_submission_retains_commands() -> bool {
     return GPU_TRACE_ON || UI_SUBMISSION_PROBE_ON || ENGINE.show_pipeline_inspector
 }
 

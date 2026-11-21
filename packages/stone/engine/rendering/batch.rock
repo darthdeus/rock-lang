@@ -114,7 +114,7 @@ fn batch_parametric_configure(b: RenderBatch, columns: int, capacity: int) {
     b.parametric_capacity = capacity
 }
 
-fn batch_parametric_begin(b: RenderBatch) {
+@noalloc fn batch_parametric_begin(b: RenderBatch) {
     if b.parametric_frame != RENDER_FRAME {
         b.parametric_count = 0
         b.parametric_frame = RENDER_FRAME
@@ -141,7 +141,7 @@ fn batch_parametric_shader_layout(b: RenderBatch, shader: string) {
     b.parametric_layout_frame = RENDER_FRAME
 }
 
-pub fn batch_parametric_reserve(b: RenderBatch) -> int {
+pub @noalloc fn batch_parametric_reserve(b: RenderBatch) -> int {
     batch_parametric_begin(b)
     let idx = b.parametric_count
     if idx >= b.parametric_capacity {
@@ -151,7 +151,7 @@ pub fn batch_parametric_reserve(b: RenderBatch) -> int {
     return idx
 }
 
-pub fn batch_parametric_write(b: RenderBatch, row: int, column: int, value: Vec4) {
+pub @noalloc fn batch_parametric_write(b: RenderBatch, row: int, column: int, value: Vec4) {
     let data = b.parametric_columns[column]
     let base = row * 4
     data[base] = value.x
@@ -207,13 +207,13 @@ fn restore_after_custom_draw(target: int, depth: DepthMode, blend: BlendMode) {
     set_blend_mode(blend)
 }
 
-// The one growth core for the batch's vertex buffer: pick the final
-// geometric capacity for `requested` first, then allocate, copy old
-// contents and refresh leaf views exactly once, however large the jump.
-// A request that already fits is a no-op. Refuses evicted (parked)
-// storage, which carries capacity 0 and the dummy buffer. Byte-count
-// comes from ffi.sizeof("Vertex") so its layout can evolve without
-// silently mis-copying here.
+// Choose the final geometric capacity first, then allocate, copy the old
+// contents and refresh leaf views once, however large the jump. A request
+// that fits is a no-op.
+//
+// A parked batch has capacity 0 and the dummy buffer. Restore it before
+// growing. Count bytes with ffi.sizeof("Vertex") so changes to the vertex
+// layout are reflected in the copied byte count.
 @nomangle inline(lua) fn __ensure_vertex_capacity(b: RenderBatch, requested: int) = """
     if requested <= b.capacity then return end
     if b.capacity <= 0 then
@@ -299,7 +299,7 @@ fn next_occurrence(base: string) -> int {
     return idx
 }
 
-fn parametric_batch_has_room(batch: RenderBatch) -> bool {
+@noalloc fn parametric_batch_has_room(batch: RenderBatch) -> bool {
     return batch.parametric_frame != RENDER_FRAME
         || batch.parametric_count < batch.parametric_capacity
 }
@@ -351,14 +351,14 @@ fn current_ui_pool() -> RenderBatchPool {
     return if CURRENT_UI_POOL.active() { CURRENT_UI_POOL.pool() } else { UI_RENDER_BATCHES }
 }
 
-fn sampled_texture_fast_handle(texture: SampledTexture) -> int {
+@noalloc fn sampled_texture_fast_handle(texture: SampledTexture) -> int {
     return match texture {
         SampledTexture::Image(image) => image.0,
         SampledTexture::Canvas(canvas) => canvas.handle.0,
     }
 }
 
-pub fn sampled_texture_same(a: SampledTexture, b: SampledTexture) -> bool {
+pub @noalloc fn sampled_texture_same(a: SampledTexture, b: SampledTexture) -> bool {
     return match a {
         SampledTexture::Image(image) => match b {
             SampledTexture::Image(other) => image.0 == other.0,
@@ -371,12 +371,12 @@ pub fn sampled_texture_same(a: SampledTexture, b: SampledTexture) -> bool {
     }
 }
 
-fn sampled_texture_optional_same(a: SampledTexture?, b: SampledTexture?) -> bool {
+@noalloc fn sampled_texture_optional_same(a: SampledTexture?, b: SampledTexture?) -> bool {
     if a == null || b == null { return a == null && b == null }
     return sampled_texture_same(a, b)
 }
 
-fn pipeline_optional_same(a: Pipeline?, b: Pipeline?) -> bool {
+@noalloc fn pipeline_optional_same(a: Pipeline?, b: Pipeline?) -> bool {
     if a == null || b == null { return a == null && b == null }
     return a.shader_name == b.shader_name
         && a.parametric_quads == b.parametric_quads

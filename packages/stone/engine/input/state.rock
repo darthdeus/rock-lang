@@ -188,7 +188,7 @@ pub fn input_note_last_device(event: InputDeviceEvent) {
     if device != null { LAST_INPUT_DEVICE = device }
 }
 
-pub fn input_last_device() -> InputDevice { return LAST_INPUT_DEVICE }
+pub @noalloc fn input_last_device() -> InputDevice { return LAST_INPUT_DEVICE }
 
 // Back to boot input state, so a test does not see another test's holds or latches.
 fn input_reset_state() {
