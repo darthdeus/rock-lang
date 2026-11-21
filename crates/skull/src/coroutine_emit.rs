@@ -10,7 +10,7 @@ use skull_codegen_lua::{
 use skull_mir::code_identity::CodeArtifact;
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
-use skull_transform::{CoroLowered, PreparedCoroutine, STATE};
+use skull_transform::{PreparedCoroutine, STATE};
 
 fn raw<T>(i: Idx<T>) -> u32 {
     i.into_raw().into()
@@ -33,7 +33,36 @@ pub(crate) fn emit_coroutine_with_artifact(
     ),
     CompilerError,
 > {
+    use crate::allocation_report;
+    use crate::mir_emit::noalloc;
+
+    let checked = noalloc::marked(source_func);
+    let frame_site = (allocation_report::enabled() || checked).then(|| {
+        allocation_report::generated_site(
+            plan.base(),
+            source_func.name_span,
+            skull_codegen_lua::EmittedAllocationKind::CoroutineFrame,
+            2,
+            allocation_report::AllocationResultUse::Returned,
+        )
+    });
+    if let Some(site) = &frame_site
+        && checked
+    {
+        return Err(noalloc::reject_generated(source_func, site));
+    }
     let interner = scx.interner();
+    let prepared =
+        skull_transform::prepare_coroutine(ws, interner, source_func, plan, func, &|name| {
+            ctx.mint_synthetic(name.to_string());
+        })?;
+    let constructor = emit_constructor(
+        plan,
+        &prepared,
+        frame_site
+            .as_ref()
+            .filter(|_| allocation_report::activation_enabled()),
+    );
     let PreparedCoroutine {
         mut lowered,
         step_name,
@@ -41,10 +70,8 @@ pub(crate) fn emit_coroutine_with_artifact(
         defers,
         hooks,
         code_artifact,
-        keys,
-    } = skull_transform::prepare_coroutine(ws, interner, source_func, plan, func, &|name| {
-        ctx.mint_synthetic(name.to_string());
-    })?;
+        ..
+    } = prepared;
     let frame = FrameCtx {
         s_cell: lowered.s_cell,
         fields: lowered.frame_plan.fields().iter().copied().collect(),
@@ -90,15 +117,16 @@ pub(crate) fn emit_coroutine_with_artifact(
             out.emit(&nf.name, &nf.name, nf, None);
         }
     }
-    out.lua.push_str(&emit_constructor(
-        plan,
-        &step_name,
-        &lowered,
-        keys.advance.as_deref(),
-        &keys.resume,
-        &keys.defers,
-        &keys.hooks,
-    ));
+    if let Some(site) = frame_site {
+        out.allocation_bodies
+            .push(allocation_report::AllocationBody {
+                emitted_name: plan.base().to_string(),
+                diagnostic_name: source_func.name.to_string(),
+                direct_sites: vec![site],
+                call_edges: Vec::new(),
+            });
+    }
+    out.lua.push_str(&constructor);
     Ok((
         out.lua,
         code_artifact,
@@ -163,6 +191,7 @@ fn emit_coroutine_body(
     let LuaEmission {
         lua,
         allocation_sites,
+        call_sites,
     } = emit_lua_definition(
         ws,
         ctx,
@@ -181,6 +210,7 @@ fn emit_coroutine_body(
         diagnostic_name,
         func,
         allocation_sites,
+        &call_sites,
     );
     CoroutineBodyEmission { lua, body }
 }
@@ -188,14 +218,16 @@ fn emit_coroutine_body(
 /// Construct the frame with step-bound resume/advance CodeRefs.
 fn emit_constructor(
     plan: &CoroutinePlan,
-    step_name: &str,
-    lowered: &CoroLowered,
-    advance_key: Option<&str>,
-    resume_key: &str,
-    defer_keys: &[String],
-    hook_keys: &[String],
+    prepared: &PreparedCoroutine,
+    frame_site: Option<&crate::allocation_report::AllocationSite>,
 ) -> String {
     use std::fmt::Write as _;
+    let PreparedCoroutine {
+        lowered,
+        step_name,
+        keys,
+        ..
+    } = prepared;
     let name = plan.base();
     let channel = plan.channel.as_ref();
     // The frame local keeps its raw cell id, so detached hooks and the step
@@ -221,8 +253,9 @@ fn emit_constructor(
     for pf in &param_fields {
         init.push(format!("{pf} = {pf}"));
     }
-    if !defer_keys.is_empty() {
-        let list: Vec<String> = defer_keys
+    if !keys.defers.is_empty() {
+        let list: Vec<String> = keys
+            .defers
             .iter()
             .map(|key| {
                 format!(
@@ -235,13 +268,20 @@ fn emit_constructor(
         init.push(format!("__defers = {{ {} }}", list.join(", ")));
     }
 
-    for ((kind, _), key) in lowered.hooks.iter().zip(hook_keys) {
+    for ((kind, _), key) in lowered.hooks.iter().zip(&keys.hooks) {
         let field = kind.slot();
         init.push(format!(
             "{field} = __rock_code_slot_ref({})",
             skull_codegen_lua::lua_string(key)
         ));
     }
+
+    let frame_expr = |fields: &str| {
+        crate::allocation_report::instrument_generated(
+            frame_site,
+            format!("setmetatable({{ {fields} }}, __rock_box_mts[\"Coroutine\"])"),
+        )
+    };
 
     let step_call = if lowered.needs_protected_resume {
         format!("__rock_coroutine_resume({step_name}, s, arg)")
@@ -289,11 +329,11 @@ fn emit_constructor(
         let resume = plan.resume();
         let advance_ref = format!(
             "__rock_code_slot_ref({})",
-            skull_codegen_lua::lua_string(advance_key.expect("advance CodeRef"))
+            skull_codegen_lua::lua_string(keys.advance.as_deref().expect("advance CodeRef"))
         );
         let resume_ref = format!(
             "__rock_code_slot_ref({})",
-            skull_codegen_lua::lua_string(resume_key)
+            skull_codegen_lua::lua_string(&keys.resume)
         );
         return format!(
             "function {advance}(s, arg)\n\
@@ -306,21 +346,22 @@ fn emit_constructor(
              \x20 return {box_fields}\n\
              end\n\
              function {name}({paramlist})\n\
-             \x20 local {svar} = setmetatable({{ {fields}, __advance = {advance_ref}, __resume = {resume_ref} }}, __rock_box_mts[\"Coroutine\"])\n\
+             \x20 local {svar} = {frame}\n\
              \x20{clears}\n\
              \x20 return {svar}\n\
              end\n",
             paramlist = param_fields.join(", "),
-            fields = init.join(", "),
-            advance_ref = advance_ref,
-            resume_ref = resume_ref,
+            frame = frame_expr(&format!(
+                "{}, __advance = {advance_ref}, __resume = {resume_ref}",
+                init.join(", ")
+            )),
         );
     }
 
     let resume = plan.resume();
     let resume_ref = format!(
         "__rock_code_slot_ref({})",
-        skull_codegen_lua::lua_string(resume_key)
+        skull_codegen_lua::lua_string(&keys.resume)
     );
     format!(
         "function {resume}(s, arg)\n\
@@ -328,11 +369,10 @@ fn emit_constructor(
          \x20 return {step_call}\n\
          end\n\
          function {name}({paramlist})\n\
-         \x20 local {svar} = setmetatable({{ {fields}, __resume = {resume_ref} }}, __rock_box_mts[\"Coroutine\"])\n\
+         \x20 local {svar} = {frame}\n\
          \x20 return {svar}\n\
          end\n",
         paramlist = param_fields.join(", "),
-        fields = init.join(", "),
-        resume_ref = resume_ref,
+        frame = frame_expr(&format!("{}, __resume = {resume_ref}", init.join(", "))),
     )
 }

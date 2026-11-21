@@ -21,30 +21,6 @@ fn collect_abi_dependencies(mf: &MirFunc, out: &mut FxHashMap<FuncRef, u64>) {
     }
 }
 
-fn emit_named_with_allocation_report(
-    ws: &Workspace,
-    cg: &CodegenCtx,
-    interner: &skull_mir::monoty::MonoInterner,
-    name: &str,
-    mf: &mut MirFunc,
-    inherited_statics: &[skull_mir::mir::StaticCell],
-    bound: Option<&skull_codegen_lua::CalleeBindingPlan>,
-) -> skull_codegen_lua::LuaEmission {
-    skull_codegen_lua::with_constants_baked(cg, mf, |mf| {
-        skull_codegen_lua::emit_lua_definition(
-            ws,
-            cg,
-            interner,
-            name,
-            mf,
-            None,
-            inherited_statics,
-            bound,
-            crate::allocation_report::enabled().then(crate::allocation_report::activation_enabled),
-        )
-    })
-}
-
 /// Coroutines never inline, so a combinator chain leaves a residual call that
 /// a specialized standalone body must serve. The constructor and `__step` are
 /// not the declaration's own body, so they bind no callees.
@@ -292,7 +268,14 @@ fn finish_body_chunk(
         allocation_bodies: &mut allocation_bodies,
         times: &mut times,
     };
-    let mut lua = emitter.emit(name, f.name.as_str(), &mut mf, &[], bind.as_ref());
+    let mut lua = emitter.emit(
+        name,
+        f.name.as_str(),
+        &mut mf,
+        &[],
+        bind.as_ref(),
+        noalloc::marked(f).then_some(f),
+    )?;
     // Read before the nested fns are emitted, which detaches their children.
     let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
     let mut abi_deps = FxHashMap::default();
@@ -355,19 +338,29 @@ impl BodyEmitter<'_> {
         mf: &mut MirFunc,
         inherited_statics: &[skull_mir::mir::StaticCell],
         bound: Option<&skull_codegen_lua::CalleeBindingPlan>,
-    ) -> String {
+        contract: Option<&bone_semantic::hir::Function>,
+    ) -> Result<String, CompilerError> {
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
         let interner = self.scx.interner();
-        let emission = emit_named_with_allocation_report(
-            self.ws,
-            self.cg,
-            interner,
-            name,
-            mf,
-            inherited_statics,
-            bound,
-        );
+        let allocation = (contract.is_some() || crate::allocation_report::enabled())
+            .then(crate::allocation_report::activation_enabled);
+        let emission = skull_codegen_lua::with_constants_baked(self.cg, mf, |mf| {
+            skull_codegen_lua::emit_lua_definition(
+                self.ws,
+                self.cg,
+                interner,
+                name,
+                mf,
+                None,
+                inherited_statics,
+                bound,
+                allocation,
+            )
+        });
+        if let Some(contract) = contract {
+            noalloc::validate(self.ws, contract, mf, &emission)?;
+        }
         if let Some(body) = crate::allocation_report::collect_emitted_body(
             self.ws,
             interner,
@@ -375,6 +368,7 @@ impl BodyEmitter<'_> {
             source,
             mf,
             emission.allocation_sites,
+            &emission.call_sites,
         ) {
             self.allocation_bodies.push(body);
         }
@@ -384,7 +378,7 @@ impl BodyEmitter<'_> {
         let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(emit);
         self.times.regalloc += regalloc;
         self.times.regalloc_work |= regalloc > Duration::ZERO;
-        emission.lua
+        Ok(emission.lua)
     }
 
     pub(crate) fn emit_nested(
@@ -419,7 +413,7 @@ impl BodyEmitter<'_> {
                 chunk.statics.extend(nf.statics.iter().cloned());
             }
             let name = nf.name.as_str();
-            lua.push_str(&self.emit(name, name, nf, inherited_statics, None));
+            lua.push_str(&self.emit(name, name, nf, inherited_statics, None, None)?);
             if chunk.is_some() {
                 let mut children = std::mem::take(&mut nf.nested_fns);
                 let mut next_inherited = inherited_statics.to_vec();

@@ -145,7 +145,9 @@ fn validate_one(
         | "relocates" | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
         | "build_var_expand" | "embed_expand" | "uniform_values" | "scene_type_key"
         | "materialize" | "sort_key_wide" | "sort_key_lt" | "gpu_only" | "scalar_abi"
-        | "inline" | "sim" | "sim_entry" | "sim_render" | "shadow_root" => no_args_at(FnItem),
+        | "inline" | "noalloc" | "sim" | "sim_entry" | "sim_render" | "shadow_root" => {
+            no_args_at(FnItem)
+        }
         // The result is below the place's live length at return.
         "returns_index_below" => check(
             FnItem,

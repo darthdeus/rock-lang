@@ -217,7 +217,13 @@ impl UnitBody<'_> {
             times: &mut out.times,
         };
         // Runs once at chunk load, outside the definitions section the binding pass covers.
-        let mut lua = emitter.emit(self.symbol, self.source_name, mf, &[], None);
+        let mut lua = match emitter.emit(self.symbol, self.source_name, mf, &[], None, None) {
+            Ok(lua) => lua,
+            Err(error) => {
+                out.hard_error = Some(error);
+                return None;
+            }
+        };
         if let Err(e) = emitter.emit_nested(&mut mf.nested_fns, &mf.statics, None, &mut lua) {
             out.hard_error = Some(e);
             return None;

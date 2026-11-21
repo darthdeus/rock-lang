@@ -571,12 +571,35 @@ pub fn build_in(
     roots: Vec<FuncRef>,
     interner: std::sync::Arc<MonoInterner>,
 ) -> InstanceGraph {
+    build_from_roots(ws, roots, interner, true)
+}
+
+/// Plan a set of functions without pulling in unrelated global initializers
+/// and decorator bodies.
+pub fn build_functions_in(
+    ws: &Workspace,
+    roots: Vec<FuncRef>,
+    interner: std::sync::Arc<MonoInterner>,
+) -> InstanceGraph {
+    build_from_roots(ws, roots, interner, false)
+}
+
+fn build_from_roots(
+    ws: &Workspace,
+    roots: Vec<FuncRef>,
+    interner: std::sync::Arc<MonoInterner>,
+    include_always_emitted: bool,
+) -> InstanceGraph {
     let t_build = Instant::now();
     let intern_before = interner.stats();
     let mut g = InstanceGraph::empty_in(interner);
     let t = Instant::now();
     g.seed_roots(ws, canonical_roots(ws, roots));
-    let pending = g.always_emitted_owners(ws);
+    let pending = if include_always_emitted {
+        g.always_emitted_owners(ws)
+    } else {
+        Vec::new()
+    };
     let t_seed = t.elapsed();
     let t = Instant::now();
     let stats = g.run(ws, pending, false);

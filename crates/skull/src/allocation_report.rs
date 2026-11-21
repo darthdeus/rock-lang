@@ -412,6 +412,7 @@ pub(crate) fn collect_emitted_body(
     diagnostic_name: &str,
     func: &MirFunc,
     emitted_sites: Vec<skull_codegen_lua::EmittedAllocationSite>,
+    call_sites: &[Idx<Inst>],
 ) -> Option<AllocationBody> {
     if !enabled() {
         return None;
@@ -454,8 +455,10 @@ pub(crate) fn collect_emitted_body(
     for block in reachable_blocks_from(func, func.entry) {
         let loop_depth = block_loop_depths.get(&block).copied().unwrap_or(0);
         for &iid in &func.blocks[block].insts {
-            let inst = &func.insts[iid];
-            match inst {
+            if call_sites.binary_search(&iid).is_err() {
+                continue;
+            }
+            match &func.insts[iid] {
                 Inst::Call { func: target, .. } | Inst::CallMulti { func: target, .. } => {
                     let callee = &ws.module(target.module).functions[target.func];
                     let target_name = call_target(ws, interner, func, iid, *target);
@@ -499,7 +502,7 @@ pub(crate) fn collect_emitted_body(
     })
 }
 
-fn allocation_aggregate(inst: &Inst) -> (Option<String>, u32) {
+pub(crate) fn allocation_aggregate(inst: &Inst) -> (Option<String>, u32) {
     match inst {
         Inst::MakeStruct { ty, fields } => (
             Some(ty.map_or_else(|| "<anonymous>".to_string(), |ty| ty.to_string())),
@@ -682,6 +685,34 @@ fn call_target(
         Some(instance) => instance.symbol(ws, interner),
         None => skull_codegen_lua::mangle_fn(ws, &ws.module(target.module).functions[target.func]),
     }
+}
+
+pub(crate) fn generated_site(
+    body: &str,
+    span: Span,
+    kind: skull_codegen_lua::EmittedAllocationKind,
+    lua_body_line: u32,
+    result_use: AllocationResultUse,
+) -> AllocationSite {
+    let mut allocation = site(
+        body,
+        Idx::from_raw(lua_body_line.into()),
+        kind.into(),
+        Some(span),
+        None,
+        0,
+    );
+    allocation.lua_body_line = lua_body_line;
+    allocation.result_use = result_use;
+    allocation.result_uses = 1;
+    allocation
+}
+
+pub(crate) fn instrument_generated(site: Option<&AllocationSite>, value: String) -> String {
+    if let Some(site) = site {
+        return format!("(__rock_alloc_site[\"{:016x}\"] and {value})", site.id);
+    }
+    value
 }
 
 fn site(

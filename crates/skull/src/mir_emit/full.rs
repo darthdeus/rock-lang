@@ -516,6 +516,98 @@ fn index_dependents(chunks: &ChunkMap) -> (FxHashMap<FuncRef, FxHashSet<Instance
     (dependents, dependency_edges)
 }
 
+fn check_unpublished_noalloc(
+    ws: &Workspace,
+    graph: &crate::instance_graph::InstanceGraph,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    scx: &skull_mir::lower::ScalarCtx,
+    cg: &CodegenCtx,
+    lua_view: &crate::artifact::ArtifactView,
+) -> Result<(), CompilerError> {
+    let mut roots = Vec::new();
+    let mut rejections = Rejections::default();
+    for module in ws.source_modules() {
+        for (func, f) in module.functions.iter() {
+            if f.backend == bone_semantic::hir::FnBackend::Js || !noalloc::marked(f) {
+                continue;
+            }
+            if f.is_extern || f.inline_body.is_some() {
+                continue;
+            }
+            let fref = FuncRef {
+                module: module.id,
+                func,
+            };
+            if is_generic(f) {
+                for instance in graph
+                    .instances
+                    .range(Instance::base(fref)..)
+                    .take_while(|instance| instance.func == fref)
+                {
+                    if concrete.plan_for(instance).is_some()
+                        && let Err(error) = check_noalloc_instance(ws, cg, scx, concrete, instance)
+                    {
+                        rejections.push(error);
+                    }
+                }
+            } else if !should_emit_via_view(ws, lua_view, fref) {
+                let instance = Instance::base(fref);
+                if concrete.plan_for(&instance).is_none() {
+                    roots.push(fref);
+                } else if let Err(error) = check_noalloc_instance(ws, cg, scx, concrete, &instance)
+                {
+                    rejections.push(error);
+                }
+            }
+        }
+    }
+    if !roots.is_empty() {
+        // Check declarations pruned by this artifact without making them publication roots.
+        let graph = crate::instance_graph::build_functions_in(
+            ws,
+            roots,
+            std::sync::Arc::clone(graph.interner()),
+        );
+        if let Some(error) = graph_rejection_error(ws, &graph) {
+            return Err(error);
+        }
+        let concrete = build_concrete_plans(ws, &graph)?;
+        for instance in &graph.instances {
+            let f = &ws.module(instance.func.module).functions[instance.func.func];
+            if f.backend != bone_semantic::hir::FnBackend::Js
+                && !f.is_extern
+                && f.inline_body.is_none()
+                && noalloc::marked(f)
+                && (is_generic(f) || !should_emit_via_view(ws, lua_view, instance.func))
+                && let Err(error) = check_noalloc_instance(ws, cg, scx, &concrete, instance)
+            {
+                rejections.push(error);
+            }
+        }
+    }
+    rejections.into_result()
+}
+
+fn check_noalloc_instance(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
+    instance: &Instance,
+) -> Result<(), CompilerError> {
+    let name = (!instance.args.is_empty()).then(|| instance.symbol(ws, scx.interner()));
+    emit_body_chunk(
+        ws,
+        cg,
+        scx,
+        concrete,
+        instance,
+        name.as_deref(),
+        &mut worker_inline_cache(None),
+    )
+    .map(|_| ())
+}
+
 pub(super) fn emit_full_build(
     ws: &Workspace,
     user_mid: ModuleId,
@@ -586,6 +678,12 @@ pub(super) fn emit_full_build(
     setup_phases.timed("setup: ABI validation", || {
         reject_abi_param_collisions(ws, &scx, &cg)
     });
+
+    let noalloc_result = if noalloc::required(ws) {
+        check_unpublished_noalloc(ws, &graph, &concrete, &scx, &cg, &lua_view)
+    } else {
+        Ok(())
+    };
 
     let graph_records = (build.lifetime() == CacheLifetime::OneShot).then(|| graph.take_records());
     let spec_queue = SpecQueue::new(ws, &scx, graph_records.as_ref().unwrap_or(&graph), None);
@@ -685,14 +783,21 @@ pub(super) fn emit_full_build(
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let assembly_started = Instant::now();
-    let (mut emit, emitted, unit_reads) = assemble(
+    let assembly = assemble(
         ws,
         &mut cache,
         &mut built_specs,
         build.lifetime(),
         Some(early),
         Some(specs),
-    )?;
+    );
+    if let Err(mut error) = noalloc_result {
+        if let Err(other) = assembly {
+            error = noalloc::merge_diagnostics(error, other);
+        }
+        return Err(error);
+    }
+    let (mut emit, emitted, unit_reads) = assembly?;
     let assembly_window = assembly_started.elapsed();
     let mut phases = setup_phases.0;
     phases.extend(emit.phases);

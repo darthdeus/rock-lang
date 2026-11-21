@@ -1,0 +1,31 @@
+@noalloc extern(lua, "math.abs") fn trusted_abs(n: int) -> int
+
+@noalloc fn bridge_abs(n: int) -> int {
+    return trusted_abs(n)
+}
+
+@test(backends = "lua")
+fn noalloc_trusted_extern() {
+    assert(bridge_abs(-3) == 3)
+}
+
+fn diagnostic(n: int) -> string { return "invalid input {n}" }
+
+@noalloc
+fn fatal_only(n: int, a: bool) -> int {
+    if n < 0 {
+        let message = diagnostic(n)
+        if a { error(message + "!") }
+        error(message)
+    }
+    return bridge_abs(n)
+}
+
+@noalloc
+fn scalar_math(n: float) -> float { return sqrt(n) + floor(n) }
+
+@test(backends = "lua")
+fn noalloc_trap_chain_and_math() {
+    assert(fatal_only(3, false) == 3)
+    assert(scalar_math(9.0) == 12.0)
+}

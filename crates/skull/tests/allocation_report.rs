@@ -59,6 +59,8 @@ fn activation_instruments_manifest_sites_in_rock_and_coroutine_bodies() {
     let emit = emit_mir(
         r#"
 enum Event { Text(string) }
+value FfiRecord { n: int }
+extern(ffi, "native") fn get_record() -> FfiRecord
 global SINK: string = ""
 fn render(items: [string], a: int) { items.push("value={a}") }
 co fn worker(seed: int) -> Coroutine<Event> {
@@ -75,6 +77,17 @@ fn main() {
 "#,
     );
     let text = emit.allocation_report.render_text();
+    for kind in ["coroutine-frame", "ffi-array", "ffi-return-value"] {
+        let row = text
+            .lines()
+            .find(|line| line.contains(&format!("\t{kind}\t")))
+            .expect("generated allocation");
+        let id = row.split_whitespace().next().unwrap();
+        assert!(
+            emit.lua.contains(&format!("__rock_alloc_site[\"{id}\"]")),
+            "{kind}: {id}"
+        );
+    }
     let rows: Vec<Vec<&str>> = text
         .lines()
         .filter(|line| line.contains("\tstring-concat\t"))

@@ -1,0 +1,38 @@
+@noalloc
+fn leaf(n: int) -> int { return n * 2 }
+
+@inline
+fn increment(n: int) -> int { return n + 1 }
+
+@noalloc
+fn checked(n: int) -> int {
+    if n < 0 {
+        let message = "negative: {n}"
+        error(message)
+    }
+    return leaf(increment(n))
+}
+
+@noalloc
+fn generic_scalar<T>(x: T) -> T { return x }
+
+@test
+fn noalloc_math_and_error_path() {
+    assert(checked(2) == 6)
+    assert(generic_scalar(7) == 7)
+}
+
+
+struct FixedCounter { value: int }
+
+@noalloc
+fn add_to_counter(counter: FixedCounter, by: int) {
+    counter.value += by
+}
+
+@test
+fn noalloc_overwrites_existing_field() {
+    let counter = FixedCounter { value: 3 }
+    add_to_counter(counter, 4)
+    assert(counter.value == 7)
+}

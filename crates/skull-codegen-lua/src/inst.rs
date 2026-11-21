@@ -23,7 +23,14 @@ impl Emitter<'_> {
         }
     }
 
+    fn record_call(&self, id: Idx<Inst>) {
+        if let Some(allocation) = self.allocation {
+            allocation.calls.borrow_mut().push(id);
+        }
+    }
+
     pub(crate) fn write_call(&self, out: &mut String, id: Idx<Inst>) {
+        self.record_call(id);
         match &self.func.insts[id] {
             Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
                 if let Some(path) = func_of(self.ws, *func).lua_extern_path {
@@ -124,6 +131,7 @@ impl Emitter<'_> {
         // local copy of it: the body writes no register of the caller, and
         // its result register is assigned by the last statement only.
         let analyzed = InlineLuaBody::new(body.as_str());
+        self.record_call(result);
         let splice_start = out.len();
         let first_site = self.allocation.map_or(0, |a| a.sites.borrow().len());
         let mut locals = String::new();

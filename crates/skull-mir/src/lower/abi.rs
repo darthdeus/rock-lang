@@ -1921,7 +1921,7 @@ impl BackendFnAbiPlan {
             || f.inline_body.is_some()
             || f.is_coroutine
             || f.is_variadic
-            || !f.annotations.is_empty()
+            || f.annotations.iter().any(|a| !a.is_builtin("noalloc"))
             || (!with_defaults && f.num_required != f.param_decls.len()))
     }
 

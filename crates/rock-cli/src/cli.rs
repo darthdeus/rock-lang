@@ -383,6 +383,8 @@ impl Args {
                             .action(clap::ArgAction::SetTrue)
                             .help("Check if files are already formatted (exit 1 if not)."),
                     )
+                } else if command.get_name() == "compile" {
+                    command.alias("build")
                 } else {
                     command
                 }

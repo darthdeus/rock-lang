@@ -105,6 +105,19 @@ fn skip_middle(a: int, unused: int, b: string) -> string { return "{a}{b}" }
 }
 
 #[test]
+fn noalloc_preserves_parameter_demand() {
+    let source = r#"
+value Sample { kept: int, unused: int }
+@noalloc fn read(v: Sample) -> int { return v.kept }
+fn main() { let _ = read(Sample { kept: 1, unused: 2 }) }
+"#;
+    let unannotated = source.replace("@noalloc ", "         ");
+    let plain = full_lua(&ws_with_stdlib(&unannotated));
+    assert_eq!(function_params(&plain, "read").len(), 1);
+    assert_eq!(full_lua(&ws_with_stdlib(source)), plain);
+}
+
+#[test]
 fn a_function_value_keeps_its_unused_parameters() {
     let _inline = inline_off_guard();
     let ws = ws_with_stdlib(

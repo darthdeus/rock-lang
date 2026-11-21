@@ -42,6 +42,7 @@ pub struct FrameCtx {
 pub(crate) struct AllocationEmission<'a> {
     pub(crate) body: &'a str,
     pub(crate) sites: &'a RefCell<Vec<EmittedAllocationSite>>,
+    pub(crate) calls: &'a RefCell<Vec<Idx<Inst>>>,
     pub(crate) instrument: bool,
 }
 
@@ -90,9 +91,11 @@ pub fn emit_lua_definition(
         return LuaEmission {
             lua,
             allocation_sites: Vec::new(),
+            call_sites: Vec::new(),
         };
     };
     let sites = RefCell::new(Vec::new());
+    let calls = RefCell::new(Vec::new());
     // A bound body sits inside a factory, so its header cannot be found by
     // searching for `function <name>`.
     let (lua, header_offset) = emit_body(
@@ -107,6 +110,7 @@ pub fn emit_lua_definition(
         Some(AllocationEmission {
             body: name,
             sites: &sites,
+            calls: &calls,
             instrument,
         }),
     );
@@ -129,9 +133,13 @@ pub fn emit_lua_definition(
     }
     allocation_sites.sort_by_key(|site| site.id);
     allocation_sites.dedup_by_key(|site| site.id);
+    let mut call_sites = calls.into_inner();
+    call_sites.sort_unstable();
+    call_sites.dedup();
     LuaEmission {
         lua,
         allocation_sites,
+        call_sites,
     }
 }
 

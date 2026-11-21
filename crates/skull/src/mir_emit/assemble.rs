@@ -106,24 +106,31 @@ impl Assembly {
         needed_foreign: &FxHashSet<Instance>,
         definitions: &mut DefinitionOrder<'c>,
         facts: &mut Vec<(Ustr, &'c Chunk)>,
-    ) -> Result<(), CompilerError> {
+    ) {
         let fns: Vec<(FuncRef, &bone_semantic::hir::Function)> = source_functions(ws).collect();
+        let allocation =
+            crate::allocation_report::enabled().then(crate::allocation_report::activation_enabled);
         let placements: Vec<Placement<'c>> = {
             use bone_core::prelude::*;
             fns.par_iter()
-                .map(|&(self_ref, f)| place_function(ws, cache, needed_foreign, self_ref, f))
+                .map(|&(self_ref, f)| {
+                    place_function(ws, cache, needed_foreign, self_ref, f, allocation)
+                })
                 .collect()
         };
         for ((_, f), placement) in fns.into_iter().zip(placements) {
             match placement {
                 Placement::None => {}
-                Placement::Text(text) => definitions.push_text(text?),
+                Placement::Text(Ok((text, allocation))) => {
+                    definitions.push_text(text);
+                    self.allocation_bodies.extend(allocation);
+                }
+                Placement::Text(Err(error)) => self.rejections.push(error),
                 Placement::Chunk(emit_def, chunk) => {
                     self.pull_cached_chunk(f, chunk, emit_def, definitions, facts)
                 }
             }
         }
-        Ok(())
     }
 
     fn pull_cached_chunk<'c>(
@@ -291,9 +298,14 @@ fn source_functions(
 
 fn ffi_extern_wrapper(
     ws: &Workspace,
+    self_ref: FuncRef,
     f: &bone_semantic::hir::Function,
     lib: Ustr,
-) -> Result<(String, String, String), CompilerError> {
+    allocation_mode: Option<bool>,
+) -> Result<LuaDefinition, CompilerError> {
+    use crate::allocation_report::{self as report, AllocationResultUse};
+    use skull_codegen_lua::EmittedAllocationKind as Kind;
+
     let nm = mangle_fn(ws, f);
     let params = f
         .param_decls
@@ -301,6 +313,8 @@ fn ffi_extern_wrapper(
         .map(|p| p.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
+    let prologue = default_fill_prologue(ws, self_ref.module, self_ref.func, f);
+    let mut allocation = None;
     let body = match extern_ret(ws, f)? {
         // Returns an owning copy: LuaJIT does not keep the parent
         // array alive through a reference into it.
@@ -311,9 +325,50 @@ fn ffi_extern_wrapper(
             } else {
                 format!("__out, {params}")
             };
+            let checked = noalloc::marked(f);
+            let sites = (checked || allocation_mode.is_some()).then(|| {
+                let line = 2 + prologue.lines().count() as u32;
+                [
+                    report::generated_site(
+                        &nm,
+                        f.name_span,
+                        Kind::FfiArray,
+                        line,
+                        AllocationResultUse::DirectCall,
+                    ),
+                    report::generated_site(
+                        &nm,
+                        f.name_span,
+                        Kind::FfiReturnValue,
+                        line + 2,
+                        AllocationResultUse::Returned,
+                    ),
+                ]
+            });
+            if let Some([array, value]) = &sites
+                && checked
+            {
+                return Err(noalloc::reject_generated(f, array)
+                    .with_siblings([noalloc::reject_generated(f, value)]));
+            }
+            let instrumented = sites.as_ref().filter(|_| allocation_mode == Some(true));
+            let temp = report::instrument_generated(
+                instrumented.map(|sites| &sites[0]),
+                format!("ffi.new(\"{sname}[1]\")"),
+            );
+            let result = report::instrument_generated(
+                instrumented.map(|sites| &sites[1]),
+                format!("ffi.new(\"{sname}\", __out[0])"),
+            );
+            allocation = sites.map(|sites| report::AllocationBody {
+                emitted_name: nm.clone(),
+                diagnostic_name: f.name.to_string(),
+                direct_sites: sites.into(),
+                call_edges: Vec::new(),
+            });
             format!(
-                "  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n{}",
-                skull_codegen_lua::wrapper_return(&format!("ffi.new(\"{sname}\", __out[0])"))
+                "  local __out = {temp}\n  {lib}.{nm}({call_args})\n{}",
+                skull_codegen_lua::wrapper_return(&result)
             )
         }
         // `return <call>` is a `CALLT` into C, which a root trace cannot
@@ -326,7 +381,10 @@ fn ffi_extern_wrapper(
         ExternRet::AsIs => skull_codegen_lua::wrapper_return(&format!("{lib}.{nm}({params})")),
         ExternRet::None => format!("  {lib}.{nm}({params})"),
     };
-    Ok((nm, params, body))
+    Ok((
+        format!("function {nm}({params})\n{prologue}{body}\nend\n"),
+        allocation,
+    ))
 }
 
 fn inline_lua_definition(
@@ -473,9 +531,11 @@ fn emitted_bodies(
     emitted_bodies
 }
 
+type LuaDefinition = (String, Option<crate::allocation_report::AllocationBody>);
+
 enum Placement<'c> {
     None,
-    Text(Result<String, CompilerError>),
+    Text(Result<LuaDefinition, CompilerError>),
     Chunk(bool, Option<Result<(Ustr, &'c Chunk), &'c CompilerError>>),
 }
 
@@ -487,9 +547,8 @@ fn place_function<'c>(
     needed_foreign: &FxHashSet<Instance>,
     self_ref: FuncRef,
     f: &bone_semantic::hir::Function,
+    allocation_mode: Option<bool>,
 ) -> Placement<'c> {
-    let mid = self_ref.module;
-    let fid = self_ref.func;
     if f.backend == bone_semantic::hir::FnBackend::Js {
         return Placement::None;
     }
@@ -500,28 +559,28 @@ fn place_function<'c>(
         };
         // Every extern is checked; only the write is gated, since pruning may change
         // which definitions are emitted and nothing else.
-        let (nm, params, body) = match ffi_extern_wrapper(ws, f, lib) {
-            Ok(wrapper) => wrapper,
-            Err(err) => return Placement::Text(Err(err)),
+        return match ffi_extern_wrapper(ws, self_ref, f, lib, allocation_mode) {
+            Ok(definition) if emit_def => Placement::Text(Ok(definition)),
+            Ok(_) => Placement::None,
+            Err(error) => Placement::Text(Err(error)),
         };
-        if !emit_def {
-            return Placement::None;
-        }
-        let prologue = default_fill_prologue(ws, mid, fid, f);
-        return Placement::Text(Ok(format!(
-            "function {nm}({params})\n{prologue}{body}\nend\n"
-        )));
     }
     if let Some((_, body)) = f.inline_body {
+        if noalloc::marked(f) {
+            return Placement::Text(Err(CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "`@noalloc` function `{}`: cannot verify a verbatim inline Lua body",
+                    f.name
+                ),
+            )));
+        }
         if !emits_foreign_definition(ws, &cache.lua_view, needed_foreign, self_ref) {
             return Placement::None;
         }
-        return Placement::Text(Ok(inline_lua_definition(
-            ws,
-            &cache.scx,
-            self_ref,
-            f,
-            body.as_str(),
+        return Placement::Text(Ok((
+            inline_lua_definition(ws, &cache.scx, self_ref, f, body.as_str()),
+            None,
         )));
     }
     if f.has_iterator_bounds() || is_generic(f) {
@@ -862,7 +921,7 @@ pub(super) fn assemble(
         let unit_demands = std::mem::take(&mut asm.needed_specs);
         let mut order = DefinitionOrder::default();
         let mut facts: Vec<(Ustr, &Chunk)> = Vec::new();
-        asm.push_function_definitions(ws, cache, &needed_foreign, &mut order, &mut facts)?;
+        asm.push_function_definitions(ws, cache, &needed_foreign, &mut order, &mut facts);
         let declared = order.emitted.len();
         let mut demands: Vec<&skull_mir::bound::SpecDemand> = unit_demands
             .iter()

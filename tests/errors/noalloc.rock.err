@@ -1,0 +1,115 @@
+//=== TEST CASE: string_concatenation_Generic ===
+//! expect: string concatenation
+@noalloc fn join(a: string, b: string) -> string { return a + b }
+
+//=== TEST CASE: string_conversion_Generic ===
+//! expect: string conversion
+@noalloc fn stringify(n: int) -> string { return "{n}" }
+
+//=== TEST CASE: record_box_Generic ===
+//! expect: boxes `Item`
+struct Item { value: int }
+@noalloc fn box_item(n: int) -> Item { return Item { value: n } }
+
+//=== TEST CASE: captures_Generic ===
+//! expect: closure captures `x`
+@noalloc fn capture(x: int) -> fn() -> int { return () => x }
+
+//=== TEST CASE: variadic_pack_Generic ===
+//! expect: calls non-@noalloc `pack_variadic`
+@inline inline(lua) fn pack_variadic(args: ...any) -> any = "return {...}"
+@noalloc fn collect(x: int) -> any { return pack_variadic(x) }
+
+//=== TEST CASE: vec_Generic ===
+//! expect: constructs a Vec
+@noalloc fn collect(x: int) -> [int] { return [x] }
+
+//=== TEST CASE: inline_rock_Generic ===
+//! expect: string concatenation
+@inline fn join(a: string, b: string) -> string { return a + b }
+@noalloc fn caller(a: string, b: string) -> string { return join(a, b) }
+
+//=== TEST CASE: out_of_line_Generic ===
+//! expect: calls non-@noalloc `plain`
+fn plain(a: int) -> int { return a + 1 }
+@noalloc fn caller(a: int) -> int { return plain(a) }
+
+//=== TEST CASE: indirect_call_Generic ===
+//! expect: calls an indirect function value
+@noalloc fn caller(f: fn(int) -> int, a: int) -> int { return f(a) }
+
+//=== TEST CASE: opaque_lua_Generic ===
+//! expect: calls non-@noalloc `opaque`
+@inline inline(lua) fn opaque(a: int) -> int = "return a + 1"
+@noalloc fn caller(a: int) -> int { return opaque(a) }
+
+//=== TEST CASE: extern_Generic ===
+//! expect: calls non-@noalloc `opaque`
+extern(lua) fn opaque(a: int) -> int
+@noalloc fn caller(a: int) -> int { return opaque(a) }
+
+//=== TEST CASE: shared_success_path_Generic ===
+//! expect: string concatenation
+@noalloc fn check(a: string, b: string, fail: bool) -> string {
+    let s = a + b
+    if fail { error(s) }
+    return s
+}
+
+//=== TEST CASE: generic_instance_Generic ===
+//! expect: constructs a Vec
+@noalloc fn wrap<T>(x: T) -> [T] { return [x] }
+fn main() { let _ = wrap(1) }
+
+//=== TEST CASE: annotation_on_inline_lua_Generic ===
+//! expect: cannot verify a verbatim inline Lua body
+@noalloc inline(lua) fn opaque() -> any = "return {}"
+
+//=== TEST CASE: annotation_on_struct_Generic ===
+//! expect: annotation `@noalloc` is not allowed on a struct
+@noalloc struct Item { value: int }
+
+//=== TEST CASE: coroutine_frame_Generic ===
+//! expect: constructs a coroutine frame
+@noalloc co fn worker(n: int) -> Coroutine<int> { yield n }
+
+//=== TEST CASE: tuple_table_Generic ===
+//! expect: constructs a tuple table
+@noalloc fn pair(n: int) -> any { return (n, n + 1) }
+
+//=== TEST CASE: runtime_format_Generic ===
+//! expect: string formatting
+@noalloc fn fmt(n: int) -> string { return "{n:04d}" }
+
+//=== TEST CASE: extern_wrapper_Generic ===
+//! expect: boxes an FFI return value
+value R { n: int }
+@noalloc extern(ffi, "native") fn allocate_r() -> R
+
+//=== TEST CASE: independent_sites_Generic ===
+//! expect: function `allocates`: string concatenation
+//! expect: function `allocates`: calls non-@noalloc `plain`
+//! expect: function `generic_box`: constructs a Vec
+fn plain(a: string) -> string { return a }
+@noalloc fn allocates(a: string, b: string) -> string { return plain(a + b) }
+@noalloc fn generic_box<T>(x: T) -> [T] { return [x] }
+fn main() { let _ = generic_box(2) }
+
+//=== TEST CASE: allocation_in_inline_only_body_Generic ===
+//! expect: function `box_value`: constructs a Vec
+@noalloc @inline fn box_value<T>(a: T) -> [T] { return [a] }
+fn main() { let _ = box_value(1) }
+
+
+//=== TEST CASE: nullable_field_growth_Generic ===
+//! expect: may grow a container table
+struct OptionalField { value: int? = null }
+@noalloc fn fill_field(record: OptionalField, n: int) { record.value = n }
+
+//=== TEST CASE: map_growth_Generic ===
+//! expect: may grow a container table
+@noalloc fn put(m: Map<int, int>, key: int) { m[key] = 1 }
+
+//=== TEST CASE: native_buffer_Generic ===
+//! expect: allocates an FFI array
+@noalloc fn alloc(n: int) -> NativeBuffer<float> { return native_buffer_alloc(n) }

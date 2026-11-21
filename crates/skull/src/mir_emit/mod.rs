@@ -24,6 +24,7 @@ mod decorators;
 mod full;
 mod global_init;
 mod instances;
+pub mod noalloc;
 mod overlay;
 pub(crate) mod par;
 mod roots;

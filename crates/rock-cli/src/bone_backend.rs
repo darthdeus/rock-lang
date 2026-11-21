@@ -128,11 +128,14 @@ pub(crate) fn bone_session_for_emission(
     Ok(session)
 }
 
-fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), Vec<CompilerError>>, BonePhaseTimes) {
+fn bone_pipeline_timed(
+    src: &str,
+    path: &str,
+) -> (std::result::Result<(), Vec<CompilerError>>, BonePhaseTimes) {
     let mut times = BonePhaseTimes::default();
 
     let t = Instant::now();
-    let module = match skull_parser::parse_module(src, ustr::Ustr::from("<parse_rock>")) {
+    let module = match skull_parser::parse_module(src, ustr::Ustr::from(path)) {
         Ok(m) => m,
         Err(e) => {
             times.parse = t.elapsed();
@@ -142,7 +145,12 @@ fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), Vec<CompilerError>
     times.parse = t.elapsed();
 
     let t = Instant::now();
-    let res = check_with_stdlib([module]).map(|_| ());
+    let file = module.file;
+    let res = check_with_stdlib([module]).and_then(|ws| {
+        check_noalloc(ws, file, None)
+            .map(|_| ())
+            .map_err(|error| vec![error])
+    });
     times.semantic = t.elapsed();
     (res, times)
 }
@@ -222,19 +230,6 @@ pub fn entry_module_id(
     file: ustr::Ustr,
 ) -> bone_semantic::prelude::ModuleId {
     ws.module_ids[&file]
-}
-
-pub(crate) fn bone_workspace_timed(
-    sources: &SourceFiles,
-) -> (
-    std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>>,
-    BonePhaseTimes,
-) {
-    let (res, mut times) = workspace_frontend_timed(sources);
-    if !times.semantic_pass_called {
-        times.semantic = Duration::ZERO;
-    }
-    (res.map(|(workspace, _entry_file)| workspace), times)
 }
 
 pub(crate) fn workspace_frontend_timed(
@@ -335,7 +330,7 @@ pub(crate) fn bone_check_single(path: &str, iters: usize) -> Result<()> {
     let mut agg = BonePhaseTimes::default();
     let mut first_err: Option<Vec<CompilerError>> = None;
     for _ in 0..iters {
-        let (res, times) = bone_pipeline_timed(&src);
+        let (res, times) = bone_pipeline_timed(&src, path);
         agg.add(&times);
         if first_err.is_none() {
             if let Err(errs) = res {
@@ -347,7 +342,7 @@ pub(crate) fn bone_check_single(path: &str, iters: usize) -> Result<()> {
     if let Some(errs) = first_err {
         eprintln!(
             "{}",
-            render_errs(&crate::common::single_source("<parse_rock>", &src), &errs)
+            render_errs(&crate::common::single_source(path, &src), &errs)
         );
         crate::invocation_log::exit(1);
     }
@@ -365,17 +360,23 @@ fn bone_check_project(path: &str, iters: usize) -> Result<()> {
     let mut last_ws: Option<bone_semantic::inference::Workspace> = None;
     let mut first_err: Option<Vec<CompilerError>> = None;
     for _ in 0..iters {
-        let (res, times) = bone_workspace_timed(&sources);
+        let (res, mut times) = workspace_frontend_timed(&sources);
+        if !times.semantic_pass_called {
+            times.semantic = Duration::ZERO;
+        }
         agg.add(&times);
         match res {
-            Ok(ws) => {
-                if first_err.is_none() {
-                    let errs = body_errors(&ws);
-                    if !errs.is_empty() {
-                        first_err = Some(errs);
+            Ok((ws, file)) => {
+                let mut errs = body_errors(&ws);
+                if errs.is_empty() {
+                    match check_noalloc(ws, file, Some(path)) {
+                        Ok(ws) => last_ws = Some(ws),
+                        Err(error) => errs.push(error),
                     }
                 }
-                last_ws = Some(ws);
+                if first_err.is_none() && !errs.is_empty() {
+                    first_err = Some(errs);
+                }
             }
             Err(errs) => {
                 if first_err.is_none() {
@@ -400,6 +401,24 @@ fn bone_check_project(path: &str, iters: usize) -> Result<()> {
         report_phase_timing(path, &agg, iters);
     }
     Ok(())
+}
+
+fn check_noalloc(
+    mut ws: bone_semantic::inference::Workspace,
+    file: ustr::Ustr,
+    project_root: Option<&str>,
+) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
+    if skull::mir_emit::noalloc::required(&ws) {
+        if let Some(root) = project_root {
+            crate::comptime::stamp_workspace(&mut ws, Path::new(root)).map_err(|error| {
+                CompilerError::new_no_location(format!("build var resolution failed: {error:#}"))
+            })?;
+        }
+        skull::mir_emit::FullEmit::one_shot()
+            .project_root(project_root)
+            .run(&ws, entry_module_id(&ws, file))?;
+    }
+    Ok(ws)
 }
 
 fn bone_loc_stats(sources: &SourceFiles) -> rock_core::CompileStats {

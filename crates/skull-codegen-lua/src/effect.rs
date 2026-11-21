@@ -20,9 +20,92 @@ impl Emitter<'_> {
         c.never_nil || cell_never_nil(self.ws, c.ty)
     }
 
+    fn effect_allocation(&self, inst: &Inst) -> Option<EmittedAllocationKind> {
+        self.allocation?;
+        let grows = match inst {
+            Inst::ArrayPush { .. }
+            | Inst::StoreIndex {
+                kind:
+                    ContainerKind::Map
+                    | ContainerKind::Vec
+                    | ContainerKind::VecInBounds
+                    | ContainerKind::VecColumn,
+                ..
+            } => true,
+            Inst::StoreIndex {
+                base,
+                index,
+                kind: ContainerKind::Record,
+                ..
+            } => match self.func.insts[*index] {
+                Inst::Const(Lit::Str(field)) => {
+                    !cell_never_nil(self.ws, self.field_type(*base, field))
+                }
+                _ => true,
+            },
+            Inst::StoreField { base, field, value } => {
+                // A guarded literal nil store only overwrites an existing slot.
+                let guarded_clear = matches!(self.func.insts[*value], Inst::Const(Lit::Nil))
+                    && self.opnd_is_plain(*base);
+                !guarded_clear && !cell_never_nil(self.ws, self.field_type(*base, *field))
+            }
+            _ => false,
+        };
+        grows.then_some(EmittedAllocationKind::ContainerGrowth)
+    }
+
+    fn field_type(&self, base: Idx<Inst>, field: ustr::Ustr) -> Option<bone_core::prelude::TyId> {
+        use bone_core::hir::{TypeCtor, TypeExpr};
+        use bone_core::prelude::TyId;
+
+        let ty = match self.func.insts[base] {
+            Inst::Load(cell) => self.func.cells[cell]
+                .ty
+                .filter(|ty| matches!(ty, TyId::Static(..)))
+                .or_else(|| {
+                    if !self.func.params.contains(&cell) {
+                        return None;
+                    }
+                    let name = self.func.cells[cell].name?;
+                    let owner = self.func.abi_plan.as_ref()?.subject.func;
+                    let f = func_of(self.ws, owner);
+                    f.param_decls.iter().find(|p| p.name == name).map(|p| p.ty)
+                }),
+            Inst::Global(name) => self.ws.globals_by_name.get(&name).copied(),
+            _ => self
+                .func
+                .field_projection(base)
+                .and_then(|(base, field)| self.field_type(base, field)),
+        };
+        let TyId::Static(module, index) = ty? else {
+            return None;
+        };
+        let arena = &self.ws.module(module).ty_arena;
+        let mut index = index;
+        loop {
+            match arena[index] {
+                TypeExpr::App {
+                    ctor: TypeCtor::Ref,
+                    params,
+                } => index = params.into_iter().next()?,
+                TypeExpr::App {
+                    ctor: TypeCtor::Nominal(name),
+                    ..
+                } => {
+                    let owner = self.ws.nominals.struct_id(name)?;
+                    return self.ws.module(owner.module).structs[owner.def]
+                        .fields
+                        .iter()
+                        .find(|f| f.name == field)
+                        .map(|f| f.storage_ty);
+                }
+                _ => return None,
+            }
+        }
+    }
+
     pub(crate) fn write_effect(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
-        if let Some(site) =
-            self.record_allocation_site(id, emitted_effect_allocation_kind(inst), out.len())
+        if let Some(site) = self.record_allocation_site(id, self.effect_allocation(inst), out.len())
         {
             out.push_str(" __rock_alloc_hit_effect(\"");
             write!(out, "{:016x}", site.id).unwrap();

@@ -169,6 +169,33 @@ live length of the vector that place holds when the call returns, and
 `@returns_nonneg`. The standard library's column-map slot helpers carry
 them; they are promises of the same kind as the body itself.
 
+## Allocation guarantees
+
+Mark a function `@noalloc` to require its emitted Lua to be allocation-free
+on paths that can continue normally. A guard can allocate its error message.
+
+```rock
+@noalloc fn index_offset(index: int, stride: int) -> int {
+    if index < 0 { error("negative index: {index}") }
+    return index * stride
+}
+```
+
+The check uses emitted allocation sites, including boxes, collection
+construction and growth, capturing closures, and string building. It checks
+inlined Rock calls in the caller and reports each offending site. An
+out-of-line call must target an `@noalloc` function or a known non-allocating
+compiler intrinsic. Indirect calls cannot establish that guarantee.
+Allocations on paths that always trap are allowed. Generic functions are
+checked at their concrete instantiations.
+
+An `extern` marked `@noalloc` promises that its implementation and ABI
+return conversion do not allocate. The compiler rejects known allocating
+wrappers such as FFI returns by value. Verbatim `inline(lua)` bodies are
+opaque to the check. The compiler recognizes a small set of stdlib scalar
+math intrinsics by their Lua bodies. JS accepts the annotation. The guarantee
+is checked by the Lua backend.
+
 ## Macros
 
 Macros expand at call sites and can accept syntax fragments. Arguments are

@@ -70,7 +70,9 @@ pub enum EmittedAllocationKind {
     EnumConstruction,
     DynamicEnumConstruction,
     ClosureEnvironment,
+    CoroutineFrame,
     FfiArray,
+    FfiReturnValue,
     FfiView,
     ContainerGrowth,
 }
@@ -91,7 +93,9 @@ impl EmittedAllocationKind {
             Self::EnumConstruction => "enum-construction",
             Self::DynamicEnumConstruction => "dynamic-enum-construction",
             Self::ClosureEnvironment => "closure-environment",
+            Self::CoroutineFrame => "coroutine-frame",
             Self::FfiArray => "ffi-array",
+            Self::FfiReturnValue => "ffi-return-value",
             Self::FfiView => "ffi-view",
             Self::ContainerGrowth => "container-growth",
         }
@@ -112,6 +116,7 @@ pub struct EmittedAllocationSite {
 pub struct LuaEmission {
     pub lua: String,
     pub allocation_sites: Vec<EmittedAllocationSite>,
+    pub call_sites: Vec<Idx<Inst>>,
 }
 
 fn checked_u32_constant(func: &MirFunc, x: Idx<Inst>) -> Option<f64> {
@@ -221,20 +226,13 @@ fn emitted_value_allocation_kind(inst: &Inst) -> Option<EmittedAllocationKind> {
         Inst::MakeEnumDyn { .. } => EmittedAllocationKind::DynamicEnumConstruction,
         Inst::MakeEnv { .. } => EmittedAllocationKind::ClosureEnvironment,
         Inst::FfiNewArray { .. } => EmittedAllocationKind::FfiArray,
-        Inst::FfiViewCast { .. } => EmittedAllocationKind::FfiView,
+        Inst::FfiViewCast { .. }
+        | Inst::Index {
+            kind: ContainerKind::NativeBufferValue(_),
+            ..
+        } => EmittedAllocationKind::FfiView,
         _ => return None,
     })
-}
-
-fn emitted_effect_allocation_kind(inst: &Inst) -> Option<EmittedAllocationKind> {
-    match inst {
-        Inst::ArrayPush { .. }
-        | Inst::StoreIndex {
-            kind: ContainerKind::Map,
-            ..
-        } => Some(EmittedAllocationKind::ContainerGrowth),
-        _ => None,
-    }
 }
 
 fn allocation_site_id(
