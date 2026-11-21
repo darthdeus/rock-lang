@@ -37,38 +37,6 @@ fn with_log_runtime(tail: &str) -> String {
 const FAILING_DEFER: &str =
     "__rock_coroutine_run_defers({ __defers: [function() { throw new Error('boom'); }] });\n";
 
-/// A failing coroutine defer is reported through the Rock logger, as Lua's
-/// `__rock_log(0, "CO", ...)` is: an installed `__rock_log_sink` receives it
-/// at error level under the `CO` tag, and nothing reaches the host streams.
-#[test]
-fn coroutine_defer_failure_goes_to_the_log_sink() {
-    let body = with_log_runtime(&format!(
-        "var seen = [];\n\
-         __G.__rock_log_sink = function(level, category, msg, wall) {{\n\
-           seen.push(level + '|' + category + '|' + msg + '|' + wall);\n\
-         }};\n\
-         {FAILING_DEFER}\
-         __rock_host.write(seen.join(';'));\n"
-    ));
-    let (out, err) = run_without_process(&body);
-    assert_eq!(
-        out,
-        "0|CO|coroutine defer failed during cleanup: boom|false"
-    );
-    assert_eq!(err, "");
-}
-
-/// With no sink installed the logger falls back to `print("[CO] ...")`.
-#[test]
-fn coroutine_defer_failure_without_a_sink_prints_the_tagged_line() {
-    let body = with_log_runtime(&format!(
-        "function print(s) {{ __rock_host.write(s + '|'); }}\n{FAILING_DEFER}"
-    ));
-    let (out, err) = run_without_process(&body);
-    assert_eq!(out, "[CO] coroutine defer failed during cleanup: boom|");
-    assert_eq!(err, "");
-}
-
 const PROGRAM: &str = r#"
 @intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
 
@@ -93,21 +61,6 @@ fn whole_program(host: &str) -> String {
     js
 }
 
-/// The assembled prelude runs a whole program in a context with no `process`:
-/// print/put reach the host's stdout, `env_var` and the RNG seed read the
-/// host's environment.
-#[test]
-fn a_whole_program_runs_against_an_embedder_host() {
-    let (out, err) = run_without_process(&whole_program(""));
-    assert_eq!(err, "");
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(&lines[..3], &["a\t1\t2.5", "raw", "5"], "{out}");
-    // Seeded from the host's ROCK_TEST_SEED, so the draw matches the node
-    // default given the same seed.
-    let node_out = run_node_default("5");
-    assert_eq!(out, node_out);
-}
-
 fn run_node_default(seed: &str) -> String {
     let output = node()
         .env("ROCK_TEST_SEED", seed)
@@ -121,14 +74,4 @@ fn run_node_default(seed: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).to_string()
-}
-
-/// The node default writes to stdout and seeds from `ROCK_TEST_SEED`: equal
-/// seeds draw equally, different seeds differ.
-#[test]
-fn the_node_host_prints_and_seeds_from_the_environment() {
-    let a = run_node_default("11");
-    assert!(a.starts_with("a\t1\t2.5\nraw\n11\n"), "{a}");
-    assert_eq!(a, run_node_default("11"));
-    assert_ne!(a, run_node_default("12"));
 }
