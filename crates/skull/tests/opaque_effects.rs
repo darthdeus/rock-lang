@@ -1,6 +1,21 @@
 use crate::common::{emit_module, run_luajit};
 
-const SOURCE: &str = r#"
+const CALLBACKS: &str = r#"
+@nomangle fn bounds_probe_vec() -> [int] { [7] }
+@nomangle fn bounds_probe_clear(xs: [int]) { xs.clear() }
+
+@nomangle fn after_log_level(xs: [int]) -> int {
+    if xs.len() <= 0 { return -1 }
+    let level = log_get_level()
+    if level < 0 { return -2 }
+    return xs[0]
+}
+@nomangle fn after_log_once(xs: [int]) -> int {
+    if xs.len() <= 0 { return -1 }
+    log_once("effects", "message", "effect-test")
+    return xs[0]
+}
+
 fn stringify_external(value: any) -> string { return tostring(value) }
 
 @nomangle fn after_tostring(xs: [int], value: any) -> int {
@@ -29,153 +44,14 @@ fn stringify_external(value: any) -> string { return tostring(value) }
     if tag == null { return -2 }
     return xs[0]
 }
-"#;
 
-#[test]
-fn host_logging_callbacks_invalidate_vector_bounds() {
-    let lua = emit_module(
-        r#"
-@nomangle fn after_log_level(xs: [int]) -> int {
-    if xs.len() <= 0 { return -1 }
-    let level = log_get_level()
-    if level < 0 { return -2 }
-    return xs[0]
-}
-@nomangle fn after_log_once(xs: [int]) -> int {
-    if xs.len() <= 0 { return -1 }
-    log_once("effects", "message", "effect-test")
-    return xs[0]
-}
-"#,
-    );
-    let output = run_luajit(&format!(
-        r#"{lua}
-for _, case in ipairs({{
-    {{after_log_level, '__rock_log_level_source'}},
-    {{after_log_once, '__rock_log_sink'}},
-}}) do
-    local xs = {{len = 1, _data = {{7}}}}
-    local calls = 0
-    _G[case[2]] = function()
-        calls = calls + 1
-        xs.len, xs._data[1] = 0, nil
-        return 2
-    end
-    local ok, err = pcall(case[1], xs)
-    _G[case[2]] = nil
-    assert(calls == 1, 'logging must invoke the callback once')
-    assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
-end
-print('ok')
-"#
-    ));
-    assert_eq!(output.trim(), "ok");
-}
-
-#[test]
-fn external_string_conversion_invalidates_vector_bounds() {
-    let lua = emit_module(SOURCE);
-    let output = run_luajit(&format!(
-        r#"{lua}
-for _, f in ipairs({{after_tostring, after_stringify_helper, after_print}}) do
-    local xs = {{len = 1, _data = {{7}}}}
-    local calls = 0
-    local value = setmetatable({{}}, {{__tostring = function()
-        calls = calls + 1
-        xs.len, xs._data[1] = 0, nil
-        return 'converted'
-    end}})
-    local ok, err = pcall(f, xs, value)
-    assert(calls == 1, 'string conversion must invoke the callback once')
-    assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
-end
-print('ok')
-"#
-    ));
-    assert_eq!(output.trim(), "converted\nok");
-}
-
-#[test]
-fn external_type_tag_lookup_invalidates_vector_bounds() {
-    let lua = emit_module(SOURCE);
-    let output = run_luajit(&format!(
-        r#"{lua}
-local xs = {{len = 1, _data = {{7}}}}
-local value = setmetatable({{}}, {{__index = function(_, key)
-    assert(key == '__ty')
-    xs.len, xs._data[1] = 0, nil
-    return 'Foreign'
-end}})
-local ok, err = pcall(after_type_tag, xs, value)
-assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
-print('ok')
-"#
-    ));
-    assert_eq!(output.trim(), "ok");
-}
-
-#[test]
-fn checked_native_store_invalidates_element_value_facts() {
-    let lua = emit_module(
-        r#"
-@nomangle fn changed_native_index(xs: [int], indices: NativeBuffer<int>) -> int {
-    if indices[0] < 0 || indices[0] >= xs.len() { return -1 }
-    __nb_checked_set(indices, 0, 99)
-    return xs[indices[0]]
-}
-@nomangle fn native_store_case() -> int {
-    let indices = native_buffer_int(1)
-    indices[0] = 1
-    return changed_native_index([11, 22], indices)
-}
-"#,
-    );
-    assert_eq!(
-        run_luajit(&format!(
-            r#"{lua}
-local ok, err = pcall(native_store_case)
-assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
-print('ok')
-"#
-        )),
-        "ok"
-    );
-}
-
-#[test]
-fn foreign_equality_helper_invalidates_vector_bounds() {
-    let lua = emit_module(
-        r#"
 fn external_equal(a: any, b: any) -> bool { return a == b }
 @nomangle fn after_equal(xs: [int], a: any, b: any) -> int {
     if xs.len() <= 0 { return -1 }
     if external_equal(a, b) { return xs[0] }
     return -2
 }
-"#,
-    );
-    let output = run_luajit(&format!(
-        r#"{lua}
-local xs = {{len = 1, _data = {{7}}}}
-local calls = 0
-local mt = {{__eq = function()
-    calls = calls + 1
-    xs.len, xs._data[1] = 0, nil
-    return true
-end}}
-local ok, err = pcall(after_equal, xs, setmetatable({{}}, mt), setmetatable({{}}, mt))
-assert(calls == 1, 'equality must invoke the callback once')
-assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
-print('ok')
-"#
-    ));
-    assert_eq!(output.trim(), "ok");
-}
 
-#[test]
-fn foreign_record_callbacks_invalidate_vector_bounds() {
-    let lua = emit_module(
-        r#"
 struct ExternalRecord { value: int? }
 fn read_external(record: ExternalRecord) -> int? { return record.value }
 fn write_external(record: ExternalRecord) { record.value = 1 }
@@ -235,41 +111,92 @@ struct ExternalHolder { embed child: EmbeddedValue }
     record.child.n = 1
     return xs[0]
 }
-"#,
-    );
-    let output = run_luajit(&format!(
-        r#"{lua}
-for _, case in ipairs({{
-    {{after_record_read, '__index'}},
-    {{after_record_write, '__newindex'}},
-    {{after_record_read_helper, '__index'}},
-    {{after_record_write_helper, '__newindex'}},
-    {{after_unused_record_read, '__index'}},
-    {{after_safe_record_read, '__index'}},
-    {{after_safe_record_write, '__newindex'}},
-    {{after_embedded_read, '__index', 'child.n'}},
-    {{after_embedded_write, '__newindex', 'child.n'}},
-}}) do
-    local xs = {{len = 1, _data = {{7}}}}
-    local calls = 0
-    local record = setmetatable({{}}, {{[case[2]] = function(_, key)
-        assert(key == (case[3] or 'value'), key)
+"#;
+
+#[test]
+fn opaque_callbacks_invalidate_vector_bounds() {
+    let lua = emit_module(CALLBACKS);
+    let probe = r#"
+for _, case in ipairs({
+    {'after_log_level', '__rock_log_level_source', 2, global = true},
+    {'after_log_once', '__rock_log_sink', 2, global = true},
+    {'after_tostring', '__tostring', 'converted'},
+    {'after_stringify_helper', '__tostring', 'converted'},
+    {'after_print', '__tostring', 'converted'},
+    {'after_type_tag', '__index', 'Foreign', key = '__ty'},
+    {'after_equal', '__eq', true},
+    {'after_record_read', '__index', 1, key = 'value'},
+    {'after_record_write', '__newindex', 1, key = 'value'},
+    {'after_record_read_helper', '__index', 1, key = 'value'},
+    {'after_record_write_helper', '__newindex', 1, key = 'value'},
+    {'after_unused_record_read', '__index', 1, key = 'value'},
+    {'after_safe_record_read', '__index', 1, key = 'value'},
+    {'after_safe_record_write', '__newindex', 1, key = 'value'},
+    {'after_embedded_read', '__index', 1, key = 'child.n'},
+    {'after_embedded_write', '__newindex', 1, key = 'child.n'},
+}) do
+    local name, hook, result = unpack(case)
+    local fn = assert(_G[name], name)
+    local xs, calls = bounds_probe_vec(), 0
+    local function callback(_, key)
+        assert(not case.key or key == case.key, key)
         calls = calls + 1
-        xs.len, xs._data[1] = 0, nil
-        return 1
-    end}})
-    local ok, err = pcall(case[1], xs, record)
-    assert(calls == 1, 'field callback must run exactly once: ' .. calls)
-    assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
+        bounds_probe_clear(xs)
+        return result
+    end
+    local ok, err
+    if case.global then
+        _G[hook] = callback
+        ok, err = pcall(fn, xs)
+        _G[hook] = nil
+    else
+        local mt = {[hook] = callback}
+        local receiver = setmetatable({}, mt)
+        if hook == '__eq' then
+            ok, err = pcall(fn, xs, receiver, setmetatable({}, mt))
+        else
+            ok, err = pcall(fn, xs, receiver)
+        end
+    end
+    assert(calls == 1, name .. ' callback count: ' .. calls)
+    assert(not ok and tostring(err):find('Vec index out of bounds', 1, true),
+        name .. ': ' .. tostring(err))
 end
 local reads = 0
-local record = setmetatable({{}}, {{__index = function()
+local record = setmetatable({}, {__index = function()
     reads = reads + 1
     return reads
-end}})
+end})
 assert(repeated_record_read(record) == 12 and reads == 2, 'reads must not be combined')
 print('ok')
+"#;
+    assert_eq!(run_luajit(&format!("{lua}{probe}")), "converted\nok");
+}
+
+#[test]
+fn checked_native_store_invalidates_element_value_facts() {
+    let lua = emit_module(
+        r#"
+@nomangle fn changed_native_index(xs: [int], indices: NativeBuffer<int>) -> int {
+    if indices[0] < 0 || indices[0] >= xs.len() { return -1 }
+    __nb_checked_set(indices, 0, 99)
+    return xs[indices[0]]
+}
+@nomangle fn native_store_case() -> int {
+    let indices = native_buffer_int(1)
+    indices[0] = 1
+    return changed_native_index([11, 22], indices)
+}
+"#,
+    );
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+local ok, err = pcall(native_store_case)
+assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
+print('ok')
 "#
-    ));
-    assert_eq!(output.trim(), "ok");
+        )),
+        "ok"
+    );
 }
