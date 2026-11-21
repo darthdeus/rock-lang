@@ -1,12 +1,7 @@
 //! macOS vsync without SDL's display-link wait.
 //!
-//! SDL2's Cocoa swap (`Cocoa_GL_SwapWindow` in SDL_cocoaopengl.m, unchanged
-//! through the SDL2 branch head) waits for a CVDisplayLink tick on a condition
-//! variable with no timeout. The link stops ticking while every display
-//! sleeps, so a vsynced game stops in its swap until a display wakes, and a
-//! game driven over SSH or by an agent never returns. SDL's own vsync is only
-//! that wait followed by an interval-0 flush, so Stone keeps SDL's interval at
-//! 0 and waits for the tick here with a timeout instead.
+//! SDL2's Cocoa swap can wait indefinitely when every display sleeps.
+//! Keep its swap interval at 0 and wait for CVDisplayLink with a timeout.
 
 use std::ffi::c_void;
 use std::sync::{Condvar, Mutex};

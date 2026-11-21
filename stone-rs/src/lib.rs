@@ -824,7 +824,6 @@ struct PendingShow {
     activate: bool,
 }
 
-/// Opaque window handle - wraps SDL2 window + GL context + glow
 pub struct StoneWindow {
     _sdl_context: sdl2::Sdl,
     _video: sdl2::VideoSubsystem,
@@ -860,7 +859,6 @@ fn apply_gl_context_request(gl_attr: &sdl2::video::gl_attr::GLAttr<'_>, request:
     gl_attr.set_context_version(request.major, request.minor);
 }
 
-/// Event types
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoneEventType {
@@ -882,7 +880,6 @@ pub enum StoneEventType {
 
 const STONE_TEXT_INPUT_BYTES: usize = 32;
 
-/// Event structure
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct StoneEvent {
@@ -1027,7 +1024,6 @@ fn stone_event_from_sdl(event: &Event) -> Option<StoneEvent> {
     Some(translated)
 }
 
-/// Graphics statistics
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GraphicsStats {
@@ -1172,32 +1168,20 @@ pub extern "C" fn stone_sdl_video_driver() -> *const c_char {
     unsafe { sdl2::sys::SDL_GetCurrentVideoDriver() as *const c_char }
 }
 
-/// Request quit. Only sets the deferred flag -- it does NOT tear down the
-/// window / GL context / ImGui. This is the game-facing quit call, safe from
-/// ANY system (@update, @draw, @late_draw): the current frame finishes
-/// rendering against a live context, the runner's event poll sees the flag
-/// next frame and ends the loop, and the loop-exit path runs stone_teardown()
-/// once. Calling this mid-frame used to destroy the window synchronously,
-/// crashing the rest of the frame (the pause-menu "Quit" segfault).
+/// Request quit after the current frame, keeping its window and GL context alive.
 #[no_mangle]
 pub extern "C" fn stone_quit() {
     QUIT_REQUESTED.store(true, Ordering::SeqCst);
 }
 
-/// Whether a programmatic quit has been requested. The runner's event poll
-/// reads this to end the main loop cleanly -- there is no SDL Quit event in
-/// that path, so without this the loop would spin until the frame budget runs
-/// out.
+/// Programmatic quit does not produce an SDL Quit event.
 #[no_mangle]
 pub extern "C" fn stone_quit_requested() -> bool {
     QUIT_REQUESTED.load(Ordering::SeqCst)
 }
 
-/// End the process's window and GL context. Every registry that holds a GL
-/// name or a handle into the context is released here, while the context is
-/// still current, so nothing outlives the context it belongs to. Run ONCE
-/// after the main loop exits (stone_shutdown_window), never mid-frame.
-/// Idempotent: safe to call when already torn down or never initialized.
+/// Release context-owned resources while the context is current. Call after the
+/// main loop, never mid-frame. Safe if already torn down or never initialized.
 #[no_mangle]
 pub extern "C" fn stone_teardown() -> bool {
     crate::flow_jobs::shutdown();
@@ -1901,7 +1885,6 @@ pub extern "C" fn stone_stop_text_input() {
     unsafe { sdl2::sys::SDL_StopTextInput() };
 }
 
-/// Swap buffers
 #[no_mangle]
 pub extern "C" fn stone_swap_window(_window: *mut StoneWindow) {
     GL_SWAP_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -2012,10 +1995,7 @@ pub extern "C" fn stone_hide_window() {
     });
 }
 
-/// Show a previously hidden window without restarting the game or touching
-/// scene state. Rendering and input restore with the same drawable; the map
-/// does not steal focus beyond the WM's normal click-to-focus (SDL show on
-/// X11 maps without forcing input focus).
+/// Show the window without changing scene state or forcing input focus.
 #[no_mangle]
 pub extern "C" fn stone_show_window() {
     show_window_impl(None);
@@ -2198,17 +2178,14 @@ fn activate_window_impl(window: &mut StoneWindow) {
     ::log::info!(target: "STONE", "window activated by request");
 }
 
-/// GL errors DebugGl has seen since process start (0 in release builds,
-/// where the per-call check compiles out). Sims assert this stays 0.
-/// u32 so LuaJIT sees a plain number, not a boxed uint64_t cdata.
+/// GL errors since process start, or 0 in release builds.
+/// u32 avoids boxed uint64_t cdata in LuaJIT.
 #[no_mangle]
 pub extern "C" fn stone_gl_error_count() -> u32 {
     stone_gl::GL_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed) as u32
 }
 
-/// Shader compile + link failures since process start. Unlike GL errors these
-/// are counted in release too -- the compile-status check is not a debug-only
-/// probe. Bounded runs (`rock frame` / perf / sims) exit nonzero on any.
+/// Shader compile and link failures since process start, including release builds.
 #[no_mangle]
 pub extern "C" fn stone_shader_error_count() -> u32 {
     stone_gl::SHADER_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed) as u32
@@ -2221,7 +2198,6 @@ pub extern "C" fn stone_gpu_timer_begin() {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().begin(gl)));
 }
 
-/// End this frame's GPU timer query.
 #[no_mangle]
 pub extern "C" fn stone_gpu_timer_end() {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().end(gl)));
@@ -2585,7 +2561,6 @@ pub extern "C" fn stone_set_fullscreen(mode: c_int) {
     });
 }
 
-/// Delay
 #[no_mangle]
 pub extern "C" fn stone_delay(ms: u32) {
     std::thread::sleep(std::time::Duration::from_millis(ms as u64));
@@ -2600,7 +2575,6 @@ pub extern "C" fn stone_wall_time() -> f64 {
         .as_secs_f64()
 }
 
-/// Get time
 #[no_mangle]
 pub extern "C" fn stone_get_time() -> f64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -2916,9 +2890,7 @@ pub extern "C" fn stone_get_display_count() -> c_int {
     .unwrap_or(1)
 }
 
-/// Refresh rate in Hz of the display the window is on, or 0 when it is
-/// unknown. Every path to 0 is logged: no window, a failed SDL query, or a
-/// mode whose rate SDL reports as 0 because the driver does not know it.
+/// Refresh rate in Hz, or 0 when unknown.
 #[no_mangle]
 pub extern "C" fn stone_get_window_refresh_rate() -> c_int {
     with_window(|window| {
