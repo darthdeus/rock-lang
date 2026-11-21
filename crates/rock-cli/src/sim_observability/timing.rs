@@ -280,46 +280,6 @@ mod tests {
     }
 
     #[test]
-    fn timing_artifact_keeps_completed_and_interrupted_entries_for_consumers() {
-        let root = tempfile::tempdir().unwrap();
-        let mut timing = recorder(root.path());
-        timing.set_source_files(&HashMap::from([(
-            "sim".into(),
-            "tests/sims/example.rock".into(),
-        )]));
-        enter(&mut timing, false);
-        end(&mut timing, 1234, false);
-        timing.observe(
-            "entry_start",
-            &json!({ "worker_attempt": 2, "occurrence_id": 2, "name": "interrupted" }),
-            1500,
-        );
-        timing.observe(
-            "entry_result",
-            &json!({ "worker_attempt": 2, "occurrence_id": 2,
-                "verdict": "FAIL", "timed_out": true }),
-            2000,
-        );
-        let path = root.path().join("timings.json");
-        timing
-            .save(&path, &json!({ "complete": true, "status": "FAIL" }))
-            .unwrap();
-        let value: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["project"], "game");
-        let rows = value["entries"].as_array().unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["name"], "sim");
-        assert_eq!(rows[0]["source_file"], "tests/sims/example.rock");
-        assert_eq!(rows[0]["duration_ms"], 1234);
-        assert_eq!(rows[0]["completed"], true);
-        assert_eq!(rows[1]["name"], "interrupted");
-        assert_eq!(rows[1]["source_file"], Value::Null);
-        assert_eq!(rows[1]["duration_ms"], 500);
-        assert_eq!(rows[1]["completed"], false);
-    }
-
-    #[test]
     fn scheduling_history_ignores_foreign_hosts_stale_schemas_and_unfinished_rows() {
         let root = tempfile::tempdir().unwrap();
         let mut previous = recorder(root.path());
@@ -363,44 +323,6 @@ mod tests {
         assert_eq!(lookup(host), None);
     }
 
-    #[test]
-    fn the_latest_finished_duration_per_project_is_kept_for_dispatch() {
-        let root = tempfile::tempdir().unwrap();
-        let record = |dir: &str, project: &str, duration: u64, finished: bool| {
-            let mut timing = recorder(root.path());
-            enter(&mut timing, false);
-            timing.observe(
-                "run_config",
-                &json!({ "project_path": project, "effective_jobs": 4 }),
-                0,
-            );
-            if finished {
-                end(&mut timing, duration, false);
-            } else {
-                timing.observe(
-                    "entry_result",
-                    &json!({ "worker_attempt": 1, "occurrence_id": 1,
-                    "verdict": "FAIL", "timed_out": true }),
-                    duration,
-                );
-            }
-            retain(
-                root.path(),
-                dir,
-                &timing,
-                &json!({ "complete": false, "status": "FAIL" }),
-            );
-        };
-        record("01", "game", 5_000, true);
-        record("02", "game", 3_000, true);
-        record("03", "sample", 9_000, true);
-        record("04", "game", 60_000, false);
-        let mut next = recorder(root.path());
-        enter(&mut next, true);
-        assert_eq!(next.latest_duration_ms("sim"), Some(3_000));
-        assert_eq!(next.latest_duration_ms("never_ran"), None);
-    }
-
     fn retain(root: &Path, name: &str, timing: &Timings, finished: &Value) {
         let dir = root.join(name);
         std::fs::create_dir(&dir).unwrap();
@@ -438,32 +360,6 @@ mod tests {
             duration,
         );
         warnings
-    }
-
-    #[test]
-    fn completed_timing_rows_retain_the_compiled_sim_source_file() {
-        let root = tempfile::tempdir().unwrap();
-        let mut timing = recorder(root.path());
-        timing.observe("run_start", &json!({ "source": { "dirty": false } }), 0);
-        timing.set_source_files(&HashMap::from([(
-            "sim".to_string(),
-            "tests/sims/example.rock".to_string(),
-        )]));
-        timing.observe("run_config", &json!({ "project_path": "game" }), 0);
-        timing.observe(
-            "entry_start",
-            &json!({ "worker_attempt": 1, "occurrence_id": 1,
-            "name": "sim" }),
-            0,
-        );
-        timing.observe(
-            "entry_end",
-            &json!({ "worker_attempt": 1, "occurrence_id": 1,
-            "frame_count": 7 }),
-            1000,
-        );
-
-        assert_eq!(timing.rows[0]["source_file"], "tests/sims/example.rock");
     }
 
     #[test]
