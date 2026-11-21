@@ -719,8 +719,7 @@ fn lower_type_application(
         .map(|x| lower_type_expr_helper(ctx, pos, a.te(x)))
         .try_vec()?;
 
-    // Exact intrinsic keys keep their own rules, even when a user type
-    // has the same spelling in the workspace-wide generic map.
+    // Intrinsic keys must not match same-named user types.
     let is_map = args.is_some() && bone_core::modules::is_intrinsic_key(key, "Map");
     if is_map && lowered.len() != 2 {
         comp_error!(te.span, "Map type must have exactly 2 type arguments");
@@ -1138,9 +1137,7 @@ pub(crate) fn lower_statement_value(
         }
 
         StatementKind::NestedFn(f) => {
-            // Name binds in the ENCLOSING scope, BEFORE the body is lowered, so a
-            // self-recursive call resolves; a not-yet-declared sibling stays a
-            // Global (decl-before-use -> mutual recursion rejected in inference).
+            // Bind before the body so self-recursion resolves.
             let name_binding = ctx.alloc_binding(
                 BindingInfo {
                     name: f.name.name,
@@ -1152,9 +1149,7 @@ pub(crate) fn lower_statement_value(
             );
             ctx.bind_local(scope, name_binding, f.name.span.offset_range().1);
 
-            // Params live in a child scope whose parent is the enclosing scope,
-            // so an enclosing param/local reference still resolves (then gets
-            // rejected as a capture in inference), while the params shadow.
+            // The child scope resolves enclosing captures for inference to reject.
             let fn_scope = ctx.body.alloc_child_scope(scope);
             let first_param = ctx.body.binding_arena.len();
             for p in &f.params {
@@ -2078,8 +2073,6 @@ fn reject_generic_bounds(
     Ok(())
 }
 
-/// Synthesize the `TypeExpr` a default pads in at a use site: exactly what the
-/// source form would have lowered to (a builtin, or a bare nominal `App`).
 fn default_type_expr(d: hir::GenericDefault) -> TypeExpr {
     match d {
         hir::GenericDefault::Builtin(b) => TypeExpr::Builtin(b),
@@ -2109,7 +2102,6 @@ fn reject_generic_defaults(
     Ok(())
 }
 
-/// Validate defaults even when their lowered forms are unused here.
 fn type_def_generics(
     ctx: &mut LowerCtx,
     what: &str,
@@ -2221,10 +2213,7 @@ pub(crate) fn build_function(
         });
     }
 
-    // Registry violations accumulate as lowering errors (the recovery channel)
-    // rather than failing fast: the workspace must stay buildable while an
-    // annotation is mid-typed (decorator completion runs on it), and
-    // `body_errors()` already turns any lowering error into a hard verdict.
+    // Recovery keeps the workspace buildable while an annotation is mid-edit.
     let annotations = lower_annotations_with_ctx(ctx, annotations)?;
     let anno_errors = fn_annotation_errors(ctx, &annotations, &param_decls);
 
@@ -2364,7 +2353,6 @@ fn lower_fn_body_into(
         "lower_fn_body_into needs one resolved param ty per AST param"
     );
 
-    // Returned rather than stored so a body re-lower replaces its errors.
     let mut bindings = FxHashMap::default();
     let default_scope = ctx.body.alloc_root_scope();
 
@@ -2375,10 +2363,7 @@ fn lower_fn_body_into(
     }
     let range = ctx.body.binding_arena.allocated_since(first_param);
 
-    // Defaults are lowered after every param binding exists: a lambda default
-    // allocates its own param bindings, which would otherwise land inside the
-    // `first..=last` param range below. An unresolved name in a default fails
-    // the body.
+    // Lambda defaults allocate bindings; lower them after the parameter range.
     let (defaults, mut errors) =
         ctx.collect_name_errors(|ctx| lower_param_defaults(ctx, default_scope, &f.params));
     let param_defaults = defaults?;
@@ -2487,7 +2472,6 @@ pub fn relower_function_in_place(
         ..LowerCtx::new(ws, module, a, high_water)
     };
 
-    // Rebuild the signature's navigation spans with body-local type IDs.
     if let Some(ret_ty) = &f.return_ty {
         lower_type_expr_local(&mut ctx, a.te(ret_ty))?;
     }
@@ -2498,9 +2482,7 @@ pub fn relower_function_in_place(
     let (body_failed, mut errors) = lower_fn_body_into(&mut ctx, f, &param_tys)?;
     ctx.module.lower_var_high_water = ctx._next_var_id;
 
-    // Re-validate annotations on the body-only path too: the REPLACE below
-    // would otherwise clear a still-present annotation violation recorded by
-    // the last full lower.
+    // Revalidate before replacing errors from the last full lower.
     let lowered_annos = lower_annotations_with_ctx(&ctx, annotations)?;
     errors.extend(fn_annotation_errors(
         &ctx,
@@ -2509,10 +2491,7 @@ pub fn relower_function_in_place(
     ));
     ctx.flush_scope_probes();
 
-    // The signature is kept as-is EXCEPT its span: `shift_module_after_edit`
-    // deliberately skips the edited fn's own span (it expected `build_function`
-    // to replace the whole `Function`), so patch the new full-item span +
-    // name span here -- otherwise `body_at` / navigation go stale on the next edit.
+    // Edit shifting skips this function's own spans, so update them here.
     let existing = &mut ctx.module.functions[fid];
     existing.span = f.span;
     existing.name_span = f.name.span;

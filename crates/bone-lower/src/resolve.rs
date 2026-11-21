@@ -314,8 +314,6 @@ fn bind_tiers(
     }
     let viewers = [frag];
 
-    // Tier 2: the current logical module's own definitions and explicit
-    // export bindings.
     let own = Lookup::new(ws).explicit_members(
         &viewers,
         ModuleKey::at(ws, frag.package, &frag.module_path),
@@ -343,7 +341,6 @@ fn bind_tiers(
         }
     }
 
-    // Tier 5: the compiler-owned std export view.
     if tiers.wants_more(callee) {
         if let Some(std) = std_definition(ws, name) {
             tiers.bind([std], FamilyTier::Std);
@@ -367,10 +364,7 @@ fn import_tier(
         return Ok((!hits.is_empty()).then_some(hits));
     }
 
-    // An unaliased `operator(-)` selector binds the binary spelling
-    // (`__op_sub`) because that is the name a binary expression uses. Prefix
-    // lowering asks for `__unm`, so follow that selector to the sibling unary
-    // member without making a second import spelling or a second family.
+    // Subtraction imports also admit the sibling unary operator `__unm`.
     if name.as_str() == "__unm" {
         let binary = Ustr::from("__op_sub");
         if let Some(targets) = frag.named.get(&binary) {
@@ -489,10 +483,7 @@ fn glob_candidates(
             name,
         )?
         .found;
-    // `frag.globs` is kept in path order (`UsePathRef::insert_sorted`).
     for glob in &frag.globs {
-        // Every fragment glob was checked where it is declared
-        // (`check_use_target`), so a failure here is a real diagnostic.
         let module = walk_modules(ws, frag, glob)?;
         hits.extend(lookup.members_of(&viewers, module, name)?.found);
     }
@@ -707,7 +698,6 @@ impl<'w> Lookup<'w> {
         let exporter = exporter_scope(pkg, path);
         let mut chain = viewers.to_vec();
         chain.push(&exporter);
-        // Kept in target path order (`UsePathRef::insert_sorted`).
         for binding in &node.glob_exports {
             if !all_admit(self.ws, viewers, &binding.vis, pkg_id, path) {
                 continue;
@@ -928,8 +918,6 @@ pub fn module_members(
     Lookup::new(ws).members_of(viewers, ModuleKey::at(ws, pkg_id, path), name)
 }
 
-/// An exporting module standing in as the site its export targets resolve
-/// from.
 fn exporter_scope(pkg: &bone_core::modules::NsPackage, path: &[Ustr]) -> FragmentScope {
     // Spelled out: `..Default::default()` would intern an empty package
     // name only to discard it, once per glob step of every lookup.
@@ -1125,7 +1113,6 @@ fn check_target(
             "`{}` is not accessible from this module",
             last_of(&path.segments)
         )),
-        // The last segment is a module this site may not enter.
         _ => {
             module?;
             Err(format!(
