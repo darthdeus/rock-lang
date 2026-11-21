@@ -1,4 +1,4 @@
-use crate::support::{assert_has, emit_pipeline, pipeline_emission};
+use crate::support::emit_pipeline;
 
 fn fragment_arrays(params: &str, body: &str) -> String {
     format!(
@@ -11,10 +11,6 @@ fn fragment_arrays(params: &str, body: &str) -> String {
         fn fr(vary: Vary, {params}) -> Vec4 {{ {body} }}
     "#
     )
-}
-
-fn emit(src: &str) -> String {
-    pipeline_emission(src, "vt", "fr").expect("emit").source
 }
 
 cases! { reject:
