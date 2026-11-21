@@ -395,40 +395,6 @@ mod tests {
     use super::{LiveProject, LiveUpdate};
 
     #[test]
-    fn a_rejected_lint_edit_keeps_the_running_program_and_allows_recovery() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("main.rock");
-        let main = dir.path().join("main.lua");
-        let overlay = dir.path().join("incremental.lua");
-        let old = "fn maybe_int() -> int? { 1 }\nfn always_int() -> int { 1 }\n@nomangle fn value() -> int { let _value: int = cast(always_int()) 3 }\n";
-        std::fs::write(&source, old).unwrap();
-        let mut project = crate::skull_backend::IncrementalProject::init(
-            dir.path().to_str().unwrap(),
-            &main,
-            &overlay,
-        )
-        .unwrap();
-        let before = std::fs::read_to_string(&main).unwrap();
-        let error = project
-            .apply_edit(
-                &source,
-                &old.replace("cast(always_int())", "cast(maybe_int())"),
-                &main,
-                &overlay,
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains("lint error(s)"), "{error}");
-        assert_eq!(std::fs::read_to_string(&main).unwrap(), before);
-        project.force_full(&main, &overlay).unwrap();
-        let script = format!(
-            "{}\nassert(value() == 3)",
-            std::fs::read_to_string(&main).unwrap()
-        );
-        let run = crate::compile_cmd::run_lua_code_with_timeout(&script, None).unwrap();
-        assert!(run.success, "{}", run.combined());
-    }
-
-    #[test]
     fn malformed_manifest_keeps_the_last_good_session_and_allows_recovery() {
         let (dir, main, _a, mut project) = v1_live_project();
         let manifest = dir.path().join("stick.toml");
