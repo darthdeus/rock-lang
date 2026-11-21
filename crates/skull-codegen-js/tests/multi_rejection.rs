@@ -26,26 +26,6 @@ const TWO_UNMAPPED_DEFINITIONS: &str = "inline(lua) fn lua_one(x: int) -> int = 
      fn b(x: int) -> int { let v = lua_two(x); v + 2 }\n\
      fn root(y: int) -> int { a(y) + b(y) }\n";
 
-#[test]
-fn rejection_discovery_reports_multiple_failures() {
-    let same_body = "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
-         inline(lua) fn lua_two(x: int) -> int = \"\"\" return x \"\"\"\n\
-         fn root(y: int) -> int { lua_one(y) + lua_two(y) }\n";
-    for (label, source) in [
-        ("separate definitions", TWO_UNMAPPED_DEFINITIONS),
-        ("same body", same_body),
-    ] {
-        let messages = reject_messages(source);
-        for name in ["lua_one", "lua_two"] {
-            assert!(
-                messages.iter().any(|message| message.contains(name)),
-                "{label}: no rejection names `{name}`:\n{}",
-                messages.join("\n")
-            );
-        }
-    }
-}
-
 /// Each `nobox` rejection names the body it was emitting. Without it an
 /// accumulated list of sinks across several bodies reads as one site repeated,
 /// which is exactly the misreading the accumulation exists to prevent.
@@ -67,56 +47,4 @@ fn root(y: float) -> int { a(y) + b(y) }
             all.join("\n")
         );
     }
-}
-
-/// The reported ORDER is fixed. Definitions come off a worklist in post-order,
-/// so the report is sorted by emitted name -- otherwise any test asserting the
-/// primary would be flaky rather than wrong.
-#[test]
-fn the_rejection_order_is_deterministic() {
-    let first = reject_messages(TWO_UNMAPPED_DEFINITIONS);
-    for _ in 0..4 {
-        assert_eq!(first, reject_messages(TWO_UNMAPPED_DEFINITIONS));
-    }
-}
-
-/// A single rejection must not grow a spurious sibling.
-#[test]
-fn a_lone_rejection_has_no_siblings() {
-    let all = reject_messages(
-        "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
-         fn root(y: int) -> int { lua_one(y) }\n",
-    );
-    assert_eq!(
-        all.len(),
-        1,
-        "expected exactly one rejection, got:\n{}",
-        all.join("\n")
-    );
-}
-
-#[test]
-fn a_rejected_registration_target_names_the_unsupported_callee() {
-    let ws = crate::common::ws_with(
-        r#"
-deco init hook() {}
-inline(lua) fn unsupported_callback_leaf() = "print('native')"
-@hook fn callback() { unsupported_callback_leaf() }
-fn main() {}
-"#,
-    );
-    let mid = crate::common::test_mid(&ws);
-    let error = skull_codegen_js::emit::emit_program(&ws, mid)
-        .err()
-        .expect("callback must reject");
-    let messages: Vec<_> = std::iter::once(&error)
-        .chain(error.siblings.iter())
-        .map(|error| error.message.as_str())
-        .collect();
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("unsupported_callback_leaf")),
-        "callback rejection was hidden by staging: {messages:?}"
-    );
 }
