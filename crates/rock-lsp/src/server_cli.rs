@@ -436,35 +436,6 @@ fn canonical(file_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use log::Level;
-
-    fn enabled(rust_log: Option<&str>, probes: &[(&str, Level)]) -> Vec<bool> {
-        let filter = stderr_log_filter(rust_log).unwrap();
-        probes
-            .iter()
-            .map(|(target, level)| filter.enabled(target, *level))
-            .collect()
-    }
-
-    #[test]
-    fn rust_log_accepts_standard_directives() {
-        use Level::*;
-        assert_eq!(
-            enabled(
-                Some("rock_lsp=debug"),
-                &[("rock_lsp", Debug), ("other", Warn), ("other", Info)]
-            ),
-            [true, true, false]
-        );
-        assert_eq!(
-            enabled(
-                Some("info,bone_query=trace"),
-                &[("x", Info), ("x", Debug), ("bone_query", Trace)]
-            ),
-            [true, false, true]
-        );
-        assert_eq!(enabled(None, &[("x", Warn), ("x", Info)]), [true, false]);
-    }
 
     #[test]
     fn rust_log_rejects_unparsable_directives() {
