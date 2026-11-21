@@ -1,5 +1,3 @@
-//! Value-test shaders and shader-root queries.
-
 use super::*;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

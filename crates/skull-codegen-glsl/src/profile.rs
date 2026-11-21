@@ -1,5 +1,3 @@
-//! The tier-0 profile check: which signatures and instructions have a GLSL lowering.
-
 use super::*;
 use bone_core::hir::{BodyOwner, Expr};
 

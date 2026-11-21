@@ -1,5 +1,3 @@
-//! Value types and expressions, calls, block statements and returns.
-
 use super::*;
 
 impl FnEmit<'_> {

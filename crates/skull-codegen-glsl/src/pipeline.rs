@@ -1,5 +1,3 @@
-//! Vertex/fragment pipelines: stage emission, collisions and planning.
-
 use super::*;
 
 fn emit_varyings(out: &mut String, iface: &ShaderInterfacePlan, dir: &str) {

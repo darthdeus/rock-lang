@@ -1,5 +1,3 @@
-//! Shader ABI layout and stage declarations.
-
 use super::*;
 
 /// Flatten the scalar blocks then the array blocks for Lua and JS registration.

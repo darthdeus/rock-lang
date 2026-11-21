@@ -1,5 +1,3 @@
-//! Emitting one function definition, and resolving its callees.
-
 use super::*;
 
 impl FnEmit<'_> {

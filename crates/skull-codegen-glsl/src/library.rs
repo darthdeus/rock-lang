@@ -1,5 +1,3 @@
-//! Shader libraries and program sessions over the instance graph.
-
 use super::*;
 
 /// Resolve a root fn name to a unique [`FuncRef`], preferring the user module.

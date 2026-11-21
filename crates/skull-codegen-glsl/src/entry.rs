@@ -1,5 +1,3 @@
-//! Single-entry shaders: shapes, stage plans and rendering.
-
 use super::*;
 
 pub(crate) struct EntryShape {

@@ -1,5 +1,3 @@
-//! The GLSL intrinsic table, reserved words and inline-rendered callables.
-
 use super::*;
 
 const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[

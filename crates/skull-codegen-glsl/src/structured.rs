@@ -1,5 +1,3 @@
-//! The relooper's structured walk over one GLSL function.
-
 use super::*;
 
 impl StructuredEmit for FnEmit<'_> {

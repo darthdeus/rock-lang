@@ -1,5 +1,3 @@
-//! Classifying vertex, varyings and fragment signatures.
-
 use super::*;
 
 #[derive(Default)]

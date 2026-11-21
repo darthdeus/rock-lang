@@ -1,5 +1,3 @@
-//! Per-function preparation: names, cell types and folded diamonds.
-
 use super::*;
 
 impl FnEmit<'_> {
