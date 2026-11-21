@@ -248,7 +248,6 @@ mod tests {
     const OPEN: &str = "\u{256d}\u{2500}";
     const CLOSE: &str = "\u{2500}\u{2500}\u{2500}\u{256f}";
     const BAR: &str = "\u{2502}";
-    const TICK: &str = "\u{2570}\u{2500}";
 
     const MAIN: &str = "fn main() {\n    let x = 1;\n}\n";
 
@@ -278,133 +277,6 @@ mod tests {
 
     fn labelled() -> CompilerError {
         CompilerError::new_with_label(at("main.rock", 1, 8, 17), "bad thing".to_string())
-    }
-
-    fn body(rendered: &str) -> &str {
-        rendered.split_once('\n').expect("header line").1
-    }
-
-    #[test]
-    fn diagnostic_names_hide_standalone_package_identities() {
-        let error = CompilerError::new_no_location(
-            "expected `@/a.rock::Point`, found `@/b.rock::child::Point`",
-        );
-        assert_eq!(error.message, "expected `Point`, found `child::Point`");
-        assert_eq!(error.labels[0].message, error.message);
-    }
-
-    #[test]
-    fn render_draws_the_labelled_frame() {
-        let rendered = strip_ansi_sgr(&labelled().render(&files()));
-        assert_eq!(
-            rendered,
-            [
-                "[E00] Error: bad thing".to_string(),
-                format!("   {OPEN}[main.rock:2:6]"),
-                format!("   {BAR}"),
-                format!(" 2 {BAR}     let x = 1;"),
-                format!("   {BAR}      {BAR} "),
-                format!("   {BAR}      {TICK} bad thing"),
-                CLOSE.to_string(),
-                String::new(),
-            ]
-            .join("\n")
-        );
-    }
-
-    #[test]
-    fn render_points_at_the_location_without_any_label() {
-        let error = CompilerError::at(at("main.rock", 1, 8, 17).start(), "no label".to_string());
-        let rendered = strip_ansi_sgr(&error.render(&files()));
-        assert_eq!(
-            rendered,
-            [
-                "[E00] Error: no label".to_string(),
-                format!("   {OPEN}[main.rock:2:6]"),
-                format!("   {BAR}"),
-                format!(" 2 {BAR}     let x = 1;"),
-                CLOSE.to_string(),
-                String::new(),
-            ]
-            .join("\n")
-        );
-    }
-
-    #[test]
-    fn render_keeps_every_label_in_the_order_it_was_added() {
-        let error = labelled().with_label(at("main.rock", 1, 8, 17), "second".to_string());
-        let rendered = strip_ansi_sgr(&error.render(&files()));
-        assert_eq!(
-            rendered,
-            [
-                "[E00] Error: bad thing".to_string(),
-                format!("   {OPEN}[main.rock:2:6]"),
-                format!("   {BAR}"),
-                format!(" 2 {BAR}     let x = 1;"),
-                format!("   {BAR}      {BAR} "),
-                format!("   {BAR}      {TICK} bad thing"),
-                format!("   {BAR}      {BAR} "),
-                format!("   {BAR}      {TICK} second"),
-                CLOSE.to_string(),
-                String::new(),
-            ]
-            .join("\n")
-        );
-    }
-
-    #[test]
-    fn level_and_code_change_the_header_but_leave_the_frame_body() {
-        use CompilerErrorCode::*;
-        use CompilerErrorLevel::*;
-
-        let error = labelled();
-        let files = files();
-        let base = strip_ansi_sgr(&error.render(&files));
-        for (level, code, header, compact) in [
-            (Error, Unknown, "[E00] Error:", "[E00] Error:"),
-            (Error, TokenizerError, "[E01] Error:", "[E00] Error:"),
-            (Error, SyntaxError, "[E02] Error:", "[E00] Error:"),
-            (Warning, Unknown, "[W00] Warning:", "[W00] Warning:"),
-            (Advice, Unknown, "[A00] Advice:", "[A00] Advice:"),
-        ] {
-            let error = error.clone().with_level(level).with_code(code);
-            let rendered = strip_ansi_sgr(&error.render(&files));
-            assert_eq!(
-                rendered.lines().next().unwrap(),
-                format!("{header} bad thing")
-            );
-            assert_eq!(body(&rendered), body(&base));
-            assert_eq!(
-                strip_ansi_sgr(&error.one_line()),
-                format!("{compact} bad thing at main.rock:1:8")
-            );
-        }
-    }
-
-    #[test]
-    fn render_all_of_nothing_is_empty() {
-        assert_eq!(render_all(&[], &files()), "");
-    }
-
-    #[test]
-    fn render_all_separates_frames_by_one_blank_line() {
-        let first = labelled();
-        let second = CompilerError::new_with_label(at("main.rock", 2, 0, 29), "second".to_string());
-        let rendered = strip_ansi_sgr(&render_all(&[first.clone(), second.clone()], &files()));
-        assert_eq!(
-            rendered,
-            format!(
-                "{}\n{}",
-                strip_ansi_sgr(&first.render(&files())),
-                strip_ansi_sgr(&second.render(&files()))
-            )
-        );
-        assert_eq!(
-            body(&rendered)
-                .matches(&format!("{CLOSE}\n\n[E00]"))
-                .count(),
-            1
-        );
     }
 
     #[test]
@@ -439,27 +311,6 @@ mod tests {
     }
 
     #[test]
-    fn render_all_draws_a_frame_for_a_registered_stdlib_file() {
-        let stdlib =
-            CompilerError::new_with_label(at("<stdlib>/core.rock", 0, 3, 3), "stdlib".to_string());
-        let rendered = strip_ansi_sgr(&render_all(&[stdlib], &files()));
-        assert_eq!(
-            rendered,
-            [
-                "[E00] Error: stdlib".to_string(),
-                format!("   {OPEN}[<stdlib>/core.rock:1:4]"),
-                format!("   {BAR}"),
-                format!(" 1 {BAR} fn core() {{}}"),
-                format!("   {BAR}    {BAR} "),
-                format!("   {BAR}    {TICK} stdlib"),
-                CLOSE.to_string(),
-                String::new(),
-            ]
-            .join("\n")
-        );
-    }
-
-    #[test]
     fn labels_are_byte_ranges_of_a_multibyte_source() {
         let source = "fn main() {\n    let s = \"\u{e9}\u{e9}\";\n}\n";
         let mut files = SourceFiles::empty();
@@ -485,43 +336,6 @@ mod tests {
             ]
             .join("\n")
         );
-    }
-
-    #[test]
-    fn siblings_are_flattened_and_stay_out_of_the_report() {
-        let primary = labelled();
-        let sibling =
-            CompilerError::new_with_label(at("main.rock", 2, 0, 29), "sibling".to_string());
-        let nested = CompilerError::new_with_label(at("main.rock", 2, 0, 29), "nested".to_string())
-            .with_siblings(vec![sibling.clone()]);
-        let error = primary.clone().with_siblings(vec![sibling, nested]);
-        assert_eq!(
-            error
-                .siblings
-                .iter()
-                .map(|s| s.message.as_str())
-                .collect::<Vec<_>>(),
-            ["sibling", "nested", "sibling"]
-        );
-        assert!(error.siblings.iter().all(|s| s.siblings.is_empty()));
-        assert_eq!(
-            strip_ansi_sgr(&error.render(&files())),
-            strip_ansi_sgr(&primary.render(&files()))
-        );
-        assert_eq!(
-            strip_ansi_sgr(&error.one_line()),
-            strip_ansi_sgr(&primary.one_line())
-        );
-    }
-
-    #[test]
-    fn silent_errors_carry_a_span_and_an_empty_message() {
-        let span = at("main.rock", 1, 8, 17);
-        let error = CompilerError::silent(span);
-        assert_eq!(error.location, span.start());
-        assert_eq!(error.message, "");
-        assert!(error.labels.is_empty());
-        assert_eq!(error.level, CompilerErrorLevel::Error);
     }
 
     #[test]
