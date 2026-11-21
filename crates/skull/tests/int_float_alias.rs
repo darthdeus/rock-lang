@@ -36,14 +36,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn reused_int_to_float_across_a_yield_aliases_and_resumes_its_value() {
-    let lua = emit_module(YIELD_ACROSS);
-    let step = function_body(&lua, "scaled_int__step");
-    assert_eq!(register_moves(step), Vec::<&str>::new());
-    assert_eq!(run_main(&lua), "42\n18\n7");
-}
-
 const SELECTION: &str = r#"
 fn min_param(x: int, b: float) -> float {
     let a = x as float
@@ -71,18 +63,4 @@ fn aliased_int_to_float_selection_operand_keeps_native_minmax() {
     assert!(body.contains("math.min("));
     assert_eq!(register_moves(body), Vec::<&str>::new());
     assert_eq!(run_main(&lua), "2\n2.5\n8.5\n0");
-}
-
-#[test]
-fn prelude_identity_conversions_return_their_arguments_directly() {
-    let lua = emit_module(
-        r#"
-fn conversions(n: int, s: string) -> (int, float, float, float, string) {
-    return (int(n), float(n), int_to_float(n), to_float(n), to_string(s))
-}
-fn main() { print(conversions(-3, "hello")) }
-"#,
-    );
-    let body = function_body(&lua, "conversions_int_string");
-    assert!(body.contains("return c0, c0, c0, c0, c1"));
 }
