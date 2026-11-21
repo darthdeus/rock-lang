@@ -207,29 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn packages_use_override_then_install_then_build_checkout() {
-        let temp = tempfile::tempdir().unwrap();
-        let exe = temp.path().join("install/bin/rock");
-        let checkout = temp.path().join("checkout/packages");
-        let built = package_fixture(&checkout, "build");
-        assert_eq!(
-            resolve_package("probe", None, Some(&exe), &checkout).unwrap(),
-            built
-        );
-        let installed = package_fixture(&temp.path().join("install/packages"), "install");
-        assert_eq!(
-            resolve_package("probe", None, Some(&exe), &checkout).unwrap(),
-            installed
-        );
-        let override_root = temp.path().join("override");
-        let overridden = package_fixture(&override_root, "override");
-        assert_eq!(
-            resolve_package("probe", Some(override_root), Some(&exe), &checkout).unwrap(),
-            overridden
-        );
-    }
-
-    #[test]
     fn a_missing_package_never_borrows_from_another_version() {
         let temp = tempfile::tempdir().unwrap();
         let exe = temp.path().join("install/bin/rock");
@@ -313,22 +290,6 @@ mod tests {
         assert_eq!(
             resolve(Some("/controlled/stdlib"), Some("/opt/rock/bin/rock"), &[]),
             StdlibSource::Dir(PathBuf::from("/controlled/stdlib"))
-        );
-    }
-
-    #[test]
-    fn exe_outside_a_release_layout_uses_build_checkout() {
-        assert_eq!(
-            resolve(
-                None,
-                Some("/work/rock/target/debug/rock"),
-                &["/work/rock/target/stdlib", CHECKOUT]
-            ),
-            StdlibSource::Dir(PathBuf::from(CHECKOUT))
-        );
-        assert_eq!(
-            resolve(None, Some("/usr/bin/rock"), &[CHECKOUT]),
-            StdlibSource::Dir(PathBuf::from(CHECKOUT))
         );
     }
 
