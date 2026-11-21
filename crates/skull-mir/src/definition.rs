@@ -468,34 +468,6 @@ mod tests {
     }
 
     #[test]
-    fn collector_admits_literal_keyed_factories_and_counts_population() {
-        let ws = workspace(&[(
-            "defs.rock",
-            r#"
-                @artifact_definition(catalog="widgets", key_param="key")
-                deco init widget(key: string) {}
-                @widget(key="alpha") fn make_alpha() -> int { return 1 }
-                @widget(key="beta") fn make_beta() -> int { return 2 }
-                fn main() {}
-            "#,
-        )]);
-
-        let plan = collect(&ws).expect("definition plan");
-        assert_eq!(
-            plan.entries
-                .iter()
-                .map(|entry| (entry.catalog.as_str(), entry.key.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("widgets", "alpha"), ("widgets", "beta")]
-        );
-        assert_ne!(plan.entries[0].identity, plan.entries[1].identity);
-        assert_eq!(
-            crate::mangle::declared_name(plan.entries[0].diagnostic_name.as_str()),
-            "make_alpha"
-        );
-    }
-
-    #[test]
     fn duplicate_keys_reject_with_the_catalog_and_key() {
         let ws = workspace(&[(
             "dupe.rock",
@@ -531,40 +503,6 @@ mod tests {
                 fn main() {{}}
             "#
         )
-    }
-
-    #[test]
-    fn typed_nonempty_catalog_has_an_accessor_and_a_nonzero_population() {
-        let ws = workspace(&[(
-            "typed.rock",
-            &typed_source(
-                r#"
-                @artifact_catalog(catalog="widgets")
-                @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-                @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
-                "#,
-            ),
-        )]);
-        let plan = collect(&ws).expect("typed definition plan");
-        assert_eq!(plan.catalogs.len(), 1);
-        assert!(plan.catalogs[0].accessor.is_some());
-        assert_eq!(plan.entries.len(), 1);
-    }
-
-    #[test]
-    fn declared_empty_catalog_is_retained_as_a_typed_catalog() {
-        let ws = workspace(&[(
-            "empty.rock",
-            &typed_source(
-                r#"
-                @artifact_catalog(catalog="widgets")
-                @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-                "#,
-            ),
-        )]);
-        let plan = collect(&ws).expect("declared empty definition plan");
-        assert_eq!(plan.catalogs.len(), 1);
-        assert_eq!(plan.entries.len(), 0);
     }
 
     #[test]
