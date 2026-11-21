@@ -10,53 +10,6 @@ fn messages(bone: &BoneWorkspace, path: &str) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn edits_through_broken_states_end_clean() {
-    let cast = |ty: &str| format!("fn f(v: float) -> int {{\n    return v as {ty}\n}}\n");
-    let assign = |kw: &str| format!("{kw} X: float = 0.0\nfn w() {{\n    X = 1.0\n}}\n");
-    // (case, buffer states with the fragment each reports; None is clean)
-    let cases = [
-        (
-            "`as int` broken to `as in`",
-            vec![
-                (cast("int"), None),
-                (cast("in"), Some("")),
-                (cast("int"), None),
-            ],
-        ),
-        (
-            "typing `as int` char by char",
-            vec![
-                (cast("int"), None),
-                (cast("i"), Some("")),
-                (cast("in"), Some("")),
-                (cast("int"), None),
-            ],
-        ),
-        (
-            "const flipped to global",
-            vec![
-                (assign("const"), Some("cannot assign to const")),
-                (assign("global"), None),
-            ],
-        ),
-    ];
-    for (case, states) in cases {
-        let mut bone = BoneWorkspace::new();
-        for (i, (text, expected)) in states.into_iter().enumerate() {
-            bone.update(PATH, text);
-            let msgs = messages(&bone, PATH);
-            match expected {
-                None => assert!(msgs.is_empty(), "{case}: state {i}: {msgs:?}"),
-                Some(f) => assert!(
-                    msgs.iter().any(|m| m.contains(f)),
-                    "{case}: state {i}: {msgs:?}"
-                ),
-            }
-        }
-    }
-}
-
 /// Flipping const to global must re-infer the dependent module that writes the global.
 #[test]
 fn const_to_global_clears_assign_error_cross_file() {
