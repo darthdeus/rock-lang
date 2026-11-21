@@ -98,69 +98,43 @@ fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) ->
     };
     // A block that cannot reach a proof query cannot affect any proof. Keep
     // relevance and reexecution based on the full CFG above.
-    const INPUT: u8 = 1;
-    const OUTPUT: u8 = 2;
-    let mut needed = vec![0; func.blocks.len()];
-    let mut pending = Vec::new();
-    for &(b, _) in &queries {
-        needed[raw(b)] = INPUT;
-        pending.push(b);
-    }
+    let mut needed = vec![false; func.blocks.len()];
+    let mut pending: Vec<_> = queries.iter().map(|&(b, _)| b).collect();
     while let Some(b) = pending.pop() {
         for &p in preds.get(&b).into_iter().flatten() {
-            if std::mem::replace(&mut needed[raw(p)], OUTPUT) != OUTPUT {
+            if !std::mem::replace(&mut needed[raw(p)], true) {
                 pending.push(p);
             }
         }
     }
-    rpo.retain(|&b| needed[raw(b)] != 0);
+    rpo.retain(|&b| needed[raw(b)]);
     let body = Body::new(func);
     let func = &body;
-    let n = func.blocks.len();
-    let mut ins: Vec<Option<Facts>> = vec![None; n];
-    let mut outs: Vec<Option<Facts>> = vec![None; n];
-    let mut dirty = vec![true; n];
-    ins[raw(func.entry)] = Some(Facts::default());
+    let mut outs: Vec<Option<Facts>> = vec![None; func.blocks.len()];
+    let mut dirty = vec![true; func.blocks.len()];
+    let input = |outs: &[Option<Facts>], b| {
+        if b == func.entry {
+            return Some(Facts::default());
+        }
+        let mut inputs = preds.get(&b).into_iter().flatten().filter_map(|&p| {
+            let out = outs[raw(p)].as_ref()?;
+            Some(edge_facts(func, out, p, b, ctx.affine))
+        });
+        let mut merged = inputs.next()?.into_owned();
+        for edge in inputs {
+            merged.meet(edge.as_ref());
+        }
+        Some(merged)
+    };
     loop {
         let mut changed = false;
         for &b in &rpo {
-            // Clear before transfer so a changed self-edge output schedules
-            // another visit. Unchanged predecessor outputs need no new merge.
             if !std::mem::replace(&mut dirty[raw(b)], false) {
                 continue;
             }
-            if b != func.entry {
-                let mut merged: Option<Facts> = None;
-                if let Some(ps) = preds.get(&b) {
-                    for &p in ps {
-                        let Some(out) = &outs[raw(p)] else {
-                            continue;
-                        };
-                        let edge = edge_facts(func, out, p, b, ctx.affine);
-                        merged = Some(match merged {
-                            None => edge.into_owned(),
-                            Some(mut m) => {
-                                m.meet(edge.as_ref());
-                                m
-                            }
-                        });
-                    }
-                }
-                if merged == ins[raw(b)] && outs[raw(b)].is_some() {
-                    continue;
-                }
-                if merged != ins[raw(b)] {
-                    changed = true;
-                    ins[raw(b)] = merged;
-                }
-            }
-            if needed[raw(b)] == INPUT {
-                continue;
-            }
-            let Some(input) = &ins[raw(b)] else {
+            let Some(mut facts) = input(&outs, b) else {
                 continue;
             };
-            let mut facts = input.clone();
             for &id in &func.blocks[b].insts {
                 step(&mut facts, func, &ctx, id, reexecuting[raw(b)]);
             }
@@ -176,7 +150,7 @@ fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) ->
     }
     let mut proven = Vec::new();
     for &(b, last) in &queries {
-        let Some(mut facts) = ins[raw(b)].take() else {
+        let Some(mut facts) = input(&outs, b) else {
             continue;
         };
         // Solved inputs are independent: replay only as far as this block's
