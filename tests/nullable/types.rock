@@ -311,3 +311,35 @@ fn direct_coalescing_helpers_preserve_false_and_absence() {
     assert(is_null(__op_null_coalesce(absent, absent)))
     assert_eq(__op_null_coalesce(absent, present), present)
 }
+
+struct NullableEqPoint { x: int }
+enum NullableLabel { Named(string), Counted(int), Blank }
+struct NullableLabelSlot { item: NullableLabel? }
+
+global NULL_EQ_CALLS: int = 0
+
+fn nullable_eq_point() -> NullableEqPoint? {
+    NULL_EQ_CALLS += 1
+    return NullableEqPoint { x: 1 }
+}
+
+fn same_nullable_label(a: NullableLabel?, b: NullableLabel?) -> bool { a == b }
+
+@test
+fn nullable_equality_evaluates_effects_once_and_compares_cleared_tags() {
+    NULL_EQ_CALLS = 0
+    let expected: NullableEqPoint? = NullableEqPoint { x: 1 }
+    assert(nullable_eq_point() == expected)
+    assert_eq(NULL_EQ_CALLS, 1)
+    assert(same_nullable_label(null, null))
+    assert(!same_nullable_label(null, NullableLabel::Blank))
+    assert(!same_nullable_label(NullableLabel::Blank, null))
+    assert(same_nullable_label(NullableLabel::Named("a"), NullableLabel::Named("a")))
+    let holder = NullableLabelSlot { item: NullableLabel::Blank }
+    holder.item = null
+    let labels: [NullableLabel?] = [NullableLabel::Counted(1)]
+    labels[0] = null
+    let local: NullableLabel? = NullableLabel::Blank
+    local = null
+    assert(holder.item != NullableLabel::Blank && labels[0] != NullableLabel::Counted(1) && local != NullableLabel::Blank)
+}
