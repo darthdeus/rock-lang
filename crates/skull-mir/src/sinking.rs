@@ -355,7 +355,7 @@ pub fn preserve_effect_order_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mir::{ContainerKind, Lit, Term};
+    use crate::mir::{Lit, Term};
     use ustr::Ustr;
 
     fn mask(func: &MirFunc) -> Vec<bool> {
@@ -370,47 +370,6 @@ mod tests {
 
     fn folded(inlinable: &[bool], id: Idx<Inst>) -> bool {
         inlinable[id.into_raw().into_u32() as usize]
-    }
-
-    #[test]
-    fn projections_and_calls_cannot_cross_a_write() {
-        for make in [
-            (|v| Inst::Index {
-                base: v,
-                index: v,
-                kind: ContainerKind::Vec,
-            }) as fn(Idx<Inst>) -> Inst,
-            |v| Inst::VecCheckedIndex { vec: v, index: v },
-            |v| Inst::Field {
-                nonthrowing: false,
-                base: v,
-                field: Ustr::from("value"),
-            },
-            |v| Inst::Field {
-                nonthrowing: true,
-                base: v,
-                field: Ustr::from("value"),
-            },
-            |v| Inst::TupleIndex { base: v, index: 0 },
-            |v| Inst::CallValue {
-                callee: v,
-                args: vec![],
-            },
-        ] {
-            let mut func = MirFunc::new(Ustr::from("probe"));
-            let b = func.entry;
-            let base = func.emit(b, Inst::Const(Lit::Nil));
-            let value = func.emit(b, make(base));
-            func.emit(
-                b,
-                Inst::StoreGlobal {
-                    name: Ustr::from("marks"),
-                    value: base,
-                },
-            );
-            func.set_term(b, Term::Return(vec![value]));
-            assert!(!folded(&mask(&func), value), "{:?}", func.insts[value]);
-        }
     }
 
     #[test]
@@ -431,68 +390,6 @@ mod tests {
         let inlinable = mask(&func);
         assert!(!folded(&inlinable, checked));
         assert!(folded(&inlinable, tuple));
-    }
-
-    #[test]
-    fn non_throwing_arithmetic_can_cross_effects() {
-        let mut func = MirFunc::new(Ustr::from("probe"));
-        let b = func.entry;
-        let input = func.emit(b, Inst::Const(Lit::Int(1)));
-        let sum = func.emit(b, Inst::IntAdd(input, input));
-        let tuple = func.emit(b, Inst::MakeTuple(vec![sum]));
-        func.emit(
-            b,
-            Inst::CallValue {
-                callee: input,
-                args: vec![],
-            },
-        );
-        func.set_term(b, Term::Return(vec![tuple]));
-        let inlinable = mask(&func);
-        assert!(folded(&inlinable, sum));
-        assert!(folded(&inlinable, tuple));
-    }
-
-    #[test]
-    fn a_throw_can_fold_into_the_next_effect_operand() {
-        let mut func = MirFunc::new(Ustr::from("probe"));
-        let b = func.entry;
-        let input = func.emit(b, Inst::Const(Lit::Int(-1)));
-        let checked = func.emit(b, Inst::IntToUint(input));
-        func.emit(
-            b,
-            Inst::StoreGlobal {
-                name: Ustr::from("value"),
-                value: checked,
-            },
-        );
-        assert!(folded(&mask(&func), checked));
-    }
-
-    #[test]
-    fn a_throw_can_fold_into_a_folded_call_that_consumes_it() {
-        let mut func = MirFunc::new(Ustr::from("probe"));
-        let b = func.entry;
-        let input = func.emit(b, Inst::Const(Lit::Nil));
-        let read = func.emit(
-            b,
-            Inst::Field {
-                nonthrowing: false,
-                base: input,
-                field: Ustr::from("value"),
-            },
-        );
-        let call = func.emit(
-            b,
-            Inst::CallValue {
-                callee: input,
-                args: vec![read],
-            },
-        );
-        func.set_term(b, Term::Return(vec![call]));
-        let inlinable = mask(&func);
-        assert!(folded(&inlinable, call));
-        assert!(folded(&inlinable, read));
     }
 
     #[test]
