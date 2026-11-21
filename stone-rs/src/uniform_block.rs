@@ -1,18 +1,5 @@
-//! Uniform blocks: the slot-bound replacement for the by-name uniform setters.
-//!
-//! A block is registered once (`stone_shader_bind_uniform_block`) and fed whole
-//! (`stone_shader_upload_uniform_block`). Each upload lands in its own range of
-//! the per-frame uniform stream (stream_buffer.rs), and the range is bound at
-//! the block's binding per program switch, since binding indices are global
-//! state. No
-//! `glGetUniformLocation` per field and no name after link time -- which is the
-//! point, since WGSL/Vulkan/Metal have no CPU-visible uniform name to look up.
-//!
-//! The bytes are packed by the compiler from its std140 `UniformBlockPlan`.
-//! Nothing here knows that layout; this file moves an opaque span of bytes and
-//! then asks the driver whether it agrees
-//! (`stone_shader_check_uniform_block_layout`), which is the only independent
-//! std140 implementation in reach.
+//! The compiler packs std140 bytes; this module streams them and checks the
+//! driver layout. Binding indices are global GL state.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -42,12 +29,7 @@ struct BlockBuffer {
     /// `glBindBufferRange` is global state, so blocks re-bind whenever their program goes
     /// current (`bind_block_for_program`).
     binding: u32,
-    /// The compiler's `UniformBlockPlan::fingerprint` for the layout this
-    /// block was sized and bound for. An upload carries its own, from the plan
-    /// the PACKER used, and the two must agree: the packer derives offsets from
-    /// the uniform type while the destination comes from the shader, so
-    /// `set_uniform_block(blur, HeatShimmerU { .. })` is well typed on both
-    /// sides and writes one layout's bytes into another's block.
+    /// Packer and shader layout fingerprints must match even at equal size.
     fingerprint: u64,
 }
 
@@ -78,21 +60,8 @@ fn buffer_id(buffer: Option<glow::Buffer>) -> u32 {
     buffer.map_or(0, |b| b.0.get())
 }
 
-/// The binding state GL itself reports, as JSON, for the on-demand uniform
-/// block dump (`uniform_block_dump_arm`, stone/engine/rendering/uniform_block_dump.rock).
-/// Diagnostic only: it queries GL and reads buffers back, so nothing calls it
-/// unless a dump was requested.
-///
-/// `handle == 0` describes every block-owning program and the buffer bound at
-/// each indexed binding point; a non-zero handle describes that program's
-/// blocks at this instant, which the dump takes immediately before a draw.
-/// Per block: the binding the registry recorded, the binding GL reports for the
-/// program (`GL_UNIFORM_BLOCK_BINDING`), the block's stream range (buffer,
-/// offset, and whether it was written this frame), the buffer range actually
-/// bound at that index, the last uploaded bytes, and -- on desktop GL -- the
-/// bytes at the BOUND range. A bound range that is not the block's own, or GPU
-/// bytes that differ from the upload, is the defect class the dump exists to
-/// catch. The pointer is valid until the next call.
+/// Diagnostic JSON for one program, or all programs when handle is zero.
+/// The returned pointer is valid until the next call.
 #[no_mangle]
 pub extern "C" fn stone_uniform_block_binding_state_json(handle: u64) -> *const c_char {
     let json = binding_state(handle).to_string();
@@ -227,15 +196,7 @@ fn binding_state(handle: u64) -> serde_json::Value {
     .unwrap_or_else(|| serde_json::json!({ "error": "no GL context" }))
 }
 
-/// Drop every bookkeeping entry belonging to `handle`. Its ranges stay in the
-/// stream, which reclaims them by frame.
-///
-/// Called from `stone_destroy_shader`, which owns a program's whole lifetime.
-/// Deleting the program alone left the blocks registered and the
-/// program -> handle entry live, so a rejected candidate leaked every block it
-/// had already bound -- once per reload, for the process lifetime --
-/// and a later program handed the same GL id inherited the stale attribution
-/// that `mark_program_drawn` reads.
+/// Stream ranges are reclaimed by frame; remove both program indexes.
 pub(crate) fn destroy_blocks_for_shader(handle: u64, program: glow::Program) {
     BLOCKS.with(|b| b.borrow_mut().remove(&handle));
     BLOCK_PROGRAMS.with(|m| m.borrow_mut().remove(&program));
@@ -388,23 +349,14 @@ pub extern "C" fn stone_shader_bind_uniform_block(
         };
         gl.uniform_block_binding(program, index, binding as u32);
 
-        // Zero bytes, streamed when the block is first bound. A block member
-        // the packer never writes -- an inactive field, a stale tail after a
-        // hot reload shrinks the plan, or a whole block nothing fills -- must
-        // read 0 rather than whatever the driver handed back, or the same
-        // source renders differently per driver and per run.
+        // Unwritten members and tails must start at zero on every driver.
         let bytes = vec![0u8; size as usize];
 
         BLOCK_PROGRAMS.with(|m| m.borrow_mut().insert(program, handle));
         BLOCKS.with(|b| {
             let mut map = b.borrow_mut();
             let blocks = map.entry(handle).or_default();
-            // A re-register (hot reload) replaces the block at this BINDING;
-            // the old one would otherwise leak for the process lifetime.
-            // A binding is a GL index, not a position in this list: a
-            // program's bindings need not run densely from 0.
-            // A fresh block has never been filled, so a hot reload re-arms the
-            // unfilled check rather than inheriting the old block's history.
+            // Bindings are sparse GL indices; reload replaces and re-arms the block.
             let fresh = BlockBuffer {
                 program,
                 range: None,
@@ -464,12 +416,7 @@ pub extern "C" fn stone_shader_upload_uniform_block(
             );
             return false;
         };
-        // EQUALITY, not a ceiling. Overrunning is UB in GL, but an undersized
-        // upload is equally a mismatch: it leaves the tail holding the previous
-        // frame's bytes, which reads as a stale uniform rather than as a wiring
-        // bug. The sizes come from two different compiler artifacts (the plan at
-        // pack time, the plan at registration time) that a stale hot reload can
-        // desynchronize.
+        // An undersized upload leaves stale bytes; an oversized one is invalid.
         if size as usize != block.size {
             ::log::error!(
                 target: "SHADER",
@@ -493,12 +440,8 @@ pub extern "C" fn stone_shader_upload_uniform_block(
             return false;
         }
         let bytes = unsafe { std::slice::from_raw_parts(data, size as usize) };
-        // A fresh stream range, never storage a queued draw reads: an in-place
-        // `glBufferSubData` into such storage makes Apple's GL-on-Metal flush,
-        // resubmit and wait (~139 uploads per frame in a large game put half the main
-        // thread in that stall), and re-specifying one buffer per block with
-        // `glBufferData` let NVIDIA 595.104 serve a draw the storage its own
-        // upload replaced (#883).
+        // Never overwrite a range still read by a queued draw: GL drivers can
+        // stall on the write or give the queued draw the replacement storage.
         let current = crate::CURRENT_SHADER.with(|c| *c.borrow()) == Some(block.program);
         let ok = with_gl(|gl| unsafe {
             let streamed = stream_block(gl, block, Some(bytes)).is_some();
@@ -585,20 +528,9 @@ fn block_bytes_into(
     })
 }
 
-/// Assert the driver's own std140 layout against the compiler's plan.
-///
-/// `names` is a NUL-separated run of `count` member names; `offsets` is the
-/// compiler's byte offset for each. A mismatch means the shader is reading
-/// different bytes than the packer is writing -- silent garbage pixels -- so it
-/// is reported eagerly at registration rather than discovered by looking at the
-/// screen.
-///
-/// **Only ACTIVE members can be checked.** GL is free to optimize an unused
-/// block member away entirely, and then reports no index for it; such a member
-/// is skipped, not failed. So this is a partial oracle by construction, and
-/// full coverage needs a shader that reads every field. For the same reason the
-/// block's queried DATA_SIZE is compared as an upper bound (the driver may size
-/// for the active members only), not for equality.
+/// Check the driver layout against NUL-separated names and compiler offsets.
+/// GL may omit inactive members and size only the active portion, so this
+/// check skips absent members and treats the queried size as an upper bound.
 #[no_mangle]
 pub extern "C" fn stone_shader_check_uniform_block_layout(
     handle: u64,

@@ -1,13 +1,3 @@
-//! Stone - Rust implementation of the Stone game engine library
-//!
-//! This is a cdylib that exports C-compatible functions for LuaJIT FFI.
-//!
-//! Uses:
-//! - sdl2 for windowing/input
-//! - glow for OpenGL
-//! - image for image loading (pure Rust, replaces SDL2_image)
-//! - ttf-parser + zeno for glyph outlines and rasterization (pure Rust, replaces FreeType)
-
 // This crate is the LuaJIT FFI boundary: every `pub extern "C" fn` is called
 // across an unsafe ABI, and pointer-arg derefs are part of the contract.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -393,17 +383,7 @@ mod macos_focus {
         }
     }
 
-    /// On the first user interaction with our window (focus-gained event),
-    /// promote NSApp from Accessory back to Regular. Regular includes Stone in
-    /// Dock and Cmd-Tab. The SDL background hint suppresses launch activation;
-    /// FocusGained means the user has chosen Stone, so activation is wanted.
-    ///
-    /// Activation detail: after flipping policy we also explicitly call
-    /// `[NSApp activate]`. Without this, macOS's Cmd-Tab MRU list is not
-    /// updated — stone never enters the list, so Cmd-Tab from stone jumps
-    /// to whatever the previous app's Cmd-Tab target was (e.g. Chrome)
-    /// rather than back to the launching terminal. Explicit activation
-    /// inserts stone at MRU[0] and demotes the launcher to MRU[1].
+    /// Explicit activation updates the macOS Cmd-Tab MRU after promotion.
     pub fn promote_to_regular_once() {
         if PROMOTED_TO_REGULAR.with(|c| c.get()) {
             return;
@@ -470,30 +450,9 @@ mod macos_focus {
     }
 }
 
-/// X11 request errors on the window path, and the handler that keeps them from
-/// ending the process.
-///
-/// A reparenting WM (i3) owns a frame window around the client and destroys it
-/// when the client withdraws. Two SDL X11 paths then name that dead frame:
-/// `X11_SetWindowPosition` reads the client's current parent and calls
-/// XTranslateCoordinates through it (SDL_x11window.c:823), and the
-/// ConfigureNotify handler does the same while pumping events
-/// (SDL_x11events.c:1154). A request that lands inside the teardown therefore
-/// gets `BadWindow` on X_TranslateCoords.
-///
-/// SDL's own process handler cannot absorb that: its video init installs
-/// X11_SafetyNetErrHandler with the previous handler (Xlib's `_XDefaultError`)
-/// saved, and the safety net ends by calling it -- which prints
-/// `X Error of failed request: BadWindow ... 40 (X_TranslateCoords)` and exits
-/// the process. A game must not die because a WM replaced its frame, so stone
-/// takes the handler for its display: every error is logged through the shared
-/// logger, and none of them is fatal.
-///
-/// Tolerated: BadWindow and BadDrawable, the request named a window that was
-/// already gone. On this path that is the WM's frame teardown, which the WM owns
-/// and stone cannot prevent. `move_window` retries the move for those.
-/// Everything else is logged at error level and left alone: exiting from inside
-/// an Xlib callback loses the game with no cleanup and no diagnostics.
+/// SDL may translate through a window-manager frame destroyed during teardown.
+/// Its X11 safety net delegates to a fatal handler, so retain and log errors
+/// here; window moves retry BadWindow and BadDrawable.
 #[cfg(target_os = "linux")]
 pub mod x11_wm {
     use std::cell::Cell;
@@ -740,31 +699,12 @@ pub mod x11_focus {
         deferred_map(window, false)
     }
 
-    /// Stamp `_NET_WM_USER_TIME = 0` on a still-hidden SDL window so the
-    /// WM maps it without giving it focus.
-    ///
-    /// EWMH: a zero user-time at map time means "this map was not user-
-    /// initiated; do not focus it." Same mechanism as GTK's
-    /// gtk_window_set_focus_on_map(FALSE); honored by i3, mutter, kwin.
-    /// SDL has no equivalent — SDL2's X11_ShowWindow unconditionally
-    /// XMapRaised's, and SDL3 reads SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN on
-    /// X11 only to `(void)`-discard it. So: create hidden, stamp, show.
-    ///
-    /// The zero only suppresses focus on the *initial* map. SDL updates
-    /// the property with a real timestamp on the first user input, so
-    /// clicking the window focuses it normally from then on.
-    ///
-    /// No-op on Wayland (compositors don't let clients steal focus) and on
-    /// WMs that predate the EWMH user-time check (they just focus the
-    /// window — today's behavior, nothing worse).
+    /// Set EWMH user-time zero before mapping to suppress initial focus.
+    /// SDL supplies a real timestamp on subsequent input.
     pub fn set_user_time_zero(window: &sdl2::video::Window) {
         use sdl2::sys;
 
-        // Query the native handles via SDL_GetWindowWMInfo directly. sdl2's
-        // raw-window-handle wrappers run this same query but panic!() when it
-        // fails (e.g. SDL fell back to a non-X11 video driver under a
-        // degraded/SSH X session), and the unwind out of our extern "C"
-        // caller would hard-abort. The raw call just returns SDL_FALSE.
+        // The raw SDL query returns failure; the wrapper panics across FFI.
         let mut wm_info: sys::SDL_SysWMinfo = unsafe { std::mem::zeroed() };
         unsafe { sys::SDL_GetVersion(&mut wm_info.version) };
         if unsafe { sys::SDL_GetWindowWMInfo(window.raw(), &mut wm_info) }
@@ -801,12 +741,8 @@ pub mod x11_focus {
         }
     }
 
-    /// Mark the window's position as USER-specified (USPosition), not merely
-    /// program-specified, so the WM honors it on map instead of relocating the
-    /// window onto the pointer's monitor ("place on active monitor" policy --
-    /// the multi-monitor drift). Must be set before the map. Preserves SDL's
-    /// other size hints (min/max, resize increments) by editing the existing
-    /// set rather than replacing it.
+    /// Set USPosition before mapping so the WM honors the requested display.
+    /// Preserve SDL size hints.
     pub fn pin_user_position(window: &sdl2::video::Window, x: i32, y: i32) {
         use sdl2::sys;
 
@@ -847,12 +783,7 @@ pub mod x11_focus {
 #[cfg(target_os = "linux")]
 const MOVE_ATTEMPTS: u32 = 3;
 
-/// Move the window through the platform position path.
-///
-/// X11: SDL reads the window's current parent and translates through it, which
-/// on a reparenting WM can name the frame the WM is tearing down (see
-/// `x11_wm`). That error is tolerated and logged there; a move that only hit it
-/// is repeated so the position request still reaches the WM.
+/// SDL may translate through an X11 frame being torn down; retry that error.
 fn move_window(window: &mut sdl2::video::Window, x: i32, y: i32) {
     #[cfg(target_os = "linux")]
     {
@@ -894,10 +825,6 @@ struct PendingShow {
     activate: bool,
 }
 
-// =============================================================================
-// Types shared with the Stone cdef
-// =============================================================================
-
 /// Opaque window handle - wraps SDL2 window + GL context + glow
 pub struct StoneWindow {
     _sdl_context: sdl2::Sdl,
@@ -907,11 +834,7 @@ pub struct StoneWindow {
     gl: Rc<DebugGl>,
     event_pump: RefCell<sdl2::EventPump>,
     controller_manager: RefCell<input::SdlControllerManager>,
-    // A windowed window is created hidden and shown only after init, at this
-    // position -- a mapped X11 window is relocated by the WM to the pointer's
-    // monitor during the event-starved init, so we keep it unmapped until we
-    // can map it at the right spot with the loop already pumping. Some => a
-    // deferred show is still pending; None once shown (or never deferred).
+    // X11 mapping is deferred until the frame loop can reassert the position.
     pending_show: Option<PendingShow>,
     runtime_hidden: bool,
     title: String,
@@ -1374,37 +1297,13 @@ pub extern "C" fn stone_create_window_ex(
         return ptr::null_mut();
     }
 
-    // Don't steal focus from the user's current window when we open.
-    //
-    // Per-platform mechanism:
-    //
-    //   * macOS — SDL's Cocoa backend intentionally steals focus:
-    //     `Cocoa_RegisterApp` calls `[NSApp setActivationPolicy:Regular]`
-    //     and `applicationDidFinishLaunching` calls `[NSApp
-    //     activateIgnoringOtherApps:YES]` (after briefly activating the
-    //     Dock). Both are gated on `SDL_HINT_MAC_BACKGROUND_APP`; setting
-    //     the hint to "1" before SDL init suppresses them at the source.
-    //     See SDL_cocoaevents.m:289 and :461 in SDL 2.30.x.
-    //
-    //   * Windows — `SDL_HINT_WINDOW_NO_ACTIVATION_WHEN_SHOWN` (SDL2,
-    //     implemented only in the Windows backend).
-    //
-    //   * Linux — no SDL mechanism exists (the Windows hint above is a
-    //     no-op on X11, verified in tools/focus-experiment); mechanism
-    //     and Wayland story: `x11_focus::set_user_time_zero`.
-    //
-    // Accessory policy removes Stone from Dock and Cmd-Tab after SDL init.
-    // It still permits explicit activation, so teardown checks ownership.
-    //
-    // Opt out entirely with STONE_FOCUS_ON_SHOW=1.
+    // SDL focus suppression differs by platform; X11 also needs user-time zero.
     let prevent_focus_steal = std::env::var("STONE_FOCUS_ON_SHOW").is_err();
     if prevent_focus_steal {
         sdl2::hint::set("SDL_MAC_BACKGROUND_APP", "1");
         sdl2::hint::set("SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN", "1");
 
-        // Capture who was frontmost BEFORE SDL runs, so we can hand focus
-        // back on shutdown instead of letting macOS pick an arbitrary app
-        // (usually Finder) based on window z-order.
+        // Capture before SDL can change the frontmost app.
         #[cfg(target_os = "macos")]
         macos_focus::capture_previous_frontmost();
     }
@@ -1493,15 +1392,7 @@ pub extern "C" fn stone_create_window_ex(
     };
     let born_fullscreen = boot_fs.is_some();
 
-    // A plain windowed window is created hidden and shown only after init
-    // (stone_show_window_if_deferred, once the frame loop is live). A tiling WM
-    // (i3) maps a floating window on the *focused* output regardless of the
-    // requested position, so we map it late and re-assert the position after
-    // the map -- which i3 does honor -- landing it on the intended monitor with
-    // no visible relocation. Linux-only: macOS/Windows honor the create-time
-    // position, so they keep showing immediately. Fullscreen is pinned to its
-    // display by the WM (no defer); headless never shows. STONE_IMMEDIATE_SHOW=1
-    // opts out.
+    // A tiling WM can ignore create-time position; reassert it after mapping.
     let defer_windowed_show = cfg!(target_os = "linux")
         && !headless
         && !born_fullscreen
@@ -1578,12 +1469,7 @@ pub extern "C" fn stone_create_window_ex(
         window_builder.hidden();
     }
 
-    // High-DPI makes the GL drawable size track the host display's scale
-    // factor, so a headless image_snapshot renders at 1440x1433 on a 1.0
-    // display but 1920x1910 on a 1.333 one -- non-reproducible across dev
-    // machines and CI. Headless (sim) runs render at the logical window
-    // size for deterministic, portable snapshots; real windowed runs keep
-    // high-DPI for crisp output.
+    // Headless snapshots use logical pixels so display scale cannot change them.
     if !headless {
         window_builder.allow_highdpi();
     }
@@ -1624,14 +1510,7 @@ pub extern "C" fn stone_create_window_ex(
         window.show();
     }
 
-    // Born-fullscreen: SDL_SetWindowFullscreen(DESKTOP) fullscreens on the
-    // display the window currently sits on, and an unmapped window's requested
-    // position isn't yet honored -- so map it (show) at the target-display
-    // origin FIRST, reassert the position now that it's mapped, then go
-    // fullscreen. It comes up fullscreen on the right monitor with no runtime
-    // move. The window has no rendered content yet, so the pre-fullscreen mapped
-    // frame is blank, not a visible windowed flash. Fit above is skipped -- the
-    // mode owns the whole display.
+    // SDL fullscreen selects the current display, so map at the target first.
     if born_fullscreen {
         #[cfg(target_os = "linux")]
         if defer_show_for_focus {
