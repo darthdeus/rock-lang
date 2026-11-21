@@ -626,10 +626,6 @@ pub fn run_fn(lua: &str, name: &str) -> String {
     run_luajit(&format!("{lua}\n{resolved}()\n"))
 }
 
-pub fn compile_and_run(src: &str) -> String {
-    run_main(&emit_module(src))
-}
-
 pub use skull::allocation_report::{activation_scope, scope as allocation_scope};
 pub use skull_transform::inline_off_guard;
 
