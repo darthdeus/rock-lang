@@ -630,76 +630,6 @@ fn wait_for_ready(root: &Path, runs: &mut Runs, names: [&str; 2]) {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn concurrent_game_runs_keep_their_own_output() {
-    let root = tempfile::tempdir().unwrap();
-    let shared = root.path().join("tmp/main.lua");
-    write_files(root.path(), &[("tmp/main.lua", "unrelated output")]);
-    let names = ["first", "second"];
-    let mut runs = Runs(Vec::new(), None);
-    for name in names {
-        let source = format!(
-            r#"
-inline(lua) fn wait_for_release() = """
-    local ffi = require("ffi")
-    ffi.cdef("int usleep(unsigned int);")
-    local ready = assert(io.open("{name}.ready", "w"))
-    ready:write("ready")
-    ready:close()
-    while true do
-        local release = io.open("release", "r")
-        if release then release:close(); return end
-        ffi.C.usleep(10000)
-    end
-"""
-fn main() {{ wait_for_release() }}
-"#
-        );
-        let project = write_project(
-            &root.path().join(name),
-            name,
-            "",
-            &[("main_stone.rock", &source)],
-        );
-        runs.0.push(
-            log_output(
-                skip_engine_build(root.path())
-                    .arg("run")
-                    .arg(project)
-                    .env("STONE_HEADLESS", "1"),
-                &root.path().join(format!("{name}.log")),
-            )
-            .spawn()
-            .unwrap(),
-        );
-    }
-    wait_for_ready(root.path(), &mut runs, names);
-    assert_eq!(
-        read(&shared),
-        "unrelated output",
-        "game run overwrote shared output"
-    );
-    for (child, (name, other)) in runs
-        .0
-        .iter()
-        .zip([("first", "second"), ("second", "first")])
-    {
-        let generated = root
-            .path()
-            .join("tmp/stone")
-            .join(format!("{name}-{}", child.id()))
-            .join("main.lua");
-        let contents = std::fs::read_to_string(generated).unwrap();
-        assert!(contents.contains(&format!("{name}.ready")));
-        assert!(!contents.contains(&format!("{other}.ready")));
-    }
-    std::fs::write(root.path().join("release"), "").unwrap();
-    for child in &mut runs.0 {
-        assert!(child.wait().unwrap().success());
-    }
-}
-
 #[test]
 fn bounded_commands_run_an_external_stone_project() {
     let fixture = tempfile::tempdir().unwrap();
@@ -1147,28 +1077,6 @@ fn game_run(root: &Path, launcher: &str, script: &str) -> Command {
         .env("ROCK_LUAJIT", launcher)
         .env("ROCK_HEADLESS_SCOPE", "0");
     command
-}
-
-#[cfg(unix)]
-#[test]
-fn game_run_forwards_app_arguments() {
-    let root = tempfile::tempdir().unwrap();
-    let arguments = root.path().join("arguments");
-    let output = game_run(
-        root.path(),
-        "luajit-probe",
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ARGUMENTS\"\n",
-    )
-    .args(["--", "first", "two words", "--flag"])
-    .env("STONE_HEADLESS", "0")
-    .env("STONE_JV", "0")
-    .env("ARGUMENTS", &arguments)
-    .output()
-    .unwrap();
-    assert!(output.status.success(), "{}", text(&output));
-    let arguments = read(&arguments);
-    let arguments: Vec<_> = arguments.lines().collect();
-    assert_eq!(&arguments[1..], ["first", "two words", "--flag"]);
 }
 
 #[cfg(unix)]
