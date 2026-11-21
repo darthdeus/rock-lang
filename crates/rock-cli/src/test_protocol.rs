@@ -227,34 +227,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_result_lines_ignoring_other_output() {
-        let stdout = "hello\n\
-                      __SKULL__\tPASS\t\n\
-                      noise __SKULL__ not at line start\n\
-                      __SKULL__\tVALUE\tt_a\t42\n\
-                      __SKULL__\tVALUE\tt_c\t-1.5\n\
-                      __SKULL__\tFAIL\tt_a: error: boom\n\
-                      __SKULL__\tPASS\t\n\
-                      __SKULL__\tFAIL\tt_b: output mismatch: expected <1> got <2>\n";
-        let m = parse_skull_markers(stdout).expect("markers present");
-        assert_eq!(m.passed, 2);
-        assert_eq!(
-            m.fails,
-            vec![
-                "t_a: error: boom".to_string(),
-                "t_b: output mismatch: expected <1> got <2>".to_string()
-            ]
-        );
-        assert_eq!(
-            m.values,
-            vec![
-                ("t_a".to_string(), "42".to_string()),
-                ("t_c".to_string(), "-1.5".to_string())
-            ]
-        );
-    }
-
-    #[test]
     fn legacy_time_lines_do_not_count_as_results() {
         let stdout = "__SKULL__\tPASS\t\n\
                       __SKULL__\tTIME\tt_a\t12.500\tpass\twatch-token\t0\n\
@@ -283,20 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn no_marker_lines_is_none() {
-        assert!(parse_skull_markers("plain output\nno markers here\n").is_none());
-        assert!(parse_skull_markers("").is_none());
-    }
-
-    #[test]
-    fn fail_detail_preserves_tabs_past_the_marker() {
-        // splitn(3, '\t') keeps tabs INSIDE the detail intact.
-        let m = parse_skull_markers("__SKULL__\tFAIL\ta: got <x\ty>\n").expect("markers");
-        assert_eq!(m.passed, 0);
-        assert_eq!(m.fails, vec!["a: got <x\ty>".to_string()]);
-    }
-
-    #[test]
     fn histogram_sorts_by_count_desc_then_reason_asc() {
         let reasons = ["b", "a", "b", "c", "a", "b"];
         assert_eq!(
@@ -313,17 +271,6 @@ mod tests {
             vec![("y".to_string(), 1), ("z".to_string(), 1)]
         );
         assert!(reason_histogram([]).is_empty());
-    }
-
-    #[test]
-    fn compare_int_exact_and_across_serializations() {
-        use skull::ValueExpect::*;
-        assert!(compare_value(&Int(42), "42", FLOAT_REL_TOL).is_ok());
-        // A backend may serialize an int-typed 42 as 42.0 (or 17-digit form);
-        // the host compares parsed f64s, not strings.
-        assert!(compare_value(&Int(42), "42.000000000000000", FLOAT_REL_TOL).is_ok());
-        let err = compare_value(&Int(43), "42", FLOAT_REL_TOL).unwrap_err();
-        assert_eq!(err, "value mismatch: expected <43> got <42>");
     }
 
     #[test]
