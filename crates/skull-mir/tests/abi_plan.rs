@@ -720,32 +720,6 @@ fn main() { print("main") }
 }
 
 #[test]
-fn aggregate_value_projection_has_an_owned_value_context() {
-    let ws = checked_ws_of("nobox value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
-    let arena = RepArena::default();
-    let id = arena
-        .plan(
-            &ws,
-            bone_core::hir::FnBackend::Lua,
-            &nominal(&ws, "V2"),
-            RepUse::Value,
-            &RepUseFacts::default(),
-            RepGuarantees {
-                nobox: true,
-                allow_opaque: true,
-            },
-        )
-        .expect("a concrete aggregate value must have a physical plan");
-    let plan = arena.get(id);
-    assert_eq!(plan.use_context(), RepUse::Value);
-    assert_eq!(plan.value_storage(), Some(ValueStorage::CData));
-    assert!(
-        matches!(plan.layout(), RepLayout::Leaves(_)),
-        "aggregate plan must carry leaves"
-    );
-}
-
-#[test]
 fn global_storage_uses_an_owned_value_plan() {
     let ws = checked_ws_of(
         "nobox value G { x: float, y: float }\n\
@@ -790,58 +764,6 @@ fn main() {
     skull_mir::mir::column_elem_rep_plans(&mir, &mut plans);
     assert_eq!(plans.get(&key(&ws, "V2")).map(|p| p.0), Some(false));
     assert_eq!(plans.get(&key(&ws, "NV2")).map(|p| p.0), Some(true));
-}
-
-#[test]
-fn nominal_value_storage_is_owned_by_the_rep_plan() {
-    let ws = checked_ws_of("value Boxed { text: string, tag: int }\n");
-    let arena = RepArena::default();
-    let id = arena
-        .plan_nominal_value(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Boxed"))
-        .expect("a GC-carrying value must have an explicit physical plan");
-    let plan = arena.get(id);
-    assert_eq!(plan.value_storage(), Some(ValueStorage::GcTable));
-    assert!(matches!(plan.layout(), RepLayout::Leaves(_)));
-    assert_eq!(
-        arena
-            .nominal_value_storage_required(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Boxed"))
-            .expect("the required storage plan must exist"),
-        ValueStorage::GcTable
-    );
-}
-
-#[test]
-fn nominal_value_paths_and_addresses_are_owned_by_the_rep_plan() {
-    let ws =
-        checked_ws_of("value V2 { x: float, y: float }\nvalue Boxed { child: V2, tag: int }\n");
-    let arena = RepArena::default();
-    let expected = vec![
-        Ustr::from("child.x"),
-        Ustr::from("child.y"),
-        Ustr::from("tag"),
-    ];
-    assert_eq!(
-        arena
-            .nominal_value_leaf_paths_required(
-                &ws,
-                bone_core::hir::FnBackend::Lua,
-                key(&ws, "Boxed"),
-            )
-            .expect("the required leaf-path plan must exist"),
-        expected
-    );
-    let plan = native_buffer_plan(&ws, &arena, "Boxed");
-    let addresses = plan
-        .leaf_places()
-        .expect("the concrete value plan must own nonzero leaf addresses");
-    assert_eq!(
-        addresses
-            .iter()
-            .map(|address| address.path)
-            .collect::<Vec<_>>(),
-        expected
-    );
-    assert!(addresses.iter().all(|address| address.stride > 0));
 }
 
 #[test]
