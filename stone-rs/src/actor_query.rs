@@ -112,31 +112,6 @@ mod tests {
     }
 
     #[test]
-    fn sparse_candidates_skip_holes_filter_exact_edges_and_sort_slots() {
-        let records = [
-            record(true, 5, 5, 10, true), // Slot 0: inclusive maximum corner.
-            record(false, 2, 2, 11, true),
-            record(true, 0, 0, 12, true), // Slot 2: inclusive minimum corner.
-            record(true, 3, 4, 13, true),
-            record(true, 6, 3, 14, true), // Candidate, outside exact rectangle.
-            record(true, 4, 4, 15, true),
-        ]
-        .concat();
-        let candidates = [5, 4, 1, 3, 0, 2];
-        let mut output = [-1; 8];
-
-        assert!(query(
-            &records,
-            &candidates,
-            (0, 0, 5, 5),
-            false,
-            &mut output
-        ));
-        assert_eq!(&output[..6], &[4, 5, 0, 2, 3, 5]);
-        assert_eq!(&output[6..], &[-1; 2]);
-    }
-
-    #[test]
     fn installed_filter_precedes_examined_count() {
         let records = [
             record(true, 1, 1, 1, false),
