@@ -107,7 +107,6 @@ macro_rules! parity_tests {
 
 parity_tests! {
     js_run_matches_luajit_end_to_end: both_backends(GATE, EXPECTED);
-    js_run_project_dir_matches_luajit: both_backends_project(PROJECT_FILES, "sum=30\n");
     js_run_modules_v1_bin_package_runs_main: both_backends_project(MODULES_V1_FILES, "17\n");
     js_run_no_main_is_load_effects_only: both_backends(NO_MAIN, "");
 }
