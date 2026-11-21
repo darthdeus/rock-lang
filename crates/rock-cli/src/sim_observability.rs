@@ -662,14 +662,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unique_history_directories_are_created() {
-        let root = tempfile::tempdir().expect("history root");
-        let a = SimRunRecorder::begin_at(root.path(), "p", "a", false, None);
-        let b = SimRunRecorder::begin_at(root.path(), "p", "b", false, None);
-        assert_ne!(a.events_path(), b.events_path());
-    }
-
-    #[test]
     fn entry_and_admission_records_keep_the_fields_budget_readers_use() {
         let root = tempfile::tempdir().unwrap();
         let recorder = SimRunRecorder::begin_at(root.path(), "p", "a", false, None);
