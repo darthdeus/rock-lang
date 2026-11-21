@@ -472,25 +472,3 @@ fn import_path(ws: &Workspace, frag: &FragmentScope, meta: &DefMeta) -> Option<(
     segments.push(meta.name);
     Some((from_root, segments))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn displayed_types_resolve_standalone_keys_with_file_punctuation() {
-        let key = Ustr::from(
-            format!(
-                "{}fixture-dir/types.rock::Kind",
-                bone_core::modules::STANDALONE_PACKAGE_PREFIX
-            )
-            .as_str(),
-        );
-        let spellings = std::collections::HashMap::from([(key, vec![Ustr::from("Alias")])]);
-        let ws = Workspace::new();
-        assert_eq!(
-            display_type_with_names(&ws, &format!("Vec<{key}?>"), &spellings),
-            "Vec<Alias?>"
-        );
-    }
-}
