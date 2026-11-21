@@ -2040,64 +2040,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    pub(crate) fn column_vec_literal(
-        &mut self,
-        elems: &[Idx<Expr>],
-        elem: ColumnElem,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let shape = self.column_shape(elem)?;
-        let paths = column_leaf_paths(&shape);
-        let mut columns: Vec<(Ustr, Vec<Idx<Inst>>)> = paths
-            .iter()
-            .map(|p| (*p, Vec::with_capacity(elems.len())))
-            .collect();
-        for &e in elems {
-            let repr = self.lower_expr_repr(e)?;
-            let leaves =
-                self.element_storage_leaves(&repr, &shape, paths.len(), elem, "column literal")?;
-            for (col, leaf) in columns.iter_mut().zip(leaves) {
-                col.1.push(leaf);
-            }
-        }
-        let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
-        Ok(self.emit_cur(Inst::MakeVecColumns {
-            elem: elem.name,
-            representation: elem.representation(),
-            nobox: elem.is_nobox(),
-            columns,
-            len: elems.len(),
-            capacity,
-        }))
-    }
-
-    pub(crate) fn strided_vec_literal(
-        &mut self,
-        elems: &[Idx<Expr>],
-        elem: ColumnElem,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let shape = self.column_shape(elem)?;
-        let stride = shape.leaf_count();
-        let mut values = Vec::with_capacity(elems.len() * stride);
-        for &expr in elems {
-            let bundle = self.lower_expr_repr(expr)?;
-            let leaves =
-                self.element_storage_leaves(&bundle, &shape, stride, elem, "strided literal")?;
-            for leaf in leaves {
-                values.push(self.strided_encode(elem, leaf));
-            }
-        }
-        let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
-        Ok(self.emit_cur(Inst::MakeVecStrided {
-            elem: elem.name,
-            representation: elem.representation(),
-            nobox: elem.is_nobox(),
-            stride,
-            values,
-            len: elems.len(),
-            capacity,
-        }))
-    }
-
     pub(crate) fn lower_array_literal(
         &mut self,
         lit: Idx<Expr>,
@@ -2130,10 +2072,8 @@ impl<'a> Builder<'a> {
             None => self.vec_flat_elem_of(lit)?,
         };
         if !has_spread {
-            match flat_elem {
-                Some((elem, FlatStorage::Columns)) => return self.column_vec_literal(&idxs, elem),
-                Some((elem, FlatStorage::Strided)) => return self.strided_vec_literal(&idxs, elem),
-                None => {}
+            if let Some((elem, storage)) = flat_elem {
+                return self.flat_vec_literal(&idxs, elem, storage);
             }
             let vs: Vec<Idx<Inst>> = idxs
                 .iter()
@@ -2141,30 +2081,31 @@ impl<'a> Builder<'a> {
                 .collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
-        if let Some((elem, storage)) = flat_elem {
-            let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
-            let arr = self.empty_flat_vec(elem, storage, capacity)?;
-            for &e in &idxs {
-                if let Expr::Spread(inner) = self.body.expr_arena[e] {
-                    self.spread_into(arr, inner, SpreadDest::Flat(elem, storage))?;
-                } else {
-                    let bundle = self.lower_expr_repr(e)?;
-                    self.flat_append_bundle(arr, &bundle, elem, storage)?;
-                }
+        let (arr, dest) = match flat_elem {
+            Some((elem, storage)) => {
+                let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
+                let arr = self.empty_flat_vec(elem, storage, capacity)?;
+                (arr, SpreadDest::Flat(elem, storage))
             }
-            return Ok(arr);
-        }
-        let arr = self.emit_cur(Inst::MakeVec(vec![]));
-        for &e in &idxs {
+            None => (
+                self.emit_cur(Inst::MakeVec(vec![])),
+                SpreadDest::Container(ContainerKind::Vec),
+            ),
+        };
+        for e in idxs {
             if let Expr::Spread(inner) = self.body.expr_arena[e] {
-                self.spread_into(arr, inner, SpreadDest::Container(ContainerKind::Vec))?;
+                self.spread_into(arr, inner, dest)?;
             } else {
-                let v = self.lower_expr(e)?;
-                self.emit_cur(Inst::ArrayPush {
-                    arr,
-                    value: v,
-                    kind: ContainerKind::Vec,
-                });
+                match dest {
+                    SpreadDest::Container(kind) => {
+                        let value = self.lower_expr(e)?;
+                        self.emit_cur(Inst::ArrayPush { arr, value, kind });
+                    }
+                    SpreadDest::Flat(elem, storage) => {
+                        let bundle = self.lower_expr_repr(e)?;
+                        self.flat_append_bundle(arr, &bundle, elem, storage)?;
+                    }
+                }
             }
         }
         Ok(arr)
@@ -2273,28 +2214,12 @@ impl<'a> Builder<'a> {
             base: src,
             kind: src_kind,
         });
-        let i_cell = self.f.new_cell(None);
-        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.store_cell(i_cell, zero);
-
-        let header = self.f.new_block();
-        let body = self.f.new_block();
-        let exit = self.f.new_block();
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = header;
-        let i = self.emit_cur(Inst::Load(i_cell));
-        let cmp = self.emit_cur(Inst::IntLt(i, n));
-        self.branch_to(cmp, body, exit);
-
-        self.cur = body;
-        let i_now = self.emit_cur(Inst::Load(i_cell));
-        let repr = self.loop_element_repr_at(src, i_now, src_kind)?;
-        self.append_spread_value(arr, repr, dest)?;
-        self.increment_cell(i_cell);
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = exit;
-        Ok(())
+        self.for_each_row(n, |s, cell, _| {
+            let i = s.emit_cur(Inst::Load(cell));
+            let repr = s.loop_element_repr_at(src, i, src_kind)?;
+            s.append_spread_value(arr, repr, dest)?;
+            let i = s.emit_cur(Inst::Load(cell));
+            Ok(s.int_plus_one(i))
+        })
     }
 }
