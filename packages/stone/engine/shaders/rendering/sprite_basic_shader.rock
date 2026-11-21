@@ -1,17 +1,5 @@
-// The basic sprite program (formerly the embedded default program in
-// stone-rs/src/sprite.rs), authored in Rock: compiled in-game via
-// `rock_shader(sprite_basic_vert, sprite_basic_frag)` -- no committed GLSL.
-// Serves the immediate shape path (submit_immediate_shape) when no world/UI
-// camera pass is bound.
-//
-// VERTEX-FORMAT LOCKSTEP: the @attr field order fixes attribute locations 0,1,2
-// (aPos, aTexCoord, aColor), matching the sprite VAO and the reflected mesh
-// VAO (whose extra attributes this program does not read, like the embedded
-// program it replaces). Do not
-// reorder.
-//
-// The matrices arrive as the ENGINE block at binding 0 (`engine_uniforms`);
-// the standalone/immediate path fills it with a pixel ortho and identity view.
+// Attribute field order fixes locations 0, 1 and 2 to match the sprite VAO.
+// ENGINE binding 0 supplies pixel ortho and identity view for immediate draws.
 
 pub value SpriteBasicVert {
     aPos: Vec2f,
