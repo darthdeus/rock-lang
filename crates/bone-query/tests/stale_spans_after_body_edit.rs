@@ -1,6 +1,5 @@
 //! A body edit that shifts lines in one fn must not leave other fns' navigation spans stale.
 
-use crate::completion::{assert_labels, labels_of};
 use crate::fixture::{PATH, workspace};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;

@@ -3172,7 +3172,6 @@ mod failure_log;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FileUriExt;
 
     fn span_test_workspace(path: &str) -> BoneWorkspace {
         let mut bone = BoneWorkspace::new();
@@ -3451,14 +3450,6 @@ mod tests {
             .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some(name))
             .map(|(_, f)| f.param_decls[0].ty)
             .unwrap()
-    }
-
-    fn key_for_tail(ws: &Workspace, name: &str) -> Ustr {
-        *ws.defs
-            .iter()
-            .find(|(_, meta)| meta.name.as_str() == name)
-            .map(|(key, _)| key)
-            .expect("definition key")
     }
 
     #[test]

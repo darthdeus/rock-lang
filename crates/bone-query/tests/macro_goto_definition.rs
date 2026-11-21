@@ -1,9 +1,7 @@
 //! Goto-definition on a macro invocation name jumps to the `macro` decl, not the expansion.
 
-use crate::fixture::{Project, pos};
+use crate::fixture::pos;
 use bone_query::BoneWorkspace;
-use bone_query::FileUriExt;
-use lsp_types::Uri;
 
 fn probe_path(name: &str) -> String {
     if cfg!(windows) {

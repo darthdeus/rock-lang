@@ -2,8 +2,6 @@
 
 use crate::completion::*;
 use crate::fixture::Project;
-use bone_query::BoneWorkspace;
-use lsp_types::Position;
 
 const RECEIVER_OVERLOAD: &str = "value Color { r: float, g: float, b: float, a: float }\nstruct UiRect { x: float }\n\
     struct Image { w: int }\nglobal WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }\n\

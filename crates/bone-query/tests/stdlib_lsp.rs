@@ -1,8 +1,6 @@
 //! The stdlib behaves like any other workspace file: real canonical paths, seeded texts.
 
-use crate::fixture::{Project, hover_markup};
 use bone_query::BoneWorkspace;
-use lsp_types::{DiagnosticSeverity, Position};
 
 /// Canonical on-disk path of a stdlib file: what the editor sends and sees.
 fn stdlib_path(name: &str) -> String {

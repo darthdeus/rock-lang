@@ -1,8 +1,7 @@
 //! The LSP over a modules-v1 package.
 
-use crate::completion::{assert_invariants, assert_labels, find, labels_of};
+use crate::completion::{assert_invariants, find, labels_of};
 use crate::fixture::{Project, assert_no_errors, covered, position_of_offset};
-use crate::label_asserts::{assert_lacks, assert_offers};
 use bone_query::BoneWorkspace;
 use bone_query::FileUriExt;
 use lsp_types::Position;
@@ -278,7 +277,6 @@ fn hover_on_v1_signature_types_records_each_nominal_spelling() {
 /// Completion items at the end of `typed`, typed as a new line inside
 /// `main`'s body (the line after `let a = ...`).
 const MAIN_ANCHOR: &str = "    let a = shapes::inner::depth()\n";
-const SIZES_ANCHOR: &str = "    let width = box_width(b)\n";
 
 fn with_completion(typed: &str, anchor: &str) -> String {
     MAIN.replace(anchor, &format!("{anchor}    {typed}\n"))
@@ -295,10 +293,6 @@ fn complete_at(
 
 fn complete_in_main(typed: &str) -> Vec<lsp_types::CompletionItem> {
     complete_at_anchor(typed, MAIN_ANCHOR)
-}
-
-fn complete_in_sizes(typed: &str) -> Vec<lsp_types::CompletionItem> {
-    complete_at_anchor(&format!("let q = {typed}"), SIZES_ANCHOR)
 }
 
 fn complete_at_anchor(typed: &str, anchor: &str) -> Vec<lsp_types::CompletionItem> {

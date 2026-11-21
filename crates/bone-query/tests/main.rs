@@ -25,8 +25,6 @@ mod ctags;
 mod cw7_backend_failure_reporting;
 #[path = "enum_variant_nav.rs"]
 mod enum_variant_nav;
-#[path = "hole_info.rs"]
-mod hole_info;
 #[path = "hover.rs"]
 mod hover;
 #[path = "incremental_stale_diagnostic.rs"]
@@ -39,12 +37,6 @@ mod inline_local_macro_spans;
 mod interface_relower_staleness;
 #[path = "interp_hole_spans.rs"]
 mod interp_hole_spans;
-#[path = "line_index.rs"]
-mod line_index;
-#[path = "lint_columns_after_body_edit.rs"]
-mod lint_columns_after_body_edit;
-#[path = "lint_incremental_matches_fresh.rs"]
-mod lint_incremental_matches_fresh;
 #[path = "lsp_span_coverage.rs"]
 mod lsp_span_coverage;
 #[path = "lsp_utf16_columns.rs"]
@@ -53,10 +45,6 @@ mod lsp_utf16_columns;
 mod macro_goto_definition;
 #[path = "modules_v1.rs"]
 mod modules_v1;
-#[path = "noncanonical_path.rs"]
-mod noncanonical_path;
-#[path = "phantom_block_sentinel.rs"]
-mod phantom_block_sentinel;
 #[path = "program_inputs.rs"]
 mod program_inputs;
 #[path = "query.rs"]
