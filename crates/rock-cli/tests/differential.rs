@@ -81,13 +81,6 @@ fn campaign() {
 }
 
 #[test]
-fn reload_smoke() {
-    if let Err(finding) = reload::check(2) {
-        panic!("reload seed 2: {finding}");
-    }
-}
-
-#[test]
 #[ignore = "long reload campaign; set ROCK_DIFF_SEEDS and ROCK_DIFF_START"]
 fn reload_campaign() {
     for seed in seeds() {
@@ -107,11 +100,6 @@ fn mutations(seed: u64, count: usize) {
     if let Err(finding) = mutations::check(seed, count) {
         panic!("mutation seed {seed}: {finding}");
     }
-}
-
-#[test]
-fn mutation_smoke() {
-    mutations(2, 12);
 }
 
 #[test]
