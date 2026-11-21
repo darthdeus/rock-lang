@@ -1,0 +1,11 @@
+fn side(x: int) -> int { return x * 7 + 1 }
+
+@inline fn pick(flag: bool, x: int) -> int {
+    if flag { return side(x) }
+    return x + 2
+}
+
+fn caller(x: int) -> int { return pick(false, x) }
+
+@test(output = "7")
+fn inlined_constant_argument() { print("{caller(5)}") }

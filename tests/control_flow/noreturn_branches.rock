@@ -1,0 +1,41 @@
+@nomangle fn check_0(n: int) -> int {
+    if n < 0 {
+        error("negative")
+        print("after")
+    }
+    return n * 2
+}
+@test(output = "6")
+fn return_after_guard() { print(check_0(3)) }
+
+@nomangle fn get(x: int?) -> int {
+    let v = x.unwrap()
+    return v + 1
+}
+@test(output = "5")
+fn return_after_unwrap() { print(get(4)) }
+
+struct W { n: int }
+@nomangle fn live(w: W) -> bool { return w.n > 0 }
+@nomangle fn check_2(a: int, b: int, c: int, w: W?) -> bool {
+    let ok = a > 0
+    if ok {
+        ok = w != null
+    }
+    if ok {
+        ok = live(w.unwrap())
+    }
+    return ok && b > c
+}
+@test(output = "true")
+fn branch_with_unwrap() { print(check_2(1, 2, 1, W { n: 1 })) }
+
+inline(lua) fn traps_after_guard() -> bool = """
+    local ok, message = pcall(check_0, -1)
+    return not ok and string.find(tostring(message), 'negative', 1, true) ~= nil
+"""
+
+@test(backends = "lua")
+fn negative_guard_traps_before_the_following_statement() {
+    assert(traps_after_guard())
+}

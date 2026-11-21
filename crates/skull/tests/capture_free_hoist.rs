@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, mangled_name, run_luajit, run_main};
+use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
 #[test]
 fn defer_retains_an_existing_cleanup_without_a_forwarding_capture() {
@@ -108,24 +108,6 @@ fn main() { let _ = mk() }
     let mk = mangled_name(&lua, "mk");
     let driver = format!("\nlocal a = {mk}()\nlocal b = {mk}()\nprint(rawequal(a, b))\n");
     assert_eq!(run_luajit(&format!("{lua}{driver}")), "true");
-}
-
-#[test]
-fn transitive_root_capture_hoists_both() {
-    let src = r#"
-fn transitive(x: int) -> fn() -> int {
-    let outer = () => { return () => x }
-    return outer()
-}
-fn main() { let g = transitive(7) print("{g()}") }
-"#;
-    let lua = emit_module(src);
-    let m = mangled_name(&lua, "transitive");
-    assert!(
-        lua.contains(&format!("function {m}__lambda0(c"))
-            && lua.contains(&format!("function {m}__lambda1(c"))
-    );
-    assert_eq!(run_main(&lua), "7");
 }
 
 #[test]

@@ -1,0 +1,6 @@
+fn transitive(x: int) -> fn() -> int {
+    let outer = () => { return () => x }
+    return outer()
+}
+@test(output = "7")
+fn closure_propagates_transitive_capture() { let g = transitive(7) print("{g()}") }

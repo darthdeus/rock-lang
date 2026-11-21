@@ -1,0 +1,21 @@
+@nomangle fn get(x: int?) -> int { return x.unwrap() + 1 }
+@nomangle fn need(x: int?) -> int { return x.expect("x is required") + 1 }
+
+inline(lua) fn valid_optional_results() -> bool = "return get(2) == 3 and need(4) == 5"
+inline(lua) fn optional_failure_messages() -> bool = """
+    local function failing_caller() local v = get(nil); return v end
+    local ok, message = pcall(failing_caller)
+    assert(not ok)
+    assert(message:find("unwrap() called on null value", 1, true), message)
+    assert(message:find("in function 'get'", 1, true), message)
+    ok, message = pcall(need, nil)
+    assert(not ok)
+    assert(message:find("expect() failed: x is required", 1, true), message)
+    return true
+"""
+
+@test(backends = "lua")
+fn optional_failures_report_the_message_and_the_call_site() {
+    assert(valid_optional_results())
+    assert(optional_failure_messages())
+}

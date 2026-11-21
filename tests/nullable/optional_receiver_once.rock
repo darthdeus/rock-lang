@@ -1,0 +1,13 @@
+value Row { text: string, n: int }
+struct Counter { calls: int = 0 }
+@nomangle fn next_row(c: Counter) -> Row? {
+    c.calls += 1
+    if c.calls == 1 { return Row { text: "first", n: 7 } }
+    return null
+}
+@nomangle fn read_once(c: Counter) -> int { return next_row(c)?.n ?? -1 }
+@test(output = "7 1")
+fn optional_receiver_runs_once() {
+    let c = Counter {}
+    print("{read_once(c)} {c.calls}")
+}

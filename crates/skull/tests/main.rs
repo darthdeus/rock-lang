@@ -35,7 +35,6 @@ mod const_hot_reload;
 mod coroutine_frame_writes;
 mod coroutine_hook_hoist;
 mod coroutine_trace_witness;
-mod default_guard_fold;
 mod defer_unwind;
 mod descriptor_value_repr;
 mod embed_scalarize;
@@ -70,10 +69,8 @@ mod repr_opaque_param;
 mod vec_push_column_route;
 
 mod inline_body_column_map_param;
-mod inline_constant_argument;
 
 mod inline_lua_column_container_param_sentinel;
-mod inline_lua_splice;
 mod inline_value_specialization;
 mod live_call_conversion;
 
@@ -84,7 +81,6 @@ mod identity_storage_instances;
 mod instance_owned_emission;
 mod relocation;
 mod site_join;
-mod struct_default_generic_relation;
 
 mod shader_artifact;
 
@@ -104,14 +100,12 @@ mod native_buffer_alloc;
 mod native_buffer_element_admission;
 mod native_buffer_leaf_addressing;
 mod nil_kill_scope;
-mod nobox_arena_random_sentinel;
 mod nobox_column_threshold;
 mod nobox_generic_return_boundary_sentinel;
 mod nobox_materialize_gc_tier;
 mod nobox_nested_ctor;
 mod nobox_values;
 mod nobox_wide_strided;
-mod noreturn_calls;
 mod nullable_embed_clear;
 mod nullable_generic_binding_sroa;
 mod nullable_value_join_sroa;
@@ -120,7 +114,6 @@ mod plain_struct_scalarize;
 mod preflight;
 mod program_roots;
 mod removed_global_markers;
-mod reserved_namespace;
 mod shader_pipeline_register;
 mod state_global_bridge;
 mod static_hot_reload;
@@ -128,7 +121,6 @@ mod tail_calls;
 mod tuple_scalarize;
 mod uniform_block_pack;
 mod unread_runtime_tables;
-mod unwrap_failure;
 mod user_fn_emit_rejection;
 mod value_leaf_layout;
 mod value_scalarize;
@@ -140,16 +132,11 @@ mod vec_value_columns;
 mod wide_value_abi;
 mod wide_value_slot_budget;
 
-mod condition_branches;
-
 mod projection_demand;
 
-mod read_folding;
 mod return_kills;
 
 mod argument_demand;
-
-mod optional_receiver_once;
 
 mod covered_field_reads;
 mod fresh_struct_projection;

@@ -1,0 +1,10 @@
+fn seed<T>() -> T? { return null }
+
+struct Box<T> { value: T? = seed() }
+
+@test(output = "nil nil")
+fn generic_default_fixture() {
+    let a: Box<int> = Box {}
+    let b: Box<string> = Box {}
+    print("{a.value} {b.value}")
+}

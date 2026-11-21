@@ -1,0 +1,19 @@
+global r: int = 1
+global rx1: int = 1
+global r1x: int = 1
+global __rock_foo: int = 9
+
+fn add_r(a: int) -> int { return a + r }
+fn add_rx1(a: int) -> int { return a + rx1 }
+fn add_r1x(a: int) -> int { return a + r1x }
+fn add_rock_foo(a: int) -> int { return a + __rock_foo }
+fn radius(a: int) -> int { return a * 2 }
+
+@test
+fn user_names_shaped_like_emitter_locals() {
+    assert(add_r(1) == 2)
+    assert(add_rx1(1) == 2)
+    assert(add_r1x(1) == 2)
+    assert(radius(3) == 6)
+    assert(add_rock_foo(1) == 10)
+}

@@ -1,0 +1,38 @@
+fn mk_cap(x: int) -> fn() -> int { return () => x }
+@test(output = "5")
+fn captured_parameter_survives_return() { let f = mk_cap(5) print("{f()}") }
+
+fn pair_box() -> (fn(), fn() -> int) {
+    let n = 0
+    let bump = () => { n = n + 1 }
+    let read = () => n
+    return (bump, read)
+}
+@test(output = "0\n2")
+fn closures_share_updates() {
+    let (bump, read) = pair_box()
+    print("{read()}")
+    bump()
+    bump()
+    print("{read()}")
+}
+
+fn outer_cap(x: int) -> fn() -> fn() -> int { return () => { return () => x } }
+@test(output = "9")
+fn nested_closure_reads_its_outer_capture() {
+    let mid = outer_cap(9)
+    let inner = mid()
+    print("{inner()}")
+}
+
+fn apply_ten(f: fn(int) -> fn() -> int) -> fn() -> int { return f(10) }
+fn drive() -> int {
+    let g = apply_ten((n: int) => {
+        let read = () => n
+        n = n + 5
+        return read
+    })
+    return g()
+}
+@test(output = "15")
+fn nested_closure_sees_a_reassigned_parameter() { print("{drive()}") }
