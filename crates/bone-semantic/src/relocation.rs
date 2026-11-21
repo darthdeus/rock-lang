@@ -1313,8 +1313,3 @@ pub fn check_relocation(ws: &mut Workspace) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{keys_may_alias, substitute};
-}
