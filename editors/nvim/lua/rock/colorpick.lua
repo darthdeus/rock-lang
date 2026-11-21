@@ -146,9 +146,7 @@ end
 
 local function open_float(lines, meta, source)
   local buf = ui.ensure_named_buffer(FLOAT_NAME)
-  vim.api.nvim_set_option_value('modifiable', true, { buf = buf })
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.api.nvim_set_option_value('modifiable', false, { buf = buf })
+  ui.write_lines(buf, lines)
   vim.api.nvim_set_option_value('filetype', 'rock-colorpick', { buf = buf })
 
   apply_swatches(buf, lines)
@@ -160,62 +158,38 @@ local function open_float(lines, meta, source)
   width = math.min(math.max(width + 4, 60), vim.o.columns - 4)
   local height = math.min(#lines + 1, math.floor(vim.o.lines * 0.6))
 
-  local win = vim.api.nvim_open_win(buf, true, {
-    relative = 'editor',
-    width = width,
-    height = height,
-    row = math.floor((vim.o.lines - height) / 2),
-    col = math.floor((vim.o.columns - width) / 2),
-    style = 'minimal',
-    border = 'rounded',
-    title = ' RockColorPick ',
-    title_pos = 'center',
-  })
+  local win = ui.centered(buf, width, height, ' RockColorPick ')
   vim.api.nvim_set_option_value('cursorline', true, { win = win })
 
   local function close()
     if vim.api.nvim_win_is_valid(win) then vim.api.nvim_win_close(win, true) end
   end
 
-  local function yank_hex()
+  local function yank(label, select_item)
     local row = vim.api.nvim_win_get_cursor(win)[1]
-    local m = meta[row]
-    if not m or #m.hexes == 0 then
-      vim.notify('rock.nvim: no hex on this line', vim.log.levels.INFO)
+    local item = meta[row]
+    local text = item and select_item(item)
+    if not text then
+      vim.notify('rock.nvim: no ' .. label .. ' on this line', vim.log.levels.INFO)
       return
     end
-    local hx = m.hexes[1]
-    vim.fn.setreg('+', hx)
-    vim.fn.setreg('"', hx)
-    vim.notify('Yanked ' .. hx)
-  end
-
-  local function yank_group()
-    local row = vim.api.nvim_win_get_cursor(win)[1]
-    local m = meta[row]
-    if not m or not m.group then
-      vim.notify('rock.nvim: no group on this line', vim.log.levels.INFO)
-      return
-    end
-    vim.fn.setreg('+', m.group)
-    vim.fn.setreg('"', m.group)
-    vim.notify('Yanked ' .. m.group)
+    vim.fn.setreg('+', text)
+    vim.fn.setreg('"', text)
+    vim.notify('Yanked ' .. text)
   end
 
   local function refresh()
     local new_lines, new_meta = build_lines(source.buf, source.row, source.col)
     lines, meta = new_lines, new_meta
-    vim.api.nvim_set_option_value('modifiable', true, { buf = buf })
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.api.nvim_set_option_value('modifiable', false, { buf = buf })
+    ui.write_lines(buf, lines)
     apply_swatches(buf, lines)
   end
 
   local map = function(lhs, fn) vim.keymap.set('n', lhs, fn, { buffer = buf, nowait = true, silent = true }) end
   map('q', close)
   map('<Esc>', close)
-  map('y', yank_hex)
-  map('<CR>', yank_group)
+  map('y', function() yank('hex', function(item) return item.hexes[1] end) end)
+  map('<CR>', function() yank('group', function(item) return item.group end) end)
   map('r', refresh)
 end
 

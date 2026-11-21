@@ -14,6 +14,7 @@
 -- Output is a floating scratch buffer with plain text formatted for
 -- pasting back into a conversation.
 
+local ui = require('rock.ui')
 local M = {}
 
 local function client_for(bufnr)
@@ -162,17 +163,7 @@ local function open_float(lines)
   vim.bo[buf].filetype = 'markdown'
   local width = math.min(vim.o.columns - 4, 120)
   local height = math.min(vim.o.lines - 4, #lines + 2)
-  local win = vim.api.nvim_open_win(buf, true, {
-    relative = 'editor',
-    width = width,
-    height = height,
-    row = math.floor((vim.o.lines - height) / 2),
-    col = math.floor((vim.o.columns - width) / 2),
-    style = 'minimal',
-    border = 'rounded',
-    title = ' RockSemTokens ',
-    title_pos = 'center',
-  })
+  local win = ui.centered(buf, width, height, ' RockSemTokens ')
   vim.keymap.set('n', 'q', '<cmd>close<cr>', { buffer = buf, silent = true })
   vim.keymap.set('n', '<esc>', '<cmd>close<cr>', { buffer = buf, silent = true })
   return win, buf

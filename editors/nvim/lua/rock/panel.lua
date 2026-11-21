@@ -5,6 +5,7 @@
 
 local state = require('rock.state')
 local client = require('rock.client')
+local ui = require('rock.ui')
 
 local M = {}
 
@@ -366,8 +367,7 @@ local HL_NS = vim.api.nvim_create_namespace('rock.nvim.panel')
 local function render()
   if not PANEL_BUF or not vim.api.nvim_buf_is_valid(PANEL_BUF) then return end
   local lines, hl = collect_lines()
-  vim.api.nvim_set_option_value('modifiable', true, { buf = PANEL_BUF })
-  vim.api.nvim_buf_set_lines(PANEL_BUF, 0, -1, false, lines)
+  ui.write_lines(PANEL_BUF, lines)
   vim.api.nvim_buf_clear_namespace(PANEL_BUF, HL_NS, 0, -1)
   for _, h in ipairs(hl) do
     local line_idx, group, cs, ce = h[1], h[2], h[3], h[4]
@@ -383,7 +383,6 @@ local function render()
     end
     pcall(vim.api.nvim_buf_set_extmark, PANEL_BUF, HL_NS, line_idx, cs, extmark_opts)
   end
-  vim.api.nvim_set_option_value('modifiable', false, { buf = PANEL_BUF })
 end
 
 local function expand_event_under_cursor()
@@ -399,26 +398,15 @@ local function expand_event_under_cursor()
     if e.id == ev_id then ev = e; break end
   end
   if not ev then return end
-  local ok, json = pcall(vim.fn.json_encode, ev.payload)
-  if not ok then json = vim.inspect(ev.payload) end
-  -- Pretty-print by inserting newlines after commas (cheap).
   local pretty = vim.inspect(ev.payload)
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(
+  ui.write_lines(buf, vim.split(
     ('# %s %s %s\n\n%s'):format(ev.wall, ev.dir, ev.method, pretty), '\n'
   ))
   vim.api.nvim_set_option_value('filetype', 'lua', { buf = buf })
-  vim.api.nvim_set_option_value('modifiable', false, { buf = buf })
   local w = math.floor(vim.o.columns * 0.7)
   local h = math.floor(vim.o.lines * 0.7)
-  vim.api.nvim_open_win(buf, true, {
-    relative = 'editor',
-    width = w, height = h,
-    row = math.floor((vim.o.lines - h) / 2),
-    col = math.floor((vim.o.columns - w) / 2),
-    style = 'minimal', border = 'rounded',
-    title = ' event #' .. ev_id .. ' ', title_pos = 'center',
-  })
+  ui.centered(buf, w, h, ' event #' .. ev_id .. ' ')
   vim.keymap.set('n', 'q', '<cmd>close<cr>', { buffer = buf, silent = true })
 end
 
@@ -471,7 +459,7 @@ function M.open()
   local cur_col = vim.api.nvim_win_get_position(vim.api.nvim_get_current_win())[2]
   SIDE = cur_col < math.floor(vim.o.columns / 2) and 'right' or 'left'
   if not PANEL_BUF or not vim.api.nvim_buf_is_valid(PANEL_BUF) then
-    PANEL_BUF = require('rock.ui').ensure_named_buffer('rock://panel')
+    PANEL_BUF = ui.ensure_named_buffer('rock://panel')
     vim.api.nvim_set_option_value('filetype', 'rock_panel', { buf = PANEL_BUF })
     setup_panel_keymaps(PANEL_BUF)
   end

@@ -22,14 +22,28 @@ function M.ensure_named_buffer(name)
   return buf, false
 end
 
+function M.centered(buf, width, height, title)
+  return vim.api.nvim_open_win(buf, true, {
+    relative = 'editor', width = width, height = height,
+    row = math.floor((vim.o.lines - height) / 2),
+    col = math.floor((vim.o.columns - width) / 2),
+    style = 'minimal', border = 'rounded',
+    title = title, title_pos = 'center',
+  })
+end
+
+function M.write_lines(buf, lines)
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+end
+
 function M.float(view, opts)
   local buf, win
 
   local function show(lines)
     if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
-    vim.bo[buf].modifiable = true
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.bo[buf].modifiable = false
+    M.write_lines(buf, lines)
   end
 
   function view.is_open()
@@ -55,13 +69,7 @@ function M.float(view, opts)
     local lines = opts.lines and opts.lines()
     if lines then show(lines) end
     local w, h = opts.size(lines)
-    win = vim.api.nvim_open_win(buf, true, {
-      relative = 'editor', width = w, height = h,
-      row = math.floor((vim.o.lines - h) / 2),
-      col = math.floor((vim.o.columns - w) / 2),
-      style = 'minimal', border = 'rounded',
-      title = ' rock.nvim: ' .. opts.title .. ' ', title_pos = 'center',
-    })
+    win = M.centered(buf, w, h, ' rock.nvim: ' .. opts.title .. ' ')
     if opts.nowrap then vim.wo[win].wrap = false end
     if opts.on_open then opts.on_open(show) end
   end
