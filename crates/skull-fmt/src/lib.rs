@@ -100,7 +100,7 @@ fn comments(src: &str, tokens: &[rock_tokenizer::Token]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FormatConfig, check_comments, try_format};
+    use super::check_comments;
 
     #[test]
     fn a_missing_comment_fails_the_format() {
