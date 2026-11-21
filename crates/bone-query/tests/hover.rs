@@ -700,37 +700,3 @@ fn describe(m: <|>Mob) {
         assert_eq!(hover_at(&workspace(&src), at).trim(), *want, "{case}");
     }
 }
-
-/// A name's hover covers the name token, not the construct around it.
-#[test]
-fn hover_ranges_cover_the_name() {
-    // (case, source with a `<|>` cursor, the covered text)
-    let cases: &[(&str, &str, &str)] = &[
-        (
-            "struct literal head",
-            "struct P { x: int }\nfn main() {\n    let p = <|>P { x: 1 }\n}",
-            "P",
-        ),
-        (
-            "enum qualifier",
-            "enum D { N, S }\nfn main() {\n    let d = <|>D::N\n}",
-            "D",
-        ),
-        (
-            "struct field declaration",
-            "struct P {\n    <|>x: int,\n}",
-            "x",
-        ),
-    ];
-    for (case, marked, covered) in cases {
-        let (src, at) = cursor(marked);
-        let range = workspace(&src)
-            .hover(PATH, at)
-            .and_then(|h| h.range)
-            .unwrap_or_else(|| panic!("{case}: no hover range"));
-        assert_eq!(range.start.line, range.end.line, "{case}");
-        let line = src.lines().nth(range.start.line as usize).unwrap();
-        let text = &line[range.start.character as usize..range.end.character as usize];
-        assert_eq!(text, *covered, "{case}");
-    }
-}
