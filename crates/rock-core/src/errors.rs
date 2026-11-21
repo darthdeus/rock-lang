@@ -54,9 +54,7 @@ pub struct CompilerLabel {
 pub enum CompilerErrorKind {
     Generic,
 
-    /// A `nobox` value materialized implicitly. Distinct from a plain codegen
-    /// rejection because it breaks a LANGUAGE GUARANTEE rather than marking a
-    /// backend parity gap.
+    /// Implicit materialization violates the `nobox` language guarantee.
     NoboxGuaranteeViolated,
 
     TargetLimit,
@@ -191,8 +189,7 @@ impl CompilerError {
     }
 }
 
-// Building an ariadne cache copies every file in `sources` (~1.5 MB per project, ~1.6 ms), so
-// render all diagnostics of a batch against one cache.
+// An ariadne cache copies its source files; share one across the batch.
 #[must_use]
 pub fn render_all(errs: &[CompilerError], sources: &SourceFiles) -> String {
     let (unframed, framed): (Vec<_>, Vec<_>) = errs.iter().partition(|error| {

@@ -2,15 +2,8 @@ use crate::prelude::*;
 
 pub(crate) type ReportBuilder<'a> = ariadne::ReportBuilder<'a, (String, std::ops::Range<usize>)>;
 
-/// Build a report whose labels address the source by byte offset.
-///
-/// `Span.offset_range()` holds byte offsets (`Tokenizer::advance` adds
-/// `c.len_utf8()` per character), while ariadne's default index type counts
-/// characters and would place a label past a multibyte character in the wrong
-/// column; the index type is therefore fixed to bytes. Colour is settled here
-/// as well, because styling the source frame is a large share of ariadne's
-/// per-diagnostic cost and a piped stderr renders none of it. `ROCK_FORCE_COLOR`
-/// and `NO_COLOR` override the terminal probe.
+/// Ariadne must index bytes to match spans after multibyte characters.
+/// `ROCK_FORCE_COLOR` and `NO_COLOR` override terminal color detection.
 pub(crate) fn make_report_builder<'a>(
     kind: ariadne::ReportKind<'a>,
     file: String,
