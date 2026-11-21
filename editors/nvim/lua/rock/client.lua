@@ -416,10 +416,7 @@ function M.setup_autocmds()
       local client = vim.lsp.get_client_by_id(args.data.client_id)
       if client and client.name == SERVER_NAME then
         state.set_buffer(args.buf, { attached = false })
-        -- Drop the dead client's stats/modules so multi-client dumps
-        -- don't accumulate frozen snapshots from clients that exited.
-        -- Only fire when no other buffers are still attached to this
-        -- client (LspDetach is per-buffer, not per-client).
+        -- LspDetach is per-buffer; keep the snapshot until the last buffer detaches.
         local still_attached = vim.lsp.get_clients({ id = args.data.client_id })
         if not still_attached or #still_attached == 0 then
           state.forget_client(args.data.client_id)
@@ -431,11 +428,7 @@ function M.setup_autocmds()
     group = g,
     callback = function(args) state.remove_buffer(args.buf) end,
   })
-  -- Point buffer-local `tags` at the package's `.rock.tags` union for ANY file
-  -- under a stick root, not just `.rock` buffers -- the rock LSP only attaches
-  -- to `.rock`, so shader/config/etc. buffers would otherwise never learn the
-  -- tags exist ("tags not found. Generate?"). Gated on stick root so buffers
-  -- outside any rock project keep their inherited `tags`.
+  -- Non-Rock buffers under the project need tags without an LSP attachment.
   vim.api.nvim_create_autocmd({ 'BufReadPost', 'BufNewFile' }, {
     group = g,
     callback = function(args)

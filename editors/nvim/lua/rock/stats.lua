@@ -1,16 +1,4 @@
--- Poll every attached rock-lsp client for `rock/stats` and
--- `rock/modules`, keyed by client_id. The panel and dump iterate
--- the resulting per-client maps.
---
--- Why poll every client, not just clients[1]: nvim sometimes spawns
--- one rock-lsp per workspace_folder (e.g. when two packages are
--- both attached). The previous "clients[1] only" wiring made every
--- multi-client session into a half-blind dump where one workspace's
--- stats overwrote the other's depending on attach order. Surfaced
--- by a dump where client.id=2 tracked one package but the stats
--- reported the other's 44-source workspace. Detecting the
--- multi-context publish-authority bug class requires seeing every
--- client's workspace at once.
+-- Neovim may attach multiple clients, so retain stats per client id.
 
 local state = require('rock.state')
 
@@ -24,8 +12,6 @@ local MODULES_INTERVAL_MS = 10000
 local DOCTOR_INTERVAL_MS = 30000
 local SERVER_NAME = 'rock'
 
--- Fan out a custom request across every attached rock client. The
--- callback receives (client_id, result) so state can key on it.
 local function request_all_clients(method, cb)
   local clients = vim.lsp.get_clients({ name = SERVER_NAME })
   if not clients or #clients == 0 then return end

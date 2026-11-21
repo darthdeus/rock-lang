@@ -1,8 +1,3 @@
--- Floating window showing the raw textDocument/completion response
--- from rock-lsp. This is the ground-truth "what did the server send"
--- view -- useful when nvim-cmp appears to show the wrong items and you
--- want to know whether it's a server bug or a client-side filter bug.
-
 local state = require('rock.state')
 
 local M = {}

@@ -182,7 +182,6 @@ function M.setup(user)
     { desc = 'rock.nvim: restart LSP' })
 end
 
--- Convenience re-exports for users.
 M.restart = function() require('rock.client').restart() end
 M.panel = function() return require('rock.panel') end
 M.statusline = function() return require('rock.statusline').component() end
