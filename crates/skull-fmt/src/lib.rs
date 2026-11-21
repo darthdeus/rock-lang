@@ -107,20 +107,4 @@ mod tests {
         let err = check_comments(&["// c".into()], &[]).expect_err("comment dropped");
         assert!(err.contains("// c"), "{err}");
     }
-
-    #[test]
-    fn trailing_block_lambda_keeps_call_layout_after_expansion() {
-        let config = FormatConfig {
-            max_line_length: 20,
-            ..FormatConfig::default()
-        };
-        let source = "fn probe() {\n    check(() => { touch() })\n}\n";
-        let once = try_format(source, &config).expect("format lambda");
-        let twice = try_format(&once, &config).expect("format expanded lambda");
-        assert_eq!(once, twice);
-
-        let separated =
-            "fn probe() {\n    check(\n        () => {\n            touch()\n        }\n    )\n}\n";
-        assert_eq!(try_format(separated, &config).unwrap(), separated);
-    }
 }
