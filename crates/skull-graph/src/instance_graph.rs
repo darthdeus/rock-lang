@@ -436,9 +436,6 @@ fn assert_subst(
 #[derive(Clone)]
 pub struct InstanceGraph {
     incremental_indexes: bool,
-    /// A retained view checks the revision it was realized from instead of
-    /// trusting call order.
-    revision: u64,
     interner: std::sync::Arc<MonoInterner>,
     /// The primary records; every derived field is computed from these and `root_instances`.
     pub contributions: BTreeMap<Owner, Box<Contribution>>,
@@ -450,6 +447,7 @@ pub struct InstanceGraph {
     last_run_always_targets: BTreeSet<Instance>,
     delta_added: BTreeSet<Instance>,
     delta_removed: BTreeSet<Instance>,
+    replaced_sites: Option<FxHashMap<Instance, BTreeMap<Site, SiteRecord>>>,
     /// Whole-graph findings with no single owner, from the recursion search.
     pub graph_rejections: Vec<Rejection>,
     recursion_findings: BTreeMap<Instance, RecursionFinding>,
@@ -638,15 +636,13 @@ impl InstanceGraph {
 
     /// Release one-shot build records, keeping the shared type arena.
     pub fn take_records(&mut self) -> Self {
-        let mut empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
-        empty.revision = self.revision;
+        let empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
         std::mem::replace(self, empty)
     }
 
     fn empty_in(interner: std::sync::Arc<MonoInterner>) -> Self {
         InstanceGraph {
             incremental_indexes: false,
-            revision: 0,
             interner,
             contributions: BTreeMap::new(),
             lost: BTreeSet::new(),
@@ -656,6 +652,7 @@ impl InstanceGraph {
             last_run_always_targets: BTreeSet::new(),
             delta_added: BTreeSet::new(),
             delta_removed: BTreeSet::new(),
+            replaced_sites: None,
             index: Indices::default(),
             graph_rejections: Vec::new(),
             recursion_findings: BTreeMap::new(),
@@ -1265,11 +1262,14 @@ impl InstanceGraph {
             .contributions
             .remove(owner)
             .expect("presence was checked above");
+        let mut capture_sites = None;
         if let Some(instance) = owner.instance() {
-            if self.instances.remove(instance) {
-                if !self.delta_added.remove(instance) {
-                    self.delta_removed.insert(instance.clone());
-                }
+            if self.instances.remove(instance) && !self.delta_added.remove(instance) {
+                self.delta_removed.insert(instance.clone());
+                capture_sites = self
+                    .replaced_sites
+                    .as_mut()
+                    .map(|rows| rows.entry(instance.clone()));
             }
         }
         self.index.remove_update_rows(owner, &old);
@@ -1299,6 +1299,9 @@ impl InstanceGraph {
                     self.index.decls.remove(&from.func);
                 }
             }
+        }
+        if let Some(entry) = capture_sites {
+            entry.or_insert(old.call_sites);
         }
     }
 
@@ -1625,7 +1628,7 @@ impl InstanceGraph {
         changed: &[(ModuleId, BodyOwner)],
         edits: &[TextEditDelta],
     ) -> UpdateStats {
-        self.revision += 1;
+        self.replaced_sites = Some(FxHashMap::default());
         self.ensure_incremental_indexes();
         let pending_roots: Vec<Owner> = canonical_roots(ws, root_added.to_vec())
             .into_iter()
@@ -1679,16 +1682,32 @@ impl InstanceGraph {
                 .filter(|instance| self.instances.contains(*instance))
                 .cloned(),
         );
+        // Every replaced owner is a dirty caller. To follow the old side of a
+        // split component, the artifact only needs its withdrawn targets.
+        let mut changed_calls = FxHashMap::default();
+        for (caller, old) in self.replaced_sites.take().expect("recorded during repair") {
+            let before = resolved_sites(Some(&old));
+            let after = self.resolved_sites(&caller);
+            if !before.clone().eq(after) {
+                let new = self.sites_of(&caller);
+                let withdrawn = before
+                    .filter(|(site, to)| {
+                        !matches!(new.and_then(|rows| rows.get(site)), Some(SiteRecord {
+                            outcome: SiteOutcome::Resolved(current), ..
+                        }) if current == *to)
+                    })
+                    .map(|(_, to)| to.clone())
+                    .collect();
+                changed_calls.insert(caller, withdrawn);
+            }
+        }
         UpdateStats {
             added,
             removed,
             revisited,
             revisited_owners: std::mem::take(&mut self.last_run_owners),
+            changed_calls,
         }
-    }
-
-    pub fn revision(&self) -> u64 {
-        self.revision
     }
 
     fn ensure_incremental_indexes(&mut self) {
@@ -1782,6 +1801,17 @@ impl InstanceGraph {
         self.contribution(i)
             .map(|c| &c.call_sites)
             .filter(|m| !m.is_empty())
+    }
+
+    pub(crate) fn resolved_sites(
+        &self,
+        i: &Instance,
+    ) -> impl Iterator<Item = (&Site, &Instance)> + Clone {
+        resolved_sites(self.sites_of(i))
+    }
+
+    pub(crate) fn predecessors(&self, i: &Instance) -> impl Iterator<Item = &Instance> {
+        self.index.preds.get(i).into_iter().flatten()
     }
 
     pub fn edges(&self) -> impl Iterator<Item = (&Instance, &Edge)> {
@@ -1957,6 +1987,19 @@ pub struct UpdateStats {
     pub removed: BTreeSet<Instance>,
     pub revisited: BTreeSet<Instance>,
     pub revisited_owners: BTreeSet<Owner>,
+    pub(crate) changed_calls: FxHashMap<Instance, Vec<Instance>>,
+}
+
+fn resolved_sites(
+    sites: Option<&BTreeMap<Site, SiteRecord>>,
+) -> impl Iterator<Item = (&Site, &Instance)> + Clone {
+    sites
+        .into_iter()
+        .flatten()
+        .filter_map(|(site, record)| match &record.outcome {
+            SiteOutcome::Resolved(callee) => Some((site, callee)),
+            SiteOutcome::Failed(_) => None,
+        })
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -8,6 +8,7 @@ use skull_mir::mir::FuncRef;
 use crate::concrete_body::BoundaryId;
 use crate::instance_graph::{
     self, BoundaryClass, Concreteness, DeclKey, Instance, InstanceGraph, Site, SiteOutcome,
+    UpdateStats,
 };
 use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -198,10 +199,6 @@ pub struct ArtifactView {
 #[derive(Clone, Default)]
 struct ArtifactIndex {
     realizable: FxHashMap<Instance, Result<Realized, Unrealizable>>,
-    graph_revision: u64,
-    update_rows: bool,
-    outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>>,
-    incoming: FxHashMap<Instance, FxHashSet<Instance>>,
     always_fn_values: FxHashSet<Instance>,
     realization_by_decl: FxHashMap<FuncRef, FxHashSet<Instance>>,
     instances_by_decl: FxHashMap<FuncRef, FxHashSet<Instance>>,
@@ -210,41 +207,7 @@ struct ArtifactIndex {
     root_decls: BTreeSet<DeclKey>,
 }
 
-#[derive(Default)]
-struct ArtifactSiteRows<'g> {
-    outgoing: FxHashMap<Site, Instance>,
-    callees: FxHashSet<&'g Instance>,
-}
-
-impl<'g> ArtifactSiteRows<'g> {
-    fn new(sites: &'g BTreeMap<Site, instance_graph::SiteRecord>) -> Self {
-        let mut outgoing = FxHashMap::default();
-        let mut callees = FxHashSet::default();
-        for (site, record) in sites {
-            let SiteOutcome::Resolved(callee) = &record.outcome else {
-                continue;
-            };
-            outgoing.insert(site.clone(), callee.clone());
-            callees.insert(callee);
-        }
-        Self { outgoing, callees }
-    }
-}
-
 impl ArtifactIndex {
-    // The owner's old rows must be retracted before installing its replacement.
-    fn install_site_rows(&mut self, owner: &Instance, rows: ArtifactSiteRows<'_>) {
-        if !rows.outgoing.is_empty() {
-            self.outgoing.insert(owner.clone(), rows.outgoing);
-        }
-        for callee in rows.callees {
-            self.incoming
-                .entry(callee.clone())
-                .or_default()
-                .insert(owner.clone());
-        }
-    }
-
     fn add_publication_candidate(&mut self, instance: Instance, symbol: String) -> bool {
         if self
             .publication_candidates
@@ -295,32 +258,11 @@ fn unique_publication<'a>(
 }
 
 impl ArtifactView {
-    /// Call before updating the graph: the rows must describe the graph this
-    /// view was realized from.
-    pub fn prepare_update(&mut self, g: &InstanceGraph) {
-        if self.index.update_rows {
+    fn prepare_update(&mut self) {
+        if !self.index.instances_by_decl.is_empty() {
             return;
         }
-        assert_eq!(
-            g.revision(),
-            self.index.graph_revision,
-            "an artifact view's update rows are derived from the graph it was realized \
-             from; call `prepare_update` before updating the graph"
-        );
-        self.index.update_rows = true;
-        // Rows are built in parallel; the reverse rows join owners in owner order.
-        let owner_rows: Vec<(&Instance, ArtifactSiteRows<'_>)> = {
-            use bone_core::prelude::*;
-            let owners: Vec<_> = g.call_sites().collect();
-            owners
-                .into_par_iter()
-                .map(|(owner, sites)| (owner, ArtifactSiteRows::new(sites)))
-                .collect()
-        };
         let index = &mut self.index;
-        for (owner, rows) in owner_rows {
-            index.install_site_rows(owner, rows);
-        }
         for (i, r) in &self.realization {
             index
                 .realization_by_decl
@@ -340,9 +282,7 @@ impl ArtifactView {
         ws: &Workspace,
         g: &InstanceGraph,
         req: &ArtifactRequest<'_>,
-        revisited: &BTreeSet<Instance>,
-        added: &BTreeSet<Instance>,
-        removed: &BTreeSet<Instance>,
+        update: &UpdateStats,
         root_added: &[FuncRef],
         root_removed: &[FuncRef],
     ) {
@@ -354,11 +294,10 @@ impl ArtifactView {
         };
         let root_added = &canonical(root_added);
         let root_removed = &canonical(root_removed);
-        // A caller that did not update the graph may skip `prepare_update`.
-        self.prepare_update(g);
-        let mut subjects = revisited.clone();
-        subjects.extend(added.iter().cloned());
-        subjects.extend(removed.iter().cloned());
+        self.prepare_update();
+        let mut subjects = update.revisited.clone();
+        subjects.extend(update.removed.iter().cloned());
+        subjects.extend(update.changed_calls.keys().cloned());
         for decl in root_added.iter().chain(root_removed) {
             subjects.extend(
                 self.index
@@ -382,31 +321,6 @@ impl ArtifactView {
             .iter()
             .filter_map(|i| self.index.realizable.get(i).map(|r| (i.clone(), *r)))
             .collect();
-        let old_predecessors: FxHashMap<Instance, FxHashSet<Instance>> = subjects
-            .iter()
-            .filter_map(|i| {
-                self.index
-                    .incoming
-                    .get(i)
-                    .map(|preds| (i.clone(), preds.clone()))
-            })
-            .collect();
-        let mut old_outgoing = FxHashMap::default();
-        for i in &subjects {
-            // The removed rows stay in `old_outgoing` for the dirty-region walk.
-            if let Some(edges) = self.index.outgoing.remove(i) {
-                for callee in edges.values() {
-                    if let Some(preds) = self.index.incoming.get_mut(callee) {
-                        preds.remove(i);
-                        if preds.is_empty() {
-                            self.index.incoming.remove(callee);
-                        }
-                    }
-                }
-                old_outgoing.insert(i.clone(), edges);
-            }
-        }
-
         let target = req.spec.cpu;
         for i in &subjects {
             if !g.instances.contains(i) {
@@ -416,8 +330,6 @@ impl ArtifactView {
             self.index
                 .realizable
                 .insert(i.clone(), realize_decl(ws, i.func, &target, &req.mappings));
-            let rows = g.sites_of(i).map(ArtifactSiteRows::new).unwrap_or_default();
-            self.index.install_site_rows(i, rows);
         }
 
         for decl in root_removed {
@@ -453,22 +365,19 @@ impl ArtifactView {
         }
         let root_delta_changed = !root_added.is_empty() || !root_removed.is_empty();
 
-        let edge_changed = subjects
-            .iter()
-            .any(|i| old_outgoing.get(i) != self.index.outgoing.get(i));
         let realization_changed = subjects
             .iter()
             .any(|i| old_realizable.get(i) != self.index.realizable.get(i));
         let roots_changed = subjects
             .iter()
             .any(|i| old_root_subjects.contains(i) != self.roots.contains(i));
-        if !edge_changed
+        if update.changed_calls.is_empty()
             && !realization_changed
             && !roots_changed
             && !root_delta_changed
             && !always_fn_values_changed
-            && added.is_empty()
-            && removed.is_empty()
+            && update.added.is_empty()
+            && update.removed.is_empty()
         {
             return;
         }
@@ -476,15 +385,11 @@ impl ArtifactView {
         let mut dirty = subjects.clone();
         let mut queue: VecDeque<Instance> = subjects.iter().cloned().collect();
         while let Some(i) = queue.pop_front() {
-            let successors = [old_outgoing.get(&i), self.index.outgoing.get(&i)]
-                .into_iter()
-                .flatten()
-                .flat_map(FxHashMap::values);
-            let predecessors = [self.index.incoming.get(&i), old_predecessors.get(&i)]
-                .into_iter()
-                .flatten()
-                .flatten();
-            let neighbours = successors.chain(predecessors);
+            let neighbours = g
+                .resolved_sites(&i)
+                .map(|(_, callee)| callee)
+                .chain(g.predecessors(&i))
+                .chain(update.changed_calls.get(&i).into_iter().flatten());
             for neighbour in neighbours {
                 if dirty.insert(neighbour.clone()) {
                     queue.push_back(neighbour.clone());
@@ -510,11 +415,9 @@ impl ArtifactView {
             if realized.kind.boundary_class().is_some() {
                 continue;
             }
-            if let Some(edges) = self.index.outgoing.get(&i) {
-                for callee in edges.values() {
-                    if dirty.contains(callee) {
-                        reach_queue.push_back(callee.clone());
-                    }
+            for (_, callee) in g.resolved_sites(&i) {
+                if dirty.contains(callee) {
+                    reach_queue.push_back(callee.clone());
                 }
             }
         }
@@ -638,11 +541,9 @@ impl ArtifactView {
                 );
             }
         }
-        if let Some(edges) = self.index.outgoing.get(i) {
-            for (site, callee) in edges {
-                if site.op == skull_mir::site::SiteOp::FnValue {
-                    self.fn_value_targets.insert(callee.clone());
-                }
+        for (site, callee) in g.resolved_sites(i) {
+            if site.op == skull_mir::site::SiteOp::FnValue {
+                self.fn_value_targets.insert(callee.clone());
             }
         }
         if self.index.always_fn_values.contains(i) {
@@ -866,7 +767,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .collect();
     let mut index = ArtifactIndex {
         realizable,
-        graph_revision: g.revision(),
         root_decls,
         ..Default::default()
     };
