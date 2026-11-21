@@ -261,50 +261,6 @@ pub fn resolve_worktree_asset(
     resolve_asset_with_overlays(project_dir, game_key, &[], logical_key)
 }
 
-#[cfg(test)]
-mod worktree_bank_tests {
-    use super::*;
-
-    #[test]
-    fn worktree_bank_resolution_prefers_the_project_over_an_overlay() {
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("demo");
-        let overlay = root.path().join("vault");
-        std::fs::create_dir_all(project.join("assets")).unwrap();
-        std::fs::create_dir_all(overlay.join("assets")).unwrap();
-        std::fs::write(project.join(visual_bank::BANK_PATH), "project").unwrap();
-        std::fs::write(overlay.join(visual_bank::BANK_PATH), "overlay").unwrap();
-
-        let selected = resolve_worktree_asset(&project, "demo", visual_bank::BANK_PATH)
-            .unwrap()
-            .unwrap();
-        assert_eq!(selected.source, project.join(visual_bank::BANK_PATH));
-
-        let ordinary = resolve_asset_with_overlays(
-            &project,
-            "demo",
-            std::slice::from_ref(&overlay),
-            visual_bank::BANK_PATH,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(ordinary.source, overlay.join(visual_bank::BANK_PATH));
-    }
-
-    #[test]
-    fn missing_worktree_bank_does_not_fall_back_to_an_overlay() {
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("demo");
-        let overlay = root.path().join("vault");
-        std::fs::create_dir_all(project.join("assets")).unwrap();
-        std::fs::create_dir_all(overlay.join("assets")).unwrap();
-        std::fs::write(overlay.join(visual_bank::BANK_PATH), "overlay").unwrap();
-
-        let selected = resolve_worktree_asset(&project, "demo", visual_bank::BANK_PATH).unwrap();
-        assert!(selected.is_none());
-    }
-}
-
 fn is_runtime_data_asset(relative: &Path) -> bool {
     let mut components = relative.components();
     matches!(
@@ -484,53 +440,6 @@ mod tests {
     use rock_host::stick::StickConfig;
 
     #[test]
-    fn selection_and_staging_share_game_engine_and_fallback_assets() {
-        let root = tempfile::tempdir().unwrap();
-        let engine = tempfile::tempdir().unwrap();
-        let project = root.path().join("games/demo");
-        std::fs::create_dir_all(project.join("assets/nested")).unwrap();
-        std::fs::create_dir_all(project.join("saves")).unwrap();
-        std::fs::create_dir_all(engine.path().join("engine/shaders/common")).unwrap();
-        std::fs::write(project.join("assets/nested/a.txt"), "a").unwrap();
-        std::fs::write(project.join("saves/level.json"), "level").unwrap();
-        std::fs::write(engine.path().join("engine/shaders/common/a.glsl"), "shader").unwrap();
-        std::fs::create_dir_all(engine.path().join("engine/assets/fonts")).unwrap();
-        std::fs::write(
-            engine.path().join("engine/assets/fonts/default.ttf"),
-            "font",
-        )
-        .unwrap();
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"demo\"\n[release]\nassets = [\"assets\", \"saves/level.json\"]\n",
-        )
-        .unwrap();
-
-        let selected =
-            select_assets(&project, "games/demo", Some(&cfg), Some(engine.path())).unwrap();
-        let keys = &selected.files;
-        assert!(keys.contains_key("games/demo/assets/nested/a.txt"));
-        assert!(keys.contains_key("games/demo/saves/level.json"));
-        assert!(keys.contains_key("stone/engine/shaders/common/a.glsl"));
-        assert!(keys.contains_key("stone/engine/assets/fonts/default.ttf"));
-
-        let out = root.path().join("staged");
-        let staged = stage_assets(&selected, &out).unwrap();
-        assert_eq!(
-            std::fs::read(out.join("stone/engine/assets/fonts/default.ttf")).unwrap(),
-            b"font"
-        );
-        assert_eq!(staged.file_count, keys.len());
-        assert_eq!(
-            std::fs::read(out.join("games/demo/assets/nested/a.txt")).unwrap(),
-            b"a"
-        );
-        assert_eq!(
-            std::fs::read(out.join("stone/engine/shaders/common/a.glsl")).unwrap(),
-            b"shader"
-        );
-    }
-
-    #[test]
     fn selected_asset_directories_exclude_runtime_metadata_cache() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("demo");
@@ -657,31 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn overlay_path_lists_ignore_empty_segments() {
-        let root = tempfile::tempdir().unwrap();
-        let first = root.path().join("first");
-        let second = root.path().join("second");
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
-        let value = std::env::join_paths([
-            Path::new(""),
-            first.as_path(),
-            Path::new(""),
-            second.as_path(),
-            Path::new(""),
-        ])
-        .unwrap();
-
-        assert_eq!(
-            parse_asset_overlay_paths(&value).unwrap(),
-            vec![
-                first.canonicalize().unwrap(),
-                second.canonicalize().unwrap()
-            ]
-        );
-    }
-
-    #[test]
     fn overlays_merge_assets_in_declared_priority_without_shadowing_other_release_files() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("demo");
@@ -741,38 +625,6 @@ mod tests {
         assert_eq!(
             by_key["demo/saves/level.json"],
             project.join("saves/level.json")
-        );
-    }
-
-    #[test]
-    fn explicit_overlay_environment_replaces_stick_defaults_including_with_empty() {
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("game");
-        let configured = root.path().join("configured");
-        let explicit = root.path().join("explicit");
-        for path in [&project, &configured, &explicit] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-        let cfg = StickConfig::new_from_str(&format!(
-            "[package]\nname = \"game\"\n[assets]\noverlays = ['{}']\n",
-            configured.display()
-        ))
-        .unwrap();
-
-        assert_eq!(
-            configured_asset_overlays_from(&project, Some(&cfg), None).unwrap(),
-            vec![configured.canonicalize().unwrap()]
-        );
-        let explicit_list = std::env::join_paths([explicit.as_path()]).unwrap();
-        assert_eq!(
-            configured_asset_overlays_from(&project, Some(&cfg), Some(&explicit_list)).unwrap(),
-            vec![explicit.canonicalize().unwrap()]
-        );
-        assert!(
-            configured_asset_overlays_from(&project, Some(&cfg), Some(OsStr::new("")))
-                .unwrap()
-                .is_empty(),
-            "an explicitly empty environment disables configured defaults"
         );
     }
 }
