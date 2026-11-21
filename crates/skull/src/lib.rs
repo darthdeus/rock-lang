@@ -302,6 +302,15 @@ pub fn module_tests_with_ids(
             }
             None => None,
         };
+        if let Some(arg) = test_ann.args.iter().find(|arg| {
+            arg.name
+                .as_ref()
+                .is_some_and(|n| n.name.as_str() == "mir_checks")
+        }) && let bone_semantic::hir::AnnoValue::Bool(required) = arg.value
+            && required != skull_mir::verify::checks_enabled()
+        {
+            continue;
+        }
         out.push((
             fid,
             SkullTest {

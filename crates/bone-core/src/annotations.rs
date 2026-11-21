@@ -373,6 +373,7 @@ fn test_args(anno: &Annotation) -> Result<(), CompilerError> {
         "compile_error",
         "type_holes",
         "backends",
+        "mir_checks",
     ];
     for arg in &anno.args {
         match &arg.name {
@@ -387,18 +388,24 @@ fn test_args(anno: &Annotation) -> Result<(), CompilerError> {
                     "`@test(backends = ...)` takes a string such as \"lua\" or \"lua, js\""
                 ),
             },
+            Some(key)
+                if key.name.as_str() == "mir_checks"
+                    && !matches!(arg.value, AnnoValue::Bool(_)) =>
+            {
+                comp_error!(anno.span, "`@test(mir_checks = ...)` takes a boolean");
+            }
             Some(key) if TEST_KEYS.contains(&key.name.as_str()) => {}
             Some(key) => {
                 comp_error!(
                     anno.span,
-                    "`@test` has no `{}` argument (known: output, returns, expect_failure, compile_error, type_holes, backends)",
+                    "`@test` has no `{}` argument (known: output, returns, expect_failure, compile_error, type_holes, backends, mir_checks)",
                     key.name
                 );
             }
             None => {
                 comp_error!(
                     anno.span,
-                    "`@test` arguments must be named: output=, returns=, expect_failure=, compile_error=, type_holes=, backends="
+                    "`@test` arguments must be named: output=, returns=, expect_failure=, compile_error=, type_holes=, backends=, mir_checks="
                 );
             }
         }

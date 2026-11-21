@@ -41,6 +41,10 @@ without running it.
 and JS. Tests that JS cannot compile are reported as skips; CI caps their
 count with `JS_MAX_SKIPS` in `.github/workflows/ci.yml`.
 
+`@test(mir_checks = true)` runs only when MIR checks are enabled with
+`ROCK_MIR_CHECKS=1`. Use `@test(mir_checks = false)` for a test that requires
+checks to be off.
+
 The runtime corpus lives in `tests/`, grouped by feature. Expected compiler
 errors live under `tests/errors/`.
 Test labels use only the parent directory and filename, so avoid deeper topic
