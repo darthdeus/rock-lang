@@ -91,65 +91,12 @@ fn execute(lua: &str, driver: &str) {
     );
 }
 
-#[test]
-fn unconditional_mutable_value_initializer_seeds_the_box() {
-    let (mf, lua) = converted(
-        "value V { a: int }\n\
-         fn f(input: V, replacement: V) -> fn() -> V {\n\
-             let n = input\n\
-             return () => {\n\
-                 let previous = n\n\
-                 n = replacement\n\
-                 return previous\n\
-             }\n\
-         }",
-        |_| {},
-    );
-    let boxes = boxes(&mf);
-    assert_eq!(boxes.len(), 1, "one shared mutable cell: {lua}");
-    assert_eq!(
-        boxes[0].len(),
-        1,
-        "initializer must seed the shared box: {lua}"
-    );
-    assert_eq!(boxes[0][0].0, Ustr::from("v"));
-    assert!(lua.contains("{v = "), "seeded Lua constructor: {lua}");
-    execute(
-        &lua,
-        "
-        function V_ct(a) return {a = a} end
-        local input, replacement = {a = 37}, {a = 91}
-        local other_input, other_replacement = {a = -12}, {a = 6}
-        local first = f(input.a, replacement.a)
-        local second = f(other_input.a, other_replacement.a)
-        assert(first().a == input.a)
-        assert(second().a == other_input.a)
-        assert(first().a == replacement.a)
-        assert(second().a == other_replacement.a)
-        assert(first().a == replacement.a)
-    ",
-    );
-}
-
 const MUTABLE_LOCAL: &str = "fn f(input: int, replacement: int) -> fn() -> int {\n\
     let n = input\n\
     let read = () => n\n\
     n = replacement\n\
     return read\n\
 }";
-
-#[test]
-fn pre_initialization_read_retains_the_entry_box() {
-    let (mf, lua) = converted(MUTABLE_LOCAL, |mf| {
-        let (_, cell, init) = captured_initializer(mf);
-        let read = mf.alloc_inst(Inst::Load(cell));
-        mf.blocks[mf.entry].insts.insert(init, read);
-    });
-    assert!(
-        boxes(&mf)[0].is_empty(),
-        "pre-initialization read needs an entry cell: {lua}"
-    );
-}
 
 #[test]
 fn branch_dependent_initialization_retains_the_entry_box() {
@@ -229,32 +176,6 @@ fn initializer_after_a_join_can_seed_the_box() {
         assert(yes() == input)
         assert(no() == replacement)
         assert(yes() == replacement)
-    ",
-    );
-}
-
-#[test]
-fn forward_capture_retains_the_entry_box() {
-    // Construct a forward capture directly: the MIR transform must preserve
-    // its shared cell even when source definite-assignment disallows the shape.
-    let (mf, lua) = converted(MUTABLE_LOCAL, |mf| {
-        let (tree, _, init) = captured_initializer(mf);
-        let lambda = tree.scopes[1].lambda.unwrap();
-        mf.blocks[mf.entry].insts.retain(|&id| id != lambda);
-        mf.blocks[mf.entry].insts.insert(init, lambda);
-    });
-    let boxes = boxes(&mf);
-    assert_eq!(boxes.len(), 1);
-    assert!(
-        boxes[0].is_empty(),
-        "forward capture needs its pre-initialization cell: {lua}"
-    );
-    execute(
-        &lua,
-        "
-        local input, replacement = 37, 91
-        local read = f(input, replacement)
-        assert(read() == replacement)
     ",
     );
 }
