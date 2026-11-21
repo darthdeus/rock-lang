@@ -959,159 +959,89 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
 }
 
 #[test]
-fn direct_leaf_reader_compacts_parameter_transport() {
-    let ws = checked_ws_of(
-        r#"
-value Sample { x: float, y: float, z: float }
-fn selected(v: Sample) -> float { return v.y }
-fn main() -> float { return selected(Sample { x: 1.0, y: 2.0, z: 3.0 }) }
-"#,
-    );
-    let selected = func_ref(&ws, "selected");
-    let main = func_ref(&ws, "main");
-    let fixture = MirFixture::new(&ws, &[main]);
-    let caller = fixture.lower(main).expect("lower test root");
-    let entry = fixture.lower(selected).expect("lower test root");
-    assert_eq!(
-        entry.params.len(),
-        1,
-        "entry binds only the demanded interior field"
-    );
-    let args = caller
-        .insts
-        .iter()
-        .find_map(|(_, inst)| match inst {
-            skull_mir::mir::Inst::Call { func, args } if *func == selected => Some(args),
-            _ => None,
-        })
-        .expect("direct call");
-    assert_eq!(args.len(), 1, "caller uses the same compact transport");
-    assert!(
-        matches!(caller.insts[args[0]], skull_mir::mir::Inst::Const(skull_mir::mir::Lit::Float(v)) if v == 2.0)
-    );
-}
+fn aggregate_parameter_transport_preserves_demand_and_boundary_rules() {
+    use skull_mir::mir::{Inst, Lit};
 
-#[test]
-fn demanded_top_level_field_retains_nested_layout_and_nobox_guarantee() {
-    let ws = checked_ws_of(
-        r#"
-nobox value Inner { x: float, y: float }
-nobox value Outer { unused: float, kept: Inner, tail: float }
-fn selected(v: Outer) -> float { return v.kept.y }
-fn main(v: Outer) -> float { return selected(v) }
-"#,
-    );
-    let selected = func_ref(&ws, "selected");
-    let main = func_ref(&ws, "main");
-    let fixture = MirFixture::new(&ws, &[main]);
-    let entry = fixture.lower(selected).expect("lower test root");
-    assert_eq!(
-        entry.params.len(),
-        2,
-        "selected nested field retains both lanes"
-    );
-    let plan = entry.abi_plan.as_ref().unwrap();
-    let rep = plan.rep_plan(plan.representation().params()[0]);
-    assert!(rep.nobox());
-    assert!(
-        !rep.boxable(),
-        "partial transport is not a complete boxable value"
-    );
-}
-
-#[test]
-fn whole_use_and_mutation_keep_complete_parameter_transport() {
     let ws = checked_ws_of(
         r#"
 value Sample { x: float, y: float }
+value Wide { x: float, y: float, z: float }
+nobox value Inner { x: float, y: float }
+nobox value Outer { unused: float, kept: Inner, tail: float }
+
+fn leaf(v: Wide) -> float { return v.y }
+fn leaf_caller() -> float { return leaf(Wide { x: 1.0, y: 2.0, z: 3.0 }) }
+fn nested(v: Outer) -> float { return v.kept.y }
+fn nested_caller(v: Outer) -> float { return nested(v) }
 fn identity(v: Sample) -> Sample { return v }
 fn mutate(v: Sample) -> float { v = Sample { x: v.y, y: v.x }; return v.x }
 fn captured(v: Sample) -> fn() -> float { return () => v.x }
-fn main(v: Sample) -> float { return mutate(identity(v)) }
-"#,
-    );
-    let main = func_ref(&ws, "main");
-    let identity = func_ref(&ws, "identity");
-    let mutate = func_ref(&ws, "mutate");
-    let captured = func_ref(&ws, "captured");
-    let fixture = MirFixture::new(&ws, &[main, captured]);
-    for f in [identity, mutate, captured] {
-        assert_eq!(fixture.lower(f).expect("lower test root").params.len(), 2);
-    }
-}
-
-#[test]
-fn unused_aggregate_parameter_has_zero_transport_but_keeps_eager_call() {
-    let ws = checked_ws_of(
-        r#"
-value Sample { x: float, y: float }
-fn selected(v: Sample) -> float { return 5.0 }
-fn main() -> float { return selected(Sample { x: 1.0, y: 2.0 }) }
-"#,
-    );
-    let selected = func_ref(&ws, "selected");
-    let main = func_ref(&ws, "main");
-    let fixture = MirFixture::new(&ws, &[main]);
-    assert_eq!(
-        fixture
-            .lower(selected)
-            .expect("lower test root")
-            .params
-            .len(),
-        0
-    );
-    let caller = fixture.lower(main).expect("lower test root");
-    assert!(caller.insts.iter().any(|(_, inst)| matches!(inst, skull_mir::mir::Inst::Call { func, args } if *func == selected && args.is_empty())));
-}
-
-#[test]
-fn fixed_names_nullable_and_defaulted_parameters_keep_complete_transport() {
-    let ws = checked_ws_of(
-        r#"
-value Sample { x: float, y: float }
+fn whole_caller(v: Sample) -> float { return mutate(identity(v)) }
+fn unused(v: Sample) -> float { return 5.0 }
+fn unused_caller() -> float { return unused(Sample { x: 1.0, y: 2.0 }) }
 @nomangle fn demand_fixed(v: Sample) -> float { return v.y }
 fn demand_default(v: Sample = Sample { x: 1.0, y: 2.0 }) -> float { return v.y }
 fn demand_nullable(v: Sample?) -> Sample? { return v }
+fn demand_method(v: Sample) -> float { return v.y }
+fn safe_caller(v: Sample?) -> float { return v?.demand_method() ?? 0.0 }
 "#,
     );
     let roots = [
-        func_ref(&ws, "demand_fixed"),
-        func_ref(&ws, "demand_default"),
-        func_ref(&ws, "demand_nullable"),
-    ];
+        "leaf_caller",
+        "nested_caller",
+        "whole_caller",
+        "captured",
+        "unused_caller",
+        "demand_fixed",
+        "demand_default",
+        "demand_nullable",
+        "safe_caller",
+    ]
+    .map(|name| func_ref(&ws, name));
     let fixture = MirFixture::new(&ws, &roots);
-    // Fixed-name boundaries use the existing boxed ABI; defaulted and nullable
-    // internal parameters retain their complete declared leaf layouts.
-    for (f, width) in roots.into_iter().zip([1, 2, 3]) {
-        assert_eq!(
-            fixture.lower(f).expect("lower test root").params.len(),
-            width
-        );
+    for (name, width) in [
+        ("leaf", 1),
+        ("nested", 2),
+        ("identity", 2),
+        ("mutate", 2),
+        ("captured", 2),
+        ("unused", 0),
+        ("demand_fixed", 1),
+        ("demand_default", 2),
+        ("demand_nullable", 3),
+        ("demand_method", 1),
+    ] {
+        assert_eq!(fixture.named(name).params.len(), width, "{name}");
     }
-}
+    let nested = fixture.named("nested");
+    let abi = nested.abi_plan.as_ref().expect("nested parameter ABI");
+    let rep = abi.rep_plan(abi.representation().params()[0]);
+    assert!(rep.nobox());
+    assert!(
+        !rep.boxable(),
+        "transport omits fields required for a complete box"
+    );
 
-#[test]
-fn safe_navigation_receiver_uses_the_same_compact_transport() {
-    let ws = checked_ws_of(
-        r#"
-value Sample { x: float, y: float }
-fn demand_method(v: Sample) -> float { return v.y }
-fn main(v: Sample?) -> float { return v?.demand_method() ?? 0.0 }
-"#,
-    );
-    let selected = func_ref(&ws, "demand_method");
-    let main = func_ref(&ws, "main");
-    let fixture = MirFixture::new(&ws, &[main]);
-    assert_eq!(
-        fixture
-            .lower(selected)
-            .expect("lower test root")
-            .params
-            .len(),
-        1
-    );
-    let caller = fixture.lower(main).expect("lower test root");
-    assert!(caller.insts.iter().any(|(_, inst)| matches!(inst, skull_mir::mir::Inst::Call { func, args } if *func == selected && args.len() == 1)));
+    for (caller, callee, width) in [
+        ("leaf_caller", "leaf", 1),
+        ("unused_caller", "unused", 0),
+        ("safe_caller", "demand_method", 1),
+    ] {
+        let mir = fixture.named(caller);
+        let callee_ref = func_ref(&ws, callee);
+        let args = mir
+            .insts
+            .values()
+            .find_map(|inst| match inst {
+                Inst::Call { func, args } if *func == callee_ref => Some(args),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{caller} must call {callee}"));
+        assert_eq!(args.len(), width, "{caller}");
+        if callee == "leaf" {
+            assert!(matches!(mir.insts[args[0]], Inst::Const(Lit::Float(v)) if v == 2.0));
+        }
+    }
 }
 
 #[test]
