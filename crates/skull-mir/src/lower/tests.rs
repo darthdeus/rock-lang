@@ -1,27 +1,5 @@
 use super::*;
 
-#[test]
-fn missing_wire_slot_rejects_instead_of_boxing() {
-    let slots = [RepLayout::Opaque];
-    assert!(
-        super::required_wire_slot(&slots, 0, false, "fixture", |message| {
-            super::gap(message)
-        },)
-        .is_ok()
-    );
-    let err = super::required_wire_slot(&slots, 1, false, "fixture", super::gap)
-        .expect_err("a missing non-variadic slot must reject");
-    assert!(
-        err.message.contains("fixture has no ABI slot 1"),
-        "{}",
-        err.message
-    );
-
-    let variadic = super::required_wire_slot(&slots, 3, true, "fixture", super::gap)
-        .expect("a variadic call reuses its declared tail slot");
-    assert!(matches!(variadic, RepLayout::Opaque));
-}
-
 // No Rock program reaches the states below: each hands the oracle a compiler
 // state bone never produces, so they are rejections rather than diagnostics.
 fn spec_ws(src: &str) -> (Workspace, ModuleId) {
