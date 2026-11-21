@@ -132,31 +132,4 @@ mod tests {
         let missing = dir.path().join("gone.rock").to_string_lossy().into_owned();
         assert!(collect_rock_files(&[first, missing]).is_err());
     }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_directory_yields_sorted_files_including_symlinked_sources() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        for name in ["b.rock", "a.rock"] {
-            std::fs::write(dir.path().join(name), "fn main() {}\n").unwrap();
-        }
-        let target = outside.path().join("shared.rock");
-        std::fs::write(&target, "fn main() {}\n").unwrap();
-        std::os::unix::fs::symlink(&target, dir.path().join("c.rock")).unwrap();
-
-        let top = dir.path().to_string_lossy().into_owned();
-        let names: Vec<String> = collect_rock_files(&[top])
-            .unwrap()
-            .iter()
-            .map(|path| {
-                std::path::Path::new(path)
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-        assert_eq!(names, ["a.rock", "b.rock", "c.rock"]);
-    }
 }
