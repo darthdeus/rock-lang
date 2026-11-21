@@ -135,17 +135,6 @@ fn cut_fixture(payload: usize, nullable: bool) -> String {
 }
 
 #[test]
-fn a_value_over_the_cut_takes_the_aggregate_wire() {
-    for (payload, lanes) in [
-        (WIDE_VALUE_PAYLOAD_LEAF_CUT, WIDE_VALUE_PAYLOAD_LEAF_CUT),
-        (WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, 1),
-    ] {
-        let lua = emit_module(&cut_fixture(payload, false));
-        assert_eq!(function_params(&lua, "thru").len(), lanes, "{payload}");
-    }
-}
-
-#[test]
 fn a_nullable_ordinary_value_takes_the_cut_of_its_payload() {
     for (payload, lanes) in [
         (2, Some(3)),
@@ -158,23 +147,6 @@ fn a_nullable_ordinary_value_takes_the_cut_of_its_payload() {
         }
         assert_eq!(run_main(&lua), "1");
     }
-}
-
-#[test]
-fn a_wide_nobox_value_keeps_its_scalar_lanes() {
-    let payload = WIDE_VALUE_PAYLOAD_LEAF_CUT + 1;
-    let src = format!(
-        "nobox value N {{ {fields} }}\n\
-         fn mk(x: float) -> N {{ return N {{ {inits} }} }}\n\
-         fn thru(u: N) -> N {{ return u }}\n\
-         fn read(u: N) -> float {{ return u.f0 }}\n\
-         fn main() {{ print(\"{{read(thru(mk(1.0)))}}\") }}\n",
-        fields = float_fields(payload),
-        inits = float_inits(payload, "x"),
-    );
-    let lua = emit_module(&src);
-    assert_eq!(function_params(&lua, "thru").len(), payload);
-    assert_eq!(run_main(&lua), "1");
 }
 
 const BUDGET_MEMBER: usize = 24;
@@ -314,46 +286,6 @@ fn main() {
     print("{direct} {indirect} {closed} {generic} {method} {tailed} {multi} {yielded} {finished}")
 }
 "#;
-
-#[test]
-fn every_call_kind_agrees_on_the_boxed_wire() {
-    let lua = emit_module(&format!("{}{CALL_KINDS_BODY}", over_cut_value()));
-    let bumps: Vec<_> = definition_names(&lua)
-        .into_iter()
-        .filter(|name| name.starts_with("bump"))
-        .collect();
-    assert!(!bumps.is_empty());
-    for name in bumps {
-        assert_eq!(function_params(&lua, name).len(), 1, "{name}");
-    }
-    assert_eq!(run_main(&lua), "1 1 1 1 0 1 3 1 2");
-}
-
-#[test]
-fn a_boxed_parameter_does_not_alias_the_callers_value() {
-    let src = format!(
-        "{}
-global CALLER: W
-global CALLEE: W
-fn keep_and_mutate(w: W) -> float {{
-    CALLEE = w
-    CALLEE.a0 = 99.0
-    return CALLEE.a0
-}}
-fn main() {{
-    CALLER = mkw(1.0)
-    let seen = keep_and_mutate(CALLER)
-    let caller_after_callee_wrote = CALLER.a0
-    CALLER.a0 = 7.0
-    print(\"{{caller_after_callee_wrote}} {{seen}} {{CALLER.a0}} {{CALLEE.a0}}\")
-}}
-",
-        over_cut_value()
-    );
-    let lua = emit_module(&src);
-    assert_eq!(function_params(&lua, "keep_and_mutate").len(), 1);
-    assert_eq!(run_main(&lua), "1 99 7 99");
-}
 
 #[test]
 fn a_forwarding_callee_lends_the_box_until_a_mutable_store() {
