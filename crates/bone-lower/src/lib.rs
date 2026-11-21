@@ -392,41 +392,10 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         Ok(self.resolve_bare(name, span)?.key)
     }
 
-    fn v1_path_callable(&self, path: &skull_parser::Path) -> Option<Ustr> {
-        let frag = self.fragment_scope();
-        let use_path = use_path_ref(path);
-        match self.probed(|| resolve::resolve_member_path(self.workspace, frag, &use_path)) {
-            Ok(resolve::MemberTarget::Callable(key)) => Some(key),
-            Ok(resolve::MemberTarget::Global(key))
-                if matches!(
-                    self.workspace.defs.get(&key).map(|m| m.kind),
-                    Some(bone_core::modules::DefKind::Callable)
-                ) =>
-            {
-                Some(key)
-            }
-            // `p::NT(x)`. As a VALUE the path is the type, and the call then
-            // lowers as a call of a value: inference reports the key as an
-            // undefined global, because a newtype constructor is resolved by
-            // name, exactly as `NT(x)` is inside the defining module.
-            Ok(resolve::MemberTarget::Type(key))
-                if self.workspace.nominals.newtype_id(key).is_some() =>
-            {
-                Some(key)
-            }
-            _ => None,
-        }
-    }
-
-    fn v1_path_variant(&self, path: &skull_parser::Path) -> Option<(Ustr, Ustr)> {
-        let frag = self.fragment_scope();
-        let use_path = use_path_ref(path);
-        match self.probed(|| resolve::resolve_member_path(self.workspace, frag, &use_path)) {
-            Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
-                Some((enum_key, variant))
-            }
-            _ => None,
-        }
+    fn resolve_path(&self, path: &skull_parser::Path) -> Result<resolve::MemberTarget, String> {
+        let scope = self.fragment_scope();
+        let path = use_path_ref(path);
+        self.probed(|| resolve::resolve_member_path(self.workspace, scope, &path))
     }
 
     // Stdlib names are already the final compiler-owned keys. Paths still
@@ -1442,17 +1411,7 @@ pub(crate) fn lower_expr_value(
             let generic_args = ctx.lower_type_exprs_to_range(TyPos::Body, generic_args)?;
             match &a.e(func).kind {
                 ExprKind::Ident(name) => {
-                    let args_range = lower_exprs(ctx, scope, args.iter().map(|x| &x.value))?;
-
-                    for (arg_idx, ca) in args_range.into_iter().zip(args.iter()) {
-                        if let Some(nm) = &ca.name {
-                            ctx.body.arg_names.insert(arg_idx, nm.name);
-                        }
-                        if ca.is_spread {
-                            ctx.body.spread_args.insert(arg_idx);
-                        }
-                    }
-
+                    let args_range = lower_call_args(ctx, scope, None, args, true)?;
                     lower_named_call(ctx, scope, name, args_range, generic_args)?
                 }
 
@@ -1463,19 +1422,7 @@ pub(crate) fn lower_expr_value(
                             "explicit type arguments are only supported on named function calls"
                         );
                     }
-                    let all = std::iter::once(receiver).chain(args.iter().map(|a| &a.value));
-
-                    let args_range = lower_exprs(ctx, scope, all)?;
-
-                    for (arg_idx, ca) in args_range.into_iter().skip(1).zip(args.iter()) {
-                        if let Some(nm) = &ca.name {
-                            ctx.body.arg_names.insert(arg_idx, nm.name);
-                        }
-                        if ca.is_spread {
-                            ctx.body.spread_args.insert(arg_idx);
-                        }
-                    }
-
+                    let args_range = lower_call_args(ctx, scope, Some(receiver), args, true)?;
                     ctx.body.method_call_recvs.insert(args_range.start());
                     ctx.body
                         .method_names
@@ -1494,69 +1441,57 @@ pub(crate) fn lower_expr_value(
                     }
                 }
 
-                // `a::b::f(..)` in a v1 fragment. Without this the path lowers as a
-                // VALUE (`Expr::Global`) and the call becomes `Callee::Value`, which
-                // MIR cannot give a callee identity -- a direct call must carry the
-                // family's DefKey exactly as the bare-name form does.
-                ExprKind::Path(path) if ctx.v1_path_callable(path).is_some() => {
-                    let key = ctx.v1_path_callable(path).expect("guard resolved it");
-                    ctx.record_path(TyPos::Body, path, hir::SegmentTarget::Def(key));
-                    let args_range = lower_exprs(ctx, scope, args.iter().map(|x| &x.value))?;
-                    for (arg_idx, ca) in args_range.into_iter().zip(args.iter()) {
-                        if let Some(nm) = &ca.name {
-                            ctx.body.arg_names.insert(arg_idx, nm.name);
+                ExprKind::Path(path) => {
+                    use resolve::MemberTarget;
+                    let target = ctx.resolve_path(path);
+                    match target {
+                        Ok(MemberTarget::EnumVariant { enum_key, variant }) => {
+                            ctx.record_path(
+                                TyPos::Body,
+                                path,
+                                hir::SegmentTarget::Variant { enum_key, variant },
+                            );
+                            if !generic_args.is_empty() {
+                                comp_error!(
+                                    e.span,
+                                    "explicit type arguments are not supported on enum constructors"
+                                );
+                            }
+                            let args = lower_exprs(ctx, scope, args.iter().map(|arg| &arg.value))?;
+                            lower_variant(
+                                ctx,
+                                path,
+                                enum_key,
+                                variant,
+                                hir::VariantArgs::Tuple(args),
+                            )
                         }
-                    }
-                    Expr::Call {
-                        callee: hir::Callee::Unresolved {
-                            name: key,
-                            name_span: ctx
-                                .body
-                                .name_spans
-                                .alloc(path.segments.last().map_or(e.span, |segment| segment.span)),
-                        },
-                        args: args_range,
-                        generic_args,
-                        family: hir::CallFamily::Resolved(key),
-                    }
-                }
-
-                // A path enum constructor with payload; value-position paths lower
-                // as unit variants and would otherwise drop these arguments.
-                ExprKind::Path(path) if ctx.v1_path_variant(path).is_some() => {
-                    let (enum_key, variant) = ctx.v1_path_variant(path).expect("guard resolved it");
-                    let (enum_span, variant_span) = variant_path_spans(path);
-                    ctx.record_path(
-                        TyPos::Body,
-                        path,
-                        hir::SegmentTarget::Variant { enum_key, variant },
-                    );
-                    if !generic_args.is_empty() {
-                        comp_error!(
-                            e.span,
-                            "explicit type arguments are not supported on enum constructors"
-                        );
-                    }
-                    let args_range = lower_exprs(ctx, scope, args.iter().map(|x| &x.value))?;
-                    Expr::EnumVariant {
-                        enum_name: enum_key,
-                        enum_name_span: ctx.body.name_spans.alloc(enum_span),
-                        variant,
-                        variant_span: ctx.body.name_spans.alloc(variant_span),
-                        args: VariantArgs::Tuple(args_range),
+                        Ok(target) if is_direct_call_target(ctx, &target) => {
+                            let hir::SegmentTarget::Def(key) = member_segment_target(&target)
+                            else {
+                                unreachable!();
+                            };
+                            ctx.record_path(TyPos::Body, path, hir::SegmentTarget::Def(key));
+                            let lowered = lower_call_args(ctx, scope, None, args, false)?;
+                            Expr::Call {
+                                callee: Callee::Unresolved {
+                                    name: key,
+                                    name_span: ctx.body.name_spans.alloc(
+                                        path.segments.last().map_or(e.span, |segment| segment.span),
+                                    ),
+                                },
+                                args: lowered,
+                                generic_args,
+                                family: hir::CallFamily::Resolved(key),
+                            }
+                        }
+                        _ => lower_value_call(ctx, scope, *func, args, generic_args, e.span)?,
                     }
                 }
 
                 ExprKind::SafeNavigation(receiver, method) => {
                     let receiver = lower_expr(ctx, scope, a.e(receiver))?;
-                    let args_range = lower_exprs(ctx, scope, args.iter().map(|a| &a.value))?;
-
-                    for (arg_idx, ca) in args_range.into_iter().zip(args.iter()) {
-                        if let Some(nm) = &ca.name {
-                            ctx.body.arg_names.insert(arg_idx, nm.name);
-                        }
-                    }
-
+                    let args_range = lower_call_args(ctx, scope, None, args, false)?;
                     ctx.body.method_names.insert(receiver, method.name);
                     let (callee_key, family) =
                         ctx.resolve_method_family(method.name, method.span)?;
@@ -1568,26 +1503,7 @@ pub(crate) fn lower_expr_value(
                     }
                 }
 
-                _ => {
-                    if !generic_args.is_empty() {
-                        comp_error!(
-                            e.span,
-                            "explicit type arguments require a named function callee"
-                        );
-                    }
-                    let callee = lower_expr(ctx, scope, a.e(func))?;
-                    let args_range = lower_exprs(ctx, scope, args.iter().map(|a| &a.value))?;
-
-                    Expr::Call {
-                        callee: hir::Callee::Value(callee),
-                        args: args_range,
-                        generic_args: IdxRange::new_empty(),
-                        // The callee is a value, so inference calls its type and
-                        // never asks the family for a name; the placeholder key is
-                        // not a resolvable spelling.
-                        family: hir::CallFamily::Resolved(ustr("<value>")),
-                    }
-                }
+                _ => lower_value_call(ctx, scope, *func, args, generic_args, e.span)?,
             }
         }
 
@@ -1775,35 +1691,23 @@ pub(crate) fn lower_expr_value(
             }
         },
 
-        ExprKind::Path(path) => {
-            let frag = ctx.fragment_scope();
-            let use_path = use_path_ref(path);
-            let target =
-                ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path));
-            if let Ok(t) = &target {
-                ctx.record_path(TyPos::Body, path, member_segment_target(t));
-            }
-            match target {
-                Ok(resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key)) => {
-                    Expr::Global(key)
-                }
-                Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
-                    let (enum_span, variant_span) = variant_path_spans(path);
-                    Expr::EnumVariant {
-                        enum_name: enum_key,
-                        enum_name_span: ctx.body.name_spans.alloc(enum_span),
-                        variant,
-                        variant_span: ctx.body.name_spans.alloc(variant_span),
-                        args: hir::VariantArgs::Unit,
+        ExprKind::Path(path) => match ctx.resolve_path(path) {
+            Ok(target) => {
+                ctx.record_path(TyPos::Body, path, member_segment_target(&target));
+                match target {
+                    resolve::MemberTarget::EnumVariant { enum_key, variant } => {
+                        lower_variant(ctx, path, enum_key, variant, hir::VariantArgs::Unit)
                     }
-                }
-                Ok(resolve::MemberTarget::Type(key)) => Expr::Global(key),
-                Err(msg) => {
-                    ctx.recover_name(CompilerError::new_with_label(e.span, msg))?;
-                    Expr::Error
+                    resolve::MemberTarget::Global(key)
+                    | resolve::MemberTarget::Callable(key)
+                    | resolve::MemberTarget::Type(key) => Expr::Global(key),
                 }
             }
-        }
+            Err(msg) => {
+                ctx.recover_name(CompilerError::new_with_label(e.span, msg))?;
+                Expr::Error
+            }
+        },
 
         ExprKind::PathStructLiteral {
             path,
@@ -1816,19 +1720,16 @@ pub(crate) fn lower_expr_value(
             } else {
                 IdxRange::new_empty()
             };
-            let frag = ctx.fragment_scope();
-            let use_path = use_path_ref(path);
-            let target =
-                match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
-                    Ok(t) => t,
-                    Err(msg) => {
-                        ctx.recover_name(CompilerError::new_with_label(e.span, msg))?;
-                        for (_, value) in fields.iter() {
-                            lower_expr(ctx, scope, a.e(value))?;
-                        }
-                        return Ok(Expr::Error);
+            let target = match ctx.resolve_path(path) {
+                Ok(target) => target,
+                Err(msg) => {
+                    ctx.recover_name(CompilerError::new_with_label(e.span, msg))?;
+                    for (_, value) in fields.iter() {
+                        lower_expr(ctx, scope, a.e(value))?;
                     }
-                };
+                    return Ok(Expr::Error);
+                }
+            };
             ctx.record_path(TyPos::Body, path, member_segment_target(&target));
             if !unqualified && !bases.is_empty() {
                 return Err(CompilerError::new_with_label(
@@ -1855,16 +1756,13 @@ pub(crate) fn lower_expr_value(
                     fields: fields_range,
                     bases: base_range,
                 },
-                resolve::MemberTarget::EnumVariant { enum_key, variant } => {
-                    let (enum_span, variant_span) = variant_path_spans(path);
-                    Expr::EnumVariant {
-                        enum_name: enum_key,
-                        enum_name_span: ctx.body.name_spans.alloc(enum_span),
-                        variant,
-                        variant_span: ctx.body.name_spans.alloc(variant_span),
-                        args: hir::VariantArgs::Record(fields_range),
-                    }
-                }
+                resolve::MemberTarget::EnumVariant { enum_key, variant } => lower_variant(
+                    ctx,
+                    path,
+                    enum_key,
+                    variant,
+                    hir::VariantArgs::Record(fields_range),
+                ),
                 resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key) => {
                     return Err(CompilerError::new_with_label(
                         e.span,
@@ -3718,6 +3616,89 @@ fn compound_place_temps(a: &Ast, place: &Idx<ExprData>) -> Vec<Idx<ExprData>> {
     }
     parts.retain(|p| !expr_is_literal(a, p));
     parts
+}
+
+fn is_direct_call_target(ctx: &LowerCtx, target: &resolve::MemberTarget) -> bool {
+    match *target {
+        resolve::MemberTarget::Callable(_) => true,
+        resolve::MemberTarget::Global(key) => ctx
+            .workspace
+            .defs
+            .get(&key)
+            .is_some_and(|meta| meta.kind == bone_core::modules::DefKind::Callable),
+        resolve::MemberTarget::Type(key) => ctx.workspace.nominals.newtype_id(key).is_some(),
+        resolve::MemberTarget::EnumVariant { .. } => false,
+    }
+}
+
+fn lower_call_args(
+    ctx: &mut LowerCtx,
+    scope: Idx<Scope>,
+    receiver: Option<&Idx<ExprData>>,
+    args: &[skull_parser::FunctionCallArg],
+    allow_spread: bool,
+) -> Result<IdxRange<Expr>, CompilerError> {
+    let lowered = lower_exprs(
+        ctx,
+        scope,
+        receiver
+            .into_iter()
+            .chain(args.iter().map(|arg| &arg.value)),
+    )?;
+    for (idx, arg) in lowered
+        .into_iter()
+        .skip(usize::from(receiver.is_some()))
+        .zip(args)
+    {
+        if let Some(name) = &arg.name {
+            ctx.body.arg_names.insert(idx, name.name);
+        }
+        if allow_spread && arg.is_spread {
+            ctx.body.spread_args.insert(idx);
+        }
+    }
+    Ok(lowered)
+}
+
+fn lower_value_call(
+    ctx: &mut LowerCtx,
+    scope: Idx<Scope>,
+    func: Idx<ExprData>,
+    args: &[skull_parser::FunctionCallArg],
+    generic_args: IdxRange<TypeExpr>,
+    span: Span,
+) -> Result<Expr, CompilerError> {
+    if !generic_args.is_empty() {
+        comp_error!(
+            span,
+            "explicit type arguments require a named function callee"
+        );
+    }
+    let callee = lower_expr(ctx, scope, ctx.ast.e(&func))?;
+    let args = lower_exprs(ctx, scope, args.iter().map(|arg| &arg.value))?;
+    Ok(Expr::Call {
+        callee: Callee::Value(callee),
+        args,
+        generic_args,
+        family: hir::CallFamily::Resolved(ustr("<value>")),
+    })
+}
+
+fn lower_variant(
+    ctx: &mut LowerCtx,
+    path: &skull_parser::Path,
+    enum_name: Ustr,
+    variant: Ustr,
+    args: VariantArgs,
+) -> Expr {
+    let (enum_span, variant_span) = variant_path_spans(path);
+    Expr::EnumVariant {
+        enum_name,
+        enum_name_span: ctx.body.name_spans.alloc(enum_span),
+        variant,
+        variant_span: ctx.body.name_spans.alloc(variant_span),
+        args,
+    }
 }
 
 fn lower_named_call(

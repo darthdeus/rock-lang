@@ -155,7 +155,6 @@ impl ResolvedNames {
     fn resolve(&mut self, ws: &Workspace, frag: &FragmentScope, name: Ustr) {
         let bare = resolve::resolve_bare(ws, frag, name).ok();
         let ordinary = match bare {
-            Some(r) if r.kind == ResolvedKind::Module => return,
             Some(r) if r.kind != ResolvedKind::Callable => {
                 let spellings = match r.kind {
                     ResolvedKind::Global => Some(&mut self.globals),

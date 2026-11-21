@@ -1403,9 +1403,7 @@ fn resolve_named_call_inner(
         let meta = gamma.workspace.defs.get(&name);
         let shown = meta.map(|m| m.name).unwrap_or(name);
         let message = match meta.map(|m| m.kind) {
-            Some(
-                kind @ (DefKind::Global | DefKind::Type | DefKind::Decorator | DefKind::Module),
-            ) => {
+            Some(kind @ (DefKind::Global | DefKind::Type | DefKind::Decorator)) => {
                 let what = match kind {
                     DefKind::Global => "global",
                     DefKind::Type => "type",

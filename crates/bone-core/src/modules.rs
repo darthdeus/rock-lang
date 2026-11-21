@@ -232,7 +232,6 @@ impl NsNode {
             DefKind::Global => &mut self.owned_globals,
             DefKind::Callable => &mut self.owned_callables,
             DefKind::Decorator => &mut self.owned_decorators,
-            DefKind::Module => unreachable!("modules are children, not owned definitions"),
         }
     }
 }
@@ -254,7 +253,6 @@ pub enum DefKind {
     Global,
     Callable,
     Decorator,
-    Module,
 }
 
 /// Metadata for one canonical definition. Diagnostics render `name` or the
