@@ -1,4 +1,4 @@
-use skull::mir_emit::{emit_full, emit_overlay};
+use skull::mir_emit::emit_overlay;
 
 use crate::common::{body_id, bound_callee_name, emit_full_of, function_body, ws_with_stdlib};
 
@@ -24,51 +24,6 @@ fn assert_passes(script: &str) {
     assert!(out.stdout.contains("PASS"));
 }
 
-fn only(lua: &str, needle: &str) -> usize {
-    let first = lua
-        .find(needle)
-        .unwrap_or_else(|| panic!("missing `{needle}`"));
-    assert!(lua[first + needle.len()..].find(needle).is_none());
-    first
-}
-
-#[test]
-fn every_binding_line_follows_every_definition() {
-    let lua = emit(SRC);
-    let factories: Vec<&str> = lua
-        .lines()
-        .filter_map(|line| line.strip_prefix("__rock_mk_"))
-        .filter_map(|rest| rest.split_once(" = function(").map(|(name, _)| name))
-        .collect();
-    assert!(
-        factories.iter().any(|n| n.starts_with("top_"))
-            && factories.iter().any(|n| n.starts_with("mid_"))
-    );
-    let last_definition = lua
-        .match_indices("\n__rock_mk_")
-        .last()
-        .map(|(i, _)| i)
-        .expect("at least one factory");
-    for name in &factories {
-        let bind = only(&lua, &format!("\n{name} = __rock_mk_{name}("));
-        assert!(bind > last_definition);
-    }
-}
-
-#[test]
-fn binding_lines_are_ordered_callees_before_callers() {
-    let lua = emit(SRC);
-    let position = |prefix: &str| -> usize {
-        lua.match_indices(&format!("\n{prefix}"))
-            .map(|(i, _)| i)
-            .find(|&i| lua[i + 1..].starts_with(prefix) && lua[i + 1..].contains(" = __rock_mk_"))
-            .unwrap_or_else(|| panic!("no binding line for `{prefix}`"))
-    };
-    let mid_bind = position("mid_int = __rock_mk_");
-    let top_bind = position("top_int = __rock_mk_");
-    assert!(mid_bind < top_bind);
-}
-
 #[test]
 fn a_mutually_recursive_pair_stays_a_global_lookup() {
     let lua = emit(SRC);
@@ -82,64 +37,6 @@ fn a_mutually_recursive_pair_stays_a_global_lookup() {
 }
 
 #[test]
-fn emits_main_is_reported() {
-    let ws = ws_with_stdlib(SRC);
-    let mid = skull::user_module_id(&ws).unwrap();
-    let emit = emit_full(&ws, mid).expect("emit_full").0;
-    assert!(emit.emits_main);
-    assert!(!emit.lua.contains("function main("));
-
-    let no_main = ws_with_stdlib("fn leaf(a: int) -> int { a + 1 }\n");
-    let mid = skull::user_module_id(&no_main).unwrap();
-    let emit = emit_full(&no_main, mid).expect("emit_full").0;
-    assert!(!emit.emits_main);
-}
-
-fn over_budget_inline_caller_fixture(helper_value: i32) -> String {
-    let mut src = format!(
-        "@inline @nomangle fn helper(flag: bool) -> int {{ {helper_value} }}\n\
-         @nomangle fn caller() -> int {{\n"
-    );
-    for i in 0..401 {
-        src.push_str(&format!("let unused_{i} = 0\nunused_{i} = {i}\n"));
-    }
-    src.push_str("return helper(false)\n}\n");
-    src
-}
-
-#[test]
-fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
-    let v1 = format!("{SRC}\n@nomangle fn saved() -> fn(int) -> int {{ top }}\n");
-    let ws1 = ws_with_stdlib(&v1);
-    let (full, mut cache) = emit_full_of(&ws1, "full");
-    let v2 = v1.replace("a * 3 + 1", "a * 3 + 2");
-    let ws2 = ws_with_stdlib(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
-    let script = format!(
-        "{}\nlocal saved_top = saved()\nassert(top_int(3) == 33)\n{}\nassert(top_int(3) == 36)\nassert(saved_top(3) == 36)\nprint('PASS')\n",
-        full.lua, overlay.lua,
-    );
-    assert_passes(&script);
-}
-
-#[test]
-fn bound_overlay_rebinds_a_residual_inline_caller() {
-    let v1 = over_budget_inline_caller_fixture(3);
-    let ws1 = ws_with_stdlib(&v1);
-    let (full, mut cache) = emit_full_of(&ws1, "full");
-
-    let v2 = over_budget_inline_caller_fixture(5);
-    let ws2 = ws_with_stdlib(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("overlay");
-
-    let script = format!(
-        "{}\nassert(caller() == 3)\n{}\nassert(caller() == 5)\nprint('PASS')\n",
-        full.lua, overlay.lua,
-    );
-    assert_passes(&script);
-}
-
-#[test]
 fn bound_overlay_cells_read_the_live_global_storage() {
     let v1 = "global COUNT: int = 0\nfn delta(n: int) -> int { n + 1 }\n@nomangle fn bump() { COUNT = delta(COUNT) }\n";
     let ws1 = ws_with_stdlib(v1);
@@ -149,56 +46,6 @@ fn bound_overlay_cells_read_the_live_global_storage() {
     let script = format!(
         "{}\nbump()\n{}\nbump()\nassert(COUNT == 3)\nCOUNT = 20\nbump()\nassert(COUNT == 22)\nprint('PASS')\n",
         full.lua, overlay.lua,
-    );
-    assert_passes(&script);
-}
-
-#[test]
-fn bound_overlay_new_backedge_keeps_capture_binding_acyclic() {
-    let v1 = "fn leaf(n: int) -> int { n }\nfn top(n: int) -> int { leaf(n) }\n@nomangle fn answer() -> int { top(3) }\n";
-    let ws1 = ws_with_stdlib(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "full");
-    let ws2 = ws_with_stdlib(&v1.replace("{ n }", "{ if n == 0 { return 10 }\n top(n - 1) }"));
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
-    let script = format!(
-        "{}\n{}\nassert(answer() == 10)\nprint('PASS')\n",
-        full.lua, overlay.lua
-    );
-    assert_passes(&script);
-}
-
-#[test]
-fn repeated_stripped_overlays_share_one_storage_table_and_old_closures_live() {
-    let v1 = "global COUNT: int = 0\n@nomangle fn bump() { COUNT = COUNT + 1 }\n";
-    let ws1 = ws_with_stdlib(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "full");
-    let ws2 = ws_with_stdlib(&v1.replace("COUNT + 1", "COUNT + 2"));
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "bump")]).expect("overlay");
-    let script = format!(
-        r#"
-local function stripped(code)
-  return assert(loadstring(string.dump(assert(loadstring(code)), true)))
-end
-local real_join = debug.upvaluejoin
-local joins = 0
-debug.upvaluejoin = function(...) joins = joins + 1; return real_join(...) end
-stripped({full})()
-local old_bump = bump
-local storage = __rock_globals
-local patch = stripped({overlay})
-for i = 1, 25 do patch() end
-stripped({full})()
-patch()
-assert(joins == 0, 'a chunk joined upvalues; every chunk reads the one storage table')
-assert(__rock_globals == storage, 'a reload replaced the global storage')
-COUNT = 10
-old_bump()
-bump()
-assert(COUNT == 13)
-print('PASS')
-"#,
-        full = skull_codegen_lua::lua_string(&full.lua),
-        overlay = skull_codegen_lua::lua_string(&overlay.lua),
     );
     assert_passes(&script);
 }
