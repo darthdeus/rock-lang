@@ -16,14 +16,6 @@ co fn mutable_closure() -> Coroutine<int> {
     yield count
 }
 
-@test(output = "0\n10\n30")
-fn test_closure_mutates_captured_scalar() {
-    let c = mutable_closure()
-    print(c.resume() ?? -99)
-    print(c.resume() ?? -99)
-    print(c.resume() ?? -99)
-}
-
 // ---- Multiple closures sharing captured scalar ----
 // Two closures capture the same hoisted local. Mutations via one are
 // visible via the other. This is the canonical "counter + reader"
@@ -39,14 +31,6 @@ co fn shared_capture() -> Coroutine<int> {
     bumper()
     bumper()
     yield reader()
-}
-
-@test(output = "100\n101\n103")
-fn test_multiple_closures_share_state() {
-    let c = shared_capture()
-    print(c.resume() ?? -99)
-    print(c.resume() ?? -99)
-    print(c.resume() ?? -99)
 }
 
 // ---- Closure invoked across MULTIPLE yield boundaries ----
@@ -67,15 +51,6 @@ co fn long_lived_closure() -> Coroutine<int> {
     yield snapshot()
 }
 
-@test(output = "1\n2\n10\n50")
-fn test_closure_across_many_yields() {
-    let c = long_lived_closure()
-    print(c.resume() ?? -99)
-    print(c.resume() ?? -99)
-    print(c.resume() ?? -99)
-    print(c.resume() ?? -99)
-}
-
 fn apply_to(f: fn(int) -> int, x: int) -> int { return f(x) }
 
 // A named nested fn inside a co fn keeps its own hoisted lambda.
@@ -85,13 +60,6 @@ co fn nested_fn_lambda(k: int) -> Coroutine<int> {
     }
     yield scaled(k)
     yield scaled(k + 1)
-}
-
-@test(output = "30\n40")
-fn test_nested_fn_lambda_in_co_fn() {
-    let c = nested_fn_lambda(3)
-    print(c.resume() ?? -99)
-    print(c.resume() ?? -99)
 }
 
 co fn defer_mixed_capture() -> Coroutine<int> {
@@ -136,14 +104,6 @@ co fn inner_scope_defer() -> Coroutine<int> {
     yield keep()
 }
 
-@test(output = "1\n4\n2\n5")
-fn test_inner_scope_defer_closure_survives_yield() {
-    let c = inner_scope_defer()
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-}
-
 // ---- Early return splices the defer a second time ----
 co fn early_return_defer(stop: bool) -> Coroutine<int> {
     defer {
@@ -183,13 +143,6 @@ co fn hook_local() -> Coroutine<int> {
     yield 2
 }
 
-@test(output = "1\n41")
-fn test_on_killed_closure_mutates_hook_local() {
-    let c = hook_local()
-    print(c.resume() ?? -1)
-    c.kill()
-}
-
 // ---- Two defers whose locals share a name ----
 co fn two_defers() -> Coroutine<int> {
     defer {
@@ -204,17 +157,6 @@ co fn two_defers() -> Coroutine<int> {
         print(f())
     }
     yield 1
-}
-
-@test(output = "1\n2\n3\n1\n2\n3")
-fn test_two_defers_closures() {
-    let c = two_defers()
-    print(c.resume() ?? -1)
-    c.resume()
-
-    let c = two_defers()
-    print(c.resume() ?? -1)
-    c.kill()
 }
 
 // ---- Closure in a loop inside a defer: the box spans several blocks ----
@@ -238,17 +180,6 @@ co fn loop_in_defer() -> Coroutine<int> {
         print(total)
     }
     yield 1
-}
-
-@test(output = "1\n66\n1\n66")
-fn test_loop_in_defer_closure() {
-    let c = loop_in_defer()
-    print(c.resume() ?? -1)
-    c.resume()
-
-    let c = loop_in_defer()
-    print(c.resume() ?? -1)
-    c.kill()
 }
 
 // ---- Defer registered in a loop body ----
@@ -286,17 +217,6 @@ co fn lambda_defer_in_defer() -> Coroutine<int> {
     yield 1
 }
 
-@test(output = "1\n102\n1\n102")
-fn test_lambda_defer_in_defer() {
-    let c = lambda_defer_in_defer()
-    print(c.resume() ?? -1)
-    c.resume()
-
-    let c = lambda_defer_in_defer()
-    print(c.resume() ?? -1)
-    c.kill()
-}
-
 // ---- Nested defers inside a defer ----
 co fn nested_defer() -> Coroutine<int> {
     defer {
@@ -314,17 +234,6 @@ co fn nested_defer() -> Coroutine<int> {
     yield 1
 }
 
-@test(output = "1\n2\n12\n1\n2\n12")
-fn test_nested_defer_closures() {
-    let c = nested_defer()
-    print(c.resume() ?? -1)
-    c.resume()
-
-    let c = nested_defer()
-    print(c.resume() ?? -1)
-    c.kill()
-}
-
 // ---- A defer nested in an on_killed hook ----
 co fn hook_with_defer() -> Coroutine<int> {
     on_killed {
@@ -337,13 +246,6 @@ co fn hook_with_defer() -> Coroutine<int> {
         n = n + 1
     }
     yield 1
-}
-
-@test(output = "1\n12")
-fn test_hook_nested_defer_closure() {
-    let c = hook_with_defer()
-    print(c.resume() ?? -1)
-    c.kill()
 }
 
 // ---- Generic co fn ----
@@ -365,4 +267,43 @@ fn test_generic_defer_closure() {
     let d = generic_defer(3)
     d.resume()
     d.kill()
+}
+
+fn print_yields(c: Coroutine<int>, count: int) {
+    for _ in 0..count { print(c.resume().unwrap()) }
+}
+
+@test(output = "0\n10\n30\n100\n101\n103\n1\n2\n10\n50\n30\n40\n1\n4\n2\n5")
+fn captures_survive_suspension() {
+    print_yields(mutable_closure(), 3)
+    print_yields(shared_capture(), 3)
+    print_yields(long_lived_closure(), 4)
+    print_yields(nested_fn_lambda(3), 2)
+    print_yields(inner_scope_defer(), 3)
+}
+
+fn kill_after_yield(c: Coroutine<int>) {
+    print(c.resume().unwrap())
+    c.kill()
+}
+
+@test(output = "1\n41\n1\n12")
+fn kill_hooks_keep_locals_in_nested_closures() {
+    kill_after_yield(hook_local())
+    kill_after_yield(hook_with_defer())
+}
+
+fn finish_and_kill(finished: Coroutine<int>, killed: Coroutine<int>) {
+    print(finished.resume().unwrap())
+    finished.resume()
+    print(killed.resume().unwrap())
+    killed.kill()
+}
+
+@test(output = "1\n2\n3\n1\n2\n3\n1\n66\n1\n66\n1\n102\n1\n102\n1\n2\n12\n1\n2\n12")
+fn defer_closures_run_on_completion_and_on_kill() {
+    finish_and_kill(two_defers(), two_defers())
+    finish_and_kill(loop_in_defer(), loop_in_defer())
+    finish_and_kill(lambda_defer_in_defer(), lambda_defer_in_defer())
+    finish_and_kill(nested_defer(), nested_defer())
 }
