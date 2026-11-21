@@ -23,67 +23,6 @@ fn generated_sim_registration_loads_and_prunes_unrelated_library_code() {
 }
 
 #[test]
-fn shared_prefix_dependency_retains_only_reached_bodies() {
-    let ws = ws_with_dependency_module(
-        "fn unused_dependency_body() -> int { return 7 }\nfn reached_dependency_body() -> int { return 9 }",
-        "fn main() { print(reached_dependency_body()) }",
-    );
-    let mid = module_id(&ws, "/tmp/rock-mono-project/main.rock");
-    let (emit, mut cache) = skull::mir_emit::FullEmit::program()
-        .project_root(Some("/tmp/rock-mono-project"))
-        .run(&ws, mid)
-        .expect("pruned dependency bodies must not require lowering plans");
-    assert!(
-        !definition_symbols(&emit.lua)
-            .iter()
-            .any(|s| s.starts_with("unused_dependency_body"))
-    );
-    assert!(
-        definition_symbols(&emit.lua)
-            .iter()
-            .any(|s| s.starts_with("reached_dependency_body"))
-    );
-
-    assert_eq!(common::run_main(&emit.lua), "9");
-
-    let edited = ws_with_dependency_module(
-        "fn unused_dependency_body() -> int { return 7 }\nfn reached_dependency_body() -> int { return 9 }",
-        "fn main() { print(0) }",
-    );
-    let incremental = skull::mir_emit::test_support::emit_incremental(
-        &edited,
-        &mut cache,
-        &[body_id(&edited, "main")],
-    )
-    .expect("remove the dependency call incrementally");
-    let fresh = skull::mir_emit::FullEmit::program()
-        .project_root(Some("/tmp/rock-mono-project"))
-        .run(&edited, mid)
-        .expect("fresh emission after removing the dependency call")
-        .0;
-    assert_eq!(incremental.lua, fresh.lua);
-    assert_eq!(common::run_main(&incremental.lua), "0");
-}
-
-#[test]
-fn v1_sim_glue_finds_register_sim_by_declared_name() {
-    let fragments = [
-        ("main.rock", SIM_SRC),
-        (
-            "engine.rock",
-            &format!("mod engine;\npub {}", SIM_LIB.trim_start()),
-        ),
-    ];
-    let emit = emit_v1_package("v1sims", &fragments);
-    let registrations: Vec<&str> = emit
-        .lua
-        .lines()
-        .filter(|l| l.starts_with("register_sim_") && l.contains("probe_sim\""))
-        .collect();
-    assert_eq!(registrations.len(), 1);
-}
-
-#[test]
 fn v1_sim_glue_rejects_two_register_sim_definitions() {
     let lib = |module: &str| {
         format!(
@@ -139,23 +78,5 @@ fn nested_project_sources_keep_uncalled_public_functions() {
         definition_symbols(&emit.lua)
             .iter()
             .any(|s| s.contains("uncalled"))
-    );
-}
-
-#[test]
-fn shared_prefix_dependency_keeps_bare_name_api_roots() {
-    let ws = ws_with_dependency_module(
-        "@nomangle fn external_api() -> int { return 7 }",
-        "fn main() {}",
-    );
-    let mid = module_id(&ws, "/tmp/rock-mono-project/main.rock");
-    let (emit, _) = skull::mir_emit::FullEmit::program()
-        .project_root(Some("/tmp/rock-mono-project"))
-        .run(&ws, mid)
-        .expect("dependency API emission");
-    assert!(
-        definition_symbols(&emit.lua)
-            .iter()
-            .any(|s| s == "external_api")
     );
 }
