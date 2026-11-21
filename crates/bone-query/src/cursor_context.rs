@@ -966,51 +966,21 @@ mod gaps {
 }
 
 #[cfg(test)]
-mod frontier_census {
-    use super::*;
-
-    fn corpus() -> Vec<(String, String)> {
-        let fixture = include_str!("../tests/fixtures/cursor_frontier.rock");
-        (0..16)
-            .map(|index| (format!("cursor_frontier_{index}.rock"), fixture.repeat(6)))
-            .collect()
-    }
-
-    #[test]
-    fn none_rate_over_all_offsets() {
-        let mut total = 0usize;
-        let mut none = 0usize;
-        let mut samples: Vec<String> = Vec::new();
-        for (name, src) in corpus() {
-            let mut off = 1usize;
-            while off < src.len() {
-                if src.is_char_boundary(off) {
-                    total += 1;
-                    if CursorAst::at(&src, off).is_none() {
-                        none += 1;
-                        if samples.len() < 10 {
-                            let s = off.saturating_sub(40);
-                            samples.push(format!("{name}:{off} ...{:?}", &src[s..off]));
-                        }
-                    }
-                }
-                off += 5;
-            }
-        }
-        assert!(
-            none == 0,
-            "the tokenize frontier is supposed to be EMPTY (the raw buffer is \
-             always a ladder rung and balance_delimiters closes broken string \
-             tails) -- {none}/{total} positions returned None:\n{}",
-            samples.join("\n")
-        );
-        assert!(total > 10_000, "census too small to mean anything: {total}");
-    }
-}
-
-#[cfg(test)]
 mod tokenize_frontier {
     use super::*;
+
+    #[test]
+    fn classifies_the_sampled_fixture_offsets() {
+        let src = include_str!("../tests/fixtures/cursor_frontier.rock").repeat(6);
+        for offset in (1..src.len()).step_by(5) {
+            if src.is_char_boundary(offset) {
+                assert!(
+                    CursorAst::at(&src, offset).is_some(),
+                    "fixture did not classify at byte {offset}"
+                );
+            }
+        }
+    }
 
     /// Raw buffers that fail tokenize must still classify via the balanced
     /// munges.
