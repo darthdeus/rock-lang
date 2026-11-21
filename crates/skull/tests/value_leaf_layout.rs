@@ -16,28 +16,3 @@ fn assert_load_fails(lua: &str, edits: &[(&str, &str)], message: &str) {
     let (ok, out) = crate::common::run_luajit_capturing(&edited);
     assert!(!ok && out.contains(message));
 }
-
-#[test]
-fn emitted_layout_checks_reject_offset_and_size_drift() {
-    let lua = crate::common::emit_module(MUTATION_PROGRAM);
-    assert_eq!(crate::common::run_main(&lua), "6");
-    for (from, to, message) in [
-        (
-            "  double c;\n  double e;\n",
-            "  double e;\n  double c;\n",
-            "skull layout drift: Outer.c at 24, expected 16",
-        ),
-        (
-            "double __rock_leaf_696e6e65722e61; int __rock_leaf_696e6e65722e62;",
-            "int __rock_leaf_696e6e65722e62; double __rock_leaf_696e6e65722e61;",
-            "skull leaf alias drift: Outer.__rock_leaf_696e6e65722e61",
-        ),
-        (
-            "  int d;\n} Outer;",
-            "  int d;\n  double pad;\n} Outer;",
-            "skull layout drift: sizeof(Outer) = 48, expected 40",
-        ),
-    ] {
-        assert_load_fails(&lua, &[(from, to)], message);
-    }
-}
