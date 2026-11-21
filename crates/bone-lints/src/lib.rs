@@ -1,5 +1,3 @@
-//! Lints over bone's typechecked HIR. Reads semantic results without re-typechecking.
-
 use bone_core::hir::{
     AnnoValue, BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, Function, Module,
     Statement, TyId, TypeCtor, TypeExpr,
@@ -78,7 +76,6 @@ fn candidate_bindings<'a>(
         .chain(params.into_iter().flatten())
 }
 
-/// Enum names that lower to `Let` bindings in bare pattern arms.
 pub(crate) fn enum_variant_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
     ws.user_modules(warm)
         .flat_map(|m| m.enums.iter())
@@ -132,7 +129,6 @@ fn collect_write_targets(body: &Body, target: Idx<Expr>, out: &mut FxHashSet<Idx
 
 pub const UNUSED_VAR: &str = "unused_var";
 
-/// Lint names recognized by selection, suppression, and completion.
 pub const KNOWN_LINTS: &[&str] = &[
     UNUSED_VAR,
     UNUSED_FN,
@@ -198,7 +194,6 @@ impl LintOptions {
     }
 }
 
-/// A rendered, name-tagged finding shared by the LSP, CLI, and build pass.
 #[derive(Clone, Debug)]
 pub struct Finding {
     pub lint: &'static str,
@@ -547,7 +542,6 @@ fn finding_offset(finding: &Finding) -> usize {
         .unwrap_or(finding.error.location.offset)
 }
 
-/// Deterministic diagnostic order: offset, lint, message, then label spans.
 fn cmp_by_offset(a: &Finding, b: &Finding) -> std::cmp::Ordering {
     finding_offset(a)
         .cmp(&finding_offset(b))
@@ -571,7 +565,6 @@ fn cmp_by_offset(a: &Finding, b: &Finding) -> std::cmp::Ordering {
         })
 }
 
-/// Lines containing `allow`, with the numbering and trimming of `str::lines`.
 fn allow_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     let mut line_no = 0;
     let mut counted_to = 0;
@@ -599,7 +592,6 @@ fn allow_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
-/// One notice for the run when any action-layer lint needs a missing policy.
 fn missing_policy_advice(module: &Module, sel: &LintOptions) -> Option<Finding> {
     if sel.action_policy.is_some() {
         return None;
@@ -695,8 +687,7 @@ pub fn lint_workspace(
     IncrementalLintCache::default().update(ws, warm, is_bin, sources, sel, &LintCacheUpdate::full())
 }
 
-/// Parse standalone or trailing allow comments, including optional whitespace
-/// and justification arguments. Unknown lint names do not match.
+/// Unknown lint names do not match.
 fn suppression_entries(source: &str) -> FxHashSet<(usize, &'static str)> {
     let mut allow = FxHashSet::default();
     for (n, line) in allow_lines(source) {
@@ -822,7 +813,6 @@ fn reachable_functions(
     reachable
 }
 
-/// A function entered from outside the in-project call graph is a root.
 fn is_root(f: &Function) -> bool {
     f.json_field_for.is_some()
         || declared_name(f.name.as_str()) == "main"
@@ -876,7 +866,6 @@ fn body_references(
     }
 }
 
-/// Functions reached through resolved calls and iterator-protocol edges.
 fn inference_edges(bi: &BodyInference, out: &mut Vec<(ModuleId, Idx<Function>)>) {
     out.extend(bi.resolved_overload_calls.values().copied());
     out.extend(bi.implicit_iter_args.values().map(|w| w.func));
@@ -1309,8 +1298,6 @@ pub(crate) fn task_null_abandon_in_body(
     out
 }
 
-/// The type of an assignment target; locals use binding types, other places use
-/// expression types.
 fn place_type(bi: &BodyInference, body: &Body, target: Idx<Expr>) -> Option<TyId> {
     match body.expr_arena[target] {
         Expr::Var(b) => bi.binding_types.get(b).copied(),
@@ -1328,7 +1315,6 @@ fn is_task_slot(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
     )
 }
 
-/// Render a supported assignment target for the diagnostic.
 fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
     Some(match body.expr_arena[e] {
         Expr::Var(b) => body.binding_arena[b].name.to_string(),
@@ -1355,7 +1341,6 @@ fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
     })
 }
 
-/// Last segment of a DefKey, used when matching compiler-owned names.
 fn declared_name(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)
 }
