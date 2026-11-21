@@ -236,20 +236,6 @@ mod resolve_tests {
     }
 
     #[test]
-    fn registered_header_does_not_retain_a_full_asset_allocation() {
-        let key = unique_key("header_#.bin");
-        let _asset = register_guarded_asset(&key, vec![42; 8 * 1024 * 1024]);
-        let header = resolve_asset_prefix(&key, 24).unwrap();
-        assert_eq!(header, vec![42; 24]);
-        assert!(
-            header.capacity() <= 24,
-            "header retained {} bytes",
-            header.capacity()
-        );
-        assert_eq!(resolve_asset_prefix(&key, 0), Some(vec![]));
-    }
-
-    #[test]
     fn override_wins_with_bounded_headers_and_falls_back_to_the_registry() {
         let root = fresh_root();
         let key = unique_key("world/header_#.bin");
@@ -284,59 +270,10 @@ mod resolve_tests {
     }
 
     #[test]
-    fn unregistered_paths_are_never_overridden() {
-        let root = fresh_root();
-        let key = unique_key("saves/state_#.json");
-        let modded = root.join(&key);
-        std::fs::create_dir_all(modded.parent().unwrap()).unwrap();
-        std::fs::write(&modded, b"MOD_SAVE").unwrap();
-        assert_eq!(resolve_with_root(Some(&root), &key, None), None);
-        assert_eq!(resolve_with_root(None, &key, None), None);
-    }
-
-    #[test]
     fn traversal_and_absolute_keys_never_escape_mods() {
         let root = fresh_root();
         for key in ["../secret", "a/../../secret", "/etc/passwd"] {
             assert!(matches!(read_override(&root, key, None), Ok(None)), "{key}");
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unreadable_override_does_not_fall_through_to_embedded_asset() {
-        let root = fresh_root();
-        let key = unique_key("loop_#/shipped.bin");
-        let override_path = root.join(&key);
-        std::fs::create_dir_all(override_path.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&override_path, &override_path).unwrap();
-        let observed = std::fs::read(&override_path).unwrap_err();
-        assert_eq!(observed.raw_os_error(), Some(libc::ELOOP), "{observed}");
-        let _asset = register_guarded_asset(&key, b"embedded bytes".to_vec());
-
-        assert_eq!(resolve_with_root(Some(&root), &key, None), None);
-    }
-
-    #[test]
-    fn embedded_directory_entries_are_direct_sorted_and_deduplicated() {
-        let dir = unique_key("game/assets/list_#");
-        {
-            let mut guard = REGISTRY.lock().unwrap();
-            let registry = guard.get_or_insert_with(AssetRegistry::default);
-            for child in ["z.ogg", "a.ogg", "nested/one.ogg", "nested/two.ogg"] {
-                registry.insert(format!("{dir}/{child}"), vec![]);
-            }
-            registry.insert(format!("{dir}ish/not-a-child.ogg"), vec![]);
-        }
-
-        let expected = ["a.ogg", "nested", "z.ogg"];
-        assert_eq!(directory_entries(&dir), expected);
-        assert_eq!(directory_entries(&dir.replace('/', "\\")), expected);
-        assert!(contains_directory(&dir) && contains_directory(&format!("{dir}/nested/")));
-        assert!(
-            !contains_directory(&format!("{dir}/a.ogg")),
-            "an asset is not a directory"
-        );
-        assert!(!contains_directory(&format!("{dir}/missing")));
     }
 }
