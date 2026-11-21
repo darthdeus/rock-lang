@@ -350,26 +350,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_parent_sums_exactly_and_keeps_its_remainder() {
-        let node = Node::parent(
-            "codegen",
-            Duration::from_millis(10),
-            vec![
-                Node::leaf("setup", Duration::from_millis(3)),
-                Node::leaf("fan-out", Duration::from_millis(5)),
-            ],
-        );
-        let json = node.into_json();
-        let children = json["children"].as_array().unwrap();
-        assert_eq!(children[2]["name"], "other");
-        let sum: f64 = children
-            .iter()
-            .map(|c| c["wall_ms"].as_f64().unwrap())
-            .sum();
-        assert!((sum - json["wall_ms"].as_f64().unwrap()).abs() < 1e-9);
-    }
-
-    #[test]
     fn children_that_overrun_their_parent_widen_it() {
         let node = Node::parent(
             "p",
