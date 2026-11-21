@@ -402,3 +402,16 @@ fn float64_views_round_trip_across_elements() {
     assert_eq(values[1].x, 16777219.25)
     assert_eq(values[1].y, 1.0000000000000004)
 }
+
+value PreciseNativeRow { valid: bool, small: int, single: f32, exact: float }
+
+@test
+fn native_equality_observes_every_bit_of_the_final_leaf() {
+    let a: NativeBuffer<PreciseNativeRow> = native_buffer_alloc(2)
+    let b: NativeBuffer<PreciseNativeRow> = native_buffer_alloc(2)
+    a[1] = PreciseNativeRow { valid: true, small: -7, single: 1.5, exact: 1.0000000001 }
+    b[1] = a[1]
+    assert(a == b)
+    b[1].exact = 1.0000000002
+    assert(a != b)
+}
