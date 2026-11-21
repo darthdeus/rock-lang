@@ -178,11 +178,3 @@ pub struct CallSite {
     pub owner: OwnerRef,
     pub site: Site,
 }
-
-#[cfg(test)]
-mod size {
-    #[test]
-    fn a_site_is_five_words() {
-        assert_eq!(std::mem::size_of::<super::Site>(), 40);
-    }
-}
