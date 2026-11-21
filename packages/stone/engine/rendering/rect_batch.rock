@@ -2,19 +2,9 @@
 // *_immediate draws (draw.rock) around canvas switches or readback.
 pub const RECT_BATCH_VERTS_PER_RECT: int = 6
 
-// THE sprite vertex layout. One owner: this field order IS the GPU attribute
-// layout, for the CPU writers here, for the GL binding (derived per draw via
-// `@vertex_expand`, so nothing in stone-rs restates it) and for the shaders
-// that declare it as their `@attr` param (sprite_batch, outline_target).
-// Value types are C-layout cdata and pack tightly with matching alignment,
-// so `NativeBuffer<Vertex>` = `ffi.new("Vertex[?]", n)` IS the GPU vertex
-// buffer layout — no schema indirection, and the emitted ffi.offsetof
-// assertions abort at chunk load if that stops being true.
-//
-// `color` is a Vec4 and not a `Color`: an attribute must be a
-// float/int/VecN, and a Color-typed @attr also fails in the shader BODY
-// (`expected Vec4, found Color`), so the shader half could not consume it.
-// @nomangle: the vertex buffers' `ffi.new`/`ffi.sizeof` strings spell `Vertex`.
+// Field order is the GPU vertex layout; value types use tightly packed C layout.
+// Shader attributes require Vec4 rather than Color.
+// @nomangle: ffi.new and ffi.sizeof refer to Vertex by name.
 pub @nomangle value Vertex {
     pos: Vec2f,
     uv: Vec2f,
@@ -37,9 +27,7 @@ inline(lua) fn __copy_vertex_buffer_prefix(
     return target
 """
 
-// Wrapper around stone_draw_mesh that accepts Ptr<Vertex> and casts to
-// float* internally. The extern signature takes Ptr<float> because
-// that's the historical layout; Vertex is binary-compatible.
+// Vertex is binary-compatible with the float pointer expected by the extern.
 @nomangle inline(lua) fn __stone_draw_mesh_vertex_raw(
     p: Ptr<Vertex>, vertex_count: int, stride: int,
     attr_sizes: Ptr<int>, attr_count: int, texture_kind: int, texture: int, fan_ranges: NativeBuffer<int>?, fan_count: int
@@ -50,16 +38,8 @@ inline(lua) fn __copy_vertex_buffer_prefix(
     return stone.stone_draw_mesh(ffi.cast("float*", p), vertex_count, stride, attr_sizes, attr_count, texture_kind, texture)
 """
 
-// THE submit for every sprite-format draw: the GL side owns no layout, so the
-// stride and the per-attribute component counts are derived here from `Vertex`
-// itself (`@vertex_expand`). Reordering
-// Vertex's fields moves the GL binding with them.
-//
-// Takes the buffer rather than its `.ptr` because the derivation reads the
-// element type, which a Ptr<Vertex> also carries but the expansion contract
-// spells as FlatVec/NativeBuffer. The int* scratch is per-call-site static: the
-// FFI edge wants a C array, and the counts are a compile-time constant, so it
-// is filled once and reused for the process' lifetime.
+// The expansion derives the GL layout from the buffer element type.
+// Static scratch holds the compile-time component counts for the FFI call.
 pub @nomangle fn __stone_draw_mesh_vertex(
     buf: NativeBuffer<Vertex>, vertex_count: int, texture_kind: int, texture: int,
     fan_ranges: NativeBuffer<int>? = null, fan_count: int = 0, audit_inputs: bool = true
@@ -82,11 +62,8 @@ pub @nomangle fn __stone_draw_mesh_vertex(
     return result
 }
 
-// THE submit for every sprite-format draw that owns its sampling. Bind and
-// release are a strict pair and live here rather than at the five call sites:
-// the sampler is per-unit GL state, so a leaked one re-filters every later draw
-// on unit 0 and an inherited one re-filters THIS draw. The scalar texture
-// signature keeps the table-backed SampledTexture off this submit boundary.
+// Samplers are per-unit GL state; bind and release them together to avoid leaking state.
+// Scalar texture arguments avoid a table allocation at the submit boundary.
 fn draw_mesh_sampled(
     buf: NativeBuffer<Vertex>, vertex_count: int, texture_kind: int, texture: int,
     sampler_key: int, sampling: TextureFilter,
@@ -227,10 +204,7 @@ pub fn rect_batch_reset(b: RectBatch) {
     b.count = 0
 }
 
-// One vertex, built from scalars. Leaf addressing lowers `buf[i] = vert(..)`
-// to `view[i*13 + k]` float stores the flat idiom wrote by hand, with
-// no Vertex_ct/Vec2_ct materialized -- so the layout comes from the struct
-// instead of from argument order, at no allocation.
+// Leaf addressing emits float stores without allocating Vertex or Vec2 cdata.
 pub @pure fn vert(
     x: float, y: float, u: float, v_: float,
     r: float, g: float, b: float, a: float,
@@ -347,10 +321,6 @@ pub fn rect_batch_push_textured_quad4(b: RectBatch,
     b.count = b.count + RECT_BATCH_VERTS_PER_RECT
 }
 
-// Push one colored triangle. 3 vertices, half the geometry of a quad
-// push. Same vertex layout (pos + uv + color + zeros for the
-// pivot/entity_id tail), so the GPU draw is identical
-// to a rect — no shader changes needed.
 fn __rect_batch_push_triangle_verts(
     buf: NativeBuffer<Vertex>, vi: int,
     x1: float, y1: float, x2: float, y2: float, x3: float, y3: float,
@@ -732,15 +702,9 @@ fn __sprite_mesh_add_quad_tail(
     m.count = m.count + RECT_BATCH_VERTS_PER_RECT
 }
 
-// Pool-parameterized submit core: acquire_mesh's flush and
-// RetainedMesh.draw funnel here (mesh_pool.rock owns all lifecycles).
-//
-// Queues the mesh's pre-filled vbo as a CLOSURE-FREE vertex batch, drawn via
-// __stone_draw_mesh_vertex in all three passes (color / entity-id /
-// outline-mask). Each submission takes the next CUSTOM_DRAW_COUNTER value,
-// so its key is unique in the frame and never merges with a pooled vertex
-// batch sharing its texture/z. The row persists while the mesh draws every
-// frame; the helpers stay small so the per-mesh loop traces.
+// Each submission needs a unique key so it cannot merge with another vertex batch.
+// Keep helpers small enough for the per-mesh loop to trace.
+
 fn submit_mesh_into(
     pool: RenderBatchPool, m: SpriteMesh, retained_mesh: MeshId? = null,
 ) {
