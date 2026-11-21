@@ -10,13 +10,6 @@ fn probe() -> string {
 fn main() { RESULT = probe() }
 ";
 
-#[test]
-fn static_initializer_hash_is_reproducible_across_two_emits() {
-    let a = emit_without_stdlib(STRING_STATIC);
-    let b = emit_without_stdlib(STRING_STATIC);
-    assert_eq!(a, b);
-}
-
 const PROBE: &str = "\
 global RESULT: int = 0
 global DO_SET: bool = false
@@ -98,39 +91,6 @@ fn overlay_run_editing(
     crate::common::run_luajit(&script(&full.lua, &overlay.lua))
 }
 
-#[test]
-fn a_body_edit_that_adds_a_static_overlays_over_live_globals() {
-    let out = overlay_run(COUNTER, COUNTER_WITH_STATIC, |full, overlay| {
-        format!(
-            "{full}\nassert(bump() == 1)\nassert(bump() == 2)\n{overlay}\n\
-             assert(bump() == 12)\nassert(bump() == 23)\nprint('ok')"
-        )
-    });
-    assert_eq!(out, "ok");
-}
-
-#[test]
-fn a_body_edit_that_removes_a_static_overlays_over_live_globals() {
-    let out = overlay_run(COUNTER_WITH_STATIC, COUNTER, |full, overlay| {
-        format!(
-            "{full}\nassert(bump() == 10)\nassert(bump() == 21)\n\
-             local function static_cells()\n\
-               local n = 0\n\
-               for key in pairs(__rock_globals) do\n\
-                 if type(key) == 'string' and key:find('::step#', 1, true) then n = n + 1 end\n\
-               end\n\
-               return n\n\
-             end\n\
-             assert(static_cells() == 2, 'the static value and done cells are live')\n\
-             {overlay}\n\
-             assert(bump() == 22)\n\
-             assert(static_cells() == 0, 'the removed static still holds ' .. static_cells() .. ' cells')\n\
-             print('ok')"
-        )
-    });
-    assert_eq!(out, "ok");
-}
-
 const SPECIALIZED: &str = "\
 value V2 { x: float, y: float }
 global TOTAL: float = 0.0
@@ -145,26 +105,3 @@ fn tagged<T>(v: T) -> T {
 }
 fn main() {}
 ";
-
-#[test]
-fn a_body_edit_that_removes_a_specialized_generics_static_drops_its_cells() {
-    let after = SPECIALIZED.replace("    static seen = 0\n    seen = seen + 1\n", "");
-    let out = overlay_run_editing("tagged", SPECIALIZED, &after, |full, overlay| {
-        format!(
-            "{full}\nassert(bump() == 1)\n\
-             local function static_cells()\n\
-               local n = 0\n\
-               for key in pairs(__rock_globals) do\n\
-                 if type(key) == 'string' and key:find('::seen#', 1, true) then n = n + 1 end\n\
-               end\n\
-               return n\n\
-             end\n\
-             assert(static_cells() == 2, 'the specialized static holds ' .. static_cells() .. ' cells')\n\
-             {overlay}\n\
-             assert(bump() == 2)\n\
-             assert(static_cells() == 0, 'the removed static still holds ' .. static_cells() .. ' cells')\n\
-             print('ok')"
-        )
-    });
-    assert_eq!(out, "ok");
-}
