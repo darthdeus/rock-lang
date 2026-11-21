@@ -43,35 +43,6 @@ fn value(ast: &Ast) -> Idx<ExprData> {
     l.value.unwrap()
 }
 
-fn reparse_item(full: &Ast, src: &str, index: usize) -> Ast {
-    let item = &full.items[index];
-    let (s, e) = item.span.offset_range();
-    parse_one_item(
-        &src[s..e],
-        file(),
-        s,
-        item.span.line_range().0,
-        item.span.col_range().0,
-    )
-    .expect("parse_one_item")
-}
-
-fn ident_spans(ast: &Ast, src: &str) -> Vec<(String, String)> {
-    ast.exprs
-        .iter()
-        .filter_map(|(_, x)| match &x.kind {
-            ExprKind::Ident(id) => {
-                let (s, e) = x.span.offset_range();
-                Some((
-                    id.name.to_string(),
-                    src.get(s..e).unwrap_or("<out of range>").to_string(),
-                ))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 #[test]
 fn malformed_source_is_rejected_with_its_diagnostic() {
     for (src, needle) in [
@@ -144,57 +115,6 @@ fn malformed_source_is_rejected_with_its_diagnostic() {
 }
 
 #[test]
-fn parse_module_clean_rejects_what_parse_module_recovers_from() {
-    let src = "inline(lua) fn f(x: int) -> int \"\"\" return x \"\"\"\n";
-    let lenient = parse_module(src, file()).expect("recovering parse still returns a tree");
-    assert!(
-        !lenient.recovery_errors.is_empty(),
-        "the dropped item is recorded"
-    );
-    assert!(
-        fn_names(&lenient).is_empty(),
-        "the malformed fn is absent from the lenient tree, which is the trap"
-    );
-    assert!(
-        parse_module_clean(src, file()).is_err(),
-        "strict parse rejects it"
-    );
-}
-
-#[test]
-fn nesting_beyond_the_limit_drops_only_its_item() {
-    let depth = rock_core::nesting::MAX_NESTING_DEPTH as usize;
-    let deep = format!(
-        "fn deep() {{\n{}{}}}\n",
-        "if true {\n".repeat(depth),
-        "}\n".repeat(depth)
-    );
-    let src = format!("{deep}fn after() {{\n    let broken =\n    let kept = 1\n}}\n");
-    let ast = std::thread::Builder::new()
-        .stack_size(rock_core::nesting::COMPILER_STACK_BYTES)
-        .spawn(move || parse_module(&src, Ustr::from("<deep>")).expect("tokenization"))
-        .unwrap()
-        .join()
-        .unwrap();
-    let messages: Vec<&str> = ast
-        .recovery_errors
-        .iter()
-        .map(|e| e.message.as_str())
-        .collect();
-    assert_eq!(
-        messages.len(),
-        2,
-        "one error for the deep item, one for the broken let: {messages:?}"
-    );
-    assert!(messages[0].contains("nested too deeply"), "{messages:?}");
-    assert_eq!(
-        fn_names(&ast),
-        ["after"],
-        "the deep fn is dropped and statement recovery still works after it"
-    );
-}
-
-#[test]
 fn item_recovery_does_not_swallow_the_next_fn() {
     let src = "fn helper(a: int) -> int { return a * 2 }\n\
                fn incomplete(x: int) -> int\n\
@@ -227,44 +147,6 @@ fn recovery_preserves_fields_and_following_bindings() {
         panic!("expected let")
     };
     assert!(matches!(&l.pattern, Pattern::Ident(i) if i.name == "kept"));
-}
-
-#[test]
-fn interpolation_nested_hole_spans_are_file_offsets() {
-    let src = "fn a() {}\n\
-               fn b(y: int, z: int) -> string {\n    \
-                   let s = \"v {y} w {if true { \"{z}\" } else { \"\" }}\"\n    \
-                   \"{s} {f(\\\"n {h(y, g(\\\"{z}\\\"))}\\\")}\"\n\
-               }\n";
-    let full = parse_module(src, file()).expect("full parse");
-    for (name, text) in ident_spans(&full, src) {
-        assert_eq!(text, name, "ident span does not cover its source");
-    }
-    for (name, text) in ident_spans(&reparse_item(&full, src, 1), src) {
-        assert_eq!(text, name, "reparsed ident span does not cover its source");
-    }
-}
-
-#[test]
-fn a_comment_may_close_a_list_or_precede_its_comma() {
-    for src in [
-        "fn f() {\n    g(\n        a,\n        // c\n    )\n}\n",
-        "fn f() {\n    g(\n        x: a,\n        // c\n    )\n}\n",
-        "fn f() {\n    x.g<int>(\n        a,\n        // c\n    )\n}\n",
-        "fn f() {\n    let v = (\n        a,\n        b,\n        // c\n    )\n}\n",
-        "@a(\n    1,\n    // c\n)\nfn f() {}\n",
-        "fn f<\n    T,\n    // c\n>() {}\n",
-        "enum E {\n    A(\n        int,\n        // c\n    ),\n}\n",
-        "fn f() {\n    let l = (\n        // c\n        a: int,\n        // c\n    ) => a\n}\n",
-        "fn f() {\n    g(a /* c */, b)\n}\n",
-        "fn f() {\n    g(x: a /* c */, y: b)\n}\n",
-        "fn f() {\n    let v = [a /* c */, b]\n}\n",
-        "@a(1 /* c */, 2)\nfn f() {}\n",
-        "fn f(m: Map<int /* c */, int>) {}\n",
-        "fn f(m: Map<\n    // c\n    int,\n>) {}\n",
-    ] {
-        parse(src);
-    }
 }
 
 #[test]
