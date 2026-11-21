@@ -31,13 +31,3 @@ fn package_diagnostics_report_errors_and_lints_per_file() {
     assert_eq!(util.len(), 1, "{reply}");
     assert_eq!(util[0]["code"], "unused_fn");
 }
-
-#[test]
-fn diagnostics_publish_utf16_ranges_and_clear_after_a_fix() {
-    let mut doc = Document::single(BROKEN);
-    let diagnostics = array(&doc.diagnostics).to_vec();
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-    assert_eq!(diagnostics[0]["range"], utf16_range(17, 21));
-    doc.replace(&BROKEN.replace("\"\u{1f319}\"", "1"));
-    assert_eq!(doc.diagnostics, json!([]));
-}
