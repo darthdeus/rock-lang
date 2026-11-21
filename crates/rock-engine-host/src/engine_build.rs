@@ -702,13 +702,8 @@ fn stage_cdylib_once(
 }
 
 pub(crate) fn prepare_staged_cdylib(_staging: &Path, _dst_stem: &str) -> Result<()> {
-    // macOS only: strip rustc's `linker-signed` flag by re-signing
-    // adhoc. Sequoia 15.x's syspolicyd evaluates (adhoc |
-    // linker-signed) through a stricter path than plain adhoc and may
-    // SIGKILL dlopen with no userspace error for fresh cdhashes — see
-    // XProtect data update pushed 2026-04-24. Plain `--sign -` is the
-    // standard adhoc resign. Done in isolation on the per-call staging
-    // path so concurrent stagers can't read a mid-resign file.
+    // macOS can kill dlopen of linker-signed artifacts; ad-hoc re-sign on
+    // the private staging path so concurrent readers never see it mid-sign.
     #[cfg(target_os = "macos")]
     {
         let staging = _staging;

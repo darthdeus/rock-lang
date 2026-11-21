@@ -31,8 +31,7 @@ pub fn luajit_path() -> PathBuf {
 const LIB_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 
 fn lib_path_value_in(root: &Path) -> String {
-    // Release layout stages nothing into tmp/, so a worktree's tmp/ can only
-    // hold stale dev-layout builds; searching it shadowed the SDK's libstone.
+    // Release layouts must not load stale development libraries from tmp/.
     if is_release_layout_in(root) {
         let lib = root.join("lib");
         return if cfg!(windows) {
@@ -43,10 +42,7 @@ fn lib_path_value_in(root: &Path) -> String {
         };
     }
 
-    // Dev layout: cached native libraries plus tmp/ rooted at rock_dir().
-    // The prebuilt lib dir MUST be on the search path: stone's Rock global
-    // initializer does ffi.load("libcimgui_complete.{dylib,so,dll}") before
-    // stone_init has had a chance to dlopen anything via rpath.
+    // The global initializer loads cimgui before stone_init can use rpath.
     let native = gamelibs::host_dir().join(if cfg!(windows) { "bin" } else { "lib" });
     let sep = LIB_PATH_SEPARATOR;
     format!(
@@ -56,17 +52,9 @@ fn lib_path_value_in(root: &Path) -> String {
     )
 }
 
-/// The runtime library dirs plus platform graphics libraries; Linux also gets the system
-/// Vulkan loader and driver directories when they
-/// exist; the bundled LuaJIT does not receive NixOS's nix-ld defaults itself.
-///
-/// Rock's own dirs (SDK `lib/`, or `tmp` and cached gamelibs) come FIRST so the bundled
-/// luajit/cimgui libs always win; the inherited value follows so a
-/// user-provided `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH`/`PATH` still
-/// resolves transitive system deps the prebuilt FHS libs need but the
-/// gamelibs dir doesn't ship. On NixOS those deps live in nix-store dirs the
-/// user puts on the path (e.g. via `programs.nix-ld.libraries` ->
-/// `$NIX_LD_LIBRARY_PATH`); clobbering instead of appending drops them.
+/// Runtime libraries precede the inherited search path, which is still needed
+/// for transitive system dependencies. Bundled LuaJIT does not inherit NixOS
+/// nix-ld defaults, so Linux graphics loader paths are added where available.
 fn lib_path_with_values(inherited: Option<&OsStr>, nix_ld: Option<&OsStr>) -> String {
     let mut value = lib_path_value_in(Path::new(&rock_host::rock_dir()));
     let mut append = |path: &OsStr| {

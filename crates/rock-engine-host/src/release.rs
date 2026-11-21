@@ -207,11 +207,7 @@ pub fn select_assets_with_overlays(
         add_path(&mut selection.files, game_key, &source, project_dir, false)?;
     }
 
-    // A game with visual bank roots admits overlay files
-    // exactly: sound and visual dependencies plus declared loose assets, each
-    // resolved directly by key. Walking the whole shared overlay tree here
-    // only to discard it in narrowing wastes tens of seconds on slow overlay
-    // disks. Bankless games keep the legacy whole-overlay staging.
+    // Bank roots resolve admitted assets directly; bankless projects stage the overlay.
     if visual_bank_paths(project_dir, config)?.is_empty() {
         for overlay in overlays.iter().rev() {
             let source = overlay.join("assets");
