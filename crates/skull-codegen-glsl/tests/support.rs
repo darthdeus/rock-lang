@@ -108,14 +108,6 @@ pub fn emit_entry(src: &str, root: &str) -> Result<String, String> {
     entry_emission(src, root).map(|e| e.source)
 }
 
-pub fn emit_checked_entry(src: &str, root: &str) -> Result<String, String> {
-    let (ws, mid) = workspace(src);
-    body_errors(&ws)?;
-    emit_program(&ws, mid, None, root, GlslProfile::Core330)
-        .map(|e| e.source)
-        .map_err(|e| e.message)
-}
-
 pub fn entry_emission(src: &str, root: &str) -> Result<ShaderEmission, String> {
     let (ws, mid) = workspace(src);
     emit_program(&ws, mid, None, root, GlslProfile::Core330).map_err(|e| e.message)
