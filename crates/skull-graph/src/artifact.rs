@@ -3,170 +3,45 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bone_core::hir::{FnBackend, Function};
 use bone_core::workspace::Workspace;
 use skull_mir::intrinsics::{self, BackendRealization};
+use skull_mir::lower::{BackendFnAbiPlan, ScalarCtx};
 use skull_mir::mir::FuncRef;
+use skull_mir::monoty::MonoTyReason;
 
 use crate::instance_graph::{
-    self, BoundaryClass, DeclKey, Instance, InstanceGraph, Site, SiteOutcome, UpdateStats,
+    self, DeclKey, Instance, InstanceGraph, Site, SiteOutcome, UpdateStats,
 };
-use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
+use crate::target_projection::CpuTargetSpec;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-/// Native mappings are supplied by matching inline bodies or by the backend.
-#[derive(Clone, Copy)]
-pub struct ArtifactMappings<'a> {
-    pub inline_backend: FnBackend,
+pub struct ArtifactRequest<'a> {
+    pub target: CpuTargetSpec,
+    pub roots: &'a [FuncRef],
+    pub scx: &'a ScalarCtx,
     pub supply: Option<&'a dyn BackendRealization>,
 }
 
-impl<'a> ArtifactMappings<'a> {
-    pub fn for_backend(b: FnBackend) -> Self {
-        Self {
-            inline_backend: b,
-            supply: None,
-        }
-    }
-
-    pub fn with_supply(mut self, s: &'a dyn BackendRealization) -> Self {
-        self.supply = Some(s);
-        self
+impl ArtifactRequest<'_> {
+    fn check_context(&self, graph: &InstanceGraph) {
+        assert_eq!(self.scx.target(), self.target.backend);
+        assert!(std::ptr::eq(self.scx.interner(), graph.interner().as_ref()));
     }
 
     fn supplies(&self, ws: &Workspace, f: &Function) -> bool {
-        self.supply.is_some_and(|s| s.supplies(ws, f))
-    }
-
-    /// Native mapping only; a Rock body is the portable rung, a separate question.
-    pub fn maps(&self, ws: &Workspace, f: &Function) -> bool {
-        f.inline_body
-            .is_some_and(|(be, _)| instance_graph::serves(be, self.inline_backend))
-            || self.supplies(ws, f)
+        self.supply.is_some_and(|source| source.supplies(ws, f))
     }
 }
 
-#[derive(Clone, Copy)]
-pub enum SymbolPlanner {
-    Logical,
-    Realized,
-}
-
-impl SymbolPlanner {
-    fn symbol(
-        &self,
-        ws: &Workspace,
-        graph: &InstanceGraph,
-        instance: &Instance,
-        realized: Realized,
-    ) -> String {
-        match self {
-            Self::Logical => instance.symbol(ws, graph.interner()),
-            Self::Realized => Instance {
-                func: realized.decl,
-                args: instance.args.clone(),
-            }
-            .symbol(ws, graph.interner()),
-        }
-    }
-}
-
-pub static REALIZED_SYMBOLS: SymbolPlanner = SymbolPlanner::Realized;
-
-pub struct ArtifactRequest<'a> {
-    pub spec: TargetSpec,
-    pub mappings: ArtifactMappings<'a>,
-    pub roots: &'a [FuncRef],
-    pub symbols: &'a SymbolPlanner,
-    scalar_context: Option<&'a skull_mir::lower::ScalarCtx>,
-}
-
-impl<'a> ArtifactRequest<'a> {
-    pub fn new(spec: TargetSpec, roots: &'a [FuncRef]) -> Self {
-        Self {
-            mappings: ArtifactMappings::for_backend(spec.cpu.backend),
-            spec,
-            roots,
-            symbols: &SymbolPlanner::Logical,
-            scalar_context: None,
-        }
-    }
-
-    pub fn with_scalar_context(mut self, context: &'a skull_mir::lower::ScalarCtx) -> Self {
-        self.scalar_context = Some(context);
-        self
-    }
-
-    fn scalar_context<'b>(
-        &'b self,
-        ws: &Workspace,
-        g: &InstanceGraph,
-        local: &'b std::cell::OnceCell<skull_mir::lower::ScalarCtx>,
-    ) -> &'b skull_mir::lower::ScalarCtx {
-        let backend = self.spec.cpu.backend;
-        if let Some(context) = self.scalar_context {
-            assert_eq!(
-                context.target(),
-                backend,
-                "artifact scalar context backend mismatch"
-            );
-            assert!(
-                std::ptr::eq(context.interner(), g.interner().as_ref()),
-                "artifact scalar context must share the graph interner"
-            );
-            return context;
-        }
-        local.get_or_init(|| {
-            skull_mir::lower::ScalarCtx::new(ws)
-                .with_target(backend)
-                .sharing(g.interner().clone())
-        })
-    }
-
-    pub fn with_mappings(mut self, m: ArtifactMappings<'a>) -> Self {
-        self.mappings = m;
-        self
-    }
-
-    pub fn with_symbols(mut self, p: &'a SymbolPlanner) -> Self {
-        self.symbols = p;
-        self
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Realization {
     RockBody,
-    ForeignBody(BoundaryClass),
-    NativeMapping,
-    PortableFallback,
-    /// Supplied by the backend itself for a declaration without `@intrinsic`.
-    HostBinding,
-    CompileTimeExpansion,
-}
-
-impl Realization {
-    pub fn boundary_class(self) -> Option<BoundaryClass> {
-        match self {
-            Self::ForeignBody(c) => Some(c),
-            Self::NativeMapping | Self::CompileTimeExpansion | Self::HostBinding => {
-                Some(BoundaryClass::Intrinsic)
-            }
-            Self::RockBody | Self::PortableFallback => None,
-        }
-    }
+    InlineBody,
+    Boundary,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Realized {
     pub decl: FuncRef,
     pub kind: Realization,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum Unrealizable {
-    /// The `@nomangle`-sibling case: a JS body in a Lua walk.
-    ForeignToArtifact,
-    ClassUnsupported(BoundaryClass),
-    /// `@native_required`: a Rock fallback does not answer.
-    NativeMappingMissing,
 }
 
 #[derive(Clone)]
@@ -179,7 +54,6 @@ pub struct ArtifactView {
     /// Function values need addressable definitions even with no direct calls.
     pub fn_value_targets: BTreeSet<Instance>,
     pub realization: BTreeMap<Instance, Realized>,
-    pub symbols: BTreeMap<Instance, String>,
     pub publisher_lanes: BTreeMap<Instance, usize>,
     /// Required `@nomangle` definitions keyed by the exact declaration. Calls can
     /// still resolve via a sibling in `realization`.
@@ -189,7 +63,7 @@ pub struct ArtifactView {
 
 #[derive(Clone, Default)]
 struct ArtifactIndex {
-    realizable: FxHashMap<Instance, Result<Realized, Unrealizable>>,
+    realizable: FxHashMap<Instance, Realized>,
     always_fn_values: FxHashSet<Instance>,
     publication_candidates: BTreeMap<Instance, String>,
     publication_users: BTreeMap<String, BTreeSet<Instance>>,
@@ -256,6 +130,7 @@ impl ArtifactView {
         root_added: &[FuncRef],
         root_removed: &[FuncRef],
     ) {
+        req.check_context(g);
         let canonical = |roots: &[FuncRef]| -> BTreeSet<DeclKey> {
             roots
                 .iter()
@@ -280,15 +155,14 @@ impl ArtifactView {
         self.index.root_decls.extend(root_added);
 
         let mut admission_changed = false;
-        let target = req.spec.cpu;
         for i in &subjects {
             let live = g.instances.contains(i);
-            let now = live.then(|| realize_decl(ws, i.func, &target, &req.mappings));
+            let now = live.then(|| realize_decl(ws, i.func, req)).flatten();
             let was = match now {
                 Some(realization) => self.index.realizable.insert(i.clone(), realization),
                 None => self.index.realizable.remove(i),
             };
-            let realizable = now.is_some_and(|r| r.is_ok());
+            let realizable = now.is_some();
             let declared = realizable && declared_root(ws, &self.index.root_decls, i);
             let root = declared || (realizable && g.is_always_emitted_target(i));
             let always_value = realizable && g.is_always_emitted_fn_value(i);
@@ -349,11 +223,11 @@ impl ArtifactView {
             if !dirty.contains(&i) || reachable_dirty.contains(&i) {
                 continue;
             }
-            let Some(Ok(realized)) = self.index.realizable.get(&i) else {
+            let Some(realized) = self.index.realizable.get(&i) else {
                 continue;
             };
             reachable_dirty.insert(i.clone());
-            if realized.kind.boundary_class().is_some() {
+            if realized.kind != Realization::RockBody {
                 continue;
             }
             for (_, callee) in g.resolved_sites(&i) {
@@ -365,14 +239,12 @@ impl ArtifactView {
         for i in &dirty {
             self.remove_instance_output(i);
         }
-        let scalar_context = std::cell::OnceCell::new();
         for i in dirty.iter().filter(|i| g.instances.contains(*i)) {
-            let Some(result) = self.index.realizable.get(i).copied() else {
+            let Some(realized) = self.index.realizable.get(i).copied() else {
                 continue;
             };
             if reachable_dirty.contains(i) {
-                let realized = result.expect("retained artifact instance must be realizable");
-                self.install_instance_output(ws, g, req, i, realized, &scalar_context);
+                self.install_instance_output(ws, g, req, i, realized);
                 let declared = declared_root(ws, &self.index.root_decls, i);
                 if declared || g.is_always_emitted_target(i) {
                     self.roots.insert(i.clone());
@@ -396,7 +268,6 @@ impl ArtifactView {
     fn remove_instance_output(&mut self, i: &Instance) {
         self.roots.remove(i);
         self.declared_roots.remove(i);
-        self.symbols.remove(i);
         self.realization.remove(i);
         self.publisher_lanes.remove(i);
         // Dirty callers are installed again only after every dirty target is retracted.
@@ -410,10 +281,7 @@ impl ArtifactView {
         req: &ArtifactRequest<'_>,
         i: &Instance,
         realized: Realized,
-        scalar_context: &std::cell::OnceCell<skull_mir::lower::ScalarCtx>,
     ) {
-        let symbol = req.symbols.symbol(ws, g, i, realized);
-        self.symbols.insert(i.clone(), symbol);
         self.realization.insert(i.clone(), realized);
         for (site, callee) in g.resolved_sites(i) {
             if site.op == skull_mir::site::SiteOp::FnValue {
@@ -423,24 +291,8 @@ impl ArtifactView {
         if self.index.always_fn_values.contains(i) {
             self.fn_value_targets.insert(i.clone());
         }
-        if matches!(
-            realized.kind,
-            Realization::ForeignBody(BoundaryClass::InlineBody)
-        ) {
-            let scx = req.scalar_context(ws, g, scalar_context);
-            if let Ok(signature) = crate::concrete_body::concrete_signature_for_instance(ws, g, i) {
-                let selected = Instance {
-                    func: realized.decl,
-                    args: i.args.clone(),
-                };
-                self.publisher_lanes.insert(
-                    i.clone(),
-                    skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
-                        ws, scx, &selected, &signature,
-                    )
-                    .result_lanes(),
-                );
-            }
+        if let Ok(Some(lanes)) = publisher_lanes(ws, g, req.scx, i, realized) {
+            self.publisher_lanes.insert(i.clone(), lanes);
         }
     }
 
@@ -466,7 +318,7 @@ impl ArtifactView {
             }
             self.publications.remove(&instance);
         }
-        let target = req.spec.cpu;
+        let target = req.target;
         for decl in root_added {
             let Some((instance, symbol)) = publication_candidate(ws, &target, decl.0) else {
                 continue;
@@ -502,7 +354,7 @@ impl ArtifactView {
     pub fn retains_rock_body(&self, i: &Instance) -> bool {
         self.realization
             .get(i)
-            .is_some_and(|row| row.kind.boundary_class().is_none())
+            .is_some_and(|row| row.kind == Realization::RockBody)
     }
 
     pub fn retains(&self, i: &Instance) -> bool {
@@ -510,117 +362,90 @@ impl ArtifactView {
     }
 }
 
-fn realize_decl(
-    ws: &Workspace,
-    rep: FuncRef,
-    target: &CpuTargetSpec,
-    mappings: &ArtifactMappings<'_>,
-) -> Result<Realized, Unrealizable> {
-    // Must precede sibling selection: these serve calls with no body for this backend.
-    let rep_f = &ws.module(rep.module).functions[rep.func];
-    if intrinsics::expand_kind(rep_f).is_some() && supports(target, BoundaryClass::Intrinsic) {
-        return Ok(Realized {
+fn realize_decl(ws: &Workspace, rep: FuncRef, request: &ArtifactRequest<'_>) -> Option<Realized> {
+    let target = &request.target;
+    let f = &ws.module(rep.module).functions[rep.func];
+    if intrinsics::expand_kind(f).is_some() || request.supplies(ws, f) {
+        return Some(Realized {
             decl: rep,
-            kind: Realization::CompileTimeExpansion,
+            kind: Realization::Boundary,
         });
     }
-    if supports(target, BoundaryClass::Intrinsic) && mappings.supplies(ws, rep_f) {
-        // One rung, one oracle: `@intrinsic` only picks the label. Asking separately
-        // is what once let `map_new` reach a body branch.
-        let kind = if intrinsics::is_intrinsic(rep_f) {
-            Realization::NativeMapping
+    let decl = skull_mir::lower::backend_variant(ws, f.name, rep, target.backend).ok()?;
+    let f = &ws.module(decl.module).functions[decl.func];
+    let kind = if instance_graph::is_erased_runtime_entry(f) {
+        Some(Realization::Boundary)
+    } else if f.is_extern {
+        (f.backend == FnBackend::Js && target.backend == FnBackend::Js || target.foreign_symbols)
+            .then_some(Realization::Boundary)
+    } else if intrinsics::is_intrinsic(f) {
+        if intrinsics::expand_kind(f).is_some()
+            || f.inline_body
+                .is_some_and(|(backend, _)| instance_graph::serves(backend, target.backend))
+            || request.supplies(ws, f)
+        {
+            Some(Realization::Boundary)
         } else {
-            Realization::HostBinding
-        };
-        return Ok(Realized { decl: rep, kind });
-    }
-
-    let name = ws.module(rep.module).functions[rep.func].name;
-    let selected = skull_mir::lower::backend_variant(ws, name, rep, target.backend)
-        .map_err(|_| Unrealizable::ForeignToArtifact);
-    selected.and_then(|decl| {
-        let f = &ws.module(decl.module).functions[decl.func];
-        realize_body(ws, decl, f, target, mappings).map(|kind| Realized { decl, kind })
-    })
-}
-
-/// Split from selection so both questions read the same `FuncRef`.
-fn realize_body(
-    ws: &Workspace,
-    decl: FuncRef,
-    f: &Function,
-    target: &CpuTargetSpec,
-    mappings: &ArtifactMappings<'_>,
-) -> Result<Realization, Unrealizable> {
-    // An erased runtime entry is an identity that exists under its bare name on
-    // every target, so it is classified before any body slot is read.
-    if crate::instance_graph::is_erased_runtime_entry(f) {
-        return class_or_reject(target, BoundaryClass::ErasedRuntimeEntry);
-    }
-    if f.is_extern {
-        // `extern(js)` names the browser surface, not a host symbol, so it needs
-        // no foreign-symbol capability.
-        if f.backend == FnBackend::Js && target.backend == FnBackend::Js {
-            return Ok(Realization::ForeignBody(BoundaryClass::Extern));
+            (!intrinsics::is_native_required(f) && has_rock_body(ws, decl))
+                .then_some(Realization::RockBody)
         }
-        return class_or_reject(target, BoundaryClass::Extern);
-    }
-    if intrinsics::is_intrinsic(f) {
-        if !supports(target, BoundaryClass::Intrinsic) {
-            return Err(Unrealizable::ClassUnsupported(BoundaryClass::Intrinsic));
-        }
-        // Expansion is compile-time on every backend: no body to map or fall back to.
-        if intrinsics::expand_kind(f).is_some() {
-            return Ok(Realization::CompileTimeExpansion);
-        }
-        if mappings.maps(ws, f) {
-            return Ok(Realization::NativeMapping);
-        }
-        // Asked before the fallback rung, and never satisfied by a Rock body.
-        if intrinsics::is_native_required(f) {
-            return Err(Unrealizable::NativeMappingMissing);
-        }
-        if has_rock_body(ws, decl) {
-            return Ok(Realization::PortableFallback);
-        }
-        return Err(Unrealizable::NativeMappingMissing);
-    }
-    if f.inline_body.is_some() {
-        return class_or_reject(target, BoundaryClass::InlineBody);
-    }
-    Ok(Realization::RockBody)
-}
-
-fn class_or_reject(
-    target: &CpuTargetSpec,
-    class: BoundaryClass,
-) -> Result<Realization, Unrealizable> {
-    if supports(target, class) {
-        Ok(Realization::ForeignBody(class))
+    } else if f.inline_body.is_some() {
+        Some(Realization::InlineBody)
     } else {
-        Err(Unrealizable::ClassUnsupported(class))
-    }
+        Some(Realization::RockBody)
+    }?;
+    Some(Realized { decl, kind })
 }
 
-/// Unlike `instance_graph::has_rock_body`, requires the body itself, which an
-/// expansion intrinsic lacks.
 fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
     ws.module(decl.module)
         .bodies
         .contains_key(&bone_core::hir::BodyOwner::Function(decl.func))
 }
 
+fn publisher_lanes(
+    ws: &Workspace,
+    graph: &InstanceGraph,
+    scx: &ScalarCtx,
+    instance: &Instance,
+    realized: Realized,
+) -> Result<Option<usize>, MonoTyReason> {
+    if realized.kind != Realization::InlineBody || graph.substitution(instance).is_none() {
+        return Ok(None);
+    }
+    let selected = Instance {
+        func: realized.decl,
+        args: instance.args.clone(),
+    };
+    debug_assert_eq!(
+        ws.module(selected.func.module).functions[selected.func.func]
+            .generics
+            .len(),
+        ws.module(instance.func.module).functions[instance.func.func]
+            .generics
+            .len(),
+        "a backend sibling must declare the same generics as the instance it serves",
+    );
+    let signature = crate::concrete_body::concrete_signature_for_instance(ws, graph, instance)?;
+    Ok(Some(
+        BackendFnAbiPlan::for_concrete_signature(ws, scx, &selected, &signature).result_lanes(),
+    ))
+}
+
 /// Realize existing graph instances for the artifact request.
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
-    let target = req.spec.cpu;
-    let mut realizable: FxHashMap<Instance, Result<Realized, Unrealizable>> = FxHashMap::default();
+    req.check_context(g);
+    let target = req.target;
+    let mut realizable: FxHashMap<Instance, Realized> = FxHashMap::default();
     // A declaration's instances all realize alike, so each declaration is asked once.
-    let mut by_decl: FxHashMap<FuncRef, Result<Realized, Unrealizable>> = FxHashMap::default();
+    let mut by_decl: FxHashMap<FuncRef, Option<Realized>> = FxHashMap::default();
     for i in &g.instances {
         let realized = *by_decl
             .entry(i.func)
-            .or_insert_with(|| realize_decl(ws, i.func, &target, &req.mappings));
-        realizable.insert(i.clone(), realized);
+            .or_insert_with(|| realize_decl(ws, i.func, req));
+        if let Some(realized) = realized {
+            realizable.insert(i.clone(), realized);
+        }
     }
 
     // Always-emitted callees are roots: they have no caller instance.
@@ -639,7 +464,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for i in &g.instances {
         let declared = declared_root(ws, &index.root_decls, i);
         let is_root = declared || g.is_always_emitted_target(i);
-        if is_root && index.realizable[i].is_ok() {
+        if is_root && index.realizable.contains_key(i) {
             roots.insert(i.clone());
             if declared {
                 declared_roots.insert(i.clone());
@@ -657,17 +482,13 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         queue: VecDeque<&'g Instance>,
     }
     impl<'g> Admission<'g> {
-        fn admit(
-            &mut self,
-            i: &'g Instance,
-            realizable: &FxHashMap<Instance, Result<Realized, Unrealizable>>,
-        ) {
+        fn admit(&mut self, i: &'g Instance, realizable: &FxHashMap<Instance, Realized>) {
             if !self.admitted.insert(i) {
                 return;
             }
-            let r = *realizable[i].as_ref().expect("admitted means realizable");
+            let r = realizable[i];
             self.reached.push((i, r));
-            if r.kind.boundary_class().is_none() {
+            if r.kind == Realization::RockBody {
                 self.queue.push_back(i);
             }
         }
@@ -696,7 +517,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             let SiteOutcome::Resolved(callee) = &record.outcome else {
                 continue;
             };
-            if !matches!(index.realizable.get(callee), Some(Ok(_))) {
+            if !index.realizable.contains_key(callee) {
                 continue;
             }
             if site.op == skull_mir::site::SiteOp::FnValue {
@@ -711,56 +532,18 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         reached.iter().map(|(i, r)| ((*i).clone(), *r)).collect();
     drop(site_tables);
 
-    // Derived in parallel, recorded in instance order.
-    let planned: Vec<(&Instance, String)> = {
-        use bone_core::prelude::*;
-        let rows: Vec<(&Instance, Realized)> = realization.iter().map(|(i, r)| (i, *r)).collect();
-        rows.into_par_iter()
-            .map(|(i, r)| (i, req.symbols.symbol(ws, g, i, r)))
-            .collect()
-    };
-    let symbols: BTreeMap<Instance, String> =
-        planned.into_iter().map(|(i, s)| (i.clone(), s)).collect();
-
-    // Lane widths are asked of the selected declaration, whose body is emitted.
-    let scalar_context = std::cell::OnceCell::new();
-    let scx = req.scalar_context(ws, g, &scalar_context);
-    let mut publisher_lanes: BTreeMap<Instance, usize> = BTreeMap::new();
-    for (i, r) in &realization {
-        if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
-            continue;
-        }
-        if g.substitution(i).is_none() {
-            continue;
-        }
-        let selected = Instance {
-            func: r.decl,
-            args: i.args.clone(),
-        };
-        debug_assert_eq!(
-            ws.module(selected.func.module).functions[selected.func.func]
-                .generics
-                .len(),
-            ws.module(i.func.module).functions[i.func.func]
-                .generics
-                .len(),
-            "a backend sibling must declare the same generics as the instance it serves",
-        );
-        let signature = crate::concrete_body::concrete_signature_for_instance(ws, g, i)
-            .unwrap_or_else(|reason| {
-                panic!(
-                    "retained inline body {:?} has no concrete publisher signature: {reason:?}",
-                    i
-                )
-            });
-        publisher_lanes.insert(
-            i.clone(),
-            skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
-                ws, scx, &selected, &signature,
-            )
-            .result_lanes(),
-        );
-    }
+    let publisher_lanes = realization
+        .iter()
+        .filter_map(|(i, &r)| {
+            publisher_lanes(ws, g, req.scx, i, r)
+                .unwrap_or_else(|reason| {
+                    panic!(
+                        "retained inline body {i:?} has no concrete publisher signature: {reason:?}"
+                    )
+                })
+                .map(|width| (i.clone(), width))
+        })
+        .collect();
 
     for (instance, symbol) in req
         .roots
@@ -785,7 +568,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         declared_roots,
         fn_value_targets,
         realization,
-        symbols,
         index,
     }
 }

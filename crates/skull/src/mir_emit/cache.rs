@@ -665,11 +665,12 @@ impl SkullEmitCache {
         cache.lua_view.update_local_with_root_delta(
             ws,
             &cache.graph,
-            &crate::artifact::ArtifactRequest::new(
-                crate::target_projection::LUAJIT_DESKTOP,
-                cache.roots.emission_roots.as_slice(),
-            )
-            .with_scalar_context(&cache.scx),
+            &crate::artifact::ArtifactRequest {
+                target: crate::target_projection::LUAJIT_DESKTOP.cpu,
+                roots: cache.roots.emission_roots.as_slice(),
+                scx: &cache.scx,
+                supply: None,
+            },
             &update,
             &root_added,
             &root_removed,

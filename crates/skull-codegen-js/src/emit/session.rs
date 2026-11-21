@@ -18,6 +18,7 @@ pub(super) type OpaqueRoots = BTreeMap<DeclKey, rustc_hash::FxHashSet<FuncRef>>;
 pub(super) struct JsSession {
     pub(super) graph: InstanceGraph,
     pub(super) view: ArtifactView,
+    pub(super) symbols: rustc_hash::FxHashMap<Instance, String>,
     pub(super) opaque_roots: OpaqueRoots,
     pub(super) concrete: skull_graph::concrete_body::ConcreteBodies,
 }
@@ -147,12 +148,24 @@ fn opaque_roots(ws: &Workspace, view: &ArtifactView) -> OpaqueRoots {
         .collect()
 }
 
-fn js_artifact_request(roots: &[FuncRef]) -> artifact::ArtifactRequest<'_> {
-    let mappings = artifact::ArtifactMappings::for_backend(bone_core::hir::FnBackend::Js)
-        .with_supply(&crate::JsBackendRealization);
-    artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, roots)
-        .with_mappings(mappings)
-        .with_symbols(&artifact::REALIZED_SYMBOLS)
+fn js_symbols(
+    ws: &Workspace,
+    graph: &InstanceGraph,
+    view: &ArtifactView,
+) -> rustc_hash::FxHashMap<Instance, String> {
+    view.realization
+        .iter()
+        .map(|(instance, row)| {
+            let name = view.publications.get(instance).cloned().unwrap_or_else(|| {
+                Instance {
+                    func: row.decl,
+                    args: instance.args.clone(),
+                }
+                .symbol(ws, graph.interner())
+            });
+            (instance.clone(), name)
+        })
+        .collect()
 }
 
 fn entry_root(ws: &Workspace, user_mid: bone_core::prelude::ModuleId) -> Option<(FuncRef, String)> {
@@ -218,7 +231,16 @@ fn build_program_session(
             root_plan.refs.clone(),
             scx.interner_handle(),
         );
-        let view = artifact::realize(ws, &graph, &js_artifact_request(&root_plan.refs));
+        let view = artifact::realize(
+            ws,
+            &graph,
+            &artifact::ArtifactRequest {
+                target: target_projection::JAVASCRIPT_WEB.cpu,
+                roots: &root_plan.refs,
+                scx,
+                supply: Some(&crate::JsBackendRealization),
+            },
+        );
         let opaque_roots = opaque_roots(ws, &view);
         let mut seen: HashSet<FuncRef> = root_plan.refs.iter().copied().collect();
         let old_count = root_plan.refs.len();
@@ -233,6 +255,7 @@ fn build_program_session(
             continue;
         }
         let session = JsSession {
+            symbols: js_symbols(ws, &graph, &view),
             concrete: skull_graph::concrete_body::build(ws, &graph),
             graph,
             view,

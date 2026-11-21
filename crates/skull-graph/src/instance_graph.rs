@@ -15,8 +15,6 @@ use skull_mir::monoty::{MonoInterner, MonoSubst, MonoTyId, MonoTyReason};
 
 pub use skull_mir::instance::{DeclKey, Instance};
 
-pub use skull_mir::lower::BoundaryClass;
-
 #[derive(Clone, Debug)]
 pub struct Edge {
     pub to: Instance,

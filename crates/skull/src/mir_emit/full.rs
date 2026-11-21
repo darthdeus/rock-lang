@@ -304,11 +304,12 @@ fn cpu_artifact_lane(
     let lua_view = crate::artifact::realize(
         ws,
         graph,
-        &crate::artifact::ArtifactRequest::new(
-            crate::target_projection::LUAJIT_DESKTOP,
-            emission_roots,
-        )
-        .with_scalar_context(&scx),
+        &crate::artifact::ArtifactRequest {
+            target: crate::target_projection::LUAJIT_DESKTOP.cpu,
+            roots: emission_roots,
+            scx: &scx,
+            supply: None,
+        },
     );
     let cg = cg.map(|mut cg| {
         cg.set_call_sccs(call_sccs(graph));

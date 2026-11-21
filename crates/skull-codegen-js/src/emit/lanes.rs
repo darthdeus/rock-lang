@@ -83,12 +83,7 @@ pub(super) fn max_published_lanes(
                     body.decl
                 )));
             };
-            if !matches!(
-                realized.kind,
-                artifact::Realization::ForeignBody(
-                    skull_graph::instance_graph::BoundaryClass::InlineBody
-                )
-            ) {
+            if !matches!(realized.kind, artifact::Realization::InlineBody) {
                 return Ok(0);
             }
             if let Some(&lanes) = view.publisher_lanes.get(&body.instance) {

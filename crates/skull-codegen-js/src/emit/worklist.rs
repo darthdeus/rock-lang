@@ -92,6 +92,7 @@ impl<'a> WorklistState<'a> {
             view,
             concrete,
             opaque_roots,
+            ..
         } = session;
         let mut names = CalleeNames {
             session: Some(session),

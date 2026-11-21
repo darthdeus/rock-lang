@@ -235,13 +235,9 @@ struct CalleeNames<'a> {
 
 impl CalleeNames<'_> {
     fn get(&self, body: &Instance) -> Option<&String> {
-        self.overrides.get(body).or_else(|| {
-            let view = &self.session?.view;
-            view.realization.get(body)?;
-            view.publications
-                .get(body)
-                .or_else(|| view.symbols.get(body))
-        })
+        self.overrides
+            .get(body)
+            .or_else(|| self.session?.symbols.get(body))
     }
 
     fn base_instance(&self, ws: &Workspace, fr: FuncRef) -> Option<Instance> {

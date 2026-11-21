@@ -1,4 +1,3 @@
-use crate::instance_graph::BoundaryClass;
 use bone_core::hir::FnBackend;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +36,3 @@ pub const JAVASCRIPT_WEB: TargetSpec = TargetSpec {
     },
     shader: GLSL_330,
 };
-
-pub fn supports(target: &CpuTargetSpec, class: BoundaryClass) -> bool {
-    class != BoundaryClass::Extern || target.foreign_symbols
-}
