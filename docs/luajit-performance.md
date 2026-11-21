@@ -59,15 +59,9 @@ keeps one handler per event and an application can install its own.
 
 ## Nullable tuple returns
 
-A `-> (T, U)?` returns one boxed table per present value, or nil, including
-a tuple carrying a `nobox` element (its box holds the element's leaves).
-Measured under LuaJIT this costs nothing in the shape that matters: a hot
-loop over a `(int, int)?` call (20M iterations) runs at the same speed
-boxed as a hand-written multi-return version -- the allocation sits inside
-the trace and sinking elides it. A fresh `(P, int)?` read by its caller
-(`benchmarks/tuple_copy.rock`, `p_fresh_read`) stays at 0 bytes. A stored
-tuple passes through as its own box: `if let t = xs.get(i) { ys.push(t) }`
-went from 96 bytes and 34 ns per element (unpacked into a presence-lane wire
-and packed again) to 0 bytes and 3.9 ns. Revisit only with a measurement
-showing a trace where the box survives (an escape, or a trace boundary
-through the call).
+A `-> (T, U)?` returns a boxed tuple or nil. If the tuple contains a `nobox`
+value, its box holds that value's scalar leaves. LuaJIT can sink a fresh box
+when construction and destructuring happen in one trace. A stored tuple can
+pass through as its existing box when copied from one container to another.
+Measure escaping values and calls across trace boundaries to see when a box
+survives.
