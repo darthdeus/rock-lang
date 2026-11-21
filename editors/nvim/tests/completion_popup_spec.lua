@@ -1,13 +1,4 @@
--- Insert-mode popup assertion via the child-nvim harness. Where the
--- response-level specs assert on `buf_request -> payload`, this one
--- enters real insert mode in a real event-loop nvim, fires omnifunc
--- (`<C-x><C-o>` -> vim.lsp.completion.get -> complete()), and reads
--- `complete_info()` — i.e. exactly what the user would see in the pum.
---
--- Catches a class of regressions response-level specs miss: trigger-
--- character drift, completeopt defaults, source pollution, the editor
--- ignoring sort_text. See `tests/_lib/nvim_child.lua` for why a child
--- nvim is required (headless -l mode never enters insert mode).
+-- Headless nvim -l cannot enter insert mode; use a child event-loop nvim.
 
 package.path = package.path .. ';' .. vim.fn.getcwd() .. '/tests/?.lua'
 local NvimChild = require('_lib.nvim_child')

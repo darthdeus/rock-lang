@@ -1,14 +1,3 @@
--- textDocument/references round-trip against a real rock-lsp.
---
--- Exercise `textDocument/references` on a two-file project through
--- the live LSP protocol.
---
--- Asserts:
---   * the request reaches the server (no error)
---   * the response is an array of Location objects covering the
---     declaration and at least one cross-file use site
---   * URIs match `file://`-prefixed paths inside the test project
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

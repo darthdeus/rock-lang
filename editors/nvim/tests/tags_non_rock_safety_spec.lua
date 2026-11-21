@@ -1,10 +1,4 @@
--- Broadening rock's tag wiring to every filetype under a stick root must NOT
--- trample buffers that aren't real rock-project files. Two guarantees:
---   1. A foreign buffer-local `tags` (an ftplugin / gutentags) present when rock
---      first wires a buffer is PRESERVED (rock appends, never replaces).
---   2. Scratch/unnamed buffers are left alone even when cwd sits under a stick
---      root (`vim.fs.root` falls back to cwd for a nameless buffer).
--- Pure client-side (no `$ROCK_LSP_BIN`): drives the autocmds, not the server.
+-- vim.fs.root falls back to cwd for unnamed buffers.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')

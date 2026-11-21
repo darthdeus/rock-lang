@@ -1,8 +1,3 @@
--- Real-LSP completion request. Beyond verifying a response comes
--- back, this drives the `is_completion` branch in client.lua's
--- wrapped rpc.request — the one that populates state.last_completion
--- (the floater's data source).
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

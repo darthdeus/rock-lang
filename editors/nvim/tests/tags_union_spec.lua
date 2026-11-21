@@ -1,10 +1,3 @@
--- rock-lsp writes a `.rock.tags` per stick.toml package. With buffers open in
--- two different packages, a tag jump (`<C-]>`) from one must resolve symbols in
--- the other -- so every rock buffer's `tags` must search the UNION of all open
--- packages' tag files, not just its own. Guards the cross-package aggregation
--- in `client.lua` (`note_package_tags`): opening a buffer in a NEW package
--- refreshes tags on every already-open rock buffer.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

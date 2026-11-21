@@ -1,13 +1,4 @@
--- :RockDump must not blow up when state has a high/sparse integer key.
---
--- Repro: `state.buffers` is keyed by bufnr, `stats`/`modules` by
--- client_id. After a long session those integers get large while only
--- one or two are tracked, so the table is an "excessively sparse
--- array" to vim.json.encode -> dump.write notifies an error and
--- returns nil. Field report: ":RockDump on bindings.rock failed to
--- encode snapshot: Cannot serialise table: excessively sparse array".
---
--- This spec needs no LSP binary; it drives state + dump directly.
+-- vim.json.encode rejects sparse integer-keyed arrays.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')

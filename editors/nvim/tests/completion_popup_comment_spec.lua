@@ -1,10 +1,3 @@
--- Typing inside a `//` comment or a string literal's text must not raise the
--- completion popup, while an interpolation hole must still raise it. The
--- response-level rules live in bone-query (completion_in_comment.rs,
--- completion_in_string.rs); this drives real `.` trigger keystrokes so an empty
--- response is confirmed to leave the pum closed rather than showing a
--- stale/fallback list.
-
 package.path = package.path .. ';' .. vim.fn.getcwd() .. '/tests/?.lua'
 local NvimChild = require('_lib.nvim_child')
 

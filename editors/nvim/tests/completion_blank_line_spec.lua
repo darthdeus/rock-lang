@@ -1,13 +1,3 @@
--- Space is a completion trigger character, so `let x = |` opens the popup on an
--- empty prefix. But `<CR>` auto-indent inserts spaces, which would trigger the
--- popup on a fresh line -- so `<CR><CR>` accepts item 1 instead of two newlines.
--- The server suppresses a space trigger whose line-prefix is only whitespace;
--- a space after a token, and any non-space (manual) invoke, still complete.
---
--- Response-level: asserts on `textDocument/completion` payloads for crafted
--- trigger contexts (TriggerCharacter=' ' vs Invoked). See completion_popup_spec
--- for the insert-mode pum variant.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

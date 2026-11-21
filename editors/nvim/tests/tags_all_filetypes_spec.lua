@@ -1,13 +1,3 @@
--- The `.rock.tags` a package's rock-lsp writes should be reachable from ANY
--- buffer under that package's stick.toml root, not only `.rock` buffers. Shader
--- work happens in `.glsl` files that sit right next to the rock sources; a tag
--- jump from one must still resolve rock symbols. Guards the filetype-agnostic
--- tags wiring in `client.lua` (the `BufReadPost`/`BufNewFile` autocmd + the
--- under-stick-root gate): opening a non-rock file in a package points its
--- buffer-local `tags` at that package's `.rock.tags`, no LSP attach required.
---
--- Pure client-side (no `$ROCK_LSP_BIN`): drives the autocmd, not the server.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

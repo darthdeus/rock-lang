@@ -1,13 +1,3 @@
--- Verifies init.lua's minimum-nvim-version gate.
---
--- Drives the real setup() entry point. Mocks vim.version() to simulate
--- both an old nvim (must reject + notify ERROR + return without
--- registering anything) and the current nvim (must proceed past the
--- gate). We DO NOT call setup() in "current" mode end-to-end — that
--- would try to register lsp config + bind keymaps which the missing
--- binary path stress-tests separately. We only assert the gate itself
--- did not bail.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

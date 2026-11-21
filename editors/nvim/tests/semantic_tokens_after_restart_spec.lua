@@ -1,12 +1,4 @@
--- Semantic-token re-request after restart. A known-fragile path:
--- client.lua:328 explicitly calls
--- vim.lsp.semantic_tokens.force_refresh on every rock buffer 300ms
--- after restart, because in earlier nvim versions the auto-refresh
--- on attach didn't always fire the second time around.
---
--- This spec asserts: open a .rock buffer, wait for the initial
--- semanticTokens request, restart, and confirm a SECOND
--- semanticTokens request fires within a reasonable window.
+-- Some Neovim versions do not automatically refresh tokens after reattach.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')

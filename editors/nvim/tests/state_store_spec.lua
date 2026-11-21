@@ -1,9 +1,4 @@
--- Verifies state.lua's pub/sub + ring-buffer semantics.
---
--- Particularly: (1) subscribers receive notifications on most setters;
--- (2) record_request_timing intentionally does NOT notify (per-event
--- thrash on hot request streams was the documented reason); (3) the
--- bounded event ring stays within cap+slack and drops oldest in chunks.
+-- Request timing intentionally does not notify subscribers on every event.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')

@@ -1,9 +1,3 @@
--- Bug-capture snapshot (capture.lua): the on-disk capture must carry the
--- user's note (":RockCapture bad: nullable ignored" -- how a mis-ranked
--- completion gets flagged for later corpus work) and a REPRO.sh that also
--- runs `--explain` (the RankKey rung decode is the diagnosis, not just the
--- item list).
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

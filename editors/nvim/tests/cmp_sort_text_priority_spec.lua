@@ -1,8 +1,4 @@
--- The rock LSP ranks call-argument completions by type via `sortText`, but
--- nvim-cmp orders fuzzy `score` before `sort_text` by default, so the ranking
--- only broke ties. `reorder_sort_text_before_score` moves `sort_text` ahead of
--- `score` (preserving the rest of the list) so the server ranking wins. This
--- tests that pure reorder directly -- no cmp needed.
+-- nvim-cmp defaults to score before sort_text, hiding the server ranking.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')

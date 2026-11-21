@@ -1,17 +1,3 @@
--- Regression: rock-lsp must stay alive when a project's stick.toml
--- omits `version`. Originally a sentinel for the bug
--- (rock_lsp_minimal_project_sentinel_spec.lua); flipped to a normal
--- regression test in the same commit as the fix in
--- rock/src/stick/mod.rs (Package.version became #[serde(default)]).
---
--- Bug shape: previously, a stick.toml of `[package]\nname = "x"\n`
--- crashed rock-lsp ~100ms after attach with a non-zero exit and no
--- diagnostic. The client showed `attached` with capabilities, then
--- every subsequent request hung silently.
---
--- This spec mirrors the smoke spec but without `version` to confirm
--- the fix still holds.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

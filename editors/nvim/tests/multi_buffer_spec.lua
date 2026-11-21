@@ -1,15 +1,3 @@
--- Multi-buffer attach + restart re-attaches all.
---
--- Open three .rock files in the same project, all should attach to a
--- *single* rock-lsp client (nvim's reuse_client deduplicates by name +
--- root). After client.restart(), all three buffers must re-attach to
--- the new client.
---
--- This is the most bug-prone scenario in normal use: getting reuse
--- wrong spawns three servers; getting restart wrong leaves orphaned
--- buffers without semantic tokens. Both have happened during
--- development of this plugin.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

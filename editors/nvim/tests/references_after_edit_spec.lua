@@ -1,10 +1,3 @@
--- References must track a line-shifting buffer edit (real client sync path).
---
--- User-reported flow: add a line inside fn A, move the cursor onto a symbol
--- in fn B -> occurrence spans must use post-edit offsets, not be off by the
--- line delta. This spec feeds the server Neovim's own didChange notification
--- after an incremental edit from nvim_buf_set_lines.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)

@@ -1,9 +1,3 @@
--- Semantic tokens fire automatically after attach (nvim's built-in
--- behavior when the server reports semanticTokensProvider). The
--- plugin's request-timing ring should capture the call — proving the
--- wrapped rpc.request shim caught nvim's auto-fired traffic, not
--- just user-driven calls.
-
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)
