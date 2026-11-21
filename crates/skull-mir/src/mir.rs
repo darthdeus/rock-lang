@@ -6,6 +6,8 @@ use ustr::Ustr;
 
 pub const VALUE_INTEGER_CHECK: &str = "__rock_value_integer_check";
 
+pub const VEC_LENGTH_SLOT: &str = "@vec_len";
+
 pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
 
 /// Part of the plan identity: backends must not infer it from field names

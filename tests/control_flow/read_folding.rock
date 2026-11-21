@@ -32,7 +32,7 @@ struct Row { value: int }
 inline(lua) fn host_probe() -> bool = """
 local row = setmetatable({}, { __index = function() return bump() end })
 local values = setmetatable({}, { __index = function() return bump() end })
-local xs = { len = 1, _data = values }
+local xs = setmetatable({ [0] = 1 }, getmetatable(values))
 local value, snapshot = via_vec(xs)
 return probe(row) == 9 and via_map(values) == 9 and value + snapshot == 9 and control() == 9
 """

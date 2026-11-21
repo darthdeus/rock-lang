@@ -77,7 +77,7 @@ struct Holder { slice: Slice }
 inline(lua) fn check_immutable_units() -> bool = """
     local h = in_field()
     local v = in_vec(2)
-    assert(h.slice == returned(0) and rawequal(v._data[1], v._data[2]) and v._data[1] == maybe(0))
+    assert(h.slice == returned(0) and rawequal(v[1], v[2]) and v[1] == maybe(0))
     give(h, 5)
     assert(h.slice._0 == 5 and returned(0).__tag == 0 and returned(0)._0 == 0)
     assert(not is_sliced(h))

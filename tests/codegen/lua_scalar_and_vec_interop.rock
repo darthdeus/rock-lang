@@ -45,10 +45,10 @@ inline(lua) fn check_boxed_vectors() -> bool = """
     __vec_checked_get = function(v, i) calls = calls + 1; return checked(v, i) end
     local ok, err = pcall(function()
         local a = int_vec(7)
-        assert(a.len == 2 and a._data[1] == 7 and a._data[2] == 2)
+        assert(a[0] == 2 and a[1] == 7 and a[2] == 2)
         assert(rawget(a, "__ty") == nil)
         assert(vec_read(a, 1) == 2 and vec_first(a) == 7)
-        assert(bool_first({_data = {false}, len = 1}, 0) == false)
+        assert(bool_first({[0] = 1, false}, 0) == false)
         assert(calls == 0)
         assert(not pcall(vec_read, a, 2))
         assert(calls == 1)

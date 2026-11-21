@@ -117,17 +117,18 @@ debug.sethook(function()
 end, 'c')
 for _, case in ipairs(cases) do
     local first, second = case[1](case[3]), case[1](case[3])
-    assert(first.len == 0 and second.len == 0, case[4])
+    assert((first[0] or first.len) == 0 and (second[0] or second.len) == 0, case[4])
     assert(not rawequal(first, second), 'snapshot result was shared')
-    if first._data then
-        assert(not rawequal(first._data, second._data), 'snapshot storage was shared')
+    if first[0] ~= nil then
+        first[1] = 'probe'
+        assert(second[1] == nil, 'snapshot storage was shared')
     end
 end
 for _, case in ipairs({{{{boxed_keys_into, boxed}}, {{column_keys_into, column}}}}) do
     local out = empty_keys()
-    out._data[1], out.len = 'stale', 1
+    out[1], out[0] = 'stale', 1
     assert(rawequal(case[1](case[2], out), out))
-    assert(out.len == 0 and out._data[1] == nil)
+    assert(out[0] == 0 and out[1] == nil)
 end
 debug.sethook()
 print('ok')
@@ -151,11 +152,11 @@ for key in pairs(mixed) do
     if tostring(key) == '10' then tied[#tied + 1] = key end
 end
 local a, b, c = boxed_keys(boxed), column_keys(column), label_keys(labels)
-assert(a._data[1] == '10' and b._data[1] == '10' and c._data[1] == '10')
+assert(a[1] == '10' and b[1] == '10' and c[1] == '10')
 local d, e = number_keys(numbers), mixed_keys(mixed)
-assert(d._data[1] == 10 and d._data[2] == 2, 'numeric keys keep tostring order')
-assert(e.len == 3 and e._data[3] == '2', 'mixed keys keep tostring order')
-assert(e._data[1] == tied[1] and e._data[2] == tied[2], 'equal key text keeps traversal order')
+assert(d[1] == 10 and d[2] == 2, 'numeric keys keep tostring order')
+assert(e[0] == 3 and e[3] == '2', 'mixed keys keep tostring order')
+assert(e[1] == tied[1] and e[2] == tied[2], 'equal key text keeps traversal order')
 print('ok')
 "#
     ));

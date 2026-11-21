@@ -26,7 +26,9 @@ pub value LifecycleSystem {
 
 extern(lua) fn __rock_lifecycle_take_wire(key: string) -> bool
 
-pub inline(lua) fn lifecycle_systems(phase: string) -> [LifecycleSystem] = "return (_G.__ROCK_LIFECYCLE_PLAN or {})[phase] or {len=0,_data={}}"
+pub inline(lua) fn lifecycle_systems(phase: string) -> [LifecycleSystem] = """
+    return (_G.__ROCK_LIFECYCLE_PLAN or {})[phase] or setmetatable({[0]=0}, __rock_box_mts.Vec)
+"""
 inline(lua) fn lifecycle_phase_has_scene(phase: string) -> bool = "local p = (_G.__ROCK_LIFECYCLE_PLAN or {})[phase]; return p ~= nil and (p.scene_owned or 0) > 0"
 
 @inline

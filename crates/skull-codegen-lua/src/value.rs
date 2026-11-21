@@ -166,13 +166,11 @@ impl Emitter<'_> {
                 out.push('}');
             }
             Inst::MakeVec(vs) => {
-                out.push_str("{_data = {");
-                self.write_csv(out, vs);
-                let _ = write!(out, "}}, len = {}}}", vs.len());
+                crate::write_vec(out, vs.len(), |out| self.write_csv(out, vs));
             }
             Inst::MakeFlatVec(vec) => self.write_flat_vec(out, vec),
             Inst::MakeStruct { ty, fields } => {
-                // A Lua Vec is untagged; `__rock_get_type` recognizes it by shape.
+                // Column and strided Vecs already carry a storage header.
                 let nominal = ty.filter(|name| name.as_str() != "Vec");
                 if nominal.is_some() {
                     out.push_str("setmetatable(");
@@ -300,8 +298,11 @@ impl Emitter<'_> {
                 ContainerKind::Vec
                 | ContainerKind::VecInBounds
                 | ContainerKind::VecNonNull
-                | ContainerKind::VecNonNullInBounds
-                | ContainerKind::VecValueColumns(_)
+                | ContainerKind::VecNonNullInBounds => {
+                    self.write_opnd(out, *base);
+                    out.push_str("[0]");
+                }
+                ContainerKind::VecValueColumns(_)
                 | ContainerKind::VecValueStrided(_)
                 | ContainerKind::NativeBuffer
                 | ContainerKind::NativeBufferInBounds
@@ -502,22 +503,32 @@ impl Emitter<'_> {
         kind: ContainerKind,
     ) {
         match kind {
-            // A Vec keeps every slot outside `[0, len)` nil, so a slot that
-            // reads as non-nil is in bounds and is the answer: no call per
-            // element, `false` included. A nil slot is either a nil element or
-            // out of bounds, and the helper tells which. A read whose result
-            // is discarded is a bare statement, which only the call can be.
+            // Check negative indices before reading the slot, since logical
+            // index -1 addresses the length. False elements need no helper.
             ContainerKind::Vec | ContainerKind::VecNonNull
                 if self.repeatable(base, 2)
-                    && self.repeatable(index, 2)
+                    && self.repeatable(index, 3)
                     && self.used_as_expr(id) =>
             {
-                // The helper distinguishes a nil element from an out-of-bounds slot.
-                for prefix in ["", " or ("] {
-                    out.push_str(prefix);
-                    self.write_index_place(out, base, index, ContainerKind::VecInBounds);
+                let check_sign =
+                    !matches!(self.func.insts[index], Inst::Const(Lit::Int(i)) if i >= 0);
+                if check_sign {
+                    self.write_opnd(out, index);
+                    out.push_str(" >= 0 and ");
                 }
-                out.push_str(" == nil and ");
+                self.write_index_place(out, base, index, ContainerKind::VecInBounds);
+                out.push_str(" or (");
+                if check_sign {
+                    out.push('(');
+                    self.write_opnd(out, index);
+                    out.push_str(" < 0 or ");
+                }
+                self.write_index_place(out, base, index, ContainerKind::VecInBounds);
+                out.push_str(" == nil");
+                if check_sign {
+                    out.push(')');
+                }
+                out.push_str(" and ");
                 self.write_builtin_call(out, "__vec_checked_get", &[base, index]);
                 out.push(')');
             }
@@ -557,7 +568,7 @@ impl Emitter<'_> {
             // The index was proven within `[0, len)`, so the slot holds the
             // element, nil and false included: no fallback.
             ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
-                out.push_str("._data[");
+                out.push('[');
                 self.write_vec_slot(out, index);
                 out.push(']');
                 return;

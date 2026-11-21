@@ -67,8 +67,7 @@ fn a_leaf_write_spares_its_sibling_column() {
 nobox value P { x: float, y: float }
 
 @nomangle inline(lua) fn probe_len<T>(v: [T]) -> int = """
-    if v._data == nil then return -1 end
-    return #v._data
+    return #v
 """
 
 @test(output = "3", backends = "lua")
@@ -88,8 +87,7 @@ fn an_any_param_still_admits_a_column_vec() {
 }
 
 @nomangle inline(lua) fn opaque_t<T>(v: T) -> int = """
-    if v._data == nil then return -1 end
-    return #v._data
+    return #v
 """
 
 @test(output = "3", backends = "lua")
@@ -102,8 +100,7 @@ fn a_generic_param_bound_to_a_boxed_vec_is_correct() {
 // could answer, which would read as the rule firing.
 @nomangle inline(lua) fn opaque_scalar_t<T>(v: T) -> int = """
     if type(v) ~= "table" then return -1 end
-    if v._data == nil then return -2 end
-    return #v._data
+    return #v
 """
 
 @test(output = "-1", backends = "lua")

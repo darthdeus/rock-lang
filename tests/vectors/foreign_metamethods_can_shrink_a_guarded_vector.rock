@@ -106,14 +106,14 @@
 inline(lua) fn probe() = """
 __op_eq = function(a, b) return a == b end
             local function table(mt) return setmetatable({}, mt) end
-            local function vec(mt) return { len = 1, _data = setmetatable({}, mt) } end
-            local function empty_vec(mt) return { len = 0, _data = setmetatable({}, mt) } end
+            local function vec(mt) return setmetatable({ [0] = 1 }, mt) end
+            local function empty_vec(mt) return setmetatable({ [0] = 0 }, mt) end
             local function pair(mt) return setmetatable({}, mt), setmetatable({}, mt) end
             local function check(name, f, wrap, key, result)
-                local xs = { len = 1, _data = { 7 } }
+                local xs = { [0] = 1, 7 }
                 local mt = { [key] = function()
-                    xs.len = 0
-                    xs._data[1] = nil
+                    xs[0] = 0
+                    xs[1] = nil
                     return result
                 end }
                 local ok, err = pcall(f, xs, wrap(mt))

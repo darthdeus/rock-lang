@@ -31,7 +31,7 @@ inline(lua) fn read_with_poisoned_siblings() -> int = """
             __index = function(_, key) error("unused field was read: " .. key) end,
         })
     end
-    return name_total({layers = {_data = {make("ab"), make("cde")}, len = 2}})
+    return name_total({layers = {[0] = 2, make("ab"), make("cde")}})
 """
 
 @test(backends = "lua")

@@ -880,29 +880,42 @@ pub fn lua_string(s: &str) -> String {
     out
 }
 
-/// A Rock `[string]` value as a Lua literal.
-pub fn lua_string_vec(items: &[&str]) -> String {
-    let mut out = String::from("{_data = {");
-    for (i, s) in items.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        write_lua_string(&mut out, s);
+fn write_vec(out: &mut String, len: usize, items: impl FnOnce(&mut String)) {
+    if len == 0 {
+        // Reserve four array slots without a constructor call frame.
+        out.push_str("setmetatable({[0]=0,nil,nil,nil,nil}, __rock_box_mts.Vec)");
+        return;
     }
-    let _ = write!(out, "}}, len = {}}}", items.len());
+    let _ = write!(out, "setmetatable({{[0]={len},");
+    items(out);
+    out.push_str("}, __rock_box_mts.Vec)");
+}
+
+/// A Rock `[string]` value as Lua.
+pub fn lua_string_vec(items: &[&str]) -> String {
+    let mut out = String::new();
+    write_vec(&mut out, items.len(), |out| {
+        for (i, s) in items.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            write_lua_string(out, s);
+        }
+    });
     out
 }
 
 /// The `[int]` sibling of [`lua_string_vec`].
 pub fn lua_int_vec(items: &[i64]) -> String {
-    let mut out = String::from("{_data = {");
-    for (i, n) in items.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
+    let mut out = String::new();
+    write_vec(&mut out, items.len(), |out| {
+        for (i, n) in items.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "{n}");
         }
-        let _ = write!(out, "{n}");
-    }
-    let _ = write!(out, "}}, len = {}}}", items.len());
+    });
     out
 }
 
@@ -916,7 +929,9 @@ fn is_lua_ident(s: &str) -> bool {
 }
 
 fn write_field_key(out: &mut String, field: &str) {
-    if is_lua_ident(field) {
+    if field == skull_mir::mir::VEC_LENGTH_SLOT {
+        out.push_str("[0]");
+    } else if is_lua_ident(field) {
         let _ = write!(out, ".{field}");
     } else {
         out.push('[');

@@ -986,9 +986,6 @@ fn get_app_args() -> [string] {
     return out
 }
 
-// The bare 1-indexed Lua `arg` table. Building the Vec on the Rock side keeps
-// `vec_new`/`vec_push` out of opaque text, where the boxed `_data` layout they
-// mint is not a contract the caller can rely on.
 inline(lua) fn __app_args_raw() -> any = "return arg or {}"
 
 // Flushes immediately, so the data reaches the OS even when the process exits

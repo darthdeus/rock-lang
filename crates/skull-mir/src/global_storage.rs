@@ -126,6 +126,9 @@ pub fn global_directory(
 /// created under a different layout cannot be loaded into.
 pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, String> {
     let mut rows = Vec::new();
+    if scx.target() == FnBackend::Lua {
+        rows.push("vec:array-length-at-zero".to_string());
+    }
     for module in ws.source_modules() {
         for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
             let identity = global_identity(module.logical_file, global.name);

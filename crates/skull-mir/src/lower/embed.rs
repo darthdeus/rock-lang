@@ -43,6 +43,17 @@ impl<'a> Builder<'a> {
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<(Idx<Expr>, Ustr, Option<ValueShape>, bool), CompilerError> {
+        if field.as_str() == "len"
+            && matches!(
+                self.concrete_expr_ty(base).map(|ty| ty.peel_nullable().0),
+                Some(MonoTy::App {
+                    ctor: MonoCtor::Array,
+                    ..
+                })
+            )
+        {
+            return Ok((base, self.vec_length_field(base)?, None, false));
+        }
         let mut parts = vec![field];
         let mut cur = base;
         let mut physical = (base, field, None, false);

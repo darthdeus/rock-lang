@@ -195,8 +195,8 @@ impl Emitter<'_> {
                 match kind {
                     ContainerKind::Vec | ContainerKind::VecNonNull => {
                         // Increment len before the write: the data table is 1-indexed.
-                        let _ = writeln!(out, " {a}.len = {a}.len + 1");
-                        let _ = write!(out, " {a}._data[{a}.len]");
+                        let _ = writeln!(out, " {a}[0] = {a}[0] + 1");
+                        let _ = write!(out, " {a}[{a}[0]]");
                         self.write_assignment_rhs(out, *value);
                     }
                     // Column push bumps the shared `len` once, then writes K

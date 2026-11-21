@@ -8,7 +8,7 @@ value G { x: float, y: float }
 struct B { s: string }
 
 @nomangle inline(lua) fn make_boxed<T>() -> T = """
-    return {_data = {}, len = 0}
+    return setmetatable({[0] = 0}, __rock_box_mts.Vec)
 """
 
 @test(output = "0", backends = "lua")
@@ -28,7 +28,7 @@ fn a_generic_return_at_a_scalar_is_admitted() {
 }
 
 @nomangle inline(lua) fn probe_named<T>(sink: [T], token: int) -> int = """
-    return #sink._data + token
+    return #sink + token
 """
 
 @test(output = "1", backends = "lua")
@@ -40,7 +40,7 @@ fn a_named_out_of_order_boxed_argument_is_admitted() {
 // `vec_push`'s shape: the sink `[[G]]` has a boxed element while the stored,
 // never-indexed payload is a column vec.
 @nomangle inline(lua) fn take_payload<T>(sink: [T], @repr(opaque) item: T) -> int = """
-    sink._data[1] = item
+    sink[1] = item
     return 1
 """
 
@@ -52,7 +52,7 @@ fn an_opaque_payload_is_admitted_and_correct() {
 }
 
 @nomangle inline(lua) fn take_named<T>(sink: [T], @repr(opaque) item: T, token: int) -> int = """
-    sink._data[1] = item
+    sink[1] = item
     return token
 """
 
@@ -65,7 +65,7 @@ fn repr_opaque_waives_the_declared_slot_under_named_arguments() {
 }
 
 @nomangle inline(lua) fn probe_unbound<T, U>(sink: [T]) -> int = """
-    return #sink._data
+    return #sink
 """
 
 @test(output = "1", backends = "lua")
@@ -76,7 +76,7 @@ fn an_irrelevant_unbound_generic_still_admits_a_boxed_element() {
 
 @nomangle inline(lua) fn probe_nullable<T>(sink: [T]? = null) -> int = """
     if sink == nil then return 0 end
-    return #sink._data
+    return #sink
 """
 
 @test(output = "1", backends = "lua")

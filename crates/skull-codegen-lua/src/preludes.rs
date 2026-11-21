@@ -105,16 +105,16 @@ function __rock_lifecycle_wire_due(old_plan, candidate_plan)
   local due = {}
   local old_phase = old_plan and old_plan.wire
   local old_entries = {}
-  if old_phase and old_phase._data then
-    for i = 1, old_phase.len do
-      local entry = old_phase._data[i]
+  if old_phase then
+    for i = 1, old_phase[0] do
+      local entry = old_phase[i]
       if entry then old_entries[entry.key] = entry end
     end
   end
   local candidate_phase = candidate_plan and candidate_plan.wire
-  if not candidate_phase or not candidate_phase._data then return due end
-  for i = 1, candidate_phase.len do
-    local candidate = candidate_phase._data[i]
+  if not candidate_phase then return due end
+  for i = 1, candidate_phase[0] do
+    local candidate = candidate_phase[i]
     local old = candidate and old_entries[candidate.key]
     local changed = old == nil or candidate.qualification == "plain"
     if not changed and candidate.qualification ~= old.qualification then changed = true end
@@ -122,12 +122,12 @@ function __rock_lifecycle_wire_due(old_plan, candidate_plan)
     if not changed then
       local candidate_deps = candidate.dependencies
       local old_deps = old.dependencies
-      if not candidate_deps or not old_deps or candidate_deps.len ~= old_deps.len then
+      if not candidate_deps or not old_deps or candidate_deps[0] ~= old_deps[0] then
         changed = true
       else
-        for j = 1, candidate_deps.len do
-          local candidate_dep = candidate_deps._data[j]
-          local old_dep = old_deps._data[j]
+        for j = 1, candidate_deps[0] do
+          local candidate_dep = candidate_deps[j]
+          local old_dep = old_deps[j]
           if not candidate_dep or not old_dep
               or candidate_dep.key ~= old_dep.key
               or candidate_dep.fingerprint ~= old_dep.fingerprint then
@@ -153,9 +153,9 @@ end
 function __rock_definition_plan_materialize(plan, materializers)
   _G.__rock_definition_plan_materializing = true
   for _, catalog in pairs(plan) do
-    if type(catalog) == "table" and catalog._data and catalog.len then
-      for i = 1, catalog.len do
-        local entry = catalog._data[i]
+    if type(catalog) == "table" and catalog[0] then
+      for i = 1, catalog[0] do
+        local entry = catalog[i]
         if entry and entry.factory ~= nil then
           if type(entry.factory) == "function" then
             -- Explicit foreign factories already return one boxed result.

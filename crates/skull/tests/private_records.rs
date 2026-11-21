@@ -17,10 +17,10 @@ struct Report { offset: int }
     assert_eq!(
         run_luajit(&format!(
             r#"{lua}
-local xs = {{_data={{0,0,0}},len=3}}
+local xs = {{[0] = 3, 0,0,0}}
 local report = fill_report(xs, 7)
 assert(report.offset == 7)
-assert(xs._data[1] == 7 and xs._data[2] == 8 and xs._data[3] == 9)
+assert(xs[1] == 7 and xs[2] == 8 and xs[3] == 9)
 print('ok')
 "#
         )),

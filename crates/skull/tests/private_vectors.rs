@@ -18,11 +18,11 @@ fn a_private_output_push_preserves_input_bounds() {
     assert!(!body.contains("__vec_checked_set"));
     let output = run_luajit(&format!(
         r#"{lua}
-local xs = {{_data = {{}}, len = 21}}
-for i=1,21 do xs._data[i]=0 end
+local xs = {{[0] = 21}}
+for i=1,21 do xs[i]=0 end
 local out = collect_private(xs)
-assert(out.len == 3 and out._data[1] == 0 and out._data[2] == 7 and out._data[3] == 14)
-assert(xs._data[21] == 20)
+assert(out[0] == 3 and out[1] == 0 and out[2] == 7 and out[3] == 14)
+assert(xs[21] == 20)
 print('ok')
 "#
     ));
@@ -34,8 +34,8 @@ fn pushing_an_alias_of_the_receiver_revokes_its_privacy() {
     let lua = emit_module(
         r#"
 inline(lua) fn arm_alias(alias: any, xs: [int]) = """
-    setmetatable(alias._data, {__newindex=function(t,k,v)
-        xs.len=0; rawset(t,k,v)
+    setmetatable(alias, {__newindex=function(t,k,v)
+        xs[0]=0; rawset(t,k,v)
     end})
 """
 @nomangle fn self_item(xs: [int]) -> int {
@@ -51,7 +51,7 @@ inline(lua) fn arm_alias(alias: any, xs: [int]) = """
     assert_eq!(
         run_luajit(&format!(
             r#"{lua}
-local xs={{len=3, _data={{0,0,0}}}}
+local xs={{[0] = 3, 0,0,0}}
 local ok, err=pcall(self_item,xs)
 assert(not ok and tostring(err):find('out of bounds'))
 print('ok')

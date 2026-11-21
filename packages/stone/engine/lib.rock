@@ -456,13 +456,14 @@ pub @nomangle inline(lua) fn stone_list_directory(path: string) -> [string]? = "
     local count = count_ptr[0]
     local files = files_ptr[0]
 
-    local result = { _data = {}, len = count }
+    local result = __rock_table_new(count, 0)
+    result[0] = count
     for i = 0, count - 1 do
-        result._data[i + 1] = ffi.string(files[i])
+        result[i + 1] = ffi.string(files[i])
     end
 
     if count > 0 then stone.stone_free_string_array(files, count) end
-    return result
+    return setmetatable(result, __rock_box_mts.Vec)
 """
 
 // OpenGL state management

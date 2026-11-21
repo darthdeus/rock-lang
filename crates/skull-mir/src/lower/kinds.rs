@@ -195,6 +195,18 @@ impl<'a> Builder<'a> {
         }
     }
 
+    pub(crate) fn vec_length_field(&self, vec: Idx<Expr>) -> Result<Ustr, CompilerError> {
+        let field = if self.scx.target == bone_core::hir::FnBackend::Lua
+            && !self.scx.values_first_class
+            && self.vec_flat_elem_of(vec)?.is_none()
+        {
+            crate::mir::VEC_LENGTH_SLOT
+        } else {
+            "len"
+        };
+        Ok(crate::names::ustr(field))
+    }
+
     pub(crate) fn vec_flat_elem_of(
         &self,
         e: Idx<Expr>,

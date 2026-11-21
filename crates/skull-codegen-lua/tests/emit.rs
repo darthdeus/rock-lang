@@ -535,7 +535,7 @@ fn arena_occupancy_reads_are_raw() {
     );
     let occupancy = lua.lines().find(|l| l.contains("if ")).unwrap_or_default();
     assert!(
-        occupancy.contains(" == nil and __vec_checked_get("),
+        occupancy.contains(" == nil) and __vec_checked_get("),
         "{lua}"
     );
 }
@@ -732,7 +732,7 @@ fn loop_store_checks_follow_callee_effects() {
         fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = stamp(i) } }"
     ));
     assert!(proven(
-        "@writes_elems inline(lua) fn poke(ys: [int], i: int) -> int = \"ys._data[1] = i return i\"
+        "@writes_elems inline(lua) fn poke(ys: [int], i: int) -> int = \"ys[1] = i return i\"
         fn fill(xs: [int], ys: [int]) { for i in 0..xs.len() { xs[i] = poke(ys, i) } }"
     ));
     assert!(proven(

@@ -1,0 +1,20 @@
+inline(lua) fn vec_layout_is_direct(xs: [bool?]) -> bool = """
+    return rawget(xs, 0) == 3 and rawget(xs, 1) == false
+        and rawget(xs, 2) == nil and rawget(xs, 3) == true
+        and rawget(xs, "len") == nil and rawget(xs, "_data") == nil
+"""
+
+@test(backends = "lua")
+fn ordinary_vec_length_and_nullable_slots_share_the_array() {
+    let xs: [bool?] = [false, null, true]
+    assert(vec_layout_is_direct(xs))
+    assert(vec_layout_is_direct(xs.clone()))
+    assert_eq(xs.len(), 3)
+    assert_eq(xs[0], false)
+    assert_eq(xs[1], null)
+    assert_eq(xs.pop(), true)
+    assert_eq(xs.pop(), null)
+    assert_eq(xs.len, 1)
+    xs.push(true)
+    assert_eq(xs[1], true)
+}

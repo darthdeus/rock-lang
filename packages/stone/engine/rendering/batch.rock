@@ -395,7 +395,7 @@ fn batch_fast_add(cache: Map<int, [string]>, texture: SampledTexture, key: strin
         candidates.push(key)
     } else {
         // Pre-sized, not `[key]`. The cache is cleared every frame, so a
-        // grown-on-demand candidate list moves its `_data` array part 1 -> 2 ->
+        // grown-on-demand candidate list grows its array part 1 -> 2 ->
         // 4 while traces are recording, and the array-versus-hash guard a trace
         // baked in goes permanently false. The probe's compares then run with
         // the caller's draw geometry live and no side trace can be assembled

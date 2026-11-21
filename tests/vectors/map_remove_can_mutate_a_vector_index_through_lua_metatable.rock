@@ -16,23 +16,23 @@
 }
 
 inline(lua) fn probe() = """
-local xs = { len = 2, _data = { 11, 22 } }
-                local indices = { len = 1, _data = { 1 } }
+local xs = { [0] = 2, 11, 22 }
+                local indices = { [0] = 1, 1 }
                 local m = { held = indices }
                 assert(held(xs, indices, m) == 22 and m.held == nil)
                 local ok, err = pcall(removed, xs, { key = 1 })
                 assert(not ok and tostring(err):find("attempt to compare nil", 1, true), tostring(err))
-                local changed = { len = 1, _data = { 1 } }
+                local changed = { [0] = 1, 1 }
                 local foreign = setmetatable({}, { __index = function()
-                    changed._data[1] = 99
+                    changed[1] = 99
                     return nil
                 end })
                 ok, err = pcall(held, xs, changed, foreign)
                 assert(not ok and tostring(err):find("Vec index out of bounds", 1, true), tostring(err))
-                local target = { len = 1, _data = { 7 } }
+                local target = { [0] = 1, 7 }
                 local shrinking = setmetatable({}, { __index = function()
-                    target.len = 0
-                    target._data[1] = nil
+                    target[0] = 0
+                    target[1] = nil
                     return nil
                 end })
                 ok, err = pcall(shrunk, target, shrinking)

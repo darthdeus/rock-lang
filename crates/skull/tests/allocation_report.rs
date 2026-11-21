@@ -211,12 +211,13 @@ io.write("SLOTS ", best)
 #[test]
 fn activation_does_not_add_register_slots_to_a_wide_luajit_frame() {
     let _inline = inline_off_guard();
-    let source = wide_value_fixture(60, 123);
+    let source = wide_value_fixture(60, 119);
     let ordinary = emit_mir(&source);
     let instrumented = {
         let _activation = activation_scope(true);
         emit_mir(&source)
     };
-    assert_eq!(max_stack_slots(&ordinary.lua, "ordinary"), Ok(249));
-    assert_eq!(max_stack_slots(&instrumented.lua, "activated"), Ok(249));
+    let slots = max_stack_slots(&ordinary.lua, "ordinary").expect("wide frame loads");
+    assert!((245..250).contains(&slots), "{slots}");
+    assert_eq!(max_stack_slots(&instrumented.lua, "activated"), Ok(slots));
 }

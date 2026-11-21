@@ -4,12 +4,12 @@ inline(lua) fn __resolve_asset_dev_mode() -> bool = """
 pub global ASSET_DEV_MODE: bool = __resolve_asset_dev_mode()
 
 inline(lua) fn __resolve_asset_overlay_dirs() -> [string] = """
-    local result = { _data = {}, len = 0 }
+    local result = setmetatable({ [0] = 0 }, __rock_box_mts.Vec)
     local raw = os.getenv("ROCK_ASSET_OVERLAYS")
     if raw == nil then
         for _, root in ipairs(_G.__ROCK_ASSET_OVERLAY_DEFAULTS or {}) do
-            result.len = result.len + 1
-            result._data[result.len] = root
+            result[0] = result[0] + 1
+            result[result[0]] = root
         end
         return result
     end
@@ -34,8 +34,8 @@ inline(lua) fn __resolve_asset_overlay_dirs() -> [string] = """
             while #root > root_len and (root:sub(-1) == "/" or root:sub(-1) == "\\") do
                 root = root:sub(1, -2)
             end
-            result.len = result.len + 1
-            result._data[result.len] = root
+            result[0] = result[0] + 1
+            result[result[0]] = root
         end
         if stop > #raw then break end
         start = stop + 1

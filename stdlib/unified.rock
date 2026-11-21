@@ -544,7 +544,7 @@ value SceneBuilder {
     if type(mt) == "table" then return rawget(mt, "__ty") end
 """
 
-// Vecs reflect by shape; cdata values reflect through the type table and ffi.istype.
+// Flat Vecs reflect by their storage header.
 @nomangle inline(lua) fn __rock_get_type(obj: any) -> string? = """
     if type(obj) ~= "table" then
         return nil
@@ -553,11 +553,7 @@ value SceneBuilder {
     -- Foreign __index can supply a type and run arbitrary Lua.
     if ty == nil then ty = obj.__ty end
     if ty ~= nil then return ty end
-    if rawget(obj, "len") ~= nil
-            and (rawget(obj, "_data") ~= nil or rawget(obj, "@vec") ~= nil)
-            and not __rock_is_fn_record(obj) then
-        return "Vec"
-    end
+    if rawget(obj, "len") ~= nil and type(rawget(obj, "@vec")) == "table" then return "Vec" end
     return nil
 """
 
@@ -650,7 +646,7 @@ fn weak_cache_get<T, V>(name: string, owner: Entity<T>) -> V? {
 // consume LuaJIT's cumulative tail-call budget.
 inline(lua) fn __weak_cache_entity_get<V>(name: string, scene: int, arena: int, slot: int, generation: int) -> V? = """
     local backing = __arena_store_any(scene, arena)
-    if not backing or backing.generations._data[slot + 1] ~= generation then
+    if not backing or backing.generations[slot + 1] ~= generation then
         return nil
     end
     local owners = _G.__rock_weak_cache_owners
@@ -671,7 +667,7 @@ fn weak_cache_put<T, V>(name: string, owner: Entity<T>, value: V) {
 
 inline(lua) fn __weak_cache_entity_put<V>(name: string, scene: int, arena: int, slot: int, generation: int, value: V) = """
     local backing = __arena_store_any(scene, arena)
-    if not backing or backing.generations._data[slot + 1] ~= generation then
+    if not backing or backing.generations[slot + 1] ~= generation then
         error("weak_cache_put requires a live owner")
     end
     __weak_cache_write(name, scene, arena, slot, generation, backing, value)
@@ -862,7 +858,6 @@ deco init on_reload {
     if mode == "copy" or mode == "census" then return true end
     if mode == "image" then
         return key ~= "__stone_image_storage_shape"
-            and key ~= "__stone_image_code_env"
             and not (views and views[key])
     end
     if mode == "equality" then return key ~= "__ty" end
@@ -934,16 +929,17 @@ deco init on_reload {
     -- representation, so unequal representations cannot be values of the same
     -- concrete Vec type.
     if type_a == "Vec" or type_b == "Vec" then
-        if type_a ~= "Vec" or type_b ~= "Vec" or a.len ~= b.len then
+        if type_a ~= "Vec" or type_b ~= "Vec" then
             return false
         end
         local ah, bh = rawget(a, "@vec"), rawget(b, "@vec")
         local ar = type(ah) == "table" and ah.repr or "boxed"
         local br = type(bh) == "table" and bh.repr or "boxed"
-        if ar ~= br then return false end
+        local len = a[0] or a.len
+        if ar ~= br or len ~= (b[0] or b.len) then return false end
         if ar == "strided" then
             if ah.elem ~= bh.elem or ah.stride ~= bh.stride then return false end
-            for i = 1, a.len * ah.stride do
+            for i = 1, len * ah.stride do
                 if not __op_eq(a._data[i], b._data[i]) then return false end
             end
             return true
@@ -954,7 +950,7 @@ deco init on_reload {
                 if k ~= "len" and k ~= "@vec" then
                     local other = b[k]
                     if type(col) ~= "table" or type(other) ~= "table" then return false end
-                    for i = 1, a.len do
+                    for i = 1, len do
                         if not __op_eq(col[i], other[i]) then return false end
                     end
                 end
@@ -966,9 +962,8 @@ deco init on_reload {
             end
             return true
         end
-        if type(a._data) ~= "table" or type(b._data) ~= "table" then return false end
-        for i = 1, a.len do
-            if not __op_eq(a._data[i], b._data[i]) then return false end
+        for i = 1, len do
+            if not __op_eq(a[i], b[i]) then return false end
         end
         return true
     end
@@ -1042,7 +1037,8 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
     for i = start_val, end_val - 1 do
         table.insert(t, i)
     end
-    return { _data = t, len = end_val - start_val }
+    t[0] = end_val - start_val
+    return setmetatable(t, __rock_box_mts.Vec)
 """
 
 @intrinsic @nomangle @inline inline(lua) fn __range_uint(start_val: uint, end_val: uint) -> any = """
@@ -1050,7 +1046,8 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
     for i = start_val, end_val - 1 do
         table.insert(t, i)
     end
-    return { _data = t, len = end_val - start_val }
+    t[0] = end_val - start_val
+    return setmetatable(t, __rock_box_mts.Vec)
 """
 
 // Fixed-operator syntax lowers directly. Arithmetic signatures participate in overload resolution.
@@ -1242,38 +1239,22 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 
 @nowrite @intrinsic @inline fn vec_new<T>() -> [T] { return [] }
 
-// Bridges between a `[T]` and the raw 1-indexed backing array, for Rock code
-// handing that array to a C/Lua API or wrapping one built in raw Lua. Keeps the
-// `_data` field name confined to stdlib, and the column routes intercept both
-// by Rock name (`storage.rs`, `call.rs`).
-//
-// Not `@nomangle`: no opaque body names these. They expose or mint the BOXED
-// `_data` layout, which is not a representation an opaque caller can be
-// promised, so their opaque consumers moved
-// to the Rock side rather than being given a contract.
+// Column and strided vectors intercept these bridges in lowering.
 inline(lua) fn __rock_vec_to_lua_array<T>(vec: [T]) -> any = """
     local out = {}
-    for i = 1, vec.len do out[i] = vec._data[i] end
+    for i = 1, vec[0] do out[i] = vec[i] end
     return out
 """
 
 inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
-    return { _data = arr, len = len }
+    arr[0] = len
+    return setmetatable(arr, __rock_box_mts.Vec)
 """
 
-// Repeated appends make the call frame itself expensive. The body is
-// kept inline to avoid spending trace frames in hot loops. Body
-// translated from the Rock equivalent
-// `{ vec.len = vec.len + 1; table_set(vec._data, vec.len, item) }`.
-//
-// `vec` names the vec LAYOUT, so a column-stored receiver must not reach this
-// body -- `column_push` routes around it. `item` is stored and never indexed,
-// so it makes no layout claim and carries the contract that says so. It stays
-// spelled `T`: that is the inference edge giving `vec_new()` its element type,
-// and `any`/`any?` would sever it.
+// The element type drives inference from a push into an empty Vec.
 @intrinsic @relocates @inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
-    vec.len = vec.len + 1
-    vec._data[vec.len] = item
+    vec[0] = vec[0] + 1
+    vec[vec[0]] = item
 """
 
 @inline fn vec_get<T>(vec: [T], index: int) -> T? {
@@ -1295,11 +1276,11 @@ fn vec_set<T>(vec: [T], index: int, value: T) {
 }
 
 @nomangle inline(lua) fn __vec_checked_get(vec: any, i: int) -> any = """
-    if i < 0 or i >= vec.len then
+    if i < 0 or i >= vec[0] then
         error("Vec index out of bounds: index " .. tostring(i) ..
-              " is outside [0, " .. tostring(vec.len) .. ")")
+              " is outside [0, " .. tostring(vec[0]) .. ")")
     end
-    return vec._data[i + 1]
+    return vec[i + 1]
 """
 
 @nomangle inline(lua) fn __vec_checked_index(vec: any, i: int) -> int = """
@@ -1311,11 +1292,11 @@ fn vec_set<T>(vec: [T], index: int, value: T) {
 """
 
 @nomangle inline(lua) fn __vec_checked_set(vec: any, i: int, v: any) = """
-    if i < 0 or i >= vec.len then
+    if i < 0 or i >= vec[0] then
         error("Vec index out of bounds: index " .. tostring(i) ..
-              " is outside [0, " .. tostring(vec.len) .. ")")
+              " is outside [0, " .. tostring(vec[0]) .. ")")
     end
-    vec._data[i + 1] = v
+    vec[i + 1] = v
 """
 
 @pure fn vec_len<T>(vec: [T]) -> int {
@@ -1338,16 +1319,9 @@ fn vec_set<T>(vec: [T], index: int, value: T) {
     return key
 """
 
-// Bare-name UFCS wrappers, so `xs.push(x)`/`xs.len()` resolve to the
-// prefix-named fns. Only `vec_new`/`vec_push` are @nomangle, and the reason
-// is inline(lua) BODIES that call them by name (`get_app_args`, the
-// NativeBuffer collectors) -- not codegen: `xs[i]` lowers to the
-// `__vec_checked_*` family, never to `vec_get`/`vec_set`.
-// `push` is the same append as `vec_push`, not a forward to it: a Rock-bodied
-// forward is spliced into every caller before the append is.
 @intrinsic @relocates @inline inline(lua) fn Vec<T>.push(vec, @repr(opaque) item: T) = """
-    vec.len = vec.len + 1
-    vec._data[vec.len] = item
+    vec[0] = vec[0] + 1
+    vec[vec[0]] = item
 """
 @inline fn Vec<T>.set(vec, index: int, value: T) { vec_set(vec, index, value) }
 @pure @inline fn Vec<T>.len(vec) -> int { return vec_len(vec) }
@@ -1765,58 +1739,33 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     tbl[index] = nil
 """
 
-// Base-agnostic Vec `_data` element accessors: a logical 0-based element index,
-// the storage base absorbed per-backend (luajit 1-based `[i + 1]`, JS 0-based
-// `[i]` via the intrinsic map) so the shared pure-Rock Vec ops stop hard-coding
-// the Lua base. `@inline` so hot `vec_get` / drain callsites still splice with
-// no call frame.
-// The RECEIVER is typed so 2.4 can protect these: spelled `any` they claimed no
-// representation, and a missing column route fell through to the boxed body and
-// died at runtime on `_data` instead of rejecting. The stored VALUE is spelled
-// `T` with `@repr(opaque)`, as `vec_push`'s item is: it makes no layout claim,
-// and an `any` would erase an Arena row.
-//
-// Not `@nomangle`: nothing calls these by their bare name. `@nomangle` is what
-// creates a bare-name obligation for opaque text to call, and these are reached
-// only through ordinary Rock calls and the column intercept, which match the
-// Rock name rather than the emitted symbol.
-@intrinsic @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
-@intrinsic @inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
-@intrinsic @relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
+// Each backend translates the logical index into its native array base.
+@intrinsic @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec[index + 1]"
+@intrinsic @inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec[index + 1] = value"
+@intrinsic @relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec[index + 1] = nil"
 
-// The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
-// reaches storage one element at a time; these are the ops that touch the
-// backing AS A WHOLE (allocate it, measure it, copy it, shift it, reorder it),
-// which a per-element accessor cannot express. Same contract: the body below is
-// the boxed lowering, and a column-stored receiver is intercepted at lowering,
-// statically per instantiation -- never a runtime `_data` test.
-//
-// Not `@inline`: these are cold (construction, clone, sort), so a call frame is
-// the right trade and splicing them into every caller is not.
-// Not `@nomangle`: nothing calls this by its bare name. `@nomangle` is what
-// creates a bare-name obligation for opaque text to call, and these are reached
-// only through ordinary Rock calls and the column intercept, which match the
-// Rock name rather than the emitted symbol.
 @intrinsic inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
-    local tbl = {}
-    for i = 1, capacity do tbl[i] = false end
-    return { _data = tbl, len = 0 }
+    local vec = __rock_table_new(math.max(capacity, 0), 0)
+    for i = 1, capacity do vec[i] = false end
+    vec[0] = 0
+    return setmetatable(vec, __rock_box_mts.Vec)
 """
 
-@intrinsic inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
+@intrinsic inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec"
 
 @intrinsic @relocates inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
-    table.insert(vec._data, lua_index, value)
+    table.insert(vec, lua_index, value)
 """
 
 @intrinsic inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
-    local copy = {}
-    for i = 1, #vec._data do copy[i] = vec._data[i] end
-    return { _data = copy, len = vec.len }
+    local n = math.max(vec[0], #vec)
+    local copy = __rock_table_new(n, 0)
+    for i = 0, n do copy[i] = vec[i] end
+    return setmetatable(copy, __rock_box_mts.Vec)
 """
 
 @intrinsic @relocates inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
-    table.sort(vec._data, function(a, b)
+    table.sort(vec, function(a, b)
         return key_fn(a) < key_fn(b)
     end)
 """
@@ -2190,21 +2139,15 @@ const EPSILON: float = 0.0000001
 
     local type_name = __rock_get_type(t)
 
-    -- Vec type
-    -- The explicit column marker wins even when the element itself has an
-    -- `_data` leaf column.
-    if type_name == "Vec" and t.len and
-            (t._data or __rock_is_column_vec(t) or __rock_is_strided_vec(t)) then
-        local elems
+    if type_name == "Vec" then
+        local elems = t
         if __rock_is_column_vec(t) then
             elems = __rock_vec_column_elements(t)
         elseif __rock_is_strided_vec(t) then
             elems = __rock_vec_strided_elements(t)
-        else
-            elems = t._data
         end
         local parts = {}
-        for i = 1, t.len do
+        for i = 1, t[0] or t.len do
             parts[i] = __rock_inspect_value(elems[i], indent, path .. "[" .. (i-1) .. "]", visited, precision)
         end
         if visited then visited[t] = nil end
@@ -2378,7 +2321,7 @@ const EPSILON: float = 0.0000001
 """
 
 @relocates @nomangle inline(lua) fn __sort_map_keys<K>(keys: [K]) = """
-    local data, n = keys._data, keys.len
+    local data, n = keys, keys[0]
     local width = 8
     for first = 1, n, width do
         for i = first + 1, math.min(first + width - 1, n) do
@@ -2646,16 +2589,17 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 // synthesized call can only target a fn like this one. That the element type
 // never appears is what makes one core serve both.
 //
-// Both halves assume the boxed `_data`/`len` Vec layout for `free_indices`;
-// this is only sound while that stays the representation of `[int]`
-// (`crates/skull/tests/inline_lua_column_container_param_sentinel.rs`).
+// `free_indices` is always an ordinary `[int]` with no column or stride header.
 @nomangle inline(lua) fn __slot_alloc(m: any, hw: any) -> int = """
     local fi = m.free_indices
     local s
-    if fi.len > 0 then
-        s = fi._data[fi.len]
-        fi._data[fi.len] = nil
-        fi.len = fi.len - 1
+    if fi[0] > 0 then
+        s = fi[fi[0]]
+        fi[fi[0]] = nil
+        fi[0] = fi[0] - 1
+    elseif hw[0] ~= nil then
+        s = hw[0]
+        hw[0] = s + 1
     else
         s = hw.len
         hw.len = s + 1
@@ -2666,8 +2610,8 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 
 @nomangle inline(lua) fn __slot_release(m: any, slot: int) = """
     local fi = m.free_indices
-    fi.len = fi.len + 1
-    fi._data[fi.len] = slot
+    fi[0] = fi[0] + 1
+    fi[fi[0]] = slot
     m.occupied_count = m.occupied_count - 1
 """
 
@@ -2871,9 +2815,7 @@ fn float_range(start: float, end_val: float, step: float) -> [float] {
     return result
 }
 
-// `_data` is 1-based with an explicit `len`, since `#t` is unreliable with
-// holes. Slots past `len` hold nil or false: an emitted `xs[i]` read takes a
-// truthy slot as in bounds without a check.
+// Use the explicit length for nullable elements and reserved slots.
 struct Vec<T> {
     _data: any,
     len: int,

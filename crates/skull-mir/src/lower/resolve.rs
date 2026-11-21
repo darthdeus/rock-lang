@@ -649,8 +649,8 @@ impl<'a> Builder<'a> {
                     )
                 {
                     let vec = self.lower_expr(base)?;
-                    // Every Vec header has a raw length, even with a foreign backing table.
-                    return Ok(ValueRepr::Scalar(self.read_value_field(vec, field)));
+                    let key = self.vec_length_field(base)?;
+                    return Ok(ValueRepr::Scalar(self.read_value_field(vec, key)));
                 }
                 if let Some(repr) = self.immediate_value_projection_repr(e)? {
                     return Ok(repr);

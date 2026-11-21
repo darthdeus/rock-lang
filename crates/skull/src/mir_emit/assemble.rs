@@ -1358,10 +1358,10 @@ fn definition_plan_stage_lua(
             .unwrap_or_default();
         let _ = writeln!(
             out,
-            "[{}] = {{ catalog = {}, len = {}, _data = {{",
+            "[{}] = setmetatable({{ [0] = {}, catalog = {},",
             skull_codegen_lua::lua_string(catalog_plan.catalog.as_str()),
+            entries.len(),
             skull_codegen_lua::lua_string(catalog_plan.catalog.as_str()),
-            entries.len()
         );
         for (index, entry) in entries.into_iter().enumerate() {
             let key = entry.identity.logical_key(ws, scx.interner());
@@ -1376,7 +1376,7 @@ fn definition_plan_stage_lua(
                 skull_codegen_lua::lua_string(&key),
             );
         }
-        out.push_str("} },\n");
+        out.push_str("}, __rock_box_mts.Vec),\n");
     }
     out.push_str("}, {\n");
     for (identity, body) in materializers {
@@ -1407,7 +1407,7 @@ pub(super) fn lifecycle_plan_stage_lua(
             .count();
         let _ = writeln!(
             out,
-            "[{}] = {{ len = {}, scene_owned = {}, _data = {{",
+            "[{}] = setmetatable({{ [0] = {}, scene_owned = {},",
             skull_codegen_lua::lua_string(phase.as_str()),
             entries.len(),
             scene_owned
@@ -1462,7 +1462,7 @@ pub(super) fn lifecycle_plan_stage_lua(
             };
             let _ = writeln!(
                 out,
-                "[{}] = {{ phase = {}, owner = {}, root_type = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = {}, qualification = {}, body_fingerprint = {}, dependencies = {{ len = {}, _data = {{",
+                "[{}] = {{ phase = {}, owner = {}, root_type = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = {}, qualification = {}, body_fingerprint = {}, dependencies = setmetatable({{ [0] = {},",
                 index + 1,
                 skull_codegen_lua::lua_string(entry.phase.as_str()),
                 skull_codegen_lua::lua_string(entry.owner.as_str()),
@@ -1486,9 +1486,9 @@ pub(super) fn lifecycle_plan_stage_lua(
                     skull_codegen_lua::lua_string(&format!("{:016x}", dependency.fingerprint))
                 );
             }
-            out.push_str("} } },\n");
+            out.push_str("}, __rock_box_mts.Vec) },\n");
         }
-        out.push_str("} },\n");
+        out.push_str("}, __rock_box_mts.Vec),\n");
     }
     out.push_str("})\n");
     out

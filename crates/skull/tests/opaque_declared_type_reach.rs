@@ -26,7 +26,7 @@ fn main() {{
     let error = emit_rejection(
         r#"
 value G { x: float, y: float }
-@nomangle inline(lua) fn make<T>() -> T = "return {_data = {}, len = 0}"
+@nomangle inline(lua) fn make<T>() -> T = "return setmetatable({[0] = 0}, __rock_box_mts.Vec)"
 fn main() { let xs: [G] = make(); print(xs.len) }
 "#,
     );

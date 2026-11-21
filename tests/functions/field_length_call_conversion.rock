@@ -21,9 +21,9 @@ fn convert_field_length_in_calls() {
 
 inline(lua) fn count_length_reads() -> int = """
     local reads = 0
-    local values = setmetatable({_data = {7}}, {
+    local values = setmetatable({7}, {
         __index = function(_, k)
-            assert(k == 'len')
+            assert(k == 0)
             reads = reads + 1
             return 1
         end,

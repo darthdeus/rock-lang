@@ -2285,28 +2285,53 @@ fn resolve_text_spans_at(
     static indices: [int] = []
     text_family_indices_into(family, site, require_atlas, fonts, indices)
     runs.clear()
-    for span in spans {
-        let start = runs.len()
-        text_resolve_segment(runs, fonts, indices, span.text,
-            size, render_scale, world_raster, span.style, true, site)
-        for i in start..runs.len() {
-            let run = runs[i]
-            let scale = resolved_run_scale(run)
-            let layout: TextLayout? = if !build_layouts {
-                null
-            } else if world_raster {
-                text_layout_cached_world(run.font, run.text, scale, scale,
-                    raster_physical_target_scale: 1.0, face: run.face)
-            } else {
-                text_layout_cached(run.font, run.text, size, render_scale,
-                    TextAlign::TopLeft, raster_physical_target_scale,
-                    face: run.face)
-            }
-            if let built = layout { run.text = built.text }
-            run.raster_physical_target_scale = raster_physical_target_scale
-            run.layout = layout
-        }
+    let count = spans.len()
+    if count == 1 {
+        resolve_text_span_at(runs, fonts, indices, spans[0], size, render_scale,
+            world_raster, site, raster_physical_target_scale, build_layouts)
+        return
     }
+    for i in 0..count {
+        resolve_text_span_at(runs, fonts, indices, spans[i], size, render_scale,
+            world_raster, site, raster_physical_target_scale, build_layouts)
+    }
+}
+
+@inline fn resolve_text_span_at(runs: [ResolvedTextRun], fonts: [Font], indices: [int],
+    span: TextSpan, size: float, render_scale: float, world_raster: bool,
+    site: string, raster_physical_target_scale: float, build_layouts: bool
+) {
+    let start = runs.len()
+    text_resolve_segment(runs, fonts, indices, span.text,
+        size, render_scale, world_raster, span.style, true, site)
+    if !build_layouts && raster_physical_target_scale == 1.0 { return }
+    let end = runs.len()
+    if end == start + 1 {
+        finish_text_run(runs[start], size, render_scale, world_raster,
+            raster_physical_target_scale, build_layouts)
+        return
+    }
+    for i in start..end {
+        finish_text_run(runs[i], size, render_scale, world_raster,
+            raster_physical_target_scale, build_layouts)
+    }
+}
+
+@inline fn finish_text_run(run: ResolvedTextRun, size: float, render_scale: float,
+    world_raster: bool, raster_physical_target_scale: float, build_layouts: bool
+) {
+    run.raster_physical_target_scale = raster_physical_target_scale
+    if !build_layouts { return }
+    let layout = if world_raster {
+        let scale = resolved_run_scale(run)
+        text_layout_cached_world(run.font, run.text, scale, scale,
+            raster_physical_target_scale: 1.0, face: run.face)
+    } else {
+        text_layout_cached(run.font, run.text, size, render_scale,
+            TextAlign::TopLeft, raster_physical_target_scale, face: run.face)
+    }
+    run.text = layout.text
+    run.layout = layout
 }
 
 pub fn resolve_text_spans(

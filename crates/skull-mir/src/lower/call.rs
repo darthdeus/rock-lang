@@ -1117,12 +1117,12 @@ impl<'a> Builder<'a> {
             && self.calls_stdlib_vec_fn(e, name, recv)
         {
             let base = self.lower_expr(recv)?;
-            let value = ValueRepr::Scalar(self.read_field(base, crate::names::ustr("len")));
+            let key = self.vec_length_field(recv)?;
+            let value = ValueRepr::Scalar(self.read_field(base, key));
             return self.value_bundle_for_expr(e, value);
         }
         if let Callee::Unresolved { name, .. } = callee {
-            // The stdlib push bodies write into one `_data` backing, which column storage
-            // lacks; inside `Vec<T>.push` the element is opaque, so it is replaced here.
+            // The ordinary push stores one boxed element. Flat storage expands it into leaves.
             if matches!(name.as_str(), "push" | "vec_push") {
                 if let [recv, item] = arg_idxs[..] {
                     if let Some((elem, storage)) = self.vec_flat_elem_of(recv)? {
@@ -1135,7 +1135,7 @@ impl<'a> Builder<'a> {
                 return Ok(r);
             }
             // The element type comes from the call's own type. The concrete plan must
-            // select the column representation before the body exposes a table `_data`.
+            // select the storage before applying the ordinary allocator.
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
                 if let Some((elem, storage)) = self.vec_flat_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;

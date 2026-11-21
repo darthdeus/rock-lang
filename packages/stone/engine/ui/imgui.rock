@@ -190,10 +190,7 @@ pub fn imgui_slider_int(label: string, value: int, min: int, max: int) -> (bool,
 """
 
 pub fn imgui_combo(label: string, current_idx: int, items: [string]) -> (bool, int) {
-    // ImGui wants the items NUL-separated with a trailing NUL. A Rock string
-    // literal cannot carry a NUL byte, so the separator comes from Lua; the
-    // join itself is Rock, which keeps `__rock_vec_to_lua_array` (and the boxed
-    // `_data` it hands back) out of an opaque body.
+    // ImGui expects NUL separators and a trailing NUL.
     let nul = __nul_byte()
     return __imgui_combo_str(label, current_idx, "{items.join(nul)}{nul}")
 }

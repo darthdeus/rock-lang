@@ -1,17 +1,12 @@
-// A Vec carries no type tag: `__rock_get_type` (used by `==` on `any`,
-// `inspect` and `d()`) recognizes one by its `len` field and its `_data` array
-// or `@vec` header, so a Vec built by a stdlib helper or raw Lua behaves the same
-// as a literal.
-
 @nomangle inline(lua) fn __test_ty_no_mt(v: any) -> string = """
     setmetatable(v, nil)
     return __rock_get_type(v) or "<nil>"
 """
 
 @test(output = "Vec", backends = "lua")
-fn vec_identifiable_without_metatable() {
-    let v: [int] = vec_new()
-    print(__test_ty_no_mt(v))
+fn column_vec_identifiable_without_metatable() {
+    let rows: [Vec2?] = [null]
+    print(__test_ty_no_mt(rows))
 }
 
 @test(output = "Vec {{ 1, 2, 3 }}")
@@ -26,4 +21,11 @@ fn range_vec_is_a_vec() {
     let v = [0, 1, 2]
     print("{r == v} {v == r}")
     print(inspect(r, true, 6))
+}
+
+@test(output = "<nil>", backends = "lua")
+fn an_array_with_a_zero_key_is_not_a_vec() {
+    let map: Map<int, int> = map_new()
+    map[0] = 1
+    print(__test_ty_no_mt(map))
 }

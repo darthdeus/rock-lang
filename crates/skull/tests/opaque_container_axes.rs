@@ -30,7 +30,7 @@ const CTOR_RETURNS_COLUMN_VEC: &str = r#"
 value G { x: float, y: float }
 
 @nomangle inline(lua) fn make() -> [G] = """
-    return {_data = {}, len = 0}
+    return setmetatable({[0] = 0}, __rock_box_mts.Vec)
 """
 
 fn main() {
@@ -43,7 +43,7 @@ const CTOR_RETURNS_BOXED_VEC: &str = r#"
 struct B { s: string }
 
 @nomangle inline(lua) fn make() -> [B] = """
-    return {_data = {}, len = 0}
+    return setmetatable({[0] = 0}, __rock_box_mts.Vec)
 """
 
 fn main() {

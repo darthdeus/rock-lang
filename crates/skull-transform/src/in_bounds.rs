@@ -217,7 +217,7 @@ fn is_stdlib_fn(ws: Option<&Workspace>, fref: FuncRef, name: &str) -> bool {
     })
 }
 
-// These two stdlib bodies only grow `len` and store into `_data`. The
+// These two stdlib bodies only grow `len` and store the element. The
 // receiver's representation and privacy must still be proved at each call.
 fn is_boxed_vec_push(ws: Option<&Workspace>, fref: FuncRef) -> bool {
     use bone_core::hir::{FnBackend, TyId, TypeCtor, TypeExpr};
@@ -238,7 +238,7 @@ fn is_boxed_vec_push(ws: Option<&Workspace>, fref: FuncRef) -> bool {
     if !body
         .as_str()
         .split_whitespace()
-        .eq("vec.len = vec.len + 1 vec._data[vec.len] = item".split_whitespace())
+        .eq("vec[0] = vec[0] + 1 vec[vec[0]] = item".split_whitespace())
     {
         return false;
     }
@@ -334,13 +334,13 @@ impl<'a> Ctx<'a> {
                     // A length read is tied to its place so a later use of the
                     // value (a modulo, a `len - 1`) can name the vector.
                     Inst::Len { base, .. } => mark(&[id, *base], &mut relevant),
-                    Inst::Field { base, field, .. } if field.as_str() == LEN => {
+                    Inst::Field { base, field, .. } if is_length(*field) => {
                         mark(&[id, *base], &mut relevant);
                     }
                     Inst::Store { value, .. } => mark(&[*value], &mut relevant),
                     Inst::MakeStruct { fields, .. } => {
                         for (field, value) in fields {
-                            if field.as_str() == LEN {
+                            if is_length(*field) {
                                 mark(&[*value], &mut relevant);
                             }
                         }
@@ -782,7 +782,7 @@ impl Facts {
         };
         let allowed = match inst {
             Inst::Store { cell, value } if !func.cells[*cell].borrowed => Some(*value),
-            Inst::Field { base, field, .. } if field.as_str() == LEN => Some(*base),
+            Inst::Field { base, field, .. } if is_length(*field) => Some(*base),
             Inst::Len { base, .. } | Inst::VecCheckedIndex { vec: base, .. } => Some(*base),
             Inst::Index {
                 base,
@@ -841,7 +841,8 @@ impl Facts {
     fn after_private_push(&mut self, func: &Body<'_>) {
         // The numeric length only grows, so captured upper bounds remain true.
         // Current length reads and element-derived facts no longer name memory.
-        self.forget_field(func, Ustr::from(LEN));
+        self.forget_field(func, Ustr::from("len"));
+        self.forget_field(func, Ustr::from(skull_mir::mir::VEC_LENGTH_SLOT));
         self.forget_elems(func);
     }
 
@@ -1024,7 +1025,7 @@ impl Facts {
         self.keys_of(func, id)
             .into_iter()
             .filter_map(|k| match func.data(k) {
-                KeyData::Field(base, f) if f.as_str() == LEN => Some(base),
+                KeyData::Field(base, f) if is_length(f) => Some(base),
                 _ => None,
             })
             .collect()
@@ -1191,7 +1192,9 @@ fn constant_scale(func: &MirFunc, id: Idx<Inst>) -> Option<(Idx<Inst>, i64)> {
     None
 }
 
-const LEN: &str = "len";
+fn is_length(field: Ustr) -> bool {
+    matches!(field.as_str(), "len" | skull_mir::mir::VEC_LENGTH_SLOT)
+}
 
 fn seed_declared_result_facts(
     facts: &mut Facts,
@@ -1279,7 +1282,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
     match inst {
         Inst::MakeStruct { fields, .. } => {
             // A fresh descriptor's length equals its initializer snapshot.
-            if let Some((_, len)) = fields.iter().rev().find(|(field, _)| field.as_str() == LEN) {
+            if let Some((_, len)) = fields.iter().rev().find(|(field, _)| is_length(*field)) {
                 for key in facts.keys_of(func, *len) {
                     facts.le_len.insert((key, func.key(KeyData::Value(id))));
                 }
@@ -1290,7 +1293,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
                 facts.le_len.insert((func.key(KeyData::Value(id)), v));
             }
         }
-        Inst::Field { base, field, .. } if field.as_str() == LEN => {
+        Inst::Field { base, field, .. } if is_length(*field) => {
             for v in facts.keys_of(func, *base) {
                 facts.le_len.insert((func.key(KeyData::Value(id)), v));
             }
@@ -1392,7 +1395,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
             k == KeyData::Global(*name)
         }),
         Inst::StoreField { field, .. } => {
-            if field.as_str() == LEN {
+            if is_length(*field) {
                 facts.forget_lengths();
             }
             facts.forget_field(func, *field);

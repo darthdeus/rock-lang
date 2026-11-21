@@ -502,8 +502,8 @@ fn main() {}
         let driver = r#"
 local function run_wire()
   local phase = _G.__ROCK_LIFECYCLE_PLAN.wire
-  for i = 1, phase.len do
-    local entry = phase._data[i]
+  for i = 1, phase[0] do
+    local entry = phase[i]
     if __rock_lifecycle_take_wire(entry.key) then entry.func() end
   end
 end
@@ -1449,7 +1449,7 @@ mod watch_route_tests {
         let script = format!(
             "local function load() _G.HOT_RELOAD = true dofile({path:?}) _G.HOT_RELOAD = false end\n\
              local function sims() local n = 0 for _ in pairs(_G.SIMS) do n = n + 1 end return n end\n\
-             local function shutdowns() return _G.__ROCK_LIFECYCLE_PLAN.shutdown.len end\n\
+             local function shutdowns() return _G.__ROCK_LIFECYCLE_PLAN.shutdown[0] end\n\
              load()\n\
              local plan = shutdowns()\n\
              assert(plan >= 1, 'the shutdown plan holds the handler')\n\

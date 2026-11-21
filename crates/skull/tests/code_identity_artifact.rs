@@ -15,7 +15,7 @@ fn main() {}
     assert!(crate::common::definitions_matching(&emit.lua, "__deco_tick").is_empty());
     assert!(!emit.lua.contains("__deco_tick({"));
     let out = run_luajit(&format!(
-        "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; for i=1,p.len do local e = p._data[i]; e.func(0); print(e.name .. ':' .. e.stage) end",
+        "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; for i=1,p[0] do local e = p[i]; e.func(0); print(e.name .. ':' .. e.stage) end",
         emit.lua
     ));
     assert_eq!(out, "first:7\nsecond:7\ndefaulted:100");
@@ -71,7 +71,7 @@ fn main() {}
     );
     assert!(!emit.lua.contains("__ROCK_DEFINITION_PLAN or {}"));
     let out = run_luajit(&format!(
-        "{}\nlocal p = widget_definition_plan(); local e = empty_definition_plan(); local missing = not pcall(function() return __rock_definition_catalog('missing') end); print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].factory().value .. ':' .. p._data[2].key .. ':' .. e.len .. ':' .. tostring(missing))",
+        "{}\nlocal p = widget_definition_plan(); local e = empty_definition_plan(); local missing = not pcall(function() return __rock_definition_catalog('missing') end); print(p[0] .. ':' .. p[1].key .. ':' .. p[1].factory().value .. ':' .. p[2].key .. ':' .. e[0] .. ':' .. tostring(missing))",
         emit.lua
     ));
     assert_eq!(out, "2:alpha:1:beta:0:true");

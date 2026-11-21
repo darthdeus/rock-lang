@@ -28,7 +28,7 @@ fn v1_lifecycle_aliases_register_one_private_hook() {
     );
     assert_eq!(emitted.lifecycle_plan.entries.len(), 1);
     let out = run_luajit(&format!(
-        "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; print(p.len)\n",
+        "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; print(p[0])\n",
         emitted.lua
     ));
     assert_eq!(out, "1");
