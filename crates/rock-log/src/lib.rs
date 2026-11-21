@@ -1,5 +1,3 @@
-//! The one logging backend.
-
 use rock_core::clock::Instant;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -22,10 +20,7 @@ fn parse_level(s: &str) -> Option<u8> {
 
 pub fn set_level(level: u8) {
     LEVEL.store(level.min(4), Ordering::Relaxed);
-    // Keep the `log` facade's static max-level gate in sync. Without
-    // this, `log::info!` etc. short-circuit against the max-level set
-    // once at init() and runtime level changes never open the gate even though our atomic
-    // changed.
+    // The facade's static gate must track runtime level changes.
     log::set_max_level(facade_max());
 }
 
@@ -122,15 +117,7 @@ fn fmt_body(target: &str, args: &std::fmt::Arguments) -> String {
     }
 }
 
-// Shared log epoch (UNIX millis). A parent and the child
-// process it spawns are separate processes, each with its own logger
-// install. With a per-process monotonic `Instant` origin their
-// interleaved `[<elapsed>s]` timestamps jump backward every hot-reload
-// / restart.txt respawn (the child's clock restarts at ~0 while the
-// long-lived driver is at 100s+). Anchoring both to one wall-clock
-// epoch keeps the combined stream monotonic: the first process to
-// init() sets ROCK_LOG_EPOCH_MS; every child inherits it via the
-// environment and reports elapsed against the same origin.
+// A shared epoch keeps parent and child elapsed timestamps aligned across restarts.
 static EPOCH_MS: LazyLock<u128> = LazyLock::new(|| {
     if let Ok(v) = std::env::var("ROCK_LOG_EPOCH_MS")
         && let Ok(ms) = v.parse::<u128>()
@@ -145,21 +132,7 @@ static EPOCH_MS: LazyLock<u128> = LazyLock::new(|| {
     now
 });
 
-/// Separator between the stamp and the body for a record DECLARED a
-/// wall-clock measurement at its log site, in place of the ordinary space.
-///
-/// A record whose content IS a duration or a frame counter cannot be compared
-/// across two runs of the same work, so differential consumers can drop it.
-/// The declaration rides in the stamp
-/// rather than in the message, so the drop never has to sniff for an `ms`
-/// suffix. One character, so a declared record and a plain one align.
-///
-/// The exact stamp grammar is RESERVED PROTOCOL between this emitter and that
-/// harness. A `print()` reproducing it byte for byte is indistinguishable from
-/// a log record, and always was -- the harness already strips such a prefix
-/// and loses the category with it; the declaration only adds one more
-/// consequence to text that was already protocol. What the strict grammar
-/// buys is that ordinary application output cannot match it by ACCIDENT.
+/// Reserved stamp separator marking wall-clock records for differential consumers.
 pub const WALL_CLOCK_MARK: &str = "~";
 
 fn format_line(
@@ -219,13 +192,8 @@ fn emit(level: log::Level, target: &str, args: &std::fmt::Arguments, wall_clock:
     eprintln!("{}{}{}", color, line, reset);
 }
 
-/// Emit a record DECLARED a wall-clock measurement at its log site: its
-/// content is a duration, a frame counter, or otherwise a property of when the
-/// process ran. Same backend, same gate, same format as every other record --
-/// only the separator differs (see [`WALL_CLOCK_MARK`]).
-///
-/// This bypasses the `log` facade because the facade has no channel for the
-/// declaration; it does not bypass the logger.
+/// Marks timing-dependent output for differential consumers. The `log` facade
+/// has no channel for this declaration, so this calls the logger directly.
 pub fn emit_wall_clock(level: log::Level, target: &str, args: std::fmt::Arguments) {
     init();
     if !target_enabled(level, target) {
