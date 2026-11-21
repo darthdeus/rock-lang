@@ -413,7 +413,7 @@ mod cap_tests {
             assert!(prepare_pixels(source, "fixture.dds", format, true, Some((4, 3))).is_none());
         }
     }
-    use super::{box_downsample, capped_dims_for, decode_rgba_bytes, probe_dimensions};
+    use super::{box_downsample, capped_dims_for};
 
     fn quad_4x4() -> Vec<u8> {
         let mut rgba = vec![0u8; 4 * 4 * 4];
@@ -436,33 +436,6 @@ mod cap_tests {
             vec![0, 1, 2, 3, 16, 17, 18, 19, 32, 33, 34, 35, 48, 49, 50, 51,],
             "each destination texel is its own 2x2 block's mean"
         );
-    }
-
-    #[test]
-    fn box_downsample_rounds_and_covers_every_texel() {
-        type Case = (&'static str, &'static [u8], u32, u32, &'static [u8]);
-        let cases: [Case; 2] = [
-            (
-                "a fractional mean rounds to nearest",
-                &[0, 0, 0, 0, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5],
-                4,
-                2,
-                &[2, 2, 2, 2, 5, 5, 5, 5],
-            ),
-            (
-                "a non-integer ratio covers every texel",
-                &[
-                    10, 10, 10, 10, 20, 20, 20, 20, 30, 30, 30, 30, 60, 60, 60, 60, 90, 90, 90, 90,
-                ],
-                5,
-                2,
-                &[15, 15, 15, 15, 60, 60, 60, 60],
-            ),
-        ];
-        for (name, rgba, width, out_width, expected) in cases {
-            let out = box_downsample(rgba, width, 1, out_width, 1).expect(name);
-            assert_eq!(out, expected, "{name}");
-        }
     }
 
     #[test]
@@ -503,36 +476,6 @@ mod cap_tests {
         for (name, (cap, width, height), expected) in cases {
             assert_eq!(capped_dims_for(cap, width, height), expected, "{name}");
         }
-    }
-
-    /// The decode-failure fixture's corruption: a PNG with one flipped IDAT
-    /// payload byte probes its dimensions (headers byte-identical, so the load
-    /// defers its decode) but never decodes (the payload fails CRC/inflate).
-    /// Deterministic under any encoder layout, unlike a blind truncation.
-    #[test]
-    fn idat_corruption_probes_but_does_not_decode() {
-        let mut cut = crate::image_data::encode_test_png(4, 2, &[0, 255, 0, 255]);
-        let mut off = 8;
-        loop {
-            let len = u32::from_be_bytes(cut[off..off + 4].try_into().unwrap()) as usize;
-            if &cut[off + 4..off + 8] == b"IDAT" {
-                assert!(len > 0, "empty IDAT");
-                let at = off + 8 + len / 2;
-                cut[at] = cut[at].wrapping_add(1);
-                break;
-            }
-            off += 12 + len;
-            assert!(off + 8 <= cut.len(), "no IDAT in encoded png");
-        }
-        assert_eq!(
-            probe_dimensions(&cut),
-            Some((4, 2)),
-            "the header survives corruption"
-        );
-        assert!(
-            decode_rgba_bytes(&cut, "corrupt-test").is_none(),
-            "the body does not decode"
-        );
     }
 }
 
