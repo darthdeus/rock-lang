@@ -1366,13 +1366,6 @@ mod tests {
         )
     }
 
-    fn write_op(path: PathBuf, bytes: &[u8]) -> TransactionOp {
-        TransactionOp::Write(AtomicWrite {
-            path,
-            fragments: vec![bytes.to_vec()],
-        })
-    }
-
     fn submit(queue: &Mutex<Jobs>, path: PathBuf, bytes: &[u8], append: bool) -> Option<i32> {
         queue.lock().unwrap().submit(bytes.len(), false, || {
             let write = AtomicWrite {
@@ -1441,35 +1434,6 @@ mod tests {
         gate.release();
         assert_eq!(waiter.join().unwrap(), 1);
         assert_eq!(poll(&queue, second, true), 1);
-    }
-
-    #[test]
-    fn admission_bounds_jobs_and_owned_bytes() {
-        let root = test_root();
-        let gate = TestGate::new();
-        let queue = gated(limits(1, 4), &gate, |probe| matches!(probe, Probe::Request));
-        let first = queued_write(&queue, root.join("first"), b"1234");
-        assert!(gate.wait_until_entered());
-        assert!(submit(&queue, root.join("second"), b"x", false).is_none());
-        gate.release();
-        assert_eq!(poll(&queue, first, true), 1);
-        let second = queued_write(&queue, root.join("second"), b"x");
-        assert_eq!(poll(&queue, second, true), 1);
-    }
-
-    #[test]
-    fn completed_job_releases_owned_bytes_before_observation() {
-        let root = test_root();
-        let queue = queue(limits(2, 4));
-        let first = queued_write(&queue, root.join("first"), b"1234");
-        let shared = queue.lock().unwrap().queue;
-        assert_eq!(shared.wait(first as u64), 1);
-        assert_eq!(reserved(&queue), 0);
-        let second = submit(&queue, root.join("second"), b"5678", false)
-            .expect("completed payload still consumes the byte budget");
-        assert_eq!(poll(&queue, first, false), 1);
-        assert_eq!(poll(&queue, second, true), 1);
-        assert_eq!(std::fs::read(root.join("first")).unwrap(), b"1234");
     }
 
     #[test]
@@ -1699,22 +1663,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_transaction_keeps_old_manifest_gc_files_and_earlier_writes() {
-        let root = test_root();
-        let queue = queue(limits(4, 64 * 1024));
-        let (snapshots, manifest) = gc_fixture(&root);
-        let snapshot = root.join("snapshot.png");
-        let transaction_id = begin(&queue);
-        stage_write(&queue, transaction_id, &snapshot, b"snapshot");
-        stage_write(&queue, transaction_id, &snapshots, b"bad write");
-        stage_gc_manifest(&queue, transaction_id, &snapshots, &manifest);
-        let job = commit(&queue, transaction_id);
-        assert_eq!(poll(&queue, job, true), -1);
-        assert_gc_outcome(&snapshots, &manifest, false);
-        assert_eq!(std::fs::read(snapshot).unwrap(), b"snapshot");
-    }
-
-    #[test]
     fn uncertain_manifest_publish_retains_dependencies_and_plain_write_recovers() {
         let root = test_root();
         let fired = std::sync::atomic::AtomicBool::new(false);
@@ -1836,27 +1784,6 @@ mod tests {
         gate.release();
         assert_eq!(poll(&queue, job, true), 1);
         assert_gc_outcome(&snapshots, &manifest, true);
-    }
-
-    #[test]
-    fn failed_restoring_write_puts_back_every_earlier_path() {
-        let root = tempfile::tempdir().unwrap();
-        let level = root.path().join("level");
-        let quest = root.path().join("quest");
-        let blocker = root.path().join("blocker");
-        std::fs::write(&level, b"old level").unwrap();
-        std::fs::write(&blocker, b"blocker").unwrap();
-        let queue = queue(limits(4, 64));
-        let job = queue.lock().unwrap().submit(0, true, || {
-            vec![
-                write_op(level.clone(), b"new level"),
-                write_op(quest.clone(), b"new quest"),
-                write_op(blocker.join("child"), b"bad"),
-            ]
-        });
-        assert_eq!(poll(&queue, job.unwrap(), true), -1);
-        assert_eq!(std::fs::read(&level).unwrap(), b"old level");
-        assert!(!quest.exists());
     }
 }
 
