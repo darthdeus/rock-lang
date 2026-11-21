@@ -1,9 +1,10 @@
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::closure::{FrameInfo, convert_closures_framed};
 use crate::frame::materialize_frame_cells;
 use comfy_la_arena::Idx;
 use skull_mir::cfg::successors;
+use skull_mir::code_identity::{CaptureSchema, CodeCompatibility, CodeIdentity, LambdaSiteId};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
@@ -28,6 +29,8 @@ pub(crate) fn lower_detached_region(
     source: &MirFunc,
     entry: Idx<Block>,
     name: &str,
+    role: Ustr,
+    sites: &HashMap<Idx<Inst>, LambdaSiteId>,
     frame: &FrameInfo<'_>,
 ) -> MirFunc {
     let region = detached_region_blocks(source, entry);
@@ -37,25 +40,18 @@ pub(crate) fn lower_detached_region(
     aux.code_identity = source
         .code_identity
         .as_ref()
-        .map(skull_mir::code_identity::CodeIdentity::owner)
-        .zip(detached_region_site(source, &region))
-        .map(
-            |(enclosing, site)| skull_mir::code_identity::CodeIdentity::Nested {
-                enclosing,
-                site,
-                name: aux.name,
-            },
-        );
-    aux.code_abi_fingerprint = Some(format!("detached:{name}"));
-    aux.code_compatibility =
-        aux.code_identity
-            .as_ref()
-            .map(|_| skull_mir::code_identity::CodeCompatibility {
-                call_abi: format!("detached:{name}"),
-                capture: skull_mir::code_identity::CaptureSchema::empty(),
-                frame: Some(frame.schema()),
-                lambda_topology: Default::default(),
-            });
+        .map(|identity| CodeIdentity::Generated {
+            enclosing: identity.owner(),
+            role,
+        });
+    let call_abi = format!("detached:{name}");
+    aux.code_abi_fingerprint = Some(call_abi.clone());
+    aux.code_compatibility = aux.code_identity.as_ref().map(|_| CodeCompatibility {
+        call_abi,
+        capture: CaptureSchema::empty(),
+        frame: Some(frame.schema()),
+        lambda_topology: Default::default(),
+    });
     aux.params = vec![frame.s_cell];
     aux.is_coroutine = false;
     aux.resume_arg = None;
@@ -79,7 +75,7 @@ pub(crate) fn lower_detached_region(
         }
     }
 
-    convert_closures_framed(&mut aux, name, Some(frame), None);
+    convert_closures_framed(&mut aux, name, Some(sites), Some(frame), None);
     let aux_entry = aux.entry;
     materialize_frame_cells(&mut aux, aux_entry, frame.s_cell, frame.slots);
     assert!(
@@ -89,18 +85,6 @@ pub(crate) fn lower_detached_region(
         "detached region `{name}` retained an Inst::Lambda after conversion"
     );
     aux
-}
-
-fn detached_region_site(
-    source: &MirFunc,
-    region: &HashSet<Idx<Block>>,
-) -> Option<skull_mir::code_identity::LambdaSiteId> {
-    region
-        .iter()
-        .flat_map(|block| source.blocks[*block].insts.iter().copied())
-        .filter_map(|inst| source.inst_spans.get(inst).copied())
-        .min_by_key(|span| span.offset_range().0)
-        .and_then(skull_mir::code_identity::LambdaSiteId::from_span)
 }
 
 pub(crate) fn erase_detached_lambdas(

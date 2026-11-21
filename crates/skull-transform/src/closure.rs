@@ -82,8 +82,66 @@ impl FrameInfo<'_> {
     }
 }
 
+pub(crate) fn lambda_sites(mf: &MirFunc) -> HashMap<Idx<Inst>, LambdaSiteId> {
+    use std::cmp::Reverse;
+
+    // Spans recover lexical order and containment, including copies introduced
+    // by defer lowering and inlining. Only the resulting path survives.
+    let mut locations: Vec<_> = mf
+        .insts
+        .iter()
+        .filter_map(|(id, inst)| {
+            if !matches!(inst, Inst::Lambda { .. }) {
+                return None;
+            }
+            let span = mf.inst_spans.get(id)?;
+            let (start, end) = span.offset_range();
+            (span.file != "<unknown>").then_some((span.file, start, Reverse(end), id))
+        })
+        .collect();
+    locations.sort_unstable();
+
+    let mut sites = HashMap::default();
+    let mut parents: Vec<(usize, Ustr, usize)> = Vec::new();
+    let mut previous = None;
+    let mut next_root = 0;
+    let prefix = match &mf.code_identity {
+        Some(CodeIdentity::Nested { site, .. }) => site.path.as_str(),
+        _ => "",
+    };
+    for (file, start, Reverse(end), id) in locations {
+        if let Some((prev_file, prev_start, path)) = previous {
+            if (file, start) == (prev_file, prev_start) {
+                sites.insert(id, LambdaSiteId { file, path });
+                continue;
+            }
+            if file != prev_file {
+                parents.clear();
+                next_root = 0;
+            }
+        }
+        while parents
+            .last()
+            .is_some_and(|(limit, _, _)| start >= *limit || end > *limit)
+        {
+            parents.pop();
+        }
+        let (parent, next) = match parents.last_mut() {
+            Some((_, path, next)) => (path.as_str(), next),
+            None => (prefix, &mut next_root),
+        };
+        let path = format!("{parent}/{next}");
+        *next += 1;
+        let path = Ustr::from(path.as_str());
+        parents.push((end, path, 0));
+        previous = Some((file, start, path));
+        sites.insert(id, LambdaSiteId { file, path });
+    }
+    sites
+}
+
 pub fn convert_closures(mf: &mut MirFunc, name_base: &str) {
-    convert_closures_framed(mf, name_base, None, None);
+    convert_closures_framed(mf, name_base, None, None, None);
 }
 
 /// Reuse the pre-yield scope tree for a coroutine step. Rebuilding it after
@@ -91,6 +149,7 @@ pub fn convert_closures(mf: &mut MirFunc, name_base: &str) {
 pub fn convert_closures_framed(
     mf: &mut MirFunc,
     name_base: &str,
+    sites: Option<&HashMap<Idx<Inst>, LambdaSiteId>>,
     frame: Option<&FrameInfo<'_>>,
     precomputed: Option<(&ScopeTree, &Ownership)>,
 ) {
@@ -103,6 +162,14 @@ pub fn convert_closures_framed(
         return;
     }
 
+    let owned_sites;
+    let sites = match sites {
+        Some(sites) => sites,
+        None => {
+            owned_sites = lambda_sites(mf);
+            &owned_sites
+        }
+    };
     let owned_tree;
     let owned_own;
     let (tree, own): (&ScopeTree, &Ownership) = match precomputed {
@@ -150,11 +217,7 @@ pub fn convert_closures_framed(
         .iter()
         .filter_map(|&(_, sid)| {
             let lambda = tree.scopes[sid].lambda?;
-            let site = mf
-                .inst_spans
-                .get(lambda)
-                .copied()
-                .and_then(LambdaSiteId::from_span)?;
+            let site = *sites.get(&lambda)?;
             let Inst::Lambda { params, .. } = &mf.insts[lambda] else {
                 return None;
             };
@@ -404,12 +467,7 @@ pub fn convert_closures_framed(
             .code_identity
             .as_ref()
             .map(CodeIdentity::owner)
-            .zip(
-                mf.inst_spans
-                    .get(lambda)
-                    .copied()
-                    .and_then(LambdaSiteId::from_span),
-            )
+            .zip(sites.get(&lambda).copied())
             .map(|(enclosing, site)| CodeIdentity::Lambda { enclosing, site });
         let capture = capture_schema(mf, env_plans[&sid].captures(), &boxed, frame);
         let compatibility = Some(CodeCompatibility {

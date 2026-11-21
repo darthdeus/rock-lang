@@ -2,7 +2,6 @@
 //! identities: they are realization details, not artifact identity.
 use std::collections::{BTreeMap, BTreeSet};
 
-use bone_core::prelude::Span;
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
@@ -30,21 +29,10 @@ pub(crate) fn logical_def_key(file: Ustr, name: Ustr) -> String {
     }
 }
 
-/// The start offset is stable when the lambda body changes; the owner's
-/// topology fingerprint rejects inserted, removed or reordered sibling sites.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct LambdaSiteId {
     pub file: Ustr,
-    pub offset: u64,
-}
-
-impl LambdaSiteId {
-    pub fn from_span(span: Span) -> Option<Self> {
-        (span.file != "<unknown>").then_some(Self {
-            file: span.file,
-            offset: span.offset_range().0 as u64,
-        })
-    }
+    pub path: Ustr,
 }
 
 /// Always-emitted global/decorator roots have no declaration, so their source
@@ -139,16 +127,14 @@ impl CodeIdentity {
                 )
             }
         };
-        // The owner key already names its file, so a site in that file is spelled by
-        // offset alone; that keeps build paths out of the key.
         let site_key = |owner: &CodeOwner, site: &LambdaSiteId| {
             let owner_file = match owner {
                 CodeOwner::Instance(instance) => ws.module(instance.func.module).file,
                 CodeOwner::Artifact { module, .. } => *module,
             };
             match site.file == owner_file {
-                true => site.offset.to_string(),
-                false => format!("{}:{}", ws.logical_file(site.file), site.offset),
+                true => site.path.to_string(),
+                false => format!("{}:{}", ws.logical_file(site.file), site.path),
             }
         };
         match self {
@@ -188,7 +174,7 @@ impl LambdaTopologyFingerprint {
         h.write_usize(sites.len());
         for (site, params) in sites {
             h.write_str(site.file.as_str());
-            h.write_u64(site.offset);
+            h.write_str(site.path.as_str());
             h.write_usize(*params);
         }
         Self(h.finish())
@@ -226,7 +212,9 @@ pub enum CaptureMode {
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum CaptureIdentity {
     Binding {
-        site: LambdaSiteId,
+        file: Ustr,
+        index: u32,
+        name: Ustr,
         projection: Ustr,
     },
     Generated {
@@ -245,10 +233,14 @@ impl CaptureIdentity {
         };
         match self {
             Self::Binding {
-                site,
+                file,
+                index,
+                name,
                 projection: base,
             } => Self::Binding {
-                site: *site,
+                file: *file,
+                index: *index,
+                name: *name,
                 projection: append(*base),
             },
             Self::Generated { role } => Self::Generated {
@@ -649,6 +641,7 @@ impl CodeArtifact {
     /// A topology mismatch is an owner-level incompatibility, even if all
     /// surviving individual keys look compatible.
     pub fn compatible_overlay(&self, next: &Self) -> bool {
+        let mut edited_sites = Vec::new();
         for (identity, old) in &self.entries {
             if !old.escaping {
                 continue;
@@ -662,6 +655,15 @@ impl CodeArtifact {
             if !old.compatibility.compatible_with(&new.compatibility) {
                 return false;
             }
+            if old.body_fingerprint != new.body_fingerprint
+                && match identity {
+                    CodeIdentity::Lambda { .. } | CodeIdentity::Nested { .. } => true,
+                    CodeIdentity::Generated { role, .. } => role.starts_with("defer:"),
+                    _ => false,
+                }
+            {
+                edited_sites.push((old, new));
+            }
         }
         if next
             .entries
@@ -669,6 +671,20 @@ impl CodeArtifact {
             .any(|entry| entry.escaping && !self.entries.contains_key(&entry.identity))
         {
             return false;
+        }
+        // A sibling that moved to another positional slot must not hijack a
+        // retained closure with the same call ABI and capture layout.
+        if edited_sites.len() > 1 {
+            let old_sites: FxHashSet<_> = edited_sites
+                .iter()
+                .map(|(old, _)| (old.identity.owner(), old.body_fingerprint))
+                .collect();
+            if edited_sites
+                .iter()
+                .any(|(_, new)| old_sites.contains(&(new.identity.owner(), new.body_fingerprint)))
+            {
+                return false;
+            }
         }
         // A live coroutine resumes into the replacement body, so every named
         // frame-bound callable must keep its frame layout, and none may appear or vanish.
@@ -1282,7 +1298,7 @@ mod tests {
             enclosing: CodeOwner::Instance(Instance::base(declaration())),
             site: LambdaSiteId {
                 file: Ustr::from("main.rock"),
-                offset: 1,
+                path: Ustr::from("1"),
             },
         };
         let (unique, clash, promoted, held) = (named(9), named(40), named(41), named(42));

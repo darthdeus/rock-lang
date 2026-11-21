@@ -66,6 +66,8 @@ pub const GLOBALS_BRIDGE_LINE: &str = "__rock_globals_install_bridge()\n";
 pub struct MirEmit {
     pub compile_counts: CompileCounts,
     pub lua: String,
+    /// Whether the edit needs to publish a payload to the running VM.
+    pub runtime_changed: bool,
     /// The byte offset in `lua` just past [`GLOBALS_BRIDGE_LINE`]. `None` for
     /// an overlay, which has no bridge, and for text rewritten after assembly.
     pub globals_bridge_end: Option<usize>,

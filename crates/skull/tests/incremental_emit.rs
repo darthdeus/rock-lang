@@ -266,6 +266,8 @@ inline(lua) fn slots_empty(c: Coroutine<FrameYield>) -> bool = """
 const SHARED_ABI_SLOTS: &str = r#"
 @lifecycle(phase="update", owner="process")
 deco init tick {}
+global TICKS: int = 0
+@nomangle fn ticks() -> int { TICKS }
 @tick fn first() {}
 @tick fn second() {}
 @tick fn third() {}
@@ -293,7 +295,7 @@ fn shared_call_abis_are_staged_once_and_remain_compatible_across_overlays() {
         let literal = skull_codegen_lua::lua_string(abi);
         assert_eq!(full.lua.matches(literal.as_str()).count(), 1);
     }
-    let v2 = SHARED_ABI_SLOTS.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }");
+    let v2 = SHARED_ABI_SLOTS.replace("@tick fn first() {}", "@tick fn first() { TICKS = 1 }");
     let escaping: Vec<_> = full
         .code_artifact
         .entries
@@ -314,6 +316,8 @@ end
 local before = snapshot()
 {overlay}
 assert(snapshot() == before, "the overlay changed a slot ABI")
+__ROCK_LIFECYCLE_PLAN.update[1].func()
+assert(ticks() == 1)
 print(before)
 "#,
         full = full.lua,

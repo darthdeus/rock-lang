@@ -5,9 +5,7 @@ use rustc_hash::FxHashSet as HashSet;
 use bone_core::prelude::CompilerError;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
-use skull_mir::code_identity::{
-    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, LambdaSiteId,
-};
+use skull_mir::code_identity::{CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity};
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
 use skull_mir::verify::Stage;
@@ -47,6 +45,7 @@ pub fn prepare_coroutine(
     func: &MirFunc,
     reserve: &dyn Fn(&str),
 ) -> Result<PreparedCoroutine, CompilerError> {
+    let sites = crate::closure::lambda_sites(func);
     let channel = plan.channel.as_ref();
     let mut lowered = crate::transform_coroutine(func, channel, plan.has_return_value());
     crate::body_chain::debug_verify(&lowered.step, Stage::LOWERED, &"the coroutine transform");
@@ -75,6 +74,8 @@ pub fn prepare_coroutine(
             &lowered.step,
             entry,
             &name,
+            Ustr::from(format!("defer:{k}").as_str()),
+            &sites,
             &frame_info,
         ));
     }
@@ -82,32 +83,14 @@ pub fn prepare_coroutine(
     for (kind, entry) in &hook_entries {
         let name = plan.hook(kind.slot());
         reserve(&name);
-        let mut aux = crate::lower_detached_region(&lowered.step, *entry, &name, &frame_info);
-        // A hook without a body site uses its registration lambda's source site.
-        if aux.code_identity.is_none() {
-            let enclosing = func.code_identity.as_ref().map(CodeIdentity::owner);
-            let site = hook_registration_site(func, *kind, *entry);
-            let (Some(enclosing), Some(site)) = (enclosing, site) else {
-                return Err(CompilerError::new_with_label(
-                    source_func.name_span,
-                    format!(
-                        "coroutine hook `{}` has no source identity at its registration lambda",
-                        kind.slot()
-                    ),
-                ));
-            };
-            aux.code_identity = Some(CodeIdentity::Nested {
-                enclosing,
-                site,
-                name: aux.name,
-            });
-            aux.code_compatibility = Some(CodeCompatibility {
-                call_abi: format!("detached:{}", aux.name),
-                capture: CaptureSchema::empty(),
-                frame: Some(frame_info.schema()),
-                lambda_topology: Default::default(),
-            });
-        }
+        let aux = crate::lower_detached_region(
+            &lowered.step,
+            *entry,
+            &name,
+            Ustr::from(kind.slot()),
+            &sites,
+            &frame_info,
+        );
         hooks.push((*kind, aux));
     }
     crate::erase_detached_lambdas(
@@ -122,6 +105,7 @@ pub fn prepare_coroutine(
     crate::convert_closures_framed(
         &mut lowered.step,
         &step_name,
+        Some(&sites),
         Some(&frame_info),
         Some((&lowered.step_tree, &lowered.step_own)),
     );
@@ -213,40 +197,6 @@ fn collect_nested_code_identities(mf: &MirFunc, out: &mut HashSet<CodeIdentity>)
         }
         collect_nested_code_identities(nested, out);
     }
-}
-
-fn hook_registration_site(
-    source: &MirFunc,
-    kind: CoroHookKind,
-    entry: Idx<Block>,
-) -> Option<LambdaSiteId> {
-    source.insts.iter().find_map(|(_, inst)| {
-        let Inst::CoroHook {
-            kind: registered,
-            lambda,
-        } = inst
-        else {
-            return None;
-        };
-        if *registered != kind {
-            return None;
-        }
-        let Inst::Lambda {
-            entry: lambda_entry,
-            ..
-        } = &source.insts[*lambda]
-        else {
-            return None;
-        };
-        if *lambda_entry != entry {
-            return None;
-        }
-        source
-            .inst_spans
-            .get(*lambda)
-            .copied()
-            .and_then(LambdaSiteId::from_span)
-    })
 }
 
 fn add_coroutine_code_values(

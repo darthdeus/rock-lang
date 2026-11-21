@@ -1195,6 +1195,7 @@ pub(super) fn assemble(
     phases.extend(steps);
     Ok((
         MirEmit {
+            runtime_changed: true,
             compile_counts,
             lua: out,
             globals_bridge_end,

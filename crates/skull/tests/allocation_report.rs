@@ -33,6 +33,20 @@ fn update_root() -> int {
         let _report = allocation_scope(true);
         emit_mir(source)
     };
+    let commented = {
+        let _report = allocation_scope(true);
+        emit_mir(&format!(
+            "// Preserve allocation site identities\n\n{source}"
+        ))
+    };
+    let manifest = |emit: &skull::mir_emit::MirEmit| {
+        emit.allocation_report
+            .bodies
+            .iter()
+            .flat_map(|(name, body)| body.direct_sites.iter().map(|site| (name.clone(), site.id)))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(manifest(&reported), manifest(&commented));
     assert_eq!(ordinary.lua, reported.lua);
     let text = reported.allocation_report.render_text();
     assert!(text.contains("emitted site manifest:"));

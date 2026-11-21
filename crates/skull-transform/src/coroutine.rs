@@ -6,8 +6,9 @@ use crate::detached::detached_region_blocks;
 use crate::visit::{raw, top_level_blocks};
 use comfy_la_arena::Idx;
 use skull_mir::cfg::successors;
-use skull_mir::code_identity::LambdaSiteId;
 use skull_mir::mir::*;
+
+use ustr::Ustr;
 
 pub const STATE: &str = "__state";
 
@@ -288,7 +289,7 @@ fn live_at_resumes<K: Copy + Eq + std::hash::Hash>(
 fn detached_uses(
     func: &MirFunc,
     entries: impl IntoIterator<Item = Idx<Block>>,
-) -> (HashSet<Idx<Cell>>, HashSet<LambdaSiteId>) {
+) -> (HashSet<Idx<Cell>>, HashSet<(Ustr, usize)>) {
     let mut cells = HashSet::default();
     let mut sites = HashSet::default();
     for block in entries
@@ -310,11 +311,11 @@ fn detached_uses(
     (cells, sites)
 }
 
-fn lambda_site(func: &MirFunc, lambda: Idx<Inst>) -> Option<LambdaSiteId> {
+fn lambda_site(func: &MirFunc, lambda: Idx<Inst>) -> Option<(Ustr, usize)> {
     func.inst_spans
         .get(lambda)
-        .copied()
-        .and_then(LambdaSiteId::from_span)
+        .filter(|span| span.file != "<unknown>")
+        .map(|span| (span.file, span.offset_range().0))
 }
 
 pub fn transform_coroutine(

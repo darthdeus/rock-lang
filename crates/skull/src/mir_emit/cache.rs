@@ -816,17 +816,22 @@ impl SkullEmitCache {
         for body in &affected {
             cache.inline_cache.invalidate(body.func);
         }
-        for body in &affected {
+        affected.retain(|body| {
             cache.unindex_chunk(body);
             let fref = body.func;
             let f = &ws.module(fref.module).functions[fref.func];
             if is_cached_emitted_body(f, body) {
                 let chunk = cache.rebuild_chunk(ws, body);
+                let same = match (&chunk, cache.chunks.get(body)) {
+                    (Ok(next), Some(Ok(old))) => next.same_overlay_payload(old),
+                    _ => false,
+                };
                 cache.insert_chunk(body.clone(), chunk);
+                !same
             } else {
-                cache.chunks.remove(body);
+                cache.chunks.remove(body).is_some()
             }
-        }
+        });
         // After invalidation, so a newly reached body cannot reuse an inline decision
         // made for the old body.
         let added_errors = cache.build_graph_added_chunks(ws, &update.added);

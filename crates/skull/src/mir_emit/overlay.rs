@@ -347,6 +347,7 @@ fn assemble_overlay(
 
     Ok((
         MirEmit {
+            runtime_changed: true,
             compile_counts: CompileCounts {
                 concrete_plans: cache.concrete.plans.len() + cache.concrete.always_plans.len(),
                 chunks: cache.chunks.len(),
@@ -413,6 +414,10 @@ pub fn emit_overlay_with_span_edits(
     if shader_changed {
         cache.refresh_shader_registrations(ws)?;
     }
+    let mut runtime_changed = shader_changed
+        || !affected.is_empty()
+        || !update.added.is_empty()
+        || !update.removed.is_empty();
     cache.edit.changed_since_full.extend(affected);
     for &(mid, owner) in reinferred {
         if let BodyOwner::Global(gid) = owner {
@@ -448,6 +453,7 @@ pub fn emit_overlay_with_span_edits(
         .iter()
         .all(|(_, owner)| matches!(owner, BodyOwner::Function(_)));
     if !body_only {
+        runtime_changed = true;
         let layout = skull_mir::global_storage::global_layout_id(ws, &cache.scx)
             .map_err(CompilerError::new_no_location)?;
         if cache.edit.global_layout.as_deref() != Some(layout.as_str()) {
@@ -474,6 +480,7 @@ pub fn emit_overlay_with_span_edits(
             })
             .map(|(key, _)| *key)
             .collect();
+        runtime_changed |= !stale_consts.is_empty();
         cache.edit.changed_consts_since_full.extend(stale_consts);
     }
     let d_stale = t_stale.elapsed();
@@ -481,6 +488,7 @@ pub fn emit_overlay_with_span_edits(
     let t3 = Instant::now();
     let (mut emit, overlay_unit_reads) =
         assemble_overlay(ws, cache, shader_changed, initialize_code_slots)?;
+    emit.runtime_changed = runtime_changed;
     cache.edit.record_artifact(&emit);
     for (key, reads) in overlay_unit_reads.globals {
         if reads.is_empty() {

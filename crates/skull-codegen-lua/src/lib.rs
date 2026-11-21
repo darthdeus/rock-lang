@@ -235,12 +235,7 @@ fn emitted_value_allocation_kind(inst: &Inst) -> Option<EmittedAllocationKind> {
     })
 }
 
-fn allocation_site_id(
-    body: &str,
-    id: Idx<Inst>,
-    kind: EmittedAllocationKind,
-    span: Option<Span>,
-) -> u64 {
+fn allocation_site_id(body: &str, id: Idx<Inst>, kind: EmittedAllocationKind) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     let mut write = |bytes: &[u8]| {
         for byte in bytes {
@@ -251,11 +246,6 @@ fn allocation_site_id(
     write(body.as_bytes());
     write(kind.as_str().as_bytes());
     write(&raw(id).to_le_bytes());
-    if let Some(span) = span {
-        write(span.file.as_str().as_bytes());
-        write(&span.offset_range().0.to_le_bytes());
-        write(&span.offset_range().1.to_le_bytes());
-    }
     hash
 }
 

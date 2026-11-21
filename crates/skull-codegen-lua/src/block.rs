@@ -108,7 +108,7 @@ impl Emitter<'_> {
         let kind = kind?;
         let span = self.func.inst_spans.get(id).copied();
         let site = EmittedAllocationSite {
-            id: allocation_site_id(allocation.body, id, kind, span),
+            id: allocation_site_id(allocation.body, id, kind),
             kind,
             span,
             lua_body_line: 0,

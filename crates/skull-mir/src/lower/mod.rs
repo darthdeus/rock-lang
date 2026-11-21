@@ -1513,9 +1513,14 @@ impl<'a> Builder<'a> {
         if let Some(concrete) = ty.and_then(|ty| self.concrete_ty_id(ty)) {
             self.f.cells[cell].never_nil = crate::nilness::monoty_never_nil(self.ws, concrete);
         }
+        let binding_info = &self.body.binding_arena[binding];
         self.f.cells[cell].capture_identity =
-            crate::code_identity::LambdaSiteId::from_span(self.body.binding_arena[binding].span)
-                .map(|site| crate::code_identity::CaptureIdentity::Binding { site, projection });
+            Some(crate::code_identity::CaptureIdentity::Binding {
+                file: binding_info.span.file,
+                index: raw(binding),
+                name: binding_info.name,
+                projection,
+            });
         cell
     }
 

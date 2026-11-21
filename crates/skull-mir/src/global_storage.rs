@@ -189,8 +189,7 @@ pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, Strin
     Ok(format!("{hash:016x}"))
 }
 
-/// Static identity is its owning logical callable and source site, never its
-/// emitted cell name or initializer hash.
+/// Static identity uses the logical callable and the binding's ordinal among namesakes.
 pub fn static_cell_storage_keys(
     ws: &Workspace,
     interner: &crate::monoty::MonoInterner,
@@ -200,9 +199,6 @@ pub fn static_cell_storage_keys(
         .owner
         .as_ref()
         .ok_or_else(|| format!("static `{}` has no owning callable", cell.cell))?;
-    if cell.site.is_none() {
-        return Err(format!("static `{}` has no source site", cell.cell));
-    }
     let identity = static_identity(
         &owner.logical_key(ws, interner),
         cell.logical_name,

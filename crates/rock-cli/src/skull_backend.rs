@@ -2588,6 +2588,10 @@ impl IncrementalProject {
                     reasons: vec![reason.to_string()],
                 });
             }
+            if !overlay.runtime_changed {
+                self.cache.commit_body_edit_transaction();
+                return Ok(SkullReload::NoChange);
+            }
             let bytes = overlay.lua.len();
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();

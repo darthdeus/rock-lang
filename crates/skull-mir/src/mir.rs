@@ -862,7 +862,6 @@ pub struct StaticCell {
     /// elsewhere in the body.
     pub init_hash: u64,
     pub owner: Option<crate::code_identity::CodeIdentity>,
-    pub site: Option<crate::code_identity::LambdaSiteId>,
 }
 
 /// Physical indices stay dense for side tables; these preserve source arena

@@ -180,7 +180,6 @@ impl<'a> Builder<'a> {
             type_str,
             init_hash,
             owner: self.f.code_identity.clone(),
-            site: crate::code_identity::LambdaSiteId::from_span(self.body.binding_arena[name].span),
         });
 
         let done_v = self.emit_cur(Inst::Global(done_flag));
@@ -274,19 +273,21 @@ impl<'a> Builder<'a> {
 
         let mut mf = MirFunc::new(hoisted);
         mf.rep_arena = Some(self.scx.rep_arena().clone());
-        let nested_identity = self
-            .site_owner
-            .clone()
-            .zip(crate::code_identity::LambdaSiteId::from_span(
-                self.body.expr_spans[body],
-            ))
-            .map(
-                |(enclosing, site)| crate::code_identity::CodeIdentity::Nested {
-                    enclosing: crate::code_identity::CodeOwner::Instance(enclosing),
-                    site,
-                    name: sname,
+        let nested_identity = self.f.code_identity.as_ref().map(|parent| {
+            use crate::code_identity::{CodeIdentity, LambdaSiteId};
+            let path = match parent {
+                CodeIdentity::Nested { site, .. } => format!("{}/{sname}:{ctr}", site.path),
+                _ => format!("{sname}:{ctr}"),
+            };
+            CodeIdentity::Nested {
+                enclosing: parent.owner(),
+                site: LambdaSiteId {
+                    file: self.body.binding_arena[name].span.file,
+                    path: Ustr::from(path.as_str()),
                 },
-            );
+                name: sname,
+            }
+        });
         let mut child = Builder::new(
             self.ws,
             self.scx,

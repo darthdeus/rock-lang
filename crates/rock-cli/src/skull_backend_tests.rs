@@ -1482,3 +1482,25 @@ mod watch_route_tests {
         );
     }
 }
+
+#[test]
+fn comment_only_closure_edit_does_not_publish_an_overlay() {
+    let source = "global KEEP: fn() -> int = () => 0\n\
+                  fn install(x: int) {\n    KEEP = () => x + 1\n}\n\
+                  fn main() { install(10); print(KEEP()) }";
+    let mut fixture = ProjectFixture::boot(source);
+    let before = fixture.main_text();
+    let above = format!("// Initialize the retained callback\n\n{source}");
+    let commented = above.replace("    KEEP", "    // Preserve the capture\n\n    KEEP");
+    for text in [&above, &commented] {
+        assert!(matches!(
+            fixture.edit(text).unwrap(),
+            super::SkullReload::NoChange
+        ));
+    }
+    assert_eq!(fixture.main_text(), before);
+    assert!(matches!(
+        fixture.edit(&commented.replace("x + 1", "x + 20")).unwrap(),
+        super::SkullReload::Incremental { .. }
+    ));
+}

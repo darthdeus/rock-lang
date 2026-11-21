@@ -139,10 +139,16 @@ fn write_code_row(h: &mut CanonicalHasher, key: &str, entry: &CodeEntry) {
     h.len(entry.compatibility.capture.fields.len());
     for field in &entry.compatibility.capture.fields {
         match &field.identity {
-            skull_mir::code_identity::CaptureIdentity::Binding { site, projection } => {
+            skull_mir::code_identity::CaptureIdentity::Binding {
+                file,
+                index,
+                name,
+                projection,
+            } => {
                 h.string("binding");
-                h.string(site.file.as_str());
-                h.u64(site.offset);
+                h.string(file.as_str());
+                h.u64(u64::from(*index));
+                h.string(name.as_str());
                 h.string(projection.as_str());
             }
             skull_mir::code_identity::CaptureIdentity::Generated { role } => {

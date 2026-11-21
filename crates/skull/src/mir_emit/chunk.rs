@@ -31,6 +31,21 @@ pub(super) struct Chunk {
 }
 
 impl Chunk {
+    pub(super) fn same_overlay_payload(&self, other: &Self) -> bool {
+        self.lua == other.lua
+            && self.binds == other.binds
+            && self.statics == other.statics
+            && self.code_artifact.entries() == other.code_artifact.entries()
+            && self
+                .comptime_reads
+                .iter()
+                .map(|read| (&read.input, read.value_hash))
+                .eq(other
+                    .comptime_reads
+                    .iter()
+                    .map(|read| (&read.input, read.value_hash)))
+    }
+
     pub(super) fn index_dependents(
         &self,
         body: &Instance,

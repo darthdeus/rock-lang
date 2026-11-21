@@ -727,11 +727,6 @@ fn site(
     hash.write(body.as_bytes());
     hash.write(kind.as_str().as_bytes());
     hash.write(&iid.into_raw().into_u32().to_le_bytes());
-    if let Some(span) = span {
-        hash.write(span.file.as_str().as_bytes());
-        hash.write(&span.offset_range().0.to_le_bytes());
-        hash.write(&span.offset_range().1.to_le_bytes());
-    }
     AllocationSite {
         id: hash.finish(),
         kind,
