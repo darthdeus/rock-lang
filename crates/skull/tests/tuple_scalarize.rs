@@ -63,42 +63,11 @@ fn arena_bare_loop_used_entity_scalarizes_into_call() {
     );
 }
 
-const ARENA_SCAN_RETURN_ENTITY: &str = r#"
-struct Mob { health: int, tag: int }
-struct Found { entity: Entity<Mob>? }
-global STORED: Found? = null
-
-@nomangle inline(lua) fn __out(s: string) = "io.write(s, ' ')"
-
-fn scan_return_hit(mobs: Arena<Mob>, want: int) -> Entity<Mob>? {
-    for (e, m) in mobs {
-        if m.tag == want { return e }
-    }
-    return null
-}
-
-fn main() {
-    let mobs: Arena<Mob> = arena_new()
-    insert(mobs, Mob { health: 10, tag: 1 })
-    insert(mobs, Mob { health: 20, tag: 2 })
-    let hit = scan_return_hit(mobs, 2).unwrap()
-    let again = scan_return_hit(mobs, 2)
-    STORED = Found { entity: scan_return_hit(mobs, 2) }
-    let empty: Arena<Mob> = arena_new()
-    __out("{scan_return_hit(mobs, 2) == again} {get(hit).unwrap().tag} {STORED.unwrap().entity == again}")
-    __out("{scan_return_hit(mobs, 3) == null} {scan_return_hit(empty, 1) == null}")
-}
-"#;
-
 #[test]
-fn arena_scan_returning_entity_keeps_leaves_until_a_boxed_sink() {
-    let lua = emit_module(ARENA_SCAN_RETURN_ENTITY);
-    let find = function_body(&lua, "scan_return_hit");
-    assert!(!find.contains("Entity_vt(") && !find.contains("Entity_ct(") && !find.contains('{'));
-    assert!(!find.contains("_arena ="));
-    let main = function_body(&lua, "main");
-    assert_eq!(main.matches("Entity_ct(").count(), 1);
-    assert_eq!(run_main(&lua), "true 2 true true true");
+fn arena_scan_only_boxes_at_the_stored_boundary() {
+    let lua = emit_module(include_str!("../../../tests/noalloc/arena_scan.rock"));
+    let body = function_body(&lua, "scan_returning_an_entity");
+    assert_eq!(body.matches("Entity_ct(").count(), 1);
 }
 
 const ARENA_ENTITY_IN_ENUM: &str = r#"

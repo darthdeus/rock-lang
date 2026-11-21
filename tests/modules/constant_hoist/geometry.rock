@@ -1,0 +1,7 @@
+mod geometry;
+
+pub value Point { pub x: float, pub y: float }
+
+pub fn make(x: float) -> Point { return Point { x, y: x } }
+
+pub fn label(p: Point) -> string { return "{p.x}/{p.y}" }

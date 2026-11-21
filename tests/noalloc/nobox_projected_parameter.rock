@@ -1,0 +1,22 @@
+nobox value P { x: int, y: int }
+nobox value Id { a: int, b: int }
+enum Who { Player, Mob(Id) }
+nobox value Cand { target: Who, place: P, ok: bool }
+nobox value Decision { target: Who, place: P }
+enum Eval { Found(Decision, bool), Nothing(bool) }
+value Snap { label: string, lock: Cand, rest: [int] }
+@noalloc fn pick(s: Snap) -> Eval {
+    if s.lock.ok { return Eval::Found(Decision { target: s.lock.target, place: s.lock.place }, false) }
+    return Eval::Nothing(true)
+}
+@test(output = "13")
+fn read_nobox_leaf_from_value_parameter() {
+    let e = pick(Snap { label: "s", lock: Cand { target: Who::Mob(Id { a: 5, b: 6 }), place: P { x: 3, y: 4 }, ok: true }, rest: [] })
+    match e {
+        Eval::Found(d, _) => match d.target {
+            Who::Mob(id) => print(id.b + d.place.x + d.place.y),
+            Who::Player => print(0),
+        },
+        Eval::Nothing(_) => print(-1),
+    }
+}

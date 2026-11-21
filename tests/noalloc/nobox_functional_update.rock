@@ -1,0 +1,13 @@
+nobox value C { r: float, g: float }
+enum Kind { Plain, Tagged(string) }
+value View { id: int, kind: Kind, name: string, color: C }
+@noalloc fn mk(k: Kind) -> View { return View { id: 1, kind: k, name: "n", color: C { r: 0.5, g: 0.25 } } }
+@noalloc fn use_it(v: View) -> float { return v.color.r + v.color.g + v.id }
+@noalloc fn update(view: View) -> float {
+    return use_it(View { ..view, id: 3 })
+}
+
+@test
+fn update_gc_value_without_boxing() {
+    assert(update(mk(Kind::Tagged("t"))) == 3.75)
+}

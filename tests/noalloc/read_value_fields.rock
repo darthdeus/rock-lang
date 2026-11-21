@@ -1,0 +1,31 @@
+value FixVec2 { x: float, y: float }
+value IVec2 { x: int, y: int }
+
+@noalloc @pure fn fv(x: float, y: float) -> FixVec2 { return FixVec2 { x: x, y: y } }
+@noalloc @pure fn iv(x: int, y: int) -> IVec2 { return IVec2 { x: x, y: y } }
+@noalloc @pure fn tile_center(g: IVec2) -> FixVec2 {
+    return fv(((g.x + g.y) as float), ((g.x - g.y) as float))
+}
+
+@noalloc fn hot(w: int, h: int) -> float {
+    let acc = 0.0
+    for gy in 0..h {
+        for gx in 0..w {
+            let pos = tile_center(iv(gx, gy))
+            let kind = ((gx * 7) + (gy * 13)) % 3
+            if kind == 0 {
+                acc = (acc + (pos.x * 2.0)) - pos.y
+            } else if kind == 1 {
+                acc = (acc - pos.y) + pos.x
+            } else {
+                acc = (acc + pos.x) + pos.y
+            }
+        }
+    }
+    return acc
+}
+
+@test(output = "4")
+fn scalarize_value_in_loop() {
+    print(hot(2, 2))
+}

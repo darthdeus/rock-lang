@@ -1,0 +1,13 @@
+enum Shown { Alpha, Beta }
+enum Hidden { Gamma, Delta }
+
+fn pick(n: int) -> Hidden {
+    if n > 0 { return Hidden::Gamma }
+    return Hidden::Delta
+}
+
+@test(output = "Shown::Beta\ntrue")
+fn shown_names_and_unshown_comparisons() {
+    print("{Shown::Beta}")
+    print(pick(1) == Hidden::Gamma)
+}

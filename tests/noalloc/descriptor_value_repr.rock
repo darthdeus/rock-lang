@@ -1,0 +1,16 @@
+value V2 { x: float, y: float }
+
+@nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
+
+value BufHolder { buf: NativeBuffer<V2>, tag: int }
+
+@noalloc fn bump(h: BufHolder) {
+    h.buf[1] = V2 { x: h.buf[1].x + 1.0, y: h.buf[1].y + 2.0 }
+}
+
+@test(backends = "lua", output = "1 2")
+fn native_buffer_descriptor_leaves_are_reused() {
+    let h = BufHolder { buf: NativeBuffer { ptr: __nb_alloc_V2(2), len: 2 }, tag: 1 }
+    bump(h)
+    print("{h.buf[1].x} {h.buf[1].y}")
+}

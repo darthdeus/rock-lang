@@ -1,0 +1,9 @@
+value Pair<T> { a: T, b: T }
+@noalloc fn pair_sum(p: Pair<int>) -> int { return p.a + p.b }
+@noalloc fn mk(x: int, y: int) -> Pair<int> { return Pair { a: x, b: y } }
+@noalloc fn drive(x: int, y: int) -> int {
+    let p = mk(x, y)
+    return pair_sum(p)
+}
+@test(output = "7")
+fn scalarize_generic_pair_abi() { print(drive(3, 4)) }

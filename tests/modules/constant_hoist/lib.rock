@@ -1,0 +1,123 @@
+value FixVec2 { x: float, y: float }
+value Outer { a: FixVec2, b: FixVec2, c: float }
+
+// The Vec cannot store all five lanes inline. Keep the boxed store that
+// previously rebuilt both constant children on every iteration.
+@nomangle fn fill(out: [Outer], n: int) {
+    for i in 0..n {
+        out.push(Outer { a: FixVec2 { x: 3.0, y: 7.0 }, b: FixVec2 { x: 3.0, y: 7.0 }, c: i as float })
+    }
+}
+
+@noalloc fn update(buffer: NativeBuffer<Outer>, n: int) {
+    for i in 0..n {
+        buffer[i].a = FixVec2 { x: 3.0, y: 7.0 }
+        buffer[i].b = FixVec2 { x: 3.0, y: 7.0 }
+    }
+}
+
+inline(lua) fn fill_without_rebuilding_constant(out: any, sample: any, qualified: bool) = """
+    local ffi = require("ffi")
+    local ctype = ffi.typeof(sample)
+    local ctor_type = tostring(ctype)
+    local ctors = {}
+    local constants = 0
+    for name, value in pairs(_G) do
+        if type(value) == "cdata" then
+            if tostring(value) == ctor_type then
+                ctors[name] = value
+            elseif ffi.istype(ctype, value) and value.x == 3 and value.y == 7 then
+                constants = constants + 1
+            end
+        end
+    end
+    assert(next(ctors), "the point must have an emitted cdata constructor")
+    assert(constants == 1, "expected one shared point constant, got " .. constants)
+    for name, ctor in pairs(ctors) do
+        _G[name] = function(x, y)
+            assert(x ~= 3 or y ~= 7, "rebuilt the constant point in the loop")
+            return ctor(x, y)
+        end
+    end
+    local ok, err = pcall(qualified and fill_qualified or fill, out, 4)
+    for name, ctor in pairs(ctors) do _G[name] = ctor end
+    assert(ok, err)
+"""
+
+@test(backends = "lua")
+fn nested_constants_keep_all_lanes() {
+    let out: [Outer] = []
+    fill_without_rebuilding_constant(out, FixVec2 { x: -3.0, y: -7.0 }, false)
+    let buffer: NativeBuffer<Outer> = native_buffer_alloc(4)
+    update(buffer, 4)
+    for i in 0..4 {
+        assert(out[i].c == i as float)
+        assert(out[i].a.x == buffer[i].a.x && buffer[i].a.x == 3.0)
+        assert(out[i].b.y == buffer[i].b.y && buffer[i].b.y == 7.0)
+    }
+}
+
+enum Slice { Sliced, Empty, Leather(int) }
+struct Holder { slice: Slice }
+
+@nomangle fn in_field() -> Holder { Holder { slice: Slice::Sliced } }
+@noalloc @nomangle fn reset(h: Holder) { h.slice = Slice::Sliced }
+@nomangle fn give(h: Holder, n: int) { h.slice = Slice::Leather(n) }
+@nomangle fn in_vec(n: int) -> [Slice] {
+    let v: [Slice] = []
+    for _ in 0..n { v.push(Slice::Empty) }
+    v
+}
+
+@noalloc @nomangle fn returned_unit() -> Slice { return Slice::Sliced }
+@nomangle fn returned(k: int) -> Slice { if k == 0 { Slice::Sliced } else { Slice::Leather(k) } }
+@noalloc @nomangle fn maybe(k: int) -> Slice? { if k < 0 { null } else { Slice::Empty } }
+@noalloc @nomangle fn is_sliced(h: Holder) -> bool { h.slice == Slice::Sliced }
+
+inline(lua) fn check_immutable_units() -> bool = """
+    local h = in_field()
+    local v = in_vec(2)
+    assert(h.slice == returned(0) and rawequal(v._data[1], v._data[2]) and v._data[1] == maybe(0))
+    give(h, 5)
+    assert(h.slice._0 == 5 and returned(0).__tag == 0 and returned(0)._0 == 0)
+    assert(not is_sliced(h))
+    reset(h)
+    assert(is_sliced(h) and h.slice == returned(0) and returned(3) == returned(3))
+    assert(maybe(-1) == nil)
+    assert(rawequal(returned_unit(), returned_unit()))
+    local slots = {}
+    for i = 1, 200 do slots[i] = false end
+    for _ = 1, 1000 do for i = 1, 200 do reset(h); slots[i] = returned(0) end end
+    collectgarbage("collect"); collectgarbage("stop")
+    local before = collectgarbage("count")
+    for _ = 1, 1000 do for i = 1, 200 do reset(h); slots[i] = returned(0) end end
+    local bytes = (collectgarbage("count") - before) * 1024
+    collectgarbage("restart")
+    assert(bytes < 20000, bytes .. " bytes for 200000 unit stores")
+    return true
+"""
+
+@test(backends = "lua")
+fn immutable_enum_constants_are_shared() { assert(check_immutable_units()) }
+
+value Segment { a: geometry::Point, b: geometry::Point, c: float }
+
+@nomangle fn fill_qualified(out: [Segment]) {
+    for i in 0..2 {
+        out.push(Segment { a: geometry::Point { x: 3.0, y: 7.0 }, b: geometry::make(i as float), c: 1.0 })
+    }
+}
+
+@noalloc fn store_qualified(buf: NativeBuffer<Segment>) {
+    buf[0].a = geometry::Point { x: 3.0, y: 7.0 }
+}
+
+@test(backends = "lua")
+fn nested_constant_uses_the_qualified_type() {
+    let out: [Segment] = []
+    fill_without_rebuilding_constant(out, geometry::make(-2.0), true)
+    let buf: NativeBuffer<Segment> = native_buffer_alloc(1)
+    store_qualified(buf)
+    assert(geometry::label(out[1].a) == "3/7" && geometry::label(out[1].b) == "1/1")
+    assert(geometry::label(buf[0].a) == "3/7")
+}

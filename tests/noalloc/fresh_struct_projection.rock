@@ -1,0 +1,33 @@
+value FreshPair { x: int, y: int }
+struct FreshEnvelope { pair: FreshPair, spare: int }
+struct FreshScalar { selected: int, discarded: int }
+global marks: int = 0
+@noalloc fn mark(n: int) -> int { marks = marks * 10 + n; return n }
+@noalloc fn read(p: FreshPair) -> int { return p.x }
+@noalloc @nomangle fn fresh_scalar() -> int {
+    return FreshScalar { selected: 7, discarded: mark(2) }.selected
+}
+@noalloc @nomangle fn fresh_call() -> int {
+    return read(FreshEnvelope { pair: FreshPair { x: 7, y: mark(2) }, spare: mark(3) }.pair)
+}
+@noalloc @nomangle fn fresh_nested() -> int {
+    return FreshEnvelope { pair: FreshPair { x: 7, y: mark(2) }, spare: mark(3) }.pair.x
+}
+fn change(h: FreshScalar) { h.selected = 19 }
+fn retained() -> int {
+    let h = FreshScalar { selected: 7, discarded: mark(2) }
+    let old = h.selected
+    change(h)
+    return old + h.selected
+}
+@test(output = "7 2\n7 23\n7 23\n26 2")
+fn fresh_struct_projection_preserves_evaluation() {
+    marks = 0
+    print("{fresh_scalar()} {marks}")
+    marks = 0
+    print("{fresh_call()} {marks}")
+    marks = 0
+    print("{fresh_nested()} {marks}")
+    marks = 0
+    print("{retained()} {marks}")
+}

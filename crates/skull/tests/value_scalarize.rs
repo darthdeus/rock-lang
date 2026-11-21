@@ -1,38 +1,5 @@
 use crate::common::{emit_module, function_body, run_main};
 
-const VALUE_FIELD_LOOP: &str = r#"
-value FixVec2 { x: float, y: float }
-value IVec2 { x: int, y: int }
-
-@pure fn fv(x: float, y: float) -> FixVec2 { return FixVec2 { x: x, y: y } }
-@pure fn iv(x: int, y: int) -> IVec2 { return IVec2 { x: x, y: y } }
-@pure fn tile_center(g: IVec2) -> FixVec2 {
-    return fv(((g.x + g.y) as float), ((g.x - g.y) as float))
-}
-
-fn hot(w: int, h: int) -> float {
-    let acc = 0.0
-    for gy in 0..h {
-        for gx in 0..w {
-            let pos = tile_center(iv(gx, gy))
-            let kind = ((gx * 7) + (gy * 13)) % 3
-            if kind == 0 {
-                acc = (acc + (pos.x * 2.0)) - pos.y
-            } else if kind == 1 {
-                acc = (acc - pos.y) + pos.x
-            } else {
-                acc = (acc + pos.x) + pos.y
-            }
-        }
-    }
-    return acc
-}
-
-fn main() {
-    let _ = hot(2, 2)
-}
-"#;
-
 const VALUE_FIELD_AND_WHOLE_USE: &str = r#"
 value Color { r: float, g: float, b: float, a: float }
 value FixVec3 { x: float, y: float, z: float }
@@ -61,67 +28,6 @@ fn value_struct_with_whole_use_keeps_cdata() {
     assert!(body.contains("Color_ct("));
     assert!(!body.contains(".r"));
     assert_eq!(run_main(&lua), "33");
-}
-
-#[test]
-fn value_struct_field_reads_dont_materialize_cdata() {
-    let lua = emit_module(VALUE_FIELD_LOOP);
-    let hot = function_body(&lua, "hot");
-    assert!(!hot.contains("FixVec2_ct("));
-    assert!(!hot.contains("IVec2_ct("));
-}
-
-const NATIVE_BUFFER_VALUE_STORE: &str = r#"
-value V2 { x: float, y: float }
-value Vert { pos: V2, uv: V2, w: float }
-
-@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
-fn nb_vert(n: int) -> NativeBuffer<Vert> { return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n } }
-
-@pure fn mk(x: float) -> Vert { return Vert { pos: V2 { x: x, y: x }, uv: V2 { x: x, y: x }, w: x } }
-
-fn fill(buf: NativeBuffer<Vert>, n: int) {
-    for i in 0..n {
-        buf[i] = mk(i as float)
-    }
-}
-
-fn main() {
-    let buf = nb_vert(4)
-    fill(buf, 4)
-}
-"#;
-
-#[test]
-fn native_buffer_value_store_writes_leaves_through_views() {
-    let lua = emit_module(NATIVE_BUFFER_VALUE_STORE);
-    let body = function_body(&lua, "fill");
-    assert!(body.contains("__nb_checked_index("));
-    assert!(!body.contains("__nb_checked_get("));
-    assert!(!body.contains("__nb_checked_set("));
-    for ct in ["Vert_ct(", "V2_ct("] {
-        assert!(!body.contains(ct));
-    }
-}
-
-const GENERIC_VALUE_SCALARIZE: &str = r#"
-value Pair<T> { a: T, b: T }
-fn pair_sum(p: Pair<int>) -> int { return p.a + p.b }
-fn mk(x: int, y: int) -> Pair<int> { return Pair { a: x, b: y } }
-fn drive(x: int, y: int) -> int {
-    let p = mk(x, y)
-    return pair_sum(p)
-}
-fn main() { let _ = drive(3, 4) }
-"#;
-
-#[test]
-fn generic_value_struct_rides_scalar_abi() {
-    let lua = emit_module(GENERIC_VALUE_SCALARIZE);
-    let sum = function_body(&lua, "pair_sum");
-    assert!(!sum.contains("Pair_vt") && !sum.contains("Pair_ct"));
-    let drive = function_body(&lua, "drive");
-    assert!(!drive.contains("Pair_vt") && !drive.contains("Pair_ct"));
 }
 
 const NESTED_SCALAR_ABI: &str = r#"

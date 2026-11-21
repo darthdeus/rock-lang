@@ -1,0 +1,23 @@
+nobox value P { x: int, y: int }
+nobox value Id { a: int, b: int }
+enum Who { Player, Mob(Id) }
+nobox value Cand { target: Who, place: P, ok: bool }
+value Snap { label: string, lock: Cand, rest: [int] }
+@noalloc fn vis(c: Cand, v: bool) -> Cand { return Cand { target: c.target, place: c.place, ok: v } }
+@noalloc fn look(s0: Snap) -> int {
+    let s = s0
+    for _ in 0..4 {
+        let id = match s.lock.target {
+            Who::Player => return -1,
+            Who::Mob(id) => id,
+        }
+        if s.lock.ok { return id.b + s.lock.place.y }
+        let lock = vis(s.lock, true)
+        s = Snap { ..s, lock }
+    }
+    return -2
+}
+@test(output = "10")
+fn boxed_gc_value_keeps_enum_leaves() {
+    print(look(Snap { label: "s", lock: Cand { target: Who::Mob(Id { a: 5, b: 6 }), place: P { x: 3, y: 4 }, ok: false }, rest: [] }))
+}
