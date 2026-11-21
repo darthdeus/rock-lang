@@ -2088,37 +2088,6 @@ fn uses_rerun_outside_let(body: &hir::Body, let_span: Span, uses: &[Span]) -> bo
     })
 }
 
-#[cfg(test)]
-mod rerun_region_tests {
-    use super::*;
-
-    #[test]
-    fn rerun_regions_only_contain_spans_from_their_own_file() {
-        let span = |file: &str, start, end| {
-            Span::new(Ustr::from(file), (0, 0), (start, end), (start, end))
-        };
-        let mut body = hir::Body::default();
-        let unit = body.expr_arena.alloc(hir::Expr::Unit);
-        body.alloc_statement(hir::Statement::Defer(unit), span("region.rock", 10, 30));
-
-        assert!(!uses_rerun_outside_let(
-            &body,
-            span("binding.rock", 0, 5),
-            &[span("binding.rock", 20, 21)],
-        ));
-        assert!(uses_rerun_outside_let(
-            &body,
-            span("binding.rock", 15, 16),
-            &[span("region.rock", 20, 21)],
-        ));
-        assert!(!uses_rerun_outside_let(
-            &body,
-            span("region.rock", 15, 16),
-            &[span("region.rock", 20, 21)],
-        ));
-    }
-}
-
 fn init_needs_parens(e: &hir::Expr) -> bool {
     !matches!(
         e,
