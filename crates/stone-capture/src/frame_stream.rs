@@ -1,12 +1,6 @@
-//! A recording of presented frames as one raw RGBA stream: tightly packed
-//! top-down rows, frame after frame, all the same size. The caller reads a
-//! frame back into a recycled buffer and submits it; a writer thread orders
-//! the rows and writes them, so the frame pays only the readback. The target
-//! is usually a FIFO an encoder reads (tools/video), or a plain file.
-//!
-//! Memory is bounded by the buffer pool: when the writer falls behind,
-//! `next_buffer` waits for it. A failed write stops the writer; the failure
-//! is returned by the next `next_buffer`/`submit` and by `finish`.
+//! Frames are tightly packed top-down RGBA rows at a fixed size. A bounded
+//! buffer pool blocks when the writer falls behind; write failures reach the
+//! next `next_buffer`, `submit` and `finish` calls.
 
 use std::fs::File;
 use std::io::Write;
@@ -270,8 +264,7 @@ mod tests {
         dir
     }
 
-    // Three columns, two rows, bottom row first as GL reads them; every
-    // byte distinct so a flipped or shifted row cannot compare equal.
+    // Distinct bytes make a flipped or shifted row observable.
     fn bottom_up_frame(seed: u8) -> Vec<u8> {
         (0..3 * 2 * 4)
             .map(|i| seed.wrapping_add(i as u8 * 7))

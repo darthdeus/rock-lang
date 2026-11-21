@@ -1,8 +1,5 @@
-//! The CPU-RGBA capture policy: one place that turns presented pixels into
-//! the PNG a screenshot means. Backends supply raw RGBA rows and say which
-//! way is up; everything else -- flip, the long-edge cap, Lanczos
-//! resampling, PNG encoding and the saved/failed logging -- lives here. `FrameStream` is the recording
-//! counterpart: the same rows, unencoded, written off the frame.
+//! Capture accepts raw RGBA rows in either orientation; `FrameStream` records
+//! them unencoded off the frame.
 
 mod frame_stream;
 
