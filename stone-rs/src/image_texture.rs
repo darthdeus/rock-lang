@@ -490,11 +490,7 @@ pub(crate) unsafe fn define_bound_image_texture(
     });
 }
 
-/// GL storage dimensions for a load: one white texel when headers-only,
-/// otherwise what `STONE_IMAGE_MAX_SIDE` leaves of the file's own size.
-///
-/// `exact_texels` is a declaration about the FILE's texels, so it exempts an
-/// image from the cap but says nothing to a stub, which holds none of them.
+/// Exact texels bypass the cap, but a stub still stores one white texel.
 fn load_storage_dims(stubbed: bool, exact_texels: bool, width: u32, height: u32) -> (u32, u32) {
     if stubbed {
         STUB_STORAGE
@@ -526,13 +522,7 @@ fn image_byte_len(image: &LoadedImage) -> u64 {
     stored_texel_bytes(stored.0, stored.1, image.format, image.mipmapped)
 }
 
-/// Publish a finished load: the image, its exactness declaration, what GL now
-/// holds for it, and the path a stub reports itself by.
-///
-/// One place, so the stub arm and the real arm cannot record different things
-/// about the same load. `stored` is what was actually defined -- `STUB_STORAGE`
-/// for a stub, the capped size otherwise -- while `logical` stays the file's
-/// own and is what `stone_get_image_size` answers.
+/// `logical` remains the file size even when GL storage is capped or stubbed.
 fn register_loaded_image(
     id: u64,
     texture: glow::Texture,
@@ -1086,14 +1076,8 @@ pub extern "C" fn stone_image_is_stub(handle: u64) -> bool {
     with_image(handle, |image| image.stub_path.is_some()).unwrap_or(false)
 }
 
-/// What GL actually holds for `handle`: one texel for a stub, otherwise the
-/// extent after `STONE_IMAGE_MAX_SIDE`. An exact-texel declaration exempts a
-/// real image from the cap. Zeros for an unknown handle.
-///
-/// A DIAGNOSTIC. No draw may branch on it: the whole point of the cap is that
-/// sheet frames, pixel rects and UVs are derived from the logical size and
-/// cannot see a reduction. It exists so a fixture can ask whether a reduction
-/// happened at all.
+/// Diagnostic GL storage size, or zeros for an unknown handle. Draws must use
+/// logical dimensions so texture caps cannot change layout or UVs.
 #[no_mangle]
 pub extern "C" fn stone_image_storage_size(handle: u64, width: *mut c_int, height: *mut c_int) {
     let (w, h) = with_image(handle, LoadedImage::stored_size).unwrap_or((0, 0));
@@ -1145,16 +1129,8 @@ pub extern "C" fn stone_image_set_wrap(handle: u64, repeat: bool) -> bool {
     .is_some()
 }
 
-/// The texture a write to `handle` must target, and whether it already holds
-/// `data`.
-///
-/// `true` in the second slot means the returned texture already carries `data`
-/// as its complete contents, so the caller's own upload is redundant. `None`
-/// for an unknown image.
-///
-/// `data` is the image's full logical size. A writer whose bytes are already at
-/// the image's GL storage size (the asset uploads, which `STONE_IMAGE_MAX_SIDE`
-/// may have reduced) calls `image_write_target_stored` instead.
+/// `data` is at logical size. The returned flag means it is already uploaded;
+/// `None` means the handle is unknown.
 pub(crate) fn image_write_target(
     handle: u64,
     width: u32,
@@ -1185,12 +1161,8 @@ pub(crate) fn image_write_target_stored(
     Some((texture, true))
 }
 
-/// Read one texel straight out of an image's texture, as 0xRRGGBBAA.
-///
-/// A PROBE, and desktop-GL only: `glGetTexImage` does not exist on GLES.
-/// Nothing in the engine calls this; it is how a fixture
-/// asks what is actually in the texture a handle names. -1 when the handle is
-/// unknown or the coordinate is outside it.
+/// Read 0xRRGGBBAA, or -1 for an invalid handle or coordinate.
+/// Desktop GL only: `glGetTexImage` is unavailable on GLES.
 #[no_mangle]
 pub extern "C" fn stone_image_read_texel(handle: u64, x: c_int, y: c_int) -> i64 {
     let Some((texture, (width, height))) =
@@ -1198,10 +1170,7 @@ pub extern "C" fn stone_image_read_texel(handle: u64, x: c_int, y: c_int) -> i64
     else {
         return -1;
     };
-    // `glGetTexImage` writes the whole level, so the buffer and the stride come
-    // from what GL stores, never from the image's logical size: under
-    // `STONE_IMAGE_MAX_SIDE` the two differ and a logical-sized stride would
-    // read the wrong texel out of a short buffer.
+    // `glGetTexImage` writes stored dimensions, which may differ from logical size.
     if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
         return -1;
     }
@@ -1248,10 +1217,6 @@ pub extern "C" fn stone_image_decode_failed_count() -> u64 {
     FAILED_DECODE_COUNT.with(|c| *c.borrow())
 }
 
-/// Bind an image's texture to a unit, resolved here from the image handle. The
-/// rendering path binds through this rather than fetching the name and handing
-/// it back; the raw getter below stays for cimgui, whose consumers are GL by
-/// construction.
 #[no_mangle]
 pub extern "C" fn stone_bind_image_texture_to_unit(handle: u64, unit: c_int) -> bool {
     let tex = sample_image_texture_for_bind(handle);
@@ -1296,13 +1261,7 @@ pub(crate) fn sample_image_texture(handle: u64) -> Option<u32> {
         return None;
     }
     with_image(handle, |img| {
-        // Asking for the GL name is what a draw does just before binding, so a
-        // stub reaching here is a draw sampling white. That is the contract
-        // under `STONE_ASSET_STUB`, not a fault, so it is a debug line: a sim
-        // whose assertion needs the file's own texels declares
-        // `@sim_env("STONE_ASSET_STUB", "0")`. Reported per IMAGE, not per call
-        // site: one `log_once` keyed on the site would name the first image and
-        // swallow the rest.
+        // Report each stub image: one log per call site would hide the others.
         if let Some(path) = &img.stub_path {
             if crate::rock_log_reexport::once_should_emit_for(
                 concat!(file!(), ":", line!()),
@@ -1337,12 +1296,8 @@ pub(crate) fn unload_all() {
     WHITE_IMAGE.with(|white| *white.borrow_mut() = None);
 }
 
-/// Re-decode `path` and re-upload it into the texture already bound to
-/// `handle`, keeping the SAME handle and GL texture object. Existing
-/// `Image(handle)` values scattered through game state stay valid -- this is
-/// what makes asset hot reload reference-free. Filter/wrap state on the
-/// texture is preserved (we only replace the pixel data + dimensions).
-/// Returns false if the handle is unknown or the file can't be decoded.
+/// Reload pixels while preserving the handle, GL texture and filter/wrap state.
+/// Returns false for an unknown handle or failed decode.
 #[no_mangle]
 pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     if handle == 0 || path.is_null() {
@@ -1468,10 +1423,8 @@ pub(crate) fn live_texture_bytes() -> u64 {
     live_image_bytes() + live_mip_bytes() + crate::canvas::live_canvas_bytes()
 }
 
-/// Honest GL bytes for one live image, including its mip chain when present.
-/// The census reads this per classified handle instead of multiplying
-/// `stone_get_image_size` by 4, which overcounts R8 and RG8 textures. Zero for
-/// an unknown handle.
+/// GL bytes including mipmaps, or zero for an unknown handle. Logical size times
+/// four would overcount R8 and RG8 textures.
 #[no_mangle]
 pub extern "C" fn stone_get_image_byte_len(handle: u64) -> u64 {
     with_image(handle, image_byte_len).unwrap_or(0)
