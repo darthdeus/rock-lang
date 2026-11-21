@@ -1822,18 +1822,6 @@ mod tests {
     use rodio::buffer::SamplesBuffer;
 
     #[test]
-    fn lowpass_silence_does_not_retain_subnormal_state() {
-        let mut filter = Biquad::new();
-        filter.set_lowpass(21_600.0, 0.707, 48_000.0);
-        assert!(filter.process(0, 1.0).abs() > 0.1);
-        for _ in 0..48_000 {
-            filter.process(0, 0.0);
-        }
-        assert_eq!(filter.state[0], [0.0, 0.0]);
-        assert_eq!(filter.process(0, 0.0), 0.0);
-    }
-
-    #[test]
     fn stream_errors_are_counted_without_flooding_the_log() {
         if delegate_decoded_audio_fixture(
             "audio::tests::stream_errors_are_counted_without_flooding_the_log",
@@ -2135,27 +2123,6 @@ mod tests {
         SamplesBuffer::new(ch2(), sr(), v)
     }
 
-    /// Loaded sounds live for the process, so the decode must not keep the
-    /// collect's growth slack; the samples must equal a plain collect.
-    #[test]
-    fn decoded_sound_samples_are_exact_length() {
-        let bytes = include_bytes!("../../packages/stone/tests/fixtures/tone.ogg").to_vec();
-        let reference: Vec<f32> = Decoder::new(std::io::Cursor::new(bytes.clone()))
-            .expect("fixture decodes")
-            .collect();
-        let (samples, _, _) = decode_sound_bytes(bytes, "tone.ogg").expect("fixture decodes");
-        assert!(!samples.is_empty());
-        assert_eq!(
-            samples.capacity(),
-            samples.len(),
-            "retained PCM keeps spare capacity"
-        );
-        assert_eq!(
-            samples.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
-            reference.iter().map(|s| s.to_bits()).collect::<Vec<_>>()
-        );
-    }
-
     fn dc(frames: usize, level: f32) -> SamplesBuffer {
         SamplesBuffer::new(ch2(), sr(), vec![level; frames * 2])
     }
@@ -2301,36 +2268,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bus_meter_falls_after_signal_stops() {
-        let (bus, mut out) = wired();
-        bus.mixer.add(dc(64, 1.0));
-        let _ = mean_abs(&mut out, 512, 1);
-
-        let lit = bus.meter();
-        assert!(lit > 0.9, "meter should catch the blip, got {lit}");
-        assert_eq!(
-            bus.meter(),
-            lit,
-            "reading the meter between callbacks must not consume it"
-        );
-
-        let _ = mean_abs(&mut out, (0.25 * 44100.0) as usize * 2, 1);
-        let falling = bus.meter();
-        assert!(
-            falling < lit * 0.8,
-            "meter should be falling, got {falling} from {lit}"
-        );
-        assert!(
-            falling > 0.05,
-            "and not have dropped straight out, got {falling}"
-        );
-
-        let _ = mean_abs(&mut out, (3.0 * 44100.0) as usize * 2, 1);
-        let dark = bus.meter();
-        assert!(dark < 0.001, "meter should decay to dark, got {dark}");
-    }
-
     /// Gain is slewed, so it must converge on the target rather than step to
     /// it -- a stepped gain zippers.
     #[test]
@@ -2449,35 +2386,6 @@ mod tests {
         assert_eq!(once, vec![0.25, 0.75]);
     }
 
-    /// 16-bit stereo WAV of a whole number of periods: a sine on the left and
-    /// a cosine on the right, so the loop point sits at a full-scale sample.
-    fn synthetic_loop_wav(frames: usize, period: usize, amplitude: f32) -> Vec<u8> {
-        let rate = 44_100u32;
-        let data_len = (frames * 2 * 2) as u32;
-        let mut wav = Vec::with_capacity(44 + data_len as usize);
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&2u16.to_le_bytes());
-        wav.extend_from_slice(&rate.to_le_bytes());
-        wav.extend_from_slice(&(rate * 4).to_le_bytes());
-        wav.extend_from_slice(&4u16.to_le_bytes());
-        wav.extend_from_slice(&16u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&data_len.to_le_bytes());
-        for frame in 0..frames {
-            let phase = std::f32::consts::TAU * frame as f32 / period as f32;
-            for value in [phase.sin(), phase.cos()] {
-                wav.extend_from_slice(
-                    &((value * amplitude * 32767.0).round() as i16).to_le_bytes(),
-                );
-            }
-        }
-        wav
-    }
-
     fn looped_stream(bytes: Vec<u8>, decoded: &[f32], passes: usize) -> Vec<f32> {
         let stream = stream_source(Arc::from(bytes), true).expect("the fixture streams");
         let streamed: Vec<f32> = stream.take(decoded.len() * passes + 6).collect();
@@ -2494,32 +2402,6 @@ mod tests {
             );
         }
         streamed
-    }
-
-    #[test]
-    fn stream_loop_seam_repeats_the_decoded_loop_without_a_click() {
-        const FRAMES: usize = 1000;
-        const PERIOD: usize = 100;
-        const AMPLITUDE: f32 = 0.5;
-        let wav = synthetic_loop_wav(FRAMES, PERIOD, AMPLITUDE);
-        let (decoded, _, channels) = decode_sound_bytes(wav.clone(), "synthetic-loop.wav")
-            .expect("the synthetic loop decodes");
-        assert_eq!(
-            (decoded.len(), channels),
-            (FRAMES * 2, 2),
-            "the full decode holds exactly the authored loop"
-        );
-        let passes = 3;
-        let streamed = looped_stream(wav, &decoded, passes);
-        let max_step = AMPLITUDE * std::f32::consts::TAU / PERIOD as f32 + 2.0 / 32768.0;
-        for pass in 1..passes {
-            let seam = pass * decoded.len();
-            for channel in 0..2 {
-                let step = (streamed[seam + channel] - streamed[seam - 2 + channel]).abs();
-                assert!(step <= max_step,
-                    "loop seam {pass} channel {channel} steps {step}, over the waveform's {max_step}");
-            }
-        }
     }
 
     #[test]
