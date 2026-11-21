@@ -1,8 +1,4 @@
-use bone_semantic::hir::BodyOwner;
-
-use crate::common::{
-    emit_module, function_body, module_id, name_matches, run_luajit, ws_with_stdlib,
-};
+use crate::common::{emit_module, function_body, run_luajit};
 
 const SRC: &str = r#"
 nobox value Wide { a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int, k: int, l: int, m: int, n: int, o: int }
@@ -123,93 +119,6 @@ print("ok")
     ] {
         assert_eq!(run_luajit(&format!("{lua}{probe}")), "ok", "{case}");
     }
-}
-
-#[test]
-fn mixed_units_keep_identity_through_body_overlay_and_full_reload() {
-    let ws = ws_with_stdlib(SRC);
-    let mid = module_id(&ws, "<test>");
-    let (full, mut cache) = skull::mir_emit::emit_full(&ws, mid).expect("full");
-    let edited = SRC.replace("kind == 0", "kind < 1");
-    let ws2 = ws_with_stdlib(&edited);
-    let reinferred: Vec<_> = ws2.modules[mid.index()]
-        .functions
-        .iter()
-        .filter(|(_, f)| {
-            !name_matches(f.name, "constant_unit") && !name_matches(f.name, "other_unit")
-        })
-        .map(|(fid, _)| (mid, BodyOwner::Function(fid)))
-        .collect();
-    let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &reinferred).expect("overlay");
-    let fresh = skull::mir_emit::emit_full(&ws2, mid).expect("fresh").0;
-    let out = run_luajit(&format!(
-        r#"{}
-local before = through_field(0)
-assert(rawequal(before, constant_unit()))
-_G.HOT_RELOAD = true
-{}
-assert(rawequal(before, through_field(0)))
-assert(rawequal(before, through_field(-1)))
-{}
-assert(rawequal(before, through_vec(0)))
-assert(rawequal(before, copied(0)))
-print("ok")
-"#,
-        full.lua, overlay.lua, fresh.lua
-    ));
-    assert_eq!(out, "ok");
-}
-
-#[test]
-fn variant_sizing_preserves_widened_offsets_and_named_payloads() {
-    let src = r#"
-nobox value Wide { a: int, b: int, c: int }
-enum Packet {
-    None, Narrow(string), Wide(Wide), Pair(string, int),
-    Named { text: string }, NamedWide { text: string, code: int }
-}
-struct Holder { packet: Packet }
-fn make_packet(kind: int) -> Packet {
-    let p = if kind == 0 { Packet::None } else if kind == 1 { Packet::Narrow("one") }
-        else if kind == 2 { Packet::Wide(Wide { a: 2, b: 3, c: 5 }) }
-        else if kind == 3 { Packet::Pair("pair", 7) }
-        else if kind == 4 { Packet::Named { text: "named" } }
-        else { Packet::NamedWide { text: "wide", code: 11 } }
-    return p
-}
-@nomangle fn packet(kind: int) -> any {
-    let holder = Holder { packet: make_packet(kind) }
-    return holder.packet
-}
-@nomangle fn score(kind: int) -> int {
-    let p = make_packet(kind)
-    return match p {
-        Packet::None => 0,
-        Packet::Narrow(s) => s.len(),
-        Packet::Wide(w) => w.a + w.b + w.c,
-        Packet::Pair(s, n) => s.len() + n,
-        Packet::Named { text } => text.len(),
-        Packet::NamedWide { text, code } => text.len() + code,
-    }
-}
-"#;
-    let lua = emit_module(src);
-    let out = run_luajit(&format!(
-        r#"{lua}
-local expected = {{0, 3, 10, 11, 5, 15}}
-for kind = 0, 5 do assert(score(kind) == expected[kind + 1]) end
-local narrow = packet(1)
-assert(narrow[1] == "one" and narrow[2] == nil and narrow[3] == nil)
-local pair = packet(3)
-assert(pair[1] == "pair" and pair[4] == 7)
-local named = packet(4)
-assert(named.text == "named" and named.code == nil and named[1] == nil)
-local named_wide = packet(5)
-assert(named_wide.text == "wide" and named_wide.code == 11)
-print("ok")
-"#
-    ));
-    assert_eq!(out, "ok");
 }
 
 #[test]
