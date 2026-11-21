@@ -1,10 +1,11 @@
-//! Hand-built MIR checked against its dump.
+//! Operand traversal and value classification for hand-built MIR.
 
+use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 use ustr::ustr;
 
 #[test]
-fn dump_covers_aggregates_and_containers() {
+fn aggregate_and_container_operands_and_effects() {
     let mut f = MirFunc::new(ustr("probe"));
     let bb = f.entry();
     let a = f.emit(bb, Inst::Const(Lit::Int(1)));
@@ -76,28 +77,30 @@ fn dump_covers_aggregates_and_containers() {
     );
     f.set_term(bb, Term::Return(vec![fld]));
 
-    let expected = "\
-fn probe() {
-  bb0:
-    v0 = const 1
-    v1 = const 2
-    v2 = tuple [v0, v1]
-    v3 = vec [v0, v1]
-    v4 = struct Foo {a=v0, b=v1}
-    v5 = enum E::Some(v0)
-    v6 = field v4.a
-    v7 = tuple_index v2.0
-    v8 = index.Vec v3[v0]
-    v9 = len.Vec v3
-    store_field v4.a, v1
-    store_index.Vec v3[v0], v1
-    return v6
-}";
-    assert_eq!(f.to_string(), expected);
+    assert_operands(
+        &f,
+        bb,
+        10,
+        &[
+            &[],
+            &[],
+            &[a, b],
+            &[a, b],
+            &[a, b],
+            &[a],
+            &[st],
+            &[tup],
+            &[vec, a],
+            &[vec],
+            &[st, b],
+            &[vec, a, b],
+        ],
+    );
+    assert_eq!(f.blocks[bb].term, Term::Return(vec![fld]));
 }
 
 #[test]
-fn dump_covers_arith_unary_and_yield() {
+fn arithmetic_and_yield_operands() {
     let mut f = MirFunc::new(ustr("probe"));
     let entry = f.entry();
     let s0 = f.new_block();
@@ -135,22 +138,38 @@ fn dump_covers_arith_unary_and_yield() {
     );
     f.set_term(resume, Term::Return(vec![]));
 
-    let expected = "\
-fn probe() {
-  bb0:
-    v0 = const 1.5
-    v1 = global g
-    v2 = float.add v0, v1
-    v3 = neg v2
-    v4 = bit.xor v3, v0
-    v5 = eq v4, v0
-    branch v5 -> bb1, bb2
-  bb1:
-    yield v4 -> bb3
-  bb2:
-    yield -> bb3
-  bb3:
-    return
-}";
-    assert_eq!(f.to_string(), expected);
+    assert_operands(
+        &f,
+        entry,
+        6,
+        &[&[], &[], &[a, b], &[sum], &[neg, a], &[bits, a]],
+    );
+    assert_eq!(
+        f.blocks[entry].term,
+        Term::Branch {
+            cond,
+            then_bb: s0,
+            else_bb: s1
+        },
+    );
+    for (block, values) in [(s0, vec![bits]), (s1, vec![])] {
+        let term = &f.blocks[block].term;
+        let mut used = Vec::new();
+        term.uses_each(&mut |value| used.push(value));
+        assert_eq!(used, values);
+        assert_eq!(*term, Term::Yield { values, resume });
+    }
+    assert_eq!(f.blocks[resume].term, Term::Return(vec![]));
+}
+
+fn assert_operands(f: &MirFunc, block: Idx<Block>, value_count: usize, operands: &[&[Idx<Inst>]]) {
+    let insts = &f.blocks[block].insts;
+    assert_eq!(insts.len(), operands.len());
+    for (index, (&id, &want)) in insts.iter().zip(operands).enumerate() {
+        let inst = &f.insts[id];
+        let mut used = Vec::new();
+        inst.uses_each(&mut |value| used.push(value));
+        assert_eq!(used, want, "{inst:?}");
+        assert_eq!(inst.produces_value(), index < value_count, "{inst:?}");
+    }
 }

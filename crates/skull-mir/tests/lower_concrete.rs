@@ -7,7 +7,7 @@ use skull_mir::instance::Instance;
 use skull_mir::lower::{
     RepArena, RepGuarantees, RepId, RepUse, RepUseFacts, ScalarCtx, lower_instance_with_plans,
 };
-use skull_mir::mir::{Inst, MirFunc, ValueCtorForm};
+use skull_mir::mir::{ContainerKind, Inst, Lit, MirFunc, Term, ValueCtorForm};
 use skull_mir::monoty::{MonoInterner, MonoTy};
 
 #[test]
@@ -228,35 +228,16 @@ fn value_constructor(mir: &MirFunc, name: &str) -> Idx<Inst> {
         .unwrap_or_else(|| panic!("missing `{name}` value constructor"))
 }
 
-/// Lower `fn_name` from `modules` (last = the user `<test>` module) and
-/// return its MIR dump.
-fn lower_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
+fn lower_fixture(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> MirFunc {
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("user module id");
-    let m = ws.module(mid);
-    let (fid, _) = m
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let (fid, _) = ws
+        .module(mid)
         .functions
         .iter()
         .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some(fn_name))
         .expect("function by name");
-    let dump = lower_test_root(&ws, mid, fid)
-        .unwrap_or_else(|e| panic!("lower failed: {}", e.message))
-        .to_string();
-    let mut dump = dump
-        .lines()
-        .map(|line| line.strip_prefix("    ").unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    for key in ws.defs.keys() {
-        let display = bone_core::modules::display_name(key.as_str());
-        if display != key.as_str() {
-            dump = dump.replace(key.as_str(), display);
-        }
-    }
-    dump
+    lower_test_root(&ws, mid, fid).unwrap_or_else(|e| panic!("lower failed: {}", e.message))
 }
 
 #[test]
@@ -266,21 +247,20 @@ fn scalar_abi_call_widens_an_int_argument_for_a_float_parameter() {
                fn shift(w: float) -> V2 { return mk(w, 0) }\n\
                fn shift_named(w: float) -> V2 { return mk(y: 0, x: w) }";
     for name in ["shift", "shift_named"] {
-        let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-        let dump = lower_dump(vec![ast], name);
+        let mir = mir(src, name);
         assert!(
-            dump.contains("int_to_float"),
-            "an int literal bound to a float parameter must be widened in `{name}`: {dump}"
+            has(&mir, |inst| matches!(inst, Inst::IntToFloat(_))),
+            "an int literal bound to a float parameter must be widened in `{name}`: {mir:#?}"
         );
     }
 }
 
 #[test]
 fn explicit_int_to_float_is_a_typed_mir_conversion() {
-    let dump = mir("fn widen(value: int) -> float { value as float }", "widen");
+    let mir = mir("fn widen(value: int) -> float { value as float }", "widen");
     assert!(
-        dump.contains("int_to_float"),
-        "an explicit scalar cast must survive lowering as a typed conversion:\n{dump}"
+        has(&mir, |inst| matches!(inst, Inst::IntToFloat(_))),
+        "an explicit scalar cast must survive lowering as a typed conversion:\n{mir:#?}"
     );
 }
 
@@ -468,14 +448,14 @@ fn value_constructors_carry_the_owned_representation() {
 }
 
 /// Stdlib-free: enough for literals, vars, `let`, and builtin operators.
-fn mir(src: &str, fn_name: &str) -> String {
+fn mir(src: &str, fn_name: &str) -> MirFunc {
     let ast = skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse");
-    lower_dump(vec![ast], fn_name)
+    lower_fixture(vec![ast], fn_name)
 }
 
 /// Stdlib-loaded: needed for `__op_*` arithmetic overloads. The stdlib is
 /// parsed once (cached) and re-checked per call alongside the snippet.
-fn mir_std(src: &str, fn_name: &str) -> String {
+fn mir_std(src: &str, fn_name: &str) -> MirFunc {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_stdlib::stdlib_files()
@@ -488,45 +468,69 @@ fn mir_std(src: &str, fn_name: &str) -> String {
     });
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
-    lower_dump(modules, fn_name)
+    lower_fixture(modules, fn_name)
+}
+
+fn instruction_ids(mir: &MirFunc) -> impl Iterator<Item = Idx<Inst>> + '_ {
+    mir.blocks
+        .values()
+        .flat_map(|block| block.insts.iter().copied())
+}
+
+fn instructions(mir: &MirFunc) -> impl Iterator<Item = &Inst> {
+    instruction_ids(mir).map(|id| &mir.insts[id])
+}
+
+fn values(mir: &MirFunc) -> Vec<Idx<Inst>> {
+    instruction_ids(mir)
+        .filter(|&id| mir.insts[id].produces_value())
+        .collect()
+}
+
+fn has(mir: &MirFunc, predicate: impl FnMut(&Inst) -> bool) -> bool {
+    instructions(mir).any(predicate)
+}
+
+fn count(mir: &MirFunc, mut predicate: impl FnMut(&Inst) -> bool) -> usize {
+    instructions(mir).filter(|inst| predicate(inst)).count()
+}
+
+fn returns(mir: &MirFunc) -> impl Iterator<Item = &[Idx<Inst>]> {
+    mir.blocks.values().filter_map(|block| match &block.term {
+        Term::Return(values) => Some(values.as_slice()),
+        _ => None,
+    })
+}
+
+fn assert_no_v2_box(mir: &MirFunc) {
+    assert!(
+        !has(mir, |inst| matches!(inst,
+        Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. }
+        if bone_core::modules::display_name(name.as_str()) == "V2")),
+        "{mir:#?}"
+    );
 }
 
 macro_rules! mir_properties {
-    ($($name:ident($lower:ident, $src:expr, $root:expr, $expected:expr $(, not $absent:expr)? $(,)?);)*) => {
+    ($($name:ident($lower:ident, $src:expr, $root:expr) |$mir:ident| $check:block)*) => {
         $(
             #[test]
             fn $name() {
-                let dump = $lower($src, $root);
-                assert_dump_contains_in_order(&dump, $expected, stringify!($name));
-                $(
-                    assert!(!dump.contains($absent), "{} unexpectedly contains `{}`:\n{dump}", stringify!($name), $absent);
-                )?
+                let $mir = $lower($src, $root);
+                $check
             }
         )*
     };
 }
 
-fn assert_dump_contains_in_order(dump: &str, expected: &[&str], case: &str) {
-    let mut tail = dump;
-    for property in expected {
-        let Some(offset) = tail.find(property) else {
-            panic!("{case}: missing `{property}` from MIR:\n{dump}");
-        };
-        tail = &tail[offset + property.len()..];
-    }
-}
-
 #[test]
 fn dynamic_column_spread_keeps_element_repr_unboxed() {
-    let dump = mir_std(
+    let mir = mir_std(
         "value V2 { x: int, y: int }\n\
          fn copy(xs: [V2]) -> [V2] { [...xs] }",
         "copy",
     );
-    assert!(
-        !dump.contains("V2_ct"),
-        "dynamic column spread must carry leaves into the destination, got:\n{dump}"
-    );
+    assert_no_v2_box(&mir);
 }
 
 #[test]
@@ -537,132 +541,209 @@ fn nested_native_buffer_value_store_accepts_boxed_function_result() {
                fn replace_nested(b: NativeBuffer<Outer>, f: (int) -> Pair, n: int) {\n\
                    b[0].p = f(n)\n\
                }";
-    let dump = mir_std(src, "replace_nested");
+    let mir = mir_std(src, "replace_nested");
     assert_eq!(
-        dump.matches("store_index.NativeBufferLeaf").count(),
+        count(&mir, |inst| matches!(
+            inst,
+            Inst::StoreIndex {
+                kind: ContainerKind::NativeBufferLeaf,
+                ..
+            }
+        )),
         2,
-        "Pair's declared `x` and `y` leaves must both reach storage: {dump}"
+        "Pair's declared `x` and `y` leaves must both reach storage: {mir:#?}"
     );
 }
 
 #[test]
 fn omitted_result_discards_tail_value_after_its_effects() {
-    let dump = mir_std(
+    let mir = mir_std(
         "value V2 { x: int, y: int }\n\
          fn produce() -> V2 { V2 { x: 1, y: 2 } }\n\
          fn sink() { produce() }",
         "sink",
     );
     assert!(
-        dump.contains("call"),
-        "the tail call must still execute, got:\n{dump}"
+        has(&mir, |inst| matches!(
+            inst,
+            Inst::Call { .. } | Inst::CallMulti { .. }
+        )),
+        "{mir:#?}"
     );
-    assert!(
-        dump.lines().any(|line| line.trim() == "return"),
-        "a function with no declared result must return no value, got:\n{dump}"
-    );
-    assert!(
-        !dump.lines().any(|line| line.trim().starts_with("return v")),
-        "the ignored tail value must not escape the unit function, got:\n{dump}"
-    );
-    assert!(
-        !dump.contains("V2_ct"),
-        "discarding the scalar return must not reconstruct its value type, got:\n{dump}"
-    );
+    assert_eq!(returns(&mir).collect::<Vec<_>>(), [&[]]);
+    assert_no_v2_box(&mir);
 }
 
 #[test]
 fn inferred_lambda_result_remains_value_bearing() {
-    let dump = mir_std("fn sink() { let xs = [2, 1]\n xs.sort(x => x) }", "sink");
+    let mir = mir_std("fn sink() { let xs = [2, 1]\n xs.sort(x => x) }", "sink");
+    let entry = instructions(&mir)
+        .find_map(|inst| match inst {
+            Inst::Lambda { entry, .. } => Some(*entry),
+            _ => None,
+        })
+        .expect("sort key lambda");
     assert!(
-        dump.contains("lambda"),
-        "fixture must lower the sort key lambda, got:\n{dump}"
-    );
-    assert!(
-        dump.lines().any(|line| line.trim().starts_with("return v")),
-        "the context-inferred lambda result must remain value-bearing, got:\n{dump}"
+        skull_mir::cfg::reachable_blocks_from(&mir, entry)
+            .into_iter()
+            .any(|bb| matches!(&mir.blocks[bb].term, Term::Return(values) if !values.is_empty()))
     );
 }
 
 #[test]
 fn diverging_if_join_does_not_declare_never_storage() {
-    let ast = skull_parser::parse_module(
+    let mir = mir(
         "fn f(x: int) -> int { if x > 0 { return 1 } else { return 2 } }",
-        ustr::Ustr::from("<test>"),
-    )
-    .expect("parse");
-    let mut modules = vec![ast];
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, function)| function.name.as_str().rsplit("::").next() == Some("f"))
-        .expect("function");
-    let mir = lower_test_root(&ws, mid, fid).expect("lower");
+        "f",
+    );
     assert!(
         mir.cells.iter().skip(1).all(|(_, cell)| cell.ty.is_none()),
-        "a diverging join cannot materialize a never-typed local: {mir}"
+        "a diverging join cannot materialize a never-typed local: {mir:#?}"
     );
 }
 
 #[test]
 fn nullable_aggregate_if_join_does_not_declare_payload_storage() {
-    let ast = skull_parser::parse_module(
+    let mir = mir(
         "value Pair { x: int, y: int }\n\
          fn f(present: bool) -> Pair? {\n\
              return if present { Pair { x: 1, y: 2 } } else { null }\n\
          }",
-        ustr::Ustr::from("<test>"),
-    )
-    .expect("parse");
-    let mut modules = vec![ast];
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, function)| function.name.as_str().rsplit("::").next() == Some("f"))
-        .expect("function");
-    let mir = lower_test_root(&ws, mid, fid).expect("lower");
-    let typed_temporaries: Vec<_> = mir
-        .cells
-        .iter()
-        .filter(|(_, cell)| cell.name.is_none() && cell.ty.is_some())
-        .collect();
+        "f",
+    );
     assert!(
-        typed_temporaries.is_empty(),
-        "nullable payload storage cannot represent its absent arm: {mir}"
+        !mir.cells
+            .values()
+            .any(|cell| cell.name.is_none() && cell.ty.is_some()),
+        "nullable payload storage cannot represent its absent arm: {mir:#?}"
     );
 }
 
 mir_properties! {
-    string_plus_is_concat(mir_std, "fn cat(a: string, b: string) -> string { a + b }", "cat", &["str.concat v0, v1"]);
-    tuple_return_splats_multi_value(mir, "fn f() -> (int, bool) { (1, true) }", "f", &["return v0, v1"], not "tuple ");
-    vec_index_carries_container_kind(mir, "fn f(xs: [int]) -> int { xs[0] }", "f", &["index.VecNonNull v0[v1]"]);
-    enum_unit_variant(mir, "enum Color { Red, Green }\nfn f() -> Color { Color::Red }", "f", &["v0 = const 0", "return v0"]);
-    enum_tuple_variant_carries_payload(mir, "enum Shape { Circle(int), Square(int, int) }\nfn f() -> Shape { Shape::Circle(5) }", "f", &["v0 = const 0", "v1 = const 5", "v2 = const 0", "return v0, v1, v2"]);
-    struct_literal_in_declared_field_order(mir, "struct Point { x: int, y: int }\nfn f() -> Point { Point { x: 1, y: 2 } }", "f", &["struct Point {x=v0, y=v1}"]);
-    struct_literal_injects_omitted_field_default(mir, "struct P { x: int, y: int = 0 }\nfn f() -> P { P { x: 1 } }", "f", &["v0 = const 1", "v1 = const 0", "struct P {x=v0, y=v1}"]);
-    for_over_native_buffer_indexes_each_element(mir_std, "fn f(xs: NativeBuffer<int>) { for x in xs { } }", "f", &["len.NativeBuffer v0", "index.NativeBuffer v0[v5]"]);
-    global_assignment_is_store_global(mir, "global G: int = 0\nfn f() -> int { G = 5; G }", "f", &["store_global G, v0"]);
-    match_enum_tests_tag_and_binds_payload_through_cells(
+    string_plus_is_concat(mir_std, "fn cat(a: string, b: string) -> string { a + b }", "cat") |m| {
+        let [a, b, result, ..] = values(&m)[..] else { panic!("{m:#?}") };
+        assert_eq!(m.insts[result], Inst::StringConcat(a, b));
+    }
+    tuple_return_splats_multi_value(mir, "fn f() -> (int, bool) { (1, true) }", "f") |m| {
+        let v = values(&m);
+        assert_eq!(returns(&m).collect::<Vec<_>>(), [&v[..2]]);
+        assert!(!has(&m, |inst| matches!(inst, Inst::MakeTuple(_))));
+    }
+    vec_index_carries_container_kind(mir, "fn f(xs: [int]) -> int { xs[0] }", "f") |m| {
+        let v = values(&m);
+        assert!(has(&m, |inst| *inst == Inst::Index {
+            base: v[0], index: v[1], kind: ContainerKind::VecNonNull,
+        }));
+    }
+    enum_unit_variant(mir, "enum Color { Red, Green }\nfn f() -> Color { Color::Red }", "f") |m| {
+        assert_int_return(&m, &[0]);
+    }
+    enum_tuple_variant_carries_payload(mir, "enum Shape { Circle(int), Square(int, int) }\nfn f() -> Shape { Shape::Circle(5) }", "f") |m| {
+        assert_int_return(&m, &[0, 5, 0]);
+    }
+    struct_literal_in_declared_field_order(mir, "struct Point { x: int, y: int }\nfn f() -> Point { Point { x: 1, y: 2 } }", "f") |m| {
+        assert_xy_fields(&m, "Point");
+    }
+    struct_literal_injects_omitted_field_default(mir, "struct P { x: int, y: int = 0 }\nfn f() -> P { P { x: 1 } }", "f") |m| {
+        let v = values(&m);
+        assert_eq!(m.insts[v[0]], Inst::Const(Lit::Int(1)));
+        assert_eq!(m.insts[v[1]], Inst::Const(Lit::Int(0)));
+        assert_xy_fields(&m, "P");
+    }
+    for_over_native_buffer_indexes_each_element(mir_std, "fn f(xs: NativeBuffer<int>) { for x in xs { } }", "f") |m| {
+        let v = values(&m);
+        let mut insts = instructions(&m);
+        assert!(insts.any(|inst| *inst == Inst::Len { base: v[0], kind: ContainerKind::NativeBuffer }));
+        assert!(insts.any(|inst| *inst == Inst::Index {
+            base: v[0], index: v[5], kind: ContainerKind::NativeBuffer,
+        }));
+    }
+    global_assignment_is_store_global(mir, "global G: int = 0\nfn f() -> int { G = 5; G }", "f") |m| {
+        let v = values(&m);
+        assert!(has(&m, |inst| matches!(inst, Inst::StoreGlobal { name, value }
+            if bone_core::modules::display_name(name.as_str()) == "G" && *value == v[0])));
+    }
+    for_over_map_uses_next_iteration(mir, "fn f(m: Map<int, int>) { for (k, v) in m { } }", "f") |m| {
+        let v = values(&m);
+        let cells: Vec<_> = m.cells.iter().map(|(id, _)| id).collect();
+        let mut ids = instruction_ids(&m);
+        assert!(ids.any(|id| m.insts[id] == Inst::MapNext {
+            key_cell: cells[1], val_cell: cells[2], table: v[0],
+        }));
+        assert_eq!(m.insts[v[3]], Inst::Const(Lit::Nil));
+        assert!(ids.any(|id| id == v[3]));
+        assert!(ids.any(|id| m.insts[id] == Inst::Eq(v[2], v[3])));
+    }
+}
+
+fn assert_int_return(mir: &MirFunc, want: &[i64]) {
+    let v = values(mir);
+    assert_eq!(returns(mir).collect::<Vec<_>>(), [&v[..want.len()]]);
+    for (&id, &n) in v.iter().zip(want) {
+        assert_eq!(mir.insts[id], Inst::Const(Lit::Int(n)));
+    }
+}
+
+fn assert_xy_fields(mir: &MirFunc, name: &str) {
+    let v = values(mir);
+    assert!(has(
         mir,
+        |inst| matches!(inst, Inst::MakeStruct { ty: Some(ty), fields }
+        if bone_core::modules::display_name(ty.as_str()) == name
+        && fields == &[(ustr::ustr("x"), v[0]), (ustr::ustr("y"), v[1])])
+    ));
+}
+
+fn field(inst: &Inst, owner: Idx<Inst>, key: &str) -> bool {
+    matches!(inst, Inst::Field { base, field, .. } if *base == owner && *field == key)
+}
+
+#[test]
+fn match_enum_tests_tag_and_binds_payload_through_cells() {
+    let mir = mir(
         "enum Opt { Some(int), None }\nfn f(o: Opt) -> int { match o { Opt::Some(n) => n, Opt::None => 0 } }",
         "f",
-        &[
-            "Opt_ct(__tag: v0, _0: v1)",
-            "eq v3, v4",
-            "field v2._0",
-            "store c3, v10",
-            "v11 = load c3",
-            "store c2, v11",
-        ],
     );
-    if_let_binds_on_match_else_branch_otherwise(mir, "enum Opt { Some(int), None }\nfn f(o: Opt) -> int { if let Opt::Some(n) = o { n } else { 0 } }", "f", &["branch v5 -> bb3, bb1", "v8 = field v2._0", "store c2, v9"]);
-    for_over_map_uses_next_iteration(mir, "fn f(m: Map<int, int>) { for (k, v) in m { } }", "f", &["c1, c2 = next(v0)", "v3 = const nil", "eq v2, v3"]);
+    let v = values(&mir);
+    let cells: Vec<_> = mir.cells.iter().map(|(id, _)| id).collect();
+    let mut ids = instruction_ids(&mir);
+    assert!(ids.any(|id| matches!(&mir.insts[id],
+        Inst::MakeValueStruct { name, fields, .. } | Inst::MaterializeValueStruct { name, fields, .. }
+        if bone_core::modules::display_name(name.as_str()) == "Opt"
+            && fields == &[(ustr::ustr("__tag"), v[0]), (ustr::ustr("_0"), v[1])])));
+    assert!(ids.any(|id| mir.insts[id] == Inst::Eq(v[3], v[4])));
+    assert!(ids.any(|id| field(&mir.insts[id], v[2], "_0")));
+    assert!(ids.any(|id| mir.insts[id]
+        == Inst::Store {
+            cell: cells[3],
+            value: v[10]
+        }));
+    assert_eq!(mir.insts[v[11]], Inst::Load(cells[3]));
+    assert!(ids.any(|id| id == v[11]));
+    assert!(ids.any(|id| mir.insts[id]
+        == Inst::Store {
+            cell: cells[2],
+            value: v[11]
+        }));
+}
+
+#[test]
+fn if_let_binds_on_match_else_branch_otherwise() {
+    let mir = mir(
+        "enum Opt { Some(int), None }\nfn f(o: Opt) -> int { if let Opt::Some(n) = o { n } else { 0 } }",
+        "f",
+    );
+    let v = values(&mir);
+    let blocks: Vec<_> = mir.blocks.iter().map(|(id, _)| id).collect();
+    assert!(mir.blocks.values().any(|block| block.term
+        == Term::Branch {
+            cond: v[5],
+            then_bb: blocks[3],
+            else_bb: blocks[1],
+        }));
+    assert!(field(&mir.insts[v[8]], v[2], "_0"));
+    let cell = mir.cells.iter().nth(2).unwrap().0;
+    assert!(has(&mir, |inst| *inst == Inst::Store { cell, value: v[9] }));
 }
 
 #[test]
@@ -670,46 +751,55 @@ fn match_nested_enum_gates_child_read_behind_parent_tag() {
     let source = "enum Shape { Circle(int), Square(int) }\n\
                  enum Opt { Some(Shape), None }\n\
                  fn f(o: Opt) -> int { match o { Opt::Some(Shape::Circle(r)) => r, _ => 0 } }";
-    let dump = mir(source, "f");
-    assert_dump_contains_in_order(
-        &dump,
-        &[
-            "branch v3 -> bb3, bb2",
-            "bb3:",
-            "v6 = field v1.__tag",
-            "branch v8 -> bb4, bb2",
-            "bb4:",
-            "v9 = field v1._0",
-        ],
-        "nested enum gate",
+    let mir = mir(source, "f");
+    let v = values(&mir);
+    let blocks: Vec<_> = mir.blocks.iter().map(|(id, _)| id).collect();
+    assert!(mir.blocks.values().any(|block| block.term
+        == Term::Branch {
+            cond: v[3],
+            then_bb: blocks[3],
+            else_bb: blocks[2],
+        }));
+    assert!(mir.blocks[blocks[3]].insts.contains(&v[6]));
+    assert!(field(&mir.insts[v[6]], v[1], "__tag"));
+    assert_eq!(
+        mir.blocks[blocks[3]].term,
+        Term::Branch {
+            cond: v[8],
+            then_bb: blocks[4],
+            else_bb: blocks[2],
+        }
     );
-    assert_eq!(dump.matches("field v1.__tag").count(), 1, "{dump}");
-    assert_eq!(dump.matches("field v1._0").count(), 1, "{dump}");
+    assert!(mir.blocks[blocks[4]].insts.contains(&v[9]));
+    assert!(field(&mir.insts[v[9]], v[1], "_0"));
+    for key in ["__tag", "_0"] {
+        assert_eq!(count(&mir, |inst| field(inst, v[1], key)), 1);
+    }
 }
 
 #[test]
 fn null_coalesce_evaluates_lhs_once() {
-    let dump = mir("fn f(a: int?) -> int { a ?? 0 }", "f");
-    assert_eq!(dump.matches("load c0").count(), 1, "{dump}");
-    assert_dump_contains_in_order(
-        &dump,
-        &[
-            "v0 = load c0",
-            "v1 = const nil",
-            "v2 = eq v0, v1",
-            "store c1, v0",
-        ],
-        "null coalesce",
-    );
+    let mir = mir("fn f(a: int?) -> int { a ?? 0 }", "f");
+    let a = mir.params[0];
+    let v = values(&mir);
+    assert_eq!(count(&mir, |inst| *inst == Inst::Load(a)), 1);
+    assert_eq!(mir.insts[v[0]], Inst::Load(a));
+    assert_eq!(mir.insts[v[1]], Inst::Const(Lit::Nil));
+    assert_eq!(mir.insts[v[2]], Inst::Eq(v[0], v[1]));
+    let cell = mir.cells.iter().nth(1).unwrap().0;
+    assert!(has(&mir, |inst| *inst == Inst::Store { cell, value: v[0] }));
 }
 
 #[test]
 fn nullable_nobox_presence_normalizes_escaped_boolean() {
     let src = "nobox value Id { n: int } struct State { id: Id? = null }
         fn f(state: State) -> bool { return state.id != null }";
-    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    let dump = lower_dump(vec![ast], "f");
-    assert_eq!(dump.matches(" = not ").count(), 2, "{dump}");
+    let mir = mir(src, "f");
+    assert_eq!(
+        count(&mir, |inst| matches!(inst, Inst::Not(_))),
+        2,
+        "{mir:#?}"
+    );
 }
 
 #[test]
@@ -725,10 +815,14 @@ fn nullable_nobox_presence_conditions_skip_normalization() {
             if value > 0 { score = 2 }
             return score
         }";
-    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    let dump = lower_dump(vec![ast], "f");
-    assert!(!dump.contains(" = not "), "{dump}");
-    assert!(dump.contains("branch "), "{dump}");
+    let mir = mir(src, "f");
+    assert!(!has(&mir, |inst| matches!(inst, Inst::Not(_))), "{mir:#?}");
+    assert!(
+        mir.blocks
+            .values()
+            .any(|block| matches!(block.term, Term::Branch { .. })),
+        "{mir:#?}"
+    );
 }
 
 #[test]
@@ -744,25 +838,23 @@ fn branch_conditions_do_not_materialize_logical_results() {
         ),
     ] {
         let src = format!("fn probe(a: bool, b: bool, c: bool) -> int {{ {body} }}");
-        let ast =
-            skull_parser::parse_module_clean(&src, ustr::Ustr::from("<test>")).expect("parse");
-        let dump = lower_dump(vec![ast], "probe");
+        let mir = mir(&src, "probe");
         assert!(
-            !dump.contains("const false"),
-            "condition must branch without a boolean result: {dump}"
+            !has(&mir, |inst| matches!(inst, Inst::Const(Lit::Bool(false)))),
+            "condition must branch without a boolean result: {mir:#?}"
         );
         assert!(
-            !dump.contains("const true"),
-            "condition must branch without a boolean result: {dump}"
+            !has(&mir, |inst| matches!(inst, Inst::Const(Lit::Bool(true)))),
+            "condition must branch without a boolean result: {mir:#?}"
         );
         assert!(
-            !dump.contains(" = not "),
-            "native not must swap branch destinations: {dump}"
+            !has(&mir, |inst| matches!(inst, Inst::Not(_))),
+            "native not must swap branch destinations: {mir:#?}"
         );
         assert_eq!(
-            dump.matches("store ").count(),
+            count(&mir, |inst| matches!(inst, Inst::Store { .. })),
             result_stores,
-            "only non-terminal arm values need stores: {dump}"
+            "only non-terminal arm values need stores: {mir:#?}"
         );
     }
 }
@@ -770,10 +862,10 @@ fn branch_conditions_do_not_materialize_logical_results() {
 #[test]
 fn a_reassigned_let_keeps_its_cell() {
     let src = "fn bump(a: int) -> int { let b = a * 2\n b = b + 1\n return b }";
-    let dump = mir_std(src, "bump");
+    let mir = mir_std(src, "bump");
     assert!(
-        dump.contains("store"),
-        "a reassigned let is written through its cell: {dump}"
+        has(&mir, |inst| matches!(inst, Inst::Store { .. })),
+        "a reassigned let is written through its cell: {mir:#?}"
     );
 }
 
@@ -782,17 +874,17 @@ fn an_unwritten_nobox_let_holds_its_leaves_as_values() {
     let src = "nobox value P { x: int, y: int }\n\
                fn mk(a: int) -> P { return P { x: a, y: a + 1 } }\n\
                fn sum(a: int) -> int { let p = mk(a)\n return p.x + p.y }";
-    let dump = mir_std(src, "sum");
+    let mir = mir_std(src, "sum");
     assert!(
-        !dump.contains("store"),
-        "an unwritten nobox let needs no leaf cells: {dump}"
+        !has(&mir, |inst| matches!(inst, Inst::Store { .. })),
+        "an unwritten nobox let needs no leaf cells: {mir:#?}"
     );
     let src = "nobox value P { x: int, y: int }\n\
                fn mk(a: int) -> P { return P { x: a, y: a + 1 } }\n\
                fn sum(a: int) -> int { let p = mk(a)\n p.x = 5\n return p.x + p.y }";
-    let dump = mir_std(src, "sum");
+    let mir = mir_std(src, "sum");
     assert!(
-        dump.contains("store"),
-        "a written nobox let keeps its leaf cells: {dump}"
+        has(&mir, |inst| matches!(inst, Inst::Store { .. })),
+        "a written nobox let keeps its leaf cells: {mir:#?}"
     );
 }
