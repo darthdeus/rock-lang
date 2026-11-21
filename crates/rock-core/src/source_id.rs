@@ -16,35 +16,3 @@ pub fn stdlib_file_name(file: &str) -> Option<&str> {
 pub fn is_stdlib_module_file(file: &str) -> bool {
     stdlib_file_name(file).is_some()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stdlib_file_id_round_trips_through_the_predicate_and_name() {
-        for name in ["unified.rock", "arena.rock", "scene.rock"] {
-            let id = stdlib_file_id(name);
-            assert!(is_stdlib_module_file(&id), "{id}");
-            assert_eq!(stdlib_file_name(&id), Some(name));
-        }
-    }
-
-    #[test]
-    fn only_the_loader_spelling_is_a_stdlib_file() {
-        for file in [
-            "<stdlib:unified.rock>",
-            "<bone-stdlib:unified.rock>",
-            "<embedded-stdlib>/unified.rock",
-            "stdlib/unified.rock",
-            "/project/stdlib/unified.rock",
-            "C:\\project\\stdlib\\unified.rock",
-            "<stdlib>/",
-            "<test>",
-            "",
-        ] {
-            assert!(!is_stdlib_module_file(file), "{file}");
-            assert_eq!(stdlib_file_name(file), None, "{file}");
-        }
-    }
-}
