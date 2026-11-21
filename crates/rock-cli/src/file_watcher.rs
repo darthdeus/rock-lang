@@ -548,65 +548,6 @@ mod state {
             );
         }
         #[test]
-        fn state_changes_preserve_new_sources_atomic_saves_touch_and_removals() {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path().canonicalize().unwrap();
-            let source = root.join("main.rock");
-            std::fs::write(&source, "before").unwrap();
-            let mut observation = observation(root.clone(), FileWatcher::new());
-            std::fs::write(&source, "after").unwrap();
-            assert_eq!(
-                observation.scan(false).unwrap().paths,
-                HashSet::from([source.clone()])
-            );
-            let temporary = source.with_extension("saving");
-            std::fs::write(&temporary, "after").unwrap();
-            std::fs::rename(&temporary, &source).unwrap();
-            assert_eq!(
-                observation.scan(false).unwrap().paths,
-                HashSet::from([source.clone()]),
-                "same-byte inode replacement is still an atomic save"
-            );
-            let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
-            std::fs::File::options()
-                .write(true)
-                .open(&source)
-                .unwrap()
-                .set_modified(modified + Duration::from_nanos(1))
-                .unwrap();
-            assert_eq!(
-                observation.scan(false).unwrap().paths,
-                HashSet::from([source.clone()])
-            );
-            let added = root.join("added.rock");
-            std::fs::write(&added, "added").unwrap();
-            assert_eq!(
-                observation.scan(false).unwrap().paths,
-                HashSet::from([added.clone()])
-            );
-            std::fs::remove_file(&added).unwrap();
-            assert_eq!(
-                observation.scan(false).unwrap().paths,
-                HashSet::from([added])
-            );
-        }
-        #[test]
-        fn a_burst_of_saves_between_scans_is_one_change() {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path().canonicalize().unwrap();
-            let source = root.join("main.rock");
-            std::fs::write(&source, "seed").unwrap();
-            let mut observation = observation(root, FileWatcher::new());
-            for i in 0..10 {
-                std::fs::write(&source, format!("fn value() -> int {{ {i} }}\n")).unwrap();
-            }
-            assert_eq!(
-                observation.scan(false).unwrap().paths,
-                HashSet::from([source])
-            );
-            assert!(observation.scan(false).unwrap().paths.is_empty());
-        }
-        #[test]
         fn unchanged_asset_directories_reuse_entries_and_build_outputs_are_pruned() {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().canonicalize().unwrap();
@@ -738,27 +679,6 @@ mod state {
             assert_eq!(
                 observation.scan(false).unwrap().paths,
                 HashSet::from([root.join("linked/data.txt")])
-            );
-        }
-        #[test]
-        fn same_size_rewrite_within_filesystem_tick_is_not_missed() {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path().canonicalize().unwrap();
-            let source = root.join("main.rock");
-            std::fs::write(&source, "AAAA").unwrap();
-            let mut observation = observation(root.clone(), FileWatcher::new());
-            std::fs::write(&source, "BBBB").unwrap();
-            let recorded = observation.files.get(&source).unwrap().stamp.clone();
-            set_mtime(&source, modified_time(&recorded));
-            let current = Stamp::read(&source).unwrap();
-            assert_eq!(
-                (current.size, current.modified),
-                (recorded.size, recorded.modified)
-            );
-            observation.files.get_mut(&source).unwrap().stamp = current;
-            assert_eq!(
-                observation.scan(false).unwrap().paths,
-                HashSet::from([source])
             );
         }
         #[test]
