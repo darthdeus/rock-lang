@@ -8,7 +8,6 @@ use bone_semantic::prelude::*;
 use bone_semantic::semantic_passes::{FragmentContribution, ScopeItem};
 use std::collections::HashMap;
 
-/// The fragment scope of the v1 file `file`, `None` for a synthetic module.
 pub fn fragment(ws: &Workspace, file: Ustr) -> Option<&FragmentScope> {
     ws.fragment_scopes.get(&file)
 }

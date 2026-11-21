@@ -1717,7 +1717,6 @@ pub(crate) fn struct_fields_by_name(ws: &Workspace, name: &str) -> Vec<(String, 
     }
 }
 
-/// The declared (static) TyId of struct `name`'s field `field`.
 pub fn struct_field_ty(ws: &Workspace, name: &str, field: &str) -> Option<TyId> {
     let sdef = struct_def_by_name(ws, Ustr::from(name))?;
     sdef.fields
@@ -1906,7 +1905,6 @@ pub struct InlineLocalSites {
     pub parenthesize: bool,
 }
 
-/// Find a let binding and the uses where its initializer can be safely inlined.
 pub fn inline_local(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<InlineLocalSites> {
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
@@ -2847,7 +2845,6 @@ pub(crate) fn render_deferred_signature(
     ))
 }
 
-/// File path -> source text (the LSP's per-project `texts`).
 pub(crate) type SourceMap = std::collections::HashMap<String, String>;
 
 /// An optional param whose default source is unreachable renders
@@ -3050,7 +3047,6 @@ fn struct_ctor_sig(ws: &Workspace, name: Ustr) -> Option<SignatureEntry> {
     Some(SignatureEntry { label, params })
 }
 
-/// Which kind of `?` hole the cursor sits on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HoleKind {
     /// `?` in type position, e.g. `let x: ? = expr`.

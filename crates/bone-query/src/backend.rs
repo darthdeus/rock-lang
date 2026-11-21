@@ -1,5 +1,3 @@
-//! Connect the incremental session and typed queries to the LSP protocol.
-
 mod completion;
 mod macro_refs;
 mod protocol;
@@ -315,7 +313,6 @@ fn module_declaration(session: &Session, package: u32, node: Ustr) -> Option<Spa
     block
 }
 
-/// One module's row for the `rock/modules` snapshot.
 #[derive(Clone, Debug)]
 pub struct ModuleRecency {
     pub id: String,
@@ -335,14 +332,12 @@ pub struct BoneWorkspace {
     path_canon: HashMap<String, String>,
 }
 
-/// The "fill in missing match arms" edit and how many variants it adds.
 pub struct MatchArmsFill {
     pub range: Range,
     pub new_text: String,
     pub missing: usize,
 }
 
-/// The "fill struct fields" edit and how many fields it adds.
 pub struct StructFieldsFill {
     pub range: Range,
     pub new_text: String,
@@ -554,7 +549,6 @@ impl BoneWorkspace {
             .sum()
     }
 
-    /// Module recency for the editor's `rock/modules` request.
     pub fn projects_summary(&self) -> Vec<(String, Vec<ModuleRecency>)> {
         let now = bone_core::prelude::Instant::now();
         let mut out: Vec<(String, Vec<ModuleRecency>)> = self
@@ -1075,7 +1069,6 @@ impl BoneWorkspace {
             .collect()
     }
 
-    /// References in the current document.
     pub fn document_highlight(&self, path: &str, pos: Position) -> Vec<DocumentHighlight> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
@@ -1174,7 +1167,6 @@ impl BoneWorkspace {
         })
     }
 
-    /// The "inline local" edits for the `let` binding or use at `pos`.
     pub fn inline_local(&self, path: &str, pos: Position) -> Option<InlineLocalEdits> {
         let (_, _, src, offset, ws, mid) = self.cursor(path, pos)?;
         let sites = crate::query::inline_local(ws, mid, offset)?;
@@ -2714,7 +2706,7 @@ fn recover_missing_module(
     request: &'static str,
     repair: impl FnOnce() -> String,
 ) -> Option<Workspace> {
-    // A broken buffer can drop the module from the live session (#21).
+    // A broken buffer can drop the module from the live session.
     if user_module_for_path(session.workspace(), path).is_some() {
         return None;
     }

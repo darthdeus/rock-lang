@@ -1,6 +1,3 @@
-//! Every name token in a module and the symbol it names. Cursor resolution
-//! (`symbol`) and find-references (`sites`) both read this one walk.
-
 use super::*;
 
 /// One name token. `hit` is where the cursor resolves to `target`; `site` is
@@ -598,7 +595,6 @@ fn enum_qualifier(name: Ustr, span: Span, variant: Option<Span>) -> Occurrence {
         .site(leading_name_span(&span, name))
 }
 
-/// A bare top-level name: a global, or a function used as a value.
 fn global_occurrences(
     ws: &Workspace,
     name: Ustr,
@@ -623,7 +619,6 @@ fn global_occurrences(
     );
 }
 
-/// The callee token of a resolved call.
 fn call_name_span<'t>(
     ws: &Workspace,
     body: &Body,
@@ -655,7 +650,6 @@ fn call_name_span<'t>(
     }
 }
 
-/// A named-argument label names the callee's parameter.
 fn named_argument_sites<'t>(
     ws: &Workspace,
     body: &Body,

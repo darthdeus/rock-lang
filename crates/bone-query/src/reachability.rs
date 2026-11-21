@@ -66,7 +66,6 @@ pub struct ReachabilityIndex {
     /// Per sorted expected-type set: every type with a path to one of them.
     /// Prunes searches only.
     reachers: Mutex<FxHashMap<Vec<Ustr>, Arc<FxHashSet<Ustr>>>>,
-    /// Shallow call-through argument paths, filled on first lookup.
     arg_paths: FxHashMap<Ustr, OnceLock<Vec<ReachPath>>>,
 }
 
@@ -75,7 +74,6 @@ pub struct ReachabilityIndex {
 const ARG_PATH_DEPTH: u16 = 2;
 
 impl ReachabilityIndex {
-    /// Lays edges and predecessor lists; derived data is filled per query.
     pub fn build(ws: &Workspace) -> ReachabilityIndex {
         let mut edges: HashMap<Ustr, Vec<Edge>> = HashMap::new();
 

@@ -1,5 +1,3 @@
-//! Find completion contexts in the AST after inserting a probe at the cursor.
-
 use rock_tokenizer::TokenKind;
 use skull_parser::Idx;
 use skull_parser::ast::{
@@ -180,7 +178,6 @@ impl CursorAst {
         chain
     }
 
-    /// A direct yield operand can promote coroutine candidates.
     pub(crate) fn after_yield(&self) -> bool {
         let chain = &self.chain;
         chain.windows(2).any(|w| match self.expr(w[1]).kind {
