@@ -16,8 +16,8 @@ path = "src/lib.rs"
 default = ["backend-js"]
 # node execution of the JS-subset emitter (`rock --backend js`).
 backend-js = ["dep:skull-codegen-js"]
-# Shared Lua execution oracles for downstream compiler integration tests.
-test-support = ["dep:test-utils"]
+# Support checking shared integration tests from a Git dependency.
+test-support = ["dep:lsp-server", "dep:test-utils", "dep:wait-timeout"]
 # Use sequential compiler passes for sampling without Rayon worker frames.
 sequential = ["bone-semantic/sequential", "skull/sequential", "bone-query/sequential"]
 
@@ -29,7 +29,9 @@ globset = "0.4.19"
 symphonia = { workspace = true }
 rodio = { version = "0.22", default-features = false, features = ["mp3", "vorbis", "wav"] }
 
+lsp-server = { workspace = true, optional = true }
 test-utils = { workspace = true, optional = true }
+wait-timeout = { workspace = true, optional = true }
 rock-host = { workspace = true }
 rock-stdlib = { workspace = true }
 rock-log = { workspace = true }
