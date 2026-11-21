@@ -1,8 +1,6 @@
 use super::*;
 
-use bone_core::hir::{
-    BuiltinTy, EnumDef, FnBackend, StructFieldDef, TyId, TypeCtor, TypeExpr, VariantPayload,
-};
+use bone_core::hir::{BuiltinTy, EnumDef, FnBackend, TyId, TypeCtor, TypeExpr, VariantPayload};
 use bone_core::type_equiv::TyRef;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
@@ -291,72 +289,72 @@ pub(crate) fn value_leaf_layout(
     name: Ustr,
 ) -> Option<(Vec<LeafSlot>, usize, usize)> {
     let plan = planned_value(ws, name)?;
-    if plan.storage != ValueStorage::CData {
-        return None;
-    }
-    let mut out = Vec::new();
-    let (size, align) = planned_layout_rec(ws, &plan, "", 0, &[], &mut out)?;
-    Some((out, size, align))
+    let layout = plan.cdata.as_ref()?;
+    let mut leaves = Vec::new();
+    layout.write_leaves(ws, "", 0, &[], &mut leaves);
+    Some((leaves, layout.size(), layout.align))
 }
 
-fn planned_layout_rec(
-    ws: &Workspace,
-    plan: &PlannedValue,
-    prefix: &str,
-    base: usize,
-    owners: &[Ustr],
-    out: &mut Vec<LeafSlot>,
-) -> Option<(usize, usize)> {
-    let mut off = base;
-    let mut align = 1usize;
-    for (field, planned) in &plan.fields {
-        match planned {
-            PlannedField::Primitive(cty) => {
-                let (size, field_align) = c_prim_size_align(cty)?;
-                off = round_up(off, field_align);
-                out.push(LeafSlot {
+struct CLayout {
+    fields: Vec<(Ustr, usize, CMember)>,
+    end: usize,
+    align: usize,
+}
+
+enum CMember {
+    Scalar(&'static str),
+    Aggregate(Ustr, CLayout),
+}
+
+impl CLayout {
+    fn new() -> Self {
+        Self {
+            fields: Vec::new(),
+            end: 0,
+            align: 1,
+        }
+    }
+
+    fn size(&self) -> usize {
+        round_up(self.end, self.align)
+    }
+
+    fn push(&mut self, name: Ustr, member: CMember) {
+        let (size, align) = match &member {
+            CMember::Scalar(ty) => c_prim_size_align(ty).expect("planned primitive type"),
+            CMember::Aggregate(_, child) => (child.size(), child.align),
+        };
+        let offset = round_up(self.end, align);
+        self.fields.push((name, offset, member));
+        self.end = offset + size;
+        self.align = self.align.max(align);
+    }
+
+    fn write_leaves(
+        &self,
+        ws: &Workspace,
+        prefix: &str,
+        base: usize,
+        owners: &[Ustr],
+        leaves: &mut Vec<LeafSlot>,
+    ) {
+        for (field, offset, member) in &self.fields {
+            let byte_off = base + offset;
+            match member {
+                CMember::Scalar(cty) => leaves.push(LeafSlot {
                     path: leaf_path(prefix, field.as_str()),
                     cty,
-                    byte_off: off,
+                    byte_off,
                     owners: owners.to_vec(),
-                });
-                off += size;
-                align = align.max(field_align);
-            }
-            PlannedField::Nested(child) => {
-                let child_base = round_up(off, planned_alignment(child)?);
-                let mut child_owners = owners.to_vec();
-                child_owners.push(crate::mangle::type_symbol(ws, child.name));
-                let (size, child_align) = planned_layout_rec(
-                    ws,
-                    child,
-                    &format!("{}{field}.", prefix),
-                    child_base,
-                    &child_owners,
-                    out,
-                )?;
-                off = child_base + size;
-                align = align.max(child_align);
-            }
-            PlannedField::FlatEnum(_) | PlannedField::Nullable(_) | PlannedField::Opaque => {
-                return None;
+                }),
+                CMember::Aggregate(name, child) => {
+                    let mut owners = owners.to_vec();
+                    owners.push(crate::mangle::type_symbol(ws, *name));
+                    child.write_leaves(ws, &format!("{prefix}{field}."), byte_off, &owners, leaves);
+                }
             }
         }
     }
-    Some((round_up(off - base, align), align))
-}
-
-fn planned_alignment(plan: &PlannedValue) -> Option<usize> {
-    plan.fields.iter().try_fold(1usize, |align, (_, field)| {
-        let field_align = match field {
-            PlannedField::Primitive(cty) => c_prim_size_align(cty)?.1,
-            PlannedField::Nested(child) => planned_alignment(child)?,
-            PlannedField::FlatEnum(_) | PlannedField::Nullable(_) | PlannedField::Opaque => {
-                return None;
-            }
-        };
-        Some(align.max(field_align))
-    })
 }
 
 pub(crate) fn leaf_path(prefix: &str, name: &str) -> Ustr {
@@ -420,58 +418,19 @@ impl FieldShape {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum PlannedField {
-    Primitive(&'static str),
-    Nested(Box<PlannedValue>),
-    FlatEnum(ValueShape),
-    Nullable(Box<PlannedValue>),
-    Opaque,
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct PlannedValue {
-    pub(crate) name: Ustr,
     pub(crate) storage: ValueStorage,
-    pub(crate) fields: Vec<(Ustr, PlannedField)>,
-    pub(crate) shape: Option<ValueShape>,
-    pub(crate) gc_shape: Option<ValueShape>,
+    shape: ValueShape,
+    cdata: Option<CLayout>,
+    pub(crate) scalarizable: bool,
+    pub(crate) box_materializes_nobox: bool,
+    contains_flat_enum: bool,
 }
 
 impl PlannedValue {
-    fn value_shape(&self) -> Option<&ValueShape> {
-        self.shape.as_ref().or(self.gc_shape.as_ref())
+    pub(super) fn scalar_shape(&self) -> Option<&ValueShape> {
+        self.scalarizable.then_some(&self.shape)
     }
-}
-
-fn planned_shape(name: Ustr, fields: &[(Ustr, PlannedField)], gc: bool) -> Option<ValueShape> {
-    let mut out = Vec::with_capacity(fields.len());
-    for (field, planned) in fields {
-        let shape = match planned {
-            PlannedField::Primitive(_) => FieldShape::Prim,
-            PlannedField::Opaque if gc => FieldShape::Prim,
-            PlannedField::FlatEnum(shape) if gc => FieldShape::Nested(shape.clone()),
-            PlannedField::Nested(child) | PlannedField::Nullable(child) => {
-                let mut shape = if gc {
-                    child.value_shape()
-                } else {
-                    child.shape.as_ref()
-                }?
-                .clone();
-                if matches!(planned, PlannedField::Nullable(_)) {
-                    shape.nullable = true;
-                }
-                FieldShape::Nested(shape)
-            }
-            PlannedField::Opaque | PlannedField::FlatEnum(_) => return None,
-        };
-        out.push((*field, shape));
-    }
-    Some(ValueShape {
-        name,
-        fields: out,
-        nullable: false,
-    })
 }
 
 pub(super) fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bool)> {
@@ -498,19 +457,18 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
     if let Some(enum_plan) = EnumPlan::for_name(ws, name)
         && let Some(cdata) = enum_plan.cdata()
     {
-        let mut fields = vec![(crate::names::ustr("__tag"), PlannedField::Primitive("int"))];
-        fields.extend(
-            cdata
-                .slots
-                .iter()
-                .map(|(field, cty)| (*field, PlannedField::Primitive(cty))),
-        );
+        let mut layout = CLayout::new();
+        layout.push(crate::names::ustr("__tag"), CMember::Scalar("int"));
+        for &(name, ty) in &cdata.slots {
+            layout.push(name, CMember::Scalar(ty));
+        }
         return Some(PlannedValue {
-            name,
+            shape: cdata.value_shape(),
             storage: ValueStorage::CData,
-            shape: Some(cdata.value_shape()),
-            gc_shape: None,
-            fields,
+            cdata: Some(layout),
+            scalarizable: true,
+            box_materializes_nobox: false,
+            contains_flat_enum: false,
         });
     }
     let sid = ws.nominals.struct_id(name)?;
@@ -519,90 +477,93 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
         return None;
     }
     visiting.push(name);
-    let mut fields = Vec::with_capacity(sd.fields.len());
-    // Handle type arguments select a registry row type. Double lanes keep the
-    // Lua-number representation of the IDs when a handle escapes scalarization.
+    // Registry type arguments select a row type. Escaping ID lanes remain Lua numbers.
     let handle = is_registry_handle(name);
-    let mut cdata = sd.generics.is_empty() || handle;
+    let mut cdata = (sd.generics.is_empty() || handle).then(CLayout::new);
     let mut scalarizable = true;
+    let mut contains_flat_enum = false;
+    let mut box_materializes_nobox = false;
+    let mut fields = Vec::with_capacity(sd.fields.len());
+
     for field in &sd.fields {
-        let planned = if handle
-            && static_ty(ws, field.storage_ty) == Some(TypeExpr::Builtin(BuiltinTy::Int))
-        {
-            PlannedField::Primitive("double")
+        let ty = static_ty(ws, field.storage_ty);
+        let primitive = match ty {
+            Some(TypeExpr::Builtin(BuiltinTy::Int)) if handle => Some("double"),
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) if is_payload_free_enum(ws, name) => Some("int"),
+            Some(ty) => primitive_c_type(&ty),
+            None => None,
+        };
+        let (shape, ctype) = if let Some(primitive) = primitive {
+            (FieldShape::Prim, Some(CMember::Scalar(primitive)))
         } else {
-            plan_field(ws, field, visiting).unwrap_or(PlannedField::Opaque)
+            let child = match ty {
+                Some(TypeExpr::App {
+                    ctor: TypeCtor::Nominal(child),
+                    ..
+                }) => Some((child, false)),
+                Some(TypeExpr::Nullable(_)) => nominal_name_from_ty(ws, field.ty)
+                    .filter(|&(child, nullable)| nullable && is_nobox_nominal(ws, child)),
+                _ => None,
+            };
+            let mut member = None;
+            let shape = match child {
+                Some((child, false)) if let Some(shape) = flat_enum_value_shape(ws, child) => {
+                    scalarizable = false;
+                    contains_flat_enum = true;
+                    FieldShape::Nested(shape)
+                }
+                Some((child, nullable))
+                    if let Some(mut plan) = planned_value_rec(ws, child, visiting) =>
+                {
+                    scalarizable &= plan.scalarizable;
+                    contains_flat_enum |= plan.contains_flat_enum;
+                    box_materializes_nobox |=
+                        plan.box_materializes_nobox || is_nobox_nominal(ws, child);
+                    plan.shape.nullable = nullable;
+                    if !nullable {
+                        member = plan.cdata.map(|layout| CMember::Aggregate(child, layout));
+                    }
+                    FieldShape::Nested(plan.shape)
+                }
+                _ => {
+                    scalarizable = false;
+                    FieldShape::Prim
+                }
+            };
+            (shape, member)
         };
-        let (field_cdata, field_scalar) = match &planned {
-            PlannedField::Primitive(_) => (true, true),
-            PlannedField::Nested(child) => {
-                (child.storage == ValueStorage::CData, child.shape.is_some())
+        if let Some(member) = ctype {
+            if let Some(layout) = &mut cdata {
+                layout.push(field.name, member);
             }
-            PlannedField::Nullable(child) => (false, child.shape.is_some()),
-            PlannedField::Opaque | PlannedField::FlatEnum(_) => (false, false),
-        };
-        cdata &= field_cdata;
-        scalarizable &= field_scalar;
-        fields.push((field.name, planned));
+        } else {
+            cdata = None;
+        }
+        fields.push((field.name, shape));
     }
     visiting.pop();
-    let shape = scalarizable
-        .then(|| planned_shape(name, &fields, false))
-        .flatten();
-    let storage = if cdata {
+    let storage = if cdata.is_some() {
         ValueStorage::CData
     } else if scalarizable && sd.generics.is_empty() {
         ValueStorage::LeafTable
     } else {
         ValueStorage::GcTable
     };
-    let gc_shape = (storage != ValueStorage::CData)
-        .then(|| planned_shape(name, &fields, true))
-        .flatten();
     Some(PlannedValue {
-        name,
         storage,
-        fields,
-        shape,
-        gc_shape,
+        shape: ValueShape {
+            name,
+            fields,
+            nullable: false,
+        },
+        cdata,
+        scalarizable,
+        box_materializes_nobox: storage == ValueStorage::GcTable && box_materializes_nobox,
+        contains_flat_enum,
     })
-}
-
-fn plan_field(
-    ws: &Workspace,
-    field: &StructFieldDef,
-    visiting: &mut Vec<Ustr>,
-) -> Option<PlannedField> {
-    let ty = static_ty(ws, field.storage_ty)?;
-    if let Some(cty) = primitive_c_type(&ty) {
-        return Some(PlannedField::Primitive(cty));
-    }
-    match ty {
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(child),
-            ..
-        } => {
-            if is_payload_free_enum(ws, child) {
-                return Some(PlannedField::Primitive("int"));
-            }
-            if let Some(shape) = flat_enum_value_shape(ws, child) {
-                return Some(PlannedField::FlatEnum(shape));
-            }
-            planned_value_rec(ws, child, visiting)
-                .map(|child| PlannedField::Nested(Box::new(child)))
-        }
-        TypeExpr::Nullable(_) => {
-            let (child, true) = nominal_name_from_ty(ws, field.ty)? else {
-                return None;
-            };
-            if !is_nobox_nominal(ws, child) {
-                return None;
-            }
-            planned_value_rec(ws, child, visiting)
-                .map(|child| PlannedField::Nullable(Box::new(child)))
-        }
-        _ => None,
-    }
 }
 
 pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<Rc<PlannedValue>> {
@@ -706,15 +667,7 @@ impl Drop for ShapeMemoScope {
 }
 
 pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bool {
-    fn contains(plan: &PlannedValue) -> bool {
-        plan.fields.iter().any(|(_, field)| match field {
-            PlannedField::FlatEnum(_) => true,
-            PlannedField::Nested(child) | PlannedField::Nullable(child) => contains(child),
-            PlannedField::Primitive(_) | PlannedField::Opaque => false,
-        })
-    }
-
-    planned_value(ws, name).is_some_and(|plan| contains(&plan))
+    planned_value(ws, name).is_some_and(|plan| plan.contains_flat_enum)
 }
 
 pub(super) fn enum_definition(ws: &Workspace, name: Ustr) -> Option<&EnumDef> {
@@ -923,7 +876,7 @@ pub(crate) fn static_ty(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
 }
 
 pub(crate) fn value_shape(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
-    planned_value(ws, name)?.shape.clone()
+    planned_value(ws, name)?.scalar_shape().cloned()
 }
 
 /// The one storage classification; callers must not rediscover `_ct`, `_vt`
@@ -939,13 +892,13 @@ pub(crate) fn declared_value_storage(
 pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
     ws.nominals.struct_id(name)?;
     planned_value(ws, name)?
-        .shape
-        .as_ref()
-        .map(|_| struct_field_names(ws, name))
+        .scalarizable
+        .then(|| struct_field_names(ws, name))
 }
 
 pub(crate) fn value_shape_gc(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
-    planned_value(ws, name)?.gc_shape.clone()
+    let plan = planned_value(ws, name)?;
+    (plan.storage != ValueStorage::CData).then(|| plan.shape.clone())
 }
 
 /// Declared field names in positional `<name>_ct` ctor order; a cdata-eligible
@@ -1289,7 +1242,7 @@ pub(crate) fn struct_expand_variants(
 /// A flat enum encodes absence in its tag, so only structs gain a presence lane.
 pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
     if ws.nominals.struct_id(n).is_some()
-        && let Some(mut shape) = planned_value(ws, n).and_then(|plan| plan.value_shape().cloned())
+        && let Some(mut shape) = planned_value(ws, n).map(|plan| plan.shape.clone())
     {
         shape.nullable = true;
         return Some(shape);
@@ -1299,7 +1252,7 @@ pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<V
 
 pub(crate) fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     planned_value(ws, name)
-        .and_then(|plan| plan.value_shape().cloned())
+        .map(|plan| plan.shape.clone())
         .or_else(|| flat_enum_value_shape(ws, name))
 }
 
@@ -1545,18 +1498,20 @@ pub enum CFieldType {
 
 pub fn value_c_fields(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, CFieldType)>> {
     let plan = planned_value(ws, name)?;
-    (plan.storage == ValueStorage::CData).then_some(())?;
-    plan.fields
-        .iter()
-        .map(|(name, field)| {
-            let ty = match field {
-                PlannedField::Primitive(ctype) => CFieldType::Scalar(ctype),
-                PlannedField::Nested(child) => CFieldType::Aggregate(child.name),
-                _ => return None,
-            };
-            Some((*name, ty))
-        })
-        .collect()
+    Some(
+        plan.cdata
+            .as_ref()?
+            .fields
+            .iter()
+            .map(|(name, _, member)| {
+                let ty = match member {
+                    CMember::Scalar(ty) => CFieldType::Scalar(ty),
+                    CMember::Aggregate(name, _) => CFieldType::Aggregate(*name),
+                };
+                (*name, ty)
+            })
+            .collect(),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

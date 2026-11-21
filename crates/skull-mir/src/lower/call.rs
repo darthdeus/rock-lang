@@ -3164,8 +3164,7 @@ impl<'a> Builder<'a> {
             // lanes, not a reconstructed box, own the snapshot.
             ValueRepr::Scalar(v)
                 if super::shape::planned_value(self.ws, shape.name).is_some_and(|plan| {
-                    plan.shape
-                        .as_ref()
+                    plan.scalar_shape()
                         .is_some_and(|plain| plain.fields == shape.fields)
                 }) =>
             {

@@ -605,12 +605,11 @@ fn value_shape_facts(ws: &Workspace, name: Ustr) -> (Option<ValueStorage>, bool,
         return (None, false, true);
     };
     let column_eligible = super::shape::is_value_struct(ws, name)
-        && (plan.shape.is_some()
-            || (crate::lower::is_nobox_nominal(ws, name) && plan.gc_shape.is_some()));
+        && (plan.scalarizable || crate::lower::is_nobox_nominal(ws, name));
     (
         Some(plan.storage),
         column_eligible,
-        !plan_box_materializes_nobox(ws, &plan),
+        !plan.box_materializes_nobox,
     )
 }
 
@@ -630,20 +629,7 @@ fn payload_leaf_count(shape: &ValueShape) -> usize {
 /// Cdata and leaf-table boxes flatten child leaves; GC tables keep declared keys,
 /// so boxing one would materialize a `nobox` child.
 fn box_would_materialize_nobox(ws: &Workspace, name: Ustr) -> bool {
-    super::shape::planned_value(ws, name).is_some_and(|plan| plan_box_materializes_nobox(ws, &plan))
-}
-
-fn plan_box_materializes_nobox(ws: &Workspace, plan: &super::shape::PlannedValue) -> bool {
-    use super::shape::PlannedField;
-    if plan.storage != ValueStorage::GcTable {
-        return false;
-    }
-    plan.fields.iter().any(|(_, field)| match field {
-        PlannedField::Nested(child) | PlannedField::Nullable(child) => {
-            crate::lower::is_nobox_nominal(ws, child.name) || plan_box_materializes_nobox(ws, child)
-        }
-        PlannedField::Primitive(_) | PlannedField::FlatEnum(_) | PlannedField::Opaque => false,
-    })
+    super::shape::planned_value(ws, name).is_some_and(|plan| plan.box_materializes_nobox)
 }
 
 /// `None` is an opaque slot. Storage width does not affect the ABI.
@@ -1794,7 +1780,7 @@ pub(super) fn expanded_nullable_parameter_shape(ws: &Workspace, shape: &ValueSha
                 continue;
             };
             let Some(mut child) =
-                super::shape::planned_value(ws, child).and_then(|p| p.shape.clone())
+                super::shape::planned_value(ws, child).and_then(|p| p.scalar_shape().cloned())
             else {
                 continue;
             };
