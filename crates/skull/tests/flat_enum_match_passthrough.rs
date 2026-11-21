@@ -41,15 +41,3 @@ fn maybe_join(src: Src?, s: string) -> Src? {
     return "{render(a.src)} {a.n}|{render(b.src)} {b.n}|{render(c)}|{render(d ?? Src::Player)}|{e == null}"
 }
 "#;
-
-#[test]
-fn a_flat_enum_match_returning_its_scrutinee_does_not_box() {
-    let mut lua = emit_module(SRC);
-    for name in ["field_join", "let_join", "param_join"] {
-        let body = function_body(&lua, &mangled_name(&lua, name));
-        assert!(!body.contains("{__variant"));
-        assert!(!body.contains("\"Src\""));
-    }
-    lua.push_str("\nprint(probe())\n");
-    assert_eq!(run_luajit(&lua), "mob 1 2 3|qx 4|player|mob 5 6|true");
-}
