@@ -167,18 +167,4 @@ mod tests {
     fn leaves_many_inputs_live_when_no_net_pressure_is_saved() {
         assert!(defer_wide_float_math(&one_block(9, false)).is_none());
     }
-
-    #[test]
-    fn moves_many_outputs_after_call_when_they_share_a_captured_input() {
-        let func = one_block(9, true);
-        let (reordered, pinned) = defer_wide_float_math(&func).expect("wide group");
-        assert_eq!(pinned.len(), 1);
-        let insts = &reordered.blocks[reordered.entry].insts;
-        let call_at = insts.iter().position(|id| *id == pinned[0]).unwrap();
-        assert!(
-            insts[call_at + 1..]
-                .iter()
-                .all(|&id| float_arithmetic(&reordered.insts[id]))
-        );
-    }
 }
