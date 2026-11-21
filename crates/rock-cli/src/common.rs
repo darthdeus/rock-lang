@@ -1,4 +1,5 @@
 use crate::*;
+use bone_core::prelude::Instant;
 use std::process::Child;
 use std::time::Duration;
 
@@ -41,49 +42,18 @@ impl ProcessManager {
             child,
             WaitPolicy::Total(timeout),
             false,
-            false,
             |_| None,
             |()| None,
         )
     }
 
-    /// Bound startup and inactivity using a caller-supplied stderr decoder.
-    pub(crate) fn wait_with_progress_watchdog<P: Send + 'static>(
+    pub(crate) fn wait_with_progress<P: Send + 'static>(
         child: &mut Child,
-        startup: Duration,
-        inactivity: Duration,
-        decode: fn(&[u8]) -> Option<P>,
-        forward_stdout: bool,
-        forward_stderr: bool,
-    ) -> Result<ProcessResult<P>> {
-        Self::wait_with_policy(
-            child,
-            WaitPolicy::Progress {
-                startup,
-                inactivity,
-            },
-            forward_stdout,
-            forward_stderr,
-            decode,
-            Some,
-        )
-    }
-
-    /// Start a total run budget at the first decoded progress event.
-    pub(crate) fn wait_with_progress_budget<P: Send + 'static>(
-        child: &mut Child,
-        startup: Duration,
-        budget: Duration,
+        watchdog: ProgressWatchdog,
         decode: fn(&[u8]) -> Option<P>,
     ) -> Result<ProcessResult<P>> {
-        Self::wait_with_policy(
-            child,
-            WaitPolicy::ProgressBudget { startup, budget },
-            false,
-            false,
-            decode,
-            Some,
-        )
+        let forward = watchdog.inactivity;
+        Self::wait_with_policy(child, WaitPolicy::Progress(watchdog), forward, decode, Some)
     }
 
     #[cfg(feature = "backend-js")]
@@ -97,7 +67,6 @@ impl ProcessManager {
                 cpu_limit: budget,
                 wall_limit: Duration::MAX,
             },
-            false,
             false,
             |_| None,
             |()| None,
@@ -114,7 +83,6 @@ impl ProcessManager {
             child,
             policy,
             false,
-            false,
             move |line| crate::test_protocol::decode_lua_test(line, &token),
             |event| tests.observe(event).then_some(()),
         )
@@ -123,8 +91,7 @@ impl ProcessManager {
     fn wait_with_policy<P: Send + 'static, R>(
         child: &mut Child,
         policy: WaitPolicy,
-        forward_stdout: bool,
-        forward_stderr: bool,
+        forward: bool,
         decode: impl Fn(&[u8]) -> Option<P> + Send + 'static,
         mut observe: impl FnMut(P) -> Option<R>,
     ) -> Result<ProcessResult<R>> {
@@ -155,7 +122,7 @@ impl ProcessManager {
                         Ok(0) => break,
                         Ok(n) => {
                             buf.extend_from_slice(&chunk[..n]);
-                            if forward_stdout {
+                            if forward {
                                 let mut stdout = io::stdout().lock();
                                 let _ = stdout.write_all(&chunk[..n]);
                                 let _ = stdout.flush();
@@ -174,7 +141,7 @@ impl ProcessManager {
                 let mut buf = Vec::new();
                 let mut line = Vec::new();
                 while reader.read_until(b'\n', &mut line)? != 0 {
-                    if forward_stderr {
+                    if forward {
                         let mut stderr = io::stderr().lock();
                         let _ = stderr.write_all(&line);
                         let _ = stderr.flush();
@@ -183,7 +150,7 @@ impl ProcessManager {
                         && let Some(progress) = decode(&line)
                     {
                         let _ = tx.send(ProgressEvent {
-                            at: bone_core::prelude::Instant::now(),
+                            at: Instant::now(),
                             progress,
                             child_cpu: sample_cpu
                                 .then(|| child_process_cpu_time(child_pid))
@@ -201,7 +168,7 @@ impl ProcessManager {
             })
         });
 
-        let start_time = bone_core::prelude::Instant::now();
+        let start_time = Instant::now();
         let mut last_progress_at = start_time;
         let mut first_progress_at = None;
         let mut latest_progress = None;
@@ -222,7 +189,7 @@ impl ProcessManager {
                     last_progress_at = if sample_cpu {
                         last_progress_at.max(event.at)
                     } else {
-                        bone_core::prelude::Instant::now()
+                        Instant::now()
                     };
                     first_progress_at.get_or_insert(last_progress_at);
                     if let Some(sample) = event.child_cpu {
@@ -236,24 +203,17 @@ impl ProcessManager {
                 break (status, None);
             }
             let saw_progress = first_progress_at.is_some();
-            let (elapsed, limit, phase) = match policy {
-                WaitPolicy::Total(timeout) => {
-                    (start_time.elapsed(), timeout, TimeoutPhase::TotalBudget)
-                }
-                WaitPolicy::Progress {
-                    startup,
-                    inactivity,
-                } => {
-                    if saw_progress {
-                        (
-                            last_progress_at.elapsed(),
-                            inactivity,
-                            TimeoutPhase::ProgressInactivity,
-                        )
-                    } else {
-                        (start_time.elapsed(), startup, TimeoutPhase::Startup)
-                    }
-                }
+            let (remaining, phase) = match policy {
+                WaitPolicy::Total(timeout) => (
+                    timeout.saturating_sub(start_time.elapsed()),
+                    TimeoutPhase::TotalBudget,
+                ),
+                WaitPolicy::Progress(watchdog) => watchdog.remaining(
+                    Instant::now(),
+                    start_time,
+                    first_progress_at,
+                    last_progress_at,
+                ),
                 WaitPolicy::Cpu {
                     cpu_limit,
                     wall_limit,
@@ -262,32 +222,28 @@ impl ProcessManager {
                     let cpu_elapsed = child_process_cpu_time(child_pid)
                         .zip(last_test_cpu)
                         .map(|(now, baseline)| now.saturating_sub(baseline));
-                    if let Some(elapsed) = cpu_elapsed.filter(|elapsed| *elapsed >= cpu_limit) {
+                    if cpu_elapsed.is_some_and(|elapsed| elapsed >= cpu_limit) {
                         let phase = if saw_progress {
                             TimeoutPhase::TestCpu
                         } else {
                             TimeoutPhase::StartupCpu
                         };
-                        (elapsed, cpu_limit, phase)
+                        (Duration::ZERO, phase)
                     } else {
                         let phase = if saw_progress {
                             TimeoutPhase::TestWall
                         } else {
                             TimeoutPhase::StartupWall
                         };
-                        (wall_elapsed, wall_limit, phase)
+                        (wall_limit.saturating_sub(wall_elapsed), phase)
                     }
                 }
-                WaitPolicy::ProgressBudget { startup, budget } => match first_progress_at {
-                    Some(first) => (first.elapsed(), budget, TimeoutPhase::ProgressBudget),
-                    None => (start_time.elapsed(), startup, TimeoutPhase::Startup),
-                },
             };
-            if elapsed >= limit {
+            if remaining.is_zero() {
                 child.kill()?;
                 break (child.wait()?, Some(phase));
             }
-            thread::sleep(poll);
+            thread::sleep(poll.min(remaining));
             poll = (poll * 2).min(Duration::from_millis(50));
         };
         let timed_out = timeout_phase.is_some();
@@ -324,9 +280,7 @@ impl ProcessManager {
             timed_out,
             timeout_phase,
             progress: latest_progress,
-            progress_stopped: matches!(policy, WaitPolicy::Progress { .. })
-                && first_progress_at.is_some()
-                && timed_out,
+            progress_stopped: timeout_phase == Some(TimeoutPhase::ProgressInactivity),
         })
     }
 }
@@ -341,18 +295,44 @@ pub(crate) fn test_watchdog_wall_backstop(cpu_limit: Duration) -> Duration {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum WaitPolicy {
     Total(Duration),
-    Progress {
-        startup: Duration,
-        inactivity: Duration,
-    },
-    ProgressBudget {
-        startup: Duration,
-        budget: Duration,
-    },
+    Progress(ProgressWatchdog),
     Cpu {
         cpu_limit: Duration,
         wall_limit: Duration,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProgressWatchdog {
+    pub startup: Duration,
+    pub running: Duration,
+    pub inactivity: bool,
+    pub launch_cap: Option<(Instant, Duration)>,
+}
+
+impl ProgressWatchdog {
+    fn remaining(
+        self,
+        now: Instant,
+        started: Instant,
+        first: Option<Instant>,
+        latest: Instant,
+    ) -> (Duration, TimeoutPhase) {
+        let (anchor, limit, phase) = match first {
+            None => (started, self.startup, TimeoutPhase::Startup),
+            Some(_) if self.inactivity => (latest, self.running, TimeoutPhase::ProgressInactivity),
+            Some(first) => (first, self.running, TimeoutPhase::ProgressBudget),
+        };
+        if let Some((launch, cap)) = self.launch_cap
+            && cap <= limit.saturating_add(anchor.duration_since(launch))
+        {
+            return (
+                cap.saturating_sub(now.duration_since(launch)),
+                TimeoutPhase::TotalBudget,
+            );
+        }
+        (limit.saturating_sub(now.duration_since(anchor)), phase)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,7 +363,7 @@ impl std::fmt::Display for TimeoutPhase {
 }
 
 struct ProgressEvent<P> {
-    at: bone_core::prelude::Instant,
+    at: Instant,
     progress: P,
     child_cpu: Option<Duration>,
 }
@@ -526,19 +506,6 @@ pub struct ProcessResult<P = ()> {
     pub progress_stopped: bool,
 }
 
-#[cfg(not(unix))]
-impl ProcessResult {
-    pub(crate) fn with_progress<P>(self, progress: Option<P>) -> ProcessResult<P> {
-        ProcessResult {
-            output: self.output,
-            timed_out: self.timed_out,
-            timeout_phase: self.timeout_phase,
-            progress,
-            progress_stopped: self.progress_stopped,
-        }
-    }
-}
-
 /// Thread count requested by `ROCK_NUM_THREADS`, else `RAYON_NUM_THREADS`.
 /// It sizes both the compiler's global rayon pool and the C test pool.
 /// `0` asks for the default, as in rayon. A value that is not a count is an
@@ -579,6 +546,9 @@ pub(crate) fn requested_thread_count() -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::{Instant, ProgressWatchdog};
+    use std::time::Duration;
+
     #[test]
     fn thread_count_request_rejects_a_value_that_is_not_a_count() {
         use super::parse_thread_count_request as parse;
@@ -599,6 +569,41 @@ mod tests {
     }
 
     #[test]
+    fn watchdog_uses_the_earliest_deadline() {
+        use super::TimeoutPhase::*;
+        let secs = Duration::from_secs;
+        let launch = Instant::now();
+        let started = launch + secs(1);
+        let first = launch + secs(3);
+        let latest = launch + secs(4);
+        let now = launch + secs(5);
+        let watchdog = ProgressWatchdog {
+            startup: secs(6),
+            running: secs(3),
+            inactivity: false,
+            launch_cap: Some((launch, secs(8))),
+        };
+        for (first_progress, inactivity, cap, expected) in [
+            (None, false, 8, (secs(2), Startup)),
+            (None, false, 2, (Duration::ZERO, TotalBudget)),
+            (Some(first), false, 8, (secs(1), ProgressBudget)),
+            (Some(first), true, 8, (secs(2), ProgressInactivity)),
+            (Some(first), true, 6, (secs(1), TotalBudget)),
+            (Some(first), true, 4, (Duration::ZERO, TotalBudget)),
+        ] {
+            assert_eq!(
+                ProgressWatchdog {
+                    inactivity,
+                    launch_cap: Some((launch, secs(cap))),
+                    ..watchdog
+                }
+                .remaining(now, started, first_progress, latest),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn panicked_pipe_reader_fails_the_wait_instead_of_returning_empty_output() {
         fn decode_panics(_: &[u8]) -> Option<()> {
             panic!("decoder panic inside the stderr reader")
@@ -609,13 +614,15 @@ mod tests {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("spawn sh");
-        let result = super::ProcessManager::wait_with_progress_watchdog(
+        let result = super::ProcessManager::wait_with_progress(
             &mut child,
-            std::time::Duration::from_secs(30),
-            std::time::Duration::from_secs(30),
+            ProgressWatchdog {
+                startup: Duration::from_secs(30),
+                running: Duration::from_secs(30),
+                inactivity: false,
+                launch_cap: None,
+            },
             decode_panics,
-            false,
-            false,
         );
         let error = result.expect_err("a panicked reader must fail the wait");
         assert!(error.to_string().contains("stderr"), "got: {error}");
@@ -629,7 +636,7 @@ mod tests {
                     .arg("0.01")
                     .spawn()
                     .expect("spawn sleep");
-                let start = bone_core::prelude::Instant::now();
+                let start = Instant::now();
                 let result = super::ProcessManager::wait_with_timeout(
                     &mut child,
                     std::time::Duration::from_secs(30),

@@ -2,16 +2,12 @@ use crate::Result;
 use anyhow::Context as _;
 use std::path::PathBuf;
 
-pub(crate) struct CompiledGame {
-    pub lua_file: std::path::PathBuf,
-}
-
 // Keep this directory alive until the child exits. The requested output directory
 // may also be targeted by a compiler, watcher or another bounded invocation.
 pub(crate) fn compile_frame_invocation(
     path: &str,
     output: &str,
-) -> Result<(tempfile::TempDir, CompiledGame)> {
+) -> Result<(tempfile::TempDir, PathBuf)> {
     std::fs::create_dir_all(output)?;
     let invocation = tempfile::Builder::new()
         .prefix("frame-run-")
@@ -20,21 +16,34 @@ pub(crate) fn compile_frame_invocation(
         .canonicalize()
         .map_err(|error| anyhow::anyhow!("canonicalize game {path}: {error}"))?;
     let project = project.to_string_lossy();
-    let private_output = PathBuf::from(invocation.path().to_string_lossy().into_owned());
-    let lua_file = private_output.join(rock_host::project::MAIN_LUA_FILENAME);
-    with_game_prepared(&project, || {
-        std::fs::create_dir_all(&private_output)
-            .with_context(|| format!("create {}", private_output.display()))?;
-        let compiler = rock_host::timed("compile", || {
-            crate::skull_backend::IncrementalProject::init(
-                &project,
-                &lua_file,
-                &lua_file.with_file_name("incremental.lua"),
-            )
-        })?;
-        crate::allocator::drop_and_release_in_background(compiler);
-        Ok(())
+    let lua_file = invocation
+        .path()
+        .join(rock_host::project::MAIN_LUA_FILENAME);
+    let engine_project = rock_host::timed("resolve project", || {
+        rock_engine_host::project::resolve_project_dir(&project)
     })?;
+    let engine_project = engine_project.to_string_lossy();
+    rock_host::timed("sound bank", || {
+        crate::package::prepare_sound_bank(&engine_project)
+    })?;
+    beside(
+        || {
+            rock_host::timed("engine libraries", || {
+                rock_engine_host::engine_build::build_engine_libs(&engine_project)
+            })
+        },
+        || {
+            let compiler = rock_host::timed("compile", || {
+                crate::skull_backend::IncrementalProject::init(
+                    &project,
+                    &lua_file,
+                    &lua_file.with_file_name("incremental.lua"),
+                )
+            })?;
+            crate::allocator::drop_and_release_in_background(compiler);
+            Ok(())
+        },
+    )?;
     // Profiling tools inspect this diagnostic copy after the run. Execution uses
     // only the private file, so another invocation can safely replace this copy.
     rock_host::timed("diagnostic copy", || {
@@ -43,7 +52,7 @@ pub(crate) fn compile_frame_invocation(
             &PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
         )
     })?;
-    Ok((invocation, CompiledGame { lua_file }))
+    Ok((invocation, lua_file))
 }
 
 /// Install `source` as `destination` and wipe the overlay beside it, as a full
@@ -58,24 +67,6 @@ fn diagnostic_copy(source: &std::path::Path, destination: &std::path::Path) -> R
     })
     .with_context(|| format!("copy frame artifact to {}", destination.display()))?;
     crate::skull_backend::wipe_overlay(&destination.with_file_name("incremental.lua"))
-}
-
-pub(crate) fn with_game_prepared<T>(path: &str, compile: impl FnOnce() -> Result<T>) -> Result<T> {
-    let project = rock_host::timed("resolve project", || {
-        rock_engine_host::project::resolve_project_dir(path)
-    })?;
-    let project = project.to_string_lossy();
-    rock_host::timed("sound bank", || {
-        crate::package::prepare_sound_bank(&project)
-    })?;
-    beside(
-        || {
-            rock_host::timed("engine libraries", || {
-                rock_engine_host::engine_build::build_engine_libs(&project)
-            })
-        },
-        compile,
-    )
 }
 
 /// Runs `prepare` beside `compile` and returns the compile's result once
