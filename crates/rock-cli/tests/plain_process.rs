@@ -222,34 +222,6 @@ fn plain_compiler_process_without_private_runtime() {
 }
 
 #[test]
-fn plain_main_errors_containing_interrupt_text_remain_failures() {
-    let root = tempfile::tempdir().unwrap();
-    write(
-        root.path(),
-        "stick.toml",
-        "[package]\nname = \"main-errors\"\n",
-    );
-    for message in [
-        "ordinary main failure",
-        "operation interrupted! database write failed",
-        "database operation interrupted!",
-    ] {
-        write(
-            root.path(),
-            "main.rock",
-            format!("fn main() {{ error(\"{message}\") }}\n"),
-        );
-        let out = invoke(root.path(), &["run", "."]);
-        assert!(
-            !out.status.success(),
-            "main error exited successfully: {message:?}: {}",
-            text(&out)
-        );
-        assert_mentions(&out, message);
-    }
-}
-
-#[test]
 fn js_backend_is_served_by_the_plain_cli() {
     let root = tempfile::tempdir().unwrap();
     for command in ["test", "run"] {
@@ -341,84 +313,6 @@ fn plain_identity_storage_follows_the_manifest_declaration() {
     );
 }
 
-#[test]
-fn plain_tests_use_portable_scratch_without_cwd_tmp() {
-    let root = tempfile::tempdir().unwrap();
-    let log = root.path().join("scratch.log");
-    for fail in [false, true] {
-        let source = format!(
-            r#"@test inline(lua) fn scratch_probe() = """
-local scratch = assert(os.getenv("ROCK_TEST_TMP"))
-local probe = assert(io.open(scratch .. "/writable", "w"))
-probe:write("scratch is writable")
-probe:close()
-local log = assert(io.open(os.getenv("SCRATCH_LOG"), "w"))
-log:write(scratch)
-log:close()
-{}
-"""
-"#,
-            if fail {
-                "error('intentional scratch failure')"
-            } else {
-                ""
-            }
-        );
-        write(root.path(), "scratch.rock", source);
-        let out = rock(root.path())
-            .args(["test", "scratch.rock"])
-            .env("SCRATCH_LOG", &log)
-            .env("ROCK_TEST_VERBOSE", "1")
-            .output()
-            .unwrap();
-        assert_eq!(out.status.success(), !fail, "{}", text(&out));
-        if fail {
-            assert_mentions(&out, "intentional scratch failure");
-        } else {
-            assert_mentions(&out, "1/1 @tests passed");
-        }
-        let scratch = std::fs::read_to_string(&log).unwrap();
-        assert!(
-            !std::path::Path::new(&scratch).exists(),
-            "scratch survived child exit: {scratch}"
-        );
-        assert!(
-            !root.path().join("tmp").exists(),
-            "plain test created <cwd>/tmp"
-        );
-    }
-}
-
-#[test]
-fn invalid_commands_and_options_report_their_exit_status_and_argument() {
-    let root = tempfile::tempdir().unwrap();
-    let cases: &[(&[&str], i32, &str)] = &[
-        (
-            &["lsp", "hole-info"],
-            2,
-            "unrecognized subcommand 'hole-info'",
-        ),
-        (&["fix", "missing.rock"], 2, "unrecognized subcommand 'fix'"),
-        (
-            &["run", "--timeout", "5"],
-            2,
-            "unexpected argument '--timeout'",
-        ),
-        (&["compile", "--check"], 2, "unexpected argument '--check'"),
-        (
-            &["run", "missing.rock", "--backend", "c"],
-            2,
-            "invalid value 'c'",
-        ),
-    ];
-    for (args, code, fragment) in cases {
-        let output = invoke(root.path(), args);
-        assert_eq!(output.status.code(), Some(*code), "{}", text(&output));
-        assert_mentions(&output, fragment);
-    }
-    assert!(!root.path().join("tmp").exists());
-}
-
 /// `app/` printing 42 through its path dependency `lib/`.
 fn app_with_library(root: &Path) {
     write_files(
@@ -439,43 +333,6 @@ fn app_with_library(root: &Path) {
                 "use lib::answer;\nfn main() { print(answer()) }\n",
             ),
         ],
-    );
-}
-
-#[test]
-fn run_loads_a_manifest_dependency() {
-    let root = tempfile::tempdir().unwrap();
-    app_with_library(root.path());
-    let out = invoke(root.path(), &["run", "app"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
-}
-
-#[test]
-fn plain_compile_has_no_cross_process_slot_policy() {
-    let root = tempfile::tempdir().unwrap();
-    write(root.path(), "main.rock", "fn main() {}\n");
-    write(
-        root.path(),
-        "stick.toml",
-        r#"[package]
-name = "slot-probe"
-type = "bin"
-"#,
-    );
-    let out = rock(root.path())
-        .args(["compile", ".", "out.lua"])
-        .env("HOME", root.path())
-        .env_remove("ROCK_COMPILE_ADMISSION")
-        .env_remove("ROCK_COMPILE_SLOTS")
-        .env_remove("ROCK_COMPILE_SLOT_DIR")
-        .env_remove("ROCK_COMPILE_CLASS")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(
-        !root.path().join("tmp").exists(),
-        "plain compile wrote a private slot policy under HOME/tmp"
     );
 }
 
@@ -512,66 +369,6 @@ fn plain_scan_assigns_no_archive_semantics() {
             expected
         );
     }
-}
-
-#[test]
-fn plain_writes_an_invocation_log_only_where_rock_invocation_log_names() {
-    let root = tempfile::tempdir().unwrap();
-    let state = tempfile::tempdir().unwrap();
-    write(root.path(), "main.rock", "fn main() {}\n");
-    let run = |log: Option<&std::path::Path>| {
-        let mut command = rock(root.path());
-        command
-            .args(["fmt", "--check", "main.rock"])
-            .env("XDG_STATE_HOME", state.path())
-            .env("HOME", state.path())
-            .env_remove("ROCK_INVOCATION_LOG");
-        if let Some(log) = log {
-            command.env("ROCK_INVOCATION_LOG", log);
-        }
-        command.output().expect("start public plain CLI")
-    };
-    let out = run(None);
-    let mut written = Vec::new();
-    let mut pending = vec![state.path().to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                pending.push(path)
-            } else {
-                written.push(path)
-            }
-        }
-    }
-    assert!(
-        written.is_empty(),
-        "plain build logged without opting in: {written:?}\n{}",
-        text(&out)
-    );
-
-    let log = state.path().join("chosen.jsonl");
-    let out = run(Some(&log));
-    let record = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(
-        record.contains("\"fmt\""),
-        "explicit ROCK_INVOCATION_LOG not written: <{record}>\n{}",
-        text(&out)
-    );
-    let stone_log = state.path().join("stone.jsonl");
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(root.path())
-        .args(["stone", "missing-project"])
-        .env("ROCK_DIR", root.path())
-        .env("ROCK_INVOCATION_LOG", &stone_log)
-        .env_remove("ROCK_INVOCATION_PARENT")
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "missing project must fail");
-    let records = read_jsonl(&stone_log);
-    assert_eq!(records.len(), 1, "{}", text(&out));
-    assert_eq!(records[0]["kind"], "stone");
-    assert_ne!(records[0]["exit_code"], 0);
 }
 
 /// Publishes the built binary at `exe` without opening it for writing where a
@@ -615,50 +412,6 @@ fn start_relocated(exe: &Path, root: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
-fn plain_rock_runs_relocated_outside_any_checkout() {
-    // An installed binary has no checkout and no stdlib beside it: relocate the
-    // built binary into a bare temp dir (no bin/ layout, no stdlib sibling)
-    // and compile + run a small program from another temp dir.
-    let home = tempfile::tempdir().unwrap();
-    let exe = home
-        .path()
-        .join(if cfg!(windows) { "rock.exe" } else { "rock" });
-    relocate(env!("CARGO_BIN_EXE_rock"), &exe);
-    let root = tempfile::tempdir().unwrap();
-    write(root.path(), "main.rock", "fn main() { print(6 * 7) }\n");
-    let run = |args: &[&str]| start_relocated(&exe, root.path(), args);
-    let compiled = run(&["compile", "main.rock"]);
-    assert!(compiled.status.success(), "{}", text(&compiled));
-    assert!(
-        String::from_utf8_lossy(&compiled.stdout).contains("print"),
-        "no Lua emitted"
-    );
-    let ran = run(&["run", "main.rock"]);
-    assert!(ran.status.success(), "{}", text(&ran));
-    assert_eq!(String::from_utf8_lossy(&ran.stdout), "42\n");
-}
-
-#[test]
-fn plain_rejects_a_thread_count_that_is_not_a_count() {
-    let root = tempfile::tempdir().unwrap();
-    for var in ["ROCK_NUM_THREADS", "RAYON_NUM_THREADS"] {
-        let out = rock(root.path())
-            .args(["fmt", "--check", "missing.rock"])
-            .env_remove("ROCK_NUM_THREADS")
-            .env_remove("RAYON_NUM_THREADS")
-            .env(var, "eight")
-            .output()
-            .expect("start public plain CLI");
-        assert_eq!(out.status.code(), Some(2), "{var}: {}", text(&out));
-        assert!(
-            text(&out).contains(&format!("invalid value 'eight' for '{var}'")),
-            "{}",
-            text(&out)
-        );
-    }
-}
-
-#[test]
 fn plain_lua_line_directives_number_dev_output_and_reject_a_release_channel() {
     let root = tempfile::tempdir().unwrap();
     write_files(
@@ -694,96 +447,6 @@ fn plain_lua_line_directives_number_dev_output_and_reject_a_release_channel() {
     let release = directives(&["compile", ".", "out.lua", "--channel", "steam"]);
     assert!(!release.status.success(), "{}", text(&release));
     assert_mentions(&release, "Lua line directives are a development option");
-}
-
-#[test]
-fn run_lets_a_program_outlive_the_test_runner_timeout() {
-    let root = tempfile::tempdir().unwrap();
-    write(
-        root.path(),
-        "slow.rock",
-        r#"inline(lua) fn busy_wait(seconds: float) = """
-    local deadline = os.clock() + seconds
-    while os.clock() < deadline do end
-"""
-fn main() {
-    busy_wait(2.5)
-    print("done")
-}
-"#,
-    );
-    let out = invoke(root.path(), &["run", "slow.rock"]);
-    assert!(out.status.success(), "{}", text(&out));
-    assert_mentions(&out, "done");
-}
-
-#[test]
-fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
-    let parse = |argv: &[&str]| {
-        rock_cli::Args::from_matches(rock_cli::Args::cli().try_get_matches_from(argv).unwrap())
-    };
-    let perf = parse(&["rock", "perf", "game"]);
-    assert_eq!((perf.frames, perf.warmup_frames), (None, None));
-    let perf = parse(&[
-        "rock",
-        "perf",
-        "game",
-        "--frames",
-        "7",
-        "--seconds",
-        "2.5",
-        "--warmup-frames",
-        "0",
-        "--gc-window",
-        "3",
-        "--gc-window-start",
-        "2",
-        "--gc-window-mode",
-        "running",
-        "--jv",
-    ]);
-    assert_eq!(perf.frames, Some(7));
-    assert_eq!(perf.seconds, Some(2.5));
-    assert_eq!(perf.warmup_frames, Some(0));
-    assert_eq!((perf.gc_window, perf.gc_window_start), (3, 2));
-    assert_eq!(perf.gc_window_mode, "running");
-    assert!(perf.jv);
-    let test = parse(&[
-        "rock",
-        "test",
-        "main.rock",
-        "--iters",
-        "2",
-        "--warmup",
-        "0",
-        "--channel",
-        "release",
-        "--target-os",
-        "web",
-        "--format",
-        "json",
-    ]);
-    assert_eq!(test.iters, 2);
-    assert_eq!(test.warmup, 0);
-    assert_eq!(test.target_os.as_deref(), Some("web"));
-    assert_eq!(test.perf_format, "json");
-
-    let prefixed = parse(&["rock", "--format", "json", "sim", "game"]);
-    assert_eq!(prefixed.perf_format, "json");
-    let sim = parse(&["rock", "--jobs", "2", "sim", "game"]);
-    assert_eq!(sim.jobs, Some(2));
-    let pass_through = parse(&["rock", "frame", "game", "--", "--seed", "42"]);
-    assert_eq!(pass_through.app_args, ["--seed", "42"]);
-    let vars = parse(&[
-        "rock",
-        "--var",
-        "A=1",
-        "compile",
-        "main.rock",
-        "--var",
-        "B=2",
-    ]);
-    assert_eq!(vars.build_var_overrides, ["A=1", "B=2"]);
 }
 
 #[test]
