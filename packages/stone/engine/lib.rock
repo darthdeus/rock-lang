@@ -1,4 +1,3 @@
-// Stone library - OpenGL + ImGui wrapper
 
 // 0.0 until the runner writes the frame delta, so code run by an eager
 // `start()` prime before the first frame reads 0, not nil.
@@ -8,10 +7,7 @@ pub global time: float = 0
 // Replay is exempt: the log carries the already-scaled dt.
 pub global TIME_SCALE: float = get_env_float("STONE_TIME_SCALE", 1.0)
 
-// Monotonic host-frame counter, bumped once per frame in the runner before any
-// @update system runs, including frozen (paused) frames. Advances in every mode
-// (game, sim, `rock frame`) since all route through the runner. Game-tick
-// consumers use the host task clock.
+// Advances once per host frame, including paused frames; game ticks use the host clock.
 pub global frame_seq: int = 0
 
 const KEY_DEBUG_PROFILER: ToolKey = ToolKey::F8
@@ -22,9 +18,7 @@ const KEY_DEBUG_SCREENSHOT: ToolKey = ToolKey::F12
 // Toggle per-FPS-window JIT trace/abort delta logging. LuaJIT-only; no-op
 // elsewhere. Lazy-installs a `jit.attach` callback on first enable.
 pub global KEY_DEBUG_JIT_TRACE: string = "f2"
-// Runtime `jit.off()` / `jit.on()` toggle (flushes traces on disable). Use
-// to A/B-test whether the JIT itself is responsible for an FPS regression —
-// if perf jumps when this is pressed, the cause is JIT trace thrash.
+// Disabling the JIT also flushes compiled traces.
 pub global KEY_DEBUG_JIT_TOGGLE: string = "f3"
 
 pub const KEY_CTRL_LEFT: string = "lctrl"
@@ -211,10 +205,7 @@ fn stone_pad_type_name_raw() -> string {
     return ffi_string(p, null)
 }
 
-// Opaque handle phantoms. Runtime value is raw LuaJIT cdata for
-// StoneWindow* / StoneEvent*; the struct is
-// compile-time-only nominal typing so externs can't accidentally
-// accept a different handle type.
+// Handles are LuaJIT cdata; these phantoms prevent mixing pointer types.
 pub struct StoneWindow { }
 pub struct StoneEvent  { }
 
@@ -257,18 +248,8 @@ extern(ffi, "stone") fn stone_is_key_down(key: string) -> bool
 extern(ffi, "stone") fn stone_get_mouse_position(x: Ptr<int>, y: Ptr<int>)
 extern(ffi, "stone") fn stone_get_global_mouse_position(x: Ptr<int>, y: Ptr<int>)
 
-// ============================================================================
-// Persistent FFI scratch buffers
-// ============================================================================
-// Reused NativeBuffers so FFI boundary calls don't `ffi.new` per call:
-// FFI_*_OUT are 4 fixed size-1 slots per type, for scalar OUT-params (C
-// writes, Rock reads). Multiple distinct slots because one call can need
-// several at once (window borders = 4).
-//
-// Safety property: a slot is handed to ONE synchronous C call (pure Rust,
-// never re-enters Lua / yields), then read -- never held across another call
-// or coroutine yield. Pointer arguments stay JIT-able; struct-by-value returns
-// do not, so compound results use out-pointers.
+// Each scratch slot belongs to one synchronous C call and cannot cross a
+// re-entry or yield. Out-pointers avoid untraceable struct-by-value returns.
 
 // Scalar out-param slots. Max simultaneous: 4 (window borders / image pixel).
 global FFI_INT_OUT_1: NativeBuffer<int> = native_buffer_int(1)
@@ -624,10 +605,7 @@ pub extern(ffi, "stone") fn stone_imgui_initialized() -> bool
 
 extern(ffi, "stone") fn stone_draw_fullscreen_rect(u0: float, v0: float, u1: float, v1: float)
 
-// Direct Rock-level extern for the flat-array mesh path. Takes a typed
-// Ptr<float> (no longer `any`) so callers can't accidentally hand it the
-// wrong cdata variant. Pair with NativeBuffer<float>.ptr; see
-// stone/engine/rendering/rect_batch.rock for a working caller.
+// The typed pointer must refer to a NativeBuffer<float>.
 extern(ffi, "stone") fn stone_draw_mesh(
     vertex_data: Ptr<float>,
     vertex_count: int,
@@ -1206,22 +1184,7 @@ extern(ffi, "stone") fn stone_text_init() -> bool
 
 pub enum FontRasterPolicy { Fixed, OutputDensity }
 
-// `FontData` is the Rock-side metadata for a loaded font:
-//   - `backend_id`: the 1-based stone-rs font_id that owns the GL atlas
-//   - `base_pixel_size`: the logical em requested by the caller
-//   - `pixel_size`: the resolved physical atlas em, used for scale math
-//   - `cap_height`: the selected face's canonical native cap-height metric
-//   - `native_em`: the selected font's authored world-text em, or zero for the
-//     per-font atlas em
-//
-// `Font` wraps an `Entity<FontData>` so the user-facing handle is
-// generation-counted via the Arena. A stale Font (one whose font was
-// unloaded) returns null from `font.data()` and silently no-ops in
-// every draw/measure path. Slots are never reused in stone-rs (backend
-// ids are monotonic 1-based), and Arena gives the Rock-side guarantee
-// that a removed Entity stays removed.
-//
-// `DEFAULT_FONT` is set by runner.rock after loading the engine font.
+// Backend font IDs are monotonic and 1-based; stale Font handles no-op.
 pub struct FontData {
     backend_id: int,
     base_pixel_size: int,
@@ -1405,11 +1368,7 @@ fn load_font_at_raster_size(path: string, base_pixel_size: int, raster_size: int
         raster, faces, initialize_batch, native_em, extra)
 }
 
-// `metrics_only` is the one fact that separates a font that can be DRAWN from a
-// font that can only be MEASURED. It gates the two steps that are about pixels
-// rather than metrics: the atlas page (a GL texture, which a metrics font does
-// not own) and the hot-reload watch (a re-raster, which stone-rs refuses on a
-// metrics font because there is no texture to re-upload into).
+// Metrics-only fonts own no atlas and cannot be re-rasterized.
 fn register_loaded_font(id: int, path: string, base_pixel_size: int, raster_size: int,
     sampling: TextureFilter, raster: FontRasterPolicy, faces: TextFaces,
     initialize_batch: bool, native_em: int, extra: string,
@@ -1425,19 +1384,8 @@ fn register_loaded_font(id: int, path: string, base_pixel_size: int, raster_size
     return font
 }
 
-// Load a font for MEASUREMENT AND LAYOUT ONLY. The same file, charset and
-// font-unit metrics as `load_font`, with no atlas texture -- which is the only
-// way a font loads in a process that never created a window, and so the only
-// way the `rock test <game>` luajit process can measure text.
-//
-// The raster policy is Fixed, not a parameter: `OutputDensity` asks the window
-// for its drawable/logical ratio and there is no window. Nothing is lost,
-// because layout divides every advance by the font's own units-per-em, so the
-// raster size does not appear in a measurement (pinned in stone-rs by
-// `unit_metrics_do_not_depend_on_the_raster_size`).
-//
-// `sampling` is recorded for the FontData the registry keeps, and is never
-// observed: the only reader is the atlas page this font does not have.
+// Loads metrics without a GL atlas, including in a process without a window.
+// Fixed raster size does not affect font-unit measurements.
 pub fn load_font_metrics(path: string, pixel_size: int,
     faces: TextFaces = TextFaces {},
     native_em: int = 0,
@@ -1485,14 +1433,7 @@ pub fn refresh_font_density() {
     }
 }
 
-// Unload a font. Frees the GL atlas in stone-rs, drops the batch state,
-// and removes the Entity from FONT_REGISTRY — any other Font handle
-// that referenced this entity is now stale (font.data() returns null,
-// every draw/measure silently no-ops).
-//
-// Manual lifecycle for now; a future `arena_with_drop<T>` would let
-// the destructor run automatically on remove. Don't double-free:
-// calling unload_font on a stale handle returns immediately.
+// Removes the font; stale handles no-op and repeated unload is safe.
 pub fn unload_font(font: Font) {
     let d = font.data() ?? return
     let backend_id = d.backend_id
@@ -1737,23 +1678,8 @@ pub fn with_debug_group(msg: string, f: fn() -> ()) {
     f()
 }
 
-// The live hover query, called ONCE per frame from `input_imgui_new_frame`
-// right after ImGui's NewFrame. `is_imgui_using_mouse` below reads what this
-// stored.
-//
-// It reads `imgui.C`, the raw cimgui namespace, rather than the `imgui.*`
-// wrappers: every wrapper in `stone/prebuilt/cimgui/wrap.lua` opens with
-// `jit.off(true)`, so a LuaJIT trace that reaches one is blacklisted and
-// thrown away -- and `input_mouse_captured` sits on the per-frame mouse path
-// that `is_mouse_down` and the action layer poll. Same C functions the
-// wrappers call, same answers, no `jit.off`.
-//
-// `IsWindowHovered(AnyWindow)` is fixed for the frame at NewFrame.
-// `IsAnyItemHovered` reads HoveredId || HoveredIdPreviousFrame, so a sample
-// taken here reflects the PREVIOUS frame's item hover -- which is exactly what
-// a live call made anywhere between two NewFrames already returned, so no
-// consumer's answer moves.
-//
+// Raw cimgui calls avoid wrapper jit.off(true) on the per-frame input path.
+// Item hover reflects the preceding frame, as live calls between NewFrames do.
 @nomangle inline(lua) fn __imgui_sample_mouse_hover() = """
     local hovered = false
     if _G.imgui and imgui.C then
