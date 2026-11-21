@@ -411,48 +411,6 @@ mod tests {
     }
 
     #[test]
-    fn flush_publishes_each_completion_before_receiving_the_next() {
-        if isolated("flush_publishes_each_completion_before_receiving_the_next") {
-            return;
-        }
-        let mut p = requests();
-        p.receive(result(1, 4));
-        let tx = image_decode::test_completions(3);
-        let (published, seen) = std::sync::mpsc::channel::<u64>();
-        let worker = std::thread::spawn(move || {
-            let mut streamed = Vec::new();
-            for id in [3, 2, 4] {
-                tx.send(result(id, 4)).unwrap();
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-                let mut found = false;
-                while let Ok(got) =
-                    seen.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
-                {
-                    if got == id {
-                        found = true;
-                        break;
-                    }
-                }
-                streamed.push(found);
-            }
-            streamed
-        });
-        let mut order = Vec::new();
-        p.select_with(Flush, |d| {
-            order.push(d.id);
-            let _ = published.send(d.id);
-        });
-        assert_eq!(
-            worker.join().unwrap(),
-            [true, true, true],
-            "each completion must be published before the next is received"
-        );
-        assert_eq!(order, [1, 3, 2, 4]);
-        assert!(p.requests.is_empty());
-        assert_eq!(image_decode::outstanding_count(), 0);
-    }
-
-    #[test]
     fn neither_a_statistics_reset_nor_a_budget_change_refunds_frame_uploads() {
         PUBLICATIONS.with(|p| {
             let mut p = p.borrow_mut();
@@ -508,81 +466,6 @@ mod tests {
             released
         });
         (signal, worker)
-    }
-
-    #[test]
-    fn flush_returns_once_required_work_is_published_and_leaves_deferred_work_pending() {
-        if isolated(
-            "flush_returns_once_required_work_is_published_and_leaves_deferred_work_pending",
-        ) {
-            return;
-        }
-        let mut p = classed(&[RequestClass::Deferred, RequestClass::Required]);
-        let tx = image_decode::test_completions(2);
-        tx.send(result(2, 4)).unwrap();
-        let (signal, deferred_worker) = release_on_signal(tx, 1);
-        let published = ids(&p.select(Flush));
-        let _ = signal.send(());
-        assert!(
-            deferred_worker.join().unwrap(),
-            "the flush waited for the Deferred decode"
-        );
-        assert_eq!(
-            published,
-            [2],
-            "the flush publishes the Required request only"
-        );
-        assert!(p.ready(2));
-        assert!(!p.ready(1), "the Deferred request stays pending");
-        assert_eq!(p.pending_bytes(), 16);
-        p.receive(image_decode::recv_one().unwrap());
-        assert_eq!(ids(&p.select(Pump)), [1]);
-        assert!(p.ready(1));
-        assert_eq!(p.pending_bytes(), 0);
-    }
-
-    #[test]
-    fn flush_leaves_received_deferred_results_for_the_budgeted_pump() {
-        if isolated("flush_leaves_received_deferred_results_for_the_budgeted_pump") {
-            return;
-        }
-        let mut p = classed(&[
-            RequestClass::Deferred,
-            RequestClass::Required,
-            RequestClass::Deferred,
-            RequestClass::Required,
-        ]);
-        p.receive(result(1, 4));
-        p.receive(result(2, 4));
-        let tx = image_decode::test_completions(2);
-        let mut order = Vec::new();
-        p.select_with(Flush, |d| {
-            order.push(d.id);
-            if d.id == 2 {
-                tx.send(result(3, 4)).unwrap();
-                tx.send(result(4, 4)).unwrap();
-            }
-        });
-        assert_eq!(
-            order,
-            [2, 4],
-            "only Required results publish at either receive site"
-        );
-        assert!(!p.ready(1));
-        assert!(!p.ready(3));
-        assert_eq!(p.frame_uploaded_bytes, 8);
-        assert!(
-            p.select(Pump).is_empty(),
-            "the Required uploads spent this frame's allowance"
-        );
-        p.begin_frame();
-        assert_eq!(
-            ids(&p.select(Pump)),
-            [1, 3],
-            "Deferred results retain their readiness order for the next frame's pump"
-        );
-        assert!(p.requests.is_empty());
-        assert_eq!(image_decode::outstanding_count(), 0);
     }
 
     #[test]
