@@ -37,7 +37,7 @@ pub enum GpuLoad {
     Clear(Color),
 }
 
-pub @lua_named struct GpuBinding {
+pub struct GpuBinding {
     slot: int,
     resource: SampledTexture,
     filter: TextureFilter,

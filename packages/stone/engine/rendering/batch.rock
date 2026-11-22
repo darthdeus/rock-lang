@@ -16,7 +16,7 @@ pub enum WorldSurfaceOutputs {
     ReceiverMetadata,
 }
 
-pub @lua_named struct RenderBatch {
+pub struct RenderBatch {
     handle: RenderBatchHandle = RenderBatchHandle {},
     verts: NativeBuffer<Vertex>,
     count: int,               // physical vertices pushed since last submit
@@ -214,26 +214,33 @@ fn restore_after_custom_draw(target: int, depth: DepthMode, blend: BlendMode) {
 // A parked batch has capacity 0 and the dummy buffer. Restore it before
 // growing. Count bytes with ffi.sizeof("Vertex") so changes to the vertex
 // layout are reflected in the copied byte count.
-@nomangle inline(lua) fn __ensure_vertex_capacity(b: RenderBatch, requested: int) = """
-    if requested <= b.capacity then return end
-    if b.capacity <= 0 then
+fn __ensure_vertex_capacity(b: RenderBatch, requested: int) {
+    if requested <= b.capacity { return }
+    if b.capacity <= 0 {
         error("reserve_vertices: batch was evicted and its vertex storage parked; re-ensure it")
-    end
-    local new_cap = b.capacity
-    while new_cap < requested do new_cap = new_cap * 2 end
-    local new_ptr = __rock_nb_alloc("Vertex", new_cap)
-    if b.count > 0 then
-        ffi.copy(new_ptr, b.verts.ptr, b.count * ffi.sizeof("Vertex"))
-    end
-    b.verts.ptr = new_ptr
-    b.verts.len = new_cap
+        return
+    }
+    let new_cap = b.capacity
+    while new_cap < requested { new_cap = new_cap * 2 }
+    __reseat_vertex_storage(b.verts, b.count, new_cap)
     b.capacity = new_cap
-    -- Reseating `.ptr` by hand leaves the compiler's leaf views pointing at
-    -- the OLD array, which is then collected (ffi.cast does not anchor it).
-    __nb_refresh_views(b.verts)
+}
+
+// Reseats the shared descriptor in place, so every holder of this buffer sees
+// the grown storage. Reseating `.ptr` by hand leaves the compiler's leaf views
+// pointing at the OLD array, which is then collected (ffi.cast does not anchor
+// it).
+@nomangle inline(lua) fn __reseat_vertex_storage(verts: NativeBuffer<Vertex>, count: int, new_cap: int) = """
+    local new_ptr = __rock_nb_alloc("Vertex", new_cap)
+    if count > 0 then
+        ffi.copy(new_ptr, verts.ptr, count * ffi.sizeof("Vertex"))
+    end
+    verts.ptr = new_ptr
+    verts.len = new_cap
+    __nb_refresh_views(verts)
 """
 
-@nomangle fn __grow_vertex_buf(b: RenderBatch) {
+fn __grow_vertex_buf(b: RenderBatch) {
     __ensure_vertex_capacity(b, b.capacity + 1)
 }
 
@@ -1178,7 +1185,7 @@ pub fn push_silhouette_mask_quad(
     emit_sprite_quad(mb, texture, pos, source, dest_size, pivot, rotation, flip_x, flip_y, tint, z_off, entity_id, false)
 }
 
-pub @nomangle fn reserve_vertices(batch: RenderBatch, n: int) {
+pub fn reserve_vertices(batch: RenderBatch, n: int) {
     __ensure_vertex_capacity(batch, batch.count + n)
 }
 
