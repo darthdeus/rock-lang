@@ -14,7 +14,7 @@ enum Write<'a, 'f> {
     Assign(Idx<Expr>),
     Update {
         postfix: bool,
-        apply: &'f dyn Fn(&mut Builder<'a>, Idx<Inst>) -> Result<Idx<Inst>, CompilerError>,
+        apply: &'f dyn Fn(&mut Builder<'a>, ValueRepr) -> Result<ValueRepr, CompilerError>,
     },
 }
 
@@ -934,7 +934,8 @@ impl<'a> Builder<'a> {
                 (self.lower_expr_with_expected(rhs, expected)?, None)
             }
             Write::Update { postfix, apply } => {
-                let new = apply(self, old)?;
+                let new = apply(self, ValueRepr::Scalar(old))?;
+                let new = self.pack_maybe_absent(new)?;
                 (new, Some(if postfix { old } else { new }))
             }
         };
@@ -1036,7 +1037,8 @@ impl<'a> Builder<'a> {
             Write::Assign(rhs) => (self.lower_expr_with_expected(rhs, expected)?, None),
             Write::Update { postfix, apply } => {
                 let old = self.read_place(&place)?;
-                let new = apply(self, old)?;
+                let new = apply(self, ValueRepr::Scalar(old))?;
+                let new = self.pack_maybe_absent(new)?;
                 (new, Some(if postfix { old } else { new }))
             }
         };
@@ -1113,6 +1115,13 @@ impl<'a> Builder<'a> {
                 self.group_presence_guard(&guards, join);
                 return self.group_leaf_place_base(e, cells[0]);
             }
+            let mut guards = Vec::new();
+            if let Some(flat) = self.flat_field_projection(base, field, true, Some(&mut guards))?
+                && matches!(flat.selection, Some((_, FieldShape::Prim)))
+            {
+                let place = self.guard_flat_projection(&flat, guards, join)?;
+                return self.read_place(&Place::Flat(place));
+            }
             let recv = self.lower_place_base_with_guard(base, absent)?;
             self.guard_place_receiver(recv, join);
             return self.read_place(&Place::Field(recv, field));
@@ -1127,13 +1136,20 @@ impl<'a> Builder<'a> {
                     return self.group_leaf_place_base(e, cells[0]);
                 }
                 if self
-                    .flat_field_projection(base, field, true)?
+                    .flat_field_projection(base, field, true, None)?
                     .is_some_and(|p| matches!(p.selection, Some((_, FieldShape::Prim))))
                 {
                     return self.lower_expr(e);
                 }
             }
             if direct {
+                if absent.is_some()
+                    && let Some(flat) = self.flat_field_projection(base, field, true, None)?
+                    && matches!(flat.selection, Some((_, FieldShape::Prim)))
+                {
+                    let place = self.lower_flat_projection(flat.root, flat.key)?;
+                    return self.read_place(&Place::Flat(place));
+                }
                 let (owner, key, _) = self.physical_field_place(base, field, absent)?;
                 return self.read_place(&Place::Field(owner, key));
             }
@@ -1184,6 +1200,63 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn write_flat_field(
+        &mut self,
+        place: FlatRefVal,
+        selection: Option<(std::ops::Range<usize>, FieldShape)>,
+        write: Write<'a, '_>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        if let Write::Update { .. } = write
+            && !matches!(selection, Some((_, FieldShape::Nested(_))))
+        {
+            return self.write_scalar(Place::Flat(place), None, write);
+        }
+        self.flat_field_store(place, selection, |s, shape| match (write, shape) {
+            (Write::Assign(value), Some(shape)) => {
+                let bundle = s.lower_expr_repr(value)?;
+                s.repr_to_storage_leaves(&bundle, shape, "nested field store")
+            }
+            (Write::Assign(value), None) => Ok(vec![s.lower_expr(value)?]),
+            (Write::Update { apply, .. }, Some(shape)) => {
+                let old = s.flat_group_read(place)?.into_value();
+                let new = apply(s, old)?;
+                let new = s.owned_value_children(new)?;
+                s.repr_to_leaves_shape(&new, shape)
+            }
+            (Write::Update { .. }, None) => unreachable!("scalar field update"),
+        })?;
+        Ok(None)
+    }
+
+    fn guard_flat_projection(
+        &mut self,
+        flat: &FlatProjection,
+        guards: Vec<Ustr>,
+        join: Idx<Block>,
+    ) -> Result<FlatRefVal, CompilerError> {
+        let place = self.lower_flat_projection(flat.root, flat.key)?;
+        if !matches!(self.body.expr_arena[flat.root], Expr::Index { .. })
+            && self
+                .concrete_expr_ty(flat.root)
+                .is_some_and(|ty| ty.peel_nullable().1)
+        {
+            self.guard_place_receiver(place.vec, join);
+        }
+        for prefix in guards {
+            let flag = self.flat_leaf_load(FlatRefVal {
+                key: FlatRefKey {
+                    prefix,
+                    ..place.key
+                },
+                ..place
+            })?;
+            let present = self.f.new_block();
+            self.branch_to(flag, present, join);
+            self.cur = present;
+        }
+        Ok(place)
+    }
+
     fn write_guarded_field(
         &mut self,
         target: Idx<Expr>,
@@ -1192,11 +1265,17 @@ impl<'a> Builder<'a> {
         write: Write<'a, '_>,
     ) -> Result<(), CompilerError> {
         let join = self.f.new_block();
+        let mut guards = Vec::new();
         if let Some((guards, cells, shape)) = self.group_leaf_walk(target)
             && (matches!(write, Write::Assign(_)) || matches!(shape, FieldShape::Prim))
         {
             self.group_presence_guard(&guards, join);
             self.write_group_field(target, &cells, shape, write)?;
+        } else if let Some(flat) =
+            self.flat_field_projection(base, field, true, Some(&mut guards))?
+        {
+            let place = self.guard_flat_projection(&flat, guards, join)?;
+            self.write_flat_field(place, flat.selection, write)?;
         } else {
             let recv = self.lower_place_base_with_guard(base, Some(join))?;
             self.guard_place_receiver(recv, join);
@@ -1284,7 +1363,7 @@ impl<'a> Builder<'a> {
             }
             _ => {}
         }
-        let mut flat = self.flat_field_projection(base, field, true)?;
+        let mut flat = self.flat_field_projection(base, field, true, None)?;
         if flat.is_none() && matches!(write, Write::Assign(_)) {
             let key = if matches!(self.body.expr_arena[base], Expr::Index { .. }) {
                 self.flat_index_key(base)?
@@ -1305,13 +1384,7 @@ impl<'a> Builder<'a> {
                 || matches!(flat.selection, Some((_, FieldShape::Prim))))
         {
             let place = self.lower_flat_projection(flat.root, flat.key)?;
-            return match write {
-                Write::Assign(value) => {
-                    self.flat_field_store(place, flat.selection, value)?;
-                    Ok(None)
-                }
-                Write::Update { .. } => self.write_scalar(Place::Flat(place), None, write),
-            };
+            return self.write_flat_field(place, flat.selection, write);
         }
         if let Write::Assign(value) = write {
             if let Some((buf, slot, elem, path)) = self.nb_leaf_field_place(base, field)? {
@@ -1663,12 +1736,18 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
-        let combine = |s: &mut Self, cur| -> Result<Idx<Inst>, CompilerError> {
-            let mut new = s.compound_combine(e, scalar, op_fn, overload, cur, value)?;
+        let combine = |s: &mut Self, cur| {
+            let new = s.compound_combine(e, scalar, op_fn, overload, cur, value)?;
+            let ValueRepr::Scalar(mut new) = new else {
+                return Ok(new);
+            };
             if f32_target {
                 new = s.emit_cur(Inst::FloatToF32(new));
             }
-            Ok(s.check_integer_field(new, s.assign_integer_field_unsigned(target)))
+            Ok(ValueRepr::Scalar(s.check_integer_field(
+                new,
+                s.assign_integer_field_unsigned(target),
+            )))
         };
         let Expr::SafeNav { base, field } = self.body.expr_arena[target] else {
             unreachable!("compound assignment without a top-level safe navigation");
@@ -1684,25 +1763,26 @@ impl<'a> Builder<'a> {
         )
     }
 
-    pub(crate) fn compound_combine(
+    fn compound_combine(
         &mut self,
         e: Idx<Expr>,
         scalar: Option<(ArithTy, ArithTy)>,
         op_fn: Ustr,
         overload: Option<FuncRef>,
-        cur: Idx<Inst>,
+        cur: ValueRepr,
         rhs: Idx<Expr>,
-    ) -> Result<Idx<Inst>, CompilerError> {
+    ) -> Result<ValueRepr, CompilerError> {
         match scalar {
             Some((lt, rt)) => {
+                let cur = self.pack_maybe_absent(cur)?;
                 let rv = self.lower_expr(rhs)?;
                 let inst = arith_inst(op_fn.as_str(), lt, rt, cur, rv)?;
-                Ok(self.emit_cur(inst))
+                Ok(ValueRepr::Scalar(self.emit_cur(inst)))
             }
             None => {
                 let func = overload.expect("non-scalar compound-assign resolved an overload");
                 let value = self.ufcs_call_repr(e, func, cur, &[rhs])?;
-                self.pack_maybe_absent(value.into_value())
+                Ok(value.into_value())
             }
         }
     }
@@ -1743,8 +1823,12 @@ impl<'a> Builder<'a> {
             }
         };
         let update = |s: &mut Self, old| {
+            let old = s.pack_maybe_absent(old)?;
             let new = bump(s, old);
-            Ok(s.check_integer_field(new, s.assign_integer_field_unsigned(target)))
+            Ok(ValueRepr::Scalar(s.check_integer_field(
+                new,
+                s.assign_integer_field_unsigned(target),
+            )))
         };
         let write = Write::Update {
             postfix,
@@ -1802,7 +1886,7 @@ impl<'a> Builder<'a> {
         } else {
             let func = self.resolve_funcref(e, method)?;
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            self.ufcs_call_repr(e, func, recv, &arg_idxs)
+            self.ufcs_call_repr(e, func, ValueRepr::Scalar(recv), &arg_idxs)
         }
     }
 

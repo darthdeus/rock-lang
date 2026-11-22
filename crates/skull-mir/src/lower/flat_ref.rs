@@ -1091,7 +1091,7 @@ impl<'a> Builder<'a> {
                 self.flat_group_read(val).map(Some)
             }
             Expr::FieldAccess { base, field } => {
-                let Some(projection) = self.flat_field_projection(base, field, false)? else {
+                let Some(projection) = self.flat_field_projection(base, field, false, None)? else {
                     return Ok(None);
                 };
                 let place = self.lower_flat_projection(projection.root, projection.key)?;
@@ -1106,7 +1106,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn flat_group_read(&mut self, val: FlatRefVal) -> Result<ValueBundle, CompilerError> {
+    pub(super) fn flat_group_read(
+        &mut self,
+        val: FlatRefVal,
+    ) -> Result<ValueBundle, CompilerError> {
         let shape = self.flat_target_shape(&val.key)?;
         let keys = self.flat_leaf_keys(&val.key, &shape);
         let leaves = keys

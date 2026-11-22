@@ -1816,7 +1816,7 @@ impl<'a> Builder<'a> {
         &mut self,
         e: Idx<Expr>,
         func: FuncRef,
-        recv: Idx<Inst>,
+        recv: ValueRepr,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueBundle, CompilerError> {
         let trusted = self.ws.module(func.module).functions[func.func]
@@ -1831,18 +1831,24 @@ impl<'a> Builder<'a> {
         &mut self,
         e: Idx<Expr>,
         func: FuncRef,
-        recv: Idx<Inst>,
+        recv: ValueRepr,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueBundle, CompilerError> {
+        let pack_receiver = |s: &mut Self, recv| match recv {
+            ValueRepr::Scalar(value) => Ok(value),
+            _ => s.pack_maybe_absent(recv),
+        };
         let dc = self.plan_direct_call(e)?;
         let value = (|| -> Result<ValueRepr, CompilerError> {
-            if let Some(args) = self.sort_call_args(e, &dc, arg_idxs, Some(recv))? {
+            if let ValueRepr::Scalar(recv) = recv
+                && let Some(args) = self.sort_call_args(e, &dc, arg_idxs, Some(recv))?
+            {
                 let args = dc.plan.transport_arguments(args)?;
                 return self.emit_direct_call(e, func, args, None, None, &dc);
             }
             self.reject_flat_return_outside_direct_call(e, &dc.callee.instance)?;
             if !dc.plan.uses_scalar_abi() {
-                let mut argv = vec![recv];
+                let mut argv = vec![pack_receiver(self, recv)?];
                 for &a in arg_idxs {
                     argv.push(self.lower_expr(a)?);
                 }
@@ -1862,10 +1868,13 @@ impl<'a> Builder<'a> {
                 })?;
             match receiver_slot {
                 RepLayout::Leaves(shape) => {
-                    let leaves = self.cdata_leaves(recv, shape)?;
+                    let leaves = match recv {
+                        ValueRepr::Scalar(recv) => self.cdata_leaves(recv, shape)?,
+                        _ => self.repr_to_leaves_shape(&recv, shape)?,
+                    };
                     argv.extend(leaves);
                 }
-                _ => argv.push(recv),
+                _ => argv.push(pack_receiver(self, recv)?),
             }
             for (i, &a) in arg_idxs.iter().enumerate() {
                 let slot = *required_wire_slot(

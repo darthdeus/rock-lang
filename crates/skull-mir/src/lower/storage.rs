@@ -477,7 +477,7 @@ impl<'a> Builder<'a> {
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, String)>, CompilerError> {
-        let (cur, _) = self.field_chain(base, field).last().unwrap();
+        let (cur, _, _) = self.field_chain(base, field, false).last().unwrap();
         let Expr::Index { base: ib, index } = self.body.expr_arena[cur] else {
             return Ok(None);
         };
@@ -491,8 +491,8 @@ impl<'a> Builder<'a> {
         // The bounds check belongs to the index, not the outer field access.
         let checked = self.with_site_expr(cur, |s| s.nb_checked_index(b, i))?;
         let mut fields: Vec<_> = self
-            .field_chain(base, field)
-            .map(|(_, field)| field)
+            .field_chain(base, field, false)
+            .map(|(_, field, _)| field)
             .collect();
         fields.reverse();
         let path = fields
@@ -1121,13 +1121,16 @@ impl<'a> Builder<'a> {
         &self,
         base: Idx<Expr>,
         field: Ustr,
-    ) -> impl Iterator<Item = (Idx<Expr>, Ustr)> + '_ {
-        std::iter::successors(Some((base, field)), |&(base, _)| {
-            match self.body.expr_arena[base] {
-                Expr::FieldAccess { base, field } => Some((base, field)),
+        guarded: bool,
+    ) -> impl Iterator<Item = (Idx<Expr>, Ustr, bool)> + '_ {
+        std::iter::successors(
+            Some((base, field, guarded)),
+            move |&(base, _, _)| match self.body.expr_arena[base] {
+                Expr::FieldAccess { base, field } => Some((base, field, false)),
+                Expr::SafeNav { base, field } if guarded => Some((base, field, true)),
                 _ => None,
-            }
-        })
+            },
+        )
     }
 
     pub(super) fn flat_field_projection(
@@ -1135,8 +1138,10 @@ impl<'a> Builder<'a> {
         base: Idx<Expr>,
         field: Ustr,
         allow_index: bool,
+        guards: Option<&mut Vec<Ustr>>,
     ) -> Result<Option<FlatProjection>, CompilerError> {
-        let (root, _) = self.field_chain(base, field).last().unwrap();
+        let chain = || self.field_chain(base, field, guards.is_some());
+        let (root, _, _) = chain().last().unwrap();
         let key = match self.body.expr_arena[root] {
             Expr::Index { .. } if allow_index => self.flat_index_key(root)?,
             _ => self.flat_ref_root_key(root)?,
@@ -1144,32 +1149,42 @@ impl<'a> Builder<'a> {
         let Some(key) = key else {
             return Ok(None);
         };
-        let mut fields: Vec<_> = self
-            .field_chain(base, field)
-            .map(|(_, field)| field)
-            .collect();
+        let mut fields: Vec<_> = chain().map(|(_, field, safe)| (field, safe)).collect();
         if !key.prefix.is_empty() {
-            fields.extend(key.prefix.as_str().rsplit('.').map(Ustr::from));
+            fields.extend(
+                key.prefix
+                    .as_str()
+                    .rsplit('.')
+                    .map(|part| (Ustr::from(part), false)),
+            );
         }
         fields.reverse();
         let shape = self.column_shape(key.elem)?;
-        Ok(self
-            .value_projection_range(&shape, &fields)
-            .map(|selection| {
-                let path = fields
-                    .iter()
-                    .map(Ustr::as_str)
-                    .collect::<Vec<_>>()
-                    .join(".");
-                FlatProjection {
-                    root,
-                    key: FlatRefKey {
-                        prefix: crate::names::ustr(&path),
-                        ..key
-                    },
-                    selection: Some(selection),
-                }
-            }))
+        let mut offsets = Vec::new();
+        let Some(selection) = Self::project_value_fields(&shape, fields.iter().copied(), |i| {
+            offsets.push(i);
+        }) else {
+            return Ok(None);
+        };
+        if let Some(guards) = guards
+            && !offsets.is_empty()
+        {
+            let paths = column_leaf_paths(&shape);
+            guards.extend(offsets.into_iter().map(|i| paths[i]));
+        }
+        let path = fields
+            .iter()
+            .map(|(field, _)| field.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        Ok(Some(FlatProjection {
+            root,
+            key: FlatRefKey {
+                prefix: crate::names::ustr(&path),
+                ..key
+            },
+            selection: Some(selection),
+        }))
     }
 
     pub(crate) fn lower_flat_index_place(
@@ -1197,7 +1212,10 @@ impl<'a> Builder<'a> {
         &mut self,
         place: FlatRefVal,
         selection: Option<(std::ops::Range<usize>, FieldShape)>,
-        value: Idx<Expr>,
+        lower_leaves: impl FnOnce(
+            &mut Self,
+            Option<&ValueShape>,
+        ) -> Result<Vec<Idx<Inst>>, CompilerError>,
     ) -> Result<(), CompilerError> {
         let FlatRefVal { vec, slot, key } = place;
         let FlatRefKey {
@@ -1205,12 +1223,6 @@ impl<'a> Builder<'a> {
             storage,
             prefix: field,
         } = key;
-        if storage == FlatStorage::Columns && elem.nullable {
-            return Err(gap(format!(
-                "cannot write `{field}` through an element of `[{}?]`; refine the element to non-null and store it whole",
-                elem.name
-            )));
-        }
         let shape = self.column_shape(elem)?;
         let range = selection
             .as_ref()
@@ -1231,13 +1243,7 @@ impl<'a> Builder<'a> {
             Some((_, FieldShape::Nested(sub))) => Some(sub),
             _ => None,
         };
-        let leaves = match nested {
-            Some(sub) => {
-                let bundle = self.lower_expr_repr(value)?;
-                self.repr_to_storage_leaves(&bundle, sub, "nested field store")?
-            }
-            None => vec![self.lower_expr(value)?],
-        };
+        let leaves = lower_leaves(self, nested)?;
         let range = range.ok_or_else(|| {
             gap(format!(
                 "`{field}` does not name slots of strided `[{}]`",
