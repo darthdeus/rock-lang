@@ -31,3 +31,19 @@ fn def_macro_invocation_jumps_to_the_macro_decl_cross_file() {
     );
     assert_eq!((loc.range.start.line, loc.range.start.character), (0, 6));
 }
+
+#[test]
+fn macro_definition_after_a_body_edit_matches_a_fresh_workspace() {
+    let path = probe_path("main.rock");
+    let before = "fn earlier() -> int {\n    1\n}\nmacro twice(x: expr) { let _ = x + x }\nfn main() { twice(41) }\n";
+    let after = before.replace("    1", "    let one = 1\n    one");
+    let query = |bone: &mut BoneWorkspace, source: &str| {
+        bone.update(&path, source.into());
+        bone.definition(&path, pos(source, "twice(41)", 2)).unwrap()
+    };
+    let mut warm = BoneWorkspace::new();
+    assert_eq!(query(&mut warm, before).range.start.line, 3);
+    let fresh = query(&mut BoneWorkspace::new(), &after);
+    assert_eq!(fresh.range.start.line, 4);
+    assert_eq!(query(&mut warm, &after), fresh);
+}

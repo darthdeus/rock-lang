@@ -1624,10 +1624,23 @@ impl Session {
         };
         match rebuild(self) {
             Ok(mut result) => {
-                if result.tier == UpdateTier::BodyOnly {
-                    result.text_edit = previous
-                        .as_ref()
-                        .map(|file| text_edit_delta(path, &file.text, &self.files[path].text));
+                if result.tier == UpdateTier::BodyOnly
+                    && let Some(previous) = &previous
+                {
+                    let current = &self.files[path];
+                    result.text_edit = Some(text_edit_delta(path, &previous.text, &current.text));
+                    let moved: FxHashMap<_, _> = previous
+                        .macros
+                        .iter()
+                        .zip(&current.macros)
+                        .filter_map(|(old, new)| {
+                            (old.span != new.span).then_some((old.span, new.span))
+                        })
+                        .collect();
+                    if !moved.is_empty() {
+                        self.registry
+                            .relocate_def_names(|span| moved.get(&span).copied());
+                    }
                 }
                 if position.is_none() && result.tier != UpdateTier::NoChange {
                     bone_semantic::relocation::check_relocation(&mut self.ws);

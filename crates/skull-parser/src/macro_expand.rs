@@ -53,6 +53,14 @@ impl MacroRegistry {
         self.0.is_empty()
     }
 
+    pub fn relocate_def_names(&mut self, mut relocate: impl FnMut(Span) -> Option<Span>) {
+        for template in self.0.values_mut().flatten() {
+            if let Some(span) = relocate(template.def_name_span) {
+                template.def_name_span = span;
+            }
+        }
+    }
+
     /// Source name span used for navigation after an invocation is expanded.
     pub fn def_name_span(&self, name: Ustr, argc: usize) -> Option<Span> {
         select_overload(self.0.get(&name)?, argc).map(|t| t.def_name_span)
