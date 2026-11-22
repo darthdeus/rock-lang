@@ -71,13 +71,13 @@ fn sprite_mesh_quad_distinct_corner_attributes_follow_geometry() {
         expected.push(vert(positions[k].x,positions[k].y,u[k],vv[k],
             tint.r,tint.g,tint.b,tint.a*alpha[k],7.0,colorize:depth[k]))
     }
-    retained.add_quad(positions[0],positions[1],positions[2],positions[3],ir(8,4,16,8),
+    retained.add_quad(positions[0],positions[1],positions[2],positions[3],irect(8,4,16,8),
         py:7.0,tint:tint,colorize:0.95,corner_alpha:v(alpha[0],alpha[1],alpha[2],alpha[3]),
         corner_colorize:v(depth[0],depth[1],depth[2],depth[3]),
         corner_u:v(u[0],u[1],u[2],u[3]),corner_v:v(vv[0],vv[1],vv[2],vv[3]))
     assert_eq(retained.mesh.count,6,"retained quad emits exactly two triangles")
     quad_corner_oracle(retained.mesh,0,expected)
-    sprite_mesh_add_quad(retained.mesh,positions[0],positions[1],positions[2],positions[3],ir(8,4,16,8),
+    sprite_mesh_add_quad(retained.mesh,positions[0],positions[1],positions[2],positions[3],irect(8,4,16,8),
         py:7.0,tint:tint,colorize:0.95,corner_alpha:v(alpha[0],alpha[1],alpha[2],alpha[3]),
         corner_colorize:v(depth[0],depth[1],depth[2],depth[3]),
         corner_u:v(u[0],u[1],u[2],u[3]),corner_v:v(vv[0],vv[1],vv[2],vv[3]))
@@ -91,14 +91,14 @@ fn sprite_mesh_quad_scalar_defaults_and_alpha_remain_source_compatible() {
     let retained = quad_corner_test_mesh()
     let positions = [v(-2.0,3.0),v(5.0,4.0),v(6.0,-2.0),v(-3.0,-4.0)]
     let uv = [v(0.25,0.25),v(0.75,0.25),v(0.75,0.75),v(0.25,0.75)]
-    retained.add_quad(positions[0],positions[1],positions[2],positions[3],ir(8,4,16,8))
+    retained.add_quad(positions[0],positions[1],positions[2],positions[3],irect(8,4,16,8))
     let expected: [Vertex] = []
     for k in 0..4 {
         expected.push(vert(positions[k].x,positions[k].y,uv[k].x,uv[k].y,1.0,1.0,1.0,1.0))
     }
     quad_corner_oracle(retained.mesh,0,expected)
     let alpha = [0.125,0.375,0.625,0.875]
-    sprite_mesh_add_quad(retained.mesh,positions[0],positions[1],positions[2],positions[3],ir(8,4,16,8),
+    sprite_mesh_add_quad(retained.mesh,positions[0],positions[1],positions[2],positions[3],irect(8,4,16,8),
         py:7.0,tint:Color { r:0.25,g:0.5,b:0.75,a:0.5 },colorize:0.6,
         corner_alpha:v(alpha[0],alpha[1],alpha[2],alpha[3]))
     expected.clear()

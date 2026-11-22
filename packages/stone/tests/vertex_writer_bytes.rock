@@ -120,7 +120,7 @@ fn sprite_rect_arbitrary_quad_and_ribbon_match_vertex_bytes() {
     let expected = native_buffer_vertex(24)
 
     let tint = Color { r: 0.2, g: 0.4, b: 0.6, a: 0.8 }
-    sprite_mesh_add(retained.mesh, v(10.0, 20.0), ir(4, 2, 8, 6), v(8.0, 4.0),
+    sprite_mesh_add(retained.mesh, v(10.0, 20.0), irect(4, 2, 8, 6), v(8.0, 4.0),
         pivot: v(0.25, 0.75), py: 35.0, tint: tint)
     expected[0] = vert(8.0, 21.0, 0.125, 0.125, 0.2, 0.4, 0.6, 0.8, 35.0)
     expected[1] = vert(16.0, 21.0, 0.375, 0.125, 0.2, 0.4, 0.6, 0.8, 35.0)
@@ -134,7 +134,7 @@ fn sprite_rect_arbitrary_quad_and_ribbon_match_vertex_bytes() {
     let colorize = v(0.2, 0.4, 0.6, 0.8)
     let u = v(-0.1, 0.3, 0.7, 1.1)
     let vv = v(1.3, 0.9, 0.5, 0.1)
-    retained.add_quad(positions[0], positions[1], positions[2], positions[3], ir(8, 4, 16, 8),
+    retained.add_quad(positions[0], positions[1], positions[2], positions[3], irect(8, 4, 16, 8),
         py: 42.0, tint: tint, colorize: 0.95,
         corner_alpha: alpha, corner_colorize: colorize, corner_u: u, corner_v: vv)
     expected[6] = vert(-2.0, 3.0, -0.1, 1.3, 0.2, 0.4, 0.6, 0.1, 42.0, colorize: 0.2)
@@ -165,7 +165,7 @@ fn sprite_rect_arbitrary_quad_and_ribbon_match_vertex_bytes() {
     for i in 0..retained.mesh.vbo.len { retained.mesh.vbo[i] = vertex_writer_dirty(500.0 + i as float * 20.0) }
     let reused = native_buffer_vertex(retained.mesh.vbo.len)
     for i in 0..reused.len { reused[i] = vertex_writer_dirty(500.0 + i as float * 20.0) }
-    sprite_mesh_add(retained.mesh, v(-4.0, 7.0), ir(1, 3, 5, 7), v(10.0, 6.0),
+    sprite_mesh_add(retained.mesh, v(-4.0, 7.0), irect(1, 3, 5, 7), v(10.0, 6.0),
         pivot: v(0.5, 0.5), py: -3.0, tint: Color { r: 0.9, g: 0.7, b: 0.5, a: 0.3 })
     reused[0] = vert(-9.0, 10.0, 0.03125, 0.1875, 0.9, 0.7, 0.5, 0.3, -3.0)
     reused[1] = vert(1.0, 10.0, 0.1875, 0.1875, 0.9, 0.7, 0.5, 0.3, -3.0)
@@ -185,7 +185,7 @@ fn queued_sprite_rect_matches_vertex_store_reference() {
         handle: CanvasId(73021), width: 32.0, height: 16.0,
     })
     let pool = render_batch_pool_new()
-    push_silhouette_mask_quad(pool, texture, v(10.0, 20.0), ir(4, 2, 8, 6),
+    push_silhouette_mask_quad(pool, texture, v(10.0, 20.0), irect(4, 2, 8, 6),
         v(8.0, 4.0), v(0.25, 0.75), 0.0, false, false,
         Color { r: 0.2, g: 0.4, b: 0.6, a: 0.8 }, 5.0, 17)
     let batch = pool.get(sampled_texture_key(texture)).unwrap()

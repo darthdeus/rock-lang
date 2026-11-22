@@ -13,7 +13,7 @@ fn mesh_batch_retention_test_mesh(z: int) -> SpriteMesh {
         blend: BlendMode::Alpha,
         sampling: TextureFilter::Nearest,
     }
-    sprite_mesh_add(mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    sprite_mesh_add(mesh, v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     return mesh
 }
 

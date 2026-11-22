@@ -105,10 +105,10 @@ fn sprite_mesh_growth_test_mesh() -> SpriteMesh {
 
 fn sprite_mesh_growth_append_kind(mesh: SpriteMesh, kind: int) {
     if kind == 0 {
-        sprite_mesh_add(mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+        sprite_mesh_add(mesh, v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     } else if kind == 1 {
         sprite_mesh_add_quad(mesh, v(1.0, 2.0), v(3.0, 4.0),
-            v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+            v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8))
     } else {
         sprite_mesh_add_segment(mesh,
             v(1.0, 2.0), v(0.0, 0.0), v(3.0, 4.0), v(1.0, 0.0), WHITE,
@@ -126,13 +126,13 @@ fn sprite_mesh_arguments_evaluate_before_append_growth() {
     let mesh = sprite_mesh_growth_test_mesh()
     sprite_mesh_growth_append_kind(mesh, 0)
     sprite_mesh_add_quad(mesh, sprite_mesh_growth_observe_capacity(mesh),
-        v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+        v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8))
     assert_eq(mesh.capacity, 2)
     assert_eq(mesh.count, 12)
     let read = sprite_mesh_growth_test_mesh()
     sprite_mesh_growth_append_kind(read, 0)
     sprite_mesh_add_quad(read, v(float(read.capacity), 2.0),
-        v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+        v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8))
     assert_eq(read.capacity, 2)
     assert_eq(read.vbo[6].pos.x as float, 1.0)
 }
@@ -140,9 +140,9 @@ fn sprite_mesh_arguments_evaluate_before_append_growth() {
 @test
 fn retained_mesh_argument_reading_capacity_keeps_evaluation_order() {
     let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh() }
-    rm.add(v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    rm.add(v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     rm.add_quad(v(float(rm.mesh.capacity), 2.0),
-        v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+        v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8))
     assert_eq(rm.mesh.capacity, 2)
     assert_eq(rm.mesh.vbo[6].pos.x as float, 1.0)
 }
@@ -151,12 +151,12 @@ fn retained_mesh_argument_reading_capacity_keeps_evaluation_order() {
 fn retained_mesh_growth_failure_releases_upload_before_allocation() {
     assert(stone_gpu_host_ensure())
     let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh() }
-    rm.add(v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    rm.add(v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     retained_mesh_prepare(rm)
     assert(rm.gpu_mesh != null)
     let failed = __sprite_mesh_growth_force_alloc_failure(() => {
         rm.add_quad(v(1.0, 2.0), v(3.0, 4.0),
-            v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+            v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8))
     })
     assert(failed)
     assert(rm.gpu_mesh == null)
@@ -168,13 +168,13 @@ fn retained_mesh_growth_failure_releases_upload_before_allocation() {
 fn retained_mesh_growth_callback_keeps_reinstalled_gpu_upload() {
     assert(stone_gpu_host_ensure())
     let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh() }
-    rm.add(v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    rm.add(v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     retained_mesh_prepare(rm)
     assert(rm.gpu_mesh != null)
     let hit = __sprite_mesh_growth_callback_during_alloc(
         () => {
             rm.add_quad(v(1.0, 2.0), v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0),
-                ir(0, 0, 8, 8), 0.0,
+                irect(0, 0, 8, 8), 0.0,
                 Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, 0.0,
                 null, null, null, null)
         },
@@ -193,7 +193,7 @@ fn sprite_mesh_preflight_skips_metatable_getters() {
     let meter = __sprite_mesh_growth_getter_meter()
     let proxy = __sprite_mesh_growth_proxy(mesh, meter)
     sprite_mesh_add_quad(proxy, v(1.0, 2.0), v(3.0, 4.0),
-        v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+        v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8))
     assert_eq(__sprite_mesh_growth_getter_count(meter, "count"), 4)
     assert_eq(__sprite_mesh_growth_getter_count(meter, "capacity"), 2)
     assert_eq(mesh.count, 12)
@@ -203,11 +203,11 @@ fn sprite_mesh_preflight_skips_metatable_getters() {
 @test
 fn retained_mesh_preflight_skips_metatable_getters() {
     let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh() }
-    rm.add(v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    rm.add(v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     let meter = __sprite_mesh_growth_getter_meter()
     let proxy = __retained_mesh_growth_proxy(rm, meter)
     proxy.add_quad(v(1.0, 2.0), v(3.0, 4.0),
-        v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+        v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8))
     assert_eq(__sprite_mesh_growth_getter_count(meter, "mesh"), 1)
     assert_eq(rm.mesh.count, 12)
     assert_eq(rm.mesh.capacity, 2)
@@ -220,7 +220,7 @@ fn sprite_mesh_invalid_full_count_keeps_the_writer_error() {
     mesh.count = 12
     let failure = world_fixture_raised(() => {
         sprite_mesh_add_quad(mesh, v(1.0, 2.0), v(3.0, 4.0),
-            v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
+            v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8))
     })
     assert(failure != null, "the writer rejects a span beyond grown storage")
     assert_eq(mesh.capacity, 2)
@@ -229,7 +229,7 @@ fn sprite_mesh_invalid_full_count_keeps_the_writer_error() {
 
 fn sprite_mesh_growth_callback_append(mesh: SpriteMesh) {
     sprite_mesh_add_quad(mesh, v(1.0, 2.0), v(3.0, 4.0),
-        v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8), 0.0,
+        v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8), 0.0,
         Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, 0.0,
         null, null, null, null)
 }
@@ -277,11 +277,11 @@ fn sprite_mesh_growth_assert_one_copy(meter: any, before: string, after: string)
 @test
 fn append_growth_bulk_copies_the_emitted_vertex_prefix() {
     let mesh = sprite_mesh_growth_test_mesh()
-    sprite_mesh_add(mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    sprite_mesh_add(mesh, v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     let mesh_prefix = mesh.count
     let mesh_before = __sprite_mesh_growth_prefix(mesh.vbo, mesh.count)
     let mesh_meter = __sprite_mesh_growth_copy_meter(() => {
-        sprite_mesh_add(mesh, v(15.0, 22.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+        sprite_mesh_add(mesh, v(15.0, 22.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     })
     sprite_mesh_growth_assert_one_copy(mesh_meter, mesh_before,
         __sprite_mesh_growth_prefix(mesh.vbo, mesh_prefix))
@@ -406,7 +406,7 @@ fn sprite_mesh_reserve_quads_keeps_exact_fits_and_empty_requests() {
 fn sprite_mesh_reserve_quads_bulk_copies_once_and_keeps_live_vertices() {
     for additional in [1, 2, 9, 65, 1025] {
         let mesh = sprite_mesh_growth_test_mesh()
-        sprite_mesh_add(mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+        sprite_mesh_add(mesh, v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
         let before = __sprite_mesh_growth_prefix(mesh.vbo, mesh.count)
         let meter = __sprite_mesh_growth_copy_meter(() => { reserve_quads(mesh, additional) })
         assert(mesh.capacity >= 1 + additional && mesh.capacity < (1 + additional) * 2)
@@ -415,7 +415,7 @@ fn sprite_mesh_reserve_quads_bulk_copies_once_and_keeps_live_vertices() {
         sprite_mesh_growth_assert_one_copy(meter, before,
             __sprite_mesh_growth_prefix(mesh.vbo, mesh.count))
         let storage = mesh.vbo
-        sprite_mesh_add(mesh, v(15.0, 22.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+        sprite_mesh_add(mesh, v(15.0, 22.0), irect(0, 0, 8, 8), v(6.0, 10.0))
         assert_eq(mesh.count, 12)
         assert(__sprite_mesh_growth_same_storage(mesh.vbo, storage))
         assert_eq(__sprite_mesh_growth_prefix(mesh.vbo, 6), before)
@@ -434,7 +434,7 @@ fn sprite_mesh_reserve_quads_can_start_empty_storage() {
     assert_eq(mesh.count, 0)
     assert_eq(mesh.vbo.len, 6)
     let storage = mesh.vbo
-    sprite_mesh_add(mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    sprite_mesh_add(mesh, v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     assert_eq(mesh.count, 6)
     assert(__sprite_mesh_growth_same_storage(mesh.vbo, storage))
 }
@@ -443,7 +443,7 @@ fn sprite_mesh_reserve_quads_can_start_empty_storage() {
 fn retained_mesh_reserve_quads_preserves_contents_and_gpu_upload() {
     assert(stone_gpu_host_ensure())
     let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh(), dirty: false }
-    sprite_mesh_add(rm.mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    sprite_mesh_add(rm.mesh, v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     let before = __sprite_mesh_growth_prefix(rm.mesh.vbo, rm.mesh.count)
     retained_mesh_prepare(rm)
     defer retained_mesh_gpu_release(rm)
@@ -454,7 +454,7 @@ fn retained_mesh_reserve_quads_preserves_contents_and_gpu_upload() {
     assert(rm.mesh.capacity >= 18)
     assert(rm.gpu_mesh == gpu && !rm.dirty)
     assert_eq(__sprite_mesh_growth_prefix(rm.mesh.vbo, rm.mesh.count), before)
-    rm.add(v(15.0, 22.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    rm.add(v(15.0, 22.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     assert_eq(rm.mesh.count, 12)
     assert(rm.gpu_mesh == null)
     assert_eq(__sprite_mesh_growth_prefix(rm.mesh.vbo, 6), before)

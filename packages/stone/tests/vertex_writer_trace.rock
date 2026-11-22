@@ -23,7 +23,7 @@ use stone::*
         mesh.count = (i % 128) * 6
         let x = float(i)
         sprite_mesh_add_quad(mesh, v(x, 3.0), v(x + 2.0, 4.0),
-            v(x + 3.0, -2.0), v(x - 1.0, -4.0), ir(8, 4, 16, 8),
+            v(x + 3.0, -2.0), v(x - 1.0, -4.0), irect(8, 4, 16, 8),
             py: 7.0, tint: Color { r: 0.25, g: 0.5, b: 0.75, a: 0.5 },
             colorize: 0.6)
     }

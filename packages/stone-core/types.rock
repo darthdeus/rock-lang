@@ -41,11 +41,6 @@ pub struct SpriteAnimationState {
 }
 
 pub @inline
-@pure fn ir(x: int, y: int, w: int, h: int) -> IRect {
-    return irect(x, y, w, h)
-}
-
-pub @inline
 @pure fn irect(x: int, y: int, w: int, h: int) -> IRect {
     return IRect { x: x, y: y, w: w, h: h }
 }
